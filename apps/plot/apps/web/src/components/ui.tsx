@@ -76,7 +76,7 @@ export function Button({
 }
 
 const CONTROL =
-  'control-box rounded-xl border border-line bg-surface px-3.5 text-fg placeholder:text-muted/80 ' +
+  'control-box rounded-xl border bg-surface px-3.5 text-fg placeholder:text-muted/80 ' +
   'transition-colors focus:border-focus focus:outline-2 focus:outline-offset-1 focus:outline-focus/25 disabled:opacity-60';
 
 export function TextInput({ className, ...props }: InputHTMLAttributes<HTMLInputElement>) {
