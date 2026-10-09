@@ -38,6 +38,20 @@
 @utility caption2 { letter-spacing: 0; font-size: 0.625rem; font-weight: 500; line-height: 0.875rem; }
 @utility button10 { letter-spacing: -0.00625rem; font-size: 0.625rem; font-weight: 500; line-height: 0.625rem; }
 
+/*
+ * A form control's box, below the utilities layer: a caller's own `w-*`, `py-*`
+ * or `text-*` replaces it. As utilities beside the caller's, the winner would
+ * be whichever Tailwind happens to emit later, not the one the caller wrote.
+ */
+@layer components {
+  .control-box {
+    width: 100%;
+    padding-block: 0.625rem;
+    font-size: var(--text-sm);
+    line-height: var(--text-sm--line-height);
+  }
+}
+
 html { color-scheme: light; scrollbar-gutter: stable; }
 body {
   font-family: var(--font-sans);
