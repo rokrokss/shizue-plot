@@ -1,7 +1,9 @@
-import { applyMacros, stripImageMacros, type MacroContext } from './macro.js';
-import { activateLore } from './lorebook.js';
+import { extractChoices } from './choices.js';
+import { applyMacros, stripImageMacros, type MacroClock, type MacroContext } from './macro.js';
+import { activateLore, loreEntryKey, type LoreActivationVia, type LoreTimedState } from './lorebook.js';
 import { isNarration, narrationBody } from './narration.js';
 import { DEFAULT_PRESET, type Preset } from './presets.js';
+import { extractStatusBlock } from './statusBlock.js';
 import { countTokens } from './tokens.js';
 import {
   DEFAULT_LORE_SETTINGS,
@@ -94,6 +96,13 @@ export interface PromptPlot {
 export interface PromptCharacter {
   name: string;
   card: NormalizedCard;
+  /**
+   * Sent off the stage in this chat: the card's block, its example dialogue and
+   * its lorebook leave the prompt, and one line says the member is not in the
+   * scene. A first member that is away still stands in for the work — its
+   * overrides and lore settings are the work's, not a line of its own.
+   */
+  absent?: boolean;
 }
 
 export interface AssemblePromptInput {
@@ -115,8 +124,8 @@ export interface AssemblePromptInput {
    */
   relationshipText?: string;
   /**
-   * Author's note. Injected as a system message right before the history and,
-   * like the post-history block, never evicted.
+   * Author's note. Injected as a system message `AUTHOR_NOTE_DEPTH` messages from
+   * the end of the history and, like the post-history block, never evicted.
    */
   authorNote?: string;
   /**
@@ -147,15 +156,107 @@ export interface AssemblePromptInput {
    * macros that produced them stay in the history verbatim.
    */
   variables?: Variables;
+  /** The reader's clock, for the time macros. Without it they stay verbatim. */
+  clock?: MacroClock;
+  /** What keeps `{{pick}}` stable across turns — the chat id. */
+  seed?: string;
+  /**
+   * The branch's lore records, for the timed effects. Built by the caller from
+   * the whole branch, which `history` may be only the newest stretch of.
+   */
+  loreState?: LoreTimedState;
   contextBudget?: number;
   maxResponseTokens?: number;
   preset?: Preset;
+  /**
+   * Also say how the prompt was put together (`PromptReport`). Off for every
+   * generation: it measures each block again, which only the inspector needs.
+   */
+  report?: boolean;
 }
 
 export interface AssembledPrompt {
   system: string;
   messages: PromptMessage[];
+  /**
+   * `loreEntryKey`s of the lore that freshly triggered for this prompt — what
+   * the assistant message it produces records for the timed effects.
+   */
+  loreTriggers: string[];
+  /** Present only when the input asked for it. */
+  report?: PromptReport;
 }
+
+/** What each piece of an assembled prompt is, in the creator's prompt inspector. */
+export type PromptBlockKind =
+  | 'main'
+  | 'narration_note'
+  | 'lore_before'
+  | 'plot'
+  | 'character'
+  | 'absent_cast'
+  | 'narrator'
+  | 'style'
+  | 'lore_after'
+  | 'persona'
+  | 'memory'
+  | 'relationship'
+  | 'directions'
+  | 'examples'
+  | 'history'
+  | 'depth_lore'
+  | 'author_note'
+  | 'post_history'
+  | 'trailing';
+
+export interface PromptReportBlock {
+  kind: PromptBlockKind;
+  /** A member's name, a turn's role, or a depth lore entry's depth. */
+  label?: string;
+  tokens: number;
+  text: string;
+}
+
+/** One lore entry that made it into the prompt. */
+export interface PromptReportLore {
+  key: string;
+  /** `'plot'`, or the name of the member whose card carries the entry. */
+  source: string;
+  keys: string[];
+  /** The first characters of the content as the model reads it. */
+  preview: string;
+  placement: LorePosition | `depth ${number}`;
+  via: LoreActivationVia;
+}
+
+/**
+ * How a prompt was put together: its blocks in the order the model reads them,
+ * what the budget allowed, and which lore fired and why. The creator's
+ * debugging view — the text is the creator's own work plus the chat it runs on.
+ */
+export interface PromptReport {
+  blocks: PromptReportBlock[];
+  totals: {
+    contextBudget: number;
+    /** What the budget keeps free for the reply. */
+    responseReserve: number;
+    /** Everything charged to the budget: the blocks above, as they were counted. */
+    used: number;
+  };
+  history: { included: number; total: number };
+  examples: { included: number; total: number };
+  lore: PromptReportLore[];
+}
+
+/** How much of an activated entry's content the report quotes. */
+const LORE_PREVIEW_LENGTH = 80;
+
+/**
+ * How far from the end of the history the author's note sits — SillyTavern's
+ * default. Close enough to the end to steer the next turn, without being the
+ * last thing the model reads.
+ */
+export const AUTHOR_NOTE_DEPTH = 4;
 
 export const DEFAULT_CONTEXT_BUDGET = 16000;
 // Sized for the speech protocol: a turn carries several speakers plus narration,
@@ -209,6 +310,21 @@ export const characterHeader = (name: string): string => `[등장인물: ${name}
  * every example it was meant to introduce.
  */
 export const exampleHeader = (name: string): string => `[예시 대화: ${name}]`;
+
+/**
+ * What a member sent off the stage leaves behind: one line, right after the
+ * blocks of those still in it. Their card is gone, but their name is still all
+ * over the history, and without this the model would carry on writing them in.
+ */
+export const absentCastLine = (names: string[]): string =>
+  `현재 장면에 없는 인물: ${names.join(', ')} — 이 인물들은 이번 장면에서 대사나 행동으로 등장하지 않습니다.`;
+
+/**
+ * Who the reader wants the next reply to be about. One turn's request, so the
+ * caller appends it after everything else and stores it nowhere.
+ */
+export const sceneFocusDirective = (names: string[]): string =>
+  `이번 응답은 ${names.join(', ')}의 대사와 행동을 중심으로 씁니다.`;
 
 /** How each point of view is put to the model. No macro, so no particle to agree with. */
 export const NARRATOR_POV_LABELS: Record<NarratorPov, string> = {
@@ -343,6 +459,9 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     narrator = plot.narrator,
     trailingTurns = 0,
     variables = emptyVariables(),
+    clock,
+    seed,
+    loreState,
     userName = DEFAULT_USER_NAME,
     contextBudget = DEFAULT_CONTEXT_BUDGET,
     maxResponseTokens = DEFAULT_MAX_RESPONSE_TOKENS,
@@ -352,8 +471,14 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // `{{char}}` resolves per text origin. A member's own card text is about that
   // member, and everything else — the presets, the plot's own writing, the
   // narrator, the history — is about the work, so the plot's name stands in.
-  const plotMacro: MacroContext = { char: plot.name, user: userName, variables };
-  const macroOf = (name: string): MacroContext => ({ char: name, user: userName, variables });
+  const macroOf = (name: string): MacroContext => ({
+    char: name,
+    user: userName,
+    variables,
+    ...(clock ? { clock } : {}),
+    ...(seed !== undefined ? { seed } : {}),
+  });
+  const plotMacro = macroOf(plot.name);
   // Image references never reach the model, so they are gone before anything is
   // measured against the budget.
   const expandWith = (text: string, macro: MacroContext): string =>
@@ -365,6 +490,10 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // a card that carries one still speaks for the work it is the first member of.
   const first = characters[0];
   const firstMacro = first ? macroOf(first.name) : plotMacro;
+  // Whoever the reader sent off the stage is gone from everything that is the
+  // member's own — their block, examples and lorebook — and from nothing else.
+  const cast = characters.filter((member) => !member.absent);
+  const absentNames = characters.filter((member) => member.absent).map((member) => member.name);
 
   // 1. main system prompt
   const main = resolveOverride(first?.card.systemPrompt ?? '', expand(preset.main), firstMacro);
@@ -373,32 +502,39 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // against the last scanDepth messages. The sort inside `activateLore` is stable,
   // so entries sharing an insertionOrder keep this order: plot, then roster.
   const loreMacro = new Map<LoreEntry, MacroContext>();
+  /** Whose book each entry came from, for the report. */
+  const loreSource = new Map<LoreEntry, string>();
   const lorebook: LoreEntry[] = [];
   for (const entry of plot.lorebook) {
     lorebook.push(entry);
     loreMacro.set(entry, plotMacro);
+    loreSource.set(entry, 'plot');
   }
-  for (const member of characters) {
+  for (const member of cast) {
     const macro = macroOf(member.name);
     for (const entry of member.card.lorebook) {
       lorebook.push(entry);
       loreMacro.set(entry, macro);
+      loreSource.set(entry, member.name);
     }
   }
   // One book means one set of settings decides its depth and budget: the first
   // member's, the same card the overrides come from.
   const loreSettings = first?.card.loreSettings ?? DEFAULT_LORE_SETTINGS;
-  const scanText = history
-    .slice(-loreSettings.scanDepth)
-    .map((message) => message.content)
-    .join('\n');
-  const activated = activateLore(
-    lorebook,
-    scanText,
-    loreSettings.tokenBudget,
+  // The raw texts: an old status block the model is no longer sent (7, below)
+  // is still where the scene's place and people are written down.
+  const {
+    entries: activated,
+    triggered: loreTriggers,
+    via: loreVia,
+  } = activateLore(lorebook, {
+    history: history.map((message) => message.content),
+    scanDepth: loreSettings.scanDepth,
+    budgetTokens: loreSettings.tokenBudget,
     countTokens,
-    loreSettings.recursiveScanning,
-  );
+    recursiveScanning: loreSettings.recursiveScanning,
+    ...(loreState ? { timed: loreState } : {}),
+  });
   const expandLore = (entry: LoreEntry): string =>
     expandWith(entry.content, loreMacro.get(entry) ?? plotMacro);
   const loreText = (position: LorePosition): string =>
@@ -425,16 +561,22 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     .filter((line) => line.length > 0)
     .join('\n');
 
-  // 4. one block per roster member, in the creator's order. The card's scenario
-  // is not read: a situation belongs to the plot or to an intro, not to a member.
-  const characterBlocks = characters.map(({ name, card }) => {
+  // 4. one block per roster member on the stage, in the creator's order. The
+  // card's scenario is not read: a situation belongs to the plot or to an intro,
+  // not to a member.
+  const characterBlocks = cast.map(({ name, card }): SystemSection => {
     const macro = macroOf(name);
     const lines = [characterHeader(name), expandWith(card.description, macro).trim()]
       .filter((line) => line.length > 0)
       .join('\n');
-    if (!card.personality.trim()) return lines;
-    return `${lines}\n\n${expandWith('{{char}}의 성격: ', macro)}${expandWith(card.personality, macro).trim()}`;
+    const text = card.personality.trim()
+      ? `${lines}\n\n${expandWith('{{char}}의 성격: ', macro)}${expandWith(card.personality, macro).trim()}`
+      : lines;
+    return { kind: 'character', label: name, text };
   });
+
+  // 4a. who is not on the stage — right behind those who are.
+  const absentBlock = absentNames.length > 0 ? absentCastLine(absentNames) : '';
 
   // 4b. narrator — how the scene is told, as against how the members speak.
   // Static text in the cached prefix like the blocks it follows.
@@ -460,27 +602,28 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // 5c. relationship — how the plot's characters currently feel about the user.
   const relationshipBlock = relationshipText.trim() ? expand(relationshipText).trim() : '';
 
-  const system = [
-    main,
-    NARRATION_NOTE,
-    loreText('before_char'),
-    plotBlock,
+  const sections: SystemSection[] = [
+    { kind: 'main', text: main },
+    { kind: 'narration_note', text: NARRATION_NOTE },
+    { kind: 'lore_before', text: loreText('before_char') },
+    { kind: 'plot', text: plotBlock },
     ...characterBlocks,
-    narratorBlock,
-    styleBlock,
-    loreText('after_char'),
-    personaBlock,
-    memoryBlock,
-    relationshipBlock,
-  ]
-    .filter((section) => section.length > 0)
-    .join('\n\n');
+    { kind: 'absent_cast', text: absentBlock },
+    { kind: 'narrator', text: narratorBlock },
+    { kind: 'style', text: styleBlock },
+    { kind: 'lore_after', text: loreText('after_char') },
+    { kind: 'persona', text: personaBlock },
+    { kind: 'memory', text: memoryBlock },
+    { kind: 'relationship', text: relationshipBlock },
+  ];
+  const systemSections = sections.filter((section) => section.text.length > 0);
+  const system = systemSections.map((section) => section.text).join('\n\n');
 
   // 5d. stage directions of the turn being answered. Outside the system string on
   // purpose: it changes every turn, and the system string is the cached prefix.
   const directionsBlock = directions.trim() ? `${DIRECTIONS_HEADER}\n${expand(directions).trim()}` : '';
 
-  // 6b. author's note
+  // 7c. author's note — spliced into the history at AUTHOR_NOTE_DEPTH, below.
   const authorNoteBlock = authorNote.trim() ? expand(authorNote).trim() : '';
 
   // 8. post-history instructions
@@ -504,15 +647,22 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
 
   // 7. history, newest first. The newest message is always kept so the request
   // is never empty.
+  //
+  // Only the newest assistant turn keeps its status window and choice lines: it
+  // carries the current state and shows the model the format, and every older
+  // copy is a superseded state the model would otherwise re-read each turn.
+  const newestAssistant = history.findLastIndex((turn) => turn.role === 'assistant');
   const historyMessages: PromptMessage[] = [];
+  /** What each kept turn was charged, images included; parallel to historyMessages. */
+  const historyCosts: number[] = [];
   for (let i = history.length - 1; i >= 0; i -= 1) {
     const turn = history[i]!;
+    const said =
+      turn.role === 'assistant' && i !== newestAssistant ? withoutStateTail(turn.content) : turn.content;
     // A narrating turn keeps its role — the message is still the reader's or the
     // model's — but it is labelled, so the model reads it as the scene moving
     // rather than as someone acting. The prefix never reaches the model.
-    const raw = isNarration(turn.content)
-      ? `${NARRATION_HEADER} ${narrationBody(turn.content)}`.trim()
-      : turn.content;
+    const raw = isNarration(said) ? `${NARRATION_HEADER} ${narrationBody(said)}`.trim() : said;
     const text = expand(raw);
     const images = turn.images ?? [];
     const cost = countTokens(text) + images.length * IMAGE_TOKEN_ESTIMATE;
@@ -528,51 +678,137 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
             ...images.map((url): PromptPart => ({ type: 'image', url })),
           ];
     historyMessages.unshift({ role: turn.role, content });
+    historyCosts.unshift(cost);
   }
 
   // 6. example dialogue — every member's blocks, each named so the model can tell
   // whose exchange it is reading. Filled from whatever budget history left over,
   // so it is the first thing to be evicted.
-  const exampleMessages: PromptMessage[] = [];
-  const exampleBlocks = characters.flatMap(({ name, card }) =>
-    splitExamples(card.mesExample).map(
-      (block) => `${exampleHeader(name)}\n${expandWith(block, macroOf(name))}`,
-    ),
+  const exampleSlots: MessageSlot[] = [];
+  const exampleBlocks = cast.flatMap(({ name, card }) =>
+    splitExamples(card.mesExample).map((block) => ({
+      name,
+      content: `${exampleHeader(name)}\n${expandWith(block, macroOf(name))}`,
+    })),
   );
-  for (const content of exampleBlocks) {
+  for (const { name, content } of exampleBlocks) {
     const cost = countTokens(content);
     if (cost > available) break;
     available -= cost;
-    exampleMessages.push({ role: 'system', content });
+    exampleSlots.push({ kind: 'examples', label: name, message: { role: 'system', content }, tokens: cost });
   }
 
   // Depth 0 lands after the last message, depth N before the Nth message from the
   // end, and anything deeper than the history clamps to its start. Trailing turns
   // count as the last messages even though the caller attaches them, so anything
-  // shallower than them clamps to the end of the history block.
+  // shallower than them clamps to the end of the history block. The author's note
+  // takes the same slots, after any depth lore that shares its slot.
   const end = historyMessages.length;
   const indexOf = (depth: number): number => Math.min(end, Math.max(0, end + trailingTurns - depth));
-  const depthAt = (index: number): PromptMessage[] =>
-    depthLore
+  const noteIndex = authorNoteBlock ? indexOf(AUTHOR_NOTE_DEPTH) : -1;
+  const depthAt = (index: number): MessageSlot[] => [
+    ...depthLore
       .filter(({ depth }) => indexOf(depth) === index)
-      .map(({ role, content }) => ({ role, content }));
+      .map(({ depth, role, content }): MessageSlot => ({
+        kind: 'depth_lore',
+        label: `depth ${depth}`,
+        message: { role, content },
+      })),
+    ...(index === noteIndex
+      ? [{ kind: 'author_note', message: { role: 'system', content: authorNoteBlock } } satisfies MessageSlot]
+      : []),
+  ];
 
-  const historyBlock: PromptMessage[] = [];
+  const historyBlock: MessageSlot[] = [];
   for (let i = 0; i < historyMessages.length; i += 1) {
-    historyBlock.push(...depthAt(i), historyMessages[i]!);
+    const message = historyMessages[i]!;
+    historyBlock.push(...depthAt(i), {
+      kind: 'history',
+      label: message.role,
+      message,
+      tokens: historyCosts[i]!,
+    });
   }
   historyBlock.push(...depthAt(historyMessages.length));
 
+  const slots: MessageSlot[] = [
+    ...(directionsBlock
+      ? [{ kind: 'directions', message: { role: 'system', content: directionsBlock } } satisfies MessageSlot]
+      : []),
+    ...exampleSlots,
+    ...historyBlock,
+    { kind: 'post_history', message: { role: 'system', content: postHistory } },
+  ];
+
+  /** Measured here, after the fact, so a generation never pays for it. */
+  const report = (): PromptReport => ({
+    blocks: [
+      ...systemSections.map(({ kind, label, text }) => ({
+        kind,
+        ...(label !== undefined ? { label } : {}),
+        tokens: countTokens(text),
+        text,
+      })),
+      ...slots.map(({ kind, label, message, tokens }) => {
+        const text = promptText(message.content);
+        return {
+          kind,
+          ...(label !== undefined ? { label } : {}),
+          tokens: tokens ?? countTokens(text),
+          text,
+        };
+      }),
+    ],
+    totals: {
+      contextBudget,
+      responseReserve: maxResponseTokens,
+      // What the budget gave out: the room it started with, less what is left.
+      used: contextBudget - maxResponseTokens - available,
+    },
+    history: { included: historyMessages.length, total: history.length },
+    examples: { included: exampleSlots.length, total: exampleBlocks.length },
+    lore: activated.map((entry) => ({
+      key: loreEntryKey(entry),
+      source: loreSource.get(entry) ?? 'plot',
+      keys: entry.keys,
+      preview: expandLore(entry).slice(0, LORE_PREVIEW_LENGTH),
+      placement: entry.depth !== undefined ? (`depth ${entry.depth}` as const) : entry.position,
+      via: loreVia.get(entry) ?? 'keyword',
+    })),
+  });
+
   return {
     system,
-    messages: [
-      ...(directionsBlock ? [{ role: 'system' as const, content: directionsBlock }] : []),
-      ...exampleMessages,
-      ...(authorNoteBlock ? [{ role: 'system' as const, content: authorNoteBlock }] : []),
-      ...historyBlock,
-      { role: 'system', content: postHistory },
-    ],
+    messages: slots.map((slot) => slot.message),
+    loreTriggers,
+    ...(input.report ? { report: report() } : {}),
   };
+}
+
+/** One section of the system string, kept with what it is until the report. */
+interface SystemSection {
+  kind: PromptBlockKind;
+  label?: string;
+  text: string;
+}
+
+/** One message of the assembled list, kept with what it is until the report. */
+interface MessageSlot {
+  kind: PromptBlockKind;
+  label?: string;
+  message: PromptMessage;
+  /** What the budget was charged for it, where that was already measured. */
+  tokens?: number;
+}
+
+/**
+ * A turn without its trailing choice lines and status window, taken off in the
+ * order the renderer reads them. Left whole when they are all it says — an empty
+ * turn would read as the model having said nothing.
+ */
+function withoutStateTail(content: string): string {
+  const body = extractStatusBlock(extractChoices(content).body).body;
+  return body.trim() ? body : content;
 }
 
 function splitExamples(mesExample: string): string[] {

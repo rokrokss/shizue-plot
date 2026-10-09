@@ -29,6 +29,9 @@ export async function requireOK(response: Response): Promise<Response> {
 export function responseBody(req: ChatRequest): Record<string, unknown> {
   return {
     model: req.model, store: false, stream: true,
+    // Only the effort is asked for: a reasoning summary is never requested,
+    // because it can paraphrase the creator's hidden prompt back to the reader.
+    ...(req.reasoningEffort ? { reasoning: { effort: req.reasoningEffort } } : {}),
     instructions: req.system,
     input: req.messages.map((message) => ({
       role: message.role === 'system' ? 'developer' : message.role,

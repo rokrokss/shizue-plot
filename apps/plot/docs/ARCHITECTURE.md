@@ -51,7 +51,7 @@ plot/
     e2e/                    # @shizue/e2e — Playwright 스모크·회귀 스펙
 ```
 
-`@shizue/core`는 서브패스 익스포트를 갖는다: `./variables`, `./display-script`, `./component`, `./narration`, `./speech`, `./status-block`, `./choices`, `./scene` — 웹이 토크나이저·카드 파서를 번들에 끌어오지 않고 같은 로직을 쓰기 위한 경계다.
+`@shizue/core`는 서브패스 익스포트를 갖는다: `./variables`, `./display-script`, `./component`, `./narration`, `./speech`, `./status-block`, `./choices`, `./scene`, `./world-info` — 웹이 토크나이저·카드 파서를 번들에 끌어오지 않고 같은 로직을 쓰기 위한 경계다.
 
 **워크스페이스 밖 의존**: `apps/api`와 `apps/web`은 `@shizue/contracts`를 `workspace:*`로 참조한다. 이 트리가 아니라 리포지터리 루트의 `packages/contracts`에 있는 패키지다 — 예전에는 형제 체크아웃을 전제한 `link:` 파일 링크였고, 지금은 같은 워크스페이스의 패키지 링크다. 경계를 건너는 페이로드 스키마는 반드시 여기서 import한다(복제 금지, PLATFORM.md §1).
 
@@ -142,14 +142,15 @@ OpenAI의 오픈소스 흐름은 오픈소스·로컬 호스팅 앱이 대상이
 
 - `chats` — 소유자·**플롯**·페르소나·모델·프리셋·유저노트, 그리고 계층별 설정(`memory*`, `relationship*`, 내레이터 오버라이드, `allow_component_turns`, `status_window_enabled`/`choices_enabled`). `head_message_id`는 현재 브랜치의 리프이며, messages와의 순환 FK를 피하려고 제약 없는 uuid다.
   - `status_window_enabled`·`choices_enabled`는 **독자 몫의 스위치**이고 둘 다 기본 true다. 플롯이 그 기능을 켠 대화에서만 의미가 있다 — 조립기에는 플롯 설정과의 **교집합**만 간다(`apps/api/src/plots.ts`의 `chatStyle`). 플롯이 상태창을 끈 작품은 챗 컬럼이 true여도 상태창 지시문을 받지 않고, 독자가 선택지를 끄면 플롯이 어떻게 정했든 선택지가 붙지 않는다. 반대로 **응답 길이는 크리에이터 전용**이라 독자 토글이 없다.
-- `messages` — append-only 트리. `parent_id`가 null이면 루트(인사). `source`는 유저 턴을 누가 썼는지(`user` | `component`), `directions`는 그 턴에 게임 컴포넌트가 붙인 판정이다.
+  - `absent_character_ids`(string[], null 가능)는 독자가 **장면에서 뺀** 등장인물이다. 그 멤버의 카드 블록·예시 대화·카드 로어북이 프롬프트에서 빠지고 한 줄 안내가 대신 남는다(§6). 빈 목록은 null로 저장하고(로스터 전원 등장), 멤버가 삭제되어 남은 id는 아무와도 맞지 않아 그냥 무시된다.
+- `messages` — append-only 트리. `parent_id`가 null이면 루트(인사). `source`는 유저 턴을 누가 썼는지(`user` | `component`), `directions`는 그 턴에 게임 컴포넌트가 붙인 판정이다. `lore_triggers`(string[], null 가능)는 그 assistant 턴의 프롬프트에서 **새로** 발동한 로어 엔트리의 키(`loreEntryKey`)다 — 지속·재사용 대기 같은 시한 효과가 브랜치에 남은 이 기록으로 계산된다(§6 로어북). 새 assistant 행을 넣는 경로(전송·재생성·자동진행·나레이션)만 쓰고, 이어쓰기는 같은 턴이라 기록을 건드리지 않는다. 클라이언트 JSON에는 실리지 않는다.
 - 트리 규약. **행을 새로 넣는 연산은 넷뿐이다** — 챗 생성(인사 루트들), 유저 턴 전송(유저 메시지 + 그에 대한 assistant), 재생성/자동진행(assistant), 유저 메시지 수정(유저 형제). 스와이프·assistant 메시지 수정·이어쓰기는 행을 만들지 않는다.
   - 현재 경로 = `head_message_id`에서 parent 체인을 루트까지 역추적.
   - 재생성 = 마지막 assistant와 같은 parent로 새 sibling → head 이동. head가 유저 메시지면 그 아래 assistant 자식을 만든다(실패 후 재시도·edit-fork 후 응답 경로).
   - 스와이프 = `POST /:id/head`가 head를 sibling 서브트리의 **최신 자식 후손 리프**로 옮긴다. 메시지를 만들지 않는다 — 스와이프가 형제를 만드는 게 아니라, 재생성이 만들어 둔 형제 사이를 오갈 뿐이다. `deepestLeaf`는 각 층에서 가장 최근 자식을 따라 내려가지 서브트리에서 가장 깊은 잎을 찾지 않는다 — 그 sibling 아래에 더 오래되고 더 깊은 가지가 있으면 거기로 가지 않는다.
   - 유저 메시지 수정 = 같은 parent로 새 sibling(새 브랜치) → head 이동.
   - assistant 메시지 수정 = in-place. 이어쓰기(continue)도 in-place append라 트리가 변하지 않는다.
-  - 첫 인사는 **플롯의 `intros` 전부**를 parent_id null 형제 루트로 한 번에 저장한다(최대 10개). head는 `POST /api/chats`가 받은 `introIndex`(기본 0)가 가리키는 루트다. 매크로 확장 후 빈 도입부는 저장하지 않고, 선택한 도입부가 비면 루트 없이 빈 챗으로 시작한다. 벌크 insert가 같은 `created_at`을 갖지 않도록 행마다 1ms씩 어긋난 값을 명시한다. 도입부 텍스트의 `{{char}}`는 **플롯 이름**으로 확장된다(§6 매크로).
+  - 첫 인사는 **플롯의 `intros` 전부**를 parent_id null 형제 루트로 한 번에 저장한다(최대 10개). head는 `POST /api/chats`가 받은 `introIndex`(기본 0)가 가리키는 루트다. 매크로 확장 후 빈 도입부는 저장하지 않고, 선택한 도입부가 비면 루트 없이 빈 챗으로 시작한다. 벌크 insert가 같은 `created_at`을 갖지 않도록 행마다 1ms씩 어긋난 값을 명시한다. 도입부 텍스트의 `{{char}}`는 **플롯 이름**으로 확장된다(§6 매크로). 시계 매크로는 챗을 여는 순간 독자의 시계로 풀리고, `{{pick}}`에는 seed가 없다 — 챗 id는 그 뒤의 insert가 발급한다.
 
 ### 기억
 
@@ -182,37 +183,53 @@ OpenAI의 오픈소스 흐름은 오픈소스·로컬 호스팅 앱이 대상이
 
 왕복하는 것은 **정규화 필드 + `extensions`**다. `exportCardV3`는 정규화 필드로 V3 카드를 다시 짓고, `extensions`를 그대로 실은 뒤 거기에 우리 확장 블록을 다시 써넣는다 — 스펙에 대응 필드가 없는 것(RisuAI 표시 스크립트·기본 변수, 우리 컴포넌트 코드·capability)이 이 통로로 살아남는다. `raw`(원본 카드 JSON 전체)는 **어떤 코드도 읽지 않는다**: 보관·진단용으로 카드 jsonb 안에 남아 있을 뿐 익스포트에 관여하지 않는다.
 
-`LoreEntry`는 keys/secondaryKeys/selective/constant/insertionOrder/caseSensitive/useRegex/position에 더해 V3 데코레이터에서 온 `depth?`·`role?`을 갖는다.
+`LoreEntry`는 keys/secondaryKeys/selective/constant/insertionOrder/caseSensitive/useRegex/position에 더해 V3 데코레이터(또는 SillyTavern 엔트리 확장·스튜디오의 고급 칸)에서 온 `depth?`·`role?`, 그리고 SillyTavern의 고급 발동 필드 `selectiveLogic?`·`probability?`·`group?`·`groupWeight?`·`scanDepth?`·`sticky?`·`cooldown?`·`delay?`를 갖는다(§6 로어북). 고급 필드는 **없는 것이 기본값**이라 기본값을 채워 넣지 않는다 — API의 `coerceLoreEntry`도 보낸 것만 정수로 반올림·클램프해 남긴다(확률 0–100, 그룹 가중치 1–1000, 스캔 깊이 0–1000, 지속·재사용 대기·지연 0–10000, 모르는 selectiveLogic과 빈 그룹은 버린다).
 
 ### 파싱·정규화
 
 - `card/parse.ts`가 입력 종류를 판별한다: PNG 시그니처 → tEXt 청크(`ccv3` 우선, 없으면 `chara`, base64 → JSON), ZIP 시그니처 → charx, 그 외 → JSON.
 - `card/normalize.ts`는 **항상 `@risuai/ccardlib`로 변환한다**(V1/V2 → V3). 직접 매핑 경로는 없다.
-- `card/png.ts` — tEXt 청크 파서 자체 구현.
+  - **SillyTavern이 쓴 카드는 ccardlib 스키마에 그대로는 맞지 않는다.** ST의 PNG `ccv3` 청크는 V2 JSON의 spec만 바꾼 것이라 `group_only_greetings`가 없고, ST가 만든 로어북에는 책 단위 `extensions`가 없다. 그대로 검사하면 거절이 아니라 **V1로 통과한다** — ST는 V1 필드를 최상위에 반복해 쓰므로 `data` 아래 전부(로어북·추가 인사·시스템 프롬프트)를 잃는다. 그래서 spec이 V2/V3인 카드는 검사 전에 이 둘을 사본에 채운다(`raw`는 원본 그대로).
+  - 엔트리 매핑은 `card/bookEntry.ts` 한 곳이다(의존성 없음 — `./world-info`가 웹으로 가져간다). 같은 설정이 세 곳에 있을 수 있고 **V3 데코레이터 > ST 엔트리 `extensions` > CCv3 필드** 순으로 이긴다. ST는 내보내는 모든 엔트리에 숫자 `extensions.position`과 설정 전부를 쓰므로 그것으로 ST 엔트리를 알아본다: `position` 0/1 → before/after char, 4 → `depth`(`extensions.depth`, 없으면 4)와 `role`(0 system·1 user·2 assistant), 그 밖(작가 노트 위아래·예시 대화·아웃렛) → before_char. `selectiveLogic` 0 AND_ANY·1 NOT_ALL·2 NOT_ANY·3 AND_ALL, `probability`는 `useProbability`가 꺼지지 않았고(없으면 켜짐) 100 미만일 때만, `group`·`group_weight`·`scan_depth`·`sticky`·`cooldown`·`delay`, 대소문자는 `extensions.case_sensitive`에서. ST가 기본값으로 쓴 값(AND_ANY, 확률 100, 가중치 100, 0인 시한 효과, system 역할)은 **없는 것으로** 읽는다.
+  - **ST는 `use_regex`를 읽지 않는다**(그리고 모든 엔트리에 true로 쓴다). 키가 `/패턴/플래그` 꼴일 때만 정규식이다. 우리 것은 엔트리 단위라, ST 엔트리는 그 꼴의 키가 하나라도 있으면 정규식 엔트리가 되어 그 키는 패턴만 남기고(플래그는 버리고 대소문자는 엔트리 설정을 따른다) 나머지 평문 키는 이스케이프된 리터럴이 된다. 없으면 평문 엔트리다. ST가 아닌 엔트리는 `use_regex`를 그대로 믿는다.
+  - `card/sillyTavern.ts` — `extensions.depth_prompt`(캐릭터 노트, `{prompt, depth, role}` — role은 낱말 'system'|'user'|'assistant')는 내용이 있으면 **constant 깊이 엔트리**로 카드 로어북 끝(insertionOrder = 카드 엔트리 최댓값 + 1)에 붙고 `extensions`에서 빠진다 — 익스포트가 엔트리로 다시 쓰므로 왕복해도 두 번 생기지 않는다. `extensions.regex_scripts` 중 표시 전용(`markdownOnly`, `promptOnly`·`disabled` 아님, `placement`에 AI 출력 2 포함)만 RisuAI 것 뒤에 `displayScripts`로 붙는다: `findRegex`는 `/패턴/플래그` 또는 맨 패턴, `replaceString`의 `{{match}}`·`$0` → `$&`, `trimStrings`는 버린다. 패턴 검사(§8.1)에 걸리면 그 스크립트만 건너뛰고, 같은 in/out이 이미 있으면 넣지 않는다. `regex_scripts` 자체는 왕복을 위해 `extensions`에 남는다.
+- `card/png.ts` — tEXt 청크 파서·제거기와 작성기(`insertPngTextChunks`, CRC32를 직접 계산해 IEND 바로 앞에 넣는다), 그리고 그림 없는 카드용 크림색 자리표시 PNG(`placeholderPng`, fflate로 IDAT를 만든다).
 - `card/charx.ts` — fflate로 필요한 엔트리만 두 패스로 해제한다. 1패스에서 `card.json`, 2패스에서 카드가 선언한 아이콘(`type==='icon' && name==='main'`)과 **임베드 이미지 에셋 전부**(카드 순서, 50개 캡)를 한 예산 안에서 읽는다. 반환은 `{raw, iconBuffer?, assets}`이고 임포트가 에셋을 slug화해 `plot_assets`로 저장한다.
   - **아카이브의 50개와 플롯의 100개는 다른 상한이다.** charx 쪽 50은 파싱 예산 — 낯선 zip 하나가 프로세스에게 시킬 수 있는 일의 한도이며, 그래서 파서 안에 있다. 플롯 쪽 100(`MAX_ASSETS_PER_PLOT`)은 한 작품이 보유할 수 있는 이미지 수이고 업로드 경로에서 API가 집행한다. 카드 하나를 임포트해 만든 플롯은 최대 50개를 갖고 시작해 업로드로 100까지 채울 수 있으며, 추가 등장인물 카드를 임포트하면 남은 자리만큼만 그 카드의 에셋이 들어온다.
   - 하드닝: 엔트리당 20MiB, 16KB 슬라이스 단위 push. 선언 크기를 믿지 않고 인플레이터가 실제로 뱉은 바이트를 센다. 예산 초과는 그 자리에서 패스를 중단한다 — fflate 동기 인플레이터의 `terminate()`가 no-op이라 루프 break만이 실제로 일을 멈춘다.
   - **64MiB 총량 예산은 패스마다 따로 잡힌다.** 1패스의 `card.json`은 이름을 카드에서 알아낼 수 없고 그 자체가 카드라 자기 패스에서 혼자 풀리며, 총량 예산이 아니라 엔트리 캡(20MiB)에만 걸린다. 2패스가 64MiB를 쓰고, 예산 초과 판정이 엔트리 경계가 아니라 청크마다 나므로 초과분 한 엔트리가 더 붙을 수 있다. 즉 **아카이브 하나의 최악치는 64MiB가 아니라 대략 `20MiB(card.json) + 64MiB + 마지막 엔트리`**다 — 코드 주석의 "이 예산 + 한 엔트리"가 가리키는 것이 이것이다.
-- V3 로어북 데코레이터: content 선행 `@@` 블록만 데코레이터로 보고 본문에서 분리한다. 지원 서브셋은 `@@depth N` / `@@role user|assistant|system`(depth와 함께일 때만 보존) / `@@constant` / `@@position before_desc|after_desc`. position이 있으면 스펙대로 depth를 무시하되, 값이 인식 불가면 position 자체를 무시하므로 depth가 살아남는다. 나머지 데코레이터와 `@@@` 폴백 체인은 해석 없이 strip.
-- `card/export.ts` — NormalizedCard → V3 JSON. depth/role은 대응 필드가 없어 `@@depth`/`@@role` 라인으로 다시 직렬화한다. 우리 확장은 `extensions.shizue.{componentCode, componentCapabilities}`로, RisuAI 호환 필드는 `extensions.risuai`로 나간다. 익스포트는 등장인물 한 명의 카드를 내되 플롯 차원의 내레이터·커스텀 UI를 그 확장 블록에 되돌려 써서 **임포트가 감싼 것을 익스포트가 벗겨 낸다** — 카드가 왕복한다.
+- V3 로어북 데코레이터: content 선행 `@@` 블록만 데코레이터로 보고 본문에서 분리한다. 지원 서브셋은 `@@depth N` / `@@role user|assistant|system`(depth와 함께일 때만 보존) / `@@constant` / `@@position before_desc|after_desc` / `@@activate_only_after N` → `delay` / `@@scan_depth N` → `scanDepth` / `@@keep_activate_after_match` → `sticky` 10000 / `@@dont_activate_after_match` → `cooldown` 10000(API 클램프의 상한이라 저장해도 그대로다) / `@@exclude_keys a,b` → 보조 키가 없고 정규식 엔트리가 아닐 때만 그 키들을 `not_any` 보조 키로(대소문자 유지). position이 있으면 스펙대로 depth를 무시하되, 값이 인식 불가면 position 자체를 무시하므로 depth가 살아남는다. 나머지 데코레이터와 `@@@` 폴백 체인은 해석 없이 strip.
+- `card/export.ts` — NormalizedCard → V3 JSON. depth/role은 대응 필드가 없어 `@@depth`/`@@role` 라인으로 다시 직렬화하고, 10000 이상인 sticky·cooldown은 `@@keep_activate_after_match`·`@@dont_activate_after_match`로도 나간다. 그 밖의 고급 필드는 데코레이터로 쓰지 않고(본문을 깨끗이 두려고) **모든 엔트리에 ST 엔트리 `extensions`**(`position`·`depth`·`role`·`selectiveLogic`·`probability`+`useProbability`·`group`·`group_weight`·`scan_depth`·`sticky`·`cooldown`·`delay`·`case_sensitive`)로 쓴다 — ST가 읽는 자리이자 우리 임포트가 다시 읽는 자리다. 정규식 엔트리의 키는 `/패턴/`(대소문자 무시면 `i`)으로, 안의 `/`는 이스케이프해 나간다. 우리 확장은 `extensions.shizue.{componentCode, componentCapabilities}`로, RisuAI 호환 필드는 `extensions.risuai`로 나간다. 익스포트는 등장인물 한 명의 카드를 내되 플롯 차원의 것(`CardPlotOverlay`: 내레이터·커스텀 UI·도입부 — 첫째가 `first_mes`, 나머지가 `alternate_greetings`, 도입부가 없으면 카드 것 — ·플롯 로어북은 카드 엔트리 뒤에)을 되돌려 써서 **임포트가 감싼 것을 익스포트가 벗겨 낸다** — 카드가 왕복한다. `exportCardPng`는 그림(PNG가 아니거나 청크를 걸을 수 없으면 자리표시)의 텍스트 청크를 지우고 `chara`(ccardlib의 V3→V2 백필 — 스펙대로 데코레이터를 빼므로 깊이·역할은 ST 엔트리 확장으로만 남는다)와 `ccv3`를 싣는다.
+- `worldInfo.ts`(`./world-info`) — `toWorldInfo(entries)`는 SillyTavern 월드 인포 파일(`{entries: {uid: {key, keysecondary, order, disable, position, …}}}`)을, `fromLorebookFile(json)`은 월드 인포 파일·CCv2/v3 `character_book`·그것을 담은 카드 JSON을 `LoreEntry[]`로 읽는다(그 밖은 `LorebookFileError`). 스튜디오가 브라우저에서 쓴다.
 - `card/risu.ts` — RisuAI `customScripts` 중 `type==='editdisplay'`만 `displayScripts`로, `defaultVariables`(개행 `key=value` 블록 또는 객체)를 변수 시드로 매핑한다.
 
 ### 매크로·변수
 
-- `macro.ts` — CBS 서브셋: `{{char}}`, `{{user}}`, `{{getvar::k}}`, `{{random:a,b}}`, `{{roll:dN}}`, `{{// comment}}`(제거), `{{original}}`(오버라이드 치환 전용). 대소문자 무시. **미지원 매크로는 원문 유지** — 이것이 `{{setvar}}`/`{{addvar}}`를 프롬프트 히스토리에 남겨 모델이 자기 프로토콜을 계속 관찰하게 하는 장치다.
+- `macro.ts` — CBS 서브셋: `{{char}}`, `{{user}}`, `{{getvar::k}}`, `{{random:a,b}}`, `{{pick::a,b}}`(`{{pick:a,b}}`도), `{{roll:dN}}`, `{{// comment}}`(제거), `{{original}}`(오버라이드 치환 전용), 시계 매크로 `{{date}}`·`{{time}}`·`{{weekday}}`·`{{idle_duration}}`. 대소문자 무시. **미지원 매크로는 원문 유지** — 이것이 `{{setvar}}`/`{{addvar}}`를 프롬프트 히스토리에 남겨 모델이 자기 프로토콜을 계속 관찰하게 하는 장치다.
 - **`{{char}}`는 글의 출처마다 다르게 풀린다.** 등장인물 카드 안의 글(설명·성격·예시 대화·그 카드의 로어)에서는 그 등장인물의 이름이고, 그 밖의 모든 곳 — 프리셋, 플롯의 세계관 설정과 로어, 내레이터, 도입부, 히스토리 — 에서는 **플롯 이름**이다. 로스터가 여럿인 작품에서 프리셋의 "{{char}}의 등장인물"이 말이 되는 것이 이 규칙이다. `{{user}}`는 종전대로.
 - `stripImageMacros` — `{{img::slug}}`는 클라이언트 마크업이라 프롬프트 조립에서만 제거한다. 저장 메시지와 인사 확장에는 남는다.
+- **시계 매크로**는 `MacroContext.clock`(`{now, timeZone, locale, idleMs?}`)이 있을 때만 풀리고, 없으면 원문 그대로다. `Intl.DateTimeFormat(locale, {timeZone})`으로 `date` = `dateStyle: 'long'`, `time` = 24시간제 `HH:mm`(`hourCycle: 'h23'` — ICU 판마다 `timeStyle: 'short'`의 한국어가 "오후 3:36"과 "PM 3:36"으로 갈려서다), `weekday` = `weekday: 'long'`. locale은 플롯의 콘텐츠 `language`, 시간대는 웹이 보낸 `x-shizue-tz` 헤더다(§7.2). `{{idle_duration}}`은 `idleMs`를 그 언어로 쓴다 — 1분 미만이거나 값이 없으면 "방금"/"just now"/"たった今", 그 이상은 분·시간·일 중 가장 큰 단위의 정수(`Intl.NumberFormat`의 unit 서식, "3일"/"3 days"/"3 日").
+- `{{pick}}`은 `{{random}}`과 같되 **챗마다 고정**이다. 인덱스가 `${seed}\0${원문}\0${매크로 위치}`의 FNV-1a 해시에서 나오고 seed는 챗 id다 — 같은 글의 같은 자리는 재생성해도 같은 것을 고르고, 한 글 안의 두 `{{pick}}`은 따로 고른다. seed가 없으면 `{{random}}`처럼 동작한다.
+- **캐시 주의**: system 문자열(캐시 프리픽스)에 분 단위로 바뀌는 매크로(`{{time}}`·`{{idle_duration}}`)를 쓰면 프리픽스가 매분 달라진다. 크리에이터 가이드가 이것들을 depth 로어에 두라고 권하는 이유다.
 - `variables.ts` — 경로 파생 변수. **저장 컬럼이 없다**: 값은 현재 브랜치 메시지의 `{{setvar}}`/`{{addvar}}`를 오래된 순으로 접어서 얻는다. 트리가 append-only라 스와이프·포크가 자동으로 그 브랜치의 상태를 낸다. 모든 맵은 null 프로토타입이고 읽기는 own-property로만 한다 — 변수 이름은 모델 출력과 남의 카드에서 오므로 `__proto__`·`toString`이 실제로 들어온다.
 
 ### 로어북
 
-`lorebook.ts` `activateLore(entries, scanText, budgetTokens, countTokens, recursiveScanning?)`:
+`lorebook.ts` `activateLore(entries, {history, scanDepth, budgetTokens, countTokens, recursiveScanning?, timed?, random?}) → {entries, triggered}`:
 
-- scanText = 최근 `scanDepth`개 메시지 연결.
-- constant는 무조건 활성. selective면 keys AND secondaryKeys 각 1개 이상 매칭. useRegex면 key를 정규식으로, 아니면 부분 문자열(caseSensitive 반영).
+- 스캔 텍스트 = 히스토리 원문(최신이 마지막) 중 최근 `scanDepth`개의 연결. 엔트리에 `scanDepth`가 있으면 그 엔트리만 자기 깊이로 스캔한다 — 0이면 재귀로 덧붙은 텍스트만 보고, constant는 그래도 활성이다.
+- constant는 무조건 활성. selective면 keys 1개 이상 매칭에 더해 secondaryKeys를 `selectiveLogic`으로 따진다: `and_any`(1개 이상 — 기본이자 필드 이전의 유일한 동작) / `and_all`(전부) / `not_any`(하나도 없음) / `not_all`(전부는 아님). useRegex면 key를 정규식으로, 아니면 부분 문자열(caseSensitive 반영).
 - 로어북 정규식은 RE2JS의 선형 시간 엔진으로 실행한다. 키당 512자까지 지원하며, 잘못된 패턴·역참조·전방 탐색 등 지원하지 않는 문법과 길이 초과 키는 활성화하지 않는다. JS 정규식으로 폴백하지 않는다. 가져온 카드가 서버의 정규식 역추적으로 이벤트 루프를 멈추지 못하게 하는 경계다.
 - insertionOrder 오름차순 정렬 후 tokenBudget 내로 컷.
-- 재귀 스캔(카드 `recursive_scanning`, 기본 false): 1패스에서 활성화된 content를 스캔 텍스트에 덧붙여 최대 2회 추가 스캔. constant는 첫 패스만, 이미 활성인 엔트리는 후속 패스 제외라 상호 트리거도 각 1회. tokenBudget은 전 패스 합산이고, 어느 패스든 예산이 모자라 잘리면 거기서 재귀도 끝난다. 반환은 마지막에 insertionOrder로 재정렬한다.
+- 재귀 스캔(카드 `recursive_scanning`, 기본 false): 1패스에서 활성화된 content를 모든 엔트리의 스캔 텍스트에 덧붙여 최대 2회 추가 스캔. constant는 첫 패스만, 이미 활성인 엔트리는 후속 패스 제외라 상호 트리거도 각 1회. tokenBudget은 전 패스 합산이고, 어느 패스든 예산이 모자라 잘리면 거기서 재귀도 끝난다. 반환은 마지막에 insertionOrder로 재정렬한다.
+- **확률**(`probability` 0–100, 없으면 100): 새로 걸린 엔트리마다 한 번 굴린다(SillyTavern처럼 constant도). 실패한 엔트리는 이번 활성화에서 끝이고 기록되지 않는다. 100 이상이거나 없으면 굴리지 않는다.
+- **포함 그룹**(`group`, 쉼표로 여럿, `groupWeight` 기본 100): 한 패스에서 확률을 통과한 엔트리 가운데 같은 그룹 라벨을 가진 것들은 가중치 추첨으로 하나만 남는다. 이번 활성화에서 그 그룹을 이미 가진 엔트리(지속 중인 것, 앞 패스에서 들어간 것)가 있으면 그것이 이기고 새 것들은 빠진다. 여러 그룹에 속한 엔트리는 하나라도 지면 빠진다. 굴림과 추첨은 주입 가능한 `random`을 쓴다.
+- **시한 효과**(SillyTavern 의미론): 호출자가 `timed = {chatLength, lastTriggered}`를 준다. chatLength(g)는 생성될 메시지의 경로 인덱스(= 그 앞 메시지 수), lastTriggered는 `loreEntryKey` → 그 키를 `lore_triggers`에 담은 가장 최근 assistant 메시지의 인덱스(i)다. 메시지는 user·assistant를 가리지 않고 센다.
+  - `delay` D: g < D인 동안 발동하지 않는다.
+  - `sticky` S: `g - i <= S`인 동안 스캔·확률 없이 활성이고, 새 발동으로 세지 않는다(기간이 갱신되지 않는다).
+  - `cooldown` C: `i + S < g <= i + S + C`인 동안 발동하지 않는다(S는 그 엔트리의 sticky, 없으면 0).
+- **엔트리 키** `loreEntryKey(entry)` = `JSON.stringify([keys, secondaryKeys, content])`의 FNV-1a 16진수. 순서를 바꿔도 유지되고 엔트리를 고치면 바뀌어 시한 상태가 초기화된다(ST가 편집된 엔트리의 효과를 지우는 것과 같다). 기록은 지금 합쳐진 로어북에 **있고 enabled인** 엔트리에만 작용한다 — 지워졌거나 꺼졌거나 고쳐진 엔트리의 옛 기록은 효과가 없다.
+- 반환의 `triggered`는 이번에 **새로** 발동해 실제로 프롬프트에 들어간 엔트리의 키다(재귀로 들어온 것 포함, 지속으로 넘어온 것·예산에 잘린 것 제외). 조립기가 `loreTriggers`로 돌려주고 apps/api가 새 assistant 메시지에 저장한다(§7.2).
 
 **한 권으로 합쳐진 로어북**: 조립기가 `plot.lorebook` 뒤에 **모든 등장인물 카드의 로어북**을 이어 붙여 한 번에 활성화한다. 전 층이 하나의 토큰 예산을 나눠 쓰고, `activateLore`의 전역 insertionOrder 정렬이 병합 결과를 하나의 로어북으로 취급한다(정렬이 안정적이라 동점은 플롯이 먼저, 그다음 로스터 순서). 깊이·예산 설정(`loreSettings`)은 **첫 등장인물 카드의 것**을 쓴다 — 한 권이면 그것을 정하는 설정도 하나여야 하고, 오버라이드를 읽는 카드와 같은 카드다.
 
@@ -228,7 +245,7 @@ OpenAI의 오픈소스 흐름은 오픈소스·로컬 호스팅 앱이 대상이
 
 ### 프롬프트 조립
 
-`prompt.ts` `assemblePrompt(input) → { system, messages }`. 입력은 **플롯 하나 + 로스터 전체**(`{plot: {name, description, lorebook, narrator}, characters: [{name, card}]}`, 카드가 아니다).
+`prompt.ts` `assemblePrompt(input) → { system, messages, loreTriggers }`. 입력은 **플롯 하나 + 로스터 전체**(`{plot: {name, description, lorebook, narrator}, characters: [{name, card}]}`, 카드가 아니다).
 
 system 문자열(= 캐시 프리픽스, 순서대로 비어있지 않은 것만):
 
@@ -236,7 +253,7 @@ system 문자열(= 캐시 프리픽스, 순서대로 비어있지 않은 것만)
 2. 나레이션 규약 한 줄 — `[나레이션]` 표시가 화자의 발화가 아니라는 설명. 매 턴 같은 문장이라 캐시 프리픽스에 한 번만 둔다
 3. 로어북 `before_char`
 4. 작품 블록 — `[작품: 이름]` + description
-5. 등장인물 블록 — `order_index` 순으로 한 명당 하나: `[등장인물: 이름]` + description + (있으면) `{{char}}의 성격: ` + personality. **카드의 `scenario`는 읽지 않는다**
+5. 등장인물 블록 — `order_index` 순으로 한 명당 하나: `[등장인물: 이름]` + description + (있으면) `{{char}}의 성격: ` + personality. **카드의 `scenario`는 읽지 않는다**. 장면에서 뺀 멤버(`PromptCharacter.absent`)는 블록도 예시 대화도 카드 로어북도 없고, 대신 남은 블록들 **바로 뒤에** `현재 장면에 없는 인물: A, B — 이 인물들은 이번 장면에서 대사나 행동으로 등장하지 않습니다.` 한 줄(`absentCastLine`)이 선다 — 카드는 빠져도 히스토리에는 그 이름이 가득해서, 이 줄이 없으면 모델이 계속 그 인물을 쓴다. 첫 멤버가 빠져도 **작품의 대리인은 그대로 첫 멤버다**(시스템 프롬프트·post-history 오버라이드와 로어 설정) — 그것들은 그 멤버의 말이 아니라 작품의 것이기 때문이다
 6. 내레이터 블록 — `나레이터 문체: ` / `나레이션 시점: `. 챗 오버라이드가 있으면 그것, 없으면 플롯의 것
 7. 스타일 블록 — `연출 지시:` + 설정된 옵션마다 한 줄(`styleDirectives`, 아래). 내레이터 **바로 뒤**, `after_char` 로어 **앞**이다 — 둘 다 "어떻게 쓸지"라 붙어 있어야 한 덩어리의 연출 지시로 읽힌다
 8. 로어북 `after_char`
@@ -249,8 +266,7 @@ messages 배열:
 ```
 [게임 판정] system 블록(마지막 유저 턴의 directions가 있을 때)
 예시 대화 (등장인물마다 mesExample을 <START>로 분할, 블록마다 [예시 대화: 이름] 머리)
-author's note system 블록
-히스토리 (depth 로어가 깊이대로 끼어든다)
+히스토리 (depth 로어와 author's note가 깊이대로 끼어든다)
 post-history system 블록  ← 첫 등장인물 카드의 postHistoryInstructions로 대체 가능
 ```
 
@@ -258,9 +274,11 @@ post-history system 블록  ← 첫 등장인물 카드의 postHistoryInstructio
 
 - **directions가 system 문자열 밖에 있는 이유**: 턴마다 바뀌므로 캐시 프리픽스를 무효화하면 안 된다. 마지막 유저 메시지의 directions만 주입한다 — regenerate·continue는 같은 턴을 다시 쓰는 것이라 같은 판정을 다시 적용하고, auto는 그 턴 너머의 비트라 주입하지 않는다. 히스토리 텍스트에는 절대 들어가지 않는다.
 - **예산**: 탈락하지 않는 것(system, post-history, directions, author's note, depth 로어)을 `contextBudget - maxResponseTokens`에서 먼저 뺀다. 남은 예산으로 히스토리를 **최신부터 역순으로** 채우고(가장 최신 메시지는 항상 남긴다), 그러고 남은 것으로 예시 대화를 채운다. 결과적으로 **탈락 순서는 예시 대화 → 오래된 히스토리**이고 author's note와 post-history는 탈락하지 않는다.
-- **depth 로어**: `@@depth`가 있는 엔트리는 system 블록이 아니라 히스토리 구간에 `{role, content}`로 들어간다. depth 0 = 마지막 메시지 뒤, depth N = 끝에서 N번째 앞, 히스토리보다 깊으면 시작으로 clamp. 같은 지점에 여럿이면 insertionOrder 순. 로어북 자체 예산과 별개로 contextBudget에서도 선차감한다 — depth 로어는 히스토리를 밀어낸다.
+- **depth 로어**: `depth`가 있는 엔트리(`@@depth`·SillyTavern의 at-depth·캐릭터 노트로 들어오거나 스튜디오에서 지정)는 system 블록이 아니라 히스토리 구간에 `{role, content}`로 들어간다. depth 0 = 마지막 메시지 뒤, depth N = 끝에서 N번째 앞, 히스토리보다 깊으면 시작으로 clamp. 같은 지점에 여럿이면 insertionOrder 순. 로어북 자체 예산과 별개로 contextBudget에서도 선차감한다 — depth 로어는 히스토리를 밀어낸다.
+- **author's note**(챗 노트 + 첨부 노트)는 히스토리 끝에서 `AUTHOR_NOTE_DEPTH` = 4(SillyTavern 기본값) 깊이에 system 메시지로 들어간다. 삽입 인덱스는 depth 로어와 같은 계산이고(trailingTurns 포함), 같은 지점에 depth 로어가 있으면 로어가 먼저(insertionOrder 순), 노트가 그다음이다. 히스토리가 4개보다 짧으면 그 시작으로 clamp된다. 히스토리 앞이 아니라 끝 가까이 두는 이유는 그것이 다음 턴을 이끄는 지시이기 때문이다 — 멀수록 모델이 덜 따른다. 예산에서는 종전대로 선차감되고 탈락하지 않는다. 설정이나 UI는 없다.
 - **trailingTurns**: 호출자가 조립 결과 *뒤에* 직접 붙이는 턴 수. 이어쓰기에서 apps/api가 부분 assistant 메시지를 post-history 뒤에 재부착하므로 1을 넘긴다. 삽입 인덱스는 `min(len, max(0, len + trailingTurns - depth))`이고, trailing보다 얕은 depth는 히스토리 블록 끝으로 clamp된다(prefill 뒤에는 아무것도 올 수 없다). trailing 턴의 토큰은 조립기가 보지 못하므로 호출자가 `contextBudget`에서 빼서 넘긴다.
-- 모든 텍스트에 매크로 적용. 토큰 카운트는 `tokens.ts` — `js-tiktoken` o200k_base 단일 인코더 근사.
+- 모든 텍스트에 매크로 적용. 시계와 `{{pick}}` seed는 입력의 `clock`/`seed`로 받아 플롯·등장인물 매크로 컨텍스트 전부에 싣고, 로어의 시한 상태는 `loreState`로 받는다(호출자가 전체 브랜치에서 만든다). 토큰 카운트는 `tokens.ts` — `js-tiktoken` o200k_base 단일 인코더 근사.
+- **리포트**(`report: true`일 때만 — 생성 경로는 켜지 않는다): 결과에 `PromptReport`가 붙는다. `blocks`는 모델이 읽는 순서대로의 조각 `{kind, label?, tokens, text}`이다 — system 문자열의 섹션들(합치면 정확히 `system`)에 이어 messages 하나당 하나(`directions`·`examples`·`history`·`depth_lore`·`author_note`·`post_history`, 히스토리는 턴마다 따로라 끼어든 depth 로어와 노트의 자리가 보인다). `totals`는 `{contextBudget, responseReserve, used}`이고 `used`는 예산이 실제로 내준 양(탈락하지 않는 것 + 남은 히스토리·예시, 이미지 추정치 포함)이다. `history`/`examples`는 `{included, total}`, `lore`는 활성화된 엔트리마다 `{key, source('plot' | 멤버 이름), keys, preview(80자), placement('before_char' | 'after_char' | 'depth N'), via}` — `via`는 `activateLore`가 돌려주는 경위(`constant` | `keyword` | `sticky` | `recursion`)다. 블록마다 토큰을 다시 세므로 꺼져 있을 때는 비용이 없다.
 
 ### 스타일 지시문 (`style.ts` + `prompt.ts`)
 
@@ -290,6 +308,7 @@ post-history system 블록  ← 첫 등장인물 카드의 postHistoryInstructio
 - **선택지**(`choices.ts`) — 응답 맨 끝의 `>> ` 줄들. `extractChoices(content) → {body, choices}`는 **끝의 연속 구간만** 떼어 낸다(중간의 `>>`는 산문이다). 사이의 빈 줄은 여백으로 넘기고, `>> ` 뒤에 아직 아무것도 없는 줄은 선택지가 아니다 — 빈 버튼이 생겼다가 라벨이 바뀌는 일을 막는다.
 - **추출 순서는 선택지 → 상태창 → 기존 파이프라인이다.** 지시문이 선택지를 상태창 블록 *뒤에* 붙이라고 가르치므로, 선택지를 먼저 떼어 내지 않으면 상태창 펜스가 "턴의 끝"이 되는 일이 없다. 둘 다 발화 파싱보다 앞이다 — 상태창도 선택지도 누가 한 말이 아니다.
 - **첫 장면의 상태창은 도입부 텍스트가 낸다.** 크리에이터가 도입부 끝에 같은 펜스를 쓰면 그 도입부 루트가 렌더될 때 같은 카드가 그려진다. 별도 입력 칸을 두지 않은 이유가 이것이다 — 규약이면 어디에 쓰든 규약이다.
+- **보내는 히스토리에서는 지난 상태창·선택지를 뗀다.** `assemblePrompt`가 히스토리의 assistant 메시지 가운데 **가장 최신 것을 뺀 전부**에서, 렌더러와 같은 순서로(`extractChoices` → `extractStatusBlock`, `.body`) 끝의 선택지와 상태창 펜스를 떼어 낸 뒤에 재고 싣는다. 가장 최신 assistant 턴은 그대로 간다 — 지금의 상태이자 형식의 본보기다. 지난 상태는 이미 대체된 것이라 매 턴 다시 읽힐 이유가 없다. 유저 메시지는 손대지 않고, 떼고 나면 아무것도 남지 않는 턴은 통째로 둔다. 저장 텍스트는 그대로다. **로어북 스캔은 원문을 읽는다** — 옛 상태창의 `위치: 왕궁` 줄은 여전히 로어를 건다. 이어쓰기에서는 부분 메시지가 조립기를 우회하므로 그 앞의 assistant 메시지가 '가장 최신'이 되고, 의도된 동작이다.
 
 ### 프리셋
 
@@ -307,22 +326,26 @@ post-history system 블록  ← 첫 등장인물 카드의 postHistoryInstructio
 interface LLMAdapter { stream(req: ChatRequest): AsyncGenerator<StreamDelta, StreamDone>; }
 ```
 
-- `chatgptAuth.ts` — 상태 없는 OAuth: 동적 등록, S256 PKCE·state·nonce, 인가 URL, 콜백 검사, JWKS 기반 ID 토큰 검증, 교환·갱신·해제, 계정의 모델 카탈로그. 시도와 토큰은 호출자(API의 `chatgptAccounts.ts`, §4.1)가 보관한다. 발급 client ID는 접두사를 가정하지 않고 `dynamic_agent_client`만 거부한다.
+- `chatgptAuth.ts` — 상태 없는 OAuth: 동적 등록, S256 PKCE·state·nonce, 인가 URL, 콜백 검사, JWKS 기반 ID 토큰 검증, 교환·갱신·해제, 계정의 모델 카탈로그. 시도와 토큰은 호출자(API의 `chatgptAccounts.ts`, §4.1)가 보관한다. 발급 client ID는 접두사를 가정하지 않고 `dynamic_agent_client`만 거부한다. 카탈로그 항목의 `supported_reasoning_levels`(`{effort, description}` 객체 또는 문자열)와 `default_reasoning_level`을 `reasoningEfforts`/`defaultReasoningEffort`로 읽는다 — 소문자 단어(`/^[a-z]{1,20}$/`)만 받고, 없거나 쓸 값이 없으면 필드도 없다(추론 강도 셀렉트가 숨는다). 필드 이름은 Codex 클라이언트에서 가져온 것으로 실계정 응답으로는 확인하지 않았다(테스트 픽스처가 그 가정을 적어 둔다).
 - `registry.ts` — 모델 목록·어댑터는 **요청한 사용자의 계정**(`ChatGPTAccount`: access token + 카탈로그)에서 나온다. 계정 공식 `/v1/models` 응답에서 `visibility: list`만 순서대로 제공하고 30초 캐시한다. 계정이 없으면 목록은 비고 어댑터는 `chatgpt_login_required`다. Echo는 `NODE_ENV=test` 전용이다.
-- `chatgptResponses.ts` — OAuth Bearer로 공식 `/v1/responses`에 `store:false`, `stream:true`를 보낸다. 전체 히스토리를 앱이 제공하고 system 턴은 순서를 유지한 developer 턴으로 변환한다. 지원하지 않는 temperature·max_output_tokens는 보내지 않는다. 응답 길이는 프롬프트 지시이며 stop 문자열은 로컬에서 적용한다. `response.completed` 전에는 성공으로 취급하지 않는다.
+- `chatgptResponses.ts` — OAuth Bearer로 공식 `/v1/responses`에 `store:false`, `stream:true`를 보낸다. 전체 히스토리를 앱이 제공하고 system 턴은 순서를 유지한 developer 턴으로 변환한다. 지원하지 않는 temperature·max_output_tokens는 보내지 않는다. `ChatRequest.reasoningEffort`가 있을 때만 `reasoning: {effort}`를 싣고, 추론 요약은 요청하지 않는다(크리에이터의 숨은 프롬프트를 바꿔 말할 수 있다). 응답 길이는 프롬프트 지시이며 stop 문자열은 로컬에서 적용한다. `response.completed` 전에는 성공으로 취급하지 않는다.
 - 이미지 생성과 임베딩은 이 경로에서 지원하지 않으므로 실행 경로에서 제거했다. 과거 벡터 메모리의 정합성 테스트만 주입된 테스트 임베더로 유지한다. 계정 모델 메타데이터의 `input_modalities`가 image를 포함할 때만 첨부 이미지를 전송한다.
 - 다른 제공자/API 키 폴백은 지원하지 않는다. 생성·초안·답장 추천은 요청한 사용자의 계정으로, 요약·관계 같은 배경 작업은 그 챗 소유자의 계정으로 호출한다. 기존 대화는 기록을 보존한 채 사용 가능한 모델로 변경한다.
 
 
 ### 7.2 생성
 
-`generation.ts`가 messages / regenerate / continue / auto 네 경로의 공통 몸통이다.
+`generation.ts`가 messages / regenerate / continue / auto / narrate 다섯 경로의 공통 몸통이다.
 
 1. `withGenerationSlot` — 유저당 동시 생성 1(in-memory Set). 이미 잡혀 있으면 **429 `generation_in_progress`**. 슬롯은 SSE 응답이 끝날 때까지 유지된다.
-2. 계획 수립: 경로 로드 → 플롯 + 로스터(`order_index` 순), persona, memory/relationship 블록, author's note(챗 노트 + 첨부 노트 병합), 마지막 유저 턴의 directions, 경로 파생 변수, 프리셋, 챗별 contextBudget. 내레이터는 `chats.narrator ?? plots.narrator`.
+2. 계획 수립: 경로 로드 → 플롯 + 로스터(`order_index` 순 — 챗의 `absent_character_ids`에 든 멤버는 absent로 표시, §6), persona, memory/relationship 블록, author's note(챗 노트 + 첨부 노트 병합), 마지막 유저 턴의 directions, 경로 파생 변수, 프리셋, 챗별 contextBudget. 내레이터는 `chats.narrator ?? plots.narrator`.
+   - **독자의 시계**(`requestClock`): 시간대는 웹이 생성 POST 다섯 개와 `POST /api/chats`에 싣는 `x-shizue-tz` 헤더(IANA 이름)이고, `Intl.DateTimeFormat`이 거부하는 값이나 헤더 없음은 `UTC`다 — 시계 매크로가 턴을 실패시키는 일은 없다. locale은 플롯 `language`. idle은 브랜치의 마지막 유저 메시지와 그 앞 메시지의 `created_at` 차이라, 다섯 경로 모두 같은 값이고 재생성해도 그대로다. `{{pick}}`의 seed는 챗 id.
+   - **로어 시한 상태**(`loreStateOf`): 생성될 메시지 앞의 **전체** 브랜치 경로에서 키마다 마지막으로 기록된 인덱스를 모은다 — 기억이 잘라 낸 히스토리가 아니다. 브랜치는 전송이면 경로 + 방금 넣은 유저 턴, 재생성이면 **교체될 head를 뺀** 경로, 자동진행·나레이션이면 경로 그대로, 이어쓰기면 생성 중인 메시지가 head 자신이므로 head를 뺀 경로다(그 head의 기록이 직전 턴의 발동으로 읽히면 지속 엔트리가 잘못 켜지고 재사용 대기가 잘못 걸린다).
 3. `assemblePrompt` 후 특수 꼬리를 붙인다: continue는 부분 assistant 텍스트를 post-history 뒤에 assistant 메시지로, auto는 "유저 개입 없이 장면을 이어간다"는 system 지시를 그 뒤에 붙인다. 둘 다 조립기를 우회하므로 토큰을 `contextBudget`에서 직접 뺀다. **auto의 지시문은 DB에 저장되지 않는다.**
-4. 스트림: `maxTokens`는 `replyLengthTokens(plot.style?.replyLength)`(§6 응답 길이 페어링 — 기본 1200), `stop: ["\n{userName}:"]`, temperature 미지정(gpt-5가 비기본값을 거부한다).
-5. 완료 시 persist(신규 삽입 + head 이동, 또는 continue의 in-place append) → **해금 평가**(§7.5) → `done` 이벤트 → **done 이후에** 배경 작업 스케줄.
+   - **다음 화자**: 생성 POST 다섯 개가 받는 `focusCharacterIds`는 `이번 응답은 {이름들}의 대사와 행동을 중심으로 씁니다.`(`sceneFocusDirective`, 이름은 로스터 순)가 되어 같은 꼬리 system 지시에 **합쳐진다** — 모드의 지시(auto·나레이션 넛지)가 있으면 그다음 줄이다. 그 턴 하나의 요청이라 저장되지 않는다. 이어쓰기에서는 부분 텍스트 **앞**에 온다 — 모델이 이어 쓸 턴이 맨 끝에 남아야 하기 때문이다.
+   - `inspectGeneration`은 같은 `buildRequestMessages`를 리포트와 함께 돌리고 거기서 멈춘다 — 어댑터도 persist도 없다. 꼬리 지시는 `trailing` 블록으로 붙고, 리포트의 `contextBudget`은 꼬리를 빼기 전의 챗 예산이다.
+4. 스트림: `maxTokens`는 `replyLengthTokens(plot.style?.replyLength)`(§6 응답 길이 페어링 — 기본 1200), `stop: ["\n{userName}:"]`, temperature 미지정(gpt-5가 비기본값을 거부한다). 추론 강도는 계획이 아니라 `runGeneration`이 그 자리에서 챗 행의 `reasoning_effort`를 읽어, 지금 카탈로그가 그 모델에 그 값을 광고할 때만 `reasoningEffort`로 넘긴다 — 카탈로그에서 빠진 값은 저장된 채 보내지 않는다.
+5. 완료 시 persist(신규 삽입 + head 이동, 또는 continue의 in-place append) — 신규 삽입은 그 프롬프트의 `loreTriggers`를 `messages.lore_triggers`에 함께 쓰고(없으면 null), continue는 쓰지 않는다 → **해금 평가**(§7.5) → `done` 이벤트 → **done 이후에** 배경 작업 스케줄.
 
 SSE 형식:
 ```
@@ -360,7 +383,7 @@ event: error   data: {"message":"..."}
 
 ### 7.5 해금 평가
 
-`unlocks.ts`. 배경 작업이 아니라 **턴의 일부**다 — 값싸고 동기적이며, 네 생성 경로가 공유하는 persist 직후 한 곳에서만 불린다(`generation.ts`의 `openUnlocks`).
+`unlocks.ts`. 배경 작업이 아니라 **턴의 일부**다 — 값싸고 동기적이며, 다섯 생성 경로가 공유하는 persist 직후 한 곳에서만 불린다(`generation.ts`의 `openUnlocks`).
 
 - 후보는 "이 플롯의 `unlock`이 걸린 에셋 − 이 챗이 이미 연 것"이다. **플롯 소유자의 챗은 후보가 비어 있다** — 자기 작품의 그림은 이미 전부 열려 있다(`assetLocks`).
 - 판정은 방금 영속된 assistant 텍스트에 대해 한다. keyword는 대소문자 무시 부분 문자열, turns는 현재 갈래의 assistant 깊이 ≥ count(그것을 기다리는 후보가 있을 때만 경로를 걷는다), relationship은 `chat.relationship.axes[axis] ≥ min`(axes가 null이면 언제나 거짓).
@@ -467,7 +490,8 @@ API는 `@shizue/contracts`의 스키마를 사용한다.
   라우터 통째로:  /api/comments   /api/personas   /api/notes
                   /api/chats      /api/messages   /api/notifications
   가드 없이 viewerId로 답함: /api/chatgpt(로그인 시작·콜백·상태, 로그아웃만 가드)
-                  /api/models(읽는 사람 계정의 모델, 비로그인은 [])
+                  /api/models(읽는 사람 계정의 모델, 비로그인은 [];
+                              광고하는 모델만 reasoningEfforts·defaultReasoningEffort)
   라우트별로:     /api/plots(본체 + 댓글)
                   /api/creators(팔로우 두 라우트만)
   가드 없음:      /api/explore
@@ -488,6 +512,8 @@ API는 `@shizue/contracts`의 스키마를 사용한다.
 /api/plots/:id/characters           로스터 목록 · 추가 · 재정렬(POST …/reorder)
 /api/plots/:id/characters/import    카드 파일 → 등장인물 한 명 추가(50MB)
 /api/plots/:id/characters/:cid      PATCH · DELETE · /avatar(업로드·삭제·서빙)
+/api/plots/:id/characters/:cid/export?format=json|png
+                                    소유자 전용 — 저장된 카드 + 플롯 오버레이를 V3 카드 파일로(첨부 다운로드)
 /api/plots/:id/assets[/:slug]       목록·서빙은 공개, 업로드·삭제·PATCH(해금 조건)는 소유자
 /api/explore                          공개 플롯 피드 (별도의 플롯 레일은 없다 — 탐색이 곧 플롯이다)
 /api/creators/:id                     그 크리에이터의 공개 플롯 그리드 + 팔로우 상태
@@ -495,6 +521,7 @@ API는 `@shizue/contracts`의 스키마를 사용한다.
 /api/notifications                    내 알림 목록(커서) · POST /read(전부 읽음)
 POST /api/chats {plotId, model, personaId?|profileId?, introIndex?}
 POST /api/chats/:id/suggest           답장 후보 3개 (§7.6)
+GET  /api/chats/:id/inspect           재생성이 지금 보낼 프롬프트의 리포트 — 작가 본인의 챗만 (아래)
 ```
 
 익명으로 200인 GET은 **공개 콘텐츠뿐**이다: `/api/explore`, `/api/creators/:id`, `/api/plots/:id/public`·`/cover`·`/assets*`·`/characters/:cid/avatar`·`/comments`. 나머지는 전부 401이다 — 모든 mutation(좋아요·댓글 작성·챗·업로드·CRUD), `/api/plots` 목록(내 것)과 소유자 뷰, 페르소나·노트.
@@ -509,9 +536,15 @@ POST /api/chats/:id/suggest           답장 후보 3개 (§7.6)
 
 산문이 필요한 계약만 여기 남긴다:
 
-**SSE 생성** — `POST /api/chats/:id/{messages,regenerate,continue,auto}` 넷뿐이다. 이벤트 형식과 실패 규약은 §7.2. 그 외 어떤 라우트도 SSE가 아니다.
+**SSE 생성** — `POST /api/chats/:id/{messages,regenerate,continue,auto,narrate}` 다섯뿐이다. 이벤트 형식과 실패 규약은 §7.2. 그 외 어떤 라우트도 SSE가 아니다. 다섯 모두 선택 필드 `focusCharacterIds: string[]`(다음 화자, §7.2)를 받는다 — `messages` 외의 넷은 바디가 없어도 되고, 오면 JSON 객체여야 한다. id는 플롯의 멤버이면서 **장면에 있는**(빠지지 않은) 멤버여야 하고 아니면 400 `invalid_request`다. 전송은 이 검사를 유저 턴을 쓰기 전에 하므로 거절된 전송은 아무것도 남기지 않는다.
+
+**장면 구성** — `PATCH /api/chats/:id {absentCharacterIds: string[] | null}`. 모든 id가 챗 플롯의 멤버여야 하고(플롯의 공개 여부와 무관하게 로스터로 판정 — 독자 자신의 설정이다) 아니면 400 `invalid_request`, 중복은 하나로 접고, 빈 배열과 `null`은 컬럼을 `null`로 둔다. 다른 챗 설정과 같은 핸들러라 생성 중이면 409다. 챗 JSON은 `absentCharacterIds`를 **언제나 배열로** 싣는다(null이면 `[]`) — 삭제된 멤버의 id가 남아 있을 수 있으므로 클라이언트는 다시 보낼 때 현재 로스터에 없는 id를 걸러 낸다.
+
+**프롬프트 인스펙터** — `GET /api/chats/:id/inspect`는 그 챗에서 **지금 재생성하면** 보낼 프롬프트를 `PromptReport`(§6)로 돌려준다. 재생성의 계획 빌더(`regeneratePlan`)를 그대로 쓰고 `inspectGeneration`으로 조립만 한다 — 슬롯을 잡지 않고, 모델을 부르지 않고, 아무것도 쓰지 않는다. 호출자가 **챗의 소유자이자 플롯의 소유자일 때만** 200이고, 그 밖에는 404다: 남의 플롯에서 연 내 챗은 작가의 글을, 내 플롯에서 남이 연 챗은 남의 대화를 보여 주게 되기 때문이다. 챗 상태 응답의 `isPlotOwner`(boolean)가 웹이 이 기능을 그릴지를 정한다.
 
 **스타일과 두 파생 기능** — `POST /api/plots`와 `PATCH /api/plots/:id`가 `style`을 받는다(객체 또는 `null`, 그 외 타입이면 400 `invalid_request`). 내용은 `coercePlotStyle`을 지나므로 모르는 열거값은 거부가 아니라 **삭제**되고, 남는 것이 없으면 컬럼은 `null`이 된다 — 내레이터와 같은 규약이다. 소유자 뷰는 `style`을 그대로 내고, 공개 뷰도 낸다(위). `PATCH /api/chats/:id`는 독자 몫의 `statusWindowEnabled`/`choicesEnabled`(boolean)를 받고 챗 상태에 그대로 실어 돌려준다 — 다른 챗 설정과 같은 핸들러이므로 **생성 중이면 409 `generation_in_progress`**다(위 §7.2의 슬롯 규약).
+
+**추론 강도** — `PATCH /api/chats/:id {reasoningEffort: string | null}`. 문자열은 챗 모델(같은 바디가 `model`도 바꾸면 **새 모델**)이 광고하는 목록에 있어야 하고, 아니면(광고가 없는 모델 포함) 400 `invalid_request`다. `null`은 지운다(모델 기본값). `model`만 바꾸면 저장된 값은 새 모델도 광고할 때만 남고 아니면 `null`이 된다. 챗 JSON은 `reasoningEffort`를 싣는다.
 
 **추천 프로필** — `POST /api/plots`·`PATCH /api/plots/:id`가 `profiles`를 받는다(배열 또는 `null`, 그 외 타입이면 400 `invalid_request`). 내용은 `coercePlotProfiles`를 지나므로 못 쓸 행은 거절이 아니라 삭제이고, 남는 것이 없으면 컬럼은 `null`이 된다 — 스타일·내레이터와 같은 규약이다. 소유자 뷰와 공개 뷰 모두 `profiles`를 **언제나 배열로** 낸다(컬럼이 null이어도 `[]`). `POST /api/chats`는 `personaId`와 `profileId`를 **동시에 받지 않는다**(둘 다 오면 400 `invalid_request`, 플롯에 없는 id면 404). `profileId`가 오면 서버가 그 프로필을 독자의 `personas`로 복사하고 챗은 그 새 행을 가리킨다 — **중복 제거는 하지 않는다**: 행 하나는 싸고, 같은 프로필로 연 두 대화는 독자가 서로 다르게 키워 갈 두 페르소나다.
 
@@ -588,11 +621,13 @@ POST /api/chats/:id/suggest           답장 후보 3개 (§7.6)
 
 `/characters*`·`/c/:id`·`/u/:id`는 **없다**. 리다이렉트도 두지 않았다 — 캐릭터 단위의 공개 주소가 가리킬 대상 자체가 사라졌기 때문이다.
 
-- **플롯 스튜디오**(`/{locale}/plots/:id`)의 섹션: 프로필(제목·소개·커버·태그·콘텐츠 언어·댓글 허용) · 세계관(모델용 설정) · **스타일**(아래) · 등장인물(카드 리스트 — 추가/카드로 추가/삭제/순서 이동, 최대 10, 각각 이름·아바타·독자 소개·설정·성격·예시 대화) · 도입부(최대 10, 발화 규약 힌트가 붙은 textarea) · **추천 프로필**(최대 5, 이름·소개 — 둘 다 유저 공개 배지) · 로어북 · 에셋(타일마다 해금 조건 편집기) · 커스텀 UI(표시 스크립트·기본 변수·컴포넌트 코드 + 프리뷰) · 공개 설정(세이프티·발행 토글) · 이 플롯과의 대화 목록.
+- **플롯 스튜디오**(`/{locale}/plots/:id`)의 섹션: 프로필(제목·소개·커버·태그·콘텐츠 언어·댓글 허용) · 세계관(모델용 설정) · **스타일**(아래) · 등장인물(카드 리스트 — 추가/카드로 추가/삭제/순서 이동, 최대 10, 각각 이름·아바타·독자 소개·설정·성격·예시 대화, 그리고 JSON·PNG **카드 내보내기** 링크 — 저장된 카드를 내보내는 라우트라 링크다) · 도입부(최대 10, 발화 규약 힌트가 붙은 textarea) · **추천 프로필**(최대 5, 이름·소개 — 둘 다 유저 공개 배지) · 로어북(월드 인포 **가져오기**는 파일의 엔트리를 편집 중인 로어북 뒤에 붙여 저장 버튼으로 커밋하고, **내보내기**는 지금 편집 중인 엔트리를 ST 월드 인포 JSON으로 내려받는다 — 둘 다 브라우저에서 `./world-info`로) · 에셋(타일마다 해금 조건 편집기) · 커스텀 UI(표시 스크립트·기본 변수·컴포넌트 코드 + 프리뷰) · 공개 설정(세이프티·발행 토글) · 이 플롯과의 대화 목록.
   - **스타일 섹션**(`PlotStyleEditor`)은 네 묶음이다: 문체(내레이터 문체·시점 · 시제 · 응답 길이 · 표현 방식) · 전개(속도 · 난이도) · 장르·연출(분위기 칩 최대 2 · 스토리텔링 8종) · 부가 기능(상태창 체크박스 · 선택지 3단). 옵션마다 **고른 것 하나의** 한 줄 가이드가 밑에 붙는다(여덟 줄을 늘어놓으면 고르는 화면이 읽는 화면이 된다). 분위기의 상한은 거절이 아니라 **자리를 비우는 방식**이다 — 세 번째를 고르면 가장 먼저 고른 것이 풀린다. 내레이터가 세계관이 아니라 여기 있는 이유는 문체와 시점도 "어떻게 쓸지"이기 때문이고, 저장은 플롯의 다른 필드와 같은 저장 버튼 하나다.
   - 저장 버튼 하나가 플롯 필드와 로스터의 카드를 **함께** 커밋한다(멤버 PATCH들 먼저, 그다음 플롯 PATCH, 응답을 에디터 상태로 채택). 반면 사진 업로드·로스터의 추가/삭제/순서·발행 토글은 **자기 요청이 곧 결과인 것들**이라 각각 즉시 서버에 간다 — 크리에이터가 결과를 봐야 하는 동작이고, 옆에서 쓰던 카드를 서버 사본으로 덮어쓰지 않는다.
 - `(app)` 레이아웃은 세션과 무관하게 헤더·본문·모바일 탭바를 렌더한다(공개: `/`, `/p/:id`, `/creators/:id`, `/explore`). 세션 필수 페이지는 하위 `(app)/(member)` 그룹이고, 그 레이아웃이 없으면 `/login?next=<경로>`로 보낸다. `(auth)` 레이아웃은 로케일 스위처만 단다.
-- 챗 화면 구성: 메시지 목록(마크다운 + `*지문*`, raw HTML 비활성), 스트리밍 렌더(fetch + ReadableStream SSE 파싱), 마지막 assistant에 스와이프 ◀ n/N ▶ · 재생성 · 이어쓰기 · 이어가기(auto) · 나레이션, hover 수정, 상단에 플롯으로 돌아가는 링크와 모델·프리셋·페르소나 셀렉트, `ChatPanel`(등장인물 목록·유저노트·첨부 노트·기억 요약과 설정·내레이터 오버라이드·**플롯 기능 토글**·관계 게이지·커스텀 UI 토글·컴포넌트 턴 동의).
+- 챗 화면 구성: 메시지 목록(마크다운 + `*지문*`, raw HTML 비활성), 스트리밍 렌더(fetch + ReadableStream SSE 파싱 — 요청이 열린 뒤 첫 글자가 보이기 전까지 생성 중인 말풍선은 "생각 중… N초"를 초 단위로 센다. 추론 내용은 요청하지도 보여 주지도 않는다), 마지막 assistant에 스와이프 ◀ n/N ▶ · 재생성 · 이어쓰기 · 이어가기(auto) · 나레이션, hover 수정, 상단에 플롯으로 돌아가는 링크와 모델·추론 강도(모델이 광고할 때만 — "기본"은 `null`, 아는 단어만 번역하고 나머지는 그대로)·프리셋·페르소나 셀렉트, `ChatPanel`(등장인물 목록과 멤버별 장면에서 빼기/돌아오기·유저노트·첨부 노트·기억 요약과 설정·내레이터 오버라이드·**플롯 기능 토글**·관계 게이지·커스텀 UI 토글·컴포넌트 턴 동의·작가 전용 프롬프트 보기).
+- **다음 화자 픽커**(`FocusPicker`): 장면에 있는 멤버가 둘 이상일 때만 작성 모드 칩 줄에 선다. 고른 멤버는 다음 전송·재생성·이어가기(auto) 하나에 `focusCharacterIds`로 실리고, 그 응답이 `done`으로 끝나면 비워진다 — 실패한 응답은 고른 것을 남겨 두어 다시 시도가 같은 것을 다시 요청한다. 이어쓰기·나레이션에는 실리지 않는다(고를 화자가 없다). 장면에서 빠진 멤버는 목록에도 요청에도 없다.
+- **프롬프트 보기**(`PromptInspector`, `prompt-inspector`): 챗 상태의 `isPlotOwner`가 참일 때만 패널 맨 아래에 선다. 열 때(그리고 새로고침할 때)만 `GET /:id/inspect`를 읽는다 — 디버깅 도구이고 매번 프롬프트 전체를 조립하는 비용이 든다. 예산 막대(왼쪽부터 사용량, 오른쪽 끝에 응답 몫), 히스토리·예시 대화 포함 개수, 블록 목록(종류·토큰·펼치면 원문, 이어진 히스토리 턴은 한 줄로 접힌다), 발동한 로어(출처·위치·경위·키)를 보여 준다.
 - **발화 렌더**: 어시스턴트 메시지는 `parseAssistantSpeech(content, roster)`(§6)로 잘려 한 메시지 안에서 화자가 갈린다. 내레이터 구간은 아바타도 이름도 없이 전폭·기울임으로 "대사 바깥"에 서고(`data-testid="speech-narration"`), 등장인물 구간은 로스터에서 찾은 아바타와 이름을 머리에 달고 그 아래 대사가 온다(`data-testid="speech-character"` + `data-speaker`). 인물 줄 안의 `*…*`는 마크다운 강조로 되돌려 넣어 그 인물의 블록 안에서 상황묘사로 그려진다 — `안녕 *웃으며* 반가워`는 한 문장이지 세 덩어리가 아니기 때문이다. 로스터가 비었거나(플롯 읽기 전, 등장인물이 없는 작품) 유저 턴이면 예전처럼 한 덩어리로 그린다.
 - **스타일 배지**(`/p/:id`, `PlotStyleBadges`): 태그 줄 아래에 분위기 → 난이도 → 전개 속도 → 시점 순으로, **기본값이 아닌 것만** 조용한 칩으로 선다(`보통 난이도` 칩은 읽고 나서야 읽을 것이 없었음을 아는 칩이다). 태그가 "무엇에 관한 이야기인지"라면 이쪽은 "어떻게 쓰인 이야기인지"다. 열거값만 나가므로 지시문 텍스트는 여기 실리지 않는다.
 - **상태창·선택지 렌더**(`MessageRow`): 메시지 하나에서 `extractChoices` → `extractStatusBlock` → 기존 파이프라인(`MessageBody`) 순으로 읽는다. 순서가 규약이다(§6) — 선택지를 먼저 떼야 상태창 펜스가 턴의 끝이 된다.

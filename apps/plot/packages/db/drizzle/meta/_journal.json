@@ -5,22 +5,8 @@
     {
       "idx": 0,
       "version": "7",
-      "when": 1791473956149,
+      "when": 1791528233601,
       "tag": "0000_character_chat",
-      "breakpoints": true
-    },
-    {
-      "idx": 1,
-      "version": "7",
-      "when": 1791507342985,
-      "tag": "0001_hosted_chatgpt",
-      "breakpoints": true
-    },
-    {
-      "idx": 2,
-      "version": "7",
-      "when": 1791511380524,
-      "tag": "0002_plot_rename",
       "breakpoints": true
     }
   ]

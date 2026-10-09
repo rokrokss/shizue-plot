@@ -3,7 +3,7 @@
 import { useTranslations } from 'next-intl';
 import { useEffect, useState } from 'react';
 import { Link, useRouter } from '@/i18n/navigation';
-import { apiGet, apiSend } from '@/lib/api';
+import { apiGet, apiSend, timeZoneHeaders } from '@/lib/api';
 import { useSession } from '@/lib/authClient';
 import { signInHref } from '@/lib/nav';
 import type { ChatState, ModelInfo, Persona, PlotProfile } from '@/lib/types';
@@ -69,14 +69,21 @@ export function StartChatPanel({
     setBusy(true);
     setError('');
     try {
-      const state = await apiSend<ChatState>('POST', '/api/chats', {
-        plotId,
-        model,
-        ...(introIndex !== undefined ? { introIndex } : {}),
-        // The server refuses both at once, and the picker above never sets both:
-        // a profile wins, and choosing a persona is what gives it up.
-        ...(profileId ? { profileId } : personaId ? { personaId } : {}),
-      });
+      const state = await apiSend<ChatState>(
+        'POST',
+        '/api/chats',
+        {
+          plotId,
+          model,
+          ...(introIndex !== undefined ? { introIndex } : {}),
+          // The server refuses both at once, and the picker above never sets both:
+          // a profile wins, and choosing a persona is what gives it up.
+          ...(profileId ? { profileId } : personaId ? { personaId } : {}),
+        },
+        undefined,
+        // The openings are expanded now, so their clock macros read the reader's zone.
+        timeZoneHeaders(),
+      );
       router.push(`/chats/${state.chat.id}`);
     } catch (caught) {
       setError(toMessage(caught));

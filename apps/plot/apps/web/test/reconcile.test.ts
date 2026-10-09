@@ -38,6 +38,8 @@ const state = (head: string | null, path: ChatMessage[]): ChatState => ({
     allowComponentTurns: false,
     statusWindowEnabled: true,
     choicesEnabled: true,
+    reasoningEffort: null,
+    absentCharacterIds: [],
     noteIds: [],
     createdAt: '2026-08-05T00:00:00.000Z',
     updatedAt: '2026-08-05T00:00:00.000Z',

@@ -378,7 +378,8 @@ export const chats = pgTable(
     personaId: uuid('persona_id').references(() => personas.id, { onDelete: 'set null' }),
     title: text('title').notNull().default(''),
     model: text('model').notNull(),
-    // Author's note: per-chat instruction injected right before the history.
+    // Author's note: per-chat instruction injected four messages from the end of
+    // the history (`AUTHOR_NOTE_DEPTH`).
     note: text('note').notNull().default(''),
     // Prompt preset id (see @shizue/core presets); unknown values fall back to the default.
     preset: text('preset').notNull().default('standard'),
@@ -406,6 +407,12 @@ export const chats = pgTable(
     // status window carries a true nobody ever sees.
     statusWindowEnabled: boolean('status_window_enabled').notNull().default(true),
     choicesEnabled: boolean('choices_enabled').notNull().default(true),
+    // Roster members the reader sent off the stage: their cards leave the prompt
+    // until they are brought back. Null (or empty) means the whole roster is on.
+    absentCharacterIds: jsonb('absent_character_ids').$type<string[]>(),
+    // Reasoning effort the reader asked for. Null sends none and leaves the model
+    // at its default; a value is only sent where the model advertises it.
+    reasoningEffort: text('reasoning_effort'),
     // The generation claim: when a turn is being generated on this chat, and null
     // when none is. It lives in the row rather than in a process so several API
     // instances see the same answer; the stream renews it while it runs, and a
@@ -436,6 +443,9 @@ export const messages = pgTable(
     // about it. Injected into the prompt only while the turn is the last one, and
     // never rendered as message text.
     directions: text('directions'),
+    // Lore entries (by `loreEntryKey`) that freshly triggered for the prompt this
+    // assistant turn was generated from. Timed effects read the branch's records.
+    loreTriggers: jsonb('lore_triggers').$type<string[]>(),
     model: text('model'),
     promptTokens: integer('prompt_tokens'),
     completionTokens: integer('completion_tokens'),

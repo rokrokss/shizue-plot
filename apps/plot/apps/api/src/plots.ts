@@ -41,7 +41,15 @@ export const toPromptPlot = (plot: Plot, chat: Chat): PromptPlot => ({
 /**
  * The roster as the assembler reads it. The name is the row's rather than the
  * card's: it is the speaker prefix the script protocol matches, so the name the
- * model is taught to write has to be the name the parser looks for.
+ * model is taught to write has to be the name the parser looks for. `absent` are
+ * the ids a chat sent off the stage; an id no member has any more matches nothing.
  */
-export const toPromptCharacters = (members: Character[]): PromptCharacter[] =>
-  members.map((member) => ({ name: member.name, card: member.card }));
+export const toPromptCharacters = (
+  members: Character[],
+  absent: ReadonlySet<string> = new Set(),
+): PromptCharacter[] =>
+  members.map((member) => ({
+    name: member.name,
+    card: member.card,
+    ...(absent.has(member.id) ? { absent: true } : {}),
+  }));

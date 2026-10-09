@@ -11,6 +11,7 @@ CREATE TABLE "account" (
 	"refresh_token_expires_at" timestamp with time zone,
 	"scope" text,
 	"password" text,
+	"client_id" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
@@ -49,7 +50,7 @@ CREATE TABLE "verification" (
 --> statement-breakpoint
 CREATE TABLE "characters" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
-	"story_id" uuid NOT NULL,
+	"plot_id" uuid NOT NULL,
 	"name" text NOT NULL,
 	"card" jsonb NOT NULL,
 	"avatar_path" text,
@@ -86,7 +87,7 @@ CREATE TABLE "chat_note_links" (
 CREATE TABLE "chats" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"user_id" text NOT NULL,
-	"story_id" uuid NOT NULL,
+	"plot_id" uuid NOT NULL,
 	"persona_id" uuid,
 	"title" text DEFAULT '' NOT NULL,
 	"model" text NOT NULL,
@@ -102,6 +103,8 @@ CREATE TABLE "chats" (
 	"allow_component_turns" boolean DEFAULT false NOT NULL,
 	"status_window_enabled" boolean DEFAULT true NOT NULL,
 	"choices_enabled" boolean DEFAULT true NOT NULL,
+	"absent_character_ids" jsonb,
+	"reasoning_effort" text,
 	"generating_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
@@ -109,7 +112,7 @@ CREATE TABLE "chats" (
 --> statement-breakpoint
 CREATE TABLE "comments" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
-	"story_id" uuid NOT NULL,
+	"plot_id" uuid NOT NULL,
 	"user_id" text NOT NULL,
 	"parent_id" uuid,
 	"content" text NOT NULL,
@@ -145,20 +148,10 @@ CREATE TABLE "jobs" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "ledger_entries" (
-	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
-	"user_id" text NOT NULL,
-	"delta" integer NOT NULL,
-	"balance_after" integer NOT NULL,
-	"kind" text NOT NULL,
-	"ref" text,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
-);
---> statement-breakpoint
 CREATE TABLE "memories" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"user_id" text NOT NULL,
-	"story_id" uuid NOT NULL,
+	"plot_id" uuid NOT NULL,
 	"chat_id" uuid NOT NULL,
 	"content" text NOT NULL,
 	"embedding" vector(1536),
@@ -174,6 +167,7 @@ CREATE TABLE "messages" (
 	"content" text NOT NULL,
 	"source" text DEFAULT 'user' NOT NULL,
 	"directions" text,
+	"lore_triggers" jsonb,
 	"model" text,
 	"prompt_tokens" integer,
 	"completion_tokens" integer,
@@ -185,10 +179,10 @@ CREATE TABLE "notifications" (
 	"user_id" text NOT NULL,
 	"kind" text NOT NULL,
 	"actor_id" text,
-	"story_id" uuid,
+	"plot_id" uuid,
 	"read_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "notifications_user_id_story_id_kind_key" UNIQUE("user_id","story_id","kind")
+	CONSTRAINT "notifications_user_id_plot_id_kind_key" UNIQUE("user_id","plot_id","kind")
 );
 --> statement-breakpoint
 CREATE TABLE "personas" (
@@ -199,7 +193,28 @@ CREATE TABLE "personas" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "stories" (
+CREATE TABLE "plot_assets" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"plot_id" uuid NOT NULL,
+	"slug" text NOT NULL,
+	"path" text NOT NULL,
+	"mime" text NOT NULL,
+	"width" integer,
+	"height" integer,
+	"thumbhash" text,
+	"unlock" jsonb,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "plot_assets_plot_id_slug_key" UNIQUE("plot_id","slug")
+);
+--> statement-breakpoint
+CREATE TABLE "plot_likes" (
+	"user_id" text NOT NULL,
+	"plot_id" uuid NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "plot_likes_user_id_plot_id_pk" PRIMARY KEY("user_id","plot_id")
+);
+--> statement-breakpoint
+CREATE TABLE "plots" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"owner_id" text NOT NULL,
 	"name" text NOT NULL,
@@ -224,27 +239,6 @@ CREATE TABLE "stories" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "story_assets" (
-	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
-	"story_id" uuid NOT NULL,
-	"slug" text NOT NULL,
-	"path" text NOT NULL,
-	"mime" text NOT NULL,
-	"width" integer,
-	"height" integer,
-	"thumbhash" text,
-	"unlock" jsonb,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "story_assets_story_id_slug_key" UNIQUE("story_id","slug")
-);
---> statement-breakpoint
-CREATE TABLE "story_likes" (
-	"user_id" text NOT NULL,
-	"story_id" uuid NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "story_likes_user_id_story_id_pk" PRIMARY KEY("user_id","story_id")
-);
---> statement-breakpoint
 CREATE TABLE "user_notes" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"user_id" text NOT NULL,
@@ -255,61 +249,53 @@ CREATE TABLE "user_notes" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "wallets" (
-	"user_id" text PRIMARY KEY NOT NULL,
-	"balance" integer DEFAULT 0 NOT NULL
-);
---> statement-breakpoint
 ALTER TABLE "account" ADD CONSTRAINT "account_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "session" ADD CONSTRAINT "session_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "characters" ADD CONSTRAINT "characters_story_id_stories_id_fk" FOREIGN KEY ("story_id") REFERENCES "public"."stories"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "characters" ADD CONSTRAINT "characters_plot_id_plots_id_fk" FOREIGN KEY ("plot_id") REFERENCES "public"."plots"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "chat_asset_unlocks" ADD CONSTRAINT "chat_asset_unlocks_chat_id_chats_id_fk" FOREIGN KEY ("chat_id") REFERENCES "public"."chats"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "chat_asset_unlocks" ADD CONSTRAINT "chat_asset_unlocks_asset_id_story_assets_id_fk" FOREIGN KEY ("asset_id") REFERENCES "public"."story_assets"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "chat_asset_unlocks" ADD CONSTRAINT "chat_asset_unlocks_asset_id_plot_assets_id_fk" FOREIGN KEY ("asset_id") REFERENCES "public"."plot_assets"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "chat_attachments" ADD CONSTRAINT "chat_attachments_chat_id_chats_id_fk" FOREIGN KEY ("chat_id") REFERENCES "public"."chats"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "chat_attachments" ADD CONSTRAINT "chat_attachments_message_id_messages_id_fk" FOREIGN KEY ("message_id") REFERENCES "public"."messages"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "chat_note_links" ADD CONSTRAINT "chat_note_links_chat_id_chats_id_fk" FOREIGN KEY ("chat_id") REFERENCES "public"."chats"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "chat_note_links" ADD CONSTRAINT "chat_note_links_note_id_user_notes_id_fk" FOREIGN KEY ("note_id") REFERENCES "public"."user_notes"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "chats" ADD CONSTRAINT "chats_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "chats" ADD CONSTRAINT "chats_story_id_stories_id_fk" FOREIGN KEY ("story_id") REFERENCES "public"."stories"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "chats" ADD CONSTRAINT "chats_plot_id_plots_id_fk" FOREIGN KEY ("plot_id") REFERENCES "public"."plots"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "chats" ADD CONSTRAINT "chats_persona_id_personas_id_fk" FOREIGN KEY ("persona_id") REFERENCES "public"."personas"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "comments" ADD CONSTRAINT "comments_story_id_stories_id_fk" FOREIGN KEY ("story_id") REFERENCES "public"."stories"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "comments" ADD CONSTRAINT "comments_plot_id_plots_id_fk" FOREIGN KEY ("plot_id") REFERENCES "public"."plots"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "comments" ADD CONSTRAINT "comments_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "follows" ADD CONSTRAINT "follows_follower_id_user_id_fk" FOREIGN KEY ("follower_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "follows" ADD CONSTRAINT "follows_creator_id_user_id_fk" FOREIGN KEY ("creator_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "ledger_entries" ADD CONSTRAINT "ledger_entries_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "memories" ADD CONSTRAINT "memories_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "memories" ADD CONSTRAINT "memories_story_id_stories_id_fk" FOREIGN KEY ("story_id") REFERENCES "public"."stories"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "memories" ADD CONSTRAINT "memories_plot_id_plots_id_fk" FOREIGN KEY ("plot_id") REFERENCES "public"."plots"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "memories" ADD CONSTRAINT "memories_chat_id_chats_id_fk" FOREIGN KEY ("chat_id") REFERENCES "public"."chats"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "messages" ADD CONSTRAINT "messages_chat_id_chats_id_fk" FOREIGN KEY ("chat_id") REFERENCES "public"."chats"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "notifications" ADD CONSTRAINT "notifications_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "notifications" ADD CONSTRAINT "notifications_actor_id_user_id_fk" FOREIGN KEY ("actor_id") REFERENCES "public"."user"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "notifications" ADD CONSTRAINT "notifications_story_id_stories_id_fk" FOREIGN KEY ("story_id") REFERENCES "public"."stories"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "notifications" ADD CONSTRAINT "notifications_plot_id_plots_id_fk" FOREIGN KEY ("plot_id") REFERENCES "public"."plots"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "personas" ADD CONSTRAINT "personas_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "stories" ADD CONSTRAINT "stories_owner_id_user_id_fk" FOREIGN KEY ("owner_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "story_assets" ADD CONSTRAINT "story_assets_story_id_stories_id_fk" FOREIGN KEY ("story_id") REFERENCES "public"."stories"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "story_likes" ADD CONSTRAINT "story_likes_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "story_likes" ADD CONSTRAINT "story_likes_story_id_stories_id_fk" FOREIGN KEY ("story_id") REFERENCES "public"."stories"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "plot_assets" ADD CONSTRAINT "plot_assets_plot_id_plots_id_fk" FOREIGN KEY ("plot_id") REFERENCES "public"."plots"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "plot_likes" ADD CONSTRAINT "plot_likes_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "plot_likes" ADD CONSTRAINT "plot_likes_plot_id_plots_id_fk" FOREIGN KEY ("plot_id") REFERENCES "public"."plots"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "plots" ADD CONSTRAINT "plots_owner_id_user_id_fk" FOREIGN KEY ("owner_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "user_notes" ADD CONSTRAINT "user_notes_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "wallets" ADD CONSTRAINT "wallets_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-CREATE INDEX "characters_story_id_idx" ON "characters" USING btree ("story_id","order_index");--> statement-breakpoint
+CREATE UNIQUE INDEX "account_provider_account_idx" ON "account" USING btree ("provider_id","account_id");--> statement-breakpoint
+CREATE INDEX "characters_plot_id_idx" ON "characters" USING btree ("plot_id","order_index");--> statement-breakpoint
 CREATE INDEX "chat_attachments_chat_id_idx" ON "chat_attachments" USING btree ("chat_id");--> statement-breakpoint
 CREATE INDEX "chat_attachments_message_id_idx" ON "chat_attachments" USING btree ("message_id");--> statement-breakpoint
 CREATE INDEX "chats_user_id_idx" ON "chats" USING btree ("user_id");--> statement-breakpoint
-CREATE INDEX "chats_story_id_idx" ON "chats" USING btree ("story_id");--> statement-breakpoint
-CREATE INDEX "comments_story_id_idx" ON "comments" USING btree ("story_id","created_at" DESC NULLS LAST,"id" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX "chats_plot_id_idx" ON "chats" USING btree ("plot_id");--> statement-breakpoint
+CREATE INDEX "comments_plot_id_idx" ON "comments" USING btree ("plot_id","created_at" DESC NULLS LAST,"id" DESC NULLS LAST);--> statement-breakpoint
 CREATE INDEX "comments_parent_id_idx" ON "comments" USING btree ("parent_id");--> statement-breakpoint
 CREATE INDEX "feed_cursors_updated_at_idx" ON "feed_cursors" USING btree ("updated_at");--> statement-breakpoint
 CREATE INDEX "follows_creator_id_idx" ON "follows" USING btree ("creator_id","created_at" DESC NULLS LAST);--> statement-breakpoint
 CREATE INDEX "jobs_claim_idx" ON "jobs" USING btree ("status","run_at");--> statement-breakpoint
-CREATE INDEX "ledger_entries_history_idx" ON "ledger_entries" USING btree ("user_id","created_at" DESC NULLS LAST,"id" DESC NULLS LAST);--> statement-breakpoint
-CREATE INDEX "ledger_entries_ref_idx" ON "ledger_entries" USING btree ("user_id","kind","ref");--> statement-breakpoint
 CREATE INDEX "memories_chat_id_idx" ON "memories" USING btree ("chat_id");--> statement-breakpoint
 CREATE INDEX "messages_chat_id_idx" ON "messages" USING btree ("chat_id");--> statement-breakpoint
 CREATE INDEX "messages_parent_id_idx" ON "messages" USING btree ("parent_id");--> statement-breakpoint
 CREATE INDEX "notifications_user_id_idx" ON "notifications" USING btree ("user_id","created_at" DESC NULLS LAST,"id" DESC NULLS LAST);--> statement-breakpoint
-CREATE INDEX "stories_explore_recent_idx" ON "stories" USING btree ("visibility","language","published_at" DESC NULLS LAST,"id" DESC NULLS LAST);--> statement-breakpoint
-CREATE INDEX "stories_explore_likes_idx" ON "stories" USING btree ("visibility","language","like_count" DESC NULLS LAST,"id" DESC NULLS LAST);--> statement-breakpoint
-CREATE INDEX "stories_explore_chats_idx" ON "stories" USING btree ("visibility","language","chat_count" DESC NULLS LAST,"id" DESC NULLS LAST);--> statement-breakpoint
-CREATE INDEX "stories_tags_idx" ON "stories" USING gin ("tags");--> statement-breakpoint
-CREATE INDEX "story_likes_story_id_idx" ON "story_likes" USING btree ("story_id","created_at");--> statement-breakpoint
+CREATE INDEX "plot_likes_plot_id_idx" ON "plot_likes" USING btree ("plot_id","created_at");--> statement-breakpoint
+CREATE INDEX "plots_explore_recent_idx" ON "plots" USING btree ("visibility","language","published_at" DESC NULLS LAST,"id" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX "plots_explore_likes_idx" ON "plots" USING btree ("visibility","language","like_count" DESC NULLS LAST,"id" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX "plots_explore_chats_idx" ON "plots" USING btree ("visibility","language","chat_count" DESC NULLS LAST,"id" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX "plots_tags_idx" ON "plots" USING gin ("tags");--> statement-breakpoint
 CREATE INDEX "user_notes_user_id_idx" ON "user_notes" USING btree ("user_id");

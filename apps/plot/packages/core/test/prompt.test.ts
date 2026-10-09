@@ -9,8 +9,11 @@ import {
   PRESET_IDS,
   PRESETS,
 } from '../src/presets.js';
+import { loreEntryKey } from '../src/lorebook.js';
 import {
+  absentCastLine,
   assemblePrompt,
+  AUTHOR_NOTE_DEPTH,
   characterHeader,
   DEFAULT_USER_NAME,
   exampleHeader,
@@ -678,12 +681,17 @@ describe('assemblePrompt - depth lore', () => {
 
 describe('assemblePrompt - author note', () => {
   const authorNote = '{{user}}는 지금 초조하다.';
+  const longer: HistoryMessage[] = [
+    ...history,
+    { role: 'assistant', content: '다섯 번째 캐릭터 발화입니다.' },
+    { role: 'user', content: '여섯 번째 유저 발화입니다.' },
+  ];
 
-  it('places the note after the examples and before the history', () => {
+  it(`sits ${AUTHOR_NOTE_DEPTH} messages from the end of the history`, () => {
     const { messages } = assemblePrompt({
       plot,
       characters: [aria],
-      history,
+      history: longer,
       preset,
       userName: '민준',
       authorNote,
@@ -691,8 +699,65 @@ describe('assemblePrompt - author note', () => {
     expect(messages.map((m) => m.content)).toEqual([
       `${exampleHeader('아리아')}\n민준: 예시 질문 하나\n아리아: 예시 답변 하나`,
       `${exampleHeader('아리아')}\n민준: 예시 질문 둘\n아리아: 예시 답변 둘`,
+      ...longer.slice(0, 2).map((m) => m.content),
       '민준는 지금 초조하다.',
-      ...history.map((m) => m.content),
+      ...longer.slice(2).map((m) => m.content),
+      'POST',
+    ]);
+    expect(messages.find((m) => m.content === '민준는 지금 초조하다.')?.role).toBe('system');
+  });
+
+  it('follows the depth lore that shares its slot, and clamps to the start of a short history', () => {
+    const { messages } = assemblePrompt({
+      plot,
+      characters: [
+        {
+          name: '아리아',
+          card: { ...bareCard, lorebook: [loreEntry({ content: 'DEPTH4', depth: AUTHOR_NOTE_DEPTH })] },
+        },
+      ],
+      history: longer,
+      preset,
+      userName: '민준',
+      authorNote,
+    });
+    expect(messages.map((m) => m.content).slice(1, 5)).toEqual([
+      longer[1]!.content,
+      'DEPTH4',
+      '민준는 지금 초조하다.',
+      longer[2]!.content,
+    ]);
+
+    const short = assemblePrompt({
+      plot,
+      characters: [bareAria],
+      history: history.slice(-2),
+      preset,
+      userName: '민준',
+      authorNote,
+    });
+    expect(short.messages.map((m) => m.content)).toEqual([
+      '민준는 지금 초조하다.',
+      ...history.slice(-2).map((m) => m.content),
+      'POST',
+    ]);
+  });
+
+  it('counts trailing turns like depth lore does', () => {
+    const { messages } = assemblePrompt({
+      plot,
+      characters: [bareAria],
+      history: longer.slice(0, -1),
+      preset,
+      userName: '민준',
+      authorNote,
+      trailingTurns: 1,
+    });
+    // With the partial re-attached last, the note is still four from the end.
+    expect(messages.map((m) => m.content)).toEqual([
+      ...longer.slice(0, 2).map((m) => m.content),
+      '민준는 지금 초조하다.',
+      ...longer.slice(2, -1).map((m) => m.content),
       'POST',
     ]);
   });
@@ -727,6 +792,243 @@ describe('assemblePrompt - author note', () => {
       authorNote,
     });
     expect(messages.map((m) => m.content)).toEqual([note, history[3]!.content, 'POST']);
+  });
+});
+
+describe('assemblePrompt - old status windows and choices', () => {
+  const status = (place: string) => `\`\`\`status\n위치: ${place}\n\`\`\``;
+  const stated: HistoryMessage[] = [
+    { role: 'assistant', content: `첫 장면.\n\n${status('왕궁')}\n\n>> 문을 연다\n>> 돌아선다` },
+    { role: 'user', content: `>> 이건 유저의 글\n${status('유저가 쓴 블록')}` },
+    { role: 'assistant', content: `둘째 장면.\n\n${status('정원')}` },
+    { role: 'user', content: '정원을 걷는다.' },
+  ];
+  const assembleStated = (lorebook: LoreEntry[] = []) =>
+    assemblePrompt({
+      plot,
+      characters: [{ name: '아리아', card: { ...bareCard, lorebook } }],
+      history: stated,
+      preset,
+      userName: '민준',
+    });
+
+  it('sends only the newest assistant turn with its state, and user turns untouched', () => {
+    expect(assembleStated().messages.map((m) => m.content)).toEqual([
+      '첫 장면.',
+      stated[1]!.content,
+      stated[2]!.content,
+      stated[3]!.content,
+      'POST',
+    ]);
+  });
+
+  it('still scans the stripped state for lore', () => {
+    const { system, messages } = assembleStated([
+      loreEntry({ content: '왕궁의 비밀', constant: false, keys: ['왕궁'] }),
+    ]);
+    expect(system).toContain('왕궁의 비밀');
+    expect(promptText(messages[0]!.content)).toBe('첫 장면.');
+  });
+
+  it('keeps a turn whole when its state is all it says', () => {
+    const { messages } = assemblePrompt({
+      plot,
+      characters: [bareAria],
+      history: [{ role: 'assistant', content: status('왕궁') }, ...stated.slice(2)],
+      preset,
+      userName: '민준',
+    });
+    expect(messages[0]!.content).toBe(status('왕궁'));
+  });
+});
+
+describe('assemblePrompt - clock, seed and lore records', () => {
+  const now = new Date('2026-01-02T23:30:00Z');
+  const clock = { now, timeZone: 'Asia/Seoul', locale: 'ko' as const, idleMs: 3 * 86_400_000 };
+
+  it('expands the time macros everywhere the plot macros reach', () => {
+    const { system, messages } = assemblePrompt({
+      plot: { ...plot, description: '오늘은 {{weekday}}.' },
+      characters: [{ name: '아리아', card: { ...bareCard, description: '{{char}}는 {{idle_duration}} 기다렸다.' } }],
+      history,
+      preset,
+      userName: '민준',
+      authorNote: '{{pick::하나}}',
+      clock,
+      seed: 'chat',
+    });
+    expect(system).toContain('오늘은 토요일.');
+    expect(system).toContain('아리아는 3일 기다렸다.');
+    expect(messages.map((m) => m.content)).toContain('하나');
+  });
+
+  it('returns the keys that freshly triggered and honours the records it is given', () => {
+    const sticky = loreEntry({ content: 'STICKY', constant: false, keys: ['없는 말'], sticky: 3 });
+    const fresh = loreEntry({ content: 'FRESH', insertionOrder: 1 });
+    const result = assemblePrompt({
+      plot: { ...plot, lorebook: [sticky, fresh] },
+      characters: [bareAria],
+      history,
+      preset,
+      userName: '민준',
+      loreState: { chatLength: 6, lastTriggered: { [loreEntryKey(sticky)]: 4 } },
+    });
+    expect(result.system).toContain('STICKY');
+    expect(result.loreTriggers).toEqual([loreEntryKey(fresh)]);
+  });
+});
+
+describe('assemblePrompt - scene cast', () => {
+  const minsu: PromptCharacter = {
+    name: '민수',
+    card: {
+      ...card,
+      description: '여관 주인.',
+      mesExample: '<START>\n{{char}}: MINSU EXAMPLE',
+      lorebook: [loreEntry({ content: 'MINSU LORE' })],
+    },
+  };
+
+  it("takes an absent member's block, examples and lorebook out, and names them once", () => {
+    const { system, messages } = assemblePrompt({
+      plot,
+      characters: [aria, { ...minsu, absent: true }],
+      history,
+      preset,
+      userName: '민준',
+    });
+    expect(system).not.toContain(characterHeader('민수'));
+    expect(system).not.toContain('MINSU LORE');
+    expect(messages.map((m) => promptText(m.content)).join('\n')).not.toContain('MINSU EXAMPLE');
+    // Right behind the members who are still on the stage.
+    expect(system).toBe([('MAIN'), NARRATION_NOTE, PLOT_BLOCK, ARIA_BLOCK, absentCastLine(['민수'])].join('\n\n'));
+  });
+
+  it('keeps an absent first member standing in for the work', () => {
+    const { system } = assemblePrompt({
+      plot,
+      characters: [
+        { ...minsu, card: { ...minsu.card, systemPrompt: 'WORK PROMPT' }, absent: true },
+        aria,
+      ],
+      history,
+      preset,
+      userName: '민준',
+    });
+    expect(system.startsWith('WORK PROMPT')).toBe(true);
+    expect(system).toContain(ARIA_BLOCK);
+  });
+});
+
+describe('assemblePrompt - report', () => {
+  it('is only measured when asked for', () => {
+    expect(assemble(100_000).report).toBeUndefined();
+  });
+
+  it('lists every block in the order the model reads it, and what the budget gave out', () => {
+    const result = assemblePrompt({
+      plot: { ...plot, lorebook: [loreEntry({ content: 'DEPTH LORE', depth: 1 })] },
+      characters: [aria, { name: '민수', card: bareCard, absent: true }],
+      history,
+      preset,
+      userName: '민준',
+      personaText: '검객.',
+      authorNote: 'NOTE',
+      directions: 'RULING',
+      report: true,
+    });
+    const report = result.report!;
+    const systemBlocks = report.blocks.slice(0, report.blocks.length - result.messages.length);
+    const messageBlocks = report.blocks.slice(systemBlocks.length);
+
+    expect(systemBlocks.map((block) => block.kind)).toEqual([
+      'main',
+      'narration_note',
+      'plot',
+      'character',
+      'absent_cast',
+      'persona',
+    ]);
+    expect(systemBlocks.map((block) => block.text).join('\n\n')).toBe(result.system);
+    expect(systemBlocks[3]!.label).toBe('아리아');
+    // One block per message, in the same order and with the same text.
+    expect(messageBlocks.map((block) => block.text)).toEqual(result.messages.map((m) => promptText(m.content)));
+    expect(messageBlocks.map((block) => block.kind)).toEqual([
+      'directions',
+      'examples',
+      'examples',
+      'author_note',
+      'history',
+      'history',
+      'history',
+      'depth_lore',
+      'history',
+      'post_history',
+    ]);
+    expect(messageBlocks[1]!.label).toBe('아리아');
+    expect(messageBlocks[7]!.label).toBe('depth 1');
+
+    expect(report.history).toEqual({ included: 4, total: 4 });
+    expect(report.examples).toEqual({ included: 2, total: 2 });
+    expect(report.totals).toEqual({
+      contextBudget: 16000,
+      responseReserve: 1200,
+      used:
+        countTokens(result.system) +
+        result.messages.reduce((sum, m) => sum + countTokens(promptText(m.content)), 0),
+    });
+  });
+
+  it('says where each activated entry came from, where it went and why', () => {
+    const constant = loreEntry({ content: 'PLOT CONSTANT', insertionOrder: 0 });
+    const keyed = loreEntry({
+      content: `KEYED 열쇠 ${'가'.repeat(100)}`,
+      constant: false,
+      keys: ['인사말'],
+      depth: 2,
+      insertionOrder: 1,
+    });
+    const recursive = loreEntry({ content: 'RECURSIVE', constant: false, keys: ['열쇠'], insertionOrder: 2 });
+    const sticky = loreEntry({ content: 'STICKY', constant: false, keys: ['없는 말'], sticky: 5, insertionOrder: 3 });
+    const { report } = assemblePrompt({
+      plot: { ...plot, lorebook: [constant, sticky] },
+      characters: [
+        {
+          name: '아리아',
+          card: {
+            ...bareCard,
+            lorebook: [keyed, recursive],
+            loreSettings: { ...DEFAULT_LORE_SETTINGS, scanDepth: 10, recursiveScanning: true },
+          },
+        },
+      ],
+      history,
+      preset,
+      userName: '민준',
+      loreState: { chatLength: 4, lastTriggered: { [loreEntryKey(sticky)]: 2 } },
+      report: true,
+    });
+
+    expect(report!.lore).toEqual([
+      {
+        key: loreEntryKey(constant),
+        source: 'plot',
+        keys: [],
+        preview: 'PLOT CONSTANT',
+        placement: 'before_char',
+        via: 'constant',
+      },
+      {
+        key: loreEntryKey(keyed),
+        source: '아리아',
+        keys: ['인사말'],
+        preview: keyed.content.slice(0, 80),
+        placement: 'depth 2',
+        via: 'keyword',
+      },
+      expect.objectContaining({ key: loreEntryKey(recursive), source: '아리아', via: 'recursion' }),
+      expect.objectContaining({ key: loreEntryKey(sticky), source: 'plot', via: 'sticky' }),
+    ]);
   });
 });
 

@@ -19,7 +19,8 @@ import {
 } from '@/lib/types';
 import { Avatar } from './Avatar';
 import { Lightbox } from './Lightbox';
-import { Button, Checkbox, Field, Select, TextArea } from './ui';
+import { PromptInspector } from './PromptInspector';
+import { Button, Checkbox, Field, Select, TextArea, cx } from './ui';
 
 /** What the server falls back to for a key the chat has not set. */
 const DEFAULTS = { contextBudget: 16000, summaryThreshold: 0.6, retrievalCount: 5 };
@@ -129,6 +130,9 @@ export function ChatPanel({
   onToggleComponentTurns,
   onToggleStatusWindow,
   onToggleChoices,
+  absentCharacterIds = [],
+  onToggleAbsent,
+  inspectChatId,
 }: {
   /** Everyone the plot's replies may be written in the voice of, in its order. */
   members: readonly PublicMember[];
@@ -176,6 +180,15 @@ export function ChatPanel({
   onToggleComponentTurns: (allowed: boolean) => Promise<void>;
   onToggleStatusWindow: (enabled: boolean) => Promise<void>;
   onToggleChoices: (enabled: boolean) => Promise<void>;
+  /** Members the reader sent off the stage. */
+  absentCharacterIds?: readonly string[];
+  /** Sends a member off the stage or brings them back; no toggles without it. */
+  onToggleAbsent?: (memberId: string, absent: boolean) => Promise<void>;
+  /**
+   * The chat whose assembled prompt this reader may see — set only for the
+   * plot's creator. Everyone else never gets the section.
+   */
+  inspectChatId?: string;
 }) {
   const t = useTranslations('chat');
   const common = useTranslations('common');
@@ -249,13 +262,35 @@ export function ChatPanel({
         <section data-testid="chat-members" className="space-y-3 border-b border-line pb-5">
           <h2 className="text-xs font-medium tracking-wide text-muted uppercase">{t('members')}</h2>
           <ul className="flex flex-wrap gap-x-4 gap-y-2">
-            {members.map((member) => (
-              <li key={member.id} className="flex min-w-0 items-center gap-2">
-                <Avatar src={member.avatarUrl} name={member.name} className="size-7 text-xs" />
-                <span className="truncate text-sm text-fg">{member.name}</span>
-              </li>
-            ))}
+            {members.map((member) => {
+              const away = absentCharacterIds.includes(member.id);
+              return (
+                <li key={member.id} className="flex min-w-0 items-center gap-2">
+                  <Avatar
+                    src={member.avatarUrl}
+                    name={member.name}
+                    className={cx('size-7 text-xs', away && 'opacity-40')}
+                  />
+                  <span className={cx('truncate text-sm', away ? 'text-muted line-through' : 'text-fg')}>
+                    {member.name}
+                  </span>
+                  {onToggleAbsent ? (
+                    <button
+                      type="button"
+                      data-testid="member-absent-toggle"
+                      aria-pressed={away}
+                      disabled={busy}
+                      onClick={() => void onToggleAbsent(member.id, !away)}
+                      className="rounded-md px-1.5 py-0.5 text-xs text-muted transition-colors hover:text-fg disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                    >
+                      {away ? t('sceneReturn') : t('sceneLeave')}
+                    </button>
+                  ) : null}
+                </li>
+              );
+            })}
           </ul>
+          {onToggleAbsent ? <p className="text-xs text-muted/80">{t('sceneCastHint')}</p> : null}
         </section>
       ) : null}
 
@@ -495,6 +530,7 @@ export function ChatPanel({
         )}
       </section>
 
+      {inspectChatId ? <PromptInspector chatId={inspectChatId} /> : null}
     </div>
   );
 }

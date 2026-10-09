@@ -14,7 +14,7 @@ import { NextIntlClientProvider } from 'next-intl';
 import { createElement, type ReactElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MessageRow } from '../src/components/MessageRow';
 import type { MessageRole } from '../src/lib/types';
 
@@ -27,7 +27,7 @@ const messages = {
   chat: {
     edit: '수정',
     editUserHint: '힌트',
-    generating: '생성 중…',
+    thinking: '생각 중… {seconds}초',
     sceneHint: '장면 힌트',
     swipePrev: '이전 응답',
     swipeNext: '다음 응답',
@@ -297,6 +297,20 @@ describe('the furniture on a row', () => {
     render(row('문을 여', 'assistant', { name: '아리아', streaming: true, onDelete: () => undefined }));
     expect(button('메시지 복사')).toBeUndefined();
     expect(button('삭제')).toBeUndefined();
+  });
+
+  it('counts the seconds a reply is waited for, and only until it starts', () => {
+    vi.useFakeTimers();
+    try {
+      render(row('', 'assistant', { name: '아리아', streaming: true, thinking: true }));
+      expect(host.textContent).toContain('생각 중… 0초');
+      act(() => vi.advanceTimersByTime(3000));
+      expect(host.textContent).toContain('생각 중… 3초');
+      render(row('눈이', 'assistant', { name: '아리아', streaming: true, thinking: false }));
+      expect(host.textContent).not.toContain('생각 중');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('carries the time it was stored, revealed on hover', () => {

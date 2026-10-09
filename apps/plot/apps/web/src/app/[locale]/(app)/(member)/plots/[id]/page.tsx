@@ -8,10 +8,12 @@ import { Avatar } from '@/components/Avatar';
 import { ComponentCodeEditor } from '@/components/ComponentCodeEditor';
 import { DefaultVariablesEditor, DisplayScriptEditor } from '@/components/DisplayScriptEditor';
 import { LorebookEditor } from '@/components/LorebookEditor';
+import { LorebookFileActions } from '@/components/LorebookFileActions';
 import { PlotStyleEditor } from '@/components/PlotStyleEditor';
 import { TagInput } from '@/components/TagInput';
 import {
   Button,
+  buttonClass,
   CenteredMessage,
   Checkbox,
   ErrorText,
@@ -446,6 +448,11 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
 
           <Section title={t('lorebook')} action={<AiBadge />}>
             <p className="text-xs text-muted/80">{t('lorebookHint')}</p>
+            <LorebookFileActions
+              entries={lorebook}
+              fileName={`${name.trim() || plot.name} ${t('lorebook')}`}
+              onImport={(imported) => setLorebook((current) => [...current, ...imported])}
+            />
             <LorebookEditor entries={lorebook} onChange={setLorebook} />
           </Section>
 
@@ -699,6 +706,28 @@ function MembersSection({
                 onChange={(event) => onPatch(member.id, { mesExample: event.target.value })}
               />
             </Field>
+
+            {/* Links rather than buttons: the route answers with the file itself,
+                built from the saved card — which is what the hint tells the creator. */}
+            <div className="space-y-1.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-medium tracking-wide text-muted uppercase">
+                  {t('memberExport')}
+                </span>
+                {(['json', 'png'] as const).map((format) => (
+                  <a
+                    key={format}
+                    href={`/api/plots/${plotId}/characters/${member.id}/export?format=${format}`}
+                    download
+                    data-testid={`member-export-${format}`}
+                    className={buttonClass('secondary', 'sm')}
+                  >
+                    {format === 'json' ? t('memberExportJson') : t('memberExportPng')}
+                  </a>
+                ))}
+              </div>
+              <p className="text-xs text-muted/80">{t('memberExportHint')}</p>
+            </div>
           </div>
         </details>
       ))}

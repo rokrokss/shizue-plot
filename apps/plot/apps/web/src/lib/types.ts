@@ -5,6 +5,8 @@ import type {
   ComponentCapability,
   DisplayScript,
   LoreEntry,
+  LoreRole,
+  LoreSelectiveLogic,
   NarrativeDelivery,
   NarratorConfig,
   NarratorPov,
@@ -17,6 +19,8 @@ import type {
   PlotProfile,
   PlotStyle,
   PlotTense,
+  PromptBlockKind,
+  PromptReport,
   StorytellingStyle,
   UnlockAxis,
   Variables,
@@ -29,6 +33,8 @@ export type {
   ComponentCapability,
   DisplayScript,
   LoreEntry,
+  LoreRole,
+  LoreSelectiveLogic,
   NarrativeDelivery,
   NarratorConfig,
   NarratorPov,
@@ -41,6 +47,8 @@ export type {
   PlotProfile,
   PlotStyle,
   PlotTense,
+  PromptBlockKind,
+  PromptReport,
   StorytellingStyle,
   UnlockAxis,
   Variables,
@@ -105,6 +113,12 @@ export const ASSET_UNLOCK_KINDS = [
   'turns',
   'relationship',
 ] as const satisfies readonly AssetUnlockKind[];
+export const LORE_SELECTIVE_LOGICS = [
+  'and_any',
+  'and_all',
+  'not_any',
+  'not_all',
+] as const satisfies readonly LoreSelectiveLogic[];
 
 /** How many moods one plot may aim for at once; mirrors @shizue/core. */
 export const MAX_PLOT_MOODS = 2;
@@ -345,6 +359,10 @@ export interface Persona {
 export interface ModelInfo {
   id: string;
   label: string;
+  /** Reasoning efforts the model accepts; absent where it advertises none. */
+  reasoningEfforts?: string[];
+  /** The effort the model runs at when the chat picks none. */
+  defaultReasoningEffort?: string;
 }
 
 export interface PresetInfo {
@@ -411,7 +429,7 @@ export interface Chat {
   personaId: string | null;
   title: string;
   model: string;
-  /** Author's note, injected right before the history. */
+  /** Author's note, injected four messages from the end of the history. */
   note: string;
   /** Prompt preset id, one of the ids GET /api/presets lists. */
   preset: string;
@@ -432,6 +450,13 @@ export interface Chat {
    */
   statusWindowEnabled: boolean;
   choicesEnabled: boolean;
+  /** One of the model's advertised efforts; null sends none (the model's default). */
+  reasoningEffort: string | null;
+  /**
+   * Members the reader sent off the stage; empty while the whole roster is on.
+   * May name a member that has since been deleted, which matches nobody.
+   */
+  absentCharacterIds: string[];
   /** Reusable notes attached to this chat, in injection order. */
   noteIds: string[];
   createdAt: string;
@@ -535,6 +560,11 @@ export interface ChatState {
   capabilities?: ChatCapabilities;
   /** Every asset of the plot, locked or open. Optional for the same reason. */
   assetLocks?: AssetLock[];
+  /**
+   * Whether the reader is the plot's creator, the one person the assembled
+   * prompt may be shown to. Optional for the same reason; absent reads as no.
+   */
+  isPlotOwner?: boolean;
 }
 
 export interface Usage {

@@ -41,6 +41,10 @@
     "./scene": {
       "types": "./dist/scene.d.ts",
       "default": "./dist/scene.js"
+    },
+    "./world-info": {
+      "types": "./dist/worldInfo.d.ts",
+      "default": "./dist/worldInfo.js"
     }
   },
   "files": [

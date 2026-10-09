@@ -158,6 +158,8 @@ const state = (locked: boolean): ChatState => ({
     allowComponentTurns: false,
     statusWindowEnabled: false,
     choicesEnabled: false,
+    reasoningEffort: null,
+    absentCharacterIds: [],
     noteIds: [],
     createdAt: '2026-08-16T00:00:00.000Z',
     updatedAt: '2026-08-16T00:00:00.000Z',

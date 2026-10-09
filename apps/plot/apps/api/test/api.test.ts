@@ -17,6 +17,9 @@ import {
   DEFAULT_CONTEXT_BUDGET,
   DEFAULT_MAX_RESPONSE_TOKENS,
   IMAGE_ATTACHED_PLACEHOLDER,
+  loreEntryKey,
+  parseCard,
+  placeholderPng,
   PRESET_IDS,
   readPngTextChunks,
   stripPngTextChunks,
@@ -62,7 +65,7 @@ import { join } from 'node:path';
 import type { Hono } from 'hono';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createEmbedder } from '../../../packages/llm/test/helpers/embed.js';
-import { v3Card } from '../../../packages/core/test/fixtures/cards.js';
+import { stCard, v3Card } from '../../../packages/core/test/fixtures/cards.js';
 import { buildCharx, type CharxAssetSpec } from '../../../packages/core/test/helpers/charx.js';
 import { buildPngWithTextChunks } from '../../../packages/core/test/helpers/png.js';
 import { createApp } from '../src/app.js';
@@ -1380,6 +1383,96 @@ describe('plot characters', () => {
   });
 });
 
+describe('card export', () => {
+  const stCardFile = (): File =>
+    new File([JSON.stringify(stCard())], 'elara.json', { type: 'application/json' });
+  const exportPath = (plotId: string, memberId: string, format: string) =>
+    `/api/plots/${plotId}/characters/${memberId}/export?format=${format}`;
+
+  it('hands a member back as a V3 card with the plot written over it, to the owner only', async () => {
+    const alice = await signUp('card-export@example.com');
+    const bob = await signUp('card-export-other@example.com');
+    // Imported, so the stored card holds everything the ST card carried —
+    // including the lorebook settings the editor's save may not keep.
+    const plot = await importCard(alice, stCardFile());
+    const member = plot.characters[0];
+    const plotEntry = {
+      keys: ['왕궁'],
+      secondaryKeys: [],
+      selective: false,
+      content: '왕궁은 북쪽 언덕에 있다.',
+      enabled: true,
+      constant: false,
+      insertionOrder: 0,
+      caseSensitive: false,
+      useRegex: false,
+      position: 'before_char',
+    };
+    await patchPlot(alice, plot.id, {
+      intros: ['첫 인사.', '두 번째.'],
+      lorebook: [plotEntry],
+      narrator: { pov: 'third' },
+    });
+
+    const res = await request(alice, exportPath(plot.id, member.id, 'json'));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('application/json');
+    expect(res.headers.get('content-disposition')).toBe(
+      `attachment; filename="___.json"; filename*=UTF-8''${encodeURIComponent('엘라라.json')}`,
+    );
+    const exported = await readJson(res);
+    expect(exported.spec).toBe('chara_card_v3');
+    const { card } = parseCard(exported);
+    expect(card.name).toBe('엘라라');
+    expect(card.firstMes).toBe('첫 인사.');
+    expect(card.alternateGreetings).toEqual(['두 번째.']);
+    expect(card.narrator).toEqual({ pov: 'third' });
+    expect(card.lorebook).toEqual([...member.card.lorebook, plotEntry]);
+    // The character note came in as a lorebook entry and goes out as one.
+    expect(card.lorebook.filter((entry) => entry.content.includes('숲을 떠나지'))).toHaveLength(1);
+
+    expect((await request(bob, exportPath(plot.id, member.id, 'json'))).status).toBe(404);
+    expect((await request(undefined, exportPath(plot.id, member.id, 'json'))).status).toBe(401);
+    expect((await request(alice, exportPath(plot.id, randomUUID(), 'json'))).status).toBe(404);
+    expect((await request(alice, exportPath(plot.id, member.id, 'xml'))).status).toBe(400);
+  });
+
+  it('writes the PNG on the avatar, the cover, or a placeholder', async () => {
+    const cookie = await signUp('card-export-png@example.com');
+    const plot = await importCard(cookie, stCardFile());
+    const member = plot.characters[0];
+    const exportPng = async (): Promise<Uint8Array> => {
+      const res = await request(cookie, exportPath(plot.id, member.id, 'png'));
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toBe('image/png');
+      return new Uint8Array(await res.arrayBuffer());
+    };
+
+    // No avatar and no cover: the placeholder, carrying the card.
+    const bare = await exportPng();
+    expect(stripPngTextChunks(bare)).toEqual(placeholderPng());
+    expect([...readPngTextChunks(bare).keys()]).toEqual(['chara', 'ccv3']);
+    const reparsed = parseCard(bare).card;
+    expect(reparsed.name).toBe('엘라라');
+    expect(reparsed.lorebook).toEqual(member.card.lorebook);
+
+    const cover = buildPngWithTextChunks({ Title: 'cover' });
+    await uploadFile(cookie, `/api/plots/${plot.id}/cover`, cover, 'c.png');
+    expect(stripPngTextChunks(await exportPng())).toEqual(stripPngTextChunks(cover));
+
+    // The member's own picture wins over the cover (any PNG unlike the cover's will do).
+    const avatarPath = `/api/plots/${plot.id}/characters/${member.id}/avatar`;
+    const avatar = placeholderPng();
+    await uploadFile(cookie, avatarPath, avatar, 'a.png');
+    expect(stripPngTextChunks(await exportPng())).toEqual(avatar);
+
+    // An avatar the export cannot write into gives way to the placeholder, not the cover.
+    const gif = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 2, 3]);
+    await uploadFile(cookie, avatarPath, gif, 'a.gif');
+    expect(stripPngTextChunks(await exportPng())).toEqual(placeholderPng());
+  });
+});
+
 describe('personas', () => {
   it('supports CRUD', async () => {
     const cookie = await signUp('persona@example.com');
@@ -2068,6 +2161,79 @@ describe('chats', () => {
     expect(cleared.chat.model).toBe('test/text');
   });
 
+  it('takes a reasoning effort only from the list the chat model advertises', async () => {
+    const cookie = await signUp('effort@example.com');
+    const { chatId } = await setupChat(cookie);
+    const withKey = makeApp({ env: { SHIZUE_TEST_MODELS: '1' } });
+
+    const models = await readJson(await request(cookie, '/api/models', 'GET', undefined, withKey));
+    expect(models.find((entry: any) => entry.id === 'test/reasoning')).toEqual({
+      id: 'test/reasoning',
+      label: expect.any(String),
+      reasoningEfforts: ['low', 'medium', 'high'],
+      defaultReasoningEffort: 'medium',
+    });
+    expect(models.find((entry: any) => entry.id === 'echo/echo')).toEqual({ id: 'echo/echo', label: expect.any(String) });
+
+    const patch = (body: unknown) => json(cookie, `/api/chats/${chatId}`, 'PATCH', body, withKey);
+    // Echo advertises none, so there is nothing to pick from.
+    const refused = await patch({ reasoningEffort: 'high' });
+    expect(refused.status).toBe(400);
+    expect((await readJson(refused)).code).toBe('invalid_request');
+
+    // Checked against the model the same body switches to.
+    const chosen = await readJson(await patch({ model: 'test/reasoning', reasoningEffort: 'high' }));
+    expect(chosen.chat).toMatchObject({ model: 'test/reasoning', reasoningEffort: 'high' });
+    for (const bad of ['turbo', 7, '']) {
+      const res = await patch({ reasoningEffort: bad });
+      expect(res.status).toBe(400);
+      expect((await readJson(res)).code).toBe('invalid_request');
+    }
+    expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.reasoningEffort).toBe('high');
+
+    expect((await readJson(await patch({ reasoningEffort: null }))).chat.reasoningEffort).toBeNull();
+    expect((await readJson(await patch({ reasoningEffort: 'low' }))).chat.reasoningEffort).toBe('low');
+    // A model that still offers it keeps it; one that does not clears it.
+    expect((await readJson(await patch({ model: 'test/reasoning' }))).chat.reasoningEffort).toBe('low');
+    expect((await readJson(await patch({ model: 'test/text' }))).chat).toMatchObject({
+      model: 'test/text',
+      reasoningEffort: null,
+    });
+  });
+
+  it('sends the reasoning effort only while the model still advertises it', async () => {
+    const cookie = await signUp('effort-send@example.com');
+    const { chatId } = await setupChat(cookie);
+    const sent: (string | undefined)[] = [];
+    const echo = createEchoAdapter();
+    const effortApp = makeApp({
+      env: { SHIZUE_TEST_MODELS: '1' },
+      getAdapter: () => ({
+        providerModel: 'echo',
+        adapter: {
+          stream: (req) => {
+            sent.push(req.reasoningEffort);
+            return echo.stream(req);
+          },
+        },
+      }),
+    });
+    const send = async (): Promise<void> => {
+      const events = await readSse(
+        await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, effortApp),
+      );
+      expect(events.at(-1)?.event).toBe('done');
+    };
+
+    await send();
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { model: 'test/reasoning', reasoningEffort: 'high' }, effortApp);
+    await send();
+    // An effort the catalog stopped advertising stays stored but is not sent.
+    await db.update(chats).set({ reasoningEffort: 'turbo' }).where(eq(chats.id, chatId));
+    await send();
+    expect(sent).toEqual([undefined, 'high', undefined]);
+  });
+
   it('stores the author note and injects it right before the history', async () => {
     const cookie = await signUp('note@example.com');
     const other = await signUp('note-other@example.com');
@@ -2271,6 +2437,280 @@ describe('chats', () => {
     expect(continued.at(-1)).toEqual({ role: 'assistant', content: before.path[2].content });
     expect(continued.at(-3)).toEqual({ role: 'system', content: 'DEPTH LORE' });
     expect(continued.at(-4)).toEqual({ role: 'user', content: '이어서' });
+  });
+
+  /** A generation POST carrying the reader's time zone, the way the web client sends it. */
+  const postInZone = (target: Hono<AppEnv>, cookie: string, path: string, zone: string, body?: unknown) =>
+    target.request(path, {
+      method: 'POST',
+      headers: { cookie, 'x-shizue-tz': zone, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+
+  it('expands the clock macros in the zone the reader sent, and picks the same way on a regenerate', async () => {
+    const cookie = await signUp('clock@example.com');
+    const { plotId, chatId } = await setupChat(cookie);
+    await patchPlot(cookie, plotId, { description: 'TIME[{{time}}] PICK[{{pick::가,나,다,라,마,바,사}}]' });
+    const { app: capturing, prompts } = capturingApp();
+    const timeIn = (zone: string): string =>
+      new Intl.DateTimeFormat('ko', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: zone }).format(new Date());
+    const sent = (index: number, label: string): string =>
+      new RegExp(`${label}\\[(.*?)\\]`).exec(prompts[index]!.system)![1]!;
+
+    // Read on both sides of the request, so a minute ticking over in between
+    // cannot fail the comparison.
+    const zone = 'Pacific/Kiritimati';
+    const before = timeIn(zone);
+    await readSse(await postInZone(capturing, cookie, `/api/chats/${chatId}/messages`, zone, { content: '안녕' }));
+    expect([before, timeIn(zone)]).toContain(sent(0, 'TIME'));
+
+    // A zone Intl refuses is UTC, never a failed turn.
+    const utc = timeIn('UTC');
+    await readSse(await postInZone(capturing, cookie, `/api/chats/${chatId}/regenerate`, 'Not/AZone'));
+    expect([utc, timeIn('UTC')]).toContain(sent(1, 'TIME'));
+    expect(sent(1, 'PICK')).toBe(sent(0, 'PICK'));
+  });
+
+  it('expands the clock into the intros at chat creation', async () => {
+    const cookie = await signUp('clock-intro@example.com');
+    const plot = await createPlot(cookie, { intros: ['{{weekday}}의 문 앞'] });
+    const weekday = (): string =>
+      new Intl.DateTimeFormat('ko', { weekday: 'long', timeZone: 'Asia/Seoul' }).format(new Date());
+    const before = weekday();
+    const res = await postInZone(app, cookie, '/api/chats', 'Asia/Seoul', { plotId: plot.id, model: 'echo/echo' });
+    expect(res.status).toBe(201);
+    const state = await readJson(res);
+    expect([`${before}의 문 앞`, `${weekday()}의 문 앞`]).toContain(state.path[0].content);
+  });
+
+  it('records fresh lore triggers on new turns and keeps a sticky entry for its window', async () => {
+    const cookie = await signUp('sticky-lore@example.com');
+    const { plotId, chatId } = await setupChat(cookie);
+    const member = await firstMember(cookie, plotId);
+    const dragon = { keys: ['용'], content: 'DRAGON LORE', sticky: 2, scanDepth: 1 };
+    await patchCharacter(cookie, plotId, member.id, { card: { ...member.card, lorebook: [dragon] } });
+    const key = loreEntryKey((await firstMember(cookie, plotId)).card.lorebook[0]);
+    const { app: capturing, prompts } = capturingApp();
+    const triggersOf = async (id: string) =>
+      (await db.select().from(messages).where(eq(messages.id, id)))[0]!.loreTriggers;
+    const turn = async (path: string, body?: unknown) => {
+      const events = await readSse(await json(cookie, `/api/chats/${chatId}/${path}`, 'POST', body, capturing));
+      return { id: events.at(-1)!.data.messageId as string, system: prompts.at(-1)!.system };
+    };
+
+    // Index 2: the keyword is in the scanned message, so the entry triggers fresh.
+    const first = await turn('messages', { content: '용이 나타났다' });
+    expect(first.system).toContain('DRAGON LORE');
+    expect(await triggersOf(first.id)).toEqual([key]);
+    // A continue is the same turn: it writes no record of its own.
+    await turn('continue');
+    expect(await triggersOf(first.id)).toEqual([key]);
+
+    // Index 4 is within two messages of the trigger: active without the keyword,
+    // and not recorded again — for the turn and for its regenerate alike.
+    const second = await turn('messages', { content: '고요히 걷는다' });
+    expect(second.system).toContain('DRAGON LORE');
+    expect(await triggersOf(second.id)).toBeNull();
+    const swiped = await turn('regenerate');
+    expect(swiped.id).not.toBe(second.id);
+    expect(swiped.system).toContain('DRAGON LORE');
+
+    // Index 6 is past the window.
+    const third = await turn('messages', { content: '고요히 앉는다' });
+    expect(third.system).not.toContain('DRAGON LORE');
+  });
+
+  it('sends old status windows stripped while their keys still trigger lore', async () => {
+    const cookie = await signUp('status-strip@example.com');
+    const intro = '문 앞.\n\n```status\n위치: 왕궁\n```';
+    const { plotId, chatId } = await setupChat(cookie);
+    await patchPlot(cookie, plotId, {
+      intros: [intro],
+      lorebook: [{ keys: ['왕궁'], content: 'PALACE LORE' }],
+    });
+    // A new chat, so the opening is the intro just written.
+    const fresh = (await startChat(cookie, plotId)).chat.id;
+    expect(chatId).not.toBe(fresh);
+    const { app: capturing, prompts } = capturingApp();
+
+    await readSse(await json(cookie, `/api/chats/${fresh}/messages`, 'POST', { content: '들어간다' }, capturing));
+    // The intro is still the newest assistant turn: it goes as it is.
+    expect(prompts[0]!.messages[0]).toEqual({ role: 'assistant', content: intro });
+
+    await readSse(await json(cookie, `/api/chats/${fresh}/messages`, 'POST', { content: '둘러본다' }, capturing));
+    expect(prompts[1]!.messages[0]).toEqual({ role: 'assistant', content: '문 앞.' });
+    expect(prompts[1]!.system).toContain('PALACE LORE');
+  });
+
+  it('keeps the advanced lore fields a client sends, clamped, and invents none', async () => {
+    const cookie = await signUp('lore-coerce@example.com');
+    const { plotId } = await setupChat(cookie);
+    const plot = await patchPlot(cookie, plotId, {
+      lorebook: [
+        { content: 'plain' },
+        {
+          content: 'advanced',
+          selectiveLogic: 'not_all',
+          probability: 150,
+          group: ' 날씨, 시간 ',
+          groupWeight: 0,
+          scanDepth: -3,
+          sticky: 2.6,
+          cooldown: 99_999,
+          delay: 7,
+        },
+        { content: 'junk', selectiveLogic: 'or', group: '  ', probability: '50', delay: Number.NaN },
+      ],
+    });
+    const advancedKeys = ['selectiveLogic', 'probability', 'group', 'groupWeight', 'scanDepth', 'sticky', 'cooldown', 'delay'];
+    const advanced = (entry: Record<string, unknown>) =>
+      Object.fromEntries(advancedKeys.filter((key) => key in entry).map((key) => [key, entry[key]]));
+    expect(plot.lorebook.map(advanced)).toEqual([
+      {},
+      {
+        selectiveLogic: 'not_all',
+        probability: 100,
+        group: '날씨, 시간',
+        groupWeight: 1,
+        scanDepth: 0,
+        sticky: 3,
+        cooldown: 10_000,
+        delay: 7,
+      },
+      {},
+    ]);
+  });
+
+  it('sends a member off the stage until the reader brings them back', async () => {
+    const cookie = await signUp('scene-cast@example.com');
+    const { plotId, chatId } = await setupChat(cookie);
+    const minsu = await addCharacter(cookie, plotId, {
+      name: '민수',
+      card: {
+        description: '여관 주인.',
+        mesExample: '<START>\n{{char}}: MINSU EXAMPLE',
+        lorebook: [{ content: 'MINSU LORE', constant: true }],
+      },
+    });
+    const { app: capturing, prompts } = capturingApp();
+    const patch = (body: unknown) => json(cookie, `/api/chats/${chatId}`, 'PATCH', body);
+    const sent = (index: number): string =>
+      [prompts[index]!.system, ...prompts[index]!.messages.map((m) => contentText(m.content))].join('\n');
+
+    const away = await patch({ absentCharacterIds: [minsu.id, minsu.id] });
+    expect(away.status).toBe(200);
+    expect((await readJson(away)).chat.absentCharacterIds).toEqual([minsu.id]);
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '들어간다' }, capturing));
+    expect(sent(0)).not.toMatch(/\[등장인물: 민수\]|MINSU EXAMPLE|MINSU LORE/);
+    expect(prompts[0]!.system).toContain('[등장인물: 리안]');
+    expect(prompts[0]!.system).toContain('현재 장면에 없는 인물: 민수 — ');
+
+    // Only the plot's own members can be sent away.
+    const stranger = (await addCharacter(cookie, (await createPlot(cookie)).id)).id;
+    for (const body of [{ absentCharacterIds: [stranger] }, { absentCharacterIds: 'x' }, { absentCharacterIds: [1] }]) {
+      const res = await patch(body);
+      expect(res.status).toBe(400);
+      expect((await readJson(res)).code).toBe('invalid_request');
+    }
+
+    // An empty list is the whole roster again, stored as nothing at all.
+    expect((await readJson(await patch({ absentCharacterIds: [] }))).chat.absentCharacterIds).toEqual([]);
+    const [row] = await db.select().from(chats).where(eq(chats.id, chatId));
+    expect(row!.absentCharacterIds).toBeNull();
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
+    expect(sent(1)).toContain('MINSU EXAMPLE');
+    expect(prompts[1]!.system).not.toContain('현재 장면에 없는 인물');
+
+    // A member deleted while away leaves an id that matches nobody.
+    await patch({ absentCharacterIds: [minsu.id] });
+    expect((await request(cookie, `/api/plots/${plotId}/characters/${minsu.id}`, 'DELETE')).status).toBe(204);
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
+    expect(prompts[2]!.system).not.toContain('현재 장면에 없는 인물');
+  });
+
+  it('centers one reply on the members the reader picked, and stores none of it', async () => {
+    const cookie = await signUp('scene-focus@example.com');
+    const { plotId, chatId } = await setupChat(cookie);
+    const lian = await firstMember(cookie, plotId);
+    const minsu = await addCharacter(cookie, plotId, { name: '민수' });
+    const { app: capturing, prompts } = capturingApp();
+    const focus = '이번 응답은 리안, 민수의 대사와 행동을 중심으로 씁니다.';
+    const post = (path: string, body?: unknown) =>
+      json(cookie, `/api/chats/${chatId}/${path}`, 'POST', body, capturing);
+    const lastSent = () => prompts.at(-1)!.messages.at(-1)!;
+
+    // Roster order, whatever order the ids came in.
+    await readSse(await post('messages', { content: '안녕', focusCharacterIds: [minsu.id, lian.id] }));
+    expect(lastSent()).toEqual({ role: 'system', content: focus });
+    const stored = await db.select().from(messages).where(eq(messages.chatId, chatId));
+    expect(stored.map((message) => message.content).join('\n')).not.toContain('중심으로');
+
+    // The next turn is back to the scene deciding.
+    await readSse(await post('regenerate'));
+    expect(contentText(lastSent().content)).not.toContain('중심으로');
+
+    // A continue carries the request just before its partial, which stays the
+    // last turn the model resumes; a narration's nudge and the request are one
+    // closing instruction.
+    await readSse(await post('continue', { focusCharacterIds: [lian.id] }));
+    expect(prompts.at(-1)!.messages.at(-2)).toEqual({ role: 'system', content: '이번 응답은 리안의 대사와 행동을 중심으로 씁니다.' });
+    expect(lastSent().role).toBe('assistant');
+    await readSse(await post('narrate', { focusCharacterIds: [minsu.id] }));
+    expect(contentText(lastSent().content)).toMatch(/나레이터의 장면 서술만.*\n이번 응답은 민수의 대사와/s);
+
+    // Only someone on the stage can be asked for, and a refused send writes nothing.
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { absentCharacterIds: [minsu.id] });
+    const before = (await db.select().from(messages).where(eq(messages.chatId, chatId))).length;
+    for (const [path, body] of [
+      ['messages', { content: '또', focusCharacterIds: [minsu.id] }],
+      ['auto', { focusCharacterIds: [randomUUID()] }],
+      ['regenerate', { focusCharacterIds: 'x' }],
+    ] as const) {
+      const res = await post(path, body);
+      expect(res.status, path).toBe(400);
+      expect((await readJson(res)).code).toBe('invalid_request');
+    }
+    expect((await db.select().from(messages).where(eq(messages.chatId, chatId))).length).toBe(before);
+    expect(await claimOf(chatId)).toBeNull();
+  });
+
+  it("shows the plot's creator what a regenerate would send, and nobody else", async () => {
+    const owner = await signUp('inspect-owner@example.com');
+    const reader = await signUp('inspect-reader@example.com');
+    const plot = await publishablePlot(owner, {
+      lorebook: [{ content: 'ALWAYS ON', constant: true }],
+    });
+    await publishPlot(owner, plot.id);
+    const own = await startChat(owner, plot.id);
+    const theirs = await startChat(reader, plot.id);
+    expect(own.isPlotOwner).toBe(true);
+    expect(theirs.isPlotOwner).toBe(false);
+    await readSse(await json(owner, `/api/chats/${own.chat.id}/messages`, 'POST', { content: '안녕' }));
+    const count = async () => (await db.select().from(messages).where(eq(messages.chatId, own.chat.id))).length;
+    const before = await count();
+
+    const res = await request(owner, `/api/chats/${own.chat.id}/inspect`);
+    expect(res.status).toBe(200);
+    const report = await readJson(res);
+    expect(report.blocks.map((block: { kind: string }) => block.kind)).toEqual(
+      expect.arrayContaining(['main', 'lore_before', 'plot', 'character', 'history', 'post_history']),
+    );
+    // A regenerate replaces the assistant head: the history ends on the user turn.
+    const turns = report.blocks.filter((block: { kind: string }) => block.kind === 'history');
+    expect(turns.at(-1)).toMatchObject({ label: 'user', text: '안녕' });
+    expect(report.totals).toMatchObject({
+      contextBudget: DEFAULT_CONTEXT_BUDGET,
+      responseReserve: DEFAULT_MAX_RESPONSE_TOKENS,
+    });
+    expect(report.totals.used).toBeGreaterThan(0);
+    expect(report.lore).toEqual([expect.objectContaining({ source: 'plot', via: 'constant', preview: 'ALWAYS ON' })]);
+    expect(await count()).toBe(before);
+    expect(await claimOf(own.chat.id)).toBeNull();
+
+    // The reader's own chat on someone else's plot, and the creator on a chat
+    // that is not theirs, both read as no such chat.
+    expect((await request(reader, `/api/chats/${theirs.chat.id}/inspect`)).status).toBe(404);
+    expect((await request(owner, `/api/chats/${theirs.chat.id}/inspect`)).status).toBe(404);
   });
 
   it('returns 429 while another generation is in flight', async () => {
@@ -3481,6 +3921,7 @@ describe('scene editing', () => {
       content: string;
       source?: 'user' | 'component';
       directions?: string;
+      loreTriggers?: string[];
     }[],
     parentId: string,
   ): Promise<string[]> {
@@ -3499,6 +3940,7 @@ describe('scene editing', () => {
           content: row.content,
           ...(row.source ? { source: row.source } : {}),
           ...(row.directions ? { directions: row.directions } : {}),
+          ...(row.loreTriggers ? { loreTriggers: row.loreTriggers } : {}),
           createdAt: new Date(stamp + index),
         })
         .returning();
@@ -3586,7 +4028,7 @@ describe('scene editing', () => {
       [
         // A narration the reader wrote, through a component, under a ruling.
         { role: 'user', content: '@: 문이 열린다', source: 'component', directions: '판정: 성공' },
-        { role: 'assistant', content: '누구세요?' },
+        { role: 'assistant', content: '누구세요?', loreTriggers: ['0badc0de'] },
       ],
       state.path[0].id,
     );
@@ -3611,6 +4053,10 @@ describe('scene editing', () => {
     expect(rewritten.content).toBe('@: 문이 조용히 열린다');
     expect(rebuiltReply.id).not.toBe(reply);
     expect(rebuiltReply.role).toBe('assistant');
+    // The lore it triggered stays on the turn, or a typo fix would end a sticky
+    // entry's window.
+    const [stored] = await db.select().from(messages).where(eq(messages.id, rebuiltReply.id));
+    expect(stored!.loreTriggers).toEqual(['0badc0de']);
   });
 
   it('gives a new narration block to the reader and a new dialogue block to the character', async () => {

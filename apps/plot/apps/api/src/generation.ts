@@ -2,18 +2,22 @@ import {
   assemblePrompt,
   countTokens,
   replyLengthTokens,
+  sceneFocusDirective,
   stripImageMacros,
   withNarrationPrefix,
+  type AssembledPrompt,
   type HistoryMessage,
+  type LoreTimedState,
+  type MacroClock,
   type NarratorConfig,
   type Preset,
   type PromptCharacter,
-  type PromptMessage,
   type PromptPlot,
+  type PromptReport,
   type Variables,
 } from '@shizue/core';
 import { chats, messages, type Chat, type Message } from '@shizue/db';
-import { ChatGPTError, getAdapter, supportsVision, type ChatGPTAccount, type LLMAdapter } from '@shizue/llm';
+import { ChatGPTError, getAdapter, getModel, supportsVision, type ChatGPTAccount, type LLMAdapter } from '@shizue/llm';
 import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
@@ -54,7 +58,7 @@ export interface GenerationPlan {
   memoryText: string;
   /** Relationship state block, empty when the chat has none or turned it off. */
   relationshipText: string;
-  /** The chat's author note, injected right before the history. */
+  /** The chat's author note, injected `AUTHOR_NOTE_DEPTH` messages from the end. */
   authorNote: string;
   /**
    * The narrator in force for this chat: its own override where it set one, the
@@ -72,6 +76,15 @@ export interface GenerationPlan {
    * `{{getvar::k}}` reads them; the macros themselves stay in the history.
    */
   variables: Variables;
+  /** The reader's clock, for the time macros (see `requestClock`). */
+  clock: MacroClock;
+  /** What keeps `{{pick}}` stable on this chat: its id. */
+  seed: string;
+  /**
+   * The lore records of the branch the turn is generated on, for the timed
+   * effects — taken from the whole branch, not the history the budget kept.
+   */
+  loreState: LoreTimedState;
   /** The chat's prompt preset. */
   preset: Preset;
   /** Context budget this chat runs with (see memorySettings). */
@@ -82,6 +95,12 @@ export interface GenerationPlan {
    * rather than in the history.
    */
   trailingSystem?: string;
+  /**
+   * Members the reader asked this one reply to center on, by name. Like the
+   * trailing instruction it rides at the very end of the prompt and is stored
+   * nowhere — the next turn is back to the scene deciding who speaks.
+   */
+  focusNames?: string[];
   /**
    * This turn is the narrator's, not a character's: the text is stored under the
    * narration prefix so every reader of the branch — the renderer, the prompt, the
@@ -290,7 +309,12 @@ async function withoutUnseeableImages(history: HistoryMessage[], model: string, 
   });
 }
 
-async function buildRequestMessages(plan: GenerationPlan, deps: AppDeps, account?: ChatGPTAccount): Promise<{ system: string; messages: PromptMessage[] }> {
+async function buildRequestMessages(
+  plan: GenerationPlan,
+  deps: AppDeps,
+  account?: ChatGPTAccount,
+  report = false,
+): Promise<AssembledPrompt> {
   // For continue the trailing assistant text must be the last turn so the model
   // resumes it, so it is re-attached after the post-history instructions.
   const isContinue = plan.target.kind === 'continue';
@@ -305,7 +329,14 @@ async function buildRequestMessages(plan: GenerationPlan, deps: AppDeps, account
     deps,
     account,
   );
-  const trailingSystem = plan.trailingSystem?.trim() ?? '';
+  // The mode's own nudge first, then who the reader wants the reply to be about:
+  // one closing instruction rather than two system turns in a row.
+  const trailingSystem = [
+    plan.trailingSystem?.trim() ?? '',
+    plan.focusNames?.length ? sceneFocusDirective(plan.focusNames) : '',
+  ]
+    .filter((line) => line.length > 0)
+    .join('\n');
   const prompt = assemblePrompt({
     plot: plan.plot,
     characters: plan.characters,
@@ -318,6 +349,9 @@ async function buildRequestMessages(plan: GenerationPlan, deps: AppDeps, account
     ...(plan.narrator ? { narrator: plan.narrator } : {}),
     preset: plan.preset,
     variables: plan.variables,
+    clock: plan.clock,
+    seed: plan.seed,
+    loreState: plan.loreState,
     history,
     // The budget reserves what the stream may actually spend — the same value
     // the request's maxTokens is set from, so a `long` plot does not assemble
@@ -330,17 +364,84 @@ async function buildRequestMessages(plan: GenerationPlan, deps: AppDeps, account
     // The trailing instruction bypasses the assembler too, so its tokens are
     // subtracted here; it is not a turn, so it does not shift depth lore.
     contextBudget: plan.contextBudget - countTokens(partial) - countTokens(trailingSystem),
+    report,
   });
   if (!partial && !trailingSystem) return prompt;
 
+  // The partial is the turn the model resumes, so it stays last: a closing
+  // instruction on a continue (only a speaker focus can be one) goes before it.
   return {
     system: prompt.system,
     messages: [
       ...prompt.messages,
-      ...(partial ? [{ role: 'assistant' as const, content: partial }] : []),
       ...(trailingSystem ? [{ role: 'system' as const, content: trailingSystem }] : []),
+      ...(partial ? [{ role: 'assistant' as const, content: partial }] : []),
     ],
+    loreTriggers: prompt.loreTriggers,
+    // The two appended turns are part of what is sent, so the report says so —
+    // and the budget it shows is the chat's, before they were taken out of it.
+    ...(prompt.report
+      ? {
+          report: {
+            ...prompt.report,
+            blocks: [
+              ...prompt.report.blocks,
+              ...(trailingSystem
+                ? [{ kind: 'trailing' as const, tokens: countTokens(trailingSystem), text: trailingSystem }]
+                : []),
+              ...(partial ? [{ kind: 'history' as const, label: 'assistant', tokens: countTokens(partial), text: partial }] : []),
+            ],
+            totals: {
+              ...prompt.report.totals,
+              contextBudget: plan.contextBudget,
+              used: prompt.report.totals.used + countTokens(partial) + countTokens(trailingSystem),
+            },
+          },
+        }
+      : {}),
   };
+}
+
+/**
+ * What a plan would send, measured block by block — the creator's prompt
+ * inspector. Builds the request exactly as a generation would and stops there:
+ * no adapter is asked, nothing is written.
+ */
+export async function inspectGeneration(
+  deps: AppDeps,
+  plan: GenerationPlan,
+  account?: ChatGPTAccount,
+): Promise<PromptReport> {
+  const { report } = await buildRequestMessages(plan, deps, account, true);
+  return report!;
+}
+
+/**
+ * The reasoning effort to send with this turn, if any. Read here rather than
+ * planned: it is a request option, not prompt input. The catalog can drop an
+ * effort after the reader chose it, and one the model no longer advertises is
+ * left unsent rather than risked as an upstream error. Best effort: the reply
+ * does not depend on it, so a failed read sends none instead of failing the turn
+ * under a misleading `model_unavailable`.
+ */
+async function chosenReasoningEffort(
+  deps: AppDeps,
+  plan: GenerationPlan,
+  account?: ChatGPTAccount,
+): Promise<string | undefined> {
+  try {
+    const [row] = await deps.db
+      .select({ reasoningEffort: chats.reasoningEffort })
+      .from(chats)
+      .where(eq(chats.id, plan.chatId));
+    const chosen = row?.reasoningEffort;
+    if (!chosen) return undefined;
+    const offered = (await getModel(plan.model, deps.env, account))?.reasoningEfforts;
+    return offered?.includes(chosen) ? chosen : undefined;
+  } catch (error) {
+    console.error('[api] reasoning effort lookup failed', error);
+    return undefined;
+  }
 }
 
 async function runGeneration(
@@ -352,12 +453,14 @@ async function runGeneration(
   // Defensive: the routes already rejected unavailable models before writing
   // anything, so this should not fire for the deterministic case.
   let resolved: { adapter: LLMAdapter; providerModel: string };
-  let request: { system: string; messages: PromptMessage[] };
+  let request: AssembledPrompt;
+  let reasoningEffort: string | undefined;
   try {
     // The reader's own ChatGPT account answers their chat.
     const account = deps.chatgpt?.accounts.forUser(c.get('userId'));
     resolved = await (deps.getAdapter ?? getAdapter)(plan.model, deps.env, account);
     request = await buildRequestMessages(plan, deps, account);
+    reasoningEffort = await chosenReasoningEffort(deps, plan, account);
   } catch (error) {
     await release();
     if (error instanceof ChatGPTError) throw error;
@@ -395,6 +498,7 @@ async function runGeneration(
           maxTokens: replyLengthTokens(plan.plot.style?.replyLength),
           // ChatGPT sharing does not accept sampling parameters.
           stop: [`\n${plan.userName}:`],
+          ...(reasoningEffort ? { reasoningEffort } : {}),
           abortSignal: controller.signal,
         });
 
@@ -420,7 +524,7 @@ async function runGeneration(
       // Client gone: keep whatever was received so far, but send nothing.
       if (controller.signal.aborted) {
         if (text) {
-          const stored = await persist(deps, plan, text, usage);
+          const stored = await persist(deps, plan, text, usage, request.loreTriggers);
           // The turn is on the branch whether or not anyone was listening, so what
           // it opened is opened; there is simply no event to say so on.
           await openUnlocks(deps, plan.chatId, stored.content);
@@ -429,7 +533,7 @@ async function runGeneration(
         return;
       }
 
-      const stored = await persist(deps, plan, text, usage);
+      const stored = await persist(deps, plan, text, usage, request.loreTriggers);
       const unlockedAssetIds = await openUnlocks(deps, plan.chatId, stored.content);
       await stream.writeSSE({
         event: 'done',
@@ -477,12 +581,17 @@ interface StoredTurn {
   content: string;
 }
 
-/** Writes the generated text and moves the head. */
+/**
+ * Writes the generated text and moves the head. A new turn records the lore that
+ * freshly triggered for its prompt; a continue is the same turn, whose record was
+ * written when it was first generated.
+ */
 async function persist(
   deps: AppDeps,
   plan: GenerationPlan,
   text: string,
   usage: Usage,
+  loreTriggers: string[],
 ): Promise<StoredTurn> {
   if (plan.target.kind === 'continue') {
     const target = plan.target.message;
@@ -515,6 +624,7 @@ async function persist(
       model: plan.model,
       promptTokens: usage.promptTokens,
       completionTokens: usage.completionTokens,
+      loreTriggers: loreTriggers.length > 0 ? loreTriggers : null,
     })
     .returning();
   await deps.db

@@ -14,6 +14,7 @@ import { Avatar } from '@/components/Avatar';
 import { BottomSheet } from '@/components/BottomSheet';
 import { ChatPanel } from '@/components/ChatPanel';
 import { ChatSettings } from '@/components/ChatSettings';
+import { FocusPicker } from '@/components/FocusPicker';
 import { MessageRow } from '@/components/MessageRow';
 import { MoreActions } from '@/components/MoreActions';
 import { SceneDraft } from '@/components/SceneDraft';
@@ -111,6 +112,9 @@ const LOAD_EARLIER_PX = 400;
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** The modes a next-speaker pick rides on; continuing or narrating has no speaker to pick. */
+const FOCUS_MODES: readonly StreamMode[] = ['send', 'regenerate', 'auto'];
+
 /**
  * Whether a generation left anything behind. Continue appends to the head in
  * place and leaves its id alone, so there what the head says is the question.
@@ -185,6 +189,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const [input, setInput] = useState('');
   /** How the composer's text is meant: a line, a description, or the narrator's. */
   const [composerMode, setComposerMode] = useState<ComposerMode>('dialogue');
+  /**
+   * Members the next reply should center on. One reply's worth: it rides on the
+   * next send, regenerate or auto-continue and is cleared once that lands.
+   */
+  const [focus, setFocus] = useState<string[]>([]);
   const [mode, setMode] = useState<StreamMode | null>(null);
   /**
    * The mode whose optimistic row is still on screen after its stream failed.
@@ -631,6 +640,12 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
 
   /** The plot's cast, which is what a reply's `이름:` lines are read against. */
   const members = plot?.characters ?? NO_MEMBERS;
+  const absentIds = state?.chat.absentCharacterIds;
+  /** Who is on the stage — the members a reply can be asked to center on. */
+  const stage = useMemo(
+    () => members.filter((member) => !(absentIds ?? []).includes(member.id)),
+    [members, absentIds],
+  );
   const characterName = plot?.name ?? state?.chat.title ?? '';
   // Who the conversation is with, once either read has said so.
   useDocumentTitle(characterName);
@@ -728,10 +743,16 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     let aborted = false;
     /** How much of a reply arrived, which decides whether there is any to keep. */
     let received = 0;
+    // Only the modes where someone speaks carry the pick, and only members still
+    // on the stage: the server refuses anyone else.
+    const focusIds = FOCUS_MODES.includes(next)
+      ? focus.filter((memberId) => stage.some((member) => member.id === memberId))
+      : [];
+    const focusBody = focusIds.length > 0 ? { focusCharacterIds: focusIds } : undefined;
     try {
       const result = await streamGeneration(
         next === 'send' ? `/api/chats/${id}/messages` : `/api/chats/${id}/${next}`,
-        next === 'send' ? { content, ...turnOptions } : undefined,
+        next === 'send' ? { content, ...turnOptions, ...focusBody } : focusBody,
         (text) => {
           received += text.length;
           append(text);
@@ -740,6 +761,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       );
       if (result.kind === 'error') streamError = result.code ? toMessage(new ApiError(0, result.code, result.message)) : result.message;
       aborted = result.kind === 'aborted';
+      // The pick was for this reply. A failed one keeps it, so the retry asks again.
+      if (result.kind === 'done' && focusIds.length > 0) setFocus([]);
       // What the turn opened, celebrated on the spot: the refetch below carries
       // the same answer, and a reveal that waits for it arrives a beat late.
       if (result.kind === 'done' && result.unlockedAssetIds.length > 0) {
@@ -987,6 +1010,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   /** Every chat setting goes through PATCH, which answers with the whole state. */
   async function updateSettings(patch: {
     model?: string;
+    /** null sends no effort, leaving the model's own default. */
+    reasoningEffort?: string | null;
     personaId?: string | null;
     note?: string;
     preset?: string;
@@ -998,6 +1023,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     choicesEnabled?: boolean;
     /** null clears the override and hands the chat back to the character's narrator. */
     narrator?: NarratorConfig | null;
+    /** Members sent off the stage; an empty list is the whole roster on. */
+    absentCharacterIds?: string[];
   }): Promise<void> {
     if (!beginMutation()) return;
     setSettingsError('');
@@ -1008,6 +1035,17 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     } finally {
       endMutation();
     }
+  }
+
+  /**
+   * Sends a member off the stage or brings them back. Ids no member has any more
+   * are dropped on the way: the server only takes the plot's own members.
+   */
+  async function toggleAbsent(memberId: string, absent: boolean): Promise<void> {
+    const kept = (state?.chat.absentCharacterIds ?? []).filter(
+      (other) => other !== memberId && members.some((member) => member.id === other),
+    );
+    await updateSettings({ absentCharacterIds: absent ? [...kept, memberId] : kept });
   }
 
   /** The rolling summary has its own endpoint, but the same whole-state answer. */
@@ -1190,6 +1228,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           <div className="ml-auto hidden items-center gap-2 lg:flex">
             <ChatSettings
               model={state.chat.model}
+              reasoningEffort={state.chat.reasoningEffort}
               preset={state.chat.preset}
               personaId={state.chat.personaId}
               models={models}
@@ -1264,6 +1303,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               choices={plotChoices}
               choicesEnabled={state.chat.choicesEnabled}
               onToggleChoices={(choicesEnabled) => updateSettings({ choicesEnabled })}
+              absentCharacterIds={state.chat.absentCharacterIds}
+              onToggleAbsent={toggleAbsent}
+              {...(state.isPlotOwner ? { inspectChatId: state.chat.id } : {})}
               customUi={customUi}
               onToggleCustomUi={(enabled) => {
                 writeCustomUiEnabled(enabled);
@@ -1357,6 +1399,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                   {...(components ? { components } : {})}
                   previousSameRole={meta.previousSameRole}
                   streaming={message.streaming}
+                  // Nothing of the reply on screen yet: the time it has been
+                  // waited for, which is all of the model's thinking that is shown.
+                  thinking={message.streaming && streamText === ''}
                   disabled={settingsLocked}
                   {...(message.createdAt ? { createdAt: message.createdAt } : {})}
                   grouped={meta.grouped}
@@ -1591,6 +1636,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             <span aria-hidden="true">✦</span>
             {t('suggest')}
           </Button>
+          {/* Only where there is a choice to make: a lone member on the stage is
+              who every reply is about anyway. */}
+          {stage.length > 1 ? <FocusPicker members={stage} selected={focus} onChange={setFocus} /> : null}
         </div>
         <div className="mx-auto grid max-w-3xl grid-cols-[auto_auto_1fr_auto] items-end gap-2 px-5 pt-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
           <TextArea
@@ -1688,6 +1736,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           <ChatSettings
             stacked
             model={state.chat.model}
+            reasoningEffort={state.chat.reasoningEffort}
             preset={state.chat.preset}
             personaId={state.chat.personaId}
             models={models}

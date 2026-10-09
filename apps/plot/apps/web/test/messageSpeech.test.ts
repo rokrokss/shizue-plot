@@ -28,7 +28,6 @@ const messages = {
   chat: {
     edit: '수정',
     editUserHint: '힌트',
-    generating: '생성 중…',
     sceneHint: '장면 힌트',
     swipePrev: '이전 응답',
     swipeNext: '다음 응답',

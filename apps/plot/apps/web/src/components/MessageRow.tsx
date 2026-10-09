@@ -28,6 +28,23 @@ const FOCUS_RING = 'focus-visible:outline-2 focus-visible:outline-offset-2 focus
 const NO_ROSTER: readonly PublicMember[] = [];
 
 /**
+ * How long the reply has been waited for, counted from when the row began to
+ * wait. The time is all there is to show: a reasoning model's thoughts can
+ * paraphrase the creator's hidden prompt, so they are never asked for. Its own
+ * component, so the tick re-renders this line and not the row around it.
+ */
+function ThinkingClock() {
+  const t = useTranslations('chat');
+  const [start] = useState(() => Date.now());
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => setSeconds(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, [start]);
+  return <span className="text-sm text-muted tabular-nums">{t('thinking', { seconds })}</span>;
+}
+
+/**
  * Memoized on its props, which is what keeps a streaming turn from re-rendering
  * the whole branch behind it. The page hands every row a stable identity for the
  * duration of a generation — the handlers, the footer and the branch navigation
@@ -46,6 +63,7 @@ export const MessageRow = memo(function MessageRow({
   roster = NO_ROSTER,
   previousSameRole,
   streaming,
+  thinking = false,
   disabled = false,
   createdAt,
   grouped,
@@ -80,6 +98,8 @@ export const MessageRow = memo(function MessageRow({
   /** Raw text of the previous message with the same role, for `repeat_back`. */
   previousSameRole?: string;
   streaming: boolean;
+  /** The request is open and none of the reply has arrived yet. */
+  thinking?: boolean;
   disabled?: boolean;
   /** When the turn was stored, revealed on hover. Absent while it is optimistic. */
   createdAt?: string;
@@ -346,9 +366,7 @@ export const MessageRow = memo(function MessageRow({
               previousSameRole={previousSameRole ?? ''}
               streaming={streaming}
             />
-            {streaming && content.length === 0 ? (
-              <span className="text-sm text-muted">{t('generating')}</span>
-            ) : null}
+            {thinking ? <ThinkingClock /> : null}
             {streaming ? (
               <span className="ml-0.5 inline-block h-4 w-[2px] translate-y-0.5 animate-pulse bg-accent" />
             ) : null}

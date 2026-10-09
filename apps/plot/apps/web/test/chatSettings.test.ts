@@ -71,6 +71,42 @@ describe('the stacked layout', () => {
   });
 });
 
+describe('the reasoning effort', () => {
+  it('is offered where the model advertises efforts, and its default sends none', () => {
+    const patches: unknown[] = [];
+    act(() => {
+      root.render(
+        createElement(NextIntlClientProvider, {
+          locale: 'ko',
+          messages,
+          children: createElement(ChatSettings, {
+            model: 'm2',
+            reasoningEffort: 'low',
+            preset: 'standard',
+            personaId: null,
+            models: [{ id: 'm2', label: '추론 모델', reasoningEfforts: ['low', 'turbo'], defaultReasoningEffort: 'medium' }],
+            presets: [],
+            personas: [],
+            disabled: false,
+            onChange: (patch) => void patches.push(patch),
+          }),
+        }),
+      );
+    });
+
+    const effort = selects()[1]!;
+    expect(effort.getAttribute('aria-label')).toBe('추론 강도');
+    // Known words are translated; a word the catalogues do not know is shown as sent.
+    expect([...effort.options].map((option) => option.textContent)).toEqual(['기본 (보통)', '낮음', 'turbo']);
+    expect(effort.value).toBe('low');
+    act(() => {
+      effort.value = '';
+      effort.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(patches).toEqual([{ reasoningEffort: null }]);
+  });
+});
+
 describe('the compact row', () => {
   beforeEach(() => render(false));
 

@@ -16,7 +16,82 @@ export interface MacroContext {
   original?: string;
   /** Injectable randomness for deterministic tests. Returns [0, 1). */
   random?: () => number;
+  /**
+   * The reader's wall clock, for {{date}}/{{time}}/{{weekday}}/{{idle_duration}}.
+   * Without it those macros are left alone like any other unsupported one.
+   */
+  clock?: MacroClock;
+  /**
+   * What makes {{pick}} stable: the same seed, text and position always pick the
+   * same option, so a regenerate does not reroll the scene. The chat id. Without
+   * it {{pick}} behaves like {{random}}.
+   */
+  seed?: string;
 }
+
+/** Content languages a clock formats in — a plot's `language`. */
+export type MacroLocale = 'ko' | 'en' | 'ja';
+
+export interface MacroClock {
+  now: Date;
+  /** IANA zone the reader is in. */
+  timeZone: string;
+  locale: MacroLocale;
+  /**
+   * How long the reader was away before this turn: the gap between the latest
+   * user message and the one before it. Absent reads as "just now".
+   */
+  idleMs?: number;
+}
+
+/** {{idle_duration}} under a minute — and with nothing to measure. */
+const JUST_NOW: Record<MacroLocale, string> = { ko: '방금', en: 'just now', ja: 'たった今' };
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
+
+/** The largest whole unit of minutes, hours or days, written out in the locale. */
+function idleDuration(clock: MacroClock): string {
+  const ms = clock.idleMs ?? 0;
+  if (ms < MINUTE_MS) return JUST_NOW[clock.locale];
+  const [amount, unit] =
+    ms >= DAY_MS
+      ? [Math.floor(ms / DAY_MS), 'day']
+      : ms >= HOUR_MS
+        ? [Math.floor(ms / HOUR_MS), 'hour']
+        : [Math.floor(ms / MINUTE_MS), 'minute'];
+  return new Intl.NumberFormat(clock.locale, { style: 'unit', unit, unitDisplay: 'long' }).format(amount);
+}
+
+/** The clock macros, or undefined for a name that is not one of them. */
+function clockMacro(name: string, clock: MacroClock): string | undefined {
+  const format = (options: Intl.DateTimeFormatOptions): string =>
+    new Intl.DateTimeFormat(clock.locale, { ...options, timeZone: clock.timeZone }).format(clock.now);
+  if (name === 'date') return format({ dateStyle: 'long' });
+  // 24-hour in every language: `timeStyle: 'short'` reads "PM 3:36" in Korean on
+  // current ICU data and "오후 3:36" on older, and an intro stores what it gets.
+  if (name === 'time') return format({ hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+  if (name === 'weekday') return format({ weekday: 'long' });
+  if (name === 'idle_duration') return idleDuration(clock);
+  return undefined;
+}
+
+/**
+ * 32-bit FNV-1a over the string's UTF-16 code units. Not a security hash — a
+ * cheap, stable one, for picks that must come out the same every time and for
+ * naming lore entries (`loreEntryKey`).
+ */
+export function fnv1a(text: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+const splitOptions = (arg: string): string[] => arg.split(',').map((option) => option.trim());
 
 const MACRO_RE = /\{\{([^{}]*)\}\}/g;
 const IMAGE_MACRO_RE = /\{\{\s*img\s*::([^{}]*)\}\}/gi;
@@ -42,16 +117,24 @@ export function imageMacroSlugs(text: string): string[] {
 }
 
 /**
- * CBS subset: {{char}}, {{user}}, {{getvar::k}}, {{random:a,b,...}}, {{roll:dN}},
- * {{// comment}}, {{original}}. Macro names are case-insensitive; unsupported
- * macros are left as-is — which is what keeps {{setvar}}/{{addvar}} in the prompt
- * history, where the model needs to keep seeing its own protocol.
+ * CBS subset: {{char}}, {{user}}, {{getvar::k}}, {{random:a,b,...}},
+ * {{pick::a,b,...}}, {{roll:dN}}, {{// comment}}, {{original}}, and the clock's
+ * {{date}}, {{time}}, {{weekday}}, {{idle_duration}}. Macro names are
+ * case-insensitive; unsupported macros are left as-is — which is what keeps
+ * {{setvar}}/{{addvar}} in the prompt history, where the model needs to keep
+ * seeing its own protocol.
  */
 export function applyMacros(text: string, ctx: MacroContext): string {
   if (!text) return text;
   const rand = ctx.random ?? Math.random;
+  // Seeded by the text and the macro's place in it, so two {{pick}}s in one text
+  // choose independently while each one chooses the same way every time.
+  const pick = (options: string[], offset: number): string | undefined =>
+    ctx.seed === undefined
+      ? options[Math.floor(rand() * options.length)]
+      : options[fnv1a(`${ctx.seed}\u0000${text}\u0000${offset}`) % options.length];
 
-  return text.replace(MACRO_RE, (match, body: string) => {
+  return text.replace(MACRO_RE, (match, body: string, offset: number) => {
     const inner = body.trim();
     const lower = inner.toLowerCase();
 
@@ -59,6 +142,10 @@ export function applyMacros(text: string, ctx: MacroContext): string {
     if (lower === 'char') return ctx.char;
     if (lower === 'user') return ctx.user;
     if (lower === 'original') return ctx.original ?? match;
+    if (ctx.clock) {
+      const value = clockMacro(lower, ctx.clock);
+      if (value !== undefined) return value;
+    }
 
     // `::` is the CBS argument separator; it has to be tried before the single
     // colon, or `getvar::k` would parse as the argument `:k`.
@@ -68,6 +155,7 @@ export function applyMacros(text: string, ctx: MacroContext): string {
       if (name === 'getvar' && ctx.variables) {
         return readVariable(ctx.variables, inner.slice(separator + 2).trim()) ?? '';
       }
+      if (name === 'pick') return pick(splitOptions(inner.slice(separator + 2)), offset) ?? match;
       return match;
     }
 
@@ -81,6 +169,8 @@ export function applyMacros(text: string, ctx: MacroContext): string {
         if (options.length === 0) return match;
         return options[Math.floor(rand() * options.length)] ?? match;
       }
+
+      if (name === 'pick') return pick(splitOptions(arg), offset) ?? match;
 
       if (name === 'roll') {
         const sides = Number.parseInt(arg.trim().replace(/^d/i, ''), 10);

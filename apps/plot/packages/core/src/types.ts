@@ -25,7 +25,32 @@ export interface LoreEntry {
   depth?: number;
   /** V3 `@@role`: role of the injected message. Only set together with depth. */
   role?: LoreRole;
+  /**
+   * How `secondaryKeys` combine with the primary match when `selective` is on.
+   * Absent means `and_any`.
+   */
+  selectiveLogic?: LoreSelectiveLogic;
+  /** Chance in percent (0–100) that a triggered entry is inserted. Absent means 100. */
+  probability?: number;
+  /**
+   * Inclusion group labels, comma-separated (SillyTavern's `group`). Of the entries
+   * triggered together in one group only one is inserted, picked by `groupWeight`.
+   */
+  group?: string;
+  /** Relative weight in the group pick. Absent means 100. */
+  groupWeight?: number;
+  /** This entry's own scan depth in messages, overriding the book's `scanDepth`. */
+  scanDepth?: number;
+  /** Messages the entry stays active after it triggers (SillyTavern sticky). */
+  sticky?: number;
+  /** Messages the entry cannot trigger after its effect ends (SillyTavern cooldown). */
+  cooldown?: number;
+  /** The entry cannot trigger before the chat holds this many messages. */
+  delay?: number;
 }
+
+/** SillyTavern's selective logic, in its own terms. */
+export type LoreSelectiveLogic = 'and_any' | 'and_all' | 'not_any' | 'not_all';
 
 export interface LoreSettings {
   scanDepth: number;

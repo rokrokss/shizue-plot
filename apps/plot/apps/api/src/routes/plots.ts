@@ -4,6 +4,8 @@ import {
   coercePlotProfiles,
   coercePlotStyle,
   emptyCard,
+  exportCardPng,
+  exportCardV3,
   MAX_INTRO_LENGTH,
   parseCard,
   type CharxAssetFile,
@@ -61,7 +63,7 @@ import {
 import { enqueueJob } from '../jobs.js';
 import { requireUser } from '../session.js';
 import { loadOwnedPlot } from '../plots.js';
-import { coverKey, deleteQuietly } from '../storage.js';
+import { coverKey, deleteQuietly, readAll } from '../storage.js';
 import { isUuid, optionalBoolean, optionalString, readJsonBody, requireString, requireUuidParam } from '../util.js';
 import { countComments } from './comments.js';
 import { followState } from './explore.js';
@@ -430,6 +432,21 @@ async function readCardUpload(c: { req: { formData: () => Promise<FormData> } })
   } catch (error) {
     throw badRequest('invalid_card', error instanceof Error ? error.message : 'Unreadable character card');
   }
+}
+
+/**
+ * `Content-Disposition` for a download named after a character: the name as
+ * written in RFC 5987 form, and an ASCII stand-in for clients that predate it.
+ * `encodeURIComponent` leaves `'()*` alone, which RFC 5987 does not allow.
+ */
+function attachment(name: string, extension: string): string {
+  const file = `${name.replace(/[\u0000-\u001f\u007f/\\]/g, '').trim() || 'character'}.${extension}`;
+  const ascii = file.replace(/[^\x20-\x7e]|["\\]/g, '_');
+  const encoded = encodeURIComponent(file).replace(
+    /['()*]/g,
+    (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
 }
 
 /** Applies a like delta (0 when the like row did not change) and returns the count. */
@@ -986,6 +1003,58 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       .returning();
     if (member.avatarPath) await deleteQuietly(deps.storage, member.avatarPath);
     return c.json(toMemberJson(updated!));
+  });
+
+  /**
+   * A member as a card file again — for SillyTavern, RisuAI, or an import here.
+   * The stored card goes out with what the plot holds for the work written over
+   * it: the narrator, the custom UI, the openings and the plot lorebook (see
+   * `CardPlotOverlay`). The owner's alone, like every whole card: a published
+   * plot shows readers its cast, never their definitions.
+   *
+   * The PNG is the member's avatar (else the plot cover) with its text chunks
+   * stripped and the card written in; one that is not a PNG gives way to a plain
+   * placeholder, since nothing here transcodes images.
+   */
+  app.get('/:id/characters/:characterId/export', requireUser, async (c) => {
+    const plot = await loadOwnedPlot(deps, requireUuidParam(c), c.get('userId'));
+    const [member] = await deps.db
+      .select()
+      .from(characters)
+      .where(
+        and(eq(characters.id, requireUuidParam(c, 'characterId')), eq(characters.plotId, plot.id)),
+      )
+      .limit(1);
+    if (!member) throw notFound('Character not found');
+    const format = c.req.query('format') ?? 'json';
+    if (format !== 'json' && format !== 'png') {
+      throw badRequest('invalid_request', 'format must be json or png');
+    }
+
+    const card = exportCardV3(member.card, {
+      narrator: plot.narrator ?? undefined,
+      // The plot's custom UI is the whole answer even when empty: the card's own
+      // copies are what the import lifted off it.
+      customUi: plot.customUi ?? {},
+      intros: plot.intros,
+      lorebook: plot.lorebook,
+    });
+    const headers = {
+      'Content-Disposition': attachment(member.name, format),
+      'Cache-Control': 'no-store',
+    };
+    if (format === 'json') {
+      return new Response(JSON.stringify(card), {
+        headers: { ...headers, 'Content-Type': 'application/json; charset=utf-8' },
+      });
+    }
+
+    const imagePath = member.avatarPath ?? plot.coverPath;
+    const object = imagePath ? await deps.storage.get(imagePath) : null;
+    const image = object ? await readAll(object.body) : undefined;
+    return new Response(exportCardPng(card, image), {
+      headers: { ...headers, 'Content-Type': 'image/png' },
+    });
   });
 
   /* ------------------------------------------------------------- the assets */

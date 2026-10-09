@@ -40,6 +40,8 @@ export interface ChatRequest {
   messages: ChatMessage[];
   maxTokens: number;
   temperature?: number;
+  /** One of the model's advertised reasoning efforts; absent leaves the model's default. */
+  reasoningEffort?: string;
   stop?: string[];
   abortSignal?: AbortSignal;
 }

@@ -13,12 +13,19 @@ async function catalog(env: LLMEnv, account?: ChatGPTAccount): Promise<ChatGPTMo
   if (testing(env)) return [echo, ...(env['SHIZUE_TEST_MODELS'] === '1' ? [
     { id: 'test/text', label: 'Text (test)', vision: false },
     { id: 'test/vision', label: 'Vision (test)', vision: true },
+    { id: 'test/reasoning', label: 'Reasoning (test)', vision: false, reasoningEfforts: ['low', 'medium', 'high'], defaultReasoningEffort: 'medium' },
   ] : [])];
   if (!account) throw providerError('chatgpt_login_required', 401);
   return account.models();
 }
-export async function listEnabledModels(env: LLMEnv, account?: ChatGPTAccount): Promise<{ id: string; label: string }[]> {
-  try { return (await catalog(env, account)).map(({ id, label }) => ({ id, label })); }
+export async function listEnabledModels(env: LLMEnv, account?: ChatGPTAccount): Promise<Omit<ChatGPTModel, 'vision'>[]> {
+  try {
+    return (await catalog(env, account)).map(({ id, label, reasoningEfforts, defaultReasoningEffort }) => ({
+      id, label,
+      ...(reasoningEfforts ? { reasoningEfforts } : {}),
+      ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
+    }));
+  }
   catch (error) {
     if (error instanceof ChatGPTError && error.code === 'chatgpt_login_required') return [];
     throw error;

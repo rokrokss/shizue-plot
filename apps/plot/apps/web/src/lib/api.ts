@@ -37,18 +37,46 @@ async function parse<T>(res: Response): Promise<T> {
   return (await res.json()) as T;
 }
 
-export async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
-  return parse<T>(await fetch(path, signal ? { signal } : {}));
+export async function apiGet<T>(
+  path: string,
+  signal?: AbortSignal,
+  headers: Record<string, string> = {},
+): Promise<T> {
+  return parse<T>(
+    await fetch(path, {
+      ...(signal ? { signal } : {}),
+      ...(Object.keys(headers).length > 0 ? { headers } : {}),
+    }),
+  );
 }
 
-export async function apiSend<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+/**
+ * The reader's IANA time zone, for the clock macros the server expands a turn or
+ * an opening with. Empty where the runtime cannot say, and the server reads UTC.
+ */
+export function timeZoneHeaders(): Record<string, string> {
+  try {
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return zone ? { 'x-shizue-tz': zone } : {};
+  } catch {
+    return {};
+  }
+}
+
+export async function apiSend<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  signal?: AbortSignal,
+  headers: Record<string, string> = {},
+): Promise<T> {
+  const sent = body === undefined ? headers : { ...headers, 'content-type': 'application/json' };
   return parse<T>(
     await fetch(path, {
       method,
       ...(signal ? { signal } : {}),
-      ...(body === undefined
-        ? {}
-        : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+      ...(Object.keys(sent).length > 0 ? { headers: sent } : {}),
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     }),
   );
 }

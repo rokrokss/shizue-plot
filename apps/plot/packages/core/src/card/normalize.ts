@@ -1,87 +1,50 @@
-import { CCardLib, type CharacterCardV3, type LorebookEntry } from '@risuai/ccardlib';
-import {
-  DEFAULT_LORE_SETTINGS,
-  type CardSpec,
-  type LoreEntry,
-  type LorePosition,
-  type LoreRole,
-  type NormalizedCard,
-} from '../types.js';
+import { CCardLib, type CharacterCardV3 } from '@risuai/ccardlib';
+import { DEFAULT_LORE_SETTINGS, type CardSpec, type NormalizedCard } from '../types.js';
+import { loreEntryFromBook } from './bookEntry.js';
 import { componentCapabilitiesFromExtensions, componentCodeFromExtensions } from './componentCode.js';
 import { introFromExtensions } from './intro.js';
 import { narratorFromExtensions } from './narrator.js';
 import { defaultVariablesFromExtensions, displayScriptsFromExtensions } from './risu.js';
+import {
+  depthPromptEntry,
+  displayScriptsWithRegexScripts,
+  extensionsWithoutDepthPrompt,
+} from './sillyTavern.js';
+
+export { parseDecorators, type LoreDecorators } from './bookEntry.js';
 
 export class CardParseError extends Error {}
 
-/** The V3 decorator subset this implementation understands. */
-export interface LoreDecorators {
-  constant?: boolean;
-  depth?: number;
-  role?: LoreRole;
-  position?: LorePosition;
-}
+type Json = Record<string, unknown>;
 
-/** `@@name arg`. `@@@name` (a fallback decorator) does not match and is stripped. */
-const DECORATOR_LINE = /^@@([a-z_]+)(?:[ \t]+(.*))?$/;
+const isObject = (value: unknown): value is Json =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
 
 /**
- * Splits the leading `@@`-prefixed decorator lines of a V3 lorebook entry off its
- * content and interprets the supported subset. Unsupported decorators are
- * stripped without effect, per spec.
+ * SillyTavern's cards fail ccardlib's V2/V3 schema as ST writes them: its `ccv3`
+ * PNG chunk is its V2 JSON with the spec relabelled, so there is no
+ * `group_only_greetings`, and a lorebook ST built itself has no book-level
+ * `extensions`. Worse than refused, such a card passes as V1 — ST repeats the V1
+ * fields at the top — and everything under `data` would be lost. The two gaps are
+ * filled in on a copy, so `raw` stays what arrived; a card without them is
+ * returned as is.
  */
-export function parseDecorators(content: string): { decorators: LoreDecorators; body: string } {
-  const lines = content.split('\n');
-  const decorators: LoreDecorators = {};
-  let start = 0;
-  for (; start < lines.length; start += 1) {
-    const line = lines[start]!.trim();
-    if (!line.startsWith('@@')) break;
-    const match = DECORATOR_LINE.exec(line);
-    if (!match) continue;
-    const arg = (match[2] ?? '').trim().toLowerCase();
-    switch (match[1]) {
-      case 'constant':
-        decorators.constant = true;
-        break;
-      case 'depth': {
-        const depth = Number.parseInt(arg, 10);
-        if (Number.isFinite(depth) && depth >= 0) decorators.depth = depth;
-        break;
-      }
-      case 'role':
-        if (arg === 'user' || arg === 'assistant' || arg === 'system') decorators.role = arg;
-        break;
-      case 'position':
-        if (arg === 'before_desc') decorators.position = 'before_char';
-        else if (arg === 'after_desc') decorators.position = 'after_char';
-        break;
-      default:
-        break;
-    }
+function withSillyTavernGaps(raw: object): object {
+  const card = raw as Json;
+  const spec = card['spec'];
+  if ((spec !== 'chara_card_v2' && spec !== 'chara_card_v3') || !isObject(card['data'])) return raw;
+  const data: Json = { ...card['data'] };
+  let filled = false;
+  if (spec === 'chara_card_v3' && data['group_only_greetings'] == null) {
+    data['group_only_greetings'] = [];
+    filled = true;
   }
-  return { decorators, body: lines.slice(start).join('\n') };
-}
-
-function toLoreEntry(entry: LorebookEntry): LoreEntry {
-  const { decorators, body } = parseDecorators(entry.content ?? '');
-  // Per spec, `@@position` takes precedence over `@@depth`.
-  const depth = decorators.position === undefined ? decorators.depth : undefined;
-  return {
-    keys: entry.keys ?? [],
-    secondaryKeys: entry.secondary_keys ?? [],
-    selective: entry.selective ?? false,
-    content: body,
-    enabled: entry.enabled ?? true,
-    constant: decorators.constant ?? entry.constant ?? false,
-    insertionOrder: entry.insertion_order ?? 0,
-    caseSensitive: entry.case_sensitive ?? false,
-    useRegex: entry.use_regex ?? false,
-    position:
-      decorators.position ?? (entry.position === 'after_char' ? 'after_char' : 'before_char'),
-    ...(depth === undefined ? {} : { depth }),
-    ...(depth !== undefined && decorators.role ? { role: decorators.role } : {}),
-  };
+  const book = data['character_book'];
+  if (isObject(book) && book['extensions'] == null) {
+    data['character_book'] = { ...book, extensions: {} };
+    filled = true;
+  }
+  return filled ? { ...card, data } : raw;
 }
 
 /**
@@ -93,19 +56,29 @@ export function normalizeCard(raw: unknown): NormalizedCard {
     throw new CardParseError('Card must be a JSON object');
   }
 
-  const spec = CCardLib.character.check(raw);
+  const source = withSillyTavernGaps(raw);
+  const spec = CCardLib.character.check(source);
   if (spec === 'unknown') {
     throw new CardParseError('Unrecognized character card format');
   }
 
   const v3 =
     spec === 'v3'
-      ? (raw as CharacterCardV3)
-      : CCardLib.character.convert(raw as never, { to: 'v3' });
+      ? (source as CharacterCardV3)
+      : CCardLib.character.convert(source as never, { to: 'v3' });
   const data = v3.data;
   const book = data.character_book;
-  const extensions = data.extensions ?? {};
-  const displayScripts = displayScriptsFromExtensions(extensions);
+  const ownLore = (book?.entries ?? []).map((entry) => loreEntryFromBook(entry));
+  // SillyTavern's character's note becomes a lore entry, and leaves the
+  // extensions so an export (which writes the entry back) cannot double it.
+  const note = depthPromptEntry(data.extensions ?? {}, ownLore);
+  const extensions = note
+    ? extensionsWithoutDepthPrompt(data.extensions ?? {})
+    : (data.extensions ?? {});
+  const displayScripts = displayScriptsWithRegexScripts(
+    extensions,
+    displayScriptsFromExtensions(extensions),
+  );
   const defaultVariables = defaultVariablesFromExtensions(extensions);
   const componentCode = componentCodeFromExtensions(extensions);
   const componentCapabilities = componentCapabilitiesFromExtensions(extensions);
@@ -130,7 +103,7 @@ export function normalizeCard(raw: unknown): NormalizedCard {
     tags: data.tags ?? [],
     creator: data.creator ?? '',
     characterVersion: data.character_version ?? '',
-    lorebook: (book?.entries ?? []).map(toLoreEntry),
+    lorebook: note ? [...ownLore, note] : ownLore,
     loreSettings: {
       scanDepth: book?.scan_depth ?? DEFAULT_LORE_SETTINGS.scanDepth,
       tokenBudget: book?.token_budget ?? DEFAULT_LORE_SETTINGS.tokenBudget,

@@ -14,7 +14,15 @@ interface TokenResponse { access_token: string; refresh_token?: string; id_token
 
 export interface ChatGPTTokens { accessToken: string; refreshToken: string; idToken?: string; scope: string; expiresAt: number }
 export interface ChatGPTIdentity { subject: string; email: string | null; name: string | null }
-export interface ChatGPTModel { id: string; label: string; vision: boolean }
+export interface ChatGPTModel {
+  id: string;
+  label: string;
+  vision: boolean;
+  /** Reasoning efforts the model accepts, in the catalog's order. Absent: none advertised. */
+  reasoningEfforts?: string[];
+  /** The effort the model runs at when a request names none. */
+  defaultReasoningEffort?: string;
+}
 /** One sign-in attempt, held by the server between the redirect and the callback. */
 export interface PendingSignIn { state: string; nonce: string; verifier: string; redirectUri: string; clientId?: string }
 /** What a model call needs from one signed-in account. */
@@ -61,6 +69,22 @@ const endpoint = (url: string): URL => {
   if (parsed.origin !== AUTH) throw providerError('chatgpt_invalid_issuer');
   return parsed;
 };
+
+/**
+ * An effort goes back to the provider in the request body and is shown to the
+ * reader as an option, so only a plain lowercase word is taken from the catalog.
+ */
+const effortWord = (value: unknown): value is string => typeof value === 'string' && /^[a-z]{1,20}$/.test(value);
+/**
+ * `supported_reasoning_levels` as the Codex catalog writes it — `{effort, description}`
+ * objects — or as bare strings. The field names come from the Codex client, not a
+ * published contract, which is why both shapes are taken and anything else dropped.
+ */
+function reasoningEfforts(levels: unknown): string[] {
+  if (!Array.isArray(levels)) return [];
+  const words = levels.map((level: unknown) => typeof level === 'string' ? level : (level as { effort?: unknown } | null)?.effort);
+  return [...new Set(words.filter(effortWord))];
+}
 
 export class ChatGPTOAuth {
   private oidc?: Discovery;
@@ -142,12 +166,18 @@ export class ChatGPTOAuth {
   /** The account's own catalog, in its order; only models it lists for use. */
   async models(accessToken: string): Promise<ChatGPTModel[]> {
     const response = await requireOK(await this.fetcher(`${CHATGPT_RESOURCE}/models`, { headers: { Authorization: `Bearer ${accessToken}` }, signal: AbortSignal.timeout(20_000) }));
-    const body = await response.json() as { models?: { slug: string; display_name?: string; visibility: string; input_modalities?: string[] }[] };
+    const body = await response.json() as { models?: { slug: string; display_name?: string; visibility: string; input_modalities?: string[]; supported_reasoning_levels?: unknown; default_reasoning_level?: unknown }[] };
     if (!Array.isArray(body.models)) throw providerError('chatgpt_invalid_catalog');
-    return body.models.filter((model) => model.visibility === 'list' && typeof model.slug === 'string').map((model) => ({
-      id: model.slug, label: model.display_name || model.slug,
-      // Do not assume an unknown model can read images.
-      vision: Array.isArray(model.input_modalities) && model.input_modalities.includes('image'),
-    }));
+    return body.models.filter((model) => model.visibility === 'list' && typeof model.slug === 'string').map((model) => {
+      const efforts = reasoningEfforts(model.supported_reasoning_levels);
+      const fallback = model.default_reasoning_level;
+      return {
+        id: model.slug, label: model.display_name || model.slug,
+        // Do not assume an unknown model can read images.
+        vision: Array.isArray(model.input_modalities) && model.input_modalities.includes('image'),
+        ...(efforts.length ? { reasoningEfforts: efforts } : {}),
+        ...(effortWord(fallback) ? { defaultReasoningEffort: fallback } : {}),
+      };
+    });
   }
 }

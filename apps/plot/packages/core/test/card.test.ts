@@ -1,12 +1,19 @@
-import { unzipSync, zipSync } from 'fflate';
+import { unzipSync, unzlibSync, zipSync } from 'fflate';
 import { describe, expect, it } from 'vitest';
-import { exportCardV3 } from '../src/card/export.js';
+import { exportCardPng, exportCardV3 } from '../src/card/export.js';
 import { CardParseError, normalizeCard, parseDecorators } from '../src/card/normalize.js';
 import { parseCard } from '../src/card/parse.js';
 import { MAX_INTRO_LENGTH } from '../src/card/intro.js';
-import { readPngTextChunks, stripPngTextChunks } from '../src/card/png.js';
+import {
+  insertPngTextChunks,
+  isPng,
+  placeholderPng,
+  readPngTextChunks,
+  stripPngTextChunks,
+} from '../src/card/png.js';
 import { assemblePrompt } from '../src/prompt.js';
-import { v1Card, v2Card, v3Card } from './fixtures/cards.js';
+import type { LoreEntry } from '../src/types.js';
+import { stCard, v1Card, v2Card, v3Card } from './fixtures/cards.js';
 import { buildPngWithTextChunks } from './helpers/png.js';
 
 const encode = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
@@ -29,9 +36,47 @@ describe('parseDecorators', () => {
   it('strips unknown decorators, fallbacks, and malformed arguments without effect', () => {
     expect(
       parseDecorators(
-        '@@activate_only_after 3\n@@@depth 2\n@@depth abc\n@@role narrator\n@@position personality\n본문',
+        '@@ignore_on_max_context\n@@@depth 2\n@@depth abc\n@@role narrator\n@@position personality\n@@scan_depth many\n@@exclude_keys  , \n본문',
       ),
     ).toEqual({ decorators: {}, body: '본문' });
+  });
+
+  it('reads the activation decorators onto their SillyTavern-shaped fields', () => {
+    expect(
+      parseDecorators(
+        '@@activate_only_after 3\n@@scan_depth 0\n@@keep_activate_after_match\n@@dont_activate_after_match\n@@exclude_keys 왕비, Queen \n본문',
+      ).decorators,
+    ).toEqual({
+      delay: 3,
+      scanDepth: 0,
+      sticky: 10000,
+      cooldown: 10000,
+      // Keys are matched as written, so this argument keeps its case.
+      excludeKeys: ['왕비', 'Queen'],
+    });
+  });
+
+  it('turns @@exclude_keys into NOT_ANY secondary keys, only where there is room for them', () => {
+    const entry = (content: string, overrides: Record<string, unknown> = {}) =>
+      parseCard({
+        ...v3Card,
+        data: {
+          ...v3Card.data,
+          character_book: {
+            extensions: {},
+            entries: [{ ...v3Card.data.character_book.entries[1]!, keys: ['궁'], content, ...overrides }],
+          },
+        },
+      }).card.lorebook[0]!;
+
+    const excluded = entry('@@exclude_keys 왕비,시녀\n본문');
+    expect(excluded.secondaryKeys).toEqual(['왕비', '시녀']);
+    expect(excluded.selective).toBe(true);
+    expect(excluded.selectiveLogic).toBe('not_any');
+    // An entry with secondary keys of its own keeps them; a regex entry ignores
+    // the decorator, as the V3 spec says.
+    expect(entry('@@exclude_keys 왕비\n본문', { secondary_keys: ['밤'], selective: true }).secondaryKeys).toEqual(['밤']);
+    expect(entry('@@exclude_keys 왕비\n본문', { use_regex: true }).secondaryKeys).toEqual([]);
   });
 
   it('ignores @@depth when a position decorator is present, per spec', () => {
@@ -124,12 +169,13 @@ describe('parseCard - JSON', () => {
       role: 'assistant',
     });
 
-    // @@constant + @@position override the card fields; @@activate_only_after is
-    // unsupported, so it is stripped without effect.
+    // @@constant + @@position override the card fields; @@activate_only_after
+    // becomes the entry's delay.
     expect(card.lorebook[1]!.content).toBe('주막은 국경 검문소 옆이다.');
     expect(card.lorebook[1]!.constant).toBe(true);
     expect(card.lorebook[1]!.position).toBe('after_char');
     expect(card.lorebook[1]!.depth).toBeUndefined();
+    expect(card.lorebook[1]!.delay).toBe(2);
   });
 
   it('keeps the decorators of the source card in raw', () => {
@@ -640,5 +686,287 @@ describe('the plot overlay on export', () => {
   it('falls back to the card when there is no plot to overlay', () => {
     const stored = { ...card, narrator: { pov: 'first' as const } };
     expect(normalizeCard(exportCardV3(stored)).narrator).toEqual({ pov: 'first' });
+  });
+
+  it('writes the plot openings and appends the plot lorebook after the card entries', () => {
+    const plotEntry: LoreEntry = {
+      ...card.lorebook[0]!,
+      keys: ['왕궁'],
+      secondaryKeys: [],
+      selective: false,
+      content: '왕궁은 북쪽 언덕에 있다.',
+    };
+    const exported = exportCardV3(card, { intros: ['첫 인사.', '둘째.', '셋째.'], lorebook: [plotEntry] });
+    expect(exported.data.first_mes).toBe('첫 인사.');
+    expect(exported.data.alternate_greetings).toEqual(['둘째.', '셋째.']);
+    expect(normalizeCard(exported).lorebook).toEqual([...card.lorebook, plotEntry]);
+
+    // A plot with no openings leaves the card's own.
+    const bare = exportCardV3(card, { intros: [] });
+    expect(bare.data.first_mes).toBe(card.firstMes);
+    expect(bare.data.alternate_greetings).toEqual(card.alternateGreetings);
+  });
+});
+
+// Shapes and enums below are SillyTavern's own (world-info.js, characters.js,
+// regex/engine.js); `stCard` is what its writer produces.
+describe('SillyTavern cards', () => {
+  /** ST's PNG writer: `chara` is the V2 JSON, `ccv3` the same JSON relabelled V3. */
+  const stPng = () =>
+    buildPngWithTextChunks({
+      chara: toBase64(stCard()),
+      ccv3: toBase64({ ...stCard(), spec: 'chara_card_v3', spec_version: '3.0' }),
+    });
+
+  it('imports the PNG SillyTavern writes, and its JSON', () => {
+    // ccardlib's checker refuses both as written: the relabelled ccv3 has no
+    // group_only_greetings, and an ST-built lorebook has no book-level extensions.
+    const { card } = parseCard(stPng());
+    expect(card.spec).toBe('v3');
+    expect(card.name).toBe('엘라라');
+    expect(card.lorebook).toHaveLength(3);
+
+    const fromJson = parseCard(stCard()).card;
+    expect(fromJson.spec).toBe('v2');
+    expect(fromJson.lorebook).toEqual(card.lorebook);
+  });
+
+  it('reads the entry settings ST keeps in each entry\'s extensions', () => {
+    const [first, second] = parseCard(stPng()).card.lorebook;
+    expect(first).toEqual({
+      // ST reads a key as a regex only in its slash form, whatever use_regex says;
+      // the plain key beside it becomes an escaped literal.
+      keys: ['엘프', '숲(지기|의 왕)'],
+      secondaryKeys: [],
+      selective: true,
+      content: '엘프는 숲의 왕을 섬긴다.',
+      enabled: true,
+      constant: false,
+      insertionOrder: 10,
+      caseSensitive: false,
+      useRegex: true,
+      position: 'before_char',
+      depth: 2,
+      role: 'assistant',
+      selectiveLogic: 'and_all',
+      probability: 40,
+      group: '숲, 왕국',
+      groupWeight: 30,
+      scanDepth: 6,
+      sticky: 3,
+      cooldown: 2,
+      delay: 5,
+    });
+    expect(second).toEqual({
+      keys: ['활'],
+      secondaryKeys: ['부러진'],
+      selective: true,
+      content: '엘라라의 활은 할머니의 유품이다.',
+      enabled: true,
+      constant: false,
+      insertionOrder: 20,
+      // ST keeps case in its extensions only.
+      caseSensitive: true,
+      // Plain keys: ST's use_regex: true means nothing.
+      useRegex: false,
+      position: 'after_char',
+      // NOT_ANY is 2; probability is off, so the 25 is not one.
+      selectiveLogic: 'not_any',
+    });
+  });
+
+  it('makes the character note a constant depth entry, and takes it out of the extensions', () => {
+    const { card } = parseCard(stPng());
+    expect(card.lorebook[2]).toEqual({
+      keys: [],
+      secondaryKeys: [],
+      selective: false,
+      content: '{{char}}는 숲을 떠나지 않는다.',
+      enabled: true,
+      constant: true,
+      // After the card's own entries.
+      insertionOrder: 21,
+      caseSensitive: false,
+      useRegex: false,
+      position: 'before_char',
+      depth: 2,
+    });
+    expect(card.extensions['depth_prompt']).toBeUndefined();
+    expect(card.extensions['world']).toBe('엘라라의 숲');
+
+    // The export writes it back as the entry it now is, so a re-import does not
+    // find it twice.
+    expect(normalizeCard(exportCardV3(card)).lorebook).toEqual(card.lorebook);
+
+    const withNote = (depth_prompt: unknown) => {
+      const raw = stCard();
+      return normalizeCard({ ...raw, data: { ...raw.data, extensions: { ...raw.data.extensions, depth_prompt } } });
+    };
+    expect(withNote({ prompt: '속삭인다.', depth: 0, role: 'user' }).lorebook[2]).toMatchObject({
+      depth: 0,
+      role: 'user',
+    });
+    // An empty note is not an entry, and stays where ST put it.
+    const empty = withNote({ prompt: '  ', depth: 4, role: 'system' });
+    expect(empty.lorebook).toHaveLength(2);
+    expect(empty.extensions['depth_prompt']).toEqual({ prompt: '  ', depth: 4, role: 'system' });
+  });
+
+  it('lets V3 decorators win over the ST extensions', () => {
+    const entryWith = (content: string) => {
+      const raw = stCard();
+      const [first] = raw.data.character_book.entries;
+      return normalizeCard({
+        ...raw,
+        data: { ...raw.data, character_book: { ...raw.data.character_book, entries: [{ ...first!, content }] } },
+      }).lorebook[0]!;
+    };
+    expect(entryWith('@@depth 1\n@@role user\n본문')).toMatchObject({ depth: 1, role: 'user' });
+    const positioned = entryWith('@@position after_desc\n본문');
+    expect(positioned.position).toBe('after_char');
+    expect(positioned.depth).toBeUndefined();
+    expect(entryWith('@@activate_only_after 9\n@@scan_depth 1\n본문')).toMatchObject({ delay: 9, scanDepth: 1 });
+  });
+
+  it('maps display-only regex scripts onto display scripts, after RisuAI ones and without duplicates', () => {
+    const script = stCard().data.extensions.regex_scripts[0]!;
+    const withScripts = (regexScripts: unknown[], risuai?: unknown) => {
+      const raw = stCard();
+      return normalizeCard({
+        ...raw,
+        data: {
+          ...raw.data,
+          extensions: { ...raw.data.extensions, regex_scripts: regexScripts, ...(risuai ? { risuai } : {}) },
+        },
+      });
+    };
+
+    const card = withScripts([
+      script,
+      { ...script, findRegex: 'plain', promptOnly: true },
+      { ...script, findRegex: 'off', disabled: true },
+      { ...script, findRegex: 'everywhere', markdownOnly: false },
+      { ...script, findRegex: 'user', placement: [1] },
+      // The pattern screen's refusal skips the script rather than the card.
+      { ...script, findRegex: '/(a+)+$/' },
+      { ...script, findRegex: 'bare $', replaceString: '[$0]' },
+    ]);
+    expect(card.displayScripts).toEqual([
+      { in: '\\[status\\] hp=(\\d+)', out: '<div class="hp">$& → $1</div>', flags: 'gi', order: 0, enabled: true },
+      { in: 'bare $', out: '[$&]', order: 1, enabled: true },
+    ]);
+    // Left in place for SillyTavern on the way back out.
+    expect(card.extensions['regex_scripts']).toHaveLength(7);
+
+    const alongsideRisu = withScripts([script], {
+      customScripts: [
+        { in: 'x', out: 'y', type: 'editdisplay', ableFlag: false, flag: '<order 4>' },
+        { in: '\\[status\\] hp=(\\d+)', out: '<div class="hp">$& → $1</div>', type: 'editdisplay', ableFlag: true, flag: 'gi' },
+      ],
+    });
+    expect(alongsideRisu.displayScripts?.map((one) => one.in)).toEqual(['x', '\\[status\\] hp=(\\d+)']);
+
+    // Our export writes the script into RisuAI's block and keeps regex_scripts,
+    // so a re-import meets it twice and keeps one.
+    const reimported = normalizeCard(exportCardV3(parseCard(stPng()).card));
+    expect(reimported.displayScripts).toHaveLength(1);
+  });
+
+  it('exports the settings where ST reads them, and reads its own export back', () => {
+    const { card } = parseCard(stPng());
+    const exported = exportCardV3(card);
+    const [first, second, note] = exported.data.character_book!.entries;
+    expect(first!.keys).toEqual(['/엘프/i', '/숲(지기|의 왕)/i']);
+    expect(first!.content).toBe('@@depth 2\n@@role assistant\n엘프는 숲의 왕을 섬긴다.');
+    expect(first!.extensions).toEqual({
+      position: 4,
+      depth: 2,
+      role: 2,
+      selectiveLogic: 3,
+      probability: 40,
+      useProbability: true,
+      group: '숲, 왕국',
+      group_weight: 30,
+      scan_depth: 6,
+      sticky: 3,
+      cooldown: 2,
+      delay: 5,
+      case_sensitive: false,
+    });
+    expect(second!.keys).toEqual(['활']);
+    expect(second!.extensions).toMatchObject({ position: 1, selectiveLogic: 2, probability: 100, case_sensitive: true });
+    expect(note!.extensions).toMatchObject({ position: 4, depth: 2, role: 0 });
+
+    expect(normalizeCard(exported).lorebook).toEqual(card.lorebook);
+  });
+
+  it('keeps an imported regex entry a regex through the round trip', () => {
+    // A key with a slash in it has to be escaped, or ST would not read it as one.
+    const { card } = parseCard(v3Card);
+    const regex: LoreEntry = { ...card.lorebook[0]!, keys: ['a/b', '검(술|객)'], caseSensitive: true };
+    const exported = exportCardV3({ ...card, lorebook: [regex] });
+    expect(exported.data.character_book!.entries[0]!.keys).toEqual(['/a\\/b/', '/검(술|객)/']);
+    expect(normalizeCard(exported).lorebook).toEqual([regex]);
+  });
+
+  it('writes a sticky or cooldown at the cap back out as the after-match decorators', () => {
+    const { card } = parseCard(v3Card);
+    const entry: LoreEntry = { ...card.lorebook[1]!, sticky: 10000, cooldown: 12000 };
+    const exported = exportCardV3({ ...card, lorebook: [entry, { ...entry, sticky: 9999, cooldown: undefined }] });
+    const [forever, counted] = exported.data.character_book!.entries;
+    expect(forever!.content).toBe(
+      '@@keep_activate_after_match\n@@dont_activate_after_match\n주막은 국경 검문소 옆이다.',
+    );
+    expect(counted!.content).toBe('주막은 국경 검문소 옆이다.');
+    // Anything past the cap is the same "forever", and comes back as the cap.
+    expect(normalizeCard(exported).lorebook[0]).toMatchObject({ sticky: 10000, cooldown: 10000 });
+  });
+});
+
+describe('the PNG card export', () => {
+  const { card } = parseCard(stCard());
+
+  it('writes ccv3 and chara before IEND, and the card parses back out', () => {
+    const avatar = buildPngWithTextChunks({ chara: 'an old card', Comment: 'kept? no' });
+    const overlay = { intros: ['첫 인사.'], narrator: { pov: 'third' as const } };
+    const png = exportCardPng(exportCardV3(card, overlay), avatar);
+
+    const chunks = readPngTextChunks(png);
+    expect([...chunks.keys()]).toEqual(['chara', 'ccv3']);
+    const parsed = parseCard(png);
+    expect(parsed.card.name).toBe(card.name);
+    expect(parsed.card.firstMes).toBe('첫 인사.');
+    expect(parsed.card.narrator).toEqual({ pov: 'third' });
+    expect(parsed.card.lorebook).toEqual(card.lorebook);
+    expect(parsed.card.displayScripts).toEqual(card.displayScripts);
+    // The image underneath is the avatar's, without its old chunks.
+    expect(stripPngTextChunks(png)).toEqual(stripPngTextChunks(avatar));
+  });
+
+  it('carries the V2 backfill without decorators, and depth survives in the ST extensions', () => {
+    const png = exportCardPng(exportCardV3(card));
+    const v2 = JSON.parse(Buffer.from(readPngTextChunks(png).get('chara')!, 'base64').toString('utf-8'));
+    expect(v2.spec).toBe('chara_card_v2');
+    expect(v2.data.character_book.entries[0].content).toBe('엘프는 숲의 왕을 섬긴다.');
+    expect(normalizeCard(v2).lorebook).toEqual(card.lorebook);
+  });
+
+  it('falls back to a drawable placeholder for anything that is not a PNG', () => {
+    const jpeg = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0]);
+    const png = exportCardPng(exportCardV3(card), jpeg);
+    expect(stripPngTextChunks(png)).toEqual(placeholderPng());
+
+    const placeholder = placeholderPng();
+    expect(isPng(placeholder)).toBe(true);
+    // A real IDAT: 64 rows of a filter byte and 64 RGB pixels.
+    const idatLength = new DataView(placeholder.buffer).getUint32(33);
+    expect(unzlibSync(placeholder.subarray(41, 41 + idatLength))).toHaveLength(64 * (1 + 64 * 3));
+  });
+
+  it('writes chunks byte for byte the way a PNG encoder would', () => {
+    expect(insertPngTextChunks(buildPngWithTextChunks({}), [['chara', 'abc'], ['ccv3', 'def']])).toEqual(
+      buildPngWithTextChunks({ chara: 'abc', ccv3: 'def' }),
+    );
+    expect(() => insertPngTextChunks(new Uint8Array([1, 2, 3]), [])).toThrow();
   });
 });

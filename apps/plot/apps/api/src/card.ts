@@ -11,6 +11,7 @@ import {
   type ComponentCapability,
   type DisplayScript,
   type LoreEntry,
+  type LoreSelectiveLogic,
   type NormalizedCard,
   type PlotCustomUi,
   type Variables,
@@ -24,6 +25,35 @@ const num = (value: unknown, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 const strArray = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+
+const SELECTIVE_LOGICS: readonly LoreSelectiveLogic[] = ['and_any', 'and_all', 'not_any', 'not_all'];
+
+/**
+ * The advanced activation fields, each only where the client sent one: absent
+ * is the default, so nothing here is written out to mean "unchanged". Numbers
+ * are rounded and clamped to a range the engine can act on.
+ */
+function coerceLoreActivation(raw: Record<string, unknown>): Partial<LoreEntry> {
+  const int = (key: string, min: number, max: number): Partial<LoreEntry> => {
+    const value = raw[key];
+    if (typeof value !== 'number' || !Number.isFinite(value)) return {};
+    return { [key]: Math.min(max, Math.max(min, Math.round(value))) };
+  };
+  const logic = raw['selectiveLogic'];
+  const group = str(raw['group']).trim();
+  return {
+    ...(SELECTIVE_LOGICS.includes(logic as LoreSelectiveLogic)
+      ? { selectiveLogic: logic as LoreSelectiveLogic }
+      : {}),
+    ...int('probability', 0, 100),
+    ...(group ? { group } : {}),
+    ...int('groupWeight', 1, 1000),
+    ...int('scanDepth', 0, 1000),
+    ...int('sticky', 0, 10_000),
+    ...int('cooldown', 0, 10_000),
+    ...int('delay', 0, 10_000),
+  };
+}
 
 function coerceLoreEntry(value: unknown): LoreEntry {
   const raw = (value ?? {}) as Record<string, unknown>;
@@ -47,6 +77,7 @@ function coerceLoreEntry(value: unknown): LoreEntry {
           ...(role === 'user' || role === 'assistant' || role === 'system' ? { role } : {}),
         }
       : {}),
+    ...coerceLoreActivation(raw),
   };
 }
 

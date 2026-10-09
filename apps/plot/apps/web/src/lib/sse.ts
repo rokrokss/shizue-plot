@@ -1,4 +1,4 @@
-import { toApiError } from './api';
+import { timeZoneHeaders, toApiError } from './api';
 import type { Usage } from './types';
 
 type StreamResult =
@@ -69,9 +69,9 @@ export async function streamGeneration(
     res = await fetch(path, {
       method: 'POST',
       signal,
-      ...(body === undefined
-        ? {}
-        : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+      // Every generation expands the clock macros in the reader's zone.
+      headers: { ...timeZoneHeaders(), ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
   } catch (error) {
     if (signal.aborted) return { kind: 'aborted' };

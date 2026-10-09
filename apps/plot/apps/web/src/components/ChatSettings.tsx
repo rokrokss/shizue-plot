@@ -5,9 +5,13 @@ import { useId, type ReactNode } from 'react';
 import type { ModelInfo, Persona, PresetInfo } from '@/lib/types';
 import { Select } from './ui';
 
+/** Effort words the catalogues translate; any other word a model advertises is shown as it is. */
+const KNOWN_EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh']);
+
 /**
- * The three choices a chat is run with. The same controls stand in the header on
- * a wide screen and in the settings sheet on a narrow one, so they live here
+ * The choices a chat is run with: model, reasoning effort where the model offers
+ * one, preset and persona. The same controls stand in the header on a wide
+ * screen and in the settings sheet on a narrow one, so they live here
  * rather than being written twice — `stacked` is the whole difference: labelled
  * rows at full width, or one compact row.
  *
@@ -20,6 +24,7 @@ import { Select } from './ui';
  */
 export function ChatSettings({
   model,
+  reasoningEffort,
   preset,
   personaId,
   models,
@@ -30,6 +35,7 @@ export function ChatSettings({
   onChange,
 }: {
   model: string;
+  reasoningEffort: string | null;
   preset: string;
   personaId: string | null;
   models: ModelInfo[];
@@ -37,12 +43,23 @@ export function ChatSettings({
   personas: Persona[];
   disabled: boolean;
   stacked?: boolean;
-  onChange: (patch: { model?: string; preset?: string; personaId?: string | null }) => void;
+  onChange: (patch: {
+    model?: string;
+    reasoningEffort?: string | null;
+    preset?: string;
+    personaId?: string | null;
+  }) => void;
 }) {
   const t = useTranslations('chat');
   const locked = disabled ? t('lockedWhileGenerating') : undefined;
   const selectClass = stacked ? undefined : 'h-8 w-auto py-0 text-xs';
   const id = useId();
+  // Only a model that advertises efforts gets the control; the server clears a
+  // chosen effort when the model is switched to one that does not offer it.
+  const current = models.find((entry) => entry.id === model);
+  const efforts = current?.reasoningEfforts ?? [];
+  const effortLabel = (effort: string): string =>
+    KNOWN_EFFORTS.has(effort) ? t(`reasoningEfforts.${effort}`) : effort;
 
   /** Where a select's accessible name comes from in each layout. */
   const nameOf = (key: string, label: string) =>
@@ -85,6 +102,35 @@ export function ChatSettings({
           ))}
         </Select>,
       )}
+      {efforts.length > 0
+        ? field(
+            'effort',
+            t('reasoningEffort'),
+            <Select
+              value={reasoningEffort ?? ''}
+              disabled={disabled}
+              {...(locked ? { title: locked } : {})}
+              {...nameOf('effort', t('reasoningEffort'))}
+              className={selectClass}
+              onChange={(event) => onChange({ reasoningEffort: event.target.value || null })}
+            >
+              <option value="">
+                {current?.defaultReasoningEffort
+                  ? t('reasoningEffortDefaultIs', { effort: effortLabel(current.defaultReasoningEffort) })
+                  : t('reasoningEffortDefault')}
+              </option>
+              {/* An effort the catalog has since dropped stays visible, as a historical model does. */}
+              {reasoningEffort && !efforts.includes(reasoningEffort) ? (
+                <option value={reasoningEffort}>{effortLabel(reasoningEffort)}</option>
+              ) : null}
+              {efforts.map((effort) => (
+                <option key={effort} value={effort}>
+                  {effortLabel(effort)}
+                </option>
+              ))}
+            </Select>,
+          )
+        : null}
       {field(
         'preset',
         t('preset'),

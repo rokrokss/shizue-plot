@@ -100,6 +100,28 @@ describe('ChatGPT OAuth', () => {
     expect(await f.oauth.revoke('oaiapp_test', 'REFRESH')).toBe(false);
     expect(await f.oauth.models('ACCESS')).toEqual([{ id: 'gpt-test', label: 'GPT test', vision: true }, { id: 'next-model', label: 'next-model', vision: false }]);
   });
+  it('reads the reasoning efforts a model advertises, and only plain words', async () => {
+    // Shaped like the Codex `/models` entries these field names were taken from
+    // (from the Codex client, unverified against a live account): a list of
+    // `{effort, description}` and the default's name.
+    const oauth = new ChatGPTOAuth({ fetch: async () => json({ models: [
+      { slug: 'gpt-reasoning', visibility: 'list', default_reasoning_level: 'medium', supported_reasoning_levels: [
+        { effort: 'low', description: 'Fast responses with lighter reasoning' },
+        { effort: 'medium', description: 'Balances speed and reasoning depth' },
+        { effort: 'high', description: 'Greater reasoning depth for complex problems' },
+      ] },
+      { slug: 'bare-strings', visibility: 'list', supported_reasoning_levels: ['minimal', 'xhigh', 'xhigh'] },
+      { slug: 'odd-values', visibility: 'list', default_reasoning_level: 'High!', supported_reasoning_levels: [{ effort: 'Turbo' }, { effort: 7 }, null, 'a'.repeat(21), { description: 'no effort' }] },
+      { slug: 'plain', visibility: 'list' },
+    ] }) });
+    expect(await oauth.models('ACCESS')).toEqual([
+      { id: 'gpt-reasoning', label: 'gpt-reasoning', vision: false, reasoningEfforts: ['low', 'medium', 'high'], defaultReasoningEffort: 'medium' },
+      { id: 'bare-strings', label: 'bare-strings', vision: false, reasoningEfforts: ['minimal', 'xhigh'] },
+      // Nothing usable advertised: no selector, and nothing is ever sent.
+      { id: 'odd-values', label: 'odd-values', vision: false },
+      { id: 'plain', label: 'plain', vision: false },
+    ]);
+  });
   it('rejects callback substitution and authorization denial', () => {
     const params = (query: string) => new URLSearchParams(query);
     expect(() => callbackResult(params('state=forged&code=c&client_id=app_x'), { state: 's' })).toThrow(expect.objectContaining({ code: 'chatgpt_invalid_state' }));
@@ -143,6 +165,10 @@ describe('ChatGPT Responses adapter', () => {
       { role: 'user', content: [{ type: 'input_text', text: 'look' }, { type: 'input_image', image_url: 'data:image/png;base64,aA==' }] },
       { role: 'assistant', content: 'partial' }, { role: 'developer', content: 'post-history' },
     ] });
+  });
+  it('asks for a reasoning effort only when one is chosen, and never for a summary', () => {
+    expect(responseBody({ ...request, reasoningEffort: 'high' }).reasoning).toEqual({ effort: 'high' });
+    expect(responseBody(request)).not.toHaveProperty('reasoning');
   });
   it('handles split UTF-8 / CRLF, local stop strings and terminal usage', async () => {
     const result = await collect(event({ type: 'response.output_text.delta', delta: '안녕\nUs' }) + event({ type: 'response.output_text.delta', delta: 'er: hidden' }) + event({ type: 'response.completed', response: { usage: { input_tokens: 9, output_tokens: 7 } } }));

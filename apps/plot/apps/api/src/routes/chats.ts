@@ -17,6 +17,8 @@ import {
   stripVariableMacros,
   withNarrationPrefix,
   type HistoryMessage,
+  type LoreTimedState,
+  type MacroClock,
   type MacroContext,
   type NarratorConfig,
   type PromptCharacter,
@@ -34,6 +36,7 @@ import {
   personas,
   plots,
   plotAssets,
+  type Character,
   type Chat,
   type ChatAttachment,
   type ChatMemorySettings,
@@ -66,6 +69,7 @@ import { ApiError, badRequest, forbidden, notFound } from '../errors.js';
 import {
   acquireChatSlot,
   HEARTBEAT_MS,
+  inspectGeneration,
   isGenerating,
   rejectBusyChat,
   releaseChatSlot,
@@ -122,6 +126,14 @@ const toChatJson = (chat: Chat, noteIds: string[]) => ({
    */
   statusWindowEnabled: chat.statusWindowEnabled,
   choicesEnabled: chat.choicesEnabled,
+  /** One of the model's advertised efforts, or null to send none. */
+  reasoningEffort: chat.reasoningEffort,
+  /**
+   * Members the reader sent off the stage; empty while the whole roster is on.
+   * An id whose member has since been deleted may linger here — it matches
+   * nobody, so it is simply ignored.
+   */
+  absentCharacterIds: chat.absentCharacterIds ?? [],
   /** Reusable notes attached to this chat, in injection order. */
   noteIds,
   createdAt: chat.createdAt.toISOString(),
@@ -252,7 +264,22 @@ async function chatState(deps: AppDeps, chat: Chat, window?: PathWindow): Promis
      * without a fal credential `drawScene` is off and the action is not offered.
      */
     capabilities: { drawScene: drawSceneEnabled(deps) },
+    /**
+     * Whether the reader is also the plot's creator — the one person the
+     * chat's assembled prompt may be shown to (`GET /:id/inspect`).
+     */
+    isPlotOwner: await ownsPlot(deps, chat.plotId, chat.userId),
   };
+}
+
+/** Whether the user is the plot's creator, whatever its visibility. */
+async function ownsPlot(deps: AppDeps, plotId: string, userId: string): Promise<boolean> {
+  const [plot] = await deps.db
+    .select({ ownerId: plots.ownerId })
+    .from(plots)
+    .where(eq(plots.id, plotId))
+    .limit(1);
+  return plot?.ownerId === userId;
 }
 
 /** Reads the `before`/`limit` query pair a branch read may narrow itself with. */
@@ -275,6 +302,38 @@ async function requireEnabledModel(deps: AppDeps, userId: string, model: string)
     throw badRequest('model_unavailable', `Model not available: ${model}`);
   }
   return model;
+}
+
+/**
+ * The reasoning effort a PATCH leaves the chat with; undefined leaves it alone. A
+ * requested effort must be one the chat's model advertises — the new model, when
+ * the same body switches it — and null clears it. A model switch on its own keeps
+ * the stored effort only where the new model offers it too, so the setting never
+ * names something the selector cannot show.
+ */
+async function patchedReasoningEffort(
+  deps: AppDeps,
+  userId: string,
+  body: Record<string, unknown>,
+  chat: Chat,
+  model: string | undefined,
+): Promise<string | null | undefined> {
+  const offered = async (id: string): Promise<string[]> =>
+    (await getModel(id, deps.env, deps.chatgpt?.accounts.forUser(userId)))?.reasoningEfforts ?? [];
+  const requested = body['reasoningEffort'];
+  if (requested === null) return null;
+  if (requested === undefined) {
+    if (model === undefined || chat.reasoningEffort === null) return undefined;
+    return (await offered(model)).includes(chat.reasoningEffort) ? undefined : null;
+  }
+  if (typeof requested !== 'string') {
+    throw badRequest('invalid_request', 'reasoningEffort must be a string or null');
+  }
+  const target = model ?? chat.model;
+  if (!(await offered(target)).includes(requested)) {
+    throw badRequest('invalid_request', `Reasoning effort not offered by ${target}: ${requested}`);
+  }
+  return requested;
 }
 
 /** Validates an optional preset id against the catalog @shizue/core owns. */
@@ -415,7 +474,10 @@ async function loadGenerationContext(
   chat: Chat,
 ): Promise<{
   plot: PromptPlot;
+  /** The whole roster, the members the reader sent off the stage marked absent. */
   characters: PromptCharacter[];
+  /** The members still on the stage — the ones a reply may be asked to center on. */
+  onStage: Character[];
   /** The row itself, for the settings that are the plot's rather than the prompt's. */
   row: Plot;
   personaText: string;
@@ -429,13 +491,15 @@ async function loadGenerationContext(
   const row = await loadVisiblePlot(deps.db, chat.plotId, chat.userId);
   // In the creator's order, which is the order the prompt blocks are written in.
   const members = await loadMembers(deps.db, row.id);
+  const absent = new Set(chat.absentCharacterIds ?? []);
 
   const persona = await loadPersona(deps, chat);
   return {
     // Crossed with this chat's own toggles: the style the assembler compiles is
     // the creator's, minus the two features this reader turned off.
     plot: toPromptPlot(row, chat),
-    characters: toPromptCharacters(members),
+    characters: toPromptCharacters(members, absent),
+    onStage: members.filter((member) => !absent.has(member.id)),
     row,
     personaText: persona?.description ?? '',
     userName: persona?.name ?? DEFAULT_USER_NAME,
@@ -451,6 +515,55 @@ async function loadGenerationContext(
 
 const toHistory = (path: Message[]): HistoryMessage[] =>
   path.map((message) => ({ role: message.role, content: message.content }));
+
+/** Header the web client names the reader's IANA time zone in. */
+const TIME_ZONE_HEADER = 'x-shizue-tz';
+
+/**
+ * The reader's time zone as the client reported it. Anything Intl refuses — or
+ * nothing at all — is UTC: a clock macro must never be what fails a turn.
+ */
+function requestTimeZone(c: Context<AppEnv>): string {
+  const zone = c.req.header(TIME_ZONE_HEADER);
+  if (!zone) return 'UTC';
+  try {
+    new Intl.DateTimeFormat(undefined, { timeZone: zone });
+    return zone;
+  } catch {
+    return 'UTC';
+  }
+}
+
+/**
+ * The reader's clock for the time macros, in the plot's content language. The
+ * idle time is the gap between the branch's latest user message and the one
+ * before it — how long the reader was away before this turn — so a regenerate
+ * of the same turn reads the same value.
+ */
+function requestClock(c: Context<AppEnv>, plot: Plot, branch: Message[] = []): MacroClock {
+  const user = branch.findLastIndex((message) => message.role === 'user');
+  const idleMs =
+    user > 0 ? branch[user]!.createdAt.getTime() - branch[user - 1]!.createdAt.getTime() : undefined;
+  return {
+    now: new Date(),
+    timeZone: requestTimeZone(c),
+    locale: plot.language,
+    ...(idleMs !== undefined ? { idleMs } : {}),
+  };
+}
+
+/**
+ * The lore records of the branch a new message is about to end, for the timed
+ * effects: the whole branch, since a sticky entry outlives the history the
+ * memory trims, and the new message's index is its length.
+ */
+function loreStateOf(branch: Message[]): LoreTimedState {
+  const lastTriggered: Record<string, number> = {};
+  branch.forEach((message, index) => {
+    for (const key of message.loreTriggers ?? []) lastTriggered[key] = index;
+  });
+  return { chatLength: branch.length, lastTriggered };
+}
 
 /**
  * The branch as the model reads it: the turns, plus the images the turn being
@@ -683,6 +796,59 @@ function optionalAttachmentIds(body: Record<string, unknown>): string[] {
   return ids;
 }
 
+/** A list of member ids in a body, shape only and without repeats; absent is empty. */
+function optionalMemberIds(body: Record<string, unknown>, key: string): string[] | null | undefined {
+  const value = body[key];
+  if (value === undefined || value === null) return value;
+  if (!Array.isArray(value) || value.some((id) => typeof id !== 'string')) {
+    throw badRequest('invalid_request', `${key} must be an array of character ids`);
+  }
+  return [...new Set(value as string[])];
+}
+
+/**
+ * The members a PATCH sends off the stage. Every id must be one of the plot's
+ * members as the roster stands — read whatever became of the plot's visibility,
+ * since the setting is the reader's own — and an empty list is stored as null:
+ * the whole roster on, the same as a chat that never touched it.
+ */
+async function patchedAbsentIds(
+  deps: AppDeps,
+  body: Record<string, unknown>,
+  chat: Chat,
+): Promise<string[] | null | undefined> {
+  const ids = optionalMemberIds(body, 'absentCharacterIds');
+  if (!ids?.length) return ids === undefined ? undefined : null;
+  const members = new Set((await loadMembers(deps.db, chat.plotId)).map((member) => member.id));
+  if (ids.some((id) => !members.has(id))) {
+    throw badRequest('invalid_request', 'absentCharacterIds must name members of the plot');
+  }
+  return ids;
+}
+
+/**
+ * The names of the members a turn asked to center on, in roster order. Only a
+ * member on the stage can be asked for: one the reader sent away is not in the
+ * scene to speak, and the prompt already says so.
+ */
+function focusNamesOf(onStage: Character[], ids: string[]): string[] {
+  if (ids.some((id) => !onStage.some((member) => member.id === id))) {
+    throw badRequest('invalid_request', 'focusCharacterIds must name members who are in the scene');
+  }
+  return onStage.filter((member) => ids.includes(member.id)).map((member) => member.name);
+}
+
+/**
+ * The body of a generation POST that needs none. The client sends one only to
+ * name the next speaker, so no body at all is an empty request rather than a
+ * malformed one.
+ */
+async function optionalJsonBody(c: Context<AppEnv>): Promise<Record<string, unknown>> {
+  // Hono caches the body it read, so the JSON parse below reads the same text.
+  if (!(await c.req.text()).trim()) return {};
+  return readJsonBody(c);
+}
+
 /**
  * The length a component turn declares. The worker, the frame and the bridge all
  * truncate to it, so a longer one did not come through the runtime — and a program
@@ -749,6 +915,80 @@ function requireSceneBlocks(body: Record<string, unknown>): SceneBlock[] {
   });
 }
 
+/**
+ * What a regenerate of the chat would generate from, right now. The route runs it
+ * inside the generation slot; the creator's prompt inspector runs it bare, since
+ * building a plan writes nothing.
+ */
+async function regeneratePlan(
+  c: Context<AppEnv>,
+  deps: AppDeps,
+  chat: Chat,
+  focusIds: string[] = [],
+): Promise<GenerationPlan> {
+  await requireEnabledModel(deps, chat.userId, chat.model);
+  const context = await loadGenerationContext(deps, chat);
+  const focusNames = focusNamesOf(context.onStage, focusIds);
+  const path = buildPath(context.all, chat.headMessageId);
+  const head = path[path.length - 1];
+  if (!head) throw badRequest('invalid_state', 'The chat has no messages to generate from');
+
+  // An assistant head is replaced by a sibling; a user head (edit fork, or a
+  // failed generation) gets a fresh assistant child instead.
+  const isAssistantHead = head.role === 'assistant';
+  // Regenerating a narration asks for a narration again. Without this the
+  // replacement would come back as ordinary dialogue and the swipe would move
+  // between two different kinds of turn.
+  const narration = isAssistantHead && isNarration(head.content);
+  // Memory is applied to the whole path first — it only ever trims the front,
+  // so the mode-specific trim of the last turn still lines up.
+  const memory = await buildMemoryInput(deps, chat, path, lastUserText(path));
+  // The head is about to be replaced, so whatever it set is not part of the
+  // state the replacement is generated from.
+  const kept = isAssistantHead ? path.slice(0, -1) : path;
+
+  return {
+    chatId: chat.id,
+    model: chat.model,
+    plot: context.plot,
+    characters: context.characters,
+    personaText: context.personaText,
+    userName: context.userName,
+    history: await promptHistory(
+      deps,
+      chat.userId,
+      chat.model,
+      isAssistantHead ? memory.history.slice(0, -1) : memory.history,
+    ),
+    memoryText: memory.memoryText,
+    relationshipText: buildRelationshipText(chat),
+    authorNote: context.authorNote,
+    ...(context.narrator ? { narrator: context.narrator } : {}),
+    // The user turn being answered is still on the branch, so its ruling comes
+    // back with it — a regenerate is the same turn, judged the same way.
+    directions: lastUserDirections(kept),
+    preset: getPreset(chat.preset),
+    variables: pathVariables(context.row, kept.map((message) => message.content)),
+    clock: requestClock(c, context.row, kept),
+    seed: chat.id,
+    // Without the head being replaced: its records belong to the swipe this
+    // generation is an alternative to.
+    loreState: loreStateOf(kept),
+    contextBudget: memorySettingsOf(chat).contextBudget,
+    focusNames,
+    ...(narration
+      ? {
+          trailingSystem: applyMacros(NARRATION_NUDGE, {
+            char: context.plot.name,
+            user: context.userName,
+          }),
+          narration: true,
+        }
+      : {}),
+    target: { kind: 'new', parentId: isAssistantHead ? head.parentId : head.id },
+  };
+}
+
 export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
 
@@ -795,9 +1035,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const persona = await startPersona(deps, userId, plot, body);
 
     // `{{char}}` in a plot's own writing is the work, not one of its members.
+    // The clock is the reader's at the moment the chat opens. There is no seed:
+    // the chat id is minted by the insert below, and an intro is expanded once.
     const intros = introTexts(plot, {
       char: plot.name,
       user: persona?.name ?? DEFAULT_USER_NAME,
+      clock: requestClock(c, plot),
     });
     const chosen = pickIntroIndex(intros.length, body['introIndex']);
 
@@ -969,6 +1212,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const statusWindowEnabled = optionalBoolean(body, 'statusWindowEnabled');
       const choicesEnabled = optionalBoolean(body, 'choicesEnabled');
       const narrator = optionalNarrator(body);
+      const reasoningEffort = await patchedReasoningEffort(deps, userId, body, chat, model);
+      const absentCharacterIds = await patchedAbsentIds(deps, body, chat);
 
       if (
         model === undefined &&
@@ -980,7 +1225,9 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         allowComponentTurns === undefined &&
         statusWindowEnabled === undefined &&
         choicesEnabled === undefined &&
-        narrator === undefined
+        narrator === undefined &&
+        reasoningEffort === undefined &&
+        absentCharacterIds === undefined
       ) {
         return c.json(await chatState(deps, chat));
       }
@@ -998,6 +1245,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           ...(statusWindowEnabled !== undefined ? { statusWindowEnabled } : {}),
           ...(choicesEnabled !== undefined ? { choicesEnabled } : {}),
           ...(narrator !== undefined ? { narrator } : {}),
+          ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+          ...(absentCharacterIds !== undefined ? { absentCharacterIds } : {}),
           updatedAt: new Date(),
         })
         .where(and(eq(chats.id, id), eq(chats.userId, userId)))
@@ -1305,6 +1554,9 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         content: contents[kept + position]!,
         ...(original ? { source: original.source } : {}),
         ...(original?.directions ? { directions: original.directions } : {}),
+        // The copy is the same turn, so it keeps the lore it triggered: timed
+        // effects read the branch's records, and a typo fix must not end them.
+        ...(original?.loreTriggers ? { loreTriggers: original.loreTriggers } : {}),
         // Distinct stamps, like the greeting roots: siblings order by creation, and
         // one insert's rows would otherwise share the transaction's `now()`.
         createdAt: new Date(stamp + position),
@@ -1478,6 +1730,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     if (source === 'component') requireComponentTurnLength(content);
     const directions = optionalDirections(body);
     const attachmentIds = optionalAttachmentIds(body);
+    const focusIds = optionalMemberIds(body, 'focusCharacterIds') ?? [];
 
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
       const chat = await loadOwnedChat(deps, id, userId);
@@ -1487,6 +1740,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const context = await loadGenerationContext(deps, chat);
       // Still before any write, and it needs the card the context just loaded.
       if (source === 'component') requireComponentTurnAllowed(chat, context.row);
+      const focusNames = focusNamesOf(context.onStage, focusIds);
 
       // One transaction, because the uploads are part of the turn: an id that is
       // not this chat's own — or that another turn already claimed — must leave
@@ -1537,7 +1791,11 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           ...path.map((message) => message.content),
           content,
         ]),
+        clock: requestClock(c, context.row, [...path, userMessage]),
+        seed: chat.id,
+        loreState: loreStateOf([...path, userMessage]),
         contextBudget: memorySettingsOf(chat).contextBudget,
+        focusNames,
         target: { kind: 'new', parentId: userMessage.id },
       };
     });
@@ -1546,74 +1804,39 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   app.post('/:id/regenerate', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
+    const focusIds = optionalMemberIds(await optionalJsonBody(c), 'focusCharacterIds') ?? [];
 
-    return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
-      const chat = await loadOwnedChat(deps, id, userId);
-      await requireEnabledModel(deps, userId, chat.model);
-      const context = await loadGenerationContext(deps, chat);
-      const path = buildPath(context.all, chat.headMessageId);
-      const head = path[path.length - 1];
-      if (!head) throw badRequest('invalid_state', 'The chat has no messages to generate from');
+    return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> =>
+      regeneratePlan(c, deps, await loadOwnedChat(deps, id, userId), focusIds),
+    );
+  });
 
-      // An assistant head is replaced by a sibling; a user head (edit fork, or a
-      // failed generation) gets a fresh assistant child instead.
-      const isAssistantHead = head.role === 'assistant';
-      // Regenerating a narration asks for a narration again. Without this the
-      // replacement would come back as ordinary dialogue and the swipe would move
-      // between two different kinds of turn.
-      const narration = isAssistantHead && isNarration(head.content);
-      // Memory is applied to the whole path first — it only ever trims the front,
-      // so the mode-specific trim of the last turn still lines up.
-      const memory = await buildMemoryInput(deps, chat, path, lastUserText(path));
-      // The head is about to be replaced, so whatever it set is not part of the
-      // state the replacement is generated from.
-      const kept = isAssistantHead ? path.slice(0, -1) : path;
-
-      return {
-        chatId: chat.id,
-        model: chat.model,
-        plot: context.plot,
-        characters: context.characters,
-        personaText: context.personaText,
-        userName: context.userName,
-        history: await promptHistory(
-          deps,
-          c.get('userId'),
-          chat.model,
-          isAssistantHead ? memory.history.slice(0, -1) : memory.history,
-        ),
-        memoryText: memory.memoryText,
-        relationshipText: buildRelationshipText(chat),
-        authorNote: context.authorNote,
-        ...(context.narrator ? { narrator: context.narrator } : {}),
-        // The user turn being answered is still on the branch, so its ruling comes
-        // back with it — a regenerate is the same turn, judged the same way.
-        directions: lastUserDirections(kept),
-        preset: getPreset(chat.preset),
-        variables: pathVariables(context.row, kept.map((message) => message.content)),
-        contextBudget: memorySettingsOf(chat).contextBudget,
-        ...(narration
-          ? {
-              trailingSystem: applyMacros(NARRATION_NUDGE, {
-                char: context.plot.name,
-                user: context.userName,
-              }),
-              narration: true,
-            }
-          : {}),
-        target: { kind: 'new', parentId: isAssistantHead ? head.parentId : head.id },
-      };
-    });
+  /**
+   * The prompt a regenerate would send right now, block by block — the creator's
+   * debugging view of their own work. Only for a chat that is the caller's own on
+   * a plot that is the caller's own: anywhere else the prompt is someone else's
+   * writing or someone else's conversation, so the chat is simply not found.
+   *
+   * It builds the plan and stops: no slot, no model, no write.
+   */
+  app.get('/:id/inspect', async (c) => {
+    const userId = c.get('userId');
+    const chat = await loadOwnedChat(deps, requireUuidParam(c), userId);
+    if (!(await ownsPlot(deps, chat.plotId, userId))) throw notFound('Chat not found');
+    const plan = await regeneratePlan(c, deps, chat);
+    return c.json(await inspectGeneration(deps, plan, deps.chatgpt?.accounts.forUser(userId)));
   });
 
   app.post('/:id/continue', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
+    const focusIds = optionalMemberIds(await optionalJsonBody(c), 'focusCharacterIds') ?? [];
 
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
       const chat = await loadOwnedChat(deps, id, userId);
       await requireEnabledModel(deps, userId, chat.model);
       const context = await loadGenerationContext(deps, chat);
+      const focusNames = focusNamesOf(context.onStage, focusIds);
       const path = buildPath(context.all, chat.headMessageId);
       const head = path[path.length - 1];
       if (!head || head.role !== 'assistant') {
@@ -1641,7 +1864,14 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         directions: lastUserDirections(path),
         preset: getPreset(chat.preset),
         variables: pathVariables(context.row, path.map((message) => message.content)),
+        clock: requestClock(c, context.row, path),
+        seed: chat.id,
+        // The message being generated is the head itself, so the branch before it
+        // is what it was first generated on — its own record must not read as a
+        // trigger from the turn before.
+        loreState: loreStateOf(path.slice(0, -1)),
         contextBudget: memorySettingsOf(chat).contextBudget,
+        focusNames,
         target: { kind: 'continue', message: head },
       };
     });
@@ -1653,11 +1883,13 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   app.post('/:id/auto', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
+    const focusIds = optionalMemberIds(await optionalJsonBody(c), 'focusCharacterIds') ?? [];
 
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
       const chat = await loadOwnedChat(deps, id, userId);
       await requireEnabledModel(deps, userId, chat.model);
       const context = await loadGenerationContext(deps, chat);
+      const focusNames = focusNamesOf(context.onStage, focusIds);
       const path = buildPath(context.all, chat.headMessageId);
       const head = path[path.length - 1];
       if (!head || head.role !== 'assistant') {
@@ -1682,7 +1914,11 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         ...(context.narrator ? { narrator: context.narrator } : {}),
         preset: getPreset(chat.preset),
         variables: pathVariables(context.row, path.map((message) => message.content)),
+        clock: requestClock(c, context.row, path),
+        seed: chat.id,
+        loreState: loreStateOf(path),
         contextBudget: memorySettingsOf(chat).contextBudget,
+        focusNames,
         trailingSystem: applyMacros(AUTO_CONTINUE_NUDGE, {
           char: context.plot.name,
           user: context.userName,
@@ -1702,11 +1938,13 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   app.post('/:id/narrate', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
+    const focusIds = optionalMemberIds(await optionalJsonBody(c), 'focusCharacterIds') ?? [];
 
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
       const chat = await loadOwnedChat(deps, id, userId);
       await requireEnabledModel(deps, userId, chat.model);
       const context = await loadGenerationContext(deps, chat);
+      const focusNames = focusNamesOf(context.onStage, focusIds);
       const path = buildPath(context.all, chat.headMessageId);
       const head = path[path.length - 1];
       if (!head) throw badRequest('invalid_state', 'The chat has no messages to narrate from');
@@ -1729,7 +1967,11 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         ...(context.narrator ? { narrator: context.narrator } : {}),
         preset: getPreset(chat.preset),
         variables: pathVariables(context.row, path.map((message) => message.content)),
+        clock: requestClock(c, context.row, path),
+        seed: chat.id,
+        loreState: loreStateOf(path),
         contextBudget: memorySettingsOf(chat).contextBudget,
+        focusNames,
         trailingSystem: applyMacros(NARRATION_NUDGE, {
           char: context.plot.name,
           user: context.userName,
@@ -1816,7 +2058,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
 
         const image = await (deps.generateSceneImage ?? generateSceneImage)(
           deps,
-          sceneImagePrompt(context.plot, context.characters, path),
+          // Only who is on the stage: a member sent off it is not in the picture.
+          sceneImagePrompt(
+            context.plot,
+            context.characters.filter((member) => !member.absent),
+            path,
+          ),
         );
         const attachmentId = randomUUID();
         const stored = await saveAttachment(deps.storage, attachmentId, image.bytes);

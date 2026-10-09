@@ -95,3 +95,128 @@ export const v3Card = {
     },
   },
 };
+
+/** One lorebook entry as SillyTavern's `convertWorldInfoToCharacterBook` writes it. */
+const stEntry = (overrides: Record<string, unknown>, extensions: Record<string, unknown> = {}) => ({
+  id: 0,
+  keys: [] as string[],
+  secondary_keys: [] as string[],
+  comment: '',
+  content: '',
+  constant: false,
+  selective: true,
+  insertion_order: 100,
+  enabled: true,
+  position: 'before_char',
+  use_regex: true, // ST writes this on every entry and never reads it
+  extensions: {
+    position: 0,
+    exclude_recursion: false,
+    display_index: 0,
+    probability: 100,
+    useProbability: true,
+    depth: 4,
+    selectiveLogic: 0,
+    outlet_name: '',
+    group: '',
+    group_override: false,
+    group_weight: 100,
+    prevent_recursion: false,
+    delay_until_recursion: false,
+    scan_depth: null,
+    match_whole_words: null,
+    use_group_scoring: false,
+    case_sensitive: null,
+    automation_id: '',
+    role: 0,
+    vectorized: false,
+    sticky: null,
+    cooldown: null,
+    delay: null,
+    match_persona_description: false,
+    match_character_description: false,
+    match_character_personality: false,
+    match_character_depth_prompt: false,
+    match_scenario: false,
+    match_creator_notes: false,
+    triggers: [],
+    ignore_budget: false,
+    ...extensions,
+  },
+  ...overrides,
+});
+
+/**
+ * A card the way SillyTavern writes one (`charaFormatData` in
+ * `src/endpoints/characters.js`): V2 with the V1 fields repeated at the top, ST's
+ * own extensions, and a lorebook ST built itself — which has no book-level
+ * `extensions`. A factory, because ccardlib's checker deletes the nulls from
+ * whatever it is handed.
+ */
+export const stCard = () => ({
+  name: '엘라라',
+  description: '숲의 엘프 궁수.',
+  personality: '경계심이 많다.',
+  scenario: '국경의 숲.',
+  first_mes: '거기 멈춰.',
+  mes_example: '',
+  creatorcomment: '',
+  avatar: 'none',
+  chat: '엘라라 - 2026-10-09@09h00m00s',
+  talkativeness: 0.5,
+  fav: false,
+  tags: ['판타지'],
+  spec: 'chara_card_v2',
+  spec_version: '2.0',
+  data: {
+    name: '엘라라',
+    description: '숲의 엘프 궁수.',
+    personality: '경계심이 많다.',
+    scenario: '국경의 숲.',
+    first_mes: '거기 멈춰.',
+    mes_example: '',
+    creator_notes: '',
+    system_prompt: '',
+    post_history_instructions: '',
+    tags: ['판타지'],
+    creator: '',
+    character_version: '',
+    alternate_greetings: [],
+    extensions: {
+      talkativeness: 0.5,
+      fav: false,
+      world: '엘라라의 숲',
+      depth_prompt: { prompt: '{{char}}는 숲을 떠나지 않는다.', depth: 2, role: 'system' },
+      regex_scripts: [
+        {
+          id: 'c0ffee00-0000-4000-8000-000000000001',
+          scriptName: '상태창',
+          findRegex: '/\\[status\\] hp=(\\d+)/gi',
+          replaceString: '<div class="hp">{{match}} → $1</div>',
+          trimStrings: [],
+          placement: [2],
+          disabled: false,
+          markdownOnly: true,
+          promptOnly: false,
+          runOnEdit: true,
+          substituteRegex: 0,
+          minDepth: null,
+          maxDepth: null,
+        },
+      ],
+    },
+    character_book: {
+      name: '엘라라의 숲',
+      entries: [
+        stEntry(
+          { id: 0, keys: ['엘프', '/숲(지기|의 왕)/i'], content: '엘프는 숲의 왕을 섬긴다.', insertion_order: 10 },
+          { position: 4, depth: 2, role: 2, display_index: 0, selectiveLogic: 3, probability: 40, sticky: 3, cooldown: 2, delay: 5, scan_depth: 6, group: '숲, 왕국', group_weight: 30 },
+        ),
+        stEntry(
+          { id: 1, keys: ['활'], secondary_keys: ['부러진'], content: '엘라라의 활은 할머니의 유품이다.', insertion_order: 20 },
+          { position: 1, display_index: 1, selectiveLogic: 2, probability: 25, useProbability: false, case_sensitive: true },
+        ),
+      ],
+    },
+  },
+});

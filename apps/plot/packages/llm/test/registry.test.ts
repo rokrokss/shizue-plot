@@ -20,6 +20,11 @@ describe('ChatGPT-only registry', () => {
       models: async () => [{ id: model, label: model, vision: model === 'vision' }],
     });
     expect(await listEnabledModels(env, account('gpt-a', 'A'))).toEqual([{ id: 'gpt-a', label: 'gpt-a' }]);
+    // The efforts travel with the listing — the selector is drawn from them.
+    expect(await listEnabledModels(env, {
+      accessToken: async () => 'C',
+      models: async () => [{ id: 'gpt-r', label: 'R', vision: true, reasoningEfforts: ['low', 'high'], defaultReasoningEffort: 'low' }],
+    })).toEqual([{ id: 'gpt-r', label: 'R', reasoningEfforts: ['low', 'high'], defaultReasoningEffort: 'low' }]);
     expect(await supportsVision('vision', env, account('vision', 'B'))).toBe(true);
     await expect(getAdapter('gpt-a', env, account('gpt-b', 'B'))).rejects.toMatchObject({ code: 'model_unavailable' });
     expect((await getAdapter('gpt-a', env, account('gpt-a', 'A'))).providerModel).toBe('gpt-a');
