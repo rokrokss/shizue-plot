@@ -55,7 +55,7 @@ export function AttachmentChips({
               type="button"
               title={t('attachFailed')}
               onClick={() => onRetry(chip.key)}
-              className="absolute inset-0 flex items-center justify-center bg-canvas/70 text-[11px] text-danger hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+              className="absolute inset-0 flex items-center justify-center bg-canvas/70 text-xs text-danger hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
             >
               {common('retry')}
             </button>

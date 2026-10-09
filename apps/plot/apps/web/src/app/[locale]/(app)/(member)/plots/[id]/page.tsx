@@ -307,7 +307,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
               aria-label={t('name')}
               value={name}
               onChange={(event) => setName(event.target.value)}
-              className="min-w-0 flex-1 truncate border-none bg-transparent text-2xl font-bold tracking-tight sm:text-3xl text-fg focus:outline-none"
+              className="min-w-0 flex-1 truncate border-none bg-transparent title2 sm:title1 text-fg focus:outline-none"
             />
             <PublicBadge />
           </div>
@@ -463,19 +463,19 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
           <Section title={t('customUi')}>
             <p className="text-xs text-muted/80">{t('customUiHint')}</p>
 
-            <h3 className="text-xs font-medium tracking-wide text-muted uppercase">
+            <h3 className="text-xs font-medium text-muted">
               {t('displayScripts')}
             </h3>
             <p className="text-xs text-muted/80">{t('displayScriptsHint')}</p>
             <DisplayScriptEditor scripts={scripts} onChange={setScripts} />
 
-            <h3 className="text-xs font-medium tracking-wide text-muted uppercase">
+            <h3 className="text-xs font-medium text-muted">
               {t('defaultVariables')}
             </h3>
             <p className="text-xs text-muted/80">{t('defaultVariablesHint')}</p>
             <DefaultVariablesEditor variables={variables} onChange={setVariables} />
 
-            <h3 className="text-xs font-medium tracking-wide text-muted uppercase">
+            <h3 className="text-xs font-medium text-muted">
               {t('componentCode')}
             </h3>
             <p className="text-xs text-muted/80">{t('componentCodeSectionHint')}</p>
@@ -711,7 +711,7 @@ function MembersSection({
                 built from the saved card — which is what the hint tells the creator. */}
             <div className="space-y-1.5">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="text-xs font-medium tracking-wide text-muted uppercase">
+                <span className="text-xs font-medium text-muted">
                   {t('memberExport')}
                 </span>
                 {(['json', 'png'] as const).map((format) => (
@@ -832,7 +832,7 @@ function MemberAvatarPicker({
             {t('avatarRemove')}
           </Button>
         ) : (
-          <span className="text-[11px] text-muted/80">{t('avatarHint')}</span>
+          <span className="text-xs text-muted/80">{t('avatarHint')}</span>
         )}
         <ErrorText>{error}</ErrorText>
       </div>
@@ -883,7 +883,7 @@ function CoverPicker({
   return (
     <div className="space-y-1.5">
       <span className="flex flex-wrap items-center gap-2">
-        <span className="text-xs font-medium tracking-wide text-muted uppercase">{t('cover')}</span>
+        <span className="text-xs font-medium text-muted">{t('cover')}</span>
         <PublicBadge />
       </span>
       {plot.coverUrl ? (

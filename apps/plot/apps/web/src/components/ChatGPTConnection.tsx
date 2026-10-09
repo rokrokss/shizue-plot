@@ -20,7 +20,7 @@ export function ChatGPTConnection({ entrance = false, next = '/', error }: { ent
   const t = useTranslations('chatgpt');
   return (
     <section className={cx('min-w-0 space-y-5', !entrance && 'rounded-2xl border border-line bg-surface p-6 shadow-card')}>
-      <h2 className="text-2xl font-bold tracking-tight">{t(entrance ? 'welcome' : 'title')}</h2>
+      <h2 className="title2">{t(entrance ? 'welcome' : 'title')}</h2>
       <p className="text-sm leading-relaxed text-muted">{t('description')}</p>
       {entrance ? <SignIn next={next} errorCode={error} /> : <Account />}
     </section>

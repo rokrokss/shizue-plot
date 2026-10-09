@@ -53,7 +53,7 @@ export function AiBadge() {
     <span
       data-testid="ai-badge"
       title={t('aiBadgeHint')}
-      className="rounded-full bg-raised px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-muted uppercase"
+      className="rounded-full bg-raised px-1.5 py-0.5 caption2 text-muted"
     >
       {t('aiBadge')}
     </span>

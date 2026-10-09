@@ -18,10 +18,10 @@ export default async function LocaleNotFound() {
 
   return (
     <main className="flex min-h-dvh flex-col items-center justify-center gap-4 p-10 text-center">
-      <p className="text-[11px] leading-none font-medium tracking-[0.32em] text-muted tabular-nums">
+      <p className="text-xs leading-none font-medium text-muted tabular-nums">
         404
       </p>
-      <h1 className="text-lg font-semibold tracking-tight text-fg">{t('title')}</h1>
+      <h1 className="heading2 text-fg">{t('title')}</h1>
       <p className="max-w-sm text-sm text-muted">{t('body')}</p>
       <Link
         href="/"

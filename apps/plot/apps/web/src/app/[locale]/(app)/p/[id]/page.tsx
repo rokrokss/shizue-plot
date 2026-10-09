@@ -102,7 +102,7 @@ export default function PublicPlotPage({ params }: { params: Promise<{ id: strin
         <div className="space-y-6 lg:col-span-2">
           <div className="flex flex-wrap items-center gap-4">
             <div className="min-w-0 flex-1">
-              <h1 className="truncate text-2xl font-bold tracking-tight sm:text-3xl">{plot.name}</h1>
+              <h1 className="truncate title2 sm:title1">{plot.name}</h1>
               <div className="mt-1 flex flex-wrap items-center gap-3">
                 <Link
                   href={`/creators/${plot.creatorId}`}

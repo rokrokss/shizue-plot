@@ -89,7 +89,7 @@ export function SceneEditor({
   return (
     <fieldset disabled={busy} aria-busy={busy || undefined} className="min-w-0 space-y-3 rounded-xl border border-line bg-surface/60 p-4">
       <div className="flex items-center justify-between gap-3">
-        <h3 className="text-xs font-medium tracking-wide text-fg">{t('sceneTitle')}</h3>
+        <h3 className="text-xs font-medium text-fg">{t('sceneTitle')}</h3>
         <p className="text-xs text-muted">{t('sceneHint')}</p>
       </div>
 

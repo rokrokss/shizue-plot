@@ -72,7 +72,7 @@ export function PromptInspector({ chatId }: { chatId: string }) {
   return (
     <section data-testid="prompt-inspector" className="space-y-3 border-t border-line pt-5">
       <div className="flex items-center justify-between gap-3">
-        <h2 className="text-xs font-medium tracking-wide text-muted uppercase">{t('title')}</h2>
+        <h2 className="text-xs font-medium text-muted">{t('title')}</h2>
         <div className="flex items-center gap-1">
           {report ? (
             <Button size="sm" variant="ghost" onClick={() => setReport(null)}>

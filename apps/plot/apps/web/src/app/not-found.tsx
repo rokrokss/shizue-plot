@@ -14,7 +14,7 @@ export default function NotFound() {
     <html lang="en">
       <body>
         <main className="flex min-h-dvh flex-col items-center justify-center gap-5">
-          <p className="text-2xl font-semibold tracking-tight text-fg tabular-nums">404</p>
+          <p className="title2 text-fg tabular-nums">404</p>
           <a
             href="/"
             translate="no"

@@ -12,7 +12,7 @@ import { SignOutButton } from './SignOutButton';
 import { buttonClass, cx } from './ui';
 
 const TAB =
-  'flex flex-1 flex-col gap-1 items-center justify-center px-1 text-[11px] font-medium transition-colors ' +
+  'flex flex-1 flex-col gap-1 items-center justify-center px-1 button10 transition-colors ' +
   'focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-focus';
 
 /**

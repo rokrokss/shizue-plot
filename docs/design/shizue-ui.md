@@ -35,9 +35,25 @@ UI 작업 전에 읽는다. 제품 이름은 소문자 `shizue`, 저장소 이�
 
 ## 서체와 레이아웃
 
-- 워드마크는 shizue.net과 같은 Bricolage Grotesque 800(`next/font`로 빌드 시 자체 호스팅)을 쓴다.
-  본문·폼·버튼은 시스템 산세리프를 사용한다. 픽셀 서체는 사용하지 않는다.
-- 제목은 굵고 촘촘한 자간, 본문은 편안한 행간. 한국어는 어절 단위로 줄바꿈한다.
+- 워드마크(`shizue`)만 shizue.net과 같은 Bricolage Grotesque 800(`next/font`로 빌드 시 자체 호스팅)을 쓴다.
+  그 밖의 글자는 모두 zeta 웹(zeta-ai.io)과 같은 Pretendard Variable, 일본어 글리프는 Pretendard JP Variable이다.
+  두 서체는 npm 패키지의 dynamic subset CSS를 `globals.css`에서 불러 같은 출처에서 제공한다. 픽셀 서체는 사용하지 않는다.
+- 용도별 글자 스타일은 zeta의 이름과 값을 그대로 쓰는 `globals.css`의 유틸리티다. 굵기는 600이 최대다.
+
+| 용도 | 스타일 |
+|---|---|
+| 페이지 제목 | `title2 sm:title1` (24 → 28px) |
+| 브랜드 화면 큰 제목 | `title24 sm:title32` |
+| 섹션 제목 · 카드 섹션 · 작은 페이지 제목 | `heading1` · `heading3` · `heading2` |
+| 카드 작품 이름 | `body1 font-semibold` |
+| 본문 · 입력 | `text-sm` (= zeta body2, 14/20) |
+| 메타 · 라벨 · 태그 | `text-xs` (= zeta caption1, 12/16), 라벨은 `font-medium`. 대문자 변환·넓은 자간은 쓰지 않는다 |
+| 아주 작은 배지 · 숫자 | `caption2` |
+| 버튼 | `body14 font-medium` |
+| 모바일 탭바 | `button10` |
+| 대화 본문 | `.message-body` = zeta `chat` (15px / 19.2px, 자간 -0.3px) |
+
+- 한국어는 어절 단위로 줄바꿈한다.
 - 기본 간격은 4/8/12/16/24/32px. 페이지 폭은 목록 1152px, 읽기·설정 768px.
 - 브랜드 화면은 도트와 픽셀 장식을 사용한다. 채팅 본문에는 패턴을 넣지 않는다.
 - 카드·폼은 12–24px 반경. 주요 CTA와 브랜드 패널에는 잉크 테두리와 짧은 단색 그림자.

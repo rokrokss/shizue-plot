@@ -29,7 +29,7 @@ export function AuthForm({ next, error }: { next?: string | string[]; error?: st
       <div className="brand-dots flex flex-col justify-between border-b-2 border-fg bg-mint-soft p-7 sm:p-10 lg:border-r-2 lg:border-b-0">
         <div>
           <p className="text-xs font-semibold text-link">{rebrand('eyebrow')}</p>
-          <h1 className="mt-4 whitespace-pre-line text-2xl leading-tight font-bold tracking-tight sm:text-4xl">{brand('catchphrase')}</h1>
+          <h1 className="mt-4 whitespace-pre-line title24 sm:title32">{brand('catchphrase')}</h1>
           <p className="mt-4 hidden max-w-sm text-sm sm:block leading-relaxed text-muted">{brand('tagline')}</p>
         </div>
         <div className="hidden sm:block"><BrandGarden /></div>

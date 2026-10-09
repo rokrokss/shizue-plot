@@ -304,7 +304,7 @@ function Catalogue() {
           <span className="inline-flex items-center gap-2 rounded-full border border-fg bg-surface px-3 py-1.5 text-xs font-semibold">
             <span aria-hidden="true" className="size-2 bg-accent" />{rebrand('eyebrow')}
           </span>
-          <h1 className="mt-5 max-w-xl text-3xl leading-tight font-bold tracking-tight sm:text-4xl">{rebrand('journeyTitle')}</h1>
+          <h1 className="mt-5 max-w-xl title24 sm:title32">{rebrand('journeyTitle')}</h1>
           <p className="mt-3 max-w-lg text-sm leading-relaxed text-muted sm:text-base">{rebrand('journeySubtitle')}</p>
           <div className="mt-6 flex flex-wrap gap-3">
             <a href="#plot-catalogue" className={buttonClass('primary')}>
@@ -317,7 +317,7 @@ function Catalogue() {
       </section>
 
       <div id="plot-catalogue" className="mt-10 scroll-mt-20">
-        <h2 className="text-xl font-bold tracking-tight">{t('title')}</h2>
+        <h2 className="heading1">{t('title')}</h2>
         <p className="mt-1.5 text-sm text-muted">{t('subtitle')}</p>
       </div>
 

@@ -28,7 +28,7 @@ export function LockedImage({ kind }: { kind: AssetUnlockKind }) {
         🔒
       </span>
       <span className="text-xs text-muted">{t('lockedImage')}</span>
-      <span className="text-xs tracking-wide text-fg/80">{hint}</span>
+      <span className="text-xs text-fg/80">{hint}</span>
     </span>
   );
 }

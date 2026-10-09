@@ -1,4 +1,7 @@
 @import 'tailwindcss';
+/* Zeta's faces, self-hosted: each unicode-range subset is fetched from this origin on first use. */
+@import 'pretendard/dist/web/variable/pretendardvariable-dynamic-subset.css';
+@import 'pretendard-jp/dist/web/variable/pretendardvariable-jp-dynamic-subset.css';
 
 /* Shared with ../shizue/store/src/base.css; see docs/design/shizue-ui.md. */
 @theme {
@@ -14,9 +17,26 @@
   --color-link: #126b61;
   --color-focus: #126b61;
   --color-danger: #b43e35;
-  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Apple SD Gothic Neo', 'Hiragino Sans', 'Noto Sans KR', 'Noto Sans JP', 'Segoe UI', sans-serif;
+  --font-sans: 'Pretendard Variable', 'Pretendard JP Variable', -apple-system, system-ui, Roboto, 'Helvetica Neue', 'Segoe UI', 'Apple SD Gothic Neo', 'Noto Sans KR', 'Malgun Gothic', 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', sans-serif;
   --shadow-card: 3px 3px 0 #10302b;
 }
+
+/*
+ * Zeta's type styles, by purpose, with Zeta's names and values. `text-xs` and
+ * `text-sm` already equal its caption1 (12/16) and body2 (14/20). Zeta tops out
+ * at 600; the wordmark is the only heavier text.
+ */
+@utility title1 { letter-spacing: -0.035rem; font-size: 1.75rem; font-weight: 600; line-height: 2.375rem; }
+@utility title2 { letter-spacing: -0.027rem; font-size: 1.5rem; font-weight: 600; line-height: 2rem; }
+@utility title24 { letter-spacing: -0.0225rem; font-size: 1.5rem; font-weight: 600; line-height: 1.8rem; }
+@utility title32 { letter-spacing: -0.03rem; font-size: 2rem; font-weight: 600; line-height: 2.4rem; }
+@utility heading1 { letter-spacing: -0.0125rem; font-size: 1.25rem; font-weight: 600; line-height: 1.75rem; }
+@utility heading2 { letter-spacing: 0; font-size: 1.125rem; font-weight: 600; line-height: 1.625rem; }
+@utility heading3 { letter-spacing: 0; font-size: 1rem; font-weight: 600; line-height: 1.5rem; }
+@utility body1 { letter-spacing: 0; font-size: 0.938rem; font-weight: 400; line-height: 1.375rem; }
+@utility body14 { letter-spacing: -0.013125rem; font-size: 0.875rem; font-weight: 400; line-height: 1.05rem; }
+@utility caption2 { letter-spacing: 0; font-size: 0.625rem; font-weight: 500; line-height: 0.875rem; }
+@utility button10 { letter-spacing: -0.00625rem; font-size: 0.625rem; font-weight: 500; line-height: 0.625rem; }
 
 html { color-scheme: light; scrollbar-gutter: stable; }
 body {
@@ -64,9 +84,11 @@ a, button, input, select, textarea, summary { -webkit-tap-highlight-color: trans
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0s !important; }
 }
 
-/* Rendered message bodies: markdown from the model. */
+/* Rendered message bodies: markdown from the model, in Zeta's `chat` style. */
 .message-body {
-  line-height: 1.75;
+  letter-spacing: -0.01876rem;
+  font-size: 0.938rem;
+  line-height: 1.2rem;
   overflow-wrap: anywhere;
 }
 

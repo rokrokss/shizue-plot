@@ -45,6 +45,9 @@ importers:
       '@aws-sdk/client-s3':
         specifier: ^3.1105.0
         version: 3.1106.0
+      '@hono/node-server':
+        specifier: ^2.1.0
+        version: 2.1.0(hono@4.13.13)
       '@shizue/contracts':
         specifier: workspace:*
         version: link:../../../../packages/contracts
@@ -57,9 +60,6 @@ importers:
       '@shizue/llm':
         specifier: workspace:*
         version: link:../../packages/llm
-      '@hono/node-server':
-        specifier: ^2.1.0
-        version: 2.1.0(hono@4.13.13)
       better-auth:
         specifier: ^1.6.26
         version: 1.6.26(drizzle-kit@0.31.11)(drizzle-orm@0.45.2(@electric-sql/pglite@0.5.4)(kysely@0.29.4)(postgres@3.4.9))(next@16.4.0(@playwright/test@1.62.1)(@types/node@24.10.1)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vitest@4.1.11(@types/node@24.10.1)(jsdom@30.1.2(@noble/hashes@2.3.0))(vite@7.3.7(@types/node@24.10.1)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.23.11)))
@@ -112,6 +112,12 @@ importers:
       next-intl:
         specifier: ^4.13.6
         version: 4.13.6(@swc/helpers@0.5.23)(next@16.4.0(@playwright/test@1.62.1)(@types/node@24.10.1)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react@19.2.8)(typescript@5.9.3)
+      pretendard:
+        specifier: ^1.3.9
+        version: 1.3.9
+      pretendard-jp:
+        specifier: ^1.3.9
+        version: 1.3.9
       react:
         specifier: ^19.2.8
         version: 19.2.8
@@ -2357,6 +2363,12 @@ packages:
   postgres@3.4.9:
     resolution: {integrity: sha512-GD3qdB0x1z9xgFI6cdRD6xu2Sp2WCOEoe3mtnyB5Ee0XrrL5Pe+e4CCnJrRMnL1zYtRDZmQQVbvOttLnKDLnaw==}
     engines: {node: '>=12'}
+
+  pretendard-jp@1.3.9:
+    resolution: {integrity: sha512-F00fRLyHa9IQh80hj80Z3wEDamD1gFStFKY2yQUdugQp+54mk7LEEuB3uRxgWk2EMLvigr2Zc34hKTe2X9okuQ==}
+
+  pretendard@1.3.9:
+    resolution: {integrity: sha512-PaQAADyLY5v4kYFwkpSJHbSSYIkiriY/1xXw75TKoZ9UQQqeU+tvP05yTdZAWibiIYoo8ZKtRv8PM7w0IaywSw==}
 
   property-information@7.2.0:
     resolution: {integrity: sha512-IAtzIB6sUiWaJYrX9smp3V46pBGbBeLFRGdh25kg1334VcBlD8HzhPeNIWQH9zhGmo2itIe25EHt9dQP7G5hmg==}
@@ -4692,6 +4704,10 @@ snapshots:
       source-map-js: 1.2.2
 
   postgres@3.4.9: {}
+
+  pretendard-jp@1.3.9: {}
+
+  pretendard@1.3.9: {}
 
   property-information@7.2.0: {}
 

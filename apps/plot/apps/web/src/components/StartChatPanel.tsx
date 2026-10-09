@@ -112,7 +112,7 @@ export function StartChatPanel({
           picking either gives up the other, because the chat carries one. */}
       {profiles.length > 0 ? (
         <div className="space-y-1.5">
-          <span className="block text-xs font-medium tracking-wide text-muted uppercase">
+          <span className="block text-xs font-medium text-muted">
             {t('profiles')}
           </span>
           <ul className="flex flex-wrap gap-2">

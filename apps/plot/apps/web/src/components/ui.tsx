@@ -10,7 +10,7 @@ export const cx = (...parts: (string | false | null | undefined)[]): string =>
 
 /* `relative` is for the busy spinner, which lies over the label rather than beside it. */
 const BUTTON_BASE =
-  'relative inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-xl text-sm font-semibold ' +
+  'relative inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-xl body14 font-medium ' +
   'transition-colors disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-2 ' +
   'focus-visible:outline-offset-2 focus-visible:outline-focus';
 
@@ -112,7 +112,7 @@ export function Badge({
   return (
     <span
       className={cx(
-        'inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[11px] leading-none whitespace-nowrap',
+        'inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-xs leading-none whitespace-nowrap',
         BADGE_TONES[tone],
       )}
     >
@@ -191,7 +191,7 @@ export function Section({
     <section aria-busy={busy || undefined} className="rounded-2xl border border-line bg-surface p-5 sm:p-6">
       <fieldset disabled={busy} className="min-w-0">
         <div className="mb-4 flex items-center justify-between gap-3">
-          <h2 className="text-sm font-semibold tracking-wide text-fg">{title}</h2>
+          <h2 className="heading3 text-fg">{title}</h2>
           {action}
         </div>
         <div className="space-y-4">{children}</div>

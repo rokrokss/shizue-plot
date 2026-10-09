@@ -36,7 +36,7 @@ export default function CreatorPage({ params }: { params: Promise<{ id: string }
     <div className="mx-auto w-full max-w-6xl px-5 py-10">
       <div className="flex flex-wrap items-center gap-4">
         <div className="min-w-0 flex-1">
-          <h1 className="truncate text-2xl font-bold tracking-tight sm:text-3xl">{creator.name}</h1>
+          <h1 className="truncate title2 sm:title1">{creator.name}</h1>
           <p className="mt-1 text-sm text-muted">
             {t('plotCount', { count: creator.publicPlots.length })}
           </p>

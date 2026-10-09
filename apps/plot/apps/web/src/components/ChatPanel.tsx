@@ -45,7 +45,7 @@ function IllustrationGallery({ illustrations }: { illustrations: readonly Illust
 
   return (
     <section data-testid="chat-illustrations" className="space-y-3 border-b border-line pb-5">
-      <h2 className="text-xs font-medium tracking-wide text-muted uppercase">
+      <h2 className="text-xs font-medium text-muted">
         {t('illustrations')}
       </h2>
       <ul className="grid grid-cols-3 gap-2 sm:grid-cols-4">
@@ -60,7 +60,7 @@ function IllustrationGallery({ illustrations }: { illustrations: readonly Illust
                   🔒
                 </span>
                 {illustration.kind ? (
-                  <span className="text-[10px] leading-tight text-muted">
+                  <span className="caption2 text-muted">
                     {t(`lockedHints.${illustration.kind}`)}
                   </span>
                 ) : null}
@@ -260,7 +260,7 @@ export function ChatPanel({
           panel can answer about a chat that holds more than one voice. */}
       {members.length > 0 ? (
         <section data-testid="chat-members" className="space-y-3 border-b border-line pb-5">
-          <h2 className="text-xs font-medium tracking-wide text-muted uppercase">{t('members')}</h2>
+          <h2 className="text-xs font-medium text-muted">{t('members')}</h2>
           <ul className="flex flex-wrap gap-x-4 gap-y-2">
             {members.map((member) => {
               const away = absentCharacterIds.includes(member.id);
@@ -310,7 +310,7 @@ export function ChatPanel({
       </section>
 
       <section data-testid="chat-notes" className="space-y-3 border-t border-line pt-5">
-        <h2 className="text-xs font-medium tracking-wide text-muted uppercase">{t('attachedNotes')}</h2>
+        <h2 className="text-xs font-medium text-muted">{t('attachedNotes')}</h2>
         {notes.length === 0 ? (
           <p className="text-sm text-muted">{t('attachedNotesEmpty')}</p>
         ) : (
@@ -345,14 +345,14 @@ export function ChatPanel({
           </>
         ) : (
           <>
-            <h2 className="text-xs font-medium tracking-wide text-muted uppercase">{t('memory')}</h2>
+            <h2 className="text-xs font-medium text-muted">{t('memory')}</h2>
             <p className="text-sm text-muted">{t('memoryEmpty')}</p>
           </>
         )}
       </section>
 
       <section data-testid="memory-settings" className="space-y-3 border-t border-line pt-5">
-        <h2 className="text-xs font-medium tracking-wide text-muted uppercase">{t('memorySettings')}</h2>
+        <h2 className="text-xs font-medium text-muted">{t('memorySettings')}</h2>
         <div className="grid gap-3 sm:grid-cols-3">
           <Field label={t('contextBudget')}>
             <Select
@@ -408,7 +408,7 @@ export function ChatPanel({
       </section>
 
       <section data-testid="chat-narrator" className="space-y-3 border-t border-line pt-5">
-        <h2 className="text-xs font-medium tracking-wide text-muted uppercase">{t('narrator')}</h2>
+        <h2 className="text-xs font-medium text-muted">{t('narrator')}</h2>
         <Field label={t('narratorVoice')}>
           <TextArea
             rows={3}
@@ -440,7 +440,7 @@ export function ChatPanel({
           the feature off — there would be nothing on the other end of it. */}
       {statusWindow || choices ? (
         <section data-testid="chat-plot-features" className="space-y-3 border-t border-line pt-5">
-          <h2 className="text-xs font-medium tracking-wide text-muted uppercase">
+          <h2 className="text-xs font-medium text-muted">
             {t('plotFeatures')}
           </h2>
           {statusWindow ? (
@@ -470,7 +470,7 @@ export function ChatPanel({
 
       <section data-testid="chat-display" className="space-y-3 border-t border-line pt-5">
         <div className="flex items-center justify-between gap-3">
-          <h2 className="text-xs font-medium tracking-wide text-muted uppercase">{t('display')}</h2>
+          <h2 className="text-xs font-medium text-muted">{t('display')}</h2>
           <Checkbox
             label={t('customUi')}
             checked={customUi}
@@ -480,7 +480,7 @@ export function ChatPanel({
         <p className="text-xs text-muted/80">{t('customUiHint')}</p>
 
         <div className="flex items-center justify-between gap-3">
-          <h2 className="text-xs font-medium tracking-wide text-muted uppercase">
+          <h2 className="text-xs font-medium text-muted">
             {t('componentTurns')}
           </h2>
           <Checkbox
@@ -495,7 +495,7 @@ export function ChatPanel({
 
       <section data-testid="chat-relationship" className="space-y-3 border-t border-line pt-5">
         <div className="flex items-center justify-between gap-3">
-          <h2 className="text-xs font-medium tracking-wide text-muted uppercase">{t('relationship')}</h2>
+          <h2 className="text-xs font-medium text-muted">{t('relationship')}</h2>
           <Checkbox
             label={t('relationshipEnabled')}
             checked={relationshipEnabled}

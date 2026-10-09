@@ -1766,7 +1766,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           data-testid="attachment-drop"
           className="pointer-events-none fixed inset-0 z-40 flex items-center justify-center bg-canvas/70 backdrop-blur-sm"
         >
-          <span className="rounded-xl border border-dashed border-muted px-6 py-4 text-sm tracking-wide text-fg">
+          <span className="rounded-xl border border-dashed border-muted px-6 py-4 text-sm text-fg">
             {t('attach')}
           </span>
         </div>

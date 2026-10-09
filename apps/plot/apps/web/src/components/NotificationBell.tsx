@@ -93,7 +93,7 @@ export function NotificationBell() {
           <span
             aria-hidden="true"
             data-testid="notification-badge"
-            className="absolute top-0.5 right-0.5 min-w-4 rounded-full bg-accent px-1 text-[10px] leading-4 font-medium text-accent-ink tabular-nums"
+            className="absolute top-0.5 right-0.5 min-w-4 rounded-full bg-accent px-1 caption2 leading-4 text-accent-ink tabular-nums"
           >
             {unread > 99 ? '99+' : unread}
           </span>
@@ -106,7 +106,7 @@ export function NotificationBell() {
           className="absolute right-0 z-30 mt-1 max-h-96 w-72 overflow-y-auto rounded-lg border border-line bg-raised p-1 shadow-lg"
         >
           <div className="flex items-center justify-between gap-2 px-2 py-1.5">
-            <span className="text-xs font-medium tracking-wide text-muted uppercase">
+            <span className="text-xs font-medium text-muted">
               {t('title')}
             </span>
             <button

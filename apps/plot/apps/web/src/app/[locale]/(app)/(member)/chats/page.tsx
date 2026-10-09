@@ -39,7 +39,7 @@ export default function ChatsPage() {
 
   return (
     <div className="mx-auto w-full max-w-3xl px-5 py-10">
-      <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">{t('listTitle')}</h1>
+      <h1 className="title2 sm:title1">{t('listTitle')}</h1>
       <p className="mt-2 text-sm text-muted">{rebrand('chatSubtitle')}</p>
 
       <div className="mt-4">

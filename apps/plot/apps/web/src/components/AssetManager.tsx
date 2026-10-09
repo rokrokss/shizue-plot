@@ -144,7 +144,7 @@ export function AssetManager({ plotId }: { plotId: string }) {
                 loading="lazy"
                 className="aspect-square w-full object-cover"
               />
-              <p className="truncate px-2 pt-1 text-[11px] text-muted" title={`{{img::${asset.slug}}}`}>
+              <p className="truncate px-2 pt-1 text-xs text-muted" title={`{{img::${asset.slug}}}`}>
                 {asset.slug}
               </p>
               {/* What this image waits for, and the way to change it. One editor
@@ -156,7 +156,7 @@ export function AssetManager({ plotId }: { plotId: string }) {
                 aria-label={t('assetUnlockEdit', { slug: asset.slug })}
                 aria-expanded={editing === asset.slug}
                 onClick={() => setEditing((current) => (current === asset.slug ? null : asset.slug))}
-                className="block w-full truncate px-2 pb-1 text-left text-[11px] text-muted transition-colors hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                className="block w-full truncate px-2 pb-1 text-left text-xs text-muted transition-colors hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
               >
                 {asset.unlock ? '🔒 ' : ''}
                 {t(UNLOCK_LABEL[asset.unlock?.kind ?? 'none'])}
@@ -337,7 +337,7 @@ function UnlockEditor({
       className="space-y-3 rounded-lg border border-line bg-canvas/60 p-3"
     >
       <div className="flex items-center justify-between gap-3">
-        <h3 className="min-w-0 truncate text-xs font-medium tracking-wide text-muted uppercase">
+        <h3 className="min-w-0 truncate text-xs font-medium text-muted">
           {t('assetUnlockOf', { slug: asset.slug })}
         </h3>
         <Button size="sm" variant="ghost" aria-label={common('close')} onClick={onClose}>

@@ -70,7 +70,7 @@ export function ChatSettings({
       <div className="space-y-1.5">
         <label
           htmlFor={`${id}-${key}`}
-          className="block text-xs font-medium tracking-wide text-muted uppercase"
+          className="block text-xs font-medium text-muted"
         >
           {label}
         </label>

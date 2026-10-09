@@ -116,7 +116,7 @@ function OptionRow({
 function Group({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="space-y-4 border-t border-line pt-5 first:border-0 first:pt-0">
-      <h3 className="text-xs font-medium tracking-wide text-muted uppercase">{title}</h3>
+      <h3 className="text-xs font-medium text-muted">{title}</h3>
       {children}
     </section>
   );

@@ -122,7 +122,7 @@ export default function PlotsPage() {
       <fieldset disabled={busy} aria-busy={busy || undefined} className="min-w-0">
         <div className="mt-6 flex flex-wrap items-end justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">{t('title')}</h1>
+            <h1 className="title2 sm:title1">{t('title')}</h1>
             <p className="mt-1 text-sm text-muted">{t('subtitle')}</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -170,7 +170,7 @@ export default function PlotsPage() {
             data-testid="plot-draft-panel"
             className="mt-5 space-y-3 rounded-xl border border-line bg-surface/60 p-3"
           >
-            <h2 className="text-sm font-semibold tracking-wide text-fg">{t('draftTitle')}</h2>
+            <h2 className="heading3 text-fg">{t('draftTitle')}</h2>
             <Field label={t('draftPremise')} hint={t('draftHint')}>
               <TextArea
                 autoFocus
@@ -244,21 +244,21 @@ export default function PlotsPage() {
                     className="aspect-[16/10] w-full bg-raised/60 object-cover"
                   />
                 ) : (
-                  <div className="brand-dots flex aspect-[16/10] w-full items-center justify-center bg-mint-soft/60"><span className="line-clamp-2 px-6 text-center text-xl font-bold">{plot.name}</span></div>
+                  <div className="brand-dots flex aspect-[16/10] w-full items-center justify-center bg-mint-soft/60"><span className="line-clamp-2 px-6 text-center heading1">{plot.name}</span></div>
                 )}
                 <div className="flex min-w-0 flex-1 flex-col gap-2 p-5">
                   <div className="flex items-center gap-2">
                     <p className="min-w-0 flex-1 truncate text-sm font-medium text-fg">
                       {plot.name}
                     </p>
-                    <span className="shrink-0 text-[11px] text-muted">
+                    <span className="shrink-0 text-xs text-muted">
                       {plot.visibility === 'public' ? t('public') : t('private')}
                     </span>
                   </div>
                   <p className="line-clamp-2 text-xs leading-relaxed text-muted">
                     {plot.intro || plot.description || t('noDescription')}
                   </p>
-                  <p className="mt-auto pt-1 text-[11px] text-muted">
+                  <p className="mt-auto pt-1 text-xs text-muted">
                     {t('updatedAt', {
                       date: format.dateTime(new Date(plot.updatedAt), { dateStyle: 'medium' }),
                     })}
