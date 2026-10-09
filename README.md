@@ -4,8 +4,6 @@ Character chat with plot creation, character cards, persistent conversations,
 branching replies, memory and personas. AI runs through Sign in with ChatGPT. The app supports Korean,
 English and Japanese.
 
-Repository: https://github.com/rokrokss/shizue-plot
-
 ## Layout
 
 | Path | Purpose |
