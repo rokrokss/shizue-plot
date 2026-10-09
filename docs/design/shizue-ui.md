@@ -47,8 +47,9 @@ UI 작업 전에 읽는다. 제품 이름은 소문자 `shizue`, 저장소 이�
 
 `apps/plot/apps/web/public/brand/`:
 
-- `mark.svg`: 레퍼런스 `src/public/icon.svg`에서 복사한 픽셀 마크.
-- `standing.png`: 레퍼런스 캐릭터 스프라이트. 14×17px 첫 프레임을 CSS로 정적으로 표시한다.
+- `mark.svg`: 레퍼런스 `src/public/icon.svg`에서 복사한 토끼 얼굴 픽셀 마크. 파비콘
+  `apps/plot/apps/web/src/app/icon.svg`도 같은 파일이므로 함께 바꾼다.
+- `standing.png`: 레퍼런스 `src/assets/character/standing.png`의 토끼 스프라이트. 14×17px 첫 프레임을 CSS로 정적으로 표시한다.
 
 로고·브랜드 장식은 개별 작품의 등장인물을 대신하지 않는다.
 과거 `presence/` 이미지와 `reference/` 목업은 역사적 자료이며 현재 UI에서 참조하지 않는다.
