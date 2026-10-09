@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "shizue sign-in helper",
+  "description": "Completes Sign in with ChatGPT for the shizue web app.",
+  "version": "0.1.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxKkRdhhHeJ7Kbb6/IlIvDD3+KvLFV4vOgMcCnVrfhlN5aFvBOCCOw4W3K9MgaZ7euwz7xOczgNQ3CEHMuRevFAtpjxrfW50AIM01K2fLFVsBBLMTRPVdzwucfiiTUS6QpaUiJwTaB9HJ2jmzvmI/8TfAAliHj5iiwhJopCn0Snso4vWW4sxGmDqaa/5c62uxiWf2+/2kA7VtpNVIASTO+qTGQdrFuSdaHIWsr7odq2mxFGBRK2JMLcVEbrW/0jK1GVj3tjUKO3i6x8f7aW2nF0G2L53wOSm7QRXssi8fpteNaZbcEW2nAgAh/HDtEf9hWD5JL5DE4OkrxaR+mWZnkQIDAQAB",
+  "permissions": [
+    "declarativeNetRequestWithHostAccess"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "sw.js"
+  },
+  "externally_connectable": {
+    "matches": [
+      "http://localhost/*"
+    ]
+  },
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "callback",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  }
+}

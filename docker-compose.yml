@@ -1,0 +1,66 @@
+# A fixed project name, so containers and volumes keep their names wherever
+# the checkout lives.
+name: shizue-plot
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: shizue-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: plot
+      POSTGRES_USER: plot
+      POSTGRES_PASSWORD: plot
+    ports:
+      - '127.0.0.1:15433:5432'
+    volumes:
+      - shizue-pgdata:/var/lib/postgresql/data
+      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U plot -d plot']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Object storage for every kind of media a plot stores — avatars, character
+  # assets, plot covers and chat attachments. A local stand-in for S3: RustFS,
+  # since MinIO stopped publishing images. Versions are pinned so an upstream
+  # change cannot take the stack down again.
+  s3:
+    image: rustfs/rustfs:1.0.1
+    container_name: shizue-s3
+    restart: unless-stopped
+    environment:
+      RUSTFS_ACCESS_KEY: shizue
+      RUSTFS_SECRET_KEY: shizue-secret
+    ports:
+      - '127.0.0.1:19000:9000'
+      - '127.0.0.1:19001:9001'
+    volumes:
+      - shizue-s3data:/data
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:9000/health']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # A new store has no bucket, so the app would find nothing to write to on a
+  # fresh stack. This runs once and exits; a bucket that is already there is left
+  # as it is.
+  s3-init:
+    image: amazon/aws-cli:2.37.11
+    container_name: shizue-s3-init
+    depends_on:
+      s3:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: shizue
+      AWS_SECRET_ACCESS_KEY: shizue-secret
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint: >
+      sh -c "aws --endpoint-url http://s3:9000 s3api head-bucket --bucket shizue-media 2>/dev/null ||
+             aws --endpoint-url http://s3:9000 s3api create-bucket --bucket shizue-media"
+
+volumes:
+  shizue-pgdata:
+  shizue-s3data:

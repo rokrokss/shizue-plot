@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // The specs run half their code in the browser: everything inside a
+    // `page.evaluate` is a document's, not Node's, so the DOM declarations are
+    // part of this program even though nothing here ships to a browser.
+    "lib": ["ES2023", "DOM"],
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "types": ["node"]
+  },
+  "include": ["playwright.config.ts", "tests/**/*.ts"]
+}

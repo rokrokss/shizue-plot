@@ -1,0 +1,38 @@
+{
+  "name": "@shizue/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --hostname 127.0.0.1 --port 13000",
+    "build": "next build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "next start --hostname 127.0.0.1 --port 13000",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@adobe/css-tools": "^4.5.0",
+    "@shizue/core": "workspace:*",
+    "dompurify": "^3.4.16",
+    "next": "^16.4.0",
+    "next-intl": "^4.13.6",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "remark-breaks": "^4.0.0",
+    "remark-gfm": "^4.0.1",
+    "thumbhash": "^0.1.1",
+    "use-stick-to-bottom": "^1.1.6"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "jsdom": "^30.0.1",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}

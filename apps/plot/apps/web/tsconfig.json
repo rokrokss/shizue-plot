@@ -1,0 +1,60 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": [
+      "ES2023",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    // Next writes this one itself and rewrites the file if it disagrees, and
+    // under Next 16 both `dev` and `build` want `react-jsx` — not a preference.
+    // (An earlier commit read a `preserve` rewrite as Next 16's dev behaviour;
+    // that write came from a still-running Next 15 dev server. Measured since:
+    // a 16.3 dev boot rewrites `preserve` back to `react-jsx`.)
+    "jsx": "react-jsx",
+    "strict": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "allowJs": true,
+    "incremental": true,
+    "noEmit": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": [
+        "./src/*"
+      ]
+    }
+  },
+  "include": [
+    "next-env.d.ts",
+    "next.config.ts",
+    "vitest.config.ts",
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "test/**/*.ts",
+    ".next/types/**/*.ts",
+    // The same generated route types from `next dev`, which writes under
+    // `.next/dev` so a dev server and a build cannot overwrite each other's
+    // output. Listed because Next rewrites this file — reformatting all of it —
+    // when a glob it expects is missing; naming it here is what stops that.
+    ".next/dev/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    ".next"
+  ]
+}

@@ -1,0 +1,28 @@
+node_modules/
+dist/index.js` by path.
+dist/
+
+.env
+.env.*
+!.env.example
+credentials.json
+credentials-*.tmp
+
+data/
+*.log
+pnpm-debug.log*
+
+.DS_Store
+.vscode/
+.idea/
+
+coverage/
+*.tsbuildinfo
+
+
+# vim swap files — a swap of .env carries the key material
+*.swp
+
+# Share project settings only; local settings and worktrees stay private.
+.claude/*
+!.claude/settings.json

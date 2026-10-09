@@ -1,0 +1,16 @@
+packages:
+  - 'packages/*'
+  - 'apps/plot'
+  - 'apps/plot/apps/*'
+  - 'apps/plot/packages/*'
+
+onlyBuiltDependencies:
+  - esbuild
+
+# Keep transitive tooling on patched releases until upstream raises its minimums.
+overrides:
+  '@esbuild-kit/core-utils>esbuild': '^0.25.12'
+  'vite@<7.3.5': '^7.3.5'
+  'nanoid@>=3.0.0 <3.3.18': '^3.3.18'
+  'source-map-js@<1.2.2': '^1.2.2'
+  'undici@>=8.0.0 <8.10.2': '^8.10.2'

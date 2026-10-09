@@ -1,0 +1,24 @@
+{
+  "name": "shizue-plot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.28.2",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "dev": "./scripts/dev.sh",
+    "build": "pnpm -r build",
+    "test": "pnpm --filter @shizue/contracts test && pnpm --filter @shizue/plot test",
+    "test:e2e": "pnpm --filter @shizue/plot test:e2e",
+    "typecheck": "tsc -p tsconfig.json && pnpm --filter @shizue/plot typecheck",
+    "db:generate": "pnpm --filter @shizue/plot db:generate",
+    "db:migrate": "pnpm --filter @shizue/plot db:migrate"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.7"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "@shizue/plot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.28.2",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "//scripts": "No `build` here on purpose. This manifest is a workspace package like any other now, so the workspace root's `pnpm -r build` already builds `packages/*` and `apps/*` in topological order — a `pnpm -r build` here would recurse into itself, and a filtered one would build the same tree a second time, `next build` included. Build plot from the root: `pnpm --filter './apps/plot/**' build`.",
+  "scripts": {
+    "dev": "pnpm --filter './apps/*' --parallel dev",
+    "test": "vitest run",
+    "test:e2e": "pnpm --filter @shizue/e2e test",
+    "typecheck": "tsc -p tsconfig.json && pnpm --filter @shizue/web typecheck",
+    "db:generate": "pnpm --filter @shizue/db db:generate",
+    "db:migrate": "pnpm --filter @shizue/db db:migrate",
+    "db:studio": "pnpm --filter @shizue/db db:studio"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "jsdom": "^30.0.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}

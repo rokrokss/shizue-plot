@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: shizue-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: plot
+      POSTGRES_USER: plot
+      POSTGRES_PASSWORD: plot
+    ports:
+      - '15433:5432'
+    volumes:
+      - shizue-pgdata:/var/lib/postgresql/data
+      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U plot -d plot']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  shizue-pgdata:

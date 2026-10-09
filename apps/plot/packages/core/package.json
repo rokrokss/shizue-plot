@@ -1,0 +1,63 @@
+{
+  "name": "@shizue/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./variables": {
+      "types": "./dist/variables.d.ts",
+      "default": "./dist/variables.js"
+    },
+    "./display-script": {
+      "types": "./dist/displayScript.d.ts",
+      "default": "./dist/displayScript.js"
+    },
+    "./component": {
+      "types": "./dist/component.d.ts",
+      "default": "./dist/component.js"
+    },
+    "./narration": {
+      "types": "./dist/narration.d.ts",
+      "default": "./dist/narration.js"
+    },
+    "./speech": {
+      "types": "./dist/speech.d.ts",
+      "default": "./dist/speech.js"
+    },
+    "./status-block": {
+      "types": "./dist/statusBlock.d.ts",
+      "default": "./dist/statusBlock.js"
+    },
+    "./choices": {
+      "types": "./dist/choices.d.ts",
+      "default": "./dist/choices.js"
+    },
+    "./scene": {
+      "types": "./dist/scene.d.ts",
+      "default": "./dist/scene.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@risuai/ccardlib": "^0.4.2",
+    "fflate": "^0.8.3",
+    "js-tiktoken": "^1.0.21",
+    "re2js": "^2.8.6"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3"
+  }
+}
