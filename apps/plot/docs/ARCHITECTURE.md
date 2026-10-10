@@ -8,7 +8,7 @@ AI 롤플레이 플롯 서비스. 현재 구현된 시스템을 주제별로 기
 - 커스텀 UI의 조사·설계 근거와 잔존 리스크 레지스터는 `docs/CUSTOM-UI-DESIGN.md`.
 - 크리에이터가 각 필드에 무엇을 쓰면 되는지(유저 공개 vs AI 전용, 도입부·발화 규약·스타일·예시 대화·로어북 작성법)는 `docs/CREATOR-GUIDE.md`. 제품 문구가 아니라 창작 가이드이며, 구현의 기준은 이 문서다.
 - `docs/GAP-ANALYSIS.md` / `docs/GLOBAL-RESEARCH.md` / `docs/FEATURE-BACKLOG.md`는 2026-08-05~06 시점의 시장 리서치 스냅숏이다. 현재 상태의 기준은 이 문서다.
-- `docs/KR-PLATFORM-MIGRATION.md`는 국내 플랫폼(케이브덕·베이비챗·제타·크랙·엘린) 제작 화면의 칸 지도와 붙여넣기 이주 매핑, 경쟁사 블랙박스 테스트 체크리스트다(2026-10-11 스냅숏).
+- `docs/KR-PLATFORM-MIGRATION.md`는 국내 플랫폼(케이브덕·베이비챗·제타·크랙·엘린) 제작 화면의 칸 지도와 붙여넣기 이주 매핑, 경쟁사 블랙박스 테스트 체크리스트다(2026-10-11 스냅숏). 그 위에 세운 붙여넣기 이주 설계는 `docs/KR-PASTE-MIGRATION-DESIGN.md`(미구현).
 
 ## 1. 시스템 개요
 
