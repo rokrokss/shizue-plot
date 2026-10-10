@@ -4,6 +4,7 @@ import type {
   ChoicesMode,
   ComponentCapability,
   DisplayScript,
+  ImportProvenance,
   LoreEntry,
   LoreRole,
   LoreSelectiveLogic,
@@ -32,6 +33,7 @@ export type {
   ChoicesMode,
   ComponentCapability,
   DisplayScript,
+  ImportProvenance,
   LoreEntry,
   LoreRole,
   LoreSelectiveLogic,
@@ -145,6 +147,8 @@ export const MAX_INTROS_PER_PLOT = 10;
 /** One opening's length, and the reader-facing intro's; mirrors the API. */
 export const MAX_INTRO_TEXT_LENGTH = 4000;
 export const MAX_INTRO_LENGTH = 500;
+/** One card file an import takes; mirrors `MAX_CARD_IMPORT_BYTES` in apps/api. */
+export const MAX_CARD_IMPORT_BYTES = 50 * 1024 * 1024;
 
 /**
  * A plot as its owner edits it. The first-class row: everything a work is
@@ -180,6 +184,8 @@ export interface Plot {
   likeCount: number;
   chatCount: number;
   publishedAt: string | null;
+  /** When the owner last vouched for the imported members; null until then. */
+  rightsConfirmedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -192,6 +198,10 @@ export interface PlotMember {
   /** URL served by the API, or null when the member has no avatar. */
   avatarUrl: string | null;
   orderIndex: number;
+  /** Where an imported card came from; null for a member the studio made. */
+  importedFrom: ImportProvenance | null;
+  /** The license the card declares (`extensions.risuai.license`); null when it says none. */
+  license: string | null;
   createdAt: string;
   updatedAt: string;
 }

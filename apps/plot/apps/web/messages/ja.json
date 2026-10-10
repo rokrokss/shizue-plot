@@ -56,7 +56,7 @@
     "subtitle": "カードを読み込むか、ゼロからプロットを作りましょう。",
     "new": "新規プロット",
     "import": "カードを読み込む",
-    "importHint": "png・json・charx のカードファイル — カードは最初の登場人物として新しいプロットに入ります。",
+    "importHint": "png・json・charx・jpg(charx) のカードファイル — カードは最初の登場人物として新しいプロットに入ります。",
     "name": "名前",
     "namePlaceholder": "プロットの名前",
     "create": "作成",
@@ -114,7 +114,7 @@
     "memberCount": "{count}/{max}人",
     "memberAdd": "登場人物を追加",
     "memberImport": "カードから追加",
-    "memberImportHint": "png・json・charx のカードファイルを登場人物として追加します。",
+    "memberImportHint": "png・json・charx・jpg(charx) のカードファイルを登場人物として追加します。",
     "memberNewName": "新しい登場人物",
     "memberName": "名前",
     "memberIntro": "読者向け紹介",
@@ -302,6 +302,40 @@
     "chats": "チャット一覧",
     "chatsEmpty": "このプロットとのチャットはまだありません。",
     "deletePlot": "プロットを削除"
+  },
+  "cardImport": {
+    "realmOpen": "RisuRealmから読み込む",
+    "realmAdd": "RisuRealmから追加",
+    "realmTitle": "RisuRealmから読み込む",
+    "realmUrl": "キャラクターページのアドレス",
+    "realmPlaceholder": "https://realm.risuai.net/character/…",
+    "realmHint": "カードはこのブラウザが RisuRealm から直接ダウンロードして読み込みます。50MBまで読み込めます。",
+    "realmBrowse": "キャラクターは <link>RisuRealm</link> で探せます。",
+    "realmSubmit": "読み込む"
+  },
+  "rights": {
+    "importedBadge": "読み込み",
+    "importedTitle": "読み込んだカード",
+    "source": "出典",
+    "sourceFile": "ファイル {name}",
+    "creator": "作者",
+    "creatorUnknown": "記載なし",
+    "license": "ライセンス",
+    "licenseNone": "ライセンスの記載なし",
+    "licensePrivate": "非公開ライセンス(private)",
+    "terms": {
+      "by": "表示",
+      "nc": "非営利",
+      "nd": "改変禁止",
+      "sa": "継承"
+    },
+    "restrictedNotice": "改変禁止または非公開のライセンスです。作者の許可なくこのプロットに入れて公開すると、ライセンス違反になるおそれがあります。",
+    "publishNotice": "このプロットにはカードから読み込んだ登場人物が{count}人います。shizue はカードの作者を確認できないため、公開する前に権利を確認してください。",
+    "restrictedPublish": "{names} のカードは改変禁止(ND)または非公開のライセンスです。作者の明示的な許可なく公開すると、ライセンス違反になるおそれがあります。",
+    "importPublicNotice": "公開中のプロットなので、カードから追加した登場人物はすぐに読者に表示されます。shizue はカードの作者を確認できません。",
+    "confirmPublish": "読み込んだ登場人物は自分で作ったものか、作者から公開の許可を得ています。",
+    "confirmImport": "追加する登場人物は自分で作ったものか、作者から公開の許可を得ています。",
+    "confirmedAt": "権利確認 {date}"
   },
   "style": {
     "groupProse": "文体",
@@ -794,7 +828,15 @@
     "chatgpt_invalid_state": "ログインの有効期限が切れたか、別のブラウザで開かれました。このブラウザでもう一度ログインしてください。",
     "chatgpt_identity_mismatch": "ChatGPT アカウントを確認できませんでした。もう一度ログインしてください。",
     "chatgpt_login_failed": "ChatGPT ログインに失敗しました。再試行してください。",
-    "chatgpt_unavailable": "現在 ChatGPT ログインを利用できません。しばらくしてから再試行してください。"
+    "chatgpt_unavailable": "現在 ChatGPT ログインを利用できません。しばらくしてから再試行してください。",
+    "rights_unconfirmed": "読み込んだ登場人物を公開するには、権利の確認が必要です。",
+    "card_too_large": "カードファイルが大きすぎます。50MBまで読み込めます。",
+    "realm_invalid_url": "RisuRealm のキャラクターページのアドレスではありません。https://realm.risuai.net/character/… の形式で貼り付けてください。",
+    "realm_not_found": "RisuRealm でこのキャラクターが見つかりません。",
+    "realm_forbidden": "このキャラクターは RisuRealm からダウンロードできない設定になっています。",
+    "realm_rate_limited": "RisuRealm へのリクエストが多すぎます。少し待ってから再試行してください。",
+    "realm_unreachable": "RisuRealm に接続できませんでした。ネットワークを確認して再試行してください。",
+    "realm_unavailable": "RisuRealm からカードを取得できませんでした。少し待ってから再試行してください。"
   },
   "rebrand": {
     "eyebrow": "物語が育つ場所",

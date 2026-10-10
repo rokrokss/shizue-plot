@@ -2,10 +2,12 @@
 
 import { useFormatter, useTranslations } from 'next-intl';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { RealmImportForm } from '@/components/CardImport';
 import { CreatorTabs } from '@/components/CreatorTabs';
 import { Button, ErrorText, Field, Spinner, TextArea, TextInput } from '@/components/ui';
 import { Link, useRouter } from '@/i18n/navigation';
 import { apiGet, apiSend, apiUpload } from '@/lib/api';
+import { checkCardSize, downloadRealmCard } from '@/lib/realm';
 import {
   MAX_PREMISE_LENGTH,
   type Plot,
@@ -23,6 +25,7 @@ import { useErrorMessage } from '@/lib/useErrorMessage';
  */
 export default function PlotsPage() {
   const t = useTranslations('plots');
+  const cardImport = useTranslations('cardImport');
   const common = useTranslations('common');
   const format = useFormatter();
   const toMessage = useErrorMessage();
@@ -36,8 +39,10 @@ export default function PlotsPage() {
   /** The AI draft panel, and the one line it is written from. */
   const [drafting, setDrafting] = useState(false);
   const [premise, setPremise] = useState('');
+  /** The RisuRealm panel: a card page's address instead of a file. */
+  const [realmOpen, setRealmOpen] = useState(false);
   const [error, setError] = useState('');
-  const [operation, setOperation] = useState<'create' | 'draft' | 'import' | null>(null);
+  const [operation, setOperation] = useState<'create' | 'draft' | 'import' | 'realm' | null>(null);
   const busy = operation !== null;
 
   const load = useCallback(async () => {
@@ -107,11 +112,32 @@ export default function PlotsPage() {
     setOperation('import');
     setError('');
     try {
-      const created = await apiUpload<PlotDetail>('/api/plots/import', file);
+      const created = await apiUpload<PlotDetail>('/api/plots/import', checkCardSize(file));
       router.push(`/plots/${created.id}`);
     } catch (caught) {
       setError(toMessage(caught));
       setOperation(null);
+    }
+  }
+
+  /**
+   * The same import, from a RisuRealm page: this browser downloads the card
+   * (`downloadRealmCard`) and uploads it like a picked file, naming the page it
+   * came from. The new plot is private, so nothing is asked of the owner yet.
+   */
+  async function importFromRealm(url: string): Promise<boolean> {
+    if (busy) return false;
+    setOperation('realm');
+    setError('');
+    try {
+      const { file, sourceUrl } = await downloadRealmCard(url);
+      const created = await apiUpload<PlotDetail>('/api/plots/import', file, { sourceUrl });
+      router.push(`/plots/${created.id}`);
+      return true;
+    } catch (caught) {
+      setError(toMessage(caught));
+      setOperation(null);
+      return false;
     }
   }
 
@@ -130,7 +156,7 @@ export default function PlotsPage() {
               ref={fileInput}
               data-testid="plot-import-input"
               type="file"
-              accept=".png,.json,.charx"
+              accept=".png,.json,.charx,.jpg,.jpeg"
               hidden
               onChange={(event) => {
                 const file = event.target.files?.[0];
@@ -141,6 +167,16 @@ export default function PlotsPage() {
             <Button busy={operation === 'import'} onClick={() => fileInput.current?.click()} title={t('importHint')}>
               {t('import')}
             </Button>
+            <Button
+              data-testid="plot-realm-open"
+              onClick={() => {
+                setRealmOpen((open) => !open);
+                setDrafting(false);
+                setCreating(false);
+              }}
+            >
+              {cardImport('realmOpen')}
+            </Button>
             {/* Beside 새 플롯 rather than instead of it: this drafts a first
                 version, and the creator edits it like any other. */}
             <Button
@@ -149,6 +185,7 @@ export default function PlotsPage() {
               onClick={() => {
                 setDrafting((open) => !open);
                 setCreating(false);
+                setRealmOpen(false);
               }}
             >
               {t('draft')}
@@ -158,12 +195,23 @@ export default function PlotsPage() {
               onClick={() => {
                 setCreating((open) => !open);
                 setDrafting(false);
+                setRealmOpen(false);
               }}
             >
               {t('new')}
             </Button>
           </div>
         </div>
+
+        {realmOpen ? (
+          <div
+            data-testid="plot-realm-panel"
+            className="mt-5 space-y-3 rounded-xl border border-line bg-surface/60 p-3"
+          >
+            <h2 className="heading3 text-fg">{cardImport('realmTitle')}</h2>
+            <RealmImportForm busy={operation === 'realm'} onSubmit={importFromRealm} />
+          </div>
+        ) : null}
 
         {drafting ? (
           <div

@@ -11,7 +11,7 @@ AI 롤플레이 플롯 서비스. 현재 구현된 시스템을 주제별로 기
 
 ## 1. 시스템 개요
 
-- **일급 단위는 플롯 하나다.** 유저는 플롯을 만들고, 그 안에 등장인물(최대 10명)을 두고, 도입부(최대 10개)를 쓰고, 발행하고, 탐색되고, 좋아요·댓글을 받고, 대화한다. 캐릭터는 플롯의 하위 구조물이며 **독자적인 발행·탐색 표면이 없다**. 외부 캐릭터 카드(V1/V2/V3 JSON, PNG tEXt, .charx) 임포트는 카드를 감싸는 플롯을 하나 만들고 그 카드를 첫 등장인물로 넣는다.
+- **일급 단위는 플롯 하나다.** 유저는 플롯을 만들고, 그 안에 등장인물(최대 10명)을 두고, 도입부(최대 10개)를 쓰고, 발행하고, 탐색되고, 좋아요·댓글을 받고, 대화한다. 캐릭터는 플롯의 하위 구조물이며 **독자적인 발행·탐색 표면이 없다**. 외부 캐릭터 카드(V1/V2/V3 JSON, PNG tEXt, .charx, JPEG 뒤에 붙은 charx) 임포트는 카드를 감싸는 플롯을 하나 만들고 그 카드를 첫 등장인물로 넣는다. 임포트한 등장인물은 어디서 왔는지 기록되고, 그런 멤버가 있는 플롯은 소유자가 권리를 확인해야 발행된다(§10 임포트 출처와 발행 권리).
 - **챗은 플롯에 속한다.** 한 대화 안에서 그 플롯의 등장인물 전원과 내레이터가 함께 말한다. 누가 말하는지는 컬럼이 아니라 **콘텐츠 규약**이다 — 어시스턴트 응답의 `이름: ` 접두 줄은 그 등장인물의 발화, 접두사 없는 줄은 내레이터의 상황묘사이며, 줄 안의 `*별표*`가 그 화자의 상황묘사다(§6 발화 프로토콜).
 - 대화는 **append-only 메시지 트리**다. 재생성과 유저 메시지 수정은 형제 노드를 **만들고** head를 옮기지만, 스와이프는 이미 있는 형제로 **head만 옮긴다**(`POST /api/chats/:id/head`는 아무것도 쓰지 않는다). 어느 쪽도 기존 메시지를 지우지 않으므로 모든 가지가 리로드 후에도 남는다. 플롯의 도입부 전부가 parent_id null 형제 루트라, 어느 도입부로 시작할지 고르는 것도 같은 스와이프다.
 - 프롬프트는 **서버에서만** 조립된다. 플롯의 세계관 설정과 각 등장인물 카드(설명·성격·로어북·시스템 프롬프트)는 소유자 외에게 API로 나가지 않는다.
@@ -28,7 +28,7 @@ AI 롤플레이 플롯 서비스. 현재 구현된 시스템을 주제별로 기
 - ORM: Drizzle + drizzle-kit 마이그레이션.
 - 인증: Sign in with ChatGPT가 유일한 로그인이다(§4.1). 세션은 서버 측 `session` 행과 HttpOnly 쿠키이고(`hostedAuth.ts`), 별도 회원가입·비밀번호는 없다. better-auth는 `NODE_ENV=test`의 다중 사용자 테스트 픽스처에만 쓰인다.
 - 테스트: vitest (루트 `pnpm test`가 전체 실행), E2E는 Playwright(`apps/e2e`).
-- 웹→API: Next `rewrites` 프록시 (same-origin, CORS 불필요).
+- 웹→API: Next `rewrites` 프록시 (same-origin, CORS 불필요). 프록시에는 자기 바디 상한이 있다(§10 바디 상한).
 
 ## 3. 레포 구조
 
@@ -51,7 +51,7 @@ plot/
     e2e/                    # @shizue/e2e — Playwright 스모크·회귀 스펙
 ```
 
-`@shizue/core`는 서브패스 익스포트를 갖는다: `./variables`, `./display-script`, `./component`, `./narration`, `./speech`, `./status-block`, `./choices`, `./scene`, `./world-info` — 웹이 토크나이저·카드 파서를 번들에 끌어오지 않고 같은 로직을 쓰기 위한 경계다.
+`@shizue/core`는 서브패스 익스포트를 갖는다: `./variables`, `./cbs`, `./display-script`, `./component`, `./narration`, `./speech`, `./status-block`, `./choices`, `./scene`, `./world-info` — 웹이 토크나이저·카드 파서를 번들에 끌어오지 않고 같은 로직을 쓰기 위한 경계다.
 
 **워크스페이스 밖 의존**: `apps/api`와 `apps/web`은 `@shizue/contracts`를 `workspace:*`로 참조한다. 이 트리가 아니라 리포지터리 루트의 `packages/contracts`에 있는 패키지다 — 예전에는 형제 체크아웃을 전제한 `link:` 파일 링크였고, 지금은 같은 워크스페이스의 패키지 링크다. 경계를 건너는 페이로드 스키마는 반드시 여기서 import한다(복제 금지, PLATFORM.md §1).
 
@@ -127,13 +127,14 @@ OpenAI의 오픈소스 흐름은 오픈소스·로컬 호스팅 앱이 대상이
 
 ### 플롯·등장인물
 
-- `plots` — **이 스키마의 일급 행**. 소유자, 제목, `intro`(독자용 소개), `description`(모델용 세계관 설정), `cover_path`(스토리지 키, §9.2), `lorebook jsonb`, `intros jsonb`(도입부 string[], 최대 10개·개당 4,000자를 API가 집행), `narrator jsonb`, `style jsonb`(크리에이터가 정한 연출 옵션 묶음 — 시제·응답 길이·표현 방식·전개 속도·난이도·분위기·스토리텔링 문체·상태창·선택지, §6), `profiles jsonb`(작품이 권하는 독자 프로필, 아래), `custom_ui jsonb`(표시 스크립트·기본 변수·컴포넌트 코드·capability를 한 컬럼에). 노출 축이 셋이다: `visibility`(private/public), `language`(ko/en/ja 콘텐츠 언어), `safety_level`(all/adult — 연령 인증이 없는 이 빌드에서 API는 all만 받고, adult는 그 전에 저장된 행에만 남는다). 발행 시 `published_at`과 `tags`(최대 10개·개당 20자)가 갱신된다. `like_count`는 `plot_likes` 행과 같은 트랜잭션에서 움직이는 비정규화 카운터다. `chat_count`는 그렇지 않다 — 챗 생성과 카운터 증가가 **별개 문장**이고(트랜잭션 없음), 챗을 지워도 **감소하지 않는다**. 지금까지 남이 이 플롯으로 대화를 몇 번 시작했는지를 누적하는 인기 지표이지 현재 챗 수가 아니며, 증가 문장이 실패하면 조용히 낮게 어긋난 채로 남는다. `comments_enabled`로 크리에이터가 댓글창을 닫을 수 있다.
+- `plots` — **이 스키마의 일급 행**. 소유자, 제목, `intro`(독자용 소개), `description`(모델용 세계관 설정), `cover_path`(스토리지 키, §9.2), `lorebook jsonb`, `intros jsonb`(도입부 string[], 최대 10개·개당 4,000자를 API가 집행), `narrator jsonb`, `style jsonb`(크리에이터가 정한 연출 옵션 묶음 — 시제·응답 길이·표현 방식·전개 속도·난이도·분위기·스토리텔링 문체·상태창·선택지, §6), `profiles jsonb`(작품이 권하는 독자 프로필, 아래), `custom_ui jsonb`(표시 스크립트·기본 변수·컴포넌트 코드·capability를 한 컬럼에). 노출 축이 셋이다: `visibility`(private/public), `language`(ko/en/ja 콘텐츠 언어), `safety_level`(all/adult — 연령 인증이 없는 이 빌드에서 API는 all만 받고, adult는 그 전에 저장된 행에만 남는다). 발행 시 `published_at`과 `tags`(최대 10개·개당 20자)가 갱신된다. `rights_confirmed_at`은 소유자가 임포트한 멤버에 대한 권리를 **마지막으로** 확인한 시각이다 — 그런 멤버가 있는 발행과 공개 중인 플롯으로의 임포트가 찍고, 비공개 전환은 지우지 않는다(§10). `like_count`는 `plot_likes` 행과 같은 트랜잭션에서 움직이는 비정규화 카운터다. `chat_count`는 그렇지 않다 — 챗 생성과 카운터 증가가 **별개 문장**이고(트랜잭션 없음), 챗을 지워도 **감소하지 않는다**. 지금까지 남이 이 플롯으로 대화를 몇 번 시작했는지를 누적하는 인기 지표이지 현재 챗 수가 아니며, 증가 문장이 실패하면 조용히 낮게 어긋난 채로 남는다. `comments_enabled`로 크리에이터가 댓글창을 닫을 수 있다.
 - `plots.style`은 **열거값만** 담는다 — 자유 텍스트가 없다. 그래서 공개 뷰에 그대로 실려 나가 배지가 되고(§10·§11), 모델이 읽는 지시문은 그 열거값을 코어가 컴파일한 우리 문장이지 크리에이터가 쓴 글이 아니다(§6). 알아볼 옵션이 하나도 없으면 API가 `null`로 저장하고, 스튜디오 에디터는 기본값과 같아진 옵션을 아예 빼고 넘긴다(`lib/plotStyle.ts`) — 스타일을 건드린 적 없는 플롯과 골랐다가 되돌린 플롯이 같은 빈 컬럼이 되는 것이 그래서다.
 - `plots.profiles`는 **독자를 향한 글이다** — `{id, name(30자), description(1000자)}` 최대 5개, 아바타는 없다(v1). 프롬프트에 닿지 않는 것이 핵심 규약이다: 독자가 하나를 고르면 서버가 그것을 **독자 소유의 `personas` 행으로 복사**하고, 챗이 가리키는 것도 프롬프트에 실리는 것도 그 복사본이다(§10). 그래서 고른 뒤에 독자가 자기 페르소나처럼 고쳐 쓸 수 있다. `coercePlotProfiles`는 스타일과 같은 규약을 진다 — 이름이 없는 행은 거절이 아니라 삭제, id는 없으면 발급, 상한 초과는 잘라내고, 남는 것이 없으면 컬럼은 `null`이다.
 - `intro`와 `cover_path`는 **프롬프트에 닿지 않는다** — `description`이 모델을 향한 글이고 이 둘은 독자를 향한 것이라 컬럼이 따로 있다. 같은 이유로 등장인물 카드의 `intro`도 프롬프트에 들어가지 않는다(§6).
 - 탐색 인덱스는 정렬별로 하나씩 `plots`에 있고, `(visibility, language)` 하드 파티션이 앞에 오고 마지막이 `id`다 — 커서의 타이브레이크와 같은 순서라 다음 페이지가 동점 그룹 안으로 seek한다. `tags`는 GIN.
 - `characters` — 플롯의 하위 구조물. `plot_id`(NOT NULL, 플롯 삭제 시 `cascade`), `name`, 정규화 카드(`card jsonb`, §6), 아바타 경로, `order_index`. **자기 소유자도 공개 축도 갖지 않는다** — 소유·가시성·세이프티·언어·태그·좋아요·댓글은 전부 플롯의 것이고, 권한 검사는 언제나 플롯을 거친다. `name`은 카드에서 읽지 않고 행이 직접 갖는데, 이것이 발화 프로토콜이 매칭하는 화자 접두사이기 때문이다(§6). 플롯당 10명 상한은 API가 집행하고, 인덱스는 `(plot_id, order_index)` 하나 — 생성할 때마다 로스터 전체를 순서대로 읽는 그 쿼리다. `order_index`는 unique가 아니다(재정렬이 전체를 다시 쓰므로 잠깐 겹쳐도 순서만 동률이 된다).
-- `plot_assets` — 메시지 안에서 `{{img::slug}}`로 참조되는 이미지. `(plot_id, slug)` unique, **플롯당 100개**(API가 집행). 업로더가 미리 잰 `width`/`height`/`thumbhash`를 같이 싣는다(charx 임포트로 들어온 것은 셋 다 null이라 자리 예약 없이 그려진다). `unlock jsonb`(null 가능)은 이 그림이 **한 대화에서** 열리기까지 무엇이 필요한지다 — `{kind:'keyword', keywords[1..5]}` · `{kind:'turns', count 1..500}` · `{kind:'relationship', axis, min 1..100}` 셋뿐이고, null이면 언제나 보이는 지금까지의 동작이다. **이것은 접근 제어가 아니라 연출이다**: 바이트는 여전히 플롯을 읽을 수 있는 누구에게나 서빙되고(§10), 잠기는 것은 한 대화에서의 공개다. `coerceAssetUnlock`은 알아볼 수 없는 조건을 `null`로 만든다 — 아무것도 만족시킬 수 없는 조건은 영영 잠긴 그림이기 때문이다.
+  - `imported_from jsonb`(null 가능)은 카드 파일로 들어온 멤버의 출처 기록이다 — `ImportProvenance` `{fileName, sha256, sourceUrl?, importedAt}`. 스튜디오가 만든 멤버는 null이다. 카드 필드가 아니라 컬럼인 이유는 이것이 인물이 무엇인지가 아니라 **행이 어떻게 생겼는지**의 기록이라서다 — 익스포트에 실리지 않는다. 증명이 아니라 신고 대응용 기록이다: `sha256`은 서버가 받은 바이트를 직접 해시한 것이지만 `sourceUrl`은 가져온 사람의 말이다. 소유자 응답에만 실리고(§10), 공개 표면에는 실을 필드가 없다. 발행 게이트가 "임포트한 멤버가 있는가"를 이 컬럼의 null 여부로 판정하므로, 임포트한 멤버를 지우면 그 질문도 함께 사라진다.
+- `plot_assets` — 메시지 안에서 `{{img::slug}}`로 참조되는 이미지. `(plot_id, slug)` unique, **플롯당 100개**(API가 집행). 업로더가 미리 잰 `width`/`height`/`thumbhash`를 같이 싣는다(charx 임포트로 들어온 것은 셋 다 null이라 자리 예약 없이 그려진다). `name`(null 가능)은 임포트한 카드가 그 그림에 붙인 **원래 이름**이다 — RisuAI 카드는 렌더 시점에 이 이름으로 참조를 조립하고(`{{img::{{getvar::outfit}}.png}}`), slug는 그것을 대신할 수 없다(한글 이름은 slug로 접으면 아무것도 남지 않는다). 업로드한 그림은 null이다. `unlock jsonb`(null 가능)은 이 그림이 **한 대화에서** 열리기까지 무엇이 필요한지다 — `{kind:'keyword', keywords[1..5]}` · `{kind:'turns', count 1..500}` · `{kind:'relationship', axis, min 1..100}` 셋뿐이고, null이면 언제나 보이는 지금까지의 동작이다. **이것은 접근 제어가 아니라 연출이다**: 바이트는 여전히 플롯을 읽을 수 있는 누구에게나 서빙되고(§10), 잠기는 것은 한 대화에서의 공개다. `coerceAssetUnlock`은 알아볼 수 없는 조건을 `null`로 만든다 — 아무것도 만족시킬 수 없는 조건은 영영 잠긴 그림이기 때문이다.
 - `chat_asset_unlocks` — `(chat_id, asset_id)` PK, 양쪽 cascade. 한 대화가 이미 연 그림. 삽입은 언제나 `on conflict do nothing`이고 **실제로 들어간 행만 반환**하므로, 같은 조건을 두 번 평가해도 행은 하나고 처음 넣은 쪽만 그것을 보고한다 — 턴 경로와 관계 경로가 서로를 모른 채 자유롭게 물어볼 수 있는 이유다(§7.5).
 - `plot_likes` — `(user_id, plot_id)` PK. 주간 인기 정렬이 `(plot_id, created_at)` 인덱스로 이 행들을 되읽는다(§10).
 - `comments` — 플롯 공개 페이지의 댓글, 1단계 대댓글까지(`plot_id`). 삭제는 소프트지만 같은 쓰기에서 `content`를 비운다(행은 대댓글의 앵커로만 남는다).
@@ -187,27 +188,38 @@ OpenAI의 오픈소스 흐름은 오픈소스·로컬 호스팅 앱이 대상이
 
 ### 파싱·정규화
 
-- `card/parse.ts`가 입력 종류를 판별한다: PNG 시그니처 → tEXt 청크(`ccv3` 우선, 없으면 `chara`, base64 → JSON), ZIP 시그니처 → charx, 그 외 → JSON.
+- `card/parse.ts`가 입력 종류를 판별한다: PNG 시그니처 → tEXt 청크(`ccv3` 우선, 없으면 `chara`, base64 → JSON), ZIP 시그니처 → charx, JPEG 시그니처(`FF D8 FF`) 뒤에 charx가 붙어 있으면 → 그 charx, 그 외 → JSON.
+  - **RisuAI PNG 카드는 다른 그림도 싣는다.** 그림마다 tEXt 청크 `chara-ext-asset_:N`(base64)에 넣고 카드에서는 uri `__asset:N`으로 가리킨다(RisuAI 리더처럼 콜론 없는 `chara-ext-asset_N`도 읽는다). 목록은 RisuAI가 spec에 따라 읽는 자리를 그대로 따른다: V3는 `data.assets`(메인 아이콘은 빼고 — PNG 자체가 아바타다), V2는 `extensions.risuai`의 `emotions`(`[name, uri]`, 언제나 png)와 `additionalAssets`(`[name, uri, ext]`, ext가 없으면 png). 이미지 확장자 규칙·50개·엔트리당 20MiB·64MiB 예산은 charx 상수를 그대로 쓴다. 디코딩 크기는 청크 길이로 미리 알 수 있어 캡을 넘는 에셋은 디코딩 전에 그 자리에서 멈추고(charx 패스처럼 그 뒤는 버린다), 청크는 입력에 대한 뷰로 읽어 고른 것만 디코딩한다. 이름이 비면 `asset_N`.
+  - **JPEG 뒤의 charx는 RisuAI의 'charx jpeg' 익스포트다** — 그림을 쓰고 그 뒤에 zip 전체를 스트리밍한다. 로컬 헤더 시그니처 `PK\x03\x04`는 JPEG 데이터에도 우연히 나올 수 있어 앞에서부터 찾지 않고 끝의 EOCD 레코드로 찾는다. RisuAI는 오프셋을 그림만큼 밀지 않으므로 zip 시작 = 중앙 디렉터리의 실제 위치 − 기록된 오프셋이다. 아바타는 앞의 JPEG가 아니라 아카이브가 선언한 아이콘이다(RisuAI 임포트도 그렇다).
 - `card/normalize.ts`는 **항상 `@risuai/ccardlib`로 변환한다**(V1/V2 → V3). 직접 매핑 경로는 없다.
   - **SillyTavern이 쓴 카드는 ccardlib 스키마에 그대로는 맞지 않는다.** ST의 PNG `ccv3` 청크는 V2 JSON의 spec만 바꾼 것이라 `group_only_greetings`가 없고, ST가 만든 로어북에는 책 단위 `extensions`가 없다. 그대로 검사하면 거절이 아니라 **V1로 통과한다** — ST는 V1 필드를 최상위에 반복해 쓰므로 `data` 아래 전부(로어북·추가 인사·시스템 프롬프트)를 잃는다. 그래서 spec이 V2/V3인 카드는 검사 전에 이 둘을 사본에 채운다(`raw`는 원본 그대로).
   - 엔트리 매핑은 `card/bookEntry.ts` 한 곳이다(의존성 없음 — `./world-info`가 웹으로 가져간다). 같은 설정이 세 곳에 있을 수 있고 **V3 데코레이터 > ST 엔트리 `extensions` > CCv3 필드** 순으로 이긴다. ST는 내보내는 모든 엔트리에 숫자 `extensions.position`과 설정 전부를 쓰므로 그것으로 ST 엔트리를 알아본다: `position` 0/1 → before/after char, 4 → `depth`(`extensions.depth`, 없으면 4)와 `role`(0 system·1 user·2 assistant), 그 밖(작가 노트 위아래·예시 대화·아웃렛) → before_char. `selectiveLogic` 0 AND_ANY·1 NOT_ALL·2 NOT_ANY·3 AND_ALL, `probability`는 `useProbability`가 꺼지지 않았고(없으면 켜짐) 100 미만일 때만, `group`·`group_weight`·`scan_depth`·`sticky`·`cooldown`·`delay`, 대소문자는 `extensions.case_sensitive`에서. ST가 기본값으로 쓴 값(AND_ANY, 확률 100, 가중치 100, 0인 시한 효과, system 역할)은 **없는 것으로** 읽는다.
   - **ST는 `use_regex`를 읽지 않는다**(그리고 모든 엔트리에 true로 쓴다). 키가 `/패턴/플래그` 꼴일 때만 정규식이다. 우리 것은 엔트리 단위라, ST 엔트리는 그 꼴의 키가 하나라도 있으면 정규식 엔트리가 되어 그 키는 패턴만 남기고(플래그는 버리고 대소문자는 엔트리 설정을 따른다) 나머지 평문 키는 이스케이프된 리터럴이 된다. 없으면 평문 엔트리다. ST가 아닌 엔트리는 `use_regex`를 그대로 믿는다.
   - `card/sillyTavern.ts` — `extensions.depth_prompt`(캐릭터 노트, `{prompt, depth, role}` — role은 낱말 'system'|'user'|'assistant')는 내용이 있으면 **constant 깊이 엔트리**로 카드 로어북 끝(insertionOrder = 카드 엔트리 최댓값 + 1)에 붙고 `extensions`에서 빠진다 — 익스포트가 엔트리로 다시 쓰므로 왕복해도 두 번 생기지 않는다. `extensions.regex_scripts` 중 표시 전용(`markdownOnly`, `promptOnly`·`disabled` 아님, `placement`에 AI 출력 2 포함)만 RisuAI 것 뒤에 `displayScripts`로 붙는다: `findRegex`는 `/패턴/플래그` 또는 맨 패턴, `replaceString`의 `{{match}}`·`$0` → `$&`, `trimStrings`는 버린다. 패턴 검사(§8.1)에 걸리면 그 스크립트만 건너뛰고, 같은 in/out이 이미 있으면 넣지 않는다. `regex_scripts` 자체는 왕복을 위해 `extensions`에 남는다.
-- `card/png.ts` — tEXt 청크 파서·제거기와 작성기(`insertPngTextChunks`, CRC32를 직접 계산해 IEND 바로 앞에 넣는다), 그리고 그림 없는 카드용 크림색 자리표시 PNG(`placeholderPng`, fflate로 IDAT를 만든다).
-- `card/charx.ts` — fflate로 필요한 엔트리만 두 패스로 해제한다. 1패스에서 `card.json`, 2패스에서 카드가 선언한 아이콘(`type==='icon' && name==='main'`)과 **임베드 이미지 에셋 전부**(카드 순서, 50개 캡)를 한 예산 안에서 읽는다. 반환은 `{raw, iconBuffer?, assets}`이고 임포트가 에셋을 slug화해 `plot_assets`로 저장한다.
+- `card/png.ts` — tEXt 청크 파서(`readPngTextChunkBytes`는 입력에 대한 뷰로, `readPngTextChunks`는 문자열로)·제거기와 작성기(`insertPngTextChunks`, CRC32를 직접 계산해 IEND 바로 앞에 넣는다), 그리고 그림 없는 카드용 크림색 자리표시 PNG(`placeholderPng`, fflate로 IDAT를 만든다).
+- `card/charx.ts` — fflate로 필요한 엔트리만 세 패스로 해제한다. 1패스에서 `card.json`, 2패스에서 RisuAI의 `module.risum`, 3패스에서 카드가 선언한 아이콘(`type==='icon' && name==='main'`)과 **임베드 이미지 에셋 전부**(카드 순서, 50개 캡)를 한 예산 안에서 읽는다. 반환은 `{raw, module?, iconBuffer?, assets}`이고 임포트가 에셋을 slug화해 `plot_assets`로 저장한다.
+  - **RisuAI의 charx 익스포트는 스크립트를 `card.json` 밖에 둔다.** `extensions.risuai`의 `customScripts`·`triggerscript`를 지우고 루트 엔트리 `module.risum`(`card/risum.ts`)에 실으며, RisuAI 임포트가 다시 합친다. 그래서 `parse.ts`가 모듈의 `regex`·`trigger`를 카드 사본의 그 두 자리에 넣고(카드에 이미 리스트가 있으면 그대로 둔다) 그 사본을 정규화한다 — `raw`도 합쳐진 카드다. 두 엔트리에 나뉘어 왔을 뿐 아카이브가 실어 온 카드가 그것이기 때문이다. `editdisplay`는 기존 `risu.ts` 경로로 `displayScripts`가 되고, 나머지(editoutput/editprocess/트리거)는 실행하지 않고 왕복용으로 `extensions`에 남는다. 모듈의 로어북은 버린다 — RisuAI가 같은 엔트리를 `character_book`으로도 쓴다.
+  - **모듈은 자기 패스에서 혼자 읽는다.** 모듈이 무엇이든 임포트를 실패시키면 안 되는데, RisuAI는 에셋 → `module.risum` → `card.json` 순서로 쓴다. 1패스에 넣으면 캡을 넘는 모듈이 패스를 끝내 `card.json`에 닿지 못하고, 에셋 패스에 넣으면 앞선 그림들이 예산을 다 써 모듈에 닿지 못한다. 따로 읽으면 캡을 넘는 모듈은 그 패스를 빈손으로 끝낼 뿐이고, 인플레이트 오류는 잡아서 버린다. 대가는 아카이브를 한 번 더 훑는 것(해제는 모듈만)이다.
   - **아카이브의 50개와 플롯의 100개는 다른 상한이다.** charx 쪽 50은 파싱 예산 — 낯선 zip 하나가 프로세스에게 시킬 수 있는 일의 한도이며, 그래서 파서 안에 있다. 플롯 쪽 100(`MAX_ASSETS_PER_PLOT`)은 한 작품이 보유할 수 있는 이미지 수이고 업로드 경로에서 API가 집행한다. 카드 하나를 임포트해 만든 플롯은 최대 50개를 갖고 시작해 업로드로 100까지 채울 수 있으며, 추가 등장인물 카드를 임포트하면 남은 자리만큼만 그 카드의 에셋이 들어온다.
   - 하드닝: 엔트리당 20MiB, 16KB 슬라이스 단위 push. 선언 크기를 믿지 않고 인플레이터가 실제로 뱉은 바이트를 센다. 예산 초과는 그 자리에서 패스를 중단한다 — fflate 동기 인플레이터의 `terminate()`가 no-op이라 루프 break만이 실제로 일을 멈춘다.
-  - **64MiB 총량 예산은 패스마다 따로 잡힌다.** 1패스의 `card.json`은 이름을 카드에서 알아낼 수 없고 그 자체가 카드라 자기 패스에서 혼자 풀리며, 총량 예산이 아니라 엔트리 캡(20MiB)에만 걸린다. 2패스가 64MiB를 쓰고, 예산 초과 판정이 엔트리 경계가 아니라 청크마다 나므로 초과분 한 엔트리가 더 붙을 수 있다. 즉 **아카이브 하나의 최악치는 64MiB가 아니라 대략 `20MiB(card.json) + 64MiB + 마지막 엔트리`**다 — 코드 주석의 "이 예산 + 한 엔트리"가 가리키는 것이 이것이다.
+  - **64MiB 총량 예산은 패스마다 따로 잡힌다.** 1패스의 `card.json`은 이름을 카드에서 알아낼 수 없고 그 자체가 카드라 자기 패스에서 혼자 풀리며, 2패스의 `module.risum`도 위의 이유로 혼자 풀린다. 둘 다 총량 예산이 아니라 엔트리 캡(20MiB)에만 걸린다. 3패스가 64MiB를 쓰고, 예산 초과 판정이 엔트리 경계가 아니라 청크마다 나므로 초과분 한 엔트리가 더 붙을 수 있다. 즉 **아카이브 하나의 최악치는 64MiB가 아니라 대략 `20MiB(card.json) + 20MiB(module.risum) + 64MiB + 마지막 엔트리`**다 — 코드 주석의 "이 예산 + 한 엔트리, 그 둘 위에"가 가리키는 것이 이것이다.
+- `card/risum.ts` — RisuAI 레거시 모듈(`.risum`) 리더. 바이트 111(매직)·0(버전)·u32 LE 길이 L, 이어 L바이트의 RPack 인코딩 UTF-8 JSON `{type:'risuModule', module}`, 그 뒤 에셋 블록(`0x01`, u32 LE 길이, RPack 바이트)들과 끝의 `0x00`이다. 본 블록만 읽는다. RPack은 바이트 단위 치환이라 256바이트 디코드 표를 데이터로 싣고 디코더는 직접 썼다 — 표의 출처(RisuAI `src/ts/rpack/rpack_map.bin` 256–511바이트)와 RPack LICENSE의 "RisuAI 밖에서 쓰면 AGPL-3.0" 주장은 표 옆 주석에 남겼다(2026-10-10 소유자 결정). `readRisum`은 throw하지 않는다 — 읽을 수 없는 모듈은 undefined이고 카드는 모듈 없이 들어온다.
 - V3 로어북 데코레이터: content 선행 `@@` 블록만 데코레이터로 보고 본문에서 분리한다. 지원 서브셋은 `@@depth N` / `@@role user|assistant|system`(depth와 함께일 때만 보존) / `@@constant` / `@@position before_desc|after_desc` / `@@activate_only_after N` → `delay` / `@@scan_depth N` → `scanDepth` / `@@keep_activate_after_match` → `sticky` 10000 / `@@dont_activate_after_match` → `cooldown` 10000(API 클램프의 상한이라 저장해도 그대로다) / `@@exclude_keys a,b` → 보조 키가 없고 정규식 엔트리가 아닐 때만 그 키들을 `not_any` 보조 키로(대소문자 유지). position이 있으면 스펙대로 depth를 무시하되, 값이 인식 불가면 position 자체를 무시하므로 depth가 살아남는다. 나머지 데코레이터와 `@@@` 폴백 체인은 해석 없이 strip.
 - `card/export.ts` — NormalizedCard → V3 JSON. depth/role은 대응 필드가 없어 `@@depth`/`@@role` 라인으로 다시 직렬화하고, 10000 이상인 sticky·cooldown은 `@@keep_activate_after_match`·`@@dont_activate_after_match`로도 나간다. 그 밖의 고급 필드는 데코레이터로 쓰지 않고(본문을 깨끗이 두려고) **모든 엔트리에 ST 엔트리 `extensions`**(`position`·`depth`·`role`·`selectiveLogic`·`probability`+`useProbability`·`group`·`group_weight`·`scan_depth`·`sticky`·`cooldown`·`delay`·`case_sensitive`)로 쓴다 — ST가 읽는 자리이자 우리 임포트가 다시 읽는 자리다. 정규식 엔트리의 키는 `/패턴/`(대소문자 무시면 `i`)으로, 안의 `/`는 이스케이프해 나간다. 우리 확장은 `extensions.shizue.{componentCode, componentCapabilities}`로, RisuAI 호환 필드는 `extensions.risuai`로 나간다. 익스포트는 등장인물 한 명의 카드를 내되 플롯 차원의 것(`CardPlotOverlay`: 내레이터·커스텀 UI·도입부 — 첫째가 `first_mes`, 나머지가 `alternate_greetings`, 도입부가 없으면 카드 것 — ·플롯 로어북은 카드 엔트리 뒤에)을 되돌려 써서 **임포트가 감싼 것을 익스포트가 벗겨 낸다** — 카드가 왕복한다. `exportCardPng`는 그림(PNG가 아니거나 청크를 걸을 수 없으면 자리표시)의 텍스트 청크를 지우고 `chara`(ccardlib의 V3→V2 백필 — 스펙대로 데코레이터를 빼므로 깊이·역할은 ST 엔트리 확장으로만 남는다)와 `ccv3`를 싣는다.
 - `worldInfo.ts`(`./world-info`) — `toWorldInfo(entries)`는 SillyTavern 월드 인포 파일(`{entries: {uid: {key, keysecondary, order, disable, position, …}}}`)을, `fromLorebookFile(json)`은 월드 인포 파일·CCv2/v3 `character_book`·그것을 담은 카드 JSON을 `LoreEntry[]`로 읽는다(그 밖은 `LorebookFileError`). 스튜디오가 브라우저에서 쓴다.
-- `card/risu.ts` — RisuAI `customScripts` 중 `type==='editdisplay'`만 `displayScripts`로, `defaultVariables`(개행 `key=value` 블록 또는 객체)를 변수 시드로 매핑한다.
+- `card/risu.ts` — RisuAI `customScripts` 중 `type==='editdisplay'`만 `displayScripts`로, `defaultVariables`(개행 `key=value` 블록 또는 객체)를 변수 시드로 매핑한다. `cardLicense`는 `extensions.risuai.license`(RisuRealm이 쓰는 `CC BY-NC 4.0`·`private` 따위)를 읽는다 — 빈 문자열은 "표기 없음"이라 `undefined`다. `extensions`가 원문 그대로 보존되므로 정규화된 카드에서 읽어도 된다.
 
 ### 매크로·변수
 
-- `macro.ts` — CBS 서브셋: `{{char}}`, `{{user}}`, `{{getvar::k}}`, `{{random:a,b}}`, `{{pick::a,b}}`(`{{pick:a,b}}`도), `{{roll:dN}}`, `{{// comment}}`(제거), `{{original}}`(오버라이드 치환 전용), 시계 매크로 `{{date}}`·`{{time}}`·`{{weekday}}`·`{{idle_duration}}`. 대소문자 무시. **미지원 매크로는 원문 유지** — 이것이 `{{setvar}}`/`{{addvar}}`를 프롬프트 히스토리에 남겨 모델이 자기 프로토콜을 계속 관찰하게 하는 장치다.
+- `cbs.ts`(`./cbs`) — RisuAI CBS의 **공유 파서·평가기**. 프롬프트(`applyMacros`)와 표시 스크립트 템플릿(웹 `lib/cbs.ts`)이 같은 언어를 읽고, 출력이 어디로 가는지(이스케이프·표식·예산)는 호스트가 정한다. 중괄호는 RisuAI처럼 왼쪽부터 짝지어 **중첩**되고 안쪽부터 평가된다. 다만 RisuAI는 안쪽 결과를 바깥 매크로의 원문에 붙여 넣고 다시 읽지만 여기서는 **트리**라, 인자 경계(`::`)는 작성자가 쓴 것만 인정되고 값 속의 `::`·`{{`는 절대 구조가 되지 않는다. 식만 예외다 — `{{? $hp > {{getvar::max}}}}`는 RisuAI처럼 값이 붙은 텍스트로 계산되므로 값은 계산 결과만 바꿀 수 있다.
+  - 블록: `{{#if X}}`(참 = 첫 단어가 `1`/`true`, 본문은 줄마다 앞 공백을 정리), `{{#if_pure X}}`(공백 유지), `{{#when X}}`·`{{#when::A::연산자::B}}`(RisuAI처럼 오른쪽부터: `not`·`and`·`or`·`is`·`isnot`·`>`·`<`·`>=`·`<=`·`var`·`vis`·`visnot`·`keep`·`legacy` — 전역 토글은 없으므로 `toggle`은 늘 꺼짐), `{{:else}}`. 닫기는 `{{/이름}}` 또는 `{{/}}`.
+  - 함수: `getvar`, `calc`·`{{? …}}`, `equal`·`not_equal`(문자열 비교)·`greater`·`greater_equal`·`less`·`less_equal`(숫자 비교) — 결과는 `1`/`0`, `and`·`or`·`not`(`1`만 참), `sum`, `random`·`pick`(인자 여럿·JSON 배열·`,`/`:` 분할 목록), `roll`(`N`·`dN`·`XdY`, 주사위 100개 상한), `{{// …}}`. 이름은 RisuAI처럼 대소문자·공백·`_`·`-`를 무시한다(`greater_equal` = `greaterequal`). `::`가 없으면 `:`가 구분자다(`{{random:a,b}}`).
+  - 식(`{{? }}`/`{{calc}}`)은 두 방언의 합집합: `$name`은 숫자로 읽는 변수(RisuAI, 없거나 숫자가 아니면 0), 맨이름은 텍스트로 읽는 변수(우리, `getvar::hp`도 같은 이름), `=`/`==`, `&`/`&&`, `|`/`||`, `!`, `^`, `≤≥≠`, 따옴표 문자열. **우선순위만 RisuAI와 다르다** — RisuAI는 `&`·`|`·비교를 한 단계로 묶어 `$a>1&$b<2`가 `(($a>1)&$b)<2`지만 여기서는 비교가 먼저다(실제 카드는 괄호를 쳐서 둘이 같다). 소수 잡음은 6자리에서 자르고 0으로 나누면 0이다.
+  - **모르는 매크로는 인자까지 원문 그대로** 나가고 안쪽도 평가하지 않는다 — `{{setvar::x::{{getvar::y}}}}`가 히스토리에 그대로 남아 변수 폴드가 다시 읽는다. 이름이 다른 매크로로 조립된 매크로(`{{{{getvar::f}}::x}}`)도 모르는 것으로 친다 — 값이 어떤 함수를 돌릴지 고르게 두지 않는다.
+  - 파싱은 관대(기본)와 엄격 둘이다. 관대하면 닫히지 않은 블록은 여는 매크로 원문, 짝 없는 닫기는 텍스트, 아무 닫기나 가장 안쪽 블록을 닫는다(RisuAI 동작). 엄격하면 셋 다 `CbsSyntaxError`다. 닫히지 않은 `{{`는 둘 다 텍스트. 깊이 상한은 블록 8, 매크로 16. RisuAI의 레거시 `{#if …#}` 블록, `#each … as`, 그 밖의 함수(`chat_index` 등)는 지원하지 않는다(원문 유지).
+- `macro.ts` — `applyMacros`는 위 평가기에 프롬프트 호스트를 끼운 것이다: `{{char}}`, `{{user}}`, `{{original}}`(오버라이드 치환 전용), 시계 매크로 `{{date}}`·`{{time}}`·`{{weekday}}`·`{{idle_duration}}`, 챗마다 고정인 `{{pick}}`. 관대하게 파싱하고 throw하지 않는다. 변수(`MacroContext.variables`)가 없는 곳(챗 생성 시 도입부 확장)에서는 `getvar`와 식이 원문 유지이고, **그런 값에 기댄 `#if`/`#when` 블록은 통째로 원문 유지**다 — 거짓으로 읽혀 저장된 도입부에서 영영 빠지는 대신, 히스토리가 프롬프트로 확장될 때 그 갈래의 변수로 풀린다. **미지원 매크로는 원문 유지** — 이것이 `{{setvar}}`/`{{addvar}}`를 프롬프트 히스토리에 남겨 모델이 자기 프로토콜을 계속 관찰하게 하는 장치다.
 - **`{{char}}`는 글의 출처마다 다르게 풀린다.** 등장인물 카드 안의 글(설명·성격·예시 대화·그 카드의 로어)에서는 그 등장인물의 이름이고, 그 밖의 모든 곳 — 프리셋, 플롯의 세계관 설정과 로어, 내레이터, 도입부, 히스토리 — 에서는 **플롯 이름**이다. 로스터가 여럿인 작품에서 프리셋의 "{{char}}의 등장인물"이 말이 되는 것이 이 규칙이다. `{{user}}`는 종전대로.
-- `stripImageMacros` — `{{img::slug}}`는 클라이언트 마크업이라 프롬프트 조립에서만 제거한다. 저장 메시지와 인사 확장에는 남는다.
+- `stripImageMacros` — `{{img::…}}`와 RisuAI의 나머지 에셋 매크로(`image`·`asset`·`emotion`·`raw`·`path`·`bg`·`bgm`·`audio`·`video`·`video-img`·`inlay`·`source`)는 클라이언트 마크업이라 프롬프트 조립에서만 제거한다 — 블록 안, 다른 매크로의 인자 안, 이름이 조립된 것까지. 저장 메시지와 인사 확장에는 남는다. `imageMacroRefs`는 글이 가리키는 그림(slug 또는 카드의 원래 이름, 조립된 것은 제외)이고, `assetResolver`가 참조를 slug로 푼다: slug 그대로 → 카드가 붙인 이름(RisuAI처럼 대소문자 무시) → 양쪽 다 이미지 확장자를 뗀 것 → 임포트가 접었을 slug(API `normalizeSlug`와 같은 규칙). RisuAI의 편집 거리 근사 매칭은 하지 않는다 — 틀린 그림이 없는 그림보다 나쁘다. 웹 렌더러와 챗 익스포트가 같은 규칙을 쓴다.
 - **시계 매크로**는 `MacroContext.clock`(`{now, timeZone, locale, idleMs?}`)이 있을 때만 풀리고, 없으면 원문 그대로다. `Intl.DateTimeFormat(locale, {timeZone})`으로 `date` = `dateStyle: 'long'`, `time` = 24시간제 `HH:mm`(`hourCycle: 'h23'` — ICU 판마다 `timeStyle: 'short'`의 한국어가 "오후 3:36"과 "PM 3:36"으로 갈려서다), `weekday` = `weekday: 'long'`. locale은 플롯의 콘텐츠 `language`, 시간대는 웹이 보낸 `x-shizue-tz` 헤더다(§7.2). `{{idle_duration}}`은 `idleMs`를 그 언어로 쓴다 — 1분 미만이거나 값이 없으면 "방금"/"just now"/"たった今", 그 이상은 분·시간·일 중 가장 큰 단위의 정수(`Intl.NumberFormat`의 unit 서식, "3일"/"3 days"/"3 日").
 - `{{pick}}`은 `{{random}}`과 같되 **챗마다 고정**이다. 인덱스가 `${seed}\0${원문}\0${매크로 위치}`의 FNV-1a 해시에서 나오고 seed는 챗 id다 — 같은 글의 같은 자리는 재생성해도 같은 것을 고르고, 한 글 안의 두 `{{pick}}`은 따로 고른다. seed가 없으면 `{{random}}`처럼 동작한다.
 - **캐시 주의**: system 문자열(캐시 프리픽스)에 분 단위로 바뀌는 매크로(`{{time}}`·`{{idle_duration}}`)를 쓰면 프리픽스가 매분 달라진다. 크리에이터 가이드가 이것들을 depth 로어에 두라고 권하는 이유다.
@@ -407,9 +419,10 @@ event: error   data: {"message":"..."}
 - 플롯 필드 `custom_ui.displayScripts`: `{in(정규식), out(HTML 템플릿), flags?, order, action?, enabled}`. `move_top`/`move_bottom`은 매치를 메시지 상/하단으로 옮기고, `repeat_back`은 이번 메시지에 매치가 없으면 직전 동일 role 메시지의 매치를 재사용한다(상태창 유지).
 - 적용은 **웹 렌더에서만**. 저장 텍스트도 프롬프트도 건드리지 않는다. `apps/web/src/lib/displayScripts.ts`가 예산(스캔 20,000자, 스크립트당 매치 200, 세그먼트 100, HTML 100,000자, 50ms 데드라인) 안에서 돌리고, 어느 하나라도 넘으면 변환을 통째로 버리고 플레인 텍스트로 떨어진다.
 - **변환은 두 쪽으로 갈라져 있다**. 창작자 정규식을 실제로 돌리는 쪽(`planDisplayScripts` → "어디에 매치가 있는가"라는 순수 데이터)은 `lib/displayPlanner.ts`가 **종료 가능한 워커**에서 돌린다 — 단일 `exec`는 중단할 수 없고 협조적 데드라인은 그 경우 차례를 못 받으므로, 1,000ms 안에 답이 없으면 스레드를 끝내고 그 메시지는 평문이 된다. 매치를 마크업으로 바꾸는 쪽(캡처 바인딩 → CBS 템플릿 → 새니타이즈)은 DOM이 필요하므로 메인 스레드에 남고, 계획에는 바인딩이 들어가지 않으므로 변수가 바뀔 때의 재렌더는 왕복 없이 동기다. 계획은 정착한 메시지당 1회 요청하며, **스트리밍 중인 메시지에는 표시 스크립트를 적용하지 않는다**.
-- OUT 템플릿 바인딩은 CBS 서브셋(클라이언트 평가): `{{getvar}}`, `{{#if}}`, `{{#each}}`, `{{calc}}`(자체 파서, eval 금지), `{{img::slug}}`, `{{rel::축}}`, `{{turn}}`, `{{char}}`, `{{user}}`, `{{button::라벨::입력텍스트}}`. `{{button}}`은 입력창을 채우기만 하고 전송은 유저가 한다.
+- OUT 템플릿 바인딩은 공유 CBS(`@shizue/core/cbs`, §매크로·변수)에 웹 호스트(`lib/cbs.ts`)를 끼운 것이다(클라이언트 평가, eval 금지). RisuAI의 중첩·블록·함수 전부에 더해 우리 방언 — `{{#if 식}}`(조건을 **매크로 없이 적으면** 맨이름 변수·`==`·따옴표 문자열의 식, **매크로를 넣어 적으면** RisuAI의 `1`/`true` 판정), `{{#each 목록}}`…`{{slot}}`, `{{rel::축}}`, `{{turn}}`, `{{char}}`, `{{user}}`, `{{button::라벨::입력텍스트}}`, `{{screen_width}}`(그린 시점의 창 너비). `{{button}}`은 입력창을 채우기만 하고 전송은 유저가 한다. 템플릿은 엄격 파싱이라, 거부되면 이스케이프된 원문으로 보인다.
+  - **그림**: `{{img::X}}`·`{{image::X}}`·`{{asset::X}}`·`{{emotion::X}}`는 마크업의 **텍스트 자리에서는 `<img>` 요소**(RisuAI 카드의 `<div>{{img::face.png}}</div>`)이고, **태그 속성이나 `<style>` 안에서는 주소**(우리의 `<img src="{{img::slug}}">`·`url({{img::slug}})`)다. 자리는 템플릿 자신의 텍스트로만 판정한다 — 치환된 값은 이스케이프되어 `<`가 없으므로 모델이 자리를 옮길 수 없다. `{{raw::X}}`·`{{path::X}}`는 어디서나 주소, `bg`·`bgm`·`audio`·`video`·`video-img`·`inlay`·`source`는 버린다. X는 `assetResolver`로 풀고(§매크로·변수), 렌더 시점에 조립된 이름도 푼다(`{{img::{{getvar::outfit}}_1.webp}}`). 못 풀거나 이 챗에서 잠긴 그림은 빈 문자열이다. 메시지 본문(`MessageBody`)도 같은 별칭을 마크다운 이미지로 그리고(alt는 slug), 주소·미디어·조립된 참조는 버린다 — 본문에는 변수가 없다.
 - **새니타이즈(신뢰 경계)**: `apps/web/src/lib/sanitizeHtml.ts`. ① `<style>`을 CSS AST(`@adobe/css-tools`)로 재작성 — 셀렉터를 `.shizue-msg` 아래로 스코프, 클래스를 `x-shizue-` 네임스페이스, 속성/함수 화이트리스트, 스코프 불가 at-rule 제거. ② DOMPurify 화이트리스트 패스. ③ DOM 패스 — 클래스 네임스페이싱, 인라인 style 재검사, `<img src>` same-origin 강제, 외부 `<a>`에 `target=_blank` + `rel=noopener noreferrer nofollow`. ④ 2차 DOMPurify. 절대 throw하지 않고 실패하면 빈 문자열.
-  - **`href`는 모양이 아니라 최종값으로 판정한다**: 템플릿 엔진이 보간하는 값 중 모델이 고른 것(`{{getvar}}`·`{{calc}}`·`{{slot}}`·정규식 캡처)에 표식을 달고(`lib/taint.ts`), 보간이 끝난 `href`에 표식이 있으면 그 `<a>`는 링크가 아니라 텍스트가 된다 — 라벨은 남고 갈 뻔했던 주소가 옆에 찍힌다. 표식은 나가기 전에 전부 제거된다.
+  - **`href`는 모양이 아니라 최종값으로 판정한다**: 템플릿 엔진이 보간하는 값 중 모델이 고른 것(`{{getvar}}`·`{{calc}}`/`{{? }}`·`{{slot}}`·정규식 캡처)에 표식을 달고(`lib/taint.ts`), 보간이 끝난 `href`에 표식이 있으면 그 `<a>`는 링크가 아니라 텍스트가 된다 — 라벨은 남고 갈 뻔했던 주소가 옆에 찍힌다. RisuAI 함수(`equal`·`random`·`sum` …)는 읽은 인자에 표식이 있었으면 결과에도 단다. 그림 주소는 모델이 *어느* 그림인지 골랐어도 우리 에셋 주소라 달지 않는다. 표식은 나가기 전에 전부 제거된다.
 - 뷰어 보호: localStorage 토글 하나로 표시 스크립트와 컴포넌트를 모두 끄고 `{{setvar}}`만 숨긴 플레인 렌더로 떨어진다.
 
 ### 8.2 Layer 2 — 샌드박스 컴포넌트
@@ -502,15 +515,15 @@ API는 `@shizue/contracts`의 스키마를 사용한다.
 ```
 /api/plots                          목록(내 것) · 생성
 /api/plots/draft                    POST — 한 줄 설정 → 초안(저장하지 않는다, §7.6)
-/api/plots/import                   카드 파일 → 카드를 감싸는 새 플롯(50MB)
+/api/plots/import                   카드 파일 → 카드를 감싸는 새 플롯(50MB, 선택 필드 sourceUrl)
 /api/plots/:id                      소유자 뷰(전부) · PATCH · DELETE
-/api/plots/:id/publish              발행/회수 + 세이프티 선언
+/api/plots/:id/publish              발행/회수 + 세이프티 선언 + 임포트 멤버의 권리 확인(rightsConfirmed)
 /api/plots/:id/public               익명 공개 뷰 (아래)
 /api/plots/:id/cover                업로드 · 삭제 · 서빙(공개)
 /api/plots/:id/like                 POST · DELETE
 /api/plots/:id/comments             목록(공개) · 작성
 /api/plots/:id/characters           로스터 목록 · 추가 · 재정렬(POST …/reorder)
-/api/plots/:id/characters/import    카드 파일 → 등장인물 한 명 추가(50MB)
+/api/plots/:id/characters/import    카드 파일 → 등장인물 한 명 추가(50MB, sourceUrl · 공개 플롯이면 rightsConfirmed)
 /api/plots/:id/characters/:cid      PATCH · DELETE · /avatar(업로드·삭제·서빙)
 /api/plots/:id/characters/:cid/export?format=json|png
                                     소유자 전용 — 저장된 카드 + 플롯 오버레이를 V3 카드 파일로(첨부 다운로드)
@@ -530,7 +543,7 @@ GET  /api/chats/:id/inspect           재생성이 지금 보낼 프롬프트의
 
 익명 뷰어 규칙은 두 줄로 끝난다: `visibleToViewer(null)`은 `publiclyListed()`와 같고, 좋아요 조인은 `on false`가 되어 `likedByMe`가 항상 false다. `c.userId`는 **가드 뒤에서만** 읽는다 — 그래서 그 변수의 타입이 `string`이고, 공개 표면은 `c.viewerId`(`string | null`)를 읽는다.
 
-바디 상한: 기본 5MB JSON, 카드 임포트 두 경로(`POST /api/plots/import`, `POST /api/plots/:id/characters/import`)는 50MB, `POST /api/chats/:id/attachments`는 이미지 업로드 상한.
+바디 상한: 기본 5MB JSON, 카드 임포트 두 경로(`POST /api/plots/import`, `POST /api/plots/:id/characters/import`)는 카드 파일 50MB(`MAX_CARD_IMPORT_BYTES` — 넘으면 라우트가 413 `payload_too_large`)에 멀티파트 여유 1MB를 더한 바디, `POST /api/chats/:id/attachments`는 이미지 업로드 상한. RisuRealm의 PNG 카드는 그림을 품어 30MB 안팎이고 charx는 더 크다. **웹의 `/api` rewrite 프록시에도 따로 상한이 있다** — Next 16의 `experimental.proxyClientMaxBodySize`(기본 10MB)이고, 넘으면 413으로 거절하지 않고 서버 로그에 경고만 남긴 채 **바디를 그 크기에서 잘라 넘긴다** — 큰 임포트는 온전히 도착하지 못하고 실패한다. 그래서 `next.config.ts`가 API의 임포트 바디 상한과 같은 51MB로 맞춘다 — 더 큰 바디는 API가 `Content-Length`를 보고 413으로 답한다. 프록시의 `proxyTimeout`(30초)은 총 소요가 아니라 소켓 유휴 시간이라 느린 업로드도 끊지 않는다. 임포트 폼은 이 상한을 넘는 파일을 올리기 전에 거절한다(`card_too_large`).
 
 에러는 항상 `{error: string(개발용 영어), code: string(기계판독)}` + 상태코드. 클라이언트는 code로 번역 메시지를 고른다. 소유권 검사는 필수이며 **타 유저 리소스는 404**다(403이 아니라). uuid 파라미터가 깨졌으면 400이 아니라 404다.
 
@@ -547,6 +560,15 @@ GET  /api/chats/:id/inspect           재생성이 지금 보낼 프롬프트의
 **추론 강도** — `PATCH /api/chats/:id {reasoningEffort: string | null}`. 문자열은 챗 모델(같은 바디가 `model`도 바꾸면 **새 모델**)이 광고하는 목록에 있어야 하고, 아니면(광고가 없는 모델 포함) 400 `invalid_request`다. `null`은 지운다(모델 기본값). `model`만 바꾸면 저장된 값은 새 모델도 광고할 때만 남고 아니면 `null`이 된다. 챗 JSON은 `reasoningEffort`를 싣는다.
 
 **추천 프로필** — `POST /api/plots`·`PATCH /api/plots/:id`가 `profiles`를 받는다(배열 또는 `null`, 그 외 타입이면 400 `invalid_request`). 내용은 `coercePlotProfiles`를 지나므로 못 쓸 행은 거절이 아니라 삭제이고, 남는 것이 없으면 컬럼은 `null`이 된다 — 스타일·내레이터와 같은 규약이다. 소유자 뷰와 공개 뷰 모두 `profiles`를 **언제나 배열로** 낸다(컬럼이 null이어도 `[]`). `POST /api/chats`는 `personaId`와 `profileId`를 **동시에 받지 않는다**(둘 다 오면 400 `invalid_request`, 플롯에 없는 id면 404). `profileId`가 오면 서버가 그 프로필을 독자의 `personas`로 복사하고 챗은 그 새 행을 가리킨다 — **중복 제거는 하지 않는다**: 행 하나는 싸고, 같은 프로필로 연 두 대화는 독자가 서로 다르게 키워 갈 두 페르소나다.
+
+**임포트 출처와 발행 권리** — 남이 만든 카드(RisuRealm 등)를 가져오는 것은 막지 않는다. 시스템은 카드의 원작자가 누구인지 확인할 수 없으므로, 대신 출처를 기록하고 공개 직전에 소유자의 확인을 받는다.
+
+- 두 임포트 경로는 업로드 바이트의 SHA-256을 서버에서 계산해 새 멤버의 `imported_from`(§5)에 `{fileName, sha256, sourceUrl?, importedAt}`로 남긴다. 멀티파트 선택 필드 `sourceUrl`은 RisuRealm 캐릭터 페이지만 받는다 — `https://realm.risuai.net/character/<id>`, `https://risuai.xyz/?realm=<id>`, 맨 id 셋이고 id는 UUID 꼴이어야 한다(`apps/api/src/realm.ts`). 저장은 언제나 `https://realm.risuai.net/character/<id>` 한 표기다. 알아볼 수 없는 값은 **버리지 않고 400 `invalid_request`**로 거절한다 — 보낸 클라이언트는 그것이 기록됐다고 믿기 때문이다. 빈 값은 없는 것과 같다. 이 검사는 카드를 파싱하기 전에 한다.
+- `POST /:id/publish {publish: true}`는 `imported_from`이 null이 아닌 멤버가 하나라도 있으면 바디의 `rightsConfirmed: true`(boolean, 그 밖의 타입은 400)를 요구하고, 없으면 **409 `rights_unconfirmed`**다. 통과하면 `rights_confirmed_at`을 지금으로 찍는다. 임포트한 멤버가 없는 플롯은 예전과 똑같이 발행되고 아무것도 찍지 않는다. 비공개 전환은 묻지 않는다. 재발행도 매번 묻는다.
+- 같은 구멍을 반대편에서 막는다: **이미 공개 중인** 플롯으로의 `POST /:id/characters/import`는 그 임포트 자체가 발행이므로 멀티파트 필드 `rightsConfirmed=true`를 요구하고(없으면 같은 409, 멤버·아바타·에셋은 아무것도 남지 않는다) 통과하면 같은 시각을 찍는다. 비공개 플롯으로의 임포트와 새 플롯을 만드는 임포트는 묻지 않는다 — 공개할 때 묻는다.
+- 두 판정 모두 플롯 행을 `for update`로 잡은 트랜잭션 안에서 읽는다(임포트는 `insertMember`, 발행은 발행 트랜잭션). 같은 락이라 비공개였던 플롯에 멤버가 들어오는 사이에 발행이 지나가 아무도 묻지 않는 경우가 없다.
+- 소유자 응답(소유자 뷰·로스터·멤버 응답)은 멤버마다 `importedFrom`과 `license`(`cardLicense`, 없으면 null)를, 플롯에 `rightsConfirmedAt`을 싣는다. 제작자는 카드의 `creator` 그대로다. 공개 뷰·탐색·챗 내보내기에는 셋 다 실을 필드가 없다.
+- 라이선스는 **보여 줄 뿐 막지 않는다**. 스튜디오는 변경금지(ND)·`private` 라이선스 카드에 더 강한 경고를 걸지만, 소유자가 원작자의 허락을 받았을 수 있고 그것은 시스템이 볼 수 없으므로 하드 블록은 없다.
 
 **해금형 일러스트** — `PATCH /api/plots/:id/assets/:slug`가 `unlock`(객체 또는 `null`)만 받는다. 바이트를 다시 올리지 않고 조건만 고치는 유일한 경로라 업로드 multipart의 필드가 아니라 별도 PATCH이고, 같은 슬러그를 다시 업로드해도 조건을 다시 쓸 필요가 없다. 조건 자체는 **소유자 응답에만** 실린다(`GET /:id/assets`가 소유자에게만 `unlock`을 붙인다) — 키워드는 그 공개가 가질 가치의 스포일러이기 때문이다. 독자가 받는 것은 챗 상태의 `assetLocks: [{assetId, slug, locked, kind}]`뿐이고, `kind`는 힌트이지 조건이 아니다. 소유자 자신의 챗에서는 전부 `locked: false`다.
 
@@ -600,7 +622,7 @@ GET  /api/chats/:id/inspect           재생성이 지금 보낼 프롬프트의
 
 즉 실제 노출 경로는 API가 아니라 **프로바이더**와 **프롬프트 유도 발설**이다. 후자에 대한 방어는 프리셋의 인캐릭터 유지 지시뿐이고, 그것은 완화이지 보증이 아니다. 작품 정의를 진짜 비밀로 취급해야 하는 상황이라면 이 구조는 그것을 제공하지 않는다.
 - 공개 노출 조건은 `visibility='public' AND safety_level='all'`(`hub.ts`의 `publiclyListed`). 연령 인증이 없으므로 생성·수정·발행은 `safetyLevel: 'adult'`를 400 `invalid_request`로 거절하고(스튜디오도 전체 이용가만 내놓는다), 그 전에 저장된 **adult 행은 탐색·공개 상세·타인 챗 시작에서 전면 차단**되고 소유자만 접근한다. 읽기 권한은 `visibleToViewer(viewerId)` 한 줄이 정한다 — 내 것이거나 공개 노출 중이거나. 등장인물·에셋·아바타·댓글은 자기 축이 없으므로 전부 이 한 판정을 통과한 뒤에 나온다.
-- 발행 게이트: `name`·`description`·`intros` 중 하나라도 비어 있으면 400 `not_publishable`. **저장된** 행을 읽어 판정하므로 편집 중인 값이 아니라 커밋된 값이 기준이다.
+- 발행 게이트: `name`·`description`·`intros` 중 하나라도 비어 있으면 400 `not_publishable`. **저장된** 행을 읽어 판정하므로 편집 중인 값이 아니라 커밋된 값이 기준이다. 그다음 임포트한 멤버가 있으면 권리 확인이 없을 때 409 `rights_unconfirmed`(위 임포트 출처와 발행 권리).
 - 타 유저의 public 플롯으로 챗을 시작하면 원작자의 `plots`/`characters` 행을 직접 참조한다(Zeta/C.AI 방식) — 크리에이터가 수정하면 기존 챗에도 반영된다. 이때만 `chat_count`가 오른다(본인 플롯은 미집계).
 
 ## 11. 웹 (apps/web)
@@ -610,7 +632,7 @@ GET  /api/chats/:id/inspect           재생성이 지금 보낼 프롬프트의
 | 경로 | 내용 |
 |---|---|
 | `/{locale}` | 플롯 탐색 피드 — 검색·태그 칩·정렬 탭(최신/주간 인기/인기/좋아요), 플롯 카드(커버·제목·소개 한 줄·태그·로스터 얼굴 스택·챗/좋아요 수) |
-| `/{locale}/plots` | 내 플롯 그리드 + 새 플롯 / AI로 초안 만들기 / 카드 임포트(png·json·charx) — 제작 영역(플롯/페르소나/노트 서브탭) |
+| `/{locale}/plots` | 내 플롯 그리드 + 새 플롯 / AI로 초안 만들기 / 카드 임포트(png·json·charx·jpg(charx)) / RisuRealm에서 가져오기 — 제작 영역(플롯/페르소나/노트 서브탭) |
 | `/{locale}/plots/:id` | **플롯 스튜디오** — 한 작품의 전부(아래) |
 | `/{locale}/p/:id` | 플롯 공개 페이지 — 커버·소개·태그·스타일 배지·등장인물 스트립·도입부 피커와 전문·좋아요·댓글·대화 시작 패널 |
 | `/{locale}/chats/:id` | 챗 화면 |
@@ -621,7 +643,7 @@ GET  /api/chats/:id/inspect           재생성이 지금 보낼 프롬프트의
 
 `/characters*`·`/c/:id`·`/u/:id`는 **없다**. 리다이렉트도 두지 않았다 — 캐릭터 단위의 공개 주소가 가리킬 대상 자체가 사라졌기 때문이다.
 
-- **플롯 스튜디오**(`/{locale}/plots/:id`)의 섹션: 프로필(제목·소개·커버·태그·콘텐츠 언어·댓글 허용) · 세계관(모델용 설정) · **스타일**(아래) · 등장인물(카드 리스트 — 추가/카드로 추가/삭제/순서 이동, 최대 10, 각각 이름·아바타·독자 소개·설정·성격·예시 대화, 그리고 JSON·PNG **카드 내보내기** 링크 — 저장된 카드를 내보내는 라우트라 링크다) · 도입부(최대 10, 발화 규약 힌트가 붙은 textarea) · **추천 프로필**(최대 5, 이름·소개 — 둘 다 유저 공개 배지) · 로어북(월드 인포 **가져오기**는 파일의 엔트리를 편집 중인 로어북 뒤에 붙여 저장 버튼으로 커밋하고, **내보내기**는 지금 편집 중인 엔트리를 ST 월드 인포 JSON으로 내려받는다 — 둘 다 브라우저에서 `./world-info`로) · 에셋(타일마다 해금 조건 편집기) · 커스텀 UI(표시 스크립트·기본 변수·컴포넌트 코드 + 프리뷰) · 공개 설정(세이프티·발행 토글) · 이 플롯과의 대화 목록.
+- **플롯 스튜디오**(`/{locale}/plots/:id`)의 섹션: 프로필(제목·소개·커버·태그·콘텐츠 언어·댓글 허용) · 세계관(모델용 설정) · **스타일**(아래) · 등장인물(카드 리스트 — 추가/카드로 추가/RisuRealm에서 추가/삭제/순서 이동, 최대 10, 각각 이름·아바타·독자 소개·설정·성격·예시 대화, 가져온 카드면 출처·제작자·라이선스, 그리고 JSON·PNG **카드 내보내기** 링크 — 저장된 카드를 내보내는 라우트라 링크다) · 도입부(최대 10, 발화 규약 힌트가 붙은 textarea) · **추천 프로필**(최대 5, 이름·소개 — 둘 다 유저 공개 배지) · 로어북(월드 인포 **가져오기**는 파일의 엔트리를 편집 중인 로어북 뒤에 붙여 저장 버튼으로 커밋하고, **내보내기**는 지금 편집 중인 엔트리를 ST 월드 인포 JSON으로 내려받는다 — 둘 다 브라우저에서 `./world-info`로) · 에셋(타일마다 해금 조건 편집기) · 커스텀 UI(표시 스크립트·기본 변수·컴포넌트 코드 + 프리뷰) · 공개 설정(세이프티·발행 토글·가져온 멤버의 권리 확인) · 이 플롯과의 대화 목록.
   - **스타일 섹션**(`PlotStyleEditor`)은 네 묶음이다: 문체(내레이터 문체·시점 · 시제 · 응답 길이 · 표현 방식) · 전개(속도 · 난이도) · 장르·연출(분위기 칩 최대 2 · 스토리텔링 8종) · 부가 기능(상태창 체크박스 · 선택지 3단). 옵션마다 **고른 것 하나의** 한 줄 가이드가 밑에 붙는다(여덟 줄을 늘어놓으면 고르는 화면이 읽는 화면이 된다). 분위기의 상한은 거절이 아니라 **자리를 비우는 방식**이다 — 세 번째를 고르면 가장 먼저 고른 것이 풀린다. 내레이터가 세계관이 아니라 여기 있는 이유는 문체와 시점도 "어떻게 쓸지"이기 때문이고, 저장은 플롯의 다른 필드와 같은 저장 버튼 하나다.
   - 저장 버튼 하나가 플롯 필드와 로스터의 카드를 **함께** 커밋한다(멤버 PATCH들 먼저, 그다음 플롯 PATCH, 응답을 에디터 상태로 채택). 반면 사진 업로드·로스터의 추가/삭제/순서·발행 토글은 **자기 요청이 곧 결과인 것들**이라 각각 즉시 서버에 간다 — 크리에이터가 결과를 봐야 하는 동작이고, 옆에서 쓰던 카드를 서버 사본으로 덮어쓰지 않는다.
 - `(app)` 레이아웃은 세션과 무관하게 헤더·본문·모바일 탭바를 렌더한다(공개: `/`, `/p/:id`, `/creators/:id`, `/explore`). 세션 필수 페이지는 하위 `(app)/(member)` 그룹이고, 그 레이아웃이 없으면 `/login?next=<경로>`로 보낸다. `(auth)` 레이아웃은 로케일 스위처만 단다.
@@ -640,6 +662,8 @@ GET  /api/chats/:id/inspect           재생성이 지금 보낼 프롬프트의
 - **팔로우 버튼**은 크리에이터 페이지와 플롯 페이지 양쪽에 서고, 좋아요와 같은 낙관적 갱신을 한다(실패하면 버튼이 있던 자리로 돌아가는 것이 답이다). 자기 자신에게는 버튼 대신 팔로워 수만 선다 — API가 400으로 거절할 요청을 그릴 이유가 없다. 카운트는 버튼 이름의 일부다(WCAG 2.5.3 label in name).
 - **알림 벨**은 마운트할 때와 창이 다시 포커스될 때 읽는다. 폴링하지 않는다 — 알림 하나는 폴링을 살 만큼 급하지 않고, 탭으로 돌아오는 순간이 정확히 그것이 궁금해지는 때다. 뱃지는 첫 페이지의 `unreadCount`이고, 패널의 "모두 읽음"이 유일한 읽음 조작이다.
 - **답장 추천 칩**은 작성 모드 칩 옆의 ✦ 버튼이 불러온다. 누르면 컴포저를 채우고 **보내지는 않는다** — 표시 스크립트의 버튼과 같은 의미론이다. 생성 중에는 버튼이 비활성이고, 턴을 보내거나 재생성하면 칩은 사라진다(지나간 턴에 대한 답이라서). 크리에이터의 **선택지**와는 다른 것이다: 그쪽은 인물이 답 안에서 내미는 제안이고, 이쪽은 독자가 자기 차례에 스스로 부르는 것이다.
+- **RisuRealm 가져오기**(`lib/realm.ts`, `components/CardImport.tsx`): 내 플롯 페이지와 스튜디오 등장인물 섹션에서 캐릭터 페이지 주소를 받는다. RisuRealm의 API는 문서상 클라이언트 측 CORS 사용만 허용하고(서버 사용·비문서 엔드포인트 금지) 그래서 **다운로드는 독자의 브라우저가 한다** — 서버는 Realm에 요청하지 않는다. 쓰는 것은 문서화된 `GET https://realm.risuai.net/api/v1/download/:format/:id?cors=true` 하나다: `charx-v3`를 먼저 묻고 403이면 `png-v3`(charx로 올린 카드는 charx-v3만, PNG로 올린 카드는 png·json만 내준다). `non_commercial=true`는 보내지 않는다. 둘 다 403이면 `realm_forbidden`(내려받을 수 없는 카드), 404 `realm_not_found`, 429 `realm_rate_limited`, 그 밖의 실패 `realm_unavailable`, 네트워크·CORS 실패 `realm_unreachable`, 주소가 아니면 `realm_invalid_url`이다 — 상태 0의 `ApiError`라 API 오류와 같은 `errors` 카탈로그로 번역된다. 받은 바이트는 파일 임포트와 같은 경로로 `sourceUrl`과 함께 올라간다. 검색·탐색 UI는 없다(그 엔드포인트들은 문서화되지 않았다) — realm.risuai.net으로 가는 링크만 있다. 앱에는 CSP가 없어 `connect-src`가 막지 않는다(CSP는 컴포넌트 iframe에만 있다, §8.2).
+- **권리 확인**: 스튜디오의 공개 설정은 임포트한 멤버가 있으면 발행 버튼 위에 확인 체크박스를 두고, 체크해야 버튼이 열리며 `rightsConfirmed: true`를 보낸다. 판정은 페이지가 들고 있는 로스터로 한다 — 방금 임포트한 멤버는 플롯 읽기보다 먼저 거기 있다. ND·`private` 멤버가 있으면 이름을 들어 더 강한 경고를 붙인다. 공개 중인 플롯에서는 등장인물 섹션이 같은 체크박스를 두고, 체크해야 파일·RisuRealm 임포트가 열리며 임포트마다 다시 묻는다. 가져온 멤버는 카드 머리에 "가져옴" 배지를, 펼치면 출처(Realm 링크 또는 파일 이름)·제작자·라이선스(코드와 CC 조건 풀이, 없으면 "라이선스 표기 없음")를 보여 준다.
 - **AI 초안 패널**은 내 플롯 페이지의 `새 플롯` 옆에 있다. 한 줄 설정 → `POST /api/plots/draft` → 돌아온 필드로 평범한 생성 POST → 등장인물을 로스터 엔드포인트로 하나씩 → 편집기로 이동. **초안의 검토 화면은 편집기다** — 마음에 들지 않는 초안은 다투는 다이얼로그가 아니라 지우는 플롯이다.
 - **작성 모드 칩** 3종 — 대사(기본) / 묘사(보낼 때 `*…*`로 감싼다) / 내레이터(보낼 때 `@:`를 붙인다). 나가는 텍스트를 표시할 뿐 저장 형식은 손으로 칠 수 있는 그 규약 그대로다.
 - `MessageBody`가 렌더 파이프라인의 중심이다: 표시 스크립트 → HTML/텍스트 섬 분리 → 컴포넌트 호출 코드 분리 → **남은 평문만 화자별로 분할** → 텍스트는 `react-markdown`, HTML 섬은 새니타이즈 결과를 `.shizue-msg` 아래에, 호출 코드는 `ComponentFrame`으로. 화자 분할이 마지막인 이유는 앞의 둘이 만든 것은 크리에이터의 마크업이고 컴포넌트라 쪼갤 대상이 아니기 때문이다.
@@ -669,8 +693,8 @@ GET  /api/chats/:id/inspect           재생성이 지금 보낼 프롬프트의
 - 스토리지: `storage.test.ts`가 로컬·실제 S3(compose의 RustFS) 드라이버의 왕복, 덮어쓰기, 삭제 멱등성과 네임스페이스 분리를 확인한다. `api.test.ts`는 아바타·에셋 업로드→서빙→삭제를 확인한다. `TEST_S3_REQUIRED=1`은 S3 서버가 없을 때 skip 대신 실패시킨다.
 - core: 카드 V1/V2/V3 픽스처 매핑, PNG/charx는 테스트에서 프로그래밍으로 생성해 왕복 검증, 로어북(constant/selective/regex/예산/재귀), 데코레이터, 매크로, 변수, 표시 스크립트, 컴포넌트 서브셋, 프롬프트 조립(탈락 순서·depth 위치·author's note 잔존).
 - llm: OAuth·토큰 회전·권한 해제, Responses 종료/오류·SSE 파서, ChatGPT 전용 registry, echo 취소. 테스트 임베더를 사용하는 메모리 정합성은 API 테스트가 확인한다.
-- web: 새니타이저 회귀(XSS 벡터), **새니타이저 호환 게이트**(실제 유통 형태 카드 12종의 출력 고정 — 규칙을 조여 크리에이터 자산을 깨뜨리는 변경을 잡는 반대쪽 절반), 표시 스크립트, **표시 스크립트 플래너**(stub 워커로 종료 경로, Node 워커 스레드로 실제 종료), 컴포넌트 호출 파서·브리지·워커 런타임, SSE 파서, 허브 유틸.
-- e2e(`apps/e2e`, Playwright, echo 모델 고정): 스모크(테스트 세션 생성→플롯 생성→등장인물 2명→도입부→발행→공개 페이지에서 챗 시작→도입부 스와이프→발화 구분 렌더→재생성→수정→노트→로케일 전환), 플롯 로스터(발행 게이트·순서 변경·삭제), 허브, 댓글, 태그, 세이프티, 내레이터, 커스텀 UI, 비주얼 베이스라인, **P1**(`p1.spec.ts` — 추천 프로필 작성→픽커로 챗 시작·해금 조건 설정→잠긴 카드→키워드 턴→갤러리 반영·팔로우 토글·주간 인기 탭·두 계정 알림 플로우). **AI 초안과 답장 추천은 e2e에 없다** — 둘 다 echo가 대신할 수 없는 실제 모델 호출(초안은 기본 채팅 모델의 엄격 JSON, 추천은 메모리 채널)이라 계약은 `apps/api/test`가 본다. 매 실행이 새 계정을 쓰므로 반복 실행 가능하다. 타입체크는 이 패키지의 자체 tsconfig가 한다(`tsc -p apps/e2e/tsconfig.json` — 스펙의 절반이 브라우저에서 도는 코드라 DOM lib를 함께 켠다).
+- web: RisuRealm 주소 파서·다운로드 폴백·라이선스 판정(`realm.test.ts`), 새니타이저 회귀(XSS 벡터), **새니타이저 호환 게이트**(실제 유통 형태 카드 12종의 출력 고정 — 규칙을 조여 크리에이터 자산을 깨뜨리는 변경을 잡는 반대쪽 절반), 표시 스크립트, **표시 스크립트 플래너**(stub 워커로 종료 경로, Node 워커 스레드로 실제 종료), 컴포넌트 호출 파서·브리지·워커 런타임, SSE 파서, 허브 유틸.
+- e2e(`apps/e2e`, Playwright, echo 모델 고정): 스모크(테스트 세션 생성→플롯 생성→등장인물 2명→도입부→발행→공개 페이지에서 챗 시작→도입부 스와이프→발화 구분 렌더→재생성→수정→노트→로케일 전환), 플롯 로스터(발행 게이트·순서 변경·삭제), 카드 임포트(`cardImport.spec.ts` — rewrite 프록시의 기본 10MB를 넘는 카드 파일 → 출처·라이선스 표시 → 권리 확인 후 발행 → Realm 다운로드를 `page.route`로 대신한 RisuRealm 추가), 허브, 댓글, 태그, 세이프티, 내레이터, 커스텀 UI, 비주얼 베이스라인, **P1**(`p1.spec.ts` — 추천 프로필 작성→픽커로 챗 시작·해금 조건 설정→잠긴 카드→키워드 턴→갤러리 반영·팔로우 토글·주간 인기 탭·두 계정 알림 플로우). **AI 초안과 답장 추천은 e2e에 없다** — 둘 다 echo가 대신할 수 없는 실제 모델 호출(초안은 기본 채팅 모델의 엄격 JSON, 추천은 메모리 채널)이라 계약은 `apps/api/test`가 본다. 매 실행이 새 계정을 쓰므로 반복 실행 가능하다. 타입체크는 이 패키지의 자체 tsconfig가 한다(`tsc -p apps/e2e/tsconfig.json` — 스펙의 절반이 브라우저에서 도는 코드라 DOM lib를 함께 켠다).
 
 ## 13. 컨벤션
 

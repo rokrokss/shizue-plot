@@ -15,6 +15,7 @@ import { assemblePrompt } from '../src/prompt.js';
 import type { LoreEntry } from '../src/types.js';
 import { stCard, v1Card, v2Card, v3Card } from './fixtures/cards.js';
 import { buildPngWithTextChunks } from './helpers/png.js';
+import { buildRisum } from './helpers/risum.js';
 
 const encode = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
 const toBase64 = (value: unknown): string => Buffer.from(JSON.stringify(value), 'utf-8').toString('base64');
@@ -216,6 +217,112 @@ describe('parseCard - PNG', () => {
   it('fails when no card chunk is present', () => {
     const png = buildPngWithTextChunks({ Comment: 'no card here' });
     expect(() => parseCard(png)).toThrow(CardParseError);
+  });
+});
+
+describe('parseCard - PNG assets', () => {
+  const base64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString('base64');
+  const v3WithAssets = (assets: unknown): string =>
+    toBase64({ ...v3Card, data: { ...v3Card.data, assets } });
+
+  it("returns a V3 card's chara-ext-asset images, in card order", () => {
+    const smile = Uint8Array.from([10, 11]);
+    const background = Uint8Array.from([20, 21]);
+    const nameless = Uint8Array.from([30, 31]);
+    // RisuAI writes the asset chunks first and the card last.
+    const png = buildPngWithTextChunks({
+      'chara-ext-asset_:1': base64(smile),
+      'chara-ext-asset_:2': base64(background),
+      'chara-ext-asset_:3': base64(Uint8Array.from([40, 41])),
+      'chara-ext-asset_:4': base64(nameless),
+      ccv3: v3WithAssets([
+        { type: 'icon', name: 'main', uri: 'ccdefault:', ext: 'png' },
+        { type: 'emotion', name: 'smile', uri: '__asset:1', ext: 'png' },
+        { type: 'x-risu-asset', name: 'bg.webp', uri: '__asset:2', ext: 'webp' },
+        { type: 'x-risu-asset', name: 'theme', uri: '__asset:3', ext: 'mp3' },
+        { type: 'emotion', name: 'gone', uri: '__asset:9', ext: 'png' },
+        { type: 'icon', name: 'remote', uri: 'https://example.com/remote.png', ext: 'png' },
+        { type: 'emotion', name: '', uri: '__asset:4', ext: 'gif' },
+      ]),
+    });
+
+    const { card, iconBuffer, assets } = parseCard(png);
+    expect(card.name).toBe('세이');
+    // The PNG is still the avatar; non-images, missing chunks and external uris are
+    // left alone, and a nameless asset is named after its index.
+    expect(iconBuffer).toBe(png);
+    expect(assets).toEqual([
+      { name: 'smile', bytes: smile },
+      { name: 'bg.webp', bytes: background },
+      { name: 'asset_4', bytes: nameless },
+    ]);
+  });
+
+  it("reads a V2 card's emotions and additional assets", () => {
+    const happy = Uint8Array.from([1]);
+    const map = Uint8Array.from([2]);
+    const old = Uint8Array.from([4]);
+    const png = buildPngWithTextChunks({
+      'chara-ext-asset_:1': base64(happy),
+      'chara-ext-asset_:2': base64(map),
+      'chara-ext-asset_:3': base64(Uint8Array.from([3])),
+      // The keyword without the colon, which RisuAI's own reader still takes.
+      'chara-ext-asset_4': base64(old),
+      chara: toBase64({
+        ...v2Card,
+        data: {
+          ...v2Card.data,
+          extensions: {
+            risuai: {
+              emotions: [['happy', '__asset:1']],
+              additionalAssets: [
+                ['map.png', '__asset:2', 'png'],
+                ['theme', '__asset:3', 'mp3'],
+                ['old', '__asset:4'],
+              ],
+            },
+          },
+        },
+      }),
+    });
+
+    expect(parseCard(png).assets).toEqual([
+      { name: 'happy', bytes: happy },
+      { name: 'map.png', bytes: map },
+      { name: 'old', bytes: old },
+    ]);
+  });
+
+  it('stops at 50 assets', () => {
+    const chunks: Record<string, string> = {};
+    const declared: unknown[] = [];
+    for (let i = 0; i < 60; i += 1) {
+      chunks[`chara-ext-asset_:${i}`] = base64(Uint8Array.from([i]));
+      declared.push({ type: 'emotion', name: `e${i}`, uri: `__asset:${i}`, ext: 'png' });
+    }
+    const { assets } = parseCard(buildPngWithTextChunks({ ...chunks, ccv3: v3WithAssets(declared) }));
+
+    expect(assets).toHaveLength(50);
+    expect(assets!.at(-1)!.name).toBe('e49');
+  });
+
+  it('stops at an asset over the per-entry cap instead of failing the import', () => {
+    const early = Uint8Array.from([7, 7]);
+    const png = buildPngWithTextChunks({
+      'chara-ext-asset_:1': base64(early),
+      // Base64 for 21MB, over the 20MB cap: refused from its length, never decoded.
+      'chara-ext-asset_:2': 'A'.repeat(28 * 1024 * 1024),
+      'chara-ext-asset_:3': base64(Uint8Array.from([8, 8])),
+      ccv3: v3WithAssets([
+        { type: 'emotion', name: 'early', uri: '__asset:1', ext: 'png' },
+        { type: 'emotion', name: 'huge', uri: '__asset:2', ext: 'png' },
+        { type: 'emotion', name: 'late', uri: '__asset:3', ext: 'png' },
+      ]),
+    });
+
+    const { card, assets } = parseCard(png);
+    expect(card.name).toBe('세이');
+    expect(assets).toEqual([{ name: 'early', bytes: early }]);
   });
 });
 
@@ -484,6 +591,109 @@ describe('parseCard - charx', () => {
 
     const { card } = parseCard(duplicated);
     expect(card.name).toBe('세이');
+  });
+
+  describe('RisuAI module.risum', () => {
+    const scripts = [
+      { comment: '', in: '\\*\\*(.+?)\\*\\*', out: '<b>$1</b>', type: 'editdisplay', ableFlag: true, flag: 'g' },
+      { comment: '', in: 'foo', out: 'bar', type: 'editoutput', ableFlag: false, flag: '' },
+    ];
+    const triggers = [{ comment: '', type: 'start', conditions: [], effect: [] }];
+    const moduleFile = buildRisum({
+      module: { name: 'm', description: '', id: 'id', regex: scripts, trigger: triggers, lorebook: [] },
+      type: 'risuModule',
+    });
+    const cardWithRisu = (risuai: Record<string, unknown>): Uint8Array =>
+      encode({
+        ...v3Card,
+        data: {
+          ...v3Card.data,
+          extensions: { risuai },
+          assets: [{ type: 'icon', name: 'main', uri: 'embeded://assets/icon/image/main.png', ext: 'png' }],
+        },
+      });
+    /** RisuAI's entry order: the assets, then the module, then card.json. */
+    const risuCharx = (module: Uint8Array, risuai: Record<string, unknown> = { bias: [] }): Uint8Array =>
+      zipSync({
+        'assets/icon/image/main.png': iconBytes,
+        'module.risum': module,
+        'card.json': cardWithRisu(risuai),
+      });
+
+    it('puts the scripts the export moved into the module back on the card', () => {
+      const { card, iconBuffer } = parseCard(risuCharx(moduleFile));
+
+      expect(iconBuffer).toEqual(iconBytes);
+      expect(card.displayScripts).toEqual([
+        expect.objectContaining({ in: '\\*\\*(.+?)\\*\\*', out: '<b>$1</b>', flags: 'g' }),
+      ]);
+      // Everything else rides along in the extensions for the round trip.
+      expect(card.extensions['risuai']).toEqual({ bias: [], customScripts: scripts, triggerscript: triggers });
+      expect((card.raw as typeof v3Card).data.extensions).toEqual({
+        risuai: { bias: [], customScripts: scripts, triggerscript: triggers },
+      });
+    });
+
+    it('keeps a list card.json carries itself', () => {
+      const own = [{ comment: '', in: 'own', out: 'mine', type: 'editdisplay', ableFlag: false, flag: '' }];
+      const { card } = parseCard(risuCharx(moduleFile, { customScripts: own }));
+
+      expect(card.extensions['risuai']).toEqual({ customScripts: own, triggerscript: triggers });
+      expect(card.displayScripts!.map((script) => script.in)).toEqual(['own']);
+    });
+
+    /** Opens an entry's deflate stream with a reserved block type, which no inflater accepts. */
+    const corruptEntry = (zip: Uint8Array, name: string): Uint8Array => {
+      const out = zip.slice();
+      const view = new DataView(out.buffer);
+      const header = Buffer.from(out).indexOf(name) - 30; // the first hit is the local header
+      const data = header + 30 + view.getUint16(header + 26, true) + view.getUint16(header + 28, true);
+      out[data] = 0b111; // BFINAL 1, BTYPE 11
+      return out;
+    };
+
+    it('imports without a module that cannot be read', () => {
+      const corrupt = corruptEntry(risuCharx(moduleFile), 'module.risum');
+      expect(() => unzipSync(corrupt)).toThrow();
+
+      const unreadable = [
+        risuCharx(Uint8Array.from([1, 2, 3])),
+        corrupt,
+        // Over the per-entry cap, and ahead of card.json as RisuAI writes it.
+        risuCharx(oversizedAsset()),
+      ];
+      for (const zip of unreadable) {
+        const { card, iconBuffer } = parseCard(zip);
+        expect(card.name).toBe('세이');
+        expect(iconBuffer).toEqual(iconBytes);
+        expect(card.displayScripts).toBeUndefined();
+        expect(card.extensions['risuai']).toEqual({ bias: [] });
+      }
+    });
+  });
+
+  describe('a charx appended to a JPEG', () => {
+    // A stand-in picture whose bytes include a local-header signature, which a
+    // reader scanning for the first `PK\x03\x04` would take for the archive.
+    const picture = Uint8Array.from([
+      0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x08, 0x00, 0xff, 0xd9,
+    ]);
+
+    it('reads the archive behind the picture, icon from the archive', () => {
+      const charx = zipSync({
+        'assets/icon/image/main.png': iconBytes,
+        'card.json': cardWithAssets([
+          { type: 'icon', name: 'main', uri: 'embeded://assets/icon/image/main.png', ext: 'png' },
+        ]),
+      });
+      const { card, iconBuffer } = parseCard(concat(picture, charx));
+      expect(card.name).toBe('세이');
+      expect(iconBuffer).toEqual(iconBytes);
+    });
+
+    it('rejects a JPEG that carries no archive', () => {
+      expect(() => parseCard(picture)).toThrow(CardParseError);
+    });
   });
 });
 

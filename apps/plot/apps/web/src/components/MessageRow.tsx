@@ -5,6 +5,7 @@ import { isNarration, narrationBody } from '@shizue/core/narration';
 import { extractStatusBlock } from '@shizue/core/status-block';
 import { useFormatter, useTranslations } from 'next-intl';
 import { memo, useEffect, useMemo, useState, type ReactNode } from 'react';
+import type { AssetResolver } from '@/lib/assets';
 import type { ComponentContext } from '@/lib/componentCalls';
 import type { DisplayContext } from '@/lib/displayScripts';
 import type { ChatAttachment, MessageRole, PublicMember } from '@/lib/types';
@@ -57,6 +58,7 @@ export const MessageRow = memo(function MessageRow({
   name,
   avatar,
   assets,
+  resolveAsset,
   attachments,
   display,
   components,
@@ -82,6 +84,8 @@ export const MessageRow = memo(function MessageRow({
   avatar: string | null;
   /** Character images by slug, for the `{{img::slug}}` references in the message. */
   assets: ReadonlyMap<string, string>;
+  /** The same references by an imported card's own image names; slugs only without it. */
+  resolveAsset?: AssetResolver;
   /** Images the reader sent this turn with; drawn above its text. */
   attachments?: ChatAttachment[];
   /** Display scripts and their bindings; omitted when custom UI is off. */
@@ -360,6 +364,7 @@ export const MessageRow = memo(function MessageRow({
             <MessageBody
               content={narration ? narrationBody(body) : body}
               assets={assets}
+              {...(resolveAsset ? { resolveAsset } : {})}
               {...(display ? { display } : {})}
               {...(components ? { components } : {})}
               {...(attributed ? { roster } : {})}

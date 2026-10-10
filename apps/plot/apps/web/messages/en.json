@@ -56,7 +56,7 @@
     "subtitle": "Import a card or start a plot from scratch.",
     "new": "New plot",
     "import": "Import card",
-    "importHint": "png · json · charx card file — the card arrives as the first character of a new plot.",
+    "importHint": "png · json · charx · jpg(charx) card file — the card arrives as the first character of a new plot.",
     "name": "Name",
     "namePlaceholder": "Plot name",
     "create": "Create",
@@ -114,7 +114,7 @@
     "memberCount": "{count}/{max}",
     "memberAdd": "Add character",
     "memberImport": "Add from card",
-    "memberImportHint": "Adds a png · json · charx card file as a character.",
+    "memberImportHint": "Adds a png · json · charx · jpg(charx) card file as a character.",
     "memberNewName": "New character",
     "memberName": "Name",
     "memberIntro": "Reader intro",
@@ -302,6 +302,40 @@
     "chats": "Chats",
     "chatsEmpty": "No chats with this plot yet.",
     "deletePlot": "Delete plot"
+  },
+  "cardImport": {
+    "realmOpen": "Import from RisuRealm",
+    "realmAdd": "Add from RisuRealm",
+    "realmTitle": "Import from RisuRealm",
+    "realmUrl": "Character page address",
+    "realmPlaceholder": "https://realm.risuai.net/character/…",
+    "realmHint": "Your browser downloads the card straight from RisuRealm. Cards up to 50MB can be imported.",
+    "realmBrowse": "Browse characters on <link>RisuRealm</link>.",
+    "realmSubmit": "Import"
+  },
+  "rights": {
+    "importedBadge": "Imported",
+    "importedTitle": "Imported card",
+    "source": "Source",
+    "sourceFile": "File {name}",
+    "creator": "Creator",
+    "creatorUnknown": "Not stated",
+    "license": "License",
+    "licenseNone": "No license specified",
+    "licensePrivate": "Private license",
+    "terms": {
+      "by": "Attribution",
+      "nc": "NonCommercial",
+      "nd": "NoDerivatives",
+      "sa": "ShareAlike"
+    },
+    "restrictedNotice": "This card's license forbids derivatives or keeps it private. Publishing it in this plot without the author's permission may break that license.",
+    "publishNotice": "{count, plural, one {# character} other {# characters}} in this plot came from card files. shizue can't verify who made a card, so confirm your rights before publishing.",
+    "restrictedPublish": "The cards for {names} are licensed NoDerivatives (ND) or private. Publishing them without the author's explicit permission may violate the license.",
+    "importPublicNotice": "This plot is public, so a character added from a card is shown to readers right away. shizue can't verify who made a card.",
+    "confirmPublish": "I made the imported characters, or their authors have allowed me to publish them.",
+    "confirmImport": "I made the character I'm adding, or its author has allowed me to publish it.",
+    "confirmedAt": "Rights confirmed {date}"
   },
   "style": {
     "groupProse": "Prose",
@@ -794,7 +828,15 @@
     "chatgpt_invalid_state": "This sign-in expired or was opened in another browser. Sign in again from this browser.",
     "chatgpt_identity_mismatch": "Couldn't verify your ChatGPT account. Sign in again.",
     "chatgpt_login_failed": "ChatGPT sign-in failed. Try again.",
-    "chatgpt_unavailable": "Sign in with ChatGPT isn't available right now. Try again later."
+    "chatgpt_unavailable": "Sign in with ChatGPT isn't available right now. Try again later.",
+    "rights_unconfirmed": "Confirm your rights to the imported characters before publishing them.",
+    "card_too_large": "That card file is too large. Cards up to 50MB can be imported.",
+    "realm_invalid_url": "That isn't a RisuRealm character page. Paste an address like https://realm.risuai.net/character/…",
+    "realm_not_found": "This character wasn't found on RisuRealm.",
+    "realm_forbidden": "This character can't be downloaded from RisuRealm.",
+    "realm_rate_limited": "Too many requests to RisuRealm. Try again in a moment.",
+    "realm_unreachable": "Couldn't reach RisuRealm. Check your connection and try again.",
+    "realm_unavailable": "Couldn't get the card from RisuRealm. Try again in a moment."
   },
   "rebrand": {
     "eyebrow": "A place for plots to grow",

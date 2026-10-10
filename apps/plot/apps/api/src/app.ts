@@ -14,7 +14,7 @@ import { notificationRoutes } from './routes/notifications.js';
 import { noteRoutes } from './routes/notes.js';
 import { personaRoutes } from './routes/personas.js';
 import { presetRoutes } from './routes/presets.js';
-import { plotRoutes } from './routes/plots.js';
+import { MAX_CARD_IMPORT_BYTES, plotRoutes } from './routes/plots.js';
 import { requireUser } from './session.js';
 
 const MB = 1024 * 1024;
@@ -41,8 +41,11 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
 
   const tooLarge = (c: Context): Response =>
     c.json<ErrorBody>({ error: 'Payload too large', code: 'payload_too_large' }, 413);
-  // Character cards arrive as charx archives; everything else is small JSON.
-  const importLimit = bodyLimit({ maxSize: 50 * MB, onError: tooLarge });
+  // Character cards arrive as charx archives and image-laden PNGs; everything
+  // else is small JSON. One card file plus its multipart framing and the
+  // provenance fields: the route caps the file itself, this caps what the
+  // parser is handed.
+  const importLimit = bodyLimit({ maxSize: MAX_CARD_IMPORT_BYTES + MB, onError: tooLarge });
   const jsonLimit = bodyLimit({ maxSize: 5 * MB, onError: tooLarge });
   // One 8MB image plus its multipart framing and the measurement fields. The
   // route caps the file itself; this caps what the parser is handed.

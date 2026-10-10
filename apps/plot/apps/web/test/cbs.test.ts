@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { renderTemplate, RenderBudgetExhausted, type CbsContext } from '../src/lib/cbs';
 import { TAINT, stripTaint } from '../src/lib/taint';
 
@@ -196,6 +196,66 @@ describe('{{#each}}', () => {
   });
 });
 
+describe('RisuAI templates', () => {
+  const risu = (template: string, variables: Record<string, string>, overrides: Partial<CbsContext> = {}) =>
+    render(template, { variables, ...overrides });
+
+  it('nests conditions the way RisuAI cards write them', () => {
+    const gauge = '{{#if {{? ($mp>-100)&($mp<251)}}}}<b>보통</b>{{/if}}{{#if {{? ($mp>250)}}}}<b>높음</b>{{/if}}';
+    expect(risu(gauge, { mp: '120' })).toBe('<b>보통</b>');
+    expect(risu(gauge, { mp: '300' })).toBe('<b>높음</b>');
+    expect(risu('{{#if {{equal::{{getvar::outfit}}::casual}}}}평상복{{:else}}다른 옷{{/if}}', { outfit: 'suit' })).toBe(
+      '다른 옷',
+    );
+  });
+
+  it('reads a nested condition as RisuAI does — 1 or true — and a written-out one as ours', () => {
+    expect(risu('{{#if {{getvar::n}}}}a{{/if}}{{#if n}}b{{/if}}', { n: '5' })).toBe('b');
+  });
+
+  it('draws an image where the markup has text, and gives its address inside a tag or a stylesheet', () => {
+    expect(render('<div>{{img::smile}}</div>')).toBe(
+      '<div><img src="/api/plots/c1/assets/smile" alt="smile"></div>',
+    );
+    expect(render('<div title="a>b" style="background:url({{img::smile}})">{{raw::smile}}</div>')).toBe(
+      '<div title="a>b" style="background:url(/api/plots/c1/assets/smile)">/api/plots/c1/assets/smile</div>',
+    );
+    expect(render('<style>.a > .b { background: url({{image::smile}}) }</style><i>{{emotion::smile}}</i>')).toBe(
+      '<style>.a > .b { background: url(/api/plots/c1/assets/smile) }</style><i><img src="/api/plots/c1/assets/smile" alt="smile"></i>',
+    );
+    expect(render('<img src="{{#if 1}}{{img::smile}}{{/if}}">')).toBe('<img src="/api/plots/c1/assets/smile">');
+  });
+
+  it('composes an image name at render time and resolves it by the card’s own names', () => {
+    const resolveAsset = (ref: string) => (ref.toLowerCase() === 'wet_coat_2.webp' ? 'smile' : undefined);
+    const template = '{{img::{{#if {{? ($rain=1)}}}}wet_{{/if}}{{getvar::outfit}}_2.webp}}';
+    expect(risu(template, { rain: '1', outfit: 'coat' }, { resolveAsset })).toBe(
+      '<img src="/api/plots/c1/assets/smile" alt="smile">',
+    );
+    expect(risu(template, { rain: '0', outfit: 'coat' }, { resolveAsset })).toBe('');
+  });
+
+  it('drops the asset macros a message has no counterpart for', () => {
+    expect(render('[{{bg::a}}{{bgm::b}}{{audio::c}}{{video::d}}{{video-img::e}}{{inlay::f}}{{source::char}}]')).toBe('[]');
+  });
+
+  it('never lets a value reach past its own argument or name a foreign image', () => {
+    expect(risu('{{getvar::x}}', { x: '{{img::smile}}' })).toBe('{{img::smile}}');
+    expect(risu('{{equal::{{getvar::x}}::a}}', { x: 'a::a' })).toBe('0');
+    expect(risu('[{{img::{{getvar::x}}}}]', { x: 'https://tracker.example.test/p.png' })).toBe('[]');
+    expect(risu('{{random::{{getvar::x}}::{{getvar::x}}}}', { x: '<b>' })).toBe('&lt;b&gt;');
+  });
+
+  it('lays out by the window width, as RisuAI cards do', () => {
+    vi.stubGlobal('window', { innerWidth: 500 });
+    try {
+      expect(render('{{#if {{? {{screen_width}} <= 768 }} }}좁음{{/if}}')).toBe('좁음');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe('malformed templates', () => {
   it('renders an unclosed block as its own escaped source', () => {
     expect(render('<div>{{#if hp}}열림</div>')).toBe('&lt;div&gt;{{#if hp}}열림&lt;/div&gt;');
@@ -267,10 +327,22 @@ describe('taint marking', () => {
     // getvar and calc read chat variables, and chat variables are model output.
     expect(marked('{{getvar::hp}}')).toBe('#40#');
     expect(marked('{{calc::hp + 1}}')).toBe('#41#');
-    // char, user, turn, rel and img are ours, so a link built from them stands.
-    expect(marked('{{char}} {{user}} {{turn}} {{rel::affection}} {{img::smile}}')).toBe(
+    // char, user, turn, rel and an image's address are ours, so a link built
+    // from them stands.
+    expect(marked('{{char}} {{user}} {{turn}} {{rel::affection}} {{raw::smile}}')).toBe(
       '아리아 민준 7 62 /api/plots/c1/assets/smile',
     );
+  });
+
+  it('leaves an image unmarked even when the model chose which one', () => {
+    expect(marked('<a href="{{img::{{getvar::face}}}}">', { variables: { face: 'smile' } })).toBe(
+      '<a href="/api/plots/c1/assets/smile">',
+    );
+  });
+
+  it('marks what a RisuAI function computed from a marked argument, and not from the template', () => {
+    expect(marked('{{equal::{{getvar::mood}}::angry}} {{equal::a::a}}')).toBe('#1# 1');
+    expect(marked(`{{random::${TAINT}잡힘${TAINT}}}`)).toBe('#잡힘#');
   });
 
   it('marks an each item, because the list is usually a variable', () => {
@@ -287,6 +359,13 @@ describe('taint marking', () => {
     // A variable carrying the marker itself must not be able to un-mark anything,
     // nor to leave a stray control character in the output.
     expect(marked('{{getvar::x}}', { variables: { x: `a${TAINT}b` } })).toBe('#ab#');
+  });
+
+  it('never lets a capture choose which function runs or open a block', () => {
+    // A capture is bound into the template before it is parsed, marked; the
+    // mark is what keeps it an argument rather than a name or a keyword.
+    expect(marked(`{{${TAINT}getvar::mood${TAINT}}}`)).toBe('#{{getvar::mood}}#');
+    expect(marked(`{{${TAINT}#if 1${TAINT}}}x`)).toBe('#{{#if 1}}#x');
   });
 
   it('carries the mark through a macro that reads a marked argument', () => {

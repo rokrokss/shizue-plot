@@ -1,4 +1,5 @@
 import {
+  cardLicense,
   coerceAssetUnlock,
   coerceNarrator,
   coercePlotProfiles,
@@ -9,6 +10,7 @@ import {
   MAX_INTRO_LENGTH,
   parseCard,
   type CharxAssetFile,
+  type ImportProvenance,
   type NarratorConfig,
   type NormalizedCard,
   type PlotCustomUi,
@@ -27,9 +29,9 @@ import {
   type Plot,
   type PlotAsset,
 } from '@shizue/db';
-import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, isNotNull, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   assetUrl,
   coerceAssetPreview,
@@ -63,6 +65,7 @@ import {
 import { enqueueJob } from '../jobs.js';
 import { requireUser } from '../session.js';
 import { loadOwnedPlot } from '../plots.js';
+import { realmCardId, realmCharacterUrl } from '../realm.js';
 import { coverKey, deleteQuietly, readAll } from '../storage.js';
 import { isUuid, optionalBoolean, optionalString, readJsonBody, requireString, requireUuidParam } from '../util.js';
 import { countComments } from './comments.js';
@@ -81,6 +84,27 @@ export const MAX_CHARACTERS_PER_PLOT = 10;
 export const MAX_INTROS_PER_PLOT = 10;
 /** One opening's length — a prologue, not a chapter. */
 export const MAX_INTRO_TEXT_LENGTH = 4000;
+/**
+ * One card file. A RisuRealm PNG carries its images inside and runs to about
+ * 30MB, and a charx with the same images is larger still. The body limit
+ * (app.ts) and the web's rewrite proxy (next.config.ts) leave room for this
+ * plus the multipart framing, and the import forms check it before uploading.
+ */
+export const MAX_CARD_IMPORT_BYTES = 50 * 1024 * 1024;
+/** The upload's own name as the provenance keeps it; a multipart name has no cap of its own. */
+const MAX_IMPORT_FILE_NAME_LENGTH = 255;
+
+/**
+ * What an import that would show someone else's characters to readers is
+ * refused with until the owner vouches for them: a publish with imported
+ * members, and an import into a plot that is already public.
+ */
+const rightsUnconfirmed = (): ApiError =>
+  new ApiError(
+    409,
+    'rights_unconfirmed',
+    'Imported characters are published only once the owner confirms the rights to them (rightsConfirmed)',
+  );
 
 export function coerceLanguage(value: string | undefined): ContentLanguage | undefined {
   if (value === undefined) return undefined;
@@ -249,17 +273,26 @@ const toPlotJson = (plot: Plot) => ({
   likeCount: plot.likeCount,
   chatCount: plot.chatCount,
   publishedAt: plot.publishedAt?.toISOString() ?? null,
+  // The last time the owner vouched for the imported members; null until then.
+  rightsConfirmedAt: plot.rightsConfirmedAt?.toISOString() ?? null,
   createdAt: plot.createdAt.toISOString(),
   updatedAt: plot.updatedAt.toISOString(),
 });
 
-/** A member as its own creator sees it: the whole card, since they wrote it. */
+/**
+ * A member as its own creator sees it: the whole card, since they wrote it — or
+ * imported it, in which case where it came from and the license its card
+ * declares travel too, being what the owner weighs before publishing it. Both
+ * are the owner's alone: no public shape carries them.
+ */
 const toMemberJson = (member: Character) => ({
   id: member.id,
   name: member.name,
   card: member.card,
   avatarUrl: avatarUrl(member),
   orderIndex: member.orderIndex,
+  importedFrom: member.importedFrom,
+  license: cardLicense(member.card.extensions) ?? null,
   createdAt: member.createdAt.toISOString(),
   updatedAt: member.updatedAt.toISOString(),
 });
@@ -304,19 +337,38 @@ async function loadOwnedMember(
   return member;
 }
 
+/** What a card upload says about itself beside the card (`readCardUpload`). */
+interface CardImport {
+  importedFrom: ImportProvenance;
+  /** The owner's word that they may publish the card, for a plot that is already public. */
+  rightsConfirmed: boolean;
+}
+
 /**
  * Inserts a member under the roster cap. The cap is a count, and a count only
  * means something while nothing else can insert: the plot row is locked for the
  * whole check-then-write, so two creates racing at nine cannot both see room.
+ *
+ * An imported member joining a plot that is already public is published by the
+ * insert itself, so it needs the owner's word exactly as a publish does. The
+ * visibility is read under the same lock a publish takes, so an import and a
+ * publish cannot pass each other with neither one asking.
  */
 async function insertMember(
   deps: AppDeps,
   plotId: string,
   name: string,
   card: NormalizedCard,
+  imported?: CardImport,
 ): Promise<Character> {
   return deps.db.transaction(async (tx) => {
-    await tx.select({ id: plots.id }).from(plots).where(eq(plots.id, plotId)).for('update');
+    const [plot] = await tx
+      .select({ visibility: plots.visibility })
+      .from(plots)
+      .where(eq(plots.id, plotId))
+      .for('update');
+    const vouching = imported !== undefined && plot?.visibility === 'public';
+    if (vouching && !imported.rightsConfirmed) throw rightsUnconfirmed();
     const [counted] = await tx
       .select({ value: sql<number>`count(*)::int`, next: sql<number>`coalesce(max(${characters.orderIndex}), -1) + 1` })
       .from(characters)
@@ -329,8 +381,17 @@ async function insertMember(
     }
     const [created] = await tx
       .insert(characters)
-      .values({ plotId, name, card, orderIndex: counted?.next ?? 0 })
+      .values({
+        plotId,
+        name,
+        card,
+        orderIndex: counted?.next ?? 0,
+        ...(imported ? { importedFrom: imported.importedFrom } : {}),
+      })
       .returning();
+    if (vouching) {
+      await tx.update(plots).set({ rightsConfirmedAt: new Date() }).where(eq(plots.id, plotId));
+    }
     return created!;
   });
 }
@@ -422,25 +483,69 @@ async function storeImportedAssets(
   }
 }
 
-/** The card file a `multipart/form-data` import carries. */
+/**
+ * The page an import names as its source. Only a RisuRealm card page is
+ * recorded, and always in one spelling; anything else is refused rather than
+ * dropped, because a client that sent it expects it to have been kept.
+ */
+function coerceSourceUrl(value: unknown): string | undefined {
+  if (value === null || (typeof value === 'string' && !value.trim())) return undefined;
+  const id = typeof value === 'string' ? realmCardId(value) : null;
+  if (!id) throw badRequest('invalid_request', 'sourceUrl must be a RisuRealm character page');
+  return realmCharacterUrl(id);
+}
+
+/**
+ * The card file a `multipart/form-data` import carries, and the record of it the
+ * member keeps: the file's name, the hash of the bytes as they arrived and the
+ * page the importer says they came from (`sourceUrl`, optional). Beside them
+ * rides `rightsConfirmed=true`, which an import into a public plot needs.
+ *
+ * The cheap refusals come before the parse — a 30MB card is not read to be
+ * turned away for its URL.
+ */
 async function readCardUpload(c: { req: { formData: () => Promise<FormData> } }): Promise<{
   parsed: ReturnType<typeof parseCard>;
   fileName: string;
+  imported: CardImport;
 }> {
-  let file: unknown;
+  let form: FormData;
   try {
-    file = (await c.req.formData()).get('file');
+    form = await c.req.formData();
   } catch {
     throw badRequest('invalid_request', 'Expected multipart/form-data with a file field');
   }
+  const file = form.get('file');
   if (!(file instanceof File)) throw badRequest('invalid_request', 'file field is required');
+  // The route's own statement of the cap; the body limit (app.ts) sits a
+  // little above it to leave room for the framing.
+  if (file.size > MAX_CARD_IMPORT_BYTES) {
+    throw new ApiError(413, 'payload_too_large', `A card file is at most ${MAX_CARD_IMPORT_BYTES} bytes`);
+  }
+  const sourceUrl = coerceSourceUrl(form.get('sourceUrl'));
 
   const bytes = new Uint8Array(await file.arrayBuffer());
+  let parsed: ReturnType<typeof parseCard>;
   try {
-    return { parsed: parseCard(bytes), fileName: file.name };
+    parsed = parseCard(bytes);
   } catch (error) {
     throw badRequest('invalid_card', error instanceof Error ? error.message : 'Unreadable character card');
   }
+  return {
+    parsed,
+    fileName: file.name,
+    imported: {
+      importedFrom: {
+        fileName: file.name.slice(0, MAX_IMPORT_FILE_NAME_LENGTH),
+        // The part of the record the server can vouch for: the URL is the
+        // importer's word, the hash is of what actually arrived.
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+        ...(sourceUrl ? { sourceUrl } : {}),
+        importedAt: new Date().toISOString(),
+      },
+      rightsConfirmed: form.get('rightsConfirmed') === 'true',
+    },
+  };
 }
 
 /**
@@ -540,7 +645,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
    * failure is a 400, never a 500.
    */
   app.post('/import', requireUser, async (c) => {
-    const { parsed, fileName } = await readCardUpload(c);
+    const { parsed, fileName, imported } = await readCardUpload(c);
     const card = parsed.card;
     const name = card.name.trim() || fileName.replace(/\.[^.]+$/, '') || 'Unnamed';
     // The setting the model is told, which on a card is split across two fields.
@@ -568,7 +673,9 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       .returning();
     const plot = created!;
 
-    const member = await insertMember(deps, plot.id, name, card);
+    // A new plot is private, so this records where the card came from and asks
+    // for nothing yet: the owner vouches for it when they publish.
+    const member = await insertMember(deps, plot.id, name, card, imported);
     if (parsed.iconBuffer) await writeMemberAvatar(deps, member, parsed.iconBuffer);
     if (parsed.assets?.length) await storeImportedAssets(deps, plot.id, parsed.assets);
 
@@ -678,7 +785,13 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.body(null, 204);
   });
 
-  // Publishing is owner-only, and only for a plot that carries the basics.
+  /**
+   * Publishing is owner-only, and only for a plot that carries the basics. A
+   * plot with imported members also needs `rightsConfirmed: true` — the owner's
+   * word that they made those characters or may publish them, which nothing
+   * here can check — and the publish stamps when it was given. Unpublishing
+   * asks for nothing.
+   */
   app.post('/:id/publish', requireUser, async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
@@ -687,6 +800,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     const publish = body['publish'];
     if (typeof publish !== 'boolean') throw badRequest('invalid_request', 'publish must be a boolean');
     const safetyLevel = coerceSafetyLevel(optionalString(body, 'safetyLevel'));
+    const rightsConfirmed = optionalBoolean(body, 'rightsConfirmed') === true;
     if (publish) requirePublishable(plot);
     // Avatars imported before the card stripping existed are cleaned up here, so
     // going public never exposes an embedded card.
@@ -705,6 +819,16 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
         .from(plots)
         .where(eq(plots.id, id))
         .for('update');
+      // Under the lock an import takes too (`insertMember`), so a member that
+      // lands while this publish waits is one it vouches for.
+      const [imported] = publish
+        ? await tx
+            .select({ id: characters.id })
+            .from(characters)
+            .where(and(eq(characters.plotId, id), isNotNull(characters.importedFrom)))
+            .limit(1)
+        : [];
+      if (imported && !rightsConfirmed) throw rightsUnconfirmed();
       const [row] = await tx
         .update(plots)
         .set({
@@ -714,6 +838,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
           ...(safetyLevel !== undefined ? { safetyLevel } : {}),
           // Kept on unpublish: it only ever matters while the row is public.
           ...(publish ? { publishedAt: new Date() } : {}),
+          ...(imported ? { rightsConfirmedAt: new Date() } : {}),
           updatedAt: new Date(),
         })
         .where(and(eq(plots.id, id), eq(plots.ownerId, userId)))
@@ -858,13 +983,14 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
   app.post('/:id/characters/import', requireUser, async (c) => {
     const id = requireUuidParam(c);
     await loadOwnedPlot(deps, id, c.get('userId'));
-    const { parsed, fileName } = await readCardUpload(c);
+    const { parsed, fileName, imported } = await readCardUpload(c);
     const name = parsed.card.name.trim() || fileName.replace(/\.[^.]+$/, '') || 'Unnamed';
 
     // Nothing is lifted onto the plot: it already has a narrator and a custom UI
     // of its own, and a member joining a cast does not get to redecorate it. Its
     // images do land as the plot's, because `{{img::slug}}` resolves there.
-    let member = await insertMember(deps, id, name, parsed.card);
+    // Into a public plot it needs `rightsConfirmed` (`insertMember`).
+    let member = await insertMember(deps, id, name, parsed.card, imported);
     if (parsed.iconBuffer) member = await writeMemberAvatar(deps, member, parsed.iconBuffer);
     if (parsed.assets?.length) await storeImportedAssets(deps, id, parsed.assets);
     return c.json(toMemberJson(member), 201);

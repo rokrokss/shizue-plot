@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { exportCardV3 } from '../src/card/export.js';
 import { normalizeCard } from '../src/card/normalize.js';
+import { cardLicense } from '../src/card/risu.js';
 import type { DisplayScript } from '../src/types.js';
 
 /** A V2 card the way RisuAI exports one, with a status-window display script. */
@@ -202,5 +203,26 @@ describe('card export', () => {
       },
     });
     expect(exportCardV3(card).data.extensions).toEqual({});
+  });
+});
+
+describe('card license', () => {
+  const licensed = (license: unknown) => {
+    const card = risuCard([]);
+    (card.data.extensions.risuai as Record<string, unknown>)['license'] = license;
+    return normalizeCard(card);
+  };
+
+  it('reads the license RisuRealm writes, through normalization', () => {
+    expect(cardLicense(licensed('CC BY-NC-ND 4.0').extensions)).toBe('CC BY-NC-ND 4.0');
+    expect(cardLicense(licensed(' private ').extensions)).toBe('private');
+  });
+
+  it('says nothing for an empty license, a missing one, or a card without a risuai block', () => {
+    expect(cardLicense(licensed('').extensions)).toBeUndefined();
+    expect(cardLicense(licensed(3).extensions)).toBeUndefined();
+    expect(cardLicense(normalizeCard(risuCard([])).extensions)).toBeUndefined();
+    expect(cardLicense({})).toBeUndefined();
+    expect(cardLicense({ risuai: null })).toBeUndefined();
   });
 });

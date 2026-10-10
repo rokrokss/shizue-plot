@@ -14,6 +14,10 @@
       "types": "./dist/variables.d.ts",
       "default": "./dist/variables.js"
     },
+    "./cbs": {
+      "types": "./dist/cbs.d.ts",
+      "default": "./dist/cbs.js"
+    },
     "./display-script": {
       "types": "./dist/displayScript.d.ts",
       "default": "./dist/displayScript.js"

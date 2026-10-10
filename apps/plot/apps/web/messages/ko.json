@@ -56,7 +56,7 @@
     "subtitle": "카드를 불러오거나 처음부터 플롯을 만들어 보세요.",
     "new": "새 플롯",
     "import": "카드 임포트",
-    "importHint": "png · json · charx 카드 파일 — 카드가 첫 등장인물이 되는 플롯으로 들어옵니다.",
+    "importHint": "png · json · charx · jpg(charx) 카드 파일 — 카드가 첫 등장인물이 되는 플롯으로 들어옵니다.",
     "name": "이름",
     "namePlaceholder": "플롯 이름",
     "create": "만들기",
@@ -114,7 +114,7 @@
     "memberCount": "{count}/{max}명",
     "memberAdd": "등장인물 추가",
     "memberImport": "카드로 추가",
-    "memberImportHint": "png · json · charx 카드 파일을 등장인물로 추가합니다.",
+    "memberImportHint": "png · json · charx · jpg(charx) 카드 파일을 등장인물로 추가합니다.",
     "memberNewName": "새 등장인물",
     "memberName": "이름",
     "memberIntro": "독자 소개",
@@ -302,6 +302,40 @@
     "chats": "대화 목록",
     "chatsEmpty": "아직 이 플롯과의 대화가 없습니다.",
     "deletePlot": "플롯 삭제"
+  },
+  "cardImport": {
+    "realmOpen": "RisuRealm에서 가져오기",
+    "realmAdd": "RisuRealm에서 추가",
+    "realmTitle": "RisuRealm에서 가져오기",
+    "realmUrl": "캐릭터 페이지 주소",
+    "realmPlaceholder": "https://realm.risuai.net/character/…",
+    "realmHint": "카드는 이 브라우저가 RisuRealm에서 직접 내려받아 가져옵니다. 50MB까지 가져올 수 있어요.",
+    "realmBrowse": "캐릭터는 <link>RisuRealm</link>에서 찾아볼 수 있어요.",
+    "realmSubmit": "가져오기"
+  },
+  "rights": {
+    "importedBadge": "가져옴",
+    "importedTitle": "가져온 카드",
+    "source": "출처",
+    "sourceFile": "파일 {name}",
+    "creator": "제작자",
+    "creatorUnknown": "표기 없음",
+    "license": "라이선스",
+    "licenseNone": "라이선스 표기 없음",
+    "licensePrivate": "비공개 라이선스(private)",
+    "terms": {
+      "by": "저작자표시",
+      "nc": "비영리",
+      "nd": "변경금지",
+      "sa": "동일조건변경허락"
+    },
+    "restrictedNotice": "변경금지 또는 비공개 라이선스입니다. 원작자의 허락 없이 이 플롯에 넣어 공개하면 라이선스를 어길 수 있습니다.",
+    "publishNotice": "카드로 가져온 등장인물이 {count}명 있습니다. shizue는 카드의 원작자를 확인할 수 없으니, 공개하기 전에 권리를 확인해 주세요.",
+    "restrictedPublish": "{names}의 카드는 변경금지(ND) 또는 비공개 라이선스입니다. 원작자의 명시적인 허락 없이 공개하면 라이선스 위반이 될 수 있습니다.",
+    "importPublicNotice": "공개 중인 플롯이라 카드로 추가한 등장인물은 바로 독자에게 보입니다. shizue는 카드의 원작자를 확인할 수 없습니다.",
+    "confirmPublish": "가져온 등장인물을 직접 만들었거나, 원작자에게 공개해도 좋다는 허락을 받았습니다.",
+    "confirmImport": "추가할 등장인물을 직접 만들었거나, 원작자에게 공개해도 좋다는 허락을 받았습니다.",
+    "confirmedAt": "권리 확인 {date}"
   },
   "style": {
     "groupProse": "문체",
@@ -794,7 +828,15 @@
     "chatgpt_invalid_state": "로그인 요청이 만료되었거나 다른 브라우저에서 열렸습니다. 이 브라우저에서 다시 로그인해 주세요.",
     "chatgpt_identity_mismatch": "ChatGPT 계정을 확인하지 못했습니다. 다시 로그인해 주세요.",
     "chatgpt_login_failed": "ChatGPT 로그인에 실패했습니다. 다시 시도해 주세요.",
-    "chatgpt_unavailable": "지금은 ChatGPT 로그인을 사용할 수 없습니다. 잠시 후 다시 시도해 주세요."
+    "chatgpt_unavailable": "지금은 ChatGPT 로그인을 사용할 수 없습니다. 잠시 후 다시 시도해 주세요.",
+    "rights_unconfirmed": "가져온 등장인물을 공개하려면 권리를 확인해야 합니다.",
+    "card_too_large": "카드 파일이 너무 큽니다. 50MB까지 가져올 수 있습니다.",
+    "realm_invalid_url": "RisuRealm 캐릭터 페이지 주소가 아닙니다. https://realm.risuai.net/character/… 형식의 주소를 붙여 넣어 주세요.",
+    "realm_not_found": "RisuRealm에서 이 캐릭터를 찾을 수 없습니다.",
+    "realm_forbidden": "이 캐릭터는 RisuRealm에서 내려받을 수 없도록 설정되어 있습니다.",
+    "realm_rate_limited": "RisuRealm 요청이 너무 잦습니다. 잠시 후 다시 시도해 주세요.",
+    "realm_unreachable": "RisuRealm에 연결하지 못했습니다. 네트워크를 확인하고 다시 시도해 주세요.",
+    "realm_unavailable": "RisuRealm에서 카드를 받지 못했습니다. 잠시 후 다시 시도해 주세요."
   },
   "rebrand": {
     "eyebrow": "이야기가 자라는 곳",

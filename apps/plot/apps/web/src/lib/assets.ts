@@ -1,5 +1,6 @@
 /** Client-side helpers for plot images and the `{{img::slug}}` reference. */
 
+import { replaceAssetMacros } from '@shizue/core/cbs';
 import { rgbaToThumbHash } from 'thumbhash';
 import type { AssetLock, AssetUnlock, AssetUnlockKind, ChatAttachment } from './types';
 
@@ -52,25 +53,55 @@ export const normalizeSlug = (raw: string): string => foldSlug(raw.trim()).repla
 export const slugFromFileName = (name: string): string => normalizeSlug(name.replace(/\.[^.]+$/, ''));
 
 /**
- * Deliberately as permissive as the stripper in @shizue/core: whatever the model
- * never sees must not survive on screen either, however the slug is written.
+ * The slug a reference names — a slug, or the name an imported card gave the
+ * image (`assetResolver` in @shizue/core/cbs builds one from the plot's assets).
  */
-const IMAGE_TOKEN_RE = /\{\{\s*img\s*::([^{}]*)\}\}/gi;
+export type AssetResolver = (ref: string) => string | undefined;
+
+/** With no names to go by, a reference is a slug or nothing. */
+const bySlug: AssetResolver = (ref) => ref.trim();
 
 /**
- * Rewrites every reference into a markdown image, so the message still goes
- * through a single markdown pass. A slug the plot has no asset for renders as
- * nothing — the same thing that reaches the model.
+ * What a reference resolves to in a map of srcs by slug: the slug and its src,
+ * or undefined when the plot has no such image — or, in a map that leaves locked
+ * slugs out, when this chat has not opened it yet.
  */
-export function renderImageTokens(content: string, assets: ReadonlyMap<string, string>): string {
-  return content.replace(IMAGE_TOKEN_RE, (_token, slug: string) => {
-    const url = assets.get(slug.trim());
-    return url ? `![${slug.trim()}](${url})` : '';
+export function lookupAsset(
+  ref: string,
+  assets: ReadonlyMap<string, string>,
+  resolve: AssetResolver = bySlug,
+): { slug: string; src: string } | undefined {
+  const slug = resolve(ref);
+  const src = slug === undefined ? undefined : assets.get(slug);
+  return slug === undefined || src === undefined ? undefined : { slug, src };
+}
+
+/**
+ * Rewrites every image reference into a markdown image, so the message still
+ * goes through a single markdown pass. `{{img::…}}` and RisuAI's other spellings
+ * of an image (`image`, `asset`, `emotion`) count; a reference the plot has no
+ * asset for renders as nothing — the same thing that reaches the model — and so
+ * does every asset macro a message has no use for: an address (`raw`, `path`),
+ * music, video, a name composed from variables. The same parse as the stripper
+ * in @shizue/core, so whatever the model never sees does not survive on screen.
+ *
+ * The alt text is the resolved slug, never the reference: a card's name for an
+ * image can hold `]` or `)`, and the slug cannot.
+ */
+export function renderImageTokens(
+  content: string,
+  assets: ReadonlyMap<string, string>,
+  resolve?: AssetResolver,
+): string {
+  return replaceAssetMacros(content, (macro) => {
+    if (macro.kind !== 'image' || macro.ref === null) return '';
+    const found = lookupAsset(macro.ref, assets, resolve);
+    return found ? `![${found.slug}](${found.src})` : '';
   });
 }
 
 /** Drops every reference, for surfaces that show plain text rather than markdown. */
-export const stripImageTokens = (content: string): string => content.replace(IMAGE_TOKEN_RE, '');
+export const stripImageTokens = (content: string): string => replaceAssetMacros(content, () => '');
 
 /**
  * What a locked asset resolves to instead of its URL.

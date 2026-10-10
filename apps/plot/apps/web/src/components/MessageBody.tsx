@@ -17,7 +17,7 @@ import rehypeHighlight from 'rehype-highlight';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
 import { stripVariableMacros } from '@shizue/core/variables';
-import { readLockKind, renderImageTokens } from '@/lib/assets';
+import { readLockKind, renderImageTokens, type AssetResolver } from '@/lib/assets';
 import {
   splitComponentCalls,
   type BodySegment,
@@ -238,8 +238,10 @@ function useDisplayPlan(
  * Renders a message as markdown. Raw HTML is not enabled, so model output can
  * never inject markup. `*action*` becomes an <em>, styled in globals.css.
  *
- * `{{img::slug}}` is resolved against the character's assets before the markdown
- * pass; an unknown slug renders as nothing, so a reference never leaks as text.
+ * `{{img::slug}}` — and RisuAI's other asset macros, by slug or by an imported
+ * card's own name for the image — is resolved against the character's assets
+ * before the markdown pass; an unknown one renders as nothing, so a reference
+ * never leaks as text.
  * `{{setvar}}` / `{{addvar}}` are hidden the same way — they are protocol for the
  * model, which still sees them in the prompt.
  *
@@ -267,6 +269,7 @@ function useDisplayPlan(
 export const MessageBody = memo(function MessageBody({
   content,
   assets = NO_ASSETS,
+  resolveAsset,
   display,
   components: componentContext,
   roster = NO_ROSTER,
@@ -276,6 +279,8 @@ export const MessageBody = memo(function MessageBody({
   content: string;
   /** Asset url by slug — memoize it, or this component re-renders on every keystroke. */
   assets?: ReadonlyMap<string, string>;
+  /** Resolves imported cards' own image names to slugs; memoize it too. Slugs only without it. */
+  resolveAsset?: AssetResolver;
   /**
    * Omitted when the viewer opted out or the character has no display scripts.
    * `scripts` must keep its identity across renders — it is what tells a plan
@@ -319,14 +324,14 @@ export const MessageBody = memo(function MessageBody({
     () =>
       segments.map((segment) => {
         if (segment.kind !== 'text') return null;
-        const text = stripVariableMacros(renderImageTokens(segment.text, assets));
+        const text = stripVariableMacros(renderImageTokens(segment.text, assets, resolveAsset));
         if (roster.length === 0) return [{ name: null, narration: false, blocks: splitBlocks(text) }];
         return speechRuns(
           text,
           roster.map((member) => member.name),
         ).map((run) => ({ name: run.name, narration: run.name === null, blocks: splitBlocks(run.text) }));
       }),
-    [segments, assets, roster],
+    [segments, assets, resolveAsset, roster],
   );
 
   // Only the very last block of the last run of text is still being written.

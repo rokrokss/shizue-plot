@@ -30,7 +30,7 @@ Elyn의 표현력(JSX)과 RisuAI의 안전 모델·변수 시스템을 결합하
 
 - **챗 변수 저장소**: `chats.variables jsonb` — `{{setvar::k::v}}/{{addvar::k::n}}`을 모델 출력 커밋 시점에만 실행(RisuAI runVar 시맨틱), 표시 시 매크로 제거. `card.defaultVariables` 지원(임포트 호환).
 - **표시 스크립트(카드 필드)**: `displayScripts: {in(정규식), out(HTML 템플릿), order, actions(move_top|move_bottom|repeat_back)}` — 모델 출력 표시 시점에만 적용, 저장 데이터 불변. RisuAI `customScripts` 임포트 매핑.
-- **템플릿 바인딩**: OUT 안에서 CBS 확장 서브셋 — `{{getvar::k}}`, `{{#if}}`, `{{#each}}`, `{{calc}}`, `{{img::slug}}`, **플랫폼 변수** `{{rel::affection}}` 등 6축 관계 스탯·`{{turn}}`·`{{user}}`·`{{char}}`.
+- **템플릿 바인딩**: OUT 안에서 RisuAI CBS(중첩·`{{#if}}`·`{{#when}}`·`{{? }}`·`{{equal}}` 등, 프롬프트와 같은 `@shizue/core/cbs`) 확장 — `{{getvar::k}}`, `{{#each}}`, `{{calc}}`, `{{img::slug}}`(카드의 원래 그림 이름도), **플랫폼 변수** `{{rel::affection}}` 등 6축 관계 스탯·`{{turn}}`·`{{user}}`·`{{char}}`.
 - **새니타이즈**: DOMPurify(허용 태그·속성 화이트리스트, on* 제거, href 프로토콜 제한) + `<style>` CSS AST 재작성(셀렉터 `.shizue-msg` 접두, 클래스 `x-shizue-` 네임스페이스, @import·외부 url() 차단 — 검증된 RisuAI/ST 패턴 이식).
 - **인터랙션 1단계**: `{{button::라벨::입력텍스트}}` — 클릭 시 해당 텍스트를 입력창에 채움(전송은 유저가) → 선택지 UX를 안전하게.
 - 효과: 상태창·게이지·테마 카드가 즉시 가능 + **RisuAI 카드 임포트 시 상태창 자동 재현** (경쟁사 전무 기능).
@@ -106,7 +106,7 @@ Layer 1 `12cb556`, Layer 2 `e5ecc8d`. 서 있는 구조는 이렇다:
 - 검증: 실제 스레드에서 위 패턴을 돌려 1,000ms 후 종료되고 메인 스레드는 그동안 계속 돌았음을 확인한다(`apps/web/test/displayPlannerThread.test.ts`). 프로덕션 번들에서 `planDisplayScripts.toString()`이 여전히 자립 함수인 것도 확인했다(minify 후 추출해 빈 렘에서 실행).
 
 **닫음 — `href`는 이제 최종값으로 판정한다.**
-템플릿 모양을 믿는 대신, 보간된 값에 표식을 달아 새니타이저가 **완성된 `href`**를 보고 결정한다(`apps/web/src/lib/taint.ts`). 표식은 모델이 고른 것에만 붙는다: `{{getvar}}`·`{{calc}}`·`{{slot}}`·정규식 캡처(`$1`). `{{char}}`·`{{user}}`·`{{turn}}`·`{{rel}}`·`{{img}}`는 우리가 만든 값이라 붙이지 않는다 — 붙이면 멀쩡한 링크만 죽는다.
+템플릿 모양을 믿는 대신, 보간된 값에 표식을 달아 새니타이저가 **완성된 `href`**를 보고 결정한다(`apps/web/src/lib/taint.ts`). 표식은 모델이 고른 것에만 붙는다: `{{getvar}}`·`{{calc}}`/`{{? }}`·`{{slot}}`·정규식 캡처(`$1`), 그리고 표식 있는 인자를 읽은 RisuAI 함수(`equal`·`random` …)의 결과. `{{char}}`·`{{user}}`·`{{turn}}`·`{{rel}}`·`{{img}}`는 우리가 만든 값이라 붙이지 않는다 — 붙이면 멀쩡한 링크만 죽는다.
 - 판정 결과는 **거부가 아니라 무력화**다. `<a>`는 라벨을 유지한 채 `href`/`target`/`rel`을 잃고, 갈 뻔했던 주소가 그 옆에 평문으로 찍힌다(120자 절단). 통째로 지우면 "카드가 어딘가로 보내려 했다"는 사실 자체가 사라지는데 그게 독자가 알아야 할 것이고, 클릭 가능한 채로 두면 낯선 자가 고른 라벨 뒤에 낯선 자가 고른 오리진이 클릭 하나 거리에 남는다. 둘 다 아닌 것이 답이다.
 - 모델이 표식 문자(U+0001)를 변수에 심어도 소용없다. 값은 들어올 때 표식이 제거된 뒤 우리 표식이 다시 붙고, 애초에 표식을 위조하면 *더 많이* 오염될 뿐이다 — 판정은 링크를 거부하는 쪽으로만 실패한다.
 - 정적으로 창작자가 써 넣은 링크는 예전 그대로 새 탭·`rel="noopener noreferrer nofollow"`로 열린다.

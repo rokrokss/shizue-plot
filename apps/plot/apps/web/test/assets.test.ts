@@ -1,3 +1,4 @@
+import { assetResolver } from '@shizue/core/cbs';
 import { describe, expect, it } from 'vitest';
 import {
   assetHref,
@@ -55,7 +56,24 @@ describe('renderImageTokens', () => {
 
   it('leaves other macros and other markdown alone', () => {
     expect(renderImageTokens('{{char}}가 ![기존](/x.png)', assets)).toBe('{{char}}가 ![기존](/x.png)');
-    expect(renderImageTokens('{{image::smile}}', assets)).toBe('{{image::smile}}');
+  });
+
+  it('draws RisuAI’s other spellings of an image, and drops the asset macros a message cannot use', () => {
+    expect(renderImageTokens('{{image::smile}}|{{asset::smile}}|{{emotion::smile}}', assets)).toBe(
+      '![smile](/api/plots/c1/assets/smile)|![smile](/api/plots/c1/assets/smile)|![smile](/api/plots/c1/assets/smile)',
+    );
+    expect(renderImageTokens('앞{{raw::smile}}{{path::smile}}{{bgm::song}}{{video-img::v}}뒤', assets)).toBe('앞뒤');
+    // Composed from a variable, it names nothing until something renders it with one.
+    expect(renderImageTokens('앞 {{img::{{getvar::face}}}} 뒤', assets)).toBe('앞  뒤');
+  });
+
+  it('resolves an imported card’s own name for the image, and writes the slug as the alt', () => {
+    const resolve = assetResolver([{ slug: 'profile-png', name: 'Profile [main].png' }]);
+    const named = new Map([['profile-png', '/api/plots/c1/assets/profile-png']]);
+    expect(renderImageTokens('{{img::profile [main].png}}', named, resolve)).toBe(
+      '![profile-png](/api/plots/c1/assets/profile-png)',
+    );
+    expect(renderImageTokens('{{img::profile [main].png}}', named)).toBe('');
   });
 });
 
@@ -111,6 +129,7 @@ describe('stripImageTokens', () => {
   it('drops every reference, known or not', () => {
     expect(stripImageTokens('앞 {{img::smile}} 뒤 {{img::없음}}')).toBe('앞  뒤 ');
     expect(stripImageTokens('{{char}}는 그대로')).toBe('{{char}}는 그대로');
+    expect(stripImageTokens('앞{{image::a}}{{raw::b}}{{img::{{getvar::c}}}}뒤')).toBe('앞뒤');
   });
 });
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyMacros, stripImageMacros } from '../src/macro.js';
+import { applyMacros, imageMacroRefs, stripImageMacros } from '../src/macro.js';
 
 const ctx = { char: '아리아', user: '민준' };
 
@@ -99,6 +99,64 @@ describe('applyMacros - pick', () => {
   });
 });
 
+describe('applyMacros - RisuAI CBS', () => {
+  const variables = { mood: '7', outfit: 'casual', hp: '40' };
+  const vars = { ...ctx, variables };
+
+  it('evaluates nested conditions the way imported lorebooks write them', () => {
+    const entry = '{{#if {{? ($mood>5)&($mood<10)}}}}\n  {{char}}는 기분이 좋다.\n{{/if}}';
+    expect(applyMacros(entry, vars)).toBe('아리아는 기분이 좋다.');
+    expect(applyMacros(entry, { ...vars, variables: { mood: '2' } })).toBe('');
+    expect(applyMacros('{{#if {{equal::{{getvar::outfit}}::casual}}}}평상복{{:else}}정장{{/if}}', vars)).toBe(
+      '평상복',
+    );
+  });
+
+  it('leaves an unknown macro as written, its nested arguments unevaluated', () => {
+    // The history fold replays `{{setvar}}` from the stored text, so the model
+    // must keep seeing exactly what it wrote.
+    expect(applyMacros('{{setvar::hp::{{calc::{{getvar::hp}}-5}}}} 앞', vars)).toBe(
+      '{{setvar::hp::{{calc::{{getvar::hp}}-5}}}} 앞',
+    );
+  });
+
+  it('treats anything that reads a variable as unsupported where there are none', () => {
+    expect(applyMacros('{{getvar::hp}} {{? $hp+1}} {{calc::2*3}}', ctx)).toBe(
+      '{{getvar::hp}} {{? $hp+1}} {{calc::2*3}}',
+    );
+    expect(applyMacros('{{? $hp+1}}', vars)).toBe('41');
+  });
+
+  it('keeps a condition on a variable whole where there are none, for the prompt to decide', () => {
+    // A greeting is expanded before the chat holds any variable. Read as false,
+    // the body would be gone from the stored text for good.
+    const greeting = '{{#if {{? $hp=0}}}}쓰러졌다{{:else}}서 있다{{/if}} {{char}}';
+    expect(applyMacros(greeting, ctx)).toBe('{{#if {{? $hp=0}}}}쓰러졌다{{:else}}서 있다{{/if}} 아리아');
+    expect(applyMacros(greeting, { ...vars, variables: { hp: '0' } })).toBe('쓰러졌다 아리아');
+    expect(applyMacros('{{#when::{{getvar::outfit}}::is::casual}}평상복{{/when}}', ctx)).toBe(
+      '{{#when::{{getvar::outfit}}::is::casual}}평상복{{/when}}',
+    );
+    expect(applyMacros('{{#when::outfit::vis::casual}}평상복{{/when}}', ctx)).toBe(
+      '{{#when::outfit::vis::casual}}평상복{{/when}}',
+    );
+    // A function of one is written as itself too, not as its answer about nothing.
+    expect(applyMacros('{{equal::{{getvar::outfit}}::casual}} {{random::{{getvar::outfit}}::정장}}', ctx)).toBe(
+      '{{equal::{{getvar::outfit}}::casual}} {{random::{{getvar::outfit}}::정장}}',
+    );
+    // A condition that needs no variable is still decided at once.
+    expect(applyMacros('{{#if {{equal::{{char}}::아리아}}}}본인{{/if}}', ctx)).toBe('본인');
+  });
+
+  it('repairs a malformed template rather than refusing the whole text', () => {
+    expect(applyMacros('{{#if 1}}열림 {{char}}', ctx)).toBe('{{#if 1}}열림 아리아');
+    expect(applyMacros('{{char}} {{/if}} {{ 미완', ctx)).toBe('아리아 {{/if}} {{ 미완');
+  });
+
+  it('accepts names the RisuAI way — case, spaces, underscores and dashes aside', () => {
+    expect(applyMacros('{{greater_equal::3::3}}{{GreaterEqual::2::3}}{{not_equal::a::b}}', ctx)).toBe('101');
+  });
+});
+
 describe('stripImageMacros', () => {
   it('removes every reference, however it is written', () => {
     expect(stripImageMacros('웃는다 {{img::smile}} 그리고 {{ IMG :: bg-2 }} 끝')).toBe(
@@ -108,6 +166,24 @@ describe('stripImageMacros', () => {
 
   it('keeps other macros and unknown slugs are not its problem', () => {
     expect(stripImageMacros('{{char}}가 {{img::존재하지-않음}} 웃는다')).toBe('{{char}}가  웃는다');
-    expect(stripImageMacros('{{image::smile}}')).toBe('{{image::smile}}');
+  });
+
+  it('removes every RisuAI asset macro, composed ones and those inside blocks too', () => {
+    expect(
+      stripImageMacros(
+        '{{image::smile}}{{asset::a}}{{emotion::b}}{{raw::c}}{{path::d}}{{bg::e}}{{bgm::f}}{{audio::g}}' +
+          '{{video::h}}{{video-img::i}}{{inlay::j}}{{source::char}}끝',
+      ),
+    ).toBe('끝');
+    expect(stripImageMacros('앞 {{img::{{getvar::outfit}}_웃음.png}} 뒤')).toBe('앞  뒤');
+    expect(stripImageMacros('{{#if {{getvar::x}}}}{{img::a}}보임{{/if}}')).toBe('{{#if {{getvar::x}}}}보임{{/if}}');
+  });
+});
+
+describe('imageMacroRefs', () => {
+  it('lists the images a text names, slugs and card names alike, and skips composed ones', () => {
+    expect(
+      imageMacroRefs('{{img::smile}} {{ Image :: 프로필.png }} {{raw::bg}} {{img::{{getvar::x}}.png}} {{emotion::울음}}'),
+    ).toEqual(['smile', '프로필.png', '울음']);
   });
 });

@@ -5,6 +5,7 @@ import { use, useCallback, useEffect, useRef, useState } from 'react';
 import { AssetManager } from '@/components/AssetManager';
 import { AiBadge, PublicBadge } from '@/components/AudienceBadge';
 import { Avatar } from '@/components/Avatar';
+import { ImportedCardDetails, RealmImportForm, RightsConfirmation } from '@/components/CardImport';
 import { ComponentCodeEditor } from '@/components/ComponentCodeEditor';
 import { DefaultVariablesEditor, DisplayScriptEditor } from '@/components/DisplayScriptEditor';
 import { LorebookEditor } from '@/components/LorebookEditor';
@@ -12,6 +13,7 @@ import { LorebookFileActions } from '@/components/LorebookFileActions';
 import { PlotStyleEditor } from '@/components/PlotStyleEditor';
 import { TagInput } from '@/components/TagInput';
 import {
+  Badge,
   Button,
   buttonClass,
   CenteredMessage,
@@ -27,6 +29,7 @@ import {
 import { Link, useRouter } from '@/i18n/navigation';
 import { locales } from '@/i18n/routing';
 import { apiDelete, apiGet, apiSend, apiUpload } from '@/lib/api';
+import { checkCardSize, downloadRealmCard, isRestrictiveLicense } from '@/lib/realm';
 import {
   MAX_CHARACTERS_PER_PLOT,
   MAX_INTRO_TEXT_LENGTH,
@@ -230,19 +233,37 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
     }
   }
 
-  async function importMember(file: File): Promise<void> {
-    if (locked) return;
+  /**
+   * A card as one more member — a picked file, or a RisuRealm page this browser
+   * downloads first (`downloadRealmCard`). Into a public plot the import itself
+   * publishes the member, so the owner's word rides along and the server stamps
+   * it; the panel's date follows without a re-read.
+   */
+  async function importMember(source: File | string, rightsConfirmed: boolean): Promise<boolean> {
+    if (locked) return false;
     setMutating(true);
     setError('');
     try {
-      const created = await apiUpload<PlotMember>(
-        `/api/plots/${id}/characters/import`,
-        file,
-      );
+      let file: File;
+      const fields: Record<string, string> = {};
+      if (typeof source === 'string') {
+        const realm = await downloadRealmCard(source);
+        file = realm.file;
+        fields['sourceUrl'] = realm.sourceUrl;
+      } else {
+        file = checkCardSize(source);
+      }
+      if (rightsConfirmed) fields['rightsConfirmed'] = 'true';
+      const created = await apiUpload<PlotMember>(`/api/plots/${id}/characters/import`, file, fields);
       setMembers((current) => [...current, created]);
       setSaved((current) => new Map(current).set(created.id, memberFields(created)));
+      if (rightsConfirmed) {
+        setPlot((current) => current && { ...current, rightsConfirmedAt: new Date().toISOString() });
+      }
+      return true;
     } catch (caught) {
       setError(toMessage(caught));
+      return false;
     } finally {
       setMutating(false);
     }
@@ -387,11 +408,12 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
 
           <MembersSection
             plotId={id}
+            published={plot.visibility === 'public'}
             onBusyChange={setMutating}
             members={members}
             onPatch={patchMember}
             onAdd={() => void addMember()}
-            onImport={(file) => void importMember(file)}
+            onImport={importMember}
             onRemove={(memberId) => void removeMember(memberId)}
             onMove={(index, delta) => void move(index, delta)}
             onAvatar={(updated) =>
@@ -491,7 +513,12 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
         </div>
 
         <div className="space-y-6">
-          <VisibilitySection plot={plot} onChange={adoptPlot} onBusyChange={setMutating} />
+          <VisibilitySection
+            plot={plot}
+            members={members}
+            onChange={adoptPlot}
+            onBusyChange={setMutating}
+          />
           <ChatList plotId={id} />
           <Button variant="danger" className="w-full" onClick={() => void remove()}>
             {t('deletePlot')}
@@ -586,9 +613,14 @@ function ProfilesSection({
   );
 }
 
-/** The roster: who is in the work, in the order the prompt names them. */
+/**
+ * The roster: who is in the work, in the order the prompt names them. A card
+ * imported into a plot that is already public reaches readers at once, so there
+ * the imports wait for the owner's word — asked again for every card.
+ */
 function MembersSection({
   plotId,
+  published,
   members,
   onPatch,
   onAdd,
@@ -600,18 +632,31 @@ function MembersSection({
 }: {
   onBusyChange: (busy: boolean) => void;
   plotId: string;
+  published: boolean;
   members: PlotMember[];
   onPatch: (id: string, patch: Partial<NormalizedCard>, name?: string) => void;
   onAdd: () => void;
-  onImport: (file: File) => void;
+  /** A file or a RisuRealm page; resolves true once the member is in. */
+  onImport: (source: File | string, rightsConfirmed: boolean) => Promise<boolean>;
   onRemove: (id: string) => void;
   onMove: (index: number, delta: number) => void;
   onAvatar: (member: PlotMember) => void;
 }) {
   const t = useTranslations('plot');
   const common = useTranslations('common');
+  const rights = useTranslations('rights');
+  const cardImport = useTranslations('cardImport');
   const fileInput = useRef<HTMLInputElement>(null);
   const full = members.length >= MAX_CHARACTERS_PER_PLOT;
+  const [realmOpen, setRealmOpen] = useState(false);
+  const [importRights, setImportRights] = useState(false);
+  const importBlocked = full || (published && !importRights);
+
+  async function importCard(source: File | string): Promise<boolean> {
+    const done = await onImport(source, published && importRights);
+    if (done) setImportRights(false);
+    return done;
+  }
 
   return (
     <Section
@@ -635,6 +680,7 @@ function MembersSection({
           <summary className="flex cursor-pointer items-center gap-3 px-3 py-2.5 text-sm">
             <Avatar src={member.avatarUrl} name={member.name} className="size-7 text-xs" />
             <span className="min-w-0 flex-1 truncate text-fg">{member.name}</span>
+            {member.importedFrom ? <Badge>{rights('importedBadge')}</Badge> : null}
             <span className="text-xs text-muted tabular-nums">{index + 1}</span>
           </summary>
 
@@ -670,6 +716,8 @@ function MembersSection({
                 </Button>
               </span>
             </div>
+
+            <ImportedCardDetails member={member} />
 
             <Field label={t('memberName')} badge={<PublicBadge />}>
               <TextInput
@@ -732,26 +780,43 @@ function MembersSection({
         </details>
       ))}
 
+      {published ? (
+        <RightsConfirmation
+          notice={rights('importPublicNotice')}
+          label={rights('confirmImport')}
+          checked={importRights}
+          onChange={setImportRights}
+        />
+      ) : null}
       <div className="flex flex-wrap items-center gap-2">
         <input
           ref={fileInput}
           data-testid="member-import-input"
           type="file"
-          accept=".png,.json,.charx"
+          accept=".png,.json,.charx,.jpg,.jpeg"
           hidden
           onChange={(event) => {
             const file = event.target.files?.[0];
             event.target.value = '';
-            if (file) onImport(file);
+            if (file) void importCard(file);
           }}
         />
         <Button disabled={full} onClick={onAdd}>
           {t('memberAdd')}
         </Button>
-        <Button disabled={full} title={t('memberImportHint')} onClick={() => fileInput.current?.click()}>
+        <Button disabled={importBlocked} title={t('memberImportHint')} onClick={() => fileInput.current?.click()}>
           {t('memberImport')}
         </Button>
+        <Button
+          data-testid="member-realm-open"
+          disabled={full}
+          aria-expanded={realmOpen}
+          onClick={() => setRealmOpen((open) => !open)}
+        >
+          {cardImport('realmAdd')}
+        </Button>
       </div>
+      {realmOpen ? <RealmImportForm disabled={importBlocked} onSubmit={importCard} /> : null}
     </Section>
   );
 }
@@ -938,14 +1003,19 @@ function CoverPicker({
  */
 function VisibilitySection({
   plot,
+  members,
   onChange,
   onBusyChange,
 }: {
   onBusyChange: (busy: boolean) => void;
   plot: PlotDetail;
+  /** The roster as the page holds it, which a member imported a moment ago is already in. */
+  members: PlotMember[];
   onChange: (plot: PlotDetail) => void;
 }) {
   const t = useTranslations('plot');
+  const rights = useTranslations('rights');
+  const format = useFormatter();
   const toMessage = useErrorMessage();
 
   const [busy, setBusy] = useState(false);
@@ -957,6 +1027,15 @@ function VisibilitySection({
   // A plot stored as adult is published but not listed anywhere, so say so
   // wherever the owner can see it.
   const gated = published && plot.safetyLevel === 'adult';
+  // Imported characters are somebody's work until the owner says otherwise, and
+  // nothing here can tell whose: publishing them waits for the owner's word,
+  // asked again for every publish.
+  const imported = members.filter((member) => member.importedFrom);
+  const restricted = imported
+    .filter((member) => isRestrictiveLicense(member.license))
+    .map((member) => member.name);
+  const needsRights = !published && imported.length > 0;
+  const [rightsConfirmed, setRightsConfirmed] = useState(false);
 
   async function toggle(): Promise<void> {
     if (busy) return;
@@ -968,8 +1047,10 @@ function VisibilitySection({
         await apiSend<PlotDetail>('POST', `/api/plots/${plot.id}/publish`, {
           publish: !published,
           safetyLevel,
+          ...(needsRights ? { rightsConfirmed } : {}),
         }),
       );
+      setRightsConfirmed(false);
     } catch (caught) {
       setError(toMessage(caught));
     } finally {
@@ -996,16 +1077,33 @@ function VisibilitySection({
           {t('safetyAdultPending')}
         </p>
       ) : null}
+      {needsRights ? (
+        <RightsConfirmation
+          notice={rights('publishNotice', { count: imported.length })}
+          label={rights('confirmPublish')}
+          restricted={restricted}
+          checked={rightsConfirmed}
+          onChange={setRightsConfirmed}
+        />
+      ) : null}
       <ErrorText>{error}</ErrorText>
       <Button
         variant={published ? 'secondary' : 'primary'}
         className="w-full"
         busy={busy}
+        disabled={needsRights && !rightsConfirmed}
         onClick={() => void toggle()}
       >
         {published ? t('unpublish') : t('publish')}
       </Button>
       {published ? null : <p className="text-xs text-muted/80">{t('publishHint')}</p>}
+      {published && imported.length > 0 && plot.rightsConfirmedAt ? (
+        <p className="text-xs text-muted/80">
+          {rights('confirmedAt', {
+            date: format.dateTime(new Date(plot.rightsConfirmedAt), { dateStyle: 'medium' }),
+          })}
+        </p>
+      ) : null}
       <Link
         href={`/p/${plot.id}`}
         className="block text-center text-xs text-muted transition-colors hover:text-fg"

@@ -1,18 +1,20 @@
 import { Unzip, UnzipInflate, type UnzipFile } from 'fflate';
 import { CardParseError } from './normalize.js';
+import { readRisum, type RisuModuleScripts } from './risum.js';
 
 const ZIP_SIGNATURE = [0x50, 0x4b, 0x03, 0x04];
 const EMBEDDED_PREFIX = 'embeded://'; // sic — the CCv3 spec spells it this way.
 /** Decompressed-size cap per entry, so a hostile archive cannot exhaust memory. */
-const MAX_ENTRY_BYTES = 20 * 1024 * 1024;
+export const MAX_ENTRY_BYTES = 20 * 1024 * 1024;
 /**
  * Budget for the pass that reads the icon and the assets. The per-entry cap bounds
  * memory but not work: an archive can name dozens of entries that each stop just
- * under it. `card.json` is read by its own earlier pass — its name is not known
- * from the card, it *is* the card — so the worst case for one archive is this
- * budget plus one entry.
+ * under it. `card.json` and `module.risum` are read by their own earlier passes —
+ * the card's name is not known from the card, it *is* the card, and the module
+ * must not share its fate with anything (see `readModule`) — so the worst case
+ * for one archive is this budget plus one entry, on top of those two.
  */
-const MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+export const MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 /**
  * The archive is fed in small slices rather than one push: the inflater emits
  * output per slice, so an oversized entry trips the cap after a few MB instead
@@ -23,12 +25,43 @@ const PUSH_CHUNK_BYTES = 16 * 1024;
  * Embedded assets kept per archive — a parse budget, deliberately below the
  * plot's 100-asset cap (uploads can reach the rest).
  */
-const MAX_ASSETS = 50;
+export const MAX_ASSETS = 50;
 /** Only images become character assets; the declared type is not restricted. */
-const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp']);
+export const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp']);
 
 export function isZip(bytes: Uint8Array): boolean {
   return ZIP_SIGNATURE.every((byte, i) => bytes[i] === byte);
+}
+
+const JPEG_SIGNATURE = [0xff, 0xd8, 0xff];
+const EOCD_SIGNATURE = [0x50, 0x4b, 0x05, 0x06];
+/** End-of-central-directory record without its comment, which is at most 64KiB. */
+const EOCD_BYTES = 22;
+const MAX_COMMENT_BYTES = 0xffff;
+
+/**
+ * The charx inside a JPEG — RisuAI's "charx jpeg" export writes the picture and
+ * then streams a whole archive after it. Returns the archive's bytes, or
+ * undefined when these are not a JPEG carrying one.
+ *
+ * The archive is found from its end-of-central-directory record rather than by
+ * looking for a local header, since `PK\x03\x04` can turn up in JPEG data by
+ * chance. The offsets in that record count from the archive's own first byte —
+ * RisuAI does not shift them for the picture in front — so the archive starts
+ * where its central directory really is, minus where it claims to be.
+ */
+export function charxInJpeg(bytes: Uint8Array): Uint8Array | undefined {
+  if (!JPEG_SIGNATURE.every((byte, i) => bytes[i] === byte)) return undefined;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const last = bytes.length - EOCD_BYTES;
+  for (let at = last; at >= 0 && at >= last - MAX_COMMENT_BYTES; at -= 1) {
+    if (!EOCD_SIGNATURE.every((byte, i) => bytes[at + i] === byte)) continue;
+    // A real record's comment runs exactly to the end of the file.
+    if (at + EOCD_BYTES + view.getUint16(at + 20, true) !== bytes.length) continue;
+    const start = at - view.getUint32(at + 12, true) - view.getUint32(at + 16, true);
+    return start >= 0 && isZip(bytes.subarray(start)) ? bytes.subarray(start) : undefined;
+  }
+  return undefined;
 }
 
 interface CharxAsset {
@@ -38,7 +71,10 @@ interface CharxAsset {
   ext?: string;
 }
 
-/** An embedded image asset, ready to be slugged and stored by the caller. */
+/**
+ * An embedded image asset, ready to be slugged and stored by the caller. A
+ * RisuAI PNG card's asset chunks come out in the same shape.
+ */
 export interface CharxAssetFile {
   /** Asset name as the card declares it; falls back to the entry file name. */
   name: string;
@@ -46,7 +82,10 @@ export interface CharxAssetFile {
 }
 
 export interface CharxContents {
+  /** `card.json` as it arrived — the module's scripts are not merged in. */
   raw: unknown;
+  /** The scripts RisuAI's export moved out of `card.json`, when the archive has a readable module. */
+  module?: RisuModuleScripts;
   iconBuffer?: Uint8Array;
   /** Embedded image assets other than the main icon, in card order. */
   assets: CharxAssetFile[];
@@ -173,15 +212,35 @@ const fileNameOf = (entry: string): string =>
 const looksLikeImage = (asset: CharxAsset, entry: string): boolean =>
   IMAGE_EXTENSIONS.has((asset.ext ?? '').toLowerCase()) || IMAGE_EXTENSIONS.has(extensionOf(entry));
 
+/** Where RisuAI's charx export puts the scripts it takes out of `card.json`. */
+const MODULE_ENTRY = 'module.risum';
+
 /**
- * Unpacks a .charx archive: `card.json`, the main icon, and the embedded images
- * the card declares. Nothing else is ever inflated.
+ * The archive's RisuAI module, in a pass of its own: nothing about the module
+ * may fail the import, and a shared pass would tie its fate to another entry's.
+ * RisuAI writes it after the assets and before `card.json`, so in the card's pass
+ * an oversized module would end the pass before the card was reached, and in the
+ * asset pass the budget can run out on the images ahead of it. Here an oversized
+ * module ends the pass with nothing, and an inflate error is caught.
+ */
+function readModule(bytes: Uint8Array): RisuModuleScripts | undefined {
+  try {
+    const entry = extractEntries(bytes, [{ name: MODULE_ENTRY, required: false }]).get(MODULE_ENTRY);
+    return entry ? readRisum(entry) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Unpacks a .charx archive: `card.json`, RisuAI's `module.risum`, the main icon,
+ * and the embedded images the card declares. Nothing else is ever inflated.
  *
- * Two passes, and only two: the card has to be read before the other names are
- * known, and everything it names is then read together so icon and assets share
- * one budget. An archive that exhausts it keeps whatever completed first — the
- * icon is best-effort there, like any other entry, since `required` governs the
- * per-entry cap and nothing else.
+ * The card has to be read before the other names are known, and everything it
+ * names is then read together so icon and assets share one budget. An archive
+ * that exhausts it keeps whatever completed first — the icon is best-effort
+ * there, like any other entry, since `required` governs the per-entry cap and
+ * nothing else. The module is read in between, on its own (see `readModule`).
  */
 export function readCharx(bytes: Uint8Array): CharxContents {
   const cardJson = extractEntries(bytes, [{ name: 'card.json', required: true }]).get('card.json');
@@ -190,6 +249,7 @@ export function readCharx(bytes: Uint8Array): CharxContents {
   }
 
   const raw: unknown = JSON.parse(new TextDecoder('utf-8').decode(cardJson));
+  const module = readModule(bytes);
   const declared = (raw as { data?: { assets?: CharxAsset[] } }).data?.assets ?? [];
   const iconEntry = entryOf(declared.find((asset) => asset.type === 'icon' && asset.name === 'main'));
 
@@ -215,5 +275,5 @@ export function readCharx(bytes: Uint8Array): CharxContents {
   }
 
   const iconBuffer = iconEntry ? inflated.get(iconEntry) : undefined;
-  return iconBuffer ? { raw, iconBuffer, assets } : { raw, assets };
+  return { raw, ...(module ? { module } : {}), ...(iconBuffer ? { iconBuffer } : {}), assets };
 }

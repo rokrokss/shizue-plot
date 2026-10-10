@@ -344,6 +344,22 @@ describe('a link the model got to write', () => {
     );
     expect(html(segments)[0]).toContain('/api/plots/c1/assets/door.png');
   });
+
+  it('draws a RisuAI card’s image by its own name, through the sanitizer', () => {
+    const assets = new Map([['door', '/api/plots/c1/assets/door.png']]);
+    const resolveAsset = (ref: string) => (ref === 'Door Open.png' ? 'door' : undefined);
+    const segments = applyDisplayScripts(
+      '[status] hp=50',
+      context(
+        [script({ out: '<div class="pic">{{img::Door Open.png}}</div><img class="raw" src="{{raw::Door Open.png}}">' })],
+        { assets, resolveAsset },
+      ),
+    );
+    expect(html(segments)[0]).toBe(
+      '<div class="x-shizue-pic"><img src="/api/plots/c1/assets/door.png" alt="door"></div>' +
+        '<img class="x-shizue-raw" src="/api/plots/c1/assets/door.png">',
+    );
+  });
 });
 
 describe('work that produces nothing', () => {

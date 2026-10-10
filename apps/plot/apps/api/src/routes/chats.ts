@@ -1,11 +1,12 @@
 import type { ChatExport, ChatExportVariableSnapshot } from '@shizue/contracts';
 import {
   applyMacros,
+  assetResolver,
   coerceNarrator,
   computeVariables,
   DEFAULT_USER_NAME,
   getPreset,
-  imageMacroSlugs,
+  imageMacroRefs,
   isNarration,
   isPresetId,
   isSceneMessage,
@@ -686,21 +687,24 @@ async function lastMessages(deps: AppDeps, rows: Chat[]): Promise<Map<string, st
 
 /**
  * The plot's assets the branch actually shows, in the order the asset list uses.
- * A `{{img::slug}}` naming an asset that has since been deleted exports nothing —
- * the same thing the chat renders for it.
+ * A reference is resolved the way the chat resolves it — by slug, or by the name
+ * an imported card gave the image — and one naming an asset that has since been
+ * deleted exports nothing, the same thing the chat renders for it.
  */
 async function referencedAssets(
   deps: AppDeps,
   plotId: string,
   path: Message[],
 ): Promise<ChatExport['assets']> {
-  const referenced = new Set(path.flatMap((message) => imageMacroSlugs(message.content)));
-  if (referenced.size === 0) return [];
+  const refs = path.flatMap((message) => imageMacroRefs(message.content));
+  if (refs.length === 0) return [];
   const rows = await deps.db
     .select()
     .from(plotAssets)
     .where(eq(plotAssets.plotId, plotId))
     .orderBy(asc(plotAssets.createdAt), asc(plotAssets.slug));
+  const slugOf = assetResolver(rows);
+  const referenced = new Set(refs.map(slugOf));
   return rows
     .filter((asset) => referenced.has(asset.slug))
     .map((asset) => ({ slug: asset.slug, url: assetUrl(plotId, asset.slug), mime: asset.mime }));

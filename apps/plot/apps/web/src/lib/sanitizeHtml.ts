@@ -88,7 +88,8 @@ const URL_FORBIDDEN_ENCODED = /%(?:5c|2f|00|09|0a|0d|7f)/i;
  * Whether a URL loads from our own origin, decided the way the browser decides it
  * rather than by shape. Every resource a message loads has to pass: a foreign
  * image url is a beacon reporting the reader's address and reading time to
- * whoever wrote the card, and `{{img::slug}}` produces exactly this form.
+ * whoever wrote the card, and every asset macro (`{{img::…}}`'s `<img>`, the
+ * address `{{raw::…}}` gives) produces exactly this form.
  *
  * A prefix test is not enough. `/\evil.test/p` starts with a slash and resolves
  * to `//evil.test/p`, because the browser folds backslashes into slashes; so do
@@ -219,7 +220,7 @@ function scopeSelector(selector: string): string | null {
  * The two survivors of the allowlists still need a value check. `position` is
  * allowed but `fixed` is not — the wrapper's paint containment already traps it,
  * and one containment property is not a boundary worth resting on. And `url()`
- * is allowed but only pointing at us, which is what `{{img::slug}}` produces.
+ * is allowed but only pointing at us, which is what an asset macro produces.
  */
 function isSafeDeclaration(property: string, value: string): boolean {
   const name = normalizeCss(property).trim().toLowerCase();

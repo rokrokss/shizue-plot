@@ -51,11 +51,13 @@ export function stripPngTextChunks(bytes: Uint8Array): Uint8Array | null {
 }
 
 /**
- * Reads tEXt chunks as keyword -> text. Length-driven traversal; the signature
- * and chunk CRCs are not verified.
+ * Reads tEXt chunks as keyword -> text bytes, as views into the input: a RisuAI
+ * card can carry hundreds of asset chunks, and the caller decodes only the ones
+ * it takes. Length-driven traversal; the signature and chunk CRCs are not
+ * verified. The first chunk of a keyword wins.
  */
-export function readPngTextChunks(bytes: Uint8Array): Map<string, string> {
-  const chunks = new Map<string, string>();
+export function readPngTextChunkBytes(bytes: Uint8Array): Map<string, Uint8Array> {
+  const chunks = new Map<string, Uint8Array>();
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const decoder = new TextDecoder('utf-8');
 
@@ -72,9 +74,7 @@ export function readPngTextChunks(bytes: Uint8Array): Map<string, string> {
       const separator = data.indexOf(0);
       if (separator > 0) {
         const keyword = decoder.decode(data.subarray(0, separator));
-        if (!chunks.has(keyword)) {
-          chunks.set(keyword, decoder.decode(data.subarray(separator + 1)));
-        }
+        if (!chunks.has(keyword)) chunks.set(keyword, data.subarray(separator + 1));
       }
     }
 
@@ -82,6 +82,14 @@ export function readPngTextChunks(bytes: Uint8Array): Map<string, string> {
     offset = dataEnd + 4; // skip CRC
   }
 
+  return chunks;
+}
+
+/** Reads tEXt chunks as keyword -> text. */
+export function readPngTextChunks(bytes: Uint8Array): Map<string, string> {
+  const decoder = new TextDecoder('utf-8');
+  const chunks = new Map<string, string>();
+  for (const [keyword, text] of readPngTextChunkBytes(bytes)) chunks.set(keyword, decoder.decode(text));
   return chunks;
 }
 

@@ -1,30 +1,50 @@
 /**
- * The CBS subset a display script's OUT template is written in.
+ * The CBS a display script's OUT template is written in.
  *
  * Client-side by design: a template is a *presentation* of a message, so it is
  * evaluated where the message is drawn and never where it is stored or prompted.
  * That also keeps the whole thing reactive — a swipe or a streaming delta changes
  * the derived variables, and the next render simply picks them up.
  *
- * There is no `eval` anywhere: `{{calc}}` and `{{#if}}` run on the small
- * recursive-descent parser below. A malformed template is never fatal — it falls
- * back to its own escaped source, so the message still reads.
+ * The language itself — nesting, `{{#if}}`/`{{#when}}`, RisuAI's functions,
+ * `{{? …}}`/`{{calc}}` — is `@shizue/core/cbs`, shared with the prompt. What is
+ * this file's is everything about the page: values escaped, the model's values
+ * marked (`lib/taint.ts`), every step paid for, our own `{{#each}}`, `{{rel}}`,
+ * `{{turn}}`, `{{button}}`, and the plot's images. There is no `eval` anywhere.
+ * A malformed template is never fatal — it falls back to its own escaped
+ * source, so the message still reads.
  */
 
+import {
+  assetMacroKind,
+  evaluateCbs,
+  evaluateExpression,
+  expressionTruthy,
+  isCbsTrue,
+  parseCbs,
+  type AssetMacroKind,
+  type CbsBlock,
+  type CbsBlockScope,
+  type CbsCall,
+  type CbsExpressionValue,
+  type CbsHost,
+  type CbsNode,
+  type CbsValue,
+} from '@shizue/core/cbs';
 import { readVariable } from '@shizue/core/variables';
-import { stripTaint, taint } from './taint';
-
-/** Nesting cap for `{{#if}}` / `{{#each}}`; anything deeper is malformed. */
-const MAX_BLOCK_DEPTH = 8;
+import { lookupAsset, type AssetResolver } from './assets';
+import { isTainted, stripTaint, taint } from './taint';
 
 /** The relationship axes `{{rel::axis}}` exposes; mirrors RELATIONSHIP_AXES. */
 const REL_AXES = ['affection', 'obsession', 'trust', 'liking', 'disgust', 'fear'] as const;
 
 export interface CbsContext {
-  /** Path-derived chat variables, for `{{getvar::k}}` and bare identifiers. */
+  /** Path-derived chat variables, for `{{getvar::k}}`, `$k` and bare identifiers. */
   variables: Record<string, string>;
-  /** Character asset urls by slug, for `{{img::slug}}`. */
+  /** Character asset urls by slug, for `{{img::…}}` and RisuAI's other asset macros. */
   assets: ReadonlyMap<string, string>;
+  /** Resolves a reference by an imported card's own image names too; slugs only without it. */
+  resolveAsset?: AssetResolver;
   /** Relationship axes 0-100, or null while the chat has none. */
   relationship: Record<string, number> | null;
   /** User turns taken on this branch, for `{{turn}}`. */
@@ -48,244 +68,7 @@ export function escapeHtml(text: string): string {
     .replace(/'/g, '&#39;');
 }
 
-/* ------------------------------------------------------------------ parsing */
-
-type Node =
-  | { kind: 'text'; text: string }
-  | { kind: 'macro'; body: string }
-  | { kind: 'block'; name: 'if' | 'each'; arg: string; children: Node[] };
-
-class MalformedTemplate extends Error {}
-
-/** Macro bodies never contain braces, which is what makes a flat scan enough. */
-const MACRO_RE = /\{\{([^{}]*)\}\}/g;
-const OPEN_RE = /^#(if|each)\b\s*(.*)$/s;
-const CLOSE_RE = /^\/(if|each)$/;
-
-function parse(template: string): Node[] {
-  const root: Node[] = [];
-  const stack: { name: 'if' | 'each'; arg: string; children: Node[] }[] = [];
-  const top = (): Node[] => stack[stack.length - 1]?.children ?? root;
-
-  let cursor = 0;
-  MACRO_RE.lastIndex = 0;
-  for (let match = MACRO_RE.exec(template); match; match = MACRO_RE.exec(template)) {
-    if (match.index > cursor) top().push({ kind: 'text', text: template.slice(cursor, match.index) });
-    cursor = match.index + match[0].length;
-
-    // A capture bound into a macro argument — `{{calc::$1 / 2}}`, `{{#if $2}}` —
-    // arrives marked, and an argument is read rather than shown: the marks would
-    // only make the expression unparseable. What the macro *emits* is marked again
-    // on the way out, so the taint follows the value rather than the spelling.
-    const body = stripTaint(match[1]!).trim();
-    const open = OPEN_RE.exec(body);
-    if (open) {
-      if (stack.length >= MAX_BLOCK_DEPTH) throw new MalformedTemplate('block nesting too deep');
-      stack.push({ name: open[1] as 'if' | 'each', arg: (open[2] ?? '').trim(), children: [] });
-      continue;
-    }
-    const close = CLOSE_RE.exec(body);
-    if (close) {
-      const block = stack.pop();
-      if (!block || block.name !== close[1]) throw new MalformedTemplate('unbalanced block');
-      top().push({ kind: 'block', name: block.name, arg: block.arg, children: block.children });
-      continue;
-    }
-    top().push({ kind: 'macro', body });
-  }
-  if (stack.length > 0) throw new MalformedTemplate('unclosed block');
-  if (cursor < template.length) top().push({ kind: 'text', text: template.slice(cursor) });
-  return root;
-}
-
-/* --------------------------------------------------------------- expressions */
-
-type Value = number | string;
-
-const isNumeric = (value: Value): boolean =>
-  typeof value === 'number' || (value.trim() !== '' && Number.isFinite(Number(value)));
-
-const toNumber = (value: Value): number => {
-  if (typeof value === 'number') return value;
-  const parsed = Number(value.trim());
-  return Number.isFinite(parsed) ? parsed : 0;
-};
-
-/** Trims the float noise `0.1 + 0.2` would otherwise put on screen. */
-const formatNumber = (value: number): string =>
-  Number.isFinite(value) ? String(Number(value.toFixed(6))) : '0';
-
-const TOKEN_RE =
-  /\s*(?:(\d+(?:\.\d+)?)|"([^"]*)"|'([^']*)'|([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)?)|(==|!=|>=|<=|[-+*/%()<>]))/y;
-
-interface Token {
-  type: 'number' | 'string' | 'ident' | 'op';
-  text: string;
-}
-
-function tokenize(source: string): Token[] {
-  const tokens: Token[] = [];
-  TOKEN_RE.lastIndex = 0;
-  while (TOKEN_RE.lastIndex < source.length) {
-    const start = TOKEN_RE.lastIndex;
-    const match = TOKEN_RE.exec(source);
-    if (!match) {
-      // Trailing whitespace is fine; anything else is a character we do not know.
-      if (source.slice(start).trim() === '') break;
-      throw new MalformedTemplate(`unexpected character in expression: ${source.slice(start, start + 1)}`);
-    }
-    if (match[1] !== undefined) tokens.push({ type: 'number', text: match[1] });
-    else if (match[2] !== undefined) tokens.push({ type: 'string', text: match[2] });
-    else if (match[3] !== undefined) tokens.push({ type: 'string', text: match[3] });
-    else if (match[4] !== undefined) tokens.push({ type: 'ident', text: match[4] });
-    else tokens.push({ type: 'op', text: match[5]! });
-  }
-  return tokens;
-}
-
-/**
- * `expr := compare`, `compare := add (cmp add)*`, `add := mul (('+'|'-') mul)*`,
- * `mul := unary (('*'|'/'|'%') unary)*`, `unary := '-' unary | primary`,
- * `primary := number | string | identifier | '(' expr ')'`.
- *
- * An identifier is a chat variable; `getvar::hp` is accepted as a spelling of `hp`.
- */
-class ExpressionParser {
-  private index = 0;
-
-  constructor(
-    private readonly tokens: Token[],
-    private readonly resolve: (name: string) => string,
-  ) {}
-
-  static evaluate(source: string, resolve: (name: string) => string): Value {
-    const parser = new ExpressionParser(tokenize(source), resolve);
-    const value = parser.compare();
-    if (parser.index < parser.tokens.length) throw new MalformedTemplate('trailing tokens');
-    return value;
-  }
-
-  private peek(): Token | undefined {
-    return this.tokens[this.index];
-  }
-
-  private eat(text: string): boolean {
-    const token = this.peek();
-    if (token?.type === 'op' && token.text === text) {
-      this.index += 1;
-      return true;
-    }
-    return false;
-  }
-
-  private compare(): Value {
-    let left = this.add();
-    for (;;) {
-      const token = this.peek();
-      if (token?.type !== 'op' || !['==', '!=', '>=', '<=', '>', '<'].includes(token.text)) return left;
-      this.index += 1;
-      const right = this.add();
-      left = compareValues(left, right, token.text) ? 1 : 0;
-    }
-  }
-
-  private add(): Value {
-    let left = this.mul();
-    for (;;) {
-      if (this.eat('+')) left = toNumber(left) + toNumber(this.mul());
-      else if (this.eat('-')) left = toNumber(left) - toNumber(this.mul());
-      else return left;
-    }
-  }
-
-  private mul(): Value {
-    let left = this.unary();
-    for (;;) {
-      if (this.eat('*')) left = toNumber(left) * toNumber(this.unary());
-      else if (this.eat('/')) {
-        const divisor = toNumber(this.unary());
-        left = divisor === 0 ? 0 : toNumber(left) / divisor;
-      } else if (this.eat('%')) {
-        const divisor = toNumber(this.unary());
-        left = divisor === 0 ? 0 : toNumber(left) % divisor;
-      } else return left;
-    }
-  }
-
-  private unary(): Value {
-    if (this.eat('-')) return -toNumber(this.unary());
-    if (this.eat('+')) return toNumber(this.unary());
-    return this.primary();
-  }
-
-  private primary(): Value {
-    const token = this.peek();
-    if (!token) throw new MalformedTemplate('unexpected end of expression');
-    if (token.type === 'number') {
-      this.index += 1;
-      return Number(token.text);
-    }
-    if (token.type === 'string') {
-      this.index += 1;
-      return token.text;
-    }
-    if (token.type === 'ident') {
-      this.index += 1;
-      const name = token.text.startsWith('getvar::') ? token.text.slice('getvar::'.length) : token.text;
-      return this.resolve(name);
-    }
-    if (this.eat('(')) {
-      const value = this.compare();
-      if (!this.eat(')')) throw new MalformedTemplate('missing )');
-      return value;
-    }
-    throw new MalformedTemplate(`unexpected token: ${token.text}`);
-  }
-}
-
-function compareValues(left: Value, right: Value, operator: string): boolean {
-  if (isNumeric(left) && isNumeric(right)) {
-    const a = toNumber(left);
-    const b = toNumber(right);
-    switch (operator) {
-      case '==':
-        return a === b;
-      case '!=':
-        return a !== b;
-      case '>=':
-        return a >= b;
-      case '<=':
-        return a <= b;
-      case '>':
-        return a > b;
-      default:
-        return a < b;
-    }
-  }
-  const a = String(left);
-  const b = String(right);
-  switch (operator) {
-    case '==':
-      return a === b;
-    case '!=':
-      return a !== b;
-    case '>=':
-      return a >= b;
-    case '<=':
-      return a <= b;
-    case '>':
-      return a > b;
-    default:
-      return a < b;
-  }
-}
-
-/* ---------------------------------------------------------------- rendering */
-
-const truthy = (value: Value): boolean =>
-  typeof value === 'number'
-    ? value !== 0
-    : value.trim() !== '' && value.trim() !== '0' && value.trim().toLowerCase() !== 'false';
+/* -------------------------------------------------------------- the budget */
 
 /**
  * What one template render may spend. The depth cap bounds how deeply blocks
@@ -338,116 +121,197 @@ function read(value: string, budget: Budget): string {
   return value;
 }
 
-function renderNodes(nodes: Node[], ctx: CbsContext, slot: string | null, budget: Budget): string {
-  let out = '';
-  for (const node of nodes) {
-    budget.nodes -= 1;
-    if (budget.nodes < 0) throw new RenderBudgetExhausted('too many nodes');
-    out += renderNode(node, ctx, slot, budget);
-    // Checking each intermediate bounds the final string too, since it is one.
-    if (out.length > MAX_RENDERED_CHARS) throw new RenderBudgetExhausted('output too large');
-  }
-  return out;
+/* ------------------------------------------------------------ image context */
+
+/**
+ * The macros that sit inside a tag or a stylesheet of the creator's markup.
+ *
+ * An image reference means two things. In a RisuAI card, `<div>{{img::face.png}}</div>`
+ * is a picture; in ours, `<img src="{{img::face}}">` and `url({{img::face}})` are
+ * its address — and `{{raw::…}}` is the address everywhere. Where the macro stands
+ * tells them apart: inside a tag's attributes or a `<style>`, only an address
+ * makes sense. It is read off the template's own text, never off a substituted
+ * value (escaped, a value holds no `<`), so nothing the model writes moves a
+ * reference from one side to the other — and a misreading is a broken picture the
+ * sanitizer then removes, not a hole.
+ */
+function attributePositions(nodes: CbsNode[]): Set<CbsNode> {
+  const inside = new Set<CbsNode>();
+  let state: 'text' | 'tag' | 'quoted' | 'style' = 'text';
+  let quote = '';
+  let tag = '';
+  let naming = false;
+
+  const scan = (text: string): void => {
+    for (let i = 0; i < text.length; i += 1) {
+      const char = text[i]!;
+      if (state === 'text') {
+        if (char === '<' && /[A-Za-z/]/.test(text[i + 1] ?? '')) {
+          state = 'tag';
+          tag = '';
+          naming = true;
+        }
+      } else if (state === 'tag') {
+        if (naming && /[A-Za-z0-9/]/.test(char)) tag += char.toLowerCase();
+        else naming = false;
+        if (char === '"' || char === "'") {
+          state = 'quoted';
+          quote = char;
+        } else if (char === '>') {
+          state = tag === 'style' ? 'style' : 'text';
+        }
+      } else if (state === 'quoted') {
+        if (char === quote) state = 'tag';
+      } else if (char === '<' && text.slice(i, i + 7).toLowerCase() === '</style') {
+        state = 'tag';
+        tag = '/style';
+        naming = false;
+      }
+    }
+  };
+
+  const walk = (list: CbsNode[]): void => {
+    for (const node of list) {
+      if (node.type === 'text') scan(node.text);
+      else if (node.type === 'macro') {
+        if (state !== 'text') inside.add(node);
+      } else {
+        walk(node.body);
+        if (node.otherwise) walk(node.otherwise);
+      }
+    }
+  };
+  walk(nodes);
+  return inside;
 }
 
-function renderNode(node: Node, ctx: CbsContext, slot: string | null, budget: Budget): string {
-  if (node.kind === 'text') return node.text;
-  if (node.kind === 'macro') return renderMacro(node.body, ctx, slot, budget);
+/* ---------------------------------------------------------------- the host */
 
+/**
+ * The page's side of the evaluation.
+ *
+ * Which values are marked, and why: `{{getvar}}`, `{{? …}}` and `{{calc}}` read
+ * chat variables, and chat variables are whatever the model's `{{setvar}}`
+ * macros said; `{{slot}}` is an `{{#each}}` item, usually a variable; a RisuAI
+ * function (`equal`, `random`, …) is marked when an argument it read was — a
+ * capture or a variable passes its mark on. The rest are not the model's to
+ * choose: `{{char}}` is the card's name, `{{user}}` the reader's persona,
+ * `{{turn}}` a count we keep, `{{rel}}` an axis we compute, and an image an
+ * address out of our own asset map — even when the model chose *which* of the
+ * card's images, the address is still ours, and marking it would make ordinary
+ * links inert for no gain.
+ */
+function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>): CbsHost {
   // Own-property reads throughout: a variable may legitimately be called
   // `toString`, and inheriting one would put a function where a string belongs.
-  const resolve = (name: string): string => read(readVariable(ctx.variables, name) ?? '', budget);
-  if (node.name === 'if') {
-    let value: Value;
+  const variable = (name: string): string => read(readVariable(ctx.variables, name) ?? '', budget);
+
+  /** Our own `{{#if expr}}`: an expression over bare names, or failing that, text. */
+  const expressionHolds = (source: string): boolean => {
+    let value: CbsExpressionValue;
     try {
-      value = ExpressionParser.evaluate(node.arg, resolve);
+      value = evaluateExpression(source, variable);
     } catch (error) {
       // An exhausted budget is not a malformed expression, and treating it as one
       // would turn a megabyte read into a silently truthy condition.
       if (error instanceof RenderBudgetExhausted) throw error;
       // Not an expression — fall back to the raw text, so `{{#if some text}}` is
       // simply truthy rather than an error that eats the whole message.
-      value = node.arg;
+      value = source;
     }
-    return truthy(value) ? renderNodes(node.children, ctx, slot, budget) : '';
-  }
+    return expressionTruthy(value);
+  };
 
-  // {{#each}} over a comma-separated list: a bare name is a variable holding one
-  // (empty when unset, so a typo renders nothing rather than itself), anything
-  // else is the list written out inline. `{{slot}}` is the current item.
-  const source = /^[A-Za-z_][A-Za-z0-9_]*$/.test(node.arg)
-    ? read(readVariable(ctx.variables, node.arg) ?? '', budget)
-    : node.arg;
-  const items = source
-    .split(',')
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0);
+  const asset = (call: CbsCall, kind: AssetMacroKind): CbsValue => {
+    if (kind === 'drop') return { text: '' };
+    const found = lookupAsset(call.args.rest(1)?.value().text ?? '', ctx.assets, ctx.resolveAsset);
+    if (!found) return { text: '' };
+    const src = read(found.src, budget);
+    if (kind === 'url' || call.mode === 'arg' || attributes.has(call.macro)) return { text: src };
+    return { text: `<img src="${escapeHtml(src)}" alt="${escapeHtml(found.slug)}">`, markup: true };
+  };
 
-  let out = '';
-  for (const item of items) {
-    budget.iterations -= 1;
-    if (budget.iterations < 0) throw new RenderBudgetExhausted('too many iterations');
-    out += renderNodes(node.children, ctx, item, budget);
-    if (out.length > MAX_RENDERED_CHARS) throw new RenderBudgetExhausted('output too large');
-  }
-  return out;
-}
-
-/**
- * Which macros produce model-controlled content, and are therefore marked.
- *
- * `{{getvar}}` and `{{calc}}` read chat variables, and chat variables are whatever
- * the model's `{{setvar}}` macros said. `{{slot}}` is an item of an `{{#each}}`,
- * which is usually a variable. The rest are not the model's to choose: `{{char}}`
- * is the card's name, `{{user}}` the reader's persona, `{{turn}}` a count we keep,
- * `{{rel}}` an axis we compute, and `{{img}}` a url out of our own asset map —
- * marking those would make ordinary links inert for no gain.
- */
-function renderMacro(body: string, ctx: CbsContext, slot: string | null, budget: Budget): string {
-  const lower = body.toLowerCase();
-  if (lower === 'char') return escapeHtml(read(ctx.char, budget));
-  if (lower === 'user') return escapeHtml(read(ctx.user, budget));
-  if (lower === 'turn') return String(ctx.turn);
-  if (lower === 'slot') return taint(escapeHtml(read(slot ?? '', budget)));
-
-  const separator = body.indexOf('::');
-  if (separator !== -1) {
-    const name = body.slice(0, separator).trim().toLowerCase();
-    const rest = body.slice(separator + 2);
-    if (name === 'getvar') {
-      return taint(escapeHtml(read(readVariable(ctx.variables, rest.trim()) ?? '', budget)));
+  /**
+   * `{{#each}}` over a comma-separated list: a bare name is a variable holding one
+   * (empty when unset, so a typo renders nothing rather than itself), anything
+   * else is the list written out inline. `{{slot}}` is the current item.
+   */
+  const each = (scope: CbsBlockScope, block: CbsBlock): CbsValue => {
+    const head = scope.head.value().text.trim();
+    const source = /^[A-Za-z_][A-Za-z0-9_]*$/.test(head) ? variable(head) : head;
+    const items = source
+      .split(',')
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+    let text = '';
+    let untrusted = false;
+    for (const item of items) {
+      budget.iterations -= 1;
+      if (budget.iterations < 0) throw new RenderBudgetExhausted('too many iterations');
+      const value = scope.render(block.body, item);
+      text += value.text;
+      if (value.untrusted) untrusted = true;
+      if (text.length > MAX_RENDERED_CHARS) throw new RenderBudgetExhausted('output too large');
     }
-    if (name === 'img') return escapeHtml(read(ctx.assets.get(rest.trim()) ?? '', budget));
-    if (name === 'rel') {
-      const axis = rest.trim().toLowerCase();
-      if (!(REL_AXES as readonly string[]).includes(axis)) return escapeHtml(`{{${body}}}`);
-      return String(ctx.relationship?.[axis] ?? 0);
-    }
-    if (name === 'calc') {
-      try {
-        const value = ExpressionParser.evaluate(rest, (key) =>
-          read(readVariable(ctx.variables, key) ?? '', budget),
-        );
-        return taint(escapeHtml(typeof value === 'number' ? formatNumber(value) : value));
-      } catch (error) {
-        // Same reason as `{{#if}}`: an exhausted budget is not a bad expression,
-        // and must not come back as a small string that looks like one.
-        if (error instanceof RenderBudgetExhausted) throw error;
-        return escapeHtml(`{{${body}}}`);
+    return { text, untrusted };
+  };
+
+  return {
+    variable,
+    visit: () => {
+      budget.nodes -= 1;
+      if (budget.nodes < 0) throw new RenderBudgetExhausted('too many nodes');
+    },
+    // Checking each intermediate bounds the final string too, since it is one.
+    grow: (length) => {
+      if (length > MAX_RENDERED_CHARS) throw new RenderBudgetExhausted('output too large');
+    },
+    // A capture bound into a macro argument — `{{calc::$1 / 2}}`, `{{#if $2}}` —
+    // arrives marked, and an argument is read rather than shown: the marks would
+    // only make the expression unparseable. So they come off, and the mark moves
+    // to the value; what the macro *emits* is marked again on the way out, so the
+    // taint follows the value rather than the spelling.
+    text: (raw) => ({ text: stripTaint(raw), untrusted: isTainted(raw) }),
+    emit: (value) =>
+      value.markup ? value.text : value.untrusted ? taint(escapeHtml(value.text)) : escapeHtml(value.text),
+    // A condition written as RisuAI writes it — with a macro inside — is RisuAI's
+    // (`1` or `true`); one written out is ours, an expression.
+    condition: (head) => (head.literal ? expressionHolds(head.value().text) : isCbsTrue(head.value().text)),
+    block: (block, scope) => (block.kind === 'each' ? each(scope, block) : undefined),
+    macro: (call) => {
+      switch (call.name) {
+        case 'char':
+          return { text: read(ctx.char, budget) };
+        case 'user':
+          return { text: read(ctx.user, budget) };
+        case 'turn':
+          return { text: String(ctx.turn) };
+        case 'slot':
+          return { text: read(call.slot ?? '', budget), untrusted: true };
+        case 'screenwidth':
+          // RisuAI cards lay out by it. The width when the message was drawn.
+          return typeof window === 'undefined' ? undefined : { text: String(window.innerWidth) };
+        case 'rel': {
+          const axis = call.args.rest(1)?.value().text.trim().toLowerCase() ?? '';
+          if (!(REL_AXES as readonly string[]).includes(axis)) return undefined;
+          return { text: String(ctx.relationship?.[axis] ?? 0) };
+        }
+        case 'button': {
+          // The only interactive element a template can produce. It carries no
+          // behaviour of its own — the chat page delegates on `data-shizue-fill` and
+          // does nothing but put the text in the composer.
+          const label = call.args.at(1)?.value().text ?? '';
+          const fill = call.args.rest(2)?.value().text ?? label;
+          return {
+            text: `<button type="button" data-shizue-fill="${escapeHtml(fill)}">${escapeHtml(label)}</button>`,
+            markup: true,
+          };
+        }
       }
-    }
-    if (name === 'button') {
-      // The only interactive element a template can produce. It carries no
-      // behaviour of its own — the chat page delegates on `data-shizue-fill` and
-      // does nothing but put the text in the composer.
-      const cut = rest.indexOf('::');
-      const label = cut === -1 ? rest : rest.slice(0, cut);
-      const fill = cut === -1 ? rest : rest.slice(cut + 2);
-      return `<button type="button" data-shizue-fill="${escapeHtml(fill)}">${escapeHtml(label)}</button>`;
-    }
-  }
-  // Unknown macro: shown as written, so a typo is visible instead of silent.
-  return escapeHtml(`{{${body}}}`);
+      const kind = assetMacroKind(call.name);
+      return kind ? asset(call, kind) : undefined;
+    },
+  };
 }
 
 /**
@@ -469,7 +333,8 @@ export function renderTemplate(
 ): string {
   const budget: Budget = { nodes: MAX_RENDERED_NODES, iterations: MAX_EACH_ITERATIONS, charge };
   try {
-    return renderNodes(parse(template), ctx, null, budget);
+    const nodes = parseCbs(template, { strict: true });
+    return evaluateCbs(template, nodes, host(ctx, budget, attributePositions(nodes)));
   } catch (error) {
     if (error instanceof RenderBudgetExhausted) throw error;
     return escapeHtml(template);

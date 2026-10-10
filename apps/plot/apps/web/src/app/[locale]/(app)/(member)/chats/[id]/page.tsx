@@ -1,6 +1,7 @@
 'use client';
 
 import { Icon } from '@/components/Icon';
+import { assetResolver } from '@shizue/core/cbs';
 import { componentNames } from '@shizue/core/component';
 import { NARRATION_PREFIX } from '@shizue/core/narration';
 import { isSceneMessage, sceneSpanAt } from '@shizue/core/scene';
@@ -567,6 +568,12 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     return map;
   }, [assetUrls, lockedKinds]);
 
+  /**
+   * What a reference names, for both maps: a slug, or the name an imported card
+   * wrote it under (`{{img::profile.png}}`), which no slug can stand in for.
+   */
+  const resolveAsset = useMemo(() => assetResolver(assets), [assets]);
+
   /** The gallery's rows: every image of the work, open or not. */
   const gallery = useMemo(() => illustrations(assets, locks ?? []), [assets, locks]);
 
@@ -661,12 +668,13 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       scripts,
       variables,
       assets: assetUrls,
+      resolveAsset,
       relationship: axes,
       turn,
       char: characterName,
       user: personaName ?? youLabel,
     };
-  }, [customUi, scripts, variables, assetUrls, axes, turn, characterName, personaName, youLabel]);
+  }, [customUi, scripts, variables, assetUrls, resolveAsset, axes, turn, characterName, personaName, youLabel]);
 
   /** Fills the composer; the reader still decides to send. */
   const suggestInput = useCallback((text: string) => setInput(text), []);
@@ -1394,6 +1402,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                   avatar={plot?.coverUrl ?? null}
                   roster={members}
                   assets={messageAssets}
+                  resolveAsset={resolveAsset}
                   attachments={message.attachments}
                   {...(display ? { display } : {})}
                   {...(components ? { components } : {})}

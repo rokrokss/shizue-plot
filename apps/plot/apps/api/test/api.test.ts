@@ -18,6 +18,7 @@ import {
   DEFAULT_MAX_RESPONSE_TOKENS,
   IMAGE_ATTACHED_PLACEHOLDER,
   loreEntryKey,
+  MAX_ASSETS,
   parseCard,
   placeholderPng,
   PRESET_IDS,
@@ -58,7 +59,7 @@ import {
   type StreamDone,
 } from '@shizue/llm';
 import { and, asc, desc, eq, inArray } from 'drizzle-orm';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -94,6 +95,7 @@ import {
 } from '../src/jobs.js';
 import { createJobHandlers, notificationFanout } from '../src/notifications.js';
 import {
+  MAX_CARD_IMPORT_BYTES,
   MAX_CHARACTERS_PER_PLOT,
   MAX_INTRO_TEXT_LENGTH,
   MAX_INTROS_PER_PLOT,
@@ -1380,6 +1382,211 @@ describe('plot characters', () => {
 
     expect((await request(cookie, `/api/plots/${plot.id}`, 'DELETE')).status).toBe(204);
     await expect(readFile(join(storageDir, 'avatars', `${staying.id}.gif`))).rejects.toThrow();
+  });
+});
+
+describe('import provenance and publishing rights', () => {
+  /** A V2 card as RisuRealm serves one, with its creator and license on it. */
+  const realmCard = (license: string) => ({
+    ...v2Card,
+    data: { ...v2Card.data, creator: '원작자', extensions: { risuai: { license } } },
+  });
+  const realmId = '0f8e6c1a-3b2d-4c5e-9f7a-1b2c3d4e5f60';
+  const realmUrl = `https://realm.risuai.net/character/${realmId}`;
+  const sha256 = (bytes: string): string => createHash('sha256').update(bytes).digest('hex');
+
+  /** Posts a card file with whatever fields ride beside it. */
+  function importWith(
+    cookie: string,
+    path: string,
+    file: File,
+    fields: Record<string, string> = {},
+  ): Promise<Response> {
+    const form = new FormData();
+    form.append('file', file);
+    for (const [key, value] of Object.entries(fields)) form.append(key, value);
+    return request(cookie, path, 'POST', form);
+  }
+
+  it('records the file, its hash and the canonical page it came from, for the owner', async () => {
+    const cookie = await signUp('provenance@example.com');
+    const text = JSON.stringify(realmCard('CC BY-NC-ND 4.0'));
+    const before = Date.now();
+    const res = await importWith(cookie, '/api/plots/import', new File([text], 'lian.json'), {
+      sourceUrl: `https://risuai.xyz/?realm=${realmId}`,
+    });
+    expect(res.status, await res.clone().text()).toBe(201);
+    const plot = await readJson(res);
+    const [member] = plot.characters;
+    // Stored in one spelling, whichever shape it was pasted in.
+    expect(member.importedFrom).toEqual({
+      fileName: 'lian.json',
+      sha256: sha256(text),
+      sourceUrl: realmUrl,
+      importedAt: expect.any(String),
+    });
+    expect(Date.parse(member.importedFrom.importedAt)).toBeGreaterThanOrEqual(before - 1000);
+    expect(member.license).toBe('CC BY-NC-ND 4.0');
+    expect(member.card.creator).toBe('원작자');
+    // A new plot is private, and nobody has vouched for anything yet.
+    expect(plot).toMatchObject({ visibility: 'private', rightsConfirmedAt: null });
+
+    // A bare id is a page too; a file with no page says nothing about one.
+    const path = `/api/plots/${plot.id}/characters/import`;
+    const byId = await readJson(await importWith(cookie, path, new File([text], 'b.json'), { sourceUrl: realmId }));
+    expect(byId.importedFrom.sourceUrl).toBe(realmUrl);
+    const bare = await readJson(await importWith(cookie, path, cardFile()));
+    expect(bare.importedFrom).toMatchObject({ fileName: 'lian.json', sha256: expect.any(String) });
+    expect(bare.importedFrom.sourceUrl).toBeUndefined();
+    expect(bare.license).toBeNull();
+    // A member the studio made has no record and no license.
+    expect(await addCharacter(cookie, plot.id, { name: '세라' })).toMatchObject({
+      importedFrom: null,
+      license: null,
+    });
+
+    const roster = await readJson(await request(cookie, `/api/plots/${plot.id}/characters`));
+    expect(roster.map((one: any) => one.importedFrom?.sourceUrl ?? null)).toEqual([
+      realmUrl,
+      realmUrl,
+      null,
+      null,
+    ]);
+  });
+
+  it('refuses a source that is not a RisuRealm card page, before reading the card', async () => {
+    const cookie = await signUp('provenance-invalid@example.com');
+    for (const sourceUrl of [
+      `https://example.com/character/${realmId}`,
+      'https://realm.risuai.net/character/not-an-id',
+      `https://realm.risuai.net/character/${realmId}/edit`,
+      `ftp://realm.risuai.net/character/${realmId}`,
+      'https://risuai.xyz/?realm=nope',
+    ]) {
+      // A file that would not even parse: the URL is what is refused.
+      const res = await importWith(cookie, '/api/plots/import', new File(['not a card'], 'x.json'), {
+        sourceUrl,
+      });
+      expect(res.status, sourceUrl).toBe(400);
+      expect((await readJson(res)).code).toBe('invalid_request');
+    }
+    expect(await readJson(await request(cookie, '/api/plots'))).toEqual([]);
+
+    // An empty field is no source at all.
+    const blank = await importWith(cookie, '/api/plots/import', cardFile(), { sourceUrl: ' ' });
+    expect(blank.status, await blank.clone().text()).toBe(201);
+    expect((await readJson(blank)).characters[0].importedFrom.sourceUrl).toBeUndefined();
+  });
+
+  it('publishes imported characters only on the owner’s word, and stamps when it was given', async () => {
+    const cookie = await signUp('rights-publish@example.com');
+    const plot = await importCard(cookie, cardFile());
+    const path = `/api/plots/${plot.id}/publish`;
+
+    for (const body of [{ publish: true }, { publish: true, rightsConfirmed: false }]) {
+      const refused = await json(cookie, path, 'POST', body);
+      expect(refused.status).toBe(409);
+      expect((await readJson(refused)).code).toBe('rights_unconfirmed');
+    }
+    expect((await json(cookie, path, 'POST', { publish: true, rightsConfirmed: 'yes' })).status).toBe(400);
+    expect(await readPlot(cookie, plot.id)).toMatchObject({
+      visibility: 'private',
+      publishedAt: null,
+      rightsConfirmedAt: null,
+    });
+
+    const before = Date.now();
+    const published = await publishPlot(cookie, plot.id, { rightsConfirmed: true });
+    expect(published.visibility).toBe('public');
+    expect(Date.parse(published.rightsConfirmedAt)).toBeGreaterThanOrEqual(before - 1000);
+
+    // Taking it down asks for nothing, and keeps the record of the word given.
+    const hidden = await readJson(await json(cookie, path, 'POST', { publish: false }));
+    expect(hidden).toMatchObject({
+      visibility: 'private',
+      rightsConfirmedAt: published.rightsConfirmedAt,
+    });
+  });
+
+  it('leaves a plot of studio-made members publishing as it always has', async () => {
+    const cookie = await signUp('rights-studio@example.com');
+    const plot = await publishablePlot(cookie);
+    expect(await publishPlot(cookie, plot.id)).toMatchObject({
+      visibility: 'public',
+      rightsConfirmedAt: null,
+    });
+
+    // The question follows the roster: with its imported member gone, a plot is
+    // made of the owner's own characters again.
+    const imported = await importCard(cookie, cardFile());
+    await addCharacter(cookie, imported.id, { name: '세라' });
+    const memberPath = `/api/plots/${imported.id}/characters/${imported.characters[0].id}`;
+    expect((await request(cookie, memberPath, 'DELETE')).status).toBe(204);
+    expect((await publishPlot(cookie, imported.id)).visibility).toBe('public');
+  });
+
+  it('asks the same of an import into a plot that is already public', async () => {
+    const cookie = await signUp('rights-import@example.com');
+    const plot = await publishablePlot(cookie);
+    await publishPlot(cookie, plot.id);
+    const path = `/api/plots/${plot.id}/characters/import`;
+
+    for (const fields of [{}, { rightsConfirmed: 'false' }] as Record<string, string>[]) {
+      const refused = await importWith(cookie, path, cardFile(), fields);
+      expect(refused.status).toBe(409);
+      expect((await readJson(refused)).code).toBe('rights_unconfirmed');
+    }
+    expect(await readPlot(cookie, plot.id)).toMatchObject({ rightsConfirmedAt: null });
+    expect((await readPlot(cookie, plot.id)).characters).toHaveLength(1);
+
+    const before = Date.now();
+    const joined = await importWith(cookie, path, cardFile(), { rightsConfirmed: 'true' });
+    expect(joined.status, await joined.clone().text()).toBe(201);
+    const after = await readPlot(cookie, plot.id);
+    expect(after.characters).toHaveLength(2);
+    expect(Date.parse(after.rightsConfirmedAt)).toBeGreaterThanOrEqual(before - 1000);
+  });
+
+  it('never shows anyone but the owner where a member came from', async () => {
+    const alice = await signUp('rights-owner@example.com');
+    const bob = await signUp('rights-reader@example.com');
+    const file = new File([JSON.stringify(realmCard('CC BY 4.0'))], 'lian-original.json');
+    const plot = await readJson(
+      await importWith(alice, '/api/plots/import', file, { sourceUrl: realmUrl }),
+    );
+    await publishPlot(alice, plot.id, { rightsConfirmed: true });
+
+    const view = await readPublicPlot(bob, plot.id);
+    expect(view.characters).toHaveLength(1);
+    expect(view.characters[0].importedFrom).toBeUndefined();
+    expect(view.rightsConfirmedAt).toBeUndefined();
+    const explore = await readJson(await request(bob, '/api/explore?language=ko'));
+    // The reader's own transcript names the cast, by name and face only.
+    const state = await startChat(bob, plot.id);
+    const exported = await readJson(await request(bob, `/api/chats/${state.chat.id}/export`));
+    for (const payload of [view, explore, exported]) {
+      expect(JSON.stringify(payload)).not.toContain(realmId);
+      expect(JSON.stringify(payload)).not.toContain('lian-original.json');
+    }
+    for (const path of [`/api/plots/${plot.id}`, `/api/plots/${plot.id}/characters`]) {
+      expect((await request(bob, path)).status).toBe(404);
+    }
+  });
+
+  it(`takes a card the size Realm serves, and refuses one over ${MAX_CARD_IMPORT_BYTES} bytes`, async () => {
+    const cookie = await signUp('import-size@example.com');
+    // JSON takes whitespace anywhere, so this is one ordinary card in a 30MB file.
+    const padded = JSON.stringify(v2Card) + ' '.repeat(30 * 1024 * 1024);
+    const taken = await importWith(cookie, '/api/plots/import', new File([padded], 'big.json'));
+    expect(taken.status, await taken.clone().text()).toBe(201);
+
+    // Over the file cap but inside the body limit's room for framing: the
+    // route's own refusal, under the same code.
+    const huge = JSON.stringify(v2Card) + ' '.repeat(MAX_CARD_IMPORT_BYTES);
+    const over = await importWith(cookie, '/api/plots/import', new File([huge], 'huge.json'));
+    expect(over.status).toBe(413);
+    expect((await readJson(over)).code).toBe('payload_too_large');
+    expect(await readJson(await request(cookie, '/api/plots'))).toHaveLength(1);
   });
 });
 
@@ -4447,7 +4654,7 @@ describe('custom UI', () => {
       owner,
       new File([JSON.stringify(risuCard)], 'lumi.json', { type: 'application/json' }),
     );
-    await publishPlot(owner, plot.id);
+    await publishPlot(owner, plot.id, { rightsConfirmed: true });
 
     const view = await readPublicPlot(reader, plot.id);
     expect(view.public).toBe(true);
@@ -6960,8 +7167,13 @@ describe('plot hub', () => {
     return plot;
   }
 
-  async function publish(cookie: string, id: string, value = true): Promise<any> {
-    const res = await json(cookie, `/api/plots/${id}/publish`, 'POST', { publish: value });
+  async function publish(
+    cookie: string,
+    id: string,
+    value = true,
+    body: Record<string, unknown> = {},
+  ): Promise<any> {
+    const res = await json(cookie, `/api/plots/${id}/publish`, 'POST', { publish: value, ...body });
     expect(res.status, await res.clone().text()).toBe(200);
     return readJson(res);
   }
@@ -7677,7 +7889,8 @@ describe('plot hub', () => {
     expect((await request(bob, avatarUrl)).status).toBe(404);
     expect((await request(bob, `/api/plots/${plot.id}/cover`)).status).toBe(404);
 
-    await publish(alice, plot.id);
+    // An imported card, so the owner vouches for it.
+    await publish(alice, plot.id, true, { rightsConfirmed: true });
     const avatar = await request(bob, avatarUrl);
     expect(avatar.status).toBe(200);
     expect(new Uint8Array(await avatar.arrayBuffer())).toEqual(stripPngTextChunks(png));
@@ -7702,7 +7915,7 @@ describe('plot hub', () => {
     const url = `/api/plots/${plot.id}/characters/${member.id}/avatar`;
     // The import itself still reads the card out of the same bytes.
     expect(member.card.description).toBe('왕립 도서관의 사서.');
-    await publish(alice, plot.id);
+    await publish(alice, plot.id, true, { rightsConfirmed: true });
 
     const served = new Uint8Array(await (await request(bob, url)).arrayBuffer());
     expect(readPngTextChunks(served).size).toBe(0);
@@ -7714,7 +7927,7 @@ describe('plot hub', () => {
     // up by publishing.
     await writeFile(join(storageDir, 'avatars', `${member.id}.png`), png);
     expect(readPngTextChunks(new Uint8Array(await (await request(bob, url)).arrayBuffer())).size).toBe(1);
-    await publish(alice, plot.id);
+    await publish(alice, plot.id, true, { rightsConfirmed: true });
     const resanitized = new Uint8Array(await (await request(bob, url)).arrayBuffer());
     expect(readPngTextChunks(resanitized).size).toBe(0);
     expect(resanitized).toEqual(buildPngWithTextChunks({}));
@@ -8803,6 +9016,8 @@ describe('plot assets', () => {
     const created = await readJson(await upload(cookie, plot.id, 'smile', png));
     expect(created).toEqual({
       slug: 'smile',
+      // Only an image an imported card brought keeps a name of its own.
+      name: null,
       url: `/api/plots/${plot.id}/assets/smile`,
       mime: 'image/png',
       // Nothing measured this one, and nothing on the read side needs it to be.
@@ -8987,6 +9202,13 @@ describe('plot assets', () => {
     expect(assets['smile'].mime).toBe('image/png');
     expect(assets['smile-2'].mime).toBe('image/gif');
     expect(assets['asset-3'].mime).toBe('image/gif');
+    // The card's own names travel beside the slugs: the references a card builds
+    // at render time are written in them, and a Korean one has no slug at all.
+    expect([assets['smile'].name, assets['smile-2'].name, assets['asset-3'].name]).toEqual([
+      'Smile',
+      'smile',
+      '웃음',
+    ]);
 
     const first = await request(cookie, assets['smile'].url);
     expect(new Uint8Array(await first.arrayBuffer())).toEqual(stripPngTextChunks(cardPng()));
@@ -8999,8 +9221,8 @@ describe('plot assets', () => {
 
   it('stops a charx import at the archive parser bound, below the plot cap', async () => {
     const cookie = await signUp('asset-charx-cap@example.com');
-    /** `MAX_ASSETS` in @shizue/core's charx reader, which runs before this route. */
-    const CHARX_ASSET_BOUND = 50;
+    /** The charx reader's own bound, which runs before this route. */
+    const CHARX_ASSET_BOUND = MAX_ASSETS;
     const embedded: CharxAssetSpec[] = Array.from({ length: CHARX_ASSET_BOUND + 5 }, (_, i) => ({
       type: 'emotion',
       name: `e${i}`,
