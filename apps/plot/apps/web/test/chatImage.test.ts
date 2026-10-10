@@ -49,6 +49,7 @@ function thumbhashOf(r: number, g: number, b: number): string {
 const measured = (slug: string) =>
   assetSrc({
     slug,
+    name: null,
     url: `/api/plots/c1/assets/${slug}`,
     mime: 'image/png',
     width: 800,
@@ -60,6 +61,7 @@ const measured = (slug: string) =>
 const unmeasured = (slug: string) =>
   assetSrc({
     slug,
+    name: null,
     url: `/api/plots/c1/assets/${slug}`,
     mime: 'image/png',
     width: null,

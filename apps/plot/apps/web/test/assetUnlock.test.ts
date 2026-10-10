@@ -37,6 +37,7 @@ const { AssetManager } = await import('../src/components/AssetManager');
 
 const asset = (unlock: PlotAsset['unlock'] = null): PlotAsset => ({
   slug: 'kiss',
+  name: null,
   url: '/api/plots/sty_1/assets/kiss',
   mime: 'image/png',
   width: 512,

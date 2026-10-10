@@ -8,6 +8,13 @@
       "when": 1791528233601,
       "tag": "0000_character_chat",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1791615274858,
+      "tag": "0001_import_rights",
+      "breakpoints": true
     }
   ]
 }

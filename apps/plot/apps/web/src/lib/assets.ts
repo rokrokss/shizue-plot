@@ -9,6 +9,8 @@ const MAX_SLUG_LENGTH = 40;
 
 export interface PlotAsset {
   slug: string;
+  /** The imported card's own name for the image; null for uploads. */
+  name: string | null;
   /** URL served by the API. */
   url: string;
   mime: string;

@@ -62,6 +62,7 @@ describe('renderImageTokens', () => {
 describe('the measurement carried in the src', () => {
   const asset = (overrides: Partial<PlotAsset> = {}): PlotAsset => ({
     slug: 'smile',
+    name: null,
     url: '/api/plots/c1/assets/smile',
     mime: 'image/png',
     width: 800,
@@ -116,6 +117,7 @@ describe('stripImageTokens', () => {
 describe('the lock a chat reads an image through', () => {
   const asset = (slug: string): PlotAsset => ({
     slug,
+    name: null,
     url: `/api/plots/c1/assets/${slug}`,
     mime: 'image/png',
     width: null,

@@ -35,6 +35,7 @@ const { AssetManager } = await import('../src/components/AssetManager');
 
 const asset: PlotAsset = {
   slug: 'smile',
+  name: null,
   url: '/api/plots/sty_1/assets/smile',
   mime: 'image/png',
   width: 512,

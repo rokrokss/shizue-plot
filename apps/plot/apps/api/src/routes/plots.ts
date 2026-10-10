@@ -274,6 +274,8 @@ const toMemberJson = (member: Character) => ({
  */
 const toAssetJson = (asset: PlotAsset, owner = false) => ({
   slug: asset.slug,
+  // An imported card's own name for the image, which its references are written in.
+  name: asset.name,
   url: assetUrl(asset.plotId, asset.slug),
   mime: asset.mime,
   // Null for everything uploaded before the measurement existed; the reader
@@ -401,7 +403,14 @@ async function storeImportedAssets(
           taken,
         );
         taken.add(slug);
-        return { id: candidate.id, plotId, slug, path: candidate.key, mime: candidate.mime };
+        return {
+          id: candidate.id,
+          plotId,
+          slug,
+          name: candidate.name,
+          path: candidate.key,
+          mime: candidate.mime,
+        };
       });
       if (rows.length > 0) await tx.insert(plotAssets).values(rows);
       return candidates.slice(rows.length).map((candidate) => candidate.key);

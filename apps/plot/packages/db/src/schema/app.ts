@@ -1,5 +1,6 @@
 import type {
   AssetUnlock,
+  ImportProvenance,
   LoreEntry,
   NarratorConfig,
   NormalizedCard,
@@ -162,6 +163,10 @@ export const plots = pgTable(
     tags: text('tags').array().notNull().default([]),
     // The creator may close the comment section; existing comments then stay hidden.
     commentsEnabled: boolean('comments_enabled').notNull().default(true),
+    // When the owner last declared they hold the rights to the imported characters
+    // the plot shows. Stamped by every publish, and every import into a public
+    // plot, that had imported members to vouch for; null until the first.
+    rightsConfirmedAt: timestamp('rights_confirmed_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -193,6 +198,10 @@ export const characters = pgTable(
     // speech.ts), so it is the row's own column rather than a read of the card.
     name: text('name').notNull(),
     card: jsonb('card').$type<NormalizedCard>().notNull(),
+    // Set when the member came from a card file, null when the studio made it. A
+    // column rather than a card field, because it records how the row came to be,
+    // not what the character is — an export never carries it.
+    importedFrom: jsonb('imported_from').$type<ImportProvenance>(),
     /** Storage key, namespaced `avatars/…` (apps/api/src/storage.ts). */
     avatarPath: text('avatar_path'),
     // The creator's arrangement, which is the order the prompt blocks are written
@@ -237,6 +246,11 @@ export const plotAssets = pgTable(
       .notNull()
       .references(() => plots.id, { onDelete: 'cascade' }),
     slug: text('slug').notNull(),
+    // The name an imported card gave the image, as it wrote it. RisuAI cards build
+    // image references out of these names at render time (`{{img::{{getvar::outfit}}.png}}`),
+    // and a slug cannot stand in for them — the fold turns a Korean name into
+    // nothing. Null for uploads.
+    name: text('name'),
     /** Storage key, namespaced `assets/…` (apps/api/src/storage.ts). */
     path: text('path').notNull(),
     mime: text('mime').notNull(),

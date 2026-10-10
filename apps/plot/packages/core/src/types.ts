@@ -353,6 +353,22 @@ export interface PlotCustomUi {
   componentCapabilities?: ComponentCapability[];
 }
 
+/**
+ * Where an imported character came from: the file as it arrived, and the page
+ * the reader says they took it from. A record for a takedown request rather than
+ * a proof — the server hashes what it received, but the URL is the importer's
+ * word. A member the studio created has none.
+ */
+export interface ImportProvenance {
+  fileName: string;
+  /** Hex SHA-256 of the uploaded bytes. */
+  sha256: string;
+  /** Canonical source page, e.g. `https://realm.risuai.net/character/<id>`. */
+  sourceUrl?: string;
+  /** ISO 8601. */
+  importedAt: string;
+}
+
 export const DEFAULT_LORE_SETTINGS: LoreSettings = {
   scanDepth: 4,
   tokenBudget: 2048,
