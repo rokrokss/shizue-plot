@@ -72,7 +72,9 @@
     "draftHint": "One premise becomes a first version. The draft opens in the editor, yours to rewrite.",
     "draftPremise": "Premise",
     "draftPremisePlaceholder": "e.g. On a rainy night, a stranger knocks at a bookshop that has already closed.",
-    "draftCreate": "Write the draft"
+    "draftCreate": "Write the draft",
+    "stImport": "Move from SillyTavern",
+    "stImportHint": "Bring over SillyTavern characters, groups, personas and chats all at once."
   },
   "plot": {
     "notFound": "Plot not found.",
@@ -312,6 +314,133 @@
     "realmHint": "Your browser downloads the card straight from RisuRealm. Cards up to 50MB can be imported.",
     "realmBrowse": "Browse characters on <link>RisuRealm</link>.",
     "realmSubmit": "Import"
+  },
+  "stImport": {
+    "title": "Move from SillyTavern",
+    "subtitle": "Bring over the characters, groups, personas and chats you had in SillyTavern, all at once.",
+    "back": "← My plots",
+    "stepsLabel": "Steps",
+    "steps": {
+      "choose": "Choose files",
+      "review": "Review",
+      "run": "Import"
+    },
+    "choose": {
+      "zipTitle": "From a backup (recommended)",
+      "zipHint": "Choose the zip you saved from SillyTavern's User Settings → Account → Download Backup.",
+      "zipPick": "Choose zip file",
+      "zipDrop": "Or drop it here.",
+      "folderTitle": "From a folder",
+      "folderHint": "Choose the data/default-user folder inside your SillyTavern install.",
+      "folderPick": "Choose folder",
+      "privacy": "The backup is read inside this browser. Only the character cards you pick, their lorebooks and the converted chats are uploaded — settings.json, secrets.json, backgrounds, thumbnails, vectors and every other file stay on your device."
+    },
+    "scan": {
+      "reading": "Reading the backup…",
+      "hashing": "Checking what's already here… {done}/{total}",
+      "checking": "Comparing with your account…",
+      "cancel": "Cancel"
+    },
+    "review": {
+      "summary": "Found {characters, plural, one {# character} other {# characters}}, {groups, plural, one {# group} other {# groups}}, {personas, plural, one {# persona} other {# personas}} and {chats, plural, one {# chat} other {# chats}}.",
+      "characters": "Characters",
+      "charactersHint": "Each character becomes a plot of its own with them as its first character, and their chats come along.",
+      "groups": "Groups",
+      "groupsHint": "Each group becomes one plot with every member in the cast, and the group chats come along.",
+      "personas": "Personas",
+      "selectAll": "Select all",
+      "selectNone": "Clear all",
+      "chats": "{count, plural, one {# chat} other {# chats}}",
+      "chatsNew": "{count} new",
+      "chatsIncomplete": "{count, plural, one {# interrupted chat starts} other {# interrupted chats start}} over",
+      "imported": "Already imported",
+      "world": "Lorebook {name}",
+      "worldMissing": "The linked lorebook file ({name}) is missing, so the card's own lorebook is used.",
+      "unspeakable": "This name is over 40 characters or contains a colon, so chats can't recognize it as a speaker. Imported lines may read as narration.",
+      "extraWorlds": "{count, plural, one {# extra lorebook} other {# extra lorebooks}}",
+      "members": "Members: {names}",
+      "noMembers": "None of the members has a card here, so the group can't be imported.",
+      "overflow": "A plot holds up to 10 characters, so these members are left out: {names}",
+      "missing": "Left out for lack of a card: {names}",
+      "personaExists": "A persona with this name already exists.",
+      "options": "Options",
+      "optionChats": "Import chats",
+      "optionMemoryBackfill": "Summarize long chats into memory",
+      "memoryNotice": "Summarizing long imported chats uses your ChatGPT plan's usage.",
+      "optionExtraLorebooks": "Attach each character's extra lorebooks",
+      "optionGlobalLorebooks": "Attach the global lorebooks ({names}) to every imported plot",
+      "optionGlobalRegex": "Add the {count, plural, one {# global regex script} other {# global regex scripts}} as display scripts",
+      "privateNotice": "Imported plots are private. Publishing one asks you to confirm your rights to the imported characters.",
+      "notImported": "What isn't imported",
+      "notImportedList": "Presets, Instruct and Context templates, Quick Replies, themes, backgrounds, the Data Bank, vectors and extensions are not brought over.",
+      "skippedFiles": "{count, plural, one {# file not read} other {# files not read}}",
+      "nothing": "Pick something to import.",
+      "restart": "Choose different files",
+      "start": "Import {count, plural, one {# item} other {# items}}"
+    },
+    "skipReasons": {
+      "too_large": "too large",
+      "unreadable": "unreadable",
+      "not_a_card": "not a character card",
+      "invalid_json": "not JSON",
+      "no_character": "no matching character",
+      "no_group": "no matching group",
+      "missing": "file missing"
+    },
+    "run": {
+      "current": "Importing {name}…",
+      "starting": "Getting ready…",
+      "summary": "{done} done · {skipped} skipped · {failed} failed · {cancelled} stopped",
+      "progress": "{done} / {total}",
+      "progressLabel": "Import progress",
+      "cancel": "Stop",
+      "retry": "Retry failed items",
+      "toPlots": "Go to my plots",
+      "cancelledNotice": "Retrying picks up the stopped items. A chat that was mid-import starts over.",
+      "openPlot": "Open plot",
+      "openChat": "Open chat",
+      "kinds": {
+        "persona": "Persona",
+        "character": "Character",
+        "group": "Group",
+        "chat": "Chat"
+      },
+      "status": {
+        "pending": "Waiting",
+        "running": "Importing",
+        "done": "Done",
+        "skipped": "Skipped",
+        "failed": "Failed",
+        "cancelled": "Stopped"
+      },
+      "reasons": {
+        "already_imported": "Already imported.",
+        "persona_exists": "A persona with this name already exists.",
+        "chat_empty": "No messages to import.",
+        "owner_failed": "Skipped because its character or group couldn't be imported."
+      },
+      "memory": {
+        "queued": "Memory summary started; it will show in the chat's memory shortly.",
+        "not_needed": "Not long enough to need a summary.",
+        "unavailable": "No model is available for memory, so it wasn't summarized."
+      },
+      "dropped": {
+        "label": "Left out: {list}",
+        "hidden": "{count, plural, one {# hidden message} other {# hidden messages}}",
+        "empty": "{count, plural, one {# empty message} other {# empty messages}}",
+        "malformed": "{count, plural, one {# unreadable line} other {# unreadable lines}}",
+        "overLimit": "{count, plural, one {# message} other {# messages}} past 20,000",
+        "swipes": "{count, plural, one {# swipe} other {# swipes}} past 20 per message",
+        "swipesOverRows": "{count, plural, one {# swipe} other {# swipes}} let go to fit the 20,000 per-chat limit"
+      },
+      "unknownSpeaker": "{count, plural, one {# message} other {# messages}} with an unknown speaker came in as narration.",
+      "warnings": {
+        "world_missing": "Lorebook file missing, not attached: {name}",
+        "world_unreadable": "Couldn't read the lorebook file, imported without it: {name}",
+        "extras_failed": "Couldn't attach the extra lorebooks and scripts: {message}"
+      },
+      "modelUnavailable": "Chats need a model to go on. Connect ChatGPT in <link>Settings</link>, then retry — the characters are already in."
+    }
   },
   "rights": {
     "importedBadge": "Imported",
@@ -743,7 +872,9 @@
         "sticky": "Sticky",
         "recursion": "Recursion"
       }
-    }
+    },
+    "importing": "This chat is still being imported. You can carry on once everything is in.",
+    "importingReload": "Refresh"
   },
   "personas": {
     "title": "Personas",
@@ -836,7 +967,18 @@
     "realm_forbidden": "This character can't be downloaded from RisuRealm.",
     "realm_rate_limited": "Too many requests to RisuRealm. Try again in a moment.",
     "realm_unreachable": "Couldn't reach RisuRealm. Check your connection and try again.",
-    "realm_unavailable": "Couldn't get the card from RisuRealm. Try again in a moment."
+    "realm_unavailable": "Couldn't get the card from RisuRealm. Try again in a moment.",
+    "already_imported": "This chat has already been imported.",
+    "chat_importing": "This chat is still being imported. Try again once it finishes.",
+    "chat_not_importing": "This chat has already finished importing.",
+    "invalid_lorebook": "Couldn't read the lorebook (World Info) file.",
+    "message_limit": "An imported chat can hold up to 20,000 messages, swipes included.",
+    "st_not_sillytavern": "No SillyTavern data found. Choose the backup zip or the data/default-user folder.",
+    "st_zip_unreadable": "Couldn't read that zip file. Try downloading the backup from SillyTavern again.",
+    "st_file_unreadable": "Couldn't read a file. It may have changed or been damaged since you chose it.",
+    "st_file_too_large": "That file is too large to import.",
+    "st_group_empty": "None of the group's members has a card here.",
+    "message_too_long": "One message in this chat is over 100,000 characters, so the chat can't be imported."
   },
   "rebrand": {
     "eyebrow": "A place for plots to grow",

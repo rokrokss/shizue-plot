@@ -11,12 +11,14 @@ import {
   parseCard,
   type CharxAssetFile,
   type ImportProvenance,
+  type LoreEntry,
   type NarratorConfig,
   type NormalizedCard,
   type PlotCustomUi,
   type PlotProfile,
   type PlotStyle,
 } from '@shizue/core';
+import { fromLorebookFile, LorebookFileError } from '@shizue/core/world-info';
 import {
   characters,
   plots,
@@ -496,10 +498,33 @@ function coerceSourceUrl(value: unknown): string | undefined {
 }
 
 /**
+ * The lorebook a SillyTavern World Info file beside the card carries (the optional
+ * `worldInfo` field). ST writes a character's linked world back into the card only
+ * when the character is saved, so the file is the fresher copy and its entries
+ * stand in for the card's own. Unreadable is a 400, like an unreadable card.
+ */
+async function readWorldInfo(value: ReturnType<FormData['get']>): Promise<LoreEntry[] | undefined> {
+  if (value === null || value === '') return undefined;
+  const text = typeof value === 'string' ? value : await value.text();
+  let entries: LoreEntry[];
+  try {
+    entries = fromLorebookFile(JSON.parse(text));
+  } catch (error) {
+    throw badRequest(
+      'invalid_lorebook',
+      error instanceof LorebookFileError ? error.message : 'Unreadable World Info file',
+    );
+  }
+  // A file the client chose, normalized on the way in like any other lorebook it sends.
+  return coerceLorebook(entries);
+}
+
+/**
  * The card file a `multipart/form-data` import carries, and the record of it the
  * member keeps: the file's name, the hash of the bytes as they arrived and the
  * page the importer says they came from (`sourceUrl`, optional). Beside them
- * rides `rightsConfirmed=true`, which an import into a public plot needs.
+ * rides `rightsConfirmed=true`, which an import into a public plot needs, and the
+ * character's World Info file (`worldInfo`, `readWorldInfo`).
  *
  * The cheap refusals come before the parse — a 30MB card is not read to be
  * turned away for its URL.
@@ -523,6 +548,7 @@ async function readCardUpload(c: { req: { formData: () => Promise<FormData> } })
     throw new ApiError(413, 'payload_too_large', `A card file is at most ${MAX_CARD_IMPORT_BYTES} bytes`);
   }
   const sourceUrl = coerceSourceUrl(form.get('sourceUrl'));
+  const lorebook = await readWorldInfo(form.get('worldInfo'));
 
   const bytes = new Uint8Array(await file.arrayBuffer());
   let parsed: ReturnType<typeof parseCard>;
@@ -532,7 +558,7 @@ async function readCardUpload(c: { req: { formData: () => Promise<FormData> } })
     throw badRequest('invalid_card', error instanceof Error ? error.message : 'Unreadable character card');
   }
   return {
-    parsed,
+    parsed: lorebook ? { ...parsed, card: { ...parsed.card, lorebook } } : parsed,
     fileName: file.name,
     imported: {
       importedFrom: {

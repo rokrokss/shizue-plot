@@ -2,10 +2,11 @@
  * Path-derived chat variables.
  *
  * There is no storage column: the value of a variable is whatever you get by
- * replaying the `{{setvar}}` / `{{addvar}}` macros of the messages on the current
- * branch, oldest first. Because the message tree is append-only, a swipe or a
- * fork automatically yields that branch's state — the same guarantee a per-node
- * state column would give, at zero storage cost.
+ * replaying the `{{setvar}}` / `{{addvar}}` macros — and SillyTavern's
+ * `{{incvar}}` / `{{decvar}}` — of the messages on the current branch, oldest
+ * first. Because the message tree is append-only, a swipe or a fork automatically
+ * yields that branch's state — the same guarantee a per-node state column would
+ * give, at zero storage cost.
  *
  * Deliberately dependency-free so the web client can import it (`@shizue/core/variables`)
  * without pulling the tokenizer and the card parser into the bundle.
@@ -43,10 +44,12 @@ function adopt(source: Record<string, string>): Variables {
 }
 
 /**
- * `{{setvar::key::value}}` / `{{addvar::key::delta}}`. The key may not contain a
- * colon or a brace; the value runs to the closing braces, so it may contain `::`.
+ * `{{setvar::key::value}}` / `{{addvar::key::delta}}`, and `{{incvar::key}}` /
+ * `{{decvar::key}}`. The key may not contain a colon or a brace; the value runs to
+ * the closing braces, so it may contain `::`. One pattern, so a message's macros
+ * fold in the order they were written.
  */
-const VAR_MACRO_RE = /\{\{\s*(setvar|addvar)\s*::([^:{}]*)::([^{}]*)\}\}/gi;
+const VAR_MACRO_RE = /\{\{\s*(?:(setvar|addvar)\s*::([^:{}]*)::([^{}]*)|(incvar|decvar)\s*::([^:{}]*))\}\}/gi;
 
 /** `{{getvar::key}}`. Resolved wherever macros are expanded. */
 const GETVAR_RE = /\{\{\s*getvar\s*::([^{}]*)\}\}/gi;
@@ -67,6 +70,10 @@ const toNumber = (value: string | undefined): number => {
  * Folds the macros of `texts` (branch messages, oldest first) over `defaults`.
  * Malformed macros — an empty key, a non-numeric `addvar` delta — are skipped
  * rather than throwing, so a model typo can never break a chat.
+ *
+ * `incvar`/`decvar` are `addvar` by 1 and -1, which is how ST defines them — so a
+ * value that is not a number counts as 0 here too, where ST's `addvar` would
+ * append the digit to the text instead.
  */
 export function computeVariables(texts: readonly string[], defaults: Variables = {}): Variables {
   // Copied rather than spread: a card's defaultVariables comes back from jsonb as
@@ -75,14 +82,14 @@ export function computeVariables(texts: readonly string[], defaults: Variables =
   for (const text of texts) {
     if (!text) continue;
     for (const match of text.matchAll(VAR_MACRO_RE)) {
-      const key = match[2]!.trim();
+      const op = (match[1] ?? match[4]!).toLowerCase();
+      const key = (match[2] ?? match[5]!).trim();
       if (!key) continue;
-      const value = match[3]!;
-      if (match[1]!.toLowerCase() === 'setvar') {
-        variables[key] = value;
+      if (op === 'setvar') {
+        variables[key] = match[3]!;
         continue;
       }
-      const delta = Number(value.trim());
+      const delta = op === 'incvar' ? 1 : op === 'decvar' ? -1 : Number(match[3]!.trim());
       if (!Number.isFinite(delta)) continue;
       variables[key] = formatNumber(toNumber(readVariable(variables, key)) + delta);
     }
@@ -91,9 +98,10 @@ export function computeVariables(texts: readonly string[], defaults: Variables =
 }
 
 /**
- * Drops every `{{setvar}}` / `{{addvar}}` macro. Display only — the macros stay
- * in the stored message and in the prompt history, so the model keeps observing
- * its own protocol and keeps emitting it.
+ * Drops every `{{setvar}}` / `{{addvar}}` / `{{incvar}}` / `{{decvar}}` macro
+ * (ST shows the new value where an `incvar` stood; here it is protocol like the
+ * rest). Display only — the macros stay in the stored message and in the prompt
+ * history, so the model keeps observing its own protocol and keeps emitting it.
  */
 export function stripVariableMacros(text: string): string {
   return text.replace(VAR_MACRO_RE, '');

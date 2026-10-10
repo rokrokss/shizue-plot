@@ -25,6 +25,7 @@ import {
   readPngTextChunks,
   stripPngTextChunks,
 } from '@shizue/core';
+import { toWorldInfo } from '@shizue/core/world-info';
 import { ChatExportSchema } from '@shizue/contracts';
 import {
   account,
@@ -93,6 +94,7 @@ import {
   startJobWorker,
   type JobHandlers,
 } from '../src/jobs.js';
+import { BACKFILL_CHUNKS_PER_RUN } from '../src/memory.js';
 import { createJobHandlers, notificationFanout } from '../src/notifications.js';
 import {
   MAX_CARD_IMPORT_BYTES,
@@ -232,6 +234,8 @@ let storageDir: string;
 let storage: ObjectStorage;
 let auth: ReturnType<typeof createAuth>;
 let app: Hono<AppEnv>;
+/** The handler registry the API runs its queue with, on the default deps. */
+let jobHandlers: JobHandlers;
 
 beforeAll(async () => {
   ({ db, sql, close } = createDb(databaseUrl));
@@ -251,10 +255,8 @@ beforeEach(async () => {
     baseUrl: 'http://localhost:13000',
   });
   app = makeApp();
+  jobHandlers = createJobHandlers(makeDeps());
 });
-
-/** The plot publication handler registry used by the API. */
-const jobHandlers = createJobHandlers();
 
 /**
  * One API instance's dependencies. Two of these are two instances: they share the
@@ -1476,6 +1478,54 @@ describe('import provenance and publishing rights', () => {
     const blank = await importWith(cookie, '/api/plots/import', cardFile(), { sourceUrl: ' ' });
     expect(blank.status, await blank.clone().text()).toBe(201);
     expect((await readJson(blank)).characters[0].importedFrom.sourceUrl).toBeUndefined();
+  });
+
+  it('takes a member’s lorebook from the World Info file beside its card, over the card’s own', async () => {
+    const cookie = await signUp('world-info@example.com');
+    const card = (): File => new File([JSON.stringify(v3Card)], 'sei.json');
+    const world = JSON.stringify(
+      toWorldInfo([
+        {
+          keys: ['도서관'],
+          secondaryKeys: [],
+          selective: false,
+          content: '왕립 도서관은 자정에 닫힌다.',
+          enabled: true,
+          constant: false,
+          insertionOrder: 100,
+          caseSensitive: false,
+          useRegex: false,
+          position: 'before_char',
+        },
+      ]),
+    );
+    const withWorld = (path: string, worldInfo: string): Promise<Response> => {
+      const form = new FormData();
+      form.append('file', card());
+      form.append('worldInfo', new File([worldInfo], 'sei-world.json'));
+      return request(cookie, path, 'POST', form);
+    };
+    const contents = (member: any): string[] => member.card.lorebook.map((entry: any) => entry.content);
+
+    const plain = await importCard(cookie, card());
+    expect(contents(plain.characters[0])).toContain('세이의 검은 이가 빠져 있다.');
+
+    const created = await withWorld('/api/plots/import', world);
+    expect(created.status, await created.clone().text()).toBe(201);
+    const plot = await readJson(created);
+    expect(contents(plot.characters[0])).toEqual(['왕립 도서관은 자정에 닫힌다.']);
+    expect(plot.characters[0].card.lorebook[0].keys).toEqual(['도서관']);
+    const added = await withWorld(`/api/plots/${plot.id}/characters/import`, world);
+    expect(added.status, await added.clone().text()).toBe(201);
+    expect(contents(await readJson(added))).toEqual(['왕립 도서관은 자정에 닫힌다.']);
+
+    // A file that is no lorebook refuses the import, and nothing is created.
+    for (const garbage of ['not json', '{"name": "세이"}', '[]']) {
+      const res = await withWorld('/api/plots/import', garbage);
+      expect(res.status, garbage).toBe(400);
+      expect((await readJson(res)).code).toBe('invalid_lorebook');
+    }
+    expect(await readJson(await request(cookie, '/api/plots'))).toHaveLength(2);
   });
 
   it('publishes imported characters only on the owner’s word, and stamps when it was given', async () => {
@@ -6041,6 +6091,8 @@ describe('memory', () => {
 
   interface Harness {
     app: Hono<AppEnv>;
+    /** The job handlers of the same instance, for the backfill the queue runs. */
+    handlers: JobHandlers;
     /** Chat-model requests, in order. */
     prompts: Captured[];
     /** Memory-channel requests, in order. */
@@ -6108,17 +6160,19 @@ describe('memory', () => {
       };
     };
 
+    const deps = makeDeps({
+      getAdapter,
+      onBackgroundTask: (task, kind) => {
+        pending.push(task);
+        // `tasks` counts refreshes only, so the relationship job running alongside
+        // does not look like a duplicate refresh.
+        if (kind === 'memory') tasks.push(task);
+      },
+      ...overrides,
+    });
     return {
-      app: makeApp({
-        getAdapter,
-        onBackgroundTask: (task, kind) => {
-          pending.push(task);
-          // `tasks` counts refreshes only, so the relationship job running alongside
-          // does not look like a duplicate refresh.
-          if (kind === 'memory') tasks.push(task);
-        },
-        ...overrides,
-      }),
+      app: createApp(deps),
+      handlers: createJobHandlers(deps),
       prompts,
       summaries,
       tasks,
@@ -6752,6 +6806,377 @@ describe('memory', () => {
 
     expect((await json(cookie, `/api/chats/${chatId}/memory`, 'PUT', {})).status).toBe(400);
     expect((await json(other, `/api/chats/${chatId}/memory`, 'PUT', { summary: 'x' })).status).toBe(404);
+  });
+
+  it('folds an imported backlog a capped chunk per call, a few calls per job run', async () => {
+    const cookie = await signUp('memory-backfill@example.com');
+    const harness = memoryApp();
+    const plot = await createPlot(cookie);
+    const BUDGET = 8000;
+    // `#n#` keeps every text out of every other one, so a call's chunk can be read back.
+    const text = (index: number): string => `#${index}# ${'서가 사이에서 나눈 긴 대화입니다. '.repeat(50)}`;
+    // More history than one run's calls can fold at one budget each.
+    const length = Math.ceil((BUDGET * (BACKFILL_CHUNKS_PER_RUN + 1.5)) / countTokens(text(10)));
+    const history = Array.from({ length }, (_, index) => ({
+      role: index % 2 === 0 ? 'assistant' : 'user',
+      versions: [text(index)],
+      selected: 0,
+    }));
+    const started = await json(
+      cookie,
+      '/api/chats/import',
+      'POST',
+      { plotId: plot.id, fileName: 'long.jsonl', sha256: 'a'.repeat(64), messages: history },
+      harness.app,
+    );
+    expect(started.status, await started.clone().text()).toBe(201);
+    const chatId = (await readJson(started)).chat.id;
+    // Straight into the row: the settings route takes no writes while the import runs.
+    await db
+      .update(chats)
+      .set({ memorySettings: { contextBudget: BUDGET, summaryThreshold: 0.4 } })
+      .where(eq(chats.id, chatId));
+    const done = await json(cookie, `/api/chats/${chatId}/import/complete`, 'POST', { backfillMemory: true }, harness.app);
+    expect((await readJson(done)).memoryBackfill).toBe('queued');
+
+    /** Where on the branch the summary's anchor stands. */
+    const anchorIndex = async (): Promise<number> => {
+      const [row] = await db.select({ memory: chats.memory }).from(chats).where(eq(chats.id, chatId));
+      const ids = (
+        await db.select().from(messages).where(eq(messages.chatId, chatId)).orderBy(asc(messages.createdAt))
+      ).map((message) => message.id);
+      return ids.indexOf(row!.memory!.anchorMessageId);
+    };
+    const pendingJobs = () => db.select().from(jobs).where(eq(jobs.status, 'pending'));
+
+    // One run makes its calls and leaves the rest to a successor.
+    expect(await drainJobs(db, harness.handlers, { maxJobs: 1 })).toBe(1);
+    expect(harness.summaries).toHaveLength(BACKFILL_CHUNKS_PER_RUN);
+    const afterFirstRun = await anchorIndex();
+    expect(await pendingJobs()).toMatchObject([{ kind: 'memory_backfill', payload: { chatId } }]);
+
+    await drainJobs(db, harness.handlers);
+    expect(harness.summaries.length).toBeGreaterThan(BACKFILL_CHUNKS_PER_RUN);
+    expect(await anchorIndex()).toBeGreaterThan(afterFirstRun);
+    expect(await pendingJobs()).toEqual([]);
+
+    // Each call was handed the oldest stretch the one before it left, within the
+    // budget, and the summary so far; the anchor is the last message folded.
+    let next = 0;
+    for (const [call, sent] of harness.summaries.entries()) {
+      const ask = contentText(sent.messages[0]!.content);
+      const folded = history.flatMap((message, index) => (ask.includes(message.versions[0]!) ? [index] : []));
+      expect(folded.length).toBeGreaterThan(0);
+      expect(folded).toEqual(folded.map((_, offset) => next + offset));
+      const tokens = folded.reduce((sum, index) => sum + countTokens(history[index]!.versions[0]!), 0);
+      expect(tokens).toBeLessThanOrEqual(BUDGET);
+      if (call > 0) expect(ask).toContain(SUMMARY);
+      next += folded.length;
+    }
+    expect(await anchorIndex()).toBe(next - 1);
+    // What is left verbatim is the tail the prompt keeps.
+    expect(next).toBeLessThan(history.length);
+  });
+
+  it('ends a backfill quietly once the chat is gone', async () => {
+    const harness = memoryApp();
+    await db.transaction((tx) => enqueueJob(tx, 'memory_backfill', { chatId: randomUUID() }));
+    expect(await drainJobs(db, harness.handlers)).toBe(1);
+    expect(harness.summaries).toEqual([]);
+    expect(await db.select({ status: jobs.status }).from(jobs)).toEqual([{ status: 'done' }]);
+  });
+});
+
+describe('chat import', () => {
+  const hashOf = (text: string): string => createHash('sha256').update(text).digest('hex');
+  const FILE = hashOf('chat.jsonl');
+
+  /** One message as the wizard sends it: the source's swipes, and the one it was on. */
+  const turn = (role: 'user' | 'assistant', versions: string[], selected = 0, createdAt?: string) => ({
+    role,
+    versions,
+    selected,
+    ...(createdAt ? { createdAt } : {}),
+  });
+
+  const startImport = (
+    cookie: string,
+    plotId: string,
+    batch: unknown[],
+    body: Record<string, unknown> = {},
+    target: Hono<AppEnv> = app,
+  ): Promise<Response> =>
+    json(cookie, '/api/chats/import', 'POST', { plotId, fileName: 'chat.jsonl', sha256: FILE, messages: batch, ...body }, target);
+
+  async function importChat(
+    cookie: string,
+    plotId: string,
+    batch: unknown[],
+    body: Record<string, unknown> = {},
+    target: Hono<AppEnv> = app,
+  ): Promise<any> {
+    const res = await startImport(cookie, plotId, batch, body, target);
+    expect(res.status, await res.clone().text()).toBe(201);
+    return readJson(res);
+  }
+
+  const complete = (cookie: string, chatId: string, backfillMemory = false, target: Hono<AppEnv> = app) =>
+    json(cookie, `/api/chats/${chatId}/import/complete`, 'POST', { backfillMemory }, target);
+
+  const rowsOf = (chatId: string) =>
+    db.select().from(messages).where(eq(messages.chatId, chatId)).orderBy(asc(messages.createdAt));
+
+  it('writes a linear conversation, swipes as siblings and the head on the selected path, across batches', async () => {
+    const cookie = await signUp('chat-import@example.com');
+    const plot = await createPlot(cookie, { name: '도서관', intros: ['플롯의 도입부'] });
+    const first = await importChat(cookie, plot.id, [
+      turn('assistant', ['인사 A', '인사 B'], 1, '2024-03-01T09:00:00.000Z'),
+      turn('user', ['안녕'], 0, '2024-03-01T09:01:00.000Z'),
+      turn('assistant', ['답 1', '답 2', '답 3'], 0, '2024-03-01T09:02:00.000Z'),
+    ]);
+    expect(first.inserted).toBe(6);
+    expect(first.chat).toMatchObject({
+      plotId: plot.id,
+      title: '도서관',
+      model: 'echo/echo',
+      importing: true,
+      importedFrom: { fileName: 'chat.jsonl', sha256: FILE, importedAt: expect.any(String) },
+    });
+    const chatId = first.chat.id;
+
+    // The next batch goes on from the head. A time before what came already is
+    // moved just past it, and a message without one follows the one before.
+    const second = await json(cookie, `/api/chats/${chatId}/import`, 'POST', {
+      messages: [turn('user', ['다음'], 0, '2024-02-01T00:00:00.000Z'), turn('assistant', ['끝'])],
+    });
+    expect(second.status, await second.clone().text()).toBe(200);
+    expect(await readJson(second)).toEqual({ inserted: 2, total: 8 });
+
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    expect(state.chat.importing).toBe(true);
+    expect(state.path.map((m: any) => m.content)).toEqual(['인사 B', '안녕', '답 1', '다음', '끝']);
+    expect(state.path.map((m: any) => m.role)).toEqual(['assistant', 'user', 'assistant', 'user', 'assistant']);
+    // The selected version is the newest of its siblings.
+    expect(state.siblings[state.path[0].id]).toMatchObject({ index: 1, total: 2 });
+    expect(state.siblings[state.path[2].id]).toMatchObject({ index: 2, total: 3 });
+
+    // No plot opening: the conversation brought its own.
+    const rows = await rowsOf(chatId);
+    expect(rows.map((row) => row.content)).toEqual(['인사 A', '인사 B', '안녕', '답 2', '답 3', '답 1', '다음', '끝']);
+    const times = rows.map((row) => row.createdAt.getTime());
+    expect(times.every((time, index) => index === 0 || time > times[index - 1]!)).toBe(true);
+    expect(rows[0]!.createdAt.toISOString()).toBe('2024-03-01T09:00:00.000Z');
+    expect(rows[2]!.createdAt.toISOString()).toBe('2024-03-01T09:01:00.000Z');
+    expect(rows[3]!.createdAt.toISOString()).toBe('2024-03-01T09:02:00.000Z');
+    expect(times[6]).toBe(times[5]! + 1);
+    expect(rows.every((row) => row.source === 'user' && row.model === null)).toBe(true);
+    const byText = new Map(rows.map((row) => [row.content, row]));
+    expect(byText.get('인사 A')!.parentId).toBeNull();
+    expect(byText.get('안녕')!.parentId).toBe(byText.get('인사 B')!.id);
+    for (const reply of ['답 1', '답 2', '답 3']) {
+      expect(byText.get(reply)!.parentId).toBe(byText.get('안녕')!.id);
+    }
+    expect(byText.get('다음')!.parentId).toBe(byText.get('답 1')!.id);
+
+    // Finished, a swipe away and back again lands on the conversation as it was.
+    expect((await complete(cookie, chatId)).status).toBe(200);
+    const swipe = async (text: string): Promise<string[]> =>
+      (
+        await readJson(await json(cookie, `/api/chats/${chatId}/head`, 'POST', { messageId: byText.get(text)!.id }))
+      ).path.map((m: any) => m.content);
+    expect(await swipe('답 2')).toEqual(['인사 B', '안녕', '답 2']);
+    expect(await swipe('답 1')).toEqual(['인사 B', '안녕', '답 1', '다음', '끝']);
+    expect(await swipe('인사 A')).toEqual(['인사 A']);
+    expect(await swipe('인사 B')).toEqual(['인사 B', '안녕', '답 1', '다음', '끝']);
+  });
+
+  it('starts an unfinished import of the same file over, and refuses a finished one', async () => {
+    const alice = await signUp('chat-import-again@example.com');
+    const plot = await createPlot(alice);
+    const abandoned = await importChat(alice, plot.id, [turn('assistant', ['처음 시도'])]);
+    const restarted = await importChat(alice, plot.id, [turn('assistant', ['다시 시도'])]);
+    expect(restarted.chat.id).not.toBe(abandoned.chat.id);
+    expect((await request(alice, `/api/chats/${abandoned.chat.id}`)).status).toBe(404);
+    expect(await rowsOf(abandoned.chat.id)).toEqual([]);
+    expect((await complete(alice, restarted.chat.id)).status).toBe(200);
+
+    const again = await startImport(alice, plot.id, [turn('assistant', ['세 번째'])]);
+    expect(again.status).toBe(409);
+    expect(await readJson(again)).toEqual({
+      error: expect.any(String),
+      code: 'already_imported',
+      chatId: restarted.chat.id,
+    });
+
+    // The same file is another reader's own business.
+    const bob = await signUp('chat-import-again-bob@example.com');
+    await importChat(bob, (await createPlot(bob)).id, [turn('assistant', ['밥의 대화'])]);
+    expect((await readJson(await request(alice, '/api/chats'))).map((chat: any) => chat.id)).toEqual([
+      restarted.chat.id,
+    ]);
+  });
+
+  it('takes no other write while it is importing, and no batch once it is done', async () => {
+    const cookie = await signUp('chat-import-gate@example.com');
+    // A plot with a member, since the chat takes a real turn once it is finished.
+    const plot = await importCard(cookie, cardFile());
+    const { chat } = await importChat(cookie, plot.id, [turn('assistant', ['인사']), turn('user', ['안녕'])]);
+    const id = chat.id;
+    const userTurn = (await rowsOf(id)).find((row) => row.role === 'user')!;
+
+    const refused = async (res: Response): Promise<void> => {
+      expect(res.status, await res.clone().text()).toBe(409);
+      expect((await readJson(res)).code).toBe('chat_importing');
+    };
+    await refused(await json(cookie, `/api/chats/${id}/messages`, 'POST', { content: '끼어들기' }));
+    await refused(await json(cookie, `/api/chats/${id}/regenerate`, 'POST'));
+    await refused(await json(cookie, `/api/chats/${id}`, 'PATCH', { note: '메모' }));
+    await refused(await json(cookie, `/api/chats/${id}/head`, 'POST', { messageId: userTurn.id }));
+    await refused(await json(cookie, `/api/chats/${id}/memory`, 'PUT', { summary: '요약' }));
+    await refused(await request(cookie, `/api/chats/${id}/messages/${userTurn.id}`, 'DELETE'));
+    await refused(await json(cookie, `/api/messages/${userTurn.id}`, 'PATCH', { content: '고침' }));
+    expect(await rowsOf(id)).toHaveLength(2);
+
+    // Reads stay open, and both chat shapes say what is going on.
+    expect((await request(cookie, `/api/chats/${id}`)).status).toBe(200);
+    expect((await readJson(await request(cookie, '/api/chats')))[0]).toMatchObject({
+      id,
+      importing: true,
+      importedFrom: { fileName: 'chat.jsonl', sha256: FILE },
+    });
+
+    // The refused turn gave its slot back: once finished, the chat takes one.
+    expect((await complete(cookie, id)).status).toBe(200);
+    const sent = await json(cookie, `/api/chats/${id}/messages`, 'POST', { content: '이제 내 차례' });
+    expect((await readSse(sent)).at(-1)!.event).toBe('done');
+    for (const late of [
+      await json(cookie, `/api/chats/${id}/import`, 'POST', { messages: [turn('user', ['늦은 배치'])] }),
+      await complete(cookie, id),
+    ]) {
+      expect(late.status).toBe(409);
+      expect((await readJson(late)).code).toBe('chat_not_importing');
+    }
+
+    // Deleting the whole chat is how an import is abandoned.
+    const other = await importChat(cookie, plot.id, [turn('assistant', ['또 다른'])], { sha256: hashOf('b') });
+    expect((await request(cookie, `/api/chats/${other.chat.id}`, 'DELETE')).status).toBe(204);
+  });
+
+  it('checks a batch whole, and whose plot, persona and chat it is, before writing', async () => {
+    const alice = await signUp('chat-import-check@example.com');
+    const plot = await createPlot(alice);
+    for (const batch of [
+      [{ role: 'system', versions: ['x'], selected: 0 }],
+      [{ role: 'user', versions: [], selected: 0 }],
+      [{ role: 'user', versions: ['a'], selected: 1 }],
+      [{ role: 'user', versions: Array(21).fill('a'), selected: 0 }],
+      [{ role: 'user', versions: ['a'.repeat(100_001)], selected: 0 }],
+      [{ role: 'user', versions: ['a'], selected: 0, createdAt: '어제' }],
+      [turn('user', ['a']), 'b'],
+      Array.from({ length: 501 }, () => turn('user', ['a'])),
+    ]) {
+      const res = await startImport(alice, plot.id, batch);
+      expect(res.status).toBe(400);
+      expect((await readJson(res)).code).toBe('invalid_request');
+    }
+    for (const body of [{ sha256: FILE.toUpperCase() }, { sha256: 'abc' }, { fileName: ' ' }]) {
+      expect((await startImport(alice, plot.id, [], body)).status).toBe(400);
+    }
+    expect(await readJson(await request(alice, '/api/chats'))).toEqual([]);
+
+    const bob = await signUp('chat-import-check-bob@example.com');
+    expect((await startImport(alice, (await createPlot(bob)).id, [])).status).toBe(404);
+    const bobPersona = await readJson(await json(bob, '/api/personas', 'POST', { name: '밥' }));
+    expect((await startImport(alice, plot.id, [], { personaId: bobPersona.id })).status).toBe(404);
+    const persona = await readJson(await json(alice, '/api/personas', 'POST', { name: '앨리스' }));
+    const { chat } = await importChat(alice, plot.id, [], { personaId: persona.id, title: '  옛 대화  ' });
+    expect(chat).toMatchObject({ personaId: persona.id, title: '옛 대화', headMessageId: null });
+    expect((await json(bob, `/api/chats/${chat.id}/import`, 'POST', { messages: [] })).status).toBe(404);
+    expect((await complete(bob, chat.id)).status).toBe(404);
+
+    // The cap counts every version, and a batch that would pass it writes nothing.
+    const wide = Array.from({ length: 500 }, () => turn('assistant', Array(20).fill('갈래')));
+    expect((await readJson(await json(alice, `/api/chats/${chat.id}/import`, 'POST', { messages: wide }))).total).toBe(10_000);
+    expect((await readJson(await json(alice, `/api/chats/${chat.id}/import`, 'POST', { messages: wide }))).total).toBe(20_000);
+    const over = await json(alice, `/api/chats/${chat.id}/import`, 'POST', { messages: [turn('user', ['하나 더'])] });
+    expect(over.status).toBe(400);
+    expect((await readJson(over)).code).toBe('message_limit');
+    expect(await rowsOf(chat.id)).toHaveLength(20_000);
+  });
+
+  it('sets the relationship cursor where the history ends, and queues a backfill only when it is needed', async () => {
+    const cookie = await signUp('chat-import-complete@example.com');
+    const plot = await createPlot(cookie);
+    const short = await importChat(cookie, plot.id, [
+      turn('assistant', ['인사']),
+      turn('user', ['안녕']),
+      turn('assistant', ['답', '다른 답'], 1),
+    ]);
+    const finished = await readJson(await complete(cookie, short.chat.id, true));
+    expect(finished.memoryBackfill).toBe('not_needed');
+    expect(finished.chat).toMatchObject({
+      importing: false,
+      relationship: { axes: null, note: '', lastExtractedAssistantDepth: 2 },
+    });
+    expect(await db.select().from(jobs)).toEqual([]);
+
+    // Past the summary threshold of the default budget.
+    const longText = (index: number): string => `${index}. ${'서가 사이에서 나눈 긴 대화입니다. '.repeat(50)}`;
+    const length = Math.ceil((DEFAULT_CONTEXT_BUDGET * 0.6) / countTokens(longText(0))) + 2;
+    const long = Array.from({ length }, (_, index) =>
+      turn(index % 2 === 0 ? 'assistant' : 'user', [longText(index)]),
+    );
+    const assistantTurns = long.filter((message) => message.role === 'assistant').length;
+
+    // Not asked for, nothing is queued however long the history is.
+    const unasked = await importChat(cookie, plot.id, long, { sha256: hashOf('unasked') });
+    expect((await readJson(await complete(cookie, unasked.chat.id, false))).memoryBackfill).toBe('not_needed');
+    expect(await db.select().from(jobs)).toEqual([]);
+
+    // An adapter for every model, the memory channel's included.
+    const { app: withChannel } = capturingApp();
+    const asked = await importChat(cookie, plot.id, long, { sha256: hashOf('asked') }, withChannel);
+    const queued = await readJson(await complete(cookie, asked.chat.id, true, withChannel));
+    expect(queued.memoryBackfill).toBe('queued');
+    expect(queued.chat.relationship.lastExtractedAssistantDepth).toBe(assistantTurns);
+    expect(await db.select({ kind: jobs.kind, payload: jobs.payload }).from(jobs)).toEqual([
+      { kind: 'memory_backfill', payload: { chatId: asked.chat.id } },
+    ]);
+
+    // The default test registry has no memory model: nothing to fold it with.
+    const stranded = await importChat(cookie, plot.id, long, { sha256: hashOf('stranded') });
+    const unavailable = await readJson(await complete(cookie, stranded.chat.id, true));
+    expect(unavailable).toMatchObject({ memoryBackfill: 'unavailable', chat: { importing: false } });
+    expect(await db.select().from(jobs)).toHaveLength(1);
+  });
+
+  it('tells which of a backup’s files are already here, among the caller’s own', async () => {
+    const alice = await signUp('lookup-alice@example.com');
+    const bob = await signUp('lookup-bob@example.com');
+    const cardText = JSON.stringify(v2Card);
+    const cardHash = hashOf(cardText);
+    const plot = await importCard(alice, new File([cardText], 'lian.json'));
+    const bobPlot = await importCard(bob, new File([cardText], 'lian.json'));
+    const { chat } = await importChat(alice, plot.id, [turn('assistant', ['인사'])]);
+
+    const lookup = (cookie: string | undefined, sha256: unknown) =>
+      json(cookie, '/api/imports/lookup', 'POST', { sha256 });
+    expect(await readJson(await lookup(alice, [cardHash, FILE, hashOf('nothing'), cardHash]))).toEqual({
+      characters: [{ sha256: cardHash, plotId: plot.id, characterId: plot.characters[0].id }],
+      chats: [{ sha256: FILE, chatId: chat.id, importing: true }],
+    });
+    // Bob holds the same card, and none of Alice's chats.
+    expect(await readJson(await lookup(bob, [cardHash, FILE]))).toEqual({
+      characters: [{ sha256: cardHash, plotId: bobPlot.id, characterId: bobPlot.characters[0].id }],
+      chats: [],
+    });
+    expect(await readJson(await lookup(alice, []))).toEqual({ characters: [], chats: [] });
+    for (const bad of [cardHash, [cardHash.toUpperCase()], ['x'], [1], Array(1001).fill(cardHash)]) {
+      const res = await lookup(alice, bad);
+      expect(res.status).toBe(400);
+      expect((await readJson(res)).code).toBe('invalid_request');
+    }
+    expect((await lookup(undefined, [cardHash])).status).toBe(401);
   });
 });
 

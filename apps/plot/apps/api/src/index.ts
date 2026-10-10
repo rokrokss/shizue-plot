@@ -3,6 +3,7 @@ import { createDb } from '@shizue/db';
 import { createApp } from './app.js';
 import { createAuth } from './auth.js';
 import { createChatGPTAccounts } from './chatgptAccounts.js';
+import type { AppDeps } from './deps.js';
 import { createHostedAuth, createSessionStore } from './hostedAuth.js';
 import { loadRootEnv, readConfig } from './env.js';
 import { startJobWorker } from './jobs.js';
@@ -28,7 +29,9 @@ const fixture = testing ? createAuth(db, {
   extraTrustedOrigins: config.authExtraTrustedOrigins,
 }) : undefined;
 
-const app = createApp({
+// One set for the routes and the job worker: the memory backfill shares the
+// per-chat refresh guard with the turns the reader is sending meanwhile.
+const deps: AppDeps = {
   db,
   auth: createHostedAuth(sessions, accounts, fixture),
   chatgpt: { accounts, sessions },
@@ -41,7 +44,8 @@ const app = createApp({
   extractingRelationship: new Set<string>(),
   suggesting: new Set<string>(),
   drafting: new Set<string>(),
-});
+};
+const app = createApp(deps);
 
 serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
   console.log(`[api] listening on http://${config.host}:${info.port}`);
@@ -49,7 +53,7 @@ serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => 
 
 // Every instance polls the same queue; `for update skip locked` is what keeps them
 // off each other's rows.
-const stopJobWorker = startJobWorker({ db, handlers: createJobHandlers() });
+const stopJobWorker = startJobWorker({ db, handlers: createJobHandlers(deps) });
 
 // A signal listener replaces node's own, which was the thing that ended the
 // process — so this has to end it. Only the claiming is stopped first: a job still

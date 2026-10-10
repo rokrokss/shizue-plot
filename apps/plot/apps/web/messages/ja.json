@@ -72,7 +72,9 @@
     "draftHint": "一行の設定から最初のバージョンを書きます。下書きはエディタでそのまま直せます。",
     "draftPremise": "設定",
     "draftPremisePlaceholder": "例：雨の夜、閉店した書店に見知らぬ客が訪れる。",
-    "draftCreate": "下書きを作る"
+    "draftCreate": "下書きを作る",
+    "stImport": "SillyTavern からお引っ越し",
+    "stImportHint": "SillyTavern のキャラクター・グループ・ペルソナ・チャットをまとめて移します。"
   },
   "plot": {
     "notFound": "プロットが見つかりません。",
@@ -312,6 +314,133 @@
     "realmHint": "カードはこのブラウザが RisuRealm から直接ダウンロードして読み込みます。50MBまで読み込めます。",
     "realmBrowse": "キャラクターは <link>RisuRealm</link> で探せます。",
     "realmSubmit": "読み込む"
+  },
+  "stImport": {
+    "title": "SillyTavern からお引っ越し",
+    "subtitle": "SillyTavern で使っていたキャラクター・グループ・ペルソナ・チャットをまとめて移します。",
+    "back": "← マイプロット",
+    "stepsLabel": "手順",
+    "steps": {
+      "choose": "ファイルを選ぶ",
+      "review": "確認",
+      "run": "読み込み"
+    },
+    "choose": {
+      "zipTitle": "バックアップから(おすすめ)",
+      "zipHint": "SillyTavern のユーザー設定(User Settings)→ アカウント(Account)→ バックアップのダウンロード(Download Backup)で保存した zip ファイルを選んでください。",
+      "zipPick": "zip ファイルを選ぶ",
+      "zipDrop": "ここにドラッグ&ドロップしても大丈夫です。",
+      "folderTitle": "フォルダから",
+      "folderHint": "SillyTavern をインストールしたフォルダの data/default-user フォルダを選んでください。",
+      "folderPick": "フォルダを選ぶ",
+      "privacy": "バックアップはこのブラウザの中だけで読み込みます。アップロードされるのは選んだキャラクターカードとそのロアブック、変換したチャットだけで、settings.json・secrets.json や背景・サムネイル・ベクターなど、ほかのファイルはアップロードされません。"
+    },
+    "scan": {
+      "reading": "バックアップを読み込み中…",
+      "hashing": "読み込み済みの項目を確認中… {done}/{total}",
+      "checking": "アカウントと照合中…",
+      "cancel": "キャンセル"
+    },
+    "review": {
+      "summary": "キャラクター{characters}人、グループ{groups}個、ペルソナ{personas}個、チャット{chats}件が見つかりました。",
+      "characters": "キャラクター",
+      "charactersHint": "キャラクターごとに、そのキャラクターを最初の登場人物とするプロットが1つずつ作られ、チャットも一緒に入ります。",
+      "groups": "グループ",
+      "groupsHint": "グループごとにメンバー全員が登場するプロットが1つ作られ、グループチャットも一緒に入ります。",
+      "personas": "ペルソナ",
+      "selectAll": "すべて選択",
+      "selectNone": "すべて解除",
+      "chats": "チャット{count}件",
+      "chatsNew": "新しいチャット{count}件",
+      "chatsIncomplete": "中断したチャット{count}件は最初からやり直し",
+      "imported": "読み込み済み",
+      "world": "ロアブック {name}",
+      "worldMissing": "リンクされたロアブックのファイル({name})がないため、カードに含まれるロアブックを使います。",
+      "unspeakable": "名前が40文字を超えているかコロン(:)を含むため、チャットで話者として認識されません。読み込んだセリフがナレーションとして表示されることがあります。",
+      "extraWorlds": "追加ロアブック{count}個",
+      "members": "メンバー:{names}",
+      "noMembers": "カードのあるメンバーがいないため、読み込めません。",
+      "overflow": "登場人物はプロットごとに10人までのため、次のメンバーは外れます:{names}",
+      "missing": "カードがないため外れるメンバー:{names}",
+      "personaExists": "同じ名前のペルソナがすでにあります。",
+      "options": "オプション",
+      "optionChats": "チャットを読み込む",
+      "optionMemoryBackfill": "長いチャットは記憶に要約する",
+      "memoryNotice": "読み込んだ長いチャットの要約には、あなたの ChatGPT プランの利用量が使われます。",
+      "optionExtraLorebooks": "キャラクターごとの追加ロアブックを付ける",
+      "optionGlobalLorebooks": "グローバルロアブック({names})を読み込むすべてのプロットに付ける",
+      "optionGlobalRegex": "グローバル正規表現スクリプト{count}個を表示スクリプトとして付ける",
+      "privateNotice": "読み込んだプロットは非公開で作られます。公開するときに、読み込んだ登場人物の権利を確認します。",
+      "notImported": "読み込まないもの",
+      "notImportedList": "プリセット、Instruct・Context テンプレート、クイックリプライ(Quick Replies)、テーマ、背景、データバンク(Data Bank)、ベクター、拡張機能は移しません。",
+      "skippedFiles": "読み込まなかったファイル{count}件",
+      "nothing": "読み込む項目を選んでください。",
+      "restart": "別のファイルを選ぶ",
+      "start": "{count}件を読み込む"
+    },
+    "skipReasons": {
+      "too_large": "大きすぎる",
+      "unreadable": "読み込めない",
+      "not_a_card": "キャラクターカードではない",
+      "invalid_json": "JSON ではない",
+      "no_character": "対応するキャラクターがない",
+      "no_group": "対応するグループがない",
+      "missing": "ファイルがない"
+    },
+    "run": {
+      "current": "読み込み中:{name}",
+      "starting": "準備中…",
+      "summary": "完了 {done} · スキップ {skipped} · 失敗 {failed} · 停止 {cancelled}",
+      "progress": "{done} / {total}",
+      "progressLabel": "読み込みの進捗",
+      "cancel": "停止",
+      "retry": "失敗した項目を再試行",
+      "toPlots": "マイプロットへ",
+      "cancelledNotice": "停止した項目は、再試行すると続きから読み込みます。読み込み中だったチャットは最初からやり直します。",
+      "openPlot": "プロットを開く",
+      "openChat": "チャットを開く",
+      "kinds": {
+        "persona": "ペルソナ",
+        "character": "キャラクター",
+        "group": "グループ",
+        "chat": "チャット"
+      },
+      "status": {
+        "pending": "待機",
+        "running": "読み込み中",
+        "done": "完了",
+        "skipped": "スキップ",
+        "failed": "失敗",
+        "cancelled": "停止"
+      },
+      "reasons": {
+        "already_imported": "読み込み済みです。",
+        "persona_exists": "同じ名前のペルソナがすでにあります。",
+        "chat_empty": "読み込むメッセージがありません。",
+        "owner_failed": "キャラクターまたはグループを読み込めなかったため、スキップしました。"
+      },
+      "memory": {
+        "queued": "記憶の要約を始めました。しばらくするとチャットの記憶に反映されます。",
+        "not_needed": "要約が必要な長さではありません。",
+        "unavailable": "記憶に使えるモデルがないため、要約しませんでした。"
+      },
+      "dropped": {
+        "label": "除外:{list}",
+        "hidden": "非表示のメッセージ{count}件",
+        "empty": "空のメッセージ{count}件",
+        "malformed": "読み込めない行{count}件",
+        "overLimit": "2万件を超えたメッセージ{count}件",
+        "swipes": "1メッセージ20件を超えたスワイプ{count}件",
+        "swipesOverRows": "チャットごとの上限(2万件)に収めるために外したスワイプ{count}件"
+      },
+      "unknownSpeaker": "話者が分からないメッセージ{count}件は、ナレーションとして入りました。",
+      "warnings": {
+        "world_missing": "ロアブックのファイルがないため付けられませんでした:{name}",
+        "world_unreadable": "ロアブックのファイルを読み込めなかったため、除いて読み込みました:{name}",
+        "extras_failed": "追加ロアブック・スクリプトを付けられませんでした:{message}"
+      },
+      "modelUnavailable": "チャットを読み込むには、チャットに使えるモデルが必要です。<link>設定</link>で ChatGPT を連携してから再試行してください。キャラクターはすでに読み込まれています。"
+    }
   },
   "rights": {
     "importedBadge": "読み込み",
@@ -743,7 +872,9 @@
         "sticky": "持続",
         "recursion": "再帰"
       }
-    }
+    },
+    "importing": "このチャットはまだ読み込み中です。すべて入ったら続きを書けます。",
+    "importingReload": "再読み込み"
   },
   "personas": {
     "title": "ペルソナ",
@@ -836,7 +967,18 @@
     "realm_forbidden": "このキャラクターは RisuRealm からダウンロードできない設定になっています。",
     "realm_rate_limited": "RisuRealm へのリクエストが多すぎます。少し待ってから再試行してください。",
     "realm_unreachable": "RisuRealm に接続できませんでした。ネットワークを確認して再試行してください。",
-    "realm_unavailable": "RisuRealm からカードを取得できませんでした。少し待ってから再試行してください。"
+    "realm_unavailable": "RisuRealm からカードを取得できませんでした。少し待ってから再試行してください。",
+    "already_imported": "すでに読み込んだチャットです。",
+    "chat_importing": "このチャットはまだ読み込み中です。終わってから再試行してください。",
+    "chat_not_importing": "このチャットの読み込みはすでに終わっています。",
+    "invalid_lorebook": "ロアブック(ワールドインフォ)ファイルを読み込めません。",
+    "message_limit": "読み込んだチャットに入れられるメッセージは、スワイプを含めて20,000件までです。",
+    "st_not_sillytavern": "SillyTavern のデータが見つかりませんでした。バックアップの zip ファイルか data/default-user フォルダを選んでください。",
+    "st_zip_unreadable": "zip ファイルを読み込めません。SillyTavern でバックアップをもう一度ダウンロードしてみてください。",
+    "st_file_unreadable": "ファイルを読み込めませんでした。選んだ後に変更されたか、破損している可能性があります。",
+    "st_file_too_large": "ファイルが大きすぎて読み込めません。",
+    "st_group_empty": "グループのメンバーのカードが1つもありません。",
+    "message_too_long": "1つのメッセージが10万文字を超えているため、このチャットは読み込めません。"
   },
   "rebrand": {
     "eyebrow": "物語が育つ場所",

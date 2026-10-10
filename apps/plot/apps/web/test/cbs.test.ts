@@ -256,6 +256,25 @@ describe('RisuAI templates', () => {
   });
 });
 
+describe('SillyTavern templates', () => {
+  it('decides {{if}} on ST truth, reading .name as the chat variable', () => {
+    expect(render('{{if .hp}}<b>HP {{getvar::hp}}</b>{{else}}없음{{/if}} · {{if !.none}} 평온 {{/if}}')).toBe(
+      '<b>HP 40</b> · 평온',
+    );
+    expect(render('{{if {{getvar::flag}}}}켜짐{{else}}꺼짐{{/if}}', { variables: { flag: 'off' } })).toBe('꺼짐');
+  });
+
+  it('formats with trim, newline and space, the trim mark surviving the escaping', () => {
+    expect(render('<b>a</b>\n{{trim}}\n<i>{{getvar::mood}}</i>{{newline}}{{space::2}}끝')).toBe(
+      '<b>a</b><i>angry</i>\n  끝',
+    );
+  });
+
+  it('renders an unclosed {{if}} as its own escaped source, like any unclosed block', () => {
+    expect(render('{{if .hp}}열림')).toBe('{{if .hp}}열림');
+  });
+});
+
 describe('malformed templates', () => {
   it('renders an unclosed block as its own escaped source', () => {
     expect(render('<div>{{#if hp}}열림</div>')).toBe('&lt;div&gt;{{#if hp}}열림&lt;/div&gt;');

@@ -242,8 +242,8 @@ function useDisplayPlan(
  * card's own name for the image — is resolved against the character's assets
  * before the markdown pass; an unknown one renders as nothing, so a reference
  * never leaks as text.
- * `{{setvar}}` / `{{addvar}}` are hidden the same way — they are protocol for the
- * model, which still sees them in the prompt.
+ * `{{setvar}}` / `{{addvar}}` (and ST's `{{incvar}}` / `{{decvar}}`) are hidden the
+ * same way — they are protocol for the model, which still sees them in the prompt.
  *
  * With `display` set, the character's display scripts run first and the message
  * becomes a mix of text runs and sanitized HTML islands. Without it — the viewer

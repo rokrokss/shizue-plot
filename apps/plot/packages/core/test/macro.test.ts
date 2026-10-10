@@ -157,6 +157,30 @@ describe('applyMacros - RisuAI CBS', () => {
   });
 });
 
+describe('applyMacros - SillyTavern macros', () => {
+  const vars = { ...ctx, variables: { hp: '0', mood: '좋음' } };
+
+  it('decides {{if}} on the chat variables, and asks a bare name as a macro', () => {
+    expect(applyMacros('{{if .hp}}서 있다{{else}}쓰러졌다{{/if}}', vars)).toBe('쓰러졌다');
+    expect(applyMacros('{{if {{getvar::mood}}}}\n  기분: {{getvar::mood}}\n{{/if}}', vars)).toBe('기분: 좋음');
+    expect(applyMacros('{{if char}}{{char}}{{/if}}', ctx)).toBe('아리아');
+  });
+
+  it('keeps an {{if}} on a variable whole where there are none, for the prompt to decide', () => {
+    const greeting = '{{if .hp}}서 있다{{else}}쓰러졌다{{/if}} {{if {{getvar::hp}}}}…{{/if}} {{char}}';
+    expect(applyMacros(greeting, ctx)).toBe('{{if .hp}}서 있다{{else}}쓰러졌다{{/if}} {{if {{getvar::hp}}}}…{{/if}} 아리아');
+    expect(applyMacros(greeting, vars)).toBe('쓰러졌다  아리아');
+  });
+
+  it('formats with trim, newline, space and noop', () => {
+    expect(applyMacros('설정\n\n{{trim}}\n추가{{newline}}끝{{space::2}}{{noop}}.', ctx)).toBe('설정추가\n끝  .');
+  });
+
+  it('leaves incvar and decvar in place for the model to see, like setvar', () => {
+    expect(applyMacros('{{incvar::hp}} {{decvar::hp}}', vars)).toBe('{{incvar::hp}} {{decvar::hp}}');
+  });
+});
+
 describe('stripImageMacros', () => {
   it('removes every reference, however it is written', () => {
     expect(stripImageMacros('웃는다 {{img::smile}} 그리고 {{ IMG :: bg-2 }} 끝')).toBe(

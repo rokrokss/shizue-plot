@@ -66,6 +66,20 @@ describe('computeVariables', () => {
   it('reads several macros out of one message, in order', () => {
     expect(computeVariables(['{{setvar::hp::10}} 그리고 {{addvar::hp::5}}'])).toEqual({ hp: '15' });
   });
+
+  it('counts up and down with incvar and decvar, in the order written', () => {
+    expect(computeVariables(['{{incvar::n}}{{IncVar :: n }}', '{{setvar::n::10}} {{decvar::n}}'])).toEqual({ n: '9' });
+    expect(computeVariables(['{{incvar::n}} {{setvar::n::10}}'])).toEqual({ n: '10' });
+    expect(computeVariables(['{{decvar::x}}'])).toEqual({ x: '-1' });
+  });
+
+  it('counts a value that is not a number as zero for incvar, as addvar does', () => {
+    expect(computeVariables(['{{setvar::m::많음}}', '{{incvar::m}}'])).toEqual({ m: '1' });
+  });
+
+  it('skips an incvar without a key or with an argument it does not take', () => {
+    expect(computeVariables(['{{incvar::}}', '{{incvar::n::5}}', '{{decvar}}'])).toEqual({});
+  });
 });
 
 describe('names that belong to Object.prototype', () => {
@@ -141,6 +155,10 @@ describe('stripVariableMacros', () => {
     expect(stripVariableMacros('앞 {{setvar::hp::1}}{{addvar::hp::1}} 뒤 {{img::a}}')).toBe(
       '앞  뒤 {{img::a}}',
     );
+  });
+
+  it('drops incvar and decvar too, and leaves one it would not fold', () => {
+    expect(stripVariableMacros('앞{{incvar::n}}{{ DecVar :: n }}뒤 {{incvar::n::5}}')).toBe('앞뒤 {{incvar::n::5}}');
   });
 });
 

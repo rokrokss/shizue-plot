@@ -9,6 +9,7 @@ import { errorResponse, type ErrorBody } from './errors.js';
 import { chatRoutes, messageRoutes } from './routes/chats.js';
 import { commentRoutes, plotCommentRoutes } from './routes/comments.js';
 import { creatorRoutes, exploreRoutes } from './routes/explore.js';
+import { chatImportRoutes, importRoutes } from './routes/imports.js';
 import { modelRoutes } from './routes/models.js';
 import { notificationRoutes } from './routes/notifications.js';
 import { noteRoutes } from './routes/notes.js';
@@ -91,6 +92,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     '/api/notifications',
     '/api/chats',
     '/api/messages',
+    '/api/imports',
   ]) {
     gated(path);
   }
@@ -105,7 +107,10 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   app.route('/api/notes', noteRoutes(deps));
   app.route('/api/notifications', notificationRoutes(deps));
   app.route('/api/chats', chatRoutes(deps));
+  // A chat brought over from another app, written in batches (`POST /api/chats/import`).
+  app.route('/api/chats', chatImportRoutes(deps));
   app.route('/api/messages', messageRoutes(deps));
+  app.route('/api/imports', importRoutes(deps));
 
   return app;
 }

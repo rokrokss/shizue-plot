@@ -1,7 +1,9 @@
 /** Plot publication notifications, fan-out queued in the publish transaction. */
 import { follows, notifications, plots, type Db, type JobPayloadMap } from '@shizue/db';
 import { and, desc, eq, sql } from 'drizzle-orm';
+import type { AppDeps } from './deps.js';
 import type { JobHandlers } from './jobs.js';
+import { memoryBackfill } from './memory.js';
 
 /**
  * Followers per insert. The walk is keyset, so this decides how much one statement
@@ -128,7 +130,14 @@ export async function notificationFanout(
   }
 }
 
-/** The plot publication work this API runs off the queue. */
-export function createJobHandlers(): JobHandlers {
-  return { notification_fanout: notificationFanout };
+/**
+ * The work this API runs off the queue. The memory backfill calls the chat owner's
+ * model and shares the per-chat refresh guard with the request path, so it is
+ * handed the same deps the app runs on.
+ */
+export function createJobHandlers(deps: AppDeps): JobHandlers {
+  return {
+    notification_fanout: notificationFanout,
+    memory_backfill: (_db, payload) => memoryBackfill(deps, payload),
+  };
 }

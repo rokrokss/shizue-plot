@@ -4,7 +4,7 @@ import { useFormatter, useTranslations } from 'next-intl';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { RealmImportForm } from '@/components/CardImport';
 import { CreatorTabs } from '@/components/CreatorTabs';
-import { Button, ErrorText, Field, Spinner, TextArea, TextInput } from '@/components/ui';
+import { Button, buttonClass, ErrorText, Field, Spinner, TextArea, TextInput } from '@/components/ui';
 import { Link, useRouter } from '@/i18n/navigation';
 import { apiGet, apiSend, apiUpload } from '@/lib/api';
 import { checkCardSize, downloadRealmCard } from '@/lib/realm';
@@ -177,6 +177,17 @@ export default function PlotsPage() {
             >
               {cardImport('realmOpen')}
             </Button>
+            {/* A page of its own rather than a panel: a whole library is reviewed
+                before anything comes over. */}
+            <Link
+              href="/plots/import/sillytavern"
+              data-testid="plot-st-import"
+              title={t('stImportHint')}
+              aria-disabled={busy || undefined}
+              className={buttonClass('secondary', 'md', busy ? 'pointer-events-none opacity-45' : undefined)}
+            >
+              {t('stImport')}
+            </Link>
             {/* Beside 새 플롯 rather than instead of it: this drafts a first
                 version, and the creator edits it like any other. */}
             <Button

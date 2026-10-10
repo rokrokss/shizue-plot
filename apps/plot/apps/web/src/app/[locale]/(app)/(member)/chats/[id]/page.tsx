@@ -1186,8 +1186,14 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    * would send the turn without them.
    */
   const attaching = isUploading(chips);
+  /**
+   * An import is still writing this chat's history, and until it finishes the API
+   * refuses every other write (`chat_importing`). The chat reads as it stands so
+   * far, and everything that would write is held — the composer included.
+   */
+  const importing = state.chat.importing === true;
   function submit(): void {
-    if (!input.trim() || mode || drawing || mutationRef.current || attaching) return;
+    if (!input.trim() || mode || drawing || mutationRef.current || attaching || importing) return;
     // The chip is a way of typing: what is stored is the plain convention, the
     // same one the reader could have written the marks of by hand.
     const content = composeTurn(input, composerMode);
@@ -1199,7 +1205,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const info = last ? state.siblings[last.id] : undefined;
   // A drawn scene takes the same per-chat slot a generation does, so while one is
   // in flight the row of actions is withheld exactly as it is while text streams.
-  const showActions = !mode && !drawing && !mutating && Boolean(last);
+  const showActions = !mode && !drawing && !mutating && !importing && Boolean(last);
   /**
    * The two features the plot turns on and the reader may turn back off. The
    * panel offers a toggle only where the plot asked for the feature at all — a
@@ -1210,7 +1216,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const plotStatusWindow = plot?.style?.statusWindow === true;
   const plotChoices = (plot?.style?.choices ?? 'off') !== 'off';
   const choicesOffered = state.chat.choicesEnabled;
-  const settingsLocked = Boolean(mode) || drawing || mutating;
+  const settingsLocked = Boolean(mode) || drawing || mutating || importing;
   const prevTarget = last && !mode ? siblingTarget(last, -1) : null;
   const nextTarget = last && !mode ? siblingTarget(last, 1) : null;
 
@@ -1565,6 +1571,20 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             {t('jumpToLatest')}
           </button>
         )}
+        {importing ? (
+          <div
+            role="status"
+            data-testid="chat-importing"
+            className="mx-auto flex max-w-3xl items-center gap-3 px-5 pt-3"
+          >
+            <p className="min-w-0 flex-1 rounded-xl border border-line bg-raised/60 px-4 py-2.5 text-xs text-muted">
+              {t('importing')}
+            </p>
+            <Button size="sm" onClick={() => void reload()}>
+              {t('importingReload')}
+            </Button>
+          </div>
+        ) : null}
         <div className="mx-auto w-full max-w-3xl">
           <AttachmentChips chips={chips} onRemove={dropChip} onRetry={retryChip} />
           {attachError ? (
@@ -1639,7 +1659,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             data-testid="suggest-button"
             title={t('suggestHint')}
             busy={suggesting}
-            disabled={Boolean(mode) || drawing}
+            disabled={Boolean(mode) || drawing || importing}
             onClick={() => void suggest()}
           >
             <span aria-hidden="true">✦</span>
@@ -1654,6 +1674,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             ref={composerRef}
             rows={2}
             value={input}
+            // Unlike a streaming reply, an import has no end the reader is waiting
+            // on in the composer, so the field itself is held with the rest.
+            disabled={importing}
             aria-label={t('placeholder')}
             placeholder={t('placeholder')}
             // Typing goes on while the reply streams — only sending waits for it
@@ -1708,7 +1731,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             variant="ghost"
             aria-label={t('attach')}
             title={t('attach')}
-            disabled={Boolean(mode)}
+            disabled={Boolean(mode) || importing}
             onClick={() => filePicker.current?.click()}
           >
             <Icon name="attach" className="size-4" />
@@ -1718,7 +1741,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             variant="ghost"
             aria-label={t('direction')}
             title={t('directionHint')}
-            disabled={Boolean(mode)}
+            disabled={Boolean(mode) || importing}
             onClick={toggleDirection}
           >
             {/* The asterisk sits high in its em box, so what is centred is the box
@@ -1730,7 +1753,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               {t('stop')}
             </Button>
           ) : (
-            <Button className="col-start-4 min-w-24" variant="primary" disabled={!input.trim() || attaching || drawing || mutating} onClick={submit}>
+            <Button className="col-start-4 min-w-24" variant="primary" disabled={!input.trim() || attaching || drawing || mutating || importing} onClick={submit}>
               {t('send')}
             </Button>
           )}

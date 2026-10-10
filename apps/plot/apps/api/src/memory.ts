@@ -12,14 +12,16 @@
  * retrieved by cosine similarity against the latest user message.
  *
  * Everything in the update path is fire-and-forget: it runs after the SSE `done`
- * event and swallows its own failures.
+ * event and swallows its own failures. The one exception is an imported chat's
+ * backlog, which the `memory_backfill` job folds off the queue (`memoryBackfill`).
  */
 import { countTokens, DEFAULT_CONTEXT_BUDGET, DEFAULT_USER_NAME, stripImageMacros } from '@shizue/core';
 import { transcriptLine } from './transcript.js';
-import { chats, memories, messages, personas, type Chat, type Message } from '@shizue/db';
+import { chats, memories, messages, personas, type Chat, type JobPayloadMap, type Message } from '@shizue/db';
 import { getAdapter, listEnabledModels, type ChatRequest, type LLMAdapter } from '@shizue/llm';
 import { and, asc, cosineDistance, desc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import type { AppDeps, Tx } from './deps.js';
+import { enqueueJob } from './jobs.js';
 import { buildPath } from './tree.js';
 
 // Measured 2026-08-10 (45-call eval, production prompt): 9/9 JSON-parse, the
@@ -38,6 +40,10 @@ const MAX_FACTS = 8;
 const DEFAULT_RETRIEVAL_COUNT = 5;
 /** Turns scanned for facts the model can already see, which are not re-injected. */
 const RECENT_TURNS_SCANNED = 6;
+/** Summarize calls one `memory_backfill` run makes before a successor job takes over. */
+export const BACKFILL_CHUNKS_PER_RUN = 3;
+/** How long a backfill stands back from a refresh a finished turn is already running. */
+const BACKFILL_RETRY_MS = 30_000;
 
 const SUMMARY_HEADING = '[지난 이야기 요약]';
 const FACTS_HEADING = '[기억]';
@@ -218,6 +224,8 @@ export function scheduleMemoryUpdate(deps: AppDeps, chatId: string): void {
   deps.refreshingMemory.add(chatId);
 
   const task = updateMemory(deps, chatId)
+    // Whether more is left is the backfill's question; the next turn folds the next chunk.
+    .then(() => undefined)
     .catch((error: unknown) => {
       console.error('[memory] update failed', error);
     })
@@ -225,14 +233,21 @@ export function scheduleMemoryUpdate(deps: AppDeps, chatId: string): void {
   deps.onBackgroundTask?.(task, 'memory');
 }
 
-async function updateMemory(deps: AppDeps, chatId: string): Promise<void> {
+/**
+ * One fold: the oldest chunk of what the summary does not yet cover goes into it.
+ * Answers whether a later pass has more to fold — the chunk cap stopped this one
+ * short of the eviction target, or an edit discarded its result while the backlog
+ * is still there. Only the backfill job asks; a finished turn's refresh does not
+ * loop, the next turn folds the next chunk.
+ */
+async function updateMemory(deps: AppDeps, chatId: string): Promise<boolean> {
   const [row] = await deps.db
     .select({ chat: chats, personaName: personas.name })
     .from(chats)
     .leftJoin(personas, eq(chats.personaId, personas.id))
     .where(eq(chats.id, chatId))
     .limit(1);
-  if (!row) return;
+  if (!row) return false;
   const chat = row.chat;
   // Read-modify-write over a slow model call: remember the revision this refresh
   // snapshotted, so any edit landing in the meantime discards its result.
@@ -244,15 +259,13 @@ async function updateMemory(deps: AppDeps, chatId: string): Promise<void> {
     .where(eq(messages.chatId, chatId))
     .orderBy(asc(messages.createdAt));
   const { summary, history } = applyMemory(buildPath(all, chat.headMessageId), chat);
+  if (!overThreshold(chat, summary, history)) return false;
 
-  const { contextBudget, summaryThreshold, retrievalCount } = memorySettingsOf(chat);
-  const costs = history.map((message) => countTokens(message.content));
-  const total = countTokens(summary) + costs.reduce((sum, cost) => sum + cost, 0);
-  if (total <= contextBudget * summaryThreshold) return;
-
-  const evicted = history.slice(0, evictionCount(costs, contextBudget));
-  const anchor = evicted[evicted.length - 1];
-  if (!anchor) return;
+  const { contextBudget, retrievalCount } = memorySettingsOf(chat);
+  const evicted = history.slice(0, evictionCount(history, contextBudget));
+  const chunk = foldChunk(evicted, contextBudget);
+  const anchor = chunk[chunk.length - 1];
+  if (!anchor) return false;
 
   // Retrieval off means the fact layer is off end to end: nothing derived from
   // this chat is sent to the embedding provider, nothing is stored, and the
@@ -261,11 +274,11 @@ async function updateMemory(deps: AppDeps, chatId: string): Promise<void> {
   const result = await summarize(deps, {
     userId: chat.userId,
     summary,
-    evicted,
+    evicted: chunk,
     userName: row.personaName ?? DEFAULT_USER_NAME,
     extractFacts: embedder !== undefined,
   });
-  if (!result) return;
+  if (!result) return false;
 
   const written = await deps.db
     .update(chats)
@@ -279,10 +292,12 @@ async function updateMemory(deps: AppDeps, chatId: string): Promise<void> {
     .where(and(eq(chats.id, chatId), eq(chats.memoryRevision, captured)))
     .returning({ id: chats.id });
   // The chat changed under this refresh (an edit, or the user's own summary): the
-  // result describes history that no longer holds, and its facts go with it.
-  if (written.length === 0) return;
+  // result describes history that no longer holds, and its facts go with it. The
+  // backlog it was folding is still there for the next pass to read afresh.
+  if (written.length === 0) return true;
+  const more = chunk.length < evicted.length;
 
-  if (!embedder || result.facts.length === 0) return;
+  if (!embedder || result.facts.length === 0) return more;
   const vectors = await embedder.embed(result.facts);
   await deps.db.transaction(async (tx) => {
     // Embedding is another window for an edit to land. Locking the chat row
@@ -305,6 +320,46 @@ async function updateMemory(deps: AppDeps, chatId: string): Promise<void> {
       })),
     );
   });
+  return more;
+}
+
+/**
+ * The `memory_backfill` job (§7.3): folds an imported chat's history into its
+ * rolling summary, one capped chunk per summarize call, a few calls per run.
+ *
+ * A run is bounded so one long import does not hold this instance's worker — the
+ * queue runs one job at a time — for an hour; what is left goes to a successor
+ * job, behind whatever else is due. It takes the same per-chat guard a finished
+ * turn's refresh takes and stands back when one is running, and every fold still
+ * goes through the revision CAS, so a reader who starts chatting meanwhile only
+ * shares the work. A chat that is gone, or an owner with no memory channel, ends
+ * the chain quietly: `updateMemory` folds nothing and says there is nothing more.
+ * A provider failure throws, and the queue retries the run with its backoff.
+ */
+export async function memoryBackfill(
+  deps: AppDeps,
+  { chatId }: JobPayloadMap['memory_backfill'],
+): Promise<void> {
+  for (let pass = 0; pass < BACKFILL_CHUNKS_PER_RUN; pass += 1) {
+    if (deps.refreshingMemory.has(chatId)) {
+      await enqueueBackfill(deps, chatId, new Date(Date.now() + BACKFILL_RETRY_MS));
+      return;
+    }
+    deps.refreshingMemory.add(chatId);
+    let more: boolean;
+    try {
+      more = await updateMemory(deps, chatId);
+    } finally {
+      deps.refreshingMemory.delete(chatId);
+    }
+    if (!more) return;
+  }
+  await enqueueBackfill(deps, chatId);
+}
+
+/** The next backfill run, on a transaction of its own: nothing else is being written with it. */
+async function enqueueBackfill(deps: AppDeps, chatId: string, runAt?: Date): Promise<void> {
+  await deps.db.transaction((tx) => enqueueJob(tx, 'memory_backfill', { chatId }, runAt ? { runAt } : {}));
 }
 
 /**
@@ -370,20 +425,67 @@ async function coversMessage(
 }
 
 /**
+ * Whether the summary and the history it does not cover yet have outgrown
+ * `contextBudget × summaryThreshold`. Counted from the oldest message and stopped
+ * as soon as the answer is yes, so an imported backlog of thousands of turns is
+ * not tokenized whole on every pass — none of the passes needs its exact size.
+ */
+function overThreshold(chat: Chat, summary: string, history: Message[]): boolean {
+  const { contextBudget, summaryThreshold } = memorySettingsOf(chat);
+  const limit = contextBudget * summaryThreshold;
+  let total = countTokens(summary);
+  for (const message of history) {
+    if (total > limit) return true;
+    total += countTokens(message.content);
+  }
+  return total > limit;
+}
+
+/** Whether this branch is due a fold: what an import asks before it queues a backfill. */
+export function overSummaryThreshold(chat: Chat, path: Message[]): boolean {
+  const { summary, history } = applyMemory(path, chat);
+  return overThreshold(chat, summary, history);
+}
+
+/**
  * How many of the oldest messages to fold into the summary so the retained tail
  * fits KEEP_RATIO of the budget, while keeping at least MIN_RETAINED_MESSAGES.
+ * Walked from the newest and counted as it goes, so only the tail is tokenized.
  */
-function evictionCount(costs: number[], contextBudget: number): number {
+function evictionCount(history: Message[], contextBudget: number): number {
   const keep = contextBudget * KEEP_RATIO;
   let kept = 0;
-  let cut = costs.length;
-  for (let i = costs.length - 1; i >= 0; i -= 1) {
-    const retained = costs.length - i;
-    if (kept + costs[i]! > keep && retained > MIN_RETAINED_MESSAGES) break;
-    kept += costs[i]!;
+  let cut = history.length;
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const cost = countTokens(history[i]!.content);
+    const retained = history.length - i;
+    if (kept + cost > keep && retained > MIN_RETAINED_MESSAGES) break;
+    kept += cost;
     cut = i;
   }
   return cut;
+}
+
+/**
+ * The oldest stretch of `evicted` one summarize call is given: at most
+ * `contextBudget` tokens, and never less than one message. A chat that grows a
+ * turn at a time never reaches the cap — it evicts the stretch between the
+ * threshold and the keep-tail, well under the budget — but an imported backlog,
+ * or a branch switch away from the anchor, puts the whole history past the
+ * keep-tail at once, and one call over all of it would outgrow the model's
+ * context. Folded a chunk at a time, each call continues from the anchor the
+ * last one left.
+ */
+function foldChunk(evicted: Message[], contextBudget: number): Message[] {
+  let total = 0;
+  let end = 0;
+  while (end < evicted.length) {
+    const cost = countTokens(evicted[end]!.content);
+    if (end > 0 && total + cost > contextBudget) break;
+    total += cost;
+    end += 1;
+  }
+  return evicted.slice(0, end);
 }
 
 interface SummarizeInput {

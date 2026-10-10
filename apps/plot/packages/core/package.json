@@ -49,6 +49,10 @@
     "./world-info": {
       "types": "./dist/worldInfo.d.ts",
       "default": "./dist/worldInfo.js"
+    },
+    "./sillytavern": {
+      "types": "./dist/sillytavern/index.d.ts",
+      "default": "./dist/sillytavern/index.js"
     }
   },
   "files": [

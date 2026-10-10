@@ -5,10 +5,10 @@ export interface MacroContext {
   char: string;
   user: string;
   /**
-   * Path-derived chat variables, for {{getvar::k}} and expressions. Omitted where
-   * there is no chat to derive them from (a greeting expanded at chat creation),
-   * and then {{getvar}}, {{calc}} and {{? …}} are left alone like any other
-   * unsupported macro.
+   * Path-derived chat variables, for {{getvar::k}}, expressions and ST's
+   * {{if .k}}. Omitted where there is no chat to derive them from (a greeting
+   * expanded at chat creation), and then {{getvar}}, {{calc}} and {{? …}} are left
+   * alone like any other unsupported macro.
    */
   variables?: Variables;
   /**
@@ -123,12 +123,13 @@ export function imageMacroRefs(text: string): string[] {
  * CBS for the prompt, on the shared evaluator (`cbs.ts`): {{char}}, {{user}},
  * {{getvar::k}}, {{random:a,b}} and {{random::a::b}}, {{pick::a,b}},
  * {{roll:dN}}, {{// comment}}, {{original}}, the clock's {{date}}, {{time}},
- * {{weekday}}, {{idle_duration}}, and RisuAI's nesting, blocks ({{#if}},
- * {{#when}}) and functions ({{? …}}, {{calc}}, {{equal}}, {{sum}}, …). Macro
- * names are case-insensitive; unsupported macros are left as-is, arguments and
- * all — which is what keeps {{setvar}}/{{addvar}} in the prompt history, where
- * the model needs to keep seeing its own protocol. Never throws: a malformed
- * template is repaired rather than refused.
+ * {{weekday}}, {{idle_duration}}, RisuAI's nesting, blocks ({{#if}},
+ * {{#when}}) and functions ({{? …}}, {{calc}}, {{equal}}, {{sum}}, …), and
+ * SillyTavern's {{if}}…{{else}}…{{/if}}, {{trim}}, {{newline}}, {{space}} and
+ * {{noop}}. Macro names are case-insensitive; unsupported macros are left as-is,
+ * arguments and all — which is what keeps {{setvar}}/{{addvar}}/{{incvar}}/
+ * {{decvar}} in the prompt history, where the model needs to keep seeing its own
+ * protocol. Never throws: a malformed template is repaired rather than refused.
  */
 export function applyMacros(text: string, ctx: MacroContext): string {
   if (!text || !text.includes('{{')) return text;

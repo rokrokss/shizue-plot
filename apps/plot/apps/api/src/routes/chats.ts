@@ -103,7 +103,7 @@ import {
   requireUuidParam,
 } from '../util.js';
 
-const toChatJson = (chat: Chat, noteIds: string[]) => ({
+export const toChatJson = (chat: Chat, noteIds: string[]) => ({
   id: chat.id,
   plotId: chat.plotId,
   personaId: chat.personaId,
@@ -137,6 +137,13 @@ const toChatJson = (chat: Chat, noteIds: string[]) => ({
   absentCharacterIds: chat.absentCharacterIds ?? [],
   /** Reusable notes attached to this chat, in injection order. */
   noteIds,
+  /**
+   * True while an import is still writing the history in batches. The chat takes
+   * no other write until the import completes — it can only be read or deleted.
+   */
+  importing: chat.importing,
+  /** The chat file a conversation brought over from another app came from; null for one started here. */
+  importedFrom: chat.importedFrom,
   createdAt: chat.createdAt.toISOString(),
   updatedAt: chat.updatedAt.toISOString(),
 });
@@ -166,6 +173,23 @@ export async function loadOwnedChat(deps: AppDeps, id: string, userId: string): 
     .where(and(eq(chats.id, id), eq(chats.userId, userId)))
     .limit(1);
   if (!chat) throw notFound('Chat not found');
+  return chat;
+}
+
+/** What a write to a chat an import is still filling is refused with. */
+export const chatImporting = (): ApiError =>
+  new ApiError(409, 'chat_importing', 'This chat is still being imported');
+
+/**
+ * `loadOwnedChat` for a route that writes. A chat an import is still filling takes
+ * no writes but the import's own batches (§5): a turn, a swipe or an edit landing
+ * in the middle would hang the rest of the history under something the import
+ * never chose. Reads stay open, and so does deleting the whole chat — that is how
+ * an import is abandoned.
+ */
+export async function loadWritableChat(deps: AppDeps, id: string, userId: string): Promise<Chat> {
+  const chat = await loadOwnedChat(deps, id, userId);
+  if (chat.importing) throw chatImporting();
   return chat;
 }
 
@@ -410,7 +434,7 @@ function optionalNarrator(body: Record<string, unknown>): NarratorConfig | null 
 }
 
 /** Validates an optional personaId: it must belong to the caller. */
-async function resolvePersona(deps: AppDeps, userId: string, value: unknown): Promise<Persona | null> {
+export async function resolvePersona(deps: AppDeps, userId: string, value: unknown): Promise<Persona | null> {
   if (value === undefined || value === null) return null;
   if (typeof value !== 'string') throw badRequest('invalid_request', 'personaId must be a string or null');
   if (!isUuid(value)) throw notFound('Persona not found');
@@ -1201,7 +1225,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       throw new ApiError(409, 'generation_in_progress', 'A generation is running for this chat');
     }
     try {
-      const chat = await loadOwnedChat(deps, id, userId);
+      const chat = await loadWritableChat(deps, id, userId);
       const body = await readJsonBody(c);
 
       const model =
@@ -1279,7 +1303,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   // User-edited summary. The anchor is kept: it says which turns the summary
   // stands for, and the user is only rewriting the text.
   app.put('/:id/memory', async (c) => {
-    const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
+    const chat = await loadWritableChat(deps, requireUuidParam(c), c.get('userId'));
     const body = await readJsonBody(c);
     const summary = requireString(body, 'summary');
 
@@ -1312,7 +1336,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   // no-op rather than a conflict, so a double click cannot fail the request.
   app.post('/:id/notes/:noteId', async (c) => {
     const userId = c.get('userId');
-    const chat = await loadOwnedChat(deps, requireUuidParam(c), userId);
+    const chat = await loadWritableChat(deps, requireUuidParam(c), userId);
     const note = await loadOwnedNote(deps, requireUuidParam(c, 'noteId'), userId);
 
     // The cap is a count, and a count only means something while nothing else can
@@ -1337,7 +1361,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
 
   app.delete('/:id/notes/:noteId', async (c) => {
     const userId = c.get('userId');
-    const chat = await loadOwnedChat(deps, requireUuidParam(c), userId);
+    const chat = await loadWritableChat(deps, requireUuidParam(c), userId);
     const note = await loadOwnedNote(deps, requireUuidParam(c, 'noteId'), userId);
 
     await deps.db
@@ -1348,7 +1372,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
 
   // Branch switch: head moves to the deepest (newest) leaf under the given message.
   app.post('/:id/head', async (c) => {
-    const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
+    const chat = await loadWritableChat(deps, requireUuidParam(c), c.get('userId'));
     const body = await readJsonBody(c);
     const messageId = requireString(body, 'messageId');
     if (!isUuid(messageId)) throw notFound('Message not found');
@@ -1381,7 +1405,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    */
   app.delete('/:id/messages/:messageId', async (c) => {
     const userId = c.get('userId');
-    const chat = await loadOwnedChat(deps, requireUuidParam(c), userId);
+    const chat = await loadWritableChat(deps, requireUuidParam(c), userId);
     const messageId = requireUuidParam(c, 'messageId');
 
     // A prune computed beside a running generation would race the rows the
@@ -1487,7 +1511,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const messageIds = requireMessageIds(body);
     const blocks = requireSceneBlocks(body);
 
-    const chat = await loadOwnedChat(deps, id, userId);
+    const chat = await loadWritableChat(deps, id, userId);
     const path = buildPath(await loadMessages(deps, chat.id), chat.headMessageId);
 
     // The scene has to be a run of the branch as it stands right now, and every
@@ -1599,7 +1623,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * of the route, which bounds the multipart parse.
    */
   app.post('/:id/attachments', async (c) => {
-    const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
+    const chat = await loadWritableChat(deps, requireUuidParam(c), c.get('userId'));
 
     let form: FormData;
     try {
@@ -1706,7 +1730,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * deletes it.
    */
   app.delete('/:id/attachments/:attachmentId', async (c) => {
-    const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
+    const chat = await loadWritableChat(deps, requireUuidParam(c), c.get('userId'));
     const [deleted] = await deps.db
       .delete(chatAttachments)
       .where(
@@ -1737,7 +1761,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const focusIds = optionalMemberIds(body, 'focusCharacterIds') ?? [];
 
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
-      const chat = await loadOwnedChat(deps, id, userId);
+      const chat = await loadWritableChat(deps, id, userId);
       // Fail before any write: a 400 here must leave the chat untouched, otherwise
       // the client resends a turn that was already persisted.
       await requireEnabledModel(deps, userId, chat.model);
@@ -1811,7 +1835,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const focusIds = optionalMemberIds(await optionalJsonBody(c), 'focusCharacterIds') ?? [];
 
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> =>
-      regeneratePlan(c, deps, await loadOwnedChat(deps, id, userId), focusIds),
+      regeneratePlan(c, deps, await loadWritableChat(deps, id, userId), focusIds),
     );
   });
 
@@ -1837,7 +1861,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const focusIds = optionalMemberIds(await optionalJsonBody(c), 'focusCharacterIds') ?? [];
 
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
-      const chat = await loadOwnedChat(deps, id, userId);
+      const chat = await loadWritableChat(deps, id, userId);
       await requireEnabledModel(deps, userId, chat.model);
       const context = await loadGenerationContext(deps, chat);
       const focusNames = focusNamesOf(context.onStage, focusIds);
@@ -1890,7 +1914,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const focusIds = optionalMemberIds(await optionalJsonBody(c), 'focusCharacterIds') ?? [];
 
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
-      const chat = await loadOwnedChat(deps, id, userId);
+      const chat = await loadWritableChat(deps, id, userId);
       await requireEnabledModel(deps, userId, chat.model);
       const context = await loadGenerationContext(deps, chat);
       const focusNames = focusNamesOf(context.onStage, focusIds);
@@ -1945,7 +1969,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const focusIds = optionalMemberIds(await optionalJsonBody(c), 'focusCharacterIds') ?? [];
 
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
-      const chat = await loadOwnedChat(deps, id, userId);
+      const chat = await loadWritableChat(deps, id, userId);
       await requireEnabledModel(deps, userId, chat.model);
       const context = await loadGenerationContext(deps, chat);
       const focusNames = focusNamesOf(context.onStage, focusIds);
@@ -2054,7 +2078,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       // scene is still on its way in.
       const keepAlive = setInterval(() => void renewChatSlot(deps, id), HEARTBEAT_MS);
       try {
-        const chat = await loadOwnedChat(deps, id, userId);
+        const chat = await loadWritableChat(deps, id, userId);
         const context = await loadGenerationContext(deps, chat);
         const path = buildPath(context.all, chat.headMessageId);
         const head = path[path.length - 1];
@@ -2169,6 +2193,7 @@ export function messageRoutes(deps: AppDeps): Hono<AppEnv> {
       .where(and(eq(messages.id, id), eq(chats.userId, userId)))
       .limit(1);
     if (!row) throw notFound('Message not found');
+    if (row.chat.importing) throw chatImporting();
 
     if (row.message.role === 'assistant') {
       // One transaction: the edit and the memory invalidation it forces must not be

@@ -49,6 +49,28 @@ describe('parseCbs', () => {
     expect(run('{{#if 1}}a{{/each}}b')).toBe('ab');
   });
 
+  it('opens ST {{if}} without the #, and closes it with {{/if}} or {{/}} only', () => {
+    const [node] = parseCbs('{{if {{getvar::a}}}}x{{else}}y{{/if}}', { strict: true });
+    expect(node?.type === 'block' && node.kind).toBe('st_if');
+    expect(() => parseCbs('{{IF:a::b}}x{{/}}', { strict: true })).not.toThrow();
+    expect(() => parseCbs('{{if a}}x{{/when}}', { strict: true })).toThrow(CbsSyntaxError);
+    // ST's scoped form of another macro is text to it, not the end of the block.
+    expect(run('{{if 1}}a{{/setvar}}b{{/if}}')).toBe('a{{/setvar}}b');
+  });
+
+  it('leaves ST forms that open nothing as written: the inline {{if::c::then}}, a bare {{if}}', () => {
+    expect(run('{{if::1::x}} 그리고 {{if 1}}y{{/if}}')).toBe('{{if::1::x}} 그리고 y');
+    expect(run('{{if}}a{{/if}}')).toBe('{{if}}a{{/if}}');
+    expect(run('{{if 1}}열림')).toBe('{{if 1}}열림');
+    expect(() => parseCbs('{{if 1}}열림', { strict: true })).toThrow(CbsSyntaxError);
+  });
+
+  it('reads each dialect’s else in its own blocks only', () => {
+    expect(run('{{#if 1}}a{{else}}b{{/if}}')).toBe('a{{else}}b');
+    expect(run('{{if 1}}a{{:else}}b{{/if}}')).toBe('a{{:else}}b');
+    expect(run('a{{else}}b')).toBe('a{{else}}b');
+  });
+
   it('caps nesting', () => {
     const blocks = (n: number): string => `${'{{#if 1}}'.repeat(n)}x${'{{/if}}'.repeat(n)}`;
     expect(run(blocks(8))).toBe('x');
@@ -204,6 +226,95 @@ describe('evaluateCbs - blocks', () => {
 
   it('leaves a block no host handles as written', () => {
     expect(run('{{#each a,b}}{{slot}}{{/each}}')).toBe('{{#each a,b}}{{slot}}{{/each}}');
+  });
+});
+
+describe('evaluateCbs - SillyTavern {{if}}', () => {
+  const branch = (condition: string, variables: Record<string, string> = {}, host: CbsHost = {}) =>
+    run(`{{if ${condition}}}예{{else}}아니오{{/if}}`, variables, host);
+
+  it('holds unless the condition is empty, false, off or 0', () => {
+    for (const v of ['', 'false', 'FALSE', 'Off', ' 0 ']) expect(branch('{{getvar::v}}', { v }), v).toBe('아니오');
+    for (const v of ['1', 'true', 'yes', 'no', '00', '-1']) expect(branch('{{getvar::v}}', { v }), v).toBe('예');
+  });
+
+  it('inverts on a leading !', () => {
+    expect(branch('!0')).toBe('예');
+    expect(branch('! {{getvar::v}}', { v: 'x' })).toBe('아니오');
+  });
+
+  it('reads .name and $name as the chat variable, there being no globals', () => {
+    const vars = { hp: '3', off: 'off' };
+    expect([branch('.hp', vars), branch('$hp', vars), branch('.off', vars), branch('.none', vars)]).toEqual([
+      '예',
+      '예',
+      '아니오',
+      '아니오',
+    ]);
+    expect(branch('!$none', vars)).toBe('예');
+    // ST's shorthand names start with an ASCII letter; anything else is plain text.
+    expect(branch('.호감', { 호감: '0' })).toBe('예');
+    expect(branch('{{getvar::호감}}', { 호감: '0' })).toBe('아니오');
+  });
+
+  it('asks a bare name as a macro, and reads one nothing answers as its text', () => {
+    const host: CbsHost = { macro: ({ name }) => (name === 'description' ? { text: '' } : undefined) };
+    expect(branch('description', {}, host)).toBe('아니오');
+    expect(branch('noop')).toBe('아니오');
+    expect(branch('anything')).toBe('예');
+  });
+
+  it('reads a composed condition as its text, never as a name to look up', () => {
+    expect(branch('{{getvar::w}}', { w: '.none' })).toBe('예');
+    const host: CbsHost = { macro: ({ name }) => (name === 'description' ? { text: '' } : undefined) };
+    expect(branch('{{getvar::w}}', { w: 'description' }, host)).toBe('예');
+  });
+
+  it('evaluates only the branch it takes, and an else belongs to the innermost if', () => {
+    let reads = 0;
+    run('{{if 0}}{{getvar::x}}{{else}}b{{/if}}', {}, { variable: () => String((reads += 1)) });
+    expect(reads).toBe(0);
+    expect(run('{{if 1}}{{if 0}}a{{else}}b{{/if}}{{else}}c{{/if}}')).toBe('b');
+  });
+
+  it('trims and dedents by the first line, keeping a deeper indent where #if flattens it', () => {
+    const list = '\n  - a\n    - b\n  - c\n';
+    expect(run(`[{{if 1}}${list}{{/if}}]`)).toBe('[- a\n  - b\n- c]');
+    expect(run(`[{{#if 1}}${list}{{/if}}]`)).toBe('[- a\n- b\n- c]');
+  });
+
+  it('leaves {{#if}} to RisuAI, whose truth is 1 or true', () => {
+    expect(run('{{#if yes}}a{{/if}}{{if yes}}b{{/if}}')).toBe('b');
+  });
+
+  it('keeps a condition on a variable whole where the host has none', () => {
+    const template = '{{if .hp}}a{{/if}} {{if {{getvar::x}}}}b{{/if}} {{if 1}}c{{/if}}';
+    expect(evaluateCbs(template, parseCbs(template))).toBe('{{if .hp}}a{{/if}} {{if {{getvar::x}}}}b{{/if}} c');
+  });
+});
+
+describe('evaluateCbs - SillyTavern formatting', () => {
+  it('writes newlines and spaces, one or a whole count of them', () => {
+    expect(run('a{{newline}}b{{newline::2}}c{{space}}d{{space::3}}e{{space::0}}f')).toBe('a\nb\n\nc d   ef');
+    expect(run('[{{space::{{getvar::n}}}}]', { n: '2' })).toBe('[  ]');
+  });
+
+  it('leaves a count that is not a whole number, or past the cap, as written', () => {
+    const odd = '{{newline::x}}{{space::-1}}{{space::1.5}}{{space::101}}{{space::1::2}}';
+    expect(run(odd)).toBe(odd);
+  });
+
+  it('drops {{noop}}', () => {
+    expect(run('a{{noop}}b')).toBe('ab');
+  });
+
+  it('deletes {{trim}} with the line breaks around it, once everything is expanded', () => {
+    expect(run('a\n\n{{trim}}\r\n\nb')).toBe('ab');
+    expect(run('a {{trim}} b')).toBe('a  b');
+    expect(run('a{{newline}}{{trim}}{{newline::2}}b')).toBe('ab');
+    expect(run('{{if 1}}a\n{{/if}}{{trim}}\n{{#if 1}}b{{/if}}')).toBe('ab');
+    // `{{trim::x}}` is RisuAI's string trim, which this engine does not do.
+    expect(run('{{trim:: x }}')).toBe('{{trim:: x }}');
   });
 });
 

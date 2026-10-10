@@ -224,8 +224,12 @@ async function revealByRelationship(deps: AppDeps, chat: Chat, axes: Relationshi
   }
 }
 
-/** The stored values as they are, with the extraction depth moved to `depth`. */
-const rebased = (current: ChatRelationship | null, depth: number): ChatRelationship => ({
+/**
+ * The stored values as they are, with the extraction depth moved to `depth`. A
+ * finished chat import writes one too, so the backlog it brought in is not read
+ * as five turns overdue.
+ */
+export const rebased =(current: ChatRelationship | null, depth: number): ChatRelationship => ({
   axes: current?.axes ?? null,
   note: current?.note ?? '',
   updatedAt: current?.updatedAt ?? new Date().toISOString(),

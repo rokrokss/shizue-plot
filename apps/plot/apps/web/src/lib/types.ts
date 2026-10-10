@@ -469,6 +469,12 @@ export interface Chat {
   absentCharacterIds: string[];
   /** Reusable notes attached to this chat, in injection order. */
   noteIds: string[];
+  /**
+   * True while an import (the SillyTavern move) is still writing the history in
+   * batches; nothing else may write to the chat until it finishes. Optional so a
+   * state built by hand needs no flag.
+   */
+  importing?: boolean;
   createdAt: string;
   updatedAt: string;
 }

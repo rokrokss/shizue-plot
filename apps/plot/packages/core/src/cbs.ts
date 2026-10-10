@@ -18,6 +18,12 @@
  * `{{? $hp > {{getvar::max}}}}` is computed it is text, as in RisuAI, and a value
  * can change what the expression computes. Only that — never what the template is.
  *
+ * SillyTavern's Macros 2.0 rides along where it says something RisuAI does not:
+ * `{{if COND}}…{{else}}…{{/if}}` without the `#`, and `{{trim}}`, `{{newline}}`,
+ * `{{space}}`, `{{noop}}`. RisuAI has no `if`, `else` or `/if` macro outside its
+ * `#` blocks, so the two never compete for a template; where both spell the same
+ * thing (`{{#if}}`, which ST reads as its `if` keeping whitespace), RisuAI wins.
+ *
  * Deliberately dependency-free, like `variables.ts`, so the web can import it
  * (`@shizue/core/cbs`) without the tokenizer or the card parser. No `eval`.
  */
@@ -42,8 +48,9 @@ export interface CbsMacro {
 /**
  * The blocks RisuAI cards use, plus our own `#each`. `#if_pure` is `#if` that
  * keeps its whitespace; `#when` is RisuAI's successor to `#if`, with operators.
+ * `st_if` is SillyTavern's `{{if COND}}`, written without the `#`.
  */
-export type CbsBlockKind = 'if' | 'if_pure' | 'when' | 'each';
+export type CbsBlockKind = 'if' | 'if_pure' | 'when' | 'each' | 'st_if';
 
 export interface CbsBlock {
   type: 'block';
@@ -53,7 +60,7 @@ export interface CbsBlock {
   /** The opening macro after its keyword: the condition, or the list. */
   head: CbsNode[];
   body: CbsNode[];
-  /** What follows `{{:else}}`; null when there is none. */
+  /** What follows `{{:else}}` (`{{else}}` in `st_if`); null when there is none. */
   otherwise: CbsNode[] | null;
 }
 
@@ -101,14 +108,37 @@ const literalText = (macro: CbsMacro): string | null => {
 };
 
 /**
+ * The condition of SillyTavern's `{{if COND}}` — or null when the macro does not
+ * open one. ST reads the keyword up to whitespace or a colon, then one argument:
+ * `{{if a::b}}` and `{{if:a::b}}` both test `a::b`. Only after a leading `::` do
+ * further `::` separate, and `{{if::COND::THEN}}` is then ST's inline form, which
+ * has no body to close; it stays a macro, as does `{{if}}` with nothing to test.
+ */
+function tavernIfHead(macro: CbsMacro): CbsNode[] | null {
+  const opening = lead(macro);
+  if (!/^if(?=[\s:])/i.test(opening)) return null;
+  const tail = macro.body.slice(1);
+  let rest = opening.slice(2).trimStart();
+  if (rest.startsWith('::')) {
+    rest = rest.slice(2);
+    if (rest.includes('::') || tail.some((node) => node.type === 'text' && node.text.includes('::'))) return null;
+  } else if (rest.startsWith(':')) {
+    rest = rest.slice(1);
+  }
+  const head = [...(rest ? [{ type: 'text', text: rest } as CbsText] : []), ...tail];
+  return head.some((node) => node.type !== 'text' || node.text.trim() !== '') ? head : null;
+}
+
+/**
  * Pairs braces left to right, the way RisuAI does: `{{` opens, and `}}` closes the
  * innermost macro still open — or is plain text when none is.
  *
  * Lenient (the default) repairs rather than refuses, because the prompt has to say
  * *something* with a stranger's typo in it: an unclosed block is its opening macro
  * written out, a stray closer is text, and any closer ends the innermost block, as
- * in RisuAI. Strict refuses all three — the chat shows a creator their own
- * template rather than guessing at it. An unclosed `{{` is text in both.
+ * in RisuAI — but ST's `{{if}}`, which only its own closer ends. Strict refuses
+ * all three — the chat shows a creator their own template rather than guessing at
+ * it. An unclosed `{{` is text in both.
  */
 export function parseCbs(source: string, options: { strict?: boolean } = {}): CbsNode[] {
   const strict = options.strict ?? false;
@@ -123,19 +153,27 @@ export function parseCbs(source: string, options: { strict?: boolean } = {}): Cb
     if (end > textStart) append(top(), { type: 'text', text: source.slice(textStart, end) });
   };
 
+  const openBlock = (macro: CbsMacro, kind: CbsBlockKind, head: CbsNode[]): void => {
+    if (blocks >= MAX_CBS_BLOCK_DEPTH) {
+      if (strict) throw new CbsSyntaxError('block nesting too deep');
+      append(top(), macro);
+      return;
+    }
+    stack.push({ type: 'block', kind, opener: macro, head, nodes: [], body: null, elseMarker: null });
+    blocks += 1;
+  };
+
   const closeMacro = (macro: CbsMacro): void => {
     const opener = OPEN_RE.exec(lead(macro));
     if (opener) {
-      if (blocks >= MAX_CBS_BLOCK_DEPTH) {
-        if (strict) throw new CbsSyntaxError('block nesting too deep');
-        append(top(), macro);
-        return;
-      }
       const rest = lead(macro).slice(opener[0].length);
       const head = [...(rest ? [{ type: 'text', text: rest } as CbsText] : []), ...macro.body.slice(1)];
-      const kind = opener[1]!.toLowerCase() as CbsBlockKind;
-      stack.push({ type: 'block', kind, opener: macro, head, nodes: [], body: null, elseMarker: null });
-      blocks += 1;
+      openBlock(macro, opener[1]!.toLowerCase() as CbsBlockKind, head);
+      return;
+    }
+    const condition = tavernIfHead(macro);
+    if (condition) {
+      openBlock(macro, 'st_if', condition);
       return;
     }
 
@@ -143,9 +181,13 @@ export function parseCbs(source: string, options: { strict?: boolean } = {}): Cb
     const frame = stack[stack.length - 1];
     if (literal !== undefined && literal.startsWith('/') && !literal.startsWith('//')) {
       const name = literal.slice(1).trim().toLowerCase();
+      // ST's `{{if}}` closes on its own name only: any other closer inside it is
+      // ST's scoped form of another macro (`{{/setvar}}`), which ST leaves as text.
       const matches =
         frame?.type === 'block' &&
-        (!strict || name === '' || name === frame.kind || (frame.kind === 'if_pure' && name === 'if'));
+        (frame.kind === 'st_if'
+          ? name === '' || name === 'if'
+          : !strict || name === '' || name === frame.kind || (frame.kind === 'if_pure' && name === 'if'));
       if (frame?.type === 'block' && matches) {
         stack.pop();
         blocks -= 1;
@@ -163,7 +205,12 @@ export function parseCbs(source: string, options: { strict?: boolean } = {}): Cb
       if (strict) throw new CbsSyntaxError(frame?.type === 'block' ? 'mismatched close' : 'stray close');
     }
 
-    if (literal === ':else' && frame?.type === 'block' && frame.kind !== 'each' && !frame.body) {
+    // Each dialect's else in its own blocks only: elsewhere it is text, as in both.
+    if (
+      frame?.type === 'block' &&
+      !frame.body &&
+      (frame.kind === 'st_if' ? literal?.toLowerCase() === 'else' : frame.kind !== 'each' && literal === ':else')
+    ) {
       frame.body = frame.nodes;
       frame.nodes = [];
       frame.elseMarker = macro;
@@ -538,7 +585,10 @@ export interface CbsHost {
   macro?(call: CbsCall): CbsValue | undefined;
   /** Blocks the language leaves to the host (`#each`). Undefined: left as written. */
   block?(block: CbsBlock, scope: CbsBlockScope): CbsValue | undefined;
-  /** `#if`'s truth. The default is RisuAI's: the first word is `1` or `true`. */
+  /**
+   * `#if`'s truth. The default is RisuAI's: the first word is `1` or `true`. ST's
+   * `{{if}}` has its own, which no host changes.
+   */
   condition?(head: CbsArg): boolean;
   /** [0, 1), for `random` and `roll`. */
   random?(): number;
@@ -577,6 +627,31 @@ const trimBlankLines = (text: string): string => {
   return lines.join('\n');
 };
 
+const indentOf = (line: string): number => line.length - line.replace(/^[ \t]+/, '').length;
+
+/**
+ * ST `{{if}}`'s: the branch trimmed and dedented by its first non-blank line's
+ * indent, a line indented less losing all of its own. Unlike `#if`, a deeper
+ * indent (a nested list) keeps its shape.
+ */
+const dedent = (text: string): string => {
+  const lines = text.split('\n');
+  const first = lines.find((line) => line.trim() !== '');
+  const indent = first === undefined ? 0 : indentOf(first);
+  if (indent === 0) return text.trim();
+  return lines
+    .map((line) => (indentOf(line) >= indent ? line.slice(indent) : line.trimStart()))
+    .join('\n')
+    .trim();
+};
+
+/** ST's false condition: empty, or `false`, `off` or `0` in any case. Anything else holds. */
+const isTavernFalse = (text: string): boolean =>
+  text === '' || ['false', 'off', '0'].includes(text.trim().toLowerCase());
+
+/** A macro called with nothing: a bare name in ST's `{{if}}`. */
+const NO_ARGS: CbsArgs = { length: 0, at: () => undefined, rest: () => undefined };
+
 /** `{{random}}`'s options: several arguments, a JSON array, or one list split on `,`/`:`. */
 function options(args: CbsArgs): { list: string[]; untrusted: boolean; deferred: boolean } {
   const values = Array.from({ length: args.length }, (_, i) => args.at(i + 1)!.value());
@@ -609,6 +684,19 @@ function parseArray(text: string): string[] | null {
 
 /** Dice past this are not a roll anyone wrote, just a loop someone wants run. */
 const MAX_DICE = 100;
+
+/** Likewise `{{newline::N}}` and `{{space::N}}`: past this, a memory bomb rather than layout. */
+const MAX_REPEAT = 100;
+
+/**
+ * Where a bare `{{trim}}` stood. ST deletes it once everything else is expanded,
+ * with every line break directly around it — across block and macro boundaries,
+ * so it is a mark in the output rather than an edit of the tree. Control
+ * characters, like ST's own else marker: no template writes them, and a value that
+ * smuggles one in only costs the text its line breaks.
+ */
+const TRIM_MARK = '\u0000\u001Ftrim\u001F\u0000';
+const TRIM_RE = /(?:\r?\n)*\u0000\u001Ftrim\u001F\u0000(?:\r?\n)*/g;
 
 /**
  * Evaluates parsed nodes against a host. `source` is the text they were parsed
@@ -680,6 +768,11 @@ export function evaluateCbs(source: string, nodes: CbsNode[], host: CbsHost = {}
       const { holds, whitespace } = decided;
       const trim = whitespace === 'keep' ? (text: string) => text : whitespace === 'legacy' ? trimLines : trimBlankLines;
       return branch(holds ? node.body : node.otherwise, trim);
+    }
+    if (node.kind === 'st_if') {
+      const { negated, value } = tavernCondition(node, slot);
+      if (value.deferred) return settle(deferred(node), mode);
+      return branch(isTavernFalse(value.text) === negated ? node.body : node.otherwise, dedent);
     }
     const hosted = host.block?.(node, {
       head,
@@ -790,6 +883,46 @@ export function evaluateCbs(source: string, nodes: CbsNode[], host: CbsHost = {}
     return { holds: isCbsTrue(statement[0] ?? ''), whitespace };
   }
 
+  /**
+   * ST `{{if}}`'s condition: a `!` in front inverts it, and nested macros are
+   * answered first. Written out, it may also name a chat variable — `.name`, or
+   * `$name`, ST's global, which reads the chat's too since there are no globals —
+   * or a macro called with nothing (`{{if char}}` asks `{{char}}`); a name nothing
+   * answers is just its text. ST looks a nested macro's answer up the same way,
+   * which would let a value choose the variable or the macro; here a composed
+   * condition is only ever its text.
+   */
+  function tavernCondition(node: CbsBlock, slot: string | null): { negated: boolean; value: CbsValue } {
+    const list = [...node.head];
+    const first = list[0];
+    let negated = false;
+    if (first?.type === 'text') {
+      const bang = /^\s*!\s*/.exec(first.text);
+      negated = bang !== null;
+      list[0] = { type: 'text', text: first.text.slice(bang?.[0].length ?? 0).trimStart() };
+    }
+    const last = list[list.length - 1];
+    if (last?.type === 'text') list[list.length - 1] = { type: 'text', text: last.text.trimEnd() };
+
+    const condition = argOf(list, slot);
+    const value = condition.value();
+    if (!condition.literal) return { negated, value };
+    const variable = /^[.$]([A-Za-z](?:[\w-]*\w)?)$/.exec(value.text);
+    if (variable) {
+      if (!host.variable) return { negated, value: { text: value.text, deferred: true } };
+      return { negated, value: { text: host.variable(variable[1]!) ?? '', untrusted: true } };
+    }
+    if (!/^[A-Za-z][\w-]*$/.test(value.text)) return { negated, value };
+    const called = answer({
+      name: normalizeName(value.text),
+      args: NO_ARGS,
+      macro: { type: 'macro', start: node.start, end: node.end, body: list },
+      mode: 'arg',
+      slot,
+    });
+    return { negated, value: called ?? value };
+  }
+
   /** `{{? …}}` and `{{calc::…}}`. Reading a variable marks the answer. */
   function expression(arg: CbsArg | undefined, node: CbsMacro): CbsValue {
     if (!host.variable) return deferred(node);
@@ -836,10 +969,15 @@ export function evaluateCbs(source: string, nodes: CbsNode[], host: CbsHost = {}
     };
 
     const call: CbsCall = { name, args, macro: node, mode, slot };
-    const result = host.macro?.(call) ?? builtin(call) ?? verbatim(node);
+    const result = answer(call) ?? verbatim(node);
     // An answer built on a variable the host does not have is no answer: the
     // macro is written as itself, inner text and all, for a later pass to decide.
     return result.deferred ? deferred(node) : result;
+  }
+
+  /** The host's macro, else the language's; undefined when neither knows the name. */
+  function answer(call: CbsCall): CbsValue | undefined {
+    return host.macro?.(call) ?? builtin(call);
   }
 
   /** A function of its arguments: marked when any argument it read was. */
@@ -930,12 +1068,30 @@ export function evaluateCbs(source: string, nodes: CbsNode[], host: CbsHost = {}
         for (let i = 0; i < count; i += 1) total += Math.floor(random() * sides) + 1;
         return derived(String(total), [notation]);
       }
+      case 'newline':
+      case 'space': {
+        // RisuAI's `newline` is its `br`; ST's takes a count — a whole number, as
+        // ST checks it, or the macro is left as written.
+        const unit = name === 'newline' ? '\n' : ' ';
+        if (args.length === 0) return { text: unit };
+        const count = value(1);
+        if (count.deferred) return derived('', [count]);
+        const digits = count.text.trim();
+        if (args.length > 1 || !/^\d+$/.test(digits) || Number(digits) > MAX_REPEAT) return undefined;
+        return derived(unit.repeat(Number(digits)), [count]);
+      }
+      case 'noop':
+        return args.length === 0 ? { text: '' } : undefined;
+      case 'trim':
+        // Bare, ST's: see TRIM_MARK. `{{trim::x}}` is RisuAI's string trim, not supported.
+        return args.length === 0 ? { text: TRIM_MARK } : undefined;
       default:
         return undefined;
     }
   }
 
-  return sequence(nodes, 'out', null).text;
+  const out = sequence(nodes, 'out', null).text;
+  return out.includes(TRIM_MARK) ? out.replace(TRIM_RE, '') : out;
 }
 
 /* ------------------------------------------------------------------- assets */
