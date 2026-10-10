@@ -235,6 +235,17 @@ export const MAX_PLOT_PROFILE_NAME_LENGTH = 30;
 /** A profile's description, which becomes the copied persona's. */
 export const MAX_PLOT_PROFILE_DESCRIPTION_LENGTH = 1000;
 
+/** Roster size. Ten is what one prompt can hold and one reader can keep straight. */
+export const MAX_CHARACTERS_PER_PLOT = 10;
+/** Openings a plot may offer; every one of them becomes a root of a new chat. */
+export const MAX_INTROS_PER_PLOT = 10;
+/** One opening's length — a prologue, not a chapter. */
+export const MAX_INTRO_TEXT_LENGTH = 4000;
+/** Tags on a plot's explore filter column. */
+export const MAX_TAGS = 10;
+/** One tag — a word or two, not a phrase. */
+export const MAX_TAG_LENGTH = 20;
+
 /**
  * The relationship axes an unlock may be keyed on. Mirrors `RELATIONSHIP_AXES`
  * in `@shizue/db`, which cannot be imported here — that package depends on this one.

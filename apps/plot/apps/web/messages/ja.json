@@ -74,7 +74,9 @@
     "draftPremisePlaceholder": "例：雨の夜、閉店した書店に見知らぬ客が訪れる。",
     "draftCreate": "下書きを作る",
     "stImport": "SillyTavern からお引っ越し",
-    "stImportHint": "SillyTavern のキャラクター・グループ・ペルソナ・チャットをまとめて移します。"
+    "stImportHint": "SillyTavern のキャラクター・グループ・ペルソナ・チャットをまとめて移します。",
+    "pasteImport": "他のプラットフォームから移す",
+    "pasteImportHint": "ZetaやElynなど他のプラットフォームで自作したキャラクターを、項目ごとに貼り付けて移します。"
   },
   "plot": {
     "notFound": "プロットが見つかりません。",
@@ -447,6 +449,7 @@
     "importedTitle": "読み込んだカード",
     "source": "出典",
     "sourceFile": "ファイル {name}",
+    "sourcePaste": "{platform}から貼り付け",
     "creator": "作者",
     "creatorUnknown": "記載なし",
     "license": "ライセンス",
@@ -978,7 +981,8 @@
     "st_file_unreadable": "ファイルを読み込めませんでした。選んだ後に変更されたか、破損している可能性があります。",
     "st_file_too_large": "ファイルが大きすぎて読み込めません。",
     "st_group_empty": "グループのメンバーのカードが1つもありません。",
-    "message_too_long": "1つのメッセージが10万文字を超えているため、このチャットは読み込めません。"
+    "message_too_long": "1つのメッセージが10万文字を超えているため、このチャットは読み込めません。",
+    "migration_unconfirmed": "移す前の確認項目にすべて同意してください。"
   },
   "rebrand": {
     "eyebrow": "物語が育つ場所",
@@ -1011,5 +1015,192 @@
     "extensionInstall": "拡張機能を入手",
     "extensionRecheck": "再確認",
     "extensionStillMissing": "拡張機能がまだ見つかりません。インストール済みの場合は、このページを再読み込みしてください。"
+  },
+  "migrate": {
+    "title": "他のプラットフォームから移す",
+    "subtitle": "他のプラットフォームで自作したキャラクターを、そのサイトの編集画面から項目ごとにコピーして貼り付け、プロットとして移します。",
+    "back": "← マイプロット",
+    "backToSites": "← サイトを選ぶ",
+    "platforms": {
+      "zeta": "Zeta",
+      "elyn": "Elyn",
+      "caveduck": "Caveduck",
+      "babechat": "BabeChat",
+      "crack": "Crack"
+    },
+    "platformHints": {
+      "zeta": "プロット・キャラクター・イントロ・設定集・スタイルを移します。",
+      "elyn": "基本情報・プロンプト・最初のメッセージ・ロア・JSXコンポーネントを移します。",
+      "caveduck": "エピソード・ロアブック・会話例",
+      "babechat": "開始設定・ロアブック・シチュエーション素材",
+      "crack": "ストーリー・キャラクター・キーワードブック"
+    },
+    "comingSoon": "準備中",
+    "savedDraft": "保存済みの作業あり",
+    "start": "始める",
+    "continue": "続ける",
+    "clearSaved": "保存データを消去",
+    "savedCleared": "保存データを消去しました。",
+    "privacy": "貼り付けた内容は「作成」を押すまでこのブラウザにだけ保存されます。shizueが元のサイトにリクエストを送ることはありません。",
+    "loading": "読み込み中…",
+    "wizardTitle": "{platform}から移す",
+    "wizardSubtitle": "元の編集画面を横に開いたまま、項目ごとに貼り付けてください。作成する前に結果をプレビューできます。",
+    "stepsLabel": "進行ステップ",
+    "steps": {
+      "confirm": "確認",
+      "form": "貼り付け",
+      "images": "画像",
+      "preview": "プレビュー",
+      "run": "作成"
+    },
+    "previous": "戻る",
+    "next": "次へ",
+    "restored": "このブラウザに保存された作業を読み込みました。",
+    "restoredWithoutImages": "このブラウザに保存された作業を読み込みました。画像は保存されないため、画像のステップでもう一度追加してください。",
+    "confirmStep": {
+      "title": "移す前に確認してください",
+      "hint": "すべてにチェックすると次へ進めます。",
+      "blocked": "このサイトの作品は移せません。",
+      "sourceUrl": "元の公開ページのURL（任意）",
+      "sourceUrlHint": "入力すると出典として記録されます。元のサイトにはアクセスしません。",
+      "sourceUrlInvalid": "{platform}のキャラクター公開ページのURLではありません。",
+      "sourceUrlPlaceholder": {
+        "zeta": "https://zeta-ai.io/ko/plots/…/profile",
+        "elyn": "https://elyn.ai/…",
+        "caveduck": "https://caveduck.io/ko/characters/…",
+        "babechat": "https://babechat.ai/character/u/…/profile",
+        "crack": "https://crack.wrtn.ai/detail/…"
+      }
+    },
+    "confirm": {
+      "ownWork": "このキャラクターは自分で作ったものです。他の人が作ったキャラクターは移しません。",
+      "secondaryWork": "原作のある二次創作の場合、公開する前に原作の権利者の権利を確認する必要があることを理解しています。",
+      "elynOnly": "ELYN ONLYに指定していないか、指定から90日が過ぎています。"
+    },
+    "form": {
+      "hint": "元の編集画面で同じ名前の項目をすべて選択してコピーし、貼り付けてください。項目名は元の画面のままです。元の上限は参考用で、こちらの上限を超える項目はその下に表示されます。",
+      "placeholder": "元の「{label}」をすべて選択してコピーし、貼り付けてください。",
+      "aliases": "別名: {names}",
+      "visibility": {
+        "public": "ユーザーに公開",
+        "ai": "AI専用",
+        "both": "ユーザーに公開・AI",
+        "meta": "管理用"
+      },
+      "sourceLimitChars": "元の上限 {count, number}字",
+      "sourceLimitBytes": "元の上限 {count, number}バイト",
+      "unverified": "未確認",
+      "length": "{count, number}字",
+      "keywordsHint": "カンマ(,)・縦線(|)・改行で区切られます。",
+      "turnsHint": "各行の話し手はプレビューで決めます。",
+      "choiceHint": "元のサイトで選んだものと同じものを選んでください。もう一度押すと選択が外れます。",
+      "maxChoices": "最大{max}個",
+      "rowCount": "{count} / {max}",
+      "rowLabel": "{section} {number}",
+      "moveUp": "上へ",
+      "moveDown": "下へ",
+      "remove": "削除",
+      "removeRow": "{section} {number}を削除",
+      "addRow": "{section}を追加",
+      "addRowKey": "項目の中でCtrl+Enter（Macは⌘+Enter）を押すと、すぐ下に新しい行が追加されます。"
+    },
+    "images": {
+      "title": "画像（任意）",
+      "hint": "元のサイトに上げた画像をもう一度アップロードします。画像ごとに元のサイトで呼んでいた名前（参照名）と説明を入力し、キャラクターのアバターにする画像を選んでください。",
+      "pick": "画像を選ぶ",
+      "drop": "ここにドラッグ＆ドロップもできます。",
+      "count": "{count} / {max}",
+      "notSaved": "画像はこのブラウザに保存されません。再読み込みするともう一度追加する必要があります。",
+      "readd": "保存された作業には画像がありましたが、画像は保存されません。もう一度追加してください。",
+      "name": "参照名",
+      "nameHint": "本文の'{{'img::{name}'}}'がこの名前で画像を探します。",
+      "description": "説明",
+      "descriptionHint": "元のサイトが場面に合う画像を選ぶときに使っていた説明です。空欄でもかまいません。",
+      "avatar": "アバター",
+      "avatarNone": "アバターにしない",
+      "memberUnnamed": "キャラクター {number}",
+      "avatarNote": "アバターにする画像は、プロットの画像としてはアップロードしません。",
+      "remove": "外す"
+    },
+    "preview": {
+      "warnings": "確認事項",
+      "noWarnings": "確認事項はありません。",
+      "convert": "変換方法",
+      "speakerHint": "場面の文章の各行を誰のせりふとみなすか、項目ごとに選びます。Zetaの「@名前:」表記は方法にかかわらずその話し手になります。メインの話し手を自動にすると、文中に最初に出てくるキャラクター、いなければ最初のキャラクターになります。",
+      "speakerMode": "話し手の方法",
+      "speakerModes": {
+        "auto": "自動 — かぎかっこのせりふの行はメインの話し手、それ以外はナレーター",
+        "character": "すべての行をメインの話し手に",
+        "narrator": "すべての行をナレーターに",
+        "verbatim": "原文のまま"
+      },
+      "mainSpeaker": "メインの話し手",
+      "mainSpeakerAuto": "自動",
+      "normalizeBraces": "'{user}'・'{char}'を'{{user}}'・'{{char}}'に直す",
+      "imageListLore": "説明のある画像から「画像リスト」のロア項目を作る",
+      "imageListLoreHint": "モデルが場面に合う画像を選んで使えるようにします。毎ターンプロンプトに入り、トークンを使います。",
+      "splitSections": "プロンプトの「# 캐릭터」の下にある「## 名前」の区画をキャラクターに分ける",
+      "empty": "空欄",
+      "styleNone": "指定されたスタイルはありません。",
+      "componentCode": "{count, number}字 — 作成後、スタジオのカスタムUIで確認してください。",
+      "noMembers": "キャラクターがいません。",
+      "loreState": "状態",
+      "loreDisabled": "オフ",
+      "loreLength": "{count, number}字",
+      "speakerNarrator": "ナレーター",
+      "speakerUser": "ユーザー",
+      "alreadyImported": "この内容から作ったプロットがすでにあります。<link>そのプロットを開く</link>",
+      "create": "非公開プロットを作成",
+      "createHint": "プロットは非公開で作成されます。",
+      "cannotCreate": "プロットのタイトルとキャラクターが1人以上必要です。"
+    },
+    "run": {
+      "working": "作成中…",
+      "done": "プロットを作成しました。",
+      "partial": "プロットは作成しましたが、{count}件をアップロードできませんでした。もう一度お試しください。",
+      "createFailed": "プロットを作成できませんでした。もう一度試すか、プレビューに戻って修正してください。",
+      "progressLabel": "作成の進行状況",
+      "kinds": {
+        "create": "プロットとキャラクター",
+        "avatar": "{name}のアバター",
+        "asset": "画像 {name}"
+      },
+      "status": {
+        "pending": "待機",
+        "running": "進行中",
+        "done": "完了",
+        "failed": "失敗"
+      },
+      "retry": "失敗した項目を再試行",
+      "back": "プレビューへ",
+      "openStudio": "スタジオで開く",
+      "privateNotice": "非公開プロットとして作成しました。公開するには、スタジオの公開設定で権利を確認します。",
+      "savedCleared": "このサイトの保存データは消去しました。",
+      "warningsSummary": "確認事項 {count}件",
+      "preserved": "移せなかった原文",
+      "preservedHint": "こちらに対応する項目がないか、上限に合わせて切り取られた原文です。サーバーには保存されないので、必要ならダウンロードしておいてください。",
+      "preservedNone": "移せなかった原文はありません。",
+      "preservedDownload": "原文をダウンロード (.txt)",
+      "clearSaved": "保存データを消去"
+    },
+    "warnings": {
+      "truncated": "{length, number}字あり、上限の{limit, number}字に合わせて文の終わりで切りました。切り取られた原文は結果画面でダウンロードできます。",
+      "tooMany": "{count, number}件のうち{limit, number}件までを移します。あふれた項目の原文は結果画面でダウンロードできます。",
+      "nameMissing": "名前が空欄です。名前のないキャラクター・プロフィールは除かれ、原文だけが保存されます。",
+      "noMembers": "キャラクターが1人もいません。プロットにはキャラクターが1人以上必要です。",
+      "placeholderName": "「{name}」が{count, number}回出てきます。公開画面からコピーしてユーザー名の部分が置き換わったものなら、'{{user}}'に直してください。",
+      "speakerNotInRoster": "「{name}」はキャラクターにいないため、その行はナレーションとして表示されます。",
+      "povUnsupported": "二人称の視点は対応する設定がないため、視点を指定しません。",
+      "loreNoKeys": "キーワードのない項目は発動しません。キーワードを入れるか、スタジオで「常に含める」に変えてください。",
+      "loreInverted": "「見つかったら無効化」の項目は対応する動作がないため、オフのまま移します。",
+      "loreGroupApprox": "グループの優先順位は重みとして近似的に移します。同じグループ内での選ばれ方が元と異なる場合があります。",
+      "loreDependencyDropped": "ロアの依存関係は対応する機能がないため外れます。",
+      "componentSubset": "JSXコンポーネントがサポート範囲を外れています: {violation}。スタジオで直すまで動かない場合があります。",
+      "componentTooLong": "JSXコンポーネントが{length, number}字で上限の{limit, number}字を超えるため移しません。原文は結果画面でダウンロードできます。",
+      "adultOnly": "成人向けの作品は、今のところ非公開プロットとしてのみ移せます。",
+      "splitNoSections": "「# 캐릭터」の下に「## 名前」の区画が見つからず、キャラクターに分けませんでした。",
+      "platformUnsupported": "このサイトからはまだ移せません。",
+      "imageInstructionsStripped": "Elynの設定にある画像出力の指示（'{{img::…}}'）は、そのままではモデルに伝わりません。代わりに「画像リスト」のロア項目をオンにしたので、画像のステップで画像ごとに説明を入力してください。"
+    }
   }
 }

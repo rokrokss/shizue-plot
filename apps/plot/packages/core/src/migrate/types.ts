@@ -67,6 +67,11 @@ export interface SiteSchema {
  * What the creator typed into the form: field id → value, and for a repeated
  * section, section id → array of such records. Values are strings, or string
  * arrays for `multiChoice`.
+ *
+ * A flat section's fields sit at the top level by field id — so field ids are
+ * unique across a site's flat sections — and only repeated sections nest. The
+ * `<sectionId>.<fieldId>` paths in options and warnings locate a field on the
+ * form; they are not paths into this object.
  */
 export type SiteInput = Record<string, unknown>;
 
@@ -139,6 +144,50 @@ export interface MigrationDraft {
   /** 1–10. */
   members: MigrationDraftMember[];
 }
+
+/**
+ * Every warning a mapper emits, so a catalog can be checked against them:
+ * - `truncated` {limit, length}: cut to our limit — prose at a sentence, with the original
+ *   preserved; a tag or a profile name at the limit.
+ * - `tooMany` {limit, count}: rows past our cap dropped; their text is preserved.
+ * - `nameMissing`: a plot, member or profile without a name (rows are dropped and preserved).
+ * - `noMembers`: the draft has no member, which a plot needs.
+ * - `placeholderName` {name, count}: `Guest` / `사용자` where the reader's name may have been.
+ * - `speakerNotInRoster` {name}: a Zeta `@이름:` naming no member; the line reads as narration.
+ * - `povUnsupported`: Zeta's 2인칭 has no narrator point of view here.
+ * - `loreNoKeys`: an entry with no keyword, which never triggers.
+ * - `loreInverted`: Elyn "찾았을 때 비활성화", imported switched off.
+ * - `loreGroupApprox`: Elyn group priority approximated by weight.
+ * - `loreDependencyDropped`: Elyn dependencies have no counterpart.
+ * - `componentSubset` {violation}: a `componentSubsetViolations` code.
+ * - `componentTooLong` {limit, length}: the joined components exceed our cap; left out, preserved.
+ * - `adultOnly`: an adult-only source comes in private only.
+ * - `splitNoSections`: splitting was asked for and no `## 이름` block was found.
+ * - `platformUnsupported`: no mapper for this platform yet.
+ * - `imageInstructionsStripped`: Elyn text tells the model to output `{{img::…}}`, which
+ *   prompt assembly strips; the image list (on by default then) carries it instead.
+ */
+export const MIGRATION_WARNING_CODES = [
+  'truncated',
+  'tooMany',
+  'nameMissing',
+  'noMembers',
+  'placeholderName',
+  'speakerNotInRoster',
+  'povUnsupported',
+  'loreNoKeys',
+  'loreInverted',
+  'loreGroupApprox',
+  'loreDependencyDropped',
+  'componentSubset',
+  'componentTooLong',
+  'adultOnly',
+  'splitNoSections',
+  'platformUnsupported',
+  'imageInstructionsStripped',
+] as const;
+
+export type MigrationWarningCode = (typeof MIGRATION_WARNING_CODES)[number];
 
 /** Something the preview must tell the creator. `code` is an i18n key suffix. */
 export interface MigrationWarning {

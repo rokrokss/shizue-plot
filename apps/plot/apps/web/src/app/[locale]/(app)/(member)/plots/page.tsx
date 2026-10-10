@@ -188,6 +188,16 @@ export default function PlotsPage() {
             >
               {t('stImport')}
             </Link>
+            {/* Field by field from another platform's editor, so a page of its own too. */}
+            <Link
+              href="/plots/import/paste"
+              data-testid="plot-paste-import"
+              title={t('pasteImportHint')}
+              aria-disabled={busy || undefined}
+              className={buttonClass('secondary', 'md', busy ? 'pointer-events-none opacity-45' : undefined)}
+            >
+              {t('pasteImport')}
+            </Link>
             {/* Beside 새 플롯 rather than instead of it: this drafts a first
                 version, and the creator edits it like any other. */}
             <Button

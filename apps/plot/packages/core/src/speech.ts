@@ -130,3 +130,25 @@ export function parseUserSpeech(content: string): SpeechBlock[] {
   const parts = splitParts(content.trim());
   return parts.length > 0 ? [{ speaker: { kind: 'user' }, parts }] : [];
 }
+
+/**
+ * The roster name a line's speaker prefix names, read the way
+ * `parseAssistantSpeech` reads it; undefined when the line is the narrator's.
+ */
+export function lineSpeaker(line: string, roster: readonly string[]): string | undefined {
+  const match = SPEAKER_RE.exec(line);
+  return match ? roster.find((member) => member === match[1]!.trim()) : undefined;
+}
+
+/**
+ * Text written into the protocol as `name`'s: every line with text gets the
+ * `name: ` prefix, except a line the parser already reads as someone on
+ * `roster` (by default `name` alone). Blank lines stay, as spacing. The
+ * importers turn a character's prose into speech-protocol lines with it.
+ */
+export function spokenBy(text: string, name: string, roster: readonly string[] = [name]): string {
+  return text
+    .split('\n')
+    .map((line) => (!line.trim() || lineSpeaker(line, roster) !== undefined ? line : `${name}: ${line}`))
+    .join('\n');
+}

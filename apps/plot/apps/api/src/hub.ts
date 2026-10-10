@@ -1,4 +1,4 @@
-import { stripImageMacros, stripVariableMacros } from '@shizue/core';
+import { MAX_TAG_LENGTH, MAX_TAGS, stripImageMacros, stripVariableMacros } from '@shizue/core';
 import {
   characters,
   plots,
@@ -12,9 +12,6 @@ import { and, asc, eq, inArray, sql, type SQL } from 'drizzle-orm';
 import type { Tx } from './deps.js';
 import { notFound } from './errors.js';
 
-/** Caps on the plot's tag column. */
-const MAX_TAGS = 10;
-const MAX_TAG_LENGTH = 20;
 /** How much of the first intro a listing card reveals. */
 const INTRO_PREVIEW_LENGTH = 200;
 

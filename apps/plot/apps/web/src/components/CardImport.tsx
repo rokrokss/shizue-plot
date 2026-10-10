@@ -3,6 +3,7 @@
 import { useTranslations } from 'next-intl';
 import { useState } from 'react';
 import { isRestrictiveLicense, licenseTerms, REALM_ORIGIN } from '@/lib/realm';
+import { MIGRATION_PLATFORMS } from '@/lib/migrate/wizard';
 import type { PlotMember } from '@/lib/types';
 import { Button, Checkbox, Field, TextInput } from './ui';
 
@@ -92,8 +93,16 @@ export function LicenseText({ license }: { license: string | null }) {
  */
 export function ImportedCardDetails({ member }: { member: PlotMember }) {
   const t = useTranslations('rights');
+  const tm = useTranslations('migrate');
   const source = member.importedFrom;
   if (!source) return null;
+  // A paste carries no file worth naming — its `fileName` is a label the server
+  // made up — so the platform it was pasted from is what the owner is told.
+  const platform = MIGRATION_PLATFORMS.find((known) => known === source.platform);
+  const pasted =
+    source.method === 'paste'
+      ? t('sourcePaste', { platform: platform ? tm(`platforms.${platform}`) : (source.platform ?? '') })
+      : null;
 
   return (
     <div
@@ -104,6 +113,7 @@ export function ImportedCardDetails({ member }: { member: PlotMember }) {
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-muted">
         <dt>{t('source')}</dt>
         <dd className="break-all text-fg">
+          {pasted && <span className="mr-1">{pasted}</span>}
           {source.sourceUrl ? (
             <a
               href={source.sourceUrl}
@@ -113,7 +123,7 @@ export function ImportedCardDetails({ member }: { member: PlotMember }) {
             >
               {source.sourceUrl}
             </a>
-          ) : (
+          ) : pasted ? null : (
             t('sourceFile', { name: source.fileName })
           )}
         </dd>

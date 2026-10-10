@@ -6,6 +6,11 @@ import type { AssetLock, AssetUnlock, AssetUnlockKind, ChatAttachment } from './
 
 /** Mirrors MAX_ASSETS_PER_PLOT in apps/api/src/assets.ts. */
 export const MAX_ASSETS = 100;
+/**
+ * An upload's source reference name (`name`); mirrors MAX_ASSET_NAME_LENGTH in
+ * apps/api/src/routes/plots.ts, which refuses a longer one rather than cutting it.
+ */
+export const MAX_ASSET_NAME_LENGTH = 100;
 const MAX_SLUG_LENGTH = 40;
 
 export interface PlotAsset {

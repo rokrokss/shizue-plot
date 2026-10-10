@@ -74,7 +74,9 @@
     "draftPremisePlaceholder": "e.g. On a rainy night, a stranger knocks at a bookshop that has already closed.",
     "draftCreate": "Write the draft",
     "stImport": "Move from SillyTavern",
-    "stImportHint": "Bring over SillyTavern characters, groups, personas and chats all at once."
+    "stImportHint": "Bring over SillyTavern characters, groups, personas and chats all at once.",
+    "pasteImport": "Move from another platform",
+    "pasteImportHint": "Bring over a character you made on another platform, such as Zeta or Elyn, by pasting it in field by field."
   },
   "plot": {
     "notFound": "Plot not found.",
@@ -447,6 +449,7 @@
     "importedTitle": "Imported card",
     "source": "Source",
     "sourceFile": "File {name}",
+    "sourcePaste": "Pasted from {platform}",
     "creator": "Creator",
     "creatorUnknown": "Not stated",
     "license": "License",
@@ -978,7 +981,8 @@
     "st_file_unreadable": "Couldn't read a file. It may have changed or been damaged since you chose it.",
     "st_file_too_large": "That file is too large to import.",
     "st_group_empty": "None of the group's members has a card here.",
-    "message_too_long": "One message in this chat is over 100,000 characters, so the chat can't be imported."
+    "message_too_long": "One message in this chat is over 100,000 characters, so the chat can't be imported.",
+    "migration_unconfirmed": "Agree to every confirmation before moving a character over."
   },
   "rebrand": {
     "eyebrow": "A place for plots to grow",
@@ -1011,5 +1015,192 @@
     "extensionInstall": "Get the extension",
     "extensionRecheck": "Check again",
     "extensionStillMissing": "The extension wasn't found yet. If you just installed it, reload this page."
+  },
+  "migrate": {
+    "title": "Move from another platform",
+    "subtitle": "Bring a character you made on another platform over as a plot by copying each field from that site’s editor and pasting it here.",
+    "back": "← My plots",
+    "backToSites": "← Choose a site",
+    "platforms": {
+      "zeta": "Zeta",
+      "elyn": "Elyn",
+      "caveduck": "Caveduck",
+      "babechat": "BabeChat",
+      "crack": "Crack"
+    },
+    "platformHints": {
+      "zeta": "Brings over the plot, characters, intro, lorebooks and style.",
+      "elyn": "Brings over the basics, prompt, first messages, lore and JSX components.",
+      "caveduck": "Episodes, lorebook and example dialogue",
+      "babechat": "Starting setups, lorebook and situation assets",
+      "crack": "Stories, characters and keyword books"
+    },
+    "comingSoon": "Coming soon",
+    "savedDraft": "Saved work",
+    "start": "Start",
+    "continue": "Continue",
+    "clearSaved": "Clear saved copy",
+    "savedCleared": "The saved copy was cleared.",
+    "privacy": "What you paste is kept only in this browser until you press Create. shizue never sends a request to the source site.",
+    "loading": "Loading…",
+    "wizardTitle": "Move from {platform}",
+    "wizardSubtitle": "Keep the source editor open beside this page and paste field by field. You preview the result before anything is created.",
+    "stepsLabel": "Steps",
+    "steps": {
+      "confirm": "Confirm",
+      "form": "Paste",
+      "images": "Images",
+      "preview": "Preview",
+      "run": "Create"
+    },
+    "previous": "Back",
+    "next": "Next",
+    "restored": "Restored the work saved in this browser.",
+    "restoredWithoutImages": "Restored the work saved in this browser. Images are not saved, so add them again in the Images step.",
+    "confirmStep": {
+      "title": "Before you move it over",
+      "hint": "Check every item to go on.",
+      "blocked": "Works on this site cannot be moved over.",
+      "sourceUrl": "Public page on the source site (optional)",
+      "sourceUrlHint": "Recorded as the source. The source site is not contacted.",
+      "sourceUrlInvalid": "This is not a public character page on {platform}.",
+      "sourceUrlPlaceholder": {
+        "zeta": "https://zeta-ai.io/ko/plots/…/profile",
+        "elyn": "https://elyn.ai/…",
+        "caveduck": "https://caveduck.io/ko/characters/…",
+        "babechat": "https://babechat.ai/character/u/…/profile",
+        "crack": "https://crack.wrtn.ai/detail/…"
+      }
+    },
+    "confirm": {
+      "ownWork": "I made this character myself. I am not moving a character someone else made.",
+      "secondaryWork": "If it is fan work based on an existing title, I know I must check the original rights holder’s rights before publishing it.",
+      "elynOnly": "It is not marked ELYN ONLY, or 90 days have passed since it was."
+    },
+    "form": {
+      "hint": "In the source editor, select all of the field with the same name, copy it and paste it here. Field names are shown exactly as on the source screen. Source limits are for reference; a field over our own limit is flagged below it.",
+      "placeholder": "Select all of “{label}” in the source, copy and paste it here.",
+      "aliases": "Also called: {names}",
+      "visibility": {
+        "public": "Public",
+        "ai": "AI only",
+        "both": "Public · AI",
+        "meta": "Settings"
+      },
+      "sourceLimitChars": "Source limit {count, number} chars",
+      "sourceLimitBytes": "Source limit {count, number} bytes",
+      "unverified": "unverified",
+      "length": "{count, number} chars",
+      "keywordsHint": "Split on commas (,), bars (|) and line breaks.",
+      "turnsHint": "Who speaks each line is set in the preview.",
+      "choiceHint": "Pick the same option you picked on the source. Press it again to clear it.",
+      "maxChoices": "Up to {max}",
+      "rowCount": "{count} / {max}",
+      "rowLabel": "{section} {number}",
+      "moveUp": "Up",
+      "moveDown": "Down",
+      "remove": "Remove",
+      "removeRow": "Remove {section} {number}",
+      "addRow": "Add {section}",
+      "addRowKey": "Press Ctrl+Enter (⌘+Enter on a Mac) inside a field to add a row right below."
+    },
+    "images": {
+      "title": "Images (optional)",
+      "hint": "Upload the pictures you used on the source again. For each, enter the name the source referred to it by (its reference name) and its description, and choose which pictures are character avatars.",
+      "pick": "Choose images",
+      "drop": "Or drop them here.",
+      "count": "{count} / {max}",
+      "notSaved": "Images are not saved in this browser. After a reload you have to add them again.",
+      "readd": "The saved work had images, but images are not saved. Please add them again.",
+      "name": "Reference name",
+      "nameHint": "'{{'img::{name}'}}' in your text finds the picture by this name.",
+      "description": "Description",
+      "descriptionHint": "The description the source used to pick a picture for a scene. Optional.",
+      "avatar": "Avatar",
+      "avatarNone": "Not an avatar",
+      "memberUnnamed": "Character {number}",
+      "avatarNote": "A picture used as an avatar is not uploaded as a plot image.",
+      "remove": "Remove"
+    },
+    "preview": {
+      "warnings": "To check",
+      "noWarnings": "Nothing to check.",
+      "convert": "Conversion",
+      "speakerHint": "For each scene field, choose whose words its lines are. Zeta’s “@name:” turns become that speaker whatever the mode. With the main speaker on Auto, it is the first character the text names, or else the first character.",
+      "speakerMode": "Speaker mode",
+      "speakerModes": {
+        "auto": "Auto — quoted lines to the main speaker, the rest to the narrator",
+        "character": "Every line to the main speaker",
+        "narrator": "Every line to the narrator",
+        "verbatim": "Exactly as pasted"
+      },
+      "mainSpeaker": "Main speaker",
+      "mainSpeakerAuto": "Auto",
+      "normalizeBraces": "Change '{user}' · '{char}' to '{{user}}' · '{{char}}'",
+      "imageListLore": "Make an “image list” lore entry from the described images",
+      "imageListLoreHint": "Lets the model pick a picture that fits the scene. It is in the prompt every turn and uses tokens.",
+      "splitSections": "Split the “## name” blocks under “# 캐릭터” in the prompt into characters",
+      "empty": "Empty",
+      "styleNone": "No style set.",
+      "componentCode": "{count, number} chars — check it in the studio’s Custom UI after creating.",
+      "noMembers": "There are no characters.",
+      "loreState": "State",
+      "loreDisabled": "Off",
+      "loreLength": "{count, number} chars",
+      "speakerNarrator": "Narrator",
+      "speakerUser": "User",
+      "alreadyImported": "A plot was already made from this content. <link>Open that plot</link>",
+      "create": "Create private plot",
+      "createHint": "The plot is created as private.",
+      "cannotCreate": "A plot needs a title and at least one character."
+    },
+    "run": {
+      "working": "Creating…",
+      "done": "The plot was created.",
+      "partial": "The plot was created, but {count} items failed to upload. Please try again.",
+      "createFailed": "The plot could not be created. Try again, or go back to the preview to fix it.",
+      "progressLabel": "Creation progress",
+      "kinds": {
+        "create": "Plot and characters",
+        "avatar": "Avatar of {name}",
+        "asset": "Image {name}"
+      },
+      "status": {
+        "pending": "Waiting",
+        "running": "In progress",
+        "done": "Done",
+        "failed": "Failed"
+      },
+      "retry": "Retry failed items",
+      "back": "Back to preview",
+      "openStudio": "Open in studio",
+      "privateNotice": "Created as a private plot. To publish it, confirm your rights in the studio’s visibility settings.",
+      "savedCleared": "The saved copy for this site was cleared.",
+      "warningsSummary": "{count} things to check",
+      "preserved": "Text that did not come over",
+      "preservedHint": "Source text with no matching field here, or cut to fit a limit. It is not stored on the server, so download it if you need it.",
+      "preservedNone": "All text came over.",
+      "preservedDownload": "Download text (.txt)",
+      "clearSaved": "Clear saved copy"
+    },
+    "warnings": {
+      "truncated": "At {length, number} characters this is over our limit of {limit, number}, so it was cut at a sentence end. The cut text can be downloaded on the result screen.",
+      "tooMany": "Only {limit, number} of {count, number} come over. The rest can be downloaded on the result screen.",
+      "nameMissing": "A name is empty. Characters and profiles without a name are left out and their text is preserved.",
+      "noMembers": "There are no characters. A plot needs at least one.",
+      "placeholderName": "“{name}” appears {count, number} times. If it was copied from a public page where the reader’s name was replaced, change it to '{{user}}'.",
+      "speakerNotInRoster": "“{name}” is not one of the characters, so those lines read as narration.",
+      "povUnsupported": "Second person has no matching setting here, so no point of view is set.",
+      "loreNoKeys": "An entry without keywords never triggers. Add keywords, or make it “always included” in the studio.",
+      "loreInverted": "“Deactivate when found” has no counterpart here, so the entry comes over switched off.",
+      "loreGroupApprox": "Group priority comes over as an approximate weight; picks within a group may differ from the source.",
+      "loreDependencyDropped": "Lore dependencies have no counterpart here and are left out.",
+      "componentSubset": "A JSX component uses something outside what is supported: {violation}. It may not work until you fix it in the studio.",
+      "componentTooLong": "The JSX components are {length, number} characters, over the limit of {limit, number}, so they are left out. The text can be downloaded on the result screen.",
+      "adultOnly": "Adult-only works come over as private plots only, for now.",
+      "splitNoSections": "No “## name” blocks were found under “# 캐릭터”, so nothing was split into characters.",
+      "platformUnsupported": "This site cannot be moved from yet.",
+      "imageInstructionsStripped": "Elyn instructions to output images ('{{img::…}}') do not reach the model as written. The “image list” lore entry is switched on instead, so give each picture a description in the Images step."
+    }
   }
 }

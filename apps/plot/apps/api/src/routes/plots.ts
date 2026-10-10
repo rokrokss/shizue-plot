@@ -7,7 +7,10 @@ import {
   emptyCard,
   exportCardPng,
   exportCardV3,
+  MAX_CHARACTERS_PER_PLOT,
   MAX_INTRO_LENGTH,
+  MAX_INTRO_TEXT_LENGTH,
+  MAX_INTROS_PER_PLOT,
   parseCard,
   type CharxAssetFile,
   type ImportProvenance,
@@ -18,6 +21,13 @@ import {
   type PlotProfile,
   type PlotStyle,
 } from '@shizue/core';
+import {
+  draftFingerprint,
+  MIGRATION_PLATFORMS_ENABLED,
+  type MigrationDraft,
+  type MigrationPlatform,
+} from '@shizue/core/migrate';
+import { sourceUrlFor } from '@shizue/core/source-url';
 import { fromLorebookFile, LorebookFileError } from '@shizue/core/world-info';
 import {
   characters,
@@ -80,12 +90,6 @@ const LANGUAGES: ContentLanguage[] = ['ko', 'en', 'ja'];
  */
 const SAFETY_LEVELS: SafetyLevel[] = ['all'];
 
-/** Roster size. Ten is what one prompt can hold and one reader can keep straight. */
-export const MAX_CHARACTERS_PER_PLOT = 10;
-/** Openings a plot may offer; every one of them becomes a root of a new chat. */
-export const MAX_INTROS_PER_PLOT = 10;
-/** One opening's length — a prologue, not a chapter. */
-export const MAX_INTRO_TEXT_LENGTH = 4000;
 /**
  * One card file. A RisuRealm PNG carries its images inside and runs to about
  * 30MB, and a charx with the same images is larger still. The body limit
@@ -95,6 +99,8 @@ export const MAX_INTRO_TEXT_LENGTH = 4000;
 export const MAX_CARD_IMPORT_BYTES = 50 * 1024 * 1024;
 /** The upload's own name as the provenance keeps it; a multipart name has no cap of its own. */
 const MAX_IMPORT_FILE_NAME_LENGTH = 255;
+/** An uploaded asset's reference name (`name`), the one a pasted `{{img::name}}` is written in. */
+export const MAX_ASSET_NAME_LENGTH = 100;
 
 /**
  * What an import that would show someone else's characters to readers is
@@ -309,7 +315,8 @@ const toMemberJson = (member: Character) => ({
  */
 const toAssetJson = (asset: PlotAsset, owner = false) => ({
   slug: asset.slug,
-  // An imported card's own name for the image, which its references are written in.
+  // The source's own name for the image — an imported card's, or the one an
+  // upload sent — which its references are written in.
   name: asset.name,
   url: assetUrl(asset.plotId, asset.slug),
   mime: asset.mime,
@@ -495,6 +502,42 @@ function coerceSourceUrl(value: unknown): string | undefined {
   const id = typeof value === 'string' ? realmCardId(value) : null;
   if (!id) throw badRequest('invalid_request', 'sourceUrl must be a RisuRealm character page');
   return realmCharacterUrl(id);
+}
+
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
+
+/**
+ * The page a paste migration names as its source, in the one spelling its
+ * platform's rule stores (`@shizue/core/source-url`). Refused rather than
+ * dropped, as a card import's is; blank is no source at all.
+ */
+function coerceMigrationSourceUrl(platform: MigrationPlatform, value: unknown): string | undefined {
+  if (value === undefined || value === null || (typeof value === 'string' && !value.trim())) return undefined;
+  const url = typeof value === 'string' ? sourceUrlFor(platform, value) : null;
+  if (!url) throw badRequest('invalid_request', `sourceUrl must be a ${platform} character page`);
+  return url;
+}
+
+/**
+ * The roster a migration draft brings, each member made the way the studio's
+ * member create makes one (`coerceCard`) from the only fields a paste fills —
+ * nothing else on a card is the draft's to set.
+ */
+function coerceMigrationMembers(value: unknown): { name: string; card: NormalizedCard }[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw badRequest('invalid_request', 'draft.members must be a non-empty array');
+  }
+  if (value.length > MAX_CHARACTERS_PER_PLOT) {
+    throw badRequest('character_limit', `A plot holds at most ${MAX_CHARACTERS_PER_PLOT} characters`);
+  }
+  return value.map((member) => {
+    if (!isObject(member)) throw badRequest('invalid_request', 'draft.members must be objects');
+    const name = requireString(member, 'name').trim();
+    if (!name) throw badRequest('invalid_request', 'name must not be empty');
+    const { intro, description, personality, mesExample } = member;
+    return { name, card: coerceCard({ name, intro, description, personality, mesExample }, name) };
+  });
 }
 
 /**
@@ -705,6 +748,93 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     if (parsed.iconBuffer) await writeMemberAvatar(deps, member, parsed.iconBuffer);
     if (parsed.assets?.length) await storeImportedAssets(deps, plot.id, parsed.assets);
 
+    return c.json(await ownerView(deps, plot), 201);
+  });
+
+  /**
+   * A creator's own character moved over from another platform by pasting its
+   * fields (docs/KR-PASTE-MIGRATION-DESIGN.md). The browser maps the site's form
+   * onto one `MigrationDraft`; this writes it as a new plot and its roster in one
+   * transaction, so a draft refused half-way leaves nothing behind.
+   *
+   * The draft passes the coercers the create and the studio's member create use,
+   * so a pasted plot holds nothing a written one could not. The creator's word
+   * that the work is theirs and not held exclusively elsewhere comes first
+   * (`migration_unconfirmed`). Every member is stamped `imported_from`, so the
+   * publish asks for `rightsConfirmed` exactly as it does after a card import;
+   * the plot is private whatever the source rated it. The images follow through
+   * the ordinary avatar and asset uploads, against the ids the answer carries.
+   */
+  app.post('/migrate', requireUser, async (c) => {
+    const body = await readJsonBody(c);
+    const confirmations = body['confirmations'];
+    if (!isObject(confirmations) || confirmations['ownWork'] !== true || confirmations['notExclusive'] !== true) {
+      throw badRequest(
+        'migration_unconfirmed',
+        'confirmations.ownWork and confirmations.notExclusive must both be true',
+      );
+    }
+    const platform = body['platform'] as MigrationPlatform;
+    if (!MIGRATION_PLATFORMS_ENABLED.includes(platform)) {
+      throw badRequest('invalid_request', `platform must be one of ${MIGRATION_PLATFORMS_ENABLED.join(', ')}`);
+    }
+    const draft = body['draft'];
+    if (!isObject(draft) || draft['platform'] !== platform) {
+      throw badRequest('invalid_request', 'draft must be an object for the same platform');
+    }
+    const sourceUrl = coerceMigrationSourceUrl(platform, body['sourceUrl']);
+    const work = draft['plot'];
+    if (!isObject(work)) throw badRequest('invalid_request', 'draft.plot must be an object');
+    const name = requireString(work, 'name').trim();
+    if (!name) throw badRequest('invalid_request', 'name must not be empty');
+    const intros = coerceIntros(work);
+    const tags = coerceTags(work);
+    const narrator = optionalNarrator(work);
+    const style = optionalStyle(work);
+    const profiles = optionalProfiles(work);
+    const customUi = optionalCustomUi(work);
+    const values = {
+      ownerId: c.get('userId'),
+      name,
+      intro: coerceIntro(work) ?? '',
+      description: optionalString(work, 'description') ?? '',
+      ...(work['lorebook'] === undefined ? {} : { lorebook: coerceLorebook(work['lorebook']) }),
+      ...(intros !== undefined ? { intros } : {}),
+      ...(tags !== undefined ? { tags } : {}),
+      ...(narrator ? { narrator } : {}),
+      ...(style ? { style } : {}),
+      ...(profiles ? { profiles } : {}),
+      ...(customUi ? { customUi } : {}),
+    };
+    const members = coerceMigrationMembers(draft['members']);
+    const importedFrom: ImportProvenance = {
+      fileName: `${platform}-paste`,
+      // Of the draft as it arrived, not as coerced: it is the hash the browser
+      // computed before sending, and checked against `/api/imports/lookup`.
+      sha256: createHash('sha256')
+        .update(draftFingerprint(draft as unknown as MigrationDraft))
+        .digest('hex'),
+      ...(sourceUrl ? { sourceUrl } : {}),
+      importedAt: new Date().toISOString(),
+      platform,
+      method: 'paste',
+    };
+
+    // A new plot is private and nobody else knows its id, so the roster goes in
+    // whole: none of `insertMember`'s locking has anything to guard yet.
+    const plot = await deps.db.transaction(async (tx) => {
+      const [created] = await tx.insert(plots).values(values).returning();
+      await tx.insert(characters).values(
+        members.map((member, index) => ({
+          plotId: created!.id,
+          name: member.name,
+          card: member.card,
+          orderIndex: index,
+          importedFrom,
+        })),
+      );
+      return created!;
+    });
     return c.json(await ownerView(deps, plot), 201);
   });
 
@@ -1249,6 +1379,13 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     const slug = normalizeSlug(String(form.get('slug') ?? ''));
     if (!slug) throw badRequest('invalid_asset', 'slug must contain at least one of [a-z0-9-_]');
     const preview = coerceAssetPreview(form.get('width'), form.get('height'), form.get('thumbhash'));
+    // The name the source wrote its references in (a paste migration's
+    // `{{img::웃음}}`), which the resolver reads beside the slug. Refused rather
+    // than cut: a shortened name is a reference that silently stops resolving.
+    const name = String(form.get('name') ?? '').trim() || null;
+    if (name && name.length > MAX_ASSET_NAME_LENGTH) {
+      throw badRequest('invalid_asset', `name must be at most ${MAX_ASSET_NAME_LENGTH} characters`);
+    }
 
     const assetId = randomUUID();
     const bytes = new Uint8Array(await file.arrayBuffer());
@@ -1288,11 +1425,13 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       };
       const [row] = await tx
         .insert(plotAssets)
-        .values({ id: assetId, plotId: id, slug, path: stored.key, mime: stored.mime, ...measured })
+        .values({ id: assetId, plotId: id, slug, name, path: stored.key, mime: stored.mime, ...measured })
         .onConflictDoUpdate({
           target: [plotAssets.plotId, plotAssets.slug],
           // createdAt stays put: a replaced image keeps its place in the grid.
-          set: { path: stored.key, mime: stored.mime, ...measured },
+          // The name is not the bytes' — an imported card's references are
+          // written in it — so a replacement that sends none keeps the old one.
+          set: { path: stored.key, mime: stored.mime, ...measured, ...(name ? { name } : {}) },
         })
         .returning();
       return { asset: row!, replaced: existing?.path };

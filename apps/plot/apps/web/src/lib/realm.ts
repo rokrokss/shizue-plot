@@ -10,41 +10,14 @@
  * Failures are `ApiError`s with status 0 and a code of their own, so the forms
  * translate them from the `errors` catalogue the way they do the API's.
  */
+import { realmCardId, realmCharacterUrl } from '@shizue/core/source-url';
 import { ApiError } from './api';
 import { MAX_CARD_IMPORT_BYTES } from './types';
 
 export const REALM_ORIGIN = 'https://realm.risuai.net';
 
-/** Realm card ids are UUIDs; apps/api/src/realm.ts reads the same shapes. */
-const REALM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/** The one spelling a card page is stored in. */
-export const realmCharacterUrl = (id: string): string => `${REALM_ORIGIN}/character/${id}`;
-
-/**
- * The card id in `https://realm.risuai.net/character/<id>`,
- * `https://risuai.xyz/?realm=<id>` or a bare id; null for anything else.
- */
-export function realmCardId(input: string): string | null {
-  const value = input.trim();
-  if (REALM_ID.test(value)) return value;
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return null;
-  }
-  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
-  if (url.hostname === 'realm.risuai.net') {
-    const id = /^\/character\/([^/]+)\/?$/.exec(url.pathname)?.[1];
-    return id && REALM_ID.test(id) ? id : null;
-  }
-  if (url.hostname === 'risuai.xyz' || url.hostname === 'www.risuai.xyz') {
-    const id = url.searchParams.get('realm');
-    return id && REALM_ID.test(id) ? id : null;
-  }
-  return null;
-}
+// The page shapes are shared with the API through `@shizue/core/source-url`.
+export { realmCardId, realmCharacterUrl };
 
 const failure = (code: string, message: string): ApiError => new ApiError(0, code, message);
 

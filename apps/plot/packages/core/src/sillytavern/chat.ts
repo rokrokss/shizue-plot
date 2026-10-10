@@ -13,6 +13,7 @@
  * comments, tool calls) are left out.
  */
 
+import { spokenBy } from '../speech.js';
 import type { ImportedChatMessage } from '../types.js';
 
 export interface StCast {
@@ -109,12 +110,6 @@ export function parseSillyTavernDate(value: unknown): string | undefined {
   return undefined;
 }
 
-/** A speaker prefix the speech parser would read as this name (`SPEAKER_RE` in `speech.ts`). */
-function startsAs(line: string, name: string): boolean {
-  const match = /^([^:\n]{1,40}):/.exec(line);
-  return match !== null && match[1]!.trim() === name;
-}
-
 /** The roster name a character message is attributed to (see `convertSillyTavernChat`). */
 function speakerOf(cast: StCast, avatar: unknown, name: string): string | undefined {
   const member =
@@ -123,13 +118,6 @@ function speakerOf(cast: StCast, avatar: unknown, name: string): string | undefi
     (cast.members.length === 1 ? cast.members[0] : undefined);
   return member?.name.trim() || undefined;
 }
-
-/** Every line with text becomes the speaker's; blank lines stay as spacing. */
-const spokenBy = (text: string, name: string): string =>
-  text
-    .split('\n')
-    .map((line) => (!line.trim() || startsAs(line, name) ? line : `${name}: ${line}`))
-    .join('\n');
 
 /**
  * The versions a message carries: its swipes when it has any, else its text.

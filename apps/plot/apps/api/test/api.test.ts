@@ -19,12 +19,16 @@ import {
   IMAGE_ATTACHED_PLACEHOLDER,
   loreEntryKey,
   MAX_ASSETS,
+  MAX_CHARACTERS_PER_PLOT,
+  MAX_INTRO_TEXT_LENGTH,
+  MAX_INTROS_PER_PLOT,
   parseCard,
   placeholderPng,
   PRESET_IDS,
   readPngTextChunks,
   stripPngTextChunks,
 } from '@shizue/core';
+import { draftFingerprint, MIGRATION_PLATFORMS_ENABLED, type MigrationDraft } from '@shizue/core/migrate';
 import { toWorldInfo } from '@shizue/core/world-info';
 import { ChatExportSchema } from '@shizue/contracts';
 import {
@@ -96,12 +100,7 @@ import {
 } from '../src/jobs.js';
 import { BACKFILL_CHUNKS_PER_RUN } from '../src/memory.js';
 import { createJobHandlers, notificationFanout } from '../src/notifications.js';
-import {
-  MAX_CARD_IMPORT_BYTES,
-  MAX_CHARACTERS_PER_PLOT,
-  MAX_INTRO_TEXT_LENGTH,
-  MAX_INTROS_PER_PLOT,
-} from '../src/routes/plots.js';
+import { MAX_ASSET_NAME_LENGTH, MAX_CARD_IMPORT_BYTES } from '../src/routes/plots.js';
 import { createLocalStorage, type ObjectStorage } from '../src/storage.js';
 import { connectS3Server } from './s3Server.js';
 
@@ -1637,6 +1636,220 @@ describe('import provenance and publishing rights', () => {
     expect(over.status).toBe(413);
     expect((await readJson(over)).code).toBe('payload_too_large');
     expect(await readJson(await request(cookie, '/api/plots'))).toHaveLength(1);
+  });
+});
+
+describe('paste migration', () => {
+  const zetaId = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
+  const zetaUrl = `https://zeta-ai.io/ko/plots/${zetaId}/profile`;
+  const confirmations = { ownWork: true, notExclusive: true };
+  const fingerprintHash = (draft: unknown): string =>
+    createHash('sha256').update(draftFingerprint(draft as MigrationDraft)).digest('hex');
+
+  /**
+   * What the Zeta mapper hands over: already in our protocol and inside our
+   * limits. A tag and a name keep the whitespace the coercers trim, so a hash of
+   * the coerced draft would not be the hash of this one.
+   */
+  const zetaDraft = (
+    plot: Record<string, unknown> = {},
+    members: unknown[] = [
+      {
+        name: ' 세라 ',
+        intro: '서점 주인.',
+        description: '말수가 적다.',
+        personality: '차분함',
+        mesExample: '<START>\n{{user}}: 안녕\n세라: 어서 오세요.',
+      },
+      { name: '윤', description: '단골 손님.' },
+    ],
+  ): any => ({
+    platform: 'zeta',
+    plot: {
+      name: '비 오는 서점',
+      intro: '비가 그치지 않는 서점의 이야기.',
+      description: '서점은 자정에만 열린다.',
+      tags: [' 로맨스 ', '판타지'],
+      intros: ['세라: "어서 오세요."\n종이 울린다.'],
+      lorebook: [{ keys: ['자정'], content: '자정이 지나면 책이 말을 한다.' }],
+      narrator: { pov: 'third' },
+      style: { tense: 'past' },
+      profiles: [{ name: '단골', description: '매주 오는 손님' }],
+      ...plot,
+    },
+    members,
+  });
+
+  const migrate = (cookie: string | undefined, body: Record<string, unknown>): Promise<Response> =>
+    json(cookie, '/api/plots/migrate', 'POST', { platform: 'zeta', confirmations, draft: zetaDraft(), ...body });
+
+  async function refused(cookie: string, body: Record<string, unknown>, status = 400): Promise<string> {
+    const res = await migrate(cookie, body);
+    expect(res.status, JSON.stringify(body).slice(0, 200)).toBe(status);
+    return (await readJson(res)).code;
+  }
+
+  it('creates a private plot with its roster in order, every member recording the paste', async () => {
+    const cookie = await signUp('migrate@example.com');
+    const draft = zetaDraft();
+    const before = Date.now();
+    const res = await migrate(cookie, { draft, sourceUrl: `https://zeta-ai.io/en/plots/${zetaId}/profile` });
+    expect(res.status, await res.clone().text()).toBe(201);
+    const plot = await readJson(res);
+
+    // The owner view a create answers, made private whatever the source rated it.
+    expect(plot).toMatchObject({
+      name: '비 오는 서점',
+      intro: '비가 그치지 않는 서점의 이야기.',
+      description: '서점은 자정에만 열린다.',
+      tags: ['로맨스', '판타지'],
+      intros: ['세라: "어서 오세요."\n종이 울린다.'],
+      narrator: { pov: 'third' },
+      style: { tense: 'past' },
+      visibility: 'private',
+      safetyLevel: 'all',
+      publishedAt: null,
+      rightsConfirmedAt: null,
+    });
+    expect(plot.lorebook).toMatchObject([{ keys: ['자정'], content: '자정이 지나면 책이 말을 한다.', enabled: true }]);
+    expect(plot.profiles).toMatchObject([{ id: expect.any(String), name: '단골', description: '매주 오는 손님' }]);
+
+    // The members, in the draft's order, with the ids the avatar uploads go to.
+    expect(plot.characters.map((member: any) => [member.name, member.orderIndex])).toEqual([
+      ['세라', 0],
+      ['윤', 1],
+    ]);
+    for (const member of plot.characters) expect(member.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(plot.characters[0].card).toMatchObject({
+      name: '세라',
+      intro: '서점 주인.',
+      description: '말수가 적다.',
+      personality: '차분함',
+      mesExample: '<START>\n{{user}}: 안녕\n세라: 어서 오세요.',
+      systemPrompt: '',
+    });
+    expect(plot.characters[1].card.intro).toBeUndefined();
+
+    // One record for the whole paste, its page in the platform's one spelling.
+    for (const member of plot.characters) {
+      expect(member.importedFrom).toEqual({
+        fileName: 'zeta-paste',
+        sha256: fingerprintHash(draft),
+        sourceUrl: zetaUrl,
+        importedAt: expect.any(String),
+        platform: 'zeta',
+        method: 'paste',
+      });
+    }
+    expect(Date.parse(plot.characters[0].importedFrom.importedAt)).toBeGreaterThanOrEqual(before - 1000);
+    expect(await readPlot(cookie, plot.id)).toEqual(plot);
+
+    // A page is optional, and blank is none.
+    const bare = await readJson(await migrate(cookie, { sourceUrl: ' ' }));
+    expect(bare.characters[0].importedFrom.sourceUrl).toBeUndefined();
+  });
+
+  it('finds a migrated draft by the fingerprint the browser computes, for its owner only', async () => {
+    const alice = await signUp('migrate-lookup@example.com');
+    const bob = await signUp('migrate-lookup-other@example.com');
+    const draft = zetaDraft();
+    const plot = await readJson(await migrate(alice, { draft }));
+    const sha256 = fingerprintHash(draft);
+
+    const found = await readJson(await json(alice, '/api/imports/lookup', 'POST', { sha256: [sha256] }));
+    // One hit per member: the web reads them by plot.
+    expect(found.characters).toEqual(
+      plot.characters.map((member: any) => ({ sha256, plotId: plot.id, characterId: member.id })),
+    );
+    expect(await readJson(await json(bob, '/api/imports/lookup', 'POST', { sha256: [sha256] }))).toEqual({
+      characters: [],
+      chats: [],
+    });
+    // A different draft is a different fingerprint.
+    const other = fingerprintHash(zetaDraft({ name: '다른 서점' }));
+    expect((await readJson(await json(alice, '/api/imports/lookup', 'POST', { sha256: [other] }))).characters).toEqual([]);
+  });
+
+  it('publishes a migrated plot only on the owner’s word, as an imported card', async () => {
+    const cookie = await signUp('migrate-rights@example.com');
+    const plot = await readJson(await migrate(cookie, {}));
+    const path = `/api/plots/${plot.id}/publish`;
+
+    const refused = await json(cookie, path, 'POST', { publish: true });
+    expect(refused.status).toBe(409);
+    expect((await readJson(refused)).code).toBe('rights_unconfirmed');
+    expect((await readPlot(cookie, plot.id)).visibility).toBe('private');
+
+    const published = await publishPlot(cookie, plot.id, { rightsConfirmed: true });
+    expect(published.visibility).toBe('public');
+    expect(published.rightsConfirmedAt).not.toBeNull();
+  });
+
+  it('asks the creator’s word before anything else, and refuses a platform it does not take', async () => {
+    const cookie = await signUp('migrate-refusals@example.com');
+    for (const answer of [
+      undefined,
+      null,
+      {},
+      { ownWork: true },
+      { ownWork: true, notExclusive: false },
+      { ownWork: 'true', notExclusive: true },
+    ]) {
+      expect(await refused(cookie, { confirmations: answer, platform: 'nope' })).toBe('migration_unconfirmed');
+    }
+
+    const disabled = (['zeta', 'elyn', 'caveduck', 'babechat', 'crack'] as const).filter(
+      (platform) => !MIGRATION_PLATFORMS_ENABLED.includes(platform),
+    );
+    for (const platform of [undefined, 'nope', 42, ...disabled]) {
+      const draft = { ...zetaDraft(), platform };
+      expect(await refused(cookie, { platform, draft })).toBe('invalid_request');
+    }
+    // The draft must be for the platform the request names.
+    expect(await refused(cookie, { platform: 'elyn' })).toBe('invalid_request');
+    expect(await refused(cookie, { draft: 'zeta' })).toBe('invalid_request');
+
+    // A page that is not the platform's is refused, not dropped.
+    for (const sourceUrl of [
+      'https://example.com/',
+      `https://zeta-ai.io/ko/plots/not-an-id/profile`,
+      `https://caveduck.io/ko/characters/${zetaId}`,
+      42,
+    ]) {
+      expect(await refused(cookie, { sourceUrl })).toBe('invalid_request');
+    }
+    expect((await json(undefined, '/api/plots/migrate', 'POST', {})).status).toBe(401);
+    expect(await readJson(await request(cookie, '/api/plots'))).toEqual([]);
+  });
+
+  it('holds a draft to the limits the studio holds, and writes nothing it refuses', async () => {
+    const cookie = await signUp('migrate-limits@example.com');
+    const member = (name: string, extra: Record<string, unknown> = {}) => ({ name, description: '설명', ...extra });
+
+    const tooMany = Array.from({ length: MAX_CHARACTERS_PER_PLOT + 1 }, (_, i) => member(`인물${i}`));
+    expect(await refused(cookie, { draft: zetaDraft({}, tooMany) })).toBe('character_limit');
+    for (const members of [[], [member('')], [{ description: '이름 없음' }], ['세라']]) {
+      expect(await refused(cookie, { draft: zetaDraft({}, members) })).toBe('invalid_request');
+    }
+    expect(await refused(cookie, { draft: zetaDraft({}, [member('세라', { intro: '가'.repeat(501) })]) })).toBe(
+      'invalid_request',
+    );
+    for (const plot of [{ name: ' ' }, { intro: '가'.repeat(501) }, { tags: '로맨스' }, { description: 3 }, { style: 'noir' }]) {
+      expect(await refused(cookie, { draft: zetaDraft(plot) })).toBe('invalid_request');
+    }
+    for (const plot of [
+      { intros: Array.from({ length: MAX_INTROS_PER_PLOT + 1 }, () => '안녕') },
+      { intros: ['가'.repeat(MAX_INTRO_TEXT_LENGTH + 1)] },
+    ]) {
+      expect(await refused(cookie, { draft: zetaDraft(plot) })).toBe('intro_limit');
+    }
+    expect(await readJson(await request(cookie, '/api/plots'))).toEqual([]);
+
+    // Up to the cap is a plot.
+    const full = Array.from({ length: MAX_CHARACTERS_PER_PLOT }, (_, i) => member(`인물${i}`));
+    const created = await migrate(cookie, { draft: zetaDraft({}, full) });
+    expect(created.status, await created.clone().text()).toBe(201);
+    expect((await readJson(created)).characters).toHaveLength(MAX_CHARACTERS_PER_PLOT);
   });
 });
 
@@ -5905,6 +6118,23 @@ describe('chat export', () => {
     expect(payload.messages[1].text).toBe('{{img::smile}} 웃는다');
   });
 
+  it('resolves a reference written in the name an asset was uploaded under', async () => {
+    const cookie = await signUp('export-asset-name@example.com');
+    const { plotId, chatId } = await setupChat(cookie);
+    // What a paste migration does: the slug is ours, the name is the source's.
+    const form = new FormData();
+    form.append('file', new File([Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1])], 'smile.gif'));
+    form.append('slug', 'x1');
+    form.append('name', '웃음');
+    const uploaded = await request(cookie, `/api/plots/${plotId}/assets`, 'POST', form);
+    expect(uploaded.status, await uploaded.clone().text()).toBe(201);
+    await seedPath(chatId, [{ role: 'assistant', content: '문 앞이다 {{img::웃음}}' }]);
+
+    expect((await exportOf(cookie, chatId)).assets).toEqual([
+      { slug: 'x1', url: `/api/plots/${plotId}/assets/x1`, mime: 'image/gif' },
+    ]);
+  });
+
   it('lists the variable fold only where it moved, on the branch that is current', async () => {
     const cookie = await signUp('export-variables@example.com');
     const plot = await createPlot(cookie, {
@@ -9546,6 +9776,35 @@ describe('plot assets', () => {
     const fileless = await request(cookie, `/api/plots/${plot.id}/assets`, 'POST', noFile);
     expect(fileless.status).toBe(400);
     expect((await readJson(fileless)).code).toBe('invalid_request');
+  });
+
+  it('keeps the reference name an upload sends, through replacements that send none', async () => {
+    const cookie = await signUp('asset-name@example.com');
+    const plot = await newPlot(cookie);
+    const named = (name: string) => ({ name });
+
+    // A Korean name has no slug, so it travels beside one.
+    const created = await readJson(await upload(cookie, plot.id, 'x1', gif(1), true, named('  웃음 ')));
+    expect(created).toMatchObject({ slug: 'x1', name: '웃음' });
+    // A replacement that names the image renames it…
+    expect(await readJson(await upload(cookie, plot.id, 'x1', gif(2), true, named('미소')))).toMatchObject({
+      name: '미소',
+    });
+    // …and one that does not — the studio's own re-upload — leaves the name alone,
+    // since references written in it would otherwise stop resolving. Blank is none.
+    expect((await readJson(await upload(cookie, plot.id, 'x1', gif(3)))).name).toBe('미소');
+    expect((await readJson(await upload(cookie, plot.id, 'x1', gif(4), true, named(' ')))).name).toBe('미소');
+
+    // Refused rather than cut, and refused before anything is written.
+    const tooLong = await upload(cookie, plot.id, 'x2', gif(5), true, named('가'.repeat(MAX_ASSET_NAME_LENGTH + 1)));
+    expect(tooLong.status).toBe(400);
+    expect((await readJson(tooLong)).code).toBe('invalid_asset');
+    const longest = await upload(cookie, plot.id, 'x2', gif(5), true, named('가'.repeat(MAX_ASSET_NAME_LENGTH)));
+    expect(longest.status, await longest.clone().text()).toBe(201);
+    expect((await listAssets(cookie, plot.id)).map((asset: any) => [asset.slug, asset.name])).toEqual([
+      ['x1', '미소'],
+      ['x2', '가'.repeat(MAX_ASSET_NAME_LENGTH)],
+    ]);
   });
 
   it(`caps a plot at ${MAX_ASSETS_PER_PLOT} assets while still allowing replacements`, async () => {

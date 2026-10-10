@@ -53,6 +53,14 @@
     "./sillytavern": {
       "types": "./dist/sillytavern/index.d.ts",
       "default": "./dist/sillytavern/index.js"
+    },
+    "./migrate": {
+      "types": "./dist/migrate/index.d.ts",
+      "default": "./dist/migrate/index.js"
+    },
+    "./source-url": {
+      "types": "./dist/sourceUrl.d.ts",
+      "default": "./dist/sourceUrl.js"
     }
   },
   "files": [
