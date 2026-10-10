@@ -367,6 +367,10 @@ export interface ImportProvenance {
   sourceUrl?: string;
   /** ISO 8601. */
   importedAt: string;
+  /** The platform it came from, when it was not a card file (`zeta`, `elyn`, …). */
+  platform?: string;
+  /** How it arrived. Absent means a card file, which is what every older row is. */
+  method?: 'file' | 'url' | 'backup' | 'paste';
 }
 
 /**
