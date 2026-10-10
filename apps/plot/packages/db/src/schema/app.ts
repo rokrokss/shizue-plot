@@ -36,7 +36,7 @@ export type ContentLanguage = 'ko' | 'en' | 'ja';
  */
 export type SafetyLevel = 'all' | 'adult';
 export type NotificationKind = 'plot_published';
-export type JobKind = 'notification_fanout';
+export type JobKind = 'notification_fanout' | 'memory_backfill';
 export type JobStatus = 'pending' | 'done' | 'failed';
 
 /** The publication event and the follower cutoff captured in its transaction. */
@@ -46,6 +46,10 @@ export interface JobPayloadMap {
     plotId: string;
     actorId: string;
     publishedAt: string;
+  };
+  /** Folds an imported chat's history into its rolling summary, a chunk per call. */
+  memory_backfill: {
+    chatId: string;
   };
 }
 export type JobPayload = JobPayloadMap[JobKind];
@@ -432,6 +436,13 @@ export const chats = pgTable(
     // instances see the same answer; the stream renews it while it runs, and a
     // claim nobody has renewed for two minutes is taken over rather than trusted.
     generatingAt: timestamp('generating_at', { withTimezone: true }),
+    // Set when the conversation came from another app's chat file (SillyTavern's
+    // JSONL), null when it was started here. The hash is what a second run of the
+    // same import recognizes it by.
+    importedFrom: jsonb('imported_from').$type<ImportProvenance>(),
+    // True while an import is still writing the history in batches. Nothing but
+    // the import may write to the chat until it is finished.
+    importing: boolean('importing').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

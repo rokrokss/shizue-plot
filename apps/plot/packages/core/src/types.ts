@@ -369,6 +369,23 @@ export interface ImportProvenance {
   importedAt: string;
 }
 
+/**
+ * One message of a conversation brought over from another app, as the chat
+ * import takes it. The source's alternatives (SillyTavern's swipes) come along
+ * as `versions`, and the conversation goes on from the `selected` one — the rest
+ * become siblings the reader can still swipe to. The text is already in our
+ * speech protocol: the importer, not the server, knows who said what.
+ */
+export interface ImportedChatMessage {
+  role: 'user' | 'assistant';
+  /** At least one. */
+  versions: string[];
+  /** Index into `versions`. */
+  selected: number;
+  /** ISO 8601, when the source recorded a time it could be read from. */
+  createdAt?: string;
+}
+
 export const DEFAULT_LORE_SETTINGS: LoreSettings = {
   scanDepth: 4,
   tokenBudget: 2048,
