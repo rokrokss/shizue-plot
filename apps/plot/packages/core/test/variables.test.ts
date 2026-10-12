@@ -82,6 +82,102 @@ describe('computeVariables', () => {
   });
 });
 
+describe('computeVariables with macros nested in a value', () => {
+  it('evaluates the value against the variables the branch holds at that point', () => {
+    expect(computeVariables(['{{setvar::hp::10}}', '{{setvar::hp::{{calc::{{getvar::hp}}-3}}}}'])).toEqual({
+      hp: '7',
+    });
+    expect(computeVariables(['{{setvar::hp::{{? $hp - 3}}}}'], { hp: '10' })).toEqual({ hp: '7' });
+    expect(
+      computeVariables(['{{setvar::total::{{sum::{{getvar::a}}::{{getvar::b}}}}}}'], { a: '2', b: '0.5' }),
+    ).toEqual({ a: '2', b: '0.5', total: '2.5' });
+    expect(computeVariables(['{{setvar::low::{{less::{{getvar::hp}}::5}}}}'], { hp: '3' })).toEqual({
+      hp: '3',
+      low: '1',
+    });
+  });
+
+  it('sees what an earlier macro of the same message set', () => {
+    expect(computeVariables(['{{setvar::hp::10}} 그리고 {{setvar::hp::{{? $hp * 2}}}}'])).toEqual({ hp: '20' });
+    expect(computeVariables(['{{setvar::a::1}}{{setvar::b::{{getvar::a}}}}{{setvar::a::2}}'])).toEqual({
+      a: '2',
+      b: '1',
+    });
+  });
+
+  it('evaluates a nested delta, and a nested key', () => {
+    expect(computeVariables(['{{addvar::hp::{{getvar::damage}}}}'], { hp: '10', damage: '-4' })).toEqual({
+      hp: '6',
+      damage: '-4',
+    });
+    expect(computeVariables(['{{incvar::{{getvar::target}}}}'], { target: 'gold' })).toEqual({
+      target: 'gold',
+      gold: '1',
+    });
+  });
+
+  it('reads an unset variable as empty', () => {
+    expect(computeVariables(['{{setvar::name::[{{getvar::nobody}}]}}'])).toEqual({ name: '[]' });
+  });
+
+  it('stores a macro it does not know as written, as RisuAI does', () => {
+    expect(computeVariables(['{{setvar::greeting::{{user}}님, {{getvar::hp}}}}'], { hp: '5' })).toEqual({
+      hp: '5',
+      greeting: '{{user}}님, 5',
+    });
+  });
+
+  it('folds onto a map that was already folded the same way it folds the whole branch', () => {
+    const branch = ['{{setvar::hp::50}}', '{{setvar::hp::{{calc::{{getvar::hp}}-10}}}}', '{{addvar::hp::{{getvar::hp}}}}'];
+    const wholesale = computeVariables(branch);
+    expect(computeVariables(branch.slice(1), computeVariables(branch.slice(0, 1)))).toEqual(wholesale);
+    expect(wholesale).toEqual({ hp: '80' });
+  });
+
+  it('takes a name that belongs to Object.prototype through a nested value too', () => {
+    const variables = computeVariables(['{{setvar::constructor::{{getvar::toString}}!}}'], { toString: '가치' });
+    expect(readVariable(variables, 'constructor')).toBe('가치!');
+  });
+
+  it('rolls the same way every time the branch is replayed', () => {
+    const branch = ['{{setvar::mood::{{random::기쁨::슬픔::분노::평온}}}} {{setvar::dice::{{roll::d20}}}}'];
+    const first = computeVariables(branch);
+    expect(['기쁨', '슬픔', '분노', '평온']).toContain(first['mood']);
+    expect(Number(first['dice'])).toBeGreaterThanOrEqual(1);
+    for (let i = 0; i < 5; i += 1) expect(computeVariables(branch)).toEqual(first);
+  });
+
+  it('stops a value that keeps doubling instead of taking the chat down with it', () => {
+    const doubling = '{{setvar::x::{{getvar::x}}{{getvar::x}}}}';
+    const branch = ['{{setvar::x::ab}}', ...Array.from({ length: 40 }, () => doubling), '{{setvar::done::1}}'];
+    const variables = computeVariables(branch);
+    expect(variables['x']!.length).toBeLessThanOrEqual(100_000);
+    expect(variables['x']!.length).toBeGreaterThan(50_000);
+    expect(variables['done']).toBe('1');
+  });
+});
+
+describe('computeVariables inside a block', () => {
+  it('runs only the branch the condition takes', () => {
+    const branch = ['{{#if {{? $hp < 5}}}}{{setvar::state::위험}}{{:else}}{{setvar::state::안정}}{{/if}}'];
+    expect(computeVariables(branch, { hp: '3' })['state']).toBe('위험');
+    expect(computeVariables(branch, { hp: '10' })['state']).toBe('안정');
+  });
+
+  it('decides the condition with what the same message set before it', () => {
+    expect(
+      computeVariables(['{{setvar::hp::0}}{{#if {{equal::{{getvar::hp}}::0}}}}{{setvar::dead::1}}{{/if}}']),
+    ).toEqual({ hp: '0', dead: '1' });
+  });
+
+  it('reads RisuAI #when and SillyTavern if the same way', () => {
+    const routes = '{{#when::route::vis::1}}{{setvar::hp::10}}{{/when}}{{#when::route::vis::6}}{{setvar::hp::60}}{{/when}}';
+    expect(computeVariables([routes], { route: '6' })['hp']).toBe('60');
+    expect(computeVariables(['{{if .flag}}{{incvar::n}}{{else}}{{decvar::n}}{{/if}}'], { flag: '1' })['n']).toBe('1');
+    expect(computeVariables(['{{if .flag}}{{incvar::n}}{{else}}{{decvar::n}}{{/if}}'])['n']).toBe('-1');
+  });
+});
+
 describe('names that belong to Object.prototype', () => {
   /**
    * Every one of these arrives in practice — a model writes `{{setvar::state::…}}`
@@ -159,6 +255,29 @@ describe('stripVariableMacros', () => {
 
   it('drops incvar and decvar too, and leaves one it would not fold', () => {
     expect(stripVariableMacros('앞{{incvar::n}}{{ DecVar :: n }}뒤 {{incvar::n::5}}')).toBe('앞뒤 {{incvar::n::5}}');
+  });
+
+  it('drops one with a nested value whole, and nothing around it', () => {
+    expect(stripVariableMacros('앞 {{setvar::hp::{{calc::{{getvar::hp}}-3}}}} 뒤 {{getvar::hp}}}}')).toBe(
+      '앞  뒤 {{getvar::hp}}}}',
+    );
+  });
+
+  it('drops one in either branch of a block, and leaves the block', () => {
+    expect(stripVariableMacros('{{#if {{getvar::x}}}}가{{setvar::x::1}}{{:else}}나{{addvar::y::2}}{{/if}}')).toBe(
+      '{{#if {{getvar::x}}}}가{{:else}}나{{/if}}',
+    );
+  });
+
+  it('reads a name and its arguments the way the fold does, so the two always agree', () => {
+    // The evaluator's reading: case, `_` and spaces ignored, and `:` separating
+    // where the author never wrote `::`.
+    expect(computeVariables(['{{SET_VAR:hp:3}}'])).toEqual({ hp: '3' });
+    expect(stripVariableMacros('앞{{SET_VAR:hp:3}}뒤')).toBe('앞뒤');
+  });
+
+  it('leaves one that was never closed as written', () => {
+    expect(stripVariableMacros('앞 {{setvar::x::{{getvar::y}} 뒤')).toBe('앞 {{setvar::x::{{getvar::y}} 뒤');
   });
 });
 

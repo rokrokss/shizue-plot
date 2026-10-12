@@ -9,7 +9,9 @@ import { extensionsWithCustomUi } from './risu.js';
 
 /**
  * depth/role have no V3 field of their own, so they go back out as decorators,
- * and so does a sticky or cooldown long enough to be the "after match" ones.
+ * and so does a sticky or cooldown long enough to be the "after match" ones. A
+ * switched-off entry says so as `@@dont_activate` too: RisuAI lore has no
+ * `enabled`, so that line is the only off switch it reads.
  */
 function toContent(entry: LoreEntry): string {
   const decorators: string[] = [];
@@ -19,6 +21,7 @@ function toContent(entry: LoreEntry): string {
   }
   if ((entry.sticky ?? 0) >= FOREVER_MESSAGES) decorators.push('@@keep_activate_after_match');
   if ((entry.cooldown ?? 0) >= FOREVER_MESSAGES) decorators.push('@@dont_activate_after_match');
+  if (!entry.enabled) decorators.push('@@dont_activate');
   return decorators.length > 0 ? `${decorators.join('\n')}\n${entry.content}` : entry.content;
 }
 

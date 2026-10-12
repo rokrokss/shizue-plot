@@ -96,7 +96,7 @@ const URL_FORBIDDEN_ENCODED = /%(?:5c|2f|00|09|0a|0d|7f)/i;
  * `%5c` once decoded and `htt\np:` once whitespace is stripped. Those spellings
  * are refused outright, and whatever survives is resolved and compared.
  */
-function isSameOriginUrl(raw: string): boolean {
+export function isSameOriginUrl(raw: string): boolean {
   const value = raw.trim();
   if (!value || URL_FORBIDDEN_CHARS.test(value) || URL_FORBIDDEN_ENCODED.test(value)) return false;
   // No document means no origin to be same as — and no way to sanitize at all.

@@ -1,8 +1,8 @@
 import { extractChoices } from './choices.js';
-import { applyMacros, type MacroClock, type MacroContext } from './macro.js';
+import { applyMacros, stripInlayMacros, type MacroClock, type MacroContext } from './macro.js';
 import { activateLore, loreEntryKey, type LoreActivationVia, type LoreTimedState } from './lorebook.js';
 import { isNarration, narrationBody } from './narration.js';
-import { DEFAULT_PRESET, type Preset } from './presets.js';
+import { DEFAULT_PRESET, SPEECH_PROTOCOL, SPEECH_PROTOCOL_REMINDER, type Preset } from './presets.js';
 import { extractStatusBlock } from './statusBlock.js';
 import { countTokens } from './tokens.js';
 import {
@@ -448,10 +448,19 @@ export function styleDirectives(style: PlotStyle): string {
   return [STYLE_DIRECTIVES_HEADER, ...lines.map((line) => `- ${line}`)].join('\n');
 }
 
-/** Applies an override that may re-inject the preset through {{original}}. */
-function resolveOverride(override: string, presetText: string, macro: MacroContext): string {
+/**
+ * Applies an override that may re-inject the preset through {{original}}.
+ *
+ * A card's own instructions were written for some other app's chat, which knows
+ * nothing of the `이름: ` lines `speech.ts` reads a reply by — and RisuAI itself
+ * sets the system prompt aside whenever a prompt template is in use. So the
+ * preset's speech protocol outlives the override: one that did not bring the
+ * preset back through {{original}} gets the protocol appended.
+ */
+function resolveOverride(override: string, presetText: string, macro: MacroContext, protocol: string): string {
   if (!override.trim()) return presetText;
-  return applyMacros(override, { ...macro, original: presetText });
+  const resolved = applyMacros(override, { ...macro, original: presetText });
+  return presetText.includes(protocol) && !resolved.includes(protocol) ? `${resolved}\n\n${protocol}` : resolved;
 }
 
 /**
@@ -526,7 +535,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const absentNames = characters.filter((member) => member.absent).map((member) => member.name);
 
   // 1. main system prompt
-  const main = resolveOverride(first?.card.systemPrompt ?? '', expand(preset.main), firstMacro);
+  const main = resolveOverride(first?.card.systemPrompt ?? '', expand(preset.main), firstMacro, SPEECH_PROTOCOL);
 
   // 2/4. lorebook — the plot's entries and every member's, activated as one book
   // against the last scanDepth messages. The sort inside `activateLore` is stable,
@@ -673,6 +682,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     first?.card.postHistoryInstructions ?? '',
     expand(preset.postHistory),
     firstMacro,
+    SPEECH_PROTOCOL_REMINDER,
   );
 
   // Everything that is never evicted is charged up front. Depth lore is charged
@@ -705,7 +715,9 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     // model's — but it is labelled, so the model reads it as the scene moving
     // rather than as someone acting. The prefix never reaches the model.
     const raw = isNarration(said) ? `${NARRATION_HEADER} ${narrationBody(said)}`.trim() : said;
-    const text = expand(raw);
+    // A turn's inlays name pictures in someone's own RisuAI storage; RisuAI takes
+    // them out of the turns it sends, and so does this.
+    const text = expand(stripInlayMacros(raw));
     const images = turn.images ?? [];
     const cost = countTokens(text) + images.length * IMAGE_TOKEN_ESTIMATE;
     if (cost > available && historyMessages.length > 0) break;

@@ -9,9 +9,14 @@
  *
  * `in` is the bare regular expression source. `flag` carries the regex flags with
  * `<…>` directives mixed into them — a real card writes `gi<move_top><order 3>` —
- * and `ableFlag` says whether the flag letters are meant to be used at all. Older
- * cards spell the same directives `@@move_top` at the head of `out`, so both forms
- * are read.
+ * and `ableFlag` says whether that field is read at all. Older cards spell the
+ * actions `@@move_top` at the head of `out`, so both forms are read.
+ *
+ * `<order N>` does not mean what our `order` means. RisuAI runs the highest first,
+ * and only once some script on the list carries one — until then the list runs as
+ * it stands. Ours runs the lowest first, always. So the numbers are not carried
+ * across in either direction: an import numbers the scripts in the sequence RisuAI
+ * would run them, and an export writes them out in the sequence they run here.
  */
 
 import { displayScriptPatternError } from '../displayScript.js';
@@ -25,7 +30,10 @@ const NATIVE_FLAGS = 'dgimsuvy';
 const FLAG_DIRECTIVE = /<([a-z_]+)(?:[ \t]+(-?\d+))?>/gi;
 /** `@@move_top` — the same directives as older cards write them, inside `out`. */
 const OUT_ACTION = /@@(move_top|move_bottom|repeat_back)\b/i;
-/** `<order 3>` written into `out` rather than into `flag`. */
+/**
+ * `<order 3>` written into `out` rather than into `flag`. RisuAI never reads it
+ * there, so it orders nothing; it is only taken out of the template.
+ */
 const OUT_ORDER = /<order[ \t]+(-?\d+)>/i;
 
 const ACTIONS = ['move_top', 'move_bottom', 'repeat_back'];
@@ -55,47 +63,66 @@ function parseFlagField(flag: string): Directives & { flags: string } {
   return { flags, ...(action ? { action } : {}), ...(order !== undefined ? { order } : {}) };
 }
 
-/** Reads the directives an older card puts in `out`, and returns the template without them. */
+/** Reads the action an older card puts in `out`, and returns the template without its directives. */
 function parseOutDirectives(out: string): Directives & { template: string } {
   const action = OUT_ACTION.exec(out);
-  const order = OUT_ORDER.exec(out);
   return {
     ...(action ? { action: action[1]!.toLowerCase() as DisplayScriptAction } : {}),
-    ...(order ? { order: Number.parseInt(order[1]!, 10) } : {}),
     template: out.replace(OUT_ACTION, '').replace(OUT_ORDER, '').replace(/^\n+/, ''),
   };
 }
 
-function toDisplayScript(raw: Record<string, unknown>, index: number): DisplayScript | null {
+/** A script before its place in the run is known, with the `<order N>` RisuAI would read. */
+interface Unplaced {
+  script: Omit<DisplayScript, 'order'>;
+  rank: number | undefined;
+}
+
+function toDisplayScript(raw: Record<string, unknown>): Unplaced | null {
   const source = typeof raw['in'] === 'string' ? raw['in'] : '';
   if (!source) return null;
 
+  // RisuAI reads the flag field only when ableFlag is on. Off, the script is a
+  // plain global match, and a directive in the field is as dead as the letters
+  // around it: the creator saw it render in place, in list order.
   const flag = typeof raw['flag'] === 'string' ? raw['flag'] : '';
-  const fromFlag = parseFlagField(flag);
-  // RisuAI falls back to a plain global match when ableFlag is off, so the letters
-  // are only honoured when it is on. The directives are read either way.
-  const flags = raw['ableFlag'] === true ? fromFlag.flags : '';
+  const fromFlag: Directives & { flags: string } =
+    raw['ableFlag'] === true ? parseFlagField(flag) : { flags: '' };
 
   // RisuAI stores the template with escaped newlines.
   const out = typeof raw['out'] === 'string' ? raw['out'].replaceAll('\\n', '\n') : '';
   const fromOut = parseOutDirectives(out);
 
   const action = fromFlag.action ?? fromOut.action;
-  const order = fromFlag.order ?? fromOut.order ?? index;
 
   return {
-    in: source,
-    out: fromOut.template,
-    ...(flags ? { flags } : {}),
-    order,
-    ...(action ? { action } : {}),
-    // A pattern this build refuses to run is imported switched off rather than
-    // dropped, so the creator can still see it and rewrite it.
-    enabled: displayScriptPatternError(source) === null,
+    script: {
+      in: source,
+      out: fromOut.template,
+      ...(fromFlag.flags ? { flags: fromFlag.flags } : {}),
+      ...(action ? { action } : {}),
+      // A pattern this build refuses to run is imported switched off rather than
+      // dropped, so the creator can still see it and rewrite it.
+      enabled: displayScriptPatternError(source) === null,
+    },
+    rank: fromFlag.order,
   };
 }
 
-/** Maps `extensions.risuai.customScripts` onto display scripts. */
+/**
+ * Maps `extensions.risuai.customScripts` onto display scripts, in the sequence
+ * RisuAI runs them and numbered in it.
+ *
+ * RisuAI leaves the list as it stands until one script carries `<order N>`. From
+ * then on it sorts the whole list by that number, highest first, a script without
+ * one counting as 0 and a tie keeping its place. Handing those numbers to our
+ * lowest-first sort would run an ordered card backwards, so the scripts are put in
+ * RisuAI's sequence and numbered 0, 1, 2… down it — what the editor then shows.
+ *
+ * Only the `editdisplay` entries are looked at, though RisuAI sorts every type
+ * together: the sort is stable, so the others cannot change where these fall
+ * relative to each other.
+ */
 export function displayScriptsFromExtensions(
   extensions: Record<string, unknown>,
 ): DisplayScript[] | undefined {
@@ -112,8 +139,11 @@ export function displayScriptsFromExtensions(
         (entry as Record<string, unknown>)['type'] === 'editdisplay',
     )
     .map(toDisplayScript)
-    .filter((script): script is DisplayScript => script !== null);
-  return mapped.length > 0 ? mapped : undefined;
+    .filter((entry): entry is Unplaced => entry !== null);
+  if (mapped.some((entry) => entry.rank !== undefined)) {
+    mapped.sort((a, b) => (b.rank ?? 0) - (a.rank ?? 0));
+  }
+  return mapped.length > 0 ? mapped.map(({ script }, order) => ({ ...script, order })) : undefined;
 }
 
 /** Longest stylesheet a plot may carry. A real RisuAI card's runs to a few tens of kilobytes. */
@@ -168,15 +198,13 @@ export function defaultVariablesFromExtensions(
 
 /**
  * Back to RisuAI's own schema: bare source in `in`, bare template in `out`, and
- * the flags plus the directives in `flag`. The order directive always goes out, so
- * a re-import reproduces the ordering rather than inferring it from position.
+ * the flags plus the action in `flag`. No `<order N>` goes out — the caller writes
+ * the scripts in the sequence they run here, which is the sequence RisuAI runs a
+ * list without one in, and a re-import reads them back the same way. Our numbers
+ * would run backwards there, and the editor's need not even be whole.
  */
 function toCustomScript(script: DisplayScript): Record<string, unknown> {
-  const flag = [
-    script.flags ?? '',
-    ...(script.action ? [`<${script.action}>`] : []),
-    `<order ${script.order}>`,
-  ].join('');
+  const flag = [script.flags ?? '', ...(script.action ? [`<${script.action}>`] : [])].join('');
   return {
     comment: '',
     in: script.in,
@@ -190,15 +218,18 @@ function toCustomScript(script: DisplayScript): Record<string, unknown> {
 /**
  * Writes the two fields back into a copy of the card's extensions. Existing
  * non-`editdisplay` scripts are kept in place; the `editdisplay` ones are replaced
- * wholesale, because the editor owns them once the card is imported. Disabled
- * scripts are dropped: they render nothing, so the exported card behaves the same.
+ * wholesale, because the editor owns them once the card is imported, and go out
+ * in the sequence they run here — `order`, ties in list order. Disabled scripts
+ * are dropped: they render nothing, so the exported card behaves the same.
  */
 export function extensionsWithCustomUi(
   extensions: Record<string, unknown>,
   displayScripts: DisplayScript[] | undefined,
   defaultVariables: Variables | undefined,
 ): Record<string, unknown> {
-  const enabled = (displayScripts ?? []).filter((script) => script.enabled);
+  const enabled = (displayScripts ?? [])
+    .filter((script) => script.enabled)
+    .sort((a, b) => a.order - b.order);
   const hasVariables = defaultVariables && Object.keys(defaultVariables).length > 0;
 
   const previous = extensions['risuai'];

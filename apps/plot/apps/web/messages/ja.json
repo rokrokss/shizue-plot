@@ -252,7 +252,7 @@
     "displayScriptIn": "正規表現",
     "displayScriptInHint": "例: \\[status\\] hp=(\\d+)",
     "displayScriptOut": "HTMLテンプレート",
-    "displayScriptOutHint": "$1〜$9でキャプチャを差し込み、'{{getvar::キー}} {{calc::式}} {{#if 式}} {{#each リスト}} {{img::スラッグ}} {{button::ラベル::入力}}' マクロが使えます。",
+    "displayScriptOutHint": "$1〜$99でキャプチャを差し込み、'{{getvar::キー}} {{calc::式}} {{#if 式}} {{#each リスト}} {{img::スラッグ}} {{button::ラベル::入力}}' マクロが使えます。",
     "displayScriptOrder": "適用順",
     "displayScriptAction": "動作",
     "displayScriptActionNone": "その場に表示",

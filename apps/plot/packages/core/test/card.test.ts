@@ -12,6 +12,7 @@ import {
   readPngTextChunks,
   stripPngTextChunks,
 } from '../src/card/png.js';
+import { activateLore } from '../src/lorebook.js';
 import { assemblePrompt } from '../src/prompt.js';
 import type { LoreEntry } from '../src/types.js';
 import { stCard, v1Card, v2Card, v3Card } from './fixtures/cards.js';
@@ -38,7 +39,7 @@ describe('parseDecorators', () => {
   it('strips unknown decorators, fallbacks, and malformed arguments without effect', () => {
     expect(
       parseDecorators(
-        '@@ignore_on_max_context\n@@@depth 2\n@@depth abc\n@@role narrator\n@@position personality\n@@scan_depth many\n@@exclude_keys  , \n본문',
+        '@@ignore_on_max_context\n@@@depth 2\n@@depth abc\n@@role narrator\n@@position personality\n@@scan_depth many\n@@exclude_keys  , \n@@additional_keys ,\n@@probability often\n본문',
       ),
     ).toEqual({ decorators: {}, body: '본문' });
   });
@@ -58,6 +59,28 @@ describe('parseDecorators', () => {
     });
   });
 
+  it('collects every line of the key decorators, and reads the rest RisuAI applies', () => {
+    expect(
+      parseDecorators(
+        '@@probability 30\n@@additional_keys 밤\n@@additional_keys 달, 새벽\n@@exclude_keys 왕비\n@@exclude_keys 시녀, 기사\n@@exclude_keys_all 비,눈\n@@exclude_keys_all 안개\n@@dont_activate\n@@activate\n본문',
+      ),
+    ).toEqual({
+      decorators: {
+        probability: 30,
+        additionalKeys: [['밤'], ['달', '새벽']],
+        excludeKeys: ['왕비', '시녀', '기사'],
+        excludeAllKeys: ['비', '눈', '안개'],
+        // The last of the two, as RisuAI reads them.
+        force: 'activate',
+      },
+      body: '본문',
+    });
+    // RisuAI rolls 0–100 against N: below 0 never passes, from 100 always does.
+    expect(parseDecorators('@@probability -5\n본문').decorators).toEqual({ probability: 0 });
+    expect(parseDecorators('@@probability 150\n본문').decorators).toEqual({ probability: 100 });
+    expect(parseDecorators('@@activate\n@@dont_activate\n본문').decorators).toEqual({ force: 'deactivate' });
+  });
+
   it('turns @@exclude_keys into NOT_ANY secondary keys, only where there is room for them', () => {
     const entry = (content: string, overrides: Record<string, unknown> = {}) =>
       parseCard({
@@ -75,10 +98,10 @@ describe('parseDecorators', () => {
     expect(excluded.secondaryKeys).toEqual(['왕비', '시녀']);
     expect(excluded.selective).toBe(true);
     expect(excluded.selectiveLogic).toBe('not_any');
-    // An entry with secondary keys of its own keeps them; a regex entry ignores
-    // the decorator, as the V3 spec says.
+    // An entry with secondary keys of its own keeps them; inert ones (the entry
+    // is not selective) give way.
     expect(entry('@@exclude_keys 왕비\n본문', { secondary_keys: ['밤'], selective: true }).secondaryKeys).toEqual(['밤']);
-    expect(entry('@@exclude_keys 왕비\n본문', { use_regex: true }).secondaryKeys).toEqual([]);
+    expect(entry('@@exclude_keys 왕비\n본문', { secondary_keys: ['밤'] }).secondaryKeys).toEqual(['왕비']);
   });
 
   it('ignores @@depth when a position decorator is present, per spec', () => {
@@ -156,6 +179,7 @@ describe('parseCard - JSON', () => {
     expect(card.systemPrompt).toContain('{{original}}');
     expect(card.loreSettings.recursiveScanning).toBe(true);
 
+    // `/검(술|객)/i` loses its slashes, and its `i` makes the entry ignore case.
     // @@depth/@@role: injected into the history rather than the system block.
     expect(card.lorebook[0]).toEqual({
       keys: ['검(술|객)'],
@@ -171,6 +195,11 @@ describe('parseCard - JSON', () => {
       depth: 4,
       role: 'assistant',
     });
+    const fired = (text: string) =>
+      activateLore([card.lorebook[0]!], { history: [text], scanDepth: 1, budgetTokens: 1000, countTokens: (t) => t.length })
+        .entries.length;
+    expect(fired('떠돌이 검객이 문을 연다.')).toBe(1);
+    expect(fired('떠돌이 상인이 문을 연다.')).toBe(0);
 
     // @@constant + @@position override the card fields; @@activate_only_after
     // becomes the entry's delay.
@@ -997,6 +1026,171 @@ describe('the plot overlay on export', () => {
   });
 });
 
+// RisuAI's terms come from its lorebook.svelte.ts (matching and decorators) and
+// characterCards.ts (the import that rewrites ST settings into decorators).
+describe('RisuAI lorebook entries', () => {
+  /** One entry as RisuAI's export writes it: no ST position, so not read as ST's. */
+  const risuEntry = (fields: Record<string, unknown>): LoreEntry =>
+    normalizeCard({
+      ...v3Card,
+      data: {
+        ...v3Card.data,
+        character_book: {
+          extensions: {},
+          entries: [
+            {
+              keys: [],
+              content: '본문',
+              extensions: {},
+              enabled: true,
+              insertion_order: 100,
+              constant: false,
+              selective: false,
+              case_sensitive: false,
+              use_regex: false,
+              ...fields,
+            },
+          ],
+        },
+      },
+    }).lorebook[0]!;
+  const fires = (entry: LoreEntry, text: string, random?: () => number): boolean =>
+    activateLore([entry], { history: [text], scanDepth: 1, budgetTokens: 1000, countTokens: (t) => t.length, random })
+      .entries.length === 1;
+
+  it('reads /pattern/flags keys as regexes, with `i` deciding the case', () => {
+    const sword = risuEntry({ keys: ['/검(술|객)/i'], use_regex: true });
+    expect(sword).toMatchObject({ keys: ['검(술|객)'], useRegex: true, caseSensitive: false });
+    expect(fires(sword, '떠돌이 검객이 들어온다')).toBe(true);
+    expect(fires(sword, '떠돌이 상인이 들어온다')).toBe(false);
+
+    // RisuAI's regexes never read case_sensitive: without `i` they keep case.
+    const exact = risuEntry({ keys: ['/Sword \\d+/'], use_regex: true, case_sensitive: false });
+    expect(exact.caseSensitive).toBe(true);
+    expect(fires(exact, 'Sword 7')).toBe(true);
+    expect(fires(exact, 'sword 7')).toBe(false);
+    const loose = risuEntry({ keys: ['/Sword \\d+/i'], use_regex: true, case_sensitive: true });
+    expect(loose.caseSensitive).toBe(false);
+    expect(fires(loose, 'SWORD 7')).toBe(true);
+
+    // Secondary keys are regexes on the same terms.
+    const night = risuEntry({
+      keys: ['/검객/'],
+      secondary_keys: ['/밤|새벽/'],
+      selective: true,
+      use_regex: true,
+    });
+    expect(night.secondaryKeys).toEqual(['밤|새벽']);
+    expect(fires(night, '새벽의 검객')).toBe(true);
+    expect(fires(night, '한낮의 검객')).toBe(false);
+  });
+
+  it('keeps use_regex only where RisuAI keeps it', () => {
+    // A first key without a slash: RisuAI's import clears the flag, and every key is text.
+    const plain = risuEntry({ keys: ['검(술|객)', '/칼/'], use_regex: true });
+    expect(plain).toMatchObject({ keys: ['검(술|객)', '/칼/'], useRegex: false });
+    expect(fires(plain, '떠돌이 검객')).toBe(false);
+    // Slashes without the flag are text too.
+    expect(risuEntry({ keys: ['/검객/'] })).toMatchObject({ keys: ['/검객/'], useRegex: false });
+
+    // A bare key in a regex entry would fail RisuAI's whole key list; here it is a literal.
+    const mixed = risuEntry({ keys: ['/검(술|객)/i', '칼.'], use_regex: true });
+    expect(mixed.keys).toEqual(['검(술|객)', '칼\\.']);
+    expect(fires(mixed, '칼.')).toBe(true);
+    expect(fires(mixed, '칼날')).toBe(false);
+  });
+
+  it('maps @@probability, @@activate and @@dont_activate', () => {
+    const rare = risuEntry({ keys: ['궁'], content: '@@probability 30\n본문' });
+    expect(rare.probability).toBe(30);
+    expect(fires(rare, '궁', () => 0.2)).toBe(true);
+    expect(fires(rare, '궁', () => 0.5)).toBe(false);
+    expect(risuEntry({ keys: ['궁'], content: '@@probability 100\n본문' })).not.toHaveProperty('probability');
+
+    // RisuAI lore has no `enabled`; this is its off switch.
+    const off = risuEntry({ keys: ['궁'], content: '@@dont_activate\n본문' });
+    expect(off).toMatchObject({ enabled: false, content: '본문' });
+    expect(fires(off, '궁')).toBe(false);
+    const on = risuEntry({ keys: ['궁'], content: '@@activate\n본문' });
+    expect(on.constant).toBe(true);
+    expect(fires(on, '아무 말')).toBe(true);
+    expect(risuEntry({ keys: ['궁'], content: '@@activate\n@@dont_activate\n본문' })).toMatchObject({
+      enabled: false,
+      constant: false,
+    });
+  });
+
+  it('turns the key decorators into secondary keys', () => {
+    const any = risuEntry({ keys: ['궁'], content: '@@additional_keys 밤, 새벽\n본문' });
+    expect(any).toMatchObject({ secondaryKeys: ['밤', '새벽'], selective: true });
+    expect(any.selectiveLogic).toBeUndefined();
+    expect(fires(any, '궁의 새벽')).toBe(true);
+    expect(fires(any, '궁의 한낮')).toBe(false);
+
+    // One line per key is how RisuAI writes ST's AND_ALL.
+    const all = risuEntry({ keys: ['궁'], content: '@@additional_keys 밤\n@@additional_keys 달\n본문' });
+    expect(all).toMatchObject({ secondaryKeys: ['밤', '달'], selective: true, selectiveLogic: 'and_all' });
+    expect(fires(all, '궁의 밤')).toBe(false);
+    expect(fires(all, '궁의 밤, 달')).toBe(true);
+
+    // ...and NOT_ANY: every line counts.
+    const none = risuEntry({ keys: ['궁'], content: '@@exclude_keys 왕비\n@@exclude_keys 시녀\n본문' });
+    expect(none).toMatchObject({ secondaryKeys: ['왕비', '시녀'], selectiveLogic: 'not_any' });
+    expect(fires(none, '궁의 시녀')).toBe(false);
+    expect(fires(none, '궁의 기사')).toBe(true);
+
+    const notAll = risuEntry({ keys: ['궁'], content: '@@exclude_keys_all 왕비,시녀\n본문' });
+    expect(notAll).toMatchObject({ secondaryKeys: ['왕비', '시녀'], selectiveLogic: 'not_all' });
+    expect(fires(notAll, '궁의 시녀')).toBe(true);
+    expect(fires(notAll, '궁의 왕비와 시녀')).toBe(false);
+
+    // On a regex entry RisuAI reads the decorator's keys as regexes too.
+    const regex = risuEntry({ keys: ['/궁/'], use_regex: true, content: '@@exclude_keys /왕비|시녀/\n본문' });
+    expect(regex.secondaryKeys).toEqual(['왕비|시녀']);
+    expect(fires(regex, '궁의 시녀')).toBe(false);
+    expect(fires(regex, '궁의 기사')).toBe(true);
+  });
+
+  it('reads an ST entry RisuAI re-exported once, from its decorators', () => {
+    // RisuAI's import moved the probability and the AND_ALL keys into decorators,
+    // left position 1 and selectiveLogic in the extensions, and stopped exporting
+    // the secondary keys once the entry was no longer selective.
+    const raw = stCard();
+    const [, second] = raw.data.character_book.entries;
+    const { probability: _probability, useProbability: _useProbability, ...kept } = second!.extensions;
+    const entry = normalizeCard({
+      ...raw,
+      data: {
+        ...raw.data,
+        character_book: {
+          ...raw.data.character_book,
+          entries: [
+            {
+              ...second!,
+              secondary_keys: undefined,
+              selective: false,
+              use_regex: false,
+              content: '@@additional_keys 달\n@@additional_keys 밤\n@@probability 30\n엘라라의 활은 할머니의 유품이다.',
+              extensions: { ...kept, selectiveLogic: 3 },
+            },
+          ],
+        },
+      },
+    }).lorebook[0]!;
+    expect(entry).toMatchObject({
+      keys: ['활'],
+      secondaryKeys: ['달', '밤'],
+      selective: true,
+      selectiveLogic: 'and_all',
+      probability: 30,
+      position: 'after_char',
+      content: '엘라라의 활은 할머니의 유품이다.',
+    });
+    expect(fires(entry, '활과 밤', () => 0)).toBe(false);
+    expect(fires(entry, '활과 밤과 달', () => 0)).toBe(true);
+  });
+});
+
 // Shapes and enums below are SillyTavern's own (world-info.js, characters.js,
 // regex/engine.js); `stCard` is what its writer produces.
 describe('SillyTavern cards', () => {
@@ -1209,6 +1403,14 @@ describe('SillyTavern cards', () => {
     expect(counted!.content).toBe('주막은 국경 검문소 옆이다.');
     // Anything past the cap is the same "forever", and comes back as the cap.
     expect(normalizeCard(exported).lorebook[0]).toMatchObject({ sticky: 10000, cooldown: 10000 });
+  });
+
+  it('writes a switched-off entry back out as @@dont_activate, the off switch RisuAI reads', () => {
+    const { card } = parseCard(v3Card);
+    const off: LoreEntry = { ...card.lorebook[1]!, enabled: false };
+    const exported = exportCardV3({ ...card, lorebook: [off] });
+    expect(exported.data.character_book!.entries[0]!.content).toBe('@@dont_activate\n주막은 국경 검문소 옆이다.');
+    expect(normalizeCard(exported).lorebook).toEqual([off]);
   });
 });
 

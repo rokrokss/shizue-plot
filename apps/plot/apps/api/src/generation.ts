@@ -3,6 +3,7 @@ import {
   countTokens,
   replyLengthTokens,
   sceneFocusDirective,
+  stripInlayMacros,
   withNarrationPrefix,
   type AssembledPrompt,
   type HistoryMessage,
@@ -319,7 +320,10 @@ async function buildRequestMessages(
   // For continue the trailing assistant text must be the last turn so the model
   // resumes it, so it is re-attached after the post-history instructions.
   const isContinue = plan.target.kind === 'continue';
-  const partial = isContinue ? (plan.history[plan.history.length - 1]?.content ?? '').trimEnd() : '';
+  // The partial bypasses the assembler, so it drops its own inlays as every other turn does.
+  const partial = isContinue
+    ? stripInlayMacros(plan.history[plan.history.length - 1]?.content ?? '').trimEnd()
+    : '';
   const history = await withoutUnseeableImages(
     isContinue ? plan.history.slice(0, -1) : plan.history,
     plan.model,

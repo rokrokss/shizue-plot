@@ -34,7 +34,7 @@ import { balancePartial } from '@/lib/markdown/balance';
 import { splitBlocks } from '@/lib/markdown/blocks';
 import { rehypeDialogueQuotes } from '@/lib/markdown/quotes';
 import { rehypeWordReveal } from '@/lib/markdown/reveal';
-import { MESSAGE_SCOPE_CLASS } from '@/lib/sanitizeHtml';
+import { isSameOriginUrl, MESSAGE_SCOPE_CLASS } from '@/lib/sanitizeHtml';
 import { speechRuns } from '@/lib/speechRuns';
 import type { DisplayScript, PublicMember } from '@/lib/types';
 import { Avatar } from './Avatar';
@@ -112,7 +112,12 @@ const components: Components = {
     // so the reference still becomes something — the card that says what it is
     // waiting for — and no request is made for a picture nobody may see yet.
     const locked = url ? readLockKind(url) : null;
-    return locked ? <LockedImage kind={locked} /> : <ChatImage src={url} alt={alt ?? ''} />;
+    if (locked) return <LockedImage kind={locked} />;
+    // Markdown lets a model (or a card's lore) write any address as an image, and
+    // a foreign one is a beacon to whoever wrote it — the same rule the display
+    // scripts' HTML is held to. The plot's own images are always same-origin.
+    if (!url || !isSameOriginUrl(url)) return null;
+    return <ChatImage src={url} alt={alt ?? ''} />;
   },
   pre: ({ node: _node, children }) => <CodeBlock>{children}</CodeBlock>,
 };

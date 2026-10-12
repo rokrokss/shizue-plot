@@ -72,7 +72,8 @@ export const v3Card = {
       recursive_scanning: true,
       entries: [
         {
-          keys: ['검(술|객)'],
+          // RisuAI's spelling of a regex key, the only one its matcher reads.
+          keys: ['/검(술|객)/i'],
           content: '@@depth 4\n@@role assistant\n세이의 검은 이가 빠져 있다.',
           extensions: {},
           enabled: true,

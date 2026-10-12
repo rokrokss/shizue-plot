@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyMacros, imageMacroRefs, stripImageMacros } from '../src/macro.js';
+import { applyMacros, imageMacroRefs, stripImageMacros, stripInlayMacros } from '../src/macro.js';
 
 const ctx = { char: '아리아', user: '민준' };
 
@@ -187,6 +187,14 @@ describe('applyMacros - SillyTavern macros', () => {
 
   it('leaves incvar and decvar in place for the model to see, like setvar', () => {
     expect(applyMacros('{{incvar::hp}} {{decvar::hp}}', vars)).toBe('{{incvar::hp}} {{decvar::hp}}');
+  });
+});
+
+describe('stripInlayMacros', () => {
+  it("drops RisuAI's inlays and nothing else", () => {
+    expect(stripInlayMacros('앞 {{inlay::a}}{{inlayed::b}}{{ InlayedData :: c }} {{img::smile}}{{bgm::d}} 뒤')).toBe(
+      '앞  {{img::smile}}{{bgm::d}} 뒤',
+    );
   });
 });
 

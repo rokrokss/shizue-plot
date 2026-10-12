@@ -716,10 +716,13 @@ async function lastMessages(deps: AppDeps, rows: Chat[]): Promise<Map<string, st
  * The plot's assets the branch actually shows, in the order the asset list uses.
  * A reference is resolved the way the chat resolves it — by slug, or by the name
  * an imported card gave the image — and one naming an asset that has since been
- * deleted exports nothing, the same thing the chat renders for it.
+ * deleted exports nothing, the same thing the chat renders for it. So does one
+ * this chat has not unlocked yet: the chat draws a locked card in its place, and
+ * the reveal is not the reader's to take away before it happens.
  */
 async function referencedAssets(
   deps: AppDeps,
+  chat: Chat,
   plotId: string,
   path: Message[],
 ): Promise<ChatExport['assets']> {
@@ -732,8 +735,11 @@ async function referencedAssets(
     .orderBy(asc(plotAssets.createdAt), asc(plotAssets.slug));
   const slugOf = assetResolver(rows);
   const referenced = new Set(refs.map(slugOf));
+  const locked = new Set(
+    (await assetLocks(deps, chat)).filter((lock) => lock.locked).map((lock) => lock.assetId),
+  );
   return rows
-    .filter((asset) => referenced.has(asset.slug))
+    .filter((asset) => referenced.has(asset.slug) && !locked.has(asset.id))
     .map((asset) => ({ slug: asset.slug, url: assetUrl(plotId, asset.slug), mime: asset.mime }));
 }
 
@@ -1193,7 +1199,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       // All three are the creator's to give, so all three go away with the plot.
       // The urls would 404 for this reader anyway — the asset, avatar and cover
       // routes apply the same rule.
-      assets: plot ? await referencedAssets(deps, plot.id, path) : [],
+      assets: plot ? await referencedAssets(deps, chat, plot.id, path) : [],
       // The roster, in the creator's order: the names are the speaker prefixes the
       // transcript carries, so an importer can tell whose lines are whose.
       characters: plot

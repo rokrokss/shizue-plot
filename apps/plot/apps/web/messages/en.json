@@ -252,7 +252,7 @@
     "displayScriptIn": "Pattern",
     "displayScriptInHint": "e.g. \\[status\\] hp=(\\d+)",
     "displayScriptOut": "HTML template",
-    "displayScriptOutHint": "Bind captures with $1-$9, and use the '{{getvar::key}} {{calc::expr}} {{#if expr}} {{#each list}} {{img::slug}} {{button::label::text}}' macros.",
+    "displayScriptOutHint": "Bind captures with $1-$99, and use the '{{getvar::key}} {{calc::expr}} {{#if expr}} {{#each list}} {{img::slug}} {{button::label::text}}' macros.",
     "displayScriptOrder": "Order",
     "displayScriptAction": "Action",
     "displayScriptActionNone": "Render in place",

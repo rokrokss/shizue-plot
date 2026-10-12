@@ -115,6 +115,21 @@ export function stripImageMacros(text: string): string {
   return replaceAssetMacros(text, () => '');
 }
 
+const INLAY_MACROS = new Set(['inlay', 'inlayed', 'inlayeddata']);
+
+/**
+ * Drops RisuAI's inlay macros and leaves every other asset macro alone. An
+ * inlay names a picture in the sender's own RisuAI storage, which this app
+ * never has, and RisuAI takes them out of chat turns before the model reads
+ * them (sending the picture as an image part where it can). Card text keeps
+ * them, as RisuAI's does.
+ */
+export function stripInlayMacros(text: string): string {
+  return replaceAssetMacros(text, (macro) =>
+    INLAY_MACROS.has(macro.name) ? '' : text.slice(macro.start, macro.end),
+  );
+}
+
 /**
  * The images `text` references — slugs, or the names an imported card wrote —
  * in order of appearance and trimmed. A reference composed at render time

@@ -301,6 +301,8 @@ describe('evaluateCbs - SillyTavern {{if}}', () => {
 describe('evaluateCbs - SillyTavern formatting', () => {
   it('writes newlines and spaces, one or a whole count of them', () => {
     expect(run('a{{newline}}b{{newline::2}}c{{space}}d{{space::3}}e{{space::0}}f')).toBe('a\nb\n\nc d   ef');
+    // RisuAI's own name for it.
+    expect(run('a{{br}}b{{BR}}c')).toBe('a\nb\nc');
     expect(run('[{{space::{{getvar::n}}}}]', { n: '2' })).toBe('[  ]');
   });
 

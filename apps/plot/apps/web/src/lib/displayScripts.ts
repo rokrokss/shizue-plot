@@ -219,7 +219,8 @@ export function planDisplayScripts(
     const script = scripts[i]!;
     if (script.enabled && script.in) ordered.push({ index: i, script });
   }
-  ordered.sort((a, b) => a.script.order - b.script.order);
+  // A tie runs in list order, which is also how a card's export writes it out.
+  ordered.sort((a, b) => a.script.order - b.script.order || a.index - b.index);
   if (ordered.length === 0) return null;
   // Scanning a wall of text with a creator's regex is the expensive case, and a
   // message this long is prose rather than a status block.
@@ -233,8 +234,12 @@ export function planDisplayScripts(
   /** Thrown from anywhere below when a cap is blown; the answer is then null. */
   const OVER = { over: true };
 
-  /** `$1`..`$9`, `$&` and `$<name>` — what an OUT template binds a match with. */
-  const CAPTURE = /\$(?:(&)|(\d)|<([A-Za-z_][A-Za-z0-9_]*)>)/g;
+  /**
+   * `$1`..`$99`, `$&` and `$<name>` — what an OUT template binds a match with. Two
+   * digits are taken here and narrowed in `expand`, as `String.prototype.replace`
+   * reads them.
+   */
+  const CAPTURE = /\$(?:(&)|(\d\d?)|<([A-Za-z_][A-Za-z0-9_]*)>)/g;
 
   /**
    * An invalid regex disables its script, silently. `d` is always added: a capture
@@ -409,6 +414,7 @@ export function planDisplayScripts(
     CAPTURE.lastIndex = 0;
     for (let ref = CAPTURE.exec(template); ref; ref = CAPTURE.exec(template)) {
       const [whole, all, index, name] = ref;
+      let length = whole.length;
       if (all) {
         literal(template.slice(cursor, ref.index));
         span([match.index, match.index + match[0].length]);
@@ -418,17 +424,23 @@ export function planDisplayScripts(
         const groups = indices?.groups;
         if (groups && Object.prototype.hasOwnProperty.call(groups, name)) span(groups[name]);
       } else {
-        const at = Number(index);
-        // An unused group number stays literal, so a `$` in the template survives.
-        if (at >= match.length || match[at] === undefined) {
-          literal(template.slice(cursor, ref.index + whole.length));
-          cursor = ref.index + whole.length;
+        // `$10` is group 10 only when the pattern has ten groups. With fewer it is
+        // `$1` and then a literal `0` — `String.prototype.replace`'s reading, which is
+        // what RisuAI hands a template that stays in place to.
+        const digits = index!.length === 2 && Number(index) >= match.length ? index!.slice(0, 1) : index!;
+        const at = Number(digits);
+        length = 1 + digits.length;
+        // A group the pattern does not have stays literal, so a `$` in the template survives.
+        if (at >= match.length) {
+          literal(template.slice(cursor, ref.index + length));
+          cursor = ref.index + length;
           continue;
         }
         literal(template.slice(cursor, ref.index));
+        // One it has that took no part in the match binds nothing, as in `replace`.
         span(indices?.[at]);
       }
-      cursor = ref.index + whole.length;
+      cursor = ref.index + length;
     }
     literal(template.slice(cursor));
 

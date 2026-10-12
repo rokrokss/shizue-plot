@@ -4481,6 +4481,21 @@ describe('unlockable assets', () => {
     }
   });
 
+  it('leaves an image out of the export until this chat has unlocked it', async () => {
+    const alice = await signUp('unlock-export-creator@example.com');
+    const plot = await lockedPlot(alice, KEYWORD);
+    const bob = await signUp('unlock-export-reader@example.com');
+    const chatId = (await startChat(bob, plot.id)).chat.id;
+    const exportedSlugs = async (): Promise<string[]> =>
+      (await readJson(await request(bob, `/api/chats/${chatId}/export`))).assets.map((asset: any) => asset.slug);
+
+    await sendTurn(bob, chatId, '{{img::plain}} {{img::secret}}');
+    expect(await exportedSlugs()).toEqual(['plain']);
+
+    await sendTurn(bob, chatId, '고백');
+    expect(await exportedSlugs()).toEqual(['plain', 'secret']);
+  });
+
   it('opens a keyword unlock on the turn that says it', async () => {
     const alice = await signUp('unlock-keyword-creator@example.com');
     const plot = await lockedPlot(alice, KEYWORD);
@@ -4938,7 +4953,8 @@ describe('custom UI', () => {
         in: '\\[status\\] hp=(\\d+)',
         out: '<div class="hp">HP $1</div>',
         flags: 'g',
-        order: 2,
+        // RisuAI's `<order N>` runs high first, so it comes in as a place in the run, not a number.
+        order: 0,
         action: 'move_top',
         enabled: true,
       },

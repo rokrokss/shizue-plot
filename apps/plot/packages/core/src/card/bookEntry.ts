@@ -25,8 +25,16 @@ export interface LoreDecorators {
   sticky?: number;
   /** `@@dont_activate_after_match`. */
   cooldown?: number;
-  /** `@@exclude_keys a,b`, case kept. */
+  /** `@@probability N`, clamped to 0–100. */
+  probability?: number;
+  /** `@@activate` or `@@dont_activate`, whichever comes last. */
+  force?: 'activate' | 'deactivate';
+  /** `@@additional_keys a,b`, one list per line, case kept. */
+  additionalKeys?: string[][];
+  /** `@@exclude_keys a,b`, every line's keys together, case kept. */
   excludeKeys?: string[];
+  /** `@@exclude_keys_all a,b`, every line's keys together, case kept. */
+  excludeAllKeys?: string[];
 }
 
 /**
@@ -45,10 +53,18 @@ const count = (arg: string): number | undefined => {
   return Number.isFinite(value) && value >= 0 ? value : undefined;
 };
 
+/** A decorator's comma-separated keys, as RisuAI's parser splits them. */
+const keyList = (arg: string): string[] =>
+  arg.split(',').map((key) => key.trim()).filter((key) => key.length > 0);
+
 /**
  * Splits the leading `@@`-prefixed decorator lines of a V3 lorebook entry off its
  * content and interprets the supported subset. Unsupported decorators are
  * stripped without effect, per spec.
+ *
+ * The key decorators may repeat, and RisuAI applies every line: its own import
+ * of a SillyTavern entry writes NOT_ANY and AND_ALL as one `@@exclude_keys` or
+ * `@@additional_keys` line per key. Of the rest, the last line wins.
  */
 export function parseDecorators(content: string): { decorators: LoreDecorators; body: string } {
   const lines = content.split('\n');
@@ -93,10 +109,33 @@ export function parseDecorators(content: string): { decorators: LoreDecorators; 
       case 'dont_activate_after_match':
         decorators.cooldown = FOREVER_MESSAGES;
         break;
+      case 'probability': {
+        // RisuAI drops the entry when a roll of 0–100 exceeds N, so anything
+        // under 0 never fires and anything from 100 always does.
+        const chance = Number.parseInt(arg, 10);
+        if (Number.isFinite(chance)) decorators.probability = Math.min(100, Math.max(0, chance));
+        break;
+      }
+      case 'activate':
+        decorators.force = 'activate';
+        break;
+      case 'dont_activate':
+        decorators.force = 'deactivate';
+        break;
+      // Keys are matched as written, so these arguments keep their case.
+      case 'additional_keys': {
+        const keys = keyList(raw);
+        if (keys.length > 0) decorators.additionalKeys = [...(decorators.additionalKeys ?? []), keys];
+        break;
+      }
       case 'exclude_keys': {
-        // Keys are matched as written, so this one argument keeps its case.
-        const keys = raw.split(',').map((key) => key.trim()).filter((key) => key.length > 0);
-        if (keys.length > 0) decorators.excludeKeys = keys;
+        const keys = keyList(raw);
+        if (keys.length > 0) decorators.excludeKeys = [...(decorators.excludeKeys ?? []), ...keys];
+        break;
+      }
+      case 'exclude_keys_all': {
+        const keys = keyList(raw);
+        if (keys.length > 0) decorators.excludeAllKeys = [...(decorators.excludeAllKeys ?? []), ...keys];
         break;
       }
       default:
@@ -242,15 +281,26 @@ function loreFieldsOfSillyTavern(fields: SillyTavernFields): Partial<LoreEntry> 
 /** `/pattern/flags`, the one form in which ST reads a key as a regex (`parseRegexFromString`). */
 const SLASH_REGEX = /^\/([\w\W]+?)\/([gimsuy]*)$/;
 
-/** The source of a `/pattern/flags` key, or null when ST would read it as plain text. */
-function slashRegexSource(key: string): string | null {
+/** A `/pattern/flags` key taken apart, or null when ST would read it as plain text. */
+function slashRegexSource(key: string): { source: string; flags: string } | null {
   const match = SLASH_REGEX.exec(key);
   // ST refuses a pattern with an unescaped delimiter in it, and so do we.
   if (!match || /(^|[^\\])\//.test(match[1]!)) return null;
-  return match[1]!.replaceAll('\\/', '/');
+  return { source: match[1]!.replaceAll('\\/', '/'), flags: match[2]! };
 }
 
 const escapeRegex = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** A regex entry's key as our matcher reads it: a slash key's pattern, anything else as a literal. */
+const regexKeySource = (key: string): string => slashRegexSource(key)?.source ?? escapeRegex(key);
+
+/** How an entry's keys came out of the file, and the case they want when that is theirs to say. */
+interface EntryKeys {
+  keys: string[];
+  secondaryKeys: string[];
+  useRegex: boolean;
+  caseSensitive?: boolean;
+}
 
 /**
  * ST ignores `use_regex` (and writes `true` on every entry it exports): a key is a
@@ -258,15 +308,34 @@ const escapeRegex = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g
  * per entry, so an entry with any such key becomes a regex entry whose plain keys
  * are escaped into literals. The flags are dropped; case follows the entry.
  */
-function keysOfSillyTavern(
-  keys: string[],
-  secondaryKeys: string[],
-): { keys: string[]; secondaryKeys: string[]; useRegex: boolean } {
+function keysOfSillyTavern(keys: string[], secondaryKeys: string[]): EntryKeys {
   if (![...keys, ...secondaryKeys].some((key) => slashRegexSource(key) !== null)) {
     return { keys, secondaryKeys, useRegex: false };
   }
-  const toSource = (key: string): string => slashRegexSource(key) ?? escapeRegex(key);
-  return { keys: keys.map(toSource), secondaryKeys: secondaryKeys.map(toSource), useRegex: true };
+  return { keys: keys.map(regexKeySource), secondaryKeys: secondaryKeys.map(regexKeySource), useRegex: true };
+}
+
+/**
+ * Everyone else's keys, which means RisuAI's: it does read `use_regex`, but its
+ * import keeps the flag only when the first key starts with `/`, and its matcher
+ * then takes every key as `/pattern/flags` (a bare pattern never matches there).
+ * So the entry is a regex entry on the same terms and its keys lose the slashes.
+ *
+ * The flags are per key there and case is per entry here: the entry ignores case
+ * when any key carries `i` and keeps it otherwise, whatever `case_sensitive` says
+ * — RisuAI's regexes never read that field. The other flags are dropped. A key not
+ * spelled with slashes makes RisuAI's whole key list fail, which leaves the entry
+ * unable to fire; here it is a literal instead, as on the ST path.
+ */
+function keysOfRisuAi(keys: string[], secondaryKeys: string[], useRegex: boolean): EntryKeys {
+  if (!useRegex || !keys[0]?.startsWith('/')) return { keys, secondaryKeys, useRegex: false };
+  const all = [...keys, ...secondaryKeys];
+  return {
+    keys: keys.map(regexKeySource),
+    secondaryKeys: secondaryKeys.map(regexKeySource),
+    useRegex: true,
+    caseSensitive: !all.some((key) => slashRegexSource(key)?.flags.includes('i')),
+  };
 }
 
 /** The inverse, for export: a regex entry's keys spelled so ST reads them as regexes. */
@@ -324,7 +393,9 @@ function assemble(
 
   const entry: LoreEntry = {
     ...base,
-    constant: decorators.constant ?? base.constant,
+    // RisuAI lore has no `enabled`; `@@dont_activate` is how it switches one off.
+    enabled: decorators.force === 'deactivate' ? false : base.enabled,
+    constant: decorators.force === 'activate' || (decorators.constant ?? base.constant),
     position,
     ...(depth === undefined ? {} : { depth }),
     ...(depth !== undefined && role ? { role } : {}),
@@ -334,16 +405,47 @@ function assemble(
     ...(decorators.sticky !== undefined ? { sticky: decorators.sticky } : {}),
     ...(decorators.cooldown !== undefined ? { cooldown: decorators.cooldown } : {}),
   };
+  if (decorators.probability !== undefined) {
+    // 100 is the default, which an entry leaves out.
+    if (decorators.probability < 100) entry.probability = decorators.probability;
+    else delete entry.probability;
+  }
 
-  // Exclusion is what NOT_ANY secondary keys already are; the spec has the
-  // decorator ignored on a regex entry, and an entry with secondary keys of its
-  // own has no room for a second set.
-  if (decorators.excludeKeys && entry.secondaryKeys.length === 0 && !entry.useRegex) {
-    entry.secondaryKeys = decorators.excludeKeys;
+  // An entry whose own secondary keys take part has no room for a second set;
+  // inert ones (not selective) give way.
+  const secondary = secondaryOfDecorators(decorators);
+  if (secondary && (!entry.selective || entry.secondaryKeys.length === 0)) {
+    // RisuAI reads these keys the way it reads the entry's own — as regexes on a
+    // regex entry, where the V3 spec would ignore `@@exclude_keys` instead.
+    entry.secondaryKeys = entry.useRegex ? secondary.keys.map(regexKeySource) : secondary.keys;
     entry.selective = true;
-    entry.selectiveLogic = 'not_any';
+    if (secondary.logic === 'and_any') delete entry.selectiveLogic;
+    else entry.selectiveLogic = secondary.logic;
   }
   return entry;
+}
+
+/**
+ * The key decorators as one set of secondary keys. RisuAI runs each line as a
+ * search of its own — every `@@additional_keys` line has to find one of its keys,
+ * any `@@exclude_keys` key and all of an `@@exclude_keys_all` line's keys rule the
+ * entry out — and ours is one set with one logic. So one line of additional keys
+ * is AND_ANY, several lines of one key each (how RisuAI writes ST's AND_ALL) are
+ * AND_ALL, and any other several lines loosen to AND_ANY; the exclusions are
+ * NOT_ANY and NOT_ALL over every line's keys. Where an entry carries more than one
+ * kind, additional keys win over exclusions, and NOT_ANY over NOT_ALL.
+ */
+function secondaryOfDecorators(
+  decorators: LoreDecorators,
+): { keys: string[]; logic: LoreSelectiveLogic } | undefined {
+  const lines = decorators.additionalKeys;
+  if (lines) {
+    const each = lines.length > 1 && lines.every((line) => line.length === 1);
+    return { keys: lines.flat(), logic: each ? 'and_all' : 'and_any' };
+  }
+  if (decorators.excludeKeys) return { keys: decorators.excludeKeys, logic: 'not_any' };
+  if (decorators.excludeAllKeys) return { keys: decorators.excludeAllKeys, logic: 'not_all' };
+  return undefined;
 }
 
 /** A CCv2/CCv3 character_book entry, from a card or from a stand-alone book. */
@@ -359,7 +461,7 @@ export function loreEntryFromBook(raw: unknown): LoreEntry {
   const secondaryKeys = strings(entry['secondary_keys']);
   const matching = fromSillyTavern
     ? keysOfSillyTavern(keys, secondaryKeys)
-    : { keys, secondaryKeys, useRegex: entry['use_regex'] === true };
+    : keysOfRisuAi(keys, secondaryKeys, entry['use_regex'] === true);
 
   return assemble(
     {
@@ -371,9 +473,13 @@ export function loreEntryFromBook(raw: unknown): LoreEntry {
       enabled: entry['enabled'] !== false,
       constant: entry['constant'] === true,
       insertionOrder: finite(entry['insertion_order']) ?? 0,
-      // ST keeps case in its extensions and leaves the CCv3 field out.
+      // A RisuAI regex's flags come first. ST keeps case in its extensions and
+      // leaves the CCv3 field out.
       caseSensitive:
-        boolOf(entry['case_sensitive']) ?? boolOf(extensions['case_sensitive']) ?? false,
+        matching.caseSensitive ??
+        boolOf(entry['case_sensitive']) ??
+        boolOf(extensions['case_sensitive']) ??
+        false,
       position: entry['position'] === 'after_char' ? 'after_char' : 'before_char',
     },
     decorators,

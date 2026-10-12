@@ -8,6 +8,8 @@ import {
   isPresetId,
   PRESET_IDS,
   PRESETS,
+  SPEECH_PROTOCOL,
+  SPEECH_PROTOCOL_REMINDER,
 } from '../src/presets.js';
 import { loreEntryKey } from '../src/lorebook.js';
 import {
@@ -246,7 +248,7 @@ describe('assemblePrompt', () => {
   it('keeps every {{img::…}} reference, as RisuAI sends them', () => {
     const withImages: HistoryMessage[] = [
       { role: 'assistant', content: '{{img::smile}}웃으며 인사한다.' },
-      { role: 'user', content: '반가워 {{img::wave}}' },
+      { role: 'user', content: '반가워 {{img::wave}}{{inlay::photo-1}}' },
     ];
     const { system, messages } = assemblePrompt({
       plot: {
@@ -279,6 +281,8 @@ describe('assemblePrompt', () => {
     }
     // The model's own earlier picture is in the history as it wrote it.
     expect(messages.map((message) => message.content)).toContain('{{img::smile}}웃으며 인사한다.');
+    // An inlay names a picture in the sender's own RisuAI storage; RisuAI drops it from turns.
+    expect(messages.map((message) => message.content)).toContain('반가워 {{img::wave}}');
   });
 
   it('names the open images for {{assetlist}} and {{emotionlist}}', () => {
@@ -397,6 +401,27 @@ describe('assemblePrompt', () => {
     expect(system.startsWith('MAIN\n\n추가 규칙.')).toBe(true);
     expect(system).not.toContain('무시된다.');
     expect(messages.at(-1)).toEqual({ role: 'system', content: 'POST 리마인더.' });
+  });
+
+  it("keeps the preset's speech protocol under a card's own instructions", () => {
+    const assembled = (systemPrompt: string, postHistoryInstructions: string) =>
+      assemblePrompt({
+        plot,
+        characters: [{ name: '아리아', card: { ...card, systemPrompt, postHistoryInstructions } }],
+        history,
+        preset: DEFAULT_PRESET,
+      });
+    // A RisuAI card's instructions know nothing of the `이름: ` lines a reply is read by.
+    const own = assembled('카드의 규칙.', '카드의 리마인더.');
+    expect(own.system.startsWith(`카드의 규칙.\n\n${SPEECH_PROTOCOL}`)).toBe(true);
+    expect(own.system).not.toContain('작성 규칙:');
+    expect(own.messages.at(-1)).toEqual({
+      role: 'system',
+      content: `카드의 리마인더.\n\n${SPEECH_PROTOCOL_REMINDER}`,
+    });
+    // One that brings the preset back through {{original}} already has it — once.
+    const kept = assembled('{{original}}\n\n추가.', '');
+    expect(kept.system.split(SPEECH_PROTOCOL)).toHaveLength(2);
   });
 
   it('drops example dialogue first, then the oldest history', () => {

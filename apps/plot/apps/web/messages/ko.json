@@ -252,7 +252,7 @@
     "displayScriptIn": "정규식",
     "displayScriptInHint": "예: \\[status\\] hp=(\\d+)",
     "displayScriptOut": "HTML 템플릿",
-    "displayScriptOutHint": "$1~$9로 캡처를 넣고 '{{getvar::키}} {{calc::식}} {{#if 식}} {{#each 목록}} {{img::슬러그}} {{button::라벨::입력}}' 매크로를 쓸 수 있습니다.",
+    "displayScriptOutHint": "$1~$99로 캡처를 넣고 '{{getvar::키}} {{calc::식}} {{#if 식}} {{#each 목록}} {{img::슬러그}} {{button::라벨::입력}}' 매크로를 쓸 수 있습니다.",
     "displayScriptOrder": "적용 순서",
     "displayScriptAction": "동작",
     "displayScriptActionNone": "그 자리에 표시",

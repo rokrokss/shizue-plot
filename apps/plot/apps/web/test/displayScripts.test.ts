@@ -85,6 +85,44 @@ describe('applyDisplayScripts', () => {
     expect(html(segments)).toEqual(['<i>50 $7</i>']);
   });
 
+  it('reads two digits as String.prototype.replace does', () => {
+    // `$10` is group 10 when there is one, and `$1` then `0` when there is not;
+    // `$01` is group 1. The expected strings are what `replace` itself gives.
+    const ten = '(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)';
+    expect(
+      html(applyDisplayScripts('abcdefghij', context([script({ in: ten, out: '<i>$10 $11 $1 $01</i>' })]))),
+    ).toEqual([`<i>${'abcdefghij'.replace(new RegExp(ten), '$10 $11 $1 $01')}</i>`]);
+    expect('abcdefghij'.replace(new RegExp(ten), '$10 $11 $1 $01')).toBe('j a1 a a');
+
+    expect(
+      html(applyDisplayScripts('hp=50', context([script({ in: 'hp=(\\d+)', out: '<i>$10|$01</i>' })]))),
+    ).toEqual(['<i>500|50</i>']);
+  });
+
+  it('binds nothing for a group that took no part in the match, as replace does', () => {
+    const segments = applyDisplayScripts('b', context([script({ in: '(a)|(b)', out: '<i>[$1|$2]</i>' })]));
+    expect(html(segments)).toEqual(['<i>[|b]</i>']);
+  });
+
+  it('still binds $0 to the whole match, where replace would leave it literal', () => {
+    const segments = applyDisplayScripts('hp=50', context([script({ in: 'hp=(\\d+)', out: '<i>$0</i>' })]));
+    expect(html(segments)).toEqual(['<i>hp=50</i>']);
+  });
+
+  it('runs scripts with the same order in list order', () => {
+    const segments = applyDisplayScripts(
+      'x',
+      context([
+        script({ order: 1, in: 'z', out: '<u>$&</u>' }),
+        script({ order: 0, in: 'x', out: 'y' }),
+        script({ order: 0, in: 'y', out: '<b>z</b>' }),
+      ]),
+    );
+    // x → y, then y → <b>z</b>, then the z inside is wrapped. Reversed, the tie
+    // would leave a bare `y`.
+    expect(html(segments)).toEqual(['<b><u>z</u></b>']);
+  });
+
   it('binds the chat variables and platform values a template asks for', () => {
     const segments = applyDisplayScripts(
       '[status] hp=50',

@@ -76,7 +76,7 @@ export interface LoreSettings {
 export interface DisplayScript {
   /** Regular expression source, matched against the raw message text. */
   in: string;
-  /** HTML template. `$1`..`$9`, `$&` and `$<name>` bind the match; CBS macros bind the chat. */
+  /** HTML template. `$1`..`$99`, `$&` and `$<name>` bind the match; CBS macros bind the chat. */
   out: string;
   /** Regex flags. `g` is always applied. */
   flags?: string;

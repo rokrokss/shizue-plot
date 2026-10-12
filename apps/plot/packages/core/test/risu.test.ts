@@ -78,7 +78,8 @@ describe('RisuAI customScripts import', () => {
       in: '\\[status\\] hp=(\\d+)',
       out: '<div class="hp">HP $1</div>',
       flags: 'gi',
-      order: 3,
+      // Its place in the run, not RisuAI's number: alone, it runs first.
+      order: 0,
       action: 'move_top',
       enabled: true,
     });
@@ -90,11 +91,12 @@ describe('RisuAI customScripts import', () => {
     expect(card.displayScripts?.[0]).toMatchObject({ flags: 'g', action: 'repeat_back' });
   });
 
-  it('honours ableFlag: without it the letters are not flags', () => {
+  it('honours ableFlag: without it nothing in the flag field is read', () => {
     const card = normalizeCard(risuCard([editdisplay({ ableFlag: false, flag: 'gi<move_top>' })]));
     expect(card.displayScripts?.[0]?.flags).toBeUndefined();
-    // The directive is read either way — it is not a flag.
-    expect(card.displayScripts?.[0]?.action).toBe('move_top');
+    // RisuAI parses the directives only when ableFlag is on, so this script
+    // rendered in place for the creator who wrote it.
+    expect(card.displayScripts?.[0]?.action).toBeUndefined();
   });
 
   it('imports a pattern that could hang a reader switched off rather than armed', () => {
@@ -109,7 +111,7 @@ describe('RisuAI customScripts import', () => {
     expect(card.displayScripts?.[0]).toEqual({
       in: '\\[status\\] hp=(\\d+)',
       out: '<div>HP $1</div>',
-      order: 3,
+      order: 0,
       action: 'move_top',
       enabled: true,
     });
@@ -149,7 +151,7 @@ describe('card export', () => {
       in: '\\[status\\] hp=(\\d+)',
       out: '<div class="hp">HP $1</div>',
       ableFlag: true,
-      flag: 'gi<move_top><order 3>',
+      flag: 'gi<move_top>',
     });
   });
 
@@ -203,6 +205,79 @@ describe('card export', () => {
       },
     });
     expect(exportCardV3(card).data.extensions).toEqual({});
+  });
+});
+
+describe('RisuAI script order', () => {
+  /** A script whose pattern is its name, so a sequence reads as a list of names. */
+  const named = (name: string, flag = '', ableFlag = true) =>
+    editdisplay({ in: name, out: `<b>${name}</b>`, ableFlag, flag });
+  const placed = (scripts: DisplayScript[] | undefined) =>
+    scripts?.map(({ in: source, order }) => [source, order]);
+
+  it('keeps a list without order directives as it stands', () => {
+    const card = normalizeCard(risuCard([named('a'), named('b', 'g'), named('c')]));
+    expect(placed(card.displayScripts)).toEqual([['a', 0], ['b', 1], ['c', 2]]);
+  });
+
+  it('runs the highest order first once any script has one, the rest counting as 0', () => {
+    // RisuAI sorts `b.order - a.order`, stably: the two 2s keep their places, and
+    // so do the two scripts without a number. Ours runs the lowest first, so the
+    // scripts are numbered down RisuAI's sequence rather than given its numbers.
+    const card = normalizeCard(
+      risuCard([
+        named('a'),
+        named('b', '<order 2>'),
+        named('c', 'g<order -1>'),
+        named('d', '<order 2>'),
+        named('e'),
+      ]),
+    );
+    expect(placed(card.displayScripts)).toEqual([['b', 0], ['d', 1], ['a', 2], ['e', 3], ['c', 4]]);
+    expect(card.displayScripts?.[4]?.flags).toBe('g');
+  });
+
+  it('reads no order RisuAI would not: with ableFlag off, or written into out', () => {
+    const card = normalizeCard(
+      risuCard([
+        named('a', '<order 5>', false),
+        editdisplay({ in: 'b', out: '<order 9>\n<b>b</b>' }),
+        named('c', '<order 1>'),
+      ]),
+    );
+    expect(placed(card.displayScripts)).toEqual([['c', 0], ['a', 1], ['b', 2]]);
+    expect(card.displayScripts?.[2]?.out).toBe('<b>b</b>');
+  });
+
+  it('exports the scripts in the sequence they run here, without an order directive', () => {
+    const scripts: DisplayScript[] = [
+      { in: 'x', out: 'X', order: 5, enabled: true },
+      { in: 'y', out: 'Y', order: 2, enabled: true },
+      // A tie with `x` runs after it, here and in the export.
+      { in: 'z', out: 'Z', order: 5, enabled: true },
+    ];
+    const exported = exportCardV3({ ...normalizeCard(risuCard([])), displayScripts: scripts });
+    const written = (
+      exported.data.extensions as { risuai: { customScripts: Record<string, unknown>[] } }
+    ).risuai.customScripts;
+
+    // With no directive on the list RisuAI runs it as it stands: y, x, z.
+    expect(written.map((script) => [script['in'], script['flag']])).toEqual([
+      ['y', ''],
+      ['x', ''],
+      ['z', ''],
+    ]);
+    expect(placed(normalizeCard(exported).displayScripts)).toEqual([['y', 0], ['x', 1], ['z', 2]]);
+  });
+
+  it('round-trips an ordered RisuAI card in the sequence RisuAI runs it', () => {
+    const card = normalizeCard(
+      risuCard([named('a'), named('b', '<order 2>'), named('c', 'g<order -1>')]),
+    );
+    expect(placed(card.displayScripts)).toEqual([['b', 0], ['a', 1], ['c', 2]]);
+    const reimported = normalizeCard(exportCardV3(card));
+    expect(reimported.displayScripts).toEqual(card.displayScripts);
+    expect(normalizeCard(exportCardV3(reimported)).displayScripts).toEqual(card.displayScripts);
   });
 });
 

@@ -219,8 +219,15 @@ export function parseCbs(source: string, options: { strict?: boolean } = {}): Cb
     append(top(), macro);
   };
 
+  // Only a brace can open or close anything, so the scan jumps from one to the
+  // next rather than stepping through the prose between them — the variable fold
+  // parses every message of a branch, and most of that is prose.
+  const brace = /[{}]/g;
   let i = 0;
   while (i < source.length - 1) {
+    brace.lastIndex = i;
+    if (!brace.exec(source)) break;
+    i = brace.lastIndex - 1;
     const here = source.charCodeAt(i);
     const next = source.charCodeAt(i + 1);
     if (here === 0x7b && next === 0x7b) {
@@ -1075,11 +1082,12 @@ export function evaluateCbs(source: string, nodes: CbsNode[], host: CbsHost = {}
         for (let i = 0; i < count; i += 1) total += Math.floor(random() * sides) + 1;
         return derived(String(total), [notation]);
       }
+      case 'br':
       case 'newline':
       case 'space': {
-        // RisuAI's `newline` is its `br`; ST's takes a count — a whole number, as
-        // ST checks it, or the macro is left as written.
-        const unit = name === 'newline' ? '\n' : ' ';
+        // `br` is RisuAI's own name for it and `newline` its alias; ST's takes a
+        // count — a whole number, as ST checks it, or the macro is left as written.
+        const unit = name === 'space' ? ' ' : '\n';
         if (args.length === 0) return { text: unit };
         const count = value(1);
         if (count.deferred) return derived('', [count]);
@@ -1136,6 +1144,8 @@ export const assetMacroKind = (name: string): AssetMacroKind | undefined =>
 export interface AssetMacro {
   start: number;
   end: number;
+  /** The normalized macro name — `img`, `inlay`, `videoimg` … */
+  name: string;
   kind: AssetMacroKind;
   /** The asset it names, trimmed; null when the name is composed at render time. */
   ref: string | null;
@@ -1143,9 +1153,10 @@ export interface AssetMacro {
 
 /**
  * Every asset macro in `text`, outermost first and in order — inside blocks and
- * other macros' arguments too, since none of them may reach a model or a screen
- * as written. One whose name is built from other macros has no `ref`: only a
- * renderer holding the variables can say which image it means.
+ * other macros' arguments too, since none of them may reach a screen as written
+ * (the roleplay prompt is the one reader that gets them verbatim). One whose
+ * name is built from other macros has no `ref`: only a renderer holding the
+ * variables can say which image it means.
  */
 export function findAssetMacros(text: string): AssetMacro[] {
   if (!text.includes('{{')) return [];
@@ -1170,7 +1181,7 @@ export function findAssetMacros(text: string): AssetMacro[] {
       const ref = literal
         ? rest.map((part) => part.map((child) => (child as CbsText).text).join('')).join(separator).trim()
         : null;
-      found.push({ start: node.start, end: node.end, kind, ref });
+      found.push({ start: node.start, end: node.end, name: name!, kind, ref });
     }
   };
   walk(parseCbs(text));

@@ -17,14 +17,14 @@ export interface Preset {
  * exactly this shape, so five copies of it would be five ways for the rendered
  * chat to drift out of step with what the model was told to write.
  */
-const SPEECH_PROTOCOL = `발화 규칙:
+export const SPEECH_PROTOCOL = `발화 규칙:
 - 등장인물의 말과 행동은 \`이름: \`으로 시작하는 줄에 씁니다. 이름은 등장인물 목록에 있는 이름을 그대로 적습니다.
 - 그 줄 안에서 행동·표정·몸짓은 *별표로 감싼 묘사*로 적고, 나머지는 그 인물이 입 밖에 낸 말입니다.
 - 장면·배경·상황은 접두사 없는 줄에 씁니다. 그것이 내레이터의 몫이며, 내레이터는 대사를 하지 않습니다.
 - 한 응답에 여러 등장인물이 번갈아 나올 수 있습니다. 장면에 필요한 인물만 등장시키고, 없는 인물을 지어내지 않습니다.`;
 
 /** The same protocol as a one-line reminder, for the post-history block. */
-const SPEECH_PROTOCOL_REMINDER =
+export const SPEECH_PROTOCOL_REMINDER =
   '인물의 말과 행동은 `이름: ` 줄로, 그 줄 안의 행동은 *별표*로, 장면 서술은 접두사 없는 줄로 씁니다.';
 
 /** Writer-framing Korean RP system prompt. */
