@@ -253,12 +253,19 @@ function coerceTags(body: Record<string, unknown>): string[] | undefined {
   return normalizeTags(value as string[]);
 }
 
-/** A plot may only be published once it has enough substance to be worth finding. */
-function requirePublishable(plot: Plot): void {
+/**
+ * A plot may only be published once it has enough substance to be worth finding:
+ * a name, and something for the model to play — its own setting, or a member's
+ * description. An imported card keeps its character there and seldom has a
+ * scenario to lend the plot, and RisuAI lets a card open on the reader's first
+ * message, so neither a setting nor an opening is asked for on its own.
+ */
+function requirePublishable(plot: Plot, members: Character[]): void {
   const missing = [
     ...(plot.name.trim() ? [] : ['name']),
-    ...(plot.description.trim() ? [] : ['description']),
-    ...(plot.intros.some((intro) => intro.trim()) ? [] : ['intros']),
+    ...(plot.description.trim() || members.some((member) => member.card.description.trim())
+      ? []
+      : ['description']),
   ];
   if (missing.length > 0) {
     throw badRequest('not_publishable', `Cannot publish: ${missing.join(', ')} must not be empty`);
@@ -988,11 +995,12 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     if (typeof publish !== 'boolean') throw badRequest('invalid_request', 'publish must be a boolean');
     const safetyLevel = coerceSafetyLevel(optionalString(body, 'safetyLevel'));
     const rightsConfirmed = optionalBoolean(body, 'rightsConfirmed') === true;
-    if (publish) requirePublishable(plot);
     // Avatars imported before the card stripping existed are cleaned up here, so
     // going public never exposes an embedded card.
     if (publish) {
-      for (const member of await loadMembers(deps.db, id)) {
+      const members = await loadMembers(deps.db, id);
+      requirePublishable(plot, members);
+      for (const member of members) {
         if (member.avatarPath) await sanitizeStoredAvatar(deps.storage, member.avatarPath);
       }
     }

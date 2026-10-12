@@ -4,7 +4,7 @@ import { badRequest } from './errors.js';
 import { assetKey, type ObjectStorage } from './storage.js';
 
 /** Assets a single plot may hold. */
-export const MAX_ASSETS_PER_PLOT = 100;
+export const MAX_ASSETS_PER_PLOT = 1000;
 /** `{{img::slug}}` only ever carries `[a-z0-9-_]{1,40}`. */
 const MAX_SLUG_LENGTH = 40;
 /** Past this the measurement is wrong, not the image. */

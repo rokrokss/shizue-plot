@@ -36,8 +36,12 @@
  * without pulling the tokenizer and the card parser into the bundle.
  */
 
-/** Longest pattern a display script may carry. */
-export const MAX_DISPLAY_PATTERN_LENGTH = 500;
+/**
+ * Longest pattern a display script may carry. RisuAI sets none, and a card that
+ * names each of its images in one alternation runs to thousands of characters;
+ * what could hang a reader is the repetition refused below, not the length.
+ */
+export const MAX_DISPLAY_PATTERN_LENGTH = 10_000;
 
 /** Why a pattern was rejected. Stable codes — the UI maps them to a message. */
 export type PatternRejection = 'too_long' | 'invalid' | 'unsafe_repetition';

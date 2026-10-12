@@ -93,6 +93,8 @@ describe('toWorldInfo', () => {
       entry(),
       entry({ keys: ['검(술|객)'], useRegex: true, caseSensitive: true, depth: 0, role: 'assistant' }),
       entry({ position: 'after_char', selectiveLogic: 'and_all', secondaryKeys: ['밤'], selective: true }),
+      // The label rides in ST's `comment`.
+      entry({ name: '야경' }),
     ];
     // Through JSON, as the file travels.
     expect(fromLorebookFile(JSON.parse(JSON.stringify(toWorldInfo(entries))))).toEqual(entries);

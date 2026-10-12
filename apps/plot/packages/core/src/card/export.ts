@@ -32,6 +32,8 @@ function toContent(entry: LoreEntry): string {
 function toLorebookEntry(entry: LoreEntry, index: number): LorebookEntry {
   const { keys, secondaryKeys } = keysForSillyTavern(entry);
   return {
+    // Both, as RisuAI writes them: ST reads `comment`, the spec names `name`.
+    ...(entry.name ? { name: entry.name, comment: entry.name } : {}),
     keys,
     secondary_keys: secondaryKeys,
     selective: entry.selective,

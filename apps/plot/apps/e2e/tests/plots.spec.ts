@@ -76,9 +76,9 @@ test('a plot refuses to be published until it says something', async () => {
   plotId = new URL(page.url()).pathname.split('/').pop() ?? '';
 
   // A name alone is not a work: the publish is refused by the server, and the
-  // panel says which of the three it is missing.
+  // panel says what it is missing.
   await page.getByRole('button', { name: '공개하기' }).click();
-  await expect(page.getByText('제목·세계관·도입부를 모두 채워야 공개할 수 있습니다.')).toBeVisible();
+  await expect(page.getByText('제목과 함께 세계관이나 등장인물 설정을 채워야 공개할 수 있습니다.')).toBeVisible();
   await expect(page.getByRole('button', { name: '공개하기' })).toBeVisible();
 });
 

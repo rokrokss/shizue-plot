@@ -20,6 +20,7 @@ import {
   loreEntryKey,
   MAX_ASSETS,
   MAX_CHARACTERS_PER_PLOT,
+  MAX_DISPLAY_PATTERN_LENGTH,
   MAX_INTRO_LENGTH,
   MAX_INTRO_TEXT_LENGTH,
   MAX_INTROS_PER_PLOT,
@@ -1333,20 +1334,24 @@ describe('plots', () => {
     const bob = await signUp('publish-reader@example.com');
     const bare = await createPlot(alice, { name: '빈 작품' });
 
-    // Neither a setting nor an opening: nothing to find yet.
+    // Neither a setting nor anyone described: nothing for the model to play.
     const refused = await json(alice, `/api/plots/${bare.id}/publish`, 'POST', { publish: true });
     expect(refused.status).toBe(400);
     expect((await readJson(refused)).code).toBe('not_publishable');
     expect((await readPlot(alice, bare.id)).visibility).toBe('private');
 
-    // Only the setting: still not publishable — a reader needs a way in.
-    await patchPlot(alice, bare.id, { description: '설명만 있음' });
-    expect((await json(alice, `/api/plots/${bare.id}/publish`, 'POST', { publish: true })).status).toBe(400);
-    // An opening of nothing but whitespace is no opening.
-    await patchPlot(alice, bare.id, { intros: ['   '] });
+    // An opening is no substance on its own, and a description of whitespace is none.
+    await patchPlot(alice, bare.id, { intros: ['안녕'] });
+    await addCharacter(alice, bare.id, { name: '리안', card: { description: '   ' } });
     expect((await json(alice, `/api/plots/${bare.id}/publish`, 'POST', { publish: true })).status).toBe(400);
 
-    await patchPlot(alice, bare.id, { intros: ['안녕'] });
+    // The setting alone is enough — a chat may open on the reader's own message.
+    const setting = await createPlot(alice, { name: '세계관만', description: '설명만 있음' });
+    expect((await publishPlot(alice, setting.id)).visibility).toBe('public');
+
+    // So is a member's description, which is where an imported card keeps its
+    // character when it has no scenario to lend the plot.
+    await addCharacter(alice, bare.id, { name: '세라', card: { description: '기사단장.' } });
     const published = await publishPlot(alice, bare.id);
     expect(published.visibility).toBe('public');
     expect(published.publishedAt).toEqual(expect.any(String));
@@ -3172,9 +3177,10 @@ describe('chats', () => {
     const { plotId } = await setupChat(cookie);
     const plot = await patchPlot(cookie, plotId, {
       lorebook: [
-        { content: 'plain' },
+        { content: 'plain', name: '   ' },
         {
           content: 'advanced',
+          name: '  글노덮  ',
           selectiveLogic: 'not_all',
           probability: 150,
           group: ' 날씨, 시간 ',
@@ -3203,6 +3209,12 @@ describe('chats', () => {
         delay: 7,
       },
       {},
+    ]);
+    // The label is kept trimmed, and a blank one is none.
+    expect(plot.lorebook.map((entry: Record<string, unknown>) => entry['name'])).toEqual([
+      undefined,
+      '글노덮',
+      undefined,
     ]);
   });
 
@@ -4976,7 +4988,7 @@ describe('custom UI', () => {
     expect(rejected.status).toBe(400);
     expect((await readJson(rejected)).code).toBe('invalid_request');
     expect((await save('([')).status).toBe(400);
-    expect((await save(`a{${'0'.repeat(600)}}`)).status).toBe(400);
+    expect((await save(`a{${'0'.repeat(MAX_DISPLAY_PATTERN_LENGTH)}}`)).status).toBe(400);
 
     // The stored plot never took the bad one…
     expect((await readPlot(cookie, plot.id)).customUi).toBeNull();
@@ -10122,7 +10134,7 @@ describe('plot assets', () => {
     expect(new Uint8Array(await avatar.arrayBuffer())).toEqual(stripPngTextChunks(icon));
   });
 
-  it('stops a charx import at the archive parser bound, below the plot cap', async () => {
+  it('stops a charx import at the archive parser bound, within the plot cap', async () => {
     const cookie = await signUp('asset-charx-cap@example.com');
     /** The charx reader's own bound, which runs before this route. */
     const CHARX_ASSET_BOUND = MAX_ASSETS;
@@ -10135,8 +10147,8 @@ describe('plot assets', () => {
     }));
     const plot = await importCard(cookie, new File([buildCharx(v3Card, embedded)], 'many.charx'));
 
-    // The archive is bounded before its images ever reach the plot's own cap.
-    expect(CHARX_ASSET_BOUND).toBeLessThan(MAX_ASSETS_PER_PLOT);
+    // The archive is bounded before its images ever pass the plot's own cap.
+    expect(CHARX_ASSET_BOUND).toBeLessThanOrEqual(MAX_ASSETS_PER_PLOT);
     const slugs = (await listAssets(cookie, plot.id)).map((asset: any) => asset.slug);
     expect(slugs.sort()).toEqual(
       Array.from({ length: CHARX_ASSET_BOUND }, (_, i) => `e${i}`).sort(),

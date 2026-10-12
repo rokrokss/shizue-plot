@@ -61,7 +61,9 @@ function coerceLoreEntry(value: unknown): LoreEntry {
   const raw = (value ?? {}) as Record<string, unknown>;
   const depth = num(raw['depth'], -1);
   const role = raw['role'];
+  const name = str(raw['name']).trim();
   return {
+    ...(name ? { name } : {}),
     keys: strArray(raw['keys']),
     secondaryKeys: strArray(raw['secondaryKeys']),
     selective: bool(raw['selective'], false),

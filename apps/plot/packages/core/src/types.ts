@@ -6,6 +6,11 @@ export type LorePosition = 'before_char' | 'after_char';
 export type LoreRole = 'user' | 'assistant' | 'system';
 
 export interface LoreEntry {
+  /**
+   * The creator's label for the entry (CCv3 `name`/`comment`, SillyTavern's
+   * `comment`). Only the studio shows it; the model never reads it.
+   */
+  name?: string;
   keys: string[];
   secondaryKeys: string[];
   /** When true, secondaryKeys must also match. */

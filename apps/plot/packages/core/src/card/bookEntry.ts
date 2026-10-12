@@ -120,6 +120,11 @@ const wholeCount = (value: unknown): number | undefined => {
 };
 const boolOf = (value: unknown): boolean | undefined =>
   typeof value === 'boolean' ? value : undefined;
+/** The first of these that says anything, as an entry's label. */
+const labelOf = (...values: unknown[]): { name?: string } => {
+  const name = values.map((value) => (typeof value === 'string' ? value.trim() : '')).find(Boolean);
+  return name ? { name } : {};
+};
 
 /* ------------------------------------------------- SillyTavern's own terms */
 
@@ -282,6 +287,7 @@ function keyForSillyTavern(key: string, caseSensitive: boolean): string {
 /* ------------------------------------------------------------ assembling */
 
 interface BaseEntry {
+  name?: string;
   keys: string[];
   secondaryKeys: string[];
   selective: boolean;
@@ -357,6 +363,8 @@ export function loreEntryFromBook(raw: unknown): LoreEntry {
 
   return assemble(
     {
+      // RisuAI writes the label as both; ST writes only `comment`.
+      ...labelOf(entry['name'], entry['comment']),
       ...matching,
       selective: entry['selective'] === true,
       content: body,
@@ -381,6 +389,7 @@ export function loreEntryFromWorldInfo(raw: unknown): LoreEntry {
   );
   return assemble(
     {
+      ...labelOf(entry['comment']),
       ...keysOfSillyTavern(strings(entry['key']), strings(entry['keysecondary'])),
       selective: entry['selective'] === true,
       content: body,
@@ -465,7 +474,7 @@ export function worldInfoFieldsOf(entry: LoreEntry): Record<string, unknown> {
   return {
     key: keys,
     keysecondary: secondaryKeys,
-    comment: '',
+    comment: entry.name ?? '',
     content: entry.content,
     constant: entry.constant,
     selective: entry.selective,

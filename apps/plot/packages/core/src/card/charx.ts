@@ -1,4 +1,5 @@
 import { Unzip, UnzipInflate, type UnzipFile } from 'fflate';
+import { MAX_CARD_IMPORT_BYTES } from '../types.js';
 import { CardParseError } from './normalize.js';
 import { readRisum, type RisuModuleScripts } from './risum.js';
 
@@ -13,8 +14,12 @@ export const MAX_ENTRY_BYTES = 20 * 1024 * 1024;
  * the card's name is not known from the card, it *is* the card, and the module
  * must not share its fate with anything (see `readModule`) — so the worst case
  * for one archive is this budget plus one entry, on top of those two.
+ *
+ * As large as the file an import takes: images are stored rather than deflated,
+ * so a card under that cap holds about this much of them, and a smaller budget
+ * would quietly drop the rest of a big card's pictures.
  */
-export const MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+export const MAX_TOTAL_BYTES = MAX_CARD_IMPORT_BYTES;
 /**
  * The archive is fed in small slices rather than one push: the inflater emits
  * output per slice, so an oversized entry trips the cap after a few MB instead
@@ -22,10 +27,11 @@ export const MAX_TOTAL_BYTES = 64 * 1024 * 1024;
  */
 const PUSH_CHUNK_BYTES = 16 * 1024;
 /**
- * Embedded assets kept per archive — a parse budget, deliberately below the
- * plot's 100-asset cap (uploads can reach the rest).
+ * Embedded assets kept per archive — a parse budget, at the plot's 1000-asset
+ * cap: Realm's popular cards carry a few hundred images, and one card is
+ * allowed to fill a plot.
  */
-export const MAX_ASSETS = 50;
+export const MAX_ASSETS = 1000;
 /** Only images become character assets; the declared type is not restricted. */
 export const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp']);
 

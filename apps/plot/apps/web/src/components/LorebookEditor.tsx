@@ -85,7 +85,7 @@ export function LorebookEditor({
           <summary className="flex cursor-pointer items-center gap-3 px-3 py-2.5 text-sm">
             <span className="text-xs text-muted">{t('loreEntry', { index: index + 1 })}</span>
             <span className="min-w-0 flex-1 truncate text-fg">
-              {entry.keys.join(', ') || entry.content.slice(0, 40)}
+              {entry.name || entry.keys.join(', ') || entry.content.slice(0, 40)}
             </span>
             {/* The star is shorthand a reader has to have been told about, so it
                 carries the word it stands for rather than only its colour. */}
@@ -101,6 +101,13 @@ export function LorebookEditor({
           </summary>
 
           <div className="space-y-4 border-t border-line px-3 py-4">
+            <Field label={t('loreName')} hint={t('loreNameHint')}>
+              <TextInput
+                value={entry.name ?? ''}
+                onChange={(event) => update(index, { name: event.target.value })}
+              />
+            </Field>
+
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label={t('loreKeys')}>
                 <ListInput value={entry.keys} onChange={(keys) => update(index, { keys })} />

@@ -1,6 +1,7 @@
 import { unzipSync, unzlibSync, zipSync } from 'fflate';
 import { describe, expect, it } from 'vitest';
 import { exportCardPng, exportCardV3 } from '../src/card/export.js';
+import { MAX_ASSETS, MAX_TOTAL_BYTES } from '../src/card/charx.js';
 import { CardParseError, normalizeCard, parseDecorators } from '../src/card/normalize.js';
 import { parseCard } from '../src/card/parse.js';
 import { introFromCreatorNotes, MAX_INTRO_LENGTH } from '../src/card/intro.js';
@@ -294,17 +295,17 @@ describe('parseCard - PNG assets', () => {
     ]);
   });
 
-  it('stops at 50 assets', () => {
+  it(`stops at ${MAX_ASSETS} assets`, () => {
     const chunks: Record<string, string> = {};
     const declared: unknown[] = [];
-    for (let i = 0; i < 60; i += 1) {
+    for (let i = 0; i < MAX_ASSETS + 10; i += 1) {
       chunks[`chara-ext-asset_:${i}`] = base64(Uint8Array.from([i]));
       declared.push({ type: 'emotion', name: `e${i}`, uri: `__asset:${i}`, ext: 'png' });
     }
     const { assets } = parseCard(buildPngWithTextChunks({ ...chunks, ccv3: v3WithAssets(declared) }));
 
-    expect(assets).toHaveLength(50);
-    expect(assets!.at(-1)!.name).toBe('e49');
+    expect(assets).toHaveLength(MAX_ASSETS);
+    expect(assets!.at(-1)!.name).toBe(`e${MAX_ASSETS - 1}`);
   });
 
   it('stops at an asset over the per-entry cap instead of failing the import', () => {
@@ -413,17 +414,17 @@ describe('parseCard - charx', () => {
     ]);
   });
 
-  it('stops at 50 assets', () => {
+  it(`stops at ${MAX_ASSETS} assets`, () => {
     const files: Record<string, Uint8Array> = { 'assets/icon/main.png': iconBytes };
     const declared = [{ type: 'icon', name: 'main', uri: 'embeded://assets/icon/main.png', ext: 'png' }];
-    for (let i = 0; i < 60; i += 1) {
+    for (let i = 0; i < MAX_ASSETS + 10; i += 1) {
       files[`assets/emotion/e${i}.png`] = Uint8Array.from([i]);
       declared.push({ type: 'emotion', name: `e${i}`, uri: `embeded://assets/emotion/e${i}.png`, ext: 'png' });
     }
     const { assets } = parseCard(zipSync({ 'card.json': cardWithAssets(declared), ...files }));
 
-    expect(assets).toHaveLength(50);
-    expect(assets!.at(-1)!.name).toBe('e49');
+    expect(assets).toHaveLength(MAX_ASSETS);
+    expect(assets!.at(-1)!.name).toBe(`e${MAX_ASSETS - 1}`);
   });
 
   it('stops the asset pass at an oversized extra asset instead of failing the import', () => {
@@ -449,14 +450,15 @@ describe('parseCard - charx', () => {
   });
 
   it('shares one inflate budget between the icon and the assets', () => {
-    // Four 17MB entries: each under the per-entry cap, together over the 64MB
-    // archive budget. Per-pass budgets would let all four through.
-    const big = new Uint8Array(17 * 1024 * 1024);
+    // 19MB entries: each under the per-entry cap, one more than the archive
+    // budget holds. Per-pass budgets would let all of them through.
+    const big = new Uint8Array(19 * 1024 * 1024);
+    const fit = Math.floor(MAX_TOTAL_BYTES / big.length);
     const declared: unknown[] = [
       { type: 'icon', name: 'main', uri: 'embeded://assets/icon/main.png', ext: 'png' },
     ];
     const files: Record<string, Uint8Array> = { 'assets/icon/main.png': iconBytes };
-    for (let i = 0; i < 4; i += 1) {
+    for (let i = 0; i <= fit; i += 1) {
       declared.push({ type: 'emotion', name: `b${i}`, uri: `embeded://assets/b${i}.png`, ext: 'png' });
       files[`assets/b${i}.png`] = big;
     }
@@ -466,8 +468,8 @@ describe('parseCard - charx', () => {
     );
     // The icon is read in the same pass and comes first in the archive.
     expect(iconBuffer).toEqual(iconBytes);
-    // 3 x 17MB fit; the fourth crosses the budget and ends the pass.
-    expect(assets!.map((asset) => asset.name)).toEqual(['b0', 'b1', 'b2']);
+    // `fit` of them fit; the next crosses the budget and ends the pass.
+    expect(assets!.map((asset) => asset.name)).toEqual(Array.from({ length: fit }, (_, i) => `b${i}`));
   });
 
   it('fails when card.json is missing', () => {
@@ -724,6 +726,47 @@ describe('exportCardV3', () => {
     const reparsed = parseCard(exported).card;
     expect(reparsed.lorebook).toEqual(card.lorebook);
     expect(reparsed.loreSettings).toEqual(card.loreSettings);
+  });
+
+  it("keeps an entry's label through the round trip, out of the prompt", () => {
+    const entry = (fields: Record<string, unknown>) => ({
+      keys: [''],
+      content: '호그와트의 규칙.',
+      extensions: {},
+      enabled: true,
+      insertion_order: 0,
+      use_regex: false,
+      constant: true,
+      ...fields,
+    });
+    const card = normalizeCard({
+      ...v3Card,
+      data: {
+        ...v3Card.data,
+        character_book: {
+          extensions: {},
+          // RisuAI writes both; SillyTavern only `comment`; most cards neither.
+          entries: [entry({ name: '글노덮', comment: '글노덮' }), entry({ comment: '  학교  ' }), entry({})],
+        },
+      },
+    });
+    expect(card.lorebook.map((lore) => lore.name)).toEqual(['글노덮', '학교', undefined]);
+
+    const written = exportCardV3(card).data.character_book!.entries;
+    expect(written.map((lore) => [lore.name, lore.comment])).toEqual([
+      ['글노덮', '글노덮'],
+      ['학교', '학교'],
+      [undefined, undefined],
+    ]);
+    expect(parseCard(exportCardV3(card)).card.lorebook).toEqual(card.lorebook);
+
+    const { system } = assemblePrompt({
+      plot: { name: '이야기', description: '', lorebook: [] },
+      characters: [{ name: card.name, card }],
+      history: [{ role: 'user', content: '안녕' }],
+    });
+    expect(system).toContain('호그와트의 규칙.');
+    expect(system).not.toContain('글노덮');
   });
 
   it('writes a token budget only where the card has one of its own', () => {
