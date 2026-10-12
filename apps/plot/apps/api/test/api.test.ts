@@ -1788,7 +1788,7 @@ describe('import provenance and publishing rights', () => {
 
     // Over the file cap but inside the body limit's room for framing: the
     // route's own refusal, under the same code.
-    // Bytes rather than a string: the cap is a few hundred megabytes, and the
+    // Bytes rather than a string: the cap is a gigabyte, and the
     // route refuses on the file's size before reading a byte of it.
     const huge = new Uint8Array(MAX_CARD_IMPORT_BYTES + 1);
     const over = await importWith(cookie, '/api/plots/import', new File([huge], 'huge.json'));

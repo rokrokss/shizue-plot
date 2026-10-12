@@ -1,4 +1,4 @@
-import { unzipSync, unzlibSync, zipSync } from 'fflate';
+import { unzipSync, unzlibSync, zipSync, type Zippable } from 'fflate';
 import { describe, expect, it } from 'vitest';
 import { exportCardPng, exportCardV3 } from '../src/card/export.js';
 import { MAX_ASSETS, MAX_TOTAL_BYTES } from '../src/card/charx.js';
@@ -457,10 +457,11 @@ describe('parseCard - charx', () => {
     const declared: unknown[] = [
       { type: 'icon', name: 'main', uri: 'embeded://assets/icon/main.png', ext: 'png' },
     ];
-    const files: Record<string, Uint8Array> = { 'assets/icon/main.png': iconBytes };
+    const files: Zippable = { 'assets/icon/main.png': iconBytes };
     for (let i = 0; i <= fit; i += 1) {
       declared.push({ type: 'emotion', name: `b${i}`, uri: `embeded://assets/b${i}.png`, ext: 'png' });
-      files[`assets/b${i}.png`] = big;
+      // Stored, as a real card's images are: a gigabyte is not deflated twice per run.
+      files[`assets/b${i}.png`] = [big, { level: 0 }];
     }
 
     const { iconBuffer, assets } = parseCard(

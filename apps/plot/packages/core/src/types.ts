@@ -260,11 +260,11 @@ export const MAX_TAGS = 10;
 export const MAX_TAG_LENGTH = 20;
 /**
  * One card file an import takes. RisuRealm caps a charx upload at 150MB and its
- * popular cards carry hundreds of images; twice that leaves room for archives
+ * popular cards carry hundreds of images; a gigabyte leaves room for archives
  * built elsewhere, so a card is not refused for its size. A PNG card with its
  * images inside runs to about 30MB.
  */
-export const MAX_CARD_IMPORT_BYTES = 300 * 1024 * 1024;
+export const MAX_CARD_IMPORT_BYTES = 1024 * 1024 * 1024;
 
 /**
  * The relationship axes an unlock may be keyed on. Mirrors `RELATIONSHIP_AXES`

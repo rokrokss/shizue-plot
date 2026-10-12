@@ -332,7 +332,7 @@
     "realmTitle": "RisuRealmから読み込む",
     "realmUrl": "キャラクターページのアドレス",
     "realmPlaceholder": "https://realm.risuai.net/character/…",
-    "realmHint": "カードはこのブラウザが RisuRealm から直接ダウンロードして読み込みます。300MBまで読み込めます。",
+    "realmHint": "カードはこのブラウザが RisuRealm から直接ダウンロードして読み込みます。1GBまで読み込めます。",
     "realmBrowse": "キャラクターは <link>RisuRealm</link> で探せます。",
     "realmSubmit": "読み込む"
   },
@@ -990,7 +990,7 @@
     "chatgpt_login_failed": "ChatGPT ログインに失敗しました。再試行してください。",
     "chatgpt_unavailable": "現在 ChatGPT ログインを利用できません。しばらくしてから再試行してください。",
     "rights_unconfirmed": "読み込んだ登場人物を公開するには、権利の確認が必要です。",
-    "card_too_large": "カードファイルが大きすぎます。300MBまで読み込めます。",
+    "card_too_large": "カードファイルが大きすぎます。1GBまで読み込めます。",
     "realm_invalid_url": "RisuRealm のキャラクターページのアドレスではありません。https://realm.risuai.net/character/… の形式で貼り付けてください。",
     "realm_not_found": "RisuRealm でこのキャラクターが見つかりません。",
     "realm_forbidden": "このキャラクターは RisuRealm からダウンロードできない設定になっています。",
