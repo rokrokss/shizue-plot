@@ -23,7 +23,7 @@ const failure = (code: string, message: string): ApiError => new ApiError(0, cod
 
 /**
  * Refuses a card the import routes would refuse anyway, before it is sent: the
- * creator learns the limit now rather than after uploading 50MB to hear it.
+ * creator learns the limit now rather than after uploading hundreds of megabytes to hear it.
  */
 export function checkCardSize(file: File): File {
   if (file.size > MAX_CARD_IMPORT_BYTES) {

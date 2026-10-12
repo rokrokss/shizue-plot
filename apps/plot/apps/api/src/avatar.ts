@@ -3,7 +3,7 @@ import { avatarKey, readAll, type ObjectStorage } from './storage.js';
 
 /**
  * Cap on an image a creator uploads directly — an avatar or a plot cover. Not a
- * card import: a card PNG carries a whole character and has its own 50MB body
+ * card import: a card PNG carries a whole character and has its own 300MB body
  * limit (ARCHITECTURE §10).
  */
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;

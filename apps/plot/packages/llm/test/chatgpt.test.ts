@@ -50,7 +50,7 @@ describe('ChatGPT OAuth', () => {
     const url = new URL(authorizationUrl(pending, 'urn:uuid:host'));
     expect(url.origin + url.pathname).toBe('https://auth.openai.com/api/accounts/authorize');
     expect(Object.fromEntries(url.searchParams)).toMatchObject({
-      client_id: 'dynamic_agent_client', agent_name_hint: 'shizue', scope, redirect_uri: 'http://127.0.0.1:47801/auth/callback',
+      client_id: 'dynamic_agent_client', agent_name_hint: 'Shizue Plot', scope, redirect_uri: 'http://127.0.0.1:47801/auth/callback',
       state: pending.state, nonce: pending.nonce, ext_agent_host_id: 'urn:uuid:host', code_challenge_method: 'S256',
       code_challenge: createHash('sha256').update(pending.verifier).digest('base64url'),
     });

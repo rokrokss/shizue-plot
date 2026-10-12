@@ -313,7 +313,7 @@
     "realmTitle": "Import from RisuRealm",
     "realmUrl": "Character page address",
     "realmPlaceholder": "https://realm.risuai.net/character/…",
-    "realmHint": "Your browser downloads the card straight from RisuRealm. Cards up to 50MB can be imported.",
+    "realmHint": "Your browser downloads the card straight from RisuRealm. Cards up to 300MB can be imported.",
     "realmBrowse": "Browse characters on <link>RisuRealm</link>.",
     "realmSubmit": "Import"
   },
@@ -964,7 +964,7 @@
     "chatgpt_login_failed": "ChatGPT sign-in failed. Try again.",
     "chatgpt_unavailable": "Sign in with ChatGPT isn't available right now. Try again later.",
     "rights_unconfirmed": "Confirm your rights to the imported characters before publishing them.",
-    "card_too_large": "That card file is too large. Cards up to 50MB can be imported.",
+    "card_too_large": "That card file is too large. Cards up to 300MB can be imported.",
     "realm_invalid_url": "That isn't a RisuRealm character page. Paste an address like https://realm.risuai.net/character/…",
     "realm_not_found": "This character wasn't found on RisuRealm.",
     "realm_forbidden": "This character can't be downloaded from RisuRealm.",

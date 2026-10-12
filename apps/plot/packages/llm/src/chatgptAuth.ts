@@ -48,7 +48,7 @@ export function authorizationUrl(pending: PendingSignIn, hostId: string): string
     state: pending.state, nonce: pending.nonce,
     code_challenge: createHash('sha256').update(pending.verifier).digest('base64url'), code_challenge_method: 'S256',
     ext_agent_host_id: hostId,
-    ...(pending.clientId ? {} : { agent_name_hint: 'shizue' }),
+    ...(pending.clientId ? {} : { agent_name_hint: 'Shizue Plot' }),
   }).toString();
   return url.href;
 }

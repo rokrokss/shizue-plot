@@ -7,6 +7,7 @@ import {
   emptyCard,
   exportCardPng,
   exportCardV3,
+  MAX_CARD_IMPORT_BYTES,
   MAX_CHARACTERS_PER_PLOT,
   MAX_INTRO_LENGTH,
   MAX_INTRO_TEXT_LENGTH,
@@ -91,12 +92,11 @@ const LANGUAGES: ContentLanguage[] = ['ko', 'en', 'ja'];
 const SAFETY_LEVELS: SafetyLevel[] = ['all'];
 
 /**
- * One card file. A RisuRealm PNG carries its images inside and runs to about
- * 30MB, and a charx with the same images is larger still. The body limit
- * (app.ts) and the web's rewrite proxy (next.config.ts) leave room for this
- * plus the multipart framing, and the import forms check it before uploading.
+ * One card file (`@shizue/core`). The body limit (app.ts) and the web's rewrite
+ * proxy (next.config.ts) leave room for this plus the multipart framing, and the
+ * import forms check it before uploading.
  */
-export const MAX_CARD_IMPORT_BYTES = 50 * 1024 * 1024;
+export { MAX_CARD_IMPORT_BYTES };
 /** The upload's own name as the provenance keeps it; a multipart name has no cap of its own. */
 const MAX_IMPORT_FILE_NAME_LENGTH = 255;
 /** An uploaded asset's reference name (`name`), the one a pasted `{{img::name}}` is written in. */

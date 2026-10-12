@@ -217,7 +217,7 @@ OpenAI의 오픈소스 흐름은 오픈소스·로컬 호스팅 앱이 대상이
 ST의 "Download Backup"(사용자 데이터 디렉터리 `data/<handle>/` 전체를 archiver로 묶은 zip — 디렉터리 내용이 zip 루트에 있고 `secrets.json`은 기본으로 빠진다, `src/users.js` `createBackupArchive`) 또는 그 폴더를 **브라우저가** 읽어 임포트할 것을 고르게 하는 순수 모듈이다. Buffer·fs 없이 돌고, 패키지 루트에서 내보내지 않아 쓰는 페이지만 가져간다.
 
 - `zip.ts` — 범위 읽기(`ZipSource.read(offset, length)`, 웹은 `File.slice()`) 위의 ZIP 리더. 수 GB 백업을 통째로 올리지 않도록 끝의 EOCD(주석 64KiB까지 거슬러 찾고, 주석이 파일 끝에 정확히 닿는지로 우연한 시그니처와 가른다)에서 중앙 디렉터리를 한 번 읽고(64MiB·50만 엔트리 상한), 엔트리는 필요할 때 자기 오프셋에서 읽는다. ZIP64(로케이터 → ZIP64 EOCD, 엔트리 extra `0x0001`은 최댓값으로 찬 필드만 순서대로)를 읽는다. archiver는 데이터 디스크립터를 쓰므로(로컬 헤더의 크기가 0) 크기는 언제나 중앙 디렉터리에서, 데이터 시작은 로컬 헤더 자신의 이름·extra 길이로 잡는다. 이름은 플래그와 무관하게 UTF-8이다. store/deflate만 읽고 암호화·그 밖의 방식은 `ZipError`. `maxBytes`는 선언 크기가 아니라 인플레이터가 실제로 뱉은 바이트를 세며(1MiB 범위 읽기, 16KiB push — charx와 같은 이유) 넘는 순간 `FileTooLargeError`다.
-- `files.ts` — 루트 탐지와 허용 목록. 루트는 `characters/*.png`와 `settings.json` 앞의 접두사 중 가장 많이 나온 것(동률이면 얕은 것, 세 단계까지)이라, zip 루트·감싼 폴더 하나·webkitdirectory의 `default-user/…`·`data/default-user/…`·1.12 이전의 `public/…`이 한 규칙으로 풀린다. 임포트 한 번에 사용자 하나다. 루트 기준 `settings.json`, `characters/*.png`, `chats/<아바타 stem>/*.jsonl`, `group chats/*.jsonl`, `groups/*.json`, `worlds/*.json`만 파일이 되고 나머지(`secrets.json` 포함)는 보이지도 않는다. 종류별 읽기 상한 `ST_CAPS`: settings 32MiB, 캐릭터 50MiB(카드 임포트 한도), 챗 64MiB, 그룹 1MiB, 월드 16MiB. 고른 폴더의 파일은 크기가 진짜라 상한을 읽기 전에 건다.
+- `files.ts` — 루트 탐지와 허용 목록. 루트는 `characters/*.png`와 `settings.json` 앞의 접두사 중 가장 많이 나온 것(동률이면 얕은 것, 세 단계까지)이라, zip 루트·감싼 폴더 하나·webkitdirectory의 `default-user/…`·`data/default-user/…`·1.12 이전의 `public/…`이 한 규칙으로 풀린다. 임포트 한 번에 사용자 하나다. 루트 기준 `settings.json`, `characters/*.png`, `chats/<아바타 stem>/*.jsonl`, `group chats/*.jsonl`, `groups/*.json`, `worlds/*.json`만 파일이 되고 나머지(`secrets.json` 포함)는 보이지도 않는다. 종류별 읽기 상한 `ST_CAPS`: settings 32MiB, 캐릭터는 카드 임포트 한도(`MAX_CARD_IMPORT_BYTES`, 300MB), 챗 64MiB, 그룹 1MiB, 월드 16MiB. 고른 폴더의 파일은 크기가 진짜라 상한을 읽기 전에 건다.
 - `scan.ts` `scanSillyTavern` — settings.json·캐릭터 PNG·그룹만 읽고 챗·월드는 경로로만 싣는다(상한을 넘는 것은 크기로 미리 뺀다). 캐릭터 PNG는 `ccv3` → `chara` 청크에서 이름과 연결 월드(`data.extensions.world`)만 꺼낸다. settings.json에서 가져오는 것은 다섯 가지뿐이다: `power_user.personas`(`{아바타: 이름}`)와 `persona_descriptions[아바타].description`, `world_info_settings.world_info`(옛 파일은 최상위 `world_info` — ST도 그렇게 읽는다)의 `globalSelect`와 `charLore`(`[{name, extraBooks}]` — name은 **확장자를 뗀** 아바타 파일 이름, `getCharaFilename`), 그리고 `extension_settings.regex`. 파싱한 객체는 함수 밖으로 나가지 않고 settings.json 자체는 매니페스트에 없어 업로드될 길이 없다 — API 설정과 프록시 비밀번호가 거기 있다. 그룹 챗은 `group chats/<sanitize(id)>.jsonl`이고 옛 그룹은 `chat_id`만 가질 수 있다. 문제 있는 허용 목록 파일은 throw 대신 `skipped`에 이유(`too_large`·`unreadable`·`not_a_card`·`invalid_json`·`no_character`·`no_group`·`missing`)와 함께 남는다.
 - `chat.ts` `convertSillyTavernChat(jsonl, cast)` — 헤더 줄 뒤의 메시지를 `ImportedChatMessage`로. 지금의 ST는 헤더의 두 이름을 `'unused'`로 쓰고 `create_date`가 없어(`saveChat`) 이름은 첫 유저·캐릭터 메시지의 `name`에서 얻고, 메타데이터 마이그레이션 이전의 그룹 챗은 헤더 없이 메시지로 시작한다. `is_user` → user 그대로. ST 내레이터(`extra.type === 'narrator'`)는 `is_system`이어도 접두사 없는 assistant — 우리 내레이터다. 그 밖의 `is_system`(숨김·코멘트·툴 호출, ST가 프롬프트에서 빼는 것)은 `hidden`으로 세고 버린다. 캐릭터 메시지의 화자는 `original_avatar`(그룹 챗만 기록한다) → `name` 완전 일치 → 로스터가 하나면 그 사람 순으로 정하고, 글이 있는 모든 줄에 `이름: `을 붙인다(발화 파서가 이미 그 이름으로 읽는 줄은 그대로, 빈 줄은 여백). 못 정하면 접두사 없이 두고 `unknownSpeaker`로 센다. `swipes` → `versions`, `swipe_id` → `selected`(클램프)이고 선택된 칸은 `mes`로 채운다 — ST가 보여 주고 편집하는 것이 그쪽이다. 빈 버전은 빠지고 다 비면 `empty`, JSON 객체가 아닌 줄은 `malformed`, 2만 메시지(`MAX_CHAT_MESSAGES`) 너머는 `overLimit`. `send_date`는 ST `parseTimestamp`가 읽는 모양(epoch ms, ISO, `June 19, 2023 2:20pm`, humanized 세 가지)을 읽되 존이 없는 것은 ST처럼 UTC로 읽고, 못 읽으면 생략한다. throw하지 않는다.
 - `regexScriptsToDisplayScripts` — 전역 regex를 `card/sillyTavern.ts`의 카드 매핑 그대로(표시 전용만) 표시 스크립트로. 로어북 변환기는 따로 없다 — ST 월드 파일은 `fromLorebookFile`(`./world-info`)이 이미 읽는다.
@@ -549,7 +549,7 @@ API는 `@shizue/contracts`의 스키마를 사용한다.
 ```
 /api/plots                          목록(내 것) · 생성
 /api/plots/draft                    POST — 한 줄 설정 → 초안(저장하지 않는다, §7.6)
-/api/plots/import                   카드 파일 → 카드를 감싸는 새 플롯(50MB, 선택 필드 sourceUrl · worldInfo)
+/api/plots/import                   카드 파일 → 카드를 감싸는 새 플롯(300MB, 선택 필드 sourceUrl · worldInfo)
 /api/plots/migrate                  POST — 다른 플랫폼에서 붙여 넣은 초안 → 비공개 새 플롯 + 멤버(아래 붙여넣기 이주)
 /api/plots/:id                      소유자 뷰(전부) · PATCH · DELETE
 /api/plots/:id/publish              발행/회수 + 세이프티 선언 + 임포트 멤버의 권리 확인(rightsConfirmed)
@@ -558,7 +558,7 @@ API는 `@shizue/contracts`의 스키마를 사용한다.
 /api/plots/:id/like                 POST · DELETE
 /api/plots/:id/comments             목록(공개) · 작성
 /api/plots/:id/characters           로스터 목록 · 추가 · 재정렬(POST …/reorder)
-/api/plots/:id/characters/import    카드 파일 → 등장인물 한 명 추가(50MB, sourceUrl · worldInfo · 공개 플롯이면 rightsConfirmed)
+/api/plots/:id/characters/import    카드 파일 → 등장인물 한 명 추가(300MB, sourceUrl · worldInfo · 공개 플롯이면 rightsConfirmed)
 /api/plots/:id/characters/:cid      PATCH · DELETE · /avatar(업로드·삭제·서빙)
 /api/plots/:id/characters/:cid/export?format=json|png
                                     소유자 전용 — 저장된 카드 + 플롯 오버레이를 V3 카드 파일로(첨부 다운로드)
@@ -582,7 +582,7 @@ GET  /api/chats/:id/inspect           재생성이 지금 보낼 프롬프트의
 
 익명 뷰어 규칙은 두 줄로 끝난다: `visibleToViewer(null)`은 `publiclyListed()`와 같고, 좋아요 조인은 `on false`가 되어 `likedByMe`가 항상 false다. `c.userId`는 **가드 뒤에서만** 읽는다 — 그래서 그 변수의 타입이 `string`이고, 공개 표면은 `c.viewerId`(`string | null`)를 읽는다.
 
-바디 상한: 기본 5MB JSON, 카드 임포트 두 경로(`POST /api/plots/import`, `POST /api/plots/:id/characters/import`)는 카드 파일 50MB(`MAX_CARD_IMPORT_BYTES` — 넘으면 라우트가 413 `payload_too_large`)에 멀티파트 여유 1MB를 더한 바디, `POST /api/chats/:id/attachments`는 이미지 업로드 상한. RisuRealm의 PNG 카드는 그림을 품어 30MB 안팎이고 charx는 더 크다. **웹의 `/api` rewrite 프록시에도 따로 상한이 있다** — Next 16의 `experimental.proxyClientMaxBodySize`(기본 10MB)이고, 넘으면 413으로 거절하지 않고 서버 로그에 경고만 남긴 채 **바디를 그 크기에서 잘라 넘긴다** — 큰 임포트는 온전히 도착하지 못하고 실패한다. 그래서 `next.config.ts`가 API의 임포트 바디 상한과 같은 51MB로 맞춘다 — 더 큰 바디는 API가 `Content-Length`를 보고 413으로 답한다. 프록시의 `proxyTimeout`(30초)은 총 소요가 아니라 소켓 유휴 시간이라 느린 업로드도 끊지 않는다. 임포트 폼은 이 상한을 넘는 파일을 올리기 전에 거절한다(`card_too_large`).
+바디 상한: 기본 5MB JSON, 카드 임포트 두 경로(`POST /api/plots/import`, `POST /api/plots/:id/characters/import`)는 카드 파일 300MB(`MAX_CARD_IMPORT_BYTES`, `@shizue/core` — 넘으면 라우트가 413 `payload_too_large`)에 멀티파트 여유 1MB를 더한 바디, `POST /api/chats/:id/attachments`는 이미지 업로드 상한. RisuRealm의 PNG 카드는 그림을 품어 30MB 안팎이고 charx는 Realm 업로드 상한인 150MB까지 간다. **웹의 `/api` rewrite 프록시에도 따로 상한이 있다** — Next 16의 `experimental.proxyClientMaxBodySize`(기본 10MB)이고, 넘으면 413으로 거절하지 않고 서버 로그에 경고만 남긴 채 **바디를 그 크기에서 잘라 넘긴다** — 큰 임포트는 온전히 도착하지 못하고 실패한다. 그래서 `next.config.ts`가 API의 임포트 바디 상한과 같은 301MB로 맞춘다 — 더 큰 바디는 API가 `Content-Length`를 보고 413으로 답한다. 프록시의 `proxyTimeout`(30초)은 총 소요가 아니라 소켓 유휴 시간이라 느린 업로드도 끊지 않는다. 임포트 폼은 이 상한을 넘는 파일을 올리기 전에 거절한다(`card_too_large`).
 
 에러는 항상 `{error: string(개발용 영어), code: string(기계판독)}` + 상태코드. 클라이언트는 code로 번역 메시지를 고른다. 소유권 검사는 필수이며 **타 유저 리소스는 404**다(403이 아니라). uuid 파라미터가 깨졌으면 400이 아니라 404다.
 

@@ -5,6 +5,7 @@
  * else in the directory stay where they are — and every read is capped.
  */
 
+import { MAX_CARD_IMPORT_BYTES } from '../types.js';
 import { FileTooLargeError, readZipEntry, type ZipEntry, type ZipSource } from './zip.js';
 
 /** A file under the user-data root; `path` is relative to it and '/'-separated. */
@@ -34,7 +35,7 @@ const MIB = 1024 * 1024;
 
 export const ST_CAPS: StCaps = {
   settings: 32 * MIB,
-  character: 50 * MIB,
+  character: MAX_CARD_IMPORT_BYTES,
   chat: 64 * MIB,
   group: 1 * MIB,
   world: 16 * MIB,

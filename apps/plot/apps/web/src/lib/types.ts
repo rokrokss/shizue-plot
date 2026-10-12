@@ -147,8 +147,8 @@ export const MAX_INTROS_PER_PLOT = 10;
 /** One opening's length, and the reader-facing intro's; mirrors the API. */
 export const MAX_INTRO_TEXT_LENGTH = 4000;
 export const MAX_INTRO_LENGTH = 500;
-/** One card file an import takes; mirrors `MAX_CARD_IMPORT_BYTES` in apps/api. */
-export const MAX_CARD_IMPORT_BYTES = 50 * 1024 * 1024;
+/** One card file an import takes; mirrors `MAX_CARD_IMPORT_BYTES` in @shizue/core. */
+export const MAX_CARD_IMPORT_BYTES = 300 * 1024 * 1024;
 
 /**
  * A plot as its owner edits it. The first-class row: everything a work is

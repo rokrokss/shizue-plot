@@ -1631,7 +1631,9 @@ describe('import provenance and publishing rights', () => {
 
     // Over the file cap but inside the body limit's room for framing: the
     // route's own refusal, under the same code.
-    const huge = JSON.stringify(v2Card) + ' '.repeat(MAX_CARD_IMPORT_BYTES);
+    // Bytes rather than a string: the cap is a few hundred megabytes, and the
+    // route refuses on the file's size before reading a byte of it.
+    const huge = new Uint8Array(MAX_CARD_IMPORT_BYTES + 1);
     const over = await importWith(cookie, '/api/plots/import', new File([huge], 'huge.json'));
     expect(over.status).toBe(413);
     expect((await readJson(over)).code).toBe('payload_too_large');
