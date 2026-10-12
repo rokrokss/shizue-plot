@@ -74,9 +74,17 @@ UI 작업 전에 읽는다. 제품 이름은 소문자 `shizue`, 저장소 이�
 - `mark.svg`: 레퍼런스 `src/public/icon.svg`에서 복사한 토끼 얼굴 픽셀 마크. 파비콘
   `apps/plot/apps/web/src/app/icon.svg`도 같은 파일이므로 함께 바꾼다.
 - `standing.png`: 레퍼런스 `src/assets/character/standing.png`의 토끼 스프라이트. 14×17px 첫 프레임을 CSS로 정적으로 표시한다.
-- `standing_dark.png`: 레퍼런스 `src/assets/character/standing_dark.png`의 다크용 시트(몸통만 노란색).
-  다크에서는 레퍼런스 인사 화면처럼 `invert(1) hue-rotate(180deg)`로 반전해 어두운 몸통에 밝은 윤곽의
-  토끼로 보인다. 마크(`mark.svg`)는 반전하지 않는다.
+
+다크에서는 토끼를 반전한 별도 에셋으로 바꾼다. 토끼 옆에 다른 요소(워드마크, 정원 창)가 함께 있으므로
+화면에 필터를 걸지 않고 에셋을 교체한다. `globals.css`의 `--brand-mark`·`--brand-standing`이 테마별 경로를
+갖고, 마크는 `.brand-mark`, 스프라이트는 `.brand-sprite`가 배경으로 그린다.
+
+- `standing-dark.png`: 레퍼런스가 다크에서 쓰는 결과를 굳힌 것이다. 레퍼런스는 몸통만 노란 시트
+  (`standing_dark.png`)에 `invert(1) hue-rotate(180deg)`를 걸고, 그 결과 색을 `standing.png`의 픽셀에 그대로
+  옮겼다. 어두운 몸통(`#151400`)에 밝은 파란 윤곽(`#9FC3FF`)이다.
+- `mark-dark.svg`: 마크의 얼굴만 반전했다(흰색 → `#151400`, 스프라이트 몸통과 같은 색). 같은 필터를 그대로
+  걸면 민트 윤곽이 `#007666`으로 어두워져 어두운 상단바에서 형태가 무너지므로, 민트 윤곽·눈과 분홍 귀·볼은
+  그대로 둔다. `mark.svg`를 바꾸면 이 파일도 함께 바꾼다. 파비콘은 페이지가 아닌 브라우저 UI에 놓이므로 바꾸지 않는다.
 
 로고·브랜드 장식은 개별 작품의 등장인물을 대신하지 않는다.
 과거 `presence/` 이미지와 `reference/` 목업은 역사적 자료이며 현재 UI에서 참조하지 않는다.

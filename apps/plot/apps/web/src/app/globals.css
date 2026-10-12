@@ -44,6 +44,9 @@
   color-scheme: light;
   --reading: #fffef7;
   --dots: #10302b16;
+  /* The bunnies have dark versions of their own (docs/design/shizue-ui.md §자산). */
+  --brand-mark: url('/brand/mark.svg');
+  --brand-standing: url('/brand/standing.png');
   @variant dark {
     color-scheme: dark;
     --color-canvas: #0f1a19;
@@ -60,6 +63,8 @@
     --color-scrim: rgb(0 0 0 / 0.6);
     --reading: #111d1b;
     --dots: #90f7ec14;
+    --brand-mark: url('/brand/mark-dark.svg');
+    --brand-standing: url('/brand/standing-dark.png');
   }
 }
 
@@ -122,6 +127,7 @@ a, button, input, select, textarea, summary { -webkit-tap-highlight-color: trans
 .garden-window { position: absolute; inset: 18px 20px 22px; overflow: hidden; border: 2px solid var(--color-fg); border-radius: 16px; background: var(--color-canvas); box-shadow: 7px 7px 0 var(--color-fg); transform: rotate(-4deg); }
 .garden-window-bar { display: flex; gap: 6px; padding: 12px; border-bottom: 2px solid var(--color-fg); background: var(--color-surface); }
 .garden-window-bar i { width: 6px; height: 6px; background: var(--color-fg); }
+.brand-mark { background: var(--brand-mark) center / contain no-repeat; image-rendering: pixelated; }
 .garden-mascot { position: absolute; width: 112px; height: 112px; left: calc(50% - 56px); bottom: 32px; image-rendering: pixelated; }
 .garden-ground { position: absolute; bottom: 0; width: 100%; height: 22px; border-top: 2px solid var(--color-fg); background: var(--color-accent); }
 .garden-ground::before { content: ''; position: absolute; inset: -8px 0 auto; height: 6px; background: repeating-linear-gradient(90deg, var(--color-fg) 0 8px, transparent 8px 16px); }
@@ -129,14 +135,7 @@ a, button, input, select, textarea, summary { -webkit-tap-highlight-color: trans
 .garden-spark-one { right: 0; top: 2px; }
 .garden-spark-two { left: 0; bottom: 42px; width: 18px; height: 18px; }
 .garden-leaf { position: absolute; right: 6px; bottom: 8px; width: 52px; height: 30px; border: 2px solid var(--color-fg); border-radius: 100% 0 100% 0; background: #e8b5ac; transform: rotate(-18deg); }
-.brand-sprite { display: block; width: 56px; height: 68px; background: url('/brand/standing.png') no-repeat 0 0 / auto 68px; image-rendering: pixelated; }
-/* Dark inverts the bunny, with the reference's dark sheet, as its greeting does. */
-.brand-sprite {
-  @variant dark {
-    background-image: url('/brand/standing_dark.png');
-    filter: invert(1) hue-rotate(180deg);
-  }
-}
+.brand-sprite { display: block; width: 56px; height: 68px; background: var(--brand-standing) no-repeat 0 0 / auto 68px; image-rendering: pixelated; }
 .garden-friend { position: absolute; left: 0; bottom: 2px; }
 .brand-garden-compact { width: 240px; height: 218px; }
 .brand-garden-compact .garden-mascot { width: 88px; height: 88px; left: calc(50% - 44px); bottom: 24px; }
