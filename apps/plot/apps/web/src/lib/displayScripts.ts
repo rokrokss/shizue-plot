@@ -39,7 +39,7 @@
  * round trip at all.
  */
 
-import type { Variables } from '@shizue/core/variables';
+import { stripVariableMacros, type Variables } from '@shizue/core/variables';
 import { escapeHtml, renderTemplate, RenderBudgetExhausted, type CbsContext } from './cbs';
 import { sanitizeCustomHtml } from './sanitizeHtml';
 import { stripTaint, taint } from './taint';
@@ -82,6 +82,18 @@ export const MAX_SCANNED_CHARS = 20_000;
 export const MAX_MATCHES_PER_SCRIPT = 200;
 /** Pieces one message may be cut into, text runs and islands together. */
 export const MAX_SEGMENTS = 100;
+/**
+ * Runs of provenance the planner may hold at once. A segment is made of many of
+ * them — every capture inside an island is its own run — so this is the cap the
+ * planner can hit first, and the one that bounds a template made of `$1`s.
+ */
+export const MAX_PLAN_PIECES = 2_000;
+/**
+ * How long the rewritten message may grow while the scripts run. Scripts chain,
+ * so each one scans what the ones before it wrote, and a template is expanded
+ * into the text before anything is rendered. Charged as each expansion is built.
+ */
+export const MAX_WORKING_CHARS = 100_000;
 /** Total sanitized HTML one message may produce. */
 export const MAX_HTML_CHARS = 100_000;
 /**
@@ -127,6 +139,8 @@ export interface PlanLimits {
   scanned: number;
   matches: number;
   segments: number;
+  pieces: number;
+  working: number;
   deadlineMs: number;
 }
 
@@ -134,38 +148,59 @@ export const PLAN_LIMITS: PlanLimits = {
   scanned: MAX_SCANNED_CHARS,
   matches: MAX_MATCHES_PER_SCRIPT,
   segments: MAX_SEGMENTS,
+  pieces: MAX_PLAN_PIECES,
+  working: MAX_WORKING_CHARS,
   deadlineMs: TRANSFORM_DEADLINE_MS,
 };
 
 /* ----------------------------------------------------------------- the plan */
 
 /**
- * One match, as data. Everything a template binding needs and nothing that only
- * exists in the realm the match was made in — so a plan survives `postMessage`.
+ * One run of the message as the scripts have rewritten it so far, and whose
+ * words they are.
+ *
+ *   - `text`: the model's, never taken into a template — drawn as prose.
+ *   - `capture`: the model's, taken into a template through `$1`, `$&` or
+ *     `$<name>` — drawn inside that template's markup, escaped.
+ *   - `out`: the creator's own template text — the only thing ever read as markup
+ *     or as CBS.
+ *
+ * Where a word came from follows it through every later script. A pattern may
+ * match across all three kinds and a template may move any of them, but a
+ * capture is never promoted to `out`: nothing the model wrote becomes markup by
+ * being matched twice.
+ *
+ * `island` says which drawn block a piece belongs to — 0 for prose. Every match
+ * starts a block of its own, and a match that begins or ends inside an earlier
+ * block joins it, so a `{{#if}}` one script opened is still in the same block as
+ * the `{{/if}}` that closes it after a later script rewrote the middle.
  */
-export interface PlanMatch {
-  /** Index into the script array the plan was made from. */
-  script: number;
-  /** `match[0]` first, then each group; a group that did not participate is null. */
-  captures: (string | null)[];
-  /** Named groups, if the pattern had any. */
-  groups: Record<string, string>;
+export interface PlanPiece {
+  kind: 'text' | 'capture' | 'out';
+  text: string;
+  island: number;
 }
-
-export type PlanSegment = { kind: 'text'; text: string } | { kind: 'match'; match: PlanMatch };
 
 /** Where every island goes, before any of them has been rendered. */
 export interface DisplayPlan {
-  /** `move_top`, and the carry-over `repeat_back` reuses from the previous turn. */
-  top: PlanMatch[];
-  body: PlanSegment[];
-  bottom: PlanMatch[];
+  /** `move_top` matches, and the carry-over `repeat_back` reuses — one island each. */
+  top: PlanPiece[][];
+  body: PlanPiece[];
+  /** `move_bottom` matches, one island each. */
+  bottom: PlanPiece[][];
 }
 
 /**
- * Runs every enabled script over the message and answers with where the matches
- * are. Returns null when the message should be left as prose — no scripts, too
- * long to scan, or a blown cap.
+ * Runs every enabled script over the message and answers with what it became —
+ * plain data, nothing evaluated. Returns null when the message should be left as
+ * prose: no scripts, too long to scan, or a blown cap.
+ *
+ * The scripts **chain**, as RisuAI's and SillyTavern's do: each runs over what
+ * the ones before it wrote, so a card can turn `<img src="x">` into markup in one
+ * script and wrap the whole panel around it in the next. What keeps that safe is
+ * that the text is never one string to a renderer — it is pieces that remember
+ * who wrote them (`PlanPiece`), and the renderer reads only the creator's pieces
+ * as template.
  *
  * **Self-contained by contract.** `lib/displayPlanner.ts` stringifies this function
  * into a worker, so it may not reference a single thing outside itself: no imports,
@@ -190,11 +225,27 @@ export function planDisplayScripts(
   // message this long is prose rather than a status block.
   if (content.length > limits.scanned) return null;
 
-  /** An invalid regex disables its script, silently. */
+  type Piece = PlanPiece;
+  type Match = RegExpExecArray & {
+    indices?: Array<[number, number] | undefined> & { groups?: Record<string, [number, number] | undefined> };
+  };
+
+  /** Thrown from anywhere below when a cap is blown; the answer is then null. */
+  const OVER = { over: true };
+
+  /** `$1`..`$9`, `$&` and `$<name>` — what an OUT template binds a match with. */
+  const CAPTURE = /\$(?:(&)|(\d)|<([A-Za-z_][A-Za-z0-9_]*)>)/g;
+
+  /**
+   * An invalid regex disables its script, silently. `d` is always added: a capture
+   * is moved as the pieces it spans, so where it matched matters, not only what.
+   */
   function compile(script: DisplayScript): RegExp | null {
-    const flags = script.flags ?? '';
+    let flags = script.flags ?? '';
+    if (!flags.includes('g')) flags += 'g';
+    if (!flags.includes('d')) flags += 'd';
     try {
-      return new RegExp(script.in, flags.includes('g') ? flags : `${flags}g`);
+      return new RegExp(script.in, flags);
     } catch {
       return null;
     }
@@ -212,135 +263,305 @@ export function planDisplayScripts(
     return index + (code === undefined ? 1 : String.fromCodePoint(code).length);
   }
 
-  function planned(index: number, match: RegExpExecArray): PlanMatch {
-    const captures: (string | null)[] = [];
-    for (let i = 0; i < match.length; i += 1) {
-      captures.push(match[i] === undefined ? null : match[i]!);
+  /* -- the budget, shared by the whole run */
+
+  /** Characters of rewritten text that exist, across body, top and bottom. */
+  let size = content.length;
+  /** Pieces created by expansions in this run — what a `$1` storm is caught by. */
+  let created = 0;
+  const grow = (chars: number): void => {
+    size += chars;
+    if (size > limits.working) throw OVER;
+  };
+  const made = (): void => {
+    created += 1;
+    if (created > limits.pieces) throw OVER;
+  };
+
+  /* -- islands: which drawn block each piece belongs to */
+
+  const parent: number[] = [0];
+  const fresh = (): number => {
+    parent.push(parent.length);
+    return parent.length - 1;
+  };
+  const find = (id: number): number => {
+    let root = id;
+    while (parent[root] !== root) root = parent[root]!;
+    // Path compression keeps the next lookup flat.
+    while (parent[id] !== root) {
+      const up = parent[id]!;
+      parent[id] = root;
+      id = up;
     }
-    const groups: Record<string, string> = {};
-    if (match.groups) {
-      for (const key of Object.keys(match.groups)) groups[key] = match.groups[key] ?? '';
-    }
-    return { script: index, captures, groups };
+    return root;
+  };
+  const union = (a: number, b: number): void => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent[rb] = ra;
+  };
+
+  /* -- the working text as pieces, addressed by offset into their concatenation */
+
+  interface Layout {
+    pieces: Piece[];
+    starts: number[];
+    joined: string;
   }
 
-  const deadline = now() + limits.deadlineMs;
-  const top: PlanMatch[] = [];
-  const bottom: PlanMatch[] = [];
-  let segments: PlanSegment[] = [{ kind: 'text', text: content }];
+  function layout(pieces: Piece[]): Layout {
+    const starts: number[] = [];
+    let offset = 0;
+    for (const piece of pieces) {
+      starts.push(offset);
+      offset += piece.text.length;
+    }
+    return { pieces, starts, joined: pieces.map((piece) => piece.text).join('') };
+  }
 
-  for (const entry of ordered) {
-    const pattern = compile(entry.script);
-    if (!pattern) continue;
-    const unicode = pattern.flags.includes('u') || pattern.flags.includes('v');
-    // A script's own match count starts over; the clock and the pieces do not.
-    let matches = 0;
-    let matched = false;
-    const next: PlanSegment[] = [];
+  /** Index of the piece holding the character at `at`, or -1 past either end. */
+  function pieceAt(view: Layout, at: number): number {
+    if (at < 0 || at >= view.joined.length) return -1;
+    let lo = 0;
+    let hi = view.pieces.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (view.starts[mid]! <= at) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo;
+  }
 
-    for (const segment of segments) {
-      // An earlier script's output is finished markup; a later script must not
-      // re-match inside it.
-      if (segment.kind !== 'text') {
-        next.push(segment);
-        continue;
+  /** The pieces covering `[from, to)`, cut at both ends. */
+  function slice(view: Layout, from: number, to: number): Piece[] {
+    const out: Piece[] = [];
+    if (to <= from) return out;
+    for (let i = Math.max(0, pieceAt(view, from)); i < view.pieces.length; i += 1) {
+      const start = view.starts[i]!;
+      if (start >= to) break;
+      const piece = view.pieces[i]!;
+      const a = Math.max(from, start) - start;
+      const b = Math.min(to, start + piece.text.length) - start;
+      if (b > a) out.push({ kind: piece.kind, text: piece.text.slice(a, b), island: piece.island });
+    }
+    return out;
+  }
+
+  /**
+   * The island a boundary at `at` lies inside, or 0. A boundary is inside a block
+   * when the characters on both sides of it belong to the same one.
+   */
+  function insideIsland(view: Layout, at: number): number {
+    const before = pieceAt(view, at - 1);
+    const after = pieceAt(view, at);
+    if (before < 0 || after < 0) return 0;
+    const left = view.pieces[before]!.island;
+    const right = view.pieces[after]!.island;
+    return left !== 0 && find(left) === find(right) ? left : 0;
+  }
+
+  /** Adjacent pieces of one kind in one island become one. */
+  function merge(pieces: Piece[]): Piece[] {
+    const out: Piece[] = [];
+    for (const piece of pieces) {
+      if (!piece.text) continue;
+      const island = piece.island === 0 ? 0 : find(piece.island);
+      const last = out[out.length - 1];
+      if (last && last.kind === piece.kind && last.island === island) last.text += piece.text;
+      else out.push({ kind: piece.kind, text: piece.text, island });
+    }
+    return out;
+  }
+
+  /**
+   * The template with the match bound into it, as pieces. The template's own text
+   * is `out`; a capture is the pieces it spans, moved with their provenance. Every
+   * piece is charged as it is made, before the next one: a template within the
+   * caps can hold fifty thousand `$1`s.
+   *
+   * A result with any of the creator's text in it — or one that lands inside an
+   * existing block — is a block, and the model's words in it are captures. One
+   * without is model text rearranged (`$1` alone, trimming whitespace), and stays
+   * prose, so it is still read as markdown.
+   */
+  function expand(template: string, match: Match, view: Layout, joins: number[]): Piece[] {
+    const island = fresh();
+    for (const other of joins) if (other) union(island, other);
+    const pieces: Piece[] = [];
+    const literal = (text: string): void => {
+      if (!text) return;
+      made();
+      grow(text.length);
+      pieces.push({ kind: 'out', text, island });
+    };
+    const span = (range: [number, number] | undefined): void => {
+      if (!range) return;
+      for (const piece of slice(view, range[0], range[1])) {
+        made();
+        grow(piece.text.length);
+        pieces.push(piece);
       }
+    };
+
+    const indices = match.indices;
+    let cursor = 0;
+    CAPTURE.lastIndex = 0;
+    for (let ref = CAPTURE.exec(template); ref; ref = CAPTURE.exec(template)) {
+      const [whole, all, index, name] = ref;
+      if (all) {
+        literal(template.slice(cursor, ref.index));
+        span([match.index, match.index + match[0].length]);
+      } else if (name) {
+        literal(template.slice(cursor, ref.index));
+        // Own-property only: a named group called `toString` must not resolve to one.
+        const groups = indices?.groups;
+        if (groups && Object.prototype.hasOwnProperty.call(groups, name)) span(groups[name]);
+      } else {
+        const at = Number(index);
+        // An unused group number stays literal, so a `$` in the template survives.
+        if (at >= match.length || match[at] === undefined) {
+          literal(template.slice(cursor, ref.index + whole.length));
+          cursor = ref.index + whole.length;
+          continue;
+        }
+        literal(template.slice(cursor, ref.index));
+        span(indices?.[at]);
+      }
+      cursor = ref.index + whole.length;
+    }
+    literal(template.slice(cursor));
+
+    const block = pieces.some((piece) => piece.kind === 'out') || joins.some((other) => other !== 0);
+    return pieces.map((piece) =>
+      block
+        ? { kind: piece.kind === 'text' ? 'capture' : piece.kind, text: piece.text, island }
+        : { kind: 'text', text: piece.text, island: 0 },
+    );
+  }
+
+  /** Text runs and blocks, as the renderer will cut them. */
+  function segmentsOf(pieces: Piece[]): number {
+    let count = 0;
+    let previous = -1;
+    for (const piece of pieces) {
+      const island = piece.island === 0 ? 0 : find(piece.island);
+      if (island !== previous || island === 0) count += 1;
+      previous = island;
+    }
+    return count;
+  }
+
+  const total = (pieces: Piece[]): number => pieces.reduce((sum, piece) => sum + piece.text.length, 0);
+
+  const deadline = now() + limits.deadlineMs;
+  const top: Piece[][] = [];
+  const bottom: Piece[][] = [];
+  let body: Piece[] = content ? [{ kind: 'text', text: content, island: 0 }] : [];
+
+  try {
+    for (const entry of ordered) {
+      const pattern = compile(entry.script);
+      if (!pattern) continue;
+      const unicode = pattern.flags.includes('u') || pattern.flags.includes('v');
+      const view = layout(body);
+      // A script's own match count starts over; the clock and the budget do not.
+      let matches = 0;
+      let matched = false;
+      const next: Piece[] = [];
       let cursor = 0;
+
       pattern.lastIndex = 0;
-      for (let match = pattern.exec(segment.text); match; match = pattern.exec(segment.text)) {
+      for (let found = pattern.exec(view.joined); found; found = pattern.exec(view.joined)) {
+        const match = found as Match;
         matched = true;
         matches += 1;
         if (matches > limits.matches) return null;
         if (now() > deadline) return null;
-        if (match.index > cursor) {
-          next.push({ kind: 'text', text: segment.text.slice(cursor, match.index) });
-        }
-        const one = planned(entry.index, match);
-        if (entry.script.action === 'move_top') top.push(one);
-        else if (entry.script.action === 'move_bottom') bottom.push(one);
-        else next.push({ kind: 'match', match: one });
-        if (top.length + next.length + bottom.length > limits.segments) return null;
-        cursor = match.index + match[0].length;
+        const start = match.index;
+        const end = start + match[0].length;
+        next.push(...slice(view, cursor, start));
+        // What the match replaces stops existing as it is rewritten.
+        size -= match[0].length;
+        const joins = [insideIsland(view, start), insideIsland(view, end)];
+        const expansion = expand(entry.script.out, match, view, joins);
+        if (entry.script.action === 'move_top') top.push(expansion);
+        else if (entry.script.action === 'move_bottom') bottom.push(expansion);
+        else next.push(...expansion);
+        cursor = end;
         if (match[0].length === 0) {
-          pattern.lastIndex = advance(segment.text, pattern.lastIndex, unicode);
+          pattern.lastIndex = advance(view.joined, pattern.lastIndex, unicode);
         }
       }
-      if (cursor < segment.text.length) {
-        next.push({ kind: 'text', text: segment.text.slice(cursor) });
+      if (matched) {
+        next.push(...slice(view, cursor, view.joined.length));
+        body = merge(next);
       }
-    }
-    segments = next;
-    if (top.length + segments.length + bottom.length > limits.segments) return null;
 
-    // The status-window idiom: a turn that says nothing about the state keeps
-    // showing the last state that was reported, pinned above the prose.
-    if (!matched && entry.script.action === 'repeat_back' && previousSameRole) {
-      const again = compile(entry.script);
-      const previous = again ? again.exec(previousSameRole) : null;
-      if (previous) top.push(planned(entry.index, previous));
+      // The status-window idiom: a turn that says nothing about the state keeps
+      // showing the last state that was reported, pinned above the prose.
+      if (!matched && entry.script.action === 'repeat_back' && previousSameRole) {
+        const again = compile(entry.script);
+        const previous = again ? (again.exec(previousSameRole) as Match | null) : null;
+        if (previous) {
+          const carried = layout([{ kind: 'text', text: previousSameRole, island: 0 }]);
+          top.push(expand(entry.script.out, previous, carried, [0, 0]));
+        }
+      }
+
+      const pieces = body.length + top.reduce((sum, group) => sum + group.length, 0) +
+        bottom.reduce((sum, group) => sum + group.length, 0);
+      if (pieces > limits.pieces) return null;
+      if (segmentsOf(body) + top.length + bottom.length > limits.segments) return null;
+      // Recounted from what exists, so the running estimate never drifts.
+      size = total(body) + top.reduce((sum, group) => sum + total(group), 0) +
+        bottom.reduce((sum, group) => sum + total(group), 0);
+      if (size > limits.working) return null;
+      created = 0;
     }
+  } catch (error) {
+    if (error === OVER) return null;
+    throw error;
   }
 
-  return { top, body: segments, bottom };
+  return {
+    top: top.map(merge),
+    body: merge(body),
+    bottom: bottom.map(merge),
+  };
 }
 
 /* ------------------------------------------------------------- the rewriting */
-
-/** `$1`..`$9`, `$&` and `$<name>` — what an OUT template binds a match with. */
-const CAPTURE_RE = /\$(?:(&)|(\d)|<([A-Za-z_][A-Za-z0-9_]*)>)/g;
 
 /**
  * Captured text comes from the model, so it is neutralized twice over: HTML-escaped
  * so it cannot introduce markup, and brace-escaped so it cannot introduce a macro
  * the creator did not write. It is then marked, for the same reason `{{getvar}}` is
  * — a capture is model output, and a link built out of one is the model's link.
+ * Its `{{setvar}}`s are protocol, hidden here as they are in prose.
  */
 const escapeCapture = (text: string): string =>
-  taint(escapeHtml(text).replace(/\{/g, '&#123;').replace(/\}/g, '&#125;'));
-
-/**
- * Substitutes the captures a template asks for, charging each one *as it goes*.
- *
- * The length of the finished string is no use here, because building it is the
- * expensive part: a template within the budget can hold fifty thousand `$1`s, and
- * a match can be twenty thousand characters, so measuring afterwards means
- * measuring a billion characters that have already been built. `replace` stops
- * where the exception is thrown, so what gets built is what was paid for.
- */
-function bindCaptures(template: string, match: PlanMatch, charge: (chars: number) => void): string {
-  const substitute = (value: string): string => {
-    // Charged raw, before escaping allocates anything.
-    charge(value.length);
-    return escapeCapture(value);
-  };
-  return template.replace(CAPTURE_RE, (whole, all?: string, index?: string, name?: string) => {
-    if (all) return substitute(match.captures[0] ?? '');
-    // Own-property only: a named group called `toString` must not resolve to one.
-    if (name) {
-      return substitute(
-        Object.prototype.hasOwnProperty.call(match.groups, name) ? (match.groups[name] ?? '') : '',
-      );
-    }
-    const value = match.captures[Number(index)];
-    // An unused group number stays literal, so a `$` in the template survives.
-    return value === undefined || value === null ? whole : substitute(value);
-  });
-}
+  taint(escapeHtml(stripVariableMacros(text)).replace(/\{/g, '&#123;').replace(/\}/g, '&#125;'));
 
 /**
  * Turns a plan into the segments to draw, with the bindings as they are *now* —
  * which is why this is not part of the plan and does not go near a worker. Returns
  * null when the message should be left as prose.
  *
- * Two budgets, and they bound different things. `MAX_RENDER_INPUT_CHARS` is what a
- * match is allowed to *cost*, charged before the work; `MAX_HTML_CHARS` is what all
- * the matches together are allowed to put on the page. Only the first of them can
- * see work that produces nothing.
+ * An island's template is its pieces put back together: the creator's own text as
+ * it was written, and the model's words escaped (`escapeCapture`). Only then is it
+ * read as CBS — so a block one script opened and another closed parses as one, and
+ * nothing the model wrote can be part of the syntax.
  *
- * One allowance runs through all of it — capture binding, the template engine, and
- * the sanitizer — because every one of those stages can be made to do a great deal
- * and hand back very little, and a stage that keeps its own books can always be
- * asked to open them again for the next match.
+ * Two budgets, and they bound different things. `MAX_RENDER_INPUT_CHARS` is what an
+ * island is allowed to *cost*, charged before the work; `MAX_HTML_CHARS` is what all
+ * of them together are allowed to put on the page. Only the first of them can see
+ * work that produces nothing.
+ *
+ * One allowance runs through all of it — reassembly, the template engine, and the
+ * sanitizer — because every one of those stages can be made to do a great deal and
+ * hand back very little, and a stage that keeps its own books can always be asked
+ * to open them again for the next island.
  */
 export function renderDisplayPlan(plan: DisplayPlan, ctx: DisplayContext): Segment[] | null {
   let taken = 0;
@@ -352,21 +573,19 @@ export function renderDisplayPlan(plan: DisplayPlan, ctx: DisplayContext): Segme
     if (taken > MAX_RENDER_INPUT_CHARS) throw new RenderBudgetExhausted('input');
   };
 
-  const render = (match: PlanMatch): Segment => {
-    const script = ctx.scripts[match.script];
-    if (!script) throw new Error('plan refers to a script that is not there');
-    // Charged before anything reads the template — including the strip below,
-    // which is itself a pass over it — so a hundred matches of a large template
-    // cannot get a hundred passes for free. Nothing on the way in bounds how long
-    // an `out` is.
-    charge(script.out.length);
-    // Stripped so that the only markers in the string handed to the sanitizer are
-    // the ones this render put there — a creator who typed a U+0001 does not get
-    // to say a link is trustworthy.
-    const template = stripTaint(script.out);
+  const island = (pieces: readonly PlanPiece[]): Segment => {
+    let template = '';
+    for (const piece of pieces) {
+      // Charged raw, before escaping or stripping allocates anything.
+      charge(piece.text.length);
+      // Stripped so that the only markers in the string handed to the sanitizer are
+      // the ones this render put there — a creator who typed a U+0001 does not get
+      // to say a link is trustworthy.
+      template += piece.kind === 'out' ? stripTaint(piece.text) : escapeCapture(piece.text);
+    }
     // The engine charges the same allowance for every variable it reads, before it
     // expands one, and throws rather than returning a small answer when it runs out.
-    const rendered = renderTemplate(bindCaptures(template, match, charge), ctx, charge);
+    const rendered = renderTemplate(template, ctx, charge);
     // …and again before the sanitizer, which is both the expensive stage and the
     // one that throws the input away.
     charge(rendered.length);
@@ -377,11 +596,24 @@ export function renderDisplayPlan(plan: DisplayPlan, ctx: DisplayContext): Segme
   };
 
   try {
-    return [
-      ...plan.top.map(render),
-      ...plan.body.map((segment) => (segment.kind === 'text' ? segment : render(segment.match))),
-      ...plan.bottom.map(render),
-    ];
+    const segments: Segment[] = plan.top.map(island);
+    let block: PlanPiece[] = [];
+    const close = (): void => {
+      if (block.length > 0) segments.push(island(block));
+      block = [];
+    };
+    for (const piece of plan.body) {
+      if (piece.island === 0) {
+        close();
+        segments.push({ kind: 'text', text: piece.text });
+      } else {
+        if (block.length > 0 && block[0]!.island !== piece.island) close();
+        block.push(piece);
+      }
+    }
+    close();
+    segments.push(...plan.bottom.map(island));
+    return segments;
   } catch (error) {
     // Anything at all — a blown cap, a template that threw — leaves the message
     // exactly as the model wrote it. Half a status window is worse than none.

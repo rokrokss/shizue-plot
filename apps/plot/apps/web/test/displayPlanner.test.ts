@@ -77,11 +77,18 @@ describe('the worker source', () => {
     expect(answer['id']).toBe(7);
 
     const plan = answer['plan'] as DisplayPlan;
-    expect(plan.body).toEqual([
-      { kind: 'text', text: '앞 ' },
-      { kind: 'match', match: { script: 0, captures: ['[status] hp=50', '50'], groups: {} } },
-      { kind: 'text', text: ' 뒤' },
+    // The message as pieces that remember whose words they are: the creator's
+    // template text, the model's capture inside it, and the prose around them.
+    expect(plan.body.map(({ kind, text }) => [kind, text])).toEqual([
+      ['text', '앞 '],
+      ['out', '<div class="hp">HP '],
+      ['capture', '50'],
+      ['out', '</div>'],
+      ['text', ' 뒤'],
     ]);
+    // One match, one island; prose belongs to none.
+    expect(plan.body.map((piece) => piece.island > 0)).toEqual([false, true, true, true, false]);
+    expect(new Set(plan.body.map((piece) => piece.island)).size).toBe(2);
     // What the reader gets out of it, rendered on the other side.
     const segments = renderDisplayPlan(plan, context([script()]))!;
     expect(segments.map((segment) => (segment.kind === 'html' ? segment.html : segment.text))).toEqual([
@@ -155,7 +162,7 @@ class StubWorker implements PlannerWorker {
   }
 }
 
-const EMPTY: DisplayPlan = { top: [], body: [{ kind: 'text', text: 'x' }], bottom: [] };
+const EMPTY: DisplayPlan = { top: [], body: [{ kind: 'text', text: 'x', island: 0 }], bottom: [] };
 const request = { content: '[status] hp=50', scripts: [script()], previousSameRole: '' };
 
 describe('a worker that stops answering', () => {

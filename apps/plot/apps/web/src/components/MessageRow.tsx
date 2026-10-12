@@ -65,6 +65,7 @@ export const MessageRow = memo(function MessageRow({
   components,
   roster = NO_ROSTER,
   previousSameRole,
+  chatIndex,
   streaming,
   thinking = false,
   disabled = false,
@@ -107,6 +108,8 @@ export const MessageRow = memo(function MessageRow({
   roster?: readonly PublicMember[];
   /** Raw text of the previous message with the same role, for `repeat_back`. */
   previousSameRole?: string;
+  /** This message's place on the branch, RisuAI's way, for `{{chat_index}}`. */
+  chatIndex?: number;
   streaming: boolean;
   /** The request is open and none of the reply has arrived yet. */
   thinking?: boolean;
@@ -375,6 +378,7 @@ export const MessageRow = memo(function MessageRow({
               {...(components ? { components } : {})}
               {...(attributed ? { roster } : {})}
               previousSameRole={previousSameRole ?? ''}
+              {...(chatIndex !== undefined ? { chatIndex } : {})}
               streaming={streaming}
             />
             {thinking ? <ThinkingClock /> : null}

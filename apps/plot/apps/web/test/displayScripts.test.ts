@@ -57,7 +57,11 @@ describe('applyDisplayScripts', () => {
     expect(html(segments)).toHaveLength(2);
   });
 
-  it('applies scripts in order and never re-matches inside earlier output', () => {
+  it('applies scripts in order, each over what the ones before it wrote', () => {
+    // Scripts chain, as RisuAI's and SillyTavern's do: a later pattern sees an
+    // earlier template's text. This used to be refused outright — an earlier
+    // output was final — and imported cards that build a panel in several steps
+    // came out as raw tags. The provenance tests below are what make it safe.
     const segments = applyDisplayScripts(
       '[status] hp=50',
       context([
@@ -65,7 +69,7 @@ describe('applyDisplayScripts', () => {
         script({ order: 0 }),
       ]),
     );
-    expect(html(segments)).toEqual(['<div class="x-shizue-hp">HP 50</div>']);
+    expect(html(segments)).toEqual(['<div class="x-shizue-hp"><b>겹침</b> 50</div>']);
   });
 
   it('binds $&, numbered and named groups', () => {
@@ -115,6 +119,127 @@ describe('applyDisplayScripts', () => {
   });
 });
 
+describe('chaining', () => {
+  const ordered = (...scripts: Partial<DisplayScript>[]): DisplayScript[] =>
+    scripts.map((overrides, order) => script({ order, ...overrides }));
+
+  it('keeps a block one script opened in one piece after a later one rewrote its middle', () => {
+    const scripts = ordered(
+      { in: '\\[pic (\\w+)\\]', out: '{{#if {{equal::{{getvar::show}}::1}}}}<p>[img $1]</p>{{/if}}' },
+      { in: '\\[img (\\w+)\\]', out: '<b>$1</b>' },
+    );
+    expect(html(applyDisplayScripts('[pic face]', context(scripts, { variables: { show: '1' } })))).toEqual([
+      '<p><b>face</b></p>',
+    ]);
+    expect(html(applyDisplayScripts('[pic face]', context(scripts, { variables: { show: '0' } })))).toEqual(['']);
+  });
+
+  it('matches across the model’s words and an earlier script’s markup', () => {
+    const segments = applyDisplayScripts(
+      'A <pk-panel>hp 5</pk-panel> B',
+      context(
+        ordered(
+          { in: 'hp (\\d+)', out: '<i>$1</i>' },
+          { in: '<pk-panel>([\\s\\S]*?)</pk-panel>', out: '<div class="card">$1</div>' },
+        ),
+      ),
+    );
+    expect(text(segments)).toEqual(['A ', ' B']);
+    expect(html(segments)).toEqual(['<div class="x-shizue-card"><i>5</i></div>']);
+  });
+
+  it('never reads the model’s words as markup or syntax, however many scripts move them', () => {
+    const segments = applyDisplayScripts(
+      '<pk-panel>{{getvar::secret}} {{/if}} $1 </div><script>alert(1)</script></pk-panel>',
+      context(
+        ordered(
+          {
+            in: '<pk-panel>([\\s\\S]*?)</pk-panel>',
+            out: '{{#if {{equal::1::1}}}}<div class="card">$1</div>{{/if}}',
+          },
+          // A later script reaches into the captured words and wraps part of them.
+          { in: 'secret', out: '<u>$&</u>' },
+        ),
+        { variables: { secret: 'LEAKED' } },
+      ),
+    );
+    const [island] = html(segments);
+    expect(island).toContain('<div class="x-shizue-card">{{getvar::<u>secret</u>}} {{/if}} $1 ');
+    expect(island).toContain('&lt;/div&gt;&lt;script&gt;alert(1)&lt;/script&gt;</div>');
+    expect(island).not.toContain('LEAKED');
+    expect(island).not.toContain('<script');
+  });
+
+  it('lets $& put the model’s words back for a later script to match again', () => {
+    const segments = applyDisplayScripts(
+      'hp=5',
+      context(ordered({ in: 'hp=(\\d+)', out: '<span>$&</span>' }, { in: 'hp=', out: '<b>HP </b>' })),
+    );
+    expect(html(segments)).toEqual(['<span><b>HP </b>5</span>']);
+  });
+
+  it('keeps the model’s words prose when a template only rearranges them', () => {
+    // RisuAI cards trim the blank lines around an image this way; nothing of the
+    // creator's is added, so it is still markdown, not an island.
+    const segments = applyDisplayScripts(
+      'a\n\n<img src="x">\n\nb',
+      context(ordered({ in: '\\s*(<img src="[^"]*">)\\s*', out: '$1' })),
+    );
+    expect(segments).toEqual([{ kind: 'text', text: 'a<img src="x">b' }]);
+  });
+
+  it('keeps a zero-length match inside the block it fell in', () => {
+    const segments = applyDisplayScripts(
+      '[s]',
+      context(ordered({ in: '\\[s\\]', out: '<p>ab</p>' }, { in: '(?=b)', out: '<i>·</i>' })),
+    );
+    expect(html(segments)).toEqual(['<p>a<i>·</i>b</p>']);
+  });
+
+  it('draws a RisuAI card’s panel and picture the way the card builds them', () => {
+    // Parma Knights' scripts, cut down: trim around an image, show it on the last
+    // turns only, draw it if the plot has one by that name, and wrap the panel.
+    const scripts = ordered(
+      { in: '<pk-time>\\s*(.+?)\\s*\\|\\s*(.+?)\\s*</pk-time>', out: '<div class="pk-time">$1 · $2</div>' },
+      { in: '\\s*(<img src="[^"]*">)\\s*', out: '$1' },
+      {
+        in: '<img src="(.+?)">',
+        out: '{{#if {{greater_equal::{{chat_index}}::{{? {{lastmessageid}}-2}}}}}}\n<img src="$1">\n{{/if}}',
+      },
+      {
+        in: '<img src="(([^"\\-]+)(-[^"]*)?)"?>',
+        out:
+          '{{#when::{{contains::{{assetlist}}::$1}}}}<div class="image-container" ' +
+          'style="background-image: url(\'{{raw::$1}}\');"></div>{{/when}}',
+      },
+      { in: '<pk-panel>([\\s\\S]*?)</pk-panel>', out: '<div class="pk-card">$1</div>' },
+    );
+    const content = '부임 첫날.\n\n<img src="face">\n\n<pk-panel>\n<pk-time>1247 | 본부</pk-time>\n</pk-panel>';
+    const bound = (overrides: Partial<DisplayContext>) =>
+      context(scripts, {
+        assets: new Map([['face', '/api/plots/p/assets/face']]),
+        assetNames: ['face'],
+        chatIndex: -1,
+        lastMessageId: -1,
+        ...overrides,
+      });
+
+    const drawn = applyDisplayScripts(content, bound({}));
+    expect(text(drawn)).toEqual(['부임 첫날.']);
+    const [picture, panel] = html(drawn);
+    expect(picture).toContain('class="x-shizue-image-container"');
+    expect(picture).toContain("url('/api/plots/p/assets/face')");
+    expect(panel).toBe('<div class="x-shizue-pk-card">\n<div class="x-shizue-pk-time">1247 · 본부</div>\n</div>');
+
+    // No image by that name: the reference goes, rather than drawing a broken one.
+    expect(html(applyDisplayScripts(content, bound({ assetNames: [] })))[0]).not.toContain('image-container');
+    // An old turn: the card keeps pictures to the last three.
+    expect(html(applyDisplayScripts(content, bound({ chatIndex: 0, lastMessageId: 9 })))[0]).not.toContain(
+      'image-container',
+    );
+  });
+});
+
 describe('actions', () => {
   it('move_top lifts the match above the prose', () => {
     const segments = applyDisplayScripts(
@@ -122,7 +247,8 @@ describe('actions', () => {
       context([script({ action: 'move_top' })]),
     );
     expect(segments[0]).toEqual({ kind: 'html', html: '<div class="x-shizue-hp">HP 50</div>' });
-    expect(text(segments)).toEqual(['인사 ', ' 끝']);
+    // The prose closes over the hole the match left, as it does in RisuAI.
+    expect(text(segments)).toEqual(['인사  끝']);
   });
 
   it('move_bottom drops the match below the prose', () => {

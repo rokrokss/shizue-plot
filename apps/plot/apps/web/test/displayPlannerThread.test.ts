@@ -72,7 +72,8 @@ describe('a pattern that does not come back', () => {
       scripts: [script()],
       previousSameRole: '',
     });
-    expect(plan?.body).toHaveLength(3);
+    // The provenance survives the thread boundary along with the text.
+    expect(plan?.body.map((piece) => piece.kind)).toEqual(['text', 'out', 'capture', 'out', 'text']);
     planner.stop();
   });
 
@@ -109,7 +110,7 @@ describe('a pattern that does not come back', () => {
       scripts: [script()],
       previousSameRole: '',
     });
-    expect(after?.body).toHaveLength(1);
+    expect(after?.body.map((piece) => piece.kind)).toEqual(['out', 'capture', 'out']);
     planner.stop();
   }, 20_000);
 

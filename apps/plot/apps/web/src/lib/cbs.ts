@@ -51,6 +51,16 @@ export interface CbsContext {
   turn: number;
   char: string;
   user: string;
+  /**
+   * This message's place on the branch as RisuAI counts it, for `{{chat_index}}`:
+   * the greeting is -1 and the first message after it 0. Counted within the loaded
+   * stretch when earlier messages have not been read. Unset, the macro stays as written.
+   */
+  chatIndex?: number;
+  /** The last message's place, counted the same way, for `{{lastmessageid}}`. */
+  lastMessageId?: number;
+  /** The names the plot's open images go by, for `{{assetlist}}`. */
+  assetNames?: readonly string[];
 }
 
 /**
@@ -291,6 +301,17 @@ function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>): CbsHos
         case 'screenwidth':
           // RisuAI cards lay out by it. The width when the message was drawn.
           return typeof window === 'undefined' ? undefined : { text: String(window.innerWidth) };
+        // RisuAI cards show a panel or a picture on the last few turns only
+        // (`{{greater_equal::{{chat_index}}::{{? {{lastmessageid}}-2}}}}`).
+        case 'chatindex':
+          return ctx.chatIndex === undefined ? undefined : { text: String(ctx.chatIndex) };
+        case 'lastmessageid':
+        case 'lastmessageindex':
+          return ctx.lastMessageId === undefined ? undefined : { text: String(ctx.lastMessageId) };
+        // …and ask whether an image exists before drawing it
+        // (`{{contains::{{assetlist}}::name}}`). The plot's own names, not the model's.
+        case 'assetlist':
+          return { text: read(JSON.stringify(ctx.assetNames ?? []), budget) };
         case 'rel': {
           const axis = call.args.rest(1)?.value().text.trim().toLowerCase() ?? '';
           if (!(REL_AXES as readonly string[]).includes(axis)) return undefined;

@@ -1008,6 +1008,13 @@ export function evaluateCbs(source: string, nodes: CbsNode[], host: CbsHost = {}
         const same = both[0].text === both[1].text;
         return bit(name === 'equal' ? same : !same, both);
       }
+      case 'contains': {
+        // RisuAI's: whether the first argument has the second in it, as text. A
+        // card asks `{{contains::{{assetlist}}::name}}` before drawing an image.
+        const both = pair();
+        if (!both) return bit(false, []);
+        return bit(both[0].text.includes(both[1].text), both);
+      }
       case 'greater':
       case 'greaterequal':
       case 'less':

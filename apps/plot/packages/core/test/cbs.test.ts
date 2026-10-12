@@ -89,6 +89,11 @@ describe('evaluateCbs - RisuAI functions', () => {
     expect(run('{{greater::5}}{{equal::a}}{{notequal::a}}')).toBe('001');
   });
 
+  it('finds text inside text with contains, the way a card asks after an image', () => {
+    expect(run('{{contains::["face","door"]::door}}{{contains::abc::d}}{{contains::abc}}')).toBe('100');
+    expect(run('{{contains::{{getvar::list}}::face}}', { list: '["face"]' })).toBe('1');
+  });
+
   it('reads 1 as the only truth for and, or and not', () => {
     expect(run('{{and::1::1}}{{and::1::true}}{{or::0::1}}{{or::yes::no}}{{not::1}}{{not::0}}')).toBe('101001');
   });

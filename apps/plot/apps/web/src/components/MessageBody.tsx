@@ -274,6 +274,7 @@ export const MessageBody = memo(function MessageBody({
   components: componentContext,
   roster = NO_ROSTER,
   previousSameRole = '',
+  chatIndex,
   streaming = false,
 }: {
   content: string;
@@ -299,6 +300,8 @@ export const MessageBody = memo(function MessageBody({
   roster?: readonly PublicMember[];
   /** Raw text of the previous message with the same role, for `repeat_back`. */
   previousSameRole?: string;
+  /** This message's place on the branch, RisuAI's way, for `{{chat_index}}`. */
+  chatIndex?: number;
   /** A message still being written gets no display scripts until it settles. */
   streaming?: boolean;
 }) {
@@ -311,9 +314,10 @@ export const MessageBody = memo(function MessageBody({
     const plain: Segment[] = [{ kind: 'text', text: content }];
     // The plan says where the islands are; the bindings, which change on every
     // token, are applied here and now.
-    const base = display && plan ? (renderDisplayPlan(plan, display) ?? plain) : plain;
+    const bound = display && chatIndex !== undefined ? { ...display, chatIndex } : display;
+    const base = bound && plan ? (renderDisplayPlan(plan, bound) ?? plain) : plain;
     return componentContext ? splitComponentCalls(base, componentContext.names) : base;
-  }, [content, display, componentContext, plan]);
+  }, [content, display, chatIndex, componentContext, plan]);
 
   /**
    * Each text segment, already resolved, attributed and cut into blocks. The image

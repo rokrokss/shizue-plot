@@ -676,6 +676,20 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const turn = messages.filter((message) => message.role === 'user').length + (mode === 'send' ? 1 : 0);
   const axes = state?.chat.relationship?.axes ?? null;
 
+  /**
+   * Where RisuAI would number the branch from. Its greeting sits outside the
+   * message list at -1, so a branch that opens on one starts there; with earlier
+   * messages not read yet, the loaded stretch is counted from 0, which keeps the
+   * comparisons cards make between two indices right.
+   */
+  const indexBase = !state?.hasMore && messages[0] && isGreeting(messages[0]) ? -1 : 0;
+  const lastMessageId = indexBase + messages.length - 1;
+  /** The names a card asks for its images by — its own where it had them — open ones only. */
+  const assetNames = useMemo(
+    () => assets.filter((asset) => !lockedKinds.has(asset.slug)).map((asset) => asset.name ?? asset.slug),
+    [assets, lockedKinds],
+  );
+
   const display = useMemo<DisplayContext | undefined>(() => {
     if (!customUi || scripts.length === 0) return undefined;
     return {
@@ -687,8 +701,23 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       turn,
       char: characterName,
       user: personaName ?? youLabel,
+      lastMessageId,
+      assetNames,
     };
-  }, [customUi, scripts, variables, assetUrls, resolveAsset, axes, turn, characterName, personaName, youLabel]);
+  }, [
+    customUi,
+    scripts,
+    variables,
+    assetUrls,
+    resolveAsset,
+    axes,
+    turn,
+    characterName,
+    personaName,
+    youLabel,
+    lastMessageId,
+    assetNames,
+  ]);
 
   /**
    * The greetings on the branch as the reader sees them — the prompt's pass over
@@ -1465,6 +1494,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                   {...(display ? { display } : {})}
                   {...(components ? { components } : {})}
                   previousSameRole={meta.previousSameRole}
+                  chatIndex={indexBase + index}
                   streaming={message.streaming}
                   // Nothing of the reply on screen yet: the time it has been
                   // waited for, which is all of the model's thinking that is shown.
