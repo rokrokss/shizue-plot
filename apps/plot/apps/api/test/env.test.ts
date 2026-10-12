@@ -24,8 +24,10 @@ describe('readConfig', () => {
     expect(readConfig({ NODE_ENV: 'production', DATABASE_URL, BETTER_AUTH_SECRET: 's' }).authSecret).toBe('s');
   });
   it('takes a hosted web origin, but only an origin', () => {
-    expect(readConfig({ NODE_ENV: 'production', DATABASE_URL, BETTER_AUTH_SECRET: 's', BETTER_AUTH_URL: 'https://plot.example.com' }).authUrl)
-      .toBe('https://plot.example.com');
+    expect(readConfig({
+      NODE_ENV: 'production', DATABASE_URL, BETTER_AUTH_SECRET: 's',
+      BETTER_AUTH_URL: 'https://plot.example.com', CHATGPT_CALLBACK_PORT: '47821',
+    }).authUrl).toBe('https://plot.example.com');
     for (const url of ['https://plot.example.com/', 'https://plot.example.com/app', 'ftp://plot.example.com', 'http://user@localhost']) {
       expect(() => readConfig({ NODE_ENV: 'development', DATABASE_URL, BETTER_AUTH_URL: url })).toThrow(/web origin/);
     }
@@ -34,6 +36,42 @@ describe('readConfig', () => {
     expect(readConfig({ DATABASE_URL }).chatgptCallbackPort).toBe(47801);
     expect(readConfig({ DATABASE_URL, CHATGPT_CALLBACK_PORT: '47811' }).chatgptCallbackPort).toBe(47811);
     expect(() => readConfig({ DATABASE_URL, CHATGPT_CALLBACK_PORT: '80' })).toThrow(/CHATGPT_CALLBACK_PORT/);
+  });
+
+  describe('against the ports Shizue sends to each origin', () => {
+    const production = { NODE_ENV: 'production', DATABASE_URL, BETTER_AUTH_SECRET: 's' };
+
+    it('needs no setting for plot.shizue.net, and takes 47811 from Shizue', () => {
+      // The deployment that forgets the variable: before this, it asked OpenAI for
+      // 47801, which Shizue sends to localhost:13000 on the reader's own machine.
+      expect(readConfig({ ...production, BETTER_AUTH_URL: 'https://plot.shizue.net' }).chatgptCallbackPort).toBe(47811);
+      expect(readConfig({ ...production, BETTER_AUTH_URL: 'https://plot.shizue.net', CHATGPT_CALLBACK_PORT: '47811' })
+        .chatgptCallbackPort).toBe(47811);
+    });
+
+    it('refuses a production port that disagrees with Shizue', () => {
+      expect(() => readConfig({ ...production, BETTER_AUTH_URL: 'https://plot.shizue.net', CHATGPT_CALLBACK_PORT: '47801' }))
+        .toThrow(/Shizue brings it back on 47811/);
+      expect(() => readConfig({ ...production, BETTER_AUTH_URL: 'https://plot.example.com', CHATGPT_CALLBACK_PORT: '47811' }))
+        .toThrow(/Shizue's port for https:\/\/plot\.shizue\.net/);
+      expect(() => readConfig({ ...production, BETTER_AUTH_URL: 'https://plot.example.com', CHATGPT_CALLBACK_PORT: '47801' }))
+        .toThrow(/Shizue's port for http:\/\/localhost:13000/);
+    });
+
+    it('refuses another production origin that names no port', () => {
+      expect(() => readConfig({ ...production, BETTER_AUTH_URL: 'https://plot.example.com' })).toThrow(/must be set for https:\/\/plot\.example\.com/);
+      expect(readConfig({ ...production, BETTER_AUTH_URL: 'https://plot.example.com', CHATGPT_CALLBACK_PORT: '47821' })
+        .chatgptCallbackPort).toBe(47821);
+    });
+
+    it('leaves development to take any port, for helper builds and offset dev servers', () => {
+      expect(readConfig({ NODE_ENV: 'development', DATABASE_URL, BETTER_AUTH_URL: 'http://localhost:13100' }).chatgptCallbackPort)
+        .toBe(47801);
+      expect(readConfig({ NODE_ENV: 'test', DATABASE_URL, BETTER_AUTH_URL: 'http://localhost:13100', CHATGPT_CALLBACK_PORT: '47811' })
+        .chatgptCallbackPort).toBe(47811);
+      expect(readConfig({ NODE_ENV: 'development', DATABASE_URL, BETTER_AUTH_URL: 'https://plot.shizue.net' }).chatgptCallbackPort)
+        .toBe(47811);
+    });
   });
 
 });

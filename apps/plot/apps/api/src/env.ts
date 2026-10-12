@@ -17,6 +17,59 @@ const DEV_AUTH_URL = 'http://localhost:13000';
 /** The loopback port the companion extension's development rule catches (apps/extension). */
 const DEV_CALLBACK_PORT = 47801;
 
+/**
+ * The loopback port each web origin's sign-in comes back on in Shizue, the Chrome
+ * Web Store extension readers install (`src/public/plot-signin-rules.json` in
+ * rokrokss/shizue). Shizue sends each port to one origin and nowhere else, so an
+ * origin asking OpenAI for another port has its readers sent to the wrong place —
+ * 47801 is the development rule, and lands on `http://localhost:13000` on the
+ * reader's own machine. Changing an entry here means releasing Shizue too.
+ */
+const SHIZUE_CALLBACK_PORTS: Readonly<Record<string, number>> = {
+  'https://plot.shizue.net': 47811,
+  'http://localhost:13000': 47801,
+};
+
+/**
+ * The loopback port to ask OpenAI for. A known origin needs no setting: its port
+ * is Shizue's. In production a setting that disagrees with Shizue is refused at
+ * boot rather than discovered at the first reader's sign-in — a known origin on
+ * another port, another origin on a port Shizue sends elsewhere, or another
+ * origin with no port at all. Development takes any port, for the helper builds
+ * (apps/extension) and offset dev servers.
+ */
+function readCallbackPort(env: NodeJS.ProcessEnv, authUrl: string): number {
+  const shizuePort = SHIZUE_CALLBACK_PORTS[authUrl];
+  const production = env['NODE_ENV'] === 'production';
+  const raw = env['CHATGPT_CALLBACK_PORT']?.trim();
+  if (!raw) {
+    if (shizuePort !== undefined) return shizuePort;
+    if (production) {
+      throw new Error(
+        `CHATGPT_CALLBACK_PORT must be set for ${authUrl}: the port the sign-in helper built for it catches (apps/extension).`,
+      );
+    }
+    return DEV_CALLBACK_PORT;
+  }
+
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+    throw new Error('CHATGPT_CALLBACK_PORT must be a port number from 1024 to 65535.');
+  }
+  if (production && shizuePort !== undefined && port !== shizuePort) {
+    throw new Error(
+      `CHATGPT_CALLBACK_PORT=${port} would send ${authUrl}'s sign-in elsewhere: Shizue brings it back on ${shizuePort}.`,
+    );
+  }
+  const owner = Object.entries(SHIZUE_CALLBACK_PORTS).find(([origin, shizue]) => shizue === port && origin !== authUrl);
+  if (production && owner) {
+    throw new Error(
+      `CHATGPT_CALLBACK_PORT=${port} is Shizue's port for ${owner[0]}: readers with Shizue would be sent there instead of ${authUrl}.`,
+    );
+  }
+  return port;
+}
+
 interface ApiConfig {
   port: number;
   /** Where the API listens. Loopback beside the web app; `0.0.0.0` on a server of its own. */
@@ -82,10 +135,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
   if (!/^https?:$/.test(new URL(authUrl).protocol) || new URL(authUrl).origin !== authUrl) {
     throw new Error('BETTER_AUTH_URL must be the web origin, e.g. https://plot.example.com');
   }
-  const callbackPort = Number(env['CHATGPT_CALLBACK_PORT'] ?? DEV_CALLBACK_PORT);
-  if (!Number.isInteger(callbackPort) || callbackPort < 1024 || callbackPort > 65535) {
-    throw new Error('CHATGPT_CALLBACK_PORT must be a port number from 1024 to 65535.');
-  }
+  const callbackPort = readCallbackPort(env, authUrl);
 
   return {
     port: Number(env['API_PORT'] ?? 8787),

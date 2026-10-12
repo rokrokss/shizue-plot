@@ -31,7 +31,7 @@ API의 `CHATGPT_CALLBACK_PORT` 기본값과 같다.
 
 ```sh
 node apps/plot/apps/extension/scripts/variant.mjs --out /tmp/shizue-helper \
-  --target http://localhost:13000=47801 --target https://plot.example.com=47811
+  --target http://localhost:13000=47801 --target https://plot.example.com=47821
 ```
 
 오리진마다 루프백 포트가 하나씩 필요하고, 그 오리진의 API는 같은 포트를

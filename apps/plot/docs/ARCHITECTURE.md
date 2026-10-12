@@ -76,7 +76,7 @@ UPLOAD_DIR=./data/uploads        # 로컬 드라이버 루트, 이미지 네임�
 S3_BUCKET / S3_REGION / S3_ENDPOINT                        # STORAGE_DRIVER=s3 일 때만
 S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY                    # 둘 다 비면 SDK 자격증명 체인
 S3_FORCE_PATH_STYLE=true         # 로컬 RustFS 필수, AWS 는 false
-CHATGPT_CALLBACK_PORT=47801      # OpenAI 루프백 콜백 포트. 확장 규칙과 오리진마다 짝 — 운영 plot.shizue.net은 47811 (§4.1)
+CHATGPT_CALLBACK_PORT=47801      # OpenAI 루프백 콜백 포트. 확장 규칙과 오리진마다 짝 — plot.shizue.net·localhost:13000은 생략하면 Shizue 포트 (§4.1)
 ```
 
 `.env.example`에 없지만 코드가 읽는 것:
@@ -107,8 +107,12 @@ Next rewrite가 넘긴 요청은 `x-forwarded-host`가 웹 호스트일 때만 �
 | **Shizue** (Chrome 웹 스토어, 0.3.6 이상) | `mpcbgfkoholfgapcgcmfjobnfcbnfanm` | `https://plot.shizue.net` ← 47811, `http://localhost:13000` ← 47801 | 독자가 설치하는 것. ping에 `features: ['plotSignIn']`로 답하고, 이 기능이 없는 답은 설치되지 않은 것으로 본다. 0.3.5 이하는 아예 답하지 않는다 |
 | 로그인 도우미 (`apps/extension`, 압축 해제 로드) | `naclpiefafceoehanglehokfnibaicle` | `scripts/variant.mjs`로 고른 오리진 | 개발용, 그리고 위 두 오리진 밖의 배포용 |
 
-그래서 운영(`plot.shizue.net`)의 API는 `CHATGPT_CALLBACK_PORT=47811`이어야 한다. 오리진을 바꾸면 Shizue를 다시
-릴리즈해야 한다(규칙은 `rokrokss/shizue`의 `src/public/plot-signin-rules.json`). 로그인 화면은 확장이 없을 때
+포트는 API가 `BETTER_AUTH_URL`로 정한다(`env.ts`의 `SHIZUE_CALLBACK_PORTS`): 위 두 오리진은 설정 없이 Shizue의
+포트를 쓰고, 운영(`NODE_ENV=production`)에서는 Shizue와 어긋나는 설정을 **부팅 때 거절한다** — 아는 오리진에 다른
+포트, 다른 오리진에 Shizue가 다른 곳으로 보내는 포트(47801·47811), 다른 오리진에 포트 없음. 변수를 빠뜨린 운영
+배포가 47801을 요청하면 Shizue가 독자를 그 사람 컴퓨터의 `localhost:13000`으로 보내기 때문이다. 개발은 오프셋 서버와
+도우미 빌드를 위해 어떤 포트든 받는다. 오리진을 바꾸면 Shizue를 다시 릴리즈하고 이 표도 고쳐야 한다(규칙은
+`rokrokss/shizue`의 `src/public/plot-signin-rules.json`). 로그인 화면은 확장이 없을 때
 웹 스토어 링크를 앞에, 도우미를 직접 로드하는 개발용 단계를 접힌 칸에 둔다.
 
 1. `POST /api/chatgpt/sign-in {next, locale}` — PKCE·state·nonce를 만들어 `verification` 행에 10분 보관하고,
