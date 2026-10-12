@@ -3,7 +3,6 @@ import {
   countTokens,
   replyLengthTokens,
   sceneFocusDirective,
-  stripImageMacros,
   withNarrationPrefix,
   type AssembledPrompt,
   type HistoryMessage,
@@ -85,6 +84,8 @@ export interface GenerationPlan {
    * effects — taken from the whole branch, not the history the budget kept.
    */
   loreState: LoreTimedState;
+  /** The names this chat's open images go by, for `{{assetlist}}` (see `openAssetNames`). */
+  assetNames: string[];
   /** The chat's prompt preset. */
   preset: Preset;
   /** Context budget this chat runs with (see memorySettings). */
@@ -318,11 +319,7 @@ async function buildRequestMessages(
   // For continue the trailing assistant text must be the last turn so the model
   // resumes it, so it is re-attached after the post-history instructions.
   const isContinue = plan.target.kind === 'continue';
-  // The partial bypasses the assembler, so it is stripped of image references
-  // here — the assembler would have done it for any other turn.
-  const partial = isContinue
-    ? stripImageMacros(plan.history[plan.history.length - 1]?.content ?? '').trimEnd()
-    : '';
+  const partial = isContinue ? (plan.history[plan.history.length - 1]?.content ?? '').trimEnd() : '';
   const history = await withoutUnseeableImages(
     isContinue ? plan.history.slice(0, -1) : plan.history,
     plan.model,
@@ -352,6 +349,7 @@ async function buildRequestMessages(
     clock: plan.clock,
     seed: plan.seed,
     loreState: plan.loreState,
+    assetNames: plan.assetNames,
     history,
     // The budget reserves what the stream may actually spend — the same value
     // the request's maxTokens is set from, so a `long` plot does not assemble

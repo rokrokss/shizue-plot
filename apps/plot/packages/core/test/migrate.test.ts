@@ -4,7 +4,7 @@
  * whole where the shape is the point, so a mapping change shows up as a diff.
  */
 import { describe, expect, it } from 'vitest';
-import { stripImageMacros } from '../src/macro.js';
+import { applyMacros } from '../src/macro.js';
 import {
   convertToDraft,
   draftFingerprint,
@@ -420,7 +420,7 @@ describe('image list lore', () => {
   });
 
   it('turns on for Elyn when its text tells the model to output an image', () => {
-    // The instruction itself is stripped before the model sees it; the list says it in words.
+    // The instruction reaches the model as written; the list adds what each picture is of.
     const fromPrompt = convertToDraft('elyn', elyn({ name: 'n', prompt: '기쁠 때 {{img::웃음}}을 출력한다.' }), {
       assets,
     });
@@ -430,7 +430,7 @@ describe('image list lore', () => {
       { assets },
     );
     for (const result of [fromPrompt, fromLore]) {
-      expect(result.warnings).toContainEqual(expect.objectContaining({ code: 'imageInstructionsStripped' }));
+      expect(result.warnings).toContainEqual(expect.objectContaining({ code: 'imageInstructionsFound' }));
       expect(result.draft.plot.lorebook.some((entry) => entry.constant && entry.content.startsWith('[이미지]'))).toBe(
         true,
       );
@@ -457,10 +457,10 @@ describe('image list lore', () => {
     ]);
   });
 
-  it('survives prompt assembly, which strips every asset macro', () => {
+  it('shows the model the syntax, which its macros leave as written', () => {
     const [entry] = convertToDraft('zeta', zeta({ title: 't' }), { assets }).draft.plot.lorebook;
-    expect(stripImageMacros(entry!.content)).toBe(entry!.content);
-    expect(entry!.content).toContain('img::');
+    expect(entry!.content).toContain('{{img::이름}}');
+    expect(applyMacros(entry!.content, { char: 'c', user: 'u' })).toBe(entry!.content);
   });
 });
 

@@ -36,6 +36,8 @@ export interface AssetLock {
 interface UnlockableAsset {
   id: string;
   slug: string;
+  /** The imported card's own name for the image; null for uploads that sent none. */
+  name: string | null;
   unlock: AssetUnlock | null;
   ownerId: string;
 }
@@ -50,6 +52,7 @@ async function plotAssetsOfChat(deps: AppDeps, chat: Chat): Promise<UnlockableAs
     .select({
       id: plotAssets.id,
       slug: plotAssets.slug,
+      name: plotAssets.name,
       unlock: plotAssets.unlock,
       ownerId: plots.ownerId,
     })
@@ -193,14 +196,14 @@ export async function unlockByRelationship(
 }
 
 /**
- * What this chat may show of its plot's images. Every asset is listed, so the
- * gallery can draw the locked ones as silhouettes, and the condition itself never
- * travels — only its `kind`, which is the hint the placeholder carries.
- *
+ * Every asset of the chat's plot, each with whether this chat still has it shut.
  * The plot's owner sees their own work whole: nothing is locked in the creator's
  * own chats.
  */
-export async function assetLocks(deps: AppDeps, chat: Chat): Promise<AssetLock[]> {
+async function lockStates(
+  deps: AppDeps,
+  chat: Chat,
+): Promise<{ asset: UnlockableAsset; locked: boolean }[]> {
   const assets = await plotAssetsOfChat(deps, chat);
   if (assets.length === 0) return [];
   const owner = assets[0]!.ownerId === chat.userId;
@@ -210,9 +213,33 @@ export async function assetLocks(deps: AppDeps, chat: Chat): Promise<AssetLock[]
       : await unlockedIds(deps, chat.id);
 
   return assets.map((asset) => ({
+    asset,
+    locked: asset.unlock !== null && !owner && !unlocked.has(asset.id),
+  }));
+}
+
+/**
+ * What this chat may show of its plot's images. Every asset is listed, so the
+ * gallery can draw the locked ones as silhouettes, and the condition itself never
+ * travels — only its `kind`, which is the hint the placeholder carries.
+ */
+export async function assetLocks(deps: AppDeps, chat: Chat): Promise<AssetLock[]> {
+  return (await lockStates(deps, chat)).map(({ asset, locked }) => ({
     assetId: asset.id,
     slug: asset.slug,
-    locked: asset.unlock !== null && !owner && !unlocked.has(asset.id),
+    locked,
     kind: asset.unlock?.kind ?? null,
   }));
+}
+
+/**
+ * The names this chat's open images go by — the card's own where it had one,
+ * the slug otherwise — in the asset list's order. What `{{assetlist}}` reads in
+ * the prompt: the same list the chat page gives the display scripts, so a locked
+ * image is no more named to the model than it is drawn for the reader.
+ */
+export async function openAssetNames(deps: AppDeps, chat: Chat): Promise<string[]> {
+  return (await lockStates(deps, chat))
+    .filter(({ locked }) => !locked)
+    .map(({ asset }) => asset.name ?? asset.slug);
 }

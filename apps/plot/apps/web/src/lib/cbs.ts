@@ -59,7 +59,7 @@ export interface CbsContext {
   chatIndex?: number;
   /** The last message's place, counted the same way, for `{{lastmessageid}}`. */
   lastMessageId?: number;
-  /** The names the plot's open images go by, for `{{assetlist}}`. */
+  /** The names the plot's open images go by, for `{{assetlist}}` and `{{emotionlist}}`. */
   assetNames?: readonly string[];
 }
 
@@ -310,7 +310,9 @@ function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>): CbsHos
           return ctx.lastMessageId === undefined ? undefined : { text: String(ctx.lastMessageId) };
         // …and ask whether an image exists before drawing it
         // (`{{contains::{{assetlist}}::name}}`). The plot's own names, not the model's.
+        // A plot keeps one list of images, so RisuAI's emotion list is the same one.
         case 'assetlist':
+        case 'emotionlist':
           return { text: read(JSON.stringify(ctx.assetNames ?? []), budget) };
         case 'rel': {
           const axis = call.args.rest(1)?.value().text.trim().toLowerCase() ?? '';

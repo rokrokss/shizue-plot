@@ -1,5 +1,5 @@
 import { extractChoices } from './choices.js';
-import { applyMacros, stripImageMacros, type MacroClock, type MacroContext } from './macro.js';
+import { applyMacros, type MacroClock, type MacroContext } from './macro.js';
 import { activateLore, loreEntryKey, type LoreActivationVia, type LoreTimedState } from './lorebook.js';
 import { isNarration, narrationBody } from './narration.js';
 import { DEFAULT_PRESET, type Preset } from './presets.js';
@@ -165,6 +165,8 @@ export interface AssemblePromptInput {
    * the whole branch, which `history` may be only the newest stretch of.
    */
   loreState?: LoreTimedState;
+  /** The names this chat's open images go by, for {{assetlist}} (`MacroContext.assetNames`). */
+  assetNames?: readonly string[];
   contextBudget?: number;
   maxResponseTokens?: number;
   preset?: Preset;
@@ -449,16 +451,16 @@ export function styleDirectives(style: PlotStyle): string {
 /** Applies an override that may re-inject the preset through {{original}}. */
 function resolveOverride(override: string, presetText: string, macro: MacroContext): string {
   if (!override.trim()) return presetText;
-  return stripImageMacros(applyMacros(override, { ...macro, original: presetText }));
+  return applyMacros(override, { ...macro, original: presetText });
 }
 
 /**
- * A lore entry as the model reads it, macros expanded and image references gone.
- * Blank when that leaves nothing to say — a `{{#if}}` that came out false — so it
- * costs the budget nothing and is not sent as an empty block.
+ * A lore entry as the model reads it, macros expanded. Blank when that leaves
+ * nothing to say — a `{{#if}}` that came out false — so it costs the budget
+ * nothing and is not sent as an empty block.
  */
 function loreEntryText(entry: LoreEntry, macro: MacroContext): string {
-  const text = stripImageMacros(applyMacros(entry.content, macro));
+  const text = applyMacros(entry.content, macro);
   return text.trim() ? text : '';
 }
 
@@ -489,6 +491,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     clock,
     seed,
     loreState,
+    assetNames,
     userName = DEFAULT_USER_NAME,
     contextBudget = DEFAULT_CONTEXT_BUDGET,
     maxResponseTokens = DEFAULT_MAX_RESPONSE_TOKENS,
@@ -504,13 +507,13 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     variables,
     ...(clock ? { clock } : {}),
     ...(seed !== undefined ? { seed } : {}),
+    ...(assetNames ? { assetNames } : {}),
   });
   const plotMacro = macroOf(plot.name);
-  // Image references never reach the model, so they are gone before anything is
-  // measured against the budget.
-  const expandWith = (text: string, macro: MacroContext): string =>
-    stripImageMacros(applyMacros(text, macro));
-  const expand = (text: string): string => expandWith(text, plotMacro);
+  // Image references stay, as RisuAI leaves them: the card's own `{{img::…}}`
+  // is how it tells the model to draw, and the model's earlier ones in the
+  // history are how it keeps doing so.
+  const expand = (text: string): string => applyMacros(text, plotMacro);
 
   // The first member is the plot's stand-in wherever the assembler needs one
   // card rather than all of them. There is no plot-level override field yet, so
@@ -605,11 +608,11 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // not to a member.
   const characterBlocks = cast.map(({ name, card }): SystemSection => {
     const macro = macroOf(name);
-    const lines = [characterHeader(name), expandWith(card.description, macro).trim()]
+    const lines = [characterHeader(name), applyMacros(card.description, macro).trim()]
       .filter((line) => line.length > 0)
       .join('\n');
     const text = card.personality.trim()
-      ? `${lines}\n\n${expandWith('{{char}}의 성격: ', macro)}${expandWith(card.personality, macro).trim()}`
+      ? `${lines}\n\n${applyMacros('{{char}}의 성격: ', macro)}${applyMacros(card.personality, macro).trim()}`
       : lines;
     return { kind: 'character', label: name, text };
   });
@@ -727,7 +730,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const exampleBlocks = cast.flatMap(({ name, card }) =>
     splitExamples(card.mesExample).map((block) => ({
       name,
-      content: `${exampleHeader(name)}\n${expandWith(block, macroOf(name))}`,
+      content: `${exampleHeader(name)}\n${applyMacros(block, macroOf(name))}`,
     })),
   );
   for (const { name, content } of exampleBlocks) {

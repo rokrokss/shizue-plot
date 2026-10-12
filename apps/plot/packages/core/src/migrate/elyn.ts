@@ -273,13 +273,12 @@ export function elynToDraft(c: Conversion, input: SiteInput): MigrationDraft {
   });
   preserveLoreNames(c, labelOf(c, 'lore', 'name'), loreNames);
   // Elyn's manual image mode is an instruction in the prompt or a lore entry to
-  // output `{{img::키}}`. Prompt assembly strips every asset macro, so that
-  // instruction reaches the model with the token gone; the image list, which
-  // spells the syntax in words, is what carries it instead — on by default then.
+  // output `{{img::키}}`. It reaches the model as written; the image list, on by
+  // default then, adds what each picture is of.
   const imageInstructions =
     IMAGE_MACRO.test(text(input['prompt'])) ||
     rowsOf(input, 'lore').some((row) => IMAGE_MACRO.test(text(row['content'])));
-  if (imageInstructions) warn(c, 'imageInstructionsStripped', 'prompt.prompt');
+  if (imageInstructions) warn(c, 'imageInstructionsFound', 'prompt.prompt');
   if (c.options.imageListLore ?? imageInstructions) {
     const images = imageListEntry(c, lorebook.length);
     if (images) lorebook.push(images);

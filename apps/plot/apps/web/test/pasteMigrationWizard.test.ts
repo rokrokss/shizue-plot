@@ -229,7 +229,7 @@ describe('the Elyn wizard', () => {
     const imageList = checkboxes.find((label) => label.textContent?.includes('이미지 목록'))!;
     // The prompt asks for `{{img::…}}`, so the core turns the image list on, and the box says so.
     expect(imageList.querySelector('input')!.checked).toBe(true);
-    expect(host.querySelector('[data-code="imageInstructionsStripped"]')).not.toBeNull();
+    expect(host.querySelector('[data-code="imageInstructionsFound"]')).not.toBeNull();
 
     const split = checkboxes.find((label) => label.textContent?.includes('구획'))!;
     await click(split.querySelector('input'));

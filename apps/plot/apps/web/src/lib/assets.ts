@@ -85,10 +85,10 @@ export function lookupAsset(
  * Rewrites every image reference into a markdown image, so the message still
  * goes through a single markdown pass. `{{img::…}}` and RisuAI's other spellings
  * of an image (`image`, `asset`, `emotion`) count; a reference the plot has no
- * asset for renders as nothing — the same thing that reaches the model — and so
- * does every asset macro a message has no use for: an address (`raw`, `path`),
- * music, video, a name composed from variables. The same parse as the stripper
- * in @shizue/core, so whatever the model never sees does not survive on screen.
+ * asset for renders as nothing, and so does every asset macro a message has no
+ * use for: an address (`raw`, `path`), music, video, a name composed from
+ * variables. The same parse as the stripper in @shizue/core, so no token the
+ * renderer passes over is left on screen as text.
  *
  * The alt text is the resolved slug, never the reference: a card's name for an
  * image can hold `]` or `)`, and the slug cannot.

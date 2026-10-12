@@ -4448,6 +4448,27 @@ describe('unlockable assets', () => {
     expect((await json(reader, `/api/plots/${plot.id}/assets/secret`, 'PATCH', { unlock: null })).status).toBe(404);
   });
 
+  it("names only this chat's open images to the model through {{assetlist}}", async () => {
+    const alice = await signUp('assetlist-creator@example.com');
+    const plot = await publishablePlot(alice, { name: '목록 작품', description: '그림: {{assetlist}}' });
+    await seedAsset(plot.id, 'plain');
+    await seedAsset(plot.id, 'secret', KEYWORD);
+    await publishPlot(alice, plot.id);
+    const bob = await signUp('assetlist-reader@example.com');
+    const { app: capturing, prompts } = capturingApp();
+
+    // A reader's model is not told of the image still shut in their chat; the
+    // creator's own chat has nothing shut.
+    for (const [cookie, names] of [
+      [bob, '["plain"]'],
+      [alice, '["plain","secret"]'],
+    ] as const) {
+      const chatId = (await startChat(cookie, plot.id)).chat.id;
+      await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing));
+      expect(prompts.at(-1)!.system).toContain(`그림: ${names}`);
+    }
+  });
+
   it('opens a keyword unlock on the turn that says it', async () => {
     const alice = await signUp('unlock-keyword-creator@example.com');
     const plot = await lockedPlot(alice, KEYWORD);
@@ -6972,8 +6993,8 @@ describe('memory', () => {
       );
       expect((await readSse(res)).at(-1)!.event).toBe('done');
 
-      // The query leaves this service for a provider, so it is stripped like any
-      // other model-bound text.
+      // The query is embedded for its meaning, which an image token has none of,
+      // so it is stripped even though the roleplay prompt keeps it.
       expect(embedded.some((text) => text.includes('목요일'))).toBe(true);
       expect(embedded.some((text) => text.includes('{{img'))).toBe(false);
     });
@@ -10175,7 +10196,7 @@ describe('plot assets', () => {
     expect(onDisk).toHaveLength(2);
   });
 
-  it('keeps image references in the stored message but never sends them to the model', async () => {
+  it('keeps image references in the stored message and sends them to the model as written', async () => {
     const cookie = await signUp('asset-prompt@example.com');
     const { chatId } = await setupChat(cookie);
     const { app: capturing, prompts } = capturingApp();
@@ -10183,16 +10204,15 @@ describe('plot assets', () => {
     const content = '반가워 {{img::smile}} 오늘도';
     await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }, capturing));
 
+    // As RisuAI sends them: the model learns to draw from the tokens it sees.
     const sent = prompts.at(-1)!;
-    expect([sent.system, ...sent.messages.map((message) => message.content)].join('\n')).not.toContain(
-      '{{img',
-    );
+    expect(sent.messages.map((message) => message.content)).toContain(content);
     // The message itself keeps the reference — that is what the chat renders.
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
     expect(state.path.map((message: any) => message.content)).toContain(content);
   });
 
-  it('never sends an image reference to the model on the continue path', async () => {
+  it('keeps an image reference in the partial the continue path re-attaches', async () => {
     const cookie = await signUp('asset-continue@example.com');
     const { chatId, state } = await setupChat(cookie);
     const { app: capturing, prompts } = capturingApp();
@@ -10205,11 +10225,10 @@ describe('plot assets', () => {
     const events = await readSse(await json(cookie, `/api/chats/${chatId}/continue`, 'POST', undefined, capturing));
     expect(events.at(-1)!.event).toBe('done');
 
-    // That partial bypasses the assembler, so it carries its own stripping.
+    // That partial bypasses the assembler and reaches the model as stored, like every other turn.
     const sent = prompts.at(-1)!;
     expect(sent.messages.at(-1)!.role).toBe('assistant');
-    expect(sent.messages.at(-1)!.content).toBe('문이 열린다');
-    expect([sent.system, ...sent.messages.map((message) => message.content)].join('\n')).not.toContain('{{img');
+    expect(sent.messages.at(-1)!.content).toBe('문이 열린다 {{img::smile}}');
 
     // The stored message keeps the reference; the continuation appends to it.
     const after = await readJson(await request(cookie, `/api/chats/${chatId}`));

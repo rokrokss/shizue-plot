@@ -129,8 +129,8 @@ export async function buildMemoryInput(
 ): Promise<{ memoryText: string; history: Message[] }> {
   const { summary, history, anchored } = applyMemory(path, chat);
   // Branch divergence invalidates the whole memory layer, facts included. The
-  // query is embedded by a provider, so it is stripped like any other text that
-  // leaves this service.
+  // query is embedded for its meaning, which an image token has none of, so it
+  // is stripped even though the roleplay prompt keeps it.
   const facts = anchored
     ? await retrieveFacts(
         deps,

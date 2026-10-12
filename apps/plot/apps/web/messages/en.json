@@ -1221,7 +1221,7 @@
       "adultOnly": "Adult-only works come over as private plots only, for now.",
       "splitNoSections": "No “## name” blocks were found under “# 캐릭터”, so nothing was split into characters.",
       "platformUnsupported": "This site cannot be moved from yet.",
-      "imageInstructionsStripped": "Elyn instructions to output images ('{{img::…}}') do not reach the model as written. The “image list” lore entry is switched on instead, so give each picture a description in the Images step."
+      "imageInstructionsFound": "The Elyn settings ask the model to output images ('{{img::…}}'), so the “image list” lore entry is switched on. Give each picture a description in the Images step."
     }
   }
 }

@@ -164,8 +164,8 @@ export interface MigrationDraft {
  * - `adultOnly`: an adult-only source comes in private only.
  * - `splitNoSections`: splitting was asked for and no `## 이름` block was found.
  * - `platformUnsupported`: no mapper for this platform yet.
- * - `imageInstructionsStripped`: Elyn text tells the model to output `{{img::…}}`, which
- *   prompt assembly strips; the image list (on by default then) carries it instead.
+ * - `imageInstructionsFound`: Elyn text tells the model to output `{{img::…}}`; the image
+ *   list is on by default then, so each picture can be described.
  */
 export const MIGRATION_WARNING_CODES = [
   'truncated',
@@ -184,7 +184,7 @@ export const MIGRATION_WARNING_CODES = [
   'adultOnly',
   'splitNoSections',
   'platformUnsupported',
-  'imageInstructionsStripped',
+  'imageInstructionsFound',
 ] as const;
 
 export type MigrationWarningCode = (typeof MIGRATION_WARNING_CODES)[number];

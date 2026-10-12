@@ -29,6 +29,14 @@ export interface MacroContext {
    * it {{pick}} behaves like {{random}}.
    */
   seed?: string;
+  /**
+   * The names the plot's images go by in this chat — a card's own name where it
+   * had one, the slug otherwise, open ones only — for RisuAI's {{assetlist}} and
+   * {{emotionlist}}, which a card writes into its prompt to tell the model what
+   * it may draw. A plot keeps one list of images, so both read the same names.
+   * Without it both are left alone like any other unsupported macro.
+   */
+  assetNames?: readonly string[];
 }
 
 /** Content languages a clock formats in — a plot's `language`. */
@@ -95,11 +103,13 @@ export function fnv1a(text: string): number {
 
 /**
  * Drops every asset reference — `{{img::…}}` and the rest of RisuAI's asset
- * macros, nested ones included. The token is client-side markup — the chat
- * renders it as the character's image — so it is noise to a model, while the
- * stored message keeps it. Prompt assembly is therefore the only caller;
- * `applyMacros` deliberately leaves the token alone, because it also runs where
- * the expanded text is what gets stored (greetings).
+ * macros, nested ones included — for the surfaces that show or read a message
+ * as plain words: list previews, the public intro, the memory and side-task
+ * transcripts, the scene-image prompt.
+ *
+ * The roleplay prompt keeps them, as RisuAI's does: a card teaches the model to
+ * draw a picture by writing the token into its description or lore, and the
+ * model keeps doing it by seeing its own earlier ones in the history.
  */
 export function stripImageMacros(text: string): string {
   return replaceAssetMacros(text, () => '');
@@ -123,7 +133,8 @@ export function imageMacroRefs(text: string): string[] {
  * CBS for the prompt, on the shared evaluator (`cbs.ts`): {{char}}, {{user}},
  * {{getvar::k}}, {{random:a,b}} and {{random::a::b}}, {{pick::a,b}},
  * {{roll:dN}}, {{// comment}}, {{original}}, the clock's {{date}}, {{time}},
- * {{weekday}}, {{idle_duration}}, RisuAI's nesting, blocks ({{#if}},
+ * {{weekday}}, {{idle_duration}}, RisuAI's {{assetlist}} and {{emotionlist}},
+ * RisuAI's nesting, blocks ({{#if}},
  * {{#when}}) and functions ({{? …}}, {{calc}}, {{equal}}, {{sum}}, …), and
  * SillyTavern's {{if}}…{{else}}…{{/if}}, {{trim}}, {{newline}}, {{space}} and
  * {{noop}}. Macro names are case-insensitive; unsupported macros are left as-is,
@@ -149,6 +160,9 @@ export function applyMacros(text: string, ctx: MacroContext): string {
       if (name === 'char') return { text: ctx.char };
       if (name === 'user') return { text: ctx.user };
       if (name === 'original') return ctx.original === undefined ? undefined : { text: ctx.original };
+      if (name === 'assetlist' || name === 'emotionlist') {
+        return ctx.assetNames === undefined ? undefined : { text: JSON.stringify(ctx.assetNames) };
+      }
       const value = clock ? clockMacro(name, clock) : undefined;
       return value === undefined ? undefined : { text: value };
     },

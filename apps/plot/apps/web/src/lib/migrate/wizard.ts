@@ -208,13 +208,13 @@ export const defaultOptions = (): PreviewOptions => ({
  * Whether the "image list" lore entry is made when the creator has not said
  * (design D7), as the core decides it: on where the source picks pictures by
  * their description, and on Elyn only when its text asks the model for
- * `{{img::…}}` — which the core says with `imageInstructionsStripped`.
+ * `{{img::…}}` — which the core says with `imageInstructionsFound`.
  */
 export const imageListDefault = (
   platform: MigrationPlatform,
   warnings: readonly MigrationWarning[],
 ): boolean =>
-  platform === 'elyn' ? warnings.some((warning) => warning.code === 'imageInstructionsStripped') : true;
+  platform === 'elyn' ? warnings.some((warning) => warning.code === 'imageInstructionsFound') : true;
 
 /** Every `turns` field of the input that has text, which is what a speaker mode applies to. */
 export function sceneFields(

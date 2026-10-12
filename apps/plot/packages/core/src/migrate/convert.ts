@@ -331,9 +331,9 @@ export const loreEntry = (
  * The constant "image list" entry (D7): one line per described asset, so the
  * model can pick a picture the way the source picked by description.
  *
- * The syntax is spelled in words rather than shown, and the list gives bare
- * names. Prompt assembly strips every asset macro (`stripImageMacros`) — any
- * brace spelling written here would reach the model as nothing at all.
+ * The syntax is shown once and the list gives bare names. The prompt keeps
+ * asset macros as written, so the model reads `{{img::이름}}` here the way it
+ * reads its own earlier ones in the history.
  */
 export function imageListEntry(c: Conversion, insertionOrder: number): LoreEntry | undefined {
   const seen = new Set<string>();
@@ -349,7 +349,7 @@ export function imageListEntry(c: Conversion, insertionOrder: number): LoreEntry
   }
   if (rows.length === 0) return undefined;
   const content = [
-    '[이미지] 아래 목록에 지금 장면에 맞는 그림이 있으면, 그 그림의 이름 앞에 img::를 붙이고 전체를 이중 중괄호로 감싼 표기를 한 줄로 출력한다.',
+    '[이미지] 아래 목록에 지금 장면에 맞는 그림이 있으면, 그 그림을 {{img::이름}} 표기로 한 줄에 출력한다.',
     ...rows,
   ].join('\n');
   return loreEntry([], content, insertionOrder, { constant: true, position: 'after_char' });

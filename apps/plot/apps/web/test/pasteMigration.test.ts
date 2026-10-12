@@ -188,7 +188,7 @@ describe('the images', () => {
   it('shows the image list’s default the way the core decides it', () => {
     expect(imageListDefault('zeta', [])).toBe(true);
     expect(imageListDefault('elyn', [])).toBe(false);
-    expect(imageListDefault('elyn', [{ code: 'imageInstructionsStripped', field: 'prompt.prompt' }])).toBe(true);
+    expect(imageListDefault('elyn', [{ code: 'imageInstructionsFound', field: 'prompt.prompt' }])).toBe(true);
   });
 });
 

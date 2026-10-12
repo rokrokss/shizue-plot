@@ -93,7 +93,7 @@ import { deleteQuietly } from '../storage.js';
 import { toPromptCharacters, toPromptPlot } from '../plots.js';
 import { suggestReplies } from '../suggest.js';
 import { buildPath, deepestLeaf, siblingInfo } from '../tree.js';
-import { assetLocks } from '../unlocks.js';
+import { assetLocks, openAssetNames } from '../unlocks.js';
 import {
   isUuid,
   optionalBoolean,
@@ -509,6 +509,8 @@ async function loadGenerationContext(
   userName: string;
   authorNote: string;
   narrator: NarratorConfig | undefined;
+  /** The names this chat's open images go by, for `{{assetlist}}` in the prompt. */
+  assetNames: string[];
   all: Message[];
 }> {
   // Re-checked on every generation, not just at chat creation: unpublishing a
@@ -534,6 +536,7 @@ async function loadGenerationContext(
     narrator: chat.narrator ?? row.narrator ?? undefined,
     // The chat's own note plus the reusable notes attached to it.
     authorNote: await loadAuthorNote(deps, chat),
+    assetNames: await openAssetNames(deps, chat),
     all: await loadMessages(deps, chat.id),
   };
 }
@@ -1002,6 +1005,7 @@ async function regeneratePlan(
     // Without the head being replaced: its records belong to the swipe this
     // generation is an alternative to.
     loreState: loreStateOf(kept),
+    assetNames: context.assetNames,
     contextBudget: memorySettingsOf(chat).contextBudget,
     focusNames,
     ...(narration
@@ -1822,6 +1826,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         clock: requestClock(c, context.row, [...path, userMessage]),
         seed: chat.id,
         loreState: loreStateOf([...path, userMessage]),
+        assetNames: context.assetNames,
         contextBudget: memorySettingsOf(chat).contextBudget,
         focusNames,
         target: { kind: 'new', parentId: userMessage.id },
@@ -1898,6 +1903,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         // is what it was first generated on — its own record must not read as a
         // trigger from the turn before.
         loreState: loreStateOf(path.slice(0, -1)),
+        assetNames: context.assetNames,
         contextBudget: memorySettingsOf(chat).contextBudget,
         focusNames,
         target: { kind: 'continue', message: head },
@@ -1945,6 +1951,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         clock: requestClock(c, context.row, path),
         seed: chat.id,
         loreState: loreStateOf(path),
+        assetNames: context.assetNames,
         contextBudget: memorySettingsOf(chat).contextBudget,
         focusNames,
         trailingSystem: applyMacros(AUTO_CONTINUE_NUDGE, {
@@ -1998,6 +2005,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         clock: requestClock(c, context.row, path),
         seed: chat.id,
         loreState: loreStateOf(path),
+        assetNames: context.assetNames,
         contextBudget: memorySettingsOf(chat).contextBudget,
         focusNames,
         trailingSystem: applyMacros(NARRATION_NUDGE, {

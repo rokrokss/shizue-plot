@@ -243,13 +243,17 @@ describe('assemblePrompt', () => {
     expect(system.indexOf('AFTER')).toBeGreaterThan(system.indexOf('아리아의 성격'));
   });
 
-  it('drops every {{img::slug}} reference before the model sees it', () => {
+  it('keeps every {{img::…}} reference, as RisuAI sends them', () => {
     const withImages: HistoryMessage[] = [
       { role: 'assistant', content: '{{img::smile}}웃으며 인사한다.' },
       { role: 'user', content: '반가워 {{img::wave}}' },
     ];
     const { system, messages } = assemblePrompt({
-      plot: { ...plot, description: '외딴 여관. {{img::inn}}' },
+      plot: {
+        ...plot,
+        description: '외딴 여관. {{img::inn}}',
+        lorebook: [loreEntry({ content: '여관의 규칙 {{img::rules}}' })],
+      },
       characters: [
         {
           name: '아리아',
@@ -270,10 +274,22 @@ describe('assemblePrompt', () => {
     });
 
     const everything = [system, ...messages.map((message) => message.content)].join('\n');
-    expect(everything).not.toContain('{{img');
-    // Only the reference goes; the sentence around it stays.
-    expect(system).toContain('서리 골짜기의 마녀.');
-    expect(messages.map((message) => message.content)).toContain('웃으며 인사한다.');
+    for (const ref of ['inn', 'rules', 'portrait', 'hidden', 'footer', 'example', 'persona', 'note', 'wave']) {
+      expect(everything).toContain(`{{img::${ref}}}`);
+    }
+    // The model's own earlier picture is in the history as it wrote it.
+    expect(messages.map((message) => message.content)).toContain('{{img::smile}}웃으며 인사한다.');
+  });
+
+  it('names the open images for {{assetlist}} and {{emotionlist}}', () => {
+    const { system } = assemblePrompt({
+      plot: { ...plot, description: '그림: {{assetlist}} / 표정: {{emotionlist}}' },
+      characters: [aria],
+      history,
+      preset,
+      assetNames: ['웃음.png', 'door'],
+    });
+    expect(system).toContain('그림: ["웃음.png","door"] / 표정: ["웃음.png","door"]');
   });
 
   it('injects memoryText after the persona, with macros expanded', () => {

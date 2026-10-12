@@ -33,8 +33,17 @@ describe('applyMacros', () => {
     expect(applyMacros('{{unknown}} {{setvar::a::1}}', ctx)).toBe('{{unknown}} {{setvar::a::1}}');
   });
 
-  it('leaves image references in place — stripping them is the prompt assembler job', () => {
+  it('leaves image references in place — the chat draws them and the model reads them', () => {
     expect(applyMacros('웃는다 {{img::smile}}', ctx)).toBe('웃는다 {{img::smile}}');
+  });
+
+  it("answers RisuAI's {{assetlist}} and {{emotionlist}} only when it was given the names", () => {
+    const text = '{{assetlist}} {{emotion_list}}';
+    expect(applyMacros(text, { ...ctx, assetNames: ['웃음', 'door.png'] })).toBe(
+      '["웃음","door.png"] ["웃음","door.png"]',
+    );
+    expect(applyMacros(text, { ...ctx, assetNames: [] })).toBe('[] []');
+    expect(applyMacros(text, ctx)).toBe(text);
   });
 });
 
