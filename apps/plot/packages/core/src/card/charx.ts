@@ -5,8 +5,12 @@ import { readRisum, type RisuModuleScripts } from './risum.js';
 
 const ZIP_SIGNATURE = [0x50, 0x4b, 0x03, 0x04];
 const EMBEDDED_PREFIX = 'embeded://'; // sic — the CCv3 spec spells it this way.
-/** Decompressed-size cap per entry, so a hostile archive cannot exhaust memory. */
-export const MAX_ENTRY_BYTES = 20 * 1024 * 1024;
+/**
+ * Decompressed-size cap per entry, so a hostile archive cannot exhaust memory.
+ * Room for any one picture a card could reasonably carry: an image over it ends
+ * the asset pass, and every image after it goes too.
+ */
+export const MAX_ENTRY_BYTES = 100 * 1024 * 1024;
 /**
  * Budget for the pass that reads the icon and the assets. The per-entry cap bounds
  * memory but not work: an archive can name dozens of entries that each stop just

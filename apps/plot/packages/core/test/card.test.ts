@@ -1,7 +1,7 @@
 import { unzipSync, unzlibSync, zipSync, type Zippable } from 'fflate';
 import { describe, expect, it } from 'vitest';
 import { exportCardPng, exportCardV3 } from '../src/card/export.js';
-import { MAX_ASSETS, MAX_TOTAL_BYTES } from '../src/card/charx.js';
+import { MAX_ASSETS, MAX_ENTRY_BYTES, MAX_TOTAL_BYTES } from '../src/card/charx.js';
 import { CardParseError, normalizeCard, parseDecorators } from '../src/card/normalize.js';
 import { parseCard } from '../src/card/parse.js';
 import { introFromCreatorNotes, MAX_INTRO_LENGTH } from '../src/card/intro.js';
@@ -312,8 +312,8 @@ describe('parseCard - PNG assets', () => {
     const early = Uint8Array.from([7, 7]);
     const png = buildPngWithTextChunks({
       'chara-ext-asset_:1': base64(early),
-      // Base64 for 21MB, over the 20MB cap: refused from its length, never decoded.
-      'chara-ext-asset_:2': 'A'.repeat(28 * 1024 * 1024),
+      // Base64 for a megabyte over the per-entry cap: refused from its length, never decoded.
+      'chara-ext-asset_:2': 'A'.repeat(Math.ceil(((MAX_ENTRY_BYTES + 1024 * 1024) * 4) / 3)),
       'chara-ext-asset_:3': base64(Uint8Array.from([8, 8])),
       ccv3: v3WithAssets([
         { type: 'emotion', name: 'early', uri: '__asset:1', ext: 'png' },
@@ -477,15 +477,15 @@ describe('parseCard - charx', () => {
     expect(() => parseCard(zipSync({ 'other.json': encode({}) }))).toThrow(CardParseError);
   });
 
-  // Above readCharx's 20MB per-entry cap. Built once and reused as zip input.
-  let oversized: Uint8Array | undefined;
-  const oversizedAsset = (): Uint8Array => {
-    if (!oversized) {
-      oversized = new Uint8Array(24 * 1024 * 1024);
-      for (let i = 0; i < oversized.length; i += 1) oversized[i] = i & 0xff;
-    }
-    return oversized;
+  const patterned = (size: number): Uint8Array => {
+    const bytes = new Uint8Array(size);
+    for (let i = 0; i < bytes.length; i += 1) bytes[i] = i & 0xff;
+    return bytes;
   };
+
+  // Above readCharx's per-entry cap. Built once and reused as zip input.
+  let oversized: Uint8Array | undefined;
+  const oversizedAsset = (): Uint8Array => (oversized ??= patterned(MAX_ENTRY_BYTES + 4 * 1024 * 1024));
 
   const cardWithAssets = (assets: unknown): Uint8Array =>
     encode({ ...v3Card, data: { ...v3Card.data, assets } });
@@ -545,7 +545,8 @@ describe('parseCard - charx', () => {
         { type: 'icon', name: 'main', uri: 'embeded://assets/icon/main.png', ext: 'png' },
       ]),
       'assets/icon/main.png': iconBytes,
-      'assets/huge.bin': oversizedAsset(),
+      // Large enough to fill most of the archive; its size has nothing to do with the cap.
+      'assets/huge.bin': patterned(24 * 1024 * 1024),
     });
     // Corrupt the dummy asset's compressed stream. Inflating it now throws, so a
     // successful parse proves the entry was filtered out rather than decompressed.
@@ -566,19 +567,19 @@ describe('parseCard - charx', () => {
       'assets/huge.bin': oversizedAsset(),
     });
     expect(() => parseCard(zip)).toThrow(CardParseError);
-    expect(() => parseCard(zip)).toThrow(/20MB limit/);
+    expect(() => parseCard(zip)).toThrow(`${MAX_ENTRY_BYTES / (1024 * 1024)}MB limit`);
   });
 
   it('caps on emitted bytes, not on the sizes declared in the zip headers', () => {
     // The declared uncompressed size is attacker-controlled. Understate it and a
-    // cap that trusts the headers waves through an entry that really inflates to 24MB.
+    // cap that trusts the headers waves through an entry that really inflates past it.
     const zip = zipSync({ 'card.json': oversizedAsset() });
     const view = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
     view.setUint32(22, 1024, true); // local file header: uncompressed size
     view.setUint32(centralDirOffset(zip) + 24, 1024, true); // central directory: uncompressed size
 
     expect(() => parseCard(zip)).toThrow(CardParseError);
-    expect(() => parseCard(zip)).toThrow(/20MB limit/);
+    expect(() => parseCard(zip)).toThrow(`${MAX_ENTRY_BYTES / (1024 * 1024)}MB limit`);
   });
 
   it('inflates only the first entry when a name is duplicated', () => {
