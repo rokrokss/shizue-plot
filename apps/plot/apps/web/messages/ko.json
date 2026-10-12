@@ -1023,10 +1023,6 @@
     "welcome": "이야기를 시작해 볼까요?",
     "signIn": "ChatGPT로 로그인",
     "extensionRequired": "로그인하려면 데스크톱 Chrome에 Shizue 확장 프로그램(0.3.6 이상)이 필요합니다. 이미 설치했다면 최신 버전으로 업데이트해 주세요.",
-    "extensionDeveloper": "개발용: 로그인 도우미를 직접 로드하기",
-    "extensionStepOpen": "주소창에 <code>chrome://extensions</code>를 입력해 엽니다.",
-    "extensionStepDeveloper": "오른쪽 위의 개발자 모드를 켭니다.",
-    "extensionStepLoad": "'압축해제된 확장 프로그램을 로드합니다'를 눌러 shizue 로그인 도우미 폴더를 선택합니다.",
     "extensionInstall": "Chrome 웹 스토어에서 Shizue 받기",
     "extensionRecheck": "다시 확인",
     "extensionStillMissing": "아직 확장 프로그램을 찾지 못했습니다. 설치했다면 이 페이지를 새로고침해 주세요."

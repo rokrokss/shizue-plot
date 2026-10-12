@@ -1,15 +1,10 @@
 /**
- * Finding the extension that carries the sign-in — Shizue from the store, or the
- * unpacked helper: every way it can be absent reads as "not installed", and only
- * an answer that carries the sign-in reads as installed.
+ * Finding Shizue, the extension that carries the sign-in: every way it can be
+ * absent reads as "not installed", and only an answer that carries the sign-in
+ * reads as installed.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  EXTENSION_IDS,
-  HELPER_EXTENSION_ID,
-  SHIZUE_EXTENSION_ID,
-  detectExtension,
-} from '../src/lib/chatgptExtension';
+import { EXTENSION_IDS, SHIZUE_EXTENSION_ID, detectExtension } from '../src/lib/chatgptExtension';
 
 type Reply = (response: unknown) => void;
 const scope = globalThis as { chrome?: unknown };
@@ -41,10 +36,7 @@ describe('detectExtension', () => {
   });
 
   it('is not installed when Chrome reports the extension missing', async () => {
-    stubRuntime((runtime, reply) => {
-      runtime.lastError = { message: 'Could not establish connection. Receiving end does not exist.' };
-      reply(undefined);
-    });
+    stubRuntime(missing);
     expect(await detectExtension()).toBe(false);
   });
 
@@ -53,39 +45,26 @@ describe('detectExtension', () => {
     expect(await detectExtension()).toBe(false);
   });
 
-  it('asks Shizue and the helper alike', async () => {
+  it('asks Shizue', async () => {
     const runtime = stubRuntime(missing);
     await detectExtension();
-    expect(EXTENSION_IDS).toEqual([SHIZUE_EXTENSION_ID, HELPER_EXTENSION_ID]);
-    for (const id of EXTENSION_IDS) {
-      expect(runtime.sendMessage).toHaveBeenCalledWith(id, { type: 'ping' }, expect.any(Function));
-    }
-  });
-
-  it('is installed when the helper answers the ping, Shizue being absent', async () => {
-    stubRuntime((runtime, reply, id) =>
-      id === HELPER_EXTENSION_ID ? setTimeout(() => reply({ ok: true, version: '0.1.0' }), 10) : missing(runtime, reply),
-    );
-    expect(await detectExtension()).toBe(true);
+    expect(EXTENSION_IDS).toEqual([SHIZUE_EXTENSION_ID]);
+    expect(runtime.sendMessage).toHaveBeenCalledWith(SHIZUE_EXTENSION_ID, { type: 'ping' }, expect.any(Function));
   });
 
   it('is installed when Shizue says it carries the sign-in for this site', async () => {
-    stubRuntime((runtime, reply, id) =>
-      id === SHIZUE_EXTENSION_ID
-        ? reply({ ok: true, version: '0.3.6', features: ['plotSignIn'] })
-        : missing(runtime, reply),
-    );
+    stubRuntime((_runtime, reply) => setTimeout(() => reply({ ok: true, version: '0.3.6', features: ['plotSignIn'] }), 10));
     expect(await detectExtension()).toBe(true);
   });
 
-  it('is not installed when Shizue answers without the sign-in feature', async () => {
-    stubRuntime((runtime, reply, id) =>
-      id === SHIZUE_EXTENSION_ID ? reply({ ok: true, version: '9.0.0', features: [] }) : missing(runtime, reply),
-    );
-    expect(await detectExtension()).toBe(false);
+  it('is not installed when the answer does not carry the sign-in', async () => {
+    for (const answer of [{ ok: true, version: '9.0.0', features: [] }, { ok: true, version: '0.1.0' }, { ok: false }]) {
+      stubRuntime((_runtime, reply) => reply(answer));
+      expect(await detectExtension()).toBe(false);
+    }
   });
 
-  it('gives up when the helper never answers', async () => {
+  it('gives up when Shizue never answers', async () => {
     vi.useFakeTimers();
     stubRuntime(() => {});
     const found = detectExtension(1000);

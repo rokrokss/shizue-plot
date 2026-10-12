@@ -64,7 +64,7 @@ describe('readConfig', () => {
         .chatgptCallbackPort).toBe(47821);
     });
 
-    it('leaves development to take any port, for helper builds and offset dev servers', () => {
+    it('leaves development to take any port, for offset dev servers and the browser tests', () => {
       expect(readConfig({ NODE_ENV: 'development', DATABASE_URL, BETTER_AUTH_URL: 'http://localhost:13100' }).chatgptCallbackPort)
         .toBe(47801);
       expect(readConfig({ NODE_ENV: 'test', DATABASE_URL, BETTER_AUTH_URL: 'http://localhost:13100', CHATGPT_CALLBACK_PORT: '47811' })

@@ -59,7 +59,7 @@ function SignIn({ next, errorCode }: { next: string; errorCode: string | undefin
       const { authorizationUrl } = await apiSend<{ authorizationUrl: string }>('POST', '/api/chatgpt/sign-in', { next, locale }, AbortSignal.timeout(15_000));
       const url = new URL(authorizationUrl);
       if (url.origin !== 'https://auth.openai.com') throw new Error(t('failed'));
-      // Same tab, and busy until it leaves: the helper extension brings this browser back to the callback.
+      // Same tab, and busy until it leaves: Shizue brings this browser back to the callback.
       window.location.assign(url.href);
     } catch (e) { setError(toMessage(e)); setBusy(false); }
   }
@@ -73,14 +73,6 @@ function SignIn({ next, errorCode }: { next: string; errorCode: string | undefin
         <div className="space-y-3 rounded-xl border border-line bg-raised/50 p-4 text-sm leading-relaxed break-words">
           <p>{t('extensionRequired')}</p>
           <a href={EXTENSION_URL} target="_blank" rel="noreferrer" className="inline-block font-semibold text-link underline underline-offset-2">{t('extensionInstall')}</a>
-          <details className="text-muted">
-            <summary className="cursor-pointer">{t('extensionDeveloper')}</summary>
-            <ol className="mt-2 list-decimal space-y-1 pl-5">
-              <li>{t.rich('extensionStepOpen', { code: (chunks) => <code className="font-mono text-fg">{chunks}</code> })}</li>
-              <li>{t('extensionStepDeveloper')}</li>
-              <li>{t('extensionStepLoad')}</li>
-            </ol>
-          </details>
           <Button size="sm" busy={rechecking} onClick={() => void recheck()}>{t('extensionRecheck')}</Button>
           <p role="status" className="text-muted">{extension === 'stillMissing' ? t('extensionStillMissing') : ''}</p>
         </div>

@@ -11,8 +11,8 @@ import type { Tx } from './deps.js';
  * Sign in with ChatGPT for many readers on one server. Each reader's tokens live
  * on their `account` row, sealed with a key derived from the app secret; model
  * calls read them through `forUser`. The browser never sees a token: OpenAI's
- * loopback callback reaches `/api/chatgpt/callback` through the companion
- * extension (apps/extension), and the server finishes the exchange there.
+ * loopback callback reaches `/api/chatgpt/callback` through the Shizue
+ * extension's redirect rule, and the server finishes the exchange there.
  */
 const PROVIDER = 'chatgpt';
 const PENDING_PREFIX = 'chatgpt-sign-in:';

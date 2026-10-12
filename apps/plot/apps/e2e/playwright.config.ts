@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test';
+import { STAND_IN_ID } from './shizueStandIn.js';
 
 // Overridable so a containerized run (e.g. generating another platform's visual
 // baselines) can point at the host's dev stack instead of its own localhost.
@@ -38,7 +39,7 @@ export default defineConfig({
       command: 'pnpm --filter @shizue/api exec tsx src/index.ts',
       env: {
         NODE_ENV: 'test', API_PORT: new URL(API_URL).port, BETTER_AUTH_URL: WEB_URL,
-        // extension.spec.ts: the sign-in helper's loopback port, and OpenAI stood in for.
+        // extension.spec.ts: the Shizue stand-in's loopback port, and OpenAI stood in for.
         CHATGPT_CALLBACK_PORT: process.env['E2E_CALLBACK_PORT'] ?? '47801', CHATGPT_FAKE_OPENAI: '1',
       },
       // Public route, so a plain 200 means the API is really serving.
@@ -48,7 +49,8 @@ export default defineConfig({
     },
     {
       command: `pnpm --filter @shizue/web exec next dev --hostname 127.0.0.1 --port ${new URL(WEB_URL).port}`,
-      env: { API_ORIGIN: API_URL },
+      // extension.spec.ts loads a Shizue stand-in for this origin; the login page asks it too.
+      env: { API_ORIGIN: API_URL, NEXT_PUBLIC_CHATGPT_EXTENSION_ID: STAND_IN_ID },
       // Warm the single ChatGPT entrance before the browser suite begins.
       url: `${WEB_URL}/ko/login`,
       reuseExistingServer: false,

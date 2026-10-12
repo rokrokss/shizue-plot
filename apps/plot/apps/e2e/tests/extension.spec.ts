@@ -2,22 +2,23 @@ import { chromium, expect, test } from '@playwright/test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { writeVariant } from '../../extension/scripts/variant.mjs';
+import { writeShizueStandIn } from '../shizueStandIn.js';
 
 const WEB_URL = process.env['E2E_WEB_URL'] ?? 'http://localhost:13000';
 const CALLBACK_PORT = Number(process.env['E2E_CALLBACK_PORT'] ?? 47801);
 
 /**
- * The real sign-in helper, the real login page, the Next rewrite and the API's
- * callback: only OpenAI is stood in for. auth.openai.com is routed here to send
- * the browser to the loopback address, exactly where the real consent screen
- * would; the API exchanges the code with its NODE_ENV=test stand-in
- * (CHATGPT_FAKE_OPENAI), which reads the identity this test packed into it.
+ * Shizue's rule and presence answer (as a stand-in for this test's origin), the
+ * real login page, the Next rewrite and the API's callback: only OpenAI is stood
+ * in for. auth.openai.com is routed here to send the browser to the loopback
+ * address, exactly where the real consent screen would; the API exchanges the
+ * code with its NODE_ENV=test stand-in (CHATGPT_FAKE_OPENAI), which reads the
+ * identity this test packed into it.
  */
-test('Sign in with ChatGPT through the companion extension', async () => {
+test('Sign in with ChatGPT through Shizue', async () => {
   const root = await mkdtemp(join(tmpdir(), 'shizue-extension-'));
   const extension = join(root, 'extension');
-  await writeVariant(extension, [{ origin: WEB_URL, loopbackPort: CALLBACK_PORT }]);
+  await writeShizueStandIn(extension, WEB_URL, CALLBACK_PORT);
   const context = await chromium.launchPersistentContext(join(root, 'profile'), {
     channel: 'chromium', headless: true, locale: 'ko-KR',
     args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`],

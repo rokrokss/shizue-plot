@@ -1023,10 +1023,6 @@
     "welcome": "物語を始めましょう。",
     "signIn": "ChatGPTでログイン",
     "extensionRequired": "ログインするには、デスクトップ版 Chrome に Shizue 拡張機能（0.3.6 以降）が必要です。インストール済みの場合は最新版に更新してください。",
-    "extensionDeveloper": "開発用：ログインヘルパーを直接読み込む",
-    "extensionStepOpen": "アドレスバーに <code>chrome://extensions</code> を入力して開きます。",
-    "extensionStepDeveloper": "右上のデベロッパー モードをオンにします。",
-    "extensionStepLoad": "「パッケージ化されていない拡張機能を読み込む」をクリックし、shizue ログインヘルパーのフォルダを選択します。",
     "extensionInstall": "Chrome ウェブストアで Shizue を入手",
     "extensionRecheck": "再確認",
     "extensionStillMissing": "拡張機能がまだ見つかりません。インストール済みの場合は、このページを再読み込みしてください。"

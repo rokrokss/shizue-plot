@@ -12,7 +12,6 @@ chat format.
 | `packages/contracts` | `@shizue/contracts` | zod schemas and types for chat export |
 | `apps/plot` | `@shizue/plot` | Script aggregator and unit suite |
 | `apps/plot/apps/{api,web,e2e}` | `@shizue/api`, `@shizue/web`, `@shizue/e2e` | Hono API, Next app, browser tests |
-| `apps/plot/apps/extension` | — | Chrome sign-in helper for Sign in with ChatGPT |
 | `apps/plot/packages/{core,db,llm}` | `@shizue/core`, `@shizue/db`, `@shizue/llm` | Cards/prompts, database, provider clients |
 
 ## Commands

@@ -11,7 +11,6 @@ English and Japanese.
 | `apps/plot/apps/api` | Hono API, authentication, chat generation and media storage |
 | `apps/plot/apps/web` | Next.js character-chat app |
 | `apps/plot/apps/e2e` | Playwright browser tests |
-| `apps/plot/apps/extension` | Chrome sign-in helper for Sign in with ChatGPT |
 | `apps/plot/packages/core` | Character cards, prompts and chat presentation |
 | `apps/plot/packages/db` | Drizzle schema and PostgreSQL migrations |
 | `apps/plot/packages/llm` | Model adapters and registry |
@@ -31,7 +30,7 @@ cp apps/plot/.env.example apps/plot/.env
 make dev
 ```
 
-Open http://localhost:13000 in Chrome with the sign-in helper loaded (below).
+Open http://localhost:13000 in Chrome with [Shizue](https://chromewebstore.google.com/detail/mpcbgfkoholfgapcgcmfjobnfcbnfanm) installed (below).
 Next.js forwards `/api/*` to Hono on port 8787. `make stop` stops the app
 processes; `make infra-down` stops the containers. The database and media
 volumes persist across restarts.
@@ -43,14 +42,13 @@ their chats. No provider API key or usage billing is involved; on a limit or
 connection error the app reports it and does not switch providers.
 
 OpenAI's open-source flow only returns to `http://127.0.0.1:<port>/auth/callback`,
-which a hosted site cannot receive. The **shizue sign-in helper** Chrome extension
-in [`apps/plot/apps/extension`](apps/plot/apps/extension/README.md) rewrites that
-navigation to the app's `/api/chatgpt/callback` before any connection is made. It
-is needed only while signing in; afterwards the API calls OpenAI directly.
+which a hosted site cannot receive. **Shizue**, the Chrome Web Store extension
+(0.3.6 or later), rewrites that navigation to the app's `/api/chatgpt/callback`
+before any connection is made: `https://plot.shizue.net` on loopback port 47811
+and `http://localhost:13000` on 47801, which the API picks from `BETTER_AUTH_URL`.
+It is needed only while signing in; afterwards the API calls OpenAI directly.
 
-1. Load the helper: `chrome://extensions` → Developer mode → **Load unpacked** →
-   `apps/plot/apps/extension`. The committed build serves `http://localhost:13000`
-   on loopback port 47801; build other origins with `scripts/variant.mjs`.
+1. Install [Shizue from the Chrome Web Store](https://chromewebstore.google.com/detail/mpcbgfkoholfgapcgcmfjobnfcbnfanm).
 2. Choose **Sign in with ChatGPT** and approve in the same tab. The app returns to
    the page you started from.
 3. Pick one of your account's models when you start a chat.

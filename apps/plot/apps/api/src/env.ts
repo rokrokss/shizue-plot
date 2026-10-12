@@ -14,7 +14,7 @@ export function loadRootEnv(): void {
 /** Development defaults. A production launch must set its own secret (readConfig). */
 const DEV_AUTH_SECRET = 'dev-secret-change-me';
 const DEV_AUTH_URL = 'http://localhost:13000';
-/** The loopback port the companion extension's development rule catches (apps/extension). */
+/** The loopback port Shizue's development rule catches, for an origin it does not know. */
 const DEV_CALLBACK_PORT = 47801;
 
 /**
@@ -35,8 +35,8 @@ const SHIZUE_CALLBACK_PORTS: Readonly<Record<string, number>> = {
  * is Shizue's. In production a setting that disagrees with Shizue is refused at
  * boot rather than discovered at the first reader's sign-in — a known origin on
  * another port, another origin on a port Shizue sends elsewhere, or another
- * origin with no port at all. Development takes any port, for the helper builds
- * (apps/extension) and offset dev servers.
+ * origin with no port at all. Development takes any port, for offset dev servers
+ * and the browser tests' stand-in for Shizue (apps/e2e/shizueStandIn.ts).
  */
 function readCallbackPort(env: NodeJS.ProcessEnv, authUrl: string): number {
   const shizuePort = SHIZUE_CALLBACK_PORTS[authUrl];
@@ -46,7 +46,7 @@ function readCallbackPort(env: NodeJS.ProcessEnv, authUrl: string): number {
     if (shizuePort !== undefined) return shizuePort;
     if (production) {
       throw new Error(
-        `CHATGPT_CALLBACK_PORT must be set for ${authUrl}: the port the sign-in helper built for it catches (apps/extension).`,
+        `CHATGPT_CALLBACK_PORT must be set for ${authUrl}: Shizue carries the sign-in only for ${Object.keys(SHIZUE_CALLBACK_PORTS).join(' and ')}, so another origin needs an extension of its own and the port it catches.`,
       );
     }
     return DEV_CALLBACK_PORT;
