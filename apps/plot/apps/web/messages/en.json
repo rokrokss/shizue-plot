@@ -960,7 +960,7 @@
     "user_not_found": "We couldn't find that account.",
     "failed_to_create_user": "The account couldn't be created.",
     "character_limit": "A plot holds at most 10 characters.",
-    "intro_limit": "Up to 10 openings, each at most 4,000 characters.",
+    "intro_limit": "Up to 10 openings, each at most 16,000 characters.",
     "asset_limit": "A plot can hold at most 100 images.",
     "note_limit": "Up to 100 notes per account, 2,000 characters each, and 10 per chat.",
     "invalid_asset": "That image file or slug is not valid.",

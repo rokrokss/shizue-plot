@@ -243,8 +243,12 @@ export const MAX_PLOT_PROFILE_DESCRIPTION_LENGTH = 1000;
 export const MAX_CHARACTERS_PER_PLOT = 10;
 /** Openings a plot may offer; every one of them becomes a root of a new chat. */
 export const MAX_INTROS_PER_PLOT = 10;
-/** One opening's length — a prologue, not a chapter. */
-export const MAX_INTRO_TEXT_LENGTH = 4000;
+/**
+ * One opening's length. Room for a RisuAI greeting that keeps a branch per
+ * variable value: only the branch the variables choose reaches the model and the
+ * reader, so the stored text can be several prologues long.
+ */
+export const MAX_INTRO_TEXT_LENGTH = 16_000;
 /** Tags on a plot's explore filter column. */
 export const MAX_TAGS = 10;
 /** One tag — a word or two, not a phrase. */

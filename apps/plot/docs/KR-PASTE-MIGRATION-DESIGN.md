@@ -109,7 +109,7 @@ interface MigrationDraft {
     intro: string;                     // ≤500자 (D15)
     description: string;               // 세계관 설정
     tags: string[];                    // ≤10 × 20자
-    intros: string[];                  // ≤10 × 4,000자, 발화 규약 적용 후
+    intros: string[];                  // ≤10 × 16,000자, 발화 규약 적용 후
     lorebook: LoreEntry[];
     narrator?: NarratorConfig;
     style?: PlotStyle;
@@ -159,7 +159,7 @@ interface MigrationDraft {
 
 **로어 항목 이름**: 우리 `LoreEntry`에는 이름(주석) 칸이 없다. 원본 이름은 버리고 보존 목록에 남긴다(베이비챗은 원래 AI에 보내지 않고, 다른 곳도 대부분 표시용이다). 스튜디오에서 항목을 알아보기 어려워지면 `LoreEntry.comment` 추가를 따로 검토한다.
 
-**한도**: 우리 한도를 넘는 값은 문장 경계(마침표·물음표·느낌표·줄바꿈)에서 자르고 경고, 잘린 원문은 보존 목록으로 간다. 도입부는 4,000자, 플롯 소개 500자, 인물 소개 500자, 태그 20자.
+**한도**: 우리 한도를 넘는 값은 문장 경계(마침표·물음표·느낌표·줄바꿈)에서 자르고 경고, 잘린 원문은 보존 목록으로 간다. 도입부는 16,000자, 플롯 소개 500자, 인물 소개 500자, 태그 20자.
 
 ## 4. API
 
