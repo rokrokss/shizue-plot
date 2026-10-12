@@ -116,6 +116,35 @@ export function displayScriptsFromExtensions(
   return mapped.length > 0 ? mapped : undefined;
 }
 
+/** Longest stylesheet a plot may carry. A real RisuAI card's runs to a few tens of kilobytes. */
+export const MAX_CREATOR_CSS_LENGTH = 100_000;
+
+/** A complete `<style>` element and its body. */
+const STYLE_ELEMENT = /<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi;
+
+/**
+ * The stylesheet a RisuAI card dresses its display scripts' markup in.
+ *
+ * RisuAI keeps it in `extensions.risuai.backgroundHTML`, HTML it injects behind
+ * the whole chat. Only the `<style>` elements in it mean anything here: the
+ * classes a display script's `out` writes are styled there, and a status window
+ * without them is a column of bare text. Anything else in that HTML — a
+ * decorative background, a script — is not taken. The extension itself is left
+ * as it is, so the card still round-trips. Undefined when there is no stylesheet,
+ * or one longer than this build will carry.
+ */
+export function creatorCssFromExtensions(extensions: Record<string, unknown>): string | undefined {
+  const risu = extensions['risuai'];
+  if (risu === null || typeof risu !== 'object') return undefined;
+  const html = (risu as Record<string, unknown>)['backgroundHTML'];
+  if (typeof html !== 'string') return undefined;
+  const css = [...html.matchAll(STYLE_ELEMENT)]
+    .map((element) => element[1]!.trim())
+    .filter((body) => body.length > 0)
+    .join('\n\n');
+  return css && css.length <= MAX_CREATOR_CSS_LENGTH ? css : undefined;
+}
+
 /**
  * The license a RisuAI card declares in `extensions.risuai.license` — `CC BY-NC 4.0`,
  * `private` and the like, as RisuRealm writes them. Undefined when the card says

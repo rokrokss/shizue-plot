@@ -74,6 +74,7 @@ const plotResponse: PublicPlotDetail = {
   style: null,
   profiles: [],
   displayScripts: [],
+  css: '',
   defaultVariables: {},
   componentCode: '',
   componentCapabilities: [],

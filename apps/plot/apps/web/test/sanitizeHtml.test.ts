@@ -196,6 +196,22 @@ describe('css', () => {
   it('drops a stylesheet it cannot parse rather than passing it through', () => {
     expect(sanitizeCustomHtml('<style>.a { color: red</style>')).not.toContain('color');
   });
+
+  it("keeps a RisuAI card's plot-wide sheet, losing only what it cannot scope", () => {
+    // The shapes a real backgroundHTML is made of: a reset, a universal child
+    // selector, pseudo-elements, a keyframe animation and a phone breakpoint.
+    const output = sanitizeCustomHtml(
+      '<style>.pk-gs{all:initial;display:block}.pk-gs *{margin:0}' +
+        '@keyframes pulse{from{opacity:0}to{opacity:1}}.pk-q:hover::before{content:"·"}' +
+        '@media (max-width:600px){.image-container{width:95vw;height:60vw}}</style>',
+    );
+    expect(output).toContain('.shizue-msg .x-shizue-pk-gs');
+    expect(output).toContain('display: block');
+    expect(output).toContain('.shizue-msg .x-shizue-pk-q:hover::before');
+    expect(output).toContain('width: 95vw');
+    expect(output).not.toContain('all:');
+    expect(output).not.toContain('@keyframes');
+  });
 });
 
 describe('css escapes and comments', () => {

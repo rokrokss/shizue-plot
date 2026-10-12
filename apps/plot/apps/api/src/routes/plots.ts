@@ -1105,6 +1105,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       profiles: plot.profiles ?? [],
       narrator: plot.narrator?.pov ? { pov: plot.narrator.pov } : null,
       displayScripts: plot.customUi?.displayScripts ?? [],
+      css: plot.customUi?.css ?? '',
       defaultVariables: plot.customUi?.defaultVariables ?? {},
       componentCode: plot.customUi?.componentCode ?? '',
       componentCapabilities: plot.customUi?.componentCapabilities ?? [],

@@ -61,6 +61,7 @@ import {
   type DisplayContext,
 } from '@/lib/displayScripts';
 import { reconcileSend } from '@/lib/reconcile';
+import { sanitizeCustomHtml } from '@/lib/sanitizeHtml';
 import { streamGeneration } from '@/lib/sse';
 import { readStatusCollapsed, writeStatusCollapsed } from '@/lib/statusCard';
 import type {
@@ -595,6 +596,16 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   // view of a plot carries them — otherwise a creator's status window would
   // only ever render for the creator.
   const scripts: DisplayScript[] = useMemo(() => plot?.displayScripts ?? [], [plot]);
+  const creatorCss = plot?.css ?? '';
+  /**
+   * The plot's stylesheet, scoped and filtered exactly as a `<style>` in a
+   * script's output is — but once for the whole chat, not once per message. It
+   * styles nothing but the islands, so it goes when custom UI does.
+   */
+  const creatorSheet = useMemo(
+    () => (customUi && creatorCss ? sanitizeCustomHtml(`<style>${creatorCss}</style>`) : ''),
+    [customUi, creatorCss],
+  );
   const defaultVariables = useMemo(() => plot?.defaultVariables ?? {}, [plot]);
   const componentCode = plot?.componentCode ?? '';
   /** Only these tags are call codes, so a plot without components never mounts a frame. */
@@ -1352,6 +1363,15 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           }}
         >
           <AiNotice />
+
+          {creatorSheet ? (
+            <div
+              hidden
+              data-testid="creator-css"
+              // Sanitized by lib/sanitizeHtml — the only place markup is trusted.
+              dangerouslySetInnerHTML={{ __html: creatorSheet }}
+            />
+          ) : null}
 
           {loadingEarlier ? (
             <p className="text-center text-xs text-muted" role="status">

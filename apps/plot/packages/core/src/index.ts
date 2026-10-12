@@ -25,4 +25,4 @@ export * from './card/intro.js';
 export * from './card/narrator.js';
 export * from './card/png.js';
 export * from './card/charx.js';
-export { cardLicense } from './card/risu.js';
+export { cardLicense, creatorCssFromExtensions, MAX_CREATOR_CSS_LENGTH } from './card/risu.js';

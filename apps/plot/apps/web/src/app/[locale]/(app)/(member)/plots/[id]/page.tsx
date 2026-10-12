@@ -96,6 +96,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
   const [lorebook, setLorebook] = useState<LoreEntry[]>([]);
   const [scripts, setScripts] = useState<DisplayScript[]>([]);
   const [variables, setVariables] = useState<Record<string, string>>({});
+  const [css, setCss] = useState('');
   const [componentCode, setComponentCode] = useState('');
   const [capabilities, setCapabilities] = useState<ComponentCapability[]>([]);
   /** The roster as it is being edited, and as the server last answered with it. */
@@ -132,6 +133,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
     setLorebook(detail.lorebook);
     setScripts(detail.customUi?.displayScripts ?? []);
     setVariables(detail.customUi?.defaultVariables ?? {});
+    setCss(detail.customUi?.css ?? '');
     setComponentCode(detail.customUi?.componentCode ?? '');
     setCapabilities(detail.customUi?.componentCapabilities ?? []);
     setMembers(detail.characters);
@@ -179,6 +181,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
           lorebook,
           customUi: {
             displayScripts: scripts,
+            css,
             defaultVariables: variables,
             componentCode,
             componentCapabilities: capabilities,
@@ -499,6 +502,16 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
             </h3>
             <p className="text-xs text-muted/80">{t('displayScriptsHint')}</p>
             <DisplayScriptEditor scripts={scripts} onChange={setScripts} />
+
+            <Field label={t('creatorCss')} hint={t('creatorCssHint')}>
+              <TextArea
+                rows={6}
+                spellCheck={false}
+                className="font-mono text-xs"
+                value={css}
+                onChange={(event) => setCss(event.target.value)}
+              />
+            </Field>
 
             <h3 className="text-xs font-medium text-muted">
               {t('defaultVariables')}

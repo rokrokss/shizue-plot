@@ -243,6 +243,8 @@
     "customUiHint": "Turns patterns in the model's output into on-screen elements such as status panels and gauges. The stored conversation is untouched.",
     "displayScripts": "Display scripts",
     "displayScriptsHint": "A regular expression selects part of a message and an HTML template draws it. Importing a RisuAI card brings its editdisplay scripts here.",
+    "creatorCss": "Stylesheet",
+    "creatorCssHint": "CSS for the markup your display scripts draw. It applies inside messages only, and only allowed properties are kept. Importing a RisuAI card brings the <style> from its background HTML here.",
     "displayScriptEmpty": "No display scripts yet.",
     "displayScriptEntry": "Script {index}",
     "displayScriptIn": "Pattern",

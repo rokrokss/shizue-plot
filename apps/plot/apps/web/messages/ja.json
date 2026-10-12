@@ -243,6 +243,8 @@
     "customUiHint": "モデル出力の特定のパターンをステータス画面やゲージとして表示します。保存された会話内容は変わりません。",
     "displayScripts": "表示スクリプト",
     "displayScriptsHint": "正規表現で取り出した部分をHTMLテンプレートで描画します。RisuAIカードのeditdisplayスクリプトはここに取り込まれます。",
+    "creatorCss": "スタイルシート",
+    "creatorCssHint": "表示スクリプトが描く画面に当てるCSSです。メッセージの中にだけ効き、許可されたプロパティだけが残ります。RisuAIカードを取り込むと、背景HTMLの<style>がここに入ります。",
     "displayScriptEmpty": "表示スクリプトがありません。",
     "displayScriptEntry": "スクリプト {index}",
     "displayScriptIn": "正規表現",

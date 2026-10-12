@@ -283,6 +283,8 @@ export interface PublicPlotDetail extends PublicPlot {
   narrator?: NarratorConfig | null;
   /** Presentation, so it travels even though the definitions do not. */
   displayScripts: DisplayScript[];
+  /** The stylesheet the scripts' markup is drawn with; '' when the plot has none. */
+  css: string;
   defaultVariables: Record<string, string>;
   /** The Layer 2 module, for the same reason. '' when the plot has none. */
   componentCode: string;

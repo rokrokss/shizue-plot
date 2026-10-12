@@ -243,6 +243,8 @@
     "customUiHint": "모델 출력의 특정 패턴을 상태창·게이지 같은 화면 요소로 바꿔 보여줍니다. 저장된 대화 내용은 바뀌지 않습니다.",
     "displayScripts": "표시 스크립트",
     "displayScriptsHint": "정규식으로 잡은 부분을 HTML 템플릿으로 그립니다. RisuAI 카드의 editdisplay 스크립트를 가져오면 여기에 들어옵니다.",
+    "creatorCss": "스타일시트",
+    "creatorCssHint": "표시 스크립트가 그린 화면에 입힐 CSS입니다. 메시지 안에만 적용되고, 허용된 속성만 남습니다. RisuAI 카드를 가져오면 배경 HTML의 <style>이 여기에 들어옵니다.",
     "displayScriptEmpty": "표시 스크립트가 없습니다.",
     "displayScriptEntry": "스크립트 {index}",
     "displayScriptIn": "정규식",

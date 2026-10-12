@@ -5023,6 +5023,46 @@ describe('custom UI', () => {
     expect(imported.characters[0].card.extensions.shizue.componentCode).toBe(code);
   });
 
+  it("lifts a RisuAI card's stylesheet onto the plot, and lets the owner edit it", async () => {
+    const owner = await signUp('creator-css-owner@example.com');
+    const reader = await signUp('creator-css-reader@example.com');
+    const backgroundHTML =
+      '<div class="bg"></div>\n<style>\n.pk-card { border: 1px solid #333; }\n</style>\n<style>.pk-q { color: red; }</style>';
+
+    // Only the <style> bodies come over; the rest of the background is not taken.
+    const imported = await importCard(
+      owner,
+      new File(
+        [
+          JSON.stringify({
+            ...risuCard,
+            data: { ...risuCard.data, extensions: { risuai: { backgroundHTML } } },
+          }),
+        ],
+        'styled.json',
+        { type: 'application/json' },
+      ),
+    );
+    expect(imported.customUi.css).toBe('.pk-card { border: 1px solid #333; }\n\n.pk-q { color: red; }');
+    // The card keeps its own copy, so it still round-trips as it came.
+    expect(imported.characters[0].card.extensions.risuai.backgroundHTML).toBe(backgroundHTML);
+
+    const edited = '.pk-card { border: 2px solid #333; }';
+    expect((await patchPlot(owner, imported.id, { customUi: { css: edited } })).customUi.css).toBe(edited);
+
+    // Refused over the cap rather than cut: half a stylesheet is a broken one.
+    const tooLong = await json(owner, `/api/plots/${imported.id}`, 'PATCH', {
+      customUi: { css: 'a'.repeat(100_001) },
+    });
+    expect(tooLong.status).toBe(400);
+    expect((await readJson(tooLong)).code).toBe('invalid_request');
+
+    // Presentation, so it travels with the public view like the display scripts.
+    const plot = await publishablePlot(owner, { name: '스타일 작품', customUi: { css: edited } });
+    await publishPlot(owner, plot.id);
+    expect((await readPublicPlot(reader, plot.id)).css).toBe(edited);
+  });
+
   it('drops oversized component code on import rather than storing it', async () => {
     const cookie = await signUp('component-import-cap@example.com');
     // Import does not go through the editor, so the cap has to hold here too:

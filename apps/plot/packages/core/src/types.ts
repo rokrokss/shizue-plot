@@ -370,6 +370,12 @@ export interface NormalizedCard {
  */
 export interface PlotCustomUi {
   displayScripts?: DisplayScript[];
+  /**
+   * The stylesheet the scripts' markup is drawn with — what a RisuAI card keeps
+   * in `backgroundHTML`. Scoped and filtered like a `<style>` in a script's
+   * output, once per chat rather than once per message.
+   */
+  css?: string;
   defaultVariables?: Record<string, string>;
   componentCode?: string;
   componentCapabilities?: ComponentCapability[];

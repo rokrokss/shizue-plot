@@ -1,11 +1,13 @@
 import {
   coerceNarrator,
   COMPONENT_CAPABILITIES,
+  creatorCssFromExtensions,
   DEFAULT_LORE_SETTINGS,
   displayScriptPatternError,
   emptyCard,
   emptyVariables,
   MAX_COMPONENT_CODE_LENGTH,
+  MAX_CREATOR_CSS_LENGTH,
   MAX_DISPLAY_PATTERN_LENGTH,
   MAX_INTRO_LENGTH,
   type ComponentCapability,
@@ -150,6 +152,15 @@ function coerceVariables(value: unknown): Variables {
  * the code runs. Only the size is refused, because the card is jsonb and every
  * reader downloads it.
  */
+/** Refused over the cap rather than cut: half a stylesheet is a broken one. */
+function coerceCreatorCss(value: unknown): string {
+  const css = str(value);
+  if (css.length > MAX_CREATOR_CSS_LENGTH) {
+    throw badRequest('invalid_request', `css may be at most ${MAX_CREATOR_CSS_LENGTH} characters`);
+  }
+  return css.trim() ? css : '';
+}
+
 function coerceComponentCode(value: unknown): string {
   const code = str(value);
   if (code.length > MAX_COMPONENT_CODE_LENGTH) {
@@ -202,28 +213,38 @@ export function coerceCustomUi(value: unknown): PlotCustomUi {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return {};
   const raw = value as Record<string, unknown>;
   const displayScripts = coerceDisplayScripts(raw['displayScripts']);
+  const css = coerceCreatorCss(raw['css']);
   const defaultVariables = coerceVariables(raw['defaultVariables']);
   const componentCode = coerceComponentCode(raw['componentCode']);
   const componentCapabilities = coerceComponentCapabilities(raw['componentCapabilities']);
   return {
     ...(displayScripts.length > 0 ? { displayScripts } : {}),
+    ...(css ? { css } : {}),
     ...(Object.keys(defaultVariables).length > 0 ? { defaultVariables } : {}),
     ...(componentCode ? { componentCode } : {}),
     ...(componentCapabilities.length > 0 ? { componentCapabilities } : {}),
   };
 }
 
-/** What the import lifts off a card onto the plot that wraps it. */
-export const customUiOfCard = (card: NormalizedCard): PlotCustomUi => ({
-  ...(card.displayScripts?.length ? { displayScripts: card.displayScripts } : {}),
-  ...(card.defaultVariables && Object.keys(card.defaultVariables).length > 0
-    ? { defaultVariables: card.defaultVariables }
-    : {}),
-  ...(card.componentCode ? { componentCode: card.componentCode } : {}),
-  ...(card.componentCapabilities?.length
-    ? { componentCapabilities: card.componentCapabilities }
-    : {}),
-});
+/**
+ * What the import lifts off a card onto the plot that wraps it. The stylesheet is
+ * read straight off the card's RisuAI extension rather than carried on the card:
+ * the extension already travels with it, so the card round-trips as it came.
+ */
+export function customUiOfCard(card: NormalizedCard): PlotCustomUi {
+  const css = creatorCssFromExtensions(card.extensions);
+  return {
+    ...(card.displayScripts?.length ? { displayScripts: card.displayScripts } : {}),
+    ...(css ? { css } : {}),
+    ...(card.defaultVariables && Object.keys(card.defaultVariables).length > 0
+      ? { defaultVariables: card.defaultVariables }
+      : {}),
+    ...(card.componentCode ? { componentCode: card.componentCode } : {}),
+    ...(card.componentCapabilities?.length
+      ? { componentCapabilities: card.componentCapabilities }
+      : {}),
+  };
+}
 
 /**
  * Normalizes a client-supplied card (already in NormalizedCard shape) so that a

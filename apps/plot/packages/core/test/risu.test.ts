@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { exportCardV3 } from '../src/card/export.js';
 import { normalizeCard } from '../src/card/normalize.js';
-import { cardLicense } from '../src/card/risu.js';
+import { cardLicense, creatorCssFromExtensions, MAX_CREATOR_CSS_LENGTH } from '../src/card/risu.js';
 import type { DisplayScript } from '../src/types.js';
 
 /** A V2 card the way RisuAI exports one, with a status-window display script. */
@@ -224,5 +224,24 @@ describe('card license', () => {
     expect(cardLicense(normalizeCard(risuCard([])).extensions)).toBeUndefined();
     expect(cardLicense({})).toBeUndefined();
     expect(cardLicense({ risuai: null })).toBeUndefined();
+  });
+});
+
+describe('creator stylesheet', () => {
+  const css = (backgroundHTML: unknown) => creatorCssFromExtensions({ risuai: { backgroundHTML } });
+
+  it('takes the <style> bodies out of backgroundHTML, in order, and nothing else', () => {
+    expect(
+      css('<div class="bg"><img src="x"></div>\n<style type="text/css">\n.a { color: red; }\n</STYLE>\n<style>.b{}</style>'),
+    ).toBe('.a { color: red; }\n\n.b{}');
+  });
+
+  it('says nothing when there is no stylesheet, or one past the cap', () => {
+    expect(css('<div>only a background</div>')).toBeUndefined();
+    expect(css('<style>   </style>')).toBeUndefined();
+    expect(css(3)).toBeUndefined();
+    expect(creatorCssFromExtensions({})).toBeUndefined();
+    expect(creatorCssFromExtensions({ risuai: null })).toBeUndefined();
+    expect(css(`<style>${'a'.repeat(MAX_CREATOR_CSS_LENGTH + 1)}</style>`)).toBeUndefined();
   });
 });
