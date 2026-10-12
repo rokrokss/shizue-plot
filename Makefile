@@ -12,7 +12,6 @@ stop: ## stop app processes started by this checkout
 
 e2e: infra ## character-chat browser suite
 	pnpm --filter @shizue/contracts --filter './apps/plot/packages/*' build
-	pnpm db:migrate
 	pnpm test:e2e
 
 infra: ## postgres + s3 (RustFS) containers

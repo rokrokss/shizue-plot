@@ -37,6 +37,7 @@ Worktree setup:
 3. Run unit tests and typecheck in the worktree as usual. Exception: plot's
    `TEST_DATABASE_URL` is a scratch DB shared with main (TRUNCATEd on every
    test), so never run those tests concurrently with tests running in main.
+   The e2e suite's API runs on that same DB, so the same goes for it.
 4. As a rule, don't start dev servers in a worktree — the ports (API 8787,
    web 13000) collide with main's servers. Do live verification in main after
    merging. If you really need one, offset with `API_PORT` and

@@ -106,7 +106,9 @@ TEST_S3_REQUIRED=1 pnpm test
 The S3 tests use the compose RustFS on port 19000. `TEST_S3_REQUIRED=1` makes an unavailable
 store fail instead of skip. Browser tests serve the API and web app with the
 test-only echo model (`NODE_ENV=test` on the API); they do not contact an AI
-provider. Legacy email/password sessions exist only in this test mode to isolate
+provider. Their API runs on the same scratch `TEST_DATABASE_URL`, which it migrates
+on start, never on the app's `DATABASE_URL`; since `pnpm test` truncates that
+database, don't run the two at once. Legacy email/password sessions exist only in this test mode to isolate
 test fixtures; the normal app does not serve those endpoints. The ChatGPT login
 spec mocks OAuth to exercise the single-button entrance and automatic redirect.
 Stop any normal instance on the test ports before running browser tests; the suite
