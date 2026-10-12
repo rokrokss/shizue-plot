@@ -2,6 +2,11 @@
 
 Sign in with ChatGPT를 호스팅된 shizue 웹에서 끝내 주는 크롬 확장이다.
 
+독자가 설치하는 것은 이 도우미가 아니라 Chrome 웹 스토어의 **Shizue(0.3.6 이상)**다. Shizue가 같은 규칙을
+`https://plot.shizue.net`(포트 47811)과 `http://localhost:13000`(포트 47801)에 대해 싣고 있다
+(`rokrokss/shizue`의 `src/public/plot-signin-rules.json`). 이 도우미는 Shizue 없이 개발할 때와, 그 두 오리진
+밖에 배포할 때 쓴다. 웹은 두 확장 모두에 ping을 보낸다.
+
 OpenAI의 오픈소스 로그인 흐름은 `http://127.0.0.1:<port>/auth/callback`으로만 돌아온다. 이 주소는
 서버가 아니라 사용자 기기를 가리키므로 웹 서버는 받을 수 없다. 이 확장은 정적
 declarativeNetRequest 규칙 하나로 그 이동을 연결 전에 `<웹 오리진>/api/chatgpt/callback`으로

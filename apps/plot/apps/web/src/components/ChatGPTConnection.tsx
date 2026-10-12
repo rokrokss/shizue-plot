@@ -72,14 +72,15 @@ function SignIn({ next, errorCode }: { next: string; errorCode: string | undefin
       {missing ? (
         <div className="space-y-3 rounded-xl border border-line bg-raised/50 p-4 text-sm leading-relaxed break-words">
           <p>{t('extensionRequired')}</p>
-          <ol className="list-decimal space-y-1 pl-5 text-muted">
-            <li>{t.rich('extensionStepOpen', { code: (chunks) => <code className="font-mono text-fg">{chunks}</code> })}</li>
-            <li>{t('extensionStepDeveloper')}</li>
-            <li>{t('extensionStepLoad')}</li>
-          </ol>
-          {EXTENSION_URL ? (
-            <a href={EXTENSION_URL} target="_blank" rel="noreferrer" className="inline-block font-semibold text-link underline underline-offset-2">{t('extensionInstall')}</a>
-          ) : null}
+          <a href={EXTENSION_URL} target="_blank" rel="noreferrer" className="inline-block font-semibold text-link underline underline-offset-2">{t('extensionInstall')}</a>
+          <details className="text-muted">
+            <summary className="cursor-pointer">{t('extensionDeveloper')}</summary>
+            <ol className="mt-2 list-decimal space-y-1 pl-5">
+              <li>{t.rich('extensionStepOpen', { code: (chunks) => <code className="font-mono text-fg">{chunks}</code> })}</li>
+              <li>{t('extensionStepDeveloper')}</li>
+              <li>{t('extensionStepLoad')}</li>
+            </ol>
+          </details>
           <Button size="sm" busy={rechecking} onClick={() => void recheck()}>{t('extensionRecheck')}</Button>
           <p role="status" className="text-muted">{extension === 'stillMissing' ? t('extensionStillMissing') : ''}</p>
         </div>

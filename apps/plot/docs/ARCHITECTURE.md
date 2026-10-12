@@ -76,7 +76,7 @@ UPLOAD_DIR=./data/uploads        # 로컬 드라이버 루트, 이미지 네임�
 S3_BUCKET / S3_REGION / S3_ENDPOINT                        # STORAGE_DRIVER=s3 일 때만
 S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY                    # 둘 다 비면 SDK 자격증명 체인
 S3_FORCE_PATH_STYLE=true         # 로컬 RustFS 필수, AWS 는 false
-CHATGPT_CALLBACK_PORT=47801      # OpenAI 루프백 콜백 포트. 도우미 확장 규칙과 오리진마다 짝 (§4.1)
+CHATGPT_CALLBACK_PORT=47801      # OpenAI 루프백 콜백 포트. 확장 규칙과 오리진마다 짝 — 운영 plot.shizue.net은 47811 (§4.1)
 ```
 
 `.env.example`에 없지만 코드가 읽는 것:
@@ -86,7 +86,7 @@ CHATGPT_CALLBACK_PORT=47801      # OpenAI 루프백 콜백 포트. 도우미 확
 | `API_ORIGIN` | `apps/web/next.config.ts` | `/api/*` rewrite 타깃, 기본 `http://localhost:8787` |
 | `NODE_ENV` | `apps/api/src/index.ts` | `test`에서만 better-auth 픽스처와 Echo 모델을 허용. 정상 실행은 ChatGPT 로그인만 사용 |
 | `CHATGPT_FAKE_OPENAI` | `apps/api/src/index.ts` | `NODE_ENV=test`에서 `1`이면 OpenAI 로그인 엔드포인트를 프로세스 안에서 흉내 낸다(`testOpenAI.ts`, 브라우저 스위트 전용) |
-| `NEXT_PUBLIC_CHATGPT_EXTENSION_ID` / `_URL` | `apps/web/src/lib/chatgptExtension.ts` | 도우미 확장 ID(기본은 고정 키의 ID)와 선택적 설치 링크 |
+| `NEXT_PUBLIC_CHATGPT_EXTENSION_ID` / `_URL` | `apps/web/src/lib/chatgptExtension.ts` | Shizue·도우미 ID 앞에 하나 더 물어볼 확장 ID(압축 해제한 Shizue 빌드 등)와 설치 링크(기본은 Shizue의 웹 스토어 페이지) |
 
 
 ### 4.1 호스팅 경계와 로그인 (`readConfig`, `originGuard`, `chatgptAccounts`)
@@ -96,9 +96,20 @@ CHATGPT_CALLBACK_PORT=47801      # OpenAI 루프백 콜백 포트. 도우미 확
 Next rewrite가 넘긴 요청은 `x-forwarded-host`가 웹 호스트일 때만 받는다(DNS 리바인딩).
 
 로그인은 OpenAI의 오픈소스 Sign in with ChatGPT 흐름이다. 그 흐름은 `http://127.0.0.1:<port>/auth/callback`
-으로만 돌아오고 이 주소는 사용자 기기를 가리키므로, 저장소의 크롬 확장(`apps/extension`)이 정적
-declarativeNetRequest 규칙으로 그 이동을 연결 전에 `<웹 오리진>/api/chatgpt/callback`으로 바꾼다(쿼리 유지).
-포트는 오리진마다 하나이고 API의 `CHATGPT_CALLBACK_PORT`와 확장 규칙이 같아야 한다.
+으로만 돌아오고 이 주소는 사용자 기기를 가리키므로, 크롬 확장의 정적 declarativeNetRequest 규칙이 그 이동을
+연결 전에 `<웹 오리진>/api/chatgpt/callback`으로 바꾼다(쿼리 유지). 포트는 오리진마다 하나이고 API의
+`CHATGPT_CALLBACK_PORT`와 확장 규칙이 같아야 한다.
+
+그 규칙을 싣는 확장은 둘이다. 웹은 둘 다에 ping을 보내 하나라도 답하면 로그인 버튼을 연다(`lib/chatgptExtension.ts`).
+
+| 확장 | ID | 규칙 | 용도 |
+|---|---|---|---|
+| **Shizue** (Chrome 웹 스토어, 0.3.6 이상) | `mpcbgfkoholfgapcgcmfjobnfcbnfanm` | `https://plot.shizue.net` ← 47811, `http://localhost:13000` ← 47801 | 독자가 설치하는 것. ping에 `features: ['plotSignIn']`로 답하고, 이 기능이 없는 답은 설치되지 않은 것으로 본다. 0.3.5 이하는 아예 답하지 않는다 |
+| 로그인 도우미 (`apps/extension`, 압축 해제 로드) | `naclpiefafceoehanglehokfnibaicle` | `scripts/variant.mjs`로 고른 오리진 | 개발용, 그리고 위 두 오리진 밖의 배포용 |
+
+그래서 운영(`plot.shizue.net`)의 API는 `CHATGPT_CALLBACK_PORT=47811`이어야 한다. 오리진을 바꾸면 Shizue를 다시
+릴리즈해야 한다(규칙은 `rokrokss/shizue`의 `src/public/plot-signin-rules.json`). 로그인 화면은 확장이 없을 때
+웹 스토어 링크를 앞에, 도우미를 직접 로드하는 개발용 단계를 접힌 칸에 둔다.
 
 1. `POST /api/chatgpt/sign-in {next, locale}` — PKCE·state·nonce를 만들어 `verification` 행에 10분 보관하고,
    시도를 그 브라우저에 묶는 HttpOnly 쿠키를 심은 뒤 `authorizationUrl`을 준다. 브라우저는 같은 탭으로 이동한다.
