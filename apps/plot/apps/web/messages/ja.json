@@ -640,7 +640,9 @@
     "cast": "登場人物",
     "intros": "導入",
     "introLabel": "導入 {index}",
-    "publishedAt": "公開 {date}"
+    "publishedAt": "公開 {date}",
+    "introMore": "もっと見る",
+    "introLess": "閉じる"
   },
   "comments": {
     "title": "コメント {count}",

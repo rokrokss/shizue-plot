@@ -5,6 +5,7 @@ import { use, useEffect, useState } from 'react';
 import { Avatar } from '@/components/Avatar';
 import { CommentsSection } from '@/components/CommentsSection';
 import { FollowButton } from '@/components/FollowButton';
+import { PlotIntro } from '@/components/PlotIntro';
 import { StartChatPanel } from '@/components/StartChatPanel';
 import { PlotStyleBadges } from '@/components/PlotStyleBadges';
 import { Button, CenteredMessage, cx, ErrorText, Section, Spinner } from '@/components/ui';
@@ -171,14 +172,7 @@ export default function PublicPlotPage({ params }: { params: Promise<{ id: strin
           <ErrorText>{error}</ErrorText>
 
           {/* The creator's line to readers, above everything the work itself says. */}
-          {plot.intro ? (
-            <p
-              data-testid="plot-intro"
-              className="text-sm leading-relaxed whitespace-pre-wrap text-fg"
-            >
-              {fillPreview(plot.intro, plot.name, userMacro)}
-            </p>
-          ) : null}
+          {plot.intro ? <PlotIntro text={fillPreview(plot.intro, plot.name, userMacro)} /> : null}
 
           {plot.characters.length > 0 ? (
             <Section title={t('cast')}>

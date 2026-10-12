@@ -33,6 +33,7 @@ import { LORE_BUDGET_SHARE, loreBudget } from '@/lib/loreBudget';
 import { checkCardSize, downloadRealmCard, isRestrictiveLicense } from '@/lib/realm';
 import {
   MAX_CHARACTERS_PER_PLOT,
+  MAX_INTRO_LENGTH,
   MAX_INTRO_TEXT_LENGTH,
   MAX_INTROS_PER_PLOT,
   MAX_PLOT_PROFILE_DESCRIPTION_LENGTH,
@@ -363,6 +364,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
               <TextArea
                 rows={3}
                 value={intro}
+                maxLength={MAX_INTRO_LENGTH}
                 placeholder={t('introPlaceholder')}
                 onChange={(event) => setIntro(event.target.value)}
               />

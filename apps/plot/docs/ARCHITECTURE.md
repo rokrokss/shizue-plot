@@ -197,7 +197,7 @@ OpenAI의 오픈소스 흐름은 오픈소스·로컬 호스팅 앱이 대상이
 - `componentCode?` — Layer 2 JSX 모듈(40,000자 상한).
 - `componentCapabilities?` — 컴포넌트가 챗에 요청할 수 있는 것(현재 `'sendTurn'` 하나).
 - 위 넷은 카드 필드로 남아 카드와 함께 이식되지만, **런타임이 읽는 것은 `plots.custom_ui`다**. 임포트가 카드에서 들어 올리고 익스포트가 카드로 되돌려 쓴다.
-- `intro?` — 유저 노출용 소개(500자 상한). **`prompt.ts`가 읽지 않는 유일한 카드 필드다** — `description`이 모델을 향한 글이고 이쪽은 독자를 향한 글이라, `creatorNotes`(CCv3 의미론이 다르다)에 합치지 않고 자체 필드로 둔다. 플롯 공개 뷰의 등장인물 소개(§10)에 실려 나간다.
+- `intro?` — 유저 노출용 소개(4,000자 상한, 플롯 소개와 같은 `MAX_INTRO_LENGTH`). **`prompt.ts`가 읽지 않는 유일한 카드 필드다** — `description`이 모델을 향한 글이고 이쪽은 독자를 향한 글이라, `creatorNotes`에 합치지 않고 자체 필드(`extensions.shizue.intro`)로 두어 왕복을 지킨다. 플롯 공개 뷰의 등장인물 소개(§10)에 실려 나간다. 남의 카드에서는 `creatorNotes`가 그 자리다 — RisuAI와 Realm이 검색 결과와 첫 화면에서 독자에게 보여 주는 설명이라, 카드로 새 플롯을 만들 때 이 필드가 없으면 플롯 소개로 쓴다(§10 카드로 새 플롯).
 - `scenario`는 **더 이상 읽히지 않는다**. 상황은 플롯의 `description`이거나 도입부이지 한 인물의 것이 아니기 때문이며, 왕복을 위해 필드 자체는 그대로 보존된다. 카드로 새 플롯을 만드는 임포트가 이것을 플롯 `description`으로 옮긴다(§10).
 - `loreSettings.tokenBudget?`는 **카드 자신의 `token_budget`**일 때만 있다. 없으면 자동 예산이다 — 조립의 `contextBudget × LORE_BUDGET_SHARE`(0.25, 내림)(아래 로어북). 정규화는 카드 북의 숫자 `token_budget`만 옮기고, `coerceCard`(API)는 숫자로 온 것만 남기고, 익스포트는 있을 때만 `token_budget`을 쓴다. 예전에는 없을 때 2048을 채워 저장했는데, 마이그레이션 `0003_lore_budget_auto`가 그 2048을 — 원본 `raw`의 `data.character_book.token_budget`이 비어 있는(없음·JSON null·`raw` null) 카드에서만 — 지웠다.
 
@@ -625,7 +625,7 @@ GET  /api/chats/:id/inspect           재생성이 지금 보낼 프롬프트의
 
 **추천 프로필** — `POST /api/plots`·`PATCH /api/plots/:id`가 `profiles`를 받는다(배열 또는 `null`, 그 외 타입이면 400 `invalid_request`). 내용은 `coercePlotProfiles`를 지나므로 못 쓸 행은 거절이 아니라 삭제이고, 남는 것이 없으면 컬럼은 `null`이 된다 — 스타일·내레이터와 같은 규약이다. 소유자 뷰와 공개 뷰 모두 `profiles`를 **언제나 배열로** 낸다(컬럼이 null이어도 `[]`). `POST /api/chats`는 `personaId`와 `profileId`를 **동시에 받지 않는다**(둘 다 오면 400 `invalid_request`, 플롯에 없는 id면 404). `profileId`가 오면 서버가 그 프로필을 독자의 `personas`로 복사하고 챗은 그 새 행을 가리킨다 — **중복 제거는 하지 않는다**: 행 하나는 싸고, 같은 프로필로 연 두 대화는 독자가 서로 다르게 키워 갈 두 페르소나다.
 
-**카드로 새 플롯** — `POST /api/plots/import`는 카드를 첫 멤버로 두고 작품에 속하는 것을 플롯으로 들어 올린다. 플롯 `description`(세계관 설정)은 **카드의 `scenario`만**(앞뒤 공백 제거)이다 — 캐릭터 description은 멤버 카드에 남고 조립기가 등장인물 블록에서 읽으므로, 플롯에 또 복사하면 모델이 같은 글을 두 번 읽는다. 그래서 scenario가 없는 카드는 빈 세계관으로 들어오고 발행 게이트(`not_publishable`)가 그것을 묻는다. 콘텐츠 언어는 첫 도입부의 `detectContentLanguage`, 판정이 안 되면 카드 description의 것, 그것도 안 되면 컬럼 기본값(`ko`)이다. 카드가 그림을 실었으면(PNG 자체, charx의 아이콘) 멤버 아바타와 함께 **플롯 커버**로도 저장한다 — 커버 업로드와 같은 `storableImage`·`coverKey` 경로라 텍스트 청크(카드 정의)는 지워진다. 커버 저장이 실패해도 임포트는 실패하지 않고 커버 없는 플롯이 된다. 멤버 하나를 더하는 `POST /:id/characters/import`는 셋 다 하지 않는다 — 플롯은 이미 자기 것이 있다.
+**카드로 새 플롯** — `POST /api/plots/import`는 카드를 첫 멤버로 두고 작품에 속하는 것을 플롯으로 들어 올린다. 플롯 `description`(세계관 설정)은 **카드의 `scenario`만**(앞뒤 공백 제거)이다 — 캐릭터 description은 멤버 카드에 남고 조립기가 등장인물 블록에서 읽으므로, 플롯에 또 복사하면 모델이 같은 글을 두 번 읽는다. 그래서 scenario가 없는 카드는 빈 세계관으로 들어오고 발행 게이트(`not_publishable`)가 그것을 묻는다. 콘텐츠 언어는 첫 도입부의 `detectContentLanguage`, 판정이 안 되면 카드 description의 것, 그것도 안 되면 컬럼 기본값(`ko`)이다. 플롯 `intro`(독자용 소개)는 카드의 `extensions.shizue.intro`, 없으면 `creatorNotes`다(`introFromCreatorNotes`). RisuAI가 이 필드를 `` # `ko` `` 같은 머리줄로 언어별 구획을 나눠 쓰므로(Realm 업로드는 `en` 구획을 요구한다) Realm이 독자에게 고르는 순서대로 위에서 판정한 콘텐츠 언어(판정이 안 됐으면 건너뛴다) → `en` → 머리줄 밖 텍스트에서 첫 비어 있지 않은 것을 쓰고, 4,000자를 넘으면 도입부처럼 자른다. 멤버 카드의 `intro`에는 옮기지 않는다 — 공개 페이지가 같은 글을 두 번 보이게 된다. 카드가 그림을 실었으면(PNG 자체, charx의 아이콘) 멤버 아바타와 함께 **플롯 커버**로도 저장한다 — 커버 업로드와 같은 `storableImage`·`coverKey` 경로라 텍스트 청크(카드 정의)는 지워진다. 커버 저장이 실패해도 임포트는 실패하지 않고 커버 없는 플롯이 된다. 멤버 하나를 더하는 `POST /:id/characters/import`는 넷 다 하지 않는다 — 플롯은 이미 자기 것이 있다.
 
 **로어 사용량** — 소유자에게 멤버를 내주는 모든 응답(소유자 뷰·로스터·멤버 생성·카드 임포트·PATCH·재정렬·아바타)은 멤버마다 `loreConstantTokens`를, 소유자 뷰는 플롯에 `plotLoreConstantTokens`를 싣는다. 켜진 constant 엔트리를 챗의 첫 프롬프트처럼 확장한 토큰 합이다(`constantLoreTokens`, §6 — 플롯 기본 변수, 기본 유저 이름, `{{char}}`는 그 책 주인). 스튜디오가 로어 예산과 견줘 경고한다. 요청마다 다시 센다(저장 컬럼 없음).
 
@@ -724,7 +724,7 @@ GET  /api/chats/:id/inspect           재생성이 지금 보낼 프롬프트의
 | `/{locale}/plots/import/paste` | **붙여넣기 이주 사이트 고르기** — 다섯 사이트 카드(열린 것만 시작, 나머지 "준비 중"), 사이트별 저장본 표시·지우기(아래) |
 | `/{locale}/plots/import/paste/:platform` | **붙여넣기 이주 마법사** — 확인 → 붙여넣기 → 이미지 → 미리보기 → 만들기(아래). 열리지 않은 사이트는 404 |
 | `/{locale}/plots/:id` | **플롯 스튜디오** — 한 작품의 전부(아래) |
-| `/{locale}/p/:id` | 플롯 공개 페이지 — 커버·소개·태그·스타일 배지·등장인물 스트립·도입부 피커와 전문·좋아요·댓글·대화 시작 패널 |
+| `/{locale}/p/:id` | 플롯 공개 페이지 — 커버·소개(마크다운, 원시 HTML과 그림은 빼고, 길면 접힘 — `components/PlotIntro.tsx`)·태그·스타일 배지·등장인물 스트립·도입부 피커와 전문·좋아요·댓글·대화 시작 패널 |
 | `/{locale}/chats/:id` | 챗 화면 |
 | `/{locale}/explore` | `/{locale}`로 리다이렉트(구 탐색 경로 보존) |
 | `/{locale}/creators/:id` | 크리에이터 공개 플롯 그리드 |

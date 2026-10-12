@@ -11,6 +11,7 @@ import {
   emptyCard,
   exportCardPng,
   exportCardV3,
+  introFromCreatorNotes,
   MAX_CARD_IMPORT_BYTES,
   MAX_CHARACTERS_PER_PLOT,
   MAX_INTRO_LENGTH,
@@ -756,7 +757,9 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       .values({
         ownerId: c.get('userId'),
         name,
-        intro: card.intro ?? '',
+        // Only the plot borrows the creator notes: the member keeps its card's own
+        // intro, or the public page would say the same thing twice.
+        intro: card.intro ?? introFromCreatorNotes(card.creatorNotes, language) ?? '',
         description,
         intros,
         tags: normalizeTags(card.tags),

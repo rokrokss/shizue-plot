@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { exportCardPng, exportCardV3 } from '../src/card/export.js';
 import { CardParseError, normalizeCard, parseDecorators } from '../src/card/normalize.js';
 import { parseCard } from '../src/card/parse.js';
-import { MAX_INTRO_LENGTH } from '../src/card/intro.js';
+import { introFromCreatorNotes, MAX_INTRO_LENGTH } from '../src/card/intro.js';
 import {
   insertPngTextChunks,
   isPng,
@@ -803,6 +803,29 @@ describe('the intro round trip', () => {
     });
     expect(system).not.toContain('유저에게만 보이는 소개문.');
     expect(JSON.stringify(messages)).not.toContain('유저에게만 보이는 소개문.');
+  });
+});
+
+describe('introFromCreatorNotes', () => {
+  it('reads the section Realm would show the reader', () => {
+    // As Realm cards write it: an English section, which Realm requires.
+    const parma = '\n# `en`\nAn adult fantasy knight order roleplay set in the city of Parma.';
+    expect(introFromCreatorNotes(parma, 'ko')).toBe('An adult fantasy knight order roleplay set in the city of Parma.');
+
+    const both = '# `en`\nKnights of Parma.\n# `ko`\n파르마의 기사단.\n\n둘째 문단.';
+    expect(introFromCreatorNotes(both, 'ko')).toBe('파르마의 기사단.\n\n둘째 문단.');
+    expect(introFromCreatorNotes(both, 'ja')).toBe('Knights of Parma.');
+    expect(introFromCreatorNotes(both)).toBe('Knights of Parma.');
+  });
+
+  it('takes untagged notes whole, and nothing from blank ones', () => {
+    expect(introFromCreatorNotes('  **기사단**을 이끄는 이야기.\n')).toBe('**기사단**을 이끄는 이야기.');
+    expect(introFromCreatorNotes('', 'ko')).toBeUndefined();
+    expect(introFromCreatorNotes('# `ko`\n   ', 'ko')).toBeUndefined();
+  });
+
+  it('cuts notes past the cap rather than dropping them', () => {
+    expect(introFromCreatorNotes('가'.repeat(MAX_INTRO_LENGTH + 10))).toBe('가'.repeat(MAX_INTRO_LENGTH));
   });
 });
 

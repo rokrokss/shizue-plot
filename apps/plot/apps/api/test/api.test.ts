@@ -20,6 +20,7 @@ import {
   loreEntryKey,
   MAX_ASSETS,
   MAX_CHARACTERS_PER_PLOT,
+  MAX_INTRO_LENGTH,
   MAX_INTRO_TEXT_LENGTH,
   MAX_INTROS_PER_PLOT,
   parseCard,
@@ -900,8 +901,12 @@ describe('plots', () => {
     expect((await json(cookie, '/api/plots', 'POST', { name: '   ' })).status).toBe(400);
     expect((await json(cookie, `/api/plots/${created.id}`, 'PATCH', { name: '' })).status).toBe(400);
     // The reader-facing intro is refused rather than truncated.
-    expect((await json(cookie, `/api/plots/${created.id}`, 'PATCH', { intro: '가'.repeat(501) })).status).toBe(400);
-    expect((await json(cookie, `/api/plots/${created.id}`, 'PATCH', { intro: '가'.repeat(500) })).status).toBe(200);
+    expect(
+      (await json(cookie, `/api/plots/${created.id}`, 'PATCH', { intro: '가'.repeat(MAX_INTRO_LENGTH + 1) })).status,
+    ).toBe(400);
+    expect(
+      (await json(cookie, `/api/plots/${created.id}`, 'PATCH', { intro: '가'.repeat(MAX_INTRO_LENGTH) })).status,
+    ).toBe(200);
 
     expect((await request(cookie, `/api/plots/${created.id}`, 'DELETE')).status).toBe(204);
     expect((await request(cookie, `/api/plots/${created.id}`)).status).toBe(404);
@@ -1241,6 +1246,22 @@ describe('plots', () => {
     expect(plot.customUi.displayScripts).toHaveLength(1);
     // The card is the import container, so it keeps its own copy for the round trip.
     expect(plot.characters[0].card.narrator).toEqual({ voice: '건조한 문체.', pov: 'omniscient' });
+  });
+
+  it("gives an imported work the creator notes Realm shows its readers when the card has no intro of ours", async () => {
+    const cookie = await signUp('import-notes@example.com');
+    const notes = '\n# `en`\nAn adult fantasy knight order roleplay set in the city of Parma.';
+    const plot = await importCard(
+      cookie,
+      new File([JSON.stringify({ ...v2Card, data: { ...v2Card.data, creator_notes: notes } })], 'parma.json', {
+        type: 'application/json',
+      }),
+    );
+
+    expect(plot.intro).toBe('An adult fantasy knight order roleplay set in the city of Parma.');
+    // The member keeps its card as it came; the notes are the work's to show.
+    expect(plot.characters[0].card.intro).toBeUndefined();
+    expect(plot.characters[0].card.creatorNotes).toBe(notes);
   });
 
   it("tells the owner what each book's always-on lore costs as a chat would start it", async () => {
@@ -1964,10 +1985,11 @@ describe('paste migration', () => {
     for (const members of [[], [member('')], [{ description: '이름 없음' }], ['세라']]) {
       expect(await refused(cookie, { draft: zetaDraft({}, members) })).toBe('invalid_request');
     }
-    expect(await refused(cookie, { draft: zetaDraft({}, [member('세라', { intro: '가'.repeat(501) })]) })).toBe(
+    const tooLong = '가'.repeat(MAX_INTRO_LENGTH + 1);
+    expect(await refused(cookie, { draft: zetaDraft({}, [member('세라', { intro: tooLong })]) })).toBe(
       'invalid_request',
     );
-    for (const plot of [{ name: ' ' }, { intro: '가'.repeat(501) }, { tags: '로맨스' }, { description: 3 }, { style: 'noir' }]) {
+    for (const plot of [{ name: ' ' }, { intro: tooLong }, { tags: '로맨스' }, { description: 3 }, { style: 'noir' }]) {
       expect(await refused(cookie, { draft: zetaDraft(plot) })).toBe('invalid_request');
     }
     for (const plot of [

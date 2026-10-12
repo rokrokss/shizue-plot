@@ -146,7 +146,7 @@ export const MAX_CHARACTERS_PER_PLOT = 10;
 export const MAX_INTROS_PER_PLOT = 10;
 /** One opening's length, and the reader-facing intro's; mirrors the API. */
 export const MAX_INTRO_TEXT_LENGTH = 16_000;
-export const MAX_INTRO_LENGTH = 500;
+export const MAX_INTRO_LENGTH = 4000;
 /** One card file an import takes; mirrors `MAX_CARD_IMPORT_BYTES` in @shizue/core. */
 export const MAX_CARD_IMPORT_BYTES = 300 * 1024 * 1024;
 

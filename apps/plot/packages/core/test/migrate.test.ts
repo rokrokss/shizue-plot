@@ -14,6 +14,7 @@ import {
   type MigrationDraft,
   type SiteInput,
 } from '../src/migrate/index.js';
+import { MAX_INTRO_LENGTH } from '../src/card/intro.js';
 import { cutAtSentence, normalizeBraces, normalizeImageRefs, splitKeywords } from '../src/migrate/convert.js';
 import { splitCastSections } from '../src/migrate/elyn.js';
 import { coercePlotStyle } from '../src/style.js';
@@ -237,20 +238,20 @@ describe('Zeta', () => {
   });
 
   it('cuts the joined intro at a sentence and keeps the 소개글 whole', () => {
-    const aboutMe = '여름이 온다. '.repeat(80).trim();
+    const aboutMe = '여름이 온다. '.repeat(MAX_INTRO_LENGTH / 5).trim();
     const result = convertToDraft(
       'zeta',
       zeta({ title: 't', characters: [{ name: '하루' }], summary: '짧은 소개.', aboutMe }),
     );
     const intro = result.draft.plot.intro;
-    expect(intro.length).toBeLessThanOrEqual(500);
+    expect(intro.length).toBeLessThanOrEqual(MAX_INTRO_LENGTH);
     expect(intro.startsWith('짧은 소개.\n\n여름이 온다.')).toBe(true);
     expect(intro.endsWith('다.')).toBe(true);
     expect(result.warnings).toEqual([
       {
         code: 'truncated',
         field: 'about.aboutMe',
-        detail: { limit: 500, length: '짧은 소개.\n\n'.length + aboutMe.length },
+        detail: { limit: MAX_INTRO_LENGTH, length: '짧은 소개.\n\n'.length + aboutMe.length },
       },
     ]);
     expect(result.preserved).toEqual([{ label: '소개 › 나만의 소개글', text: aboutMe }]);
@@ -465,7 +466,7 @@ describe('image list lore', () => {
 
 describe('Elyn', () => {
   it('maps a whole character', () => {
-    const intro = `${'소개 문장이다. '.repeat(70).trim()}`;
+    const intro = `${'소개 문장이다. '.repeat(MAX_INTRO_LENGTH / 5).trim()}`;
     const result = convertToDraft(
       'elyn',
       elyn({
@@ -493,7 +494,7 @@ describe('Elyn', () => {
       }),
     );
     const cut = result.draft.plot.intro;
-    expect(cut.length).toBeLessThanOrEqual(500);
+    expect(cut.length).toBeLessThanOrEqual(MAX_INTRO_LENGTH);
     expect(cut.endsWith('다.')).toBe(true);
 
     const base = { secondaryKeys: [], selective: false, constant: false, caseSensitive: false, useRegex: false };
@@ -542,7 +543,7 @@ describe('Elyn', () => {
     });
     expect(result.warnings).toEqual([
       { code: 'adultOnly', field: 'profile.rating' },
-      { code: 'truncated', field: 'profile.intro', detail: { limit: 500, length: intro.length } },
+      { code: 'truncated', field: 'profile.intro', detail: { limit: MAX_INTRO_LENGTH, length: intro.length } },
       { code: 'loreGroupApprox', field: 'lore[0].group' },
       { code: 'loreInverted', field: 'lore[1].onMatch' },
       { code: 'loreDependencyDropped', field: 'lore[2].dependencies' },

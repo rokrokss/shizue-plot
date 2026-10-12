@@ -640,7 +640,9 @@
     "cast": "Cast",
     "intros": "Openings",
     "introLabel": "Opening {index}",
-    "publishedAt": "Published {date}"
+    "publishedAt": "Published {date}",
+    "introMore": "Show more",
+    "introLess": "Show less"
   },
   "comments": {
     "title": "Comments {count}",

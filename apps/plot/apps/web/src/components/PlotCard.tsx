@@ -2,6 +2,7 @@
 
 import { useTranslations } from 'next-intl';
 import { Link } from '@/i18n/navigation';
+import { messageSnippet } from '@/lib/chatSnippet';
 import { fillPreview } from '@/lib/hub';
 import type { PublicPlot } from '@/lib/types';
 import { Icon } from './Icon';
@@ -9,6 +10,17 @@ import { Avatar } from './Avatar';
 
 /** How many faces of the roster a card shows before it starts counting instead. */
 const FACES = 4;
+
+/**
+ * Two lines of plain text: the intro and the opening are markdown, which two
+ * lines have no room to render, and imported creator notes often carry HTML as
+ * well — a style block goes whole, any other tag leaves its words.
+ */
+function cardText(text: string): string {
+  return messageSnippet(
+    text.replace(/<(style|script)\b[\s\S]*?<\/\1\s*>/gi, ' ').replace(/<[^>]*>/g, ' '),
+  );
+}
 
 /** One entry of the public catalogue — shared by the feed and /creators/:id. */
 export function PlotCard({ plot }: { plot: PublicPlot }) {
@@ -44,7 +56,7 @@ export function PlotCard({ plot }: { plot: PublicPlot }) {
         {/* The creator's own line to readers when there is one; the opening is
             what the card falls back to, cut by the API. */}
         <p className="line-clamp-2 text-sm leading-relaxed text-muted/90">
-          {fillPreview(plot.intro || plot.introPreview, plot.name, t('userMacro'))}
+          {cardText(fillPreview(plot.intro || plot.introPreview, plot.name, t('userMacro')))}
         </p>
         {plot.tags.length > 0 ? (
           <ul className="flex flex-wrap gap-1">

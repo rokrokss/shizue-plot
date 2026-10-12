@@ -640,7 +640,9 @@
     "cast": "등장인물",
     "intros": "도입부",
     "introLabel": "도입부 {index}",
-    "publishedAt": "공개 {date}"
+    "publishedAt": "공개 {date}",
+    "introMore": "더 보기",
+    "introLess": "접기"
   },
   "comments": {
     "title": "댓글 {count}",

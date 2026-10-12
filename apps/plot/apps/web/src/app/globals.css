@@ -148,7 +148,11 @@ a, button, input, select, textarea, summary { -webkit-tap-highlight-color: trans
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0s !important; }
 }
 
-/* Rendered message bodies: markdown from the model, in Zeta's `chat` style. */
+/*
+ * Rendered message bodies: markdown from the model, in Zeta's `chat` style. A
+ * plot's intro (`.intro-body`) is markdown too and shares the element rules,
+ * but stays at body size.
+ */
 .message-body {
   letter-spacing: -0.01876rem;
   font-size: 0.938rem;
@@ -169,69 +173,86 @@ a, button, input, select, textarea, summary { -webkit-tap-highlight-color: trans
   isolation: isolate;
   contain: paint;
 }
-.message-body > * + * {
+.message-body > * + *,
+.intro-body > * + * {
   margin-top: 0.85em;
 }
 /* A speaker's run is a box of its own, so its paragraphs need the rule too. */
 .message-body .speech-run > * + * {
   margin-top: 0.85em;
 }
-.message-body em {
+.message-body em,
+.intro-body em {
   font-style: italic;
   color: color-mix(in oklab, var(--color-muted) 85%, var(--color-fg));
 }
-.message-body strong {
+.message-body strong,
+.intro-body strong {
   font-weight: 600;
   color: var(--color-fg);
 }
-.message-body a {
+.message-body a,
+.intro-body a {
   color: var(--color-link);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
-.message-body code {
+.message-body code,
+.intro-body code {
   font-size: 0.9em;
   padding: 0.1em 0.35em;
   border-radius: 0.25rem;
   background-color: var(--color-raised);
 }
-.message-body pre {
+.message-body pre,
+.intro-body pre {
   padding: 0.85rem 1rem;
   border-radius: 0.5rem;
   background-color: var(--color-raised);
   overflow-x: auto;
 }
-.message-body pre code {
+.message-body pre code,
+.intro-body pre code {
   padding: 0;
   background: none;
 }
-.message-body blockquote {
+.message-body blockquote,
+.intro-body blockquote {
   padding-left: 0.9rem;
   border-left: 3px solid var(--color-accent);
   color: var(--color-muted);
 }
 .message-body ul,
-.message-body ol {
+.message-body ol,
+.intro-body ul,
+.intro-body ol {
   padding-left: 1.4rem;
   list-style: revert;
 }
 .message-body h1,
 .message-body h2,
-.message-body h3 {
+.message-body h3,
+.intro-body h1,
+.intro-body h2,
+.intro-body h3 {
   font-weight: 600;
 }
-.message-body table {
+.message-body table,
+.intro-body table {
   display: block;
   overflow-x: auto;
   border-collapse: collapse;
 }
 .message-body th,
-.message-body td {
+.message-body td,
+.intro-body th,
+.intro-body td {
   padding: 0.35rem 0.7rem;
   border: 1px solid var(--color-line);
   text-align: left;
 }
-.message-body th {
+.message-body th,
+.intro-body th {
   font-weight: 600;
 }
 
