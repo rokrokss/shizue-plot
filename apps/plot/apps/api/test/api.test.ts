@@ -8536,6 +8536,7 @@ describe('plot hub', () => {
       ],
       // Presentation, so it travels even though the definition does not.
       displayScripts: [],
+      css: '',
       defaultVariables: {},
       componentCode: '',
       componentCapabilities: [],
