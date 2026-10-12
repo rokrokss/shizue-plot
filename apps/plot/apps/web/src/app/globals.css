@@ -14,11 +14,53 @@
   --color-accent: #32ccbc;
   --color-accent-ink: #10302b;
   --color-mint-soft: #cbfbf6;
+  --color-accent-hover: #cbfbf6;
   --color-link: #126b61;
   --color-focus: #126b61;
   --color-danger: #b43e35;
+  --color-scrim: rgb(16 48 43 / 0.35);
   --font-sans: 'Pretendard Variable', 'Pretendard JP Variable', -apple-system, system-ui, Roboto, 'Helvetica Neue', 'Segoe UI', 'Apple SD Gothic Neo', 'Noto Sans KR', 'Malgun Gothic', 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', sans-serif;
-  --shadow-card: 3px 3px 0 #10302b;
+  --shadow-card: 3px 3px 0 var(--color-fg);
+}
+
+/*
+ * Dark follows the OS unless the reader picked a side; the pick is
+ * `data-theme` on <html>, set before first paint (lib/theme.ts). The palette
+ * is the reference's dark store image: deep green surfaces, mint-2 for links
+ * and focus. Mint stays mint, and the ink on it stays ink.
+ */
+@custom-variant dark {
+  &:where([data-theme='dark'], [data-theme='dark'] *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: dark) {
+    &:where(:not([data-theme='light'], [data-theme='light'] *)) {
+      @slot;
+    }
+  }
+}
+
+:root {
+  color-scheme: light;
+  --reading: #fffef7;
+  --dots: #10302b16;
+  @variant dark {
+    color-scheme: dark;
+    --color-canvas: #0f1a19;
+    --color-surface: #14211f;
+    --color-raised: #1b2c29;
+    --color-line: #2b423e;
+    --color-fg: #e9f6f3;
+    --color-muted: #a3bab6;
+    --color-mint-soft: #1a4540;
+    --color-accent-hover: #90f7ec;
+    --color-link: #90f7ec;
+    --color-focus: #90f7ec;
+    --color-danger: #f0877b;
+    --color-scrim: rgb(0 0 0 / 0.6);
+    --reading: #111d1b;
+    --dots: #90f7ec14;
+  }
 }
 
 /*
@@ -54,7 +96,7 @@
   }
 }
 
-html { color-scheme: light; scrollbar-gutter: stable; }
+html { scrollbar-gutter: stable; }
 body {
   font-family: var(--font-sans);
   background-color: var(--color-canvas);
@@ -73,12 +115,12 @@ a, button, input, select, textarea, summary { -webkit-tap-highlight-color: trans
 :where(input, select, textarea) { scroll-margin-top: 5rem; }
 
 .brand-dots {
-  background-image: radial-gradient(#10302b16 1px, transparent 1px);
+  background-image: radial-gradient(var(--dots) 1px, transparent 1px);
   background-size: 22px 22px;
 }
 .brand-garden { position: relative; width: 280px; height: 260px; margin: auto; }
 .garden-window { position: absolute; inset: 18px 20px 22px; overflow: hidden; border: 2px solid var(--color-fg); border-radius: 16px; background: var(--color-canvas); box-shadow: 7px 7px 0 var(--color-fg); transform: rotate(-4deg); }
-.garden-window-bar { display: flex; gap: 6px; padding: 12px; border-bottom: 2px solid var(--color-fg); background: white; }
+.garden-window-bar { display: flex; gap: 6px; padding: 12px; border-bottom: 2px solid var(--color-fg); background: var(--color-surface); }
 .garden-window-bar i { width: 6px; height: 6px; background: var(--color-fg); }
 .garden-mascot { position: absolute; width: 112px; height: 112px; left: calc(50% - 56px); bottom: 32px; image-rendering: pixelated; }
 .garden-ground { position: absolute; bottom: 0; width: 100%; height: 22px; border-top: 2px solid var(--color-fg); background: var(--color-accent); }
@@ -88,13 +130,20 @@ a, button, input, select, textarea, summary { -webkit-tap-highlight-color: trans
 .garden-spark-two { left: 0; bottom: 42px; width: 18px; height: 18px; }
 .garden-leaf { position: absolute; right: 6px; bottom: 8px; width: 52px; height: 30px; border: 2px solid var(--color-fg); border-radius: 100% 0 100% 0; background: #e8b5ac; transform: rotate(-18deg); }
 .brand-sprite { display: block; width: 56px; height: 68px; background: url('/brand/standing.png') no-repeat 0 0 / auto 68px; image-rendering: pixelated; }
+/* Dark inverts the bunny, with the reference's dark sheet, as its greeting does. */
+.brand-sprite {
+  @variant dark {
+    background-image: url('/brand/standing_dark.png');
+    filter: invert(1) hue-rotate(180deg);
+  }
+}
 .garden-friend { position: absolute; left: 0; bottom: 2px; }
 .brand-garden-compact { width: 240px; height: 218px; }
 .brand-garden-compact .garden-mascot { width: 88px; height: 88px; left: calc(50% - 44px); bottom: 24px; }
 
 /* Reading surfaces remain quiet; the playful motif belongs to discovery/auth. */
-.chat-workspace { background: #fffef7; }
-.skip-link { position: fixed; top: 8px; left: 8px; z-index: 100; transform: translateY(-150%); border: 2px solid var(--color-fg); border-radius: 8px; background: white; padding: 10px 16px; }
+.chat-workspace { background: var(--reading); }
+.skip-link { position: fixed; top: 8px; left: 8px; z-index: 100; transform: translateY(-150%); border: 2px solid var(--color-fg); border-radius: 8px; background: var(--color-surface); padding: 10px 16px; }
 .skip-link:focus { transform: translateY(0); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0s !important; }

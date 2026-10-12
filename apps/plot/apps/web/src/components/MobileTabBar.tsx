@@ -9,6 +9,7 @@ import { Icon } from './Icon';
 import { BottomSheet } from './BottomSheet';
 import { LocaleSwitcher } from './LocaleSwitcher';
 import { SignOutButton } from './SignOutButton';
+import { ThemeSwitcher } from './ThemeSwitcher';
 import { buttonClass, cx } from './ui';
 
 const TAB =
@@ -72,7 +73,10 @@ export function MobileTabBar() {
               a level down. */}
           {data ? <Link href="/settings" onClick={() => setMenuOpen(false)} className={buttonClass('secondary', 'sm', 'mt-4 w-full')}>{t('aiSettings')}</Link> : null}
           <div className="mt-4 flex items-center justify-between gap-3 border-t border-line pt-4">
-            <LocaleSwitcher />
+            <div className="flex items-center gap-2">
+              <LocaleSwitcher />
+              <ThemeSwitcher />
+            </div>
             {isPending ? null : data ? (
               <SignOutButton />
             ) : (

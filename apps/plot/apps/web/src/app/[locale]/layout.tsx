@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation';
 import { hasLocale, NextIntlClientProvider } from 'next-intl';
 import { getTranslations, setRequestLocale } from 'next-intl/server';
 import type { ReactNode } from 'react';
+import { ThemedHtml } from '@/components/ThemedHtml';
 import { routing } from '@/i18n/routing';
 import '../globals.css';
 
@@ -32,10 +33,10 @@ export default async function LocaleLayout({
   setRequestLocale(locale);
 
   return (
-    <html lang={locale}>
+    <ThemedHtml lang={locale}>
       <body>
         <NextIntlClientProvider>{children}</NextIntlClientProvider>
       </body>
-    </html>
+    </ThemedHtml>
   );
 }

@@ -30,7 +30,7 @@ export function BottomSheet({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex flex-col justify-end bg-fg/35 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex flex-col justify-end bg-scrim backdrop-blur-sm"
       // The backdrop is everything the sheet is not; a click in it closes.
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();

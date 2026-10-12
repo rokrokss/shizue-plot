@@ -100,7 +100,7 @@ export interface PlatformContext {
   assets: Record<string, string>;
 }
 
-/** Parent → frame, over the port. The only message the frame accepts on it. */
+/** Parent → frame, over the port. One of the two messages the frame accepts on it. */
 export interface InitMessage {
   type: 'init';
   code: string;
@@ -109,6 +109,15 @@ export interface InitMessage {
   platform: PlatformContext;
   /** Localized strings the frame cannot look up itself. */
   labels: { error: string };
+}
+
+/**
+ * Parent → frame, over the port: the page's color scheme changed. Kept apart
+ * from `init` because a new `init` remounts the component and drops its state.
+ */
+export interface SchemeMessage {
+  type: 'scheme';
+  scheme: 'light' | 'dark';
 }
 
 /**
@@ -1652,9 +1661,16 @@ function componentFrameRuntime(
     if (!data || data.type !== 'port' || !event.ports || !event.ports[0]) return;
     port = event.ports[0];
     port.onmessage = function (message: Any): void {
-      const init = message.data;
-      if (!init || init.type !== 'init') return;
-      mountPayload(init);
+      const data = message.data;
+      if (!data) return;
+      // The frame's scheme has to match the page's, or the browser paints the
+      // frame an opaque backdrop of its own.
+      if (data.type === 'scheme') {
+        doc.documentElement.setAttribute('data-theme', data.scheme === 'dark' ? 'dark' : 'light');
+        return;
+      }
+      if (data.type !== 'init') return;
+      mountPayload(data);
     };
   });
 
@@ -1680,9 +1696,10 @@ function componentFrameRuntime(
 }
 /* eslint-enable */
 
-/** Base style of the frame document, matching the shizue reading surface. */
+/** Base style of the frame document, matching the shizue reading surface in either scheme. */
 const FRAME_STYLE = `
 :root { color-scheme: light; }
+:root[data-theme='dark'] { color-scheme: dark; }
 html, body { margin: 0; padding: 0; background: transparent; }
 body {
   font: 14px/1.6 ui-sans-serif, system-ui, -apple-system, 'Apple SD Gothic Neo',
@@ -1690,6 +1707,7 @@ body {
   color: #10302b;
   overflow: hidden;
 }
+:root[data-theme='dark'] body { color: #e9f6f3; }
 img { max-width: 100%; }
 .shizue-fallback {
   border: 1px solid rgba(224, 112, 95, 0.4);
@@ -1706,6 +1724,8 @@ img { max-width: 100%; }
   font-size: 11px;
   color: #50645b;
 }
+:root[data-theme='dark'] .shizue-fallback { color: #f0877b; }
+:root[data-theme='dark'] .shizue-fallback pre { color: #a3bab6; }
 `;
 
 /** Origins we are willing to name in a CSP. Anything else gets no image source at all. */
@@ -1786,13 +1806,14 @@ export function componentRuntimeSource(origin: string): string {
 
 /**
  * The whole frame document. It carries no creator code — the code, the props and
- * the platform state arrive over the bridge — so one document serves every
- * component on the page and the browser can reuse the parse.
+ * the platform state arrive over the bridge — so one document per scheme serves
+ * every component on the page and the browser can reuse the parse. `scheme` is
+ * only where the frame starts; later changes arrive as a `scheme` message.
  */
-export function componentFrameSrcdoc(origin: string): string {
+export function componentFrameSrcdoc(origin: string, scheme: 'light' | 'dark' = 'light'): string {
   const script = componentRuntimeSource(origin).replace(/<\/(script)/gi, '<\\/$1');
   return [
-    '<!doctype html><html><head><meta charset="utf-8">',
+    `<!doctype html><html data-theme="${scheme}"><head><meta charset="utf-8">`,
     `<meta http-equiv="Content-Security-Policy" content="${componentFrameCsp(origin)}">`,
     `<style>${FRAME_STYLE}</style></head>`,
     '<body><div id="shizue-root"></div>',

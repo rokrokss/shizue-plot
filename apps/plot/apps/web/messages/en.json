@@ -10,6 +10,7 @@
     "create": "Create",
     "signOut": "Sign out",
     "language": "Language",
+    "theme": "Theme",
     "chats": "Chats",
     "menu": "Menu",
     "aiSettings": "AI connection"
@@ -929,6 +930,11 @@
     "ko": "한국어",
     "en": "English",
     "ja": "日本語"
+  },
+  "themes": {
+    "system": "System",
+    "light": "Light",
+    "dark": "Dark"
   },
   "errors": {
     "unknown": "Something went wrong.",

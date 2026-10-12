@@ -9,6 +9,7 @@ import { Icon } from './Icon';
 import { LocaleSwitcher } from './LocaleSwitcher';
 import { NotificationBell } from './NotificationBell';
 import { SignOutButton } from './SignOutButton';
+import { ThemeSwitcher } from './ThemeSwitcher';
 import { buttonClass, cx } from './ui';
 
 function NavLink({ href, label, active, icon }: { href: string; label: string; active: boolean; icon: 'explore' | 'chats' | 'create' }) {
@@ -76,13 +77,15 @@ export function Header() {
               <NotificationBell />
               <div className="hidden items-center gap-2 lg:flex">
                 <LocaleSwitcher />
+                <ThemeSwitcher />
                 <SignOutButton />
               </div>
             </>
           ) : (
             <>
-              <div className="hidden lg:flex">
+              <div className="hidden items-center gap-2 lg:flex">
                 <LocaleSwitcher />
+                <ThemeSwitcher />
               </div>
               <Link href="/login" aria-label={chatgpt('signIn')} className={buttonClass('secondary', 'sm')}>
                 <span className="text-xs sm:text-sm">{chatgpt('signIn')}</span>

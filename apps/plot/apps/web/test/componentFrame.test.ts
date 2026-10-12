@@ -15,6 +15,7 @@ import { act, createElement, type ReactElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ComponentFrame } from '../src/components/ComponentFrame';
+import { stubMatchMedia } from './matchMedia';
 
 (globalThis as Record<string, unknown>)['IS_REACT_ACT_ENVIRONMENT'] = true;
 
@@ -53,6 +54,7 @@ const wait = (ms: number): void => {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  stubMatchMedia();
   host = document.createElement('div');
   document.body.appendChild(host);
   root = createRoot(host);

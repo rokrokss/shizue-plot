@@ -1129,6 +1129,25 @@ describe('the handshake', () => {
     expect(frame.root.textContent).toContain('HP 5');
   });
 
+  it('takes the page scheme without remounting the component', async () => {
+    const frame = boot();
+    frame.port.postMessage(initMessage);
+    await settle();
+    const worker = frame.worker();
+    const scheme = (): string | null => frame.window.document.documentElement.getAttribute('data-theme');
+
+    frame.port.postMessage({ type: 'scheme', scheme: 'dark' });
+    await settle();
+    expect(scheme()).toBe('dark');
+    expect(frame.worker()).toBe(worker);
+    expect(frame.root.textContent).toContain('HP 5');
+
+    // Anything but `dark` is light; the value never lands in the document as written.
+    frame.port.postMessage({ type: 'scheme', scheme: 'x" onload="alert(1)' });
+    await settle();
+    expect(scheme()).toBe('light');
+  });
+
   it('refuses an init on the window, even from the parent', async () => {
     const frame = boot();
     // The window channel carries the handshake and nothing else, so a component

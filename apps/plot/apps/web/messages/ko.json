@@ -10,6 +10,7 @@
     "create": "만들기",
     "signOut": "로그아웃",
     "language": "언어",
+    "theme": "테마",
     "chats": "대화",
     "menu": "메뉴",
     "aiSettings": "AI 연결"
@@ -929,6 +930,11 @@
     "ko": "한국어",
     "en": "English",
     "ja": "日本語"
+  },
+  "themes": {
+    "system": "시스템 설정",
+    "light": "라이트",
+    "dark": "다크"
   },
   "errors": {
     "unknown": "알 수 없는 오류가 발생했습니다.",

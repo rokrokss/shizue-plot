@@ -12,6 +12,7 @@ import { NextIntlClientProvider } from 'next-intl';
 import { act, createElement, type ReactElement, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { stubMatchMedia } from './matchMedia';
 
 let pathname = '/';
 let session: { data: unknown; isPending: boolean } = { data: { user: {} }, isPending: false };
@@ -103,6 +104,7 @@ function click(node: Element): void {
 beforeEach(() => {
   pathname = '/';
   session = { data: { user: {} }, isPending: false };
+  stubMatchMedia();
   host = document.createElement('div');
   document.body.appendChild(host);
   root = createRoot(host);

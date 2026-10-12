@@ -10,6 +10,7 @@
     "create": "制作",
     "signOut": "ログアウト",
     "language": "言語",
+    "theme": "テーマ",
     "chats": "チャット",
     "menu": "メニュー",
     "aiSettings": "AI 接続"
@@ -929,6 +930,11 @@
     "ko": "한국어",
     "en": "English",
     "ja": "日本語"
+  },
+  "themes": {
+    "system": "システム設定",
+    "light": "ライト",
+    "dark": "ダーク"
   },
   "errors": {
     "unknown": "不明なエラーが発生しました。",

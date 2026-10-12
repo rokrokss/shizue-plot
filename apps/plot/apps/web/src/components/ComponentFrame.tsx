@@ -1,18 +1,18 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createFrameBridge, MIN_FRAME_HEIGHT, type FrameBridge } from '@/lib/componentBridge';
 import { componentFrameSrcdoc, type PlatformContext } from '@/lib/componentRuntime';
+import { getColorScheme, subscribeTheme, type ColorScheme } from '@/lib/theme';
 
 /**
- * One frame document serves every component on the page, so it is built once and
- * the browser reuses the parse. It carries no creator code — that arrives over the
- * bridge — which is the reason it can be shared at all.
+ * One frame document per scheme serves every component on the page, so each is
+ * built once and the browser reuses the parse. It carries no creator code — that
+ * arrives over the bridge — which is the reason it can be shared at all.
  */
-let cachedSrcdoc = '';
-function srcdocFor(origin: string): string {
-  if (!cachedSrcdoc) cachedSrcdoc = componentFrameSrcdoc(origin);
-  return cachedSrcdoc;
+const cachedSrcdoc: Partial<Record<ColorScheme, string>> = {};
+function srcdocFor(origin: string, scheme: ColorScheme): string {
+  return (cachedSrcdoc[scheme] ??= componentFrameSrcdoc(origin, scheme));
 }
 
 /**
@@ -91,6 +91,7 @@ export function ComponentFrame({
   const [granted] = useState(Boolean(onSendTurn));
 
   const [srcdoc, setSrcdoc] = useState('');
+  const scheme = useSyncExternalStore(subscribeTheme, getColorScheme, () => 'light');
   const [phase, setPhase] = useState<'loading' | 'connected' | 'lost' | 'timeout'>('loading');
   const [height, setHeight] = useState(MIN_FRAME_HEIGHT);
   /** Bumped by the retry button; a new number is a new frame and a new bridge. */
@@ -118,7 +119,10 @@ export function ComponentFrame({
   const bridge = bridgeRef.current.bridge;
 
   // The origin is only knowable in the browser, and the frame is only useful there.
-  useEffect(() => setSrcdoc(srcdocFor(window.location.origin)), []);
+  // The document is picked once: a new srcdoc would reload the frame, and the
+  // bridge reads a second load as the component navigating away. A later scheme
+  // goes over the port instead.
+  useEffect(() => setSrcdoc(srcdocFor(window.location.origin, getColorScheme())), []);
 
   // One listener for the life of the component, dispatching to whichever bridge
   // is current when a message lands. Keyed on `bridge` instead, a retry would
@@ -158,6 +162,11 @@ export function ComponentFrame({
     if (phase !== 'connected') return;
     bridge.post(JSON.parse(payload) as unknown);
   }, [payload, phase, bridge]);
+
+  useEffect(() => {
+    if (phase !== 'connected') return;
+    bridge.post({ type: 'scheme', scheme });
+  }, [scheme, phase, bridge]);
 
   if (!srcdoc) return <div style={{ height: MIN_FRAME_HEIGHT }} />;
 

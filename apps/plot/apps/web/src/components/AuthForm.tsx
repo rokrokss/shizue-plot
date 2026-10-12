@@ -43,7 +43,7 @@ export function AuthForm({ next, error }: { next?: string | string[]; error?: st
         </ol>
       </div>
       <div className="flex min-w-0 flex-col justify-center p-7 sm:p-10 lg:p-12">
-        <span className="mb-5 hidden size-11 items-center justify-center rounded-xl border border-fg bg-accent sm:flex"><Icon name="book" /></span>
+        <span className="mb-5 hidden size-11 items-center justify-center rounded-xl border border-fg bg-accent text-accent-ink sm:flex"><Icon name="book" /></span>
         <ChatGPTConnection entrance next={back} error={typeof error === 'string' ? error : undefined} />
       </div>
     </div>

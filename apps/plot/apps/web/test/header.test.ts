@@ -12,6 +12,7 @@ import { NextIntlClientProvider } from 'next-intl';
 import { act, createElement, type ReactElement, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { stubMatchMedia } from './matchMedia';
 
 const apiGet = vi.fn<() => Promise<unknown>>();
 let pathname = '/chats';
@@ -103,6 +104,7 @@ beforeEach(() => {
   pathname = '/chats';
   session = { data: { user: {} }, isPending: false };
   apiGet.mockReset().mockResolvedValue({ items: [], nextCursor: null });
+  stubMatchMedia();
   host = document.createElement('div');
   document.body.appendChild(host);
   root = createRoot(host);
