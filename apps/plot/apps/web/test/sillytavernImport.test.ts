@@ -133,6 +133,7 @@ function fakeApi() {
       orderIndex: index,
       importedFrom: { fileName, sha256: sha(`characters/${fileName}`), importedAt: '' },
       license: null,
+      loreConstantTokens: 0,
       createdAt: '',
       updatedAt: '',
     };

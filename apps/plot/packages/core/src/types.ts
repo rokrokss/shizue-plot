@@ -54,7 +54,11 @@ export type LoreSelectiveLogic = 'and_any' | 'and_all' | 'not_any' | 'not_all';
 
 export interface LoreSettings {
   scanDepth: number;
-  tokenBudget: number;
+  /**
+   * The card's own `token_budget`. Absent is automatic: a share of the chat's
+   * context budget (`LORE_BUDGET_SHARE`), so the lore grows with the room it has.
+   */
+  tokenBudget?: number;
   /** V3 `recursive_scanning`: rescan with the activated content added to the scan text. */
   recursiveScanning: boolean;
 }
@@ -408,8 +412,8 @@ export interface ImportedChatMessage {
   createdAt?: string;
 }
 
+/** No `tokenBudget`: a card that names none gets the automatic one. */
 export const DEFAULT_LORE_SETTINGS: LoreSettings = {
   scanDepth: 4,
-  tokenBudget: 2048,
   recursiveScanning: false,
 };

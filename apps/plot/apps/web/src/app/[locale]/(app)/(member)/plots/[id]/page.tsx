@@ -29,6 +29,7 @@ import {
 import { Link, useRouter } from '@/i18n/navigation';
 import { locales } from '@/i18n/routing';
 import { apiDelete, apiGet, apiSend, apiUpload } from '@/lib/api';
+import { LORE_BUDGET_SHARE, loreBudget } from '@/lib/loreBudget';
 import { checkCardSize, downloadRealmCard, isRestrictiveLicense } from '@/lib/realm';
 import {
   MAX_CHARACTERS_PER_PLOT,
@@ -61,6 +62,10 @@ const memberFields = (member: PlotMember): string =>
     member.card.description,
     member.card.personality,
     member.card.mesExample,
+    member.card.systemPrompt,
+    member.card.postHistoryInstructions,
+    member.card.lorebook,
+    member.card.loreSettings,
   ]);
 
 /**
@@ -409,6 +414,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
           <MembersSection
             plotId={id}
             published={plot.visibility === 'public'}
+            plotLoreConstantTokens={plot.plotLoreConstantTokens}
             onBusyChange={setMutating}
             members={members}
             onPatch={patchMember}
@@ -470,6 +476,9 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
 
           <Section title={t('lorebook')} action={<AiBadge />}>
             <p className="text-xs text-muted/80">{t('lorebookHint')}</p>
+            <LoreBudgetNote plotTokens={plot.plotLoreConstantTokens} members={members} />
+            <p className="text-xs text-muted/80">{t('loreBudgetHint')}</p>
+            {members[0] ? <LoreBudgetInput member={members[0]} onPatch={patchMember} /> : null}
             <LorebookFileActions
               entries={lorebook}
               fileName={`${name.trim() || plot.name} ${t('lorebook')}`}
@@ -621,6 +630,7 @@ function ProfilesSection({
 function MembersSection({
   plotId,
   published,
+  plotLoreConstantTokens,
   members,
   onPatch,
   onAdd,
@@ -633,6 +643,8 @@ function MembersSection({
   onBusyChange: (busy: boolean) => void;
   plotId: string;
   published: boolean;
+  /** The plot lorebook's share of the budget the card lorebooks are counted against. */
+  plotLoreConstantTokens: number;
   members: PlotMember[];
   onPatch: (id: string, patch: Partial<NormalizedCard>, name?: string) => void;
   onAdd: () => void;
@@ -755,6 +767,52 @@ function MembersSection({
               />
             </Field>
 
+            {/* The two overrides are read from the first member alone, so on any
+                other row a written one is said to be idle rather than left to
+                look as though it were in every prompt. */}
+            <Field label={t('memberSystemPrompt')} hint={t('memberSystemPromptHint')} badge={<AiBadge />}>
+              <TextArea
+                rows={4}
+                value={member.card.systemPrompt}
+                onChange={(event) => onPatch(member.id, { systemPrompt: event.target.value })}
+              />
+            </Field>
+            {index > 0 && member.card.systemPrompt.trim() ? (
+              <p className="text-xs text-link">{t('memberFirstOnlyIdle', { first: members[0]!.name })}</p>
+            ) : null}
+            <Field label={t('memberPostHistory')} hint={t('memberPostHistoryHint')} badge={<AiBadge />}>
+              <TextArea
+                rows={4}
+                value={member.card.postHistoryInstructions}
+                onChange={(event) => onPatch(member.id, { postHistoryInstructions: event.target.value })}
+              />
+            </Field>
+            {index > 0 && member.card.postHistoryInstructions.trim() ? (
+              <p className="text-xs text-link">{t('memberFirstOnlyIdle', { first: members[0]!.name })}</p>
+            ) : null}
+
+            {/* Beside a heading rather than inside a Field, like the plot's own
+                lorebook: the editor's buttons and checkboxes are its own. */}
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-xs font-medium text-muted">{t('memberLorebook')}</h3>
+                <AiBadge />
+              </div>
+              <p className="text-xs text-muted/80">{t('memberLorebookHint')}</p>
+              <LoreBudgetNote plotTokens={plotLoreConstantTokens} members={members} />
+              <LorebookFileActions
+                entries={member.card.lorebook}
+                fileName={`${member.name} ${t('memberLorebook')}`}
+                onImport={(imported) =>
+                  onPatch(member.id, { lorebook: [...member.card.lorebook, ...imported] })
+                }
+              />
+              <LorebookEditor
+                entries={member.card.lorebook}
+                onChange={(lorebook) => onPatch(member.id, { lorebook })}
+              />
+            </div>
+
             {/* Links rather than buttons: the route answers with the file itself,
                 built from the saved card — which is what the hint tells the creator. */}
             <div className="space-y-1.5">
@@ -818,6 +876,65 @@ function MembersSection({
       </div>
       {realmOpen ? <RealmImportForm disabled={importBlocked} onSubmit={importCard} /> : null}
     </Section>
+  );
+}
+
+/**
+ * The one budget the plot and card lorebooks share, beside each of them. The
+ * always-on entries are the part a creator can see going wrong: they are in
+ * every prompt whatever the conversation says, and the book stops at the first
+ * entry in insertion order that no longer fits — so once they alone are over,
+ * what comes after them is cut, keyword entries and always-on ones alike. The
+ * server counts them from what is saved, so an edit shows here after the next Save.
+ */
+function LoreBudgetNote({ plotTokens, members }: { plotTokens: number; members: PlotMember[] }) {
+  const t = useTranslations('plot');
+  const { constantTokens, budget, automatic, over } = loreBudget(plotTokens, members);
+
+  return (
+    <div className="space-y-1">
+      <p className="text-xs text-muted tabular-nums">
+        {automatic
+          ? t('loreBudgetUsageAuto', { constant: constantTokens, budget, share: LORE_BUDGET_SHARE })
+          : t('loreBudgetUsage', { constant: constantTokens, budget })}
+      </p>
+      {over ? <p className="text-xs text-danger">{t('loreBudgetOver')}</p> : null}
+    </div>
+  );
+}
+
+/**
+ * The book's budget, which is the first member's card setting. Emptied, it goes
+ * back to absent — automatic — rather than to the 0 an empty number input
+ * parses to, which would be a book that never says anything.
+ */
+function LoreBudgetInput({
+  member,
+  onPatch,
+}: {
+  member: PlotMember;
+  onPatch: (id: string, patch: Partial<NormalizedCard>) => void;
+}) {
+  const t = useTranslations('plot');
+  const { tokenBudget, ...rest } = member.card.loreSettings;
+
+  return (
+    <div className="max-w-xs">
+      <Field label={t('loreBudget')} hint={t('loreBudgetInputHint', { first: member.name })}>
+        <TextInput
+          type="number"
+          min={1}
+          placeholder={t('loreBudgetAuto')}
+          value={tokenBudget ?? ''}
+          onChange={(event) => {
+            const raw = event.target.value;
+            onPatch(member.id, {
+              loreSettings: raw.trim() && Number(raw) > 0 ? { ...rest, tokenBudget: Number(raw) } : rest,
+            });
+          }}
+        />
+      </Field>
+    </div>
   );
 }
 

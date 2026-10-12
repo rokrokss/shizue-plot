@@ -104,7 +104,10 @@ export function exportCardV3(card: NormalizedCard, overlay: CardPlotOverlay = {}
       character_book: {
         extensions: {},
         scan_depth: card.loreSettings.scanDepth,
-        token_budget: card.loreSettings.tokenBudget,
+        // An automatic budget is no number to write down; the importer picks its own.
+        ...(card.loreSettings.tokenBudget !== undefined
+          ? { token_budget: card.loreSettings.tokenBudget }
+          : {}),
         recursive_scanning: card.loreSettings.recursiveScanning,
         entries: lorebook.map(toLorebookEntry),
       },

@@ -14,6 +14,7 @@ export * from './profiles.js';
 export * from './unlock.js';
 export * from './scene.js';
 export * from './tokens.js';
+export * from './language.js';
 export * from './presets.js';
 export * from './prompt.js';
 export * from './card/parse.js';

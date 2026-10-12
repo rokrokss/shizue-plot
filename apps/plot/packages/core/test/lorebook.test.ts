@@ -171,6 +171,56 @@ describe('activateLore - recursive scanning', () => {
   });
 });
 
+describe('activateLore - expanded text', () => {
+  // What the caller's macro expansion would make of each entry; the rest read as written.
+  const expanded = new Map<string, string>([
+    ['{{#if 0}}긴 조건부 설정 블록{{/if}}', ''],
+    ['{{getvar::next}}', 'B를 부른다'],
+  ]);
+  const textOf = (e: LoreEntry): string => expanded.get(e.content) ?? e.content;
+
+  it('charges an entry for its expanded text, so one that comes out empty costs nothing', () => {
+    const entries = [
+      entry({ content: '{{#if 0}}긴 조건부 설정 블록{{/if}}', constant: true, insertionOrder: 1 }),
+      entry({ content: 'bbbb', constant: true, insertionOrder: 2 }),
+    ];
+    const budget = 'bbbb'.length;
+    // Measured raw, the false block spends the budget the next entry needed.
+    expect(activate(entries, '', budget, countChars).map((e) => e.content)).toEqual([]);
+    const result = activateLore(entries, {
+      history: [''],
+      scanDepth: 1,
+      budgetTokens: budget,
+      countTokens: countChars,
+      textOf,
+    });
+    expect(result.entries.map((e) => e.content)).toEqual([
+      '{{#if 0}}긴 조건부 설정 블록{{/if}}',
+      'bbbb',
+    ]);
+    // The key stays on the raw text, whatever it expanded to this time.
+    expect(result.triggered).toContain(loreEntryKey(entries[0]!));
+  });
+
+  it('scans the expanded text on a recursive pass', () => {
+    const entries = [
+      entry({ content: '{{getvar::next}}', keys: ['시작'], insertionOrder: 1 }),
+      entry({ content: 'B 엔트리', keys: ['B를'], insertionOrder: 2 }),
+      // Only the raw text names it, and the raw text is not what was sent.
+      entry({ content: 'getvar 엔트리', keys: ['getvar'], insertionOrder: 3 }),
+    ];
+    const result = activateLore(entries, {
+      history: ['시작'],
+      scanDepth: 1,
+      budgetTokens: 1000,
+      countTokens: countChars,
+      recursiveScanning: true,
+      textOf,
+    });
+    expect(result.entries.map((e) => e.content)).toEqual(['{{getvar::next}}', 'B 엔트리']);
+  });
+});
+
 const run = (entries: LoreEntry[], input: Partial<ActivateLoreInput> & { history: string[] }) =>
   activateLore(entries, { scanDepth: 4, budgetTokens: 1000, countTokens: countChars, ...input });
 const contents = (result: { entries: LoreEntry[] }): string[] => result.entries.map((e) => e.content);

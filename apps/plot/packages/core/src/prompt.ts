@@ -259,6 +259,12 @@ const LORE_PREVIEW_LENGTH = 80;
 export const AUTHOR_NOTE_DEPTH = 4;
 
 export const DEFAULT_CONTEXT_BUDGET = 16000;
+/**
+ * The lore budget of a book whose card names none (`LoreSettings.tokenBudget`):
+ * this share of the context budget, so a chat given more room gives its lore
+ * more too.
+ */
+export const LORE_BUDGET_SHARE = 0.25;
 // Sized for the speech protocol: a turn carries several speakers plus narration,
 // and 600 (the single-character era value) cut replies mid-sentence.
 export const DEFAULT_MAX_RESPONSE_TOKENS = 1200;
@@ -446,6 +452,27 @@ function resolveOverride(override: string, presetText: string, macro: MacroConte
   return stripImageMacros(applyMacros(override, { ...macro, original: presetText }));
 }
 
+/**
+ * A lore entry as the model reads it, macros expanded and image references gone.
+ * Blank when that leaves nothing to say — a `{{#if}}` that came out false — so it
+ * costs the budget nothing and is not sent as an empty block.
+ */
+function loreEntryText(entry: LoreEntry, macro: MacroContext): string {
+  const text = stripImageMacros(applyMacros(entry.content, macro));
+  return text.trim() ? text : '';
+}
+
+/**
+ * What a book's always-on entries cost once expanded the way the assembler
+ * expands them — the part of the lore budget spent before any keyword matches.
+ * The studio weighs it against the budget.
+ */
+export function constantLoreTokens(entries: LoreEntry[], macro: MacroContext): number {
+  return entries
+    .filter((entry) => entry.enabled && entry.constant)
+    .reduce((sum, entry) => sum + countTokens(loreEntryText(entry, macro)), 0);
+}
+
 export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const {
     plot,
@@ -519,8 +546,20 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     }
   }
   // One book means one set of settings decides its depth and budget: the first
-  // member's, the same card the overrides come from.
+  // member's, the same card the overrides come from. A card that names no budget
+  // gets its share of this prompt's context.
   const loreSettings = first?.card.loreSettings ?? DEFAULT_LORE_SETTINGS;
+  // Expanded once per entry: the budget is charged for the text the model reads,
+  // and a `{{random}}` has to be charged for the very roll it sends.
+  const expandedLore = new Map<LoreEntry, string>();
+  const expandLore = (entry: LoreEntry): string => {
+    let text = expandedLore.get(entry);
+    if (text === undefined) {
+      text = loreEntryText(entry, loreMacro.get(entry) ?? plotMacro);
+      expandedLore.set(entry, text);
+    }
+    return text;
+  };
   // The raw texts: an old status block the model is no longer sent (7, below)
   // is still where the scene's place and people are written down.
   const {
@@ -530,23 +569,23 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   } = activateLore(lorebook, {
     history: history.map((message) => message.content),
     scanDepth: loreSettings.scanDepth,
-    budgetTokens: loreSettings.tokenBudget,
+    budgetTokens: loreSettings.tokenBudget ?? Math.floor(contextBudget * LORE_BUDGET_SHARE),
     countTokens,
     recursiveScanning: loreSettings.recursiveScanning,
+    textOf: expandLore,
     ...(loreState ? { timed: loreState } : {}),
   });
-  const expandLore = (entry: LoreEntry): string =>
-    expandWith(entry.content, loreMacro.get(entry) ?? plotMacro);
   const loreText = (position: LorePosition): string =>
     activated
       .filter((entry) => entry.depth === undefined && entry.position === position)
       .map(expandLore)
+      .filter((text) => text.length > 0)
       .join('\n\n');
 
   // 7b. `@@depth` entries go into the history instead of the system block. Kept
   // in insertionOrder, which decides the order of entries sharing a depth.
   const depthLore = activated
-    .filter((entry) => entry.depth !== undefined)
+    .filter((entry) => entry.depth !== undefined && expandLore(entry).length > 0)
     .map((entry) => ({
       depth: entry.depth!,
       role: (entry.role ?? 'system') as PromptRole,

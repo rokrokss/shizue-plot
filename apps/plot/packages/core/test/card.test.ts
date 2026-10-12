@@ -116,7 +116,8 @@ describe('parseCard - JSON', () => {
     expect(card.alternateGreetings).toEqual([]);
     expect(card.systemPrompt).toBe('');
     expect(card.lorebook).toEqual([]);
-    expect(card.loreSettings).toEqual({ scanDepth: 4, tokenBudget: 2048, recursiveScanning: false });
+    // No book, so no budget of its own: the prompt's automatic one applies.
+    expect(card.loreSettings).toEqual({ scanDepth: 4, recursiveScanning: false });
     expect(card.raw).toBe(v1Card);
   });
 
@@ -723,6 +724,16 @@ describe('exportCardV3', () => {
     const reparsed = parseCard(exported).card;
     expect(reparsed.lorebook).toEqual(card.lorebook);
     expect(reparsed.loreSettings).toEqual(card.loreSettings);
+  });
+
+  it('writes a token budget only where the card has one of its own', () => {
+    // The V3 fixture's book names none, so it reads (and stays) automatic.
+    const automatic = parseCard(v3Card).card;
+    expect(automatic.loreSettings.tokenBudget).toBeUndefined();
+    expect(exportCardV3(automatic).data.character_book).not.toHaveProperty('token_budget');
+
+    const own = parseCard(v2Card).card;
+    expect(exportCardV3(own).data.character_book!.token_budget).toBe(512);
   });
 });
 

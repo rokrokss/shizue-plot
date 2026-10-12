@@ -13,7 +13,7 @@ const plot = {
   id: 'plot-1', name: '원래 제목', intro: '', description: '세계관', language: 'ko',
   tags: [], commentsEnabled: true, intros: [], narrator: null, style: null,
   profiles: [], lorebook: [], customUi: null, characters: [], coverUrl: null,
-  visibility: 'private', safetyLevel: 'all',
+  visibility: 'private', safetyLevel: 'all', plotLoreConstantTokens: 0,
 };
 vi.mock('@/lib/api', async (original) => ({
   ...(await original<typeof import('../src/lib/api')>()),

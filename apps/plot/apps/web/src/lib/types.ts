@@ -202,6 +202,8 @@ export interface PlotMember {
   importedFrom: ImportProvenance | null;
   /** The license the card declares (`extensions.risuai.license`); null when it says none. */
   license: string | null;
+  /** Tokens the card lorebook's always-on entries take, counted by the server from the saved card. */
+  loreConstantTokens: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -213,6 +215,8 @@ export interface PlotMember {
 export interface PlotDetail extends Plot {
   characters: PlotMember[];
   commentCount: number;
+  /** Tokens the plot lorebook's always-on entries take, counted from the saved plot. */
+  plotLoreConstantTokens: number;
 }
 
 /** A member as every public surface names one: a face and a name. */

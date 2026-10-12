@@ -4,6 +4,10 @@ import {
   coerceNarrator,
   coercePlotProfiles,
   coercePlotStyle,
+  computeVariables,
+  constantLoreTokens,
+  DEFAULT_USER_NAME,
+  detectContentLanguage,
   emptyCard,
   exportCardPng,
   exportCardV3,
@@ -16,6 +20,7 @@ import {
   type CharxAssetFile,
   type ImportProvenance,
   type LoreEntry,
+  type MacroContext,
   type NarratorConfig,
   type NormalizedCard,
   type PlotCustomUi,
@@ -288,12 +293,25 @@ const toPlotJson = (plot: Plot) => ({
 });
 
 /**
+ * The macros a book is expanded with the way a chat's first prompt expands it:
+ * the plot's default variables, the default user name, and `{{char}}` as
+ * whoever the book belongs to — the plot's name, or the member's.
+ */
+const firstPromptMacro = (plot: Plot, char: string): MacroContext => ({
+  char,
+  user: DEFAULT_USER_NAME,
+  variables: computeVariables([], plot.customUi?.defaultVariables),
+});
+
+/**
  * A member as its own creator sees it: the whole card, since they wrote it — or
  * imported it, in which case where it came from and the license its card
  * declares travel too, being what the owner weighs before publishing it. Both
- * are the owner's alone: no public shape carries them.
+ * are the owner's alone: no public shape carries them. So is what the card's
+ * always-on lore costs once expanded (`constantLoreTokens`), which the studio
+ * sets against the lore budget.
  */
-const toMemberJson = (member: Character) => ({
+const toMemberJson = (plot: Plot, member: Character) => ({
   id: member.id,
   name: member.name,
   card: member.card,
@@ -301,6 +319,7 @@ const toMemberJson = (member: Character) => ({
   orderIndex: member.orderIndex,
   importedFrom: member.importedFrom,
   license: cardLicense(member.card.extensions) ?? null,
+  loreConstantTokens: constantLoreTokens(member.card.lorebook, firstPromptMacro(plot, member.name)),
   createdAt: member.createdAt.toISOString(),
   updatedAt: member.updatedAt.toISOString(),
 });
@@ -329,21 +348,21 @@ const toAssetJson = (asset: PlotAsset, owner = false) => ({
   createdAt: asset.createdAt.toISOString(),
 });
 
-/** Loads a member of a plot the caller owns; anything else is simply not found. */
+/** Loads a member of a plot the caller owns, with the plot; anything else is simply not found. */
 async function loadOwnedMember(
   deps: AppDeps,
   plotId: string,
   characterId: string,
   userId: string,
-): Promise<Character> {
-  await loadOwnedPlot(deps, plotId, userId);
+): Promise<{ plot: Plot; member: Character }> {
+  const plot = await loadOwnedPlot(deps, plotId, userId);
   const [member] = await deps.db
     .select()
     .from(characters)
     .where(and(eq(characters.id, characterId), eq(characters.plotId, plotId)))
     .limit(1);
   if (!member) throw notFound('Character not found');
-  return member;
+  return { plot, member };
 }
 
 /** What a card upload says about itself beside the card (`readCardUpload`). */
@@ -709,23 +728,28 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
   /**
    * Importing a card creates the work it was always describing: the card becomes
    * the first member and everything on it that belongs to a work rather than to a
-   * person — the situation, the openings, the narrator, the custom UI — is lifted
-   * onto the plot around it. Card files are user-controlled bytes, so every parse
-   * failure is a 400, never a 500.
+   * person — the situation, the openings, the narrator, the custom UI, the
+   * picture as the cover — is lifted onto the plot around it. Card files are
+   * user-controlled bytes, so every parse failure is a 400, never a 500.
    */
   app.post('/import', requireUser, async (c) => {
     const { parsed, fileName, imported } = await readCardUpload(c);
     const card = parsed.card;
     const name = card.name.trim() || fileName.replace(/\.[^.]+$/, '') || 'Unnamed';
-    // The setting the model is told, which on a card is split across two fields.
-    const description = [card.description.trim(), card.scenario.trim()]
-      .filter((part) => part.length > 0)
-      .join('\n\n');
+    // The situation is the work's; the character's description stays on the
+    // member, which the prompt already reads it from — copying it here as well
+    // would tell the model the same thing twice.
+    const description = card.scenario.trim();
     const intros = [card.firstMes, ...card.alternateGreetings]
       .filter((intro) => intro.trim().length > 0)
       .slice(0, MAX_INTROS_PER_PLOT)
       .map((intro) => intro.slice(0, MAX_INTRO_TEXT_LENGTH));
     const customUi = customUiOfCard(card);
+    // What the reader meets first says what the work is written in; a card with
+    // no opening to read is judged by its description, and an undecided one
+    // keeps the column's default.
+    const language =
+      detectContentLanguage(intros[0] ?? '') ?? detectContentLanguage(card.description);
 
     const [created] = await deps.db
       .insert(plots)
@@ -738,14 +762,18 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
         tags: normalizeTags(card.tags),
         ...(card.narrator ? { narrator: card.narrator } : {}),
         ...(Object.keys(customUi).length > 0 ? { customUi } : {}),
+        ...(language ? { language } : {}),
       })
       .returning();
-    const plot = created!;
+    let plot = created!;
 
     // A new plot is private, so this records where the card came from and asks
     // for nothing yet: the owner vouches for it when they publish.
     const member = await insertMember(deps, plot.id, name, card, imported);
-    if (parsed.iconBuffer) await writeMemberAvatar(deps, member, parsed.iconBuffer);
+    if (parsed.iconBuffer) {
+      await writeMemberAvatar(deps, member, parsed.iconBuffer);
+      plot = await writeImportedCover(deps, plot, parsed.iconBuffer);
+    }
     if (parsed.assets?.length) await storeImportedAssets(deps, plot.id, parsed.assets);
 
     return c.json(await ownerView(deps, plot), 201);
@@ -1122,23 +1150,23 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
   app.get('/:id/characters', requireUser, async (c) => {
     const plot = await loadOwnedPlot(deps, requireUuidParam(c), c.get('userId'));
     const members = await loadMembers(deps.db, plot.id);
-    return c.json(members.map(toMemberJson));
+    return c.json(members.map((member) => toMemberJson(plot, member)));
   });
 
   app.post('/:id/characters', requireUser, async (c) => {
     const id = requireUuidParam(c);
-    await loadOwnedPlot(deps, id, c.get('userId'));
+    const plot = await loadOwnedPlot(deps, id, c.get('userId'));
     const body = await readJsonBody(c);
     const name = requireString(body, 'name').trim();
     if (!name) throw badRequest('invalid_request', 'name must not be empty');
     const card = body['card'] === undefined ? emptyCard(name) : coerceCard(body['card'], name);
-    return c.json(toMemberJson(await insertMember(deps, id, name, card)), 201);
+    return c.json(toMemberJson(plot, await insertMember(deps, id, name, card)), 201);
   });
 
   // Registered before `/:characterId`, which would otherwise swallow both.
   app.post('/:id/characters/import', requireUser, async (c) => {
     const id = requireUuidParam(c);
-    await loadOwnedPlot(deps, id, c.get('userId'));
+    const plot = await loadOwnedPlot(deps, id, c.get('userId'));
     const { parsed, fileName, imported } = await readCardUpload(c);
     const name = parsed.card.name.trim() || fileName.replace(/\.[^.]+$/, '') || 'Unnamed';
 
@@ -1149,7 +1177,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     let member = await insertMember(deps, id, name, parsed.card, imported);
     if (parsed.iconBuffer) member = await writeMemberAvatar(deps, member, parsed.iconBuffer);
     if (parsed.assets?.length) await storeImportedAssets(deps, id, parsed.assets);
-    return c.json(toMemberJson(member), 201);
+    return c.json(toMemberJson(plot, member), 201);
   });
 
   /**
@@ -1159,7 +1187,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
    */
   app.post('/:id/characters/reorder', requireUser, async (c) => {
     const id = requireUuidParam(c);
-    await loadOwnedPlot(deps, id, c.get('userId'));
+    const plot = await loadOwnedPlot(deps, id, c.get('userId'));
     const body = await readJsonBody(c);
     const value = body['ids'];
     if (!Array.isArray(value)) throw badRequest('invalid_request', 'ids must be an array');
@@ -1188,14 +1216,14 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       }
       return loadMembers(tx, id);
     });
-    return c.json(members.map(toMemberJson));
+    return c.json(members.map((member) => toMemberJson(plot, member)));
   });
 
   app.patch('/:id/characters/:characterId', requireUser, async (c) => {
     const id = requireUuidParam(c);
     const characterId = requireUuidParam(c, 'characterId');
     const userId = c.get('userId');
-    const member = await loadOwnedMember(deps, id, characterId, userId);
+    const { plot, member } = await loadOwnedMember(deps, id, characterId, userId);
     const body = await readJsonBody(c);
 
     const name = optionalString(body, 'name')?.trim();
@@ -1211,13 +1239,13 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       })
       .where(and(eq(characters.id, characterId), eq(characters.plotId, id)))
       .returning();
-    return c.json(toMemberJson(updated!));
+    return c.json(toMemberJson(plot, updated!));
   });
 
   app.delete('/:id/characters/:characterId', requireUser, async (c) => {
     const id = requireUuidParam(c);
     const characterId = requireUuidParam(c, 'characterId');
-    const member = await loadOwnedMember(deps, id, characterId, c.get('userId'));
+    const { member } = await loadOwnedMember(deps, id, characterId, c.get('userId'));
     await deps.db
       .delete(characters)
       .where(and(eq(characters.id, characterId), eq(characters.plotId, id)));
@@ -1260,7 +1288,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
   app.post('/:id/characters/:characterId/avatar', requireUser, async (c) => {
     const id = requireUuidParam(c);
     const characterId = requireUuidParam(c, 'characterId');
-    const member = await loadOwnedMember(deps, id, characterId, c.get('userId'));
+    const { plot, member } = await loadOwnedMember(deps, id, characterId, c.get('userId'));
 
     let form: FormData;
     try {
@@ -1279,13 +1307,13 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     }
 
     const updated = await writeMemberAvatar(deps, member, new Uint8Array(await file.arrayBuffer()));
-    return c.json(toMemberJson(updated));
+    return c.json(toMemberJson(plot, updated));
   });
 
   app.delete('/:id/characters/:characterId/avatar', requireUser, async (c) => {
     const id = requireUuidParam(c);
     const characterId = requireUuidParam(c, 'characterId');
-    const member = await loadOwnedMember(deps, id, characterId, c.get('userId'));
+    const { plot, member } = await loadOwnedMember(deps, id, characterId, c.get('userId'));
 
     const [updated] = await deps.db
       .update(characters)
@@ -1293,7 +1321,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       .where(and(eq(characters.id, characterId), eq(characters.plotId, id)))
       .returning();
     if (member.avatarPath) await deleteQuietly(deps.storage, member.avatarPath);
-    return c.json(toMemberJson(updated!));
+    return c.json(toMemberJson(plot, updated!));
   });
 
   /**
@@ -1587,16 +1615,48 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
   return app;
 }
 
-/** The plot with its roster and its comment count — every owner-side answer. */
+/**
+ * The plot with its roster and its comment count — every owner-side answer.
+ * Beside the plot's own book rides what its always-on lore costs, as each
+ * member's does (`toMemberJson`).
+ */
 async function ownerView(deps: AppDeps, plot: Plot): Promise<unknown> {
   const members = await loadMembers(deps.db, plot.id);
   return {
     ...toPlotJson(plot),
-    characters: members.map(toMemberJson),
+    plotLoreConstantTokens: constantLoreTokens(plot.lorebook, firstPromptMacro(plot, plot.name)),
+    characters: members.map((member) => toMemberJson(plot, member)),
     // Only the owner view carries the comment count: the listings are card grids,
     // and a count per card would cost a query per card.
     commentCount: await countComments(deps.db, plot),
   };
+}
+
+/**
+ * The card's picture as the new plot's cover, through `storableImage` like an
+ * uploaded cover — the copy every reader is served carries none of the card's
+ * text chunks. Best effort: the plot is already written, and an import does not
+ * fail over its cover; the plot simply has none.
+ */
+async function writeImportedCover(deps: AppDeps, plot: Plot, bytes: Uint8Array): Promise<Plot> {
+  const image = storableImage(bytes);
+  // The cover upload's own cap, measured once the card's text chunks are gone: a
+  // cover is fetched by every explore card, and a picture past it stays the
+  // character's avatar only.
+  if (!image || image.bytes.length > MAX_IMAGE_BYTES) return plot;
+  const key = coverKey(plot.id, image.ext);
+  try {
+    await deps.storage.put(key, image.bytes, image.mime);
+    const [updated] = await deps.db
+      .update(plots)
+      .set({ coverPath: key, updatedAt: new Date() })
+      .where(eq(plots.id, plot.id))
+      .returning();
+    return updated ?? plot;
+  } catch {
+    await deleteQuietly(deps.storage, key);
+    return plot;
+  }
 }
 
 /** Writes a member's avatar and re-reads the row that now names it. */

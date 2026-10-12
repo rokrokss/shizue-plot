@@ -106,7 +106,8 @@ export function normalizeCard(raw: unknown): NormalizedCard {
     lorebook: note ? [...ownLore, note] : ownLore,
     loreSettings: {
       scanDepth: book?.scan_depth ?? DEFAULT_LORE_SETTINGS.scanDepth,
-      tokenBudget: book?.token_budget ?? DEFAULT_LORE_SETTINGS.tokenBudget,
+      // Only the card's own number: without one the budget is the automatic one.
+      ...(typeof book?.token_budget === 'number' ? { tokenBudget: book.token_budget } : {}),
       recursiveScanning: book?.recursive_scanning ?? DEFAULT_LORE_SETTINGS.recursiveScanning,
     },
     ...(displayScripts ? { displayScripts } : {}),

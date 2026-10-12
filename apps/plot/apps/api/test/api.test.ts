@@ -221,7 +221,7 @@ const emptyCardShape = {
   creator: '',
   characterVersion: '',
   lorebook: [],
-  loreSettings: { scanDepth: 4, tokenBudget: 2048, recursiveScanning: false },
+  loreSettings: { scanDepth: 4, recursiveScanning: false },
   extensions: {},
   raw: null,
 };
@@ -1085,11 +1085,15 @@ describe('plots', () => {
     const plot = await importCard(cookie, cardFile());
 
     expect(plot.name).toBe('리안');
-    // The situation belongs to the work: description and scenario are one field
-    // here, and the greetings became the openings a reader picks between.
-    expect(plot.description).toBe('왕립 도서관의 사서.\n\n폐관 시간이 지난 도서관.');
+    // The situation belongs to the work — the scenario alone: the character's
+    // description stays on the member, which the prompt reads it from — and the
+    // greetings became the openings a reader picks between.
+    expect(plot.description).toBe('폐관 시간이 지난 도서관.');
     expect(plot.intros).toEqual(['아직 안 가셨군요, {{user}}.', '불이 꺼진 열람실에서 마주쳤다.']);
     expect(plot.tags).toEqual(['판타지']);
+    // Read off the first opening.
+    expect(plot.language).toBe('ko');
+    // A JSON card has no picture to make a cover of.
     expect(plot.coverUrl).toBeNull();
 
     // The card itself stays whole on the member it describes.
@@ -1100,7 +1104,7 @@ describe('plots', () => {
     expect(plot.characters[0].card.alternateGreetings).toEqual(['불이 꺼진 열람실에서 마주쳤다.']);
   });
 
-  it('imports a PNG card and serves the member avatar', async () => {
+  it('imports a PNG card and serves the member avatar and the plot cover', async () => {
     const cookie = await signUp('png@example.com');
     const png = buildPngWithTextChunks({
       chara: Buffer.from(JSON.stringify(v2Card), 'utf-8').toString('base64'),
@@ -1116,6 +1120,69 @@ describe('plots', () => {
     expect(avatar.headers.get('content-type')).toBe('image/png');
     // The stored avatar is the same image minus the card-bearing text chunks.
     expect(new Uint8Array(await avatar.arrayBuffer())).toEqual(stripPngTextChunks(png));
+
+    // The picture is the work's cover too — stripped the same way, since a cover
+    // is served to every reader and the chunks are the definition itself.
+    expect(plot.coverUrl).toBe(`/api/plots/${plot.id}/cover`);
+    const cover = await request(cookie, plot.coverUrl);
+    expect(cover.status).toBe(200);
+    const coverBytes = new Uint8Array(await cover.arrayBuffer());
+    expect(readPngTextChunks(coverBytes).size).toBe(0);
+    expect(coverBytes).toEqual(stripPngTextChunks(png));
+  });
+
+  it('leaves the plot without a cover rather than failing the import over it', async () => {
+    const cookie = await signUp('png-cover-fail@example.com');
+    // A store that takes everything but covers.
+    const target = makeApp({
+      storage: {
+        ...storage,
+        put: (key, bytes, mime) =>
+          key.startsWith('covers/') ? Promise.reject(new Error('down')) : storage.put(key, bytes, mime),
+      },
+    });
+    const png = buildPngWithTextChunks({
+      chara: Buffer.from(JSON.stringify(v2Card), 'utf-8').toString('base64'),
+    });
+    const form = new FormData();
+    form.append('file', new File([png], 'lian.png', { type: 'image/png' }));
+    const res = await request(cookie, '/api/plots/import', 'POST', form, target);
+    expect(res.status, await res.clone().text()).toBe(201);
+    const plot = await readJson(res);
+    expect(plot.coverUrl).toBeNull();
+    expect(plot.characters[0].avatarUrl).not.toBeNull();
+    expect((await readPlot(cookie, plot.id)).coverUrl).toBeNull();
+  });
+
+  it('reads the content language of an imported card off its first opening', async () => {
+    const cookie = await signUp('import-language@example.com');
+    const as = (data: Record<string, unknown>) =>
+      new File([JSON.stringify({ ...v2Card, data: { ...v2Card.data, ...data } })], 'card.json', {
+        type: 'application/json',
+      });
+
+    const english = await importCard(
+      cookie,
+      as({ first_mes: "You're still here, {{user}}? The library closed an hour ago.", alternate_greetings: [] }),
+    );
+    expect(english.language).toBe('en');
+    const japanese = await importCard(
+      cookie,
+      as({ first_mes: 'まだ帰っていなかったのですね、{{user}}さん。', alternate_greetings: [] }),
+    );
+    expect(japanese.language).toBe('ja');
+    // No opening to read, so the description decides.
+    const described = await importCard(
+      cookie,
+      as({ first_mes: '', alternate_greetings: [], description: 'A librarian of the royal library.' }),
+    );
+    expect(described.language).toBe('en');
+    // Nothing that says anything: the column's default.
+    const undecided = await importCard(
+      cookie,
+      as({ first_mes: '...', alternate_greetings: [], description: '' }),
+    );
+    expect(undecided.language).toBe('ko');
   });
 
   it('rejects malformed uploads with 400 invalid_card', async () => {
@@ -1174,6 +1241,70 @@ describe('plots', () => {
     expect(plot.customUi.displayScripts).toHaveLength(1);
     // The card is the import container, so it keeps its own copy for the round trip.
     expect(plot.characters[0].card.narrator).toEqual({ voice: '건조한 문체.', pov: 'omniscient' });
+  });
+
+  it("tells the owner what each book's always-on lore costs as a chat would start it", async () => {
+    const cookie = await signUp('lore-usage@example.com');
+    const plot = await createPlot(cookie, {
+      name: '서리 골짜기',
+      lorebook: [
+        { content: '{{char}}의 법칙.', constant: true },
+        { keys: ['문'], content: '키워드로만 열리는 항목.' },
+      ],
+      customUi: { defaultVariables: { route: '1' } },
+    });
+    const created = await addCharacter(cookie, plot.id, {
+      name: '아리아',
+      card: {
+        lorebook: [
+          { content: '{{char}}의 비밀.', constant: true },
+          // Expanded with the plot's default variables: one branch is all it costs.
+          {
+            content: '{{#if {{getvar::route}}}}첫 갈래.{{/if}}{{#if {{getvar::other}}}}다른 갈래.{{/if}}',
+            constant: true,
+          },
+          { content: '꺼진 항목.', constant: true, enabled: false },
+        ],
+      },
+    });
+    const ariaCost = countTokens('아리아의 비밀.') + countTokens('첫 갈래.');
+    // Every answer that hands the owner a member carries it, so the studio can
+    // put the member straight into its list.
+    expect(created.loreConstantTokens).toBe(ariaCost);
+
+    const view = await readPlot(cookie, plot.id);
+    expect(view.plotLoreConstantTokens).toBe(countTokens('서리 골짜기의 법칙.'));
+    expect(view.characters[0].loreConstantTokens).toBe(ariaCost);
+
+    const patched = await patchCharacter(cookie, plot.id, created.id, {
+      card: { ...created.card, lorebook: [{ content: '바뀐 비밀.', constant: true }] },
+    });
+    expect(patched.loreConstantTokens).toBe(countTokens('바뀐 비밀.'));
+
+    const card = {
+      ...v2Card,
+      data: {
+        ...v2Card.data,
+        character_book: {
+          extensions: {},
+          entries: [
+            {
+              keys: [],
+              content: '{{char}}의 서고.',
+              extensions: {},
+              enabled: true,
+              insertion_order: 0,
+              constant: true,
+            },
+          ],
+        },
+      },
+    };
+    const form = new FormData();
+    form.append('file', new File([JSON.stringify(card)], 'lian.json', { type: 'application/json' }));
+    const res = await request(cookie, `/api/plots/${plot.id}/characters/import`, 'POST', form);
+    expect(res.status, await res.clone().text()).toBe(201);
+    expect((await readJson(res)).loreConstantTokens).toBe(countTokens('리안의 서고.'));
   });
 
   it('publishes, gates on the basics and unpublishes', async () => {
@@ -4919,6 +5050,8 @@ describe('custom UI', () => {
       owner,
       new File([JSON.stringify(risuCard)], 'lumi.json', { type: 'application/json' }),
     );
+    // The card has no scenario, so the import left the setting for the owner to write.
+    await patchPlot(owner, plot.id, { description: '루미의 마을.' });
     await publishPlot(owner, plot.id, { rightsConfirmed: true });
 
     const view = await readPublicPlot(reader, plot.id);

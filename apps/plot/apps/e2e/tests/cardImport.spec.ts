@@ -33,9 +33,11 @@ const card = (name: string, license: string) => ({
   spec_version: '2.0',
   data: {
     name,
-    description: `폐관 시간이 지난 도서관 ${run}.`,
+    description: `서가를 정리하는 사서 ${run}.`,
     personality: '',
-    scenario: '',
+    // The world a card's scenario carries is what becomes the plot's setting, and
+    // a plot needs one to be published.
+    scenario: `폐관 시간이 지난 도서관 ${run}.`,
     first_mes: `${name}: 아직 안 가셨군요.`,
     mes_example: '',
     creator_notes: '',

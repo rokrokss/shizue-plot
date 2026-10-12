@@ -15,9 +15,11 @@ import {
   assemblePrompt,
   AUTHOR_NOTE_DEPTH,
   characterHeader,
+  constantLoreTokens,
   DEFAULT_USER_NAME,
   exampleHeader,
   IMAGE_TOKEN_ESTIMATE,
+  LORE_BUDGET_SHARE,
   NARRATION_HEADER,
   NARRATION_NOTE,
   NARRATOR_POV_LABELS,
@@ -531,6 +533,84 @@ describe('assemblePrompt - merged lorebook', () => {
     expect(budgeted({ ...DEFAULT_LORE_SETTINGS })).toContain('두 번째 항목.');
     expect(budgeted({ ...DEFAULT_LORE_SETTINGS, tokenBudget: countTokens('첫 번째 항목.') })).not.toContain(
       '두 번째 항목.',
+    );
+  });
+
+  it('gives a card that names no budget its share of the context budget', () => {
+    const first = '첫 번째 항목.';
+    const automatic = (contextBudget: number) =>
+      assemblePrompt({
+        plot: {
+          ...plot,
+          lorebook: [
+            loreEntry({ content: first, insertionOrder: 0 }),
+            loreEntry({ content: '두 번째 항목.', insertionOrder: 1 }),
+          ],
+        },
+        characters: [{ name: '아리아', card: { ...bareCard, loreSettings: { ...DEFAULT_LORE_SETTINGS } } }],
+        history,
+        preset,
+        userName: '민준',
+        contextBudget,
+        maxResponseTokens: 0,
+      }).system;
+    // Room for exactly the first entry: the budget is the share, rounded down.
+    const tight = Math.ceil(countTokens(first) / LORE_BUDGET_SHARE);
+    expect(Math.floor(tight * LORE_BUDGET_SHARE)).toBe(countTokens(first));
+    expect(automatic(tight)).toContain(first);
+    expect(automatic(tight)).not.toContain('두 번째 항목.');
+    expect(automatic(tight * 2)).toContain('두 번째 항목.');
+  });
+
+  it('charges lore for its expanded text, and sends nothing for an entry that expands to nothing', () => {
+    const conditional = `{{#if {{getvar::flag}}}}${'숨은 설정 '.repeat(50)}{{/if}}`;
+    const later = '나중 항목.';
+    const { system, messages } = assemblePrompt({
+      plot,
+      characters: [
+        {
+          name: '아리아',
+          card: {
+            ...bareCard,
+            lorebook: [
+              loreEntry({ content: conditional, insertionOrder: 0 }),
+              loreEntry({ content: conditional, depth: 0, insertionOrder: 1 }),
+              loreEntry({ content: later, insertionOrder: 2 }),
+            ],
+            // Room for the later entry alone: the raw block would have taken it all.
+            loreSettings: { ...DEFAULT_LORE_SETTINGS, tokenBudget: countTokens(later) },
+          },
+        },
+      ],
+      history,
+      preset,
+      userName: '민준',
+      variables: { flag: '0' },
+    });
+    expect(system).toContain(later);
+    expect(system).not.toContain('숨은 설정');
+    // Neither an empty system section nor an empty depth message is left behind.
+    expect(system).not.toContain('\n\n\n\n');
+    expect(messages.map((message) => message.content)).toEqual([
+      ...history.map((turn) => turn.content),
+      'POST',
+    ]);
+  });
+});
+
+describe('constantLoreTokens', () => {
+  it('counts the enabled always-on entries as the prompt would expand them', () => {
+    const entries = [
+      loreEntry({ content: '{{char}}의 비밀.' }),
+      loreEntry({ content: '{{#if {{getvar::flag}}}}숨은 설정{{/if}}' }),
+      loreEntry({ content: '꺼진 항목.', enabled: false }),
+      loreEntry({ content: '키워드 항목.', constant: false, keys: ['열쇠'] }),
+    ];
+    expect(constantLoreTokens(entries, { char: '아리아', user: '민준', variables: { flag: '0' } })).toBe(
+      countTokens('아리아의 비밀.'),
+    );
+    expect(constantLoreTokens(entries, { char: '아리아', user: '민준', variables: { flag: '1' } })).toBe(
+      countTokens('아리아의 비밀.') + countTokens('숨은 설정'),
     );
   });
 });

@@ -236,6 +236,7 @@ export function coerceCard(value: unknown, fallbackName: string): NormalizedCard
   const raw = value as Record<string, unknown>;
   const spec = raw['spec'];
   const lore = (raw['loreSettings'] ?? {}) as Record<string, unknown>;
+  const tokenBudget = lore['tokenBudget'];
   const nickname = raw['nickname'];
   // Absent rather than empty when unused: an untouched card has to export
   // byte-identical to what was imported, and a materialized empty field would
@@ -267,7 +268,8 @@ export function coerceCard(value: unknown, fallbackName: string): NormalizedCard
     lorebook: coerceLorebook(raw['lorebook']),
     loreSettings: {
       scanDepth: num(lore['scanDepth'], DEFAULT_LORE_SETTINGS.scanDepth),
-      tokenBudget: num(lore['tokenBudget'], DEFAULT_LORE_SETTINGS.tokenBudget),
+      // Absent is the automatic budget, so only a number the client sent is kept.
+      ...(typeof tokenBudget === 'number' && Number.isFinite(tokenBudget) ? { tokenBudget } : {}),
       recursiveScanning: bool(lore['recursiveScanning'], DEFAULT_LORE_SETTINGS.recursiveScanning),
     },
     ...(displayScripts.length > 0 ? { displayScripts } : {}),

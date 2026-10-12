@@ -113,6 +113,13 @@ export interface ActivateLoreInput {
   timed?: LoreTimedState;
   /** Probability rolls and group draws. Returns [0, 1). */
   random?: () => number;
+  /**
+   * What an active entry says once the caller has expanded it — what its cost is
+   * counted on and what a recursive pass scans. Absent: the raw content. A
+   * `{{#if}}` that comes out empty then costs nothing, rather than spending the
+   * budget on text the model never reads. The entry's key stays on the raw text.
+   */
+  textOf?: (entry: LoreEntry) => string;
 }
 
 export interface LoreActivation {
@@ -150,7 +157,14 @@ export type LoreActivationVia = 'constant' | 'keyword' | 'sticky' | 'recursion';
  * subject to its `probability`, and to one-per-group among its inclusion groups.
  */
 export function activateLore(entries: LoreEntry[], input: ActivateLoreInput): LoreActivation {
-  const { history, budgetTokens, countTokens, recursiveScanning = false, random = Math.random } = input;
+  const {
+    history,
+    budgetTokens,
+    countTokens,
+    recursiveScanning = false,
+    random = Math.random,
+    textOf = (entry: LoreEntry) => entry.content,
+  } = input;
   const chatLength = input.timed?.chatLength ?? history.length;
   const lastTriggered = input.timed?.lastTriggered ?? {};
 
@@ -215,7 +229,7 @@ export function activateLore(entries: LoreEntry[], input: ActivateLoreInput): Lo
     const activated: LoreEntry[] = [];
     let exhausted = false;
     for (const entry of candidates) {
-      const cost = countTokens(entry.content);
+      const cost = countTokens(textOf(entry));
       if (used + cost > budgetTokens) {
         exhausted = true;
         break;
@@ -234,7 +248,7 @@ export function activateLore(entries: LoreEntry[], input: ActivateLoreInput): Lo
     selected.push(...activated);
     if (exhausted || activated.length === 0) break;
 
-    recursion = [...recursion, ...activated.map((entry) => entry.content)];
+    recursion = [...recursion, ...activated.map(textOf)];
   }
 
   return { entries: selected.sort(byOrder), triggered: [...triggered], via };
