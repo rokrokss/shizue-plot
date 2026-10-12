@@ -1,6 +1,9 @@
 import {
+  applyVariableDelta,
   assemblePrompt,
+  computeVariables,
   countTokens,
+  diffVariables,
   replyLengthTokens,
   sceneFocusDirective,
   stripInlayMacros,
@@ -14,11 +17,12 @@ import {
   type PromptCharacter,
   type PromptPlot,
   type PromptReport,
+  type VariableDelta,
   type Variables,
 } from '@shizue/core';
 import { chats, messages, type Chat, type Message } from '@shizue/db';
 import { ChatGPTError, getAdapter, getModel, supportsVision, type ChatGPTAccount, type LLMAdapter } from '@shizue/llm';
-import { and, eq, isNull, lt, or } from 'drizzle-orm';
+import { and, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { withImageNote } from './attachments.js';
@@ -26,13 +30,19 @@ import { ApiError, badRequest, notFound } from './errors.js';
 import type { AppDeps, AppEnv } from './deps.js';
 import { invalidateMemoryForEdit, scheduleMemoryUpdate } from './memory.js';
 import { scheduleRelationshipUpdate } from './relationship.js';
+import { storableDelta, type PromptInjections } from './scriptState.js';
 import { unlockAssets } from './unlocks.js';
 
 /**
  * The fire-and-forget jobs a completed assistant turn starts. They own separate
  * per-chat guards and never block each other.
+ *
+ * A turn stored `pending` starts them only once the browser commits what its
+ * output scripts made of it (`script-commit`): run on the raw text, the summary
+ * would be built on words the commit is about to replace, and the commit's own
+ * edit would throw it away again.
  */
-function scheduleBackgroundUpdates(deps: AppDeps, chatId: string): void {
+export function scheduleBackgroundUpdates(deps: AppDeps, chatId: string): void {
   scheduleMemoryUpdate(deps, chatId);
   scheduleRelationshipUpdate(deps, chatId);
 }
@@ -72,10 +82,35 @@ export interface GenerationPlan {
   directions?: string;
   /**
    * Chat variables derived from the branch this turn generates on: the folded
-   * `{{setvar}}` macros of its messages over the plot's defaults. Only
+   * `{{setvar}}` macros of its messages, and the deltas their scripts left, over
+   * the plot's defaults — with this request's `startDelta` on top. Only
    * `{{getvar::k}}` reads them; the macros themselves stay in the history.
    */
   variables: Variables;
+  /**
+   * The state the stored turn's own macros fold onto, before the start triggers
+   * wrote anything: the parent's for a new turn, the head's parent's for a
+   * continue, which rewrites the head. What `generatedDelta` measures against.
+   */
+  turnBase: Variables;
+  /**
+   * What the card's start triggers changed, in the reader's browser, before this
+   * generation — a regenerate, a continue, an auto turn or a narration. A send
+   * has none: the triggers ran for the user turn, and their writes are on it.
+   */
+  startDelta?: VariableDelta;
+  /**
+   * The text the start triggers asked to put in the prompt, by place. Carried for
+   * the assembler, which does not place it yet: until it does, a request that
+   * brings injections generates as if it had none.
+   */
+  injections?: PromptInjections;
+  /**
+   * The browser will run the card's output scripts over the reply and commit
+   * the result, so the turn is stored `pending` and its background work waits
+   * for that commit (`scheduleBackgroundUpdates`).
+   */
+  postProcess?: boolean;
   /** The reader's clock, for the time macros (see `requestClock`). */
   clock: MacroClock;
   /** What keeps `{{pick}}` stable on this chat: its id. */
@@ -526,16 +561,20 @@ async function runGeneration(
       // Client gone: keep whatever was received so far, but send nothing.
       if (controller.signal.aborted) {
         if (text) {
+          // Stored pending all the same, if the browser meant to post-process
+          // it: the next time it opens the chat it finds the mark and finishes.
           const stored = await persist(deps, plan, text, usage, request.loreTriggers);
           // The turn is on the branch whether or not anyone was listening, so what
           // it opened is opened; there is simply no event to say so on.
           await openUnlocks(deps, plan.chatId, stored.content);
-          scheduleBackgroundUpdates(deps, plan.chatId);
+          if (!plan.postProcess) scheduleBackgroundUpdates(deps, plan.chatId);
         }
         return;
       }
 
       const stored = await persist(deps, plan, text, usage, request.loreTriggers);
+      // Evaluated on the raw text as well as at the commit: unlocks only ever
+      // open, so the earlier answer costs nothing and saves the reader a wait.
       const unlockedAssetIds = await openUnlocks(deps, plan.chatId, stored.content);
       await stream.writeSSE({
         event: 'done',
@@ -545,10 +584,13 @@ async function runGeneration(
           // Only when something really opened: the client celebrates on the field
           // being there, and every other turn's payload stays what it was.
           ...(unlockedAssetIds.length > 0 ? { unlockedAssetIds } : {}),
+          // Only for a turn the browser said it would finish: the revision its
+          // commit has to name, read from the row rather than assumed.
+          ...(plan.postProcess ? { postProcess: true, scriptRev: stored.scriptRev } : {}),
         }),
       });
       // Strictly after `done`: background work must not add latency to the turn.
-      scheduleBackgroundUpdates(deps, plan.chatId);
+      if (!plan.postProcess) scheduleBackgroundUpdates(deps, plan.chatId);
     } finally {
       clearInterval(heartbeat);
       c.req.raw.signal?.removeEventListener('abort', abort);
@@ -565,9 +607,10 @@ async function runGeneration(
  * moved, and a turn-count condition is asked about the branch as it now stands.
  * Failures are logged like any other post-persistence work — an unlock that did
  * not land is opened by the next turn, and must never tear down a stream whose
- * text is already stored.
+ * text is already stored. A script commit that rewrites a turn asks again of
+ * the text it leaves.
  */
-async function openUnlocks(deps: AppDeps, chatId: string, content: string): Promise<string[]> {
+export async function openUnlocks(deps: AppDeps, chatId: string, content: string): Promise<string[]> {
   try {
     const [chat] = await deps.db.select().from(chats).where(eq(chats.id, chatId)).limit(1);
     return chat ? await unlockAssets(deps, chat, content) : [];
@@ -577,10 +620,38 @@ async function openUnlocks(deps: AppDeps, chatId: string, content: string): Prom
   }
 }
 
-/** The stored turn: its id, and the text the branch now holds for it. */
+/** The stored turn: its id, the text the branch now holds for it, and its script revision. */
 interface StoredTurn {
   id: string;
   content: string;
+  scriptRev: number;
+}
+
+/**
+ * The delta a generated turn is stored with, so that folding it — the turn's own
+ * macros over its base, then this on top — reads the way RisuAI would have left
+ * things: the start triggers ran before the reply existed, so the reply's macros
+ * fold over their writes and win where both touch a name. Measured against the
+ * plain fold of the stored text, exactly as the browser measures the delta it
+ * commits after the output scripts (`diffVariables`), which replaces this one.
+ *
+ * A continue rewrites the head, so the head is the one node here: what it held
+ * before — its own delta included — then the start triggers, then the
+ * continuation's macros. A continue with neither a start delta nor an old one
+ * stores none, as it always has.
+ */
+function generatedDelta(plan: GenerationPlan, content: string, appended: string): VariableDelta | null {
+  if (plan.target.kind === 'continue') {
+    const head = plan.target.message;
+    if (!plan.startDelta && !head.variableDelta) return null;
+    const before = applyVariableDelta(computeVariables([head], plan.turnBase), plan.startDelta);
+    return diffVariables(computeVariables([appended], before), computeVariables([content], plan.turnBase));
+  }
+  if (!plan.startDelta) return null;
+  return diffVariables(
+    computeVariables([content], applyVariableDelta(plan.turnBase, plan.startDelta)),
+    computeVariables([content], plan.turnBase),
+  );
 }
 
 /**
@@ -595,43 +666,54 @@ async function persist(
   usage: Usage,
   loreTriggers: string[],
 ): Promise<StoredTurn> {
+  const scriptState = plan.postProcess ? ('pending' as const) : null;
   if (plan.target.kind === 'continue') {
     const target = plan.target.message;
     const content = target.content + text;
-    await deps.db.transaction(async (tx) => {
-      await tx
+    const scriptRev = await deps.db.transaction(async (tx) => {
+      const [updated] = await tx
         .update(messages)
         .set({
           content,
           promptTokens: usage.promptTokens,
           completionTokens: (target.completionTokens ?? 0) + usage.completionTokens,
+          variableDelta: storableDelta(generatedDelta(plan, content, text)),
+          scriptState,
+          // The text changed in place, so a script commit computed on the old
+          // text — another tab's, finishing the turn as it was — is refused.
+          scriptRev: sql`${messages.scriptRev} + 1`,
         })
-        .where(eq(messages.id, target.id));
+        .where(eq(messages.id, target.id))
+        .returning({ scriptRev: messages.scriptRev });
       // The append mutates assistant content in place — same revision rules as
       // an edit, so a refresh whose snapshot predates the append is discarded.
       await invalidateMemoryForEdit(tx, plan.chatId, target.id);
+      return updated?.scriptRev ?? target.scriptRev + 1;
     });
-    return { id: target.id, content };
+    return { id: target.id, content, scriptRev };
   }
 
+  // The prefix is the server's to write: the model was asked for the scene
+  // alone, and the convention is what makes the stored turn a narration.
+  const content = plan.narration ? withNarrationPrefix(text) : text;
   const [created] = await deps.db
     .insert(messages)
     .values({
       chatId: plan.chatId,
       parentId: plan.target.parentId,
       role: 'assistant',
-      // The prefix is the server's to write: the model was asked for the scene
-      // alone, and the convention is what makes the stored turn a narration.
-      content: plan.narration ? withNarrationPrefix(text) : text,
+      content,
       model: plan.model,
       promptTokens: usage.promptTokens,
       completionTokens: usage.completionTokens,
       loreTriggers: loreTriggers.length > 0 ? loreTriggers : null,
+      variableDelta: storableDelta(generatedDelta(plan, content, content)),
+      scriptState,
     })
     .returning();
   await deps.db
     .update(chats)
     .set({ headMessageId: created!.id, updatedAt: new Date() })
     .where(eq(chats.id, plan.chatId));
-  return { id: created!.id, content: created!.content };
+  return { id: created!.id, content: created!.content, scriptRev: created!.scriptRev };
 }

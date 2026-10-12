@@ -7,6 +7,8 @@ import type {
   PlotCustomUi,
   PlotProfile,
   PlotStyle,
+  VariableDelta,
+  Variables,
 } from '@shizue/core';
 import {
   boolean,
@@ -111,6 +113,22 @@ export interface ChatRelationship {
    */
   lastExtractedAssistantDepth: number;
 }
+
+/**
+ * Where a turn stands with the card's own scripts. `pending` is an assistant turn
+ * the reader's browser has not yet run its output scripts over (editoutput, output
+ * triggers): stored as the model wrote it, and finished by the commit that clears
+ * the mark. Null is every other turn.
+ */
+export type MessageScriptState = 'pending';
+
+/**
+ * What a card's scripts rewrote of the work itself — a member's description, a
+ * lorebook entry — for one chat, where RisuAI would have rewritten the card for
+ * every chat at once. The shape is the script runtime's to define when it first
+ * writes one; the column exists so that does not take another migration.
+ */
+export type ChatScriptOverlay = Record<string, unknown>;
 
 // The first-class unit. A plot is what is created, published, explored, liked,
 // commented on and chatted with; its characters are structured sub-entities of it
@@ -443,6 +461,9 @@ export const chats = pgTable(
     // True while an import is still writing the history in batches. Nothing but
     // the import may write to the chat until it is finished.
     importing: boolean('importing').notNull().default(false),
+    // The card's scripts' rewrites of the work, for this chat only. Null until a
+    // script makes one; nothing writes it yet (see `ChatScriptOverlay`).
+    scriptOverlay: jsonb('script_overlay').$type<ChatScriptOverlay>(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -471,6 +492,17 @@ export const messages = pgTable(
     // Lore entries (by `loreEntryKey`) that freshly triggered for the prompt this
     // assistant turn was generated from. Timed effects read the branch's records.
     loreTriggers: jsonb('lore_triggers').$type<string[]>(),
+    // What the card's scripts left on this turn: the final value of each variable
+    // they changed, null for one they unset (see `VariableDelta` in @shizue/core).
+    // Laid over the turn's own `{{setvar}}` macros wherever the branch is folded.
+    variableDelta: jsonb('variable_delta').$type<VariableDelta>(),
+    // 'pending' while the reader's browser still owes this turn its output
+    // scripts; null otherwise (see `MessageScriptState`).
+    scriptState: text('script_state').$type<MessageScriptState>(),
+    // Bumped by every script commit to the row. A commit names the revision its
+    // scripts ran on, so a second tab running the same scripts on the same turn
+    // is refused rather than applied twice.
+    scriptRev: integer('script_rev').notNull().default(0),
     model: text('model'),
     promptTokens: integer('prompt_tokens'),
     completionTokens: integer('completion_tokens'),
@@ -566,6 +598,25 @@ export const chatNoteLinks = pgTable(
   (t) => [primaryKey({ columns: [t.chatId, t.noteId] })],
 );
 
+// Global variables: one reader's values for one plot, shared by every chat they
+// have on it and by no one else — RisuAI's `getglobalvar`, SillyTavern's
+// `{{getglobalvar}}`. Not branch-scoped, unlike chat variables: a swipe does not
+// take one back. Capped in keys and size by the API (see `scriptState.ts`).
+export const plotReaderVariables = pgTable(
+  'plot_reader_variables',
+  {
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    plotId: uuid('plot_id')
+      .notNull()
+      .references(() => plots.id, { onDelete: 'cascade' }),
+    variables: jsonb('variables').$type<Variables>().notNull().default({}),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.plotId] })],
+);
+
 /**
  * One reader's walk through a feed sorted by a counter that moves underneath it
  * (explore `likes`/`chats`). `seen` is every row id the walk has
@@ -645,6 +696,7 @@ export type NewMemory = typeof memories.$inferInsert;
 export type UserNote = typeof userNotes.$inferSelect;
 export type NewUserNote = typeof userNotes.$inferInsert;
 export type ChatNoteLink = typeof chatNoteLinks.$inferSelect;
+export type PlotReaderVariables = typeof plotReaderVariables.$inferSelect;
 export type FeedCursor = typeof feedCursors.$inferSelect;
 export type Job = typeof jobs.$inferSelect;
 export type NewJob = typeof jobs.$inferInsert;

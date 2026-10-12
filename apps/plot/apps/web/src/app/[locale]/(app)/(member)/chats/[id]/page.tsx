@@ -629,13 +629,15 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
 
   // The fold of the persisted branch, and of the branch without its head — the
   // two bases every mode builds on. Both depend only on server state, so a
-  // streamed token never re-folds the history.
+  // streamed token never re-folds the history. The messages go in whole, not
+  // their text: what the card's scripts left on each one is folded with it, as
+  // the server folds it for the prompt.
   const persistedVariables = useMemo(
-    () => computeVariables(fold.messages.map((message) => message.content), fold.defaults),
+    () => computeVariables(fold.messages, fold.defaults),
     [fold],
   );
   const variablesBeforeHead = useMemo(
-    () => computeVariables(fold.messages.slice(0, -1).map((message) => message.content), fold.defaults),
+    () => computeVariables(fold.messages.slice(0, -1), fold.defaults),
     [fold],
   );
 

@@ -24,6 +24,7 @@ import type {
   PromptReport,
   StorytellingStyle,
   UnlockAxis,
+  VariableDelta,
   Variables,
 } from '@shizue/core';
 
@@ -527,6 +528,16 @@ export interface ChatMessage {
   source: MessageSource;
   /** The turn's stage directions, never shown as text. Null on most turns. */
   directions: string | null;
+  /**
+   * What the card's scripts left on the turn, laid over its macros by the
+   * variable fold (`computeVariables`). Null on most turns; optional so a message
+   * built by hand — a test's, a fixture's — needs none.
+   */
+  variableDelta?: VariableDelta | null;
+  /** 'pending' while the browser still owes the turn its output scripts. */
+  scriptState?: 'pending' | null;
+  /** The revision a script commit to the turn has to name. */
+  scriptRev?: number;
   model: string | null;
   promptTokens: number | null;
   completionTokens: number | null;
@@ -578,6 +589,11 @@ export interface ChatState {
    * from the display.
    */
   variableDefaults?: Variables;
+  /**
+   * The reader's global variables on the plot — shared by their chats on it, and
+   * not by branch. Optional for the same reason as the flags below.
+   */
+  globalVariables?: Variables;
   /** Optional so a state built by hand — a test's, a fixture's — needs no flags. */
   capabilities?: ChatCapabilities;
   /** Every asset of the plot, locked or open. Optional for the same reason. */

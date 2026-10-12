@@ -7,8 +7,11 @@ import {
   evaluateExpression,
   findAssetMacros,
   parseCbs,
+  pickHashRand,
   replaceAssetMacros,
+  type CbsChat,
   type CbsHost,
+  type CbsHostData,
 } from '../src/cbs.js';
 
 /** The language alone: variables, and nothing of any host's own. */
@@ -111,15 +114,21 @@ describe('evaluateCbs - RisuAI functions', () => {
     expect(run('{{random::a\\,b,c}}', {}, at(0))).toBe('a,b');
   });
 
-  it('rolls N, dN and XdY within their bounds, and leaves a silly roll alone', () => {
+  it('rolls N, dN and XdY within their bounds, answering NaN for a roll it cannot read, as RisuAI does', () => {
     expect(run('{{roll::100}}', {}, { random: () => 0.999 })).toBe('100');
     expect(run('{{roll:d20}}', {}, { random: () => 0 })).toBe('1');
     expect(run('{{roll::2d6}}', {}, { random: () => 0.999 })).toBe('12');
-    expect(run('{{roll::1000d6}} {{roll::abc}}')).toBe('{{roll::1000d6}} {{roll::abc}}');
+    expect(run('{{roll::1000d6}}')).toBe('1000');
+    // Past the cap too: RisuAI has none, and would loop.
+    expect(run('{{roll::1001d6}} {{roll::abc}} {{roll}}')).toBe('NaN NaN 1');
   });
 
-  it('reads variables, unset ones as empty', () => {
-    expect(run('[{{getvar::hp}}][{{getvar::none}}]', { hp: '40' })).toBe('[40][]');
+  it('reads variables, an unset one as RisuAI writes it: null', () => {
+    expect(run('[{{getvar::hp}}][{{getvar::none}}]', { hp: '40' })).toBe('[40][null]');
+  });
+
+  it('reads the first argument alone as the name, as RisuAI does', () => {
+    expect(run('{{getvar::hp::max}}', { hp: '40', 'hp::max': '0' })).toBe('40');
   });
 
   it('keeps a value one argument and never reads it as a macro', () => {
@@ -320,8 +329,8 @@ describe('evaluateCbs - SillyTavern formatting', () => {
     expect(run('a {{trim}} b')).toBe('a  b');
     expect(run('a{{newline}}{{trim}}{{newline::2}}b')).toBe('ab');
     expect(run('{{if 1}}a\n{{/if}}{{trim}}\n{{#if 1}}b{{/if}}')).toBe('ab');
-    // `{{trim::x}}` is RisuAI's string trim, which this engine does not do.
-    expect(run('{{trim:: x }}')).toBe('{{trim:: x }}');
+    // With an argument it is RisuAI's string trim: the two never meet.
+    expect(run('[{{trim:: x }}]')).toBe('[x]');
   });
 });
 
@@ -335,6 +344,407 @@ describe('evaluateCbs - taint', () => {
       '#a# #1# 1 #2#',
     );
     expect(marked('{{random::{{getvar::x}}}}', { x: 'z' })).toBe('#z#');
+  });
+});
+
+/** Shows where the host's marks land: what a value said, between `#`s. */
+const markValues: CbsHost = { emit: (value) => (value.untrusted ? `#${value.text}#` : value.text) };
+
+describe('parseCbs - RisuAI syntax', () => {
+  it('reads a RisuAI status panel strictly, where it used to fall back to its own source', () => {
+    const panel = [
+      '<div>{{#escape}}{a}{{/escape}}',
+      '{{#puredisplay}}{{char}}{{/puredisplay}}',
+      '{{#pure}}{{#if 1}}…{{/if}}{{/pure}}',
+      '{{#code}}\\u0041{{/code}}',
+      '{{#func f a}}{{arg::1}}{{/func}}{{call::f::x}}',
+      '{#if 1\n줄#}',
+      '<user></div>',
+    ].join('');
+    expect(() => parseCbs(panel, { strict: true })).not.toThrow();
+  });
+
+  it('keeps a raw body as written, counting the blocks in it as RisuAI does', () => {
+    const [node] = parseCbs('{{#pure}}{{#if 1}}a{{/if}}{{:else}}{{/x}}{{/pure}}');
+    expect(node?.type === 'block' && node.kind).toBe('pure');
+    expect(node?.type === 'block' && node.body).toEqual([{ type: 'text', text: '{{#if 1}}a{{/if}}{{:else}}' }]);
+  });
+
+  it('closes a raw body with its own name or {{/}} when strict, and with any closer when lenient', () => {
+    expect(() => parseCbs('{{#pure_display}}x{{/puredisplay}}', { strict: true })).not.toThrow();
+    expect(() => parseCbs('{{#escape::keep}}x{{/}}', { strict: true })).not.toThrow();
+    expect(() => parseCbs('{{#pure}}x{{/escape}}', { strict: true })).toThrow(CbsSyntaxError);
+    expect(() => parseCbs('{{#func f}}x', { strict: true })).toThrow(CbsSyntaxError);
+    expect(run('{{#pure}}x{{/escape}}')).toBe('x');
+    // Unclosed, it is an opener nobody knows, and what follows is read as usual.
+    expect(run('{{#pure}}{{getvar::a}}', { a: '1' })).toBe('{{#pure}}1');
+  });
+
+  it('opens only what RisuAI opens: #pure, #puredisplay and #code exactly, #func with a name', () => {
+    expect(run('{{#pure x}}a{{/pure}}')).toBe('{{#pure x}}a{{/pure}}');
+    expect(run('{{#func}}a{{/func}}')).toBe('{{#func}}a{{/func}}');
+  });
+
+  it('reads RisuAI’s legacy {#if}, which only #} closes, and leaves any other {# alone', () => {
+    expect(run('{#if 1\n  본문 #}')).toBe('본문');
+    expect(run('[{#if 0\n본문#}][{#if -1\nx#}][{#if  1\nx#}]')).toBe('[][][]');
+    expect(run('{#if\n열림#}')).toBe('열림');
+    expect(run('{#if {{getvar::a}}\n{{getvar::b}}#}', { a: '1', b: '값' })).toBe('값');
+    expect(run('{#if 1 한 줄#}')).toBe('{#if 1 한 줄#}');
+    expect(run('a{#b{c:d}} {# Jinja #} {#if 1')).toBe('a{#b{c:d}} {# Jinja #} {#if 1');
+    expect(() => parseCbs('{#if 1\n열림', { strict: true })).not.toThrow();
+  });
+
+  it('reads <user>, <char> and <bot> as the macros, written back as tags when nobody answers', () => {
+    const names: CbsHost = {
+      macro: ({ name }) => (name === 'user' ? { text: '민준' } : name === 'char' ? { text: '아리아' } : undefined),
+    };
+    expect(run('<user>와 <CHAR>, <Bot>, {{bot}}', {}, names)).toBe('민준와 아리아, 아리아, 아리아');
+    expect(run('<user> <char>')).toBe('<user> <char>');
+    expect(run('{{setvar::x::<user>}}')).toBe('{{setvar::x::<user>}}');
+    expect(run('{{#pure}}<user>{{/pure}}')).toBe('{{user}}');
+    expect(run('<b>굵게</b> <users>')).toBe('<b>굵게</b> <users>');
+  });
+});
+
+describe('evaluateCbs - RisuAI blocks', () => {
+  it('writes #pure as written and #puredisplay with its braces escaped, evaluating neither', () => {
+    let reads = 0;
+    const counted: CbsHost = { variable: () => String((reads += 1)) };
+    expect(run('[{{#pure}}\n  {{getvar::x}} \n{{/pure}}]', {}, counted)).toBe('[{{getvar::x}}]');
+    expect(run('{{#puredisplay}} {{char}} {{/puredisplay}}', {}, counted)).toBe('\\{\\{char\\}\\}');
+    expect(reads).toBe(0);
+  });
+
+  it('swaps #escape’s braces and parentheses for display escapes, trimmed unless ::keep', () => {
+    expect(run('[{{#escape}} {a}(b) {{/escape}}]')).toBe('[ab]');
+    expect(run('[{{#escape::keep}} {} {{/escape}}]')).toBe('[  ]');
+  });
+
+  it('unescapes #code’s result, what a value says included, and writes it as a value', () => {
+    expect(run('{{#code}}\n  a\\nb\\u0041\\t|\n{{/code}}')).toBe('a\nbA\t|');
+    expect(run('{{#code}}{{getvar::x}}{{/code}}', { x: '\\u003cb\\u003e' }, markValues)).toBe('#<b>#');
+  });
+
+  it('defines functions with #func and runs them with call, arguments being values', () => {
+    const define = '{{#func greet who}}\n안녕, {{arg::1}} ({{arg::0}})\n{{/func}}';
+    expect(run(`${define}[{{call::greet::민준}}]`)).toBe('[안녕, 민준 (greet)]');
+    // A call before the definition, or of nothing defined, stays as written.
+    expect(run(`{{call::greet::a}}${define}`)).toBe('{{call::greet::a}}');
+    expect(run('{{call::nope}}')).toBe('{{call::nope}}');
+    expect(run(`${define}{{call::greet::{{getvar::v}}}}`, { v: '{{getvar::secret}}' })).toBe(
+      '안녕, {{getvar::secret}} (greet)',
+    );
+    // An argument the call did not give stays as written, as upstream leaves it.
+    expect(run('{{#func f}}[{{arg::2}}]{{/func}}{{call::f::a}}')).toBe('[{{arg::2}}]');
+  });
+
+  it('stops at RisuAI’s call stack, counted over the whole text', () => {
+    expect(run('{{#func f}}x{{call::f}}{{/func}}{{call::f}}')).toBe(`${'x'.repeat(19)}ERROR: Call stack limit reached`);
+  });
+
+  it('keeps temporary variables for one evaluation, a call having its own', () => {
+    expect(run('{{settempvar::a::1}}[{{tempvar::a}}][{{gettempvar::b}}]')).toBe('[1][]');
+    expect(run('{{settempvar::a::1}}{{#func f}}[{{tempvar::a}}]{{/func}}{{call::f}}')).toBe('[]');
+  });
+
+  it('ends the evaluation at {{return}}, or only the call it is in', () => {
+    expect(run('앞 {{return::끝}} 뒤')).toBe('끝');
+    expect(run('{{#func f}}a{{return::b}}c{{/func}}[{{call::f}}]')).toBe('[b]');
+    expect(run('{{return}}')).toBe('null');
+  });
+
+  it('cuts what came before with bkspc and erase', () => {
+    expect(run('Hello brave world {{bkspc}}!')).toBe('Hello brave!');
+    expect(run('One. Two three{{erase}}')).toBe('One.');
+    expect(run('[{{#if 1}}a b{{bkspc}}{{/if}}]')).toBe('[a]');
+  });
+
+  it('splices a whole {{spread}} argument in as several: the one value that becomes separators', () => {
+    expect(run('{{makedict::{{spread::["a=1","b=2"]}}}}')).toBe('{"a":"1","b":"2"}');
+    expect(run('{{makearray::x::{{spread::{{getvar::l}}}}}}', { l: '["y","z"]' })).toBe('["x","y","z"]');
+  });
+});
+
+describe('evaluateCbs - #each', () => {
+  const each = (template: string, variables: Record<string, string> = {}, host: CbsHost = {}) =>
+    run(template, variables, { each: true, ...host });
+
+  it('iterates RisuAI’s LIST as name: JSON, or a §-list, and items that are not text as JSON', () => {
+    expect(each('{{#each ["a","b"] as x}}[{{slot::x}}]{{/each}}')).toBe('[a][b]');
+    expect(each('{{#each {{getvar::list}} as x}}[{{slot::x}}]{{/each}}', { list: '사과§배' })).toBe('[사과][배]');
+    expect(each('{{#each [1,{"a":2},null] as x}}[{{slot::x}}]{{/each}}')).toBe('[1][{"a":2}][null]');
+    expect(each('{{#each [] as x}}x{{/each}}')).toBe('');
+  });
+
+  it('reads RisuAI’s older LIST name when the list is a JSON array, and ours otherwise', () => {
+    expect(each('{{#each ["a","b"] item}}[{{slot::item}}]{{/each}}')).toBe('[a][b]');
+    expect(each('{{#each party}}[{{slot}}]{{/each}}', { party: '아리아, 세이' })).toBe('[아리아][세이]');
+    expect(each('{{#each a, b c}}[{{slot}}]{{/each}}')).toBe('[a][b c]');
+  });
+
+  it('unindents RisuAI’s body and trims the whole, unless ::keep — never an item’s own whitespace', () => {
+    const body = '\n  <li>{{slot::x}}</li>\n';
+    expect(each(`{{#each ["a","b"] as x}}${body}{{/each}}`)).toBe('<li>a</li><li>b</li>');
+    expect(each(`{{#each::keep ["a"] as x}}${body}{{/each}}`)).toBe('\n  <li>a</li>\n');
+    expect(each('{{#each [" a"," b"] as x}}{{slot::x}}{{/each}}')).toBe('a b');
+  });
+
+  it('lets an outer name win over an inner one of the same spelling, as RisuAI’s pasting does', () => {
+    expect(
+      each('{{#each ["a","b"] as x}}{{#each ["1","2"] as y}}[{{slot::x}}{{slot::y}}]{{/each}}{{/each}}'),
+    ).toBe('[a1][a2][b1][b2]');
+    expect(each('{{#each ["a"] as x}}{{#each ["1"] as x}}[{{slot::x}}]{{/each}}{{/each}}')).toBe('[a]');
+    expect(each('{{#each ["a"] as x}}[{{slot::y}}][{{slot:: x}}]{{/each}}')).toBe('[{{slot::y}}][{{slot:: x}}]');
+  });
+
+  it('marks every item, and never reads one as a macro', () => {
+    expect(each('{{#each {{getvar::l}} as x}}{{slot::x}}{{/each}}', { l: '["{{getvar::l}}"]' }, markValues)).toBe(
+      '#{{getvar::l}}#',
+    );
+  });
+
+  it('is bounded: by the host’s iterate, and without one by a cap of its own', () => {
+    const list = JSON.stringify(Array.from({ length: 6_000 }, () => 'x'));
+    expect(each('{{#each {{getvar::l}} as x}}{{slot::x}}{{/each}}', { l: list })).toHaveLength(5_000);
+    let left = 10;
+    const iterate = (): void => {
+      if ((left -= 1) < 0) throw new Error('budget');
+    };
+    expect(() => each('{{#each {{getvar::l}} as x}}x{{/each}}', { l: list }, { iterate })).toThrow('budget');
+  });
+
+  it('is left to the host unless it asks for it', () => {
+    expect(run('{{#each ["a"] as x}}{{slot::x}}{{/each}}')).toBe('{{#each ["a"] as x}}{{slot::x}}{{/each}}');
+  });
+});
+
+describe('evaluateCbs - #when’s else, as RisuAI splits it', () => {
+  it('splits a block on one line at its first {{:else}}', () => {
+    expect(run('{{#when 0}}a{{:else}}b{{:else}}c{{/when}}')).toBe('b{{:else}}c');
+  });
+
+  it('splits a block over lines only at a {{:else}} alone on its line, an inline one being text', () => {
+    expect(run('{{#when 1}}\na{{:else}}b\n{{/when}}')).toBe('a{{:else}}b');
+    expect(run('{{#when 0}}\na\n  {{:else}}  \nb\n{{/when}}')).toBe('b');
+    expect(run('{{#when 0}}\na{{:else}}b\n{{/when}}')).toBe('');
+  });
+
+  it('gives the else line to neither branch, kept whitespace or not', () => {
+    expect(run('[{{#when::keep::1}}\n a\n{{:else}}\n b\n{{/when}}]')).toBe('[\n a]');
+    expect(run('[{{#when::keep::0}}\n a\n{{:else}}\n b\n{{/when}}]')).toBe('[ b\n]');
+    expect(run('[{{#when 1}}  \n{{:else}}\nb{{/when}}]')).toBe('[]');
+  });
+});
+
+describe('evaluateCbs - unset variables and null', () => {
+  it('writes null for an unset getvar, which ST’s {{if}} still finds false', () => {
+    expect(run('{{if {{getvar::none}}}}a{{else}}b{{/if}}')).toBe('b');
+    expect(run('{{if !{{getvar::none}}}}a{{else}}b{{/if}}')).toBe('a');
+    // A variable set to the word is set.
+    expect(run('{{if {{getvar::v}}}}a{{else}}b{{/if}}', { v: 'null' })).toBe('a');
+  });
+
+  it('reads it as RisuAI does: false for #if and var, equal to null for vis', () => {
+    expect(run('{{#if {{getvar::none}}}}a{{:else}}b{{/if}}')).toBe('b');
+    expect(run('{{#when::none::vis::null}}a{{/when}}{{#when::var::none}}b{{:else}}c{{/when}}')).toBe('ac');
+    expect(run('{{#when::none::visnot::null}}a{{:else}}b{{/when}}')).toBe('b');
+  });
+
+  it('reads an unset name and the word null as 0 in an expression', () => {
+    expect(run('{{? {{getvar::none}} + 1}} {{calc::none + 1}} {{? null = 0}} {{? NULL}}')).toBe('1 1 1 0');
+    expect(run('{{calc::mood == "angry"}}')).toBe('0');
+  });
+});
+
+describe('evaluateCbs - RisuAI expressions, globals and toggles', () => {
+  const globals = (values: Record<string, string>): CbsHost => ({
+    globalVariable: (name) => (Object.prototype.hasOwnProperty.call(values, name) ? values[name] : undefined),
+  });
+
+  it('answers an operand from | and &, as JavaScript does upstream', () => {
+    expect(run('{{? $hp | 10}} {{? $mp | 10}} {{? 2&3}} {{? 0&3}}', { hp: '5' })).toBe('5 10 3 0');
+  });
+
+  it('reads @name as a global variable, and as 0 without one', () => {
+    expect(run('{{? @g + 1}}', {}, globals({ g: '2' }))).toBe('3');
+    expect(run('{{? @g + 1}}')).toBe('1');
+  });
+
+  it('reads getglobalvar, unset as null, and leaves it as written where there are no globals', () => {
+    expect(run('{{getglobalvar::a}} {{getglobalvar::b}}', {}, globals({ a: '1' }))).toBe('1 null');
+    expect(run('{{getglobalvar::a}}')).toBe('{{getglobalvar::a}}');
+  });
+
+  it('reads #when’s toggles from the globals, off without them', () => {
+    const on = globals({ toggle_dark: '1', toggle_mode: 'b' });
+    expect(run('{{#when::toggle::dark}}a{{:else}}b{{/when}}', {}, on)).toBe('a');
+    expect(run('{{#when::toggle::dark}}a{{:else}}b{{/when}}')).toBe('b');
+    expect(run('{{#when::mode::tis::b}}a{{/when}}{{#when::mode::tisnot::b}}c{{/when}}', {}, on)).toBe('a');
+    expect(run('{{#when::mode::tis::null}}a{{/when}}')).toBe('a');
+  });
+});
+
+describe('evaluateCbs - random, pick and rollp', () => {
+  const seeded = (length: number): CbsHost => ({ data: { seed: { key: 'chat-1', length } } });
+
+  it('writes random with nothing to pick from at full precision, and a broken array as one option', () => {
+    expect(run('{{random}}', {}, { random: () => 0.123456789 })).toBe('0.123456789');
+    expect(run('{{random::[a,b]}}')).toBe('[a,b]');
+  });
+
+  it('draws a pick once per evaluation, from the chat and its length, as RisuAI does', () => {
+    const draw = pickHashRand(3, 'chat-1');
+    const expected = ['a', 'b', 'c', 'd', 'e'][Math.floor(draw * 5)]!;
+    expect(run('{{pick::a,b,c,d,e}}{{pick::a::b::c::d::e}}', {}, seeded(3))).toBe(expected + expected);
+    expect(run('{{pick}}', {}, seeded(3))).toBe(String(draw));
+  });
+
+  it('lets a host’s own pick decide, and is random without a seed', () => {
+    expect(run('{{pick::a,b}}', {}, { ...seeded(3), pick: () => 1 })).toBe('b');
+    expect(run('{{pick::a,b}}', {}, { random: () => 0.9 })).toBe('b');
+  });
+
+  it('rolls rollp from the same seed, die i fifteen draws on', () => {
+    const die = (i: number): number => Math.floor(pickHashRand(3 + i * 15, 'chat-1') * 6) + 1;
+    expect(run('{{rollp::2d6}}', {}, seeded(3))).toBe(String(die(0) + die(1)));
+  });
+});
+
+describe('evaluateCbs - host data', () => {
+  const chat: CbsChat = {
+    messages: [
+      { role: 'user', data: '안녕', time: Date.UTC(2026, 3, 7, 0, 0, 0) },
+      { role: 'char', data: '<b>반가워</b>', time: Date.UTC(2026, 3, 7, 0, 0, 30) },
+      { role: 'user', data: '또 왔어', time: Date.UTC(2026, 3, 7, 1, 2, 3) },
+    ],
+    offset: 0,
+    length: 3,
+    index: 2,
+    greeting: { text: '어서 와', index: -1 },
+  };
+  const withData = (data: CbsHostData): CbsHost => ({ data });
+
+  it('leaves every function as written where the host gave nothing, or not what it reads', () => {
+    const template = '{{lastmessage}} {{description}} {{model}} {{role}} {{chatindex}} {{metadata::version}} {{comment::x}}';
+    expect(run(template)).toBe(template);
+    expect(run('{{description}} {{lastmessage}}', {}, withData({ user: '민준' }))).toBe('{{description}} {{lastmessage}}');
+  });
+
+  it('answers char, bot and user from data, a host’s own answer first', () => {
+    expect(run('{{char}} {{bot}} <bot> {{user}}', {}, withData({ char: '아리아', user: '민준' }))).toBe(
+      '아리아 아리아 아리아 민준',
+    );
+    const own: CbsHost = { data: { char: '아리아' }, macro: ({ name }) => (name === 'char' ? { text: '세이' } : undefined) };
+    expect(run('{{char}}', {}, own)).toBe('세이');
+  });
+
+  it('reads the character’s fields as CBS, with the same host', () => {
+    const host = withData({
+      user: '민준',
+      character: { description: '{{user}}의 친구. HP {{getvar::hp}}', personality: '{{personality}}' },
+    });
+    expect(run('{{description}}', { hp: '3' }, host)).toBe('민준의 친구. HP 3');
+    // A field that asks for itself runs into RisuAI's call stack.
+    expect(run('{{personality}}', {}, host)).toBe('ERROR: Call stack limit reached');
+  });
+
+  it('answers the chat functions from the branch, marking what a message says', () => {
+    const host = withData({ chat: () => chat });
+    expect(run('{{chatindex}} {{lastmessageid}} {{firstmsgindex}}', {}, host)).toBe('2 2 -1');
+    expect(
+      run(
+        '{{lastmessage}}|{{previouscharchat}}|{{previoususerchat}}|{{previouschatlog::0}}|{{previouschatlog::9}}',
+        {},
+        { ...host, ...markValues },
+      ),
+    ).toBe('#또 왔어#|#<b>반가워</b>#|#안녕#|#안녕#|Out of range');
+    // Where the text is no message's, as in RisuAI's prompt: the latest, and nothing.
+    const prompt = withData({ chat: () => ({ ...chat, index: -1 }) });
+    expect(run('{{lastcharmessage}}|{{lastusermessage}}', {}, prompt)).toBe('<b>반가워</b>|');
+  });
+
+  it('writes the history as RisuAI’s JSON, the greeting first, and never reads it as CBS', () => {
+    const host = withData({ chat: () => ({ ...chat, messages: [{ role: 'user', data: '{{char}}' }], length: 1 }) });
+    expect(run('{{history}}', {}, host)).toBe(
+      '["{\\"role\\":\\"char\\",\\"data\\":\\"어서 와\\"}","{\\"role\\":\\"user\\",\\"data\\":\\"{{char}}\\"}"]',
+    );
+    expect(run('{{history::role}} {{messages::x}}', {}, host)).toBe('["user: {{char}}"] ["{{char}}"]');
+    expect(run('{{userhistory}} {{charhistory}}', {}, host)).toBe(
+      '["{\\"role\\":\\"user\\",\\"data\\":\\"{{char}}\\"}"] []',
+    );
+  });
+
+  it('leaves what it cannot see as written when only a later stretch of the branch is loaded', () => {
+    const later = withData({ chat: () => ({ ...chat, messages: chat.messages.slice(2), offset: 2 }) });
+    expect(run('{{lastmessage}} {{previouschatlog::0}} {{history}}', {}, later)).toBe(
+      '또 왔어 {{previouschatlog::0}} {{history}}',
+    );
+  });
+
+  it('tells a message’s time in the reader’s zone, or why it cannot', () => {
+    const clock = { now: new Date(Date.UTC(2026, 3, 7, 2)), timeZone: 'Asia/Seoul', locale: 'en-US' };
+    const sent = new Date(chat.messages[2]!.time!);
+    const zone = { timeZone: 'Asia/Seoul' };
+    expect(run('{{messagetime}} / {{messagedate}} / {{messageidleduration}}', {}, withData({ chat: () => chat, clock }))).toBe(
+      `${sent.toLocaleTimeString('en-US', zone)} / ${sent.toLocaleDateString('en-US', zone)} / 1:02:03`,
+    );
+    expect(run('{{messagetime}}', {}, withData({ chat: () => ({ ...chat, index: -1 }), clock }))).toBe('[Cannot get time]');
+    expect(run('{{messageidleduration}}', {}, withData({ chat: () => ({ ...chat, index: 1 }), clock }))).toBe(
+      '[No previous user message found]',
+    );
+  });
+
+  it('answers the model, the screen, metadata and the rest from what the host gave', () => {
+    const host = withData({
+      user: '민준',
+      model: { id: 'claude-x', name: 'Claude X', prefill: true, maxContext: 200000 },
+      screen: { width: 390, height: 844 },
+      meta: { language: 'ko', mobile: true },
+      role: 'char',
+      firstMessage: false,
+      assets: { names: ['웃음', 'face.png'] },
+      prompts: { jailbreak: { text: '', enabled: false }, authorNote: '{{user}} 노트' },
+      modules: [{ namespace: 'mod', assets: ['a'] }],
+      triggerId: null,
+      lorebook: () => [{ key: 'k', content: 'c' }],
+    });
+    expect(run('{{model}} {{axmodel}} {{prefill}} {{maxcontext}} {{screen_width}}x{{screenheight}}', {}, host)).toBe(
+      'claude-x  1 200000 390x844',
+    );
+    expect(
+      run(
+        '{{metadata::Version}} {{metadata::major}} {{metadata::lang}} {{metadata::mobile}} {{metadata::modelname}} {{metadata::nope}}',
+        {},
+        host,
+      ),
+    ).toBe('2026.8.250 2026 ko 1 Claude X Error: nope is not a valid metadata key.');
+    expect(run('{{role}} {{isfirstmsg}} {{assetlist}} {{chardisplayasset}} {{jbtoggled}}[{{jb}}] {{authornote}}', {}, host)).toBe(
+      'char 0 ["웃음","face.png"] [] 0[] 민준 노트',
+    );
+    expect(run('{{moduleenabled::mod}}{{module_enabled::x}} {{moduleassetlist::mod}} {{trigger_id}} {{lorebook}}', {}, host)).toBe(
+      '10 ["a"] null ["{\\"key\\":\\"k\\",\\"content\\":\\"c\\"}"]',
+    );
+  });
+
+  it('draws comment and file only on screen, escaping what a value says, and decodes a file elsewhere', () => {
+    const shown = withData({ phase: 'display' });
+    expect(run('{{comment::<i>메모</i>}}', {}, shown)).toBe('<div class="risu-comment"><i>메모</i></div>');
+    expect(run('{{comment::{{getvar::x}}}}', { x: '<b>' }, shown)).toBe('<div class="risu-comment">&lt;b&gt;</div>');
+    expect(run('[{{comment::메모}}]', {}, withData({ phase: 'prompt' }))).toBe('[]');
+    expect(run('{{file::a.txt::7JWI64WV}}', {}, withData({}))).toBe('안녕');
+    expect(run('{{file::a.txt::7JWI64WV}}', {}, shown)).toBe('<br><div class="risu-file">a.txt</div><br>');
+  });
+
+  it('builds ruby and codeblock markup, a value escaped', () => {
+    expect(run('{{ruby::漢字::{{getvar::r}}}}', { r: '<かんじ>' })).toBe(
+      '<ruby>漢字<rp> (</rp><rt>&lt;かんじ&gt;</rt><rp>) </rp></ruby>',
+    );
+    expect(run('{{codeblock::<a href="x">}}')).toBe('<pre><code>&lt;a href=&quot;x&quot;&gt;</code></pre>');
+    expect(run('{{codeblock::js::a<b}}', {}, withData({ phase: 'display' }))).toBe(
+      '<pre><code class="language-js">a&lt;b</code></pre>',
+    );
+    expect(run('{{codeblock::js::a<b}}')).toBe('<pre-hljs-placeholder lang="js">a&lt;b</pre-hljs-placeholder>');
   });
 });
 

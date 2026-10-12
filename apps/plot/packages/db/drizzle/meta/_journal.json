@@ -29,6 +29,13 @@
       "when": 1791787038821,
       "tag": "0003_lore_budget_auto",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1791826458089,
+      "tag": "0004_script_runtime",
+      "breakpoints": true
     }
   ]
 }

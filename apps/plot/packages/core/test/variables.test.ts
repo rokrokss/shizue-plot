@@ -1,13 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import { applyMacros } from '../src/macro.js';
 import {
+  applyVariableDelta,
+  checkVariableDelta,
   computeVariables,
+  diffVariables,
   emptyVariables,
+  MAX_DELTA_KEYS,
+  MAX_VARIABLE_NAME_LENGTH,
+  MAX_VARIABLE_VALUE_LENGTH,
   readVariable,
   parseDefaultVariables,
   resolveGetVars,
   serializeDefaultVariables,
   stripVariableMacros,
+  type FoldItem,
 } from '../src/variables.js';
 
 describe('computeVariables', () => {
@@ -116,8 +123,8 @@ describe('computeVariables with macros nested in a value', () => {
     });
   });
 
-  it('reads an unset variable as empty', () => {
-    expect(computeVariables(['{{setvar::name::[{{getvar::nobody}}]}}'])).toEqual({ name: '[]' });
+  it('reads an unset variable as RisuAI writes it, null', () => {
+    expect(computeVariables(['{{setvar::name::[{{getvar::nobody}}]}}'])).toEqual({ name: '[null]' });
   });
 
   it('stores a macro it does not know as written, as RisuAI does', () => {
@@ -321,5 +328,162 @@ describe('defaultVariables serialization', () => {
   it('round-trips through the block form', () => {
     const variables = { hp: '100', mood: '평온' };
     expect(parseDefaultVariables(serializeDefaultVariables(variables))).toEqual(variables);
+  });
+});
+
+describe('script deltas in the fold', () => {
+  it("lays a message's delta over its own macros, a null unsetting", () => {
+    expect(
+      computeVariables(
+        [{ content: '{{setvar::hp::50}}{{setvar::flag::1}}', variableDelta: { hp: '7', mood: '좋음', flag: null } }],
+        { route: '1' },
+      ),
+    ).toEqual({ route: '1', hp: '7', mood: '좋음' });
+    // A default the scripts unset is gone too.
+    expect(computeVariables([{ content: '', variableDelta: { route: null } }], { route: '1' })).toEqual({});
+  });
+
+  it('folds the next message on top of the delta, not under it', () => {
+    expect(
+      computeVariables([{ content: '안녕', variableDelta: { hp: '10' } }, '{{addvar::hp::5}}']),
+    ).toEqual({ hp: '15' });
+  });
+
+  it('keeps a delta on its own node: a sibling, and a regenerate of it, never see it', () => {
+    const root = { content: '문 앞이다', variableDelta: null };
+    const user = { content: '{{setvar::hp::90}} 문을 연다' };
+    const replyWithScripts = { content: '삐걱', variableDelta: { door: 'open', hp: '80' } };
+    const sibling = { content: '잠겨 있다' };
+
+    expect(computeVariables([root, user, replyWithScripts])).toEqual({ hp: '80', door: 'open' });
+    expect(computeVariables([root, user, sibling])).toEqual({ hp: '90' });
+    // What a regenerate generates from: the branch without the head it replaces.
+    expect(computeVariables([root, user])).toEqual({ hp: '90' });
+  });
+
+  it('takes a delta on the greeting root over the plot defaults, as a click on an opening leaves one', () => {
+    expect(
+      computeVariables([{ content: '{{setvar::hp::100}}어서 와', variableDelta: { route: '2' } }], {
+        route: '1',
+      }),
+    ).toEqual({ route: '2', hp: '100' });
+  });
+
+  it('folds onto an already folded map exactly as it folds the whole branch', () => {
+    const branch: FoldItem[] = [
+      { content: '{{setvar::hp::50}}', variableDelta: { gold: '3' } },
+      { content: '{{addvar::hp::-10}}', variableDelta: null },
+      { content: '{{addvar::gold::2}}', variableDelta: { hp: null, mood: '평온' } },
+    ];
+    const defaults = { hp: '100' };
+    expect(computeVariables(branch.slice(1), computeVariables(branch.slice(0, 1), defaults))).toEqual(
+      computeVariables(branch, defaults),
+    );
+    expect(computeVariables(branch, defaults)).toEqual({ gold: '5', mood: '평온' });
+  });
+
+  it('stores names that belong to Object.prototype, as parsed JSON hands them over', () => {
+    const variableDelta = JSON.parse('{"__proto__":"1","constructor":"2","toString":null}') as Record<
+      string,
+      string | null
+    >;
+    const variables = computeVariables([{ content: '', variableDelta }], { toString: 'x' });
+    expect(Object.getPrototypeOf(variables)).toBeNull();
+    expect(readVariable(variables, '__proto__')).toBe('1');
+    expect(readVariable(variables, 'constructor')).toBe('2');
+    expect(readVariable(variables, 'toString')).toBeUndefined();
+  });
+
+  it('ignores a stored value that is neither a string nor null', () => {
+    const variableDelta = JSON.parse('{"hp": 5, "mood": "좋음"}') as Record<string, string | null>;
+    expect(computeVariables([{ content: '', variableDelta }], { hp: '1' })).toEqual({ hp: '1', mood: '좋음' });
+  });
+
+  it('is absolute, so laying the same delta twice changes nothing', () => {
+    const item = { content: '{{addvar::hp::5}}', variableDelta: { hp: '1', gone: null } };
+    const once = computeVariables([item], { hp: '10', gone: 'x' });
+    expect(applyVariableDelta(once, item.variableDelta)).toEqual(once);
+  });
+
+  it('reproduces where the scripts ended whatever order they ran in around the macros', () => {
+    // RisuAI runs input triggers before the message exists, so a `{{setvar}}`
+    // reading the same key sees the trigger's write — the order a fold of the
+    // macros alone cannot know. The browser stores the difference instead.
+    const parent = { x: '0' };
+    const content = '{{setvar::x::{{getvar::x}}!}}';
+    const afterInputTrigger = { ...parent, x: 'trig' };
+    const afterMacros = computeVariables([content], afterInputTrigger);
+    const final = { ...afterMacros, y: 'start' };
+    const variableDelta = diffVariables(final, computeVariables([content], parent));
+
+    expect(variableDelta).toEqual({ x: 'trig!', y: 'start' });
+    expect(computeVariables([{ content, variableDelta }], parent)).toEqual(final);
+  });
+});
+
+describe('diffVariables and applyVariableDelta', () => {
+  it('round-trips: the diff laid over its base is the target', () => {
+    const base = { hp: '10', gold: '3', mood: '평온' };
+    const target = { hp: '7', gold: '3', door: 'open' };
+    const delta = diffVariables(target, base);
+    expect(delta).toEqual({ hp: '7', door: 'open', mood: null });
+    expect(applyVariableDelta(base, delta)).toEqual(target);
+  });
+
+  it('is null for two maps that say the same thing', () => {
+    expect(diffVariables({ a: '1' }, { a: '1' })).toBeNull();
+    expect(diffVariables({}, {})).toBeNull();
+  });
+
+  it('touches neither input', () => {
+    const base = { hp: '10' };
+    const next = applyVariableDelta(base, { hp: null, gold: '1' });
+    expect(base).toEqual({ hp: '10' });
+    expect(next).toEqual({ gold: '1' });
+    expect(Object.getPrototypeOf(next)).toBeNull();
+  });
+});
+
+describe('checkVariableDelta', () => {
+  it('reads strings and nulls into a map without a prototype', () => {
+    const check = checkVariableDelta(JSON.parse('{"hp":"7","__proto__":null}'));
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+    expect(Object.getPrototypeOf(check.delta)).toBeNull();
+    expect(Object.keys(check.delta!)).toEqual(['hp', '__proto__']);
+    expect(readVariable(check.delta as Record<string, string>, '__proto__')).toBeNull();
+  });
+
+  it('takes null, nothing and an empty object as no delta', () => {
+    expect(checkVariableDelta(null)).toEqual({ ok: true, delta: null });
+    expect(checkVariableDelta(undefined)).toEqual({ ok: true, delta: null });
+    expect(checkVariableDelta({})).toEqual({ ok: true, delta: null });
+  });
+
+  it('refuses anything else, and anything past the caps', () => {
+    const refused = (value: unknown): boolean => !checkVariableDelta(value).ok;
+    expect(refused([])).toBe(true);
+    expect(refused('hp=1')).toBe(true);
+    expect(refused({ hp: 1 })).toBe(true);
+    expect(refused({ hp: { nested: '1' } })).toBe(true);
+    expect(refused({ '': '1' })).toBe(true);
+    expect(refused({ ['k'.repeat(MAX_VARIABLE_NAME_LENGTH + 1)]: '1' })).toBe(true);
+    expect(refused({ hp: 'v'.repeat(MAX_VARIABLE_VALUE_LENGTH + 1) })).toBe(true);
+    expect(refused({ 'h\u0000p': '1' })).toBe(true);
+    expect(refused({ hp: 'a\u0000b' })).toBe(true);
+    expect(
+      refused(Object.fromEntries(Array.from({ length: MAX_DELTA_KEYS + 1 }, (_, i) => [`k${i}`, '1']))),
+    ).toBe(true);
+    // Every entry within its own cap, the whole past the total.
+    const wide = Object.fromEntries(
+      Array.from({ length: 11 }, (_, i) => [`k${i}`, 'v'.repeat(MAX_VARIABLE_VALUE_LENGTH)]),
+    );
+    expect(refused(wide)).toBe(true);
+  });
+
+  it('holds a map to the limits it is given', () => {
+    expect(checkVariableDelta({ a: '1', b: '2' }, { keys: 1, chars: 100 }).ok).toBe(false);
+    expect(checkVariableDelta({ a: '12345' }, { keys: 5, chars: 5 }).ok).toBe(false);
+    expect(checkVariableDelta({ a: '1234' }, { keys: 5, chars: 5 }).ok).toBe(true);
   });
 });

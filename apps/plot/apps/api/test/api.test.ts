@@ -20,10 +20,12 @@ import {
   loreEntryKey,
   MAX_ASSETS,
   MAX_CHARACTERS_PER_PLOT,
+  MAX_DELTA_KEYS,
   MAX_DISPLAY_PATTERN_LENGTH,
   MAX_INTRO_LENGTH,
   MAX_INTRO_TEXT_LENGTH,
   MAX_INTROS_PER_PLOT,
+  MAX_VARIABLE_VALUE_LENGTH,
   parseCard,
   placeholderPng,
   PRESET_IDS,
@@ -104,13 +106,14 @@ import {
 import { BACKFILL_CHUNKS_PER_RUN } from '../src/memory.js';
 import { createJobHandlers, notificationFanout } from '../src/notifications.js';
 import { MAX_ASSET_NAME_LENGTH, MAX_CARD_IMPORT_BYTES } from '../src/routes/plots.js';
+import { MAX_GLOBAL_VARIABLE_KEYS } from '../src/scriptState.js';
 import { createLocalStorage, type ObjectStorage } from '../src/storage.js';
 import { connectS3Server } from './s3Server.js';
 
 loadRootEnv();
 
 /**
- * The connection string for a suite that TRUNCATEs twenty-one tables before every
+ * The connection string for a suite that TRUNCATEs twenty-two tables before every
  * test, so the target has to say out loud that it is disposable. There is no
  * fallback to DATABASE_URL: that is the app's own database, and it is the name a
  * CI secret is most likely to carry.
@@ -251,7 +254,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await sql`TRUNCATE TABLE memories, chat_asset_unlocks, chat_attachments, messages, chat_note_links, user_notes, chats, personas, comments, plot_likes, plot_assets, characters, notifications, follows, plots, feed_cursors, jobs, "session", account, verification, "user" RESTART IDENTITY CASCADE`;
+  await sql`TRUNCATE TABLE memories, chat_asset_unlocks, chat_attachments, messages, chat_note_links, user_notes, plot_reader_variables, chats, personas, comments, plot_likes, plot_assets, characters, notifications, follows, plots, feed_cursors, jobs, "session", account, verification, "user" RESTART IDENTITY CASCADE`;
   auth = createAuth(db, {
     secret: 'test-secret-test-secret-test-secret',
     baseUrl: 'http://localhost:13000',
@@ -10962,5 +10965,412 @@ describe('storage drivers', () => {
     const res = await request(cookie, asset.url, 'GET', undefined, target);
     expect(res.status).toBe(200);
     expect(res.headers.get('location')).toBeNull();
+  });
+});
+
+describe('card scripts', () => {
+  /**
+   * An app whose model answers every generation with `reply` and records the
+   * system prompt it was given — where a card's `{{getvar}}` shows what the fold
+   * handed the prompt. The echo model would repeat the user's macros back, which
+   * is exactly what these tests must not have in the reply.
+   */
+  function replyingApp(reply: string): { app: Hono<AppEnv>; systems: string[] } {
+    const systems: string[] = [];
+    const app = makeApp({
+      getAdapter: () => ({
+        providerModel: 'fixed',
+        adapter: {
+          stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
+            systems.push(req.system);
+            yield { type: 'text', text: reply };
+            return { usage: { promptTokens: 1, completionTokens: 1 } };
+          },
+        },
+      }),
+    });
+    return { app, systems };
+  }
+
+  /** A chat on a plot whose card prints three variables into its system prompt. */
+  async function variableChat(
+    email: string,
+  ): Promise<{ cookie: string; plotId: string; chatId: string; rootId: string }> {
+    const cookie = await signUp(email);
+    const plot = await createPlot(cookie, {
+      name: '스크립트 작품',
+      description: '설명',
+      intros: ['문 앞이다'],
+      customUi: { defaultVariables: { hp: '100' } },
+    });
+    await addCharacter(cookie, plot.id, {
+      name: '스크립트 캐릭터',
+      card: {
+        description: '설명',
+        systemPrompt: '[hp={{getvar::hp}} door={{getvar::door}} mood={{getvar::mood}}]',
+      },
+    });
+    const created = await startChat(cookie, plot.id);
+    return { cookie, plotId: plot.id, chatId: created.chat.id, rootId: created.path[0].id };
+  }
+
+  const stateOf = async (cookie: string, chatId: string): Promise<any> =>
+    readJson(await request(cookie, `/api/chats/${chatId}`));
+
+  it("folds a send's delta into the prompt and hands it back on the turn", async () => {
+    const { cookie, chatId } = await variableChat('script-send@example.com');
+    const { app: replying, systems } = replyingApp('대답');
+    const events = await readSse(
+      await json(
+        cookie,
+        `/api/chats/${chatId}/messages`,
+        'POST',
+        // The input trigger opened the door; a start trigger then took 5 off the
+        // HP the turn's own macro set. The browser stores where they ended.
+        { content: '{{setvar::hp::40}} 들어간다', variableDelta: { door: 'open', hp: '35' } },
+        replying,
+      ),
+    );
+    expect(events.at(-1)!.event).toBe('done');
+    expect('postProcess' in events.at(-1)!.data).toBe(false);
+    // An unset variable prints `null`, as RisuAI's `{{getvar}}` does.
+    expect(systems.at(-1)).toContain('[hp=35 door=open mood=null]');
+
+    const state = await stateOf(cookie, chatId);
+    const [root, user, reply] = state.path;
+    expect(root.variableDelta).toBeNull();
+    expect(user.variableDelta).toEqual({ door: 'open', hp: '35' });
+    expect(reply).toMatchObject({ variableDelta: null, scriptState: null, scriptRev: 0 });
+    expect(state.globalVariables).toEqual({});
+
+    // On the branch now, so the next turn's prompt reads it too.
+    await readSse(
+      await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '{{addvar::hp::-5}} 더' }, replying),
+    );
+    expect(systems.at(-1)).toContain('[hp=30 door=open mood=null]');
+  });
+
+  it("lays a regenerate's start delta under the reply's own macros, and never hands it to the next sibling", async () => {
+    const { cookie, chatId } = await variableChat('script-regenerate@example.com');
+    await readSse(
+      await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '들어간다' }, replyingApp('대답').app),
+    );
+
+    // The start triggers set the mood and the HP; the reply then sets the HP itself.
+    const { app: replying, systems } = replyingApp('{{setvar::hp::7}} 맞았다');
+    await readSse(
+      await json(
+        cookie,
+        `/api/chats/${chatId}/regenerate`,
+        'POST',
+        { startDelta: { mood: 'angry', hp: '1' } },
+        replying,
+      ),
+    );
+    expect(systems.at(-1)).toContain('[hp=1 door=null mood=angry]');
+    // What the reply's macros did not decide again: they set the HP after the
+    // triggers did, as RisuAI would have run them.
+    expect((await stateOf(cookie, chatId)).path.at(-1).variableDelta).toEqual({ mood: 'angry' });
+
+    // Without scripts a regenerate starts from the turn before, not from the
+    // sibling it replaces.
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, replying));
+    expect(systems.at(-1)).toContain('[hp=100 door=null mood=null]');
+    expect((await stateOf(cookie, chatId)).path.at(-1).variableDelta).toBeNull();
+  });
+
+  it("keeps a continued head's old delta and the start delta under the continuation's own macros", async () => {
+    const { cookie, chatId } = await variableChat('script-continue@example.com');
+    await readSse(
+      await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '들어간다' }, replyingApp('반쯤').app),
+    );
+    const head = (await stateOf(cookie, chatId)).path.at(-1);
+    // What a button on the reply left before the reader asked for more of it.
+    await db.update(messages).set({ variableDelta: { door: 'open', hp: '50' } }).where(eq(messages.id, head.id));
+
+    const { app: replying, systems } = replyingApp(' {{setvar::hp::20}}끝');
+    await readSse(
+      await json(cookie, `/api/chats/${chatId}/continue`, 'POST', { startDelta: { mood: 'calm' } }, replying),
+    );
+    expect(systems.at(-1)).toContain('[hp=50 door=open mood=calm]');
+
+    const continued = (await stateOf(cookie, chatId)).path.at(-1);
+    expect(continued).toMatchObject({ id: head.id, content: '반쯤 {{setvar::hp::20}}끝', scriptRev: 1 });
+    // The continuation's own setvar wins over the HP the button left; the door
+    // and the mood stay.
+    expect(continued.variableDelta).toEqual({ door: 'open', mood: 'calm' });
+  });
+
+  it('holds a reply the browser will finish as pending until a commit finishes it', async () => {
+    const { cookie, chatId } = await variableChat('script-pending@example.com');
+    const { app: replying } = replyingApp('<status>날 것</status>');
+    const events = await readSse(
+      await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '들어간다', postProcess: true }, replying),
+    );
+    const done = events.at(-1)!;
+    expect(done.event).toBe('done');
+    expect(done.data).toMatchObject({ postProcess: true, scriptRev: 0 });
+    const reply = (await stateOf(cookie, chatId)).path.at(-1);
+    expect(reply).toMatchObject({ id: done.data.messageId, scriptState: 'pending', scriptRev: 0 });
+
+    // Nothing builds on a reply its scripts never ran over, and the refusal
+    // writes nothing.
+    for (const mode of ['messages', 'continue', 'auto', 'narrate']) {
+      const body = mode === 'messages' ? { content: '또' } : {};
+      const res = await json(cookie, `/api/chats/${chatId}/${mode}`, 'POST', body, replying);
+      expect(res.status, mode).toBe(409);
+      expect((await readJson(res)).code, mode).toBe('post_processing_pending');
+    }
+    expect((await stateOf(cookie, chatId)).path.at(-1).id).toBe(reply.id);
+
+    const commit = (body: Record<string, unknown>): Promise<Response> =>
+      json(cookie, `/api/chats/${chatId}/script-commit`, 'POST', { messageId: reply.id, ...body });
+    const res = await commit({
+      scriptRev: 0,
+      content: '정리된 대답',
+      variableDelta: { mood: 'calm' },
+      clearPending: true,
+    });
+    expect(res.status, await res.clone().text()).toBe(200);
+    expect((await readJson(res)).path.at(-1)).toMatchObject({
+      id: reply.id,
+      content: '정리된 대답',
+      variableDelta: { mood: 'calm' },
+      scriptState: null,
+      scriptRev: 1,
+    });
+
+    // A second tab finishing the same turn from the same revision is refused…
+    const again = await commit({ scriptRev: 0, content: '또 정리', clearPending: true });
+    expect(again.status).toBe(409);
+    expect((await readJson(again)).code).toBe('script_rev_moved');
+    // …and so is finishing a turn that is no longer waiting.
+    const twice = await commit({ scriptRev: 1, clearPending: true });
+    expect(twice.status).toBe(409);
+    expect((await readJson(twice)).code).toBe('not_pending');
+    expect((await stateOf(cookie, chatId)).path.at(-1).content).toBe('정리된 대답');
+
+    // Finished, the chat goes on, and the prompt reads what the commit left.
+    const { app: next, systems } = replyingApp('다음');
+    const after = await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '다음' }, next));
+    expect(after.at(-1)!.event).toBe('done');
+    expect(systems.at(-1)).toContain('[hp=100 door=null mood=calm]');
+  });
+
+  it('generates on over a pending reply only once the browser gives it up, and only over the head it ran on', async () => {
+    const { cookie, chatId, rootId } = await variableChat('script-abandon@example.com');
+    const { app: replying } = replyingApp('대답');
+    await readSse(
+      await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '들어간다', postProcess: true }, replying),
+    );
+    const first = (await stateOf(cookie, chatId)).path.at(-1);
+
+    // A regenerate replaces the pending reply rather than building on it, and the
+    // sibling it leaves stays pending for whenever a swipe brings it back.
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, replying));
+    let state = await stateOf(cookie, chatId);
+    expect(state.path.at(-1)).toMatchObject({ scriptState: null });
+    const [left] = await db.select().from(messages).where(eq(messages.id, first.id));
+    expect(left!.scriptState).toBe('pending');
+
+    await readSse(
+      await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '또', postProcess: true }, replying),
+    );
+    const pending = (await stateOf(cookie, chatId)).path.at(-1);
+
+    // Scripts that ran over another head speak for a chat that is no longer there.
+    const moved = await json(
+      cookie,
+      `/api/chats/${chatId}/messages`,
+      'POST',
+      { content: '세 번째', baseHeadId: rootId, abandonPending: true },
+      replying,
+    );
+    expect(moved.status).toBe(409);
+    expect((await readJson(moved)).code).toBe('head_moved');
+
+    const res = await json(
+      cookie,
+      `/api/chats/${chatId}/messages`,
+      'POST',
+      { content: '세 번째', baseHeadId: pending.id, abandonPending: true },
+      replying,
+    );
+    expect((await readSse(res)).at(-1)!.event).toBe('done');
+    state = await stateOf(cookie, chatId);
+    // Given up, not finished: the mark is gone and the text is the model's own.
+    expect(state.path.find((m: any) => m.id === pending.id)).toMatchObject({ scriptState: null, content: '대답' });
+    expect(state.path.at(-1)).toMatchObject({ role: 'assistant', scriptState: null });
+  });
+
+  it('commits only onto the head, for the owner, within the caps', async () => {
+    const { cookie, chatId, rootId } = await variableChat('script-commit@example.com');
+    await readSse(
+      await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '들어간다' }, replyingApp('대답').app),
+    );
+    const head = (await stateOf(cookie, chatId)).path.at(-1);
+    const commit = (body: Record<string, unknown>, who = cookie): Promise<Response> =>
+      json(who, `/api/chats/${chatId}/script-commit`, 'POST', {
+        messageId: head.id,
+        scriptRev: head.scriptRev,
+        ...body,
+      });
+
+    // A button on an older message acts on the chat as it stands, so a commit
+    // names the head and nothing else.
+    const off = await commit({ messageId: rootId, scriptRev: 0, variableDelta: { door: 'open' } });
+    expect(off.status).toBe(409);
+    expect((await readJson(off)).code).toBe('head_moved');
+
+    const stranger = await signUp('script-commit-stranger@example.com');
+    expect((await commit({ variableDelta: { door: 'open' } }, stranger)).status).toBe(404);
+
+    for (const body of [
+      { scriptRev: undefined, variableDelta: { door: 'open' } },
+      { scriptRev: -1, variableDelta: { door: 'open' } },
+      { scriptRev: '0', variableDelta: { door: 'open' } },
+      { messageId: 'nope', variableDelta: { door: 'open' } },
+      // Nothing to commit.
+      {},
+      { variableDelta: { door: 1 } },
+      { variableDelta: ['open'] },
+      { variableDelta: { '': 'open' } },
+      { variableDelta: { door: 'o\u0000pen' } },
+      { variableDelta: Object.fromEntries(Array.from({ length: MAX_DELTA_KEYS + 1 }, (_, i) => [`k${i}`, '1'])) },
+      { variableDelta: { door: 'x'.repeat(MAX_VARIABLE_VALUE_LENGTH + 1) } },
+      { content: 3 },
+      { clearPending: 'yes' },
+    ]) {
+      const res = await commit(body);
+      expect(res.status, JSON.stringify(body).slice(0, 80)).toBe(400);
+    }
+    // Nothing of any of it landed.
+    expect((await stateOf(cookie, chatId)).path.at(-1)).toMatchObject({ variableDelta: null, scriptRev: 0 });
+
+    // A click's commit: the values, on the head, read by the next prompt.
+    const res = await commit({ variableDelta: { door: 'open' } });
+    expect(res.status, await res.clone().text()).toBe(200);
+    expect((await readJson(res)).path.at(-1)).toMatchObject({
+      id: head.id,
+      content: '대답',
+      variableDelta: { door: 'open' },
+      scriptRev: 1,
+    });
+    const { app: next, systems } = replyingApp('다음');
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '다음' }, next));
+    expect(systems.at(-1)).toContain('[hp=100 door=open mood=null]');
+  });
+
+  it("moves a turn's revision on a hand edit, and carries its delta onto an edit's fork", async () => {
+    const { cookie, chatId } = await variableChat('script-edits@example.com');
+    await readSse(
+      await json(
+        cookie,
+        `/api/chats/${chatId}/messages`,
+        'POST',
+        { content: '들어간다', variableDelta: { door: 'open' } },
+        replyingApp('대답').app,
+      ),
+    );
+    const [, user, reply] = (await stateOf(cookie, chatId)).path;
+
+    // The reader's own words on the reply: a commit computed on the old text
+    // must not land on top of them. The delta stays — it is not a reading of the text.
+    expect((await json(cookie, `/api/messages/${reply.id}`, 'PATCH', { content: '고친 대답' })).status).toBe(200);
+    let state = await stateOf(cookie, chatId);
+    expect(state.path.at(-1)).toMatchObject({ id: reply.id, content: '고친 대답', scriptRev: 1 });
+    const stale = await json(cookie, `/api/chats/${chatId}/script-commit`, 'POST', {
+      messageId: reply.id,
+      scriptRev: 0,
+      content: '스크립트가 고친 대답',
+    });
+    expect(stale.status).toBe(409);
+    expect((await readJson(stale)).code).toBe('script_rev_moved');
+
+    // An edited user turn forks, and the fork keeps what the scripts left on it.
+    const forked = await readJson(await json(cookie, `/api/messages/${user.id}`, 'PATCH', { content: '고쳐 들어간다' }));
+    state = await stateOf(cookie, chatId);
+    expect(state.path.at(-1)).toMatchObject({
+      id: forked.messageId,
+      content: '고쳐 들어간다',
+      variableDelta: { door: 'open' },
+    });
+  });
+
+  it('carries deltas into the window a read cut and into the export timeline', async () => {
+    const { cookie, chatId } = await variableChat('script-fold-sites@example.com');
+    const { app: replying } = replyingApp('대답');
+    await readSse(
+      await json(
+        cookie,
+        `/api/chats/${chatId}/messages`,
+        'POST',
+        { content: '하나', variableDelta: { door: 'open' } },
+        replying,
+      ),
+    );
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '둘' }, replying));
+    const whole = await stateOf(cookie, chatId);
+    expect(whole.path).toHaveLength(5);
+
+    // The opening, the first exchange — and its delta — fell in front of the window.
+    const windowed = await readJson(await request(cookie, `/api/chats/${chatId}?limit=2`));
+    expect(windowed.variableDefaults).toEqual({ hp: '100', door: 'open' });
+
+    const exported = await readJson(await request(cookie, `/api/chats/${chatId}/export`));
+    expect(exported.variableTimeline).toEqual([
+      { messageId: whole.path[2].id, variables: { hp: '100', door: 'open' } },
+    ]);
+  });
+
+  it("keeps the reader's global variables per plot, merged, unset and capped", async () => {
+    const { cookie, chatId, plotId } = await variableChat('script-globals@example.com');
+    const path = `/api/chats/${chatId}/global-variables`;
+    expect(await readJson(await request(cookie, path))).toEqual({ variables: {} });
+
+    let res = await json(cookie, path, 'PATCH', { variables: { toggle_x: '1', score: '3' } });
+    expect(await readJson(res)).toEqual({ variables: { toggle_x: '1', score: '3' } });
+    res = await json(cookie, path, 'PATCH', { variables: { toggle_x: null, constructor: '7' } });
+    expect(await readJson(res)).toEqual({ variables: { score: '3', constructor: '7' } });
+
+    // Two writes at once each land on top of the other.
+    await Promise.all([
+      json(cookie, path, 'PATCH', { variables: { a: '1' } }),
+      json(cookie, path, 'PATCH', { variables: { b: '2' } }),
+    ]);
+    const expected = { score: '3', constructor: '7', a: '1', b: '2' };
+    expect((await readJson(await request(cookie, path))).variables).toEqual(expected);
+
+    // Shared by every chat of the reader's on the plot, and carried by its state.
+    expect((await stateOf(cookie, chatId)).globalVariables).toEqual(expected);
+    expect((await startChat(cookie, plotId)).globalVariables).toEqual(expected);
+    // Not by another plot's chat.
+    const other = await variableChat('script-globals-other@example.com');
+    expect((await stateOf(other.cookie, other.chatId)).globalVariables).toEqual({});
+    // And not by anyone else: the chat is not theirs to read through.
+    expect((await request(other.cookie, path)).status).toBe(404);
+    expect((await json(other.cookie, path, 'PATCH', { variables: { a: '9' } })).status).toBe(404);
+
+    // The cap holds on the merged map, and a refused write leaves it as it was.
+    const room = MAX_GLOBAL_VARIABLE_KEYS - Object.keys(expected).length;
+    const fill = (count: number, prefix: string): Record<string, string> =>
+      Object.fromEntries(Array.from({ length: count }, (_, i) => [`${prefix}${i}`, '1']));
+    res = await json(cookie, path, 'PATCH', { variables: fill(room + 1, 'k') });
+    expect(res.status).toBe(400);
+    expect((await readJson(res)).code).toBe('global_variables_limit');
+    expect((await readJson(await request(cookie, path))).variables).toEqual(expected);
+    expect((await json(cookie, path, 'PATCH', { variables: fill(room, 'k') })).status).toBe(200);
+
+    for (const body of [
+      {},
+      { variables: { a: 1 } },
+      { variables: 'a=1' },
+      { variables: ['a'] },
+      { variables: { '': '1' } },
+      { variables: fill(MAX_GLOBAL_VARIABLE_KEYS + 1, 'z') },
+    ]) {
+      const refused = await json(cookie, path, 'PATCH', body);
+      expect(refused.status, JSON.stringify(body).slice(0, 60)).toBe(400);
+    }
   });
 });

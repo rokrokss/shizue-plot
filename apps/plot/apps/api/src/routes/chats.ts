@@ -1,6 +1,7 @@
 import type { ChatExport, ChatExportVariableSnapshot } from '@shizue/contracts';
 import {
   applyMacros,
+  applyVariableDelta,
   assetResolver,
   coerceNarrator,
   computeVariables,
@@ -22,6 +23,7 @@ import {
   type MacroClock,
   type MacroContext,
   type NarratorConfig,
+  type FoldItem,
   type PromptCharacter,
   type PromptPlot,
   type Variables,
@@ -72,9 +74,11 @@ import {
   HEARTBEAT_MS,
   inspectGeneration,
   isGenerating,
+  openUnlocks,
   rejectBusyChat,
   releaseChatSlot,
   renewChatSlot,
+  scheduleBackgroundUpdates,
   withGenerationSlot,
   type GenerationPlan,
 } from '../generation.js';
@@ -89,6 +93,17 @@ import {
 } from '../notes.js';
 import { buildRelationshipText } from '../relationship.js';
 import { drawSceneEnabled, generateSceneImage, sceneImagePrompt } from '../sceneImage.js';
+import {
+  headMoved,
+  loadGlobalVariables,
+  mergeGlobalVariables,
+  NO_SCRIPTS,
+  optionalVariableDelta,
+  readGenerationScripts,
+  scriptRevMoved,
+  storableDelta,
+  type GenerationScripts,
+} from '../scriptState.js';
 import { deleteQuietly } from '../storage.js';
 import { toPromptCharacters, toPromptPlot } from '../plots.js';
 import { suggestReplies } from '../suggest.js';
@@ -157,6 +172,15 @@ const toMessageJson = (message: Message, attachments: ChatAttachment[] = []) => 
   source: message.source,
   /** The turn's stage directions, or null. Never part of the rendered text. */
   directions: message.directions,
+  /**
+   * What the card's scripts left on this turn, laid over its macros wherever the
+   * branch is folded — the reader's screen included, so it has to travel.
+   */
+  variableDelta: message.variableDelta,
+  /** 'pending' while the browser still owes this turn its output scripts. */
+  scriptState: message.scriptState,
+  /** The revision a script commit to this turn has to name. */
+  scriptRev: message.scriptRev,
   model: message.model,
   promptTokens: message.promptTokens,
   completionTokens: message.completionTokens,
@@ -232,8 +256,8 @@ function windowPath(path: Message[], window: PathWindow): { path: Message[]; ear
 }
 
 /**
- * The variable fold the window starts from: the branch's macros up to its first
- * message, over the plot's defaults.
+ * The variable fold the window starts from: the branch's macros and script
+ * deltas up to its first message, over the plot's defaults.
  *
  * The prompt is assembled from the whole branch and never needed this, but the
  * client folds only what it loaded — so a `{{setvar}}` in the stretch it paged
@@ -247,10 +271,7 @@ async function windowVariableDefaults(
   earlier: Message[],
 ): Promise<Variables> {
   const plot = await loadChatPlot(deps, chat, chat.userId);
-  return computeVariables(
-    earlier.map((message) => message.content),
-    plot?.customUi?.defaultVariables,
-  );
+  return computeVariables(earlier, plot?.customUi?.defaultVariables);
 }
 
 /**
@@ -283,6 +304,11 @@ async function chatState(deps: AppDeps, chat: Chat, window?: PathWindow): Promis
     ...(windowed && windowed.earlier.length > 0
       ? { variableDefaults: await windowVariableDefaults(deps, chat, windowed.earlier) }
       : {}),
+    /**
+     * The reader's global variables on this plot, shared by all their chats on
+     * it and not by branch — what the card's scripts read as `getglobalvar`.
+     */
+    globalVariables: await loadGlobalVariables(deps, chat.userId, chat.plotId),
     /**
      * What this deployment can do beyond the base chat. An env-gated action
      * answers here rather than 404ing a button the reader can already see —
@@ -606,10 +632,58 @@ const promptHistory = (deps: AppDeps, userId: string, model: string, source: Mes
  * Chat variables of a branch. Folded over the *whole* branch rather than the
  * history the budget left room for: a variable set fifty turns ago must survive
  * its message being evicted, and the client derives the same map from the same
- * messages, so both sides agree without either storing anything.
+ * messages — macros and script deltas both — so both sides agree.
  */
-const pathVariables = (plot: Plot, texts: string[]): Variables =>
-  computeVariables(texts, plot.customUi?.defaultVariables);
+const pathVariables = (plot: Plot, branch: readonly FoldItem[]): Variables =>
+  computeVariables(branch, plot.customUi?.defaultVariables);
+
+/**
+ * What a generation checks of the head before it writes anything, for the card's
+ * scripts: that it is still the head the browser ran them on, and that the
+ * browser is not still owed it. A turn left `pending` is one whose output scripts
+ * never ran, and generating on from it would build on text the commit is about
+ * to change — so the browser finishes it first, or says it gives up on it
+ * (`abandonPending`), which clears the mark.
+ *
+ * A regenerate asks only the first: it replaces the head rather than building on
+ * it, and the pending turn it leaves behind as a sibling is finished whenever a
+ * swipe makes it the head again.
+ */
+async function settleHead(
+  deps: AppDeps,
+  chat: Chat,
+  head: Message | undefined,
+  scripts: GenerationScripts,
+  buildsOnHead: boolean,
+): Promise<void> {
+  if (scripts.baseHeadId !== undefined && scripts.baseHeadId !== chat.headMessageId) throw headMoved();
+  if (!buildsOnHead || head?.scriptState !== 'pending') return;
+  if (!scripts.abandonPending) {
+    throw new ApiError(
+      409,
+      'post_processing_pending',
+      'The last reply is still waiting for the scripts of the card to finish it',
+    );
+  }
+  await deps.db.update(messages).set({ scriptState: null }).where(eq(messages.id, head.id));
+}
+
+/**
+ * The plan's view of the start triggers' writes: the state the prompt reads with
+ * them laid over `base`, and the fields that carry them to `persist`.
+ */
+function startedFrom(
+  base: Variables,
+  scripts: GenerationScripts,
+): Pick<GenerationPlan, 'variables' | 'turnBase' | 'startDelta' | 'injections' | 'postProcess'> {
+  return {
+    variables: applyVariableDelta(base, scripts.startDelta),
+    turnBase: base,
+    ...(scripts.startDelta ? { startDelta: scripts.startDelta } : {}),
+    ...(scripts.injections ? { injections: scripts.injections } : {}),
+    ...(scripts.postProcess ? { postProcess: true } : {}),
+  };
+}
 
 /** Same keys, same values — what "the fold did not move" means for a snapshot. */
 function sameVariables(a: Variables, b: Variables): boolean {
@@ -639,7 +713,7 @@ function variableTimeline(
   let variables = computeVariables([], defaults);
   let previous = variables;
   for (const message of path) {
-    variables = computeVariables([message.content], variables);
+    variables = computeVariables([message], variables);
     if (message.role !== 'assistant' || sameVariables(previous, variables)) continue;
     timeline.push({ messageId: message.id, variables });
     previous = variables;
@@ -962,6 +1036,7 @@ async function regeneratePlan(
   deps: AppDeps,
   chat: Chat,
   focusIds: string[] = [],
+  scripts: GenerationScripts = NO_SCRIPTS,
 ): Promise<GenerationPlan> {
   await requireEnabledModel(deps, chat.userId, chat.model);
   const context = await loadGenerationContext(deps, chat);
@@ -969,6 +1044,7 @@ async function regeneratePlan(
   const path = buildPath(context.all, chat.headMessageId);
   const head = path[path.length - 1];
   if (!head) throw badRequest('invalid_state', 'The chat has no messages to generate from');
+  await settleHead(deps, chat, head, scripts, false);
 
   // An assistant head is replaced by a sibling; a user head (edit fork, or a
   // failed generation) gets a fresh assistant child instead.
@@ -1005,7 +1081,9 @@ async function regeneratePlan(
     // back with it — a regenerate is the same turn, judged the same way.
     directions: lastUserDirections(kept),
     preset: getPreset(chat.preset),
-    variables: pathVariables(context.row, kept.map((message) => message.content)),
+    // The kept branch only: the head being replaced takes its delta with it, so
+    // a regenerate starts from where the turn before it left things.
+    ...startedFrom(pathVariables(context.row, kept), scripts),
     clock: requestClock(c, context.row, kept),
     seed: chat.id,
     // Without the head being replaced: its records belong to the swipe this
@@ -1595,6 +1673,9 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         // The copy is the same turn, so it keeps the lore it triggered: timed
         // effects read the branch's records, and a typo fix must not end them.
         ...(original?.loreTriggers ? { loreTriggers: original.loreTriggers } : {}),
+        // …and what its scripts left: they ran once, for the turn the copy still
+        // is, and nothing runs them again for a rewording.
+        ...(original?.variableDelta ? { variableDelta: original.variableDelta } : {}),
         // Distinct stamps, like the greeting roots: siblings order by creation, and
         // one insert's rows would otherwise share the transaction's `now()`.
         createdAt: new Date(stamp + position),
@@ -1621,6 +1702,119 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       return row!;
     });
     return c.json(await chatState(deps, updated));
+  });
+
+  /**
+   * What the card's scripts made of the head, written back: the values they left
+   * (`variableDelta`, which replaces the turn's; null clears it), the text the
+   * output scripts turned the reply into (`content`, in place — a script's edit is
+   * not the reader's and forks nothing), and `clearPending`, which says the turn
+   * the browser owed its output scripts is now finished.
+   *
+   * Only the head: a button the reader clicked acts on the chat as it stands, and
+   * the reply the output scripts run over is the one that was just generated. A
+   * head that moved on meanwhile is a 409, and so is a revision other than the one
+   * the scripts ran on — a second tab finishing the same turn, or a hand edit or a
+   * continue that changed it since — so nothing the scripts did is applied twice
+   * or applied to text they never read. The browser refetches and runs again.
+   *
+   * It takes the generation slot, as a delete does: a commit landing under a
+   * running stream would change the state that stream was planned on.
+   */
+  app.post('/:id/script-commit', async (c) => {
+    const id = requireUuidParam(c);
+    const userId = c.get('userId');
+    const body = await readJsonBody(c);
+    const messageId = requireString(body, 'messageId');
+    if (!isUuid(messageId)) throw badRequest('invalid_request', 'messageId must be a message id');
+    const scriptRev = body['scriptRev'];
+    if (typeof scriptRev !== 'number' || !Number.isInteger(scriptRev) || scriptRev < 0) {
+      throw badRequest('invalid_request', 'scriptRev must be the revision the scripts ran on');
+    }
+    const variableDelta = 'variableDelta' in body ? optionalVariableDelta(body, 'variableDelta') : undefined;
+    const content = optionalString(body, 'content');
+    const clearPending = optionalBoolean(body, 'clearPending') ?? false;
+    if (variableDelta === undefined && content === undefined && !clearPending) {
+      throw badRequest('invalid_request', 'Nothing to commit');
+    }
+
+    const chat = await loadWritableChat(deps, id, userId);
+    if (!(await acquireChatSlot(deps, chat.id, userId))) await rejectBusyChat(deps, chat.id, userId);
+    let committed: { chat: Chat; message: Message };
+    try {
+      committed = await deps.db.transaction(async (tx) => {
+        // Both rows locked, the message first: a hand edit takes no slot, and it
+        // locks the message and then the chat, so taking them in the same order
+        // is what keeps the two from deadlocking. The chat's lock is what a
+        // branch switch waits on, so the head read here is the head this lands on.
+        const [current] = await tx
+          .select()
+          .from(messages)
+          .where(and(eq(messages.id, messageId), eq(messages.chatId, chat.id)))
+          .for('update');
+        const [locked] = await tx
+          .select({ headMessageId: chats.headMessageId })
+          .from(chats)
+          .where(eq(chats.id, chat.id))
+          .for('update');
+        if (!current || locked?.headMessageId !== messageId) throw headMoved();
+        if (current.scriptRev !== scriptRev) throw scriptRevMoved();
+        if (clearPending && current.scriptState !== 'pending') {
+          throw new ApiError(409, 'not_pending', 'This turn is not waiting for the scripts of the card');
+        }
+
+        const [message] = await tx
+          .update(messages)
+          .set({
+            ...(variableDelta !== undefined ? { variableDelta: storableDelta(variableDelta) } : {}),
+            ...(content !== undefined ? { content } : {}),
+            ...(clearPending ? { scriptState: null } : {}),
+            scriptRev: sql`${messages.scriptRev} + 1`,
+          })
+          .where(eq(messages.id, messageId))
+          .returning();
+        if (content !== undefined && content !== current.content) {
+          await invalidateMemoryForEdit(tx, chat.id, messageId);
+        }
+        const [row] = await tx
+          .update(chats)
+          .set({ updatedAt: new Date() })
+          .where(eq(chats.id, chat.id))
+          .returning();
+        return { chat: row!, message: message! };
+      });
+    } finally {
+      await releaseChatSlot(deps, chat.id);
+    }
+
+    // The text the reader will keep is the one the unlocks are asked about too;
+    // they only ever open, so asking again after the raw text cost nothing.
+    const unlockedAssetIds =
+      content !== undefined ? await openUnlocks(deps, chat.id, committed.message.content) : [];
+    // The turn is finished, so the work it held back can start.
+    if (clearPending) scheduleBackgroundUpdates(deps, chat.id);
+    const state = (await chatState(deps, committed.chat)) as Record<string, unknown>;
+    return c.json({ ...state, ...(unlockedAssetIds.length > 0 ? { unlockedAssetIds } : {}) });
+  });
+
+  /** The reader's global variables on this chat's plot (see `plotReaderVariables`). */
+  app.get('/:id/global-variables', async (c) => {
+    const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
+    return c.json({ variables: await loadGlobalVariables(deps, chat.userId, chat.plotId) });
+  });
+
+  /**
+   * Merges into them: `{ variables: { name: value | null } }`, null unsetting, and
+   * answers with the whole map. They are the reader's own on the plot rather than
+   * the chat's, so a chat an import is still filling may write them too.
+   */
+  app.patch('/:id/global-variables', async (c) => {
+    const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
+    const body = await readJsonBody(c);
+    if (!('variables' in body)) throw badRequest('invalid_request', 'variables is required');
+    return c.json({
+      variables: await mergeGlobalVariables(deps, chat.userId, chat.plotId, body['variables']),
+    });
   });
 
   /**
@@ -1769,6 +1963,10 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const directions = optionalDirections(body);
     const attachmentIds = optionalAttachmentIds(body);
     const focusIds = optionalMemberIds(body, 'focusCharacterIds') ?? [];
+    // What the card's input and start triggers left, over the state this turn's
+    // own macros fold to — stored on the turn, which is the message they ran for.
+    const variableDelta = optionalVariableDelta(body, 'variableDelta');
+    const scripts = readGenerationScripts(body, { startDelta: false });
 
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
       const chat = await loadWritableChat(deps, id, userId);
@@ -1779,6 +1977,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       // Still before any write, and it needs the card the context just loaded.
       if (source === 'component') requireComponentTurnAllowed(chat, context.row);
       const focusNames = focusNamesOf(context.onStage, focusIds);
+      const path = buildPath(context.all, chat.headMessageId);
+      await settleHead(deps, chat, path.at(-1), scripts, true);
 
       // One transaction, because the uploads are part of the turn: an id that is
       // not this chat's own — or that another turn already claimed — must leave
@@ -1795,6 +1995,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
             // Stored on the turn rather than on the request, so a regenerate of it
             // re-applies the same ruling.
             ...(directions ? { directions } : {}),
+            ...(variableDelta ? { variableDelta: storableDelta(variableDelta) } : {}),
           })
           .returning();
         await bindAttachments(tx, chat.id, created!.id, attachmentIds);
@@ -1805,7 +2006,6 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         return created!;
       });
 
-      const path = buildPath(context.all, chat.headMessageId);
       const memory = await buildMemoryInput(deps, chat, path, content);
       // The turn just written is the last of the history, and the images ride on
       // it; the rest of the branch's are not re-sent (see `withTurnImages`).
@@ -1825,10 +2025,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         ...(context.narrator ? { narrator: context.narrator } : {}),
         ...(directions ? { directions } : {}),
         preset: getPreset(chat.preset),
-        variables: pathVariables(context.row, [
-          ...path.map((message) => message.content),
-          content,
-        ]),
+        // The stored row, so the turn's delta is folded with its text.
+        ...startedFrom(pathVariables(context.row, [...path, userMessage]), scripts),
         clock: requestClock(c, context.row, [...path, userMessage]),
         seed: chat.id,
         loreState: loreStateOf([...path, userMessage]),
@@ -1843,10 +2041,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   app.post('/:id/regenerate', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
-    const focusIds = optionalMemberIds(await optionalJsonBody(c), 'focusCharacterIds') ?? [];
+    const body = await optionalJsonBody(c);
+    const focusIds = optionalMemberIds(body, 'focusCharacterIds') ?? [];
+    const scripts = readGenerationScripts(body, { startDelta: true });
 
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> =>
-      regeneratePlan(c, deps, await loadWritableChat(deps, id, userId), focusIds),
+      regeneratePlan(c, deps, await loadWritableChat(deps, id, userId), focusIds, scripts),
     );
   });
 
@@ -1869,7 +2069,9 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   app.post('/:id/continue', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
-    const focusIds = optionalMemberIds(await optionalJsonBody(c), 'focusCharacterIds') ?? [];
+    const body = await optionalJsonBody(c);
+    const focusIds = optionalMemberIds(body, 'focusCharacterIds') ?? [];
+    const scripts = readGenerationScripts(body, { startDelta: true });
 
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
       const chat = await loadWritableChat(deps, id, userId);
@@ -1881,6 +2083,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       if (!head || head.role !== 'assistant') {
         throw badRequest('invalid_state', 'The current head is not an assistant message');
       }
+      await settleHead(deps, chat, head, scripts, true);
       const memory = await buildMemoryInput(deps, chat, path, lastUserText(path));
       // The partial assistant turn must stay last for the model to resume it, so it
       // is re-attached when the summary swallowed it.
@@ -1902,7 +2105,10 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         // is still the one in force. Auto-continue, below, is a beat past it.
         directions: lastUserDirections(path),
         preset: getPreset(chat.preset),
-        variables: pathVariables(context.row, path.map((message) => message.content)),
+        // The prompt reads the whole branch, head included; the head's new delta
+        // is measured from the branch before it, since the continue rewrites it.
+        ...startedFrom(pathVariables(context.row, path), scripts),
+        turnBase: pathVariables(context.row, path.slice(0, -1)),
         clock: requestClock(c, context.row, path),
         seed: chat.id,
         // The message being generated is the head itself, so the branch before it
@@ -1923,7 +2129,9 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   app.post('/:id/auto', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
-    const focusIds = optionalMemberIds(await optionalJsonBody(c), 'focusCharacterIds') ?? [];
+    const body = await optionalJsonBody(c);
+    const focusIds = optionalMemberIds(body, 'focusCharacterIds') ?? [];
+    const scripts = readGenerationScripts(body, { startDelta: true });
 
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
       const chat = await loadWritableChat(deps, id, userId);
@@ -1935,6 +2143,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       if (!head || head.role !== 'assistant') {
         throw badRequest('invalid_state', 'The current head is not an assistant message');
       }
+      await settleHead(deps, chat, head, scripts, true);
       const memory = await buildMemoryInput(deps, chat, path, lastUserText(path));
       // The scene to continue must be in the prompt, so the head is re-attached
       // when the summary swallowed it.
@@ -1953,7 +2162,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         authorNote: context.authorNote,
         ...(context.narrator ? { narrator: context.narrator } : {}),
         preset: getPreset(chat.preset),
-        variables: pathVariables(context.row, path.map((message) => message.content)),
+        ...startedFrom(pathVariables(context.row, path), scripts),
         clock: requestClock(c, context.row, path),
         seed: chat.id,
         loreState: loreStateOf(path),
@@ -1979,7 +2188,9 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   app.post('/:id/narrate', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
-    const focusIds = optionalMemberIds(await optionalJsonBody(c), 'focusCharacterIds') ?? [];
+    const body = await optionalJsonBody(c);
+    const focusIds = optionalMemberIds(body, 'focusCharacterIds') ?? [];
+    const scripts = readGenerationScripts(body, { startDelta: true });
 
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
       const chat = await loadWritableChat(deps, id, userId);
@@ -1989,6 +2200,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const path = buildPath(context.all, chat.headMessageId);
       const head = path[path.length - 1];
       if (!head) throw badRequest('invalid_state', 'The chat has no messages to narrate from');
+      await settleHead(deps, chat, head, scripts, true);
       const memory = await buildMemoryInput(deps, chat, path, lastUserText(path));
       // The scene to narrate must be in the prompt, so the head is re-attached
       // when the summary swallowed it.
@@ -2007,7 +2219,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         authorNote: context.authorNote,
         ...(context.narrator ? { narrator: context.narrator } : {}),
         preset: getPreset(chat.preset),
-        variables: pathVariables(context.row, path.map((message) => message.content)),
+        ...startedFrom(pathVariables(context.row, path), scripts),
         clock: requestClock(c, context.row, path),
         seed: chat.id,
         loreState: loreStateOf(path),
@@ -2213,7 +2425,13 @@ export function messageRoutes(deps: AppDeps): Hono<AppEnv> {
       // One transaction: the edit and the memory invalidation it forces must not be
       // observable apart, or a refresh could snapshot the old text and still win.
       await deps.db.transaction(async (tx) => {
-        await tx.update(messages).set({ content }).where(eq(messages.id, id));
+        await tx
+          .update(messages)
+          // The delta stays: it holds the values the scripts set, not a reading of
+          // the text. The revision moves, so a script commit computed on the old
+          // text cannot land on top of the reader's own words.
+          .set({ content, scriptRev: sql`${messages.scriptRev} + 1` })
+          .where(eq(messages.id, id));
         await invalidateMemoryForEdit(tx, row.chat.id, id);
       });
       return c.json({ messageId: id });
@@ -2227,6 +2445,9 @@ export function messageRoutes(deps: AppDeps): Hono<AppEnv> {
         parentId: row.message.parentId,
         role: 'user',
         content,
+        // The scripts that ran for the turn are not run again for an edit of it —
+        // RisuAI never re-runs a trigger on one either — so what they left stays.
+        ...(row.message.variableDelta ? { variableDelta: row.message.variableDelta } : {}),
       })
       .returning();
     await deps.db

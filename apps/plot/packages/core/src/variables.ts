@@ -1,12 +1,19 @@
 /**
  * Path-derived chat variables.
  *
- * There is no storage column: the value of a variable is whatever you get by
- * replaying the `{{setvar}}` / `{{addvar}}` macros — and SillyTavern's
- * `{{incvar}}` / `{{decvar}}` — of the messages on the current branch, oldest
- * first. Because the message tree is append-only, a swipe or a fork automatically
- * yields that branch's state — the same guarantee a per-node state column would
- * give, at zero storage cost.
+ * The value of a variable is whatever you get by replaying the `{{setvar}}` /
+ * `{{addvar}}` macros — and SillyTavern's `{{incvar}}` / `{{decvar}}` — of the
+ * messages on the current branch, oldest first. Because the message tree is
+ * append-only, a swipe or a fork automatically yields that branch's state.
+ *
+ * The one thing stored is what a card's scripts did, which no replay can redo:
+ * a trigger or a Lua function runs in the reader's browser, once, and may roll a
+ * die or read the reader's answer to a prompt. Its result is kept on the message
+ * it ran for as that message's `variableDelta` — the values the scripts left,
+ * not the operations that produced them — and laid over the message's own
+ * macros. So the rule for any message is: its parent's state, then its own
+ * macros, then its delta on top. A delta lives on its node like everything else
+ * here, so a sibling that never carried it never sees it.
  *
  * Deliberately free of everything but the CBS evaluator (`cbs.ts`, itself
  * dependency-free), so the web client can import it (`@shizue/core/variables`)
@@ -47,6 +54,82 @@ function adopt(source: Record<string, string>): Variables {
 }
 
 /**
+ * What a card's scripts left on one message: the final value of every variable
+ * they changed, with `null` for one they unset. Absolute rather than a list of
+ * operations, so laying it over the message a second time changes nothing, and
+ * it is right whatever order RisuAI ran the scripts and the macros in — the
+ * browser computes it as the difference between where the scripts ended and
+ * where the message's macros alone would have ended (`diffVariables`).
+ */
+export type VariableDelta = Record<string, string | null>;
+
+/**
+ * One message of a branch as the fold reads it: its text, and the delta its
+ * scripts left, if any. A bare string is a message without one — text still being
+ * typed or streamed, which no script has run on yet.
+ */
+export type FoldItem = string | { readonly content: string; readonly variableDelta?: VariableDelta | null };
+
+/**
+ * The limits a stored delta is held to — the API refuses one past them, and the
+ * browser that computes one checks the same numbers first. A value may be as
+ * long as anything the fold itself lets grow (`MAX_FOLD_CHARS`); a delta is
+ * capped in keys and in total size, since it is read back on every fold of the
+ * branch. A name the length of a sentence is not a variable anyone reads.
+ */
+export const MAX_DELTA_KEYS = 512;
+export const MAX_VARIABLE_NAME_LENGTH = 256;
+export const MAX_DELTA_CHARS = 1_000_000;
+
+/** Lays `delta` over `variables` in place: a string sets, `null` unsets. */
+function layDelta(variables: Variables, delta: VariableDelta | null | undefined): void {
+  if (!delta) return;
+  // Own keys only: a delta arrives as parsed JSON, where `__proto__` is an own
+  // key like any other, and the target has no prototype to be confused by it.
+  for (const key of Object.keys(delta)) {
+    const value = delta[key];
+    if (value === null) delete variables[key];
+    else if (typeof value === 'string') variables[key] = value;
+  }
+}
+
+/** `variables` with `delta` laid over it, as a fresh map; neither input is touched. */
+export function applyVariableDelta(variables: Variables, delta: VariableDelta | null | undefined): Variables {
+  const next = adopt(variables);
+  layDelta(next, delta);
+  return next;
+}
+
+/**
+ * The delta that takes `base` to `target`: every key whose value differs, and
+ * `null` for every key `target` dropped. Null when they are the same map, so a
+ * message whose scripts changed nothing stores nothing.
+ *
+ * `applyVariableDelta(base, diffVariables(target, base))` is `target` — which is
+ * why the browser computes a message's delta with this, against the fold of the
+ * message's own macros (`computeVariables([content], parentState)`), and not by
+ * recording what the scripts did step by step.
+ */
+export function diffVariables(target: Variables, base: Variables): VariableDelta | null {
+  const delta: VariableDelta = Object.create(null) as VariableDelta;
+  let changed = false;
+  for (const key of Object.keys(target)) {
+    const value = readVariable(target, key);
+    if (value !== undefined && value !== readVariable(base, key)) {
+      delta[key] = value;
+      changed = true;
+    }
+  }
+  for (const key of Object.keys(base)) {
+    if (readVariable(target, key) === undefined) {
+      delta[key] = null;
+      changed = true;
+    }
+  }
+  return changed ? delta : null;
+}
+
+/**
  * `{{setvar::key::value}}` / `{{addvar::key::delta}}`, and `{{incvar::key}}` /
  * `{{decvar::key}}`, as the CBS evaluator reads a call: the name without case,
  * spaces, `_` or `-`, and arguments split where the author wrote separators. The
@@ -77,6 +160,60 @@ const mayHoldVariableMacro = (text: string): boolean => text.includes('{{') && /
  * the server, down with them. The scale of the screen's own budgets.
  */
 const MAX_FOLD_CHARS = 100_000;
+
+/** The longest value a delta may carry: no longer than the fold could have grown it. */
+export const MAX_VARIABLE_VALUE_LENGTH = MAX_FOLD_CHARS;
+
+/** How many names, and how many characters in all, a checked map may hold. */
+export interface DeltaLimits {
+  keys: number;
+  chars: number;
+}
+
+export type DeltaCheck = { ok: true; delta: VariableDelta | null } | { ok: false; error: string };
+
+/**
+ * Reads a delta that arrived from outside — a request body, a script's result —
+ * into a null-prototype map, or says why it is not one. Every name is a
+ * non-empty string within `MAX_VARIABLE_NAME_LENGTH`, every value a string
+ * within `MAX_VARIABLE_VALUE_LENGTH` or `null`, and the whole within `limits`.
+ * U+0000 is refused anywhere in it: Postgres cannot store it in a jsonb string,
+ * so it would otherwise surface as a failed write rather than as a bad request.
+ * An empty object is no delta at all, and so is `null`.
+ */
+export function checkVariableDelta(
+  value: unknown,
+  limits: DeltaLimits = { keys: MAX_DELTA_KEYS, chars: MAX_DELTA_CHARS },
+): DeltaCheck {
+  if (value === null || value === undefined) return { ok: true, delta: null };
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    return { ok: false, error: 'must be an object of strings and nulls' };
+  }
+  const source = value as Record<string, unknown>;
+  const keys = Object.keys(source);
+  if (keys.length > limits.keys) return { ok: false, error: `may hold at most ${limits.keys} variables` };
+  const delta: VariableDelta = Object.create(null) as VariableDelta;
+  let chars = 0;
+  for (const key of keys) {
+    if (!key || key.length > MAX_VARIABLE_NAME_LENGTH) {
+      return { ok: false, error: `variable names must be 1 to ${MAX_VARIABLE_NAME_LENGTH} characters` };
+    }
+    const entry = source[key];
+    if (entry !== null && typeof entry !== 'string') {
+      return { ok: false, error: 'values must be strings or null' };
+    }
+    if (entry !== null && entry.length > MAX_VARIABLE_VALUE_LENGTH) {
+      return { ok: false, error: `values may be at most ${MAX_VARIABLE_VALUE_LENGTH} characters` };
+    }
+    if (key.includes('\u0000') || entry?.includes('\u0000')) {
+      return { ok: false, error: 'must not contain U+0000' };
+    }
+    chars += key.length + (entry?.length ?? 0);
+    if (chars > limits.chars) return { ok: false, error: `may hold at most ${limits.chars} characters in all` };
+    delta[key] = entry;
+  }
+  return { ok: true, delta: keys.length > 0 ? delta : null };
+}
 
 /** Thrown by the fold's `grow`, and caught a message at a time. */
 class FoldBudgetExhausted extends Error {}
@@ -166,21 +303,29 @@ const toNumber = (value: string | undefined): number => {
 };
 
 /**
- * Folds the macros of `texts` (branch messages, oldest first) over `defaults`,
- * each message in the order its macros were written (`foldMessage`).
- * Malformed macros — an empty key, a non-numeric `addvar` delta — are skipped
- * rather than throwing, so a model typo can never break a chat.
+ * Folds the branch `items` (messages, oldest first) over `defaults`: each
+ * message's macros in the order they were written (`foldMessage`), then the delta
+ * its scripts left on top (`VariableDelta`). Malformed macros — an empty key, a
+ * non-numeric `addvar` delta — are skipped rather than throwing, so a model typo
+ * can never break a chat.
+ *
+ * Every fold of a branch goes through here — the prompt's, the chat state's, the
+ * export's and the reader's own screen — so passing the message rows themselves,
+ * rather than their text, is what keeps a delta from being seen by one and not
+ * the others.
  *
  * `incvar`/`decvar` are `addvar` by 1 and -1, which is how ST defines them — so a
  * value that is not a number counts as 0 here too, where ST's `addvar` would
  * append the digit to the text instead.
  */
-export function computeVariables(texts: readonly string[], defaults: Variables = {}): Variables {
+export function computeVariables(items: readonly FoldItem[], defaults: Variables = {}): Variables {
   // Copied rather than spread: a card's defaultVariables comes back from jsonb as
   // an ordinary object, and spreading it would hand the result a prototype again.
   const variables = adopt(defaults);
-  for (const text of texts) {
+  for (const item of items) {
+    const text = typeof item === 'string' ? item : item.content;
     if (text && mayHoldVariableMacro(text)) foldMessage(text, variables);
+    if (typeof item !== 'string') layDelta(variables, item.variableDelta);
   }
   return variables;
 }
