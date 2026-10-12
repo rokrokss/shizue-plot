@@ -7,7 +7,7 @@
  * that renders its own key path at someone.
  */
 import { MIGRATION_WARNING_CODES, SITE_SCHEMAS } from '@shizue/core/migrate';
-import { createTranslator } from 'next-intl';
+import { createTranslator, IntlErrorCode } from 'next-intl';
 import { describe, expect, it } from 'vitest';
 import en from '../messages/en.json';
 import ja from '../messages/ja.json';
@@ -28,6 +28,25 @@ describe('the message catalogues', () => {
     const source = keys(ko).sort();
     expect(keys(en).sort()).toEqual(source);
     expect(keys(ja).sort()).toEqual(source);
+  });
+
+  // Every string is ICU: a bare `<style>` opens a tag that never closes, and the
+  // screen logs the error and shows its key path on every render. Formatting
+  // without values is allowed to fail here; parsing is not. A literal tag is
+  // quoted, as in `'<START>'`.
+  it('parse as messages in every locale', () => {
+    for (const [locale, messages] of Object.entries({ ko, en, ja })) {
+      const invalid: string[] = [];
+      const t = createTranslator({
+        locale,
+        messages,
+        onError: (error) => {
+          if (error.code === IntlErrorCode.INVALID_MESSAGE) invalid.push(error.message);
+        },
+      }) as unknown as (key: string) => string;
+      for (const key of keys(messages)) t(key);
+      expect(invalid, locale).toEqual([]);
+    }
   });
 });
 

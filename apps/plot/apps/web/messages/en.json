@@ -244,7 +244,7 @@
     "displayScripts": "Display scripts",
     "displayScriptsHint": "A regular expression selects part of a message and an HTML template draws it. Scripts run in order, each also matching what the earlier ones drew. Importing a RisuAI card brings its editdisplay scripts here.",
     "creatorCss": "Stylesheet",
-    "creatorCssHint": "CSS for the markup your display scripts draw. It applies inside messages only, and only allowed properties are kept. Importing a RisuAI card brings the <style> from its background HTML here.",
+    "creatorCssHint": "CSS for the markup your display scripts draw. It applies inside messages only, and only allowed properties are kept. Importing a RisuAI card brings the '<style>' from its background HTML here.",
     "displayScriptEmpty": "No display scripts yet.",
     "displayScriptEntry": "Script {index}",
     "displayScriptIn": "Pattern",

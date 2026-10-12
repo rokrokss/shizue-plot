@@ -244,7 +244,7 @@
     "displayScripts": "표시 스크립트",
     "displayScriptsHint": "정규식으로 잡은 부분을 HTML 템플릿으로 그립니다. 적용 순서대로, 앞 스크립트가 그린 결과 위에서도 다시 매치합니다. RisuAI 카드의 editdisplay 스크립트를 가져오면 여기에 들어옵니다.",
     "creatorCss": "스타일시트",
-    "creatorCssHint": "표시 스크립트가 그린 화면에 입힐 CSS입니다. 메시지 안에만 적용되고, 허용된 속성만 남습니다. RisuAI 카드를 가져오면 배경 HTML의 <style>이 여기에 들어옵니다.",
+    "creatorCssHint": "표시 스크립트가 그린 화면에 입힐 CSS입니다. 메시지 안에만 적용되고, 허용된 속성만 남습니다. RisuAI 카드를 가져오면 배경 HTML의 '<style>'이 여기에 들어옵니다.",
     "displayScriptEmpty": "표시 스크립트가 없습니다.",
     "displayScriptEntry": "스크립트 {index}",
     "displayScriptIn": "정규식",
