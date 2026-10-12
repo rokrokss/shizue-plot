@@ -13,6 +13,7 @@ import {
   type Segment,
 } from '../src/lib/displayScripts';
 import type { DisplayScript } from '../src/lib/types';
+import { normalizeCard } from '@shizue/core';
 
 const script = (overrides: Partial<DisplayScript> = {}): DisplayScript => ({
   in: '\\[status\\] hp=(\\d+)',
@@ -326,6 +327,74 @@ describe('actions', () => {
       '이전에도 조용했다',
     );
     expect(html(segments)).toEqual([]);
+  });
+});
+
+describe('how many matches a script rewrites', () => {
+  const twice = '[status] hp=50 그리고 [status] hp=20';
+
+  it('rewrites the first match only when the script carries flags without g', () => {
+    // RisuAI's reading, and SillyTavern's: `replace` with a pattern that is not global.
+    const segments = applyDisplayScripts(twice, context([script({ flags: 'i' })]));
+    expect(html(segments)).toEqual(['<div class="x-shizue-hp">HP 50</div>']);
+    expect(text(segments)).toEqual([' 그리고 [status] hp=20']);
+  });
+
+  it('rewrites every match with g, or with no flags at all', () => {
+    expect(html(applyDisplayScripts(twice, context([script({ flags: 'gi' })])))).toHaveLength(2);
+    expect(html(applyDisplayScripts(twice, context([script()])))).toHaveLength(2);
+    expect(html(applyDisplayScripts(twice, context([script({ flags: '' })])))).toHaveLength(2);
+  });
+
+  it('moves the first match only when the flags have no g, and leaves the rest in place', () => {
+    const segments = applyDisplayScripts(twice, context([script({ action: 'move_top', flags: 'u' })]));
+    expect(segments[0]).toEqual({ kind: 'html', html: '<div class="x-shizue-hp">HP 50</div>' });
+    expect(text(segments)).toEqual([' 그리고 [status] hp=20']);
+  });
+
+  it('still moves every match for a script written in the editor, which carries no flags', () => {
+    const segments = applyDisplayScripts(twice, context([script({ action: 'move_bottom' })]));
+    expect(html(segments)).toHaveLength(2);
+    expect(text(segments)).toEqual([' 그리고 ']);
+  });
+
+  it('runs an imported RisuAI script the way RisuAI does', () => {
+    const card = normalizeCard({
+      spec: 'chara_card_v2',
+      spec_version: '2.0',
+      data: {
+        name: '루미',
+        description: '',
+        personality: '',
+        scenario: '',
+        first_mes: '',
+        mes_example: '',
+        creator_notes: '',
+        system_prompt: '',
+        post_history_instructions: '',
+        alternate_greetings: [],
+        tags: [],
+        creator: '',
+        character_version: '',
+        extensions: {
+          risuai: {
+            customScripts: [
+              {
+                in: '\\[status\\] hp=(\\d+)',
+                out: '<div class="hp">HP $1</div>',
+                type: 'editdisplay',
+                ableFlag: true,
+                flag: 'gi<move_top, order 3>',
+              },
+            ],
+          },
+        },
+      },
+    });
+    const segments = applyDisplayScripts(twice.toUpperCase(), context(card.displayScripts ?? []));
+    // Case-blind from the `i`, moved by the directive, and once: the move took the `g`.
+    expect(segments[0]).toEqual({ kind: 'html', html: '<div class="x-shizue-hp">HP 50</div>' });
+    expect(text(segments)).toEqual([' 그리고 [STATUS] HP=20']);
   });
 });
 

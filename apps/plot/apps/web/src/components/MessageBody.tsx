@@ -32,17 +32,23 @@ import {
 } from '@/lib/displayScripts';
 import { balancePartial } from '@/lib/markdown/balance';
 import { splitBlocks } from '@/lib/markdown/blocks';
+import {
+  markupChunks,
+  remarkNoIndentedCode,
+  renderImageTokensAsHtml,
+} from '@/lib/markdown/html';
 import { rehypeDialogueQuotes } from '@/lib/markdown/quotes';
 import { rehypeWordReveal } from '@/lib/markdown/reveal';
-import { isSameOriginUrl, MESSAGE_SCOPE_CLASS } from '@/lib/sanitizeHtml';
+import { isExternalUrl, isSameOriginUrl, MESSAGE_SCOPE_CLASS } from '@/lib/sanitizeHtml';
 import { speechRuns } from '@/lib/speechRuns';
 import type { DisplayScript, PublicMember } from '@/lib/types';
 import { Avatar } from './Avatar';
 import { ChatImage } from './ChatImage';
 import { ComponentFrame } from './ComponentFrame';
+import { HtmlBlock } from './HtmlBlock';
 import { LockedImage } from './LockedImage';
 
-const remarkPlugins = [remarkGfm, remarkBreaks];
+const remarkPlugins = [remarkGfm, remarkBreaks, remarkNoIndentedCode];
 
 /**
  * A settled block is worth highlighting; the block still being written is not —
@@ -119,6 +125,17 @@ const components: Components = {
     if (!url || !isSameOriginUrl(url)) return null;
     return <ChatImage src={url} alt={alt ?? ''} />;
   },
+  // The rule an `<a>` in a message's HTML is held to (lib/sanitizeHtml), so a
+  // link reads the same however it was written: an http(s) address opens in a
+  // new tab and cannot reach back into this one; anything else is its label.
+  a: ({ node: _node, href, children }) =>
+    href && isExternalUrl(href) ? (
+      <a href={href} target="_blank" rel="noopener noreferrer nofollow">
+        {children}
+      </a>
+    ) : (
+      <>{children}</>
+    ),
   pre: ({ node: _node, children }) => <CodeBlock>{children}</CodeBlock>,
 };
 
@@ -161,6 +178,11 @@ interface TextRun {
   name: string | null;
   /** Drawn as 상황묘사 standing outside the dialogue rather than as prose. */
   narration: boolean;
+  /**
+   * A stretch holding HTML of its own (`lib/markdown/html`): one block, drawn as
+   * sanitized markup, unattributed — its `이름:` lines are the markup's text.
+   */
+  html: boolean;
   blocks: string[];
 }
 
@@ -240,8 +262,13 @@ function useDisplayPlan(
 }
 
 /**
- * Renders a message as markdown. Raw HTML is not enabled, so model output can
- * never inject markup. `*action*` becomes an <em>, styled in globals.css.
+ * Renders a message as markdown. `*action*` becomes an <em>, styled in globals.css.
+ *
+ * HTML the message writes itself — a greeting's status panel, a `<br>`, a
+ * `<details>` fold — is drawn as RisuAI draws it, block by block: a block that
+ * holds any is rendered as markdown with HTML enabled and sanitized like a
+ * display script's output (`lib/markdown/html`), and a block that holds none
+ * keeps everything below. Markup never reaches the DOM any other way.
  *
  * `{{img::slug}}` — and RisuAI's other asset macros, by slug or by an imported
  * card's own name for the image — is resolved against the character's assets
@@ -267,7 +294,9 @@ function useDisplayPlan(
  *
  * The speaker split comes last and only where there is still plain text to split:
  * an island a display script produced is the creator's own markup and is drawn as
- * it was written, and a component frame is a component. So a message that a script
+ * it was written, so is a block of the message's own HTML — `이름:` lines inside
+ * it stay its text, with no face beside them — and a component frame is a
+ * component. So a message that a script
  * turned into a status window keeps its status window, and the prose around it is
  * still told apart by who wrote it.
  */
@@ -325,20 +354,37 @@ export const MessageBody = memo(function MessageBody({
   }, [content, display, chatIndex, componentContext, plan]);
 
   /**
-   * Each text segment, already resolved, attributed and cut into blocks. The image
-   * and macro passes stay where they were — ahead of everything, over the whole
-   * segment — so a reference is never split across a run or a block boundary.
+   * Each text segment, already resolved, attributed and cut into blocks. The
+   * variable macros go first, over the whole segment, since one may hold a blank
+   * line. Then the segment is cut into prose and markup by block, and only then
+   * are the image references resolved — as markdown in prose, as `<img>` in
+   * markup, where markdown is not read. A reference holds no blank line, so no
+   * cut ever splits one. The speaker split runs over each stretch of prose; a
+   * stretch of markup is drawn as the markup it is.
    */
   const runs = useMemo<(TextRun[] | null)[]>(
     () =>
       segments.map((segment) => {
         if (segment.kind !== 'text') return null;
-        const text = stripVariableMacros(renderImageTokens(segment.text, assets, resolveAsset));
-        if (roster.length === 0) return [{ name: null, narration: false, blocks: splitBlocks(text) }];
-        return speechRuns(
-          text,
-          roster.map((member) => member.name),
-        ).map((run) => ({ name: run.name, narration: run.name === null, blocks: splitBlocks(run.text) }));
+        return markupChunks(stripVariableMacros(segment.text)).flatMap((chunk): TextRun[] => {
+          if (chunk.html) {
+            const markup = renderImageTokensAsHtml(chunk.text, assets, resolveAsset);
+            return [{ name: null, narration: false, html: true, blocks: [markup] }];
+          }
+          const text = renderImageTokens(chunk.text, assets, resolveAsset);
+          if (roster.length === 0) {
+            return [{ name: null, narration: false, html: false, blocks: splitBlocks(text) }];
+          }
+          return speechRuns(
+            text,
+            roster.map((member) => member.name),
+          ).map((run) => ({
+            name: run.name,
+            narration: run.name === null,
+            html: false,
+            blocks: splitBlocks(run.text),
+          }));
+        });
       }),
     [segments, assets, resolveAsset, roster],
   );
@@ -383,6 +429,9 @@ export const MessageBody = memo(function MessageBody({
         const own = runs[index]!;
         return own.map((run, at) => {
           const liveRun = index === liveSegment && at === own.length - 1;
+          if (run.html) {
+            return <HtmlBlock key={`${index}:${at}`} content={run.blocks[0]!} live={liveRun} />;
+          }
           const body = run.blocks.map((block, nth) => (
             <MarkdownBlock
               key={nth}

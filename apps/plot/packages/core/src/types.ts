@@ -66,6 +66,15 @@ export interface LoreSettings {
   tokenBudget?: number;
   /** V3 `recursive_scanning`: rescan with the activated content added to the scan text. */
   recursiveScanning: boolean;
+  /**
+   * Plain keys matched the way RisuAI matches them: case and spaces ignored on
+   * both sides (`마왕 성` finds `마왕성`), whatever an entry's `caseSensitive`
+   * says, and `{{// …}}` comments left out of the scan. Set by the import on a
+   * book that came from RisuAI, whose creator tested it that way; absent (off)
+   * everywhere else, so a SillyTavern or shizue book matches exactly as written.
+   * Regex keys are not touched.
+   */
+  risuMatching?: boolean;
 }
 
 /**
@@ -78,7 +87,11 @@ export interface DisplayScript {
   in: string;
   /** HTML template. `$1`..`$99`, `$&` and `$<name>` bind the match; CBS macros bind the chat. */
   out: string;
-  /** Regex flags. `g` is always applied. */
+  /**
+   * Regex flags as the script's source compiled them. Absent or empty: every
+   * match. Otherwise `g` decides — without it only the first match is rewritten
+   * or moved.
+   */
   flags?: string;
   /** Ascending application order. */
   order: number;
@@ -327,6 +340,13 @@ export interface NormalizedCard {
   scenario: string;
   firstMes: string;
   alternateGreetings: string[];
+  /**
+   * V3 `group_only_greetings`: openings the spec reserves for group chats. Kept
+   * on the card so an export writes them back where they came from; an import
+   * into a plot that already has a cast also makes them openings of the plot.
+   * Absent when none.
+   */
+  groupOnlyGreetings?: string[];
   /** Kept verbatim, including <START> separators. */
   mesExample: string;
   /** May be ''. Supports {{original}}. */

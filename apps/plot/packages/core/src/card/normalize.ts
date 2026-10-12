@@ -1,5 +1,5 @@
 import { CCardLib, type CharacterCardV3 } from '@risuai/ccardlib';
-import { DEFAULT_LORE_SETTINGS, type CardSpec, type NormalizedCard } from '../types.js';
+import { DEFAULT_LORE_SETTINGS, type CardSpec, type LoreSettings, type NormalizedCard } from '../types.js';
 import { loreEntryFromBook } from './bookEntry.js';
 import { componentCapabilitiesFromExtensions, componentCodeFromExtensions } from './componentCode.js';
 import { introFromExtensions } from './intro.js';
@@ -45,6 +45,56 @@ function withSillyTavernGaps(raw: object): object {
     filled = true;
   }
   return filled ? { ...card, data } : raw;
+}
+
+type Book = CharacterCardV3['data']['character_book'];
+
+/**
+ * Whether the card's lorebook was last written by RisuAI. Its exporter puts
+ * `risu_fullWordMatching` in the book's own `extensions` on every V2 and V3 card,
+ * and nothing else writes that. An older RisuAI card has only its
+ * `extensions.risuai` block to go by, which is not enough alone: our own export
+ * writes one too (for display scripts), and SillyTavern keeps one on a card it
+ * got from RisuAI — but both rewrite every entry in ST's terms, with a numeric
+ * `extensions.position`, which an entry made in RisuAI does not have. So the
+ * block counts once some entry is not written that way.
+ */
+function isRisuAiBook(book: Book, cardExtensions: Json): boolean {
+  if (!book) return false;
+  if (isObject(book.extensions) && typeof book.extensions['risu_fullWordMatching'] === 'boolean') return true;
+  return (
+    isObject(cardExtensions['risuai']) &&
+    (book.entries ?? []).some(
+      (entry) => !(isObject(entry.extensions) && typeof entry.extensions['position'] === 'number'),
+    )
+  );
+}
+
+/**
+ * The book's settings, each the card's own where it has one.
+ *
+ * A RisuAI book differs in two ways, so it runs as its creator tested it. Its
+ * plain keys are matched RisuAI's way (`risuMatching`) — unless the book asks
+ * for RisuAI's whole-word matching, which is not implemented, and to which exact
+ * matching is the nearer. And it scans recursively unless it says otherwise in
+ * RisuAI's terms: RisuAI takes `recursive_scanning` only together with
+ * `scan_depth` and `token_budget` (all three or none, `convertCharbook`), and
+ * without them recursion is on — a fixed default there, not a reader's setting.
+ * Its depth and budget without them are the reader's settings there (5 messages
+ * and 800 tokens by default), so ours stand in for those: depth 4 and the
+ * automatic budget.
+ */
+function loreSettingsOf(book: Book, cardExtensions: Json): LoreSettings {
+  const risu = isRisuAiBook(book, cardExtensions);
+  const allThree = book?.scan_depth != null && book.token_budget != null && book.recursive_scanning != null;
+  return {
+    scanDepth: book?.scan_depth ?? DEFAULT_LORE_SETTINGS.scanDepth,
+    // Only the card's own number: without one the budget is the automatic one.
+    ...(typeof book?.token_budget === 'number' ? { tokenBudget: book.token_budget } : {}),
+    recursiveScanning:
+      risu && !allThree ? true : (book?.recursive_scanning ?? DEFAULT_LORE_SETTINGS.recursiveScanning),
+    ...(risu && book?.extensions?.['risu_fullWordMatching'] !== true ? { risuMatching: true } : {}),
+  };
 }
 
 /**
@@ -96,6 +146,7 @@ export function normalizeCard(raw: unknown): NormalizedCard {
     scenario: data.scenario ?? '',
     firstMes: data.first_mes ?? '',
     alternateGreetings: data.alternate_greetings ?? [],
+    ...(data.group_only_greetings?.length ? { groupOnlyGreetings: data.group_only_greetings } : {}),
     mesExample: data.mes_example ?? '',
     systemPrompt: data.system_prompt ?? '',
     postHistoryInstructions: data.post_history_instructions ?? '',
@@ -104,12 +155,7 @@ export function normalizeCard(raw: unknown): NormalizedCard {
     creator: data.creator ?? '',
     characterVersion: data.character_version ?? '',
     lorebook: note ? [...ownLore, note] : ownLore,
-    loreSettings: {
-      scanDepth: book?.scan_depth ?? DEFAULT_LORE_SETTINGS.scanDepth,
-      // Only the card's own number: without one the budget is the automatic one.
-      ...(typeof book?.token_budget === 'number' ? { tokenBudget: book.token_budget } : {}),
-      recursiveScanning: book?.recursive_scanning ?? DEFAULT_LORE_SETTINGS.recursiveScanning,
-    },
+    loreSettings: loreSettingsOf(book, data.extensions ?? {}),
     ...(displayScripts ? { displayScripts } : {}),
     ...(defaultVariables ? { defaultVariables } : {}),
     ...(componentCode ? { componentCode } : {}),

@@ -1,6 +1,12 @@
 import { unzipSync, unzlibSync, zipSync, type Zippable } from 'fflate';
 import { describe, expect, it } from 'vitest';
-import { exportCardPng, exportCardV3 } from '../src/card/export.js';
+import {
+  exportCardCharx,
+  exportCardPng,
+  exportCardV3,
+  type CharxExportAsset,
+} from '../src/card/export.js';
+import { assetResolver } from '../src/cbs.js';
 import { MAX_ASSETS, MAX_ENTRY_BYTES, MAX_TOTAL_BYTES } from '../src/card/charx.js';
 import { CardParseError, normalizeCard, parseDecorators } from '../src/card/normalize.js';
 import { parseCard } from '../src/card/parse.js';
@@ -1024,6 +1030,87 @@ describe('the plot overlay on export', () => {
     expect(bare.data.first_mes).toBe(card.firstMes);
     expect(bare.data.alternate_greetings).toEqual(card.alternateGreetings);
   });
+
+  it('keeps the group-only greetings and writes each back once, where it came from', () => {
+    const grouped = normalizeCard({
+      ...v3Card,
+      data: { ...v3Card.data, group_only_greetings: ['모두 모였군.', '셋이서 왔소?'] },
+    });
+    expect(grouped.groupOnlyGreetings).toEqual(['모두 모였군.', '셋이서 왔소?']);
+    expect(exportCardV3(grouped).data.group_only_greetings).toEqual(['모두 모였군.', '셋이서 왔소?']);
+    // An import into a cast made one of them an opening of the plot: it goes out
+    // as a group greeting still, not as a one-on-one alternate as well.
+    const exported = exportCardV3(grouped, { intros: ['첫 인사.', '모두 모였군.', '둘째.'] });
+    expect(exported.data.first_mes).toBe('첫 인사.');
+    expect(exported.data.alternate_greetings).toEqual(['둘째.']);
+    expect(exported.data.group_only_greetings).toEqual(['모두 모였군.', '셋이서 왔소?']);
+    expect(normalizeCard(exported).groupOnlyGreetings).toEqual(grouped.groupOnlyGreetings);
+    // A card that has none carries no empty list.
+    expect(normalizeCard(v3Card)).not.toHaveProperty('groupOnlyGreetings');
+  });
+});
+
+describe('exportCardCharx', () => {
+  const card = exportCardV3(normalizeCard(v3Card));
+  const gif = (n: number): Uint8Array => new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, n]);
+  // As the plot holds them: an imported image keeps the card's own name, an
+  // upload without one has only its slug.
+  const plotAssets: CharxExportAsset[] = [
+    { slug: 'smile', name: 'Smile', ext: 'gif', bytes: gif(1) },
+    { slug: 'asset-2', name: '웃음.png', ext: 'png', bytes: placeholderPng() },
+    { slug: 'castle', name: null, ext: 'webp', bytes: gif(3) },
+  ];
+  const declaredIn = (charx: Uint8Array): unknown =>
+    JSON.parse(new TextDecoder().decode(unzipSync(charx)['card.json'])).data.assets;
+
+  it('declares the icon and every asset the way RisuAI reads them', () => {
+    const icon = { ext: 'jpg', bytes: new Uint8Array([0xff, 0xd8, 0xff, 1]) };
+    const charx = exportCardCharx(card, plotAssets, icon);
+    expect(declaredIn(charx)).toEqual([
+      { type: 'icon', uri: 'embeded://assets/icon/image/main.jpg', name: 'main', ext: 'jpg' },
+      { type: 'x-risu-asset', uri: 'embeded://assets/other/image/smile.gif', name: 'Smile', ext: 'gif' },
+      { type: 'x-risu-asset', uri: 'embeded://assets/other/image/asset-2.png', name: '웃음.png', ext: 'png' },
+      // The studio's `{{img::asset-2}}` has to find it in RisuAI too; `Smile` needs no alias.
+      { type: 'x-risu-asset', uri: 'embeded://assets/other/image/asset-2.png', name: 'asset-2', ext: 'png' },
+      { type: 'x-risu-asset', uri: 'embeded://assets/other/image/castle.webp', name: 'castle', ext: 'webp' },
+    ]);
+    // Stored, with the sizes in the local header rather than in a trailing
+    // descriptor: a streaming reader then never hunts for a signature in a picture.
+    expect(charx[6]! & 0x08).toBe(0);
+    expect(charx[8]).toBe(0);
+
+    const parsed = parseCard(charx);
+    expect(parsed.card.name).toBe('세이');
+    expect(parsed.iconBuffer).toEqual(icon.bytes);
+    expect(parsed.assets).toEqual([
+      { name: 'Smile', bytes: gif(1) },
+      { name: '웃음.png', bytes: placeholderPng() },
+      { name: 'castle', bytes: gif(3) },
+    ]);
+  });
+
+  it('brings every {{img::…}} reference back to the same picture', () => {
+    const parsed = parseCard(exportCardCharx(card, plotAssets)).assets!;
+    // A re-import mints slugs of its own; the names are what carry the references.
+    const reimported = parsed.map((asset, i) => ({ slug: `re-${i}`, name: asset.name }));
+    const before = assetResolver(plotAssets);
+    const after = assetResolver(reimported);
+    const bytesBefore = new Map(plotAssets.map((asset) => [asset.slug, asset.bytes]));
+    const bytesAfter = new Map(reimported.map((asset, i) => [asset.slug, parsed[i]!.bytes]));
+    for (const ref of ['Smile', 'smile', '웃음.png', '웃음', 'castle']) {
+      expect(bytesBefore.get(before(ref)!), ref).toBeDefined();
+      expect(bytesAfter.get(after(ref)!), ref).toEqual(bytesBefore.get(before(ref)!));
+    }
+  });
+
+  it('declares no icon when the member has no picture', () => {
+    const charx = exportCardCharx(card, [], undefined);
+    expect(declaredIn(charx)).toEqual([]);
+    const parsed = parseCard(charx);
+    expect(parsed.iconBuffer).toBeUndefined();
+    expect(parsed.assets).toEqual([]);
+    expect(parsed.card.firstMes).toBe('자리 있소?');
+  });
 });
 
 // RisuAI's terms come from its lorebook.svelte.ts (matching and decorators) and
@@ -1459,5 +1546,120 @@ describe('the PNG card export', () => {
       buildPngWithTextChunks({ chara: 'abc', ccv3: 'def' }),
     );
     expect(() => insertPngTextChunks(new Uint8Array([1, 2, 3]), [])).toThrow();
+  });
+});
+
+describe('normalizeCard - a RisuAI book', () => {
+  /** A V3 card as RisuAI's exporter writes one: the book carries `risu_fullWordMatching`. */
+  const risuCard = (book: Record<string, unknown> = {}) => {
+    const { recursive_scanning: _, ...rest } = v3Card.data.character_book;
+    return {
+      ...v3Card,
+      data: {
+        ...v3Card.data,
+        extensions: { risuai: { bias: [] } },
+        character_book: { ...rest, extensions: { risu_fullWordMatching: false }, ...book },
+      },
+    };
+  };
+
+  it('scans recursively and matches the RisuAI way when the card names no settings', () => {
+    expect(normalizeCard(risuCard()).loreSettings).toEqual({
+      scanDepth: 4,
+      recursiveScanning: true,
+      risuMatching: true,
+    });
+  });
+
+  it("keeps the card's settings when it names all three, as RisuAI does", () => {
+    const card = normalizeCard(risuCard({ scan_depth: 7, token_budget: 600, recursive_scanning: false }));
+    expect(card.loreSettings).toEqual({
+      scanDepth: 7,
+      tokenBudget: 600,
+      recursiveScanning: false,
+      risuMatching: true,
+    });
+  });
+
+  it('knows a V2 card from RisuAI through the lift to V3', () => {
+    // RisuAI's PNG export is V2. This book names a depth and a budget but no
+    // recursion, which RisuAI reads as no settings at all: recursion on.
+    const v2 = {
+      ...v2Card,
+      data: {
+        ...v2Card.data,
+        extensions: { risuai: { bias: [] } },
+        character_book: { ...v2Card.data.character_book, extensions: { risu_fullWordMatching: false } },
+      },
+    };
+    expect(normalizeCard(v2).spec).toBe('v2');
+    expect(normalizeCard(v2).loreSettings).toEqual({
+      scanDepth: 2,
+      tokenBudget: 512,
+      recursiveScanning: true,
+      risuMatching: true,
+    });
+    // The older kind, known by its block alone.
+    const older = { ...v2, data: { ...v2.data, character_book: { ...v2.data.character_book, extensions: {} } } };
+    expect(normalizeCard(older).loreSettings.risuMatching).toBe(true);
+  });
+
+  it('reads recursion as on when the card names it without the other two, as RisuAI does', () => {
+    expect(normalizeCard(risuCard({ recursive_scanning: false })).loreSettings.recursiveScanning).toBe(true);
+  });
+
+  it('knows an older RisuAI card by its extension block when its entries are RisuAI-made', () => {
+    const older = risuCard({ extensions: {} });
+    expect(normalizeCard(older).loreSettings.risuMatching).toBe(true);
+    // Without the block, it is anyone's card.
+    const anyone = { ...older, data: { ...older.data, extensions: {} } };
+    expect(normalizeCard(anyone).loreSettings).toEqual({ scanDepth: 4, recursiveScanning: false });
+  });
+
+  it('does not take a book SillyTavern or our export rewrote for a RisuAI one', () => {
+    // ST keeps the risuai block of a card it got from RisuAI, but writes every entry its own way.
+    const viaSillyTavern = stCard();
+    (viaSillyTavern.data.extensions as Record<string, unknown>)['risuai'] = { bias: [] };
+    expect(normalizeCard(viaSillyTavern).loreSettings.risuMatching).toBeUndefined();
+    expect(normalizeCard(stCard()).loreSettings.risuMatching).toBeUndefined();
+
+    // Our export writes a risuai block for display scripts, and ST's entry fields.
+    const exported = exportCardV3({
+      ...normalizeCard(v3Card),
+      displayScripts: [{ in: 'a', out: 'b', order: 0, enabled: true }],
+    });
+    expect((exported.data.extensions as Record<string, unknown>)['risuai']).toBeDefined();
+    expect(normalizeCard(exported).loreSettings.risuMatching).toBeUndefined();
+  });
+
+  it("leaves a book that asked for RisuAI's whole-word matching to exact matching", () => {
+    const whole = normalizeCard(risuCard({ extensions: { risu_fullWordMatching: true } }));
+    expect(whole.loreSettings.risuMatching).toBeUndefined();
+    expect(whole.loreSettings.recursiveScanning).toBe(true);
+  });
+
+  it('matches its keys without regard to spaces or case once in a prompt', () => {
+    const card = normalizeCard(
+      risuCard({
+        entries: [
+          {
+            keys: ['마왕 성'],
+            content: '마왕성은 북쪽 끝에 있다.',
+            extensions: {},
+            enabled: true,
+            insertion_order: 100,
+            use_regex: false,
+            constant: false,
+            case_sensitive: true,
+          },
+        ],
+      }),
+    );
+    const { system } = assemblePrompt({
+      plot: { name: '이야기', description: '', lorebook: [] },
+      characters: [{ name: card.name, card }],
+      history: [{ role: 'user', content: '마왕성으로 간다' }],
+    });
+    expect(system).toContain('마왕성은 북쪽 끝에 있다.');
   });
 });

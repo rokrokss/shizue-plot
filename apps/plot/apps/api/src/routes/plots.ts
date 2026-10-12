@@ -9,6 +9,7 @@ import {
   DEFAULT_USER_NAME,
   detectContentLanguage,
   emptyCard,
+  exportCardCharx,
   exportCardPng,
   exportCardV3,
   introFromCreatorNotes,
@@ -19,6 +20,7 @@ import {
   MAX_INTROS_PER_PLOT,
   parseCard,
   type CharxAssetFile,
+  type CharxExportAsset,
   type ImportProvenance,
   type LoreEntry,
   type MacroContext,
@@ -520,6 +522,46 @@ async function storeImportedAssets(
 }
 
 /**
+ * A card's group-only greetings, made openings of a plot it joins as one more
+ * of a cast. The V3 spec keeps them for group chats, and every chat of a plot
+ * with more than one member is one; a card that starts a plot on its own keeps
+ * them on the card alone. (In RisuAI's characterCards.ts only the import and
+ * the export touch them.)
+ *
+ * They go after the plot's own openings, under the caps the card import holds
+ * its greetings to: as many as there is room for, each cut to the opening
+ * length. The cap loses nothing — the greetings stay on the member's card and
+ * go out with its export (where the openings made of them are not written a
+ * second time, `CardPlotOverlay.intros`); it only bounds which become the root
+ * of a chat. The roster and the openings are read under the plot's row lock,
+ * so an edit to the openings racing this one is not undone by a stale list.
+ */
+async function addGroupGreetings(deps: AppDeps, plotId: string, card: NormalizedCard): Promise<void> {
+  const greetings = (card.groupOnlyGreetings ?? []).filter((greeting) => greeting.trim().length > 0);
+  if (greetings.length === 0) return;
+  await deps.db.transaction(async (tx) => {
+    const [plot] = await tx
+      .select({ intros: plots.intros })
+      .from(plots)
+      .where(eq(plots.id, plotId))
+      .for('update');
+    const [counted] = await tx
+      .select({ value: sql<number>`count(*)::int` })
+      .from(characters)
+      .where(eq(characters.plotId, plotId));
+    if (!plot || (counted?.value ?? 0) < 2) return;
+    const added = greetings
+      .slice(0, Math.max(0, MAX_INTROS_PER_PLOT - plot.intros.length))
+      .map((greeting) => greeting.slice(0, MAX_INTRO_TEXT_LENGTH));
+    if (added.length === 0) return;
+    await tx
+      .update(plots)
+      .set({ intros: [...plot.intros, ...added], updatedAt: new Date() })
+      .where(eq(plots.id, plotId));
+  });
+}
+
+/**
  * The page an import names as its source. Only a RisuRealm card page is
  * recorded, and always in one spelling; anything else is refused rather than
  * dropped, because a client that sent it expects it to have been kept.
@@ -658,6 +700,9 @@ function attachment(name: string, extension: string): string {
   );
   return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
 }
+
+/** A storage key's extension — the image type it was sniffed as when it was stored (`assetKey` and the like). */
+const extensionOf = (key: string): string => key.slice(key.lastIndexOf('.') + 1);
 
 /** Applies a like delta (0 when the like row did not change) and returns the count. */
 async function bumpLikeCount(tx: Tx, plotId: string, delta: number): Promise<number> {
@@ -1184,11 +1229,14 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
 
     // Nothing is lifted onto the plot: it already has a narrator and a custom UI
     // of its own, and a member joining a cast does not get to redecorate it. Its
-    // images do land as the plot's, because `{{img::slug}}` resolves there.
-    // Into a public plot it needs `rightsConfirmed` (`insertMember`).
+    // images do land as the plot's, because `{{img::slug}}` resolves there, and
+    // so do its group-only greetings once there is a cast for them to greet
+    // (`addGroupGreetings`). Into a public plot it needs `rightsConfirmed`
+    // (`insertMember`).
     let member = await insertMember(deps, id, name, parsed.card, imported);
     if (parsed.iconBuffer) member = await writeMemberAvatar(deps, member, parsed.iconBuffer);
     if (parsed.assets?.length) await storeImportedAssets(deps, id, parsed.assets);
+    await addGroupGreetings(deps, id, parsed.card);
     return c.json(toMemberJson(plot, member), 201);
   });
 
@@ -1346,6 +1394,16 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
    * The PNG is the member's avatar (else the plot cover) with its text chunks
    * stripped and the card written in; one that is not a PNG gives way to a plain
    * placeholder, since nothing here transcodes images.
+   *
+   * The charx is the one format that carries the plot's images, so a card's
+   * `{{img::…}}` still finds them in RisuAI (`exportCardCharx`). Its icon is the
+   * picture the PNG is written on, in whatever format it is. Every plot asset
+   * goes into every member's archive: assets are the plot's, and so are the
+   * openings, the lorebook and the custom UI that every member's card carries
+   * out — any of them may name any image. An unlock condition keeps nothing
+   * out, being a reveal inside one chat, and this is the owner's copy. The
+   * images are read whole and zipped in memory, so an export holds about twice
+   * what the plot's images weigh.
    */
   app.get('/:id/characters/:characterId/export', requireUser, async (c) => {
     const plot = await loadOwnedPlot(deps, requireUuidParam(c), c.get('userId'));
@@ -1358,8 +1416,8 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       .limit(1);
     if (!member) throw notFound('Character not found');
     const format = c.req.query('format') ?? 'json';
-    if (format !== 'json' && format !== 'png') {
-      throw badRequest('invalid_request', 'format must be json or png');
+    if (format !== 'json' && format !== 'png' && format !== 'charx') {
+      throw badRequest('invalid_request', 'format must be json, png or charx');
     }
 
     const card = exportCardV3(member.card, {
@@ -1383,8 +1441,33 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     const imagePath = member.avatarPath ?? plot.coverPath;
     const object = imagePath ? await deps.storage.get(imagePath) : null;
     const image = object ? await readAll(object.body) : undefined;
-    return new Response(exportCardPng(card, image), {
-      headers: { ...headers, 'Content-Type': 'image/png' },
+    if (format === 'png') {
+      return new Response(exportCardPng(card, image), {
+        headers: { ...headers, 'Content-Type': 'image/png' },
+      });
+    }
+
+    const rows = await deps.db
+      .select()
+      .from(plotAssets)
+      .where(eq(plotAssets.plotId, plot.id))
+      .orderBy(asc(plotAssets.createdAt), asc(plotAssets.slug));
+    const assets: CharxExportAsset[] = [];
+    for (const row of rows) {
+      // A row whose file is gone stays out of the card as well: RisuAI refuses
+      // a whole card over one image it names and does not carry.
+      const stored = await deps.storage.get(row.path);
+      if (!stored) continue;
+      assets.push({
+        slug: row.slug,
+        name: row.name,
+        ext: extensionOf(row.path),
+        bytes: await readAll(stored.body),
+      });
+    }
+    const icon = image && imagePath ? { ext: extensionOf(imagePath), bytes: image } : undefined;
+    return new Response(exportCardCharx(card, assets, icon), {
+      headers: { ...headers, 'Content-Type': 'application/zip' },
     });
   });
 

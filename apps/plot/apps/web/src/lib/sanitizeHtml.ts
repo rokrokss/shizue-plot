@@ -1,8 +1,10 @@
 /**
  * The trust boundary for creator-authored markup.
  *
- * Everything a display script produces passes through `sanitizeCustomHtml` before
- * it reaches the DOM, and nothing else may. The shape is the one RisuAI and
+ * Everything a display script produces, and every block of a message or a plot's
+ * intro that carries HTML of its own (`lib/markdown/html.ts`), passes through
+ * `sanitizeCustomHtml` before it reaches the DOM, and nothing else may. The
+ * shape is the one RisuAI and
  * SillyTavern converged on, because it is the one that has actually been attacked:
  *
  *   1. `<style>` is lifted out and rebuilt from a CSS AST: every selector scoped
@@ -49,14 +51,27 @@ const ALLOWED_TAGS = [
   'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'caption', 'colgroup', 'col',
   'img', 'a', 'button', 'progress', 'meter', 'details', 'summary',
   'figure', 'figcaption', 'mark', 'time', 'abbr', 'wbr',
+  // What a message's own markdown makes (`~~취소~~` is a <del>), and the inert
+  // presentational and sectioning tags RisuAI cards are written with. None of
+  // them can load, run or navigate anything; dropped, they took their layout
+  // with them and left a greeting reading as one run-on line.
+  'del', 'ins', 'strike', 'big', 'center', 'font', 'q', 'cite', 'kbd', 'ruby', 'rt', 'rp',
+  'section', 'article', 'header', 'footer', 'aside', 'nav',
 ];
 
 const ALLOWED_ATTR = [
   'class', 'style', 'title', 'alt', 'src', 'href', 'target', 'rel',
   'colspan', 'rowspan', 'span', 'width', 'height',
   'value', 'max', 'min', 'low', 'high', 'optimum', 'open', 'type', 'datetime',
+  // `<ol start>` from markdown; `<font color face size>` and `align` from cards.
+  'start', 'color', 'face', 'size', 'align',
   'data-shizue-fill',
 ];
+
+const KEPT_TAGS: ReadonlySet<string> = new Set(ALLOWED_TAGS);
+
+/** Whether an element survives the whitelist — anything else is unwrapped, its text kept. */
+export const keepsElement = (tag: string): boolean => KEPT_TAGS.has(tag.toLowerCase());
 
 const PURIFY_CONFIG = {
   ALLOWED_TAGS,
@@ -73,6 +88,15 @@ const PURIFY_CONFIG = {
 
 /** Links leave the app, so nothing but http(s) is a link at all. */
 const EXTERNAL_URL = /^https?:\/\//i;
+
+/**
+ * Whether an address may be a link in a message, its intro, or a display
+ * script's markup: an absolute http(s) one, opened in a new tab with
+ * `rel="noopener noreferrer nofollow"`. Everything else — a path into the app,
+ * `mailto:`, a fragment — is drawn as its label. The markdown renderers ask this
+ * too, so a link reads the same whether it was written as `[…](…)` or `<a>`.
+ */
+export const isExternalUrl = (href: string): boolean => EXTERNAL_URL.test(href.trim());
 
 /** A backslash, a control character, or whitespace anywhere inside a URL. */
 const URL_FORBIDDEN_CHARS = /[\\\u0000-\u0020\u007f]/;
@@ -372,7 +396,7 @@ function rewriteElement(element: Element): void {
 
   if (tag === 'a') {
     const href = element.getAttribute('href') ?? '';
-    const external = EXTERNAL_URL.test(href.trim());
+    const external = isExternalUrl(href);
     if (taintedHref) {
       // Part of this destination was written by the model. The link becomes text:
       // the label stands, the anchor stops being one, and the address it would

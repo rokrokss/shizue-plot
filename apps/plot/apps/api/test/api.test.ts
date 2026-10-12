@@ -27,6 +27,7 @@ import {
   parseCard,
   placeholderPng,
   PRESET_IDS,
+  readCharx,
   readPngTextChunks,
   stripPngTextChunks,
 } from '@shizue/core';
@@ -2100,6 +2101,125 @@ describe('card export', () => {
     const gif = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 2, 3]);
     await uploadFile(cookie, avatarPath, gif, 'a.gif');
     expect(stripPngTextChunks(await exportPng())).toEqual(placeholderPng());
+  });
+
+  it('writes a charx carrying the icon and every plot image, to the owner only', async () => {
+    const alice = await signUp('card-export-charx@example.com');
+    const bob = await signUp('card-export-charx-other@example.com');
+    const gif = (marker: number): Uint8Array =>
+      Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, marker]);
+    const icon = buildPngWithTextChunks({ Title: 'icon' });
+    const plot = await importCard(
+      alice,
+      new File(
+        [
+          buildCharx(v3Card, [
+            { type: 'icon', name: 'main', ext: 'png', entry: 'assets/icon/main.png', bytes: icon },
+            { type: 'x-risu-asset', name: 'Smile', ext: 'gif', entry: 'assets/a.gif', bytes: gif(1) },
+            { type: 'emotion', name: '웃음', ext: 'gif', entry: 'assets/b.gif', bytes: gif(2) },
+          ]),
+        ],
+        'sei.charx',
+      ),
+    );
+    const member = plot.characters[0];
+    const form = new FormData();
+    form.append('file', new File([gif(3)], 'castle.gif'));
+    form.append('slug', 'castle');
+    expect((await request(alice, `/api/plots/${plot.id}/assets`, 'POST', form)).status).toBe(201);
+    // A row whose file is gone: naming it would make RisuAI refuse the whole card.
+    await db.insert(plotAssets).values({ plotId: plot.id, slug: 'ghost', path: 'assets/ghost.gif', mime: 'image/gif' });
+
+    const res = await request(alice, exportPath(plot.id, member.id, 'charx'));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('application/zip');
+    expect(res.headers.get('content-disposition')).toContain(encodeURIComponent('세이.charx'));
+    const charx = new Uint8Array(await res.arrayBuffer());
+
+    // Declared as RisuAI files them: the icon, and the plot's images where
+    // `{{img::name}}` looks — under the card's own names, or the slug.
+    const declared = (readCharx(charx).raw as any).data.assets;
+    expect(declared.map((asset: any) => [asset.type, asset.name, asset.ext])).toEqual([
+      ['icon', 'main', 'png'],
+      ['x-risu-asset', '웃음', 'gif'],
+      // The same file again under the slug the studio shows for it (a Korean name folds to `asset-N`).
+      ['x-risu-asset', expect.stringMatching(/^asset-\d+$/), 'gif'],
+      ['x-risu-asset', 'Smile', 'gif'],
+      ['x-risu-asset', 'castle', 'gif'],
+    ]);
+    const parsed = parseCard(charx);
+    expect(parsed.card.name).toBe('세이');
+    expect(parsed.iconBuffer).toEqual(stripPngTextChunks(icon));
+    expect(parsed.assets).toEqual([
+      { name: '웃음', bytes: gif(2) },
+      { name: 'Smile', bytes: gif(1) },
+      { name: 'castle', bytes: gif(3) },
+    ]);
+
+    // And back in here, the same names on the same pictures (listed by slug now,
+    // one import being one insert).
+    const again = await importCard(alice, new File([charx], 'sei.charx'));
+    const assets = await readJson(await request(alice, `/api/plots/${again.id}/assets`));
+    const served = async (asset: any): Promise<[string, Uint8Array]> => [
+      asset.name,
+      new Uint8Array(await (await request(alice, asset.url)).arrayBuffer()),
+    ];
+    expect(new Map(await Promise.all(assets.map(served)))).toEqual(
+      new Map([
+        ['웃음', gif(2)],
+        ['Smile', gif(1)],
+        ['castle', gif(3)],
+      ]),
+    );
+
+    expect((await request(bob, exportPath(plot.id, member.id, 'charx'))).status).toBe(404);
+    expect((await request(undefined, exportPath(plot.id, member.id, 'charx'))).status).toBe(401);
+  });
+
+  it("makes a joining card's group-only greetings openings of the cast, under the cap", async () => {
+    const cookie = await signUp('card-group-greetings@example.com');
+    const grouped = (name: string, greetings: string[]): File =>
+      new File(
+        [JSON.stringify({ ...v3Card, data: { ...v3Card.data, name, group_only_greetings: greetings } })],
+        `${name}.json`,
+        { type: 'application/json' },
+      );
+    const joinCast = async (plotId: string, file: File): Promise<any> => {
+      const form = new FormData();
+      form.append('file', file);
+      const res = await request(cookie, `/api/plots/${plotId}/characters/import`, 'POST', form);
+      expect(res.status, await res.clone().text()).toBe(201);
+      return readJson(res);
+    };
+
+    // A card on its own keeps them: no chat of a one-member plot is a group chat.
+    const plot = await importCard(cookie, grouped('세이', ['모두 모였군.']));
+    expect(plot.intros).toEqual(['자리 있소?']);
+    const first = plot.characters[0];
+    expect(first.card.groupOnlyGreetings).toEqual(['모두 모였군.']);
+
+    // Joining a cast, they follow the plot's openings; a blank one is no opening.
+    const second = await joinCast(plot.id, grouped('리안', ['둘이 왔소?', '  ']));
+    expect((await readPlot(cookie, plot.id)).intros).toEqual(['자리 있소?', '둘이 왔소?']);
+
+    // Each goes back out once, as the group greeting it was.
+    const exported = async (memberId: string): Promise<any> =>
+      (await readJson(await request(cookie, exportPath(plot.id, memberId, 'json')))).data;
+    const own = await exported(second.id);
+    expect([own.first_mes, own.alternate_greetings, own.group_only_greetings]).toEqual([
+      '자리 있소?',
+      [],
+      ['둘이 왔소?', '  '],
+    ]);
+    const other = await exported(first.id);
+    expect([other.alternate_greetings, other.group_only_greetings]).toEqual([['둘이 왔소?'], ['모두 모였군.']]);
+
+    // Only as many as there is room for; the rest stay on the card.
+    const nine = Array.from({ length: MAX_INTROS_PER_PLOT - 1 }, (_, i) => `도입부 ${i}`);
+    await patchPlot(cookie, plot.id, { intros: nine });
+    const third = await joinCast(plot.id, grouped('하나', ['셋째 날.', '넷째 날.']));
+    expect((await readPlot(cookie, plot.id)).intros).toEqual([...nine, '셋째 날.']);
+    expect(third.card.groupOnlyGreetings).toEqual(['셋째 날.', '넷째 날.']);
   });
 });
 
@@ -4952,7 +5072,8 @@ describe('custom UI', () => {
       {
         in: '\\[status\\] hp=(\\d+)',
         out: '<div class="hp">HP $1</div>',
-        flags: 'g',
+        // A move drops RisuAI's first `g`, and nothing left compiles as `u`: only the first match moves.
+        flags: 'u',
         // RisuAI's `<order N>` runs high first, so it comes in as a place in the run, not a number.
         order: 0,
         action: 'move_top',
@@ -4980,7 +5101,8 @@ describe('custom UI', () => {
       {
         in: '\\[status\\] hp=(\\d+)',
         out: '<div class="hp">HP $1</div>',
-        flags: 'g',
+        // The editor changing the action does not recompute the flags the import stored.
+        flags: 'u',
         order: 5,
         action: 'repeat_back',
         enabled: true,

@@ -69,6 +69,13 @@ const memberFields = (member: PlotMember): string =>
     member.card.loreSettings,
   ]);
 
+/** The card files a member exports to, and their labels. Only CharX carries the plot's images. */
+const EXPORT_FORMATS = [
+  ['json', 'memberExportJson'],
+  ['png', 'memberExportPng'],
+  ['charx', 'memberExportCharx'],
+] as const;
+
 /**
  * The plot studio: one work, everything in it. The plot's own fields and its
  * members' cards are edited here and committed together by the one Save; the
@@ -268,6 +275,20 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
       setSaved((current) => new Map(current).set(created.id, memberFields(created)));
       if (rightsConfirmed) {
         setPlot((current) => current && { ...current, rightsConfirmedAt: new Date().toISOString() });
+      }
+      // Joining a cast, the card's group-only greetings became openings of the
+      // plot on the server. The editor takes them up after whatever is being
+      // written here, or the next save would put the old list back over them.
+      // A failed read does not unmake the import, which has landed.
+      if (members.length > 0 && created.card.groupOnlyGreetings?.length) {
+        await apiGet<PlotDetail>(`/api/plots/${id}`).then(
+          (detail) => {
+            const added = detail.intros.slice(plot?.intros.length ?? 0);
+            setIntros((current) => [...current, ...added]);
+            setPlot((current) => current && { ...current, intros: detail.intros });
+          },
+          () => undefined,
+        );
       }
       return true;
     } catch (caught) {
@@ -835,7 +856,7 @@ function MembersSection({
                 <span className="text-xs font-medium text-muted">
                   {t('memberExport')}
                 </span>
-                {(['json', 'png'] as const).map((format) => (
+                {EXPORT_FORMATS.map(([format, label]) => (
                   <a
                     key={format}
                     href={`/api/plots/${plotId}/characters/${member.id}/export?format=${format}`}
@@ -843,7 +864,7 @@ function MembersSection({
                     data-testid={`member-export-${format}`}
                     className={buttonClass('secondary', 'sm')}
                   >
-                    {format === 'json' ? t('memberExportJson') : t('memberExportPng')}
+                    {t(label)}
                   </a>
                 ))}
               </div>
@@ -897,9 +918,10 @@ function MembersSection({
 /**
  * The one budget the plot and card lorebooks share, beside each of them. The
  * always-on entries are the part a creator can see going wrong: they are in
- * every prompt whatever the conversation says, and the book stops at the first
- * entry in insertion order that no longer fits — so once they alone are over,
- * what comes after them is cut, keyword entries and always-on ones alike. The
+ * every prompt whatever the conversation says, and the budget fills from the
+ * highest insertion order down, skipping what no longer fits — so once they
+ * alone are over, the lower-ordered entries are cut, keyword entries and
+ * always-on ones alike. The
  * server counts them from what is saved, so an edit shows here after the next Save.
  */
 function LoreBudgetNote({ plotTokens, members }: { plotTokens: number; members: PlotMember[] }) {

@@ -270,6 +270,7 @@ export function coerceCard(value: unknown, fallbackName: string): NormalizedCard
   const componentCapabilities = coerceComponentCapabilities(raw['componentCapabilities']);
   const narrator = coerceNarrator(raw['narrator']);
   const intro = coerceIntro(raw['intro']);
+  const groupOnlyGreetings = strArray(raw['groupOnlyGreetings']);
 
   return {
     spec: spec === 'v1' || spec === 'v2' ? spec : 'v3',
@@ -281,6 +282,7 @@ export function coerceCard(value: unknown, fallbackName: string): NormalizedCard
     scenario: str(raw['scenario']),
     firstMes: str(raw['firstMes']),
     alternateGreetings: strArray(raw['alternateGreetings']),
+    ...(groupOnlyGreetings.length > 0 ? { groupOnlyGreetings } : {}),
     mesExample: str(raw['mesExample']),
     systemPrompt: str(raw['systemPrompt']),
     postHistoryInstructions: str(raw['postHistoryInstructions']),
@@ -294,6 +296,7 @@ export function coerceCard(value: unknown, fallbackName: string): NormalizedCard
       // Absent is the automatic budget, so only a number the client sent is kept.
       ...(typeof tokenBudget === 'number' && Number.isFinite(tokenBudget) ? { tokenBudget } : {}),
       recursiveScanning: bool(lore['recursiveScanning'], DEFAULT_LORE_SETTINGS.recursiveScanning),
+      ...(lore['risuMatching'] === true ? { risuMatching: true } : {}),
     },
     ...(displayScripts.length > 0 ? { displayScripts } : {}),
     ...(Object.keys(defaultVariables).length > 0 ? { defaultVariables } : {}),

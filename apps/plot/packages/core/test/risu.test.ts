@@ -77,7 +77,8 @@ describe('RisuAI customScripts import', () => {
     expect(card.displayScripts?.[0]).toEqual({
       in: '\\[status\\] hp=(\\d+)',
       out: '<div class="hp">HP $1</div>',
-      flags: 'gi',
+      // The `g` is RisuAI's to take back: a moved script lifts its first match only.
+      flags: 'i',
       // Its place in the run, not RisuAI's number: alone, it runs first.
       order: 0,
       action: 'move_top',
@@ -89,6 +90,28 @@ describe('RisuAI customScripts import', () => {
     const card = normalizeCard(risuCard([editdisplay({ ableFlag: true, flag: 'g<cbs><repeat_back>' })]));
     // `cbs` contributes no flag letters — `c`, `b` and `s` are not flags here.
     expect(card.displayScripts?.[0]).toMatchObject({ flags: 'g', action: 'repeat_back' });
+  });
+
+  it('reads several directives in one pair of brackets, as RisuAI splits them', () => {
+    // Read as one unknown directive, `<move_top, order 3>` leaked its letters into
+    // the flags — `m`, `v` and `d` — and the script rendered in place.
+    const card = normalizeCard(
+      risuCard([editdisplay({ ableFlag: true, flag: 'gi<move_top, order 3>' })]),
+    );
+    expect(card.displayScripts?.[0]).toMatchObject({ flags: 'i', action: 'move_top' });
+  });
+
+  it('reads a directive exactly as written, as RisuAI does', () => {
+    const card = normalizeCard(risuCard([editdisplay({ ableFlag: true, flag: 'g<Move_Top>' })]));
+    expect(card.displayScripts?.[0]?.action).toBeUndefined();
+    expect(card.displayScripts?.[0]?.flags).toBe('g');
+  });
+
+  it('keeps the move when a script names a move and repeat_back, top before bottom', () => {
+    const card = normalizeCard(
+      risuCard([editdisplay({ ableFlag: true, flag: '<repeat_back, move_bottom><move_top>' })]),
+    );
+    expect(card.displayScripts?.[0]?.action).toBe('move_top');
   });
 
   it('honours ableFlag: without it nothing in the flag field is read', () => {
@@ -111,6 +134,8 @@ describe('RisuAI customScripts import', () => {
     expect(card.displayScripts?.[0]).toEqual({
       in: '\\[status\\] hp=(\\d+)',
       out: '<div>HP $1</div>',
+      // ableFlag is off, but the move still takes the `g` away, and nothing left is `u`.
+      flags: 'u',
       order: 0,
       action: 'move_top',
       enabled: true,
@@ -136,6 +161,37 @@ describe('RisuAI customScripts import', () => {
   });
 });
 
+describe('RisuAI flags', () => {
+  /** The flags a script is stored with: what RisuAI compiles its pattern with. */
+  const flagsOf = (overrides: Record<string, unknown>) =>
+    normalizeCard(risuCard([editdisplay(overrides)])).displayScripts?.[0]?.flags;
+
+  it('stores nothing for the plain g RisuAI falls back to, which is ours too', () => {
+    expect(flagsOf({ ableFlag: false, flag: 'i' })).toBeUndefined();
+    expect(flagsOf({ ableFlag: true, flag: '' })).toBeUndefined();
+    expect(flagsOf({ ableFlag: true, flag: '<order 2>' })).toBeUndefined();
+    expect(flagsOf({ ableFlag: true, flag: '<repeat_back>' })).toBeUndefined();
+  });
+
+  it('keeps a field as written, so one without g rewrites its first match only', () => {
+    expect(flagsOf({ ableFlag: true, flag: 'i' })).toBe('i');
+    expect(flagsOf({ ableFlag: true, flag: 'gi' })).toBe('gi');
+    expect(flagsOf({ ableFlag: true, flag: 'ggi' })).toBe('gi');
+  });
+
+  it('takes the g off a move, with ableFlag on or off', () => {
+    expect(flagsOf({ ableFlag: true, flag: 'gi<move_top>' })).toBe('i');
+    expect(flagsOf({ ableFlag: true, flag: 'g<move_bottom>' })).toBe('u');
+    expect(flagsOf({ ableFlag: true, flag: '<move_bottom>' })).toBe('u');
+    expect(flagsOf({ ableFlag: false, flag: 'g', out: '@@move_bottom <b>$1</b>' })).toBe('u');
+  });
+
+  it('compiles a field with no flag letters left in it under u, as RisuAI does', () => {
+    expect(flagsOf({ ableFlag: true, flag: 'x' })).toBe('u');
+    expect(flagsOf({ ableFlag: true, flag: ' <cbs>' })).toBe('u');
+  });
+});
+
 describe('card export', () => {
   it('writes RisuAI schema back: bare source, bare template, flags and directives in flag', () => {
     const other = { comment: '', in: 'a', out: 'b', type: 'edittrigger' };
@@ -151,7 +207,7 @@ describe('card export', () => {
       in: '\\[status\\] hp=(\\d+)',
       out: '<div class="hp">HP $1</div>',
       ableFlag: true,
-      flag: 'gi<move_top>',
+      flag: 'i<move_top>',
     });
   });
 
@@ -235,6 +291,19 @@ describe('RisuAI script order', () => {
     );
     expect(placed(card.displayScripts)).toEqual([['b', 0], ['d', 1], ['a', 2], ['e', 3], ['c', 4]]);
     expect(card.displayScripts?.[4]?.flags).toBe('g');
+  });
+
+  it('reads an order written beside an action in one pair of brackets', () => {
+    const card = normalizeCard(risuCard([named('a'), named('b', 'g<move_top, order 3>')]));
+    expect(placed(card.displayScripts)).toEqual([['b', 0], ['a', 1]]);
+    expect(card.displayScripts?.[0]).toMatchObject({ action: 'move_top', flags: 'u' });
+  });
+
+  it('lets the last order a script names win, as RisuAI does', () => {
+    const card = normalizeCard(
+      risuCard([named('a', '<order 1>'), named('b', '<order 9, order 0>'), named('c', '<order 0><order 5>')]),
+    );
+    expect(placed(card.displayScripts)).toEqual([['c', 0], ['a', 1], ['b', 2]]);
   });
 
   it('reads no order RisuAI would not: with ableFlag off, or written into out', () => {

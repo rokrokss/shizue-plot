@@ -29,7 +29,7 @@ Elyn의 표현력(JSX)과 RisuAI의 안전 모델·변수 시스템을 결합하
 ### Layer 1 — 선언적 템플릿 + 변수 시스템 (Chunk 15, RisuAI 호환)
 
 - **챗 변수 저장소**: `chats.variables jsonb` — `{{setvar::k::v}}/{{addvar::k::n}}`을 모델 출력 커밋 시점에만 실행(RisuAI runVar 시맨틱), 표시 시 매크로 제거. `card.defaultVariables` 지원(임포트 호환).
-- **표시 스크립트(카드 필드)**: `displayScripts: {in(정규식), out(HTML 템플릿), flags?, order(오름차순), action?(move_top|move_bottom|repeat_back), enabled}` — 모델 출력 표시 시점에만 적용, 저장 데이터 불변. RisuAI `customScripts` 임포트 매핑 — RisuAI의 `<order N>`은 큰 것부터라 숫자 대신 실행 순서로 옮긴다.
+- **표시 스크립트(카드 필드)**: `displayScripts: {in(정규식), out(HTML 템플릿), flags?(없으면 모든 매치, 있으면 `g` 유무로 — RisuAI처럼), order(오름차순), action?(move_top|move_bottom|repeat_back), enabled}` — 모델 출력 표시 시점에만 적용, 저장 데이터 불변. RisuAI `customScripts` 임포트 매핑 — RisuAI의 `<order N>`은 큰 것부터라 숫자 대신 실행 순서로 옮긴다.
 - **템플릿 바인딩**: OUT 안에서 RisuAI CBS(중첩·`{{#if}}`·`{{#when}}`·`{{? }}`·`{{equal}}` 등, 프롬프트와 같은 `@shizue/core/cbs`) 확장 — `{{getvar::k}}`, `{{#each}}`, `{{calc}}`, `{{img::slug}}`(카드의 원래 그림 이름도), **플랫폼 변수** `{{rel::affection}}` 등 6축 관계 스탯·`{{turn}}`·`{{user}}`·`{{char}}`.
 - **새니타이즈**: DOMPurify(허용 태그·속성 화이트리스트, on* 제거, href 프로토콜 제한) + `<style>` CSS AST 재작성(셀렉터 `.shizue-msg` 접두, 클래스 `x-shizue-` 네임스페이스, @import·외부 url() 차단 — 검증된 RisuAI/ST 패턴 이식).
 - **인터랙션 1단계**: `{{button::라벨::입력텍스트}}` — 클릭 시 해당 텍스트를 입력창에 채움(전송은 유저가) → 선택지 UX를 안전하게.
@@ -125,6 +125,9 @@ Layer 1 `12cb556`, Layer 2 `e5ecc8d`. 서 있는 구조는 이렇다:
 - RisuAI 카드가 Lua 트리거에 기대는 부분은 여전히 돌지 않는다. 그런 카드는 자기 표시로 그 사실을 말하기도 한다 — Parma Knights는 마지막 답장마다 "시스템 백엔드 미작동" 경고를 띄운다(Lua가 붙이는 `<pk-uid>`가 없어서). 버그가 아니라 카드의 말이다.
 
 **아직 열려 있는 것.**
+- **모델·유저가 쓴 `<style>`도 페이지의 모든 `.shizue-msg`에 걸린다.** 앱 화면은 건드릴 수 없지만 다른 메시지의 섬(표시 스크립트 상태창 포함)은 꾸밀 수 있다. RisuAI의 `.chattext` 스코프와 같은 성질이다.
+- **모델이 쓴 `<button data-shizue-fill>`도 입력창을 채운다.** 전송은 사람이 하므로 `{{button}}`과 같은 이유로 수용한다.
+- RisuAI 카드의 `<img src="에셋이름">`(RisuAI의 newImageHandlingBeta)은 풀지 않는다. 같은-오리진 상대 경로로 남아 깨진 그림이 된다.
 - **실제 브라우저 `Worker`로 도는 Layer 1 경로에는 E2E가 없다.** jsdom에는 `Worker`가 없어 단위 테스트는 Node 워커 스레드로 같은 소스를 돌려 종료를 증명한다. Layer 2의 `apps/e2e/tests/customUi.spec.ts`에 있는 "끝나지 않는 컴포넌트" 케이스의 Layer 1 판을 추가할 것.
 - **`{{button::라벨::$1}}`의 채움 텍스트는 모델이 고를 수 있다.** 입력창에 들어갈 뿐 전송은 사람이 하므로 수용하지만, 표식이 붙는 값이 `data-shizue-fill`로도 흐른다는 것은 사실이다.
 - **하트비트는 "도는 것"과 "정직하게 오래 걸리는 것"을 500ms 너머로 구분하지 못한다.** 턴 밖에서 워커가 계산하고 있을 이유가 지금 런타임에는 없으므로 실무상 문제가 아니지만, 훅 표면이 늘어나면 다시 볼 것.

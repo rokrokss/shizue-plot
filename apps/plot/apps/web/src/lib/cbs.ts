@@ -131,6 +131,31 @@ function read(value: string, budget: Budget): string {
   return value;
 }
 
+/* ------------------------------------------------------------ RisuAI's #each */
+
+/**
+ * RisuAI's `parseArray`: a JSON array, or anything else split on `§` — kept
+ * whole, empties and all. An item that is not a string is written as JSON.
+ */
+function risuArray(text: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return text.split('§');
+  }
+  if (!Array.isArray(parsed)) return text.split('§');
+  return parsed.map((item: unknown) => (typeof item === 'string' ? item : JSON.stringify(item)));
+}
+
+/** RisuAI's `trimLines`, which its `#each` body gets: every line's indent and both ends off. */
+const unindent = (text: string): string =>
+  text
+    .split('\n')
+    .map((line) => line.trimStart())
+    .join('\n')
+    .trim();
+
 /* ------------------------------------------------------------ image context */
 
 /**
@@ -242,28 +267,79 @@ function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>): CbsHos
   };
 
   /**
-   * `{{#each}}` over a comma-separated list: a bare name is a variable holding one
-   * (empty when unset, so a typo renders nothing rather than itself), anything
-   * else is the list written out inline. `{{slot}}` is the current item.
+   * The `{{#each}}` items being rendered, innermost last, under the name RisuAI's
+   * form gives them — null for one of ours, which names none. `{{slot::name}}` looks
+   * a name up from the inside out, so an inner block's name shadows an outer one's.
+   */
+  const slots: { name: string | null; item: string }[] = [];
+
+  /**
+   * `{{#each}}`, in two dialects told apart by an ` as `.
+   *
+   * RisuAI's is `{{#each LIST as name}}…{{slot::name}}…{{/each}}`, read as RisuAI
+   * reads it: LIST is a JSON array, or failing that text split on `§` — so a bare
+   * name is one item, its own spelling, and `a,b` is one item too. An item that is
+   * not a string is written as JSON. Its whitespace is RisuAI's as well: every
+   * line of the body is unindented and the whole is trimmed, unless the block opens
+   * `{{#each::keep …}}`. A list that came to nothing (`{{#each {{getvar::none}} as
+   * x}}`) renders nothing. One difference is deliberate: RisuAI pastes the item
+   * into the body and reads the result as CBS, so an item holding a macro runs;
+   * here an item is a value, escaped like any other, and never syntax.
+   *
+   * Ours is `{{#each 목록}}…{{slot}}…{{/each}}` over a comma-separated list: a bare
+   * name is a variable holding one (empty when unset, so a typo renders nothing
+   * rather than itself), anything else is the list written out inline.
+   *
+   * RisuAI's older `{{#each LIST name}}`, which names the item after the last
+   * space, is not read: it cannot be told from a list of ours with spaces in it.
    */
   const each = (scope: CbsBlockScope, block: CbsBlock): CbsValue => {
-    const head = scope.head.value().text.trim();
-    const source = /^[A-Za-z_][A-Za-z0-9_]*$/.test(head) ? variable(head) : head;
-    const items = source
-      .split(',')
-      .map((item) => item.trim())
-      .filter((item) => item.length > 0);
+    let head = scope.head.value().text.trim();
+    const keep = head.startsWith('::keep ');
+    if (keep) head = head.slice(7).trim();
+
+    // What is left of `LIST as name` once LIST came to nothing.
+    if (/^as +\S+$/.test(head)) return { text: '' };
+
+    const at = head.lastIndexOf(' as ');
+    let name: string | null = null;
+    let items: string[];
+    if (at !== -1) {
+      name = head.slice(at + 4).trim();
+      items = risuArray(head.slice(0, at));
+    } else {
+      const source = /^[A-Za-z_][A-Za-z0-9_]*$/.test(head) ? variable(head) : head;
+      items = source
+        .split(',')
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0);
+    }
+
     let text = '';
     let untrusted = false;
     for (const item of items) {
       budget.iterations -= 1;
       if (budget.iterations < 0) throw new RenderBudgetExhausted('too many iterations');
-      const value = scope.render(block.body, item);
-      text += value.text;
+      slots.push({ name, item });
+      let value: CbsValue;
+      try {
+        value = scope.render(block.body, item);
+      } finally {
+        slots.pop();
+      }
+      text += name === null || keep ? value.text : unindent(value.text);
       if (value.untrusted) untrusted = true;
       if (text.length > MAX_RENDERED_CHARS) throw new RenderBudgetExhausted('output too large');
     }
-    return { text, untrusted };
+    return { text: name === null || keep ? text : text.trim(), untrusted };
+  };
+
+  /** `{{slot::name}}`: the named item, else — inside a block of ours — the current one. */
+  const namedSlot = (name: string): string | undefined => {
+    for (let i = slots.length - 1; i >= 0; i -= 1) if (slots[i]!.name === name) return slots[i]!.item;
+    // Ours names no item, and has always answered any `{{slot::…}}` with the current one.
+    const innermost = slots[slots.length - 1];
+    return innermost && innermost.name === null ? innermost.item : undefined;
   };
 
   return {
@@ -296,8 +372,12 @@ function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>): CbsHos
           return { text: read(ctx.user, budget) };
         case 'turn':
           return { text: String(ctx.turn) };
-        case 'slot':
-          return { text: read(call.slot ?? '', budget), untrusted: true };
+        case 'slot': {
+          // A name no block around it gave is left as written, as RisuAI leaves it.
+          const name = call.args.rest(1)?.value().text;
+          const item = name === undefined ? (call.slot ?? '') : namedSlot(name);
+          return item === undefined ? undefined : { text: read(item, budget), untrusted: true };
+        }
         case 'screenwidth':
           // RisuAI cards lay out by it. The width when the message was drawn.
           return typeof window === 'undefined' ? undefined : { text: String(window.innerWidth) };

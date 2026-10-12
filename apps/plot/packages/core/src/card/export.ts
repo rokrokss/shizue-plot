@@ -1,4 +1,5 @@
 import { CCardLib, type CharacterCardV3, type LorebookEntry } from '@risuai/ccardlib';
+import { zipSync } from 'fflate';
 import type { LoreEntry, NarratorConfig, NormalizedCard, PlotCustomUi } from '../types.js';
 import { bookExtensionsOf, FOREVER_MESSAGES, keysForSillyTavern } from './bookEntry.js';
 import { extensionsWithComponentCode } from './componentCode.js';
@@ -62,7 +63,12 @@ function toLorebookEntry(entry: LoreEntry, index: number): LorebookEntry {
 export interface CardPlotOverlay {
   narrator?: NarratorConfig;
   customUi?: PlotCustomUi;
-  /** The plot's openings: the first becomes `first_mes`, the rest the alternates. */
+  /**
+   * The plot's openings: the first becomes `first_mes`, the rest the alternates.
+   * One that is also among the card's group-only greetings is left out — an
+   * import into a cast made it an opening (`NormalizedCard.groupOnlyGreetings`),
+   * and it goes back out once, in the field it came from.
+   */
   intros?: string[];
   /** The plot's lorebook, appended after the card's own entries. */
   lorebook?: LoreEntry[];
@@ -83,8 +89,10 @@ export function exportCardV3(card: NormalizedCard, overlay: CardPlotOverlay = {}
   const componentCapabilities = customUi
     ? customUi.componentCapabilities
     : card.componentCapabilities;
+  const groupOnlyGreetings = card.groupOnlyGreetings ?? [];
+  const plotIntros = overlay.intros?.filter((intro) => !groupOnlyGreetings.includes(intro));
   // A plot with no openings has nothing to say about them, so the card's stand.
-  const intros = overlay.intros?.length ? overlay.intros : undefined;
+  const intros = plotIntros?.length ? plotIntros : undefined;
   const lorebook = [...card.lorebook, ...(overlay.lorebook ?? [])];
 
   return {
@@ -98,7 +106,7 @@ export function exportCardV3(card: NormalizedCard, overlay: CardPlotOverlay = {}
       scenario: card.scenario,
       first_mes: intros ? intros[0]! : card.firstMes,
       alternate_greetings: intros ? intros.slice(1) : card.alternateGreetings,
-      group_only_greetings: [],
+      group_only_greetings: groupOnlyGreetings,
       mes_example: card.mesExample,
       system_prompt: card.systemPrompt,
       post_history_instructions: card.postHistoryInstructions,
@@ -107,7 +115,9 @@ export function exportCardV3(card: NormalizedCard, overlay: CardPlotOverlay = {}
       creator: card.creator,
       character_version: card.characterVersion,
       character_book: {
-        extensions: {},
+        // What RisuAI's own exporter writes on every book, and how our import
+        // tells a RisuAI book from the rest — so its key matching survives the trip.
+        extensions: card.loreSettings.risuMatching ? { risu_fullWordMatching: false } : {},
         scan_depth: card.loreSettings.scanDepth,
         // An automatic budget is no number to write down; the importer picks its own.
         ...(card.loreSettings.tokenBudget !== undefined
@@ -153,4 +163,78 @@ export function exportCardPng(card: CharacterCardV3, image?: Uint8Array): Uint8A
     ['chara', base64Json(v2)],
     ['ccv3', base64Json(card)],
   ]);
+}
+
+/** An image a charx export carries. */
+export interface CharxExportImage {
+  /** Extension without the dot, as the image was sniffed when it was stored (`png`, `jpg`, …). */
+  ext: string;
+  bytes: Uint8Array;
+}
+
+/** A plot asset on its way into a charx. */
+export interface CharxExportAsset extends CharxExportImage {
+  /** Names the file inside the archive and nothing else, so it must be unique and path-safe — a slug is. */
+  slug: string;
+  /** The card's own name for the image; null (an upload without one) goes out as the slug. */
+  name: string | null;
+}
+
+const EMBEDDED_PREFIX = 'embeded://'; // sic — the CCv3 spec spells it this way.
+
+/**
+ * The card as a .charx archive with its images in it — the one export that
+ * carries a plot's assets, so the `{{img::…}}` references in it still resolve
+ * once the card is somewhere else.
+ *
+ * Laid out the way RisuAI's charx export lays it out (characterCards.ts,
+ * `exportCharacterCard` and `createBaseV3`), since RisuAI is the reader that
+ * matters: the main icon as `{type: 'icon', name: 'main'}` under
+ * `assets/icon/image/`, and every asset as `x-risu-asset` under
+ * `assets/other/image/` — the type RisuAI's import files into
+ * `additionalAssets`, the list its `{{img::name}}` looks names up in (without
+ * case). An `emotion` would only answer `{{emotion::…}}`. The files are named by
+ * slug rather than by name as RisuAI names them: a card's names can hold a `/`,
+ * a `..` or Hangul, and the path is only ever looked up through the `uri`, so
+ * the name rides in `name` alone. RisuAI's `x_meta/` sidecars and its
+ * `module.risum` are left out — its import reads the scripts from `card.json`
+ * when there is no module, and a module would replace them.
+ *
+ * Every entry `data.assets` declares is in the archive: RisuAI's import throws
+ * on an `embeded://` it cannot find, so a caller with an image missing leaves
+ * it out of `assets` rather than passing something empty. Nothing is
+ * compressed, as RisuAI does not compress either — the images already are — and
+ * every local header carries its sizes, so a streaming reader takes exact byte
+ * counts instead of looking for the next signature inside the picture.
+ */
+export function exportCardCharx(
+  card: CharacterCardV3,
+  assets: CharxExportAsset[],
+  icon?: CharxExportImage,
+): Uint8Array {
+  const files: Record<string, Uint8Array> = {};
+  const declared: NonNullable<CharacterCardV3['data']['assets']> = [];
+  const embed = (type: string, name: string, path: string, image: CharxExportImage): void => {
+    files[path] = image.bytes;
+    declared.push({ type, uri: `${EMBEDDED_PREFIX}${path}`, name, ext: image.ext });
+  };
+
+  if (icon) embed('icon', 'main', `assets/icon/image/main.${icon.ext}`, icon);
+  for (const asset of assets) {
+    const name = asset.name?.trim() ? asset.name : asset.slug;
+    const path = `assets/other/image/${asset.slug}.${asset.ext}`;
+    embed('x-risu-asset', name, path, asset);
+    // The studio hands creators `{{img::slug}}`, and RisuAI knows an image only
+    // by its names — so one imported under a name of its own (any Korean one)
+    // is declared a second time under the slug, pointing at the same file.
+    // Our own import reads each file once and keeps the first name.
+    if (name.toLowerCase() !== asset.slug.toLowerCase()) {
+      declared.push({ type: 'x-risu-asset', uri: `${EMBEDDED_PREFIX}${path}`, name: asset.slug, ext: asset.ext });
+    }
+  }
+  // Last, as RisuAI writes it: the card is the one entry that names the others.
+  files['card.json'] = new TextEncoder().encode(
+    JSON.stringify({ ...card, data: { ...card.data, assets: declared } }),
+  );
+  return zipSync(files, { level: 0 });
 }

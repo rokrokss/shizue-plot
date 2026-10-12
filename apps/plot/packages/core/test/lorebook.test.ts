@@ -91,7 +91,7 @@ describe('activateLore', () => {
     expect(activate(entries, 'dragon ' + 'a'.repeat(600), 1000, countChars)).toEqual([]);
   });
 
-  it('orders by insertionOrder and cuts off at the token budget', () => {
+  it('pays for the highest insertionOrder first and sends the survivors lowest first', () => {
     const entries = [
       entry({ content: 'cccc', constant: true, insertionOrder: 3 }),
       entry({ content: 'aaaa', constant: true, insertionOrder: 1 }),
@@ -102,8 +102,27 @@ describe('activateLore', () => {
       'bbbb',
       'cccc',
     ]);
-    expect(activate(entries, '', 9, countChars).map((e) => e.content)).toEqual(['aaaa', 'bbbb']);
+    // RisuAI and the V3 spec: the lowest insertionOrder is the first to go.
+    expect(activate(entries, '', 9, countChars).map((e) => e.content)).toEqual(['bbbb', 'cccc']);
     expect(activate(entries, '', 3, countChars)).toEqual([]);
+  });
+
+  it('skips an entry that does not fit and keeps trying the rest', () => {
+    const entries = [
+      entry({ content: 'aaaa', constant: true, insertionOrder: 1 }),
+      entry({ content: 'x'.repeat(8), constant: true, insertionOrder: 2 }),
+      entry({ content: 'cc', constant: true, insertionOrder: 3 }),
+    ];
+    // cc (2) fits, the 8 after it does not and is passed over, aaaa (4) still fits.
+    expect(activate(entries, '', 6, countChars).map((e) => e.content)).toEqual(['aaaa', 'cc']);
+  });
+
+  it('gives an always-on entry no precedence over a keyword entry ranked above it', () => {
+    const entries = [
+      entry({ content: 'always', constant: true, insertionOrder: 0 }),
+      entry({ content: 'dragon', keys: ['용'], insertionOrder: 5 }),
+    ];
+    expect(activate(entries, '용이 나타났다', 6, countChars).map((e) => e.content)).toEqual(['dragon']);
   });
 });
 
@@ -129,13 +148,30 @@ describe('activateLore - recursive scanning', () => {
     ]);
   });
 
-  it('stops after two extra passes', () => {
-    const longer = [...chain, entry({ content: 'D 엔트리', keys: ['C 엔트리'], insertionOrder: 4 })];
+  it('follows a chain until a pass activates nothing new', () => {
+    const longer = [
+      ...chain,
+      entry({ content: 'D는 E를 부른다', keys: ['C 엔트리'], insertionOrder: 4 }),
+      entry({ content: 'E 엔트리', keys: ['E를'], insertionOrder: 5 }),
+      entry({ content: '고립', keys: ['아무도 부르지 않는 말'], insertionOrder: 6 }),
+    ];
     expect(activate(longer, '시작', 1000, countChars, true).map((e) => e.content)).toEqual([
       'A는 B를 부른다',
       'B는 C를 부른다',
       'C 엔트리',
+      'D는 E를 부른다',
+      'E 엔트리',
     ]);
+  });
+
+  it('stops at its pass cap on a chain longer than any book needs', () => {
+    // Link i is triggered by ⟨i⟩ and says ⟨i+1⟩: one more link per pass.
+    const links = Array.from({ length: 103 }, (_, i) =>
+      entry({ content: `⟨${i + 1}⟩`, keys: [`⟨${i}⟩`], insertionOrder: i }),
+    );
+    const result = activate(links, '⟨0⟩', 10_000, countChars, true);
+    // The first pass and a hundred more.
+    expect(result).toHaveLength(101);
   });
 
   it('activates mutually triggering entries once each instead of looping', () => {
@@ -160,14 +196,14 @@ describe('activateLore - recursive scanning', () => {
     ]);
   });
 
-  it('spends one budget across every pass and stops when it runs out', () => {
+  it('spends one budget on every pass together, after the recursion has run', () => {
     const cost = chain.map((e) => e.content.length);
-    // Enough for the first two links, so the third pass finds C but cannot pay for it.
-    const twoLinks = activate(chain, '시작', cost[0]! + cost[1]!, countChars, true);
-    expect(twoLinks.map((e) => e.content)).toEqual(['A는 B를 부른다', 'B는 C를 부른다']);
-    // One token short of B: the recursion stops with only the first pass kept.
-    const oneLink = activate(chain, '시작', cost[0]! + cost[1]! - 1, countChars, true);
-    expect(oneLink.map((e) => e.content)).toEqual(['A는 B를 부른다']);
+    // Room for the last two links: A, ranked lowest, is cut — yet its content
+    // still triggered B, as it does in RisuAI. The budget does not end the scan.
+    const lastTwo = activate(chain, '시작', cost[1]! + cost[2]!, countChars, true);
+    expect(lastTwo.map((e) => e.content)).toEqual(['B는 C를 부른다', 'C 엔트리']);
+    const lastOne = activate(chain, '시작', cost[1]! + cost[2]! - 1, countChars, true);
+    expect(lastOne.map((e) => e.content)).toEqual(['C 엔트리']);
   });
 });
 
@@ -180,13 +216,14 @@ describe('activateLore - expanded text', () => {
   const textOf = (e: LoreEntry): string => expanded.get(e.content) ?? e.content;
 
   it('charges an entry for its expanded text, so one that comes out empty costs nothing', () => {
+    const conditional = '{{#if 0}}긴 조건부 설정 블록{{/if}}';
     const entries = [
-      entry({ content: '{{#if 0}}긴 조건부 설정 블록{{/if}}', constant: true, insertionOrder: 1 }),
-      entry({ content: 'bbbb', constant: true, insertionOrder: 2 }),
+      entry({ content: 'bbbb', constant: true, insertionOrder: 1 }),
+      entry({ content: conditional, constant: true, insertionOrder: 2 }),
     ];
-    const budget = 'bbbb'.length;
+    const budget = conditional.length;
     // Measured raw, the false block spends the budget the next entry needed.
-    expect(activate(entries, '', budget, countChars).map((e) => e.content)).toEqual([]);
+    expect(activate(entries, '', budget, countChars).map((e) => e.content)).toEqual([conditional]);
     const result = activateLore(entries, {
       history: [''],
       scanDepth: 1,
@@ -194,12 +231,9 @@ describe('activateLore - expanded text', () => {
       countTokens: countChars,
       textOf,
     });
-    expect(result.entries.map((e) => e.content)).toEqual([
-      '{{#if 0}}긴 조건부 설정 블록{{/if}}',
-      'bbbb',
-    ]);
+    expect(result.entries.map((e) => e.content)).toEqual(['bbbb', conditional]);
     // The key stays on the raw text, whatever it expanded to this time.
-    expect(result.triggered).toContain(loreEntryKey(entries[0]!));
+    expect(result.triggered).toContain(loreEntryKey(entries[1]!));
   });
 
   it('scans the expanded text on a recursive pass', () => {
@@ -404,11 +438,56 @@ describe('activateLore - triggered keys', () => {
       entry({ content: 'B', keys: ['B'], insertionOrder: 2 }),
       entry({ content: 'too long to fit', keys: ['시작'], insertionOrder: 3 }),
     ];
+    // The longest, ranked highest, does not fit; the two below it still do.
     const result = run(entries, { history: ['시작'], budgetTokens: 12, recursiveScanning: true });
-    expect(contents(result)).toEqual(['A는 B를 부른다']);
-    expect(result.triggered).toEqual([loreEntryKey(entries[0]!)]);
+    expect(contents(result)).toEqual(['A는 B를 부른다', 'B']);
+    expect(result.triggered).toEqual([loreEntryKey(entries[0]!), loreEntryKey(entries[1]!)]);
+    expect(result.via.has(entries[2]!)).toBe(false);
 
     const roomy = run(entries.slice(0, 2), { history: ['시작'], recursiveScanning: true });
     expect(roomy.triggered).toEqual(entries.slice(0, 2).map(loreEntryKey));
+  });
+});
+
+describe('activateLore - RisuAI matching', () => {
+  const castle = entry({ content: 'castle', keys: ['마왕 성'] });
+  const fires = (e: LoreEntry, text: string, risuMatching: boolean): boolean =>
+    run([e], { history: [text], risuMatching }).entries.length === 1;
+
+  it('ignores spaces on both sides, and only with the setting on', () => {
+    expect(fires(castle, '마왕성에 도착했다', true)).toBe(true);
+    expect(fires({ ...castle, keys: ['마왕성'] }, '마왕 성에 도착했다', true)).toBe(true);
+    expect(fires(castle, '마왕성에 도착했다', false)).toBe(false);
+    // Only the space character goes, as in RisuAI: a line break still separates.
+    expect(fires({ ...castle, keys: ['마왕성'] }, '마왕\n성', true)).toBe(false);
+  });
+
+  it('ignores case even on an entry that asks for it', () => {
+    const dragon = entry({ content: 'dragon', keys: ['Red Dragon'], caseSensitive: true });
+    expect(fires(dragon, 'a reddragon appears', true)).toBe(true);
+    expect(fires(dragon, 'a reddragon appears', false)).toBe(false);
+  });
+
+  it('applies to secondary keys too', () => {
+    const gate = entry({ content: 'gate', keys: ['성문'], secondaryKeys: ['마왕 성'], selective: true });
+    expect(fires(gate, '마왕성의 성문', true)).toBe(true);
+    expect(fires(gate, '마왕성의 성문', false)).toBe(false);
+  });
+
+  it('does not match what a comment macro says', () => {
+    expect(fires(castle, '{{// 마왕성 }}평화로운 마을', true)).toBe(false);
+    expect(fires(castle, '{{comment::마왕 성}} 평화로운 마을', true)).toBe(false);
+    expect(fires(castle, '{{// 메모}} 마왕성', true)).toBe(true);
+  });
+
+  it('reads a key of nothing but spaces as no key', () => {
+    expect(fires({ ...castle, keys: ['   '] }, '아무 말', true)).toBe(false);
+    expect(fires({ ...castle, keys: [''] }, '아무 말', true)).toBe(false);
+  });
+
+  it('leaves regex keys to their own terms', () => {
+    const regex = entry({ content: 'regex', keys: ['마왕 성'], useRegex: true });
+    expect(fires(regex, '마왕성', true)).toBe(false);
+    expect(fires(regex, '마왕 성', true)).toBe(true);
   });
 });

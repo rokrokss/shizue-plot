@@ -571,21 +571,23 @@ describe('assemblePrompt - merged lorebook', () => {
         preset,
         userName: '민준',
       }).system;
-    expect(budgeted({ ...DEFAULT_LORE_SETTINGS })).toContain('두 번째 항목.');
-    expect(budgeted({ ...DEFAULT_LORE_SETTINGS, tokenBudget: countTokens('첫 번째 항목.') })).not.toContain(
-      '두 번째 항목.',
-    );
+    expect(budgeted({ ...DEFAULT_LORE_SETTINGS })).toContain('첫 번째 항목.');
+    // Room for one: the entry ranked higher (insertionOrder 1) takes it.
+    const tight = budgeted({ ...DEFAULT_LORE_SETTINGS, tokenBudget: countTokens('두 번째 항목.') });
+    expect(tight).toContain('두 번째 항목.');
+    expect(tight).not.toContain('첫 번째 항목.');
   });
 
   it('gives a card that names no budget its share of the context budget', () => {
     const first = '첫 번째 항목.';
+    const second = '두 번째 항목.';
     const automatic = (contextBudget: number) =>
       assemblePrompt({
         plot: {
           ...plot,
           lorebook: [
             loreEntry({ content: first, insertionOrder: 0 }),
-            loreEntry({ content: '두 번째 항목.', insertionOrder: 1 }),
+            loreEntry({ content: second, insertionOrder: 1 }),
           ],
         },
         characters: [{ name: '아리아', card: { ...bareCard, loreSettings: { ...DEFAULT_LORE_SETTINGS } } }],
@@ -595,12 +597,13 @@ describe('assemblePrompt - merged lorebook', () => {
         contextBudget,
         maxResponseTokens: 0,
       }).system;
-    // Room for exactly the first entry: the budget is the share, rounded down.
-    const tight = Math.ceil(countTokens(first) / LORE_BUDGET_SHARE);
-    expect(Math.floor(tight * LORE_BUDGET_SHARE)).toBe(countTokens(first));
-    expect(automatic(tight)).toContain(first);
-    expect(automatic(tight)).not.toContain('두 번째 항목.');
-    expect(automatic(tight * 2)).toContain('두 번째 항목.');
+    // Room for exactly the higher-ranked entry: the budget is the share, rounded down.
+    const tight = Math.ceil(countTokens(second) / LORE_BUDGET_SHARE);
+    expect(Math.floor(tight * LORE_BUDGET_SHARE)).toBe(countTokens(second));
+    expect(automatic(tight)).toContain(second);
+    expect(automatic(tight)).not.toContain(first);
+    const roomy = Math.ceil((countTokens(first) + countTokens(second)) / LORE_BUDGET_SHARE);
+    expect(automatic(roomy)).toContain(first);
   });
 
   it('charges lore for its expanded text, and sends nothing for an entry that expands to nothing', () => {

@@ -49,6 +49,17 @@ function truncateOpenLink(md: string): string {
   return md.slice(0, match.index) + (match[1] ? '' : match[2]!);
 }
 
+/**
+ * `그는 <span sty` → `그는 `. A tag still being typed is text to markdown until
+ * its `>` arrives, so without this every tag the model writes would flash past
+ * as its own spelling first. Only the end of the last line is looked at, and
+ * a `<` the writer meant as text comes back with the next newline.
+ */
+function truncateOpenTag(md: string): string {
+  const match = /<\/?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>\n]*)?$/.exec(md);
+  return match ? md.slice(0, match.index) : md;
+}
+
 function toggle(stack: string[], marker: string): void {
   if (stack[stack.length - 1] === marker) stack.pop();
   else stack.push(marker);
@@ -135,11 +146,11 @@ function balanceInline(md: string): string {
 
 /**
  * The block as it should be drawn right now: fences and inline markers closed,
- * a half-typed link destination hidden.
+ * a half-typed link destination or tag hidden.
  */
 export function balancePartial(md: string): string {
   const fence = openFence(md);
   // Inside a fence nothing is markup, so closing the fence is the whole job.
   if (fence !== null) return md.endsWith('\n') ? md + fence : md + '\n' + fence;
-  return balanceInline(truncateOpenLink(md));
+  return balanceInline(truncateOpenLink(truncateOpenTag(md)));
 }

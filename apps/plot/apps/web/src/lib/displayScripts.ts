@@ -244,6 +244,8 @@ export function planDisplayScripts(
   /**
    * An invalid regex disables its script, silently. `d` is always added: a capture
    * is moved as the pieces it spans, so where it matched matters, not only what.
+   * `g` is always added too, but only so the run can walk the matches by
+   * `lastIndex` — how many of them it rewrites is `rewritesEvery`'s to say.
    */
   function compile(script: DisplayScript): RegExp | null {
     let flags = script.flags ?? '';
@@ -254,6 +256,20 @@ export function planDisplayScripts(
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Whether a script rewrites every match or only the first.
+   *
+   * A script that carries flags is read the way RisuAI and SillyTavern read them:
+   * with a `g` every match, without one the first. The importers store the flags
+   * their source compiled the pattern with — RisuAI's include taking the `g` off a
+   * `move_top`/`move_bottom`, which is why a moved RisuAI script lifts one match.
+   * A script with none is every match, whatever its action: the editor writes no
+   * flags, and a script written here has always meant every match.
+   */
+  function rewritesEvery(script: DisplayScript): boolean {
+    return !script.flags || script.flags.includes('g');
   }
 
   /**
@@ -476,6 +492,7 @@ export function planDisplayScripts(
       const pattern = compile(entry.script);
       if (!pattern) continue;
       const unicode = pattern.flags.includes('u') || pattern.flags.includes('v');
+      const every = rewritesEvery(entry.script);
       const view = layout(body);
       // A script's own match count starts over; the clock and the budget do not.
       let matches = 0;
@@ -501,6 +518,8 @@ export function planDisplayScripts(
         else if (entry.script.action === 'move_bottom') bottom.push(expansion);
         else next.push(...expansion);
         cursor = end;
+        // The rest stay as they are, in place — moved or not, as in RisuAI.
+        if (!every) break;
         if (match[0].length === 0) {
           pattern.lastIndex = advance(view.joined, pattern.lastIndex, unicode);
         }

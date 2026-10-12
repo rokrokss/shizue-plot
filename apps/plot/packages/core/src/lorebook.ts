@@ -5,26 +5,76 @@ import type { LoreEntry } from './types.js';
 /** Imported cards are untrusted; bound compilation as well as matching work. */
 const MAX_REGEX_KEY_LENGTH = 512;
 
-/** A key matcher over one scan text, which is lowercased once rather than per key. */
-function keyMatcher(scanText: string, caseSensitive: boolean, useRegex: boolean): (key: string) => boolean {
-  const haystack = caseSensitive || useRegex ? scanText : scanText.toLowerCase();
-  return (key) => {
-    if (!key) return false;
-    if (useRegex) {
-      if (key.length > MAX_REGEX_KEY_LENGTH) return false;
+/**
+ * The text one depth scans on one pass, with the foldings the plain-key matchers
+ * ask for made once, on first use, rather than once per entry.
+ */
+interface ScanText {
+  raw: string;
+  lower?: string;
+  risu?: string;
+}
+
+/**
+ * A scan text as RisuAI matches plain keys against it (`searchMatch` in its
+ * `lorebook.svelte.ts`): lowercased, its `{{// …}}` and `{{comment: …}}` macros
+ * taken out — the V3 spec says neither is to be matched — and then every space
+ * removed. Only the space character goes, not tabs or line breaks, and a comment
+ * ends at its line, as there.
+ */
+const risuFold = (text: string): string =>
+  text
+    .toLowerCase()
+    .replace(/\{\{\/\/(.+?)\}\}/g, '')
+    .replace(/\{\{comment:(.+?)\}\}/g, '')
+    .replace(/ /g, '');
+
+/**
+ * A key matcher over one scan text.
+ *
+ * `risuMatching` is RisuAI's plain-key matching, for a book that came from there:
+ * the key and the text both lowercased with their spaces taken out, so `마왕 성`
+ * finds `마왕성` and the other way round, and the entry's `caseSensitive` is not
+ * read — RisuAI never reads it on this path. A key that is nothing but spaces is
+ * no key. Regex keys keep their own terms either way, on the text as written.
+ */
+function keyMatcher(
+  scan: ScanText,
+  caseSensitive: boolean,
+  useRegex: boolean,
+  risuMatching: boolean,
+): (key: string) => boolean {
+  if (useRegex) {
+    return (key) => {
+      if (!key || key.length > MAX_REGEX_KEY_LENGTH) return false;
       try {
         // Never fall back to the backtracking JS engine for unsupported syntax.
-        return RE2JS.compile(key, caseSensitive ? 0 : RE2JS.CASE_INSENSITIVE).test(scanText);
+        return RE2JS.compile(key, caseSensitive ? 0 : RE2JS.CASE_INSENSITIVE).test(scan.raw);
       } catch {
         return false;
       }
-    }
-    return haystack.includes(caseSensitive ? key : key.toLowerCase());
-  };
+    };
+  }
+  if (risuMatching) {
+    const haystack = (scan.risu ??= risuFold(scan.raw));
+    return (key) => {
+      const needle = key.trim().toLowerCase().replace(/ /g, '');
+      return needle.length > 0 && haystack.includes(needle);
+    };
+  }
+  const haystack = caseSensitive ? scan.raw : (scan.lower ??= scan.raw.toLowerCase());
+  return (key) => key.length > 0 && haystack.includes(caseSensitive ? key : key.toLowerCase());
 }
 
-/** Extra passes run when recursive scanning is on. */
-const MAX_RECURSION_PASSES = 2;
+/**
+ * The most extra passes recursive scanning runs. Not what ends it: a pass that
+ * activates nothing does, and every pass that goes on takes at least one entry
+ * out of the running, so a book of N entries is done within N + 1 passes
+ * whatever this says. RisuAI has no cap at all. This one is only a ceiling on
+ * the work a hostile card can ask for — each pass rescans every entry still
+ * waiting — set far past any chain a creator would write.
+ */
+const MAX_RECURSION_PASSES = 100;
 
 /**
  * An entry's identity across turns, for the timed effects a branch records
@@ -38,10 +88,10 @@ export function loreEntryKey(entry: LoreEntry): string {
     .padStart(8, '0');
 }
 
-function isTriggered(entry: LoreEntry, scanText: string, recursivePass: boolean): boolean {
+function isTriggered(entry: LoreEntry, scan: ScanText, recursivePass: boolean, risuMatching: boolean): boolean {
   // Constant entries all activate on the first pass, so they never retrigger.
   if (entry.constant) return !recursivePass;
-  const matches = keyMatcher(scanText, entry.caseSensitive, entry.useRegex);
+  const matches = keyMatcher(scan, entry.caseSensitive, entry.useRegex, risuMatching);
   if (!entry.keys.some(matches)) return false;
   if (!entry.selective || entry.secondaryKeys.length === 0) return true;
   const logic = entry.selectiveLogic;
@@ -109,6 +159,8 @@ export interface ActivateLoreInput {
   budgetTokens: number;
   countTokens: (text: string) => number;
   recursiveScanning?: boolean;
+  /** The book's `LoreSettings.risuMatching`: plain keys matched as RisuAI does. */
+  risuMatching?: boolean;
   /** Absent: a branch with no records, as long as `history`. */
   timed?: LoreTimedState;
   /** Probability rolls and group draws. Returns [0, 1). */
@@ -141,20 +193,31 @@ export interface LoreActivation {
 export type LoreActivationVia = 'constant' | 'keyword' | 'sticky' | 'recursion';
 
 /**
- * Selects lore entries triggered by the newest history, ordered by insertionOrder
- * and cut off at budgetTokens.
+ * Selects lore entries triggered by the newest history, keeps what fits in
+ * budgetTokens, and returns them ordered by insertionOrder.
  *
  * Each entry scans the newest `scanDepth` messages — or its own `scanDepth`. With
  * recursiveScanning, the content activated by a pass is appended to every
- * entry's scan text and the remaining entries are scanned again, up to
- * MAX_RECURSION_PASSES extra passes. The budget spans all passes: the pass that
- * runs out of it stops there and ends the recursion.
+ * entry's scan text and the remaining entries are scanned again, until a pass
+ * activates nothing new (or MAX_RECURSION_PASSES extra passes have run).
+ *
+ * The budget comes after all of that, as RisuAI spends it and as the V3 spec
+ * describes `insertion_order`: the highest insertionOrder is paid for first, and
+ * an entry that does not fit is skipped while the ones after it still get their
+ * turn. Always-on entries take their place in that order like any other, and an
+ * entry the budget leaves out has still done its recursive scanning — the budget
+ * decides what is sent, not what the scan saw. The entries that made it go into
+ * the prompt lowest insertionOrder first, the order the spec and RisuAI both
+ * write them in. Ties go by the order the entries activated in — the book's,
+ * within one pass — in the budget and in the prompt alike.
  *
  * Timed effects (SillyTavern's): a sticky entry stays active for `sticky`
  * messages after it triggers, without a scan and without counting as a new
  * trigger; a cooldown then keeps it from triggering for `cooldown` more; a delay
  * keeps it off until the chat holds `delay` messages. A triggered entry is then
- * subject to its `probability`, and to one-per-group among its inclusion groups.
+ * subject to its `probability`, and to one-per-group among its inclusion groups
+ * — where a group counts as taken once one of its members activates, whether or
+ * not the budget then has room for it.
  */
 export function activateLore(entries: LoreEntry[], input: ActivateLoreInput): LoreActivation {
   const {
@@ -162,6 +225,7 @@ export function activateLore(entries: LoreEntry[], input: ActivateLoreInput): Lo
     budgetTokens,
     countTokens,
     recursiveScanning = false,
+    risuMatching = false,
     random = Math.random,
     textOf = (entry: LoreEntry) => entry.content,
   } = input;
@@ -204,52 +268,67 @@ export function activateLore(entries: LoreEntry[], input: ActivateLoreInput): Lo
     return scan;
   };
   let recursion: string[] = [];
-  const scanFor = (entry: LoreEntry): string =>
-    [historyScan(entry.scanDepth ?? input.scanDepth), ...recursion].filter((text) => text).join('\n');
+  // The recursion text stands still within a pass, so each depth's scan text is
+  // built once per pass rather than once per entry.
+  let passScans = new Map<number, ScanText>();
+  const scanFor = (entry: LoreEntry): ScanText => {
+    const depth = entry.scanDepth ?? input.scanDepth;
+    let scan = passScans.get(depth);
+    if (scan === undefined) {
+      scan = { raw: [historyScan(depth), ...recursion].filter((text) => text).join('\n') };
+      passScans.set(depth, scan);
+    }
+    return scan;
+  };
   const passes = (entry: LoreEntry): boolean =>
     entry.probability === undefined || entry.probability >= 100 || random() * 100 < entry.probability;
   const byOrder = (a: LoreEntry, b: LoreEntry): number => a.insertionOrder - b.insertionOrder;
 
-  const selected: LoreEntry[] = [];
-  const triggered = new Set<string>();
+  /** Everything activated, pass by pass, each pass in insertionOrder. */
+  const active: LoreEntry[] = [];
   const via = new Map<LoreEntry, LoreActivationVia>();
   const held = new Set<string>(sticky.flatMap(groupsOf));
-  let used = 0;
 
   for (let pass = 0; pass < (recursiveScanning ? 1 + MAX_RECURSION_PASSES : 1); pass += 1) {
-    const matched = pending.filter((entry) => isTriggered(entry, scanFor(entry), pass > 0)).sort(byOrder);
+    const matched = pending
+      .filter((entry) => isTriggered(entry, scanFor(entry), pass > 0, risuMatching))
+      .sort(byOrder);
     // A failed roll or a lost draw is final for this activation: the entry is not
     // rolled again on a later pass.
     const done = new Set(matched);
     pending = pending.filter((entry) => !done.has(entry));
     const fresh = applyInclusionGroups(matched.filter(passes), held, random);
 
-    const candidates = (pass === 0 ? [...sticky, ...fresh] : fresh).sort(byOrder);
+    const activated = (pass === 0 ? [...sticky, ...fresh] : fresh).sort(byOrder);
     const isFresh = new Set(fresh);
-    const activated: LoreEntry[] = [];
-    let exhausted = false;
-    for (const entry of candidates) {
-      const cost = countTokens(textOf(entry));
-      if (used + cost > budgetTokens) {
-        exhausted = true;
-        break;
-      }
-      used += cost;
-      activated.push(entry);
-      // Only what reached the prompt is recorded: an entry the budget cut never
-      // had an effect to keep.
-      if (isFresh.has(entry)) triggered.add(keyOf(entry));
+    for (const entry of activated) {
       via.set(
         entry,
         !isFresh.has(entry) ? 'sticky' : entry.constant ? 'constant' : pass === 0 ? 'keyword' : 'recursion',
       );
       for (const label of groupsOf(entry)) held.add(label);
     }
-    selected.push(...activated);
-    if (exhausted || activated.length === 0) break;
+    active.push(...activated);
+    if (activated.length === 0 || pending.length === 0) break;
 
     recursion = [...recursion, ...activated.map(textOf)];
+    passScans = new Map();
   }
 
+  // Highest insertionOrder first; a stable sort, so ties keep the activation order.
+  const kept = new Set<LoreEntry>();
+  let used = 0;
+  for (const entry of [...active].sort((a, b) => b.insertionOrder - a.insertionOrder)) {
+    const cost = countTokens(textOf(entry));
+    if (used + cost > budgetTokens) continue;
+    used += cost;
+    kept.add(entry);
+  }
+
+  const selected = active.filter((entry) => kept.has(entry));
+  for (const entry of active) if (!kept.has(entry)) via.delete(entry);
+  // Only what reached the prompt is recorded: an entry the budget cut never had
+  // an effect to keep.
+  const triggered = new Set(selected.filter((entry) => via.get(entry) !== 'sticky').map(keyOf));
   return { entries: selected.sort(byOrder), triggered: [...triggered], via };
 }

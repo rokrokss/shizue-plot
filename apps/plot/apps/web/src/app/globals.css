@@ -177,8 +177,10 @@ a, button, input, select, textarea, summary { -webkit-tap-highlight-color: trans
 .intro-body > * + * {
   margin-top: 0.85em;
 }
-/* A speaker's run is a box of its own, so its paragraphs need the rule too. */
-.message-body .speech-run > * + * {
+/* A speaker's run is a box of its own, so its paragraphs need the rule too —
+   and so is HTML written into a message (HtmlBlock). */
+.message-body .speech-run > * + *,
+.message-html > * + * {
   margin-top: 0.85em;
 }
 .message-body em,

@@ -475,8 +475,8 @@ function loreEntryText(entry: LoreEntry, macro: MacroContext): string {
 
 /**
  * What a book's always-on entries cost once expanded the way the assembler
- * expands them — the part of the lore budget spent before any keyword matches.
- * The studio weighs it against the budget.
+ * expands them — the part of the lore budget a book spends whatever the
+ * conversation says. The studio weighs it against the budget.
  */
 export function constantLoreTokens(entries: LoreEntry[], macro: MacroContext): number {
   return entries
@@ -584,6 +584,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     budgetTokens: loreSettings.tokenBudget ?? Math.floor(contextBudget * LORE_BUDGET_SHARE),
     countTokens,
     recursiveScanning: loreSettings.recursiveScanning,
+    risuMatching: loreSettings.risuMatching ?? false,
     textOf: expandLore,
     ...(loreState ? { timed: loreState } : {}),
   });

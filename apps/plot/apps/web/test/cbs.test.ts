@@ -196,6 +196,80 @@ describe('{{#each}}', () => {
   });
 });
 
+describe("RisuAI's {{#each LIST as name}}", () => {
+  it('iterates a JSON array written inline, naming the item', () => {
+    expect(render('{{#each ["a","b"] as item}}[{{slot::item}}]{{/each}}')).toBe('[a][b]');
+  });
+
+  it('iterates a JSON array a variable holds', () => {
+    expect(
+      render('{{#each {{getvar::list}} as name}}<li>{{slot::name}}</li>{{/each}}', {
+        variables: { list: '["아리아","세이"]' },
+      }),
+    ).toBe('<li>아리아</li><li>세이</li>');
+  });
+
+  it('splits anything that is not a JSON array on §, as RisuAI does', () => {
+    expect(render('{{#each 사과§배§감 as x}}[{{slot::x}}]{{/each}}')).toBe('[사과][배][감]');
+    // A comma is not RisuAI's separator, and a bare name is not a variable there.
+    expect(render('{{#each a,b as x}}[{{slot::x}}]{{/each}}')).toBe('[a,b]');
+    expect(render('{{#each party as x}}[{{slot::x}}]{{/each}}')).toBe('[party]');
+    expect(render('{{#each {"a":1} as x}}[{{slot::x}}]{{/each}}')).toBe('[{&quot;a&quot;:1}]');
+  });
+
+  it('writes an item that is not a string as JSON', () => {
+    expect(render('{{#each [1,{"hp":2},null] as x}}[{{slot::x}}]{{/each}}')).toBe(
+      '[1][{&quot;hp&quot;:2}][null]',
+    );
+  });
+
+  it('renders nothing for an empty array, or a list that came to nothing', () => {
+    expect(render('{{#each [] as x}}[{{slot::x}}]{{/each}}')).toBe('');
+    expect(render('{{#each {{getvar::none}} as x}}[{{slot::x}}]{{/each}}')).toBe('');
+  });
+
+  it('resolves each name to its own block, the inner one shadowing the outer', () => {
+    expect(
+      render('{{#each ["a","b"] as x}}{{#each ["1","2"] as y}}[{{slot::x}}{{slot::y}}]{{/each}}{{/each}}'),
+    ).toBe('[a1][a2][b1][b2]');
+    expect(render('{{#each ["a"] as x}}{{#each ["1"] as x}}[{{slot::x}}]{{/each}}{{/each}}')).toBe('[1]');
+  });
+
+  it('leaves a name no block gave as written', () => {
+    expect(render('{{#each ["a"] as x}}[{{slot::y}}]{{/each}}')).toBe('[{{slot::y}}]');
+    expect(render('{{slot::x}}')).toBe('{{slot::x}}');
+  });
+
+  it('unindents the body and trims the whole, unless it is ::keep', () => {
+    const body = '\n  <li>{{slot::x}}</li>\n';
+    expect(render(`{{#each ["a","b"] as x}}${body}{{/each}}`)).toBe('<li>a</li><li>b</li>');
+    expect(render(`{{#each::keep ["a","b"] as x}}${body}{{/each}}`)).toBe(
+      '\n  <li>a</li>\n\n  <li>b</li>\n',
+    );
+  });
+
+  it('escapes an item, and never runs one as a macro the way RisuAI would', () => {
+    expect(
+      render('{{#each {{getvar::list}} as x}}[{{slot::x}}]{{/each}}', {
+        variables: { list: '["<b>", "{{getvar::hp}}"]' },
+      }),
+    ).toBe('[&lt;b&gt;][{{getvar::hp}}]');
+  });
+
+  it('keeps ours: a bare name is a comma-separated variable, and any slot is the current item', () => {
+    expect(render('{{#each party}}[{{slot}}|{{slot::member}}]{{/each}}')).toBe(
+      '[아리아|아리아][세이|세이][루미|루미]',
+    );
+  });
+
+  it('is bounded like ours', () => {
+    const list = JSON.stringify(Array.from({ length: 6_000 }, () => 'x'));
+    expect(() =>
+      render('{{#each {{getvar::list}} as x}}{{slot::x}}{{/each}}', { variables: { list } }),
+    ).toThrow(RenderBudgetExhausted);
+  });
+});
+
 describe('RisuAI templates', () => {
   const risu = (template: string, variables: Record<string, string>, overrides: Partial<CbsContext> = {}) =>
     render(template, { variables, ...overrides });
@@ -366,6 +440,7 @@ describe('taint marking', () => {
 
   it('marks an each item, because the list is usually a variable', () => {
     expect(marked('{{#each party}}[{{slot}}]{{/each}}')).toBe('[#아리아#][#세이#][#루미#]');
+    expect(marked('{{#each ["a"] as x}}[{{slot::x}}]{{/each}}')).toBe('[#a#]');
   });
 
   it('leaves the creator’s own template untouched', () => {
