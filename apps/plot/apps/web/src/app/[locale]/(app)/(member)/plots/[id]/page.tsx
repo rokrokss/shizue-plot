@@ -1074,7 +1074,7 @@ function CoverPicker({
           src={`${plot.coverUrl}?v=${version}`}
           alt=""
           data-testid="plot-cover"
-          className="aspect-[16/9] w-full rounded-lg border border-line object-cover"
+          className="aspect-[2/3] w-32 rounded-lg border border-line object-cover sm:w-40"
         />
       ) : null}
       <div className="flex flex-wrap items-center gap-2">

@@ -88,79 +88,85 @@ export default function PublicPlotPage({ params }: { params: Promise<{ id: strin
 
   return (
     <div className="mx-auto w-full max-w-6xl px-5 py-10">
-      {plot.coverUrl ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={plot.coverUrl}
-          alt=""
-          data-testid="plot-cover"
-          className="mb-6 aspect-[16/9] w-full rounded-xl border border-line object-cover"
-        />
-      ) : null}
-
       <div className="grid gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">
-          <div className="flex flex-wrap items-center gap-4">
-            <div className="min-w-0 flex-1">
-              <h1 className="truncate title2 sm:title1">{plot.name}</h1>
-              <div className="mt-1 flex flex-wrap items-center gap-3">
-                <Link
-                  href={`/creators/${plot.creatorId}`}
-                  className="text-sm text-muted transition-colors hover:text-fg"
-                >
-                  {explore('by', { name: plot.creatorName })}
-                </Link>
-                {/* Beside the name it belongs to: the work is how a reader finds
-                    a creator, so this is where following one is worth offering. */}
-                <FollowButton creatorId={plot.creatorId} initial={plot.creatorFollow} />
+          {/* A portrait poster beside the title, as covers are drawn: a wide
+              banner would keep only the middle band of one. */}
+          <div className="flex items-start gap-4 sm:gap-6">
+            {plot.coverUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={plot.coverUrl}
+                alt=""
+                data-testid="plot-cover"
+                className="aspect-[2/3] w-28 shrink-0 rounded-xl border border-line object-cover sm:w-44"
+              />
+            ) : null}
+            <div className="min-w-0 flex-1 space-y-4">
+              <div className="flex flex-wrap items-center gap-4">
+                {/* The basis lets the button drop under a title the poster leaves narrow. */}
+                <div className="min-w-0 flex-1 basis-48">
+                  <h1 className="title2 sm:title1">{plot.name}</h1>
+                  <div className="mt-1 flex flex-wrap items-center gap-3">
+                    <Link
+                      href={`/creators/${plot.creatorId}`}
+                      className="text-sm text-muted transition-colors hover:text-fg"
+                    >
+                      {explore('by', { name: plot.creatorName })}
+                    </Link>
+                    {/* Beside the name it belongs to: the work is how a reader finds
+                        a creator, so this is where following one is worth offering. */}
+                    <FollowButton creatorId={plot.creatorId} initial={plot.creatorFollow} />
+                  </div>
+                </div>
+                {owner ? (
+                  <Link
+                    href={`/plots/${plot.id}`}
+                    className="inline-flex h-10 shrink-0 items-center rounded-lg bg-accent px-4 text-sm font-medium text-accent-ink transition-colors hover:bg-accent/90"
+                  >
+                    {t('edit')}
+                  </Link>
+                ) : (
+                  <Button
+                    data-testid="like-button"
+                    variant={plot.likedByMe ? 'primary' : 'secondary'}
+                    aria-pressed={plot.likedByMe}
+                    onClick={() => void toggleLike()}
+                  >
+                    {/* The count is part of the name rather than hidden behind an
+                        aria-label that contradicts it (WCAG 2.5.3 label in name). */}
+                    <span aria-hidden>{plot.likedByMe ? '♥' : '♡'}</span>
+                    {plot.likeCount}
+                    <span className="sr-only">{plot.likedByMe ? t('unlike') : t('like')}</span>
+                  </Button>
+                )}
               </div>
+
+              <p className="text-sm text-muted">
+                {explore('likeCount', { count: plot.likeCount })} ·{' '}
+                {explore('chatCount', { count: plot.chatCount })}
+                {plot.publishedAt
+                  ? ` · ${t('publishedAt', {
+                      date: format.dateTime(new Date(plot.publishedAt), { dateStyle: 'medium' }),
+                    })}`
+                  : ''}
+              </p>
+
+              {plot.tags.length > 0 ? (
+                <ul className="flex flex-wrap gap-1.5">
+                  {plot.tags.map((tag) => (
+                    <li key={tag} className="rounded-full bg-raised px-3 py-1 text-xs text-muted">
+                      {tag}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+
+              {/* Under the tags, and quieter than them: a tag is what the work is
+                  about, these are how it is told. */}
+              <PlotStyleBadges style={plot.style} pov={plot.narrator?.pov} />
             </div>
-            {owner ? (
-              <Link
-                href={`/plots/${plot.id}`}
-                className="inline-flex h-10 shrink-0 items-center rounded-lg bg-accent px-4 text-sm font-medium text-accent-ink transition-colors hover:bg-accent/90"
-              >
-                {t('edit')}
-              </Link>
-            ) : (
-              <Button
-                data-testid="like-button"
-                variant={plot.likedByMe ? 'primary' : 'secondary'}
-                aria-pressed={plot.likedByMe}
-                onClick={() => void toggleLike()}
-              >
-                {/* The count is part of the name rather than hidden behind an
-                    aria-label that contradicts it (WCAG 2.5.3 label in name). */}
-                <span aria-hidden>{plot.likedByMe ? '♥' : '♡'}</span>
-                {plot.likeCount}
-                <span className="sr-only">{plot.likedByMe ? t('unlike') : t('like')}</span>
-              </Button>
-            )}
           </div>
-
-          <p className="text-sm text-muted">
-            {explore('likeCount', { count: plot.likeCount })} ·{' '}
-            {explore('chatCount', { count: plot.chatCount })}
-            {plot.publishedAt
-              ? ` · ${t('publishedAt', {
-                  date: format.dateTime(new Date(plot.publishedAt), { dateStyle: 'medium' }),
-                })}`
-              : ''}
-          </p>
-
-          {plot.tags.length > 0 ? (
-            <ul className="flex flex-wrap gap-1.5">
-              {plot.tags.map((tag) => (
-                <li key={tag} className="rounded-full bg-raised px-3 py-1 text-xs text-muted">
-                  {tag}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-
-          {/* Under the tags, and quieter than them: a tag is what the work is
-              about, these are how it is told. */}
-          <PlotStyleBadges style={plot.style} pov={plot.narrator?.pov} />
 
           <ErrorText>{error}</ErrorText>
 

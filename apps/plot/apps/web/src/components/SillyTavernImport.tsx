@@ -200,7 +200,7 @@ function StThumb({ file, name }: { file: StFile; name: string }) {
     <span ref={ref} className="shrink-0">
       {src ? (
         // eslint-disable-next-line @next/next/no-img-element
-        <img src={src} alt="" className="size-10 rounded-full bg-raised object-cover" />
+        <img src={src} alt="" className="size-10 rounded-full bg-raised object-cover object-top" />
       ) : (
         <Avatar src={null} name={name} className="size-10 text-sm" />
       )}

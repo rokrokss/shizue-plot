@@ -214,7 +214,7 @@ export function ImagesStep({
               <img
                 src={urls.get(image.id)}
                 alt=""
-                className="size-24 shrink-0 rounded-xl border border-line bg-raised object-cover"
+                className="aspect-[2/3] w-24 shrink-0 rounded-xl border border-line bg-raised object-contain"
               />
               <div className="min-w-0 flex-1 space-y-3">
                 <Field label={t('name')} hint={t('nameHint', { name: image.name || '…' })}>

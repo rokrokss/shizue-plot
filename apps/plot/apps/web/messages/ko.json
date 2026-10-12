@@ -87,7 +87,7 @@
     "introHint": "탐색 카드와 플롯 페이지에 노출됩니다. AI에게는 전달되지 않아요.",
     "introPlaceholder": "예: 다섯 길드가 나눠 다스리는 도시. 당신은 어느 쪽에도 속하지 않은 채 이곳에 도착했다.",
     "cover": "커버 이미지",
-    "coverHint": "탐색 카드와 플롯 페이지에 쓰입니다. png · jpg · gif · webp · 5MB 이하",
+    "coverHint": "탐색 카드와 플롯 페이지에 쓰입니다. 세로 2:3 이미지가 잘리지 않고 맞습니다. png · jpg · gif · webp · 5MB 이하",
     "coverUpload": "이미지 올리기",
     "coverUploading": "올리는 중…",
     "coverRemove": "커버 제거",

@@ -142,7 +142,7 @@ export function AssetManager({ plotId }: { plotId: string }) {
                 src={`${asset.url}?v=${version}`}
                 alt={asset.slug}
                 loading="lazy"
-                className="aspect-square w-full object-cover"
+                className="aspect-[2/3] w-full object-contain"
               />
               <p className="truncate px-2 pt-1 text-xs text-muted" title={`{{img::${asset.slug}}}`}>
                 {asset.slug}

@@ -296,7 +296,7 @@ export default function PlotsPage() {
           <p className="mt-1 text-sm text-muted">{t('emptyHint')}</p>
         </div>
       ) : (
-        <ul className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <ul className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 md:grid-cols-4 lg:grid-cols-5">
           {plots.map((plot) => (
             <li key={plot.id}>
               <Link
@@ -310,12 +310,12 @@ export default function PlotsPage() {
                     src={plot.coverUrl}
                     alt=""
                     loading="lazy"
-                    className="aspect-[16/10] w-full bg-raised/60 object-cover"
+                    className="aspect-[2/3] w-full bg-raised/60 object-cover"
                   />
                 ) : (
-                  <div className="brand-dots flex aspect-[16/10] w-full items-center justify-center bg-mint-soft/60"><span className="line-clamp-2 px-6 text-center heading1">{plot.name}</span></div>
+                  <div className="brand-dots flex aspect-[2/3] w-full items-center justify-center bg-mint-soft/60"><span className="line-clamp-3 px-4 text-center heading1">{plot.name}</span></div>
                 )}
-                <div className="flex min-w-0 flex-1 flex-col gap-2 p-5">
+                <div className="flex min-w-0 flex-1 flex-col gap-2 p-3 sm:p-4">
                   <div className="flex items-center gap-2">
                     <p className="min-w-0 flex-1 truncate text-sm font-medium text-fg">
                       {plot.name}

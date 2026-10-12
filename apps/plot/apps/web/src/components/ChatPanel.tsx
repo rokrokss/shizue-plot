@@ -54,7 +54,7 @@ function IllustrationGallery({ illustrations }: { illustrations: readonly Illust
             {illustration.src === null ? (
               <span
                 data-testid="illustration-locked"
-                className="flex aspect-square w-full flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-line bg-raised/40 px-1 text-center"
+                className="flex aspect-[2/3] w-full flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-line bg-raised/40 px-1 text-center"
               >
                 <span aria-hidden="true" className="text-sm leading-none">
                   🔒
@@ -78,7 +78,7 @@ function IllustrationGallery({ illustrations }: { illustrations: readonly Illust
                   src={assetHref(illustration.src)}
                   alt=""
                   loading="lazy"
-                  className="aspect-square w-full object-cover"
+                  className="aspect-[2/3] w-full object-cover"
                 />
               </button>
             )}

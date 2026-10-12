@@ -87,7 +87,7 @@
     "introHint": "Shown on the explore card and the plot page. It is never sent to the model.",
     "introPlaceholder": "e.g. A city divided between five guilds. You arrived belonging to none of them.",
     "cover": "Cover image",
-    "coverHint": "Used on the explore card and the plot page. png · jpg · gif · webp · up to 5MB",
+    "coverHint": "Used on the explore card and the plot page. A portrait 2:3 image fits without cropping. png · jpg · gif · webp · up to 5MB",
     "coverUpload": "Upload image",
     "coverUploading": "Uploading…",
     "coverRemove": "Remove cover",

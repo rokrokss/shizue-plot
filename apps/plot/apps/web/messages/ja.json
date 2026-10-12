@@ -87,7 +87,7 @@
     "introHint": "さがすのカードとプロットページに表示されます。AIには渡りません。",
     "introPlaceholder": "例：五つのギルドが分けて治める都市。あなたはどこにも属さないまま、ここへ辿り着いた。",
     "cover": "カバー画像",
-    "coverHint": "さがすのカードとプロットページで使われます。png · jpg · gif · webp · 5MB以下",
+    "coverHint": "さがすのカードとプロットページで使われます。縦長の2:3なら切れずに収まります。png · jpg · gif · webp · 5MB以下",
     "coverUpload": "画像をアップロード",
     "coverUploading": "アップロード中…",
     "coverRemove": "カバーを削除",

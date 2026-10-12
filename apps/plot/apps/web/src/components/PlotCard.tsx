@@ -28,17 +28,17 @@ export function PlotCard({ plot }: { plot: PublicPlot }) {
           alt=""
           loading="lazy"
           data-testid="plot-cover"
-          className="aspect-[16/10] w-full bg-raised/60 object-cover"
+          className="aspect-[2/3] w-full bg-raised/60 object-cover"
         />
       ) : (
         // Without a cover the work still needs a face, so the roster stands in
         // for one — and reads as the same block of the card either way.
-        <div className="brand-dots flex aspect-[16/10] w-full flex-col items-center justify-center gap-4 border-b border-line bg-mint-soft/60">
+        <div className="brand-dots flex aspect-[2/3] w-full flex-col items-center justify-center gap-4 border-b border-line bg-mint-soft/60">
           <Icon name="book" className="size-9 text-link" />
-          <span className="line-clamp-2 px-6 text-center heading1 text-fg">{plot.name}</span>
+          <span className="line-clamp-3 px-4 text-center heading1 text-fg">{plot.name}</span>
         </div>
       )}
-      <div className="flex min-w-0 flex-1 flex-col gap-2.5 p-5">
+      <div className="flex min-w-0 flex-1 flex-col gap-2 p-3 sm:p-4">
         <p className="truncate body1 font-semibold text-fg">{plot.name}</p>
         <p className="truncate text-xs text-muted">{t('by', { name: plot.creatorName })}</p>
         {/* The creator's own line to readers when there is one; the opening is
@@ -55,7 +55,7 @@ export function PlotCard({ plot }: { plot: PublicPlot }) {
             ))}
           </ul>
         ) : null}
-        <div className="mt-auto flex items-center gap-2 border-t border-line pt-3">
+        <div className="mt-auto flex flex-wrap items-center gap-x-2 gap-y-1.5 border-t border-line pt-3">
           {plot.characters.length > 0 ? (
             <div className="flex -space-x-2" data-testid="plot-faces">
               {plot.characters.slice(0, FACES).map((member) => (
@@ -85,7 +85,7 @@ export function PlotCard({ plot }: { plot: PublicPlot }) {
 /** The responsive grid every catalogue surface uses. */
 export function PlotGrid({ plots }: { plots: PublicPlot[] }) {
   return (
-    <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+    <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 md:grid-cols-4 lg:grid-cols-5">
       {plots.map((plot) => (
         <li key={plot.id}>
           <PlotCard plot={plot} />

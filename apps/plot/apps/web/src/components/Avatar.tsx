@@ -15,8 +15,10 @@ export function Avatar({
 }) {
   const shape = cx('shrink-0 overflow-hidden rounded-full bg-raised', className);
   if (src) {
+    // Character art is mostly portrait with the face near the top, which a
+    // centred square crop cuts through; square and landscape images are unchanged.
     // eslint-disable-next-line @next/next/no-img-element
-    return <img src={src} alt={name} className={cx(shape, 'object-cover')} />;
+    return <img src={src} alt={name} className={cx(shape, 'object-cover object-top')} />;
   }
   return (
     <span
