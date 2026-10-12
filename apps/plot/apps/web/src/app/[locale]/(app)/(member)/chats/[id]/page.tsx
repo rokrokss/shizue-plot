@@ -60,6 +60,7 @@ import {
   writeCustomUiEnabled,
   type DisplayContext,
 } from '@/lib/displayScripts';
+import { greetingText, isGreeting } from '@/lib/greeting';
 import { reconcileSend } from '@/lib/reconcile';
 import { sanitizeCustomHtml } from '@/lib/sanitizeHtml';
 import { streamGeneration } from '@/lib/sse';
@@ -153,6 +154,8 @@ interface ViewMessage {
   id: string | null;
   role: MessageRole;
   content: string;
+  /** A greeting with its conditions decided (`lib/greeting`), where that differs from what is stored. */
+  shown?: string;
   /** Images sent with the turn — already uploaded ones on the optimistic bubble. */
   attachments: ChatAttachment[];
   /** null for the same two: nothing is stored, so nothing has a time yet. */
@@ -687,6 +690,28 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     };
   }, [customUi, scripts, variables, assetUrls, resolveAsset, axes, turn, characterName, personaName, youLabel]);
 
+  /**
+   * The greetings on the branch as the reader sees them — the prompt's pass over
+   * the conditions a greeting kept, with the same variables (`lib/greeting`).
+   * Keyed on the stored messages rather than the view, so a streamed token does
+   * not re-evaluate the opening; only a variable that moved does.
+   */
+  const chatId = state?.chat.id ?? '';
+  const shownGreetings = useMemo(() => {
+    const shown = new Map<string, string>();
+    for (const message of messages) {
+      if (!isGreeting(message)) continue;
+      const text = greetingText(message.content, message.id, {
+        variables,
+        char: characterName,
+        user: personaName ?? youLabel,
+        seed: chatId,
+      });
+      if (text !== message.content) shown.set(message.id, text);
+    }
+    return shown;
+  }, [messages, variables, characterName, personaName, youLabel, chatId]);
+
   /** Fills the composer; the reader still decides to send. */
   const suggestInput = useCallback((text: string) => setInput(text), []);
 
@@ -1141,6 +1166,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       id: message.id,
       role: message.role,
       content: continued ? message.content + streamText : message.content,
+      ...(shownGreetings.has(message.id) ? { shown: shownGreetings.get(message.id)! } : {}),
       attachments: message.attachments,
       createdAt: message.createdAt,
       streaming: continued && mode !== null,
@@ -1182,7 +1208,12 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    * one above them. One pass rather than a scan per row: every streamed frame
    * rebuilds this, and a scan made that quadratic in the length of the branch.
    */
-  const rowMeta = chatRowMeta(view);
+  // A greeting is read as it is shown, so `repeat_back` carries over what the reader saw.
+  const rowMeta = chatRowMeta(
+    shownGreetings.size === 0
+      ? view
+      : view.map((row) => (row.shown === undefined ? row : { ...row, content: row.shown })),
+  );
 
   // The scene being edited, if any. It is grouped from the branch as it stands, so
   // a message that is no longer on it simply leaves nothing to draw.
@@ -1424,6 +1455,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                 <MessageRow
                   role={message.role}
                   content={message.content}
+                  {...(message.shown !== undefined ? { shown: message.shown } : {})}
                   name={message.role === 'user' ? t('you') : characterName}
                   avatar={plot?.coverUrl ?? null}
                   roster={members}

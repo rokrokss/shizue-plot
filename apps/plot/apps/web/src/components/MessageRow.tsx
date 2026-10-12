@@ -55,6 +55,7 @@ function ThinkingClock() {
 export const MessageRow = memo(function MessageRow({
   role,
   content,
+  shown,
   name,
   avatar,
   assets,
@@ -80,6 +81,11 @@ export const MessageRow = memo(function MessageRow({
 }: {
   role: MessageRole;
   content: string;
+  /**
+   * What the reader sees, where it is not what is stored: a greeting with its
+   * conditions decided. Editing and copying still work on `content`.
+   */
+  shown?: string;
   name: string;
   avatar: string | null;
   /** Character images by slug, for the `{{img::slug}}` references in the message. */
@@ -179,10 +185,10 @@ export const MessageRow = memo(function MessageRow({
    * is what leaves a fence still being written on screen as the text it is.
    */
   const { body, status, choices } = useMemo(() => {
-    const withoutChoices = extractChoices(content);
+    const withoutChoices = extractChoices(shown ?? content);
     const withoutStatus = extractStatusBlock(withoutChoices.body);
     return { body: withoutStatus.body, status: withoutStatus.status, choices: withoutChoices.choices };
-  }, [content]);
+  }, [content, shown]);
   /**
    * Whether the message names its own speakers. Only a reply does — one turn of
    * the reader's is one voice — and only against a roster to name them from.
