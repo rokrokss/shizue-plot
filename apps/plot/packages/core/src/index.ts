@@ -7,6 +7,8 @@ export * from './component.js';
 export * from './lorebook.js';
 export * from './narration.js';
 export * from './speech.js';
+export * from './group.js';
+export * from './transcript.js';
 export * from './statusBlock.js';
 export * from './choices.js';
 export * from './style.js';

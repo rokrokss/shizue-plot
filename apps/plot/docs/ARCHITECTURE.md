@@ -345,6 +345,22 @@ ST의 "Download Backup"(사용자 데이터 디렉터리 `data/<handle>/` 전체
 - 익스포트는 이 접두사를 **그대로** 싣고 로스터를 함께 보낸다(§9.2) — 소비자가 누구의 줄인지 알아볼 수 있는 근거가 그것이다.
 - **카드 스크립트가 그 캐릭터로 쓴 메시지**(트리거의 `impersonate` char, Lua `addChat`·`insertChat` char, `/sendas`, assistant로 바꾼 메시지)는 스크립트가 다시 읽을 글 그대로 접두사 없이 저장되고 행이 `source='script'`다(§5). 그 메시지의 이름 없는 줄은 내레이터가 아니라 **스크립트 멤버**의 것이다 — 스크립트가 도는 멤버(`scriptedMember`, 로스터에서 스크립트가 있는 첫 멤버), 스크립트가 없어졌으면 멤버가 하나인 플롯의 그 멤버, 이름은 이 챗에서 바뀐 것. 화면은 그 줄을 그 멤버의 블록으로 그리고(§11 발화 렌더), 프롬프트는 `HistoryMessage.speaker`로 받은 그 이름을 `spokenBy`로 줄마다 붙여 보낸다(`prompt-scripts`가 고친 글에, 나레이션 표시 전에. 이어쓰기의 부분 글도). 다른 멤버를 부르는 줄은 그대로 그 멤버의 것이다. 모델의 답장을 스크립트가 고쳐 쓴 것(`modifychat`, `setChat`)은 표시하지 않는다 — 모델이 쓴 내레이터 줄이 섞여 있어서다. 익스포트와 기억 요약·답장 추천의 대본은 저장된 글 그대로다.
 
+### 그룹 턴 (`group.ts`, `./group`)
+
+**아직 생성 경로에 연결되지 않았다** — 코어의 함수와 타입만 있고, API와 웹은 지금도 장면 프롬프트 하나로 답한다. 연결되면 멤버가 둘 이상인 플롯은 전부 이 방식이 된다(플롯별 스위치는 없다): 한 차례(round)에 화자마다 답장 하나, 각각 자기 메시지다. 멤버가 하나인 플롯은 지금과 똑같고, 옛 장면식 메시지(태그 없이 `이름:` 접두사로 쓴 것)는 위의 발화 프로토콜 그대로 읽힌다.
+
+- `groupOrder({members, text, calls?, lastSpeakerId, order, max, random})` → 이번 차례에 말할 id들, 말하는 순서대로. 순수 함수이고 모든 굴림이 호출자가 준 `random`을 거친다 — 브라우저가 돌리기 때문이다(다음 화자의 시작 트리거가 앞 답장을 본 뒤에 돌아야 한다). `members`는 무대 위 멤버 `{id, names, talkativeness}`를 로스터 순으로, `text`는 답하는 대상인 저장된 글, `lastSpeakerId`는 독자가 시작하지 않은 차례에서만 직전 화자다.
+  - `natural`: ① 독자가 이름으로 부른 이(`calls`, 친 순서) — 수다스러움·직전 화자·상한과 상관없이 말한다 ② 수다스러움이 0보다 크고 직전 화자가 아닌 나머지 멤버 가운데 `text`가 언급한 이, 첫 언급 순으로 한 번씩 ③ 그 밖의 후보를 섞어 각자 `talkativeness / 100 >= random()`이면 합류 ④ 부른 이가 없는 차례에서 ②③이 아무도 못 찾으면 한 명을 뽑는다 — ②의 후보 → 수다스러움이 0보다 큰 전원(직전 화자 포함) → 무대 전원 순으로 처음 비지 않은 데서 ⑤ 상한 — 부른 이가 쓰고 남은 자리(`max - 부른 수`, 0 이상)를 언급된 멤버부터 채운다.
+  - `list`: 수다스러움이 0보다 큰 멤버 전원을 로스터 순으로. 언급·굴림이 없고 직전 화자도 빼지 않는다. 부른 이, 폴백, 상한은 같다.
+  - 빈 배열은 무대에 아무도 없고 부른 이도 없을 때뿐이다.
+- **내레이터는 스스로 차례를 잡지 않는다.** 굴림도 수다스러움도 없고, 글에 "내레이터"가 나와도 언급이 아니다. 독자가 이름으로 부르거나(`@내레이터:`) 나레이션 버튼을 누를 때만 말하고, 그때는 `NARRATOR_SPEAKER`로 차례 맨 앞에 서서 차례를 연다 — 먼저 친 멤버 호출보다도 앞이다.
+- 멤버의 수다스러움은 0~100(`coerceTalkativeness` — 숫자가 아니면, null이면 `DEFAULT_TALKATIVENESS` 50, 범위 밖은 clamp)이고 0은 "지목할 때만"이다. 차례 설정은 `coerceGroupSettings` → `{order: 'natural' | 'list', maxSpeakers: 1..10}`: null·잡값은 기본(`natural`, 3), 모르는 순서는 `natural`, 범위 밖 인원은 clamp.
+- **언급**(`mentionIndex`, `mentionedMembers`) — NFC로 맞추고 대소문자를 무시한다. 규칙은 이름의 문자 체계가 정한다: 한글 이름은 어절 첫머리에서 뒤에 무엇이 붙든(세이 → 세이야·세이는, 아세이는 아니다), 가나·한자 두 글자 이상은 어디서든(띄어 쓰지 않는 문자다), 그 밖(라틴, 한 글자 가나·한자)은 온 단어로 — 같은 문자 체계의 글자나 숫자가 이어지면 아니고, 다른 체계의 글자는 이어져도 된다(`Alice는`, `凛ちゃん`). 이름 앞의 `@`는 단어 경계다. 두 멤버의 이름이 같은 자리에서 시작하면 긴 이름이 갖는다 — `세이야 왔어`는 세이의 언급이 아니다.
+- **명시 호출**(`explicitCalls(text, members, narratorNames?)`) — Zeta의 멀티 캐릭터 호출과 같다. 글이나 줄의 첫머리(앞 공백 허용)의 `@이름`(이름·닉네임·별칭) 또는 `@내레이터`·`@나레이터`·`@narrator`·`@ナレーター`(`NARRATOR_CALL_NAMES`), 그 뒤에 `:`(전각 포함)·공백·문장부호·글의 끝. 친 순서로 한 번씩 멤버 id와 `NARRATOR_SPEAKER`를 돌려준다. 맨 `@:`는 호출이 아니라 독자가 쓴 나레이션이고, `@세이야는`처럼 글자가 이어지면 호출이 아니라 언급이며, 이름 하나가 다른 이름의 앞부분이면 들어맞는 것 가운데 가장 긴 이름이 불린다. 무대 밖 멤버는 `members`에 없으므로 불리지 않는다. 저장되는 유저 글에서 호출 표시를 뗄지는 아직 정하지 않았고, `stripCallMarker`가 첫 줄의 표시와 그 뒤 공백만 떼어 준다.
+- `stripSpeakerPrefix(text, speakerNames)` — 그룹 답장은 화자의 것 전부이므로, 모델이 그래도 쓴 화자 자신의 `이름: ` 접두사(이름·닉네임)를 저장 전에 줄마다 뗀다. 다른 멤버 이름의 줄과 접두사 없는 줄은 그대로다.
+- `transcriptLine(message, userName, speakerName?)` — 기억·관계·답장 추천의 대본 한 줄. API의 `transcript.ts`와 같은 규칙에, 화자 이름을 주면 태그된 답장의 줄마다 `spokenBy`로 그 이름을 붙인다. API는 아직 자기 사본을 쓴다.
+- 뒤 단계를 위한 타입 필드만 먼저 있다(전부 선택 필드): `HistoryMessage.speakerId`, `PromptCharacter.id`, `ImportedChatMessage.speakerId`, `DisplayScript.memberId`, `PlotCustomUi.memberCss`.
+
 ### 프롬프트 조립
 
 `prompt.ts` `assemblePrompt(input) → { system, messages, loreTriggers }`. 입력은 **플롯 하나 + 로스터 전체**(`{plot: {name, description, lorebook, narrator}, characters: [{name, card}]}`, 카드가 아니다).
@@ -387,6 +403,7 @@ promptend 주입
 - **프롬프트 스크립트**: 히스토리 턴의 `promptContent`(호출자가 워커에서 만든 것)가 있으면 그 글을 보낸다. 로어 스캔과 채팅 함수는 저장된 `content`를 읽는다.
 - **턴마다 채팅 인덱스**: 히스토리 각 턴은 자기 인덱스(도입부 -1, 이후 0부터)로 CBS를 읽는다(RisuAI가 턴을 자기 `chatID`로 파싱하는 것과 같다).
 - 모든 텍스트에 매크로 적용. 입력의 `clock`·`seed`·`branch`(히스토리가 브랜치의 어디인지·도입부)·`model`·`globalVariables`를 매크로 컨텍스트 전부에 싣고, 보내는 문자열에서만 RisuAI 표시 이스케이프를 되돌린다(`unescapeCbs`). `injections`(브라우저의 시작 트리거가 보낸 것)는 원문 그대로 system 턴으로 들어가고 탈락하지 않으며 예산에서 먼저 뺀다. 리포트에는 `injection` 블록으로 보인다. **SillyTavern 카드의 변수 매크로**: RisuAI 프롬프트는 카드 글의 `{{setvar}}`를 돌리지 않으므로(원문 유지), ST가 저장한 카드(`data.extensions`에 `talkativeness`나 `fav`가 있고 `risuai`가 없는 것, `isSillyTavernCard`)의 글 — 설명·성격·예시·로어, 첫 멤버면 오버라이드 — 에서만 조립 중에 실행되어 빈 문자열이 되고 같은 프롬프트의 뒤 `{{getvar}}`가 그 값을 읽는다. 쓴 값은 `variableWrites`로 돌아와 생성된 턴의 델타에 시작 트리거 값 다음, 답장 매크로 앞의 순서로 접힌다. 로어의 시한 상태는 `loreState`로 받는다(호출자가 전체 브랜치에서 만든다). 토큰 카운트는 `tokens.ts` — `js-tiktoken` o200k_base 단일 인코더 근사.
+- **그룹 턴의 `speaker`**(아직 생성 경로에 연결되지 않았다, 위 그룹 턴): `characters`의 인덱스이거나 `NARRATOR_SPEAKER`. **없으면 지금과 한 바이트도 다르지 않다** — `groupPrompt.test.ts`의 스냅샷이 멤버 하나, 여러 멤버의 장면 호출, 나레이션을 고정한다. 멤버 화자면 ① 시스템·post-history 오버라이드가 첫 멤버 대신 **그 화자 카드**의 것이고 그 화자를 `{{char}}`로 읽는다 ② 프리셋은 `groupPreset`을 거쳐 그룹 규약이 들어간 것이다(아래 프리셋. `{{original}}`을 쓰지 않은 오버라이드에는 그룹 규약이 붙고, RisuAI 호스트 데이터의 main·postHistory도 바뀐 쪽이다) ③ 히스토리에서 `speakerId`가 화자 자신인 답장은 접두사 없이, 다른 멤버의 답장은 `spokenBy`로 그 이름을 줄마다 붙여 보내고, 태그 없는 장면 메시지는 그대로다(`speakerId`가 가리키는 멤버가 없으면 `speaker`가 정한다) ④ 맨 끝, promptend 주입 뒤에 `groupSpeakerLine` — `[다음 응답의 화자: 이름. 이 인물의 말과 행동만 씁니다.]`, 이름 뒤에 조사를 붙이지 않는다 — 이 `trailing` 블록으로 서고, 탈락하지 않으며 예산에서 먼저 빠진다. 로어 설정은 여전히 첫 멤버의 것이다. 화자는 무대 위에 있어야 하고, 로스터 밖 인덱스는 `RangeError`다. 내레이터 화자는 지금의 나레이션과 같은 장면 프롬프트다 — 나레이션 지시(`NARRATION_NUDGE`)는 지금처럼 호출자가 `trailingSystem`으로 붙인다. 태그된 답장에 이름이 붙는 것은 내레이터 화자든 `speaker` 없는 장면 호출이든 같다. `speaker`가 있으면 결과에 `stopSequences`가 실린다: 화자를 뺀 무대 위 멤버마다 `\n이름:`과 `\n닉네임:`(내레이터면 전원) — 호출자가 그 자리에서 스트림을 끊는다.
 - **리포트**(`report: true`일 때만 — 생성 경로는 켜지 않는다): 결과에 `PromptReport`가 붙는다. `blocks`는 모델이 읽는 순서대로의 조각 `{kind, label?, tokens, text}`이다 — system 문자열의 섹션들(합치면 정확히 `system`)에 이어 messages 하나당 하나(`directions`·`examples`·`history`·`depth_lore`·`author_note`·`post_history`, 히스토리는 턴마다 따로라 끼어든 depth 로어와 노트의 자리가 보인다). 카드의 요청 트리거가 고친 턴은 API가 보내는 역할을 라벨로 단 `request` 블록 하나로 바꿔 단다(§7.2). `totals`는 `{contextBudget, responseReserve, used}`이고 `used`는 예산이 실제로 내준 양(탈락하지 않는 것 + 남은 히스토리·예시, 이미지 추정치 포함)이다. `history`/`examples`는 `{included, total}`, `lore`는 활성화된 엔트리마다 `{key, source('plot' | 멤버 이름), keys, preview(80자), placement('before_char' | 'after_char' | 'depth N'), via}` — `via`는 `activateLore`가 돌려주는 경위(`constant` | `keyword` | `sticky` | `recursion`)다. 블록마다 토큰을 다시 세므로 꺼져 있을 때는 비용이 없다.
 
 ### 스타일 지시문 (`style.ts` + `prompt.ts`)
@@ -426,6 +443,7 @@ promptend 주입
 - 프리셋이 프레이밍하는 화자는 한 인물이 아니라 **작품 전체**다("당신은 {{char}}의 등장인물 전원과 내레이터를 연기하는 작가입니다") — 프리셋 텍스트에서 `{{char}}`가 플롯 이름으로 풀리는 것이 이 문장을 성립시킨다.
 - 발화 규약 문단(`SPEECH_PROTOCOL`)은 **한 곳에 한 번 쓰여 다섯 프리셋이 공유한다**. `speech.ts`가 파싱하는 것이 정확히 이 형식이라, 사본이 다섯 개면 렌더된 챗이 모델에게 시킨 것과 어긋날 길도 다섯 개가 된다. post-history 블록에는 같은 규약의 한 줄 요약이 들어간다.
 - 규약이 가르치는 것: 인물의 말과 행동은 `이름: ` 줄에, 줄 안의 행동·표정은 `*별표 묘사*`로, 장면·배경은 접두사 없는 줄로. 한 응답에 여러 인물이 번갈아 나올 수 있고, 로스터에 없는 인물은 지어내지 않는다. 유저 대필 금지는 종전대로.
+- 그룹 턴(위)은 `SPEECH_PROTOCOL`과 그 리마인더를 `GROUP_SPEECH_PROTOCOL`·`GROUP_SPEECH_PROTOCOL_REMINDER`로 바꿔 쓴다(`groupPreset`, 문자열 치환). 그래서 다섯 프리셋은 두 상수를 글자 그대로 품어야 하고, 하나라도 빠지면 그 프리셋의 그룹 턴이 조용히 장면 규약을 가르치게 되므로 테스트가 전 프리셋을 지킨다. 그룹 규약이 가르치는 것: 한 응답은 한 화자의 몫이고 화자는 맨 끝의 화자 줄이 정한다, 이름 접두사 없이 그 인물의 말과 `*행동*`만 쓴다, 다른 인물의 몫은 쓰지 않는다(그 인물은 자기 차례에 답한다), 대화 기록의 `이름: ` 줄은 그 인물의 것이다, 내레이터도 차례를 받는 참여자이고 `[나레이션]`이 붙은 메시지가 그 차례(어느 인물의 말도 아닌 장면 서술)다.
 
 ## 7. 생성 파이프라인 (apps/api)
 

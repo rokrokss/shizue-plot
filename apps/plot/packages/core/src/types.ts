@@ -148,6 +148,12 @@ export interface DisplayScript {
    */
   action?: DisplayScriptAction;
   enabled: boolean;
+  /**
+   * The member whose card the script came with, in a work of several. It is
+   * skipped on a message another member is the speaker of; untagged, it runs on
+   * every message.
+   */
+  memberId?: string;
 }
 
 export type DisplayScriptAction = 'move_top' | 'move_bottom' | 'repeat_back';
@@ -454,6 +460,11 @@ export interface PlotCustomUi {
   defaultVariables?: Record<string, string>;
   componentCode?: string;
   componentCapabilities?: ComponentCapability[];
+  /**
+   * Each member's own stylesheet, by member id, in a work of several — scoped
+   * to the messages that member speaks, and to the untagged ones.
+   */
+  memberCss?: Record<string, string>;
 }
 
 /**
@@ -491,6 +502,11 @@ export interface ImportedChatMessage {
   selected: number;
   /** ISO 8601, when the source recorded a time it could be read from. */
   createdAt?: string;
+  /**
+   * The member an assistant message is wholly said by, for a group chat brought
+   * into a work of several: its text then carries no `이름: ` prefix.
+   */
+  speakerId?: string;
 }
 
 /** No `tokenBudget`: a card that names none gets the automatic one. */

@@ -54,6 +54,10 @@
       "types": "./dist/speech.d.ts",
       "default": "./dist/speech.js"
     },
+    "./group": {
+      "types": "./dist/group.d.ts",
+      "default": "./dist/group.js"
+    },
     "./status-block": {
       "types": "./dist/statusBlock.d.ts",
       "default": "./dist/statusBlock.js"

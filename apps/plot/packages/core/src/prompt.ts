@@ -4,7 +4,16 @@ import { applyMacros, stripInlayMacros, type MacroClock, type MacroContext, type
 import { activateLore, loreEntryKey, type LoreActivationVia, type LoreTimedState } from './lorebook.js';
 import { isNarration, narrationBody } from './narration.js';
 import { spokenBy } from './speech.js';
-import { DEFAULT_PRESET, SPEECH_PROTOCOL, SPEECH_PROTOCOL_REMINDER, type Preset } from './presets.js';
+import type { NarratorSpeaker } from './group.js';
+import {
+  DEFAULT_PRESET,
+  GROUP_SPEECH_PROTOCOL,
+  GROUP_SPEECH_PROTOCOL_REMINDER,
+  groupPreset,
+  SPEECH_PROTOCOL,
+  SPEECH_PROTOCOL_REMINDER,
+  type Preset,
+} from './presets.js';
 import { extractStatusBlock } from './statusBlock.js';
 import { countTokens } from './tokens.js';
 import {
@@ -73,6 +82,15 @@ export interface HistoryMessage {
    * scan and the chat functions still read `content`.
    */
   speaker?: string;
+  /**
+   * The member a group turn's reply is stored under (`messages.speaker_member_id`),
+   * matched against `PromptCharacter.id`. The reply is that member's whole and
+   * carries no `이름: ` prefix, so it is sent under their name (`spokenBy`) — except
+   * to themselves: when they are the `speaker` being asked, their own replies go
+   * plain, as the one they are about to write. It names the member before
+   * `speaker` does; an id no member has leaves `speaker` to decide.
+   */
+  speakerId?: string;
 }
 
 /**
@@ -158,6 +176,8 @@ export interface PromptPlot {
  * the model is taught to write has to be the name the parser looks for.
  */
 export interface PromptCharacter {
+  /** The member's row id, which a group turn's history names its speaker by (`HistoryMessage.speakerId`). */
+  id?: string;
   name: string;
   card: NormalizedCard;
   /**
@@ -261,6 +281,24 @@ export interface AssemblePromptInput {
    * generation: it measures each block again, which only the inspector needs.
    */
   report?: boolean;
+  /**
+   * Who a group turn asks the reply of (`group.ts`): an index into `characters`,
+   * or `NARRATOR_SPEAKER`. Without it the prompt is the scene's, as it has always
+   * been.
+   *
+   * A member: their card's system and post-history overrides stand in for the
+   * first member's (read with `{{char}}` as them), the preset teaches
+   * `GROUP_SPEECH_PROTOCOL` in place of the speech protocol (`groupPreset`), their
+   * own past replies go plain while everyone else's go under their names, and the
+   * prompt closes on `groupSpeakerLine`. The member is expected to be on the stage.
+   *
+   * The narrator: the scene prompt as a narration has always been built on — the
+   * caller still closes it with the narration nudge — with every member's reply
+   * under its name.
+   *
+   * Either way the result carries `stopSequences`.
+   */
+  speaker?: number | NarratorSpeaker;
 }
 
 export interface AssembledPrompt {
@@ -281,6 +319,12 @@ export interface AssembledPrompt {
   variableWrites?: VariableDelta;
   /** Present only when the input asked for it. */
   report?: PromptReport;
+  /**
+   * For a group turn (`AssemblePromptInput.speaker`): where the reply has strayed
+   * into another member's line — `\n이름:` and `\n별명:` of every member on the
+   * stage but the speaker. The caller stops the stream on them.
+   */
+  stopSequences?: string[];
 }
 
 /** What each piece of an assembled prompt is, in the creator's prompt inspector. */
@@ -406,6 +450,13 @@ export const NARRATION_HEADER = '[나레이션]';
  */
 export const NARRATION_NOTE =
   '[나레이션] 표시가 붙은 메시지는 캐릭터나 유저의 발화가 아니라 장면·상황 전개 서술입니다.';
+
+/**
+ * What closes a group turn's prompt: who speaks next. The name stands bare,
+ * before a full stop, so no particle has to agree with it.
+ */
+export const groupSpeakerLine = (name: string): string =>
+  `[다음 응답의 화자: ${name}. 이 인물의 말과 행동만 씁니다.]`;
 
 /** Wrapper the work's own setting is read under. */
 export const plotHeader = (name: string): string => `[작품: ${name}]`;
@@ -610,7 +661,8 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     userName = DEFAULT_USER_NAME,
     contextBudget = DEFAULT_CONTEXT_BUDGET,
     maxResponseTokens = DEFAULT_MAX_RESPONSE_TOKENS,
-    preset = DEFAULT_PRESET,
+    preset: scenePreset = DEFAULT_PRESET,
+    speaker,
   } = input;
   const history = withBranchGreeting(given, branch);
 
@@ -618,6 +670,16 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // card rather than all of them. There is no plot-level override field yet, so
   // a card that carries one still speaks for the work it is the first member of.
   const first = characters[0];
+  // A group turn's member speaker. Its card's overrides speak for this one reply
+  // in place of the first member's, and the preset teaches the group protocol.
+  const speakerMember = typeof speaker === 'number' ? characters[speaker] : undefined;
+  if (typeof speaker === 'number' && !speakerMember) {
+    throw new RangeError(`speaker ${speaker} is not on the roster of ${characters.length}`);
+  }
+  const voice = speakerMember ?? first;
+  const preset = speakerMember ? groupPreset(scenePreset) : scenePreset;
+  const protocol = speakerMember ? GROUP_SPEECH_PROTOCOL : SPEECH_PROTOCOL;
+  const protocolReminder = speakerMember ? GROUP_SPEECH_PROTOCOL_REMINDER : SPEECH_PROTOCOL_REMINDER;
   // Whoever the reader sent off the stage is gone from everything that is the
   // member's own — their block, examples and lorebook — and from nothing else.
   const cast = characters.filter((member) => !member.absent);
@@ -688,7 +750,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // is how it tells the model to draw, and the model's earlier ones in the
   // history are how it keeps doing so.
   const expand = (text: string): string => applyMacros(text, plotMacro);
-  const firstMacro = first ? macroOf(first) : plotMacro;
+  const voiceMacro = voice ? macroOf(voice) : plotMacro;
   /** The history is the work's too, read in the role of the turn. */
   const turnMacro = { user: macroOf(undefined, 'user'), assistant: macroOf(undefined, 'char') };
   // Each turn is read as the message it is, as RisuAI parses a turn with its own
@@ -702,7 +764,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   };
 
   // 1. main system prompt
-  const main = resolveOverride(first?.card.systemPrompt ?? '', expand(preset.main), firstMacro, SPEECH_PROTOCOL);
+  const main = resolveOverride(voice?.card.systemPrompt ?? '', expand(preset.main), voiceMacro, protocol);
 
   // 2/4. lorebook — the plot's entries and every member's, activated as one book
   // against the last scanDepth messages. The sort inside `activateLore` is stable,
@@ -895,10 +957,10 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // 8. post-history instructions
   const postHistory = send(
     resolveOverride(
-      first?.card.postHistoryInstructions ?? '',
+      voice?.card.postHistoryInstructions ?? '',
       expand(preset.postHistory),
-      firstMacro,
-      SPEECH_PROTOCOL_REMINDER,
+      voiceMacro,
+      protocolReminder,
     ),
   );
 
@@ -917,6 +979,16 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     0,
   );
 
+  // 8c. a group turn's member speaker: who speaks next, after everything else
+  // and, like the injections, never evicted.
+  const speakerSlot: MessageSlot | null = speakerMember
+    ? {
+        kind: 'trailing',
+        label: speakerMember.name,
+        message: { role: 'system', content: groupSpeakerLine(speakerMember.name) },
+      }
+    : null;
+
   // Everything that is never evicted is charged up front. Depth lore is charged
   // here too — it is counted against the lorebook budget by activateLore, but it
   // still occupies context that history would otherwise use.
@@ -928,6 +1000,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     countTokens(directionsBlock) -
     countTokens(authorNoteBlock) -
     injectedTokens -
+    (speakerSlot ? countTokens(promptText(speakerSlot.message.content)) : 0) -
     depthLore.reduce((sum, entry) => sum + countTokens(entry.content), 0);
 
   // 7. history, newest first. The newest message is always kept so the request
@@ -939,6 +1012,9 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const newestAssistant = history.findLastIndex((turn) => turn.role === 'assistant');
   /** Every name a line may already be under, for the turns a script wrote as its character. */
   const speakers = characters.map((member) => member.name);
+  const byId = new Map(
+    characters.flatMap((member) => (member.id !== undefined ? [[member.id, member] as const] : [])),
+  );
   const historyMessages: PromptMessage[] = [];
   /** What each kept turn was charged, images included; parallel to historyMessages. */
   const historyCosts: number[] = [];
@@ -950,11 +1026,14 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     // A narrating turn keeps its role — the message is still the reader's or the
     // model's — but it is labelled, so the model reads it as the scene moving
     // rather than as someone acting. The prefix never reaches the model. A turn a
-    // script wrote as its character is that character's, line by line.
+    // script wrote as its character, or a group turn's reply, is that member's,
+    // line by line — but a speaker reads their own replies plain.
+    const tagged = turn.speakerId !== undefined ? byId.get(turn.speakerId) : undefined;
+    const saidBy = tagged ? (tagged === speakerMember ? undefined : tagged.name) : turn.speaker;
     const raw = isNarration(said)
       ? `${NARRATION_HEADER} ${narrationBody(said)}`.trim()
-      : turn.speaker !== undefined && turn.role === 'assistant'
-        ? spokenBy(said, turn.speaker, speakers)
+      : saidBy !== undefined && turn.role === 'assistant'
+        ? spokenBy(said, saidBy, speakers)
         : said;
     // A turn's inlays name pictures in someone's own RisuAI storage; RisuAI takes
     // them out of the turns it sends, and so does this.
@@ -1057,6 +1136,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     ...historyBlock,
     { kind: 'post_history', message: { role: 'system', content: postHistory } },
     ...(promptEndInjection ? [promptEndInjection] : []),
+    ...(speakerSlot ? [speakerSlot] : []),
   ];
 
   // Every text that could write has been expanded by now, examples last.
@@ -1104,12 +1184,25 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     })),
   });
 
+  // A group turn's reply stops where it starts on another member's line.
+  const stopSequences =
+    speaker === undefined
+      ? undefined
+      : [
+          ...new Set(
+            cast
+              .filter((member) => member !== speakerMember)
+              .flatMap((member) => [`\n${member.name}:`, `\n${characterName(member)}:`]),
+          ),
+        ];
+
   return {
     system,
     messages: slots.map((slot) => slot.message),
     loreTriggers,
     ...(variableWrites ? { variableWrites } : {}),
     ...(input.report ? { report: report() } : {}),
+    ...(stopSequences ? { stopSequences } : {}),
   };
 }
 

@@ -27,6 +27,24 @@ export const SPEECH_PROTOCOL = `발화 규칙:
 export const SPEECH_PROTOCOL_REMINDER =
   '인물의 말과 행동은 `이름: ` 줄로, 그 줄 안의 행동은 *별표*로, 장면 서술은 접두사 없는 줄로 씁니다.';
 
+/**
+ * What a group turn — one reply per speaker, in a work of two or more members —
+ * teaches in place of `SPEECH_PROTOCOL` (`groupPreset`). The reply is the
+ * speaker's whole and is stored under them, so it carries no `이름: ` prefix; the
+ * other members' replies reach the model under theirs, and the narrator — which
+ * speaks when the reader asks for it — is one more participant taking turns.
+ */
+export const GROUP_SPEECH_PROTOCOL = `발화 규칙:
+- 이 대화에서는 등장인물이 한 사람씩 차례로 답합니다. 응답 하나는 한 화자의 몫이며, 이번 화자는 맨 끝의 [다음 응답의 화자: 이름] 줄이 정합니다.
+- 화자의 말과 행동만 씁니다. 이름 접두사는 붙이지 않고, 행동·표정·몸짓은 *별표로 감싼 묘사*로 적으며, 나머지는 그 인물이 입 밖에 낸 말입니다.
+- 다른 등장인물의 말과 행동은 쓰지 않습니다. 그 인물은 자기 차례에 직접 답합니다. 대화 기록의 \`이름: \` 줄은 그 이름의 인물이 한 말과 행동입니다.
+- 내레이터도 차례를 받는 참여자입니다. [나레이션] 표시가 붙은 메시지가 내레이터의 차례이며, 그 글은 어느 인물의 말도 아닌 장면 서술입니다.
+- 등장인물 목록에 없는 인물을 지어내지 않습니다.`;
+
+/** The group protocol as a one-line reminder, in place of `SPEECH_PROTOCOL_REMINDER`. */
+export const GROUP_SPEECH_PROTOCOL_REMINDER =
+  '이번 응답은 지정된 화자 한 명의 말과 행동만 이름 접두사 없이 쓰고, 그 안의 행동은 *별표*로 적으며, 다른 인물의 몫은 쓰지 않습니다.';
+
 /** Writer-framing Korean RP system prompt. */
 export const DEFAULT_MAIN_PRESET = `당신은 {{char}}의 등장인물 전원과 내레이터를 연기하는 작가입니다. 아래 설정을 바탕으로 각 인물의 성격과 말투를 일관되게 유지하며 장면을 이어 씁니다.
 
@@ -141,4 +159,16 @@ export function isPresetId(value: unknown): value is PresetId {
 /** The preset for a stored id, falling back to the default for anything unknown. */
 export function getPreset(id: string | null | undefined): Preset {
   return isPresetId(id) ? PRESETS[id] : DEFAULT_PRESET;
+}
+
+/**
+ * A preset as a group turn reads it: the speech protocol and its reminder swapped
+ * for the group's. Every built-in preset carries both (a test holds them to it);
+ * a preset that does not is left as it is.
+ */
+export function groupPreset(preset: Preset): Preset {
+  return {
+    main: preset.main.replace(SPEECH_PROTOCOL, () => GROUP_SPEECH_PROTOCOL),
+    postHistory: preset.postHistory.replace(SPEECH_PROTOCOL_REMINDER, () => GROUP_SPEECH_PROTOCOL_REMINDER),
+  };
 }
