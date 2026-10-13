@@ -34,9 +34,11 @@
  */
 
 import {
+  luaScriptsOf,
   MAX_OVERLAY_NAME_LENGTH,
   MAX_TRIGGER_VALUE_LENGTH,
   overlayName,
+  risuLore,
   type CodeScope,
   type TriggerLogEntry,
   type TriggerScript,
@@ -85,15 +87,7 @@ export interface LuaEngineOptions {
   log(entry: TriggerLogEntry): void;
 }
 
-/** The scripts on a card, in trigger order: each trigger whose first effect is `triggerlua`. */
-export function luaScriptsOf(triggers: readonly TriggerScript[]): string[] {
-  return triggers.flatMap((trigger) => {
-    const first = trigger.effect[0];
-    if (first?.type !== 'triggerlua') return [];
-    const code = first['code'];
-    return [typeof code === 'string' ? code : ''];
-  });
-}
+export { luaScriptsOf };
 
 /**
  * The global functions the scripts declare, for a `{{button}}` that names one —
@@ -127,19 +121,6 @@ const splitKeys = (text: string): string[] =>
     .split(',')
     .map((key) => key.trim())
     .filter(Boolean);
-
-/** A lore entry in RisuAI's shape, as `getLoreBooks` answers. */
-const risuLore = (entry: LoreEntry): LuaLoreBook => ({
-  key: entry.keys.join(', '),
-  secondkey: entry.secondaryKeys.join(', '),
-  insertorder: entry.insertionOrder,
-  comment: entry.name ?? '',
-  content: entry.content,
-  mode: 'normal',
-  alwaysActive: entry.constant,
-  selective: entry.selective,
-  useRegex: entry.useRegex,
-});
 
 /** An entry `upsertLocalLoreBook` made, in ours: keyed, or always on. */
 const ourLore = (book: LuaLoreBook): LoreEntry => ({

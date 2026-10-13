@@ -87,6 +87,7 @@ import {
   scheduleBackgroundUpdates,
   withGenerationSlot,
   type GenerationPlan,
+  type ScriptView,
 } from '../generation.js';
 import { avatarUrl, coverUrl, loadMembers, loadVisiblePlot, visibleToViewer } from '../hub.js';
 import { auxiliaryModelOf, buildMemoryInput, invalidateMemoryForEdit, memorySettingsOf } from '../memory.js';
@@ -575,6 +576,20 @@ async function loadPersona(deps: AppDeps, chat: Chat): Promise<Persona | null> {
 }
 
 /**
+ * What the scripted member's Lua reads that the prompt does not carry, as
+ * `GET /:id/scripts` and the chat hand the browser's: `note` the chat's own.
+ */
+function scriptViewOf(member: Character, overlay: ScriptOverlay | null, note: string): ScriptView {
+  const own = overlay?.members?.[member.id];
+  return {
+    note,
+    ...(own?.firstMessage !== undefined ? { firstMessage: own.firstMessage } : {}),
+    backgroundHtml: own?.backgroundHtml ?? backgroundHtmlOf(member.card.extensions) ?? '',
+    avatarUrl: avatarUrl(member),
+  };
+}
+
+/**
  * Plot, roster, persona and branch history — what every generation mode needs.
  *
  * The chat's script overlay is laid over the work here (`chats.script_overlay`,
@@ -617,6 +632,8 @@ async function loadGenerationContext(
   overlay: ScriptOverlay | null;
   /** The plot's first opening as the scripts rewrote it in this chat (`setCharacterFirstMessage`). */
   firstMessage: string | undefined;
+  /** What the scripted member's Lua reads beyond the prompt (`GenerationPlan.scriptView`). */
+  scriptView: ScriptView | undefined;
   /** Who says a character message a card's script wrote (`HistoryMessage.speaker`); undefined when no one can. */
   scriptSpeaker: string | undefined;
   all: Message[];
@@ -662,6 +679,7 @@ async function loadGenerationContext(
     globalVariables: await loadGlobalVariables(deps, chat.userId, chat.plotId),
     overlay,
     firstMessage: scripted ? overlay?.members?.[scripted.id]?.firstMessage : undefined,
+    scriptView: scripted ? scriptViewOf(scripted, overlay, scripts.note ?? chat.note) : undefined,
     // The member whose scripts run, under its name in this chat — or a plot's one
     // member, should its scripts be gone. As the page draws it.
     scriptSpeaker: (scripted ? rewritten.find((member) => member.id === scripted.id) : only)?.name,
@@ -1271,6 +1289,7 @@ async function regeneratePlan(
     // generation is an alternative to.
     loreState: loreStateOf(kept),
     assetNames: context.assetNames,
+    scriptView: context.scriptView,
     auxiliaryModel: context.auxiliaryModel,
     contextBudget: memorySettingsOf(chat).contextBudget,
     focusNames,
@@ -2447,6 +2466,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         branch: promptBranch(edited.all, branch, context.firstMessage),
         loreState: loreStateOf(branch),
         assetNames: context.assetNames,
+        scriptView: context.scriptView,
         auxiliaryModel: context.auxiliaryModel,
         contextBudget: memorySettingsOf(chat).contextBudget,
         focusNames,
@@ -2551,6 +2571,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         // trigger from the turn before.
         loreState: loreStateOf(path.slice(0, -1)),
         assetNames: context.assetNames,
+        scriptView: context.scriptView,
         auxiliaryModel: context.auxiliaryModel,
         contextBudget: memorySettingsOf(chat).contextBudget,
         focusNames,
@@ -2614,6 +2635,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         branch: promptBranch(edited?.all ?? context.all, path, context.firstMessage),
         loreState: loreStateOf(path),
         assetNames: context.assetNames,
+        scriptView: context.scriptView,
         auxiliaryModel: context.auxiliaryModel,
         contextBudget: memorySettingsOf(chat).contextBudget,
         focusNames,
@@ -2683,6 +2705,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         branch: promptBranch(edited?.all ?? context.all, path, context.firstMessage),
         loreState: loreStateOf(path),
         assetNames: context.assetNames,
+        scriptView: context.scriptView,
         auxiliaryModel: context.auxiliaryModel,
         contextBudget: memorySettingsOf(chat).contextBudget,
         focusNames,

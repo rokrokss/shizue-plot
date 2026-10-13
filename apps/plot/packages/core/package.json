@@ -22,6 +22,10 @@
       "types": "./dist/triggers/index.d.ts",
       "default": "./dist/triggers/index.js"
     },
+    "./lua": {
+      "types": "./dist/lua/index.d.ts",
+      "default": "./dist/lua/index.js"
+    },
     "./macro": {
       "types": "./dist/macro.d.ts",
       "default": "./dist/macro.js"

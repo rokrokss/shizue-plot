@@ -20,7 +20,8 @@
  * without a pattern — each is dropped rather than trusted, and nothing throws.
  */
 
-import type { NormalizedCard } from '../types.js';
+import type { LuaLoreBook } from '../lua/runtime.js';
+import type { LoreEntry, NormalizedCard } from '../types.js';
 
 /** When a trigger runs, in RisuAI's words. */
 export type TriggerMode = 'start' | 'manual' | 'output' | 'input' | 'display' | 'request';
@@ -51,6 +52,29 @@ export const CODE_EFFECTS: readonly string[] = ['triggerlua', 'triggercode'];
 /** Whether a trigger is a code trigger: one RisuAI runs in every mode, for its code to decide. */
 export const isCodeTrigger = (trigger: TriggerScript): boolean =>
   CODE_EFFECTS.includes(trigger.effect[0]?.type ?? '');
+
+/** The Lua scripts on a card, in trigger order: each trigger whose first effect is `triggerlua`. */
+export function luaScriptsOf(triggers: readonly TriggerScript[]): string[] {
+  return triggers.flatMap((trigger) => {
+    const first = trigger.effect[0];
+    if (first?.type !== 'triggerlua') return [];
+    const code = first['code'];
+    return [typeof code === 'string' ? code : ''];
+  });
+}
+
+/** A lore entry in RisuAI's shape, as Lua's `getLoreBooks` answers. */
+export const risuLore = (entry: LoreEntry): LuaLoreBook => ({
+  key: entry.keys.join(', '),
+  secondkey: entry.secondaryKeys.join(', '),
+  insertorder: entry.insertionOrder,
+  comment: entry.name ?? '',
+  content: entry.content,
+  mode: 'normal',
+  alwaysActive: entry.constant,
+  selective: entry.selective,
+  useRegex: entry.useRegex,
+});
 
 /** When a regex script runs. Only the two the reader's browser runs are kept. */
 export type EditScriptType = 'editinput' | 'editoutput';

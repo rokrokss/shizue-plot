@@ -3,6 +3,7 @@ import type { getAdapter } from '@shizue/llm';
 import type { ChatGPTAccounts } from './chatgptAccounts.js';
 import type { AppAuth, SessionStore } from './hostedAuth.js';
 import type { SceneImageGenerator } from './sceneImage.js';
+import type { RequestLuaRunner } from './requestLua.js';
 import type { RequestTriggerRunner } from './requestTriggers.js';
 import type { ScriptFetch } from './scriptFetch.js';
 import type { ObjectStorage } from './storage.js';
@@ -73,6 +74,12 @@ export interface AppDeps {
    * default. Tests wrap it to shorten its deadline or to count its runs.
    */
   runRequestTriggers?: RequestTriggerRunner;
+  /**
+   * Runs a card's Lua `editRequest` listeners (`requestLua.ts`); the child
+   * process pool by default. Tests wrap it to shorten its deadline, to count its
+   * runs, or to answer the sandbox probe.
+   */
+  runRequestLua?: RequestLuaRunner;
   /** Adapter factory; defaults to the model registry. Overridden in tests. */
   getAdapter?: (...args: Parameters<typeof getAdapter>) => ReturnType<typeof getAdapter> | Awaited<ReturnType<typeof getAdapter>>;
   /**

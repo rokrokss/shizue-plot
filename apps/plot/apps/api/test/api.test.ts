@@ -109,6 +109,7 @@ import {
 import { BACKFILL_CHUNKS_PER_RUN } from '../src/memory.js';
 import { createJobHandlers, notificationFanout } from '../src/notifications.js';
 import { MAX_ASSET_NAME_LENGTH, MAX_CARD_IMPORT_BYTES } from '../src/routes/plots.js';
+import { runRequestLua } from '../src/requestLua.js';
 import { runRequestTriggers } from '../src/requestTriggers.js';
 import { createScriptFetch, type HopResponse, type Transport } from '../src/scriptFetch.js';
 import { MAX_GLOBAL_VARIABLE_KEYS } from '../src/scriptState.js';
@@ -12521,6 +12522,219 @@ describe('request triggers', () => {
     expect(report.blocks[1]).toMatchObject({ kind: 'history', label: 'assistant', text: '문 앞이다.' });
     expect(report.blocks[2]).toMatchObject({ kind: 'request', label: 'system', text: '안녕' });
     expect(kinds).toContain('post_history');
+  });
+});
+
+describe('editRequest listeners', () => {
+  /** A Lua script whose one listener runs `body` over the request (`req`), as RisuAI's `listenEdit` registers it. */
+  const listening = (body: string): string => `listenEdit('editRequest', function(id, req, meta)\n${body}\nend)`;
+  const lua = (code: string): Record<string, unknown> => ({ comment: '', type: 'start', conditions: [], effect: [{ type: 'triggerlua', code }] });
+
+  /** A plot whose one member carries `triggerscript`, and its owner's chat on it. */
+  async function luaChat(email: string, triggerscript: Record<string, unknown>[]): Promise<{ cookie: string; chatId: string }> {
+    const cookie = await signUp(email);
+    const plot = await createPlot(cookie, { name: '루아 작품', description: '설명', intros: ['문 앞이다.'] });
+    await addCharacter(cookie, plot.id, { name: '아리아', card: { description: '설명', extensions: { risuai: { triggerscript } } } });
+    return { cookie, chatId: (await startChat(cookie, plot.id)).chat.id };
+  }
+
+  const send = async (cookie: string, chatId: string, target: Hono<AppEnv>, content = '안녕'): Promise<SseEvent[]> =>
+    readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }, target));
+
+  /** Runs counted, with the pool's own runner. */
+  function countedRuns(options: Parameters<typeof runRequestLua>[1] = {}): { runRequestLua: AppDeps['runRequestLua']; runs: () => number } {
+    let runs = 0;
+    return {
+      runRequestLua: (input) => {
+        runs += 1;
+        return runRequestLua(input, options);
+      },
+      runs: () => runs,
+    };
+  }
+
+  it('sends the model the request as the listener left it, and stores none of it', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const { cookie, chatId } = await luaChat('lua-edit@example.com', [
+      lua(
+        listening(`
+          req[1].content = req[1].content .. '\\n규칙: ' .. getName(id) .. '와 ' .. getPersonaName(id)
+          for _, turn in ipairs(req) do
+            if turn.role == 'user' then turn.content = turn.content .. ' (' .. getChat(id, -1).data .. ')' end
+          end
+          return req`),
+      ),
+    ]);
+    expect((await send(cookie, chatId, capturing)).at(-1)!.event).toBe('done');
+    expect((await send(cookie, chatId, capturing, '또 왔어')).at(-1)!.event).toBe('done');
+    const sent = prompts.at(-1)!;
+    expect(sent.system.endsWith('\n규칙: 아리아와 유저')).toBe(true);
+    // The listener read the chat with the turn just sent at its end, as RisuAI's `sendChat` has it.
+    expect(sent.messages.filter((message) => message.role === 'user').map((message) => message.content)).toEqual([
+      '안녕 (또 왔어)',
+      '또 왔어 (또 왔어)',
+    ]);
+    const stored = await db.select().from(messages).where(eq(messages.chatId, chatId)).orderBy(asc(messages.createdAt));
+    expect(stored.filter((message) => message.role === 'user').map((message) => message.content)).toEqual(['안녕', '또 왔어']);
+  });
+
+  it('keeps the chat variables a listener wrote on the reply, where the next turn reads them', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const { cookie, chatId } = await luaChat('lua-vars@example.com', [
+      lua(
+        listening(`
+          local n = tonumber(getChatVar(id, 'calls')) or 0
+          setChatVar(id, 'calls', tostring(n + 1))
+          setState(id, 'seen', { req[#req].role })
+          req[1].content = req[1].content .. ' #' .. tostring(n + 1)
+          return req`),
+      ),
+    ]);
+    await send(cookie, chatId, capturing);
+    expect(prompts.at(-1)!.system.endsWith(' #1')).toBe(true);
+    const reply = (await db.select().from(messages).where(eq(messages.chatId, chatId)).orderBy(asc(messages.createdAt))).at(-1)!;
+    expect(reply.role).toBe('assistant');
+    expect(reply.variableDelta).toEqual({ calls: '1', __seen: '["system"]' });
+    await send(cookie, chatId, capturing, '다시');
+    expect(prompts.at(-1)!.system.endsWith(' #2')).toBe(true);
+  });
+
+  it('sends the request unedited when a listener throws, and when it runs out the clock', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const plain = await luaChat('lua-plain@example.com', [lua(listening('return req'))]);
+    await send(plain.cookie, plain.chatId, capturing);
+    const unedited = prompts.at(-1)!;
+
+    // RisuAI keeps the request a listener that threw would have changed.
+    const thrown = await luaChat('lua-throw@example.com', [lua(listening(`req[1].content = '바뀜' error('boom')`))]);
+    expect((await send(thrown.cookie, thrown.chatId, capturing)).at(-1)!.event).toBe('done');
+    expect(prompts.at(-1)!.system).toBe(unedited.system);
+    expect(prompts.at(-1)!.messages).toEqual(unedited.messages);
+
+    const counted = countedRuns({ deadlineMs: 500 });
+    const { app: hurried, prompts: hurriedPrompts } = capturingApp({ runRequestLua: counted.runRequestLua });
+    const hung = await luaChat('lua-hang@example.com', [lua(listening(`req[1].content = '바뀜' while true do end`))]);
+    const started = Date.now();
+    expect((await send(hung.cookie, hung.chatId, hurried)).at(-1)!.event).toBe('done');
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(counted.runs()).toBe(1);
+    expect(hurriedPrompts.at(-1)!.system).toBe(unedited.system);
+
+    // The child it took is gone; the next card's listener runs in a fresh one.
+    const after = await luaChat('lua-after@example.com', [lua(listening(`req[1].content = '다음 시스템' return req`))]);
+    await send(after.cookie, after.chatId, capturing);
+    expect(prompts.at(-1)!.system).toBe('다음 시스템');
+  });
+
+  it('runs nothing for a plot whose scripts have no editRequest listener', async () => {
+    const counted = countedRuns();
+    const { app: countedApp, prompts } = capturingApp({ runRequestLua: counted.runRequestLua });
+    // Lua with other hooks only, and a plot with no scripts at all.
+    const other = await luaChat('lua-none@example.com', [lua(`function onStart(id) setChatVar(id, 'x', '1') end`)]);
+    await send(other.cookie, other.chatId, countedApp);
+    const plain = await setupChat(other.cookie);
+    await send(other.cookie, plain.chatId, countedApp);
+    expect(counted.runs()).toBe(0);
+
+    const scripted = await luaChat('lua-some@example.com', [lua(listening(`req[1].content = '바뀜' return req`))]);
+    await send(scripted.cookie, scripted.chatId, countedApp);
+    expect(counted.runs()).toBe(1);
+    expect(prompts.at(-1)!.system).toBe('바뀜');
+  });
+
+  it('runs no Lua and sends the request unedited where the server cannot sandbox it', async () => {
+    const { cookie, chatId } = await luaChat('lua-disabled@example.com', [lua(listening(`req[1].content = '바뀜' return req`))]);
+    // An older Node: its permission model would not keep the child off the network.
+    const { app: older, prompts: olderPrompts } = capturingApp({
+      runRequestLua: (input) => runRequestLua(input, { probe: async () => false }),
+    });
+    expect((await send(cookie, chatId, older)).at(-1)!.event).toBe('done');
+    expect(olderPrompts.at(-1)!.system).toContain('루아 작품');
+
+    // The same chat, where the sandbox holds.
+    const { app: capturing, prompts } = capturingApp();
+    await send(cookie, chatId, capturing, '다시');
+    expect(prompts.at(-1)!.system).toBe('바뀜');
+  });
+
+  it('gives a listener no model call and no request, as RisuAI gives it none', async () => {
+    let models = 0;
+    let fetches = 0;
+    const echo = createEchoAdapter();
+    const { app: capturing, prompts } = capturingApp({
+      getAdapter: () => ({
+        providerModel: 'echo',
+        adapter: {
+          stream: (req) => {
+            models += 1;
+            prompts.push({ system: req.system, messages: req.messages, maxTokens: req.maxTokens });
+            return echo.stream(req);
+          },
+        },
+      }),
+      scriptFetch: {
+        request: async () => {
+          fetches += 1;
+          return { status: 200, data: 'fetched' };
+        },
+      },
+    });
+    const cookie = await signUp('lua-lowlevel@example.com');
+    const plot = await createPlot(cookie, { name: '루아 작품', description: '설명', intros: ['문 앞이다.'] });
+    const code = listening(`
+      local llm = table.pack(pcall(LLM, id, { { role = 'user', content = '몰래' } }))
+      local fetched = request(id, 'https://example.com/'):await()
+      req[1].content = tostring(llm[1]) .. ' / ' .. tostring(llm[2]):match('expected argument of type string, got nil') .. ' / ' .. tostring(fetched)
+      return req`);
+    // Even a card that grants low-level access: RisuAI's editRequest listeners never have it.
+    await addCharacter(cookie, plot.id, {
+      name: '아리아',
+      card: { description: '설명', extensions: { risuai: { triggerscript: [lua(code)], lowLevelAccess: true } } },
+    });
+    const chatId = (await startChat(cookie, plot.id)).chat.id;
+    expect((await send(cookie, chatId, capturing)).at(-1)!.event).toBe('done');
+    expect(prompts.at(-1)!.system).toBe('false / expected argument of type string, got nil / nil');
+    expect(models).toBe(1);
+    expect(fetches).toBe(0);
+  });
+
+  it('runs before the request triggers, which read the request and the variables it left', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const { cookie, chatId } = await luaChat('lua-order@example.com', [
+      {
+        comment: '',
+        type: 'request',
+        conditions: [],
+        effect: [
+          // Only over the request the listener left.
+          { type: 'v2GetRequestState', index: '0', indexType: 'value', outputVar: 't', indent: 0 },
+          { type: 'v2If', source: 't', condition: '=', target: '루아', targetType: 'value', indent: 0 },
+          { type: 'v2SetRequestState', index: '0', indexType: 'value', value: '루아를 읽은 트리거 {{getvar::lua}}', valueType: 'value', indent: 1 },
+          { type: 'v2EndIndent', indent: 1 },
+        ],
+      },
+      lua(listening(`setChatVar(id, 'lua', '루아가 씀') req[1].content = '루아' return req`)),
+    ]);
+    await send(cookie, chatId, capturing);
+    expect(prompts.at(-1)!.system).toBe('루아를 읽은 트리거 루아가 씀');
+  });
+
+  it('edits the request every generation sends, and the one the creator inspects, without keeping the inspector’s writes', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const { cookie, chatId } = await luaChat('lua-modes@example.com', [
+      lua(listening(`setChatVar(id, 'n', tostring((tonumber(getChatVar(id, 'n')) or 0) + 1)) req[1].content = '루아 ' .. getChatVar(id, 'n') return req`)),
+    ]);
+    for (const [path, body] of [['messages', { content: '안녕' }], ['regenerate'], ['continue'], ['auto'], ['narrate']] as const) {
+      const events = await readSse(await json(cookie, `/api/chats/${chatId}/${path}`, 'POST', body, capturing));
+      expect(events.at(-1)!.event, path).toBe('done');
+      expect(prompts.at(-1)!.system, path).toMatch(/^루아 \d$/);
+    }
+    const report = await readJson(await request(cookie, `/api/chats/${chatId}/inspect`));
+    expect(report.blocks[0]).toMatchObject({ kind: 'request', label: 'system' });
+    const shown = report.blocks[0].text;
+    // The preview wrote nothing: what the next generation reads is what the last one left.
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
+    expect(prompts.at(-1)!.system).toBe(shown);
   });
 });
 

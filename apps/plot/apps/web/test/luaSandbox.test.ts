@@ -24,7 +24,7 @@ import type { LoreEntry } from '../src/lib/types';
 import { afterEach, describe, expect, it } from 'vitest';
 import { LUA_CLASSIFICATION } from '../src/lib/scripts/lua/classification';
 import { createLuaEngine, luaFunctionNames } from '../src/lib/scripts/lua/engine';
-import { LUA_WRAPPER } from '../src/lib/scripts/lua/prelude';
+import { LUA_WRAPPER } from '@shizue/core/lua';
 import {
   createLuaSandbox,
   type LuaHost,
@@ -743,7 +743,7 @@ describe('the Lua sandbox', () => {
 describe('the Lua classification', () => {
   it('names every function the worker declares and the wrapper defines, and nothing they do not', () => {
     const declared = new Set(
-      [...readFileSync(new URL('../src/lib/scripts/lua/sandboxRuntime.ts', import.meta.url), 'utf8').matchAll(/\bset\('([A-Za-z]+)'/g)].map(
+      [...readFileSync(new URL('../../../packages/core/src/lua/runtime.ts', import.meta.url), 'utf8').matchAll(/\bset\('([A-Za-z]+)'/g)].map(
         (match) => match[1]!,
       ),
     );
@@ -756,7 +756,7 @@ describe('the Lua classification', () => {
     expect(new Set(hosts)).toEqual(declared);
     expect(new Set(wrappers)).toEqual(wrapped);
     // RisuAI's low-level gate is the worker's `low(id)` check: the same functions.
-    const source = readFileSync(new URL('../src/lib/scripts/lua/sandboxRuntime.ts', import.meta.url), 'utf8');
+    const source = readFileSync(new URL('../../../packages/core/src/lua/runtime.ts', import.meta.url), 'utf8');
     for (const name of hosts) {
       const body = source.slice(source.indexOf(`set('${name}'`));
       const gated = /^[^]*?if \(!low\(/.exec(body.slice(0, body.indexOf('\n    set(', 1)));

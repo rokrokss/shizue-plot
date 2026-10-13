@@ -8,6 +8,7 @@ import { createHostedAuth, createSessionStore } from './hostedAuth.js';
 import { loadRootEnv, readConfig } from './env.js';
 import { startJobWorker } from './jobs.js';
 import { createJobHandlers } from './notifications.js';
+import { probeRequestLua } from './requestLua.js';
 import { createScriptFetch } from './scriptFetch.js';
 import { createStorage } from './storage.js';
 import { fakeChatGPTOAuth } from './testOpenAI.js';
@@ -49,6 +50,8 @@ const deps: AppDeps = {
   drafting: new Set<string>(),
 };
 const app = createApp(deps);
+// Whether this Node can sandbox a card's editRequest Lua, asked now so the log says so at startup.
+void probeRequestLua();
 
 serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
   console.log(`[api] listening on http://${config.host}:${info.port}`);

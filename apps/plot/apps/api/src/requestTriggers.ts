@@ -9,7 +9,10 @@
  * (`editRequestTurns`). That request already is a list of turns — the one the
  * script made, which is what RisuAI's triggers see of a script's — and goes to
  * the model as `script-llm` sends any, its leading system turns as the
- * instructions. What follows is about a generation's.
+ * instructions. What follows is about a generation's, where the card's Lua
+ * `editRequest` listeners (`requestLua.ts`) have the same list first and the
+ * triggers read what they left; the request is mapped back once, for both
+ * (`withEditedRequest`).
  *
  * **The request as the triggers see it.** RisuAI hands them its request as
  * JSON, a list of `{role, content}` turns. Ours is a system string and a list
@@ -197,6 +200,14 @@ function readTurns(json: string): RequestTurn[] | null {
   } catch {
     return null;
   }
+  return turnsOf(value);
+}
+
+/**
+ * A value an editor of the request left, as a request — or null for anything
+ * but a list of turns we can send. A turn's other fields are not kept.
+ */
+export function turnsOf(value: unknown): RequestTurn[] | null {
   if (!Array.isArray(value)) return null;
   const turns: RequestTurn[] = [];
   for (const item of value as unknown[]) {
@@ -263,19 +274,23 @@ export async function editRequestTurns(
   return edited;
 }
 
-/** The prompt a generation sends, as the card's request triggers leave it (`editRequestTurns`). */
-export async function withRequestTriggers(
+/**
+ * The prompt a generation sends, as `edit` leaves its request — the card's
+ * `editRequest` listeners (`requestLua.ts`), then its request triggers
+ * (`editRequestTurns`). `edit` answers null for a request it leaves as it was.
+ */
+export async function withEditedRequest(
   prompt: AssembledPrompt,
-  input: Omit<TriggerRunInput, 'mode' | 'displayData'>,
-  options: RunOptions,
+  edit: (turns: RequestTurn[]) => Promise<RequestTurn[] | null>,
+  label: string,
 ): Promise<AssembledPrompt> {
   const { turns, images } = requestOf(prompt);
-  const edited = await editRequestTurns(turns, input, options);
+  const edited = await edit(turns);
   if (!edited) return prompt;
 
   const sameShape = edited.length === turns.length && edited.every((turn, index) => turn.role === turns[index]!.role);
   const dropped = sameShape ? 0 : images.reduce((count, parts) => count + (parts?.length ?? 0), 0);
-  if (dropped > 0) console.warn(`[api] request triggers changed a role; ${dropped} image(s) not sent:`, options.label);
+  if (dropped > 0) console.warn(`[api] the request's scripts changed a role; ${dropped} image(s) not sent:`, label);
   const system = edited[0]?.role === 'system' ? edited[0].content : null;
   const messages: PromptMessage[] = (system !== null ? edited.slice(1) : edited).map((turn, index) => {
     // Same shape: the first turn is still the system string, so a message's index is its own.

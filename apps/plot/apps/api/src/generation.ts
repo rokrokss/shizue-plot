@@ -28,7 +28,15 @@ import {
   type Variables,
 } from '@shizue/core';
 import { promptScriptJob, promptScriptsOf } from '@shizue/core/prompt-scripts';
-import { hasTriggersFor, scriptedMember, type TriggerMessage, type TriggerRunInput } from '@shizue/core/triggers';
+import {
+  hasTriggersFor,
+  luaScriptsOf,
+  risuLore,
+  scriptedMember,
+  type RequestTurn,
+  type TriggerMessage,
+  type TriggerRunInput,
+} from '@shizue/core/triggers';
 import { chats, messages, type Chat, type Message } from '@shizue/db';
 import { ChatGPTError, getAdapter, getModel, supportsVision, type ChatGPTAccount, type LLMAdapter } from '@shizue/llm';
 import { and, eq, isNull, lt, or, sql } from 'drizzle-orm';
@@ -40,7 +48,8 @@ import type { AppDeps, AppEnv } from './deps.js';
 import { invalidateMemoryForEdit, scheduleMemoryUpdate } from './memory.js';
 import { runPromptScriptJob } from './regexWorker.js';
 import { scheduleRelationshipUpdate } from './relationship.js';
-import { withRequestTriggers } from './requestTriggers.js';
+import { characterImage, editRequestLua, type RequestLuaInput } from './requestLua.js';
+import { editRequestTurns, withEditedRequest } from './requestTriggers.js';
 import { storableDelta, type PromptInjections } from './scriptState.js';
 import { unlockAssets } from './unlocks.js';
 
@@ -155,6 +164,13 @@ export interface GenerationPlan {
   assetNames: string[];
   /** The chat's auxiliary model, for `{{axmodel}}` (see `auxiliaryModelOf`). */
   auxiliaryModel: string;
+  /**
+   * What the scripted member's Lua reads that the prompt does not carry, as the
+   * browser's reads it (`GET /:id/scripts`, the chat's own note): for the
+   * `editRequest` listeners the server runs (`requestLuaInput`). Absent without
+   * a scripted member.
+   */
+  scriptView?: ScriptView;
   /** The chat's prompt preset. */
   preset: Preset;
   /** Context budget this chat runs with (see memorySettings). */
@@ -179,6 +195,18 @@ export interface GenerationPlan {
    */
   narration?: boolean;
   target: GenerationTarget;
+}
+
+/** `GenerationPlan.scriptView`. */
+export interface ScriptView {
+  /** The chat's own note, as this request's scripts left it — not the attached notes the prompt adds. */
+  note: string;
+  /** The first message this chat's scripts set (`setCharacterFirstMessage`). */
+  firstMessage?: string;
+  /** The background as the overlay has it, else the card's `backgroundHTML`, whole. */
+  backgroundHtml: string;
+  /** The member's avatar, a same-origin address, or null. */
+  avatarUrl: string | null;
 }
 
 interface Usage {
@@ -421,9 +449,12 @@ async function withPromptScripts(
 
 /**
  * What a generation sends — or, with `report`, measures for the creator's
- * inspector: the prompt as it is put together, then as the card's request
- * triggers leave it, since RisuAI runs them over the request it is about to
- * send (`requestTriggers.ts`).
+ * inspector: the prompt as it is put together, then as the card's scripts
+ * leave the request in RisuAI's order — its Lua `editRequest` listeners, which
+ * `sendChat` runs once the request is put together (`requestLua.ts`), then its
+ * request triggers, which `requestChatData` runs just before sending
+ * (`requestTriggers.ts`). The chat variables the listeners wrote are the
+ * triggers' to read, and the generated turn's to keep.
  */
 async function buildRequestMessages(
   plan: GenerationPlan,
@@ -432,8 +463,85 @@ async function buildRequestMessages(
   report = false,
 ): Promise<AssembledPrompt> {
   const prompt = await assembleRequest(plan, deps, account, report);
-  const input = requestTriggerInput(plan);
-  return input ? withRequestTriggers(prompt, input, { run: deps.runRequestTriggers, label: plan.chatId }) : prompt;
+  const lua = requestLuaInput(plan);
+  const triggers = requestTriggerInput(plan);
+  if (!lua && !triggers) return prompt;
+  const label = plan.chatId;
+  const listened: { writes: VariableDelta | null } = { writes: null };
+  const edited = await withEditedRequest(
+    prompt,
+    async (turns) => {
+      let request: RequestTurn[] | null = null;
+      if (lua) {
+        const result = await editRequestLua(turns, lua, { run: deps.runRequestLua, label });
+        request = result.turns;
+        listened.writes = result.writes;
+      }
+      if (triggers) {
+        const input = { ...triggers, variables: applyVariableDelta(triggers.variables, listened.writes) };
+        request = (await editRequestTurns(request ?? turns, input, { run: deps.runRequestTriggers, label })) ?? request;
+      }
+      return request;
+    },
+    label,
+  );
+  const { writes } = listened;
+  return writes ? { ...edited, variableWrites: { ...edited.variableWrites, ...writes } } : edited;
+}
+
+/**
+ * What the card's `editRequest` listeners run with, or null for a plot whose
+ * scripted member has none — read off its Lua's text, as the browser decides
+ * which hooks a script has, so a plot without them spawns nothing. Every Lua
+ * script on the card runs, in trigger order, as RisuAI runs them. What they read
+ * is what the browser hands its sandbox (web `lua/engine.ts`, `snapshotOf`):
+ * the member as the request triggers have it, the whole branch, and
+ * `scriptView`'s note, first message, background and avatar.
+ */
+export function requestLuaInput(
+  plan: Pick<
+    GenerationPlan,
+    | 'characters'
+    | 'wholeBranch'
+    | 'branch'
+    | 'personaText'
+    | 'userName'
+    | 'variables'
+    | 'globalVariables'
+    | 'scriptView'
+  >,
+): Omit<RequestLuaInput, 'request'> | null {
+  const found = scriptedMember(plan.characters);
+  if (!found) return null;
+  const scripts = luaScriptsOf(found.scripts.triggers);
+  if (!/\beditRequest\b/.test(scripts.join('\n'))) return null;
+  const { member } = found;
+  const view = plan.scriptView;
+  return {
+    scripts,
+    snapshot: {
+      vars: Object.entries(plan.variables),
+      globals: Object.entries(plan.globalVariables),
+      messages: plan.wholeBranch.slice(plan.branch.greeting ? 1 : 0).map((message) => ({
+        role: message.role === 'user' ? 'user' : 'char',
+        data: message.content,
+        time: message.createdAt.getTime(),
+      })),
+      char: {
+        name: member.name,
+        nickname: member.card.nickname?.trim() ?? '',
+        description: member.card.description,
+        firstMessage: view?.firstMessage ?? plan.branch.greeting?.text ?? '',
+        background: view?.backgroundHtml ?? '',
+        image: characterImage(view?.avatarUrl),
+        lore: member.card.lorebook.map(risuLore),
+      },
+      user: plan.userName,
+      persona: plan.personaText,
+      note: view?.note ?? '',
+      lowLevel: false,
+    },
+  };
 }
 
 /**

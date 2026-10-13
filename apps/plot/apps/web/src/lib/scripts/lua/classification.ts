@@ -10,7 +10,8 @@
  *   the way a trigger's writes are — a chat variable on the turn, the chat the
  *   run left, a rewrite of the work in the chat's overlay — or, for a model
  *   call, answered by the API on the reader's own account, and for a request,
- *   made by the API, as RisuAI's proxy makes it.
+ *   made by the API, as RisuAI's proxy makes it. `editRequest` alone runs on
+ *   the API itself, in a child process (`apps/api/src/requestLua.ts`).
  * - `logged`: answers what RisuAI answers when there is nothing to act on, and
  *   the run notes it.
  * - `impossible`: nothing here can do it; logged, with RisuAI's failure value.
@@ -155,7 +156,7 @@ export const LUA_CLASSIFICATION: Readonly<Record<string, LuaSupport>> = {
   // The wrapper's machinery
   json: wrapper('browser', 'rxi’s json.lua interface'),
   async: wrapper('browser'),
-  listenEdit: wrapper('browser', 'editInput, editOutput, editDisplay; editRequest never fires (the prompt is built on the server)'),
+  listenEdit: wrapper('browser', 'editInput, editOutput, editDisplay in the browser; editRequest on the server'),
   callListenMain: wrapper('browser'),
 
   // Hooks RisuAI calls
@@ -170,5 +171,10 @@ export const LUA_CLASSIFICATION: Readonly<Record<string, LuaSupport>> = {
   ),
   'listen:editOutput': hook('server', 'the reply as it is stored, and its chat writes, which the output triggers read'),
   'listen:editDisplay': hook('browser', 'the screen only, before the display triggers'),
-  'listen:editRequest': hook('impossible', 'the request is assembled on the server'),
+  'listen:editRequest': hook(
+    'server',
+    'the request as {role, content} turns, run by the API in a child process (no network, no files) before the request triggers, ' +
+      'without low-level access as in RisuAI; dialogs answer as they do in a display pass; its chat variable writes land on the reply’s ' +
+      'delta, its chat and character writes are dropped; a fresh Lua state each time, so globals set by other hooks are not there',
+  ),
 };
