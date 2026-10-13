@@ -125,8 +125,11 @@ export type MessageScriptState = 'pending';
 /**
  * What a card's scripts rewrote of the work itself — a member's description, a
  * lorebook entry — for one chat, where RisuAI would have rewritten the card for
- * every chat at once. The shape is the script runtime's to define when it first
- * writes one; the column exists so that does not take another migration.
+ * every chat at once. Its shape is `ScriptOverlay` in @shizue/core/triggers
+ * (`{members: {[id]: {description?, lorebook?, postHistoryInstructions?}},
+ * persona?}`), validated and merged by apps/api/src/scriptState.ts; the API lays
+ * it over the cards when it builds a prompt. Typed loosely here so the schema
+ * does not depend on the script runtime.
  */
 export type ChatScriptOverlay = Record<string, unknown>;
 
@@ -462,7 +465,8 @@ export const chats = pgTable(
     // the import may write to the chat until it is finished.
     importing: boolean('importing').notNull().default(false),
     // The card's scripts' rewrites of the work, for this chat only. Null until a
-    // script makes one; nothing writes it yet (see `ChatScriptOverlay`).
+    // script makes one (see `ChatScriptOverlay`). Per chat, not per branch: a
+    // swipe does not undo it.
     scriptOverlay: jsonb('script_overlay').$type<ChatScriptOverlay>(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),

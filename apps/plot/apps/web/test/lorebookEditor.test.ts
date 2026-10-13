@@ -108,3 +108,45 @@ describe('the advanced lore fields', () => {
     expect('group' in changes.at(-1)![0]!).toBe(false);
   });
 });
+
+describe('the lore position', () => {
+  /** The position select, by its caption. */
+  const positionSelect = (): HTMLSelectElement => {
+    const label = [...host.querySelectorAll('label')].find((node) =>
+      node.querySelector('span')?.textContent?.startsWith('위치'),
+    );
+    return label!.querySelector('select')!;
+  };
+  function choose(node: HTMLSelectElement, value: string): void {
+    const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!;
+    act(() => {
+      setter.call(node, value);
+      node.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+  }
+
+  it("offers SillyTavern's positions, and an outlet's name only on an outlet", () => {
+    render(base);
+    expect([...positionSelect().options].map((option) => option.value)).toEqual([
+      'before_char',
+      'after_char',
+      'before_author_note',
+      'after_author_note',
+      'before_examples',
+      'after_examples',
+      'outlet',
+    ]);
+    expect(host.textContent).not.toContain('아웃렛 이름');
+
+    choose(positionSelect(), 'outlet');
+    expect(changes.at(-1)![0]!.position).toBe('outlet');
+
+    render({ ...base, position: 'outlet', outletName: '무기' });
+    expect(field('아웃렛 이름').value).toBe('무기');
+    // The name leaves with the outlet.
+    choose(positionSelect(), 'after_examples');
+    const moved = changes.at(-1)![0]!;
+    expect(moved.position).toBe('after_examples');
+    expect('outletName' in moved).toBe(false);
+  });
+});

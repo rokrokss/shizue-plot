@@ -11575,3 +11575,348 @@ describe('prompt host data', () => {
     }
   });
 });
+
+describe('prompt scripts and SillyTavern lore', () => {
+  /** An app whose model answers `reply` and records the system string and the turns it was sent. */
+  function sentApp(reply: string): {
+    app: Hono<AppEnv>;
+    systems: string[];
+    turns: { role: string; text: string }[][];
+  } {
+    const systems: string[] = [];
+    const turns: { role: string; text: string }[][] = [];
+    const app = makeApp({
+      getAdapter: () => ({
+        providerModel: 'fixed',
+        adapter: {
+          stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
+            systems.push(req.system);
+            turns.push(
+              req.messages.map((message) => ({
+                role: message.role,
+                text: typeof message.content === 'string' ? message.content : JSON.stringify(message.content),
+              })),
+            );
+            yield { type: 'text', text: reply };
+            return { usage: { promptTokens: 1, completionTokens: 1 } };
+          },
+        },
+      }),
+    });
+    return { app, systems, turns };
+  }
+
+  /** A chat on a plot whose one member carries `extensions`, opened on its one intro. */
+  async function scriptedChat(
+    email: string,
+    extensions: Record<string, unknown>,
+  ): Promise<{ cookie: string; chatId: string }> {
+    const cookie = await signUp(email);
+    const plot = await createPlot(cookie, {
+      name: '스크립트 작품',
+      description: '설명',
+      intros: ['문 앞이다. 비밀이 있다.'],
+    });
+    await addCharacter(cookie, plot.id, { name: '아리아', card: { description: '설명', extensions } });
+    const created = await startChat(cookie, plot.id);
+    return { cookie, chatId: created.chat.id };
+  }
+
+  const editprocess = (source: string, out: string): Record<string, unknown> => ({
+    comment: '',
+    type: 'editprocess',
+    in: source,
+    out,
+    ableFlag: false,
+    flag: '',
+  });
+
+  it("rewrites the greeting and every turn with RisuAI's editprocess scripts, and stores none of it", async () => {
+    const { cookie, chatId } = await scriptedChat('editprocess@example.com', {
+      risuai: {
+        customScripts: [
+          editprocess('비밀', '[가림]'),
+          // CBS in the template reads the turn's own index: the greeting is -1.
+          editprocess('^', '#{{chat_index}} '),
+          // A display script never reaches the prompt.
+          { ...editprocess('문', 'DISPLAY'), type: 'editdisplay' },
+        ],
+      },
+    });
+    const { app, turns } = sentApp('대답');
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '비밀을 말해' }, app));
+    const texts = turns.at(-1)!.map((turn) => turn.text);
+    expect(texts).toContain('#-1 문 앞이다. [가림]이 있다.');
+    expect(texts).toContain('#0 [가림]을 말해');
+
+    const stored = await db
+      .select()
+      .from(messages)
+      .where(eq(messages.chatId, chatId))
+      .orderBy(asc(messages.createdAt));
+    expect(stored.map((message) => message.content)).toEqual(['문 앞이다. 비밀이 있다.', '비밀을 말해', '대답']);
+  });
+
+  it("runs SillyTavern's prompt-only regex on the placements it names", async () => {
+    const { cookie, chatId } = await scriptedChat('tavern-regex@example.com', {
+      talkativeness: '0.5',
+      fav: false,
+      regex_scripts: [
+        {
+          scriptName: '유저만',
+          findRegex: '/비밀/g',
+          replaceString: '<{{match}}>',
+          trimStrings: [],
+          placement: [1],
+          disabled: false,
+          markdownOnly: false,
+          promptOnly: true,
+          runOnEdit: true,
+          substituteRegex: 0,
+          minDepth: null,
+          maxDepth: null,
+        },
+      ],
+    });
+    const { app, turns } = sentApp('대답');
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '비밀을 말해' }, app));
+    const texts = turns.at(-1)!.map((turn) => turn.text);
+    // The user's turn only; the greeting is the model's.
+    expect(texts).toContain('<비밀>을 말해');
+    expect(texts).toContain('문 앞이다. 비밀이 있다.');
+  });
+
+  it('cuts off a catastrophic pattern, runs the rest, and still answers', async () => {
+    const { cookie, chatId } = await scriptedChat('catastrophic@example.com', {
+      risuai: { customScripts: [editprocess('^(a+)+$', 'X'), editprocess('b$', 'B')] },
+    });
+    const { app, turns } = sentApp('대답');
+    const started = Date.now();
+    const events = await readSse(
+      await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: `${'a'.repeat(40)}b` }, app),
+    );
+    expect(events.at(-1)!.event).toBe('done');
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(turns.at(-1)!.map((turn) => turn.text)).toContain(`${'a'.repeat(40)}B`);
+  });
+
+  it("keeps SillyTavern's lore positions and settings through a save, and places them in the prompt", async () => {
+    const cookie = await signUp('st-positions@example.com');
+    const plot = await createPlot(cookie, { name: '위치 작품', description: '[{{outlet::무기}}]', intros: ['안녕'] });
+    const member = await addCharacter(cookie, plot.id, {
+      name: '아리아',
+      card: {
+        description: '설명',
+        lorebook: [
+          { keys: [], content: 'AN-LORE', constant: true, position: 'before_author_note' },
+          { keys: [], content: 'EX-LORE', constant: true, position: 'after_examples' },
+          { keys: [], content: 'SWORD', constant: true, position: 'outlet', outletName: ' 무기 ' },
+          { keys: [], content: 'NOWHERE', constant: true, position: 'nowhere', outletName: '무기' },
+        ],
+        loreSettings: { scanDepth: 2, budgetPercent: 40, recursiveScanning: true, maxRecursionSteps: 3 },
+      },
+    });
+    expect(member.card.lorebook.map((entry: any) => [entry.position, entry.outletName])).toEqual([
+      ['before_author_note', undefined],
+      ['after_examples', undefined],
+      ['outlet', '무기'],
+      // An unknown position is the default, and an outlet's name leaves with it.
+      ['before_char', undefined],
+    ]);
+    expect(member.card.loreSettings).toEqual({
+      scanDepth: 2,
+      budgetPercent: 40,
+      recursiveScanning: true,
+      maxRecursionSteps: 3,
+    });
+
+    const created = await startChat(cookie, plot.id);
+    const { app, systems, turns } = sentApp('대답');
+    await readSse(await json(cookie, `/api/chats/${created.chat.id}/messages`, 'POST', { content: '안녕' }, app));
+    expect(systems.at(-1)).toContain('[SWORD]');
+    expect(systems.at(-1)).not.toContain('AN-LORE');
+    expect(systems.at(-1)).not.toContain('EX-LORE');
+    const texts = turns.at(-1)!.map((turn) => turn.text);
+    // The chat has no author's note of its own: the entry takes its place.
+    expect(texts).toContain('AN-LORE');
+    expect(texts).toContain('[예시 대화: 아리아]\nEX-LORE');
+  });
+});
+
+describe('the browser script runtime', () => {
+  /** An app that answers every generation with `reply` and records the system prompt. */
+  function promptApp(reply: string): { app: Hono<AppEnv>; systems: string[] } {
+    const systems: string[] = [];
+    const app = makeApp({
+      getAdapter: () => ({
+        providerModel: 'fixed',
+        adapter: {
+          stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
+            systems.push(req.system);
+            yield { type: 'text', text: reply };
+            return { usage: { promptTokens: 1, completionTokens: 1 } };
+          },
+        },
+      }),
+    });
+    return { app, systems };
+  }
+
+  const triggerscript = [
+    { comment: '공격', type: 'manual', conditions: [], effect: [{ type: 'setvar', var: 'hit', value: '1', operator: '=' }] },
+    { comment: '', type: 'start', conditions: [], effect: [] },
+  ];
+  const customScripts = [
+    { type: 'editoutput', in: 'a', out: 'b' },
+    { type: 'editdisplay', in: 'x', out: 'y' },
+  ];
+
+  /** A published plot whose second member carries RisuAI scripts, and a chat on it. */
+  async function scriptedPlot(owner: string): Promise<{ cookie: string; plotId: string; memberId: string }> {
+    const cookie = await signUp(owner);
+    const plot = await createPlot(cookie, { name: '스크립트 작품', description: '설명', intros: ['문 앞이다'] });
+    await addCharacter(cookie, plot.id, { name: '평범', card: { description: '스크립트 없는 멤버' } });
+    const member = await addCharacter(cookie, plot.id, {
+      name: '리안',
+      card: {
+        description: '원래 설명',
+        lorebook: [{ keys: ['성'], content: '북쪽의 성.', name: '성' }],
+        extensions: { risuai: { triggerscript, customScripts, lowLevelAccess: true } },
+      },
+    });
+    await publishPlot(cookie, plot.id);
+    return { cookie, plotId: plot.id, memberId: member.id };
+  }
+
+  const scriptsOf = async (cookie: string, chatId: string): Promise<any> =>
+    readJson(await request(cookie, `/api/chats/${chatId}/scripts`));
+
+  it('ships nothing for a plot without scripts', async () => {
+    const cookie = await signUp('scripts-none@example.com');
+    const plot = await createPlot(cookie, { description: '설명', intros: ['안녕'] });
+    await addCharacter(cookie, plot.id, { card: { description: '평범한 사서' } });
+    const chat = await startChat(cookie, plot.id);
+    expect(await scriptsOf(cookie, chat.chat.id)).toEqual({ scripts: null });
+  });
+
+  it("ships the scripted member's scripts and card text to a reader, and nothing of the others", async () => {
+    const { plotId, memberId } = await scriptedPlot('scripts-owner@example.com');
+    const reader = await signUp('scripts-reader@example.com');
+    const chat = await startChat(reader, plotId);
+    const answer = await scriptsOf(reader, chat.chat.id);
+    expect(answer.scripts).toMatchObject({
+      memberId,
+      name: '리안',
+      lowLevelAccess: true,
+      triggers: triggerscript,
+      // Only the two the browser runs.
+      editScripts: [{ type: 'editoutput', in: 'a', out: 'b' }],
+      character: { description: '원래 설명', lorebook: [expect.objectContaining({ content: '북쪽의 성.' })] },
+      overlay: { member: null, persona: null },
+    });
+    expect(JSON.stringify(answer)).not.toContain('스크립트 없는 멤버');
+    // Someone else's chat is not found.
+    const stranger = await signUp('scripts-stranger@example.com');
+    expect((await request(stranger, `/api/chats/${chat.chat.id}/scripts`)).status).toBe(404);
+  });
+
+  it("lays a generation's overlay over the prompt it starts, and keeps it", async () => {
+    const { cookie: owner, plotId, memberId } = await scriptedPlot('scripts-overlay@example.com');
+    const reader = await signUp('scripts-overlay-reader@example.com');
+    const chat = await startChat(reader, plotId);
+    const { app: replying, systems } = promptApp('대답');
+    const events = await readSse(
+      await json(
+        reader,
+        `/api/chats/${chat.chat.id}/messages`,
+        'POST',
+        {
+          content: '안녕',
+          overlay: { members: { [memberId]: { description: '바뀐 설명' } }, persona: '스크립트 페르소나' },
+          note: '비가 온다',
+        },
+        replying,
+      ),
+    );
+    expect(events.at(-1)!.event).toBe('done');
+    expect(systems.at(-1)).toContain('바뀐 설명');
+    expect(systems.at(-1)).not.toContain('원래 설명');
+    expect(systems.at(-1)).toContain('스크립트 페르소나');
+    expect((await readJson(await request(reader, `/api/chats/${chat.chat.id}`))).chat.note).toBe('비가 온다');
+    expect((await scriptsOf(reader, chat.chat.id)).scripts.overlay).toEqual({
+      member: { description: '바뀐 설명' },
+      persona: '스크립트 페르소나',
+    });
+
+    // The next generation reads it without being told again; the plot never changed.
+    await readSse(await json(reader, `/api/chats/${chat.chat.id}/regenerate`, 'POST', {}, replying));
+    expect(systems.at(-1)).toContain('바뀐 설명');
+    const work = await readPlot(owner, plotId);
+    expect(work.characters.find((member: any) => member.id === memberId).card.description).toBe('원래 설명');
+  });
+
+  it('keeps nothing a refused generation carried, and refuses a member the plot does not have', async () => {
+    const { plotId, memberId } = await scriptedPlot('scripts-refused@example.com');
+    const reader = await signUp('scripts-refused-reader@example.com');
+    const chat = await startChat(reader, plotId);
+    const moved = await json(reader, `/api/chats/${chat.chat.id}/messages`, 'POST', {
+      content: '안녕',
+      baseHeadId: randomUUID(),
+      overlay: { members: { [memberId]: { description: '버려질 설명' } } },
+    });
+    expect(moved.status).toBe(409);
+    expect((await scriptsOf(reader, chat.chat.id)).scripts.overlay.member).toBeNull();
+
+    const foreign = await json(reader, `/api/chats/${chat.chat.id}/messages`, 'POST', {
+      content: '안녕',
+      overlay: { members: { [randomUUID()]: { description: 'x' } } },
+    });
+    expect(foreign.status).toBe(400);
+    const notMap = await json(reader, `/api/chats/${chat.chat.id}/messages`, 'POST', {
+      content: '안녕',
+      overlay: { members: { [memberId]: { lorebook: 'nope' } } },
+    });
+    expect(notMap.status).toBe(400);
+  });
+
+  it('commits an overlay and a note with a script commit, merged field by field under the lock', async () => {
+    const { plotId, memberId } = await scriptedPlot('scripts-commit@example.com');
+    const reader = await signUp('scripts-commit-reader@example.com');
+    const chat = await startChat(reader, plotId);
+    const head = chat.path.at(-1);
+    const first = await json(reader, `/api/chats/${chat.chat.id}/script-commit`, 'POST', {
+      messageId: head.id,
+      scriptRev: head.scriptRev,
+      variableDelta: { hit: '1' },
+      overlay: { members: { [memberId]: { lorebook: [{ keys: ['탑'], content: '높은 탑.', name: '탑' }] } } },
+      note: '버튼이 남긴 노트',
+    });
+    expect(first.status, await first.clone().text()).toBe(200);
+    const second = await json(reader, `/api/chats/${chat.chat.id}/script-commit`, 'POST', {
+      messageId: head.id,
+      scriptRev: head.scriptRev + 1,
+      overlay: { members: { [memberId]: { description: '두 번째' } } },
+    });
+    expect(second.status).toBe(200);
+    expect((await readJson(second)).chat.note).toBe('버튼이 남긴 노트');
+    const overlay = (await scriptsOf(reader, chat.chat.id)).scripts.overlay.member;
+    expect(overlay.description).toBe('두 번째');
+    expect(overlay.lorebook.map((entry: any) => entry.content)).toEqual(['높은 탑.']);
+
+    // An overlay alone is something to commit.
+    const alone = await json(reader, `/api/chats/${chat.chat.id}/script-commit`, 'POST', {
+      messageId: head.id,
+      scriptRev: head.scriptRev + 2,
+      overlay: { persona: 'p' },
+    });
+    expect(alone.status).toBe(200);
+    // …and it is still held to the head's revision.
+    const stale = await json(reader, `/api/chats/${chat.chat.id}/script-commit`, 'POST', {
+      messageId: head.id,
+      scriptRev: head.scriptRev,
+      overlay: { persona: 'q' },
+    });
+    expect(stale.status).toBe(409);
+    expect((await scriptsOf(reader, chat.chat.id)).scripts.overlay.persona).toBe('p');
+  });
+});

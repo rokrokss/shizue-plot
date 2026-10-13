@@ -176,7 +176,11 @@ export function PromptInspector({ chatId }: { chatId: string }) {
                         entry.source === 'plot' ? t('sourcePlot') : entry.source,
                         entry.placement.startsWith('depth ')
                           ? t('placement.depth', { depth: entry.placement.slice('depth '.length) })
-                          : t(`placement.${entry.placement as 'before_char' | 'after_char'}`),
+                          : entry.placement.startsWith('outlet ')
+                            ? t('placement.outlet', { name: entry.placement.slice('outlet '.length) })
+                            : t(
+                                `placement.${entry.placement as Exclude<typeof entry.placement, `${'depth' | 'outlet'} ${string}`>}`,
+                              ),
                         t(`via.${entry.via}`),
                         entry.keys.length > 0 ? entry.keys.join(', ') : '',
                       ]

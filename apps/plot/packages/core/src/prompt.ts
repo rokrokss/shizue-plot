@@ -49,6 +49,14 @@ export interface HistoryMessage {
   role: 'user' | 'assistant';
   content: string;
   /**
+   * What the model is sent for the turn where that is not what is stored: the
+   * text after the cards' prompt scripts rewrote it — RisuAI's `editprocess`,
+   * SillyTavern's prompt-only regex (`promptScripts.ts`). The caller runs them,
+   * in a worker, before the assembler; the lore scan and the chat functions
+   * still read `content`, as both apps read the stored turn.
+   */
+  promptContent?: string;
+  /**
    * Images attached to the turn, as URLs the provider can read (the API resolves
    * its stored attachments into `data:` URLs). Only a model with vision is given
    * them — see `IMAGE_ATTACHED_PLACEHOLDER`.
@@ -297,7 +305,8 @@ export interface PromptReportLore {
   keys: string[];
   /** The first characters of the content as the model reads it. */
   preview: string;
-  placement: LorePosition | `depth ${number}`;
+  /** Its position — with the depth of a depth entry, and the name of an outlet entry's outlet. */
+  placement: Exclude<LorePosition, 'outlet'> | `depth ${number}` | `outlet ${string}`;
   via: LoreActivationVia;
 }
 
@@ -658,6 +667,15 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const firstMacro = first ? macroOf(first) : plotMacro;
   /** The history is the work's too, read in the role of the turn. */
   const turnMacro = { user: macroOf(undefined, 'user'), assistant: macroOf(undefined, 'char') };
+  // Each turn is read as the message it is, as RisuAI parses a turn with its own
+  // `chatID`: `{{chat_index}}` in it — or in what a prompt script wrote into it —
+  // is the turn's index, the greeting -1, the messages after it from 0.
+  const historyStart = Math.max(branch?.length ?? history.length, history.length) - history.length;
+  const turnMacroOf = (turn: HistoryMessage, at: number): MacroContext => {
+    const macro = turnMacro[turn.role];
+    const index = historyStart + at - (branch?.greeting ? 1 : 0);
+    return { ...macro, data: { ...macro.data, chat: () => ({ ...chatOf(), index }) } };
+  };
 
   // 1. main system prompt
   const main = resolveOverride(first?.card.systemPrompt ?? '', expand(preset.main), firstMacro, SPEECH_PROTOCOL);
@@ -706,19 +724,51 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   } = activateLore(lorebook, {
     history: history.map((message) => message.content),
     scanDepth: loreSettings.scanDepth,
-    budgetTokens: loreSettings.tokenBudget ?? Math.floor(contextBudget * LORE_BUDGET_SHARE),
+    budgetTokens:
+      loreSettings.tokenBudget ??
+      Math.floor(
+        contextBudget *
+          (loreSettings.budgetPercent !== undefined ? loreSettings.budgetPercent / 100 : LORE_BUDGET_SHARE),
+      ),
     countTokens,
     recursiveScanning: loreSettings.recursiveScanning,
+    ...(loreSettings.maxRecursionSteps !== undefined
+      ? { maxRecursionSteps: loreSettings.maxRecursionSteps }
+      : {}),
     risuMatching: loreSettings.risuMatching ?? false,
     textOf: expandLore,
     ...(loreState ? { timed: loreState } : {}),
   });
-  const loreText = (position: LorePosition): string =>
-    activated
-      .filter((entry) => entry.depth === undefined && entry.position === position)
-      .map(expandLore)
-      .filter((text) => text.length > 0)
-      .join('\n\n');
+  /** The expanded entries a position holds, in insertionOrder, the empty ones left out. */
+  const loreAt = (position: LorePosition): LoreEntry[] =>
+    activated.filter(
+      (entry) => entry.depth === undefined && entry.position === position && expandLore(entry).length > 0,
+    );
+  const loreText = (position: LorePosition): string => loreAt(position).map(expandLore).join('\n\n');
+
+  // 2b. outlets — SillyTavern's World Info position 7. An outlet entry goes
+  // nowhere by itself: what its outlet's entries say, one per line as ST joins
+  // them, stands in for every `{{outlet::name}}` the prompt's text writes, and an
+  // outlet nothing names is not sent at all. A name no active entry fills reads
+  // as nothing, as in ST. One pass, so an outlet's own text never names another.
+  const outlets = new Map<string, string[]>();
+  for (const entry of loreAt('outlet')) {
+    const name = entry.outletName?.trim();
+    if (name) outlets.set(name, [...(outlets.get(name) ?? []), expandLore(entry)]);
+  }
+  /**
+   * A string as it is sent: its outlets filled, and RisuAI's display escapes —
+   * which keep `{` and the like inert through every pass that might read the
+   * text again — back to the characters they stand for. The outlets come first,
+   * so a macro an escape kept from being one stays text, and an outlet's own
+   * escapes are undone with the rest. Only ever on what goes to the model —
+   * never on anything stored.
+   */
+  const send = (text: string): string =>
+    unescapeCbs(
+      text.replace(OUTLET_MACRO, (_macro, name: string) => outlets.get(name.trim())?.join('\n') ?? ''),
+      'text',
+    );
 
   // 7b. `@@depth` entries go into the history instead of the system block. Kept
   // in insertionOrder, which decides the order of entries sharing a depth.
@@ -803,8 +853,20 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // purpose: it changes every turn, and the system string is the cached prefix.
   const directionsBlock = directions.trim() ? send(`${DIRECTIONS_HEADER}\n${expand(directions).trim()}`) : '';
 
-  // 7c. author's note — spliced into the history at AUTHOR_NOTE_DEPTH, below.
-  const authorNoteBlock = authorNote.trim() ? send(expand(authorNote).trim()) : '';
+  // 7c. author's note — spliced into the history at AUTHOR_NOTE_DEPTH, below —
+  // with the lore SillyTavern puts around it (World Info positions 2 and 3), one
+  // per line as ST joins them. Like ST, which adds them whenever the note is due,
+  // the entries take the note's place even when the chat has no note of its own.
+  const authorNoteBlock = send(
+    [
+      ...loreAt('before_author_note').map(expandLore),
+      expand(authorNote).trim(),
+      ...loreAt('after_author_note').map(expandLore),
+    ]
+      .filter((text) => text.length > 0)
+      .join('\n')
+      .trim(),
+  );
 
   // 8. post-history instructions
   const postHistory = send(
@@ -856,15 +918,16 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const historyCosts: number[] = [];
   for (let i = history.length - 1; i >= 0; i -= 1) {
     const turn = history[i]!;
-    const said =
-      turn.role === 'assistant' && i !== newestAssistant ? withoutStateTail(turn.content) : turn.content;
+    // What the cards' prompt scripts made of the turn, where they rewrote it.
+    const source = turn.promptContent ?? turn.content;
+    const said = turn.role === 'assistant' && i !== newestAssistant ? withoutStateTail(source) : source;
     // A narrating turn keeps its role — the message is still the reader's or the
     // model's — but it is labelled, so the model reads it as the scene moving
     // rather than as someone acting. The prefix never reaches the model.
     const raw = isNarration(said) ? `${NARRATION_HEADER} ${narrationBody(said)}`.trim() : said;
     // A turn's inlays name pictures in someone's own RisuAI storage; RisuAI takes
     // them out of the turns it sends, and so does this.
-    const text = send(applyMacros(stripInlayMacros(raw), turnMacro[turn.role]));
+    const text = send(applyMacros(stripInlayMacros(raw), turnMacroOf(turn, i)));
     const images = turn.images ?? [];
     const cost = countTokens(text) + images.length * IMAGE_TOKEN_ESTIMATE;
     if (cost > available && historyMessages.length > 0) break;
@@ -884,15 +947,31 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
 
   // 6. example dialogue — every member's blocks, each named so the model can tell
   // whose exchange it is reading. Filled from whatever budget history left over,
-  // so it is the first thing to be evicted.
+  // so it is the first thing to be evicted. The lore SillyTavern puts around the
+  // examples (World Info positions 5 and 6) is example dialogue there — split on
+  // `<START>` like a card's, ahead of every member's blocks or behind them, and
+  // evicted with them — named for the book it came from.
   const exampleSlots: MessageSlot[] = [];
-  const exampleBlocks = cast.flatMap((member) => {
-    const macro = macroOf(member);
-    return splitExamples(member.card.mesExample).map((block) => ({
-      name: member.name,
-      content: send(`${exampleHeader(member.name)}\n${applyMacros(block, macro)}`),
-    }));
-  });
+  const exampleLore = (position: LorePosition): { name: string; content: string }[] =>
+    loreAt(position).flatMap((entry) => {
+      const source = loreSource.get(entry);
+      const name = source === undefined || source === 'plot' ? plot.name : source;
+      return splitExamples(expandLore(entry)).map((block) => ({
+        name,
+        content: send(`${exampleHeader(name)}\n${block}`),
+      }));
+    });
+  const exampleBlocks = [
+    ...exampleLore('before_examples'),
+    ...cast.flatMap((member) => {
+      const macro = macroOf(member);
+      return splitExamples(member.card.mesExample).map((block) => ({
+        name: member.name,
+        content: send(`${exampleHeader(member.name)}\n${applyMacros(block, macro)}`),
+      }));
+    }),
+    ...exampleLore('after_examples'),
+  ];
   for (const { name, content } of exampleBlocks) {
     const cost = countTokens(content);
     if (cost > available) break;
@@ -984,7 +1063,12 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
       source: loreSource.get(entry) ?? 'plot',
       keys: entry.keys,
       preview: expandLore(entry).slice(0, LORE_PREVIEW_LENGTH),
-      placement: entry.depth !== undefined ? (`depth ${entry.depth}` as const) : entry.position,
+      placement:
+        entry.depth !== undefined
+          ? (`depth ${entry.depth}` as const)
+          : entry.position === 'outlet'
+            ? (`outlet ${entry.outletName?.trim() ?? ''}` as const)
+            : entry.position,
       via: loreVia.get(entry) ?? 'keyword',
     })),
   });
@@ -1014,13 +1098,8 @@ interface MessageSlot {
   tokens?: number;
 }
 
-/**
- * A string as it is sent: RisuAI's display escapes, which keep `{` and the like
- * inert through every pass that might read the text again, back to the
- * characters they stand for. Only ever on what goes to the model — never on
- * anything stored.
- */
-const send = (text: string): string => unescapeCbs(text, 'text');
+/** SillyTavern's `{{outlet::name}}`, which the assembler fills (`send` in `assemblePrompt`). */
+const OUTLET_MACRO = /\{\{outlet::([^}]*)\}\}/gi;
 
 /** `{{char}}` in a member's own text: the nickname its card goes by, as RisuAI reads it, else the roster name. */
 export const characterName = (member: Pick<PromptCharacter, 'name' | 'card'>): string =>

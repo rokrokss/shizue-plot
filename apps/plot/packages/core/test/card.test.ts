@@ -1470,6 +1470,45 @@ describe('SillyTavern cards', () => {
     expect(normalizeCard(exported).lorebook).toEqual(card.lorebook);
   });
 
+  it("keeps ST's positions around the note and the examples, and an outlet's name, through the trip", () => {
+    const raw = stCard();
+    const [base] = raw.data.character_book.entries;
+    const at = (position: number, extra: Record<string, unknown> = {}) => ({
+      ...base!,
+      extensions: { ...base!.extensions, position, ...extra },
+    });
+    const card = normalizeCard({
+      ...raw,
+      data: {
+        ...raw.data,
+        character_book: {
+          ...raw.data.character_book,
+          entries: [at(2), at(3), at(5), at(6), at(7, { outlet_name: ' 금고 ' }), at(7, { outlet_name: '' })],
+        },
+      },
+    });
+    const own = card.lorebook.slice(0, 6);
+    expect(own.map((entry) => [entry.position, entry.outletName, entry.depth])).toEqual([
+      ['before_author_note', undefined, undefined],
+      ['after_author_note', undefined, undefined],
+      ['before_examples', undefined, undefined],
+      ['after_examples', undefined, undefined],
+      ['outlet', '금고', undefined],
+      ['outlet', undefined, undefined],
+    ]);
+
+    const entries = exportCardV3({ ...card, lorebook: own }).data.character_book!.entries;
+    expect(entries.map((entry) => [entry.position, entry.extensions?.['position'], entry.extensions?.['outlet_name']])).toEqual([
+      ['before_char', 2, undefined],
+      ['after_char', 3, undefined],
+      ['before_char', 5, undefined],
+      ['after_char', 6, undefined],
+      ['before_char', 7, '금고'],
+      ['before_char', 7, ''],
+    ]);
+    expect(normalizeCard(exportCardV3({ ...card, lorebook: own })).lorebook).toEqual(own);
+  });
+
   it('keeps an imported regex entry a regex through the round trip', () => {
     // A key with a slash in it has to be escaped, or ST would not read it as one.
     const { card } = parseCard(v3Card);

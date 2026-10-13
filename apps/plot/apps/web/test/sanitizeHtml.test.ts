@@ -457,3 +457,35 @@ describe('a destination the model composed', () => {
     expect(output).not.toContain(TAINT);
   });
 });
+
+describe("RisuAI's script buttons", () => {
+  it('keeps risu-trigger, risu-id and risu-btn under our names, on any element', () => {
+    const output = sanitizeCustomHtml(
+      '<button risu-trigger="공격" risu-id="b1">베기</button><div risu-btn="open:door">문</div>',
+    );
+    const holder = document.createElement('div');
+    holder.innerHTML = output;
+    const button = holder.querySelector('button')!;
+    expect(button.getAttribute('data-shizue-trigger')).toBe('공격');
+    expect(button.getAttribute('data-shizue-trigger-id')).toBe('b1');
+    expect(button.getAttribute('type')).toBe('button');
+    expect(holder.querySelector('div')!.getAttribute('data-shizue-btn')).toBe('open:door');
+    expect(output).not.toContain('risu-');
+  });
+
+  it('keeps a name that would fail a URL check, and still nothing that runs', () => {
+    const output = expectClean(
+      '<button risu-trigger="javascript:alert(1)" onclick="alert(2)">x</button>',
+      'onclick',
+      'alert(2)',
+    );
+    // A trigger's name is a word the page looks up, never a destination.
+    expect(output).toContain('data-shizue-trigger="javascript:alert(1)"');
+  });
+
+  it('takes the marks off a trigger name a template built from the model’s values', () => {
+    const output = sanitizeCustomHtml(['<button risu-trigger="', TAINT, '공격', TAINT, '">x</button>'].join(''));
+    expect(output).toContain('data-shizue-trigger="공격"');
+    expect(output).not.toContain(TAINT);
+  });
+});

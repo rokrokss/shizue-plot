@@ -1,5 +1,6 @@
 'use client';
 
+import { carriesScripts } from '@shizue/core/triggers';
 import { useFormatter, useTranslations } from 'next-intl';
 import { use, useCallback, useEffect, useRef, useState } from 'react';
 import { AssetManager } from '@/components/AssetManager';
@@ -1190,6 +1191,9 @@ function VisibilitySection({
     .map((member) => member.name);
   const needsRights = !published && imported.length > 0;
   const [rightsConfirmed, setRightsConfirmed] = useState(false);
+  // A RisuAI card's triggers and regex scripts run in the reader's browser, so
+  // readers receive them — and the card text they read — once the plot is public.
+  const scripted = members.some((member) => carriesScripts(member.card));
 
   async function toggle(): Promise<void> {
     if (busy) return;
@@ -1229,6 +1233,11 @@ function VisibilitySection({
       {gated ? (
         <p data-testid="adult-gate-notice" className="text-xs text-link">
           {t('safetyAdultPending')}
+        </p>
+      ) : null}
+      {scripted ? (
+        <p data-testid="scripts-publish-notice" className="text-xs text-muted">
+          {t('scriptsPublishNotice')}
         </p>
       ) : null}
       {needsRights ? (

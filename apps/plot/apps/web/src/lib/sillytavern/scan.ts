@@ -6,6 +6,7 @@
 import {
   convertSillyTavernChat,
   listZip,
+  promptRegexScripts,
   regexScriptsToDisplayScripts,
   scanSillyTavern,
   stFilesFromFolder,
@@ -50,4 +51,5 @@ export const IMPORT_DEPS: ImportDeps = {
   convertChat: convertSillyTavernChat,
   lorebookEntries: fromLorebookFile,
   displayScripts: regexScriptsToDisplayScripts,
+  promptScripts: promptRegexScripts,
 };

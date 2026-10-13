@@ -48,7 +48,10 @@ function toLorebookEntry(entry: LoreEntry, index: number): LorebookEntry {
     insertion_order: entry.insertionOrder,
     case_sensitive: entry.caseSensitive,
     use_regex: entry.useRegex,
-    position: entry.position,
+    // V3 knows two positions. SillyTavern's others go out in its extensions,
+    // where ST and our import read them; a reader that knows only V3 reads the
+    // `after_` ones as after the character and the rest as before it.
+    position: entry.position.startsWith('after_') ? 'after_char' : 'before_char',
     id: index,
   };
 }

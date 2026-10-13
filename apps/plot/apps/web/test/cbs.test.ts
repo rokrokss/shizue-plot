@@ -129,6 +129,18 @@ describe('{{button}}', () => {
       '<button type="button" data-shizue-fill="&quot; onclick=&quot;alert(1)">&lt;b&gt;</button>',
     );
   });
+
+  it('runs the plot’s manual trigger of that name, as RisuAI’s does, and fills the composer otherwise', () => {
+    const triggerNames = new Set(['공격', '"x']);
+    expect(render('{{button::베기::공격}}', { triggerNames })).toBe(
+      '<button type="button" risu-trigger="공격">베기</button>',
+    );
+    expect(render('{{button::인사::안녕}}', { triggerNames })).toBe(
+      '<button type="button" data-shizue-fill="안녕">인사</button>',
+    );
+    // A trigger's name is escaped like any other value.
+    expect(render('{{button::a::"x}}', { triggerNames })).toBe('<button type="button" risu-trigger="&quot;x">a</button>');
+  });
 });
 
 describe('{{calc}}', () => {

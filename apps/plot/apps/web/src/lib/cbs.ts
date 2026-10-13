@@ -10,7 +10,7 @@
  * `{{? …}}`/`{{calc}}` — is `@shizue/core/cbs`, shared with the prompt. What is
  * this file's is everything about the page: values escaped, the model's values
  * marked (`lib/taint.ts`), every step paid for, `{{rel}}`, `{{turn}}`,
- * `{{button}}`, the plot's images, and what the browser can tell RisuAI's
+ * `{{button}}` (a manual trigger where the plot defines one), the plot's images, and what the browser can tell RisuAI's
  * functions about the chat (`CbsHostData`). There is no `eval` anywhere.
  * A malformed template is never fatal — it falls back to its own escaped
  * source, so the message still reads.
@@ -85,6 +85,11 @@ export interface CbsContext {
   chatId?: string;
   /** The reader's interface language, for `{{metadata::language}}`. */
   locale?: string;
+  /**
+   * The manual triggers the plot's scripts define, by name. A `{{button}}` whose
+   * target is one of them runs it, as RisuAI's does; any other fills the composer.
+   */
+  triggerNames?: ReadonlySet<string>;
 }
 
 /**
@@ -346,12 +351,15 @@ function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>): CbsHos
         }
         case 'button': {
           // The only interactive element a template can produce. It carries no
-          // behaviour of its own — the chat page delegates on `data-shizue-fill` and
-          // does nothing but put the text in the composer.
+          // behaviour of its own — the chat page delegates on its attribute. RisuAI's
+          // `{{button::label::trigger}}` runs the plot's manual trigger of that name
+          // (`risu-trigger`, which the sanitizer keeps under our name); a target that
+          // names none is text, and the click puts it in the composer.
           const label = call.args.at(1)?.value().text ?? '';
           const fill = call.args.rest(2)?.value().text ?? label;
+          const attribute = ctx.triggerNames?.has(fill) ? 'risu-trigger' : 'data-shizue-fill';
           return {
-            text: `<button type="button" data-shizue-fill="${escapeHtml(fill)}">${escapeHtml(label)}</button>`,
+            text: `<button type="button" ${attribute}="${escapeHtml(fill)}">${escapeHtml(label)}</button>`,
             markup: true,
           };
         }

@@ -31,6 +31,7 @@ import {
   styleDirectives,
   type HistoryMessage,
   type PromptCharacter,
+  type PromptPart,
   type PromptPlot,
 } from '../src/prompt.js';
 import { countTokens } from '../src/tokens.js';
@@ -1774,5 +1775,231 @@ describe("assemblePrompt - a SillyTavern member's variable macros", () => {
     expect(result.system).toContain('{{setvar::mood::calm}}');
     expect(result.messages.map((message) => promptText(message.content))).toContain('{{setvar::mood::angry}}');
     expect(result.variableWrites).toBeUndefined();
+  });
+});
+
+describe("assemblePrompt - SillyTavern's lore positions", () => {
+  const longer: HistoryMessage[] = [
+    ...history,
+    { role: 'assistant', content: '다섯 번째 캐릭터 발화입니다.' },
+    { role: 'user', content: '여섯 번째 유저 발화입니다.' },
+  ];
+  const texts = (messages: { content: string | PromptPart[] }[]): string[] =>
+    messages.map((message) => promptText(message.content));
+  const noteLore = [
+    loreEntry({ content: 'AN-BOTTOM', position: 'after_author_note', insertionOrder: 2 }),
+    loreEntry({ content: 'AN-TOP', position: 'before_author_note', insertionOrder: 1 }),
+  ];
+
+  it("puts the author's-note lore around the note, a line each, where the note sits", () => {
+    const { system, messages } = assemblePrompt({
+      plot,
+      characters: [{ name: '아리아', card: { ...bareCard, lorebook: noteLore } }],
+      history: longer,
+      preset,
+      userName: '민준',
+      authorNote: '{{user}}는 지금 초조하다.',
+    });
+    expect(system).not.toContain('AN-');
+    expect(texts(messages)).toEqual([
+      ...longer.slice(0, 2).map((m) => m.content),
+      'AN-TOP\n민준는 지금 초조하다.\nAN-BOTTOM',
+      ...longer.slice(2).map((m) => m.content),
+      'POST',
+    ]);
+  });
+
+  it("takes the note's place when the chat has no note of its own", () => {
+    const { messages } = assemblePrompt({
+      plot,
+      characters: [{ name: '아리아', card: { ...bareCard, lorebook: noteLore } }],
+      history: longer,
+      preset,
+      userName: '민준',
+    });
+    expect(messages[2]).toEqual({ role: 'system', content: 'AN-TOP\nAN-BOTTOM' });
+  });
+
+  it('puts the example lore around the examples, named for its book, and evicts it with them', () => {
+    const input = {
+      plot: { ...plot, lorebook: [loreEntry({ content: '<START>\nA\n<START>\nB', position: 'before_examples' })] },
+      characters: [
+        { name: '아리아', card: { ...card, lorebook: [loreEntry({ content: 'C', position: 'after_examples' })] } },
+      ],
+      history,
+      preset,
+      userName: '민준',
+      maxResponseTokens: 0,
+    } satisfies Parameters<typeof assemblePrompt>[0];
+    const roomy = assemblePrompt({ ...input, contextBudget: 100_000 });
+    expect(texts(roomy.messages)).toEqual([
+      `${exampleHeader(plot.name)}\nA`,
+      `${exampleHeader(plot.name)}\nB`,
+      `${exampleHeader('아리아')}\n민준: 예시 질문 하나\n아리아: 예시 답변 하나`,
+      `${exampleHeader('아리아')}\n민준: 예시 질문 둘\n아리아: 예시 답변 둘`,
+      `${exampleHeader('아리아')}\nC`,
+      ...history.map((m) => m.content),
+      'POST',
+    ]);
+    expect(roomy.system).not.toContain('\nC');
+
+    // Room for the system string, the history and the post-history block only.
+    const budget =
+      countTokens(roomy.system) +
+      countTokens('POST') +
+      history.reduce((sum, turn) => sum + countTokens(turn.content), 0);
+    expect(texts(assemblePrompt({ ...input, contextBudget: budget }).messages)).toEqual([
+      ...history.map((m) => m.content),
+      'POST',
+    ]);
+  });
+
+  it('fills every {{outlet::name}} with its entries, and sends an outlet nothing names nowhere', () => {
+    const { system, messages, report } = assemblePrompt({
+      plot,
+      characters: [
+        {
+          name: '아리아',
+          card: {
+            ...bareCard,
+            description: '[{{outlet::무기}}|{{outlet::없음}}|{{OUTLET:: 무기 }}]',
+            lorebook: [
+              loreEntry({ content: 'BOW', position: 'outlet', outletName: '무기', insertionOrder: 2 }),
+              loreEntry({ content: 'SWORD', position: 'outlet', outletName: '무기', insertionOrder: 1 }),
+              loreEntry({ content: 'SHIELD', position: 'outlet', outletName: '방어' }),
+              // ST never sends an outlet entry no macro can name.
+              loreEntry({ content: 'NAMELESS', position: 'outlet' }),
+            ],
+          },
+        },
+      ],
+      history: [{ role: 'user', content: '{{outlet::방어}}?' }],
+      preset,
+      userName: '민준',
+      report: true,
+    });
+    expect(system).toContain('[SWORD\nBOW||SWORD\nBOW]');
+    expect(system.split('SWORD')).toHaveLength(3);
+    expect(system).not.toContain('SHIELD');
+    expect(system).not.toContain('NAMELESS');
+    expect(texts(messages)).toContain('SHIELD?');
+    expect(report!.lore.map((entry) => entry.placement)).toEqual([
+      'outlet 방어',
+      'outlet ',
+      'outlet 무기',
+      'outlet 무기',
+    ]);
+  });
+});
+
+describe('assemblePrompt - what the prompt scripts made of the history', () => {
+  it('sends the rewritten turn, while the lore still scans the stored one', () => {
+    const { system, messages } = assemblePrompt({
+      plot,
+      characters: [
+        {
+          name: '아리아',
+          card: { ...bareCard, lorebook: [loreEntry({ content: 'KEY-LORE', constant: false, keys: ['열쇠'] })] },
+        },
+      ],
+      history: [
+        { role: 'assistant', content: '열쇠가 있다.', promptContent: '[가려짐]' },
+        { role: 'user', content: '좋아' },
+      ],
+      preset,
+      userName: '민준',
+    });
+    expect(system).toContain('KEY-LORE');
+    expect(messages.map((message) => promptText(message.content))).toEqual(['[가려짐]', '좋아', 'POST']);
+  });
+
+  it('reads each turn as its own message, as RisuAI does: {{chat_index}} is its index', () => {
+    const turns: HistoryMessage[] = [
+      { role: 'assistant', content: '{{chat_index}}' },
+      { role: 'user', content: '{{chat_index}}' },
+      { role: 'assistant', content: '{{chat_index}}' },
+      { role: 'user', content: '{{chat_index}}' },
+    ];
+    const sent = (turnsSent: HistoryMessage[], length: number): string[] =>
+      assemblePrompt({
+        plot,
+        characters: [bareAria],
+        history: turnsSent,
+        preset,
+        userName: '민준',
+        branch: { length, greeting: { text: '{{chat_index}}', index: -1 } },
+      })
+        .messages.slice(0, -1)
+        .map((message) => promptText(message.content));
+    // The greeting is -1 and the turns after it count from 0, the trimmed ones too.
+    expect(sent(turns, 4)).toEqual(['-1', '0', '1', '2']);
+    expect(sent(turns.slice(2), 4)).toEqual(['1', '2']);
+  });
+});
+
+describe("assemblePrompt - SillyTavern's World Info settings", () => {
+  it('gives the automatic budget the share the book names', () => {
+    const words = '단어 '.repeat(40).trim();
+    const lorebook = [
+      loreEntry({ content: `A ${words}`, insertionOrder: 3 }),
+      loreEntry({ content: `B ${words}`, insertionOrder: 2 }),
+      loreEntry({ content: `C ${words}`, insertionOrder: 1 }),
+    ];
+    const cost = countTokens(`A ${words}`);
+    const activated = (budgetPercent?: number): string[] =>
+      assemblePrompt({
+        plot,
+        characters: [
+          {
+            name: '아리아',
+            card: {
+              ...bareCard,
+              lorebook,
+              loreSettings: { ...DEFAULT_LORE_SETTINGS, ...(budgetPercent ? { budgetPercent } : {}) },
+            },
+          },
+        ],
+        history,
+        preset,
+        userName: '민준',
+        // Room for two entries at the default quarter, and for one at a tenth.
+        contextBudget: Math.ceil((cost * 2.5) / LORE_BUDGET_SHARE),
+        report: true,
+      }).report!.lore.map((entry) => entry.preview.slice(0, 1));
+    expect(activated()).toEqual(['B', 'A']);
+    expect(activated(10)).toEqual(['A']);
+  });
+
+  it('stops a recursive scan at the step limit, the first scan included', () => {
+    const lorebook = [
+      loreEntry({ content: '열쇠', insertionOrder: 1 }),
+      loreEntry({ content: '자물쇠', constant: false, keys: ['열쇠'], insertionOrder: 2 }),
+      loreEntry({ content: '문', constant: false, keys: ['자물쇠'], insertionOrder: 3 }),
+    ];
+    const activated = (maxRecursionSteps?: number): string[] =>
+      assemblePrompt({
+        plot,
+        characters: [
+          {
+            name: '아리아',
+            card: {
+              ...bareCard,
+              lorebook,
+              loreSettings: {
+                ...DEFAULT_LORE_SETTINGS,
+                recursiveScanning: true,
+                ...(maxRecursionSteps ? { maxRecursionSteps } : {}),
+              },
+            },
+          },
+        ],
+        history,
+        preset,
+        userName: '민준',
+        report: true,
+      }).report!.lore.map((entry) => entry.preview);
+    expect(activated()).toEqual(['열쇠', '자물쇠', '문']);
+    expect(activated(2)).toEqual(['열쇠', '자물쇠']);
+    expect(activated(1)).toEqual(['열쇠']);
   });
 });

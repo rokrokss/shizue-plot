@@ -6,6 +6,7 @@ import {
   listZip,
   MAX_CHAT_MESSAGES,
   parseSillyTavernDate,
+  promptRegexScripts,
   readZipEntry,
   regexScriptsToDisplayScripts,
   scanSillyTavern,
@@ -325,7 +326,15 @@ function syntheticBackup(): Record<string, Uint8Array> {
           // Keyed by the avatar without its extension (getCharaFilename).
           charLore: [{ name: '하루', extraBooks: ['하루의 비밀', '하루의 세계'] }],
         },
-        world_info_depth: 2,
+        world_info_depth: 3,
+        world_info_budget: 40,
+        world_info_recursive: true,
+        world_info_max_recursion_steps: 2,
+        world_info_budget_cap: 0,
+        world_info_include_names: true,
+        world_info_case_sensitive: true,
+        world_info_match_whole_words: true,
+        world_info_character_strategy: 1,
       },
       extension_settings: {
         regex: [
@@ -403,6 +412,8 @@ describe('scanSillyTavern', () => {
     expect(regexScriptsToDisplayScripts(manifest.globalRegex)).toEqual([
       { in: '\\*\\*(.+?)\\*\\*', out: '<b>$1</b>', flags: 'g', order: 0, enabled: true },
     ]);
+    // The prompt-only one, as ST wrote it, for the prompt to run.
+    expect(promptRegexScripts(manifest.globalRegex)).toEqual([manifest.globalRegex[1]]);
 
     expect(manifest.skipped).toEqual(
       expect.arrayContaining([
@@ -414,6 +425,30 @@ describe('scanSillyTavern', () => {
       ]),
     );
     expect(manifest.skipped).toHaveLength(5);
+  });
+
+  it("reads the World Info settings as a book's, and names the ones it leaves behind", async () => {
+    const source = sourceOf(zipSync(syntheticBackup()));
+    const manifest = await scanSillyTavern(stFilesFromZip(source, await listZip(source)));
+    expect(manifest.worldInfoSettings).toEqual({
+      lore: { scanDepth: 3, budgetPercent: 40, recursiveScanning: true, maxRecursionSteps: 2 },
+      // Only what is set away from ST's default; the rest is what every import gets.
+      dropped: ['world_info_case_sensitive', 'world_info_match_whole_words'],
+    });
+
+    // ST's defaults where the file says nothing, and nothing at all without a file.
+    const bare = await scanSillyTavern([{ path: 'settings.json', size: 1, read: async () => json({}) }]);
+    expect(bare.worldInfoSettings).toEqual({ lore: { scanDepth: 2, recursiveScanning: true }, dropped: [] });
+    const flat = await scanSillyTavern([
+      {
+        path: 'settings.json',
+        size: 1,
+        read: async () => json({ world_info_depth: 0, world_info_recursive: false, world_info_max_recursion_steps: 3 }),
+      },
+    ]);
+    // An older file keeps them at the top level; a step limit without recursion says nothing.
+    expect(flat.worldInfoSettings?.lore).toEqual({ scanDepth: 0, recursiveScanning: false });
+    expect((await scanSillyTavern([])).worldInfoSettings).toBeUndefined();
   });
 
   it('never surfaces settings.json or secrets.json content', async () => {

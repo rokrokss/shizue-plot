@@ -35,6 +35,17 @@ describe('loreBudget', () => {
     expect(loreBudget(0, [])).toMatchObject({ budget: automatic, automatic: true });
   });
 
+  it('takes the share a book names for the automatic budget', () => {
+    const shared = {
+      ...member(0),
+      card: { loreSettings: { ...member(0).card.loreSettings, budgetPercent: 40 } } as NormalizedCard,
+    };
+    expect(loreBudget(0, [shared])).toMatchObject({
+      budget: Math.floor(DEFAULT_CONTEXT_BUDGET * 0.4),
+      automatic: true,
+    });
+  });
+
   it('warns only once the always-on entries take more than the budget', () => {
     expect(loreBudget(400, [member(600, 1000)]).over).toBe(false);
     expect(loreBudget(401, [member(600, 1000)]).over).toBe(true);

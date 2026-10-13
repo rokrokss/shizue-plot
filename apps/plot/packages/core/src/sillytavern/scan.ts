@@ -14,13 +14,16 @@
  *   `power_user.persona_descriptions[avatar].description` (`public/scripts/personas.js`).
  * - Global regex scripts are `extension_settings.regex`
  *   (`public/scripts/extensions/regex/engine.js`).
+ * - The World Info settings sit beside `world_info`, as `world_info_depth`,
+ *   `world_info_budget` and the rest (`getWorldInfoSettings`, `world-info.js`).
  *
  * settings.json also holds API settings and, in places, credentials. It is parsed
- * here, in the browser, and only those five values leave this function; the file
+ * here, in the browser, and only those six values leave this function; the file
  * itself is never part of the manifest, so it is never uploaded.
  */
 
 import { readPngTextChunkBytes } from '../card/png.js';
+import type { LoreSettings } from '../types.js';
 import { FileTooLargeError } from './zip.js';
 import { ST_CAPS, stFileKind, type StCaps, type StFile } from './files.js';
 
@@ -81,7 +84,24 @@ export interface StManifest {
   globalWorlds: string[];
   /** settings.json `extension_settings.regex`, ST's raw scripts. */
   globalRegex: unknown[];
+  /** settings.json's World Info settings, read as a book's. Absent without a settings.json. */
+  worldInfoSettings?: StWorldInfoSettings;
   skipped: { path: string; reason: StSkipReason }[];
+}
+
+/**
+ * ST's global World Info settings as far as a book's lore settings say the same
+ * thing — they decide every chat's lore there, and a book here carries its own
+ * (the first member's card, for a plot) — and the ones nothing here does.
+ */
+export interface StWorldInfoSettings {
+  /** What every imported plot's book takes over. */
+  lore: Pick<LoreSettings, 'scanDepth' | 'budgetPercent' | 'recursiveScanning' | 'maxRecursionSteps'>;
+  /**
+   * The settings left behind, by ST's own name — only those set away from ST's
+   * default: at the default, what shizue does instead is what every import gets.
+   */
+  dropped: string[];
 }
 
 type Json = Record<string, unknown>;
@@ -143,12 +163,64 @@ function cardSummary(png: Uint8Array): { name: string; world: string } | undefin
   return undefined;
 }
 
-/** The five values the import takes from settings.json; the parsed object goes no further. */
+/** The six values the import takes from settings.json; the parsed object goes no further. */
 interface SettingsValues {
   personas: StPersona[];
   charLore: Map<string, string[]>;
   globalWorlds: string[];
   globalRegex: unknown[];
+  worldInfoSettings: StWorldInfoSettings;
+}
+
+/** A whole number from `floor` up, or undefined. */
+const wholeAtLeast = (value: unknown, floor: number): number | undefined =>
+  typeof value === 'number' && Number.isFinite(value) && value >= floor ? Math.floor(value) : undefined;
+
+/**
+ * ST's World Info settings (`world_info_*`), each read with ST's own default
+ * where the file has none, as a book's lore settings:
+ *
+ *   - `world_info_depth` (2) is the scan depth;
+ *   - `world_info_budget` (25, percent of the context) the automatic budget's
+ *     share, left out at 25, which is the share here too;
+ *   - `world_info_recursive` (on) recursive scanning, and
+ *     `world_info_max_recursion_steps` (0, no limit) its step limit.
+ *
+ * What a book here cannot say: the budget's token cap, scanning with names,
+ * case sensitivity and whole-word matching as the default of an entry that sets
+ * none (an entry here always carries its own), the minimum activations, the
+ * group scoring, and the insertion strategy (a merged book here is one book in
+ * insertion order). Those are named in `dropped` when they are set away from
+ * ST's default.
+ */
+function worldInfoSettingsOf(settings: Json): StWorldInfoSettings {
+  const depth = wholeAtLeast(settings['world_info_depth'], 0) ?? 2;
+  const budget = wholeAtLeast(settings['world_info_budget'], 1) ?? 25;
+  const recursive = typeof settings['world_info_recursive'] === 'boolean' ? settings['world_info_recursive'] : true;
+  const steps = wholeAtLeast(settings['world_info_max_recursion_steps'], 0) ?? 0;
+
+  const dropped: string[] = [];
+  const awayFrom = (key: string, fallback: unknown): void => {
+    const value = settings[key];
+    if (value !== undefined && value !== null && value !== fallback) dropped.push(key);
+  };
+  awayFrom('world_info_budget_cap', 0);
+  awayFrom('world_info_include_names', true);
+  awayFrom('world_info_case_sensitive', false);
+  awayFrom('world_info_match_whole_words', false);
+  awayFrom('world_info_min_activations', 0);
+  awayFrom('world_info_use_group_scoring', false);
+  awayFrom('world_info_character_strategy', 1);
+
+  return {
+    lore: {
+      scanDepth: depth,
+      ...(budget !== 25 ? { budgetPercent: Math.min(100, budget) } : {}),
+      recursiveScanning: recursive,
+      ...(recursive && steps > 0 ? { maxRecursionSteps: steps } : {}),
+    },
+    dropped,
+  };
 }
 
 function settingsValues(settings: Json): SettingsValues {
@@ -185,6 +257,7 @@ function settingsValues(settings: Json): SettingsValues {
     charLore,
     globalWorlds: stringsOf(worldInfo['globalSelect']),
     globalRegex: Array.isArray(regex) ? regex.filter(isObject) : [],
+    worldInfoSettings: worldInfoSettingsOf(worldSettings),
   };
 }
 
@@ -339,6 +412,7 @@ export async function scanSillyTavern(
     worlds,
     globalWorlds: settings.globalWorlds,
     globalRegex: settings.globalRegex,
+    ...(settingsJson ? { worldInfoSettings: settings.worldInfoSettings } : {}),
     skipped,
   };
 }

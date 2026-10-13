@@ -159,6 +159,11 @@ export interface ActivateLoreInput {
   budgetTokens: number;
   countTokens: (text: string) => number;
   recursiveScanning?: boolean;
+  /**
+   * The book's `LoreSettings.maxRecursionSteps`: how many scans a recursive
+   * activation may run, the first included. Absent: until nothing new activates.
+   */
+  maxRecursionSteps?: number;
   /** The book's `LoreSettings.risuMatching`: plain keys matched as RisuAI does. */
   risuMatching?: boolean;
   /** Absent: a branch with no records, as long as `history`. */
@@ -199,7 +204,8 @@ export type LoreActivationVia = 'constant' | 'keyword' | 'sticky' | 'recursion';
  * Each entry scans the newest `scanDepth` messages — or its own `scanDepth`. With
  * recursiveScanning, the content activated by a pass is appended to every
  * entry's scan text and the remaining entries are scanned again, until a pass
- * activates nothing new (or MAX_RECURSION_PASSES extra passes have run).
+ * activates nothing new (or MAX_RECURSION_PASSES extra passes have run, or the
+ * book's `maxRecursionSteps` scans).
  *
  * The budget comes after all of that, as RisuAI spends it and as the V3 spec
  * describes `insertion_order`: the highest insertionOrder is paid for first, and
@@ -289,7 +295,12 @@ export function activateLore(entries: LoreEntry[], input: ActivateLoreInput): Lo
   const via = new Map<LoreEntry, LoreActivationVia>();
   const held = new Set<string>(sticky.flatMap(groupsOf));
 
-  for (let pass = 0; pass < (recursiveScanning ? 1 + MAX_RECURSION_PASSES : 1); pass += 1) {
+  // SillyTavern's step limit counts the first scan, so 1 is no recursion at all.
+  const steps = input.maxRecursionSteps;
+  const passLimit = recursiveScanning
+    ? Math.min(1 + MAX_RECURSION_PASSES, steps !== undefined && steps > 0 ? steps : Infinity)
+    : 1;
+  for (let pass = 0; pass < passLimit; pass += 1) {
     const matched = pending
       .filter((entry) => isTriggered(entry, scanFor(entry), pass > 0, risuMatching))
       .sort(byOrder);

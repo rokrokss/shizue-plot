@@ -5,6 +5,7 @@ import { assetResolver, type CbsMessage } from '@shizue/core/cbs';
 import { componentNames } from '@shizue/core/component';
 import { NARRATION_PREFIX } from '@shizue/core/narration';
 import { isSceneMessage, sceneSpanAt } from '@shizue/core/scene';
+import { manualTriggerNames } from '@shizue/core/triggers';
 import { computeVariables, DEFAULT_USER_NAME, type FoldOptions, type Variables } from '@shizue/core/variables';
 import { useFormatter, useLocale, useTranslations } from 'next-intl';
 import { Fragment, use, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -18,6 +19,7 @@ import { ChatSettings } from '@/components/ChatSettings';
 import { FocusPicker } from '@/components/FocusPicker';
 import { MessageRow } from '@/components/MessageRow';
 import { MoreActions } from '@/components/MoreActions';
+import { ScriptDialog, type ScriptPrompt } from '@/components/ScriptDialog';
 import { SceneDraft } from '@/components/SceneDraft';
 import { SceneEditor, type SceneBlock } from '@/components/SceneEditor';
 import { Button, CenteredMessage, Spinner, TextArea, cx } from '@/components/ui';
@@ -49,6 +51,7 @@ import {
   prependWindow,
   type VariableAnchor,
 } from '@/lib/chatHistory';
+import { finishMarked, markFinish, unmarkFinish } from '@/lib/scripts/finishMark';
 import { chatRowMeta, relativeDay } from '@/lib/chatRows';
 import { COMPOSER_MODES, composeTurn, type ComposerMode } from '@/lib/composerMode';
 import type { ComponentContext } from '@/lib/componentCalls';
@@ -64,6 +67,15 @@ import { greetingText, isGreeting } from '@/lib/greeting';
 import { reconcileSend } from '@/lib/reconcile';
 import { sanitizeCustomHtml } from '@/lib/sanitizeHtml';
 import { streamGeneration } from '@/lib/sse';
+import { loadWholeBranch } from '@/lib/scripts/branch';
+import {
+  createScriptRuntime,
+  type PreparedGeneration,
+  type ScriptBundle,
+  type ScriptRuntime,
+  type ScriptUi,
+  type ScriptView,
+} from '@/lib/scripts/runtime';
 import { readStatusCollapsed, writeStatusCollapsed } from '@/lib/statusCard';
 import type {
   ChatAttachment,
@@ -114,6 +126,13 @@ const ABORT_POLL_MS = 250;
 const LOAD_EARLIER_PX = 400;
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Replies a card's scripts may ask for in a row (`sendAIprompt`) before the
+ * reader has to act again. RisuAI sets no limit; a card that asks every time
+ * would spend the reader's model turns without end.
+ */
+const MAX_SCRIPT_FOLLOW_UPS = 3;
 
 /** The modes a next-speaker pick rides on; continuing or narrating has no speaker to pick. */
 const FOCUS_MODES: readonly StreamMode[] = ['send', 'regenerate', 'auto'];
@@ -190,6 +209,21 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const [personas, setPersonas] = useState<Persona[]>([]);
   const [notes, setNotes] = useState<UserNote[]>([]);
   const [missing, setMissing] = useState(false);
+
+  /**
+   * The card's scripts (`lib/scripts`): undefined while the read is out, null for
+   * a plot that carries none. Read once per chat — what they rewrite of the work
+   * afterwards, the runtime keeps track of itself.
+   */
+  const [scriptBundle, setScriptBundle] = useState<ScriptBundle | null | undefined>(undefined);
+  useEffect(() => {
+    setScriptBundle(undefined);
+    apiGet<{ scripts: ScriptBundle | null }>(`/api/chats/${id}/scripts`).then(
+      (answer) => setScriptBundle(answer?.scripts ?? null),
+      // A plot that cannot be read runs nothing, and a pending reply is kept as written.
+      () => setScriptBundle(null),
+    );
+  }, [id]);
 
   const [input, setInput] = useState('');
   /** How the composer's text is meant: a line, a description, or the narrator's. */
@@ -722,6 +756,12 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const chatId = state?.chat.id ?? '';
   const locale = useLocale();
 
+  /** The manual triggers a `{{button}}` may name, which then runs one rather than filling the composer. */
+  const triggerNames = useMemo(
+    () => (scriptBundle ? manualTriggerNames(scriptBundle.triggers) : undefined),
+    [scriptBundle],
+  );
+
   const display = useMemo<DisplayContext | undefined>(() => {
     if (!customUi || scripts.length === 0) return undefined;
     return {
@@ -740,6 +780,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       chatId,
       locale,
       ...(globalVariables ? { globalVariables } : {}),
+      ...(triggerNames ? { triggerNames } : {}),
     };
   }, [
     customUi,
@@ -759,6 +800,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     chatId,
     locale,
     globalVariables,
+    triggerNames,
   ]);
 
   /**
@@ -831,10 +873,258 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     sendTurn,
   ]);
 
-  async function run(next: StreamMode, content?: string, turnOptions?: SendOptions): Promise<void> {
+  /* --------------------------------------------------------- card scripts */
+
+  /** What a script is asking the reader, while the run waits on it. */
+  const [scriptPrompt, setScriptPrompt] = useState<ScriptPrompt | null>(null);
+  /** A word from the scripts that is not an error: a send they held back. */
+  const [scriptNotice, setScriptNotice] = useState('');
+  /** A next reply a script asked for (`sendAIprompt`), waiting for the turn to end. */
+  const [followUp, setFollowUp] = useState(false);
+  /** Replies asked for in a row that way; the reader's own action starts the count again. */
+  const followUpChain = useRef(0);
+  /** Pending heads already tried, by id and revision, so a failure is not retried in a loop. */
+  const finishTried = useRef(new Set<string>());
+
+  const scriptUi = useMemo<ScriptUi>(
+    () => ({
+      alert: (text, error) => new Promise<void>((resolve) => setScriptPrompt({ kind: 'alert', text, error, resolve })),
+      input: (text) => new Promise<string>((resolve) => setScriptPrompt({ kind: 'input', text, resolve })),
+      select: (options, display) =>
+        new Promise<string>((resolve) => setScriptPrompt({ kind: 'select', text: display ?? '', options, resolve })),
+    }),
+    [],
+  );
+  const runtime = useMemo<ScriptRuntime | null>(
+    () =>
+      scriptBundle
+        ? createScriptRuntime({
+            chatId: id,
+            bundle: scriptBundle,
+            api: { send: apiSend },
+            ui: scriptUi,
+            onGlobalVariables: (globals) =>
+              setState((current) => (current ? { ...current, globalVariables: globals } : current)),
+          })
+        : null,
+    [id, scriptBundle, scriptUi],
+  );
+  /**
+   * The scripts fold the branch as the server does, from the plot's defaults, so
+   * nothing runs before both reads are in: a turn sent in the meantime would be
+   * measured against the wrong starting state.
+   */
+  const scriptsPending = scriptBundle === undefined || (scriptBundle !== null && plot === null);
+
+  /** The page's latest state, for the steps of a turn that outlive the render they began in. */
+  const stateRef = useRef<ChatState | null>(null);
+  stateRef.current = state;
+
+  /** What RisuAI's functions may read in a script, from the reader's side. */
+  const scriptData = useCallback(
+    (afterGreeting: number): ScriptView['data'] => {
+      const zone = Intl.DateTimeFormat().resolvedOptions();
+      return {
+        clock: { now: new Date(), timeZone: zone.timeZone, locale: zone.locale },
+        seed: { key: chatId, length: afterGreeting },
+        meta: { language: locale },
+        assets: { names: assetNames, display: assetNames },
+      };
+    },
+    [chatId, locale, assetNames],
+  );
+
+  /**
+   * The branch as a script reads it: all of it — the windows not paged in yet
+   * are read first, and the page keeps them — with the fold's starting point and
+   * the reader's side of things.
+   */
+  const scriptViewOf = useCallback(
+    async (current: ChatState): Promise<ScriptView> => {
+      let whole = current;
+      if (current.hasMore) {
+        whole = await loadWholeBranch(current, (cursor, limit) =>
+          apiGet<ChatState>(`/api/chats/${id}?before=${cursor}&limit=${limit}`),
+        );
+        stateRef.current = whole;
+        setState((latest) => (latest && latest.chat.headMessageId === whole.chat.headMessageId ? whole : latest));
+      }
+      const persona = personas.find((entry) => entry.id === whole.chat.personaId);
+      const afterGreeting = whole.path.length - (whole.path[0] && isGreeting(whole.path[0]) ? 1 : 0);
+      return {
+        messages: whole.path,
+        defaults: defaultVariables,
+        names: foldNames,
+        note: whole.chat.note,
+        persona: persona?.description ?? '',
+        ...(whole.globalVariables ? { globalVariables: whole.globalVariables } : {}),
+        data: scriptData(afterGreeting),
+      };
+    },
+    [id, personas, defaultVariables, foldNames, scriptData],
+  );
+
+  /**
+   * Finishes the reply the server holds `pending`: the `editoutput` scripts and
+   * the output triggers, committed in place. A plot with no scripts left, or an
+   * attempt that took the tab down last time (`finishMark`), keeps the reply as
+   * the model wrote it. A head that moved or changed under the commit is read
+   * again and tried once more; one someone else finished is simply taken.
+   */
+  async function finishPending(
+    current: ChatState,
+    retried = false,
+  ): Promise<{ state: ChatState; followUp: boolean } | null> {
+    const head = current.path[current.path.length - 1];
+    if (!head || head.scriptState !== 'pending') return null;
+    const rev = head.scriptRev ?? 0;
+    finishTried.current.add(`${head.id}:${rev}`);
+    try {
+      if (!runtime || finishMarked(head.id, rev)) {
+        unmarkFinish(head.id, rev);
+        const kept = await apiSend<ChatState>('POST', `/api/chats/${id}/script-commit`, {
+          messageId: head.id,
+          scriptRev: rev,
+          clearPending: true,
+        });
+        return { state: kept, followUp: false };
+      }
+      const view = await scriptViewOf(current);
+      // Marked only around the scripts themselves: a tab closed while the older
+      // windows were still loading did not hang on them.
+      markFinish(head.id, rev);
+      try {
+        return await runtime.finish(view);
+      } finally {
+        unmarkFinish(head.id, rev);
+      }
+    } catch (caught) {
+      if (!(caught instanceof ApiError) || caught.status !== 409) throw caught;
+      const { state: fresh } = await refetch();
+      if (!fresh) throw caught;
+      if (retried || caught.code === 'not_pending') return { state: fresh, followUp: false };
+      return finishPending(mergeRefetched(stateRef.current, fresh), true);
+    }
+  }
+
+  /**
+   * `finishPending`, its answer applied and a follow-up queued. Answers with the
+   * branch as it now stands — `current` when there was nothing to finish or the
+   * finish failed, which it says on the banner.
+   */
+  async function settlePending(current: ChatState): Promise<ChatState> {
+    try {
+      const done = await finishPending(current);
+      if (!done) return current;
+      mergeState(done.state);
+      // RisuAI's `sendAIprompt` asks for the next reply at once. A few in a row at
+      // most: a card that asks every time would otherwise never stop.
+      if (done.followUp && followUpChain.current < MAX_SCRIPT_FOLLOW_UPS) setFollowUp(true);
+      return mergeRefetched(current, done.state);
+    } catch {
+      setError(t('scriptFinishFailed'));
+      return current;
+    }
+  }
+
+  // A pending head that is not this tab's doing — a reload after the tab closed
+  // mid-reply, a swipe onto a pending sibling — is finished as soon as it is seen.
+  useEffect(() => {
+    if (!state || mode || mutating || drawing || scriptsPending || state.chat.importing) return;
+    const head = state.path[state.path.length - 1];
+    if (!head || head.scriptState !== 'pending') return;
+    if (finishTried.current.has(`${head.id}:${head.scriptRev ?? 0}`)) return;
+    if (!beginMutation()) return;
+    void settlePending(state).finally(endMutation);
+    // `settlePending` and the mutation pair are this render's; the effect only
+    // has to run again when one of these moves.
+  }, [state, mode, mutating, drawing, scriptsPending]);
+
+  // The reply a script asked for, once the turn that asked has fully ended. It is
+  // the card taking a turn for the reader, so it waits on the same consent a
+  // component's turn does.
+  useEffect(() => {
+    if (!followUp || mode || mutating || drawing || !state) return;
+    setFollowUp(false);
+    void (async () => {
+      if (!state.chat.allowComponentTurns) {
+        if (!window.confirm(t('scriptFollowUpConsent', { name: characterName }))) return;
+        try {
+          applyState(await apiSend<ChatState>('PATCH', `/api/chats/${id}`, { allowComponentTurns: true }));
+        } catch (caught) {
+          setSettingsError(toMessage(caught));
+          return;
+        }
+      }
+      followUpChain.current += 1;
+      await run('auto', undefined, undefined, true);
+    })();
+  }, [followUp, mode, mutating, drawing, state]);
+
+  /** A `risu-trigger` or `{{button}}` click: the plot's manual triggers of that name, committed on the head. */
+  async function runManualTrigger(name: string, triggerId: string | null): Promise<void> {
+    const current = stateRef.current;
+    if (!runtime || !current || scriptsPending || !beginMutation()) return;
+    try {
+      const next = await runtime.manual(name, triggerId, await scriptViewOf(current));
+      if (next) mergeState(next);
+    } catch (caught) {
+      setError(toMessage(caught));
+    } finally {
+      endMutation();
+    }
+  }
+
+  /**
+   * The messages as the display triggers draw them, where the plot has any —
+   * text for the screen alone, never stored. Over the stored branch and its
+   * fold, so a streamed token redraws none of it.
+   */
+  const scriptShown = useMemo(() => {
+    const shown = new Map<string, string>();
+    if (!runtime?.rewritesDisplay || !customUi || !state) return shown;
+    const persona = personas.find((entry) => entry.id === state.chat.personaId);
+    const view: ScriptView = {
+      messages,
+      defaults: defaultVariables,
+      names: foldNames,
+      note: state.chat.note,
+      persona: persona?.description ?? '',
+      ...(globalVariables ? { globalVariables } : {}),
+      data: scriptData(lastMessageId + 1),
+    };
+    for (const message of messages) {
+      const text = shownGreetings.get(message.id) ?? message.content;
+      const drawn = runtime.display(text, view, persistedVariables);
+      if (drawn !== text) shown.set(message.id, drawn);
+    }
+    return shown;
+  }, [
+    runtime,
+    customUi,
+    state,
+    personas,
+    messages,
+    defaultVariables,
+    foldNames,
+    globalVariables,
+    scriptData,
+    lastMessageId,
+    shownGreetings,
+    persistedVariables,
+  ]);
+
+  async function run(
+    next: StreamMode,
+    content?: string,
+    turnOptions?: SendOptions,
+    /** A reply a script asked for, rather than one the reader did. */
+    scripted = false,
+  ): Promise<void> {
     // A drawn scene holds the same per-chat slot a generation does, so asking for
     // one while the picture is on its way would only come back a 429.
-    if (mode || drawing || mutationRef.current) return;
+    if (mode || drawing || mutationRef.current || scriptsPending) return;
+    if (!scripted) followUpChain.current = 0;
     const headBefore = state?.chat.headMessageId ?? null;
     /** What the branch looked like before, for reading whether the turn landed. */
     const before = { id: headBefore, content: last?.content ?? '' };
@@ -852,6 +1142,56 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     setError('');
     setRetryable(false);
     setAmbiguous(false);
+    setScriptNotice('');
+
+    /** What the reader wrote: what goes back into the composer if the turn never lands. */
+    const typed = content;
+    // The card's scripts go first — the input and start triggers and the input
+    // scripts — and what they decide rides on the request (`lib/scripts`).
+    let scriptBody: Record<string, unknown> = {};
+    let prepared: PreparedGeneration | null = null;
+    if (runtime && state) {
+      try {
+        let current = stateRef.current ?? state;
+        // A reply still owed its output scripts is finished before anything builds
+        // on it — unless this tab already tried and failed, which the request then
+        // says it gives up on (below). A regenerate replaces it, so it waits.
+        const owed = current.path[current.path.length - 1];
+        if (
+          next !== 'regenerate' &&
+          owed?.scriptState === 'pending' &&
+          !finishTried.current.has(`${owed.id}:${owed.scriptRev ?? 0}`)
+        ) {
+          current = await settlePending(current);
+        }
+        const view = await scriptViewOf(current);
+        prepared = await runtime.prepare(next, view, content);
+        if (prepared.state) mergeState(prepared.state);
+        // A head still pending here is one this tab could not finish: the turn
+        // goes on without its output scripts rather than being refused for them.
+        const head = view.messages[view.messages.length - 1];
+        scriptBody = { ...prepared.body, ...(head?.scriptState === 'pending' ? { abandonPending: true } : {}) };
+      } catch (caught) {
+        prepared = null;
+        setError(toMessage(caught));
+      }
+      if (!prepared || prepared.stop) {
+        // Nothing was sent. A send's text goes back where it was written.
+        if (next === 'send') {
+          setInput((current) => (current.trim() ? `${typed ?? ''}\n${current}` : (typed ?? '')));
+          if (prepared?.stop) setScriptNotice(t('scriptStopped'));
+        }
+        abortRef.current = null;
+        reset();
+        setMode(null);
+        setPendingUser('');
+        return;
+      }
+      if (prepared.content !== undefined && next === 'send') {
+        content = prepared.content;
+        setPendingUser(content);
+      }
+    }
 
     let rejection: unknown = null;
     let streamError: string | null = null;
@@ -867,7 +1207,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     try {
       const result = await streamGeneration(
         next === 'send' ? `/api/chats/${id}/messages` : `/api/chats/${id}/${next}`,
-        next === 'send' ? { content, ...turnOptions, ...focusBody } : focusBody,
+        next === 'send'
+          ? { content, ...turnOptions, ...focusBody, ...scriptBody }
+          : focusBody || Object.keys(scriptBody).length > 0
+            ? { ...focusBody, ...scriptBody }
+            : undefined,
         (text) => {
           received += text.length;
           append(text);
@@ -889,6 +1233,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     } catch (caught) {
       rejection = caught;
     }
+    // The stream opened, so the server kept what the scripts rewrote of the work.
+    if (rejection === null) prepared?.accept();
     abortRef.current = null;
     // However it ended, it ended: the pacing gives up whatever it was still
     // holding back before anything decides what the ending meant.
@@ -912,6 +1258,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     // and on a long chat that is less than what the reader has paged in.
     const settled = refreshed.state;
     if (settled) mergeState(settled);
+    // A reply the scripts still owe their output pass is finished before the turn
+    // ends, with the composer still held: until then it is not the reply.
+    if (settled && scriptBundle !== undefined) await settlePending(mergeRefetched(stateRef.current, settled));
 
     /** Whether the turn was written — and so whether its images went with it. */
     let delivered = next === 'send';
@@ -931,7 +1280,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         // The unsent text goes back into the composer — above whatever was
         // typed while it was on its way, never over it.
         if (recovery.kind !== 'delivered') {
-          setInput((current) => (current.trim() ? `${content ?? ''}\n${current}` : (content ?? '')));
+          setInput((current) => (current.trim() ? `${typed ?? ''}\n${current}` : (typed ?? '')));
         }
         setAmbiguous(recovery.kind === 'unknown');
         delivered = recovery.kind === 'delivered';
@@ -1237,7 +1586,12 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       id: message.id,
       role: message.role,
       content: continued ? message.content + streamText : message.content,
-      ...(shownGreetings.has(message.id) ? { shown: shownGreetings.get(message.id)! } : {}),
+      // What the display triggers draw, else the greeting as its conditions decide it.
+      ...(!continued && scriptShown.has(message.id)
+        ? { shown: scriptShown.get(message.id)! }
+        : shownGreetings.has(message.id)
+          ? { shown: shownGreetings.get(message.id)! }
+          : {}),
       attachments: message.attachments,
       createdAt: message.createdAt,
       streaming: continued && mode !== null,
@@ -1306,7 +1660,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    */
   const importing = state.chat.importing === true;
   function submit(): void {
-    if (!input.trim() || mode || drawing || mutationRef.current || attaching || importing) return;
+    if (!input.trim() || mode || drawing || mutationRef.current || attaching || importing || scriptsPending) return;
     // The chip is a way of typing: what is stored is the plain convention, the
     // same one the reader could have written the marks of by hand.
     const content = composeTurn(input, composerMode);
@@ -1318,7 +1672,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const info = last ? state.siblings[last.id] : undefined;
   // A drawn scene takes the same per-chat slot a generation does, so while one is
   // in flight the row of actions is withheld exactly as it is while text streams.
-  const showActions = !mode && !drawing && !mutating && !importing && Boolean(last);
+  const showActions = !mode && !drawing && !mutating && !importing && !scriptsPending && Boolean(last);
   /**
    * The two features the plot turns on and the reader may turn back off. The
    * panel offers a toggle only where the plot asked for the feature at all — a
@@ -1457,10 +1811,20 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           // The bottom padding is for the jump-to-latest pill, which floats over
           // the last line of the conversation when it is showing.
           className="mx-auto w-full max-w-3xl space-y-7 px-5 pt-7 pb-12"
-          // The one thing a display script's button can do: put its text in the
-          // composer. Sending stays the user's decision.
+          // What a button in a message can do: run one of the card's manual
+          // triggers (`risu-trigger`, `{{button}}` naming one) or hand a Lua button
+          // its data (`risu-btn`), or put its text in the composer — sending that
+          // stays the reader's decision.
           onClick={(event) => {
-            const button = (event.target as HTMLElement).closest?.('[data-shizue-fill]');
+            const target = event.target as HTMLElement;
+            const scripted = target.closest?.('[data-shizue-trigger], [data-shizue-btn]');
+            if (scripted) {
+              const name = scripted.getAttribute('data-shizue-trigger');
+              if (name !== null) void runManualTrigger(name, scripted.getAttribute('data-shizue-trigger-id'));
+              else void runtime?.button(scripted.getAttribute('data-shizue-btn') ?? '');
+              return;
+            }
+            const button = target.closest?.('[data-shizue-fill]');
             if (button) setInput(button.getAttribute('data-shizue-fill') ?? '');
           }}
         >
@@ -1748,6 +2112,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             {suggestError}
           </p>
         ) : null}
+        {scriptNotice ? (
+          <p data-testid="script-notice" className="mx-auto max-w-3xl px-5 pt-2 text-xs text-muted" role="status">
+            {scriptNotice}
+          </p>
+        ) : null}
 
         {/* What the reader is about to write: their own line, their 상황묘사, or
             the narrator's. It marks the text on its way out and nothing more —
@@ -1877,7 +2246,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               {t('stop')}
             </Button>
           ) : (
-            <Button className="col-start-4 min-w-24" variant="primary" disabled={!input.trim() || attaching || drawing || mutating || importing} onClick={submit}>
+            <Button className="col-start-4 min-w-24" variant="primary" disabled={!input.trim() || attaching || drawing || mutating || importing || scriptsPending} onClick={submit}>
               {t('send')}
             </Button>
           )}
@@ -1913,6 +2282,10 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             {t('notes')}
           </Button>
         </BottomSheet>
+      ) : null}
+
+      {scriptPrompt ? (
+        <ScriptDialog prompt={scriptPrompt} name={characterName} onDone={() => setScriptPrompt(null)} />
       ) : null}
 
       {/* The whole window is the drop target while a file is over it, so the

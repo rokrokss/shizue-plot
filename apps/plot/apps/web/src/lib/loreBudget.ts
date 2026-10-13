@@ -28,7 +28,10 @@ export function loreBudget(
   members: Pick<PlotMember, 'card' | 'loreConstantTokens'>[],
 ): LoreBudget {
   const constantTokens = members.reduce((sum, member) => sum + member.loreConstantTokens, plotConstantTokens);
-  const explicit = members[0]?.card.loreSettings.tokenBudget;
-  const budget = explicit ?? Math.floor(DEFAULT_CONTEXT_BUDGET * LORE_BUDGET_SHARE);
+  const settings = members[0]?.card.loreSettings;
+  const explicit = settings?.tokenBudget;
+  // A book SillyTavern's migration set a share on takes that share instead.
+  const share = settings?.budgetPercent !== undefined ? settings.budgetPercent / 100 : LORE_BUDGET_SHARE;
+  const budget = explicit ?? Math.floor(DEFAULT_CONTEXT_BUDGET * share);
   return { constantTokens, budget, automatic: explicit === undefined, over: constantTokens > budget };
 }

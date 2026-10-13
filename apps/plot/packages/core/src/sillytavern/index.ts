@@ -7,6 +7,7 @@
  */
 
 import { displayScriptsWithRegexScripts } from '../card/sillyTavern.js';
+import { promptScriptsOfCard } from '../promptScripts.js';
 import type { DisplayScript } from '../types.js';
 
 export * from './zip.js';
@@ -21,4 +22,15 @@ export * from './chat.js';
  */
 export function regexScriptsToDisplayScripts(scripts: unknown[]): DisplayScript[] {
   return displayScriptsWithRegexScripts({ regex_scripts: scripts }, undefined) ?? [];
+}
+
+/**
+ * ST's global regex scripts that alter the outgoing prompt, as ST wrote them —
+ * the ones the prompt runs (`promptScripts.ts`). A plot has no regex of its own
+ * to keep them in, so the migration puts them ahead of its first member's
+ * `regex_scripts`, where the prompt reads a card's and ST runs its global ones
+ * first; that card's export then carries them as the card's own.
+ */
+export function promptRegexScripts(scripts: unknown[]): unknown[] {
+  return scripts.filter((script) => promptScriptsOfCard({ regex_scripts: [script] }).length > 0);
 }

@@ -35,7 +35,7 @@ import {
   type ImportStep,
   type Results,
 } from '../src/lib/sillytavern/import';
-import type { LoreEntry, PlotDetail, PlotMember } from '../src/lib/types';
+import type { LoreEntry, NormalizedCard, PlotDetail, PlotMember } from '../src/lib/types';
 
 // ── the library ─────────────────────────────────────────────────────────────
 
@@ -130,6 +130,7 @@ function fakeApi() {
   const chats = new Map<string, FakeChat>();
   const personas: { id: string; name: string; description: string }[] = [];
   const patches: { plotId: string; body: Record<string, unknown> }[] = [];
+  const memberPatches: { plotId: string; memberId: string; body: Record<string, unknown> }[] = [];
   const uploads: { path: string; file: string; worldInfo: string | null }[] = [];
   const log: string[] = [];
   /** Requests that answer with an error instead, by `METHOD path`, consumed in order. */
@@ -146,7 +147,11 @@ function fakeApi() {
     return {
       id: id('member'),
       name: fileName.replace('.png', ''),
-      card: { lorebook } as unknown as PlotMember['card'],
+      card: {
+        lorebook,
+        loreSettings: { scanDepth: 4, tokenBudget: 900, recursiveScanning: false },
+        extensions: { regex_scripts: ['own'] },
+      } as unknown as PlotMember['card'],
       avatarUrl: null,
       orderIndex: index,
       importedFrom: { fileName, sha256: sha(`characters/${fileName}`), importedAt: '' },
@@ -213,6 +218,15 @@ function fakeApi() {
       plot.characters.push(joined);
       return json(201, joined);
     }
+    const memberMatch = /^PATCH \/api\/plots\/([^/]+)\/characters\/([^/]+)$/.exec(route);
+    if (memberMatch) {
+      const plot = plots.get(memberMatch[1]!);
+      const found = plot?.characters.find((each) => each.id === memberMatch[2]);
+      if (!plot || !found) return json(404, { error: 'no', code: 'not_found' });
+      memberPatches.push({ plotId: plot.id, memberId: found.id, body: read() });
+      Object.assign(found, read());
+      return json(200, found);
+    }
     const plotMatch = /^(GET|PATCH) \/api\/plots\/([^/]+)$/.exec(route);
     if (plotMatch) {
       const plot = plots.get(plotMatch[2]!);
@@ -262,6 +276,7 @@ function fakeApi() {
     chats,
     personas,
     patches,
+    memberPatches,
     uploads,
     log,
     failures,
@@ -310,6 +325,8 @@ function deps(api: Api): ImportDeps & { casts: { members: { name: string; avatar
     lorebookEntries: (json) => (json as { entries: string[] }).entries.map(lore),
     displayScripts: (scripts) =>
       scripts.map((script, order) => ({ in: String(script), out: '', order, enabled: true })),
+    // The stand-in reads a script as prompt-only when it says so in its name.
+    promptScripts: (scripts) => scripts.filter((script) => String(script).startsWith('prompt:')),
   };
 }
 
@@ -1061,5 +1078,46 @@ describe('the picked files', () => {
     const [secrets, card] = guardFiles([file('secrets.json', '{"api_key":"k"}'), file('characters/A.png')]);
     await expect(secrets!.read()).rejects.toThrow();
     await expect(card!.read()).resolves.toBeInstanceOf(Uint8Array);
+  });
+});
+
+describe("runImport - how SillyTavern ran the library", () => {
+  it("puts ST's World Info settings and its global prompt-only scripts on each new plot's first card", async () => {
+    const api = fakeApi();
+    const manifest: StManifest = {
+      ...sample(),
+      globalRegex: ['/x/', 'prompt:a', 'own'],
+      worldInfoSettings: {
+        lore: { scanDepth: 2, budgetPercent: 40, recursiveScanning: true, maxRecursionSteps: 3 },
+        dropped: ['world_info_match_whole_words'],
+      },
+    };
+    const { results } = await runAll(api, manifest, { ...DEFAULT_OPTIONS, globalRegex: true });
+    expect(Object.values(results).every((result) => result.status === 'done')).toBe(true);
+
+    // Alice's plot, Bob's, and the group's, whose first card is Alice's again.
+    expect(api.memberPatches.map((patch) => patch.plotId)).toEqual(['plot-2', 'plot-5', 'plot-8']);
+    for (const { body } of api.memberPatches) {
+      const card = body['card'] as NormalizedCard;
+      // ST never spent a book's own budget, so the card's goes with its other settings.
+      expect(card.loreSettings).toEqual({
+        scanDepth: 2,
+        budgetPercent: 40,
+        recursiveScanning: true,
+        maxRecursionSteps: 3,
+      });
+      // ST runs its global scripts first; one the card already carries is not added again.
+      expect(card.extensions['regex_scripts']).toEqual(['prompt:a', 'own']);
+    }
+    // The display-only one went where it always has, onto the plot.
+    expect(
+      (api.patches[0]!.body['customUi'] as { displayScripts: { in: string }[] }).displayScripts.map((one) => one.in),
+    ).toEqual(['card', '/x/', 'prompt:a', 'own']);
+  });
+
+  it('leaves the cards alone without a settings file and without the global regex', async () => {
+    const api = fakeApi();
+    await runAll(api, { ...sample(), globalRegex: ['prompt:a'] }, DEFAULT_OPTIONS);
+    expect(api.memberPatches).toEqual([]);
   });
 });

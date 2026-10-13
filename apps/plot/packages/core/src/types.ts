@@ -1,6 +1,33 @@
 export type CardSpec = 'v1' | 'v2' | 'v3';
 
-export type LorePosition = 'before_char' | 'after_char';
+/**
+ * Where an entry that is not injected at a depth goes. The first two are the
+ * system string, around the cast; the rest are SillyTavern's World Info
+ * positions, which its cards and World Info files carry as numbers: around the
+ * author's note (2 and 3 there), around the example dialogue (5 and 6), and an
+ * outlet (7) — text that goes nowhere by itself and stands in for a
+ * `{{outlet::name}}` macro wherever the prompt's text writes one
+ * (`LoreEntry.outletName`).
+ */
+export type LorePosition =
+  | 'before_char'
+  | 'after_char'
+  | 'before_author_note'
+  | 'after_author_note'
+  | 'before_examples'
+  | 'after_examples'
+  | 'outlet';
+
+/** Every position an entry may take; anything else reads as `before_char`. */
+export const LORE_POSITIONS: readonly LorePosition[] = [
+  'before_char',
+  'after_char',
+  'before_author_note',
+  'after_author_note',
+  'before_examples',
+  'after_examples',
+  'outlet',
+];
 
 /** Role of a depth-injected lore entry (V3 `@@role`). */
 export type LoreRole = 'user' | 'assistant' | 'system';
@@ -23,6 +50,12 @@ export interface LoreEntry {
   /** V3: interpret keys as regular expressions. */
   useRegex: boolean;
   position: LorePosition;
+  /**
+   * The outlet an `outlet` entry fills — what `{{outlet::name}}` names. Only set
+   * with that position; an outlet entry without one is never sent, as in
+   * SillyTavern.
+   */
+  outletName?: string;
   /**
    * V3 `@@depth N`: inject the entry into the history, N messages from the end,
    * instead of into the system block. Undefined for system-block entries.
@@ -64,8 +97,21 @@ export interface LoreSettings {
    * context budget (`LORE_BUDGET_SHARE`), so the lore grows with the room it has.
    */
   tokenBudget?: number;
+  /**
+   * The automatic budget's share of the context, in percent, where it is not the
+   * default quarter (`LORE_BUDGET_SHARE`) — SillyTavern's global
+   * `world_info_budget`, which its migration carries over. Absent is the default
+   * share; `tokenBudget`, when the card names one, wins over both.
+   */
+  budgetPercent?: number;
   /** V3 `recursive_scanning`: rescan with the activated content added to the scan text. */
   recursiveScanning: boolean;
+  /**
+   * How many scans a recursive activation may run in all, the first included —
+   * SillyTavern's global `world_info_max_recursion_steps`, so 1 is no recursion
+   * at all. Absent is unbounded, up to the engine's own ceiling.
+   */
+  maxRecursionSteps?: number;
   /**
    * Plain keys matched the way RisuAI matches them: case and spaces ignored on
    * both sides (`마왕 성` finds `마왕성`), whatever an entry's `caseSensitive`

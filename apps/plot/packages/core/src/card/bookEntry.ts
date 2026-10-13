@@ -181,9 +181,29 @@ const ST_LOGIC_NUMBER: Record<LoreSelectiveLogic, number> = {
   and_all: 3,
 };
 
-/** `world_info_position`: 0 before char, 1 after char, 4 at depth; the rest have no counterpart. */
-const ST_BEFORE = 0;
-const ST_AFTER = 1;
+/**
+ * `world_info_position`, as `LorePosition`: 0 before and 1 after the character,
+ * 2 and 3 around the author's note, 5 and 6 around the example dialogue, and 7
+ * an outlet. 4 is at a depth, which is `LoreEntry.depth` rather than a position.
+ */
+const ST_POSITIONS: Record<number, LorePosition> = {
+  0: 'before_char',
+  1: 'after_char',
+  2: 'before_author_note',
+  3: 'after_author_note',
+  5: 'before_examples',
+  6: 'after_examples',
+  7: 'outlet',
+};
+const ST_POSITION_NUMBER: Record<LorePosition, number> = {
+  before_char: 0,
+  after_char: 1,
+  before_author_note: 2,
+  after_author_note: 3,
+  before_examples: 5,
+  after_examples: 6,
+  outlet: 7,
+};
 const ST_AT_DEPTH = 4;
 /** ST's `DEFAULT_DEPTH`, which is also the depth an at-depth entry with none gets. */
 const ST_DEFAULT_DEPTH = 4;
@@ -217,6 +237,7 @@ export interface SillyTavernFields {
   sticky?: unknown;
   cooldown?: unknown;
   delay?: unknown;
+  outletName?: unknown;
 }
 
 /** The same settings as a character_book entry's `extensions` spells them. */
@@ -233,6 +254,7 @@ const fieldsOfBookExtensions = (extensions: Json): SillyTavernFields => ({
   sticky: extensions['sticky'],
   cooldown: extensions['cooldown'],
   delay: extensions['delay'],
+  outletName: extensions['outlet_name'],
 });
 
 /**
@@ -243,14 +265,17 @@ const fieldsOfBookExtensions = (extensions: Json): SillyTavernFields => ({
 function loreFieldsOfSillyTavern(fields: SillyTavernFields): Partial<LoreEntry> {
   const out: Partial<LoreEntry> = {};
 
+  // A position ST has no number for (none yet) reads as before the character.
   const position = finite(fields.position);
-  if (position === ST_AFTER) out.position = 'after_char';
-  else if (position !== undefined) out.position = 'before_char';
+  if (position !== undefined) out.position = ST_POSITIONS[position] ?? 'before_char';
   if (position === ST_AT_DEPTH) {
     out.depth = wholeCount(fields.depth) ?? ST_DEFAULT_DEPTH;
     const role = roleFromSillyTavern(fields.role);
     if (role) out.role = role;
   }
+  // An outlet without a name is one no macro can name, which ST never sends.
+  const outlet = typeof fields.outletName === 'string' ? fields.outletName.trim() : '';
+  if (out.position === 'outlet' && outlet) out.outletName = outlet;
 
   const logic = ST_LOGIC[finite(fields.selectiveLogic) ?? 0];
   if (logic && logic !== 'and_any') out.selectiveLogic = logic;
@@ -375,7 +400,7 @@ function assemble(
   decorators: LoreDecorators,
   sillyTavern: Partial<LoreEntry>,
 ): LoreEntry {
-  const { position: stPosition, depth: stDepth, role: stRole, ...stRest } = sillyTavern;
+  const { position: stPosition, depth: stDepth, role: stRole, outletName, ...stRest } = sillyTavern;
   let position = base.position;
   let depth: number | undefined;
   let role: LoreRole | undefined;
@@ -397,6 +422,8 @@ function assemble(
     enabled: decorators.force === 'deactivate' ? false : base.enabled,
     constant: decorators.force === 'activate' || (decorators.constant ?? base.constant),
     position,
+    // The outlet's name only means something while the entry is an outlet.
+    ...(position === 'outlet' && outletName ? { outletName } : {}),
     ...(depth === undefined ? {} : { depth }),
     ...(depth !== undefined && role ? { role } : {}),
     ...stRest,
@@ -525,13 +552,13 @@ interface SillyTavernOut {
   sticky?: number;
   cooldown?: number;
   delay?: number;
+  outletName?: string;
 }
 
 /** ST's settings for one entry, under the World Info names; the caller renames for a book. */
 function sillyTavernFieldsOf(entry: LoreEntry): SillyTavernOut {
   return {
-    position:
-      entry.depth !== undefined ? ST_AT_DEPTH : entry.position === 'after_char' ? ST_AFTER : ST_BEFORE,
+    position: entry.depth !== undefined ? ST_AT_DEPTH : ST_POSITION_NUMBER[entry.position] ?? 0,
     depth: entry.depth ?? ST_DEFAULT_DEPTH,
     role: ST_ROLES.indexOf(entry.role ?? 'system'),
     selectiveLogic: ST_LOGIC_NUMBER[entry.selectiveLogic ?? 'and_any'],
@@ -545,6 +572,8 @@ function sillyTavernFieldsOf(entry: LoreEntry): SillyTavernOut {
     ...(entry.sticky !== undefined ? { sticky: entry.sticky } : {}),
     ...(entry.cooldown !== undefined ? { cooldown: entry.cooldown } : {}),
     ...(entry.delay !== undefined ? { delay: entry.delay } : {}),
+    // Written for an outlet only, so every other entry exports as it always has.
+    ...(entry.depth === undefined && entry.position === 'outlet' ? { outletName: entry.outletName ?? '' } : {}),
   };
 }
 
@@ -561,11 +590,12 @@ export function keysForSillyTavern(entry: LoreEntry): { keys: string[]; secondar
  * case only from there.
  */
 export function bookExtensionsOf(entry: LoreEntry): Record<string, unknown> {
-  const { groupWeight, scanDepth, ...fields } = sillyTavernFieldsOf(entry);
+  const { groupWeight, scanDepth, outletName, ...fields } = sillyTavernFieldsOf(entry);
   return {
     ...fields,
     group_weight: groupWeight,
     ...(scanDepth !== undefined ? { scan_depth: scanDepth } : {}),
+    ...(outletName !== undefined ? { outlet_name: outletName } : {}),
     case_sensitive: entry.caseSensitive,
   };
 }

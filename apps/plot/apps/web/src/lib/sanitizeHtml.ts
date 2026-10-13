@@ -66,6 +66,24 @@ const ALLOWED_ATTR = [
   // `<ol start>` from markdown; `<font color face size>` and `align` from cards.
   'start', 'color', 'face', 'size', 'align',
   'data-shizue-fill',
+  // RisuAI's script buttons, under their own names for the first pass and under
+  // ours after it (`SCRIPT_ATTRIBUTES`).
+  'risu-trigger', 'risu-id', 'risu-btn',
+  'data-shizue-trigger', 'data-shizue-trigger-id', 'data-shizue-btn',
+];
+
+/**
+ * RisuAI's script attributes and the names they are kept under. `risu-trigger`
+ * names a manual trigger a click runs, `risu-id` is what that run reads as
+ * `{{trigger_id}}`, and `risu-btn` is a Lua button's data. Each is only a word
+ * the chat page reads on a click (`lib/scripts`): it names one of the creator's
+ * own scripts and runs nothing by itself, so it is kept — renamed into our
+ * namespace, so nothing but the page's one delegated handler reads it.
+ */
+const SCRIPT_ATTRIBUTES: readonly (readonly [string, string])[] = [
+  ['risu-trigger', 'data-shizue-trigger'],
+  ['risu-id', 'data-shizue-trigger-id'],
+  ['risu-btn', 'data-shizue-btn'],
 ];
 
 const KEPT_TAGS: ReadonlySet<string> = new Set(ALLOWED_TAGS);
@@ -76,12 +94,12 @@ export const keepsElement = (tag: string): boolean => KEPT_TAGS.has(tag.toLowerC
 const PURIFY_CONFIG = {
   ALLOWED_TAGS,
   ALLOWED_ATTR,
-  // Only the one data attribute the button bridge reads gets through.
+  // Only the data attributes the button bridge reads get through.
   ALLOW_DATA_ATTR: false,
   ALLOW_UNKNOWN_PROTOCOLS: false,
-  // Its value is free text (a message to put in the composer), not a URL, so it
-  // must not be measured against the URI whitelist.
-  ADD_URI_SAFE_ATTR: ['data-shizue-fill'],
+  // Their values are free text (a message to put in the composer, a trigger's
+  // name), not URLs, so they must not be measured against the URI whitelist.
+  ADD_URI_SAFE_ATTR: ['data-shizue-fill', ...SCRIPT_ATTRIBUTES.flat()],
   RETURN_DOM: false as const,
   RETURN_DOM_FRAGMENT: false as const,
 };
@@ -380,6 +398,13 @@ function rewriteElement(element: Element): void {
     }
   }
 
+  for (const [risu, ours] of SCRIPT_ATTRIBUTES) {
+    const value = element.getAttribute(risu);
+    if (value === null) continue;
+    element.removeAttribute(risu);
+    element.setAttribute(ours, value);
+  }
+
   const classes = element.getAttribute('class');
   if (classes !== null) {
     const folded = classes.split(/\s+/).filter(Boolean).map(foldClass).join(' ');
@@ -429,7 +454,7 @@ function rewriteElement(element: Element): void {
   }
 
   // A button never submits: forms cannot survive the whitelist, and the chat page
-  // is the only thing that reads `data-shizue-fill`.
+  // is the only thing that reads `data-shizue-fill` and the script attributes.
   if (tag === 'button') element.setAttribute('type', 'button');
 }
 

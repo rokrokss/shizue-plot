@@ -4,6 +4,7 @@ import {
   creatorCssFromExtensions,
   DEFAULT_LORE_SETTINGS,
   displayScriptPatternError,
+  LORE_POSITIONS,
   emptyCard,
   emptyVariables,
   MAX_COMPONENT_CODE_LENGTH,
@@ -13,6 +14,7 @@ import {
   type ComponentCapability,
   type DisplayScript,
   type LoreEntry,
+  type LorePosition,
   type LoreSelectiveLogic,
   type NormalizedCard,
   type PlotCustomUi,
@@ -29,6 +31,12 @@ const strArray = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 
 const SELECTIVE_LOGICS: readonly LoreSelectiveLogic[] = ['and_any', 'and_all', 'not_any', 'not_all'];
+
+/** `{ [key]: n }` for a number the client sent, rounded into `min`–`max`; nothing otherwise. */
+const wholeIn = <K extends string>(value: unknown, min: number, max: number, key: K): Partial<Record<K, number>> =>
+  typeof value === 'number' && Number.isFinite(value)
+    ? ({ [key]: Math.min(max, Math.max(min, Math.round(value))) } as Partial<Record<K, number>>)
+    : {};
 
 /**
  * The advanced activation fields, each only where the client sent one: absent
@@ -57,11 +65,18 @@ function coerceLoreActivation(raw: Record<string, unknown>): Partial<LoreEntry> 
   };
 }
 
+/** An outlet's name — what `{{outlet::name}}` reads — a label rather than a sentence. */
+const MAX_OUTLET_NAME_LENGTH = 100;
+
 function coerceLoreEntry(value: unknown): LoreEntry {
   const raw = (value ?? {}) as Record<string, unknown>;
   const depth = num(raw['depth'], -1);
   const role = raw['role'];
   const name = str(raw['name']).trim();
+  const position = LORE_POSITIONS.includes(raw['position'] as LorePosition)
+    ? (raw['position'] as LorePosition)
+    : 'before_char';
+  const outletName = str(raw['outletName']).trim().slice(0, MAX_OUTLET_NAME_LENGTH);
   return {
     ...(name ? { name } : {}),
     keys: strArray(raw['keys']),
@@ -73,7 +88,9 @@ function coerceLoreEntry(value: unknown): LoreEntry {
     insertionOrder: num(raw['insertionOrder'], 0),
     caseSensitive: bool(raw['caseSensitive'], false),
     useRegex: bool(raw['useRegex'], false),
-    position: raw['position'] === 'after_char' ? 'after_char' : 'before_char',
+    position,
+    // The name only means something on an outlet.
+    ...(position === 'outlet' && outletName ? { outletName } : {}),
     // role only means something on a depth-injected entry.
     ...(depth >= 0
       ? {
@@ -295,7 +312,9 @@ export function coerceCard(value: unknown, fallbackName: string): NormalizedCard
       scanDepth: num(lore['scanDepth'], DEFAULT_LORE_SETTINGS.scanDepth),
       // Absent is the automatic budget, so only a number the client sent is kept.
       ...(typeof tokenBudget === 'number' && Number.isFinite(tokenBudget) ? { tokenBudget } : {}),
+      ...wholeIn(lore['budgetPercent'], 1, 100, 'budgetPercent'),
       recursiveScanning: bool(lore['recursiveScanning'], DEFAULT_LORE_SETTINGS.recursiveScanning),
+      ...wholeIn(lore['maxRecursionSteps'], 1, 1000, 'maxRecursionSteps'),
       ...(lore['risuMatching'] === true ? { risuMatching: true } : {}),
     },
     ...(displayScripts.length > 0 ? { displayScripts } : {}),

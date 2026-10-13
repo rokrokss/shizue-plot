@@ -5,15 +5,17 @@
  *
  * What leaves the browser is exactly what the API calls below send: the chosen
  * card files and their linked World Info files, the extra lorebook entries and
- * display scripts converted here, persona names and descriptions, and the chats
- * converted to our message shape in batches — with each chat's variables, its
- * author's note and the entries of the World Info file bound to it. The scan's own inputs —
- * `settings.json`, the rest of the backup — are never part of a request.
+ * display scripts converted here, each new plot's first card again with ST's
+ * World Info settings and its global prompt-only regex scripts on it, persona
+ * names and descriptions, and the chats converted to our message shape in
+ * batches — with each chat's variables, its author's note and the entries of the
+ * World Info file bound to it. The scan's own inputs — `settings.json`, the rest
+ * of the backup — are never part of a request.
  *
  * Every API call goes through the injected `fetch`, and the core converters come
  * in through `ImportDeps`, so the whole flow runs in a test without a server.
  */
-import type { DisplayScript, ImportedChatMessage, LoreEntry } from '@shizue/core';
+import type { DisplayScript, ImportedChatMessage, LoreEntry, NormalizedCard } from '@shizue/core';
 import {
   FileTooLargeError,
   stNoteKeepsPlace,
@@ -25,6 +27,7 @@ import {
   type StGroup,
   type StManifest,
   type StPersona,
+  type StWorldInfoSettings,
 } from '@shizue/core/sillytavern';
 import { ApiError, toApiError } from '../api';
 import {
@@ -576,10 +579,12 @@ export interface ImportDeps {
   lorebookEntries: (json: unknown) => LoreEntry[];
   /** `regexScriptsToDisplayScripts`. */
   displayScripts: (scripts: unknown[]) => DisplayScript[];
+  /** `promptRegexScripts`. */
+  promptScripts: (scripts: unknown[]) => unknown[];
 }
 
 export interface RunInput {
-  manifest: Pick<StManifest, 'worlds' | 'globalWorlds' | 'globalRegex'>;
+  manifest: Pick<StManifest, 'worlds' | 'globalWorlds' | 'globalRegex' | 'worldInfoSettings'>;
   steps: ImportStep[];
   options: ImportOptions;
   /**
@@ -600,6 +605,8 @@ interface RunContext extends RunInput {
   /** Parsed World Info files, read once per run however many plots take them. */
   worlds: Map<string, Promise<LoreEntry[]>>;
   globalScripts: DisplayScript[] | null;
+  /** The global regex scripts that alter the prompt, as ST wrote them; read once per run. */
+  globalPromptScripts: unknown[] | null;
   /** Set once the API says the reader has no model to start a chat on. */
   chatsBlocked: ApiError | null;
 }
@@ -703,10 +710,42 @@ function worldEntries(ctx: RunContext, name: string, file: StFile): Promise<Lore
 }
 
 /**
+ * The first member's card as SillyTavern ran it. Its book takes ST's global World
+ * Info settings — ST reads those rather than a book's own, so a token budget the
+ * card names goes too, ST never having spent it — and the global prompt-only
+ * regex scripts go ahead of the card's own, where the prompt reads a card's and
+ * ST runs its global ones first. A script the card already carries is not added
+ * again.
+ */
+export function cardAsSillyTavernRan(
+  card: NormalizedCard,
+  lore: StWorldInfoSettings['lore'] | undefined,
+  scripts: unknown[],
+): NormalizedCard {
+  const next = { ...card };
+  if (lore) {
+    const { tokenBudget: _budget, budgetPercent: _share, maxRecursionSteps: _steps, ...own } = card.loreSettings;
+    next.loreSettings = { ...own, ...lore };
+  }
+  if (scripts.length > 0) {
+    const extensions = card.extensions ?? {};
+    const own = Array.isArray(extensions['regex_scripts']) ? (extensions['regex_scripts'] as unknown[]) : [];
+    const known = new Set(own.map((script) => JSON.stringify(script)));
+    next.extensions = {
+      ...extensions,
+      regex_scripts: [...scripts.filter((script) => !known.has(JSON.stringify(script))), ...own],
+    };
+  }
+  return next;
+}
+
+/**
  * What a new plot takes after its cards: the extra and global lorebooks appended
  * to its own, the global regex scripts appended to its display scripts, and — for
- * a group — the group's name. One PATCH, and its failure is the plot's warning,
- * not its end: the cast is in and the chats can still come.
+ * a group — the group's name, in one PATCH; then, in a second, its first card as
+ * SillyTavern ran it (`cardAsSillyTavernRan`) — the card a plot's lore settings
+ * are read from. A failure is the plot's warning, not its end: the cast is in and
+ * the chats can still come.
  */
 async function applyExtras(
   ctx: RunContext,
@@ -751,12 +790,30 @@ async function applyExtras(
       displayScripts: [...(plot.customUi?.displayScripts ?? []), ...scripts],
     };
   }
-  if (Object.keys(patch).length === 0) return warnings;
-  try {
-    await request<PlotDetail>(ctx, 'PATCH', `/api/plots/${plot.id}`, patch);
-  } catch (caught) {
-    ctx.signal?.throwIfAborted();
-    warnings.push({ code: 'extras_failed', error: asApiError(caught) });
+  if (Object.keys(patch).length > 0) {
+    try {
+      await request<PlotDetail>(ctx, 'PATCH', `/api/plots/${plot.id}`, patch);
+    } catch (caught) {
+      ctx.signal?.throwIfAborted();
+      warnings.push({ code: 'extras_failed', error: asApiError(caught) });
+    }
+  }
+
+  if (ctx.options.globalRegex && ctx.globalPromptScripts === null) {
+    ctx.globalPromptScripts = ctx.deps.promptScripts(ctx.manifest.globalRegex);
+  }
+  const promptScripts = ctx.options.globalRegex ? (ctx.globalPromptScripts ?? []) : [];
+  const lore = ctx.manifest.worldInfoSettings?.lore;
+  const first = plot.characters[0];
+  if (first && (lore || promptScripts.length > 0)) {
+    try {
+      await request<PlotMember>(ctx, 'PATCH', `/api/plots/${plot.id}/characters/${first.id}`, {
+        card: cardAsSillyTavernRan(first.card, lore, promptScripts),
+      });
+    } catch (caught) {
+      ctx.signal?.throwIfAborted();
+      warnings.push({ code: 'extras_failed', error: asApiError(caught) });
+    }
   }
   return warnings;
 }
@@ -1100,6 +1157,7 @@ export async function runImport(
     results,
     worlds: new Map(),
     globalScripts: null,
+    globalPromptScripts: null,
     chatsBlocked: null,
   };
 

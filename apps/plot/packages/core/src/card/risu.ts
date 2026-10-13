@@ -20,14 +20,10 @@
  */
 
 import { displayScriptPatternError } from '../displayScript.js';
+import { compiledScriptFlags, parseScriptFlag } from '../promptScripts.js';
 import { parseDefaultVariables, serializeDefaultVariables, type Variables } from '../variables.js';
 import type { DisplayScript, DisplayScriptAction } from '../types.js';
 
-/**
- * `<move_top>`, `<order 3>`, `<move_top, order 3>`, `<cbs>`, … — a bracketed group
- * of directives inside the flag field, RisuAI's own pattern for it.
- */
-const FLAG_DIRECTIVE = /<(.+?)>/g;
 /** `@@move_top` — the same directives as older cards write them, inside `out`. */
 const OUT_ACTION = /@@(move_top|move_bottom|repeat_back)\b/i;
 /**
@@ -42,62 +38,12 @@ const OUT_ORDER = /<order[ \t]+(-?\d+)>/i;
  * said `move_bottom`; `repeat_back` only acts when there is no match at all. A
  * script here takes one action, so a script that names a move and `repeat_back`
  * keeps the move.
+ *
+ * The flag field's directives and the flags RisuAI compiles are read by the
+ * rules the prompt's `editprocess` scripts share (`parseScriptFlag`,
+ * `compiledScriptFlags` in `promptScripts.ts`).
  */
 const ACTIONS: readonly DisplayScriptAction[] = ['move_top', 'move_bottom', 'repeat_back'];
-
-/**
- * Takes the directives out of the flag field the way RisuAI does, and answers with
- * what they said and what is left of the field.
- *
- * Every `<…>` is cut out and split on commas, so `<move_top, order 3>` is two
- * directives — read as one, its letters leaked into the flags (`m`, `v`, `d`). An
- * `order N` sets the order, the last one written winning; anything else is an
- * action, matched exactly, case and all, because RisuAI looks for `move_top` and
- * nothing else. One it has no use for (`<cbs>`) is simply gone, rather than
- * mistaken for flag letters — the reason the directives come out first. RisuAI
- * looks for them only when the field has a `<` in it.
- */
-function parseFlagField(flag: string): { rest: string; actions: string[]; order?: number } {
-  const actions: string[] = [];
-  if (!flag.includes('<')) return { rest: flag, actions };
-  let order: number | undefined;
-
-  const rest = flag.replace(FLAG_DIRECTIVE, (_group, inner: string) => {
-    for (const directive of inner.split(',').map((part) => part.trim())) {
-      // RisuAI's `parseInt`: `order x` is NaN there too, and sorts as a tie.
-      if (directive.startsWith('order ')) order = Number.parseInt(directive.slice(6));
-      else actions.push(directive);
-    }
-    return '';
-  });
-
-  return { rest, actions, ...(order !== undefined ? { order } : {}) };
-}
-
-/**
- * The flags RisuAI compiles the pattern with, which is also what decides how many
- * matches the script rewrites — with a `g` every one, without it the first. So it
- * is worked out the way RisuAI works it out, from what is left of the field once
- * the directives are out (`rest`, empty when `ableFlag` is off and nothing is read):
- *
- *   - a field that says nothing is `g`;
- *   - a move takes the first `g` out again — RisuAI's own "temporary fix" — so a
- *     moved script lifts its first match only, and the rest stay where they were;
- *   - anything that is not a flag letter goes, and so do repeats;
- *   - and a field with nothing left is `u`.
- *
- * Undefined for the first case alone: a plain `g` the field never asked for is
- * RisuAI's default and ours alike, so there is nothing to store. Everything else is
- * stored as RisuAI reads it — the display transform reads a stored set without `g`
- * as RisuAI does, and runs the pattern under the `u` it got.
- */
-function compiledFlags(rest: string, move: boolean): string | undefined {
-  let flag = rest || 'g';
-  if (move) flag = flag.replace('g', '');
-  flag = [...new Set(flag.trim().replace(/[^dgimsuvy]/g, ''))].join('');
-  if (!flag) flag = 'u';
-  return !rest && flag === 'g' ? undefined : flag;
-}
 
 /** Reads the action an older card puts in `out`, and returns the template without its directives. */
 function parseOutDirectives(out: string): { action?: DisplayScriptAction; template: string } {
@@ -122,7 +68,7 @@ function toDisplayScript(raw: Record<string, unknown>): Unplaced | null {
   // plain global match, and a directive in the field is as dead as the letters
   // around it: the creator saw it render in place, in list order.
   const flag = typeof raw['flag'] === 'string' ? raw['flag'] : '';
-  const fromFlag = parseFlagField(raw['ableFlag'] === true ? flag : '');
+  const fromFlag = parseScriptFlag(raw['ableFlag'] === true ? flag : '');
 
   // RisuAI stores the template with escaped newlines.
   const out = typeof raw['out'] === 'string' ? raw['out'].replaceAll('\\n', '\n') : '';
@@ -132,7 +78,7 @@ function toDisplayScript(raw: Record<string, unknown>): Unplaced | null {
   const named: string[] = [...fromFlag.actions, ...(fromOut.action ? [fromOut.action] : [])];
   const action = ACTIONS.find((candidate) => named.includes(candidate));
   // An `@@move_top` in `out` takes the `g` away even with ableFlag off.
-  const flags = compiledFlags(fromFlag.rest, action === 'move_top' || action === 'move_bottom');
+  const flags = compiledScriptFlags(fromFlag.rest, action === 'move_top' || action === 'move_bottom');
 
   return {
     script: {

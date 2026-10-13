@@ -44,6 +44,7 @@ import {
   type Character,
   type Chat,
   type ChatAttachment,
+  type ChatScriptOverlay,
   type ChatMemorySettings,
   type Message,
   type MessageRole,
@@ -52,6 +53,7 @@ import {
   type Plot,
 } from '@shizue/db';
 import { getModel } from '@shizue/llm';
+import { overlaidCard, scriptedMember, type ScriptOverlay } from '@shizue/core/triggers';
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { randomUUID } from 'node:crypto';
@@ -98,10 +100,15 @@ import { drawSceneEnabled, generateSceneImage, sceneImagePrompt } from '../scene
 import {
   headMoved,
   loadGlobalVariables,
+  mergedOverlay,
   mergeGlobalVariables,
   NO_SCRIPTS,
+  optionalScriptNote,
   optionalVariableDelta,
+  overlayOf,
   readGenerationScripts,
+  readOverlay,
+  saveScriptWrites,
   scriptRevMoved,
   storableDelta,
   type GenerationScripts,
@@ -533,10 +540,21 @@ async function loadPersona(deps: AppDeps, chat: Chat): Promise<Persona | null> {
   return persona ?? null;
 }
 
-/** Plot, roster, persona and branch history — what every generation mode needs. */
+/**
+ * Plot, roster, persona and branch history — what every generation mode needs.
+ *
+ * The chat's script overlay is laid over the work here (`chats.script_overlay`,
+ * `ScriptOverlay` in @shizue/core): what the card's scripts rewrote of a member's
+ * card or of the reader's persona is what this chat's prompt reads, while the
+ * plot and the persona rows stay as they are. A generation whose own scripts
+ * just rewrote something brings it as `scripts` and reads it already — RisuAI's
+ * input and start triggers run before its prompt is built — and the route keeps
+ * it once the request has passed its checks (`keepScriptWrites`).
+ */
 async function loadGenerationContext(
   deps: AppDeps,
   chat: Chat,
+  scripts: Pick<GenerationScripts, 'overlay' | 'note'> = NO_SCRIPTS,
 ): Promise<{
   plot: PromptPlot;
   /** The whole roster, the members the reader sent off the stage marked absent. */
@@ -555,6 +573,8 @@ async function loadGenerationContext(
   fold: FoldOptions;
   /** The reader's global variables on this plot. */
   globalVariables: Variables;
+  /** The chat's script overlay with this request's rewrites laid over it. */
+  overlay: ScriptOverlay | null;
   all: Message[];
 }> {
   // Re-checked on every generation, not just at chat creation: unpublishing a
@@ -563,28 +583,49 @@ async function loadGenerationContext(
   // In the creator's order, which is the order the prompt blocks are written in.
   const members = await loadMembers(deps.db, row.id);
   const absent = new Set(chat.absentCharacterIds ?? []);
+  const overlay = mergedOverlay(chat, scripts.overlay, new Set(members.map((member) => member.id)));
+  const rewritten = overlay?.members
+    ? members.map((member) => ({ ...member, card: overlaidCard(member.card, overlay.members?.[member.id]) }))
+    : members;
 
   const persona = await loadPersona(deps, chat);
   return {
     // Crossed with this chat's own toggles: the style the assembler compiles is
     // the creator's, minus the two features this reader turned off.
     plot: toPromptPlot(row, chat),
-    characters: toPromptCharacters(members, absent),
+    characters: toPromptCharacters(rewritten, absent),
     onStage: members.filter((member) => !absent.has(member.id)),
     row,
-    personaText: persona?.description ?? '',
+    personaText: overlay?.persona ?? persona?.description ?? '',
     userName: persona?.name ?? DEFAULT_USER_NAME,
     // The narrator in force: the chat's own if it set one, the plot's
     // otherwise. Whole rather than field by field — a reader who overrides the
     // voice is describing a narrator, not patching the creator's.
     narrator: chat.narrator ?? row.narrator ?? undefined,
-    // The chat's own note plus the reusable notes attached to it.
-    authorNote: await loadAuthorNote(deps, chat),
+    // The chat's own note plus the reusable notes attached to it — the note as
+    // this request's scripts left it, when they rewrote it.
+    authorNote: await loadAuthorNote(deps, scripts.note === undefined ? chat : { ...chat, note: scripts.note }),
     assetNames: await openAssetNames(deps, chat),
     fold: foldOptionsOf(row.name, persona),
     globalVariables: await loadGlobalVariables(deps, chat.userId, chat.plotId),
+    overlay,
     all: await loadMessages(deps, chat.id),
   };
+}
+
+/**
+ * Keeps what a generation's scripts rewrote — the overlay the context was built
+ * with, and the note — once the request has passed the head checks. Before any
+ * other write of the turn, so a turn that fails part-way still leaves the work as
+ * its scripts left it, as RisuAI's rewrite of the card would stand.
+ */
+async function keepScriptWrites(
+  deps: AppDeps,
+  chat: Chat,
+  context: { overlay: ScriptOverlay | null },
+  scripts: Pick<GenerationScripts, 'overlay' | 'note'>,
+): Promise<void> {
+  await saveScriptWrites(deps, chat.id, context.overlay, scripts.note, scripts.overlay !== null);
 }
 
 const toHistory = (path: Message[]): HistoryMessage[] =>
@@ -1073,12 +1114,13 @@ async function regeneratePlan(
   scripts: GenerationScripts = NO_SCRIPTS,
 ): Promise<GenerationPlan> {
   await requireEnabledModel(deps, chat.userId, chat.model);
-  const context = await loadGenerationContext(deps, chat);
+  const context = await loadGenerationContext(deps, chat, scripts);
   const focusNames = focusNamesOf(context.onStage, focusIds);
   const path = buildPath(context.all, chat.headMessageId);
   const head = path[path.length - 1];
   if (!head) throw badRequest('invalid_state', 'The chat has no messages to generate from');
   await settleHead(deps, chat, head, scripts, false);
+  await keepScriptWrites(deps, chat, context, scripts);
 
   // An assistant head is replaced by a sibling; a user head (edit fork, or a
   // failed generation) gets a fresh assistant child instead.
@@ -1746,11 +1788,60 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   });
 
   /**
+   * What the reader's browser runs for this chat: the triggers and the
+   * `editinput`/`editoutput` regex scripts of the plot's scripted member (the
+   * first in roster order that carries any — `scriptedMember`), and the parts of
+   * that member's card the scripts may read — its description and the rest of its
+   * character text, its lorebook, its post-history instructions — with what this
+   * chat's overlay rewrote of them beside it.
+   *
+   * This is the one place a reader receives a member's card internals, and only
+   * for a plot that carries scripts: RisuAI's scripts read the card they belong
+   * to, so a card that plays in RisuAI has to be able to read it here too. The
+   * creator is told so when they publish such a plot. Everything else a reader
+   * gets of the work stays as it was — `{ scripts: null }` for a plot without.
+   */
+  app.get('/:id/scripts', async (c) => {
+    const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
+    // The same gate as generating: a plot withdrawn from the reader runs nothing.
+    const plot = await loadVisiblePlot(deps.db, chat.plotId, chat.userId);
+    const found = scriptedMember(await loadMembers(deps.db, plot.id));
+    if (!found) return c.json({ scripts: null });
+    const { member, scripts } = found;
+    const card = member.card;
+    const overlay = overlayOf(chat);
+    return c.json({
+      scripts: {
+        memberId: member.id,
+        // `{{char}}` in a card's own text: its nickname where it sets one.
+        name: card.nickname?.trim() || member.name,
+        triggers: scripts.triggers,
+        editScripts: scripts.editScripts,
+        lowLevelAccess: scripts.lowLevelAccess,
+        character: {
+          description: card.description,
+          personality: card.personality,
+          scenario: card.scenario,
+          exampleDialogue: card.mesExample,
+          lorebook: card.lorebook,
+          postHistoryInstructions: card.postHistoryInstructions,
+        },
+        overlay: {
+          member: overlay?.members?.[member.id] ?? null,
+          persona: overlay?.persona ?? null,
+        },
+      },
+    });
+  });
+
+  /**
    * What the card's scripts made of the head, written back: the values they left
    * (`variableDelta`, which replaces the turn's; null clears it), the text the
    * output scripts turned the reply into (`content`, in place — a script's edit is
    * not the reader's and forks nothing), and `clearPending`, which says the turn
-   * the browser owed its output scripts is now finished.
+   * the browser owed its output scripts is now finished. What they rewrote of the
+   * work rides along too — `overlay`, laid over the chat's (`ScriptOverlay`), and
+   * `note`, the chat note — in the same transaction as the turn.
    *
    * Only the head: a button the reader clicked acts on the chat as it stands, and
    * the reply the output scripts run over is the one that was just generated. A
@@ -1775,11 +1866,15 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const variableDelta = 'variableDelta' in body ? optionalVariableDelta(body, 'variableDelta') : undefined;
     const content = optionalString(body, 'content');
     const clearPending = optionalBoolean(body, 'clearPending') ?? false;
-    if (variableDelta === undefined && content === undefined && !clearPending) {
+    // What the scripts rewrote of the work, and the chat note (see `ScriptOverlay`).
+    const overlay = readOverlay(body['overlay']);
+    const note = optionalScriptNote(body);
+    if (variableDelta === undefined && content === undefined && !clearPending && !overlay && note === undefined) {
       throw badRequest('invalid_request', 'Nothing to commit');
     }
 
     const chat = await loadWritableChat(deps, id, userId);
+    const memberIds = overlay ? new Set((await loadMembers(deps.db, chat.plotId)).map((member) => member.id)) : null;
     if (!(await acquireChatSlot(deps, chat.id, userId))) await rejectBusyChat(deps, chat.id, userId);
     let committed: { chat: Chat; message: Message };
     try {
@@ -1794,7 +1889,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           .where(and(eq(messages.id, messageId), eq(messages.chatId, chat.id)))
           .for('update');
         const [locked] = await tx
-          .select({ headMessageId: chats.headMessageId })
+          .select({ headMessageId: chats.headMessageId, scriptOverlay: chats.scriptOverlay })
           .from(chats)
           .where(eq(chats.id, chat.id))
           .for('update');
@@ -1817,9 +1912,15 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         if (content !== undefined && content !== current.content) {
           await invalidateMemoryForEdit(tx, chat.id, messageId);
         }
+        // Read under the chat's lock, so two commits each land on the other's.
+        const merged = overlay && memberIds ? mergedOverlay(locked, overlay, memberIds) : undefined;
         const [row] = await tx
           .update(chats)
-          .set({ updatedAt: new Date() })
+          .set({
+            ...(merged !== undefined ? { scriptOverlay: merged as ChatScriptOverlay | null } : {}),
+            ...(note !== undefined ? { note } : {}),
+            updatedAt: new Date(),
+          })
           .where(eq(chats.id, chat.id))
           .returning();
         return { chat: row!, message: message! };
@@ -2014,12 +2115,13 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       // Fail before any write: a 400 here must leave the chat untouched, otherwise
       // the client resends a turn that was already persisted.
       await requireEnabledModel(deps, userId, chat.model);
-      const context = await loadGenerationContext(deps, chat);
+      const context = await loadGenerationContext(deps, chat, scripts);
       // Still before any write, and it needs the card the context just loaded.
       if (source === 'component') requireComponentTurnAllowed(chat, context.row);
       const focusNames = focusNamesOf(context.onStage, focusIds);
       const path = buildPath(context.all, chat.headMessageId);
       await settleHead(deps, chat, path.at(-1), scripts, true);
+      await keepScriptWrites(deps, chat, context, scripts);
 
       // One transaction, because the uploads are part of the turn: an id that is
       // not this chat's own — or that another turn already claimed — must leave
@@ -2120,7 +2222,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
       const chat = await loadWritableChat(deps, id, userId);
       await requireEnabledModel(deps, userId, chat.model);
-      const context = await loadGenerationContext(deps, chat);
+      const context = await loadGenerationContext(deps, chat, scripts);
       const focusNames = focusNamesOf(context.onStage, focusIds);
       const path = buildPath(context.all, chat.headMessageId);
       const head = path[path.length - 1];
@@ -2128,6 +2230,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         throw badRequest('invalid_state', 'The current head is not an assistant message');
       }
       await settleHead(deps, chat, head, scripts, true);
+      await keepScriptWrites(deps, chat, context, scripts);
       const memory = await buildMemoryInput(deps, chat, path, lastUserText(path));
       // The partial assistant turn must stay last for the model to resume it, so it
       // is re-attached when the summary swallowed it.
@@ -2183,7 +2286,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
       const chat = await loadWritableChat(deps, id, userId);
       await requireEnabledModel(deps, userId, chat.model);
-      const context = await loadGenerationContext(deps, chat);
+      const context = await loadGenerationContext(deps, chat, scripts);
       const focusNames = focusNamesOf(context.onStage, focusIds);
       const path = buildPath(context.all, chat.headMessageId);
       const head = path[path.length - 1];
@@ -2191,6 +2294,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         throw badRequest('invalid_state', 'The current head is not an assistant message');
       }
       await settleHead(deps, chat, head, scripts, true);
+      await keepScriptWrites(deps, chat, context, scripts);
       const memory = await buildMemoryInput(deps, chat, path, lastUserText(path));
       // The scene to continue must be in the prompt, so the head is re-attached
       // when the summary swallowed it.
@@ -2245,12 +2349,13 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
       const chat = await loadWritableChat(deps, id, userId);
       await requireEnabledModel(deps, userId, chat.model);
-      const context = await loadGenerationContext(deps, chat);
+      const context = await loadGenerationContext(deps, chat, scripts);
       const focusNames = focusNamesOf(context.onStage, focusIds);
       const path = buildPath(context.all, chat.headMessageId);
       const head = path[path.length - 1];
       if (!head) throw badRequest('invalid_state', 'The chat has no messages to narrate from');
       await settleHead(deps, chat, head, scripts, true);
+      await keepScriptWrites(deps, chat, context, scripts);
       const memory = await buildMemoryInput(deps, chat, path, lastUserText(path));
       // The scene to narrate must be in the prompt, so the head is re-attached
       // when the summary swallowed it.

@@ -79,9 +79,10 @@ const replacementTemplate = (replaceString: string): string =>
  * Maps the card's display-only regex scripts onto display scripts, after the ones
  * already there (RisuAI's), skipping any that would duplicate one. Display-only is
  * ST's "Alter chat display" on AI output: `markdownOnly`, not `promptOnly`, not
- * disabled. Scripts that change the prompt or the stored text have no
- * counterpart here — a display script only ever rewrites what is drawn — and are
- * left in the extensions untouched. A pattern the screen refuses is skipped.
+ * disabled. The rest stay in the extensions untouched: the prompt-only ones are
+ * read from there each time a prompt is built (`promptScripts.ts`), and the
+ * ones that edit the stored text have no counterpart here — a display script
+ * only ever rewrites what is drawn. A pattern the screen refuses is skipped.
  */
 export function displayScriptsWithRegexScripts(
   extensions: Record<string, unknown>,

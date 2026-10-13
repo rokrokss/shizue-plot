@@ -95,6 +95,10 @@ describe('toWorldInfo', () => {
       entry({ position: 'after_char', selectiveLogic: 'and_all', secondaryKeys: ['밤'], selective: true }),
       // The label rides in ST's `comment`.
       entry({ name: '야경' }),
+      // ST's own positions, an outlet with the name its macro reads.
+      entry({ position: 'before_author_note' }),
+      entry({ position: 'after_examples' }),
+      entry({ position: 'outlet', outletName: '금고' }),
     ];
     // Through JSON, as the file travels.
     expect(fromLorebookFile(JSON.parse(JSON.stringify(toWorldInfo(entries))))).toEqual(entries);
@@ -128,7 +132,22 @@ describe('fromLorebookFile', () => {
           cooldown: 3,
           delay: null,
         },
-        '1': { uid: 1, key: ['비밀'], content: '꺼져 있다.', disable: true, order: 1, position: 7 },
+        '1': {
+          uid: 1,
+          key: ['비밀'],
+          content: '꺼져 있다.',
+          disable: true,
+          order: 1,
+          position: 7,
+          outletName: ' 금고 ',
+        },
+        // ST's other positions: around the author's note and the examples.
+        '2': { uid: 2, key: ['노트'], content: '노트 위', order: 2, position: 2 },
+        '3': { uid: 3, key: ['노트'], content: '노트 아래', order: 3, position: 3 },
+        '4': { uid: 4, key: ['예시'], content: '예시 위', order: 4, position: 5 },
+        '5': { uid: 5, key: ['예시'], content: '예시 아래', order: 5, position: 6 },
+        // An outlet no macro can name.
+        '6': { uid: 6, key: ['이름'], content: '이름 없음', order: 6, position: 7, outletName: '' },
       },
     });
     expect(entries).toEqual([
@@ -148,8 +167,19 @@ describe('fromLorebookFile', () => {
         selectiveLogic: 'not_any',
         cooldown: 3,
       },
-      // An outlet entry has no counterpart; it lands in the system block.
-      entry({ keys: ['비밀'], content: '꺼져 있다.', enabled: false, insertionOrder: 1 }),
+      entry({
+        keys: ['비밀'],
+        content: '꺼져 있다.',
+        enabled: false,
+        insertionOrder: 1,
+        position: 'outlet',
+        outletName: '금고',
+      }),
+      entry({ keys: ['노트'], content: '노트 위', insertionOrder: 2, position: 'before_author_note' }),
+      entry({ keys: ['노트'], content: '노트 아래', insertionOrder: 3, position: 'after_author_note' }),
+      entry({ keys: ['예시'], content: '예시 위', insertionOrder: 4, position: 'before_examples' }),
+      entry({ keys: ['예시'], content: '예시 아래', insertionOrder: 5, position: 'after_examples' }),
+      entry({ keys: ['이름'], content: '이름 없음', insertionOrder: 6, position: 'outlet' }),
     ]);
   });
 

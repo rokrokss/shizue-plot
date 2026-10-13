@@ -28,6 +28,24 @@ type LoreNumberField =
   | 'cooldown'
   | 'delay';
 
+type LorePosition = LoreEntry['position'];
+
+/**
+ * Every position an entry may take, with its label: the two around the cast,
+ * then SillyTavern's — around the author's note, around the example dialogue,
+ * and an outlet. Mirrors `LORE_POSITIONS` in @shizue/core.
+ */
+const POSITION_LABELS = {
+  before_char: 'positionBeforeChar',
+  after_char: 'positionAfterChar',
+  before_author_note: 'positionBeforeAuthorNote',
+  after_author_note: 'positionAfterAuthorNote',
+  before_examples: 'positionBeforeExamples',
+  after_examples: 'positionAfterExamples',
+  outlet: 'positionOutlet',
+} as const satisfies Record<LorePosition, string>;
+const LORE_POSITIONS = Object.keys(POSITION_LABELS) as LorePosition[];
+
 /** Roles a depth entry may speak in; absent reads as system. */
 const LORE_ROLES = ['system', 'user', 'assistant'] as const satisfies readonly LoreRole[];
 
@@ -51,6 +69,17 @@ export function LorebookEditor({
 
   const update = (index: number, patch: Partial<LoreEntry>): void =>
     onChange(entries.map((entry, i) => (i === index ? { ...entry, ...patch } : entry)));
+
+  // An outlet's name only means something on an outlet, so it leaves with it.
+  const setPosition = (index: number, position: LorePosition): void =>
+    onChange(
+      entries.map((entry, i) => {
+        if (i !== index) return entry;
+        const next = { ...entry, position };
+        if (position !== 'outlet') delete next.outletName;
+        return next;
+      }),
+    );
 
   // An emptied field goes back to absent — the default — rather than to 0, which
   // for most of these means something else entirely.
@@ -132,12 +161,13 @@ export function LorebookEditor({
               <Field label={t('lorePosition')}>
                 <Select
                   value={entry.position}
-                  onChange={(event) =>
-                    update(index, { position: event.target.value as LoreEntry['position'] })
-                  }
+                  onChange={(event) => setPosition(index, event.target.value as LorePosition)}
                 >
-                  <option value="before_char">{t('positionBeforeChar')}</option>
-                  <option value="after_char">{t('positionAfterChar')}</option>
+                  {LORE_POSITIONS.map((position) => (
+                    <option key={position} value={position}>
+                      {t(POSITION_LABELS[position])}
+                    </option>
+                  ))}
                 </Select>
               </Field>
               <Field label={t('loreInsertionOrder')}>
@@ -159,6 +189,15 @@ export function LorebookEditor({
                 </Button>
               </div>
             </div>
+
+            {entry.position === 'outlet' ? (
+              <Field label={t('loreOutletName')} hint={t('loreOutletNameHint')}>
+                <TextInput
+                  value={entry.outletName ?? ''}
+                  onChange={(event) => update(index, { outletName: event.target.value })}
+                />
+              </Field>
+            ) : null}
 
             <div className="flex flex-wrap gap-x-5 gap-y-2 pt-1">
               <Checkbox

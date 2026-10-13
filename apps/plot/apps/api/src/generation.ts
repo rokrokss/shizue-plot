@@ -1,6 +1,8 @@
 import {
+  applyMacros,
   applyVariableDelta,
   assemblePrompt,
+  characterName,
   computeVariables,
   countTokens,
   diffVariables,
@@ -23,6 +25,7 @@ import {
   type VariableDelta,
   type Variables,
 } from '@shizue/core';
+import { promptScriptJob, promptScriptsOf } from '@shizue/core/prompt-scripts';
 import { chats, messages, type Chat, type Message } from '@shizue/db';
 import { ChatGPTError, getAdapter, getModel, supportsVision, type ChatGPTAccount, type LLMAdapter } from '@shizue/llm';
 import { and, eq, isNull, lt, or, sql } from 'drizzle-orm';
@@ -32,6 +35,7 @@ import { withImageNote } from './attachments.js';
 import { ApiError, badRequest, notFound } from './errors.js';
 import type { AppDeps, AppEnv } from './deps.js';
 import { invalidateMemoryForEdit, scheduleMemoryUpdate } from './memory.js';
+import { runPromptScriptJob } from './regexWorker.js';
 import { scheduleRelationshipUpdate } from './relationship.js';
 import { storableDelta, type PromptInjections } from './scriptState.js';
 import { unlockAssets } from './unlocks.js';
@@ -359,8 +363,47 @@ async function withoutUnseeableImages(history: HistoryMessage[], model: string, 
   return history.map((turn) => {
     if (!turn.images?.length) return turn;
     const { images, ...rest } = turn;
-    return { ...rest, content: withImageNote(turn.content, images.length) };
+    return {
+      ...rest,
+      content: withImageNote(turn.content, images.length),
+      ...(turn.promptContent !== undefined
+        ? { promptContent: withImageNote(turn.promptContent, images.length) }
+        : {}),
+    };
   });
+}
+
+/**
+ * The history with what the cards' prompt scripts make of it: RisuAI's
+ * `editprocess` and SillyTavern's prompt-only regex, read off every member's
+ * card in roster order — a member sent off the stage too, since the history
+ * they rewrite is still the work's. Each turn they change carries the result as
+ * its `promptContent`; the stored turns, and what the lore scans, stay as they
+ * are. The macros a script's pattern is matched with are expanded here, for the
+ * card it is on; everything else of a script runs in the pool's threads, which
+ * bound it (`regexWorker.ts`).
+ */
+async function withPromptScripts(
+  history: HistoryMessage[],
+  plan: GenerationPlan,
+  branch: PromptBranch,
+): Promise<HistoryMessage[]> {
+  if (history.length === 0) return history;
+  const scripts = promptScriptsOf(
+    plan.characters.map((member) => member.card),
+    (text, index) =>
+      applyMacros(text, {
+        char: characterName(plan.characters[index]!),
+        user: plan.userName,
+        variables: plan.variables,
+        globalVariables: plan.globalVariables,
+      }),
+  );
+  if (scripts.length === 0) return history;
+  const texts = await runPromptScriptJob(promptScriptJob(history, scripts, branch));
+  return history.map((turn, index) =>
+    texts[index] === undefined || texts[index] === turn.content ? turn : { ...turn, promptContent: texts[index] },
+  );
 }
 
 async function buildRequestMessages(
@@ -376,8 +419,16 @@ async function buildRequestMessages(
   const partial = isContinue
     ? stripInlayMacros(plan.history[plan.history.length - 1]?.content ?? '').trimEnd()
     : '';
+  // The partial is not in the history the assembler reads, so not on its branch
+  // either — and where the partial is the greeting itself, there is none apart.
+  const branch: PromptBranch = !isContinue
+    ? plan.branch
+    : plan.branch.length <= 1
+      ? { length: 0 }
+      : { ...plan.branch, length: plan.branch.length - 1 };
+  // The scripts read the turns as stored, before an image note is added to them.
   const history = await withoutUnseeableImages(
-    isContinue ? plan.history.slice(0, -1) : plan.history,
+    await withPromptScripts(isContinue ? plan.history.slice(0, -1) : plan.history, plan, branch),
     plan.model,
     deps,
     account,
@@ -405,13 +456,7 @@ async function buildRequestMessages(
     globalVariables: plan.globalVariables,
     clock: plan.clock,
     seed: plan.seed,
-    // The partial is not in the history the assembler reads, so not on its branch
-    // either — and where the partial is the greeting itself, there is none apart.
-    branch: !isContinue
-      ? plan.branch
-      : plan.branch.length <= 1
-        ? { length: 0 }
-        : { ...plan.branch, length: plan.branch.length - 1 },
+    branch,
     // ChatGPT takes no assistant prefill: a continue is asked for, not resumed mid-turn.
     model: { id: plan.model, maxContext: plan.contextBudget, prefill: false },
     ...(plan.injections ? { injections: plan.injections } : {}),

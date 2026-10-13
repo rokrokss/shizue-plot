@@ -15,11 +15,17 @@
  * - the start triggers' writes for a generation that adds no user turn
  *   (`startDelta`), and the prompt text they asked for (`injections`);
  * - whether the browser will run output scripts over the reply (`postProcess`),
- *   which leaves the reply `pending` until it commits the result.
+ *   which leaves the reply `pending` until it commits the result;
+ * - what the scripts rewrote of the work itself — a member's description, lore
+ *   and global note, the reader's persona (`overlay`), and the chat note — kept
+ *   on the chat (`chats.script_overlay`, `chats.note`) and laid over the work
+ *   wherever that chat's prompt is assembled. The plot never changes.
  */
 import { applyVariableDelta, checkVariableDelta, type VariableDelta, type Variables } from '@shizue/core';
-import { plotReaderVariables } from '@shizue/db';
+import { mergeScriptOverlay, type MemberOverlay, type ScriptOverlay } from '@shizue/core/triggers';
+import { chats, plotReaderVariables, type Chat, type ChatScriptOverlay } from '@shizue/db';
 import { and, eq } from 'drizzle-orm';
+import { coerceLorebook } from './card.js';
 import type { AppDeps } from './deps.js';
 import { ApiError, badRequest } from './errors.js';
 import { isUuid, optionalBoolean } from './util.js';
@@ -71,6 +77,13 @@ export interface GenerationScripts {
   baseHeadId: string | null | undefined;
   /** Generate on over a head still pending, giving up its output scripts. */
   abandonPending: boolean;
+  /**
+   * What the scripts that ran for this generation rewrote of the work, laid over
+   * the chat's overlay before the prompt is assembled and kept with it.
+   */
+  overlay: ScriptOverlay | null;
+  /** The chat note as the scripts left it (`v2SetAuthorNote`); undefined when untouched. */
+  note: string | undefined;
 }
 
 export const NO_SCRIPTS: GenerationScripts = {
@@ -79,6 +92,8 @@ export const NO_SCRIPTS: GenerationScripts = {
   postProcess: false,
   baseHeadId: undefined,
   abandonPending: false,
+  overlay: null,
+  note: undefined,
 };
 
 /** `body[key]` as a delta, or what is wrong with it. Absent and `null` are no delta. */
@@ -128,7 +143,140 @@ export function readGenerationScripts(
     postProcess: optionalBoolean(body, 'postProcess') ?? false,
     baseHeadId: baseHeadId as string | null | undefined,
     abandonPending: optionalBoolean(body, 'abandonPending') ?? false,
+    overlay: optionalOverlay(body),
+    note: optionalScriptNote(body),
   };
+}
+
+/* ---------------------------------------------------------- the overlay */
+
+/**
+ * The longest text field an overlay may carry — a description, a global note, a
+ * persona — and the most lore entries. A card's own description is not capped
+ * at import, but one a script built a step at a time is bounded the way a
+ * variable is: by what the reader's tab could make of it.
+ */
+export const MAX_OVERLAY_TEXT_LENGTH = 200_000;
+export const MAX_OVERLAY_LORE_ENTRIES = 2_000;
+/** The whole overlay, serialized. It is read back on every generation of the chat. */
+export const MAX_OVERLAY_CHARS = 2_000_000;
+
+const overlayText = (value: unknown, path: string): string | undefined => {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') throw badRequest('invalid_request', `${path} must be a string`);
+  if (value.length > MAX_OVERLAY_TEXT_LENGTH) {
+    throw badRequest('invalid_request', `${path} may be at most ${MAX_OVERLAY_TEXT_LENGTH} characters`);
+  }
+  if (value.includes('\u0000')) throw badRequest('invalid_request', `${path} must not contain U+0000`);
+  return value;
+};
+
+/**
+ * A rewrite of the work as the browser sends it (`ScriptOverlay` in
+ * @shizue/core): per member id, the description, the lorebook — coerced the way
+ * the studio's lorebook is — and the post-history instructions, and the
+ * persona. Which members may be named is the route's to check, against the
+ * plot's roster. Absent and `null` are no rewrite.
+ */
+export function readOverlay(value: unknown, path = 'overlay'): ScriptOverlay | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) throw badRequest('invalid_request', `${path} must be an object`);
+  const source = value as Record<string, unknown>;
+  const members: Record<string, MemberOverlay> = {};
+  const rawMembers = source['members'];
+  if (rawMembers !== undefined && rawMembers !== null) {
+    if (typeof rawMembers !== 'object' || Array.isArray(rawMembers)) {
+      throw badRequest('invalid_request', `${path}.members must be an object`);
+    }
+    for (const [id, raw] of Object.entries(rawMembers as Record<string, unknown>)) {
+      if (!isUuid(id)) throw badRequest('invalid_request', `${path}.members keys must be member ids`);
+      if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+        throw badRequest('invalid_request', `${path}.members.${id} must be an object`);
+      }
+      const fields = raw as Record<string, unknown>;
+      const description = overlayText(fields['description'], `${path}.members.${id}.description`);
+      const postHistoryInstructions = overlayText(
+        fields['postHistoryInstructions'],
+        `${path}.members.${id}.postHistoryInstructions`,
+      );
+      const rawLore = fields['lorebook'];
+      if (rawLore !== undefined && rawLore !== null && !Array.isArray(rawLore)) {
+        throw badRequest('invalid_request', `${path}.members.${id}.lorebook must be an array`);
+      }
+      if (Array.isArray(rawLore) && rawLore.length > MAX_OVERLAY_LORE_ENTRIES) {
+        throw badRequest('invalid_request', `${path}.members.${id}.lorebook may hold at most ${MAX_OVERLAY_LORE_ENTRIES} entries`);
+      }
+      const member: MemberOverlay = {
+        ...(description !== undefined ? { description } : {}),
+        ...(Array.isArray(rawLore) ? { lorebook: coerceLorebook(rawLore) } : {}),
+        ...(postHistoryInstructions !== undefined ? { postHistoryInstructions } : {}),
+      };
+      if (Object.keys(member).length > 0) members[id] = member;
+    }
+  }
+  const persona = overlayText(source['persona'], `${path}.persona`);
+  const overlay: ScriptOverlay = {
+    ...(Object.keys(members).length > 0 ? { members } : {}),
+    ...(persona !== undefined ? { persona } : {}),
+  };
+  return Object.keys(overlay).length > 0 ? overlay : null;
+}
+
+function optionalOverlay(body: Record<string, unknown>): ScriptOverlay | null {
+  return readOverlay(body['overlay']);
+}
+
+/** `note`, the chat note a script rewrote. Bounded like an overlay text. */
+export function optionalScriptNote(body: Record<string, unknown>, key = 'note'): string | undefined {
+  return overlayText(body[key], key);
+}
+
+/** The overlay a chat holds, as core reads it. The column's type is the database's loose one. */
+export const overlayOf = (chat: Pick<Chat, 'scriptOverlay'>): ScriptOverlay | null =>
+  (chat.scriptOverlay as ScriptOverlay | null) ?? null;
+
+/**
+ * The chat's overlay with `patch` laid over it, checked against the members the
+ * plot really has — an id from another plot, or of a member since deleted, is a
+ * stale client rather than something to keep — and against the size the column
+ * may grow to.
+ */
+export function mergedOverlay(
+  chat: Pick<Chat, 'scriptOverlay'>,
+  patch: ScriptOverlay | null,
+  memberIds: ReadonlySet<string>,
+): ScriptOverlay | null {
+  if (!patch) return overlayOf(chat);
+  for (const id of Object.keys(patch.members ?? {})) {
+    if (!memberIds.has(id)) throw badRequest('invalid_request', 'overlay names a member this plot does not have');
+  }
+  const merged = mergeScriptOverlay(overlayOf(chat), patch);
+  if (merged && JSON.stringify(merged).length > MAX_OVERLAY_CHARS) {
+    throw badRequest('script_overlay_limit', `A chat's script overlay may hold at most ${MAX_OVERLAY_CHARS} characters`);
+  }
+  return merged;
+}
+
+/**
+ * Keeps what the scripts of a generation rewrote: the merged overlay, and the
+ * note. Called inside the generation slot once the request has passed every
+ * check, so a refused generation writes neither.
+ */
+export async function saveScriptWrites(
+  deps: AppDeps,
+  chatId: string,
+  overlay: ScriptOverlay | null,
+  note: string | undefined,
+  changed: boolean,
+): Promise<void> {
+  if (!changed && note === undefined) return;
+  await deps.db
+    .update(chats)
+    .set({
+      ...(changed ? { scriptOverlay: overlay as ChatScriptOverlay | null } : {}),
+      ...(note !== undefined ? { note } : {}),
+    })
+    .where(eq(chats.id, chatId));
 }
 
 /** What a request made over a head that has since moved is refused with. */
