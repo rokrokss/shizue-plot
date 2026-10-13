@@ -127,16 +127,45 @@ export type TriggerRequest =
 
 /**
  * What code running inside a trigger may touch: the chat variables and the chat
- * of this run, and the reader's global variables — RisuAI's Lua reads and writes
- * the same through `getChatVar`/`setChatVar` and `getGlobalVar`/`setGlobalVar`.
+ * of this run, the reader's global variables, and the parts of the character,
+ * the persona and the chat note RisuAI's Lua reads — `getChatVar`/`setChatVar`,
+ * `getGlobalVar`, `getChat`/`setChat`, `getDescription`/`setDescription`,
+ * `getLoreBooks`/`upsertLocalLoreBook`, `getPersonaDescription`,
+ * `getAuthorsNote`.
+ *
+ * The same shape is what the browser's runtime hands an engine outside a
+ * trigger run (an edit listener, a `risu-btn` click), so an engine has one way
+ * to read the chat and one way to write it back wherever it was called from.
+ *
+ * Code in another engine cannot call back into this one synchronously, so it is
+ * given what it reads up front — `variables()` and `globalVariables()` are every
+ * value `getVar` and `getGlobalVar` would answer — and hands what it wrote back
+ * through the setters once it is done.
  */
 export interface CodeScope {
   getVar(name: string): string;
-  setVar(name: string, value: string): void;
+  /** `null` unsets — what RisuAI's Lua leaves for a `nil`, which reads back as `null`. */
+  setVar(name: string, value: string | null): void;
+  /** Every chat variable `getVar` answers for, by name — the run's locals over the chat's. */
+  variables(): Variables;
   getGlobalVar(name: string): string;
   /** `null` unsets. */
   setGlobalVar(name: string, value: string | null): void;
+  /** The reader's global variables as the run has them. */
+  globalVariables(): Variables;
+  /** The run's chat, which the code may edit in place. */
   messages: TriggerMessage[];
+  /** The character as the run has it, with what the run already rewrote of it. */
+  readonly character: { readonly name: string; readonly description: string; readonly lorebook: readonly LoreEntry[] };
+  setDescription(text: string): void;
+  setLorebook(entries: LoreEntry[]): void;
+  /** The reader's persona name (`{{user}}`) and description. */
+  readonly user: string;
+  readonly persona: string;
+  /** The chat note. */
+  readonly note: string;
+  /** The greeting the branch opened on, or null. */
+  readonly greeting: string | null;
 }
 
 /* ----------------------------------------------------------------- results */
@@ -656,13 +685,46 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
             scope: {
               getVar,
               setVar: (name, text) => setVar(name, text),
+              variables: () => {
+                const all = applyVariableDelta(shared.display ? shared.tempVariables : emptyVariables(), null);
+                for (const [name, text] of Object.entries(shared.variables)) all[name] = text;
+                // The locals in reach shadow the chat's, as `getVar` reads them.
+                for (const name of Object.values(scopes).flatMap((locals) => Object.keys(locals))) {
+                  const local = getLocal(name);
+                  if (local !== null) all[name] = local;
+                }
+                return all;
+              },
               getGlobalVar: (name) => readVariable(shared.globals, name) ?? 'null',
               setGlobalVar: (name, text) => {
                 if (text === null) delete shared.globals[name];
                 else shared.globals[name] = text;
                 shared.globalWrites[name] = text;
               },
+              globalVariables: () => applyVariableDelta(shared.globals, null),
               messages: run.messages,
+              character: {
+                name: input.character.name,
+                get description() {
+                  return shared.character.description;
+                },
+                get lorebook() {
+                  return shared.character.lorebook;
+                },
+              },
+              setDescription: (text) => {
+                shared.character.description = text;
+                rewrite('description');
+              },
+              setLorebook: (entries) => {
+                // The run's own list is edited in place: the v2 effects hold it as `lore`.
+                lore.splice(0, lore.length, ...entries);
+                rewrite('lorebook');
+              },
+              user: input.data?.user ?? '',
+              persona: shared.persona,
+              note: shared.note,
+              greeting: input.greeting ?? null,
             },
           };
           if (answer && typeof answer === 'object' && (answer as { stopSending?: unknown }).stopSending === true) {

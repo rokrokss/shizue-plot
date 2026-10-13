@@ -115,6 +115,7 @@ import {
 } from '../scriptState.js';
 import { deleteQuietly } from '../storage.js';
 import { toPromptCharacters, toPromptPlot } from '../plots.js';
+import { readScriptLlmMessages, runScriptLlm } from '../scriptLlm.js';
 import { suggestReplies } from '../suggest.js';
 import { buildPath, deepestLeaf, siblingInfo } from '../tree.js';
 import { assetLocks, openAssetNames } from '../unlocks.js';
@@ -1957,6 +1958,39 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.json({
       variables: await mergeGlobalVariables(deps, chat.userId, chat.plotId, body['variables']),
     });
+  });
+
+  /**
+   * A model call a card's Lua script asks for (`LLM`, `axLLM`, `simpleLLM`):
+   * `{ messages: [{ role, content }] }` in, `{ result }` out — the chat's model
+   * on the reader's own account, nothing stored (`scriptLlm.ts`).
+   *
+   * Held as RisuAI holds the functions: the plot's scripted member must grant
+   * low-level access (403 `script_llm_forbidden` otherwise). Held as a turn is:
+   * the reader's writable chat on a plot still visible to them, and the
+   * generation slot for the length of the call (429 `generation_in_progress`),
+   * renewed as a stream renews it. No count limit — the reader's account pays.
+   */
+  app.post('/:id/script-llm', async (c) => {
+    const id = requireUuidParam(c);
+    const userId = c.get('userId');
+    const body = await readJsonBody(c);
+    const messages = readScriptLlmMessages(body['messages']);
+    const chat = await loadWritableChat(deps, id, userId);
+    const plot = await loadVisiblePlot(deps.db, chat.plotId, chat.userId);
+    if (!scriptedMember(await loadMembers(deps.db, plot.id))?.scripts.lowLevelAccess) {
+      throw forbidden('script_llm_forbidden', "This plot's scripts may not call the model");
+    }
+    if (!(await acquireChatSlot(deps, chat.id, userId))) await rejectBusyChat(deps, chat.id, userId);
+    const keepAlive = setInterval(() => void renewChatSlot(deps, chat.id), HEARTBEAT_MS);
+    try {
+      return c.json({
+        result: await runScriptLlm(deps, { userId, model: chat.model, messages, signal: c.req.raw.signal }),
+      });
+    } finally {
+      clearInterval(keepAlive);
+      await releaseChatSlot(deps, chat.id);
+    }
   });
 
   /**

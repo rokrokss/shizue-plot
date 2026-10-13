@@ -597,6 +597,43 @@ describe('code triggers', () => {
     // Without an engine the block is simply not run.
     expect(runTriggersSync(input(triggers)).variables['fromLua']).toBeUndefined();
   });
+
+  it('show the code everything it reads up front, and take back what it rewrote', async () => {
+    const triggers = [
+      trigger('start', [
+        set('hp', '3'),
+        { type: 'v2DeclareLocalVar', var: 'temp', value: '로컬', valueType: 'value', indent: 0 },
+      ]),
+      trigger('manual', [{ type: 'triggerlua', code: '' }]),
+    ];
+    const result = await runTriggers(
+      input(triggers, {
+        variables: vars({ hp: '1', name: '리안' }),
+        globalVariables: vars({ coins: '7' }),
+        note: '노트',
+        greeting: '첫 인사',
+        data: { user: '아린' },
+        character: character(triggers, { lorebook: [lore('성', '북쪽')] }),
+      }),
+      {
+        code: ({ scope }) => {
+          // A local an earlier trigger of the same run declared is still in reach, as in RisuAI.
+          expect({ ...scope.variables() }).toEqual({ hp: '3', name: '리안', temp: '로컬' });
+          expect({ ...scope.globalVariables() }).toEqual({ coins: '7' });
+          expect(scope.character.name).toBe('리안');
+          expect(scope.character.lorebook.map((entry) => entry.content)).toEqual(['북쪽']);
+          expect([scope.user, scope.persona, scope.note, scope.greeting]).toEqual(['아린', '여행자', '노트', '첫 인사']);
+          scope.setDescription('고쳐 쓴 설명');
+          scope.setLorebook([...scope.character.lorebook, lore('탑', '높다')]);
+          expect(scope.character.description).toBe('고쳐 쓴 설명');
+          scope.messages.splice(0, 1);
+        },
+      },
+    );
+    expect(result.character.description).toBe('고쳐 쓴 설명');
+    expect(result.character.lorebook?.map((entry) => entry.content)).toEqual(['북쪽', '높다']);
+    expect(result.messages.map((message) => message.data)).toEqual(['어서 와']);
+  });
 });
 
 describe('CBS in effect fields', () => {

@@ -7,6 +7,7 @@ import { applyVariableDelta, computeVariables, emptyVariables, type Variables } 
 import type { TriggerScript, TriggerStep } from '@shizue/core/triggers';
 import { describe, expect, it } from 'vitest';
 import { loadWholeBranch } from '../src/lib/scripts/branch';
+import type { ScriptEngine } from '../src/lib/scripts/engine';
 import { createScriptRuntime, type ScriptBundle, type ScriptUi, type ScriptView } from '../src/lib/scripts/runtime';
 import type { ChatMessage, ChatState } from '../src/lib/types';
 
@@ -88,6 +89,7 @@ const silentUi: ScriptUi = {
   alert: async () => undefined,
   input: async () => '',
   select: async (options) => options[0] ?? '',
+  confirm: async () => false,
 };
 
 const defaults = vars({ hp: '100' });
@@ -388,7 +390,7 @@ describe('the Lua seat', () => {
     });
     // A plot whose only scripts are Lua finishes no replies without the engine.
     expect(without.finishesReplies).toBe(false);
-    await without.button('data');
+    expect(await without.button('data', view([greeting]))).toBeNull();
     expect(logged).toEqual(['risu-btn']);
 
     const seen: string[] = [];
@@ -416,13 +418,91 @@ describe('the Lua seat', () => {
       ],
     });
     const prepared = await withEngine.prepare('auto', view([greeting], { globalVariables: vars({ visits: '3' }) }));
-    await withEngine.button('go');
+    // A button that wrote nothing has nothing to commit.
+    expect(await withEngine.button('go', view([greeting]))).toBeNull();
     expect(seen).toEqual(['start', 'button:go']);
     expect(prepared.body['startDelta']).toEqual({ fromLua: '1' });
     expect(calls).toEqual([
       { method: 'PATCH', path: '/api/chats/c1/global-variables', body: { variables: { visits: '4', gone: null } } },
     ]);
     expect(globals).toEqual([{ visits: '4', old: 'x' }]);
+  });
+});
+
+describe('an engine outside a trigger run', () => {
+  /** An engine whose hooks write through the scope they are handed, as the Lua engine does. */
+  const writer = (): ScriptEngine => ({
+    name: 'lua',
+    handles: (phase) => phase !== 'start' && phase !== 'output' && phase !== 'input',
+    edit: async (phase, text, meta, scope) => {
+      scope.setVar(phase, `${scope.getVar('hp')}@${meta.chatIndex}`);
+      return `${text}+${phase}`;
+    },
+    display: async (items, scope) => items.map((item) => `${item.text}|${scope.getVar('hp')}|${item.chatIndex}`),
+    button: async (data, scope) => {
+      scope.setVar('pressed', data);
+      scope.setDescription('버튼이 바꾼 설명');
+      scope.messages.at(-1)!.data = '버튼이 고친 답';
+    },
+    manualNames: () => ['attack'],
+  });
+  const lua = [trigger('start', [{ type: 'triggerlua', code: 'x' }])];
+
+  it('folds what an input listener wrote into the turn, and an output listener’s into the reply', async () => {
+    const { api, calls } = fakeApi();
+    const runtime = createScriptRuntime({ chatId: 'c1', api, ui: silentUi, bundle: bundle({ triggers: lua }), engines: [writer()] });
+    expect(runtime.finishesReplies).toBe(true);
+    expect(runtime.triggerNames.has('attack')).toBe(true);
+    const sent = await runtime.prepare('send', view([greeting]), '안녕');
+    expect(sent.content).toBe('안녕+editinput');
+    expect(sent.body['variableDelta']).toEqual({ editinput: '100@-1' });
+
+    await runtime.finish(view(branch));
+    const commit = calls.find((call) => call.path.endsWith('/script-commit'))!;
+    expect(commit.body['content']).toBe('{{setvar::hp::90}}다친 것 같다.+editoutput');
+    // Against what the server folds the stored reply to: its macros, and nothing of the old delta.
+    const plain = serverFold([greeting, branch[1]!, { content: commit.body['content'] as string }]);
+    const folded = serverFold([greeting, branch[1]!, { content: commit.body['content'] as string, variableDelta: commit.body['variableDelta'] as Record<string, string | null> }]);
+    expect(plain['hp']).toBe('90');
+    expect(folded['editoutput']).toBe('90@1');
+    expect(folded['mood']).toBe('tense');
+  });
+
+  it('commits what a button did on the head, as a manual run’s is', async () => {
+    const { api, calls } = fakeApi();
+    const runtime = createScriptRuntime({ chatId: 'c1', api, ui: silentUi, bundle: bundle({ triggers: lua }), engines: [writer()] });
+    const head = message('m2', 'm1', 'assistant', '답', { scriptRev: 4 });
+    await runtime.button('go', view([greeting, branch[1]!, head]));
+    expect(calls).toEqual([
+      {
+        method: 'POST',
+        path: '/api/chats/c1/script-commit',
+        body: {
+          messageId: 'm2',
+          scriptRev: 4,
+          variableDelta: { pressed: 'go' },
+          content: '버튼이 고친 답',
+          overlay: { members: { '00000000-0000-4000-8000-000000000001': { description: '버튼이 바꾼 설명' } } },
+        },
+      },
+    ]);
+  });
+
+  it('draws messages through the display listeners, by message, with the chat’s index for each', async () => {
+    const runtime = createScriptRuntime({ chatId: 'c1', api: fakeApi().api, ui: silentUi, bundle: bundle({ triggers: lua }), engines: [writer()] });
+    expect(runtime.editsDisplay).toBe(true);
+    const shown = await runtime.displayEdits(
+      [
+        { id: 'm0', text: '어서 와.' },
+        { id: 'm1', text: '들어간다' },
+      ],
+      view(branch),
+      vars({ hp: '7' }),
+    );
+    expect([...shown]).toEqual([
+      ['m0', '어서 와.|7|-1'],
+      ['m1', '들어간다|7|0'],
+    ]);
   });
 });
 

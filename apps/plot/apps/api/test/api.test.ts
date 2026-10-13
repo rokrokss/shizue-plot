@@ -11920,3 +11920,116 @@ describe('the browser script runtime', () => {
     expect((await scriptsOf(reader, chat.chat.id)).scripts.overlay.persona).toBe('p');
   });
 });
+
+describe('script model calls', () => {
+  const lua = [{ comment: '', type: 'start', conditions: [], effect: [{ type: 'triggerlua', code: 'function onStart(id) end' }] }];
+
+  /** A published plot whose member carries Lua, with or without low-level access, and a reader's chat on it. */
+  async function luaChat(owner: string, lowLevelAccess: boolean): Promise<{ reader: string; chatId: string }> {
+    const cookie = await signUp(owner);
+    const plot = await createPlot(cookie, { name: '루아 작품', description: '설명', intros: ['문 앞이다'] });
+    await addCharacter(cookie, plot.id, {
+      name: '리안',
+      card: { description: '사서', extensions: { risuai: { triggerscript: lua, lowLevelAccess } } },
+    });
+    await publishPlot(cookie, plot.id);
+    const reader = await signUp(`reader-${owner}`);
+    const chat = await startChat(reader, plot.id);
+    return { reader, chatId: chat.chat.id };
+  }
+
+  const prompt = [
+    { role: 'system', content: '규칙' },
+    { role: 'user', content: '질문' },
+    { role: 'assistant', content: '앞의 답' },
+    { role: 'system', content: '중간 지시' },
+  ];
+
+  it("answers on the chat's model, the leading system turns as the instructions, and stores nothing", async () => {
+    const { reader, chatId } = await luaChat('script-llm@example.com', true);
+    const seen: { system: string; messages: unknown[] }[] = [];
+    const answering = makeApp({
+      getAdapter: () => ({
+        providerModel: 'fixed',
+        adapter: {
+          stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
+            seen.push({ system: req.system, messages: req.messages });
+            yield { type: 'text', text: '모델의 ' };
+            yield { type: 'text', text: '대답' };
+            return { usage: { promptTokens: 1, completionTokens: 1 } };
+          },
+        },
+      }),
+    });
+    const before = (await db.select().from(messages).where(eq(messages.chatId, chatId))).length;
+    const res = await json(reader, `/api/chats/${chatId}/script-llm`, 'POST', { messages: prompt }, answering);
+    expect(res.status, await res.clone().text()).toBe(200);
+    expect(await readJson(res)).toEqual({ result: '모델의 대답' });
+    expect(seen).toEqual([
+      {
+        system: '규칙',
+        messages: [
+          { role: 'user', content: '질문' },
+          { role: 'assistant', content: '앞의 답' },
+          { role: 'system', content: '중간 지시' },
+        ],
+      },
+    ]);
+    expect((await db.select().from(messages).where(eq(messages.chatId, chatId))).length).toBe(before);
+    // The slot was given back: a turn can be taken right after.
+    const [row] = await db.select({ generatingAt: chats.generatingAt }).from(chats).where(eq(chats.id, chatId));
+    expect(row!.generatingAt).toBeNull();
+  });
+
+  it("refuses a plot whose card does not grant low-level access, and anyone's chat but the caller's", async () => {
+    const { reader, chatId } = await luaChat('script-llm-closed@example.com', false);
+    const closed = await json(reader, `/api/chats/${chatId}/script-llm`, 'POST', { messages: prompt });
+    expect(closed.status).toBe(403);
+    expect((await readJson(closed)).code).toBe('script_llm_forbidden');
+
+    const { chatId: open } = await luaChat('script-llm-open@example.com', true);
+    const stranger = await signUp('script-llm-stranger@example.com');
+    expect((await json(stranger, `/api/chats/${open}/script-llm`, 'POST', { messages: prompt })).status).toBe(404);
+    expect((await json(undefined, `/api/chats/${open}/script-llm`, 'POST', { messages: prompt })).status).toBe(401);
+  });
+
+  it('holds the prompt to its shape and size', async () => {
+    const { reader, chatId } = await luaChat('script-llm-size@example.com', true);
+    const send = (body: unknown) => json(reader, `/api/chats/${chatId}/script-llm`, 'POST', body);
+    expect((await send({ messages: [] })).status).toBe(400);
+    expect((await send({ messages: [{ role: 'tool', content: 'x' }] })).status).toBe(400);
+    expect((await send({ messages: [{ role: 'user', content: 3 }] })).status).toBe(400);
+    const long = await send({ messages: [{ role: 'user', content: 'x'.repeat(400_001) }] });
+    expect(long.status).toBe(400);
+    expect((await readJson(long)).code).toBe('script_llm_too_large');
+    const many = await send({ messages: Array.from({ length: 201 }, () => ({ role: 'user', content: 'x' })) });
+    expect((await readJson(many)).code).toBe('script_llm_too_large');
+  });
+
+  it("takes the chat's generation slot for the call, and has no count limit", async () => {
+    const { reader, chatId } = await luaChat('script-llm-slot@example.com', true);
+    const { getAdapter, started, release } = gatedGetAdapter('대답');
+    const gated = makeApp({ getAdapter });
+    const first = json(reader, `/api/chats/${chatId}/script-llm`, 'POST', { messages: prompt }, gated);
+    await started;
+    const second = await json(reader, `/api/chats/${chatId}/script-llm`, 'POST', { messages: prompt }, gated);
+    expect(second.status).toBe(429);
+    expect((await readJson(second)).code).toBe('generation_in_progress');
+    expect((await json(reader, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' })).status).toBe(429);
+    release();
+    expect((await first).status).toBe(200);
+    for (let call = 0; call < 5; call += 1) {
+      expect((await json(reader, `/api/chats/${chatId}/script-llm`, 'POST', { messages: prompt }, gated)).status).toBe(200);
+    }
+  });
+
+  it('answers 502 when the model fails, and gives the slot back', async () => {
+    const { reader, chatId } = await luaChat('script-llm-fail@example.com', true);
+    const broken = makeApp({ getAdapter: failingGetAdapter });
+    const res = await json(reader, `/api/chats/${chatId}/script-llm`, 'POST', { messages: prompt }, broken);
+    expect(res.status).toBe(502);
+    expect((await readJson(res)).code).toBe('script_llm_failed');
+    const [row] = await db.select({ generatingAt: chats.generatingAt }).from(chats).where(eq(chats.id, chatId));
+    expect(row!.generatingAt).toBeNull();
+  });
+});

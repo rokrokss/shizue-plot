@@ -48,7 +48,10 @@ export const TRIGGER_CLASSIFICATION: Readonly<Record<string, { support: TriggerS
   checkSimilarity: { support: 'impossible', note: 'lowLevelAccess; no embedder' },
   extractRegex: { support: 'browser', note: 'lowLevelAccess' },
   runImgGen: { support: 'impossible', note: 'lowLevelAccess; writes RisuAI’s failure text' },
-  triggerlua: { support: 'logged', note: 'handed to the Lua engine when one is installed' },
+  triggerlua: {
+    support: 'server',
+    note: 'the Lua engine, sandboxed in the reader’s browser; what the code writes rides like any effect’s (LUA_CLASSIFICATION in the web app)',
+  },
   triggercode: { support: 'logged', note: 'never run by RisuAI either' },
 
   // v2 control flow and variables

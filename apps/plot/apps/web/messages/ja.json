@@ -819,6 +819,8 @@
     "scriptDialogTitle": "{name}からのメッセージ",
     "scriptDialogOk": "OK",
     "scriptDialogAnswer": "回答",
+    "scriptDialogYes": "はい",
+    "scriptDialogNo": "いいえ",
     "scriptStopped": "作品のスクリプトがこのメッセージを送信しませんでした。書いた文章は入力欄に残っています。",
     "scriptFinishFailed": "作品のスクリプトが直前の返信を仕上げられませんでした。次のメッセージはその返信をそのままにして続きます。",
     "scriptFollowUpConsent": "{name}のスクリプトが続けてもう一つ返信を求めています。この会話で許可しますか？ ノートパネルからいつでも取り消せます。",

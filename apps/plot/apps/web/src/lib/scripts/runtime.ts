@@ -47,6 +47,7 @@ import {
   runTriggers,
   runTriggersSync,
   type CharacterRewrite,
+  type CodeScope,
   type EditScript,
   type MemberOverlay,
   type PromptInjectionText,
@@ -100,6 +101,8 @@ export interface ScriptUi {
   alert(text: string, error: boolean): Promise<void>;
   input(text: string): Promise<string>;
   select(options: string[], display?: string): Promise<string>;
+  /** Yes or no (Lua's `alertConfirm`); dismissing it is no. */
+  confirm(text: string): Promise<boolean>;
 }
 
 /** The API, as little of it as the runtime needs. */
@@ -119,8 +122,9 @@ export interface ScriptRuntimeOptions {
   wait?: (ms: number) => Promise<void>;
   /**
    * The reader's global variables after the scripts wrote some. Nothing in the
-   * trigger language does — only code (Lua's `setGlobalVar`) — so this is the
-   * seat the Lua engine's writes reach the page through.
+   * trigger language or in RisuAI's Lua writes one — `CodeScope.setGlobalVar`
+   * is there for an engine that does — so this is where such writes would reach
+   * the page.
    */
   onGlobalVariables?: (variables: Variables) => void;
 }
@@ -210,13 +214,29 @@ export interface ScriptRuntime {
   finish(view: ScriptView): Promise<FinishedReply | null>;
   /** Runs the manual triggers named `name`; null when there was nothing to commit. */
   manual(name: string, triggerId: string | null, view: ScriptView): Promise<ChatState | null>;
-  /** A `risu-btn` click: the engines' (Lua's) to answer. */
-  button(data: string): Promise<void>;
+  /**
+   * A `risu-btn` click: the engines' (Lua's `onButtonClick`) to answer, and what
+   * they did committed on the head as a manual run's is; null when there was
+   * nothing to commit.
+   */
+  button(data: string, view: ScriptView): Promise<ChatState | null>;
   /**
    * A message's text as the display triggers draw it, with the chat's variables
    * as they stand — the page's own fold, so drawing a message folds nothing.
    */
   display(text: string, view: ScriptView, variables: Variables): string;
+  /** Whether an engine rewrites what messages show (Lua's `editDisplay`), which `displayEdits` answers. */
+  readonly editsDisplay: boolean;
+  /**
+   * The engines' display listeners over several messages at once, by message
+   * id — only the ones they changed. Asynchronous, unlike `display`: the page
+   * draws a message as it stands until its answer arrives, and what the
+   * listeners write stays with the screen. Runs before the display triggers,
+   * whose input it becomes, as in RisuAI.
+   */
+  displayEdits(items: readonly { id: string; text: string }[], view: ScriptView, variables: Variables): Promise<Map<string, string>>;
+  /** Ends what the engines keep running — the Lua sandbox. */
+  dispose(): void;
 }
 
 export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntime {
@@ -379,24 +399,97 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     };
   }
 
-  /** `text` through the engines' edit listeners and then the regex scripts of `phase`. */
+  /**
+   * A `CodeScope` over one operation's session, for an engine called outside a
+   * trigger run — an edit listener, a button, a display pass. The variables are
+   * its own copy (`variables()` is how the engine left them); the character, the
+   * globals and the rest go through the session, as a trigger run's rewrites do.
+   */
+  function sessionScope(
+    s: Session,
+    variables: Variables,
+    messages: TriggerMessage[],
+    greeting: string | null,
+  ): { scope: CodeScope; variables(): Variables; changed(): boolean } {
+    const vars = applyVariableDelta(variables, null);
+    let changed = false;
+    const base = character();
+    const scope: CodeScope = {
+      getVar: (name) => readVariable(vars, name) ?? 'null',
+      setVar: (name, value) => {
+        if (value === null) {
+          if (readVariable(vars, name) === undefined) return;
+          delete vars[name];
+        } else {
+          if (readVariable(vars, name) === value) return;
+          vars[name] = value;
+        }
+        changed = true;
+      },
+      variables: () => applyVariableDelta(vars, null),
+      getGlobalVar: (name) => readVariable(s.globals, name) ?? 'null',
+      setGlobalVar: (name, value) => {
+        s.globals = applyVariableDelta(s.globals, { [name]: value });
+        s.globalWrites = { ...(s.globalWrites ?? {}), [name]: value };
+      },
+      globalVariables: () => applyVariableDelta(s.globals, null),
+      messages,
+      character: {
+        name: bundle.name,
+        get description() {
+          return s.patch.description ?? base.description;
+        },
+        get lorebook() {
+          return s.patch.lorebook ?? base.lorebook;
+        },
+      },
+      setDescription: (text) => {
+        s.patch.description = text;
+      },
+      setLorebook: (entries) => {
+        s.patch.lorebook = entries;
+      },
+      user: s.view.names.user ?? s.view.data?.user ?? '',
+      persona: s.persona,
+      note: s.note,
+      greeting,
+    };
+    return { scope, variables: () => vars, changed: () => changed };
+  }
+
+  /**
+   * `text` through the engines' edit listeners and then the regex scripts of
+   * `phase`, with the variables as the listeners left them. The listeners get a
+   * copy of the chat: an edit hook's answer is its text, and anything it did to
+   * other messages is said and dropped.
+   */
   async function edit(
     phase: Extract<EditPhase, 'editinput' | 'editoutput'>,
     text: string,
     variables: Variables,
     s: Session,
     meta: { chatIndex: number; previousSameRole?: string },
-  ): Promise<string> {
+    chat: readonly TriggerMessage[],
+    greeting: string | null,
+  ): Promise<{ text: string; variables: Variables }> {
     let data = text;
+    let current = variables;
     for (const engine of engines) {
-      if (engine.edit && engine.handles(phase)) data = await engine.edit(phase, data, { chatIndex: meta.chatIndex });
+      if (!engine.edit || !engine.handles(phase)) continue;
+      const working = chat.map((message) => ({ ...message }));
+      const over = sessionScope(s, current, working, greeting);
+      data = await engine.edit(phase, data, { chatIndex: meta.chatIndex }, over.scope);
+      current = over.variables();
+      if (working.length !== chat.length || working.some((message, index) => message.data !== chat[index]?.data)) {
+        log({ kind: 'dropped', effect: phase, message: 'an edit listener changed the chat; only its answer is kept' });
+      }
     }
-    if (!hasEditScripts(bundle.editScripts, phase)) return data;
-    return runEditScripts(data, bundle.editScripts, phase, {
+    if (!hasEditScripts(bundle.editScripts, phase)) return { text: data, variables: current };
+    const edited = runEditScripts(data, bundle.editScripts, phase, {
       chatIndex: meta.chatIndex,
       ...(meta.previousSameRole !== undefined ? { previousSameRole: meta.previousSameRole } : {}),
       env: {
-        variable: (name) => readVariable(variables, name),
+        variable: (name) => readVariable(current, name),
         globalVariable: (name) => readVariable(s.globals, name),
         ...(options.random ? { random: options.random } : {}),
         data: {
@@ -409,6 +502,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       },
       onSkip: (_script, reason) => log({ kind: 'error', effect: phase, message: reason }),
     });
+    return { text: edited, variables: current };
   }
 
   /**
@@ -448,7 +542,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
 
   return {
     bundle,
-    triggerNames: manualTriggerNames(triggers),
+    triggerNames: new Set([...manualTriggerNames(triggers), ...engines.flatMap((engine) => engine.manualNames?.() ?? [])]),
     finishesReplies,
     rewritesDisplay: hasTriggersFor(triggers, 'display'),
 
@@ -472,8 +566,9 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
           variables = input.variables;
           messages = input.messages;
         }
-        let sent = await edit('editinput', text, variables, s, { chatIndex: -1 });
-        variables = computeVariables([sent], variables, view.names);
+        const typed = await edit('editinput', text, variables, s, { chatIndex: -1 }, messages, greeting);
+        let sent = typed.text;
+        variables = computeVariables([sent], typed.variables, view.names);
         let injections: PromptInjectionText | null = null;
         if (runsAt('start')) {
           const withTurn: TriggerMessage[] = [...messages, { role: 'user', data: sent, id: NEW_TURN }];
@@ -542,12 +637,24 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       const previous =
         [...chat.slice(0, -1)].reverse().find((message) => message.role === 'char')?.data ?? greeting ?? '';
       const stored = { content: head.content, variableDelta: head.variableDelta ?? null };
-      let text = await edit('editoutput', head.content, computeVariables([stored], parent, view.names), s, {
-        chatIndex,
-        previousSameRole: previous,
-      });
+      const asStored = computeVariables([stored], parent, view.names);
+      const reply = await edit(
+        'editoutput',
+        head.content,
+        asStored,
+        s,
+        { chatIndex, previousSameRole: previous },
+        chat,
+        greeting,
+      );
+      let text = reply.text;
 
-      let variables = computeVariables([{ content: text, variableDelta: stored.variableDelta }], parent, view.names);
+      // The reply's text may have changed under its macros, so the fold is taken
+      // again — and what the listeners wrote laid back over it.
+      let variables = applyVariableDelta(
+        computeVariables([{ content: text, variableDelta: stored.variableDelta }], parent, view.names),
+        diffVariables(reply.variables, asStored),
+      );
       let followUp = false;
       if (runsAt('output')) {
         const withReply = chat.map((message, index) => (index === chat.length - 1 ? { ...message, data: text } : message));
@@ -574,41 +681,28 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     async manual(name, triggerId, view) {
       if (!name) return null;
       const s = session(view);
-      const head = view.messages[view.messages.length - 1];
       const base = computeVariables(view.messages, view.defaults, view.names);
       const { greeting, chat } = triggerMessages(view.messages);
       const result = await run(s, 'manual', base, chat, greeting, {
         manualName: name,
         triggerId,
       });
-      const content = headEdit(chat, result.messages, head?.id ?? null);
-      await flushGlobals(s);
-      const fields = writes(s);
-      if (!result.variablesChanged && content === undefined && !fields.overlay && fields.note === undefined) return null;
-      if (!head) {
-        log({ kind: 'dropped', message: 'a chat with no message has nowhere to keep what a button did' });
-        return null;
-      }
-      const parent = computeVariables(view.messages.slice(0, -1), view.defaults, view.names);
-      const delta = storable(diffVariables(result.variables, computeVariables([content ?? head.content], parent, view.names)), log);
-      const state = await commit({
-        messageId: head.id,
-        scriptRev: head.scriptRev ?? 0,
-        variableDelta: delta,
-        ...(content !== undefined ? { content } : {}),
-        ...fields,
-      });
-      kept(s);
-      return state;
+      return commitHead(s, view, result.variables, result.variablesChanged, chat, result.messages);
     },
 
-    async button(data) {
+    async button(data, view) {
       const engine = engines.find((candidate) => candidate.button && candidate.handles('button'));
       if (!engine?.button) {
-        log({ kind: 'unsupported', effect: 'risu-btn', message: 'risu-btn needs the Lua engine, which is not installed' });
-        return;
+        log({ kind: 'unsupported', effect: 'risu-btn', message: 'nothing on this card answers a risu-btn' });
+        return null;
       }
-      await engine.button(data);
+      const s = session(view);
+      const base = computeVariables(view.messages, view.defaults, view.names);
+      const { greeting, chat } = triggerMessages(view.messages);
+      const working = chat.map((message) => ({ ...message }));
+      const over = sessionScope(s, base, working, greeting);
+      await engine.button(data, over.scope);
+      return commitHead(s, view, over.variables(), over.changed(), chat, working);
     },
 
     display(text, view, variables) {
@@ -636,7 +730,67 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       });
       return result.displayData ?? text;
     },
+
+    editsDisplay: engineHandles('editdisplay'),
+
+    async displayEdits(items, view, variables) {
+      const shown = new Map<string, string>();
+      const engine = engines.find((candidate) => candidate.display && candidate.handles('editdisplay'));
+      if (!engine?.display || items.length === 0) return shown;
+      const { greeting, chat } = triggerMessages(view.messages);
+      // RisuAI's index for a message, the greeting being -1.
+      const index = new Map(chat.map((message, at) => [message.id, at]));
+      const over = sessionScope(session(view), variables, chat, greeting);
+      const texts = await engine.display(
+        items.map((item) => ({ text: item.text, chatIndex: index.get(item.id) ?? -1 })),
+        over.scope,
+      );
+      items.forEach((item, at) => {
+        const text = texts[at];
+        if (typeof text === 'string' && text !== item.text) shown.set(item.id, text);
+      });
+      return shown;
+    },
+
+    dispose() {
+      for (const engine of engines) engine.dispose?.();
+    },
   };
+
+  /**
+   * What a manual run or a button did, committed on the head: the variables it
+   * left (as the head's delta), a rewrite of the head's text, the overlay and the
+   * note. Null when it changed none of them.
+   */
+  async function commitHead(
+    s: Session,
+    view: ScriptView,
+    variables: Variables,
+    variablesChanged: boolean,
+    before: readonly TriggerMessage[],
+    after: readonly TriggerMessage[],
+  ): Promise<ChatState | null> {
+    const head = view.messages[view.messages.length - 1];
+    const content = headEdit(before, after, head?.id ?? null);
+    await flushGlobals(s);
+    const fields = writes(s);
+    if (!variablesChanged && content === undefined && !fields.overlay && fields.note === undefined) return null;
+    if (!head) {
+      log({ kind: 'dropped', message: 'a chat with no message has nowhere to keep what a button did' });
+      return null;
+    }
+    const parent = computeVariables(view.messages.slice(0, -1), view.defaults, view.names);
+    const delta = storable(diffVariables(variables, computeVariables([content ?? head.content], parent, view.names)), log);
+    const state = await commit({
+      messageId: head.id,
+      scriptRev: head.scriptRev ?? 0,
+      variableDelta: delta,
+      ...(content !== undefined ? { content } : {}),
+      ...fields,
+    });
+    kept(s);
+    return state;
+  }
 
   /**
    * A rewrite of the head the runs asked for before a generation, committed in

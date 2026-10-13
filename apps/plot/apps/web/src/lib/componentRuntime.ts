@@ -1769,7 +1769,7 @@ export function componentFrameCsp(origin: string): string {
  * failure happens at serialization, loudly, pointing at the contract.
  */
 const BUNDLER_TOKEN = /__turbopack_context__|__webpack_require__|\brequire\(/;
-function selfContained(source: string, name: string): string {
+export function selfContained(source: string, name: string): string {
   const hit = BUNDLER_TOKEN.exec(source);
   if (hit) {
     throw new Error(

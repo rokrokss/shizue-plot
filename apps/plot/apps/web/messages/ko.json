@@ -819,6 +819,8 @@
     "scriptDialogTitle": "{name}의 메시지",
     "scriptDialogOk": "확인",
     "scriptDialogAnswer": "답",
+    "scriptDialogYes": "예",
+    "scriptDialogNo": "아니요",
     "scriptStopped": "작품의 스크립트가 이 메시지를 보내지 않았습니다. 쓴 글은 입력창에 남아 있습니다.",
     "scriptFinishFailed": "작품의 스크립트가 마지막 답장을 마무리하지 못했습니다. 다음 메시지는 그 답장을 그대로 두고 이어집니다.",
     "scriptFollowUpConsent": "{name}의 스크립트가 이어서 답장을 하나 더 받으려고 합니다. 이 대화에서 허용할까요? 노트 패널에서 언제든 취소할 수 있습니다.",

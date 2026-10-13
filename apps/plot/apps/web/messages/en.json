@@ -819,6 +819,8 @@
     "scriptDialogTitle": "A message from {name}",
     "scriptDialogOk": "OK",
     "scriptDialogAnswer": "Your answer",
+    "scriptDialogYes": "Yes",
+    "scriptDialogNo": "No",
     "scriptStopped": "The story's scripts held this message back. What you wrote is still in the composer.",
     "scriptFinishFailed": "The story's scripts could not finish the last reply. The next message carries on from it as it is.",
     "scriptFollowUpConsent": "A script of {name} wants to ask for another reply right away. Allow it in this chat? You can take it back from the notes panel at any time.",

@@ -10,6 +10,11 @@ const nextConfig: NextConfig = {
   agentRules: false,
   turbopack: {
     root: fileURLToPath(new URL('../../../../', import.meta.url)),
+    rules: {
+      // `import url from 'pkg/file?url'`: the file emitted unchanged, its address
+      // imported — how the Lua sandbox gets wasmoon (`lib/scripts/lua/assets.ts`).
+      '*': { condition: { query: '?url' }, type: 'asset' },
+    },
   },
   experimental: {
     // The `/api` rewrite proxies a copy of the request body, and that copy stops

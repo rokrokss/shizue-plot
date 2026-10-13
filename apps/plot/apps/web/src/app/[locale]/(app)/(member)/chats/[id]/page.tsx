@@ -68,6 +68,8 @@ import { reconcileSend } from '@/lib/reconcile';
 import { sanitizeCustomHtml } from '@/lib/sanitizeHtml';
 import { streamGeneration } from '@/lib/sse';
 import { loadWholeBranch } from '@/lib/scripts/branch';
+import { createLuaEngine, luaFunctionNames, luaScriptsOf } from '@/lib/scripts/lua/engine';
+import { createLuaSandbox } from '@/lib/scripts/lua/sandbox';
 import {
   createScriptRuntime,
   type PreparedGeneration,
@@ -758,7 +760,14 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
 
   /** The manual triggers a `{{button}}` may name, which then runs one rather than filling the composer. */
   const triggerNames = useMemo(
-    () => (scriptBundle ? manualTriggerNames(scriptBundle.triggers) : undefined),
+    () =>
+      scriptBundle
+        ? new Set([
+            ...manualTriggerNames(scriptBundle.triggers),
+            // A manual run calls the Lua global of its name, so a button may name one.
+            ...luaFunctionNames(luaScriptsOf(scriptBundle.triggers)),
+          ])
+        : undefined,
     [scriptBundle],
   );
 
@@ -892,23 +901,44 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       input: (text) => new Promise<string>((resolve) => setScriptPrompt({ kind: 'input', text, resolve })),
       select: (options, display) =>
         new Promise<string>((resolve) => setScriptPrompt({ kind: 'select', text: display ?? '', options, resolve })),
+      confirm: (text) => new Promise<boolean>((resolve) => setScriptPrompt({ kind: 'confirm', text, resolve })),
     }),
     [],
   );
-  const runtime = useMemo<ScriptRuntime | null>(
-    () =>
-      scriptBundle
-        ? createScriptRuntime({
-            chatId: id,
-            bundle: scriptBundle,
-            api: { send: apiSend },
+  const runtime = useMemo<ScriptRuntime | null>(() => {
+    if (!scriptBundle) return null;
+    const log = (entry: { kind: string; effect?: string; message: string }): void =>
+      console.warn('[scripts]', entry.kind, entry.effect ?? '', entry.message);
+    // A plot that carries Lua gets the sandbox; wasmoon is fetched on its first call, never before.
+    const engines = luaScriptsOf(scriptBundle.triggers).length
+      ? [
+          createLuaEngine({
+            triggers: scriptBundle.triggers,
+            lowLevelAccess: scriptBundle.lowLevelAccess,
+            sandbox: createLuaSandbox({
+              loadAssets: () => import('@/lib/scripts/lua/assets').then((assets) => assets.loadLuaAssets()),
+              onIdleKill: (reason) => log({ kind: 'limit', effect: 'triggerlua', message: `a Lua script still running between calls was stopped (${reason})` }),
+            }),
             ui: scriptUi,
-            onGlobalVariables: (globals) =>
-              setState((current) => (current ? { ...current, globalVariables: globals } : current)),
-          })
-        : null,
-    [id, scriptBundle, scriptUi],
-  );
+            llm: async (messages) =>
+              (await apiSend<{ result: string }>('POST', `/api/chats/${id}/script-llm`, { messages })).result,
+            log,
+          }),
+        ]
+      : [];
+    return createScriptRuntime({
+      chatId: id,
+      bundle: scriptBundle,
+      api: { send: apiSend },
+      ui: scriptUi,
+      engines,
+      log,
+      onGlobalVariables: (globals) =>
+        setState((current) => (current ? { ...current, globalVariables: globals } : current)),
+    });
+  }, [id, scriptBundle, scriptUi]);
+  // The sandbox goes with the runtime that opened it.
+  useEffect(() => () => runtime?.dispose(), [runtime]);
   /**
    * The scripts fold the branch as the server does, from the plot's defaults, so
    * nothing runs before both reads are in: a turn sent in the meantime would be
@@ -1076,13 +1106,78 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   }
 
   /**
+   * A `risu-btn` click: the card's Lua `onButtonClick`, and what it did
+   * committed on the head, as a manual trigger's is.
+   */
+  async function runLuaButton(data: string): Promise<void> {
+    const current = stateRef.current;
+    if (!runtime || !current || scriptsPending || !beginMutation()) return;
+    try {
+      const next = await runtime.button(data, await scriptViewOf(current));
+      if (next) mergeState(next);
+    } catch (caught) {
+      setError(toMessage(caught));
+    } finally {
+      endMutation();
+    }
+  }
+
+  /**
+   * The messages as the Lua `editDisplay` listeners draw them, by id — the
+   * screen's alone, and asked for whenever the branch or its fold moves. A
+   * message keeps the last answer it had until the next one arrives, so a
+   * redraw does not flash the text the listeners hide; the first time, it shows
+   * as it stands until they answer.
+   */
+  const [luaShown, setLuaShown] = useState<ReadonlyMap<string, string>>(() => new Map());
+  useEffect(() => {
+    if (!runtime?.editsDisplay || !customUi || !state) return;
+    let current = true;
+    const persona = personas.find((entry) => entry.id === state.chat.personaId);
+    const view: ScriptView = {
+      messages,
+      defaults: defaultVariables,
+      names: foldNames,
+      note: state.chat.note,
+      persona: persona?.description ?? '',
+      ...(globalVariables ? { globalVariables } : {}),
+      data: scriptData(lastMessageId + 1),
+    };
+    const items = messages.map((message) => ({ id: message.id, text: shownGreetings.get(message.id) ?? message.content }));
+    runtime.displayEdits(items, view, persistedVariables).then(
+      (shown) => {
+        if (current) setLuaShown(shown);
+      },
+      () => undefined,
+    );
+    return () => {
+      current = false;
+    };
+  }, [
+    runtime,
+    customUi,
+    state,
+    personas,
+    messages,
+    defaultVariables,
+    foldNames,
+    globalVariables,
+    scriptData,
+    lastMessageId,
+    shownGreetings,
+    persistedVariables,
+  ]);
+
+  /**
    * The messages as the display triggers draw them, where the plot has any —
-   * text for the screen alone, never stored. Over the stored branch and its
-   * fold, so a streamed token redraws none of it.
+   * text for the screen alone, never stored — over what the Lua display
+   * listeners made of them, as RisuAI runs the two. Over the stored branch and
+   * its fold, so a streamed token redraws none of it.
    */
   const scriptShown = useMemo(() => {
     const shown = new Map<string, string>();
-    if (!runtime?.rewritesDisplay || !customUi || !state) return shown;
+    if (!runtime || !customUi || !state) return shown;
+    if (!runtime.rewritesDisplay) return runtime.editsDisplay ? new Map(luaShown) : shown;
     const persona = personas.find((entry) => entry.id === state.chat.personaId);
     const view: ScriptView = {
       messages,
@@ -1095,7 +1190,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     };
     for (const message of messages) {
       const text = shownGreetings.get(message.id) ?? message.content;
-      const drawn = runtime.display(text, view, persistedVariables);
+      const drawn = runtime.display(luaShown.get(message.id) ?? text, view, persistedVariables);
       if (drawn !== text) shown.set(message.id, drawn);
     }
     return shown;
@@ -1112,6 +1207,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     lastMessageId,
     shownGreetings,
     persistedVariables,
+    luaShown,
   ]);
 
   async function run(
@@ -1821,7 +1917,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             if (scripted) {
               const name = scripted.getAttribute('data-shizue-trigger');
               if (name !== null) void runManualTrigger(name, scripted.getAttribute('data-shizue-trigger-id'));
-              else void runtime?.button(scripted.getAttribute('data-shizue-btn') ?? '');
+              else void runLuaButton(scripted.getAttribute('data-shizue-btn') ?? '');
               return;
             }
             const button = target.closest?.('[data-shizue-fill]');
