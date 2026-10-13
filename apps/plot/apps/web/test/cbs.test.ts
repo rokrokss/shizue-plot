@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { pickHashRand } from '@shizue/core/cbs';
 import { renderTemplate, RenderBudgetExhausted, type CbsContext } from '../src/lib/cbs';
 import { TAINT, stripTaint } from '../src/lib/taint';
 
@@ -38,8 +39,16 @@ describe('simple macros', () => {
     expect(render('{{char}}와 {{user}}, {{turn}}턴')).toBe('아리아와 민준, 7턴');
   });
 
-  it('reads variables through getvar and blanks an unknown key', () => {
-    expect(render('{{getvar::hp}}/{{getvar::max}} {{getvar::none}}')).toBe('40/100 ');
+  it('reads variables through getvar and writes RisuAI’s null for an unknown key', () => {
+    expect(render('{{getvar::hp}}/{{getvar::max}} {{getvar::none}}')).toBe('40/100 null');
+  });
+
+  it('still reads an unset variable as unset, not as the word null', () => {
+    // SillyTavern's `{{if}}` finds the word `null` true, and an unset variable false.
+    expect(render('{{if {{getvar::none}}}}있음{{else}}없음{{/if}}')).toBe('없음');
+    expect(render('{{if .none}}있음{{else}}없음{{/if}}')).toBe('없음');
+    expect(render('{{#if none}}있음{{/if}}{{calc::none + 1}}')).toBe('1');
+    expect(render('{{#each none}}x{{/each}}')).toBe('');
   });
 
   it('resolves an asset reference to its url and an unknown slug to nothing', () => {
@@ -97,7 +106,7 @@ describe('names that belong to Object.prototype', () => {
     // Given an ordinary object — which a caller may still hand us — `toString`
     // would otherwise resolve to a function and be rendered as its source.
     for (const name of NAMES) {
-      expect(render(`[{{getvar::${name}}}]`, { variables: {} }), name).toBe('[]');
+      expect(render(`[{{getvar::${name}}}]`, { variables: {} }), name).toBe('[null]');
       expect(render(`{{#each ${name}}}x{{/each}}`, { variables: {} }), name).toBe('');
       expect(render(`{{#if ${name}}}있음{{/if}}`, { variables: {} }), name).toBe('');
     }
@@ -223,16 +232,19 @@ describe("RisuAI's {{#each LIST as name}}", () => {
     );
   });
 
-  it('renders nothing for an empty array, or a list that came to nothing', () => {
+  it('renders nothing for an empty array, and an unset variable’s null as RisuAI does', () => {
     expect(render('{{#each [] as x}}[{{slot::x}}]{{/each}}')).toBe('');
-    expect(render('{{#each {{getvar::none}} as x}}[{{slot::x}}]{{/each}}')).toBe('');
+    // `{{getvar}}` of an unset variable is the word `null`, which is no JSON array
+    // and so — split on `§` — one item, as in RisuAI.
+    expect(render('{{#each {{getvar::none}} as x}}[{{slot::x}}]{{/each}}')).toBe('[null]');
   });
 
-  it('resolves each name to its own block, the inner one shadowing the outer', () => {
+  it('resolves each name to its own block, the outer one winning a shared name as in RisuAI', () => {
     expect(
       render('{{#each ["a","b"] as x}}{{#each ["1","2"] as y}}[{{slot::x}}{{slot::y}}]{{/each}}{{/each}}'),
     ).toBe('[a1][a2][b1][b2]');
-    expect(render('{{#each ["a"] as x}}{{#each ["1"] as x}}[{{slot::x}}]{{/each}}{{/each}}')).toBe('[1]');
+    // RisuAI pastes the outer block's items over `{{slot::x}}` before the inner block runs.
+    expect(render('{{#each ["a"] as x}}{{#each ["1"] as x}}[{{slot::x}}]{{/each}}{{/each}}')).toBe('[a]');
   });
 
   it('leaves a name no block gave as written', () => {
@@ -262,11 +274,19 @@ describe("RisuAI's {{#each LIST as name}}", () => {
     );
   });
 
-  it('is bounded like ours', () => {
-    const list = JSON.stringify(Array.from({ length: 6_000 }, () => 'x'));
-    expect(() =>
-      render('{{#each {{getvar::list}} as x}}{{slot::x}}{{/each}}', { variables: { list } }),
-    ).toThrow(RenderBudgetExhausted);
+  it('is paid for per iteration, and runs out rather than being cut short', () => {
+    // The core stops an `#each` at 5,000 iterations and keeps what it has; a
+    // status window with its tail missing is not one to draw, so the page's own
+    // allowance runs out first and the whole render is given up.
+    const list = (length: number) => JSON.stringify(Array.from({ length }, () => 'x'));
+    for (const length of [4_500, 6_000]) {
+      expect(() =>
+        render('{{#each {{getvar::list}} as x}}{{slot::x}}{{/each}}', { variables: { list: list(length) } }),
+      ).toThrow(RenderBudgetExhausted);
+    }
+    expect(render('{{#each {{getvar::list}} as x}}{{slot::x}}{{/each}}', { variables: { list: list(3) } })).toBe(
+      'xxx',
+    );
   });
 });
 
@@ -465,5 +485,109 @@ describe('taint marking', () => {
   it('carries the mark through a macro that reads a marked argument', () => {
     // The mark is stripped to parse the expression and put back on the answer.
     expect(marked(`{{calc::${TAINT}40${TAINT} + 2}}`)).toBe('#42#');
+  });
+});
+
+describe('what the browser tells RisuAI’s functions', () => {
+  // The branch after its greeting, numbered as `chatIndex` numbers it.
+  const branch: Partial<CbsContext> = {
+    messages: [
+      { role: 'user', data: '안녕', time: Date.UTC(2026, 9, 1, 3) },
+      { role: 'char', data: '<b>반가워</b>', time: Date.UTC(2026, 9, 1, 3, 1) },
+      { role: 'user', data: '잘 지냈어?', time: Date.UTC(2026, 9, 1, 3, 2) },
+    ],
+    wholeBranch: true,
+    chatIndex: 1,
+    lastMessageId: 2,
+    chatId: 'chat-1',
+  };
+
+  const marked = (template: string, overrides?: Partial<CbsContext>): string =>
+    renderTemplate(template, ctx(overrides), generous()).replaceAll(TAINT, '#');
+
+  it('answers the chat functions over a whole branch, from this message', () => {
+    expect(render('{{lastmessage}}|{{previous_user_chat}}|{{chat_index}}/{{lastmessageid}}', branch)).toBe(
+      '잘 지냈어?|안녕|1/2',
+    );
+    expect(render('{{previous_chat_log::1}}', branch)).toBe('&lt;b&gt;반가워&lt;/b&gt;');
+    expect(render('{{history::role}}', branch)).toBe(
+      '[&quot;user: 안녕&quot;,&quot;char: &lt;b&gt;반가워&lt;/b&gt;&quot;,&quot;user: 잘 지냈어?&quot;]',
+    );
+  });
+
+  it('leaves them as written over a stretch of the branch, keeping its own numbering', () => {
+    const windowed = { ...branch, wholeBranch: false };
+    expect(render('{{lastmessage}} {{history}} {{previous_user_chat}}', windowed)).toBe(
+      '{{lastmessage}} {{history}} {{previous_user_chat}}',
+    );
+    expect(render('{{chat_index}}/{{lastmessageid}}', windowed)).toBe('1/2');
+  });
+
+  it('never lets a message become markup, and marks it so a link built of it is inert', () => {
+    const tracker = {
+      ...branch,
+      messages: [{ role: 'char' as const, data: 'https://tracker.example.test/"><script>' }],
+      chatIndex: 0,
+      lastMessageId: 0,
+    };
+    expect(marked('<a href="{{lastmessage}}">{{lastmessage}}</a>', tracker)).toBe(
+      '<a href="#https://tracker.example.test/&quot;&gt;&lt;script&gt;#">#https://tracker.example.test/&quot;&gt;&lt;script&gt;#</a>',
+    );
+  });
+
+  it('says whose message it is, and whether it is the greeting', () => {
+    expect(render('{{role}} {{isfirstmsg}}', branch)).toBe('char 0');
+    expect(render('{{role}} {{isfirstmsg}}', { ...branch, chatIndex: 2 })).toBe('user 0');
+    expect(render('{{role}} {{isfirstmsg}}', { ...branch, chatIndex: -1 })).toBe('char 1');
+    // Without a place on the branch there is nothing to say.
+    expect(render('{{role}} {{isfirstmsg}}')).toBe('{{role}} {{isfirstmsg}}');
+  });
+
+  it('picks as RisuAI does: the chat, and the branch’s length', () => {
+    const index = Math.floor(pickHashRand(3, 'chat-1') * 4);
+    expect(render('{{pick::a::b::c::d}}', branch)).toBe(['a', 'b', 'c', 'd'][index]);
+    // One draw for the whole render, so two picks over the same options agree.
+    const both = render('{{pick::a::b::c::d}}{{pick::a::b::c::d}}', branch);
+    expect(both[0]).toBe(both[1]);
+  });
+
+  it('reads the reader’s global variables, and leaves getglobalvar as written without them', () => {
+    const globals = { globalVariables: { met: '1', toggle_dark: '1' } };
+    expect(render('{{getglobalvar::met}} {{getglobalvar::none}} {{? @met + 1}}', globals)).toBe('1 null 2');
+    expect(render('{{#when::toggle::dark}}어둡게{{/when}}', globals)).toBe('어둡게');
+    expect(render('{{#if @met}}만남{{/if}}', globals)).toBe('만남');
+    expect(render('{{getglobalvar::met}}')).toBe('{{getglobalvar::met}}');
+    expect(marked('{{getglobalvar::met}}', globals)).toBe('#1#');
+  });
+
+  it('lists the open images, and answers for the screen, the clock and the language', () => {
+    expect(render('{{assetlist}} {{emotionlist}}', { assetNames: ['face.png', 'smile'] })).toBe(
+      '[&quot;face.png&quot;,&quot;smile&quot;] [&quot;face.png&quot;,&quot;smile&quot;]',
+    );
+    expect(render('{{assetlist}}')).toBe('{{assetlist}}');
+    expect(render('{{metadata::language}}', { locale: 'ko' })).toBe('ko');
+    expect(render('{{comment::메모}}')).toBe('<div class="risu-comment">메모</div>');
+    expect(render('{{unixtime}}')).toMatch(/^\d+$/);
+    vi.stubGlobal('window', { innerWidth: 500, innerHeight: 900 });
+    try {
+      expect(render('{{screen_width}}x{{screen_height}}')).toBe('500x900');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('the display unescape', () => {
+  it('shows what #escape and #puredisplay kept as written, as text', () => {
+    expect(render('{{#escape}}{{getvar::hp}}{{/escape}}')).toBe('{{getvar::hp}}');
+    expect(render('{{#puredisplay}}{{getvar::hp}}{{/puredisplay}}')).toBe('{{getvar::hp}}');
+  });
+
+  it('turns an escaped angle bracket into an entity, never a tag', () => {
+    expect(render('{{deabo}}b{{deabc}}굵게{{<}}/b{{>}}')).toBe('&lt;b&gt;굵게&lt;/b&gt;');
+  });
+
+  it('leaves the markup #escape does not escape — only braces and parentheses, as RisuAI', () => {
+    expect(render('{{#escape}}<b>(굵게)</b>{{/escape}}')).toBe('<b>(굵게)</b>');
   });
 });

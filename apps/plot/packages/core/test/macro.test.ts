@@ -228,3 +228,42 @@ describe('imageMacroRefs', () => {
     ).toEqual(['smile', '프로필.png', '울음']);
   });
 });
+
+describe('applyMacros - RisuAI parity', () => {
+  const clock = { now: new Date('2026-01-02T23:30:00Z'), timeZone: 'Asia/Seoul', locale: 'ko' as const };
+
+  it("answers {{date}} and {{time}} itself only bare, leaving RisuAI's format strings to the evaluator", () => {
+    expect(applyMacros('{{date::YYYY}}년 {{time::HH시}}', { ...ctx, clock })).toBe('2026년 08시');
+  });
+
+  it("answers ST's {{time_UTC±N}} with the time at that offset, and nothing without a clock", () => {
+    expect(applyMacros('{{time_UTC+9}} {{time_UTC-5}} {{time_UTC+1.5}}', { ...ctx, clock })).toBe('08:30 18:30 01:00');
+    expect(applyMacros('{{time_UTC+9}}', ctx)).toBe('{{time_UTC+9}}');
+  });
+
+  it('reads <USER>, <Bot> and <char> tags in any case', () => {
+    expect(applyMacros('<USER>와 <Bot>, <char>', ctx)).toBe('민준와 아리아, 아리아');
+  });
+
+  it("draws {{pick}} RisuAI's way with the branch length: one draw for every pick, a new one as it grows", () => {
+    const options = Array.from({ length: 20 }, (_, i) => `o${i}`).join(',');
+    const text = `{{pick::${options}}}/{{pick::${options}}}`;
+    const at = (seedLength: number): string => applyMacros(text, { ...ctx, seed: 'chat-1', seedLength });
+    const [a, b] = at(3).split('/');
+    expect(a).toBe(b);
+    expect(at(3)).toBe(at(3));
+    expect([4, 5, 6, 7].some((length) => at(length) !== at(3))).toBe(true);
+  });
+
+  it('leaves {{comment}} and {{file}} as written outside the prompt, for a screen to draw', () => {
+    expect(applyMacros('a{{comment::메모}}b', ctx)).toBe('a{{comment::메모}}b');
+    expect(applyMacros('a{{comment::메모}}b', { ...ctx, data: {} })).toBe('ab');
+  });
+
+  it('runs the variable macros against the given map only when asked to', () => {
+    const variables = { hp: '3' };
+    expect(applyMacros('{{addvar::hp::2}}{{getvar::hp}}', { ...ctx, variables })).toBe('{{addvar::hp::2}}3');
+    expect(applyMacros('{{addvar::hp::2}}{{getvar::hp}}', { ...ctx, variables, runVariableMacros: true })).toBe('5');
+    expect(variables).toEqual({ hp: '5' });
+  });
+});

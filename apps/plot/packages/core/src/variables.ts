@@ -27,7 +27,15 @@
  * `__proto__`) is silently swallowed on assignment.
  */
 
-import { evaluateCbs, parseCbs, type CbsCall, type CbsHost, type CbsMacro, type CbsNode } from './cbs.js';
+import {
+  evaluateCbs,
+  parseCbs,
+  type CbsCall,
+  type CbsHost,
+  type CbsMacro,
+  type CbsNode,
+  type CbsValue,
+} from './cbs.js';
 
 /** Chat variables by name. Values are always strings; `addvar` does the math. */
 export type Variables = Record<string, string>;
@@ -130,19 +138,46 @@ export function diffVariables(target: Variables, base: Variables): VariableDelta
 }
 
 /**
- * `{{setvar::key::value}}` / `{{addvar::key::delta}}`, and `{{incvar::key}}` /
- * `{{decvar::key}}`, as the CBS evaluator reads a call: the name without case,
- * spaces, `_` or `-`, and arguments split where the author wrote separators. The
- * value runs to the closing braces, so it may contain `::`. A call with any other
- * number of arguments is not one of them, and is left as written — by the fold
- * and by `stripVariableMacros` alike.
+ * `{{setvar::key::value}}` / `{{addvar::key::delta}}`, RisuAI's
+ * `{{setdefaultvar::key::value}}`, and `{{incvar::key}}` / `{{decvar::key}}`, as
+ * the CBS evaluator reads a call: the name without case, spaces, `_` or `-`, and
+ * arguments split where the author wrote separators. The value runs to the
+ * closing braces, so it may contain `::`. A call with any other number of
+ * arguments is not one of them, and is left as written — by the fold and by
+ * `stripVariableMacros` alike.
  */
-type VariableOp = 'setvar' | 'addvar' | 'incvar' | 'decvar';
+type VariableOp = 'setvar' | 'setdefaultvar' | 'addvar' | 'incvar' | 'decvar';
 
 function variableOp({ name, args }: CbsCall): VariableOp | null {
-  if (name === 'setvar' || name === 'addvar') return args.length >= 2 ? name : null;
+  if (name === 'setvar' || name === 'setdefaultvar' || name === 'addvar') return args.length >= 2 ? name : null;
   if (name === 'incvar' || name === 'decvar') return args.length === 1 ? name : null;
   return null;
+}
+
+/**
+ * Runs `call` against `variables`, in place, when it is one of the variable
+ * macros, and answers with what it leaves behind — nothing. Undefined for any
+ * other call. The fold's host and SillyTavern's prompt (`MacroContext.runVariableMacros`)
+ * both run them through here, so the two cannot read a macro differently.
+ *
+ * `setdefaultvar` sets only a variable that is unset, empty or RisuAI's `null`
+ * — the three things RisuAI's `getvar` would show as nothing to go on.
+ */
+export function runVariableMacro(call: CbsCall, variables: Variables): CbsValue | undefined {
+  const op = variableOp(call);
+  if (!op) return undefined;
+  const key = call.args.at(1)!.value().text.trim();
+  if (op === 'setvar' || op === 'setdefaultvar') {
+    const current = readVariable(variables, key);
+    const settable = op === 'setvar' || current === undefined || current === '' || current === 'null';
+    if (key && settable) variables[key] = call.args.rest(2)!.value().text;
+    return { text: '' };
+  }
+  const delta = op === 'incvar' ? 1 : op === 'decvar' ? -1 : Number(call.args.rest(2)!.value().text.trim());
+  if (key && Number.isFinite(delta)) {
+    variables[key] = formatNumber(toNumber(readVariable(variables, key)) + delta);
+  }
+  return { text: '' };
 }
 
 /**
@@ -242,37 +277,61 @@ function replayableRandom(text: string): () => number {
 }
 
 /**
- * Folds one message into `variables`, in place, by running it through the CBS
- * evaluator with a host whose only macros are these four — RisuAI's `runVar`.
- * Whatever is nested in a key or a value is evaluated first, against the
- * variables as they stand at that point of the branch, so
- * `{{setvar::hp::{{calc::{{getvar::hp}}-3}}}}` takes three off; and a macro in
- * a branch of `{{#if}}`, `{{#when}}` or `{{if}}` that is not taken does not run.
- * A nested macro nothing here answers (`{{user}}`, `{{img::…}}`) stays in the
- * value as written, as it does under RisuAI's `runVar`.
+ * `#each` iterations one message may run while it is folded. The evaluator's own
+ * cap is per evaluation and sized for a screen; the fold reruns every message of
+ * the branch on every request, so it pays for far fewer.
  */
-function foldMessage(text: string, variables: Variables): void {
+const MAX_FOLD_ITERATIONS = 1_000;
+
+/**
+ * The names the fold answers `{{user}}` and `{{char}}` with, so a value that
+ * nests one stores the name rather than the macro. `char` is the text's origin
+ * as the prompt reads it: a message belongs to the work, so it is the plot's
+ * name. Without them both stay in the value as written — which is what every
+ * fold did before there were any, and what one that is not given them still does.
+ */
+/**
+ * The reader's name when they have chosen no persona. It lives here rather than
+ * with the prompt because the chat page folds variables too, and both folds have
+ * to answer `{{user}}` with the same name or a value built from it would read
+ * one way on screen and another in the prompt.
+ */
+export const DEFAULT_USER_NAME = '유저';
+
+export interface FoldOptions {
+  user?: string;
+  char?: string;
+}
+
+/**
+ * Folds one message into `variables`, in place, by running it through the CBS
+ * evaluator with a host whose only macros are the variable macros — RisuAI's
+ * `runVar` (`runVariableMacro`). Whatever is nested in a key or a value is
+ * evaluated first, against the variables as they stand at that point of the
+ * branch, so `{{setvar::hp::{{calc::{{getvar::hp}}-3}}}}` takes three off; a
+ * macro in a branch of `{{#if}}`, `{{#when}}` or `{{if}}` that is not taken does
+ * not run; and one in an `#each` body runs once per item, as RisuAI's does. A
+ * nested macro nothing here answers (`{{img::…}}`, the clock — and `{{user}}`
+ * and `{{char}}` unless `options` name them) stays in the value as written, as
+ * it does under RisuAI's `runVar`.
+ */
+function foldMessage(text: string, variables: Variables, options: FoldOptions): void {
+  let iterations = 0;
   const host: CbsHost = {
     variable: (name) => readVariable(variables, name),
     random: replayableRandom(text),
+    each: true,
+    iterate: () => {
+      if ((iterations += 1) > MAX_FOLD_ITERATIONS) throw new FoldBudgetExhausted();
+    },
     grow: (length) => {
       if (length > MAX_FOLD_CHARS) throw new FoldBudgetExhausted();
     },
     macro: (call) => {
-      const op = variableOp(call);
-      if (!op) return undefined;
-      const key = call.args.at(1)!.value().text.trim();
-      if (op === 'setvar') {
-        const value = call.args.rest(2)!.value().text;
-        if (key) variables[key] = value;
-        return { text: '' };
-      }
-      const delta =
-        op === 'incvar' ? 1 : op === 'decvar' ? -1 : Number(call.args.rest(2)!.value().text.trim());
-      if (key && Number.isFinite(delta)) {
-        variables[key] = formatNumber(toNumber(readVariable(variables, key)) + delta);
-      }
-      return { text: '' };
+      // `{{bot}}` and `<char>` reach here as `char`, `<user>` as `user`.
+      if (call.name === 'user' && options.user !== undefined) return { text: options.user };
+      if (call.name === 'char' && options.char !== undefined) return { text: options.char };
+      return runVariableMacro(call, variables);
     },
   };
   // Only what the macros do counts, not what the message reads as, so the prose
@@ -317,21 +376,29 @@ const toNumber = (value: string | undefined): number => {
  * `incvar`/`decvar` are `addvar` by 1 and -1, which is how ST defines them — so a
  * value that is not a number counts as 0 here too, where ST's `addvar` would
  * append the digit to the text instead.
+ *
+ * Every fold of one branch has to pass the same `options`, or two of them read a
+ * value nesting `{{user}}` differently — the server's and the reader's screen
+ * above all, whose deltas are measured one against the other.
  */
-export function computeVariables(items: readonly FoldItem[], defaults: Variables = {}): Variables {
+export function computeVariables(
+  items: readonly FoldItem[],
+  defaults: Variables = {},
+  options: FoldOptions = {},
+): Variables {
   // Copied rather than spread: a card's defaultVariables comes back from jsonb as
   // an ordinary object, and spreading it would hand the result a prototype again.
   const variables = adopt(defaults);
   for (const item of items) {
     const text = typeof item === 'string' ? item : item.content;
-    if (text && mayHoldVariableMacro(text)) foldMessage(text, variables);
+    if (text && mayHoldVariableMacro(text)) foldMessage(text, variables, options);
     if (typeof item !== 'string') layDelta(variables, item.variableDelta);
   }
   return variables;
 }
 
 /**
- * Whether the evaluator reads `node` as one of the four. Asked of the evaluator
+ * Whether the evaluator reads `node` as one of the variable macros. Asked of the evaluator
  * rather than parsed again here, so this and the fold cannot drift apart; a host
  * that answers every call stops it there, before it reads an argument.
  */
@@ -347,7 +414,7 @@ function isVariableMacro(source: string, node: CbsMacro): boolean {
 }
 
 /**
- * Drops every `{{setvar}}` / `{{addvar}}` / `{{incvar}}` / `{{decvar}}` macro,
+ * Drops every `{{setvar}}` / `{{setdefaultvar}}` / `{{addvar}}` / `{{incvar}}` / `{{decvar}}` macro,
  * whatever is nested in it (ST shows the new value where an `incvar` stood; here
  * it is protocol like the rest). Display only — the macros stay in the stored
  * message and in the prompt history, so the model keeps observing its own

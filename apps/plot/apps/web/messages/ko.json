@@ -453,13 +453,20 @@
         "malformed": "읽을 수 없는 줄 {count}개",
         "overLimit": "2만 개를 넘은 메시지 {count}개",
         "swipes": "메시지당 20개를 넘은 스와이프 {count}개",
-        "swipesOverRows": "대화당 2만 개 상한에 맞추느라 뺀 스와이프 {count}개"
+        "swipesOverRows": "대화당 2만 개 상한에 맞추느라 뺀 스와이프 {count}개",
+        "variables": "이름이나 값이 너무 길거나 상한을 넘은 변수 {count}개"
       },
       "unknownSpeaker": "화자를 알 수 없는 메시지 {count}개는 내레이션으로 들어왔습니다.",
       "warnings": {
         "world_missing": "로어북 파일이 없어 붙이지 못했습니다: {name}",
         "world_unreadable": "로어북 파일을 읽지 못해 빼고 가져왔습니다: {name}",
-        "extras_failed": "추가 로어북·스크립트를 붙이지 못했습니다: {message}"
+        "extras_failed": "추가 로어북·스크립트를 붙이지 못했습니다: {message}",
+        "chat_world_failed": "대화에 묶인 로어북을 붙이지 못했습니다: {name} ({message})"
+      },
+      "notices": {
+        "chat_world_attached": "대화에 묶여 있던 로어북 {name}을(를) 플롯 로어북에 붙였습니다. 이 플롯의 다른 대화에도 적용됩니다.",
+        "note_moved": "작가 노트(Author's Note)는 유저노트로 가져왔습니다. 위치·간격·역할 설정은 옮기지 못해, 매 턴 끝에서 네 번째 메시지 앞에 시스템 메시지로 들어갑니다.",
+        "note_off": "SillyTavern에서 꺼 둔(삽입 간격 0) 작가 노트는 가져오지 않았습니다."
       },
       "modelUnavailable": "대화를 가져오려면 대화에 쓸 모델이 있어야 합니다. <link>설정</link>에서 ChatGPT를 연결한 뒤 다시 시도하세요. 캐릭터는 그대로 들어왔습니다."
     }
@@ -880,7 +887,8 @@
         "depth_lore": "깊이 로어",
         "author_note": "유저노트",
         "post_history": "히스토리 뒤 지시",
-        "trailing": "마지막 지시"
+        "trailing": "마지막 지시",
+        "injection": "스크립트 주입"
       },
       "roles": {
         "user": "유저",

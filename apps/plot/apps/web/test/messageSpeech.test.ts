@@ -136,6 +136,17 @@ describe('a reply with several speakers in it', () => {
   });
 });
 
+describe('a member the card gives a nickname', () => {
+  it('speaks under it with their own face and name', () => {
+    const nicknamed: PublicMember[] = [{ ...ROSTER[0]!, nickname: '아리 씨' }, ROSTER[1]!];
+    render(row('아리 씨: 왔어?\n카이: 응.', 'assistant', { roster: nicknamed }));
+
+    expect(speakers()).toEqual(['아리아', '카이']);
+    expect(host.querySelector('.message-body img')?.getAttribute('src')).toBe('/avatars/aria.png');
+    expect(host.textContent).not.toContain('아리 씨');
+  });
+});
+
 describe('a reply that is nothing but the scene', () => {
   it('is drawn full width, dimmed, with no face and no name', () => {
     render(row('비가 그치지 않았다.'));

@@ -6,7 +6,7 @@
  * marks markdown reads, so a line with a description inside it is still one line.
  */
 import { describe, expect, it } from 'vitest';
-import { speechRuns } from '../src/lib/speechRuns';
+import { speakerAliases, speechRuns } from '../src/lib/speechRuns';
 
 const ROSTER = ['아리아', '카이'];
 
@@ -39,5 +39,32 @@ describe('a reply with more than one voice in it', () => {
   it('reads a half-written line as what it currently says', () => {
     expect(speechRuns('아리', ROSTER)).toEqual([{ name: null, text: '아리' }]);
     expect(speechRuns('아리아: 아직', ROSTER)).toEqual([{ name: '아리아', text: '아직' }]);
+  });
+});
+
+describe('a member who goes by a nickname', () => {
+  const aliases = speakerAliases([{ name: '아리아', nickname: '아리 씨' }, { name: '카이' }]);
+
+  it('is the member under either name, drawn under their own', () => {
+    expect(speechRuns('아리 씨: 왔어?\n카이: 응.', ROSTER, aliases)).toEqual([
+      { name: '아리아', text: '왔어?' },
+      { name: '카이', text: '응.' },
+    ]);
+  });
+
+  it('is one run when both names follow each other', () => {
+    expect(speechRuns('아리아: 왔어?\n아리 씨: *웃으며* 늦었네.', ROSTER, aliases)).toEqual([
+      { name: '아리아', text: '왔어?\n*웃으며* 늦었네.' },
+    ]);
+  });
+
+  it('never takes a nickname that is someone’s own name, or that someone else has first', () => {
+    const contested = speakerAliases([
+      { name: '아리아', nickname: '카이' },
+      { name: '카이', nickname: '별' },
+      { name: '세이', nickname: '별' },
+    ]);
+    expect([...contested]).toEqual([['별', '카이']]);
+    expect(speechRuns('카이: 응.', ['아리아', '카이', '세이'], contested)).toEqual([{ name: '카이', text: '응.' }]);
   });
 });

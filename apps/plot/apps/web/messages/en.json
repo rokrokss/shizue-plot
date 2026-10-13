@@ -453,13 +453,20 @@
         "malformed": "{count, plural, one {# unreadable line} other {# unreadable lines}}",
         "overLimit": "{count, plural, one {# message} other {# messages}} past 20,000",
         "swipes": "{count, plural, one {# swipe} other {# swipes}} past 20 per message",
-        "swipesOverRows": "{count, plural, one {# swipe} other {# swipes}} let go to fit the 20,000 per-chat limit"
+        "swipesOverRows": "{count, plural, one {# swipe} other {# swipes}} let go to fit the 20,000 per-chat limit",
+        "variables": "{count, plural, one {# variable} other {# variables}} too long or past the limits"
       },
       "unknownSpeaker": "{count, plural, one {# message} other {# messages}} with an unknown speaker came in as narration.",
       "warnings": {
         "world_missing": "Lorebook file missing, not attached: {name}",
         "world_unreadable": "Couldn't read the lorebook file, imported without it: {name}",
-        "extras_failed": "Couldn't attach the extra lorebooks and scripts: {message}"
+        "extras_failed": "Couldn't attach the extra lorebooks and scripts: {message}",
+        "chat_world_failed": "Couldn't attach the chat's lorebook {name}: {message}"
+      },
+      "notices": {
+        "chat_world_attached": "The lorebook bound to this chat, {name}, is now part of the plot's lorebook, so it also applies to the plot's other chats.",
+        "note_moved": "The author's note came over as this chat's note, but not its position, interval or role: here it goes in every turn as a system message, four messages from the end.",
+        "note_off": "The author's note was switched off in SillyTavern (interval 0), so it wasn't brought over."
       },
       "modelUnavailable": "Chats need a model to go on. Connect ChatGPT in <link>Settings</link>, then retry — the characters are already in."
     }
@@ -880,7 +887,8 @@
         "depth_lore": "Depth lore",
         "author_note": "Author's note",
         "post_history": "Post-history instructions",
-        "trailing": "Closing instruction"
+        "trailing": "Closing instruction",
+        "injection": "Script injection"
       },
       "roles": {
         "user": "User",

@@ -9,11 +9,14 @@ import {
   stripInlayMacros,
   withNarrationPrefix,
   type AssembledPrompt,
+  type FoldItem,
+  type FoldOptions,
   type HistoryMessage,
   type LoreTimedState,
   type MacroClock,
   type NarratorConfig,
   type Preset,
+  type PromptBranch,
   type PromptCharacter,
   type PromptPlot,
   type PromptReport,
@@ -94,15 +97,28 @@ export interface GenerationPlan {
    */
   turnBase: Variables;
   /**
+   * The names the chat's folds answer `{{user}}` and `{{char}}` with — the ones
+   * `variables` and `turnBase` were folded with, so the stored turn's delta is
+   * measured the same way.
+   */
+  fold: FoldOptions;
+  /** The reader's global variables on this plot, for `{{getglobalvar}}`. */
+  globalVariables: Variables;
+  /**
+   * Where `history` sits on the branch the turn is generated on, for RisuAI's
+   * chat functions and the draw `{{pick}}` makes. For a continue it counts the
+   * head being continued, which the assembler is not handed.
+   */
+  branch: PromptBranch;
+  /**
    * What the card's start triggers changed, in the reader's browser, before this
    * generation — a regenerate, a continue, an auto turn or a narration. A send
    * has none: the triggers ran for the user turn, and their writes are on it.
    */
   startDelta?: VariableDelta;
   /**
-   * The text the start triggers asked to put in the prompt, by place. Carried for
-   * the assembler, which does not place it yet: until it does, a request that
-   * brings injections generates as if it had none.
+   * The text the start triggers asked to put in the prompt, by place — RisuAI's
+   * three, which the assembler places (`PromptInjections` in @shizue/core).
    */
   injections?: PromptInjections;
   /**
@@ -113,7 +129,7 @@ export interface GenerationPlan {
   postProcess?: boolean;
   /** The reader's clock, for the time macros (see `requestClock`). */
   clock: MacroClock;
-  /** What keeps `{{pick}}` stable on this chat: its id. */
+  /** What `{{pick}}` draws from on this chat: its id, with the branch's length. */
   seed: string;
   /**
    * The lore records of the branch the turn is generated on, for the timed
@@ -342,7 +358,8 @@ async function withoutUnseeableImages(history: HistoryMessage[], model: string, 
   if (!history.some((turn) => turn.images?.length) || await supportsVision(model, deps.env, account)) return history;
   return history.map((turn) => {
     if (!turn.images?.length) return turn;
-    return { role: turn.role, content: withImageNote(turn.content, turn.images.length) };
+    const { images, ...rest } = turn;
+    return { ...rest, content: withImageNote(turn.content, images.length) };
   });
 }
 
@@ -385,8 +402,19 @@ async function buildRequestMessages(
     ...(plan.narrator ? { narrator: plan.narrator } : {}),
     preset: plan.preset,
     variables: plan.variables,
+    globalVariables: plan.globalVariables,
     clock: plan.clock,
     seed: plan.seed,
+    // The partial is not in the history the assembler reads, so not on its branch
+    // either — and where the partial is the greeting itself, there is none apart.
+    branch: !isContinue
+      ? plan.branch
+      : plan.branch.length <= 1
+        ? { length: 0 }
+        : { ...plan.branch, length: plan.branch.length - 1 },
+    // ChatGPT takes no assistant prefill: a continue is asked for, not resumed mid-turn.
+    model: { id: plan.model, maxContext: plan.contextBudget, prefill: false },
+    ...(plan.injections ? { injections: plan.injections } : {}),
     loreState: plan.loreState,
     assetNames: plan.assetNames,
     history,
@@ -415,6 +443,7 @@ async function buildRequestMessages(
       ...(partial ? [{ role: 'assistant' as const, content: partial }] : []),
     ],
     loreTriggers: prompt.loreTriggers,
+    ...(prompt.variableWrites ? { variableWrites: prompt.variableWrites } : {}),
     // The two appended turns are part of what is sent, so the report says so —
     // and the budget it shows is the chat's, before they were taken out of it.
     ...(prompt.report
@@ -563,7 +592,7 @@ async function runGeneration(
         if (text) {
           // Stored pending all the same, if the browser meant to post-process
           // it: the next time it opens the chat it finds the mark and finishes.
-          const stored = await persist(deps, plan, text, usage, request.loreTriggers);
+          const stored = await persist(deps, plan, text, usage, request);
           // The turn is on the branch whether or not anyone was listening, so what
           // it opened is opened; there is simply no event to say so on.
           await openUnlocks(deps, plan.chatId, stored.content);
@@ -572,7 +601,7 @@ async function runGeneration(
         return;
       }
 
-      const stored = await persist(deps, plan, text, usage, request.loreTriggers);
+      const stored = await persist(deps, plan, text, usage, request);
       // Evaluated on the raw text as well as at the commit: unlocks only ever
       // open, so the earlier answer costs nothing and saves the reader a wait.
       const unlockedAssetIds = await openUnlocks(deps, plan.chatId, stored.content);
@@ -635,22 +664,36 @@ interface StoredTurn {
  * plain fold of the stored text, exactly as the browser measures the delta it
  * commits after the output scripts (`diffVariables`), which replaces this one.
  *
+ * What a SillyTavern member's text wrote while the prompt was put together
+ * (`AssembledPrompt.variableWrites`) lands between the two: ST runs those macros
+ * as it builds the prompt, after the triggers and before the reply exists. It
+ * rides on the turn the prompt produced, so a regenerate — which folds the
+ * branch without the turn it replaces — writes them again, once, and the next
+ * turn reads them from here.
+ *
  * A continue rewrites the head, so the head is the one node here: what it held
- * before — its own delta included — then the start triggers, then the
- * continuation's macros. A continue with neither a start delta nor an old one
+ * before — its own delta included — then the start triggers, then the prompt's
+ * writes, then the continuation's macros. A continue with none of the three
  * stores none, as it always has.
  */
-function generatedDelta(plan: GenerationPlan, content: string, appended: string): VariableDelta | null {
+function generatedDelta(
+  plan: GenerationPlan,
+  content: string,
+  appended: string,
+  writes: VariableDelta | undefined,
+): VariableDelta | null {
+  const fold = (items: readonly FoldItem[], base: Variables): Variables =>
+    computeVariables(items, base, plan.fold);
   if (plan.target.kind === 'continue') {
     const head = plan.target.message;
-    if (!plan.startDelta && !head.variableDelta) return null;
-    const before = applyVariableDelta(computeVariables([head], plan.turnBase), plan.startDelta);
-    return diffVariables(computeVariables([appended], before), computeVariables([content], plan.turnBase));
+    if (!plan.startDelta && !writes && !head.variableDelta) return null;
+    const before = applyVariableDelta(applyVariableDelta(fold([head], plan.turnBase), plan.startDelta), writes);
+    return diffVariables(fold([appended], before), fold([content], plan.turnBase));
   }
-  if (!plan.startDelta) return null;
+  if (!plan.startDelta && !writes) return null;
   return diffVariables(
-    computeVariables([content], applyVariableDelta(plan.turnBase, plan.startDelta)),
-    computeVariables([content], plan.turnBase),
+    fold([content], applyVariableDelta(applyVariableDelta(plan.turnBase, plan.startDelta), writes)),
+    fold([content], plan.turnBase),
   );
 }
 
@@ -664,7 +707,7 @@ async function persist(
   plan: GenerationPlan,
   text: string,
   usage: Usage,
-  loreTriggers: string[],
+  { loreTriggers, variableWrites }: Pick<AssembledPrompt, 'loreTriggers' | 'variableWrites'>,
 ): Promise<StoredTurn> {
   const scriptState = plan.postProcess ? ('pending' as const) : null;
   if (plan.target.kind === 'continue') {
@@ -677,7 +720,7 @@ async function persist(
           content,
           promptTokens: usage.promptTokens,
           completionTokens: (target.completionTokens ?? 0) + usage.completionTokens,
-          variableDelta: storableDelta(generatedDelta(plan, content, text)),
+          variableDelta: storableDelta(generatedDelta(plan, content, text, variableWrites)),
           scriptState,
           // The text changed in place, so a script commit computed on the old
           // text — another tab's, finishing the turn as it was — is refused.
@@ -707,7 +750,7 @@ async function persist(
       promptTokens: usage.promptTokens,
       completionTokens: usage.completionTokens,
       loreTriggers: loreTriggers.length > 0 ? loreTriggers : null,
-      variableDelta: storableDelta(generatedDelta(plan, content, content)),
+      variableDelta: storableDelta(generatedDelta(plan, content, content, variableWrites)),
       scriptState,
     })
     .returning();

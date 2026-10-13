@@ -34,6 +34,31 @@ export interface SpeechBlock {
 }
 
 /**
+ * One member of the roster the parser reads prefixes against: the roster name,
+ * or the name with the other names a line may give it. A RisuAI card's
+ * `{{char}}` is its nickname, so the model reads about the member under that
+ * name and writes its lines under it too; the line is still the member's, and
+ * reads back under the roster name.
+ */
+export type SpeechRosterMember = string | { readonly name: string; readonly aliases?: readonly string[] };
+
+/**
+ * The roster name a prefix names. Roster names are asked first, all of them, so
+ * a nickname that happens to be another member's name reads as that member;
+ * among aliases the first member in roster order wins.
+ */
+function rosterName(prefix: string, roster: readonly SpeechRosterMember[]): string | undefined {
+  for (const member of roster) {
+    const name = typeof member === 'string' ? member : member.name;
+    if (name === prefix) return name;
+  }
+  for (const member of roster) {
+    if (typeof member !== 'string' && member.aliases?.some((alias) => alias.trim() === prefix)) return member.name;
+  }
+  return undefined;
+}
+
+/**
  * A speaker prefix: a name, a colon, and at most one space of separation. The
  * name is capped at 40 characters so an ordinary sentence containing a colon
  * cannot be read as a very long speaker.
@@ -84,14 +109,15 @@ function narratorBlocks(text: string): SpeechBlock[] {
 }
 
 /**
- * Assistant output: `이름: …` lines belong to the named roster member, every
- * other line is the narrator's 상황묘사, and consecutive lines with the same
- * speaker are one block. A prefix that names nobody on the roster is left alone —
- * the line stays narrator text, colon and all.
+ * Assistant output: `이름: …` lines belong to the named roster member — by its
+ * roster name or one of its aliases, and read back under the roster name either
+ * way — every other line is the narrator's 상황묘사, and consecutive lines with
+ * the same speaker are one block. A prefix that names nobody on the roster is
+ * left alone — the line stays narrator text, colon and all.
  *
  * A blank line is spacing: it neither starts a block nor ends one.
  */
-export function parseAssistantSpeech(content: string, roster: readonly string[]): SpeechBlock[] {
+export function parseAssistantSpeech(content: string, roster: readonly SpeechRosterMember[]): SpeechBlock[] {
   // A whole-turn `@:` is the narration convention, which says with a prefix what
   // an unprefixed line says here. Both read back as the narrator.
   if (isNarration(content)) return narratorBlocks(narrationBody(content));
@@ -100,7 +126,7 @@ export function parseAssistantSpeech(content: string, roster: readonly string[])
   for (const line of content.split(/\r?\n/)) {
     if (!line.trim()) continue;
     const match = SPEAKER_RE.exec(line);
-    const name = match ? roster.find((member) => member === match[1]!.trim()) : undefined;
+    const name = match ? rosterName(match[1]!.trim(), roster) : undefined;
     const speaker: SpeechSpeaker =
       name === undefined ? { kind: 'narrator' } : { kind: 'character', name };
     const body = name === undefined ? line : match![2]!;
@@ -135,9 +161,9 @@ export function parseUserSpeech(content: string): SpeechBlock[] {
  * The roster name a line's speaker prefix names, read the way
  * `parseAssistantSpeech` reads it; undefined when the line is the narrator's.
  */
-export function lineSpeaker(line: string, roster: readonly string[]): string | undefined {
+export function lineSpeaker(line: string, roster: readonly SpeechRosterMember[]): string | undefined {
   const match = SPEAKER_RE.exec(line);
-  return match ? roster.find((member) => member === match[1]!.trim()) : undefined;
+  return match ? rosterName(match[1]!.trim(), roster) : undefined;
 }
 
 /**
@@ -146,7 +172,7 @@ export function lineSpeaker(line: string, roster: readonly string[]): string | u
  * `roster` (by default `name` alone). Blank lines stay, as spacing. The
  * importers turn a character's prose into speech-protocol lines with it.
  */
-export function spokenBy(text: string, name: string, roster: readonly string[] = [name]): string {
+export function spokenBy(text: string, name: string, roster: readonly SpeechRosterMember[] = [name]): string {
   return text
     .split('\n')
     .map((line) => (!line.trim() || lineSpeaker(line, roster) !== undefined ? line : `${name}: ${line}`))

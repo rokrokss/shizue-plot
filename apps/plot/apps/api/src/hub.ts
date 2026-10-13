@@ -111,10 +111,16 @@ export async function membersByPlot(
   return grouped;
 }
 
-/** A member as every public surface names one: a face and a name, nothing else. */
+/**
+ * A member as every public surface names one: a face and a name, nothing else —
+ * and the nickname its card goes by, or null. A RisuAI card's `{{char}}` is that
+ * nickname, so the model writes the member's lines under it as well, and a
+ * reader's screen needs it to tell whose lines they are.
+ */
 export const toPublicMemberJson = (member: Character) => ({
   id: member.id,
   name: member.name,
+  nickname: member.card.nickname?.trim() || null,
   avatarUrl: avatarUrl(member),
 });
 

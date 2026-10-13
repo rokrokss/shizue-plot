@@ -1,5 +1,6 @@
 import {
   cardLicense,
+  characterName,
   coerceAssetUnlock,
   coerceNarrator,
   coercePlotProfiles,
@@ -80,6 +81,7 @@ import {
   normalizeTags,
   publicIntro,
   publicPlotQuery,
+  toPublicMemberJson,
   toPublicPlotJson,
   visibleToViewer,
 } from '../hub.js';
@@ -324,12 +326,14 @@ const firstPromptMacro = (plot: Plot, char: string): MacroContext => ({
 const toMemberJson = (plot: Plot, member: Character) => ({
   id: member.id,
   name: member.name,
+  // The same field every public member carries, so a screen reads one shape.
+  nickname: member.card.nickname?.trim() || null,
   card: member.card,
   avatarUrl: avatarUrl(member),
   orderIndex: member.orderIndex,
   importedFrom: member.importedFrom,
   license: cardLicense(member.card.extensions) ?? null,
-  loreConstantTokens: constantLoreTokens(member.card.lorebook, firstPromptMacro(plot, member.name)),
+  loreConstantTokens: constantLoreTokens(member.card.lorebook, firstPromptMacro(plot, characterName(member))),
   createdAt: member.createdAt.toISOString(),
   updatedAt: member.updatedAt.toISOString(),
 });
@@ -1140,9 +1144,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       // The one card field written for readers rather than for the model, so it is
       // the one that may leave with the public view.
       characters: members.map((member) => ({
-        id: member.id,
-        name: member.name,
-        avatarUrl: avatarUrl(member),
+        ...toPublicMemberJson(member),
         intro: member.card.intro ?? '',
       })),
       // The openings, uncut — this is the page a reader decides on, and the

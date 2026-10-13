@@ -225,6 +225,11 @@ export interface PublicMember {
   id: string;
   name: string;
   avatarUrl: string | null;
+  /**
+   * The card's nickname, which RisuAI's `{{char}}` is where a card sets one — so
+   * the model may write the member's lines under it. Null when the card has none.
+   */
+  nickname?: string | null;
 }
 
 /** The only shape a non-owner ever sees of a plot: no definitions. */

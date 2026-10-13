@@ -1499,3 +1499,280 @@ describe('assemblePrompt - style', () => {
     }
   });
 });
+
+describe('assemblePrompt - RisuAI host data', () => {
+  const now = new Date('2026-01-02T23:30:00Z');
+  const clock = { now, timeZone: 'Asia/Seoul', locale: 'ko' as const };
+  const timed: HistoryMessage[] = [
+    { role: 'assistant', content: '어서 와.', createdAt: 1_000 },
+    { role: 'user', content: '안녕', createdAt: 2_000 },
+    { role: 'assistant', content: '반가워', createdAt: 3_000 },
+    { role: 'user', content: '{{setvar::x::1}}또 왔어', createdAt: 4_000 },
+  ];
+  const withDescription = (description: string, extra: Partial<Parameters<typeof assemblePrompt>[0]> = {}) =>
+    assemblePrompt({
+      plot,
+      characters: [{ name: '아리아', card: { ...bareCard, description } }],
+      history: timed,
+      preset,
+      userName: '민준',
+      ...extra,
+    });
+
+  it("answers RisuAI's chat functions from the branch, the greeting kept apart", () => {
+    const { system } = withDescription(
+      '[{{lastmessageid}}|{{firstmsgindex}}|{{lastcharmessage}}|{{messageunixtimearray}}|{{lastmessage}}]',
+      { branch: { length: 4, greeting: { text: '어서 와.', index: -1 } } },
+    );
+    expect(system).toContain('[2|-1|반가워|["2000","3000","4000"]|{{setvar::x::1}}또 왔어]');
+  });
+
+  it('counts the stretch the memory trimmed off the front of the branch', () => {
+    const { system } = withDescription('[{{lastmessageid}}|{{previouschatlog::7}}|{{previouschatlog::0}}]', {
+      history: timed.slice(2),
+      branch: { length: 10, greeting: { text: '어서 와.', index: 0 } },
+    });
+    // Ten messages, the greeting and nine after it; only the last two are loaded.
+    expect(system).toContain('[8|반가워|{{previouschatlog::0}}]');
+  });
+
+  it('never counts the branch below nothing, whatever it is told', () => {
+    const { system } = withDescription('[{{lastmessageid}}]', {
+      history: [],
+      branch: { length: 0, greeting: { text: '어서 와.', index: -1 } },
+    });
+    expect(system).toContain('[-1]');
+  });
+
+  it("answers ST's {{lastUserMessage}} with the latest user turn, and {{input}} with nothing", () => {
+    const { system } = withDescription('[{{lastUserMessage}}|{{input}}]');
+    expect(system).toContain('[{{setvar::x::1}}또 왔어|]');
+  });
+
+  it("reads the card's own fields, the persona and the prompts as CBS", () => {
+    const { system } = assemblePrompt({
+      plot: { ...plot, description: '눈 내리는 {{char}}' },
+      characters: [
+        {
+          name: '아리아',
+          card: {
+            ...bareCard,
+            description: '[{{personality}}|{{scenario}}|{{persona}}|{{mainprompt}}]',
+            personality: '{{char}}는 차갑다',
+          },
+        },
+      ],
+      history,
+      preset: { main: 'MAIN {{user}}', postHistory: 'POST' },
+      userName: '민준',
+      personaText: '{{user}}는 여행자',
+    });
+    // `{{scenario}}` is the plot's setting, read where it is asked for: in the member's text.
+    expect(system).toContain('[아리아는 차갑다|눈 내리는 아리아|민준는 여행자|MAIN 민준]');
+  });
+
+  it('answers ST field macros, the group and the role of the text', () => {
+    const second: PromptCharacter = { name: '벨', card: { ...bareCard, description: '벨.' } };
+    const { system, messages } = assemblePrompt({
+      plot,
+      characters: [
+        {
+          name: '아리아',
+          card: {
+            ...bareCard,
+            description: '[{{mesExamples}}|{{charPrompt}}|{{charJailbreak}}|{{group}}|{{role}}]',
+            mesExample: 'EX {{char}}',
+            systemPrompt: 'SYS',
+            postHistoryInstructions: 'PHI',
+          },
+        },
+        second,
+      ],
+      history: [
+        { role: 'user', content: '{{role}}' },
+        { role: 'assistant', content: '{{role}}' },
+      ],
+      preset,
+      userName: '민준',
+    });
+    expect(system).toContain('[EX 아리아|SYS|PHI|아리아, 벨|system]');
+    const texts = messages.map((message) => promptText(message.content));
+    expect(texts).toContain('user');
+    expect(texts).toContain('char');
+  });
+
+  it('answers the clock with arguments in RisuAI tokens, bare in the reader language, and ST offsets', () => {
+    const { system } = withDescription(
+      '[{{date::YYYY-MM-DD}}|{{time::HH:mm}}|{{time}}|{{time_UTC+9}}|{{time_UTC-5}}]',
+      { clock },
+    );
+    expect(system).toContain('[2026-01-03|08:30|08:30|08:30|18:30]');
+  });
+
+  it("draws {{pick}} RisuAI's way once the branch is known: per turn, the same on a reroll", () => {
+    const options = Array.from({ length: 12 }, (_, i) => `o${i}`).join(',');
+    const draw = (length: number): string =>
+      withDescription(`[{{pick::${options}}}|{{pick::${options}}}]`, { seed: 'chat-1', branch: { length } }).system;
+    expect(draw(4)).toBe(draw(4));
+    const picked = /\[(o\d+)\|(o\d+)\]/.exec(draw(4))!;
+    // One draw for every pick in a text.
+    expect(picked[1]).toBe(picked[2]);
+    const turns = [5, 6, 7, 8, 9].map((length) => /\[(o\d+)\|/.exec(draw(length))![1]);
+    expect(turns.some((one) => one !== picked[1])).toBe(true);
+  });
+
+  it('reads global variables, and the whole enabled book for {{lorebook}}', () => {
+    const entry = loreEntry({ content: '서리', keys: ['눈'], name: '날씨' });
+    const off = loreEntry({ content: '꺼짐', enabled: false });
+    const { system } = assemblePrompt({
+      plot: { ...plot, description: '[{{getglobalvar::seen}}|{{? @seen + 1}}]', lorebook: [entry, off] },
+      characters: [{ name: '아리아', card: { ...bareCard, description: 'BOOK{{lorebook}}' } }],
+      history,
+      preset,
+      userName: '민준',
+      globalVariables: { seen: '2' },
+    });
+    expect(system).toContain('[2|3]');
+    const book = JSON.parse(/BOOK(.*)/.exec(system)![1]!) as string[];
+    expect(book.map((one) => JSON.parse(one))).toEqual([
+      expect.objectContaining({ key: '눈', content: '서리', comment: '날씨', alwaysActive: true, mode: 'normal' }),
+    ]);
+  });
+
+  it('runs #each in the prompt, and sends a text whose expansion runs away as written', () => {
+    expect(withDescription('{{#each [1,2,3] as n}}<{{slot::n}}>{{/each}}').system).toContain('<1><2><3>');
+    const runaway = '{{#each {{range::[3000]}} as n}}{{range::[1000]}}{{/each}}';
+    expect(withDescription(runaway).system).toContain(runaway);
+  });
+
+  it("maps RisuAI's display escapes back on what it sends", () => {
+    const { system, messages } = withDescription('{{decbo}}x{{decbc}} {{#escape}}(y){{/escape}}', {
+      authorNote: '{{bo}}',
+    });
+    expect(system).toContain('{x} (y)');
+    expect(messages.map((message) => promptText(message.content))).toContain('{{');
+  });
+
+  it("says nothing for {{comment}} in the prompt, as RisuAI's prompt does", () => {
+    expect(withDescription('a{{comment::메모}}b').system).toContain('ab');
+  });
+});
+
+describe('assemblePrompt - nickname', () => {
+  const nicknamed: PromptCharacter = {
+    name: '아리아 블랑',
+    card: { ...card, nickname: '아리', lorebook: [loreEntry({ content: '{{char}}의 로어' })] },
+  };
+
+  it("reads {{char}} as the card's nickname in its own text, and keeps the roster name on the headers", () => {
+    const { system, messages } = assemblePrompt({
+      plot,
+      characters: [nicknamed],
+      history,
+      preset,
+      userName: '민준',
+    });
+    expect(system).toContain(`${characterHeader('아리아 블랑')}\n서리 골짜기의 마녀.\n\n아리의 성격: 무뚝뚝하다.`);
+    expect(system).toContain('아리의 로어');
+    const examples = messages
+      .map((message) => promptText(message.content))
+      .filter((text) => text.startsWith(exampleHeader('아리아 블랑')));
+    expect(examples[0]).toBe(`${exampleHeader('아리아 블랑')}\n민준: 예시 질문 하나\n아리: 예시 답변 하나`);
+  });
+});
+
+describe('assemblePrompt - injections', () => {
+  it("places RisuAI's three, as written: before the newest turn, after the history, at the very end", () => {
+    const { messages } = assemblePrompt({
+      plot,
+      characters: [bareAria],
+      history,
+      preset,
+      userName: '민준',
+      injections: { start: '{{char}} START', historyend: 'END', promptend: 'LAST' },
+    });
+    const texts = messages.map((message) => promptText(message.content));
+    const newest = texts.indexOf('네 번째 유저 발화입니다.');
+    expect(texts[newest - 1]).toBe('{{char}} START');
+    expect(texts.slice(newest + 1)).toEqual(['END', 'POST', 'LAST']);
+    const injected = messages.filter((message) =>
+      ['{{char}} START', 'END', 'LAST'].includes(promptText(message.content)),
+    );
+    expect(injected.map((message) => message.role)).toEqual(['system', 'system', 'system']);
+  });
+
+  it('charges them to the budget, evicting history rather than themselves', () => {
+    const big = '말 '.repeat(400).trim();
+    const base = { plot, characters: [bareAria], history, preset, userName: '민준', maxResponseTokens: 0 };
+    // Exactly the room everything takes without the injection.
+    const contextBudget = assemblePrompt({ ...base, report: true }).report!.totals.used;
+    const without = assemblePrompt({ ...base, contextBudget });
+    const withIt = assemblePrompt({ ...base, contextBudget, injections: { promptend: big } });
+    const turns = (prompt: typeof without): number =>
+      prompt.messages.filter((message) => message.role !== 'system').length;
+    expect(turns(withIt)).toBeLessThan(turns(without));
+    expect(promptText(withIt.messages.at(-1)!.content)).toBe(big);
+  });
+
+  it('goes where the history would be when there is none', () => {
+    const { messages } = assemblePrompt({
+      plot,
+      characters: [bareAria],
+      history: [],
+      preset,
+      userName: '민준',
+      injections: { start: 'S', historyend: 'E' },
+    });
+    expect(messages.map((message) => promptText(message.content))).toEqual(['S', 'E', 'POST']);
+  });
+});
+
+describe("assemblePrompt - a SillyTavern member's variable macros", () => {
+  const tavern = (description: string, extra: Partial<PromptCharacter> = {}): PromptCharacter => ({
+    name: '아리아',
+    card: { ...bareCard, description },
+    sillyTavern: true,
+    ...extra,
+  });
+
+  it('runs them while the prompt is built, says nothing, and hands back what they wrote', () => {
+    const variables = { hp: '10' };
+    const result = assemblePrompt({
+      plot,
+      characters: [tavern('{{incvar::seen}}{{addvar::hp::-3}}마녀 {{getvar::hp}}.')],
+      history,
+      preset,
+      userName: '민준',
+      variables,
+    });
+    expect(result.system).toContain('마녀 7.');
+    expect(result.system).not.toContain('incvar');
+    expect(result.variableWrites).toEqual({ hp: '7', seen: '1' });
+    // The caller's map is the branch's state, and stays it.
+    expect(variables).toEqual({ hp: '10' });
+  });
+
+  it('is read by a {{getvar}} later in the same prompt, the history included', () => {
+    const { messages } = assemblePrompt({
+      plot,
+      characters: [tavern('{{setvar::mood::calm}}')],
+      history: [{ role: 'user', content: '기분: {{getvar::mood}}' }],
+      preset,
+      userName: '민준',
+    });
+    expect(messages.map((message) => promptText(message.content))).toContain('기분: calm');
+  });
+
+  it("leaves them as written in any other member's text, and in the history", () => {
+    const result = assemblePrompt({
+      plot,
+      characters: [tavern('{{setvar::mood::calm}}', { sillyTavern: undefined })],
+      history: [{ role: 'user', content: '{{setvar::mood::angry}}' }],
+      preset,
+      userName: '민준',
+    });
+    expect(result.system).toContain('{{setvar::mood::calm}}');
+    expect(result.messages.map((message) => promptText(message.content))).toContain('{{setvar::mood::angry}}');
+    expect(result.variableWrites).toBeUndefined();
+  });
+});

@@ -453,13 +453,20 @@
         "malformed": "読み込めない行{count}件",
         "overLimit": "2万件を超えたメッセージ{count}件",
         "swipes": "1メッセージ20件を超えたスワイプ{count}件",
-        "swipesOverRows": "チャットごとの上限(2万件)に収めるために外したスワイプ{count}件"
+        "swipesOverRows": "チャットごとの上限(2万件)に収めるために外したスワイプ{count}件",
+        "variables": "名前や値が長すぎるか上限を超えた変数{count}件"
       },
       "unknownSpeaker": "話者が分からないメッセージ{count}件は、ナレーションとして入りました。",
       "warnings": {
         "world_missing": "ロアブックのファイルがないため付けられませんでした:{name}",
         "world_unreadable": "ロアブックのファイルを読み込めなかったため、除いて読み込みました:{name}",
-        "extras_failed": "追加ロアブック・スクリプトを付けられませんでした:{message}"
+        "extras_failed": "追加ロアブック・スクリプトを付けられませんでした:{message}",
+        "chat_world_failed": "チャットに紐づいたロアブックを付けられませんでした:{name}({message})"
+      },
+      "notices": {
+        "chat_world_attached": "このチャットに紐づいていたロアブック「{name}」をプロットのロアブックに付けました。このプロットのほかのチャットにも適用されます。",
+        "note_moved": "作者の注釈(Author's Note)はユーザーノートとして読み込みました。位置・間隔・役割の設定は移せないため、毎ターン、末尾から4番目のメッセージの前にシステムメッセージとして入ります。",
+        "note_off": "SillyTavern でオフ(挿入間隔0)になっていた作者の注釈は読み込みませんでした。"
       },
       "modelUnavailable": "チャットを読み込むには、チャットに使えるモデルが必要です。<link>設定</link>で ChatGPT を連携してから再試行してください。キャラクターはすでに読み込まれています。"
     }
@@ -880,7 +887,8 @@
         "depth_lore": "深さロア",
         "author_note": "ユーザーノート",
         "post_history": "履歴後の指示",
-        "trailing": "最後の指示"
+        "trailing": "最後の指示",
+        "injection": "スクリプト挿入"
       },
       "roles": {
         "user": "ユーザー",

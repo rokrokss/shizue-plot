@@ -12,7 +12,7 @@
 import type { ImportedChatMessage } from '@shizue/core';
 import { characters, chats, messages, plots, type NewMessage } from '@shizue/db';
 import { listEnabledModels } from '@shizue/llm';
-import { and, asc, count, eq, inArray, max, sql } from 'drizzle-orm';
+import { and, asc, count, eq, inArray, isNull, max, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { randomUUID } from 'node:crypto';
 import type { AppDeps, AppEnv, Tx } from '../deps.js';
@@ -22,6 +22,7 @@ import { memoryChannel, overSummaryThreshold } from '../memory.js';
 import { attachedNoteIds } from '../notes.js';
 import { loadOwnedPlot } from '../plots.js';
 import { rebased } from '../relationship.js';
+import { optionalVariableDelta, storableDelta } from '../scriptState.js';
 import { buildPath } from '../tree.js';
 import { isUuid, optionalBoolean, optionalString, readJsonBody, requireString, requireUuidParam } from '../util.js';
 import { resolvePersona, toChatJson } from './chats.js';
@@ -45,6 +46,12 @@ const INSERT_CHUNK_ROWS = 1_000;
 const MAX_IMPORT_FILE_NAME_LENGTH = 255;
 /** A chat title from a file name; the chat list shows one line of it. */
 const MAX_IMPORT_TITLE_LENGTH = 255;
+/**
+ * The author's note an imported chat brings. The chat's own note has no cap of
+ * its own (`PATCH /api/chats/:id`); this is one turn's length, which no note
+ * written to steer a scene comes near.
+ */
+export const MAX_IMPORT_NOTE_LENGTH = MAX_IMPORT_VERSION_LENGTH;
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
@@ -347,16 +354,38 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
    * is queued in this transaction and folds it a chunk at a time on the owner's
    * account. Over the threshold with no memory channel to fold it with, nothing is
    * queued and the answer says so.
+   *
+   * What the source kept for the chat as a whole rather than for any one message
+   * comes here, once the messages are all in:
+   * - `variables`, the chat's variables as the source left them, become the
+   *   `variable_delta` of every root — each version of the first message — so the
+   *   fold starts every branch, and every swipe of the opening, from them. Held
+   *   to the limits any delta is (`checkVariableDelta`); the browser leaves out
+   *   what would not pass before it sends.
+   * - `note`, the chat's author's note, becomes the chat's own note.
    */
   app.post('/:id/import/complete', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
-    const backfill = optionalBoolean(await readJsonBody(c), 'backfillMemory') === true;
+    const body = await readJsonBody(c);
+    const backfill = optionalBoolean(body, 'backfillMemory') === true;
+    const variables = optionalVariableDelta(body, 'variables');
+    const note = optionalString(body, 'note');
+    // U+0000 is refused for the reason a delta refuses it: Postgres cannot store it.
+    if (note !== undefined && (note.length > MAX_IMPORT_NOTE_LENGTH || note.includes('\u0000'))) {
+      throw badRequest('invalid_request', `note must be at most ${MAX_IMPORT_NOTE_LENGTH} characters, without U+0000`);
+    }
     // Before the lock: resolving the channel may read the owner's model catalog.
     const channel = backfill ? await memoryChannel(deps, userId) : null;
 
     const { chat, memoryBackfill } = await deps.db.transaction(async (tx) => {
       const locked = await lockImportingChat(tx, id, userId);
+      if (variables) {
+        await tx
+          .update(messages)
+          .set({ variableDelta: storableDelta(variables) })
+          .where(and(eq(messages.chatId, id), isNull(messages.parentId)));
+      }
       const all = await tx
         .select()
         .from(messages)
@@ -369,7 +398,12 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
 
       const [row] = await tx
         .update(chats)
-        .set({ importing: false, relationship: rebased(locked.relationship, depth), updatedAt: new Date() })
+        .set({
+          importing: false,
+          relationship: rebased(locked.relationship, depth),
+          ...(note !== undefined ? { note } : {}),
+          updatedAt: new Date(),
+        })
         .where(eq(chats.id, id))
         .returning();
       if (memoryBackfill === 'queued') await enqueueJob(tx, 'memory_backfill', { chatId: id });

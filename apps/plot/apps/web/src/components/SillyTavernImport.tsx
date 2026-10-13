@@ -547,7 +547,7 @@ function StepRow({ step, result }: { step: ImportStep; result: StepResult }) {
   const toMessage = useErrorMessage();
   const dropped = result.dropped;
   const droppedParts = dropped
-    ? (['hidden', 'empty', 'malformed', 'overLimit', 'swipes', 'swipesOverRows'] as const)
+    ? (['hidden', 'empty', 'malformed', 'overLimit', 'swipes', 'swipesOverRows', 'variables'] as const)
         .filter((key) => dropped[key] > 0)
         .map((key) => t(`dropped.${key}`, { count: dropped[key] }))
     : [];
@@ -589,6 +589,11 @@ function StepRow({ step, result }: { step: ImportStep; result: StepResult }) {
       {dropped && dropped.unknownSpeaker > 0 ? (
         <p className="text-xs text-muted">{t('unknownSpeaker', { count: dropped.unknownSpeaker })}</p>
       ) : null}
+      {(result.notices ?? []).map((notice, index) => (
+        <p key={`notice-${index}`} className="text-xs text-muted">
+          {t(`notices.${notice.code}`, { name: notice.name ?? '' })}
+        </p>
+      ))}
       {(result.warnings ?? []).map((warning, index) => (
         <p key={index} className="text-xs text-danger">
           {t(`warnings.${warning.code}`, {

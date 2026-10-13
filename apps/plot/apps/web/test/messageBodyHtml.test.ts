@@ -194,3 +194,43 @@ describe('while streaming', () => {
     expect(host.textContent).not.toContain('<span');
   });
 });
+
+/**
+ * RisuAI's display escapes — what `{{#escape}}`, `{{decbo}}`, `{{<}}` and the
+ * rest leave in a greeting so nothing reads it as syntax — drawn as the
+ * characters they stand for, and only ever as text.
+ */
+describe('display escapes in a message', () => {
+  const LT = '';
+  const GT = '';
+
+  it('shows an escaped tag as its text, never as an element', () => {
+    render({ content: `${LT}b${GT}굵게${LT}/b${GT}` });
+
+    expect(host.textContent).toContain('<b>굵게</b>');
+    expect(host.querySelector('.message-body b')).toBeNull();
+    expect(islands()).toHaveLength(0);
+  });
+
+  it('shows escaped braces as braces, never as a picture or a macro', () => {
+    render({ content: 'img::kiss 그리고 \\{\\{user\\}\\}' });
+
+    expect(host.textContent).toContain('{{img::kiss}} 그리고 {{user}}');
+    expect(host.querySelector('img')).toBeNull();
+  });
+
+  it('names no speaker with an escaped colon', () => {
+    render({ content: '아리아 안녕', roster: ROSTER });
+
+    expect(host.querySelector('[data-testid="speech-character"]')).toBeNull();
+    expect(host.textContent).toContain('아리아: 안녕');
+  });
+
+  it('keeps an escaped tag text inside markup too', () => {
+    render({ content: `<div style="color:red">${LT}i${GT}HP${LT}/i${GT}</div>` });
+
+    const panel = islands()[0]!.querySelector('div');
+    expect(panel?.textContent).toBe('<i>HP</i>');
+    expect(panel?.querySelector('i')).toBeNull();
+  });
+});

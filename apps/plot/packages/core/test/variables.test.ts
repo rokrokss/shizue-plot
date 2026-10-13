@@ -487,3 +487,36 @@ describe('checkVariableDelta', () => {
     expect(checkVariableDelta({ a: '1234' }, { keys: 5, chars: 5 }).ok).toBe(true);
   });
 });
+
+describe('computeVariables - names, setdefaultvar and #each', () => {
+  it('stores {{user}} and {{char}} as the names it is given, and as written without them', () => {
+    const text = '{{setvar::who::{{user}}와 {{char}}, <bot>}}';
+    expect(computeVariables([text])).toEqual({ who: '{{user}}와 {{char}}, <bot>' });
+    expect(computeVariables([text], {}, { user: '민준', char: '서리 골짜기' })).toEqual({
+      who: '민준와 서리 골짜기, 서리 골짜기',
+    });
+  });
+
+  it("sets with {{setdefaultvar}} only what is unset, empty or RisuAI's null", () => {
+    const text = '{{setdefaultvar::a::1}}{{setdefaultvar::b::1}}{{setdefaultvar::c::1}}{{setdefaultvar::d::1}}';
+    expect(computeVariables([text], { b: '', c: 'null', d: '7' })).toEqual({ a: '1', b: '1', c: '1', d: '7' });
+  });
+
+  it('runs the variable macros of an #each body once per item', () => {
+    expect(computeVariables(['{{#each [1,2,3] as n}}{{addvar::sum::{{slot::n}}}}{{/each}}'])).toEqual({ sum: '6' });
+    expect(computeVariables(['{{#each list}}{{addvar::count::1}}{{/each}}'], { list: 'a, b' })).toEqual({
+      list: 'a, b',
+      count: '2',
+    });
+  });
+
+  it('stops an #each that runs away, keeping what folded before it', () => {
+    const variables = computeVariables(['{{setvar::a::1}}{{#each {{range::[5000]}} as n}}{{incvar::n}}{{/each}}']);
+    expect(variables['a']).toBe('1');
+    expect(Number(variables['n'])).toBeLessThanOrEqual(1_000);
+  });
+
+  it('strips {{setdefaultvar}} from a screen like the rest', () => {
+    expect(stripVariableMacros('앞{{setdefaultvar::a::1}}뒤')).toBe('앞뒤');
+  });
+});

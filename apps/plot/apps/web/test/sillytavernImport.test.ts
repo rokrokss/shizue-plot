@@ -7,6 +7,7 @@
  */
 import type { ImportedChatMessage } from '@shizue/core';
 import type {
+  StAuthorNote,
   StCharacter,
   StChatFile,
   StFile,
@@ -45,8 +46,20 @@ function file(path: string, text = path): StFile {
   return { path, size: bytes.length, read: async () => bytes };
 }
 
+/** What the stand-in converter reads a chat file's text as. */
+interface Conversion {
+  userName?: string;
+  messages?: number;
+  versions?: number;
+  /** `chat_metadata`, as the real converter hands it on. */
+  variables?: Record<string, string>;
+  droppedVariables?: number;
+  authorNote?: StAuthorNote;
+  worldName?: string;
+}
+
 /** A chat file whose text the stand-in converter reads as its whole conversion. */
-function chatFile(path: string, conversion: { userName?: string; messages?: number; versions?: number }): StChatFile {
+function chatFile(path: string, conversion: Conversion): StChatFile {
   const name = path.split('/').pop()!.replace('.jsonl', '');
   return { file: file(path, JSON.stringify(conversion)), name };
 }
@@ -100,6 +113,9 @@ interface FakeChat {
   sha256: string;
   importing: boolean;
   messages: ImportedChatMessage[];
+  /** What the completion carried for the chat as a whole. */
+  variables?: Record<string, string>;
+  note?: string;
 }
 
 /**
@@ -124,11 +140,13 @@ function fakeApi() {
   const json = (status: number, body: unknown): Response =>
     new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
-  function member(fileName: string, index: number): PlotMember {
+  /** The linked world a card came with is its lorebook, as the import route makes it. */
+  function member(fileName: string, index: number, worldInfo: string | null): PlotMember {
+    const lorebook = worldInfo ? (JSON.parse(worldInfo) as { entries: string[] }).entries.map(lore) : [];
     return {
       id: id('member'),
       name: fileName.replace('.png', ''),
-      card: {} as PlotMember['card'],
+      card: { lorebook } as unknown as PlotMember['card'],
       avatarUrl: null,
       orderIndex: index,
       importedFrom: { fileName, sha256: sha(`characters/${fileName}`), importedAt: '' },
@@ -176,7 +194,8 @@ function fakeApi() {
       const form = body as FormData;
       const card = form.get('file') as File;
       const world = form.get('worldInfo') as File | null;
-      uploads.push({ path, file: card.name, worldInfo: world ? await world.text() : null });
+      const worldInfo = world ? await world.text() : null;
+      uploads.push({ path, file: card.name, worldInfo });
       if (path === '/api/plots/import') {
         const plotId = id('plot');
         const plot = {
@@ -184,13 +203,13 @@ function fakeApi() {
           name: card.name.replace('.png', ''),
           lorebook: [lore('own')],
           customUi: { displayScripts: [{ in: 'card', out: '', order: 0, enabled: true }] },
-          characters: [member(card.name, 0)],
+          characters: [member(card.name, 0, worldInfo)],
         } as unknown as PlotDetail;
         plots.set(plotId, plot);
         return json(201, plot);
       }
       const plot = plots.get(path.split('/')[3]!)!;
-      const joined = member(card.name, plot.characters.length);
+      const joined = member(card.name, plot.characters.length, worldInfo);
       plot.characters.push(joined);
       return json(201, joined);
     }
@@ -225,8 +244,11 @@ function fakeApi() {
     if (chatMatch) {
       const chat = chats.get(chatMatch[1]!)!;
       if (chatMatch[2]) {
+        const done = read() as { backfillMemory?: boolean; variables?: Record<string, string>; note?: string };
         chat.importing = false;
-        return json(200, { chat: { id: chat.id }, memoryBackfill: read()['backfillMemory'] ? 'queued' : 'not_needed' });
+        if (done.variables) chat.variables = done.variables;
+        if (done.note !== undefined) chat.note = done.note;
+        return json(200, { chat: { id: chat.id }, memoryBackfill: done.backfillMemory ? 'queued' : 'not_needed' });
       }
       chat.messages.push(...(read()['messages'] as ImportedChatMessage[]));
       return json(200, { inserted: 1, total: chat.messages.length });
@@ -262,11 +284,15 @@ function deps(api: Api): ImportDeps & { casts: { members: { name: string; avatar
     casts,
     convertChat: (text, cast) => {
       casts.push(cast);
-      const { userName = '', messages = 2, versions = 1 } = JSON.parse(text) as {
-        userName?: string;
-        messages?: number;
-        versions?: number;
-      };
+      const {
+        userName = '',
+        messages = 2,
+        versions = 1,
+        variables,
+        droppedVariables = 0,
+        authorNote,
+        worldName,
+      } = JSON.parse(text) as Conversion;
       return {
         userName,
         characterName: '',
@@ -275,7 +301,10 @@ function deps(api: Api): ImportDeps & { casts: { members: { name: string; avatar
           versions: Array.from({ length: versions }, (__, version) => `line ${index}.${version}`),
           selected: 0,
         })),
-        skipped: { hidden: 1, empty: 0, unknownSpeaker: 0, malformed: 0, overLimit: 0 },
+        variables: variables ?? null,
+        ...(authorNote ? { authorNote } : {}),
+        ...(worldName ? { worldName } : {}),
+        skipped: { hidden: 1, empty: 0, unknownSpeaker: 0, malformed: 0, overLimit: 0, variables: droppedVariables },
       };
     },
     lorebookEntries: (json) => (json as { entries: string[] }).entries.map(lore),
@@ -879,6 +908,137 @@ describe('runImport', () => {
     expect(api.plots.size).toBe(1);
     expect(api.plots.get('plot-1')!.characters.map((each) => each.name)).toEqual(['Alice', 'Bob']);
     expect(second['group:g1']!.status).toBe('done');
+  });
+});
+
+// ── what a chat keeps beside its messages ───────────────────────────────────
+
+describe('a chat’s own state', () => {
+  const placed: StAuthorNote = { text: '비가 온다.', interval: 1, position: 1, depth: 4, role: 0 };
+
+  it('carries the variables and the author’s note on the completion', async () => {
+    const api = fakeApi();
+    const manifest = library({
+      characters: [
+        character('A.png', 'A', {
+          chats: [
+            chatFile('chats/A/kept.jsonl', {
+              variables: { hp: '3', ['__proto__']: 'a name' },
+              droppedVariables: 2,
+              authorNote: placed,
+            }),
+            chatFile('chats/A/moved.jsonl', { authorNote: { ...placed, depth: 6 } }),
+            chatFile('chats/A/off.jsonl', { authorNote: { ...placed, interval: 0 } }),
+            chatFile('chats/A/plain.jsonl', {}),
+          ],
+        }),
+      ],
+    });
+    const { results } = await runAll(api, manifest);
+    const chat = (path: string) => [...api.chats.values()].find((each) => each.sha256 === sha(path))!;
+
+    const kept = chat('chats/A/kept.jsonl');
+    expect(kept.variables).toEqual({ hp: '3', ['__proto__']: 'a name' });
+    expect(Object.keys(kept.variables!)).toContain('__proto__');
+    expect(kept.note).toBe('비가 온다.');
+    expect(results['chat:chats/A/kept.jsonl']!.dropped!.variables).toBe(2);
+    expect(results['chat:chats/A/kept.jsonl']!.notices).toBeUndefined();
+
+    // Placed elsewhere in ST: the note comes, and the reader is told where it goes now.
+    expect(chat('chats/A/moved.jsonl').note).toBe('비가 온다.');
+    expect(results['chat:chats/A/moved.jsonl']!.notices).toEqual([{ code: 'note_moved' }]);
+    // Switched off in ST: it stays behind, and the reader is told.
+    expect(chat('chats/A/off.jsonl').note).toBeUndefined();
+    expect(results['chat:chats/A/off.jsonl']!.notices).toEqual([{ code: 'note_off' }]);
+
+    const plain = chat('chats/A/plain.jsonl');
+    expect(plain.variables).toBeUndefined();
+    expect(plain.note).toBeUndefined();
+    expect(Object.values(results).every((result) => result.status === 'done')).toBe(true);
+  });
+
+  it('puts the lorebook bound to a chat onto its plot, each entry once', async () => {
+    const api = fakeApi();
+    const manifest = library({
+      characters: [
+        character('Alice.png', 'Alice', {
+          worldName: 'Wonderland',
+          extraWorlds: ['Tea'],
+          chats: [
+            chatFile('chats/Alice/diary1.jsonl', { worldName: 'Diary' }),
+            chatFile('chats/Alice/diary2.jsonl', { worldName: 'Diary' }),
+            chatFile('chats/Alice/own.jsonl', { worldName: 'Wonderland' }),
+            chatFile('chats/Alice/tea.jsonl', { worldName: 'Tea' }),
+            chatFile('chats/Alice/lost.jsonl', { worldName: 'Nowhere' }),
+          ],
+        }),
+      ],
+      worlds: {
+        Wonderland: file('worlds/Wonderland.json', JSON.stringify({ entries: ['rabbit'] })),
+        Tea: file('worlds/Tea.json', JSON.stringify({ entries: ['tea'] })),
+        // One entry the plot already has from the extra book, one it does not.
+        Diary: file('worlds/Diary.json', JSON.stringify({ entries: ['tea', 'secret'] })),
+      },
+    });
+    const { results } = await runAll(api, manifest);
+
+    // The extras' PATCH, then the diary's — before the chat that brought it is made.
+    const writes = api.writes();
+    expect(writes.filter((route) => route.startsWith('PATCH '))).toEqual([
+      'PATCH /api/plots/plot-1',
+      'PATCH /api/plots/plot-1',
+    ]);
+    expect(writes.lastIndexOf('PATCH /api/plots/plot-1')).toBe(writes.indexOf('POST /api/chats/import') - 1);
+    // Only what the plot did not hold: the second diary chat, the character's own
+    // linked world (in her card) and the extra book add nothing.
+    expect(api.plots.get('plot-1')!.lorebook.map((entry) => entry.content)).toEqual(['own', 'tea', 'secret']);
+
+    for (const [path, name] of [
+      ['chats/Alice/diary1.jsonl', 'Diary'],
+      ['chats/Alice/diary2.jsonl', 'Diary'],
+      ['chats/Alice/own.jsonl', 'Wonderland'],
+      ['chats/Alice/tea.jsonl', 'Tea'],
+    ] as const) {
+      expect(results[`chat:${path}`]!.notices).toEqual([{ code: 'chat_world_attached', name }]);
+      expect(results[`chat:${path}`]!.warnings).toBeUndefined();
+    }
+    expect(results['chat:chats/Alice/lost.jsonl']!.warnings).toEqual([{ code: 'world_missing', name: 'Nowhere' }]);
+    expect(Object.values(results).every((result) => result.status === 'done')).toBe(true);
+  });
+
+  it('adds the bound lorebook once when a retry follows a failed create', async () => {
+    const api = fakeApi();
+    const manifest = library({
+      characters: [character('A.png', 'A', { chats: [chatFile('chats/A/x.jsonl', { worldName: 'Diary' })] })],
+      worlds: { Diary: file('worlds/Diary.json', JSON.stringify({ entries: ['secret'] })) },
+    });
+    api.failures.set('POST /api/chats/import', [{ status: 500, code: 'internal_error' }]);
+    const review = await reviewOf(api, manifest);
+    const steps = planImport(review, defaultSelection(review), DEFAULT_OPTIONS);
+    const dependencies = deps(api);
+    const first = await runImport(inputOf(manifest, steps), initialResults(steps), dependencies);
+    expect(first['chat:chats/A/x.jsonl']!.status).toBe('failed');
+
+    const second = await runImport(inputOf(manifest, steps), first, dependencies);
+    expect(second['chat:chats/A/x.jsonl']!.status).toBe('done');
+    expect(second['chat:chats/A/x.jsonl']!.notices).toEqual([{ code: 'chat_world_attached', name: 'Diary' }]);
+    expect(api.patches).toHaveLength(1);
+    expect(api.plots.get('plot-1')!.lorebook.map((entry) => entry.content)).toEqual(['own', 'secret']);
+  });
+
+  it('brings the chat over when its lorebook cannot be attached, and says so', async () => {
+    const api = fakeApi();
+    const manifest = library({
+      characters: [character('A.png', 'A', { chats: [chatFile('chats/A/x.jsonl', { worldName: 'Diary' })] })],
+      worlds: { Diary: file('worlds/Diary.json', JSON.stringify({ entries: ['secret'] })) },
+    });
+    api.failures.set('PATCH /api/plots/plot-1', [{ status: 500, code: 'internal_error' }]);
+    const { results } = await runAll(api, manifest);
+    const result = results['chat:chats/A/x.jsonl']!;
+    expect(result.status).toBe('done');
+    expect(result.warnings).toMatchObject([{ code: 'chat_world_failed', name: 'Diary', error: { code: 'internal_error' } }]);
+    expect(result.notices).toBeUndefined();
+    expect(api.chats.size).toBe(1);
   });
 });
 

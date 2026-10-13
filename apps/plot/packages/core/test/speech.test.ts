@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseAssistantSpeech, parseUserSpeech, type SpeechBlock } from '../src/speech.js';
+import { lineSpeaker, parseAssistantSpeech, parseUserSpeech, spokenBy, type SpeechBlock } from '../src/speech.js';
 
 const roster = ['아리아', '민수'] as const;
 
@@ -130,5 +130,27 @@ describe('parseUserSpeech', () => {
   it('has nothing to say about an empty turn', () => {
     expect(parseUserSpeech('   ')).toEqual([]);
     expect(parseUserSpeech('@:  ')).toEqual([]);
+  });
+});
+
+describe('parseAssistantSpeech - aliases', () => {
+  const members = [{ name: '아리아 블랑', aliases: ['아리'] }, '민수'];
+
+  it("reads a member's alias as that member, under the roster name", () => {
+    expect(shape(parseAssistantSpeech('아리: 안녕.\n아리아 블랑: 또 보네.\n민수: 응.', members))).toEqual([
+      'character(아리아 블랑) → dialogue:안녕.\n또 보네.',
+      'character(민수) → dialogue:응.',
+    ]);
+  });
+
+  it("lets a roster name win over another member's alias of the same spelling", () => {
+    const clashing = [{ name: '아리아', aliases: ['민수'] }, '민수'];
+    expect(shape(parseAssistantSpeech('민수: 응.', clashing))).toEqual(['character(민수) → dialogue:응.']);
+  });
+
+  it('reads the same lines with a plain list of names as it always has', () => {
+    expect(lineSpeaker('아리: 안녕', roster)).toBeUndefined();
+    expect(lineSpeaker('아리: 안녕', members)).toBe('아리아 블랑');
+    expect(spokenBy('안녕\n아리: 응', '민수', members)).toBe('민수: 안녕\n아리: 응');
   });
 });

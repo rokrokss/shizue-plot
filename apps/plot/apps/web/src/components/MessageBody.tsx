@@ -16,6 +16,7 @@ import Markdown, { type Components } from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
+import { unescapeCbs } from '@shizue/core/cbs';
 import { stripVariableMacros } from '@shizue/core/variables';
 import { readLockKind, renderImageTokens, type AssetResolver } from '@/lib/assets';
 import {
@@ -40,7 +41,7 @@ import {
 import { rehypeDialogueQuotes } from '@/lib/markdown/quotes';
 import { rehypeWordReveal } from '@/lib/markdown/reveal';
 import { isExternalUrl, isSameOriginUrl, MESSAGE_SCOPE_CLASS } from '@/lib/sanitizeHtml';
-import { speechRuns } from '@/lib/speechRuns';
+import { speakerAliases, speechRuns } from '@/lib/speechRuns';
 import type { DisplayScript, PublicMember } from '@/lib/types';
 import { Avatar } from './Avatar';
 import { ChatImage } from './ChatImage';
@@ -361,31 +362,44 @@ export const MessageBody = memo(function MessageBody({
    * markup, where markdown is not read. A reference holds no blank line, so no
    * cut ever splits one. The speaker split runs over each stretch of prose; a
    * stretch of markup is drawn as the markup it is.
+   *
+   * Last comes RisuAI's display unescape (`unescapeCbs`), once per stretch: the
+   * stand-ins `#escape` and the display-escape functions leave in a greeting — or
+   * that a RisuAI history brought along — become the characters they stand for
+   * once the variable macros, the image references, the cut into markup and the
+   * speaker split have had their turn. So a `\{\{img::x\}\}` stays the text it was
+   * written as rather than becoming a picture, a stand-in `<b>` never turns a
+   * stretch into markup, and a stand-in colon names no speaker. `<` and `>` come
+   * back as entities, which both the markdown and the sanitizer read as text. The
+   * markdown itself still reads what follows, so restored parentheses can close a
+   * `[label](url)` — held to the same link and image rules as one the model wrote.
+   * A display script's island is not touched here: its template had the same pass
+   * before its sanitizer (`renderTemplate`).
    */
   const runs = useMemo<(TextRun[] | null)[]>(
-    () =>
-      segments.map((segment) => {
+    () => {
+      const names = roster.map((member) => member.name);
+      const aliases = speakerAliases(roster);
+      return segments.map((segment) => {
         if (segment.kind !== 'text') return null;
         return markupChunks(stripVariableMacros(segment.text)).flatMap((chunk): TextRun[] => {
           if (chunk.html) {
-            const markup = renderImageTokensAsHtml(chunk.text, assets, resolveAsset);
+            const markup = unescapeCbs(renderImageTokensAsHtml(chunk.text, assets, resolveAsset), 'html');
             return [{ name: null, narration: false, html: true, blocks: [markup] }];
           }
           const text = renderImageTokens(chunk.text, assets, resolveAsset);
           if (roster.length === 0) {
-            return [{ name: null, narration: false, html: false, blocks: splitBlocks(text) }];
+            return [{ name: null, narration: false, html: false, blocks: splitBlocks(unescapeCbs(text, 'html')) }];
           }
-          return speechRuns(
-            text,
-            roster.map((member) => member.name),
-          ).map((run) => ({
+          return speechRuns(text, names, aliases).map((run) => ({
             name: run.name,
             narration: run.name === null,
             html: false,
-            blocks: splitBlocks(run.text),
+            blocks: splitBlocks(unescapeCbs(run.text, 'html')),
           }));
         });
-      }),
+      });
+    },
     [segments, assets, resolveAsset, roster],
   );
 

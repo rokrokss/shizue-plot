@@ -11,11 +11,19 @@ import {
   scanSillyTavern,
   stFilesFromFolder,
   stFilesFromZip,
+  stNoteKeepsPlace,
   ZipError,
   type StCast,
   type StFile,
   type ZipSource,
 } from '../src/sillytavern/index.js';
+import {
+  checkVariableDelta,
+  MAX_DELTA_CHARS,
+  MAX_DELTA_KEYS,
+  MAX_VARIABLE_NAME_LENGTH,
+  MAX_VARIABLE_VALUE_LENGTH,
+} from '../src/variables.js';
 import { buildPngWithTextChunks } from './helpers/png.js';
 
 /* ------------------------------------------------------------- builders */
@@ -500,7 +508,8 @@ describe('convertSillyTavernChat', () => {
         // The blank swipe is dropped and the selection follows the one it pointed at.
         { role: 'assistant', versions: ['하루: 첫째', '하루: 좋아.'], selected: 1 },
       ],
-      skipped: { hidden: 0, empty: 0, unknownSpeaker: 0, malformed: 0, overLimit: 0 },
+      variables: null,
+      skipped: { hidden: 0, empty: 0, unknownSpeaker: 0, malformed: 0, overLimit: 0, variables: 0 },
     });
   });
 
@@ -528,7 +537,7 @@ describe('convertSillyTavernChat', () => {
       { role: 'assistant', versions: ['해가 진다.'], selected: 0 },
       { role: 'assistant', versions: ['하루: 이미 붙어 있다\n하루:붙어 있다\n하루: 둘째 줄'], selected: 0 },
     ]);
-    expect(chat.skipped).toEqual({ hidden: 2, empty: 1, unknownSpeaker: 0, malformed: 2, overLimit: 0 });
+    expect(chat.skipped).toEqual({ hidden: 2, empty: 1, unknownSpeaker: 0, malformed: 2, overLimit: 0, variables: 0 });
   });
 
   it('attributes group turns by avatar, then by name, and counts a speaker it cannot place', () => {
@@ -551,6 +560,136 @@ describe('convertSillyTavernChat', () => {
     const chat = convertSillyTavernChat(jsonl([{ chat_metadata: {} }, ...lines]), solo);
     expect(chat.messages).toHaveLength(MAX_CHAT_MESSAGES);
     expect(chat.skipped.overLimit).toBe(3);
+  });
+
+  it('reads the chat variables as ST reads them back', () => {
+    const bom = String.fromCharCode(0xfeff);
+    const chat = convertSillyTavernChat(
+      bom +
+        jsonl([
+          {
+            user_name: 'unused',
+            character_name: 'unused',
+            chat_metadata: {
+              variables: {
+                hp: 95,
+                mood: '좋음',
+                code: '007',
+                blank: '',
+                flag: true,
+                off: false,
+                gone: null,
+                bag: ['검', '방패'],
+                // An object with keys of its own named like the methods String() would call.
+                stats: { toString: 1, valueOf: 2 },
+                ['__proto__']: 'a name like any other',
+              },
+            },
+          },
+          { name: '하루', is_user: false, mes: '안녕' },
+        ]),
+      solo,
+    );
+    expect(chat.variables).not.toBeNull();
+    // Null prototype: the names are a card's or a script's, `__proto__` among them.
+    expect(Object.getPrototypeOf(chat.variables)).toBeNull();
+    expect({ ...chat.variables }).toEqual({
+      hp: '95',
+      mood: '좋음',
+      code: '007',
+      blank: '',
+      flag: '1',
+      off: '0',
+      gone: '0',
+      bag: '["검","방패"]',
+      stats: '{"toString":1,"valueOf":2}',
+      ['__proto__']: 'a name like any other',
+    });
+    expect(Object.keys(chat.variables!)).toContain('__proto__');
+    expect(chat.skipped.variables).toBe(0);
+    // What it hands on passes the check the API holds a delta to.
+    expect(checkVariableDelta({ ...chat.variables }).ok).toBe(true);
+    expect(chat.messages).toHaveLength(1);
+  });
+
+  it('leaves out the variables past the delta limits, and counts them', () => {
+    const header = (variables: Record<string, unknown>) =>
+      convertSillyTavernChat(jsonl([{ chat_metadata: { variables } }, { name: '하루', mes: '안녕' }]), solo);
+
+    const odd = header({
+      ok: '1',
+      ['n'.repeat(MAX_VARIABLE_NAME_LENGTH + 1)]: '1',
+      long: 'x'.repeat(MAX_VARIABLE_VALUE_LENGTH + 1),
+      nul: 'a\u0000b',
+      ['nul\u0000name']: '1',
+      fine: 'x'.repeat(MAX_VARIABLE_VALUE_LENGTH),
+    });
+    expect(Object.keys(odd.variables!)).toEqual(['ok', 'fine']);
+    expect(odd.skipped.variables).toBe(4);
+
+    const many = header(Object.fromEntries(Array.from({ length: MAX_DELTA_KEYS + 2 }, (_, i) => [`v${i}`, `${i}`])));
+    expect(Object.keys(many.variables!)).toHaveLength(MAX_DELTA_KEYS);
+    expect(many.variables!['v0']).toBe('0');
+    expect(many.skipped.variables).toBe(2);
+
+    // Eleven values that each fit, past the total from the eleventh on; a small
+    // one after it still fits.
+    const values = Object.fromEntries(
+      Array.from({ length: 11 }, (_, i) => [`big${i}`, 'x'.repeat(MAX_VARIABLE_VALUE_LENGTH - 10)]),
+    );
+    const big = header({ ...values, small: '1' });
+    const total = Object.entries(big.variables!).reduce((sum, [name, value]) => sum + name.length + value.length, 0);
+    expect(total).toBeLessThanOrEqual(MAX_DELTA_CHARS);
+    expect(big.variables!['small']).toBe('1');
+    expect(big.skipped.variables).toBe(1);
+    expect(checkVariableDelta({ ...big.variables }).ok).toBe(true);
+
+    // Nothing usable is no variables at all.
+    const none = header({ ['n'.repeat(MAX_VARIABLE_NAME_LENGTH + 1)]: '1' });
+    expect(none.variables).toBeNull();
+    expect(none.skipped.variables).toBe(1);
+    expect(header({}).variables).toBeNull();
+  });
+
+  it('reads the author’s note with ST’s defaults for what the file leaves out', () => {
+    const noteOf = (meta: Record<string, unknown>) =>
+      convertSillyTavernChat(jsonl([{ chat_metadata: meta }, { name: '하루', mes: '안녕' }]), solo).authorNote;
+
+    const placed = noteOf({ note_prompt: '비가 온다.\r\n천천히.', note_interval: 1, note_position: 1, note_depth: 4, note_role: 0 });
+    expect(placed).toEqual({ text: '비가 온다.\n천천히.', interval: 1, position: 1, depth: 4, role: 0 });
+    expect(stNoteKeepsPlace(placed!)).toBe(true);
+
+    // Absent keys are ST's defaults, which are where our note goes.
+    const bare = noteOf({ note_prompt: '짧게.' });
+    expect(bare).toEqual({ text: '짧게.', interval: 1, position: 1, depth: 4, role: 0 });
+    expect(stNoteKeepsPlace(bare!)).toBe(true);
+
+    // A hand-edited file's numeric strings are read as numbers; garbage is the default.
+    expect(noteOf({ note_prompt: 'x', note_depth: '2', note_role: 'assistant' })).toMatchObject({ depth: 2, role: 0 });
+
+    for (const moved of [
+      { note_interval: 3 },
+      { note_interval: 0 },
+      { note_position: 0 },
+      { note_position: 2 },
+      { note_depth: 6 },
+      { note_role: 1 },
+    ]) {
+      expect(stNoteKeepsPlace(noteOf({ note_prompt: 'x', ...moved })!)).toBe(false);
+    }
+    expect(noteOf({ note_prompt: 'x', note_interval: 0 })!.interval).toBe(0);
+
+    expect(noteOf({ note_prompt: '   ', note_interval: 1 })).toBeUndefined();
+    expect(noteOf({ note_interval: 1 })).toBeUndefined();
+  });
+
+  it('names the World Info file bound to the chat', () => {
+    const worldOf = (meta: unknown) =>
+      convertSillyTavernChat(jsonl([{ chat_metadata: meta }, { name: '하루', mes: '안녕' }]), solo).worldName;
+    expect(worldOf({ world_info: ' 비밀 장부 ' })).toBe('비밀 장부');
+    expect(worldOf({ world_info: '' })).toBeUndefined();
+    expect(worldOf({ world_info: 3 })).toBeUndefined();
+    expect(worldOf({})).toBeUndefined();
   });
 });
 

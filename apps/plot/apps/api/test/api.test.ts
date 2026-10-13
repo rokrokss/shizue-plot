@@ -7751,6 +7751,57 @@ describe('chat import', () => {
     expect(await db.select().from(jobs)).toHaveLength(1);
   });
 
+  it('lays the chat’s variables on every version of its opening and takes its note, at the completion', async () => {
+    const cookie = await signUp('chat-import-state@example.com');
+    const plot = await createPlot(cookie);
+    const { chat } = await importChat(cookie, plot.id, [
+      turn('assistant', ['인사 A', '인사 B'], 1),
+      turn('user', ['안녕']),
+      turn('assistant', ['{{addvar::hp::-5}}답']),
+    ]);
+    const finish = (body: Record<string, unknown>) =>
+      json(cookie, `/api/chats/${chat.id}/import/complete`, 'POST', { backfillMemory: false, ...body });
+
+    // Checked before anything is written: the chat is still importing after each.
+    for (const body of [
+      { variables: { hp: 3 } },
+      { variables: ['hp'] },
+      { variables: { ['n'.repeat(257)]: '1' } },
+      { note: 3 },
+      { note: 'a'.repeat(100_001) },
+      { note: 'a\u0000b' },
+    ]) {
+      const res = await finish(body);
+      expect(res.status, JSON.stringify(body)).toBe(400);
+      expect((await readJson(res)).code).toBe('invalid_request');
+    }
+    expect((await readJson(await request(cookie, `/api/chats/${chat.id}`))).chat.importing).toBe(true);
+    expect((await rowsOf(chat.id)).every((row) => row.variableDelta === null)).toBe(true);
+
+    const done = await finish({ variables: { hp: '100', mood: '좋음', constructor: '7' }, note: '비가 온다.' });
+    expect(done.status, await done.clone().text()).toBe(200);
+    expect((await readJson(done)).chat).toMatchObject({ importing: false, note: '비가 온다.' });
+
+    // Every root — each swipe of the opening — carries them, and nothing else does.
+    const rows = await rowsOf(chat.id);
+    const roots = rows.filter((row) => row.parentId === null);
+    expect(roots.map((row) => row.content)).toEqual(['인사 A', '인사 B']);
+    for (const root of roots) expect(root.variableDelta).toEqual({ hp: '100', mood: '좋음', constructor: '7' });
+    expect(rows.filter((row) => row.parentId !== null).every((row) => row.variableDelta === null)).toBe(true);
+
+    // The fold starts from them: the reply's own macro goes on from the imported value.
+    const exported = await readJson(await request(cookie, `/api/chats/${chat.id}/export`));
+    expect(exported.variableTimeline.map((snapshot: any) => snapshot.variables)).toEqual([
+      { hp: '100', mood: '좋음', constructor: '7' },
+      { hp: '95', mood: '좋음', constructor: '7' },
+    ]);
+
+    // Without either, the completion leaves the chat's note and the roots alone.
+    const plain = await importChat(cookie, plot.id, [turn('assistant', ['인사'])], { sha256: hashOf('plain') });
+    expect((await readJson(await complete(cookie, plain.chat.id))).chat.note).toBe('');
+    expect((await rowsOf(plain.chat.id))[0]!.variableDelta).toBeNull();
+  });
+
   it('tells which of a backup’s files are already here, among the caller’s own', async () => {
     const alice = await signUp('lookup-alice@example.com');
     const bob = await signUp('lookup-bob@example.com');
@@ -8726,6 +8777,8 @@ describe('plot hub', () => {
         {
           id: member.id,
           name: '공개 멤버',
+          // The name a card's `{{char}}` reads as, which the model writes lines under too.
+          nickname: null,
           avatarUrl: null,
           intro: '멤버를 소개하는 한 줄.',
         },
@@ -8782,9 +8835,10 @@ describe('plot hub', () => {
       {
         id: first.id,
         name: '첫 멤버',
+        nickname: null,
         avatarUrl: `/api/plots/${plot.id}/characters/${first.id}/avatar`,
       },
-      { id: second.id, name: '둘째 멤버', avatarUrl: null },
+      { id: second.id, name: '둘째 멤버', nickname: null, avatarUrl: null },
     ]);
     // The card grid never counts comments, and never carries a definition.
     expect(card.commentCount).toBeUndefined();
@@ -11371,6 +11425,153 @@ describe('card scripts', () => {
     ]) {
       const refused = await json(cookie, path, 'PATCH', body);
       expect(refused.status, JSON.stringify(body).slice(0, 60)).toBe(400);
+    }
+  });
+});
+
+describe('prompt host data', () => {
+  /** An app whose model answers `reply` and records the system string and the turns it was sent. */
+  function capturingApp(reply: string): {
+    app: Hono<AppEnv>;
+    systems: string[];
+    turns: { role: string; text: string }[][];
+  } {
+    const systems: string[] = [];
+    const turns: { role: string; text: string }[][] = [];
+    const app = makeApp({
+      getAdapter: () => ({
+        providerModel: 'fixed',
+        adapter: {
+          stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
+            systems.push(req.system);
+            turns.push(
+              req.messages.map((message) => ({
+                role: message.role,
+                text: typeof message.content === 'string' ? message.content : JSON.stringify(message.content),
+              })),
+            );
+            yield { type: 'text', text: reply };
+            return { usage: { promptTokens: 1, completionTokens: 1 } };
+          },
+        },
+      }),
+    });
+    return { app, systems, turns };
+  }
+
+  const stateOf = async (cookie: string, chatId: string): Promise<any> =>
+    readJson(await request(cookie, `/api/chats/${chatId}`));
+
+  /** A chat on a plot with one member whose card is `card`, opened on its one intro. */
+  async function chatWith(
+    email: string,
+    card: Record<string, unknown>,
+  ): Promise<{ cookie: string; plotId: string; chatId: string }> {
+    const cookie = await signUp(email);
+    const plot = await createPlot(cookie, { name: '호스트 작품', description: '설명', intros: ['문 앞이다'] });
+    await addCharacter(cookie, plot.id, { name: '아리아', card: { description: '설명', ...card } });
+    const created = await startChat(cookie, plot.id);
+    return { cookie, plotId: plot.id, chatId: created.chat.id };
+  }
+
+  it('carries the nickname on every member a screen reads, and reads {{char}} as it', async () => {
+    const owner = await signUp('nickname-owner@example.com');
+    const reader = await signUp('nickname-reader@example.com');
+    const plot = await publishablePlot(owner, {}, { name: '아리아 블랑', card: { nickname: '아리', description: '{{char}}는 마녀' } });
+    const member = plot.characters[0];
+    expect(member.nickname).toBe('아리');
+    await publishPlot(owner, plot.id);
+    expect((await readPublicPlot(reader, plot.id)).characters[0]).toMatchObject({ name: '아리아 블랑', nickname: '아리' });
+    const [card] = (await readJson(await request(reader, '/api/explore?language=ko'))).items;
+    expect(card.characters[0]).toMatchObject({ name: '아리아 블랑', nickname: '아리' });
+
+    const { app, systems } = capturingApp('대답');
+    const chat = await startChat(reader, plot.id);
+    await readSse(await json(reader, `/api/chats/${chat.chat.id}/messages`, 'POST', { content: '안녕' }, app));
+    // The roster name heads the block; the card's own text reads the nickname.
+    expect(systems.at(-1)).toContain('[등장인물: 아리아 블랑]\n아리는 마녀');
+  });
+
+  it("places the start triggers' injections where RisuAI does, for the one request", async () => {
+    const { cookie, chatId } = await chatWith('inject-send@example.com', {});
+    const { app, turns } = capturingApp('대답');
+    await readSse(
+      await json(
+        cookie,
+        `/api/chats/${chatId}/messages`,
+        'POST',
+        { content: '들어간다', injections: { start: 'S-INJ', historyend: 'E-INJ', promptend: 'P-INJ' } },
+        app,
+      ),
+    );
+    const sent = turns.at(-1)!;
+    const texts = sent.map((turn) => turn.text);
+    const newest = texts.indexOf('들어간다');
+    expect(texts[newest - 1]).toBe('S-INJ');
+    expect(texts[newest + 1]).toBe('E-INJ');
+    expect(sent.at(-1)).toEqual({ role: 'system', text: 'P-INJ' });
+
+    // Never stored: the next request without any is a prompt without them.
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, app));
+    expect(turns.at(-1)!.map((turn) => turn.text)).not.toContain('S-INJ');
+  });
+
+  it("answers RisuAI's chat, clock and global functions from the chat it is generating on", async () => {
+    const { cookie, chatId } = await chatWith('host-data@example.com', {
+      personality: '[{{lastmessageid}}|{{firstmsgindex}}|{{lastUserMessage}}|{{getglobalvar::seen}}|{{date::YYYY}}]',
+    });
+    await json(cookie, `/api/chats/${chatId}/global-variables`, 'PATCH', { variables: { seen: '3' } });
+    const { app, systems } = capturingApp('대답');
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '들어간다' }, app));
+    // The intro is the greeting, kept apart: the turn just sent is message 0.
+    expect(systems.at(-1)).toContain(`[0|-1|들어간다|3|${new Date().getUTCFullYear()}]`);
+  });
+
+  it('folds {{user}} and {{char}} in a value as the names the chat goes by', async () => {
+    const { cookie, chatId } = await chatWith('fold-names@example.com', { personality: '[{{getvar::who}}]' });
+    const { app, systems } = capturingApp('대답');
+    await readSse(
+      await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '{{setvar::who::{{user}}/{{char}}}}' }, app),
+    );
+    expect(systems.at(-1)).toContain('[유저/호스트 작품]');
+  });
+
+  it("runs a SillyTavern card's variable macros as the prompt is built, and keeps what they wrote on the turn", async () => {
+    const { cookie, chatId } = await chatWith('tavern-setvar@example.com', {
+      description: '{{setvar::met::yes}}{{incvar::visits}}마녀',
+      personality: '[met={{getvar::met}} visits={{getvar::visits}}]',
+      // What SillyTavern writes into every card it saves.
+      extensions: { talkativeness: '0.5', fav: false },
+    });
+    const { app, systems } = capturingApp('대답');
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, app));
+    expect(systems.at(-1)).toContain('마녀');
+    expect(systems.at(-1)).not.toContain('{{setvar');
+    expect(systems.at(-1)).toContain('[met=yes visits=1]');
+    expect((await stateOf(cookie, chatId)).path.at(-1).variableDelta).toEqual({ met: 'yes', visits: '1' });
+
+    // The next turn starts from what the last one carried, and adds to it.
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '또' }, app));
+    expect(systems.at(-1)).toContain('[met=yes visits=2]');
+    expect((await stateOf(cookie, chatId)).path.at(-1).variableDelta).toEqual({ visits: '2' });
+
+    // A reroll is the same turn again: the branch without the turn it replaces.
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, app));
+    expect(systems.at(-1)).toContain('[met=yes visits=2]');
+    expect((await stateOf(cookie, chatId)).path.at(-1).variableDelta).toEqual({ visits: '2' });
+  });
+
+  it('leaves the variable macros of any other card in the prompt as written', async () => {
+    for (const [email, extensions] of [
+      ['studio-setvar@example.com', {}],
+      // ST keeps RisuAI's block on a card it got from there; the card was written for RisuAI.
+      ['risu-setvar@example.com', { talkativeness: '0.5', fav: false, risuai: {} }],
+    ] as const) {
+      const { cookie, chatId } = await chatWith(email, { description: '{{setvar::met::yes}}마녀', extensions });
+      const { app, systems } = capturingApp('대답');
+      await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, app));
+      expect(systems.at(-1)).toContain('{{setvar::met::yes}}마녀');
+      expect((await stateOf(cookie, chatId)).path.at(-1).variableDelta).toBeNull();
     }
   });
 });

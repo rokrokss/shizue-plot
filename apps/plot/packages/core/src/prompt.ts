@@ -1,5 +1,6 @@
+import { unescapeCbs, type CbsChat, type CbsCharacter, type CbsModel } from './cbs.js';
 import { extractChoices } from './choices.js';
-import { applyMacros, stripInlayMacros, type MacroClock, type MacroContext } from './macro.js';
+import { applyMacros, stripInlayMacros, type MacroClock, type MacroContext, type MacroHostData } from './macro.js';
 import { activateLore, loreEntryKey, type LoreActivationVia, type LoreTimedState } from './lorebook.js';
 import { isNarration, narrationBody } from './narration.js';
 import { DEFAULT_PRESET, SPEECH_PROTOCOL, SPEECH_PROTOCOL_REMINDER, type Preset } from './presets.js';
@@ -22,7 +23,14 @@ import {
   type NarrativeDelivery,
   type ChoicesMode,
 } from './types.js';
-import { emptyVariables, type Variables } from './variables.js';
+import {
+  applyVariableDelta,
+  DEFAULT_USER_NAME,
+  diffVariables,
+  emptyVariables,
+  type VariableDelta,
+  type Variables,
+} from './variables.js';
 
 export type PromptRole = 'user' | 'assistant' | 'system';
 
@@ -46,6 +54,37 @@ export interface HistoryMessage {
    * them — see `IMAGE_ATTACHED_PLACEHOLDER`.
    */
   images?: string[];
+  /** When the turn was sent, in ms — what RisuAI's message-time functions read. */
+  createdAt?: number;
+}
+
+/**
+ * Where `history` sits on its branch, for RisuAI's chat functions and the draw
+ * `{{pick}}` makes. The history the assembler is given may be only the newest
+ * stretch of the branch — the memory trims its front — and RisuAI counts its
+ * messages from the greeting, which it keeps apart from the rest.
+ */
+export interface PromptBranch {
+  /** Every message on the branch up to and including the last of `history`, the greeting among them. */
+  length: number;
+  /**
+   * The intro the branch opened on, when it opened on one: its text as stored,
+   * and which intro it is — -1 the first, k the k-th after it (`{{firstmsgindex}}`).
+   */
+  greeting?: { text: string; index: number };
+}
+
+/**
+ * What a card's start triggers asked to put in the prompt, RisuAI's three
+ * places: just before the newest turn of the history (`start`), just after the
+ * history (`historyend`), and at the very end of the prompt (`promptend`). Sent
+ * as written — the browser that ran the triggers already expanded them — and,
+ * like RisuAI's, for the one request.
+ */
+export interface PromptInjections {
+  start?: string;
+  historyend?: string;
+  promptend?: string;
 }
 
 /**
@@ -103,6 +142,16 @@ export interface PromptCharacter {
    * overrides and lore settings are the work's, not a line of its own.
    */
   absent?: boolean;
+  /**
+   * The card was written for SillyTavern, whose prompt runs the variable macros
+   * its text holds: a `{{setvar}}` in the description sets the variable and says
+   * nothing, and a `{{getvar}}` after it reads the new value. So does this one's
+   * own text here — its fields, its examples, its lore, and its overrides when it
+   * stands in for the work. RisuAI's prompt never runs them, and neither does
+   * any other member's text; what they wrote comes back as
+   * `AssembledPrompt.variableWrites`.
+   */
+  sillyTavern?: boolean;
 }
 
 export interface AssemblePromptInput {
@@ -156,10 +205,22 @@ export interface AssemblePromptInput {
    * macros that produced them stay in the history verbatim.
    */
   variables?: Variables;
+  /** The reader's global variables on this plot, for `{{getglobalvar}}` and `@name`. */
+  globalVariables?: Variables;
   /** The reader's clock, for the time macros. Without it they stay verbatim. */
   clock?: MacroClock;
-  /** What keeps `{{pick}}` stable across turns — the chat id. */
+  /**
+   * What `{{pick}}` draws from — the chat id. With `branch` it is RisuAI's draw,
+   * which turns on the branch's length: a new one each turn, the same one on a
+   * reroll. Without `branch`, the same text and position pick alike for the whole chat.
+   */
   seed?: string;
+  /** Where `history` sits on its branch (`PromptBranch`). Without it, `history` is taken to be all of it. */
+  branch?: PromptBranch;
+  /** The model the turn is generated with, for `{{model}}` and `{{metadata}}`. */
+  model?: CbsModel;
+  /** What the card's start triggers asked to put in the prompt (`PromptInjections`). */
+  injections?: PromptInjections;
   /**
    * The branch's lore records, for the timed effects. Built by the caller from
    * the whole branch, which `history` may be only the newest stretch of.
@@ -185,6 +246,14 @@ export interface AssembledPrompt {
    * the assistant message it produces records for the timed effects.
    */
   loreTriggers: string[];
+  /**
+   * What a SillyTavern member's variable macros wrote while the prompt was put
+   * together (`PromptCharacter.sillyTavern`), as the values they left over the
+   * input's `variables`. The turn the prompt produces carries them, so the next
+   * prompt — and the reader's screen — read them from that turn on. Absent when
+   * nothing wrote anything.
+   */
+  variableWrites?: VariableDelta;
   /** Present only when the input asked for it. */
   report?: PromptReport;
 }
@@ -209,6 +278,7 @@ export type PromptBlockKind =
   | 'depth_lore'
   | 'author_note'
   | 'post_history'
+  | 'injection'
   | 'trailing';
 
 export interface PromptReportBlock {
@@ -270,7 +340,7 @@ export const LORE_BUDGET_SHARE = 0.25;
 // Sized for the speech protocol: a turn carries several speakers plus narration,
 // and 600 (the single-character era value) cut replies mid-sentence.
 export const DEFAULT_MAX_RESPONSE_TOKENS = 1200;
-export const DEFAULT_USER_NAME = '유저';
+export { DEFAULT_USER_NAME };
 
 /**
  * The cap that goes with each reply-length directive. A directive alone does not
@@ -497,8 +567,12 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     narrator = plot.narrator,
     trailingTurns = 0,
     variables = emptyVariables(),
+    globalVariables,
     clock,
     seed,
+    branch,
+    model,
+    injections = {},
     loreState,
     assetNames,
     userName = DEFAULT_USER_NAME,
@@ -507,32 +581,83 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     preset = DEFAULT_PRESET,
   } = input;
 
-  // `{{char}}` resolves per text origin. A member's own card text is about that
-  // member, and everything else — the presets, the plot's own writing, the
-  // narrator, the history — is about the work, so the plot's name stands in.
-  const macroOf = (name: string): MacroContext => ({
-    char: name,
-    user: userName,
-    variables,
-    ...(clock ? { clock } : {}),
-    ...(seed !== undefined ? { seed } : {}),
-    ...(assetNames ? { assetNames } : {}),
-  });
-  const plotMacro = macroOf(plot.name);
-  // Image references stay, as RisuAI leaves them: the card's own `{{img::…}}`
-  // is how it tells the model to draw, and the model's earlier ones in the
-  // history are how it keeps doing so.
-  const expand = (text: string): string => applyMacros(text, plotMacro);
-
   // The first member is the plot's stand-in wherever the assembler needs one
   // card rather than all of them. There is no plot-level override field yet, so
   // a card that carries one still speaks for the work it is the first member of.
   const first = characters[0];
-  const firstMacro = first ? macroOf(first.name) : plotMacro;
   // Whoever the reader sent off the stage is gone from everything that is the
   // member's own — their block, examples and lorebook — and from nothing else.
   const cast = characters.filter((member) => !member.absent);
   const absentNames = characters.filter((member) => member.absent).map((member) => member.name);
+
+  // What the macros read and — in a SillyTavern member's text — write: a copy,
+  // so the caller's map stays the state the branch folded to, and what the
+  // prompt wrote is the difference between the two.
+  const working = applyVariableDelta(variables, null);
+  // RisuAI's chat, as its chat functions see it — built when first asked for.
+  let chat: CbsChat | undefined;
+  const chatOf = (): CbsChat => (chat ??= cbsChat(history, branch));
+  const seedLength = branch ? cbsChat([], branch).length : undefined;
+  const lorebookOf = (): readonly object[] =>
+    [...plot.lorebook, ...cast.flatMap((member) => member.card.lorebook)]
+      .filter((entry) => entry.enabled)
+      .map(risuLoreEntry);
+  const shared: MacroHostData = {
+    persona: personaText,
+    prompts: {
+      main: preset.main,
+      postHistory: preset.postHistory,
+      authorNote,
+      // There is no jailbreak prompt here, and none to toggle.
+      jailbreak: { text: '', enabled: false },
+    },
+    chat: chatOf,
+    ...(model ? { model } : {}),
+    lorebook: lorebookOf,
+  };
+  const group = cast.map((member) => member.name);
+  // The card RisuAI's `{{description}}` and the like read outside a member's own
+  // text: the first one still on the stage, as RisuAI reads its one character.
+  const standIn = cast[0] ?? first;
+
+  // `{{char}}` resolves per text origin. A member's own card text is about that
+  // member — under the nickname its card goes by, as RisuAI reads it — and
+  // everything else — the presets, the plot's own writing, the narrator, the
+  // history — is about the work, so the plot's name stands in. `role` is
+  // RisuAI's `{{role}}`: the role of the text being built.
+  const macroOf = (member: PromptCharacter | undefined, role = 'system'): MacroContext => {
+    const owner = member ?? standIn;
+    return {
+      char: member ? characterName(member) : plot.name,
+      user: userName,
+      variables: working,
+      ...(globalVariables ? { globalVariables } : {}),
+      ...(clock ? { clock } : {}),
+      ...(seed !== undefined ? { seed } : {}),
+      ...(seed !== undefined && seedLength !== undefined ? { seedLength } : {}),
+      ...(assetNames ? { assetNames } : {}),
+      data: {
+        ...shared,
+        character: owner ? cbsCharacter(owner, plot) : { scenario: plot.description },
+        role,
+      },
+      tavern: {
+        ...(owner
+          ? { charPrompt: owner.card.systemPrompt, charJailbreak: owner.card.postHistoryInstructions }
+          : {}),
+        group,
+      },
+      ...(member?.sillyTavern ? { runVariableMacros: true } : {}),
+    };
+  };
+  const plotMacro = macroOf(undefined);
+  // Image references stay, as RisuAI leaves them: the card's own `{{img::…}}`
+  // is how it tells the model to draw, and the model's earlier ones in the
+  // history are how it keeps doing so.
+  const expand = (text: string): string => applyMacros(text, plotMacro);
+  const firstMacro = first ? macroOf(first) : plotMacro;
+  /** The history is the work's too, read in the role of the turn. */
+  const turnMacro = { user: macroOf(undefined, 'user'), assistant: macroOf(undefined, 'char') };
 
   // 1. main system prompt
   const main = resolveOverride(first?.card.systemPrompt ?? '', expand(preset.main), firstMacro, SPEECH_PROTOCOL);
@@ -550,7 +675,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     loreSource.set(entry, 'plot');
   }
   for (const member of cast) {
-    const macro = macroOf(member.name);
+    const macro = macroOf(member);
     for (const entry of member.card.lorebook) {
       lorebook.push(entry);
       loreMacro.set(entry, macro);
@@ -602,7 +727,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     .map((entry) => ({
       depth: entry.depth!,
       role: (entry.role ?? 'system') as PromptRole,
-      content: expandLore(entry),
+      content: send(expandLore(entry)),
     }));
 
   // 3. plot block — the work itself, ahead of the people in it.
@@ -616,8 +741,9 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // 4. one block per roster member on the stage, in the creator's order. The
   // card's scenario is not read: a situation belongs to the plot or to an intro,
   // not to a member.
-  const characterBlocks = cast.map(({ name, card }): SystemSection => {
-    const macro = macroOf(name);
+  const characterBlocks = cast.map((member): SystemSection => {
+    const { name, card } = member;
+    const macro = macroOf(member);
     const lines = [characterHeader(name), applyMacros(card.description, macro).trim()]
       .filter((line) => line.length > 0)
       .join('\n');
@@ -668,22 +794,41 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     { kind: 'memory', text: memoryBlock },
     { kind: 'relationship', text: relationshipBlock },
   ];
-  const systemSections = sections.filter((section) => section.text.length > 0);
+  const systemSections = sections
+    .map((section) => ({ ...section, text: send(section.text) }))
+    .filter((section) => section.text.length > 0);
   const system = systemSections.map((section) => section.text).join('\n\n');
 
   // 5d. stage directions of the turn being answered. Outside the system string on
   // purpose: it changes every turn, and the system string is the cached prefix.
-  const directionsBlock = directions.trim() ? `${DIRECTIONS_HEADER}\n${expand(directions).trim()}` : '';
+  const directionsBlock = directions.trim() ? send(`${DIRECTIONS_HEADER}\n${expand(directions).trim()}`) : '';
 
   // 7c. author's note — spliced into the history at AUTHOR_NOTE_DEPTH, below.
-  const authorNoteBlock = authorNote.trim() ? expand(authorNote).trim() : '';
+  const authorNoteBlock = authorNote.trim() ? send(expand(authorNote).trim()) : '';
 
   // 8. post-history instructions
-  const postHistory = resolveOverride(
-    first?.card.postHistoryInstructions ?? '',
-    expand(preset.postHistory),
-    firstMacro,
-    SPEECH_PROTOCOL_REMINDER,
+  const postHistory = send(
+    resolveOverride(
+      first?.card.postHistoryInstructions ?? '',
+      expand(preset.postHistory),
+      firstMacro,
+      SPEECH_PROTOCOL_REMINDER,
+    ),
+  );
+
+  // 8b. what the card's start triggers asked for, RisuAI's three places: just
+  // before the newest turn, just after the history, and after everything. As
+  // written — the triggers expanded their own text — and never evicted.
+  const injected = (place: keyof PromptInjections): MessageSlot | null => {
+    const text = injections[place]?.trim();
+    return text ? { kind: 'injection', label: place, message: { role: 'system', content: send(text) } } : null;
+  };
+  const startInjection = injected('start');
+  const historyEndInjection = injected('historyend');
+  const promptEndInjection = injected('promptend');
+  const injectedTokens = [startInjection, historyEndInjection, promptEndInjection].reduce(
+    (sum, slot) => sum + (slot ? countTokens(promptText(slot.message.content)) : 0),
+    0,
   );
 
   // Everything that is never evicted is charged up front. Depth lore is charged
@@ -696,6 +841,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     countTokens(postHistory) -
     countTokens(directionsBlock) -
     countTokens(authorNoteBlock) -
+    injectedTokens -
     depthLore.reduce((sum, entry) => sum + countTokens(entry.content), 0);
 
   // 7. history, newest first. The newest message is always kept so the request
@@ -718,7 +864,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     const raw = isNarration(said) ? `${NARRATION_HEADER} ${narrationBody(said)}`.trim() : said;
     // A turn's inlays name pictures in someone's own RisuAI storage; RisuAI takes
     // them out of the turns it sends, and so does this.
-    const text = expand(stripInlayMacros(raw));
+    const text = send(applyMacros(stripInlayMacros(raw), turnMacro[turn.role]));
     const images = turn.images ?? [];
     const cost = countTokens(text) + images.length * IMAGE_TOKEN_ESTIMATE;
     if (cost > available && historyMessages.length > 0) break;
@@ -740,12 +886,13 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // whose exchange it is reading. Filled from whatever budget history left over,
   // so it is the first thing to be evicted.
   const exampleSlots: MessageSlot[] = [];
-  const exampleBlocks = cast.flatMap(({ name, card }) =>
-    splitExamples(card.mesExample).map((block) => ({
-      name,
-      content: `${exampleHeader(name)}\n${applyMacros(block, macroOf(name))}`,
-    })),
-  );
+  const exampleBlocks = cast.flatMap((member) => {
+    const macro = macroOf(member);
+    return splitExamples(member.card.mesExample).map((block) => ({
+      name: member.name,
+      content: send(`${exampleHeader(member.name)}\n${applyMacros(block, macro)}`),
+    }));
+  });
   for (const { name, content } of exampleBlocks) {
     const cost = countTokens(content);
     if (cost > available) break;
@@ -774,10 +921,14 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
       : []),
   ];
 
+  // RisuAI's `start` goes right before the newest turn, behind whatever depth
+  // lore is spliced in front of it; `historyend` after the whole history block.
   const historyBlock: MessageSlot[] = [];
   for (let i = 0; i < historyMessages.length; i += 1) {
     const message = historyMessages[i]!;
-    historyBlock.push(...depthAt(i), {
+    historyBlock.push(...depthAt(i));
+    if (startInjection && i === historyMessages.length - 1) historyBlock.push(startInjection);
+    historyBlock.push({
       kind: 'history',
       label: message.role,
       message,
@@ -785,6 +936,8 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     });
   }
   historyBlock.push(...depthAt(historyMessages.length));
+  if (startInjection && historyMessages.length === 0) historyBlock.push(startInjection);
+  if (historyEndInjection) historyBlock.push(historyEndInjection);
 
   const slots: MessageSlot[] = [
     ...(directionsBlock
@@ -793,7 +946,11 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     ...exampleSlots,
     ...historyBlock,
     { kind: 'post_history', message: { role: 'system', content: postHistory } },
+    ...(promptEndInjection ? [promptEndInjection] : []),
   ];
+
+  // Every text that could write has been expanded by now, examples last.
+  const variableWrites = diffVariables(working, variables);
 
   /** Measured here, after the fact, so a generation never pays for it. */
   const report = (): PromptReport => ({
@@ -836,6 +993,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     system,
     messages: slots.map((slot) => slot.message),
     loreTriggers,
+    ...(variableWrites ? { variableWrites } : {}),
     ...(input.report ? { report: report() } : {}),
   };
 }
@@ -855,6 +1013,70 @@ interface MessageSlot {
   /** What the budget was charged for it, where that was already measured. */
   tokens?: number;
 }
+
+/**
+ * A string as it is sent: RisuAI's display escapes, which keep `{` and the like
+ * inert through every pass that might read the text again, back to the
+ * characters they stand for. Only ever on what goes to the model — never on
+ * anything stored.
+ */
+const send = (text: string): string => unescapeCbs(text, 'text');
+
+/** `{{char}}` in a member's own text: the nickname its card goes by, as RisuAI reads it, else the roster name. */
+export const characterName = (member: Pick<PromptCharacter, 'name' | 'card'>): string =>
+  member.card.nickname?.trim() || member.name;
+
+/**
+ * A member's card as RisuAI's `{{description}}` and the like read it. The
+ * scenario is the plot's setting: an imported card's became the plot's, and a
+ * member here has none of its own.
+ */
+const cbsCharacter = (member: PromptCharacter, plot: PromptPlot): CbsCharacter => ({
+  description: member.card.description,
+  personality: member.card.personality,
+  scenario: plot.description,
+  exampleDialogue: member.card.mesExample,
+});
+
+/**
+ * The branch as RisuAI's chat functions see it: the greeting apart, the
+ * messages after it counted from 0, and the prompt belonging to none of them
+ * (`index` -1). `history` is the newest stretch of the branch `branch` describes,
+ * or all of it without one.
+ */
+function cbsChat(history: readonly HistoryMessage[], branch: PromptBranch | undefined): CbsChat {
+  const total = Math.max(branch?.length ?? history.length, history.length);
+  /** Branch index of `history[0]`. */
+  const start = total - history.length;
+  const greeting = branch?.greeting;
+  const after = greeting ? 1 : 0;
+  // The greeting is RisuAI's apart from the messages, so it leaves them where it is one of them.
+  const skip = greeting && start === 0 && history.length > 0 ? 1 : 0;
+  return {
+    messages: history.slice(skip).map((message) => ({
+      role: message.role === 'assistant' ? 'char' : 'user',
+      data: message.content,
+      ...(message.createdAt !== undefined ? { time: message.createdAt } : {}),
+    })),
+    offset: Math.max(0, start + skip - after),
+    length: Math.max(0, total - after),
+    index: -1,
+    ...(greeting ? { greeting } : {}),
+  };
+}
+
+/** A lore entry in the shape RisuAI's `{{lorebook}}` writes its own as. */
+const risuLoreEntry = (entry: LoreEntry): object => ({
+  key: entry.keys.join(', '),
+  secondkey: entry.secondaryKeys.join(', '),
+  insertorder: entry.insertionOrder,
+  comment: entry.name ?? '',
+  content: entry.content,
+  mode: 'normal',
+  alwaysActive: entry.constant,
+  selective: entry.selective,
+  useRegex: entry.useRegex,
+});
 
 /**
  * A turn without its trailing choice lines and status window, taken off in the

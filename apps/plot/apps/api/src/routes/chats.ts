@@ -24,6 +24,8 @@ import {
   type MacroContext,
   type NarratorConfig,
   type FoldItem,
+  type FoldOptions,
+  type PromptBranch,
   type PromptCharacter,
   type PromptPlot,
   type Variables,
@@ -271,8 +273,20 @@ async function windowVariableDefaults(
   earlier: Message[],
 ): Promise<Variables> {
   const plot = await loadChatPlot(deps, chat, chat.userId);
-  return computeVariables(earlier, plot?.customUi?.defaultVariables);
+  const fold = foldOptionsOf(plot?.name ?? chat.title, await loadPersona(deps, chat));
+  return computeVariables(earlier, plot?.customUi?.defaultVariables, fold);
 }
+
+/**
+ * The names every fold of this chat answers `{{user}}` and `{{char}}` with
+ * (`FoldOptions`): the persona's name, and the plot's — a message is the work's
+ * text, where `{{char}}` is the work. The reader's screen has to fold with the
+ * same two, or a value nesting either reads one way there and another here.
+ */
+const foldOptionsOf = (plotName: string, persona: Persona | null): FoldOptions => ({
+  user: persona?.name ?? DEFAULT_USER_NAME,
+  char: plotName,
+});
 
 /**
  * `{ chat, path, siblings }` — the view of the currently selected branch. A
@@ -537,6 +551,10 @@ async function loadGenerationContext(
   narrator: NarratorConfig | undefined;
   /** The names this chat's open images go by, for `{{assetlist}}` in the prompt. */
   assetNames: string[];
+  /** What every fold of the chat answers `{{user}}` and `{{char}}` with. */
+  fold: FoldOptions;
+  /** The reader's global variables on this plot. */
+  globalVariables: Variables;
   all: Message[];
 }> {
   // Re-checked on every generation, not just at chat creation: unpublishing a
@@ -563,12 +581,27 @@ async function loadGenerationContext(
     // The chat's own note plus the reusable notes attached to it.
     authorNote: await loadAuthorNote(deps, chat),
     assetNames: await openAssetNames(deps, chat),
+    fold: foldOptionsOf(row.name, persona),
+    globalVariables: await loadGlobalVariables(deps, chat.userId, chat.plotId),
     all: await loadMessages(deps, chat.id),
   };
 }
 
 const toHistory = (path: Message[]): HistoryMessage[] =>
-  path.map((message) => ({ role: message.role, content: message.content }));
+  path.map((message) => ({ role: message.role, content: message.content, createdAt: message.createdAt.getTime() }));
+
+/**
+ * Where a history sits on `branch`, the messages the turn is generated on: its
+ * length, and the intro it opened on — a root the chat's openings were written
+ * as, numbered by its place among them, the first being -1 as RisuAI numbers
+ * them. Approximate where a reroll of the opening added a root of its own.
+ */
+function promptBranch(all: Message[], branch: Message[]): PromptBranch {
+  const root = branch[0];
+  if (!root || root.parentId !== null || root.role !== 'assistant') return { length: branch.length };
+  const openings = all.filter((message) => message.parentId === null && message.role === 'assistant');
+  return { length: branch.length, greeting: { text: root.content, index: openings.indexOf(root) - 1 } };
+}
 
 /** Header the web client names the reader's IANA time zone in. */
 const TIME_ZONE_HEADER = 'x-shizue-tz';
@@ -634,8 +667,8 @@ const promptHistory = (deps: AppDeps, userId: string, model: string, source: Mes
  * its message being evicted, and the client derives the same map from the same
  * messages — macros and script deltas both — so both sides agree.
  */
-const pathVariables = (plot: Plot, branch: readonly FoldItem[]): Variables =>
-  computeVariables(branch, plot.customUi?.defaultVariables);
+const pathVariables = (plot: Plot, branch: readonly FoldItem[], fold: FoldOptions): Variables =>
+  computeVariables(branch, plot.customUi?.defaultVariables, fold);
 
 /**
  * What a generation checks of the head before it writes anything, for the card's
@@ -705,15 +738,16 @@ function sameVariables(a: Variables, b: Variables): boolean {
 function variableTimeline(
   defaults: Variables | undefined,
   path: Message[],
+  fold: FoldOptions,
 ): ChatExportVariableSnapshot[] {
   const timeline: ChatExportVariableSnapshot[] = [];
   // Folded message by message instead of re-reading the prefix at every step;
   // `computeVariables` takes the state so far as its defaults, so each result is
   // exactly what `pathVariables` would return for that prefix.
-  let variables = computeVariables([], defaults);
+  let variables = computeVariables([], defaults, fold);
   let previous = variables;
   for (const message of path) {
-    variables = computeVariables([message], variables);
+    variables = computeVariables([message], variables, fold);
     if (message.role !== 'assistant' || sameVariables(previous, variables)) continue;
     timeline.push({ messageId: message.id, variables });
     previous = variables;
@@ -1083,9 +1117,12 @@ async function regeneratePlan(
     preset: getPreset(chat.preset),
     // The kept branch only: the head being replaced takes its delta with it, so
     // a regenerate starts from where the turn before it left things.
-    ...startedFrom(pathVariables(context.row, kept), scripts),
+    ...startedFrom(pathVariables(context.row, kept, context.fold), scripts),
+    fold: context.fold,
+    globalVariables: context.globalVariables,
     clock: requestClock(c, context.row, kept),
     seed: chat.id,
+    branch: promptBranch(context.all, kept),
     // Without the head being replaced: its records belong to the swipe this
     // generation is an alternative to.
     loreState: loreStateOf(kept),
@@ -1290,7 +1327,11 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       coverUrl: plot ? coverUrl(plot) : null,
       // The plot is read for its variable defaults and for nothing else; without one, the
       // fold starts empty and reflects only what the conversation itself set.
-      variableTimeline: variableTimeline(plot?.customUi?.defaultVariables, path),
+      variableTimeline: variableTimeline(
+        plot?.customUi?.defaultVariables,
+        path,
+        foldOptionsOf(plot?.name ?? chat.title, await loadPersona(deps, chat)),
+      ),
     };
     return c.json(payload);
   });
@@ -2026,9 +2067,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         ...(directions ? { directions } : {}),
         preset: getPreset(chat.preset),
         // The stored row, so the turn's delta is folded with its text.
-        ...startedFrom(pathVariables(context.row, [...path, userMessage]), scripts),
+        ...startedFrom(pathVariables(context.row, [...path, userMessage], context.fold), scripts),
+        fold: context.fold,
+        globalVariables: context.globalVariables,
         clock: requestClock(c, context.row, [...path, userMessage]),
         seed: chat.id,
+        branch: promptBranch(context.all, [...path, userMessage]),
         loreState: loreStateOf([...path, userMessage]),
         assetNames: context.assetNames,
         contextBudget: memorySettingsOf(chat).contextBudget,
@@ -2107,10 +2151,13 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         preset: getPreset(chat.preset),
         // The prompt reads the whole branch, head included; the head's new delta
         // is measured from the branch before it, since the continue rewrites it.
-        ...startedFrom(pathVariables(context.row, path), scripts),
-        turnBase: pathVariables(context.row, path.slice(0, -1)),
+        ...startedFrom(pathVariables(context.row, path, context.fold), scripts),
+        turnBase: pathVariables(context.row, path.slice(0, -1), context.fold),
+        fold: context.fold,
+        globalVariables: context.globalVariables,
         clock: requestClock(c, context.row, path),
         seed: chat.id,
+        branch: promptBranch(context.all, path),
         // The message being generated is the head itself, so the branch before it
         // is what it was first generated on — its own record must not read as a
         // trigger from the turn before.
@@ -2162,9 +2209,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         authorNote: context.authorNote,
         ...(context.narrator ? { narrator: context.narrator } : {}),
         preset: getPreset(chat.preset),
-        ...startedFrom(pathVariables(context.row, path), scripts),
+        ...startedFrom(pathVariables(context.row, path, context.fold), scripts),
+        fold: context.fold,
+        globalVariables: context.globalVariables,
         clock: requestClock(c, context.row, path),
         seed: chat.id,
+        branch: promptBranch(context.all, path),
         loreState: loreStateOf(path),
         assetNames: context.assetNames,
         contextBudget: memorySettingsOf(chat).contextBudget,
@@ -2219,9 +2269,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         authorNote: context.authorNote,
         ...(context.narrator ? { narrator: context.narrator } : {}),
         preset: getPreset(chat.preset),
-        ...startedFrom(pathVariables(context.row, path), scripts),
+        ...startedFrom(pathVariables(context.row, path, context.fold), scripts),
+        fold: context.fold,
+        globalVariables: context.globalVariables,
         clock: requestClock(c, context.row, path),
         seed: chat.id,
+        branch: promptBranch(context.all, path),
         loreState: loreStateOf(path),
         assetNames: context.assetNames,
         contextBudget: memorySettingsOf(chat).contextBudget,

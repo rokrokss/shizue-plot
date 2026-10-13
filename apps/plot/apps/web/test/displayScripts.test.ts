@@ -12,6 +12,7 @@ import {
   type DisplayContext,
   type Segment,
 } from '../src/lib/displayScripts';
+import { sanitizeCustomHtml } from '../src/lib/sanitizeHtml';
 import type { DisplayScript } from '../src/lib/types';
 import { normalizeCard } from '@shizue/core';
 
@@ -747,5 +748,27 @@ describe('work that expands before anyone charges for it', () => {
       context([at('<b>{{getvar::hp}}</b>/<b>{{calc::hp * 2}}</b>')], { variables: { hp: '40' } }),
     );
     expect(html(segments)).toHaveLength(99);
+  });
+});
+
+describe('display escapes in a template', () => {
+  const island = (out: string): string =>
+    html(applyDisplayScripts('[status] hp=40', context([script({ out })])))[0] ?? '';
+
+  it('draws an escaped tag as text, never as an element', () => {
+    const drawn = island('<div>{{deabo}}b{{deabc}}$1{{<}}/b{{>}}</div>');
+    expect(drawn).toContain('&lt;b&gt;40&lt;/b&gt;');
+    expect(drawn).not.toContain('<b>');
+  });
+
+  it('turns them back before the sanitizer, which judges what they stand for', () => {
+    // After the sanitizer, `https{{dec}}//…` would have passed as a same-origin
+    // path and only then become a foreign address.
+    expect(sanitizeCustomHtml('<img src="https//tracker.example.test/p.png">')).toContain('tracker');
+    const drawn = island(
+      '<img src="https{{dec}}//tracker.example.test/p.png"><i>{{#escape}}{{getvar::gold}}{{/escape}}</i>',
+    );
+    expect(drawn).not.toContain('tracker.example.test');
+    expect(drawn).toContain('<i>{{getvar::gold}}</i>');
   });
 });

@@ -1,12 +1,12 @@
 'use client';
 
 import { Icon } from '@/components/Icon';
-import { assetResolver } from '@shizue/core/cbs';
+import { assetResolver, type CbsMessage } from '@shizue/core/cbs';
 import { componentNames } from '@shizue/core/component';
 import { NARRATION_PREFIX } from '@shizue/core/narration';
 import { isSceneMessage, sceneSpanAt } from '@shizue/core/scene';
-import { computeVariables, type Variables } from '@shizue/core/variables';
-import { useFormatter, useTranslations } from 'next-intl';
+import { computeVariables, DEFAULT_USER_NAME, type FoldOptions, type Variables } from '@shizue/core/variables';
+import { useFormatter, useLocale, useTranslations } from 'next-intl';
 import { Fragment, use, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useStickToBottom } from 'use-stick-to-bottom';
 import { AiBadge, AiNotice } from '@/components/AiNotice';
@@ -626,6 +626,15 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     () => foldBase(messages, anchor, defaultVariables),
     [messages, anchor, defaultVariables],
   );
+  // `{{user}}` and `{{char}}` in a value fold to the names the server folds with
+  // (`foldOptionsOf` in the API) — the persona's, else the default, and the
+  // plot's — so a value built from them reads the same here and in the prompt.
+  const foldPersonaName = personas.find((persona) => persona.id === state?.chat.personaId)?.name;
+  const foldPlotName = plot?.name ?? state?.chat.title ?? '';
+  const foldNames = useMemo<FoldOptions>(
+    () => ({ user: foldPersonaName ?? DEFAULT_USER_NAME, char: foldPlotName }),
+    [foldPersonaName, foldPlotName],
+  );
 
   // The fold of the persisted branch, and of the branch without its head — the
   // two bases every mode builds on. Both depend only on server state, so a
@@ -633,12 +642,12 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   // their text: what the card's scripts left on each one is folded with it, as
   // the server folds it for the prompt.
   const persistedVariables = useMemo(
-    () => computeVariables(fold.messages, fold.defaults),
-    [fold],
+    () => computeVariables(fold.messages, fold.defaults, foldNames),
+    [fold, foldNames],
   );
   const variablesBeforeHead = useMemo(
-    () => computeVariables(fold.messages.slice(0, -1), fold.defaults),
-    [fold],
+    () => computeVariables(fold.messages.slice(0, -1), fold.defaults, foldNames),
+    [fold, foldNames],
   );
 
   // The branch as it currently reads. `computeVariables` folds onto whatever it
@@ -653,8 +662,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         ? variablesBeforeHead
         : persistedVariables;
     const pending = mode === 'send' ? [pendingUser, streamText] : [streamText];
-    return computeVariables(pending, base);
-  }, [active, mode, last, persistedVariables, variablesBeforeHead, pendingUser, streamText]);
+    return computeVariables(pending, base, foldNames);
+  }, [active, mode, last, persistedVariables, variablesBeforeHead, pendingUser, streamText, foldNames]);
 
   // …and the same values keep the same object, so the memoized message bodies do
   // not re-run their regexes, their template and two DOMPurify passes for a token
@@ -691,6 +700,27 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     () => assets.filter((asset) => !lockedKinds.has(asset.slug)).map((asset) => asset.name ?? asset.slug),
     [assets, lockedKinds],
   );
+  /**
+   * The loaded messages after the greeting, as RisuAI's chat functions read them
+   * and numbered as `chatIndex` numbers them. Stored messages only: a reply still
+   * streaming is not on the branch yet, and gets no display scripts anyway.
+   */
+  const branchMessages = useMemo(
+    () =>
+      messages.slice(indexBase === -1 ? 1 : 0).map(
+        (message): CbsMessage => ({
+          role: message.role === 'user' ? 'user' : 'char',
+          data: message.content,
+          time: Date.parse(message.createdAt),
+        }),
+      ),
+    [messages, indexBase],
+  );
+  /** Nothing before the loaded stretch was left unread, so the chat functions may answer. */
+  const wholeBranch = !state?.hasMore;
+  const globalVariables = state?.globalVariables;
+  const chatId = state?.chat.id ?? '';
+  const locale = useLocale();
 
   const display = useMemo<DisplayContext | undefined>(() => {
     if (!customUi || scripts.length === 0) return undefined;
@@ -705,6 +735,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       user: personaName ?? youLabel,
       lastMessageId,
       assetNames,
+      messages: branchMessages,
+      wholeBranch,
+      chatId,
+      locale,
+      ...(globalVariables ? { globalVariables } : {}),
     };
   }, [
     customUi,
@@ -719,6 +754,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     youLabel,
     lastMessageId,
     assetNames,
+    branchMessages,
+    wholeBranch,
+    chatId,
+    locale,
+    globalVariables,
   ]);
 
   /**
@@ -727,7 +767,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    * Keyed on the stored messages rather than the view, so a streamed token does
    * not re-evaluate the opening; only a variable that moved does.
    */
-  const chatId = state?.chat.id ?? '';
   const shownGreetings = useMemo(() => {
     const shown = new Map<string, string>();
     for (const message of messages) {
@@ -737,11 +776,12 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         char: characterName,
         user: personaName ?? youLabel,
         seed: chatId,
+        seedLength: lastMessageId + 1,
       });
       if (text !== message.content) shown.set(message.id, text);
     }
     return shown;
-  }, [messages, variables, characterName, personaName, youLabel, chatId]);
+  }, [messages, variables, characterName, personaName, youLabel, chatId, lastMessageId]);
 
   /** Fills the composer; the reader still decides to send. */
   const suggestInput = useCallback((text: string) => setInput(text), []);

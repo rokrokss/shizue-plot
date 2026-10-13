@@ -9,8 +9,9 @@
  * The language itself — nesting, `{{#if}}`/`{{#when}}`, RisuAI's functions,
  * `{{? …}}`/`{{calc}}` — is `@shizue/core/cbs`, shared with the prompt. What is
  * this file's is everything about the page: values escaped, the model's values
- * marked (`lib/taint.ts`), every step paid for, our own `{{#each}}`, `{{rel}}`,
- * `{{turn}}`, `{{button}}`, and the plot's images. There is no `eval` anywhere.
+ * marked (`lib/taint.ts`), every step paid for, `{{rel}}`, `{{turn}}`,
+ * `{{button}}`, the plot's images, and what the browser can tell RisuAI's
+ * functions about the chat (`CbsHostData`). There is no `eval` anywhere.
  * A malformed template is never fatal — it falls back to its own escaped
  * source, so the message still reads.
  */
@@ -22,12 +23,13 @@ import {
   expressionTruthy,
   isCbsTrue,
   parseCbs,
+  unescapeCbs,
   type AssetMacroKind,
-  type CbsBlock,
-  type CbsBlockScope,
   type CbsCall,
   type CbsExpressionValue,
   type CbsHost,
+  type CbsHostData,
+  type CbsMessage,
   type CbsNode,
   type CbsValue,
 } from '@shizue/core/cbs';
@@ -61,6 +63,28 @@ export interface CbsContext {
   lastMessageId?: number;
   /** The names the plot's open images go by, for `{{assetlist}}` and `{{emotionlist}}`. */
   assetNames?: readonly string[];
+  /**
+   * The reader's global variables on the plot, for `{{getglobalvar}}`, `@name` in
+   * an expression and `#when`'s toggles. Unset, `getglobalvar` stays as written.
+   */
+  globalVariables?: Record<string, string>;
+  /**
+   * The loaded messages after the greeting, oldest first, numbered as `chatIndex`
+   * numbers them — so `messages[chatIndex]` is this message, and its role is
+   * `{{role}}`. The greeting is not among them; RisuAI keeps it apart too.
+   */
+  messages?: readonly CbsMessage[];
+  /**
+   * Whether `messages` is the whole branch. Only then are RisuAI's chat functions
+   * (`{{lastmessage}}`, `{{history}}`, …) answered: with earlier messages unread,
+   * a question about the branch would be answered about the part of it on screen,
+   * and a wrong answer is worse than the macro as written.
+   */
+  wholeBranch?: boolean;
+  /** The chat id: `{{pick}}`'s seed, as RisuAI seeds it with its chat's. */
+  chatId?: string;
+  /** The reader's interface language, for `{{metadata::language}}`. */
+  locale?: string;
 }
 
 /**
@@ -88,7 +112,15 @@ export function escapeHtml(text: string): string {
  */
 const MAX_RENDERED_NODES = 20_000;
 const MAX_RENDERED_CHARS = 100_000;
-const MAX_EACH_ITERATIONS = 5_000;
+/**
+ * `{{#each}}` iterations in one render, every block together. Kept below the
+ * core's own cap (5,000), which is a different kind of bound: the core simply
+ * stops iterating there and hands back what it has, and a status window cut off
+ * at its 5,000th row is a lie about the state rather than a missing decoration.
+ * Running out here throws instead, before the core's cap is ever reached, so the
+ * whole island is given up as every other exhausted budget gives it up.
+ */
+const MAX_EACH_ITERATIONS = 4_000;
 
 /**
  * Thrown when a render runs out of allowance, and deliberately *not* caught
@@ -130,31 +162,6 @@ function read(value: string, budget: Budget): string {
   budget.charge(value.length);
   return value;
 }
-
-/* ------------------------------------------------------------ RisuAI's #each */
-
-/**
- * RisuAI's `parseArray`: a JSON array, or anything else split on `§` — kept
- * whole, empties and all. An item that is not a string is written as JSON.
- */
-function risuArray(text: string): string[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return text.split('§');
-  }
-  if (!Array.isArray(parsed)) return text.split('§');
-  return parsed.map((item: unknown) => (typeof item === 'string' ? item : JSON.stringify(item)));
-}
-
-/** RisuAI's `trimLines`, which its `#each` body gets: every line's indent and both ends off. */
-const unindent = (text: string): string =>
-  text
-    .split('\n')
-    .map((line) => line.trimStart())
-    .join('\n')
-    .trim();
 
 /* ------------------------------------------------------------ image context */
 
@@ -227,25 +234,44 @@ function attributePositions(nodes: CbsNode[]): Set<CbsNode> {
  *
  * Which values are marked, and why: `{{getvar}}`, `{{? …}}` and `{{calc}}` read
  * chat variables, and chat variables are whatever the model's `{{setvar}}`
- * macros said; `{{slot}}` is an `{{#each}}` item, usually a variable; a RisuAI
- * function (`equal`, `random`, …) is marked when an argument it read was — a
- * capture or a variable passes its mark on. The rest are not the model's to
- * choose: `{{char}}` is the card's name, `{{user}}` the reader's persona,
- * `{{turn}}` a count we keep, `{{rel}}` an axis we compute, and an image an
+ * macros said; `{{slot}}` is an `{{#each}}` item, usually a variable; a global
+ * variable is the card's scripts' as much as a chat one; a message the chat
+ * functions read (`{{lastmessage}}`, `{{history}}`) is the model's words or the
+ * reader's; a RisuAI function (`equal`, `random`, …) is marked when an argument
+ * it read was — a capture or a variable passes its mark on. The core marks all
+ * of these itself, and `emit` below escapes and marks whatever it was told is
+ * untrusted. The rest are not the model's to choose: `{{char}}` is the card's
+ * name, `{{user}}` the reader's persona, `{{turn}}` a count we keep, `{{rel}}` an
+ * axis we compute, the clock and the screen the reader's, and an image an
  * address out of our own asset map — even when the model chose *which* of the
  * card's images, the address is still ours, and marking it would make ordinary
  * links inert for no gain.
+ *
+ * An unset variable reads as unset, and `{{getvar}}` writes RisuAI's `null` for
+ * it — which is what a RisuAI card's status window shows before the model has
+ * set anything. SillyTavern's `{{if}}` still finds it false: the core keeps the
+ * word and the fact that nothing was set apart.
  */
 function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>): CbsHost {
   // Own-property reads throughout: a variable may legitimately be called
   // `toString`, and inheriting one would put a function where a string belongs.
-  const variable = (name: string): string => read(readVariable(ctx.variables, name) ?? '', budget);
+  const variable = (name: string): string | undefined => {
+    const value = readVariable(ctx.variables, name);
+    return value === undefined ? undefined : read(value, budget);
+  };
+  const globals = ctx.globalVariables;
+  const globalVariable = globals
+    ? (name: string): string | undefined => {
+        const value = readVariable(globals, name);
+        return value === undefined ? undefined : read(value, budget);
+      }
+    : undefined;
 
   /** Our own `{{#if expr}}`: an expression over bare names, or failing that, text. */
   const expressionHolds = (source: string): boolean => {
     let value: CbsExpressionValue;
     try {
-      value = evaluateExpression(source, variable);
+      value = evaluateExpression(source, variable, globalVariable);
     } catch (error) {
       // An exhausted budget is not a malformed expression, and treating it as one
       // would turn a megabyte read into a silently truthy condition.
@@ -266,84 +292,17 @@ function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>): CbsHos
     return { text: `<img src="${escapeHtml(src)}" alt="${escapeHtml(found.slug)}">`, markup: true };
   };
 
-  /**
-   * The `{{#each}}` items being rendered, innermost last, under the name RisuAI's
-   * form gives them — null for one of ours, which names none. `{{slot::name}}` looks
-   * a name up from the inside out, so an inner block's name shadows an outer one's.
-   */
-  const slots: { name: string | null; item: string }[] = [];
-
-  /**
-   * `{{#each}}`, in two dialects told apart by an ` as `.
-   *
-   * RisuAI's is `{{#each LIST as name}}…{{slot::name}}…{{/each}}`, read as RisuAI
-   * reads it: LIST is a JSON array, or failing that text split on `§` — so a bare
-   * name is one item, its own spelling, and `a,b` is one item too. An item that is
-   * not a string is written as JSON. Its whitespace is RisuAI's as well: every
-   * line of the body is unindented and the whole is trimmed, unless the block opens
-   * `{{#each::keep …}}`. A list that came to nothing (`{{#each {{getvar::none}} as
-   * x}}`) renders nothing. One difference is deliberate: RisuAI pastes the item
-   * into the body and reads the result as CBS, so an item holding a macro runs;
-   * here an item is a value, escaped like any other, and never syntax.
-   *
-   * Ours is `{{#each 목록}}…{{slot}}…{{/each}}` over a comma-separated list: a bare
-   * name is a variable holding one (empty when unset, so a typo renders nothing
-   * rather than itself), anything else is the list written out inline.
-   *
-   * RisuAI's older `{{#each LIST name}}`, which names the item after the last
-   * space, is not read: it cannot be told from a list of ours with spaces in it.
-   */
-  const each = (scope: CbsBlockScope, block: CbsBlock): CbsValue => {
-    let head = scope.head.value().text.trim();
-    const keep = head.startsWith('::keep ');
-    if (keep) head = head.slice(7).trim();
-
-    // What is left of `LIST as name` once LIST came to nothing.
-    if (/^as +\S+$/.test(head)) return { text: '' };
-
-    const at = head.lastIndexOf(' as ');
-    let name: string | null = null;
-    let items: string[];
-    if (at !== -1) {
-      name = head.slice(at + 4).trim();
-      items = risuArray(head.slice(0, at));
-    } else {
-      const source = /^[A-Za-z_][A-Za-z0-9_]*$/.test(head) ? variable(head) : head;
-      items = source
-        .split(',')
-        .map((item) => item.trim())
-        .filter((item) => item.length > 0);
-    }
-
-    let text = '';
-    let untrusted = false;
-    for (const item of items) {
-      budget.iterations -= 1;
-      if (budget.iterations < 0) throw new RenderBudgetExhausted('too many iterations');
-      slots.push({ name, item });
-      let value: CbsValue;
-      try {
-        value = scope.render(block.body, item);
-      } finally {
-        slots.pop();
-      }
-      text += name === null || keep ? value.text : unindent(value.text);
-      if (value.untrusted) untrusted = true;
-      if (text.length > MAX_RENDERED_CHARS) throw new RenderBudgetExhausted('output too large');
-    }
-    return { text: name === null || keep ? text : text.trim(), untrusted };
-  };
-
-  /** `{{slot::name}}`: the named item, else — inside a block of ours — the current one. */
-  const namedSlot = (name: string): string | undefined => {
-    for (let i = slots.length - 1; i >= 0; i -= 1) if (slots[i]!.name === name) return slots[i]!.item;
-    // Ours names no item, and has always answered any `{{slot::…}}` with the current one.
-    const innermost = slots[slots.length - 1];
-    return innermost && innermost.name === null ? innermost.item : undefined;
-  };
-
   return {
     variable,
+    ...(globalVariable ? { globalVariable } : {}),
+    data: hostData(ctx),
+    // `{{#each}}` is the core's — RisuAI's `{{#each LIST as name}}…{{slot::name}}`
+    // and our `{{#each 목록}}…{{slot}}` both — and every iteration is paid for here.
+    each: true,
+    iterate: () => {
+      budget.iterations -= 1;
+      if (budget.iterations < 0) throw new RenderBudgetExhausted('too many iterations');
+    },
     visit: () => {
       budget.nodes -= 1;
       if (budget.nodes < 0) throw new RenderBudgetExhausted('too many nodes');
@@ -363,7 +322,6 @@ function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>): CbsHos
     // A condition written as RisuAI writes it — with a macro inside — is RisuAI's
     // (`1` or `true`); one written out is ours, an expression.
     condition: (head) => (head.literal ? expressionHolds(head.value().text) : isCbsTrue(head.value().text)),
-    block: (block, scope) => (block.kind === 'each' ? each(scope, block) : undefined),
     macro: (call) => {
       switch (call.name) {
         case 'char':
@@ -372,28 +330,15 @@ function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>): CbsHos
           return { text: read(ctx.user, budget) };
         case 'turn':
           return { text: String(ctx.turn) };
-        case 'slot': {
-          // A name no block around it gave is left as written, as RisuAI leaves it.
-          const name = call.args.rest(1)?.value().text;
-          const item = name === undefined ? (call.slot ?? '') : namedSlot(name);
-          return item === undefined ? undefined : { text: read(item, budget), untrusted: true };
-        }
-        case 'screenwidth':
-          // RisuAI cards lay out by it. The width when the message was drawn.
-          return typeof window === 'undefined' ? undefined : { text: String(window.innerWidth) };
         // RisuAI cards show a panel or a picture on the last few turns only
-        // (`{{greater_equal::{{chat_index}}::{{? {{lastmessageid}}-2}}}}`).
+        // (`{{greater_equal::{{chat_index}}::{{? {{lastmessageid}}-2}}}}`). Answered
+        // here rather than from `data.chat`, so they count the same way whether the
+        // whole branch is loaded or only its latest stretch.
         case 'chatindex':
           return ctx.chatIndex === undefined ? undefined : { text: String(ctx.chatIndex) };
         case 'lastmessageid':
         case 'lastmessageindex':
           return ctx.lastMessageId === undefined ? undefined : { text: String(ctx.lastMessageId) };
-        // …and ask whether an image exists before drawing it
-        // (`{{contains::{{assetlist}}::name}}`). The plot's own names, not the model's.
-        // A plot keeps one list of images, so RisuAI's emotion list is the same one.
-        case 'assetlist':
-        case 'emotionlist':
-          return { text: read(JSON.stringify(ctx.assetNames ?? []), budget) };
         case 'rel': {
           const axis = call.args.rest(1)?.value().text.trim().toLowerCase() ?? '';
           if (!(REL_AXES as readonly string[]).includes(axis)) return undefined;
@@ -417,6 +362,56 @@ function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>): CbsHos
   };
 }
 
+/** RisuAI's own test for a phone, which `{{metadata::mobile}}` answers with. */
+const MOBILE_RE = /iPad|iPhone|iPod|Android|webOS/i;
+
+/**
+ * What the browser can tell RisuAI's functions, and nothing it cannot.
+ *
+ * The screen, the clock and the browser's language are read when the message is
+ * drawn, as RisuAI reads them. The chat is what the page has loaded: `{{role}}`
+ * and `{{isfirstmsg}}` are this message's own, the chat functions answer only over
+ * a whole branch (`wholeBranch`), and `{{pick}}` draws as RisuAI draws it — the
+ * chat and the branch's length, so a pick holds through a reroll and moves on with
+ * the next turn. The greeting is not handed over: which of the plot's openings it
+ * was (`{{firstmsgindex}}`) is not something the page can tell, so the functions
+ * that would fall back to it stay as written there. Nor are the card's internals —
+ * a reader's screen never has them to give.
+ */
+function hostData(ctx: CbsContext): CbsHostData {
+  const data: CbsHostData = { phase: 'display' };
+  const index = ctx.chatIndex;
+  const messages = ctx.messages;
+  if (index !== undefined) {
+    data.firstMessage = index === -1;
+    // The greeting is the character's; any other message says whose it is.
+    const role = index === -1 ? 'char' : messages?.[index]?.role;
+    if (role) data.role = role;
+    if (messages && ctx.wholeBranch) {
+      data.chat = () => ({ messages, offset: 0, length: messages.length, index });
+    }
+  }
+  if (ctx.chatId !== undefined && ctx.lastMessageId !== undefined) {
+    data.seed = { key: ctx.chatId, length: ctx.lastMessageId + 1 };
+  }
+  // A plot keeps one list of images, so RisuAI's emotion list and its display
+  // assets are the same one: the open images, by the names the card asks for them by.
+  if (ctx.assetNames) data.assets = { names: ctx.assetNames, display: ctx.assetNames };
+  const zone = Intl.DateTimeFormat().resolvedOptions();
+  data.clock = { now: new Date(), timeZone: zone.timeZone, locale: zone.locale };
+  if (typeof window !== 'undefined') {
+    // RisuAI cards lay out by them. The size when the message was drawn.
+    data.screen = { width: window.innerWidth, height: window.innerHeight };
+  }
+  const browser = typeof navigator === 'undefined' ? undefined : navigator;
+  data.meta = {
+    ...(ctx.locale ? { language: ctx.locale } : {}),
+    ...(browser?.language ? { browserLanguage: browser.language } : {}),
+    ...(browser?.userAgent ? { mobile: MOBILE_RE.test(browser.userAgent) } : {}),
+  };
+  return data;
+}
+
 /**
  * Renders an OUT template to (still untrusted) HTML.
  *
@@ -428,6 +423,16 @@ function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>): CbsHos
  *
  * `charge` is called with the length of every dynamic value before it is expanded,
  * so a caller rendering the same template against many matches pays for each one.
+ *
+ * The last step is RisuAI's display unescape (`unescapeCbs`), once: what `#escape`
+ * and the display-escape functions (`{{decbo}}`, `{{<}}`, …) put in as stand-ins
+ * so that nothing reads them as syntax, and `#puredisplay`'s backslashed braces,
+ * come back as the characters they stand for — `<` and `>` as entities, so a
+ * stand-in is only ever text. It has to happen here, before the sanitizer and not
+ * after it: the sanitizer judges the characters it is shown, and an address or a
+ * stylesheet that gained its `:` or its `(` after being judged
+ * (`src="https{{dec}}//…"`, `url{{(}}…`) would be one it never saw. The result is
+ * never read as CBS again, so the restored braces stay braces.
  */
 export function renderTemplate(
   template: string,
@@ -437,7 +442,7 @@ export function renderTemplate(
   const budget: Budget = { nodes: MAX_RENDERED_NODES, iterations: MAX_EACH_ITERATIONS, charge };
   try {
     const nodes = parseCbs(template, { strict: true });
-    return evaluateCbs(template, nodes, host(ctx, budget, attributePositions(nodes)));
+    return unescapeCbs(evaluateCbs(template, nodes, host(ctx, budget, attributePositions(nodes))), 'html');
   } catch (error) {
     if (error instanceof RenderBudgetExhausted) throw error;
     return escapeHtml(template);

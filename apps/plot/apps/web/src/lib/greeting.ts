@@ -35,6 +35,12 @@ export interface GreetingContext {
   user: string;
   /** The chat id: what keeps `{{pick}}` the choice the prompt makes. */
   seed: string;
+  /**
+   * Messages after the greeting on the branch — with the seed, RisuAI's pick
+   * key, which the prompt draws with too: the choice moves with the turn and
+   * holds on a reroll. Without it `{{pick}}` keeps the old once-per-chat choice.
+   */
+  seedLength?: number;
 }
 
 /** The root of a branch, written before anyone spoke: the chat's opening, or one of its swipes. */
@@ -65,6 +71,7 @@ export function greetingText(content: string, id: string, ctx: GreetingContext):
     user: ctx.user,
     variables: ctx.variables,
     seed: ctx.seed,
+    ...(ctx.seedLength !== undefined ? { seedLength: ctx.seedLength } : {}),
     random: seededRandom(id),
   });
   return shown.length > MAX_GREETING_CHARS ? content : shown;

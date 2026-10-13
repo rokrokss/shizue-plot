@@ -6,7 +6,8 @@
  * What leaves the browser is exactly what the API calls below send: the chosen
  * card files and their linked World Info files, the extra lorebook entries and
  * display scripts converted here, persona names and descriptions, and the chats
- * converted to our message shape in batches. The scan's own inputs —
+ * converted to our message shape in batches — with each chat's variables, its
+ * author's note and the entries of the World Info file bound to it. The scan's own inputs —
  * `settings.json`, the rest of the backup — are never part of a request.
  *
  * Every API call goes through the injected `fetch`, and the core converters come
@@ -15,6 +16,7 @@
 import type { DisplayScript, ImportedChatMessage, LoreEntry } from '@shizue/core';
 import {
   FileTooLargeError,
+  stNoteKeepsPlace,
   type convertSillyTavernChat,
   type StCharacter,
   type StChatFile,
@@ -45,6 +47,8 @@ export const BATCH_BYTES = 4_000_000;
 export const MAX_IMPORT_VERSIONS = 20;
 export const MAX_IMPORTED_ROWS = 20_000;
 export const MAX_IMPORT_VERSION_LENGTH = 100_000;
+/** Characters of an imported chat's author's note; mirrors the API. */
+export const MAX_IMPORT_NOTE_LENGTH = MAX_IMPORT_VERSION_LENGTH;
 /** Room left in a batch for the fields around `messages` (ids, title, file name). */
 const ENVELOPE_BYTES = 16 * 1024;
 
@@ -502,10 +506,22 @@ export type SkipReason = 'already_imported' | 'persona_exists' | 'chat_empty' | 
 
 /** Something that went wrong on a step without failing it. */
 export interface StepWarning {
-  code: 'world_missing' | 'world_unreadable' | 'extras_failed';
+  code: 'world_missing' | 'world_unreadable' | 'extras_failed' | 'chat_world_failed';
   /** The lorebook it is about. */
   name?: string;
   error?: ApiError;
+}
+
+/**
+ * Something the reader should know about how a chat came over, though nothing
+ * went wrong: its bound lorebook now reaches every chat on the plot, its
+ * author's note goes where ours goes rather than where ST put it, or the note was
+ * switched off in ST and so stayed behind.
+ */
+export interface StepNotice {
+  code: 'chat_world_attached' | 'note_moved' | 'note_off';
+  /** The lorebook it is about. */
+  name?: string;
 }
 
 /** A member of the plot as the chat converter matches speakers against it. */
@@ -532,6 +548,7 @@ export interface StepResult {
    */
   dropped?: StConvertedChat['skipped'] & { swipes: number; swipesOverRows: number };
   warnings?: StepWarning[];
+  notices?: StepNotice[];
 }
 
 export type Results = Record<string, StepResult>;
@@ -744,6 +761,60 @@ async function applyExtras(
   return warnings;
 }
 
+/** What makes two lore entries the same entry: what `loreEntryKey` hashes, unhashed. */
+const loreIdentity = (entry: LoreEntry): string =>
+  JSON.stringify([entry.keys, entry.secondaryKeys, entry.content]);
+
+/**
+ * The World Info file ST bound to one chat (its "Chat Lore", `chat_metadata.world_info`).
+ * There is no lorebook of one chat's own here — lore is the plot's, or a member
+ * card's, and reaches every chat on the plot — so the chat's book joins the
+ * plot's the way the extra books do (`applyExtras`), and the step says it now
+ * reaches every chat.
+ *
+ * What the plot already holds is not added again. An entry is skipped when one
+ * the same (`loreIdentity`) is in the plot's lorebook or in a member's card,
+ * where a member's linked world went: so a book that is also the character's own,
+ * one attached as an extra, and one another chat of the plot brought — in this
+ * run or an earlier one — each come in once. It runs before the chat is created,
+ * so a retry after a create that failed finds the entries already there.
+ */
+async function attachChatWorld(
+  ctx: RunContext,
+  plotId: string,
+  name: string,
+  warnings: StepWarning[],
+  notices: StepNotice[],
+): Promise<void> {
+  const file = ctx.manifest.worlds[name];
+  if (!file) {
+    warnings.push({ code: 'world_missing', name });
+    return;
+  }
+  let entries: LoreEntry[];
+  try {
+    entries = await worldEntries(ctx, name, file);
+  } catch {
+    ctx.signal?.throwIfAborted();
+    warnings.push({ code: 'world_unreadable', name });
+    return;
+  }
+  try {
+    const plot = await request<PlotDetail>(ctx, 'GET', `/api/plots/${plotId}`);
+    const held = new Set(
+      [...plot.lorebook, ...plot.characters.flatMap((member) => member.card.lorebook)].map(loreIdentity),
+    );
+    const fresh = entries.filter((entry) => !held.has(loreIdentity(entry)));
+    if (fresh.length > 0) {
+      await request<PlotDetail>(ctx, 'PATCH', `/api/plots/${plotId}`, { lorebook: [...plot.lorebook, ...fresh] });
+    }
+    notices.push({ code: 'chat_world_attached', name });
+  } catch (caught) {
+    ctx.signal?.throwIfAborted();
+    warnings.push({ code: 'chat_world_failed', name, error: asApiError(caught) });
+  }
+}
+
 /** The plot's members, in the library's order, as the chat converter names them. */
 function castOf(members: PlotMember[], items: CharacterItem[]): CastMember[] {
   return items.flatMap((item) => {
@@ -920,6 +991,25 @@ async function runChat(
     throw failure('message_too_long', `One imported message is at most ${MAX_IMPORT_VERSION_LENGTH} characters`);
   }
   result.dropped = { ...converted.skipped, swipes, swipesOverRows: fitted.dropped };
+
+  // What the file keeps for the chat as a whole (`chat_metadata`): the lorebook
+  // bound to it goes onto the plot now; the variables and the author's note ride
+  // the completion, once the messages they belong to are in.
+  const warnings: StepWarning[] = [];
+  const notices: StepNotice[] = [];
+  if (converted.worldName) await attachChatWorld(ctx, parent.plotId, converted.worldName, warnings, notices);
+  // Our chat note is put in every prompt; ST puts in nothing for an interval of 0,
+  // so a note switched off there stays behind rather than start speaking here.
+  // One past a turn's length (the API's cap) is cut to it — no note is that long.
+  const note = converted.authorNote;
+  const noteText = note && note.interval > 0 ? note.text.slice(0, MAX_IMPORT_NOTE_LENGTH) : undefined;
+  if (note && noteText === undefined) notices.push({ code: 'note_off' });
+  else if (note && !stNoteKeepsPlace(note)) notices.push({ code: 'note_moved' });
+  if (warnings.length > 0) result.warnings = warnings;
+  else delete result.warnings;
+  if (notices.length > 0) result.notices = notices;
+  else delete result.notices;
+
   // ST now writes 'unused' as the header's name, which the converter reads as ''
   // when no user line names one either: then the chat starts on no persona.
   const userName = converted.userName.trim();
@@ -966,7 +1056,11 @@ async function runChat(
     ctx,
     'POST',
     `/api/chats/${created.chat.id}/import/complete`,
-    { backfillMemory: ctx.options.memoryBackfill },
+    {
+      backfillMemory: ctx.options.memoryBackfill,
+      ...(converted.variables ? { variables: converted.variables } : {}),
+      ...(noteText ? { note: noteText } : {}),
+    },
   );
   result.memoryBackfill = done.memoryBackfill;
   result.status = 'done';

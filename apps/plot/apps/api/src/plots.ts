@@ -1,4 +1,4 @@
-import type { PromptCharacter, PromptPlot, PlotStyle } from '@shizue/core';
+import type { NormalizedCard, PromptCharacter, PromptPlot, PlotStyle } from '@shizue/core';
 import { plots, type Chat, type Character, type Plot } from '@shizue/db';
 import { and, eq } from 'drizzle-orm';
 import type { AppDeps } from './deps.js';
@@ -39,6 +39,21 @@ export const toPromptPlot = (plot: Plot, chat: Chat): PromptPlot => ({
 });
 
 /**
+ * Whether a card was last written by SillyTavern, whose prompt runs the
+ * `{{setvar}}` its text holds (`PromptCharacter.sillyTavern`). ST's exporter puts
+ * `talkativeness` and `fav` in `data.extensions` on every card it saves, and
+ * nothing else writes them; a studio-made card has neither. A card that also
+ * carries RisuAI's `extensions.risuai` block was written for RisuAI — ST keeps
+ * the block on a card it got from there — and RisuAI's prompt never runs them,
+ * so it is read RisuAI's way.
+ */
+export function isSillyTavernCard(card: NormalizedCard): boolean {
+  const extensions = card.extensions ?? {};
+  if (extensions['risuai'] !== undefined) return false;
+  return 'talkativeness' in extensions || 'fav' in extensions;
+}
+
+/**
  * The roster as the assembler reads it. The name is the row's rather than the
  * card's: it is the speaker prefix the script protocol matches, so the name the
  * model is taught to write has to be the name the parser looks for. `absent` are
@@ -52,4 +67,5 @@ export const toPromptCharacters = (
     name: member.name,
     card: member.card,
     ...(absent.has(member.id) ? { absent: true } : {}),
+    ...(isSillyTavernCard(member.card) ? { sillyTavern: true } : {}),
   }));
