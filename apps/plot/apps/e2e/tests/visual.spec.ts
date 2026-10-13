@@ -16,6 +16,25 @@ const VIEWPORTS = [
   { label: 'mobile', width: 390, height: 844 },
 ] as const;
 
+/**
+ * Takes out what is not part of the design: the dev-mode Next.js indicator, and
+ * the host's scrollbars. macOS draws overlay or classic scrollbars depending on
+ * whether a mouse is attached, and only a classic one makes `scrollbar-gutter:
+ * stable` (globals.css) reserve a gutter — so without this the same page lands
+ * a few pixels apart on the same Mac from one day to the next.
+ */
+async function hideUndesigned(page: Page): Promise<void> {
+  await page.addStyleTag({
+    content: [
+      'nextjs-portal { display: none !important; }',
+      '* { scrollbar-width: none !important; }',
+      '::-webkit-scrollbar { display: none !important; }',
+    ].join('\n'),
+  });
+  // No gutter is left, whichever kind of scrollbar the host draws.
+  expect(await page.evaluate(() => window.innerWidth - document.documentElement.clientWidth)).toBe(0);
+}
+
 for (const viewport of VIEWPORTS) {
   test.describe(`auth pages — ${viewport.label}`, () => {
     test.use({ viewport: { width: viewport.width, height: viewport.height } });
@@ -30,8 +49,7 @@ for (const viewport of VIEWPORTS) {
     test('login matches the approved design', async ({ page }) => {
       await page.goto('/ko/login');
       await expect(page.getByRole('heading', { name: /한 줄의 시작/ })).toBeVisible();
-      // The dev-mode Next.js indicator is not part of the design.
-      await page.addStyleTag({ content: 'nextjs-portal { display: none !important; }' });
+      await hideUndesigned(page);
 
       await expect(page).toHaveScreenshot(`login-${viewport.label}.png`, {
         animations: 'disabled',
@@ -101,7 +119,7 @@ test.describe('chat — mobile', () => {
   });
 
   test('the conversation matches the approved design', async () => {
-    await page.addStyleTag({ content: 'nextjs-portal { display: none !important; }' });
+    await hideUndesigned(page);
     await expect(page).toHaveScreenshot('chat-mobile.png', {
       animations: 'disabled',
       maxDiffPixelRatio: 0.01,
@@ -111,7 +129,7 @@ test.describe('chat — mobile', () => {
   test('the settings sheet matches the approved design', async () => {
     await page.getByRole('button', { name: '대화 설정' }).click();
     await expect(page.getByTestId('bottom-sheet')).toBeVisible();
-    await page.addStyleTag({ content: 'nextjs-portal { display: none !important; }' });
+    await hideUndesigned(page);
     await expect(page).toHaveScreenshot('chat-settings-mobile.png', {
       animations: 'disabled',
       maxDiffPixelRatio: 0.01,

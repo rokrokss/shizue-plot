@@ -63,6 +63,7 @@ export const MessageRow = memo(function MessageRow({
   attachments,
   display,
   components,
+  componentNames,
   roster = NO_ROSTER,
   speaker,
   previousSameRole,
@@ -100,6 +101,8 @@ export const MessageRow = memo(function MessageRow({
   display?: DisplayContext;
   /** Component code and its bindings; omitted when custom UI is off. */
   components?: ComponentContext;
+  /** The declared components, even when custom UI is off, so their call codes show as text. */
+  componentNames?: readonly string[];
   /**
    * The plot's members. A reply names its speakers line by line, so with a roster
    * in hand the faces and the names belong to the runs inside the message and the
@@ -383,6 +386,7 @@ export const MessageRow = memo(function MessageRow({
               {...(resolveAsset ? { resolveAsset } : {})}
               {...(display ? { display } : {})}
               {...(components ? { components } : {})}
+              {...(componentNames ? { componentNames } : {})}
               {...(attributed ? { roster } : {})}
               {...(attributed && speaker ? { speaker } : {})}
               previousSameRole={previousSameRole ?? ''}

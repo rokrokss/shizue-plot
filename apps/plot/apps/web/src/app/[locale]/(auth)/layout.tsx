@@ -7,9 +7,11 @@ import { Link } from '@/i18n/navigation';
 export default function AuthLayout({ children }: { children: ReactNode }) {
   return (
     <div className="brand-dots flex min-h-dvh flex-col">
-      <header className="mx-auto flex w-full max-w-6xl items-center justify-between px-5 py-6 sm:px-8">
+      {/* At 320px the two pickers and the wordmark do not fit one row in every
+          language, so the pickers wrap below it, still at the right. */}
+      <header className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-y-3 px-5 py-6 sm:px-8">
         <Link href="/" className="rounded-md"><Brand /></Link>
-        <div className="flex items-center gap-2">
+        <div className="ml-auto flex items-center gap-2">
           <LocaleSwitcher />
           <ThemeSwitcher />
         </div>

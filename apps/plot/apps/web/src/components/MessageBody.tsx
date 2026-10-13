@@ -20,6 +20,7 @@ import { unescapeCbs } from '@shizue/core/cbs';
 import { stripVariableMacros } from '@shizue/core/variables';
 import { readLockKind, renderImageTokens, type AssetResolver } from '@/lib/assets';
 import {
+  escapeComponentCalls,
   splitComponentCalls,
   type BodySegment,
   type ComponentContext,
@@ -290,8 +291,9 @@ function useDisplayPlan(
  *
  * With `components` set, what is left of the text is then searched for call codes,
  * and each one becomes a sandboxed frame in its place. Both are governed by the
- * same viewer opt-out: with it off neither prop is passed, so the call code reads
- * as the plain text it is and no frame is ever created.
+ * same viewer opt-out: with it off neither prop is passed and no frame is ever
+ * created. `componentNames` still is, so the call code reads as the plain text
+ * it is rather than as a tag the message's HTML path would drop.
  *
  * The speaker split comes last and only where there is still plain text to split:
  * an island a display script produced is the creator's own markup and is drawn as
@@ -307,6 +309,7 @@ export const MessageBody = memo(function MessageBody({
   resolveAsset,
   display,
   components: componentContext,
+  componentNames,
   roster = NO_ROSTER,
   speaker,
   previousSameRole = '',
@@ -327,6 +330,11 @@ export const MessageBody = memo(function MessageBody({
   display?: DisplayContext;
   /** Omitted when the viewer opted out or the character declares no components. */
   components?: ComponentContext;
+  /**
+   * The components the character declares, opted out or not: without `components`
+   * their call codes are shown as text. Memoize it, as `components`.
+   */
+  componentNames?: readonly string[];
   /**
    * The plot's members, whose names the `이름:` lines of a reply are matched
    * against. Empty — a user turn, or a plot read that has not landed yet —
@@ -357,8 +365,9 @@ export const MessageBody = memo(function MessageBody({
     // token, are applied here and now.
     const bound = display && chatIndex !== undefined ? { ...display, chatIndex } : display;
     const base = bound && plan ? (renderDisplayPlan(plan, bound) ?? plain) : plain;
-    return componentContext ? splitComponentCalls(base, componentContext.names) : base;
-  }, [content, display, chatIndex, componentContext, plan]);
+    if (componentContext) return splitComponentCalls(base, componentContext.names);
+    return componentNames ? escapeComponentCalls(base, componentNames) : base;
+  }, [content, display, chatIndex, componentContext, componentNames, plan]);
 
   /**
    * Each text segment, already resolved, attributed and cut into blocks. The

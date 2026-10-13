@@ -356,3 +356,27 @@ export function splitComponentCalls(
   }
   return out;
 }
+
+const escapeCall = (call: string): string =>
+  call.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/**
+ * The call codes left on screen as the text they are, for a reader who turned
+ * components off. Untouched, a call code is a whole tag to the message's HTML
+ * path (`lib/markdown/html`), and the sanitizer draws an unknown element as
+ * nothing. As entities it reads as written, in prose and inside markup alike.
+ */
+export function escapeComponentCalls(segments: readonly Segment[], names: readonly string[]): Segment[] {
+  return segments.map((segment) => {
+    if (segment.kind !== 'text') return segment;
+    const calls = findComponentCalls(segment.text, names);
+    if (calls.length === 0) return segment;
+    let text = '';
+    let cursor = 0;
+    for (const call of calls) {
+      text += segment.text.slice(cursor, call.start) + escapeCall(segment.text.slice(call.start, call.end));
+      cursor = call.end;
+    }
+    return { kind: 'text', text: text + segment.text.slice(cursor) };
+  });
+}

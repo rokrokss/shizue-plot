@@ -2246,6 +2246,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                     attachments={message.attachments}
                     {...(display ? { display } : {})}
                     {...(components ? { components } : {})}
+                    componentNames={declaredComponents}
                     previousSameRole={meta.previousSameRole}
                     chatIndex={indexBase + index}
                     streaming={message.streaming}

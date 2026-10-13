@@ -167,6 +167,41 @@ describe('beside the speaker split', () => {
   });
 });
 
+/**
+ * A reader who turned custom UI off gets no frames, and the call codes the
+ * frames would have stood in for read as the text they are — not as a tag the
+ * HTML path draws as an unknown element, which is to say not at all.
+ */
+describe('a call code with components turned off', () => {
+  const NAMES = ['StatusWindow'];
+
+  it('reads as its text in an opening', () => {
+    render({ componentNames: NAMES, content: '문을 연다\n<StatusWindow hp={70} name="루미" />' });
+
+    expect(host.textContent).toContain('문을 연다');
+    expect(host.textContent).toContain('<StatusWindow hp={70} name="루미" />');
+    expect(host.querySelector('iframe')).toBeNull();
+  });
+
+  it('reads as its text in the middle of a reply', () => {
+    render({ componentNames: NAMES, content: '[status] hp=50 <StatusWindow hp={50} /> 검을 뽑았다' });
+
+    expect(host.textContent).toContain('[status] hp=50 <StatusWindow hp={50} /> 검을 뽑았다');
+  });
+
+  it('reads as its text inside markup too', () => {
+    render({ componentNames: NAMES, content: '<div class="box">\n<StatusWindow hp={70} />\n</div>' });
+
+    expect(islands()[0]!.textContent).toContain('<StatusWindow hp={70} />');
+  });
+
+  it('leaves a tag no component is called by to the HTML path', () => {
+    render({ componentNames: NAMES, content: '앞 <Note text="x" /> 뒤' });
+
+    expect(host.textContent).not.toContain('<Note');
+  });
+});
+
 describe('indented text', () => {
   it('is a paragraph, not a code block', () => {
     render({ content: '첫 줄\n\n    들여 쓴 문단' });
