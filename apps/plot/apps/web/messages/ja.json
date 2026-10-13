@@ -921,11 +921,13 @@
         "author_note": "ユーザーノート",
         "post_history": "履歴後の指示",
         "trailing": "最後の指示",
-        "injection": "スクリプト挿入"
+        "injection": "スクリプト挿入",
+        "request": "リクエストトリガーが編集"
       },
       "roles": {
         "user": "ユーザー",
-        "assistant": "応答"
+        "assistant": "応答",
+        "system": "システム"
       },
       "placement": {
         "before_char": "キャラクター前",

@@ -62,7 +62,10 @@ export function PromptInspector({ chatId }: { chatId: string }) {
   const kindLabel = (block: Block): string =>
     block.kind === 'history'
       ? t(`roles.${block.label === 'user' ? 'user' : 'assistant'}`)
-      : [t(`kinds.${block.kind}`), block.label].filter(Boolean).join(' · ');
+      : block.kind === 'request'
+        ? // A turn the card's request triggers rewrote, under the role it is sent as.
+          `${t('kinds.request')} · ${t(`roles.${block.label === 'user' || block.label === 'system' ? block.label : 'assistant'}`)}`
+        : [t(`kinds.${block.kind}`), block.label].filter(Boolean).join(' · ');
 
   const percent = (value: number): string =>
     report && report.totals.contextBudget > 0

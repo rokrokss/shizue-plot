@@ -3,6 +3,7 @@ import type { getAdapter } from '@shizue/llm';
 import type { ChatGPTAccounts } from './chatgptAccounts.js';
 import type { AppAuth, SessionStore } from './hostedAuth.js';
 import type { SceneImageGenerator } from './sceneImage.js';
+import type { RequestTriggerRunner } from './requestTriggers.js';
 import type { ScriptFetch } from './scriptFetch.js';
 import type { ObjectStorage } from './storage.js';
 
@@ -67,6 +68,11 @@ export interface AppDeps {
    * the web origin refused; tests hand it a stub DNS and connection.
    */
   scriptFetch?: ScriptFetch;
+  /**
+   * Runs a card's request triggers (`requestTriggers.ts`); the worker pool by
+   * default. Tests wrap it to shorten its deadline or to count its runs.
+   */
+  runRequestTriggers?: RequestTriggerRunner;
   /** Adapter factory; defaults to the model registry. Overridden in tests. */
   getAdapter?: (...args: Parameters<typeof getAdapter>) => ReturnType<typeof getAdapter> | Awaited<ReturnType<typeof getAdapter>>;
   /**

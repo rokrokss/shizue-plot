@@ -921,11 +921,13 @@
         "author_note": "Author's note",
         "post_history": "Post-history instructions",
         "trailing": "Closing instruction",
-        "injection": "Script injection"
+        "injection": "Script injection",
+        "request": "Edited by a request trigger"
       },
       "roles": {
         "user": "User",
-        "assistant": "Reply"
+        "assistant": "Reply",
+        "system": "System"
       },
       "placement": {
         "before_char": "Before characters",

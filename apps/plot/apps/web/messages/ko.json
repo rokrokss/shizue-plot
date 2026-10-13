@@ -921,11 +921,13 @@
         "author_note": "유저노트",
         "post_history": "히스토리 뒤 지시",
         "trailing": "마지막 지시",
-        "injection": "스크립트 주입"
+        "injection": "스크립트 주입",
+        "request": "요청 트리거가 고침"
       },
       "roles": {
         "user": "유저",
-        "assistant": "응답"
+        "assistant": "응답",
+        "system": "시스템"
       },
       "placement": {
         "before_char": "캐릭터 앞",

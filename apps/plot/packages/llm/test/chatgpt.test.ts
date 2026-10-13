@@ -166,6 +166,11 @@ describe('ChatGPT Responses adapter', () => {
       { role: 'assistant', content: 'partial' }, { role: 'developer', content: 'post-history' },
     ] });
   });
+  it('leaves the instructions out when there is no system text', () => {
+    const body = responseBody({ ...request, system: '', messages: [{ role: 'user', content: 'hi' }] });
+    expect(body).not.toHaveProperty('instructions');
+    expect(body.input).toEqual([{ role: 'user', content: 'hi' }]);
+  });
   it('asks for a reasoning effort only when one is chosen, and never for a summary', () => {
     expect(responseBody({ ...request, reasoningEffort: 'high' }).reasoning).toEqual({ effort: 'high' });
     expect(responseBody(request)).not.toHaveProperty('reasoning');

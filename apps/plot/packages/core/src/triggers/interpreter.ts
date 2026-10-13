@@ -1,11 +1,13 @@
 /**
  * RisuAI's trigger interpreter (`runTrigger` in its `process/triggers.ts`),
- * ported to run in the reader's browser against our chat.
+ * ported to run in the reader's browser against our chat — and, for the
+ * `request` mode, on the server (`apps/api/src/requestTriggers.ts`).
  *
  * A card's triggers are a list. A run takes the ones for its mode — `start`
  * before every generation, `input` before the reader's turn is sent, `output`
- * after a reply arrives, `display` while a message is drawn, `manual` by name
- * when a button or another trigger asks for one — checks each one's conditions,
+ * after a reply arrives, `display` while a message is drawn, `request` over the
+ * assembled prompt just before it is sent, `manual` by name when a button or
+ * another trigger asks for one — checks each one's conditions,
  * and steps through its effects: the v1 effects (`setvar`, `systemprompt`, …)
  * and the v2 block language (`v2If`/`v2Else`/`v2EndIndent`, loops, local
  * variables, string, array and dict operations, lore and chat access).
@@ -23,14 +25,15 @@
  *   a generator that yields one (`TriggerRequest`) wherever RisuAI would await
  *   the screen or the clock — an alert, a question, a wait, a Lua block — and the
  *   driver answers it. `runTriggersSync` drives a run that may not wait (the
- *   display mode, whose allowed effects never ask), `runTriggers` one that may.
+ *   display and request modes, whose allowed effects never ask), `runTriggers`
+ *   one that may.
  * - Nothing is stored here. A run returns what it changed — the variables, the
  *   prompt text a start trigger asked for, the chat as it left it, the
- *   character's fields it rewrote — and the caller decides where each goes
- *   (`messages.variable_delta`, the generation request, `chats.script_overlay`).
- * - Effects this product cannot carry out — image generation, a model call,
- *   rewriting the request — are logged and leave what RisuAI leaves on failure
- *   (`TRIGGER_CLASSIFICATION`).
+ *   character's fields it rewrote, the request a request trigger edited — and
+ *   the caller decides where each goes (`messages.variable_delta`, the
+ *   generation request, `chats.script_overlay`).
+ * - Effects this product cannot carry out — image generation — are logged and
+ *   leave what RisuAI leaves on failure (`TRIGGER_CLASSIFICATION`).
  * - RisuAI's slash commands (`command`, `v2Command`, `command.ts`) act on the
  *   chat as stored, not on the run's copy, and the CBS reads it too — its
  *   chat functions and its variables. The run keeps that chat beside its own
@@ -40,9 +43,11 @@
  *   input run that wrote none itself, which RisuAI writes back only as messages,
  *   and the whole stored chat when the run ended early and wrote nothing back.
  * - Hard limits RisuAI does not have: steps per run, nesting, how long a value
- *   may grow, how long a wait may last. Past one the run stops as though a step
- *   had returned (`aborted`), keeping the variables it already wrote — as
- *   RisuAI keeps them, since its writes go through to the chat as they happen.
+ *   may grow (except in a request run, whose values are never stored and which
+ *   the API bounds by a thread and a deadline), how long a wait may last. Past
+ *   one the run stops as though a step had returned (`aborted`), keeping the
+ *   variables it already wrote — as RisuAI keeps them, since its writes go
+ *   through to the chat as they happen.
  *
  * Deterministic where RisuAI is: the only randomness is `v2Random` and the
  * evaluator's own dice, both drawn from the run's `random`.
@@ -66,6 +71,16 @@ export interface TriggerMessage {
   /** The stored message it came from; absent for one a trigger appended. */
   id?: string;
   time?: number;
+}
+
+/**
+ * One turn of the request a request run edits, as its `displayData` holds them
+ * in order: RisuAI's `OpenAIChat`, of which the request effects read and write
+ * these two fields only.
+ */
+export interface RequestTurn {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
 }
 
 /** The character a run belongs to — the card whose triggers these are. */
@@ -111,7 +126,11 @@ export interface TriggerRunInput {
   manualName?: string;
   /** The `risu-id` of the element that asked for a manual run, for `{{trigger_id}}`. */
   triggerId?: string | null;
-  /** The message text a display run rewrites (`v2GetDisplayState`/`v2SetDisplayState`). */
+  /**
+   * The message text a display run rewrites (`v2GetDisplayState`/`v2SetDisplayState`),
+   * or the request a request run edits: the JSON of its turns (`RequestTurn[]`),
+   * as RisuAI hands its request triggers `JSON.stringify(formated)`.
+   */
   displayData?: string;
   /**
    * The reader's global variables on the plot, for `{{getglobalvar}}` and `@name`.
@@ -298,7 +317,7 @@ export interface TriggerRunResult {
    * what slash commands wrote there.
    */
   variables: Variables;
-  /** Whether any chat variable was written. A display run's writes are its own and never count. */
+  /** Whether any chat variable was written. A display or request run's writes are its own and never count. */
   variablesChanged: boolean;
   /** What start triggers asked to put in the prompt, RisuAI's `additonalSysPrompt`. */
   injections: PromptInjectionText;
@@ -314,7 +333,7 @@ export interface TriggerRunResult {
   character: CharacterRewrite;
   persona?: string;
   note?: string;
-  /** A display run's rewritten text. */
+  /** A display run's rewritten text, or a request run's edited request (absent when the run ended early). */
   displayData?: string;
   /** The global variables code wrote, as their final values (`null` unset); null when none. */
   globalWrites: VariableDelta | null;
@@ -358,7 +377,7 @@ export const MAX_TRIGGER_STEPS = 100_000;
 export const MAX_TRIGGER_DEPTH = 50;
 /** A wait longer than this is cut to it. */
 export const MAX_TRIGGER_WAIT_MS = 30_000;
-/** The longest value a variable may be given; past it the run stops. The fold's own ceiling. */
+/** The longest value a variable may be given; past it the run stops (not a request run's). The fold's own ceiling. */
 export const MAX_TRIGGER_VALUE_LENGTH = 100_000;
 
 class Abort extends Error {}
@@ -386,7 +405,7 @@ interface Shared {
   input: TriggerRunInput;
   variables: Variables;
   variablesChanged: boolean;
-  /** A display run's writes, which never reach the chat (RisuAI's `tempVars`). */
+  /** A display or request run's writes, which never reach the chat (RisuAI's `tempVars`). */
   tempVariables: Variables;
   /** The reader's global variables as the run has them, and what it wrote of them. */
   globals: Variables;
@@ -403,6 +422,7 @@ interface Shared {
   steps: number;
   random: () => number;
   log: TriggerLogEntry[];
+  /** RisuAI's `displayMode`: a display run's, and a request run's, which RisuAI starts with it too. */
   display: boolean;
   /** The chat as stored, which the slash commands act on. */
   stored: Stored;
@@ -488,7 +508,8 @@ function* execute(
   input: TriggerRunInput,
   command?: string,
 ): Generator<TriggerRequest, { result: TriggerRunResult; top: Run; shared: Shared }, unknown> {
-  const display = input.mode === 'display';
+  // RisuAI runs its request triggers with `displayMode` on: what they write stays the run's own.
+  const display = input.mode === 'display' || input.mode === 'request';
   const shared: Shared = {
     input,
     // A copy: the caller's fold is not the run's to change.
@@ -654,7 +675,10 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
       return;
     }
     const value = asText(raw);
-    if (value.length > MAX_TRIGGER_VALUE_LENGTH) {
+    // A request run's values are never stored, and a turn of the request it reads
+    // may be longer than any stored value; the server's thread and its deadline
+    // bound that run instead.
+    if (value.length > MAX_TRIGGER_VALUE_LENGTH && input.mode !== 'request') {
       shared.log.push({ kind: 'limit', message: `a value for "${key}" grew past ${MAX_TRIGGER_VALUE_LENGTH} characters` });
       throw new Abort();
     }
@@ -1390,15 +1414,43 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
           yield { kind: 'wait', ms };
           break;
         }
+        // The request a request run edits, as JSON in `displayData` — parsed and
+        // written back whole by every effect, as RisuAI does. Only a request run
+        // reaches these (a display run's allow list skips them); anywhere else
+        // RisuAI returns from the run.
         case 'v2GetRequestState':
-        case 'v2SetRequestState':
-        case 'v2GetRequestStateRole':
-        case 'v2SetRequestStateRole':
-        case 'v2GetRequestStateLength': {
-          // The request is assembled on the server, and a request-mode run never
-          // happens here; anywhere else RisuAI returns from the run.
+        case 'v2GetRequestStateRole': {
           if (!shared.display) return false;
-          unsupported(effect.type, 'the request is assembled on the server');
+          const turns = JSON.parse(run.displayData!) as Record<string, unknown>[] | null;
+          const at = num(value(effect, 'index', 'indexType'));
+          const field = effect.type === 'v2GetRequestState' ? 'content' : 'role';
+          setVar(output(effect), turns?.[at]?.[field] ?? 'null');
+          break;
+        }
+        case 'v2SetRequestState': {
+          if (!shared.display) return false;
+          const turns = JSON.parse(run.displayData!) as Record<string, unknown>[];
+          const at = num(value(effect, 'index', 'indexType'));
+          const text = value(effect, 'value', 'valueType');
+          // A turn that is not there throws, as RisuAI's `json[index].content = value`
+          // does — and the run ends, so the request goes as it was.
+          turnAt(turns, at).content = text;
+          run.displayData = JSON.stringify(turns);
+          break;
+        }
+        case 'v2SetRequestStateRole': {
+          if (!shared.display) return false;
+          const turns = JSON.parse(run.displayData!) as Record<string, unknown>[];
+          const at = num(value(effect, 'index', 'indexType'));
+          const role = value(effect, 'value', 'valueType');
+          // Any other role is ignored — and then a missing turn is never looked at.
+          if (role === 'user' || role === 'assistant' || role === 'system') turnAt(turns, at).role = role;
+          run.displayData = JSON.stringify(turns);
+          break;
+        }
+        case 'v2GetRequestStateLength': {
+          if (!shared.display) return false;
+          setVar(output(effect), (JSON.parse(run.displayData!) as unknown[]).length.toString());
           break;
         }
         case 'v2QuickSearchChat': {
@@ -1949,6 +2001,13 @@ function impersonate(run: Run, role: unknown, text: string): void {
   else if (role === 'char') run.messages.push({ role: 'char', data: text });
 }
 
+/** A request turn to write to, which throws where RisuAI's assignment to `json[index]` would: none is there. */
+function turnAt(turns: Record<string, unknown>[], at: number): Record<string, unknown> {
+  const turn = turns[at];
+  if (typeof turn !== 'object' || turn === null) throw new TypeError(`the request has no turn at ${at}`);
+  return turn;
+}
+
 /** `Array.prototype.slice` with RisuAI's `Number` arguments, NaN read as 0 the way slice reads it. */
 const sliceLike = (messages: TriggerMessage[], start: number, end: number): TriggerMessage[] =>
   messages.slice(start, end);
@@ -2059,11 +2118,11 @@ async function drive<T>(run: Generator<TriggerRequest, T, unknown>, driver: Trig
 }
 
 /**
- * Runs without waiting for anything — the display mode's way, whose allowed
- * effects never ask. A request that does arrive (a code block, a model call, an
- * embedding search) is answered with nothing, as though no engine were there to
- * take it — so a model call made while a message is drawn fails rather than
- * calling the model.
+ * Runs without waiting for anything — the display and request modes' way,
+ * whose allowed effects never ask. A request that does arrive (a code block, a
+ * model call, an embedding search) is answered with nothing, as though no
+ * engine were there to take it — so a model call made while a message is drawn
+ * fails rather than calling the model.
  */
 export function runTriggersSync(input: TriggerRunInput): TriggerRunResult {
   const run = triggerRun(input);

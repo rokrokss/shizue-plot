@@ -109,6 +109,7 @@ import {
 import { BACKFILL_CHUNKS_PER_RUN } from '../src/memory.js';
 import { createJobHandlers, notificationFanout } from '../src/notifications.js';
 import { MAX_ASSET_NAME_LENGTH, MAX_CARD_IMPORT_BYTES } from '../src/routes/plots.js';
+import { runRequestTriggers } from '../src/requestTriggers.js';
 import { createScriptFetch, type HopResponse, type Transport } from '../src/scriptFetch.js';
 import { MAX_GLOBAL_VARIABLE_KEYS } from '../src/scriptState.js';
 import { createLocalStorage, type ObjectStorage } from '../src/storage.js';
@@ -12285,6 +12286,241 @@ describe('prompt scripts and SillyTavern lore', () => {
     // The chat has no author's note of its own: the entry takes its place.
     expect(texts).toContain('AN-LORE');
     expect(texts).toContain('[예시 대화: 아리아]\nEX-LORE');
+  });
+});
+
+describe('request triggers', () => {
+  type Effect = Record<string, unknown>;
+
+  /**
+   * Effects that find the request turn whose text is `text` and do `then` to it,
+   * at its index. The counter is a run variable, not a local: a request run's
+   * writes go to its own variables, which a local would hide.
+   */
+  const atTurn = (text: string, then: Effect): Effect[] => [
+    { type: 'v2GetRequestStateLength', outputVar: 'n', indent: 0 },
+    { type: 'v2SetVar', var: 'i', value: '0', operator: '=', valueType: 'value', indent: 0 },
+    { type: 'v2LoopNTimes', value: 'n', valueType: 'var', indent: 0 },
+    { type: 'v2GetRequestState', index: 'i', indexType: 'var', outputVar: 't', indent: 1 },
+    { type: 'v2If', source: 't', condition: '=', target: text, targetType: 'value', indent: 1 },
+    { ...then, index: 'i', indexType: 'var', indent: 2 },
+    { type: 'v2EndIndent', indent: 2 },
+    { type: 'v2SetVar', var: 'i', value: '1', operator: '+=', valueType: 'value', indent: 1 },
+    { type: 'v2EndIndent', indent: 1, endOfLoop: true },
+  ];
+  const setText = (value: string): Effect => ({ type: 'v2SetRequestState', value, valueType: 'value' });
+  const setRole = (value: string): Effect => ({ type: 'v2SetRequestStateRole', value, valueType: 'value' });
+  const setSystem = (value: string): Effect => ({ ...setText(value), index: '0', indexType: 'value', indent: 0 });
+
+  /** A plot whose one member carries request triggers made of `effects`, and its owner's chat on it. */
+  async function requestChat(
+    email: string,
+    effects: Effect[],
+    chat: Record<string, unknown> = {},
+    target: Hono<AppEnv> = app,
+  ): Promise<{ cookie: string; chatId: string }> {
+    const cookie = await signUp(email);
+    const plot = await createPlot(cookie, { name: '요청 작품', description: '설명', intros: ['문 앞이다.'] });
+    const triggerscript = [{ comment: '', type: 'request', conditions: [], effect: effects }];
+    await addCharacter(cookie, plot.id, { name: '아리아', card: { description: '설명', extensions: { risuai: { triggerscript } } } });
+    const res = await json(cookie, '/api/chats', 'POST', { plotId: plot.id, model: 'echo/echo', ...chat }, target);
+    expect(res.status, await res.clone().text()).toBe(201);
+    return { cookie, chatId: (await readJson(res)).chat.id };
+  }
+
+  const send = async (cookie: string, chatId: string, target: Hono<AppEnv>, content = '안녕'): Promise<SseEvent[]> =>
+    readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }, target));
+
+  it('sends the model the system and the turns as the triggers left them, and stores none of it', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const { cookie, chatId } = await requestChat('request-edit@example.com', [
+      // The run reads the stored chat: the branch after its greeting, the turn just sent included.
+      setSystem('새 시스템 {{user}} {{lastmessage}}'),
+      ...atTurn('안녕', setText('바뀐 인사')),
+    ]);
+    const plain = (await send(cookie, chatId, capturing)).at(-1)!;
+    expect(plain.event).toBe('done');
+    const sent = prompts.at(-1)!;
+    expect(sent.system).toBe('새 시스템 유저 안녕');
+    expect(sent.messages.filter((message) => message.role === 'user').map((message) => message.content)).toEqual([
+      '바뀐 인사',
+    ]);
+    // The greeting and the post-history block are where they were.
+    expect(sent.messages[0]).toEqual({ role: 'assistant', content: '문 앞이다.' });
+    expect(sent.messages.at(-1)!.role).toBe('system');
+
+    const stored = await db.select().from(messages).where(eq(messages.chatId, chatId)).orderBy(asc(messages.createdAt));
+    expect(stored.map((message) => message.content)).toEqual(['문 앞이다.', '안녕', '바뀐 인사']);
+  });
+
+  it('sends a turn as the role the triggers gave it, and leads with the system turn only while it is one', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const turned = await requestChat('request-role@example.com', atTurn('안녕', setRole('system')));
+    await send(turned.cookie, turned.chatId, capturing);
+    const kept = prompts.at(-1)!;
+    expect(kept.messages.slice(0, 2)).toEqual([
+      { role: 'assistant', content: '문 앞이다.' },
+      { role: 'system', content: '안녕' },
+    ]);
+    const system = kept.system;
+
+    // A system string turned into a user turn leaves the system empty and opens the turns.
+    const opened = await requestChat('request-role-first@example.com', [
+      { ...setRole('user'), index: '0', indexType: 'value', indent: 0 },
+    ]);
+    await send(opened.cookie, opened.chatId, capturing);
+    const first = prompts.at(-1)!;
+    expect(first.system).toBe('');
+    expect(first.messages[0]).toEqual({ role: 'user', content: system });
+    expect(first.messages[1]).toEqual({ role: 'assistant', content: '문 앞이다.' });
+  });
+
+  it('sends the request unedited when the run throws, and when it runs out the clock', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const before = await requestChat('request-plain@example.com', []);
+    await send(before.cookie, before.chatId, capturing);
+    const unedited = prompts.at(-1)!;
+
+    // A write to a turn that is not there throws, and the edit before it goes too.
+    const thrown = await requestChat('request-throw@example.com', [
+      setSystem('바뀜'),
+      { ...setText('없음'), index: '999', indexType: 'value', indent: 0 },
+    ]);
+    expect((await send(thrown.cookie, thrown.chatId, capturing)).at(-1)!.event).toBe('done');
+    expect(prompts.at(-1)!.system).toBe(unedited.system);
+    expect(prompts.at(-1)!.messages).toEqual(unedited.messages);
+
+    // A card's regex that backtracks forever is cut off at the deadline.
+    const { app: hurried, prompts: hurriedPrompts } = capturingApp({
+      runRequestTriggers: (input) => runRequestTriggers(input, { deadlineMs: 500 }),
+    });
+    const hung = await requestChat('request-hang@example.com', [
+      setSystem('바뀜'),
+      { type: 'v2RegexTest', value: `${'a'.repeat(40)}b`, valueType: 'value', regex: '^(a+)+$', regexType: 'value', flags: '', flagsType: 'value', outputVar: 'x', indent: 0 },
+    ]);
+    const started = Date.now();
+    expect((await send(hung.cookie, hung.chatId, hurried)).at(-1)!.event).toBe('done');
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(hurriedPrompts.at(-1)!.system).toBe(unedited.system);
+
+    // The thread it took is replaced: the next card's edit goes through.
+    const after = await requestChat('request-after@example.com', [setSystem('다음 시스템')]);
+    await send(after.cookie, after.chatId, capturing);
+    expect(prompts.at(-1)!.system).toBe('다음 시스템');
+  });
+
+  it('keeps the images on their turn while the shape holds, and drops them once a role changed', async () => {
+    const { app: seeing, prompts } = capturingApp({ env: { SHIZUE_TEST_MODELS: '1' } });
+    const gif = Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1]);
+    const image = { type: 'image', url: `data:image/gif;base64,${Buffer.from(gif).toString('base64')}` };
+    const sendWithImage = async (cookie: string, chatId: string): Promise<void> => {
+      const form = new FormData();
+      form.append('file', new File([gif], 'shot.gif'));
+      form.append('width', '800');
+      form.append('height', '600');
+      form.append('thumbhash', 'HBkSHYSIeHiPiHh8eJd4h4eAeIhw==');
+      const upload = await request(cookie, `/api/chats/${chatId}/attachments`, 'POST', form);
+      expect(upload.status, await upload.clone().text()).toBe(201);
+      const { id } = await readJson(upload);
+      const events = await readSse(
+        await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '이건 뭐야?', attachmentIds: [id] }, seeing),
+      );
+      expect(events.at(-1)!.event).toBe('done');
+    };
+    const userTurn = () => prompts.at(-1)!.messages.find((message) => contentText(message.content).includes('질문') || contentText(message.content).includes('뭐야'));
+
+    const edited = await requestChat('request-image@example.com', atTurn('이건 뭐야?', setText('바뀐 질문')), { model: 'test/vision' }, seeing);
+    await sendWithImage(edited.cookie, edited.chatId);
+    expect(userTurn()).toEqual({ role: 'user', content: [{ type: 'text', text: '바뀐 질문' }, image] });
+
+    const reshaped = await requestChat('request-image-role@example.com', atTurn('문 앞이다.', setRole('system')), { model: 'test/vision' }, seeing);
+    await sendWithImage(reshaped.cookie, reshaped.chatId);
+    expect(prompts.at(-1)!.messages[0]).toEqual({ role: 'system', content: '문 앞이다.' });
+    expect(userTurn()).toEqual({ role: 'user', content: '이건 뭐야?' });
+  });
+
+  it('runs nothing for a plot whose scripts have no request triggers', async () => {
+    let runs = 0;
+    const { app: counted, prompts } = capturingApp({
+      runRequestTriggers: (input) => {
+        runs += 1;
+        return runRequestTriggers(input);
+      },
+    });
+    const cookie = await signUp('request-none@example.com');
+    const plot = await createPlot(cookie, { name: '작품', description: '설명', intros: ['문 앞이다.'] });
+    const triggerscript = [{ comment: '', type: 'start', conditions: [], effect: [setSystem('바뀜')] }];
+    await addCharacter(cookie, plot.id, { name: '아리아', card: { description: '설명', extensions: { risuai: { triggerscript } } } });
+    const created = await startChat(cookie, plot.id);
+    await send(cookie, created.chat.id, counted);
+    const plain = await setupChat(cookie);
+    await send(cookie, plain.chatId, counted);
+    expect(runs).toBe(0);
+    expect(prompts.map((prompt) => prompt.system).every((system) => !system.includes('바뀜'))).toBe(true);
+
+    // The same seam does run for a plot that has them.
+    const scripted = await requestChat('request-some@example.com', [setSystem('바뀜')]);
+    await send(scripted.cookie, scripted.chatId, counted);
+    expect(runs).toBe(1);
+    expect(prompts.at(-1)!.system).toBe('바뀜');
+  });
+
+  it('reads the chat each mode generates on: a continue’s head is in it, a regenerate’s replaced reply is not', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const { cookie, chatId } = await requestChat('request-modes@example.com', [setSystem('{{lastmessageid}}')]);
+    const last = async (mode: string): Promise<string> => {
+      const path = mode === 'messages' ? 'messages' : mode;
+      const body = mode === 'messages' ? { content: '안녕' } : undefined;
+      expect((await readSse(await json(cookie, `/api/chats/${chatId}/${path}`, 'POST', body, capturing))).at(-1)!.event).toBe('done');
+      return prompts.at(-1)!.system;
+    };
+    // After the greeting: the user turn, then its reply.
+    expect(await last('messages')).toBe('0');
+    expect(await last('continue')).toBe('1');
+    expect(await last('regenerate')).toBe('0');
+    expect(await last('auto')).toBe('1');
+    expect(await last('narrate')).toBe('2');
+  });
+
+  it('runs over the turns a script sends the model as well, its first turn first', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const cookie = await signUp('request-script-llm@example.com');
+    const plot = await createPlot(cookie, { name: '요청 작품', description: '설명', intros: ['문 앞이다.'] });
+    const effect = [setSystem('새 규칙'), { ...setText('바뀐 질문'), index: '1', indexType: 'value', indent: 0 }];
+    const triggerscript = [{ comment: '', type: 'request', conditions: [], effect }];
+    await addCharacter(cookie, plot.id, {
+      name: '아리아',
+      card: { description: '설명', extensions: { risuai: { triggerscript, lowLevelAccess: true } } },
+    });
+    const chatId = (await startChat(cookie, plot.id)).chat.id;
+    const res = await json(
+      cookie,
+      `/api/chats/${chatId}/script-llm`,
+      'POST',
+      { messages: [{ role: 'system', content: '규칙' }, { role: 'user', content: '질문' }] },
+      capturing,
+    );
+    expect(res.status, await res.clone().text()).toBe(200);
+    // The script's own turns, as RisuAI's triggers see them: no system string ahead of them.
+    expect(prompts.at(-1)).toMatchObject({ system: '새 규칙', messages: [{ role: 'user', content: '바뀐 질문' }] });
+    expect(await readJson(res)).toEqual({ result: '바뀐 질문' });
+  });
+
+  it('shows the creator the request as the triggers leave it', async () => {
+    const { cookie, chatId } = await requestChat('request-inspect@example.com', [
+      setSystem('새 시스템'),
+      ...atTurn('안녕', setRole('system')),
+    ]);
+    await send(cookie, chatId, app);
+    const report = await readJson(await request(cookie, `/api/chats/${chatId}/inspect`));
+    const kinds = report.blocks.map((block: { kind: string }) => block.kind);
+    // The rewritten system string stands in for every section it was made of.
+    expect(report.blocks[0]).toMatchObject({ kind: 'request', label: 'system', text: '새 시스템' });
+    expect(kinds).not.toContain('main');
+    // The greeting the triggers left alone keeps its block; the user turn went as a system turn.
+    expect(report.blocks[1]).toMatchObject({ kind: 'history', label: 'assistant', text: '문 앞이다.' });
+    expect(report.blocks[2]).toMatchObject({ kind: 'request', label: 'system', text: '안녕' });
+    expect(kinds).toContain('post_history');
   });
 });
 

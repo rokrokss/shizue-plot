@@ -5,12 +5,12 @@
  * - `server`: the interpreter does it, and the runtime hands the result to the
  *   API to keep — a variable on the turn, prompt text on the generation, the
  *   chat the run left (`ScriptChat`), a rewrite of the work in the chat's
- *   overlay, the reader's note.
+ *   overlay, the reader's note — or the API runs it itself: the request mode,
+ *   over a prompt that never reaches the browser.
  * - `logged`: the run notes it and goes on, leaving what RisuAI leaves when the
  *   effect finds nothing to act on.
- * - `impossible`: nothing here can do it (no image provider, the prompt never
- *   reaches the browser); logged, with RisuAI's failure value written where it
- *   writes one.
+ * - `impossible`: nothing here can do it (no image provider); logged, with
+ *   RisuAI's failure value written where it writes one.
  *
  * Kept as data so the tests can hold the interpreter to it: every effect it
  * names here is one the interpreter has a case for.
@@ -31,7 +31,12 @@ export const TRIGGER_CLASSIFICATION: Readonly<Record<string, { support: TriggerS
   'mode:output': { support: 'server', note: 'after a reply; committed with script-commit' },
   'mode:manual': { support: 'server', note: 'buttons and runtrigger; committed on the head' },
   'mode:display': { support: 'browser', note: 'per message as it is drawn; never stored' },
-  'mode:request': { support: 'impossible', note: 'the request is assembled on the server' },
+  'mode:request': {
+    support: 'server',
+    note:
+      'the API runs it over the assembled prompt before the model call, in a worker with a deadline; ' +
+      'display-mode variables (writes stay the run’s own); a throw or a timeout sends the request unedited',
+  },
 
   // v1 effects
   setvar: { support: 'server', note: '' },
@@ -128,11 +133,14 @@ export const TRIGGER_CLASSIFICATION: Readonly<Record<string, { support: TriggerS
   v2GetAlertSelect: { support: 'browser', note: 'the index of the option taken, as text, as RisuAI’s dialog answers' },
   v2GetDisplayState: { support: 'browser', note: 'display runs' },
   v2SetDisplayState: { support: 'browser', note: 'display runs' },
-  v2GetRequestState: { support: 'impossible', note: 'request mode' },
-  v2SetRequestState: { support: 'impossible', note: 'request mode' },
-  v2GetRequestStateRole: { support: 'impossible', note: 'request mode' },
-  v2SetRequestStateRole: { support: 'impossible', note: 'request mode' },
-  v2GetRequestStateLength: { support: 'impossible', note: 'request mode' },
+  v2GetRequestState: { support: 'server', note: 'request runs; turn 0 is the system prompt, a missing turn reads null' },
+  v2SetRequestState: { support: 'server', note: 'request runs; a missing turn throws, and the request goes unedited' },
+  v2GetRequestStateRole: { support: 'server', note: 'request runs' },
+  v2SetRequestStateRole: {
+    support: 'server',
+    note: 'request runs; system, user or assistant only — a missing turn throws for those; a role change drops the request’s images',
+  },
+  v2GetRequestStateLength: { support: 'server', note: 'request runs' },
 
   // v2 strings
   v2ExtractRegex: { support: 'browser', note: '' },

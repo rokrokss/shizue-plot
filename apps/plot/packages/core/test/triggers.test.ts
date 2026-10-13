@@ -808,6 +808,147 @@ describe('display runs', () => {
   });
 });
 
+describe('request runs', () => {
+  const request = (...turns: [string, string][]): string =>
+    JSON.stringify(turns.map(([role, content]) => ({ role, content })));
+  const getState = (index: string, outputVar: string, indexType = 'value'): TriggerStep => ({
+    type: 'v2GetRequestState', index, indexType, outputVar, indent: 0,
+  });
+  const setState = (index: string, value: string, valueType = 'value'): TriggerStep => ({
+    type: 'v2SetRequestState', index, indexType: 'value', value, valueType, indent: 0,
+  });
+  const setRole = (index: string, value: string): TriggerStep => ({
+    type: 'v2SetRequestStateRole', index, indexType: 'value', value, valueType: 'value', indent: 0,
+  });
+  const run = (effects: TriggerStep[], extra: Partial<TriggerRunInput> = {}) =>
+    runTriggersSync(
+      input([trigger('request', effects)], {
+        mode: 'request',
+        displayData: request(['system', '규칙'], ['user', '안녕'], ['assistant', '어서 와']),
+        ...extra,
+      }),
+    );
+
+  it('skip v1 effects, stop and model calls, as RisuAI’s request allow list does', () => {
+    const triggers = [
+      trigger('request', [
+        { type: 'setvar', var: 'hp', value: '9', operator: '=' },
+        { type: 'systemprompt', location: 'start', value: '끼워 넣기' },
+        { type: 'impersonate', role: 'user', value: '사칭' },
+        { type: 'stop' },
+        { type: 'v2StopPromptSending', indent: 0 },
+        { type: 'runLLM', value: '물어보기', inputVar: 'answer' },
+        { type: 'v2RunLLM', value: '물어보기', valueType: 'value', outputVar: 'answer', model: 'model', indent: 0 },
+        { type: 'v2SetCharacterDesc', value: 'nope', valueType: 'value', indent: 0 },
+        { type: 'v2GetDisplayState', outputVar: 'shown', indent: 0 },
+        setState('1', '{{getvar::hp}}/{{getvar::answer}}'),
+      ]),
+      // Only the request mode's triggers run.
+      trigger('start', [setState('2', 'start')]),
+    ];
+    const result = runTriggersSync(
+      input(triggers, {
+        mode: 'request',
+        character: character(triggers, { lowLevelAccess: true }),
+        displayData: request(['system', '규칙'], ['user', '안녕'], ['assistant', '어서 와']),
+        variables: vars({ hp: '3' }),
+      }),
+    );
+    expect(JSON.parse(result.displayData!)).toEqual([
+      { role: 'system', content: '규칙' },
+      { role: 'user', content: '3/null' },
+      { role: 'assistant', content: '어서 와' },
+    ]);
+    expect(result.aborted).toBe(false);
+    expect(result.stopSending).toBe(false);
+    expect(result.injections).toEqual({ start: '', historyend: '', promptend: '' });
+    expect(result.messages).toEqual(chat('안녕', '어서 와'));
+    expect(result.character).toEqual({});
+  });
+
+  it('keep what they write to themselves, and read the chat’s values first', () => {
+    // A chat value hides the run's own write to it, as the chat state (and the
+    // defaults folded into it) comes before RisuAI's tempVars; a fresh name reads
+    // back what the run wrote.
+    const effects = [
+      set('hp', '1', '+='),
+      set('fresh', '새 값'),
+      setState('1', 'hp', 'var'),
+      setState('2', 'fresh', 'var'),
+    ];
+    const result = run(effects, { variables: vars({ hp: '3' }) });
+    expect(JSON.parse(result.displayData!).map((turn: { content: string }) => turn.content)).toEqual(['규칙', '3', '새 값']);
+    expect(result.variablesChanged).toBe(false);
+    expect(result.variables['hp']).toBe('3');
+    expect(result.variables['fresh']).toBeUndefined();
+    // Nothing carries over to the next run.
+    const again = run([setState('2', 'fresh', 'var')], { variables: vars({ hp: '3' }) });
+    expect(JSON.parse(again.displayData!)[2].content).toBe('null');
+  });
+
+  it('read and write each turn’s content and role, and count the turns', () => {
+    const result = run([
+      getState('1', 'said'),
+      { type: 'v2GetRequestStateRole', index: '2', indexType: 'value', outputVar: 'role', indent: 0 },
+      { type: 'v2GetRequestStateLength', outputVar: 'count', indent: 0 },
+      getState('7', 'missing'),
+      { type: 'v2GetRequestStateRole', index: '7', indexType: 'value', outputVar: 'missingRole', indent: 0 },
+      { type: 'v2ConcatString', source1: 'said', source1Type: 'var', source2: '!', source2Type: 'value', outputVar: 'said', indent: 0 },
+      setState('1', 'said', 'var'),
+      { type: 'v2ConcatString', source1: 'role', source1Type: 'var', source2: 'missing', source2Type: 'var', outputVar: 'summary', indent: 0 },
+      { type: 'v2ConcatString', source1: 'summary', source1Type: 'var', source2: 'count', source2Type: 'var', outputVar: 'summary', indent: 0 },
+      { type: 'v2ConcatString', source1: 'summary', source1Type: 'var', source2: 'missingRole', source2Type: 'var', outputVar: 'summary', indent: 0 },
+      setState('2', 'summary', 'var'),
+      setRole('2', 'system'),
+      // Not a role RisuAI takes: ignored, even for a turn that is not there.
+      setRole('1', 'narrator'),
+      setRole('9', 'tool'),
+    ]);
+    expect(result.aborted).toBe(false);
+    expect(JSON.parse(result.displayData!)).toEqual([
+      { role: 'system', content: '규칙' },
+      { role: 'user', content: '안녕!' },
+      { role: 'system', content: 'assistantnull3null' },
+    ]);
+  });
+
+  it('end the run on a write to a turn that is not there, dropping the whole edit', () => {
+    for (const missing of [setState('3', '없음'), setRole('3', 'user'), setState('{{getvar::nothing}}', '없음')]) {
+      const result = run([setState('1', '고침'), missing, setState('2', '뒤')]);
+      expect(result.aborted).toBe(true);
+      expect(result.displayData).toBeUndefined();
+      expect(result.log.map((entry) => entry.kind)).toEqual(['error']);
+    }
+  });
+
+  it('read a turn past the stored values’ ceiling and write it back, where a display run would stop', () => {
+    const long = '가'.repeat(150_000);
+    const effects = [
+      getState('0', 'system'),
+      { type: 'v2ConcatString', source1: 'system', source1Type: 'var', source2: '!', source2Type: 'value', outputVar: 'system', indent: 0 },
+      setState('0', 'system', 'var'),
+    ];
+    const result = run(effects, { displayData: request(['system', long], ['user', '안녕']) });
+    expect(result.aborted).toBe(false);
+    expect(JSON.parse(result.displayData!)[0].content).toBe(`${long}!`);
+
+    const shown = runTriggersSync(
+      input([trigger('display', [set('text', long), { type: 'v2SetDisplayState', value: 'text', valueType: 'var', indent: 0 }])], {
+        mode: 'display',
+        displayData: '원문',
+      }),
+    );
+    expect(shown.aborted).toBe(true);
+    expect(shown.log.map((entry) => entry.kind)).toEqual(['limit']);
+  });
+
+  it('return from any other run that reaches them, as RisuAI’s do', () => {
+    const result = runTriggersSync(input([trigger('start', [setState('0', 'x'), set('after', '1')])]));
+    expect(result.aborted).toBe(true);
+    expect(result.variables['after']).toBeUndefined();
+  });
+});
+
 describe('code triggers', () => {
   it('hand their code to the driver in place, in every mode', async () => {
     const seen: string[] = [];

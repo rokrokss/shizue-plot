@@ -54,8 +54,8 @@ import {
   type Persona,
   type Plot,
 } from '@shizue/db';
-import { getModel } from '@shizue/llm';
-import { overlaidCard, scriptedMember, type ScriptOverlay } from '@shizue/core/triggers';
+import { contentText, getModel, type ChatMessage } from '@shizue/llm';
+import { hasTriggersFor, overlaidCard, scriptedMember, type ScriptOverlay } from '@shizue/core/triggers';
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { randomUUID } from 'node:crypto';
@@ -83,6 +83,7 @@ import {
   rejectBusyChat,
   releaseChatSlot,
   renewChatSlot,
+  requestTriggerInput,
   scheduleBackgroundUpdates,
   withGenerationSlot,
   type GenerationPlan,
@@ -124,6 +125,7 @@ import {
 } from '../scriptChat.js';
 import { deleteQuietly } from '../storage.js';
 import { toPromptCharacters, toPromptPlot } from '../plots.js';
+import { editRequestTurns } from '../requestTriggers.js';
 import { createScriptFetch } from '../scriptFetch.js';
 import { readScriptLlmMessages, readScriptLlmModel, runScriptLlm } from '../scriptLlm.js';
 import { suggestReplies } from '../suggest.js';
@@ -1248,6 +1250,7 @@ async function regeneratePlan(
       isAssistantHead && !edited ? memory.history.slice(0, -1) : memory.history,
       context.scriptSpeaker,
     ),
+    wholeBranch: kept,
     memoryText: memory.memoryText,
     relationshipText: buildRelationshipText(chat),
     authorNote: context.authorNote,
@@ -1283,6 +1286,40 @@ async function regeneratePlan(
     // The head's parent or the head, or where the scripts left the branch.
     target: { kind: 'new', parentId: kept.at(-1)?.id ?? null },
   };
+}
+
+/**
+ * A script's model call (`script-llm`) as the card's request triggers leave it,
+ * since RisuAI runs them before every request it sends. The request is the
+ * script's own turns, in order, as RisuAI's triggers see a script's
+ * (`editRequestTurns`); the chat they read is the branch as stored now, with the
+ * variables, the overlay and the reader's side of things a generation on it
+ * would have. Unedited where the run fails, as a generation's.
+ */
+async function withScriptRequestTriggers(
+  c: Context<AppEnv>,
+  deps: AppDeps,
+  chat: Chat,
+  messages: ChatMessage[],
+): Promise<ChatMessage[]> {
+  const context = await loadGenerationContext(deps, chat);
+  const path = buildPath(context.all, chat.headMessageId);
+  const input = requestTriggerInput({
+    characters: context.characters,
+    wholeBranch: path,
+    branch: promptBranch(context.all, path, context.firstMessage),
+    authorNote: context.authorNote,
+    personaText: context.personaText,
+    userName: context.userName,
+    variables: pathVariables(context.row, path, context.fold),
+    globalVariables: context.globalVariables,
+    clock: requestClock(c, context.row, path),
+    seed: chat.id,
+    assetNames: context.assetNames,
+  });
+  if (!input) return messages;
+  const turns = messages.map((message) => ({ role: message.role, content: contentText(message.content) }));
+  return (await editRequestTurns(turns, input, { run: deps.runRequestTriggers, label: chat.id })) ?? messages;
 }
 
 export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
@@ -2144,7 +2181,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const which = readScriptLlmModel(body['model']);
     const chat = await loadWritableChat(deps, id, userId);
     const plot = await loadVisiblePlot(deps.db, chat.plotId, chat.userId);
-    if (!scriptedMember(await loadMembers(deps.db, plot.id))?.scripts.lowLevelAccess) {
+    const scripted = scriptedMember(await loadMembers(deps.db, plot.id));
+    if (!scripted?.scripts.lowLevelAccess) {
       throw forbidden('script_llm_forbidden', "This plot's scripts may not call the model");
     }
     if (!(await acquireChatSlot(deps, chat.id, userId))) await rejectBusyChat(deps, chat.id, userId);
@@ -2153,8 +2191,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       // An owner with no catalog resolves to '', and the adapter then says why,
       // as it does for the chat's own model.
       const model = which === 'sub' ? await auxiliaryModelOf(deps, chat) : chat.model;
+      // RisuAI runs the request triggers over a script's call as over any request it sends.
+      const sent = hasTriggersFor(scripted.scripts.triggers, 'request')
+        ? await withScriptRequestTriggers(c, deps, chat, messages)
+        : messages;
       return c.json({
-        result: await runScriptLlm(deps, { userId, model, messages, signal: c.req.raw.signal }),
+        result: await runScriptLlm(deps, { userId, model, messages: sent, signal: c.req.raw.signal }),
       });
     } finally {
       clearInterval(keepAlive);
@@ -2389,6 +2431,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         personaText: context.personaText,
         userName: context.userName,
         history,
+        wholeBranch: branch,
         memoryText: memory.memoryText,
         relationshipText: buildRelationshipText(chat),
         authorNote: context.authorNote,
@@ -2484,6 +2527,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         personaText: context.personaText,
         userName: context.userName,
         history: await promptHistory(deps, c.get('userId'), chat.model, history, context.scriptSpeaker),
+        // The head being continued is in the chat, as RisuAI's continue keeps it there.
+        wholeBranch: path,
         memoryText: memory.memoryText,
         relationshipText: buildRelationshipText(chat),
         authorNote: context.authorNote,
@@ -2555,6 +2600,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         personaText: context.personaText,
         userName: context.userName,
         history: await promptHistory(deps, c.get('userId'), chat.model, history, context.scriptSpeaker),
+        wholeBranch: path,
         memoryText: memory.memoryText,
         relationshipText: buildRelationshipText(chat),
         authorNote: context.authorNote,
@@ -2623,6 +2669,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         personaText: context.personaText,
         userName: context.userName,
         history: await promptHistory(deps, c.get('userId'), chat.model, history, context.scriptSpeaker),
+        wholeBranch: path,
         memoryText: memory.memoryText,
         relationshipText: buildRelationshipText(chat),
         authorNote: context.authorNote,

@@ -28,6 +28,7 @@ import {
   type Variables,
 } from '@shizue/core';
 import { promptScriptJob, promptScriptsOf } from '@shizue/core/prompt-scripts';
+import { hasTriggersFor, scriptedMember, type TriggerMessage, type TriggerRunInput } from '@shizue/core/triggers';
 import { chats, messages, type Chat, type Message } from '@shizue/db';
 import { ChatGPTError, getAdapter, getModel, supportsVision, type ChatGPTAccount, type LLMAdapter } from '@shizue/llm';
 import { and, eq, isNull, lt, or, sql } from 'drizzle-orm';
@@ -39,6 +40,7 @@ import type { AppDeps, AppEnv } from './deps.js';
 import { invalidateMemoryForEdit, scheduleMemoryUpdate } from './memory.js';
 import { runPromptScriptJob } from './regexWorker.js';
 import { scheduleRelationshipUpdate } from './relationship.js';
+import { withRequestTriggers } from './requestTriggers.js';
 import { storableDelta, type PromptInjections } from './scriptState.js';
 import { unlockAssets } from './unlocks.js';
 
@@ -73,6 +75,13 @@ export interface GenerationPlan {
   userName: string;
   /** Branch messages, oldest first, that the model should see. */
   history: HistoryMessage[];
+  /**
+   * The whole branch the turn is generated on, as stored, oldest first — the
+   * one `branch` measures, and a continue's head with it. What the card's
+   * request triggers read as the chat, as RisuAI's read the chat it holds when
+   * the request goes out: not `history`, which the memory trims.
+   */
+  wholeBranch: Message[];
   /** Summary/facts block for the turns that are no longer in `history`. */
   memoryText: string;
   /** Relationship state block, empty when the chat has none or turned it off. */
@@ -410,7 +419,91 @@ async function withPromptScripts(
   );
 }
 
+/**
+ * What a generation sends — or, with `report`, measures for the creator's
+ * inspector: the prompt as it is put together, then as the card's request
+ * triggers leave it, since RisuAI runs them over the request it is about to
+ * send (`requestTriggers.ts`).
+ */
 async function buildRequestMessages(
+  plan: GenerationPlan,
+  deps: AppDeps,
+  account?: ChatGPTAccount,
+  report = false,
+): Promise<AssembledPrompt> {
+  const prompt = await assembleRequest(plan, deps, account, report);
+  const input = requestTriggerInput(plan);
+  return input ? withRequestTriggers(prompt, input, { run: deps.runRequestTriggers, label: plan.chatId }) : prompt;
+}
+
+/**
+ * What the card's request triggers run with, or null for a plot whose scripted
+ * member has none — which costs it nothing. The member, its card and its name
+ * are the ones the browser's runs read (`GET /:id/scripts`), with this chat's
+ * overlay already on them; the chat is the whole branch, and the reader's side
+ * of things (`data`) is what the browser hands its runs, from the plan — or
+ * from what `script-llm` reads of the chat, in the plan's shape.
+ */
+export function requestTriggerInput(
+  plan: Pick<
+    GenerationPlan,
+    | 'characters'
+    | 'wholeBranch'
+    | 'branch'
+    | 'authorNote'
+    | 'personaText'
+    | 'userName'
+    | 'variables'
+    | 'globalVariables'
+    | 'clock'
+    | 'seed'
+    | 'assetNames'
+  >,
+): Omit<TriggerRunInput, 'mode' | 'displayData'> | null {
+  const found = scriptedMember(plan.characters);
+  if (!found || !hasTriggersFor(found.scripts.triggers, 'request')) return null;
+  const { member, scripts } = found;
+  const messages = plan.wholeBranch.slice(plan.branch.greeting ? 1 : 0).map(
+    (message): TriggerMessage => ({
+      role: message.role === 'user' ? 'user' : 'char',
+      data: message.content,
+      id: message.id,
+      time: message.createdAt.getTime(),
+    }),
+  );
+  const nickname = member.card.nickname?.trim();
+  return {
+    character: {
+      name: characterName(member),
+      memberName: member.name,
+      ...(nickname ? { nickname } : {}),
+      description: member.card.description,
+      personality: member.card.personality,
+      scenario: member.card.scenario,
+      exampleDialogue: member.card.mesExample,
+      lorebook: member.card.lorebook,
+      postHistoryInstructions: member.card.postHistoryInstructions,
+      lowLevelAccess: scripts.lowLevelAccess,
+      triggers: scripts.triggers,
+    },
+    messages,
+    greeting: plan.branch.greeting?.text ?? null,
+    note: plan.authorNote,
+    persona: plan.personaText,
+    variables: plan.variables,
+    globalVariables: plan.globalVariables,
+    data: {
+      user: plan.userName,
+      clock: plan.clock,
+      seed: { key: plan.seed, length: messages.length },
+      meta: { language: plan.clock.locale },
+      assets: { names: plan.assetNames, display: plan.assetNames },
+    },
+  };
+}
+
+/** The prompt as it is put together, before the card's request triggers see it. */
+async function assembleRequest(
   plan: GenerationPlan,
   deps: AppDeps,
   account?: ChatGPTAccount,

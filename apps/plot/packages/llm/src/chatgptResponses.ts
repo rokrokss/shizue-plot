@@ -32,7 +32,8 @@ export function responseBody(req: ChatRequest): Record<string, unknown> {
     // Only the effort is asked for: a reasoning summary is never requested,
     // because it can paraphrase the creator's hidden prompt back to the reader.
     ...(req.reasoningEffort ? { reasoning: { effort: req.reasoningEffort } } : {}),
-    instructions: req.system,
+    // No system text is no instructions, rather than an empty one.
+    ...(req.system ? { instructions: req.system } : {}),
     input: req.messages.map((message) => ({
       role: message.role === 'system' ? 'developer' : message.role,
       content: typeof message.content === 'string' ? message.content : message.content.map((part) =>

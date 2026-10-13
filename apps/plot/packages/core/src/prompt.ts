@@ -304,7 +304,13 @@ export type PromptBlockKind =
   | 'author_note'
   | 'post_history'
   | 'injection'
-  | 'trailing';
+  | 'trailing'
+  /**
+   * A turn the card's request triggers rewrote after the prompt was put together
+   * (the API's `requestTriggers.ts`), labelled with the role it is sent as. It
+   * stands for every block the turn was made of; turns they left alone keep theirs.
+   */
+  | 'request';
 
 export interface PromptReportBlock {
   kind: PromptBlockKind;
