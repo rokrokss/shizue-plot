@@ -64,6 +64,7 @@ export const MessageRow = memo(function MessageRow({
   display,
   components,
   roster = NO_ROSTER,
+  speaker,
   previousSameRole,
   chatIndex,
   streaming,
@@ -106,6 +107,12 @@ export const MessageRow = memo(function MessageRow({
    * with no members at all — where the row is the speaker as it always was.
    */
   roster?: readonly PublicMember[];
+  /**
+   * The member a card's script wrote this message as (`source` `script`): its
+   * lines that name no one are that member's, not the narrator's — RisuAI draws
+   * it as the character's own message.
+   */
+  speaker?: string;
   /** Raw text of the previous message with the same role, for `repeat_back`. */
   previousSameRole?: string;
   /** This message's place on the branch, RisuAI's way, for `{{chat_index}}`. */
@@ -377,6 +384,7 @@ export const MessageRow = memo(function MessageRow({
               {...(display ? { display } : {})}
               {...(components ? { components } : {})}
               {...(attributed ? { roster } : {})}
+              {...(attributed && speaker ? { speaker } : {})}
               previousSameRole={previousSameRole ?? ''}
               {...(chatIndex !== undefined ? { chatIndex } : {})}
               streaming={streaming}

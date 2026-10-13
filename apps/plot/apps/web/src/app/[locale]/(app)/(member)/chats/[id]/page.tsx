@@ -198,6 +198,8 @@ interface ViewMessage {
   /** null for the same two: nothing is stored, so nothing has a time yet. */
   createdAt: string | null;
   streaming: boolean;
+  /** A character message a card's script wrote (`source` `script`), said by `scriptSpeaker`. */
+  scripted?: boolean;
 }
 
 /** Nothing attached, shared so a row without images keeps a stable prop. */
@@ -754,6 +756,16 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const stage = useMemo(
     () => members.filter((member) => !(absentIds ?? []).includes(member.id)),
     [members, absentIds],
+  );
+  /**
+   * Who says a character message a card's script wrote (`source` `script`), which
+   * names no speaker, stored as the script wrote it: the member whose scripts run,
+   * under the name it goes by here — or a plot's one member, should its scripts be
+   * gone. RisuAI draws such a message as that character's own.
+   */
+  const scriptSpeaker = useMemo(
+    () => (members.find((member) => member.id === scriptedId) ?? (members.length === 1 ? members[0] : undefined))?.name,
+    [members, scriptedId],
   );
   // A plot of one member is that character: renamed by its scripts, the chat is with
   // the new name, and `{{char}}` in the work's text is it too (the prompt's `PromptPlot.char`).
@@ -1918,6 +1930,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       attachments: message.attachments,
       createdAt: message.createdAt,
       streaming: continued && mode !== null,
+      ...(message.role === 'assistant' && message.source === 'script' ? { scripted: true } : {}),
     };
   });
 
@@ -2227,6 +2240,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                     name={message.role === 'user' ? t('you') : characterName}
                     avatar={plot?.coverUrl ?? null}
                     roster={members}
+                    {...(message.scripted && scriptSpeaker ? { speaker: scriptSpeaker } : {})}
                     assets={messageAssets}
                     resolveAsset={resolveAsset}
                     attachments={message.attachments}

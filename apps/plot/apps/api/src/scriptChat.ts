@@ -89,6 +89,16 @@ const opensOnGreeting = (path: readonly Message[]): boolean =>
 export const rewritableHead = (all: readonly Message[], head: Message | undefined): Message | null =>
   head && !all.some((message) => message.parentId === head.id) ? head : null;
 
+/**
+ * Where a message's text came from once a run left it with `role`: a stored one
+ * keeps its own while its role stands. One a script added as its character, or
+ * turned into a character message, is the script's (`script`) — it names no
+ * speaker, written as the script wrote it, and is drawn and sent as that
+ * character's, as RisuAI draws it. One turned into the reader's is the reader's.
+ */
+const sourceOf = (role: MessageRole, row?: Message): MessageSource =>
+  row && row.role === role ? row.source : role === 'assistant' ? 'script' : 'user';
+
 /** Same names, same values — a message's delta as `lastDelta` would leave it. */
 function sameDelta(a: VariableDelta | null | undefined, b: VariableDelta | null): boolean {
   const left = a ?? {};
@@ -198,7 +208,7 @@ export interface AppliedScriptChat {
  * where a swipe back to the branch lands (`deepestLeaf`).
  *
  * A copy carries everything its message did — role and text unless the run
- * changed them, who wrote it (`source`), the ruling on it (`directions`, a user
+ * changed them, who wrote it (`source`, `sourceOf`), the ruling on it (`directions`, a user
  * turn's only), the lore it triggered, the values its scripts left, the model
  * and the tokens, and its images: a copy is the same turn on another branch, and
  * nothing runs again for it. It is never `pending` (its output scripts ran, or
@@ -221,7 +231,7 @@ export async function applyScriptChat(
       .set({
         role,
         content,
-        ...(role !== row.role ? { source: 'user' as const, directions: null } : {}),
+        ...(role !== row.role ? { source: sourceOf(role), directions: null } : {}),
         ...(delta !== undefined ? { variableDelta: storableDelta(delta) } : {}),
         scriptRev: sql`${messages.scriptRev} + 1`,
       })
@@ -252,7 +262,7 @@ export async function applyScriptChat(
         ...(turn.directions ? { directions: turn.directions } : {}),
       };
     }
-    if (entry.kind === 'new') return { ...base, role: entry.role, content: entry.content };
+    if (entry.kind === 'new') return { ...base, role: entry.role, content: entry.content, source: sourceOf(entry.role) };
     const { row } = entry;
     copies.set(row.id, id);
     const stillUser = entry.role === 'user' && row.role === 'user';
@@ -260,7 +270,7 @@ export async function applyScriptChat(
       ...base,
       role: entry.role,
       content: entry.content,
-      source: stillUser ? row.source : ('user' as const),
+      source: sourceOf(entry.role, row),
       directions: stillUser ? row.directions : null,
       loreTriggers: row.loreTriggers,
       variableDelta: row.variableDelta,

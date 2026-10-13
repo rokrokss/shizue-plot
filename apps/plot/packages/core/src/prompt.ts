@@ -3,6 +3,7 @@ import { extractChoices } from './choices.js';
 import { applyMacros, stripInlayMacros, type MacroClock, type MacroContext, type MacroHostData } from './macro.js';
 import { activateLore, loreEntryKey, type LoreActivationVia, type LoreTimedState } from './lorebook.js';
 import { isNarration, narrationBody } from './narration.js';
+import { spokenBy } from './speech.js';
 import { DEFAULT_PRESET, SPEECH_PROTOCOL, SPEECH_PROTOCOL_REMINDER, type Preset } from './presets.js';
 import { extractStatusBlock } from './statusBlock.js';
 import { countTokens } from './tokens.js';
@@ -64,6 +65,14 @@ export interface HistoryMessage {
   images?: string[];
   /** When the turn was sent, in ms — what RisuAI's message-time functions read. */
   createdAt?: number;
+  /**
+   * The member who says the whole of an assistant turn whose text names no one:
+   * a character message a card's script wrote (`messages.source` `script`),
+   * stored as the script wrote it. Its lines are sent under that name
+   * (`spokenBy`), as a reply's are, rather than read as the narrator's; the lore
+   * scan and the chat functions still read `content`.
+   */
+  speaker?: string;
 }
 
 /**
@@ -922,6 +931,8 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // carries the current state and shows the model the format, and every older
   // copy is a superseded state the model would otherwise re-read each turn.
   const newestAssistant = history.findLastIndex((turn) => turn.role === 'assistant');
+  /** Every name a line may already be under, for the turns a script wrote as its character. */
+  const speakers = characters.map((member) => member.name);
   const historyMessages: PromptMessage[] = [];
   /** What each kept turn was charged, images included; parallel to historyMessages. */
   const historyCosts: number[] = [];
@@ -932,8 +943,13 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     const said = turn.role === 'assistant' && i !== newestAssistant ? withoutStateTail(source) : source;
     // A narrating turn keeps its role — the message is still the reader's or the
     // model's — but it is labelled, so the model reads it as the scene moving
-    // rather than as someone acting. The prefix never reaches the model.
-    const raw = isNarration(said) ? `${NARRATION_HEADER} ${narrationBody(said)}`.trim() : said;
+    // rather than as someone acting. The prefix never reaches the model. A turn a
+    // script wrote as its character is that character's, line by line.
+    const raw = isNarration(said)
+      ? `${NARRATION_HEADER} ${narrationBody(said)}`.trim()
+      : turn.speaker !== undefined && turn.role === 'assistant'
+        ? spokenBy(said, turn.speaker, speakers)
+        : said;
     // A turn's inlays name pictures in someone's own RisuAI storage; RisuAI takes
     // them out of the turns it sends, and so does this.
     const text = send(applyMacros(stripInlayMacros(raw), turnMacroOf(turn, i)));

@@ -32,9 +32,10 @@
  *   rewriting the request — are logged and leave what RisuAI leaves on failure
  *   (`TRIGGER_CLASSIFICATION`).
  * - RisuAI's slash commands (`command`, `v2Command`, `command.ts`) act on the
- *   chat as stored, not on the run's copy, and so does the CBS RisuAI reads
- *   variables through. The run keeps that chat beside its own (`Stored`), and
- *   its result is what RisuAI's caller leaves once it writes the run's copy back:
+ *   chat as stored, not on the run's copy, and the CBS reads it too — its
+ *   chat functions and its variables. The run keeps that chat beside its own
+ *   (`Stored`), and its result is what RisuAI's caller leaves once it writes the
+ *   run's copy back:
  *   the copy, over everything the commands did — except the variables of an
  *   input run that wrote none itself, which RisuAI writes back only as messages,
  *   and the whole stored chat when the run ended early and wrote nothing back.
@@ -53,7 +54,7 @@ import { applyVariableDelta, emptyVariables, readVariable, type VariableDelta, t
 import { risuCalculate } from './calc.js';
 import { parseChatML, type ScriptChatTurn } from './chatML.js';
 import { evaluateScriptCbs, type ScriptCbsEnv } from './cbsHost.js';
-import { loreTestOf, processMultiCommand, type CommandAnswer, type CommandHost, type LoreTest } from './command.js';
+import { loreTestOf, processMultiCommand, risuSelect, type CommandAnswer, type CommandHost, type LoreTest } from './command.js';
 import { isCodeTrigger, type TriggerMode, type TriggerScript, type TriggerStep } from './scripts.js';
 
 /* ------------------------------------------------------------------ inputs */
@@ -134,7 +135,11 @@ export type TriggerRequest =
   | { kind: 'alert'; text: string; error?: boolean }
   /** A line of text from the reader. Answered with a string. */
   | { kind: 'input'; text: string }
-  /** One of `options`. Answered with the chosen string. */
+  /**
+   * A choice between `options`, under `display`, as RisuAI's select dialog draws
+   * them (`risuSelect`). Answered with the index of the one chosen, as text — what
+   * RisuAI's dialog answers and every caller hands on — or '' when dismissed.
+   */
   | { kind: 'select'; options: string[]; display?: string }
   /** A pause. Answered with nothing. */
   | { kind: 'wait'; ms: number }
@@ -407,10 +412,11 @@ interface Shared {
 
 /**
  * The chat as stored, beside the run's copy (`Run.messages`, `Shared.variables`).
- * RisuAI's commands edit it, and its CBS reads its variables. Those start as the
- * run's own — `base` null — and stay so: RisuAI's `setVar` hands the stored chat
- * the run's `scriptstate` whenever it changes a value, which drops whatever
- * commands had written there (`overlay`). A `/trigger` leaves a chat of its own,
+ * RisuAI's commands edit it, and its CBS reads it: the messages, and the
+ * variables. The variables start as the run's own — `base` null — and stay
+ * so: RisuAI's `setVar` hands the stored chat the run's `scriptstate` whenever
+ * it changes a value, which drops whatever commands had written there
+ * (`overlay`). A `/trigger` leaves a chat of its own,
  * its variables a value (`base`) until the run writes again.
  */
 interface Stored {
@@ -681,7 +687,6 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
       ...(input.greeting ? { greeting: { text: input.greeting, index: -1 } } : {}),
     };
   };
-  const cbsChat = (): CbsChat => chatOf(run.messages);
   const storedChat = (): CbsChat => chatOf(shared.stored.messages);
 
   const env: ScriptCbsEnv = {
@@ -702,23 +707,26 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
           : {}),
       },
       persona: shared.persona,
-      chat: cbsChat,
+      chat: storedChat,
       lorebook: () => shared.character.lorebook.map(risuLoreEntry),
       triggerId: input.triggerId ?? null,
     },
   };
 
   /**
-   * `risuChatParser(text, {chara})`. Its chat functions read the run's chat,
-   * and a slash command's the chat as stored, which RisuAI's always read.
+   * `risuChatParser(text, {chara})`. Its chat functions — `{{lastmessage}}`,
+   * `{{history}}`, `{{previouscharchat}}` and the rest — read the chat as
+   * stored, as RisuAI's read `getCurrentChat()`, not the run's copy; what the
+   * run's own effects did to that copy is not there until the run hands it back.
+   * The functions that read the message being parsed (`{{chat_index}}`,
+   * `{{messagetime}}`, …) are at index -1, as RisuAI parses a trigger's text.
    */
-  const p = (text: unknown, chat = cbsChat): string => {
+  const p = (text: unknown): string => {
     // The evaluator reads the description through `data`, which has to be the current one —
     // and `{{char}}`, which a Lua `setName` moves where the card has no nickname.
     (env.data!.character as { description: string }).description = shared.character.description;
     if (shared.character.name !== undefined) env.data!.char = input.character.nickname || shared.character.name;
     env.data!.persona = shared.persona;
-    env.data!.chat = chat;
     return evaluateScriptCbs(text, env);
   };
 
@@ -741,7 +749,7 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
 
   /** What RisuAI's `processCommand` reaches: the chat as stored (`Stored`). */
   const commands: CommandHost = {
-    cbs: (text) => p(text, storedChat),
+    cbs: (text) => p(text),
     chat: shared.stored,
     getVar: (name) => readVariable(shared.stored.overlay, name) ?? readVariable(shared.stored.base ?? shared.variables, name),
     setVar: (name, text) => {
@@ -935,7 +943,7 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
           } else if (alertType === 'input') {
             setVar(inputVar, asText((yield { kind: 'input', text }) ?? ''));
           } else if (alertType === 'select') {
-            setVar(inputVar, asText((yield { kind: 'select', options: text.split('§') }) ?? ''));
+            setVar(inputVar, asText((yield { kind: 'select', ...risuSelect(text.split('§')) }) ?? ''));
           }
           break;
         }
@@ -1359,7 +1367,7 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
           if (shared.display) return false;
           const display = value(effect, 'display', 'displayType');
           const options = value(effect, 'value', 'valueType').split('|');
-          setVar(output(effect), asText((yield { kind: 'select', options, display }) ?? ''));
+          setVar(output(effect), asText((yield { kind: 'select', ...risuSelect(options, display) }) ?? ''));
           break;
         }
         case 'v2GetDisplayState': {
@@ -1991,6 +1999,7 @@ const risuLoreEntry = (entry: LoreEntry): object => ({
 export interface TriggerDriver {
   alert?(text: string, error: boolean): Promise<void> | void;
   input?(text: string): Promise<string> | string;
+  /** The index of the option chosen, as text; '' for none. */
   select?(options: string[], display?: string): Promise<string> | string;
   wait?(ms: number): Promise<void>;
   code?(request: Extract<TriggerRequest, { kind: 'code' }>): Promise<{ stopSending?: boolean } | void> | { stopSending?: boolean } | void;

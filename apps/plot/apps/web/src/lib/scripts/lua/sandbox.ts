@@ -22,6 +22,7 @@
  * chat whose scripts never reach Lua carries none of it.
  */
 
+import { risuSelect } from '@shizue/core/triggers';
 import type { LuaCallResult, LuaEntry, LuaLoreBook, LuaSnapshot } from './sandboxRuntime';
 
 /** wasmoon's bundle and its WebAssembly, as the frame needs them. */
@@ -78,6 +79,7 @@ export interface LuaLoreAnswer {
 export interface LuaHost {
   alert(text: string, error: boolean): Promise<void>;
   input(text: string): Promise<string>;
+  /** The index of the option chosen, as text — RisuAI's `alertSelect` — or '' for none. */
   select(options: string[]): Promise<string>;
   confirm(text: string): Promise<boolean>;
   /** The model's answer; throws when there is none. */
@@ -374,7 +376,9 @@ export function createLuaSandbox(options: LuaSandboxOptions): LuaSandbox {
           return reply(host, { ok: true, value: await call.host.input(short(a['text'] ?? '', MAX_DIALOG_TEXT)) });
         case 'select': {
           if (!dialogs || !Array.isArray(a['options'])) return reply(host, { ok: false, error: 'not here' });
-          const choices = a['options'].slice(0, MAX_DIALOG_OPTIONS).map((option) => short(option, 1_000));
+          // The buttons RisuAI's dialog draws for them; the script is answered with the index of the one chosen.
+          const choices = risuSelect(a['options'].slice(0, MAX_DIALOG_OPTIONS).map((option) => short(option, 1_000)))
+            .options.slice(0, MAX_DIALOG_OPTIONS);
           return reply(host, { ok: true, value: await call.host.select(choices) });
         }
         case 'confirm':

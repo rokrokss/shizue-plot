@@ -564,6 +564,68 @@ describe('an engine outside a trigger run', () => {
     expect(folded['mood']).toBe('tense');
   });
 
+  it('keeps what an output listener did to the chat: the reply’s place takes its text, and the output triggers read that chat', async () => {
+    const { api, calls } = fakeApi();
+    const listener: ScriptEngine = {
+      name: 'lua',
+      handles: (phase) => phase === 'editoutput',
+      edit: async (_phase, text, _meta, scope) => {
+        scope.messages[0]!.data = '고쳐 쓴 말';
+        scope.messages.push({ role: 'char', data: '덧붙임' });
+        // The reply's own place is written over with what it came to, as RisuAI's is.
+        scope.messages[1]!.data = '사라질 글';
+        return `${text}!`;
+      },
+    };
+    const runtime = createScriptRuntime({
+      chatId: 'c1',
+      api,
+      ui: silentUi,
+      bundle: bundle({ triggers: [trigger('output', [setvar('seen', '{{lastmessage}}'), setvar('at', '{{lastmessageid}}')])] }),
+      engines: [listener],
+    });
+    await runtime.finish(view(branch));
+    const commit = calls.find((call) => call.path.endsWith('/script-commit'))!;
+    expect(commit.body).toMatchObject({
+      messageId: 'm2',
+      clearPending: true,
+      content: '{{setvar::hp::90}}다친 것 같다.!',
+      chat: { keep: 0, messages: [{ id: 'm1', content: '고쳐 쓴 말' }, { id: 'm2' }, { role: 'assistant', content: '덧붙임' }] },
+    });
+    // The delta is the message the chat now ends on, which the output triggers read the chat to.
+    expect(commit.body['variableDelta']).toMatchObject({ seen: '덧붙임', at: '2' });
+  });
+
+  it('drops what an input listener did to the chat, which RisuAI writes the input run’s chat over — unless that run ended early', async () => {
+    const intruder: ScriptEngine = {
+      name: 'lua',
+      handles: (phase) => phase === 'editinput',
+      edit: async (_phase, text, _meta, scope) => {
+        scope.messages.push({ role: 'char', data: '끼어듦' });
+        return text;
+      },
+    };
+    const messages = [greeting, message('m1', 'm0', 'user', '앉는다'), message('m2', 'm1', 'assistant', '응.')];
+    const send = async (input: TriggerStep[]) => {
+      const logged: string[] = [];
+      const runtime = createScriptRuntime({
+        chatId: 'c1',
+        api: fakeApi().api,
+        ui: silentUi,
+        bundle: bundle({ triggers: [trigger('input', input)] }),
+        engines: [intruder],
+        log: (entry) => void logged.push(`${entry.kind}:${entry.effect ?? ''}`),
+      });
+      return { prepared: await runtime.prepare('send', view(messages), '안녕'), logged };
+    };
+    const completed = await send([setvar('a', '1')]);
+    expect(completed.prepared.body['chat']).toBeUndefined();
+    expect(completed.logged).toContain('dropped:editinput');
+    // A run that returned early hands back nothing: the turn goes onto the chat as stored, the listener's write with it.
+    const ended = await send([{ type: 'v2GetDisplayState', outputVar: 'x', indent: 0 }]);
+    expect(ended.prepared.body['chat']).toEqual({ keep: 2, messages: [{ role: 'assistant', content: '끼어듦' }, { turn: true }] });
+  });
+
   it('commits what a button did on the head, as a manual run’s is', async () => {
     const { api, calls } = fakeApi();
     const runtime = createScriptRuntime({ chatId: 'c1', api, ui: silentUi, bundle: bundle({ triggers: lua }), engines: [writer()] });
@@ -891,7 +953,7 @@ describe('slash commands', () => {
   });
 
   it('from the composer: asks through the page’s dialogs and shows the list of commands', async () => {
-    const { ui, asked } = recordingUi({ input: '아린', select: '나' });
+    const { ui, asked } = recordingUi({ input: '아린', select: '1' });
     const { api, calls } = fakeApi();
     const runtime = createScriptRuntime({ chatId: 'c1', api, ui, bundle: bundle() });
     await runtime.command('/input 이름은?|/echo {{pipe}} 님|/buttons labels=["가","나"]|/setvar key=pick', view(exchange));

@@ -8,6 +8,7 @@ import {
   diffVariables,
   replyLengthTokens,
   sceneFocusDirective,
+  spokenBy,
   stripInlayMacros,
   withBranchGreeting,
   withNarrationPrefix,
@@ -418,9 +419,15 @@ async function buildRequestMessages(
   // For continue the trailing assistant text must be the last turn so the model
   // resumes it, so it is re-attached after the post-history instructions.
   const isContinue = plan.target.kind === 'continue';
-  // The partial bypasses the assembler, so it drops its own inlays as every other turn does.
-  const partial = isContinue
-    ? stripInlayMacros(plan.history[plan.history.length - 1]?.content ?? '').trimEnd()
+  // The partial bypasses the assembler, so it drops its own inlays as every other
+  // turn does — and one a script wrote as its character goes under its name, as it would there.
+  const last = isContinue ? plan.history[plan.history.length - 1] : undefined;
+  const partial = last
+    ? stripInlayMacros(
+        last.speaker !== undefined && last.role === 'assistant'
+          ? spokenBy(last.content, last.speaker, plan.characters.map((member) => member.name))
+          : last.content,
+      ).trimEnd()
     : '';
   // The partial is not in the history the assembler reads, so not on its branch
   // either — and where the partial is the greeting itself, there is none apart.

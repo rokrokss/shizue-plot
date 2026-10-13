@@ -615,6 +615,8 @@ async function loadGenerationContext(
   overlay: ScriptOverlay | null;
   /** The plot's first opening as the scripts rewrote it in this chat (`setCharacterFirstMessage`). */
   firstMessage: string | undefined;
+  /** Who says a character message a card's script wrote (`HistoryMessage.speaker`); undefined when no one can. */
+  scriptSpeaker: string | undefined;
   all: Message[];
 }> {
   // Re-checked on every generation, not just at chat creation: unpublishing a
@@ -658,6 +660,9 @@ async function loadGenerationContext(
     globalVariables: await loadGlobalVariables(deps, chat.userId, chat.plotId),
     overlay,
     firstMessage: scripted ? overlay?.members?.[scripted.id]?.firstMessage : undefined,
+    // The member whose scripts run, under its name in this chat — or a plot's one
+    // member, should its scripts be gone. As the page draws it.
+    scriptSpeaker: (scripted ? rewritten.find((member) => member.id === scripted.id) : only)?.name,
     all: await loadMessages(deps, chat.id),
   };
 }
@@ -695,8 +700,14 @@ async function keepScriptChat(
   return deps.db.transaction((tx) => applyScriptChat(tx, chat.id, plan, all));
 }
 
-const toHistory = (path: Message[]): HistoryMessage[] =>
-  path.map((message) => ({ role: message.role, content: message.content, createdAt: message.createdAt.getTime() }));
+/** The branch as the assembler takes it; a character message a script wrote is said by `speaker`. */
+const toHistory = (path: Message[], speaker: string | undefined): HistoryMessage[] =>
+  path.map((message) => ({
+    role: message.role,
+    content: message.content,
+    createdAt: message.createdAt.getTime(),
+    ...(speaker !== undefined && message.role === 'assistant' && message.source === 'script' ? { speaker } : {}),
+  }));
 
 /**
  * Where a history sits on `branch`, the messages the turn is generated on: its
@@ -772,8 +783,13 @@ function loreStateOf(branch: Message[]): LoreTimedState {
  * carried them. Every mode goes through here, `send` included: it appends the
  * turn it has just stored to the history and lets this find its uploads.
  */
-const promptHistory = (deps: AppDeps, userId: string, model: string, source: Message[]): Promise<HistoryMessage[]> =>
-  withTurnImages(deps, userId, model, source, toHistory(source));
+const promptHistory = (
+  deps: AppDeps,
+  userId: string,
+  model: string,
+  source: Message[],
+  speaker: string | undefined,
+): Promise<HistoryMessage[]> => withTurnImages(deps, userId, model, source, toHistory(source, speaker));
 
 /**
  * Chat variables of a branch. Folded over the *whole* branch rather than the
@@ -1230,6 +1246,7 @@ async function regeneratePlan(
       chat.userId,
       chat.model,
       isAssistantHead && !edited ? memory.history.slice(0, -1) : memory.history,
+      context.scriptSpeaker,
     ),
     memoryText: memory.memoryText,
     relationshipText: buildRelationshipText(chat),
@@ -2356,7 +2373,13 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const memory = await buildMemoryInput(deps, chat, branch.slice(0, -1), content);
       // The turn just written is the last of the history, and the images ride on
       // it; the rest of the branch's are not re-sent (see `withTurnImages`).
-      const history = await promptHistory(deps, c.get('userId'), chat.model, [...memory.history, ...branch.slice(-1)]);
+      const history = await promptHistory(
+        deps,
+        c.get('userId'),
+        chat.model,
+        [...memory.history, ...branch.slice(-1)],
+        context.scriptSpeaker,
+      );
 
       return {
         chatId: chat.id,
@@ -2460,7 +2483,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         characters: context.characters,
         personaText: context.personaText,
         userName: context.userName,
-        history: await promptHistory(deps, c.get('userId'), chat.model, history),
+        history: await promptHistory(deps, c.get('userId'), chat.model, history, context.scriptSpeaker),
         memoryText: memory.memoryText,
         relationshipText: buildRelationshipText(chat),
         authorNote: context.authorNote,
@@ -2531,7 +2554,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         characters: context.characters,
         personaText: context.personaText,
         userName: context.userName,
-        history: await promptHistory(deps, c.get('userId'), chat.model, history),
+        history: await promptHistory(deps, c.get('userId'), chat.model, history, context.scriptSpeaker),
         memoryText: memory.memoryText,
         relationshipText: buildRelationshipText(chat),
         authorNote: context.authorNote,
@@ -2599,7 +2622,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         characters: context.characters,
         personaText: context.personaText,
         userName: context.userName,
-        history: await promptHistory(deps, c.get('userId'), chat.model, history),
+        history: await promptHistory(deps, c.get('userId'), chat.model, history, context.scriptSpeaker),
         memoryText: memory.memoryText,
         relationshipText: buildRelationshipText(chat),
         authorNote: context.authorNote,

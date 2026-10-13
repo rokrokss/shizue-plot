@@ -19,7 +19,7 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { Worker as NodeWorker } from 'node:worker_threads';
-import { runTriggers, scriptChatOf, type CodeScope, type TriggerScript } from '@shizue/core/triggers';
+import { runTriggers, scriptChatOf, type CodeScope, type TriggerMessage, type TriggerScript } from '@shizue/core/triggers';
 import type { LoreEntry } from '../src/lib/types';
 import { afterEach, describe, expect, it } from 'vitest';
 import { LUA_CLASSIFICATION } from '../src/lib/scripts/lua/classification';
@@ -128,7 +128,11 @@ const host: LuaHost = {
     asked.push(`input:${text}`);
     return '카드';
   },
-  select: async (options) => options[1] ?? '',
+  // As the page's dialog answers: the index of the option taken, as text.
+  select: async (options) => {
+    asked.push(`select:${options.join(',')}`);
+    return String(options.indexOf('나'));
+  },
   confirm: async () => true,
   // The answer says which model it came from: `모델` the chat's own, `보조` its auxiliary one.
   llm: async (messages, model) =>
@@ -264,22 +268,23 @@ describe('the Lua sandbox', () => {
       onStart = async(function(id)
         alertNormal(id, '알림')
         local name = alertInput(id, '이름?'):await()
-        local pick = alertSelect(id, { '가', '나' }):await()
+        local pick = alertSelect(id, { '가||다', '나' }):await()
         local ok = alertConfirm(id, '확인?'):await()
-        setChatVar(id, 'answers', name .. '/' .. pick .. '/' .. tostring(ok))
+        setChatVar(id, 'answers', name .. '/' .. pick .. '/' .. type(pick) .. '/' .. tostring(ok))
         setChatVar(id, 'hash', hash(id, '한글 abc'):await())
         local reply = LLM(id, { { role = 'sys', content = '규칙' }, { role = 'char', content = '앞' }, { role = 'user', content = '질문' } })
         setChatVar(id, 'llm', tostring(reply and reply.success) .. ':' .. tostring(reply and reply.result))
       end)`;
     const without = await done(sandbox, code);
     expect(Object.fromEntries(without.vars)).toMatchObject({
-      answers: '카드/나/true',
+      // RisuAI's dialog answers with the index of the button, as text, over the buttons it splits at `||`.
+      answers: '카드/2/string/true',
       // The sandbox has no crypto.subtle; its own SHA-256 agrees with Node's.
       hash: createHash('sha256').update('한글 abc').digest('hex'),
     });
     // RisuAI's gate: no access, no call — `LLMMain` answers nil and the wrapper's decode fails.
     expect(without.error).toMatch(/expected argument of type string/);
-    expect(asked).toEqual(['alert:알림', 'input:이름?']);
+    expect(asked).toEqual(['alert:알림', 'input:이름?', 'select:가,다,나']);
 
     const granted = await done(sandbox, code, start, snapshot({ lowLevel: true }));
     expect(Object.fromEntries(granted.vars)['llm']).toBe('true:모델:system=규칙|assistant=앞|user=질문');
@@ -916,6 +921,55 @@ describe('the Lua engine', () => {
     expect(vars).toEqual({ n: '1' });
     expect([...engine.manualNames!()].sort()).toEqual(['attack', 'heal']);
     expect(luaFunctionNames(['local function hidden() end'])).toEqual([]);
+  });
+
+  it('hands what an edit listener did to the chat to the scope, and nothing a display pass did', async () => {
+    const engine = createLuaEngine({
+      triggers: [
+        lua(`listenEdit('editOutput', function(id, v) addChat(id, 'char', '덧붙임') setChat(id, 0, '고침') return v .. '!' end)
+listenEdit('editDisplay', function(id, v) setChat(id, 0, '화면') addChat(id, 'user', '안 됨') return v end)`),
+      ],
+      lowLevelAccess: false,
+      sandbox: sandboxWith(),
+      ui: host,
+      llm: host.llm,
+      similarity: host.similarity,
+      request: host.request,
+      log: () => undefined,
+    });
+    const messages: TriggerMessage[] = [
+      { role: 'user', data: '안녕', id: 'm1' },
+      { role: 'char', data: '응', id: 'm2' },
+    ];
+    const scope: CodeScope = {
+      getVar: () => 'null',
+      setVar: () => undefined,
+      variables: () => Object.create(null),
+      getGlobalVar: () => 'null',
+      setGlobalVar: () => undefined,
+      globalVariables: () => Object.create(null),
+      messages,
+      character: { name: '리안', description: '', lorebook: [] },
+      setDescription: () => undefined,
+      setLorebook: () => undefined,
+      setName: () => undefined,
+      setFirstMessage: () => undefined,
+      setBackgroundHtml: () => undefined,
+      user: '',
+      persona: '',
+      note: '',
+      greeting: null,
+    };
+    expect(await engine.edit!('editoutput', '응', { chatIndex: 1 }, scope)).toBe('응!');
+    // RisuAI's listener writes the chat as stored; a stored message keeps its id.
+    expect(messages).toEqual([
+      { role: 'user', data: '고침', id: 'm1' },
+      { role: 'char', data: '응', id: 'm2' },
+      { role: 'char', data: '덧붙임' },
+    ]);
+    const before = structuredClone(messages);
+    expect(await engine.display!([{ text: 'x', chatIndex: 0 }], scope)).toEqual(['x']);
+    expect(messages).toEqual(before);
   });
 
   it('answers a script’s search with the search it was given', async () => {

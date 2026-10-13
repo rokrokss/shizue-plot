@@ -55,7 +55,7 @@ export const LUA_CLASSIFICATION: Readonly<Record<string, LuaSupport>> = {
   alertNormal: host('browser', 'ScriptDialog; the script does not wait, as in RisuAI'),
   alertError: host('browser', 'as alertNormal'),
   alertInput: host('browser', 'ScriptDialog'),
-  alertSelect: host('browser', 'ScriptDialog'),
+  alertSelect: host('browser', 'ScriptDialog; the index of the button taken, as text, as RisuAI’s dialog answers'),
   alertConfirm: host('browser', 'ScriptDialog'),
   sleep: host('browser', 'capped at 30s a call'),
   reloadDisplay: host('browser', 'nothing to do: the chat redraws from state'),
@@ -77,14 +77,18 @@ export const LUA_CLASSIFICATION: Readonly<Record<string, LuaSupport>> = {
   getUserLastMessage: host('browser'),
   setChat: host(
     'server',
-    'any message: the head in place while nothing hangs under it, any other on a new branch (ScriptChat); an edit listener’s is dropped',
+    'any message: the head in place while nothing hangs under it, any other on a new branch (ScriptChat); an editOutput ' +
+      'listener’s is kept, an editInput listener’s is lost under the input run’s chat, as in RisuAI',
   ),
   setChatRole: host('server', 'as setChat'),
   setFullChat: wrapper('server', 'as setFullChatMain'),
   setFullChatMain: host('server', 'the whole chat; a message stays itself where its place and role did not change, as setChat'),
   cutChat: host('server', 'as setChat; what it cuts stays in the tree as another branch'),
   removeChat: host('server', 'as cutChat'),
-  addChat: host('server', 'appended to the chat the run leaves, kept as the reader’s branch'),
+  addChat: host(
+    'server',
+    'appended to the chat the run leaves, kept as the reader’s branch; a `char` one is drawn and sent as the member’s (`source` `script`)',
+  ),
   insertChat: host('server', 'as addChat, at its place'),
   getTokens: host('browser', 'estimated, four characters a token'),
   cbs: host('browser', 'only {{char}}, {{user}}, {{getvar}}, {{getglobalvar}}; the rest is left as written'),
@@ -160,8 +164,11 @@ export const LUA_CLASSIFICATION: Readonly<Record<string, LuaSupport>> = {
   onOutput: hook('server', 'after a reply; committed with script-commit'),
   onButtonClick: hook('server', 'risu-btn; committed on the head'),
   'manual:<name>': hook('server', 'a manual run by name (risu-trigger, {{button}}, runtrigger) calls the global of that name'),
-  'listen:editInput': hook('server', 'the text a send goes as'),
-  'listen:editOutput': hook('server', 'the reply as it is stored'),
+  'listen:editInput': hook(
+    'server',
+    'the text a send goes as; its chat writes are lost under the input run’s chat, as in RisuAI, unless that run ended early',
+  ),
+  'listen:editOutput': hook('server', 'the reply as it is stored, and its chat writes, which the output triggers read'),
   'listen:editDisplay': hook('browser', 'the screen only, before the display triggers'),
   'listen:editRequest': hook('impossible', 'the request is assembled on the server'),
 };

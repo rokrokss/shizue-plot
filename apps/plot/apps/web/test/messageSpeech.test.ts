@@ -158,6 +158,17 @@ describe('a reply that is nothing but the scene', () => {
   });
 });
 
+describe('a message a card’s script wrote as its character', () => {
+  it('is drawn as that character’s own, with their face and name, and no narration', () => {
+    render(row('*문틈으로 밖을 살피며* 아직도 안 그쳤네.\n카이: 조금만 더.', 'assistant', { speaker: '아리아' }));
+
+    expect(speakers()).toEqual(['아리아', '카이']);
+    expect(narrations()).toHaveLength(0);
+    expect(host.querySelector('.message-body img')?.getAttribute('src')).toBe('/avatars/aria.png');
+    expect(host.querySelector('[data-testid="speech-character"] em')?.textContent).toBe('문틈으로 밖을 살피며');
+  });
+});
+
 describe('a reply being written', () => {
   it('reads a half-written name as the scene, and as the speaker once it lands', () => {
     render(row('아리', 'assistant', { streaming: true }));

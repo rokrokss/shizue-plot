@@ -36,13 +36,19 @@ export const TRIGGER_CLASSIFICATION: Readonly<Record<string, { support: TriggerS
   // v1 effects
   setvar: { support: 'server', note: '' },
   systemprompt: { support: 'server', note: 'start runs only: prompt injections' },
-  impersonate: { support: 'server', note: 'appended to the chat the run leaves, which is kept as the reader’s branch (`ScriptChat`)' },
+  impersonate: {
+    support: 'server',
+    note:
+      'appended to the chat the run leaves, which is kept as the reader’s branch (`ScriptChat`); a `char` one is stored as written ' +
+      'and drawn and sent as the scripted member’s (`source` `script`)',
+  },
   command: {
     support: 'server',
     note:
       'RisuAI’s slash commands (`command.ts`), on the chat as stored: the run’s own chat is written back over what they did, ' +
       'except the variables of an input run that changed none itself, and all of it when the run ends early; ' +
-      '/multisend never generates in a run; /speak is silent (an imported card has no TTS)',
+      '/multisend never generates in a run; /speak is silent (an imported card has no TTS); /buttons answers the index of the label taken; ' +
+      '/sendas is the scripted member’s, as impersonate',
   },
   stop: {
     support: 'browser',
@@ -54,7 +60,7 @@ export const TRIGGER_CLASSIFICATION: Readonly<Record<string, { support: TriggerS
     support: 'server',
     note: 'any message: the head in place while nothing hangs under it, any other on a new branch that copies the rest',
   },
-  showAlert: { support: 'browser', note: 'lowLevelAccess' },
+  showAlert: { support: 'browser', note: 'lowLevelAccess; a select writes the index of the button taken, as text, as RisuAI’s dialog answers' },
   sendAIprompt: { support: 'server', note: 'lowLevelAccess; an automatic next turn, with the reader’s consent' },
   runLLM: { support: 'server', note: 'lowLevelAccess; POST /api/chats/:id/script-llm on the chat’s model; a failure writes “Error: …”' },
   runAxLLM: { support: 'logged', note: 'declared but never handled by RisuAI, so it does nothing' },
@@ -119,7 +125,7 @@ export const TRIGGER_CLASSIFICATION: Readonly<Record<string, { support: TriggerS
   // v2 dialogs and display
   v2ShowAlert: { support: 'browser', note: '' },
   v2GetAlertInput: { support: 'browser', note: '' },
-  v2GetAlertSelect: { support: 'browser', note: '' },
+  v2GetAlertSelect: { support: 'browser', note: 'the index of the option taken, as text, as RisuAI’s dialog answers' },
   v2GetDisplayState: { support: 'browser', note: 'display runs' },
   v2SetDisplayState: { support: 'browser', note: 'display runs' },
   v2GetRequestState: { support: 'impossible', note: 'request mode' },

@@ -27,8 +27,12 @@ import { user } from './auth.js';
 
 export type Visibility = 'private' | 'public';
 export type MessageRole = 'user' | 'assistant';
-/** Who put a user turn in the chat: the reader, or a card component acting for them. */
-export type MessageSource = 'user' | 'component';
+/**
+ * Where a turn's text came from. A user turn: the reader, or a card component
+ * acting for them. An assistant turn: the model (`user`), or a card's script
+ * writing as its character (`script`).
+ */
+export type MessageSource = 'user' | 'component' | 'script';
 /** Content language of a plot, independent of the UI locale. */
 export type ContentLanguage = 'ko' | 'en' | 'ja';
 /**
@@ -492,8 +496,10 @@ export const messages = pgTable(
     parentId: uuid('parent_id'),
     role: text('role').$type<MessageRole>().notNull(),
     content: text('content').notNull(),
-    // Who wrote a user turn. Assistant turns are always 'user' — the column says
-    // where the text came from, and only a user turn can come from a component.
+    // Where the text came from. Only a user turn can come from a component, and
+    // only an assistant turn from a card's script: a character message a script
+    // added, or a message it turned into one ('script'). Every other assistant
+    // turn is 'user'.
     source: text('source').$type<MessageSource>().notNull().default('user'),
     // Stage directions attached to a user turn: the ruling a game component made
     // about it. Injected into the prompt only while the turn is the last one, and

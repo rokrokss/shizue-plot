@@ -59,6 +59,7 @@ import type { LuaCallResult, LuaEntry, LuaLoreBook, LuaSnapshot } from './sandbo
 export interface LuaUi {
   alert(text: string, error: boolean): Promise<void>;
   input(text: string): Promise<string>;
+  /** The index of the option chosen, as text; '' for none. */
   select(options: string[]): Promise<string>;
   confirm(text: string): Promise<boolean>;
 }

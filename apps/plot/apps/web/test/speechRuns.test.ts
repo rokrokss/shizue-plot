@@ -85,3 +85,17 @@ describe('a member its card’s scripts renamed', () => {
     expect([...speakerAliases([{ name: '세라', aliases: ['카이'] }, { name: '카이' }])]).toEqual([]);
   });
 });
+
+describe('a message a card’s script wrote as its character', () => {
+  it('is that character’s where a line names no one, written as it was, and one run with its named lines', () => {
+    expect(speechRuns('*문을 열며* 들어와.\n아리아: 춥지?\n카이: 응.\n\n난롯가로 와.', ROSTER, undefined, '아리아')).toEqual([
+      { name: '아리아', text: '*문을 열며* 들어와.\n춥지?' },
+      { name: '카이', text: '응.' },
+      { name: '아리아', text: '난롯가로 와.' },
+    ]);
+  });
+
+  it('leaves a reply without one to the narrator, as before', () => {
+    expect(speechRuns('비가 그쳤다.', ROSTER, undefined, null)).toEqual([{ name: null, text: '비가 그쳤다.' }]);
+  });
+});

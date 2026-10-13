@@ -59,11 +59,18 @@ export function speakerAliases(
  * `aliases` (`speakerAliases`) are read as the members they belong to: a line
  * under a nickname is attributed to the member's own name, and runs of one
  * member under both spellings are one run.
+ *
+ * `speaker` says the lines that name no one, where they are not the narrator's:
+ * a message a card's script wrote as its character (`source` `script`), which
+ * RisuAI draws as that character's own and which names no speaker, stored as
+ * the script wrote it. Its text stays exactly as written, as the narrator's
+ * would; a line that names someone is still theirs.
  */
 export function speechRuns(
   content: string,
   roster: readonly string[],
   aliases: ReadonlyMap<string, string> = NO_ALIASES,
+  speaker: string | null = null,
 ): SpeechRun[] {
   const named = aliases.size > 0 ? [...roster, ...aliases.keys()] : roster;
   const runs: SpeechRun[] = [];
@@ -76,7 +83,7 @@ export function speechRuns(
               .map((part) => (part.kind === 'description' ? `*${part.text}*` : part.text))
               .join(' '),
           }
-        : { name: null, text: block.parts.map((part) => part.text).join('\n\n') };
+        : { name: speaker, text: block.parts.map((part) => part.text).join('\n\n') };
     const last = runs[runs.length - 1];
     // Only a character's: the parser already keeps the narrator's lines together.
     if (last && run.name !== null && last.name === run.name) last.text += `\n${run.text}`;

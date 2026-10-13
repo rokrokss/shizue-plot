@@ -1426,6 +1426,40 @@ describe('assemblePrompt - narration', () => {
   });
 });
 
+describe('assemblePrompt - a turn a script wrote as its character', () => {
+  const kai: PromptCharacter = { name: '카이', card: bareCard };
+  const assembleScripted = (history: HistoryMessage[]) =>
+    assemblePrompt({ plot, characters: [bareAria, kai], history, preset, userName: '민준', maxResponseTokens: 0 });
+
+  it('sends its lines under its speaker, as a reply names them, and leaves every other turn as it is', () => {
+    const { messages } = assembleScripted([
+      { role: 'user', content: '누구세요?' },
+      // Stored as the script wrote it: no one is named, and the narrator is not who says it.
+      { role: 'assistant', content: '*문을 열며* 들어와.\n\n카이: 나도 있어.\n{{user}}, 춥지?', speaker: '아리아' },
+      { role: 'assistant', content: '눈이 그쳤다.' },
+    ]);
+    expect(messages.slice(0, 3)).toEqual([
+      { role: 'user', content: '누구세요?' },
+      // A line that already names someone on the roster stays theirs; a blank line stays spacing.
+      { role: 'assistant', content: '아리아: *문을 열며* 들어와.\n\n카이: 나도 있어.\n아리아: 민준, 춥지?' },
+      { role: 'assistant', content: '눈이 그쳤다.' },
+    ]);
+  });
+
+  it('voices what the prompt scripts made of it, and leaves a narration and a reader’s turn alone', () => {
+    const { messages } = assembleScripted([
+      { role: 'assistant', content: '원문', promptContent: '고친 글', speaker: '아리아' },
+      { role: 'assistant', content: '@: 바람이 분다.', speaker: '아리아' },
+      { role: 'user', content: '응', speaker: '아리아' },
+    ]);
+    expect(messages.slice(0, 3)).toEqual([
+      { role: 'assistant', content: '아리아: 고친 글' },
+      { role: 'assistant', content: `${NARRATION_HEADER} 바람이 분다.` },
+      { role: 'user', content: '응' },
+    ]);
+  });
+});
+
 describe('assemblePrompt - narrator', () => {
   const assembleWith = (input: Partial<Parameters<typeof assemblePrompt>[0]>) =>
     assemblePrompt({

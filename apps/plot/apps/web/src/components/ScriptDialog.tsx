@@ -19,9 +19,11 @@ export type ScriptPrompt =
   | { kind: 'confirm'; text: string; resolve: (value: boolean) => void };
 
 /**
- * The sheet a script's question comes up in. Closing it without an answer
- * answers with nothing — an empty string, as RisuAI's own dialogs give when
- * dismissed, and no to a yes-or-no — so a run never waits on a sheet that is gone.
+ * The sheet a script's question comes up in. A choice answers with the index
+ * of the option taken, as text, which is what RisuAI's select dialog answers.
+ * Closing it without an answer answers with nothing — an empty string, as
+ * RisuAI's own dialogs give when dismissed, and no to a yes-or-no — so a run
+ * never waits on a sheet that is gone.
  */
 export function ScriptDialog({ prompt, name, onDone }: { prompt: ScriptPrompt; name: string; onDone: () => void }) {
   const t = useTranslations('chat');
@@ -65,7 +67,7 @@ export function ScriptDialog({ prompt, name, onDone }: { prompt: ScriptPrompt; n
           <ul className="flex flex-col gap-2">
             {prompt.options.map((option, index) => (
               <li key={index}>
-                <Button variant="secondary" className="w-full justify-start text-left" onClick={() => answer(option)}>
+                <Button variant="secondary" className="w-full justify-start text-left" onClick={() => answer(String(index))}>
                   {option}
                 </Button>
               </li>

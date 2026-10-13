@@ -52,6 +52,7 @@ vi.mock('@/components/MessageRow', async () => {
       shown?: string;
       name: string;
       roster?: readonly { name: string; aliases?: readonly string[] }[];
+      speaker?: string;
     }) =>
       h(
         'div',
@@ -59,6 +60,7 @@ vi.mock('@/components/MessageRow', async () => {
           'data-testid': 'row',
           'data-name': props.name,
           'data-roster': JSON.stringify((props.roster ?? []).map((member) => [member.name, member.aliases ?? []])),
+          ...(props.speaker !== undefined ? { 'data-speaker': props.speaker } : {}),
         },
         [
         h('span', { key: 'text' }, props.shown ?? props.content),
@@ -456,6 +458,16 @@ describe('a slash command', () => {
     expect(streamed).toEqual([]);
   });
 
+  it('answers /buttons with the index of the button the reader took', async () => {
+    bundle = scripted({});
+    await render();
+    await sendText('/buttons labels=["가","나"]|/setvar key=pick');
+    const options = [...document.querySelectorAll('[data-testid="script-dialog"] li button')];
+    expect(options.map((node) => node.textContent)).toEqual(['가', '나']);
+    await click(options[1]!);
+    expect(sent.at(-1)?.body).toMatchObject({ variableDelta: { pick: '1' } });
+  });
+
   it('sends /multisend’s message and asks for the reply once the reader agrees to it', async () => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     bundle = scripted({});
@@ -557,6 +569,20 @@ describe('what the scripts rewrote of their character', () => {
     store.set('shizue.customUi', '0');
     await render();
     expect(host.querySelector('[data-testid="chat-background"]')).toBeNull();
+  });
+
+  it('draws a character message its scripts wrote as their member’s, under the name it goes by here', async () => {
+    publicPlot = {
+      characters: [
+        { id: 'chr_1', name: '리안', avatarUrl: null, intro: '' },
+        { id: 'chr_2', name: '카이', avatarUrl: null, intro: '' },
+      ],
+    };
+    bundle = scripted({ memberId: 'chr_2', overlay: { member: { name: '카이로' }, persona: null } });
+    chatState = stateWith([...chatState.path, message('m3', 'm2', 'assistant', '굴림: 7', { source: 'script' })]);
+    await render();
+    // The model's reply names its own speakers; the one the script wrote is its member's.
+    expect(rows().map((row) => row.dataset['speaker'] ?? null)).toEqual([null, null, null, '카이로']);
   });
 
   it('draws no background for a work without one', async () => {

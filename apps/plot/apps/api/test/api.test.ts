@@ -11647,7 +11647,15 @@ describe('card scripts', () => {
       const state = await readJson(res);
       const added = state.path.at(-1);
       expect(state.path.slice(0, 5).map((m: any) => m.id)).toEqual(path.map((m) => m.id));
-      expect(added).toMatchObject({ parentId: a2.id, role: 'assistant', content: '굴림: 7', variableDelta: { door: 'open' }, model: null });
+      // Written by the script, as its character: stored as it was written, and marked so.
+      expect(added).toMatchObject({
+        parentId: a2.id,
+        role: 'assistant',
+        content: '굴림: 7',
+        source: 'script',
+        variableDelta: { door: 'open' },
+        model: null,
+      });
       expect(state.chat.headMessageId).toBe(added.id);
       // The reply it followed is as it was, but for the commit's revision.
       expect(await rowOf(a2.id)).toMatchObject({ content: '대답2', variableDelta: null, scriptRev: 1 });
@@ -11656,6 +11664,21 @@ describe('card scripts', () => {
       const { app: next, systems } = replyingApp('다음');
       await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '셋' }, next));
       expect(systems.at(-1)).toContain('[hp=100 door=open mood=null]');
+
+      // A copy of it is still the script's; a copy of the model's reply is still the model's.
+      const now = (await stateOf(cookie, chatId)).path;
+      const [, , , u2] = path;
+      const copied = await readJson(
+        await commitOn(cookie, chatId, now.at(-1), {
+          chat: { keep: 2, messages: [{ id: u2.id, content: '둘!' }, ...now.slice(4).map((m: any) => ({ id: m.id }))] },
+        }),
+      );
+      expect(copied.path.slice(4).map((m: any) => [m.content, m.source])).toEqual([
+        ['대답2', 'user'],
+        ['굴림: 7', 'script'],
+        ['셋', 'user'],
+        ['다음', 'user'],
+      ]);
     });
 
     it('moves the head back for a cut of the tail, and copies the last kept message only to carry new values', async () => {
@@ -11770,16 +11793,22 @@ describe('card scripts', () => {
       let res = await commitOn(cookie, chatId, a2, { chat: { keep: 3, messages: [{ id: a2.id, role: 'user' }] } });
       expect(res.status, await res.clone().text()).toBe(200);
       let state = await readJson(res);
-      expect(state.path.at(-1)).toMatchObject({ id: a2.id, role: 'user', content: '대답2', scriptRev: 2 });
+      expect(state.path.at(-1)).toMatchObject({ id: a2.id, role: 'user', content: '대답2', source: 'user', scriptRev: 2 });
 
       const head = state.path.at(-1);
       res = await commitOn(cookie, chatId, head, { chat: { keep: 2, messages: [{ id: u2.id, role: 'assistant' }, { id: a2.id }] } });
       expect(res.status, await res.clone().text()).toBe(200);
       state = await readJson(res);
       const [, , , u2copy, a2copy] = state.path;
-      expect(u2copy).toMatchObject({ parentId: a1.id, role: 'assistant', content: '둘', directions: null });
-      expect(a2copy).toMatchObject({ parentId: u2copy.id, role: 'user' });
+      // Turned into a character message, it is the script's: its character says it.
+      expect(u2copy).toMatchObject({ parentId: a1.id, role: 'assistant', content: '둘', source: 'script', directions: null });
+      expect(a2copy).toMatchObject({ parentId: u2copy.id, role: 'user', source: 'user' });
       expect(await rowOf(u2.id)).toMatchObject({ role: 'user' });
+
+      // Turned into a character message where it stands, it is the script's as well.
+      res = await commitOn(cookie, chatId, a2copy, { chat: { keep: 3, messages: [{ id: a2copy.id, role: 'assistant' }] } });
+      expect(res.status, await res.clone().text()).toBe(200);
+      expect((await readJson(res)).path.at(-1)).toMatchObject({ id: a2copy.id, role: 'assistant', source: 'script' });
     });
 
     it('sends the turn where the scripts left it, generating after what they added', async () => {
@@ -11804,10 +11833,11 @@ describe('card scripts', () => {
       let state = await stateOf(cookie, chatId);
       const [turn, aside, reply] = state.path.slice(5);
       expect(turn).toMatchObject({ parentId: a2.id, role: 'user', content: '셋', variableDelta: null });
-      expect(aside).toMatchObject({ parentId: turn.id, role: 'assistant', content: '[독백]', variableDelta: { door: 'open' } });
-      expect(reply).toMatchObject({ parentId: aside.id, role: 'assistant', content: '대답3' });
+      expect(aside).toMatchObject({ parentId: turn.id, role: 'assistant', content: '[독백]', source: 'script', variableDelta: { door: 'open' } });
+      expect(reply).toMatchObject({ parentId: aside.id, role: 'assistant', content: '대답3', source: 'user' });
       const spoken = harness.prompts.at(-1)!.turns.filter((turn) => !turn.startsWith('system:'));
-      expect(spoken.slice(-2)).toEqual(['user:셋', 'assistant:[독백]']);
+      // The model reads what the script wrote as the plot's one character's line, stored as it was written.
+      expect(spoken.slice(-2)).toEqual(['user:셋', 'assistant:스크립트 캐릭터: [독백]']);
       expect(harness.prompts.at(-1)!.system).toContain('door=open');
 
       // A start run that cut the turn: RisuAI sends without it.
@@ -12373,6 +12403,47 @@ describe('the browser script runtime', () => {
     expect(systems.at(-1)).toContain('바뀐 설명');
     const work = await readPlot(owner, plotId);
     expect(work.characters.find((member: any) => member.id === memberId).card.description).toBe('원래 설명');
+  });
+
+  it("sends a character message the scripts wrote as their member's line, under the name it has in this chat", async () => {
+    const { plotId, memberId } = await scriptedPlot('scripts-speaker@example.com');
+    const reader = await signUp('scripts-speaker-reader@example.com');
+    const chat = await startChat(reader, plotId);
+    const turns: string[][] = [];
+    const app = makeApp({
+      getAdapter: () => ({
+        providerModel: 'fixed',
+        adapter: {
+          stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
+            turns.push(req.messages.map((m) => `${m.role}:${contentText(m.content)}`));
+            yield { type: 'text', text: '평범: 응.' };
+            return { usage: { promptTokens: 1, completionTokens: 1 } };
+          },
+        },
+      }),
+    });
+    const events = await readSse(
+      await json(
+        reader,
+        `/api/chats/${chat.chat.id}/messages`,
+        'POST',
+        {
+          content: '안녕',
+          chat: { keep: 0, messages: [{ turn: true }, { role: 'assistant', content: '*칼을 뽑으며* 덤벼.\n\n평범: 잠깐!' }] },
+          overlay: { members: { [memberId]: { name: '세라' } } },
+        },
+        app,
+      ),
+    );
+    expect(events.at(-1)!.event).toBe('done');
+    const state = await readJson(await request(reader, `/api/chats/${chat.chat.id}`));
+    // Stored as the script wrote it, marked as the script's.
+    expect(state.path.slice(-2, -1)).toMatchObject([{ content: '*칼을 뽑으며* 덤벼.\n\n평범: 잠깐!', source: 'script' }]);
+    // Not the first member's, nor the narrator's: the scripted member's, renamed; a line naming another stays theirs.
+    expect(turns.at(-1)!.filter((turn) => !turn.startsWith('system:')).slice(-2)).toEqual([
+      'user:안녕',
+      'assistant:세라: *칼을 뽑으며* 덤벼.\n\n평범: 잠깐!',
+    ]);
   });
 
   it('keeps nothing a refused generation carried, and refuses a member the plot does not have', async () => {

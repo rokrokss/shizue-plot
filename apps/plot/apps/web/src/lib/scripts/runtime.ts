@@ -131,6 +131,7 @@ export interface ScriptBundle {
 export interface ScriptUi {
   alert(text: string, error: boolean): Promise<void>;
   input(text: string): Promise<string>;
+  /** The index of the option chosen, as text — what RisuAI's select dialog answers — or '' when dismissed. */
   select(options: string[], display?: string): Promise<string>;
   /** Yes or no (Lua's `alertConfirm`); dismissing it is no. */
   confirm(text: string): Promise<boolean>;
@@ -380,6 +381,11 @@ function headText(edits: ScriptChat | null, before: readonly TriggerMessage[], h
   const only = edits.messages[0]!;
   return 'id' in only && only.id === headId && !('role' in only) ? only.content : undefined;
 }
+
+/** Whether two trigger chats hold the same messages, in the same roles, with the same text. */
+const sameChat = (a: readonly TriggerMessage[], b: readonly TriggerMessage[]): boolean =>
+  a.length === b.length &&
+  a.every((message, index) => message.id === b[index]!.id && message.role === b[index]!.role && message.data === b[index]!.data);
 
 /** `before` with the head's text as `text`. */
 const withHeadText = (before: readonly TriggerMessage[], text: string): TriggerMessage[] =>
@@ -734,9 +740,10 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
 
   /**
    * `text` through the engines' edit listeners and then the regex scripts of
-   * `phase`, with the variables as the listeners left them. The listeners get a
-   * copy of the chat: an edit hook's answer is its text, and anything it did to
-   * other messages is said and dropped.
+   * `phase`, with the variables as the listeners left them. The listeners edit
+   * the chat as RisuAI's do — the chat as stored, each one after the one before —
+   * and `chat` is what they left of it: a copy of the chat given, as it was when
+   * they wrote nothing there. Whether it is kept is the caller's, as in RisuAI.
    */
   async function edit(
     phase: Extract<EditPhase, 'editinput' | 'editoutput'>,
@@ -746,20 +753,17 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     meta: { chatIndex: number; previousSameRole?: string },
     chat: readonly TriggerMessage[],
     greeting: string | null,
-  ): Promise<{ text: string; variables: Variables }> {
+  ): Promise<{ text: string; variables: Variables; chat: TriggerMessage[] }> {
     let data = text;
     let current = variables;
+    const working = chat.map((message) => ({ ...message }));
     for (const engine of engines) {
       if (!engine.edit || !engine.handles(phase)) continue;
-      const working = chat.map((message) => ({ ...message }));
       const over = sessionScope(s, current, working, greeting);
       data = await engine.edit(phase, data, { chatIndex: meta.chatIndex }, over.scope);
       current = over.variables();
-      if (working.length !== chat.length || working.some((message, index) => message.data !== chat[index]?.data)) {
-        log({ kind: 'dropped', effect: phase, message: 'an edit listener changed the chat; only its answer is kept' });
-      }
     }
-    if (!hasEditScripts(bundle.editScripts, phase)) return { text: data, variables: current };
+    if (!hasEditScripts(bundle.editScripts, phase)) return { text: data, variables: current, chat: working };
     const edited = runEditScripts(data, bundle.editScripts, phase, {
       chatIndex: meta.chatIndex,
       ...(meta.previousSameRole !== undefined ? { previousSameRole: meta.previousSameRole } : {}),
@@ -777,7 +781,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       },
       onSkip: (_script, reason) => log({ kind: 'error', effect: phase, message: reason }),
     });
-    return { text: edited, variables: current };
+    return { text: edited, variables: current, chat: working };
   }
 
   /**
@@ -827,14 +831,24 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
         const { greeting, chat } = branchOf(s, view.messages);
         let variables = base;
         let messages: TriggerMessage[] = chat;
+        let input: TriggerRunResult | null = null;
         if (!prepareOptions.raw && runsAt('input')) {
-          const input = await run(s, 'input', variables, chat, greeting);
+          input = await run(s, 'input', variables, chat, greeting);
           variables = input.variables;
           messages = input.messages;
         }
         const typed = prepareOptions.raw
-          ? { text, variables }
+          ? { text, variables, chat: messages }
           : await edit('editinput', text, variables, s, { chatIndex: -1 }, messages, greeting);
+        // RisuAI's editInput listener edits the chat as stored, and the send then
+        // puts the input run's copy, with the turn on it, in its place
+        // (`DefaultChatScreen`'s `sendMain`): what the listener did is gone. Not
+        // when that run ended early — it hands back nothing, and the turn is
+        // pushed onto the stored chat itself.
+        if (input?.aborted) messages = typed.chat;
+        else if (!sameChat(messages, typed.chat)) {
+          log({ kind: 'dropped', effect: 'editinput', message: 'an editInput listener changed the chat, which the input run’s chat replaces' });
+        }
         let sent = typed.text;
         variables = computeVariables([sent], typed.variables, view.names);
         // RisuAI pushes the turn onto the chat the input run left, and the start
@@ -937,18 +951,23 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       );
       let followUp = false;
       const withReply = withHeadText(chat, text);
-      let edits: ScriptChat | null = null;
+      // RisuAI's editOutput listener edits the chat as stored, the reply on it; the
+      // reply's place then takes the text it came to — by its index, whatever the
+      // listener did there (`message[msgIndex].data`) — and the output triggers
+      // run on that chat. Said, like theirs, against the chat with the reply's text.
+      const listened = reply.chat.map((message, index) => (index === chatIndex ? { ...message, data: text } : message));
+      let edits: ScriptChat | null = chatEdits(withReply, listened);
       if (runsAt('output')) {
-        const output = await run(s, 'output', variables, withReply, greeting);
+        const output = await run(s, 'output', variables, listened, greeting);
         variables = output.variables;
         followUp = output.sendAIprompt;
         edits = chatEdits(withReply, output.messages);
-        // A rewrite of the reply alone is its text; anything more is the chat.
-        const reworded = headText(edits, withReply, head.id);
-        if (reworded !== undefined) {
-          text = reworded;
-          edits = null;
-        }
+      }
+      // A rewrite of the reply alone is its text; anything more is the chat.
+      const reworded = headText(edits, withReply, head.id);
+      if (reworded !== undefined) {
+        text = reworded;
+        edits = null;
       }
       // Against the message the chat now ends on — the reply, unless the output
       // triggers added after it or cut it — without its own delta.

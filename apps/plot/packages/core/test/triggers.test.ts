@@ -291,12 +291,41 @@ describe('v1 effects', () => {
       {
         alert: (text) => void alerts.push(text),
         input: () => '아린',
-        select: (options) => options[1]!,
+        select: (options) => String(options.indexOf('활')),
       },
     );
     expect(alerts).toEqual(['조심해']);
     expect(result.variables['name']).toBe('아린');
-    expect(result.variables['weapon']).toBe('활');
+    expect(result.variables['weapon']).toBe('1');
+  });
+
+  it('writes the index of the choice, as RisuAI’s select dialog answers, over the buttons it draws', async () => {
+    const asked: { options: string[]; display?: string }[] = [];
+    const result = await runTriggers(
+      {
+        ...input([]),
+        character: character(
+          [
+            trigger('start', [
+              { type: 'showAlert', alertType: 'select', value: '검||창§활', inputVar: 'v1' },
+              { type: 'v2GetAlertSelect', display: '골라||덤', displayType: 'value', value: '검|활', valueType: 'value', outputVar: 'v2', indent: 0 },
+            ]),
+          ],
+          { lowLevelAccess: true },
+        ),
+      },
+      {
+        select: (options, display) => {
+          asked.push({ options, ...(display !== undefined ? { display } : {}) });
+          return String(options.length - 1);
+        },
+      },
+    );
+    // Joined with `||` and split again: an option holding one is two buttons, and so is the rest of the text.
+    expect(asked).toEqual([{ options: ['검', '창', '활'] }, { options: ['덤', '검', '활'], display: '골라' }]);
+    // Text, as every RisuAI caller hands it on.
+    expect(result.variables['v1']).toBe('2');
+    expect(result.variables['v2']).toBe('2');
   });
 });
 
@@ -890,6 +919,47 @@ describe('CBS in effect fields', () => {
     expect(result.variables['read']).toBe('10/어서 와/btn-1/아린');
     expect(result.variables['raw']).toBe('{{setvar::x::1}}');
     expect(result.variables['x']).toBeUndefined();
+  });
+
+  it('answers the chat functions from the chat as stored, not the run’s copy, for no message of its own', () => {
+    const result = runTriggersSync(
+      input(
+        [
+          trigger('start', [
+            { type: 'impersonate', role: 'user', value: '흉내' },
+            { type: 'v2CutChat', start: '0', startType: 'value', end: '1', endType: 'value', indent: 0 },
+            set('last', '{{lastmessage}}/{{lastmessageid}}/{{previouscharchat}}/{{previoususerchat}}/{{previouschatlog::1}}'),
+            set('history', '{{history::role}}'),
+            set('users', '{{userhistory}}'),
+            set('here', '{{chat_index}}/{{messagetime}}/{{messageidleduration}}'),
+          ]),
+        ],
+        { greeting: '어서 오세요' },
+      ),
+    );
+    // The run's own chat is one message by now; RisuAI's macros still read the two stored.
+    expect(result.messages.map((message) => message.data)).toEqual(['안녕']);
+    expect(result.variables['last']).toBe('어서 와/1/어서 와//어서 와');
+    expect(JSON.parse(result.variables['history']!)).toEqual(['user: 안녕', 'char: 어서 와']);
+    expect((JSON.parse(result.variables['users']!) as string[]).map((entry) => JSON.parse(entry))).toEqual([
+      { role: 'user', data: '안녕' },
+    ]);
+    // A trigger's text is parsed for no message — RisuAI's index -1 — whatever the chat.
+    expect(result.variables['here']).toBe('-1/[Cannot get time]/[Cannot get time]');
+  });
+
+  it('reads what a slash command did to the stored chat', () => {
+    const result = runTriggersSync(
+      input([
+        trigger('start', [
+          { type: 'command', value: '/send 명령' },
+          set('last', '{{lastmessage}}'),
+        ]),
+      ]),
+    );
+    expect(result.variables['last']).toBe('명령');
+    // The run's own copy is what it leaves, as RisuAI writes it over the stored chat.
+    expect(result.messages.map((message) => message.data)).toEqual(['안녕', '어서 와']);
   });
 });
 

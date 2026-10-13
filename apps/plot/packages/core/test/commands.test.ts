@@ -90,13 +90,18 @@ describe('the commands', () => {
   it('asks the reader, and answers /buttons with the index of the label chosen', () => {
     const { h } = host();
     expect(run('/input 이름은?', h, ['아린'])).toEqual({ answer: '아린', requests: [{ kind: 'input', text: '이름은?' }] });
-    expect(run('/buttons labels=["예","아니요"]', h, ['아니요'])).toEqual({
+    // The dialog answers with the index, as text, and that is the line's answer as it is.
+    expect(run('/buttons labels=["예","아니요"]', h, ['1'])).toEqual({
       answer: '1',
       requests: [{ kind: 'select', options: ['예', '아니요'] }],
     });
-    // Labels RisuAI joins with `||` split again; not a list leaves the pipe.
-    expect(run('/buttons labels=["a||b",3]', h, ['3']).answer).toBe('2');
+    // Labels RisuAI joins with `||` split again, so the index counts the buttons drawn; not a list leaves the pipe.
+    expect(run('/buttons labels=["a||b",3,null]', h, ['2'])).toEqual({
+      answer: '2',
+      requests: [{ kind: 'select', options: ['a', 'b', '3', ''] }],
+    });
     expect(run('/pass x|/buttons labels=nope', h).answer).toBe('x');
+    // Closed without a choice.
     expect(run('/buttons labels=["a"]', h, ['']).answer).toBe('');
     expect(run('/?', h)).toEqual({ answer: 'help', requests: [{ kind: 'help' }] });
   });

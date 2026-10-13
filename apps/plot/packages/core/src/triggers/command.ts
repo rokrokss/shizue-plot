@@ -22,6 +22,20 @@
 
 import type { TriggerMessage, TriggerRequest } from './interpreter.js';
 
+/**
+ * The buttons RisuAI's select dialog (`alertSelect`) draws for `options`, and
+ * the text above them. It joins them with `||` into one message — after the
+ * text, where there is one — and splits that again, so an option holding `||`
+ * is several buttons and a `||` in the text makes the rest of it buttons too.
+ * The dialog answers with the index of the button chosen, as text, and every
+ * caller hands that to the script as it is (`TriggerRequest` `select`).
+ */
+export function risuSelect(options: readonly string[], display?: string): { options: string[]; display?: string } {
+  if (display === undefined) return { options: options.join('||').split('||') };
+  const [text, ...rest] = [display, ...options].join('||').split('||');
+  return { options: rest, display: text! };
+}
+
 /** What a line of commands answers: the last pipe, or `false` when a command stopped it. `/trigger` leaves `undefined`. */
 export type CommandAnswer = string | false | undefined;
 
@@ -150,11 +164,9 @@ function* processCommand(
           return pipe;
         }
         if (Array.isArray(labels)) {
-          // RisuAI's select dialog joins the labels with `||` and splits them again,
-          // and answers with the index of the one chosen. Closing it here chooses none.
-          const options = labels.join('||').split('||');
-          const chosen = options.indexOf(asText((yield { kind: 'select', options }) ?? ''));
-          return chosen === -1 ? '' : String(chosen);
+          // The index of the label chosen, as the dialog answers it. Closing it here chooses none.
+          const options = labels.map((label) => (label === null || label === undefined ? '' : String(label)));
+          return asText((yield { kind: 'select', ...risuSelect(options) }) ?? '');
         }
       }
       return pipe;

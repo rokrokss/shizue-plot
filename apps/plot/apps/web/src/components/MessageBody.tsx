@@ -308,6 +308,7 @@ export const MessageBody = memo(function MessageBody({
   display,
   components: componentContext,
   roster = NO_ROSTER,
+  speaker,
   previousSameRole = '',
   chatIndex,
   streaming = false,
@@ -333,6 +334,11 @@ export const MessageBody = memo(function MessageBody({
    * render would re-cut the message on every token.
    */
   roster?: readonly PublicMember[];
+  /**
+   * The member who says the lines that name no one, instead of the narrator: on
+   * a message a card's script wrote as its character (`speechRuns`).
+   */
+  speaker?: string;
   /** Raw text of the previous message with the same role, for `repeat_back`. */
   previousSameRole?: string;
   /** This message's place on the branch, RisuAI's way, for `{{chat_index}}`. */
@@ -391,7 +397,7 @@ export const MessageBody = memo(function MessageBody({
           if (roster.length === 0) {
             return [{ name: null, narration: false, html: false, blocks: splitBlocks(unescapeCbs(text, 'html')) }];
           }
-          return speechRuns(text, names, aliases).map((run) => ({
+          return speechRuns(text, names, aliases, speaker ?? null).map((run) => ({
             name: run.name,
             narration: run.name === null,
             html: false,
@@ -400,7 +406,7 @@ export const MessageBody = memo(function MessageBody({
         });
       });
     },
-    [segments, assets, resolveAsset, roster],
+    [segments, assets, resolveAsset, roster, speaker],
   );
 
   // Only the very last block of the last run of text is still being written.

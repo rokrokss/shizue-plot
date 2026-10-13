@@ -528,8 +528,12 @@ export type StreamMode = 'send' | 'regenerate' | 'continue' | 'auto' | 'narrate'
 
 export type MessageRole = 'user' | 'assistant';
 
-/** Who put a user turn in the chat; mirrors messages.source in packages/db. */
-export type MessageSource = 'user' | 'component';
+/**
+ * Where a turn's text came from; mirrors messages.source in packages/db. A user
+ * turn is the reader's or a component's; an assistant turn is the model's
+ * (`user`) or one a card's script wrote as its character (`script`).
+ */
+export type MessageSource = 'user' | 'component' | 'script';
 
 /** An image the reader attached to one of their own turns. */
 export interface ChatAttachment {
