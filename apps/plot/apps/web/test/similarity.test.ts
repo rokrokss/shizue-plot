@@ -4,10 +4,20 @@
  * embedder swapped for stand-ins — a Map for localforage, and the same fake
  * embedder for both. The fake is deterministic and, like the real model, gives
  * a text a slightly different vector in a different batch, so a difference in
- * how the texts are batched or cached shows up as a difference in order.
+ * how the texts are batched or cached shows up as a difference in order. Ours
+ * keeps its vectors in `fake-indexeddb` where a test reloads the page.
  */
-import { afterEach, describe, expect, it } from 'vitest';
-import { createSimilaritySearch, workerEmbedder, type Embed, type EmbedWorker } from '../src/lib/scripts/similarity';
+import { createHash } from 'node:crypto';
+import { IDBFactory } from 'fake-indexeddb';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  createSimilaritySearch,
+  indexedDbStore,
+  workerEmbedder,
+  type Embed,
+  type EmbedWorker,
+  type VectorStore,
+} from '../src/lib/scripts/similarity';
 
 /* ------------------------------------------------ RisuAI's, as it is there */
 
@@ -120,8 +130,7 @@ class HypaProcesser {
 }
 
 /** RisuAI's trigger: a new processer per call, over the one database. */
-function reference(embed: (texts: string[]) => Promise<Float32Array[]>) {
-  const forage = new Forage();
+function reference(embed: (texts: string[]) => Promise<Float32Array[]>, forage = new Forage()) {
   return async (source: string, texts: string[]) => {
     const processer = new HypaProcesser(forage, embed);
     await processer.addText(texts);
@@ -170,11 +179,56 @@ function pair() {
   };
 }
 
+/**
+ * One browser's storage — a fake IndexedDB for ours, one Forage for RisuAI's —
+ * and `load()` to open the page in it again: a new search with an empty memory,
+ * on `model` if given, over what earlier loads stored.
+ */
+function browser() {
+  const idb = new IDBFactory();
+  const forage = new Forage();
+  return {
+    idb,
+    load(model?: string) {
+      const ours = fakeModel();
+      const theirs = fakeModel();
+      return {
+        ours: createSimilaritySearch(ours.embed, { model, store: indexedDbStore(() => idb) }),
+        theirs: reference(theirs.embed, forage),
+        batches: { ours: ours.batches, theirs: theirs.batches },
+      };
+    },
+  };
+}
+
+/** Every key and value in every database of `idb`. */
+async function stored(idb: IDBFactory): Promise<{ keys: IDBValidKey[]; values: unknown[] }> {
+  const request = <T,>(made: IDBRequest<T>): Promise<T> =>
+    new Promise((resolve, reject) => {
+      made.onsuccess = () => resolve(made.result);
+      made.onerror = () => reject(made.error);
+    });
+  const out = { keys: [] as IDBValidKey[], values: [] as unknown[] };
+  for (const { name } of await idb.databases()) {
+    const db = await request(idb.open(name!));
+    for (const store of db.objectStoreNames) {
+      const read = db.transaction(store).objectStore(store);
+      out.keys.push(...(await request(read.getAllKeys())));
+      out.values.push(...(await request(read.getAll())));
+    }
+    db.close();
+  }
+  return out;
+}
+
+const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex');
+
 /* ------------------------------------------------------------------ tests */
 
 const nativeSort = Array.prototype.sort;
 afterEach(() => {
   Array.prototype.sort = nativeSort;
+  vi.unstubAllGlobals();
 });
 
 describe('the embedding search', () => {
@@ -295,6 +349,111 @@ describe('the embedding search', () => {
     const native = await ours('q', texts);
     expect(native).toEqual(await theirs('q', texts));
     expect(native[0]).toBe('q');
+  });
+});
+
+describe('the stored vectors', () => {
+  it('are read back after a reload, so a near tie falls as it does in RisuAI', async () => {
+    const { load } = browser();
+    const first = load();
+    // `ab` and `Ab` point the same way; the second batch scales `Ab` a millionth higher.
+    expect(await first.ours('q', ['ab', 'zz'])).toEqual(await first.theirs('q', ['ab', 'zz']));
+    expect(await first.ours('q', ['Ab', 'zzz'])).toEqual(await first.theirs('q', ['Ab', 'zzz']));
+    const second = load();
+    const mixed = ['ab', 'Ab', 'yy'];
+    const got = await second.ours('ab', mixed);
+    expect(got).toEqual(await second.theirs('ab', mixed));
+    expect(got).toEqual(['Ab', 'ab', 'yy']);
+    expect(second.batches.ours).toEqual([['yy'], ['ab']]);
+    // A page that forgot them embeds all three in one batch, where the two tie exactly.
+    expect(await createSimilaritySearch(fakeModel().embed)('ab', mixed)).toEqual(['ab', 'Ab', 'yy']);
+  });
+
+  it('agree with RisuAI on a list of cached and new texts, duplicates and all, in the next session', async () => {
+    const { load } = browser();
+    const first = load();
+    const earlier: [string, string[]][] = [
+      ['검', ['활', '검', '창']],
+      ['a', ['a', 'b', 'a']],
+    ];
+    for (const [source, texts] of earlier) expect(await first.ours(source, texts)).toEqual(await first.theirs(source, texts));
+    const second = load();
+    const texts = ['창', '도끼', '검', '도끼', 'b', '방패', 'a', '창'];
+    const got = await second.ours('검', texts);
+    expect(got).toEqual(await second.theirs('검', texts));
+    expect(got).toHaveLength(texts.length);
+    // Only what no session embedded before, in one batch and twice where it appears twice.
+    expect(second.batches.ours).toEqual(second.batches.theirs);
+    expect(second.batches.ours).toEqual([['도끼', '도끼', '방패'], ['검']]);
+  });
+
+  it('agree with RisuAI over random runs with reloads between them', async () => {
+    const { load } = browser();
+    let seed = 11;
+    const random = (): number => {
+      seed = (seed * 16807) % 2147483647;
+      return seed / 2147483647;
+    };
+    const pool = ['검', '활', 'ab', 'Ab', 'ba', 'Hi', 'hi', '', 'sword', 'Sword', '§', 'x', 'xx'];
+    let page = load();
+    for (let round = 0; round < 120; round += 1) {
+      if (round % 15 === 14) page = load();
+      const texts = Array.from({ length: 1 + Math.floor(random() * 8) }, () => pool[Math.floor(random() * pool.length)]!);
+      const source = pool[Math.floor(random() * pool.length)]!;
+      expect(await page.ours(source, texts), `round ${round}`).toEqual(await page.theirs(source, texts));
+    }
+  });
+
+  it('are keyed by the SHA-256 of text and model, so another model embeds again', async () => {
+    const { idb, load } = browser();
+    await load().ours('sword', ['sword', 'shield']);
+    const other = load('other');
+    await other.ours('sword', ['sword', 'shield']);
+    expect(other.batches.ours).toEqual([['sword', 'shield'], ['sword']]);
+    const again = load();
+    await again.ours('sword', ['sword', 'shield']);
+    expect(again.batches.ours).toEqual([['sword']]);
+    const { keys, values } = await stored(idb);
+    expect([...keys].sort()).toEqual(['sword|MiniLM', 'shield|MiniLM', 'sword|other', 'shield|other'].map(sha256).sort());
+    expect(values.every((value) => value instanceof Float32Array && value.length === DIM)).toBe(true);
+  });
+
+  const failing: [string, () => VectorStore][] = [
+    ['there is no IndexedDB', () => indexedDbStore()],
+    [
+      'the database will not open',
+      () =>
+        indexedDbStore(() => ({
+          open: () => {
+            const request = { error: new DOMException('denied', 'UnknownError') } as unknown as IDBOpenDBRequest;
+            setTimeout(() => request.onerror?.(new Event('error')));
+            return request;
+          },
+        }) as unknown as IDBFactory),
+    ],
+    [
+      'reads and writes throw',
+      () => ({
+        get: () => Promise.reject(new DOMException('gone', 'InvalidStateError')),
+        set: () => Promise.reject(new DOMException('full', 'QuotaExceededError')),
+      }),
+    ],
+    [
+      'there is no crypto.subtle',
+      () => {
+        vi.stubGlobal('crypto', {});
+        return indexedDbStore(() => new IDBFactory());
+      },
+    ],
+  ];
+
+  it.each(failing)('fall back to the page’s memory when %s', async (_, store) => {
+    const ours = fakeModel();
+    const theirs = fakeModel();
+    const search = createSimilaritySearch(ours.embed, { store: store() });
+    const risu = reference(theirs.embed);
+    for (const texts of [['검', '활'], ['활', '창', '검']]) expect(await search('검', texts)).toEqual(await risu('검', texts));
+    expect(ours.batches).toEqual([['검', '활'], ['검'], ['창'], ['검']]);
   });
 });
 
