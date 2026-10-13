@@ -58,6 +58,7 @@ import { LUA_LIMITS, luaWorkerSource, type LuaSnapshot } from '@shizue/core/lua'
 import { MAX_TRIGGER_VALUE_LENGTH, type RequestTurn } from '@shizue/core/triggers';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import type { Socket } from 'node:net';
 import { dirname, join } from 'node:path';
@@ -93,6 +94,17 @@ const POOL_SIZE = 2;
 
 /** The child's JavaScript heap: the request, the chat and their JSON, twice over. */
 const HEAP_MB = 128;
+
+/**
+ * The most a child may hold in memory during a run, counted the way the
+ * kernel counts it (resident set), so WebAssembly memory and anything else
+ * off the V8 heap is in it. Set well above what a run uses (about 70 MB idle,
+ * the 128 MB heap and the Lua states on top) so it only ever stops a child
+ * that is running away. Read from `/proc`, so only where there is one — Linux,
+ * where the API is deployed; elsewhere the heap and Lua limits stand alone.
+ */
+const RSS_LIMIT_MB = 512;
+const RSS_POLL_MS = 100;
 
 /** The longest line the parent reads from a child — far past any request a chat sends. */
 const MAX_LINE = 8 * 1024 * 1024;
@@ -371,6 +383,24 @@ export async function runRequestLuaAt(
   }
 }
 
+/** Kills the child once its resident memory passes `RSS_LIMIT_MB`, while `done()` is false. */
+function watchMemory(child: LuaChild, done: () => boolean): void {
+  const pid = child.proc.pid;
+  if (process.platform !== 'linux' || pid === undefined) return;
+  const poll = async (): Promise<void> => {
+    if (done() || child.dead !== null) return;
+    try {
+      const status = await readFile(`/proc/${pid}/status`, 'utf8');
+      const kb = Number(/^VmRSS:\s+(\d+)\s+kB/m.exec(status)?.[1]);
+      if (kb > RSS_LIMIT_MB * 1024) return child.kill(`used more than ${RSS_LIMIT_MB} MB`);
+    } catch {
+      return;
+    }
+    setTimeout(() => void poll(), RSS_POLL_MS).unref();
+  };
+  void poll();
+}
+
 function runIn(child: LuaChild, input: RequestLuaInput, deadlineMs: number): Promise<RequestLuaOutcome> {
   return new Promise<RequestLuaOutcome>((resolve) => {
     let settled = false;
@@ -386,6 +416,7 @@ function runIn(child: LuaChild, input: RequestLuaInput, deadlineMs: number): Pro
     };
     const deadline = setTimeout(() => finish({ ok: false, reason: `no answer in ${deadlineMs} ms` }), deadlineMs);
     child.onDead = (reason) => finish({ ok: false, reason: `the Lua process ${reason}` });
+    watchMemory(child, () => settled);
     const broke = (why: string): void => child.kill(why);
 
     let request = input.request as unknown;

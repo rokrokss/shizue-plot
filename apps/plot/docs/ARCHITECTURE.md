@@ -112,13 +112,13 @@ Next rewrite가 넘긴 요청은 `x-forwarded-host`가 웹 호스트일 때만 �
 `@shizue/core/lua`의 프로그램을 서버 변형으로 돈다(wasmoon의 JS 프록시 없음, `debug`·`io`·`os` 등을 지운 Lua — §7.2), Lua 상태당
 32MB. 부팅 뒤 `process`·`Buffer` 전역도 지운다.
 
-Node의 권한 모델은 **25부터** 네트워크를 막는다(`package.json`의 engines는 `>=22.18`) — 그 전 버전에서는 `--permission` 아래서도
+Node의 권한 모델은 **25부터** 네트워크를 막는다(그래서 `package.json`의 engines는 `>=25`다) — 그 전 버전에서는 `--permission` 아래서도
 자식이 어디로든 연결한다. 그래서 API는 기동 때 같은 플래그로 자식을 하나 띄워(`requestLuaProbe.ts`) 이름 풀이와 소켓이
 `ERR_ACCESS_DENIED`로 거절되는지 확인하고(`probeRequestLua`, 프로세스당 한 번), 아니면 — 모르는 플래그, 띄우기 실패, 풀린
 이름, 10초 무응답 모두 — 이 기능을 끈다: 카드의 Lua를 돌리지 않고 요청을 고치지 않은 채 보내며 로그에 한 번 남긴다. 샌드박스
 없이 카드 Lua를 돌리는 경로는 없다. 권한 모델이 막지 않는 것도 있다 — 같은 uid의 프로세스에 보내는 시그널(`process.kill`)과
 V8 힙 밖의 메모리(ArrayBuffer). 둘 다 자식의 JS에 닿아야 쓸 수 있고, Lua에서 JS로 가는 길(프록시·문자열 코드·`process` 전역)을
-막아 둔 것이 그 앞의 방어다. 배포가 컨테이너 메모리 한도를 두면 그것이 마지막 선이다.
+막아 둔 것이 그 앞의 방어다. 힙 밖 메모리의 마지막 선은 상주 메모리 한도다: Linux에서는 실행 중인 자식의 `/proc/<pid>/status` VmRSS를 100ms마다 읽어 512MB를 넘으면 죽인다(`RSS_LIMIT_MB` — 유휴 약 70MB·힙 128MB·Lua 상태 위로 넉넉하게, 폭주만 멈춘다). `/proc`이 없는 개발 기기에서는 힙과 Lua 한도만 선다. 배포가 컨테이너 메모리 한도도 두면 그 바깥 선이 하나 더 생긴다.
 
 로그인은 OpenAI의 오픈소스 Sign in with ChatGPT 흐름이다. 그 흐름은 `http://127.0.0.1:<port>/auth/callback`
 으로만 돌아오고 이 주소는 사용자 기기를 가리키므로, 크롬 확장의 정적 declarativeNetRequest 규칙이 그 이동을
