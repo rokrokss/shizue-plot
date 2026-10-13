@@ -8,7 +8,8 @@
  * - `server`: done in the sandbox, and what it changed is carried to the API
  *   the way a trigger's writes are — a chat variable on the turn, the chat the
  *   run left, a rewrite of the work in the chat's overlay — or, for a model
- *   call, answered by the API on the reader's own account.
+ *   call, answered by the API on the reader's own account, and for a request,
+ *   made by the API, as RisuAI's proxy makes it.
  * - `logged`: answers what RisuAI answers when there is nothing to act on, and
  *   the run notes it.
  * - `impossible`: nothing here can do it; logged, with RisuAI's failure value.
@@ -120,7 +121,11 @@ export const LUA_CLASSIFICATION: Readonly<Record<string, LuaSupport>> = {
     'RisuAI’s default embedder (Xenova/all-MiniLM-L6-v2, q8) in the page’s worker, shared with the triggers; best first, as RisuAI orders them; a failure is a Lua error',
     true,
   ),
-  request: host('impossible', 'the sandbox has no network; answers RisuAI’s refusal (status 400)', true),
+  request: host(
+    'server',
+    'POST /api/chats/:id/script-fetch: our server makes the GET, as RisuAI’s proxy does on the web, so the address sees our server, not the reader; RisuAI’s limits and answers (six a minute per reader, 120 characters, https, its banned hosts and ours); only public addresses, redirects re-checked, 10s, 2MB',
+    true,
+  ),
   generateImage: host('impossible', 'answers RisuAI’s failure text', true),
   hash: host('browser', 'SHA-256, hex'),
 

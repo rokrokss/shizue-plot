@@ -69,7 +69,7 @@ import { sanitizeCustomHtml } from '@/lib/sanitizeHtml';
 import { streamGeneration } from '@/lib/sse';
 import { loadWholeBranch } from '@/lib/scripts/branch';
 import { createLuaEngine, luaFunctionNames, luaScriptsOf } from '@/lib/scripts/lua/engine';
-import { createLuaSandbox } from '@/lib/scripts/lua/sandbox';
+import { createLuaSandbox, type LuaRequestAnswer } from '@/lib/scripts/lua/sandbox';
 import {
   createScriptRuntime,
   type CommandOutcome,
@@ -955,6 +955,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             llm: async (messages, model) =>
               (await apiSend<{ result: string }>('POST', `/api/chats/${id}/script-llm`, { messages, model })).result,
             similarity,
+            // Our server makes the GET, under RisuAI's limits, and answers as RisuAI does.
+            request: (url) => apiSend<LuaRequestAnswer>('POST', `/api/chats/${id}/script-fetch`, { url }),
             log,
           }),
         ]

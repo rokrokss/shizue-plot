@@ -137,6 +137,11 @@ const host: LuaHost = {
     asked.push(`similarity:${source}:${texts.join(',')}`);
     return [...texts].reverse();
   },
+  // The server's answer, standing in: a status of its own and a body naming the address.
+  request: async (url) => {
+    asked.push(`request:${url}`);
+    return { status: 203, data: `"본문" of ${url}` };
+  },
 };
 
 const start: LuaEntry = { kind: 'trigger', mode: 'start' };
@@ -351,6 +356,74 @@ describe('the Lua sandbox', () => {
     expect(outcome.kind === 'done' && outcome.result.vars).toEqual([['a', '첫']]);
   }, 10_000);
 
+  it('relays a request to the page behind RisuAI’s gate, and hands the script RisuAI’s JSON text', async () => {
+    asked.length = 0;
+    const sandbox = sandboxWith();
+    // RisuAI's wrapper leaves `request` alone: the script awaits the JSON text and decodes it itself.
+    const code = `
+      onStart = async(function(id)
+        local answer = request(id, 'https://example.com/a?b=1'):await()
+        if answer == nil then setChatVar(id, 'answer', 'nil') return end
+        local decoded = json.decode(answer)
+        setChatVar(id, 'answer', answer)
+        setChatVar(id, 'decoded', decoded.status .. '|' .. decoded.data)
+        setChatVar(id, 'odd', request(id, 42):await())
+      end)`;
+    const granted = await done(sandbox, code, start, snapshot({ lowLevel: true }));
+    expect(granted.error).toBeNull();
+    expect(Object.fromEntries(granted.vars)).toEqual({
+      answer: JSON.stringify({ status: 203, data: '"본문" of https://example.com/a?b=1' }),
+      decoded: '203|"본문" of https://example.com/a?b=1',
+      // Anything but text goes to the server as nothing, which answers it as RisuAI does.
+      odd: JSON.stringify({ status: 203, data: '"본문" of null' }),
+    });
+    expect(asked).toEqual(['request:https://example.com/a?b=1', 'request:null']);
+
+    // No access, no request: RisuAI's `request` answers nothing. The edit hooks never have it.
+    asked.length = 0;
+    expect(Object.fromEntries((await done(sandbox, code)).vars)).toEqual({ answer: 'nil' });
+    const edit = await done(
+      sandbox,
+      "listenEdit('editOutput', function(id, v) return tostring(request(id, 'https://example.com/'):await()) end)",
+      { kind: 'edit', phase: 'editOutput', text: 'v', index: 0 },
+      snapshot({ lowLevel: true }),
+    );
+    expect(edit.res).toBe('nil');
+    expect(asked).toEqual([]);
+
+    // A request the page could not make is RisuAI's fetch that threw.
+    const failing: LuaHost = {
+      ...host,
+      request: async () => {
+        throw new Error('offline');
+      },
+    };
+    const outcome = await sandbox.call(
+      "onStart = async(function(id) setChatVar(id, 'answer', request(id, 'https://example.com/'):await()) end)",
+      start,
+      snapshot({ lowLevel: true }),
+      failing,
+    );
+    expect(outcome.kind === 'done' && outcome.result.vars).toEqual([
+      ['answer', JSON.stringify({ status: 400, data: 'internal error' })],
+    ]);
+  });
+
+  it('does not count a slow request against the script', async () => {
+    const sandbox = sandboxWith({ active: 800 });
+    const slow: LuaHost = {
+      ...host,
+      request: () => new Promise((resolve) => setTimeout(() => resolve({ status: 200, data: '늦은 본문' }), 1_500)),
+    };
+    const outcome = await sandbox.call(
+      "onStart = async(function(id) setChatVar(id, 'a', json.decode(request(id, 'https://example.com/'):await()).data) end)",
+      start,
+      snapshot({ lowLevel: true }),
+      slow,
+    );
+    expect(outcome.kind === 'done' && outcome.result.vars).toEqual([['a', '늦은 본문']]);
+  }, 10_000);
+
   it('stops `while true do end` and starts over on the next call', async () => {
     let idle = '';
     const sandbox = sandboxWith({}, (reason) => (idle = reason));
@@ -424,16 +497,12 @@ describe('the Lua sandbox', () => {
         -- A JavaScript error reaches Lua as an object it may read, but a function it finds there is only callable: no Function to reach.
         local ok, err = pcall(logMain, '{')
         setChatVar(id, 'error', type(err) .. ':' .. type(err.constructor) .. ':' .. tostring(pcall(function() return err.constructor.constructor end)))
-        setChatVar(id, 'request', request(id, 'https://example.com/'):await())
       end)`,
       start,
       snapshot({ lowLevel: true }),
     );
     expect(result.error).toBeNull();
-    expect(Object.fromEntries(result.vars)).toEqual({
-      error: 'userdata:function:false',
-      request: JSON.stringify({ status: 400, data: 'request to https://example.com/ is not allowed' }),
-    });
+    expect(Object.fromEntries(result.vars)).toEqual({ error: 'userdata:function:false' });
 
     // The worker's second lock: once wasmoon is up, the network names are gone from its global.
     const probe = new NodeWorker(
@@ -570,6 +639,7 @@ describe('the Lua engine', () => {
       ui: host,
       llm: host.llm,
       similarity: host.similarity,
+      request: host.request,
       log: (entry) => logs.push(entry.message),
     });
     expect(engine.handles('start')).toBe(true);
@@ -606,6 +676,7 @@ describe('the Lua engine', () => {
         ui: host,
         llm: host.llm,
         similarity: host.similarity,
+        request: host.request,
         log: () => undefined,
       });
       const messages = [
@@ -674,6 +745,7 @@ describe('the Lua engine', () => {
       ui: host,
       llm: host.llm,
       similarity: host.similarity,
+      request: host.request,
       log: () => undefined,
     });
     const vars: Record<string, string | null> = {};
@@ -709,6 +781,7 @@ describe('the Lua engine', () => {
       ui: host,
       llm: host.llm,
       similarity: async (source, texts) => (searched.push([source, ...texts]), texts.filter((text) => text === source)),
+      request: host.request,
       log: () => undefined,
     });
     const result = await runTriggers(
@@ -724,5 +797,37 @@ describe('the Lua engine', () => {
     );
     expect(searched).toEqual([['물', '불', '물']]);
     expect(result.variables['best']).toBe('물');
+  });
+
+  it('answers a script’s request with the page’s, and only with low-level access', async () => {
+    const run = async (lowLevelAccess: boolean) => {
+      const fetched: (string | null)[] = [];
+      const triggers = [lua("onStart = async(function(id) setChatVar(id, 'got', tostring(request(id, 'https://example.com/x'):await())) end)")];
+      const engine = createLuaEngine({
+        triggers,
+        lowLevelAccess,
+        sandbox: sandboxWith(),
+        ui: host,
+        llm: host.llm,
+        similarity: host.similarity,
+        request: async (url) => (fetched.push(url), { status: 404, data: 'nope' }),
+        log: () => undefined,
+      });
+      const result = await runTriggers(
+        {
+          mode: 'start',
+          character: { name: '리안', description: '', lorebook: [], postHistoryInstructions: '', lowLevelAccess, triggers },
+          messages: [],
+          note: '',
+          persona: '',
+          variables: Object.create(null),
+        },
+        { code: (request) => engine.runCode!(request) },
+      );
+      return { fetched, got: result.variables['got'] };
+    };
+    // The target's own status comes through, a 404 as well as a 200.
+    expect(await run(true)).toEqual({ fetched: ['https://example.com/x'], got: JSON.stringify({ status: 404, data: 'nope' }) });
+    expect(await run(false)).toEqual({ fetched: [], got: 'nil' });
   });
 });

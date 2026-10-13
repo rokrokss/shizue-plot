@@ -8,6 +8,7 @@ import { createHostedAuth, createSessionStore } from './hostedAuth.js';
 import { loadRootEnv, readConfig } from './env.js';
 import { startJobWorker } from './jobs.js';
 import { createJobHandlers } from './notifications.js';
+import { createScriptFetch } from './scriptFetch.js';
 import { createStorage } from './storage.js';
 import { fakeChatGPTOAuth } from './testOpenAI.js';
 
@@ -37,6 +38,8 @@ const deps: AppDeps = {
   chatgpt: { accounts, sessions },
   webOrigin: config.authUrl,
   storage: createStorage(config.storage),
+  // One for the process: card scripts' requests and the per-reader rate limit they share.
+  scriptFetch: createScriptFetch({ ownOrigins: [config.authUrl, ...(config.apiOrigin ? [config.apiOrigin] : [])] }),
   env: config.env,
   generating: new Set<string>(),
   generationClaims: new Map(),

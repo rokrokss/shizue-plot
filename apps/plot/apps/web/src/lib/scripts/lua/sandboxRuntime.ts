@@ -12,8 +12,8 @@
  *
  * - **The parent** (our page, `sandbox.ts`) owns the chat. It hands each call a
  *   snapshot of what the script may read, serves the few things that need the
- *   reader or the server — a dialog, a model call — and takes back what the
- *   script wrote, all of it validated as a stranger's data.
+ *   reader or the server — a dialog, a model call, a request — and takes back
+ *   what the script wrote, all of it validated as a stranger's data.
  * - **The frame** (`luaFrameRuntime`) is a `srcdoc` iframe with
  *   `sandbox="allow-scripts"` and nothing else: an opaque origin, so no cookies,
  *   no storage, nothing addressed to our API is ours. Its CSP is
@@ -33,12 +33,12 @@
  * wasmoon has a `functionTimeout`, and it is the wrong clock: it counts wall
  * time, including the minutes a script spends awaiting the reader's answer or a
  * model call. The frame keeps its own, and it can, because every way a script
- * waits goes through the frame: a dialog, a model call and an embedding search
- * are host calls it relays, and `sleep` is a host call it answers itself, on its
- * own timer. So for each call it knows, without sampling anything:
+ * waits goes through the frame: a dialog, a model call, an embedding search and
+ * a request are host calls it relays, and `sleep` is a host call it answers
+ * itself, on its own timer. So for each call it knows, without sampling anything:
  *
- * - **active** time: wall time less the time a dialog, a model call or a search
- *   was open.
+ * - **active** time: wall time less the time a dialog, a model call, a search
+ *   or a request was open.
  *   Past `active` ms the worker is terminated — a script that sleeps forever.
  * - **CPU** time: active time less the time spent asleep — what is left is the
  *   script running. Past `cpu` ms it is terminated — a script that yields to a
@@ -85,7 +85,7 @@ export const LUA_LIMITS = {
   stretch: 2500,
   /** One call's running time: its active time less the time it slept. */
   cpu: 15_000,
-  /** One call's wall time, less the time a dialog, a model call or a search it asked for was open. */
+  /** One call's wall time, less the time a dialog, a model call, a search or a request it asked for was open. */
   active: 120_000,
   /** How long the worker has to load wasmoon. */
   boot: 20_000,
@@ -171,7 +171,7 @@ export interface LuaCallResult {
 }
 
 /** The host calls a script can make. Every other name is dropped. */
-export type LuaHostName = 'alert' | 'input' | 'select' | 'confirm' | 'llm' | 'similarity';
+export type LuaHostName = 'alert' | 'input' | 'select' | 'confirm' | 'llm' | 'similarity' | 'request';
 
 /* ------------------------------------------------------------ the worker */
 
@@ -641,9 +641,14 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
       const ctx = c();
       return Promise.resolve().then(function () {
         if (!low(id)) return undefined;
-        note(ctx, 'request', 'scripts have no network here');
-        // RisuAI's own answer for an address it refuses.
-        return JSON.stringify({ status: 400, data: 'request to ' + text(url) + ' is not allowed' });
+        // Our server makes it, as RisuAI's proxy does on the web, and answers RisuAI's
+        // `{status, data}` — its limits and refusals included. Anything but text is
+        // sent as nothing, which the server answers (and counts) as RisuAI does.
+        return host(ctx, 'request', { url: typeof url === 'string' ? url : null }).then(function (answer: Any) {
+          // A request the page could not make is a fetch that threw, to RisuAI.
+          const value = answer.ok ? answer.value : { status: 400, data: 'internal error' };
+          return JSON.stringify({ status: value.status, data: value.data });
+        });
       });
     });
     set('generateImage', function (id: Any) {
@@ -1091,8 +1096,8 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
 function luaFrameRuntime(env: Any, limits: Any): (data: Any) => void {
   'use strict';
 
-  /** The host calls that wait on the reader, the model or the embedder: they stop a call's active clock. */
-  const HOLDS: Any = { alert: true, input: true, select: true, confirm: true, llm: true, similarity: true };
+  /** The host calls that wait on the reader, the model, the embedder or the network: they stop a call's active clock. */
+  const HOLDS: Any = { alert: true, input: true, select: true, confirm: true, llm: true, similarity: true, request: true };
 
   let source: Any = null;
   let wasm: Any = null;

@@ -81,6 +81,12 @@ interface ApiConfig {
   authSecret: string;
   /** The web app's origin: writes must come from it, and sign-in returns to it. */
   authUrl: string;
+  /**
+   * The API's own origin when it is served apart from the web app — the web's
+   * `API_ORIGIN`, read here when the two share an environment. Card scripts'
+   * requests are refused there, as at the web origin.
+   */
+  apiOrigin?: string;
   /** Additional origins for the NODE_ENV=test email/password fixture. */
   authExtraTrustedOrigins: string[];
   /**
@@ -144,6 +150,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     storage: readStorageConfig(env),
     authSecret: authSecret ?? DEV_AUTH_SECRET,
     authUrl,
+    ...(env['API_ORIGIN'] ? { apiOrigin: new URL(env['API_ORIGIN']).origin } : {}),
     authExtraTrustedOrigins: [DEV_AUTH_URL],
     chatgptCallbackPort: callbackPort,
     env,

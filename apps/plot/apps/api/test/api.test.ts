@@ -107,6 +107,7 @@ import {
 import { BACKFILL_CHUNKS_PER_RUN } from '../src/memory.js';
 import { createJobHandlers, notificationFanout } from '../src/notifications.js';
 import { MAX_ASSET_NAME_LENGTH, MAX_CARD_IMPORT_BYTES } from '../src/routes/plots.js';
+import { createScriptFetch, type HopResponse, type Transport } from '../src/scriptFetch.js';
 import { MAX_GLOBAL_VARIABLE_KEYS } from '../src/scriptState.js';
 import { createLocalStorage, type ObjectStorage } from '../src/storage.js';
 import { connectS3Server } from './s3Server.js';
@@ -12589,5 +12590,204 @@ describe('script model calls', () => {
     expect((await readJson(res)).code).toBe('script_llm_failed');
     const [row] = await db.select({ generatingAt: chats.generatingAt }).from(chats).where(eq(chats.id, chatId));
     expect(row!.generatingAt).toBeNull();
+  });
+});
+
+describe('script requests', () => {
+  const lua = [{ comment: '', type: 'start', conditions: [], effect: [{ type: 'triggerlua', code: 'function onStart(id) end' }] }];
+
+  /**
+   * A published plot whose member carries Lua, with or without low-level access,
+   * a reader's chat on it, and that reader's `request` through `target`.
+   */
+  async function luaChat(owner: string, lowLevelAccess: boolean, target: Hono<AppEnv>) {
+    const cookie = await signUp(owner);
+    const plot = await createPlot(cookie, { name: '루아 작품', description: '설명', intros: ['문 앞이다'] });
+    await addCharacter(cookie, plot.id, {
+      name: '리안',
+      card: { description: '사서', extensions: { risuai: { triggerscript: lua, lowLevelAccess } } },
+    });
+    await publishPlot(cookie, plot.id);
+    const reader = await signUp(`reader-${owner}`);
+    const chat = await startChat(reader, plot.id);
+    const sendOn = async (chatId: string, url: unknown) => {
+      const res = await json(reader, `/api/chats/${chatId}/script-fetch`, 'POST', { url }, target);
+      // RisuAI's answers, its refusals among them, are each the body of a 200.
+      expect(res.status, await res.clone().text()).toBe(200);
+      return readJson(res);
+    };
+    return { reader, chatId: chat.chat.id, plotId: plot.id, sendOn, send: (url: unknown) => sendOn(chat.chat.id, url) };
+  }
+
+  const ok = (status: number, body: string, headers: Record<string, string> = {}): HopResponse => ({
+    status,
+    headers,
+    body: (async function* () {
+      yield new TextEncoder().encode(body);
+    })(),
+    close: () => undefined,
+  });
+
+  /**
+   * An app whose requests go to stubs: DNS answers `inside.test` with a private
+   * address and every other name with a public one, and the connection answers
+   * as `answer` says. The clock is the test's.
+   */
+  function fetchingApp(answer: Transport, options: { timeoutMs?: number; maxBytes?: number } = {}) {
+    const clock = { now: 1_000_000 };
+    const connected: { url: string; addresses: unknown }[] = [];
+    const scriptFetch = createScriptFetch({
+      ownOrigins: ['https://plot.example', 'https://api.plot.example'],
+      resolve: async (hostname) => [{ address: hostname === 'inside.test' ? '10.0.0.7' : '93.184.215.14', family: 4 }],
+      transport: async (request) => {
+        connected.push({ url: request.url.href, addresses: request.addresses });
+        return answer(request);
+      },
+      now: () => clock.now,
+      ...options,
+    });
+    return { target: makeApp({ scriptFetch }), clock, connected };
+  }
+
+  it('holds RisuAI’s gate: the card’s low-level access, on the reader’s own chat', async () => {
+    const { target, connected } = fetchingApp(async () => ok(200, 'x'));
+    const { reader, chatId } = await luaChat('fetch-closed@example.com', false, target);
+    const closed = await json(reader, `/api/chats/${chatId}/script-fetch`, 'POST', { url: 'https://site.test/' }, target);
+    expect(closed.status).toBe(403);
+    expect((await readJson(closed)).code).toBe('script_fetch_forbidden');
+
+    const { chatId: open } = await luaChat('fetch-open@example.com', true, target);
+    const stranger = await signUp('fetch-stranger@example.com');
+    expect((await json(stranger, `/api/chats/${open}/script-fetch`, 'POST', { url: 'https://site.test/' }, target)).status).toBe(404);
+    expect((await json(undefined, `/api/chats/${open}/script-fetch`, 'POST', { url: 'https://site.test/' }, target)).status).toBe(401);
+    expect(connected).toEqual([]);
+  });
+
+  it('lets six through in RisuAI’s minute and refuses the seventh, refused addresses counted too, per reader', async () => {
+    const { target, clock, connected } = fetchingApp(async () => ok(200, '본문'));
+    const { reader, plotId, send, sendOn } = await luaChat('fetch-limit@example.com', true, target);
+    const tooMany = { status: 429, data: 'Too many requests. you can request 5 times per minute' };
+    // Six: two fetched, four refused for their address — each one counted, as RisuAI counts before it looks.
+    expect(await send('https://site.test/1')).toEqual({ status: 200, data: '본문' });
+    expect((await send('http://site.test/')).status).toBe(400);
+    expect((await send(`https://site.test/${'x'.repeat(120)}`)).status).toBe(413);
+    expect((await send('https://risuai.net/')).status).toBe(400);
+    expect(await send(7)).toEqual({ status: 400, data: 'internal error' });
+    clock.now += 30_000;
+    expect(await send('https://site.test/2')).toEqual({ status: 200, data: '본문' });
+    // The seventh in the window, and every one after it, is refused without being made.
+    expect(await send('https://site.test/3')).toEqual(tooMany);
+    expect(await send('https://site.test/4')).toEqual(tooMany);
+    expect(connected.map((hop) => hop.url)).toEqual(['https://site.test/1', 'https://site.test/2']);
+
+    // The window is the reader's, across their chats; another reader has their own.
+    const again = await startChat(reader, plotId);
+    expect(await sendOn(again.chat.id, 'https://site.test/5')).toEqual(tooMany);
+    const other = await luaChat('fetch-limit-other@example.com', true, target);
+    expect(await other.send('https://site.test/6')).toEqual({ status: 200, data: '본문' });
+
+    // It starts again only once more than a minute has passed since it started: at a minute exactly it holds.
+    clock.now += 30_000;
+    expect(await send('https://site.test/7')).toEqual(tooMany);
+    clock.now += 1;
+    expect(await send('https://site.test/8')).toEqual({ status: 200, data: '본문' });
+    expect(connected.map((hop) => hop.url)).toEqual(['https://site.test/1', 'https://site.test/2', 'https://site.test/6', 'https://site.test/8']);
+  });
+
+  it('checks the address in RisuAI’s order, with its messages, and refuses this app’s own hosts as it refuses RisuAI’s', async () => {
+    const { target, clock, connected } = fetchingApp(async () => ok(200, 'x'));
+    const { send } = await luaChat('fetch-order@example.com', true, target);
+    // A fresh window for each, so the rate limit stays out of it.
+    const fresh = (url: unknown) => {
+      clock.now += 60_001;
+      return send(url);
+    };
+    const tooLong = { status: 413, data: 'URL to large. max is 120 characters' };
+    const httpsOnly = { status: 400, data: 'Only https requests are allowed' };
+    const refused = (url: string) => ({ status: 400, data: `request to ${url} is not allowed` });
+
+    // Length first, then the scheme (as written: RisuAI's is a prefix test), then the banned list.
+    expect(await fresh(`http://${'x'.repeat(120)}`)).toEqual(tooLong);
+    expect(await fresh(`https://realm.risuai.net/${'x'.repeat(100)}`)).toEqual(tooLong);
+    expect(await fresh('x'.repeat(120))).toEqual(httpsOnly);
+    expect(await fresh('HTTPS://site.test/')).toEqual(httpsOnly);
+    expect(await fresh('http://site.test/')).toEqual(httpsOnly);
+    for (const url of ['https://realm.risuai.net/x', 'https://risuai.net', 'https://risuai.xyz/a', 'https://risuai.net.site.test/']) {
+      expect(await fresh(url), url).toEqual(refused(url));
+    }
+    // Ours by host, however it is spelled.
+    for (const url of ['https://plot.example/api/presets', 'https://PLOT.example:8443/', 'https://plot.example./', 'https://api.plot.example/x']) {
+      expect(await fresh(url), url).toEqual(refused(url));
+    }
+    // A URL that is not one, or not text at all, fails as RisuAI's fetch fails on it.
+    for (const url of ['https://', 'https://exa mple.test/', null, undefined, 42, { href: 'https://site.test/' }]) {
+      expect(await fresh(url), String(url)).toEqual({ status: 400, data: 'internal error' });
+    }
+    expect(connected).toEqual([]);
+    // Exactly 120 characters is allowed.
+    const longest = `https://site.test/${'x'.repeat(120 - 'https://site.test/'.length)}`;
+    expect(longest).toHaveLength(120);
+    expect(await fresh(longest)).toEqual({ status: 200, data: 'x' });
+  });
+
+  it('passes the target’s status and body through, a 404 as well, and answers internal error for anything that threw', async () => {
+    const statuses: Record<string, HopResponse> = {
+      '/found': ok(200, '﻿{"a":1}'),
+      '/missing': ok(404, '없음'),
+      '/broken': ok(500, ''),
+    };
+    const { target, connected } = fetchingApp(async ({ url }) => {
+      if (url.pathname === '/reset') throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+      if (url.pathname === '/inward') return ok(302, '', { location: 'https://inside.test/' });
+      return statuses[url.pathname]!;
+    });
+    const { send } = await luaChat('fetch-pass@example.com', true, target);
+    // RisuAI's `text()` drops the BOM.
+    expect(await send('https://site.test/found')).toEqual({ status: 200, data: '{"a":1}' });
+    expect(connected[0]).toEqual({ url: 'https://site.test/found', addresses: [{ address: '93.184.215.14', family: 4 }] });
+    expect(await send('https://site.test/missing')).toEqual({ status: 404, data: '없음' });
+    expect(await send('https://site.test/broken')).toEqual({ status: 500, data: '' });
+    expect(await send('https://site.test/reset')).toEqual({ status: 400, data: 'internal error' });
+    // A private address, whether named first or redirected to, is a fetch that threw.
+    expect(await send('https://inside.test/')).toEqual({ status: 400, data: 'internal error' });
+    expect(await send('https://site.test/inward')).toEqual({ status: 400, data: 'internal error' });
+    expect(connected.map((hop) => hop.url)).toEqual([
+      'https://site.test/found',
+      'https://site.test/missing',
+      'https://site.test/broken',
+      'https://site.test/reset',
+      'https://site.test/inward',
+    ]);
+  });
+
+  it('answers internal error past the body cap and the deadline', async () => {
+    const capped = fetchingApp(async ({ url }) => ok(200, url.pathname === '/big' ? 'x'.repeat(17) : 'x'.repeat(16)), { maxBytes: 16 });
+    const { send } = await luaChat('fetch-cap@example.com', true, capped.target);
+    expect(await send('https://site.test/fits')).toEqual({ status: 200, data: 'x'.repeat(16) });
+    expect(await send('https://site.test/big')).toEqual({ status: 400, data: 'internal error' });
+
+    const slow = fetchingApp(
+      ({ signal }) => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true })),
+      { timeoutMs: 100 },
+    );
+    const late = await luaChat('fetch-slow@example.com', true, slow.target);
+    const began = performance.now();
+    expect(await late.send('https://site.test/')).toEqual({ status: 400, data: 'internal error' });
+    expect(performance.now() - began).toBeLessThan(2_000);
+  });
+
+  it('does not take the generation slot: a request answers while a model call holds it', async () => {
+    const { getAdapter, started, release } = gatedGetAdapter('대답');
+    const scriptFetch = createScriptFetch({
+      resolve: async () => [{ address: '93.184.215.14', family: 4 }],
+      transport: async () => ok(200, '본문'),
+    });
+    const target = makeApp({ getAdapter, scriptFetch });
+    const { reader, chatId, send } = await luaChat('fetch-slot@example.com', true, target);
+    const call = json(reader, `/api/chats/${chatId}/script-llm`, 'POST', { messages: [{ role: 'user', content: '질문' }] }, target);
+    await started;
+    expect(await send('https://site.test/')).toEqual({ status: 200, data: '본문' });
+    release();
+    expect((await call).status).toBe(200);
   });
 });

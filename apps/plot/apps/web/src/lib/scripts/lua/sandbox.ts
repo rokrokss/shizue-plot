@@ -8,8 +8,8 @@
  * whatever it likes — so it is checked for shape and size before anything of it
  * reaches the chat. The same goes for what a script asks of the page: a host
  * call is honoured only for a call that is still waiting, only where RisuAI
- * would honour it (no dialogs from a display pass, no model call or embedding
- * search without low-level access), and only once.
+ * would honour it (no dialogs from a display pass, no model call, embedding
+ * search or request without low-level access), and only once.
  *
  * The frame is opened on the first call and kept for the life of the chat. A
  * worker the watchdog killed is replaced by the frame on the next call; a frame
@@ -56,6 +56,12 @@ export interface LuaLlmMessage {
  */
 export type LuaLlmModel = 'main' | 'sub';
 
+/** RisuAI's answer to a `request`, before its `JSON.stringify`: the target's, or one of its refusals. */
+export interface LuaRequestAnswer {
+  status: number;
+  data: string;
+}
+
 /** What a script's host functions reach on the page. */
 export interface LuaHost {
   alert(text: string, error: boolean): Promise<void>;
@@ -66,6 +72,8 @@ export interface LuaHost {
   llm(messages: LuaLlmMessage[], model: LuaLlmModel): Promise<string>;
   /** `texts`, closest to `source` first, by RisuAI's default embedder; throws when it fails. */
   similarity(source: string, texts: string[]): Promise<string[]>;
+  /** RisuAI's answer to `request(url)`, from our server; throws when there is none. `null` is a URL that is not text. */
+  request(url: string | null): Promise<LuaRequestAnswer>;
 }
 
 export type LuaOutcome =
@@ -351,6 +359,13 @@ export function createLuaSandbox(options: LuaSandboxOptions): LuaSandbox {
           const search = checkSimilaritySearch(a['source'], a['texts']);
           if (!search) return reply(host, { ok: false, error: 'similarity takes a string and a list of strings' });
           return reply(host, { ok: true, value: await call.host.similarity(search.source, search.texts) });
+        }
+        case 'request': {
+          if (!call.lowLevel) return reply(host, { ok: false, error: 'low-level access is required' });
+          // No check of the URL here: the server answers every one, and counts it, as RisuAI does.
+          const answer = await call.host.request(typeof a['url'] === 'string' ? a['url'] : null);
+          if (typeof answer.status !== 'number' || typeof answer.data !== 'string') throw new Error('not an answer');
+          return reply(host, { ok: true, value: { status: answer.status, data: answer.data } });
         }
         default:
           return reply(host, { ok: false, error: 'unknown' });

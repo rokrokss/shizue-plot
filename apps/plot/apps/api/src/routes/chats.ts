@@ -122,6 +122,7 @@ import {
 } from '../scriptChat.js';
 import { deleteQuietly } from '../storage.js';
 import { toPromptCharacters, toPromptPlot } from '../plots.js';
+import { createScriptFetch } from '../scriptFetch.js';
 import { readScriptLlmMessages, readScriptLlmModel, runScriptLlm } from '../scriptLlm.js';
 import { suggestReplies } from '../suggest.js';
 import { buildPath, deepestLeaf, siblingInfo } from '../tree.js';
@@ -1247,6 +1248,7 @@ async function regeneratePlan(
 
 export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
+  const scriptFetch = deps.scriptFetch ?? createScriptFetch({ ownOrigins: deps.webOrigin ? [deps.webOrigin] : [] });
 
   // The reader's own chats, newest activity first. Each row carries what a list
   // of conversations is read by — the plot's cover and how the chat currently
@@ -2107,6 +2109,34 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       clearInterval(keepAlive);
       await releaseChatSlot(deps, chat.id);
     }
+  });
+
+  /**
+   * Lua `request`: `{ url }` in, RisuAI's `{ status, data }` out (`scriptFetch.ts`).
+   * This server makes the GET, as RisuAI's proxy does on the web, so the address
+   * sees this server and never the reader. Every answer RisuAI gives — its rate
+   * limit (429), a long URL (413), a refused one (400), `internal error`, and the
+   * target's own status — is a 200 here with that answer as the body; only this
+   * route's own refusals are HTTP errors.
+   *
+   * Held as RisuAI holds it: the plot's scripted member must grant low-level
+   * access, the same gate and the same 403 as `script-llm`. The chat must be the
+   * reader's and writable. It does not take the generation slot: it writes
+   * nothing and spends nothing of the reader's account, and a script may have
+   * several in flight at once in RisuAI (deps' `suggesting` is the same rule).
+   * Nothing is stored.
+   */
+  app.post('/:id/script-fetch', async (c) => {
+    const id = requireUuidParam(c);
+    const userId = c.get('userId');
+    const body = await readJsonBody(c);
+    const chat = await loadWritableChat(deps, id, userId);
+    const plot = await loadVisiblePlot(deps.db, chat.plotId, chat.userId);
+    if (!scriptedMember(await loadMembers(deps.db, plot.id))?.scripts.lowLevelAccess) {
+      throw forbidden('script_fetch_forbidden', "This plot's scripts may not make requests");
+    }
+    // The URL is not checked here: what RisuAI answers for one that is not text is part of its answer.
+    return c.json(await scriptFetch.request(userId, body['url'], c.req.raw.signal));
   });
 
   /**

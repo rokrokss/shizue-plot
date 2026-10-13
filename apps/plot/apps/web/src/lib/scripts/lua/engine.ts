@@ -24,7 +24,8 @@
  * whose card does not grant it. Model calls have no count limit — they run on
  * the reader's own account, through the chat's model, or its auxiliary model
  * for `axLLM`. An embedding search (`similarity`) runs on the page, in the
- * worker the trigger runs share, behind the same access.
+ * worker the trigger runs share, behind the same access. A `request` is made by
+ * our server, as RisuAI's proxy makes it, under RisuAI's own limits.
  *
  * A call the watchdog had to stop, or one the sandbox could not run, changes
  * nothing and is logged; the run goes on as if the script had returned.
@@ -33,7 +34,7 @@
 import { MAX_TRIGGER_VALUE_LENGTH, type CodeScope, type TriggerLogEntry, type TriggerScript } from '@shizue/core/triggers';
 import type { LoreEntry } from '../../types';
 import type { ScriptEngine, ScriptPhase } from '../engine';
-import type { LuaHost, LuaLlmMessage, LuaLlmModel, LuaOutcome, LuaSandbox } from './sandbox';
+import type { LuaHost, LuaLlmMessage, LuaLlmModel, LuaOutcome, LuaRequestAnswer, LuaSandbox } from './sandbox';
 import type { LuaCallResult, LuaEntry, LuaLoreBook, LuaSnapshot } from './sandboxRuntime';
 
 /** The reader's side of a script's dialogs. */
@@ -53,6 +54,8 @@ export interface LuaEngineOptions {
   llm(messages: LuaLlmMessage[], model: LuaLlmModel): Promise<string>;
   /** `similarity`: the texts closest to `source` first, or a throw. */
   similarity(source: string, texts: string[]): Promise<string[]>;
+  /** `request`: RisuAI's `{status, data}` for `url`, as our server answers it, or a throw. */
+  request(url: string | null): Promise<LuaRequestAnswer>;
   log(entry: TriggerLogEntry): void;
 }
 
@@ -170,6 +173,7 @@ export function createLuaEngine(options: LuaEngineOptions): ScriptEngine {
     confirm: (text) => queued(() => ui.confirm(text)),
     llm: (messages, model) => options.llm(messages, model),
     similarity: (source, texts) => options.similarity(source, texts),
+    request: (url) => options.request(url),
   };
 
   function report(outcome: Exclude<LuaOutcome, { kind: 'done' }>, quiet = false): void {

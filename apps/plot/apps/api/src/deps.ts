@@ -3,6 +3,7 @@ import type { getAdapter } from '@shizue/llm';
 import type { ChatGPTAccounts } from './chatgptAccounts.js';
 import type { AppAuth, SessionStore } from './hostedAuth.js';
 import type { SceneImageGenerator } from './sceneImage.js';
+import type { ScriptFetch } from './scriptFetch.js';
 import type { ObjectStorage } from './storage.js';
 
 /** The db handle inside a transaction — same query surface as `Db`. */
@@ -60,6 +61,12 @@ export interface AppDeps {
   drafting: Set<string>;
   /** Historical vector-memory tests can inject an embedder; local ChatGPT has none. */
   createEmbedder?: (timeoutMs?: number) => { embed(input: string[]): Promise<number[][]> } | undefined;
+  /**
+   * Lua `request`, made by this server for a card script (`scriptFetch.ts`): its
+   * rate limit lives here, one per process. Defaults to the real network with
+   * the web origin refused; tests hand it a stub DNS and connection.
+   */
+  scriptFetch?: ScriptFetch;
   /** Adapter factory; defaults to the model registry. Overridden in tests. */
   getAdapter?: (...args: Parameters<typeof getAdapter>) => ReturnType<typeof getAdapter> | Awaited<ReturnType<typeof getAdapter>>;
   /**
