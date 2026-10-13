@@ -72,9 +72,12 @@ import { createLuaEngine, luaFunctionNames, luaScriptsOf } from '@/lib/scripts/l
 import { createLuaSandbox } from '@/lib/scripts/lua/sandbox';
 import {
   createScriptRuntime,
+  type CommandOutcome,
   type PreparedGeneration,
+  type PrepareOptions,
   type ScriptBundle,
   type ScriptRuntime,
+  type ScriptTurn,
   type ScriptUi,
   type ScriptView,
 } from '@/lib/scripts/runtime';
@@ -109,6 +112,14 @@ interface SendOptions {
   /** Uploads to bind to the turn; the server checks they are this chat's own. */
   attachmentIds?: string[];
 }
+
+/**
+ * A turn taken once the one in hand has fully ended: the reply a card's script
+ * asked for (`next`, RisuAI's `sendAIprompt`), what a `/multisend` left
+ * (`ScriptTurn`), or the reader's own line, sent as text because the slash
+ * commands in it answered `false` (`own`).
+ */
+type QueuedTurn = { kind: 'next' } | ScriptTurn | { kind: 'own'; content: string; options?: SendOptions };
 
 /**
  * How hard to look for a stopped turn. The server writes the partial reply after
@@ -888,8 +899,10 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const [scriptPrompt, setScriptPrompt] = useState<ScriptPrompt | null>(null);
   /** A word from the scripts that is not an error: a send they held back. */
   const [scriptNotice, setScriptNotice] = useState('');
-  /** A next reply a script asked for (`sendAIprompt`), waiting for the turn to end. */
-  const [followUp, setFollowUp] = useState(false);
+  /** Turns waiting for the one in hand to end (`QueuedTurn`), taken one at a time. */
+  const [queuedTurns, setQueuedTurns] = useState<readonly QueuedTurn[]>([]);
+  /** A queued turn is being taken; the next waits for it. */
+  const [takingTurn, setTakingTurn] = useState(false);
   /** Replies asked for in a row that way; the reader's own action starts the count again. */
   const followUpChain = useRef(0);
   /** Pending heads already tried, by id and revision, so a failure is not retried in a loop. */
@@ -902,6 +915,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       select: (options, display) =>
         new Promise<string>((resolve) => setScriptPrompt({ kind: 'select', text: display ?? '', options, resolve })),
       confirm: (text) => new Promise<boolean>((resolve) => setScriptPrompt({ kind: 'confirm', text, resolve })),
+      // The first render's `t` is the page's: another language mounts the page anew.
+      help: () =>
+        new Promise<void>((resolve) =>
+          setScriptPrompt({ kind: 'alert', text: t('scriptCommandHelp'), error: false, resolve }),
+        ),
     }),
     [],
   );
@@ -1049,7 +1067,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       mergeState(done.state);
       // RisuAI's `sendAIprompt` asks for the next reply at once. A few in a row at
       // most: a card that asks every time would otherwise never stop.
-      if (done.followUp && followUpChain.current < MAX_SCRIPT_FOLLOW_UPS) setFollowUp(true);
+      if (done.followUp && followUpChain.current < MAX_SCRIPT_FOLLOW_UPS) {
+        setQueuedTurns((turns) => [...turns, { kind: 'next' }]);
+      }
       return mergeRefetched(current, done.state);
     } catch {
       setError(t('scriptFinishFailed'));
@@ -1070,28 +1090,60 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     // has to run again when one of these moves.
   }, [state, mode, mutating, drawing, scriptsPending]);
 
-  // The reply a script asked for, once the turn that asked has fully ended. It is
-  // the card taking a turn for the reader, so it waits on the same consent a
-  // component's turn does.
+  // The queued turns, each once the turn before it has fully ended. A reply the
+  // card takes for the reader — one a script asked for, `/multisend`'s — waits on
+  // the same consent a component's turn does, and declining it drops the rest.
   useEffect(() => {
-    if (!followUp || mode || mutating || drawing || !state) return;
-    setFollowUp(false);
+    const turn = queuedTurns[0];
+    if (!turn || takingTurn || mode || mutating || drawing || !state) return;
+    setQueuedTurns((turns) => turns.slice(1));
+    setTakingTurn(true);
     void (async () => {
-      if (!state.chat.allowComponentTurns) {
-        if (!window.confirm(t('scriptFollowUpConsent', { name: characterName }))) return;
-        try {
-          applyState(await apiSend<ChatState>('PATCH', `/api/chats/${id}`, { allowComponentTurns: true }));
-        } catch (caught) {
-          setSettingsError(toMessage(caught));
+      try {
+        if (turn.kind === 'own') {
+          await run('send', turn.content, turn.options);
           return;
         }
+        if (turn.kind === 'append') {
+          if (!runtime || !beginMutation()) return;
+          try {
+            const next = await runtime.append(turn.items, await scriptViewOf(stateRef.current ?? state));
+            if (next) mergeState(next);
+          } catch (caught) {
+            setError(toMessage(caught));
+          } finally {
+            endMutation();
+          }
+          return;
+        }
+        if (!state.chat.allowComponentTurns) {
+          const consent = turn.kind === 'next' ? 'scriptFollowUpConsent' : 'scriptMultisendConsent';
+          if (!window.confirm(t(consent, { name: characterName }))) {
+            setQueuedTurns([]);
+            return;
+          }
+          try {
+            applyState(await apiSend<ChatState>('PATCH', `/api/chats/${id}`, { allowComponentTurns: true }));
+          } catch (caught) {
+            setSettingsError(toMessage(caught));
+            setQueuedTurns([]);
+            return;
+          }
+        }
+        if (turn.kind === 'next') {
+          followUpChain.current += 1;
+          // RisuAI generates on whatever its chat now ends with: a reader's turn the
+          // output triggers added is answered, anything else is carried on from.
+          await run(state.path.at(-1)?.role === 'user' ? 'regenerate' : 'auto', undefined, undefined, true);
+        } else {
+          // `/multisend`'s message, pushed as it is and answered.
+          await run('send', turn.content, undefined, true, { raw: true, clear: turn.clear });
+        }
+      } finally {
+        setTakingTurn(false);
       }
-      followUpChain.current += 1;
-      // RisuAI generates on whatever its chat now ends with: a reader's turn the
-      // output triggers added is answered, anything else is carried on from.
-      await run(state.path.at(-1)?.role === 'user' ? 'regenerate' : 'auto', undefined, undefined, true);
     })();
-  }, [followUp, mode, mutating, drawing, state]);
+  }, [queuedTurns, takingTurn, mode, mutating, drawing, state]);
 
   /** A `risu-trigger` or `{{button}}` click: the plot's manual triggers of that name, committed on the head. */
   async function runManualTrigger(name: string, triggerId: string | null): Promise<void> {
@@ -1105,6 +1157,48 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     } finally {
       endMutation();
     }
+  }
+
+  /**
+   * RisuAI's composer: a line starting with `/`, in a chat whose plot carries
+   * RisuAI scripts, is a line of slash commands (`processMultiCommand`). What
+   * they did is committed on the head and the composer stays empty — unless the
+   * line answered `false` (a command RisuAI does not run), and then the text
+   * goes as an ordinary message all the same, or a command threw, and then it
+   * goes back into the composer. `content` is the text as a send would carry it.
+   */
+  async function runCommand(text: string, content: string, options: SendOptions | undefined): Promise<void> {
+    let current = stateRef.current;
+    if (!runtime || !current || scriptsPending || !beginMutation()) {
+      setInput((typed) => (typed.trim() ? `${text}\n${typed}` : text));
+      return;
+    }
+    followUpChain.current = 0;
+    setError('');
+    setScriptNotice('');
+    let outcome: CommandOutcome | null = null;
+    try {
+      // A reply still owed its output scripts is finished before the commands read the chat.
+      const owed = current.path[current.path.length - 1];
+      if (owed?.scriptState === 'pending' && !finishTried.current.has(`${owed.id}:${owed.scriptRev ?? 0}`)) {
+        current = await settlePending(current);
+      }
+      outcome = await runtime.command(text, await scriptViewOf(current));
+      if (outcome.state) mergeState(outcome.state);
+    } catch (caught) {
+      setError(toMessage(caught));
+    } finally {
+      endMutation();
+    }
+    if (!outcome || outcome.error !== undefined) {
+      // What threw is in the console, with the scripts' other notes.
+      if (outcome) setError(t('scriptCommandFailed'));
+      setInput((typed) => (typed.trim() ? `${text}\n${typed}` : text));
+      return;
+    }
+    const turns: QueuedTurn[] = [...outcome.turns];
+    if (outcome.send) turns.push({ kind: 'own', content, ...(options ? { options } : {}) });
+    if (turns.length > 0) setQueuedTurns((queued) => [...queued, ...turns]);
   }
 
   /**
@@ -1218,6 +1312,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     turnOptions?: SendOptions,
     /** A reply a script asked for, rather than one the reader did. */
     scripted = false,
+    /** How the scripts take a send that is not the reader's typing (`/multisend`'s). */
+    prepareOptions?: PrepareOptions,
   ): Promise<void> {
     // A drawn scene holds the same per-chat slot a generation does, so asking for
     // one while the picture is on its way would only come back a 429.
@@ -1263,7 +1359,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           current = await settlePending(current);
         }
         const view = await scriptViewOf(current);
-        prepared = await runtime.prepare(next, view, content);
+        prepared = await runtime.prepare(next, view, content, prepareOptions);
         if (prepared.state) mergeState(prepared.state);
         // A head still pending here is one this tab could not finish: the turn
         // goes on without its output scripts rather than being refused for them.
@@ -1765,8 +1861,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     // same one the reader could have written the marks of by hand.
     const content = composeTurn(input, composerMode);
     const attachmentIds = uploadedIds(chips);
+    const options = attachmentIds.length > 0 ? { attachmentIds } : undefined;
     setInput('');
-    void run('send', content, attachmentIds.length > 0 ? { attachmentIds } : undefined);
+    // Slash commands only where RisuAI's scripts run; anywhere else `/…` is just text.
+    if (runtime && input.startsWith('/')) void runCommand(input, content, options);
+    else void run('send', content, options);
   }
 
   const info = last ? state.siblings[last.id] : undefined;

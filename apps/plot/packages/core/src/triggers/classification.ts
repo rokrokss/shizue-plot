@@ -37,7 +37,13 @@ export const TRIGGER_CLASSIFICATION: Readonly<Record<string, { support: TriggerS
   setvar: { support: 'server', note: '' },
   systemprompt: { support: 'server', note: 'start runs only: prompt injections' },
   impersonate: { support: 'server', note: 'appended to the chat the run leaves, which is kept as the reader’s branch (`ScriptChat`)' },
-  command: { support: 'impossible', note: 'RisuAI slash commands' },
+  command: {
+    support: 'server',
+    note:
+      'RisuAI’s slash commands (`command.ts`), on the chat as stored: the run’s own chat is written back over what they did, ' +
+      'except the variables of an input run that changed none itself, and all of it when the run ends early; ' +
+      '/multisend never generates in a run; /speak is silent (an imported card has no TTS)',
+  },
   stop: {
     support: 'browser',
     note: 'start run: the generation is not sent (a send keeps its text in the composer); what the run did to the rest of the chat is kept',
@@ -88,7 +94,7 @@ export const TRIGGER_CLASSIFICATION: Readonly<Record<string, { support: TriggerS
   v2ModifyChat: { support: 'server', note: 'as modifychat' },
   v2SystemPrompt: { support: 'server', note: 'start runs only: prompt injections' },
   v2Impersonate: { support: 'server', note: 'as impersonate' },
-  v2Command: { support: 'impossible', note: 'RisuAI slash commands' },
+  v2Command: { support: 'server', note: 'as command' },
   v2SendAIprompt: { support: 'server', note: 'lowLevelAccess; an automatic next turn, with the reader’s consent' },
   v2StopPromptSending: { support: 'browser', note: 'as stop' },
   v2GetLastMessage: { support: 'browser', note: '' },

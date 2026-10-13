@@ -12322,7 +12322,12 @@ describe('the browser script runtime', () => {
       triggers: triggerscript,
       // Only the two the browser runs.
       editScripts: [{ type: 'editoutput', in: 'a', out: 'b' }],
-      character: { description: '원래 설명', lorebook: [expect.objectContaining({ content: '북쪽의 성.' })] },
+      character: {
+        description: '원래 설명',
+        lorebook: [expect.objectContaining({ content: '북쪽의 성.' })],
+        // What `/test_lorebook` activates the book by.
+        loreSettings: expect.objectContaining({ scanDepth: expect.any(Number) }),
+      },
       overlay: { member: null, persona: null },
     });
     expect(JSON.stringify(answer)).not.toContain('스크립트 없는 멤버');

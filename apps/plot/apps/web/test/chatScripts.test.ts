@@ -383,6 +383,74 @@ describe('a pending reply', () => {
   });
 });
 
+describe('a slash command', () => {
+  it('runs on a work with scripts: what it did is committed, nothing is sent, and the composer stays empty', async () => {
+    bundle = scripted({});
+    await render();
+    await sendText('/send 문을 연다|/setvar key=door open');
+    expect(streamed).toEqual([]);
+    expect(sent).toEqual([
+      {
+        method: 'POST',
+        path: '/api/chats/cht_1/script-commit',
+        body: {
+          messageId: 'm2',
+          scriptRev: 0,
+          variableDelta: { door: 'open' },
+          chat: { keep: 2, messages: [{ role: 'user', content: '문을 연다' }] },
+        },
+      },
+    ]);
+    expect([...host.querySelectorAll('[data-testid="row"] span')].map((node) => node.textContent)).toContain('문을 연다');
+    expect(host.querySelector('textarea')!.value).toBe('');
+  });
+
+  it('is plain text on a work without scripts', async () => {
+    await render();
+    await sendText('/send 안녕');
+    expect(streamed[0]!.body).toEqual({ content: '/send 안녕' });
+  });
+
+  it('is sent as text when it names a command RisuAI does not run', async () => {
+    bundle = scripted({});
+    await render();
+    await sendText('/모름 그냥 글');
+    await act(async () => undefined);
+    expect(sent).toEqual([]);
+    expect(streamed.map((call) => call.body)).toEqual([{ content: '/모름 그냥 글', baseHeadId: 'm2' }]);
+  });
+
+  it('asks through the script dialog, and goes on with the answer', async () => {
+    bundle = scripted({});
+    await render();
+    await sendText('/input 이름은?|/setvar key=name');
+    // The sheet is drawn over the page, outside it.
+    expect(document.querySelector('[data-testid="script-dialog"]')?.textContent).toContain('이름은?');
+    const field = document.querySelector<HTMLInputElement>('[data-testid="script-dialog"] input')!;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+    await act(async () => {
+      setter.call(field, '아린');
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await click([...document.querySelectorAll('[data-testid="script-dialog"] button')].find((node) => node.textContent === '확인')!);
+    expect(sent.at(-1)?.body).toMatchObject({ variableDelta: { name: '아린' } });
+    expect(streamed).toEqual([]);
+  });
+
+  it('sends /multisend’s message and asks for the reply once the reader agrees to it', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    bundle = scripted({});
+    await render();
+    await sendText('/multisend 문을 두드린다');
+    await act(async () => undefined);
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(sent[0]).toMatchObject({ method: 'PATCH', path: '/api/chats/cht_1', body: { allowComponentTurns: true } });
+    // Pushed as it is: no input scripts, and answered.
+    expect(streamed.map((call) => call.body)).toEqual([{ content: '문을 두드린다', baseHeadId: 'm2' }]);
+    confirm.mockRestore();
+  });
+});
+
 describe('a button', () => {
   it('runs the manual trigger it names and commits on the head', async () => {
     bundle = scripted({

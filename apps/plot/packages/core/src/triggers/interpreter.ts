@@ -29,8 +29,15 @@
  *   character's fields it rewrote — and the caller decides where each goes
  *   (`messages.variable_delta`, the generation request, `chats.script_overlay`).
  * - Effects this product cannot carry out — image generation, embeddings, a
- *   model call, RisuAI's slash commands, rewriting the request — are logged and
- *   leave what RisuAI leaves on failure (`TRIGGER_CLASSIFICATION`).
+ *   model call, rewriting the request — are logged and leave what RisuAI leaves
+ *   on failure (`TRIGGER_CLASSIFICATION`).
+ * - RisuAI's slash commands (`command`, `v2Command`, `command.ts`) act on the
+ *   chat as stored, not on the run's copy, and so does the CBS RisuAI reads
+ *   variables through. The run keeps that chat beside its own (`Stored`), and
+ *   its result is what RisuAI's caller leaves once it writes the run's copy back:
+ *   the copy, over everything the commands did — except the variables of an
+ *   input run that wrote none itself, which RisuAI writes back only as messages,
+ *   and the whole stored chat when the run ended early and wrote nothing back.
  * - Hard limits RisuAI does not have: steps per run, nesting, how long a value
  *   may grow, how long a wait may last. Past one the run stops as though a step
  *   had returned (`aborted`), keeping the variables it already wrote — as
@@ -46,6 +53,7 @@ import { applyVariableDelta, emptyVariables, readVariable, type VariableDelta, t
 import { risuCalculate } from './calc.js';
 import { parseChatML, type ScriptChatTurn } from './chatML.js';
 import { evaluateScriptCbs, type ScriptCbsEnv } from './cbsHost.js';
+import { loreTestOf, processMultiCommand, type CommandAnswer, type CommandHost, type LoreTest } from './command.js';
 import { isCodeTrigger, type TriggerMode, type TriggerScript, type TriggerStep } from './scripts.js';
 
 /* ------------------------------------------------------------------ inputs */
@@ -131,7 +139,15 @@ export type TriggerRequest =
    * API. Answered with a `ScriptLlmAnswer`; a run with no one to answer it reads
    * that as a failure.
    */
-  | { kind: 'llm'; messages: ScriptChatTurn[]; model: 'model' | 'submodel' };
+  | { kind: 'llm'; messages: ScriptChatTurn[]; model: 'model' | 'submodel' }
+  /**
+   * `/test_lorebook`: what RisuAI's `loadLoreBookV3Prompt` would activate of
+   * `lorebook` on `history`, the chat as stored, oldest first. Answered with a
+   * `LoreTest`; nothing answering it finds nothing.
+   */
+  | { kind: 'lore'; history: string[]; lorebook: readonly LoreEntry[] }
+  /** `/?`: RisuAI's list of the slash commands. Answered with nothing. */
+  | { kind: 'help' };
 
 /** What a model call came back with. */
 export type ScriptLlmAnswer = { ok: true; text: string } | { ok: false; error: string };
@@ -217,7 +233,11 @@ export interface TriggerLogEntry {
 }
 
 export interface TriggerRunResult {
-  /** The chat variables as the run left them. */
+  /**
+   * The chat variables as the run left them: its own, or — for an input run
+   * that wrote none itself, or one that ended early — the chat's as stored, with
+   * what slash commands wrote there.
+   */
   variables: Variables;
   /** Whether any chat variable was written. A display run's writes are its own and never count. */
   variablesChanged: boolean;
@@ -227,7 +247,10 @@ export interface TriggerRunResult {
   stopSending: boolean;
   /** `sendAIprompt`: another reply is asked for once this one is done. */
   sendAIprompt: boolean;
-  /** The chat as the run left it — its own working copy. */
+  /**
+   * The chat as the run left it — its own working copy; or, when it ended
+   * early, the chat as stored, with what slash commands did to it.
+   */
   messages: TriggerMessage[];
   character: CharacterRewrite;
   persona?: string;
@@ -243,6 +266,29 @@ export interface TriggerRunResult {
    */
   aborted: boolean;
   log: TriggerLogEntry[];
+}
+
+/** A line of slash commands typed into the composer, run on the chat as it stands. */
+export interface CommandRunInput extends Omit<TriggerRunInput, 'mode' | 'manualName' | 'triggerId' | 'displayData'> {
+  command: string;
+}
+
+/** `/multisend`'s items, as the line gave them. */
+export interface CommandMultisend {
+  items: string[];
+  clear: boolean;
+}
+
+/**
+ * What the line did: `messages` and `variables` are the chat as the commands
+ * left it — there is no run's copy to write back over it — and `aborted` says a
+ * command threw (RisuAI's line rejects, and the composer keeps the text).
+ */
+export interface CommandRunResult extends TriggerRunResult {
+  /** The line's answer. `false`: RisuAI sends the text as an ordinary message. */
+  answer: CommandAnswer;
+  /** The `/multisend`s the line ran, in order — the composer's to send. */
+  multisend: CommandMultisend[];
 }
 
 /* ------------------------------------------------------------------ limits */
@@ -296,6 +342,31 @@ interface Shared {
   random: () => number;
   log: TriggerLogEntry[];
   display: boolean;
+  /** The chat as stored, which the slash commands act on. */
+  stored: Stored;
+  /** The composer's `/multisend`s, in order. */
+  multisend: CommandMultisend[];
+}
+
+/**
+ * The chat as stored, beside the run's copy (`Run.messages`, `Shared.variables`).
+ * RisuAI's commands edit it, and its CBS reads its variables. Those start as the
+ * run's own — `base` null — and stay so: RisuAI's `setVar` hands the stored chat
+ * the run's `scriptstate` whenever it changes a value, which drops whatever
+ * commands had written there (`overlay`). A `/trigger` leaves a chat of its own,
+ * its variables a value (`base`) until the run writes again.
+ */
+interface Stored {
+  messages: TriggerMessage[];
+  base: Variables | null;
+  overlay: Variables;
+  /** Whether a command wrote a variable here or a `/trigger` replaced it. */
+  written: boolean;
+}
+
+/** The stored chat's variables, whole. */
+function storedVariables(shared: Shared): Variables {
+  return applyVariableDelta(shared.stored.base ?? shared.variables, shared.stored.overlay);
 }
 
 /** What one `runTrigger` call holds — a nested `runtrigger` gets its own. */
@@ -309,6 +380,11 @@ interface Run {
   displayData: string | undefined;
   recursiveCount: number;
   depth: number;
+  /** RisuAI's `varChanged`: this call, not a nested one, changed a chat variable. */
+  wroteVariables: boolean;
+  /** The composer's line, run in place of the triggers; its answer goes to `answer`. */
+  command?: string;
+  answer?: CommandAnswer;
 }
 
 const str = (step: TriggerStep, field: string): unknown => step[field];
@@ -330,6 +406,25 @@ function emptyInjections(): PromptInjectionText {
  * the result. Drive it with `runTriggers` or `runTriggersSync`.
  */
 export function* triggerRun(input: TriggerRunInput): Generator<TriggerRequest, TriggerRunResult, unknown> {
+  return (yield* execute(input)).result;
+}
+
+/**
+ * Runs a line of slash commands the reader typed — RisuAI's composer, which
+ * hands a message starting with `/` to `processMultiCommand` — on the chat as it
+ * stands. A generator like `triggerRun`; drive it with `runCommands`. A
+ * `/trigger` in it runs the manual triggers as a button would.
+ */
+export function* commandRun(input: CommandRunInput): Generator<TriggerRequest, CommandRunResult, unknown> {
+  const { command, ...rest } = input;
+  const { result, top, shared } = yield* execute({ ...rest, mode: 'manual' }, command);
+  return { ...result, answer: result.aborted ? undefined : top.answer, multisend: shared.multisend };
+}
+
+function* execute(
+  input: TriggerRunInput,
+  command?: string,
+): Generator<TriggerRequest, { result: TriggerRunResult; top: Run; shared: Shared }, unknown> {
   const display = input.mode === 'display';
   const shared: Shared = {
     input,
@@ -353,6 +448,13 @@ export function* triggerRun(input: TriggerRunInput): Generator<TriggerRequest, T
     random: input.random ?? Math.random,
     log: [],
     display,
+    stored: {
+      messages: input.messages.map((message) => ({ ...message })),
+      base: null,
+      overlay: emptyVariables(),
+      written: false,
+    },
+    multisend: [],
   };
   const top: Run = {
     mode: input.mode,
@@ -364,6 +466,8 @@ export function* triggerRun(input: TriggerRunInput): Generator<TriggerRequest, T
     displayData: input.displayData,
     recursiveCount: 0,
     depth: 0,
+    wroteVariables: false,
+    ...(command !== undefined ? { command } : {}),
   };
 
   let completed = false;
@@ -380,13 +484,20 @@ export function* triggerRun(input: TriggerRunInput): Generator<TriggerRequest, T
   for (const field of shared.rewrote) {
     (character as Record<string, unknown>)[field] = shared.character[field];
   }
-  return {
-    variables: shared.variables,
-    variablesChanged: shared.variablesChanged,
+  // What RisuAI's caller leaves: the run's copy written over the stored chat
+  // (`setCurrentChat(triggerResult.chat)`), except that an input run's copy goes
+  // back as messages alone, and its variables only when it changed one
+  // (`varChanged`); a run that ended early returns nothing to write. A line from
+  // the composer has no copy: the stored chat is the chat.
+  const storedChat = !completed || command !== undefined;
+  const storedVars = storedChat || (input.mode === 'input' && !top.wroteVariables);
+  const result: TriggerRunResult = {
+    variables: storedVars ? storedVariables(shared) : shared.variables,
+    variablesChanged: shared.variablesChanged || (storedVars && shared.stored.written),
     injections: completed ? top.injections : emptyInjections(),
     stopSending: completed && top.stopSending,
     sendAIprompt: completed && top.sendAIprompt,
-    messages: completed ? top.messages : input.messages.map((message) => ({ ...message })),
+    messages: storedChat ? shared.stored.messages : top.messages,
     character,
     ...(shared.personaChanged ? { persona: shared.persona } : {}),
     ...(shared.noteChanged ? { note: shared.note } : {}),
@@ -395,6 +506,7 @@ export function* triggerRun(input: TriggerRunInput): Generator<TriggerRequest, T
     aborted: !completed,
     log: shared.log,
   };
+  return { result, top, shared };
 }
 
 /**
@@ -447,6 +559,17 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
     return 'null';
   };
 
+  /**
+   * A chat variable changed. RisuAI's `setVar` then hands the stored chat the
+   * run's `scriptstate`, and what commands had written there is gone with it.
+   */
+  const changed = (): void => {
+    shared.variablesChanged = true;
+    run.wroteVariables = true;
+    shared.stored.base = null;
+    shared.stored.overlay = emptyVariables();
+  };
+
   const setVar = (key: string, raw: unknown): void => {
     if (raw === undefined || raw === null) {
       // What RisuAI stores for a missing value reads back as unset; a local
@@ -461,7 +584,7 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
       }
       if (readVariable(shared.variables, key) !== undefined) {
         delete shared.variables[key];
-        shared.variablesChanged = true;
+        changed();
       }
       return;
     }
@@ -480,13 +603,13 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
     }
     if (readVariable(shared.variables, key) === value) return;
     shared.variables[key] = value;
-    shared.variablesChanged = true;
+    changed();
   };
 
   /* ------------------------------------------------------------- the CBS */
 
-  const cbsChat = (): CbsChat => {
-    const messages: CbsMessage[] = run.messages.map((message) => ({
+  const chatOf = (source: readonly TriggerMessage[]): CbsChat => {
+    const messages: CbsMessage[] = source.map((message) => ({
       role: message.role,
       data: message.data,
       ...(message.time !== undefined ? { time: message.time } : {}),
@@ -499,10 +622,13 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
       ...(input.greeting ? { greeting: { text: input.greeting, index: -1 } } : {}),
     };
   };
+  const cbsChat = (): CbsChat => chatOf(run.messages);
+  const storedChat = (): CbsChat => chatOf(shared.stored.messages);
 
   const env: ScriptCbsEnv = {
-    // `risuChatParser` reads the chat's variables, not a trigger's locals.
-    variable: (name) => readVariable(shared.variables, name),
+    // `risuChatParser` reads the chat's variables as stored, not a trigger's
+    // locals — the run's own, unless a slash command wrote there since.
+    variable: (name) => readVariable(shared.stored.overlay, name) ?? readVariable(shared.stored.base ?? shared.variables, name),
     globalVariable: (name) => readVariable(shared.globals, name),
     random: shared.random,
     data: {
@@ -523,11 +649,15 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
     },
   };
 
-  /** `risuChatParser(text, {chara})`. */
-  const p = (text: unknown): string => {
+  /**
+   * `risuChatParser(text, {chara})`. Its chat functions read the run's chat,
+   * and a slash command's the chat as stored, which RisuAI's always read.
+   */
+  const p = (text: unknown, chat = cbsChat): string => {
     // The evaluator reads the description through `data`, which has to be the current one.
     (env.data!.character as { description: string }).description = shared.character.description;
     env.data!.persona = shared.persona;
+    env.data!.chat = chat;
     return evaluateScriptCbs(text, env);
   };
 
@@ -545,6 +675,89 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
   const unsupported = (effect: string, message: string): void => {
     shared.log.push({ kind: 'unsupported', effect, message });
   };
+
+  /* -------------------------------------------------- slash commands */
+
+  /** What RisuAI's `processCommand` reaches: the chat as stored (`Stored`). */
+  const commands: CommandHost = {
+    cbs: (text) => p(text, storedChat),
+    chat: shared.stored,
+    getVar: (name) => readVariable(shared.stored.overlay, name) ?? readVariable(shared.stored.base ?? shared.variables, name),
+    setVar: (name, text) => {
+      if (text.length > MAX_TRIGGER_VALUE_LENGTH) {
+        shared.log.push({ kind: 'limit', message: `a value for "${name}" grew past ${MAX_TRIGGER_VALUE_LENGTH} characters` });
+        throw new Abort();
+      }
+      shared.stored.overlay[name] = text;
+      shared.stored.written = true;
+    },
+    // RisuAI runs `runTrigger(char, 'manual', {chat: getCurrentChat(), manualName})`
+    // — a copy of the chat as stored, with its own variables — and then
+    // `setCurrentChat` with what it left. One that ended early leaves the stored
+    // chat as it was written meanwhile.
+    *trigger(name) {
+      if (run.depth + 1 > MAX_TRIGGER_DEPTH) {
+        shared.log.push({ kind: 'limit', message: `/trigger nested deeper than ${MAX_TRIGGER_DEPTH}` });
+        throw new Abort();
+      }
+      const stored = shared.stored;
+      const outer = { variables: shared.variables, changed: shared.variablesChanged };
+      shared.variables = storedVariables(shared);
+      shared.variablesChanged = false;
+      stored.base = null;
+      stored.overlay = emptyVariables();
+      const nested: Run = {
+        mode: 'manual',
+        manualName: name,
+        messages: stored.messages.map((message) => ({ ...message })),
+        injections: emptyInjections(),
+        stopSending: false,
+        sendAIprompt: false,
+        displayData: undefined,
+        recursiveCount: 0,
+        depth: run.depth + 1,
+        wroteVariables: false,
+      };
+      let done = false;
+      try {
+        done = yield* runOnce(shared, nested);
+      } finally {
+        stored.base = done ? shared.variables : storedVariables(shared);
+        stored.overlay = emptyVariables();
+        stored.written = true;
+        if (done) stored.messages = nested.messages;
+        shared.variables = outer.variables;
+        shared.variablesChanged = outer.changed;
+      }
+    },
+    multisend: (items, clear) => {
+      // The composer's are sent once the line is done (`CommandRunResult.multisend`).
+      if (run.command !== undefined) {
+        shared.multisend.push({ items, clear });
+        return;
+      }
+      // In a run, RisuAI's `sendChat` declines — a start or output run is inside
+      // one — or answers on the stored chat, which the run's copy then replaces.
+      for (const item of items) {
+        if (clear) shared.stored.messages = [];
+        shared.stored.messages.push({ role: 'user', data: item });
+      }
+      if (run.mode === 'input' || run.mode === 'manual') {
+        shared.log.push({ kind: 'dropped', effect: 'command', message: '/multisend does not generate inside a trigger run' });
+      }
+    },
+    *lore() {
+      return loreTestOf(
+        yield { kind: 'lore', history: shared.stored.messages.map((message) => message.data), lorebook: shared.character.lorebook },
+      );
+    },
+  };
+
+  // The composer's line runs in place of any trigger.
+  if (run.command !== undefined) {
+    run.answer = yield* processMultiCommand(run.command, commands);
+    return true;
+  }
 
   /* ----------------------------------------------------------- the loop */
 
@@ -595,7 +808,8 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
           break;
         }
         case 'command': {
-          unsupported('command', 'RisuAI slash commands do not run here');
+          // The answer goes nowhere, as in RisuAI.
+          yield* processMultiCommand(p(str(effect, 'value')), commands);
           break;
         }
         case 'stop':
@@ -622,6 +836,7 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
               displayData: undefined,
               recursiveCount: run.recursiveCount,
               depth: run.depth + 1,
+              wroteVariables: false,
             };
             const done = yield* runOnce(shared, nested);
             if (done) {
@@ -876,7 +1091,7 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
           break;
         }
         case 'v2Command': {
-          unsupported('v2Command', 'RisuAI slash commands do not run here');
+          yield* processMultiCommand(value(effect, 'value', 'valueType'), commands);
           break;
         }
         case 'v2ImgGen': {
@@ -1684,11 +1899,21 @@ export interface TriggerDriver {
   wait?(ms: number): Promise<void>;
   code?(request: Extract<TriggerRequest, { kind: 'code' }>): Promise<{ stopSending?: boolean } | void> | { stopSending?: boolean } | void;
   llm?(request: Extract<TriggerRequest, { kind: 'llm' }>): Promise<ScriptLlmAnswer> | ScriptLlmAnswer;
+  lore?(request: Extract<TriggerRequest, { kind: 'lore' }>): Promise<LoreTest> | LoreTest;
+  help?(): Promise<void> | void;
 }
 
 /** Runs to the end, answering every request through `driver`. */
-export async function runTriggers(input: TriggerRunInput, driver: TriggerDriver = {}): Promise<TriggerRunResult> {
-  const run = triggerRun(input);
+export function runTriggers(input: TriggerRunInput, driver: TriggerDriver = {}): Promise<TriggerRunResult> {
+  return drive(triggerRun(input), driver);
+}
+
+/** Runs a line of slash commands from the composer to the end, answering every request through `driver`. */
+export function runCommands(input: CommandRunInput, driver: TriggerDriver = {}): Promise<CommandRunResult> {
+  return drive(commandRun(input), driver);
+}
+
+async function drive<T>(run: Generator<TriggerRequest, T, unknown>, driver: TriggerDriver): Promise<T> {
   let answer: unknown;
   for (;;) {
     const step = run.next(answer);
@@ -1713,6 +1938,12 @@ export async function runTriggers(input: TriggerRunInput, driver: TriggerDriver 
         break;
       case 'llm':
         answer = (await driver.llm?.(request)) ?? NO_MODEL;
+        break;
+      case 'lore':
+        answer = await driver.lore?.(request);
+        break;
+      case 'help':
+        await driver.help?.();
         break;
     }
   }

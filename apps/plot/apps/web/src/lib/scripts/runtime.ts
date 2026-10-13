@@ -21,6 +21,9 @@
  *   is committed in place (`script-commit`), which clears the mark. The same call
  *   finishes a pending head found on load: a tab closed mid-reply leaves one.
  * - **A button** (`manual`): a manual trigger by name, committed on the head.
+ * - **A slash command** (`command`): what the reader typed starting with `/`,
+ *   run as RisuAI's composer runs it and committed on the head; `/multisend`'s
+ *   messages come back as turns for the page to take (`ScriptTurn`).
  * - **A message drawn** (`display`): the display triggers rewrite its text, for
  *   the screen only.
  *
@@ -51,13 +54,16 @@ import {
   isCodeTrigger,
   manualTriggerNames,
   mergeScriptOverlay,
+  runCommands,
   runEditScripts,
   runTriggers,
   runTriggersSync,
   scriptChatOf,
   type CharacterRewrite,
   type CodeScope,
+  type CommandMultisend,
   type EditScript,
+  type LoreTest,
   type MemberOverlay,
   type PromptInjectionText,
   type ScriptChat,
@@ -71,6 +77,7 @@ import {
   type TriggerRunResult,
   type TriggerScript,
 } from '@shizue/core/triggers';
+import type { LoreSettings } from '@shizue/core';
 import type { CbsHostData } from '@shizue/core/cbs';
 import {
   applyVariableDelta,
@@ -102,6 +109,8 @@ export interface ScriptBundle {
     exampleDialogue: string;
     lorebook: LoreEntry[];
     postHistoryInstructions: string;
+    /** The lorebook's settings, which `/test_lorebook` activates by. */
+    loreSettings?: LoreSettings;
   };
   /** What this chat's scripts already rewrote of it. */
   overlay: { member: MemberOverlay | null; persona: string | null };
@@ -114,6 +123,8 @@ export interface ScriptUi {
   select(options: string[], display?: string): Promise<string>;
   /** Yes or no (Lua's `alertConfirm`); dismissing it is no. */
   confirm(text: string): Promise<boolean>;
+  /** The list of slash commands (`/?`), in the reader's language. */
+  help?(): Promise<void>;
 }
 
 /** The API, as little of it as the runtime needs. */
@@ -183,6 +194,42 @@ export interface FinishedReply {
   state: ChatState;
   /** `sendAIprompt`: the card asks for another reply. The page decides whether it gets one. */
   followUp: boolean;
+}
+
+/**
+ * What a `/multisend` leaves for the page once the line is done, in order.
+ *
+ * RisuAI pushes each item onto the chat and calls `sendChat` for it, but only
+ * the first call generates: a generation leaves `doingChat` set, and every
+ * later `sendChat(-1)` declines while it is. So the first item is a send that is
+ * answered (`send`); the rest are the reader's messages with no reply
+ * (`append`). On a card with triggers, the rest of that same `/multisend` land
+ * nowhere — the start run has put a copy in place of the chat object the
+ * command pushes onto — and only a later `/multisend`'s items are appended.
+ * `clear` empties the chat before an item, as RisuAI does before each.
+ */
+export type ScriptTurn =
+  | { kind: 'send'; content: string; clear: boolean }
+  | { kind: 'append'; items: { content: string; clear: boolean }[] };
+
+/** What a line of slash commands typed into the composer came to. */
+export interface CommandOutcome {
+  /** RisuAI's line answered `false`: the text goes as an ordinary message. */
+  send: boolean;
+  /** A command threw: nothing more happens, and the text goes back to the composer. */
+  error?: string;
+  /** The chat as the commands left it, when they changed it. */
+  state?: ChatState;
+  /** What `/multisend` asked for, for the page to take once this is done. */
+  turns: ScriptTurn[];
+}
+
+/** How a send goes when it is not the reader's typing: `/multisend`'s. */
+export interface PrepareOptions {
+  /** RisuAI pushes the text as it is: no input triggers, no `editinput`. */
+  raw?: boolean;
+  /** The chat is emptied before the turn — the greeting stays. */
+  clear?: boolean;
 }
 
 /** The turn a send is about to store, as the start triggers see it on the branch. */
@@ -274,11 +321,18 @@ export interface ScriptRuntime {
   readonly finishesReplies: boolean;
   /** Whether messages are drawn through display triggers. */
   readonly rewritesDisplay: boolean;
-  prepare(mode: StreamMode, view: ScriptView, content?: string): Promise<PreparedGeneration>;
+  prepare(mode: StreamMode, view: ScriptView, content?: string, options?: PrepareOptions): Promise<PreparedGeneration>;
   /** Finishes the head reply the server holds `pending`; null when the head is not one. */
   finish(view: ScriptView): Promise<FinishedReply | null>;
   /** Runs the manual triggers named `name`; null when there was nothing to commit. */
   manual(name: string, triggerId: string | null, view: ScriptView): Promise<ChatState | null>;
+  /**
+   * A line typed into the composer starting with `/`, run as RisuAI's
+   * `processMultiCommand`: what it did to the chat is committed on the head.
+   */
+  command(text: string, view: ScriptView): Promise<CommandOutcome>;
+  /** `/multisend`'s unanswered messages (`ScriptTurn` `append`), committed on the head; null when none. */
+  append(items: readonly { content: string; clear: boolean }[], view: ScriptView): Promise<ChatState | null>;
   /**
    * A `risu-btn` click: the engines' (Lua's `onButtonClick`) to answer, and what
    * they did committed on the head as a manual run's is; null when there was
@@ -403,7 +457,75 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
         return { ok: false, error: error instanceof Error ? error.message : String(error) };
       }
     },
+    lore: (request) => testLore(request.lorebook, request.history),
+    help: () => ui.help?.(),
   };
+
+  /**
+   * `/test_lorebook`: the entries the card's book activates on `history`, in the
+   * shape RisuAI's `loadLoreBookV3Prompt` lists them. The prompt's own
+   * activation (`@shizue/core/lorebook`), fetched on first use, with the book's
+   * settings — and RisuAI's 800 tokens where it names no budget — over token
+   * counts estimated at four characters each. RisuAI's match log is not kept.
+   */
+  async function testLore(lorebook: readonly LoreEntry[], history: string[]): Promise<LoreTest> {
+    const { activateLore } = await import('@shizue/core/lorebook');
+    const settings = bundle.character.loreSettings;
+    const tokens = (text: string): number => Math.ceil(text.length / 4);
+    const entries = [...lorebook];
+    const { entries: active } = activateLore(entries, {
+      history,
+      scanDepth: settings?.scanDepth ?? 5,
+      budgetTokens: settings?.tokenBudget ?? 800,
+      countTokens: tokens,
+      recursiveScanning: settings?.recursiveScanning ?? true,
+      ...(settings?.maxRecursionSteps !== undefined ? { maxRecursionSteps: settings.maxRecursionSteps } : {}),
+      risuMatching: settings?.risuMatching ?? true,
+      ...(options.random ? { random: options.random } : {}),
+    });
+    return {
+      actives: active.map((entry) => ({
+        depth: entry.depth ?? 0,
+        pos: '',
+        prompt: entry.content,
+        role: entry.role ?? 'system',
+        order: entry.insertionOrder,
+        tokens: tokens(entry.content),
+        priority: entry.insertionOrder,
+        source: entry.name || `lorebook ${entries.indexOf(entry)}`,
+        inject: null,
+      })),
+      matchLog: [],
+    };
+  }
+
+  /** A run's input over one operation's session: the work as the runs before it left it. */
+  function runInput(
+    s: Session,
+    mode: TriggerMode,
+    variables: Variables,
+    chat: readonly TriggerMessage[],
+    greeting: string | null,
+  ): TriggerRunInput {
+    const base = character();
+    return {
+      mode,
+      character: {
+        ...base,
+        description: s.patch.description ?? base.description,
+        lorebook: s.patch.lorebook ?? base.lorebook,
+        postHistoryInstructions: s.patch.postHistoryInstructions ?? base.postHistoryInstructions,
+      },
+      messages: chat,
+      greeting,
+      note: s.note,
+      persona: s.persona,
+      variables,
+      globalVariables: s.globals,
+      data: { ...s.view.data, user: s.view.names.user ?? s.view.data?.user },
+      ...(options.random ? { random: options.random } : {}),
+    };
+  }
 
   /** Runs `mode` and folds what it rewrote into the session. */
   async function run(
@@ -414,28 +536,13 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     greeting: string | null,
     extra: Partial<TriggerRunInput> = {},
   ): Promise<TriggerRunResult> {
-    const base = character();
-    const result = await runTriggers(
-      {
-        mode,
-        character: {
-          ...base,
-          description: s.patch.description ?? base.description,
-          lorebook: s.patch.lorebook ?? base.lorebook,
-          postHistoryInstructions: s.patch.postHistoryInstructions ?? base.postHistoryInstructions,
-        },
-        messages: chat,
-        greeting,
-        note: s.note,
-        persona: s.persona,
-        variables,
-        globalVariables: s.globals,
-        data: { ...s.view.data, user: s.view.names.user ?? s.view.data?.user },
-        ...(options.random ? { random: options.random } : {}),
-        ...extra,
-      },
-      driver,
-    );
+    const result = await runTriggers({ ...runInput(s, mode, variables, chat, greeting), ...extra }, driver);
+    took(s, result);
+    return result;
+  }
+
+  /** What a run rewrote, into the session: its notes, the work, the globals, the persona and the note. */
+  function took(s: Session, result: TriggerRunResult): void {
     for (const entry of result.log) log(entry);
     absorb(s, result.character);
     if (result.globalWrites) {
@@ -450,7 +557,6 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       s.note = result.note;
       s.noteChanged = true;
     }
-    return result;
   }
 
   function absorb(s: Session, rewrite: CharacterRewrite): void {
@@ -617,7 +723,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     finishesReplies,
     rewritesDisplay: hasTriggersFor(triggers, 'display'),
 
-    async prepare(mode, view, content) {
+    async prepare(mode, view, content, prepareOptions = {}) {
       const s = session(view);
       const head = view.messages[view.messages.length - 1];
       const headId = head?.id ?? null;
@@ -632,17 +738,19 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
         const { greeting, chat } = triggerMessages(view.messages);
         let variables = base;
         let messages: TriggerMessage[] = chat;
-        if (runsAt('input')) {
+        if (!prepareOptions.raw && runsAt('input')) {
           const input = await run(s, 'input', variables, chat, greeting);
           variables = input.variables;
           messages = input.messages;
         }
-        const typed = await edit('editinput', text, variables, s, { chatIndex: -1 }, messages, greeting);
+        const typed = prepareOptions.raw
+          ? { text, variables }
+          : await edit('editinput', text, variables, s, { chatIndex: -1 }, messages, greeting);
         let sent = typed.text;
         variables = computeVariables([sent], typed.variables, view.names);
         // RisuAI pushes the turn onto the chat the input run left, and the start
         // run reads it there — and may edit around it, or cut it.
-        let final: TriggerMessage[] = [...messages, { role: 'user', data: sent, id: NEW_TURN }];
+        let final: TriggerMessage[] = [...(prepareOptions.clear ? [] : messages), { role: 'user', data: sent, id: NEW_TURN }];
         let injections: PromptInjectionText | null = null;
         if (runsAt('start')) {
           const start = await run(s, 'start', variables, final, greeting);
@@ -790,6 +898,35 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       return commitRun(s, view, view.messages, chat, chatEdits(chat, result.messages), result.variables, result.variablesChanged);
     },
 
+    async command(text, view) {
+      const s = session(view);
+      const base = computeVariables(view.messages, view.defaults, view.names);
+      const { greeting, chat } = triggerMessages(view.messages);
+      const result = await runCommands({ ...runInput(s, 'manual', base, chat, greeting), command: text }, driver);
+      took(s, result);
+      // What the line did stands even when a command threw after it, as in RisuAI.
+      const state = await commitRun(s, view, view.messages, chat, chatEdits(chat, result.messages), result.variables, result.variablesChanged);
+      const failure = result.log.filter((entry) => entry.kind === 'error' || entry.kind === 'limit').at(-1);
+      return {
+        send: !result.aborted && result.answer === false,
+        ...(result.aborted ? { error: failure?.message ?? '' } : {}),
+        ...(state ? { state } : {}),
+        turns: multisendTurns(result.multisend),
+      };
+    },
+
+    async append(items, view) {
+      const s = session(view);
+      const base = computeVariables(view.messages, view.defaults, view.names);
+      const { chat } = triggerMessages(view.messages);
+      let after = chat.map((message) => ({ ...message }));
+      for (const { content, clear } of items) {
+        if (clear) after = [];
+        after.push({ role: 'user', data: content });
+      }
+      return commitRun(s, view, view.messages, chat, chatEdits(chat, after), base, false);
+    },
+
     async button(data, view) {
       const engine = engines.find((candidate) => candidate.button && candidate.handles('button'));
       if (!engine?.button) {
@@ -856,6 +993,21 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       for (const engine of engines) engine.dispose?.();
     },
   };
+
+  /** A line's `/multisend`s as the turns RisuAI ends up taking for them (`ScriptTurn`). */
+  function multisendTurns(multisend: readonly CommandMultisend[]): ScriptTurn[] {
+    const turns: ScriptTurn[] = [];
+    const appended: { content: string; clear: boolean }[] = [];
+    for (const { items, clear } of multisend) {
+      const answered = turns.length === 0 && items.length > 0;
+      for (const [index, content] of items.entries()) {
+        if (answered && index === 0) turns.push({ kind: 'send', content, clear });
+        else if (!(answered && triggers.length > 0)) appended.push({ content, clear });
+      }
+    }
+    if (appended.length > 0) turns.push({ kind: 'append', items: appended });
+    return turns;
+  }
 
   /**
    * What a run did, committed on the head — a manual run's, a button's, a

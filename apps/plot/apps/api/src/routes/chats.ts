@@ -1871,8 +1871,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * `editinput`/`editoutput` regex scripts of the plot's scripted member (the
    * first in roster order that carries any — `scriptedMember`), and the parts of
    * that member's card the scripts may read — its description and the rest of its
-   * character text, its lorebook, its post-history instructions — with what this
-   * chat's overlay rewrote of them beside it.
+   * character text, its lorebook and the book's settings, its post-history
+   * instructions — with what this chat's overlay rewrote of them beside it.
    *
    * This is the one place a reader receives a member's card internals, and only
    * for a plot that carries scripts: RisuAI's scripts read the card they belong
@@ -1904,6 +1904,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           exampleDialogue: card.mesExample,
           lorebook: card.lorebook,
           postHistoryInstructions: card.postHistoryInstructions,
+          // What `/test_lorebook` activates the book by, as the prompt does.
+          loreSettings: card.loreSettings,
         },
         overlay: {
           member: overlay?.members?.[member.id] ?? null,

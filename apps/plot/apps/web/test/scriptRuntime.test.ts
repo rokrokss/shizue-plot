@@ -748,6 +748,199 @@ describe('the chat a run leaves', () => {
   });
 });
 
+describe('slash commands', () => {
+  const exchange = [greeting, message('m1', 'm0', 'user', '앉는다'), message('m2', 'm1', 'assistant', '응.', { variableDelta: { mood: 'calm' } })];
+  const command = (value: string): TriggerStep => ({ type: 'command', value });
+
+  /** A ui that answers from a script and notes what it was asked. */
+  function recordingUi(answers: { input?: string; select?: string } = {}) {
+    const asked: string[] = [];
+    const ui: ScriptUi = {
+      alert: async (text) => void asked.push(`alert:${text}`),
+      input: async (text) => {
+        asked.push(`input:${text}`);
+        return answers.input ?? '';
+      },
+      select: async (options) => {
+        asked.push(`select:${options.join(',')}`);
+        return answers.select ?? '';
+      },
+      confirm: async () => false,
+      help: async () => void asked.push('help'),
+    };
+    return { ui, asked };
+  }
+
+  it('in a send: keep an input run’s variables when it wrote none itself, and lose what the start run’s copy replaces', async () => {
+    const { api } = fakeApi();
+    const runtime = createScriptRuntime({
+      chatId: 'c1',
+      api,
+      ui: silentUi,
+      bundle: bundle({
+        triggers: [
+          trigger('input', [command('/setvar key=mood happy|/send 사라짐')]),
+          trigger('start', [command('/setvar key=hp 1|/sendas 사라짐')]),
+        ],
+      }),
+    });
+    const prepared = await runtime.prepare('send', view(exchange), '또');
+    expect(prepared.body['chat']).toBeUndefined();
+    const stored = [...exchange, { content: '또', variableDelta: prepared.body['variableDelta'] as Record<string, string> }];
+    expect(serverFold(stored)).toEqual(vars({ hp: '100', mood: 'happy' }));
+
+    // An input run that changes a variable itself hands its own back, without the command's.
+    const writing = createScriptRuntime({
+      chatId: 'c1',
+      api,
+      ui: silentUi,
+      bundle: bundle({ triggers: [trigger('input', [command('/setvar key=mood happy'), setvar('seen', '1')])] }),
+    });
+    const lost = await writing.prepare('send', view(exchange), '또');
+    expect(serverFold([...exchange, { content: '또', variableDelta: lost.body['variableDelta'] as Record<string, string> }])).toEqual(
+      vars({ hp: '100', mood: 'calm', seen: '1' }),
+    );
+  });
+
+  it('in an output, a manual or a stopped-early run: lose the chat and variables to the run’s copy, unless the run ended early', async () => {
+    const { api, calls } = fakeApi();
+    const runtime = createScriptRuntime({
+      chatId: 'c1',
+      api,
+      ui: silentUi,
+      bundle: bundle({
+        triggers: [
+          trigger('output', [command('/send 사라짐|/setvar key=gone 1')]),
+          trigger('manual', [command('/sendas 사라짐|/setvar key=gone 1')], { comment: '버튼' }),
+          trigger('start', [command('/send 남는다|/setvar key=kept 1'), command('/getvar key=none')]),
+        ],
+      }),
+    });
+    await runtime.finish(view(branch));
+    expect(calls[0]!.body['chat']).toBeUndefined();
+    expect(calls[0]!.body['variableDelta']).not.toHaveProperty('gone');
+    expect(await runtime.manual('버튼', null, view(exchange))).toBeNull();
+    // `/getvar` of an unset variable throws, and RisuAI writes nothing back over the stored chat.
+    const auto = await runtime.prepare('auto', view(exchange));
+    expect(auto.body['chat']).toEqual({ keep: 2, messages: [{ role: 'user', content: '남는다' }] });
+    expect(applyVariableDelta(serverFold([...exchange, { content: '남는다' }]), auto.body['startDelta'] as Record<string, string>)).toEqual(
+      vars({ hp: '100', mood: 'calm', kept: '1' }),
+    );
+  });
+
+  it('from the composer: commits what the line did on the head, and says whether to send the text', async () => {
+    const { api, calls } = fakeApi(() => ({ marker: 'committed' }) as unknown as ChatState);
+    const runtime = createScriptRuntime({ chatId: 'c1', api, ui: silentUi, bundle: bundle() });
+    const outcome = await runtime.command('/send 문을 연다|/sendas 들어와.|/setvar key=door open', view(exchange));
+    expect(outcome).toEqual({ send: false, state: { marker: 'committed' }, turns: [] });
+    expect(calls[0]).toMatchObject({
+      path: '/api/chats/c1/script-commit',
+      body: { messageId: 'm2', scriptRev: 0, chat: { keep: 2, messages: [{ role: 'user', content: '문을 연다' }, { role: 'assistant', content: '들어와.' }] } },
+    });
+    const stored = [...exchange, { content: '문을 연다' }, { content: '들어와.', variableDelta: calls[0]!.body['variableDelta'] as Record<string, string> }];
+    expect(serverFold(stored)).toEqual(vars({ hp: '100', mood: 'calm', door: 'open' }));
+
+    // A command RisuAI does not run answers false: the text is sent, and nothing was committed.
+    expect(await runtime.command('/모름 이건 그냥 글', view(exchange))).toEqual({ send: true, turns: [] });
+    expect(calls).toHaveLength(1);
+    // One that throws keeps what came before it, and the text is not sent.
+    const thrown = await runtime.command('/comment 메모|/getvar key=none', view(exchange));
+    expect(thrown).toMatchObject({ send: false, error: expect.stringContaining('none') });
+    expect(calls[1]!.body).toMatchObject({ messageId: 'm2', content: '응.<Comment>\n메모\n</Comment>' });
+  });
+
+  it('from the composer: asks through the page’s dialogs and shows the list of commands', async () => {
+    const { ui, asked } = recordingUi({ input: '아린', select: '나' });
+    const { api, calls } = fakeApi();
+    const runtime = createScriptRuntime({ chatId: 'c1', api, ui, bundle: bundle() });
+    await runtime.command('/input 이름은?|/echo {{pipe}} 님|/buttons labels=["가","나"]|/setvar key=pick', view(exchange));
+    expect(asked).toEqual(['input:이름은?', 'alert:아린 님', 'select:가,나']);
+    expect(applyVariableDelta(serverFold(exchange), calls[0]!.body['variableDelta'] as Record<string, string>)).toMatchObject({ pick: '1' });
+    expect(await runtime.command('/?', view(exchange))).toEqual({ send: false, turns: [] });
+    expect(asked.at(-1)).toBe('help');
+  });
+
+  it('from the composer: tests the lore on the chat, and runs a manual trigger with /trigger', async () => {
+    const { ui, asked } = recordingUi();
+    const { api, calls } = fakeApi();
+    const lore = {
+      name: '성',
+      keys: ['앉'],
+      secondaryKeys: [],
+      selective: false,
+      content: '북쪽의 성',
+      enabled: true,
+      constant: false,
+      insertionOrder: 100,
+      caseSensitive: false,
+      useRegex: false,
+      position: 'before_char' as const,
+    };
+    const runtime = createScriptRuntime({
+      chatId: 'c1',
+      api,
+      ui,
+      bundle: bundle({
+        triggers: [trigger('manual', [setvar('hit', '1')], { comment: '공격' })],
+        character: { ...bundle().character, lorebook: [lore], loreSettings: { scanDepth: 4, recursiveScanning: false, risuMatching: true } },
+      }),
+    });
+    await runtime.command('/test_lorebook|/setvar key=lore', view(exchange));
+    expect(asked).toEqual(['alert:북쪽의 성']);
+    const written = applyVariableDelta(serverFold(exchange), calls[0]!.body['variableDelta'] as Record<string, string>);
+    expect(JSON.parse(written['lore']!)).toEqual({
+      actives: [{ depth: 0, pos: '', prompt: '북쪽의 성', role: 'system', order: 100, tokens: 2, priority: 100, source: '성', inject: null }],
+      matchLog: [],
+    });
+    await runtime.command('/trigger 공격', view(exchange));
+    expect(applyVariableDelta(serverFold(exchange), calls[1]!.body['variableDelta'] as Record<string, string>)).toMatchObject({ hit: '1' });
+  });
+
+  it('from the composer: answers only the first /multisend message, and appends the rest as RisuAI leaves them', async () => {
+    const list = view(exchange, { defaults: vars({ hp: '100', list: 'clear|||가|||나' }) });
+    const plain = createScriptRuntime({ chatId: 'c1', api: fakeApi().api, ui: silentUi, bundle: bundle() });
+    expect((await plain.command('/multisend {{getvar::list}}|/multisend 다', list)).turns).toEqual([
+      { kind: 'send', content: '가', clear: true },
+      { kind: 'append', items: [{ content: '나', clear: true }, { content: '다', clear: false }] },
+    ]);
+    // On a card with triggers the rest of that /multisend lands on a chat the start run replaced.
+    const scripted = createScriptRuntime({
+      chatId: 'c1',
+      api: fakeApi().api,
+      ui: silentUi,
+      bundle: bundle({ triggers: [trigger('display', [])] }),
+    });
+    expect((await scripted.command('/multisend {{getvar::list}}|/multisend 다', list)).turns).toEqual([
+      { kind: 'send', content: '가', clear: true },
+      { kind: 'append', items: [{ content: '다', clear: false }] },
+    ]);
+  });
+
+  it('sends a /multisend message as it is, after the chat is emptied, and appends the rest on the head', async () => {
+    const { api, calls } = fakeApi();
+    const runtime = createScriptRuntime({
+      chatId: 'c1',
+      api,
+      ui: silentUi,
+      bundle: bundle({
+        triggers: [trigger('input', [setvar('typed', '1')])],
+        editScripts: [{ type: 'editinput', in: '가', out: '바뀜' }],
+      }),
+    });
+    const prepared = await runtime.prepare('send', view(exchange), '가', { raw: true, clear: true });
+    expect(prepared.content).toBe('가');
+    expect(prepared.body['chat']).toEqual({ keep: 0, messages: [{ turn: true }] });
+    // Chat variables outlive the cut: the turn's delta keeps the branch's.
+    expect(serverFold([greeting, { content: '가', variableDelta: prepared.body['variableDelta'] as Record<string, string> }])).toEqual(
+      vars({ hp: '100', mood: 'calm' }),
+    );
+    await runtime.append([{ content: '나', clear: false }], view(exchange));
+    expect(calls[0]!.body).toMatchObject({ messageId: 'm2', chat: { keep: 2, messages: [{ role: 'user', content: '나' }] } });
+    await runtime.append([{ content: '나', clear: false }, { content: '다', clear: true }], view(exchange));
+    expect(calls[1]!.body).toMatchObject({ messageId: 'm2', chat: { keep: 0, messages: [{ role: 'user', content: '다' }] } });
+  });
+});
+
 describe('loadWholeBranch', () => {
   it('reads every window before the loaded one, oldest last', async () => {
     const all = Array.from({ length: 5 }, (_, index) =>

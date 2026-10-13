@@ -26,6 +26,10 @@
       "types": "./dist/macro.d.ts",
       "default": "./dist/macro.js"
     },
+    "./lorebook": {
+      "types": "./dist/lorebook.d.ts",
+      "default": "./dist/lorebook.js"
+    },
     "./display-script": {
       "types": "./dist/displayScript.d.ts",
       "default": "./dist/displayScript.js"
