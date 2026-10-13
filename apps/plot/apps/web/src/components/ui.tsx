@@ -140,7 +140,7 @@ export function Field({
         {badge}
       </span>
       {children}
-      {hint ? <span className="block text-xs text-muted/80">{hint}</span> : null}
+      {hint ? <span className="block text-xs text-muted">{hint}</span> : null}
     </label>
   );
 }

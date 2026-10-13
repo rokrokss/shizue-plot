@@ -13,7 +13,8 @@ import { Button } from './ui';
  * backdrop closes it, Escape closes it, and Tab stays inside it.
  *
  * The bottom padding clears the phone's home indicator; the height is capped so
- * a long panel scrolls rather than covering the whole conversation.
+ * a long panel scrolls rather than covering the whole conversation. A script's
+ * dialog opens one on a wide screen too, and there it keeps to the chat's 768px column.
  */
 export function BottomSheet({
   title,
@@ -43,7 +44,7 @@ export function BottomSheet({
         aria-label={title}
         data-testid="bottom-sheet"
         tabIndex={-1}
-        className="max-h-[80dvh] overflow-y-auto overscroll-contain rounded-t-2xl border-t border-line bg-raised px-5 pt-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] focus:outline-none"
+        className="max-h-[80dvh] overflow-y-auto overscroll-contain rounded-t-2xl border-t border-line bg-raised px-5 pt-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] focus:outline-none lg:mx-auto lg:w-full lg:max-w-3xl"
       >
         <div className="flex items-center justify-between gap-3 pb-4">
           <h2 className="text-sm font-medium text-fg">{title}</h2>

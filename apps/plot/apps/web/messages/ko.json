@@ -820,7 +820,7 @@
     "componentTurnsAllowed": "컴포넌트의 턴 전송 허용",
     "componentTurnsHint": "이 대화에서 플롯의 컴포넌트가 나 대신 메시지를 보내는 것을 허용합니다. 언제든 끌 수 있고, 끄면 다음 요청 때 다시 물어봅니다.",
     "componentTurnConsent": "{name}의 컴포넌트가 나 대신 메시지를 보내려고 합니다. 이 대화에서 허용할까요? 노트 패널에서 언제든 취소할 수 있습니다.",
-    "scriptDialogTitle": "{name}의 메시지",
+    "scriptDialogTitle": "작품 스크립트의 메시지",
     "scriptDialogOk": "확인",
     "scriptDialogAnswer": "답",
     "scriptDialogYes": "예",

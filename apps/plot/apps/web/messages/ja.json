@@ -820,7 +820,7 @@
     "componentTurnsAllowed": "コンポーネントのターン送信を許可",
     "componentTurnsHint": "この会話でプロットのコンポーネントが自分の代わりにメッセージを送ることを許可します。いつでもオフにでき、オフにすると次の要求時に再度確認します。",
     "componentTurnConsent": "{name}のコンポーネントがあなたの代わりにメッセージを送ろうとしています。この会話で許可しますか？ ノートパネルからいつでも取り消せます。",
-    "scriptDialogTitle": "{name}からのメッセージ",
+    "scriptDialogTitle": "作品のスクリプトからのメッセージ",
     "scriptDialogOk": "OK",
     "scriptDialogAnswer": "回答",
     "scriptDialogYes": "はい",

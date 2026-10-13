@@ -86,7 +86,7 @@ function IllustrationGallery({ illustrations }: { illustrations: readonly Illust
           </li>
         ))}
       </ul>
-      <p className="text-xs text-muted/80">{t('illustrationsHint')}</p>
+      <p className="text-xs text-muted">{t('illustrationsHint')}</p>
       {opened !== null ? (
         <Lightbox images={images} index={opened} onClose={() => setOpened(null)} />
       ) : null}
@@ -126,8 +126,8 @@ function EmbeddingModelSetting() {
           </option>
         ))}
       </Select>
-      <p className="text-xs text-muted/80">{t(`similarityModels.${model}`)}</p>
-      <p className="text-xs text-muted/80">{t('similarityModelHint')}</p>
+      <p className="text-xs text-muted">{t(`similarityModels.${model}`)}</p>
+      <p className="text-xs text-muted">{t('similarityModelHint')}</p>
     </section>
   );
 }
@@ -332,7 +332,7 @@ export function ChatPanel({
               );
             })}
           </ul>
-          {onToggleAbsent ? <p className="text-xs text-muted/80">{t('sceneCastHint')}</p> : null}
+          {onToggleAbsent ? <p className="text-xs text-muted">{t('sceneCastHint')}</p> : null}
         </section>
       ) : null}
 
@@ -369,7 +369,7 @@ export function ChatPanel({
             ))}
           </ul>
         )}
-        <p className="text-xs text-muted/80">{t('attachedNotesHint')}</p>
+        <p className="text-xs text-muted">{t('attachedNotesHint')}</p>
       </section>
 
       <section data-testid="chat-memory" className="space-y-3 border-t border-line pt-5">
@@ -446,7 +446,7 @@ export function ChatPanel({
             </Select>
           </Field>
         </div>
-        <p className="text-xs text-muted/80">{t('memorySettingsHint')}</p>
+        <p className="text-xs text-muted">{t('memorySettingsHint')}</p>
       </section>
 
       <section data-testid="chat-narrator" className="space-y-3 border-t border-line pt-5">
@@ -474,7 +474,7 @@ export function ChatPanel({
           </Select>
         </Field>
         {saveButton('narrator')}
-        <p className="text-xs text-muted/80">{t('narratorHint')}</p>
+        <p className="text-xs text-muted">{t('narratorHint')}</p>
       </section>
 
       {/* What the plot asked for on top of the prose. Both rows are the reader's
@@ -493,7 +493,7 @@ export function ChatPanel({
                 disabled={busy}
                 onChange={(enabled) => void onToggleStatusWindow(enabled)}
               />
-              <p className="text-xs text-muted/80">{t('statusWindowHint')}</p>
+              <p className="text-xs text-muted">{t('statusWindowHint')}</p>
             </>
           ) : null}
           {choices ? (
@@ -504,7 +504,7 @@ export function ChatPanel({
                 disabled={busy}
                 onChange={(enabled) => void onToggleChoices(enabled)}
               />
-              <p className="text-xs text-muted/80">{t('choicesHint')}</p>
+              <p className="text-xs text-muted">{t('choicesHint')}</p>
             </>
           ) : null}
         </section>
@@ -519,7 +519,7 @@ export function ChatPanel({
             onChange={onToggleCustomUi}
           />
         </div>
-        <p className="text-xs text-muted/80">{t('customUiHint')}</p>
+        <p className="text-xs text-muted">{t('customUiHint')}</p>
 
         <div className="flex items-center justify-between gap-3">
           <h2 className="text-xs font-medium text-muted">
@@ -532,7 +532,7 @@ export function ChatPanel({
             onChange={(allowed) => void onToggleComponentTurns(allowed)}
           />
         </div>
-        <p className="text-xs text-muted/80">{t('componentTurnsHint')}</p>
+        <p className="text-xs text-muted">{t('componentTurnsHint')}</p>
       </section>
 
       {scriptSimilarity ? <EmbeddingModelSetting /> : null}
@@ -567,7 +567,7 @@ export function ChatPanel({
               ))}
             </ul>
             {relationship?.note ? <p className="text-sm text-fg">{relationship.note}</p> : null}
-            <p className="text-xs text-muted/80">{t('relationshipHint')}</p>
+            <p className="text-xs text-muted">{t('relationshipHint')}</p>
           </>
         ) : (
           <p className="text-sm text-muted">{t('relationshipEmpty')}</p>

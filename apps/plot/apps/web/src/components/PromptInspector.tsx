@@ -87,7 +87,7 @@ export function PromptInspector({ chatId }: { chatId: string }) {
           </Button>
         </div>
       </div>
-      <p className="text-xs text-muted/80">{t('hint')}</p>
+      <p className="text-xs text-muted">{t('hint')}</p>
       {error ? (
         <p role="alert" className="text-xs text-danger">
           {error}

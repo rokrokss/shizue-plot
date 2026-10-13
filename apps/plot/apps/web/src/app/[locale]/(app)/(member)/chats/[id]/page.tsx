@@ -2635,7 +2635,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       ) : null}
 
       {scriptPrompt ? (
-        <ScriptDialog prompt={scriptPrompt} name={characterName} onDone={() => setScriptPrompt(null)} />
+        <ScriptDialog prompt={scriptPrompt} onDone={() => setScriptPrompt(null)} />
       ) : null}
 
       {/* The whole window is the drop target while a file is over it, so the

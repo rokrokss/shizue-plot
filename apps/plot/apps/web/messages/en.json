@@ -820,7 +820,7 @@
     "componentTurnsAllowed": "Let components send turns",
     "componentTurnsHint": "Lets this plot's components send messages on your behalf in this chat. Turn it off any time; you will be asked again the next time one tries.",
     "componentTurnConsent": "A component of {name} wants to send a message on your behalf. Allow it in this chat? You can take it back from the notes panel at any time.",
-    "scriptDialogTitle": "A message from {name}",
+    "scriptDialogTitle": "A message from the story's scripts",
     "scriptDialogOk": "OK",
     "scriptDialogAnswer": "Your answer",
     "scriptDialogYes": "Yes",

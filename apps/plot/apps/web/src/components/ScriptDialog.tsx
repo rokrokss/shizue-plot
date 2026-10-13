@@ -24,8 +24,12 @@ export type ScriptPrompt =
  * Closing it without an answer answers with nothing — an empty string, as
  * RisuAI's own dialogs give when dismissed, and no to a yes-or-no — so a run
  * never waits on a sheet that is gone.
+ *
+ * Titled after the work's scripts rather than a character: the sheet also shows
+ * script errors, slash-command output and the command list, and RisuAI's own
+ * alerts name no speaker.
  */
-export function ScriptDialog({ prompt, name, onDone }: { prompt: ScriptPrompt; name: string; onDone: () => void }) {
+export function ScriptDialog({ prompt, onDone }: { prompt: ScriptPrompt; onDone: () => void }) {
   const t = useTranslations('chat');
   const [value, setValue] = useState('');
 
@@ -37,7 +41,7 @@ export function ScriptDialog({ prompt, name, onDone }: { prompt: ScriptPrompt; n
   };
 
   return (
-    <BottomSheet title={t('scriptDialogTitle', { name })} onClose={() => answer('')}>
+    <BottomSheet title={t('scriptDialogTitle')} onClose={() => answer('')}>
       <div data-testid="script-dialog" className="space-y-4">
         {prompt.text ? (
           <p className={cx('whitespace-pre-wrap text-sm', prompt.kind === 'alert' && prompt.error ? 'text-danger' : 'text-fg')}>
