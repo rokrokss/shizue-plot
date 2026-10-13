@@ -17,7 +17,7 @@ import messages from '../messages/ko.json';
 import type { PublicMember } from '../src/lib/types';
 
 vi.mock('@/lib/displayPlanner', () => ({
-  displayPlanner: { plan: () => new Promise(() => undefined), stop: () => undefined },
+  displayPlanner: { plan: () => new Promise(() => undefined), cached: () => undefined, warm: () => true, stop: () => undefined },
 }));
 
 (globalThis as Record<string, unknown>)['IS_REACT_ACT_ENVIRONMENT'] = true;

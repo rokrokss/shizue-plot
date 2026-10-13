@@ -221,35 +221,61 @@ function useSettleFade(streaming: boolean): boolean {
  * terminated). All three want the same thing on screen — the message as the model
  * wrote it — and none of them wants a blank space while we decide.
  *
- * The plan is asked for once per settled message. What a plan does *not* contain
- * is the bindings, so a `{{setvar}}` moving a gauge redraws from the plan already
- * in hand, with no worker in the loop.
+ * The plan is asked for once per settled message, and the planner keeps it: a
+ * message drawn again — remounted, scrolled back in, its text back to one it had
+ * — takes the kept plan on its first render and never shows as prose. What a
+ * plan does *not* contain is the bindings, so a `{{setvar}}` moving a gauge
+ * redraws from the plan already in hand, with no worker in the loop.
+ *
+ * One exception to "prose while we wait": a page opening cold — a reload, a
+ * chat's first open — has no plan back yet and its worker is still starting, so
+ * every message would paint as the model wrote it and then rearrange into its
+ * status windows a few frames later. A message mounted then is held (`held`):
+ * drawn, but hidden, until its own plan lands — however it ends — or
+ * `COLD_HOLD_MS` passes. Decided once, at mount: a reply that finishes streaming
+ * later, once the planner is warm, settles as it always has.
  */
 function useDisplayPlan(
   content: string,
   scripts: DisplayScript[] | undefined,
   previousSameRole: string,
   streaming: boolean,
-): DisplayPlan | null {
+): { plan: DisplayPlan | null; held: boolean } {
   const [answered, setAnswered] = useState<{ asked: PlanRequest; plan: DisplayPlan | null } | null>(
     null,
   );
+  // A half-streamed status block is not a status block: matching a line the
+  // model is still in the middle of writing gets an answer about a state that
+  // was never reported. It is worth the wait, and the wait is one turn.
+  const kept = useMemo(
+    () => (scripts && !streaming ? displayPlanner.cached({ content, scripts, previousSameRole }) : undefined),
+    [content, scripts, previousSameRole, streaming],
+  );
+  const [holding, setHolding] = useState(
+    () => scripts !== undefined && !streaming && kept === undefined && !displayPlanner.warm(),
+  );
 
   useEffect(() => {
-    // A half-streamed status block is not a status block: matching a line the
-    // model is still in the middle of writing gets an answer about a state that
-    // was never reported. It is worth the wait, and the wait is one turn.
-    if (!scripts || streaming) return;
+    if (!holding) return;
+    const timer = setTimeout(() => setHolding(false), COLD_HOLD_MS);
+    return () => clearTimeout(timer);
+  }, [holding]);
+
+  useEffect(() => {
+    if (!scripts || streaming || kept !== undefined) return;
     const asked: PlanRequest = { content, scripts, previousSameRole };
     let live = true;
     void displayPlanner.plan(asked).then((plan) => {
-      if (live) setAnswered({ asked, plan });
+      if (!live) return;
+      setAnswered({ asked, plan });
+      setHolding(false);
     });
     return () => {
       live = false;
     };
-  }, [content, scripts, previousSameRole, streaming]);
+  }, [content, scripts, previousSameRole, streaming, kept]);
 
+  if (kept !== undefined) return { plan: kept, held: false };
   // A plan carries the message it was made from, so an edit does not get one
   // render of the text it replaced: until the new plan lands, there is no plan.
   if (
@@ -258,10 +284,18 @@ function useDisplayPlan(
     answered.asked.scripts !== scripts ||
     answered.asked.previousSameRole !== previousSameRole
   ) {
-    return null;
+    return { plan: null, held: holding };
   }
-  return answered.plan;
+  return { plan: answered.plan, held: false };
 }
+
+/**
+ * The longest a message mounted on a cold page waits, hidden, for its plan:
+ * long enough for a slow phone to start the worker and plan a long chat, short
+ * enough that a pattern the worker hangs on leaves the message as prose without
+ * the reader waiting on a blank row.
+ */
+const COLD_HOLD_MS = 500;
 
 /**
  * Renders a message as markdown. `*action*` becomes an <em>, styled in globals.css.
@@ -359,7 +393,7 @@ export const MessageBody = memo(function MessageBody({
 }) {
   const t = useTranslations('chat');
   const common = useTranslations('common');
-  const plan = useDisplayPlan(content, display?.scripts, previousSameRole, streaming);
+  const { plan, held } = useDisplayPlan(content, display?.scripts, previousSameRole, streaming);
   const settling = useSettleFade(streaming);
 
   const segments = useMemo<BodySegment[]>(() => {
@@ -425,7 +459,11 @@ export const MessageBody = memo(function MessageBody({
   const liveSegment = streaming ? runs.findLastIndex((run) => run !== null) : -1;
 
   return (
-    <div className={settling ? 'message-body shizue-settling' : 'message-body'}>
+    <div
+      className={settling ? 'message-body shizue-settling' : 'message-body'}
+      // Laid out, so the chat does not jump when it shows; not yet seen.
+      {...(held ? { style: { visibility: 'hidden' }, 'data-held': '' } : {})}
+    >
       {segments.map((segment, index) => {
         if (segment.kind === 'component') {
           return (

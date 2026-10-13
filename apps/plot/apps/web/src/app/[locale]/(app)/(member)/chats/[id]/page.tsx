@@ -223,6 +223,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    */
   const [anchor, setAnchor] = useState<VariableAnchor | null>(null);
   const [plot, setPlot] = useState<PublicPlotDetail | null>(null);
+  /** The plot's read has come back, either way. */
+  const [plotRead, setPlotRead] = useState(false);
   const [assets, setAssets] = useState<PlotAsset[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [presets, setPresets] = useState<PresetInfo[]>([]);
@@ -587,7 +589,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const plotId = state?.chat.plotId ?? null;
   useEffect(() => {
     if (!plotId) return;
-    apiGet<PublicPlotDetail>(`/api/plots/${plotId}/public`).then(setPlot, () => undefined);
+    apiGet<PublicPlotDetail>(`/api/plots/${plotId}/public`)
+      .then(setPlot, () => undefined)
+      .finally(() => setPlotRead(true));
     // Images the messages may reference. Readable by anyone who may read the
     // plot, so this works for someone else's public plot too.
     apiGet<PlotAsset[]>(`/api/plots/${plotId}/assets`).then(setAssets, () => undefined);
@@ -1522,12 +1526,12 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         prepared = null;
         setError(toMessage(caught));
       }
-      if (!prepared || prepared.stop) {
+      // A stopped send still goes, as a turn with nothing generated for it (below);
+      // anything else that did not go is over here.
+      if (!prepared || (prepared.stop && next !== 'send')) {
         // Nothing was sent. A send's text goes back where it was written.
-        if (next === 'send') {
-          setInput((current) => (current.trim() ? `${typed ?? ''}\n${current}` : (typed ?? '')));
-          if (prepared?.stop) setScriptNotice(t('scriptStopped'));
-        }
+        if (next === 'send') setInput((current) => (current.trim() ? `${typed ?? ''}\n${current}` : (typed ?? '')));
+        if (prepared?.stop) setScriptNotice(t('scriptStopped'));
         abortRef.current = null;
         reset();
         setMode(null);
@@ -1551,36 +1555,53 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       ? focus.filter((memberId) => stage.some((member) => member.id === memberId))
       : [];
     const focusBody = focusIds.length > 0 ? { focusCharacterIds: focusIds } : undefined;
+    /**
+     * RisuAI pushes the turn before its start triggers run, so their `stop` leaves
+     * it in the chat with no reply, and the composer empty: the turn is stored as
+     * any send stores it, and nothing is generated. Everything below — the
+     * refetch, a rejection's reconcile, the images — goes as it does for a send.
+     */
+    const stoppedTurn = next === 'send' && prepared?.stop === true;
     try {
-      const result = await streamGeneration(
-        next === 'send' ? `/api/chats/${id}/messages` : `/api/chats/${id}/${next}`,
-        next === 'send'
-          ? { content, ...turnOptions, ...focusBody, ...scriptBody }
-          : focusBody || Object.keys(scriptBody).length > 0
-            ? { ...focusBody, ...scriptBody }
-            : undefined,
-        (text) => {
-          received += text.length;
-          append(text);
-        },
-        controller.signal,
-      );
-      if (result.kind === 'error') streamError = result.code ? toMessage(new ApiError(0, result.code, result.message)) : result.message;
-      aborted = result.kind === 'aborted';
-      // The pick was for this reply. A failed one keeps it, so the retry asks again.
-      if (result.kind === 'done' && focusIds.length > 0) setFocus([]);
-      // What the turn opened, celebrated on the spot: the refetch below carries
-      // the same answer, and a reveal that waits for it arrives a beat late.
-      if (result.kind === 'done' && result.unlockedAssetIds.length > 0) {
-        const opened = result.unlockedAssetIds;
-        setState((current) =>
-          current ? { ...current, assetLocks: openAssetLocks(current.assetLocks, opened) } : current,
+      if (stoppedTurn) {
+        await apiSend<ChatState>('POST', `/api/chats/${id}/messages`, {
+          content,
+          ...turnOptions,
+          ...scriptBody,
+          stopped: true,
+        });
+        setScriptNotice(t('scriptStopped'));
+      } else {
+        const result = await streamGeneration(
+          next === 'send' ? `/api/chats/${id}/messages` : `/api/chats/${id}/${next}`,
+          next === 'send'
+            ? { content, ...turnOptions, ...focusBody, ...scriptBody }
+            : focusBody || Object.keys(scriptBody).length > 0
+              ? { ...focusBody, ...scriptBody }
+              : undefined,
+          (text) => {
+            received += text.length;
+            append(text);
+          },
+          controller.signal,
         );
+        if (result.kind === 'error') streamError = result.code ? toMessage(new ApiError(0, result.code, result.message)) : result.message;
+        aborted = result.kind === 'aborted';
+        // The pick was for this reply. A failed one keeps it, so the retry asks again.
+        if (result.kind === 'done' && focusIds.length > 0) setFocus([]);
+        // What the turn opened, celebrated on the spot: the refetch below carries
+        // the same answer, and a reveal that waits for it arrives a beat late.
+        if (result.kind === 'done' && result.unlockedAssetIds.length > 0) {
+          const opened = result.unlockedAssetIds;
+          setState((current) =>
+            current ? { ...current, assetLocks: openAssetLocks(current.assetLocks, opened) } : current,
+          );
+        }
       }
     } catch (caught) {
       rejection = caught;
     }
-    // The stream opened, so the server kept what the scripts rewrote of the work.
+    // The server took the turn, so it kept what the scripts rewrote of the work.
     if (rejection === null) prepared?.accept();
     abortRef.current = null;
     // However it ended, it ended: the pacing gives up whatever it was still
@@ -1920,7 +1941,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   }
 
   if (missing) return <CenteredMessage>{t('notFound')}</CenteredMessage>;
-  if (!state) {
+  // The plot's display scripts come with its read, which can only start once the
+  // chat's has said which plot it is. Drawn before them, every status block shows
+  // as the text it was written as and then rearranges, so a chat that may draw
+  // custom UI waits for that one read too.
+  if (!state || (customUi && !plotRead)) {
     return (
       <div className="flex flex-1 items-center justify-center">
         <Spinner label={common('loading')} />

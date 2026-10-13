@@ -23,6 +23,10 @@ import type { DisplayScript } from '../src/lib/types';
 /** The planner is a module singleton and there is no `Worker` here, so it is replaced. */
 const answers: ((plan: unknown) => void)[] = [];
 const asked: { content: string; previousSameRole: string }[] = [];
+/** What the planner already holds, by message text. */
+const kept = new Map<string, unknown>();
+/** Whether the page has had a plan back yet. */
+let warm = true;
 
 vi.mock('@/lib/displayPlanner', () => ({
   displayPlanner: {
@@ -30,6 +34,8 @@ vi.mock('@/lib/displayPlanner', () => ({
       asked.push({ content: request.content, previousSameRole: request.previousSameRole });
       return new Promise((resolve) => answers.push(resolve));
     },
+    cached: (request: { content: string }) => (kept.has(request.content) ? kept.get(request.content) : undefined),
+    warm: () => warm,
     stop: () => undefined,
   },
 }));
@@ -95,6 +101,8 @@ async function land(plan: unknown): Promise<void> {
 beforeEach(() => {
   answers.length = 0;
   asked.length = 0;
+  kept.clear();
+  warm = true;
   host = document.createElement('div');
   document.body.appendChild(host);
   root = createRoot(host);
@@ -123,6 +131,64 @@ describe('while the plan is outstanding', () => {
     // The bindings were applied here, not in the plan.
     expect(island!.textContent).toContain('금화 12');
     expect(host.textContent).not.toContain('[status]');
+  });
+});
+
+describe('a message the planner already answered', () => {
+  it('draws its status window on the first render, and asks for nothing', () => {
+    const content = '[status] hp=50 검을 뽑았다';
+    kept.set(content, planFor(content));
+    render(createElement(MessageBody, { content, display: display() }));
+    // No round trip between the mount and the styled paint: no prose to flash.
+    expect(host.querySelector('.shizue-msg')!.textContent).toContain('HP 50');
+    expect(host.textContent).not.toContain('[status]');
+    expect(asked).toEqual([]);
+  });
+
+  it('draws a message that was kept as prose as prose, and asks for nothing', () => {
+    kept.set('[status] hp=50', null);
+    render(createElement(MessageBody, { content: '[status] hp=50', display: display() }));
+    expect(host.querySelector('.shizue-msg')).toBeNull();
+    expect(asked).toEqual([]);
+  });
+});
+
+describe('a page opening cold', () => {
+  it('holds a message hidden until its plan lands, rather than showing it as prose first', async () => {
+    warm = false;
+    const content = '[status] hp=50 검을 뽑았다';
+    render(createElement(MessageBody, { content, display: display() }));
+    const body = host.querySelector<HTMLElement>('.message-body')!;
+    // Laid out, not seen.
+    expect(body.style.visibility).toBe('hidden');
+    await land(planFor(content));
+    expect(body.style.visibility).toBe('');
+    expect(host.querySelector('.shizue-msg')!.textContent).toContain('HP 50');
+  });
+
+  it('lets a message go as prose when its plan never lands', async () => {
+    vi.useFakeTimers();
+    try {
+      warm = false;
+      render(createElement(MessageBody, { content: '[status] hp=50', display: display() }));
+      expect(host.querySelector<HTMLElement>('.message-body')!.style.visibility).toBe('hidden');
+      await act(async () => {
+        vi.advanceTimersByTime(500);
+      });
+      expect(host.querySelector<HTMLElement>('.message-body')!.style.visibility).toBe('');
+      expect(host.textContent).toContain('[status] hp=50');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('holds nothing once the page is warm, nor a message with no scripts', () => {
+    render(createElement(MessageBody, { content: '[status] hp=50', display: display() }));
+    expect(host.querySelector<HTMLElement>('.message-body')!.style.visibility).toBe('');
+    warm = false;
+    // Mounted afresh, cold, but with nothing to plan.
+    render(createElement(MessageBody, { key: 'plain', content: '그냥 글' }));
+    expect(host.querySelector<HTMLElement>('.message-body')!.style.visibility).toBe('');
   });
 });
 

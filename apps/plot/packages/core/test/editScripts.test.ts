@@ -77,6 +77,31 @@ describe('runEditScripts', () => {
   it('evaluates a <cbs> pattern before compiling it', () => {
     expect(run('리안 왔다', [output('{{getvar::name}}', '그녀', { flag: 'g<cbs>', ableFlag: true })])).toBe('그녀 왔다');
   });
+
+  it('names each script of its mode before it runs, in the order it runs, by its place in the list', () => {
+    const heard: number[] = [];
+    const scripts: EditScript[] = [
+      output('a', 'b', { flag: 'g<order 1>', ableFlag: true }),
+      { type: 'editinput', in: 'x', out: 'y' },
+      output('b', 'c', { flag: 'g<order 5>', ableFlag: true }),
+    ];
+    runEditScripts('a', scripts, 'editoutput', { chatIndex: 1, env, onScript: (index) => heard.push(index) });
+    expect(heard).toEqual([2, 0]);
+  });
+
+  it('hands a compiled pattern out again as a fresh one, from the start of the text', () => {
+    // A sticky pattern's search leaves it past its match; the next message must
+    // not start there, but get what a fresh pattern makes of it, every time.
+    const sticky = output('a', 'b', { flag: 'y<move_top>', ableFlag: true });
+    const fresh = run('aa', [sticky]);
+    expect(run('aa', [sticky])).toBe(fresh);
+    expect(run('aa', [sticky])).toBe(fresh);
+    // One pattern, two scripts: the first's search matched and nothing reset it
+    // (`@@emo` is skipped here); the second must still find the match at 0.
+    const emotion = output('a', '@@emo 웃음');
+    const inject = output('a', '', { flag: 'g<inject>', ableFlag: true });
+    expect(run('a', [emotion, inject])).toBe('');
+  });
 });
 
 describe('renderOutTemplate', () => {

@@ -1,13 +1,17 @@
 /**
  * A pending reply that took the tab down with it is not finished a second time.
  *
- * Finishing a reply runs the card's regular expressions over what the model
- * wrote, on this thread, and a pattern that backtracks without end hangs the
- * tab. The reply is still pending when the reader reloads, and finishing it on
- * load would hang the tab again, every time the chat is opened. So the attempt is
- * marked in the session's storage before it starts and unmarked when it ends, and
- * a mark found on load means the last attempt never ended: that reply is given
- * up — committed as the model wrote it — instead of being run again.
+ * Finishing a reply runs the card's scripts over what the model wrote. The
+ * `editoutput` regex scripts no longer run on this thread — they have a worker
+ * and a clock of their own (`editScriptRunner.ts`) — but the output triggers
+ * still do, and their regex effects (`v2RegexTest`, `v2ExtractRegex`, …) are the
+ * native engine too: a pattern there that backtracks without end still hangs
+ * the tab. The reply is still pending when the reader reloads, and finishing it
+ * on load would hang the tab again, every time the chat is opened. So the
+ * attempt is marked in the session's storage before it starts and unmarked when
+ * it ends, and a mark found on load means the last attempt never ended: that
+ * reply is given up — committed as the model wrote it — instead of being run
+ * again.
  *
  * Storage that cannot be reached (a private window, a blocked origin) marks
  * nothing, and the reply is simply finished as usual.

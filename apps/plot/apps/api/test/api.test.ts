@@ -13066,6 +13066,127 @@ describe('the browser script runtime', () => {
     ]);
   });
 
+  it("stores a stopped send's turn with what its scripts kept, asks the model for nothing, and a regenerate answers it", async () => {
+    const { plotId, memberId } = await scriptedPlot('scripts-stopped@example.com');
+    const reader = await signUp('scripts-stopped-reader@example.com');
+    const chat = await startChat(reader, plotId);
+    const chatId = chat.chat.id;
+    const greeting = chat.path.at(-1);
+    const { app: replying, systems } = promptApp('대답');
+    const form = new FormData();
+    form.append('file', new File([Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1])], 'shot.gif'));
+    const image = await readJson(await request(reader, `/api/chats/${chatId}/attachments`, 'POST', form, replying));
+
+    const res = await json(
+      reader,
+      `/api/chats/${chatId}/messages`,
+      'POST',
+      {
+        content: '/상태',
+        stopped: true,
+        baseHeadId: greeting.id,
+        attachmentIds: [image.id],
+        directions: '조용히',
+        variableDelta: { held: '1' },
+        overlay: { members: { [memberId]: { description: '멈춘 뒤' } } },
+        note: '멈췄다',
+      },
+      replying,
+    );
+    expect(res.status, await res.clone().text()).toBe(200);
+    // The chat as it now stands, not a stream: nothing was asked of the model.
+    expect(res.headers.get('content-type')).toContain('application/json');
+    expect(systems).toEqual([]);
+    const state = await readJson(res);
+    const turn = state.path.at(-1);
+    expect(turn).toMatchObject({
+      parentId: greeting.id,
+      role: 'user',
+      content: '/상태',
+      source: 'user',
+      directions: '조용히',
+      variableDelta: { held: '1' },
+      attachments: [expect.objectContaining({ id: image.id })],
+    });
+    expect(state.chat.headMessageId).toBe(turn.id);
+    expect(state.chat.note).toBe('멈췄다');
+    expect((await scriptsOf(reader, chatId)).scripts.overlay.member).toEqual({ description: '멈춘 뒤' });
+
+    // A user head, answered as any is: the regenerate builds on the stored turn.
+    const events = await readSse(await json(reader, `/api/chats/${chatId}/regenerate`, 'POST', { baseHeadId: turn.id }, replying));
+    expect(events.at(-1)!.event).toBe('done');
+    expect(systems.at(-1)).toContain('멈춘 뒤');
+    const answered = (await readJson(await request(reader, `/api/chats/${chatId}`))).path;
+    expect(answered.slice(-2).map((m: any) => [m.id, m.content])).toEqual([
+      [turn.id, '/상태'],
+      [events.at(-1)!.data.messageId, '대답'],
+    ]);
+  });
+
+  it('places a stopped turn where the scripts left it, and holds it to the head and a pending reply as a send', async () => {
+    const { plotId } = await scriptedPlot('scripts-stopped-chat@example.com');
+    const reader = await signUp('scripts-stopped-chat-reader@example.com');
+    const chat = await startChat(reader, plotId);
+    const chatId = chat.chat.id;
+    const { app: replying, systems } = promptApp('<status>날 것</status>');
+
+    // The start run impersonated after the turn: both stored, the values on the last.
+    const placed = await readJson(
+      await json(reader, `/api/chats/${chatId}/messages`, 'POST', {
+        content: '/굴림',
+        stopped: true,
+        variableDelta: { roll: '7' },
+        chat: { keep: 0, messages: [{ turn: true }, { role: 'assistant', content: '굴림: 7' }] },
+      }),
+    );
+    expect(placed.path.slice(-2)).toMatchObject([
+      { role: 'user', content: '/굴림', variableDelta: null },
+      { role: 'assistant', content: '굴림: 7', source: 'script', variableDelta: { roll: '7' } },
+    ]);
+
+    // The start run cut the turn itself: nothing of it is stored, and the chat stays as it was.
+    const cut = await json(reader, `/api/chats/${chatId}/messages`, 'POST', {
+      content: '/사라짐',
+      stopped: true,
+      chat: { keep: 2, messages: [] },
+    });
+    expect(cut.status, await cut.clone().text()).toBe(200);
+    expect((await readJson(cut)).path.map((m: any) => m.id)).toEqual(placed.path.map((m: any) => m.id));
+
+    // A head that moved under it refuses it, and writes nothing.
+    const moved = await json(reader, `/api/chats/${chatId}/messages`, 'POST', {
+      content: '또',
+      stopped: true,
+      baseHeadId: chat.path.at(-1).id,
+    });
+    expect(moved.status).toBe(409);
+    expect((await readJson(moved)).code).toBe('head_moved');
+    expect((await readJson(await request(reader, `/api/chats/${chatId}`))).path).toHaveLength(placed.path.length);
+
+    // A reply its output scripts never finished is not built on unless given up on.
+    await readSse(
+      await json(reader, `/api/chats/${chatId}/messages`, 'POST', { content: '다음', postProcess: true }, replying),
+    );
+    const pending = (await readJson(await request(reader, `/api/chats/${chatId}`))).path.at(-1);
+    expect(pending.scriptState).toBe('pending');
+    const held = await json(reader, `/api/chats/${chatId}/messages`, 'POST', { content: '/상태', stopped: true });
+    expect(held.status).toBe(409);
+    expect((await readJson(held)).code).toBe('post_processing_pending');
+    const given = await json(reader, `/api/chats/${chatId}/messages`, 'POST', {
+      content: '/상태',
+      stopped: true,
+      abandonPending: true,
+    });
+    expect(given.status, await given.clone().text()).toBe(200);
+    const after = (await readJson(given)).path;
+    expect(after.at(-2)).toMatchObject({ id: pending.id, scriptState: null });
+    expect(after.at(-1)).toMatchObject({ role: 'user', content: '/상태', parentId: pending.id });
+    expect(systems).toHaveLength(1);
+
+    const notBoolean = await json(reader, `/api/chats/${chatId}/messages`, 'POST', { content: 'x', stopped: 'yes' });
+    expect(notBoolean.status).toBe(400);
+  });
+
   it('keeps nothing a refused generation carried, and refuses a member the plot does not have', async () => {
     const { plotId, memberId } = await scriptedPlot('scripts-refused@example.com');
     const reader = await signUp('scripts-refused-reader@example.com');

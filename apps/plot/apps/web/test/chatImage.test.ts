@@ -18,7 +18,7 @@ import { rgbaToThumbHash } from 'thumbhash';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/lib/displayPlanner', () => ({
-  displayPlanner: { plan: () => new Promise(() => undefined), stop: () => undefined },
+  displayPlanner: { plan: () => new Promise(() => undefined), cached: () => undefined, warm: () => true, stop: () => undefined },
 }));
 
 const { MessageBody } = await import('../src/components/MessageBody');

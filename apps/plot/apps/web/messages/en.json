@@ -836,7 +836,7 @@
     "scriptDialogAnswer": "Your answer",
     "scriptDialogYes": "Yes",
     "scriptDialogNo": "No",
-    "scriptStopped": "The story's scripts held this message back. What you wrote is still in the composer.",
+    "scriptStopped": "The story's scripts held back the reply.",
     "scriptFinishFailed": "The story's scripts could not finish the last reply. The next message carries on from it as it is.",
     "scriptSimilarityPreparing": "The story's scripts are loading a model to compare texts. The first time can take a while.",
     "similarityModel": "Script similarity model",

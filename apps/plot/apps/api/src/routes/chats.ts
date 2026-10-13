@@ -2415,12 +2415,16 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     // Where they edited the chat around it, it is the message the chat ends on.
     const variableDelta = optionalVariableDelta(body, 'variableDelta');
     const scripts = readGenerationScripts(body, { startDelta: false });
+    // A start trigger said not to send (`stop`): the turn is stored as a send
+    // stores it, and nothing is generated (see `stopped` below).
+    const stopped = optionalBoolean(body, 'stopped') ?? false;
 
-    return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
-      const chat = await loadWritableChat(deps, id, userId);
-      // Fail before any write: a 400 here must leave the chat untouched, otherwise
-      // the client resends a turn that was already persisted.
-      await requireEnabledModel(deps, userId, chat.model);
+    /**
+     * Everything a send writes before its prompt is planned: the head checks, the
+     * overlay and the note, and the turn where the scripts left it. Nothing is
+     * written until every check has passed.
+     */
+    const storeTurn = async (chat: Chat) => {
       const context = await loadGenerationContext(deps, chat, scripts);
       // Still before any write, and it needs the card the context just loaded.
       if (source === 'component') requireComponentTurnAllowed(chat, context.row);
@@ -2442,6 +2446,34 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       // not this chat's own — or that another turn already claimed — must leave
       // no message behind for the client to find on its retry.
       const edited = await keepScriptChat(deps, chat, edit, context.all);
+      return { context, focusNames, edited };
+    };
+
+    /**
+     * RisuAI's `sendMain` pushes the turn onto the chat and `sendChat` then runs
+     * the start triggers, so a `stop` there leaves the turn in the chat with no
+     * reply. Here the browser ran them already and says so: the turn, its delta,
+     * what the runs did to the chat and the work are kept exactly as a send keeps
+     * them, and the answer is the chat as it now stands rather than a stream. The
+     * slot is held for the write, as a commit holds it. No model is asked for
+     * anything, so the chat's model is not checked either.
+     */
+    if (stopped) {
+      if (!(await acquireChatSlot(deps, id, userId))) await rejectBusyChat(deps, id, userId);
+      try {
+        await storeTurn(await loadWritableChat(deps, id, userId));
+      } finally {
+        await releaseChatSlot(deps, id);
+      }
+      return c.json(await chatState(deps, await loadOwnedChat(deps, id, userId)));
+    }
+
+    return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
+      const chat = await loadWritableChat(deps, id, userId);
+      // Fail before any write: a 400 here must leave the chat untouched, otherwise
+      // the client resends a turn that was already persisted.
+      await requireEnabledModel(deps, userId, chat.model);
+      const { context, focusNames, edited } = await storeTurn(chat);
       const branch = edited.path;
 
       const memory = await buildMemoryInput(deps, chat, branch.slice(0, -1), content);

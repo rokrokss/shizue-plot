@@ -31,6 +31,14 @@
  *   - Requests are answered one at a time. It makes a plan that never comes back
  *     unambiguous — the request that was in flight is the one that hung — and the
  *     work per message is microseconds when nothing is wrong.
+ *   - Answers are kept (`cached`), as RisuAI keeps the result of its display pass
+ *     (`processScriptCache` in its `process/scripts.ts`, a thousand entries keyed
+ *     by the text and the scripts). RisuAI runs that pass on this thread every
+ *     time a message is drawn, and the cache is what makes drawing it again cheap;
+ *     here it is what lets a message drawn again — scrolled back into a window,
+ *     swiped back to, its neighbour edited — paint styled at once instead of as
+ *     prose until a round trip lands. A message that hung is kept as prose too,
+ *     so it never holds the queue up a second time.
  */
 
 import { PLAN_LIMITS, planDisplayScripts, type DisplayPlan } from './displayScripts';
@@ -65,9 +73,45 @@ export interface PlannerWorker {
 export interface DisplayPlanner {
   /** Null when the message should be drawn as prose — including when it hung. */
   plan: (request: PlanRequest) => Promise<DisplayPlan | null>;
+  /** The answer already in hand for this request, or undefined when it has to be asked for. */
+  cached: (request: PlanRequest) => DisplayPlan | null | undefined;
+  /**
+   * Whether any request has been answered yet — however it ended. Until then the
+   * page is opening cold (a reload, a chat's first open), and the worker is still
+   * starting under messages that would otherwise paint as prose first.
+   */
+  warm: () => boolean;
   /** Ends the worker. The next request starts a new one. */
   stop: () => void;
 }
+
+/** How many answers are kept: RisuAI's thousand. */
+const MAX_CACHED_PLANS = 1000;
+
+/**
+ * A short name for a list of scripts, the same for the same scripts however
+ * often the plot is read again — so the key a message is kept under does not
+ * carry the whole list, and a refetch does not lose what was kept.
+ */
+const scriptNames = new WeakMap<readonly DisplayScript[], string>();
+const scriptIds = new Map<string, string>();
+
+function scriptsName(scripts: readonly DisplayScript[]): string {
+  let name = scriptNames.get(scripts);
+  if (name === undefined) {
+    const written = JSON.stringify(scripts);
+    name = scriptIds.get(written);
+    if (name === undefined) {
+      name = String(scriptIds.size);
+      scriptIds.set(written, name);
+    }
+    scriptNames.set(scripts, name);
+  }
+  return name;
+}
+
+const keyOf = (request: PlanRequest): string =>
+  `${scriptsName(request.scripts)}\u0000${request.previousSameRole}\u0000${request.content}`;
 
 /* -------------------------------------------------------------- the worker */
 
@@ -134,6 +178,11 @@ interface Pending {
 }
 
 export function createDisplayPlanner(spawn: () => PlannerWorker): DisplayPlanner {
+  /** Answers by `keyOf`, the most recently used last. */
+  const kept = new Map<string, DisplayPlan | null>();
+  /** Answers on their way, so a message drawn twice before one lands asks once. */
+  const asking = new Map<string, Promise<DisplayPlan | null>>();
+  let answeredOnce = false;
   let worker: PlannerWorker | null = null;
   let ready = false;
   let active: Pending | null = null;
@@ -224,15 +273,43 @@ export function createDisplayPlanner(spawn: () => PlannerWorker): DisplayPlanner
     });
   }
 
+  function cached(request: PlanRequest): DisplayPlan | null | undefined {
+    const key = keyOf(request);
+    if (!kept.has(key)) return undefined;
+    const plan = kept.get(key)!;
+    kept.delete(key);
+    kept.set(key, plan);
+    return plan;
+  }
+
   return {
     plan(request) {
-      return new Promise((resolve) => {
+      const hit = cached(request);
+      if (hit !== undefined) return Promise.resolve(hit);
+      const key = keyOf(request);
+      const waiting = asking.get(key);
+      if (waiting) return waiting;
+      const answer = new Promise<DisplayPlan | null>((resolve) => {
         const id = nextId;
         nextId += 1;
-        queue.push({ id, request, settle: resolve });
+        queue.push({
+          id,
+          request,
+          settle: (plan) => {
+            answeredOnce = true;
+            asking.delete(key);
+            if (kept.size >= MAX_CACHED_PLANS) kept.delete(kept.keys().next().value!);
+            kept.set(key, plan);
+            resolve(plan);
+          },
+        });
         pump();
       });
+      asking.set(key, answer);
+      return answer;
     },
+    cached,
+    warm: () => answeredOnce,
     stop,
   };
 }
@@ -245,4 +322,4 @@ export function createDisplayPlanner(spawn: () => PlannerWorker): DisplayPlanner
 export const displayPlanner: DisplayPlanner =
   typeof Worker === 'function'
     ? createDisplayPlanner(spawnWorker)
-    : { plan: () => Promise.resolve(null), stop: () => undefined };
+    : { plan: () => Promise.resolve(null), cached: () => null, warm: () => true, stop: () => undefined };

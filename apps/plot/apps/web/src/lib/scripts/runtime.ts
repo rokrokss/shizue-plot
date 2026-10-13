@@ -57,7 +57,6 @@ import {
   manualTriggerNames,
   mergeScriptOverlay,
   runCommands,
-  runEditScripts,
   runTriggers,
   runTriggersSync,
   scriptChatOf,
@@ -94,6 +93,7 @@ import {
 } from '@shizue/core/variables';
 import type { ChatMessage, ChatState, LoreEntry, StreamMode } from '../types';
 import type { EditPhase, ScriptEngine, ScriptPhase } from './engine';
+import { editScriptRunner, inlineEditRunner, type EditScriptRunner } from './editScriptRunner';
 import type { SimilaritySearch } from './similarity';
 
 /** GET /api/chats/:id/scripts — what the browser runs for a chat, when the plot carries any. */
@@ -161,6 +161,11 @@ export interface ScriptRuntimeOptions {
    */
   similarity?: SimilaritySearch;
   /**
+   * Where the `editinput`/`editoutput` regex scripts run: the page's worker
+   * (`editScriptRunner.ts`), or this thread where there are no workers.
+   */
+  editRunner?: EditScriptRunner;
+  /**
    * The reader's global variables after the scripts wrote some. Nothing in the
    * trigger language or in RisuAI's Lua writes one — `CodeScope.setGlobalVar`
    * is there for an engine that does — so this is where such writes would reach
@@ -206,11 +211,13 @@ export interface PreparedGeneration {
   /** A send's text as the input scripts left it. */
   content?: string;
   /**
-   * A start trigger said not to send (`stop`). Nothing was sent; what the runs
-   * did to the chat is kept all the same (`state`), and a send's text is not.
+   * A start trigger said not to send (`stop`): nothing is to be generated. A
+   * send's turn is stored all the same, as RisuAI pushes it before the start
+   * triggers run — `body` and `content` are that turn, for the page to post with
+   * `stopped: true`. Any other generation's run is committed here (`state`).
    */
   stop: boolean;
-  /** The chat as a stopped run's commit left it, when it had changed the chat. */
+  /** The chat as a stopped run's commit left it, when it had anything to keep. */
   state?: ChatState;
   /**
    * Called once the server took the generation (its stream opened): what the
@@ -440,6 +447,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
   const { bundle, api, ui, chatId } = options;
   const engines = options.engines ?? [];
   const log = options.log ?? ((entry) => console.warn('[scripts]', entry.kind, entry.effect ?? '', entry.message));
+  const runEdit = options.editRunner ?? (typeof Worker === 'function' ? editScriptRunner() : inlineEditRunner(options.random));
   const triggers = bundle.triggers;
   const codeTriggers = triggers.some(isCodeTrigger);
   const engineHandles = (phase: ScriptPhase): boolean => engines.some((engine) => engine.handles(phase));
@@ -764,24 +772,27 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       current = over.variables();
     }
     if (!hasEditScripts(bundle.editScripts, phase)) return { text: data, variables: current, chat: working };
-    const edited = runEditScripts(data, bundle.editScripts, phase, {
+    // In a worker the page can end (`editScriptRunner.ts`): a pattern that never
+    // returns costs the pass its clock, and the text goes on as it was.
+    const outcome = await runEdit({
+      text: data,
+      scripts: bundle.editScripts,
+      mode: phase,
       chatIndex: meta.chatIndex,
       ...(meta.previousSameRole !== undefined ? { previousSameRole: meta.previousSameRole } : {}),
-      env: {
-        variable: (name) => readVariable(current, name),
-        globalVariable: (name) => readVariable(s.globals, name),
-        ...(options.random ? { random: options.random } : {}),
-        data: {
-          ...s.view.data,
-          user: s.view.names.user ?? s.view.data?.user,
-          char: charName(s.patch),
-          persona: s.persona,
-          character: { description: s.patch.description ?? character().description },
-        },
+      variables: current,
+      globals: s.globals,
+      data: {
+        ...s.view.data,
+        user: s.view.names.user ?? s.view.data?.user,
+        char: charName(s.patch),
+        persona: s.persona,
+        character: { description: s.patch.description ?? character().description },
       },
-      onSkip: (_script, reason) => log({ kind: 'error', effect: phase, message: reason }),
     });
-    return { text: edited, variables: current, chat: working };
+    for (const { reason } of outcome.skipped) log({ kind: 'error', effect: phase, message: reason });
+    for (const notice of outcome.notices) log({ kind: 'limit', effect: phase, message: notice });
+    return { text: outcome.text, variables: current, chat: working };
   }
 
   /**
@@ -855,17 +866,17 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
         // run reads it there — and may edit around it, or cut it.
         let final: TriggerMessage[] = [...(prepareOptions.clear ? [] : messages), { role: 'user', data: sent, id: NEW_TURN }];
         let injections: PromptInjectionText | null = null;
+        let stop = false;
         if (runsAt('start')) {
           const start = await run(s, 'start', variables, final, greeting);
           // What the runs wrote, without the macros of a turn that is not stored.
           const ran = applyVariableDelta(typed.variables, diffVariables(start.variables, variables));
-          if (start.stopSending) {
-            // The turn is not sent; what the runs did to the rest of the chat is kept.
-            const rest = start.messages.filter((message) => message.id !== NEW_TURN);
-            return stopped(s, view, view.messages, chat, rest, ran);
-          }
+          // RisuAI's `sendChat` saves the chat the start triggers left and only then
+          // reads their `stop`: the turn stays — or stays cut, if they cut it — with
+          // every value they wrote, and nothing is generated for it.
+          stop = start.stopSending;
           variables = start.messages.some((message) => message.id === NEW_TURN) ? start.variables : ran;
-          injections = start.injections;
+          if (!stop) injections = start.injections;
           final = start.messages;
         }
         // A start trigger may rewrite the turn being sent; that is the text it goes as.
@@ -878,14 +889,15 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
         await flushGlobals(s);
         return {
           body: {
-            ...body,
+            // A stopped turn has no reply for the output scripts to finish.
+            ...(stop ? { baseHeadId: headId } : body),
             ...(delta ? { variableDelta: delta } : {}),
             ...(injections ? injectionFields(injections) : {}),
             ...(edits ? { chat: edits } : {}),
             ...writes(s),
           },
           content: sent,
-          stop: false,
+          stop,
           accept: () => kept(s),
         };
       }
@@ -898,7 +910,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       const base = computeVariables(branch, view.defaults, view.names);
       const { greeting, chat } = branchOf(s, branch);
       const start = await run(s, 'start', base, chat, greeting);
-      if (start.stopSending) return stopped(s, view, branch, chat, start.messages, start.variables);
+      if (start.stopSending) return stopped(s, view, start);
       const edits = chatEdits(chat, start.messages);
       // Against the branch the generation reads: the one the run left.
       const delta = storable(
@@ -1160,26 +1172,21 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
   }
 
   /**
-   * A start run that said not to send: nothing is generated. What it did to the
-   * chat is kept all the same — RisuAI saves the chat its start triggers left
-   * before it looks at the stop — committed on the head with the values the runs
-   * wrote and what they rewrote of the work. A regenerate's run read the branch
-   * without the head it was to replace, so its chat leaves that head off the
-   * branch, as RisuAI's reroll has already taken it off the chat. A run that left
-   * the chat as it was keeps nothing, as before.
+   * A start run that said not to send, on any generation but a send (whose turn
+   * the page stores itself): nothing is generated. What the run did is kept all
+   * the same — RisuAI saves the chat its start triggers left, values and all,
+   * before it looks at the stop — committed on the head with what the runs
+   * rewrote of the work. A regenerate's run read the branch without the head it
+   * was to replace, and its chat leaves that head off: RisuAI's reroll takes the
+   * reply off the chat before the start triggers run, so a stopped one ends on
+   * the turn it would have answered (the reply stays in the tree). A run that
+   * kept nothing commits nothing.
    */
-  async function stopped(
-    s: Session,
-    view: ScriptView,
-    branch: readonly ChatMessage[],
-    before: readonly TriggerMessage[],
-    after: readonly TriggerMessage[],
-    variables: Variables,
-  ): Promise<PreparedGeneration> {
+  async function stopped(s: Session, view: ScriptView, start: TriggerRunResult): Promise<PreparedGeneration> {
     const nothing: PreparedGeneration = { body: {}, stop: true, accept: () => undefined };
-    const edits = chatEdits(before, after);
-    if (!edits) return nothing;
-    const state = await commitRun(s, view, branch, before, edits, variables, true);
+    const { chat } = branchOf(s, view.messages);
+    const edits = chatEdits(chat, start.messages);
+    const state = await commitRun(s, view, view.messages, chat, edits, start.variables, start.variablesChanged);
     return state ? { ...nothing, state } : nothing;
   }
 }

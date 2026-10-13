@@ -836,7 +836,7 @@
     "scriptDialogAnswer": "답",
     "scriptDialogYes": "예",
     "scriptDialogNo": "아니요",
-    "scriptStopped": "작품의 스크립트가 이 메시지를 보내지 않았습니다. 쓴 글은 입력창에 남아 있습니다.",
+    "scriptStopped": "작품의 스크립트가 이번 답장을 멈췄습니다.",
     "scriptFinishFailed": "작품의 스크립트가 마지막 답장을 마무리하지 못했습니다. 다음 메시지는 그 답장을 그대로 두고 이어집니다.",
     "scriptSimilarityPreparing": "작품의 스크립트가 글을 비교할 모델을 불러오고 있습니다. 처음에는 시간이 걸릴 수 있습니다.",
     "similarityModel": "스크립트 유사도 검색 모델",

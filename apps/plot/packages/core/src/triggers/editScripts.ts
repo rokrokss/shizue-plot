@@ -32,19 +32,53 @@ export interface EditRunOptions {
   env: ScriptCbsEnv;
   /** Told about every script that was skipped, and why. */
   onSkip?: (script: EditScript, reason: string) => void;
+  /**
+   * Told which script is about to run, by its index in the list given — before
+   * its pattern is compiled. A caller that can stop the run from outside (the
+   * browser's worker, `lib/scripts/editScriptRunner.ts`) learns from the last
+   * one it heard which script would not come back.
+   */
+  onScript?: (index: number) => void;
+}
+
+/**
+ * Patterns compiled once and handed out again, RisuAI's `processScriptCache`
+ * moved down a level: RisuAI keeps the *result* of a whole pass by text, which
+ * an edit script never meets twice (the reader's text, the model's reply), while
+ * the same card's patterns are compiled for every one of them. Keyed by the
+ * pattern as evaluated and its flags; bounded, oldest out first. A pattern that
+ * does not compile is not kept, and throws again the next time, as there.
+ */
+const compiled = new Map<string, RegExp>();
+const MAX_COMPILED = 256;
+
+function compile(pattern: string, flags: string): RegExp {
+  const key = `${flags}/${pattern}`;
+  let regex = compiled.get(key);
+  if (!regex) {
+    regex = new RegExp(pattern, flags);
+    if (compiled.size >= MAX_COMPILED) compiled.delete(compiled.keys().next().value!);
+    compiled.set(key, regex);
+  }
+  // A global or sticky pattern carries where its last search ended; a fresh one
+  // starts at the beginning, and so must one handed out again.
+  regex.lastIndex = 0;
+  return regex;
 }
 
 interface Parsed {
   script: EditScript;
+  /** Where it stands in the list given, which `onScript` names it by. */
+  index: number;
   /** The flag field with its directives taken out. */
   flag: string | undefined;
   order: number;
   actions: string[];
 }
 
-function parse(script: EditScript): { parsed: Parsed; ordered: boolean } {
+function parse(script: EditScript, index: number): { parsed: Parsed; ordered: boolean } {
   if (!script.ableFlag || !script.flag?.includes('<')) {
-    return { parsed: { script, flag: script.flag, order: 0, actions: [] }, ordered: false };
+    return { parsed: { script, index, flag: script.flag, order: 0, actions: [] }, ordered: false };
   }
   let order = 0;
   let ordered = false;
@@ -60,7 +94,7 @@ function parse(script: EditScript): { parsed: Parsed; ordered: boolean } {
     }
     return '';
   });
-  return { parsed: { script, flag, order, actions }, ordered };
+  return { parsed: { script, index, flag, order, actions }, ordered };
 }
 
 /** What `String.prototype.replace` hands a replacement function, as a template reads it. */
@@ -115,7 +149,7 @@ function execute(data: string, entry: Parsed, mode: EditScriptType, options: Edi
   if (flag.length === 0) flag = 'u';
 
   const pattern = actions.includes('cbs') ? evaluateScriptCbs(script.in, options.env) : script.in;
-  const regex = new RegExp(pattern, flag);
+  const regex = compile(pattern, flag);
   const render = (out: string) => (...args: unknown[]): string => renderOutTemplate(out, matchOf(args), options.env);
 
   if (!template.startsWith('@@') && actions.length === 0) return data.replace(regex, render(template));
@@ -181,8 +215,8 @@ export function runEditScripts(
 ): string {
   const parsed: Parsed[] = [];
   let ordered = false;
-  for (const script of scripts) {
-    const result = parse(script);
+  for (const [index, script] of scripts.entries()) {
+    const result = parse(script, index);
     parsed.push(result.parsed);
     if (result.ordered) ordered = true;
   }
@@ -192,6 +226,8 @@ export function runEditScripts(
 
   let data = text;
   for (const entry of parsed) {
+    if (entry.script.in === '' || entry.script.type !== mode) continue;
+    options.onScript?.(entry.index);
     try {
       data = execute(data, entry, mode, options);
     } catch (error) {

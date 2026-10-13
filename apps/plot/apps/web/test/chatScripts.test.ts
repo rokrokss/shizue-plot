@@ -35,6 +35,10 @@ let afterTurn: ChatState | null = null;
 let bundle: ScriptBundle | null = null;
 /** What the plot's public read says besides the fixture's own. */
 let publicPlot: Record<string, unknown> = {};
+/** The server refuses a turn stored without a reply. */
+let refuseTurn = false;
+/** When set, the plot's public read waits for it. */
+let plotGate: Promise<void> | null = null;
 
 vi.mock('@/i18n/navigation', async () => {
   const { createElement: h } = await import('react');
@@ -43,7 +47,8 @@ vi.mock('@/i18n/navigation', async () => {
   };
 });
 // Each row draws a button carrying the attribute the sanitizer leaves on one, and
-// says whose name it is drawn under and the roster its lines are read against.
+// says whose name it is drawn under and the roster its lines are read against —
+// and the page's own footer under it, where the regenerate button is.
 vi.mock('@/components/MessageRow', async () => {
   const { createElement: h } = await import('react');
   return {
@@ -53,6 +58,7 @@ vi.mock('@/components/MessageRow', async () => {
       name: string;
       roster?: readonly { name: string; aliases?: readonly string[] }[];
       speaker?: string;
+      footer?: ReactNode;
     }) =>
       h(
         'div',
@@ -65,6 +71,7 @@ vi.mock('@/components/MessageRow', async () => {
         [
         h('span', { key: 'text' }, props.shown ?? props.content),
         h('button', { key: 'btn', type: 'button', 'data-shizue-trigger': '공격', 'data-shizue-trigger-id': 'b1' }, '베기'),
+        h('div', { key: 'footer' }, props.footer),
         ],
       ),
   };
@@ -98,18 +105,38 @@ vi.mock('@/lib/api', async (importOriginal) => {
       if (url.endsWith('/scripts')) return Promise.resolve({ scripts: bundle });
       if (url.startsWith('/api/chats/')) return Promise.resolve(chatState);
       if (url.endsWith('/public')) {
-        return Promise.resolve({
+        return (plotGate ?? Promise.resolve()).then(() => ({
           name: '여관',
           characters: [{ id: 'chr_1', name: '리안', avatarUrl: null, intro: '' }],
           displayScripts: [],
           defaultVariables: { hp: '100' },
           ...publicPlot,
-        });
+        }));
       }
       return Promise.resolve([]);
     },
     apiSend: (method: string, path: string, body: unknown) => {
       sent.push({ method, path, body });
+      if (path.endsWith('/messages') && refuseTurn) {
+        return Promise.reject(new original.ApiError(409, 'head_moved', 'The chat moved on'));
+      }
+      if (path.endsWith('/messages')) {
+        // A turn stored without a reply: where the chat places it, else last, with its delta.
+        const fields = body as {
+          content: string;
+          variableDelta?: Record<string, string | null>;
+          chat?: { keep: number; messages: ({ turn: true } | { role: ChatMessage['role']; content: string })[] };
+        };
+        const kept = fields.chat ? chatState.path.slice(0, 1 + fields.chat.keep) : chatState.path;
+        const items = fields.chat?.messages ?? [{ turn: true as const }];
+        const path = [...kept];
+        items.forEach((item, index) => {
+          const parent = path.at(-1)?.id ?? null;
+          path.push('turn' in item ? message('u1', parent, 'user', fields.content) : message(`s${index}`, parent, item.role, item.content));
+        });
+        path[path.length - 1] = { ...path.at(-1)!, variableDelta: fields.variableDelta ?? null };
+        chatState = stateWith(path);
+      }
       if (path.endsWith('/script-commit')) {
         const head = chatState.path.at(-1)!;
         const fields = body as {
@@ -243,6 +270,8 @@ beforeEach(() => {
   afterTurn = null;
   bundle = null;
   publicPlot = {};
+  refuseTurn = false;
+  plotGate = null;
   store.delete('shizue.customUi');
   chatState = stateWith([greeting, message('m1', 'm0', 'user', '안녕'), message('m2', 'm1', 'assistant', '응.')]);
   host = document.createElement('div');
@@ -253,6 +282,26 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   host.remove();
+});
+
+describe('opening', () => {
+  it('waits for the plot’s read before drawing the chat, so its display scripts are there for the first paint', async () => {
+    let release = (): void => undefined;
+    plotGate = new Promise((resolve) => (release = resolve));
+    await render();
+    expect(host.querySelectorAll('[data-testid="row"]')).toHaveLength(0);
+    await act(async () => release());
+    await act(async () => undefined);
+    expect(host.querySelectorAll('[data-testid="row"]').length).toBeGreaterThan(0);
+  });
+
+  it('does not wait on a plot whose read failed', async () => {
+    plotGate = Promise.reject(new Error('gone'));
+    plotGate.catch(() => undefined);
+    await render();
+    await act(async () => undefined);
+    expect(host.querySelectorAll('[data-testid="row"]').length).toBeGreaterThan(0);
+  });
 });
 
 describe('a send', () => {
@@ -286,18 +335,41 @@ describe('a send', () => {
     });
   });
 
-  it('keeps the text in the composer when a start trigger stops it', async () => {
+  it('stores the turn with no reply and empties the composer when a start trigger stops it, and answers it on a regenerate', async () => {
+    // Stops the first send only: the value it writes rides on the stored turn.
     bundle = scripted({
-      triggers: [{ comment: '', type: 'start', conditions: [], effect: [{ type: 'stop' }] }],
+      triggers: [
+        {
+          comment: '',
+          type: 'start',
+          conditions: [{ type: 'var', var: 'held', value: '', operator: 'null' }],
+          effect: [{ type: 'setvar', var: 'held', value: '1', operator: '=' }, { type: 'stop' }],
+        },
+        { comment: '', type: 'output', conditions: [], effect: [] },
+      ],
     });
     await render();
     await sendText('/상태');
     expect(streamed).toEqual([]);
-    expect(host.querySelector('textarea')!.value).toBe('/상태');
+    expect(sent).toEqual([
+      {
+        method: 'POST',
+        path: '/api/chats/cht_1/messages',
+        body: { content: '/상태', baseHeadId: 'm2', variableDelta: { held: '1' }, stopped: true },
+      },
+    ]);
+    // RisuAI's composer is empty once the turn is in the chat, and the turn is the head.
+    expect(host.querySelector('textarea')!.value).toBe('');
+    expect([...host.querySelectorAll('[data-testid="row"] > span')].map((node) => node.textContent).at(-1)).toBe('/상태');
     expect(host.querySelector('[data-testid="script-notice"]')).not.toBeNull();
+
+    // A user head is answered the way any is: a regenerate builds on the stored turn.
+    afterTurn = stateWith([...chatState.path, message('m3', 'u1', 'assistant', '상태: 좋음')]);
+    await click(button('재생성')!);
+    expect(streamed).toEqual([{ path: '/api/chats/cht_1/regenerate', body: { baseHeadId: 'u1', postProcess: true } }]);
   });
 
-  it('shows what a stopped start run did to the chat, and still keeps the text in the composer', async () => {
+  it('stores the turn where a stopped start run left it, with what it added after it', async () => {
     bundle = scripted({
       triggers: [
         {
@@ -314,17 +386,26 @@ describe('a send', () => {
     expect(sent).toEqual([
       {
         method: 'POST',
-        path: '/api/chats/cht_1/script-commit',
+        path: '/api/chats/cht_1/messages',
         body: {
-          messageId: 'm2',
-          scriptRev: 0,
-          variableDelta: null,
-          chat: { keep: 2, messages: [{ role: 'assistant', content: '굴림: 7' }] },
+          content: '/굴림',
+          baseHeadId: 'm2',
+          chat: { keep: 2, messages: [{ turn: true }, { role: 'assistant', content: '굴림: 7' }] },
+          stopped: true,
         },
       },
     ]);
-    expect([...host.querySelectorAll('[data-testid="row"] span')].map((node) => node.textContent)).toContain('굴림: 7');
-    expect(host.querySelector('textarea')!.value).toBe('/굴림');
+    expect([...host.querySelectorAll('[data-testid="row"] > span')].map((node) => node.textContent).slice(-2)).toEqual(['/굴림', '굴림: 7']);
+    expect(host.querySelector('textarea')!.value).toBe('');
+  });
+
+  it('gives the text back when the stopped turn could not be stored', async () => {
+    bundle = scripted({ triggers: [{ comment: '', type: 'start', conditions: [], effect: [{ type: 'stop' }] }] });
+    refuseTurn = true;
+    await render();
+    await sendText('/상태');
+    expect(sent.map((call) => call.path)).toEqual(['/api/chats/cht_1/messages']);
+    expect(host.querySelector('textarea')!.value).toBe('/상태');
   });
 
   it('sends as it always did when the plot carries no scripts', async () => {
@@ -422,7 +503,7 @@ describe('a slash command', () => {
         },
       },
     ]);
-    expect([...host.querySelectorAll('[data-testid="row"] span')].map((node) => node.textContent)).toContain('문을 연다');
+    expect([...host.querySelectorAll('[data-testid="row"] > span')].map((node) => node.textContent)).toContain('문을 연다');
     expect(host.querySelector('textarea')!.value).toBe('');
   });
 
@@ -495,7 +576,7 @@ describe('a button', () => {
       ],
     });
     await render();
-    const rows = host.querySelectorAll('[data-testid="row"] button');
+    const rows = host.querySelectorAll('[data-testid="row"] button[data-shizue-trigger]');
     await click(rows[rows.length - 1]!);
     expect(sent).toEqual([
       {

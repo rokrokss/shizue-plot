@@ -174,6 +174,9 @@ describe('prepare: a send', () => {
     expect(normal.body).toMatchObject({ postProcess: true, baseHeadId: 'm0' });
     const stopped = await runtime.prepare('send', view([greeting]), '/roll 2d6');
     expect(stopped.stop).toBe(true);
+    // The turn is still stored, but there is no reply for the output scripts to finish.
+    expect(stopped.content).toBe('/roll 2d6');
+    expect(stopped.body).toEqual({ baseHeadId: 'm0' });
   });
 
   it('carries a start trigger’s rewrite of the head on the generation, and the overlay once accepted', async () => {
@@ -801,30 +804,89 @@ describe('the chat a run leaves', () => {
     expect(calls[2]!.body).toMatchObject({ chat: { keep: 0, messages: [{ id: 'm1', role: 'assistant' }, { id: 'm2' }] } });
   });
 
-  it('keeps what a stopped start run did to the chat, on the head, and not the send it stopped', async () => {
+  it('keeps a stopped send’s turn, with what the start run did around it, for the page to store', async () => {
     const { api, calls } = fakeApi(() => ({ marker: 'kept' }) as unknown as ChatState);
     const runtime = createScriptRuntime({
       chatId: 'c1',
       api,
       ui: silentUi,
       bundle: bundle({
-        triggers: [trigger('start', [impersonate('char', '굴림: 7'), setvar('roll', '7'), { type: 'stop' }])],
+        triggers: [
+          trigger('output', []),
+          trigger('start', [impersonate('char', '굴림: 7'), setvar('roll', '7'), { type: 'stop' }]),
+        ],
       }),
     });
     const stopped = await runtime.prepare('send', view(exchange), '{{setvar::typed::1}}/굴림');
-    expect(stopped).toMatchObject({ stop: true, state: { marker: 'kept' } });
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.body).toMatchObject({
-      messageId: 'm2',
-      chat: { keep: 2, messages: [{ role: 'assistant', content: '굴림: 7' }] },
+    // RisuAI pushes the turn before the start triggers run: it is stored as a
+    // send stores it, with no reply asked for and nothing committed here.
+    expect(calls).toEqual([]);
+    expect(stopped).toMatchObject({ stop: true, content: '{{setvar::typed::1}}/굴림' });
+    expect(stopped.state).toBeUndefined();
+    expect(stopped.body).toMatchObject({
+      baseHeadId: 'm2',
+      chat: { keep: 2, messages: [{ turn: true }, { role: 'assistant', content: '굴림: 7' }] },
     });
-    // The values the run wrote, without the macros of a turn that was never stored.
-    const kept = [...exchange, { content: '굴림: 7', variableDelta: calls[0]!.body['variableDelta'] as Record<string, string> }];
-    expect(serverFold(kept)).toEqual(vars({ hp: '50', mood: 'calm', roll: '7' }));
+    expect(stopped.body['postProcess']).toBeUndefined();
+    expect(stopped.body['injections']).toBeUndefined();
+    // The values the run wrote and the turn's own macros, as the stored chat folds them.
+    const kept = [...exchange, { content: stopped.content! }, { content: '굴림: 7', variableDelta: stopped.body['variableDelta'] as Record<string, string> }];
+    expect(serverFold(kept)).toEqual(vars({ hp: '50', mood: 'calm', roll: '7', typed: '1' }));
+  });
 
-    // A stopped regenerate's chat leaves off the reply it was to replace.
-    await runtime.prepare('regenerate', view(exchange));
+  it('commits a stopped regenerate without the reply it was to replace, as RisuAI’s reroll leaves the chat', async () => {
+    const { api, calls } = fakeApi(() => ({ marker: 'kept' }) as unknown as ChatState);
+    const runtime = createScriptRuntime({
+      chatId: 'c1',
+      api,
+      ui: silentUi,
+      bundle: bundle({ triggers: [trigger('start', [{ type: 'stop' }])] }),
+    });
+    // Nothing else changed: the reply still goes, and the chat ends on the turn.
+    const plain = await runtime.prepare('regenerate', view(exchange));
+    expect(plain).toMatchObject({ stop: true, state: { marker: 'kept' } });
+    expect(calls[0]!.body).toMatchObject({ messageId: 'm2', variableDelta: null, chat: { keep: 1, messages: [] } });
+
+    const writing = createScriptRuntime({
+      chatId: 'c1',
+      api,
+      ui: silentUi,
+      bundle: bundle({ triggers: [trigger('start', [impersonate('char', '굴림: 7'), setvar('roll', '7'), { type: 'stop' }])] }),
+    });
+    await writing.prepare('regenerate', view(exchange));
     expect(calls[1]!.body).toMatchObject({ messageId: 'm2', chat: { keep: 1, messages: [{ role: 'assistant', content: '굴림: 7' }] } });
+    // Folded on the branch it leaves — the reply gone — it is where the run ended.
+    const left = [...exchange.slice(0, 2), { content: '굴림: 7', variableDelta: calls[1]!.body['variableDelta'] as Record<string, string> }];
+    expect(serverFold(left)).toEqual(vars({ hp: '50', roll: '7' }));
+  });
+
+  it('keeps what a stopped run wrote when it left the chat as it was, and commits nothing when it wrote nothing', async () => {
+    const { api, calls } = fakeApi(() => ({ marker: 'kept' }) as unknown as ChatState);
+    const writing = createScriptRuntime({
+      chatId: 'c1',
+      api,
+      ui: silentUi,
+      bundle: bundle({
+        triggers: [
+          trigger('start', [setvar('roll', '7'), { type: 'v2SetAuthorNote', value: '비', valueType: 'value', indent: 0 }, { type: 'stop' }]),
+        ],
+      }),
+    });
+    const auto = await writing.prepare('auto', view(exchange));
+    expect(auto).toMatchObject({ stop: true, state: { marker: 'kept' } });
+    expect(calls[0]!.body).toMatchObject({ messageId: 'm2', note: '비' });
+    expect(calls[0]!.body['chat']).toBeUndefined();
+    const head = { ...exchange[2]!, variableDelta: calls[0]!.body['variableDelta'] as Record<string, string> };
+    expect(serverFold([...exchange.slice(0, 2), head])).toEqual(vars({ hp: '50', mood: 'calm', roll: '7' }));
+
+    const idle = createScriptRuntime({
+      chatId: 'c1',
+      api,
+      ui: silentUi,
+      bundle: bundle({ triggers: [trigger('start', [{ type: 'stop' }])] }),
+    });
+    expect(await idle.prepare('continue', view(exchange))).toMatchObject({ stop: true });
+    expect(calls).toHaveLength(1);
   });
 
   it('says and drops an edit of the chat past what the server takes', async () => {

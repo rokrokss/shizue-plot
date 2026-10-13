@@ -214,7 +214,7 @@ describe('a worker that stops answering', () => {
     vi.advanceTimersByTime(1001);
     await expect(hung).resolves.toBeNull();
 
-    const after = planner.plan(request);
+    const after = planner.plan({ ...request, content: '[status] hp=49' });
     expect(StubWorker.made).toHaveLength(2);
     const second = StubWorker.made[1]!;
     expect(second.terminated).toBe(false);
@@ -232,7 +232,7 @@ describe('a worker that stops answering', () => {
     vi.advanceTimersByTime(1001);
     await expect(hung).resolves.toBeNull();
 
-    const after = planner.plan(request);
+    const after = planner.plan({ ...request, content: '[status] hp=49' });
     // The old worker comes back to life with the answer nobody is waiting for.
     first.terminated = false;
     first.answer(EMPTY);
@@ -260,6 +260,68 @@ describe('a worker that stops answering', () => {
     const pending = planner.plan(request);
     StubWorker.made[0]!.onerror?.({ message: 'no' });
     await expect(pending).resolves.toBeNull();
+  });
+});
+
+describe('the answers it keeps', () => {
+  afterEach(() => {
+    StubWorker.made = [];
+    vi.useRealTimers();
+  });
+
+  it('has nothing for a message it was never asked about', () => {
+    const planner = createDisplayPlanner(() => new StubWorker());
+    expect(planner.cached(request)).toBeUndefined();
+    expect(StubWorker.made).toHaveLength(0);
+  });
+
+  it('answers a message drawn again from what it kept, without the worker', async () => {
+    const planner = createDisplayPlanner(() => new StubWorker());
+    const first = planner.plan(request);
+    const worker = StubWorker.made[0]!;
+    worker.ready();
+    worker.answer(EMPTY);
+    await expect(first).resolves.toEqual(EMPTY);
+
+    expect(planner.cached(request)).toEqual(EMPTY);
+    await expect(planner.plan(request)).resolves.toEqual(EMPTY);
+    expect(worker.asked).toHaveLength(0);
+    // Its own text, scripts and previous turn: another message is another question.
+    expect(planner.cached({ ...request, previousSameRole: '전' })).toBeUndefined();
+    expect(planner.cached({ ...request, scripts: [script({ out: '<b>$1</b>' })] })).toBeUndefined();
+  });
+
+  it('knows the scripts by what they say, so a plot read again keeps its answers', async () => {
+    const planner = createDisplayPlanner(() => new StubWorker());
+    const first = planner.plan(request);
+    StubWorker.made[0]!.ready();
+    StubWorker.made[0]!.answer(EMPTY);
+    await first;
+    expect(planner.cached({ ...request, scripts: [script()] })).toEqual(EMPTY);
+  });
+
+  it('asks once for a message drawn twice before its answer lands', async () => {
+    const planner = createDisplayPlanner(() => new StubWorker());
+    const one = planner.plan(request);
+    const two = planner.plan({ ...request });
+    const worker = StubWorker.made[0]!;
+    worker.ready();
+    expect(worker.asked).toHaveLength(1);
+    worker.answer(EMPTY);
+    await expect(Promise.all([one, two])).resolves.toEqual([EMPTY, EMPTY]);
+  });
+
+  it('keeps a message that hung as prose, so it never holds the queue up again', async () => {
+    vi.useFakeTimers();
+    const planner = createDisplayPlanner(() => new StubWorker());
+    const hung = planner.plan(request);
+    StubWorker.made[0]!.deaf = true;
+    StubWorker.made[0]!.ready();
+    vi.advanceTimersByTime(1001);
+    await expect(hung).resolves.toBeNull();
+    expect(planner.cached(request)).toBeNull();
+    await expect(planner.plan(request)).resolves.toBeNull();
+    expect(StubWorker.made).toHaveLength(1);
   });
 });
 

@@ -836,7 +836,7 @@
     "scriptDialogAnswer": "回答",
     "scriptDialogYes": "はい",
     "scriptDialogNo": "いいえ",
-    "scriptStopped": "作品のスクリプトがこのメッセージを送信しませんでした。書いた文章は入力欄に残っています。",
+    "scriptStopped": "作品のスクリプトが今回の返信を止めました。",
     "scriptFinishFailed": "作品のスクリプトが直前の返信を仕上げられませんでした。次のメッセージはその返信をそのままにして続きます。",
     "scriptSimilarityPreparing": "作品のスクリプトが文章を比べるモデルを読み込んでいます。初回は時間がかかることがあります。",
     "similarityModel": "スクリプトの類似度検索モデル",
