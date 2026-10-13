@@ -105,7 +105,7 @@ function OptionRow({
           />
         ))}
       </div>
-      <span className="block text-xs text-muted/80">
+      <span className="block text-xs text-muted">
         {t(`${name}Hints.${value || 'unset'}`)}
       </span>
     </div>
@@ -242,7 +242,7 @@ export function PlotStyleEditor({
               />
             ))}
           </div>
-          <span className="block text-xs text-muted/80">
+          <span className="block text-xs text-muted">
             {t('moodsHint', { max: MAX_PLOT_MOODS })}
           </span>
         </div>
@@ -262,8 +262,8 @@ export function PlotStyleEditor({
             checked={style?.statusWindow ?? false}
             onChange={(checked) => set({ statusWindow: checked })}
           />
-          <span className="block text-xs text-muted/80">{t('statusWindowHint')}</span>
-          <span className="block text-xs text-muted/80">{t('statusWindowIntroHint')}</span>
+          <span className="block text-xs text-muted">{t('statusWindowHint')}</span>
+          <span className="block text-xs text-muted">{t('statusWindowIntroHint')}</span>
         </div>
         <OptionRow
           name="choices"

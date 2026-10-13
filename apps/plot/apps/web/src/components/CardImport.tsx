@@ -56,7 +56,7 @@ export function RealmImportForm({
           </Button>
         </div>
       </Field>
-      <p className="text-xs text-muted/80">
+      <p className="text-xs text-muted">
         {t.rich('realmBrowse', {
           link: (chunks) => (
             <a

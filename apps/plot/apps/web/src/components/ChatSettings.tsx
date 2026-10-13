@@ -83,7 +83,7 @@ export function ChatSettings({
           {label}
         </label>
         {control}
-        {hint ? <p className="text-xs text-muted/80">{hint}</p> : null}
+        {hint ? <p className="text-xs text-muted">{hint}</p> : null}
       </div>
     ) : (
       control

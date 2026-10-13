@@ -93,7 +93,7 @@ export function ComponentCodeEditor({
           checked={capabilities.includes('sendTurn')}
           onChange={(allowed) => onChangeCapabilities(allowed ? ['sendTurn'] : [])}
         />
-        <p className="text-xs text-muted/80">{t('componentSendTurnHint')}</p>
+        <p className="text-xs text-muted">{t('componentSendTurnHint')}</p>
       </div>
 
       <Field label={t('componentCall')} hint={t('componentCallHint')}>

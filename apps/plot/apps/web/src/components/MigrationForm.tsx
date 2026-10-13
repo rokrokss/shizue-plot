@@ -108,7 +108,7 @@ function Chips({
           );
         })}
       </div>
-      <span className="block text-xs text-muted/80">
+      <span className="block text-xs text-muted">
         {multi && field.maxChoices ? `${t('maxChoices', { max: field.maxChoices })} · ` : ''}
         {t('choiceHint')}
       </span>
@@ -178,7 +178,7 @@ function FieldBlock({
       {choice ? <Chips field={field} path={path} value={value} onChange={onChange} /> : null}
 
       {!choice ? (
-        <p className="flex flex-wrap gap-x-3 text-xs text-muted/80">
+        <p className="flex flex-wrap gap-x-3 text-xs text-muted">
           {field.kind === 'keywords' ? <span>{t('keywordsHint')}</span> : null}
           {field.kind === 'turns' ? <span>{t('turnsHint')}</span> : null}
           <span className="ml-auto tabular-nums">
@@ -334,7 +334,7 @@ function SectionBlock({
             >
               {t('addRow', { section: section.label })}
             </Button>
-            <span className="text-xs text-muted/80">{t('addRowKey')}</span>
+            <span className="text-xs text-muted">{t('addRowKey')}</span>
           </div>
         </>
       ) : null}

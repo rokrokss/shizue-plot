@@ -321,7 +321,7 @@ function CommentForm({
       <ErrorText>{error}</ErrorText>
       <div className="flex items-center gap-3">
         <Checkbox label={t('spoiler')} checked={spoiler} onChange={setSpoiler} />
-        <span className="text-xs text-muted/80">
+        <span className="text-xs text-muted">
           {content.length}/{MAX_COMMENT_LENGTH}
         </span>
         <Button

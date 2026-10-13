@@ -75,7 +75,7 @@ export function TagInput({
       />
       {suggestions.length > 0 && value.length < MAX_TAGS ? (
         <div className="space-y-1.5">
-          <p className="text-xs text-muted/80">{t('genreSuggestions')}</p>
+          <p className="text-xs text-muted">{t('genreSuggestions')}</p>
           <ul className="flex flex-wrap gap-1.5">
             {suggestions.map((tag) => (
               <li key={tag}>

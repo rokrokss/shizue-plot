@@ -412,7 +412,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
               checked={commentsEnabled}
               onChange={setCommentsEnabled}
             />
-            <p className="text-xs text-muted/80">{t('commentsEnabledHint')}</p>
+            <p className="text-xs text-muted">{t('commentsEnabledHint')}</p>
           </Section>
 
           <Section title={t('world')} action={<AiBadge />}>
@@ -429,7 +429,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
           {/* How it is written, as opposed to what it is about — the narrator
               included, which is why it is no longer beside the world. */}
           <Section title={t('style')} action={<AiBadge />}>
-            <p className="text-xs text-muted/80">{t('styleHint')}</p>
+            <p className="text-xs text-muted">{t('styleHint')}</p>
             <PlotStyleEditor
               style={style}
               narrator={narrator}
@@ -470,8 +470,8 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
               </Button>
             }
           >
-            <p className="text-xs text-muted/80">{t('introsHint')}</p>
-            <p className="text-xs text-muted/80">{t('speechProtocolHint')}</p>
+            <p className="text-xs text-muted">{t('introsHint')}</p>
+            <p className="text-xs text-muted">{t('speechProtocolHint')}</p>
             {intros.length === 0 ? <p className="text-sm text-muted">{t('introsEmpty')}</p> : null}
             {intros.map((text, index) => (
               <Field key={index} label={t('introLabel', { index: index + 1 })} badge={<PublicBadge />}>
@@ -502,9 +502,9 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
           <ProfilesSection profiles={profiles} onChange={setProfiles} />
 
           <Section title={t('lorebook')} action={<AiBadge />}>
-            <p className="text-xs text-muted/80">{t('lorebookHint')}</p>
+            <p className="text-xs text-muted">{t('lorebookHint')}</p>
             <LoreBudgetNote plotTokens={plot.plotLoreConstantTokens} members={members} />
-            <p className="text-xs text-muted/80">{t('loreBudgetHint')}</p>
+            <p className="text-xs text-muted">{t('loreBudgetHint')}</p>
             {members[0] ? <LoreBudgetInput member={members[0]} onPatch={patchMember} /> : null}
             <LorebookFileActions
               entries={lorebook}
@@ -519,12 +519,12 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
           {/* The editors carry their own controls, so they sit beside a heading
               rather than inside a Field, whose <label> would swallow the clicks. */}
           <Section title={t('customUi')}>
-            <p className="text-xs text-muted/80">{t('customUiHint')}</p>
+            <p className="text-xs text-muted">{t('customUiHint')}</p>
 
             <h3 className="text-xs font-medium text-muted">
               {t('displayScripts')}
             </h3>
-            <p className="text-xs text-muted/80">{t('displayScriptsHint')}</p>
+            <p className="text-xs text-muted">{t('displayScriptsHint')}</p>
             <DisplayScriptEditor scripts={scripts} onChange={setScripts} />
 
             <Field label={t('creatorCss')} hint={t('creatorCssHint')}>
@@ -540,13 +540,13 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
             <h3 className="text-xs font-medium text-muted">
               {t('defaultVariables')}
             </h3>
-            <p className="text-xs text-muted/80">{t('defaultVariablesHint')}</p>
+            <p className="text-xs text-muted">{t('defaultVariablesHint')}</p>
             <DefaultVariablesEditor variables={variables} onChange={setVariables} />
 
             <h3 className="text-xs font-medium text-muted">
               {t('componentCode')}
             </h3>
-            <p className="text-xs text-muted/80">{t('componentCodeSectionHint')}</p>
+            <p className="text-xs text-muted">{t('componentCodeSectionHint')}</p>
             <ComponentCodeEditor
               code={componentCode}
               capabilities={capabilities}
@@ -606,7 +606,7 @@ function ProfilesSection({
         </span>
       }
     >
-      <p className="text-xs text-muted/80">{t('profilesHint')}</p>
+      <p className="text-xs text-muted">{t('profilesHint')}</p>
 
       {profiles.length === 0 ? <p className="text-sm text-muted">{t('profilesEmpty')}</p> : null}
 
@@ -716,7 +716,7 @@ function MembersSection({
         </span>
       }
     >
-      <p className="text-xs text-muted/80">{t('membersHint')}</p>
+      <p className="text-xs text-muted">{t('membersHint')}</p>
 
       {members.length === 0 ? <p className="text-sm text-muted">{t('membersEmpty')}</p> : null}
 
@@ -835,7 +835,7 @@ function MembersSection({
                 <h3 className="text-xs font-medium text-muted">{t('memberLorebook')}</h3>
                 <AiBadge />
               </div>
-              <p className="text-xs text-muted/80">{t('memberLorebookHint')}</p>
+              <p className="text-xs text-muted">{t('memberLorebookHint')}</p>
               <LoreBudgetNote plotTokens={plotLoreConstantTokens} members={members} />
               <LorebookFileActions
                 entries={member.card.lorebook}
@@ -869,7 +869,7 @@ function MembersSection({
                   </a>
                 ))}
               </div>
-              <p className="text-xs text-muted/80">{t('memberExportHint')}</p>
+              <p className="text-xs text-muted">{t('memberExportHint')}</p>
             </div>
           </div>
         </details>
@@ -1052,7 +1052,7 @@ function MemberAvatarPicker({
             {t('avatarRemove')}
           </Button>
         ) : (
-          <span className="text-xs text-muted/80">{t('avatarHint')}</span>
+          <span className="text-xs text-muted">{t('avatarHint')}</span>
         )}
         <ErrorText>{error}</ErrorText>
       </div>
@@ -1145,7 +1145,7 @@ function CoverPicker({
           </Button>
         ) : null}
       </div>
-      <span className="block text-xs text-muted/80">{t('coverHint')}</span>
+      <span className="block text-xs text-muted">{t('coverHint')}</span>
       <ErrorText>{error}</ErrorText>
     </div>
   );
@@ -1259,9 +1259,9 @@ function VisibilitySection({
       >
         {published ? t('unpublish') : t('publish')}
       </Button>
-      {published ? null : <p className="text-xs text-muted/80">{t('publishHint')}</p>}
+      {published ? null : <p className="text-xs text-muted">{t('publishHint')}</p>}
       {published && imported.length > 0 && plot.rightsConfirmedAt ? (
-        <p className="text-xs text-muted/80">
+        <p className="text-xs text-muted">
           {rights('confirmedAt', {
             date: format.dateTime(new Date(plot.rightsConfirmedAt), { dateStyle: 'medium' }),
           })}

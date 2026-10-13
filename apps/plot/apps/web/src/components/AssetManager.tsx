@@ -127,7 +127,7 @@ export function AssetManager({ plotId }: { plotId: string }) {
         </span>
       }
     >
-      <p className="text-xs text-muted/80">{t('assetsHint')}</p>
+      <p className="text-xs text-muted">{t('assetsHint')}</p>
 
       {assets.length > 0 ? (
         <ul className="grid grid-cols-3 gap-3 sm:grid-cols-4">
@@ -344,7 +344,7 @@ function UnlockEditor({
           ✕
         </Button>
       </div>
-      <p className="text-xs text-muted/80">{t('assetUnlockHint')}</p>
+      <p className="text-xs text-muted">{t('assetUnlockHint')}</p>
 
       <Field label={t('assetUnlock')}>
         <Select

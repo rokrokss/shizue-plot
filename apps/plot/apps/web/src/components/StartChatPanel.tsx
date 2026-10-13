@@ -142,7 +142,7 @@ export function StartChatPanel({
               </li>
             ))}
           </ul>
-          <span className="block text-xs text-muted/80">{t('profilesHint')}</span>
+          <span className="block text-xs text-muted">{t('profilesHint')}</span>
         </div>
       ) : null}
 

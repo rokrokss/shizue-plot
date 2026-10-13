@@ -197,7 +197,7 @@ export function ImagesStep({
             {t('count', { count: images.length, max: MAX_ASSETS })}
           </span>
         </div>
-        <p className={cx('text-xs', restoredWithoutImages ? 'text-danger' : 'text-muted/80')}>
+        <p className={cx('text-xs', restoredWithoutImages ? 'text-danger' : 'text-muted')}>
           {restoredWithoutImages ? t('readd') : t('notSaved')}
         </p>
       </section>

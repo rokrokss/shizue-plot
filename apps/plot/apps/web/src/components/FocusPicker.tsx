@@ -81,7 +81,7 @@ export function FocusPicker({
               );
             })}
           </div>
-          <p className="text-xs text-muted/80">{t('focusHint')}</p>
+          <p className="text-xs text-muted">{t('focusHint')}</p>
         </div>
       ) : null}
     </div>

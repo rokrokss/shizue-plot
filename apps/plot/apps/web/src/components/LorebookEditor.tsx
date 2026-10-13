@@ -232,7 +232,7 @@ export function LorebookEditor({
                 {t('loreAdvanced')}
               </summary>
               <div className="space-y-4 border-t border-line px-3 py-3">
-                <p className="text-xs text-muted/80">{t('loreAdvancedHint')}</p>
+                <p className="text-xs text-muted">{t('loreAdvancedHint')}</p>
                 <div className="grid gap-4 sm:grid-cols-2">
                   <Field label={t('loreDepth')} hint={t('loreDepthHint')}>
                     <TextInput
