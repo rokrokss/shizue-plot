@@ -58,6 +58,7 @@ export const MessageRow = memo(function MessageRow({
   shown,
   name,
   avatar,
+  userImage,
   assets,
   resolveAsset,
   attachments,
@@ -91,6 +92,8 @@ export const MessageRow = memo(function MessageRow({
   shown?: string;
   name: string;
   avatar: string | null;
+  /** The reader's persona picture, for RisuAI's `{{source::user}}` in the message's markup. */
+  userImage?: string | null;
   /** Character images by slug, for the `{{img::slug}}` references in the message. */
   assets: ReadonlyMap<string, string>;
   /** The same references by an imported card's own image names; slugs only without it. */
@@ -392,6 +395,7 @@ export const MessageRow = memo(function MessageRow({
               previousSameRole={previousSameRole ?? ''}
               {...(chatIndex !== undefined ? { chatIndex } : {})}
               streaming={streaming}
+              {...(userImage ? { userImage } : {})}
             />
             {thinking ? <ThinkingClock /> : null}
             {streaming ? (

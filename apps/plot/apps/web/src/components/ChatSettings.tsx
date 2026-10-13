@@ -3,6 +3,7 @@
 import { useTranslations } from 'next-intl';
 import { useId, type ReactNode } from 'react';
 import type { ModelInfo, Persona, PresetInfo } from '@/lib/types';
+import { PersonaFace } from './Avatar';
 import { Select } from './ui';
 
 /** Effort words the catalogues translate; any other word a model advertises is shown as it is. */
@@ -195,21 +196,23 @@ export function ChatSettings({
       {field(
         'persona',
         t('persona'),
-        <Select
-          value={personaId ?? ''}
-          disabled={disabled}
-          {...(locked ? { title: locked } : {})}
-          {...nameOf('persona', t('persona'))}
-          className={selectClass}
-          onChange={(event) => onChange({ personaId: event.target.value || null })}
-        >
-          <option value="">{t('noPersona')}</option>
-          {personas.map((persona) => (
-            <option key={persona.id} value={persona.id}>
-              {persona.name}
-            </option>
-          ))}
-        </Select>,
+        <PersonaFace persona={personas.find((persona) => persona.id === personaId)} compact={!stacked}>
+          <Select
+            value={personaId ?? ''}
+            disabled={disabled}
+            {...(locked ? { title: locked } : {})}
+            {...nameOf('persona', t('persona'))}
+            className={selectClass}
+            onChange={(event) => onChange({ personaId: event.target.value || null })}
+          >
+            <option value="">{t('noPersona')}</option>
+            {personas.map((persona) => (
+              <option key={persona.id} value={persona.id}>
+                {persona.name}
+              </option>
+            ))}
+          </Select>
+        </PersonaFace>,
       )}
     </div>
   );

@@ -259,13 +259,22 @@ const escapeAttribute = (value: string): string =>
  * a component, and markup cannot hold one; the marker it resolves to is an
  * address on our origin, and handed to an `<img>` it would ask the page for
  * itself.
+ *
+ * RisuAI's `{{source::user}}` is the reader's persona picture (`userImage`), an
+ * address like `{{raw::…}}`'s and drawn where one is; `{{source::char}}` stays
+ * dropped (`CbsContext.userImage`).
  */
 export function renderImageTokensAsHtml(
   content: string,
   assets: ReadonlyMap<string, string>,
   resolve?: AssetResolver,
+  userImage?: string | null,
 ): string {
   return replaceAssetMacros(content, (macro) => {
+    if (macro.name === 'source') {
+      const own = macro.ref?.toLowerCase() === 'user' ? userImage : null;
+      return own && isAddressPosition(content, macro.start) ? own : '';
+    }
     if (macro.kind === 'drop' || macro.ref === null) return '';
     const found = lookupAsset(macro.ref, assets, resolve);
     if (!found || readLockKind(found.src)) return '';

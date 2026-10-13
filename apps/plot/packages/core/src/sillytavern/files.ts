@@ -16,12 +16,14 @@ export interface StFile {
   read(): Promise<Uint8Array>;
 }
 
-export type StFileKind = 'settings' | 'character' | 'chat' | 'group' | 'world';
+export type StFileKind = 'settings' | 'character' | 'chat' | 'group' | 'world' | 'avatar';
 
 /**
  * Largest file read, by kind, in bytes. A character card's limit is the card
  * import's own (`MAX_CARD_IMPORT_BYTES`); settings.json grows with every
- * extension's settings; a chat of tens of thousands of messages fits in 64 MiB.
+ * extension's settings; a chat of tens of thousands of messages fits in 64 MiB;
+ * a persona's picture is held to the API's cap on an uploaded image
+ * (`MAX_IMAGE_BYTES`, apps/api `avatar.ts`), since that is where it goes.
  */
 export interface StCaps {
   settings: number;
@@ -29,6 +31,7 @@ export interface StCaps {
   chat: number;
   group: number;
   world: number;
+  avatar: number;
 }
 
 const MIB = 1024 * 1024;
@@ -39,14 +42,19 @@ export const ST_CAPS: StCaps = {
   chat: 64 * MIB,
   group: 1 * MIB,
   world: 16 * MIB,
+  avatar: 5 * MIB,
 };
+
+/** The picture types a persona's avatar may be, as the API takes them. */
+const AVATAR_RE = /\.(?:png|jpe?g|gif|webp)$/i;
 
 /**
  * What a path under the root is, or undefined when the import leaves it alone.
  * The shapes are ST's own directories (`USER_DIRECTORY_TEMPLATE` in
  * `src/constants.js`) and the extensions ST itself lists by: a character is a
  * `.png` directly in `characters/`, its chats are `chats/<avatar stem>/*.jsonl`,
- * a group's are `group chats/<chat id>.jsonl`.
+ * a group's are `group chats/<chat id>.jsonl`, and a persona's picture is the
+ * file `power_user.personas` names it by, in `User Avatars/`.
  */
 export function stFileKind(path: string): StFileKind | undefined {
   const parts = path.split('/');
@@ -57,6 +65,7 @@ export function stFileKind(path: string): StFileKind | undefined {
     if (dir === 'group chats' && name!.endsWith('.jsonl')) return 'chat';
     if (dir === 'groups' && name!.endsWith('.json')) return 'group';
     if (dir === 'worlds' && name!.endsWith('.json')) return 'world';
+    if (dir === 'User Avatars' && AVATAR_RE.test(name!)) return 'avatar';
     return undefined;
   }
   if (parts.length === 3 && dir === 'chats' && parts[2]!.endsWith('.jsonl')) return 'chat';

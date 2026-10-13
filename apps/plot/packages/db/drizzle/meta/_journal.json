@@ -43,6 +43,13 @@
       "when": 1791891189184,
       "tag": "0005_chat_sub_model",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1791928447000,
+      "tag": "0006_persona_avatar",
+      "breakpoints": true
     }
   ]
 }

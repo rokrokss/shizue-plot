@@ -479,7 +479,8 @@
         "world_missing": "ロアブックのファイルがないため付けられませんでした:{name}",
         "world_unreadable": "ロアブックのファイルを読み込めなかったため、除いて読み込みました:{name}",
         "extras_failed": "追加ロアブック・スクリプトを付けられませんでした:{message}",
-        "chat_world_failed": "チャットに紐づいたロアブックを付けられませんでした:{name}({message})"
+        "chat_world_failed": "チャットに紐づいたロアブックを付けられませんでした:{name}({message})",
+        "avatar_failed": "ペルソナの画像を読み込めませんでした:{message}"
       },
       "notices": {
         "chat_world_attached": "このチャットに紐づいていたロアブック「{name}」をプロットのロアブックに付けました。このプロットのほかのチャットにも適用されます。",
@@ -968,7 +969,11 @@
     "namePlaceholder": "ペルソナ名",
     "descriptionPlaceholder": "例：20代の大学院生。口数は少なく観察が好き。",
     "empty": "ペルソナがまだありません。",
-    "create": "作成"
+    "create": "作成",
+    "avatarUpload": "画像をアップロード",
+    "avatarUploading": "アップロード中…",
+    "avatarRemove": "画像を削除",
+    "avatarHint": "png · jpg · gif · webp · 5MB以下"
   },
   "notes": {
     "title": "ノート",

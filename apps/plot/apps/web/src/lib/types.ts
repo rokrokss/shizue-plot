@@ -387,6 +387,8 @@ export interface Persona {
   id: string;
   name: string;
   description: string;
+  /** Its picture, served to its owner only (`/api/personas/:id/avatar`), or null. */
+  avatarUrl: string | null;
   createdAt: string;
 }
 

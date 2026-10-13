@@ -54,6 +54,11 @@ export interface CbsContext {
   char: string;
   user: string;
   /**
+   * The reader's persona's picture, a same-origin address, for RisuAI's
+   * `{{source::user}}`; unset, the macro draws nothing, as RisuAI's does without one.
+   */
+  userImage?: string;
+  /**
    * This message's place on the branch as RisuAI counts it, for `{{chat_index}}`:
    * the greeting is -1 and the first message after it 0. Counted within the loaded
    * stretch when earlier messages have not been read. Unset, the macro stays as written.
@@ -383,6 +388,13 @@ function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>): CbsHos
         }
       }
       if (call.name === 'bg' && ctx.background) return backdrop(call);
+      // RisuAI's `{{source::user}}` is the address of the reader's own picture, in
+      // markup or out. `{{source::char}}` names the one character of a RisuAI chat,
+      // which a plot of several has no single answer for, so it stays dropped.
+      if (call.name === 'source') {
+        const which = call.args.rest(1)?.value().text.trim().toLowerCase();
+        return { text: which === 'user' && ctx.userImage ? ctx.userImage : '' };
+      }
       const kind = assetMacroKind(call.name);
       return kind ? asset(call, kind) : undefined;
     },

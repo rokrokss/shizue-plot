@@ -207,6 +207,8 @@ export interface ScriptView {
   backgroundHtml: string;
   /** The member's avatar, a same-origin address, or null. */
   avatarUrl: string | null;
+  /** The chat's persona's picture, a same-origin address, or null — Lua's `getPersonaImage`. */
+  personaAvatarUrl: string | null;
 }
 
 interface Usage {
@@ -496,7 +498,7 @@ async function buildRequestMessages(
  * script on the card runs, in trigger order, as RisuAI runs them. What they read
  * is what the browser hands its sandbox (web `lua/engine.ts`, `snapshotOf`):
  * the member as the request triggers have it, the whole branch, and
- * `scriptView`'s note, first message, background and avatar.
+ * `scriptView`'s note, first message, background, avatar and persona picture.
  */
 export function requestLuaInput(
   plan: Pick<
@@ -538,6 +540,7 @@ export function requestLuaInput(
       },
       user: plan.userName,
       persona: plan.personaText,
+      personaImage: characterImage(view?.personaAvatarUrl),
       note: view?.note ?? '',
       lowLevel: false,
     },

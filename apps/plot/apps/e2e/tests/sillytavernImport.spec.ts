@@ -6,9 +6,9 @@ import { expect, test, type BrowserContext, type Page } from '@playwright/test';
  * The SillyTavern move along the owner's path: a backup zip built here — two
  * characters (one with a linked World Info file, an extra lorebook and a chat
  * with swipes, a narrator line and a hidden line), a group of both with a group
- * chat, a persona, and a settings.json holding a proxy password beside a
- * secrets.json — goes through the wizard; the plots, members, lorebooks, chats
- * and persona it makes are read back; no request the page made carries anything
+ * chat, a persona with its picture, and a settings.json holding a proxy password
+ * beside a secrets.json — goes through the wizard; the plots, members, lorebooks,
+ * chats and persona it makes are read back; no request the page made carries anything
  * of settings.json or secrets.json; and a second pass over the same zip finds
  * everything already imported.
  *
@@ -29,6 +29,8 @@ const origin = process.env['E2E_WEB_URL'] ?? 'http://localhost:13000';
 const PROXY_PASSWORD = `proxy-pass-${run}`;
 const API_KEY = `sk-secret-${run}`;
 const BACKGROUND = `BACKGROUND-BYTES-${run}`;
+/** A text chunk on the persona's picture, which the upload strips. */
+const PICTURE_NOTE = `picture-note-${run}`;
 
 const persona = `여행자${run}`;
 const alice = '앨리스';
@@ -58,6 +60,21 @@ function cardPng(data: Record<string, unknown>): Buffer {
     chunk('IHDR', header),
     chunk('tEXt', Buffer.concat([Buffer.from('chara\0', 'latin1'), Buffer.from(Buffer.from(JSON.stringify(card)).toString('base64'), 'latin1')])),
     chunk('IDAT', deflateSync(Buffer.from([0, 0x32, 0xcc, 0xbc, 0xff]))),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+/** A one-pixel PNG with a text chunk, as a persona's picture in `User Avatars/`. */
+function picturePng(note: string): Buffer {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(1, 0);
+  header.writeUInt32BE(1, 4);
+  header.set([8, 6, 0, 0, 0], 8);
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', header),
+    chunk('tEXt', Buffer.from(`Comment\0${note}`, 'latin1')),
+    chunk('IDAT', deflateSync(Buffer.from([0, 0xcb, 0xfb, 0xf6, 0xff]))),
     chunk('IEND', Buffer.alloc(0)),
   ]);
 }
@@ -138,6 +155,7 @@ const backup = storedZip({
     extension_settings: { regex: [] },
   }),
   'secrets.json': JSON.stringify({ api_key_openai: API_KEY }),
+  'User Avatars/traveler.png': picturePng(PICTURE_NOTE),
   'characters/Alice.png': cardPng(
     card(alice, { world: 'Wonderland' }, {
       entries: [{ keys: ['stale'], content: 'stale embedded entry', enabled: true, insertion_order: 0, extensions: {} }],
@@ -250,6 +268,8 @@ test('the wizard reads the backup and lists what it holds', async () => {
   await expect(page.getByTestId('st-character')).toHaveCount(2);
   await expect(page.getByTestId('st-group')).toHaveCount(1);
   await expect(page.getByTestId('st-persona')).toHaveCount(1);
+  // The persona's picture is its face in the list, as a card's is.
+  await expect(page.getByTestId('st-persona').locator('img')).toBeVisible();
   await expect(page.getByTestId('st-group')).toContainText(`${alice}, ${bob}`);
   await expect(page.getByTestId('st-character').filter({ hasText: alice })).toContainText('로어북 Wonderland');
   // The things that do not come over are named, not just left out.
@@ -289,10 +309,16 @@ test('the plots carry their cards, the linked world and the extra lorebook', asy
 });
 
 test('the chats come over with their swipes, speakers and persona', async () => {
-  const [made] = (await api<{ id: string; name: string; description: string }[]>('/api/personas')).filter(
-    (each) => each.name === persona,
-  );
+  const [made] = (
+    await api<{ id: string; name: string; description: string; avatarUrl: string | null }[]>('/api/personas')
+  ).filter((each) => each.name === persona);
   expect(made?.description).toBe('길을 잃은 여행자');
+  // Its picture came with it, through the upload that strips what a PNG carries.
+  expect(made?.avatarUrl).toBe(`/api/personas/${made!.id}/avatar`);
+  const picture = await page.request.get(`${origin}${made!.avatarUrl}`);
+  expect(picture.status()).toBe(200);
+  expect(picture.headers()['content-type']).toBe('image/png');
+  expect((await picture.body()).toString('latin1')).not.toContain(PICTURE_NOTE);
 
   const chats = await api<ChatRow[]>('/api/chats');
   const solo = chats.find((chat) => chat.plotId === plotNamed(alice).id)!;

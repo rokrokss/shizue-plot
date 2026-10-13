@@ -32,7 +32,7 @@ vi.mock('@/lib/authClient', () => ({
 }));
 
 const personas: Persona[] = [
-  { id: 'per_1', name: '내 페르소나', description: '', createdAt: '2026-08-16T00:00:00.000Z' },
+  { id: 'per_1', name: '내 페르소나', description: '', avatarUrl: null, createdAt: '2026-08-16T00:00:00.000Z' },
 ];
 
 vi.mock('@/lib/api', async (importOriginal) => ({

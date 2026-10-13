@@ -1,10 +1,11 @@
 'use client';
 
 import { useTranslations } from 'next-intl';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Avatar } from '@/components/Avatar';
 import { CreatorTabs } from '@/components/CreatorTabs';
 import { Button, ErrorText, Field, Section, Spinner, TextArea, TextInput } from '@/components/ui';
-import { apiDelete, apiGet, apiSend } from '@/lib/api';
+import { apiDelete, apiGet, apiSend, apiUpload } from '@/lib/api';
 import type { Persona } from '@/lib/types';
 import { useDocumentTitle } from '@/lib/useDocumentTitle';
 import { useErrorMessage } from '@/lib/useErrorMessage';
@@ -153,11 +154,13 @@ function PersonaCard({
   const [name, setName] = useState(persona.name);
   const [description, setDescription] = useState(persona.description);
   const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
 
   const dirty = name !== persona.name || description !== persona.description;
+  const busy = saving || deleting || uploading;
 
   async function save(): Promise<void> {
-    if (saving || deleting) return;
+    if (busy) return;
     setSaving(true);
     try {
       onSaved(await apiSend<Persona>('PUT', `/api/personas/${persona.id}`, { name, description }));
@@ -169,7 +172,13 @@ function PersonaCard({
   }
 
   return (
-    <fieldset disabled={saving || deleting} aria-busy={saving || deleting || undefined} className="min-w-0 space-y-4 border border-line bg-surface/60 p-5">
+    <fieldset disabled={busy} aria-busy={busy || undefined} className="min-w-0 space-y-4 border border-line bg-surface/60 p-5">
+      <PersonaAvatarPicker
+        persona={persona}
+        name={name}
+        onChange={onSaved}
+        onBusyChange={setUploading}
+      />
       <Field label={t('name')}>
         <TextInput value={name} onChange={(event) => setName(event.target.value)} />
       </Field>
@@ -189,5 +198,91 @@ function PersonaCard({
         </Button>
       </div>
     </fieldset>
+  );
+}
+
+/**
+ * The persona's picture, as a member's avatar is set in the studio: the upload
+ * answers with the persona alone, so it takes effect at once and leaves the name
+ * and description being written beside it standing — and the preview is
+ * cache-busted, since the URL is derived from the persona id and a replaced
+ * image would otherwise be the browser's old copy.
+ */
+function PersonaAvatarPicker({
+  persona,
+  name,
+  onChange,
+  onBusyChange,
+}: {
+  persona: Persona;
+  /** The name as it is being written, for the initial while there is no picture. */
+  name: string;
+  onChange: (persona: Persona) => void;
+  onBusyChange: (busy: boolean) => void;
+}) {
+  const t = useTranslations('personas');
+  const toMessage = useErrorMessage();
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [version, setVersion] = useState(0);
+
+  async function run(send: () => Promise<Persona>): Promise<void> {
+    if (busy) return;
+    setBusy(true);
+    onBusyChange(true);
+    setError('');
+    try {
+      onChange(await send());
+      setVersion((current) => current + 1);
+    } catch (caught) {
+      setError(toMessage(caught));
+    } finally {
+      setBusy(false);
+      onBusyChange(false);
+      if (fileInput.current) fileInput.current.value = '';
+    }
+  }
+
+  const path = `/api/personas/${persona.id}/avatar`;
+
+  return (
+    <div className="flex items-center gap-3">
+      <Avatar
+        src={persona.avatarUrl ? `${persona.avatarUrl}?v=${version}` : null}
+        name={name || persona.name}
+        className="size-14 text-xl"
+      />
+      <div className="flex flex-col items-start gap-1">
+        <input
+          ref={fileInput}
+          data-testid="persona-avatar-input"
+          type="file"
+          accept="image/png,image/jpeg,image/gif,image/webp"
+          hidden
+          onChange={(event) => {
+            const picked = event.target.files?.[0];
+            if (picked) void run(() => apiUpload<Persona>(path, picked));
+          }}
+        />
+        <Button size="sm" disabled={busy} onClick={() => fileInput.current?.click()}>
+          {busy ? t('avatarUploading') : t('avatarUpload')}
+        </Button>
+        {persona.avatarUrl ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={busy}
+            onClick={() => void run(() => apiSend<Persona>('DELETE', path))}
+          >
+            {t('avatarRemove')}
+          </Button>
+        ) : (
+          <span className="text-xs text-muted">{t('avatarHint')}</span>
+        )}
+        <ErrorText>{error}</ErrorText>
+      </div>
+    </div>
   );
 }

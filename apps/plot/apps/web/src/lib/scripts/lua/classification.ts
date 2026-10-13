@@ -131,7 +131,10 @@ export const LUA_CLASSIFICATION: Readonly<Record<string, LuaSupport>> = {
     'the member’s avatar as the markup RisuAI’s inlay token draws (`<div class="risu-inlay-image"><img>`), which a message or the display draws here; the model reads it as text; empty without one',
   ),
   getCharacterImageMain: host('browser', 'as getCharacterImage'),
-  getPersonaImage: wrapper('browser', 'a persona has no picture here: empty, RisuAI’s answer for one without'),
+  getPersonaImage: wrapper(
+    'browser',
+    'the chat’s persona’s picture as the markup RisuAI’s inlay token draws (`<div class="risu-inlay-image"><img>`), which a message or the display draws here; the model reads it as text; empty without one',
+  ),
   getPersonaImageMain: host('browser', 'as getPersonaImage'),
 
   // Model, network, images

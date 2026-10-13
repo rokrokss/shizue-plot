@@ -116,6 +116,7 @@ const snapshot = (extra: Partial<LuaSnapshot> = {}): LuaSnapshot => ({
   char: { name: '리안', nickname: '', description: '사서.', firstMessage: '첫 인사', background: '', image: '', lore: [] },
   user: '아린',
   persona: '{{user}}는 여행자',
+  personaImage: '',
   note: '노트',
   lowLevel: false,
   ...extra,
@@ -707,20 +708,19 @@ describe('the Lua sandbox', () => {
     expect(asked).toEqual([]);
   });
 
-  it('answers the character’s picture as the markup it was given, and a persona’s as nothing', async () => {
+  it('answers the character’s and the persona’s pictures as the markup it was given, and nothing without one', async () => {
     const sandbox = sandboxWith();
     const image = '<div class="risu-inlay-image"><img src="/api/plots/p/characters/c/avatar"></div>';
-    const result = await done(
-      sandbox,
-      `onStart = async(function(id)
+    const personaImage = '<div class="risu-inlay-image"><img src="/api/personas/p/avatar"></div>';
+    const code = `onStart = async(function(id)
         setChatVar(id, 'char', getCharacterImage(id))
         setChatVar(id, 'persona', getPersonaImage(id))
-      end)`,
-      start,
-      // No gate in RisuAI: a call without low-level access gets it too.
-      snapshot({ char: { ...snapshot().char, image } }),
-    );
-    expect(Object.fromEntries(result.vars)).toEqual({ char: image, persona: '' });
+      end)`;
+    // No gate in RisuAI: a call without low-level access gets it too.
+    const result = await done(sandbox, code, start, snapshot({ char: { ...snapshot().char, image }, personaImage }));
+    expect(Object.fromEntries(result.vars)).toEqual({ char: image, persona: personaImage });
+    const bare = await done(sandbox, code, start, snapshot());
+    expect(Object.fromEntries(bare.vars)).toEqual({ char: '', persona: '' });
   });
 
   it('refuses what the worker should not be able to hand back', async () => {
@@ -1067,8 +1067,11 @@ listenEdit('editDisplay', function(id, v) setChat(id, 0, '화면') addChat(id, '
         local books = loadLoreBooks(id)
         setChatVar(id, 'books', books[1].data .. '/' .. books[2].data .. '/' .. #books)
         setChatVar(id, 'image', getCharacterImage(id))
+        setChatVar(id, 'persona', getPersonaImage(id))
       end)`),
     ];
+    // Asked when the call starts, since the reader may switch the persona mid-chat.
+    let personaAvatarUrl: string | null = null;
     const engine = createLuaEngine({
       triggers,
       lowLevelAccess: true,
@@ -1082,8 +1085,10 @@ listenEdit('editDisplay', function(id, v) setChat(id, 0, '화면') addChat(id, '
         return { actives: lorebook.map((book) => ({ prompt: book.content, role: 'system' as const })), maxContext: 100 };
       },
       avatarUrl: '/api/plots/p/characters/c/avatar',
+      personaAvatarUrl: () => personaAvatarUrl,
       log: () => undefined,
     });
+    personaAvatarUrl = '/api/personas/p/avatar';
     const result = await runTriggers(
       {
         mode: 'start',
@@ -1111,6 +1116,7 @@ listenEdit('editDisplay', function(id, v) setChat(id, 0, '화면') addChat(id, '
     expect(result.variables['image']).toBe(
       '<div class="risu-inlay-image"><img src="/api/plots/p/characters/c/avatar"></div>',
     );
+    expect(result.variables['persona']).toBe('<div class="risu-inlay-image"><img src="/api/personas/p/avatar"></div>');
   });
 
   it('answers a script’s request with the page’s, and only with low-level access', async () => {

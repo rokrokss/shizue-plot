@@ -509,7 +509,7 @@ export type SkipReason = 'already_imported' | 'persona_exists' | 'chat_empty' | 
 
 /** Something that went wrong on a step without failing it. */
 export interface StepWarning {
-  code: 'world_missing' | 'world_unreadable' | 'extras_failed' | 'chat_world_failed';
+  code: 'world_missing' | 'world_unreadable' | 'extras_failed' | 'chat_world_failed' | 'avatar_failed';
   /** The lorebook it is about. */
   name?: string;
   error?: ApiError;
@@ -903,6 +903,20 @@ async function runPersona(
     description: item.persona.description,
   });
   ctx.personas.set(name, created.id);
+  // Its picture goes through the persona's own upload, which sanitizes it as the
+  // editor's does. The picture is the persona's face, not the persona: one that
+  // cannot come over leaves the persona made, and the step says so.
+  const image = item.persona.image;
+  if (image) {
+    try {
+      const form = new FormData();
+      form.append('file', new File([bytesPart(await readFile(image))], baseName(image.path)));
+      await request<Persona>(ctx, 'POST', `/api/personas/${created.id}/avatar`, form);
+    } catch (caught) {
+      ctx.signal?.throwIfAborted();
+      result.warnings = [{ code: 'avatar_failed', error: asApiError(caught) }];
+    }
+  }
   result.status = 'done';
 }
 

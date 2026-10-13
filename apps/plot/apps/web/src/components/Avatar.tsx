@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react';
+import type { Persona } from '@/lib/types';
 import { cx } from './ui';
 
 /**
@@ -26,6 +28,38 @@ export function Avatar({
       className={cx(shape, 'flex items-center justify-center font-semibold text-link/80')}
     >
       {[...name.trim()][0] ?? '?'}
+    </span>
+  );
+}
+
+/**
+ * The chosen persona's picture beside the select that chose it — an `<option>`
+ * cannot carry one. Only a persona with a picture gets it: an initial would only
+ * repeat the name the select already shows, and with none chosen nothing moves.
+ * Hidden from assistive tech for the same reason; the select is the name.
+ */
+export function PersonaFace({
+  persona,
+  compact = false,
+  children,
+}: {
+  persona: Pick<Persona, 'name' | 'avatarUrl'> | undefined;
+  /** Beside the header's short controls rather than a full-height field. */
+  compact?: boolean;
+  children: ReactNode;
+}) {
+  if (!persona?.avatarUrl) return children;
+  return (
+    <span className="flex min-w-0 items-center gap-2">
+      <span aria-hidden className="shrink-0">
+        <Avatar
+          src={persona.avatarUrl}
+          name={persona.name}
+          className={compact ? 'size-8 text-xs' : 'size-10 text-sm'}
+        />
+      </span>
+      {/* So a long name shrinks the select rather than pushing past the edge. */}
+      <span className="min-w-0 flex-1">{children}</span>
     </span>
   );
 }

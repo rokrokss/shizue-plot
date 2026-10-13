@@ -406,6 +406,8 @@ export const personas = pgTable('personas', {
     .references(() => user.id, { onDelete: 'cascade' }),
   name: text('name').notNull(),
   description: text('description').notNull().default(''),
+  /** Storage key, namespaced `personas/…` (apps/api/src/storage.ts). Served to its owner only. */
+  avatarPath: text('avatar_path'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 

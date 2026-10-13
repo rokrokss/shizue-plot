@@ -84,6 +84,12 @@ export interface LuaEngineOptions {
   lore?(history: string[], lorebook: readonly LoreEntry[]): Promise<LuaLoreAnswer>;
   /** The scripted member's avatar, a same-origin address — RisuAI's `char.image` — or null. */
   avatarUrl?: string | null;
+  /**
+   * The chat's persona's picture as it stands when a call starts, a same-origin
+   * address — RisuAI's user icon — or null. Asked per call: the reader can switch
+   * the persona mid-chat, while the member is the plot's for good.
+   */
+  personaAvatarUrl?: () => string | null;
   log(entry: TriggerLogEntry): void;
 }
 
@@ -148,15 +154,20 @@ function upserted(lorebook: readonly LoreEntry[], books: readonly LuaLoreBook[])
 }
 
 /**
- * What `getCharacterImage` answers: RisuAI hands back an inlay token, which its
- * renderer turns into `<div class="risu-inlay-image"><img …></div>`; that markup
- * itself is what a message or the display draws here, through the sanitizer, the
- * avatar being on our own origin. '' without an avatar, as RisuAI's.
+ * What `getCharacterImage` and `getPersonaImage` answer: RisuAI hands back an
+ * inlay token, which its renderer turns into `<div class="risu-inlay-image"><img …></div>`;
+ * that markup itself is what a message or the display draws here, through the
+ * sanitizer, the picture being on our own origin. '' without one, as RisuAI's.
  */
 export const characterImage = (url: string | null | undefined): string =>
   url ? `<div class="risu-inlay-image"><img src="${escapeHtml(url)}"></div>` : '';
 
-export function snapshotOf(scope: CodeScope, lowLevel: boolean, avatarUrl?: string | null): LuaSnapshot {
+export function snapshotOf(
+  scope: CodeScope,
+  lowLevel: boolean,
+  avatarUrl?: string | null,
+  personaAvatarUrl?: string | null,
+): LuaSnapshot {
   const character = scope.character;
   return {
     vars: Object.entries(scope.variables()),
@@ -179,6 +190,7 @@ export function snapshotOf(scope: CodeScope, lowLevel: boolean, avatarUrl?: stri
     },
     user: scope.user,
     persona: scope.persona,
+    personaImage: characterImage(personaAvatarUrl),
     note: scope.note,
     lowLevel,
   };
@@ -270,7 +282,7 @@ export function createLuaEngine(options: LuaEngineOptions): ScriptEngine {
       if (!options.lore) return Promise.reject(new Error('lore cannot be activated here'));
       return options.lore(history, upserted(scope.character.lorebook, upserts));
     };
-    const outcome = await sandbox.call(code, entry, snapshotOf(scope, lowLevel, options.avatarUrl), { ...host, lore });
+    const outcome = await sandbox.call(code, entry, snapshotOf(scope, lowLevel, options.avatarUrl, options.personaAvatarUrl?.()), { ...host, lore });
     if (outcome.kind !== 'done') {
       report(outcome, entry.kind === 'display');
       return null;

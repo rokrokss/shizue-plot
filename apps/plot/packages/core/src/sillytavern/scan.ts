@@ -11,7 +11,8 @@
  *   `[{ name, extraBooks }]`, where `name` is the character's avatar file name
  *   without its extension (`getCharaFilename`, `public/scripts/utils.js`).
  * - Personas are `power_user.personas` (`{ [avatar]: name }`) with
- *   `power_user.persona_descriptions[avatar].description` (`public/scripts/personas.js`).
+ *   `power_user.persona_descriptions[avatar].description` (`public/scripts/personas.js`);
+ *   the avatar is the picture's file name in `User Avatars/` (`USER_DIRECTORY_TEMPLATE`).
  * - Global regex scripts are `extension_settings.regex`
  *   (`public/scripts/extensions/regex/engine.js`).
  * - The World Info settings sit beside `world_info`, as `world_info_depth`,
@@ -57,6 +58,8 @@ export interface StPersona {
   avatar: string;
   name: string;
   description: string;
+  /** The persona's picture, `User Avatars/<avatar>`, where the directory has it within its cap. */
+  image?: StFile;
 }
 
 export type StSkipReason =
@@ -270,9 +273,10 @@ const sanitizeChatId = (id: string): string =>
 
 /**
  * Reads the directory's settings.json, character cards and groups — and nothing
- * else: chats and worlds are listed by path, for the importer to read the ones
- * the reader picks. Never throws on a bad file; it is skipped and named in
- * `skipped`. Chats and worlds over their cap are skipped up front, by size.
+ * else: chats, worlds and persona pictures are listed by path, for the importer
+ * to read the ones the reader picks. Never throws on a bad file; it is skipped
+ * and named in `skipped`. Chats, worlds and persona pictures over their cap are
+ * skipped up front, by size.
  */
 export async function scanSillyTavern(
   files: StFile[],
@@ -320,11 +324,13 @@ export async function scanSillyTavern(
   const groupChats = new Map<string, StFile>();
   const pngs: StFile[] = [];
   const groupFiles: StFile[] = [];
+  const avatars = new Map<string, StFile>();
   for (const file of files) {
     const kind = stFileKind(file.path);
     const parts = file.path.split('/');
     if (kind === 'character') pngs.push(file);
     else if (kind === 'group') groupFiles.push(file);
+    else if (kind === 'avatar') avatars.set(parts[1]!, file);
     else if (kind === 'world' || kind === 'chat') {
       if (file.size > limits[kind]) {
         skipped.push({ path: file.path, reason: 'too_large' });
@@ -405,10 +411,22 @@ export async function scanSillyTavern(
     }
   }
 
+  // A persona's picture is listed, not read: only the ones the reader picks are.
+  // One past its cap is said up front, by size; one no persona names is not ours.
+  const personas = settings.personas.map((persona): StPersona => {
+    const image = avatars.get(persona.avatar);
+    if (!image) return persona;
+    if (image.size > limits.avatar) {
+      skipped.push({ path: image.path, reason: 'too_large' });
+      return persona;
+    }
+    return { ...persona, image };
+  });
+
   return {
     characters: characters.sort((a, b) => (a.avatar < b.avatar ? -1 : a.avatar > b.avatar ? 1 : 0)),
     groups: groups.sort(byName),
-    personas: settings.personas,
+    personas,
     worlds,
     globalWorlds: settings.globalWorlds,
     globalRegex: settings.globalRegex,

@@ -91,6 +91,7 @@ import {
   withTurnImages,
 } from '../src/attachments.js';
 import { createAuth } from '../src/auth.js';
+import { MAX_IMAGE_BYTES } from '../src/avatar.js';
 import { createChatGPTAccounts } from '../src/chatgptAccounts.js';
 import { createHostedAuth, createSessionStore } from '../src/hostedAuth.js';
 import type { AppDeps, AppEnv } from '../src/deps.js';
@@ -2249,6 +2250,68 @@ describe('personas', () => {
 
     expect((await request(cookie, `/api/personas/${created.id}`, 'DELETE')).status).toBe(204);
     expect(await readJson(await request(cookie, '/api/personas'))).toEqual([]);
+  });
+
+  it('takes a picture, serves it to its owner alone, and lets it go', async () => {
+    const alice = await signUp('persona-avatar@example.com');
+    const bob = await signUp('persona-avatar-other@example.com');
+    const persona = await readJson(await json(alice, '/api/personas', 'POST', { name: '여행자' }));
+    const url = `/api/personas/${persona.id}/avatar`;
+    expect(persona.avatarUrl).toBeNull();
+
+    // A PNG with text chunks — a card, or whatever a SillyTavern persona picture
+    // carries — is stripped exactly as a member's avatar is.
+    const png = buildPngWithTextChunks({
+      chara: Buffer.from(JSON.stringify(v2Card), 'utf-8').toString('base64'),
+    });
+    const uploaded = await readJson(await uploadFile(alice, url, png, 'traveler.png'));
+    expect(uploaded).toMatchObject({ id: persona.id, name: '여행자', avatarUrl: url });
+    expect((await readJson(await request(alice, '/api/personas')))[0].avatarUrl).toBe(url);
+    const served = await request(alice, url);
+    expect(served.status).toBe(200);
+    expect(served.headers.get('content-type')).toBe('image/png');
+    // The owner's alone, as an attachment is: never a shared cache's.
+    expect(served.headers.get('cache-control')).toBe('private, max-age=3600');
+    expect(new Uint8Array(await served.arrayBuffer())).toEqual(stripPngTextChunks(png));
+    await readFile(join(storageDir, 'personas', `${persona.id}.png`));
+
+    // Nobody else reaches it, signed in or not, to read, replace or remove.
+    const gif = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 2, 3]);
+    expect((await request(bob, url)).status).toBe(404);
+    expect((await uploadFile(bob, url, gif, 'a.gif')).status).toBe(404);
+    expect((await request(bob, url, 'DELETE')).status).toBe(404);
+    expect((await request(undefined, url)).status).toBe(401);
+
+    // Re-uploading in another format leaves no orphan behind under the old key.
+    await uploadFile(alice, url, gif, 'a.gif');
+    expect((await request(alice, url)).headers.get('content-type')).toBe('image/gif');
+    await expect(readFile(join(storageDir, 'personas', `${persona.id}.png`))).rejects.toThrow();
+
+    // Bytes that are not an image, and a file past the cap.
+    const junk = await uploadFile(alice, url, new Uint8Array([1, 2, 3, 4]), 'x.bin');
+    expect(junk.status).toBe(400);
+    expect((await readJson(junk)).code).toBe('invalid_asset');
+    const big = new Uint8Array(MAX_IMAGE_BYTES + 1);
+    big.set([0x47, 0x49, 0x46, 0x38]);
+    expect((await readJson(await uploadFile(alice, url, big, 'big.gif'))).code).toBe('payload_too_large');
+    expect((await request(alice, url)).headers.get('content-type')).toBe('image/gif');
+
+    const cleared = await readJson(await request(alice, url, 'DELETE'));
+    expect(cleared.avatarUrl).toBeNull();
+    expect((await request(alice, url)).status).toBe(404);
+    await expect(readFile(join(storageDir, 'personas', `${persona.id}.gif`))).rejects.toThrow();
+  });
+
+  it('takes the picture away with the persona', async () => {
+    const cookie = await signUp('persona-avatar-cleanup@example.com');
+    const persona = await readJson(await json(cookie, '/api/personas', 'POST', { name: '떠나는 사람' }));
+    const gif = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 2, 3]);
+    await uploadFile(cookie, `/api/personas/${persona.id}/avatar`, gif, 'a.gif');
+    await readFile(join(storageDir, 'personas', `${persona.id}.gif`));
+
+    expect((await request(cookie, `/api/personas/${persona.id}`, 'DELETE')).status).toBe(204);
+    await expect(readFile(join(storageDir, 'personas', `${persona.id}.gif`))).rejects.toThrow();
+    expect((await request(cookie, `/api/personas/${persona.id}/avatar`)).status).toBe(404);
   });
 });
 
@@ -4572,7 +4635,8 @@ describe('recommended profiles', () => {
 
     // The chat points at a persona of the reader's own, not at the plot's row.
     const personas = await readJson(await request(bob, '/api/personas'));
-    expect(personas).toEqual([{ id: expect.any(String), ...KNIGHT, createdAt: expect.any(String) }]);
+    // A profile has no picture (v1), so neither has its copy.
+    expect(personas).toEqual([{ id: expect.any(String), ...KNIGHT, avatarUrl: null, createdAt: expect.any(String) }]);
     expect(state.chat.personaId).toBe(personas[0].id);
     expect(state.chat.personaId).not.toBe(profile.id);
     // And it is theirs to edit afterwards, like any other persona.
@@ -9059,6 +9123,7 @@ describe('plot hub', () => {
       [`/api/plots/${created.id}`, 'GET'],
       [`/api/plots/${created.id}/characters`, 'GET'],
       ['/api/personas', 'GET'],
+      [`/api/personas/${randomUUID()}/avatar`, 'GET'],
       ['/api/notes', 'GET'],
       ['/api/chats', 'GET'],
       [`/api/plots/${created.id}/like`, 'POST'],
@@ -12661,6 +12726,26 @@ describe('editRequest listeners', () => {
     ]);
     const stored = await db.select().from(messages).where(eq(messages.chatId, chatId)).orderBy(asc(messages.createdAt));
     expect(stored.filter((message) => message.role === 'user').map((message) => message.content)).toEqual(['안녕', '또 왔어']);
+  });
+
+  it('hands the listener the persona’s picture as the browser’s sandbox does, and nothing without one', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const { cookie, chatId } = await luaChat('lua-persona-image@example.com', [
+      lua(listening(`req[1].content = req[1].content .. '\\n그림: [' .. getPersonaImage(id) .. ']' return req`)),
+    ]);
+    await send(cookie, chatId, capturing);
+    expect(prompts.at(-1)!.system.endsWith('\n그림: []')).toBe(true);
+
+    const persona = await readJson(await json(cookie, '/api/personas', 'POST', { name: '여행자' }));
+    const gif = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 2, 3]);
+    await uploadFile(cookie, `/api/personas/${persona.id}/avatar`, gif, 'a.gif');
+    expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { personaId: persona.id })).status).toBe(200);
+    await send(cookie, chatId, capturing, '다시');
+    expect(
+      prompts.at(-1)!.system.endsWith(
+        `\n그림: [<div class="risu-inlay-image"><img src="/api/personas/${persona.id}/avatar"></div>]`,
+      ),
+    ).toBe(true);
   });
 
   it('keeps the chat variables a listener wrote on the reply, where the next turn reads them', async () => {

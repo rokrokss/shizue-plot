@@ -479,7 +479,8 @@
         "world_missing": "Lorebook file missing, not attached: {name}",
         "world_unreadable": "Couldn't read the lorebook file, imported without it: {name}",
         "extras_failed": "Couldn't attach the extra lorebooks and scripts: {message}",
-        "chat_world_failed": "Couldn't attach the chat's lorebook {name}: {message}"
+        "chat_world_failed": "Couldn't attach the chat's lorebook {name}: {message}",
+        "avatar_failed": "Couldn't bring over the persona's picture: {message}"
       },
       "notices": {
         "chat_world_attached": "The lorebook bound to this chat, {name}, is now part of the plot's lorebook, so it also applies to the plot's other chats.",
@@ -968,7 +969,11 @@
     "namePlaceholder": "Persona name",
     "descriptionPlaceholder": "e.g. A graduate student in their twenties. Quiet, observant.",
     "empty": "No personas yet.",
-    "create": "Create"
+    "create": "Create",
+    "avatarUpload": "Upload image",
+    "avatarUploading": "Uploading…",
+    "avatarRemove": "Remove image",
+    "avatarHint": "png · jpg · gif · webp · up to 5MB"
   },
   "notes": {
     "title": "Notes",

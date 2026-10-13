@@ -108,6 +108,8 @@ export interface LuaSnapshot {
   };
   user: string;
   persona: string;
+  /** The markup `getPersonaImage` answers for the persona's picture, as `char.image` is for the member's ('' without one). */
+  personaImage: string;
   note: string;
   lowLevel: boolean;
 }
@@ -657,9 +659,11 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
       });
     });
     set('getPersonaImageMain', function () {
-      // A persona has no picture here, and RisuAI answers '' for one without.
+      const ctx = c();
+      // RisuAI's is an inlay token for the persona's picture; here, as for the
+      // character's, the picture's own markup. '' without one, as RisuAI's.
       return Promise.resolve().then(function () {
-        return '';
+        return ctx.personaImage;
       });
     });
     set('hash', function (_id: Any, value: Any) {
@@ -866,6 +870,7 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
       loreUpserts: [],
       user: snap.user,
       persona: snap.persona,
+      personaImage: snap.personaImage,
       note: snap.note,
       stopSending: false,
       res: undefined,

@@ -332,6 +332,15 @@ describe('RisuAI templates', () => {
     expect(render('<img src="{{#if 1}}{{img::smile}}{{/if}}">')).toBe('<img src="/api/plots/c1/assets/smile">');
   });
 
+  it('answers RisuAI’s {{source::user}} with the persona’s picture, in markup or out, and {{source::char}} with nothing', () => {
+    const userImage = '/api/personas/p1/avatar';
+    expect(render('<img src="{{source::user}}"><i>{{source::user}}</i>', { userImage })).toBe(
+      `<img src="${userImage}"><i>${userImage}</i>`,
+    );
+    expect(render('<img src="{{source::user}}">')).toBe('<img src="">');
+    expect(render('<img src="{{source::char}}">', { userImage })).toBe('<img src="">');
+  });
+
   it('composes an image name at render time and resolves it by the card’s own names', () => {
     const resolveAsset = (ref: string) => (ref.toLowerCase() === 'wet_coat_2.webp' ? 'smile' : undefined);
     const template = '{{img::{{#if {{? ($rain=1)}}}}wet_{{/if}}{{getvar::outfit}}_2.webp}}';

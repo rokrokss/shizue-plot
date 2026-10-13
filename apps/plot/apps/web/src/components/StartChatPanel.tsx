@@ -8,6 +8,7 @@ import { useSession } from '@/lib/authClient';
 import { signInHref } from '@/lib/nav';
 import type { ChatState, ModelInfo, Persona, PlotProfile } from '@/lib/types';
 import { useErrorMessage } from '@/lib/useErrorMessage';
+import { PersonaFace } from './Avatar';
 import { Button, buttonClass, cx, ErrorText, Field, Section, Select } from './ui';
 
 /** Held so a plot with no recommendations gives the panel a stable prop. */
@@ -165,24 +166,26 @@ export function StartChatPanel({
       ) : null}
 
       <Field label={t('persona')} {...(profileId ? { hint: t('profilePicked') } : {})}>
-        <Select
-          value={personaId}
-          // Disabled rather than quietly overruled: the exclusivity is the
-          // server's rule, and a select that could be set but never sent would
-          // only be a lie about which of the two the chat is starting on.
-          disabled={Boolean(profileId)}
-          onChange={(event) => {
-            setPersonaId(event.target.value);
-            setProfileId('');
-          }}
-        >
-          <option value="">{t('noPersona')}</option>
-          {personas.map((persona) => (
-            <option key={persona.id} value={persona.id}>
-              {persona.name}
-            </option>
-          ))}
-        </Select>
+        <PersonaFace persona={personas.find((persona) => persona.id === personaId)}>
+          <Select
+            value={personaId}
+            // Disabled rather than quietly overruled: the exclusivity is the
+            // server's rule, and a select that could be set but never sent would
+            // only be a lie about which of the two the chat is starting on.
+            disabled={Boolean(profileId)}
+            onChange={(event) => {
+              setPersonaId(event.target.value);
+              setProfileId('');
+            }}
+          >
+            <option value="">{t('noPersona')}</option>
+            {personas.map((persona) => (
+              <option key={persona.id} value={persona.id}>
+                {persona.name}
+              </option>
+            ))}
+          </Select>
+        </PersonaFace>
       </Field>
 
       <ErrorText>{error || (models.length === 0 ? t('noModels') : '')}</ErrorText>

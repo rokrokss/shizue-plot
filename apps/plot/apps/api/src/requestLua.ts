@@ -551,6 +551,9 @@ export async function editRequestLua(
 const escapeAttribute = (text: string): string =>
   text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
-/** The markup the browser's `getCharacterImage` answers for the member's avatar (web `lua/engine.ts`): '' without one. */
+/**
+ * The markup the browser's `getCharacterImage` answers for the member's avatar
+ * (web `lua/engine.ts`), and `getPersonaImage` for the persona's picture: '' without one.
+ */
 export const characterImage = (url: string | null | undefined): string =>
   url ? `<div class="risu-inlay-image"><img src="${escapeAttribute(url)}"></div>` : '';

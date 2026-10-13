@@ -48,7 +48,8 @@ export interface StorableImage extends ImageType {
  * that goes through here is served to every reader of the thing it decorates,
  * while the card definition stays with the owner. So the strip is not the avatar
  * path's business; it belongs to any creator-uploaded image, and both callers
- * (avatar, plot cover) go through this.
+ * (avatar, plot cover) go through this. A persona's picture does too, though only
+ * its owner is served it: one pipeline, so no upload path is the one that forgot.
  *
  * Returns null for bytes that are not a supported image, and for a PNG whose
  * chunks cannot be walked — an unreadable PNG is refused rather than stored

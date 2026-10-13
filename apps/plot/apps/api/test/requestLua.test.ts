@@ -150,6 +150,7 @@ const snapshot: LuaSnapshot = {
   },
   user: '아린',
   persona: '{{user}}는 여행자',
+  personaImage: '<div class="risu-inlay-image"><img src="/api/personas/p/avatar"></div>',
   note: '노트',
   lowLevel: true,
 };
@@ -196,6 +197,7 @@ describe('editRequest listeners in the child', () => {
         setChatVar(id, 'persona', getPersonaDescription(id))
         setChatVar(id, 'lore', getLoreBooks(id, '탑')[1].content)
         setChatVar(id, 'image', getCharacterImage(id))
+        setChatVar(id, 'personaImage', getPersonaImage(id))
         setChatVar(id, 'hash', hash(id, 'abc'):await())
         setChatVar(id, 'tokens', tostring(getTokens(id, 'abcdefgh'):await()))
         setChatVar(id, 'meta', json.encode(meta))
@@ -213,6 +215,7 @@ describe('editRequest listeners in the child', () => {
       persona: '아린는 여행자',
       lore: '리안의 탑',
       image: snapshot.char.image,
+      personaImage: snapshot.personaImage,
       hash: createHash('sha256').update('abc').digest('hex'),
       tokens: '2',
       // RisuAI hands these listeners `{}` as their meta.

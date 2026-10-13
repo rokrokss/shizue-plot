@@ -315,6 +315,7 @@ export const MessageBody = memo(function MessageBody({
   previousSameRole = '',
   chatIndex,
   streaming = false,
+  userImage,
 }: {
   content: string;
   /** Asset url by slug — memoize it, or this component re-renders on every keystroke. */
@@ -353,6 +354,8 @@ export const MessageBody = memo(function MessageBody({
   chatIndex?: number;
   /** A message still being written gets no display scripts until it settles. */
   streaming?: boolean;
+  /** The reader's persona picture, for RisuAI's `{{source::user}}` in the message's own markup. */
+  userImage?: string | null;
 }) {
   const t = useTranslations('chat');
   const common = useTranslations('common');
@@ -399,7 +402,7 @@ export const MessageBody = memo(function MessageBody({
         if (segment.kind !== 'text') return null;
         return markupChunks(stripVariableMacros(segment.text)).flatMap((chunk): TextRun[] => {
           if (chunk.html) {
-            const markup = unescapeCbs(renderImageTokensAsHtml(chunk.text, assets, resolveAsset), 'html');
+            const markup = unescapeCbs(renderImageTokensAsHtml(chunk.text, assets, resolveAsset, userImage), 'html');
             return [{ name: null, narration: false, html: true, blocks: [markup] }];
           }
           const text = renderImageTokens(chunk.text, assets, resolveAsset);
@@ -415,7 +418,7 @@ export const MessageBody = memo(function MessageBody({
         });
       });
     },
-    [segments, assets, resolveAsset, roster, speaker],
+    [segments, assets, resolveAsset, roster, speaker, userImage],
   );
 
   // Only the very last block of the last run of text is still being written.

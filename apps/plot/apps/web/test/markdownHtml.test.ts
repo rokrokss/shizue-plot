@@ -189,6 +189,16 @@ describe('renderImageTokensAsHtml', () => {
     expect(renderImageTokensAsHtml('<div>{{img::secret}}{{img::nobody}}</div>', assets)).toBe('<div></div>');
     expect(renderImageTokensAsHtml('<img src="{{img::secret}}">', assets)).toBe('<img src="">');
   });
+
+  it('gives RisuAI’s {{source::user}} the persona’s picture where an address goes, and nothing else', () => {
+    const own = '/api/personas/p1/avatar';
+    expect(renderImageTokensAsHtml('<img src="{{source::user}}"><b>{{source::user}}</b>', assets, undefined, own)).toBe(
+      `<img src="${own}"><b></b>`,
+    );
+    // Without a picture, and for the character, whose one picture a plot of several has not got.
+    expect(renderImageTokensAsHtml('<img src="{{source::user}}">', assets)).toBe('<img src="">');
+    expect(renderImageTokensAsHtml('<img src="{{source::char}}">', assets, undefined, own)).toBe('<img src="">');
+  });
 });
 
 describe('balancePartial and a tag being typed', () => {

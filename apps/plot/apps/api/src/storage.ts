@@ -9,12 +9,15 @@ const AVATARS = 'avatars';
 const ASSETS = 'assets';
 const ATTACHMENTS = 'attachments';
 const COVERS = 'covers';
+const PERSONAS = 'personas';
 
 export const avatarKey = (characterId: string, ext: string): string => `${AVATARS}/${characterId}.${ext}`;
 export const assetKey = (assetId: string, ext: string): string => `${ASSETS}/${assetId}.${ext}`;
 export const attachmentKey = (attachmentId: string, ext: string): string =>
   `${ATTACHMENTS}/${attachmentId}.${ext}`;
 export const coverKey = (plotId: string, ext: string): string => `${COVERS}/${plotId}.${ext}`;
+/** A persona's picture — its own namespace, since unlike `avatars/` it is served to its owner only. */
+export const personaAvatarKey = (personaId: string, ext: string): string => `${PERSONAS}/${personaId}.${ext}`;
 
 /** A stored object opened for reading. */
 export interface StoredObject {
@@ -22,7 +25,7 @@ export interface StoredObject {
   size: number;
 }
 
-/** Storage for avatars, plot assets, covers and chat attachments. */
+/** Storage for avatars, plot assets, covers, persona pictures and chat attachments. */
 export interface ObjectStorage {
   /** Writes bytes under a key the caller built with one of the `*Key` helpers. */
   put(key: string, bytes: Uint8Array, contentType: string): Promise<void>;

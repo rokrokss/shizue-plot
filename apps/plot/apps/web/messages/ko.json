@@ -479,7 +479,8 @@
         "world_missing": "로어북 파일이 없어 붙이지 못했습니다: {name}",
         "world_unreadable": "로어북 파일을 읽지 못해 빼고 가져왔습니다: {name}",
         "extras_failed": "추가 로어북·스크립트를 붙이지 못했습니다: {message}",
-        "chat_world_failed": "대화에 묶인 로어북을 붙이지 못했습니다: {name} ({message})"
+        "chat_world_failed": "대화에 묶인 로어북을 붙이지 못했습니다: {name} ({message})",
+        "avatar_failed": "페르소나 이미지를 가져오지 못했습니다: {message}"
       },
       "notices": {
         "chat_world_attached": "대화에 묶여 있던 로어북 {name}을(를) 플롯 로어북에 붙였습니다. 이 플롯의 다른 대화에도 적용됩니다.",
@@ -968,7 +969,11 @@
     "namePlaceholder": "페르소나 이름",
     "descriptionPlaceholder": "예: 20대 대학원생. 말수가 적고 관찰을 좋아한다.",
     "empty": "아직 페르소나가 없습니다.",
-    "create": "만들기"
+    "create": "만들기",
+    "avatarUpload": "이미지 올리기",
+    "avatarUploading": "올리는 중…",
+    "avatarRemove": "이미지 제거",
+    "avatarHint": "png · jpg · gif · webp · 5MB 이하"
   },
   "notes": {
     "title": "노트",

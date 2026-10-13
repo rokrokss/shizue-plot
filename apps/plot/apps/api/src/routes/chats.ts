@@ -140,6 +140,7 @@ import {
   requireString,
   requireUuidParam,
 } from '../util.js';
+import { personaAvatarUrl } from './personas.js';
 
 export const toChatJson = (chat: Chat, noteIds: string[]) => ({
   id: chat.id,
@@ -578,15 +579,22 @@ async function loadPersona(deps: AppDeps, chat: Chat): Promise<Persona | null> {
 
 /**
  * What the scripted member's Lua reads that the prompt does not carry, as
- * `GET /:id/scripts` and the chat hand the browser's: `note` the chat's own.
+ * `GET /:id/scripts` and the chat hand the browser's: `note` the chat's own,
+ * and the chat's persona's picture, as the page has it from `/api/personas`.
  */
-function scriptViewOf(member: Character, overlay: ScriptOverlay | null, note: string): ScriptView {
+function scriptViewOf(
+  member: Character,
+  overlay: ScriptOverlay | null,
+  note: string,
+  persona: Persona | null,
+): ScriptView {
   const own = overlay?.members?.[member.id];
   return {
     note,
     ...(own?.firstMessage !== undefined ? { firstMessage: own.firstMessage } : {}),
     backgroundHtml: own?.backgroundHtml ?? backgroundHtmlOf(member.card.extensions) ?? '',
     avatarUrl: avatarUrl(member),
+    personaAvatarUrl: persona ? personaAvatarUrl(persona) : null,
   };
 }
 
@@ -680,7 +688,7 @@ async function loadGenerationContext(
     globalVariables: await loadGlobalVariables(deps, chat.userId, chat.plotId),
     overlay,
     firstMessage: scripted ? overlay?.members?.[scripted.id]?.firstMessage : undefined,
-    scriptView: scripted ? scriptViewOf(scripted, overlay, scripts.note ?? chat.note) : undefined,
+    scriptView: scripted ? scriptViewOf(scripted, overlay, scripts.note ?? chat.note, persona) : undefined,
     // The member whose scripts run, under its name in this chat — or a plot's one
     // member, should its scripts be gone. As the page draws it.
     scriptSpeaker: (scripted ? rewritten.find((member) => member.id === scripted.id) : only)?.name,

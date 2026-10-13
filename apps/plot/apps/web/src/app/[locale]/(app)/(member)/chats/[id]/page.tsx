@@ -775,7 +775,10 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const charMacro = soleRenamed ? soleRenamed.nickname?.trim() || renamed! : characterName;
   // Who the conversation is with, once either read has said so.
   useDocumentTitle(characterName);
-  const personaName = personas.find((persona) => persona.id === state?.chat.personaId)?.name;
+  const chatPersona = personas.find((persona) => persona.id === state?.chat.personaId);
+  const personaName = chatPersona?.name;
+  /** The persona's picture, for RisuAI's `{{source::user}}` on screen. */
+  const personaAvatarUrl = chatPersona?.avatarUrl ?? null;
   const youLabel = t('you');
   /** User turns taken on this branch, for `{{turn}}`. */
   const turn = messages.filter((message) => message.role === 'user').length + (mode === 'send' ? 1 : 0);
@@ -840,6 +843,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       turn,
       char: charMacro,
       user: personaName ?? youLabel,
+      ...(personaAvatarUrl ? { userImage: personaAvatarUrl } : {}),
       lastMessageId,
       assetNames,
       messages: branchMessages,
@@ -859,6 +863,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     turn,
     charMacro,
     personaName,
+    personaAvatarUrl,
     youLabel,
     lastMessageId,
     assetNames,
@@ -968,6 +973,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             turn,
             char: charMacro,
             user: personaName ?? youLabel,
+            ...(personaAvatarUrl ? { userImage: personaAvatarUrl } : {}),
             lastMessageId,
             assetNames,
             messages: branchMessages,
@@ -986,6 +992,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       turn,
       charMacro,
       personaName,
+      personaAvatarUrl,
       youLabel,
       lastMessageId,
       assetNames,
@@ -1072,6 +1079,10 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               maxContext: stateRef.current?.chat.memorySettings?.contextBudget ?? DEFAULT_CONTEXT_BUDGET,
             }),
             avatarUrl: scriptBundle.character.avatarUrl ?? null,
+            // The persona the chat is on when the call starts — the reader may switch it.
+            personaAvatarUrl: () =>
+              personasRef.current.find((persona) => persona.id === stateRef.current?.chat.personaId)?.avatarUrl ??
+              null,
             log,
           }),
         ]
@@ -1101,6 +1112,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   /** The page's latest state, for the steps of a turn that outlive the render they began in. */
   const stateRef = useRef<ChatState | null>(null);
   stateRef.current = state;
+  /** The reader's personas as they stand, for a script call made after this render. */
+  const personasRef = useRef(personas);
+  personasRef.current = personas;
 
   /** What RisuAI's functions may read in a script, from the reader's side. */
   const scriptData = useCallback(
@@ -2239,6 +2253,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                     {...(message.shown !== undefined ? { shown: message.shown } : {})}
                     name={message.role === 'user' ? t('you') : characterName}
                     avatar={plot?.coverUrl ?? null}
+                    userImage={personaAvatarUrl}
                     roster={members}
                     {...(message.scripted && scriptSpeaker ? { speaker: scriptSpeaker } : {})}
                     assets={messageAssets}

@@ -244,8 +244,10 @@ describe('stFilesFromZip / stFilesFromFolder', () => {
     'thumbnails/avatar/하루.png': strToU8('x'),
     'backups/chat_하루_20240101.jsonl': strToU8('{}'),
     'User Avatars/user-default.png': strToU8('x'),
+    'User Avatars/readme.txt': strToU8('x'),
   };
   const allowlisted = [
+    'User Avatars/user-default.png',
     'characters/하루.png',
     'chats/하루/a.jsonl',
     'group chats/1700000000000.jsonl',
@@ -366,6 +368,8 @@ function syntheticBackup(): Record<string, Uint8Array> {
     'worlds/하루의 세계.json': json({ entries: {} }),
     'worlds/하루의 비밀.json': json({ entries: {} }),
     'worlds/공용 설정.json': json({ entries: {} }),
+    // The first persona's picture; the second's is not in the backup.
+    'User Avatars/user-default.png': buildPngWithTextChunks({}),
   };
 }
 
@@ -403,7 +407,12 @@ describe('scanSillyTavern', () => {
     ]);
 
     expect(manifest.personas).toEqual([
-      { avatar: 'user-default.png', name: '여행자', description: '길을 잃은 여행자.' },
+      {
+        avatar: 'user-default.png',
+        name: '여행자',
+        description: '길을 잃은 여행자.',
+        image: expect.objectContaining({ path: 'User Avatars/user-default.png' }),
+      },
       { avatar: '1700000000-Mina.png', name: '미나', description: '' },
     ]);
     expect(Object.keys(manifest.worlds).sort()).toEqual(['공용 설정', '하루의 비밀', '하루의 세계']);
@@ -425,6 +434,25 @@ describe('scanSillyTavern', () => {
       ]),
     );
     expect(manifest.skipped).toHaveLength(5);
+  });
+
+  it("lists a persona's picture without reading it, and leaves one past its cap behind", async () => {
+    let reads = 0;
+    const picture = buildPngWithTextChunks({});
+    const files: StFile[] = [
+      { path: 'settings.json', size: 1, read: async () => json({ power_user: { personas: { 'a.png': '에이', 'b.webp': '비' } } }) },
+      { path: 'User Avatars/a.png', size: picture.length, read: async () => (reads++, picture) },
+      { path: 'User Avatars/b.webp', size: 64, read: async () => (reads++, new Uint8Array(64)) },
+      // Nobody's: not reported, since nothing asked for it.
+      { path: 'User Avatars/c.png', size: 64, read: async () => (reads++, new Uint8Array(64)) },
+    ];
+    const manifest = await scanSillyTavern(files, { avatar: picture.length });
+    expect(reads).toBe(0);
+    expect(manifest.personas.map((persona) => [persona.name, persona.image?.path])).toEqual([
+      ['에이', 'User Avatars/a.png'],
+      ['비', undefined],
+    ]);
+    expect(manifest.skipped).toEqual([{ path: 'User Avatars/b.webp', reason: 'too_large' }]);
   });
 
   it("reads the World Info settings as a book's, and names the ones it leaves behind", async () => {
@@ -465,6 +493,7 @@ describe('scanSillyTavern', () => {
       ...manifest.characters.flatMap((character) => [character.file, ...character.chats.map((chat) => chat.file)]),
       ...manifest.groups.flatMap((group) => group.chats.map((chat) => chat.file)),
       ...Object.values(manifest.worlds),
+      ...manifest.personas.flatMap((persona) => (persona.image ? [persona.image] : [])),
     ];
     expect(offered.map((file) => file.path)).not.toContain('settings.json');
   });

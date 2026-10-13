@@ -143,7 +143,8 @@ const THUMB_PX = 80;
 /**
  * A card's face, cut down to a thumbnail: the PNG is read when its row first
  * comes near the screen, drawn small, and let go, so a list of hundreds of cards
- * holds a few kilobytes each rather than the cards themselves.
+ * holds a few kilobytes each rather than the cards themselves. A persona's
+ * picture is drawn the same way; the decoder goes by the bytes, not the type.
  */
 async function thumbnail(file: StFile): Promise<string> {
   const bytes = (await file.read()) as Uint8Array<ArrayBuffer>;
@@ -439,6 +440,9 @@ export function ReviewPanel({
               <ReviewRow
                 key={item.key}
                 testId="st-persona"
+                {...(item.persona.image
+                  ? { face: <StThumb file={item.persona.image} name={item.persona.name} /> }
+                  : {})}
                 name={item.persona.name}
                 imported={item.exists}
                 checked={selection.personas.has(item.key)}

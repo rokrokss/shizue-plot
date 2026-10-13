@@ -128,7 +128,9 @@ function fakeApi() {
   const id = (kind: string): string => `${kind}-${(next += 1)}`;
   const plots = new Map<string, PlotDetail>();
   const chats = new Map<string, FakeChat>();
-  const personas: { id: string; name: string; description: string }[] = [];
+  const personas: { id: string; name: string; description: string; avatarUrl?: string | null }[] = [];
+  /** Persona pictures the run sent, by persona: the file name and its text. */
+  const personaAvatars = new Map<string, { name: string; text: string }>();
   const patches: { plotId: string; body: Record<string, unknown> }[] = [];
   const memberPatches: { plotId: string; memberId: string; body: Record<string, unknown> }[] = [];
   const uploads: { path: string; file: string; worldInfo: string | null }[] = [];
@@ -177,9 +179,17 @@ function fakeApi() {
 
     if (route === 'GET /api/personas') return json(200, personas);
     if (route === 'POST /api/personas') {
-      const created = { id: id('persona'), ...(read() as { name: string; description: string }) };
+      const created = { id: id('persona'), ...(read() as { name: string; description: string }), avatarUrl: null };
       personas.push(created);
       return json(201, created);
+    }
+    const avatarRoute = /^POST \/api\/personas\/([^/]+)\/avatar$/.exec(route);
+    if (avatarRoute) {
+      const persona = personas.find((each) => each.id === avatarRoute[1])!;
+      const picture = (body as FormData).get('file') as File;
+      personaAvatars.set(persona.id, { name: picture.name, text: await picture.text() });
+      persona.avatarUrl = `/api/personas/${persona.id}/avatar`;
+      return json(200, persona);
     }
     if (route === 'POST /api/imports/lookup') {
       const asked = new Set(read()['sha256'] as string[]);
@@ -275,6 +285,7 @@ function fakeApi() {
     plots,
     chats,
     personas,
+    personaAvatars,
     patches,
     memberPatches,
     uploads,
@@ -660,6 +671,30 @@ describe('runImport', () => {
     await runAll(api, sample());
     expect(api.log).not.toContain('POST /api/personas');
     expect([...api.chats.values()][0]!.personaId).toBe('mine');
+  });
+
+  it('sends a persona’s picture through its upload, and keeps the persona when the picture cannot come', async () => {
+    const withPicture = (): StManifest => ({
+      ...sample(),
+      personas: [{ avatar: 'kim.png', name: 'Kim', description: 'a reader', image: file('User Avatars/kim.png', 'KIM-PIXELS') }],
+    });
+    const api = fakeApi();
+    const { results } = await runAll(api, withPicture());
+    const [kim] = api.personas;
+    expect(api.writes().slice(0, 2)).toEqual(['POST /api/personas', `POST /api/personas/${kim!.id}/avatar`]);
+    expect(api.personaAvatars.get(kim!.id)).toEqual({ name: 'kim.png', text: 'KIM-PIXELS' });
+    expect(results['persona:kim.png']).toEqual({ status: 'done' });
+
+    // The API refuses the picture: the persona stands, its chats still find it, and the step says so.
+    const refused = fakeApi();
+    refused.failures.set('POST /api/personas/persona-1/avatar', [{ status: 400, code: 'invalid_asset' }]);
+    const after = await runAll(refused, withPicture());
+    expect(refused.personas.map((persona) => persona.id)).toEqual(['persona-1']);
+    expect(after.results['persona:kim.png']).toMatchObject({
+      status: 'done',
+      warnings: [{ code: 'avatar_failed', error: expect.objectContaining({ code: 'invalid_asset' }) }],
+    });
+    expect([...refused.chats.values()][0]!.personaId).toBe('persona-1');
   });
 
   it('checks persona names again at run time', async () => {
