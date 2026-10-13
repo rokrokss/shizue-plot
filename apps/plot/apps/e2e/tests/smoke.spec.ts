@@ -191,7 +191,7 @@ test('the public plot page carries the cast and the openings', async () => {
 });
 
 test('starts a chat that opens on the first opening and swipes the other', async () => {
-  await page.getByLabel('모델').selectOption('echo/echo');
+  await page.getByRole('combobox', { name: '모델', exact: true }).selectOption('echo/echo');
   await page.getByRole('button', { name: '대화 시작' }).click();
 
   await expect(page).toHaveURL(new RegExp(`/ko/chats/${UUID_PATH}$`));

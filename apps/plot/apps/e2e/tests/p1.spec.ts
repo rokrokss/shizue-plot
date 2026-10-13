@@ -208,7 +208,7 @@ test('a reader follows the creator and starts a chat on a recommended profile', 
   // The chat carries one of the two, so picking a profile gives up the select.
   await expect(readerPage.getByLabel('페르소나')).toBeDisabled();
 
-  await readerPage.getByLabel('모델').selectOption('echo/echo');
+  await readerPage.getByRole('combobox', { name: '모델', exact: true }).selectOption('echo/echo');
   await readerPage.getByRole('button', { name: '대화 시작' }).click();
   await expect(readerPage).toHaveURL(new RegExp(`/ko/chats/${UUID_PATH}$`));
 

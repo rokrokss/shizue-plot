@@ -2973,6 +2973,48 @@ describe('chats', () => {
     expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.subModel).toBeNull();
   });
 
+  it('opens a chat with an auxiliary model held to the same rules as the PATCH', async () => {
+    const cookie = await signUp('sub-model-start@example.com');
+    const plot = await publishablePlot(cookie, { profiles: [{ name: '기사', description: '왕국의 기사.' }] });
+    const [profile] = plot.profiles;
+    const withKey = makeApp({ env: { SHIZUE_TEST_MODELS: '1' } });
+    const start =(body: Record<string, unknown>, target: Hono<AppEnv> = withKey) =>
+      json(cookie, '/api/chats', 'POST', { plotId: plot.id, model: 'echo/echo', ...body }, target);
+
+    const picked = await start({ subModel: 'test/text' });
+    expect(picked.status, await picked.clone().text()).toBe(201);
+    const { chat } = await readJson(picked);
+    expect(chat).toMatchObject({ model: 'echo/echo', subModel: 'test/text' });
+    expect((await readJson(await request(cookie, `/api/chats/${chat.id}`))).chat.subModel).toBe('test/text');
+
+    // No pick and an explicit null both open on the default.
+    for (const body of [{}, { subModel: null }]) {
+      const res = await start(body);
+      expect(res.status).toBe(201);
+      expect((await readJson(res)).chat.subModel).toBeNull();
+    }
+
+    // Refused with a profile picked, too: a refused start must not copy one.
+    const before = (await readJson(await request(cookie, '/api/chats'))).length;
+    for (const [body, target] of [
+      [{ subModel: 'nope/none' }, withKey],
+      // The default app's catalog has echo alone.
+      [{ subModel: 'test/text' }, app],
+      [{ subModel: '' }, withKey],
+    ] as const) {
+      const res = await start({ ...body, profileId: profile.id }, target);
+      expect(res.status).toBe(400);
+      expect((await readJson(res)).code).toBe('model_unavailable');
+    }
+    for (const bad of [7, true, { id: 'test/text' }]) {
+      const res = await start({ subModel: bad, profileId: profile.id });
+      expect(res.status).toBe(400);
+      expect((await readJson(res)).code).toBe('invalid_request');
+    }
+    expect((await readJson(await request(cookie, '/api/chats'))).length).toBe(before);
+    expect(await readJson(await request(cookie, '/api/personas'))).toEqual([]);
+  });
+
   it('takes a reasoning effort only from the list the chat model advertises', async () => {
     const cookie = await signUp('effort@example.com');
     const { chatId } = await setupChat(cookie);
@@ -10058,6 +10100,49 @@ describe('plot draft', () => {
     expect((await json(cookie, '/api/plots/draft', 'POST', {}, drafting)).status).toBe(400);
     expect((await json(undefined, '/api/plots/draft', 'POST', { premise: '밤' }, drafting)).status).toBe(401);
     expect(calls()).toBe(0);
+  });
+
+  it("runs on the model the creator picked, held to their catalog, or else on the first", async () => {
+    const cookie = await signUp('draft-model@example.com');
+    const scripted = scriptedGetAdapter(DRAFT);
+    /** The model each call was handed to, in order. */
+    const used: string[] = [];
+    const deps = {
+      env: { SHIZUE_TEST_MODELS: '1' },
+      getAdapter: ((modelId, ...rest) => {
+        used.push(modelId);
+        return scripted.getAdapter!(modelId, ...rest);
+      }) satisfies AppDeps['getAdapter'],
+    };
+    const drafting = makeApp(deps);
+    const draft = (body: Record<string, unknown>, target: Hono<AppEnv> = drafting) =>
+      json(cookie, '/api/plots/draft', 'POST', { premise: '밤의 도서관', ...body }, target);
+
+    expect((await draft({ model: 'test/text' })).status).toBe(200);
+    // No pick and an explicit null are the default: the catalog's first model.
+    expect((await draft({})).status).toBe(200);
+    expect((await draft({ model: null })).status).toBe(200);
+    expect(used).toEqual(['test/text', 'echo/echo', 'echo/echo']);
+
+    for (const [body, target] of [
+      [{ model: 'nope/none' }, drafting],
+      // A catalog without the test models does not have it either.
+      [{ model: 'test/text' }, makeApp({ getAdapter: deps.getAdapter })],
+      [{ model: '' }, drafting],
+    ] as const) {
+      const res = await draft(body, target);
+      expect(res.status).toBe(400);
+      expect((await readJson(res)).code).toBe('model_unavailable');
+    }
+    for (const bad of [7, true, { id: 'test/text' }]) {
+      const res = await draft({ model: bad });
+      expect(res.status).toBe(400);
+      expect((await readJson(res)).code).toBe('invalid_request');
+    }
+    // Nothing refused reached a model, and the creator's slot is free again.
+    expect(used).toHaveLength(3);
+    expect((await draft({ model: 'test/reasoning' })).status).toBe(200);
+    expect(used.at(-1)).toBe('test/reasoning');
   });
 
   it('writes one draft at a time per creator', async () => {

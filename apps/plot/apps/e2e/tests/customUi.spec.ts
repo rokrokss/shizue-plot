@@ -47,7 +47,7 @@ async function openPanel(): Promise<void> {
 /** Opens a chat on this plot's own page, which is where a chat starts now. */
 async function startChat(): Promise<void> {
   await page.goto(`/ko/p/${plotId}`);
-  await page.getByLabel('모델').selectOption('echo/echo');
+  await page.getByRole('combobox', { name: '모델', exact: true }).selectOption('echo/echo');
   await page.getByRole('button', { name: '대화 시작' }).click();
   await expect(page).toHaveURL(new RegExp(`/ko/chats/${UUID_PATH}$`));
 }

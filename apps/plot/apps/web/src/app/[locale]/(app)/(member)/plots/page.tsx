@@ -4,12 +4,15 @@ import { useFormatter, useTranslations } from 'next-intl';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { RealmImportForm } from '@/components/CardImport';
 import { CreatorTabs } from '@/components/CreatorTabs';
-import { Button, buttonClass, ErrorText, Field, Spinner, TextArea, TextInput } from '@/components/ui';
+import { DraftGuide } from '@/components/DraftGuide';
+import { Button, buttonClass, ErrorText, Field, Select, Spinner, TextArea, TextInput } from '@/components/ui';
 import { Link, useRouter } from '@/i18n/navigation';
 import { apiGet, apiSend, apiUpload } from '@/lib/api';
+import { readDraftModel, writeDraftModel } from '@/lib/draftPrefs';
 import { checkCardSize, downloadRealmCard } from '@/lib/realm';
 import {
   MAX_PREMISE_LENGTH,
+  type ModelInfo,
   type Plot,
   type PlotDetail,
   type PlotDraft,
@@ -39,6 +42,9 @@ export default function PlotsPage() {
   /** The AI draft panel, and the one line it is written from. */
   const [drafting, setDrafting] = useState(false);
   const [premise, setPremise] = useState('');
+  /** The models a draft can run on, and the one it will: the last pick, else the first. */
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [draftModel, setDraftModel] = useState('');
   /** The RisuRealm panel: a card page's address instead of a file. */
   const [realmOpen, setRealmOpen] = useState(false);
   const [error, setError] = useState('');
@@ -56,6 +62,15 @@ export default function PlotsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // A catalog that does not load leaves the draft without a select, and the
+  // server drafts on its default model — so its failure is not this page's error.
+  useEffect(() => {
+    apiGet<ModelInfo[]>('/api/models').then((list) => {
+      setModels(list);
+      setDraftModel(readDraftModel(list));
+    }, () => undefined);
+  }, []);
 
   async function create(): Promise<void> {
     if (!name.trim() || busy) return;
@@ -84,6 +99,7 @@ export default function PlotsPage() {
     try {
       const drafted = await apiSend<PlotDraft>('POST', '/api/plots/draft', {
         premise: premise.trim(),
+        ...(draftModel ? { model: draftModel } : {}),
       });
       const created = await apiSend<Plot>('POST', '/api/plots', {
         name: drafted.name,
@@ -250,7 +266,27 @@ export default function PlotsPage() {
                 onChange={(event) => setPremise(event.target.value)}
               />
             </Field>
-            <div className="flex justify-end">
+            <div className="flex flex-wrap items-end justify-end gap-2">
+              {models.length > 0 ? (
+                <div className="min-w-0 flex-1 sm:max-w-xs">
+                  <Field label={t('draftModel')}>
+                    <Select
+                      data-testid="draft-model"
+                      value={draftModel}
+                      onChange={(event) => {
+                        setDraftModel(event.target.value);
+                        writeDraftModel(event.target.value);
+                      }}
+                    >
+                      {models.map((entry) => (
+                        <option key={entry.id} value={entry.id}>
+                          {entry.label}
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
+                </div>
+              ) : null}
               <Button
                 variant="primary"
                 busy={operation === 'draft'}
@@ -260,6 +296,7 @@ export default function PlotsPage() {
                 {t('draftCreate')}
               </Button>
             </div>
+            <DraftGuide />
           </div>
         ) : null}
 

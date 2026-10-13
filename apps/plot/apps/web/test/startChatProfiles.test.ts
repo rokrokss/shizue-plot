@@ -70,7 +70,7 @@ async function render(): Promise<void> {
 const chips = (): HTMLButtonElement[] => [
   ...host.querySelectorAll<HTMLButtonElement>('[data-testid="profile-pick"]'),
 ];
-/** The model select, then the persona one — the panel's two, in its own order. */
+/** The model, the auxiliary model, then the persona — the panel's three, in its own order. */
 const selects = (): HTMLSelectElement[] => [...host.querySelectorAll('select')];
 const start = (): HTMLButtonElement =>
   [...host.querySelectorAll('button')].find((node) => node.textContent === '대화 시작')!;
@@ -105,13 +105,13 @@ describe('the start panel’s profile picker', () => {
 
   it('sends the picked profile, and gives up the persona select while it stands', async () => {
     await render();
-    // The second select is the persona; the first is the model.
-    const persona = selects()[1]!;
+    // The third select is the persona; the first two are the models.
+    const persona = selects()[2]!;
     expect(persona.disabled).toBe(false);
 
     await click(chips()[0]!);
     expect(chips()[0]!.getAttribute('aria-pressed')).toBe('true');
-    expect(selects()[1]!.disabled).toBe(true);
+    expect(selects()[2]!.disabled).toBe(true);
 
     await click(start());
     expect(started).toEqual([{ plotId: 'sty_1', model: 'm1', profileId: 'prf_1' }]);
@@ -122,7 +122,7 @@ describe('the start panel’s profile picker', () => {
     await click(chips()[1]!);
     expect(chips()[1]!.getAttribute('aria-pressed')).toBe('true');
 
-    const persona = selects()[1]!;
+    const persona = selects()[2]!;
     await act(async () => {
       persona.value = 'per_1';
       persona.dispatchEvent(new Event('change', { bubbles: true }));

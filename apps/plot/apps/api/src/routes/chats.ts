@@ -396,9 +396,10 @@ async function requireEnabledModel(deps: AppDeps, userId: string, model: string)
 }
 
 /**
- * The auxiliary model a PATCH leaves the chat with; undefined leaves it alone.
- * A model is held to the reader's catalog exactly as the chat's own is, and null
- * clears the pick, handing the side work back to the default (`auxiliaryModelOf`).
+ * The auxiliary model a start opens the chat with or a PATCH leaves it with;
+ * undefined leaves it alone (a start: no pick). A model is held to the reader's
+ * catalog exactly as the chat's own is, and null clears the pick, handing the
+ * side work back to the default (`auxiliaryModelOf`).
  */
 async function optionalSubModel(
   deps: AppDeps,
@@ -1385,6 +1386,9 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const plot = await loadVisiblePlot(deps.db, plotId, userId);
 
     const model = await requireEnabledModel(deps, c.get('userId'), requireString(body, 'model'));
+    // Checked before the persona: a profile pick copies a row, and a refused
+    // start must leave nothing behind.
+    const subModel = await optionalSubModel(deps, userId, body);
     const persona = await startPersona(deps, userId, plot, body);
 
     // `{{char}}` in a plot's own writing is the work, not one of its members.
@@ -1405,6 +1409,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         personaId: persona?.id ?? null,
         title: plot.name,
         model,
+        subModel: subModel ?? null,
       })
       .returning();
     let chat = created!;

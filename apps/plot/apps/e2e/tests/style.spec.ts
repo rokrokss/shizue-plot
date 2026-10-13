@@ -174,7 +174,7 @@ test('the published plot page wears the style as badges', async () => {
 });
 
 test('the chat opens on an intro that carries the first scene status', async () => {
-  await page.getByLabel('모델').selectOption('echo/echo');
+  await page.getByRole('combobox', { name: '모델', exact: true }).selectOption('echo/echo');
   await page.getByRole('button', { name: '대화 시작' }).click();
   await expect(page).toHaveURL(new RegExp(`/ko/chats/${UUID_PATH}$`));
 

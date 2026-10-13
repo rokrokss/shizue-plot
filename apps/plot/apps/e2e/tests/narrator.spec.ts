@@ -80,7 +80,7 @@ test('signs up and gives a plot a narrator voice and pov', async () => {
 
 test('starts an echo chat', async () => {
   await page.goto(`/ko/p/${plotId}`);
-  await page.getByLabel('모델').selectOption('echo/echo');
+  await page.getByRole('combobox', { name: '모델', exact: true }).selectOption('echo/echo');
   await page.getByRole('button', { name: '대화 시작' }).click();
   await expect(page).toHaveURL(new RegExp(`/ko/chats/${UUID_PATH}$`));
   await expect(assistantMessages().first()).toContainText(plot.intro);

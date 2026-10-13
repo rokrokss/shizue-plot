@@ -38,6 +38,7 @@ export function StartChatPanel({
   profiles?: PlotProfile[];
 }) {
   const t = useTranslations('plot');
+  const chat = useTranslations('chat');
   const chatgpt = useTranslations('chatgpt');
   const toMessage = useErrorMessage();
   const router = useRouter();
@@ -47,6 +48,8 @@ export function StartChatPanel({
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [personas, setPersonas] = useState<Persona[]>([]);
   const [model, setModel] = useState('');
+  /** The auxiliary model; empty is no pick, and the side work runs on the first model. */
+  const [subModel, setSubModel] = useState('');
   const [personaId, setPersonaId] = useState('');
   /** The recommended profile the reader picked; exclusive with the persona. */
   const [profileId, setProfileId] = useState('');
@@ -75,6 +78,7 @@ export function StartChatPanel({
         {
           plotId,
           model,
+          ...(subModel ? { subModel } : {}),
           ...(introIndex !== undefined ? { introIndex } : {}),
           // The server refuses both at once, and the picker above never sets both:
           // a profile wins, and choosing a persona is what gives it up.
@@ -100,6 +104,20 @@ export function StartChatPanel({
     <Section title={t('startChat')} busy={busy}>
       <Field label={t('model')}>
         <Select value={model} onChange={(event) => setModel(event.target.value)}>
+          {models.map((entry) => (
+            <option key={entry.id} value={entry.id}>
+              {entry.label}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      {/* The chat settings' own control, so the copy is theirs too: next to the
+          model it spares, defaulting to the first model by name. */}
+      <Field label={chat('subModel')} hint={chat('subModelHint')}>
+        <Select value={subModel} onChange={(event) => setSubModel(event.target.value)}>
+          <option value="">
+            {models[0] ? chat('subModelDefaultIs', { model: models[0].label }) : chat('subModelDefault')}
+          </option>
           {models.map((entry) => (
             <option key={entry.id} value={entry.id}>
               {entry.label}

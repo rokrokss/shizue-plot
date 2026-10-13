@@ -6,12 +6,12 @@
  * is answered to the plot editor, which creates the plot through the ordinary POST,
  * so the editor stays the only place a work is written.
  *
- * The call goes to the default chat model rather than to the memory channel:
- * this is the creator's own writing being drafted, and the cheap summarizer is
- * not the model to hand that to.
+ * The call goes to the model the creator picked, else to the default chat model
+ * — never to the memory channel: this is the creator's own writing being
+ * drafted, and the cheap summarizer is not the model to hand that to unasked.
  */
 import { MAX_INTRO_LENGTH } from '@shizue/core';
-import { getAdapter, listEnabledModels, type ChatGPTAccount, type ChatRequest } from '@shizue/llm';
+import { getAdapter, getModel, listEnabledModels, type ChatGPTAccount, type ChatRequest } from '@shizue/llm';
 import type { AppDeps } from './deps.js';
 import { ApiError } from './errors.js';
 import { normalizeTags } from './hub.js';
@@ -78,10 +78,21 @@ export interface PlotDraft {
 }
 
 /**
- * Drafts use the first model available to the creator's ChatGPT account,
- * matching the initial selection on the start-chat panel.
+ * Drafts use the model the creator picked, held to their catalog exactly as a
+ * chat's model is; without a pick, the first model available to their ChatGPT
+ * account, matching the initial selection on the start-chat panel.
  */
-const draftModel = async (deps: AppDeps, account: ChatGPTAccount | undefined): Promise<string> => {
+const draftModel = async (
+  deps: AppDeps,
+  account: ChatGPTAccount | undefined,
+  requested: string | undefined,
+): Promise<string> => {
+  if (requested !== undefined) {
+    if (!(await getModel(requested, deps.env, account))) {
+      throw new ApiError(400, 'model_unavailable', `Model not available: ${requested}`);
+    }
+    return requested;
+  }
   const model = (await listEnabledModels(deps.env, account))[0];
   if (!model) throw new ApiError(503, 'draft_unavailable', 'No chat model is configured');
   return model.id;
@@ -93,9 +104,14 @@ const draftModel = async (deps: AppDeps, account: ChatGPTAccount | undefined): P
  * model that cannot write it; past that the creator gets a 502 and their premise
  * back, and nothing has been written anywhere.
  */
-export async function draftPlot(deps: AppDeps, userId: string, premise: string): Promise<PlotDraft> {
+export async function draftPlot(
+  deps: AppDeps,
+  userId: string,
+  premise: string,
+  model?: string,
+): Promise<PlotDraft> {
   const account = deps.chatgpt?.accounts.forUser(userId);
-  const modelId = await draftModel(deps, account);
+  const modelId = await draftModel(deps, account, model);
   const resolved = await (deps.getAdapter ?? getAdapter)(modelId, deps.env, account);
   const request: ChatRequest = {
     model: resolved.providerModel,

@@ -112,7 +112,7 @@ test.describe('chat — mobile', () => {
     // A chat opens on the work's own page, which is the same one for creator
     // and reader.
     await page.goto(`/ko/p/${plotId}`);
-    await page.getByLabel('모델').selectOption('echo/echo');
+    await page.getByRole('combobox', { name: '모델', exact: true }).selectOption('echo/echo');
     await page.getByRole('button', { name: '대화 시작' }).click();
     await expect(page).toHaveURL(new RegExp(`/ko/chats/${UUID_PATH}$`));
     await expect(page.getByTestId('message-assistant').first()).toContainText(plot.intro);

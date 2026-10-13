@@ -13,9 +13,23 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import messages from '../messages/ko.json';
 import { ApiError } from '../src/lib/api';
-import type { PlotDraft } from '../src/lib/types';
+import type { ModelInfo, PlotDraft } from '../src/lib/types';
 
 (globalThis as Record<string, unknown>)['IS_REACT_ACT_ENVIRONMENT'] = true;
+
+/**
+ * Node's own experimental `localStorage` shadows the jsdom one and is an empty
+ * object without `--localstorage-file`, so the page gets a map of its own.
+ */
+const store = new Map<string, string>();
+const storage = {
+  getItem: (key: string) => store.get(key) ?? null,
+  setItem: (key: string, value: string) => void store.set(key, value),
+  removeItem: (key: string) => void store.delete(key),
+};
+for (const scope of new Set([globalThis, window])) {
+  Object.defineProperty(scope, 'localStorage', { configurable: true, value: storage });
+}
 
 const push = vi.fn<(href: string) => void>();
 /** Every write the page has sent, in order. */
@@ -23,6 +37,8 @@ let sent: { path: string; body: unknown }[] = [];
 /** What the draft call answers with; a rejection is how a failure is tested. */
 let drafted: () => Promise<PlotDraft>;
 let created: () => Promise<{ id: string }>;
+/** The creator's models; empty unless a test is about picking one. */
+let catalog: ModelInfo[] = [];
 
 vi.mock('@/i18n/navigation', async () => {
   const { createElement: h } = await import('react');
@@ -38,7 +54,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
   const original = await importOriginal<typeof import('../src/lib/api')>();
   return {
     ...original,
-    apiGet: () => Promise.resolve([]),
+    apiGet: (path: string) => Promise.resolve(path === '/api/models' ? catalog : []),
     apiSend: (_method: string, path: string, body: unknown) => {
       sent.push({ path, body });
       if (path === '/api/plots/draft') return drafted();
@@ -100,6 +116,8 @@ beforeEach(() => {
   sent = [];
   drafted = () => Promise.resolve(draft);
   created = () => Promise.resolve({ id: 'sty_9' });
+  catalog = [];
+  store.clear();
   push.mockClear();
   host = document.createElement('div');
   document.body.appendChild(host);
@@ -174,6 +192,105 @@ describe('the AI draft', () => {
     await click(write());
 
     expect(host.textContent).toContain(messages.errors.draft_failed);
+  });
+});
+
+describe('the draft’s model', () => {
+  const modelSelect = (): HTMLSelectElement | null =>
+    panel()!.querySelector('[data-testid="draft-model"]');
+
+  beforeEach(() => {
+    catalog = [
+      { id: 'm1', label: '모델 하나' },
+      { id: 'm2', label: '가벼운 모델' },
+    ];
+  });
+
+  async function draftWith(): Promise<unknown> {
+    await type(premise(), '한 줄.');
+    await click(write());
+    return sent[0]!.body;
+  }
+
+  it('starts on the first model and sends it', async () => {
+    await render();
+    await click(opener());
+    expect([...modelSelect()!.options].map((option) => option.textContent)).toEqual(['모델 하나', '가벼운 모델']);
+    expect(modelSelect()!.value).toBe('m1');
+    expect(await draftWith()).toEqual({ premise: '한 줄.', model: 'm1' });
+  });
+
+  it('remembers the last pick in this browser', async () => {
+    await render();
+    await click(opener());
+    await act(async () => {
+      modelSelect()!.value = 'm2';
+      modelSelect()!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(store.get('shizue.draftModel')).toBe('m2');
+
+    // A later visit opens on it.
+    act(() => root.unmount());
+    root = createRoot(host);
+    await render();
+    await click(opener());
+    expect(modelSelect()!.value).toBe('m2');
+    expect(await draftWith()).toEqual({ premise: '한 줄.', model: 'm2' });
+  });
+
+  it('falls back to the first model when the remembered one is no longer offered', async () => {
+    store.set('shizue.draftModel', 'gone/model');
+    await render();
+    await click(opener());
+    expect(modelSelect()!.value).toBe('m1');
+    expect(await draftWith()).toEqual({ premise: '한 줄.', model: 'm1' });
+  });
+
+  it('leaves the choice to the server while there is no catalog', async () => {
+    catalog = [];
+    await render();
+    await click(opener());
+    expect(modelSelect()).toBeNull();
+    expect(await draftWith()).toEqual({ premise: '한 줄.' });
+  });
+});
+
+describe('the draft guide', () => {
+  const toggle = (): HTMLButtonElement => panel()!.querySelector('[data-testid="draft-guide-toggle"]')!;
+  const guide = (): HTMLElement => panel()!.querySelector('[data-testid="draft-guide"]')!;
+
+  it('is collapsed until asked for, and out of reach while it is', async () => {
+    await render();
+    await click(opener());
+    expect(toggle().textContent).toContain(messages.plots.draftGuide);
+    // A native button: Enter and Space work without a handler of its own.
+    expect(toggle().tagName).toBe('BUTTON');
+    expect(toggle().type).toBe('button');
+    expect(toggle().getAttribute('aria-expanded')).toBe('false');
+    expect(toggle().getAttribute('aria-controls')).toBe(guide().id);
+    expect(guide().hasAttribute('inert')).toBe(true);
+  });
+
+  it('opens on a press, says so, and is remembered in this browser', async () => {
+    await render();
+    await click(opener());
+    await click(toggle());
+    expect(toggle().getAttribute('aria-expanded')).toBe('true');
+    expect(guide().hasAttribute('inert')).toBe(false);
+    for (const key of ['Input', 'Model', 'Result', 'Choice'] as const) {
+      expect(guide().textContent).toContain(messages.plots[`draftGuide${key}`]);
+    }
+    expect(store.get('shizue.draftGuideOpen')).toBe('1');
+
+    // Reopening the panel finds it as it was left.
+    await click(opener());
+    await click(opener());
+    expect(toggle().getAttribute('aria-expanded')).toBe('true');
+
+    await click(toggle());
+    expect(toggle().getAttribute('aria-expanded')).toBe('false');
+    expect(guide().hasAttribute('inert')).toBe(true);
+    expect(store.get('shizue.draftGuideOpen')).toBe('0');
   });
 });
 

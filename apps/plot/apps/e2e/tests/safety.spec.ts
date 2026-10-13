@@ -88,7 +88,7 @@ test('the creator publishes at the only level on offer, all-ages', async () => {
 
 test('the chat discloses the AI once and badges it always', async () => {
   await creatorPage.goto(`/ko/p/${plotId}`);
-  await creatorPage.getByLabel('모델').selectOption('echo/echo');
+  await creatorPage.getByRole('combobox', { name: '모델', exact: true }).selectOption('echo/echo');
   await creatorPage.getByRole('button', { name: '대화 시작' }).click();
   await expect(creatorPage).toHaveURL(new RegExp(`/ko/chats/${UUID_PATH}$`));
 

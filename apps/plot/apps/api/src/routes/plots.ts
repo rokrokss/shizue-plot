@@ -965,6 +965,12 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     if (premise.length > MAX_PREMISE_LENGTH) {
       throw badRequest('invalid_request', `premise must be at most ${MAX_PREMISE_LENGTH} characters`);
     }
+    // The creator's pick; null or absent is the default model. The catalog check
+    // is the draft's own (`draftPlot`), with the account it runs on.
+    const model = body['model'];
+    if (model !== undefined && model !== null && typeof model !== 'string') {
+      throw badRequest('invalid_request', 'model must be a string or null');
+    }
 
     // One draft per creator at a time. The call is a minute long at worst, and a
     // creator hammering the button would otherwise pay for every one of them.
@@ -973,7 +979,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     }
     deps.drafting.add(userId);
     try {
-      return c.json(await draftPlot(deps, userId, premise));
+      return c.json(await draftPlot(deps, userId, premise, model ?? undefined));
     } finally {
       deps.drafting.delete(userId);
     }
