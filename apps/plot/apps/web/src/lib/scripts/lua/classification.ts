@@ -137,7 +137,7 @@ export const LUA_CLASSIFICATION: Readonly<Record<string, LuaSupport>> = {
   simpleLLM: host('server', 'as LLM', true),
   similarity: host(
     'browser',
-    'RisuAI’s default embedder (Xenova/all-MiniLM-L6-v2, q8) in the page’s worker, shared with the triggers; best first, as RisuAI orders them; a failure is a Lua error',
+    'the reader’s embedding model, picked as RisuAI’s hypaModel (multiMiniLM by default, where RisuAI’s is MiniLM), q8, in the page’s worker, shared with the triggers; best first, as RisuAI orders them; a failure is a Lua error',
     true,
   ),
   request: host(

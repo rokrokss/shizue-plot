@@ -153,7 +153,7 @@ export type TriggerRequest =
   | { kind: 'llm'; messages: ScriptChatTurn[]; model: 'model' | 'submodel' }
   /**
    * An embedding search (`checkSimilarity`, `v2CheckSimilarity`): `texts`
-   * ordered by how close each is to `source`, by RisuAI's default embedder in
+   * ordered by how close each is to `source`, by the reader's embedding model in
    * the reader's browser. Answered with a `ScriptSimilarityAnswer`; a run with
    * no one to answer it reads that as a failure.
    */

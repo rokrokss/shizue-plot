@@ -61,7 +61,8 @@ export const TRIGGER_CLASSIFICATION: Readonly<Record<string, { support: TriggerS
   checkSimilarity: {
     support: 'browser',
     note:
-      'lowLevelAccess; RisuAI’s default embedder (Xenova/all-MiniLM-L6-v2, q8, transformers.js) in a worker the page starts; ' +
+      'lowLevelAccess; the reader’s embedding model, picked as RisuAI’s hypaModel (multiMiniLM by default, where RisuAI’s is MiniLM), ' +
+      'q8, transformers.js, in a worker the page starts; ' +
       'value split on §, ordered as RisuAI orders them, joined with §; a failure stops the run, as RisuAI’s throw does',
   },
   extractRegex: { support: 'browser', note: 'lowLevelAccess' },

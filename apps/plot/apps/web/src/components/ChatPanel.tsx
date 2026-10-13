@@ -1,8 +1,9 @@
 'use client';
 
 import { useFormatter, useTranslations } from 'next-intl';
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useId, useState, type ReactNode } from 'react';
 import { assetHref, type Illustration } from '@/lib/assets';
+import { EMBEDDING_MODELS, embeddingModels, readEmbeddingModel, writeEmbeddingModel } from '@/lib/scripts/embeddingModels';
 import { withNarratorField } from '@/lib/narrator';
 import { relationshipRows } from '@/lib/relationship';
 import {
@@ -97,6 +98,41 @@ function IllustrationGallery({ illustrations }: { illustrations: readonly Illust
 type Saveable = 'note' | 'memory' | 'narrator';
 
 /**
+ * The model the plot's scripts compare texts with, picked as RisuAI's
+ * `hypaModel` is. Like the custom-UI switch it is this browser's, so it holds
+ * for every chat here; the search reads it as it starts. After a write the
+ * select shows what was read back, which is the default where storage refuses it.
+ */
+function EmbeddingModelSetting() {
+  const t = useTranslations('chat');
+  const [model, setModel] = useState(readEmbeddingModel);
+  const id = useId();
+
+  return (
+    <section data-testid="chat-similarity" className="space-y-3 border-t border-line pt-5">
+      <h2 id={id} className="text-xs font-medium text-muted">{t('similarityModel')}</h2>
+      <Select
+        aria-labelledby={id}
+        value={model}
+        className="h-9 py-0 text-xs"
+        onChange={(event) => {
+          writeEmbeddingModel(event.target.value as typeof model);
+          setModel(readEmbeddingModel());
+        }}
+      >
+        {embeddingModels.map((name) => (
+          <option key={name} value={name}>
+            {t('similarityModelOption', { name: EMBEDDING_MODELS[name].label, size: EMBEDDING_MODELS[name].megabytes })}
+          </option>
+        ))}
+      </Select>
+      <p className="text-xs text-muted/80">{t(`similarityModels.${model}`)}</p>
+      <p className="text-xs text-muted/80">{t('similarityModelHint')}</p>
+    </section>
+  );
+}
+
+/**
  * Chat-scoped notes: the author's note that goes into every prompt, the reusable
  * notes attached to this chat, the memory knobs, the rolling summary the memory
  * layer keeps, and the relationship the background job extracts. Saving is the
@@ -133,6 +169,7 @@ export function ChatPanel({
   absentCharacterIds = [],
   onToggleAbsent,
   inspectChatId,
+  scriptSimilarity = false,
 }: {
   /** Everyone the plot's replies may be written in the voice of, in its order. */
   members: readonly PublicMember[];
@@ -189,6 +226,11 @@ export function ChatPanel({
    * plot's creator. Everyone else never gets the section.
    */
   inspectChatId?: string;
+  /**
+   * Whether the plot's scripts may search by embedding, which RisuAI keeps
+   * behind their low-level access. Only then is there a model to pick.
+   */
+  scriptSimilarity?: boolean;
 }) {
   const t = useTranslations('chat');
   const common = useTranslations('common');
@@ -492,6 +534,8 @@ export function ChatPanel({
         </div>
         <p className="text-xs text-muted/80">{t('componentTurnsHint')}</p>
       </section>
+
+      {scriptSimilarity ? <EmbeddingModelSetting /> : null}
 
       <section data-testid="chat-relationship" className="space-y-3 border-t border-line pt-5">
         <div className="flex items-center justify-between gap-3">

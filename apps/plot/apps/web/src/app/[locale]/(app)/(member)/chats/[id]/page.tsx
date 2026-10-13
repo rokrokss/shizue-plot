@@ -70,6 +70,7 @@ import { reconcileSend } from '@/lib/reconcile';
 import { sanitizeCustomHtml } from '@/lib/sanitizeHtml';
 import { streamGeneration } from '@/lib/sse';
 import { loadWholeBranch } from '@/lib/scripts/branch';
+import { readEmbeddingModel } from '@/lib/scripts/embeddingModels';
 import { createLuaEngine, luaFunctionNames, luaScriptsOf } from '@/lib/scripts/lua/engine';
 import { createLuaSandbox, type LuaRequestAnswer } from '@/lib/scripts/lua/sandbox';
 import {
@@ -1020,14 +1021,16 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       console.warn('[scripts]', entry.kind, entry.effect ?? '', entry.message);
     // The embedding search of `checkSimilarity` and Lua's `similarity`, one for both:
     // its worker and the model are fetched on the first search, never before. The
-    // first one in a page waits on that download, so the reader is told why.
+    // first one on a model waits on its load, the first time on its download, so the
+    // reader is told why. The model is the reader's pick as it stands at each search.
     const similarity = async (source: string, texts: readonly string[]): Promise<string[]> => {
+      const model = readEmbeddingModel();
       const { searchSimilar, embedderReady } = await import('@/lib/scripts/embedding');
-      if (embedderReady()) return searchSimilar(source, texts);
+      if (embedderReady(model)) return searchSimilar(model, source, texts);
       const notice = t('scriptSimilarityPreparing');
       setScriptNotice(notice);
       try {
-        return await searchSimilar(source, texts);
+        return await searchSimilar(model, source, texts);
       } finally {
         setScriptNotice((current) => (current === notice ? '' : current));
       }
@@ -2116,6 +2119,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                 writeCustomUiEnabled(enabled);
                 setCustomUi(enabled);
               }}
+              scriptSimilarity={scriptBundle?.lowLevelAccess ?? false}
             />
           </div>
         </div>

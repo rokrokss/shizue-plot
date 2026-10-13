@@ -82,7 +82,7 @@ export interface LuaHost {
   confirm(text: string): Promise<boolean>;
   /** The model's answer; throws when there is none. */
   llm(messages: LuaLlmMessage[], model: LuaLlmModel): Promise<string>;
-  /** `texts`, closest to `source` first, by RisuAI's default embedder; throws when it fails. */
+  /** `texts`, closest to `source` first, by the reader's embedding model; throws when it fails. */
   similarity(source: string, texts: string[]): Promise<string[]>;
   /** RisuAI's answer to `request(url)`, from our server; throws when there is none. `null` is a URL that is not text. */
   request(url: string | null): Promise<LuaRequestAnswer>;

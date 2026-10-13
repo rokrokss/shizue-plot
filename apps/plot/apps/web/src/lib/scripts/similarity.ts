@@ -1,8 +1,8 @@
 /**
  * RisuAI's embedding search (`HypaProcesser` in its `process/memory/hypamemory.ts`)
  * as `checkSimilarity`, `v2CheckSimilarity` and Lua's `similarity` use it: a new
- * processer for each call, on RisuAI's default model (`MiniLM`), answering the
- * texts best first.
+ * processer for each call, on the model the reader picked (RisuAI's `hypaModel`,
+ * `embeddingModels.ts`), answering the texts best first.
  *
  * The order is RisuAI's to the letter, because a card reads the first text as
  * the closest and RisuAI's own order is quirky:
@@ -30,12 +30,15 @@
  *
  * So the cache lasts as RisuAI's does: its vectors are kept in the reader's
  * IndexedDB (`indexedDbStore`), and after a reload a text is read back where
- * RisuAI reads it back. RisuAI keys a vector `text|model`; the store is keyed by
- * that string's SHA-256, so what it holds never spells out the chat. The page
- * also keeps in memory what it read or wrote, and asks the store only for the
- * rest. Where the store is unavailable or fails, the memory is the whole
- * cache, for as long as the page lives.
+ * RisuAI reads it back. RisuAI keys a vector `text|model`, with the model's
+ * RisuAI name, so each model's vectors are its own; the store is keyed by that
+ * string's SHA-256, so what it holds never spells out the chat. The page also
+ * keeps in memory what it read or wrote, and asks the store only for the rest.
+ * Where the store is unavailable or fails, the memory is the whole cache, for
+ * as long as the page lives.
  */
+
+import { DEFAULT_EMBEDDING_MODEL } from './embeddingModels';
 
 /** One batch through the model: a vector per text, in order. */
 export type Embed = (texts: string[]) => Promise<Float32Array[]>;
@@ -55,9 +58,6 @@ export interface VectorStore {
 
 /** RisuAI's `embedDocuments` chunk size. */
 const BATCH = 50;
-
-/** RisuAI's name for the model the worker runs (`hypaModel`), the second half of its cache key. */
-const MODEL = 'MiniLM';
 
 interface MemoryVector {
   content: string;
@@ -79,11 +79,13 @@ async function keyOf(text: string, model: string): Promise<string> {
 
 /**
  * A search over `embed` with its own per-text cache: memory in front of `store`,
- * or memory alone without one. The page keeps one (`embedding.ts`).
+ * or memory alone without one. `model` is RisuAI's name for the model `embed`
+ * runs, the second half of the store's key; the memory is this model's alone.
+ * The page keeps one for each model the reader has searched with (`embedding.ts`).
  */
 export function createSimilaritySearch(
   embed: Embed,
-  { model = MODEL, store }: { model?: string; store?: VectorStore } = {},
+  { model = DEFAULT_EMBEDDING_MODEL, store }: { model?: string; store?: VectorStore } = {},
 ): SimilaritySearch {
   const memory = new Map<string, Float32Array>();
 
@@ -162,7 +164,7 @@ const VECTORS = 'vectors';
  *
  * Nothing is ever dropped, as in RisuAI: a dropped vector would be embedded
  * again in other company, which is the reorder the store is here to prevent.
- * A text costs its 384 floats, about 1.5 KB.
+ * A text costs its 384 floats, about 1.5 KB (`nomic`'s 768, about 3 KB).
  */
 export function indexedDbStore(factory: () => IDBFactory = () => indexedDB): VectorStore {
   let database: Promise<IDBDatabase> | null = null;
@@ -221,21 +223,29 @@ export interface EmbedWorker {
 }
 
 export interface WorkerEmbedder {
-  embed: Embed;
-  /** Whether the model has answered once — until then a batch waits on its download. */
-  ready(): boolean;
+  /** `embed` on `model`, a Hugging Face repo (`embeddingModels.ts`). */
+  embedWith(model: string): Embed;
+  /**
+   * Whether `model` is the one the worker last answered with, so is loaded —
+   * until then a batch on it waits on its load, and the first time on its download.
+   */
+  ready(model: string): boolean;
 }
 
 /**
- * `embed` through a worker (`embeddingWorker.ts`), started on the first batch
- * and kept: RisuAI keeps its pipeline loaded too. A worker that crashed fails
+ * Batches through a worker (`embeddingWorker.ts`), started on the first and
+ * kept: RisuAI keeps its pipeline loaded too. Each batch names its model, and
+ * the worker holds the last one it was asked for. A worker that crashed fails
  * what it was asked, and the next batch starts another.
  */
 export function workerEmbedder(spawn: () => EmbedWorker): WorkerEmbedder {
   let worker: EmbedWorker | null = null;
-  let answered = false;
+  let loaded: string | null = null;
   let seq = 0;
-  const waiting = new Map<number, { resolve: (vectors: Float32Array[]) => void; reject: (error: Error) => void }>();
+  const waiting = new Map<
+    number,
+    { model: string; resolve: (vectors: Float32Array[]) => void; reject: (error: Error) => void }
+  >();
 
   function start(): EmbedWorker {
     const made = spawn();
@@ -245,15 +255,20 @@ export function workerEmbedder(spawn: () => EmbedWorker): WorkerEmbedder {
       if (!call) return;
       waiting.delete(message.id);
       if (message.vectors) {
-        answered = true;
+        loaded = call.model;
         call.resolve(message.vectors);
       } else {
+        // A switch that failed to load has let go of the model it switched from.
+        if (loaded !== call.model) loaded = null;
         call.reject(new Error(message.error ?? 'the embedder failed'));
       }
     };
     made.onerror = () => {
       made.terminate();
-      if (worker === made) worker = null;
+      if (worker === made) {
+        worker = null;
+        loaded = null;
+      }
       const lost = [...waiting.values()];
       waiting.clear();
       for (const call of lost) call.reject(new Error('the embedding worker crashed'));
@@ -262,13 +277,13 @@ export function workerEmbedder(spawn: () => EmbedWorker): WorkerEmbedder {
   }
 
   return {
-    embed: (texts) =>
+    embedWith: (model) => (texts) =>
       new Promise((resolve, reject) => {
         worker ??= start();
         seq += 1;
-        waiting.set(seq, { resolve, reject });
-        worker.postMessage({ id: seq, texts });
+        waiting.set(seq, { model, resolve, reject });
+        worker.postMessage({ id: seq, model, texts });
       }),
-    ready: () => answered,
+    ready: (model) => loaded === model,
   };
 }

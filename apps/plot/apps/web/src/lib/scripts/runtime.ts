@@ -569,7 +569,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
         return { ok: false, error: error instanceof Error ? error.message : String(error) };
       }
     },
-    // `checkSimilarity`/`v2CheckSimilarity`: RisuAI's default embedder, in the
+    // `checkSimilarity`/`v2CheckSimilarity`: the reader's embedding model, in the
     // page's worker. A failure (the model would not load) stops the run there.
     similarity: async (request) => {
       if (!options.similarity) return { ok: false, error: 'no embedder is installed' };

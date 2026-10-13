@@ -30,7 +30,7 @@ let root: Root;
 let sent: string[];
 let saveNote: () => Promise<void> = async () => undefined;
 
-function render(features: { statusWindow: boolean; choices: boolean }): void {
+function render(features: { statusWindow: boolean; choices: boolean; scriptSimilarity?: boolean }): void {
   act(() => {
     root.render(
       createElement(NextIntlClientProvider, {
@@ -65,6 +65,7 @@ function render(features: { statusWindow: boolean; choices: boolean }): void {
           onToggleComponentTurns: async () => undefined,
           onToggleStatusWindow: async (enabled: boolean) => void sent.push(`status:${enabled}`),
           onToggleChoices: async (enabled: boolean) => void sent.push(`choices:${enabled}`),
+          scriptSimilarity: features.scriptSimilarity ?? false,
         }),
       }),
     );
@@ -126,4 +127,58 @@ it('locks note and narrator drafts while its own save is pending', async () => {
   expect([...host.querySelectorAll('textarea')].every((node) => node.matches(':disabled'))).toBe(true);
   await act(async () => finish());
   expect([...host.querySelectorAll('textarea')].every((node) => !node.matches(':disabled'))).toBe(true);
+});
+
+describe('the similarity model in the notes panel', () => {
+  /**
+   * Node's own experimental `localStorage` shadows the jsdom one and is an empty
+   * object without `--localstorage-file`, so the pick gets a map of its own.
+   */
+  const stored = new Map<string, string>();
+  beforeEach(() => {
+    stored.clear();
+    const storage = {
+      getItem: (key: string) => stored.get(key) ?? null,
+      setItem: (key: string, value: string) => void stored.set(key, value),
+    };
+    for (const scope of new Set([globalThis, window])) {
+      Object.defineProperty(scope, 'localStorage', { configurable: true, value: storage });
+    }
+  });
+
+  const picker = (): HTMLElement | null => host.querySelector('[data-testid="chat-similarity"]');
+  const select = (): HTMLSelectElement => picker()!.querySelector('select')!;
+
+  it('is offered only where the plot’s scripts may search', () => {
+    render({ statusWindow: false, choices: false });
+    expect(picker()).toBeNull();
+    render({ statusWindow: false, choices: false, scriptSimilarity: true });
+    expect(picker()).not.toBeNull();
+  });
+
+  it('names each model with its download, picks the multilingual one by default, and says what it is for', () => {
+    render({ statusWindow: false, choices: false, scriptSimilarity: true });
+    expect(select().getAttribute('aria-labelledby')).toBe(picker()!.querySelector('h2')!.id);
+    expect([...select().options].map((option) => [option.value, option.textContent])).toEqual([
+      ['multiMiniLM', 'Multilingual MiniLM L12 v2 · 135MB'],
+      ['MiniLM', 'MiniLM L6 v2 · 24MB'],
+      ['bgeSmallEn', 'BGE Small English · 35MB'],
+      ['nomic', 'Nomic Embed Text v1.5 · 138MB'],
+    ]);
+    expect(select().value).toBe('multiMiniLM');
+    expect(picker()!.textContent).toContain(messages.chat.similarityModels.multiMiniLM);
+  });
+
+  it('shows the pick this browser kept, and keeps a new one', async () => {
+    stored.set('shizue.embeddingModel', 'bgeSmallEn');
+    render({ statusWindow: false, choices: false, scriptSimilarity: true });
+    expect(select().value).toBe('bgeSmallEn');
+    await act(async () => {
+      select().value = 'MiniLM';
+      select().dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(stored.get('shizue.embeddingModel')).toBe('MiniLM');
+    expect(select().value).toBe('MiniLM');
+    expect(picker()!.textContent).toContain(messages.chat.similarityModels.MiniLM);
+  });
 });

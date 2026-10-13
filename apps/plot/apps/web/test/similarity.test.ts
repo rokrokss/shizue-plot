@@ -404,17 +404,20 @@ describe('the stored vectors', () => {
     }
   });
 
-  it('are keyed by the SHA-256 of text and model, so another model embeds again', async () => {
+  it('are keyed by the SHA-256 of text and the model’s RisuAI name, so another model embeds again', async () => {
     const { idb, load } = browser();
+    // Unnamed, a search is on the default: the multilingual model, not RisuAI's.
     await load().ours('sword', ['sword', 'shield']);
-    const other = load('other');
+    const other = load('MiniLM');
     await other.ours('sword', ['sword', 'shield']);
     expect(other.batches.ours).toEqual([['sword', 'shield'], ['sword']]);
-    const again = load();
+    const again = load('multiMiniLM');
     await again.ours('sword', ['sword', 'shield']);
     expect(again.batches.ours).toEqual([['sword']]);
     const { keys, values } = await stored(idb);
-    expect([...keys].sort()).toEqual(['sword|MiniLM', 'shield|MiniLM', 'sword|other', 'shield|other'].map(sha256).sort());
+    expect([...keys].sort()).toEqual(
+      ['sword|multiMiniLM', 'shield|multiMiniLM', 'sword|MiniLM', 'shield|MiniLM'].map(sha256).sort(),
+    );
     expect(values.every((value) => value instanceof Float32Array && value.length === DIM)).toBe(true);
   });
 
@@ -458,16 +461,18 @@ describe('the stored vectors', () => {
 });
 
 describe('the embedding worker’s client', () => {
+  type Posted = { id: number; model: string; texts: string[] };
+
   function fakeWorker() {
-    const spawned: (EmbedWorker & { posted: { id: number; texts: string[] }[]; terminated: boolean })[] = [];
+    const spawned: (EmbedWorker & { posted: Posted[]; terminated: boolean })[] = [];
     const spawn = (): EmbedWorker => {
       const worker = {
-        posted: [] as { id: number; texts: string[] }[],
+        posted: [] as Posted[],
         terminated: false,
         onmessage: null as EmbedWorker['onmessage'],
         onerror: null as EmbedWorker['onerror'],
         postMessage(message: unknown) {
-          worker.posted.push(message as { id: number; texts: string[] });
+          worker.posted.push(message as Posted);
         },
         terminate() {
           worker.terminated = true;
@@ -479,36 +484,70 @@ describe('the embedding worker’s client', () => {
     return { spawn, spawned };
   }
 
+  const SMALL = 'Xenova/all-MiniLM-L6-v2';
+  const MULTI = 'Xenova/paraphrase-multilingual-MiniLM-L12-v2';
+
   it('starts one worker on the first batch, matches answers to asks, and is ready once one came back', async () => {
     const { spawn, spawned } = fakeWorker();
     const embedder = workerEmbedder(spawn);
     expect(spawned).toHaveLength(0);
-    const first = embedder.embed(['a']);
-    const second = embedder.embed(['b', 'c']);
+    const first = embedder.embedWith(MULTI)(['a']);
+    const second = embedder.embedWith(MULTI)(['b', 'c']);
     expect(spawned).toHaveLength(1);
     const worker = spawned[0]!;
     expect(worker.posted).toEqual([
-      { id: 1, texts: ['a'] },
-      { id: 2, texts: ['b', 'c'] },
+      { id: 1, model: MULTI, texts: ['a'] },
+      { id: 2, model: MULTI, texts: ['b', 'c'] },
     ]);
-    expect(embedder.ready()).toBe(false);
+    expect(embedder.ready(MULTI)).toBe(false);
     worker.onmessage!({ data: { id: 2, vectors: [Float32Array.of(2), Float32Array.of(3)] } });
     worker.onmessage!({ data: { id: 1, error: 'offline' } });
     expect(await second).toEqual([Float32Array.of(2), Float32Array.of(3)]);
     await expect(first).rejects.toThrow('offline');
-    expect(embedder.ready()).toBe(true);
+    expect(embedder.ready(MULTI)).toBe(true);
   });
 
-  it('fails what a crashed worker held, and starts another for the next batch', async () => {
+  it('names each batch’s model to the one worker, and is ready only for the model it last answered with', async () => {
     const { spawn, spawned } = fakeWorker();
     const embedder = workerEmbedder(spawn);
-    const lost = embedder.embed(['a']);
+    const small = embedder.embedWith(SMALL)(['a']);
+    spawned[0]!.onmessage!({ data: { id: 1, vectors: [Float32Array.of(1)] } });
+    await small;
+    expect(embedder.ready(SMALL)).toBe(true);
+    // The reader switched: the next search waits on the other model's load, so the page says so.
+    expect(embedder.ready(MULTI)).toBe(false);
+    const multi = embedder.embedWith(MULTI)(['b']);
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0]!.posted.at(-1)).toEqual({ id: 2, model: MULTI, texts: ['b'] });
+    spawned[0]!.onmessage!({ data: { id: 2, vectors: [Float32Array.of(2)] } });
+    await multi;
+    // The worker let the first one go to load this one.
+    expect([embedder.ready(SMALL), embedder.ready(MULTI)]).toEqual([false, true]);
+    // A failure on the loaded model keeps it; a switch that failed to load leaves nothing loaded.
+    const kept = embedder.embedWith(MULTI)(['c']);
+    spawned[0]!.onmessage!({ data: { id: 3, error: 'out of memory' } });
+    await expect(kept).rejects.toThrow('out of memory');
+    expect(embedder.ready(MULTI)).toBe(true);
+    const failed = embedder.embedWith(SMALL)(['d']);
+    spawned[0]!.onmessage!({ data: { id: 4, error: 'could not fetch the model' } });
+    await expect(failed).rejects.toThrow('could not fetch the model');
+    expect([embedder.ready(SMALL), embedder.ready(MULTI)]).toEqual([false, false]);
+  });
+
+  it('fails what a crashed worker held, and starts another for the next batch, which loads its model again', async () => {
+    const { spawn, spawned } = fakeWorker();
+    const embedder = workerEmbedder(spawn);
+    const done = embedder.embedWith(MULTI)(['a']);
+    spawned[0]!.onmessage!({ data: { id: 1, vectors: [Float32Array.of(1)] } });
+    await done;
+    const lost = embedder.embedWith(MULTI)(['b']);
     spawned[0]!.onerror!(new Event('error'));
     await expect(lost).rejects.toThrow('the embedding worker crashed');
     expect(spawned[0]!.terminated).toBe(true);
-    void embedder.embed(['b']);
+    expect(embedder.ready(MULTI)).toBe(false);
+    void embedder.embedWith(MULTI)(['c']);
     expect(spawned).toHaveLength(2);
-    expect(spawned[1]!.posted).toEqual([{ id: 2, texts: ['b'] }]);
+    expect(spawned[1]!.posted).toEqual([{ id: 3, model: MULTI, texts: ['c'] }]);
   });
 
   it('fails the search where the embedder fails, as RisuAI’s throws', async () => {

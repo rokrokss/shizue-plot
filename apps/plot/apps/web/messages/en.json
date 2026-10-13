@@ -828,6 +828,15 @@
     "scriptStopped": "The story's scripts held this message back. What you wrote is still in the composer.",
     "scriptFinishFailed": "The story's scripts could not finish the last reply. The next message carries on from it as it is.",
     "scriptSimilarityPreparing": "The story's scripts are loading a model to compare texts. The first time can take a while.",
+    "similarityModel": "Script similarity model",
+    "similarityModelOption": "{name} · {size} MB",
+    "similarityModelHint": "The model the story's scripts compare texts with. It applies to every chat in this browser, and a model's first use downloads it, which can take a while.",
+    "similarityModels": {
+      "multiMiniLM": "Default. Tells Korean, Japanese and English texts apart.",
+      "MiniLM": "RisuAI's default. Small, but English only: it barely tells Korean or Japanese texts apart.",
+      "bgeSmallEn": "Small, English only.",
+      "nomic": "English only, and large."
+    },
     "scriptFollowUpConsent": "A script of {name} wants to ask for another reply right away. Allow it in this chat? You can take it back from the notes panel at any time.",
     "scriptMultisendConsent": "/multisend wants to send a message for you and have {name} answer it. Allow it in this chat? You can take it back from the notes panel at any time.",
     "scriptCommandFailed": "A slash command stopped with an error. What you wrote is back in the composer.",
