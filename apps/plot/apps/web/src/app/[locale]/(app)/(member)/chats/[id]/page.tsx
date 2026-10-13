@@ -927,6 +927,20 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     if (!scriptBundle) return null;
     const log = (entry: { kind: string; effect?: string; message: string }): void =>
       console.warn('[scripts]', entry.kind, entry.effect ?? '', entry.message);
+    // The embedding search of `checkSimilarity` and Lua's `similarity`, one for both:
+    // its worker and the model are fetched on the first search, never before. The
+    // first one in a page waits on that download, so the reader is told why.
+    const similarity = async (source: string, texts: readonly string[]): Promise<string[]> => {
+      const { searchSimilar, embedderReady } = await import('@/lib/scripts/embedding');
+      if (embedderReady()) return searchSimilar(source, texts);
+      const notice = t('scriptSimilarityPreparing');
+      setScriptNotice(notice);
+      try {
+        return await searchSimilar(source, texts);
+      } finally {
+        setScriptNotice((current) => (current === notice ? '' : current));
+      }
+    };
     // A plot that carries Lua gets the sandbox; wasmoon is fetched on its first call, never before.
     const engines = luaScriptsOf(scriptBundle.triggers).length
       ? [
@@ -940,6 +954,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             ui: scriptUi,
             llm: async (messages, model) =>
               (await apiSend<{ result: string }>('POST', `/api/chats/${id}/script-llm`, { messages, model })).result,
+            similarity,
             log,
           }),
         ]
@@ -950,6 +965,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       api: { send: apiSend },
       ui: scriptUi,
       engines,
+      similarity,
       log,
       onGlobalVariables: (globals) =>
         setState((current) => (current ? { ...current, globalVariables: globals } : current)),

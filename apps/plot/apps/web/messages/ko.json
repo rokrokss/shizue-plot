@@ -827,6 +827,7 @@
     "scriptDialogNo": "아니요",
     "scriptStopped": "작품의 스크립트가 이 메시지를 보내지 않았습니다. 쓴 글은 입력창에 남아 있습니다.",
     "scriptFinishFailed": "작품의 스크립트가 마지막 답장을 마무리하지 못했습니다. 다음 메시지는 그 답장을 그대로 두고 이어집니다.",
+    "scriptSimilarityPreparing": "작품의 스크립트가 글을 비교할 모델을 불러오고 있습니다. 처음에는 시간이 걸릴 수 있습니다.",
     "scriptFollowUpConsent": "{name}의 스크립트가 이어서 답장을 하나 더 받으려고 합니다. 이 대화에서 허용할까요? 노트 패널에서 언제든 취소할 수 있습니다.",
     "scriptMultisendConsent": "/multisend가 나 대신 메시지를 보내고 {name}의 답장을 받으려고 합니다. 이 대화에서 허용할까요? 노트 패널에서 언제든 취소할 수 있습니다.",
     "scriptCommandFailed": "슬래시 명령이 오류로 멈췄습니다. 쓴 글은 입력창으로 돌아갔습니다.",

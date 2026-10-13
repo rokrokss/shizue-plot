@@ -28,9 +28,9 @@
  *   prompt text a start trigger asked for, the chat as it left it, the
  *   character's fields it rewrote — and the caller decides where each goes
  *   (`messages.variable_delta`, the generation request, `chats.script_overlay`).
- * - Effects this product cannot carry out — image generation, embeddings, a
- *   model call, rewriting the request — are logged and leave what RisuAI leaves
- *   on failure (`TRIGGER_CLASSIFICATION`).
+ * - Effects this product cannot carry out — image generation, a model call,
+ *   rewriting the request — are logged and leave what RisuAI leaves on failure
+ *   (`TRIGGER_CLASSIFICATION`).
  * - RisuAI's slash commands (`command`, `v2Command`, `command.ts`) act on the
  *   chat as stored, not on the run's copy, and so does the CBS RisuAI reads
  *   variables through. The run keeps that chat beside its own (`Stored`), and
@@ -141,6 +141,13 @@ export type TriggerRequest =
    */
   | { kind: 'llm'; messages: ScriptChatTurn[]; model: 'model' | 'submodel' }
   /**
+   * An embedding search (`checkSimilarity`, `v2CheckSimilarity`): `texts`
+   * ordered by how close each is to `source`, by RisuAI's default embedder in
+   * the reader's browser. Answered with a `ScriptSimilarityAnswer`; a run with
+   * no one to answer it reads that as a failure.
+   */
+  | { kind: 'similarity'; source: string; texts: string[] }
+  /**
    * `/test_lorebook`: what RisuAI's `loadLoreBookV3Prompt` would activate of
    * `lorebook` on `history`, the chat as stored, oldest first. Answered with a
    * `LoreTest`; nothing answering it finds nothing.
@@ -162,6 +169,24 @@ function llmAnswer(raw: unknown): ScriptLlmAnswer {
   const answer = raw as Record<string, unknown>;
   if (answer['ok'] === true && typeof answer['text'] === 'string') return { ok: true, text: answer['text'] };
   return { ok: false, error: typeof answer['error'] === 'string' ? answer['error'] : NO_MODEL_ERROR };
+}
+
+/** What an embedding search came back with: the texts, best first. */
+export type ScriptSimilarityAnswer = { ok: true; texts: string[] } | { ok: false; error: string };
+
+/** A search nobody could make. */
+const NO_EMBEDDER_ERROR = 'embeddings are not available here';
+const NO_EMBEDDER: ScriptSimilarityAnswer = { ok: false, error: NO_EMBEDDER_ERROR };
+
+/** Whatever answered a `similarity` request, read as an answer — anything else is a failure. */
+function similarityAnswer(raw: unknown): ScriptSimilarityAnswer {
+  if (!raw || typeof raw !== 'object') return NO_EMBEDDER;
+  const answer = raw as Record<string, unknown>;
+  const texts = answer['texts'];
+  if (answer['ok'] === true && Array.isArray(texts) && texts.every((text) => typeof text === 'string')) {
+    return { ok: true, texts };
+  }
+  return { ok: false, error: typeof answer['error'] === 'string' ? answer['error'] : NO_EMBEDDER_ERROR };
 }
 
 /** What a script sends: its text as ChatML turns where it is ChatML, else one user turn (RisuAI). */
@@ -897,7 +922,12 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
           break;
         case 'checkSimilarity': {
           if (!lowLevelAccess) break;
-          unsupported('checkSimilarity', 'there is no embedder for scripts here');
+          const text = p(str(effect, 'value'));
+          const source = p(str(effect, 'source'));
+          const found = similarityAnswer(yield { kind: 'similarity', source, texts: text.split('§') });
+          // RisuAI's embedder throws out of the run, which stops there.
+          if (!found.ok) throw new Error(`checkSimilarity: ${found.error}`);
+          setVar(asText(str(effect, 'inputVar')), found.texts.join('§'));
           break;
         }
         case 'extractRegex': {
@@ -1102,7 +1132,11 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
         }
         case 'v2CheckSimilarity': {
           if (!lowLevelAccess) break;
-          unsupported('v2CheckSimilarity', 'there is no embedder for scripts here');
+          const source = value(effect, 'source', 'sourceType');
+          const text = value(effect, 'value', 'valueType');
+          const found = similarityAnswer(yield { kind: 'similarity', source, texts: text.split('§') });
+          if (!found.ok) throw new Error(`v2CheckSimilarity: ${found.error}`);
+          setVar(output(effect), found.texts.join('§'));
           break;
         }
         case 'v2RunLLM': {
@@ -1899,6 +1933,7 @@ export interface TriggerDriver {
   wait?(ms: number): Promise<void>;
   code?(request: Extract<TriggerRequest, { kind: 'code' }>): Promise<{ stopSending?: boolean } | void> | { stopSending?: boolean } | void;
   llm?(request: Extract<TriggerRequest, { kind: 'llm' }>): Promise<ScriptLlmAnswer> | ScriptLlmAnswer;
+  similarity?(request: Extract<TriggerRequest, { kind: 'similarity' }>): Promise<ScriptSimilarityAnswer> | ScriptSimilarityAnswer;
   lore?(request: Extract<TriggerRequest, { kind: 'lore' }>): Promise<LoreTest> | LoreTest;
   help?(): Promise<void> | void;
 }
@@ -1939,6 +1974,9 @@ async function drive<T>(run: Generator<TriggerRequest, T, unknown>, driver: Trig
       case 'llm':
         answer = (await driver.llm?.(request)) ?? NO_MODEL;
         break;
+      case 'similarity':
+        answer = (await driver.similarity?.(request)) ?? NO_EMBEDDER;
+        break;
       case 'lore':
         answer = await driver.lore?.(request);
         break;
@@ -1951,9 +1989,10 @@ async function drive<T>(run: Generator<TriggerRequest, T, unknown>, driver: Trig
 
 /**
  * Runs without waiting for anything — the display mode's way, whose allowed
- * effects never ask. A request that does arrive (a code block, a model call) is
- * answered with nothing, as though no engine were there to take it — so a model
- * call made while a message is drawn fails rather than calling the model.
+ * effects never ask. A request that does arrive (a code block, a model call, an
+ * embedding search) is answered with nothing, as though no engine were there to
+ * take it — so a model call made while a message is drawn fails rather than
+ * calling the model.
  */
 export function runTriggersSync(input: TriggerRunInput): TriggerRunResult {
   const run = triggerRun(input);

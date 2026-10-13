@@ -8,8 +8,8 @@
  * whatever it likes — so it is checked for shape and size before anything of it
  * reaches the chat. The same goes for what a script asks of the page: a host
  * call is honoured only for a call that is still waiting, only where RisuAI
- * would honour it (no dialogs from a display pass, no model call without
- * low-level access), and only once.
+ * would honour it (no dialogs from a display pass, no model call or embedding
+ * search without low-level access), and only once.
  *
  * The frame is opened on the first call and kept for the life of the chat. A
  * worker the watchdog killed is replaced by the frame on the next call; a frame
@@ -64,6 +64,8 @@ export interface LuaHost {
   confirm(text: string): Promise<boolean>;
   /** The model's answer; throws when there is none. */
   llm(messages: LuaLlmMessage[], model: LuaLlmModel): Promise<string>;
+  /** `texts`, closest to `source` first, by RisuAI's default embedder; throws when it fails. */
+  similarity(source: string, texts: string[]): Promise<string[]>;
 }
 
 export type LuaOutcome =
@@ -99,6 +101,9 @@ const MAX_NOTES = 64;
 /** A model call's prompt: turns, and characters across them. The server holds the same line. */
 export const MAX_LLM_MESSAGES = 200;
 export const MAX_LLM_CHARS = 400_000;
+/** An embedding search: texts, and characters across them and the query. */
+export const MAX_SIMILARITY_TEXTS = 10_000;
+export const MAX_SIMILARITY_CHARS = 1_000_000;
 /** What one dialog may show. */
 const MAX_DIALOG_TEXT = 20_000;
 const MAX_DIALOG_OPTIONS = 100;
@@ -197,6 +202,18 @@ export function checkLlmMessages(value: unknown): LuaLlmMessage[] | null {
     out.push({ role, content: message['content'] });
   }
   return out;
+}
+
+/** An embedding search as a script asked for it, or null when it is not one we run. */
+export function checkSimilaritySearch(source: unknown, texts: unknown): { source: string; texts: string[] } | null {
+  if (typeof source !== 'string' || !Array.isArray(texts) || texts.length > MAX_SIMILARITY_TEXTS) return null;
+  let total = source.length;
+  for (const text of texts) {
+    if (typeof text !== 'string') return null;
+    total += text.length;
+    if (total > MAX_SIMILARITY_CHARS) return null;
+  }
+  return { source, texts };
 }
 
 /* ---------------------------------------------------------------- the frame */
@@ -327,6 +344,13 @@ export function createLuaSandbox(options: LuaSandboxOptions): LuaSandbox {
           // Anything but the auxiliary model's name is the main model, as on the server.
           const model = a['model'] === 'sub' ? 'sub' : 'main';
           return reply(host, { ok: true, value: await call.host.llm(messages, model) });
+        }
+        case 'similarity': {
+          if (!call.lowLevel) return reply(host, { ok: false, error: 'low-level access is required' });
+          // RisuAI hands the embedder whatever it was given, and anything but text fails there.
+          const search = checkSimilaritySearch(a['source'], a['texts']);
+          if (!search) return reply(host, { ok: false, error: 'similarity takes a string and a list of strings' });
+          return reply(host, { ok: true, value: await call.host.similarity(search.source, search.texts) });
         }
         default:
           return reply(host, { ok: false, error: 'unknown' });

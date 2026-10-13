@@ -3,7 +3,8 @@
  * `runScripted` declares, the helpers its wrapper defines over them, and the
  * hooks it calls into a script — in `TRIGGER_CLASSIFICATION`'s words:
  *
- * - `browser`: done in the sandbox, as RisuAI does it.
+ * - `browser`: done in the reader's browser, as RisuAI does it — in the sandbox,
+ *   or for `similarity`, on the page, which the sandbox relays the call to.
  * - `server`: done in the sandbox, and what it changed is carried to the API
  *   the way a trigger's writes are — a chat variable on the turn, the chat the
  *   run left, a rewrite of the work in the chat's overlay — or, for a model
@@ -114,7 +115,11 @@ export const LUA_CLASSIFICATION: Readonly<Record<string, LuaSupport>> = {
   axLLM: wrapper('server', 'as LLM, on the chat’s auxiliary model; every auxiliary mode shares it'),
   axLLMMain: host('server', 'as axLLM', true),
   simpleLLM: host('server', 'as LLM', true),
-  similarity: host('impossible', 'no embedder; answers an empty list', true),
+  similarity: host(
+    'browser',
+    'RisuAI’s default embedder (Xenova/all-MiniLM-L6-v2, q8) in the page’s worker, shared with the triggers; best first, as RisuAI orders them; a failure is a Lua error',
+    true,
+  ),
   request: host('impossible', 'the sandbox has no network; answers RisuAI’s refusal (status 400)', true),
   generateImage: host('impossible', 'answers RisuAI’s failure text', true),
   hash: host('browser', 'SHA-256, hex'),

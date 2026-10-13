@@ -23,7 +23,8 @@
  * from a call that was not given the access, and the API refuses one for a plot
  * whose card does not grant it. Model calls have no count limit — they run on
  * the reader's own account, through the chat's model, or its auxiliary model
- * for `axLLM`.
+ * for `axLLM`. An embedding search (`similarity`) runs on the page, in the
+ * worker the trigger runs share, behind the same access.
  *
  * A call the watchdog had to stop, or one the sandbox could not run, changes
  * nothing and is logged; the run goes on as if the script had returned.
@@ -50,6 +51,8 @@ export interface LuaEngineOptions {
   ui: LuaUi;
   /** A model call on the chat's model or its auxiliary one; the answer's text, or a throw. */
   llm(messages: LuaLlmMessage[], model: LuaLlmModel): Promise<string>;
+  /** `similarity`: the texts closest to `source` first, or a throw. */
+  similarity(source: string, texts: string[]): Promise<string[]>;
   log(entry: TriggerLogEntry): void;
 }
 
@@ -166,6 +169,7 @@ export function createLuaEngine(options: LuaEngineOptions): ScriptEngine {
     select: (choices) => queued(() => ui.select(choices)),
     confirm: (text) => queued(() => ui.confirm(text)),
     llm: (messages, model) => options.llm(messages, model),
+    similarity: (source, texts) => options.similarity(source, texts),
   };
 
   function report(outcome: Exclude<LuaOutcome, { kind: 'done' }>, quiet = false): void {

@@ -399,6 +399,103 @@ describe('model calls', () => {
   });
 });
 
+describe('embedding similarity', () => {
+  const simInput = (steps: TriggerStep[], lowLevelAccess = true, extra: Partial<TriggerRunInput> = {}) =>
+    input([], { character: character([trigger('start', steps)], { lowLevelAccess }), ...extra });
+  const checkSimilarity = (value: string, source: string, inputVar = 'out'): TriggerStep => ({
+    type: 'checkSimilarity',
+    value,
+    source,
+    inputVar,
+  });
+  const v2CheckSimilarity = (extra: Partial<TriggerStep> = {}): TriggerStep => ({
+    type: 'v2CheckSimilarity',
+    source: '질문',
+    sourceType: 'value',
+    value: '가§나',
+    valueType: 'value',
+    outputVar: 'out',
+    indent: 0,
+    ...extra,
+  });
+  /** Answers with the texts reversed, and records what it was asked. */
+  const reversing = (asked: unknown[]) => ({
+    similarity: (request: { source: string; texts: string[] }) => {
+      asked.push(request);
+      return { ok: true as const, texts: [...request.texts].reverse() };
+    },
+  });
+
+  it('asks with the value split on §, after CBS, and writes the answer joined with § to the raw inputVar', async () => {
+    const asked: unknown[] = [];
+    const result = await runTriggers(
+      simInput([checkSimilarity('{{char}}§검§§{{getvar::item}}', '{{user}}의 무기', '{{getvar::item}}')], true, {
+        variables: vars({ item: '활' }),
+        data: { user: '아린' },
+      }),
+      reversing(asked),
+    );
+    expect(asked).toEqual([{ kind: 'similarity', source: '아린의 무기', texts: ['리안', '검', '', '활'] }]);
+    // v1 names its variable as written, CBS and all, as RisuAI's `setVar(effect.inputVar, …)` does.
+    expect(result.variables['{{getvar::item}}']).toBe('활§§검§리안');
+    expect(result.variables['활']).toBeUndefined();
+  });
+
+  it('reads v2 fields as values or variables, and names the output through CBS', async () => {
+    const asked: unknown[] = [];
+    const result = await runTriggers(
+      simInput(
+        [v2CheckSimilarity({ source: 'q', sourceType: 'var', value: 'list', valueType: 'var', outputVar: 'best_{{getvar::n}}' })],
+        true,
+        { variables: vars({ q: '바다', list: '산§강§바다', n: '1' }) },
+      ),
+      reversing(asked),
+    );
+    expect(asked).toEqual([{ kind: 'similarity', source: '바다', texts: ['산', '강', '바다'] }]);
+    expect(result.variables['best_1']).toBe('바다§강§산');
+    // An unset variable reads as the string null, which is one text.
+    const unset: unknown[] = [];
+    await runTriggers(simInput([v2CheckSimilarity({ value: 'missing', valueType: 'var' })]), reversing(unset));
+    expect(unset).toEqual([{ kind: 'similarity', source: '질문', texts: ['null'] }]);
+  });
+
+  it('does nothing without lowLevelAccess, as in RisuAI', async () => {
+    const asked: unknown[] = [];
+    const result = await runTriggers(
+      simInput([checkSimilarity('가§나', '질문'), v2CheckSimilarity(), set('after', '1')], false),
+      reversing(asked),
+    );
+    expect(asked).toEqual([]);
+    expect(result.variables['out']).toBeUndefined();
+    expect(result.variables['after']).toBe('1');
+    expect(result.aborted).toBe(false);
+  });
+
+  it('stops the run where the embedder fails, as RisuAI’s throw does, keeping what it wrote before', async () => {
+    const steps = [set('before', '1'), checkSimilarity('가§나', '질문'), set('after', '1')];
+    const failed = await runTriggers(simInput(steps), { similarity: () => ({ ok: false, error: 'model download failed' }) });
+    expect(failed.aborted).toBe(true);
+    expect(failed.variables['before']).toBe('1');
+    expect(failed.variables['out']).toBeUndefined();
+    expect(failed.variables['after']).toBeUndefined();
+    expect(failed.log).toContainEqual({ kind: 'error', message: 'checkSimilarity: model download failed' });
+
+    // No one to answer, and a run that cannot wait, fail the same way.
+    const unanswered = await runTriggers(simInput([v2CheckSimilarity(), set('after', '1')]));
+    expect(unanswered.aborted).toBe(true);
+    expect(unanswered.log).toContainEqual({ kind: 'error', message: 'v2CheckSimilarity: embeddings are not available here' });
+    const sync = runTriggersSync(simInput([checkSimilarity('가', '나'), set('after', '1')]));
+    expect(sync.aborted).toBe(true);
+    expect(sync.variables['after']).toBeUndefined();
+
+    // An answer that is not a list of texts is no answer.
+    const malformed = await runTriggers(simInput([checkSimilarity('가', '나')]), {
+      similarity: () => ({ ok: true, texts: [1, 2] }) as never,
+    });
+    expect(malformed.aborted).toBe(true);
+  });
+});
+
 describe('v2 control flow', () => {
   it('takes the else of a false if, and skips it after a true one', () => {
     const block = (hp: string) =>

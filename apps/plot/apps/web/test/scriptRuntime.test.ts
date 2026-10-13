@@ -390,6 +390,47 @@ describe('manual', () => {
     expect(calls.at(-1)!.body).toMatchObject({ variableDelta: { side: 'sub 답', main: 'main 답' } });
   });
 
+  it('answers checkSimilarity with the page’s search, and stops the run where the search fails, as RisuAI’s throw does', async () => {
+    const search = bundle({
+      lowLevelAccess: true,
+      triggers: [
+        trigger(
+          'manual',
+          [{ type: 'checkSimilarity', value: '불§물§바람', source: '{{getvar::element}}', inputVar: 'ranked' }, setvar('after', '1')],
+          { comment: '찾기' },
+        ),
+      ],
+    });
+    const done = [greeting, message('m1', 'm0', 'user', '물?', { variableDelta: { element: '물' } })];
+
+    const asked: [string, readonly string[]][] = [];
+    const { api, calls } = fakeApi();
+    await createScriptRuntime({
+      chatId: 'c1',
+      api,
+      ui: silentUi,
+      bundle: search,
+      similarity: async (source, texts) => (asked.push([source, texts]), [...texts].reverse()),
+    }).manual('찾기', null, view(done));
+    expect(asked).toEqual([['물', ['불', '물', '바람']]]);
+    expect(calls[0]!.body).toMatchObject({ messageId: 'm1', variableDelta: { ranked: '바람§물§불', after: '1' } });
+
+    const logs: unknown[] = [];
+    const failed = fakeApi();
+    await createScriptRuntime({
+      chatId: 'c1',
+      api: failed.api,
+      ui: silentUi,
+      bundle: search,
+      similarity: async () => {
+        throw new Error('the model could not be fetched');
+      },
+      log: (entry) => logs.push(entry),
+    }).manual('찾기', null, view(done));
+    expect(logs).toContainEqual({ kind: 'error', message: 'checkSimilarity: the model could not be fetched' });
+    expect(JSON.stringify(failed.calls)).not.toMatch(/ranked|after/);
+  });
+
   it('asks the reader through the page, and commits the answer', async () => {
     const { api, calls } = fakeApi();
     const asked: string[] = [];

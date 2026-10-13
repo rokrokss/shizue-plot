@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@adobe/css-tools": "^4.5.0",
+    "@huggingface/transformers": "3.8.1",
     "@shizue/core": "workspace:*",
     "dompurify": "^3.4.16",
     "next": "^16.4.0",

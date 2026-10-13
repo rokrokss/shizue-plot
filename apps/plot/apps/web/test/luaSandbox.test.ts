@@ -132,6 +132,11 @@ const host: LuaHost = {
   // The answer says which model it came from: `모델` the chat's own, `보조` its auxiliary one.
   llm: async (messages, model) =>
     `${model === 'sub' ? '보조' : '모델'}:${messages.map((message) => `${message.role}=${message.content}`).join('|')}`,
+  // "Best first" is the texts reversed; what was asked is recorded.
+  similarity: async (source, texts) => {
+    asked.push(`similarity:${source}:${texts.join(',')}`);
+    return [...texts].reverse();
+  },
 };
 
 const start: LuaEntry = { kind: 'trigger', mode: 'start' };
@@ -274,6 +279,77 @@ describe('the Lua sandbox', () => {
       '모델:user=가/모델:user=나/보조:user=다/보조:user=라/Error: Invalid axLLM mode: nope',
     );
   });
+
+  it('searches on the page behind RisuAI’s gate, and hands back the list as RisuAI’s wasmoon does, best first', async () => {
+    asked.length = 0;
+    const sandbox = sandboxWith();
+    // A JavaScript array, which wasmoon gives Lua as a proxy indexed from 1 — RisuAI's scripts get the same.
+    const code = `
+      onStart = async(function(id)
+        local found = similarity(id, '검', { '활', '검', '창' }):await()
+        if found == nil then setChatVar(id, 'found', 'nil') return end
+        local seen = {}
+        for i, text in ipairs(found) do seen[i] = text end
+        setChatVar(id, 'found', type(found) .. ':' .. #found .. ':' .. found[1] .. ':' .. table.concat(seen, ','))
+      end)`;
+    const granted = await done(sandbox, code, start, snapshot({ lowLevel: true }));
+    expect(granted.error).toBeNull();
+    expect(Object.fromEntries(granted.vars)['found']).toBe('userdata:3:창:창,검,활');
+    expect(asked).toEqual(['similarity:검:활,검,창']);
+
+    // No access, no search: RisuAI's `similarity` answers nothing. The edit hooks never have it.
+    const without = await done(sandbox, code);
+    expect(Object.fromEntries(without.vars)['found']).toBe('nil');
+    const edit = await done(
+      sandbox,
+      "listenEdit('editOutput', function(id, v) return tostring(similarity(id, 'q', { 'a' }):await()) end)",
+      { kind: 'edit', phase: 'editOutput', text: 'v', index: 0 },
+      snapshot({ lowLevel: true }),
+    );
+    expect(edit.res).toBe('nil');
+    expect(asked).toHaveLength(1);
+  });
+
+  it('raises a failed search in the script, where pcall catches it, as RisuAI’s rejected promise does', async () => {
+    const sandbox = sandboxWith();
+    const failing: LuaHost = {
+      ...host,
+      similarity: async () => {
+        throw new Error('the model could not be fetched');
+      },
+    };
+    const call = (code: string, on = failing) => sandbox.call(code, start, snapshot({ lowLevel: true }), on);
+    const outcome = await call(`
+      onStart = async(function(id)
+        local ok = pcall(function() return similarity(id, 'q', { 'a' }):await() end)
+        setChatVar(id, 'caught', tostring(ok))
+        similarity(id, 'q', { 'a' }):await()
+        setChatVar(id, 'after', '1')
+      end)`);
+    expect(outcome.kind === 'done' && outcome.result.vars).toEqual([['caught', 'false']]);
+    expect(outcome.kind === 'done' && outcome.result.error).toMatch(/the model could not be fetched/);
+
+    // Anything but text fails, as it does in RisuAI's embedder; an empty table reaches it as an object.
+    for (const list of ['{ 1, 2 }', '{}']) {
+      const bad = await call(`onStart = async(function(id) similarity(id, 'q', ${list}):await() end)`, host);
+      expect(bad.kind === 'done' && bad.result.error, list).toMatch(/a string and a list of strings/);
+    }
+  });
+
+  it('does not count a slow search against the script', async () => {
+    const sandbox = sandboxWith({ active: 800 });
+    const slow: LuaHost = {
+      ...host,
+      similarity: (_source, texts) => new Promise((resolve) => setTimeout(() => resolve(texts), 1_500)),
+    };
+    const outcome = await sandbox.call(
+      "onStart = async(function(id) setChatVar(id, 'a', similarity(id, 'q', { '첫', '둘' }):await()[1]) end)",
+      start,
+      snapshot({ lowLevel: true }),
+      slow,
+    );
+    expect(outcome.kind === 'done' && outcome.result.vars).toEqual([['a', '첫']]);
+  }, 10_000);
 
   it('stops `while true do end` and starts over on the next call', async () => {
     let idle = '';
@@ -493,6 +569,7 @@ describe('the Lua engine', () => {
       sandbox,
       ui: host,
       llm: host.llm,
+      similarity: host.similarity,
       log: (entry) => logs.push(entry.message),
     });
     expect(engine.handles('start')).toBe(true);
@@ -522,7 +599,15 @@ describe('the Lua engine', () => {
     const sandbox = sandboxWith();
     const run = async (code: string) => {
       const triggers = [lua(code)];
-      const engine = createLuaEngine({ triggers, lowLevelAccess: false, sandbox, ui: host, llm: host.llm, log: () => undefined });
+      const engine = createLuaEngine({
+        triggers,
+        lowLevelAccess: false,
+        sandbox,
+        ui: host,
+        llm: host.llm,
+        similarity: host.similarity,
+        log: () => undefined,
+      });
       const messages = [
         { role: 'user' as const, data: '안녕', id: 'm0' },
         { role: 'char' as const, data: '어서 와', id: 'm1' },
@@ -588,6 +673,7 @@ describe('the Lua engine', () => {
       sandbox,
       ui: host,
       llm: host.llm,
+      similarity: host.similarity,
       log: () => undefined,
     });
     const vars: Record<string, string | null> = {};
@@ -611,5 +697,32 @@ describe('the Lua engine', () => {
     expect(vars).toEqual({ n: '1' });
     expect([...engine.manualNames!()].sort()).toEqual(['attack', 'heal']);
     expect(luaFunctionNames(['local function hidden() end'])).toEqual([]);
+  });
+
+  it('answers a script’s search with the search it was given', async () => {
+    const searched: string[][] = [];
+    const triggers = [lua("onStart = async(function(id) setChatVar(id, 'best', similarity(id, '물', { '불', '물' }):await()[1]) end)")];
+    const engine = createLuaEngine({
+      triggers,
+      lowLevelAccess: true,
+      sandbox: sandboxWith(),
+      ui: host,
+      llm: host.llm,
+      similarity: async (source, texts) => (searched.push([source, ...texts]), texts.filter((text) => text === source)),
+      log: () => undefined,
+    });
+    const result = await runTriggers(
+      {
+        mode: 'start',
+        character: { name: '리안', description: '', lorebook: [], postHistoryInstructions: '', lowLevelAccess: true, triggers },
+        messages: [],
+        note: '',
+        persona: '',
+        variables: Object.create(null),
+      },
+      { code: (request) => engine.runCode!(request) },
+    );
+    expect(searched).toEqual([['물', '불', '물']]);
+    expect(result.variables['best']).toBe('물');
   });
 });

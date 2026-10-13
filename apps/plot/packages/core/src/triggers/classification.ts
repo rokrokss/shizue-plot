@@ -8,9 +8,9 @@
  *   overlay, the reader's note.
  * - `logged`: the run notes it and goes on, leaving what RisuAI leaves when the
  *   effect finds nothing to act on.
- * - `impossible`: nothing here can do it (no image provider, no embedder, the
- *   prompt never reaches the browser); logged, with RisuAI's failure value
- *   written where it writes one.
+ * - `impossible`: nothing here can do it (no image provider, the prompt never
+ *   reaches the browser); logged, with RisuAI's failure value written where it
+ *   writes one.
  *
  * Kept as data so the tests can hold the interpreter to it: every effect it
  * names here is one the interpreter has a case for.
@@ -58,7 +58,12 @@ export const TRIGGER_CLASSIFICATION: Readonly<Record<string, { support: TriggerS
   sendAIprompt: { support: 'server', note: 'lowLevelAccess; an automatic next turn, with the reader’s consent' },
   runLLM: { support: 'server', note: 'lowLevelAccess; POST /api/chats/:id/script-llm on the chat’s model; a failure writes “Error: …”' },
   runAxLLM: { support: 'logged', note: 'declared but never handled by RisuAI, so it does nothing' },
-  checkSimilarity: { support: 'impossible', note: 'lowLevelAccess; no embedder' },
+  checkSimilarity: {
+    support: 'browser',
+    note:
+      'lowLevelAccess; RisuAI’s default embedder (Xenova/all-MiniLM-L6-v2, q8, transformers.js) in a worker the page starts; ' +
+      'value split on §, ordered as RisuAI orders them, joined with §; a failure stops the run, as RisuAI’s throw does',
+  },
   extractRegex: { support: 'browser', note: 'lowLevelAccess' },
   runImgGen: { support: 'impossible', note: 'lowLevelAccess; writes RisuAI’s failure text' },
   triggerlua: {
@@ -107,7 +112,7 @@ export const TRIGGER_CLASSIFICATION: Readonly<Record<string, { support: TriggerS
 
   // v2 model, images, embeddings
   v2ImgGen: { support: 'impossible', note: 'lowLevelAccess; writes null' },
-  v2CheckSimilarity: { support: 'impossible', note: 'lowLevelAccess; no embedder' },
+  v2CheckSimilarity: { support: 'browser', note: 'as checkSimilarity; the output variable’s name goes through CBS' },
   v2RunLLM: { support: 'server', note: 'lowLevelAccess; POST /api/chats/:id/script-llm (`submodel` is the chat’s auxiliary model); a failure writes null' },
 
   // v2 dialogs and display

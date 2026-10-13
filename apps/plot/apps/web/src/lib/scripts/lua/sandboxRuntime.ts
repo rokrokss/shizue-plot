@@ -33,11 +33,12 @@
  * wasmoon has a `functionTimeout`, and it is the wrong clock: it counts wall
  * time, including the minutes a script spends awaiting the reader's answer or a
  * model call. The frame keeps its own, and it can, because every way a script
- * waits goes through the frame: a dialog and a model call are host calls it
- * relays, and `sleep` is a host call it answers itself, on its own timer. So for
- * each call it knows, without sampling anything:
+ * waits goes through the frame: a dialog, a model call and an embedding search
+ * are host calls it relays, and `sleep` is a host call it answers itself, on its
+ * own timer. So for each call it knows, without sampling anything:
  *
- * - **active** time: wall time less the time a dialog or a model call was open.
+ * - **active** time: wall time less the time a dialog, a model call or a search
+ *   was open.
  *   Past `active` ms the worker is terminated — a script that sleeps forever.
  * - **CPU** time: active time less the time spent asleep — what is left is the
  *   script running. Past `cpu` ms it is terminated — a script that yields to a
@@ -84,7 +85,7 @@ export const LUA_LIMITS = {
   stretch: 2500,
   /** One call's running time: its active time less the time it slept. */
   cpu: 15_000,
-  /** One call's wall time, less the time a dialog or a model call it asked for was open. */
+  /** One call's wall time, less the time a dialog, a model call or a search it asked for was open. */
   active: 120_000,
   /** How long the worker has to load wasmoon. */
   boot: 20_000,
@@ -170,7 +171,7 @@ export interface LuaCallResult {
 }
 
 /** The host calls a script can make. Every other name is dropped. */
-export type LuaHostName = 'alert' | 'input' | 'select' | 'confirm' | 'llm';
+export type LuaHostName = 'alert' | 'input' | 'select' | 'confirm' | 'llm' | 'similarity';
 
 /* ------------------------------------------------------------ the worker */
 
@@ -623,12 +624,17 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
     });
 
     // Low-level access.
-    set('similarity', function (id: Any) {
+    set('similarity', function (id: Any, source: Any, value: Any) {
       const ctx = c();
       return Promise.resolve().then(function () {
         if (!low(id)) return undefined;
-        note(ctx, 'similarity', 'there is no embedder for scripts here');
-        return [];
+        // The page embeds, and checks what it is handed. The texts come back best first as
+        // a JavaScript array, which wasmoon hands the script as it does RisuAI's.
+        return host(ctx, 'similarity', { source: source, texts: value }).then(function (answer: Any) {
+          // RisuAI's embedder throws into the script, where `pcall` can catch it.
+          if (!answer.ok) throw new Error(text(answer.error));
+          return answer.value;
+        });
       });
     });
     set('request', function (id: Any, url: Any) {
@@ -1085,8 +1091,8 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
 function luaFrameRuntime(env: Any, limits: Any): (data: Any) => void {
   'use strict';
 
-  /** The host calls that wait on the reader or the model: they stop a call's active clock. */
-  const HOLDS: Any = { alert: true, input: true, select: true, confirm: true, llm: true };
+  /** The host calls that wait on the reader, the model or the embedder: they stop a call's active clock. */
+  const HOLDS: Any = { alert: true, input: true, select: true, confirm: true, llm: true, similarity: true };
 
   let source: Any = null;
   let wasm: Any = null;

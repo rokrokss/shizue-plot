@@ -92,6 +92,7 @@ import {
 } from '@shizue/core/variables';
 import type { ChatMessage, ChatState, LoreEntry, StreamMode } from '../types';
 import type { EditPhase, ScriptEngine, ScriptPhase } from './engine';
+import type { SimilaritySearch } from './similarity';
 
 /** GET /api/chats/:id/scripts — what the browser runs for a chat, when the plot carries any. */
 export interface ScriptBundle {
@@ -142,6 +143,12 @@ export interface ScriptRuntimeOptions {
   /** Where the runs' notes go — the effects not carried out, the limits reached. */
   log?: (entry: TriggerLogEntry) => void;
   wait?: (ms: number) => Promise<void>;
+  /**
+   * The embedding search `checkSimilarity`/`v2CheckSimilarity` ask for — the
+   * page's worker (`embedding.ts`). Without one the effects fail as RisuAI's
+   * do when its embedder throws.
+   */
+  similarity?: SimilaritySearch;
   /**
    * The reader's global variables after the scripts wrote some. Nothing in the
    * trigger language or in RisuAI's Lua writes one — `CodeScope.setGlobalVar`
@@ -453,6 +460,16 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
           model: request.model === 'submodel' ? 'sub' : 'main',
         });
         return { ok: true, text: answer.result };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+    // `checkSimilarity`/`v2CheckSimilarity`: RisuAI's default embedder, in the
+    // page's worker. A failure (the model would not load) stops the run there.
+    similarity: async (request) => {
+      if (!options.similarity) return { ok: false, error: 'no embedder is installed' };
+      try {
+        return { ok: true, texts: await options.similarity(request.source, request.texts) };
       } catch (error) {
         return { ok: false, error: error instanceof Error ? error.message : String(error) };
       }
