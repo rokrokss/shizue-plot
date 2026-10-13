@@ -21,6 +21,7 @@ import {
   stripVariableMacros,
   withNarrationPrefix,
   type HistoryMessage,
+  type LoreEntry,
   type LoreTimedState,
   type MacroClock,
   type MacroContext,
@@ -46,7 +47,6 @@ import {
   type Character,
   type Chat,
   type ChatAttachment,
-  type ChatScriptOverlay,
   type ChatMemorySettings,
   type Message,
   type MessageRole,
@@ -103,13 +103,16 @@ import { drawSceneEnabled, generateSceneImage, sceneImagePrompt } from '../scene
 import {
   headMoved,
   loadGlobalVariables,
-  mergedOverlay,
+  loadReaderOverlay,
+  localLoreOf,
   mergeGlobalVariables,
+  mergeReaderOverlay,
   NO_SCRIPTS,
   optionalScriptNote,
   optionalVariableDelta,
-  overlayOf,
+  overlaidWith,
   readGenerationScripts,
+  readLocalLore,
   readOverlay,
   readScriptChat,
   saveScriptWrites,
@@ -590,6 +593,7 @@ function scriptViewOf(
 ): ScriptView {
   const own = overlay?.members?.[member.id];
   return {
+    memberId: member.id,
     note,
     ...(own?.firstMessage !== undefined ? { firstMessage: own.firstMessage } : {}),
     backgroundHtml: own?.backgroundHtml ?? backgroundHtmlOf(member.card.extensions) ?? '',
@@ -601,22 +605,25 @@ function scriptViewOf(
 /**
  * Plot, roster, persona and branch history — what every generation mode needs.
  *
- * The chat's script overlay is laid over the work here (`chats.script_overlay`,
- * `ScriptOverlay` in @shizue/core): what the card's scripts rewrote of a member's
- * card or of the reader's persona is what this chat's prompt reads, while the
- * plot and the persona rows stay as they are. A renamed member goes by its new
- * name everywhere the prompt names it — and a plot of that one member is that
+ * The reader's script overlay on the plot is laid over the work here
+ * (`plot_reader_overlays`, `ScriptOverlay` in @shizue/core): what the card's
+ * scripts rewrote of a member's card or of the reader's persona — in this chat
+ * or any other of theirs on the plot, as RisuAI's rewrite of the character
+ * reaches every chat with it — is what this chat's prompt reads, while the plot
+ * and the persona rows stay as they are. A renamed member goes by its new name
+ * everywhere the prompt names it — and a plot of that one member is that
  * character, so its `{{char}}` follows too (`PromptPlot.char`). The scripted
- * member's first message is what the first opening is sent as (`promptBranch`).
- * A generation whose own scripts just rewrote something brings it as `scripts`
- * and reads it already — RisuAI's input and start triggers run before its prompt
- * is built — and the route keeps it once the request has passed its checks
- * (`keepScriptWrites`).
+ * member's first message is what the first opening is sent as (`promptBranch`),
+ * and the chat's own lore (`chats.local_lore`) is activated after its book. A
+ * generation whose own scripts just rewrote something brings it as `scripts`
+ * and reads it already — RisuAI's input and start triggers run before its
+ * prompt is built — and the route keeps it once the request has passed its
+ * checks (`keepScriptWrites`).
  */
 async function loadGenerationContext(
   deps: AppDeps,
   chat: Chat,
-  scripts: Pick<GenerationScripts, 'overlay' | 'note'> = NO_SCRIPTS,
+  scripts: Pick<GenerationScripts, 'overlay' | 'note' | 'localLore'> = NO_SCRIPTS,
 ): Promise<{
   plot: PromptPlot;
   /** The whole roster, the members the reader sent off the stage marked absent. */
@@ -637,9 +644,13 @@ async function loadGenerationContext(
   fold: FoldOptions;
   /** The reader's global variables on this plot. */
   globalVariables: Variables;
-  /** The chat's script overlay with this request's rewrites laid over it. */
+  /** The reader's script overlay on the plot with this request's rewrites laid over it. */
   overlay: ScriptOverlay | null;
-  /** The plot's first opening as the scripts rewrote it in this chat (`setCharacterFirstMessage`). */
+  /** The plot's members, which an overlay may name. */
+  memberIds: ReadonlySet<string>;
+  /** The chat's own lore (RisuAI's `localLore`), as this request's scripts left it. */
+  localLore: LoreEntry[];
+  /** The plot's first opening as the reader's scripts rewrote it (`setCharacterFirstMessage`). */
   firstMessage: string | undefined;
   /** What the scripted member's Lua reads beyond the prompt (`GenerationPlan.scriptView`). */
   scriptView: ScriptView | undefined;
@@ -653,7 +664,8 @@ async function loadGenerationContext(
   // In the creator's order, which is the order the prompt blocks are written in.
   const members = await loadMembers(deps.db, row.id);
   const absent = new Set(chat.absentCharacterIds ?? []);
-  const overlay = mergedOverlay(chat, scripts.overlay, new Set(members.map((member) => member.id)));
+  const memberIds = new Set(members.map((member) => member.id));
+  const overlay = overlaidWith(await loadReaderOverlay(deps.db, chat.userId, chat.plotId), scripts.overlay, memberIds);
   const rewritten = overlay?.members
     ? members.map((member) => {
         const own = overlay.members?.[member.id];
@@ -687,6 +699,8 @@ async function loadGenerationContext(
     fold: foldOptionsOf(row.name, persona),
     globalVariables: await loadGlobalVariables(deps, chat.userId, chat.plotId),
     overlay,
+    memberIds,
+    localLore: scripts.localLore ?? localLoreOf(chat),
     firstMessage: scripted ? overlay?.members?.[scripted.id]?.firstMessage : undefined,
     scriptView: scripted ? scriptViewOf(scripted, overlay, scripts.note ?? chat.note, persona) : undefined,
     // The member whose scripts run, under its name in this chat — or a plot's one
@@ -697,18 +711,19 @@ async function loadGenerationContext(
 }
 
 /**
- * Keeps what a generation's scripts rewrote — the overlay the context was built
- * with, and the note — once the request has passed the head checks. Before any
- * other write of the turn, so a turn that fails part-way still leaves the work as
- * its scripts left it, as RisuAI's rewrite of the card would stand.
+ * Keeps what a generation's scripts rewrote — the overlay they sent, merged into
+ * the reader's under its lock, the note and the chat's lore — once the request
+ * has passed the head checks. Before any other write of the turn, so a turn that
+ * fails part-way still leaves the work as its scripts left it, as RisuAI's
+ * rewrite of the card would stand.
  */
 async function keepScriptWrites(
   deps: AppDeps,
   chat: Chat,
-  context: { overlay: ScriptOverlay | null },
-  scripts: Pick<GenerationScripts, 'overlay' | 'note'>,
+  context: { memberIds: ReadonlySet<string> },
+  scripts: Pick<GenerationScripts, 'overlay' | 'note' | 'localLore'>,
 ): Promise<void> {
-  await saveScriptWrites(deps, chat.id, context.overlay, scripts.note, scripts.overlay !== null);
+  await saveScriptWrites(deps, chat, scripts, context.memberIds);
 }
 
 /**
@@ -1299,6 +1314,7 @@ async function regeneratePlan(
     loreState: loreStateOf(kept),
     assetNames: context.assetNames,
     scriptView: context.scriptView,
+    localLore: context.localLore,
     auxiliaryModel: context.auxiliaryModel,
     contextBudget: memorySettingsOf(chat).contextBudget,
     focusNames,
@@ -1983,8 +1999,11 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * that member's card the scripts may read — its name and nickname, its
    * description and the rest of its character text, its lorebook and the book's
    * settings, its post-history instructions, its background HTML and its avatar —
-   * with what this chat's overlay rewrote of them beside it. `name` is `{{char}}`
-   * as it stands in this chat: the nickname, else the name the scripts left.
+   * with what the reader's scripts rewrote of them on this plot beside it (the
+   * overlay every chat of theirs on it reads), and the chat's own lore
+   * (`localLore`, what Lua's `upsertLocalLoreBook` wrote in this chat). `name` is
+   * `{{char}}` as it stands for the reader: the nickname, else the name the
+   * scripts left.
    *
    * This is the one place a reader receives a member's card internals, and only
    * for a plot that carries scripts: RisuAI's scripts read the card they belong
@@ -2000,14 +2019,14 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     if (!found) return c.json({ scripts: null });
     const { member, scripts } = found;
     const card = member.card;
-    const overlay = overlayOf(chat);
+    const overlay = await loadReaderOverlay(deps.db, chat.userId, chat.plotId);
     const own = overlay?.members?.[member.id] ?? null;
     const nickname = card.nickname?.trim() ?? '';
     return c.json({
       scripts: {
         memberId: member.id,
         // `{{char}}` in a card's own text: its nickname where it sets one, else its
-        // name as this chat's scripts left it.
+        // name as the reader's scripts left it.
         name: nickname || own?.name || member.name,
         triggers: scripts.triggers,
         editScripts: scripts.editScripts,
@@ -2033,6 +2052,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           member: own,
           persona: overlay?.persona ?? null,
         },
+        localLore: localLoreOf(chat),
       },
     });
   });
@@ -2043,8 +2063,10 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * output scripts turned the reply into (`content`, in place — a script's edit is
    * not the reader's and forks nothing), and `clearPending`, which says the turn
    * the browser owed its output scripts is now finished. What they rewrote of the
-   * work rides along too — `overlay`, laid over the chat's (`ScriptOverlay`), and
-   * `note`, the chat note — in the same transaction as the turn.
+   * work rides along too — `overlay`, merged into the reader's on the plot
+   * (`ScriptOverlay`) — and what they rewrote of the chat — `note`, the chat
+   * note, and `localLore`, the chat's own lore — in the same transaction as the
+   * turn.
    *
    * Only the head: a button the reader clicked acts on the chat as it stands, and
    * the reply the output scripts run over is the one that was just generated. A
@@ -2075,9 +2097,10 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const variableDelta = 'variableDelta' in body ? optionalVariableDelta(body, 'variableDelta') : undefined;
     const content = optionalString(body, 'content');
     const clearPending = optionalBoolean(body, 'clearPending') ?? false;
-    // What the scripts rewrote of the work, and the chat note (see `ScriptOverlay`).
+    // What the scripts rewrote of the work, the chat note and the chat's lore (see `ScriptOverlay`).
     const overlay = readOverlay(body['overlay']);
     const note = optionalScriptNote(body);
+    const localLore = readLocalLore(body['localLore']);
     const edits = readScriptChat(body, { turn: false });
     if (
       variableDelta === undefined &&
@@ -2085,6 +2108,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       !clearPending &&
       !overlay &&
       note === undefined &&
+      localLore === undefined &&
       !edits
     ) {
       throw badRequest('invalid_request', 'Nothing to commit');
@@ -2106,7 +2130,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           .where(and(eq(messages.id, messageId), eq(messages.chatId, chat.id)))
           .for('update');
         const [locked] = await tx
-          .select({ headMessageId: chats.headMessageId, scriptOverlay: chats.scriptOverlay })
+          .select({ headMessageId: chats.headMessageId })
           .from(chats)
           .where(eq(chats.id, chat.id))
           .for('update');
@@ -2141,17 +2165,19 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           });
           if (plan.changed) written = (await applyScriptChat(tx, chat.id, plan, all)).written;
         }
-        // Read under the chat's lock, so two commits each land on the other's.
-        const merged = overlay && memberIds ? mergedOverlay(locked, overlay, memberIds) : undefined;
         const [row] = await tx
           .update(chats)
           .set({
-            ...(merged !== undefined ? { scriptOverlay: merged as ChatScriptOverlay | null } : {}),
             ...(note !== undefined ? { note } : {}),
+            ...(localLore !== undefined ? { localLore: localLore.length > 0 ? localLore : null } : {}),
             updatedAt: new Date(),
           })
           .where(eq(chats.id, chat.id))
           .returning();
+        // Merged under the overlay row's own lock — after the chat's, as every
+        // writer takes them — so a commit here and a write from another of the
+        // reader's chats on the plot each land on the other's.
+        if (overlay && memberIds) await mergeReaderOverlay(tx, chat.userId, chat.plotId, overlay, memberIds);
         return { chat: row!, message: message!, written };
       });
     } finally {
@@ -2512,6 +2538,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         loreState: loreStateOf(branch),
         assetNames: context.assetNames,
         scriptView: context.scriptView,
+        localLore: context.localLore,
         auxiliaryModel: context.auxiliaryModel,
         contextBudget: memorySettingsOf(chat).contextBudget,
         focusNames,
@@ -2617,6 +2644,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         loreState: loreStateOf(path.slice(0, -1)),
         assetNames: context.assetNames,
         scriptView: context.scriptView,
+        localLore: context.localLore,
         auxiliaryModel: context.auxiliaryModel,
         contextBudget: memorySettingsOf(chat).contextBudget,
         focusNames,
@@ -2681,6 +2709,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         loreState: loreStateOf(path),
         assetNames: context.assetNames,
         scriptView: context.scriptView,
+        localLore: context.localLore,
         auxiliaryModel: context.auxiliaryModel,
         contextBudget: memorySettingsOf(chat).contextBudget,
         focusNames,
@@ -2751,6 +2780,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         loreState: loreStateOf(path),
         assetNames: context.assetNames,
         scriptView: context.scriptView,
+        localLore: context.localLore,
         auxiliaryModel: context.auxiliaryModel,
         contextBudget: memorySettingsOf(chat).contextBudget,
         focusNames,

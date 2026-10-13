@@ -340,6 +340,37 @@ describe('commands in a trigger run', () => {
     expect(result.messages.map((message) => message.data)).toEqual(['안녕', '어서 와', '"가', '나"']);
     expect(JSON.parse(result.variables['lore']!).actives[0].prompt).toBe('북쪽의 성');
   });
+
+  it('activate the card’s book and then the chat’s own for /test_lorebook, as RisuAI’s `loadLoreBookV3Prompt` does', async () => {
+    const entry = (name: string, content: string): LoreEntry => ({
+      name,
+      keys: [name],
+      secondaryKeys: [],
+      selective: false,
+      content,
+      enabled: true,
+      constant: false,
+      insertionOrder: 100,
+      caseSensitive: false,
+      useRegex: false,
+      position: 'before_char',
+    });
+    let asked: { lorebook: readonly LoreEntry[] } | undefined;
+    await runTriggers(
+      input([], {
+        character: character([trigger('start', [command('/test_lorebook')])], { lorebook: [entry('성', '북쪽의 성')] }),
+        localLore: [entry('숲', '챗의 숲')],
+      }),
+      {
+        alert: () => undefined,
+        lore: (request) => {
+          asked = request;
+          return { actives: [], matchLog: [] };
+        },
+      },
+    );
+    expect(asked?.lorebook.map((book) => book.content)).toEqual(['북쪽의 성', '챗의 숲']);
+  });
 });
 
 describe('a line from the composer', () => {

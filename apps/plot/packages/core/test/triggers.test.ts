@@ -1009,6 +1009,31 @@ describe('code triggers', () => {
     expect(result.messages.map((message) => message.data)).toEqual(['어서 와']);
   });
 
+  it('show the code the chat’s own lore apart from the card’s, and take back what it wrote there alone', async () => {
+    const triggers = [
+      trigger('start', [{ type: 'triggerlua', code: '' }]),
+      trigger('start', [set('book', '{{lorebook}}')]),
+    ];
+    const result = await runTriggers(
+      input(triggers, { character: character(triggers, { lorebook: [lore('성', '북쪽')] }), localLore: [lore('숲', '깊다')] }),
+      {
+        code: ({ scope }) => {
+          expect(scope.character.lorebook.map((entry) => entry.content)).toEqual(['북쪽']);
+          expect(scope.localLore.map((entry) => entry.content)).toEqual(['깊다']);
+          scope.setLocalLore([...scope.localLore, lore('탑', '높다')]);
+          expect(scope.localLore.map((entry) => entry.content)).toEqual(['깊다', '높다']);
+        },
+      },
+    );
+    expect(result.character.lorebook).toBeUndefined();
+    expect(result.localLore?.map((entry) => entry.content)).toEqual(['깊다', '높다']);
+    // RisuAI's `{{lorebook}}`: the card's book, then the chat's.
+    const book = result.variables['book']!;
+    expect(book.indexOf('북쪽')).toBeGreaterThan(-1);
+    expect(book.indexOf('북쪽')).toBeLessThan(book.indexOf('깊다'));
+    expect(book.indexOf('깊다')).toBeLessThan(book.indexOf('높다'));
+  });
+
   it('take back a name, a first message and a background, and `{{char}}` follows the name where there is no nickname', async () => {
     const run = (extra: Partial<TriggerCharacter>) => {
       const triggers = [

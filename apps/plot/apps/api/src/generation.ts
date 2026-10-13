@@ -16,6 +16,7 @@ import {
   type FoldItem,
   type FoldOptions,
   type HistoryMessage,
+  type LoreEntry,
   type LoreTimedState,
   type MacroClock,
   type NarratorConfig,
@@ -29,10 +30,15 @@ import {
 } from '@shizue/core';
 import { promptScriptJob, promptScriptsOf } from '@shizue/core/prompt-scripts';
 import {
+  checkScriptChat,
   hasTriggersFor,
   luaScriptsOf,
+  overlayName,
   risuLore,
+  scriptChatOf,
   scriptedMember,
+  upsertLocalLore,
+  type MemberOverlay,
   type RequestTurn,
   type TriggerMessage,
   type TriggerRunInput,
@@ -44,13 +50,28 @@ import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { withImageNote } from './attachments.js';
 import { ApiError, badRequest, notFound } from './errors.js';
-import type { AppDeps, AppEnv } from './deps.js';
+import type { AppDeps, AppEnv, Tx } from './deps.js';
 import { invalidateMemoryForEdit, scheduleMemoryUpdate } from './memory.js';
 import { runPromptScriptJob } from './regexWorker.js';
 import { scheduleRelationshipUpdate } from './relationship.js';
-import { characterImage, editRequestLua, type RequestLuaInput } from './requestLua.js';
+import {
+  characterImage,
+  editRequestLua,
+  luaStateHash,
+  luaStates,
+  type ListenerEdits,
+  type LuaCharacterRewrite,
+  type RequestLuaInput,
+} from './requestLua.js';
 import { editRequestTurns, withEditedRequest } from './requestTriggers.js';
-import { storableDelta, type PromptInjections } from './scriptState.js';
+import { applyScriptChat, planScriptChat, rewritableHead } from './scriptChat.js';
+import {
+  MAX_OVERLAY_TEXT_LENGTH,
+  mergeReaderOverlay,
+  readLocalLore,
+  storableDelta,
+  type PromptInjections,
+} from './scriptState.js';
 import { unlockAssets } from './unlocks.js';
 
 /**
@@ -171,6 +192,13 @@ export interface GenerationPlan {
    * a scripted member.
    */
   scriptView?: ScriptView;
+  /**
+   * The chat's own lore (`chats.local_lore`, RisuAI's chat `localLore`): what the
+   * card's Lua upserted in this chat. Activated after the scripted member's book,
+   * as RisuAI activates `globalLore.concat(localLore)` — and kept apart from
+   * `characters`, whose books the request triggers' lore effects read alone.
+   */
+  localLore?: LoreEntry[];
   /** The chat's prompt preset. */
   preset: Preset;
   /** Context budget this chat runs with (see memorySettings). */
@@ -199,6 +227,8 @@ export interface GenerationPlan {
 
 /** `GenerationPlan.scriptView`. */
 export interface ScriptView {
+  /** The scripted member, whose card the listeners' rewrites are of. */
+  memberId: string;
   /** The chat's own note, as this request's scripts left it — not the attached notes the prompt adds. */
   note: string;
   /** The first message this chat's scripts set (`setCharacterFirstMessage`). */
@@ -215,6 +245,9 @@ interface Usage {
   promptTokens: number;
   completionTokens: number;
 }
+
+/** A request as it is sent, with what the `editRequest` listeners did besides it, for the reply to keep. */
+type BuiltRequest = AssembledPrompt & { listenerEdits?: ListenerEdits };
 
 /**
  * How long a claim stands on its own. The running stream renews it on every
@@ -456,28 +489,41 @@ async function withPromptScripts(
  * `sendChat` runs once the request is put together (`requestLua.ts`), then its
  * request triggers, which `requestChatData` runs just before sending
  * (`requestTriggers.ts`). The chat variables the listeners wrote are the
- * triggers' to read, and the generated turn's to keep.
+ * triggers' to read, and the generated turn's to keep, as is what else they did
+ * (`listenerEdits`). The listeners' state's globals are put back from the
+ * chat's last generation, and a generation keeps them for the next
+ * (`LuaStateStore`); the inspector reads them and keeps nothing.
  */
 async function buildRequestMessages(
   plan: GenerationPlan,
   deps: AppDeps,
   account?: ChatGPTAccount,
   report = false,
-): Promise<AssembledPrompt> {
+): Promise<BuiltRequest> {
   const prompt = await assembleRequest(plan, deps, account, report);
   const lua = requestLuaInput(plan);
   const triggers = requestTriggerInput(plan);
   if (!lua && !triggers) return prompt;
   const label = plan.chatId;
-  const listened: { writes: VariableDelta | null } = { writes: null };
+  const listened: { writes: VariableDelta | null; edits: ListenerEdits | null } = { writes: null, edits: null };
   const edited = await withEditedRequest(
     prompt,
     async (turns) => {
       let request: RequestTurn[] | null = null;
       if (lua) {
-        const result = await editRequestLua(turns, lua, { run: deps.runRequestLua, label });
+        const states = deps.luaStates ?? luaStates;
+        const kept = states.get(plan.chatId);
+        // RisuAI's one state holds the code it ran last: the next run's first script finds it only if it is that code.
+        const restore = kept && kept.hash === luaStateHash(lua.scripts[0]!) ? kept.state : undefined;
+        const keep = { ...(restore !== undefined ? { restore } : {}), ...(report ? {} : { capture: true }) };
+        const result = await editRequestLua(turns, { ...lua, keep }, { run: deps.runRequestLua, label });
         request = result.turns;
         listened.writes = result.writes;
+        if (!report) {
+          listened.edits = result.edits;
+          if (result.state === null) states.delete(plan.chatId);
+          else if (result.state !== undefined) states.set(plan.chatId, { hash: luaStateHash(lua.scripts.at(-1)!), state: result.state });
+        }
       }
       if (triggers) {
         const input = { ...triggers, variables: applyVariableDelta(triggers.variables, listened.writes) };
@@ -487,8 +533,12 @@ async function buildRequestMessages(
     },
     label,
   );
-  const { writes } = listened;
-  return writes ? { ...edited, variableWrites: { ...edited.variableWrites, ...writes } } : edited;
+  const { writes, edits } = listened;
+  return {
+    ...edited,
+    ...(writes ? { variableWrites: { ...edited.variableWrites, ...writes } } : {}),
+    ...(edits ? { listenerEdits: edits } : {}),
+  };
 }
 
 /**
@@ -511,6 +561,7 @@ export function requestLuaInput(
     | 'variables'
     | 'globalVariables'
     | 'scriptView'
+    | 'localLore'
   >,
 ): Omit<RequestLuaInput, 'request'> | null {
   const found = scriptedMember(plan.characters);
@@ -537,6 +588,7 @@ export function requestLuaInput(
         background: view?.backgroundHtml ?? '',
         image: characterImage(view?.avatarUrl),
         lore: member.card.lorebook.map(risuLore),
+        localLore: (plan.localLore ?? []).map(risuLore),
       },
       user: plan.userName,
       persona: plan.personaText,
@@ -550,7 +602,7 @@ export function requestLuaInput(
 /**
  * What the card's request triggers run with, or null for a plot whose scripted
  * member has none — which costs it nothing. The member, its card and its name
- * are the ones the browser's runs read (`GET /:id/scripts`), with this chat's
+ * are the ones the browser's runs read (`GET /:id/scripts`), with the reader's
  * overlay already on them; the chat is the whole branch, and the reader's side
  * of things (`data`) is what the browser hands its runs, from the plan — or
  * from what `script-llm` reads of the chat, in the plan's shape.
@@ -613,6 +665,19 @@ export function requestTriggerInput(
   };
 }
 
+/**
+ * The roster with the chat's own lore after the scripted member's book — whose
+ * Lua wrote it — as RisuAI activates the character's lore and then the chat's.
+ */
+function withChatLore(characters: PromptCharacter[], localLore: LoreEntry[] | undefined): PromptCharacter[] {
+  if (!localLore?.length) return characters;
+  const scripted = scriptedMember(characters)?.member;
+  if (!scripted) return characters;
+  return characters.map((member) =>
+    member === scripted ? { ...member, card: { ...member.card, lorebook: [...member.card.lorebook, ...localLore] } } : member,
+  );
+}
+
 /** The prompt as it is put together, before the card's request triggers see it. */
 async function assembleRequest(
   plan: GenerationPlan,
@@ -641,7 +706,7 @@ async function assembleRequest(
       ? { length: 0 }
       : { ...plan.branch, length: plan.branch.length - 1 };
   // The scripts read the turns as stored, before an image note is added to them —
-  // the greeting as the chat's overlay has it, which is what the assembler sends.
+  // the greeting as the reader's overlay has it, which is what the assembler sends.
   const history = await withoutUnseeableImages(
     await withPromptScripts(withBranchGreeting(isContinue ? plan.history.slice(0, -1) : plan.history, branch), plan, branch),
     plan.model,
@@ -658,7 +723,7 @@ async function assembleRequest(
     .join('\n');
   const prompt = assemblePrompt({
     plot: plan.plot,
-    characters: plan.characters,
+    characters: withChatLore(plan.characters, plan.localLore),
     personaText: plan.personaText,
     userName: plan.userName,
     memoryText: plan.memoryText,
@@ -779,7 +844,7 @@ async function runGeneration(
   // Defensive: the routes already rejected unavailable models before writing
   // anything, so this should not fire for the deterministic case.
   let resolved: { adapter: LLMAdapter; providerModel: string };
-  let request: AssembledPrompt;
+  let request: BuiltRequest;
   let reasoningEffort: string | undefined;
   try {
     // The reader's own ChatGPT account answers their chat.
@@ -958,29 +1023,154 @@ function generatedDelta(
 }
 
 /**
- * Writes the generated text and moves the head. A new turn records the lore that
- * freshly triggered for its prompt; a continue is the same turn, whose record was
- * written when it was first generated.
+ * What the `editRequest` listeners rewrote of the scripted member, as the
+ * reader's overlay keeps it — held to the limits a rewrite from the browser is
+ * held to (`readOverlay`). A field past them is dropped and logged: the reply is
+ * on its way by now, and the browser drops what it cannot send the same way.
+ */
+function listenerOverlay(rewrite: LuaCharacterRewrite, label: string): MemberOverlay | null {
+  const patch: MemberOverlay = {};
+  if (rewrite.name !== undefined) {
+    const name = overlayName(rewrite.name);
+    if (name === null) console.warn('[api] editRequest set a name that is not one line of 1 to 100 characters; dropped:', label);
+    else patch.name = name;
+  }
+  for (const [from, to] of [
+    ['description', 'description'],
+    ['firstMessage', 'firstMessage'],
+    ['background', 'backgroundHtml'],
+  ] as const) {
+    const value = rewrite[from];
+    if (value === undefined) continue;
+    if (value.length > MAX_OVERLAY_TEXT_LENGTH || value.includes('\u0000')) {
+      console.warn(`[api] editRequest's ${from} rewrite is past what a rewrite may hold; dropped:`, label);
+    } else patch[to] = value;
+  }
+  return Object.keys(patch).length > 0 ? patch : null;
+}
+
+/**
+ * Keeps what the `editRequest` listeners did besides the request, in the
+ * reply's transaction and before the reply — RisuAI's listener edits the live
+ * chat and character, and `sendChat` pushes the reply onto that chat after it:
+ *
+ * - the chat, as the reader's branch (`scriptChat.ts`, the rules a start
+ *   trigger's edit is kept by), said against the branch the turn is generated
+ *   on; the reply then hangs under where it ends. A continue continues the
+ *   message it ends on, as RisuAI's continues whatever ends its chat — copied
+ *   first if another branch reads it — and a chat they left ending on anything
+ *   but a reply has nothing to continue: those edits are dropped and logged;
+ * - what they rewrote of the scripted member, merged into the reader's overlay;
+ * - the lore they upserted, into the chat's own.
+ *
+ * Each is held to the limits the browser's writes are held to; one past them
+ * is dropped and logged rather than failing a reply that is already written.
+ * Where the reply goes: under `parentId`, or onto `continued`; null leaves it
+ * where the plan put it.
+ */
+async function keepListenerEdits(
+  tx: Tx,
+  plan: GenerationPlan,
+  edits: ListenerEdits,
+): Promise<{ parentId: string | null; continued?: Message } | null> {
+  const label = plan.chatId;
+  // The chat's row first, as every writer of the reader's overlay takes the two.
+  const [chat] = await tx
+    .select({ userId: chats.userId, plotId: chats.plotId, localLore: chats.localLore })
+    .from(chats)
+    .where(eq(chats.id, plan.chatId))
+    .for('update');
+  if (!chat) return null;
+
+  let place: { parentId: string | null; continued?: Message } | null = null;
+  if (edits.messages) {
+    const all = await tx.select().from(messages).where(eq(messages.chatId, plan.chatId));
+    const rows = new Map(all.map((message) => [message.id, message]));
+    const path = plan.wholeBranch.map((message) => rows.get(message.id) ?? message);
+    // What the listeners were handed: the branch after its greeting, as RisuAI's `chat.message`.
+    const before: TriggerMessage[] = path.slice(plan.branch.greeting ? 1 : 0).map((message) => ({
+      role: message.role === 'user' ? 'user' : 'char',
+      data: message.content,
+      id: message.id,
+    }));
+    const after: TriggerMessage[] = edits.messages.map((message) => {
+      const was = message.key !== null ? before[message.key] : undefined;
+      return { role: message.role, data: message.data, ...(was ? { id: was.id } : {}) };
+    });
+    const check = checkScriptChat(scriptChatOf(before, after));
+    const continuing = plan.target.kind === 'continue';
+    if (!check.ok) {
+      console.warn(`[api] editRequest's chat edits are not kept (${check.error}):`, label);
+    } else if (check.chat) {
+      const planned = planScriptChat(path, check.chat, {
+        inPlace: rewritableHead(all, path.at(-1)),
+        ...(continuing ? { ownLast: true } : {}),
+      });
+      if (continuing && planned.lastRole !== 'assistant') {
+        console.warn('[api] editRequest left no reply at the end of the chat to continue; its chat edits are not kept:', label);
+      } else if (planned.changed) {
+        const applied = await applyScriptChat(tx, plan.chatId, planned, all);
+        const end = applied.path.at(-1);
+        place = continuing && end ? { parentId: end.parentId, continued: end } : { parentId: end?.id ?? null };
+      }
+    }
+  }
+
+  const memberId = plan.scriptView?.memberId;
+  const patch = memberId ? listenerOverlay(edits.character, label) : null;
+  if (memberId && patch) {
+    try {
+      // A savepoint: a refusal (the overlay past its size) takes back this write alone.
+      await tx.transaction((inner) =>
+        mergeReaderOverlay(inner, chat.userId, chat.plotId, { members: { [memberId]: patch } }, new Set([memberId])),
+      );
+    } catch (error) {
+      console.warn('[api] editRequest\'s character rewrites are not kept:', label, error instanceof Error ? error.message : error);
+    }
+  }
+
+  if (edits.lore.length > 0) {
+    try {
+      const lore = readLocalLore(upsertLocalLore(chat.localLore ?? [], edits.lore))!;
+      await tx
+        .update(chats)
+        .set({ localLore: lore.length > 0 ? lore : null })
+        .where(eq(chats.id, plan.chatId));
+    } catch (error) {
+      console.warn('[api] editRequest\'s lore upserts are not kept:', label, error instanceof Error ? error.message : error);
+    }
+  }
+  return place;
+}
+
+/**
+ * Writes the generated text and moves the head, in one transaction with what
+ * the `editRequest` listeners did (`keepListenerEdits`), which goes first. A
+ * new turn records the lore that freshly triggered for its prompt; a continue
+ * is the same turn, whose record was written when it was first generated.
  */
 async function persist(
   deps: AppDeps,
   plan: GenerationPlan,
   text: string,
   usage: Usage,
-  { loreTriggers, variableWrites }: Pick<AssembledPrompt, 'loreTriggers' | 'variableWrites'>,
+  { loreTriggers, variableWrites, listenerEdits }: Pick<BuiltRequest, 'loreTriggers' | 'variableWrites' | 'listenerEdits'>,
 ): Promise<StoredTurn> {
   const scriptState = plan.postProcess ? ('pending' as const) : null;
-  if (plan.target.kind === 'continue') {
-    const target = plan.target.message;
-    const content = target.content + text;
-    const scriptRev = await deps.db.transaction(async (tx) => {
+  return deps.db.transaction(async (tx) => {
+    const place = listenerEdits ? await keepListenerEdits(tx, plan, listenerEdits) : null;
+    if (plan.target.kind === 'continue') {
+      // The message the listeners left last, where they edited the chat — its text as they left it.
+      const target = place?.continued ?? plan.target.message;
+      const continued: GenerationPlan = target === plan.target.message ? plan : { ...plan, target: { kind: 'continue', message: target } };
+      const content = target.content + text;
       const [updated] = await tx
         .update(messages)
         .set({
           content,
           promptTokens: usage.promptTokens,
           completionTokens: (target.completionTokens ?? 0) + usage.completionTokens,
-          variableDelta: storableDelta(generatedDelta(plan, content, text, variableWrites)),
+          variableDelta: storableDelta(generatedDelta(continued, content, text, variableWrites)),
           scriptState,
           // The text changed in place, so a script commit computed on the old
           // text — another tab's, finishing the turn as it was — is refused.
@@ -991,32 +1181,32 @@ async function persist(
       // The append mutates assistant content in place — same revision rules as
       // an edit, so a refresh whose snapshot predates the append is discarded.
       await invalidateMemoryForEdit(tx, plan.chatId, target.id);
-      return updated?.scriptRev ?? target.scriptRev + 1;
-    });
-    return { id: target.id, content, scriptRev };
-  }
+      return { id: target.id, content, scriptRev: updated?.scriptRev ?? target.scriptRev + 1 };
+    }
 
-  // The prefix is the server's to write: the model was asked for the scene
-  // alone, and the convention is what makes the stored turn a narration.
-  const content = plan.narration ? withNarrationPrefix(text) : text;
-  const [created] = await deps.db
-    .insert(messages)
-    .values({
-      chatId: plan.chatId,
-      parentId: plan.target.parentId,
-      role: 'assistant',
-      content,
-      model: plan.model,
-      promptTokens: usage.promptTokens,
-      completionTokens: usage.completionTokens,
-      loreTriggers: loreTriggers.length > 0 ? loreTriggers : null,
-      variableDelta: storableDelta(generatedDelta(plan, content, content, variableWrites)),
-      scriptState,
-    })
-    .returning();
-  await deps.db
-    .update(chats)
-    .set({ headMessageId: created!.id, updatedAt: new Date() })
-    .where(eq(chats.id, plan.chatId));
-  return { id: created!.id, content: created!.content, scriptRev: created!.scriptRev };
+    // The prefix is the server's to write: the model was asked for the scene
+    // alone, and the convention is what makes the stored turn a narration.
+    const content = plan.narration ? withNarrationPrefix(text) : text;
+    const [created] = await tx
+      .insert(messages)
+      .values({
+        chatId: plan.chatId,
+        // Under where the listeners left the chat, where they edited it.
+        parentId: place ? place.parentId : plan.target.parentId,
+        role: 'assistant',
+        content,
+        model: plan.model,
+        promptTokens: usage.promptTokens,
+        completionTokens: usage.completionTokens,
+        loreTriggers: loreTriggers.length > 0 ? loreTriggers : null,
+        variableDelta: storableDelta(generatedDelta(plan, content, content, variableWrites)),
+        scriptState,
+      })
+      .returning();
+    await tx
+      .update(chats)
+      .set({ headMessageId: created!.id, updatedAt: new Date() })
+      .where(eq(chats.id, plan.chatId));
+    return { id: created!.id, content: created!.content, scriptRev: created!.scriptRev };
+  });
 }

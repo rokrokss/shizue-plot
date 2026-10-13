@@ -93,8 +93,8 @@ export interface LuaSnapshot {
   messages: LuaMessage[];
   /**
    * RisuAI's `char`: `name` its name (`getName`), `nickname` what `{{char}}` is
-   * instead where the card sets one, `firstMessage` and `background` as this
-   * chat's overlay has them, and `image` the markup `getCharacterImage` answers
+   * instead where the card sets one, `firstMessage` and `background` as the
+   * reader's overlay has them, and `image` the markup `getCharacterImage` answers
    * ('' without an avatar).
    */
   char: {
@@ -104,7 +104,14 @@ export interface LuaSnapshot {
     firstMessage: string;
     background: string;
     image: string;
+    /** The character's own book, RisuAI's `globalLore`. */
     lore: LuaLoreBook[];
+    /**
+     * The chat's, RisuAI's `localLore`: what `upsertLocalLoreBook` wrote here
+     * before. `getLoreBooks` searches it first, and an upsert replaces entries
+     * of its name in it alone.
+     */
+    localLore?: LuaLoreBook[];
   };
   user: string;
   persona: string;
@@ -134,6 +141,13 @@ export interface LuaCallMessage {
   code: string;
   entry: LuaEntry;
   snapshot: LuaSnapshot;
+  /**
+   * The server's `editRequest` runs only (`luaWorkerSource`'s `server`): the
+   * Lua state's plain-data globals as an earlier call left them, put back once
+   * the code has loaded (`restore`), and taken again once this call is done
+   * (`capture`) — RisuAI's state for a mode outlives a generation (`LUA_STATE`).
+   */
+  keep?: { restore?: string; capture?: boolean };
 }
 
 /** What a call left — still the worker's word, which the parent checks before using any of it. */
@@ -158,6 +172,11 @@ export interface LuaCallResult {
   /** Functions called that are not carried out here, with why. */
   notes: [string, string][];
   error: string | null;
+  /**
+   * What `keep.capture` took (`LUA_STATE`): the globals in its own format, or
+   * false when they would not fit or could not be read. Absent when not asked.
+   */
+  state?: string | false;
 }
 
 /** The host calls a script can make. Every other name is dropped. */
@@ -768,9 +787,14 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
     set('getLoreBooksMain', function (_id: Any, search: Any) {
       const ctx = c();
       const found: Any[] = [];
-      for (let i = 0; i < ctx.lore.length; i += 1) {
-        const book = ctx.lore[i];
-        if (book.comment === search) found.push(Object.assign({}, book, { content: cbsLite(ctx, book.content) }));
+      // RisuAI's order: the chat's lore, then the character's.
+      const sources = [ctx.localLore, ctx.lore];
+      for (let s = 0; s < sources.length; s += 1) {
+        const source = sources[s];
+        for (let i = 0; i < source.length; i += 1) {
+          const book = source[i];
+          if (book.comment === search) found.push(Object.assign({}, book, { content: cbsLite(ctx, book.content) }));
+        }
       }
       return JSON.stringify(found);
     });
@@ -790,10 +814,11 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
         selective: secondKey !== '',
         useRegex: o.regex === undefined ? false : Boolean(o.regex),
       };
-      ctx.lore = ctx.lore.filter(function (entry: Any) {
+      // The chat's lore, as RisuAI's `currentChat.localLore`: the character's book is left as it is.
+      ctx.localLore = ctx.localLore.filter(function (entry: Any) {
         return entry.comment !== book.comment;
       });
-      ctx.lore.push(book);
+      ctx.localLore.push(book);
       ctx.loreUpserts.push(book);
     });
     set('loadLoreBooksMain', function (id: Any, reserve: Any) {
@@ -867,6 +892,7 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
       firstMessageChanged: false,
       backgroundChanged: false,
       lore: snap.char.lore.slice(),
+      localLore: (snap.char.localLore || []).slice(),
       loreUpserts: [],
       user: snap.user,
       persona: snap.persona,
@@ -908,6 +934,7 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
     }
     state.engine = null;
     state.code = null;
+    state.keeper = null;
   }
 
   /** The state for a mode, newest last; past the cap the oldest idle one is closed. */
@@ -918,7 +945,7 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
       engines.set(name, state);
       return state;
     }
-    state = { code: null, engine: null, ctx: null, busy: false, queue: Promise.resolve() };
+    state = { code: null, engine: null, keeper: null, ctx: null, busy: false, queue: Promise.resolve() };
     engines.set(name, state);
     if (engines.size > limits.engines) {
       const names = Array.from(engines.keys());
@@ -944,6 +971,14 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
       // `os.exit` would take the whole module down, every other state with it.
       return engine
         .doString('os.exit = nil')
+        .then(function () {
+          // The server's keeper of the state's globals, made before the wrapper and
+          // the card's code so the names it skips are the library's and ours.
+          if (typeof prelude.state !== 'string') return undefined;
+          return engine.doString(prelude.state).then(function (keeper: Any) {
+            state.keeper = typeof keeper === 'function' ? keeper : null;
+          });
+        })
         .then(function () {
           return engine.doString(prelude.head + code + prelude.tail);
         })
@@ -1034,12 +1069,27 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
     return chain;
   }
 
+  /** Runs the keeper (`LUA_STATE`), which answers false for anything it could not do. */
+  function keep(state: Any, op: string, data: Any): Any {
+    if (!state.engine || typeof state.keeper !== 'function') return false;
+    try {
+      return state.keeper(op, data);
+    } catch (error) {
+      return false;
+    }
+  }
+
   function invoke(state: Any, request: Any): Any {
     const ctx = context(request);
+    const kept = request.keep && typeof request.keep === 'object' ? request.keep : null;
     state.busy = true;
     state.ctx = ctx;
     return prepare(state, request.code)
       .then(function () {
+        // Over what the code's top level just set, as RisuAI's state never ran it again.
+        if (kept && typeof kept.restore === 'string' && keep(state, 'restore', kept.restore) !== true) {
+          note(ctx, 'state', 'the globals an earlier run left could not be put back; this run starts without them');
+        }
         keySeq += 1;
         const key = 'k' + keySeq + '-' + Math.random().toString(36).slice(2);
         if (ctx.display) displayIds.add(key);
@@ -1063,7 +1113,12 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
       })
       .then(function () {
         state.busy = false;
-        return outcome(ctx);
+        const result = outcome(ctx);
+        if (kept && kept.capture === true) {
+          const taken = keep(state, 'capture', null);
+          result.state = typeof taken === 'string' ? taken : false;
+        }
+        return result;
       });
   }
 
@@ -1150,6 +1205,186 @@ do
 end
 `;
 
+/** The most the server keeps of one chat's `editRequest` globals, in bytes of `LUA_STATE`'s format. */
+export const LUA_STATE_LIMIT = 1_000_000;
+/** How deep a kept table may nest. */
+export const LUA_STATE_DEPTH = 32;
+
+/**
+ * The keeper of a server state's globals between runs (`LuaCallMessage.keep`).
+ *
+ * RisuAI keeps one Lua state per mode and makes a new one only when the code
+ * differs (`runScripted`), so what an `editRequest` listener leaves in a global
+ * is there at the next generation. The server's child runs once and is killed,
+ * so the state does not outlive the run; this takes what it can carry across —
+ * as data, never as code — and puts it back in the next run's state once that
+ * state has loaded the same code.
+ *
+ * Run before the wrapper and the card's code, it returns one function,
+ * `keeper(op, text)`, which closes over the library functions it uses and the
+ * names the global table already has then — Lua's library and our host
+ * functions — and never touches those. `capture` answers every other global
+ * whose value is a string (valid UTF-8, which is what can travel as text), a
+ * number, a boolean or a table of those — string and number keys, no
+ * metatable, no cycle, at most `LUA_STATE_DEPTH` deep — in a length-prefixed
+ * format of its own; a global holding anything else (a function, a coroutine, a
+ * class instance) is left out, since the code that made it makes it again. Past
+ * `LUA_STATE_LIMIT` bytes it answers false. `restore` reads the format back —
+ * whole or not at all, any malformed or deeper input being refused — and sets
+ * what it read, skipping those same names, answering true; it never loads
+ * anything as code.
+ */
+export const LUA_STATE = String.raw`
+local next, type, rawset, tonumber, pcall, error, getmetatable = next, type, rawset, tonumber, pcall, error, getmetatable
+local mtype, tointeger = math.type, math.tointeger
+local format, sub, find = string.format, string.sub, string.find
+local concat = table.concat
+local ulen = utf8.len
+local G = _G
+local LIMIT, DEPTH = ${LUA_STATE_LIMIT}, ${LUA_STATE_DEPTH}
+local reserved = {}
+for name in next, G do reserved[name] = true end
+local SKIP, TOO_LARGE = {}, {}
+
+local out, size, seen
+local function put(piece)
+  size = size + #piece
+  if size > LIMIT then error(TOO_LARGE, 0) end
+  out[#out + 1] = piece
+end
+local function str(s)
+  if ulen(s) == nil then error(SKIP, 0) end
+  put('s' .. #s .. ':')
+  put(s)
+end
+local function num(x)
+  if mtype(x) == 'integer' then return put('i' .. format('%d', x) .. ';') end
+  if x ~= x then return put('fnan;') end
+  if x == 1/0 then return put('finf;') end
+  if x == -1/0 then return put('f-inf;') end
+  put('f' .. format('%a', x) .. ';')
+end
+local function value(v, depth)
+  local t = type(v)
+  if t == 'string' then return str(v) end
+  if t == 'number' then return num(v) end
+  if t == 'boolean' then return put(v and 'T' or 'F') end
+  if t ~= 'table' or depth >= DEPTH or seen[v] or getmetatable(v) ~= nil then error(SKIP, 0) end
+  seen[v] = true
+  local count = 0
+  for _ in next, v do count = count + 1 end
+  put('t' .. count .. ':')
+  for k, item in next, v do
+    local kt = type(k)
+    if kt == 'string' then str(k) elseif kt == 'number' then num(k) else error(SKIP, 0) end
+    value(item, depth + 1)
+  end
+  seen[v] = nil
+end
+local function capture()
+  local pieces, total = {}, 0
+  for name, v in next, G do
+    if type(name) == 'string' and not reserved[name] then
+      out, size, seen = {}, total, {}
+      local ok, err = pcall(function() str(name) value(v, 0) end)
+      if ok then
+        pieces[#pieces + 1] = concat(out)
+        total = size
+      elseif err ~= SKIP then
+        return false
+      end
+    end
+  end
+  out, seen = nil, nil
+  return concat(pieces)
+end
+
+local data, pos
+local function need(ok) if not ok then error(SKIP, 0) end end
+local function readstr()
+  local stop = find(data, ':', pos, true)
+  need(stop)
+  local len = tointeger(tonumber(sub(data, pos, stop - 1)))
+  need(len and len >= 0)
+  local s = sub(data, stop + 1, stop + len)
+  need(#s == len)
+  pos = stop + len + 1
+  return s
+end
+local function readnum(tag)
+  local stop = find(data, ';', pos, true)
+  need(stop)
+  local text = sub(data, pos, stop - 1)
+  pos = stop + 1
+  if tag == 'i' then
+    local x = tointeger(tonumber(text))
+    need(x ~= nil)
+    return x
+  end
+  if text == 'nan' then return 0/0 end
+  if text == 'inf' then return 1/0 end
+  if text == '-inf' then return -1/0 end
+  local x = tonumber(text)
+  need(x ~= nil)
+  if mtype(x) ~= 'float' then x = x * 1.0 end
+  return x
+end
+local function read(depth)
+  local tag = sub(data, pos, pos)
+  pos = pos + 1
+  if tag == 's' then return readstr() end
+  if tag == 'i' or tag == 'f' then return readnum(tag) end
+  if tag == 'T' then return true end
+  if tag == 'F' then return false end
+  need(tag == 't' and depth < DEPTH)
+  local stop = find(data, ':', pos, true)
+  need(stop)
+  local count = tointeger(tonumber(sub(data, pos, stop - 1)))
+  need(count and count >= 0)
+  pos = stop + 1
+  local t = {}
+  for _ = 1, count do
+    local kt = sub(data, pos, pos)
+    need(kt == 's' or kt == 'i' or kt == 'f')
+    local k = read(depth)
+    need(k == k)
+    rawset(t, k, read(depth + 1))
+  end
+  return t
+end
+local function restore(text)
+  need(type(text) == 'string' and #text <= LIMIT)
+  data, pos = text, 1
+  local found = {}
+  while pos <= #data do
+    need(sub(data, pos, pos) == 's')
+    pos = pos + 1
+    local name = readstr()
+    found[#found + 1] = name
+    found[#found + 1] = read(0)
+  end
+  for i = 1, #found, 2 do
+    if not reserved[found[i]] then rawset(G, found[i], found[i + 1]) end
+  end
+  return true
+end
+
+return function(op, text)
+  if op == 'capture' then
+    local ok, res = pcall(capture)
+    out, seen = nil, nil
+    if ok then return res end
+    return false
+  end
+  if op == 'restore' then
+    local ok, res = pcall(restore, text)
+    data = nil
+    return ok and res == true
+  end
+  return false
+end
+`;
+
 /**
  * The worker's whole program: wasmoon's own bundle, with the names a CommonJS
  * or AMD host would have shadowed so it settles on `globalThis.wasmoon` and its
@@ -1169,7 +1404,7 @@ export function luaWorkerSource(
 ): string {
   const runtime = check(luaWorkerRuntime.toString());
   const prelude = server
-    ? { json: JSON_LUA, head: LUA_WRAPPER[0] + LUA_LOCK, tail: LUA_WRAPPER[1], proxy: false }
+    ? { json: JSON_LUA, head: LUA_WRAPPER[0] + LUA_LOCK, tail: LUA_WRAPPER[1], proxy: false, state: LUA_STATE }
     : { json: JSON_LUA, head: LUA_WRAPPER[0], tail: LUA_WRAPPER[1] };
   return [
     '(function (exports, module, define, require, process, __filename, __dirname) {',

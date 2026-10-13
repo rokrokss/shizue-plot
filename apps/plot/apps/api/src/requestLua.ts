@@ -24,14 +24,26 @@
  *
  * **A child runs once.** One run — every Lua script on the card, in trigger
  * order, each listener's request the next one's — and the child is killed,
- * whatever happened: nothing a script left in a Lua global or in the child's
- * JavaScript reaches another chat or another reader. Each script gets a fresh
- * Lua state, as RisuAI makes one when the code changes. `POOL_SIZE` children
- * are kept booted, so a run does not wait the ~60 ms one takes to start.
+ * whatever happened: nothing a script left in the child's JavaScript reaches
+ * another chat or another reader. Each script gets a fresh Lua state, as
+ * RisuAI makes one when the code changes. `POOL_SIZE` children are kept
+ * booted, so a run does not wait the ~60 ms one takes to start.
+ *
+ * **What a state keeps.** RisuAI keeps one `editRequest` state, rebuilt only
+ * when the next script's code differs, so its globals outlive a generation —
+ * for a card with one Lua script; with more, the code alternates and the state
+ * is rebuilt every call. The closest thing here: the last script's plain-data
+ * globals are taken when a run ends (`LUA_STATE` — strings, numbers, booleans
+ * and tables of them, never code), kept by chat and tagged with that script's
+ * hash (`LuaStateStore`, in memory), and put back into the next run's first
+ * script once its code has loaded — only when it is the same code, so a card
+ * with several scripts starts every one fresh, as in RisuAI. They go in as
+ * data, read by the keeper the state made before the card's code ran.
  *
  * **What a listener has.** What the browser hands its worker: the chat (the
  * whole branch), its variables, the reader's global variables, the character
- * as the chat's overlay has it, the persona and the chat's note — and the
+ * as the reader's overlay has it, the chat's own lore, the persona and the
+ * chat's note — and the
  * request, `[{role, content}, …]`, as the request triggers read it. RisuAI's
  * `runLuaEditTrigger` gives its listeners no low-level access, so `LLM`,
  * `axLLM`, `simpleLLM`, `request`, `similarity` and `loadLoreBooks` answer nil
@@ -43,9 +55,11 @@
  * null, as RisuAI's `res ?? data`; the last must be a list of turns we can
  * send (`turnsOf`). Chat variables a listener wrote are the generated turn's,
  * as RisuAI's listener writes the live chat — so the browser's output run folds
- * from them. What it did to the chat, the character or the lore is dropped and
- * logged: those reach the chat before the prompt is planned, and here the plan
- * is made.
+ * from them. What it did to the chat, the character and the chat's lore comes
+ * back too (`ListenerEdits`), read as the browser's sandbox reads a call's, and
+ * each script reads what the ones before it did; the reply keeps it — the chat
+ * as the branch it hangs under, the character in the reader's overlay, the lore
+ * in the chat's own (`generation.ts`).
  *
  * **Failure.** One hard clock for the whole run (`REQUEST_LUA_DEADLINE_MS`).
  * A child that runs it out, exits, writes a line that is not one of the
@@ -54,9 +68,10 @@
  * unedited too. So does a listener that throws (its writes stand, as RisuAI's).
  */
 import { checkVariableDelta, type VariableDelta } from '@shizue/core';
-import { LUA_LIMITS, luaWorkerSource, type LuaSnapshot } from '@shizue/core/lua';
+import { LUA_LIMITS, LUA_STATE_LIMIT, luaWorkerSource, type LuaLoreBook, type LuaSnapshot } from '@shizue/core/lua';
 import { MAX_TRIGGER_VALUE_LENGTH, type RequestTurn } from '@shizue/core/triggers';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -114,22 +129,61 @@ const BOOT_MS = 10_000;
 
 /** Variable writes a run may hand back, as the browser's sandbox takes them. */
 const MAX_VARS = 10_000;
+/** Messages one call may hand back beyond the ones it was given, as the browser's sandbox takes them. */
+const MAX_ADDED_MESSAGES = 1_000;
+/** Lore entries a run may upsert, as the browser's sandbox takes them from one call. */
+const MAX_LORE = 2_000;
 
 /** What one run takes: the card's Lua scripts in trigger order, the request, and what a script may read. */
 export interface RequestLuaInput {
   scripts: string[];
   request: RequestTurn[];
   snapshot: LuaSnapshot;
+  /**
+   * The state's globals across runs (`LUA_STATE`): `restore` is put into the
+   * first script's state once its code has loaded, and `capture` takes the last
+   * script's when the run is done — RisuAI's one `editRequest` state, which
+   * holds the code it ran last and is rebuilt when the next code differs.
+   */
+  keep?: { restore?: string; capture?: boolean };
+}
+
+/** A message of the chat as the listeners left it: `key` is the snapshot message it is, null for one they added. */
+export interface LuaChatMessage {
+  role: 'user' | 'char';
+  data: string;
+  key: number | null;
+}
+
+/** What the listeners rewrote of the character (RisuAI's `char`): the last value each was set to. */
+export interface LuaCharacterRewrite {
+  name?: string;
+  description?: string;
+  firstMessage?: string;
+  background?: string;
 }
 
 /**
  * How a run ended: the request as the listeners left it — any JSON, checked by
- * the caller — with the chat variables they wrote and what was not kept; or why
- * there is none. `quiet` is a run that was never made because the server cannot
- * sandbox it, which the log has said once already.
+ * the caller — with the chat variables they wrote, the chat as they left it
+ * (null when untouched), what they rewrote of the character and the lore they
+ * upserted, in order — all of it read as a stranger's data, to the browser
+ * sandbox's sizes — and what was noted; with `keep.capture`, the last state's
+ * globals (`state`, null when they would not fit); or why there is none. `quiet`
+ * is a run that was never made because the server cannot sandbox it, which the
+ * log has said once already.
  */
 export type RequestLuaOutcome =
-  | { ok: true; request: unknown; vars: [string, string | null][]; notes: string[] }
+  | {
+      ok: true;
+      request: unknown;
+      vars: [string, string | null][];
+      notes: string[];
+      messages?: LuaChatMessage[] | null;
+      character?: LuaCharacterRewrite;
+      lore?: LuaLoreBook[];
+      state?: string | null;
+    }
   | { ok: false; reason: string; quiet?: boolean };
 
 /** What runs the listeners — the pool, unless a test hands its own. */
@@ -401,6 +455,43 @@ function watchMemory(child: LuaChild, done: () => boolean): void {
   void poll();
 }
 
+/** A lore entry as a listener upserted it, in RisuAI's shape, as the browser's sandbox reads one (`checkLore`). */
+function checkLore(value: unknown): LuaLoreBook | null {
+  if (!isRecord(value)) return null;
+  const str = (key: string): string => (typeof value[key] === 'string' ? (value[key] as string) : '');
+  return {
+    key: str('key'),
+    secondkey: str('secondkey'),
+    insertorder: typeof value['insertorder'] === 'number' && Number.isFinite(value['insertorder']) ? value['insertorder'] : 100,
+    comment: str('comment'),
+    content: str('content'),
+    mode: 'normal',
+    alwaysActive: value['alwaysActive'] === true,
+    selective: value['selective'] === true,
+    useRegex: value['useRegex'] === true,
+  };
+}
+
+/**
+ * The chat a call left, read as the browser's sandbox reads it (`checkResult`):
+ * at most `MAX_ADDED_MESSAGES` beyond the `given` it was handed, each with its
+ * text, and a message keeping its identity once at most, and only one it was
+ * given. Null when it is not that.
+ */
+function checkMessages(value: unknown, given: number): LuaChatMessage[] | null {
+  if (!Array.isArray(value) || value.length > given + MAX_ADDED_MESSAGES) return null;
+  const seen = new Set<number>();
+  const messages: LuaChatMessage[] = [];
+  for (const message of value) {
+    if (!isRecord(message) || typeof message['data'] !== 'string') return null;
+    const key = message['key'];
+    const kept = typeof key === 'number' && Number.isInteger(key) && key >= 0 && key < given && !seen.has(key) ? key : null;
+    if (kept !== null) seen.add(kept);
+    messages.push({ role: message['role'] === 'user' ? 'user' : 'char', data: message['data'], key: kept });
+  }
+  return messages;
+}
+
 function runIn(child: LuaChild, input: RequestLuaInput, deadlineMs: number): Promise<RequestLuaOutcome> {
   return new Promise<RequestLuaOutcome>((resolve) => {
     let settled = false;
@@ -423,19 +514,55 @@ function runIn(child: LuaChild, input: RequestLuaInput, deadlineMs: number): Pro
     const vars = new Map(input.snapshot.vars);
     const writes = new Map<string, string | null>();
     const notes = new Set<string>();
+    // The chat, the character and the chat's lore as the listeners left them —
+    // each script reads what the ones before it did, as RisuAI's read the live
+    // chat and character. A message carries the snapshot index it started as.
+    let chat = input.snapshot.messages.map((message, at) => ({ ...message, key: at as number | null }));
+    let chatChanged = false;
+    const char = { ...input.snapshot.char, localLore: [...(input.snapshot.char.localLore ?? [])] };
+    const rewrote: LuaCharacterRewrite = {};
+    const upserts: LuaLoreBook[] = [];
+    let state: string | null | undefined;
     let call = 0;
     let served = new Set<number>();
 
     const next = (): void => {
       if (call === input.scripts.length) {
-        finish({ ok: true, request, vars: [...writes], notes: [...notes] });
+        finish({
+          ok: true,
+          request,
+          vars: [...writes],
+          notes: [...notes],
+          messages: chatChanged ? chat.map(({ role, data, key }) => ({ role, data, key })) : null,
+          character: rewrote,
+          lore: upserts,
+          ...(state !== undefined ? { state } : {}),
+        });
         return;
       }
       call += 1;
       served = new Set();
       // Each script reads what the ones before it wrote, as RisuAI's read the live chat.
-      const snapshot: LuaSnapshot = { ...input.snapshot, vars: [...vars], lowLevel: false };
-      child.post({ type: 'call', call, code: input.scripts[call - 1], entry: { kind: 'request', data: request }, snapshot });
+      const snapshot: LuaSnapshot = {
+        ...input.snapshot,
+        vars: [...vars],
+        messages: chat.map(({ role, data, time }) => ({ role, data, ...(time !== undefined ? { time } : {}) })),
+        char: { ...char, localLore: [...char.localLore] },
+        lowLevel: false,
+      };
+      // The state's globals go into the first script's state and come out of the last one's.
+      const keep = {
+        ...(call === 1 && input.keep?.restore !== undefined ? { restore: input.keep.restore } : {}),
+        ...(call === input.scripts.length && input.keep?.capture ? { capture: true } : {}),
+      };
+      child.post({
+        type: 'call',
+        call,
+        code: input.scripts[call - 1],
+        entry: { kind: 'request', data: request },
+        snapshot,
+        ...(Object.keys(keep).length > 0 ? { keep } : {}),
+      });
     };
 
     child.listener = (message) => {
@@ -489,11 +616,43 @@ function runIn(child: LuaChild, input: RequestLuaInput, deadlineMs: number): Pro
             }
           }
         }
-        if (Array.isArray(result['messages'])) notes.add('its chat edits are not kept');
-        for (const field of ['name', 'description', 'firstMessage', 'background'] as const) {
-          if (typeof result[field] === 'string') notes.add(`its ${field} rewrite is not kept`);
+        // What it did to the chat: kept when it is a chat the browser's sandbox would take.
+        if (result['messages'] !== null && result['messages'] !== undefined) {
+          const left = checkMessages(result['messages'], chat.length);
+          if (left) {
+            const before = chat;
+            chat = left.map((entry) => {
+              const was = entry.key !== null ? before[entry.key]! : undefined;
+              return { role: entry.role, data: entry.data, time: was?.time ?? 0, key: was ? was.key : null };
+            });
+            chatChanged = true;
+          } else notes.add('its chat edits were not a chat; dropped');
         }
-        if (Array.isArray(result['lore']) && result['lore'].length > 0) notes.add('its lore upserts are not kept');
+        // What it rewrote of the character, the last value each, as RisuAI's live `char` keeps it.
+        for (const [field, into] of [
+          ['name', 'name'],
+          ['description', 'description'],
+          ['firstMessage', 'firstMessage'],
+          ['background', 'background'],
+        ] as const) {
+          const value = result[field];
+          if (typeof value !== 'string') continue;
+          rewrote[into] = value;
+          char[into] = value;
+        }
+        if (Array.isArray(result['lore'])) {
+          for (const raw of result['lore'].slice(0, MAX_LORE - upserts.length)) {
+            const book = checkLore(raw);
+            if (!book) continue;
+            upserts.push(book);
+            char.localLore = [...char.localLore.filter((entry) => entry.comment !== book.comment), book];
+          }
+        }
+        if (call === input.scripts.length && input.keep?.capture) {
+          const taken = result['state'];
+          state =
+            typeof taken === 'string' && Buffer.byteLength(taken, 'utf8') <= LUA_STATE_LIMIT ? taken : null;
+        }
         next();
         return;
       }
@@ -521,12 +680,31 @@ function keptWrites(vars: [string, string | null][], label: string): VariableDel
   return null;
 }
 
-/** `turns` as the card's `editRequest` listeners left them, or null when unchanged; and the chat variables they wrote. */
+/**
+ * What the listeners did besides the request and the variables, which RisuAI's
+ * listener does to the live chat and character: the chat after its greeting as
+ * they left it (null when untouched; `key` the snapshot message each one is),
+ * what they rewrote of the scripted member, and the lore they upserted into the
+ * chat's own, in order. The caller keeps it with the reply (`generation.ts`).
+ */
+export interface ListenerEdits {
+  messages: LuaChatMessage[] | null;
+  character: LuaCharacterRewrite;
+  lore: LuaLoreBook[];
+}
+
+/**
+ * `turns` as the card's `editRequest` listeners left them, or null when
+ * unchanged; the chat variables they wrote; what else they did (`edits`, null
+ * when nothing); and, with `keep.capture`, their state's globals (`state`:
+ * null when there were none to keep, undefined when the run was not made or
+ * failed — what an earlier run kept then stands).
+ */
 export async function editRequestLua(
   turns: RequestTurn[],
   input: Omit<RequestLuaInput, 'request'>,
   { run = runRequestLua, label }: { run?: RequestLuaRunner | undefined; label: string },
-): Promise<{ turns: RequestTurn[] | null; writes: VariableDelta | null }> {
+): Promise<{ turns: RequestTurn[] | null; writes: VariableDelta | null; edits: ListenerEdits | null; state?: string | null }> {
   let outcome: RequestLuaOutcome;
   try {
     outcome = await run({ ...input, request: turns });
@@ -535,18 +713,83 @@ export async function editRequestLua(
   }
   if (!outcome.ok) {
     if (!outcome.quiet) console.warn('[api] editRequest sent the request unedited:', label, outcome.reason);
-    return { turns: null, writes: null };
+    return { turns: null, writes: null, edits: null };
   }
   for (const note of outcome.notes) console.warn(`[api] editRequest: ${note}:`, label);
   const writes = keptWrites(outcome.vars, label);
+  const character = outcome.character ?? {};
+  const lore = outcome.lore ?? [];
+  const messages = outcome.messages ?? null;
+  const edits = messages || Object.keys(character).length > 0 || lore.length > 0 ? { messages, character, lore } : null;
+  const kept = outcome.state !== undefined ? { state: outcome.state } : {};
   const edited = turnsOf(outcome.request);
   if (!edited) {
     console.warn('[api] editRequest left something that is not a request; sent unedited:', label);
-    return { turns: null, writes };
+    return { turns: null, writes, edits, ...kept };
   }
   const same = edited.length === turns.length && edited.every((turn, at) => turn.role === turns[at]!.role && turn.content === turns[at]!.content);
-  return { turns: same ? null : edited, writes };
+  return { turns: same ? null : edited, writes, edits, ...kept };
 }
+
+/* ------------------------------------------------------- state across runs */
+
+/** One chat's kept `editRequest` globals (`LUA_STATE`), and the code they were taken from. */
+export interface KeptLuaState {
+  /** `luaStateHash` of the script whose state they are — the run's last. */
+  hash: string;
+  state: string;
+}
+
+/** Where the server keeps them between generations, by chat id. */
+export interface LuaStateStore {
+  get(chatId: string): KeptLuaState | undefined;
+  set(chatId: string, kept: KeptLuaState): void;
+  delete(chatId: string): void;
+}
+
+/**
+ * The chats' states this process keeps: the most recently used first to stay,
+ * up to `entries` chats and `chars` characters in all — each one is at most
+ * `LUA_STATE_LIMIT` bytes. In memory, as RisuAI's states live in the reader's
+ * tab and go with it: a restart, or another instance of the API, starts the
+ * next run without them, which is RisuAI's after a reload.
+ */
+export function createLuaStateStore({ entries = 1_000, chars = 32_000_000 }: { entries?: number; chars?: number } = {}): LuaStateStore {
+  const kept = new Map<string, KeptLuaState>();
+  let total = 0;
+  const drop = (chatId: string): void => {
+    const was = kept.get(chatId);
+    if (!was) return;
+    kept.delete(chatId);
+    total -= was.state.length;
+  };
+  return {
+    get(chatId) {
+      const found = kept.get(chatId);
+      if (found) {
+        kept.delete(chatId);
+        kept.set(chatId, found);
+      }
+      return found;
+    },
+    set(chatId, value) {
+      drop(chatId);
+      kept.set(chatId, value);
+      total += value.state.length;
+      for (const oldest of kept.keys()) {
+        if (kept.size <= entries && total <= chars) break;
+        drop(oldest);
+      }
+    },
+    delete: drop,
+  };
+}
+
+/** The process's own store, unless the app is handed another (`AppDeps.luaStates`). */
+export const luaStates = createLuaStateStore();
+
+/** What a kept state is tagged with: the script's text, hashed. */
+export const luaStateHash = (code: string): string => createHash('sha256').update(code).digest('hex');
 
 const escapeAttribute = (text: string): string =>
   text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');

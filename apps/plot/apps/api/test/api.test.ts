@@ -36,6 +36,7 @@ import {
   stripPngTextChunks,
 } from '@shizue/core';
 import { draftFingerprint, MIGRATION_PLATFORMS_ENABLED, type MigrationDraft } from '@shizue/core/migrate';
+import { LUA_STATE_LIMIT } from '@shizue/core/lua';
 import { MAX_SCRIPT_CHAT_MESSAGES, MAX_SCRIPT_CHAT_TEXT } from '@shizue/core/triggers';
 import { toWorldInfo } from '@shizue/core/world-info';
 import { ChatExportSchema } from '@shizue/contracts';
@@ -120,7 +121,7 @@ import { connectS3Server } from './s3Server.js';
 loadRootEnv();
 
 /**
- * The connection string for a suite that TRUNCATEs twenty-two tables before every
+ * The connection string for a suite that TRUNCATEs twenty-three tables before every
  * test, so the target has to say out loud that it is disposable. There is no
  * fallback to DATABASE_URL: that is the app's own database, and it is the name a
  * CI secret is most likely to carry.
@@ -261,7 +262,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await sql`TRUNCATE TABLE memories, chat_asset_unlocks, chat_attachments, messages, chat_note_links, user_notes, plot_reader_variables, chats, personas, comments, plot_likes, plot_assets, characters, notifications, follows, plots, feed_cursors, jobs, "session", account, verification, "user" RESTART IDENTITY CASCADE`;
+  await sql`TRUNCATE TABLE memories, chat_asset_unlocks, chat_attachments, messages, chat_note_links, user_notes, plot_reader_variables, plot_reader_overlays, chats, personas, comments, plot_likes, plot_assets, characters, notifications, follows, plots, feed_cursors, jobs, "session", account, verification, "user" RESTART IDENTITY CASCADE`;
   auth = createAuth(db, {
     secret: 'test-secret-test-secret-test-secret',
     baseUrl: 'http://localhost:13000',
@@ -12906,6 +12907,174 @@ describe('editRequest listeners', () => {
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
     expect(prompts.at(-1)!.system).toBe(shown);
   });
+
+  it('keeps what a listener did to the chat, the character and the lore — the reply under the chat it left', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const { cookie, chatId } = await luaChat('lua-writes@example.com', [
+      lua(
+        listening(`
+          if getChatVar(id, 'done') == 'yes' then return req end
+          setChatVar(id, 'done', 'yes')
+          setChat(id, -1, getChat(id, -1).data .. ' (고쳐짐)')
+          addChat(id, 'char', '끼어든 말')
+          setName(id, '세라')
+          setDescription(id, '루아가 바꾼 설명')
+          upsertLocalLoreBook(id, '등불', '이 챗의 등불', { alwaysActive = true })
+          return req`),
+      ),
+    ]);
+    const events = await send(cookie, chatId, capturing);
+    expect(events.at(-1)!.event).toBe('done');
+    const replyId = events.at(-1)!.data.messageId;
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    // RisuAI's listener edits the chat the turn was just pushed onto, and the reply is pushed after it.
+    expect(state.path.map((message: any) => [message.role, message.content, message.source])).toEqual([
+      ['assistant', '문 앞이다.', 'user'],
+      ['user', '안녕 (고쳐짐)', 'user'],
+      ['assistant', '끼어든 말', 'script'],
+      ['assistant', expect.any(String), 'user'],
+    ]);
+    expect(state.path.at(-1)).toMatchObject({ id: replyId, parentId: state.path[2].id });
+    expect(state.chat.headMessageId).toBe(replyId);
+    // The request that went out was built before the listener ran; what it wrote is the next turn's.
+    expect(prompts.at(-1)!.system).toContain('설명');
+    expect(prompts.at(-1)!.system).not.toContain('루아가 바꾼 설명');
+    const scripts = (await readJson(await request(cookie, `/api/chats/${chatId}/scripts`))).scripts;
+    expect(scripts.overlay.member).toEqual({ name: '세라', description: '루아가 바꾼 설명' });
+    expect(scripts.localLore).toEqual([expect.objectContaining({ name: '등불', content: '이 챗의 등불', constant: true })]);
+
+    await send(cookie, chatId, capturing, '다시');
+    expect(prompts.at(-1)!.system).toContain(`${characterHeader('세라')}\n루아가 바꾼 설명`);
+    expect(prompts.at(-1)!.system).toContain('이 챗의 등불');
+  });
+
+  it("forks rather than rewrites a message another branch reads, and continues the message a listener left last", async () => {
+    const { app: capturing } = capturingApp();
+    const { cookie, chatId } = await luaChat('lua-fork@example.com', [
+      lua(listening(`if getChatVar(id, 'mode') == 'edit' then setChat(id, -1, '바뀐 끝') end return req`)),
+    ]);
+    await send(cookie, chatId, capturing);
+    const before = (await readJson(await request(cookie, `/api/chats/${chatId}`))).path;
+    const turn = before.at(-2);
+    const oldReply = before.at(-1);
+    // A regenerate reads the branch without the reply it replaces, whose turn has that reply under it.
+    await db.update(messages).set({ variableDelta: { mode: 'edit' } }).where(eq(messages.id, turn.id));
+    const regenerated = await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', {}, capturing));
+    expect(regenerated.at(-1)!.event).toBe('done');
+    const after = (await readJson(await request(cookie, `/api/chats/${chatId}`))).path;
+    // The turn is copied with the listener's text; the old turn and its reply stay where they were.
+    expect(after.at(-2)).toMatchObject({ role: 'user', content: '바뀐 끝', parentId: turn.parentId });
+    expect(after.at(-2).id).not.toBe(turn.id);
+    expect(after.at(-1)).toMatchObject({ id: regenerated.at(-1)!.data.messageId, parentId: after.at(-2).id });
+    const kept = await db.select().from(messages).where(inArray(messages.id, [turn.id, oldReply.id]));
+    expect(kept.map((message) => message.content).sort()).toEqual([oldReply.content, '안녕'].sort());
+
+    // A continue goes on from the message as the listener left it, written where it stands.
+    const continued = await readSse(await json(cookie, `/api/chats/${chatId}/continue`, 'POST', {}, capturing));
+    expect(continued.at(-1)!.event).toBe('done');
+    const last = (await readJson(await request(cookie, `/api/chats/${chatId}`))).path.at(-1);
+    expect(last.id).toBe(regenerated.at(-1)!.data.messageId);
+    expect(last.content.startsWith('바뀐 끝')).toBe(true);
+    expect(last.content.length).toBeGreaterThan('바뀐 끝'.length);
+  });
+
+  it('keeps the listener’s Lua globals for the chat’s next generation while the code stays the same', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const counting = listening(`counter = counter + 1 req[1].content = 'n=' .. counter return req`);
+    const code = `counter = 0\n${counting}`;
+    const cookie = await signUp('lua-state@example.com');
+    const plot = await createPlot(cookie, { name: '루아 작품', description: '설명', intros: ['문 앞이다.'] });
+    const member = await addCharacter(cookie, plot.id, {
+      name: '아리아',
+      card: { description: '설명', extensions: { risuai: { triggerscript: [lua(code)] } } },
+    });
+    const chatId = (await startChat(cookie, plot.id)).chat.id;
+    const otherChat = (await startChat(cookie, plot.id)).chat.id;
+    await send(cookie, chatId, capturing);
+    await send(cookie, chatId, capturing, '또');
+    expect(prompts.at(-1)!.system).toBe('n=2');
+    // Another chat has its own.
+    await send(cookie, otherChat, capturing);
+    expect(prompts.at(-1)!.system).toBe('n=1');
+
+    // The creator's inspector reads the state and keeps nothing of its run.
+    const report = await readJson(await request(cookie, `/api/chats/${chatId}/inspect`));
+    expect(report.blocks[0].text).toBe('n=3');
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
+    expect(prompts.at(-1)!.system).toBe('n=3');
+
+    // New code is a new state, as RisuAI rebuilds one when the code differs.
+    await patchCharacter(cookie, plot.id, member.id, {
+      card: { ...member.card, extensions: { risuai: { triggerscript: [lua(`counter = 10\n${counting}`)] } } },
+    });
+    await send(cookie, chatId, capturing, '바뀐 코드');
+    expect(prompts.at(-1)!.system).toBe('n=11');
+
+    // A card with two scripts alternates RisuAI's one state between them: nothing carries over.
+    await patchCharacter(cookie, plot.id, member.id, {
+      card: { ...member.card, extensions: { risuai: { triggerscript: [lua(code), lua('-- 둘째')] } } },
+    });
+    await send(cookie, chatId, capturing, '하나');
+    await send(cookie, chatId, capturing, '둘');
+    expect(prompts.at(-1)!.system).toBe('n=1');
+  });
+
+  it('drops only the rewrite that would take the reader’s overlay past its size, and keeps the reply and the rest', async () => {
+    const { app: capturing } = capturingApp();
+    const cookie = await signUp('lua-overlay-cap@example.com');
+    const plot = await createPlot(cookie, { name: '루아 작품', description: '설명', intros: ['문 앞이다.'] });
+    const member = await addCharacter(cookie, plot.id, {
+      name: '아리아',
+      card: {
+        description: '설명',
+        extensions: {
+          risuai: {
+            triggerscript: [
+              lua(
+                listening(`
+                  setDescription(id, string.rep('x', 200000))
+                  setCharacterFirstMessage(id, string.rep('y', 200000))
+                  setBackgroundEmbedding(id, string.rep('z', 200000))
+                  upsertLocalLoreBook(id, '등불', '남는 등불', {})
+                  return req`),
+              ),
+            ],
+          },
+        },
+      },
+    });
+    const chat = await startChat(cookie, plot.id);
+    const head = chat.path.at(-1);
+    // Most of the overlay's room already taken, by another write of the reader's.
+    const lore = Array.from({ length: 2_000 }, (_, index) => ({ keys: [`k${index}`], content: 'y'.repeat(600) }));
+    const filled = await json(cookie, `/api/chats/${chat.chat.id}/script-commit`, 'POST', {
+      messageId: head.id,
+      scriptRev: head.scriptRev,
+      overlay: { members: { [member.id]: { lorebook: lore } } },
+    });
+    expect(filled.status, await filled.clone().text()).toBe(200);
+
+    const events = await send(cookie, chat.chat.id, capturing);
+    expect(events.at(-1)!.event).toBe('done');
+    const state = await readJson(await request(cookie, `/api/chats/${chat.chat.id}`));
+    expect(state.path.at(-1).id).toBe(events.at(-1)!.data.messageId);
+    const scripts = (await readJson(await request(cookie, `/api/chats/${chat.chat.id}/scripts`))).scripts;
+    // The rewrite that did not fit is gone whole; the overlay is as it was, and the lore went to the chat.
+    expect(scripts.overlay.member.description).toBeUndefined();
+    expect(scripts.overlay.member.firstMessage).toBeUndefined();
+    expect(scripts.overlay.member.lorebook).toHaveLength(2_000);
+    expect(scripts.localLore).toEqual([expect.objectContaining({ name: '등불', content: '남는 등불' })]);
+  });
+
+  it('keeps no Lua globals past their size: the next generation starts fresh', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const { cookie, chatId } = await luaChat('lua-state-size@example.com', [
+      lua(listening(`req[1].content = big and 'kept' or 'fresh' big = string.rep('x', ${LUA_STATE_LIMIT}) return req`)),
+    ]);
+    await send(cookie, chatId, capturing);
+    await send(cookie, chatId, capturing, '또');
+    expect(prompts.map((prompt) => prompt.system)).toEqual(['fresh', 'fresh']);
+  });
 });
 
 describe('the browser script runtime', () => {
@@ -13420,6 +13589,147 @@ describe('the browser script runtime', () => {
     expect(systems.at(-1)).toContain(plotHeader('스크립트 작품'));
     // A style-only background leaves nothing to draw; a plot without scripts has none either.
     expect((await readPublicPlot(undefined, plotId)).backgroundHtml).toBe('');
+  });
+
+  it("keeps a rewrite for the reader on the plot — every chat of theirs reads it, no other reader does — and the chat's own lore and note for the chat", async () => {
+    const { plotId, memberId } = await scriptedPlot('scripts-reader-overlay@example.com');
+    const reader = await signUp('scripts-reader-overlay-reader@example.com');
+    const first = await startChat(reader, plotId);
+    const second = await startChat(reader, plotId);
+    const { app: replying, systems } = promptApp('대답');
+    const lamp = { keys: ['등불'], content: '이 챗만의 등불.', name: '등불', constant: true };
+    const sent = await readSse(
+      await json(
+        reader,
+        `/api/chats/${first.chat.id}/messages`,
+        'POST',
+        {
+          content: '안녕',
+          overlay: { members: { [memberId]: { description: '바뀐 설명', name: '세라' } }, persona: '스크립트 페르소나' },
+          note: '첫 챗의 노트',
+          localLore: [lamp],
+        },
+        replying,
+      ),
+    );
+    expect(sent.at(-1)!.event).toBe('done');
+    expect(systems.at(-1)).toContain('이 챗만의 등불.');
+
+    // The reader's other chat on the plot reads the rewrite without being told — RisuAI's character is one object.
+    await readSse(await json(reader, `/api/chats/${second.chat.id}/messages`, 'POST', { content: '안녕' }, replying));
+    expect(systems.at(-1)).toContain(`${characterHeader('세라')}\n바뀐 설명`);
+    expect(systems.at(-1)).not.toContain('원래 설명');
+    expect(systems.at(-1)).toContain('스크립트 페르소나');
+    // What RisuAI keeps on the chat stays on the one it was written in.
+    expect(systems.at(-1)).not.toContain('이 챗만의 등불.');
+    expect((await readJson(await request(reader, `/api/chats/${second.chat.id}`))).chat.note).toBe('');
+    const secondScripts = (await scriptsOf(reader, second.chat.id)).scripts;
+    expect(secondScripts).toMatchObject({
+      name: '세라',
+      overlay: { member: { description: '바뀐 설명', name: '세라' }, persona: '스크립트 페르소나' },
+      localLore: [],
+    });
+    expect((await scriptsOf(reader, first.chat.id)).scripts.localLore).toEqual([expect.objectContaining({ content: '이 챗만의 등불.' })]);
+
+    // Another reader of the same plot plays the work as the creator wrote it.
+    const other = await signUp('scripts-reader-overlay-other@example.com');
+    const theirs = await startChat(other, plotId);
+    expect((await scriptsOf(other, theirs.chat.id)).scripts.overlay).toEqual({ member: null, persona: null });
+    await readSse(await json(other, `/api/chats/${theirs.chat.id}/messages`, 'POST', { content: '안녕' }, replying));
+    expect(systems.at(-1)).toContain('원래 설명');
+    expect(systems.at(-1)).not.toContain('바뀐 설명');
+  });
+
+  it("merges two of the reader's chats writing at once field by field, and holds the merged overlay to its size", async () => {
+    const { plotId, memberId } = await scriptedPlot('scripts-overlay-race@example.com');
+    const reader = await signUp('scripts-overlay-race-reader@example.com');
+    const one = await startChat(reader, plotId);
+    const two = await startChat(reader, plotId);
+    const revs = new Map([
+      [one.chat.id, one.path.at(-1).scriptRev as number],
+      [two.chat.id, two.path.at(-1).scriptRev as number],
+    ]);
+    const commit = async (chat: any, overlay: unknown): Promise<Response> => {
+      const res = await json(reader, `/api/chats/${chat.chat.id}/script-commit`, 'POST', {
+        messageId: chat.path.at(-1).id,
+        scriptRev: revs.get(chat.chat.id),
+        overlay,
+      });
+      if (res.status === 200) revs.set(chat.chat.id, revs.get(chat.chat.id)! + 1);
+      return res;
+    };
+
+    // Different fields at once: both land.
+    const [a, b] = await Promise.all([
+      commit(one, { members: { [memberId]: { description: '첫 챗이 쓴 설명' } } }),
+      commit(two, { members: { [memberId]: { lorebook: [{ keys: ['탑'], content: '둘째 챗이 쓴 탑.' }] } }, persona: '둘째 페르소나' }),
+    ]);
+    expect([a.status, b.status]).toEqual([200, 200]);
+    const merged = (await scriptsOf(reader, one.chat.id)).scripts.overlay;
+    expect(merged.member.description).toBe('첫 챗이 쓴 설명');
+    expect(merged.member.lorebook.map((entry: any) => entry.content)).toEqual(['둘째 챗이 쓴 탑.']);
+    expect(merged.persona).toBe('둘째 페르소나');
+
+    // The same field at once: neither fails, and one of the two stands whole.
+    const [c, d] = await Promise.all([
+      commit(one, { members: { [memberId]: { description: '하나' } } }),
+      commit(two, { members: { [memberId]: { description: '둘' } } }),
+    ]);
+    expect([c.status, d.status]).toEqual([200, 200]);
+    expect(['하나', '둘']).toContain((await scriptsOf(reader, two.chat.id)).scripts.overlay.member.description);
+
+    // The cap is the merged overlay's: what one chat wrote counts against what the other may add.
+    const lore = Array.from({ length: 2_000 }, (_, index) => ({ keys: [`k${index}`], content: 'y'.repeat(600) }));
+    expect((await commit(one, { members: { [memberId]: { lorebook: lore } } })).status).toBe(200);
+    const big = 'x'.repeat(200_000);
+    const past = await commit(two, {
+      members: { [memberId]: { description: big, postHistoryInstructions: big, firstMessage: big } },
+      persona: big,
+    });
+    expect(past.status).toBe(400);
+    expect((await readJson(past)).code).toBe('script_overlay_limit');
+    // Refused whole: the commit's other writes did not land either.
+    expect((await scriptsOf(reader, two.chat.id)).scripts.overlay.member.firstMessage).toBeUndefined();
+  });
+
+  it("moves each reader's per-chat overlays to the reader and the plot, the chat touched last winning", async () => {
+    const { plotId, memberId } = await scriptedPlot('scripts-migrate@example.com');
+    const reader = await signUp('scripts-migrate-reader@example.com');
+    const older = await startChat(reader, plotId);
+    const newer = await startChat(reader, plotId);
+    const untouched = await startChat(reader, plotId);
+    const other = await signUp('scripts-migrate-other@example.com');
+    const theirs = await startChat(other, plotId);
+    const at = (minutes: number): Date => new Date(Date.UTC(2026, 9, 1, 0, minutes));
+    await db
+      .update(chats)
+      .set({ scriptOverlay: { members: { [memberId]: { description: '오래된 챗', name: '옛 이름' } } }, updatedAt: at(1) })
+      .where(eq(chats.id, older.chat.id));
+    await db
+      .update(chats)
+      .set({ scriptOverlay: { members: { [memberId]: { description: '최근 챗' } }, persona: '최근 페르소나' }, updatedAt: at(2) })
+      .where(eq(chats.id, newer.chat.id));
+    // Touched last of all, but nothing to move.
+    await db.update(chats).set({ updatedAt: at(3) }).where(eq(chats.id, untouched.chat.id));
+    await db
+      .update(chats)
+      .set({ scriptOverlay: { persona: '다른 독자' }, updatedAt: at(0) })
+      .where(eq(chats.id, theirs.chat.id));
+
+    // The migration's own statement, run over these rows as it ran over the stored ones.
+    const migration = await readFile(new URL('../../../packages/db/drizzle/0007_reader_overlay.sql', import.meta.url), 'utf8');
+    const move = migration.split('--> statement-breakpoint').at(-1)!;
+    expect(move).toContain('INSERT INTO "plot_reader_overlays"');
+    await sql.unsafe(move);
+
+    // Whole, from the chat touched last that had one — not merged with the older chat's name.
+    for (const chat of [older, newer, untouched]) {
+      expect((await scriptsOf(reader, chat.chat.id)).scripts.overlay).toEqual({
+        member: { description: '최근 챗' },
+        persona: '최근 페르소나',
+      });
+    }
+    expect((await scriptsOf(other, theirs.chat.id)).scripts.overlay).toEqual({ member: null, persona: '다른 독자' });
   });
 });
 

@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest';
 import { loadWholeBranch } from '../src/lib/scripts/branch';
 import type { ScriptEngine } from '../src/lib/scripts/engine';
 import { createScriptRuntime, type ScriptBundle, type ScriptUi, type ScriptView } from '../src/lib/scripts/runtime';
-import type { ChatMessage, ChatState } from '../src/lib/types';
+import type { ChatMessage, ChatState, LoreEntry } from '../src/lib/types';
 
 const vars = (entries: Record<string, string> = {}): Variables => Object.assign(emptyVariables(), entries);
 
@@ -647,6 +647,95 @@ describe('an engine outside a trigger run', () => {
         },
       },
     ]);
+  });
+
+  it('commits the lore an engine upserted as the chat’s own, never the character’s, and reads it back on the next run', async () => {
+    const { api, calls } = fakeApi();
+    const lore = (name: string, content: string): LoreEntry => ({
+      name,
+      keys: [name],
+      secondaryKeys: [],
+      selective: false,
+      content,
+      enabled: true,
+      constant: false,
+      insertionOrder: 100,
+      caseSensitive: false,
+      useRegex: false,
+      position: 'before_char',
+    });
+    const seen: string[][] = [];
+    const upserter: ScriptEngine = {
+      name: 'lua',
+      handles: (phase) => phase === 'button',
+      button: async (data, scope) => {
+        seen.push([...scope.localLore.map((entry) => entry.content), `card:${scope.character.lorebook.length}`]);
+        scope.setLocalLore([...scope.localLore, lore(data, `${data} 등불`)]);
+      },
+    };
+    const runtime = createScriptRuntime({
+      chatId: 'c1',
+      api,
+      ui: silentUi,
+      bundle: bundle({ triggers: lua, localLore: [lore('옛', '옛 등불')] }),
+      engines: [upserter],
+    });
+    const head = message('m2', 'm1', 'assistant', '답', { scriptRev: 4 });
+    await runtime.button('새', view([greeting, branch[1]!, head]));
+    const commit = calls.find((call) => call.path.endsWith('/script-commit'))!;
+    expect(commit.body['overlay']).toBeUndefined();
+    expect((commit.body['localLore'] as LoreEntry[]).map((entry) => entry.content)).toEqual(['옛 등불', '새 등불']);
+    // The runtime's copy moved with the commit: the next run reads the chat's lore as it now stands.
+    await runtime.button('또', view([greeting, branch[1]!, { ...head, scriptRev: 5 }]));
+    expect(seen).toEqual([
+      ['옛 등불', `card:${bundle().character.lorebook.length}`],
+      ['옛 등불', '새 등불', `card:${bundle().character.lorebook.length}`],
+    ]);
+  });
+
+  it('takes what the server’s editRequest listeners left, for the page and the runs after', async () => {
+    const seen: string[] = [];
+    const drawn: (string | undefined)[] = [];
+    const reader: ScriptEngine = {
+      name: 'lua',
+      handles: (phase) => phase === 'button',
+      button: async (_data, scope) => {
+        seen.push(`${scope.character.description}|${scope.localLore.map((entry) => entry.content).join(',')}`);
+      },
+    };
+    const listening = [trigger('start', [{ type: 'triggerlua', code: "listenEdit('editRequest', function(id, r) return r end)" }])];
+    expect(createScriptRuntime({ chatId: 'c1', api: fakeApi().api, ui: silentUi, bundle: bundle({ triggers: lua }) }).rewritesOnServer).toBe(false);
+    const runtime = createScriptRuntime({
+      chatId: 'c1',
+      api: fakeApi().api,
+      ui: silentUi,
+      bundle: bundle({ triggers: listening }),
+      engines: [reader],
+      onOverlay: (member) => void drawn.push(member.name),
+    });
+    expect(runtime.rewritesOnServer).toBe(true);
+    await runtime.button('a', view([greeting]));
+    runtime.adopt({
+      overlay: { member: { description: '서버가 바꾼 설명', name: '세라' }, persona: null },
+      localLore: [
+        {
+          name: '등불',
+          keys: ['등불'],
+          secondaryKeys: [],
+          selective: false,
+          content: '서버가 넣은 등불',
+          enabled: true,
+          constant: false,
+          insertionOrder: 100,
+          caseSensitive: false,
+          useRegex: false,
+          position: 'before_char',
+        },
+      ],
+    });
+    await runtime.button('b', view([greeting]));
+    expect(seen).toEqual(['사서.|', '서버가 바꾼 설명|서버가 넣은 등불']);
+    expect(drawn).toEqual(['세라']);
   });
 
   it('draws messages through the display listeners, by message, with the chat’s index for each', async () => {

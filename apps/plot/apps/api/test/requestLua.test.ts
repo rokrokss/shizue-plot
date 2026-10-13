@@ -4,12 +4,14 @@
  * meet it, what a script cannot reach from Lua, and the parent's side of the
  * protocol. The generation side is in `api.test.ts` (`editRequest listeners`).
  */
-import type { LuaSnapshot } from '@shizue/core/lua';
+import { LUA_STATE_LIMIT, type LuaSnapshot } from '@shizue/core/lua';
 import type { RequestTurn } from '@shizue/core/triggers';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
+  createLuaStateStore,
+  luaStateHash,
   probeRequestLua,
   runRequestLua,
   runRequestLuaAt,
@@ -243,11 +245,107 @@ describe('editRequest listeners in the child', () => {
     expect(notes.some((note) => note.includes('boom'))).toBe(true);
   });
 
-  it('get a fresh Lua state every run: nothing a global held survives', async () => {
+  it('get a fresh Lua state every run: nothing a global held survives unless it is handed back', async () => {
     const counted = listener(`counter = (counter or 0) + 1 req[1].content = tostring(counter) return req`);
     for (let run = 0; run < 3; run += 1) {
       expect(((await done([counted])).request as RequestTurn[])[0]!.content).toBe('1');
     }
+  });
+
+  it('take the last state’s plain globals when asked, and put them back over the code’s own top level', async () => {
+    // RisuAI runs the top level once and keeps the state: `counter = 0` must not reset what a listener counted.
+    const code = `counter = 0
+      bag = { 1, 2.5, 'three', nested = { deep = true, [10] = -0.0 } }
+      big = math.maxinteger
+      odd = { 1/0, -1/0 }
+      helper = function() end
+      classy = setmetatable({}, {})
+      ${listener(`counter = counter + 1 req[1].content = tostring(counter) .. ' ' .. tostring(bag.nested.deep) .. ' ' .. math.type(bag[2]) .. ' ' .. tostring(big == math.maxinteger) return req`)}`;
+    const first = await runRequestLua({ scripts: [code], request, snapshot, keep: { capture: true } });
+    if (!first.ok) throw new Error(first.reason);
+    expect((first.request as RequestTurn[])[0]!.content).toBe('1 true float true');
+    expect(typeof first.state).toBe('string');
+    // Data only: no function, no table with a metatable, nothing of the library or ours.
+    expect(first.state).not.toContain('helper');
+    expect(first.state).not.toContain('classy');
+    expect(first.state).not.toContain('getChatVar');
+
+    const second = await runRequestLua({ scripts: [code], request, snapshot, keep: { restore: first.state!, capture: true } });
+    if (!second.ok) throw new Error(second.reason);
+    expect((second.request as RequestTurn[])[0]!.content).toBe('2 true float true');
+    const third = await runRequestLua({
+      scripts: [listener(`req[1].content = tostring(odd[1]) .. tostring(odd[2]) .. ' ' .. tostring(1/bag.nested[10]) .. ' ' .. bag[3] return req`)],
+      request,
+      snapshot,
+      keep: { restore: second.state! },
+    });
+    if (!third.ok) throw new Error(third.reason);
+    expect((third.request as RequestTurn[])[0]!.content).toBe('inf-inf -inf three');
+    // Not asked to capture: nothing comes back.
+    expect(third.state).toBeUndefined();
+  });
+
+  it('refuse a kept state that is not one, and never set the library’s names or ours from it', async () => {
+    const reading = listener(`req[1].content = tostring(kept) .. ' ' .. type(getChatVar) .. ' ' .. type(string) return req`);
+    const forged = 's4:kepts2:ok' + 's10:getChatVars1:x' + 's6:strings1:y';
+    const ok = await runRequestLua({ scripts: [reading], request, snapshot, keep: { restore: forged } });
+    if (!ok.ok) throw new Error(ok.reason);
+    expect((ok.request as RequestTurn[])[0]!.content).toBe('ok function table');
+    for (const broken of ['s4:kept', 'x', 's99:kept', `s4:keptt${'t1:'.repeat(40)}`]) {
+      const outcome = await runRequestLua({ scripts: [reading], request, snapshot, keep: { restore: broken } });
+      if (!outcome.ok) throw new Error(outcome.reason);
+      expect((outcome.request as RequestTurn[])[0]!.content, broken).toBe('nil function table');
+      expect(outcome.notes.some((note) => note.startsWith('state:')), broken).toBe(true);
+    }
+  });
+
+  it('keep no state past its size', async () => {
+    const outcome = await runRequestLua({
+      scripts: [listener(`huge = string.rep('x', ${LUA_STATE_LIMIT}) small = 1 return req`)],
+      request,
+      snapshot,
+      keep: { capture: true },
+    });
+    if (!outcome.ok) throw new Error(outcome.reason);
+    expect(outcome.state).toBeNull();
+    const fits = await runRequestLua({
+      scripts: [listener(`huge = string.rep('x', ${LUA_STATE_LIMIT - 100}) return req`)],
+      request,
+      snapshot,
+      keep: { capture: true },
+    });
+    if (!fits.ok) throw new Error(fits.reason);
+    expect(fits.state!.length).toBeGreaterThan(LUA_STATE_LIMIT - 100);
+    expect(fits.state!.length).toBeLessThanOrEqual(LUA_STATE_LIMIT);
+  });
+
+  it('carry what they did to the chat, the character and the chat’s lore, each script reading the one before', async () => {
+    const outcome = await done([
+      listener(`
+        setChat(id, -1, '고친 답')
+        addChat(id, 'user', '덧붙인 말')
+        setName(id, '세라')
+        setDescription(id, '바뀐 설명')
+        upsertLocalLoreBook(id, '탑', '챗의 탑', { key = '탑' })
+        return req`),
+      listener(`
+        req[1].content = getName(id) .. '/' .. getChat(id, -1).data .. '/' .. getChatLength(id) .. '/' .. #getLoreBooks(id, '탑')
+        setCharacterFirstMessage(id, '새 인사')
+        setBackgroundEmbedding(id, '<div>밤</div>')
+        upsertLocalLoreBook(id, '탑', '다시 쓴 탑', { key = '탑' })
+        removeChat(id, 0)
+        return req`),
+    ]);
+    // The second script read the first one's chat, name and lore: the chat's entry before the card's.
+    expect((outcome.request as RequestTurn[])[0]!.content).toBe('세라/덧붙인 말/3/2');
+    expect(outcome.messages).toEqual([
+      { role: 'char', data: '고친 답', key: 1 },
+      { role: 'user', data: '덧붙인 말', key: null },
+    ]);
+    expect(outcome.character).toEqual({ name: '세라', description: '바뀐 설명', firstMessage: '새 인사', background: '<div>밤</div>' });
+    expect(outcome.lore!.map((book) => book.content)).toEqual(['챗의 탑', '다시 쓴 탑']);
+    // Nothing of it is said to be dropped any more.
+    expect(outcome.notes.filter((note) => note.includes('not kept'))).toEqual([]);
   });
 
   it('answer dialogs as a display pass is answered, and sleep on the parent’s clock', async () => {
@@ -385,5 +483,24 @@ describe('the parent’s side of the protocol', () => {
   it('runs nothing where the probe says the child would have the network', async () => {
     const outcome = await runRequestLua({ scripts: [listener('return {}')], request, snapshot }, { probe: async () => false });
     expect(outcome).toEqual({ ok: false, reason: 'the server cannot sandbox Lua', quiet: true });
+  });
+});
+
+describe('the kept states', () => {
+  it('keep the most recently used chats within their count and their size', () => {
+    const store = createLuaStateStore({ entries: 2, chars: 10 });
+    store.set('a', { hash: 'h', state: 'aaaa' });
+    store.set('b', { hash: 'h', state: 'bbbb' });
+    // Reading one keeps it: the other is the oldest now.
+    expect(store.get('a')?.state).toBe('aaaa');
+    store.set('c', { hash: 'h', state: 'cc' });
+    expect(store.get('b')).toBeUndefined();
+    expect([store.get('a')?.state, store.get('c')?.state]).toEqual(['aaaa', 'cc']);
+    // Past the size, the oldest go too.
+    store.set('d', { hash: 'h', state: 'ddddddddd' });
+    expect([store.get('a'), store.get('c'), store.get('d')?.state]).toEqual([undefined, undefined, 'ddddddddd']);
+    store.delete('d');
+    expect(store.get('d')).toBeUndefined();
+    expect(luaStateHash('x')).toBe(createHash('sha256').update('x').digest('hex'));
   });
 });

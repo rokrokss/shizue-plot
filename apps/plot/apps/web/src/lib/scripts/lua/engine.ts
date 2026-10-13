@@ -15,8 +15,10 @@
  * `setVar` (a value longer than a trigger may write is dropped and noted),
  * the chat through `messages` (a message keeps its id, with the role and the
  * text the script gave it, while the script did not move it), the description,
- * the lore, the name (one the server would not keep is dropped and noted), the
- * first message and the background through the character setters.
+ * the name (one the server would not keep is dropped and noted), the first
+ * message and the background through the character setters, and the lore
+ * `upsertLocalLoreBook` wrote through the chat's own (`setLocalLore`), as
+ * RisuAI writes it to the chat's `localLore` rather than the character.
  * From there the runtime carries them where a trigger's writes go.
  *
  * What RisuAI keeps behind the card's `lowLevelAccess` stays behind it: the
@@ -39,6 +41,7 @@ import {
   MAX_TRIGGER_VALUE_LENGTH,
   overlayName,
   risuLore,
+  upsertLocalLore,
   type CodeScope,
   type TriggerLogEntry,
   type TriggerScript,
@@ -55,7 +58,7 @@ import type {
   LuaRequestAnswer,
   LuaSandbox,
 } from './sandbox';
-import type { LuaCallResult, LuaEntry, LuaLoreBook, LuaSnapshot } from './sandboxRuntime';
+import type { LuaCallResult, LuaEntry, LuaSnapshot } from './sandboxRuntime';
 
 /** The reader's side of a script's dialogs. */
 export interface LuaUi {
@@ -122,37 +125,6 @@ const PHASES: Partial<Record<ScriptPhase, RegExp>> = {
   editdisplay: /\beditDisplay\b/,
 };
 
-const splitKeys = (text: string): string[] =>
-  text
-    .split(',')
-    .map((key) => key.trim())
-    .filter(Boolean);
-
-/** An entry `upsertLocalLoreBook` made, in ours: keyed, or always on. */
-const ourLore = (book: LuaLoreBook): LoreEntry => ({
-  name: book.comment,
-  keys: splitKeys(book.key),
-  secondaryKeys: splitKeys(book.secondkey),
-  selective: book.selective,
-  content: book.content,
-  enabled: true,
-  constant: book.alwaysActive,
-  insertionOrder: book.insertorder,
-  caseSensitive: false,
-  useRegex: book.useRegex,
-  position: 'before_char',
-});
-
-/** The lore `upsertLocalLoreBook` leaves: each upsert replaces the entries of its name, in order. */
-function upserted(lorebook: readonly LoreEntry[], books: readonly LuaLoreBook[]): LoreEntry[] {
-  let lore = [...lorebook];
-  for (const book of books) {
-    lore = lore.filter((entry) => (entry.name ?? '') !== book.comment);
-    lore.push(ourLore(book));
-  }
-  return lore;
-}
-
 /**
  * What `getCharacterImage` and `getPersonaImage` answer: RisuAI hands back an
  * inlay token, which its renderer turns into `<div class="risu-inlay-image"><img …></div>`;
@@ -187,6 +159,7 @@ export function snapshotOf(
       background: character.backgroundHtml ?? '',
       image: characterImage(avatarUrl),
       lore: character.lorebook.map(risuLore),
+      localLore: scope.localLore.map(risuLore),
     },
     user: scope.user,
     persona: scope.persona,
@@ -272,15 +245,17 @@ export function createLuaEngine(options: LuaEngineOptions): ScriptEngine {
     }
     if (result.firstMessage !== null) scope.setFirstMessage(result.firstMessage);
     if (result.background !== null) scope.setBackgroundHtml(result.background);
-    if (result.lore.length > 0) scope.setLorebook(upserted(scope.character.lorebook, result.lore));
+    // RisuAI's `upsertLocalLoreBook` writes the chat's lore, not the character's.
+    if (result.lore.length > 0) scope.setLocalLore(upsertLocalLore(scope.localLore, result.lore));
     notes(result);
   }
 
   async function call(code: string, entry: LuaEntry, scope: CodeScope, lowLevel: boolean): Promise<LuaCallResult | null> {
-    // The lore is activated over this call's character, with what the script upserted on the way.
+    // The lore is activated as RisuAI's `loadLoreBookV3Prompt` activates it: the character's book,
+    // then the chat's, with what the script upserted into the chat's on the way.
     const lore: LuaHost['lore'] = (history, upserts) => {
       if (!options.lore) return Promise.reject(new Error('lore cannot be activated here'));
-      return options.lore(history, upserted(scope.character.lorebook, upserts));
+      return options.lore(history, [...scope.character.lorebook, ...upsertLocalLore(scope.localLore, upserts)]);
     };
     const outcome = await sandbox.call(code, entry, snapshotOf(scope, lowLevel, options.avatarUrl, options.personaAvatarUrl?.()), { ...host, lore });
     if (outcome.kind !== 'done') {

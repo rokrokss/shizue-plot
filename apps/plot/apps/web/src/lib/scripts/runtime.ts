@@ -40,10 +40,14 @@
  *
  * What the scripts rewrote of the work — the description, the lore, the global
  * note, the name, the first message, the background, the persona — is the
- * chat's overlay (`ScriptOverlay`): it rides on the generation or the commit, and
- * the runtime keeps its own copy so the next run reads it, and hands it to the
- * page (`onOverlay`), which draws the name, the greeting and the background from
- * it. The chat note goes to the chat's own `note`.
+ * reader's overlay on the plot (`ScriptOverlay`), which every chat of theirs on it
+ * reads, as RisuAI's rewrite of the character reaches every chat with it: it
+ * rides on the generation or the commit, and the runtime keeps its own copy so
+ * the next run reads it, and hands it to the page (`onOverlay`), which draws the
+ * name, the greeting and the background from it. What RisuAI keeps on the chat
+ * stays this chat's: the note goes to its own `note`, and the lore Lua's
+ * `upsertLocalLoreBook` writes to its own lore (`localLore`, RisuAI's chat
+ * `localLore`).
  *
  * The runtime holds no React state and talks to the API through what it is
  * given, so it is tested with a fake fetch.
@@ -54,6 +58,7 @@ import {
   hasEditScripts,
   hasTriggersFor,
   isCodeTrigger,
+  luaScriptsOf,
   manualTriggerNames,
   mergeScriptOverlay,
   runCommands,
@@ -100,7 +105,7 @@ import type { SimilaritySearch } from './similarity';
 export interface ScriptBundle {
   /** The member whose scripts these are, and whose card they rewrite. */
   memberId: string;
-  /** `{{char}}` in the scripts' text: the member's nickname, else its name as this chat's overlay has it. */
+  /** `{{char}}` in the scripts' text: the member's nickname, else its name as the reader's overlay has it. */
   name: string;
   triggers: TriggerScript[];
   editScripts: EditScript[];
@@ -123,8 +128,10 @@ export interface ScriptBundle {
     /** The member's avatar, a same-origin address, or null. */
     avatarUrl?: string | null;
   };
-  /** What this chat's scripts already rewrote of it. */
+  /** What the reader's scripts on this plot already rewrote of it. */
   overlay: { member: MemberOverlay | null; persona: string | null };
+  /** The chat's own lore, RisuAI's chat `localLore`: what the card's Lua upserted in this chat. */
+  localLore?: LoreEntry[];
 }
 
 /** How the runtime asks the reader something — the page draws it. */
@@ -406,6 +413,18 @@ export interface ScriptRuntime {
   readonly finishesReplies: boolean;
   /** Whether messages are drawn through display triggers. */
   readonly rewritesDisplay: boolean;
+  /**
+   * Whether the card's Lua listens to the request (`editRequest`), which the
+   * server runs as the reply is generated: what it rewrites of the work and the
+   * chat's lore reaches this page only by asking (`adopt`).
+   */
+  readonly rewritesOnServer: boolean;
+  /**
+   * Takes the reader's overlay and the chat's lore as the server now holds them
+   * — after a generation whose `editRequest` listeners rewrote them — so the
+   * runs that follow read them, and the page draws the member from them.
+   */
+  adopt(scripts: Pick<ScriptBundle, 'overlay' | 'localLore'>): void;
   prepare(mode: StreamMode, view: ScriptView, content?: string, options?: PrepareOptions): Promise<PreparedGeneration>;
   /** Finishes the head reply the server holds `pending`; null when the head is not one. */
   finish(view: ScriptView): Promise<FinishedReply | null>;
@@ -460,6 +479,8 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     member: bundle.overlay.member ?? {},
     persona: bundle.overlay.persona,
   };
+  /** The chat's own lore, as the server last took it. */
+  let localLore: LoreEntry[] = bundle.localLore ?? [];
 
   /** RisuAI's `char.name` and `{{char}}`, over a session's patch: the nickname stays `{{char}}` through a rename. */
   const memberName = (patch: MemberOverlay): string =>
@@ -496,6 +517,9 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     noteChanged: boolean;
     patch: MemberOverlay;
     personaPatch: string | undefined;
+    /** The chat's own lore as the runs left it, and whether one rewrote it. */
+    localLore: LoreEntry[];
+    localLoreChanged: boolean;
     /** The reader's global variables as the runs left them, and what they wrote. */
     globals: Variables;
     globalWrites: VariableDelta | null;
@@ -508,6 +532,8 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     noteChanged: false,
     patch: {},
     personaPatch: undefined,
+    localLore,
+    localLoreChanged: false,
     globals: applyVariableDelta(view.globalVariables ?? {}, null),
     globalWrites: null,
   });
@@ -615,6 +641,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       messages: chat,
       greeting,
       note: s.note,
+      localLore: s.localLore,
       persona: s.persona,
       variables,
       globalVariables: s.globals,
@@ -653,6 +680,10 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       s.note = result.note;
       s.noteChanged = true;
     }
+    if (result.localLore !== undefined) {
+      s.localLore = result.localLore;
+      s.localLoreChanged = true;
+    }
   }
 
   function absorb(s: Session, rewrite: CharacterRewrite): void {
@@ -665,7 +696,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
   }
 
   /** The session's rewrites as the request fields that carry them. */
-  function writes(s: Session): { overlay?: ScriptOverlay; note?: string } {
+  function writes(s: Session): { overlay?: ScriptOverlay; note?: string; localLore?: LoreEntry[] } {
     const patch: ScriptOverlay | null = mergeScriptOverlay(null, {
       ...(Object.keys(s.patch).length > 0 ? { members: { [bundle.memberId]: s.patch } } : {}),
       ...(s.personaPatch !== undefined ? { persona: s.personaPatch } : {}),
@@ -673,6 +704,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     return {
       ...(patch ? { overlay: patch } : {}),
       ...(s.noteChanged ? { note: s.note } : {}),
+      ...(s.localLoreChanged ? { localLore: s.localLore } : {}),
     };
   }
 
@@ -682,6 +714,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       member: { ...overlay.member, ...s.patch },
       persona: s.personaPatch ?? overlay.persona,
     };
+    if (s.localLoreChanged) localLore = s.localLore;
     if (Object.keys(s.patch).length > 0) options.onOverlay?.(overlay.member);
   }
 
@@ -728,6 +761,13 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       },
       setLorebook: (entries) => {
         s.patch.lorebook = entries;
+      },
+      get localLore() {
+        return s.localLore;
+      },
+      setLocalLore: (entries) => {
+        s.localLore = entries;
+        s.localLoreChanged = true;
       },
       setName: (name) => {
         s.patch.name = name;
@@ -826,6 +866,13 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     triggerNames: new Set([...manualTriggerNames(triggers), ...engines.flatMap((engine) => engine.manualNames?.() ?? [])]),
     finishesReplies,
     rewritesDisplay: hasTriggersFor(triggers, 'display'),
+    rewritesOnServer: /\beditRequest\b/.test(luaScriptsOf(triggers).join('\n')),
+
+    adopt(scripts) {
+      overlay = { member: scripts.overlay.member ?? {}, persona: scripts.overlay.persona };
+      localLore = scripts.localLore ?? [];
+      options.onOverlay?.(overlay.member);
+    },
 
     async prepare(mode, view, content, prepareOptions = {}) {
       const s = session(view);
@@ -1078,6 +1125,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
         messages: chat,
         greeting,
         note: view.note,
+        localLore,
         persona: overlay.persona ?? view.persona,
         variables,
         displayData: text,
@@ -1134,7 +1182,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
    * What a run did, committed on the head — a manual run's, a button's, a
    * stopped start run's: the variables it left, as the delta of the message the
    * chat now ends on; what it did to the chat — the head's text in place when
-   * that is all, else the chat itself; the overlay and the note. `branch` is the
+   * that is all, else the chat itself; the overlay, the note and the chat's lore. `branch` is the
    * stretch of the chat the run read and `before` the trigger chat it was given.
    * Null when it changed none of them.
    */
@@ -1152,7 +1200,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     const chat = content === undefined ? edits : null;
     await flushGlobals(s);
     const fields = writes(s);
-    if (!variablesChanged && !edits && !fields.overlay && fields.note === undefined) return null;
+    if (!variablesChanged && !edits && !fields.overlay && fields.note === undefined && !fields.localLore) return null;
     if (!head) {
       log({ kind: 'dropped', message: 'a chat with no message has nowhere to keep what a button did' });
       return null;

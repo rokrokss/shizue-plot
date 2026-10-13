@@ -909,6 +909,8 @@ describe('the Lua engine', () => {
       character: { name: '리안', description: '', lorebook: [] },
       setDescription: () => undefined,
       setLorebook: () => undefined,
+      localLore: [],
+      setLocalLore: () => undefined,
       setName: () => undefined,
       setFirstMessage: () => undefined,
       setBackgroundHtml: () => undefined,
@@ -952,6 +954,8 @@ listenEdit('editDisplay', function(id, v) setChat(id, 0, '화면') addChat(id, '
       character: { name: '리안', description: '', lorebook: [] },
       setDescription: () => undefined,
       setLorebook: () => undefined,
+      localLore: [],
+      setLocalLore: () => undefined,
       setName: () => undefined,
       setFirstMessage: () => undefined,
       setBackgroundHtml: () => undefined,
@@ -1117,6 +1121,55 @@ listenEdit('editDisplay', function(id, v) setChat(id, 0, '화면') addChat(id, '
       '<div class="risu-inlay-image"><img src="/api/plots/p/characters/c/avatar"></div>',
     );
     expect(result.variables['persona']).toBe('<div class="risu-inlay-image"><img src="/api/personas/p/avatar"></div>');
+  });
+
+  it('upserts into the chat’s own lore, never the character’s book, and lists the chat’s first, as RisuAI does', async () => {
+    const entry = (name: string, content: string): LoreEntry => ({
+      name,
+      keys: [name],
+      secondaryKeys: [],
+      selective: false,
+      content,
+      enabled: true,
+      constant: false,
+      insertionOrder: 100,
+      caseSensitive: false,
+      useRegex: false,
+      position: 'before_char',
+    });
+    const triggers = [
+      lua(`function onStart(id)
+        upsertLocalLoreBook(id, '성', '챗의 성', { key = '성' })
+        local found = getLoreBooks(id, '성')
+        setChatVar(id, 'found', found[1].content .. '/' .. found[2].content .. '/' .. #found)
+      end`),
+    ];
+    const engine = createLuaEngine({
+      triggers,
+      lowLevelAccess: false,
+      sandbox: sandboxWith(),
+      ui: host,
+      llm: host.llm,
+      similarity: host.similarity,
+      request: host.request,
+      log: () => undefined,
+    });
+    const result = await runTriggers(
+      {
+        mode: 'start',
+        character: { name: '리안', description: '', lorebook: [entry('성', '북쪽의 성')], postHistoryInstructions: '', lowLevelAccess: false, triggers },
+        localLore: [entry('성', '옛 챗의 성'), entry('숲', '숲')],
+        messages: [],
+        note: '',
+        persona: '',
+        variables: Object.create(null),
+      },
+      { code: (request) => engine.runCode!(request) },
+    );
+    // The chat's entry of that name was replaced; the card's of the same name still answers, after it.
+    expect(result.variables['found']).toBe('챗의 성/북쪽의 성/2');
+    expect(result.character.lorebook).toBeUndefined();
+    expect(result.localLore!.map((book) => `${book.name}:${book.content}`)).toEqual(['숲:숲', '성:챗의 성']);
   });
 
   it('answers a script’s request with the page’s, and only with low-level access', async () => {

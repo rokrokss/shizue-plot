@@ -1227,7 +1227,7 @@ const OUTLET_MACRO = /\{\{outlet::([^}]*)\}\}/gi;
 
 /**
  * `history` with its greeting turn — where it still starts with the greeting —
- * reading as `branch.greeting.text` says: the chat's overlay may have rewritten
+ * reading as `branch.greeting.text` says: the reader's overlay may have rewritten
  * the first opening (`MemberOverlay.firstMessage`), which RisuAI sends from the
  * character rather than from the chat. A prompt script's rewrite of the stored
  * text no longer applies; the caller runs them over the result instead.

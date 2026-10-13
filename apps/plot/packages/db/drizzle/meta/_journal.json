@@ -50,6 +50,13 @@
       "when": 1791928447000,
       "tag": "0006_persona_avatar",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1791932042490,
+      "tag": "0007_reader_overlay",
+      "breakpoints": true
     }
   ]
 }

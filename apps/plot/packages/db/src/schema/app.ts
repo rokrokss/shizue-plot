@@ -128,11 +128,11 @@ export type MessageScriptState = 'pending';
 
 /**
  * What a card's scripts rewrote of the work itself — a member's description, a
- * lorebook entry, its name — for one chat, where RisuAI would have rewritten the
- * card for every chat at once. Its shape is `ScriptOverlay` in
- * @shizue/core/triggers (`{members: {[id]: {description?, lorebook?,
- * postHistoryInstructions?, name?, firstMessage?, backgroundHtml?}}, persona?}`),
- * validated and merged by apps/api/src/scriptState.ts; the API lays
+ * lorebook entry, its name — for one reader on one plot (`plot_reader_overlays`),
+ * as RisuAI rewrites the character for every chat with it at once. Its shape is
+ * `ScriptOverlay` in @shizue/core/triggers (`{members: {[id]: {description?,
+ * lorebook?, postHistoryInstructions?, name?, firstMessage?, backgroundHtml?}},
+ * persona?}`), validated and merged by apps/api/src/scriptState.ts; the API lays
  * it over the cards when it builds a prompt. Typed loosely here so the schema
  * does not depend on the script runtime.
  */
@@ -476,10 +476,17 @@ export const chats = pgTable(
     // True while an import is still writing the history in batches. Nothing but
     // the import may write to the chat until it is finished.
     importing: boolean('importing').notNull().default(false),
-    // The card's scripts' rewrites of the work, for this chat only. Null until a
-    // script makes one (see `ChatScriptOverlay`). Per chat, not per branch: a
-    // swipe does not undo it.
+    // Retired: the card's scripts' rewrites of the work were kept here, per chat,
+    // until they moved to the reader and the plot (`plot_reader_overlays`, which
+    // migration 0007 filled from this column). Nothing reads or writes it any
+    // more; it stays so a process still running the code from before that
+    // migration does not fail on a column it names.
     scriptOverlay: jsonb('script_overlay').$type<ChatScriptOverlay>(),
+    // RisuAI's chat `localLore`: the entries a card's Lua upserted
+    // (`upsertLocalLoreBook`), which belong to this chat alone and are activated
+    // after the scripted member's own lore. Null until a script writes one. Per
+    // chat, not per branch: a swipe does not undo it.
+    localLore: jsonb('local_lore').$type<LoreEntry[]>(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -635,6 +642,30 @@ export const plotReaderVariables = pgTable(
   (t) => [primaryKey({ columns: [t.userId, t.plotId] })],
 );
 
+// What a card's scripts rewrote of the work — a member's description, lore,
+// global note, name, first message and background, and the reader's persona
+// (`ChatScriptOverlay`) — for one reader on one plot. RisuAI's scripts rewrite
+// the character object itself, so a rewrite carries to every chat with it; here
+// the work is the creator's and many readers play it, so the rewrite stays with
+// the reader and the plot, like their global variables, and is laid over the
+// work wherever one of their chats on it is assembled. Not branch-scoped: a
+// swipe does not take one back. Merged field by field under this row's lock and
+// capped by the API (see `scriptState.ts`).
+export const plotReaderOverlays = pgTable(
+  'plot_reader_overlays',
+  {
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    plotId: uuid('plot_id')
+      .notNull()
+      .references(() => plots.id, { onDelete: 'cascade' }),
+    overlay: jsonb('overlay').$type<ChatScriptOverlay>().notNull().default({}),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.plotId] })],
+);
+
 /**
  * One reader's walk through a feed sorted by a counter that moves underneath it
  * (explore `likes`/`chats`). `seen` is every row id the walk has
@@ -715,6 +746,7 @@ export type UserNote = typeof userNotes.$inferSelect;
 export type NewUserNote = typeof userNotes.$inferInsert;
 export type ChatNoteLink = typeof chatNoteLinks.$inferSelect;
 export type PlotReaderVariables = typeof plotReaderVariables.$inferSelect;
+export type PlotReaderOverlay = typeof plotReaderOverlays.$inferSelect;
 export type FeedCursor = typeof feedCursors.$inferSelect;
 export type Job = typeof jobs.$inferSelect;
 export type NewJob = typeof jobs.$inferInsert;

@@ -3,7 +3,7 @@ import type { getAdapter } from '@shizue/llm';
 import type { ChatGPTAccounts } from './chatgptAccounts.js';
 import type { AppAuth, SessionStore } from './hostedAuth.js';
 import type { SceneImageGenerator } from './sceneImage.js';
-import type { RequestLuaRunner } from './requestLua.js';
+import type { LuaStateStore, RequestLuaRunner } from './requestLua.js';
 import type { RequestTriggerRunner } from './requestTriggers.js';
 import type { ScriptFetch } from './scriptFetch.js';
 import type { ObjectStorage } from './storage.js';
@@ -80,6 +80,11 @@ export interface AppDeps {
    * runs, or to answer the sandbox probe.
    */
   runRequestLua?: RequestLuaRunner;
+  /**
+   * The chats' `editRequest` globals kept between generations (`requestLua.ts`);
+   * the process's own store by default. Tests hand their own to look inside.
+   */
+  luaStates?: LuaStateStore;
   /** Adapter factory; defaults to the model registry. Overridden in tests. */
   getAdapter?: (...args: Parameters<typeof getAdapter>) => ReturnType<typeof getAdapter> | Awaited<ReturnType<typeof getAdapter>>;
   /**

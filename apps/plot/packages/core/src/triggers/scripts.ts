@@ -76,6 +76,42 @@ export const risuLore = (entry: LoreEntry): LuaLoreBook => ({
   useRegex: entry.useRegex,
 });
 
+const splitLoreKeys = (text: string): string[] =>
+  text
+    .split(',')
+    .map((key) => key.trim())
+    .filter(Boolean);
+
+/** An entry Lua's `upsertLocalLoreBook` made, in ours: keyed, or always on. */
+export const loreFromRisu = (book: LuaLoreBook): LoreEntry => ({
+  name: book.comment,
+  keys: splitLoreKeys(book.key),
+  secondaryKeys: splitLoreKeys(book.secondkey),
+  selective: book.selective,
+  content: book.content,
+  enabled: true,
+  constant: book.alwaysActive,
+  insertionOrder: book.insertorder,
+  caseSensitive: false,
+  useRegex: book.useRegex,
+  position: 'before_char',
+});
+
+/**
+ * The chat's lore once `upsertLocalLoreBook` wrote `books` into it, in order —
+ * RisuAI's chat `localLore`, where each upsert replaces the entries of its name
+ * there and only there: the character's own book is a different list, and an
+ * entry of the same name in it stays.
+ */
+export function upsertLocalLore(local: readonly LoreEntry[], books: readonly LuaLoreBook[]): LoreEntry[] {
+  let lore = [...local];
+  for (const book of books) {
+    lore = lore.filter((entry) => (entry.name ?? '') !== book.comment);
+    lore.push(loreFromRisu(book));
+  }
+  return lore;
+}
+
 /** When a regex script runs. Only the two the reader's browser runs are kept. */
 export type EditScriptType = 'editinput' | 'editoutput';
 

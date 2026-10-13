@@ -20,11 +20,14 @@
  *   — which is kept as the reader's branch (`scriptChat.ts`);
  * - what the scripts rewrote of the work itself — a member's description, lore,
  *   global note, name, first message and background HTML, the reader's persona
- *   (`overlay`), and the chat note — kept
- *   on the chat (`chats.script_overlay`, `chats.note`) and laid over the work
- *   wherever that chat's prompt is assembled. The plot never changes.
+ *   (`overlay`) — kept for the reader and the plot (`plot_reader_overlays`), as
+ *   RisuAI's rewrite of the character reaches every chat with it, and laid over
+ *   the work wherever one of that reader's chats on it is assembled; and what
+ *   RisuAI keeps on the chat — the chat note (`note`) and the lore Lua's
+ *   `upsertLocalLoreBook` wrote (`localLore`, RisuAI's chat `localLore`) — kept
+ *   on the chat (`chats.note`, `chats.local_lore`). The plot never changes.
  */
-import { applyVariableDelta, checkVariableDelta, type VariableDelta, type Variables } from '@shizue/core';
+import { applyVariableDelta, checkVariableDelta, type LoreEntry, type VariableDelta, type Variables } from '@shizue/core';
 import {
   checkScriptChat,
   MAX_OVERLAY_NAME_LENGTH,
@@ -34,10 +37,10 @@ import {
   type ScriptChat,
   type ScriptOverlay,
 } from '@shizue/core/triggers';
-import { chats, plotReaderVariables, type Chat, type ChatScriptOverlay } from '@shizue/db';
+import { chats, plotReaderOverlays, plotReaderVariables, type Chat, type ChatScriptOverlay } from '@shizue/db';
 import { and, eq } from 'drizzle-orm';
 import { coerceLorebook } from './card.js';
-import type { AppDeps } from './deps.js';
+import type { AppDeps, Tx } from './deps.js';
 import { ApiError, badRequest } from './errors.js';
 import { isUuid, optionalBoolean } from './util.js';
 
@@ -90,11 +93,13 @@ export interface GenerationScripts {
   abandonPending: boolean;
   /**
    * What the scripts that ran for this generation rewrote of the work, laid over
-   * the chat's overlay before the prompt is assembled and kept with it.
+   * the reader's overlay before the prompt is assembled and merged into it.
    */
   overlay: ScriptOverlay | null;
   /** The chat note as the scripts left it (`v2SetAuthorNote`); undefined when untouched. */
   note: string | undefined;
+  /** The chat's own lore as the scripts left it (Lua's `upsertLocalLoreBook`); undefined when untouched. */
+  localLore: LoreEntry[] | undefined;
   /**
    * The chat as the scripts that ran for this generation left it (`ScriptChat`),
    * kept before the prompt is built (`scriptChat.ts`); null when they left it as
@@ -111,6 +116,7 @@ export const NO_SCRIPTS: GenerationScripts = {
   abandonPending: false,
   overlay: null,
   note: undefined,
+  localLore: undefined,
   chat: null,
 };
 
@@ -175,6 +181,7 @@ export function readGenerationScripts(
     abandonPending: optionalBoolean(body, 'abandonPending') ?? false,
     overlay: optionalOverlay(body),
     note: optionalScriptNote(body),
+    localLore: optionalLocalLore(body),
     // A send places its own turn in it; the other generations add none.
     chat: readScriptChat(body, { turn: !startDelta }),
   };
@@ -281,52 +288,132 @@ export function optionalScriptNote(body: Record<string, unknown>, key = 'note'):
   return overlayText(body[key], key);
 }
 
-/** The overlay a chat holds, as core reads it. The column's type is the database's loose one. */
-export const overlayOf = (chat: Pick<Chat, 'scriptOverlay'>): ScriptOverlay | null =>
-  (chat.scriptOverlay as ScriptOverlay | null) ?? null;
+/**
+ * The chat's own lore as the browser sends it (`localLore`, RisuAI's chat
+ * `localLore`, which Lua's `upsertLocalLoreBook` writes) — the whole list, held
+ * to what an overlay's lorebook is held to and coerced the way the studio's is.
+ * Absent leaves it as it is; `null` empties it.
+ */
+export function readLocalLore(value: unknown, path = 'localLore'): LoreEntry[] | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return [];
+  if (!Array.isArray(value)) throw badRequest('invalid_request', `${path} must be an array`);
+  if (value.length > MAX_OVERLAY_LORE_ENTRIES) {
+    throw badRequest('invalid_request', `${path} may hold at most ${MAX_OVERLAY_LORE_ENTRIES} entries`);
+  }
+  const lore = coerceLorebook(value);
+  if (JSON.stringify(lore).length > MAX_OVERLAY_CHARS) {
+    throw badRequest('script_overlay_limit', `A chat's own lore may hold at most ${MAX_OVERLAY_CHARS} characters`);
+  }
+  return lore;
+}
+
+function optionalLocalLore(body: Record<string, unknown>): LoreEntry[] | undefined {
+  return readLocalLore(body['localLore']);
+}
+
+/** The chat's own lore, as core reads it: empty until a script wrote some. */
+export const localLoreOf = (chat: Pick<Chat, 'localLore'>): LoreEntry[] => chat.localLore ?? [];
+
+/** A stored overlay as core reads it; the column's type is the database's loose one, and `{}` is none. */
+const overlayFrom = (value: ChatScriptOverlay | null | undefined): ScriptOverlay | null =>
+  mergeScriptOverlay(null, (value ?? null) as ScriptOverlay | null);
+
+const readerOverlayRow = (userId: string, plotId: string) =>
+  and(eq(plotReaderOverlays.userId, userId), eq(plotReaderOverlays.plotId, plotId));
+
+/** What the reader's scripts rewrote of the plot (`plot_reader_overlays`); null until one did. */
+export async function loadReaderOverlay(db: AppDeps['db'] | Tx, userId: string, plotId: string): Promise<ScriptOverlay | null> {
+  const [row] = await db
+    .select({ overlay: plotReaderOverlays.overlay })
+    .from(plotReaderOverlays)
+    .where(readerOverlayRow(userId, plotId))
+    .limit(1);
+  return overlayFrom(row?.overlay);
+}
 
 /**
- * The chat's overlay with `patch` laid over it, checked against the members the
- * plot really has — an id from another plot, or of a member since deleted, is a
- * stale client rather than something to keep — and against the size the column
- * may grow to.
+ * `stored` with `patch` laid over it, checked against the members the plot
+ * really has — an id from another plot, or of a member since deleted, is a stale
+ * client rather than something to keep — and against the size the row may grow
+ * to. What a prompt reads before the write lands, and what the write keeps.
  */
-export function mergedOverlay(
-  chat: Pick<Chat, 'scriptOverlay'>,
+export function overlaidWith(
+  stored: ScriptOverlay | null,
   patch: ScriptOverlay | null,
   memberIds: ReadonlySet<string>,
 ): ScriptOverlay | null {
-  if (!patch) return overlayOf(chat);
+  if (!patch) return stored;
   for (const id of Object.keys(patch.members ?? {})) {
     if (!memberIds.has(id)) throw badRequest('invalid_request', 'overlay names a member this plot does not have');
   }
-  const merged = mergeScriptOverlay(overlayOf(chat), patch);
+  const merged = mergeScriptOverlay(stored, patch);
   if (merged && JSON.stringify(merged).length > MAX_OVERLAY_CHARS) {
-    throw badRequest('script_overlay_limit', `A chat's script overlay may hold at most ${MAX_OVERLAY_CHARS} characters`);
+    throw badRequest(
+      'script_overlay_limit',
+      `What a reader's scripts rewrote of a plot may hold at most ${MAX_OVERLAY_CHARS} characters`,
+    );
   }
   return merged;
 }
 
 /**
- * Keeps what the scripts of a generation rewrote: the merged overlay, and the
- * note. Called inside the generation slot once the request has passed every
- * check, so a refused generation writes neither.
+ * Merges `patch` into the reader's overlay on the plot, in the caller's
+ * transaction, and answers with the whole of it. The row is created on the
+ * first write and locked for the read-merge-write — the way global variables
+ * are — so two of the reader's chats writing at once each land on top of the
+ * other: field by field, the later write standing where both touched one, as
+ * the last script to rewrite a RisuAI character wins. The cap is a property of
+ * the merged overlay, checked under that lock; a refusal rolls the caller's
+ * transaction back. Taken after any chat row the transaction locks, as every
+ * caller does, so no two of them wait on each other in turn.
+ */
+export async function mergeReaderOverlay(
+  tx: Tx,
+  userId: string,
+  plotId: string,
+  patch: ScriptOverlay | null,
+  memberIds: ReadonlySet<string>,
+): Promise<ScriptOverlay | null> {
+  if (!patch) return loadReaderOverlay(tx, userId, plotId);
+  await tx.insert(plotReaderOverlays).values({ userId, plotId }).onConflictDoNothing();
+  const where = readerOverlayRow(userId, plotId);
+  const [row] = await tx.select({ overlay: plotReaderOverlays.overlay }).from(plotReaderOverlays).where(where).for('update');
+  const merged = overlaidWith(overlayFrom(row?.overlay), patch, memberIds);
+  await tx
+    .update(plotReaderOverlays)
+    .set({ overlay: (merged ?? {}) as ChatScriptOverlay, updatedAt: new Date() })
+    .where(where);
+  return merged;
+}
+
+/**
+ * Keeps what the scripts of a generation rewrote: the overlay they sent merged
+ * into the reader's (the patch, not the overlay the prompt was built from — the
+ * reader's other chats may have written since), the note and the chat's lore,
+ * in one transaction. Called inside the generation slot once the request has
+ * passed every check, so a refused generation writes none of it.
  */
 export async function saveScriptWrites(
   deps: AppDeps,
-  chatId: string,
-  overlay: ScriptOverlay | null,
-  note: string | undefined,
-  changed: boolean,
+  chat: Pick<Chat, 'id' | 'userId' | 'plotId'>,
+  scripts: Pick<GenerationScripts, 'overlay' | 'note' | 'localLore'>,
+  memberIds: ReadonlySet<string>,
 ): Promise<void> {
-  if (!changed && note === undefined) return;
-  await deps.db
-    .update(chats)
-    .set({
-      ...(changed ? { scriptOverlay: overlay as ChatScriptOverlay | null } : {}),
-      ...(note !== undefined ? { note } : {}),
-    })
-    .where(eq(chats.id, chatId));
+  const { overlay, note, localLore } = scripts;
+  if (!overlay && note === undefined && localLore === undefined) return;
+  await deps.db.transaction(async (tx) => {
+    if (note !== undefined || localLore !== undefined) {
+      await tx
+        .update(chats)
+        .set({
+          ...(note !== undefined ? { note } : {}),
+          ...(localLore !== undefined ? { localLore: localLore.length > 0 ? localLore : null } : {}),
+        })
+        .where(eq(chats.id, chat.id));
+    }
+    if (overlay) await mergeReaderOverlay(tx, chat.userId, chat.plotId, overlay, memberIds);
+  });
 }
 
 /** What a request made over a head that has since moved is refused with. */

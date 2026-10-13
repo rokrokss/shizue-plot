@@ -247,7 +247,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     );
   }, [id]);
   /**
-   * What the card's scripts rewrote of their member in this chat (`MemberOverlay`):
+   * What the card's scripts rewrote of their member for this reader on the plot —
+   * in this chat or another of theirs (`MemberOverlay`):
    * the bundle's on load, then the runtime's each time the server took a run's
    * rewrite. The screen draws the member's name, the first greeting and the
    * background from it, as RisuAI draws them from its character.
@@ -1603,6 +1604,17 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     }
     // The server took the turn, so it kept what the scripts rewrote of the work.
     if (rejection === null) prepared?.accept();
+    // RisuAI's `editRequest` listener rewrites the live character and the chat's
+    // lore; here the server ran it with the reply, so the page asks what it left
+    // before the output scripts read them.
+    if (rejection === null && !stoppedTurn && runtime?.rewritesOnServer) {
+      await apiGet<{ scripts: ScriptBundle | null }>(`/api/chats/${id}/scripts`).then(
+        (answer) => {
+          if (answer?.scripts) runtime.adopt(answer.scripts);
+        },
+        () => undefined,
+      );
+    }
     abortRef.current = null;
     // However it ended, it ended: the pacing gives up whatever it was still
     // holding back before anything decides what the ending meant.

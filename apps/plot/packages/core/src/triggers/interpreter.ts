@@ -31,7 +31,7 @@
  *   prompt text a start trigger asked for, the chat as it left it, the
  *   character's fields it rewrote, the request a request trigger edited — and
  *   the caller decides where each goes (`messages.variable_delta`, the
- *   generation request, `chats.script_overlay`).
+ *   generation request, `plot_reader_overlays`, `chats.local_lore`).
  * - Effects this product cannot carry out — image generation — are logged and
  *   leave what RisuAI leaves on failure (`TRIGGER_CLASSIFICATION`).
  * - RisuAI's slash commands (`command`, `v2Command`, `command.ts`) act on the
@@ -94,7 +94,7 @@ export interface TriggerCharacter {
   memberName?: string;
   /** The card's nickname, which `{{char}}` stays while `setName` rewrites the name under it. */
   nickname?: string;
-  /** RisuAI's `char.firstMessage` as this chat's overlay has it (`setCharacterFirstMessage`); absent while untouched. */
+  /** RisuAI's `char.firstMessage` as the reader's overlay has it (`setCharacterFirstMessage`); absent while untouched. */
   firstMessage?: string;
   /** RisuAI's `char.backgroundHTML`: the card's, or the overlay's (`setBackgroundEmbedding`). */
   backgroundHtml?: string;
@@ -118,6 +118,13 @@ export interface TriggerRunInput {
   greeting?: string | null;
   /** The chat's author's note. */
   note: string;
+  /**
+   * RisuAI's chat `localLore`: what Lua's `upsertLocalLoreBook` left in this
+   * chat, apart from the character's own book. `/test_lorebook` and
+   * `{{lorebook}}` read the two together, the character's first; the lore
+   * effects read the character's alone, as RisuAI's read its `globalLore`.
+   */
+  localLore?: readonly LoreEntry[];
   /** The reader's persona description. */
   persona: string;
   /** The chat variables the run starts from — the branch's fold. Not modified. */
@@ -272,7 +279,10 @@ export interface CodeScope {
   };
   setDescription(text: string): void;
   setLorebook(entries: LoreEntry[]): void;
-  /** Lua's `setName`, `setCharacterFirstMessage` and `setBackgroundEmbedding`: the chat's overlay. */
+  /** RisuAI's chat `localLore`, which Lua's `upsertLocalLoreBook` writes: the chat's, not the character's. */
+  readonly localLore: readonly LoreEntry[];
+  setLocalLore(entries: LoreEntry[]): void;
+  /** Lua's `setName`, `setCharacterFirstMessage` and `setBackgroundEmbedding`: the reader's overlay. */
   setName(name: string): void;
   setFirstMessage(text: string): void;
   setBackgroundHtml(html: string): void;
@@ -333,6 +343,8 @@ export interface TriggerRunResult {
   character: CharacterRewrite;
   persona?: string;
   note?: string;
+  /** The chat's lore as code left it (`CodeScope.setLocalLore`); absent while untouched. */
+  localLore?: LoreEntry[];
   /** A display run's rewritten text, or a request run's edited request (absent when the run ended early). */
   displayData?: string;
   /** The global variables code wrote, as their final values (`null` unset); null when none. */
@@ -415,6 +427,9 @@ interface Shared {
     'name' | 'firstMessage' | 'backgroundHtml'
   >;
   rewrote: Set<keyof CharacterRewrite>;
+  /** The chat's own lore (`TriggerRunInput.localLore`), and whether code rewrote it. */
+  localLore: LoreEntry[];
+  localLoreChanged: boolean;
   persona: string;
   personaChanged: boolean;
   note: string;
@@ -526,6 +541,8 @@ function* execute(
       ...(input.character.backgroundHtml !== undefined ? { backgroundHtml: input.character.backgroundHtml } : {}),
     },
     rewrote: new Set(),
+    localLore: (input.localLore ?? []).map((entry) => ({ ...entry })),
+    localLoreChanged: false,
     persona: input.persona,
     personaChanged: false,
     note: input.note,
@@ -587,6 +604,7 @@ function* execute(
     character,
     ...(shared.personaChanged ? { persona: shared.persona } : {}),
     ...(shared.noteChanged ? { note: shared.note } : {}),
+    ...(shared.localLoreChanged ? { localLore: shared.localLore } : {}),
     ...(completed && top.displayData !== undefined ? { displayData: top.displayData } : {}),
     globalWrites: Object.keys(shared.globalWrites).length > 0 ? { ...shared.globalWrites } : null,
     aborted: !completed,
@@ -732,7 +750,8 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
       },
       persona: shared.persona,
       chat: storedChat,
-      lorebook: () => shared.character.lorebook.map(risuLoreEntry),
+      // RisuAI's `{{lorebook}}`: the character's book, then the chat's.
+      lorebook: () => [...shared.character.lorebook, ...shared.localLore].map(risuLoreEntry),
       triggerId: input.triggerId ?? null,
     },
   };
@@ -841,7 +860,12 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
     },
     *lore() {
       return loreTestOf(
-        yield { kind: 'lore', history: shared.stored.messages.map((message) => message.data), lorebook: shared.character.lorebook },
+        // RisuAI's `loadLoreBookV3Prompt`: the character's book, then the chat's.
+        yield {
+          kind: 'lore',
+          history: shared.stored.messages.map((message) => message.data),
+          lorebook: [...shared.character.lorebook, ...shared.localLore],
+        },
       );
     },
   };
@@ -1077,6 +1101,13 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
                 // The run's own list is edited in place: the v2 effects hold it as `lore`.
                 lore.splice(0, lore.length, ...entries);
                 rewrite('lorebook');
+              },
+              get localLore() {
+                return shared.localLore;
+              },
+              setLocalLore: (entries) => {
+                shared.localLore = entries.map((entry) => ({ ...entry }));
+                shared.localLoreChanged = true;
               },
               setName: (name) => {
                 shared.character.name = name;

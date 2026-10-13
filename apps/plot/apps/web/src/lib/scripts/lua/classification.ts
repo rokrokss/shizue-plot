@@ -8,7 +8,7 @@
  *   relays the call to.
  * - `server`: done in the sandbox, and what it changed is carried to the API
  *   the way a trigger's writes are — a chat variable on the turn, the chat the
- *   run left, a rewrite of the work in the chat's overlay — or, for a model
+ *   run left, a rewrite of the work in the reader's overlay — or, for a model
  *   call, answered by the API on the reader's own account, and for a request,
  *   made by the API, as RisuAI's proxy makes it. `editRequest` alone runs on
  *   the API itself, in a child process (`apps/api/src/requestLua.ts`).
@@ -97,18 +97,18 @@ export const LUA_CLASSIFICATION: Readonly<Record<string, LuaSupport>> = {
   // The character, the persona, the note
   getName: host(
     'browser',
-    'RisuAI’s `char.name`: the member’s name as this chat’s overlay has it (`{{char}}` is the nickname, where the card sets one)',
+    'RisuAI’s `char.name`: the member’s name as the reader’s overlay has it (`{{char}}` is the nickname, where the card sets one)',
   ),
   setName: host(
     'server',
-    'chat overlay: the member’s name in this chat — its speaker name (its lines under the old one stay its), the name the prompt gives it, `{{char}}` where the card has no nickname, and the plot’s `{{char}}` in a plot of one member; one line of at most 100 characters, else dropped and noted',
+    'reader overlay: the member’s name in every chat this reader has on the plot — its speaker name (its lines under the old one stay its), the name the prompt gives it, `{{char}}` where the card has no nickname, and the plot’s `{{char}}` in a plot of one member; one line of at most 100 characters, else dropped and noted',
   ),
-  getDescription: host('browser', 'the description as this chat’s overlay has it'),
-  setDescription: host('server', 'chat overlay'),
+  getDescription: host('browser', 'the description as the reader’s overlay has it'),
+  setDescription: host('server', 'reader overlay: every chat this reader has on the plot'),
   getCharacterFirstMessage: host('browser', 'what setCharacterFirstMessage left, else the greeting the branch opened on'),
   setCharacterFirstMessage: host(
     'server',
-    'chat overlay: what the plot’s first opening reads as, on screen and in the prompt, while the branch opens on it (RisuAI’s `fmIndex` -1); the stored greeting stays; answers true',
+    'reader overlay: what the plot’s first opening reads as, on screen and in the prompt, while the branch opens on it (RisuAI’s `fmIndex` -1); the stored greeting stays; answers true',
   ),
   getPersonaName: host('browser'),
   getPersonaDescription: host('browser', 'its {{char}}/{{user}}/variables answered as cbs() answers them'),
@@ -116,14 +116,14 @@ export const LUA_CLASSIFICATION: Readonly<Record<string, LuaSupport>> = {
   getBackgroundEmbedding: host('browser', 'the overlay’s, else the card’s `backgroundHTML`, whole'),
   setBackgroundEmbedding: host(
     'server',
-    'chat overlay: drawn behind the conversation as CBS through the display sanitizer, scoped to it, in place of the card’s; answers true',
+    'reader overlay: drawn behind the conversation as CBS through the display sanitizer, scoped to it, in place of the card’s; answers true',
   ),
-  getLoreBooks: wrapper('browser', 'by name, in RisuAI’s shape; content as cbs() answers it'),
+  getLoreBooks: wrapper('browser', 'by name, in RisuAI’s shape, the chat’s lore before the member’s book; content as cbs() answers it'),
   getLoreBooksMain: host('browser', 'as getLoreBooks'),
-  upsertLocalLoreBook: host('server', 'chat overlay; replaces the entries of that name'),
+  upsertLocalLoreBook: host('server', 'the chat’s own lore (RisuAI’s `localLore`, `chats.local_lore`), activated after the member’s book; replaces the entries of that name there'),
   loadLoreBooks: wrapper(
     'browser',
-    'activated on the page as /test_lorebook is — the member’s book with the call’s upserts, over the chat as the script has it — and cut at the chat’s context budget less `reserve`; content as cbs() answers it',
+    'activated on the page as /test_lorebook is — the member’s book, then the chat’s lore with the call’s upserts, over the chat as the script has it — and cut at the chat’s context budget less `reserve`; content as cbs() answers it',
   ),
   loadLoreBooksMain: host('browser', 'as loadLoreBooks', true),
   getCharacterImage: wrapper(
@@ -178,6 +178,8 @@ export const LUA_CLASSIFICATION: Readonly<Record<string, LuaSupport>> = {
     'server',
     'the request as {role, content} turns, run by the API in a child process (no network, no files) before the request triggers, ' +
       'without low-level access as in RisuAI; dialogs answer as they do in a display pass; its chat variable writes land on the reply’s ' +
-      'delta, its chat and character writes are dropped; a fresh Lua state each time, so globals set by other hooks are not there',
+      'delta, its chat edits make the branch the reply is stored under, its character rewrites go to the reader’s overlay and its lore ' +
+      'upserts to the chat’s lore, all with the reply; its own Lua state, apart from the other hooks’ as RisuAI keeps one per mode, ' +
+      'whose plain-data globals carry to the next generation of the chat while the code stays the same',
   ),
 };
