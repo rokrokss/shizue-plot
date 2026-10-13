@@ -9,6 +9,7 @@ import {
   replyLengthTokens,
   sceneFocusDirective,
   stripInlayMacros,
+  withBranchGreeting,
   withNarrationPrefix,
   type AssembledPrompt,
   type FoldItem,
@@ -428,9 +429,10 @@ async function buildRequestMessages(
     : plan.branch.length <= 1
       ? { length: 0 }
       : { ...plan.branch, length: plan.branch.length - 1 };
-  // The scripts read the turns as stored, before an image note is added to them.
+  // The scripts read the turns as stored, before an image note is added to them —
+  // the greeting as the chat's overlay has it, which is what the assembler sends.
   const history = await withoutUnseeableImages(
-    await withPromptScripts(isContinue ? plan.history.slice(0, -1) : plan.history, plan, branch),
+    await withPromptScripts(withBranchGreeting(isContinue ? plan.history.slice(0, -1) : plan.history, branch), plan, branch),
     plan.model,
     deps,
     account,

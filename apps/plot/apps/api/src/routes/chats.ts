@@ -3,6 +3,8 @@ import {
   applyMacros,
   applyVariableDelta,
   assetResolver,
+  backgroundHtmlOf,
+  characterName,
   coerceNarrator,
   computeVariables,
   DEFAULT_USER_NAME,
@@ -576,10 +578,14 @@ async function loadPersona(deps: AppDeps, chat: Chat): Promise<Persona | null> {
  * The chat's script overlay is laid over the work here (`chats.script_overlay`,
  * `ScriptOverlay` in @shizue/core): what the card's scripts rewrote of a member's
  * card or of the reader's persona is what this chat's prompt reads, while the
- * plot and the persona rows stay as they are. A generation whose own scripts
- * just rewrote something brings it as `scripts` and reads it already — RisuAI's
- * input and start triggers run before its prompt is built — and the route keeps
- * it once the request has passed its checks (`keepScriptWrites`).
+ * plot and the persona rows stay as they are. A renamed member goes by its new
+ * name everywhere the prompt names it — and a plot of that one member is that
+ * character, so its `{{char}}` follows too (`PromptPlot.char`). The scripted
+ * member's first message is what the first opening is sent as (`promptBranch`).
+ * A generation whose own scripts just rewrote something brings it as `scripts`
+ * and reads it already — RisuAI's input and start triggers run before its prompt
+ * is built — and the route keeps it once the request has passed its checks
+ * (`keepScriptWrites`).
  */
 async function loadGenerationContext(
   deps: AppDeps,
@@ -607,6 +613,8 @@ async function loadGenerationContext(
   globalVariables: Variables;
   /** The chat's script overlay with this request's rewrites laid over it. */
   overlay: ScriptOverlay | null;
+  /** The plot's first opening as the scripts rewrote it in this chat (`setCharacterFirstMessage`). */
+  firstMessage: string | undefined;
   all: Message[];
 }> {
   // Re-checked on every generation, not just at chat creation: unpublishing a
@@ -617,16 +625,23 @@ async function loadGenerationContext(
   const absent = new Set(chat.absentCharacterIds ?? []);
   const overlay = mergedOverlay(chat, scripts.overlay, new Set(members.map((member) => member.id)));
   const rewritten = overlay?.members
-    ? members.map((member) => ({ ...member, card: overlaidCard(member.card, overlay.members?.[member.id]) }))
+    ? members.map((member) => {
+        const own = overlay.members?.[member.id];
+        return { ...member, name: own?.name ?? member.name, card: overlaidCard(member.card, own) };
+      })
     : members;
+  // A plot of one member is that character: RisuAI's `{{char}}` follows its rename.
+  const only = rewritten.length === 1 ? rewritten[0]! : undefined;
+  const plotChar = only && overlay?.members?.[only.id]?.name !== undefined ? characterName(only) : undefined;
+  const scripted = scriptedMember(members)?.member;
 
   const persona = await loadPersona(deps, chat);
   return {
     // Crossed with this chat's own toggles: the style the assembler compiles is
     // the creator's, minus the two features this reader turned off.
-    plot: toPromptPlot(row, chat),
+    plot: { ...toPromptPlot(row, chat), ...(plotChar !== undefined ? { char: plotChar } : {}) },
     characters: toPromptCharacters(rewritten, absent),
-    onStage: members.filter((member) => !absent.has(member.id)),
+    onStage: rewritten.filter((member) => !absent.has(member.id)),
     row,
     personaText: overlay?.persona ?? persona?.description ?? '',
     userName: persona?.name ?? DEFAULT_USER_NAME,
@@ -642,6 +657,7 @@ async function loadGenerationContext(
     fold: foldOptionsOf(row.name, persona),
     globalVariables: await loadGlobalVariables(deps, chat.userId, chat.plotId),
     overlay,
+    firstMessage: scripted ? overlay?.members?.[scripted.id]?.firstMessage : undefined,
     all: await loadMessages(deps, chat.id),
   };
 }
@@ -687,12 +703,18 @@ const toHistory = (path: Message[]): HistoryMessage[] =>
  * length, and the intro it opened on — a root the chat's openings were written
  * as, numbered by its place among them, the first being -1 as RisuAI numbers
  * them. Approximate where a reroll of the opening added a root of its own.
+ *
+ * On the first one, the greeting reads as `firstMessage` where the scripts
+ * rewrote it (`setCharacterFirstMessage`): RisuAI sends its greeting from the
+ * character while the chat is on the first (`fmIndex` -1), and only then.
  */
-function promptBranch(all: Message[], branch: Message[]): PromptBranch {
+function promptBranch(all: Message[], branch: Message[], firstMessage?: string): PromptBranch {
   const root = branch[0];
   if (!root || root.parentId !== null || root.role !== 'assistant') return { length: branch.length };
   const openings = all.filter((message) => message.parentId === null && message.role === 'assistant');
-  return { length: branch.length, greeting: { text: root.content, index: openings.indexOf(root) - 1 } };
+  const index = openings.indexOf(root) - 1;
+  const text = index === -1 && firstMessage !== undefined ? firstMessage : root.content;
+  return { length: branch.length, greeting: { text, index } };
 }
 
 /** Header the web client names the reader's IANA time zone in. */
@@ -1224,7 +1246,7 @@ async function regeneratePlan(
     globalVariables: context.globalVariables,
     clock: requestClock(c, context.row, kept),
     seed: chat.id,
-    branch: promptBranch(all, kept),
+    branch: promptBranch(all, kept, context.firstMessage),
     // Without the head being replaced: its records belong to the swipe this
     // generation is an alternative to.
     loreState: loreStateOf(kept),
@@ -1235,7 +1257,7 @@ async function regeneratePlan(
     ...(narration
       ? {
           trailingSystem: applyMacros(NARRATION_NUDGE, {
-            char: context.plot.name,
+            char: context.plot.char ?? context.plot.name,
             user: context.userName,
           }),
           narration: true,
@@ -1872,9 +1894,11 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * What the reader's browser runs for this chat: the triggers and the
    * `editinput`/`editoutput` regex scripts of the plot's scripted member (the
    * first in roster order that carries any — `scriptedMember`), and the parts of
-   * that member's card the scripts may read — its description and the rest of its
-   * character text, its lorebook and the book's settings, its post-history
-   * instructions — with what this chat's overlay rewrote of them beside it.
+   * that member's card the scripts may read — its name and nickname, its
+   * description and the rest of its character text, its lorebook and the book's
+   * settings, its post-history instructions, its background HTML and its avatar —
+   * with what this chat's overlay rewrote of them beside it. `name` is `{{char}}`
+   * as it stands in this chat: the nickname, else the name the scripts left.
    *
    * This is the one place a reader receives a member's card internals, and only
    * for a plot that carries scripts: RisuAI's scripts read the card they belong
@@ -1891,26 +1915,36 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const { member, scripts } = found;
     const card = member.card;
     const overlay = overlayOf(chat);
+    const own = overlay?.members?.[member.id] ?? null;
+    const nickname = card.nickname?.trim() ?? '';
     return c.json({
       scripts: {
         memberId: member.id,
-        // `{{char}}` in a card's own text: its nickname where it sets one.
-        name: card.nickname?.trim() || member.name,
+        // `{{char}}` in a card's own text: its nickname where it sets one, else its
+        // name as this chat's scripts left it.
+        name: nickname || own?.name || member.name,
         triggers: scripts.triggers,
         editScripts: scripts.editScripts,
         lowLevelAccess: scripts.lowLevelAccess,
         character: {
+          // RisuAI's `char.name` (Lua's `getName`), and the nickname `{{char}}` stays.
+          name: member.name,
+          nickname,
           description: card.description,
           personality: card.personality,
           scenario: card.scenario,
           exampleDialogue: card.mesExample,
           lorebook: card.lorebook,
           postHistoryInstructions: card.postHistoryInstructions,
-          // What `/test_lorebook` activates the book by, as the prompt does.
+          // What `/test_lorebook` and Lua's `loadLoreBooks` activate the book by, as the prompt does.
           loreSettings: card.loreSettings,
+          // RisuAI's `backgroundHTML` whole, styles and all, as Lua's `getBackgroundEmbedding` reads it.
+          backgroundHtml: backgroundHtmlOf(card.extensions) ?? '',
+          // RisuAI's `char.image`, for Lua's `getCharacterImage`: a same-origin address, or null.
+          avatarUrl: avatarUrl(member),
         },
         overlay: {
-          member: overlay?.members?.[member.id] ?? null,
+          member: own,
           persona: overlay?.persona ?? null,
         },
       },
@@ -2344,7 +2378,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         globalVariables: context.globalVariables,
         clock: requestClock(c, context.row, branch),
         seed: chat.id,
-        branch: promptBranch(edited.all, branch),
+        branch: promptBranch(edited.all, branch, context.firstMessage),
         loreState: loreStateOf(branch),
         assetNames: context.assetNames,
         auxiliaryModel: context.auxiliaryModel,
@@ -2443,7 +2477,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         globalVariables: context.globalVariables,
         clock: requestClock(c, context.row, path),
         seed: chat.id,
-        branch: promptBranch(edited?.all ?? context.all, path),
+        branch: promptBranch(edited?.all ?? context.all, path, context.firstMessage),
         // The message being generated is the head itself, so the branch before it
         // is what it was first generated on — its own record must not read as a
         // trigger from the turn before.
@@ -2508,14 +2542,14 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         globalVariables: context.globalVariables,
         clock: requestClock(c, context.row, path),
         seed: chat.id,
-        branch: promptBranch(edited?.all ?? context.all, path),
+        branch: promptBranch(edited?.all ?? context.all, path, context.firstMessage),
         loreState: loreStateOf(path),
         assetNames: context.assetNames,
         auxiliaryModel: context.auxiliaryModel,
         contextBudget: memorySettingsOf(chat).contextBudget,
         focusNames,
         trailingSystem: applyMacros(AUTO_CONTINUE_NUDGE, {
-          char: context.plot.name,
+          char: context.plot.char ?? context.plot.name,
           user: context.userName,
         }),
         // A child of the assistant head: two assistant turns in a row, which the
@@ -2576,14 +2610,14 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         globalVariables: context.globalVariables,
         clock: requestClock(c, context.row, path),
         seed: chat.id,
-        branch: promptBranch(edited?.all ?? context.all, path),
+        branch: promptBranch(edited?.all ?? context.all, path, context.firstMessage),
         loreState: loreStateOf(path),
         assetNames: context.assetNames,
         auxiliaryModel: context.auxiliaryModel,
         contextBudget: memorySettingsOf(chat).contextBudget,
         focusNames,
         trailingSystem: applyMacros(NARRATION_NUDGE, {
-          char: context.plot.name,
+          char: context.plot.char ?? context.plot.name,
           user: context.userName,
         }),
         narration: true,

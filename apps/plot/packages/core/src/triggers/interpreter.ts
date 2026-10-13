@@ -71,6 +71,17 @@ export interface TriggerMessage {
 export interface TriggerCharacter {
   /** `{{char}}` in the scripts' text. */
   name: string;
+  /**
+   * RisuAI's `char.name`, where it is not `name`: `{{char}}` is the card's
+   * nickname when it has one. What Lua's `getName` answers and `setName` rewrites.
+   */
+  memberName?: string;
+  /** The card's nickname, which `{{char}}` stays while `setName` rewrites the name under it. */
+  nickname?: string;
+  /** RisuAI's `char.firstMessage` as this chat's overlay has it (`setCharacterFirstMessage`); absent while untouched. */
+  firstMessage?: string;
+  /** RisuAI's `char.backgroundHTML`: the card's, or the overlay's (`setBackgroundEmbedding`). */
+  backgroundHtml?: string;
   description: string;
   personality?: string;
   scenario?: string;
@@ -222,10 +233,25 @@ export interface CodeScope {
   globalVariables(): Variables;
   /** The run's chat, which the code may edit in place. */
   messages: TriggerMessage[];
-  /** The character as the run has it, with what the run already rewrote of it. */
-  readonly character: { readonly name: string; readonly description: string; readonly lorebook: readonly LoreEntry[] };
+  /**
+   * The character as the run has it, with what the run already rewrote of it.
+   * `name` is `{{char}}`; `memberName` RisuAI's `char.name` where that differs.
+   */
+  readonly character: {
+    readonly name: string;
+    readonly memberName?: string;
+    readonly nickname?: string;
+    readonly description: string;
+    readonly lorebook: readonly LoreEntry[];
+    readonly firstMessage?: string;
+    readonly backgroundHtml?: string;
+  };
   setDescription(text: string): void;
   setLorebook(entries: LoreEntry[]): void;
+  /** Lua's `setName`, `setCharacterFirstMessage` and `setBackgroundEmbedding`: the chat's overlay. */
+  setName(name: string): void;
+  setFirstMessage(text: string): void;
+  setBackgroundHtml(html: string): void;
   /** The reader's persona name (`{{user}}`) and description. */
   readonly user: string;
   readonly persona: string;
@@ -248,6 +274,9 @@ export interface CharacterRewrite {
   description?: string;
   lorebook?: LoreEntry[];
   postHistoryInstructions?: string;
+  name?: string;
+  firstMessage?: string;
+  backgroundHtml?: string;
 }
 
 export interface TriggerLogEntry {
@@ -357,7 +386,10 @@ interface Shared {
   /** The reader's global variables as the run has them, and what it wrote of them. */
   globals: Variables;
   globalWrites: VariableDelta;
-  character: { description: string; lorebook: LoreEntry[]; postHistoryInstructions: string };
+  character: { description: string; lorebook: LoreEntry[]; postHistoryInstructions: string } & Pick<
+    CharacterRewrite,
+    'name' | 'firstMessage' | 'backgroundHtml'
+  >;
   rewrote: Set<keyof CharacterRewrite>;
   persona: string;
   personaChanged: boolean;
@@ -463,6 +495,8 @@ function* execute(
       description: input.character.description,
       lorebook: input.character.lorebook.map((entry) => ({ ...entry })),
       postHistoryInstructions: input.character.postHistoryInstructions,
+      ...(input.character.firstMessage !== undefined ? { firstMessage: input.character.firstMessage } : {}),
+      ...(input.character.backgroundHtml !== undefined ? { backgroundHtml: input.character.backgroundHtml } : {}),
     },
     rewrote: new Set(),
     persona: input.persona,
@@ -679,8 +713,10 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
    * and a slash command's the chat as stored, which RisuAI's always read.
    */
   const p = (text: unknown, chat = cbsChat): string => {
-    // The evaluator reads the description through `data`, which has to be the current one.
+    // The evaluator reads the description through `data`, which has to be the current one —
+    // and `{{char}}`, which a Lua `setName` moves where the card has no nickname.
     (env.data!.character as { description: string }).description = shared.character.description;
+    if (shared.character.name !== undefined) env.data!.char = input.character.nickname || shared.character.name;
     env.data!.persona = shared.persona;
     env.data!.chat = chat;
     return evaluateScriptCbs(text, env);
@@ -979,12 +1015,26 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
               globalVariables: () => applyVariableDelta(shared.globals, null),
               messages: run.messages,
               character: {
-                name: input.character.name,
+                get name() {
+                  return shared.character.name !== undefined
+                    ? input.character.nickname || shared.character.name
+                    : input.character.name;
+                },
+                get memberName() {
+                  return shared.character.name ?? input.character.memberName;
+                },
+                ...(input.character.nickname !== undefined ? { nickname: input.character.nickname } : {}),
                 get description() {
                   return shared.character.description;
                 },
                 get lorebook() {
                   return shared.character.lorebook;
+                },
+                get firstMessage() {
+                  return shared.character.firstMessage;
+                },
+                get backgroundHtml() {
+                  return shared.character.backgroundHtml;
                 },
               },
               setDescription: (text) => {
@@ -995,6 +1045,18 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
                 // The run's own list is edited in place: the v2 effects hold it as `lore`.
                 lore.splice(0, lore.length, ...entries);
                 rewrite('lorebook');
+              },
+              setName: (name) => {
+                shared.character.name = name;
+                rewrite('name');
+              },
+              setFirstMessage: (text) => {
+                shared.character.firstMessage = text;
+                rewrite('firstMessage');
+              },
+              setBackgroundHtml: (html) => {
+                shared.character.backgroundHtml = html;
+                rewrite('backgroundHtml');
               },
               user: input.data?.user ?? '',
               persona: shared.persona,

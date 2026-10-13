@@ -29,17 +29,25 @@ const NO_ALIASES: ReadonlyMap<string, string> = new Map();
  * about `{{char}}` writes `세이 님: …` for the member called `세이`. Those lines are
  * still that member's, and are drawn with the member's face and under the member's name. A nickname that is
  * also some member's own name is that member's; between two members sharing a
- * nickname, the first on the roster has it.
+ * nickname, the first on the roster has it. A member's `aliases` — the name its
+ * scripts renamed it from — are read the same way, after its nickname: the lines
+ * written before the rename are still its, drawn under the name it has now.
  */
 export function speakerAliases(
-  members: readonly { name: string; nickname?: string | null | undefined }[],
+  members: readonly {
+    name: string;
+    nickname?: string | null | undefined;
+    aliases?: readonly string[] | undefined;
+  }[],
 ): ReadonlyMap<string, string> {
   const names = new Set(members.map((member) => member.name));
   const aliases = new Map<string, string>();
   for (const member of members) {
-    const nickname = member.nickname?.trim();
-    if (!nickname || names.has(nickname) || aliases.has(nickname)) continue;
-    aliases.set(nickname, member.name);
+    for (const other of [member.nickname, ...(member.aliases ?? [])]) {
+      const alias = other?.trim();
+      if (!alias || names.has(alias) || aliases.has(alias)) continue;
+      aliases.set(alias, member.name);
+    }
   }
   return aliases.size > 0 ? aliases : NO_ALIASES;
 }

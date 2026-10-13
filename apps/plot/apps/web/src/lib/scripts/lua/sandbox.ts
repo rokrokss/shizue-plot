@@ -9,7 +9,7 @@
  * reaches the chat. The same goes for what a script asks of the page: a host
  * call is honoured only for a call that is still waiting, only where RisuAI
  * would honour it (no dialogs from a display pass, no model call, embedding
- * search or request without low-level access), and only once.
+ * search, request or lore activation without low-level access), and only once.
  *
  * The frame is opened on the first call and kept for the life of the chat. A
  * worker the watchdog killed is replaced by the frame on the next call; a frame
@@ -62,6 +62,18 @@ export interface LuaRequestAnswer {
   data: string;
 }
 
+/** One entry RisuAI's `loadLoreBookV3Prompt` finds active: its text before the CBS, and its role. */
+export interface LuaActiveLore {
+  prompt: string;
+  role: 'system' | 'user' | 'assistant';
+}
+
+/** What `loadLoreBooks` is answered with: the active entries in order, and RisuAI's `maxContext` — the chat's context budget. */
+export interface LuaLoreAnswer {
+  actives: LuaActiveLore[];
+  maxContext: number;
+}
+
 /** What a script's host functions reach on the page. */
 export interface LuaHost {
   alert(text: string, error: boolean): Promise<void>;
@@ -74,6 +86,12 @@ export interface LuaHost {
   similarity(source: string, texts: string[]): Promise<string[]>;
   /** RisuAI's answer to `request(url)`, from our server; throws when there is none. `null` is a URL that is not text. */
   request(url: string | null): Promise<LuaRequestAnswer>;
+  /**
+   * `loadLoreBooks`: the lore active on `history` — the chat as the script has it —
+   * with the entries the script upserted laid over the character's book; throws
+   * when it cannot be worked out.
+   */
+  lore(history: string[], upserts: LuaLoreBook[]): Promise<LuaLoreAnswer>;
 }
 
 export type LuaOutcome =
@@ -182,12 +200,16 @@ export function checkResult(raw: unknown, entry: LuaEntry, given: number): LuaCa
       }
     }
   }
+  const text = (key: string): string | null => (typeof r[key] === 'string' ? (r[key] as string) : null);
   return {
     stopSending: r['stopSending'] === true,
     ...(res !== undefined ? { res } : {}),
     vars,
     messages,
-    description: typeof r['description'] === 'string' ? r['description'] : null,
+    description: text('description'),
+    name: text('name'),
+    firstMessage: text('firstMessage'),
+    background: text('background'),
     lore: Array.isArray(r['lore'])
       ? r['lore'].slice(0, MAX_LORE).map(checkLore).filter((book): book is LuaLoreBook => book !== null)
       : [],
@@ -222,6 +244,20 @@ export function checkSimilaritySearch(source: unknown, texts: unknown): { source
     if (total > MAX_SIMILARITY_CHARS) return null;
   }
   return { source, texts };
+}
+
+/** What `loadLoreBooks` sent to activate lore on, or null when it is not that. */
+export function checkLoreSearch(
+  history: unknown,
+  upserts: unknown,
+  given: number,
+): { history: string[]; upserts: LuaLoreBook[] } | null {
+  if (!Array.isArray(history) || history.length > given + MAX_ADDED_MESSAGES) return null;
+  if (!history.every((text) => typeof text === 'string')) return null;
+  if (!Array.isArray(upserts) || upserts.length > MAX_LORE) return null;
+  const books = upserts.map(checkLore);
+  if (books.some((book) => book === null)) return null;
+  return { history: history as string[], upserts: books as LuaLoreBook[] };
 }
 
 /* ---------------------------------------------------------------- the frame */
@@ -366,6 +402,19 @@ export function createLuaSandbox(options: LuaSandboxOptions): LuaSandbox {
           const answer = await call.host.request(typeof a['url'] === 'string' ? a['url'] : null);
           if (typeof answer.status !== 'number' || typeof answer.data !== 'string') throw new Error('not an answer');
           return reply(host, { ok: true, value: { status: answer.status, data: answer.data } });
+        }
+        case 'lore': {
+          if (!call.lowLevel) return reply(host, { ok: false, error: 'low-level access is required' });
+          const search = checkLoreSearch(a['history'], a['upserts'], call.given);
+          if (!search) return reply(host, { ok: false, error: 'loadLoreBooks takes the chat as the script has it' });
+          const answer = await call.host.lore(search.history, search.upserts);
+          return reply(host, {
+            ok: true,
+            value: {
+              actives: answer.actives.map((active) => ({ prompt: active.prompt, role: active.role })),
+              maxContext: answer.maxContext,
+            },
+          });
         }
         default:
           return reply(host, { ok: false, error: 'unknown' });

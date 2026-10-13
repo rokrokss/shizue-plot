@@ -161,6 +161,24 @@ export function creatorCssFromExtensions(extensions: Record<string, unknown>): s
 }
 
 /**
+ * RisuAI's `backgroundHTML` as the card carries it: HTML RisuAI parses as CBS and
+ * draws behind the whole chat. Undefined when there is none, or only whitespace.
+ */
+export function backgroundHtmlOf(extensions: Record<string, unknown>): string | undefined {
+  const risu = extensions['risuai'];
+  if (risu === null || typeof risu !== 'object') return undefined;
+  const html = (risu as Record<string, unknown>)['backgroundHTML'];
+  return typeof html === 'string' && html.trim() ? html : undefined;
+}
+
+/**
+ * A card's background HTML without its `<style>` elements: what is left to draw
+ * behind the chat once the stylesheet is the plot's (`creatorCssFromExtensions`,
+ * which the creator may have edited since). Empty when it was all stylesheet.
+ */
+export const backgroundWithoutStyles = (html: string): string => html.replace(STYLE_ELEMENT, '').trim();
+
+/**
  * The license a RisuAI card declares in `extensions.risuai.license` — `CC BY-NC 4.0`,
  * `private` and the like, as RisuRealm writes them. Undefined when the card says
  * nothing, which Realm stores as an empty string.

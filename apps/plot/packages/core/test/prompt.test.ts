@@ -29,6 +29,7 @@ import {
   plotHeader,
   STYLE_DIRECTIVES_HEADER,
   styleDirectives,
+  withBranchGreeting,
   type HistoryMessage,
   type PromptCharacter,
   type PromptPart,
@@ -197,6 +198,43 @@ describe('assemblePrompt', () => {
     expect(system).toContain(`${characterHeader('아리아')}\n아리아는 마녀다.`);
     expect(system).toContain('서리 골짜기의 밤의 지난 이야기.');
     expect(messages.at(-1)!.content).toBe('서리 골짜기의 밤 유지.');
+  });
+
+  it('reads a member its scripts renamed, and the greeting they rewrote, as this chat has them', () => {
+    // A plot of one member renamed by its scripts: the caller gives the member its new
+    // name and the plot its `{{char}}`; the work's own header keeps the plot's name.
+    const renamed: PromptCharacter = { name: '세라', card: { ...card, description: '{{char}}는 마녀다.', mesExample: '' } };
+    const opening = { text: '{{char}}가 문을 연다.', index: -1 };
+    const { system, messages } = assemblePrompt({
+      plot: { ...plot, char: '세라', description: '{{char}}의 겨울.' },
+      characters: [renamed],
+      history,
+      branch: { length: history.length, greeting: opening },
+      preset: { main: '{{char}} 담당 작가.', postHistory: 'POST' },
+      userName: '민준',
+    });
+    expect(system).toContain('세라 담당 작가.');
+    expect(system).toContain(`${plotHeader(plot.name)}\n세라의 겨울.`);
+    expect(system).toContain(`${characterHeader('세라')}\n세라는 마녀다.`);
+    expect(system).not.toContain('아리아');
+    // The greeting turn is sent as the branch reads it, with its macros.
+    expect(messages.map((message) => promptText(message.content))).toContain('세라가 문을 연다.');
+    expect(messages.map((message) => promptText(message.content))).not.toContain('첫 번째 인사말입니다.');
+  });
+
+  it('reads the greeting turn as the branch says only while the history still starts with it', () => {
+    const opening = { text: '바뀐 인사.', index: -1 };
+    const withPrompt: HistoryMessage[] = [{ ...history[0]!, promptContent: '스크립트가 고친 인사.' }, ...history.slice(1)];
+    expect(withBranchGreeting(withPrompt, { length: 4, greeting: opening })).toEqual([
+      { role: 'assistant', content: '바뀐 인사.' },
+      ...history.slice(1),
+    ]);
+    // Trimmed by the memory: the first turn here is not the greeting.
+    expect(withBranchGreeting(history, { length: 6, greeting: opening })).toBe(history);
+    // Nothing to read it as, or nothing different.
+    expect(withBranchGreeting(history, { length: 4 })).toBe(history);
+    expect(withBranchGreeting(history, { length: 4, greeting: { text: history[0]!.content, index: -1 } })).toBe(history);
+    expect(withBranchGreeting(history.slice(1), { length: 3, greeting: opening })).toEqual(history.slice(1));
   });
 
   it('includes persona and lorebook sections around the plot and roster blocks', () => {

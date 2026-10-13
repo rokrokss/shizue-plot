@@ -90,6 +90,12 @@ export interface CbsContext {
    * target is one of them runs it, as RisuAI's does; any other fills the composer.
    */
   triggerNames?: ReadonlySet<string>;
+  /**
+   * The chat's background is being drawn (`ChatBackground`), where RisuAI's
+   * `{{bg::…}}` is the picture filling it, as its background mode draws it.
+   * Anywhere else the macro draws nothing.
+   */
+  background?: boolean;
 }
 
 /**
@@ -297,6 +303,18 @@ function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>): CbsHos
     return { text: `<img src="${escapeHtml(src)}" alt="${escapeHtml(found.slug)}">`, markup: true };
   };
 
+  /** RisuAI's `{{bg::…}}` in its background: the picture, darkened, filling the box — its address where markup cannot go. */
+  const backdrop = (call: CbsCall): CbsValue => {
+    const found = lookupAsset(call.args.rest(1)?.value().text ?? '', ctx.assets, ctx.resolveAsset);
+    if (!found) return { text: '' };
+    const src = read(found.src, budget);
+    if (call.mode === 'arg' || attributes.has(call.macro)) return { text: src };
+    return {
+      text: `<div style="width:100%;height:100%;background: linear-gradient(rgba(0, 0, 0, 0.8), rgba(0, 0, 0, 0.8)),url(${escapeHtml(src)}); background-size: cover;"></div>`,
+      markup: true,
+    };
+  };
+
   return {
     variable,
     ...(globalVariable ? { globalVariable } : {}),
@@ -364,6 +382,7 @@ function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>): CbsHos
           };
         }
       }
+      if (call.name === 'bg' && ctx.background) return backdrop(call);
       const kind = assetMacroKind(call.name);
       return kind ? asset(call, kind) : undefined;
     },
@@ -424,7 +443,8 @@ function hostData(ctx: CbsContext): CbsHostData {
  * Renders an OUT template to (still untrusted) HTML.
  *
  * A template the parser rejects comes back as its own escaped source, so a typo is
- * visible to the creator rather than fatal. An exhausted budget is the one thing
+ * visible to the creator rather than fatal — or as `malformed` says, where showing
+ * the source would be worse than nothing (the chat's background). An exhausted budget is the one thing
  * that does throw: `charge` belongs to the caller, and the caller is the only one
  * who can decide what to do about having spent it. Swallowing that here would hand
  * back a short string as though the work had been cheap.
@@ -446,6 +466,7 @@ export function renderTemplate(
   template: string,
   ctx: CbsContext,
   charge: (chars: number) => void,
+  malformed: (template: string) => string = escapeHtml,
 ): string {
   const budget: Budget = { nodes: MAX_RENDERED_NODES, iterations: MAX_EACH_ITERATIONS, charge };
   try {
@@ -453,6 +474,6 @@ export function renderTemplate(
     return unescapeCbs(evaluateCbs(template, nodes, host(ctx, budget, attributePositions(nodes))), 'html');
   } catch (error) {
     if (error instanceof RenderBudgetExhausted) throw error;
-    return escapeHtml(template);
+    return malformed(template);
   }
 }

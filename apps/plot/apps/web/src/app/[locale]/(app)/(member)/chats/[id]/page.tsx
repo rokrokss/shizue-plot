@@ -5,7 +5,7 @@ import { assetResolver, type CbsMessage } from '@shizue/core/cbs';
 import { componentNames } from '@shizue/core/component';
 import { NARRATION_PREFIX } from '@shizue/core/narration';
 import { isSceneMessage, sceneSpanAt } from '@shizue/core/scene';
-import { manualTriggerNames } from '@shizue/core/triggers';
+import { manualTriggerNames, type MemberOverlay } from '@shizue/core/triggers';
 import { computeVariables, DEFAULT_USER_NAME, type FoldOptions, type Variables } from '@shizue/core/variables';
 import { useFormatter, useLocale, useTranslations } from 'next-intl';
 import { Fragment, use, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -14,6 +14,7 @@ import { AiBadge, AiNotice } from '@/components/AiNotice';
 import { AttachmentChips } from '@/components/AttachmentChips';
 import { Avatar } from '@/components/Avatar';
 import { BottomSheet } from '@/components/BottomSheet';
+import { ChatBackground } from '@/components/ChatBackground';
 import { ChatPanel } from '@/components/ChatPanel';
 import { ChatSettings } from '@/components/ChatSettings';
 import { FocusPicker } from '@/components/FocusPicker';
@@ -54,6 +55,7 @@ import {
 import { finishMarked, markFinish, unmarkFinish } from '@/lib/scripts/finishMark';
 import { chatRowMeta, relativeDay } from '@/lib/chatRows';
 import { COMPOSER_MODES, composeTurn, type ComposerMode } from '@/lib/composerMode';
+import type { CbsContext } from '@/lib/cbs';
 import type { ComponentContext } from '@/lib/componentCalls';
 import { toggleDirectionMarkup } from '@/lib/directionMarkup';
 import { streamsNarration } from '@/lib/narrator';
@@ -63,7 +65,7 @@ import {
   writeCustomUiEnabled,
   type DisplayContext,
 } from '@/lib/displayScripts';
-import { greetingText, isGreeting } from '@/lib/greeting';
+import { greetingText, isGreeting, opensOnFirstGreeting } from '@/lib/greeting';
 import { reconcileSend } from '@/lib/reconcile';
 import { sanitizeCustomHtml } from '@/lib/sanitizeHtml';
 import { streamGeneration } from '@/lib/sse';
@@ -71,6 +73,7 @@ import { loadWholeBranch } from '@/lib/scripts/branch';
 import { createLuaEngine, luaFunctionNames, luaScriptsOf } from '@/lib/scripts/lua/engine';
 import { createLuaSandbox, type LuaRequestAnswer } from '@/lib/scripts/lua/sandbox';
 import {
+  activeLore,
   createScriptRuntime,
   type CommandOutcome,
   type PreparedGeneration,
@@ -81,6 +84,7 @@ import {
   type ScriptUi,
   type ScriptView,
 } from '@/lib/scripts/runtime';
+import { DEFAULT_CONTEXT_BUDGET } from '@/lib/loreBudget';
 import { readStatusCollapsed, writeStatusCollapsed } from '@/lib/statusCard';
 import type {
   ChatAttachment,
@@ -237,6 +241,14 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       () => setScriptBundle(null),
     );
   }, [id]);
+  /**
+   * What the card's scripts rewrote of their member in this chat (`MemberOverlay`):
+   * the bundle's on load, then the runtime's each time the server took a run's
+   * rewrite. The screen draws the member's name, the first greeting and the
+   * background from it, as RisuAI draws them from its character.
+   */
+  const [scriptOverlay, setScriptOverlay] = useState<MemberOverlay | null>(null);
+  useEffect(() => setScriptOverlay(scriptBundle?.overlay.member ?? null), [scriptBundle]);
 
   const [input, setInput] = useState('');
   /** How the composer's text is meant: a line, a description, or the narrator's. */
@@ -717,15 +729,37 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   // that moved nothing.
   const variables = useStableVariables(liveVariables);
 
-  /** The plot's cast, which is what a reply's `이름:` lines are read against. */
-  const members = plot?.characters ?? NO_MEMBERS;
+  /**
+   * The plot's cast, which is what a reply's `이름:` lines are read against — the
+   * scripted member under the name its scripts gave it in this chat (`setName`),
+   * its lines under the old name still its own (`aliases`).
+   */
+  const scriptedId = scriptBundle?.memberId;
+  const renamed = scriptOverlay?.name;
+  const cast = plot?.characters ?? NO_MEMBERS;
+  const members = useMemo(
+    () =>
+      renamed === undefined || !scriptedId
+        ? cast
+        : cast.map((member) =>
+            member.id === scriptedId && member.name !== renamed
+              ? { ...member, name: renamed, aliases: [member.name] }
+              : member,
+          ),
+    [cast, scriptedId, renamed],
+  );
   const absentIds = state?.chat.absentCharacterIds;
   /** Who is on the stage — the members a reply can be asked to center on. */
   const stage = useMemo(
     () => members.filter((member) => !(absentIds ?? []).includes(member.id)),
     [members, absentIds],
   );
-  const characterName = plot?.name ?? state?.chat.title ?? '';
+  // A plot of one member is that character: renamed by its scripts, the chat is with
+  // the new name, and `{{char}}` in the work's text is it too (the prompt's `PromptPlot.char`).
+  const soleRenamed = renamed !== undefined && cast.length === 1 && cast[0]!.id === scriptedId ? cast[0]! : null;
+  const characterName = soleRenamed ? renamed! : (plot?.name ?? state?.chat.title ?? '');
+  /** `{{char}}` in the work's own text on screen: the plot's name, or the renamed character's, nickname first. */
+  const charMacro = soleRenamed ? soleRenamed.nickname?.trim() || renamed! : characterName;
   // Who the conversation is with, once either read has said so.
   useDocumentTitle(characterName);
   const personaName = personas.find((persona) => persona.id === state?.chat.personaId)?.name;
@@ -791,7 +825,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       resolveAsset,
       relationship: axes,
       turn,
-      char: characterName,
+      char: charMacro,
       user: personaName ?? youLabel,
       lastMessageId,
       assetNames,
@@ -810,7 +844,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     resolveAsset,
     axes,
     turn,
-    characterName,
+    charMacro,
     personaName,
     youLabel,
     lastMessageId,
@@ -824,6 +858,12 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   ]);
 
   /**
+   * Whether the branch opens on the plot's first opening, where the first message
+   * the scripts set stands in for the stored greeting (RisuAI's `fmIndex` -1).
+   */
+  const firstGreeting = useMemo(() => opensOnFirstGreeting(messages, state?.siblings ?? {}), [messages, state?.siblings]);
+  const firstMessage = scriptOverlay?.firstMessage;
+  /**
    * The greetings on the branch as the reader sees them — the prompt's pass over
    * the conditions a greeting kept, with the same variables (`lib/greeting`).
    * Keyed on the stored messages rather than the view, so a streamed token does
@@ -833,9 +873,13 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     const shown = new Map<string, string>();
     for (const message of messages) {
       if (!isGreeting(message)) continue;
-      const text = greetingText(message.content, message.id, {
+      // On the first opening, the first message the scripts set stands in for the
+      // stored one (`setCharacterFirstMessage`), as RisuAI draws its greeting from
+      // the character there — evaluated the way the stored one was when the chat opened.
+      const source = firstGreeting && firstMessage !== undefined ? firstMessage : message.content;
+      const text = greetingText(source, message.id, {
         variables,
-        char: characterName,
+        char: charMacro,
         user: personaName ?? youLabel,
         seed: chatId,
         seedLength: lastMessageId + 1,
@@ -843,7 +887,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       if (text !== message.content) shown.set(message.id, text);
     }
     return shown;
-  }, [messages, variables, characterName, personaName, youLabel, chatId, lastMessageId]);
+  }, [messages, firstGreeting, firstMessage, variables, charMacro, personaName, youLabel, chatId, lastMessageId]);
 
   /** Fills the composer; the reader still decides to send. */
   const suggestInput = useCallback((text: string) => setInput(text), []);
@@ -870,7 +914,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         variables,
         relationship: axes,
         turn,
-        char: characterName,
+        char: charMacro,
         user: personaName ?? youLabel,
         assets: Object.fromEntries(assetUrls),
       },
@@ -884,7 +928,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     variables,
     axes,
     turn,
-    characterName,
+    charMacro,
     personaName,
     youLabel,
     assetUrls,
@@ -892,6 +936,53 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     maySendTurn,
     sendTurn,
   ]);
+
+  /**
+   * The HTML behind the conversation (`ChatBackground`): what the scripts set in
+   * this chat (`setBackgroundEmbedding`), else the card's past its stylesheet. It
+   * is custom UI, so it goes when custom UI does, as the stylesheet does.
+   */
+  const backgroundHtml = customUi ? (scriptOverlay?.backgroundHtml ?? plot?.backgroundHtml ?? '') : '';
+  /** What its CBS reads: the screen's own, as a display script's template reads it. */
+  const backgroundContext = useMemo<CbsContext | null>(
+    () =>
+      backgroundHtml
+        ? {
+            variables,
+            assets: assetUrls,
+            resolveAsset,
+            relationship: axes,
+            turn,
+            char: charMacro,
+            user: personaName ?? youLabel,
+            lastMessageId,
+            assetNames,
+            messages: branchMessages,
+            wholeBranch,
+            chatId,
+            locale,
+            ...(globalVariables ? { globalVariables } : {}),
+          }
+        : null,
+    [
+      backgroundHtml,
+      variables,
+      assetUrls,
+      resolveAsset,
+      axes,
+      turn,
+      charMacro,
+      personaName,
+      youLabel,
+      lastMessageId,
+      assetNames,
+      branchMessages,
+      wholeBranch,
+      chatId,
+      locale,
+      globalVariables,
+    ],
+  );
 
   /* --------------------------------------------------------- card scripts */
 
@@ -957,6 +1048,15 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             similarity,
             // Our server makes the GET, under RisuAI's limits, and answers as RisuAI does.
             request: (url) => apiSend<LuaRequestAnswer>('POST', `/api/chats/${id}/script-fetch`, { url }),
+            // `loadLoreBooks`: activated as `/test_lorebook` is, against RisuAI's
+            // `maxContext`, which is the chat's context budget here.
+            lore: async (history, lorebook) => ({
+              actives: (await activeLore(lorebook, history, scriptBundle.character.loreSettings)).actives.map(
+                (active) => ({ prompt: active.prompt, role: active.role }),
+              ),
+              maxContext: stateRef.current?.chat.memorySettings?.contextBudget ?? DEFAULT_CONTEXT_BUDGET,
+            }),
+            avatarUrl: scriptBundle.character.avatarUrl ?? null,
             log,
           }),
         ]
@@ -971,6 +1071,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       log,
       onGlobalVariables: (globals) =>
         setState((current) => (current ? { ...current, globalVariables: globals } : current)),
+      onOverlay: setScriptOverlay,
     });
   }, [id, scriptBundle, scriptUi]);
   // The sandbox goes with the runtime that opened it.
@@ -1023,6 +1124,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         names: foldNames,
         note: whole.chat.note,
         persona: persona?.description ?? '',
+        firstGreeting: opensOnFirstGreeting(whole.path, whole.siblings),
         ...(whole.globalVariables ? { globalVariables: whole.globalVariables } : {}),
         data: scriptData(afterGreeting),
       };
@@ -1254,6 +1356,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       names: foldNames,
       note: state.chat.note,
       persona: persona?.description ?? '',
+      firstGreeting,
       ...(globalVariables ? { globalVariables } : {}),
       data: scriptData(lastMessageId + 1),
     };
@@ -1278,6 +1381,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     globalVariables,
     scriptData,
     lastMessageId,
+    firstGreeting,
     shownGreetings,
     persistedVariables,
   ]);
@@ -1299,6 +1403,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       names: foldNames,
       note: state.chat.note,
       persona: persona?.description ?? '',
+      firstGreeting,
       ...(globalVariables ? { globalVariables } : {}),
       data: scriptData(lastMessageId + 1),
     };
@@ -1319,6 +1424,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     globalVariables,
     scriptData,
     lastMessageId,
+    firstGreeting,
     shownGreetings,
     persistedVariables,
     luaShown,
@@ -2015,252 +2121,258 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         </div>
       ) : null}
 
-      <div
-        ref={scrollRef}
-        className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
-        // Reading upwards into a long chat: near the top, the window before this
-        // one is fetched and put in above without moving what is on screen.
-        onScroll={(event) => {
-          if (event.currentTarget.scrollTop < LOAD_EARLIER_PX) void loadEarlier();
-        }}
-      >
+      {/* The conversation's area. What a card draws behind the chat stands still
+          in it while the list scrolls over it, as RisuAI's background does. */}
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        {backgroundContext ? <ChatBackground html={backgroundHtml} context={backgroundContext} /> : null}
         <div
-          ref={contentRef}
-          // The bottom padding is for the jump-to-latest pill, which floats over
-          // the last line of the conversation when it is showing.
-          className="mx-auto w-full max-w-3xl space-y-7 px-5 pt-7 pb-12"
-          // What a button in a message can do: run one of the card's manual
-          // triggers (`risu-trigger`, `{{button}}` naming one) or hand a Lua button
-          // its data (`risu-btn`), or put its text in the composer — sending that
-          // stays the reader's decision.
-          onClick={(event) => {
-            const target = event.target as HTMLElement;
-            const scripted = target.closest?.('[data-shizue-trigger], [data-shizue-btn]');
-            if (scripted) {
-              const name = scripted.getAttribute('data-shizue-trigger');
-              if (name !== null) void runManualTrigger(name, scripted.getAttribute('data-shizue-trigger-id'));
-              else void runLuaButton(scripted.getAttribute('data-shizue-btn') ?? '');
-              return;
-            }
-            const button = target.closest?.('[data-shizue-fill]');
-            if (button) setInput(button.getAttribute('data-shizue-fill') ?? '');
+          ref={scrollRef}
+          // Positioned only over a background, which it has to paint above.
+          className={cx('min-h-0 flex-1 overflow-y-auto overscroll-contain', backgroundContext && 'relative')}
+          // Reading upwards into a long chat: near the top, the window before this
+          // one is fetched and put in above without moving what is on screen.
+          onScroll={(event) => {
+            if (event.currentTarget.scrollTop < LOAD_EARLIER_PX) void loadEarlier();
           }}
         >
-          <AiNotice />
+          <div
+            ref={contentRef}
+            // The bottom padding is for the jump-to-latest pill, which floats over
+            // the last line of the conversation when it is showing.
+            className="mx-auto w-full max-w-3xl space-y-7 px-5 pt-7 pb-12"
+            // What a button in a message can do: run one of the card's manual
+            // triggers (`risu-trigger`, `{{button}}` naming one) or hand a Lua button
+            // its data (`risu-btn`), or put its text in the composer — sending that
+            // stays the reader's decision.
+            onClick={(event) => {
+              const target = event.target as HTMLElement;
+              const scripted = target.closest?.('[data-shizue-trigger], [data-shizue-btn]');
+              if (scripted) {
+                const name = scripted.getAttribute('data-shizue-trigger');
+                if (name !== null) void runManualTrigger(name, scripted.getAttribute('data-shizue-trigger-id'));
+                else void runLuaButton(scripted.getAttribute('data-shizue-btn') ?? '');
+                return;
+              }
+              const button = target.closest?.('[data-shizue-fill]');
+              if (button) setInput(button.getAttribute('data-shizue-fill') ?? '');
+            }}
+          >
+            <AiNotice />
 
-          {creatorSheet ? (
-            <div
-              hidden
-              data-testid="creator-css"
-              // Sanitized by lib/sanitizeHtml — the only place markup is trusted.
-              dangerouslySetInnerHTML={{ __html: creatorSheet }}
-            />
-          ) : null}
+            {creatorSheet ? (
+              <div
+                hidden
+                data-testid="creator-css"
+                // Sanitized by lib/sanitizeHtml — the only place markup is trusted.
+                dangerouslySetInnerHTML={{ __html: creatorSheet }}
+              />
+            ) : null}
 
-          {loadingEarlier ? (
-            <p className="text-center text-xs text-muted" role="status">
-              {t('loadingEarlier')}
-            </p>
-          ) : null}
+            {loadingEarlier ? (
+              <p className="text-center text-xs text-muted" role="status">
+                {t('loadingEarlier')}
+              </p>
+            ) : null}
 
-          {view.length === 0 ? <p className="py-16 text-center text-sm text-muted">{t('empty')}</p> : null}
+            {view.length === 0 ? <p className="py-16 text-center text-sm text-muted">{t('empty')}</p> : null}
 
-          {view.map((message, index) => {
-            const meta = rowMeta[index]!;
-            const source = message.id ? messageById.get(message.id) : undefined;
-            const isLast = index === view.length - 1;
-            // Every forked message carries its own way back, except the last assistant
-            // one — the footer's swipe already sits under that.
-            const branches =
-              source && !mode && !(isLast && last?.role === 'assistant')
-                ? branchNav(source)
-                : undefined;
-            // Where the conversation crossed midnight. It belongs to the row it
-            // stands above, so the scene editor gets it as readily as a message.
-            const divider = meta.dayStart ? (
-              <div className="flex items-center gap-3">
-                <span className="h-px flex-1 bg-line" />
-                <span className="text-xs text-muted">{dayLabel(meta.dayStart)}</span>
-                <span className="h-px flex-1 bg-line" />
-              </div>
-            ) : null;
-            // The scene's rows give way to one editor, drawn where the first of them was.
-            if (message.id && sceneIds.has(message.id)) {
+            {view.map((message, index) => {
+              const meta = rowMeta[index]!;
+              const source = message.id ? messageById.get(message.id) : undefined;
+              const isLast = index === view.length - 1;
+              // Every forked message carries its own way back, except the last assistant
+              // one — the footer's swipe already sits under that.
+              const branches =
+                source && !mode && !(isLast && last?.role === 'assistant')
+                  ? branchNav(source)
+                  : undefined;
+              // Where the conversation crossed midnight. It belongs to the row it
+              // stands above, so the scene editor gets it as readily as a message.
+              const divider = meta.dayStart ? (
+                <div className="flex items-center gap-3">
+                  <span className="h-px flex-1 bg-line" />
+                  <span className="text-xs text-muted">{dayLabel(meta.dayStart)}</span>
+                  <span className="h-px flex-1 bg-line" />
+                </div>
+              ) : null;
+              // The scene's rows give way to one editor, drawn where the first of them was.
+              if (message.id && sceneIds.has(message.id)) {
+                return (
+                  <Fragment key={message.key}>
+                    {divider}
+                    {message.id === scene[0]?.id ? (
+                      <SceneEditor
+                        scene={scene}
+                        characterName={characterName}
+                        youName={t('you')}
+                        disabled={settingsLocked}
+                        onCancel={() => setSceneEdit(null)}
+                        onSave={(blocks) => saveScene(scene.map((item) => item.id), blocks)}
+                      />
+                    ) : null}
+                  </Fragment>
+                );
+              }
               return (
                 <Fragment key={message.key}>
                   {divider}
-                  {message.id === scene[0]?.id ? (
-                    <SceneEditor
-                      scene={scene}
-                      characterName={characterName}
-                      youName={t('you')}
-                      disabled={settingsLocked}
-                      onCancel={() => setSceneEdit(null)}
-                      onSave={(blocks) => saveScene(scene.map((item) => item.id), blocks)}
-                    />
-                  ) : null}
+                  <MessageRow
+                    role={message.role}
+                    content={message.content}
+                    {...(message.shown !== undefined ? { shown: message.shown } : {})}
+                    name={message.role === 'user' ? t('you') : characterName}
+                    avatar={plot?.coverUrl ?? null}
+                    roster={members}
+                    assets={messageAssets}
+                    resolveAsset={resolveAsset}
+                    attachments={message.attachments}
+                    {...(display ? { display } : {})}
+                    {...(components ? { components } : {})}
+                    previousSameRole={meta.previousSameRole}
+                    chatIndex={indexBase + index}
+                    streaming={message.streaming}
+                    // Nothing of the reply on screen yet: the time it has been
+                    // waited for, which is all of the model's thinking that is shown.
+                    thinking={message.streaming && streamText === ''}
+                    disabled={settingsLocked}
+                    {...(message.createdAt ? { createdAt: message.createdAt } : {})}
+                    grouped={meta.grouped}
+                    statusCollapsed={statusCollapsed}
+                    onToggleStatus={toggleStatus}
+                    // The offer stands under the newest reply and nowhere else, and
+                    // only while nothing is being generated over it.
+                    {...(isLast && showActions && message.role === 'assistant' && choicesOffered
+                      ? { onChoice: suggestInput }
+                      : {})}
+                    {...(source && !mode && !isSceneMessage(source)
+                      ? { onSave: (content: string) => editMessage(source, content) }
+                      : {})}
+                    // A turn the scene is made of is edited with the whole scene.
+                    {...(source && !mode && isSceneMessage(source)
+                      ? { onEditScene: () => setSceneEdit(source.id) }
+                      : {})}
+                    {...(source && !mode ? { onDelete: () => void deleteMessage(source.id) } : {})}
+                    {...(branches ? { branches } : {})}
+                    footer={
+                      isLast && showActions ? (
+                        <div
+                          className={cx(
+                            'mt-2 flex items-center gap-1',
+                            message.role === 'user' && 'justify-end',
+                          )}
+                        >
+                          {last?.role === 'assistant' && info && info.total > 1 ? (
+                            <div className="mr-1 flex items-center gap-1 text-xs text-muted">
+                              <button
+                                type="button"
+                                disabled={!prevTarget}
+                                title={t('swipePrev')}
+                                aria-label={t('swipePrev')}
+                                onClick={() => prevTarget && void moveHead(prevTarget)}
+                                className="px-1 hover:text-fg disabled:opacity-30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                              >
+                                <span aria-hidden="true">◀</span>
+                              </button>
+                              <span className="tabular-nums">
+                                {info.index + 1}/{info.total}
+                              </span>
+                              <button
+                                type="button"
+                                disabled={!nextTarget}
+                                title={t('swipeNext')}
+                                aria-label={t('swipeNext')}
+                                onClick={() => nextTarget && void moveHead(nextTarget)}
+                                className="px-1 hover:text-fg disabled:opacity-30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                              >
+                                <span aria-hidden="true">▶</span>
+                              </button>
+                            </div>
+                          ) : null}
+                          <Button size="sm" variant="ghost" onClick={() => void run('regenerate')}>
+                            {t('regenerate')}
+                          </Button>
+                          {/* A narration answers a user turn as readily as it follows a
+                              reply, so unlike continue/auto it is offered under both. */}
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            title={t('narrateHint')}
+                            onClick={() => void run('narrate')}
+                          >
+                            {t('narrate')}
+                          </Button>
+                          {last?.role === 'assistant' ? (
+                            <>
+                              {/* Continue and auto are the two the row can do
+                                  without on a phone: the least reached for, and the
+                                  easiest to describe in a menu. */}
+                              <div className="hidden items-center gap-1 sm:flex">
+                                <Button size="sm" variant="ghost" onClick={() => void run('continue')}>
+                                  {t('continue')}
+                                </Button>
+                                <Button size="sm" variant="ghost" onClick={() => void run('auto')}>
+                                  {t('auto')}
+                                </Button>
+                              </div>
+                              <MoreActions
+                                label={t('moreActions')}
+                                className="sm:hidden"
+                                actions={[
+                                  {
+                                    key: 'continue',
+                                    label: t('continue'),
+                                    onSelect: () => void run('continue'),
+                                  },
+                                  { key: 'auto', label: t('auto'), onSelect: () => void run('auto') },
+                                ]}
+                              />
+                            </>
+                          ) : null}
+                          {/* Only where the deployment has an image provider: the
+                              server decides, and says so on every chat read. */}
+                          {state.capabilities?.drawScene ? (
+                            <Button size="sm" variant="ghost" onClick={() => void drawScene()}>
+                              {t('drawScene')}
+                            </Button>
+                          ) : null}
+                        </div>
+                      ) : null
+                    }
+                  />
                 </Fragment>
               );
-            }
-            return (
-              <Fragment key={message.key}>
-                {divider}
-                <MessageRow
-                  role={message.role}
-                  content={message.content}
-                  {...(message.shown !== undefined ? { shown: message.shown } : {})}
-                  name={message.role === 'user' ? t('you') : characterName}
-                  avatar={plot?.coverUrl ?? null}
-                  roster={members}
-                  assets={messageAssets}
-                  resolveAsset={resolveAsset}
-                  attachments={message.attachments}
-                  {...(display ? { display } : {})}
-                  {...(components ? { components } : {})}
-                  previousSameRole={meta.previousSameRole}
-                  chatIndex={indexBase + index}
-                  streaming={message.streaming}
-                  // Nothing of the reply on screen yet: the time it has been
-                  // waited for, which is all of the model's thinking that is shown.
-                  thinking={message.streaming && streamText === ''}
-                  disabled={settingsLocked}
-                  {...(message.createdAt ? { createdAt: message.createdAt } : {})}
-                  grouped={meta.grouped}
-                  statusCollapsed={statusCollapsed}
-                  onToggleStatus={toggleStatus}
-                  // The offer stands under the newest reply and nowhere else, and
-                  // only while nothing is being generated over it.
-                  {...(isLast && showActions && message.role === 'assistant' && choicesOffered
-                    ? { onChoice: suggestInput }
-                    : {})}
-                  {...(source && !mode && !isSceneMessage(source)
-                    ? { onSave: (content: string) => editMessage(source, content) }
-                    : {})}
-                  // A turn the scene is made of is edited with the whole scene.
-                  {...(source && !mode && isSceneMessage(source)
-                    ? { onEditScene: () => setSceneEdit(source.id) }
-                    : {})}
-                  {...(source && !mode ? { onDelete: () => void deleteMessage(source.id) } : {})}
-                  {...(branches ? { branches } : {})}
-                  footer={
-                    isLast && showActions ? (
-                      <div
-                        className={cx(
-                          'mt-2 flex items-center gap-1',
-                          message.role === 'user' && 'justify-end',
-                        )}
-                      >
-                        {last?.role === 'assistant' && info && info.total > 1 ? (
-                          <div className="mr-1 flex items-center gap-1 text-xs text-muted">
-                            <button
-                              type="button"
-                              disabled={!prevTarget}
-                              title={t('swipePrev')}
-                              aria-label={t('swipePrev')}
-                              onClick={() => prevTarget && void moveHead(prevTarget)}
-                              className="px-1 hover:text-fg disabled:opacity-30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-                            >
-                              <span aria-hidden="true">◀</span>
-                            </button>
-                            <span className="tabular-nums">
-                              {info.index + 1}/{info.total}
-                            </span>
-                            <button
-                              type="button"
-                              disabled={!nextTarget}
-                              title={t('swipeNext')}
-                              aria-label={t('swipeNext')}
-                              onClick={() => nextTarget && void moveHead(nextTarget)}
-                              className="px-1 hover:text-fg disabled:opacity-30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-                            >
-                              <span aria-hidden="true">▶</span>
-                            </button>
-                          </div>
-                        ) : null}
-                        <Button size="sm" variant="ghost" onClick={() => void run('regenerate')}>
-                          {t('regenerate')}
-                        </Button>
-                        {/* A narration answers a user turn as readily as it follows a
-                            reply, so unlike continue/auto it is offered under both. */}
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          title={t('narrateHint')}
-                          onClick={() => void run('narrate')}
-                        >
-                          {t('narrate')}
-                        </Button>
-                        {last?.role === 'assistant' ? (
-                          <>
-                            {/* Continue and auto are the two the row can do
-                                without on a phone: the least reached for, and the
-                                easiest to describe in a menu. */}
-                            <div className="hidden items-center gap-1 sm:flex">
-                              <Button size="sm" variant="ghost" onClick={() => void run('continue')}>
-                                {t('continue')}
-                              </Button>
-                              <Button size="sm" variant="ghost" onClick={() => void run('auto')}>
-                                {t('auto')}
-                              </Button>
-                            </div>
-                            <MoreActions
-                              label={t('moreActions')}
-                              className="sm:hidden"
-                              actions={[
-                                {
-                                  key: 'continue',
-                                  label: t('continue'),
-                                  onSelect: () => void run('continue'),
-                                },
-                                { key: 'auto', label: t('auto'), onSelect: () => void run('auto') },
-                              ]}
-                            />
-                          </>
-                        ) : null}
-                        {/* Only where the deployment has an image provider: the
-                            server decides, and says so on every chat read. */}
-                        {state.capabilities?.drawScene ? (
-                          <Button size="sm" variant="ghost" onClick={() => void drawScene()}>
-                            {t('drawScene')}
-                          </Button>
-                        ) : null}
-                      </div>
-                    ) : null
-                  }
-                />
-              </Fragment>
-            );
-          })}
+            })}
 
-          {/* Where the drawn scene will land: a box of its own aspect while the
-              provider works, and the same box with the retry in it if it never
-              came. The message the refetch brings back replaces this outright. */}
-          {drawing || drawFailed ? (
-            <SceneDraft
-              status={drawing ? 'drawing' : 'failed'}
-              onRetry={() => void drawScene()}
-            />
-          ) : null}
+            {/* Where the drawn scene will land: a box of its own aspect while the
+                provider works, and the same box with the retry in it if it never
+                came. The message the refetch brings back replaces this outright. */}
+            {drawing || drawFailed ? (
+              <SceneDraft
+                status={drawing ? 'drawing' : 'failed'}
+                onRetry={() => void drawScene()}
+              />
+            ) : null}
 
-          {/* Directly under the row it belongs to, which is the streaming one when
-              a stream failed part-way: its text is still up there, unstored. */}
-          {error ? (
-            <div
-              role="alert"
-              className="flex items-center gap-3 rounded-lg border border-danger/40 bg-danger/5 px-3.5 py-2.5"
-            >
-              <div className="min-w-0 flex-1">
-                <p className="text-sm text-danger">{error}</p>
-                {ambiguous ? <p className="mt-1 text-xs text-muted">{t('sendMaybeDelivered')}</p> : null}
-                {held ? <p className="mt-1 text-xs text-muted">{t('streamError')}</p> : null}
+            {/* Directly under the row it belongs to, which is the streaming one when
+                a stream failed part-way: its text is still up there, unstored. */}
+            {error ? (
+              <div
+                role="alert"
+                className="flex items-center gap-3 rounded-lg border border-danger/40 bg-danger/5 px-3.5 py-2.5"
+              >
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm text-danger">{error}</p>
+                  {ambiguous ? <p className="mt-1 text-xs text-muted">{t('sendMaybeDelivered')}</p> : null}
+                  {held ? <p className="mt-1 text-xs text-muted">{t('streamError')}</p> : null}
+                </div>
+                {retryable && !mode ? (
+                  <Button size="sm" variant="danger" onClick={() => void run('regenerate')}>
+                    {common('retry')}
+                  </Button>
+                ) : null}
               </div>
-              {retryable && !mode ? (
-                <Button size="sm" variant="danger" onClick={() => void run('regenerate')}>
-                  {common('retry')}
-                </Button>
-              ) : null}
-            </div>
-          ) : null}
+            ) : null}
+          </div>
         </div>
       </div>
 

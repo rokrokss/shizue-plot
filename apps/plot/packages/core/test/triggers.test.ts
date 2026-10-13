@@ -8,8 +8,10 @@ import {
   manualTriggerNames,
   MAX_SCRIPT_CHAT_TEXT,
   MAX_TRIGGER_STEPS,
+  MAX_OVERLAY_NAME_LENGTH,
   mergeScriptOverlay,
   overlaidCard,
+  overlayName,
   parseChatML,
   risuCalculate,
   runTriggers,
@@ -836,6 +838,39 @@ describe('code triggers', () => {
     expect(result.character.lorebook?.map((entry) => entry.content)).toEqual(['북쪽', '높다']);
     expect(result.messages.map((message) => message.data)).toEqual(['어서 와']);
   });
+
+  it('take back a name, a first message and a background, and `{{char}}` follows the name where there is no nickname', async () => {
+    const run = (extra: Partial<TriggerCharacter>) => {
+      const triggers = [
+        trigger('start', [{ type: 'triggerlua', code: '' }]),
+        trigger('start', [set('who', '{{char}}')]),
+      ];
+      return runTriggers(input(triggers, { character: character(triggers, extra) }), {
+        code: ({ scope }) => {
+          expect([scope.character.memberName, scope.character.firstMessage, scope.character.backgroundHtml]).toEqual([
+            extra.memberName,
+            undefined,
+            '<style>.a{}</style>',
+          ]);
+          scope.setName('세라');
+          scope.setFirstMessage('새 인사');
+          scope.setBackgroundHtml('<div>밤</div>');
+          expect([scope.character.memberName, scope.character.firstMessage, scope.character.backgroundHtml]).toEqual([
+            '세라',
+            '새 인사',
+            '<div>밤</div>',
+          ]);
+        },
+      });
+    };
+    const plain = await run({ memberName: '리안', backgroundHtml: '<style>.a{}</style>' });
+    expect(plain.character).toEqual({ name: '세라', firstMessage: '새 인사', backgroundHtml: '<div>밤</div>' });
+    expect(plain.variables['who']).toBe('세라');
+    // RisuAI's `{{char}}` is the nickname while there is one, whatever the name under it.
+    const nicknamed = await run({ name: '리리', nickname: '리리', memberName: '리안', backgroundHtml: '<style>.a{}</style>' });
+    expect(nicknamed.character.name).toBe('세라');
+    expect(nicknamed.variables['who']).toBe('리리');
+  });
 });
 
 describe('CBS in effect fields', () => {
@@ -883,6 +918,21 @@ describe('the overlay', () => {
     const card = { description: 'base', lorebook: [lore('x', 'y')], postHistoryInstructions: 'n' };
     expect(overlaidCard(card, second!.members!['a'])).toEqual({ description: 'one', lorebook: [], postHistoryInstructions: 'n' });
     expect(overlaidCard(card, undefined)).toBe(card);
+  });
+
+  it('keeps a name, a first message and a background field by field, the name one trimmed line', () => {
+    const first = mergeScriptOverlay(null, { members: { a: { name: '세라', firstMessage: '안녕' } } });
+    const second = mergeScriptOverlay(first, { members: { a: { backgroundHtml: '<div>밤</div>', firstMessage: '' } } });
+    expect(second).toEqual({ members: { a: { name: '세라', firstMessage: '', backgroundHtml: '<div>밤</div>' } } });
+    // The card is not where a name or a greeting lives: those are the member's and the chat's.
+    expect(overlaidCard({ description: 'd', lorebook: [], postHistoryInstructions: '' }, second!.members!['a'])).toEqual({
+      description: 'd',
+      lorebook: [],
+      postHistoryInstructions: '',
+    });
+    expect(overlayName('  세라  ')).toBe('세라');
+    expect(overlayName('x'.repeat(MAX_OVERLAY_NAME_LENGTH))).toBe('x'.repeat(MAX_OVERLAY_NAME_LENGTH));
+    for (const bad of ['', '   ', 'x'.repeat(MAX_OVERLAY_NAME_LENGTH + 1), '세\n라', '세\t라']) expect(overlayName(bad), bad).toBeNull();
   });
 });
 

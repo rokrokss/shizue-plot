@@ -33,6 +33,8 @@ let chatState: ChatState;
 /** What the server holds after a generation, if it differs from `chatState`. */
 let afterTurn: ChatState | null = null;
 let bundle: ScriptBundle | null = null;
+/** What the plot's public read says besides the fixture's own. */
+let publicPlot: Record<string, unknown> = {};
 
 vi.mock('@/i18n/navigation', async () => {
   const { createElement: h } = await import('react');
@@ -40,15 +42,29 @@ vi.mock('@/i18n/navigation', async () => {
     Link: ({ href, children }: { href: string; children?: ReactNode }) => h('a', { href }, children),
   };
 });
-// Each row draws a button carrying the attribute the sanitizer leaves on one.
+// Each row draws a button carrying the attribute the sanitizer leaves on one, and
+// says whose name it is drawn under and the roster its lines are read against.
 vi.mock('@/components/MessageRow', async () => {
   const { createElement: h } = await import('react');
   return {
-    MessageRow: (props: { content: string; shown?: string }) =>
-      h('div', { 'data-testid': 'row' }, [
+    MessageRow: (props: {
+      content: string;
+      shown?: string;
+      name: string;
+      roster?: readonly { name: string; aliases?: readonly string[] }[];
+    }) =>
+      h(
+        'div',
+        {
+          'data-testid': 'row',
+          'data-name': props.name,
+          'data-roster': JSON.stringify((props.roster ?? []).map((member) => [member.name, member.aliases ?? []])),
+        },
+        [
         h('span', { key: 'text' }, props.shown ?? props.content),
         h('button', { key: 'btn', type: 'button', 'data-shizue-trigger': '공격', 'data-shizue-trigger-id': 'b1' }, '베기'),
-      ]),
+        ],
+      ),
   };
 });
 vi.mock('@/components/ChatPanel', () => ({ ChatPanel: () => null }));
@@ -85,6 +101,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
           characters: [{ id: 'chr_1', name: '리안', avatarUrl: null, intro: '' }],
           displayScripts: [],
           defaultVariables: { hp: '100' },
+          ...publicPlot,
         });
       }
       return Promise.resolve([]);
@@ -223,6 +240,8 @@ beforeEach(() => {
   sent = [];
   afterTurn = null;
   bundle = null;
+  publicPlot = {};
+  store.delete('shizue.customUi');
   chatState = stateWith([greeting, message('m1', 'm0', 'user', '안녕'), message('m2', 'm1', 'assistant', '응.')]);
   host = document.createElement('div');
   document.body.appendChild(host);
@@ -473,5 +492,76 @@ describe('a button', () => {
         body: { messageId: 'm2', scriptRev: 0, variableDelta: { hit: 'b1' } },
       },
     ]);
+  });
+});
+
+describe('what the scripts rewrote of their character', () => {
+  const rows = (): HTMLElement[] => [...host.querySelectorAll<HTMLElement>('[data-testid="row"]')];
+  const texts = (): string[] => rows().map((row) => row.querySelector('span')!.textContent ?? '');
+
+  it('draws the member under the name its scripts gave it, its lines under the old one still its own', async () => {
+    bundle = scripted({ memberId: 'chr_1', overlay: { member: { name: '세라' }, persona: null } });
+    await render();
+    // A plot of one member is that character: the chat is with the new name.
+    expect(rows().map((row) => row.dataset['name'])).toEqual(['세라', '나', '세라']);
+    expect(rows()[0]!.dataset['roster']).toBe(JSON.stringify([['세라', ['리안']]]));
+    expect(host.textContent).toContain('세라');
+  });
+
+  it('keeps the plot’s name over a cast of several, where only the member is renamed', async () => {
+    publicPlot = {
+      characters: [
+        { id: 'chr_1', name: '리안', avatarUrl: null, intro: '' },
+        { id: 'chr_2', name: '카이', avatarUrl: null, intro: '' },
+      ],
+    };
+    bundle = scripted({ memberId: 'chr_1', overlay: { member: { name: '세라' }, persona: null } });
+    await render();
+    expect(rows()[0]!.dataset['name']).toBe('여관');
+    expect(rows()[0]!.dataset['roster']).toBe(JSON.stringify([['세라', ['리안']], ['카이', []]]));
+  });
+
+  it('shows the first message its scripts set where the branch opens on the first opening, and only there', async () => {
+    bundle = scripted({ overlay: { member: { firstMessage: '{{char}}의 문이 다시 열린다.' }, persona: null } });
+    await render();
+    expect(texts()[0]).toBe('여관의 문이 다시 열린다.');
+
+    // The branch opens on the second opening: RisuAI draws that one, as stored.
+    root.unmount();
+    root = createRoot(host);
+    chatState = {
+      ...chatState,
+      siblings: { ...chatState.siblings, m0: { index: 1, total: 2, ids: ['m9', 'm0'] } },
+    };
+    await render();
+    expect(texts()[0]).toBe('어서 와.');
+  });
+
+  it('draws the card’s background behind the conversation, or the one its scripts set, as custom UI', async () => {
+    publicPlot = { backgroundHtml: '<div class="bg">hp {{getvar::hp}}</div><script>alert(1)</script>' };
+    await render();
+    const background = host.querySelector('[data-testid="chat-background"]')!;
+    expect(background.getAttribute('aria-hidden')).toBe('true');
+    // Read as CBS against the chat, and held to the display sanitizer inside the message scope.
+    expect(background.querySelector('.shizue-msg')!.innerHTML).toBe('<div class="x-shizue-bg">hp 100</div>');
+
+    root.unmount();
+    root = createRoot(host);
+    bundle = scripted({ overlay: { member: { backgroundHtml: '<p>밤</p>' }, persona: null } });
+    await render();
+    expect(host.querySelector('[data-testid="chat-background"] .shizue-msg')!.innerHTML).toBe('<p>밤</p>');
+
+    // The reader who turned custom UI off gets none of it.
+    root.unmount();
+    root = createRoot(host);
+    store.set('shizue.customUi', '0');
+    await render();
+    expect(host.querySelector('[data-testid="chat-background"]')).toBeNull();
+  });
+
+  it('draws no background for a work without one', async () => {
+    await render();
+    expect(host.querySelector('[data-testid="chat-background"]')).toBeNull();
+    expect(texts()).toEqual(['어서 와.', '안녕', '응.']);
   });
 });

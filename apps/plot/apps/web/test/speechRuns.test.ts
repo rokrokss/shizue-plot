@@ -68,3 +68,20 @@ describe('a member who goes by a nickname', () => {
     expect(speechRuns('카이: 응.', ['아리아', '카이', '세이'], contested)).toEqual([{ name: '카이', text: '응.' }]);
   });
 });
+
+describe('a member its card’s scripts renamed', () => {
+  // As the chat page hands the roster over after `setName`: the new name, the old one beside it.
+  const roster = [{ name: '세라', aliases: ['아리아'] }, { name: '카이' }];
+  const aliases = speakerAliases(roster);
+
+  it('keeps the lines written under the old name, drawn under the new one', () => {
+    expect(speechRuns('아리아: 왔어?\n세라: *웃으며* 늦었네.\n카이: 응.', ['세라', '카이'], aliases)).toEqual([
+      { name: '세라', text: '왔어?\n*웃으며* 늦었네.' },
+      { name: '카이', text: '응.' },
+    ]);
+  });
+
+  it('leaves the old name to a member who has it as their own', () => {
+    expect([...speakerAliases([{ name: '세라', aliases: ['카이'] }, { name: '카이' }])]).toEqual([]);
+  });
+});

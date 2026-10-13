@@ -48,6 +48,23 @@ export const isGreeting = (message: { parentId: string | null; role: string }): 
   message.parentId === null && message.role === 'assistant';
 
 /**
+ * Whether a branch opens on the plot's first opening — RisuAI's `fmIndex` -1,
+ * where its greeting is drawn from the character's first message, which a card's
+ * scripts may rewrite (`setCharacterFirstMessage`). The openings are the chat's
+ * roots, oldest first, as the server numbers them (`promptBranch`); a windowed
+ * path that starts past its root opens on none.
+ */
+export function opensOnFirstGreeting(
+  path: readonly { id: string; parentId: string | null; role: string }[],
+  siblings: Readonly<Record<string, { index: number }>>,
+): boolean {
+  const root = path[0];
+  // Every read says where each message of its path stands among its siblings; a
+  // root nobody said that of is not taken for the first.
+  return root !== undefined && isGreeting(root) && siblings[root.id]?.index === 0;
+}
+
+/**
  * A `{{random}}` that is the same on every render of one message. Left on
  * `Math.random`, a roll inside a kept branch would come out different each time
  * a variable moved anywhere in the chat.

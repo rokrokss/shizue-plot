@@ -20,6 +20,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { Worker as NodeWorker } from 'node:worker_threads';
 import { runTriggers, scriptChatOf, type CodeScope, type TriggerScript } from '@shizue/core/triggers';
+import type { LoreEntry } from '../src/lib/types';
 import { afterEach, describe, expect, it } from 'vitest';
 import { LUA_CLASSIFICATION } from '../src/lib/scripts/lua/classification';
 import { createLuaEngine, luaFunctionNames } from '../src/lib/scripts/lua/engine';
@@ -112,7 +113,7 @@ const snapshot = (extra: Partial<LuaSnapshot> = {}): LuaSnapshot => ({
     { role: 'user', data: '안녕', time: 1 },
     { role: 'char', data: '어서 와', time: 2 },
   ],
-  char: { name: '리안', description: '사서.', greeting: '첫 인사', lore: [] },
+  char: { name: '리안', nickname: '', description: '사서.', firstMessage: '첫 인사', background: '', image: '', lore: [] },
   user: '아린',
   persona: '{{user}}는 여행자',
   note: '노트',
@@ -141,6 +142,18 @@ const host: LuaHost = {
   request: async (url) => {
     asked.push(`request:${url}`);
     return { status: 203, data: `"본문" of ${url}` };
+  },
+  // The page's activation, standing in: one entry per upsert after a fixed one, and a budget of 10.
+  lore: async (history, upserts) => {
+    asked.push(`lore:${history.join(',')}:${upserts.map((book) => book.comment).join(',')}`);
+    return {
+      actives: [
+        { prompt: '{{char}}의 탑', role: 'system' },
+        { prompt: '   ', role: 'user' },
+        ...upserts.map((book) => ({ prompt: book.content, role: 'assistant' as const })),
+      ],
+      maxContext: 10,
+    };
   },
 };
 
@@ -190,6 +203,19 @@ describe('the Lua sandbox', () => {
     expect(result.description).toBe('사서. 바뀜');
     expect(result.lore).toEqual([expect.objectContaining({ comment: '탑', content: '높은 탑', key: '탑', alwaysActive: true })]);
     expect(result.notes.map(([name]) => name)).toContain('cbs');
+  });
+
+  it('notes cbs() only when it leaves a macro as written', async () => {
+    const result = await done(
+      sandboxWith(),
+      `
+      function onStart(id)
+        setChatVar(id, 'cbs', cbs('{{char}}와 {{user}}, hp={{getvar::hp}} 그대로'))
+      end`,
+    );
+    expect(result.error).toBeNull();
+    expect(Object.fromEntries(result.vars)).toMatchObject({ cbs: '리안와 아린, hp=10 그대로' });
+    expect(result.notes.map(([name]) => name)).not.toContain('cbs');
   });
 
   it('keeps one Lua state per mode, as RisuAI does, until the code changes', async () => {
@@ -574,6 +600,124 @@ describe('the Lua sandbox', () => {
     expect(opened).toBe(2);
   });
 
+  it('renames the character and rewrites its first message and background as RisuAI does, behind its gates', async () => {
+    const sandbox = sandboxWith();
+    const code = `function onStart(id)
+      setChatVar(id, 'before', getName(id) .. '|' .. cbs('{{char}}'))
+      setName(id, '세라')
+      setChatVar(id, 'after', getName(id) .. '|' .. cbs('{{char}}'))
+      local ok, err = pcall(setName, id, 3)
+      setChatVar(id, 'bad', tostring(ok) .. ':' .. tostring(err))
+      setChatVar(id, 'fm', tostring(setCharacterFirstMessage(id, 1)) .. '|' .. getCharacterFirstMessage(id))
+      setChatVar(id, 'fm2', tostring(setCharacterFirstMessage(id, '새 인사')) .. '|' .. getCharacterFirstMessage(id))
+      setChatVar(id, 'last', getCharacterLastMessage(id))
+      setChatVar(id, 'bg', getBackgroundEmbedding(id) .. '|' .. tostring(setBackgroundEmbedding(id, false)))
+      setChatVar(id, 'bg2', tostring(setBackgroundEmbedding(id, '<div>밤</div>')) .. '|' .. getBackgroundEmbedding(id))
+    end`;
+    const snap = snapshot({
+      messages: [{ role: 'user', data: '안녕', time: 1 }],
+      char: { ...snapshot().char, background: '<style>.a{}</style>' },
+    });
+    const result = await done(sandbox, code, start, snap);
+    expect(result.error).toBeNull();
+    const vars = Object.fromEntries(result.vars);
+    expect(vars).toMatchObject({
+      before: '리안|리안',
+      after: '세라|세라',
+      // Not a string: RisuAI's setName throws, setCharacterFirstMessage and setBackgroundEmbedding answer false.
+      fm: 'false|첫 인사',
+      fm2: 'true|새 인사',
+      // With no reply of the character's yet, its first message.
+      last: '새 인사',
+      bg: '<style>.a{}</style>|false',
+      bg2: 'true|<div>밤</div>',
+    });
+    expect(vars['bad']).toMatch(/^false:.*Invalid data type/);
+    expect([result.name, result.firstMessage, result.background]).toEqual(['세라', '새 인사', '<div>밤</div>']);
+
+    // `{{char}}` is the card's nickname while it has one, as RisuAI reads it; the name under it moves.
+    const nicknamed = await done(
+      sandbox,
+      "function onStart(id) setName(id, '세라') setChatVar(id, 'n', getName(id) .. '|' .. cbs('{{char}}')) end",
+      start,
+      snapshot({ char: { ...snapshot().char, nickname: '리리' } }),
+    );
+    expect(nicknamed.vars).toEqual([['n', '세라|리리']]);
+
+    // A display pass holds no safe key: the setters answer nothing and write nothing, the getter too.
+    const shown = await done(
+      sandbox,
+      `listenEdit('editDisplay', function(id, value)
+        setName(id, '화면')
+        local set = setBackgroundEmbedding(id, 'x')
+        local got = getBackgroundEmbedding(id)
+        return tostring(set) .. tostring(got)
+      end)`,
+      { kind: 'display', items: [{ text: 'a', index: 0 }] },
+    );
+    expect(shown.error).toBeNull();
+    expect(shown.res).toEqual(['nilnil']);
+    expect([shown.name, shown.background]).toEqual([null, null]);
+    // An edit hook does hold one.
+    const edited = await done(sandbox, "listenEdit('editOutput', function(id, v) setName(id, '편집') return v end)", {
+      kind: 'edit',
+      phase: 'editOutput',
+      text: 'v',
+      index: 0,
+    });
+    expect(edited.name).toBe('편집');
+  });
+
+  it('lists the active lore as RisuAI does, cut at the budget less the reserve, behind low-level access', async () => {
+    asked.length = 0;
+    const sandbox = sandboxWith();
+    const code = `
+      onStart = async(function(id)
+        upsertLocalLoreBook(id, '탑', '높은 탑이다', {})
+        local all = loadLoreBooks(id)
+        local parts = {}
+        for i, book in ipairs(all) do parts[i] = book.role .. '=' .. book.data end
+        setChatVar(id, 'all', table.concat(parts, '/'))
+        setChatVar(id, 'cut', loadLoreBooksMain(id, 7):await())
+        setChatVar(id, 'none', loadLoreBooksMain(id, 11):await())
+      end)`;
+    const granted = await done(sandbox, code, start, snapshot({ lowLevel: true }));
+    expect(granted.error).toBeNull();
+    expect(Object.fromEntries(granted.vars)).toEqual({
+      // RisuAI's wrapper passes no reserve, and its arithmetic then caps nothing. The blank
+      // entry is skipped, `{{char}}` answered, and an assistant entry is the character's.
+      all: 'system=리안의 탑/char=높은 탑이다',
+      // 10 less 7 is 3: the first entry is 2 tokens, the next would make 4.
+      cut: JSON.stringify([{ data: '리안의 탑', role: 'system' }]),
+      // A reserve past the budget lists nothing.
+      none: '[]',
+    });
+    // The page was handed the chat as the script has it, and what it upserted on the way.
+    expect(asked).toEqual(['lore:안녕,어서 와:탑', 'lore:안녕,어서 와:탑', 'lore:안녕,어서 와:탑']);
+
+    // No access: RisuAI's `loadLoreBooksMain` answers nothing, and its wrapper's decode fails.
+    asked.length = 0;
+    const without = await done(sandbox, code);
+    expect(without.error).toMatch(/expected argument of type string/);
+    expect(asked).toEqual([]);
+  });
+
+  it('answers the character’s picture as the markup it was given, and a persona’s as nothing', async () => {
+    const sandbox = sandboxWith();
+    const image = '<div class="risu-inlay-image"><img src="/api/plots/p/characters/c/avatar"></div>';
+    const result = await done(
+      sandbox,
+      `onStart = async(function(id)
+        setChatVar(id, 'char', getCharacterImage(id))
+        setChatVar(id, 'persona', getPersonaImage(id))
+      end)`,
+      start,
+      // No gate in RisuAI: a call without low-level access gets it too.
+      snapshot({ char: { ...snapshot().char, image } }),
+    );
+    expect(Object.fromEntries(result.vars)).toEqual({ char: image, persona: '' });
+  });
+
   it('refuses what the worker should not be able to hand back', async () => {
     const sandbox = sandboxWith();
     // A message identity claimed twice, or out of range, is no identity.
@@ -760,6 +904,9 @@ describe('the Lua engine', () => {
       character: { name: '리안', description: '', lorebook: [] },
       setDescription: () => undefined,
       setLorebook: () => undefined,
+      setName: () => undefined,
+      setFirstMessage: () => undefined,
+      setBackgroundHtml: () => undefined,
       user: '',
       persona: '',
       note: '',
@@ -797,6 +944,119 @@ describe('the Lua engine', () => {
     );
     expect(searched).toEqual([['물', '불', '물']]);
     expect(result.variables['best']).toBe('물');
+  });
+
+  it('carries a rename, a first message and a background through the run, and drops a name the server would not keep', async () => {
+    const run = async (name: string) => {
+      const logs: string[] = [];
+      const triggers = [
+        lua(`function onStart(id)
+          setName(id, ${JSON.stringify(name)})
+          setCharacterFirstMessage(id, '새 인사')
+          setBackgroundEmbedding(id, '<div>밤</div>')
+        end`),
+      ];
+      const engine = createLuaEngine({
+        triggers,
+        lowLevelAccess: false,
+        sandbox: sandboxWith(),
+        ui: host,
+        llm: host.llm,
+        similarity: host.similarity,
+        request: host.request,
+        log: (entry) => logs.push(`${entry.kind}:${entry.effect}`),
+      });
+      const result = await runTriggers(
+        {
+          mode: 'start',
+          character: { name: '리안', description: '', lorebook: [], postHistoryInstructions: '', lowLevelAccess: false, triggers },
+          messages: [],
+          note: '',
+          persona: '',
+          variables: Object.create(null),
+        },
+        { code: (request) => engine.runCode!(request) },
+      );
+      return { character: result.character, logs };
+    };
+    // Kept as a member's own name is: trimmed.
+    expect(await run('  세라  ')).toEqual({
+      character: { name: '세라', firstMessage: '새 인사', backgroundHtml: '<div>밤</div>' },
+      logs: [],
+    });
+    for (const bad of ['', 'x'.repeat(101), '세\n라']) {
+      expect(await run(bad), JSON.stringify(bad)).toEqual({
+        character: { firstMessage: '새 인사', backgroundHtml: '<div>밤</div>' },
+        logs: ['limit:setName'],
+      });
+    }
+  });
+
+  it('activates the lore a script lists over the character the call has, with what it upserted', async () => {
+    const asks: { history: string[]; lore: string[] }[] = [];
+    const entry = (name: string, content: string): LoreEntry => ({
+      name,
+      keys: [name],
+      secondaryKeys: [],
+      selective: false,
+      content,
+      enabled: false,
+      constant: false,
+      insertionOrder: 100,
+      caseSensitive: false,
+      useRegex: false,
+      position: 'before_char',
+    });
+    const triggers = [
+      lua(`onStart = async(function(id)
+        upsertLocalLoreBook(id, '탑', '높은 탑', { key = '탑' })
+        local books = loadLoreBooks(id)
+        setChatVar(id, 'books', books[1].data .. '/' .. books[2].data .. '/' .. #books)
+        setChatVar(id, 'image', getCharacterImage(id))
+      end)`),
+    ];
+    const engine = createLuaEngine({
+      triggers,
+      lowLevelAccess: true,
+      sandbox: sandboxWith(),
+      ui: host,
+      llm: host.llm,
+      similarity: host.similarity,
+      request: host.request,
+      lore: async (history, lorebook) => {
+        asks.push({ history, lore: lorebook.map((book) => `${book.name}:${book.enabled}`) });
+        return { actives: lorebook.map((book) => ({ prompt: book.content, role: 'system' as const })), maxContext: 100 };
+      },
+      avatarUrl: '/api/plots/p/characters/c/avatar',
+      log: () => undefined,
+    });
+    const result = await runTriggers(
+      {
+        mode: 'start',
+        character: {
+          name: '리안',
+          description: '',
+          // A disabled entry stays disabled: the page activates the book as the card has it.
+          lorebook: [entry('성', '북쪽의 성')],
+          postHistoryInstructions: '',
+          lowLevelAccess: true,
+          triggers,
+        },
+        messages: [
+          { role: 'user', data: '안녕', id: 'm0' },
+          { role: 'char', data: '어서 와', id: 'm1' },
+        ],
+        note: '',
+        persona: '',
+        variables: Object.create(null),
+      },
+      { code: (request) => engine.runCode!(request) },
+    );
+    expect(asks).toEqual([{ history: ['안녕', '어서 와'], lore: ['성:false', '탑:true'] }]);
+    expect(result.variables['books']).toBe('북쪽의 성/높은 탑/2');
+    expect(result.variables['image']).toBe(
+      '<div class="risu-inlay-image"><img src="/api/plots/p/characters/c/avatar"></div>',
+    );
   });
 
   it('answers a script’s request with the page’s, and only with low-level access', async () => {

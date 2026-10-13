@@ -124,10 +124,11 @@ export type MessageScriptState = 'pending';
 
 /**
  * What a card's scripts rewrote of the work itself — a member's description, a
- * lorebook entry — for one chat, where RisuAI would have rewritten the card for
- * every chat at once. Its shape is `ScriptOverlay` in @shizue/core/triggers
- * (`{members: {[id]: {description?, lorebook?, postHistoryInstructions?}},
- * persona?}`), validated and merged by apps/api/src/scriptState.ts; the API lays
+ * lorebook entry, its name — for one chat, where RisuAI would have rewritten the
+ * card for every chat at once. Its shape is `ScriptOverlay` in
+ * @shizue/core/triggers (`{members: {[id]: {description?, lorebook?,
+ * postHistoryInstructions?, name?, firstMessage?, backgroundHtml?}}, persona?}`),
+ * validated and merged by apps/api/src/scriptState.ts; the API lays
  * it over the cards when it builds a prompt. Typed loosely here so the schema
  * does not depend on the script runtime.
  */

@@ -230,6 +230,12 @@ export interface PublicMember {
    * the model may write the member's lines under it. Null when the card has none.
    */
   nickname?: string | null;
+  /**
+   * Other names the member's lines go by on this screen: the name it had before
+   * its card's scripts renamed it in this chat (Lua's `setName`). The chat page
+   * sets it; the API never sends it.
+   */
+  aliases?: readonly string[];
 }
 
 /** The only shape a non-owner ever sees of a plot: no definitions. */
@@ -291,6 +297,12 @@ export interface PublicPlotDetail extends PublicPlot {
   displayScripts: DisplayScript[];
   /** The stylesheet the scripts' markup is drawn with; '' when the plot has none. */
   css: string;
+  /**
+   * What a RisuAI card draws behind the chat (`backgroundHTML`), past the
+   * stylesheet above, which is its `<style>` elements; '' when there is nothing
+   * else. Optional for a detail built by hand.
+   */
+  backgroundHtml?: string;
   defaultVariables: Record<string, string>;
   /** The Layer 2 module, for the same reason. '' when the plot has none. */
   componentCode: string;

@@ -982,6 +982,76 @@ describe('slash commands', () => {
   });
 });
 
+describe('the name, the first message and the background', () => {
+  const memberId = '00000000-0000-4000-8000-000000000001';
+  const lua = [trigger('manual', [{ type: 'triggerlua', code: 'x' }], { comment: '이름' })];
+
+  it('go to the overlay, reach the page, and are what the next run reads', async () => {
+    const { api, calls } = fakeApi();
+    const seen: unknown[] = [];
+    const overlays: unknown[] = [];
+    let first = true;
+    const runtime = createScriptRuntime({
+      chatId: 'c1',
+      api,
+      ui: silentUi,
+      bundle: bundle({
+        triggers: lua,
+        character: { ...bundle().character, name: '리안', nickname: '', backgroundHtml: '<style>.a{}</style>' },
+      }),
+      onOverlay: (member) => void overlays.push(member),
+      engines: [
+        {
+          name: 'lua',
+          handles: () => true,
+          runCode: async ({ scope }) => {
+            const { name, memberName, firstMessage, backgroundHtml } = scope.character;
+            seen.push({ name, memberName, firstMessage, backgroundHtml, greeting: scope.greeting });
+            if (!first) return;
+            first = false;
+            scope.setName('세라');
+            scope.setFirstMessage('새 인사');
+            scope.setBackgroundHtml('<div>밤</div>');
+          },
+        },
+      ],
+    });
+    await runtime.manual('이름', null, view([greeting], { firstGreeting: true }));
+    expect(calls[0]!.body['overlay']).toEqual({
+      members: { [memberId]: { name: '세라', firstMessage: '새 인사', backgroundHtml: '<div>밤</div>' } },
+    });
+    expect(overlays).toEqual([{ name: '세라', firstMessage: '새 인사', backgroundHtml: '<div>밤</div>' }]);
+
+    // On the first opening the greeting is the first message the scripts set; on another, the stored one.
+    await runtime.manual('이름', null, view([greeting], { firstGreeting: true }));
+    await runtime.manual('이름', null, view([greeting], { firstGreeting: false }));
+    expect(seen).toEqual([
+      { name: '리안', memberName: '리안', firstMessage: undefined, backgroundHtml: '<style>.a{}</style>', greeting: '어서 와.' },
+      { name: '세라', memberName: '세라', firstMessage: '새 인사', backgroundHtml: '<div>밤</div>', greeting: '새 인사' },
+      { name: '세라', memberName: '세라', firstMessage: '새 인사', backgroundHtml: '<div>밤</div>', greeting: '어서 와.' },
+    ]);
+  });
+
+  it('keep `{{char}}` the nickname through a rename, and let the triggers read the first message the overlay holds', async () => {
+    const { api } = fakeApi();
+    const runtime = createScriptRuntime({
+      chatId: 'c1',
+      api,
+      ui: silentUi,
+      bundle: bundle({
+        name: '리리',
+        triggers: [trigger('start', [{ type: 'v2GetFirstMessage', outputVar: 'fm', indent: 0 }, setvar('who', '{{char}}')])],
+        character: { ...bundle().character, name: '리안', nickname: '리리' },
+        overlay: { member: { name: '세라', firstMessage: '새 인사' }, persona: null },
+      }),
+    });
+    const onFirst = await runtime.prepare('auto', view([greeting], { firstGreeting: true }));
+    expect(onFirst.body['startDelta']).toEqual({ fm: '새 인사', who: '리리' });
+    const onAnother = await runtime.prepare('auto', view([greeting], { firstGreeting: false }));
+    expect(onAnother.body['startDelta']).toEqual({ fm: '어서 와.', who: '리리' });
+  });
+});
+
 describe('loadWholeBranch', () => {
   it('reads every window before the loaded one, oldest last', async () => {
     const all = Array.from({ length: 5 }, (_, index) =>

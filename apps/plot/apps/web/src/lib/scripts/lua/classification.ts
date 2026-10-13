@@ -4,7 +4,8 @@
  * hooks it calls into a script — in `TRIGGER_CLASSIFICATION`'s words:
  *
  * - `browser`: done in the reader's browser, as RisuAI does it — in the sandbox,
- *   or for `similarity`, on the page, which the sandbox relays the call to.
+ *   or for `similarity` and `loadLoreBooks`, on the page, which the sandbox
+ *   relays the call to.
  * - `server`: done in the sandbox, and what it changed is carried to the API
  *   the way a trigger's writes are — a chat variable on the turn, the chat the
  *   run left, a rewrite of the work in the chat's overlay — or, for a model
@@ -89,26 +90,44 @@ export const LUA_CLASSIFICATION: Readonly<Record<string, LuaSupport>> = {
   cbs: host('browser', 'only {{char}}, {{user}}, {{getvar}}, {{getglobalvar}}; the rest is left as written'),
 
   // The character, the persona, the note
-  getName: host('browser', '`{{char}}`: the member’s nickname, else its name'),
-  setName: host('logged', 'the name is the plot’s'),
+  getName: host(
+    'browser',
+    'RisuAI’s `char.name`: the member’s name as this chat’s overlay has it (`{{char}}` is the nickname, where the card sets one)',
+  ),
+  setName: host(
+    'server',
+    'chat overlay: the member’s name in this chat — its speaker name (its lines under the old one stay its), the name the prompt gives it, `{{char}}` where the card has no nickname, and the plot’s `{{char}}` in a plot of one member; one line of at most 100 characters, else dropped and noted',
+  ),
   getDescription: host('browser', 'the description as this chat’s overlay has it'),
   setDescription: host('server', 'chat overlay'),
-  getCharacterFirstMessage: host('browser', 'the greeting the branch opened on'),
-  setCharacterFirstMessage: host('logged', 'the greeting is a stored message; answers false'),
+  getCharacterFirstMessage: host('browser', 'what setCharacterFirstMessage left, else the greeting the branch opened on'),
+  setCharacterFirstMessage: host(
+    'server',
+    'chat overlay: what the plot’s first opening reads as, on screen and in the prompt, while the branch opens on it (RisuAI’s `fmIndex` -1); the stored greeting stays; answers true',
+  ),
   getPersonaName: host('browser'),
   getPersonaDescription: host('browser', 'its {{char}}/{{user}}/variables answered as cbs() answers them'),
   getAuthorsNote: host('browser', 'the chat note'),
-  getBackgroundEmbedding: host('logged', 'there is no background HTML; answers an empty string'),
-  setBackgroundEmbedding: host('logged', 'answers false'),
+  getBackgroundEmbedding: host('browser', 'the overlay’s, else the card’s `backgroundHTML`, whole'),
+  setBackgroundEmbedding: host(
+    'server',
+    'chat overlay: drawn behind the conversation as CBS through the display sanitizer, scoped to it, in place of the card’s; answers true',
+  ),
   getLoreBooks: wrapper('browser', 'by name, in RisuAI’s shape; content as cbs() answers it'),
   getLoreBooksMain: host('browser', 'as getLoreBooks'),
   upsertLocalLoreBook: host('server', 'chat overlay; replaces the entries of that name'),
-  loadLoreBooks: wrapper('impossible', 'lore is activated on the server; answers an empty list'),
-  loadLoreBooksMain: host('impossible', 'as loadLoreBooks', true),
-  getCharacterImage: wrapper('impossible', 'there are no inlay images; answers an empty string'),
-  getCharacterImageMain: host('impossible', 'as getCharacterImage'),
-  getPersonaImage: wrapper('impossible', 'as getCharacterImage'),
-  getPersonaImageMain: host('impossible', 'as getCharacterImage'),
+  loadLoreBooks: wrapper(
+    'browser',
+    'activated on the page as /test_lorebook is — the member’s book with the call’s upserts, over the chat as the script has it — and cut at the chat’s context budget less `reserve`; content as cbs() answers it',
+  ),
+  loadLoreBooksMain: host('browser', 'as loadLoreBooks', true),
+  getCharacterImage: wrapper(
+    'browser',
+    'the member’s avatar as the markup RisuAI’s inlay token draws (`<div class="risu-inlay-image"><img>`), which a message or the display draws here; the model reads it as text; empty without one',
+  ),
+  getCharacterImageMain: host('browser', 'as getCharacterImage'),
+  getPersonaImage: wrapper('browser', 'a persona has no picture here: empty, RisuAI’s answer for one without'),
+  getPersonaImageMain: host('browser', 'as getPersonaImage'),
 
   // Model, network, images
   LLM: wrapper('server', 'POST /api/chats/:id/script-llm, the chat’s model on the reader’s account; text only'),

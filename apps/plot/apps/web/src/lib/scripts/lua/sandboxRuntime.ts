@@ -126,7 +126,21 @@ export interface LuaSnapshot {
   vars: [string, string][];
   globals: [string, string][];
   messages: LuaMessage[];
-  char: { name: string; description: string; greeting: string; lore: LuaLoreBook[] };
+  /**
+   * RisuAI's `char`: `name` its name (`getName`), `nickname` what `{{char}}` is
+   * instead where the card sets one, `firstMessage` and `background` as this
+   * chat's overlay has them, and `image` the markup `getCharacterImage` answers
+   * ('' without an avatar).
+   */
+  char: {
+    name: string;
+    nickname: string;
+    description: string;
+    firstMessage: string;
+    background: string;
+    image: string;
+    lore: LuaLoreBook[];
+  };
   user: string;
   persona: string;
   note: string;
@@ -163,6 +177,10 @@ export interface LuaCallResult {
   /** The chat as the script left it, when it touched it; `key` is the snapshot index a message came from. */
   messages: { role: 'user' | 'char'; data: string; key: number | null }[] | null;
   description: string | null;
+  /** `setName`, `setCharacterFirstMessage` and `setBackgroundEmbedding`: the last value each was set to, or null. */
+  name: string | null;
+  firstMessage: string | null;
+  background: string | null;
   /** `upsertLocalLoreBook` calls, in order. */
   lore: LuaLoreBook[];
   /** Functions called that are not carried out here, with why. */
@@ -171,7 +189,7 @@ export interface LuaCallResult {
 }
 
 /** The host calls a script can make. Every other name is dropped. */
-export type LuaHostName = 'alert' | 'input' | 'select' | 'confirm' | 'llm' | 'similarity' | 'request';
+export type LuaHostName = 'alert' | 'input' | 'select' | 'confirm' | 'llm' | 'similarity' | 'request' | 'lore';
 
 /* ------------------------------------------------------------ the worker */
 
@@ -325,15 +343,15 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
    * is left as written.
    */
   function cbsLite(ctx: Any, value: Any): string {
-    note(ctx, 'cbs', 'only {{char}}, {{user}}, {{getvar}} and {{getglobalvar}} are answered inside the sandbox');
     return text(value).replace(/\{\{\s*([^{}]*?)\s*\}\}/g, function (whole: string, inner: string) {
       const at = inner.indexOf('::');
       const name = (at === -1 ? inner : inner.slice(0, at)).toLowerCase().replace(/[\s_-]/g, '');
       const arg = at === -1 ? '' : inner.slice(at + 2);
-      if (name === 'char' || name === 'bot') return ctx.char.name;
+      if (name === 'char' || name === 'bot') return ctx.char.nickname || ctx.char.name;
       if (name === 'user') return ctx.user;
       if (name === 'getvar') return readMap(ctx.vars, arg);
       if (name === 'getglobalvar') return readMap(ctx.globals, arg);
+      note(ctx, 'cbs', 'only {{char}}, {{user}}, {{getvar}} and {{getglobalvar}} are answered inside the sandbox');
       return whole;
     });
   }
@@ -661,15 +679,15 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
     });
     set('getCharacterImageMain', function () {
       const ctx = c();
+      // RisuAI's is an inlay token for the character's picture; here, the picture's own
+      // markup, which a message or the display draws the same way. '' without one.
       return Promise.resolve().then(function () {
-        note(ctx, 'getCharacterImage', 'there are no inlay images here');
-        return '';
+        return ctx.char.image;
       });
     });
     set('getPersonaImageMain', function () {
-      const ctx = c();
+      // A persona has no picture here, and RisuAI answers '' for one without.
       return Promise.resolve().then(function () {
-        note(ctx, 'getPersonaImage', 'there are no inlay images here');
         return '';
       });
     });
@@ -725,7 +743,9 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
     set('setName', function (id: Any, name: Any) {
       if (!safe(id)) return;
       if (typeof name !== 'string') throw 'Invalid data type';
-      note(c(), 'setName', 'the name is the plot’s and is not rewritten per chat');
+      const ctx = c();
+      ctx.char.name = name;
+      ctx.nameChanged = true;
     });
     set('getDescription', function (id: Any) {
       if (!safe(id)) return;
@@ -738,13 +758,15 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
       ctx.descriptionChanged = true;
     });
     set('getCharacterFirstMessage', function () {
-      return c().char.greeting;
+      return c().char.firstMessage;
     });
     set('setCharacterFirstMessage', function (id: Any, data: Any) {
       if (!safe(id)) return;
       if (typeof data !== 'string') return false;
-      note(c(), 'setCharacterFirstMessage', 'the greeting is a stored message and is not rewritten');
-      return false;
+      const ctx = c();
+      ctx.char.firstMessage = data;
+      ctx.firstMessageChanged = true;
+      return true;
     });
     set('getPersonaName', function () {
       return c().user;
@@ -758,14 +780,15 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
     });
     set('getBackgroundEmbedding', function (id: Any) {
       if (!safe(id)) return;
-      note(c(), 'getBackgroundEmbedding', 'there is no background HTML here');
-      return '';
+      return c().char.background;
     });
     set('setBackgroundEmbedding', function (id: Any, data: Any) {
       if (!safe(id)) return;
       if (typeof data !== 'string') return false;
-      note(c(), 'setBackgroundEmbedding', 'there is no background HTML here');
-      return false;
+      const ctx = c();
+      ctx.char.background = data;
+      ctx.backgroundChanged = true;
+      return true;
     });
     set('getLoreBooksMain', function (_id: Any, search: Any) {
       const ctx = c();
@@ -798,18 +821,40 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
       ctx.lore.push(book);
       ctx.loreUpserts.push(book);
     });
-    set('loadLoreBooksMain', function (id: Any) {
+    set('loadLoreBooksMain', function (id: Any, reserve: Any) {
       const ctx = c();
       return Promise.resolve().then(function () {
         if (!low(id)) return undefined;
-        note(ctx, 'loadLoreBooks', 'lore is activated on the server when the prompt is built');
-        return '[]';
+        // The page activates the book as the prompt would, over the chat as the script
+        // has it and the entries it upserted so far; the rest is RisuAI's, here.
+        const history = ctx.messages.map(function (message: Any) {
+          return message.data;
+        });
+        return host(ctx, 'lore', { history: history, upserts: ctx.loreUpserts }).then(function (answer: Any) {
+          if (!answer.ok) throw new Error(text(answer.error));
+          // RisuAI's arithmetic as written: a reserve its wrapper never passes leaves NaN, which caps nothing.
+          const maxContext = answer.value.maxContext - reserve;
+          if (maxContext < 0) return JSON.stringify([]);
+          let total = 0;
+          const books: Any[] = [];
+          const actives = answer.value.actives;
+          for (let i = 0; i < actives.length; i += 1) {
+            const parsed = cbsLite(ctx, actives[i].prompt).trim();
+            if (parsed.length === 0) continue;
+            // As `getTokens` counts them.
+            const tokens = Math.ceil(parsed.length / 4);
+            if (total + tokens > maxContext) break;
+            total += tokens;
+            books.push({ data: parsed, role: actives[i].role === 'assistant' ? 'char' : actives[i].role });
+          }
+          return JSON.stringify(books);
+        });
       });
     });
     set('getCharacterLastMessage', function () {
       const ctx = c();
       const found = lastOf(ctx, 'char');
-      return found ? found.data : ctx.char.greeting;
+      return found ? found.data : ctx.char.firstMessage;
     });
     set('getUserLastMessage', function () {
       const found = lastOf(c(), 'user');
@@ -834,8 +879,18 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
         return { role: role(message.role), data: text(message.data), time: message.time || 0, key: at };
       }),
       messagesChanged: false,
-      char: { name: snap.char.name, description: snap.char.description, greeting: snap.char.greeting },
+      char: {
+        name: snap.char.name,
+        nickname: snap.char.nickname,
+        description: snap.char.description,
+        firstMessage: snap.char.firstMessage,
+        background: snap.char.background,
+        image: snap.char.image,
+      },
       descriptionChanged: false,
+      nameChanged: false,
+      firstMessageChanged: false,
+      backgroundChanged: false,
       lore: snap.char.lore.slice(),
       loreUpserts: [],
       user: snap.user,
@@ -859,6 +914,9 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
           })
         : null,
       description: ctx.descriptionChanged ? ctx.char.description : null,
+      name: ctx.nameChanged ? ctx.char.name : null,
+      firstMessage: ctx.firstMessageChanged ? ctx.char.firstMessage : null,
+      background: ctx.backgroundChanged ? ctx.char.background : null,
       lore: ctx.loreUpserts,
       notes: Array.from(ctx.notes.entries()),
       error: ctx.error,

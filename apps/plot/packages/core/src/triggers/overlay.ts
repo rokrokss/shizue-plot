@@ -3,7 +3,9 @@
  *
  * RisuAI lets a trigger rewrite the character it belongs to — its description
  * (`v2SetCharacterDesc`), its lorebook (`v2CreateLorebook` and the by-index
- * family), its global note (`v2SetReplaceGlobalNote`) — and the reader's persona
+ * family), its global note (`v2SetReplaceGlobalNote`) — and Lua its name
+ * (`setName`), its first message (`setCharacterFirstMessage`) and the HTML
+ * behind the chat (`setBackgroundEmbedding`), and the reader's persona
  * (`v2SetPersonaDesc`). There the character is the reader's own copy, so the
  * rewrite simply sticks, in every chat at once. Here the work is the creator's
  * and many readers play it, so a rewrite stays with the chat it happened in
@@ -25,6 +27,21 @@ export interface MemberOverlay {
   lorebook?: LoreEntry[];
   /** RisuAI's `replaceGlobalNote`, which is the card's post-history instructions. */
   postHistoryInstructions?: string;
+  /**
+   * RisuAI's `char.name` (`setName`): the member's name in this chat — the name
+   * the prompt gives it and its lines go under, and `{{char}}` in its own text
+   * where its card sets no nickname. Trimmed (`overlayName`).
+   */
+  name?: string;
+  /**
+   * RisuAI's `char.firstMessage` (`setCharacterFirstMessage`): what the plot's
+   * first opening reads as in this chat, on a branch that opens on it — RisuAI
+   * draws and sends its greeting from the character while the chat is on the
+   * first one (`fmIndex` -1). The stored greeting is not rewritten.
+   */
+  firstMessage?: string;
+  /** RisuAI's `char.backgroundHTML` (`setBackgroundEmbedding`): the HTML drawn behind the chat, in place of the card's. */
+  backgroundHtml?: string;
 }
 
 export interface ScriptOverlay {
@@ -34,7 +51,25 @@ export interface ScriptOverlay {
   persona?: string;
 }
 
-const MEMBER_FIELDS = ['description', 'lorebook', 'postHistoryInstructions'] as const;
+const MEMBER_FIELDS = ['description', 'lorebook', 'postHistoryInstructions', 'name', 'firstMessage', 'backgroundHtml'] as const;
+
+/**
+ * The longest name a script may give a member. A member's own name has no cap,
+ * but this one comes from a script, and it is drawn as a speaker label.
+ */
+export const MAX_OVERLAY_NAME_LENGTH = 100;
+
+/**
+ * A name a script gave a member (`setName`) as the overlay keeps it — trimmed, as
+ * a member's own name is — or null when it cannot be one: empty, longer than
+ * `MAX_OVERLAY_NAME_LENGTH`, or broken over lines (a speaker's name is the start
+ * of one line, `speech.ts`).
+ */
+export function overlayName(value: string): string | null {
+  const name = value.trim();
+  if (!name || name.length > MAX_OVERLAY_NAME_LENGTH || /[\u0000-\u001f\u007f]/.test(name)) return null;
+  return name;
+}
 
 /**
  * `patch` laid over `overlay`, field by field: a field the patch carries replaces

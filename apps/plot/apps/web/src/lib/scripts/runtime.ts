@@ -39,9 +39,11 @@
  * commit's against the message it ends on, which is the one that carries it.
  *
  * What the scripts rewrote of the work — the description, the lore, the global
- * note, the persona — is the chat's overlay (`ScriptOverlay`): it rides on the
- * generation or the commit, and the runtime keeps its own copy so the next run
- * reads it. The chat note goes to the chat's own `note`.
+ * note, the name, the first message, the background, the persona — is the
+ * chat's overlay (`ScriptOverlay`): it rides on the generation or the commit, and
+ * the runtime keeps its own copy so the next run reads it, and hands it to the
+ * page (`onOverlay`), which draws the name, the greeting and the background from
+ * it. The chat note goes to the chat's own `note`.
  *
  * The runtime holds no React state and talks to the API through what it is
  * given, so it is tested with a fake fetch.
@@ -98,20 +100,28 @@ import type { SimilaritySearch } from './similarity';
 export interface ScriptBundle {
   /** The member whose scripts these are, and whose card they rewrite. */
   memberId: string;
-  /** `{{char}}` in the scripts' text: the member's nickname, else its name. */
+  /** `{{char}}` in the scripts' text: the member's nickname, else its name as this chat's overlay has it. */
   name: string;
   triggers: TriggerScript[];
   editScripts: EditScript[];
   lowLevelAccess: boolean;
   character: {
+    /** RisuAI's `char.name`, as the card has it; the overlay's rewrite is beside it. Defaults to `name`. */
+    name?: string;
+    /** The card's nickname, which `{{char}}` is while it is set; '' when none. */
+    nickname?: string;
     description: string;
     personality: string;
     scenario: string;
     exampleDialogue: string;
     lorebook: LoreEntry[];
     postHistoryInstructions: string;
-    /** The lorebook's settings, which `/test_lorebook` activates by. */
+    /** The lorebook's settings, which `/test_lorebook` and Lua's `loadLoreBooks` activate by. */
     loreSettings?: LoreSettings;
+    /** RisuAI's `backgroundHTML` as the card carries it, whole. */
+    backgroundHtml?: string;
+    /** The member's avatar, a same-origin address, or null. */
+    avatarUrl?: string | null;
   };
   /** What this chat's scripts already rewrote of it. */
   overlay: { member: MemberOverlay | null; persona: string | null };
@@ -156,6 +166,12 @@ export interface ScriptRuntimeOptions {
    * the page.
    */
   onGlobalVariables?: (variables: Variables) => void;
+  /**
+   * The scripted member's overlay once the server has taken what a run rewrote of
+   * it — the page draws the member's name, the first greeting and the background
+   * from it.
+   */
+  onOverlay?: (member: MemberOverlay) => void;
 }
 
 /**
@@ -171,6 +187,12 @@ export interface ScriptView {
   note: string;
   /** The reader's persona description, as stored. */
   persona: string;
+  /**
+   * The branch opens on the plot's first opening — RisuAI's `fmIndex` -1 — whose
+   * text the overlay's `firstMessage` stands in for, as RisuAI's greeting is drawn
+   * from the character's first message there.
+   */
+  firstGreeting?: boolean;
   globalVariables?: Variables;
   /** What the evaluator may tell the scripts about the reader's side: the clock, the screen, the seed. */
   data?: Omit<CbsHostData, 'chat' | 'character' | 'persona' | 'triggerId' | 'lorebook' | 'char'>;
@@ -237,6 +259,49 @@ export interface PrepareOptions {
   raw?: boolean;
   /** The chat is emptied before the turn — the greeting stays. */
   clear?: boolean;
+}
+
+/**
+ * The entries `lorebook` activates on `history` — the chat after its greeting —
+ * in the shape RisuAI's `loadLoreBookV3Prompt` lists them: what `/test_lorebook`
+ * shows and Lua's `loadLoreBooks` reads. The prompt's own activation
+ * (`@shizue/core/lorebook`), fetched on first use, with the book's settings — and
+ * RisuAI's 800 tokens where it names no budget — over token counts estimated at
+ * four characters each. RisuAI's match log is not kept.
+ */
+export async function activeLore(
+  lorebook: readonly LoreEntry[],
+  history: string[],
+  settings: LoreSettings | undefined,
+  random?: () => number,
+): Promise<LoreTest> {
+  const { activateLore } = await import('@shizue/core/lorebook');
+  const tokens = (text: string): number => Math.ceil(text.length / 4);
+  const entries = [...lorebook];
+  const { entries: active } = activateLore(entries, {
+    history,
+    scanDepth: settings?.scanDepth ?? 5,
+    budgetTokens: settings?.tokenBudget ?? 800,
+    countTokens: tokens,
+    recursiveScanning: settings?.recursiveScanning ?? true,
+    ...(settings?.maxRecursionSteps !== undefined ? { maxRecursionSteps: settings.maxRecursionSteps } : {}),
+    risuMatching: settings?.risuMatching ?? true,
+    ...(random ? { random } : {}),
+  });
+  return {
+    actives: active.map((entry) => ({
+      depth: entry.depth ?? 0,
+      pos: '',
+      prompt: entry.content,
+      role: entry.role ?? 'system',
+      order: entry.insertionOrder,
+      tokens: tokens(entry.content),
+      priority: entry.insertionOrder,
+      source: entry.name || `lorebook ${entries.indexOf(entry)}`,
+      inject: null,
+    })),
+    matchLog: [],
+  };
 }
 
 /** The turn a send is about to store, as the start triggers see it on the branch. */
@@ -382,8 +447,20 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     persona: bundle.overlay.persona,
   };
 
+  /** RisuAI's `char.name` and `{{char}}`, over a session's patch: the nickname stays `{{char}}` through a rename. */
+  const memberName = (patch: MemberOverlay): string =>
+    patch.name ?? overlay.member.name ?? bundle.character.name ?? bundle.name;
+  const charName = (patch: MemberOverlay): string => {
+    const renamed = patch.name ?? overlay.member.name;
+    return renamed === undefined ? bundle.name : bundle.character.nickname || renamed;
+  };
+
   const character = (): TriggerCharacter => ({
-    name: bundle.name,
+    name: charName({}),
+    memberName: memberName({}),
+    ...(bundle.character.nickname ? { nickname: bundle.character.nickname } : {}),
+    ...(overlay.member.firstMessage !== undefined ? { firstMessage: overlay.member.firstMessage } : {}),
+    backgroundHtml: overlay.member.backgroundHtml ?? bundle.character.backgroundHtml ?? '',
     description: overlay.member.description ?? bundle.character.description,
     personality: bundle.character.personality,
     scenario: bundle.character.scenario,
@@ -420,6 +497,34 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     globals: applyVariableDelta(view.globalVariables ?? {}, null),
     globalWrites: null,
   });
+
+  /** The character as one operation's runs have it: the runtime's copy, with what the runs before rewrote. */
+  const sessionCharacter = (s: Session): TriggerCharacter => {
+    const base = character();
+    const firstMessage = s.patch.firstMessage ?? base.firstMessage;
+    return {
+      ...base,
+      name: charName(s.patch),
+      memberName: memberName(s.patch),
+      description: s.patch.description ?? base.description,
+      lorebook: s.patch.lorebook ?? base.lorebook,
+      postHistoryInstructions: s.patch.postHistoryInstructions ?? base.postHistoryInstructions,
+      ...(firstMessage !== undefined ? { firstMessage } : {}),
+      backgroundHtml: s.patch.backgroundHtml ?? base.backgroundHtml ?? '',
+    };
+  };
+
+  /**
+   * The branch as one operation's runs read it (`triggerMessages`): on the plot's
+   * first opening, the greeting is the first message the scripts set
+   * (`setCharacterFirstMessage`), as RisuAI draws and reads its greeting from the
+   * character there. The stored greeting stays what the fold and the edits read.
+   */
+  const branchOf = (s: Session, messages: readonly ChatMessage[]): ReturnType<typeof triggerMessages> => {
+    const read = triggerMessages(messages);
+    const set = s.patch.firstMessage ?? overlay.member.firstMessage;
+    return read.greeting !== null && s.view.firstGreeting === true && set !== undefined ? { ...read, greeting: set } : read;
+  };
 
   /**
    * Hands what the runs wrote of the reader's global variables to the server,
@@ -478,43 +583,9 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     help: () => ui.help?.(),
   };
 
-  /**
-   * `/test_lorebook`: the entries the card's book activates on `history`, in the
-   * shape RisuAI's `loadLoreBookV3Prompt` lists them. The prompt's own
-   * activation (`@shizue/core/lorebook`), fetched on first use, with the book's
-   * settings — and RisuAI's 800 tokens where it names no budget — over token
-   * counts estimated at four characters each. RisuAI's match log is not kept.
-   */
-  async function testLore(lorebook: readonly LoreEntry[], history: string[]): Promise<LoreTest> {
-    const { activateLore } = await import('@shizue/core/lorebook');
-    const settings = bundle.character.loreSettings;
-    const tokens = (text: string): number => Math.ceil(text.length / 4);
-    const entries = [...lorebook];
-    const { entries: active } = activateLore(entries, {
-      history,
-      scanDepth: settings?.scanDepth ?? 5,
-      budgetTokens: settings?.tokenBudget ?? 800,
-      countTokens: tokens,
-      recursiveScanning: settings?.recursiveScanning ?? true,
-      ...(settings?.maxRecursionSteps !== undefined ? { maxRecursionSteps: settings.maxRecursionSteps } : {}),
-      risuMatching: settings?.risuMatching ?? true,
-      ...(options.random ? { random: options.random } : {}),
-    });
-    return {
-      actives: active.map((entry) => ({
-        depth: entry.depth ?? 0,
-        pos: '',
-        prompt: entry.content,
-        role: entry.role ?? 'system',
-        order: entry.insertionOrder,
-        tokens: tokens(entry.content),
-        priority: entry.insertionOrder,
-        source: entry.name || `lorebook ${entries.indexOf(entry)}`,
-        inject: null,
-      })),
-      matchLog: [],
-    };
-  }
+  /** `/test_lorebook`: the card's book, activated on `history` (`activeLore`). */
+  const testLore = (lorebook: readonly LoreEntry[], history: string[]): Promise<LoreTest> =>
+    activeLore(lorebook, history, bundle.character.loreSettings, options.random);
 
   /** A run's input over one operation's session: the work as the runs before it left it. */
   function runInput(
@@ -524,15 +595,9 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     chat: readonly TriggerMessage[],
     greeting: string | null,
   ): TriggerRunInput {
-    const base = character();
     return {
       mode,
-      character: {
-        ...base,
-        description: s.patch.description ?? base.description,
-        lorebook: s.patch.lorebook ?? base.lorebook,
-        postHistoryInstructions: s.patch.postHistoryInstructions ?? base.postHistoryInstructions,
-      },
+      character: sessionCharacter(s),
       messages: chat,
       greeting,
       note: s.note,
@@ -580,6 +645,9 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     if (rewrite.description !== undefined) s.patch.description = rewrite.description;
     if (rewrite.lorebook !== undefined) s.patch.lorebook = rewrite.lorebook;
     if (rewrite.postHistoryInstructions !== undefined) s.patch.postHistoryInstructions = rewrite.postHistoryInstructions;
+    if (rewrite.name !== undefined) s.patch.name = rewrite.name;
+    if (rewrite.firstMessage !== undefined) s.patch.firstMessage = rewrite.firstMessage;
+    if (rewrite.backgroundHtml !== undefined) s.patch.backgroundHtml = rewrite.backgroundHtml;
   }
 
   /** The session's rewrites as the request fields that carry them. */
@@ -594,12 +662,13 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     };
   }
 
-  /** Once the server has them, the runtime's copy of the overlay moves too. */
+  /** Once the server has them, the runtime's copy of the overlay moves too — and the page's. */
   function kept(s: Session): void {
     overlay = {
       member: { ...overlay.member, ...s.patch },
       persona: s.personaPatch ?? overlay.persona,
     };
+    if (Object.keys(s.patch).length > 0) options.onOverlay?.(overlay.member);
   }
 
   /**
@@ -616,7 +685,6 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
   ): { scope: CodeScope; variables(): Variables; changed(): boolean } {
     const vars = applyVariableDelta(variables, null);
     let changed = false;
-    const base = character();
     const scope: CodeScope = {
       getVar: (name) => readVariable(vars, name) ?? 'null',
       setVar: (name, value) => {
@@ -637,20 +705,24 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       },
       globalVariables: () => applyVariableDelta(s.globals, null),
       messages,
-      character: {
-        name: bundle.name,
-        get description() {
-          return s.patch.description ?? base.description;
-        },
-        get lorebook() {
-          return s.patch.lorebook ?? base.lorebook;
-        },
+      // Read through the session, so what one engine wrote the next one reads.
+      get character() {
+        return sessionCharacter(s);
       },
       setDescription: (text) => {
         s.patch.description = text;
       },
       setLorebook: (entries) => {
         s.patch.lorebook = entries;
+      },
+      setName: (name) => {
+        s.patch.name = name;
+      },
+      setFirstMessage: (text) => {
+        s.patch.firstMessage = text;
+      },
+      setBackgroundHtml: (html) => {
+        s.patch.backgroundHtml = html;
       },
       user: s.view.names.user ?? s.view.data?.user ?? '',
       persona: s.persona,
@@ -698,7 +770,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
         data: {
           ...s.view.data,
           user: s.view.names.user ?? s.view.data?.user,
-          char: bundle.name,
+          char: charName(s.patch),
           persona: s.persona,
           character: { description: s.patch.description ?? character().description },
         },
@@ -752,7 +824,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       if (mode === 'send') {
         const text = content ?? '';
         const base = computeVariables(view.messages, view.defaults, view.names);
-        const { greeting, chat } = triggerMessages(view.messages);
+        const { greeting, chat } = branchOf(s, view.messages);
         let variables = base;
         let messages: TriggerMessage[] = chat;
         if (!prepareOptions.raw && runsAt('input')) {
@@ -810,7 +882,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       const branch = replaces ? view.messages.slice(0, -1) : view.messages;
       if (!runsAt('start')) return { body, stop: false, accept: () => undefined };
       const base = computeVariables(branch, view.defaults, view.names);
-      const { greeting, chat } = triggerMessages(branch);
+      const { greeting, chat } = branchOf(s, branch);
       const start = await run(s, 'start', base, chat, greeting);
       if (start.stopSending) return stopped(s, view, branch, chat, start.messages, start.variables);
       const edits = chatEdits(chat, start.messages);
@@ -839,7 +911,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       const s = session(view);
       const before = view.messages.slice(0, -1);
       const parent = computeVariables(before, view.defaults, view.names);
-      const { greeting, chat } = triggerMessages(view.messages);
+      const { greeting, chat } = branchOf(s, view.messages);
       // RisuAI's index for the message, the greeting being -1.
       const chatIndex = chat.length - 1;
       const previous =
@@ -907,7 +979,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       if (!name) return null;
       const s = session(view);
       const base = computeVariables(view.messages, view.defaults, view.names);
-      const { greeting, chat } = triggerMessages(view.messages);
+      const { greeting, chat } = branchOf(s, view.messages);
       const result = await run(s, 'manual', base, chat, greeting, {
         manualName: name,
         triggerId,
@@ -918,7 +990,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     async command(text, view) {
       const s = session(view);
       const base = computeVariables(view.messages, view.defaults, view.names);
-      const { greeting, chat } = triggerMessages(view.messages);
+      const { greeting, chat } = branchOf(s, view.messages);
       const result = await runCommands({ ...runInput(s, 'manual', base, chat, greeting), command: text }, driver);
       took(s, result);
       // What the line did stands even when a command threw after it, as in RisuAI.
@@ -952,7 +1024,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       }
       const s = session(view);
       const base = computeVariables(view.messages, view.defaults, view.names);
-      const { greeting, chat } = triggerMessages(view.messages);
+      const { greeting, chat } = branchOf(s, view.messages);
       const working = chat.map((message) => ({ ...message }));
       const over = sessionScope(s, base, working, greeting);
       await engine.button(data, over.scope);
@@ -964,7 +1036,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       // Every message of a branch is drawn against the same branch: built once.
       let branch = displayBranches.get(view.messages);
       if (!branch) {
-        branch = triggerMessages(view.messages);
+        branch = branchOf(session(view), view.messages);
         displayBranches.set(view.messages, branch);
       }
       const { greeting, chat } = branch;
@@ -991,10 +1063,11 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       const shown = new Map<string, string>();
       const engine = engines.find((candidate) => candidate.display && candidate.handles('editdisplay'));
       if (!engine?.display || items.length === 0) return shown;
-      const { greeting, chat } = triggerMessages(view.messages);
+      const s = session(view);
+      const { greeting, chat } = branchOf(s, view.messages);
       // RisuAI's index for a message, the greeting being -1.
       const index = new Map(chat.map((message, at) => [message.id, at]));
-      const over = sessionScope(session(view), variables, chat, greeting);
+      const over = sessionScope(s, variables, chat, greeting);
       const texts = await engine.display(
         items.map((item) => ({ text: item.text, chatIndex: index.get(item.id) ?? -1 })),
         over.scope,

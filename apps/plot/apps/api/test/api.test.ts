@@ -13,6 +13,7 @@
  * the `echo/echo` model, so no provider key is needed.
  */
 import {
+  characterHeader,
   countTokens,
   DEFAULT_CONTEXT_BUDGET,
   DEFAULT_MAX_RESPONSE_TOKENS,
@@ -28,6 +29,7 @@ import {
   MAX_VARIABLE_VALUE_LENGTH,
   parseCard,
   placeholderPng,
+  plotHeader,
   PRESET_IDS,
   readCharx,
   readPngTextChunks,
@@ -8919,6 +8921,7 @@ describe('plot hub', () => {
       // Presentation, so it travels even though the definition does not.
       displayScripts: [],
       css: '',
+      backgroundHtml: '',
       defaultVariables: {},
       componentCode: '',
       componentCapabilities: [],
@@ -12435,6 +12438,176 @@ describe('the browser script runtime', () => {
     });
     expect(stale.status).toBe(409);
     expect((await scriptsOf(reader, chat.chat.id)).scripts.overlay.persona).toBe('p');
+  });
+
+  /** An app that answers every generation with `reply` and records what it was sent: the system and the turns. */
+  function turnsApp(reply: string): { app: Hono<AppEnv>; systems: string[]; turns: string[][] } {
+    const systems: string[] = [];
+    const turns: string[][] = [];
+    const app = makeApp({
+      getAdapter: () => ({
+        providerModel: 'fixed',
+        adapter: {
+          stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
+            systems.push(req.system);
+            turns.push(req.messages.map((message) => (typeof message.content === 'string' ? message.content : '')));
+            yield { type: 'text', text: reply };
+            return { usage: { promptTokens: 1, completionTokens: 1 } };
+          },
+        },
+      }),
+    });
+    return { app, systems, turns };
+  }
+
+  it('keeps the name, first message and background a script set, and refuses ones it would not keep', async () => {
+    const { plotId, memberId } = await scriptedPlot('scripts-rename@example.com');
+    const reader = await signUp('scripts-rename-reader@example.com');
+    const chat = await startChat(reader, plotId);
+    const head = chat.path.at(-1);
+    const commit = (fields: Record<string, unknown>, scriptRev: number) =>
+      json(reader, `/api/chats/${chat.chat.id}/script-commit`, 'POST', {
+        messageId: head.id,
+        scriptRev,
+        overlay: { members: { [memberId]: fields } },
+      });
+    for (const bad of [
+      { name: '' },
+      { name: '   ' },
+      { name: 'x'.repeat(101) },
+      { name: '세\n라' },
+      { name: 3 },
+      { firstMessage: 'x'.repeat(200_001) },
+      { backgroundHtml: 'x'.repeat(200_001) },
+    ]) {
+      const refused = await commit(bad, head.scriptRev);
+      expect(refused.status, JSON.stringify(bad).slice(0, 40)).toBe(400);
+      expect((await readJson(refused)).code).toBe('invalid_request');
+    }
+    expect((await scriptsOf(reader, chat.chat.id)).scripts.overlay.member).toBeNull();
+
+    const kept = await commit(
+      { name: '  세라  ', firstMessage: '{{char}}가 다시 문을 연다.', backgroundHtml: '<div>밤</div>' },
+      head.scriptRev,
+    );
+    expect(kept.status, await kept.clone().text()).toBe(200);
+    const scripts = (await scriptsOf(reader, chat.chat.id)).scripts;
+    // `{{char}}` as it stands in this chat, beside the card's own name and nickname.
+    expect(scripts).toMatchObject({
+      name: '세라',
+      character: { name: '리안', nickname: '', backgroundHtml: '', avatarUrl: null },
+      overlay: { member: { name: '세라', firstMessage: '{{char}}가 다시 문을 연다.', backgroundHtml: '<div>밤</div>' } },
+    });
+
+    // The overlay is held to its size as a whole, the new fields counted in it.
+    const big = 'x'.repeat(200_000);
+    let rev = head.scriptRev + 1;
+    for (const field of ['description', 'postHistoryInstructions', 'firstMessage', 'backgroundHtml'] as const) {
+      expect((await commit({ [field]: big }, rev)).status).toBe(200);
+      rev += 1;
+    }
+    const over = await json(reader, `/api/chats/${chat.chat.id}/script-commit`, 'POST', {
+      messageId: head.id,
+      scriptRev: rev,
+      overlay: {
+        members: { [memberId]: { name: '세라' } },
+        persona: big,
+      },
+      note: 'x',
+    });
+    expect(over.status).toBe(200);
+    const past = await json(reader, `/api/chats/${chat.chat.id}/script-commit`, 'POST', {
+      messageId: head.id,
+      scriptRev: rev + 1,
+      overlay: {
+        members: {
+          [memberId]: {
+            lorebook: Array.from({ length: 2_000 }, (_, index) => ({ keys: [`k${index}`], content: 'y'.repeat(600) })),
+          },
+        },
+      },
+    });
+    expect(past.status).toBe(400);
+    expect((await readJson(past)).code).toBe('script_overlay_limit');
+  });
+
+  it('prompts with the name and the first message the scripts left, where RisuAI would', async () => {
+    const owner = await signUp('scripts-greeting@example.com');
+    const plot = await createPlot(owner, {
+      name: '홀로 작품',
+      description: '{{char}}의 겨울.',
+      intros: ['첫 인사다.', '둘째 인사다.'],
+    });
+    const member = await addCharacter(owner, plot.id, {
+      name: '리안',
+      card: {
+        description: '{{char}}는 사서다.',
+        extensions: {
+          risuai: {
+            triggerscript: [{ comment: '', type: 'start', conditions: [], effect: [] }],
+            backgroundHTML: '<style>.bg{color:red}</style>\n<div class="bg">{{getvar::time}}</div>',
+          },
+        },
+      },
+    });
+    await publishPlot(owner, plot.id);
+    // Presentation: what the card draws behind the chat, past the stylesheet the plot already has.
+    expect((await readPublicPlot(undefined, plot.id)).backgroundHtml).toBe('<div class="bg">{{getvar::time}}</div>');
+    expect((await scriptsOf(owner, (await startChat(owner, plot.id)).chat.id)).scripts.character.backgroundHtml).toBe(
+      '<style>.bg{color:red}</style>\n<div class="bg">{{getvar::time}}</div>',
+    );
+
+    const reader = await signUp('scripts-greeting-reader@example.com');
+    const onFirst = await startChat(reader, plot.id);
+    const onSecond = await startChat(reader, plot.id, { introIndex: 1 });
+    const overlay = { members: { [member.id]: { name: '세라', firstMessage: '{{char}}가 다시 문을 연다.' } } };
+    const { app, systems, turns } = turnsApp('대답');
+    await readSse(await json(reader, `/api/chats/${onFirst.chat.id}/messages`, 'POST', { content: '안녕', overlay }, app));
+    // A plot of one member is that character: its `{{char}}` follows the rename; the work's header does not.
+    expect(systems.at(-1)).toContain(`${characterHeader('세라')}\n세라는 사서다.`);
+    expect(systems.at(-1)).toContain(`${plotHeader('홀로 작품')}\n세라의 겨울.`);
+    expect(systems.at(-1)).not.toContain(characterHeader('리안'));
+    // The first opening is sent as the scripts rewrote it; the stored greeting is unchanged.
+    expect(turns.at(-1)).toContain('세라가 다시 문을 연다.');
+    expect(turns.at(-1)).not.toContain('첫 인사다.');
+    const stored = await readJson(await request(reader, `/api/chats/${onFirst.chat.id}`));
+    expect(stored.path[0].content).toBe('첫 인사다.');
+
+    // On the second opening RisuAI sends that one, as stored.
+    await readSse(await json(reader, `/api/chats/${onSecond.chat.id}/messages`, 'POST', { content: '안녕', overlay }, app));
+    expect(turns.at(-1)).toContain('둘째 인사다.');
+    expect(turns.at(-1)).not.toContain('세라가 다시 문을 연다.');
+
+    // A card with a nickname keeps it as `{{char}}` through a rename.
+    await patchCharacter(owner, plot.id, member.id, { card: { ...member.card, nickname: '리리' } });
+    expect((await scriptsOf(reader, onFirst.chat.id)).scripts).toMatchObject({
+      name: '리리',
+      character: { name: '리안', nickname: '리리' },
+    });
+    await readSse(await json(reader, `/api/chats/${onFirst.chat.id}/regenerate`, 'POST', {}, app));
+    expect(systems.at(-1)).toContain(`${characterHeader('세라')}\n리리는 사서다.`);
+    expect(systems.at(-1)).toContain('리리의 겨울.');
+  });
+
+  it('renames only the member in a cast of several, and leaves the work its name', async () => {
+    const { plotId, memberId } = await scriptedPlot('scripts-cast@example.com');
+    const reader = await signUp('scripts-cast-reader@example.com');
+    const chat = await startChat(reader, plotId);
+    const { app, systems } = turnsApp('대답');
+    await readSse(
+      await json(
+        reader,
+        `/api/chats/${chat.chat.id}/messages`,
+        'POST',
+        { content: '안녕', overlay: { members: { [memberId]: { name: '세라' } } } },
+        app,
+      ),
+    );
+    expect(systems.at(-1)).toContain(characterHeader('세라'));
+    expect(systems.at(-1)).toContain(characterHeader('평범'));
+    expect(systems.at(-1)).toContain(plotHeader('스크립트 작품'));
+    // A style-only background leaves nothing to draw; a plot without scripts has none either.
+    expect((await readPublicPlot(undefined, plotId)).backgroundHtml).toBe('');
   });
 });
 

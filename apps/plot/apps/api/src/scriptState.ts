@@ -18,15 +18,18 @@
  *   which leaves the reply `pending` until it commits the result;
  * - the chat as the scripts left it (`chat`) — messages appended, cut, rewritten
  *   — which is kept as the reader's branch (`scriptChat.ts`);
- * - what the scripts rewrote of the work itself — a member's description, lore
- *   and global note, the reader's persona (`overlay`), and the chat note — kept
+ * - what the scripts rewrote of the work itself — a member's description, lore,
+ *   global note, name, first message and background HTML, the reader's persona
+ *   (`overlay`), and the chat note — kept
  *   on the chat (`chats.script_overlay`, `chats.note`) and laid over the work
  *   wherever that chat's prompt is assembled. The plot never changes.
  */
 import { applyVariableDelta, checkVariableDelta, type VariableDelta, type Variables } from '@shizue/core';
 import {
   checkScriptChat,
+  MAX_OVERLAY_NAME_LENGTH,
   mergeScriptOverlay,
+  overlayName,
   type MemberOverlay,
   type ScriptChat,
   type ScriptOverlay,
@@ -181,7 +184,7 @@ export function readGenerationScripts(
 
 /**
  * The longest text field an overlay may carry — a description, a global note, a
- * persona — and the most lore entries. A card's own description is not capped
+ * first message, a background, a persona — and the most lore entries. A card's own description is not capped
  * at import, but one a script built a step at a time is bounded the way a
  * variable is: by what the reader's tab could make of it.
  */
@@ -203,7 +206,8 @@ const overlayText = (value: unknown, path: string): string | undefined => {
 /**
  * A rewrite of the work as the browser sends it (`ScriptOverlay` in
  * @shizue/core): per member id, the description, the lorebook — coerced the way
- * the studio's lorebook is — and the post-history instructions, and the
+ * the studio's lorebook is — the post-history instructions, the name (one line,
+ * trimmed, `overlayName`), the first message and the background HTML, and the
  * persona. Which members may be named is the route's to check, against the
  * plot's roster. Absent and `null` are no rewrite.
  */
@@ -228,6 +232,20 @@ export function readOverlay(value: unknown, path = 'overlay'): ScriptOverlay | n
         fields['postHistoryInstructions'],
         `${path}.members.${id}.postHistoryInstructions`,
       );
+      const firstMessage = overlayText(fields['firstMessage'], `${path}.members.${id}.firstMessage`);
+      const backgroundHtml = overlayText(fields['backgroundHtml'], `${path}.members.${id}.backgroundHtml`);
+      const rawName = fields['name'];
+      let name: string | undefined;
+      if (rawName !== undefined && rawName !== null) {
+        const kept = typeof rawName === 'string' ? overlayName(rawName) : null;
+        if (kept === null) {
+          throw badRequest(
+            'invalid_request',
+            `${path}.members.${id}.name must be one line of 1 to ${MAX_OVERLAY_NAME_LENGTH} characters`,
+          );
+        }
+        name = kept;
+      }
       const rawLore = fields['lorebook'];
       if (rawLore !== undefined && rawLore !== null && !Array.isArray(rawLore)) {
         throw badRequest('invalid_request', `${path}.members.${id}.lorebook must be an array`);
@@ -239,6 +257,9 @@ export function readOverlay(value: unknown, path = 'overlay'): ScriptOverlay | n
         ...(description !== undefined ? { description } : {}),
         ...(Array.isArray(rawLore) ? { lorebook: coerceLorebook(rawLore) } : {}),
         ...(postHistoryInstructions !== undefined ? { postHistoryInstructions } : {}),
+        ...(name !== undefined ? { name } : {}),
+        ...(firstMessage !== undefined ? { firstMessage } : {}),
+        ...(backgroundHtml !== undefined ? { backgroundHtml } : {}),
       };
       if (Object.keys(member).length > 0) members[id] = member;
     }

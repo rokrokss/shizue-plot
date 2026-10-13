@@ -76,8 +76,10 @@ export interface PromptBranch {
   /** Every message on the branch up to and including the last of `history`, the greeting among them. */
   length: number;
   /**
-   * The intro the branch opened on, when it opened on one: its text as stored,
-   * and which intro it is — -1 the first, k the k-th after it (`{{firstmsgindex}}`).
+   * The intro the branch opened on, when it opened on one: its text, and which
+   * intro it is — -1 the first, k the k-th after it (`{{firstmsgindex}}`). The
+   * text is what the greeting turn is sent as: the stored one, or the chat's
+   * overlay of the first opening (`MemberOverlay.firstMessage`).
    */
   greeting?: { text: string; index: number };
 }
@@ -122,6 +124,12 @@ export const promptText = (content: string | PromptPart[]): string =>
  */
 export interface PromptPlot {
   name: string;
+  /**
+   * `{{char}}` in the work's own text, where it is not the plot's name: a plot of
+   * one member whose scripts renamed it (`MemberOverlay.name`) is that character,
+   * and RisuAI's `{{char}}` follows the rename. The `[작품: …]` header keeps `name`.
+   */
+  char?: string;
   description: string;
   lorebook: LoreEntry[];
   /** The plot's narrator, which a chat may stand in for. */
@@ -567,7 +575,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const {
     plot,
     characters,
-    history,
+    history: given,
     personaText = '',
     memoryText = '',
     relationshipText = '',
@@ -589,6 +597,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     maxResponseTokens = DEFAULT_MAX_RESPONSE_TOKENS,
     preset = DEFAULT_PRESET,
   } = input;
+  const history = withBranchGreeting(given, branch);
 
   // The first member is the plot's stand-in wherever the assembler needs one
   // card rather than all of them. There is no plot-level override field yet, so
@@ -637,7 +646,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const macroOf = (member: PromptCharacter | undefined, role = 'system'): MacroContext => {
     const owner = member ?? standIn;
     return {
-      char: member ? characterName(member) : plot.name,
+      char: member ? characterName(member) : (plot.char ?? plot.name),
       user: userName,
       variables: working,
       ...(globalVariables ? { globalVariables } : {}),
@@ -1100,6 +1109,23 @@ interface MessageSlot {
 
 /** SillyTavern's `{{outlet::name}}`, which the assembler fills (`send` in `assemblePrompt`). */
 const OUTLET_MACRO = /\{\{outlet::([^}]*)\}\}/gi;
+
+/**
+ * `history` with its greeting turn — where it still starts with the greeting —
+ * reading as `branch.greeting.text` says: the chat's overlay may have rewritten
+ * the first opening (`MemberOverlay.firstMessage`), which RisuAI sends from the
+ * character rather than from the chat. A prompt script's rewrite of the stored
+ * text no longer applies; the caller runs them over the result instead.
+ */
+export function withBranchGreeting(history: HistoryMessage[], branch: PromptBranch | undefined): HistoryMessage[] {
+  const opening = branch?.greeting;
+  const first = history[0];
+  if (!opening || !first || first.role !== 'assistant' || history.length < branch.length || first.content === opening.text) {
+    return history;
+  }
+  const { promptContent: _stale, ...turn } = first;
+  return [{ ...turn, content: opening.text }, ...history.slice(1)];
+}
 
 /** `{{char}}` in a member's own text: the nickname its card goes by, as RisuAI reads it, else the roster name. */
 export const characterName = (member: Pick<PromptCharacter, 'name' | 'card'>): string =>

@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { exportCardV3 } from '../src/card/export.js';
 import { normalizeCard } from '../src/card/normalize.js';
-import { cardLicense, creatorCssFromExtensions, MAX_CREATOR_CSS_LENGTH } from '../src/card/risu.js';
+import {
+  backgroundHtmlOf,
+  backgroundWithoutStyles,
+  cardLicense,
+  creatorCssFromExtensions,
+  MAX_CREATOR_CSS_LENGTH,
+} from '../src/card/risu.js';
 import type { DisplayScript } from '../src/types.js';
 
 /** A V2 card the way RisuAI exports one, with a status-window display script. */
@@ -387,5 +393,17 @@ describe('creator stylesheet', () => {
     expect(creatorCssFromExtensions({})).toBeUndefined();
     expect(creatorCssFromExtensions({ risuai: null })).toBeUndefined();
     expect(css(`<style>${'a'.repeat(MAX_CREATOR_CSS_LENGTH + 1)}</style>`)).toBeUndefined();
+  });
+});
+
+describe('background HTML', () => {
+  it('reads backgroundHTML whole, and what is left of it once the stylesheet is the plot’s', () => {
+    const html = '<style>.a{}</style>\n<div class="bg">{{bg::night}}</div>\n<STYLE type="text/css">.b{}</style>';
+    expect(backgroundHtmlOf({ risuai: { backgroundHTML: html } })).toBe(html);
+    expect(backgroundWithoutStyles(html)).toBe('<div class="bg">{{bg::night}}</div>');
+    expect(backgroundWithoutStyles('<style>.a{}</style>  ')).toBe('');
+    expect(backgroundHtmlOf({ risuai: { backgroundHTML: '  ' } })).toBeUndefined();
+    expect(backgroundHtmlOf({ risuai: { backgroundHTML: 3 } })).toBeUndefined();
+    expect(backgroundHtmlOf({})).toBeUndefined();
   });
 });

@@ -14,8 +14,9 @@
  * what the script wrote comes back through the same scope: variables through
  * `setVar` (a value longer than a trigger may write is dropped and noted),
  * the chat through `messages` (a message keeps its id, with the role and the
- * text the script gave it, while the script did not move it), the description
- * and the lore through the character setters.
+ * text the script gave it, while the script did not move it), the description,
+ * the lore, the name (one the server would not keep is dropped and noted), the
+ * first message and the background through the character setters.
  * From there the runtime carries them where a trigger's writes go.
  *
  * What RisuAI keeps behind the card's `lowLevelAccess` stays behind it: the
@@ -25,16 +26,33 @@
  * the reader's own account, through the chat's model, or its auxiliary model
  * for `axLLM`. An embedding search (`similarity`) runs on the page, in the
  * worker the trigger runs share, behind the same access. A `request` is made by
- * our server, as RisuAI's proxy makes it, under RisuAI's own limits.
+ * our server, as RisuAI's proxy makes it, under RisuAI's own limits. The lore
+ * `loadLoreBooks` lists is activated on the page (`lore`), as `/test_lorebook`'s.
  *
  * A call the watchdog had to stop, or one the sandbox could not run, changes
  * nothing and is logged; the run goes on as if the script had returned.
  */
 
-import { MAX_TRIGGER_VALUE_LENGTH, type CodeScope, type TriggerLogEntry, type TriggerScript } from '@shizue/core/triggers';
+import {
+  MAX_OVERLAY_NAME_LENGTH,
+  MAX_TRIGGER_VALUE_LENGTH,
+  overlayName,
+  type CodeScope,
+  type TriggerLogEntry,
+  type TriggerScript,
+} from '@shizue/core/triggers';
+import { escapeHtml } from '../../cbs';
 import type { LoreEntry } from '../../types';
 import type { ScriptEngine, ScriptPhase } from '../engine';
-import type { LuaHost, LuaLlmMessage, LuaLlmModel, LuaOutcome, LuaRequestAnswer, LuaSandbox } from './sandbox';
+import type {
+  LuaHost,
+  LuaLlmMessage,
+  LuaLlmModel,
+  LuaLoreAnswer,
+  LuaOutcome,
+  LuaRequestAnswer,
+  LuaSandbox,
+} from './sandbox';
 import type { LuaCallResult, LuaEntry, LuaLoreBook, LuaSnapshot } from './sandboxRuntime';
 
 /** The reader's side of a script's dialogs. */
@@ -56,6 +74,13 @@ export interface LuaEngineOptions {
   similarity(source: string, texts: string[]): Promise<string[]>;
   /** `request`: RisuAI's `{status, data}` for `url`, as our server answers it, or a throw. */
   request(url: string | null): Promise<LuaRequestAnswer>;
+  /**
+   * `loadLoreBooks`: what `lorebook` activates on `history`, and the chat's context
+   * budget, or a throw. Without it the call fails in the script.
+   */
+  lore?(history: string[], lorebook: readonly LoreEntry[]): Promise<LuaLoreAnswer>;
+  /** The scripted member's avatar, a same-origin address — RisuAI's `char.image` — or null. */
+  avatarUrl?: string | null;
   log(entry: TriggerLogEntry): void;
 }
 
@@ -130,7 +155,27 @@ const ourLore = (book: LuaLoreBook): LoreEntry => ({
   position: 'before_char',
 });
 
-export function snapshotOf(scope: CodeScope, lowLevel: boolean): LuaSnapshot {
+/** The lore `upsertLocalLoreBook` leaves: each upsert replaces the entries of its name, in order. */
+function upserted(lorebook: readonly LoreEntry[], books: readonly LuaLoreBook[]): LoreEntry[] {
+  let lore = [...lorebook];
+  for (const book of books) {
+    lore = lore.filter((entry) => (entry.name ?? '') !== book.comment);
+    lore.push(ourLore(book));
+  }
+  return lore;
+}
+
+/**
+ * What `getCharacterImage` answers: RisuAI hands back an inlay token, which its
+ * renderer turns into `<div class="risu-inlay-image"><img …></div>`; that markup
+ * itself is what a message or the display draws here, through the sanitizer, the
+ * avatar being on our own origin. '' without an avatar, as RisuAI's.
+ */
+export const characterImage = (url: string | null | undefined): string =>
+  url ? `<div class="risu-inlay-image"><img src="${escapeHtml(url)}"></div>` : '';
+
+export function snapshotOf(scope: CodeScope, lowLevel: boolean, avatarUrl?: string | null): LuaSnapshot {
+  const character = scope.character;
   return {
     vars: Object.entries(scope.variables()),
     globals: Object.entries(scope.globalVariables()),
@@ -140,10 +185,15 @@ export function snapshotOf(scope: CodeScope, lowLevel: boolean): LuaSnapshot {
       ...(message.time !== undefined ? { time: message.time } : {}),
     })),
     char: {
-      name: scope.character.name,
-      description: scope.character.description,
-      greeting: scope.greeting ?? '',
-      lore: scope.character.lorebook.map(risuLore),
+      // RisuAI's `char.name`; `{{char}}` is the nickname where there is one.
+      name: character.memberName ?? character.name,
+      nickname: character.nickname ?? '',
+      description: character.description,
+      // RisuAI's `char.firstMessage` where the scripts set one; else the greeting the branch opened on.
+      firstMessage: character.firstMessage ?? scope.greeting ?? '',
+      background: character.backgroundHtml ?? '',
+      image: characterImage(avatarUrl),
+      lore: character.lorebook.map(risuLore),
     },
     user: scope.user,
     persona: scope.persona,
@@ -166,7 +216,7 @@ export function createLuaEngine(options: LuaEngineOptions): ScriptEngine {
     dialogs = next.catch(() => undefined);
     return next;
   };
-  const host: LuaHost = {
+  const host: Omit<LuaHost, 'lore'> = {
     alert: (text, error) => queued(() => ui.alert(text, error)),
     input: (text) => queued(() => ui.input(text)),
     select: (choices) => queued(() => ui.select(choices)),
@@ -220,19 +270,25 @@ export function createLuaEngine(options: LuaEngineOptions): ScriptEngine {
       scope.messages.splice(0, scope.messages.length, ...after);
     }
     if (result.description !== null) scope.setDescription(result.description);
-    if (result.lore.length > 0) {
-      let lore = [...scope.character.lorebook];
-      for (const book of result.lore) {
-        lore = lore.filter((entry) => (entry.name ?? '') !== book.comment);
-        lore.push(ourLore(book));
-      }
-      scope.setLorebook(lore);
+    if (result.name !== null) {
+      const name = overlayName(result.name);
+      if (name === null) {
+        log({ kind: 'limit', effect: 'setName', message: `a name must be one line of 1 to ${MAX_OVERLAY_NAME_LENGTH} characters` });
+      } else scope.setName(name);
     }
+    if (result.firstMessage !== null) scope.setFirstMessage(result.firstMessage);
+    if (result.background !== null) scope.setBackgroundHtml(result.background);
+    if (result.lore.length > 0) scope.setLorebook(upserted(scope.character.lorebook, result.lore));
     notes(result);
   }
 
   async function call(code: string, entry: LuaEntry, scope: CodeScope, lowLevel: boolean): Promise<LuaCallResult | null> {
-    const outcome = await sandbox.call(code, entry, snapshotOf(scope, lowLevel), host);
+    // The lore is activated over this call's character, with what the script upserted on the way.
+    const lore: LuaHost['lore'] = (history, upserts) => {
+      if (!options.lore) return Promise.reject(new Error('lore cannot be activated here'));
+      return options.lore(history, upserted(scope.character.lorebook, upserts));
+    };
+    const outcome = await sandbox.call(code, entry, snapshotOf(scope, lowLevel, options.avatarUrl), { ...host, lore });
     if (outcome.kind !== 'done') {
       report(outcome, entry.kind === 'display');
       return null;

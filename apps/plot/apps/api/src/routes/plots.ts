@@ -1,4 +1,6 @@
 import {
+  backgroundHtmlOf,
+  backgroundWithoutStyles,
   cardLicense,
   characterName,
   coerceAssetUnlock,
@@ -38,6 +40,7 @@ import {
   type MigrationPlatform,
 } from '@shizue/core/migrate';
 import { sourceUrlFor } from '@shizue/core/source-url';
+import { scriptedMember } from '@shizue/core/triggers';
 import { fromLorebookFile, LorebookFileError } from '@shizue/core/world-info';
 import {
   characters,
@@ -314,6 +317,26 @@ const firstPromptMacro = (plot: Plot, char: string): MacroContext => ({
   user: DEFAULT_USER_NAME,
   variables: computeVariables([], plot.customUi?.defaultVariables),
 });
+
+/** Longest background the public view carries: past this the chat's renderer would draw none of it anyway. */
+const MAX_BACKGROUND_HTML_LENGTH = 100_000;
+
+/**
+ * The HTML a RisuAI card draws behind the chat (`backgroundHTML`), for the chat
+ * screen: the card whose scripts run — the character the chat is with, whose
+ * `getBackgroundEmbedding` it is — or, in a plot without scripts, the first that
+ * carries one. Its `<style>` elements are left out: they are the plot's
+ * stylesheet already (`customUi.css`, lifted at import), which the creator may
+ * have edited since. Presentation, like that stylesheet, so it travels with the
+ * public view; '' when nothing is left to draw.
+ */
+function backgroundOf(members: Character[]): string {
+  const lead =
+    scriptedMember(members)?.member ?? members.find((member) => backgroundHtmlOf(member.card.extensions) !== undefined);
+  const html = lead ? backgroundHtmlOf(lead.card.extensions) : undefined;
+  const shown = html ? backgroundWithoutStyles(html) : '';
+  return shown.length <= MAX_BACKGROUND_HTML_LENGTH ? shown : '';
+}
 
 /**
  * A member as its own creator sees it: the whole card, since they wrote it — or
@@ -1164,6 +1187,8 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       narrator: plot.narrator?.pov ? { pov: plot.narrator.pov } : null,
       displayScripts: plot.customUi?.displayScripts ?? [],
       css: plot.customUi?.css ?? '',
+      // What the card draws behind the chat, past its stylesheet (`backgroundOf`).
+      backgroundHtml: backgroundOf(members),
       defaultVariables: plot.customUi?.defaultVariables ?? {},
       componentCode: plot.customUi?.componentCode ?? '',
       componentCapabilities: plot.customUi?.componentCapabilities ?? [],
