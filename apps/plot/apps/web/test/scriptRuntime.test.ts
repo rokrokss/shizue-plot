@@ -4,7 +4,7 @@
  * to the state the scripts ended in.
  */
 import { applyVariableDelta, computeVariables, emptyVariables, type Variables } from '@shizue/core/variables';
-import type { TriggerScript, TriggerStep } from '@shizue/core/triggers';
+import { MAX_SCRIPT_CHAT_MESSAGES, type TriggerScript, type TriggerStep } from '@shizue/core/triggers';
 import { describe, expect, it } from 'vitest';
 import { loadWholeBranch } from '../src/lib/scripts/branch';
 import type { ScriptEngine } from '../src/lib/scripts/engine';
@@ -176,7 +176,7 @@ describe('prepare: a send', () => {
     expect(stopped.stop).toBe(true);
   });
 
-  it('commits a start trigger’s rewrite of the head before the turn, and carries the overlay once accepted', async () => {
+  it('carries a start trigger’s rewrite of the head on the generation, and the overlay once accepted', async () => {
     const { api, calls } = fakeApi(() => ({ marker: 'rewritten' }) as unknown as ChatState);
     const runtime = createScriptRuntime({
       chatId: 'c1',
@@ -196,15 +196,15 @@ describe('prepare: a send', () => {
     // The opening here is not the root greeting's place: a message after it is the head.
     const messages = [greeting, { ...head, parentId: 'm0' }];
     const prepared = await runtime.prepare('regenerate', view(messages));
-    // A regenerate's branch stops before the head it replaces: index 0 is the
-    // greeting's first follower, which is not the head, so nothing is committed.
-    expect(calls).toEqual([]);
+    // A regenerate's branch stops before the head it replaces: there is no index 0 to rewrite.
+    expect(prepared.body['chat']).toBeUndefined();
     const auto = await runtime.prepare('auto', view(messages));
-    expect(calls).toEqual([
-      { method: 'POST', path: '/api/chats/c1/script-commit', body: { messageId: 'm1', scriptRev: 2, content: '고친 인사' } },
-    ]);
-    expect(auto.state).toEqual({ marker: 'rewritten' });
+    // The rewrite rides on the generation, which keeps it before the prompt is
+    // built: nothing is committed first.
+    expect(calls).toEqual([]);
+    expect(auto.state).toBeUndefined();
     expect(auto.body).toMatchObject({
+      chat: { keep: 0, messages: [{ id: 'm1', content: '고친 인사' }] },
       overlay: { members: { '00000000-0000-4000-8000-000000000001': { description: '사서. 지금은 기사.' } } },
       note: '비',
     });
@@ -558,6 +558,193 @@ describe('an engine outside a trigger run', () => {
       ['m0', '어서 와.|7|-1'],
       ['m1', '들어간다|7|0'],
     ]);
+  });
+});
+
+describe('the chat a run leaves', () => {
+  const impersonate = (role: 'user' | 'char', value: string): TriggerStep => ({
+    type: 'v2Impersonate',
+    role,
+    value,
+    valueType: 'value',
+    indent: 0,
+  });
+  const cut = (start: string, end: string): TriggerStep => ({
+    type: 'v2CutChat',
+    start,
+    startType: 'value',
+    end,
+    endType: 'value',
+    indent: 0,
+  });
+  const exchange = [greeting, message('m1', 'm0', 'user', '{{setvar::hp::50}}앉는다'), message('m2', 'm1', 'assistant', '응.', { variableDelta: { mood: 'calm' } })];
+
+  it('sends the turn where the runs left it — after the input run’s cut, before what the start run added — with the delta on the last', async () => {
+    const { api, calls } = fakeApi();
+    const runtime = createScriptRuntime({
+      chatId: 'c1',
+      api,
+      ui: silentUi,
+      bundle: bundle({
+        triggers: [
+          trigger('input', [cut('1', '2')]),
+          trigger('start', [impersonate('char', '[독백]'), setvar('hp', '5', '-=')]),
+        ],
+      }),
+    });
+    const prepared = await runtime.prepare('send', view(exchange), '{{addvar::hp::1}}들어간다');
+    expect(calls).toEqual([]);
+    expect(prepared.content).toBe('{{addvar::hp::1}}들어간다');
+    expect(prepared.body['chat']).toEqual({ keep: 0, messages: [{ id: 'm2' }, { turn: true }, { role: 'assistant', content: '[독백]' }] });
+    // Folded where the server keeps it — the cut message gone, the turn, then the
+    // added message carrying the delta — it is where the runs ended.
+    const kept = [greeting, exchange[2]!, { content: prepared.content! }, { content: '[독백]', variableDelta: prepared.body['variableDelta'] as Record<string, string> }];
+    expect(serverFold(kept)).toEqual(vars({ hp: '46', mood: 'calm' }));
+
+    // A start run that cuts the turn: the chat says so, and the delta lands on
+    // what the chat ends on — without the macros of the turn that is not stored.
+    const cutting = createScriptRuntime({
+      chatId: 'c1',
+      api,
+      ui: silentUi,
+      bundle: bundle({ triggers: [trigger('start', [cut('0', '2'), setvar('door', 'open')])] }),
+    });
+    const sent = await cutting.prepare('send', view(exchange), '{{setvar::typed::1}}또');
+    expect(sent.body['chat']).toEqual({ keep: 2, messages: [] });
+    const ends = [greeting, exchange[1]!, { ...exchange[2]!, variableDelta: sent.body['variableDelta'] as Record<string, string | null> }];
+    expect(serverFold(ends)).toEqual(vars({ hp: '50', mood: 'calm', door: 'open' }));
+  });
+
+  it('sends the other generations’ chat, and a start delta measured against the branch it leaves', async () => {
+    const runtime = createScriptRuntime({
+      chatId: 'c1',
+      api: fakeApi().api,
+      ui: silentUi,
+      bundle: bundle({ triggers: [trigger('start', [cut('1', '2'), impersonate('user', '{{setvar::hp::7}}끼어듦'), setvar('seen', '1')])] }),
+    });
+    const auto = await runtime.prepare('auto', view(exchange));
+    expect(auto.body['chat']).toEqual({ keep: 0, messages: [{ id: 'm2' }, { role: 'user', content: '{{setvar::hp::7}}끼어듦' }] });
+    // The run read hp=50 from the message it cut; the branch it leaves folds to 7, and the start delta puts 50 back.
+    const left = serverFold([greeting, exchange[2]!, { content: '{{setvar::hp::7}}끼어듦' }]);
+    expect(applyVariableDelta(left, auto.body['startDelta'] as Record<string, string>)).toEqual(vars({ hp: '50', mood: 'calm', seen: '1' }));
+
+    // A regenerate's run reads the branch without the reply it replaces, and its chat is said against that.
+    const regenerate = await runtime.prepare('regenerate', view(exchange));
+    expect(regenerate.body['chat']).toEqual({ keep: 0, messages: [{ role: 'user', content: '{{setvar::hp::7}}끼어듦' }] });
+  });
+
+  it('commits what the output triggers added after the reply, with the delta on what they added', async () => {
+    const { api, calls } = fakeApi();
+    const runtime = createScriptRuntime({
+      chatId: 'c1',
+      api,
+      ui: silentUi,
+      bundle: bundle({
+        triggers: [trigger('output', [impersonate('user', '다음 행동'), setvar('hp', '10', '-=')])],
+        editScripts: [{ type: 'editoutput', in: '다친 것 같다', out: '다쳤다' }],
+      }),
+    });
+    await runtime.finish(view(branch));
+    const body = calls[0]!.body;
+    expect(body).toMatchObject({
+      messageId: 'm2',
+      clearPending: true,
+      // The reply as its edit scripts left it, in place; the chat is said against it.
+      content: '{{setvar::hp::90}}다쳤다.',
+      chat: { keep: 2, messages: [{ role: 'user', content: '다음 행동' }] },
+    });
+    const stored = [
+      ...branch.slice(0, -1),
+      { content: body['content'] as string, variableDelta: reply.variableDelta },
+      { content: '다음 행동', variableDelta: body['variableDelta'] as Record<string, string> },
+    ];
+    expect(serverFold(stored)).toEqual(vars({ hp: '80', mood: 'tense' }));
+  });
+
+  it('commits a manual run’s cut and a button’s role change as the chat, and a rewrite of the head alone as its text', async () => {
+    const { api, calls } = fakeApi();
+    const runtime = createScriptRuntime({
+      chatId: 'c1',
+      api,
+      ui: silentUi,
+      bundle: bundle({
+        triggers: [
+          trigger('manual', [cut('1', '2')], { comment: '잘라' }),
+          trigger('manual', [{ type: 'v2ModifyChat', index: '1', indexType: 'value', value: '고친 답', valueType: 'value', indent: 0 }], {
+            comment: '고쳐',
+          }),
+        ],
+      }),
+      engines: [
+        {
+          name: 'lua',
+          handles: () => true,
+          button: async (_data, scope) => {
+            scope.messages[0]!.role = 'char';
+          },
+        },
+      ],
+    });
+    await runtime.manual('잘라', null, view(exchange));
+    expect(calls[0]!.body).toMatchObject({ messageId: 'm2', chat: { keep: 0, messages: [{ id: 'm2' }] } });
+    // Nothing of the cut message's macro is in the fold the delta is measured over.
+    expect(serverFold([greeting, { ...exchange[2]!, variableDelta: calls[0]!.body['variableDelta'] as Record<string, string | null> }])).toEqual(
+      vars({ hp: '50', mood: 'calm' }),
+    );
+    await runtime.manual('고쳐', null, view(exchange));
+    expect(calls[1]!.body).toMatchObject({ messageId: 'm2', content: '고친 답' });
+    expect(calls[1]!.body['chat']).toBeUndefined();
+    await runtime.button('go', view(exchange));
+    expect(calls[2]!.body).toMatchObject({ chat: { keep: 0, messages: [{ id: 'm1', role: 'assistant' }, { id: 'm2' }] } });
+  });
+
+  it('keeps what a stopped start run did to the chat, on the head, and not the send it stopped', async () => {
+    const { api, calls } = fakeApi(() => ({ marker: 'kept' }) as unknown as ChatState);
+    const runtime = createScriptRuntime({
+      chatId: 'c1',
+      api,
+      ui: silentUi,
+      bundle: bundle({
+        triggers: [trigger('start', [impersonate('char', '굴림: 7'), setvar('roll', '7'), { type: 'stop' }])],
+      }),
+    });
+    const stopped = await runtime.prepare('send', view(exchange), '{{setvar::typed::1}}/굴림');
+    expect(stopped).toMatchObject({ stop: true, state: { marker: 'kept' } });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.body).toMatchObject({
+      messageId: 'm2',
+      chat: { keep: 2, messages: [{ role: 'assistant', content: '굴림: 7' }] },
+    });
+    // The values the run wrote, without the macros of a turn that was never stored.
+    const kept = [...exchange, { content: '굴림: 7', variableDelta: calls[0]!.body['variableDelta'] as Record<string, string> }];
+    expect(serverFold(kept)).toEqual(vars({ hp: '50', mood: 'calm', roll: '7' }));
+
+    // A stopped regenerate's chat leaves off the reply it was to replace.
+    await runtime.prepare('regenerate', view(exchange));
+    expect(calls[1]!.body).toMatchObject({ messageId: 'm2', chat: { keep: 1, messages: [{ role: 'assistant', content: '굴림: 7' }] } });
+  });
+
+  it('says and drops an edit of the chat past what the server takes', async () => {
+    const logged: string[] = [];
+    const runtime = createScriptRuntime({
+      chatId: 'c1',
+      api: fakeApi().api,
+      ui: silentUi,
+      bundle: bundle({ triggers: [trigger('start', [{ type: 'triggerlua', code: 'x' }])] }),
+      log: (entry) => logged.push(entry.message),
+      engines: [
+        {
+          name: 'lua',
+          handles: () => true,
+          runCode: async (request) => {
+            for (let i = 0; i <= MAX_SCRIPT_CHAT_MESSAGES; i += 1) request.scope.messages.push({ role: 'user', data: String(i) });
+          },
+        },
+      ],
+    });
+    const prepared = await runtime.prepare('auto', view(exchange));
+    expect(prepared.body['chat']).toBeUndefined();
+    expect(logged.some((line) => line.includes('could not be kept'))).toBe(true);
   });
 });
 

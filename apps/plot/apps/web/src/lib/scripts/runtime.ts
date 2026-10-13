@@ -28,6 +28,13 @@
  * the fold of the message's own macros over its parent (`diffVariables`), which is
  * exactly what the server folds back to that state.
  *
+ * What the runs did to the chat itself — RisuAI's `impersonate`, `cutchat`,
+ * `modifychat` and Lua's chat functions, on any message — rides along as the
+ * chat they left (`ScriptChat`, the request's `chat`), which the server keeps as
+ * the reader's branch without touching any other. A delta is then measured over
+ * that branch: the generation's start delta against where it ends, a send's or a
+ * commit's against the message it ends on, which is the one that carries it.
+ *
  * What the scripts rewrote of the work — the description, the lore, the global
  * note, the persona — is the chat's overlay (`ScriptOverlay`): it rides on the
  * generation or the commit, and the runtime keeps its own copy so the next run
@@ -38,6 +45,7 @@
  */
 
 import {
+  checkScriptChat,
   hasEditScripts,
   hasTriggersFor,
   isCodeTrigger,
@@ -46,11 +54,13 @@ import {
   runEditScripts,
   runTriggers,
   runTriggersSync,
+  scriptChatOf,
   type CharacterRewrite,
   type CodeScope,
   type EditScript,
   type MemberOverlay,
   type PromptInjectionText,
+  type ScriptChat,
   type ScriptOverlay,
   type TriggerCharacter,
   type TriggerDriver,
@@ -68,6 +78,7 @@ import {
   computeVariables,
   diffVariables,
   readVariable,
+  type FoldItem,
   type FoldOptions,
   type VariableDelta,
   type Variables,
@@ -153,9 +164,12 @@ export interface PreparedGeneration {
   body: Record<string, unknown>;
   /** A send's text as the input scripts left it. */
   content?: string;
-  /** A start trigger said not to send (`stop`). Nothing was sent, and nothing was kept. */
+  /**
+   * A start trigger said not to send (`stop`). Nothing was sent; what the runs
+   * did to the chat is kept all the same (`state`), and a send's text is not.
+   */
   stop: boolean;
-  /** The chat as a commit the scripts needed first answered it — a rewrite of the head. */
+  /** The chat as a stopped run's commit left it, when it had changed the chat. */
   state?: ChatState;
   /**
    * Called once the server took the generation (its stream opened): what the
@@ -200,6 +214,57 @@ function storable(delta: VariableDelta | null, log: (entry: TriggerLogEntry) => 
   log({ kind: 'limit', message: `the scripts' variables could not be kept: ${check.error}` });
   return null;
 }
+
+/**
+ * The branch the server holds once it takes `edits`, as the fold reads it: the
+ * greeting, then the chat the runs left, each stored message with the delta it
+ * carries (a copy keeps its message's). `messages` is the stretch of the branch
+ * the runs read, `before` the trigger chat they were given — with the text they
+ * were given it as — and `turn` a send's text, standing where `{turn: true}`
+ * does, or last when the chat is as it was.
+ */
+function resultFold(
+  messages: readonly ChatMessage[],
+  before: readonly TriggerMessage[],
+  edits: ScriptChat | null,
+  turn?: string,
+): FoldItem[] {
+  const greeting = triggerMessages(messages).greeting !== null ? [messages[0]!] : [];
+  const deltas = new Map(messages.map((message) => [message.id, message.variableDelta ?? null]));
+  const stored = before.filter((message) => message.id !== undefined && message.id !== NEW_TURN);
+  const byId = new Map(stored.map((message) => [message.id!, message]));
+  const item = (message: TriggerMessage, content = message.data): FoldItem => ({
+    content,
+    variableDelta: deltas.get(message.id!) ?? null,
+  });
+  const chat: FoldItem[] = edits
+    ? [
+        ...stored.slice(0, edits.keep).map((message) => item(message)),
+        ...edits.messages.map((entry): FoldItem =>
+          'turn' in entry ? (turn ?? '') : 'id' in entry ? item(byId.get(entry.id)!, entry.content) : entry.content,
+        ),
+      ]
+    : [...stored.map((message) => item(message)), ...(turn !== undefined ? [turn] : [])];
+  return [...greeting, ...chat];
+}
+
+/** `items` with the last one's own delta left out: what a delta for that message is measured against. */
+function withoutLastDelta(items: readonly FoldItem[]): FoldItem[] {
+  const last = items.at(-1);
+  if (last === undefined) return [];
+  return [...items.slice(0, -1), typeof last === 'string' ? last : last.content];
+}
+
+/** The head's new text, when that is all the runs changed of the chat — kept where it stands, as ever. */
+function headText(edits: ScriptChat | null, before: readonly TriggerMessage[], headId: string | undefined): string | undefined {
+  if (!edits || edits.keep !== before.length - 1 || edits.messages.length !== 1) return undefined;
+  const only = edits.messages[0]!;
+  return 'id' in only && only.id === headId && !('role' in only) ? only.content : undefined;
+}
+
+/** `before` with the head's text as `text`. */
+const withHeadText = (before: readonly TriggerMessage[], text: string): TriggerMessage[] =>
+  before.map((message, index) => (index === before.length - 1 ? { ...message, data: text } : message));
 
 export interface ScriptRuntime {
   readonly bundle: ScriptBundle;
@@ -521,30 +586,21 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
   }
 
   /**
-   * What the runs did to stored messages: the head's new text, when they
-   * rewrote it, and a note for anything else — a cut, an appended message, a
-   * rewrite further back — that the append-only tree does not take.
+   * What the runs left of the chat, against what they were given — null when
+   * they left it as it was, or when it is more than the server takes (said, and
+   * the chat goes on as it was).
    */
-  function headEdit(
+  function chatEdits(
     before: readonly TriggerMessage[],
     after: readonly TriggerMessage[],
-    headId: string | null,
-  ): string | undefined {
-    const original = new Map(before.map((message) => [message.id, message.data]));
-    let head: string | undefined;
-    let dropped = after.length !== before.length || after.some((message, index) => message.id !== before[index]?.id);
-    for (const message of after) {
-      if (!message.id || original.get(message.id) === message.data) continue;
-      if (message.id === headId) head = message.data;
-      else dropped = true;
-    }
-    if (dropped) {
-      log({
-        kind: 'dropped',
-        message: 'the scripts cut, added or rewrote messages other than the latest; only the latest is kept',
-      });
-    }
-    return head;
+    turnId?: string,
+  ): ScriptChat | null {
+    const edits = scriptChatOf(before, after, turnId);
+    if (!edits) return null;
+    const check = checkScriptChat(edits, { turn: turnId !== undefined });
+    if (check.ok) return edits;
+    log({ kind: 'limit', message: `what the scripts did to the chat could not be kept: ${check.error}` });
+    return null;
   }
 
   /** The trigger chat of each branch the display triggers drew, by the branch's array. */
@@ -584,33 +640,42 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
         const typed = await edit('editinput', text, variables, s, { chatIndex: -1 }, messages, greeting);
         let sent = typed.text;
         variables = computeVariables([sent], typed.variables, view.names);
+        // RisuAI pushes the turn onto the chat the input run left, and the start
+        // run reads it there — and may edit around it, or cut it.
+        let final: TriggerMessage[] = [...messages, { role: 'user', data: sent, id: NEW_TURN }];
         let injections: PromptInjectionText | null = null;
         if (runsAt('start')) {
-          const withTurn: TriggerMessage[] = [...messages, { role: 'user', data: sent, id: NEW_TURN }];
-          const start = await run(s, 'start', variables, withTurn, greeting);
-          if (start.stopSending) return { body: {}, stop: true, accept: () => undefined };
-          variables = start.variables;
+          const start = await run(s, 'start', variables, final, greeting);
+          // What the runs wrote, without the macros of a turn that is not stored.
+          const ran = applyVariableDelta(typed.variables, diffVariables(start.variables, variables));
+          if (start.stopSending) {
+            // The turn is not sent; what the runs did to the rest of the chat is kept.
+            const rest = start.messages.filter((message) => message.id !== NEW_TURN);
+            return stopped(s, view, view.messages, chat, rest, ran);
+          }
+          variables = start.messages.some((message) => message.id === NEW_TURN) ? start.variables : ran;
           injections = start.injections;
-          // A start trigger may rewrite the turn being sent; that is the text it goes as.
-          sent = start.messages.find((message) => message.id === NEW_TURN)?.data ?? sent;
-          messages = start.messages.filter((message) => message.id !== NEW_TURN);
+          final = start.messages;
         }
-        // Against what the server folds the stored turn to without its delta.
-        const plain = computeVariables([sent], base, view.names);
+        // A start trigger may rewrite the turn being sent; that is the text it goes as.
+        sent = final.find((message) => message.id === NEW_TURN)?.data ?? sent;
+        const edits = chatEdits([...chat, { role: 'user', data: sent, id: NEW_TURN }], final, NEW_TURN);
+        // Against what the server folds the message the chat ends on to without its
+        // delta — the stored turn, unless the runs edited the chat around it.
+        const plain = computeVariables(withoutLastDelta(resultFold(view.messages, chat, edits, sent)), view.defaults, view.names);
         const delta = storable(diffVariables(variables, plain), log);
         await flushGlobals(s);
-        const rewritten = await rewriteHead(chat, messages, head);
         return {
           body: {
             ...body,
             ...(delta ? { variableDelta: delta } : {}),
             ...(injections ? injectionFields(injections) : {}),
+            ...(edits ? { chat: edits } : {}),
             ...writes(s),
           },
           content: sent,
           stop: false,
           accept: () => kept(s),
-          ...(rewritten ? { state: rewritten } : {}),
         };
       }
 
@@ -622,21 +687,24 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       const base = computeVariables(branch, view.defaults, view.names);
       const { greeting, chat } = triggerMessages(branch);
       const start = await run(s, 'start', base, chat, greeting);
-      if (start.stopSending) return { body: {}, stop: true, accept: () => undefined };
-      const delta = storable(diffVariables(start.variables, base), log);
+      if (start.stopSending) return stopped(s, view, branch, chat, start.messages, start.variables);
+      const edits = chatEdits(chat, start.messages);
+      // Against the branch the generation reads: the one the run left.
+      const delta = storable(
+        diffVariables(start.variables, computeVariables(resultFold(branch, chat, edits), view.defaults, view.names)),
+        log,
+      );
       await flushGlobals(s);
-      // A regenerate's branch ends before the head it replaces, so no rewrite there is the head's.
-      const rewritten = await rewriteHead(chat, start.messages, replaces ? undefined : head);
       return {
         body: {
           ...body,
           ...(delta ? { startDelta: delta } : {}),
           ...injectionFields(start.injections),
+          ...(edits ? { chat: edits } : {}),
           ...writes(s),
         },
         stop: false,
         accept: () => kept(s),
-        ...(rewritten ? { state: rewritten } : {}),
       };
     },
 
@@ -671,22 +739,39 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
         diffVariables(reply.variables, asStored),
       );
       let followUp = false;
+      const withReply = withHeadText(chat, text);
+      let edits: ScriptChat | null = null;
       if (runsAt('output')) {
-        const withReply = chat.map((message, index) => (index === chat.length - 1 ? { ...message, data: text } : message));
         const output = await run(s, 'output', variables, withReply, greeting);
         variables = output.variables;
         followUp = output.sendAIprompt;
-        text = headEdit(withReply, output.messages, head.id) ?? text;
+        edits = chatEdits(withReply, output.messages);
+        // A rewrite of the reply alone is its text; anything more is the chat.
+        const reworded = headText(edits, withReply, head.id);
+        if (reworded !== undefined) {
+          text = reworded;
+          edits = null;
+        }
       }
-      const delta = storable(diffVariables(variables, computeVariables([text], parent, view.names)), log);
+      // Against the message the chat now ends on — the reply, unless the output
+      // triggers added after it or cut it — without its own delta.
+      const plain = computeVariables(
+        withoutLastDelta(resultFold(view.messages, edits ? withReply : withHeadText(chat, text), edits)),
+        view.defaults,
+        view.names,
+      );
+      const delta = storable(diffVariables(variables, plain), log);
       await flushGlobals(s);
       const state = await commit({
         messageId: head.id,
         scriptRev: head.scriptRev ?? 0,
         clearPending: true,
-        // Always sent: it replaces the delta the server computed for the reply.
+        // Always sent: it replaces the delta the server computed for the reply —
+        // or, with a chat, is the delta of the message it ends on.
         variableDelta: delta,
+        // The reply as its edit scripts left it, in place; the chat is said against it.
         ...(text !== head.content ? { content: text } : {}),
+        ...(edits ? { chat: edits } : {}),
         ...writes(s),
       });
       kept(s);
@@ -702,7 +787,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
         manualName: name,
         triggerId,
       });
-      return commitHead(s, view, result.variables, result.variablesChanged, chat, result.messages);
+      return commitRun(s, view, view.messages, chat, chatEdits(chat, result.messages), result.variables, result.variablesChanged);
     },
 
     async button(data, view) {
@@ -717,7 +802,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       const working = chat.map((message) => ({ ...message }));
       const over = sessionScope(s, base, working, greeting);
       await engine.button(data, over.scope);
-      return commitHead(s, view, over.variables(), over.changed(), chat, working);
+      return commitRun(s, view, view.messages, chat, chatEdits(chat, working), over.variables(), over.changed());
     },
 
     display(text, view, variables) {
@@ -773,34 +858,40 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
   };
 
   /**
-   * What a manual run or a button did, committed on the head: the variables it
-   * left (as the head's delta), a rewrite of the head's text, the overlay and the
-   * note. Null when it changed none of them.
+   * What a run did, committed on the head — a manual run's, a button's, a
+   * stopped start run's: the variables it left, as the delta of the message the
+   * chat now ends on; what it did to the chat — the head's text in place when
+   * that is all, else the chat itself; the overlay and the note. `branch` is the
+   * stretch of the chat the run read and `before` the trigger chat it was given.
+   * Null when it changed none of them.
    */
-  async function commitHead(
+  async function commitRun(
     s: Session,
     view: ScriptView,
+    branch: readonly ChatMessage[],
+    before: readonly TriggerMessage[],
+    edits: ScriptChat | null,
     variables: Variables,
     variablesChanged: boolean,
-    before: readonly TriggerMessage[],
-    after: readonly TriggerMessage[],
   ): Promise<ChatState | null> {
     const head = view.messages[view.messages.length - 1];
-    const content = headEdit(before, after, head?.id ?? null);
+    const content = headText(edits, before, head?.id);
+    const chat = content === undefined ? edits : null;
     await flushGlobals(s);
     const fields = writes(s);
-    if (!variablesChanged && content === undefined && !fields.overlay && fields.note === undefined) return null;
+    if (!variablesChanged && !edits && !fields.overlay && fields.note === undefined) return null;
     if (!head) {
       log({ kind: 'dropped', message: 'a chat with no message has nowhere to keep what a button did' });
       return null;
     }
-    const parent = computeVariables(view.messages.slice(0, -1), view.defaults, view.names);
-    const delta = storable(diffVariables(variables, computeVariables([content ?? head.content], parent, view.names)), log);
+    const result = resultFold(branch, content === undefined ? before : withHeadText(before, content), chat);
+    const delta = storable(diffVariables(variables, computeVariables(withoutLastDelta(result), view.defaults, view.names)), log);
     const state = await commit({
       messageId: head.id,
       scriptRev: head.scriptRev ?? 0,
       variableDelta: delta,
       ...(content !== undefined ? { content } : {}),
+      ...(chat ? { chat } : {}),
       ...fields,
     });
     kept(s);
@@ -808,18 +899,27 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
   }
 
   /**
-   * A rewrite of the head the runs asked for before a generation, committed in
-   * place first so the generation builds on it. The head keeps its id, so the
-   * generation's `baseHeadId` still holds.
+   * A start run that said not to send: nothing is generated. What it did to the
+   * chat is kept all the same — RisuAI saves the chat its start triggers left
+   * before it looks at the stop — committed on the head with the values the runs
+   * wrote and what they rewrote of the work. A regenerate's run read the branch
+   * without the head it was to replace, so its chat leaves that head off the
+   * branch, as RisuAI's reroll has already taken it off the chat. A run that left
+   * the chat as it was keeps nothing, as before.
    */
-  async function rewriteHead(
+  async function stopped(
+    s: Session,
+    view: ScriptView,
+    branch: readonly ChatMessage[],
     before: readonly TriggerMessage[],
     after: readonly TriggerMessage[],
-    head: ChatMessage | undefined,
-  ): Promise<ChatState | undefined> {
-    const content = headEdit(before, after, head?.id ?? null);
-    if (content === undefined || !head) return undefined;
-    return commit({ messageId: head.id, scriptRev: head.scriptRev ?? 0, content });
+    variables: Variables,
+  ): Promise<PreparedGeneration> {
+    const nothing: PreparedGeneration = { body: {}, stop: true, accept: () => undefined };
+    const edits = chatEdits(before, after);
+    if (!edits) return nothing;
+    const state = await commitRun(s, view, branch, before, edits, variables, true);
+    return state ? { ...nothing, state } : nothing;
   }
 }
 

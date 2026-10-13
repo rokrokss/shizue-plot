@@ -19,7 +19,7 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { Worker as NodeWorker } from 'node:worker_threads';
-import { runTriggers, type CodeScope, type TriggerScript } from '@shizue/core/triggers';
+import { runTriggers, scriptChatOf, type CodeScope, type TriggerScript } from '@shizue/core/triggers';
 import { afterEach, describe, expect, it } from 'vitest';
 import { LUA_CLASSIFICATION } from '../src/lib/scripts/lua/classification';
 import { createLuaEngine, luaFunctionNames } from '../src/lib/scripts/lua/engine';
@@ -516,6 +516,65 @@ describe('the Lua engine', () => {
     // The message keeps its id, so the runtime can tell it is the head being rewritten.
     expect(result.messages.at(-1)).toEqual({ role: 'char', data: '바뀐 끝', id: 'm1' });
     expect(logs).toEqual([]);
+  });
+
+  it('hands the run the chat the chat functions left: messages added, removed, cut, rewritten and turned', async () => {
+    const sandbox = sandboxWith();
+    const run = async (code: string) => {
+      const triggers = [lua(code)];
+      const engine = createLuaEngine({ triggers, lowLevelAccess: false, sandbox, ui: host, llm: host.llm, log: () => undefined });
+      const messages = [
+        { role: 'user' as const, data: '안녕', id: 'm0' },
+        { role: 'char' as const, data: '어서 와', id: 'm1' },
+        { role: 'user' as const, data: '들어간다', id: 'm2' },
+      ];
+      const result = await runTriggers(
+        {
+          mode: 'start',
+          character: { name: '리안', description: '', lorebook: [], postHistoryInstructions: '', lowLevelAccess: false, triggers },
+          messages,
+          note: '',
+          persona: '',
+          variables: Object.create(null),
+        },
+        { code: (request) => engine.runCode!(request) },
+      );
+      return { result: result.messages, chat: scriptChatOf(messages, result.messages) };
+    };
+
+    const edited = await run(`function onStart(id)
+      setChatRole(id, 0, 'char')
+      removeChat(id, 1)
+      insertChat(id, 1, 'char', '끼움')
+      addChat(id, 'user', '덧붙임')
+      setChat(id, -2, '고친 말')
+    end`);
+    // A stored message keeps its id through all of it, with the role and the text it was given.
+    expect(edited.result).toEqual([
+      { role: 'char', data: '안녕', id: 'm0' },
+      { role: 'char', data: '끼움' },
+      { role: 'user', data: '고친 말', id: 'm2' },
+      { role: 'user', data: '덧붙임' },
+    ]);
+    expect(edited.chat).toEqual({
+      keep: 0,
+      messages: [
+        { id: 'm0', role: 'assistant' },
+        { role: 'assistant', content: '끼움' },
+        { id: 'm2', content: '고친 말' },
+        { role: 'user', content: '덧붙임' },
+      ],
+    });
+
+    // `cutChat` is a slice; `setFullChat` keeps a message where its place and role did not change.
+    expect((await run('function onStart(id) cutChat(id, 0, 2) end')).chat).toEqual({ keep: 2, messages: [] });
+    const full = await run(`function onStart(id)
+      local chat = getFullChat(id)
+      chat[2].data = '바꾼 인사'
+      table.remove(chat, 3)
+      setFullChat(id, chat)
+    end`);
+    expect(full.chat).toEqual({ keep: 1, messages: [{ id: 'm1', content: '바꾼 인사' }] });
   });
 
   it('chains the edit hooks of every script, and reads the function names a button may call', async () => {

@@ -61,7 +61,6 @@ import { assetUrl, coerceAssetPreview } from '../assets.js';
 import {
   attachmentsByMessage,
   attachmentUrl,
-  bindAttachments,
   countUnboundAttachments,
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENTS_PER_MESSAGE,
@@ -108,11 +107,19 @@ import {
   overlayOf,
   readGenerationScripts,
   readOverlay,
+  readScriptChat,
   saveScriptWrites,
   scriptRevMoved,
   storableDelta,
   type GenerationScripts,
 } from '../scriptState.js';
+import {
+  applyScriptChat,
+  planScriptChat,
+  rewritableHead,
+  type AppliedScriptChat,
+  type ScriptChatPlan,
+} from '../scriptChat.js';
 import { deleteQuietly } from '../storage.js';
 import { toPromptCharacters, toPromptPlot } from '../plots.js';
 import { readScriptLlmMessages, readScriptLlmModel, runScriptLlm } from '../scriptLlm.js';
@@ -653,6 +660,24 @@ async function keepScriptWrites(
   await saveScriptWrites(deps, chat.id, context.overlay, scripts.note, scripts.overlay !== null);
 }
 
+/**
+ * What the scripts that ran for a generation did to the chat, kept before its
+ * plan is built (`scriptChat.ts`) — after the head checks and the overlay, like
+ * every other write of the turn: the prompt, the variables and the reply read
+ * the branch as the scripts left it, as RisuAI's request reads the chat its
+ * start triggers returned. One transaction, a send's turn written in it; nothing
+ * at all when nothing changed.
+ */
+async function keepScriptChat(
+  deps: AppDeps,
+  chat: Chat,
+  plan: ScriptChatPlan,
+  all: Message[],
+): Promise<AppliedScriptChat> {
+  if (!plan.changed) return { path: plan.path, all, turn: null, written: [] };
+  return deps.db.transaction((tx) => applyScriptChat(tx, chat.id, plan, all));
+}
+
 const toHistory = (path: Message[]): HistoryMessage[] =>
   path.map((message) => ({ role: message.role, content: message.content, createdAt: message.createdAt.getTime() }));
 
@@ -1145,7 +1170,6 @@ async function regeneratePlan(
   const head = path[path.length - 1];
   if (!head) throw badRequest('invalid_state', 'The chat has no messages to generate from');
   await settleHead(deps, chat, head, scripts, false);
-  await keepScriptWrites(deps, chat, context, scripts);
 
   // An assistant head is replaced by a sibling; a user head (edit fork, or a
   // failed generation) gets a fresh assistant child instead.
@@ -1154,12 +1178,22 @@ async function regeneratePlan(
   // replacement would come back as ordinary dialogue and the swipe would move
   // between two different kinds of turn.
   const narration = isAssistantHead && isNarration(head.content);
+  // The head is about to be replaced, so whatever it set is not part of the
+  // state the replacement is generated from — and the start triggers ran on the
+  // branch without it, so what they did to the chat is said against that. Its
+  // end is not the head when the head is replaced, so nothing there is rewritten
+  // in place: an edit of it forks, and the reply follows the fork.
+  const replaced = isAssistantHead ? path.slice(0, -1) : path;
+  const edit = scripts.chat
+    ? planScriptChat(replaced, scripts.chat, { inPlace: isAssistantHead ? null : rewritableHead(context.all, head) })
+    : null;
+  await keepScriptWrites(deps, chat, context, scripts);
+  const edited = edit ? await keepScriptChat(deps, chat, edit, context.all) : null;
+  const kept = edited ? edited.path : replaced;
+  const all = edited ? edited.all : context.all;
   // Memory is applied to the whole path first — it only ever trims the front,
   // so the mode-specific trim of the last turn still lines up.
-  const memory = await buildMemoryInput(deps, chat, path, lastUserText(path));
-  // The head is about to be replaced, so whatever it set is not part of the
-  // state the replacement is generated from.
-  const kept = isAssistantHead ? path.slice(0, -1) : path;
+  const memory = await buildMemoryInput(deps, chat, edited ? kept : path, lastUserText(kept));
 
   return {
     chatId: chat.id,
@@ -1172,7 +1206,7 @@ async function regeneratePlan(
       deps,
       chat.userId,
       chat.model,
-      isAssistantHead ? memory.history.slice(0, -1) : memory.history,
+      isAssistantHead && !edited ? memory.history.slice(0, -1) : memory.history,
     ),
     memoryText: memory.memoryText,
     relationshipText: buildRelationshipText(chat),
@@ -1189,7 +1223,7 @@ async function regeneratePlan(
     globalVariables: context.globalVariables,
     clock: requestClock(c, context.row, kept),
     seed: chat.id,
-    branch: promptBranch(context.all, kept),
+    branch: promptBranch(all, kept),
     // Without the head being replaced: its records belong to the swipe this
     // generation is an alternative to.
     loreState: loreStateOf(kept),
@@ -1206,7 +1240,8 @@ async function regeneratePlan(
           narration: true,
         }
       : {}),
-    target: { kind: 'new', parentId: isAssistantHead ? head.parentId : head.id },
+    // The head's parent or the head, or where the scripts left the branch.
+    target: { kind: 'new', parentId: kept.at(-1)?.id ?? null },
   };
 }
 
@@ -1684,8 +1719,21 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         return row!;
       });
       // Outside the transaction: an object only becomes garbage once the row that
-      // pointed at it is really gone.
-      for (const attachment of orphaned) await deleteQuietly(deps.storage, attachment.path);
+      // pointed at it is really gone — every row: a script's copy of a turn on
+      // another branch names the same image (`scriptChat.ts`).
+      const paths = [...new Set(orphaned.map((attachment) => attachment.path))];
+      const shared =
+        paths.length > 0
+          ? new Set(
+              (
+                await deps.db
+                  .select({ path: chatAttachments.path })
+                  .from(chatAttachments)
+                  .where(and(eq(chatAttachments.chatId, chat.id), inArray(chatAttachments.path, paths)))
+              ).map((attachment) => attachment.path),
+            )
+          : new Set<string>();
+      for (const path of paths) if (!shared.has(path)) await deleteQuietly(deps.storage, path);
       return c.json(await chatState(deps, updated));
     } finally {
       await releaseChatSlot(deps, chat.id);
@@ -1881,6 +1929,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * continue that changed it since — so nothing the scripts did is applied twice
    * or applied to text they never read. The browser refetches and runs again.
    *
+   * What the scripts did to the rest of the chat — a message appended after the
+   * reply, the chat cut, an older message rewritten — comes as `chat`
+   * (`ScriptChat`), said against the branch with the head as `content` left it,
+   * and is kept as the reader's branch in the same transaction (`scriptChat.ts`).
+   * `variableDelta` is then the delta of the message that branch ends on.
+   *
    * It takes the generation slot, as a delete does: a commit landing under a
    * running stream would change the state that stream was planned on.
    */
@@ -1900,14 +1954,22 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     // What the scripts rewrote of the work, and the chat note (see `ScriptOverlay`).
     const overlay = readOverlay(body['overlay']);
     const note = optionalScriptNote(body);
-    if (variableDelta === undefined && content === undefined && !clearPending && !overlay && note === undefined) {
+    const edits = readScriptChat(body, { turn: false });
+    if (
+      variableDelta === undefined &&
+      content === undefined &&
+      !clearPending &&
+      !overlay &&
+      note === undefined &&
+      !edits
+    ) {
       throw badRequest('invalid_request', 'Nothing to commit');
     }
 
     const chat = await loadWritableChat(deps, id, userId);
     const memberIds = overlay ? new Set((await loadMembers(deps.db, chat.plotId)).map((member) => member.id)) : null;
     if (!(await acquireChatSlot(deps, chat.id, userId))) await rejectBusyChat(deps, chat.id, userId);
-    let committed: { chat: Chat; message: Message };
+    let committed: { chat: Chat; message: Message; written: Message[] };
     try {
       committed = await deps.db.transaction(async (tx) => {
         // Both rows locked, the message first: a hand edit takes no slot, and it
@@ -1933,7 +1995,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         const [message] = await tx
           .update(messages)
           .set({
-            ...(variableDelta !== undefined ? { variableDelta: storableDelta(variableDelta) } : {}),
+            // With a chat, the delta is the one of the message the chat ends on.
+            ...(variableDelta !== undefined && !edits ? { variableDelta: storableDelta(variableDelta) } : {}),
             ...(content !== undefined ? { content } : {}),
             ...(clearPending ? { scriptState: null } : {}),
             scriptRev: sql`${messages.scriptRev} + 1`,
@@ -1942,6 +2005,17 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           .returning();
         if (content !== undefined && content !== current.content) {
           await invalidateMemoryForEdit(tx, chat.id, messageId);
+        }
+        // Checked against the branch as it stands under the lock; a refusal
+        // rolls the rest of the commit back with it.
+        let written: Message[] = [];
+        if (edits) {
+          const all = await tx.select().from(messages).where(eq(messages.chatId, chat.id));
+          const plan = planScriptChat(buildPath(all, messageId), edits, {
+            inPlace: rewritableHead(all, message!),
+            ...(variableDelta !== undefined ? { lastDelta: variableDelta } : {}),
+          });
+          if (plan.changed) written = (await applyScriptChat(tx, chat.id, plan, all)).written;
         }
         // Read under the chat's lock, so two commits each land on the other's.
         const merged = overlay && memberIds ? mergedOverlay(locked, overlay, memberIds) : undefined;
@@ -1954,16 +2028,20 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           })
           .where(eq(chats.id, chat.id))
           .returning();
-        return { chat: row!, message: message! };
+        return { chat: row!, message: message!, written };
       });
     } finally {
       await releaseChatSlot(deps, chat.id);
     }
 
-    // The text the reader will keep is the one the unlocks are asked about too;
-    // they only ever open, so asking again after the raw text cost nothing.
-    const unlockedAssetIds =
-      content !== undefined ? await openUnlocks(deps, chat.id, committed.message.content) : [];
+    // The text the reader will keep is the one the unlocks are asked about too —
+    // and the replies the scripts wrote or rewrote; they only ever open, so asking
+    // again after the raw text cost nothing.
+    const unlockText = [
+      ...(content !== undefined ? [committed.message.content] : []),
+      ...committed.written.filter((message) => message.role === 'assistant').map((message) => message.content),
+    ];
+    const unlockedAssetIds = unlockText.length > 0 ? await openUnlocks(deps, chat.id, unlockText.join('\n')) : [];
     // The turn is finished, so the work it held back can start.
     if (clearPending) scheduleBackgroundUpdates(deps, chat.id);
     const state = (await chatState(deps, committed.chat)) as Record<string, unknown>;
@@ -2177,6 +2255,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const focusIds = optionalMemberIds(body, 'focusCharacterIds') ?? [];
     // What the card's input and start triggers left, over the state this turn's
     // own macros fold to — stored on the turn, which is the message they ran for.
+    // Where they edited the chat around it, it is the message the chat ends on.
     const variableDelta = optionalVariableDelta(body, 'variableDelta');
     const scripts = readGenerationScripts(body, { startDelta: false });
 
@@ -2191,38 +2270,27 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const focusNames = focusNamesOf(context.onStage, focusIds);
       const path = buildPath(context.all, chat.headMessageId);
       await settleHead(deps, chat, path.at(-1), scripts, true);
+      // The turn goes where the scripts left it — after the branch, unless they
+      // edited the chat around it, or cut it (RisuAI then sends without it).
+      const edit = planScriptChat(path, scripts.chat, {
+        inPlace: rewritableHead(context.all, path.at(-1)),
+        lastDelta: variableDelta,
+        // Stored on the turn rather than on the request, so a regenerate of it
+        // re-applies the same ruling.
+        turn: { content, source, ...(directions ? { directions } : {}), attachmentIds },
+      });
       await keepScriptWrites(deps, chat, context, scripts);
 
       // One transaction, because the uploads are part of the turn: an id that is
       // not this chat's own — or that another turn already claimed — must leave
       // no message behind for the client to find on its retry.
-      const userMessage = await deps.db.transaction(async (tx) => {
-        const [created] = await tx
-          .insert(messages)
-          .values({
-            chatId: chat.id,
-            parentId: chat.headMessageId,
-            role: 'user',
-            content,
-            source,
-            // Stored on the turn rather than on the request, so a regenerate of it
-            // re-applies the same ruling.
-            ...(directions ? { directions } : {}),
-            ...(variableDelta ? { variableDelta: storableDelta(variableDelta) } : {}),
-          })
-          .returning();
-        await bindAttachments(tx, chat.id, created!.id, attachmentIds);
-        await tx
-          .update(chats)
-          .set({ headMessageId: created!.id, updatedAt: new Date() })
-          .where(eq(chats.id, chat.id));
-        return created!;
-      });
+      const edited = await keepScriptChat(deps, chat, edit, context.all);
+      const branch = edited.path;
 
-      const memory = await buildMemoryInput(deps, chat, path, content);
+      const memory = await buildMemoryInput(deps, chat, branch.slice(0, -1), content);
       // The turn just written is the last of the history, and the images ride on
       // it; the rest of the branch's are not re-sent (see `withTurnImages`).
-      const history = await promptHistory(deps, c.get('userId'), chat.model, [...memory.history, userMessage]);
+      const history = await promptHistory(deps, c.get('userId'), chat.model, [...memory.history, ...branch.slice(-1)]);
 
       return {
         chatId: chat.id,
@@ -2236,21 +2304,21 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         relationshipText: buildRelationshipText(chat),
         authorNote: context.authorNote,
         ...(context.narrator ? { narrator: context.narrator } : {}),
-        ...(directions ? { directions } : {}),
+        ...(directions && edited.turn ? { directions } : {}),
         preset: getPreset(chat.preset),
-        // The stored row, so the turn's delta is folded with its text.
-        ...startedFrom(pathVariables(context.row, [...path, userMessage], context.fold), scripts),
+        // The stored rows, so the turn's delta is folded with its text.
+        ...startedFrom(pathVariables(context.row, branch, context.fold), scripts),
         fold: context.fold,
         globalVariables: context.globalVariables,
-        clock: requestClock(c, context.row, [...path, userMessage]),
+        clock: requestClock(c, context.row, branch),
         seed: chat.id,
-        branch: promptBranch(context.all, [...path, userMessage]),
-        loreState: loreStateOf([...path, userMessage]),
+        branch: promptBranch(edited.all, branch),
+        loreState: loreStateOf(branch),
         assetNames: context.assetNames,
         auxiliaryModel: context.auxiliaryModel,
         contextBudget: memorySettingsOf(chat).contextBudget,
         focusNames,
-        target: { kind: 'new', parentId: userMessage.id },
+        target: { kind: 'new', parentId: branch.at(-1)?.id ?? null },
       };
     });
   });
@@ -2295,13 +2363,25 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       await requireEnabledModel(deps, userId, chat.model);
       const context = await loadGenerationContext(deps, chat, scripts);
       const focusNames = focusNamesOf(context.onStage, focusIds);
-      const path = buildPath(context.all, chat.headMessageId);
-      const head = path[path.length - 1];
-      if (!head || head.role !== 'assistant') {
+      const before = buildPath(context.all, chat.headMessageId);
+      if (before.at(-1)?.role !== 'assistant') {
         throw badRequest('invalid_state', 'The current head is not an assistant message');
       }
-      await settleHead(deps, chat, head, scripts, true);
+      await settleHead(deps, chat, before.at(-1), scripts, true);
+      // What is continued is the message the start triggers left last, as RisuAI
+      // continues whatever ends its chat — written in place, so a stored one other
+      // branches read is copied first. A chat they left ending on a user turn, or
+      // on nothing, has no reply to continue.
+      const edit = scripts.chat
+        ? planScriptChat(before, scripts.chat, { inPlace: rewritableHead(context.all, before.at(-1)), ownLast: true })
+        : null;
+      if (edit && edit.lastRole !== 'assistant') {
+        throw badRequest('invalid_state', 'The scripts left no assistant message to continue');
+      }
       await keepScriptWrites(deps, chat, context, scripts);
+      const edited = edit ? await keepScriptChat(deps, chat, edit, context.all) : null;
+      const path = edited ? edited.path : before;
+      const head = path[path.length - 1]!;
       const memory = await buildMemoryInput(deps, chat, path, lastUserText(path));
       // The partial assistant turn must stay last for the model to resume it, so it
       // is re-attached when the summary swallowed it.
@@ -2331,7 +2411,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         globalVariables: context.globalVariables,
         clock: requestClock(c, context.row, path),
         seed: chat.id,
-        branch: promptBranch(context.all, path),
+        branch: promptBranch(edited?.all ?? context.all, path),
         // The message being generated is the head itself, so the branch before it
         // is what it was first generated on — its own record must not read as a
         // trigger from the turn before.
@@ -2360,17 +2440,23 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       await requireEnabledModel(deps, userId, chat.model);
       const context = await loadGenerationContext(deps, chat, scripts);
       const focusNames = focusNamesOf(context.onStage, focusIds);
-      const path = buildPath(context.all, chat.headMessageId);
-      const head = path[path.length - 1];
-      if (!head || head.role !== 'assistant') {
+      const before = buildPath(context.all, chat.headMessageId);
+      if (before.at(-1)?.role !== 'assistant') {
         throw badRequest('invalid_state', 'The current head is not an assistant message');
       }
-      await settleHead(deps, chat, head, scripts, true);
+      await settleHead(deps, chat, before.at(-1), scripts, true);
+      // The reply follows whatever the start triggers left last.
+      const edit = scripts.chat
+        ? planScriptChat(before, scripts.chat, { inPlace: rewritableHead(context.all, before.at(-1)) })
+        : null;
       await keepScriptWrites(deps, chat, context, scripts);
+      const edited = edit ? await keepScriptChat(deps, chat, edit, context.all) : null;
+      const path = edited ? edited.path : before;
+      const head = path.at(-1);
       const memory = await buildMemoryInput(deps, chat, path, lastUserText(path));
       // The scene to continue must be in the prompt, so the head is re-attached
       // when the summary swallowed it.
-      const history = memory.history.length > 0 ? memory.history : [head];
+      const history = memory.history.length > 0 || !head ? memory.history : [head];
 
       return {
         chatId: chat.id,
@@ -2390,7 +2476,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         globalVariables: context.globalVariables,
         clock: requestClock(c, context.row, path),
         seed: chat.id,
-        branch: promptBranch(context.all, path),
+        branch: promptBranch(edited?.all ?? context.all, path),
         loreState: loreStateOf(path),
         assetNames: context.assetNames,
         auxiliaryModel: context.auxiliaryModel,
@@ -2402,7 +2488,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         }),
         // A child of the assistant head: two assistant turns in a row, which the
         // adapters merge for providers that require alternating roles.
-        target: { kind: 'new', parentId: head.id },
+        target: { kind: 'new', parentId: head?.id ?? null },
       };
     });
   });
@@ -2424,15 +2510,21 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       await requireEnabledModel(deps, userId, chat.model);
       const context = await loadGenerationContext(deps, chat, scripts);
       const focusNames = focusNamesOf(context.onStage, focusIds);
-      const path = buildPath(context.all, chat.headMessageId);
-      const head = path[path.length - 1];
-      if (!head) throw badRequest('invalid_state', 'The chat has no messages to narrate from');
-      await settleHead(deps, chat, head, scripts, true);
+      const before = buildPath(context.all, chat.headMessageId);
+      if (!before.at(-1)) throw badRequest('invalid_state', 'The chat has no messages to narrate from');
+      await settleHead(deps, chat, before.at(-1), scripts, true);
+      // The narration follows whatever the start triggers left last.
+      const edit = scripts.chat
+        ? planScriptChat(before, scripts.chat, { inPlace: rewritableHead(context.all, before.at(-1)) })
+        : null;
       await keepScriptWrites(deps, chat, context, scripts);
+      const edited = edit ? await keepScriptChat(deps, chat, edit, context.all) : null;
+      const path = edited ? edited.path : before;
+      const head = path.at(-1);
       const memory = await buildMemoryInput(deps, chat, path, lastUserText(path));
       // The scene to narrate must be in the prompt, so the head is re-attached
       // when the summary swallowed it.
-      const history = memory.history.length > 0 ? memory.history : [head];
+      const history = memory.history.length > 0 || !head ? memory.history : [head];
 
       return {
         chatId: chat.id,
@@ -2452,7 +2544,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         globalVariables: context.globalVariables,
         clock: requestClock(c, context.row, path),
         seed: chat.id,
-        branch: promptBranch(context.all, path),
+        branch: promptBranch(edited?.all ?? context.all, path),
         loreState: loreStateOf(path),
         assetNames: context.assetNames,
         auxiliaryModel: context.auxiliaryModel,
@@ -2463,7 +2555,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           user: context.userName,
         }),
         narration: true,
-        target: { kind: 'new', parentId: head.id },
+        target: { kind: 'new', parentId: head?.id ?? null },
       };
     });
   });

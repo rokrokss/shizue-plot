@@ -3,8 +3,10 @@ import { describe, expect, it } from 'vitest';
 import type { LoreEntry } from '../src/types.js';
 import {
   cardScripts,
+  checkScriptChat,
   hasTriggersFor,
   manualTriggerNames,
+  MAX_SCRIPT_CHAT_TEXT,
   MAX_TRIGGER_STEPS,
   mergeScriptOverlay,
   overlaidCard,
@@ -12,6 +14,7 @@ import {
   risuCalculate,
   runTriggers,
   runTriggersSync,
+  scriptChatOf,
   scriptedMember,
   TRIGGER_CLASSIFICATION,
   type TriggerCharacter,
@@ -783,6 +786,67 @@ describe('the overlay', () => {
     const card = { description: 'base', lorebook: [lore('x', 'y')], postHistoryInstructions: 'n' };
     expect(overlaidCard(card, second!.members!['a'])).toEqual({ description: 'one', lorebook: [], postHistoryInstructions: 'n' });
     expect(overlaidCard(card, undefined)).toBe(card);
+  });
+});
+
+describe('the chat a run leaves', () => {
+  const chat: TriggerMessage[] = [
+    { role: 'user', data: '안녕', id: 'm0' },
+    { role: 'char', data: '어서 와', id: 'm1' },
+    { role: 'user', data: '들어간다', id: 'm2' },
+  ];
+  const turn: TriggerMessage = { role: 'user', data: '또', id: 'turn' };
+
+  it('says what a run kept, changed and added, against the chat it was given', () => {
+    expect(scriptChatOf(chat, chat.map((message) => ({ ...message })))).toBeNull();
+    expect(scriptChatOf(chat, [...chat, { role: 'char', data: '덧붙임' }])).toEqual({
+      keep: 3,
+      messages: [{ role: 'assistant', content: '덧붙임' }],
+    });
+    expect(scriptChatOf(chat, chat.slice(0, 1))).toEqual({ keep: 1, messages: [] });
+    expect(scriptChatOf(chat, [chat[0]!, { ...chat[1]!, data: '고침', role: 'user' }, chat[2]!])).toEqual({
+      keep: 1,
+      messages: [{ id: 'm1', role: 'user', content: '고침' }, { id: 'm2' }],
+    });
+    // A message moved out of branch order, or named twice, goes as a new one with its text.
+    expect(scriptChatOf(chat, [chat[1]!, chat[0]!, chat[1]!])).toEqual({
+      keep: 0,
+      messages: [{ id: 'm1' }, { role: 'user', content: '안녕' }, { role: 'assistant', content: '어서 와' }],
+    });
+  });
+
+  it('places a send’s turn, and reads it at the end as the chat as it was', () => {
+    expect(scriptChatOf([...chat, turn], [...chat, { ...turn, data: '바뀐 말' }], 'turn')).toBeNull();
+    expect(scriptChatOf([...chat, turn], [...chat, turn, { role: 'char', data: '독백' }], 'turn')).toEqual({
+      keep: 3,
+      messages: [{ turn: true }, { role: 'assistant', content: '독백' }],
+    });
+    expect(scriptChatOf([...chat, turn], chat, 'turn')).toEqual({ keep: 3, messages: [] });
+  });
+
+  it('checks a result’s shape and size, the turn only where one may stand', () => {
+    expect(checkScriptChat(undefined)).toEqual({ ok: true, chat: null });
+    expect(checkScriptChat({ messages: [{ id: 'm1' }, { role: 'user', content: '' }] })).toEqual({
+      ok: true,
+      chat: { keep: 0, messages: [{ id: 'm1' }, { role: 'user', content: '' }] },
+    });
+    for (const value of [
+      [],
+      { keep: 1.5, messages: [] },
+      { keep: 0 },
+      { messages: [{ role: 'system', content: 'x' }] },
+      { messages: [{ role: 'user' }] },
+      { messages: [{ id: 3 }] },
+      { messages: [{ role: 'user', content: 'a\u0000b' }] },
+      { messages: [{ turn: true }] },
+    ]) {
+      expect(checkScriptChat(value), JSON.stringify(value)).toMatchObject({ ok: false, limit: false });
+    }
+    expect(checkScriptChat({ messages: [{ turn: true }, { turn: true }] }, { turn: true })).toMatchObject({ ok: false });
+    expect(checkScriptChat({ messages: [{ role: 'user', content: 'x'.repeat(MAX_SCRIPT_CHAT_TEXT + 1) }] })).toMatchObject({
+      ok: false,
+      limit: true,
+    });
   });
 });
 

@@ -34,6 +34,7 @@ import {
   stripPngTextChunks,
 } from '@shizue/core';
 import { draftFingerprint, MIGRATION_PLATFORMS_ENABLED, type MigrationDraft } from '@shizue/core/migrate';
+import { MAX_SCRIPT_CHAT_MESSAGES, MAX_SCRIPT_CHAT_TEXT } from '@shizue/core/triggers';
 import { toWorldInfo } from '@shizue/core/world-info';
 import { ChatExportSchema } from '@shizue/contracts';
 import {
@@ -11586,6 +11587,356 @@ describe('card scripts', () => {
       const refused = await json(cookie, path, 'PATCH', body);
       expect(refused.status, JSON.stringify(body).slice(0, 60)).toBe(400);
     }
+  });
+
+  describe('the chat a run leaves', () => {
+    /**
+     * An app whose model answers the chat's turns `대답1`, `대답2`, … and records
+     * the system prompt and the turns of each. The background work after a turn
+     * asks the same model; it is told apart by the card's prompt it lacks.
+     */
+    function countingApp(): { app: Hono<AppEnv>; prompts: { system: string; turns: string[] }[] } {
+      const prompts: { system: string; turns: string[] }[] = [];
+      const app = makeApp({
+        getAdapter: () => ({
+          providerModel: 'counting',
+          adapter: {
+            stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
+              const turn = req.system.includes('[hp=');
+              if (turn) prompts.push({ system: req.system, turns: req.messages.map((m) => `${m.role}:${contentText(m.content)}`) });
+              yield { type: 'text', text: turn ? `대답${prompts.length}` : '{}' };
+              return { usage: { promptTokens: 1, completionTokens: 1 } };
+            },
+          },
+        }),
+      });
+      return { app, prompts };
+    }
+
+    /** The opening, `하나` → `대답1`, `둘` → `대답2`: `[greeting, u1, a1, u2, a2]`. */
+    async function twoTurns(email: string) {
+      const chat = await variableChat(email);
+      const harness = countingApp();
+      for (const content of ['하나', '둘']) {
+        await readSse(await json(chat.cookie, `/api/chats/${chat.chatId}/messages`, 'POST', { content }, harness.app));
+      }
+      const path: any[] = (await stateOf(chat.cookie, chat.chatId)).path;
+      expect(path.map((m) => m.content)).toEqual(['문 앞이다', '하나', '대답1', '둘', '대답2']);
+      return { ...chat, harness, path };
+    }
+
+    const commitOn = (cookie: string, chatId: string, head: any, body: Record<string, unknown>): Promise<Response> =>
+      json(cookie, `/api/chats/${chatId}/script-commit`, 'POST', { messageId: head.id, scriptRev: head.scriptRev, ...body });
+
+    const rowOf = async (id: string) => (await db.select().from(messages).where(eq(messages.id, id)))[0]!;
+    const rowsOf = async (chatId: string) => db.select().from(messages).where(eq(messages.chatId, chatId));
+
+    it('appends what a stopped or finished run added after the head, with its values on it', async () => {
+      const { cookie, chatId, path } = await twoTurns('script-chat-append@example.com');
+      const [, , , , a2] = path;
+      // What a start run that impersonated and then stopped commits: no content, no pending.
+      const res = await commitOn(cookie, chatId, a2, {
+        chat: { keep: 4, messages: [{ role: 'assistant', content: '굴림: 7' }] },
+        variableDelta: { door: 'open' },
+      });
+      expect(res.status, await res.clone().text()).toBe(200);
+      const state = await readJson(res);
+      const added = state.path.at(-1);
+      expect(state.path.slice(0, 5).map((m: any) => m.id)).toEqual(path.map((m) => m.id));
+      expect(added).toMatchObject({ parentId: a2.id, role: 'assistant', content: '굴림: 7', variableDelta: { door: 'open' }, model: null });
+      expect(state.chat.headMessageId).toBe(added.id);
+      // The reply it followed is as it was, but for the commit's revision.
+      expect(await rowOf(a2.id)).toMatchObject({ content: '대답2', variableDelta: null, scriptRev: 1 });
+
+      // The next prompt reads the values where the branch now ends.
+      const { app: next, systems } = replyingApp('다음');
+      await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '셋' }, next));
+      expect(systems.at(-1)).toContain('[hp=100 door=open mood=null]');
+    });
+
+    it('moves the head back for a cut of the tail, and copies the last kept message only to carry new values', async () => {
+      const { cookie, chatId, path } = await twoTurns('script-chat-tail@example.com');
+      const [, u1, a1, u2, a2] = path;
+      // `cutchat 0 2`: the values already fold there, so it is a move.
+      let res = await commitOn(cookie, chatId, a2, { chat: { keep: 2, messages: [] }, variableDelta: null });
+      expect(res.status, await res.clone().text()).toBe(200);
+      let state = await readJson(res);
+      expect(state.path.map((m: any) => m.id)).toEqual(path.slice(0, 3).map((m) => m.id));
+      // The tail is still in the tree, under the message the head moved to.
+      expect((await rowOf(u2.id)).parentId).toBe(a1.id);
+      expect((await rowOf(a2.id)).parentId).toBe(u2.id);
+
+      // A cut that leaves values the branch does not fold to: the last kept
+      // message is copied to carry them, since the tail under it folds through it.
+      const head = state.path.at(-1);
+      res = await commitOn(cookie, chatId, head, { chat: { keep: 1, messages: [] }, variableDelta: { mood: 'calm' } });
+      expect(res.status, await res.clone().text()).toBe(200);
+      state = await readJson(res);
+      const copy = state.path.at(-1);
+      expect(copy).toMatchObject({ parentId: path[0].id, role: 'user', content: '하나', variableDelta: { mood: 'calm' } });
+      expect(copy.id).not.toBe(u1.id);
+      expect(await rowOf(u1.id)).toMatchObject({ variableDelta: null });
+      expect(state.siblings[copy.id]).toMatchObject({ index: 1, total: 2, ids: [u1.id, copy.id] });
+      expect(await rowsOf(chatId)).toHaveLength(6);
+    });
+
+    it('rebuilds the branch from a cut in the middle, leaving the old one a swipe away and dropping the summary it covered', async () => {
+      const { cookie, chatId, path } = await twoTurns('script-chat-middle@example.com');
+      const [greeting, u1, a1, u2, a2] = path;
+      await db
+        .update(chats)
+        .set({ memory: { summary: '요약', anchorMessageId: a1.id, updatedAt: new Date().toISOString() } })
+        .where(eq(chats.id, chatId));
+      const [{ memoryRevision: revision }] = await db.select({ memoryRevision: chats.memoryRevision }).from(chats).where(eq(chats.id, chatId));
+
+      // `removeChat(0)` twice: the first exchange goes.
+      const res = await commitOn(cookie, chatId, a2, {
+        chat: { keep: 0, messages: [{ id: u2.id }, { id: a2.id }] },
+        variableDelta: null,
+      });
+      expect(res.status, await res.clone().text()).toBe(200);
+      const state = await readJson(res);
+      const [, u2copy, a2copy] = state.path;
+      expect(state.path).toHaveLength(3);
+      expect(u2copy).toMatchObject({ parentId: greeting.id, role: 'user', content: '둘' });
+      expect(a2copy).toMatchObject({ parentId: u2copy.id, role: 'assistant', content: '대답2', model: a2.model });
+      expect(state.siblings[u2copy.id]).toMatchObject({ total: 2, ids: [u1.id, u2copy.id] });
+      // The old branch is untouched.
+      for (const original of path) expect(await rowOf(original.id)).toMatchObject({ parentId: original.parentId, content: original.content });
+      // The summary stood for a message the reader's branch left behind.
+      const [after] = await db.select().from(chats).where(eq(chats.id, chatId));
+      expect(after!.memory).toBeNull();
+      expect(after!.memoryRevision).toBe(revision + 1);
+
+      // A swipe back lands where the old branch ended.
+      const back = await readJson(await json(cookie, `/api/chats/${chatId}/head`, 'POST', { messageId: u1.id }));
+      expect(back.path.map((m: any) => m.id)).toEqual(path.map((m) => m.id));
+    });
+
+    it('rewrites an older message on a new branch whose copies carry every message’s payload and images', async () => {
+      const { cookie, chatId } = await variableChat('script-chat-payload@example.com');
+      const harness = countingApp();
+      await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '하나' }, harness.app));
+      const form = new FormData();
+      form.append('file', new File([Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 9])], 'shot.gif'));
+      const upload = await readJson(await request(cookie, `/api/chats/${chatId}/attachments`, 'POST', form));
+      await readSse(
+        await json(
+          cookie,
+          `/api/chats/${chatId}/messages`,
+          'POST',
+          { content: '둘', attachmentIds: [upload.id], directions: '판정: 성공', variableDelta: { door: 'open' } },
+          harness.app,
+        ),
+      );
+      const path: any[] = (await stateOf(cookie, chatId)).path;
+      const [, u1, a1, u2, a2] = path;
+      await db.update(messages).set({ loreTriggers: ['문'] }).where(eq(messages.id, a2.id));
+
+      // `modifychat 1`: the first reply.
+      const res = await commitOn(cookie, chatId, a2, {
+        chat: { keep: 1, messages: [{ id: a1.id, content: '고친 대답' }, { id: u2.id }, { id: a2.id }] },
+        variableDelta: null,
+      });
+      expect(res.status, await res.clone().text()).toBe(200);
+      const state = await readJson(res);
+      const [, keptU1, a1copy, u2copy, a2copy] = state.path;
+      expect(keptU1.id).toBe(u1.id);
+      expect(a1copy).toMatchObject({ parentId: u1.id, content: '고친 대답', model: a1.model, completionTokens: a1.completionTokens });
+      expect(u2copy).toMatchObject({ content: '둘', source: 'user', directions: '판정: 성공', variableDelta: { door: 'open' } });
+      expect(u2copy.attachments).toHaveLength(1);
+      expect(a2copy).toMatchObject({ content: '대답2', variableDelta: null, scriptState: null, scriptRev: 0 });
+      expect((await rowOf(a2copy.id)).loreTriggers).toEqual(['문']);
+      expect(await rowOf(a1.id)).toMatchObject({ content: '대답1' });
+
+      // The image is one object for both turns: pruning the old branch keeps it for the copy.
+      const [image] = await db.select().from(chatAttachments).where(eq(chatAttachments.messageId, u2copy.id));
+      expect(image!.path).toBe((await db.select().from(chatAttachments).where(eq(chatAttachments.messageId, u2.id)))[0]!.path);
+      expect((await json(cookie, `/api/chats/${chatId}/messages/${a1.id}`, 'DELETE')).status).toBe(200);
+      await readFile(join(storageDir, image!.path));
+      expect((await request(cookie, `/api/chats/${chatId}/attachments/${image!.id}`)).status).toBe(200);
+      // …and once no turn names it, it goes.
+      expect((await json(cookie, `/api/chats/${chatId}/messages/${a1copy.id}`, 'DELETE')).status).toBe(200);
+      await expect(readFile(join(storageDir, image!.path))).rejects.toThrow();
+    });
+
+    it("turns a message's role in place on a head nothing hangs under, and by a copy anywhere else", async () => {
+      const { cookie, chatId, path } = await twoTurns('script-chat-role@example.com');
+      const [, , a1, u2, a2] = path;
+      let res = await commitOn(cookie, chatId, a2, { chat: { keep: 3, messages: [{ id: a2.id, role: 'user' }] } });
+      expect(res.status, await res.clone().text()).toBe(200);
+      let state = await readJson(res);
+      expect(state.path.at(-1)).toMatchObject({ id: a2.id, role: 'user', content: '대답2', scriptRev: 2 });
+
+      const head = state.path.at(-1);
+      res = await commitOn(cookie, chatId, head, { chat: { keep: 2, messages: [{ id: u2.id, role: 'assistant' }, { id: a2.id }] } });
+      expect(res.status, await res.clone().text()).toBe(200);
+      state = await readJson(res);
+      const [, , , u2copy, a2copy] = state.path;
+      expect(u2copy).toMatchObject({ parentId: a1.id, role: 'assistant', content: '둘', directions: null });
+      expect(a2copy).toMatchObject({ parentId: u2copy.id, role: 'user' });
+      expect(await rowOf(u2.id)).toMatchObject({ role: 'user' });
+    });
+
+    it('sends the turn where the scripts left it, generating after what they added', async () => {
+      const { cookie, chatId, path, harness } = await twoTurns('script-chat-send@example.com');
+      const a2 = path.at(-1);
+      // RisuAI's order: the input run's chat, the turn pushed, the start run impersonating after it.
+      let events = await readSse(
+        await json(
+          cookie,
+          `/api/chats/${chatId}/messages`,
+          'POST',
+          {
+            content: '셋',
+            baseHeadId: a2.id,
+            chat: { keep: 4, messages: [{ turn: true }, { role: 'assistant', content: '[독백]' }] },
+            variableDelta: { door: 'open' },
+          },
+          harness.app,
+        ),
+      );
+      expect(events.at(-1)!.event).toBe('done');
+      let state = await stateOf(cookie, chatId);
+      const [turn, aside, reply] = state.path.slice(5);
+      expect(turn).toMatchObject({ parentId: a2.id, role: 'user', content: '셋', variableDelta: null });
+      expect(aside).toMatchObject({ parentId: turn.id, role: 'assistant', content: '[독백]', variableDelta: { door: 'open' } });
+      expect(reply).toMatchObject({ parentId: aside.id, role: 'assistant', content: '대답3' });
+      const spoken = harness.prompts.at(-1)!.turns.filter((turn) => !turn.startsWith('system:'));
+      expect(spoken.slice(-2)).toEqual(['user:셋', 'assistant:[독백]']);
+      expect(harness.prompts.at(-1)!.system).toContain('door=open');
+
+      // A start run that cut the turn: RisuAI sends without it.
+      events = await readSse(
+        await json(
+          cookie,
+          `/api/chats/${chatId}/messages`,
+          'POST',
+          { content: '넷', chat: { keep: 7, messages: [] } },
+          harness.app,
+        ),
+      );
+      expect(events.at(-1)!.event).toBe('done');
+      state = await stateOf(cookie, chatId);
+      expect(state.path).toHaveLength(9);
+      expect(state.path.at(-1)).toMatchObject({ parentId: reply.id, content: '대답4' });
+      expect((await rowsOf(chatId)).some((m) => m.content === '넷')).toBe(false);
+    });
+
+    it('regenerates after what the start triggers did to the branch without the head', async () => {
+      const { cookie, chatId, path, harness } = await twoTurns('script-chat-regenerate@example.com');
+      const [, , , u2, a2] = path;
+      // Appended to the branch the reply replaces: the old reply is the sibling of what was appended.
+      await readSse(
+        await json(
+          cookie,
+          `/api/chats/${chatId}/regenerate`,
+          'POST',
+          { baseHeadId: a2.id, chat: { keep: 3, messages: [{ role: 'user', content: '끼어든 말' }] }, startDelta: { mood: 'x' } },
+          harness.app,
+        ),
+      );
+      let state = await stateOf(cookie, chatId);
+      const [added, reply] = state.path.slice(4);
+      expect(added).toMatchObject({ parentId: u2.id, role: 'user', content: '끼어든 말' });
+      expect(reply).toMatchObject({ parentId: added.id, content: '대답3', variableDelta: { mood: 'x' } });
+      expect(state.siblings[added.id]).toMatchObject({ total: 2, ids: [a2.id, added.id] });
+
+      // A rewrite of the turn the reply answers: its end has a reply under it, so it forks.
+      const head = state.path.at(-1);
+      await readSse(
+        await json(
+          cookie,
+          `/api/chats/${chatId}/regenerate`,
+          'POST',
+          { baseHeadId: head.id, chat: { keep: 3, messages: [{ id: added.id, content: '고친 말' }] } },
+          harness.app,
+        ),
+      );
+      state = await stateOf(cookie, chatId);
+      expect(state.path.at(-2)).toMatchObject({ parentId: u2.id, content: '고친 말' });
+      expect(state.path.at(-1)).toMatchObject({ content: '대답4' });
+      expect(await rowOf(added.id)).toMatchObject({ content: '끼어든 말' });
+    });
+
+    it('continues what the start triggers left last, and refuses a chat they left ending on the reader', async () => {
+      const { cookie, chatId, path, harness } = await twoTurns('script-chat-continue@example.com');
+      const a2 = path.at(-1);
+      const refused = await json(
+        cookie,
+        `/api/chats/${chatId}/continue`,
+        'POST',
+        { chat: { keep: 4, messages: [{ role: 'user', content: '내 말' }] } },
+        harness.app,
+      );
+      expect(refused.status).toBe(400);
+      expect((await readJson(refused)).code).toBe('invalid_state');
+      expect(await rowsOf(chatId)).toHaveLength(5);
+
+      await readSse(
+        await json(
+          cookie,
+          `/api/chats/${chatId}/continue`,
+          'POST',
+          { chat: { keep: 4, messages: [{ role: 'assistant', content: '이어서 ' }] } },
+          harness.app,
+        ),
+      );
+      const state = await stateOf(cookie, chatId);
+      expect(state.path).toHaveLength(6);
+      expect(state.path.at(-1)).toMatchObject({ parentId: a2.id, content: '이어서 대답3' });
+      expect(await rowOf(a2.id)).toMatchObject({ content: '대답2' });
+    });
+
+    it('refuses a head that moved and a chat it cannot place, writing nothing', async () => {
+      const { cookie, chatId, path, harness, rootId } = await twoTurns('script-chat-refused@example.com');
+      const [, u1, a1, , a2] = path;
+      const moved = await json(
+        cookie,
+        `/api/chats/${chatId}/auto`,
+        'POST',
+        { baseHeadId: a1.id, chat: { keep: 4, messages: [{ role: 'user', content: '말' }] } },
+        harness.app,
+      );
+      expect(moved.status).toBe(409);
+      expect((await readJson(moved)).code).toBe('head_moved');
+
+      const cases: [unknown, string][] = [
+        [{ keep: 4, messages: [{ id: randomUUID() }] }, 'invalid_request'],
+        [{ keep: 0, messages: [{ id: a1.id }, { id: u1.id }] }, 'invalid_request'],
+        [{ keep: 0, messages: [{ id: u1.id }, { id: u1.id }] }, 'invalid_request'],
+        [{ keep: 0, messages: [{ id: rootId }] }, 'invalid_request'],
+        [{ keep: 5, messages: [] }, 'invalid_request'],
+        [{ keep: 4, messages: [{ turn: true }] }, 'invalid_request'],
+        [{ keep: 4, messages: [{ role: 'system', content: '말' }] }, 'invalid_request'],
+        [{ keep: 4, messages: [{ role: 'user' }] }, 'invalid_request'],
+        [{ keep: -1, messages: [] }, 'invalid_request'],
+        [[], 'invalid_request'],
+        [{ keep: 4, messages: [{ role: 'user', content: 'x'.repeat(MAX_SCRIPT_CHAT_TEXT + 1) }] }, 'script_chat_limit'],
+        [
+          { keep: 4, messages: Array.from({ length: MAX_SCRIPT_CHAT_MESSAGES + 1 }, () => ({ role: 'user', content: '말' })) },
+          'script_chat_limit',
+        ],
+      ];
+      for (const [chat, code] of cases) {
+        const res = await commitOn(cookie, chatId, a2, { chat, variableDelta: { door: 'open' } });
+        expect(res.status, JSON.stringify(chat).slice(0, 80)).toBe(400);
+        expect((await readJson(res)).code, JSON.stringify(chat).slice(0, 80)).toBe(code);
+      }
+      const generated = await json(
+        cookie,
+        `/api/chats/${chatId}/narrate`,
+        'POST',
+        { chat: { keep: 0, messages: [{ id: a1.id }, { id: u1.id }] } },
+        harness.app,
+      );
+      expect(generated.status).toBe(400);
+
+      expect(await rowsOf(chatId)).toHaveLength(5);
+      const state = await stateOf(cookie, chatId);
+      expect(state.chat.headMessageId).toBe(a2.id);
+      expect(state.path.at(-1)).toMatchObject({ variableDelta: null, scriptRev: 0 });
+    });
   });
 });
 

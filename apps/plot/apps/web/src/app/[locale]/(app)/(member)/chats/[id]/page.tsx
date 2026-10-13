@@ -1087,7 +1087,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         }
       }
       followUpChain.current += 1;
-      await run('auto', undefined, undefined, true);
+      // RisuAI generates on whatever its chat now ends with: a reader's turn the
+      // output triggers added is answered, anything else is carried on from.
+      await run(state.path.at(-1)?.role === 'user' ? 'regenerate' : 'auto', undefined, undefined, true);
     })();
   }, [followUp, mode, mutating, drawing, state]);
 

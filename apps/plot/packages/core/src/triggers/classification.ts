@@ -3,8 +3,9 @@
  *
  * - `browser`: the interpreter does it, in the reader's browser, as RisuAI does.
  * - `server`: the interpreter does it, and the runtime hands the result to the
- *   API to keep — a variable on the turn, prompt text on the generation, a
- *   rewrite of the work in the chat's overlay, the reader's note.
+ *   API to keep — a variable on the turn, prompt text on the generation, the
+ *   chat the run left (`ScriptChat`), a rewrite of the work in the chat's
+ *   overlay, the reader's note.
  * - `logged`: the run notes it and goes on, leaving what RisuAI leaves when the
  *   effect finds nothing to act on.
  * - `impossible`: nothing here can do it (no image provider, no embedder, the
@@ -35,12 +36,18 @@ export const TRIGGER_CLASSIFICATION: Readonly<Record<string, { support: TriggerS
   // v1 effects
   setvar: { support: 'server', note: '' },
   systemprompt: { support: 'server', note: 'start runs only: prompt injections' },
-  impersonate: { support: 'logged', note: 'seen by the run; nothing appends a message without a generation' },
+  impersonate: { support: 'server', note: 'appended to the chat the run leaves, which is kept as the reader’s branch (`ScriptChat`)' },
   command: { support: 'impossible', note: 'RisuAI slash commands' },
-  stop: { support: 'browser', note: 'start run: the generation is not sent (a send keeps its text in the composer)' },
+  stop: {
+    support: 'browser',
+    note: 'start run: the generation is not sent (a send keeps its text in the composer); what the run did to the rest of the chat is kept',
+  },
   runtrigger: { support: 'browser', note: 'nesting capped at 10 unless lowLevelAccess, 50 always' },
-  cutchat: { support: 'logged', note: 'seen by the run; the tree is append-only' },
-  modifychat: { support: 'server', note: 'the head is rewritten in place; other messages are not' },
+  cutchat: { support: 'server', note: '`chat.message.slice(start, end)`; what it cuts stays in the tree as another branch' },
+  modifychat: {
+    support: 'server',
+    note: 'any message: the head in place while nothing hangs under it, any other on a new branch that copies the rest',
+  },
   showAlert: { support: 'browser', note: 'lowLevelAccess' },
   sendAIprompt: { support: 'server', note: 'lowLevelAccess; an automatic next turn, with the reader’s consent' },
   runLLM: { support: 'server', note: 'lowLevelAccess; POST /api/chats/:id/script-llm on the chat’s model; a failure writes “Error: …”' },
@@ -77,10 +84,10 @@ export const TRIGGER_CLASSIFICATION: Readonly<Record<string, { support: TriggerS
   v2Tokenize: { support: 'browser', note: 'estimated, four characters a token' },
 
   // v2 chat
-  v2CutChat: { support: 'logged', note: 'seen by the run; the tree is append-only' },
-  v2ModifyChat: { support: 'server', note: 'the head is rewritten in place; other messages are not' },
+  v2CutChat: { support: 'server', note: 'as cutchat; an unreadable start is 0 and end the length' },
+  v2ModifyChat: { support: 'server', note: 'as modifychat' },
   v2SystemPrompt: { support: 'server', note: 'start runs only: prompt injections' },
-  v2Impersonate: { support: 'logged', note: 'seen by the run; nothing appends a message without a generation' },
+  v2Impersonate: { support: 'server', note: 'as impersonate' },
   v2Command: { support: 'impossible', note: 'RisuAI slash commands' },
   v2SendAIprompt: { support: 'server', note: 'lowLevelAccess; an automatic next turn, with the reader’s consent' },
   v2StopPromptSending: { support: 'browser', note: 'as stop' },

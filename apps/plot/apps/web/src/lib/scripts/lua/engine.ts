@@ -13,8 +13,9 @@
  * script may read, all of it, since it cannot call back synchronously — and
  * what the script wrote comes back through the same scope: variables through
  * `setVar` (a value longer than a trigger may write is dropped and noted),
- * the chat through `messages` (a message keeps its id when the script left it
- * where it was), the description and the lore through the character setters.
+ * the chat through `messages` (a message keeps its id, with the role and the
+ * text the script gave it, while the script did not move it), the description
+ * and the lore through the character setters.
  * From there the runtime carries them where a trigger's writes go.
  *
  * What RisuAI keeps behind the card's `lowLevelAccess` stays behind it: the
@@ -206,10 +207,7 @@ export function createLuaEngine(options: LuaEngineOptions): ScriptEngine {
       const before = scope.messages.slice();
       const after = result.messages.map((message) => {
         const kept = message.key !== null ? before[message.key] : undefined;
-        if (kept && kept.role !== message.role) {
-          log({ kind: 'dropped', effect: 'setChatRole', message: 'a stored message keeps its role' });
-        }
-        return kept ? { ...kept, data: message.data } : { role: message.role, data: message.data };
+        return kept ? { ...kept, role: message.role, data: message.data } : { role: message.role, data: message.data };
       });
       scope.messages.splice(0, scope.messages.length, ...after);
     }

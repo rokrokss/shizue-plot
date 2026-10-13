@@ -16,13 +16,21 @@
  *   (`startDelta`), and the prompt text they asked for (`injections`);
  * - whether the browser will run output scripts over the reply (`postProcess`),
  *   which leaves the reply `pending` until it commits the result;
+ * - the chat as the scripts left it (`chat`) — messages appended, cut, rewritten
+ *   — which is kept as the reader's branch (`scriptChat.ts`);
  * - what the scripts rewrote of the work itself — a member's description, lore
  *   and global note, the reader's persona (`overlay`), and the chat note — kept
  *   on the chat (`chats.script_overlay`, `chats.note`) and laid over the work
  *   wherever that chat's prompt is assembled. The plot never changes.
  */
 import { applyVariableDelta, checkVariableDelta, type VariableDelta, type Variables } from '@shizue/core';
-import { mergeScriptOverlay, type MemberOverlay, type ScriptOverlay } from '@shizue/core/triggers';
+import {
+  checkScriptChat,
+  mergeScriptOverlay,
+  type MemberOverlay,
+  type ScriptChat,
+  type ScriptOverlay,
+} from '@shizue/core/triggers';
 import { chats, plotReaderVariables, type Chat, type ChatScriptOverlay } from '@shizue/db';
 import { and, eq } from 'drizzle-orm';
 import { coerceLorebook } from './card.js';
@@ -84,6 +92,12 @@ export interface GenerationScripts {
   overlay: ScriptOverlay | null;
   /** The chat note as the scripts left it (`v2SetAuthorNote`); undefined when untouched. */
   note: string | undefined;
+  /**
+   * The chat as the scripts that ran for this generation left it (`ScriptChat`),
+   * kept before the prompt is built (`scriptChat.ts`); null when they left it as
+   * it was.
+   */
+  chat: ScriptChat | null;
 }
 
 export const NO_SCRIPTS: GenerationScripts = {
@@ -94,7 +108,20 @@ export const NO_SCRIPTS: GenerationScripts = {
   abandonPending: false,
   overlay: null,
   note: undefined,
+  chat: null,
 };
+
+/**
+ * `body.chat`, what the scripts did to the chat, by its shape and its size (400
+ * `invalid_request`, or `script_chat_limit` past the caps). Whether the messages
+ * it names are on the branch is the route's to check (`planScriptChat`). `turn`
+ * lets a send place its own turn.
+ */
+export function readScriptChat(body: Record<string, unknown>, { turn }: { turn: boolean }): ScriptChat | null {
+  const check = checkScriptChat(body['chat'], { turn });
+  if (check.ok) return check.chat;
+  throw badRequest(check.limit ? 'script_chat_limit' : 'invalid_request', `chat ${check.error}`);
+}
 
 /** `body[key]` as a delta, or what is wrong with it. Absent and `null` are no delta. */
 export function optionalVariableDelta(body: Record<string, unknown>, key: string): VariableDelta | null {
@@ -127,7 +154,7 @@ function optionalInjections(body: Record<string, unknown>): PromptInjections | n
  * Reads the script fields of a generation body. `startDelta` is only read where
  * the generation adds no user turn of its own: a send carries the scripts' writes
  * on the user turn instead (`variableDelta`), since that is the message they ran
- * for.
+ * for — or, where they edited the chat, on the message it ends on.
  */
 export function readGenerationScripts(
   body: Record<string, unknown>,
@@ -145,6 +172,8 @@ export function readGenerationScripts(
     abandonPending: optionalBoolean(body, 'abandonPending') ?? false,
     overlay: optionalOverlay(body),
     note: optionalScriptNote(body),
+    // A send places its own turn in it; the other generations add none.
+    chat: readScriptChat(body, { turn: !startDelta }),
   };
 }
 

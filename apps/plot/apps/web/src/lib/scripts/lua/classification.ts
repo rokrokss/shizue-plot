@@ -5,8 +5,8 @@
  *
  * - `browser`: done in the sandbox, as RisuAI does it.
  * - `server`: done in the sandbox, and what it changed is carried to the API
- *   the way a trigger's writes are — a chat variable on the turn, the head's
- *   text in place, a rewrite of the work in the chat's overlay — or, for a model
+ *   the way a trigger's writes are — a chat variable on the turn, the chat the
+ *   run left, a rewrite of the work in the chat's overlay — or, for a model
  *   call, answered by the API on the reader's own account.
  * - `logged`: answers what RisuAI answers when there is nothing to act on, and
  *   the run notes it.
@@ -72,14 +72,17 @@ export const LUA_CLASSIFICATION: Readonly<Record<string, LuaSupport>> = {
   getRecentChatsMain: host('browser'),
   getCharacterLastMessage: host('browser', 'else the greeting the branch opened on'),
   getUserLastMessage: host('browser'),
-  setChat: host('server', 'the head is rewritten in place; other messages are not'),
-  setChatRole: host('logged', 'seen by the script; a stored message keeps its role'),
-  setFullChat: wrapper('server', 'as setChat'),
-  setFullChatMain: host('server', 'as setChat'),
-  cutChat: host('logged', 'seen by the script; the tree is append-only'),
-  removeChat: host('logged', 'seen by the script; the tree is append-only'),
-  addChat: host('logged', 'seen by the script; nothing appends a message without a generation'),
-  insertChat: host('logged', 'as addChat'),
+  setChat: host(
+    'server',
+    'any message: the head in place while nothing hangs under it, any other on a new branch (ScriptChat); an edit listener’s is dropped',
+  ),
+  setChatRole: host('server', 'as setChat'),
+  setFullChat: wrapper('server', 'as setFullChatMain'),
+  setFullChatMain: host('server', 'the whole chat; a message stays itself where its place and role did not change, as setChat'),
+  cutChat: host('server', 'as setChat; what it cuts stays in the tree as another branch'),
+  removeChat: host('server', 'as cutChat'),
+  addChat: host('server', 'appended to the chat the run leaves, kept as the reader’s branch'),
+  insertChat: host('server', 'as addChat, at its place'),
   getTokens: host('browser', 'estimated, four characters a token'),
   cbs: host('browser', 'only {{char}}, {{user}}, {{getvar}}, {{getglobalvar}}; the rest is left as written'),
 

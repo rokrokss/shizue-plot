@@ -68,6 +68,7 @@ vi.mock('@/lib/sse', () => ({
   streamGeneration: async (path: string, body: unknown): Promise<unknown> => {
     streamed.push({ path, body });
     if (afterTurn) chatState = afterTurn;
+    afterTurn = null;
     return { kind: 'done', messageId: 'm3', usage: {}, unlockedAssetIds: [] };
   },
 }));
@@ -92,7 +93,13 @@ vi.mock('@/lib/api', async (importOriginal) => {
       sent.push({ method, path, body });
       if (path.endsWith('/script-commit')) {
         const head = chatState.path.at(-1)!;
-        const fields = body as { content?: string; variableDelta?: Record<string, string | null> | null };
+        const fields = body as {
+          content?: string;
+          variableDelta?: Record<string, string | null> | null;
+          chat?: { messages: { role?: ChatMessage['role']; content?: string; id?: string }[] };
+        };
+        // Only what a chat appends: enough for the page to show the branch it answers with.
+        const added = (fields.chat?.messages ?? []).filter((item) => item.id === undefined);
         chatState = {
           ...chatState,
           path: [
@@ -100,10 +107,11 @@ vi.mock('@/lib/api', async (importOriginal) => {
             {
               ...head,
               ...(fields.content !== undefined ? { content: fields.content } : {}),
-              ...('variableDelta' in fields ? { variableDelta: fields.variableDelta ?? null } : {}),
+              ...('variableDelta' in fields && !fields.chat ? { variableDelta: fields.variableDelta ?? null } : {}),
               scriptState: null,
               scriptRev: (head.scriptRev ?? 0) + 1,
             },
+            ...added.map((item, index) => message(`s${index}`, head.id, item.role!, item.content!)),
           ],
         };
       }
@@ -268,6 +276,36 @@ describe('a send', () => {
     expect(host.querySelector('[data-testid="script-notice"]')).not.toBeNull();
   });
 
+  it('shows what a stopped start run did to the chat, and still keeps the text in the composer', async () => {
+    bundle = scripted({
+      triggers: [
+        {
+          comment: '',
+          type: 'start',
+          conditions: [],
+          effect: [{ type: 'impersonate', role: 'char', value: '굴림: 7' }, { type: 'stop' }],
+        },
+      ],
+    });
+    await render();
+    await sendText('/굴림');
+    expect(streamed).toEqual([]);
+    expect(sent).toEqual([
+      {
+        method: 'POST',
+        path: '/api/chats/cht_1/script-commit',
+        body: {
+          messageId: 'm2',
+          scriptRev: 0,
+          variableDelta: null,
+          chat: { keep: 2, messages: [{ role: 'assistant', content: '굴림: 7' }] },
+        },
+      },
+    ]);
+    expect([...host.querySelectorAll('[data-testid="row"] span')].map((node) => node.textContent)).toContain('굴림: 7');
+    expect(host.querySelector('textarea')!.value).toBe('/굴림');
+  });
+
   it('sends as it always did when the plot carries no scripts', async () => {
     await render();
     await sendText('안녕');
@@ -289,6 +327,36 @@ describe('a pending reply', () => {
     await sendText('또');
     const commit = sent.find((call) => call.path.endsWith('/script-commit'));
     expect(commit?.body).toMatchObject({ messageId: 'm4', scriptRev: 0, clearPending: true, content: '다듬은 것' });
+  });
+
+  it('answers a reader’s turn its output triggers added, when they ask for another reply', async () => {
+    bundle = scripted({
+      lowLevelAccess: true,
+      triggers: [
+        {
+          comment: '',
+          type: 'output',
+          conditions: [],
+          effect: [{ type: 'impersonate', role: 'user', value: '다음 행동' }, { type: 'sendAIprompt' }],
+        },
+      ],
+    });
+    const consenting = (state: ChatState): ChatState => ({ ...state, chat: { ...state.chat, allowComponentTurns: true } });
+    chatState = consenting(chatState);
+    afterTurn = consenting(
+      stateWith([
+        ...chatState.path,
+        message('m3', 'm2', 'user', '또'),
+        message('m4', 'm3', 'assistant', '날 것', { scriptState: 'pending' }),
+      ]),
+    );
+    await render();
+    await sendText('또');
+    await act(async () => undefined);
+    const commit = sent.find((call) => call.path.endsWith('/script-commit'));
+    expect(commit?.body).toMatchObject({ messageId: 'm4', chat: { keep: 4, messages: [{ role: 'user', content: '다음 행동' }] } });
+    // RisuAI generates on whatever the chat ends with: a turn of the reader's is answered, not carried on from.
+    expect(streamed.map((call) => call.path)).toEqual(['/api/chats/cht_1/messages', '/api/chats/cht_1/regenerate']);
   });
 
   it('is finished when the chat opens on one', async () => {

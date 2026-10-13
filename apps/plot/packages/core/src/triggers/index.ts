@@ -14,6 +14,7 @@ export * from './interpreter.js';
 export { parseChatML, type ScriptChatTurn } from './chatML.js';
 export * from './editScripts.js';
 export * from './overlay.js';
+export * from './chatEdits.js';
 export { evaluateScriptCbs, renderOutTemplate, type ScriptCbsEnv, type TemplateMatch } from './cbsHost.js';
 export { risuCalculate } from './calc.js';
 export { TRIGGER_CLASSIFICATION, type TriggerSupport } from './classification.js';
