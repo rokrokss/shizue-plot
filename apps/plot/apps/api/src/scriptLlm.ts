@@ -1,7 +1,15 @@
 /**
- * A model call a card's Lua script asks for — RisuAI's `LLM`, `axLLM` and
- * `simpleLLM` — answered on the reader's own ChatGPT account, through the
- * chat's own model.
+ * A model call a card's script asks for — RisuAI's Lua `LLM`, `axLLM` and
+ * `simpleLLM`, and its triggers' `runLLM` and `v2RunLLM` — answered on the
+ * reader's own ChatGPT account, through the chat's own model or its auxiliary
+ * one.
+ *
+ * Which of the two is RisuAI's choice, carried over: `LLM`, `simpleLLM` and
+ * `runLLM` ask for the main model (`'main'`), `axLLM` in every one of its modes
+ * asks for the auxiliary model (`'sub'`), and `v2RunLLM` asks for whichever its
+ * effect names. RisuAI can give each auxiliary mode a model of its own; here
+ * they share the chat's one auxiliary model, resolved as the background work
+ * resolves it (`auxiliaryModelOf`).
  *
  * The script runs in the reader's browser, in the Lua sandbox; this is the one
  * thing of the server it can reach, and only through the page, which forwards
@@ -24,6 +32,9 @@ import { ChatGPTError, getAdapter, type ChatMessage, type ChatRequest } from '@s
 import type { AppDeps } from './deps.js';
 import { ApiError, badRequest } from './errors.js';
 import { collect } from './memory.js';
+
+/** Which of the chat's models a call asks for: its own, or its auxiliary one. */
+export type ScriptLlmModel = 'main' | 'sub';
 
 /** Turns in one call, and characters across them. The sandbox refuses past the same lines. */
 export const MAX_SCRIPT_LLM_MESSAGES = 200;
@@ -59,6 +70,13 @@ export function readScriptLlmMessages(value: unknown): ChatMessage[] {
     }
     return { role: role as ChatMessage['role'], content };
   });
+}
+
+/** The model a call names; the main one when it names none, a 400 for anything else. */
+export function readScriptLlmModel(value: unknown): ScriptLlmModel {
+  if (value === undefined || value === 'main') return 'main';
+  if (value === 'sub') return 'sub';
+  throw badRequest('invalid_request', "model must be 'main' or 'sub'");
 }
 
 /**

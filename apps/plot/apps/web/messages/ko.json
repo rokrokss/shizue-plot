@@ -734,6 +734,10 @@
       "high": "높음",
       "xhigh": "매우 높음"
     },
+    "subModel": "보조 모델",
+    "subModelDefault": "기본 (첫 번째 모델)",
+    "subModelDefaultIs": "기본 ({model})",
+    "subModelHint": "스크립트의 보조 모델 호출과 요약·관계·답장 추천 같은 백그라운드 작업에 쓰입니다. 기본은 계정 모델 목록의 첫 번째 모델입니다.",
     "preset": "프리셋",
     "presets": {
       "standard": "기본",

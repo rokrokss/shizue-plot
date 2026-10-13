@@ -138,6 +138,7 @@ const stateWith = (path: ChatMessage[]): ChatState => ({
     personaId: null,
     title: '여관',
     model: 'm1',
+    subModel: null,
     note: '',
     preset: 'default',
     headMessageId: path.at(-1)!.id,

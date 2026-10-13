@@ -734,6 +734,10 @@
       "high": "高",
       "xhigh": "最高"
     },
+    "subModel": "補助モデル",
+    "subModelDefault": "デフォルト（最初のモデル）",
+    "subModelDefaultIs": "デフォルト（{model}）",
+    "subModelHint": "スクリプトの補助モデル呼び出しと、要約・関係・返信候補などのバックグラウンド処理に使われます。デフォルトはアカウントのモデル一覧の最初のモデルです。",
     "preset": "プリセット",
     "presets": {
       "standard": "標準",

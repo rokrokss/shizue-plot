@@ -323,13 +323,15 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       }
       return engine.runCode(request);
     },
-    // `runLLM`/`v2RunLLM`: the same call card Lua makes, on the chat's model and the
-    // reader's own account. A refusal (no lowLevelAccess, a busy chat, the model
+    // `runLLM`/`v2RunLLM`: the same call card Lua makes, on the reader's own
+    // account — the chat's model, or its auxiliary model where a `v2RunLLM` asks
+    // for RisuAI's sub model. A refusal (no lowLevelAccess, a busy chat, the model
     // failing) comes back as the failure the effect writes.
     llm: async (request) => {
       try {
         const answer = await api.send<{ result: string }>('POST', `/api/chats/${chatId}/script-llm`, {
           messages: request.messages,
+          model: request.model === 'submodel' ? 'sub' : 'main',
         });
         return { ok: true, text: answer.result };
       } catch (error) {

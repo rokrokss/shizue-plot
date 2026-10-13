@@ -27,6 +27,7 @@ const state = (head: string | null, path: ChatMessage[]): ChatState => ({
     personaId: null,
     title: '리안',
     model: 'echo/echo',
+    subModel: null,
     note: '',
     preset: 'standard',
     headMessageId: head,

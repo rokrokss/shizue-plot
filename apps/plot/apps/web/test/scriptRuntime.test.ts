@@ -349,7 +349,7 @@ describe('manual', () => {
     expect(calls[0]).toEqual({
       method: 'POST',
       path: '/api/chats/c1/script-llm',
-      body: { messages: [{ role: 'user', content: '날씨?' }] },
+      body: { messages: [{ role: 'user', content: '날씨?' }], model: 'main' },
     });
     expect(calls[1]!.body).toMatchObject({ messageId: 'm1', variableDelta: { weather: '맑음' } });
 
@@ -363,6 +363,31 @@ describe('manual', () => {
     };
     await createScriptRuntime({ chatId: 'c1', api: refusing, ui: silentUi, bundle: forecast }).manual('예보', null, view(done));
     expect(refused.calls[0]!.body).toMatchObject({ variableDelta: { weather: 'Error: script_llm_forbidden' } });
+  });
+
+  it("asks for the chat's auxiliary model where a v2RunLLM names RisuAI's sub model, and the main one otherwise", async () => {
+    const step = (model: string, outputVar: string): TriggerStep => ({
+      type: 'v2RunLLM',
+      value: '날씨?',
+      valueType: 'value',
+      model,
+      outputVar,
+      indent: 0,
+    });
+    const forecast = bundle({
+      lowLevelAccess: true,
+      triggers: [trigger('manual', [step('submodel', 'side'), step('model', 'main')], { comment: '예보' })],
+    });
+    const { api, calls } = fakeApi((path, body) =>
+      (path.endsWith('/script-llm') ? { result: `${String(body['model'])} 답` } : {}) as unknown as ChatState,
+    );
+    await createScriptRuntime({ chatId: 'c1', api, ui: silentUi, bundle: forecast }).manual(
+      '예보',
+      null,
+      view([greeting, message('m1', 'm0', 'user', '밖은?')]),
+    );
+    expect(calls.filter((call) => call.path.endsWith('/script-llm')).map((call) => call.body['model'])).toEqual(['sub', 'main']);
+    expect(calls.at(-1)!.body).toMatchObject({ variableDelta: { side: 'sub 답', main: 'main 답' } });
   });
 
   it('asks the reader through the page, and commits the answer', async () => {

@@ -101,6 +101,7 @@ const baseState = (absentCharacterIds: string[]): ChatState => ({
     personaId: null,
     title: '여관',
     model: 'm1',
+    subModel: null,
     note: '',
     preset: 'default',
     headMessageId: 'msg_1',

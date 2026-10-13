@@ -95,7 +95,7 @@ export const TRIGGER_CLASSIFICATION: Readonly<Record<string, { support: TriggerS
   // v2 model, images, embeddings
   v2ImgGen: { support: 'impossible', note: 'lowLevelAccess; writes null' },
   v2CheckSimilarity: { support: 'impossible', note: 'lowLevelAccess; no embedder' },
-  v2RunLLM: { support: 'server', note: 'lowLevelAccess; POST /api/chats/:id/script-llm (the sub model is the chat’s model); a failure writes null' },
+  v2RunLLM: { support: 'server', note: 'lowLevelAccess; POST /api/chats/:id/script-llm (`submodel` is the chat’s auxiliary model); a failure writes null' },
 
   // v2 dialogs and display
   v2ShowAlert: { support: 'browser', note: '' },

@@ -126,9 +126,10 @@ export type TriggerRequest =
    */
   | { kind: 'code'; language: 'lua'; code: string; mode: string; lowLevelAccess: boolean; scope: CodeScope }
   /**
-   * A model call (`runLLM`, `v2RunLLM`) — on the chat's model and the reader's
-   * own account, through the API. Answered with a `ScriptLlmAnswer`; a run with
-   * no one to answer it reads that as a failure.
+   * A model call (`runLLM`, `v2RunLLM`) — on the chat's model, or on its
+   * auxiliary model for `submodel`, and the reader's own account, through the
+   * API. Answered with a `ScriptLlmAnswer`; a run with no one to answer it reads
+   * that as a failure.
    */
   | { kind: 'llm'; messages: ScriptChatTurn[]; model: 'model' | 'submodel' };
 
@@ -892,7 +893,7 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
         case 'v2RunLLM': {
           if (!lowLevelAccess) break;
           const text = value(effect, 'value', 'valueType');
-          // There is one model per chat here, so the sub model is the chat's model too.
+          // RisuAI's sub model is the chat's auxiliary model here; anything else is its own.
           const model = str(effect, 'model') === 'submodel' ? 'submodel' : 'model';
           const answer = llmAnswer(yield { kind: 'llm', messages: llmTurns(text), model });
           // RisuAI writes `null` for a failed call (and reads a streamed one to its end).

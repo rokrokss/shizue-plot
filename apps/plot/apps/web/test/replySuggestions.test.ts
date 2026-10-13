@@ -147,6 +147,7 @@ const state = (locked: boolean): ChatState => ({
     personaId: null,
     title: '비 오는 밤의 서점',
     model: 'm1',
+    subModel: null,
     note: '',
     preset: 'default',
     headMessageId: 'msg_1',

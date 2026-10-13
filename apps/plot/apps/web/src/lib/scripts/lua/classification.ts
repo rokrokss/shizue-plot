@@ -108,7 +108,7 @@ export const LUA_CLASSIFICATION: Readonly<Record<string, LuaSupport>> = {
   // Model, network, images
   LLM: wrapper('server', 'POST /api/chats/:id/script-llm, the chat’s model on the reader’s account; text only'),
   LLMMain: host('server', 'as LLM', true),
-  axLLM: wrapper('server', 'as LLM; every auxiliary mode is the chat’s model'),
+  axLLM: wrapper('server', 'as LLM, on the chat’s auxiliary model; every auxiliary mode shares it'),
   axLLMMain: host('server', 'as axLLM', true),
   simpleLLM: host('server', 'as LLM', true),
   similarity: host('impossible', 'no embedder; answers an empty list', true),

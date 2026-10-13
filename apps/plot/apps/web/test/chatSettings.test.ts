@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * The three chat controls, in both layouts they are drawn in.
+ * The chat controls, in both layouts they are drawn in.
  *
  * The stacked layout is the one with a visible caption, and a caption that is
  * only a caption is a dead zone: it reads like a label, it is the width of the
@@ -30,6 +30,7 @@ function render(stacked: boolean): void {
         messages,
         children: createElement(ChatSettings, {
           model: 'm1',
+          subModel: null,
           preset: 'standard',
           personaId: null,
           models: [{ id: 'm1', label: '모델 하나' }],
@@ -63,7 +64,7 @@ describe('the stacked layout', () => {
 
   it('points each caption at its own control', () => {
     const captions = labels();
-    expect(captions.map((label) => label.textContent)).toEqual(['모델', '프리셋', '페르소나']);
+    expect(captions.map((label) => label.textContent)).toEqual(['모델', '보조 모델', '프리셋', '페르소나']);
     // The caption is a label of the control below it, not of the page.
     expect(captions.map((label) => label.htmlFor)).toEqual(selects().map((select) => select.id));
     for (const select of selects()) expect(select.id).not.toBe('');
@@ -81,6 +82,7 @@ describe('the reasoning effort', () => {
           messages,
           children: createElement(ChatSettings, {
             model: 'm2',
+            subModel: null,
             reasoningEffort: 'low',
             preset: 'standard',
             personaId: null,
@@ -114,8 +116,78 @@ describe('the compact row', () => {
     expect(labels()).toHaveLength(0);
     expect(selects().map((select) => select.getAttribute('aria-label'))).toEqual([
       '모델',
+      '보조 모델',
       '프리셋',
       '페르소나',
     ]);
+  });
+});
+
+describe('the auxiliary model', () => {
+  const HINT = messages.chat.subModelHint;
+
+  function renderSub(
+    subModel: string | null,
+    models: { id: string; label: string }[],
+    stacked: boolean,
+    patches: unknown[] = [],
+  ): HTMLSelectElement {
+    act(() => {
+      root.render(
+        createElement(NextIntlClientProvider, {
+          locale: 'ko',
+          messages,
+          children: createElement(ChatSettings, {
+            model: 'm1',
+            subModel,
+            reasoningEffort: null,
+            preset: 'standard',
+            personaId: null,
+            models,
+            presets: [],
+            personas: [],
+            disabled: false,
+            stacked,
+            onChange: (patch) => void patches.push(patch),
+          }),
+        }),
+      );
+    });
+    // Model first, then the auxiliary model: these models advertise no efforts.
+    return selects()[1]!;
+  }
+
+  const pick = (select: HTMLSelectElement, value: string): void =>
+    act(() => {
+      select.value = value;
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+  it('defaults to the first model, by name, and offers every model the reader has', () => {
+    const patches: unknown[] = [];
+    const select = renderSub(null, [{ id: 'm1', label: '모델 하나' }, { id: 'm2', label: '모델 둘' }], false, patches);
+    expect(select.getAttribute('aria-label')).toBe('보조 모델');
+    expect([...select.options].map((option) => option.textContent)).toEqual(['기본 (모델 하나)', '모델 하나', '모델 둘']);
+    expect(select.value).toBe('');
+    // The compact row has no room for the hint, so it is the control's title.
+    expect(select.title).toBe(HINT);
+    pick(select, 'm2');
+    expect(patches).toEqual([{ subModel: 'm2' }]);
+  });
+
+  it('says the default is the first model before the list is in', () => {
+    const select = renderSub(null, [], false);
+    expect([...select.options].map((option) => option.textContent)).toEqual(['기본 (첫 번째 모델)']);
+  });
+
+  it('keeps a pick the catalog dropped visible, and clears it back to the default with null', () => {
+    const patches: unknown[] = [];
+    const select = renderSub('gone', [{ id: 'm1', label: '모델 하나' }], true, patches);
+    expect([...select.options].map((option) => option.value)).toEqual(['', 'gone', 'm1']);
+    expect(select.value).toBe('gone');
+    // Stacked, the hint stands under the control.
+    expect(select.parentElement!.querySelector('p')?.textContent).toBe(HINT);
+    pick(select, '');
+    expect(patches).toEqual([{ subModel: null }]);
   });
 });

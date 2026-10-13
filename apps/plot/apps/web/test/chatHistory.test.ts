@@ -51,6 +51,7 @@ const state = (ids: string[], hasMore?: boolean): ChatState => ({
     personaId: null,
     title: '리안',
     model: 'echo/echo',
+    subModel: null,
     note: '',
     preset: 'standard',
     headMessageId: ids[ids.length - 1] ?? null,

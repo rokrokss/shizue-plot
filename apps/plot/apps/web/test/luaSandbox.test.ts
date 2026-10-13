@@ -129,7 +129,9 @@ const host: LuaHost = {
   },
   select: async (options) => options[1] ?? '',
   confirm: async () => true,
-  llm: async (messages) => `모델:${messages.map((message) => `${message.role}=${message.content}`).join('|')}`,
+  // The answer says which model it came from: `모델` the chat's own, `보조` its auxiliary one.
+  llm: async (messages, model) =>
+    `${model === 'sub' ? '보조' : '모델'}:${messages.map((message) => `${message.role}=${message.content}`).join('|')}`,
 };
 
 const start: LuaEntry = { kind: 'trigger', mode: 'start' };
@@ -253,6 +255,24 @@ describe('the Lua sandbox', () => {
       snapshot({ lowLevel: true }),
     );
     expect(edit.res).toBe('nil');
+  });
+
+  it('routes LLM and simpleLLM to the main model and every axLLM mode to the auxiliary one, as RisuAI does', async () => {
+    const sandbox = sandboxWith();
+    const code = `
+      onStart = async(function(id)
+        local main = LLM(id, { { role = 'user', content = '가' } })
+        local simple = simpleLLM(id, '나'):await()
+        local side = axLLM(id, { { role = 'user', content = '다' } })
+        local translate = axLLM(id, { { role = 'user', content = '라' } }, false, { mode = 'translate' })
+        local wrong = axLLM(id, { { role = 'user', content = '마' } }, false, { mode = 'nope' })
+        setChatVar(id, 'llm', table.concat({ main.result, simple.result, side.result, translate.result, wrong.result }, '/'))
+      end)`;
+    const result = await done(sandbox, code, start, snapshot({ lowLevel: true }));
+    expect(result.error).toBeNull();
+    expect(Object.fromEntries(result.vars)['llm']).toBe(
+      '모델:user=가/모델:user=나/보조:user=다/보조:user=라/Error: Invalid axLLM mode: nope',
+    );
   });
 
   it('stops `while true do end` and starts over on the next call', async () => {

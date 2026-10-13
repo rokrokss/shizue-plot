@@ -2914,6 +2914,59 @@ describe('chats', () => {
     expect(cleared.chat.model).toBe('test/text');
   });
 
+  it("picks an auxiliary model from the reader's catalog, and null hands the side work back to the default", async () => {
+    const cookie = await signUp('sub-model@example.com');
+    const { chatId, state } = await setupChat(cookie);
+    expect(state.chat.subModel).toBeNull();
+    const withKey = makeApp({ env: { SHIZUE_TEST_MODELS: '1' } });
+    const patch = (body: unknown, target: Hono<AppEnv> = withKey) =>
+      json(cookie, `/api/chats/${chatId}`, 'PATCH', body, target);
+
+    const picked = await readJson(await patch({ subModel: 'test/text' }));
+    expect(picked.chat).toMatchObject({ model: 'echo/echo', subModel: 'test/text' });
+    // Same shape as GET, and it survives a re-read.
+    expect(picked.path).toHaveLength(1);
+    expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.subModel).toBe('test/text');
+
+    // Held to the catalog exactly as the chat's own model is.
+    for (const [body, target] of [
+      [{ subModel: 'nope/none' }, withKey],
+      // The default app's catalog has echo alone.
+      [{ subModel: 'test/reasoning' }, app],
+      [{ subModel: '' }, withKey],
+    ] as const) {
+      const res = await patch(body, target);
+      expect(res.status).toBe(400);
+      expect((await readJson(res)).code).toBe('model_unavailable');
+    }
+    for (const bad of [7, true, { id: 'test/text' }]) {
+      const res = await patch({ subModel: bad });
+      expect(res.status).toBe(400);
+      expect((await readJson(res)).code).toBe('invalid_request');
+    }
+    expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.subModel).toBe('test/text');
+
+    // Switching the main model leaves the pick alone, and the pick leaves the main model alone.
+    expect((await readJson(await patch({ model: 'test/reasoning' }))).chat).toMatchObject({
+      model: 'test/reasoning',
+      subModel: 'test/text',
+    });
+    expect((await readJson(await patch({ subModel: 'echo/echo' }))).chat).toMatchObject({
+      model: 'test/reasoning',
+      subModel: 'echo/echo',
+    });
+
+    // A generation running holds the slot, and the setting waits for it like any other.
+    await db.update(chats).set({ generatingAt: new Date() }).where(eq(chats.id, chatId));
+    const busy = await patch({ subModel: null });
+    expect(busy.status).toBe(409);
+    expect((await readJson(busy)).code).toBe('generation_in_progress');
+    await db.update(chats).set({ generatingAt: null }).where(eq(chats.id, chatId));
+
+    expect((await readJson(await patch({ subModel: null }))).chat.subModel).toBeNull();
+    expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.subModel).toBeNull();
+  });
+
   it('takes a reasoning effort only from the list the chat model advertises', async () => {
     const cookie = await signUp('effort@example.com');
     const { chatId } = await setupChat(cookie);
@@ -4602,6 +4655,25 @@ describe('unlockable assets', () => {
       await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing));
       expect(prompts.at(-1)!.system).toContain(`그림: ${names}`);
     }
+  });
+
+  it("answers {{axmodel}} with the chat's auxiliary model, the default until the reader picks one", async () => {
+    const alice = await signUp('axmodel-creator@example.com');
+    const plot = await publishablePlot(alice, { name: '보조 작품', description: '보조: {{axmodel}}' });
+    await publishPlot(alice, plot.id);
+    const { app: capturing, prompts } = capturingApp();
+    const chatId = (await startChat(alice, plot.id)).chat.id;
+    const axmodel = async (): Promise<string> => {
+      await readSse(await json(alice, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing));
+      return /보조: (\S*)/.exec(prompts.at(-1)!.system)![1]!;
+    };
+
+    expect(await axmodel()).toBe('test/memory');
+    await db.update(chats).set({ subModel: 'echo/echo' }).where(eq(chats.id, chatId));
+    expect(await axmodel()).toBe('echo/echo');
+    // A pick the catalog no longer offers names the model the side work actually runs on.
+    await db.update(chats).set({ subModel: 'gone/model' }).where(eq(chats.id, chatId));
+    expect(await axmodel()).toBe('test/memory');
   });
 
   it('leaves an image out of the export until this chat has unlocked it', async () => {
@@ -7479,6 +7551,65 @@ describe('memory', () => {
     expect(next).toBeLessThan(history.length);
   });
 
+  it("folds on the chat's auxiliary model, and on the default once the catalog no longer lists it", async () => {
+    const cookie = await signUp('memory-sub-model@example.com');
+    const asked: string[] = [];
+    const summarizing: AppDeps['getAdapter'] = (modelId) => {
+      asked.push(modelId);
+      return {
+        providerModel: 'memory-stub',
+        adapter: {
+          stream: async function* (): AsyncGenerator<StreamDelta, StreamDone> {
+            yield { type: 'text', text: SUMMARY };
+            return { usage: { promptTokens: 0, completionTokens: 0 } };
+          },
+        },
+      };
+    };
+    // One account that offers the pick, and the same account once it no longer does.
+    const offering = makeDeps({ env: { SHIZUE_TEST_MODELS: '1' }, getAdapter: summarizing });
+    const dropped = makeDeps({ getAdapter: summarizing });
+    const plot = await createPlot(cookie);
+    const BUDGET = 8000;
+    const text = (index: number): string => `#${index}# ${'서가 사이에서 나눈 긴 대화입니다. '.repeat(50)}`;
+    // More history than one run's calls can fold, so a successor run is left to drain.
+    const length = Math.ceil((BUDGET * (BACKFILL_CHUNKS_PER_RUN + 1.5)) / countTokens(text(10)));
+    const history = Array.from({ length }, (_, index) => ({
+      role: index % 2 === 0 ? 'assistant' : 'user',
+      versions: [text(index)],
+      selected: 0,
+    }));
+    const started = await json(
+      cookie,
+      '/api/chats/import',
+      'POST',
+      { plotId: plot.id, fileName: 'sub.jsonl', sha256: 'b'.repeat(64), messages: history },
+      createApp(offering),
+    );
+    expect(started.status, await started.clone().text()).toBe(201);
+    const chatId = (await readJson(started)).chat.id;
+    // Straight into the row: the settings route takes no writes while the import runs.
+    await db
+      .update(chats)
+      .set({ memorySettings: { contextBudget: BUDGET, summaryThreshold: 0.4 }, subModel: 'test/text' })
+      .where(eq(chats.id, chatId));
+    const done = await json(cookie, `/api/chats/${chatId}/import/complete`, 'POST', { backfillMemory: true }, createApp(offering));
+    expect((await readJson(done)).memoryBackfill).toBe('queued');
+    // Completing only asked whether the owner has a model to fold with at all.
+    asked.length = 0;
+
+    expect(await drainJobs(db, createJobHandlers(offering), { maxJobs: 1 })).toBe(1);
+    expect(asked).toEqual(Array.from({ length: BACKFILL_CHUNKS_PER_RUN }, () => 'test/text'));
+
+    asked.length = 0;
+    await drainJobs(db, createJobHandlers(dropped));
+    expect(asked.length).toBeGreaterThan(0);
+    expect(new Set(asked)).toEqual(new Set(['test/memory']));
+    // The pick is left as the reader made it: the model may come back.
+    const [row] = await db.select({ subModel: chats.subModel }).from(chats).where(eq(chats.id, chatId));
+    expect(row!.subModel).toBe('test/text');
+  });
+
   it('ends a backfill quietly once the chat is gone', async () => {
     const harness = memoryApp();
     await db.transaction((tx) => enqueueJob(tx, 'memory_backfill', { chatId: randomUUID() }));
@@ -10005,6 +10136,35 @@ describe('reply suggestions', () => {
     expect((await readJson(res)).code).toBe('suggestions_failed');
   });
 
+  it("writes them on the chat's auxiliary model, and on the default once the catalog drops it", async () => {
+    const cookie = await signUp('suggest-sub-model@example.com');
+    const chatId = await chatWithTurn(cookie);
+    const asked: string[] = [];
+    const { getAdapter } = scriptedGetAdapter(SUGGESTIONS);
+    const recording = (env: Record<string, string>): Hono<AppEnv> =>
+      makeApp({
+        env,
+        getAdapter: (modelId, ...rest) => {
+          asked.push(modelId);
+          return getAdapter!(modelId, ...rest);
+        },
+      });
+    const offering = recording({ SHIZUE_TEST_MODELS: '1' });
+    const suggest = async (target: Hono<AppEnv>): Promise<void> => {
+      const res = await json(cookie, `/api/chats/${chatId}/suggest`, 'POST', undefined, target);
+      expect(res.status, await res.clone().text()).toBe(200);
+    };
+
+    await suggest(offering);
+    expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { subModel: 'test/text' }, offering)).status).toBe(200);
+    await suggest(offering);
+    // The account no longer offers the pick: the default answers instead.
+    await suggest(recording({}));
+    expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { subModel: null }, offering)).status).toBe(200);
+    await suggest(offering);
+    expect(asked).toEqual(['test/memory', 'test/text', 'test/memory', 'test/memory']);
+  });
+
   it('stands back while the chat generates, and suggests one thing at a time', async () => {
     const cookie = await signUp('suggest-busy@example.com');
     const chatId = await chatWithTurn(cookie);
@@ -12021,6 +12181,48 @@ describe('script model calls', () => {
     for (let call = 0; call < 5; call += 1) {
       expect((await json(reader, `/api/chats/${chatId}/script-llm`, 'POST', { messages: prompt }, gated)).status).toBe(200);
     }
+  });
+
+  it("answers an auxiliary call on the chat's auxiliary model, and every other call on its own", async () => {
+    const { reader, chatId } = await luaChat('script-llm-sub@example.com', true);
+    const asked: string[] = [];
+    const recording = (env: Record<string, string>): Hono<AppEnv> =>
+      makeApp({
+        env,
+        getAdapter: (modelId, ...rest) => {
+          asked.push(modelId);
+          return stubGetAdapter!(modelId, ...rest);
+        },
+      });
+    const offering = recording({ SHIZUE_TEST_MODELS: '1' });
+    const send = async (body: Record<string, unknown>, target: Hono<AppEnv> = offering): Promise<void> => {
+      const res = await json(reader, `/api/chats/${chatId}/script-llm`, 'POST', { messages: prompt, ...body }, target);
+      expect(res.status, await res.clone().text()).toBe(200);
+      expect(await readJson(res)).toEqual({ result: '스텁 응답' });
+    };
+
+    // No pick yet: the auxiliary call goes where the background work goes.
+    await send({});
+    await send({ model: 'main' });
+    await send({ model: 'sub' });
+    expect(asked).toEqual(['echo/echo', 'echo/echo', 'test/memory']);
+
+    asked.length = 0;
+    expect((await json(reader, `/api/chats/${chatId}`, 'PATCH', { subModel: 'test/text' }, offering)).status).toBe(200);
+    await send({ model: 'sub' });
+    await send({ model: 'main' });
+    // The account no longer offers the pick: the default answers instead.
+    await send({ model: 'sub' }, recording({}));
+    expect(asked).toEqual(['test/text', 'echo/echo', 'test/memory']);
+
+    // Only the two names; anything else is refused before a model is asked.
+    asked.length = 0;
+    for (const model of ['submodel', 'model', 7, null]) {
+      const res = await json(reader, `/api/chats/${chatId}/script-llm`, 'POST', { messages: prompt, model }, offering);
+      expect(res.status).toBe(400);
+      expect((await readJson(res)).code).toBe('invalid_request');
+    }
+    expect(asked).toEqual([]);
   });
 
   it('answers 502 when the model fails, and gives the slot back', async () => {

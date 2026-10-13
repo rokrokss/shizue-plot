@@ -21,7 +21,8 @@
  * worker gates the functions as RisuAI does, the sandbox refuses a model call
  * from a call that was not given the access, and the API refuses one for a plot
  * whose card does not grant it. Model calls have no count limit — they run on
- * the reader's own account, through the chat's model.
+ * the reader's own account, through the chat's model, or its auxiliary model
+ * for `axLLM`.
  *
  * A call the watchdog had to stop, or one the sandbox could not run, changes
  * nothing and is logged; the run goes on as if the script had returned.
@@ -30,7 +31,7 @@
 import { MAX_TRIGGER_VALUE_LENGTH, type CodeScope, type TriggerLogEntry, type TriggerScript } from '@shizue/core/triggers';
 import type { LoreEntry } from '../../types';
 import type { ScriptEngine, ScriptPhase } from '../engine';
-import type { LuaHost, LuaLlmMessage, LuaOutcome, LuaSandbox } from './sandbox';
+import type { LuaHost, LuaLlmMessage, LuaLlmModel, LuaOutcome, LuaSandbox } from './sandbox';
 import type { LuaCallResult, LuaEntry, LuaLoreBook, LuaSnapshot } from './sandboxRuntime';
 
 /** The reader's side of a script's dialogs. */
@@ -46,8 +47,8 @@ export interface LuaEngineOptions {
   lowLevelAccess: boolean;
   sandbox: LuaSandbox;
   ui: LuaUi;
-  /** A model call on the chat's model; the answer's text, or a throw. */
-  llm(messages: LuaLlmMessage[]): Promise<string>;
+  /** A model call on the chat's model or its auxiliary one; the answer's text, or a throw. */
+  llm(messages: LuaLlmMessage[], model: LuaLlmModel): Promise<string>;
   log(entry: TriggerLogEntry): void;
 }
 
@@ -163,7 +164,7 @@ export function createLuaEngine(options: LuaEngineOptions): ScriptEngine {
     input: (text) => queued(() => ui.input(text)),
     select: (choices) => queued(() => ui.select(choices)),
     confirm: (text) => queued(() => ui.confirm(text)),
-    llm: (messages) => options.llm(messages),
+    llm: (messages, model) => options.llm(messages, model),
   };
 
   function report(outcome: Exclude<LuaOutcome, { kind: 'done' }>, quiet = false): void {

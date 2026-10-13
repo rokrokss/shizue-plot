@@ -451,6 +451,12 @@ export interface Chat {
   personaId: string | null;
   title: string;
   model: string;
+  /**
+   * The auxiliary model for scripts' auxiliary calls and the background work
+   * (summaries, relationship, suggestions); null leaves it to the first model in
+   * the reader's catalog.
+   */
+  subModel: string | null;
   /** Author's note, injected four messages from the end of the history. */
   note: string;
   /** Prompt preset id, one of the ids GET /api/presets lists. */

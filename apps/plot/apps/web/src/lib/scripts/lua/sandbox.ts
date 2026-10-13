@@ -50,6 +50,12 @@ export interface LuaLlmMessage {
   content: string;
 }
 
+/**
+ * Which of the chat's models a call is for, as RisuAI routes it: `LLM` and
+ * `simpleLLM` the main one, `axLLM` the auxiliary one.
+ */
+export type LuaLlmModel = 'main' | 'sub';
+
 /** What a script's host functions reach on the page. */
 export interface LuaHost {
   alert(text: string, error: boolean): Promise<void>;
@@ -57,7 +63,7 @@ export interface LuaHost {
   select(options: string[]): Promise<string>;
   confirm(text: string): Promise<boolean>;
   /** The model's answer; throws when there is none. */
-  llm(messages: LuaLlmMessage[]): Promise<string>;
+  llm(messages: LuaLlmMessage[], model: LuaLlmModel): Promise<string>;
 }
 
 export type LuaOutcome =
@@ -318,7 +324,9 @@ export function createLuaSandbox(options: LuaSandboxOptions): LuaSandbox {
           if (!call.lowLevel) return reply(host, { ok: false, error: 'low-level access is required' });
           const messages = checkLlmMessages(a['messages']);
           if (!messages) return reply(host, { ok: false, error: 'the prompt is not one that can be sent' });
-          return reply(host, { ok: true, value: await call.host.llm(messages) });
+          // Anything but the auxiliary model's name is the main model, as on the server.
+          const model = a['model'] === 'sub' ? 'sub' : 'main';
+          return reply(host, { ok: true, value: await call.host.llm(messages, model) });
         }
         default:
           return reply(host, { ok: false, error: 'unknown' });

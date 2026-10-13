@@ -87,7 +87,7 @@ import {
   type GenerationPlan,
 } from '../generation.js';
 import { avatarUrl, coverUrl, loadMembers, loadVisiblePlot, visibleToViewer } from '../hub.js';
-import { buildMemoryInput, invalidateMemoryForEdit, memorySettingsOf } from '../memory.js';
+import { auxiliaryModelOf, buildMemoryInput, invalidateMemoryForEdit, memorySettingsOf } from '../memory.js';
 import {
   attachedNoteIds,
   attachedNoteIdsByChat,
@@ -115,7 +115,7 @@ import {
 } from '../scriptState.js';
 import { deleteQuietly } from '../storage.js';
 import { toPromptCharacters, toPromptPlot } from '../plots.js';
-import { readScriptLlmMessages, runScriptLlm } from '../scriptLlm.js';
+import { readScriptLlmMessages, readScriptLlmModel, runScriptLlm } from '../scriptLlm.js';
 import { suggestReplies } from '../suggest.js';
 import { buildPath, deepestLeaf, siblingInfo } from '../tree.js';
 import { assetLocks, openAssetNames } from '../unlocks.js';
@@ -134,6 +134,11 @@ export const toChatJson = (chat: Chat, noteIds: string[]) => ({
   personaId: chat.personaId,
   title: chat.title,
   model: chat.model,
+  /**
+   * The auxiliary model the reader picked for scripts' auxiliary calls and the
+   * background work; null runs them on the first model of the owner's catalog.
+   */
+  subModel: chat.subModel,
   note: chat.note,
   preset: chat.preset,
   headMessageId: chat.headMessageId,
@@ -378,6 +383,22 @@ async function requireEnabledModel(deps: AppDeps, userId: string, model: string)
 }
 
 /**
+ * The auxiliary model a PATCH leaves the chat with; undefined leaves it alone.
+ * A model is held to the reader's catalog exactly as the chat's own is, and null
+ * clears the pick, handing the side work back to the default (`auxiliaryModelOf`).
+ */
+async function optionalSubModel(
+  deps: AppDeps,
+  userId: string,
+  body: Record<string, unknown>,
+): Promise<string | null | undefined> {
+  const value = body['subModel'];
+  if (value === undefined || value === null) return value;
+  if (typeof value !== 'string') throw badRequest('invalid_request', 'subModel must be a string or null');
+  return requireEnabledModel(deps, userId, value);
+}
+
+/**
  * The reasoning effort a PATCH leaves the chat with; undefined leaves it alone. A
  * requested effort must be one the chat's model advertises — the new model, when
  * the same body switches it — and null clears it. A model switch on its own keeps
@@ -570,6 +591,8 @@ async function loadGenerationContext(
   narrator: NarratorConfig | undefined;
   /** The names this chat's open images go by, for `{{assetlist}}` in the prompt. */
   assetNames: string[];
+  /** The chat's auxiliary model as it resolves now, for `{{axmodel}}` (see `auxiliaryModelOf`). */
+  auxiliaryModel: string;
   /** What every fold of the chat answers `{{user}}` and `{{char}}` with. */
   fold: FoldOptions;
   /** The reader's global variables on this plot. */
@@ -607,6 +630,7 @@ async function loadGenerationContext(
     // this request's scripts left it, when they rewrote it.
     authorNote: await loadAuthorNote(deps, scripts.note === undefined ? chat : { ...chat, note: scripts.note }),
     assetNames: await openAssetNames(deps, chat),
+    auxiliaryModel: await auxiliaryModelOf(deps, chat),
     fold: foldOptionsOf(row.name, persona),
     globalVariables: await loadGlobalVariables(deps, chat.userId, chat.plotId),
     overlay,
@@ -1170,6 +1194,7 @@ async function regeneratePlan(
     // generation is an alternative to.
     loreState: loreStateOf(kept),
     assetNames: context.assetNames,
+    auxiliaryModel: context.auxiliaryModel,
     contextBudget: memorySettingsOf(chat).contextBudget,
     focusNames,
     ...(narration
@@ -1384,7 +1409,9 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   // note is only read while a prompt is assembled and could safely be written
   // during a generation, but it takes the same slot: one rule for the endpoint
   // beats semantics that depend on which fields the body happens to carry, and the
-  // client disables the note panel while a reply streams anyway.
+  // client disables the note panel while a reply streams anyway. The auxiliary
+  // model is under the same rule — a script's call on it holds the slot too, so
+  // it is never switched in the middle of one.
   app.patch('/:id', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
@@ -1402,6 +1429,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
 
       const model =
         body['model'] === undefined ? undefined : await requireEnabledModel(deps, c.get('userId'), requireString(body, 'model'));
+      const subModel = await optionalSubModel(deps, userId, body);
       const personaId =
         'personaId' in body ? ((await resolvePersona(deps, userId, body['personaId']))?.id ?? null) : undefined;
       const note = optionalString(body, 'note');
@@ -1417,6 +1445,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
 
       if (
         model === undefined &&
+        subModel === undefined &&
         personaId === undefined &&
         note === undefined &&
         preset === undefined &&
@@ -1436,6 +1465,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         .update(chats)
         .set({
           ...(model !== undefined ? { model } : {}),
+          ...(subModel !== undefined ? { subModel } : {}),
           ...(personaId !== undefined ? { personaId } : {}),
           ...(note !== undefined ? { note } : {}),
           ...(preset !== undefined ? { preset } : {}),
@@ -1961,9 +1991,11 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   });
 
   /**
-   * A model call a card's Lua script asks for (`LLM`, `axLLM`, `simpleLLM`):
-   * `{ messages: [{ role, content }] }` in, `{ result }` out — the chat's model
-   * on the reader's own account, nothing stored (`scriptLlm.ts`).
+   * A model call a card's script asks for (Lua `LLM`, `axLLM`, `simpleLLM`;
+   * triggers' `runLLM`, `v2RunLLM`): `{ messages: [{ role, content }], model? }`
+   * in, `{ result }` out — on the reader's own account, nothing stored
+   * (`scriptLlm.ts`). `model` is `'main'` (the default), the chat's own model, or
+   * `'sub'`, its auxiliary model, resolved as the background work resolves it.
    *
    * Held as RisuAI holds the functions: the plot's scripted member must grant
    * low-level access (403 `script_llm_forbidden` otherwise). Held as a turn is:
@@ -1976,6 +2008,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const userId = c.get('userId');
     const body = await readJsonBody(c);
     const messages = readScriptLlmMessages(body['messages']);
+    const which = readScriptLlmModel(body['model']);
     const chat = await loadWritableChat(deps, id, userId);
     const plot = await loadVisiblePlot(deps.db, chat.plotId, chat.userId);
     if (!scriptedMember(await loadMembers(deps.db, plot.id))?.scripts.lowLevelAccess) {
@@ -1984,8 +2017,11 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     if (!(await acquireChatSlot(deps, chat.id, userId))) await rejectBusyChat(deps, chat.id, userId);
     const keepAlive = setInterval(() => void renewChatSlot(deps, chat.id), HEARTBEAT_MS);
     try {
+      // An owner with no catalog resolves to '', and the adapter then says why,
+      // as it does for the chat's own model.
+      const model = which === 'sub' ? await auxiliaryModelOf(deps, chat) : chat.model;
       return c.json({
-        result: await runScriptLlm(deps, { userId, model: chat.model, messages, signal: c.req.raw.signal }),
+        result: await runScriptLlm(deps, { userId, model, messages, signal: c.req.raw.signal }),
       });
     } finally {
       clearInterval(keepAlive);
@@ -2211,6 +2247,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         branch: promptBranch(context.all, [...path, userMessage]),
         loreState: loreStateOf([...path, userMessage]),
         assetNames: context.assetNames,
+        auxiliaryModel: context.auxiliaryModel,
         contextBudget: memorySettingsOf(chat).contextBudget,
         focusNames,
         target: { kind: 'new', parentId: userMessage.id },
@@ -2300,6 +2337,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         // trigger from the turn before.
         loreState: loreStateOf(path.slice(0, -1)),
         assetNames: context.assetNames,
+        auxiliaryModel: context.auxiliaryModel,
         contextBudget: memorySettingsOf(chat).contextBudget,
         focusNames,
         target: { kind: 'continue', message: head },
@@ -2355,6 +2393,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         branch: promptBranch(context.all, path),
         loreState: loreStateOf(path),
         assetNames: context.assetNames,
+        auxiliaryModel: context.auxiliaryModel,
         contextBudget: memorySettingsOf(chat).contextBudget,
         focusNames,
         trailingSystem: applyMacros(AUTO_CONTINUE_NUDGE, {
@@ -2416,6 +2455,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         branch: promptBranch(context.all, path),
         loreState: loreStateOf(path),
         assetNames: context.assetNames,
+        auxiliaryModel: context.auxiliaryModel,
         contextBudget: memorySettingsOf(chat).contextBudget,
         focusNames,
         trailingSystem: applyMacros(NARRATION_NUDGE, {
@@ -2458,6 +2498,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       return c.json({
         suggestions: await suggestReplies(deps, {
           userId: chat.userId,
+          subModel: chat.subModel,
           recent: buildPath(context.all, chat.headMessageId),
           plotName: context.plot.name,
           userName: context.userName,

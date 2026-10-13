@@ -10,10 +10,10 @@ const KNOWN_EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh']);
 
 /**
  * The choices a chat is run with: model, reasoning effort where the model offers
- * one, preset and persona. The same controls stand in the header on a wide
- * screen and in the settings sheet on a narrow one, so they live here
- * rather than being written twice — `stacked` is the whole difference: labelled
- * rows at full width, or one compact row.
+ * one, auxiliary model, preset and persona. The same controls stand in the
+ * header on a wide screen and in the settings sheet on a narrow one, so they
+ * live here rather than being written twice — `stacked` is the whole
+ * difference: labelled rows at full width, or one compact row.
  *
  * The stacked caption is a `<label htmlFor>`: pointed at the control by id
  * rather than wrapping it, because wrapping would put every option's text into
@@ -24,6 +24,7 @@ const KNOWN_EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh']);
  */
 export function ChatSettings({
   model,
+  subModel,
   reasoningEffort,
   preset,
   personaId,
@@ -35,6 +36,8 @@ export function ChatSettings({
   onChange,
 }: {
   model: string;
+  /** The auxiliary model the reader picked; null runs the side work on the first model. */
+  subModel: string | null;
   reasoningEffort: string | null;
   preset: string;
   personaId: string | null;
@@ -45,6 +48,7 @@ export function ChatSettings({
   stacked?: boolean;
   onChange: (patch: {
     model?: string;
+    subModel?: string | null;
     reasoningEffort?: string | null;
     preset?: string;
     personaId?: string | null;
@@ -60,12 +64,16 @@ export function ChatSettings({
   const efforts = current?.reasoningEfforts ?? [];
   const effortLabel = (effort: string): string =>
     KNOWN_EFFORTS.has(effort) ? t(`reasoningEfforts.${effort}`) : effort;
+  // What the server falls back to when the reader picked none: the first model
+  // the catalog lists. Named once the list is in, so the reader sees what it is.
+  const firstModel = models[0];
 
   /** Where a select's accessible name comes from in each layout. */
   const nameOf = (key: string, label: string) =>
     stacked ? { id: `${id}-${key}` } : { 'aria-label': label };
 
-  const field = (key: string, label: string, control: ReactNode): ReactNode =>
+  /** A hint shows under the control where there is room for it, and only there. */
+  const field = (key: string, label: string, control: ReactNode, hint?: string): ReactNode =>
     stacked ? (
       <div className="space-y-1.5">
         <label
@@ -75,6 +83,7 @@ export function ChatSettings({
           {label}
         </label>
         {control}
+        {hint ? <p className="text-xs text-muted/80">{hint}</p> : null}
       </div>
     ) : (
       control
@@ -131,6 +140,36 @@ export function ChatSettings({
             </Select>,
           )
         : null}
+      {/* Next to the model it spares: the side work runs here instead. The compact
+          row has no room for the hint, so there it is the control's title, as the
+          preset's is. */}
+      {field(
+        'subModel',
+        t('subModel'),
+        <Select
+          value={subModel ?? ''}
+          disabled={disabled}
+          title={locked ?? t('subModelHint')}
+          {...nameOf('subModel', t('subModel'))}
+          className={selectClass}
+          onChange={(event) => onChange({ subModel: event.target.value || null })}
+        >
+          <option value="">
+            {firstModel ? t('subModelDefaultIs', { model: firstModel.label }) : t('subModelDefault')}
+          </option>
+          {/* A pick the catalog has since dropped stays visible, as a historical model does;
+              the server runs the side work on the default meanwhile. */}
+          {subModel && !models.some((entry) => entry.id === subModel) ? (
+            <option value={subModel}>{subModel}</option>
+          ) : null}
+          {models.map((entry) => (
+            <option key={entry.id} value={entry.id}>
+              {entry.label}
+            </option>
+          ))}
+        </Select>,
+        t('subModelHint'),
+      )}
       {field(
         'preset',
         t('preset'),

@@ -273,6 +273,7 @@ async function updateMemory(deps: AppDeps, chatId: string): Promise<boolean> {
   const embedder = retrievalCount > 0 ? deps.createEmbedder?.(MEMORY_TIMEOUT_MS) : undefined;
   const result = await summarize(deps, {
     userId: chat.userId,
+    subModel: chat.subModel,
     summary,
     evicted: chunk,
     userName: row.personaName ?? DEFAULT_USER_NAME,
@@ -491,6 +492,8 @@ function foldChunk(evicted: Message[], contextBudget: number): Message[] {
 interface SummarizeInput {
   /** The chat's owner, whose ChatGPT account does the summarizing. */
   userId: string;
+  /** The chat's auxiliary model, which does it; null for the default. */
+  subModel: string | null;
   summary: string;
   evicted: Message[];
   userName: string;
@@ -505,19 +508,52 @@ interface SummaryResult {
 /** Memory models already reported as unusable — a config state, not a per-turn failure. */
 const warnedModels = new Set<string>();
 
+/** What picks a chat's auxiliary model: whose catalog it comes from, and the reader's choice. */
+export type AuxiliaryOwner = Pick<Chat, 'userId' | 'subModel'>;
+
 /**
- * Summaries, suggestions and relationships use the first model in the chat
- * owner's ChatGPT account catalog. A signed-out owner disables background work.
+ * The model a chat's side work runs on — RisuAI's auxiliary (sub) model: the
+ * one the reader picked for the chat (`chats.sub_model`) while the owner's
+ * ChatGPT catalog still lists it, and otherwise the first model that catalog
+ * lists. '' when there is none, which is what a signed-out owner has.
+ *
+ * A pick the catalog has since dropped is not an error: the chat falls back to
+ * the default, as it would had the reader never picked, and the server says so
+ * once. The setting is left as it is — the model may come back, and the
+ * selector keeps showing it until the reader picks another.
+ *
+ * Tests have no first model worth the name — the catalog leads with echo, the
+ * chat's own — so the default there is `MEMORY_MODEL`, or `test/memory`. A pick
+ * is still checked against the catalog, which is how a vanished one is tested.
  */
-export async function memoryChannel(deps: AppDeps, userId: string): Promise<{ adapter: LLMAdapter; providerModel: string } | null> {
+export async function auxiliaryModelOf(deps: AppDeps, owner: AuxiliaryOwner): Promise<string> {
+  const catalog = await listEnabledModels(deps.env, deps.chatgpt?.accounts.forUser(owner.userId));
+  if (owner.subModel) {
+    if (catalog.some((model) => model.id === owner.subModel)) return owner.subModel;
+    const key = `sub:${owner.subModel}`;
+    if (!warnedModels.has(key)) {
+      warnedModels.add(key);
+      console.warn(`[memory] auxiliary model ${owner.subModel} is no longer offered, falling back to the default`);
+    }
+  }
+  return (deps.env['NODE_ENV'] ?? process.env['NODE_ENV']) === 'test'
+    ? deps.env['MEMORY_MODEL'] || 'test/memory'
+    : catalog[0]?.id ?? '';
+}
+
+/**
+ * Summaries, suggestions and relationships run on the chat's auxiliary model
+ * (`auxiliaryModelOf`). A signed-out owner disables background work.
+ */
+export async function memoryChannel(
+  deps: AppDeps,
+  owner: AuxiliaryOwner,
+): Promise<{ adapter: LLMAdapter; providerModel: string } | null> {
   let modelId = "chatgpt";
   try {
-    const account = deps.chatgpt?.accounts.forUser(userId);
-    modelId = (deps.env['NODE_ENV'] ?? process.env['NODE_ENV']) === 'test'
-      ? deps.env['MEMORY_MODEL'] || 'test/memory'
-      : (await listEnabledModels(deps.env, account))[0]?.id ?? '';
+    modelId = await auxiliaryModelOf(deps, owner);
     if (!modelId) return null;
-    return await (deps.getAdapter ?? getAdapter)(modelId, deps.env, account);
+    return await (deps.getAdapter ?? getAdapter)(modelId, deps.env, deps.chatgpt?.accounts.forUser(owner.userId));
   } catch (error) {
     // Warn once, not on every turn for the rest of the process' life.
     if (!warnedModels.has(modelId)) {
@@ -530,7 +566,7 @@ export async function memoryChannel(deps: AppDeps, userId: string): Promise<{ ad
 
 /** Calls the memory channel model. Returns null when it is unusable — never throws. */
 async function summarize(deps: AppDeps, input: SummarizeInput): Promise<SummaryResult | null> {
-  const resolved = await memoryChannel(deps, input.userId);
+  const resolved = await memoryChannel(deps, input);
   if (!resolved) return null;
 
   // Image references are markup for the chat, not content to summarize.

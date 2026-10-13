@@ -4,10 +4,10 @@
  * Six axes, 0-100, describing how the plot's characters collectively feel about
  * the user. One set of numbers per chat rather than one per member: the chat is
  * the plot's, and a per-character split is a separate feature.
- * Every fifth assistant turn the memory channel model reads the recent turns plus
- * the current numbers and answers with new ones and a one-line summary; the block
- * is then injected into the system prompt so the roster plays at the right
- * temperature.
+ * Every fifth assistant turn the memory channel model (the chat's auxiliary model)
+ * reads the recent turns plus the current numbers and answers with new ones and a
+ * one-line summary; the block is then injected into the system prompt so the
+ * roster plays at the right temperature.
  *
  * "Every fifth turn" is read off the branch, not counted per generation: the
  * trigger compares the assistant messages on the current path against the depth
@@ -181,6 +181,7 @@ async function updateRelationship(deps: AppDeps, chatId: string): Promise<void> 
 
   const extracted = await extract(deps, {
     userId: chat.userId,
+    subModel: chat.subModel,
     axes: current?.axes ?? DEFAULT_RELATIONSHIP_AXES,
     recent: path.slice(-RECENT_TURNS),
     plotName: row.plotName,
@@ -249,6 +250,8 @@ async function writeRelationship(
 interface ExtractInput {
   /** The chat's owner, whose ChatGPT account reads the relationship. */
   userId: string;
+  /** The chat's auxiliary model, which does the reading; null for the default. */
+  subModel: string | null;
   axes: RelationshipAxes;
   recent: Message[];
   plotName: string;
@@ -262,7 +265,7 @@ async function extract(
   deps: AppDeps,
   input: ExtractInput,
 ): Promise<{ axes: RelationshipAxes; note: string } | null> {
-  const resolved = await memoryChannel(deps, input.userId);
+  const resolved = await memoryChannel(deps, input);
   if (!resolved) return null;
 
   // Image references are markup for the chat: nothing to read a relationship from.

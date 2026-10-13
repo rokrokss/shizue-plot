@@ -417,6 +417,11 @@ export const chats = pgTable(
     personaId: uuid('persona_id').references(() => personas.id, { onDelete: 'set null' }),
     title: text('title').notNull().default(''),
     model: text('model').notNull(),
+    // The auxiliary model (RisuAI's sub model) the reader picked for this chat's
+    // side work: card scripts' auxiliary calls and the background jobs — memory
+    // summaries, relationship, reply suggestions. Null leaves it to the memory
+    // channel's default, the first model in the owner's ChatGPT catalog.
+    subModel: text('sub_model'),
     // Author's note: per-chat instruction injected four messages from the end of
     // the history (`AUTHOR_NOTE_DEPTH`).
     note: text('note').notNull().default(''),

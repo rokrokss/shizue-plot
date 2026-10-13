@@ -920,8 +920,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               onIdleKill: (reason) => log({ kind: 'limit', effect: 'triggerlua', message: `a Lua script still running between calls was stopped (${reason})` }),
             }),
             ui: scriptUi,
-            llm: async (messages) =>
-              (await apiSend<{ result: string }>('POST', `/api/chats/${id}/script-llm`, { messages })).result,
+            llm: async (messages, model) =>
+              (await apiSend<{ result: string }>('POST', `/api/chats/${id}/script-llm`, { messages, model })).result,
             log,
           }),
         ]
@@ -1570,6 +1570,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   /** Every chat setting goes through PATCH, which answers with the whole state. */
   async function updateSettings(patch: {
     model?: string;
+    /** null hands the side work back to the first model in the catalog. */
+    subModel?: string | null;
     /** null sends no effort, leaving the model's own default. */
     reasoningEffort?: string | null;
     personaId?: string | null;
@@ -1805,6 +1807,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           <div className="ml-auto hidden items-center gap-2 lg:flex">
             <ChatSettings
               model={state.chat.model}
+              subModel={state.chat.subModel}
               reasoningEffort={state.chat.reasoningEffort}
               preset={state.chat.preset}
               personaId={state.chat.personaId}
@@ -2357,6 +2360,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           <ChatSettings
             stacked
             model={state.chat.model}
+            subModel={state.chat.subModel}
             reasoningEffort={state.chat.reasoningEffort}
             preset={state.chat.preset}
             personaId={state.chat.personaId}

@@ -142,6 +142,8 @@ export interface GenerationPlan {
   loreState: LoreTimedState;
   /** The names this chat's open images go by, for `{{assetlist}}` (see `openAssetNames`). */
   assetNames: string[];
+  /** The chat's auxiliary model, for `{{axmodel}}` (see `auxiliaryModelOf`). */
+  auxiliaryModel: string;
   /** The chat's prompt preset. */
   preset: Preset;
   /** Context budget this chat runs with (see memorySettings). */
@@ -458,7 +460,7 @@ async function buildRequestMessages(
     seed: plan.seed,
     branch,
     // ChatGPT takes no assistant prefill: a continue is asked for, not resumed mid-turn.
-    model: { id: plan.model, maxContext: plan.contextBudget, prefill: false },
+    model: { id: plan.model, maxContext: plan.contextBudget, prefill: false, auxiliary: plan.auxiliaryModel },
     ...(plan.injections ? { injections: plan.injections } : {}),
     loreState: plan.loreState,
     assetNames: plan.assetNames,

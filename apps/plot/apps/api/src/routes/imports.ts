@@ -376,7 +376,10 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
       throw badRequest('invalid_request', `note must be at most ${MAX_IMPORT_NOTE_LENGTH} characters, without U+0000`);
     }
     // Before the lock: resolving the channel may read the owner's model catalog.
-    const channel = backfill ? await memoryChannel(deps, userId) : null;
+    // The chat has no auxiliary model of its own yet — the settings route takes
+    // no writes while the import runs — and a pick would not change the answer
+    // anyway: what is asked is whether the owner has any model to fold with.
+    const channel = backfill ? await memoryChannel(deps, { userId, subModel: null }) : null;
 
     const { chat, memoryBackfill } = await deps.db.transaction(async (tx) => {
       const locked = await lockImportingChat(tx, id, userId);

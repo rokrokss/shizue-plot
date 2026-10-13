@@ -6,8 +6,9 @@
  * 선택지, which are offers the plot's characters make inside a reply — so they
  * never speak for the characters and never move the scene on their own.
  *
- * The call goes to the memory channel model: it is a cheap, frequent, throwaway
- * request, and a deployment without that key simply does not offer the button.
+ * The call goes to the memory channel model — the chat's auxiliary model: it is
+ * a cheap, frequent, throwaway request, and a deployment without that key simply
+ * does not offer the button.
  * Nothing is stored — a suggestion the reader ignores must leave no trace.
  */
 import type { Message } from '@shizue/db';
@@ -46,6 +47,8 @@ const SUGGEST_RULES = `당신은 롤플레이 대화에서 독자가 다음에 �
 export interface SuggestInput {
   /** The reader asking, whose ChatGPT account writes the suggestions. */
   userId: string;
+  /** The chat's auxiliary model, which writes them; null for the default. */
+  subModel: string | null;
   /** The branch tail, oldest first; the caller has already windowed it. */
   recent: Message[];
   plotName: string;
@@ -61,7 +64,7 @@ export interface SuggestInput {
  * memory model at all (503), or this call did not come back usable (502).
  */
 export async function suggestReplies(deps: AppDeps, input: SuggestInput): Promise<string[]> {
-  const resolved = await memoryChannel(deps, input.userId);
+  const resolved = await memoryChannel(deps, input);
   if (!resolved) {
     throw new ApiError(503, 'suggestions_unavailable', 'Reply suggestions are not configured');
   }

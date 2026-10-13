@@ -734,6 +734,10 @@
       "high": "High",
       "xhigh": "Extra high"
     },
+    "subModel": "Auxiliary model",
+    "subModelDefault": "Default (first model)",
+    "subModelDefaultIs": "Default ({model})",
+    "subModelHint": "Used for auxiliary model calls from scripts and for background work: summaries, relationship and reply suggestions. The default is the first model in your account list.",
     "preset": "Preset",
     "presets": {
       "standard": "Standard",

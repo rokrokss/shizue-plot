@@ -673,7 +673,7 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
         // RisuAI reads the prompt before it checks the key.
         const prompt = JSON.parse(promptStr);
         if (!low(id)) return undefined;
-        return host(ctx, 'llm', { messages: llmMessages(prompt) }).then(function (answer: Any) {
+        return host(ctx, 'llm', { messages: llmMessages(prompt), model: 'main' }).then(function (answer: Any) {
           return JSON.stringify(
             answer.ok ? { success: true, result: text(answer.value) } : { success: false, result: 'Error: ' + text(answer.error) },
           );
@@ -684,7 +684,7 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
       const ctx = c();
       return Promise.resolve().then(function () {
         if (!low(id)) return undefined;
-        return host(ctx, 'llm', { messages: [{ role: 'user', content: text(prompt) }] }).then(function (answer: Any) {
+        return host(ctx, 'llm', { messages: [{ role: 'user', content: text(prompt) }], model: 'main' }).then(function (answer: Any) {
           return answer.ok ? { success: true, result: text(answer.value) } : { success: false, result: 'Error: ' + text(answer.error) };
         });
       });
@@ -698,8 +698,8 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
         if (!Object.prototype.hasOwnProperty.call(AX_MODES, mode)) {
           return JSON.stringify({ result: 'Error: Invalid axLLM mode: ' + mode, success: false });
         }
-        // Every auxiliary model is the chat's own here.
-        return host(ctx, 'llm', { messages: llmMessages(prompt) }).then(function (answer: Any) {
+        // RisuAI's auxiliary models, one per mode there, are the chat's one auxiliary model here.
+        return host(ctx, 'llm', { messages: llmMessages(prompt), model: 'sub' }).then(function (answer: Any) {
           return JSON.stringify(
             answer.ok ? { success: true, result: text(answer.value) } : { success: false, result: 'Error: ' + text(answer.error) },
           );
