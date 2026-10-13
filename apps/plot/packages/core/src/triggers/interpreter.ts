@@ -44,6 +44,7 @@ import type { CbsChat, CbsHostData, CbsMessage } from '../cbs.js';
 import type { LoreEntry } from '../types.js';
 import { applyVariableDelta, emptyVariables, readVariable, type VariableDelta, type Variables } from '../variables.js';
 import { risuCalculate } from './calc.js';
+import { parseChatML, type ScriptChatTurn } from './chatML.js';
 import { evaluateScriptCbs, type ScriptCbsEnv } from './cbsHost.js';
 import { isCodeTrigger, type TriggerMode, type TriggerScript, type TriggerStep } from './scripts.js';
 
@@ -123,7 +124,31 @@ export type TriggerRequest =
    * Answered with `{ stopSending?: boolean }`, or nothing when no engine took it.
    * `scope` is the run as the code sees it — RisuAI hands its Lua the same.
    */
-  | { kind: 'code'; language: 'lua'; code: string; mode: string; lowLevelAccess: boolean; scope: CodeScope };
+  | { kind: 'code'; language: 'lua'; code: string; mode: string; lowLevelAccess: boolean; scope: CodeScope }
+  /**
+   * A model call (`runLLM`, `v2RunLLM`) — on the chat's model and the reader's
+   * own account, through the API. Answered with a `ScriptLlmAnswer`; a run with
+   * no one to answer it reads that as a failure.
+   */
+  | { kind: 'llm'; messages: ScriptChatTurn[]; model: 'model' | 'submodel' };
+
+/** What a model call came back with. */
+export type ScriptLlmAnswer = { ok: true; text: string } | { ok: false; error: string };
+
+/** A model call nobody could make. */
+const NO_MODEL_ERROR = 'model calls are not available here';
+const NO_MODEL: ScriptLlmAnswer = { ok: false, error: NO_MODEL_ERROR };
+
+/** Whatever answered an `llm` request, read as an answer — anything else is a failure. */
+function llmAnswer(raw: unknown): ScriptLlmAnswer {
+  if (!raw || typeof raw !== 'object') return NO_MODEL;
+  const answer = raw as Record<string, unknown>;
+  if (answer['ok'] === true && typeof answer['text'] === 'string') return { ok: true, text: answer['text'] };
+  return { ok: false, error: typeof answer['error'] === 'string' ? answer['error'] : NO_MODEL_ERROR };
+}
+
+/** What a script sends: its text as ChatML turns where it is ChatML, else one user turn (RisuAI). */
+const llmTurns = (text: string): ScriptChatTurn[] => parseChatML(text) ?? [{ role: 'user', content: text }];
 
 /**
  * What code running inside a trigger may touch: the chat variables and the chat
@@ -643,13 +668,17 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
           run.sendAIprompt = true;
           break;
         }
-        case 'runLLM':
-        case 'runAxLLM': {
+        case 'runLLM': {
           if (!lowLevelAccess) break;
-          unsupported(effect.type, 'scripts cannot call the model here');
-          setVar(str(effect, 'inputVar') as string, 'Error: model calls are not available to scripts');
+          const text = p(str(effect, 'value'));
+          const answer = llmAnswer(yield { kind: 'llm', messages: llmTurns(text), model: 'model' });
+          // A failure goes into the variable, prefixed, as RisuAI writes it.
+          setVar(asText(str(effect, 'inputVar')), answer.ok ? answer.text : `Error: ${answer.error}`);
           break;
         }
+        case 'runAxLLM':
+          // Declared in RisuAI's trigger types but never handled there, so it does nothing.
+          break;
         case 'checkSimilarity': {
           if (!lowLevelAccess) break;
           unsupported('checkSimilarity', 'there is no embedder for scripts here');
@@ -862,8 +891,12 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
         }
         case 'v2RunLLM': {
           if (!lowLevelAccess) break;
-          unsupported('v2RunLLM', 'scripts cannot call the model here');
-          setVar(output(effect), 'null');
+          const text = value(effect, 'value', 'valueType');
+          // There is one model per chat here, so the sub model is the chat's model too.
+          const model = str(effect, 'model') === 'submodel' ? 'submodel' : 'model';
+          const answer = llmAnswer(yield { kind: 'llm', messages: llmTurns(text), model });
+          // RisuAI writes `null` for a failed call (and reads a streamed one to its end).
+          setVar(output(effect), answer.ok ? answer.text : 'null');
           break;
         }
         case 'v2ShowAlert': {
@@ -1649,6 +1682,7 @@ export interface TriggerDriver {
   select?(options: string[], display?: string): Promise<string> | string;
   wait?(ms: number): Promise<void>;
   code?(request: Extract<TriggerRequest, { kind: 'code' }>): Promise<{ stopSending?: boolean } | void> | { stopSending?: boolean } | void;
+  llm?(request: Extract<TriggerRequest, { kind: 'llm' }>): Promise<ScriptLlmAnswer> | ScriptLlmAnswer;
 }
 
 /** Runs to the end, answering every request through `driver`. */
@@ -1676,14 +1710,18 @@ export async function runTriggers(input: TriggerRunInput, driver: TriggerDriver 
       case 'code':
         answer = (await driver.code?.(request)) ?? undefined;
         break;
+      case 'llm':
+        answer = (await driver.llm?.(request)) ?? NO_MODEL;
+        break;
     }
   }
 }
 
 /**
  * Runs without waiting for anything — the display mode's way, whose allowed
- * effects never ask. A request that does arrive (a code block) is answered with
- * nothing, as though no engine were there to take it.
+ * effects never ask. A request that does arrive (a code block, a model call) is
+ * answered with nothing, as though no engine were there to take it — so a model
+ * call made while a message is drawn fails rather than calling the model.
  */
 export function runTriggersSync(input: TriggerRunInput): TriggerRunResult {
   const run = triggerRun(input);

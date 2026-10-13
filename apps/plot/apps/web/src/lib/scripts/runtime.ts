@@ -323,6 +323,19 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       }
       return engine.runCode(request);
     },
+    // `runLLM`/`v2RunLLM`: the same call card Lua makes, on the chat's model and the
+    // reader's own account. A refusal (no lowLevelAccess, a busy chat, the model
+    // failing) comes back as the failure the effect writes.
+    llm: async (request) => {
+      try {
+        const answer = await api.send<{ result: string }>('POST', `/api/chats/${chatId}/script-llm`, {
+          messages: request.messages,
+        });
+        return { ok: true, text: answer.result };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    },
   };
 
   /** Runs `mode` and folds what it rewrote into the session. */

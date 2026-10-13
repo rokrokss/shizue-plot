@@ -335,6 +335,36 @@ describe('manual', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('asks the model through script-llm for a runLLM, and writes a refusal as RisuAI does', async () => {
+    const forecast = bundle({
+      lowLevelAccess: true,
+      triggers: [trigger('manual', [{ type: 'runLLM', value: '날씨?', inputVar: 'weather' }], { comment: '예보' })],
+    });
+    const done = [greeting, message('m1', 'm0', 'user', '밖은?')];
+
+    const { api, calls } = fakeApi((path) =>
+      (path.endsWith('/script-llm') ? { result: '맑음' } : {}) as unknown as ChatState,
+    );
+    await createScriptRuntime({ chatId: 'c1', api, ui: silentUi, bundle: forecast }).manual('예보', null, view(done));
+    expect(calls[0]).toEqual({
+      method: 'POST',
+      path: '/api/chats/c1/script-llm',
+      body: { messages: [{ role: 'user', content: '날씨?' }] },
+    });
+    expect(calls[1]!.body).toMatchObject({ messageId: 'm1', variableDelta: { weather: '맑음' } });
+
+    // A refused call (no lowLevelAccess on the server's side, a busy chat) is the failure the effect writes.
+    const refused = fakeApi();
+    const refusing = {
+      send: async <T,>(method: string, path: string, body?: unknown): Promise<T> => {
+        if (path.endsWith('/script-llm')) throw new Error('script_llm_forbidden');
+        return refused.api.send<T>(method, path, body);
+      },
+    };
+    await createScriptRuntime({ chatId: 'c1', api: refusing, ui: silentUi, bundle: forecast }).manual('예보', null, view(done));
+    expect(refused.calls[0]!.body).toMatchObject({ variableDelta: { weather: 'Error: script_llm_forbidden' } });
+  });
+
   it('asks the reader through the page, and commits the answer', async () => {
     const { api, calls } = fakeApi();
     const asked: string[] = [];

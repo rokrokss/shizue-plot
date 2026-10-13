@@ -8,6 +8,7 @@ import {
   MAX_TRIGGER_STEPS,
   mergeScriptOverlay,
   overlaidCard,
+  parseChatML,
   risuCalculate,
   runTriggers,
   runTriggersSync,
@@ -291,6 +292,107 @@ describe('v1 effects', () => {
     expect(alerts).toEqual(['조심해']);
     expect(result.variables['name']).toBe('아린');
     expect(result.variables['weapon']).toBe('활');
+  });
+});
+
+describe('model calls', () => {
+  // The run reads its triggers off the character, so the access flag and the
+  // triggers have to arrive together.
+  const llmInput = (steps: TriggerStep[], lowLevelAccess = true, extra: Partial<TriggerRunInput> = {}) =>
+    input([], { character: character([trigger('start', steps)], { lowLevelAccess }), ...extra });
+  const runLLM = (value: string, inputVar = 'out'): TriggerStep => ({ type: 'runLLM', value, inputVar });
+  const v2RunLLM = (value: string, extra: Partial<TriggerStep> = {}): TriggerStep => ({
+    type: 'v2RunLLM',
+    value,
+    valueType: 'value',
+    model: 'model',
+    outputVar: 'out',
+    indent: 0,
+    ...extra,
+  });
+
+  it('asks the model through the driver and writes its answer, ChatML read into turns', async () => {
+    const asked: unknown[] = [];
+    const chatML = '<|im_start|>system\n짧게.<|im_end|><|im_start|>user\n{{user}}에게 인사해<|im_end|>';
+    const result = await runTriggers(llmInput([runLLM(chatML)]), {
+      llm: (request) => {
+        asked.push(request);
+        return { ok: true, text: '안녕하세요' };
+      },
+    });
+    expect(asked).toEqual([
+      {
+        kind: 'llm',
+        model: 'model',
+        messages: [
+          { role: 'system', content: '짧게.' },
+          { role: 'user', content: expect.stringContaining('에게 인사해') },
+        ],
+      },
+    ]);
+    expect(result.variables['out']).toBe('안녕하세요');
+  });
+
+  it("sends plain text as one user turn, and writes RisuAI's failure values", async () => {
+    const failing = { llm: () => ({ ok: false as const, error: 'busy' }) };
+    const v1 = await runTriggers(llmInput([runLLM('hi')]), failing);
+    expect(v1.variables['out']).toBe('Error: busy');
+
+    const asked: unknown[] = [];
+    const v2 = await runTriggers(
+      llmInput([v2RunLLM('prompt', { valueType: 'var', model: 'submodel' })], true, {
+        variables: vars({ prompt: '날씨?' }),
+      }),
+      {
+        llm: (request) => {
+          asked.push(request);
+          return { ok: false, error: 'down' };
+        },
+      },
+    );
+    expect(asked).toEqual([{ kind: 'llm', model: 'submodel', messages: [{ role: 'user', content: '날씨?' }] }]);
+    expect(v2.variables['out']).toBe('null');
+  });
+
+  it('does nothing without lowLevelAccess, and runAxLLM does nothing at all, as in RisuAI', async () => {
+    let calls = 0;
+    const driver = {
+      llm: () => {
+        calls += 1;
+        return { ok: true as const, text: 'x' };
+      },
+    };
+    const locked = await runTriggers(
+      llmInput([runLLM('hi'), v2RunLLM('hi')], false),
+      driver,
+    );
+    expect(locked.variables['out']).toBeUndefined();
+    const ax = await runTriggers(
+      llmInput([{ type: 'runAxLLM', value: 'hi', inputVar: 'out' }]),
+      driver,
+    );
+    expect(ax.variables['out']).toBeUndefined();
+    expect(calls).toBe(0);
+  });
+
+  it('fails rather than calling the model where nothing can wait, or no one answers', async () => {
+    const sync = runTriggersSync(llmInput([runLLM('hi')]));
+    expect(sync.variables['out']).toBe('Error: model calls are not available here');
+    const unanswered = await runTriggers(llmInput([v2RunLLM('hi')]));
+    expect(unanswered.variables['out']).toBe('null');
+  });
+
+  it('reads ChatML the way RisuAI does', () => {
+    expect(parseChatML('그냥 글')).toBeNull();
+    expect(
+      parseChatML(
+        '<|im_start|>system<|im_sep|>규칙<|im_end|><|im_start|>assistant 네<Thoughts>속생각</Thoughts><|im_end|><|im_start|>무명 역할',
+      ),
+    ).toEqual([
+      { role: 'system', content: '규칙' },
+      { role: 'assistant', content: '네' },
+      { role: 'user', content: '무명 역할' },
+    ]);
   });
 });
 

@@ -43,8 +43,8 @@ export const TRIGGER_CLASSIFICATION: Readonly<Record<string, { support: TriggerS
   modifychat: { support: 'server', note: 'the head is rewritten in place; other messages are not' },
   showAlert: { support: 'browser', note: 'lowLevelAccess' },
   sendAIprompt: { support: 'server', note: 'lowLevelAccess; an automatic next turn, with the reader’s consent' },
-  runLLM: { support: 'impossible', note: 'lowLevelAccess; writes RisuAI’s error text' },
-  runAxLLM: { support: 'impossible', note: 'lowLevelAccess; writes RisuAI’s error text' },
+  runLLM: { support: 'server', note: 'lowLevelAccess; POST /api/chats/:id/script-llm on the chat’s model; a failure writes “Error: …”' },
+  runAxLLM: { support: 'logged', note: 'declared but never handled by RisuAI, so it does nothing' },
   checkSimilarity: { support: 'impossible', note: 'lowLevelAccess; no embedder' },
   extractRegex: { support: 'browser', note: 'lowLevelAccess' },
   runImgGen: { support: 'impossible', note: 'lowLevelAccess; writes RisuAI’s failure text' },
@@ -95,7 +95,7 @@ export const TRIGGER_CLASSIFICATION: Readonly<Record<string, { support: TriggerS
   // v2 model, images, embeddings
   v2ImgGen: { support: 'impossible', note: 'lowLevelAccess; writes null' },
   v2CheckSimilarity: { support: 'impossible', note: 'lowLevelAccess; no embedder' },
-  v2RunLLM: { support: 'impossible', note: 'lowLevelAccess; writes null' },
+  v2RunLLM: { support: 'server', note: 'lowLevelAccess; POST /api/chats/:id/script-llm (the sub model is the chat’s model); a failure writes null' },
 
   // v2 dialogs and display
   v2ShowAlert: { support: 'browser', note: '' },
