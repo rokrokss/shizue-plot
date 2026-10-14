@@ -47,14 +47,18 @@ export function rpackDecode(bytes: Uint8Array): Uint8Array {
 }
 
 /**
- * What a card import takes from a module. The module's lorebook is not among it:
- * RisuAI's export writes the same entries as the card's `character_book`.
+ * What an import takes from a charx's module. A card import puts the scripts
+ * back and leaves the lorebook: RisuAI's export writes the same entries as the
+ * card's `character_book`. A module import (`card/risuModule.ts`) takes the
+ * lorebook over the card's book, as RisuAI's charx import does.
  */
 export interface RisuModuleScripts {
   /** Goes back to `extensions.risuai.customScripts`. */
   regex?: unknown[];
   /** Goes back to `extensions.risuai.triggerscript`. */
   trigger?: unknown[];
+  /** The module's `lorebook`, RisuAI's own entry shape (`loreBook`). */
+  lorebook?: unknown[];
 }
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
@@ -81,7 +85,7 @@ export function readRisumMain(bytes: Uint8Array): { module: Record<string, unkno
 }
 
 /**
- * Reads a module's regex scripts and triggers. Never throws: anything that is not
+ * Reads a module's regex scripts, triggers and lorebook. Never throws: anything that is not
  * a module this reader understands comes back undefined, and the caller goes on
  * without it — a module must never cost a card its import.
  */
@@ -91,6 +95,7 @@ export function readRisum(bytes: Uint8Array): RisuModuleScripts | undefined {
   return {
     ...(Array.isArray(module['regex']) ? { regex: module['regex'] as unknown[] } : {}),
     ...(Array.isArray(module['trigger']) ? { trigger: module['trigger'] as unknown[] } : {}),
+    ...(Array.isArray(module['lorebook']) ? { lorebook: module['lorebook'] as unknown[] } : {}),
   };
 }
 

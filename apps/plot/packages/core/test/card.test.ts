@@ -1086,9 +1086,9 @@ describe('exportCardCharx', () => {
     expect(parsed.card.name).toBe('세이');
     expect(parsed.iconBuffer).toEqual(icon.bytes);
     expect(parsed.assets).toEqual([
-      { name: 'Smile', bytes: gif(1) },
-      { name: '웃음.png', bytes: placeholderPng() },
-      { name: 'castle', bytes: gif(3) },
+      { name: 'Smile', bytes: gif(1), additional: true },
+      { name: '웃음.png', bytes: placeholderPng(), additional: true },
+      { name: 'castle', bytes: gif(3), additional: true },
     ]);
   });
 

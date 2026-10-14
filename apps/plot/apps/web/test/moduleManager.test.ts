@@ -99,7 +99,7 @@ describe('the studio’s RisuAI modules', () => {
   it('sends a picked file up as a module and hands the answer on', async () => {
     await render([]);
     const input = host.querySelector<HTMLInputElement>('[data-testid="module-file"]')!;
-    expect(input.accept).toBe('.risum,.json,application/json');
+    expect(input.accept).toBe('.charx,.risum,.json,.lorebook,application/json');
     Object.defineProperty(input, 'files', { configurable: true, value: [new File(['risum'], 'weather.risum')] });
     await act(async () => {
       input.dispatchEvent(new Event('change', { bubbles: true }));
@@ -132,5 +132,21 @@ describe('the studio’s RisuAI modules', () => {
     });
     expect(changed).toEqual([]);
     expect(host.querySelector('[aria-live="polite"]')).not.toBeNull();
+  });
+});
+
+describe('a member that came in from a module file', () => {
+  it('is told apart by RisuAI’s module file name or its no-icon marker', async () => {
+    const { looksLikeRisuModule } = await import('../src/components/CardImport');
+    const member = (fileName: string | null, extensions: Record<string, unknown> = {}) =>
+      ({
+        importedFrom: fileName ? { fileName, sha256: 'x', importedAt: '2026-10-14T00:00:00.000Z' } : null,
+        card: { extensions },
+      }) as unknown as Parameters<typeof looksLikeRisuModule>[0];
+    expect(looksLikeRisuModule(member('날씨 모듈.module.charx'))).toBe(true);
+    expect(looksLikeRisuModule(member('Weather.Module.CHARX'))).toBe(true);
+    expect(looksLikeRisuModule(member('weather.charx', { moduleNoneImage: true }))).toBe(true);
+    expect(looksLikeRisuModule(member('sei.charx'))).toBe(false);
+    expect(looksLikeRisuModule(member(null))).toBe(false);
   });
 });

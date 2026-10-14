@@ -31,9 +31,9 @@ describe('readRisum', () => {
   };
   const file = buildRisum({ module, type: 'risuModule' });
 
-  it('reads the regex scripts and triggers, and nothing after the main block', () => {
+  it('reads the regex scripts, triggers and lorebook, and nothing after the main block', () => {
     const withAssets = buildRisum({ module, type: 'risuModule' }, [Uint8Array.from([1, 2, 3])]);
-    expect(readRisum(withAssets)).toEqual({ regex: module.regex, trigger: module.trigger });
+    expect(readRisum(withAssets)).toEqual({ regex: module.regex, trigger: module.trigger, lorebook: [] });
   });
 
   it('returns undefined for anything it cannot read, without throwing', () => {

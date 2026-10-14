@@ -2,8 +2,10 @@
  * A RisuAI module brought into a work on its own (`card/risuModule.ts`), and
  * what the work's modules add to the scripts a member runs (`cardScripts`).
  */
+import { zipSync } from 'fflate';
 import { describe, expect, it } from 'vitest';
 import {
+  indicatorLore,
   ModuleParseError,
   parseRisuModule,
   plotModuleOf,
@@ -12,6 +14,7 @@ import {
 import { assemblePrompt, type PromptCharacter, type PromptPlot } from '../src/prompt.js';
 import { cardScripts, runTriggersSync, scriptedMember } from '../src/triggers/index.js';
 import { DEFAULT_LORE_SETTINGS, type NormalizedCard, type PlotModule } from '../src/types.js';
+import { buildCharx } from './helpers/charx.js';
 import { buildRisum } from './helpers/risum.js';
 
 const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
@@ -88,9 +91,218 @@ describe('parseRisuModule', () => {
     expect(() => parseRisuModule(Uint8Array.from([0x89, 0x50, 0x4e, 0x47]))).toThrow(ModuleParseError);
   });
 
+  it('reads RisuAI’s lorebook export as a module of lore, named as RisuAI names it', () => {
+    const json = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
+    const parsed = parseRisuModule(json({ type: 'risu', ver: 1, data: risuModule.lorebook }));
+    expect(parsed).toMatchObject({
+      name: 'Imported Lorebook',
+      description: 'Converted from risu lorebook',
+      regex: [],
+      trigger: [],
+      lowLevelAccess: false,
+      assets: [],
+    });
+    expect(parsed.lorebook.map((entry) => entry.name)).toEqual(['우산', '날씨', '정규식']);
+    expect(parseRisuModule(json({ type: 'risu', name: '우산 책', data: [] })).name).toBe('우산 책');
+    // A HypaV3 preset export has the same type with a record for its data: not a lorebook.
+    expect(() => parseRisuModule(json({ type: 'risu', data: { summaries: [] } }))).toThrow(ModuleParseError);
+  });
+
+  it('reads an external lorebook — SillyTavern’s World Info — through the lorebook file mapping', () => {
+    const json = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
+    const worldInfo = {
+      entries: {
+        0: { uid: 0, key: ['검'], keysecondary: [], comment: '검', content: '검은 녹슬었다.', constant: false, order: 5, position: 4, depth: 2, role: 0 },
+        1: { uid: 1, key: [], keysecondary: [], comment: '배경', content: '왕국은 망했다.', constant: true, order: 1, position: 0 },
+      },
+    };
+    const parsed = parseRisuModule(json(worldInfo));
+    expect(parsed.name).toBe('Imported Lorebook');
+    expect(parsed.description).toBe('Converted from external lorebook');
+    expect(parsed.lorebook).toMatchObject([
+      { name: '검', keys: ['검'], content: '검은 녹슬었다.', insertionOrder: 5, depth: 2, constant: false },
+      { name: '배경', content: '왕국은 망했다.', constant: true, position: 'before_char' },
+    ]);
+    // A character_book's array of entries is an external lorebook too.
+    expect(parseRisuModule(json({ name: '책', entries: [{ keys: ['문'], content: '열렸다.' }] })).lorebook[0]).toMatchObject({
+      keys: ['문'],
+      content: '열렸다.',
+    });
+    // The other lorebook files the studio reads are not what RisuAI's module import takes.
+    expect(() => parseRisuModule(json({ spec: 'lorebook_v3', data: { entries: [] } }))).toThrow(ModuleParseError);
+  });
+
+  it('reads RisuAI’s regex export as a module of regex scripts', () => {
+    const json = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
+    const parsed = parseRisuModule(json({ type: 'regex', data: risuModule.regex }));
+    expect(parsed).toMatchObject({ name: 'Imported Regex', description: 'Converted from risu regex', lorebook: [], trigger: [] });
+    expect(parsed.regex).toEqual(risuModule.regex);
+    const module = plotModuleOf(parsed, {
+      id: 'm-2',
+      name: parsed.name,
+      description: parsed.description,
+      lorebook: [],
+      assets: [],
+      importedFrom: { fileName: 'regexscript_export.json', sha256: 'x', importedAt: '2026-10-14T00:00:00.000Z' },
+    });
+    expect(module.displayScripts).toEqual([{ in: '비', out: '<b>비</b>', order: 0, enabled: true }]);
+    expect(() => parseRisuModule(json({ type: 'regex' }))).toThrow(ModuleParseError);
+    expect(() => parseRisuModule(json([risuModule]))).toThrow(ModuleParseError);
+  });
+
   it('reads a lore entry RisuAI wrote selective with its secondary keys', () => {
     const entry = risuLoreBookEntry({ key: '문', secondkey: '열쇠', selective: true, content: '잠겨 있다.', insertorder: 1, comment: '', mode: 'normal', alwaysActive: false });
     expect(entry).toMatchObject({ keys: ['문'], secondaryKeys: ['열쇠'], selective: true, content: '잠겨 있다.' });
+  });
+});
+
+const encode = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
+const rainPicture = Uint8Array.from([...png, 7]);
+const smilePicture = Uint8Array.from([...png, 8]);
+const v3 = (data: Record<string, unknown>) => ({ spec: 'chara_card_v3', spec_version: '3.0', data });
+
+/**
+ * A module as RisuAI's `exportModule` writes it (`name.module.charx`): the module
+ * made a character (`convertModuleToCharacter` — its `@@indicator` entries back
+ * in the description, first messages and post-history instructions; no icon, so
+ * the stand-in and `moduleNoneImage`) and exported as a V3 charx, the scripts
+ * and lore in `module.risum` and the scripts out of `card.json`.
+ */
+const moduleCharx = (): Uint8Array =>
+  buildCharx(
+    v3({
+      name: '날씨 모듈',
+      description: '골짜기의 하늘을 다룬다.',
+      first_mes: '비가 그쳤다.',
+      alternate_greetings: ['눈이 온다.'],
+      post_history_instructions: '{{original}} 날씨를 잊지 마라.',
+      creator_notes: '비가 온다.',
+      // RisuAI writes the same lore here; the module's is the one its import takes.
+      character_book: { extensions: {}, entries: [{ keys: ['책'], content: '카드 책에만 있다.', extensions: {}, enabled: true, insertion_order: 0 }] },
+      extensions: {
+        risuai: {
+          backgroundHTML: risuModule.backgroundEmbedding,
+          lowLevelAccess: true,
+          moduleNamespace: 'weather',
+          hideChatIcon: false,
+          toggles: '',
+        },
+        moduleNoneImage: true,
+      },
+    }),
+    [
+      { type: 'x-risu-asset', name: 'rain', ext: 'png', entry: 'assets/other/image/rain.png', bytes: rainPicture },
+      { type: 'icon', name: 'main', ext: 'png', entry: 'assets/icon/image/main.png', bytes: png },
+    ],
+    {
+      'module.risum': buildRisum({
+        module: {
+          name: '날씨 모듈 Module',
+          description: 'Module for 날씨 모듈',
+          id: 'charx-id',
+          trigger: risuModule.trigger,
+          regex: risuModule.regex,
+          lorebook: risuModule.lorebook,
+        },
+        type: 'risuModule',
+      }),
+    },
+  );
+
+describe('a charx as a module', () => {
+  it('writes the description, first messages and global note as RisuAI’s indicator entries', () => {
+    const entry = (comment: string, content: string, alwaysActive: boolean) => ({
+      key: '',
+      secondkey: '',
+      insertorder: 0,
+      comment,
+      content,
+      mode: 'constant',
+      alwaysActive,
+      selective: false,
+    });
+    expect(
+      indicatorLore({ desc: '마녀.', firstMessage: '안녕.', alternateGreetings: ['또 왔네.', '어서 와.'], replaceGlobalNote: '짧게.' }),
+    ).toEqual([
+      entry('From Character Description', '@@indicator character_desc\n\n마녀.', true),
+      entry(
+        'From First Messages',
+        '@@indicator character_first_message\n\n<FM>\n안녕.\n</FM>\n<FM_alt>\n또 왔네.\n</FM_alt>\n<FM_alt>\n어서 와.\n</FM_alt>',
+        false,
+      ),
+      entry('From Global Note Replacement', '@@indicator replace_global_note\n\n짧게.', true),
+    ]);
+    expect(indicatorLore({ desc: '', firstMessage: '', alternateGreetings: [], replaceGlobalNote: '' })).toEqual([]);
+    // Alternate greetings alone still bring the first-message entry, an empty <FM> and all.
+    expect(indicatorLore({ desc: '', firstMessage: '', alternateGreetings: ['또.'], replaceGlobalNote: '' })).toEqual([
+      entry('From First Messages', '@@indicator character_first_message\n\n<FM>\n\n</FM>\n<FM_alt>\n또.\n</FM_alt>', false),
+    ]);
+  });
+
+  it('reads RisuAI’s .module.charx as convertCharacterToModule makes a module of it', () => {
+    const parsed = parseRisuModule(moduleCharx());
+    expect(parsed.name).toBe('날씨 모듈');
+    expect(parsed.description).toBe('비가 온다.');
+    // The module's lore over the card's book, then the three indicator entries in RisuAI's order.
+    expect(parsed.lorebook.map((entry) => [entry.name, entry.constant, entry.content.trim()])).toEqual([
+      ['우산', false, '우산은 파랗다.'],
+      ['날씨', true, '비가 내린다.'],
+      ['정규식', false, '구름'],
+      ['From Character Description', true, '골짜기의 하늘을 다룬다.'],
+      ['From First Messages', false, '<FM>\n비가 그쳤다.\n</FM>\n<FM_alt>\n눈이 온다.\n</FM_alt>'],
+      ['From Global Note Replacement', true, '{{original}} 날씨를 잊지 마라.'],
+    ]);
+    expect(parsed.regex).toEqual(risuModule.regex);
+    expect(parsed.trigger).toEqual(risuModule.trigger);
+    expect(parsed.lowLevelAccess).toBe(true);
+    expect(parsed.backgroundEmbedding).toBe(risuModule.backgroundEmbedding);
+    expect(parsed.namespace).toBe('weather');
+    // The x-risu-asset alone: the icon (here RisuAI's stand-in) is not a module's picture.
+    expect(parsed.assets.map((asset) => [asset.name, asset.bytes])).toEqual([['rain', rainPicture]]);
+
+    const module = plotModuleOf(parsed, {
+      id: 'm-3',
+      name: parsed.name,
+      description: parsed.description,
+      lorebook: parsed.lorebook,
+      assets: [],
+      importedFrom: { fileName: '날씨 모듈.module.charx', sha256: 'x', importedAt: '2026-10-14T00:00:00.000Z' },
+    });
+    expect(module.namespace).toBe('weather');
+    expect(module.css).toBe('.rain{color:blue}');
+  });
+
+  it('makes any character’s charx a module: the card’s own book and scripts, its additional pictures only', () => {
+    const charx = buildCharx(
+      v3({
+        name: '아리아',
+        description: '',
+        first_mes: '',
+        creator_notes: '',
+        character_book: { extensions: {}, entries: [{ keys: ['검'], content: '검은 녹슬었다.', extensions: {}, enabled: true, insertion_order: 2 }] },
+        extensions: { risuai: { customScripts: risuModule.regex, triggerscript: risuModule.trigger } },
+      }),
+      [
+        { type: 'emotion', name: 'smile', ext: 'png', entry: 'assets/emotion/image/smile.png', bytes: smilePicture },
+        { type: 'x-risu-asset', name: 'rain', ext: 'png', entry: 'assets/other/image/rain.png', bytes: rainPicture },
+      ],
+    );
+    const parsed = parseRisuModule(charx);
+    expect(parsed.name).toBe('아리아');
+    // Nothing to mark: no description, no first messages, no global note.
+    expect(parsed.lorebook.map((entry) => [entry.keys, entry.content])).toEqual([[['검'], '검은 녹슬었다.']]);
+    expect(parsed.regex).toEqual(risuModule.regex);
+    expect(parsed.trigger).toEqual(risuModule.trigger);
+    expect(parsed.lowLevelAccess).toBe(false);
+    expect(parsed.namespace).toBeUndefined();
+    expect(parsed.assets.map((asset) => asset.name)).toEqual(['rain']);
+  });
+
+  it('turns away a charx RisuAI would not read, as unreadable', () => {
+    const v2 = zipSync({ 'card.json': encode({ spec: 'chara_card_v2', spec_version: '2.0', data: { name: '옛 카드' } }) });
+    expect(() => parseRisuModule(v2)).toThrow(ModuleParseError);
+    expect(() => parseRisuModule(zipSync({ 'other.json': encode({}) }))).toThrow(ModuleParseError);
+    expect(() => parseRisuModule(zipSync({ 'card.json': new TextEncoder().encode('{not json') }))).toThrow(ModuleParseError);
   });
 });
 
@@ -235,5 +447,24 @@ describe('a work’s modules in the prompt', () => {
     expect(at('작품의 로어')).toBeLessThan(at('카드의 로어'));
     expect(at('카드의 로어')).toBeLessThan(at('모듈의 로어'));
     expect(prompt.report!.lore.map((entry) => entry.source)).toEqual(['plot', '아리아', '날씨']);
+  });
+
+  it('sends the indicator entries as RisuAI does in a module: description and global note as lore, never the first messages', () => {
+    const parsed = parseRisuModule(moduleCharx());
+    const aria: PromptCharacter = { name: '아리아', card: card({}) };
+    const plot: PromptPlot = {
+      name: '골짜기',
+      description: '',
+      lorebook: [],
+      modules: [work({ name: '날씨 모듈', lorebook: parsed.lorebook, regex: [], trigger: [] })],
+    };
+    const prompt = assemblePrompt({ plot, characters: [aria], history: [], userName: '민준', report: true });
+    const sent = [prompt.system, ...prompt.messages.map((message) => JSON.stringify(message.content))].join('\n');
+    expect(sent).toContain('골짜기의 하늘을 다룬다.');
+    expect(sent).toContain('날씨를 잊지 마라.');
+    expect(sent).not.toContain('비가 그쳤다.');
+    expect(sent).not.toContain('@@indicator');
+    // The module's always-on entry, the description and the note: nothing keyed fired, nor the first messages.
+    expect(prompt.report!.lore.filter((entry) => entry.source === '날씨 모듈')).toHaveLength(3);
   });
 });

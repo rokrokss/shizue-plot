@@ -2174,8 +2174,8 @@ describe('card export', () => {
     expect(parsed.iconBuffer).toEqual(stripPngTextChunks(icon));
     expect(parsed.assets).toEqual([
       { name: '웃음', bytes: gif(2), emotion: true },
-      { name: 'Smile', bytes: gif(1) },
-      { name: 'castle', bytes: gif(3) },
+      { name: 'Smile', bytes: gif(1), additional: true },
+      { name: 'castle', bytes: gif(3), additional: true },
     ]);
 
     // And back in here, the same names on the same pictures (listed by slug now,
@@ -16108,5 +16108,89 @@ describe('RisuAI modules', () => {
     const stranger = await signUp('module-stranger@example.com');
     expect((await importModule(stranger, plot.id, risum())).status).toBe(404);
     expect((await request(stranger, `/api/plots/${plot.id}/modules/${owner.modules[0].id}`, 'DELETE')).status).toBe(404);
+  });
+
+  it('takes RisuAI’s .module.charx: the module made a character, made a module again with its pictures', async () => {
+    const cookie = await signUp('module-charx@example.com');
+    const plot = await createPlot(cookie);
+    // As RisuAI's `exportModule` writes it: the scripts and lore in `module.risum`, the rest the card.
+    const charx = buildCharx(
+      {
+        ...v3Card,
+        data: {
+          name: '날씨 모듈',
+          description: '골짜기의 하늘.',
+          first_mes: '비가 그쳤다.',
+          creator_notes: '비가 온다.',
+          extensions: {
+            risuai: { backgroundHTML: weather.backgroundEmbedding, lowLevelAccess: true, moduleNamespace: 'weather' },
+            moduleNoneImage: true,
+          },
+        },
+      },
+      [
+        { type: 'x-risu-asset', name: 'rain', ext: 'gif', entry: 'assets/other/image/rain.gif', bytes: gif(7) },
+        { type: 'icon', name: 'main', ext: 'gif', entry: 'assets/icon/image/main.gif', bytes: gif(8) },
+      ],
+      {
+        'module.risum': buildRisum({
+          module: { name: '날씨 모듈 Module', description: '', id: 'x', regex: weather.regex, trigger: weather.trigger, lorebook: weather.lorebook },
+          type: 'risuModule',
+        }),
+      },
+    );
+    const res = await importModule(cookie, plot.id, new File([charx], '날씨 모듈.module.charx'));
+    expect(res.status, await res.clone().text()).toBe(201);
+    expect((await readJson(res)).modules).toEqual([
+      expect.objectContaining({
+        name: '날씨 모듈',
+        description: '비가 온다.',
+        // Its own entry, then the description and the first messages as RisuAI's indicator entries.
+        loreCount: 3,
+        regexCount: 2,
+        triggerCount: 1,
+        displayScriptCount: 1,
+        assetCount: 1,
+        background: true,
+        lowLevelAccess: true,
+        importedFrom: expect.objectContaining({ fileName: '날씨 모듈.module.charx' }),
+      }),
+    ]);
+    // The additional asset only: the icon RisuAI's export put there is no picture of the module's.
+    expect((await assetsOf(cookie, plot.id)).map((asset) => asset.name)).toEqual(['rain']);
+    const [row] = await db.select({ customUi: plots.customUi }).from(plots).where(eq(plots.id, plot.id));
+    expect(row!.customUi!.modules![0]!.namespace).toBe('weather');
+    expect(row!.customUi!.modules![0]!.lorebook.map((entry) => [entry.name, entry.constant])).toEqual([
+      ['날씨', true],
+      ['From Character Description', true],
+      ['From First Messages', false],
+    ]);
+
+    // An archive that does not read is the file's fault.
+    const broken = new Uint8Array(64);
+    broken.set([0x50, 0x4b, 0x03, 0x04]);
+    const bad = await importModule(cookie, plot.id, new File([broken], 'broken.module.charx'));
+    expect(bad.status).toBe(400);
+    expect((await readJson(bad)).code).toBe('invalid_module');
+  });
+
+  it('takes the lorebook and regex files RisuAI’s module import takes, each as one module named as RisuAI names it', async () => {
+    const cookie = await signUp('module-lorebook@example.com');
+    const plot = await createPlot(cookie);
+    const upload = (name: string, value: unknown) => importModule(cookie, plot.id, new File([JSON.stringify(value)], name));
+
+    expect((await upload('lorebook_export.json', { type: 'risu', ver: 1, data: weather.lorebook })).status).toBe(201);
+    const worldInfo = { entries: { 0: { uid: 0, key: ['검'], keysecondary: [], comment: '검', content: '검은 녹슬었다.', order: 1, position: 1 } } };
+    expect((await upload('world.lorebook', worldInfo)).status).toBe(201);
+    const owner = await readJson(await upload('regexscript_export.json', { type: 'regex', data: weather.regex }));
+    expect(owner.modules.map((module: any) => [module.name, module.description, module.loreCount, module.regexCount])).toEqual([
+      ['Imported Lorebook', 'Converted from risu lorebook', 1, 0],
+      ['Imported Lorebook', 'Converted from external lorebook', 1, 0],
+      ['Imported Regex', 'Converted from risu regex', 0, 2],
+    ]);
+    // A HypaV3 preset export shares the lorebook's type, with a record for its data.
+    const preset = await upload('hypa.json', { type: 'risu', data: { summaries: [] } });
+    expect(preset.status).toBe(400);
+    expect((await readJson(preset)).code).toBe('invalid_module');
   });
 });

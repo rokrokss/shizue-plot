@@ -512,8 +512,8 @@ export interface PlotCustomUi {
 }
 
 /**
- * A RisuAI module (`.risum`, or its JSON) brought into a work. RisuAI stacks a
- * module on a chat beside the character rather than into it, so one is the
+ * A RisuAI module (any file RisuAI's module import takes) brought into a work.
+ * RisuAI stacks a module on a chat beside the character rather than into it, so one is the
  * work's — every member's, untagged by any — and each runs after the card's own,
  * as RisuAI concatenates them: the card's regex scripts then the module's, the
  * card's triggers then the module's, the card's lore and the chat's then the
@@ -533,6 +533,8 @@ export interface PlotModule {
   trigger: unknown[];
   /** RisuAI's `lowLevelAccess`, for the module's own triggers alone. */
   lowLevelAccess?: true;
+  /** RisuAI's `namespace`, kept as it came; nothing here reads it yet. */
+  namespace?: string;
   /** The `editdisplay` scripts of `regex`, as display scripts — run after the work's, on every message. */
   displayScripts?: DisplayScript[];
   /** The `<style>` elements of the module's `backgroundEmbedding`, drawn after the work's stylesheet. */

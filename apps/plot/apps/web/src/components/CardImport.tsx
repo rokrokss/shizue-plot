@@ -87,6 +87,20 @@ export function LicenseText({ license }: { license: string | null }) {
 }
 
 /**
+ * Whether an imported member's file looks like a RisuAI module rather than a
+ * character: RisuAI's module export names it `name.module.charx`, and marks a
+ * module with no icon of its own `extensions.moduleNoneImage`. It came in as a
+ * character, as RisuAI's character import also brings it in; the owner is only
+ * told it can go into the work as a module instead.
+ */
+export function looksLikeRisuModule(member: Pick<PlotMember, 'card' | 'importedFrom'>): boolean {
+  return (
+    member.importedFrom?.fileName.toLowerCase().endsWith('.module.charx') === true ||
+    member.card.extensions['moduleNoneImage'] === true
+  );
+}
+
+/**
  * Where an imported member came from, who the card says made it and under what
  * license — what the owner weighs before publishing it. Nothing here is checked:
  * the creator and license are the card's own claims, the source the importer's.
@@ -136,6 +150,11 @@ export function ImportedCardDetails({ member }: { member: PlotMember }) {
       </dl>
       {isRestrictiveLicense(member.license) ? (
         <p className="text-danger">{t('restrictedNotice')}</p>
+      ) : null}
+      {looksLikeRisuModule(member) ? (
+        <p data-testid="member-module-like" className="text-muted">
+          {t('moduleLike')}
+        </p>
       ) : null}
     </div>
   );

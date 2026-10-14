@@ -107,7 +107,7 @@ export function ModuleManager({
       <input
         ref={fileInput}
         type="file"
-        accept=".risum,.json,application/json"
+        accept=".charx,.risum,.json,.lorebook,application/json"
         className="sr-only"
         tabIndex={-1}
         aria-hidden

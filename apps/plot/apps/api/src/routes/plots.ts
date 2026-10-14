@@ -1885,8 +1885,10 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
   /* ------------------------------------------------------------ the modules */
 
   /**
-   * A RisuAI module brought into the work — a `.risum` file or the module's JSON
-   * (`parseRisuModule`) — the creator's side of RisuAI's module list. RisuAI
+   * A RisuAI module brought into the work — any file RisuAI's module import
+   * takes: a charx (its `.module.charx` export, or a character's), a `.risum`,
+   * the module's JSON, a lorebook or a regex export (`parseRisuModule`) — the
+   * creator's side of RisuAI's module list. RisuAI
    * stacks a module on the chat rather than into the character, so this one is
    * the work's: kept whole under an id of its own (`PlotModule`), every member's,
    * and run after the cards' own wherever theirs run (§6 of ARCHITECTURE.md).

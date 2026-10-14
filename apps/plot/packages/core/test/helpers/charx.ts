@@ -11,10 +11,14 @@ export interface CharxAssetSpec {
 
 /**
  * Builds a .charx archive: `card.json` with the asset list wired to real zip
- * entries, plus one entry per asset. Shared with the api suite, which has no
- * fflate of its own.
+ * entries, plus one entry per asset and any `entries` beside them (RisuAI's
+ * `module.risum`). Shared with the api suite, which has no fflate of its own.
  */
-export function buildCharx(card: { data: Record<string, unknown> }, assets: CharxAssetSpec[]): Uint8Array {
+export function buildCharx(
+  card: { data: Record<string, unknown> },
+  assets: CharxAssetSpec[],
+  entries: Record<string, Uint8Array> = {},
+): Uint8Array {
   const json = {
     ...card,
     data: {
@@ -31,5 +35,5 @@ export function buildCharx(card: { data: Record<string, unknown> }, assets: Char
     'card.json': new TextEncoder().encode(JSON.stringify(json)),
   };
   for (const asset of assets) files[asset.entry] = asset.bytes;
-  return zipSync(files);
+  return zipSync({ ...files, ...entries });
 }
