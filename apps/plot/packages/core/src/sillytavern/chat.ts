@@ -28,6 +28,7 @@
  * becomes of each is the import's to decide; this only reads them.
  */
 
+import { AUTHOR_NOTE_MAX, coerceAuthorNoteSettings, type AuthorNoteRole, type AuthorNoteSettings } from '../authorNote.js';
 import { withNarrationPrefix } from '../narration.js';
 import { spokenBy } from '../speech.js';
 import type { ImportedChatMessage } from '../types.js';
@@ -70,19 +71,37 @@ export interface StAuthorNote {
 
 /**
  * ST's defaults for a chat's author's note — in the chat, four messages from the
- * end, as a system message, every turn. That is exactly where our own chat note
- * goes (`AUTHOR_NOTE_DEPTH` in `prompt.ts`, not imported here so the migration
- * stays clear of the prompt builder), so a note that keeps them reads the same
- * in both and one that does not is placed differently here.
+ * end, as a system message, every turn. They are a chat's default note settings
+ * here too (`AUTHOR_NOTE_DEFAULTS`), so a note that keeps them comes over with
+ * no settings of its own.
  */
 export const ST_AUTHOR_NOTE_DEFAULTS = { interval: 1, position: 1, depth: 4, role: 0 } as const;
 
-/** Whether a note goes where ST put it once it is our chat note — see `ST_AUTHOR_NOTE_DEFAULTS`. */
-export const stNoteKeepsPlace = (note: StAuthorNote): boolean =>
-  note.interval === ST_AUTHOR_NOTE_DEFAULTS.interval &&
-  note.position === ST_AUTHOR_NOTE_DEFAULTS.position &&
-  note.depth === ST_AUTHOR_NOTE_DEFAULTS.depth &&
-  note.role === ST_AUTHOR_NOTE_DEFAULTS.role;
+/** `note_role` by number, as ST's `extension_prompt_roles` counts them. */
+const ST_NOTE_ROLES: readonly AuthorNoteRole[] = ['system', 'user', 'assistant'];
+
+/**
+ * Whether the note keeps ST's place once it is ours: position 1, in the chat at
+ * its depth, is the one place both have. Before or after the story string
+ * (positions 2 and 0, or a number ST never writes) has no match here.
+ */
+export const stNoteInChat = (note: StAuthorNote): boolean => note.position === 1;
+
+/**
+ * The note's settings as the chat keeps them (`chats.note_settings`): ST's depth,
+ * its interval as the frequency (0 or less is never, as in ST) and its role by
+ * number (one ST never writes is a system message). A note ST put before or
+ * after the story string (`stNoteInChat`) goes as deep as a note can, which the
+ * prompt clamps to the start of the history — the nearest the history comes to
+ * the story string. Coerced as any stored settings are, so a note that keeps
+ * ST's defaults has none.
+ */
+export const noteSettingsOfSt = (note: StAuthorNote): AuthorNoteSettings | null =>
+  coerceAuthorNoteSettings({
+    depth: stNoteInChat(note) ? note.depth : AUTHOR_NOTE_MAX,
+    frequency: note.interval,
+    role: ST_NOTE_ROLES[note.role] ?? 'system',
+  });
 
 export interface StConvertedChat {
   /** The persona name the chat was written under; '' when the file never says. */

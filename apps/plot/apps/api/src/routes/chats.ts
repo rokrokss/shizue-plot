@@ -528,11 +528,12 @@ function optionalPreset(body: Record<string, unknown>): string | undefined {
  */
 /**
  * A settings object the PATCH replaces whole — the author's note's placement,
- * the language mode. What the setting does not know is dropped by its coercion,
- * as the narrator's is; only something that is not an object at all is refused.
- * `null`, and an object left with nothing, store null: every default.
+ * the language mode — and an imported chat's note placement at its completion.
+ * What the setting does not know is dropped by its coercion, as the narrator's
+ * is; only something that is not an object at all is refused. `null`, and an
+ * object left with nothing, store null: every default.
  */
-function optionalSettings<T>(
+export function optionalSettings<T>(
   body: Record<string, unknown>,
   key: string,
   coerce: (value: unknown) => T | null,

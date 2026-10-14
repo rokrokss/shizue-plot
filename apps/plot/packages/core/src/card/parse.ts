@@ -10,7 +10,7 @@ import {
   type CharxAssetFile,
   type SkippedAssets,
 } from './charx.js';
-import { MEDIA_SNIFF_BYTES, sniffMedia } from './media.js';
+import { MEDIA_SNIFF_BYTES, sniffFont, sniffMedia } from './media.js';
 import { CardParseError, normalizeCard } from './normalize.js';
 import { isPng, readPngTextChunkBytes } from './png.js';
 import { cardWithRisuModule } from './risum.js';
@@ -20,7 +20,7 @@ export interface ParsedCard {
   card: NormalizedCard;
   /** Avatar bytes when the source carried one (PNG itself, or the charx main icon). */
   iconBuffer?: Uint8Array;
-  /** Embedded pictures and music beside the icon: a charx archive's, or a RisuAI PNG's asset chunks. */
+  /** Embedded pictures, music and web fonts beside the icon: a charx archive's, or a RisuAI PNG's asset chunks. */
   assets?: CharxAssetFile[];
   /** The embedded files the card declares that are not among `assets`, by why; absent when none were. */
   skipped?: SkippedAssets;
@@ -103,10 +103,10 @@ function declaredPngAssets(raw: unknown): DeclaredPngAsset[] {
 const SNIFF_BASE64_CHARS = Math.ceil(MEDIA_SNIFF_BYTES / 3) * 4;
 
 /**
- * The pictures and music a PNG card carries beside itself, in card order, under
- * the charx parse budget. What each is comes from its first bytes, decoded off
- * the front of its chunk, so a chunk that is neither (a voice model, a font) is
- * passed over without paying for the rest of it. Each chunk's decoded size is
+ * The pictures, music and web fonts a PNG card carries beside itself, in card
+ * order, under the charx parse budget. What each is comes from its first bytes,
+ * decoded off the front of its chunk, so a chunk that is none of them (a voice
+ * model) is passed over without paying for the rest of it. Each chunk's decoded size is
  * known from its length, so the budget is checked before the decode too; like a
  * charx pass, reading stops at the first asset over a cap.
  */
@@ -135,7 +135,8 @@ function pngAssets(
       skipped.missing += 1;
       continue;
     }
-    if (!sniffMedia(Buffer.from(textOf(base64.subarray(0, SNIFF_BASE64_CHARS)), 'base64'))) {
+    const head = Buffer.from(textOf(base64.subarray(0, SNIFF_BASE64_CHARS)), 'base64');
+    if (!sniffMedia(head) && !sniffFont(head)) {
       skipped.unsupported += 1;
       continue;
     }

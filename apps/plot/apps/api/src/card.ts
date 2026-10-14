@@ -1,6 +1,5 @@
 import {
   backgroundHtmlOf,
-  backgroundWithoutStyles,
   coerceDisplayDepth,
   coerceNarrator,
   COMPONENT_CAPABILITIES,
@@ -17,6 +16,7 @@ import {
   MAX_CREATOR_CSS_LENGTH,
   MAX_DISPLAY_PATTERN_LENGTH,
   MAX_INTRO_LENGTH,
+  splitBackground,
   type ComponentCapability,
   type DisplayScript,
   type EmotionImage,
@@ -377,28 +377,18 @@ export const withoutMember = (customUi: PlotCustomUi, memberId: string): PlotCus
 };
 
 /**
- * The HTML a card draws behind the chat past its `<style>` elements, which the
- * import makes the work's background — or nothing, for none or one longer than
- * a plot carries.
- */
-function backgroundOfCard(card: NormalizedCard): string | undefined {
-  const html = backgroundHtmlOf(card.extensions);
-  const shown = html ? backgroundWithoutStyles(html) : '';
-  return shown && shown.length <= MAX_BACKGROUND_HTML_LENGTH ? shown : undefined;
-}
-
-/**
  * What the import lifts off a card onto the plot that wraps it. The stylesheet is
  * read straight off the card's RisuAI extension rather than carried on the card:
  * the extension already travels with it, so the card round-trips as it came. So
- * is the rest of its `backgroundHTML`, which becomes the work's background.
+ * is the rest of its `backgroundHTML`, which becomes the work's background — all
+ * of it, `<style>` included, where the card's scripts or its CBS would change
+ * the styles, as RisuAI's background pass does (`splitBackground`).
  * `memberId` is the member the card becomes, whose own its display scripts are
  * (`DisplayScript.memberId`): in a work of several they dress its messages and
  * the ones no member speaks.
  */
 export function customUiOfCard(card: NormalizedCard, memberId: string): PlotCustomUi {
-  const css = creatorCssFromExtensions(card.extensions);
-  const backgroundHtml = backgroundOfCard(card);
+  const { css, background: backgroundHtml } = splitBackground(backgroundHtmlOf(card.extensions), card.displayScripts);
   return {
     ...(card.displayScripts?.length
       ? { displayScripts: card.displayScripts.map((script) => ({ ...script, memberId })) }

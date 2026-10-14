@@ -48,5 +48,8 @@ export {
   isUtilityBot,
   MAX_BACKGROUND_HTML_LENGTH,
   MAX_CREATOR_CSS_LENGTH,
+  splitBackground,
+  stylesAreScripted,
+  type SplitBackground,
 } from './card/risu.js';
 export { displayScriptsWithRegexScripts } from './card/sillyTavern.js';

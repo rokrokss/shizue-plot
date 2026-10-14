@@ -362,6 +362,33 @@ export function linearCaptures(
 }
 
 /**
+ * Whether a display script's pattern matches some of `text` — a match of at
+ * least one character, as an empty one (`\s*` between two letters) is no
+ * placeholder — decided by the linear engine as `linearCaptures` is: a card's
+ * pattern never runs on the server's own. Undefined for a pattern it cannot
+ * compile (a lookaround or a backreference, which RE2 has no linear way to
+ * run), which says nothing either way.
+ */
+export function linearMatches(pattern: string, flags: string, text: string): boolean | undefined {
+  let compiled: RE2JS;
+  try {
+    compiled = RE2JS.compile(
+      pattern,
+      (flags.includes('i') ? RE2JS.CASE_INSENSITIVE : 0) |
+        (flags.includes('m') ? RE2JS.MULTILINE : 0) |
+        (flags.includes('s') ? RE2JS.DOTALL : 0),
+    );
+  } catch {
+    return undefined;
+  }
+  const matcher = compiled.matcher(text);
+  for (let tries = 0; tries < 1000 && matcher.find(); tries += 1) {
+    if (matcher.end() > matcher.start()) return true;
+  }
+  return false;
+}
+
+/**
  * The values a template's slot is fetched with: its drawn words, the captures
  * it reads (`captured`, by capture number), and every item of a list in
  * `lists` that holds one of those already — once, as the model was told to
@@ -421,6 +448,21 @@ export function localizedTemplateName(template: UrlTemplate): string {
 }
 
 /* ---------------------------------------------------------- stylesheets */
+
+/**
+ * RisuAI's asset addresses, `{{raw::name}}` and `{{path::name}}` — what a
+ * RisuAI card writes a picture or a font of its own into a stylesheet with
+ * (`url({{raw::bg.png}})`), and what a charx export here writes for a plot
+ * asset (`toRisuAssetRefs`). The one CBS a stylesheet can hold without being a
+ * template: what it reads is the work's own assets rather than anything a chat
+ * changes, so the import writes each as the asset's address once the assets
+ * are stored (`rewriteAssetAddresses`) — a stylesheet is drawn as written.
+ */
+export const ASSET_ADDRESS_MACRO = /\{\{\s*(?:raw|path)::([^{}]*?)\s*\}\}/gi;
+
+/** A text with each asset address `resolve` knows written as what it answers; one it does not know is left as it is. */
+export const rewriteAssetAddresses = (text: string, resolve: (name: string) => string | undefined): string =>
+  text.replace(ASSET_ADDRESS_MACRO, (macro, name: string) => resolve(name) ?? macro);
 
 const CSS_COMMENT = /\/\*[\s\S]*?\*\//g;
 const FONT_FACE = /@font-face\s*\{[^{}]*\}/gi;

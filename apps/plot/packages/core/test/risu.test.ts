@@ -6,7 +6,10 @@ import {
   backgroundWithoutStyles,
   cardLicense,
   creatorCssFromExtensions,
+  MAX_BACKGROUND_HTML_LENGTH,
   MAX_CREATOR_CSS_LENGTH,
+  splitBackground,
+  stylesAreScripted,
 } from '../src/card/risu.js';
 import type { DisplayScript } from '../src/types.js';
 
@@ -393,6 +396,46 @@ describe('creator stylesheet', () => {
     expect(creatorCssFromExtensions({})).toBeUndefined();
     expect(creatorCssFromExtensions({ risuai: null })).toBeUndefined();
     expect(css(`<style>${'a'.repeat(MAX_CREATOR_CSS_LENGTH + 1)}</style>`)).toBeUndefined();
+  });
+});
+
+describe('the background split', () => {
+  const script = (pattern: string, enabled = true): DisplayScript => ({ in: pattern, out: 'x', enabled, order: 0 });
+  // Renka's and Alice Rawcliffe's: placeholders in the sheet that their scripts fill.
+  const renka = '<style>\n.asset-table { border: 3px solid {border}; max-width: {limit}; }\n.smaller { font-size: 15px; }\n</style>';
+
+  it('lifts a sheet nothing changes into the stylesheet, as before', () => {
+    const html = '<style>.a{color:red}</style>\n<div class="bg"></div>';
+    expect(splitBackground(html, [script('{border}')])).toEqual({ css: '.a{color:red}', background: '<div class="bg"></div>' });
+    expect(splitBackground('<style>.a{}</style>')).toEqual({ css: '.a{}' });
+    expect(splitBackground(undefined)).toEqual({});
+    expect(splitBackground('   ')).toEqual({});
+  });
+
+  it('keeps a sheet its scripts fill in the background, styles and all, where the same scripts run over it', () => {
+    const html = `${renka}\n<div class="bg"></div>`;
+    const scripts = [script('\\s*(<img=\\".*?\\">)\\s*'), script('{border}'), script('{limit}')];
+    expect(stylesAreScripted(html, scripts)).toBe(true);
+    expect(splitBackground(html, scripts)).toEqual({ background: html });
+    // A script that is switched off, or matches nothing in the styles, fills nothing.
+    expect(stylesAreScripted(html, [script('{border}', false)])).toBe(false);
+    expect(stylesAreScripted(`${renka}<div>{bord}</div>`, [script('<div>')])).toBe(false);
+    // An empty match is no placeholder.
+    expect(stylesAreScripted(renka, [script('q*')])).toBe(false);
+  });
+
+  it('keeps a sheet with CBS in it in the background, but not one that only names its assets', () => {
+    expect(splitBackground('<style>.a{color:{{getvar::tint}}}</style>')).toEqual({
+      background: '<style>.a{color:{{getvar::tint}}}</style>',
+    });
+    expect(splitBackground('<style>.a{background:url({{raw::bg.png}})}</style>')).toEqual({
+      css: '.a{background:url({{raw::bg.png}})}',
+    });
+  });
+
+  it('splits all the same a scripted background past the cap, keeping the rest of the sheet', () => {
+    const html = `${renka}<div>${'a'.repeat(MAX_BACKGROUND_HTML_LENGTH)}</div>`;
+    expect(splitBackground(html, [script('{border}')])).toEqual({ css: renka.replace(/<\/?style>/g, '').trim() });
   });
 });
 

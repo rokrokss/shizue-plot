@@ -20,6 +20,7 @@
  */
 
 import { displayScriptPatternError } from '../displayScript.js';
+import { ASSET_ADDRESS_MACRO, linearMatches } from './externalAssets.js';
 import { compiledScriptFlags, parseScriptFlag } from '../promptScripts.js';
 import { parseDefaultVariables, serializeDefaultVariables, type Variables } from '../variables.js';
 import type { DisplayScript, DisplayScriptAction } from '../types.js';
@@ -203,6 +204,61 @@ export function backgroundHtmlOf(extensions: Record<string, unknown>): string | 
  * which the creator may have edited since). Empty when it was all stylesheet.
  */
 export const backgroundWithoutStyles = (html: string): string => html.replace(STYLE_ELEMENT, '').trim();
+
+/**
+ * Whether a background's `<style>` elements are its background pass's rather
+ * than a stylesheet. RisuAI draws `backgroundHTML` whole through
+ * `ParseMarkdown(…, 'back')` — its CBS, then the `editdisplay` scripts —
+ * `<style>` and all, and a card may leave placeholders in its sheet for its own
+ * scripts to fill: Renka's `border: 3px solid {border}`, which a script turns
+ * into a colour. A stylesheet here is drawn as written, so a `<style>` either
+ * would change belongs where they run: one with CBS in it other than an asset
+ * address (`ASSET_ADDRESS_MACRO`, which the import resolves in a stylesheet once
+ * the assets are stored), or one an enabled script's pattern matches some of. The patterns run
+ * on the linear engine (`linearMatches`); one it cannot compile is passed over.
+ */
+export function stylesAreScripted(html: string, scripts: readonly DisplayScript[] | undefined): boolean {
+  const styles = [...html.matchAll(STYLE_ELEMENT)].map((element) => element[0]);
+  if (styles.some((style) => style.replace(ASSET_ADDRESS_MACRO, '').includes('{{'))) return true;
+  const live = (scripts ?? []).filter((script) => script.enabled && script.in);
+  return styles.some((style) => live.some((script) => linearMatches(script.in, script.flags ?? '', style) === true));
+}
+
+/** A RisuAI background as the import keeps it (`splitBackground`). */
+export interface SplitBackground {
+  /** The `<style>` bodies, the work's stylesheet. */
+  css?: string;
+  /** What is drawn behind the chat. */
+  background?: string;
+}
+
+/**
+ * A RisuAI background as the import keeps it: its `<style>` elements lifted
+ * into the stylesheet and the rest drawn behind the chat — or, where the styles
+ * are the background pass's (`stylesAreScripted`), the whole of it behind the
+ * chat, `<style>` and all, as RisuAI draws it, so the same scripts fill the
+ * same placeholders in the same order. All of them stay together then, so the
+ * sheet's rules keep their order. Each part is left out past its cap
+ * (`MAX_CREATOR_CSS_LENGTH`, `MAX_BACKGROUND_HTML_LENGTH`); a whole past the
+ * background's is split all the same, which keeps at least the sheet's other rules.
+ */
+export function splitBackground(html: string | undefined, scripts?: readonly DisplayScript[]): SplitBackground {
+  const whole = html?.trim() ?? '';
+  if (!whole) return {};
+  const styles = [...whole.matchAll(STYLE_ELEMENT)];
+  if (styles.length > 0 && whole.length <= MAX_BACKGROUND_HTML_LENGTH && stylesAreScripted(whole, scripts)) {
+    return { background: whole };
+  }
+  const css = styles
+    .map((element) => element[1]!.trim())
+    .filter((body) => body.length > 0)
+    .join('\n\n');
+  const shown = backgroundWithoutStyles(whole);
+  return {
+    ...(css && css.length <= MAX_CREATOR_CSS_LENGTH ? { css } : {}),
+    ...(shown && shown.length <= MAX_BACKGROUND_HTML_LENGTH ? { background: shown } : {}),
+  };
+}
 
 /**
  * The license a RisuAI card declares in `extensions.risuai.license` — `CC BY-NC 4.0`,

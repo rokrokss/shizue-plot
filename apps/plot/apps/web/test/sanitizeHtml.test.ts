@@ -226,8 +226,9 @@ describe('css', () => {
     );
   });
 
-  it('drops a stylesheet it cannot parse rather than passing it through', () => {
-    expect(sanitizeCustomHtml('<style>.a { color: red</style>')).not.toContain('color');
+  it('closes a rule the sheet leaves open at its end, as the browser does, and keeps nothing it could not read', () => {
+    expect(sanitizeCustomHtml('<style>.a { color: red</style>')).toContain('.shizue-msg .x-shizue-a {\n  color: red;\n}');
+    expect(sanitizeCustomHtml('<style>.a { width: calc(1px </style>')).toBe('');
   });
   it("keeps a RisuAI card's plot-wide sheet, losing only what it cannot scope", () => {
     // The shapes a real backgroundHTML is made of: a reset, a universal child
@@ -295,11 +296,65 @@ describe('css property and function allowlists', () => {
     for (const declaration of [
       '-moz-binding:url(/x.xml#y)',
       'behavior:url(/x.htc)',
-      'mix-blend-mode:difference',
       '-webkit-user-modify:read-write',
-      'backdrop-filter:blur(2px)',
+      'user-modify:read-write',
+      '-webkit-box-reflect:below',
+      'all:initial',
     ]) {
       expectClean(`<style>.a{${declaration}}</style>`, declaration.split(':')[0]!);
+    }
+  });
+
+  it('keeps the compositing, filters, shapes and 3-D of a RisuAI card, which only draw', () => {
+    const declarations = [
+      // Ivy, The Vampire Maid's portrait: layers multiplied and screened back together.
+      'mix-blend-mode: multiply',
+      'background-blend-mode: screen',
+      'isolation: isolate',
+      'filter: contrast(1.2) grayscale(0.3) drop-shadow(0 0 4px rgba(0,0,0,.5))',
+      'backdrop-filter: blur(5px) saturate(1.4)',
+      'clip-path: polygon(50% 0, 100% 100%, 0 100%)',
+      'clip-path: inset(0 round 12px)',
+      'mask-image: linear-gradient(#000, transparent)',
+      'perspective: 600px',
+      'transform-style: preserve-3d',
+      'backface-visibility: hidden',
+      'cursor: pointer',
+      'pointer-events: none',
+      'user-select: none',
+      'outline: 1px dashed #c0aa83',
+      'grid-template-columns: repeat(auto-fill, minmax(120px, 1fr))',
+      'writing-mode: vertical-rl',
+      'appearance: none',
+    ];
+    const output = sanitizeCustomHtml(`<style>.a{${declarations.join(';')}}</style>`);
+    for (const kept of declarations) expect(output).toContain(kept);
+  });
+
+  it('reads a -webkit- property as the standard one it spells, renames and all', () => {
+    const output = sanitizeCustomHtml(
+      '<style>@keyframes float{to{opacity:1}}.a{-webkit-backdrop-filter:blur(2px);-webkit-mask-image:linear-gradient(#000,transparent);' +
+        '-webkit-text-fill-color:transparent;-webkit-animation:float 10s ease-in-out infinite}</style>',
+    );
+    expect(output).toContain('-webkit-backdrop-filter: blur(2px)');
+    expect(output).toContain('-webkit-mask-image: linear-gradient(#000,transparent)');
+    expect(output).toContain('-webkit-text-fill-color: transparent');
+    // The card's own keyframes, never the page's.
+    expect(output).toContain('-webkit-animation: x-shizue-float 10s ease-in-out infinite');
+    expectClean('<style>.a{-webkit-position:sticky}</style>', 'sticky');
+  });
+
+  it('refuses a url() where it would name an SVG element or draw the pointer, whatever its origin', () => {
+    for (const declaration of [
+      'filter:url(#blur)',
+      'backdrop-filter:url(/api/plots/x/assets/f.svg#f)',
+      'clip-path:url(#clip)',
+      'mask:url(/api/plots/x/assets/m.svg#m)',
+      '-webkit-mask-image:url(/api/plots/x/assets/m.png)',
+      'cursor:url(/api/plots/x/assets/c.png), auto',
+    ]) {
+      expectClean(`<style>.a{${declaration}}</style>`, declaration.split(':')[0]!);
+      expectClean(`<div style="${declaration}">x</div>`, declaration.split(':')[0]!);
     }
   });
 
@@ -742,10 +797,49 @@ describe('a long stylesheet, parsed a top-level block at a time', () => {
     expect(output).toMatch(/color: red;\n\}\n\n@media/);
   });
 
-  it('still drops a sheet the parser refuses anywhere in it', () => {
-    expect(sanitizeCustomHtml('<style>.a { color: red } } .b { color: blue }</style>')).toBe('');
-    expect(sanitizeCustomHtml('<style>.a { color: red } /* never closed .b { color: blue }</style>')).toBe('');
-    expect(sanitizeCustomHtml('<style>.a { color: red } .b { color: blue</style>')).toBe('');
+  // Until 2026-10-15 any one of these dropped the whole sheet. Now each costs what
+  // the browser would drop for it, and nothing else.
+  it('drops only the rule or the declaration the parser refuses, as the browser does', () => {
+    const red = '.shizue-msg .x-shizue-a {\n  color: red;\n}';
+    // A stray `}` is read into the next rule's selector, which goes.
+    const stray = sanitizeCustomHtml('<style>.a { color: red } } .b { color: blue }</style>');
+    expect(stray).toContain(red);
+    expect(stray).not.toContain('blue');
+    // A comment left open takes the rest of the sheet.
+    const comment = sanitizeCustomHtml('<style>.a { color: red } /* never closed .b { color: blue }</style>');
+    expect(comment).toContain(red);
+    expect(comment).not.toContain('blue');
+    // The sheet's end closes the block it left open.
+    expect(sanitizeCustomHtml('<style>.a { color: red } .b { color: blue</style>')).toContain(
+      '.shizue-msg .x-shizue-b {\n  color: blue;\n}',
+    );
+    // Renka's and Alice Rawcliffe's sheet, placeholders left for their display
+    // scripts: the two declarations with a block in them go, the rule stands.
+    const renka = sanitizeCustomHtml(
+      '<style>.asset-table{border-collapse:separate;border:3px solid {border};border-radius:15px;max-width:{limit};width:98%}' +
+        '.smaller{font-size:15px}</style>',
+    );
+    expect(renka).toContain('border-collapse: separate;\n  border-radius: 15px;\n  width: 98%;');
+    expect(renka).not.toContain('{border}');
+    expect(renka).not.toContain('{limit}');
+    expect(renka).toContain('.shizue-msg .x-shizue-smaller {\n  font-size: 15px;\n}');
+    // Inside a conditional group, and in a `style` attribute, the same.
+    const media = sanitizeCustomHtml('<style>@media (max-width: 600px) { .a { border: {b}; color: red } .c { color: green } }</style>');
+    expect(media).toContain('color: red');
+    expect(media).toContain('color: green');
+    expect(media).not.toContain('{b}');
+    const inline = sanitizeCustomHtml('<div style="border: 1px solid {border}; color: red; width: calc(1px">x</div>');
+    expect(inline).toContain('style="color: red"');
+    // A `<` costs its own rule, no longer the sheet.
+    const angle = sanitizeCustomHtml('<style>.a::after { content: "<" } .b { color: blue }</style>');
+    expect(angle).not.toContain('<"');
+    expect(angle).toContain('color: blue');
+  });
+
+  it('drops a value that leaves a bracket or a string open, which would swallow the rules after it', () => {
+    const output = sanitizeCustomHtml('<style>.a { width: calc(1px } .b { color: blue }</style>');
+    expect(output).not.toContain('calc(1px');
+    expect(output).toContain('.shizue-msg .x-shizue-b {\n  color: blue;\n}');
   });
 
   it('keeps a quarter-megabyte sheet whole, every rule of it', () => {

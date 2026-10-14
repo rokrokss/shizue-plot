@@ -42,13 +42,7 @@ import {
   type CharxAssetFile,
   type CharxContents,
 } from './charx.js';
-import {
-  backgroundHtmlOf,
-  backgroundWithoutStyles,
-  creatorCssFromExtensions,
-  displayScriptsFromExtensions,
-  MAX_BACKGROUND_HTML_LENGTH,
-} from './risu.js';
+import { backgroundHtmlOf, displayScriptsFromExtensions, splitBackground } from './risu.js';
 import { readRisumMain, rpackDecode } from './risum.js';
 
 /** A file this reader cannot take as a RisuAI module. */
@@ -336,20 +330,19 @@ function moduleOfJson(json: Json): ParsedRisuModule {
  * rules for the same parts of a card: its `editdisplay` regex as display scripts
  * in the sequence RisuAI runs them (`displayScriptsFromExtensions` — a pattern
  * this build will not run comes in switched off), and its background embedding
- * split as a card's `backgroundHTML` is, the `<style>` elements the stylesheet
- * and the rest the background — each left out past the plot's cap, as a card's
- * is. The lore, the regex and the triggers are kept whole.
+ * split as a card's `backgroundHTML` is (`splitBackground`, by the module's own
+ * scripts): the `<style>` elements the stylesheet and the rest the background,
+ * or all of it the background where its scripts or its CBS would change the
+ * styles — each left out past the plot's cap, as a card's is. The lore, the
+ * regex and the triggers are kept whole.
  */
 export function plotModuleOf(
   parsed: Omit<ParsedRisuModule, 'assets'>,
   record: Pick<PlotModule, 'id' | 'name' | 'description' | 'lorebook' | 'assets' | 'importedFrom'>,
 ): PlotModule {
-  const extensions = {
-    risuai: { customScripts: parsed.regex, ...(parsed.backgroundEmbedding ? { backgroundHTML: parsed.backgroundEmbedding } : {}) },
-  };
+  const extensions = { risuai: { customScripts: parsed.regex } };
   const displayScripts = displayScriptsFromExtensions(extensions);
-  const css = creatorCssFromExtensions(extensions);
-  const shown = parsed.backgroundEmbedding ? backgroundWithoutStyles(parsed.backgroundEmbedding) : '';
+  const { css, background: shown } = splitBackground(parsed.backgroundEmbedding, displayScripts);
   return {
     id: record.id,
     name: record.name,
@@ -361,7 +354,7 @@ export function plotModuleOf(
     ...(parsed.namespace ? { namespace: parsed.namespace } : {}),
     ...(displayScripts ? { displayScripts } : {}),
     ...(css ? { css } : {}),
-    ...(shown && shown.length <= MAX_BACKGROUND_HTML_LENGTH ? { backgroundHtml: shown } : {}),
+    ...(shown ? { backgroundHtml: shown } : {}),
     assets: record.assets,
     importedFrom: record.importedFrom,
   };

@@ -1,6 +1,6 @@
 import { Unzip, UnzipInflate, type UnzipFile } from 'fflate';
 import { MAX_CARD_IMPORT_BYTES } from '../types.js';
-import { AUDIO_EXTENSIONS, IMAGE_EXTENSIONS } from './media.js';
+import { AUDIO_EXTENSIONS, FONT_EXTENSIONS, IMAGE_EXTENSIONS } from './media.js';
 import { CardParseError } from './normalize.js';
 import { readRisum, type RisuModuleScripts } from './risum.js';
 
@@ -37,7 +37,7 @@ const PUSH_CHUNK_BYTES = 16 * 1024;
  * allowed to fill a plot.
  */
 export const MAX_ASSETS = 1000;
-/** Pictures and music become the plot's assets; the declared type is not restricted. */
+/** Pictures, music and web fonts become the plot's assets; the declared type is not restricted. */
 export { IMAGE_EXTENSIONS };
 
 export function isZip(bytes: Uint8Array): boolean {
@@ -83,7 +83,7 @@ interface CharxAsset {
 }
 
 /**
- * An embedded picture or piece of music, ready to be sniffed, slugged and stored
+ * An embedded picture, piece of music or web font, ready to be sniffed, slugged and stored
  * by the caller (`sniffMedia`). A RisuAI PNG card's asset chunks come out in the
  * same shape.
  */
@@ -107,7 +107,7 @@ export interface CharxAssetFile {
 /**
  * The embedded files a card declares that a read did not bring back, by why —
  * what an import tells its creator it left behind (`ParsedCard.skipped`).
- * Pictures and music only become assets, so a declared video, font or model is
+ * Pictures, music and web fonts only become assets, so a declared video or model is
  * `unsupported`; one the file does not hold is `missing` (the card's own fault —
  * RisuAI refuses such a card); one past a parse cap is `overBudget`.
  */
@@ -125,7 +125,7 @@ export interface CharxContents {
   /** The scripts RisuAI's export moved out of `card.json`, when the archive has a readable module. */
   module?: RisuModuleScripts;
   iconBuffer?: Uint8Array;
-  /** Embedded pictures and music other than the main icon, in card order. */
+  /** Embedded pictures, music and web fonts other than the main icon, in card order. */
   assets: CharxAssetFile[];
   /** The declared embedded files not among `assets`, by why. */
   skipped: SkippedAssets;
@@ -251,11 +251,12 @@ const fileNameOf = (entry: string): string =>
   entry.slice(entry.lastIndexOf('/') + 1).replace(/\.[^.]*$/, '');
 
 /**
- * Whether an entry is worth inflating: a picture or music by its declared
- * extension or its uri's. Both are consulted — cards in the wild carry
+ * Whether an entry is worth inflating: a picture, music or a web font by its
+ * declared extension or its uri's. Both are consulted — cards in the wild carry
  * `ext: 'unknown'` — and the bytes are sniffed by the caller anyway.
  */
-const isMediaExtension = (ext: string): boolean => IMAGE_EXTENSIONS.has(ext) || AUDIO_EXTENSIONS.has(ext);
+const isMediaExtension = (ext: string): boolean =>
+  IMAGE_EXTENSIONS.has(ext) || AUDIO_EXTENSIONS.has(ext) || FONT_EXTENSIONS.has(ext);
 const looksLikeMedia = (asset: CharxAsset, entry: string): boolean =>
   isMediaExtension((asset.ext ?? '').toLowerCase()) || isMediaExtension(extensionOf(entry));
 
@@ -281,7 +282,7 @@ function readModule(bytes: Uint8Array): RisuModuleScripts | undefined {
 
 /**
  * Unpacks a .charx archive: `card.json`, RisuAI's `module.risum`, the main icon,
- * and the embedded pictures and music the card declares. Nothing else is ever
+ * and the embedded pictures, music and web fonts the card declares. Nothing else is ever
  * inflated.
  *
  * The card has to be read before the other names are known, and everything it

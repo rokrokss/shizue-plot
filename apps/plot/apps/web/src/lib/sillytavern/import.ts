@@ -9,9 +9,9 @@
  * World Info settings and its global prompt-only regex scripts on it, each
  * group plot's round settings and its members' 대화량, persona names and
  * descriptions, and the chats converted to our message shape in batches — with
- * each chat's variables, its author's note and the entries of the World Info
- * file bound to it. The scan's own inputs — `settings.json`, the rest
- * of the backup — are never part of a request.
+ * each chat's variables, its author's note and that note's settings, and the
+ * entries of the World Info file bound to it. The scan's own inputs —
+ * `settings.json`, the rest of the backup — are never part of a request.
  *
  * Every API call goes through the injected `fetch`, and the core converters come
  * in through `ImportDeps`, so the whole flow runs in a test without a server.
@@ -20,7 +20,8 @@ import type { DisplayScript, ImportedChatMessage, LoreEntry, NormalizedCard } fr
 import { DEFAULT_GROUP_SETTINGS, DEFAULT_TALKATIVENESS } from '@shizue/core/group';
 import {
   FileTooLargeError,
-  stNoteKeepsPlace,
+  noteSettingsOfSt,
+  stNoteInChat,
   type convertSillyTavernChat,
   type StCharacter,
   type StChatFile,
@@ -526,12 +527,12 @@ export interface StepWarning {
 
 /**
  * Something the reader should know about how a chat came over, though nothing
- * went wrong: its bound lorebook now reaches every chat on the plot, its
- * author's note goes where ours goes rather than where ST put it, or the note was
- * switched off in ST and so stayed behind.
+ * went wrong: its bound lorebook now reaches every chat on the plot, or its
+ * author's note sat before or after ST's story string, which has no match here,
+ * and so opens the chat history instead.
  */
 export interface StepNotice {
-  code: 'chat_world_attached' | 'note_moved' | 'note_off';
+  code: 'chat_world_attached' | 'note_moved';
   /** The lorebook it is about. */
   name?: string;
 }
@@ -1143,18 +1144,19 @@ async function runChat(
   result.dropped = { ...converted.skipped, swipes, swipesOverRows: fitted.dropped };
 
   // What the file keeps for the chat as a whole (`chat_metadata`): the lorebook
-  // bound to it goes onto the plot now; the variables and the author's note ride
-  // the completion, once the messages they belong to are in.
+  // bound to it goes onto the plot now; the variables and the author's note, with
+  // its settings, ride the completion, once the messages they belong to are in.
   const warnings: StepWarning[] = [];
   const notices: StepNotice[] = [];
   if (converted.worldName) await attachChatWorld(ctx, parent.plotId, converted.worldName, warnings, notices);
-  // Our chat note is put in every prompt; ST puts in nothing for an interval of 0,
-  // so a note switched off there stays behind rather than start speaking here.
+  // The note comes with its depth, interval and role as the chat's note settings —
+  // switched off in ST (interval 0) it comes over never put in. Only a place
+  // outside ST's chat is not carried, and the reader is told where it goes.
   // One past a turn's length (the API's cap) is cut to it — no note is that long.
   const note = converted.authorNote;
-  const noteText = note && note.interval > 0 ? note.text.slice(0, MAX_IMPORT_NOTE_LENGTH) : undefined;
-  if (note && noteText === undefined) notices.push({ code: 'note_off' });
-  else if (note && !stNoteKeepsPlace(note)) notices.push({ code: 'note_moved' });
+  const noteText = note?.text.slice(0, MAX_IMPORT_NOTE_LENGTH);
+  const noteSettings = note ? noteSettingsOfSt(note) : null;
+  if (note && !stNoteInChat(note)) notices.push({ code: 'note_moved' });
   if (warnings.length > 0) result.warnings = warnings;
   else delete result.warnings;
   if (notices.length > 0) result.notices = notices;
@@ -1210,6 +1212,7 @@ async function runChat(
       backfillMemory: ctx.options.memoryBackfill,
       ...(converted.variables ? { variables: converted.variables } : {}),
       ...(noteText ? { note: noteText } : {}),
+      ...(noteSettings ? { noteSettings } : {}),
     },
   );
   result.memoryBackfill = done.memoryBackfill;

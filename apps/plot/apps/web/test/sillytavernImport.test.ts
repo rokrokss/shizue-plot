@@ -5,7 +5,7 @@
  * is asked for in which order, what a second run leaves alone, and what a
  * cancel, a failure and a retry each leave behind.
  */
-import type { ImportedChatMessage } from '@shizue/core';
+import { AUTHOR_NOTE_MAX, type AuthorNoteSettings, type ImportedChatMessage } from '@shizue/core';
 import {
   convertSillyTavernChat,
   type StAuthorNote,
@@ -124,6 +124,7 @@ interface FakeChat {
   /** What the completion carried for the chat as a whole. */
   variables?: Record<string, string>;
   note?: string;
+  noteSettings?: AuthorNoteSettings;
 }
 
 /**
@@ -281,10 +282,16 @@ function fakeApi() {
     if (chatMatch) {
       const chat = chats.get(chatMatch[1]!)!;
       if (chatMatch[2]) {
-        const done = read() as { backfillMemory?: boolean; variables?: Record<string, string>; note?: string };
+        const done = read() as {
+          backfillMemory?: boolean;
+          variables?: Record<string, string>;
+          note?: string;
+          noteSettings?: AuthorNoteSettings;
+        };
         chat.importing = false;
         if (done.variables) chat.variables = done.variables;
         if (done.note !== undefined) chat.note = done.note;
+        if (done.noteSettings) chat.noteSettings = done.noteSettings;
         return json(200, { chat: { id: chat.id }, memoryBackfill: done.backfillMemory ? 'queued' : 'not_needed' });
       }
       chat.messages.push(...(read()['messages'] as ImportedChatMessage[]));
@@ -1141,7 +1148,7 @@ describe("runImport - how SillyTavern ran a group's turns", () => {
 describe('a chat’s own state', () => {
   const placed: StAuthorNote = { text: '비가 온다.', interval: 1, position: 1, depth: 4, role: 0 };
 
-  it('carries the variables and the author’s note on the completion', async () => {
+  it('carries the variables and the author’s note, with its settings, on the completion', async () => {
     const api = fakeApi();
     const manifest = library({
       characters: [
@@ -1152,8 +1159,9 @@ describe('a chat’s own state', () => {
               droppedVariables: 2,
               authorNote: placed,
             }),
-            chatFile('chats/A/moved.jsonl', { authorNote: { ...placed, depth: 6 } }),
+            chatFile('chats/A/deeper.jsonl', { authorNote: { ...placed, depth: 6, role: 2 } }),
             chatFile('chats/A/off.jsonl', { authorNote: { ...placed, interval: 0 } }),
+            chatFile('chats/A/moved.jsonl', { authorNote: { ...placed, position: 0, interval: 3 } }),
             chatFile('chats/A/plain.jsonl', {}),
           ],
         }),
@@ -1162,23 +1170,32 @@ describe('a chat’s own state', () => {
     const { results } = await runAll(api, manifest);
     const chat = (path: string) => [...api.chats.values()].find((each) => each.sha256 === sha(path))!;
 
+    // ST's defaults are ours: the note comes with no settings.
     const kept = chat('chats/A/kept.jsonl');
     expect(kept.variables).toEqual({ hp: '3', ['__proto__']: 'a name' });
     expect(Object.keys(kept.variables!)).toContain('__proto__');
     expect(kept.note).toBe('비가 온다.');
+    expect(kept.noteSettings).toBeUndefined();
     expect(results['chat:chats/A/kept.jsonl']!.dropped!.variables).toBe(2);
     expect(results['chat:chats/A/kept.jsonl']!.notices).toBeUndefined();
 
-    // Placed elsewhere in ST: the note comes, and the reader is told where it goes now.
-    expect(chat('chats/A/moved.jsonl').note).toBe('비가 온다.');
+    // In the chat at another depth, as another role: carried as it was, nothing to tell.
+    expect(chat('chats/A/deeper.jsonl')).toMatchObject({ note: '비가 온다.', noteSettings: { depth: 6, role: 'assistant' } });
+    expect(results['chat:chats/A/deeper.jsonl']!.notices).toBeUndefined();
+    // Switched off in ST: it comes, never put in.
+    expect(chat('chats/A/off.jsonl')).toMatchObject({ note: '비가 온다.', noteSettings: { frequency: 0 } });
+    expect(results['chat:chats/A/off.jsonl']!.notices).toBeUndefined();
+    // Before or after the story string: it opens the history, and the reader is told.
+    expect(chat('chats/A/moved.jsonl')).toMatchObject({
+      note: '비가 온다.',
+      noteSettings: { depth: AUTHOR_NOTE_MAX, frequency: 3 },
+    });
     expect(results['chat:chats/A/moved.jsonl']!.notices).toEqual([{ code: 'note_moved' }]);
-    // Switched off in ST: it stays behind, and the reader is told.
-    expect(chat('chats/A/off.jsonl').note).toBeUndefined();
-    expect(results['chat:chats/A/off.jsonl']!.notices).toEqual([{ code: 'note_off' }]);
 
     const plain = chat('chats/A/plain.jsonl');
     expect(plain.variables).toBeUndefined();
     expect(plain.note).toBeUndefined();
+    expect(plain.noteSettings).toBeUndefined();
     expect(Object.values(results).every((result) => result.status === 'done')).toBe(true);
   });
 

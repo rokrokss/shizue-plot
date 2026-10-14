@@ -13,7 +13,9 @@ import {
   guardedGet,
   httpsTransport,
   isPublicAddress,
+  PinnedAgent,
   pinnedLookup,
+  pooledTransport,
   SCRIPT_FETCH_HEADERS,
   type HopResponse,
   type PinnedRequest,
@@ -195,6 +197,38 @@ describe('the guarded GET', () => {
     // A TLS ClientHello (handshake record) whose SNI is the name, not the address.
     expect(bytes[0]).toBe(0x16);
     expect(bytes.includes(Buffer.from('pinned.test'))).toBe(true);
+  });
+
+  it('pins a kept-open connection the same way, and pools it by the addresses it was vetted to', async () => {
+    const hello = new Promise<{ remote: string; bytes: Buffer }>((resolve) => {
+      const server = createServer((socket) => {
+        socket.once('data', (bytes) => {
+          resolve({ remote: socket.remoteAddress ?? '', bytes });
+          socket.destroy();
+          server.close();
+        });
+      });
+      server.listen(0, '127.0.0.1', () => {
+        const { port } = server.address() as AddressInfo;
+        void pooledTransport(new PinnedAgent({ keepAlive: true }))({
+          url: new URL(`https://pinned.test:${port}/x`),
+          addresses: [{ address: '127.0.0.1', family: 4 }],
+          signal: AbortSignal.timeout(5_000),
+        }).catch(() => undefined);
+      });
+    });
+    const { remote, bytes } = await hello;
+    expect(remote).toBe('127.0.0.1');
+    expect(bytes[0]).toBe(0x16);
+    expect(bytes.includes(Buffer.from('pinned.test'))).toBe(true);
+
+    // A socket is handed only to a request vetted to the very same addresses.
+    const agent = new PinnedAgent({ keepAlive: true });
+    const name = (pinnedTo: string): string =>
+      agent.getName({ host: 'fonts.test', port: 443, servername: 'fonts.test', pinnedTo } as Parameters<PinnedAgent['getName']>[0]);
+    expect(name('4/93.184.215.14')).toBe(name('4/93.184.215.14'));
+    expect(name('4/93.184.215.14')).not.toBe(name('4/93.184.215.15'));
+    agent.destroy();
   });
 
   it('follows redirects by hand, every hop vetted again: https, a public address, and never home', async () => {

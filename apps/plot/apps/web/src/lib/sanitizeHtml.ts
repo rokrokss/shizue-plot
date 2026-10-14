@@ -12,7 +12,9 @@
  *      declaration passed through a property and function allowlist, every
  *      at-rule that cannot be scoped dropped. The two page-wide names a sheet can
  *      declare — an `@keyframes` animation and an `@font-face` family — are
- *      prefixed instead, and every reference to them rewritten to match.
+ *      prefixed instead, and every reference to them rewritten to match. A rule
+ *      or a declaration the parser refuses is dropped on its own, as the browser
+ *      drops it, rather than the whole sheet (`repairPiece`).
  *   2. DOMPurify against a tag/attribute whitelist — no script, no event handler,
  *      no framed or form element, no input but a checkbox or a radio, no
  *      `javascript:` / `data:` URL.
@@ -232,8 +234,10 @@ const CSS_COMMENT = /\/\*[\s\S]*?\*\//g;
 /**
  * The declarations a message may carry: visual properties whose worst outcome is
  * an ugly message. Default-deny, because the interesting attacks are always in
- * the property nobody thought about — `-moz-binding` ran script, `mix-blend-mode`
- * read pixels back, `user-modify` made the page editable.
+ * the property nobody thought about — `-moz-binding` ran script, `user-modify`
+ * made the page editable, `behavior` loaded code. Each family below says why it
+ * is only looks, and whatever value it takes still passes the function allowlist
+ * and the same-origin `url()` check (`isSafeDeclaration`).
  */
 const ALLOWED_PROPERTIES = new Set([
   'color', 'opacity', 'display', 'visibility', 'gap', 'row-gap', 'column-gap',
@@ -252,20 +256,77 @@ const ALLOWED_PROPERTIES = new Set([
   // Only ever naming the sheet's own `@keyframes` (`renameAnimations`), whose
   // frames are held to this same list.
   'animation',
+  // Compositing: how a box's pixels mix with what the message drew under it.
+  // Ivy, The Vampire Maid draws its portrait through `multiply` and `screen`
+  // layers of solid colour, which without them hide it. These were refused for
+  // the 2016 pixel theft, which timed a blend over a cross-origin frame from a
+  // script; a message has neither — no frame survives the whitelist, every
+  // picture is our own origin, and no script of the card's runs on the page —
+  // and everything they mix stays inside the box that clips the message.
+  'mix-blend-mode', 'isolation',
+  // A blur, a tint, frosted glass behind a panel: the box's own pixels, or the
+  // message's under it, filtered where they are drawn. Functions only — a
+  // `url()` here would name an SVG filter, and is refused (`NO_URL_PROPERTIES`).
+  'filter', 'backdrop-filter',
+  // A portrait cut to a circle or a polygon. Shapes only: a `url()` would name
+  // an SVG clip path (`NO_URL_PROPERTIES`). Clipping only ever hides.
+  'clip-path',
+  // Flip cards and tilted panels: where the 3-D transforms already allowed are
+  // seen from, and whether a turned face shows.
+  'perspective', 'perspective-origin', 'transform-style', 'backface-visibility', 'translate', 'rotate', 'scale',
+  // How the reader's pointer and selection meet the creator's own boxes: a
+  // pointer over a button, a decoration that lets clicks through. Inside the
+  // message only, and a background's boxes lie under the conversation, which
+  // takes the clicks. A cursor is a keyword — a picture of one (`url()`) could
+  // stand in for the real pointer, and is refused (`NO_URL_PROPERTIES`).
+  'cursor', 'pointer-events', 'user-select', 'touch-action',
+  // A checkbox toggle drawn as the card's own, columns of text, vertical
+  // Japanese, a box that is its own layout and paint island, scaled, or that
+  // asks for the dark form controls.
+  'appearance', 'columns', 'writing-mode', 'contain', 'zoom', 'color-scheme',
+  // The `-webkit-box` clamp a card cuts a long line to three with.
+  'line-clamp', 'box-orient',
+  // Its own scrolling boxes' bars and their behaviour.
+  'scroll-behavior', 'scrollbar-width', 'scrollbar-color', 'scrollbar-gutter',
 ]);
 
-/** Prefix families of the same. `border` covers `border-radius`, `border-color`, … */
+/**
+ * Prefix families of the same. `border` covers `border-radius`, `border-color`, …;
+ * `mask` the gradient fades a card softens a picture's edge with (`url()`s
+ * refused, `NO_URL_PROPERTIES`); `outline` a focus ring of the card's own;
+ * `column-` the rules between its columns; `overscroll-` its scrolling boxes'.
+ */
 const ALLOWED_PROPERTY_PREFIXES = [
   'background-', 'border', 'margin', 'padding', 'min-', 'max-',
   'font', 'text-', 'list-style', 'flex', 'grid', 'align-', 'justify-', 'place-',
   'overflow', 'transition-', 'animation-', 'inset-',
+  'mask', 'outline', 'column-', 'overscroll-',
 ];
+
+/**
+ * The properties a `url()` may not appear in at all, whatever origin it names:
+ * there it is not a picture but a reference to an SVG element (a filter, a clip
+ * path, a mask) or a picture drawn as the reader's own pointer.
+ */
+const NO_URL_PROPERTIES = /^(?:filter|backdrop-filter|clip-path|mask.*|cursor)$/;
+
+/**
+ * The name a declaration is judged by: its own, or — for a `-webkit-` one — the
+ * standard property it spells, so `-webkit-backdrop-filter` and
+ * `-webkit-mask-image` pass with theirs and `-webkit-user-modify` fails with
+ * `user-modify`. Every value rule that follows the name (positions, animation
+ * names, families, `url()`) follows it under its prefix too.
+ */
+const canonicalProperty = (name: string): string => (name.startsWith('-webkit-') ? name.slice(8) : name);
 
 /**
  * The functions a value may call. Everything that can name a resource is either
  * here and URL-checked (`url`) or absent — `image-set()`, `-webkit-image-set()`,
  * `cross-fade()`, `element()` and `paint()` all fetch or sample without ever
- * spelling `url(`, which is why this is an allowlist and not a denylist.
+ * spelling `url(`, which is why this is an allowlist and not a denylist. What
+ * the families above take beyond the transforms and gradients: filter effects,
+ * clip shapes, grid tracks and the browser's safe-area insets — numbers and
+ * colours in, pixels out.
  */
 const ALLOWED_FUNCTIONS = new Set([
   'url', 'var', 'calc', 'min', 'max', 'clamp',
@@ -276,6 +337,10 @@ const ALLOWED_FUNCTIONS = new Set([
   'rotate', 'rotatex', 'rotatey', 'rotatez', 'rotate3d',
   'scale', 'scalex', 'scaley', 'scale3d', 'skew', 'skewx', 'skewy',
   'matrix', 'matrix3d', 'perspective', 'cubic-bezier', 'steps',
+  'blur', 'brightness', 'contrast', 'drop-shadow', 'grayscale', 'hue-rotate', 'invert', 'opacity', 'saturate', 'sepia',
+  'inset', 'circle', 'ellipse', 'polygon', 'rect', 'xywh', 'path',
+  'repeat', 'minmax', 'fit-content',
+  'env',
 ]);
 
 /**
@@ -350,17 +415,23 @@ function scopeSelector(selector: string, scope: Scope): string | null {
  * Whether a declaration may stand, judged on its normalized text: an allowed
  * property, only allowed functions, and only same-origin `url()`.
  *
- * The two survivors of the allowlists still need a value check. `position` is
- * allowed but `sticky` is not (`ALLOWED_POSITIONS`). And `url()` is allowed but
- * only pointing at us, which is what an asset macro produces.
+ * The survivors of the allowlists still need a value check. `position` is
+ * allowed but `sticky` is not (`ALLOWED_POSITIONS`). `url()` is allowed but
+ * only pointing at us, which is what an asset macro produces — and nowhere at
+ * all in a property where it names something other than a picture
+ * (`NO_URL_PROPERTIES`). And a value that leaves a bracket or a string open is
+ * dropped as the browser would read it: open, it would swallow the declarations
+ * and rules after it (`isBalanced`).
  */
 function isSafeDeclaration(property: string, value: string): boolean {
-  const name = normalizeCss(property).trim().toLowerCase();
+  const name = canonicalProperty(normalizeCss(property).trim().toLowerCase());
   const text = normalizeCss(value).trim();
   if (!name || !text) return false;
   if (!isAllowedProperty(name)) return false;
+  if (!isBalanced(value)) return false;
   if (!callsOnly(text, ALLOWED_FUNCTIONS)) return false;
   if (name === 'position' && !ALLOWED_POSITIONS.has(text.toLowerCase())) return false;
+  if (NO_URL_PROPERTIES.test(name) && /url\(/i.test(text)) return false;
   return urlsAreOurs(text);
 }
 
@@ -537,7 +608,7 @@ function renameFamilies(text: string, original: string, names: string): string {
  */
 function rewriteDeclaration(property: string, value: string, scope: Scope): string | null {
   if (!isSafeDeclaration(property, value)) return null;
-  const name = normalizeCss(property).trim().toLowerCase();
+  const name = canonicalProperty(normalizeCss(property).trim().toLowerCase());
   if (name === 'animation' || name === 'animation-name') {
     if (/var\(/i.test(normalizeCss(value))) return null;
     return renameAnimations(normalizeCss(value).trim(), name === 'animation', scope.names);
@@ -670,9 +741,9 @@ function rewriteRules(rules: readonly CssAtRuleAST[], scope: Scope): CssAtRuleAS
  * Only where the parser itself would end a top-level node: comments and quoted
  * strings are passed over (a `{` in either is not a block), and an escaped
  * character is never a delimiter. The pieces put back together are the sheet,
- * and they parse to the same rules (`sanitizeHtml.test.ts`); what the parser
- * refuses in one piece it refused in the whole, and the sheet is dropped all the
- * same.
+ * and they parse to the same rules (`sanitizeHtml.test.ts`). A `}` with no
+ * block open is junk the browser reads into the next rule's selector, so it
+ * stays with that rule, which goes with it.
  */
 export function splitStylesheet(css: string): string[] {
   const pieces: string[] = [];
@@ -694,11 +765,11 @@ export function splitStylesheet(css: string): string[] {
     } else if (char === '{') {
       depth += 1;
     } else if (char === '}') {
+      if (depth === 0) continue;
       depth -= 1;
-      if (depth <= 0) {
+      if (depth === 0) {
         pieces.push(css.slice(start, i + 1));
         start = i + 1;
-        depth = 0;
       }
     } else if (char === ';' && depth === 0 && css.slice(start, i).trimStart().startsWith('@')) {
       // An at-statement ends here. A `;` anywhere else at the top level is junk the
@@ -711,39 +782,197 @@ export function splitStylesheet(css: string): string[] {
   return pieces.filter((piece) => piece.trim() !== '');
 }
 
+/** The bracket each opening one is closed by. */
+const CLOSER: Readonly<Record<string, string>> = { '{': '}', '(': ')', '[': ']' };
+
+/**
+ * Reads CSS as the browser's tokenizer nests it — strings, comments and escapes
+ * passed over, `{`, `(` and `[` each open until its own partner closes it —
+ * calling `visit` with each character outside all of them (the opening bracket
+ * itself included). Answers whether everything opened was closed by the end. A
+ * string ends at its quote or, unterminated, at the line's end, as a browser's
+ * does; a comment left open runs to the end, which leaves nothing open.
+ */
+function scanCss(text: string, visit?: (char: string, at: number) => boolean | void): boolean {
+  const open: string[] = [];
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i]!;
+    if (char === '\\') {
+      i += 1;
+      continue;
+    }
+    if (char === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      if (end === -1) return open.length === 0;
+      i = end + 1;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      let at = i + 1;
+      while (at < text.length && text[at] !== char && text[at] !== '\n') at += text[at] === '\\' ? 2 : 1;
+      if (at >= text.length || text[at] === '\n') return false;
+      i = at;
+      continue;
+    }
+    if (open.length === 0 && visit?.(char, i) === true) return true;
+    const closer = CLOSER[char];
+    if (closer) open.push(closer);
+    else if (char === open[open.length - 1]) open.pop();
+  }
+  return open.length === 0;
+}
+
+/** Whether a value closes every bracket and string it opens — one that does not runs on past its declaration. */
+const isBalanced = (value: string): boolean => scanCss(value);
+
+/** Where the text has `char` outside every bracket, string and comment. */
+function topLevel(text: string, chars: string): number[] {
+  const at: number[] = [];
+  scanCss(text, (char, index) => {
+    if (chars.includes(char)) at.push(index);
+  });
+  return at;
+}
+
+/** The text without its comments — strings and escapes kept as they are; a comment left open takes the rest. */
+function withoutComments(text: string): string {
+  let out = '';
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i]!;
+    if (char === '\\') {
+      out += text.slice(i, i + 2);
+      i += 1;
+    } else if (char === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      if (end === -1) break;
+      i = end + 1;
+    } else if (char === '"' || char === "'") {
+      let at = i + 1;
+      while (at < text.length && text[at] !== char && text[at] !== '\n') at += text[at] === '\\' ? 2 : 1;
+      out += text.slice(i, at + 1);
+      i = at;
+    } else {
+      out += char;
+    }
+  }
+  return out;
+}
+
+/**
+ * Where the block opened at `open` ends: the index of its own `}`, or the
+ * text's length when the text ends first — which, in the browser, closes it.
+ */
+function blockEnd(text: string, open: number): number {
+  let after = -1;
+  const closed = scanCss(text.slice(open), (_char, at) => {
+    if (at === 0) return false;
+    after = at;
+    return true;
+  });
+  if (after > 0) return open + after - 1;
+  return closed ? text.length - 1 : text.length;
+}
+
+/**
+ * The declarations of a block as the browser keeps them: each one up to a `;`
+ * outside brackets and strings, and of those only the ones that are a name, a
+ * colon and a value that closes what it opens. A declaration with a block in it
+ * — Renka's `border: 3px solid {border}`, a placeholder for its scripts — or no
+ * colon at all is dropped, and only it: the rest of the rule stands.
+ */
+function cleanDeclarations(body: string): string {
+  const kept: string[] = [];
+  let from = 0;
+  for (const end of [...topLevel(body, ';'), body.length]) {
+    const declaration = body.slice(from, end).trim();
+    from = end + 1;
+    if (!declaration || topLevel(declaration, '{}').length > 0 || !isBalanced(declaration)) continue;
+    const colon = topLevel(declaration, ':')[0];
+    if (colon === undefined || !/^-{0,2}[A-Za-z_\\][\w\\-]*$/.test(declaration.slice(0, colon).trim())) continue;
+    if (!declaration.slice(colon + 1).trim()) continue;
+    kept.push(declaration);
+  }
+  return kept.join(';\n');
+}
+
+/**
+ * One top-level piece the parser refused, put the way the browser reads it, or
+ * null where the browser drops all of it. A rule keeps its declarations but the
+ * broken ones (`cleanDeclarations`); a block the sheet leaves open closes at its
+ * end, as a browser closes it; `@media`, `@supports` and `@keyframes` keep every
+ * rule inside that reads; a selector with a stray brace or `;` in it, and
+ * anything with no block at all, go.
+ */
+function repairPiece(piece: string): string | null {
+  const text = withoutComments(piece);
+  const open = topLevel(text, '{')[0];
+  if (open === undefined) return null;
+  const prelude = text.slice(0, open).trim();
+  if (!prelude || /[{};]/.test(prelude)) return null;
+  const body = text.slice(open + 1, blockEnd(text, open));
+  const at = /^@(-?[\w-]+)/.exec(prelude)?.[1]?.toLowerCase();
+  if (at === undefined || at === 'font-face') return `${prelude} {\n${cleanDeclarations(body)}\n}`;
+  if (at === 'media' || at === 'supports' || at.endsWith('keyframes')) {
+    const inner = splitStylesheet(body)
+      .map((rule) => (parsesClean(rule) ? rule : repairPiece(rule)))
+      .filter((rule): rule is string => rule !== null && parsesClean(rule));
+    return `${prelude} {\n${inner.join('\n')}\n}`;
+  }
+  return null;
+}
+
+/** Whether the parser reads a piece without one complaint. */
+const parsesClean = (css: string): boolean => (parse(css, { silent: true }).stylesheet.parsingErrors?.length ?? 0) === 0;
+
 /**
  * Rewrites a `<style>` body, one top-level piece at a time (`splitStylesheet`).
- * Anything unparseable becomes no stylesheet at all. The pieces are joined as the
- * library joins the rules of one sheet, so the output is the one a whole parse
- * would have given.
+ * A piece the parser refuses is read again the way the browser would read it
+ * (`repairPiece`), and dropped only if that fails too: as in the browser, a broken
+ * declaration or rule costs itself and nothing after it — a RisuAI card's
+ * stylesheet with one placeholder in it was otherwise no stylesheet at all.
+ * Every piece kept was parsed without a complaint, and is rebuilt from that. The
+ * pieces are joined as the library joins the rules of one sheet, so the output
+ * is the one a whole parse would have given.
  */
 function rewriteStylesheet(css: string, scope: Scope): string {
-  try {
-    const parts: string[] = [];
-    for (const piece of splitStylesheet(css)) {
-      const ast = parse(piece, { silent: true });
-      if ((ast.stylesheet.parsingErrors?.length ?? 0) > 0) return '';
+  const parts: string[] = [];
+  for (const piece of splitStylesheet(css)) {
+    try {
+      let ast = parse(piece, { silent: true });
+      if ((ast.stylesheet.parsingErrors?.length ?? 0) > 0) {
+        const repaired = repairPiece(piece);
+        if (repaired === null) continue;
+        ast = parse(repaired, { silent: true });
+        if ((ast.stylesheet.parsingErrors?.length ?? 0) > 0) continue;
+      }
       const rules = rewriteRules(ast.stylesheet.rules, scope);
-      if (rules.length > 0) parts.push(stringify({ ...ast, stylesheet: { ...ast.stylesheet, rules } }));
+      if (rules.length === 0) continue;
+      const output = stringify({ ...ast, stylesheet: { ...ast.stylesheet, rules } });
+      // `<style>` is a raw-text element: a `<` in it would end the element early,
+      // and no legitimate declaration needs one. The piece goes, not the sheet.
+      if (!output.includes('<')) parts.push(output);
+    } catch {
+      // This piece only.
     }
-    if (parts.length === 0) return '';
-    const output = parts.join('\n\n');
-    // `<style>` is a raw-text element: a `<` in it would end the element early,
-    // and no legitimate declaration needs one.
-    return output.includes('<') ? '' : output;
-  } catch {
-    return '';
   }
+  return parts.join('\n\n');
 }
 
 /** The plain scope: every message's wrapper, and the namespace with no member in it. */
 const MESSAGE_SCOPE: Scope = { selector: `.${MESSAGE_SCOPE_CLASS}`, names: CLASS_PREFIX };
 
-/** The same declaration filter, applied to a `style="…"` attribute. */
+/**
+ * The same declaration filter, applied to a `style="…"` attribute — read, where
+ * the parser refuses it, the way the browser reads one: the broken declarations
+ * go and the rest stand (`cleanDeclarations`).
+ */
 function rewriteInlineStyle(css: string): string {
   try {
-    const ast = parse(`*{${css}}`, { silent: true });
-    if ((ast.stylesheet.parsingErrors?.length ?? 0) > 0) return '';
+    let ast = parse(`*{${css}}`, { silent: true });
+    if ((ast.stylesheet.parsingErrors?.length ?? 0) > 0) {
+      ast = parse(`*{${cleanDeclarations(withoutComments(css))}}`, { silent: true });
+      if ((ast.stylesheet.parsingErrors?.length ?? 0) > 0) return '';
+    }
     const rule = ast.stylesheet.rules[0];
     if (!rule || rule.type !== CssTypes.rule) return '';
     return rewriteDeclarations(rule.declarations as CssDeclarationAST[], MESSAGE_SCOPE)

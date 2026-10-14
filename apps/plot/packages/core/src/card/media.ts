@@ -30,6 +30,8 @@ export const MEDIA_SNIFF_BYTES = 64;
 export const IMAGE_EXTENSIONS: ReadonlySet<string> = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif']);
 /** The same for music. */
 export const AUDIO_EXTENSIONS: ReadonlySet<string> = new Set(['mp3', 'ogg', 'wav', 'flac', 'm4a']);
+/** The same for web fonts (`sniffFont`), which RisuAI's charx export files under `assets/<type>/fonts/`. */
+export const FONT_EXTENSIONS: ReadonlySet<string> = new Set(['woff2', 'woff', 'otf', 'ttf']);
 
 const at = (bytes: Uint8Array, signature: string, offset = 0): boolean =>
   bytes.length >= offset + signature.length &&
@@ -93,9 +95,11 @@ export interface FontType {
 }
 
 /**
- * The web font `bytes` are, or null. Apart from `sniffMedia` on purpose: a
- * font is nothing a card's own assets are read as — only a stylesheet the
- * import localized names one (`@font-face`), so only that path asks.
+ * The web font `bytes` are, or null. Apart from `sniffMedia` on purpose: a font
+ * is no picture or music a message draws, only what a stylesheet names
+ * (`@font-face`) — one the import localized, or one a card carries for its own
+ * sheet to reach as `{{raw::name}}`, as RisuAI's own charx export writes a
+ * card's fonts — so only those paths ask.
  */
 export function sniffFont(bytes: Uint8Array): FontType | null {
   if (at(bytes, 'wOF2')) return { ext: 'woff2', mime: 'font/woff2' };

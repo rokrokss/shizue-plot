@@ -4,6 +4,7 @@ import {
   exportCardCharx,
   exportCardPng,
   exportCardV3,
+  toRisuAssetRefs,
   type CharxExportAsset,
 } from '../src/card/export.js';
 import { assetResolver } from '../src/cbs.js';
@@ -751,12 +752,18 @@ describe('parseCard - charx', () => {
       expect(parseCard(risuCharx(noLore)).card.lorebook).toEqual(alone.lorebook);
     });
 
-    it('keeps a list card.json carries itself', () => {
+    it("takes the module's lists over the ones card.json carries, as RisuAI's charx import does", () => {
       const own = [{ comment: '', in: 'own', out: 'mine', type: 'editdisplay', ableFlag: false, flag: '' }];
-      const { card } = parseCard(risuCharx(moduleFile, { customScripts: own }));
+      const ownTriggers = [{ comment: 'own', type: 'manual', conditions: [], effect: [] }];
+      const { card } = parseCard(risuCharx(moduleFile, { customScripts: own, triggerscript: ownTriggers }));
 
-      expect(card.extensions['risuai']).toEqual({ customScripts: own, triggerscript: triggers });
-      expect(card.displayScripts!.map((script) => script.in)).toEqual(['own']);
+      expect(card.extensions['risuai']).toEqual({ customScripts: scripts, triggerscript: triggers });
+      expect(card.displayScripts!.map((script) => script.in)).toEqual(['\\*\\*(.+?)\\*\\*']);
+      // A list the module does not have is an empty one, whatever card.json says.
+      const regexOnly = buildRisum({ module: { name: 'm', description: '', id: 'id', regex: [] }, type: 'risuModule' });
+      const bare = parseCard(risuCharx(regexOnly, { customScripts: own, triggerscript: ownTriggers })).card;
+      expect(bare.extensions['risuai']).toEqual({ customScripts: [], triggerscript: [] });
+      expect(bare.displayScripts).toBeUndefined();
     });
 
     /** Opens an entry's deflate stream with a reserved block type, which no inflater accepts. */
@@ -1216,6 +1223,69 @@ describe('exportCardCharx', () => {
     expect(parsed.iconBuffer).toBeUndefined();
     expect(parsed.assets).toEqual([]);
     expect(parsed.card.firstMes).toBe('자리 있소?');
+  });
+
+  it('carries a web font the import fetched, which its own import takes back by the address it came from', () => {
+    const woff2 = new Uint8Array([0x77, 0x4f, 0x46, 0x32, 0, 1, 0, 0]);
+    const charx = exportCardCharx(card, [{ slug: 'nanum', name: 'https://fonts.test/nanum.woff2', ext: 'woff2', bytes: woff2 }]);
+    expect(declaredIn(charx)).toEqual([
+      { type: 'x-risu-asset', uri: 'embeded://assets/other/fonts/nanum.woff2', name: 'https://fonts.test/nanum.woff2', ext: 'woff2' },
+      { type: 'x-risu-asset', uri: 'embeded://assets/other/fonts/nanum.woff2', name: 'nanum', ext: 'woff2' },
+    ]);
+    expect(parseCard(charx).assets).toEqual([{ name: 'https://fonts.test/nanum.woff2', bytes: woff2, additional: true }]);
+  });
+});
+
+describe('toRisuAssetRefs', () => {
+  const plot = '0b6c5f6e-1d2a-4b3c-8d4e-5f6a7b8c9d0e';
+  const assets = [
+    { slug: 'smile', name: 'Smile' },
+    { slug: 'castle', name: null },
+    { slug: 'nanum', name: 'https://fonts.test/nanum.woff2' },
+    { slug: 'odd', name: 'a "quoted" name' },
+  ];
+
+  it('names each of the plot’s assets as RisuAI reaches a card’s own', () => {
+    const text = [
+      `<img src="/api/plots/${plot}/assets/smile">`,
+      `<div style="background:url('/api/plots/${plot}/assets/castle')"></div>`,
+      `@font-face{src:url(/api/plots/${plot}/assets/nanum) format('woff2')}`,
+      `<img src="/api/plots/${plot}/assets/odd">`,
+      `<img src="/api/plots/${plot}/assets/by-name/cdn.test/face/$1.png">`,
+      `<img src="/api/plots/${plot}/assets/gone">`,
+      `<img src="/api/plots/other-plot/assets/smile">`,
+    ].join('\n');
+    expect(toRisuAssetRefs(text, plot, assets).split('\n')).toEqual([
+      '<img src="{{raw::Smile}}">',
+      "<div style=\"background:url('{{raw::castle}}')\"></div>",
+      "@font-face{src:url({{raw::https://fonts.test/nanum.woff2}}) format('woff2')}",
+      // A name that would not read as one goes by its slug, which the charx declares too.
+      '<img src="{{raw::odd}}">',
+      // A template's slot is filled before the name is looked up.
+      '<img src="{{raw::https://cdn.test/face/$1.png}}">',
+      // Not one of the plot's assets, or not this plot's: left as written.
+      `<img src="/api/plots/${plot}/assets/gone">`,
+      '<img src="/api/plots/other-plot/assets/smile">',
+    ]);
+    // What our own import resolves them back to, by the names the charx declares.
+    const resolve = assetResolver(assets.map((asset) => ({ slug: `re-${asset.slug}`, name: asset.name ?? asset.slug })));
+    expect(resolve('https://fonts.test/nanum.woff2')).toBe('re-nanum');
+    expect(resolve('Smile')).toBe('re-smile');
+  });
+
+  it("writes the work's own background in place of the card's, or none", () => {
+    const stored = normalizeCard({
+      ...v3Card,
+      data: { ...v3Card.data, extensions: { risuai: { backgroundHTML: '<style>@import url(https://fonts.test/a.css);</style>' } } },
+    });
+    const exported = exportCardV3(stored, { backgroundHtml: '<style>\n.a{}\n</style>\n<div></div>' });
+    expect((exported.data.extensions['risuai'] as Record<string, unknown>)['backgroundHTML']).toBe(
+      '<style>\n.a{}\n</style>\n<div></div>',
+    );
+    expect(exportCardV3(stored, { backgroundHtml: '' }).data.extensions).not.toHaveProperty('risuai');
+    expect((exportCardV3(stored).data.extensions['risuai'] as Record<string, unknown>)['backgroundHTML']).toBe(
+      '<style>@import url(https://fonts.test/a.css);</style>',
+    );
   });
 });
 

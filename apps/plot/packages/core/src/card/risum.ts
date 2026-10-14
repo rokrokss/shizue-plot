@@ -100,24 +100,19 @@ export function readRisum(bytes: Uint8Array): RisuModuleScripts | undefined {
 }
 
 /**
- * Puts a module's scripts back on the card, as RisuAI's own import does. Only a
- * list card.json does not carry itself is filled in — a card that has one keeps
- * it — and on a copy: the input is left as it arrived.
+ * Puts a module's scripts back on the card, as RisuAI's own charx import does
+ * (`importCharacter`): the module's `regex` and `trigger` become the card's
+ * `customScripts` and `triggerscript` whatever card.json carries — a list the
+ * module does not have becomes an empty one — since RisuAI's export moved them
+ * there and its import reads them from nowhere else. On a copy: the input is
+ * left as it arrived.
  */
 export function cardWithRisuModule(raw: unknown, module: RisuModuleScripts): unknown {
   if (!isObject(raw) || !isObject(raw['data'])) return raw;
   const data = raw['data'];
   const extensions = isObject(data['extensions']) ? data['extensions'] : {};
   const risu = isObject(extensions['risuai']) ? { ...extensions['risuai'] } : {};
-
-  let filled = false;
-  if (module.regex && !Array.isArray(risu['customScripts'])) {
-    risu['customScripts'] = module.regex;
-    filled = true;
-  }
-  if (module.trigger && !Array.isArray(risu['triggerscript'])) {
-    risu['triggerscript'] = module.trigger;
-    filled = true;
-  }
-  return filled ? { ...raw, data: { ...data, extensions: { ...extensions, risuai: risu } } } : raw;
+  risu['customScripts'] = module.regex ?? [];
+  risu['triggerscript'] = module.trigger ?? [];
+  return { ...raw, data: { ...data, extensions: { ...extensions, risuai: risu } } };
 }

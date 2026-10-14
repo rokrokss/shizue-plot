@@ -9062,7 +9062,7 @@ describe('chat import', () => {
     expect(await db.select().from(jobs)).toHaveLength(1);
   });
 
-  it('lays the chat’s variables on every version of its opening and takes its note, at the completion', async () => {
+  it('lays the chat’s variables on every version of its opening and takes its note and its settings, at the completion', async () => {
     const cookie = await signUp('chat-import-state@example.com');
     const plot = await createPlot(cookie);
     const { chat } = await importChat(cookie, plot.id, [
@@ -9081,6 +9081,8 @@ describe('chat import', () => {
       { note: 3 },
       { note: 'a'.repeat(100_001) },
       { note: 'a\u0000b' },
+      { noteSettings: 'deep' },
+      { noteSettings: [4] },
     ]) {
       const res = await finish(body);
       expect(res.status, JSON.stringify(body)).toBe(400);
@@ -9089,9 +9091,20 @@ describe('chat import', () => {
     expect((await readJson(await request(cookie, `/api/chats/${chat.id}`))).chat.importing).toBe(true);
     expect((await rowsOf(chat.id)).every((row) => row.variableDelta === null)).toBe(true);
 
-    const done = await finish({ variables: { hp: '100', mood: '좋음', constructor: '7' }, note: '비가 온다.' });
+    const done = await finish({
+      variables: { hp: '100', mood: '좋음', constructor: '7' },
+      note: '비가 온다.',
+      noteSettings: { depth: 9999.4, frequency: 0, role: 'system', placement: 'before' },
+    });
     expect(done.status, await done.clone().text()).toBe(200);
-    expect((await readJson(done)).chat).toMatchObject({ importing: false, note: '비가 온다.' });
+    expect((await readJson(done)).chat).toMatchObject({
+      importing: false,
+      note: '비가 온다.',
+      noteSettings: { depth: 9999, frequency: 0, role: 'system' },
+    });
+    // Stored as the settings PATCH stores them: in range, defaults and unknown keys left out.
+    const [stored] = await db.select({ noteSettings: chats.noteSettings }).from(chats).where(eq(chats.id, chat.id));
+    expect(stored!.noteSettings).toEqual({ depth: 9999, frequency: 0 });
 
     // Every root — each swipe of the opening — carries them, and nothing else does.
     const rows = await rowsOf(chat.id);
@@ -9107,9 +9120,12 @@ describe('chat import', () => {
       { hp: '95', mood: '좋음', constructor: '7' },
     ]);
 
-    // Without either, the completion leaves the chat's note and the roots alone.
+    // Without any, the completion leaves the chat's note, its settings and the roots alone.
     const plain = await importChat(cookie, plot.id, [turn('assistant', ['인사'])], { sha256: hashOf('plain') });
-    expect((await readJson(await complete(cookie, plain.chat.id))).chat.note).toBe('');
+    expect((await readJson(await complete(cookie, plain.chat.id))).chat).toMatchObject({
+      note: '',
+      noteSettings: { depth: 4, frequency: 1, role: 'system' },
+    });
     expect((await rowsOf(plain.chat.id))[0]!.variableDelta).toBeNull();
   });
 
@@ -17119,6 +17135,138 @@ describe('what a card loads from other hosts, brought in at import', () => {
     // Someone else's private plot is not reached by name either.
     const stranger = await signUp('localize-stranger@example.com');
     expect((await request(stranger, `${base}/by-name/cdn.test/face/Happy.png`, 'GET', undefined, target)).status).toBe(404);
+  });
+
+  it('brings in a web font the lore imports, into the stylesheet, and leaves the lore as it was', async () => {
+    const { asked, remoteFetch } = remote();
+    const target = makeApp({ remoteFetch });
+    const cookie = await signUp('localize-lore@example.com');
+    const lore = "Status window, as HTML:\n<style>@import url('https://fonts.test/css?family=Nanum');\n.sw{font-family:'Nanum'}</style>";
+    const form = new FormData();
+    form.append(
+      'file',
+      new File(
+        [
+          JSON.stringify({
+            ...v2Card,
+            data: {
+              ...v2Card.data,
+              description: '@import url("https://fonts.test/sneaky.css");',
+              character_book: {
+                extensions: {},
+                entries: [
+                  {
+                    keys: ['상태창'],
+                    secondary_keys: [],
+                    selective: false,
+                    content: lore,
+                    extensions: {},
+                    enabled: true,
+                    insertion_order: 0,
+                    constant: true,
+                    case_sensitive: false,
+                    position: 'after_char',
+                  },
+                ],
+              },
+            },
+          }),
+        ],
+        'lore.json',
+        { type: 'application/json' },
+      ),
+    );
+    const res = await request(cookie, '/api/plots/import', 'POST', form, target);
+    expect(res.status, await res.clone().text()).toBe(201);
+    const plot = await readJson(res);
+    // The font's sheet, once, and its file; the description's import is no font's
+    // sheet, so nothing it names is fetched and nothing is said of it.
+    expect(plot.importWarnings).toEqual([]);
+    expect(asked.sort()).toEqual(['https://fonts.test/css?family=Nanum', 'https://fonts.test/nanum.woff2', 'https://fonts.test/sneaky.css']);
+    expect(plot.customUi.css).toContain('/* https://fonts.test/css?family=Nanum */');
+    expect(plot.customUi.css).toContain(`src: url(/api/plots/${plot.id}/assets/nanum) format('woff2')`);
+    // What the model reads is what the card wrote.
+    const [member] = await db.select({ card: characters.card }).from(characters).where(eq(characters.plotId, plot.id));
+    expect(member!.card.lorebook[0]!.content).toBe(lore);
+  });
+
+  it('keeps a background sheet its scripts fill in the background, where they run over it', async () => {
+    const cookie = await signUp('scripted-sheet@example.com');
+    const background = '<style>\n.asset-table { border: 3px solid {border}; }\n</style>';
+    const plot = await importCard(
+      cookie,
+      new File(
+        [
+          JSON.stringify({
+            ...v2Card,
+            data: {
+              ...v2Card.data,
+              extensions: {
+                risuai: {
+                  backgroundHTML: background,
+                  customScripts: [{ comment: '', type: 'editdisplay', in: '{border}', out: 'rgba(143,130,188,0.4)', flag: '', ableFlag: false }],
+                },
+              },
+            },
+          }),
+        ],
+        'renka.json',
+        { type: 'application/json' },
+      ),
+    );
+    expect(plot.customUi.css).toBeUndefined();
+    expect(plot.customUi.backgroundHtml).toBe(background);
+  });
+
+  it('exports a charx RisuAI reads its fetched fonts and pictures from, and imports it back with nothing to fetch', async () => {
+    const first = remote();
+    const target = makeApp({ remoteFetch: first.remoteFetch });
+    const cookie = await signUp('localize-roundtrip@example.com');
+    const form = new FormData();
+    form.append('file', webCard());
+    const imported = await readJson(await request(cookie, '/api/plots/import', 'POST', form, target));
+    const member = imported.characters[0];
+
+    const res = await request(cookie, `/api/plots/${imported.id}/characters/${member.id}/export?format=charx`, 'GET', undefined, target);
+    expect(res.status).toBe(200);
+    const charx = new Uint8Array(await res.arrayBuffer());
+    const exported = parseCard(charx);
+    const raw = exported.card.raw as { data: { first_mes: string; extensions: { risuai: Record<string, unknown> } } };
+    // Not one address of this server's goes out: each fetched file is the card's
+    // own, by the address it came from — a template's slot left in.
+    expect(JSON.stringify(raw)).not.toContain('/api/plots/');
+    expect(raw.data.first_mes).toBe('<img src="{{raw::https://cdn.test/hello.png}}"> [face:Happy] 안녕.');
+    expect(exported.card.displayScripts![0]!.out).toContain("url('{{raw::https://cdn.test/face/$1.png}}')");
+    // The stylesheet and the background go out together as RisuAI keeps them.
+    const background = raw.data.extensions.risuai['backgroundHTML'] as string;
+    expect(background).toMatch(/^<style>\n\/\* https:\/\/fonts\.test\/css\?family=Nanum \*\//);
+    expect(background).toContain("src: url({{raw::https://fonts.test/nanum.woff2}}) format('woff2')");
+    expect(background).toContain('<div class="box"><img src="https://cdn.test/gone.png"></div>');
+    expect(exported.assets!.map((asset) => asset.name).sort()).toEqual([
+      'https://cdn.test/bg.png',
+      'https://cdn.test/face/Calm.png',
+      'https://cdn.test/face/Happy.png',
+      'https://cdn.test/hello.png',
+      'https://fonts.test/nanum.woff2',
+    ]);
+
+    // Back in: the files come from the archive, the stylesheet points at them,
+    // and only the one address that was never fetched is asked for again.
+    const second = remote();
+    const again = new FormData();
+    again.append('file', new File([charx], 'export.charx', { type: 'application/octet-stream' }));
+    const back = await request(cookie, '/api/plots/import', 'POST', again, makeApp({ remoteFetch: second.remoteFetch }));
+    expect(back.status, await back.clone().text()).toBe(201);
+    const reimported = await readJson(back);
+    expect(second.asked).toEqual(['https://cdn.test/gone.png']);
+    const assets = await readJson(await request(cookie, `/api/plots/${reimported.id}/assets`, 'GET', undefined, target));
+    const font = assets.find((asset: any) => asset.name === 'https://fonts.test/nanum.woff2');
+    expect(font.mime).toBe('font/woff2');
+    expect(reimported.customUi.css).toContain(`src: url(/api/plots/${reimported.id}/assets/${font.slug}) format('woff2')`);
+    expect(reimported.customUi.css).not.toContain('{{raw::');
+    // A template's `{{raw::…}}` is read as CBS when it is drawn, against these names.
+    expect(reimported.intros[0]).toBe('<img src="{{raw::https://cdn.test/hello.png}}"> [face:Happy] 안녕.');
+    expect(assets.map((asset: any) => asset.name)).toContain('https://cdn.test/hello.png');
   });
 
   it('refuses a stylesheet that would end its <style>, and a picture that is not one', async () => {

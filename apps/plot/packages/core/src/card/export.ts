@@ -75,6 +75,74 @@ export interface CardPlotOverlay {
   intros?: string[];
   /** The plot's lorebook, appended after the card's own entries. */
   lorebook?: LoreEntry[];
+  /**
+   * RisuAI's `backgroundHTML` to write in place of the card's own: the charx
+   * export's, which carries the work's stylesheet and background with their
+   * assets in the archive (`toRisuAssetRefs`). '' writes none. Absent, the
+   * card's own goes out as it came.
+   */
+  backgroundHtml?: string;
+}
+
+/** One of a plot's assets, as a charx export names it (`toRisuAssetRefs`). */
+export interface RisuAssetName {
+  slug: string;
+  /** The card's own name for it, or the address it was fetched from (`localizedName`); null for an upload. */
+  name: string | null;
+}
+
+/** What a `{{raw::…}}` may hold and still be read as one name, by RisuAI's asset pattern and by ours. */
+const SAFE_ASSET_NAME = /^[^{}<>"'`\\\n\r]+$/;
+
+/** The name an asset is reached by in an exported card: its own when that reads as one, else its slug — both are declared (`exportCardCharx`). */
+const nameInCard = (asset: RisuAssetName): string =>
+  asset.name && SAFE_ASSET_NAME.test(asset.name) && !asset.name.includes('::') ? asset.name : asset.slug;
+
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * A text of the work with every address of one of the plot's assets written as
+ * RisuAI reaches an asset a card carries: `{{raw::name}}`, which its
+ * `parseAdditionalAssets` answers with the file's address — in a greeting, a
+ * script's output and the background alike, `url(…)` and `src` included — and
+ * which this app's own import reads back the same way (`assetResolver` by name;
+ * a stylesheet's are resolved at import, `rewriteAssetAddresses`).
+ *
+ * - `/api/plots/<plot>/assets/<slug>` names the asset by its own name, or its
+ *   slug where the name would not read as one (`nameInCard`). A fetched asset's
+ *   name is the address it came from, so the card names it by that.
+ * - `/api/plots/<plot>/assets/by-name/<host>/<path>` is a template's
+ *   (`localizeAssets.ts`): the slot in it — a capture, a draw — is filled when
+ *   the text is drawn, and the address it then reads is the name of the asset
+ *   fetched for that value, so it becomes `{{raw::https://<host>/<path>}}`.
+ *
+ * Only this plot's addresses change; anything else is left as written.
+ */
+export function toRisuAssetRefs(text: string, plotId: string, assets: readonly RisuAssetName[]): string {
+  const base = `/api/plots/${plotId}/assets/`;
+  if (!text.includes(base)) return text;
+  const bySlug = new Map(assets.map((asset) => [asset.slug, asset]));
+  const prefix = escapeRegExp(base);
+  return text
+    .replace(new RegExp(`${prefix}by-name/([^"'()\\s<>]+)`, 'g'), (_match, rest: string) => `{{raw::https://${rest}}}`)
+    .replace(new RegExp(`${prefix}([a-z0-9_-]+)(?![\\w/-])`, 'g'), (match, slug: string) => {
+      const asset = bySlug.get(slug);
+      return asset ? `{{raw::${nameInCard(asset)}}}` : match;
+    });
+}
+
+/** The extensions with RisuAI's `backgroundHTML` set to `html` ('' for none), or as they were when `html` is absent. */
+function extensionsWithBackground(extensions: Record<string, unknown>, html: string | undefined): Record<string, unknown> {
+  if (html === undefined) return extensions;
+  const previous = extensions['risuai'];
+  const risu: Record<string, unknown> =
+    previous !== null && typeof previous === 'object' ? { ...(previous as Record<string, unknown>) } : {};
+  if (html) risu['backgroundHTML'] = html;
+  else delete risu['backgroundHTML'];
+  const next = { ...extensions };
+  if (Object.keys(risu).length > 0) next['risuai'] = risu;
+  else delete next['risuai'];
+  return next;
 }
 
 /**
@@ -136,7 +204,10 @@ export function exportCardV3(card: NormalizedCard, overlay: CardPlotOverlay = {}
       extensions: extensionsWithIntro(
         extensionsWithNarrator(
           extensionsWithComponentCode(
-            extensionsWithCustomUi(card.extensions, displayScripts, defaultVariables),
+            extensionsWithBackground(
+              extensionsWithCustomUi(card.extensions, displayScripts, defaultVariables),
+              overlay.backgroundHtml,
+            ),
             componentCode,
             componentCapabilities,
           ),

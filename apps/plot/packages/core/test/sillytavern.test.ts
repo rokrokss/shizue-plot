@@ -1,19 +1,23 @@
 import { strToU8, Zip, ZipDeflate, zipSync, type Zippable } from 'fflate';
 import { describe, expect, it } from 'vitest';
+import { AUTHOR_NOTE_MAX } from '../src/authorNote.js';
 import {
   convertSillyTavernChat,
   FileTooLargeError,
   listZip,
   MAX_CHAT_MESSAGES,
+  noteSettingsOfSt,
   parseSillyTavernDate,
   promptRegexScripts,
   readZipEntry,
   regexScriptsToDisplayScripts,
   scanSillyTavern,
+  ST_AUTHOR_NOTE_DEFAULTS,
   stFilesFromFolder,
   stFilesFromZip,
-  stNoteKeepsPlace,
+  stNoteInChat,
   ZipError,
+  type StAuthorNote,
   type StCast,
   type StFile,
   type ZipSource,
@@ -837,30 +841,44 @@ describe('convertSillyTavernChat', () => {
 
     const placed = noteOf({ note_prompt: '비가 온다.\r\n천천히.', note_interval: 1, note_position: 1, note_depth: 4, note_role: 0 });
     expect(placed).toEqual({ text: '비가 온다.\n천천히.', interval: 1, position: 1, depth: 4, role: 0 });
-    expect(stNoteKeepsPlace(placed!)).toBe(true);
+    expect(noteSettingsOfSt(placed!)).toBeNull();
 
-    // Absent keys are ST's defaults, which are where our note goes.
+    // Absent keys are ST's defaults, which are a chat's defaults here too.
     const bare = noteOf({ note_prompt: '짧게.' });
     expect(bare).toEqual({ text: '짧게.', interval: 1, position: 1, depth: 4, role: 0 });
-    expect(stNoteKeepsPlace(bare!)).toBe(true);
+    expect(noteSettingsOfSt(bare!)).toBeNull();
 
     // A hand-edited file's numeric strings are read as numbers; garbage is the default.
     expect(noteOf({ note_prompt: 'x', note_depth: '2', note_role: 'assistant' })).toMatchObject({ depth: 2, role: 0 });
-
-    for (const moved of [
-      { note_interval: 3 },
-      { note_interval: 0 },
-      { note_position: 0 },
-      { note_position: 2 },
-      { note_depth: 6 },
-      { note_role: 1 },
-    ]) {
-      expect(stNoteKeepsPlace(noteOf({ note_prompt: 'x', ...moved })!)).toBe(false);
-    }
     expect(noteOf({ note_prompt: 'x', note_interval: 0 })!.interval).toBe(0);
 
     expect(noteOf({ note_prompt: '   ', note_interval: 1 })).toBeUndefined();
     expect(noteOf({ note_interval: 1 })).toBeUndefined();
+  });
+
+  it('carries the author’s note’s settings, a note outside the chat at the start of the history', () => {
+    const note = (overrides: Partial<StAuthorNote>): StAuthorNote => ({ text: 'x', ...ST_AUTHOR_NOTE_DEFAULTS, ...overrides });
+
+    expect(stNoteInChat(note({}))).toBe(true);
+    expect(noteSettingsOfSt(note({ depth: 6, interval: 3, role: 1 }))).toEqual({ depth: 6, frequency: 3, role: 'user' });
+    expect(noteSettingsOfSt(note({ role: 2 }))).toEqual({ role: 'assistant' });
+    // Switched off in ST comes over switched off, never put in.
+    expect(noteSettingsOfSt(note({ interval: 0 }))).toEqual({ frequency: 0 });
+    expect(noteSettingsOfSt(note({ interval: -2 }))).toEqual({ frequency: 0 });
+    // Rounded and clamped to what a chat keeps; a role ST never writes is a system message.
+    expect(noteSettingsOfSt(note({ depth: 20_000, interval: 2.6, role: 7 }))).toEqual({ depth: AUTHOR_NOTE_MAX, frequency: 3 });
+    expect(noteSettingsOfSt(note({ depth: -1, role: 0.5 }))).toEqual({ depth: 0 });
+
+    // Before (2) or after (0) the story string has no match here — nor has a
+    // position ST never writes: as deep as a note goes, whatever its depth.
+    for (const position of [0, 2, 5]) {
+      expect(stNoteInChat(note({ position }))).toBe(false);
+      expect(noteSettingsOfSt(note({ position, depth: 2, interval: 0, role: 1 }))).toEqual({
+        depth: AUTHOR_NOTE_MAX,
+        frequency: 0,
+        role: 'user',
+      });
+    }
   });
 
   it('names the World Info file bound to the chat', () => {

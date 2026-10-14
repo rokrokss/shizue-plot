@@ -9,7 +9,7 @@
  * Cards come in through the ordinary card imports; only the chats need routes of
  * their own.
  */
-import { replyLengthTokens, type ImportedChatMessage } from '@shizue/core';
+import { coerceAuthorNoteSettings, replyLengthTokens, type ImportedChatMessage } from '@shizue/core';
 import { characters, chats, messages, plots, type NewMessage } from '@shizue/db';
 import { listEnabledModels } from '@shizue/llm';
 import { and, asc, count, eq, inArray, isNull, max, sql } from 'drizzle-orm';
@@ -26,7 +26,7 @@ import { rebased } from '../relationship.js';
 import { optionalVariableDelta, storableDelta } from '../scriptState.js';
 import { buildPath, roundCount } from '../tree.js';
 import { isUuid, optionalBoolean, optionalString, readJsonBody, requireString, requireUuidParam } from '../util.js';
-import { resolvePersona, toChatJson } from './chats.js';
+import { optionalSettings, resolvePersona, toChatJson } from './chats.js';
 
 /** Hashes one lookup may ask about — a whole backup's cards and chats in a request or two. */
 const MAX_LOOKUP_HASHES = 1000;
@@ -398,6 +398,10 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
    *   to the limits any delta is (`checkVariableDelta`); the browser leaves out
    *   what would not pass before it sends.
    * - `note`, the chat's author's note, becomes the chat's own note.
+   * - `noteSettings`, where and how often the source put that note in (its depth,
+   *   frequency and role, `AuthorNoteSettings`), become the chat's own, read as
+   *   the settings PATCH reads them: anything but an object (or null) is refused,
+   *   the rest coerced into range by `coerceAuthorNoteSettings`.
    */
   app.post('/:id/import/complete', async (c) => {
     const id = requireUuidParam(c);
@@ -410,6 +414,7 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
     if (note !== undefined && (note.length > MAX_IMPORT_NOTE_LENGTH || note.includes('\u0000'))) {
       throw badRequest('invalid_request', `note must be at most ${MAX_IMPORT_NOTE_LENGTH} characters, without U+0000`);
     }
+    const noteSettings = optionalSettings(body, 'noteSettings', coerceAuthorNoteSettings);
     // Before the lock: resolving the channel may read the owner's model catalog.
     // The chat has no auxiliary model of its own yet — the settings route takes
     // no writes while the import runs — and a pick would not change the answer
@@ -445,6 +450,7 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
           importing: false,
           relationship: rebased(locked.relationship, depth),
           ...(note !== undefined ? { note } : {}),
+          ...(noteSettings !== undefined ? { noteSettings } : {}),
           updatedAt: new Date(),
         })
         .where(eq(chats.id, id))

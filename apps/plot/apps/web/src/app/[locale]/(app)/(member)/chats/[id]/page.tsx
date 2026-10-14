@@ -2979,20 +2979,25 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     // below is the only thing that scrolls and the composer never moves.
     <div className="chat-workspace flex h-[calc(100dvh-3.5rem)] flex-col">
       <div className="shrink-0 border-b border-line bg-surface">
-        {/* One row on a phone, where the title is what gives way; the wide row wraps its controls. */}
-        <div className="mx-auto flex max-w-3xl items-center gap-3 px-5 py-2.5 lg:flex-wrap">
+        {/* One row on a phone, where the title is what gives way — after everything
+            that can step aside has: the music's mute goes into the settings sheet,
+            the settings into an icon, and the model pill gives its place to the
+            card screen's way out while that is open. The wide row wraps its controls. */}
+        <div className="mx-auto flex max-w-3xl items-center gap-2 px-5 py-2.5 lg:flex-wrap lg:gap-3">
           <Link
             // The work's own page, which is the same one for creator and reader.
             href={`/p/${state.chat.plotId}`}
             className="flex min-w-0 items-center gap-2.5"
             title={t('backToPlot')}
           >
-            <Avatar src={plot?.coverUrl ?? null} name={characterName} className="size-8 text-sm" />
+            <Avatar src={plot?.coverUrl ?? null} name={characterName} className="size-8 shrink-0 text-sm" />
             <span className="truncate text-sm font-medium">{characterName}</span>
           </Link>
           <AiBadge />
-          {/* At every width, while the page has music. */}
-          <BgmMute />
+          {/* While the page has music; on a phone, in the settings sheet. */}
+          <span className="hidden lg:contents">
+            <BgmMute />
+          </span>
           {/* While a card's floating screen is open: the quiet way out of it. On a
               phone the row has room for its mark alone, so the title still shows. */}
           {cardOverlays.open ? (
@@ -3040,22 +3045,28 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               {t('notes')}
             </Button>
           </div>
-          {/* Zeta's "zeta ⌄": the main model, where the row has no room for the controls above. */}
-          <ModelPill
-            model={state.chat.model}
-            models={models}
-            disabled={settingsLocked}
-            className={cx('lg:hidden', !cardOverlays.open && 'ml-auto')}
-            onChange={(model) => void updateSettings({ model })}
-          />
+          {/* Zeta's "zeta ⌄": the main model, where the row has no room for the controls
+              above — and not while a card's screen is open, whose way out takes its
+              place; the sheet still has it. */}
+          {cardOverlays.open ? null : (
+            <ModelPill
+              model={state.chat.model}
+              models={models}
+              disabled={settingsLocked}
+              className="ml-auto max-w-24! lg:hidden"
+              onChange={(model) => void updateSettings({ model })}
+            />
+          )}
           <Button
             size="sm"
             variant={sheetOpen ? 'secondary' : 'ghost'}
             aria-expanded={sheetOpen}
-            className="shrink-0 lg:hidden"
+            aria-label={t('settings')}
+            title={t('settings')}
+            className="shrink-0 rounded-full! px-2! lg:hidden"
             onClick={() => setSheetOpen(true)}
           >
-            {t('settings')}
+            <Icon name="sliders" className="size-4" />
           </Button>
         </div>
 
@@ -3747,6 +3758,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           and gets out of the way. */}
       {sheetOpen ? (
         <BottomSheet title={t('settings')} onClose={() => setSheetOpen(false)}>
+          {/* The music's mute, which the phone's header has no room for. */}
+          <BgmMute row className="mb-5" />
           <ChatSettings
             stacked
             model={state.chat.model}

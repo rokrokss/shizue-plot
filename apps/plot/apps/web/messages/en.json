@@ -559,8 +559,7 @@
       },
       "notices": {
         "chat_world_attached": "The lorebook bound to this chat, {name}, is now part of the plot's lorebook, so it also applies to the plot's other chats.",
-        "note_moved": "The author's note came over as this chat's note, but not its position, interval or role: here it goes in every turn as a system message, four messages from the end.",
-        "note_off": "The author's note was switched off in SillyTavern (interval 0), so it wasn't brought over."
+        "note_moved": "The author's note came over with its frequency and role, but SillyTavern placed it before or after the story string, which has no match here, so it goes at the start of the chat history."
       },
       "modelUnavailable": "Chats need a model to go on. Connect ChatGPT in <link>Settings</link>, then retry — the characters are already in."
     }

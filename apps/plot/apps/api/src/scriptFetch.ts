@@ -30,7 +30,7 @@
  */
 import { ADDRCONFIG, promises as dns, type LookupAddress } from 'node:dns';
 import type { IncomingHttpHeaders } from 'node:http';
-import { request as httpsRequest } from 'node:https';
+import { Agent, request as httpsRequest, type RequestOptions } from 'node:https';
 import { isIP, type LookupFunction } from 'node:net';
 
 /** What a script gets back, before RisuAI's `JSON.stringify`. */
@@ -176,7 +176,7 @@ export interface HopResponse {
   status: number;
   headers: IncomingHttpHeaders;
   body: AsyncIterable<Uint8Array>;
-  /** Drops the rest of the body and the connection. */
+  /** Drops the rest of the body and the connection — or, after a body read to its end, hands a pooled connection back (`pooledTransport`). */
   close(): void;
 }
 
@@ -228,6 +228,85 @@ export const httpsTransport: Transport = ({ url, addresses, signal, headers }) =
     request.on('error', reject);
     request.end();
   });
+
+/**
+ * An `https.Agent` that keeps connections open between requests, pooled by the
+ * addresses a hop was pinned to as well as by its host and TLS options. A
+ * pooled socket is only ever handed to a request whose own vetting answered the
+ * same addresses the socket was connected through (`pinnedLookup`), so a later
+ * DNS answer can never route a request onto a connection it did not vet — and a
+ * reused socket skips nothing the guard does: every hop is vetted before the
+ * transport is asked, pooled or not.
+ */
+export class PinnedAgent extends Agent {
+  override getName(options?: RequestOptions): string {
+    const pinned = (options as (RequestOptions & { pinnedTo?: string }) | undefined)?.pinnedTo ?? '';
+    return `${super.getName(options)}:${pinned}`;
+  }
+}
+
+/** The pool key of a set of vetted addresses: each once, in a stable order. */
+const pinnedKey = (addresses: readonly LookupAddress[]): string =>
+  [...new Set(addresses.map((entry) => `${entry.family}/${entry.address}`))].sort().join(',');
+
+/** Whether a socket's peer is one of the vetted addresses, however IPv6 spelled it. */
+function isVetted(remote: string, addresses: readonly LookupAddress[]): boolean {
+  const family = isIP(remote);
+  if (family === 0) return false;
+  return addresses.some((entry) =>
+    family === 6 && isIP(entry.address) === 6
+      ? v6Words(entry.address).join(':') === v6Words(remote).join(':')
+      : entry.address === remote,
+  );
+}
+
+/**
+ * `httpsTransport` over `agent`'s kept-open connections, for a caller that
+ * makes many requests to a few hosts — the import's fetch of a card's fonts and
+ * pictures (`localizeAssets.ts`), hundreds of font slices from one font host,
+ * where a fresh TLS handshake for each cost seconds apiece. The pinning is the
+ * same (`pinnedLookup`, `PinnedAgent`), and the peer that answers is checked
+ * against the vetted addresses whether its socket is new or pooled. A body read
+ * to its end hands the socket back to the pool; one dropped part-way closes it.
+ */
+export function pooledTransport(agent: PinnedAgent): Transport {
+  return ({ url, addresses, signal, headers }) =>
+    new Promise((resolve, reject) => {
+      const host = unbracketed(url.hostname);
+      const options: RequestOptions & { pinnedTo: string } = {
+        host,
+        port: url.port || 443,
+        path: `${url.pathname}${url.search}`,
+        method: 'GET',
+        headers: { ...(headers ?? SCRIPT_FETCH_HEADERS) },
+        ...(isIP(host) ? {} : { servername: host }),
+        lookup: pinnedLookup(addresses),
+        agent,
+        pinnedTo: pinnedKey(addresses),
+        signal,
+      };
+      const request = httpsRequest(options);
+      request.on('response', (response) => {
+        response.on('error', () => undefined);
+        const remote = response.socket?.remoteAddress;
+        if (!remote || !isVetted(remote, addresses)) {
+          response.destroy();
+          reject(new Error(`connected to ${remote ?? 'an unknown address'}, which ${host} was not vetted to`));
+          return;
+        }
+        resolve({
+          status: response.statusCode ?? 0,
+          headers: response.headers,
+          body: response,
+          close: () => {
+            if (!response.complete) response.destroy();
+          },
+        });
+      });
+      request.on('error', reject);
+      request.end();
+    });
+}
 
 export interface GuardOptions {
   resolve?: Resolve;

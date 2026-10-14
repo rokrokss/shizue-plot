@@ -32,6 +32,7 @@ import {
   parseCard,
   parseRisuModule,
   plotModuleOf,
+  toRisuAssetRefs,
   type CharxAssetFile,
   type CharxExportAsset,
   type EmotionImage,
@@ -443,6 +444,21 @@ function cardBackgroundOf(members: Character[]): string {
 }
 
 /**
+ * The `backgroundHTML` a member's charx export carries, put back together the
+ * way RisuAI keeps it: the work's stylesheet and the member's own (`memberCss`)
+ * as `<style>` elements ahead of what the work draws behind its chats
+ * (`backgroundOf`) — the split the import made (`splitBackground`), undone,
+ * with whatever the creator has edited since. '' when the work has none of them.
+ */
+function exportedBackground(plot: Plot, members: Character[], memberId: string): string {
+  const ui = plot.customUi ?? {};
+  const sheets = [ui.css, ui.memberCss?.[memberId]].filter((css): css is string => Boolean(css?.trim()));
+  // A `</style` in a sheet would end its element early; in CSS it is junk either way.
+  const styles = sheets.map((css) => `<style>\n${css.replace(/<\/style/gi, '<\\/style')}\n</style>`);
+  return [...styles, backgroundOf(plot, members)].filter((part) => part.trim()).join('\n');
+}
+
+/**
  * A member as its own creator sees it: the whole card, since they wrote it — or
  * imported it, in which case where it came from and the license its card
  * declares travel too, being what the owner weighs before publishing it. Both
@@ -571,10 +587,12 @@ async function insertMember(
 }
 
 /**
- * Stores the pictures and music a card carried beside the icon. Slugs come from
+ * Stores the pictures, music and web fonts a card carried beside the icon — a
+ * font for a stylesheet to reach as `{{raw::name}}`, as RisuAI's charx export
+ * carries one, and as this app's own does for the fonts it localized. Slugs come from
  * the asset names so `{{img::slug}}` written into the card keeps working; a name
  * with nothing sluggable left falls back to its position, and collisions get a
- * suffix. Bytes that turn out to be neither are skipped rather than failing the
+ * suffix. Bytes that turn out to be none of these are skipped rather than failing the
  * import, and counted (`unsupported`), as are those past the plot's cap
  * (`overLimit`), for the import to say so (`ImportWarning`).
  *
@@ -625,7 +643,7 @@ async function storeImportedAssets(
         break;
       }
       const id = randomUUID();
-      const stored = await saveAsset(deps.storage, id, asset.bytes, { audio: true });
+      const stored = await saveAsset(deps.storage, id, asset.bytes, { audio: true, font: true });
       if (!stored) {
         unsupported += 1;
         continue;
@@ -1852,7 +1870,11 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
    * placeholder, since nothing here transcodes images.
    *
    * The charx is the one format that carries the plot's images, so a card's
-   * `{{img::…}}` still finds them in RisuAI (`exportCardCharx`). Its icon is the
+   * `{{img::…}}` still finds them in RisuAI (`exportCardCharx`) — and the fonts
+   * and pictures the import brought in from other hosts, which its texts then
+   * name as `{{raw::…}}` instead of by this server's address (`toRisuAssetRefs`),
+   * the stylesheet and the background going out together as RisuAI's
+   * `backgroundHTML` (`exportedBackground`). Its icon is the
    * picture the PNG is written on, in whatever format it is. Every plot asset
    * goes into every member's archive: assets are the plot's, and so are the
    * openings, the lorebook and the custom UI that every member's card carries
@@ -1877,16 +1899,37 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     }
 
     const customUi = plot.customUi ?? {};
+    const rows =
+      format === 'charx'
+        ? await deps.db
+            .select()
+            .from(plotAssets)
+            .where(eq(plotAssets.plotId, plot.id))
+            .orderBy(asc(plotAssets.createdAt), asc(plotAssets.slug))
+        : [];
+    // In a charx the plot's assets travel with the card, so its texts name them
+    // as RisuAI reaches a card's own (`toRisuAssetRefs`) rather than by an
+    // address of this server's.
+    const inCard = (text: string): string => (format === 'charx' ? toRisuAssetRefs(text, plot.id, rows) : text);
+    const scripts = customUi.displayScripts
+      ? displayScriptsFor(customUi.displayScripts, member.id).map((script) => ({ ...script, out: inCard(script.out) }))
+      : undefined;
     const card = exportCardV3(member.card, {
       narrator: plot.narrator ?? undefined,
       // The plot's custom UI is the whole answer even when empty: the card's own
       // copies are what the import lifted off it. Of its display scripts, the
       // work's own and this member's — not another member's.
-      customUi: customUi.displayScripts
-        ? { ...customUi, displayScripts: displayScriptsFor(customUi.displayScripts, member.id) }
-        : customUi,
-      intros: plot.intros,
+      customUi: scripts ? { ...customUi, displayScripts: scripts } : customUi,
+      intros: plot.intros.map(inCard),
       lorebook: plot.lorebook,
+      // A charx carries the work's stylesheet — and this member's own — and its
+      // background as one `backgroundHTML`, as RisuAI keeps them: what the
+      // import split, put back, with every font and picture it brought in from
+      // other hosts in the archive. The other formats carry no assets, so the
+      // card's own background goes out as it came.
+      ...(format === 'charx'
+        ? { backgroundHtml: inCard(exportedBackground(plot, await loadMembers(deps.db, plot.id), member.id)) }
+        : {}),
     });
     const headers = {
       'Content-Disposition': attachment(member.name, format),
@@ -1907,11 +1950,6 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       });
     }
 
-    const rows = await deps.db
-      .select()
-      .from(plotAssets)
-      .where(eq(plotAssets.plotId, plot.id))
-      .orderBy(asc(plotAssets.createdAt), asc(plotAssets.slug));
     const assets: CharxExportAsset[] = [];
     const emotions = new Map((member.card.emotionImages ?? []).map((image) => [image.slug, image.name]));
     for (const row of rows) {
