@@ -1,9 +1,10 @@
 'use client';
 
+import { MAX_FACT_LENGTH } from '@shizue/core';
 import { useTranslations } from 'next-intl';
 import { useCallback, useEffect, useState } from 'react';
 import { apiGet, apiSend } from '@/lib/api';
-import type { MemorySummary } from '@/lib/types';
+import type { MemoryFact, MemorySummary } from '@/lib/types';
 import { useErrorMessage } from '@/lib/useErrorMessage';
 import { Button, ErrorText, Spinner, TextArea, cx } from './ui';
 
@@ -22,6 +23,9 @@ const ACTION =
  * other), an edit, a regenerate that offers a new text to keep or throw away,
  * and a delete. The summaries the current branch holds come first, newest at
  * the top; ones written on another branch wait folded below.
+ *
+ * Below them, the facts of the summaries on the branch (`facts.ts` in the API):
+ * the durable ones taken from what each summary covers, each to edit or delete.
  *
  * The list is the panel's own to fetch: it is read again whenever `version`
  * moves — the branch's head (a turn, a swipe) or the chat's memory revision (an
@@ -43,14 +47,19 @@ export function MemorySummaries({
   const t = useTranslations('chat');
   const toMessage = useErrorMessage();
   const [summaries, setSummaries] = useState<MemorySummary[] | null>(null);
+  const [facts, setFacts] = useState<MemoryFact[]>([]);
   const [shown, setShown] = useState(PAGE);
   const [error, setError] = useState('');
 
   const load = useCallback(
     async (signal?: AbortSignal): Promise<void> => {
       try {
-        const answer = await apiGet<{ summaries: MemorySummary[] }>(`/api/chats/${chatId}/memory`, signal);
+        const answer = await apiGet<{ summaries: MemorySummary[]; facts: MemoryFact[] }>(
+          `/api/chats/${chatId}/memory`,
+          signal,
+        );
         setSummaries(answer.summaries);
+        setFacts(answer.facts);
         setError('');
       } catch (caught) {
         if (signal?.aborted) return;
@@ -72,8 +81,12 @@ export function MemorySummaries({
 
   const replace = (next: MemorySummary): void =>
     setSummaries((current) => current?.map((summary) => (summary.id === next.id ? next : summary)) ?? null);
-  const remove = (id: string): void =>
+  // A summary's facts go with it.
+  const remove = (id: string): void => {
     setSummaries((current) => current?.filter((summary) => summary.id !== id) ?? null);
+    setFacts((current) => current.filter((fact) => fact.summaryId !== id));
+  };
+  const onFactError = (caught: unknown): void => setError(caught === null ? '' : toMessage(caught));
 
   const applied = (summaries ?? []).filter((summary) => summary.applies).reverse();
   const elsewhere = (summaries ?? []).filter((summary) => !summary.applies);
@@ -117,7 +130,135 @@ export function MemorySummaries({
           <ol className="mt-3 space-y-3">{elsewhere.map(card)}</ol>
         </details>
       ) : null}
+
+      <div data-testid="memory-facts" className="space-y-3 pt-2">
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="text-xs font-medium text-muted">{t('memoryFacts')}</h3>
+          {facts.length > 0 ? (
+            <span className="text-xs text-muted">{t('memoryFactsCount', { count: facts.length })}</span>
+          ) : null}
+        </div>
+        {summaries !== null && facts.length === 0 ? <p className="text-sm text-muted">{t('memoryFactsEmpty')}</p> : null}
+        <p className="text-xs text-muted">{t('memoryFactsHint')}</p>
+        {facts.length > 0 ? (
+          <ul className="space-y-2">
+            {facts.map((fact) => (
+              <FactCard
+                key={fact.id}
+                chatId={chatId}
+                fact={fact}
+                disabled={disabled}
+                onChanged={(next) => setFacts((current) => current.map((item) => (item.id === next.id ? next : item)))}
+                onDeleted={(id) => setFacts((current) => current.filter((item) => item.id !== id))}
+                onError={onFactError}
+              />
+            ))}
+          </ul>
+        ) : null}
+      </div>
     </section>
+  );
+}
+
+/** One fact, with an edit in place and a delete, as a summary has. */
+function FactCard({
+  chatId,
+  fact,
+  disabled,
+  onChanged,
+  onDeleted,
+  onError,
+}: {
+  chatId: string;
+  fact: MemoryFact;
+  disabled: boolean;
+  onChanged: (fact: MemoryFact) => void;
+  onDeleted: (id: string) => void;
+  onError: (error: unknown) => void;
+}) {
+  const t = useTranslations('chat');
+  const common = useTranslations('common');
+  const [draft, setDraft] = useState<string | null>(null);
+  const [working, setWorking] = useState<'save' | 'delete' | null>(null);
+  const base = `/api/chats/${chatId}/memory/facts/${fact.id}`;
+  const busy = disabled || working !== null;
+
+  async function run(kind: NonNullable<typeof working>, action: () => Promise<void>): Promise<void> {
+    if (busy) return;
+    setWorking(kind);
+    onError(null);
+    try {
+      await action();
+    } catch (caught) {
+      onError(caught);
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  return (
+    <li data-testid="memory-fact" className="space-y-2 rounded-xl border border-line bg-surface p-3">
+      {draft === null ? (
+        <div className="flex items-start gap-3">
+          <p className="min-w-0 flex-1 break-keep text-sm text-fg [overflow-wrap:anywhere]">{fact.content}</p>
+          <div className="flex shrink-0 items-center gap-1">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => setDraft(fact.content)}
+              className={cx(ACTION, 'text-muted hover:text-fg')}
+            >
+              {common('edit')}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                if (!window.confirm(t('memoryFactDeleteConfirm'))) return;
+                void run('delete', async () => {
+                  await apiSend<void>('DELETE', base);
+                  onDeleted(fact.id);
+                });
+              }}
+              className={cx(ACTION, 'text-danger hover:bg-danger/10')}
+            >
+              {common('delete')}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <TextArea
+            rows={2}
+            value={draft}
+            disabled={busy}
+            maxLength={MAX_FACT_LENGTH}
+            aria-label={t('memoryFactEditLabel')}
+            onChange={(event) => setDraft(event.target.value)}
+          />
+          <div className="flex justify-end gap-2">
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => setDraft(null)}>
+              {common('cancel')}
+            </Button>
+            <Button
+              size="sm"
+              variant="primary"
+              busy={working === 'save'}
+              disabled={busy || draft.trim() === ''}
+              onClick={() =>
+                void run('save', async () => {
+                  const answer = await apiSend<{ fact: MemoryFact }>('PATCH', base, { content: draft });
+                  onChanged(answer.fact);
+                  setDraft(null);
+                })
+              }
+            >
+              {common('save')}
+            </Button>
+          </div>
+        </div>
+      )}
+    </li>
   );
 }
 

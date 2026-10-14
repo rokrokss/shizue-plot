@@ -8,6 +8,7 @@ import {
   extensionsWithEmotionMode,
   inlayEmotionTags,
   pickEmotion,
+  pickEmotionByEmbedding,
 } from '../src/emotion.js';
 import { assemblePrompt } from '../src/prompt.js';
 import { emptyCard } from '../src/card/normalize.js';
@@ -113,5 +114,35 @@ describe('emotion detection', () => {
   it("shows RisuAI's default before any choice: the one named neutral", () => {
     expect(defaultEmotion(images)?.slug).toBe('neutral');
     expect(defaultEmotion([{ name: 'Neutral', slug: 'n' }])).toBeUndefined();
+  });
+});
+
+describe('embedding emotion processor', () => {
+  const scores = (entries: [string, number][]) => new Map(entries);
+
+  it('picks the nearest name, with no threshold and no neutral fallback', () => {
+    expect(pickEmotionByEmbedding(images, scores([['neutral', 0.2], ['happy', 0.5], ['Angry', 0.1]]), [])?.name).toBe('happy');
+    // Far from every name is still a choice.
+    expect(pickEmotionByEmbedding(images, scores([['neutral', -0.3], ['happy', -0.2], ['Angry', -0.4]]), [])?.name).toBe('happy');
+    // A tie keeps the card's order; no score, no picture.
+    expect(pickEmotionByEmbedding(images, scores([['happy', 0.5], ['Angry', 0.5]]), [])?.name).toBe('happy');
+    expect(pickEmotionByEmbedding(images, new Map(), [])).toBeUndefined();
+    // Two pictures of one name: the first.
+    const twice = [...images, { name: 'happy', slug: 'happy-2' }];
+    expect(pickEmotionByEmbedding(twice, scores([['happy', 0.9]]), [])?.slug).toBe('happy');
+  });
+
+  it("holds the member's last four pictures against them as RisuAI does: 0.025 for the latest down to 0.01", () => {
+    const close = (gap: number) => scores([['happy', 0.5 + gap], ['neutral', 0.5]]);
+    // The latest picture loses 0.025.
+    expect(pickEmotionByEmbedding(images, close(0.024), ['happy'])?.name).toBe('neutral');
+    expect(pickEmotionByEmbedding(images, close(0.026), ['happy'])?.name).toBe('happy');
+    // Four back, 0.01; five back, nothing.
+    expect(pickEmotionByEmbedding(images, close(0.009), ['happy', 'Angry', 'Angry', 'Angry'])?.name).toBe('neutral');
+    expect(pickEmotionByEmbedding(images, close(0.011), ['happy', 'Angry', 'Angry', 'Angry'])?.name).toBe('happy');
+    expect(pickEmotionByEmbedding(images, close(0.001), ['happy', 'Angry', 'Angry', 'Angry', 'Angry'])?.name).toBe('happy');
+    // Each time it is among them: 0.025 + 0.02.
+    expect(pickEmotionByEmbedding(images, close(0.044), ['happy', 'happy'])?.name).toBe('neutral');
+    expect(pickEmotionByEmbedding(images, close(0.046), ['happy', 'happy'])?.name).toBe('happy');
   });
 });

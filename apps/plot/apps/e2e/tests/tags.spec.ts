@@ -33,7 +33,7 @@ test('hides and unhides a tag in the feed', async ({ page }) => {
   await expect(page.getByRole('button', { name: '비공개로 전환' })).toBeVisible();
 
   await page.goto('/ko');
-  await page.getByPlaceholder('플롯 이름 검색').fill(name);
+  await page.getByPlaceholder('플롯 이름이나 보고 싶은 이야기로 검색').fill(name);
   const card = page.getByTestId('plot-card').filter({ hasText: name });
   await expect(card).toHaveCount(1);
 
@@ -49,7 +49,7 @@ test('hides and unhides a tag in the feed', async ({ page }) => {
 
   // …and it survives a reload, because it is stored per browser.
   await page.reload();
-  await page.getByPlaceholder('플롯 이름 검색').fill(name);
+  await page.getByPlaceholder('플롯 이름이나 보고 싶은 이야기로 검색').fill(name);
   await expect(page.getByTestId('hidden-tags-toggle')).toBeVisible();
   await expect(card).toHaveCount(0);
 

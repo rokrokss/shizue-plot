@@ -4,10 +4,14 @@ import {
   AUTHOR_NOTE_DEFAULTS,
   AUTHOR_NOTE_ROLES,
   DEFAULT_CONTEXT_BUDGET,
+  DEFAULT_FACT_COUNT,
+  DEFAULT_SUMMARIZATION_INSTRUCTION,
+  EMOTION_PROCESSORS,
   HYPA_V3_DEFAULTS,
-  HYPA_V3_SUMMARIZATION_PROMPT,
+  MAX_FACT_COUNT,
   type AuthorNoteRole,
   type AuthorNoteSettings,
+  type EmotionProcessor,
 } from '@shizue/core';
 import { useFormatter, useTranslations } from 'next-intl';
 import { useEffect, useId, useState, type ReactNode } from 'react';
@@ -184,6 +188,7 @@ export function ChatPanel({
   memorySettings,
   relationship,
   relationshipEnabled,
+  emotionProcessor = 'submodel',
   narrator,
   illustrations,
   customUi,
@@ -198,6 +203,7 @@ export function ChatPanel({
   onToggleNote,
   onSaveMemorySettings,
   onToggleRelationship,
+  onSaveEmotionProcessor,
   onSaveNarrator,
   onToggleCustomUi,
   onToggleComponentTurns,
@@ -225,6 +231,8 @@ export function ChatPanel({
   memorySettings: ChatMemorySettings | null;
   relationship: ChatRelationship | null;
   relationshipEnabled: boolean;
+  /** How a reply's emotion picture is chosen; offered only where a member shows its pictures beside the chat. */
+  emotionProcessor?: EmotionProcessor;
   /** This chat's narrator; null means the character's own is in force. */
   narrator: NarratorConfig | null;
   /**
@@ -255,6 +263,8 @@ export function ChatPanel({
   onToggleNote: (noteId: string, attached: boolean) => Promise<void>;
   onSaveMemorySettings: (settings: ChatMemorySettings) => Promise<void>;
   onToggleRelationship: (enabled: boolean) => Promise<void>;
+  /** Saves the emotion processor; without it the choice is not offered. */
+  onSaveEmotionProcessor?: (processor: EmotionProcessor) => Promise<void>;
   /** null clears the override, which is how the character's narrator comes back. */
   onSaveNarrator: (narrator: NarratorConfig | null) => Promise<void>;
   onToggleCustomUi: (enabled: boolean) => void;
@@ -330,7 +340,10 @@ export function ChatPanel({
   const rows = relationshipRows(relationship);
   // The selects always show a concrete value: what the chat set, or the default
   // the server would apply for a key it has not set.
-  const settings = { contextBudget: DEFAULT_CONTEXT_BUDGET, ...HYPA_V3_DEFAULTS, ...memorySettings };
+  const settings = { contextBudget: DEFAULT_CONTEXT_BUDGET, ...HYPA_V3_DEFAULTS, factCount: DEFAULT_FACT_COUNT, ...memorySettings };
+  // RisuAI's emotion processor is a choice for the panel's pictures only: in
+  // inlay mode the model names its picture in the reply.
+  const emotionPanel = members.some((member) => member.emotion?.mode === 'panel');
   const randomShare = Math.max(0, 1 - settings.recentMemoryRatio - settings.similarMemoryRatio);
 
   /**
@@ -550,6 +563,20 @@ export function ChatPanel({
             t('messageCountValue', { count }),
           )}
           {memorySelect('queryChatCount', MEMORY_STEPS.queryChatCount, (count) => t('messageCountValue', { count }))}
+          <Field label={t('memorySetting.factCount')}>
+            <Select
+              value={String(settings.factCount)}
+              disabled={busy}
+              className="h-9 py-0 text-xs"
+              onChange={(event) => void saveMemorySettings({ factCount: Number(event.target.value) })}
+            >
+              {Array.from({ length: MAX_FACT_COUNT + 1 }, (_, count) => (
+                <option key={count} value={count}>
+                  {count === 0 ? t('factCountOff') : t('messageCountValue', { count })}
+                </option>
+              ))}
+            </Select>
+          </Field>
           {memorySelect('recentMemoryRatio', MEMORY_STEPS.share, share)}
           {memorySelect('similarMemoryRatio', MEMORY_STEPS.share, share)}
           <div className="space-y-1.5">
@@ -570,7 +597,7 @@ export function ChatPanel({
             rows={3}
             value={promptDraft}
             disabled={busy}
-            placeholder={HYPA_V3_SUMMARIZATION_PROMPT}
+            placeholder={DEFAULT_SUMMARIZATION_INSTRUCTION}
             onChange={(event) => setPromptDraft(event.target.value)}
           />
         </Field>
@@ -637,6 +664,25 @@ export function ChatPanel({
               <p className="text-xs text-muted">{t('choicesHint')}</p>
             </>
           ) : null}
+        </section>
+      ) : null}
+
+      {emotionPanel && onSaveEmotionProcessor ? (
+        <section data-testid="chat-emotion" className="space-y-3 border-t border-line pt-5">
+          <Field label={t('emotionProcessor')} hint={t('emotionProcessorHint')}>
+            <Select
+              value={emotionProcessor}
+              disabled={busy}
+              className="h-9 py-0 text-xs"
+              onChange={(event) => void onSaveEmotionProcessor(event.target.value as EmotionProcessor)}
+            >
+              {EMOTION_PROCESSORS.map((processor) => (
+                <option key={processor} value={processor}>
+                  {processor === 'submodel' ? t('emotionProcessorSubmodel') : t('emotionProcessorEmbedding')}
+                </option>
+              ))}
+            </Select>
+          </Field>
         </section>
       ) : null}
 

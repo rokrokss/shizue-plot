@@ -14,6 +14,7 @@ import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import messages from '../messages/ko.json';
+import type { PublicMember } from '../src/lib/types';
 
 vi.mock('@/i18n/navigation', () => ({
   Link: ({ href, children }: { href: string; children: unknown }) =>
@@ -32,7 +33,12 @@ let saveNote: () => Promise<void> = async () => undefined;
 /** Every narrator override the panel has saved. */
 let savedNarrators: unknown[];
 
-function render(features: { statusWindow: boolean; choices: boolean; scriptSimilarity?: boolean }): void {
+function render(features: {
+  statusWindow: boolean;
+  choices: boolean;
+  scriptSimilarity?: boolean;
+  members?: PublicMember[];
+}): void {
   act(() => {
     root.render(
       createElement(NextIntlClientProvider, {
@@ -40,7 +46,7 @@ function render(features: { statusWindow: boolean; choices: boolean; scriptSimil
         timeZone: 'Asia/Seoul',
         messages,
         children: createElement(ChatPanel, {
-          members: [],
+          members: features.members ?? [],
           note: '',
           notes: [],
           noteIds: [],
@@ -69,6 +75,7 @@ function render(features: { statusWindow: boolean; choices: boolean; scriptSimil
           onToggleStatusWindow: async (enabled: boolean) => void sent.push(`status:${enabled}`),
           onToggleChoices: async (enabled: boolean) => void sent.push(`choices:${enabled}`),
           scriptSimilarity: features.scriptSimilarity ?? false,
+          onSaveEmotionProcessor: async (processor: string) => void sent.push(`emotion:${processor}`),
         }),
       }),
     );
@@ -120,6 +127,30 @@ describe('the plot features in the notes panel', () => {
     });
     expect(sent).toEqual(['status:false', 'choices:false']);
   });
+});
+
+it('offers RisuAI’s two emotion processors only where a member shows its pictures beside the chat', async () => {
+  const member = (mode: 'panel' | 'inlay'): PublicMember => ({
+    id: mode,
+    name: mode,
+    nickname: null,
+    avatarUrl: null,
+    emotion: { mode, images: [{ name: 'happy', slug: 'happy' }] },
+  });
+  const choice = (): HTMLSelectElement | null => host.querySelector('[data-testid="chat-emotion"] select');
+  render({ statusWindow: false, choices: false, members: [member('inlay')] });
+  expect(choice()).toBeNull();
+  render({ statusWindow: false, choices: false, members: [member('inlay'), member('panel')] });
+  expect([...choice()!.options].map((option) => [option.value, option.textContent])).toEqual([
+    ['submodel', messages.chat.emotionProcessorSubmodel],
+    ['embedding', messages.chat.emotionProcessorEmbedding],
+  ]);
+  expect(choice()!.value).toBe('submodel');
+  await act(async () => {
+    choice()!.value = 'embedding';
+    choice()!.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  expect(sent).toEqual(['emotion:embedding']);
 });
 
 it('saves the limited third person as this chat’s point of view', async () => {

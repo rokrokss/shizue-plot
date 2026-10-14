@@ -134,6 +134,12 @@ function Catalogue() {
   }
 
   const [feed, setFeed] = useState<FeedState>(initialFeed);
+  /**
+   * Whether the list on screen is a search by meaning — ranked by nearness, so
+   * the sort does not apply to it. The API says which answered; without an
+   * embedder a query is searched as text, in the chosen sort.
+   */
+  const [byMeaning, setByMeaning] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   /** Tags this browser has muted. Read after mount so the markup hydrates cleanly. */
   const [hidden, setHidden] = useState<string[]>([]);
@@ -259,7 +265,10 @@ function Catalogue() {
     const generation = (generationRef.current += 1);
     setFeed(restartFeed(generation));
     apiGet<ExploreResult>(url(), controller.signal).then(
-      (page) => setFeed((current) => applyPage(current, generation, page, false)),
+      (page) => {
+        if (generation === generationRef.current) setByMeaning(page.search === 'meaning');
+        setFeed((current) => applyPage(current, generation, page, false));
+      },
       (caught: unknown) => {
         const message = controller.signal.aborted ? '' : toMessage(caught);
         setFeed((current) => (message ? failPage(current, generation, message) : current));
@@ -327,25 +336,30 @@ function Catalogue() {
             <button
               key={value}
               type="button"
-              aria-pressed={sort === value}
+              aria-pressed={!byMeaning && sort === value}
+              disabled={byMeaning}
               onClick={() => setFilters({ sort: value })}
               className={cx(
-                'rounded-md px-3 py-1.5 text-sm transition-colors',
-                sort === value ? 'bg-mint-soft font-semibold text-fg' : 'text-muted hover:text-fg',
+                'rounded-md px-3 py-1.5 text-sm transition-colors disabled:opacity-50',
+                !byMeaning && sort === value ? 'bg-mint-soft font-semibold text-fg' : 'text-muted enabled:hover:text-fg',
               )}
             >
               {t(SORT_LABEL[value])}
             </button>
           ))}
         </div>
-        <TextInput
-          type="search"
-          value={draft}
-          aria-label={t('searchPlaceholder')}
-          placeholder={t('searchPlaceholder')}
-          onChange={(event) => setDraft(event.target.value)}
-          className="w-full sm:w-72"
-        />
+        <div className="w-full space-y-1.5 sm:w-80">
+          <TextInput
+            type="search"
+            value={draft}
+            aria-label={t('searchPlaceholder')}
+            aria-describedby="explore-search-hint"
+            placeholder={t('searchPlaceholder')}
+            onChange={(event) => setDraft(event.target.value)}
+            className="w-full"
+          />
+          <p id="explore-search-hint" className="px-1 text-xs text-muted">{t('searchHint')}</p>
+        </div>
 
       </div>
 
@@ -409,6 +423,9 @@ function Catalogue() {
       <div className="mt-4">
         <ErrorText>{error}</ErrorText>
       </div>
+      {byMeaning && query ? (
+        <p data-testid="explore-by-meaning" className="mt-2 text-xs text-muted">{t('searchByMeaning')}</p>
+      ) : null}
 
       {items === null ? (
         <div className="flex justify-center py-20">

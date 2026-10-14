@@ -13,8 +13,8 @@ import type { ObjectStorage } from './storage.js';
 /** The db handle inside a transaction — same query surface as `Db`. */
 export type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 
-/** The fire-and-forget jobs a finished turn can start. */
-type BackgroundTaskKind = 'memory' | 'relationship' | 'emotion' | 'vectors';
+/** The fire-and-forget jobs a finished turn — or a plot's write, or a search — can start. */
+type BackgroundTaskKind = 'memory' | 'relationship' | 'emotion' | 'vectors' | 'search';
 
 /**
  * A generation claim this instance holds: the exact `chats.generating_at` it

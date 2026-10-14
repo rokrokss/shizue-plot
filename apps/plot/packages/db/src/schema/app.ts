@@ -3,6 +3,7 @@ import type {
   AuthorNoteSettings,
   ChatRetrievalSettings,
   ChatTranslationSettings,
+  EmotionProcessor,
   GroupSettings,
   HypaV3Settings,
   ImportProvenance,
@@ -29,7 +30,6 @@ import {
   timestamp,
   unique,
   uuid,
-  vector,
 } from 'drizzle-orm/pg-core';
 import { user } from './auth.js';
 
@@ -68,9 +68,6 @@ export interface JobPayloadMap {
 }
 export type JobPayload = JobPayloadMap[JobKind];
 
-/** Dimension of the stored embeddings — fixed by the column type. */
-export const EMBEDDING_DIMENSIONS = 1536;
-
 /**
  * The single rolling summary the memory kept before HypaV3 (`chats.memory`).
  * Retired: migration 0011 turned each one into a summary of `chat_summaries`,
@@ -93,6 +90,8 @@ export const MEMORY_CONTEXT_BUDGETS = [8000, 16000, 32000] as const;
  */
 export interface ChatMemorySettings extends Partial<HypaV3Settings> {
   contextBudget?: (typeof MEMORY_CONTEXT_BUDGETS)[number];
+  /** Facts a request may carry (`[기억]`), 0–`MAX_FACT_COUNT`; 0 turns the facts off, extraction too. */
+  factCount?: number;
 }
 
 /** The six relationship axes (WHIF benchmark), in display order. */
@@ -501,6 +500,9 @@ export const chats = pgTable(
     // extraction is the only writer and last write wins.
     relationship: jsonb('relationship').$type<ChatRelationship>(),
     relationshipEnabled: boolean('relationship_enabled').notNull().default(true),
+    // How a reply's emotion picture is chosen (`EmotionProcessor`, RisuAI's
+    // `emotionProcesser`): null is the default, the auxiliary model.
+    emotionProcessor: text('emotion_processor').$type<EmotionProcessor>(),
     // This chat's narrator, standing in for the plot's own. Null means the plot
     // decides, which is what every chat starts out doing.
     narrator: jsonb('narrator').$type<NarratorConfig>(),
@@ -756,8 +758,14 @@ export const messageTranslations = pgTable(
   (t) => [primaryKey({ columns: [t.messageId, t.language] })],
 );
 
-// Long-term facts extracted from a chat — unused since the memory became
-// HypaV3's summaries. Kept for a fact layer the server embedder could revive.
+// The chat's facts (ARCHITECTURE §7.3 사실): up to eight durable ones — names,
+// promises, preferences, relationships, important objects — a separate call of
+// the auxiliary model takes from the messages a summary covers, right after it
+// is written. Each belongs to that summary (`summary_id`), so it applies where
+// the summary applies and goes with it: an edit, a hide or a delete of a covered
+// message, or the reader deleting the summary. `model` is the embedder's id for
+// `embedding`; a fact without a vector of the plot's model is embedded again by
+// the next refresh, as a summary's chunks are.
 export const memories = pgTable(
   'memories',
   {
@@ -771,13 +779,34 @@ export const memories = pgTable(
     chatId: uuid('chat_id')
       .notNull()
       .references(() => chats.id, { onDelete: 'cascade' }),
+    summaryId: uuid('summary_id')
+      .notNull()
+      .references(() => chatSummaries.id, { onDelete: 'cascade' }),
     content: text('content').notNull(),
-    embedding: vector('embedding', { dimensions: EMBEDDING_DIMENSIONS }),
-    sourceMessageId: uuid('source_message_id'),
+    model: text('model'),
+    embedding: anyVector('embedding'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('memories_chat_id_idx').on(t.chatId)],
+  (t) => [index('memories_chat_id_idx').on(t.chatId), index('memories_summary_id_idx').on(t.summaryId)],
 );
+
+// A public plot's searchable text — its name, tags, reader-facing intro and the
+// start of its first opening, never what only the model is told — embedded by
+// the server's embedder with the plot's model for explore's search by meaning
+// (§10). `text_hash` is that text's when it was embedded; a row whose hash or
+// model is not the plot's current one is stale and embedded again. Written for
+// publicly listed plots only, and deleted when one stops being listed; the
+// search still filters by the listing rule itself.
+export const plotSearchVectors = pgTable('plot_search_vectors', {
+  plotId: uuid('plot_id')
+    .primaryKey()
+    .references(() => plots.id, { onDelete: 'cascade' }),
+  model: text('model').notNull(),
+  embedding: anyVector('embedding').notNull(),
+  textHash: text('text_hash').notNull(),
+  embeddedAt: timestamp('embedded_at', { withTimezone: true }).notNull().defaultNow(),
+});
 
 // Reusable author's notes, owned by the account rather than by one chat. The caps
 // (100 per account, 2,000 characters) are enforced by the API.
@@ -936,6 +965,7 @@ export type ChatSummaryChunk = typeof chatSummaryChunks.$inferSelect;
 export type MessageTranslation = typeof messageTranslations.$inferSelect;
 export type Memory = typeof memories.$inferSelect;
 export type NewMemory = typeof memories.$inferInsert;
+export type PlotSearchVector = typeof plotSearchVectors.$inferSelect;
 export type UserNote = typeof userNotes.$inferSelect;
 export type NewUserNote = typeof userNotes.$inferInsert;
 export type ChatNoteLink = typeof chatNoteLinks.$inferSelect;

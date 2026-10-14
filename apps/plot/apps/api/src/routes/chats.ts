@@ -19,6 +19,9 @@ import {
   HYPA_V3_DEFAULTS,
   MAX_CHATS_PER_SUMMARY,
   MAX_QUERY_CHAT_COUNT,
+  MAX_FACT_COUNT,
+  EMOTION_PROCESSORS,
+  type EmotionProcessor,
   MAX_SUMMARIZATION_PROMPT_LENGTH,
   imageMacroRefs,
   isNarration,
@@ -203,6 +206,8 @@ export const toChatJson = (chat: Chat, noteIds: string[]) => ({
   memoryRevision: chat.memoryRevision,
   relationship: chat.relationship,
   relationshipEnabled: chat.relationshipEnabled,
+  /** How a reply's emotion picture is chosen (§7.7): the auxiliary model unless the reader picked the embedder. */
+  emotionProcessor: chat.emotionProcessor ?? 'submodel',
   /** This chat's narrator override; null leaves the plot's own in force. */
   narrator: chat.narrator,
   /** Whether this chat's components may send turns; the reader grants it once. */
@@ -511,7 +516,8 @@ function optionalPreset(body: Record<string, unknown>): string | undefined {
 }
 
 /**
- * Validates `memorySettings`: the context budget from its whitelist, and
+ * Validates `memorySettings`: the context budget from its whitelist, the facts a
+ * request carries (`factCount`, 0–`MAX_FACT_COUNT`), and
  * HypaV3's settings (`HypaV3Settings`) in their ranges — the two shares of the
  * memory budget together at most all of it, the extra summarization at most
  * what the memory leaves. Every key is optional; keys the pipeline does not
@@ -595,6 +601,13 @@ function optionalMemorySettings(body: Record<string, unknown>): ChatMemorySettin
   }
   const maxChatsPerSummary = count('maxChatsPerSummary', MAX_CHATS_PER_SUMMARY);
   const queryChatCount = count('queryChatCount', MAX_QUERY_CHAT_COUNT);
+  const factCount = input['factCount'];
+  if (
+    factCount !== undefined &&
+    (typeof factCount !== 'number' || !Number.isInteger(factCount) || factCount < 0 || factCount > MAX_FACT_COUNT)
+  ) {
+    throw invalid('factCount', `an integer between 0 and ${MAX_FACT_COUNT}`);
+  }
   const doNotSummarizeUserMessage = input['doNotSummarizeUserMessage'];
   if (doNotSummarizeUserMessage !== undefined && typeof doNotSummarizeUserMessage !== 'boolean') {
     throw invalid('doNotSummarizeUserMessage', 'a boolean');
@@ -617,10 +630,24 @@ function optionalMemorySettings(body: Record<string, unknown>): ChatMemorySettin
     ...(recentMemoryRatio !== undefined ? { recentMemoryRatio } : {}),
     ...(similarMemoryRatio !== undefined ? { similarMemoryRatio } : {}),
     ...(queryChatCount !== undefined ? { queryChatCount } : {}),
+    ...(factCount !== undefined ? { factCount: factCount as number } : {}),
     ...(doNotSummarizeUserMessage !== undefined ? { doNotSummarizeUserMessage } : {}),
     // An empty prompt is the default one, which a missing key already says.
     ...(typeof summarizationPrompt === 'string' && summarizationPrompt.trim() !== '' ? { summarizationPrompt } : {}),
   };
+}
+
+/**
+ * Validates `emotionProcessor`, one of `EMOTION_PROCESSORS`. The default,
+ * `submodel`, is stored as null, as an unset chat has it.
+ */
+function optionalEmotionProcessor(body: Record<string, unknown>): EmotionProcessor | null | undefined {
+  const value = body['emotionProcessor'];
+  if (value === undefined) return undefined;
+  if (!EMOTION_PROCESSORS.includes(value as EmotionProcessor)) {
+    throw badRequest('invalid_request', `emotionProcessor must be one of ${EMOTION_PROCESSORS.join(', ')}`);
+  }
+  return value === 'submodel' ? null : (value as EmotionProcessor);
 }
 
 /**
@@ -1956,6 +1983,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const readerPresetId =
         'readerPresetId' in body ? await resolveReaderPresetId(deps, userId, body['readerPresetId']) : undefined;
       const relationshipEnabled = optionalBoolean(body, 'relationshipEnabled');
+      const emotionProcessor = optionalEmotionProcessor(body);
       const memorySettings = optionalMemorySettings(body);
       const allowComponentTurns = optionalBoolean(body, 'allowComponentTurns');
       const statusWindowEnabled = optionalBoolean(body, 'statusWindowEnabled');
@@ -1978,6 +2006,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         preset === undefined &&
         readerPresetId === undefined &&
         relationshipEnabled === undefined &&
+        emotionProcessor === undefined &&
         memorySettings === undefined &&
         allowComponentTurns === undefined &&
         statusWindowEnabled === undefined &&
@@ -1999,6 +2028,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           ...(preset !== undefined ? { preset } : {}),
           ...(readerPresetId !== undefined ? { readerPresetId } : {}),
           ...(relationshipEnabled !== undefined ? { relationshipEnabled } : {}),
+          ...(emotionProcessor !== undefined ? { emotionProcessor } : {}),
           ...(memorySettings !== undefined ? { memorySettings } : {}),
           ...(allowComponentTurns !== undefined ? { allowComponentTurns } : {}),
           ...(statusWindowEnabled !== undefined ? { statusWindowEnabled } : {}),

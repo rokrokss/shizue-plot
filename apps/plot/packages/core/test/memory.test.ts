@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   HYPA_V3_DEFAULTS,
   HYPA_V3_SUMMARIZATION_PROMPT,
+  SUMMARY_LANGUAGE_LINE,
   memoryBlock,
   memoryTokenBudget,
   nextSummaryBatch,
@@ -270,10 +271,15 @@ describe('nextSummaryBatch', () => {
 });
 
 describe('summarizationTurns', () => {
-  it('sends the messages and then HypaV3’s instruction as a system turn', () => {
+  it('sends the messages and then HypaV3’s instruction as a system turn, with the conversation’s language asked for', () => {
     expect(summarizationTurns('A: hi', '')).toEqual([
       { role: 'user', content: 'A: hi' },
-      { role: 'system', content: HYPA_V3_SUMMARIZATION_PROMPT },
+      { role: 'system', content: `${HYPA_V3_SUMMARIZATION_PROMPT}\n${SUMMARY_LANGUAGE_LINE}` },
+    ]);
+    // A chat's own prompt goes as written.
+    expect(summarizationTurns('A: hi', 'Summarize briefly.')).toEqual([
+      { role: 'user', content: 'A: hi' },
+      { role: 'system', content: 'Summarize briefly.' },
     ]);
   });
 

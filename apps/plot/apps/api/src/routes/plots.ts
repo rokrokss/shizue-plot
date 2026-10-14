@@ -116,6 +116,7 @@ import {
   toPublicPlotJson,
   visibleToViewer,
 } from '../hub.js';
+import { scheduleSearchVector } from '../search.js';
 import { enqueueJob } from '../jobs.js';
 import { createRemoteFetch, localizePlot, type LocalizeScope } from '../localizeAssets.js';
 import { requireUser } from '../session.js';
@@ -1369,6 +1370,8 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     });
     // The book, or the language that picks the model its vectors are of.
     scheduleLoreEmbedding(deps, id);
+    // Its searchable text may have changed (`search.ts`); a private plot has no vector to change.
+    if (updated.visibility === 'public') scheduleSearchVector(deps, id);
     return c.json(await ownerView(deps, updated));
   });
 
@@ -1478,6 +1481,8 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       }
       return row!;
     });
+    // Listed now, or not any more: its vector is written, or deleted (`search.ts`).
+    scheduleSearchVector(deps, id);
     return c.json(await ownerView(deps, updated));
   });
 

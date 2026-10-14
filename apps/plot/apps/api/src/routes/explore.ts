@@ -1,11 +1,12 @@
-import { follows, plots, plotLikes, user, type Db, type Plot } from '@shizue/db';
-import { and, eq, ilike, inArray, notInArray, sql, type SQL } from 'drizzle-orm';
+import { follows, plots, plotLikes, plotSearchVectors, user, type ContentLanguage, type Db, type Plot } from '@shizue/db';
+import { and, eq, ilike, inArray, notInArray, or, sql, type SQL } from 'drizzle-orm';
 import type { PgColumn } from 'drizzle-orm/pg-core';
 import { Hono } from 'hono';
 import type { AppDeps, AppEnv } from '../deps.js';
 import { badRequest, notFound } from '../errors.js';
 import { pageSnapshotFeed } from '../feedCursor.js';
-import { publiclyListed, publicPlotList, publicPlotQuery } from '../hub.js';
+import { publiclyListed, publicPlotList, publicPlotQuery, type PublicPlotRow } from '../hub.js';
+import { scheduleSearchSweep } from '../search.js';
 import { requireUser } from '../session.js';
 import { isUuid } from '../util.js';
 import { requireLanguage } from './plots.js';
@@ -21,6 +22,18 @@ const SORT_COLUMNS = {
   chats: plots.chatCount,
   likes: plots.likeCount,
 } as const;
+
+/**
+ * Search by meaning (`plot_search_vectors`, `search.ts`): a plot is a match
+ * when its name contains the query or its text's vector is at least this close
+ * to the query's, and at most `MEANING_RESULTS` are ranked, past which nearness
+ * says little. Measured on KURE-v1 (ARCHITECTURE §10): the work a query was
+ * about scored 0.48–0.72, the others 0.29–0.48.
+ */
+export const MEANING_MIN_SIMILARITY = 0.45;
+const MEANING_RESULTS = 96;
+/** How long a search waits to embed its query before it searches the text instead. */
+const MEANING_EMBED_TIMEOUT_MS = 3_000;
 
 /** How far back 주간 인기 counts a like. */
 const WEEKLY_WINDOW = sql`interval '7 days'`;
@@ -130,12 +143,77 @@ function coerceLimit(value: string | undefined): number {
 /** LIKE wildcards in user input are literal characters, not operators. */
 const escapeLike = (value: string): string => value.replace(/[\\%_]/g, '\\$&');
 
+/** A page of a search by meaning: how far into the ranking it starts. */
+const encodeMeaningCursor = (offset: number): string =>
+  Buffer.from(JSON.stringify({ meaning: offset }), 'utf-8').toString('base64url');
+
+/** The offset a search-by-meaning cursor names, or null for any other cursor. */
+function meaningOffset(raw: string): number | null {
+  try {
+    const parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf-8')) as { meaning?: unknown } | null;
+    const offset = parsed?.meaning;
+    return typeof offset === 'number' && Number.isInteger(offset) && offset >= 0 ? offset : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One page of explore's search by meaning, or null when it cannot run — no
+ * embedder for the partition's language, or the query not embedded in time —
+ * and the text search answers instead. The query is embedded with the
+ * partition's model, so only the plots of that partition, which embed with the
+ * same model, are compared. Every plot the text search would list stays in
+ * reach: a name containing the query ranks first, then nearness.
+ */
+async function pageByMeaning(
+  deps: AppDeps,
+  input: { language: ContentLanguage; q: string; filters: SQL[]; viewerId: string | null; limit: number; offset: number },
+): Promise<{ rows: PublicPlotRow[]; nextCursor: string | null } | null> {
+  const embedder = deps.embedder;
+  const model = embedder?.modelFor(input.language);
+  if (!embedder || !model) return null;
+  let vector: number[];
+  try {
+    const embedded = await embedder.embed([input.q], {
+      plotLanguage: input.language,
+      kind: 'query',
+      timeoutMs: MEANING_EMBED_TIMEOUT_MS,
+    });
+    if (embedded.model !== model) return null;
+    vector = embedded.vectors[0]!;
+  } catch (error) {
+    console.warn('[explore] the query could not be embedded; searching the text', error);
+    return null;
+  }
+  scheduleSearchSweep(deps, input.language, model);
+
+  const take = Math.max(0, Math.min(input.limit, MEANING_RESULTS - input.offset));
+  if (take === 0) return { rows: [], nextCursor: null };
+  const distance = sql`(${plotSearchVectors.embedding} <=> ${JSON.stringify(vector)}::vector)`;
+  const named = ilike(plots.name, `%${escapeLike(input.q)}%`);
+  const rows = await publicPlotQuery(deps.db, input.viewerId)
+    // Only a vector of the partition's model: another's is stale, and of another length.
+    .leftJoin(plotSearchVectors, and(eq(plotSearchVectors.plotId, plots.id), eq(plotSearchVectors.model, model)))
+    .where(and(...input.filters, or(named, sql`1 - ${distance} >= ${MEANING_MIN_SIMILARITY}`)))
+    .orderBy(sql`${named} desc`, sql`${distance} asc nulls last`, descNullsLast(plots.id))
+    .limit(take + 1)
+    .offset(input.offset);
+  const more = rows.length > take && input.offset + take < MEANING_RESULTS;
+  return { rows: rows.slice(0, take), nextCursor: more ? encodeMeaningCursor(input.offset + take) : null };
+}
+
 /**
  * GET /api/explore — the public catalogue of plots, hard-partitioned by content
  * language. Explore *is* plots: a character has no exposure of its own, so
  * there is no second rail beside this one. Ordering is (sort key desc, id desc).
  * `recent` walks it with a keyset cursor; the counter sorts walk a snapshot
  * instead, because the counters move while the reader pages (feedCursor.ts).
+ *
+ * With `q` the catalogue is searched by meaning where the embedder can
+ * (`pageByMeaning`): ranked by nearness, `sort` aside, paged by offset. Where it
+ * cannot, the name is searched as text in the chosen sort. `search` says which
+ * answered.
  */
 export function exploreRoutes(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
@@ -149,13 +227,27 @@ export function exploreRoutes(deps: AppDeps): Hono<AppEnv> {
     const rawCursor = c.req.query('cursor');
     const viewerId = c.get('viewerId');
 
-    /** Everything the catalogue shows this reader, whatever the sort. */
-    const listed = (): SQL[] => [
+    /** Everything the catalogue shows this reader, whatever the sort or the search. */
+    const filters = (): SQL[] => [
       publiclyListed(),
       eq(plots.language, language),
-      ...(q ? [ilike(plots.name, `%${escapeLike(q)}%`)] : []),
       ...(tag ? [sql`${plots.tags} @> ARRAY[${tag}]::text[]`] : []),
     ];
+    /** …and of those, the ones the text search finds. */
+    const listed = (): SQL[] => [...filters(), ...(q ? [ilike(plots.name, `%${escapeLike(q)}%`)] : [])];
+
+    // A text search's cursor goes on as a text search: the reader paging it
+    // should not find the ranking changing under them.
+    const offset = q ? (rawCursor ? meaningOffset(rawCursor) : 0) : null;
+    if (q && offset !== null) {
+      const page = await pageByMeaning(deps, { language, q, filters: filters(), viewerId, limit, offset });
+      if (page) {
+        return c.json({ items: await publicPlotList(deps.db, page.rows), nextCursor: page.nextCursor, search: 'meaning' });
+      }
+      // The embedder went away mid-walk: the ranking it was paging is gone.
+      if (rawCursor) return c.json({ items: [], nextCursor: null, search: 'text' });
+    }
+    const search = q ? { search: 'text' as const } : {};
 
     if (sort !== 'recent') {
       const { items, nextCursor } = await pageSnapshotFeed(deps.db, rawCursor, limit, {
@@ -168,7 +260,7 @@ export function exploreRoutes(deps: AppDeps): Hono<AppEnv> {
           publicPlotQuery(reader, viewerId).where(and(...listed(), inArray(plots.id, ids))),
         idOf: (row) => row.plot.id,
       });
-      return c.json({ items: await publicPlotList(deps.db, items), nextCursor });
+      return c.json({ items: await publicPlotList(deps.db, items), nextCursor, ...search });
     }
 
     const rows = await publicPlotQuery(deps.db, viewerId)
@@ -182,6 +274,7 @@ export function exploreRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.json({
       items: await publicPlotList(deps.db, page),
       nextCursor: rows.length > limit && last ? encodeCursor(cursorOf(last.plot)) : null,
+      ...search,
     });
   });
 

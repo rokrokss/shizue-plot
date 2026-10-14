@@ -20,6 +20,7 @@ import {
   groupSpeakerLine,
   HYPA_V3_DEFAULTS,
   HYPA_V3_SUMMARIZATION_PROMPT,
+  DEFAULT_SUMMARIZATION_INSTRUCTION,
   IMAGE_ATTACHED_PLACEHOLDER,
   loreEntryKey,
   MAX_ASSETS,
@@ -34,6 +35,8 @@ import {
   MAX_INTROS_PER_PLOT,
   MAX_READER_PRESETS,
   MAX_VARIABLE_VALUE_LENGTH,
+  FACT_EXTRACTION_PROMPT,
+  FACTS_HEADING,
   MEMORY_HEADING,
   NARRATOR_SPEAKER,
   parseCard,
@@ -69,11 +72,13 @@ import {
   jobs,
   loreEntryVectors,
   messageChunks,
+  memories,
   messages,
   messageTranslations,
   notifications,
   plots,
   plotAssets,
+  plotSearchVectors,
   readerPresets,
   user,
   userNotes,
@@ -129,6 +134,7 @@ import {
 } from '../src/jobs.js';
 import type { Embedder } from '../src/embedder.js';
 import { BACKFILL_BATCHES_PER_RUN, embedPendingSummaries } from '../src/memory.js';
+import { refreshSearchVectors, resetSearchSweeps } from '../src/search.js';
 import { createJobHandlers, notificationFanout } from '../src/notifications.js';
 import { repairDisplayOrder } from '../src/maintenance/displayOrder.js';
 import { repairMemberScripts } from '../src/maintenance/memberScripts.js';
@@ -7747,6 +7753,8 @@ describe('memory', () => {
     prompts: Captured[];
     /** Summary requests to the memory channel, in order. */
     summaries: Captured[];
+    /** Fact extractions (`facts.ts`) sent to it, in order. */
+    facts: Captured[];
     /** Every background refresh actually scheduled — one entry per refresh. */
     tasks: Promise<void>[];
     /** Awaits the fire-and-forget work started so far, of every kind. */
@@ -7766,14 +7774,21 @@ describe('memory', () => {
 
   /**
    * App whose chat model is the real echo adapter (captured on the way in) and whose
-   * memory channel is a stub answering a fixed summary.
+   * memory channel is a stub answering a fixed summary — and `factsText` to a
+   * fact extraction, nothing by default.
    */
   function memoryApp(
-    options: Partial<AppDeps> & { summaryText?: string; summaryGate?: Promise<void> } = {},
+    options: Partial<AppDeps> & {
+      summaryText?: string;
+      summaryGate?: Promise<void>;
+      factsText?: string;
+      factsGate?: Promise<void>;
+    } = {},
   ): Harness {
-    const { summaryText = SUMMARY, summaryGate, ...overrides } = options;
+    const { summaryText = SUMMARY, summaryGate, factsText = '', factsGate, ...overrides } = options;
     const prompts: Captured[] = [];
     const summaries: Captured[] = [];
+    const facts: Captured[] = [];
     const tasks: Promise<void>[] = [];
     const pending: Promise<void>[] = [];
     const echo = createEchoAdapter();
@@ -7798,6 +7813,12 @@ describe('memory', () => {
             // enough to trigger it, and its calls are not summaries. An empty answer
             // is dropped silently, which is what this harness wants.
             if (req.system.includes('관계 분석가')) {
+              return { usage: { promptTokens: 0, completionTokens: 0 } };
+            }
+            if (req.system.includes('{"facts": string[]}')) {
+              facts.push({ system: req.system, messages: req.messages });
+              if (factsGate) await factsGate;
+              if (factsText) yield { type: 'text', text: factsText };
               return { usage: { promptTokens: 0, completionTokens: 0 } };
             }
             // Recorded before the gate, so a blocked refresh is still observable.
@@ -7826,6 +7847,7 @@ describe('memory', () => {
       handlers: createJobHandlers(deps),
       prompts,
       summaries,
+      facts,
       tasks,
       settle: async () => {
         await Promise.all(pending);
@@ -7936,7 +7958,9 @@ describe('memory', () => {
     const ask = harness.summaries[0]!;
     expect(ask.system).toBe('');
     expect(ask.messages).toHaveLength(2);
-    expect(ask.messages[1]).toEqual({ role: 'system', content: HYPA_V3_SUMMARIZATION_PROMPT });
+    // HypaV3's, with our line asking for the conversation's language.
+    expect(ask.messages[1]).toEqual({ role: 'system', content: DEFAULT_SUMMARIZATION_INSTRUCTION });
+    expect(DEFAULT_SUMMARIZATION_INSTRUCTION.startsWith(HYPA_V3_SUMMARIZATION_PROMPT)).toBe(true);
     expect(transcriptOf(ask)).toContain(sent[0]!);
     expect(transcriptOf(ask)).not.toContain(sent[3]!);
 
@@ -8288,6 +8312,288 @@ describe('memory', () => {
       const harness = memoryApp();
       const chatId = await similarChat(cookie, harness);
       expect(await ask(cookie, chatId, harness, '고양이는 어디 갔지?')).toContain(`${MEMORY_HEADING}\n등대 불빛이 꺼진 아침이었다.`);
+    });
+  });
+
+  describe('facts', () => {
+    // Each about one of the keyword embedder's words, so each has a direction of its own.
+    const FACTS = ['리안은 고양이를 무서워한다.', '유저는 등대 열쇠를 갖고 있다.', '지도는 리안의 서랍에 있다.'];
+
+    const factsOf = (chatId: string) =>
+      db.select().from(memories).where(eq(memories.chatId, chatId)).orderBy(asc(memories.createdAt), asc(memories.id));
+
+    /** The facts block of a request's system text, or '' where it has none. */
+    const factsBlockOf = (system: string): string => {
+      const at = system.indexOf(FACTS_HEADING);
+      return at < 0 ? '' : system.slice(at).split('\n\n')[0]!;
+    };
+
+    const ask = async (cookie: string, chatId: string, harness: Harness, content: string): Promise<string> => {
+      const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }, harness.app);
+      expect((await readSse(res)).at(-1)!.event).toBe('done');
+      return harness.prompts.at(-1)!.system;
+    };
+
+    /** Stores a fact of `summaryId` as an extraction would, embedded by `embedder`. */
+    async function insertFact(chatId: string, summaryId: string, content: string, embedder?: Embedder) {
+      const [chat] = await db.select().from(chats).where(eq(chats.id, chatId));
+      const embedded = embedder ? await embedder.embed([content], { plotLanguage: 'ko' }) : null;
+      const [row] = await db
+        .insert(memories)
+        .values({
+          userId: chat!.userId,
+          plotId: chat!.plotId,
+          chatId,
+          summaryId,
+          content,
+          model: embedded?.model ?? null,
+          embedding: embedded?.vectors[0] ?? null,
+        })
+        .returning();
+      return row!;
+    }
+
+    it('extracts the facts of a summary just written, embeds them, and sends the closest after the summaries', async () => {
+      const cookie = await signUp('facts-extract@example.com');
+      const { chatId } = await setupChat(cookie);
+      const embedder = keywordEmbedder();
+      // A fence around the JSON, and one fact said twice: both are read past.
+      const harness = memoryApp({
+        embedder,
+        factsText: '```json\n' + JSON.stringify({ facts: [...FACTS, ` ${FACTS[0]} `] }) + '\n```',
+      });
+      await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000 } });
+
+      const sent = await fillUntilSummary(cookie, chatId, harness);
+      await harness.settle();
+
+      // A call of its own after the summary's: the instruction, then the messages the summary was made from.
+      expect(harness.facts.length).toBeGreaterThanOrEqual(1);
+      const [extraction] = harness.facts;
+      expect(extraction!.system.startsWith(FACT_EXTRACTION_PROMPT.slice(0, FACT_EXTRACTION_PROMPT.indexOf('{{language}}')))).toBe(true);
+      expect(extraction!.messages).toHaveLength(1);
+      expect(transcriptOf(extraction!)).toContain(sent[0]!);
+      expect(transcriptOf(extraction!)).toBe(transcriptOf(harness.summaries[0]!));
+
+      // Stored once each — a later summary's same facts are the branch's already —
+      // with the first summary, and embedded with the plot's model.
+      const [first] = await summariesOf(cookie, chatId);
+      const stored = await factsOf(chatId);
+      expect(stored.map((row) => row.content)).toEqual(FACTS);
+      expect(stored.every((row) => row.summaryId === first.id)).toBe(true);
+      expect(stored.every((row) => row.model === 'test-embedder' && row.embedding?.length === 4)).toBe(true);
+      const listed = await readJson(await request(cookie, `/api/chats/${chatId}/memory`, 'GET', undefined, harness.app));
+      expect(listed.facts.map((fact: any) => [fact.content, fact.summaryId])).toEqual(FACTS.map((fact) => [fact, first.id]));
+
+      // The next turn carries the closest, after the summaries, no more than the chat asks for.
+      await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000, factCount: 1 } });
+      const system = await ask(cookie, chatId, harness, '등대 열쇠는 어디 있지?');
+      expect(factsBlockOf(system)).toBe(`${FACTS_HEADING}\n- ${FACTS[1]}`);
+      expect(system.indexOf(FACTS_HEADING)).toBeGreaterThan(system.indexOf(MEMORY_HEADING));
+
+      // Two, in the order their summaries stand on the branch, then extraction order.
+      await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000, factCount: 2 } });
+      expect(factsBlockOf(await ask(cookie, chatId, harness, '등대와 지도'))).toBe(
+        `${FACTS_HEADING}\n- ${FACTS[1]}\n- ${FACTS[2]}`,
+      );
+    });
+
+    it('leaves out what a summary it sends already says, and a fact another one already says', async () => {
+      const cookie = await signUp('facts-dedupe@example.com');
+      const { chatId } = await setupChat(cookie);
+      const embedder = keywordEmbedder();
+      const harness = memoryApp({ embedder });
+      const ids = (await shortTurns(cookie, chatId, harness, 2)).map((message: any) => message.id);
+      const summary = await seedSummary(chatId, ids.slice(0, 3), '고양이가 서점에 들어왔다.');
+      await embedPendingSummaries(harness.deps, chatId);
+      // Said by the summary word for word; said by it in other words (its vector);
+      // and two that say one thing about the lighthouse.
+      await insertFact(chatId, summary.id, '고양이가 서점에 들어왔다', embedder);
+      await insertFact(chatId, summary.id, '리안은 고양이를 무서워한다.', embedder);
+      await insertFact(chatId, summary.id, '유저는 등대 열쇠를 갖고 있다.', embedder);
+      await insertFact(chatId, summary.id, '등대 열쇠는 유저가 가지고 있다.', embedder);
+
+      const system = await ask(cookie, chatId, harness, '고양이와 등대 이야기');
+      expect(system).toContain(`${MEMORY_HEADING}\n고양이가 서점에 들어왔다.`);
+      expect(factsBlockOf(system)).toBe(`${FACTS_HEADING}\n- 유저는 등대 열쇠를 갖고 있다.`);
+    });
+
+    it('carries only the facts of the summaries on the branch, and drops them with the summary an edit drops', async () => {
+      const cookie = await signUp('facts-branch@example.com');
+      const { chatId } = await setupChat(cookie);
+      const embedder = keywordEmbedder();
+      const harness = memoryApp({ embedder });
+      const path = await shortTurns(cookie, chatId, harness, 2);
+      const ids = path.map((message: any) => message.id);
+      const front = await seedSummary(chatId, ids.slice(0, 3), '앞 요약.');
+      const back = await seedSummary(chatId, ids.slice(3, 5), '뒤 요약.');
+      await insertFact(chatId, front.id, FACTS[1]!, embedder);
+      await insertFact(chatId, back.id, FACTS[0]!, embedder);
+      const listed = async () =>
+        (await readJson(await request(cookie, `/api/chats/${chatId}/memory`, 'GET', undefined, harness.app))).facts.map(
+          (fact: any) => fact.content,
+        );
+      expect(await listed()).toEqual([FACTS[1], FACTS[0]]);
+
+      // A regenerate leaves the last reply — which the back summary covers — on another branch,
+      // and the turns after it carry only the front summary's fact.
+      await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app));
+      await harness.settle();
+      expect(await listed()).toEqual([FACTS[1]]);
+      expect(factsBlockOf(await ask(cookie, chatId, harness, '고양이와 등대'))).toBe(`${FACTS_HEADING}\n- ${FACTS[1]}`);
+      await harness.settle();
+
+      // An edit of a message the front summary covers takes the summary, and its fact with it.
+      expect(path[2].role).toBe('assistant');
+      await json(cookie, `/api/messages/${ids[2]}`, 'PATCH', { content: '고친 답변' }, harness.app);
+      await harness.settle();
+      expect((await factsOf(chatId)).map((row) => row.content)).toEqual([FACTS[0]]);
+    });
+
+    it("builds a Korean conversation's memory in Korean on an English card, and leaves a chat's own prompt as written", async () => {
+      const cookie = await signUp('facts-language@example.com');
+      const { plotId, chatId } = await setupChat(cookie);
+      await db.update(plots).set({ language: 'en' }).where(eq(plots.id, plotId));
+      const harness = memoryApp({ embedder: keywordEmbedder(), factsText: JSON.stringify({ facts: FACTS }) });
+      await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000 } });
+      await fillUntilSummary(cookie, chatId, harness);
+      await harness.settle();
+      // The summary is asked for in the conversation's language, the facts in Korean — the turns', not the plot's.
+      expect(harness.summaries[0]!.messages.at(-1)).toEqual({ role: 'system', content: DEFAULT_SUMMARIZATION_INSTRUCTION });
+      expect(harness.facts[0]!.system).toContain('대화가 한국어로 이어지고 있으므로 사실은 한국어로 씁니다.');
+
+      // A chat's own summarization prompt goes as the reader wrote it.
+      const other = await setupChat(cookie);
+      const custom = memoryApp({ embedder: keywordEmbedder() });
+      await json(cookie, `/api/chats/${other.chatId}`, 'PATCH', {
+        memorySettings: { contextBudget: 8000, summarizationPrompt: 'Summarize briefly.' },
+      });
+      await fillUntilSummary(cookie, other.chatId, custom);
+      await custom.settle();
+      expect(custom.summaries[0]!.messages.at(-1)).toEqual({ role: 'system', content: 'Summarize briefly.' });
+    });
+
+    it('stands after the summaries and before the Past events retrieval brings back', async () => {
+      const cookie = await signUp('facts-order@example.com');
+      const { chatId } = await setupChat(cookie);
+      const embedder = keywordEmbedder();
+      const harness = memoryApp({ embedder });
+      await json(cookie, `/api/chats/${chatId}`, 'PATCH', { retrieval: { enabled: true } }, harness.app);
+      for (const content of ['등대지기를 만났다', '날씨 이야기', '빵 이야기', '책 이야기', '노래 이야기']) {
+        await ask(cookie, chatId, harness, content);
+      }
+      await harness.settle();
+      const path = (await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app))).path;
+      const summary = await seedSummary(chatId, [path[0].id], '첫 인사를 나눴다.');
+      await insertFact(chatId, summary.id, FACTS[1]!, embedder);
+
+      const system = await ask(cookie, chatId, harness, '그 등대 기억나?');
+      const at = [
+        system.indexOf(`${MEMORY_HEADING}\n첫 인사를 나눴다.`),
+        system.indexOf(`${FACTS_HEADING}\n- ${FACTS[1]}`),
+        system.indexOf('Past events:'),
+      ];
+      expect(at.every((index) => index >= 0), system).toBe(true);
+      expect(at).toEqual([...at].sort((a, b) => a - b));
+    });
+
+    it('stores nothing when an edit drops the summary while its facts are being extracted', async () => {
+      const cookie = await signUp('facts-race@example.com');
+      const { chatId } = await setupChat(cookie);
+      const blocked = gate();
+      const harness = memoryApp({
+        embedder: keywordEmbedder(),
+        factsText: JSON.stringify({ facts: FACTS }),
+        factsGate: blocked.wait,
+      });
+      await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000 } });
+      await fillUntilSummary(cookie, chatId, harness);
+      await until(async () => harness.facts.length === 1, 'the extraction never started');
+
+      // The summary is written; its facts are not. The greeting it covers is edited.
+      const state = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
+      await json(cookie, `/api/messages/${state.path[0].id}`, 'PATCH', { content: '고친 인사' }, harness.app);
+      blocked.open();
+      await harness.settle();
+      const written = await db.select({ id: chatSummaries.id }).from(chatSummaries).where(eq(chatSummaries.chatId, chatId));
+      const stored = await factsOf(chatId);
+      // Whatever the gap's new summary brought is its own; nothing is the dropped one's.
+      expect(stored.every((row) => written.some((summary) => summary.id === row.summaryId))).toBe(true);
+    });
+
+    it('extracts and sends nothing with factCount 0, for a plot without a model, or with the embedder down', async () => {
+      const cookie = await signUp('facts-off@example.com');
+      const { chatId } = await setupChat(cookie);
+      const harness = memoryApp({ embedder: keywordEmbedder(), factsText: JSON.stringify({ facts: FACTS }) });
+      await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000, factCount: 0 } });
+      await fillUntilSummary(cookie, chatId, harness);
+      await harness.settle();
+      expect(harness.facts).toEqual([]);
+      expect(await factsOf(chatId)).toEqual([]);
+
+      // A fact there is is not sent while the chat asks for none…
+      const [summary] = await summariesOf(cookie, chatId);
+      await insertFact(chatId, summary.id, FACTS[1]!, keywordEmbedder());
+      expect(factsBlockOf(await ask(cookie, chatId, harness, '등대 열쇠?'))).toBe('');
+
+      // …nor, asking for some, when the embedder cannot run for the plot (nothing is extracted then either)…
+      await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000 } });
+      const unrouted = memoryApp({ embedder: { ...keywordEmbedder(), modelFor: () => null }, factsText: JSON.stringify({ facts: FACTS }) });
+      expect(factsBlockOf(await ask(cookie, chatId, unrouted, '등대 열쇠?'))).toBe('');
+      // …nor when it fails: the turn goes on without the block.
+      const down = memoryApp({ embedder: keywordEmbedder('test-embedder', true) });
+      const system = await ask(cookie, chatId, down, '등대 열쇠?');
+      expect(factsBlockOf(system)).toBe('');
+      expect(system).toContain(MEMORY_HEADING);
+      await harness.settle();
+      await unrouted.settle();
+      await down.settle();
+      expect(unrouted.facts).toEqual([]);
+    });
+
+    it('lists, rewrites and deletes a fact for its owner, embeds the rewrite again, and checks factCount', async () => {
+      const cookie = await signUp('facts-routes@example.com');
+      const other = await signUp('facts-routes-other@example.com');
+      const { chatId } = await setupChat(cookie);
+      const embedder = keywordEmbedder();
+      const harness = memoryApp({ embedder });
+      const ids = (await shortTurns(cookie, chatId, harness, 2)).map((message: any) => message.id);
+      const summary = await seedSummary(chatId, ids.slice(0, 3));
+      const kept = await insertFact(chatId, summary.id, FACTS[0]!, embedder);
+      const gone = await insertFact(chatId, summary.id, FACTS[2]!, embedder);
+      const base = `/api/chats/${chatId}/memory/facts`;
+
+      // The reader's rewrite: its old vector goes, and the refresh it schedules embeds the new words.
+      const patched = await json(cookie, `${base}/${kept.id}`, 'PATCH', { content: '  리안은 개를  좋아한다. ' }, harness.app);
+      expect(patched.status).toBe(200);
+      expect((await readJson(patched)).fact).toMatchObject({ id: kept.id, content: '리안은 개를 좋아한다.', summaryId: summary.id });
+      await harness.settle();
+      const [rewritten] = await db.select().from(memories).where(eq(memories.id, kept.id));
+      expect(rewritten).toMatchObject({ content: '리안은 개를 좋아한다.', model: 'test-embedder' });
+      expect(rewritten!.embedding).toHaveLength(4);
+      expect((await json(cookie, `${base}/${kept.id}`, 'PATCH', { content: ' ' })).status).toBe(400);
+      expect((await json(cookie, `${base}/${kept.id}`, 'PATCH', { content: 'ㄱ'.repeat(301) })).status).toBe(400);
+
+      // Nobody else's to read, change or delete.
+      expect((await request(other, `/api/chats/${chatId}/memory`)).status).toBe(404);
+      expect((await json(other, `${base}/${kept.id}`, 'PATCH', { content: '남의 것' })).status).toBe(404);
+      expect((await request(other, `${base}/${gone.id}`, 'DELETE')).status).toBe(404);
+
+      expect((await request(cookie, `${base}/${gone.id}`, 'DELETE')).status).toBe(204);
+      expect((await request(cookie, `${base}/${gone.id}`, 'DELETE')).status).toBe(404);
+      const listed = await readJson(await request(cookie, `/api/chats/${chatId}/memory`));
+      expect(listed.facts.map((fact: any) => fact.id)).toEqual([kept.id]);
+
+      // Deleting the summary takes its facts.
+      expect((await request(cookie, `/api/chats/${chatId}/memory/${summary.id}`, 'DELETE')).status).toBe(204);
+      expect(await factsOf(chatId)).toEqual([]);
+
+      // factCount is 0–10.
+      for (const factCount of [-1, 11, 2.5, '3']) {
+        expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { factCount } })).status).toBe(400);
+      }
+      const saved = await readJson(await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { factCount: 0 } }));
+      expect(saved.chat.memorySettings).toEqual({ factCount: 0 });
     });
   });
 
@@ -15809,7 +16115,7 @@ describe('emotion images', () => {
     );
 
   /** An app whose chat model echoes and whose auxiliary model answers `answer`. */
-  function emotionApp(answer: string) {
+  function emotionApp(answer: string, overrides: Partial<AppDeps> = {}) {
     const tasks: Promise<void>[] = [];
     const asked: { system: string; messages: ChatRequest['messages']; maxTokens: number }[] = [];
     const prompts: { system: string; messages: ChatRequest['messages'] }[] = [];
@@ -15841,6 +16147,7 @@ describe('emotion images', () => {
                 },
               },
         onBackgroundTask: (task) => void tasks.push(task),
+        ...overrides,
       }),
       settle: async () => {
         await Promise.all(tasks);
@@ -15938,6 +16245,66 @@ describe('emotion images', () => {
     expect(
       (await request(other, `/api/chats/${chatId}/messages/${done.messageId}/emotion`, 'GET', undefined, harness.app)).status,
     ).toBe(404);
+  });
+
+  it('chooses by the embedder where the reader picks it, as RisuAI’s embedding processor does', async () => {
+    const cookie = await signUp('emotion-embedding@example.com');
+    const plot = await importCard(cookie, emotionCard({ viewScreen: 'emotion' }));
+    // A slot per picture: its name, or a word of the reply that leans to it. `ㅎ` leans a little.
+    const calls: { texts: string[]; kind: string | undefined }[] = [];
+    const embedder: Embedder = {
+      modelFor: () => 'test-emotion',
+      async embed(texts, { kind }) {
+        calls.push({ texts: [...texts], kind });
+        const count = (text: string, word: string): number => text.split(word).length - 1;
+        const vectors = texts.map((text) => [
+          0.1 + count(text, 'happy') + count(text, '좋아') + 0.03 * count(text, 'ㅎ'),
+          0.1 + count(text, 'Angry') + count(text, '화나'),
+          0.1 + count(text, 'neutral'),
+        ]);
+        return { model: 'test-emotion', vectors };
+      },
+      warm() {},
+      async close() {},
+    };
+    const harness = emotionApp('happy', { embedder });
+    const chat = await startChat(cookie, plot.id);
+    const chatId = chat.chat.id;
+
+    // Only RisuAI's two processors, the auxiliary model the default.
+    expect(chat.chat.emotionProcessor).toBe('submodel');
+    expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { emotionProcessor: 'vibes' })).status).toBe(400);
+    const patched = await readJson(await json(cookie, `/api/chats/${chatId}`, 'PATCH', { emotionProcessor: 'embedding' }));
+    expect(patched.chat.emotionProcessor).toBe('embedding');
+
+    const first = await send(cookie, chatId, { content: '정말 좋아!' }, harness.app);
+    await harness.settle();
+    expect(await emotionOf(cookie, chatId, first.messageId, harness.app)).toEqual({ emotion: 'happy' });
+    // The names as `emotion:` documents, the reply as the query; the auxiliary model is not asked.
+    expect(calls[0]).toEqual({ texts: ['emotion:neutral', 'emotion:happy', 'emotion:Angry'], kind: 'document' });
+    expect(calls[1]).toEqual({ texts: ['정말 좋아!'], kind: 'query' });
+    expect(harness.asked).toEqual([]);
+
+    // A reply leaning to happy by less than the penalty for the member's last
+    // picture (0.025) goes to the next nearest; a fresh chat with no history keeps happy.
+    const close = '좋아 neutral ㅎ';
+    const second = await send(cookie, chatId, { content: close }, harness.app);
+    await harness.settle();
+    expect(await emotionOf(cookie, chatId, second.messageId, harness.app)).toEqual({ emotion: 'neutral' });
+    // The names were embedded once; this time only the reply.
+    expect(calls.slice(2)).toEqual([{ texts: [close], kind: 'query' }]);
+    const fresh = await startChat(cookie, plot.id);
+    await json(cookie, `/api/chats/${fresh.chat.id}`, 'PATCH', { emotionProcessor: 'embedding' });
+    const alone = await send(cookie, fresh.chat.id, { content: close }, harness.app);
+    await harness.settle();
+    expect(await emotionOf(cookie, fresh.chat.id, alone.messageId, harness.app)).toEqual({ emotion: 'happy' });
+
+    // An embedder that cannot run for the plot hands the choice to the auxiliary model.
+    const unrouted = emotionApp('Angry', { embedder: { ...embedder, modelFor: () => null } });
+    const third = await send(cookie, chatId, { content: '화나' }, unrouted.app);
+    await unrouted.settle();
+    expect(unrouted.asked).toHaveLength(1);
+    expect(await emotionOf(cookie, chatId, third.messageId, unrouted.app)).toEqual({ emotion: 'Angry' });
   });
 
   it('chooses again after a continue, and keeps the picture of one the reader stopped', async () => {
@@ -17079,5 +17446,203 @@ describe('vector storage (SillyTavern)', () => {
     const prompt = await send(cookie, chatId, '그 등대 기억나?', harness);
     expect(prompt.system).not.toContain('Past events');
     expect(prompt.system).not.toContain(KEEPER);
+  });
+});
+
+describe('explore search by meaning', () => {
+  /**
+   * An embedder of a few keywords, as the memory's: a text's vector has a slot
+   * per keyword it holds. `model` is every language's, or each one's.
+   */
+  function searchEmbedder(
+    model: string | ((language: ContentLanguage) => string | null) = 'test-search',
+    fail = false,
+  ): Embedder & { calls: { texts: string[]; kind: string | undefined }[] } {
+    const keys = ['고양이', '등대', '지도', '재벌'];
+    const calls: { texts: string[]; kind: string | undefined }[] = [];
+    const modelFor = typeof model === 'string' ? () => model : model;
+    return {
+      calls,
+      modelFor,
+      async embed(texts, { plotLanguage, kind }) {
+        calls.push({ texts: [...texts], kind });
+        const id = modelFor(plotLanguage);
+        if (fail || !id) throw new Error('embedder down');
+        const vectors = texts.map((text) => {
+          const vector = [0.1, ...keys.map((key) => (text.includes(key) ? 1 : 0))];
+          const norm = Math.hypot(...vector);
+          return vector.map((value) => value / norm);
+        });
+        return { model: id, vectors };
+      },
+      warm() {},
+      async close() {},
+    };
+  }
+
+  function searchApp(embedder?: Embedder) {
+    const tasks: Promise<void>[] = [];
+    return {
+      app: makeApp({ ...(embedder ? { embedder } : {}), onBackgroundTask: (task) => void tasks.push(task) }),
+      settle: async () => {
+        while (tasks.length > 0) await Promise.all(tasks.splice(0));
+      },
+    };
+  }
+
+  /** A published plot through `harness`, its vector written by the publish's refresh. */
+  async function published(cookie: string, harness: ReturnType<typeof searchApp>, plot: Record<string, unknown>): Promise<any> {
+    const created = await publishablePlot(cookie, plot);
+    const res = await json(cookie, `/api/plots/${created.id}/publish`, 'POST', { publish: true }, harness.app);
+    expect(res.status, await res.clone().text()).toBe(200);
+    await harness.settle();
+    return created;
+  }
+
+  const search = async (harness: ReturnType<typeof searchApp>, query: string, extra = ''): Promise<any> => {
+    const res = await request(undefined, `/api/explore?language=ko&q=${encodeURIComponent(query)}${extra}`, 'GET', undefined, harness.app);
+    expect(res.status).toBe(200);
+    return readJson(res);
+  };
+
+  it('ranks a partition’s public plots by their public text’s nearness to a sentence', async () => {
+    resetSearchSweeps();
+    const cookie = await signUp('search-rank@example.com');
+    const embedder = searchEmbedder();
+    const harness = searchApp(embedder);
+    const cat = await published(cookie, harness, { name: '서점의 오후', intro: '고양이가 사는 서점 이야기', tags: ['일상'] });
+    const both = await published(cookie, harness, { name: '바닷가 서점', intro: '등대 옆 서점에 고양이가 산다' });
+    const lighthouse = await published(cookie, harness, { name: '빛의 섬', intro: '등대지기의 하루' });
+    // What only the model is told is not what a plot is found by.
+    const hidden = await published(cookie, harness, { name: '조용한 방', intro: '지도를 그리는 방', description: '재벌 재벌 재벌' });
+
+    // Each embedded once with its own text, as a document.
+    const stored = await db.select().from(plotSearchVectors);
+    expect(stored.map((row) => row.plotId).sort()).toEqual([cat.id, both.id, lighthouse.id, hidden.id].sort());
+    expect(stored.every((row) => row.model === 'test-search' && row.embedding.length === 5)).toBe(true);
+    const documents = embedder.calls.filter((call) => call.kind === 'document').flatMap((call) => call.texts);
+    expect(documents).toContain('서점의 오후\n일상\n고양이가 사는 서점 이야기\n안녕');
+    expect(documents.join('\n')).not.toContain('재벌');
+
+    const found = await search(harness, '고양이 나오는 이야기 추천해줘');
+    expect(found.search).toBe('meaning');
+    expect(found.items.map((plot: any) => plot.id)).toEqual([cat.id, both.id]);
+    expect(embedder.calls.at(-1)).toEqual({ texts: ['고양이 나오는 이야기 추천해줘'], kind: 'query' });
+    expect((await search(harness, '재벌')).items).toEqual([]);
+
+    // A name containing the query is found, near or not; the rest by nearness.
+    const named = await search(harness, '빛의 섬');
+    expect(named.items.map((plot: any) => plot.id)).toEqual([lighthouse.id]);
+    expect((await search(harness, '등대')).items.map((plot: any) => plot.id)).toEqual([lighthouse.id, both.id]);
+
+    // The tag filter holds; the sort does not reorder by nearness; pages go by offset.
+    expect((await search(harness, '고양이', '&tag=일상')).items.map((plot: any) => plot.id)).toEqual([cat.id]);
+    expect((await search(harness, '고양이', '&sort=likes')).items.map((plot: any) => plot.id)).toEqual([cat.id, both.id]);
+    const first = await search(harness, '고양이', '&limit=1');
+    expect(first.items.map((plot: any) => plot.id)).toEqual([cat.id]);
+    const second = await search(harness, '고양이', `&limit=1&cursor=${first.nextCursor}`);
+    expect(second.items.map((plot: any) => plot.id)).toEqual([both.id]);
+    expect(second.nextCursor).toBeNull();
+    await harness.settle();
+  });
+
+  it('never ranks a private, adult or other-language plot, however near', async () => {
+    resetSearchSweeps();
+    const cookie = await signUp('search-gate@example.com');
+    const harness = searchApp(searchEmbedder());
+    const listed = await published(cookie, harness, { name: '공개', intro: '고양이' });
+    const unpublished = await published(cookie, harness, { name: '비공개', intro: '고양이 고양이' });
+    const adult = await published(cookie, harness, { name: '성인', intro: '고양이' });
+    const english = await published(cookie, harness, { name: 'Cats', intro: '고양이', language: 'en' });
+    const draft = await publishablePlot(cookie, { name: '초안', intro: '고양이' });
+    const res = await json(cookie, `/api/plots/${unpublished.id}/publish`, 'POST', { publish: false }, harness.app);
+    expect(res.status).toBe(200);
+    await harness.settle();
+    // Unpublishing deleted its vector.
+    expect(await db.select().from(plotSearchVectors).where(eq(plotSearchVectors.plotId, unpublished.id))).toEqual([]);
+    await db.update(plots).set({ safetyLevel: 'adult' }).where(eq(plots.id, adult.id));
+    // Vectors as near as the listed one's, written past the background as if left over.
+    const near = [0.1, 1, 0, 0, 0].map((value) => value / Math.hypot(0.1, 1));
+    for (const id of [unpublished.id, adult.id, draft.id]) {
+      await db
+        .insert(plotSearchVectors)
+        .values({ plotId: id, model: 'test-search', embedding: near, textHash: 'x' })
+        .onConflictDoUpdate({ target: plotSearchVectors.plotId, set: { embedding: near } });
+    }
+
+    const found = await search(harness, '고양이');
+    expect(found.search).toBe('meaning');
+    expect(found.items.map((plot: any) => plot.id)).toEqual([listed.id]);
+    // The English plot is in its own partition.
+    const en = await readJson(await request(undefined, '/api/explore?language=en&q=%EA%B3%A0%EC%96%91%EC%9D%B4', 'GET', undefined, harness.app));
+    expect(en.items.map((plot: any) => plot.id)).toEqual([english.id]);
+    // A refresh deletes what is not listed, with or without an embedder.
+    await refreshSearchVectors(makeDeps(), [unpublished.id, adult.id, draft.id]);
+    expect((await db.select().from(plotSearchVectors)).map((row) => row.plotId).sort()).toEqual([listed.id, english.id].sort());
+    await harness.settle();
+  });
+
+  it('searches the name as text when the embedder is off, down or has no model for the partition', async () => {
+    resetSearchSweeps();
+    const cookie = await signUp('search-fallback@example.com');
+    const harness = searchApp(searchEmbedder());
+    const cat = await published(cookie, harness, { name: '서점의 오후', intro: '고양이가 사는 서점 이야기' });
+
+    for (const fallback of [searchApp(), searchApp(searchEmbedder('test-search', true)), searchApp(searchEmbedder(() => null))]) {
+      const byText = await search(fallback, '서점');
+      expect(byText).toMatchObject({ search: 'text' });
+      expect(byText.items.map((plot: any) => plot.id)).toEqual([cat.id]);
+      expect((await search(fallback, '고양이 이야기')).items).toEqual([]);
+    }
+    // A text search's own cursor goes on as one, whatever answers next.
+    await published(cookie, harness, { name: '서점의 밤', intro: '등대' });
+    const page = await search(searchApp(), '서점', '&limit=1');
+    expect(page.search).toBe('text');
+    const next = await search(harness, '서점', `&limit=1&cursor=${page.nextCursor}`);
+    expect(next.search).toBe('text');
+    expect(next.items).toHaveLength(1);
+    // No query, no search.
+    const plain = await readJson(await request(undefined, '/api/explore?language=ko', 'GET', undefined, harness.app));
+    expect(plain.search).toBeUndefined();
+    await harness.settle();
+  });
+
+  it('embeds again, lazily, a plot whose vector is of another model or older than its last change', async () => {
+    resetSearchSweeps();
+    const cookie = await signUp('search-stale@example.com');
+    const old = searchApp(searchEmbedder('test-old'));
+    const cat = await published(cookie, old, { name: '서점의 오후', intro: '고양이가 사는 서점 이야기' });
+    // Published before search existed: no vector at all.
+    const before = await publishablePlot(cookie, { name: '오래된 등대', intro: '고양이와 등대' });
+    await publishPlot(cookie, before.id);
+    await db.delete(plotSearchVectors).where(eq(plotSearchVectors.plotId, before.id));
+
+    const embedder = searchEmbedder('test-new');
+    const harness = searchApp(embedder);
+    // Nothing of this model yet: the first search finds no plot by nearness, and sweeps.
+    expect((await search(harness, '고양이')).items).toEqual([]);
+    await harness.settle();
+    const swept = await db.select().from(plotSearchVectors);
+    expect(swept.map((row) => [row.plotId, row.model]).sort()).toEqual(
+      [
+        [cat.id, 'test-new'],
+        [before.id, 'test-new'],
+      ].sort(),
+    );
+    expect((await search(harness, '고양이')).items.map((plot: any) => plot.id).sort()).toEqual([cat.id, before.id].sort());
+
+    // An edit through a path that does not refresh it still bumps the plot, and the next sweep re-reads it.
+    await db.update(plots).set({ intro: '지도만 남았다', updatedAt: new Date() }).where(eq(plots.id, before.id));
+    resetSearchSweeps();
+    await search(harness, '지도');
+    await harness.settle();
+    expect((await search(harness, '지도')).items.map((plot: any) => plot.id)).toEqual([before.id]);
+
+    // An edit through the editor refreshes it straight away.
+    const patched = await json(cookie, `/api/plots/${cat.id}`, 'PATCH', { intro: '재벌가의 고양이' }, harness.app);
+    expect(patched.status).toBe(200);
+    await harness.settle();
+    expect((await search(harness, '재벌')).items.map((plot: any) => plot.id)).toEqual([cat.id]);
+    await harness.settle();
   });
 });

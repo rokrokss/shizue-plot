@@ -17,6 +17,9 @@
  *   embedder's vectors of the plot's model (`embedder.ts`) — and random ones,
  *   into a share of the context budget. Without an embedder for the plot's
  *   language the similar share goes to random ones.
+ * - **Facts ride along** (`facts.ts`): each summary written has its facts
+ *   extracted right after it, and each request adds the relevant ones as a
+ *   `[기억]` block after the summaries, searched with the same query vectors.
  *
  * Everything in the update path is fire-and-forget: it runs after the SSE `done`
  * event and swallows its own failures.
@@ -24,7 +27,10 @@
 import {
   countTokens,
   DEFAULT_CONTEXT_BUDGET,
+  DEFAULT_FACT_COUNT,
   DEFAULT_USER_NAME,
+  detectContentLanguage,
+  factsBlock,
   fnv1a,
   hypaV3SettingsOf,
   MEMORY_HEADING,
@@ -59,7 +65,8 @@ import {
 import { getAdapter, listEnabledModels, type ChatRequest, type LLMAdapter } from '@shizue/llm';
 import { and, asc, eq, inArray, notExists, sql } from 'drizzle-orm';
 import type { AppDeps, Tx } from './deps.js';
-import type { Embedder, Embedding } from './embedder.js';
+import type { Embedding } from './embedder.js';
+import { embedPendingFacts, extractFacts, selectFacts } from './facts.js';
 import { loadMembers } from './hub.js';
 import { enqueueJob } from './jobs.js';
 import { transcriptOf } from './transcript.js';
@@ -81,11 +88,15 @@ const QUERY_EMBED_TIMEOUT_MS = 3_000;
 const CHUNKS_PER_REFRESH = 64;
 /** Longest summary a reader may write. */
 export const MAX_SUMMARY_LENGTH = 20_000;
+/** The latest turns the conversation's language is read from, for the facts. */
+const LANGUAGE_TURNS = 6;
 
 /* --------------------------------------------------------------- settings */
 
 export interface MemorySettings extends HypaV3Settings {
   contextBudget: number;
+  /** Facts a request carries (`[기억]`); 0 turns the facts off, extraction included. */
+  factCount: number;
 }
 
 /**
@@ -94,8 +105,12 @@ export interface MemorySettings extends HypaV3Settings {
  * are written.
  */
 export function memorySettingsOf(chat: Pick<Chat, 'memorySettings'>): MemorySettings {
-  const { contextBudget, ...hypa } = chat.memorySettings ?? {};
-  return { ...hypaV3SettingsOf(hypa), contextBudget: contextBudget ?? DEFAULT_CONTEXT_BUDGET };
+  const { contextBudget, factCount, ...hypa } = chat.memorySettings ?? {};
+  return {
+    ...hypaV3SettingsOf(hypa),
+    contextBudget: contextBudget ?? DEFAULT_CONTEXT_BUDGET,
+    factCount: factCount ?? DEFAULT_FACT_COUNT,
+  };
 }
 
 /* ------------------------------------------------------------ applicability */
@@ -134,15 +149,17 @@ export function loadSummaries(db: AppDeps['db'] | Tx, chatId: string): Promise<C
 /* -------------------------------------------------------------- injection */
 
 /**
- * Memory inputs for one generation: the memory block injected after the persona,
- * and the history the model still sees verbatim — `path` after the last message
- * an applying summary covers.
+ * Memory inputs for one generation: the memory block injected after the persona
+ * — the selected summaries, then the facts (`[기억]`, `facts.ts`) — and the
+ * history the model still sees verbatim: `path` after the last message an
+ * applying summary covers.
  *
  * `answering` is the branch the reply answers, as the model will read it: the
  * latest `queryChatCount` of its turns are the similarity search's queries
- * (HypaV3's `chats.slice(-queryChatCount)`). The random picks are drawn from the
- * chat and the branch's length, as `{{pick}}` is — a regenerate and the prompt
- * inspector see the same selection the turn did.
+ * (HypaV3's `chats.slice(-queryChatCount)`), embedded once for the summaries and
+ * the facts alike. The random picks are drawn from the chat and the branch's
+ * length, as `{{pick}}` is — a regenerate and the prompt inspector see the same
+ * selection the turn did.
  */
 export async function buildMemoryInput(
   deps: AppDeps,
@@ -162,6 +179,11 @@ export async function buildMemoryInput(
   );
   const embedder = deps.embedder;
   const plotLanguage = embedder ? await plotLanguageOf(deps, chat.plotId) : null;
+  const model = embedder && plotLanguage ? embedder.modelFor(plotLanguage) : null;
+  // One embedding of the queries, made when the first search asks for it.
+  let embedding: Promise<Embedding> | null = null;
+  const queryVectors = (): Promise<Embedding> =>
+    (embedding ??= embedder!.embed(queries, { plotLanguage: plotLanguage!, kind: 'query', timeoutMs: QUERY_EMBED_TIMEOUT_MS }));
   const selection = await selectSummaries(
     applicable.map((summary) => ({
       summary,
@@ -170,12 +192,25 @@ export async function buildMemoryInput(
     })),
     available,
     settings,
-    embedder && plotLanguage && embedder.modelFor(plotLanguage)
-      ? (unused) => rankSimilar(deps, embedder, plotLanguage, unused, queries)
-      : null,
+    model ? (unused) => rankSimilar(deps, unused, queries, queryVectors) : null,
     seededRandom(`${chat.id}\u0000${answering.length}`),
   );
-  return { memoryText: memoryBlock(selection.selected.map((summary) => summary.text)), history };
+  let facts: string[] = [];
+  if (model && queries.length > 0) {
+    try {
+      facts = await selectFacts(deps, {
+        applicable,
+        selected: selection.selected,
+        model,
+        queryVectors,
+        count: settings.factCount,
+      });
+    } catch (error) {
+      console.warn('[memory] the facts were left out: the queries could not be embedded', error);
+    }
+  }
+  const blocks = [memoryBlock(selection.selected.map((summary) => summary.text)), factsBlock(facts)];
+  return { memoryText: blocks.filter((block) => block !== '').join('\n\n'), history };
 }
 
 /** The plot's content language, which picks its embedding model; null for a plot that is gone. */
@@ -185,25 +220,20 @@ async function plotLanguageOf(deps: AppDeps, plotId: string): Promise<ContentLan
 }
 
 /**
- * HypaV3's similar ranking over `unused`: each query embedded with the plot's
- * model, each chunk of that model scored by cosine in pgvector, fused by
- * `rankBySimilarity`. A summary with no vectors of that model yet is not ranked
- * (the background refresh embeds it). Throws when the embedder does, which
- * hands the share to random ones.
+ * HypaV3's similar ranking over `unused`: the queries' vectors (the plot's
+ * model, `queryVectors`), each chunk of that model scored by cosine in
+ * pgvector, fused by `rankBySimilarity`. A summary with no vectors of that model
+ * yet is not ranked (the background refresh embeds it). Throws when the
+ * embedder does, which hands the share to random ones.
  */
 async function rankSimilar(
   deps: AppDeps,
-  embedder: Embedder,
-  plotLanguage: ContentLanguage,
   unused: ChatSummary[],
   queries: string[],
+  queryVectors: () => Promise<Embedding>,
 ): Promise<ChatSummary[]> {
   if (unused.length === 0 || queries.length === 0) return [];
-  const { model, vectors } = await embedder.embed(queries, {
-    plotLanguage,
-    kind: 'query',
-    timeoutMs: QUERY_EMBED_TIMEOUT_MS,
-  });
+  const { model, vectors } = await queryVectors();
   const ids = unused.map((summary) => summary.id);
   const lists = await Promise.all(
     vectors.map(async (vector) => {
@@ -278,6 +308,7 @@ export function scheduleMemoryUpdate(deps: AppDeps, chatId: string): void {
       if (!result.more) break;
     }
     await embedPendingSummaries(deps, chatId);
+    await embedPendingFacts(deps, chatId);
   })()
     .catch((error: unknown) => {
       console.error('[memory] update failed', error);
@@ -301,7 +332,7 @@ interface PassResult {
 async function updateMemory(deps: AppDeps, chatId: string, continuing: boolean): Promise<PassResult> {
   const nothing: PassResult = { more: false, continuing };
   const [row] = await deps.db
-    .select({ chat: chats, personaName: personas.name, style: plots.style })
+    .select({ chat: chats, personaName: personas.name, style: plots.style, plotLanguage: plots.language })
     .from(chats)
     .innerJoin(plots, eq(chats.plotId, plots.id))
     .leftJoin(personas, eq(chats.personaId, personas.id))
@@ -325,14 +356,17 @@ async function updateMemory(deps: AppDeps, chatId: string, continuing: boolean):
     responseReserve: replyLengthTokens(row.style?.replyLength),
     fixedTokens: fixedTokensOf.get(chatId) ?? 0,
   };
-  const planned = planBatch(path, await loadSummaries(deps.db, chatId), settings, budget, continuing);
+  const summaries = await loadSummaries(deps.db, chatId);
+  const planned = planBatch(path, summaries, settings, budget, continuing);
   if (!planned) return nothing;
   const { batch, plan } = planned;
 
   const byId = new Map(path.map((message) => [message.id, message]));
+  const summarized = batch.summarizedIds.map((id) => byId.get(id)!);
+  const userName = row.personaName ?? DEFAULT_USER_NAME;
   const text = await summarize(deps, chat, {
-    messages: batch.summarizedIds.map((id) => byId.get(id)!),
-    userName: row.personaName ?? DEFAULT_USER_NAME,
+    messages: summarized,
+    userName,
     prompt: settings.summarizationPrompt,
   });
   if (!text) return nothing;
@@ -356,6 +390,29 @@ async function updateMemory(deps: AppDeps, chatId: string, continuing: boolean):
   // describes history that no longer holds. The backlog is still there for the
   // next pass to read afresh.
   if (!written) return { more: true, continuing };
+
+  // The facts of what it covers, from the same messages, by a call of their own
+  // (`facts.ts`). Only where they can be searched: a plot whose model cannot run
+  // here would pay for facts no request ever picks.
+  const embedder = deps.embedder;
+  if (settings.factCount > 0 && embedder?.modelFor(row.plotLanguage)) {
+    await extractFacts(deps, embedder, {
+      chat,
+      plotLanguage: row.plotLanguage,
+      summary: written,
+      messages: summarized,
+      userName,
+      branchSummaryIds: applicableSummaries(summaries, path).applicable.map((summary) => summary.id),
+      // The language the conversation runs in now — a Korean reader of an English
+      // card writes Korean — rather than the plot's.
+      conversationLanguage: detectContentLanguage(
+        visibleToAi(path)
+          .slice(-LANGUAGE_TURNS)
+          .map((message) => stripImageMacros(message.content))
+          .join('\n'),
+      ),
+    });
+  }
 
   const next = { continuing: continuing || !batch.gap };
   const covered = plan.map((message) =>
@@ -506,6 +563,9 @@ export async function memoryBackfill(
     if (!result.more) {
       await embedPendingSummaries(deps, chatId).catch((error: unknown) => {
         console.error('[memory] embedding a backfill failed', error);
+      });
+      await embedPendingFacts(deps, chatId).catch((error: unknown) => {
+        console.error('[memory] embedding a backfill\'s facts failed', error);
       });
       return;
     }

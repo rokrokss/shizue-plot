@@ -197,3 +197,47 @@ export function pickEmotion(answer: string, images: readonly EmotionImage[]): Em
     defaultEmotion(images)
   );
 }
+
+/**
+ * How a reply's picture is chosen — RisuAI's `emotionProcesser`: the auxiliary
+ * model (`submodel`, its default) or the embedder (`embedding`).
+ */
+export const EMOTION_PROCESSORS = ['submodel', 'embedding'] as const;
+export type EmotionProcessor = (typeof EMOTION_PROCESSORS)[number];
+
+/** What RisuAI's embedding processor puts before each name it embeds: `emotion:`, no space. */
+export const EMOTION_EMBEDDING_PREFIX = 'emotion:';
+/** Most of the member's latest pictures the embedding processor holds against them: RisuAI keeps four by the time it searches. */
+export const EMOTION_PENALTY_WINDOW = 4;
+
+/**
+ * RisuAI's embedding processor (`emotionProcesser === 'embedding'`): each name's
+ * similarity to the reply (`scores`, by name), less a penalty for every time it
+ * is among the member's last four pictures (`recent`, oldest first) — `(5 − d)
+ * / 200` for the one `d` picks back, so 0.025 for the latest down to 0.01 for
+ * the fourth — and the highest wins, the first picture of that name in the
+ * card's order. No threshold, no `neutral` fallback: while a picture has a
+ * score, one is chosen. A tie keeps the card's order.
+ */
+export function pickEmotionByEmbedding(
+  images: readonly EmotionImage[],
+  scores: ReadonlyMap<string, number>,
+  recent: readonly string[],
+): EmotionImage | undefined {
+  const adjusted = new Map(scores);
+  const window = recent.slice(-EMOTION_PENALTY_WINDOW);
+  window.forEach((name, index) => {
+    const score = adjusted.get(name);
+    if (score === undefined) return;
+    adjusted.set(name, score - (5 - (window.length - 1 - index)) / 200);
+  });
+  let best: EmotionImage | undefined;
+  let bestScore = -Infinity;
+  for (const image of images) {
+    const score = adjusted.get(image.name);
+    if (score === undefined || score <= bestScore) continue;
+    best = image;
+    bestScore = score;
+  }
+  return best;
+}

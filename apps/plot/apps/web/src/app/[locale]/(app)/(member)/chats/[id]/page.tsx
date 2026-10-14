@@ -122,7 +122,7 @@ import {
   translatesMessage,
   type ChatTranslationSettings,
 } from '@shizue/core/translation';
-import type { AuthorNoteSettings } from '@shizue/core';
+import type { AuthorNoteSettings, EmotionProcessor } from '@shizue/core';
 import type {
   ChatAttachment,
   ChatMemorySettings,
@@ -2663,6 +2663,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     /** The reader's own preset on top of `preset`; null picks none. */
     readerPresetId?: string | null;
     relationshipEnabled?: boolean;
+    /** How a reply's emotion picture is chosen. */
+    emotionProcessor?: EmotionProcessor;
     memorySettings?: ChatMemorySettings;
     allowComponentTurns?: boolean;
     /** The reader's half of the plot's two style features. */
@@ -3073,6 +3075,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               memorySettings={state.chat.memorySettings}
               relationship={state.chat.relationship}
               relationshipEnabled={state.chat.relationshipEnabled}
+              emotionProcessor={state.chat.emotionProcessor ?? 'submodel'}
+              onSaveEmotionProcessor={(emotionProcessor) => updateSettings({ emotionProcessor })}
               narrator={state.chat.narrator}
               onSaveNarrator={(narrator) => updateSettings({ narrator })}
               illustrations={gallery}

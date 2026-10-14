@@ -276,7 +276,7 @@ test('the weekly tab carries the plot', async () => {
 
   // Scoped by name: the catalogue is shared, and what is asserted here is that
   // the ranking is a listing of the same public plots, not a different set.
-  await readerPage.getByPlaceholder('플롯 이름 검색').fill(plot.name);
+  await readerPage.getByPlaceholder('플롯 이름이나 보고 싶은 이야기로 검색').fill(plot.name);
   const card = readerPage.getByTestId('plot-card').filter({ hasText: plot.name });
   await expect(card).toHaveCount(1);
   await expect(card).toContainText(creator.name);

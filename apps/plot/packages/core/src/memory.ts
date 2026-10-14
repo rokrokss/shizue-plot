@@ -52,6 +52,19 @@ export const HYPA_V3_DEFAULTS: Readonly<HypaV3Settings> = {
 export const HYPA_V3_SUMMARIZATION_PROMPT =
   '[Summarize the ongoing role story, It must also remove redundancy and unnecessary text and content from the output.]';
 
+/**
+ * Ours, after HypaV3's instruction — a deliberate difference from RisuAI, whose
+ * instruction says nothing of language, so a Korean conversation on an English
+ * card could be summarized in English. The memory builds up in the
+ * conversation's language: the search by meaning finds more within one language
+ * (KURE-v1: ko→ko 28/29 against ko→en 18/20, ARCHITECTURE §7.3), and readers read
+ * and edit the summaries in the memory panel. A chat's own prompt is sent as written.
+ */
+export const SUMMARY_LANGUAGE_LINE = 'Write the summary in the same language as the conversation.';
+
+/** The instruction a chat without a summarization prompt of its own is summarized with. */
+export const DEFAULT_SUMMARIZATION_INSTRUCTION = `${HYPA_V3_SUMMARIZATION_PROMPT}\n${SUMMARY_LANGUAGE_LINE}`;
+
 /** Longest custom summarization prompt a chat may keep. */
 export const MAX_SUMMARIZATION_PROMPT_LENGTH = 10_000;
 /** Most messages one summary may be set to cover. */
@@ -381,10 +394,11 @@ export interface SummarizationTurn {
  * in ChatML (`<|im_start|>…`) with `{{slot}}` replaced by the messages is that
  * conversation; any other prompt goes after the messages as a system turn — the
  * messages first, as one user turn. RisuAI also runs its CBS over each ChatML
- * turn; nothing here does.
+ * turn; nothing here does. An empty prompt is HypaV3's with our language line
+ * (`DEFAULT_SUMMARIZATION_INSTRUCTION`).
  */
 export function summarizationTurns(transcript: string, prompt: string): SummarizationTurn[] {
-  const instruction = prompt.trim() === '' ? HYPA_V3_SUMMARIZATION_PROMPT : prompt;
+  const instruction = prompt.trim() === '' ? DEFAULT_SUMMARIZATION_INSTRUCTION : prompt;
   return (
     parseChatML(instruction.replaceAll('{{slot}}', transcript)) ?? [
       { role: 'user', content: transcript },

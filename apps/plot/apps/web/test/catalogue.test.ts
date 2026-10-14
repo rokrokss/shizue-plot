@@ -70,6 +70,8 @@ function releaseNavigation(): void {
 let asked: string[] = [];
 /** Set by a test that wants the next page to stay in flight. */
 let holdNextPage: ((page: ExploreResult) => void) | null = null;
+/** How the stubbed API says it searched: by meaning, as text, or (no query) not at all. */
+let answered: ExploreResult['search'];
 
 vi.mock('@/i18n/navigation', () => ({
   Link: ({ href, children }: { href: string; children: ReactNode }) =>
@@ -118,6 +120,7 @@ const plot = (tag: string): PublicPlot => ({
 const page = (): ExploreResult => ({
   items: [plot('로맨스'), plot('공포')],
   nextCursor: 'next',
+  ...(answered ? { search: answered } : {}),
 });
 
 let host: HTMLElement;
@@ -158,6 +161,7 @@ beforeEach(() => {
   search = new URLSearchParams();
   asked = [];
   holdNextPage = null;
+  answered = undefined;
   heldNavigation = null;
   replace.mockClear();
   store.clear();
@@ -174,7 +178,27 @@ afterEach(() => {
 describe('the catalogue', () => {
   it('gives the search field a name of its own', async () => {
     await render();
-    expect(search_().getAttribute('aria-label')).toBe('플롯 이름 검색');
+    expect(search_().getAttribute('aria-label')).toBe(messages.explore.searchPlaceholder);
+  });
+
+  it('says a sentence will do, and holds the sort while the list is ranked by meaning', async () => {
+    search = new URLSearchParams('q=집착남 재벌물');
+    answered = 'meaning';
+    await render();
+    const hint = host.querySelector(`#${search_().getAttribute('aria-describedby')}`);
+    expect(hint?.textContent).toBe(messages.explore.searchHint);
+    expect(host.querySelector('[data-testid="explore-by-meaning"]')?.textContent).toBe(messages.explore.searchByMeaning);
+    for (const label of ['최신', '주간 인기', '인기', '좋아요']) {
+      expect(button(label).hasAttribute('disabled')).toBe(true);
+      expect(button(label).getAttribute('aria-pressed')).toBe('false');
+    }
+
+    // Searched as text (no embedder), the sort is the reader's again.
+    answered = 'text';
+    await act(async () => navigate('/?q=밤'));
+    expect(host.querySelector('[data-testid="explore-by-meaning"]')).toBeNull();
+    expect(button('최신').hasAttribute('disabled')).toBe(false);
+    expect(button('최신').getAttribute('aria-pressed')).toBe('true');
   });
 
   it('puts the filters in the URL, and leaves the defaults out of it', async () => {

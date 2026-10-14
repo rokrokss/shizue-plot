@@ -8,6 +8,7 @@ import type {
   DisplayScript,
   EmotionImage,
   EmotionMode,
+  EmotionProcessor,
   GroupSettings,
   HypaV3Settings,
   ImportProvenance,
@@ -42,6 +43,7 @@ export type {
   DisplayScript,
   EmotionImage,
   EmotionMode,
+  EmotionProcessor,
   GroupSettings,
   ImportProvenance,
   LoreEntry,
@@ -426,6 +428,8 @@ export interface ExploreResult {
   items: PublicPlot[];
   /** Opaque keyset cursor, or null on the last page. */
   nextCursor: string | null;
+  /** With a query: whether it was searched by meaning (ranked by nearness) or as text. */
+  search?: 'meaning' | 'text';
 }
 
 /** How many follow a creator, and whether the reader is one of them. */
@@ -514,6 +518,8 @@ export const MEMORY_CONTEXT_BUDGETS = [8000, 16000, 32000] as const;
  */
 export interface ChatMemorySettings extends Partial<HypaV3Settings> {
   contextBudget?: number;
+  /** Facts a request carries (`[기억]`), 0–10; absent, 5. */
+  factCount?: number;
 }
 
 /** A message one of the memory's summaries covers, as `GET /api/chats/:id/memory` lists it. */
@@ -537,6 +543,16 @@ export interface MemorySummary {
   messageIds: string[];
   /** The covered messages that still exist, in order. */
   messages: MemorySummaryMessage[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One of the facts of the summaries on the current branch, as `GET /api/chats/:id/memory` lists it. */
+export interface MemoryFact {
+  id: string;
+  content: string;
+  /** The summary it was taken from, with whose messages it goes. */
+  summaryId: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -618,6 +634,8 @@ export interface Chat {
   memorySettings: ChatMemorySettings | null;
   relationship: ChatRelationship | null;
   relationshipEnabled: boolean;
+  /** How a reply's emotion picture is chosen; optional for a state built by hand, absent is `submodel`. */
+  emotionProcessor?: EmotionProcessor;
   /** This chat's narrator; null leaves the plot's own in force. */
   narrator: NarratorConfig | null;
   /** Consent for the sendTurn capability, given once per chat and revocable. */

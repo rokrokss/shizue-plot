@@ -1,7 +1,8 @@
 /**
  * The chat's memory as the reader reads and tends it — RisuAI's HypaV3 summary
  * list (ARCHITECTURE §7.3, §10): every summary with the messages it covers, and
- * a pin, an edit, a delete and a regenerate for each.
+ * a pin, an edit, a delete and a regenerate for each; and the facts of the
+ * summaries on the current branch (`facts.ts`), each to edit or delete.
  *
  * Only the chat's owner, as every chat route. A regenerate writes nothing — it
  * answers a new text for the reader to keep or throw away, as RisuAI's reroll
@@ -11,12 +12,22 @@
  * it says. A deleted summary's messages are summarized again by the next
  * refresh, as a gap.
  */
-import { DEFAULT_USER_NAME, stripImageMacros } from '@shizue/core';
-import { chatSummaries, chatSummaryChunks, messages, personas, type Chat, type ChatSummary, type Message } from '@shizue/db';
+import { DEFAULT_USER_NAME, MAX_FACT_LENGTH, stripImageMacros } from '@shizue/core';
+import {
+  chatSummaries,
+  chatSummaryChunks,
+  memories,
+  messages,
+  personas,
+  type Chat,
+  type ChatSummary,
+  type Message,
+} from '@shizue/db';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import { Hono } from 'hono';
 import type { AppDeps, AppEnv } from '../deps.js';
 import { ApiError, badRequest, notFound } from '../errors.js';
+import { branchFacts } from '../facts.js';
 import {
   applicableSummaries,
   loadSummaries,
@@ -27,7 +38,7 @@ import {
   summarize,
 } from '../memory.js';
 import { buildPath } from '../tree.js';
-import { optionalBoolean, optionalString, readJsonBody, requireUuidParam } from '../util.js';
+import { optionalBoolean, optionalString, readJsonBody, requireString, requireUuidParam } from '../util.js';
 import { loadOwnedChat, loadWritableChat } from './chats.js';
 
 /** How much of a covered message the list shows. */
@@ -64,8 +75,11 @@ function toSummaryJson(summary: ChatSummary, applies: boolean, covered: Map<stri
   };
 }
 
-/** The chat's summaries as the list shows them: the ones on the branch in its order, then the rest as made. */
-async function listSummaries(deps: AppDeps, chat: Chat) {
+/**
+ * The chat's summaries as the list shows them — the ones on the branch in its
+ * order, then the rest as made — and the facts of the ones on the branch.
+ */
+async function listMemory(deps: AppDeps, chat: Chat) {
   const all = await deps.db.select().from(messages).where(eq(messages.chatId, chat.id)).orderBy(asc(messages.createdAt));
   const path = buildPath(all, chat.headMessageId);
   const positions = new Map(path.map((message, at) => [message.id, at]));
@@ -78,10 +92,13 @@ async function listSummaries(deps: AppDeps, chat: Chat) {
   const summaries = await loadSummaries(deps.db, chat.id);
   const { applicable } = applicableSummaries(summaries, path);
   const on = new Set(applicable);
-  return [
-    ...applicable.map((summary) => toSummaryJson(summary, true, covered)),
-    ...summaries.filter((summary) => !on.has(summary)).map((summary) => toSummaryJson(summary, false, covered)),
-  ];
+  return {
+    summaries: [
+      ...applicable.map((summary) => toSummaryJson(summary, true, covered)),
+      ...summaries.filter((summary) => !on.has(summary)).map((summary) => toSummaryJson(summary, false, covered)),
+    ],
+    facts: await branchFacts(deps, applicable),
+  };
 }
 
 async function loadChatSummary(deps: AppDeps, chatId: string, summaryId: string): Promise<ChatSummary> {
@@ -99,7 +116,45 @@ export function chatMemoryRoutes(deps: AppDeps): Hono<AppEnv> {
 
   app.get('/:id/memory', async (c) => {
     const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
-    return c.json({ summaries: await listSummaries(deps, chat) });
+    return c.json(await listMemory(deps, chat));
+  });
+
+  // `{content}`: the reader's rewrite of a fact. Its vector goes with the old
+  // words; the refresh it schedules embeds the new ones.
+  app.patch('/:id/memory/facts/:factId', async (c) => {
+    const chat = await loadWritableChat(deps, requireUuidParam(c), c.get('userId'));
+    const factId = requireUuidParam(c, 'factId');
+    const body = await readJsonBody(c);
+    const content = requireString(body, 'content').replace(/\s+/g, ' ').trim();
+    if (content.length === 0 || content.length > MAX_FACT_LENGTH || content.includes('\u0000')) {
+      throw badRequest('invalid_request', `content must be 1-${MAX_FACT_LENGTH} characters, without U+0000`);
+    }
+    const [fact] = await deps.db
+      .update(memories)
+      .set({ content, model: null, embedding: null, updatedAt: new Date() })
+      .where(and(eq(memories.id, factId), eq(memories.chatId, chat.id)))
+      .returning();
+    if (!fact) throw notFound();
+    scheduleMemoryUpdate(deps, chat.id);
+    return c.json({
+      fact: {
+        id: fact.id,
+        content: fact.content,
+        summaryId: fact.summaryId,
+        createdAt: fact.createdAt.toISOString(),
+        updatedAt: fact.updatedAt.toISOString(),
+      },
+    });
+  });
+
+  app.delete('/:id/memory/facts/:factId', async (c) => {
+    const chat = await loadWritableChat(deps, requireUuidParam(c), c.get('userId'));
+    const deleted = await deps.db
+      .delete(memories)
+      .where(and(eq(memories.id, requireUuidParam(c, 'factId')), eq(memories.chatId, chat.id)))
+      .returning({ id: memories.id });
+    if (deleted.length === 0) throw notFound();
+    return c.body(null, 204);
   });
 
   // `{text?, important?}`: the reader's rewrite, or the pin. A rewrite drops the
@@ -138,7 +193,7 @@ export function chatMemoryRoutes(deps: AppDeps): Hono<AppEnv> {
       return changed;
     });
     if (rewritten) scheduleMemoryUpdate(deps, chat.id);
-    const summary = (await listSummaries(deps, chat)).find((item) => item.id === summaryId);
+    const summary = (await listMemory(deps, chat)).summaries.find((item) => item.id === summaryId);
     return c.json({ summary });
   });
 

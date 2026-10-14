@@ -106,6 +106,13 @@
       "when": 1792015371149,
       "tag": "0014_semantic_lore_retrieval",
       "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1792018704113,
+      "tag": "0015_embedding_features",
+      "breakpoints": true
     }
   ]
 }
