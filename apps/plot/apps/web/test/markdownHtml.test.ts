@@ -8,9 +8,11 @@
 import { describe, expect, it } from 'vitest';
 import { balancePartial } from '../src/lib/markdown/balance';
 import {
+  islandToHtml,
   markdownToHtml,
   markupChunks,
   renderImageTokensAsHtml,
+  renderIsland,
   renderMarkup,
 } from '../src/lib/markdown/html';
 
@@ -117,6 +119,43 @@ describe('markdownToHtml', () => {
   it('reads an indented paragraph as a paragraph, not as code', () => {
     expect(markdownToHtml('<b>x</b>\n\n    들여 쓴 문단')).toBe('<p><b>x</b></p>\n<p>들여 쓴 문단</p>');
   });
+
+  it('never reads a stylesheet as markdown, as RisuAI keeps one out of it', () => {
+    // A blank line in a sheet inside a <div> would otherwise end the HTML block
+    // there and turn the rest of the sheet into paragraphs, `*` into emphasis.
+    const sheet = '<style>\n.a { color: red }\n\n.b * { color: blue }\n</style>';
+    expect(markdownToHtml(`<div class="a">\n${sheet}\n<b>x</b>\n</div>`)).toBe(
+      `<div class="a">\n${sheet}\n<b>x</b>\n</div>`,
+    );
+    // The stand-in's characters are the reader's no more: no text can name a sheet.
+    expect(markdownToHtml('\uE0000\uE001 앞 <style>.a{}</style>')).toBe('<p>0 앞 <style>.a{}</style></p>');
+  });
+});
+
+describe('islandToHtml', () => {
+  it('reads the prose a template wraps as RisuAI’s markdown does: paragraphs, emphasis', () => {
+    // 광휘전대's wrapper: `<div class="dc-body">\n\n$&\n\n</div>` around the whole reply.
+    expect(islandToHtml('<div class="body">\n\n첫 문단 *웃는다*\n\n둘째 문단\n\n</div>')).toBe(
+      '<div class="body">\n<p>첫 문단 <em>웃는다</em></p>\n<p>둘째 문단</p>\n</div>',
+    );
+  });
+
+  it('gives an island markdown makes one paragraph of as that paragraph’s content', () => {
+    // A quote in a colour stays a run of the line around it, in its bubble.
+    expect(islandToHtml('<span class="q">"안녕"</span>')).toBe('<span class="q">"안녕"</span>');
+    expect(islandToHtml('<span>한 줄\n둘째 줄</span>')).toBe('<span>한 줄<br>\n둘째 줄</span>');
+    expect(islandToHtml('<div>상자</div>')).toBe('<div>상자</div>');
+  });
+
+  it('keeps a mark on an address markdown built, so a link made of the model’s words is text', () => {
+    const value = renderIsland('[보기](<\u0001https://evil.test/a\u0001>)');
+    expect(value).not.toContain('href');
+    expect(value).toContain('보기');
+    const capture = renderIsland('<div class="x">[보기](<\u0002https://evil.test/b\u0003>)</div>\n\n[보기](<\u0002https://evil.test/c\u0003>)');
+    expect(capture).not.toContain('href');
+    // The creator's own link is a link.
+    expect(renderIsland('[공식](https://example.test/home)')).toContain('href="https://example.test/home"');
+  });
 });
 
 describe('renderMarkup', () => {
@@ -137,7 +176,7 @@ describe('renderMarkup', () => {
     ['a foreign picture', '<img src="https://evil.test/p.png">', ['evil.test', '<img']],
     ['a foreign markdown picture', '<b>x</b> ![x](https://evil.test/p.png)', ['evil.test', '<img']],
     ['a foreign background', '<div style="background:url(https://evil.test/x)">x</div>', ['evil.test']],
-    ['a fixed overlay', '<div style="position:fixed;inset:0">x</div>', ['fixed']],
+    ['a sticky overlay', '<div style="position:sticky;top:0">x</div>', ['sticky']],
     ['a frame', '<iframe src="https://evil.test"></iframe>', ['iframe', 'evil.test']],
   ])('neutralizes %s', (_, md, forbidden) => {
     const html = renderMarkup(md).toLowerCase();

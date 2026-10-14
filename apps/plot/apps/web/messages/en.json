@@ -1000,6 +1000,7 @@
     "jumpToLatest": "Jump to latest",
     "bgmMute": "Mute music",
     "bgmUnmute": "Unmute music",
+    "closeCardScreen": "Close card screen",
     "copyCode": "Copy code",
     "copied": "Copied",
     "streamError": "The response was interrupted. You can regenerate to continue.",

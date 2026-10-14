@@ -128,7 +128,7 @@ function contextIdOf(context: CbsContext, scripts: readonly DisplayScript[]): nu
  * window's size, which the worker has no window to ask.
  */
 function bindingsOf(context: CbsContext): PlanBindings {
-  const { resolveAsset: _resolver, chatIndex: _index, ...rest } = context;
+  const { resolveAsset: _resolver, random: _draw, chatIndex: _index, ...rest } = context;
   const bindings: PlanBindings & { scripts?: unknown } = { ...rest };
   delete bindings.scripts;
   if (typeof window !== 'undefined') bindings.screen = { width: window.innerWidth, height: window.innerHeight };

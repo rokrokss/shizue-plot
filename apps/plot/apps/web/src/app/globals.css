@@ -165,17 +165,40 @@ a, button, input, select, textarea, summary { -webkit-tap-highlight-color: trans
 }
 
 /*
- * Creator markup lives here, so the box is also its cage. `position: fixed` is
- * dropped by the sanitizer, but `absolute` is legitimate inside a status window
- * and would otherwise resolve against an ancestor and paint over the app — an
- * overlay carrying a link is a phishing surface. Paint containment makes this
- * element the containing block for positioned descendants and clips them to it;
- * isolation keeps any z-index inside its own stacking context.
+ * Creator markup lives here, so the box is also its cage. `absolute` is
+ * legitimate inside a status window, and so is `fixed` — a RisuAI card's
+ * floating menu — but either would otherwise resolve against an ancestor, or the
+ * viewport, and paint over the app: an overlay carrying a link is a phishing
+ * surface. Paint containment makes this element the containing block for both
+ * and clips them to it; isolation keeps any z-index inside its own stacking
+ * context.
  */
 .shizue-msg {
   position: relative;
   isolation: isolate;
   contain: paint;
+}
+/*
+ * In the chat the cage is the conversation's area (`.chat-stage`, the chat page):
+ * a card's `fixed` menu floats over the conversation, as RisuAI's floats over its
+ * chat screen, and stays put while the list scrolls under it — but never over the
+ * header or the composer, which stand outside that box. Layout and paint
+ * containment make the stage the containing block for `fixed` and clip
+ * everything to it; the stage is a stacking context, so a card's `z-index` ranks
+ * only among what is inside it. A message's blocks still hold their `absolute`
+ * and clip it (`overflow: clip`, and a formatting context of their own as
+ * before), but let `fixed` through to the stage, its stacking with it — a menu in
+ * an early message is not painted under a later one. No creator rule can reach
+ * these boxes: every selector is scoped under `.shizue-msg`, inside them.
+ */
+.chat-stage {
+  contain: layout paint;
+}
+.message-body .shizue-msg {
+  contain: none;
+  isolation: auto;
+  overflow: clip;
+  display: flow-root;
 }
 /* RisuAI's `{{button}}` (its `button-default`), in this palette; a card's own sheet comes later and wins. */
 .shizue-msg .x-shizue-button-default {
@@ -201,6 +224,11 @@ a, button, input, select, textarea, summary { -webkit-tap-highlight-color: trans
 .message-html > * + * {
   margin-top: 0.85em;
 }
+/* The paragraphs markdown makes of the prose a card's markup wraps (`islandToHtml`)
+   are paragraphs there too — at no weight, so any rule of the card's own wins. */
+.shizue-msg :where(p + p) {
+  margin-top: 0.85em;
+}
 .chat-narration-text > * + * {
   margin-top: 1.1em;
 }
@@ -222,6 +250,11 @@ a, button, input, select, textarea, summary { -webkit-tap-highlight-color: trans
 .message-body strong,
 .intro-body strong {
   font-weight: 600;
+}
+/* Ink for the prose's bold; in a card's markup the creator's colour carries on
+   (a `**…**` its wrapped prose holds sits on the card's own ground). */
+.message-body strong:not(.shizue-msg *),
+.intro-body strong:not(.shizue-msg *) {
   color: var(--color-fg);
 }
 .message-body a,

@@ -34,6 +34,7 @@ import {
   type CbsValue,
   type NamedAsset,
 } from '@shizue/core/cbs';
+import { fnv1a } from '@shizue/core/macro';
 import { readVariable } from '@shizue/core/variables';
 import { lookupAsset, type AssetResolver } from './assets';
 import { MAX_BACKGROUND_RENDER_CHARS } from './types';
@@ -119,7 +120,47 @@ export interface CbsContext {
    * Anywhere else the macro draws nothing.
    */
   background?: boolean;
+  /**
+   * What a redraw is, as RisuAI redraws a chat: the chat and its variables as
+   * they stand (the page's `drawKey`). RisuAI's `{{random}}`, `{{roll}}`,
+   * `{{randint}}` and `{{dice}}` draw from `Math.random` each time a message is
+   * drawn, and it draws one again when the text changes or a script moved the
+   * variables (`ReloadGUIPointer`, which empties its display cache) — not when
+   * another message arrives, or the message scrolls back into view. Drawing
+   * from this key and the message (`drawFrom`) comes out again on just those.
+   * Unset, the draws are `Math.random`'s.
+   */
+  drawKey?: string;
+  /** The draw `drawKey` makes for one text, where the text is read; it never leaves the thread. */
+  random?: () => number;
+  /**
+   * `{{trigger_id}}`: the `risu-id` of the button whose manual run has just
+   * ended, which RisuAI keeps readable for 100ms so the redraw it caused can
+   * read it; else `null`, as RisuAI's reads with none.
+   */
+  triggerId?: string | null;
 }
+
+/**
+ * A draw that is the same for the same seed: mulberry32 over the seed's FNV-1a.
+ * Small, and good enough to pick among a handful of options.
+ */
+export function seededRandom(seed: string): () => number {
+  let state = fnv1a(seed);
+  return () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * `ctx` with the draw for one text (`drawKey`): the redraw, the text and where
+ * it stands, so two messages that say the same thing still draw apart.
+ */
+export const drawFrom = (ctx: CbsContext, text: string, place: string | number = ctx.chatIndex ?? ''): CbsContext =>
+  ctx.drawKey === undefined ? ctx : { ...ctx, random: seededRandom(`${ctx.drawKey}\u0000${place}\u0000${text}`) };
 
 /**
  * Neutralizes markup, and the taint marker with it: this is the one funnel every
@@ -374,6 +415,7 @@ function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>, prose =
   return {
     variable,
     ...(globalVariable ? { globalVariable } : {}),
+    ...(ctx.random ? { random: ctx.random } : {}),
     data: hostData(ctx),
     // `{{#each}}` is the core's — RisuAI's `{{#each LIST as name}}…{{slot::name}}`
     // and our `{{#each 목록}}…{{slot}}` both — and every iteration is paid for here.
@@ -477,7 +519,7 @@ const MOBILE_RE = /iPad|iPhone|iPod|Android|webOS/i;
  * a reader's screen never has them to give.
  */
 function hostData(ctx: CbsContext): CbsHostData {
-  const data: CbsHostData = { phase: 'display' };
+  const data: CbsHostData = { phase: 'display', triggerId: ctx.triggerId ?? null };
   const index = ctx.chatIndex;
   const messages = ctx.messages;
   if (index !== undefined) {
@@ -562,6 +604,12 @@ export function renderTemplate(
   }
 }
 
+/** RisuAI's `<user>`, `<char>` and `<bot>`, which its parser reads as the macros. */
+const NAME_TAG_RE = /<(?:user|char|bot)>/i;
+
+/** Whether a text has anything for a read of CBS to answer: a macro, or one of RisuAI's name tags. */
+export const holdsCbs = (text: string): boolean => text.includes('{{') || NAME_TAG_RE.test(text);
+
 /**
  * A message's own text through the same engine, as RisuAI reads a whole message
  * before its display scripts run: still text, for the message's markdown to
@@ -573,7 +621,7 @@ export function renderTemplate(
  * A text the parser rejects comes back unread.
  */
 export function renderProse(text: string, ctx: CbsContext, charge: (chars: number) => void): string {
-  if (!text.includes('{{')) return text;
+  if (!holdsCbs(text)) return text;
   const budget: Budget = { nodes: MAX_RENDERED_NODES, iterations: MAX_EACH_ITERATIONS, charge };
   try {
     // Read leniently, as RisuAI reads a message: one stray `{{` the model wrote

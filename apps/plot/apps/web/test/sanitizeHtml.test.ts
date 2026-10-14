@@ -203,8 +203,20 @@ describe('css', () => {
   it('removes declarations that run code or escape the message box', () => {
     expectClean('<style>.a { width: expression(alert(1)) }</style>', 'expression');
     expectClean('<style>.a { -moz-binding: url(/x.xml#y) }</style>', '-moz-binding');
-    expectClean('<style>.a { position: fixed; top: 0 }</style>', 'fixed');
-    expectClean('<div style="position:fixed;inset:0">x</div>', 'fixed');
+    expectClean('<style>.a { position: sticky; top: 0 }</style>', 'sticky');
+    expectClean('<div style="position:sticky;top:0">x</div>', 'sticky');
+  });
+
+  it('keeps a RisuAI overlay floating: `fixed` and `inset`, which the box it is drawn in contains', () => {
+    // globals.css: the message (or `.shizue-msg` outside one) is the containing
+    // block for `fixed` and clips it, so a card's menu floats over its own message.
+    expect(sanitizeCustomHtml('<style>.a { position: fixed; inset: 0 }</style>')).toMatch(
+      /\.shizue-msg \.x-shizue-a \{\s*position: fixed;\s*inset: 0;/,
+    );
+    const inline = sanitizeCustomHtml('<div style="position:fixed;right:10px;bottom:104px;inset-inline-start:auto">x</div>');
+    expect(inline).toContain('position: fixed');
+    expect(inline).toContain('bottom: 104px');
+    expect(inline).toContain('inset-inline-start: auto');
   });
 
   it('drops at-rules it cannot scope, and keeps the ones it can', () => {
@@ -236,10 +248,10 @@ describe('css', () => {
 
 describe('css escapes and comments', () => {
   it('sees through a hex escape in a property value', () => {
-    // `f\69xed` is `fixed`. The raw-string check this replaced did not know that.
-    expectClean('<style>.a{position:f\\69xed;top:0}</style>', 'f\\69xed', 'position');
-    expectClean('<style>.a{position:\\66 ixed}</style>', 'position');
-    expectClean('<div style="position:f\\69xed">x</div>', 'position');
+    // `st\69cky` is `sticky`. The raw-string check this replaced did not know that.
+    expectClean('<style>.a{position:st\\69cky;top:0}</style>', 'st\\69cky', 'position');
+    expectClean('<style>.a{position:\\73 ticky}</style>', 'position');
+    expectClean('<div style="position:st\\69cky">x</div>', 'position');
   });
 
   it('sees through a hex escape in a function name', () => {
@@ -308,7 +320,7 @@ describe('css property and function allowlists', () => {
   it('allows only the positions that stay inside the message', () => {
     expect(sanitizeCustomHtml('<div style="position:absolute;top:0">x</div>')).toContain('position: absolute');
     expectClean('<style>.a{position:sticky}</style>', 'position');
-    expectClean('<style>.a{position:fixed}</style>', 'position');
+    expect(sanitizeCustomHtml('<style>.a{position:fixed}</style>')).toContain('position: fixed');
   });
 
   it('leaves a realistic status-window stylesheet intact', () => {
@@ -637,8 +649,8 @@ describe('animations', () => {
 
   it('holds every frame to the declaration filter', () => {
     const output = expectClean(
-      '<style>@keyframes go{from{position:fixed;top:0}to{background:url(https://evil.test/x);opacity:1}}</style>',
-      'fixed',
+      '<style>@keyframes go{from{position:sticky;top:0}to{background:url(https://evil.test/x);opacity:1}}</style>',
+      'sticky',
       'evil.test',
     );
     expect(output).toContain('@keyframes x-shizue-go');

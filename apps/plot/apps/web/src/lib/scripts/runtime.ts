@@ -246,6 +246,12 @@ export interface ScriptView {
   globalVariables?: Variables;
   /** What the evaluator may tell the scripts about the reader's side: the clock, the screen, the seed. */
   data?: Omit<CbsHostData, 'chat' | 'character' | 'persona' | 'triggerId' | 'lorebook' | 'char'>;
+  /**
+   * A display pass's `{{trigger_id}}`: the `risu-id` of the button whose manual
+   * run has just ended, which RisuAI's display triggers and `editDisplay` read
+   * for 100ms after it (`CbsContext.triggerId`). Any other run reads its own.
+   */
+  triggerId?: string | null;
 }
 
 /** What a generation carries for the scripts, besides the text a send may have rewritten. */
@@ -893,8 +899,9 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       persona: s.persona,
       note: s.note,
       greeting,
-      // No manual run is under way here: `{{trigger_id}}` reads `null`.
-      data: { ...s.view.data, triggerId: null },
+      // No manual run is under way here: `{{trigger_id}}` reads `null` — or, in
+      // a display pass just after one, that run's (`ScriptView.triggerId`).
+      data: { ...s.view.data, triggerId: s.view.triggerId ?? null },
     };
     return { scope, variables: () => vars, changed: () => changed };
   }
@@ -1283,6 +1290,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
         variables,
         displayData: text,
         ...(view.globalVariables ? { globalVariables: view.globalVariables } : {}),
+        ...(view.triggerId ? { triggerId: view.triggerId } : {}),
         data: { ...view.data, user: view.names.user ?? view.data?.user },
         ...(options.random ? { random: options.random } : {}),
       });

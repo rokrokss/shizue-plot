@@ -1000,6 +1000,7 @@
     "jumpToLatest": "最新へ移動",
     "bgmMute": "音楽をミュート",
     "bgmUnmute": "音楽のミュートを解除",
+    "closeCardScreen": "カード画面を閉じる",
     "copyCode": "コードをコピー",
     "copied": "コピーしました",
     "streamError": "応答が途中で途切れました。再生成で続けられます。",

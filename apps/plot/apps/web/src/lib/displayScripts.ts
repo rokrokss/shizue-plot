@@ -47,7 +47,7 @@
 import { unescapeCbs } from '@shizue/core/cbs';
 import { inDisplayDepth } from '@shizue/core/display-script';
 import { stripVariableMacros, type Variables } from '@shizue/core/variables';
-import { renderProse, renderTemplate, RenderBudgetExhausted, type CbsContext } from './cbs';
+import { drawFrom, holdsCbs, renderProse, renderTemplate, RenderBudgetExhausted, type CbsContext } from './cbs';
 import { sanitizeCustomHtml } from './sanitizeHtml';
 import { CAPTURE_CLOSE, CAPTURE_OPEN, markCapture, stripTaint, taint, TAINT } from './taint';
 import type { DisplayScript } from './types';
@@ -120,9 +120,9 @@ export function displayScriptsAt(scripts: DisplayScript[], depth: number | undef
 /**
  * The display context a message `depth` deep is drawn with: `context` narrowed
  * to the scripts in range (`displayScriptsAt`), the same object for the same
- * subset so a memoized row is not drawn again for nothing — and none at all
- * where no script is in range, which leaves the message as prose with no plan
- * asked for.
+ * subset so a memoized row is not drawn again for nothing. Where no script is in
+ * range the list is empty and the message's own CBS is still read, as RisuAI
+ * reads every message it shows.
  */
 export function displayContextAt(
   context: DisplayContext | undefined,
@@ -131,7 +131,6 @@ export function displayContextAt(
   if (!context) return undefined;
   const scripts = displayScriptsAt(context.scripts, depth);
   if (scripts === context.scripts) return context;
-  if (scripts.length === 0) return undefined;
   let narrowed = contextsOf.get(context);
   if (!narrowed) {
     narrowed = new Map();
@@ -305,8 +304,9 @@ export const bindCapture = (text: string): string => markCapture(stripVariableMa
 /**
  * Runs every enabled script over the message the way RisuAI does, and answers
  * with what it became — prose, and markup not yet sanitized. Returns null when
- * the message should be left as prose: no scripts, too long to scan, or a blown
- * cap.
+ * the message should be left as prose: no scripts and no CBS to read, too long
+ * to scan, or a blown cap. With no scripts it is the read of the message's own
+ * CBS alone, which RisuAI gives every message it shows.
  *
  * The order is RisuAI's: the message's own CBS first (`renderProse`, or for the
  * background the template engine itself), then the scripts in order, each over
@@ -332,7 +332,10 @@ export function transformDisplay(
   }
   // A tie runs in list order, which is also how a card's export writes it out.
   ordered.sort((a, b) => a.script.order - b.script.order || a.index - b.index);
-  if (ordered.length === 0) return null;
+  // With no script to run, what is left of the pass is RisuAI's read of the
+  // message's own CBS (`risuChatParser`, which it runs over every message it
+  // shows) — and nothing to do where there is nothing to read.
+  if (ordered.length === 0 && (request.background || !holdsCbs(request.content))) return null;
   // Scanning a wall of text with a creator's regex is the expensive case, and a
   // message this long is prose rather than a status block.
   if (request.content.length > limits.scanned) return null;
@@ -421,8 +424,13 @@ export function transformDisplay(
     if (evaluated > limits.evaluated) throw new RenderBudgetExhausted('evaluated');
   };
   let deadline = now() + limits.deadlineMs;
-  /** The bindings every read of a template sees; `{{bg::…}}` draws its picture only in the background. */
-  const evalCtx: CbsContext = request.background ? { ...ctx, background: true } : ctx;
+  /**
+   * The bindings every read sees, with the draw for this text (`drawFrom`): one
+   * for the whole pass, so the scripts' reads go on drawing where the message's
+   * own left off. `{{bg::…}}` draws its picture only in the background.
+   */
+  const drawn = drawFrom(ctx, request.content, request.background ? 'background' : undefined);
+  const evalCtx: CbsContext = request.background ? { ...drawn, background: true } : drawn;
 
   /**
    * A read of CBS, not counted against the matching's clock: the time it took is
@@ -717,7 +725,7 @@ export function transformDisplay(
       body = cut(read, 0, 'text');
     } else {
       charge(request.content.length);
-      const read = timed(() => renderProse(request.content, ctx, charge));
+      const read = timed(() => renderProse(request.content, evalCtx, charge));
       charge(read.length);
       body = read ? [{ kind: 'text', text: read, island: 0 }] : [];
     }
@@ -860,8 +868,16 @@ export function transformDisplay(
  * the sanitizer is allowed to be handed, charged before the work;
  * `MAX_HTML_CHARS` is what all the islands together are allowed to put on the
  * page. Only the first of them can see work that produces nothing.
+ *
+ * `render` is what an island goes through: the sanitizer alone by default, and
+ * in a message RisuAI's markdown before it (`renderIsland` in
+ * `lib/markdown/html`, passed by `MessageBody` — this module also runs in the
+ * display worker, which has no use for a markdown parser).
  */
-export function renderDisplayPlan(plan: DisplayPlan): Segment[] | null {
+export function renderDisplayPlan(
+  plan: DisplayPlan,
+  render: (html: string) => string = sanitizeCustomHtml,
+): Segment[] | null {
   let taken = 0;
   let produced = 0;
 
@@ -869,7 +885,7 @@ export function renderDisplayPlan(plan: DisplayPlan): Segment[] | null {
     // Pay first. A stage that has not been paid for does not run.
     taken += html.length;
     if (taken > MAX_RENDER_INPUT_CHARS) throw new RenderBudgetExhausted('input');
-    const clean = sanitizeCustomHtml(html);
+    const clean = render(html);
     produced += clean.length;
     if (produced > MAX_HTML_CHARS) throw new RenderBudgetExhausted('html');
     return { kind: 'html', html: clean };

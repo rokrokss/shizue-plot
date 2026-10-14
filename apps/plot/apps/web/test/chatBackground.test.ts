@@ -47,11 +47,11 @@ const ctx: CbsContext = {
 describe('the chat background', () => {
   it('reads as CBS, draws {{bg::…}} as RisuAI’s background does, and keeps to the sanitizer', () => {
     const html = renderBackground(
-      '<style>.sky { color: red; position: fixed; }</style><div class="sky">{{char}}의 {{getvar::time}}</div>{{bg::night}}<script>alert(1)</script>',
+      '<style>.sky { color: red; position: sticky; }</style><div class="sky">{{char}}의 {{getvar::time}}</div>{{bg::night}}<script>alert(1)</script>',
       ctx,
     );
     expect(html).toContain('<style>.shizue-msg .x-shizue-sky');
-    expect(html).not.toContain('fixed');
+    expect(html).not.toContain('sticky');
     expect(html).toContain('<div class="x-shizue-sky">리안의 밤</div>');
     expect(html).toContain('url(/api/plots/p1/assets/night)');
     expect(html).toContain('background-size: cover');

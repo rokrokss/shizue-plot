@@ -1,7 +1,7 @@
 'use client';
 
 import { memo, useEffect, useMemo, useState } from 'react';
-import { RenderBudgetExhausted, renderTemplate, type CbsContext } from '@/lib/cbs';
+import { drawFrom, RenderBudgetExhausted, renderTemplate, type CbsContext } from '@/lib/cbs';
 import { displayPlanner, type PlanRequest } from '@/lib/displayPlanner';
 import { type DisplayPlan } from '@/lib/displayScripts';
 import { MESSAGE_SCOPE_CLASS, sanitizeCustomHtml } from '@/lib/sanitizeHtml';
@@ -47,7 +47,7 @@ export function renderBackground(html: string, ctx: CbsContext, plan: DisplayPla
       // The creator's text, so the only markers the sanitizer sees are the engine's.
       const source = stripTaint(html);
       charge(source.length);
-      rendered = renderTemplate(source, { ...ctx, background: true }, charge, () => '');
+      rendered = renderTemplate(source, { ...drawFrom(ctx, source, 'background'), background: true }, charge, () => '');
     }
     charge(rendered.length);
     const markup = sanitizeCustomHtml(rendered);

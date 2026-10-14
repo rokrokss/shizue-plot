@@ -25,7 +25,7 @@ import {
   type BodySegment,
   type ComponentContext,
 } from '@/lib/componentCalls';
-import { renderProseButtons } from '@/lib/cbs';
+import { holdsCbs, renderProseButtons } from '@/lib/cbs';
 import { displayPlanner, type PlanRequest } from '@/lib/displayPlanner';
 import {
   renderDisplayPlan,
@@ -39,6 +39,7 @@ import {
   markupChunks,
   remarkNoIndentedCode,
   renderImageTokensAsHtml,
+  renderIsland,
 } from '@/lib/markdown/html';
 import { rehypeDialogueQuotes } from '@/lib/markdown/quotes';
 import { rehypeWordReveal } from '@/lib/markdown/reveal';
@@ -409,10 +410,11 @@ function useSettleFade(streaming: boolean): boolean {
  * answer.
  *
  * Null means draw it plain, and that covers three different situations on purpose:
- * the card has no scripts, the message is still streaming, and the plan has not
- * come back yet (or never will, because the pattern hung and the worker was
- * terminated). All three want the same thing on screen — the message as the model
- * wrote it — and none of them wants a blank space while we decide.
+ * there is nothing to run (no script, and no CBS of the message's own to read),
+ * the message is still streaming, and the plan has not come back yet (or never
+ * will, because the pattern hung and the worker was terminated). All three want
+ * the same thing on screen — the message as the model wrote it — and none of them
+ * wants a blank space while we decide.
  *
  * The planner keeps what it answered: a message drawn again — remounted,
  * scrolled back in, its text back to one it had — takes the kept plan on its
@@ -442,9 +444,10 @@ function useDisplayPlan(
   // A half-streamed status block is not a status block: matching a line the
   // model is still in the middle of writing gets an answer about a state that
   // was never reported. It is worth the wait, and the wait is one turn.
+  // With no script, only a message with CBS of its own has a pass to run.
   const request = useMemo<PlanRequest | null>(
     () =>
-      display && !streaming
+      display && !streaming && (display.scripts.length > 0 || holdsCbs(content))
         ? {
             content,
             scripts: display.scripts,
@@ -519,9 +522,11 @@ const COLD_HOLD_MS = 500;
  * same way — they are protocol for the model, which still sees them in the prompt.
  *
  * With `display` set, the character's display scripts run first and the message
- * becomes a mix of text runs and sanitized HTML islands. Without it — the viewer
- * turned custom UI off, or the character has no scripts — the whole message is
- * one text run and nothing else changes.
+ * becomes a mix of text runs and HTML islands — read as markdown, as RisuAI reads
+ * what its scripts made, and sanitized (`renderIsland`). With no scripts the
+ * message's own CBS is still read, as RisuAI reads every message it shows.
+ * Without `display` — the viewer turned custom UI off — the whole message is one
+ * text run and nothing else changes.
  *
  * The scripts — their patterns, and the CBS RisuAI reads before and between
  * them — run in a worker (`lib/displayPlanner`), so a
@@ -579,8 +584,9 @@ export const MessageBody = memo(function MessageBody({
   /** Resolves imported cards' own image names to slugs; memoize it too. Slugs only without it. */
   resolveAsset?: AssetResolver;
   /**
-   * Omitted when the viewer opted out or the character has no display scripts.
-   * `scripts` must keep its identity across renders — it is what tells a plan
+   * Omitted when the viewer opted out of custom UI; with no scripts in it, the
+   * message's own CBS is read all the same. `scripts` must keep its identity
+   * across renders — it is what tells a plan
    * apart from a stale one, and a fresh array every render would ask for a new
    * plan on every token.
    */
@@ -646,9 +652,10 @@ export const MessageBody = memo(function MessageBody({
 
   const segments = useMemo<BodySegment[]>(() => {
     const plain: Segment[] = [{ kind: 'text', text: content }];
-    // The plan is the message as the scripts and their CBS made it; only the
-    // sanitizing is left, and it is done here, where there is a DOM.
-    const base = plan ? (renderDisplayPlan(plan) ?? plain) : plain;
+    // The plan is the message as the scripts and their CBS made it; what is left
+    // is RisuAI's markdown over the islands and the sanitizing, done here, where
+    // there is a DOM.
+    const base = plan ? (renderDisplayPlan(plan, renderIsland) ?? plain) : plain;
     if (componentContext) return splitComponentCalls(base, componentContext.names);
     return componentNames ? escapeComponentCalls(base, componentNames) : base;
   }, [content, componentContext, componentNames, plan]);

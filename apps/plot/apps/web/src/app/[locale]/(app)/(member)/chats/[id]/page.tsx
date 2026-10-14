@@ -5,6 +5,7 @@ import { assetResolver, type CbsMessage } from '@shizue/core/cbs';
 import { componentNames } from '@shizue/core/component';
 import { displayScriptsFor } from '@shizue/core/display-script';
 import { NARRATOR_SPEAKER } from '@shizue/core/group';
+import { fnv1a } from '@shizue/core/macro';
 import { NARRATION_PREFIX } from '@shizue/core/narration';
 import { isSceneMessage, sceneSpanAt } from '@shizue/core/scene';
 import { manualTriggerNames, type MemberOverlay } from '@shizue/core/triggers';
@@ -141,6 +142,7 @@ import type {
   SuggestionsResult,
   UserNote,
 } from '@/lib/types';
+import { useCardOverlays } from '@/lib/useCardOverlays';
 import { useBackgroundMusic } from '@/lib/useBackgroundMusic';
 import { useDocumentTitle } from '@/lib/useDocumentTitle';
 import { ApiError } from '@/lib/api';
@@ -328,6 +330,20 @@ interface ScriptRuntimes {
 
 /** The background's key among the messages the card's display scripts draw — an id no message has. */
 const BACKGROUND_ITEM = 'background';
+
+/** How long a manual run's `risu-id` stays readable after it, as RisuAI keeps `{{trigger_id}}`. */
+const TRIGGER_ID_MS = 100;
+
+/** A fold's values as one number, the same for the same values in whatever order they were set. */
+function foldKey(values: Variables | undefined): number {
+  if (!values) return 0;
+  return fnv1a(
+    Object.keys(values)
+      .sort()
+      .map((key) => `${key}\u0000${values[key]}`)
+      .join('\u0001'),
+  );
+}
 
 export default function ChatPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -942,6 +958,27 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   useBackgroundMusic();
 
   /**
+   * The conversation's area, which a card's `fixed` overlay floats over and never
+   * past (`.chat-stage`), and the way out of one while it is open: "close card
+   * screen" in the header, or Esc (`useCardOverlays`).
+   */
+  const [stageElement, setStageElement] = useState<HTMLDivElement | null>(null);
+  const cardOverlays = useCardOverlays(stageElement, customUi);
+  const closeCardOverlays = cardOverlays.close;
+  useEffect(() => {
+    if (!cardOverlays.open) return;
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      // A dialog or a sheet of ours that is open takes its own Esc.
+      if ((event.target as Element | null)?.closest?.('[role="dialog"], dialog')) return;
+      event.preventDefault();
+      closeCardOverlays();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [cardOverlays.open, closeCardOverlays]);
+
+  /**
    * RisuAI's emotion screen: the picture each panel member shows on the branch
    * on screen (`emotionSlots`) — nothing at all for a work whose cards show none.
    */
@@ -1053,6 +1090,25 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const wholeBranch = !state?.hasMore;
   const globalVariables = state?.globalVariables;
   const chatId = state?.chat.id ?? '';
+  /**
+   * What a redraw is, for the draws of `{{random}}` and its kin
+   * (`CbsContext.drawKey`): the chat and its stored variables, chat and global,
+   * by value. RisuAI draws them again when a script moves the variables and not
+   * when a message merely arrives, so the stored fold is the key — not the live
+   * one a streamed `{{setvar}}` moves before anything is committed.
+   */
+  const drawKey = useMemo(
+    () => `${chatId}\u0000${foldKey(persistedVariables)}\u0000${foldKey(globalVariables)}`,
+    [chatId, persistedVariables, globalVariables],
+  );
+  /**
+   * The `risu-id` of the button whose manual run is under way or has just ended,
+   * for a display pass's `{{trigger_id}}`. RisuAI sets it as the run starts and
+   * clears it 100ms after (`TRIGGER_ID_MS`), so the redraw the run caused reads it
+   * and the ones after it do not. Read when the display bindings are next made,
+   * and no reason to make them: RisuAI's clearing redraws nothing either.
+   */
+  const shownTriggerId = useRef<string | null>(null);
   const locale = useLocale();
   /**
    * The chat's language mode (§11 언어 모드): decided by the work's language
@@ -1102,8 +1158,14 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    */
   const firstMemberId = cast[0]?.id ?? null;
 
+  /**
+   * What the messages are drawn with: the display scripts and the bindings their
+   * CBS reads. A work without scripts has one too, with none in it — RisuAI reads
+   * every message it shows as CBS (`risuChatParser`), so a `{{getvar}}` the model
+   * wrote is answered with or without a script to dress it.
+   */
   const display = useMemo<DisplayContext | undefined>(() => {
-    if (!customUi || scripts.length === 0) return undefined;
+    if (!customUi) return undefined;
     return {
       scripts,
       variables,
@@ -1122,6 +1184,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       wholeBranch,
       chatId,
       locale,
+      drawKey,
+      ...(shownTriggerId.current !== null ? { triggerId: shownTriggerId.current } : {}),
       ...(globalVariables ? { globalVariables } : {}),
       ...(triggerNames ? { triggerNames } : {}),
     };
@@ -1145,6 +1209,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     wholeBranch,
     chatId,
     locale,
+    drawKey,
     globalVariables,
     triggerNames,
   ]);
@@ -1164,8 +1229,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   /**
    * What a member's messages are drawn with, in a work of several: its display
    * scripts, and the buttons its own triggers answer — none for a member with no
-   * scripts, the first no differently (`runtimeOf`). Missing for a member none of
-   * the plot's scripts apply to. The messages no member speaks (`sceneDisplay`)
+   * scripts, the first no differently (`runtimeOf`). A member none of the plot's
+   * scripts apply to has an empty list, so its messages' own CBS is still read.
+   * The messages no member speaks (`sceneDisplay`)
    * take the first member's display scripts and the lead's buttons, as they run
    * the lead's scripts.
    */
@@ -1178,7 +1244,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       list === scripts && names === triggerNames ? display : { ...rest, scripts: list, ...(names ? { triggerNames: names } : {}) };
     for (const member of cast) {
       const list = scriptsByMember.get(member.id) ?? scripts;
-      if (list.length === 0) continue;
       const own = triggerNamesByMember.get(member.id);
       byMember.set(member.id, contextOf(list, own));
       if (member.id === firstMemberId) scene = contextOf(list, triggerNames);
@@ -1245,11 +1310,12 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         user: personaName ?? youLabel,
         seed: chatId,
         seedLength: lastMessageId + 1,
+        drawKey,
       });
       if (text !== message.content) shown.set(message.id, text);
     }
     return shown;
-  }, [messages, firstGreeting, firstMessage, variables, charMacro, personaName, youLabel, chatId, lastMessageId]);
+  }, [messages, firstGreeting, firstMessage, variables, charMacro, personaName, youLabel, chatId, lastMessageId, drawKey]);
 
   /** Fills the composer; the reader still decides to send. */
   const suggestInput = useCallback((text: string) => setInput(text), []);
@@ -1329,6 +1395,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             wholeBranch,
             chatId,
             locale,
+            drawKey,
+            ...(shownTriggerId.current !== null ? { triggerId: shownTriggerId.current } : {}),
             ...(globalVariables ? { globalVariables } : {}),
           }
         : null,
@@ -1351,6 +1419,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       wholeBranch,
       chatId,
       locale,
+      drawKey,
       globalVariables,
     ],
   );
@@ -1753,6 +1822,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     const current = stateRef.current;
     const runtime = scriptCast ? runtimeOf(scriptCast, member) : null;
     if (!runtime || !current || scriptsPending || !beginMutation()) return;
+    shownTriggerId.current = triggerId;
     try {
       const next = await runtime.manual(name, triggerId, await scriptViewOf(current));
       if (next) mergeState(next);
@@ -1760,6 +1830,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       setError(toMessage(caught));
     } finally {
       endMutation();
+      if (triggerId !== null) {
+        setTimeout(() => {
+          if (shownTriggerId.current === triggerId) shownTriggerId.current = null;
+        }, TRIGGER_ID_MS);
+      }
     }
   }
 
@@ -1847,6 +1922,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       firstGreeting,
       ...(globalVariables ? { globalVariables } : {}),
       data: scriptData(lastMessageId + 1),
+      ...(shownTriggerId.current !== null ? { triggerId: shownTriggerId.current } : {}),
     };
     // Each message to the listeners of the member it is (`runtimeOf`), the background to the lead's.
     const items = messages.map((message) => ({
@@ -1904,6 +1980,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       firstGreeting,
       ...(globalVariables ? { globalVariables } : {}),
       data: scriptData(lastMessageId + 1),
+      ...(shownTriggerId.current !== null ? { triggerId: shownTriggerId.current } : {}),
     };
     // Each message through the display triggers of the member it is (`runtimeOf`).
     for (const message of messages) {
@@ -2895,10 +2972,27 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           <AiBadge />
           {/* At every width, while the page has music. */}
           <BgmMute />
+          {/* While a card's floating screen is open: the quiet way out of it. On a
+              phone the row has room for its mark alone, so the title still shows. */}
+          {cardOverlays.open ? (
+            <button
+              type="button"
+              data-testid="close-card-screen"
+              aria-label={t('closeCardScreen')}
+              title={t('closeCardScreen')}
+              onClick={closeCardOverlays}
+              className="ml-auto inline-flex h-7 min-w-7 shrink-0 items-center justify-center gap-1 rounded-full border border-line px-2 text-xs text-muted transition-colors hover:border-muted/60 hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus sm:px-2.5"
+            >
+              <span aria-hidden="true">✕</span>
+              <span aria-hidden="true" className="hidden sm:inline">
+                {t('closeCardScreen')}
+              </span>
+            </button>
+          ) : null}
 
           {/* Wide enough for the controls, and they stand in the header. Narrower
               than that, one button opens them in a sheet from the bottom edge. */}
-          <div className="ml-auto hidden items-center gap-2 lg:flex">
+          <div className={cx('hidden items-center gap-2 lg:flex', !cardOverlays.open && 'ml-auto')}>
             <ChatSettings
               model={state.chat.model}
               subModel={state.chat.subModel}
@@ -2929,7 +3023,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             model={state.chat.model}
             models={models}
             disabled={settingsLocked}
-            className="ml-auto lg:hidden"
+            className={cx('lg:hidden', !cardOverlays.open && 'ml-auto')}
             onChange={(model) => void updateSettings({ model })}
           />
           <Button
@@ -3016,8 +3110,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         {emotionScreen.length > 0 ? <EmotionScreen chatId={state.chat.id} slots={emotionScreen} /> : null}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {/* The conversation's area. What a card draws behind the chat stands still
-              in it while the list scrolls over it, as RisuAI's background does. */}
-          <div className="relative flex min-h-0 flex-1 flex-col">
+              in it while the list scrolls over it, as RisuAI's background does, and
+              what a card floats (`position: fixed`) floats over it and no further. */}
+          <div ref={setStageElement} data-testid="chat-stage" className="chat-stage relative flex min-h-0 flex-1 flex-col">
             {backgroundContext ? (
               <ChatBackground html={shownBackground} context={backgroundContext} scripts={backgroundScripts} />
             ) : null}

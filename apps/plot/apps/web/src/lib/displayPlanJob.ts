@@ -24,7 +24,7 @@ import type { DisplayScript } from './types';
 export const KEPT_CONTEXTS = 16;
 
 /** The bindings a context carries across: a `CbsContext` with no function in it. */
-export type PlanBindings = Omit<CbsContext, 'resolveAsset' | 'chatIndex'>;
+export type PlanBindings = Omit<CbsContext, 'resolveAsset' | 'random' | 'chatIndex'>;
 
 /** What the page sends. */
 export type PlanMessage =

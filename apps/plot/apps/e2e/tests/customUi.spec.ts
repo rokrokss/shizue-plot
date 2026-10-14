@@ -387,3 +387,71 @@ test('a script given a range dresses only the messages in it', async () => {
   await expect(earlier).toContainText('[status] hp=50');
   await expect(assistantMessages().last().locator('.shizue-msg .x-shizue-status')).toContainText('HP 50');
 });
+
+test('a fixed overlay covers the conversation, never the header or the composer, and closes from the header or with Esc', async () => {
+  // A RisuAI card's menu asks for the viewport (`position: fixed`): it gets the
+  // conversation's area, and a box reaching for the whole page is clipped to it.
+  await page.goto(`/ko/plots/${plotId}`);
+  await page.getByTestId('add-display-script').click();
+  const added = page.getByTestId('display-script').last();
+  await added.locator('summary').click();
+  await added.getByTestId('display-script-in').fill('\\[overlay\\]');
+  await added
+    .getByTestId('display-script-out')
+    .fill(
+      '<style>.panel{display:none}.toggle:checked ~ .panel{display:block}</style>' +
+        // An id per message, as RisuAI cards write it: the reader's turn draws one too.
+        '<input type="checkbox" id="overlay-{{chat_index}}" class="toggle"><label for="overlay-{{chat_index}}">메뉴 열기</label>' +
+        '<div class="panel" style="position:fixed;inset:0;background:rgba(255,0,0,.25)">덮개' +
+        '<div style="position:fixed;top:-3000px;left:-3000px;width:9000px;height:9000px"></div></div>',
+    );
+  await page.getByRole('button', { name: '저장', exact: true }).click();
+  await expect(page.getByText('저장했습니다')).toBeVisible();
+
+  await startChat();
+  await page.getByPlaceholder('메시지를 입력하세요').fill('[overlay] 덮어 본다');
+  await page.getByRole('button', { name: '보내기' }).click();
+  await expect(assistantMessages()).toHaveCount(2);
+
+  const reply = assistantMessages().last();
+  const panel = reply.locator('.x-shizue-panel');
+  const closer = page.getByRole('button', { name: '카드 화면 닫기' });
+  await expect(panel).toBeHidden();
+  await expect(closer).toHaveCount(0);
+
+  await reply.getByText('메뉴 열기').click();
+  await expect(panel).toBeVisible();
+  expect(await panel.evaluate((el) => getComputedStyle(el).position)).toBe('fixed');
+  // `inset: 0` is the conversation's area, not the viewport.
+  const stage = (await page.getByTestId('chat-stage').boundingBox())!;
+  const covered = (await panel.boundingBox())!;
+  expect(Math.abs(covered.y - stage.y)).toBeLessThanOrEqual(1);
+  expect(Math.abs(covered.height - stage.height)).toBeLessThanOrEqual(1);
+  expect(Math.abs(covered.width - stage.width)).toBeLessThanOrEqual(1);
+
+  // What a click lands on outside the conversation is still the app — the
+  // composer and the header — not the card's 9000px box.
+  const hits = await page.evaluate(() => {
+    const at = (target: Element | null): string => {
+      const box = target!.getBoundingClientRect();
+      const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+      return hit?.closest('.shizue-msg') ? 'card' : 'app';
+    };
+    const notes = Array.from(document.querySelectorAll('button')).find((button) => button.textContent === '노트') ?? null;
+    return [at(document.querySelector('textarea[placeholder^="메시지를 입력하세요"]')), at(document.querySelector('header')), at(notes)];
+  });
+  expect(hits).toEqual(['app', 'app', 'app']);
+
+  // The way out: the header's button undoes the card's own toggle…
+  await closer.click();
+  await expect(panel).toBeHidden();
+  await expect(closer).toHaveCount(0);
+  await expect(reply.locator('input.x-shizue-toggle')).not.toBeChecked();
+  // …and so does Esc.
+  await reply.getByText('메뉴 열기').click();
+  await expect(panel).toBeVisible();
+  await expect(closer).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(panel).toBeHidden();
+  await expect(closer).toHaveCount(0);
+});

@@ -1000,6 +1000,7 @@
     "jumpToLatest": "맨 아래로",
     "bgmMute": "음악 음소거",
     "bgmUnmute": "음악 음소거 해제",
+    "closeCardScreen": "카드 화면 닫기",
     "copyCode": "코드 복사",
     "copied": "복사됨",
     "streamError": "응답이 중간에 끊겼습니다. 이어서 다시 생성할 수 있습니다.",

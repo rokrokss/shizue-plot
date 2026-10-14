@@ -344,9 +344,36 @@ export function toHtml(node: HastNode): string {
 /** The plugins markup chunks are read with: the prose path's, so markdown means the same in both. */
 export const markupRemarkPlugins = [remarkGfm, remarkBreaks, remarkNoIndentedCode];
 
+/** A `<style>` element and its sheet, to where the browser ends it. */
+const STYLE_ELEMENT_RE = /(<style\b[^>]*>)([\s\S]*?)(<\/style\s*>)/gi;
+/** The stand-in a sheet waits behind while markdown reads around it, by its number. */
+const SHEET_SLOT_RE = /(\d+)/g;
+const SHEET_SLOT_CHARS_RE = /[]/g;
+
 /**
- * Markdown with raw HTML enabled, as an unsanitized string — markdown-it's
- * `html: true`, which is what RisuAI renders with.
+ * `render` over markdown whose stylesheets it never reads, as RisuAI keeps them
+ * out of its markdown (`encodeStyle`). A sheet is not markdown: a `*` or a `_` in
+ * it is not emphasis, and a blank line in a sheet inside a `<div>` would end
+ * markdown's HTML block there and read the rest of the sheet as paragraphs —
+ * which the stylesheet parser then refuses, sheet and all. So each sheet's text
+ * waits behind a one-line stand-in while markdown runs and is put back after,
+ * its `<style>` tags left where they were so the blocks around them read as
+ * before. The stand-in's characters are taken out of the input first, so no text
+ * can name a sheet.
+ */
+function withSheetsKept(md: string, render: (text: string) => string): string {
+  if (!/<style/i.test(md)) return render(md);
+  const sheets: string[] = [];
+  const held = md.replace(SHEET_SLOT_CHARS_RE, '').replace(STYLE_ELEMENT_RE, (_element, open: string, sheet: string, close: string) => {
+    sheets.push(sheet);
+    return `${open}${sheets.length - 1}${close}`;
+  });
+  return render(held).replace(SHEET_SLOT_RE, (_slot, index: string) => sheets[Number(index)] ?? '');
+}
+
+/**
+ * Markdown with raw HTML enabled, written out by `write` as an unsanitized
+ * string — markdown-it's `html: true`, which is what RisuAI renders with.
  *
  * react-markdown is the parser the rest of the message already uses, and it
  * carries raw HTML through its pipeline as `raw` nodes until the very end, where
@@ -355,10 +382,10 @@ export const markupRemarkPlugins = [remarkGfm, remarkBreaks, remarkNoIndentedCod
  * thrown away. It holds no hooks, so calling it outside a render is calling a
  * function.
  */
-export function markdownToHtml(md: string): string {
+function renderTree(md: string, write: (tree: HastNode) => string): string {
   let html = '';
   const capture = () => (tree: HastNode): undefined => {
-    html = toHtml(tree);
+    html = write(tree);
     tree.children = [];
     return undefined;
   };
@@ -366,8 +393,64 @@ export function markdownToHtml(md: string): string {
   return html;
 }
 
+/** Markdown with raw HTML enabled, as an unsanitized string (`renderTree`). */
+export const markdownToHtml = (md: string): string => withSheetsKept(md, (text) => renderTree(text, toHtml));
+
 /**
  * A markup chunk as it may reach the DOM: rendered, then sanitized like any
  * display script's output. Empty where there is no DOM to sanitize with.
  */
 export const renderMarkup = (md: string): string => sanitizeCustomHtml(markdownToHtml(md));
+
+/** A mark (`lib/taint`) as markdown percent-encoded it into a link's or a picture's address. */
+const ENCODED_MARK_RE = /%0([1-3])/g;
+
+/**
+ * Puts back the marks markdown encoded away. An address written as markdown —
+ * `[보기](<{{getvar::url}}>)`, `[보기](<$1>)` — is percent-encoded on its way into
+ * the tree, and `%01` is no longer the mark the sanitizer reads a model's link by
+ * (`lib/sanitizeHtml`). A `%01` the model wrote itself comes back as a mark too,
+ * which only ever makes its link text.
+ */
+function restoreMarks(node: HastNode): void {
+  const properties = node.properties;
+  if (properties) {
+    for (const name of ['href', 'src']) {
+      const value = properties[name];
+      if (typeof value === 'string') {
+        properties[name] = value.replace(ENCODED_MARK_RE, (_code, digit: string) => String.fromCharCode(Number(digit)));
+      }
+    }
+  }
+  for (const child of node.children ?? []) restoreMarks(child);
+}
+
+/**
+ * A display script's island as RisuAI draws its output: RisuAI's `ParseMarkdown`
+ * runs the scripts and then markdown over what they made, so prose a template
+ * wraps — `<div class="body">\n\n$&\n\n</div>` — reads as paragraphs, emphasis
+ * and the rest, as the message's own HTML does (`markdownToHtml`).
+ *
+ * Two things are the island's own. Its marks are kept on the addresses markdown
+ * builds (`restoreMarks`), so a link a template makes of the model's words is
+ * still the model's link. And an island that markdown makes one paragraph of —
+ * `<span class="q">"…"</span>`, the words of a line in a colour — is the
+ * paragraph's content: in RisuAI it is a run of the paragraph around it, and
+ * here it stands in that paragraph's bubble (`MessageBody`), which a `<p>` of its
+ * own would take it out of.
+ */
+export function islandToHtml(html: string): string {
+  return withSheetsKept(html, (text) =>
+    renderTree(text, (tree) => {
+      restoreMarks(tree);
+      const top = (tree.children ?? []).filter((node) => node.type !== 'text' || (node.value ?? '').trim() !== '');
+      const only = top.length === 1 ? top[0]! : null;
+      return only?.type === 'element' && only.tagName === 'p'
+        ? toHtml({ type: 'root', children: only.children ?? [] })
+        : toHtml(tree);
+    }),
+  );
+}
+
+/** An island as it may reach the DOM: rendered (`islandToHtml`), then sanitized. */
+export const renderIsland = (html: string): string => sanitizeCustomHtml(islandToHtml(html));

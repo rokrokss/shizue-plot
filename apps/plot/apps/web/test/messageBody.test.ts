@@ -343,3 +343,53 @@ describe('a {{button}} in the message’s own prose', () => {
     expect(host.textContent).toContain('{{button::Start war::war}}');
   });
 });
+
+/** The plan the worker would make of `content` with `scripts`. */
+const planWith = (content: string, scripts: DisplayScript[], context: DisplayContext = display({ scripts })): unknown =>
+  transformDisplay({ content, scripts, previousSameRole: '' }, context, PLAN_LIMITS, Date.now);
+
+describe('RisuAI’s markdown over what the scripts made', () => {
+  const ROSTER = [{ id: 'c1', name: '아리아', avatarUrl: null }];
+
+  it('reads the prose a script wrapped as paragraphs and emphasis, not one run-on line', async () => {
+    // 광휘전대's wrapper takes the whole reply into its frame.
+    const scripts: DisplayScript[] = [
+      { in: '^[\\s\\S]*$', out: '<div class="wrap">\n\n$&\n\n</div>', order: 0, enabled: true, flags: 'u' },
+    ];
+    const content = '첫 문단에서 *웃는다*.\n\n둘째 문단.';
+    render(createElement(MessageBody, { content, display: display({ scripts }) }));
+    await land(planWith(content, scripts));
+    const wrap = host.querySelector('.shizue-msg .x-shizue-wrap')!;
+    expect([...wrap.querySelectorAll('p')].map((p) => p.textContent)).toEqual(['첫 문단에서 웃는다.', '둘째 문단.']);
+    expect(wrap.querySelector('p em')?.textContent).toBe('웃는다');
+  });
+
+  it('keeps a quote in a colour inside its speaker’s bubble, a run of the line', async () => {
+    const scripts: DisplayScript[] = [
+      { in: '"([^"\\n]+)"', out: '<span class="q">"$1"</span>', order: 0, enabled: true, flags: 'gu' },
+    ];
+    const content = '아리아는 "안녕" 하고 웃었다.';
+    render(createElement(MessageBody, { content, display: display({ scripts }), roster: ROSTER, speaker: '아리아', mode: 'reply' }));
+    await land(planWith(content, scripts));
+    const quote = host.querySelector('.x-shizue-q')!;
+    expect(quote.closest('.chat-bubble')).not.toBeNull();
+    expect(quote.closest('p')).toBeNull();
+  });
+});
+
+describe('a card with no display script', () => {
+  it('asks for nothing where the message has no CBS of its own', () => {
+    render(createElement(MessageBody, { content: '그냥 대사.', display: display({ scripts: [] }) }));
+    expect(asked).toEqual([]);
+    expect(host.textContent).toContain('그냥 대사.');
+  });
+
+  it('reads the model’s own CBS, as RisuAI reads every message it shows', async () => {
+    const context = display({ scripts: [] });
+    const content = '금화 {{getvar::gold}}닢, <user>.';
+    render(createElement(MessageBody, { content, display: context }));
+    expect(asked.map((one) => one.content)).toEqual([content]);
+    await land(planWith(content, [], context));
+    expect(host.textContent).toContain('금화 12닢, 민준.');
+  });
+});

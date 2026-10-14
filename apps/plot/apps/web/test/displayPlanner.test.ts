@@ -377,9 +377,11 @@ describe('the range a script runs in', () => {
     expect(displayScriptsAt(scripts, undefined)).toBe(scripts);
   });
 
-  it('asks the worker nothing for a message out of every range, and only for the scripts in it', async () => {
+  it('sends no script for a message out of every range, and only the scripts in range', async () => {
     const lone = context([near]);
-    expect(displayContextAt(lone, 2)).toBeUndefined();
+    // Out of every range, the message's own CBS is still read, as RisuAI reads every message.
+    expect(displayContextAt(lone, 2)!.scripts).toEqual([]);
+    expect(displayContextAt(lone, 2)).toBe(displayContextAt(lone, 7));
     expect(displayContextAt(lone, 0)).toBe(lone);
 
     const all = context(scripts);

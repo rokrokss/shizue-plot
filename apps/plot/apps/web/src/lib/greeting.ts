@@ -18,8 +18,9 @@
  * braces are the model's protocol, not the creator's template.
  */
 
-import { applyMacros, fnv1a } from '@shizue/core/macro';
+import { applyMacros } from '@shizue/core/macro';
 import type { Variables } from '@shizue/core/variables';
+import { seededRandom } from './cbs';
 
 /**
  * A greeting longer than this once evaluated is shown as it was stored. A
@@ -41,6 +42,8 @@ export interface GreetingContext {
    * holds on a reroll. Without it `{{pick}}` keeps the old once-per-chat choice.
    */
   seedLength?: number;
+  /** The redraw the greeting is drawn in (`CbsContext.drawKey`), for its `{{random}}`. */
+  drawKey?: string;
 }
 
 /** The root of a branch, written before anyone spoke: the chat's opening, or one of its swipes. */
@@ -65,22 +68,12 @@ export function opensOnFirstGreeting(
 }
 
 /**
- * A `{{random}}` that is the same on every render of one message. Left on
- * `Math.random`, a roll inside a kept branch would come out different each time
- * a variable moved anywhere in the chat.
+ * The greeting `content` of message `id`, with its conditions decided.
+ *
+ * Its `{{random}}` draws as a message's does (`CbsContext.drawKey`): the same on
+ * every render of the greeting until RisuAI would draw it again — the variables
+ * moved, or the text did — and not each time another message arrives.
  */
-function seededRandom(seed: string): () => number {
-  let state = fnv1a(seed);
-  // mulberry32: small, and good enough to pick among a handful of options.
-  return () => {
-    state = (state + 0x6d2b79f5) | 0;
-    let t = Math.imul(state ^ (state >>> 15), 1 | state);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-/** The greeting `content` of message `id`, with its conditions decided. */
 export function greetingText(content: string, id: string, ctx: GreetingContext): string {
   if (!content.includes('{{')) return content;
   const shown = applyMacros(content, {
@@ -89,7 +82,7 @@ export function greetingText(content: string, id: string, ctx: GreetingContext):
     variables: ctx.variables,
     seed: ctx.seed,
     ...(ctx.seedLength !== undefined ? { seedLength: ctx.seedLength } : {}),
-    random: seededRandom(id),
+    random: seededRandom(`${ctx.drawKey ?? ''}\u0000${id}\u0000${content}`),
   });
   return shown.length > MAX_GREETING_CHARS ? content : shown;
 }

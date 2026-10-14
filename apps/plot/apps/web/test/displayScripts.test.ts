@@ -355,6 +355,50 @@ describe('RisuAI’s order', () => {
       '<div class="x-shizue-wrap">앞 <img src="/api/plots/c1/assets/smile" alt="smile"> 뒤</div>',
     ]);
   });
+
+  it('reads a message’s own CBS with no script at all, as RisuAI reads every message it shows', () => {
+    // A card with no display script: a `{{getvar}}` the model wrote, and RisuAI's name tag.
+    expect(applyDisplayScripts('<user>, 금화 {{getvar::gold}}닢', context([]))).toEqual([
+      { kind: 'text', text: '민준, 금화 12닢' },
+    ]);
+    // Values stay prose: the model's markup in one is the message's own HTML, drawn by its rules.
+    expect(applyDisplayScripts('{{getvar::note}}', context([], { variables: { note: '<b>굵게</b>' } }))).toEqual([
+      { kind: 'text', text: '<b>굵게</b>' },
+    ]);
+  });
+
+  it('draws {{random}} again when RisuAI would redraw — the variables or the text moved — and not otherwise', () => {
+    const drawn = (content: string, overrides: Partial<DisplayContext>): string =>
+      text(applyDisplayScripts(content, context([], overrides))).join('');
+    const roll = '{{random}} {{roll::20}} {{randint::1::1000}}';
+    const at = { drawKey: 'chat\u0000vars-a', chatIndex: 3 };
+    // Another message arriving builds new bindings; the same redraw draws the same.
+    expect(drawn(roll, at)).toBe(drawn(roll, { ...at, lastMessageId: 9 }));
+    expect(drawn(roll, { ...at, drawKey: 'chat\u0000vars-b' })).not.toBe(drawn(roll, at));
+    expect(drawn(`${roll} 다시`, at).startsWith(drawn(roll, at))).toBe(false);
+    // Two messages that say the same thing still draw apart.
+    expect(drawn(roll, { ...at, chatIndex: 4 })).not.toBe(drawn(roll, at));
+    // A script's template draws on from where the message's own CBS left off.
+    const scripted = applyDisplayScripts(
+      '[status] hp=50',
+      context([script({ out: '<div class="hp">{{random::가,나,다,라,마,바,사,아}}{{random}}</div>' })], at),
+    );
+    expect(html(scripted)).toEqual(
+      html(
+        applyDisplayScripts(
+          '[status] hp=50',
+          context([script({ out: '<div class="hp">{{random::가,나,다,라,마,바,사,아}}{{random}}</div>' })], { ...at, turn: 7 }),
+        ),
+      ),
+    );
+  });
+
+  it('answers {{trigger_id}} as RisuAI does: the button that just ran, else null', () => {
+    expect(applyDisplayScripts('id={{trigger_id}}', context([]))).toEqual([{ kind: 'text', text: 'id=null' }]);
+    expect(applyDisplayScripts('id={{triggerid}}', context([], { triggerId: 'tab-2' }))).toEqual([
+      { kind: 'text', text: 'id=tab-2' },
+    ]);
+  });
 });
 
 describe('actions', () => {

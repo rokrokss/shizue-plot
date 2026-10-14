@@ -240,7 +240,7 @@ const ALLOWED_PROPERTIES = new Set([
   'width', 'height', 'aspect-ratio', 'object-fit', 'object-position',
   'vertical-align', 'line-height', 'letter-spacing', 'word-spacing', 'word-break',
   'white-space', 'overflow-wrap', 'box-sizing', 'box-shadow', 'order',
-  'position', 'top', 'right', 'bottom', 'left', 'z-index', 'float', 'clear',
+  'position', 'top', 'right', 'bottom', 'left', 'inset', 'z-index', 'float', 'clear',
   'table-layout', 'border-collapse', 'border-spacing', 'caption-side',
   'transform', 'transform-origin', 'transition', 'background',
   // `::before { content: '' }` is how decorative shapes are drawn, so a status
@@ -258,7 +258,7 @@ const ALLOWED_PROPERTIES = new Set([
 const ALLOWED_PROPERTY_PREFIXES = [
   'background-', 'border', 'margin', 'padding', 'min-', 'max-',
   'font', 'text-', 'list-style', 'flex', 'grid', 'align-', 'justify-', 'place-',
-  'overflow', 'transition-', 'animation-',
+  'overflow', 'transition-', 'animation-', 'inset-',
 ];
 
 /**
@@ -278,8 +278,15 @@ const ALLOWED_FUNCTIONS = new Set([
   'matrix', 'matrix3d', 'perspective', 'cubic-bezier', 'steps',
 ]);
 
-/** `position` values that stay inside the message. `fixed` and `sticky` do not. */
-const ALLOWED_POSITIONS = new Set(['static', 'relative', 'absolute']);
+/**
+ * `position` values that stay inside the box the markup is drawn in. `fixed` is
+ * one of them because every box sanitized markup goes into is a containing block
+ * for it and clips it (`globals.css`: a message's `.message-body`, and
+ * `.shizue-msg` everywhere else — the chat's background, a plot's intro), so a
+ * RisuAI card's floating menu floats over its own message and nothing past it.
+ * `sticky` sticks to the chat's scroller, which no box of ours contains.
+ */
+const ALLOWED_POSITIONS = new Set(['static', 'relative', 'absolute', 'fixed']);
 
 /**
  * Reads a CSS token the way the browser will: comments gone, escapes resolved.
@@ -344,9 +351,8 @@ function scopeSelector(selector: string, scope: Scope): string | null {
  * property, only allowed functions, and only same-origin `url()`.
  *
  * The two survivors of the allowlists still need a value check. `position` is
- * allowed but `fixed` is not — the wrapper's paint containment already traps it,
- * and one containment property is not a boundary worth resting on. And `url()`
- * is allowed but only pointing at us, which is what an asset macro produces.
+ * allowed but `sticky` is not (`ALLOWED_POSITIONS`). And `url()` is allowed but
+ * only pointing at us, which is what an asset macro produces.
  */
 function isSafeDeclaration(property: string, value: string): boolean {
   const name = normalizeCss(property).trim().toLowerCase();
@@ -555,7 +561,7 @@ const KEYFRAME_OFFSET = /^(?:from|to|\d+(?:\.\d+)?%)$/;
 
 /**
  * An `@keyframes` rule under the sheet's prefix, each frame held to the same
- * declaration filter as any rule — `position: fixed` is no safer for arriving
+ * declaration filter as any rule — `position: sticky` is no safer for arriving
  * halfway through an animation. Null when its name is not one a value could
  * name, or nothing of it is left.
  */

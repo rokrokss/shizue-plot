@@ -120,6 +120,48 @@ describe('a translated message body', () => {
     expect(island?.getAttribute('title')).toBe('체력');
     expect(host.textContent).toContain('He drew his sword.');
   });
+
+  it('translates the prose a script wrapped after its markdown, the markup it made kept byte for byte', async () => {
+    // 광휘전대's frame: the whole reply in one <div>, read as RisuAI's markdown first.
+    const scripts: DisplayScript[] = [
+      { in: '^[\\s\\S]*$', out: '<div class="wrap">\n\n$&\n\n</div>', order: 0, enabled: true, flags: 'u' },
+    ];
+    const display: DisplayContext = {
+      scripts,
+      variables: {},
+      assets: new Map(),
+      relationship: null,
+      turn: 1,
+      char: '아리아',
+      user: '민준',
+    };
+    const content = '문을 연다. *웃는다*\n\n검을 뽑았다.';
+    const plan = transformDisplay({ content, scripts, previousSameRole: '' }, display, PLAN_LIMITS, Date.now);
+    const draw = async (body: BodyTranslation, key: string): Promise<string> => {
+      render(createElement(MessageBody, { key, content, display, translation: body }));
+      await act(async () => {
+        answers.shift()?.(plan);
+        await Promise.resolve();
+      });
+      return host.querySelector('.shizue-msg')!.innerHTML;
+    };
+
+    const asked = translation();
+    const original = await draw(asked.body, 'asked');
+    // The translator sees the words, never the markup markdown made of them.
+    expect(asked.reported.at(-1)).toEqual(['문을 연다.', '웃는다', '검을 뽑았다.']);
+    expect(original).toContain('<p>문을 연다. <em>웃는다</em></p>');
+
+    const arrived = translation({ '문을 연다.': 'Opens the door.', 웃는다: 'smiles', '검을 뽑았다.': 'Draws the sword.' });
+    const shown = await draw(arrived.body, 'arrived');
+    expect(shown).toBe(
+      original.replace('문을 연다.', 'Opens the door.').replace('웃는다', 'smiles').replace('검을 뽑았다.', 'Draws the sword.'),
+    );
+    expect([...host.querySelectorAll('.x-shizue-wrap p')].map((p) => p.textContent)).toEqual([
+      'Opens the door. smiles',
+      'Draws the sword.',
+    ]);
+  });
 });
 
 describe('the chat translator', () => {
