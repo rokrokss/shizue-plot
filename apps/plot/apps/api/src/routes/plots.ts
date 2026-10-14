@@ -10,6 +10,7 @@ import {
   coercePlotStyle,
   coerceTalkativeness,
   computeVariables,
+  creatorCssOverCap,
   DEFAULT_GROUP_SETTINGS,
   constantLoreTokens,
   DEFAULT_USER_NAME,
@@ -44,6 +45,7 @@ import {
   type PlotModule,
   type PlotProfile,
   type PlotStyle,
+  type SkippedAssets,
 } from '@shizue/core';
 import {
   draftFingerprint,
@@ -553,10 +555,12 @@ async function insertMember(
 }
 
 /**
- * Stores the images a charx archive carried beside the icon. Slugs come from the
- * asset names so `{{img::slug}}` written into the card keeps working; a name with
- * nothing sluggable left falls back to its position, and collisions get a suffix.
- * Bytes that turn out not to be an image are skipped rather than failing the import.
+ * Stores the pictures and music a card carried beside the icon. Slugs come from
+ * the asset names so `{{img::slug}}` written into the card keeps working; a name
+ * with nothing sluggable left falls back to its position, and collisions get a
+ * suffix. Bytes that turn out to be neither are skipped rather than failing the
+ * import, and counted (`unsupported`), as are those past the plot's cap
+ * (`overLimit`), for the import to say so (`ImportWarning`).
  *
  * The rows are written under the plot's row lock, the same lock an upload takes:
  * the cap is a count, and a count only means something while nothing else can
@@ -574,7 +578,7 @@ async function storeImportedAssets(
   deps: AppDeps,
   plotId: string,
   assets: CharxAssetFile[],
-): Promise<{ emotions: EmotionImage[]; ids: string[] }> {
+): Promise<{ emotions: EmotionImage[]; ids: string[]; unsupported: number; overLimit: number }> {
   /** An image already in the store, still waiting for a row to name it. */
   interface StoredCandidate {
     id: string;
@@ -596,16 +600,24 @@ async function storeImportedAssets(
   let orphaned: string[] = [];
   /** The ids of the rows written, for a caller that keeps them (a module). */
   const written: string[] = [];
+  let unsupported = 0;
+  let overLimit = 0;
   try {
     for (const [index, asset] of assets.entries()) {
-      if (candidates.length >= MAX_ASSETS_PER_PLOT) break;
+      if (candidates.length >= MAX_ASSETS_PER_PLOT) {
+        overLimit = assets.length - index;
+        break;
+      }
       const id = randomUUID();
-      const stored = await saveAsset(deps.storage, id, asset.bytes);
-      if (!stored) continue;
+      const stored = await saveAsset(deps.storage, id, asset.bytes, { audio: true });
+      if (!stored) {
+        unsupported += 1;
+        continue;
+      }
       candidates.push({ id, name: asset.name, index, key: stored.key, mime: stored.mime });
       orphaned.push(stored.key);
     }
-    if (candidates.length === 0) return { emotions, ids: written };
+    if (candidates.length === 0) return { emotions, ids: written, unsupported, overLimit };
 
     orphaned = await deps.db.transaction(async (tx) => {
       await tx.select({ id: plots.id }).from(plots).where(eq(plots.id, plotId)).for('update');
@@ -638,6 +650,7 @@ async function storeImportedAssets(
         assets[candidate.index]!.emotion ? [{ name: candidate.name, slug: rows[at]!.slug }] : [],
       );
       written.push(...rows.map((row) => row.id!));
+      overLimit += candidates.length - rows.length;
       return candidates.slice(rows.length).map((candidate) => candidate.key);
     });
   } finally {
@@ -645,7 +658,80 @@ async function storeImportedAssets(
     // no row will ever name it.
     for (const key of orphaned) await deleteQuietly(deps.storage, key);
   }
-  return { emotions, ids: written };
+  return { emotions, ids: written, unsupported, overLimit };
+}
+
+/**
+ * Why an import left something of the card behind or cut it, and how much: what
+ * the import's answer lists (`importWarnings`) and the studio says quietly. Every
+ * one is a cap or a file the card itself got wrong — the import goes ahead.
+ *
+ * - `assets_unsupported` files that are neither a picture nor music (video, a font, a voice model)
+ * - `assets_missing` files the card declares and does not hold
+ * - `assets_over_budget` files past the parse budget (`MAX_TOTAL_BYTES`, `MAX_ASSETS`)
+ * - `assets_over_limit` files past the plot's `MAX_ASSETS_PER_PLOT`
+ * - `greetings_over_limit` openings past `MAX_INTROS_PER_PLOT`
+ * - `greetings_cut` openings cut to `MAX_INTRO_TEXT_LENGTH`
+ * - `stylesheet_over_limit` a stylesheet over `MAX_CREATOR_CSS_LENGTH`, left out whole
+ * - `background_over_limit` a background over `MAX_BACKGROUND_HTML_LENGTH`, left out whole
+ */
+type ImportWarningCode =
+  | 'assets_unsupported'
+  | 'assets_missing'
+  | 'assets_over_budget'
+  | 'assets_over_limit'
+  | 'greetings_over_limit'
+  | 'greetings_cut'
+  | 'stylesheet_over_limit'
+  | 'background_over_limit';
+
+interface ImportWarning {
+  code: ImportWarningCode;
+  count: number;
+}
+
+/** The counts as the answer lists them: in the order above, the zeros left out. */
+function importWarnings(counts: Partial<Record<ImportWarningCode, number>>): ImportWarning[] {
+  const order: ImportWarningCode[] = [
+    'assets_unsupported',
+    'assets_missing',
+    'assets_over_budget',
+    'assets_over_limit',
+    'greetings_over_limit',
+    'greetings_cut',
+    'stylesheet_over_limit',
+    'background_over_limit',
+  ];
+  return order.flatMap((code) => ((counts[code] ?? 0) > 0 ? [{ code, count: counts[code]! }] : []));
+}
+
+/** The asset half of the counts: what the parse passed over, and what the store did. */
+const assetWarnings = (
+  skipped: SkippedAssets | undefined,
+  stored: { unsupported: number; overLimit: number } | undefined,
+): Partial<Record<ImportWarningCode, number>> => ({
+  assets_unsupported: (skipped?.unsupported ?? 0) + (stored?.unsupported ?? 0),
+  assets_missing: skipped?.missing ?? 0,
+  assets_over_budget: skipped?.overBudget ?? 0,
+  assets_over_limit: stored?.overLimit ?? 0,
+});
+
+/**
+ * Greetings made the plot's openings: the non-empty ones, as many as there is
+ * room for, each cut to the opening length — and how many of them did not fit
+ * or were cut.
+ */
+function introsOfGreetings(
+  greetings: readonly string[],
+  room: number,
+): { intros: string[]; overLimit: number; cut: number } {
+  const given = greetings.filter((greeting) => greeting.trim().length > 0);
+  const kept = given.slice(0, Math.max(0, room));
+  return {
+    intros: kept.map((greeting) => greeting.slice(0, MAX_INTRO_TEXT_LENGTH)),
+    overLimit: given.length - kept.length,
+    cut: kept.filter((greeting) => greeting.length > MAX_INTRO_TEXT_LENGTH).length,
+  };
 }
 
 /**
@@ -722,10 +808,15 @@ async function liftCustomUi(deps: AppDeps, plotId: string, member: Character): P
  * of a chat. The roster and the openings are read under the plot's row lock,
  * so an edit to the openings racing this one is not undone by a stale list.
  */
-async function addGroupGreetings(deps: AppDeps, plotId: string, card: NormalizedCard): Promise<void> {
+async function addGroupGreetings(
+  deps: AppDeps,
+  plotId: string,
+  card: NormalizedCard,
+): Promise<{ overLimit: number; cut: number }> {
+  const none = { overLimit: 0, cut: 0 };
   const greetings = (card.groupOnlyGreetings ?? []).filter((greeting) => greeting.trim().length > 0);
-  if (greetings.length === 0) return;
-  await deps.db.transaction(async (tx) => {
+  if (greetings.length === 0) return none;
+  return deps.db.transaction(async (tx) => {
     const [plot] = await tx
       .select({ intros: plots.intros })
       .from(plots)
@@ -735,15 +826,15 @@ async function addGroupGreetings(deps: AppDeps, plotId: string, card: Normalized
       .select({ value: sql<number>`count(*)::int` })
       .from(characters)
       .where(eq(characters.plotId, plotId));
-    if (!plot || (counted?.value ?? 0) < 2) return;
-    const added = greetings
-      .slice(0, Math.max(0, MAX_INTROS_PER_PLOT - plot.intros.length))
-      .map((greeting) => greeting.slice(0, MAX_INTRO_TEXT_LENGTH));
-    if (added.length === 0) return;
-    await tx
-      .update(plots)
-      .set({ intros: [...plot.intros, ...added], updatedAt: new Date() })
-      .where(eq(plots.id, plotId));
+    if (!plot || (counted?.value ?? 0) < 2) return none;
+    const { intros: added, overLimit, cut } = introsOfGreetings(greetings, MAX_INTROS_PER_PLOT - plot.intros.length);
+    if (added.length > 0) {
+      await tx
+        .update(plots)
+        .set({ intros: [...plot.intros, ...added], updatedAt: new Date() })
+        .where(eq(plots.id, plotId));
+    }
+    return { overLimit, cut };
   });
 }
 
@@ -979,10 +1070,8 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     // member, which the prompt already reads it from — copying it here as well
     // would tell the model the same thing twice.
     const description = card.scenario.trim();
-    const intros = [card.firstMes, ...card.alternateGreetings]
-      .filter((intro) => intro.trim().length > 0)
-      .slice(0, MAX_INTROS_PER_PLOT)
-      .map((intro) => intro.slice(0, MAX_INTRO_TEXT_LENGTH));
+    const greetings = introsOfGreetings([card.firstMes, ...card.alternateGreetings], MAX_INTROS_PER_PLOT);
+    const intros = greetings.intros;
     // The member the card becomes: its display scripts are tagged as its own.
     const memberId = randomUUID();
     const customUi = customUiOfCard(card, memberId);
@@ -1017,11 +1106,20 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       member = await writeMemberAvatar(deps, member, parsed.iconBuffer);
       plot = await writeImportedCover(deps, plot, parsed.iconBuffer);
     }
-    if (parsed.assets?.length) {
-      await recordEmotionImages(deps, member, (await storeImportedAssets(deps, plot.id, parsed.assets)).emotions);
-    }
+    const stored = parsed.assets?.length ? await storeImportedAssets(deps, plot.id, parsed.assets) : undefined;
+    if (stored) await recordEmotionImages(deps, member, stored.emotions);
+    const background = backgroundHtmlOf(card.extensions);
 
-    return c.json(await ownerView(deps, plot), 201);
+    // What was left behind or cut, for the studio to say quietly.
+    const warnings = importWarnings({
+      ...assetWarnings(parsed.skipped, stored),
+      greetings_over_limit: greetings.overLimit,
+      greetings_cut: greetings.cut,
+      stylesheet_over_limit: creatorCssOverCap(card.extensions) ? 1 : 0,
+      background_over_limit:
+        background !== undefined && backgroundWithoutStyles(background).length > MAX_BACKGROUND_HTML_LENGTH ? 1 : 0,
+    });
+    return c.json({ ...((await ownerView(deps, plot)) as object), importWarnings: warnings }, 201);
   });
 
   /**
@@ -1462,13 +1560,20 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     // (`insertMember`).
     let member = await insertMember(deps, id, name, parsed.card, imported);
     if (parsed.iconBuffer) member = await writeMemberAvatar(deps, member, parsed.iconBuffer);
-    if (parsed.assets?.length) {
-      member = await recordEmotionImages(deps, member, (await storeImportedAssets(deps, id, parsed.assets)).emotions);
-    }
-    await addGroupGreetings(deps, id, parsed.card);
+    const stored = parsed.assets?.length ? await storeImportedAssets(deps, id, parsed.assets) : undefined;
+    if (stored) member = await recordEmotionImages(deps, member, stored.emotions);
+    const greetings = await addGroupGreetings(deps, id, parsed.card);
     const variableConflicts = await liftCustomUi(deps, id, member);
-    // The default variables the work already had another value for, for the studio to say so.
-    return c.json({ ...toMemberJson(plot, member), variableConflicts }, 201);
+    // The work keeps one background, so a companion's is never drawn and never missed.
+    const importWarningList = importWarnings({
+      ...assetWarnings(parsed.skipped, stored),
+      greetings_over_limit: greetings.overLimit,
+      greetings_cut: greetings.cut,
+      stylesheet_over_limit: creatorCssOverCap(parsed.card.extensions) ? 1 : 0,
+    });
+    // The default variables the work already had another value for, and what the
+    // import left behind, for the studio to say so.
+    return c.json({ ...toMemberJson(plot, member), variableConflicts, importWarnings: importWarningList }, 201);
   });
 
   /**

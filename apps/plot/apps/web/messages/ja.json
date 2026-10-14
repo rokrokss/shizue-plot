@@ -407,7 +407,18 @@
     "realmPlaceholder": "https://realm.risuai.net/character/…",
     "realmHint": "カードはこのブラウザが RisuRealm から直接ダウンロードして読み込みます。1GBまで読み込めます。",
     "realmBrowse": "キャラクターは <link>RisuRealm</link> で探せます。",
-    "realmSubmit": "読み込む"
+    "realmSubmit": "読み込む",
+    "importWarnings": "カードから取り込めなかったものがあります。",
+    "importWarning": {
+      "assets_unsupported": "画像でも音楽でもないファイル {count}件",
+      "assets_missing": "カードが指しているのにファイルにないアセット {count}件",
+      "assets_over_budget": "取り込みの容量上限を超えたファイル {count}件",
+      "assets_over_limit": "作品のアセット上限（1,000件）を超えたファイル {count}件",
+      "greetings_over_limit": "導入の上限（10件）を超えた最初のメッセージ {count}件",
+      "greetings_cut": "400,000文字で切られた最初のメッセージ {count}件",
+      "stylesheet_over_limit": "400,000文字を超えるスタイルシート",
+      "background_over_limit": "400,000文字を超える背景"
+    }
   },
   "stImport": {
     "title": "SillyTavern からお引っ越し",

@@ -316,6 +316,12 @@ describe('defaultVariables serialization', () => {
     expect(parseDefaultVariables('hp=100\nname=아리아\n\nbroken')).toEqual({ hp: '100', name: '아리아' });
   });
 
+  it('leaves a key with nothing after its = unset, as RisuAI does', () => {
+    // RisuAI's parseKeyValue keeps a line only `if(key && value)`.
+    expect(parseDefaultVariables('pm_start=\npm_stage=1\nmood= 평온')).toEqual({ pm_stage: '1', mood: '평온' });
+    expect(parseDefaultVariables('only=')).toBeUndefined();
+  });
+
   it('parses an object too, which is what our own editor stores', () => {
     expect(parseDefaultVariables({ hp: '100', bad: 3 })).toEqual({ hp: '100' });
   });

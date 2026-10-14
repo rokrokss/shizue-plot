@@ -3,15 +3,10 @@
 import { memo, useEffect, useMemo, useState } from 'react';
 import { RenderBudgetExhausted, renderTemplate, type CbsContext } from '@/lib/cbs';
 import { displayPlanner, type PlanRequest } from '@/lib/displayPlanner';
-import {
-  MAX_HTML_CHARS,
-  MAX_RENDER_INPUT_CHARS,
-  type DisplayPlan,
-  type PlanPiece,
-} from '@/lib/displayScripts';
+import { type DisplayPlan, type PlanPiece } from '@/lib/displayScripts';
 import { MESSAGE_SCOPE_CLASS, sanitizeCustomHtml } from '@/lib/sanitizeHtml';
 import { stripTaint } from '@/lib/taint';
-import type { DisplayScript } from '@/lib/types';
+import { MAX_BACKGROUND_RENDER_CHARS, type DisplayScript } from '@/lib/types';
 import { useHydrated } from './HtmlBlock';
 
 /**
@@ -25,6 +20,8 @@ function scriptedSource(plan: DisplayPlan): string {
   const text = (pieces: readonly PlanPiece[]): string => pieces.map((piece) => piece.text).join('');
   return [...plan.top.map(text), text(plan.body), ...plan.bottom.map(text)].join('\n');
 }
+
+export { MAX_BACKGROUND_RENDER_CHARS };
 
 /**
  * A RisuAI card's `backgroundHTML` as markup for the page, or '' when there is
@@ -42,7 +39,7 @@ export function renderBackground(html: string, ctx: CbsContext, plan: DisplayPla
   let taken = 0;
   const charge = (chars: number): void => {
     taken += chars;
-    if (taken > MAX_RENDER_INPUT_CHARS) throw new RenderBudgetExhausted('input');
+    if (taken > MAX_BACKGROUND_RENDER_CHARS) throw new RenderBudgetExhausted('input');
   };
   try {
     // The creator's text, so the only markers the sanitizer sees are the engine's.
@@ -51,7 +48,7 @@ export function renderBackground(html: string, ctx: CbsContext, plan: DisplayPla
     const rendered = renderTemplate(source, { ...ctx, background: true }, charge, () => '');
     charge(rendered.length);
     const markup = sanitizeCustomHtml(rendered);
-    return markup.length > MAX_HTML_CHARS ? '' : markup;
+    return markup.length > MAX_BACKGROUND_RENDER_CHARS ? '' : markup;
   } catch (error) {
     if (!(error instanceof RenderBudgetExhausted)) console.error('[background] render failed', error);
     return '';

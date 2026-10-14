@@ -72,7 +72,10 @@ test('a card past the rewrite proxy’s default body limit arrives whole', async
 
   // JSON takes whitespace anywhere, so this is one ordinary card in a 12MB
   // file — the size at which the proxy used to hand the API a truncated body.
-  const padded = JSON.stringify(card(first, 'CC BY-NC-ND 4.0')) + ' '.repeat(12 * 1024 * 1024);
+  // Eleven greetings, one more than a plot's openings: the studio says so.
+  const own = card(first, 'CC BY-NC-ND 4.0');
+  const greeted = { ...own, data: { ...own.data, alternate_greetings: Array.from({ length: 10 }, (_, i) => `다른 시작 ${i}`) } };
+  const padded = JSON.stringify(greeted) + ' '.repeat(12 * 1024 * 1024);
   await page.getByTestId('plot-import-input').setInputFiles({
     name: 'first.json',
     mimeType: 'application/json',
@@ -81,6 +84,7 @@ test('a card past the rewrite proxy’s default body limit arrives whole', async
   await expect(page).toHaveURL(new RegExp(`/ko/plots/${UUID_PATH}$`));
   plotId = new URL(page.url()).pathname.split('/').pop() ?? '';
   await expect(members()).toHaveCount(1);
+  await expect(page.getByTestId('import-warnings')).toContainText('도입부 한도(10개)를 넘은 첫 메시지 1개');
 });
 
 test('the studio says where the card came from and under what license', async () => {

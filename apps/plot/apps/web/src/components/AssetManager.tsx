@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import { apiDelete, apiGet, apiSend, apiUpload } from '@/lib/api';
 import {
   foldSlug,
+  isImageAsset,
   MAX_ASSETS,
   measureImage,
   normalizeSlug,
@@ -39,7 +40,9 @@ const UNLOCK_LABEL: Record<UnlockChoice, string> = {
 /**
  * The images a message can pull in with `{{img::slug}}`. The slug is proposed
  * from the file name but stays editable: the card refers to the slug, not to the
- * file, and re-uploading a slug replaces the image behind it.
+ * file, and re-uploading a slug replaces the image behind it. The music an
+ * imported card brought is listed among them, as a player; only a card brings
+ * music — the upload here takes pictures.
  */
 export function AssetManager({
   plotId,
@@ -144,14 +147,28 @@ export function AssetManager({
               data-testid="plot-asset"
               className="relative overflow-hidden rounded-lg border border-line bg-raised/50"
             >
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={`${asset.url}?v=${version}`}
-                alt={asset.slug}
-                loading="lazy"
-                className="aspect-[2/3] w-full object-contain"
-              />
-              <p className="truncate px-2 pt-1 text-xs text-muted" title={`{{img::${asset.slug}}}`}>
+              {isImageAsset(asset) ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={`${asset.url}?v=${version}`}
+                  alt={asset.slug}
+                  loading="lazy"
+                  className="aspect-[2/3] w-full object-contain"
+                />
+              ) : (
+                // A card's music (`{{audio::…}}`, `{{bgm::…}}`): its player in the
+                // picture's place, nothing loaded until it is played.
+                <div className="flex aspect-[2/3] w-full flex-col items-center justify-center gap-2 px-1">
+                  <span aria-hidden="true" className="text-2xl text-muted">
+                    ♪
+                  </span>
+                  <audio data-testid="plot-asset-audio" controls preload="none" src={asset.url} className="w-full" />
+                </div>
+              )}
+              <p
+                className="truncate px-2 pt-1 text-xs text-muted"
+                title={isImageAsset(asset) ? `{{img::${asset.slug}}}` : `{{audio::${asset.slug}}}`}
+              >
                 {asset.slug}
               </p>
               {/* What this image waits for, and the way to change it. One editor

@@ -10,7 +10,7 @@
  * Failures are `ApiError`s with status 0 and a code of their own, so the forms
  * translate them from the `errors` catalogue the way they do the API's.
  */
-import { realmCardId, realmCharacterUrl } from '@shizue/core/source-url';
+import { isLegacyRealmId, realmCardId, realmCharacterUrl } from '@shizue/core/source-url';
 import { ApiError } from './api';
 import { MAX_CARD_IMPORT_BYTES } from './types';
 
@@ -36,7 +36,8 @@ export function checkCardSize(file: File): File {
  * Downloads the card a Realm page names. `charx-v3` first, since that is the
  * card with its images; a card uploaded to Realm as a PNG is not served in that
  * format and says so with a 403, so `png-v3` is asked next. A 403 on both is a
- * card its author has not made downloadable.
+ * card its author has not made downloadable. A legacy card (a 64-hex id) is
+ * only ever a PNG there, so it goes to `png-v3` straight away.
  */
 export async function downloadRealmCard(input: string): Promise<{ file: File; sourceUrl: string }> {
   const id = realmCardId(input);
@@ -50,9 +51,10 @@ export async function downloadRealmCard(input: string): Promise<{ file: File; so
       throw failure('realm_unreachable', 'Could not reach RisuRealm');
     }
   };
-  let extension = 'charx';
-  let res = await get('charx-v3');
-  if (res.status === 403) {
+  const legacy = isLegacyRealmId(id);
+  let extension = legacy ? 'png' : 'charx';
+  let res = await get(legacy ? 'png-v3' : 'charx-v3');
+  if (res.status === 403 && !legacy) {
     extension = 'png';
     res = await get('png-v3');
   }

@@ -354,6 +354,20 @@ describe('RisuAI templates', () => {
     expect(render('[{{bg::a}}{{bgm::b}}{{audio::c}}{{video::d}}{{video-img::e}}{{inlay::f}}{{source::char}}]')).toBe('[]');
   });
 
+  it("plays a card's music as RisuAI does: a player, or the page's background music", () => {
+    const assets = new Map([['bgm', '/api/plots/c1/assets/bgm']]);
+    expect(render('{{audio::bgm}}', { assets })).toBe(
+      '<audio controls autoplay loop src="/api/plots/c1/assets/bgm"></audio>',
+    );
+    expect(render('{{bgm::BGM}}', { assets, resolveAsset: (ref) => ref.toLowerCase() })).toBe(
+      '<span data-shizue-bgm="/api/plots/c1/assets/bgm"></span>',
+    );
+    // A player the card writes out itself takes the address.
+    expect(render('<audio controls><source src="{{raw::bgm}}" type="audio/mpeg"></audio>', { assets })).toBe(
+      '<audio controls><source src="/api/plots/c1/assets/bgm" type="audio/mpeg"></audio>',
+    );
+  });
+
   it('never lets a value reach past its own argument or name a foreign image', () => {
     expect(risu('{{getvar::x}}', { x: '{{img::smile}}' })).toBe('{{img::smile}}');
     expect(risu('{{equal::{{getvar::x}}::a}}', { x: 'a::a' })).toBe('0');

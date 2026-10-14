@@ -21,7 +21,9 @@ import {
   IMAGE_ATTACHED_PLACEHOLDER,
   loreEntryKey,
   MAX_ASSETS,
+  MAX_BACKGROUND_HTML_LENGTH,
   MAX_CHARACTERS_PER_PLOT,
+  MAX_CREATOR_CSS_LENGTH,
   MAX_DELTA_KEYS,
   MAX_DISPLAY_DEPTH,
   MAX_DISPLAY_PATTERN_LENGTH,
@@ -1131,6 +1133,36 @@ describe('plots', () => {
     expect(plot.characters[0].card.alternateGreetings).toEqual(['불이 꺼진 열람실에서 마주쳤다.']);
   });
 
+  it("keeps a RisuAI card's long greetings and big stylesheet whole, and says what did not fit", async () => {
+    const cookie = await signUp('import-caps@example.com');
+    // A picker greeting that keeps every route's prologue (당나라 무협's runs to 241,599).
+    const long = `{{#when::{{getvar::route}}::is::a}}${'가'.repeat(250_000)}{{/when}}끝`;
+    const sheet = `.box { color: red; }\n${'.r { margin: 1px; }\n'.repeat(13_000)}`;
+    const card = {
+      ...v2Card,
+      data: {
+        ...v2Card.data,
+        first_mes: long,
+        alternate_greetings: Array.from({ length: 11 }, (_, i) => `다른 시작 ${i}`),
+        extensions: { risuai: { backgroundHTML: `<style>${sheet}</style><div class="sky">밤</div>` } },
+        // RisuAI writes an entry with no order as null, which ccardlib's schema refuses.
+        character_book: {
+          extensions: {},
+          entries: [{ keys: ['밤'], content: '밤의 도서관.', extensions: {}, enabled: true, insertion_order: null }],
+        },
+      },
+    };
+    expect(sheet.length).toBeGreaterThan(100_000);
+
+    const plot = await importCard(cookie, new File([JSON.stringify(card)], 'long.json'));
+    expect(plot.intros).toHaveLength(MAX_INTROS_PER_PLOT);
+    expect(plot.intros[0]).toBe(long);
+    expect(plot.customUi.css).toBe(sheet.trim());
+    expect(plot.characters[0].card.lorebook[0]).toMatchObject({ content: '밤의 도서관.', insertionOrder: 100 });
+    // Two of the twelve openings did not fit; nothing was cut.
+    expect(plot.importWarnings).toEqual([{ code: 'greetings_over_limit', count: 2 }]);
+  });
+
   it('imports a PNG card and serves the member avatar and the plot cover', async () => {
     const cookie = await signUp('png@example.com');
     const png = buildPngWithTextChunks({
@@ -1631,6 +1663,18 @@ describe('import provenance and publishing rights', () => {
       null,
       null,
     ]);
+  });
+
+  it("records a legacy Realm card's 64-hex page", async () => {
+    const cookie = await signUp('provenance-legacy@example.com');
+    const hex = 'c460b3f976e84ab07e639f1aed656817e64556b61e8d1ec8f25ae88f96febc09';
+    const res = await importWith(cookie, '/api/plots/import', cardFile(), {
+      sourceUrl: `https://realm.risuai.net/character/${hex}`,
+    });
+    expect(res.status, await res.clone().text()).toBe(201);
+    expect((await readJson(res)).characters[0].importedFrom.sourceUrl).toBe(
+      `https://realm.risuai.net/character/${hex}`,
+    );
   });
 
   it('refuses a source that is not a RisuRealm card page, before reading the card', async () => {
@@ -5542,7 +5586,7 @@ describe('custom UI', () => {
 
     // Refused over the cap rather than cut: half a stylesheet is a broken one.
     const tooLong = await json(owner, `/api/plots/${imported.id}`, 'PATCH', {
-      customUi: { css: 'a'.repeat(100_001) },
+      customUi: { css: 'a'.repeat(MAX_CREATOR_CSS_LENGTH + 1) },
     });
     expect(tooLong.status).toBe(400);
     expect((await readJson(tooLong)).code).toBe('invalid_request');
@@ -5815,7 +5859,7 @@ describe('custom UI in a work of several members', () => {
     expect(emptied.customUi).toEqual({ backgroundHtml: '' });
     expect(emptied.backgroundHtml).toBe('');
     // Refused over the cap rather than cut.
-    const tooLong = await json(owner, `/api/plots/${plot.id}`, 'PATCH', { customUi: { backgroundHtml: 'a'.repeat(100_001) } });
+    const tooLong = await json(owner, `/api/plots/${plot.id}`, 'PATCH', { customUi: { backgroundHtml: 'a'.repeat(MAX_BACKGROUND_HTML_LENGTH + 1) } });
     expect(tooLong.status).toBe(400);
     expect((await readJson(tooLong)).code).toBe('invalid_request');
 
@@ -11301,6 +11345,31 @@ describe('plot assets', () => {
     expect(new Uint8Array(await avatar.arrayBuffer())).toEqual(stripPngTextChunks(icon));
   });
 
+  it("keeps a card's music beside its pictures, and says what it left behind", async () => {
+    const cookie = await signUp('asset-charx-audio@example.com');
+    const mp3 = Uint8Array.from([0x49, 0x44, 0x33, 4, 0, 0, 1, 2, 3]);
+    const charx = buildCharx(v3Card, [
+      { type: 'x-risu-asset', name: 'bgm', ext: 'mp3', entry: 'assets/other/audio/bgm.mp3', bytes: mp3 },
+      // RisuAI's re-encoded pictures say `unknown`; the bytes and the uri decide.
+      { type: 'emotion', name: 'joy', ext: 'unknown', entry: 'assets/emotion/joy.gif', bytes: gif(1) },
+      { type: 'other', name: 'notes', ext: 'txt', entry: 'assets/notes.txt', bytes: gif(2) },
+      { type: 'x-risu-asset', name: 'liar', ext: 'png', entry: 'assets/other/liar.png', bytes: Uint8Array.from([1, 2, 3]) },
+    ]);
+
+    const plot = await importCard(cookie, new File([charx], 'bgm.charx'));
+    const assets: Record<string, any> = Object.fromEntries(
+      (await listAssets(cookie, plot.id)).map((asset: any) => [asset.slug, asset]),
+    );
+    expect(Object.keys(assets).sort()).toEqual(['bgm', 'joy']);
+    expect(assets['bgm'].mime).toBe('audio/mpeg');
+    expect(new Uint8Array(await (await request(cookie, assets['bgm'].url)).arrayBuffer())).toEqual(mp3);
+    // The notes (by their declaration) and the liar (by its bytes), for the studio to say.
+    expect(plot.importWarnings).toEqual([{ code: 'assets_unsupported', count: 2 }]);
+
+    // Music is a card's to bring: the studio's own upload takes pictures only.
+    expect((await upload(cookie, plot.id, 'theme', mp3)).status).toBe(400);
+  });
+
   it('stops a charx import at the archive parser bound, within the plot cap', async () => {
     const cookie = await signUp('asset-charx-cap@example.com');
     /** The charx reader's own bound, which runs before this route. */
@@ -11352,6 +11421,8 @@ describe('plot assets', () => {
     form.append('file', new File([buildCharx(v3Card, embedded)], 'many.charx'));
     const res = await request(cookie, `/api/plots/${plot.id}/characters/import`, 'POST', form, target);
     expect(res.status, await res.clone().text()).toBe(201);
+    // And says how many did not fit.
+    expect((await readJson(res)).importWarnings).toEqual([{ code: 'assets_over_limit', count: 3 }]);
 
     // The import fills the room it found and stops there, rather than reading the
     // free space before the write and overshooting it.

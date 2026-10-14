@@ -325,9 +325,16 @@ export const MAX_INTROS_PER_PLOT = 10;
 /**
  * One opening's length. Room for a RisuAI greeting that keeps a branch per
  * variable value: only the branch the variables choose reaches the model and the
- * reader, so the stored text can be several prologues long.
+ * reader, so the stored text can be several prologues long. RisuRealm's longest
+ * ones run to about 240,000 characters (당나라 무협, a picker over every route's
+ * prologue) and evaluate to a few dozen; this leaves them room to grow.
+ *
+ * The bound is the studio's save, which sends every opening in one JSON body
+ * (5MB, apps/api `jsonLimit`): one opening at the cap is at most 1.2MB of UTF-8
+ * even in Hangul. An import is not held to that — it may bring more than a save
+ * could send back — so the openings' sum is the creator's to keep under it.
  */
-export const MAX_INTRO_TEXT_LENGTH = 16_000;
+export const MAX_INTRO_TEXT_LENGTH = 400_000;
 /** Tags on a plot's explore filter column. */
 export const MAX_TAGS = 10;
 /** One tag — a word or two, not a phrase. */

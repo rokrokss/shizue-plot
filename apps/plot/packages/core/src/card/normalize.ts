@@ -20,14 +20,22 @@ type Json = Record<string, unknown>;
 const isObject = (value: unknown): value is Json =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 
+/** RisuAI's insertion order for a lore entry that has none (`addLorebook`). */
+const DEFAULT_INSERTION_ORDER = 100;
+
 /**
  * SillyTavern's cards fail ccardlib's V2/V3 schema as ST writes them: its `ccv3`
  * PNG chunk is its V2 JSON with the spec relabelled, so there is no
  * `group_only_greetings`, and a lorebook ST built itself has no book-level
  * `extensions`. Worse than refused, such a card passes as V1 — ST repeats the V1
- * fields at the top — and everything under `data` would be lost. The two gaps are
+ * fields at the top — and everything under `data` would be lost. The gaps are
  * filled in on a copy, so `raw` stays what arrived; a card without them is
  * returned as is.
+ *
+ * RisuAI leaves one more: a lore entry it exports with `insertion_order: null`
+ * (an entry whose order field was never set), which RisuAI itself imports
+ * without a word. It gets RisuAI's default for a new entry, 100 — the number
+ * ccardlib's own conversion fills in too.
  */
 function withSillyTavernGaps(raw: object): object {
   const card = raw as Json;
@@ -40,12 +48,28 @@ function withSillyTavernGaps(raw: object): object {
     filled = true;
   }
   const book = data['character_book'];
-  if (isObject(book) && book['extensions'] == null) {
-    data['character_book'] = { ...book, extensions: {} };
-    filled = true;
+  if (isObject(book)) {
+    let next: Json = book;
+    if (book['extensions'] == null) next = { ...next, extensions: {} };
+    const entries = book['entries'];
+    if (Array.isArray(entries) && entries.some((entry) => isObject(entry) && entry['insertion_order'] == null)) {
+      next = {
+        ...next,
+        entries: entries.map((entry) =>
+          isObject(entry) && entry['insertion_order'] == null
+            ? { ...entry, insertion_order: DEFAULT_INSERTION_ORDER }
+            : entry,
+        ),
+      };
+    }
+    if (next !== book) {
+      data['character_book'] = next;
+      filled = true;
+    }
   }
   return filled ? { ...card, data } : raw;
 }
+
 
 type Book = CharacterCardV3['data']['character_book'];
 

@@ -16,6 +16,19 @@ export type SourcePlatform = MigrationPlatform | 'realm';
 
 /** Realm card ids, and the plot and character ids the paste platforms use, are UUIDs. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/**
+ * Realm's older cards are named by 64 hex digits instead (a hash of the card),
+ * and are served as PNG only (`isLegacyRealmId`).
+ */
+const LEGACY_REALM_ID = /^[0-9a-f]{64}$/i;
+/** A Realm card id of either shape. */
+const isRealmId = (id: string): boolean => UUID.test(id) || LEGACY_REALM_ID.test(id);
+
+/**
+ * Whether a Realm card id is the older 64-hex shape. Realm keeps those as the
+ * PNG they were uploaded as: `charx-v3` refuses them, `png-v3` serves them.
+ */
+export const isLegacyRealmId = (id: string): boolean => LEGACY_REALM_ID.test(id);
 /** A path segment naming a locale (`ko`, `en`, `zh-TW`). */
 const LOCALE = /^[a-z]{2}(?:-[a-z]{2,4})?$/i;
 /** Crack's detail ids are not UUIDs; anything segment-shaped and bounded passes. */
@@ -26,20 +39,21 @@ export const realmCharacterUrl = (id: string): string => `https://realm.risuai.n
 
 /**
  * The card id in `https://realm.risuai.net/character/<id>`,
- * `https://risuai.xyz/?realm=<id>` or a bare id; null for anything else.
+ * `https://risuai.xyz/?realm=<id>` or a bare id; null for anything else. The
+ * id is a UUID, or a legacy card's 64 hex digits.
  */
 export function realmCardId(input: string): string | null {
   const value = input.trim();
-  if (UUID.test(value)) return value;
+  if (isRealmId(value)) return value;
   const url = webUrl(value);
   if (!url) return null;
   if (url.hostname === 'realm.risuai.net') {
     const id = /^\/character\/([^/]+)\/?$/.exec(url.pathname)?.[1];
-    return id && UUID.test(id) ? id : null;
+    return id && isRealmId(id) ? id : null;
   }
   if (url.hostname === 'risuai.xyz' || url.hostname === 'www.risuai.xyz') {
     const id = url.searchParams.get('realm');
-    return id && UUID.test(id) ? id : null;
+    return id && isRealmId(id) ? id : null;
   }
   return null;
 }

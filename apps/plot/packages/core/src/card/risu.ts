@@ -131,14 +131,21 @@ export function displayScriptsFromExtensions(
   return mapped.length > 0 ? mapped.map(({ script }, order) => ({ ...script, order })) : undefined;
 }
 
-/** Longest stylesheet a plot may carry. A real RisuAI card's runs to a few tens of kilobytes. */
-export const MAX_CREATOR_CSS_LENGTH = 100_000;
+/**
+ * Longest stylesheet a plot may carry. Most RisuAI cards' run to a few tens of
+ * kilobytes; RisuRealm's largest run to about 260,000 characters (당나라 무협,
+ * 도시 연대기 at 180,000), and a card's stylesheet is dropped whole when it is
+ * over, so the cap leaves them half as much again.
+ */
+export const MAX_CREATOR_CSS_LENGTH = 400_000;
 
 /**
- * Longest background a plot may draw behind its chats — past it the chat's
- * renderer, whose budget is this, would draw none of it anyway.
+ * Longest background a plot may draw behind its chats, past its `<style>`
+ * elements (which are the stylesheet's, `MAX_CREATOR_CSS_LENGTH`). The same
+ * number as the stylesheet: RisuAI holds `backgroundHTML` to nothing, and a
+ * card's background over the cap is dropped whole.
  */
-export const MAX_BACKGROUND_HTML_LENGTH = 100_000;
+export const MAX_BACKGROUND_HTML_LENGTH = 400_000;
 
 /** A complete `<style>` element and its body. */
 const STYLE_ELEMENT = /<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi;
@@ -155,15 +162,24 @@ const STYLE_ELEMENT = /<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi;
  * or one longer than this build will carry.
  */
 export function creatorCssFromExtensions(extensions: Record<string, unknown>): string | undefined {
+  const css = stylesheetOf(extensions);
+  return css && css.length <= MAX_CREATOR_CSS_LENGTH ? css : undefined;
+}
+
+/** Whether a card has a stylesheet that `creatorCssFromExtensions` leaves behind for its length. */
+export const creatorCssOverCap = (extensions: Record<string, unknown>): boolean =>
+  (stylesheetOf(extensions)?.length ?? 0) > MAX_CREATOR_CSS_LENGTH;
+
+/** The `<style>` bodies of a card's `backgroundHTML`, joined, whatever their length. */
+function stylesheetOf(extensions: Record<string, unknown>): string | undefined {
   const risu = extensions['risuai'];
   if (risu === null || typeof risu !== 'object') return undefined;
   const html = (risu as Record<string, unknown>)['backgroundHTML'];
   if (typeof html !== 'string') return undefined;
-  const css = [...html.matchAll(STYLE_ELEMENT)]
+  return [...html.matchAll(STYLE_ELEMENT)]
     .map((element) => element[1]!.trim())
     .filter((body) => body.length > 0)
     .join('\n\n');
-  return css && css.length <= MAX_CREATOR_CSS_LENGTH ? css : undefined;
 }
 
 /**

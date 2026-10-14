@@ -1,5 +1,6 @@
 import { Unzip, UnzipInflate, type UnzipFile } from 'fflate';
 import { MAX_CARD_IMPORT_BYTES } from '../types.js';
+import { AUDIO_EXTENSIONS, IMAGE_EXTENSIONS } from './media.js';
 import { CardParseError } from './normalize.js';
 import { readRisum, type RisuModuleScripts } from './risum.js';
 
@@ -36,8 +37,8 @@ const PUSH_CHUNK_BYTES = 16 * 1024;
  * allowed to fill a plot.
  */
 export const MAX_ASSETS = 1000;
-/** Only images become character assets; the declared type is not restricted. */
-export const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp']);
+/** Pictures and music become the plot's assets; the declared type is not restricted. */
+export { IMAGE_EXTENSIONS };
 
 export function isZip(bytes: Uint8Array): boolean {
   return ZIP_SIGNATURE.every((byte, i) => bytes[i] === byte);
@@ -82,8 +83,9 @@ interface CharxAsset {
 }
 
 /**
- * An embedded image asset, ready to be slugged and stored by the caller. A
- * RisuAI PNG card's asset chunks come out in the same shape.
+ * An embedded picture or piece of music, ready to be sniffed, slugged and stored
+ * by the caller (`sniffMedia`). A RisuAI PNG card's asset chunks come out in the
+ * same shape.
  */
 export interface CharxAssetFile {
   /** Asset name as the card declares it; falls back to the entry file name. */
@@ -102,14 +104,31 @@ export interface CharxAssetFile {
   additional?: true;
 }
 
+/**
+ * The embedded files a card declares that a read did not bring back, by why —
+ * what an import tells its creator it left behind (`ParsedCard.skipped`).
+ * Pictures and music only become assets, so a declared video, font or model is
+ * `unsupported`; one the file does not hold is `missing` (the card's own fault —
+ * RisuAI refuses such a card); one past a parse cap is `overBudget`.
+ */
+export interface SkippedAssets {
+  unsupported: number;
+  missing: number;
+  overBudget: number;
+}
+
+export const noSkippedAssets = (): SkippedAssets => ({ unsupported: 0, missing: 0, overBudget: 0 });
+
 export interface CharxContents {
   /** `card.json` as it arrived — the module's scripts are not merged in. */
   raw: unknown;
   /** The scripts RisuAI's export moved out of `card.json`, when the archive has a readable module. */
   module?: RisuModuleScripts;
   iconBuffer?: Uint8Array;
-  /** Embedded image assets other than the main icon, in card order. */
+  /** Embedded pictures and music other than the main icon, in card order. */
   assets: CharxAssetFile[];
+  /** The declared embedded files not among `assets`, by why. */
+  skipped: SkippedAssets;
 }
 
 function concat(chunks: Uint8Array[], total: number): Uint8Array {
@@ -143,7 +162,12 @@ interface WantedEntry {
  * It is called anyway — the interface documents it as ending the stream, and an
  * async decoder would honour it — but the loop break is what bounds the work.
  */
-function extractEntries(bytes: Uint8Array, wanted: WantedEntry[]): Map<string, Uint8Array> {
+function extractEntries(
+  bytes: Uint8Array,
+  wanted: WantedEntry[],
+  /** Set when a cap ended the pass, so what it did not reach was not read rather than absent. */
+  report?: { stopped: boolean },
+): Map<string, Uint8Array> {
   const names = new Set(wanted.map((entry) => entry.name));
   const required = new Set(wanted.filter((entry) => entry.required).map((entry) => entry.name));
   const entries = new Map<string, Uint8Array>();
@@ -213,6 +237,7 @@ function extractEntries(bytes: Uint8Array, wanted: WantedEntry[]): Map<string, U
     );
   }
   if (failure) throw failure;
+  if (report) report.stopped = stopped;
   return entries;
 }
 
@@ -226,12 +251,13 @@ const fileNameOf = (entry: string): string =>
   entry.slice(entry.lastIndexOf('/') + 1).replace(/\.[^.]*$/, '');
 
 /**
- * Whether an entry is worth inflating. Both the declared extension and the uri
- * are consulted — cards in the wild carry `ext: 'unknown'` — and the bytes are
- * sniffed by the caller anyway.
+ * Whether an entry is worth inflating: a picture or music by its declared
+ * extension or its uri's. Both are consulted — cards in the wild carry
+ * `ext: 'unknown'` — and the bytes are sniffed by the caller anyway.
  */
-const looksLikeImage = (asset: CharxAsset, entry: string): boolean =>
-  IMAGE_EXTENSIONS.has((asset.ext ?? '').toLowerCase()) || IMAGE_EXTENSIONS.has(extensionOf(entry));
+const isMediaExtension = (ext: string): boolean => IMAGE_EXTENSIONS.has(ext) || AUDIO_EXTENSIONS.has(ext);
+const looksLikeMedia = (asset: CharxAsset, entry: string): boolean =>
+  isMediaExtension((asset.ext ?? '').toLowerCase()) || isMediaExtension(extensionOf(entry));
 
 /** Where RisuAI's charx export puts the scripts it takes out of `card.json`. */
 const MODULE_ENTRY = 'module.risum';
@@ -255,7 +281,8 @@ function readModule(bytes: Uint8Array): RisuModuleScripts | undefined {
 
 /**
  * Unpacks a .charx archive: `card.json`, RisuAI's `module.risum`, the main icon,
- * and the embedded images the card declares. Nothing else is ever inflated.
+ * and the embedded pictures and music the card declares. Nothing else is ever
+ * inflated.
  *
  * The card has to be read before the other names are known, and everything it
  * names is then read together so icon and assets share one budget. An archive
@@ -278,10 +305,20 @@ export function readCharx(bytes: Uint8Array): CharxContents {
   // the work rather than the result.
   const wanted: WantedEntry[] = iconEntry ? [{ name: iconEntry, required: true }] : [];
   const declaredAssets: { name: string; entry: string; emotion: boolean; additional: boolean }[] = [];
+  const skipped = noSkippedAssets();
+  const entries = new Set<string>();
   for (const asset of declared) {
     const entry = entryOf(asset);
-    if (!entry || entry === iconEntry || !looksLikeImage(asset, entry)) continue;
-    if (declaredAssets.some((item) => item.entry === entry)) continue;
+    if (!entry || entry === iconEntry || entries.has(entry)) continue;
+    entries.add(entry);
+    if (!looksLikeMedia(asset, entry)) {
+      skipped.unsupported += 1;
+      continue;
+    }
+    if (declaredAssets.length >= MAX_ASSETS) {
+      skipped.overBudget += 1;
+      continue;
+    }
     declaredAssets.push({
       name: asset.name?.trim() || fileNameOf(entry),
       entry,
@@ -289,15 +326,20 @@ export function readCharx(bytes: Uint8Array): CharxContents {
       additional: asset.type === 'x-risu-asset',
     });
     wanted.push({ name: entry, required: false });
-    if (declaredAssets.length >= MAX_ASSETS) break;
   }
 
+  const pass = { stopped: false };
   const inflated =
-    wanted.length > 0 ? extractEntries(bytes, wanted) : new Map<string, Uint8Array>();
+    wanted.length > 0 ? extractEntries(bytes, wanted, pass) : new Map<string, Uint8Array>();
   const assets: CharxAssetFile[] = [];
   for (const item of declaredAssets) {
     const entry = inflated.get(item.entry);
-    if (!entry) continue;
+    if (!entry) {
+      // Past a cap the pass ended, and what it had not read yet is not known to be absent.
+      if (pass.stopped) skipped.overBudget += 1;
+      else skipped.missing += 1;
+      continue;
+    }
     assets.push({
       name: item.name,
       bytes: entry,
@@ -307,5 +349,5 @@ export function readCharx(bytes: Uint8Array): CharxContents {
   }
 
   const iconBuffer = iconEntry ? inflated.get(iconEntry) : undefined;
-  return { raw, ...(module ? { module } : {}), ...(iconBuffer ? { iconBuffer } : {}), assets };
+  return { raw, ...(module ? { module } : {}), ...(iconBuffer ? { iconBuffer } : {}), assets, skipped };
 }

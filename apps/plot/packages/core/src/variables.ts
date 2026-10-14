@@ -521,13 +521,15 @@ export function resolveGetVars(text: string, variables: Variables): string {
 /**
  * Parses RisuAI's `defaultVariables`, which is a newline-separated `key=value`
  * block. An object is accepted too, because that is what our own editor stores.
+ * A line with nothing after its `=` sets nothing, as in RisuAI's `parseKeyValue`
+ * (`if(key && value)`): the variable stays unset rather than becoming "".
  */
 export function parseDefaultVariables(value: unknown): Variables | undefined {
   if (typeof value === 'string') {
     const variables = emptyVariables();
     for (const line of value.split('\n')) {
       const separator = line.indexOf('=');
-      if (separator <= 0) continue;
+      if (separator <= 0 || separator === line.length - 1) continue;
       const key = line.slice(0, separator).trim();
       if (key) variables[key] = line.slice(separator + 1).trim();
     }

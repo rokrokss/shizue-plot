@@ -72,6 +72,26 @@ describe('urls', () => {
     expectClean('<img src="//evil.test/track.png">', '<img');
     expectClean('<img src="https://evil.test/track.png">', '<img', 'evil.test');
   });
+
+  it("keeps a card's music from our own origin and nothing from anywhere else", () => {
+    // RisuAI's `{{audio::…}}` player, and the one a card writes out with a <source>.
+    expect(sanitizeCustomHtml('<audio controls autoplay loop src="/api/plots/x/assets/bgm"></audio>')).toBe(
+      '<audio controls="" autoplay="" loop="" src="/api/plots/x/assets/bgm"></audio>',
+    );
+    expect(
+      sanitizeCustomHtml(
+        '<audio controls loop preload="none"><source src="/api/plots/x/assets/bgm" type="audio/mpeg"></audio>',
+      ),
+    ).toBe('<audio controls="" loop="" preload="none"><source src="/api/plots/x/assets/bgm" type="audio/mpeg"></audio>');
+    expectClean('<audio autoplay src="https://evil.test/beacon.mp3"></audio>', '<audio', 'evil.test');
+    expectClean('<audio controls><source src="//evil.test/a.mp3"></audio>', '<source', 'evil.test');
+    expectClean('<audio autoplay src="data:audio/mpeg;base64,SUQz"></audio>', '<audio', 'data:');
+    // The background music's marker, which the chat page plays from.
+    expect(sanitizeCustomHtml('<span data-shizue-bgm="/api/plots/x/assets/bgm"></span>')).toBe(
+      '<span data-shizue-bgm="/api/plots/x/assets/bgm"></span>',
+    );
+    expectClean('<span data-shizue-bgm="https://evil.test/a.mp3"></span>', 'evil.test', 'data-shizue-bgm');
+  });
 });
 
 describe('framed, embedded and form elements', () => {

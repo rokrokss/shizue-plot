@@ -94,6 +94,15 @@ describe('downloadRealmCard', () => {
     expect(file.name).toBe(`${id}.png`);
   });
 
+  it("asks for a legacy card's PNG straight away", async () => {
+    const hex = 'c460b3f976e84ab07e639f1aed656817e64556b61e8d1ec8f25ae88f96febc09';
+    const asked = serve({ 'png-v3': () => bytes(8, 'image/png') });
+    const { file, sourceUrl } = await downloadRealmCard(`https://realm.risuai.net/character/${hex}`);
+    expect(asked).toEqual([`https://realm.risuai.net/api/v1/download/png-v3/${hex}?cors=true`]);
+    expect(file.name).toBe(`${hex}.png`);
+    expect(sourceUrl).toBe(`https://realm.risuai.net/character/${hex}`);
+  });
+
   it('turns each refusal into something the form can say', async () => {
     const status = (value: number) => () => new Response(null, { status: value });
     serve({ 'charx-v3': status(403), 'png-v3': status(403) });

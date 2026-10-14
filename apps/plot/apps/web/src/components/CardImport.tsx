@@ -5,6 +5,7 @@ import { useState } from 'react';
 import { isRestrictiveLicense, licenseTerms, REALM_ORIGIN } from '@/lib/realm';
 import { MIGRATION_PLATFORMS } from '@/lib/migrate/wizard';
 import type { PlotMember } from '@/lib/types';
+import type { ImportWarning } from '@/lib/importWarnings';
 import { Button, Checkbox, Field, TextInput } from './ui';
 
 /**
@@ -191,6 +192,26 @@ export function RightsConfirmation({
         </p>
       ) : null}
       <Checkbox label={label} checked={checked} onChange={onChange} />
+    </div>
+  );
+}
+
+/**
+ * What a card import left behind or cut (`ImportWarning`), said quietly: the
+ * import went through, and every line is a cap or the card's own gap, for the
+ * creator to know rather than to act on. Nothing at all when nothing was.
+ */
+export function ImportWarnings({ warnings }: { warnings: readonly ImportWarning[] }) {
+  const t = useTranslations('cardImport');
+  if (warnings.length === 0) return null;
+  return (
+    <div role="status" data-testid="import-warnings" className="text-xs text-muted">
+      <p>{t('importWarnings')}</p>
+      <ul className="list-disc pl-5">
+        {warnings.map((warning) => (
+          <li key={warning.code}>{t(`importWarning.${warning.code}`, { count: warning.count })}</li>
+        ))}
+      </ul>
     </div>
   );
 }

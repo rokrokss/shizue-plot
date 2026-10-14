@@ -1,14 +1,16 @@
 import type { NormalizedCard } from '../types.js';
 import {
   charxInJpeg,
-  IMAGE_EXTENSIONS,
   isZip,
   MAX_ASSETS,
   MAX_ENTRY_BYTES,
   MAX_TOTAL_BYTES,
+  noSkippedAssets,
   readCharx,
   type CharxAssetFile,
+  type SkippedAssets,
 } from './charx.js';
+import { MEDIA_SNIFF_BYTES, sniffMedia } from './media.js';
 import { CardParseError, normalizeCard } from './normalize.js';
 import { isPng, readPngTextChunkBytes } from './png.js';
 import { cardWithRisuModule } from './risum.js';
@@ -17,15 +19,20 @@ export interface ParsedCard {
   card: NormalizedCard;
   /** Avatar bytes when the source carried one (PNG itself, or the charx main icon). */
   iconBuffer?: Uint8Array;
-  /** Embedded images beside the icon: a charx archive's, or a RisuAI PNG's asset chunks. */
+  /** Embedded pictures and music beside the icon: a charx archive's, or a RisuAI PNG's asset chunks. */
   assets?: CharxAssetFile[];
+  /** The embedded files the card declares that are not among `assets`, by why; absent when none were. */
+  skipped?: SkippedAssets;
 }
+
+const anySkipped = (skipped: SkippedAssets): boolean =>
+  skipped.unsupported + skipped.missing + skipped.overBudget > 0;
 
 /** tEXt keywords holding a card payload, in priority order. */
 const CARD_CHUNKS = ['ccv3', 'chara'];
 
 /**
- * A RisuAI PNG card carries its other images in tEXt chunks `chara-ext-asset_:N`
+ * A RisuAI PNG card carries its other files in tEXt chunks `chara-ext-asset_:N`
  * (base64) and names each by the uri `__asset:N`. RisuAI's own reader also takes
  * the keyword without the colon, and so does this.
  */
@@ -49,7 +56,6 @@ function decodeBase64Json(base64: string): unknown {
 interface DeclaredPngAsset {
   name: string;
   uri: string;
-  ext: string;
   /** One of the card's emotion pictures (`CharxAssetFile.emotion`). */
   emotion?: true;
 }
@@ -57,9 +63,10 @@ interface DeclaredPngAsset {
 /**
  * The assets a PNG card declares, read from where RisuAI reads them for the
  * card's spec: V3 `data.assets`, V2 `extensions.risuai`'s `emotions`
- * (`[name, uri]`) and `additionalAssets` (`[name, uri, ext]`). The V2 lists take
- * RisuAI's own defaults — an emotion is a png, and so is an additional asset
- * without an ext. The main icon is left out: the PNG itself is the icon.
+ * (`[name, uri]`) and `additionalAssets` (`[name, uri, ext]`). The extension
+ * each declares is not kept: RisuAI writes `unknown` for pictures it has
+ * re-encoded, so the bytes say what each is (`pngAssets`). The main icon is left
+ * out: the PNG itself is the icon.
  */
 function declaredPngAssets(raw: unknown): DeclaredPngAsset[] {
   if (!isObject(raw) || !isObject(raw['data'])) return [];
@@ -72,7 +79,6 @@ function declaredPngAssets(raw: unknown): DeclaredPngAsset[] {
       .map((asset) => ({
         name: text(asset['name']),
         uri: text(asset['uri']),
-        ext: text(asset['ext']),
         ...(asset['type'] === 'emotion' ? { emotion: true as const } : {}),
       }));
   }
@@ -86,39 +92,59 @@ function declaredPngAssets(raw: unknown): DeclaredPngAsset[] {
     ...rows(risu['emotions']).map((row) => ({
       name: text(row[0]),
       uri: text(row[1]),
-      ext: 'png',
       emotion: true as const,
     })),
-    ...rows(risu['additionalAssets']).map((row) => ({
-      name: text(row[0]),
-      uri: text(row[1]),
-      ext: text(row[2]) || 'png',
-    })),
+    ...rows(risu['additionalAssets']).map((row) => ({ name: text(row[0]), uri: text(row[1]) })),
   ];
 }
 
+/** Base64 characters that decode to the bytes `sniffMedia` reads. */
+const SNIFF_BASE64_CHARS = Math.ceil(MEDIA_SNIFF_BYTES / 3) * 4;
+
 /**
- * The images a PNG card carries beside itself, in card order, under the charx
- * parse budget. Each chunk's decoded size is known from its length, so the
- * check comes before the decode and nothing is paid for an asset that is then
- * dropped; like a charx pass, reading stops at the first asset over a cap.
+ * The pictures and music a PNG card carries beside itself, in card order, under
+ * the charx parse budget. What each is comes from its first bytes, decoded off
+ * the front of its chunk, so a chunk that is neither (a voice model, a font) is
+ * passed over without paying for the rest of it. Each chunk's decoded size is
+ * known from its length, so the budget is checked before the decode too; like a
+ * charx pass, reading stops at the first asset over a cap.
  */
-function pngAssets(raw: unknown, chunks: Map<string, Uint8Array>): CharxAssetFile[] {
+function pngAssets(
+  raw: unknown,
+  chunks: Map<string, Uint8Array>,
+): { assets: CharxAssetFile[]; skipped: SkippedAssets } {
   const assets: CharxAssetFile[] = [];
+  const skipped = noSkippedAssets();
   const seen = new Set<string>();
   let spent = 0;
+  /** Set once a cap is reached: everything after it is counted, never read. */
+  let over = false;
   for (const asset of declaredPngAssets(raw)) {
-    if (assets.length >= MAX_ASSETS) break;
-    if (!asset.uri.startsWith(PNG_ASSET_URI) || !IMAGE_EXTENSIONS.has(asset.ext.toLowerCase())) continue;
+    if (!asset.uri.startsWith(PNG_ASSET_URI)) continue;
     const key = asset.uri.slice(PNG_ASSET_URI.length);
     if (seen.has(key)) continue;
     seen.add(key);
+    if (over || assets.length >= MAX_ASSETS) {
+      skipped.overBudget += 1;
+      continue;
+    }
 
     const base64 = chunks.get(`${PNG_ASSET_CHUNK}:${key}`) ?? chunks.get(`${PNG_ASSET_CHUNK}${key}`);
-    if (!base64) continue;
+    if (!base64) {
+      skipped.missing += 1;
+      continue;
+    }
+    if (!sniffMedia(Buffer.from(textOf(base64.subarray(0, SNIFF_BASE64_CHARS)), 'base64'))) {
+      skipped.unsupported += 1;
+      continue;
+    }
     const size = Math.floor((base64.length * 3) / 4);
     spent += size;
-    if (size > MAX_ENTRY_BYTES || spent > MAX_TOTAL_BYTES) break;
+    if (size > MAX_ENTRY_BYTES || spent > MAX_TOTAL_BYTES) {
+      over = true;
+      skipped.overBudget += 1;
+      continue;
+    }
     // Copied off Buffer's shared pool, so each asset owns its bytes.
     const bytes = new Uint8Array(Buffer.from(textOf(base64), 'base64'));
     assets.push({
@@ -127,7 +153,7 @@ function pngAssets(raw: unknown, chunks: Map<string, Uint8Array>): CharxAssetFil
       ...(asset.emotion ? { emotion: true as const } : {}),
     });
   }
-  return assets;
+  return { assets, skipped };
 }
 
 function parsePngCard(bytes: Uint8Array): ParsedCard {
@@ -137,8 +163,13 @@ function parsePngCard(bytes: Uint8Array): ParsedCard {
     if (!payload?.length) continue;
     const raw = decodeBase64Json(textOf(payload));
     const card = normalizeCard(raw);
-    const assets = pngAssets(raw, chunks);
-    return assets.length > 0 ? { card, iconBuffer: bytes, assets } : { card, iconBuffer: bytes };
+    const { assets, skipped } = pngAssets(raw, chunks);
+    return {
+      card,
+      iconBuffer: bytes,
+      ...(assets.length > 0 ? { assets } : {}),
+      ...(anySkipped(skipped) ? { skipped } : {}),
+    };
   }
   throw new CardParseError('PNG has no ccv3 or chara tEXt chunk');
 }
@@ -149,9 +180,9 @@ function parsePngCard(bytes: Uint8Array): ParsedCard {
  * it is the card the archive carried, split over two entries.
  */
 function parseCharx(bytes: Uint8Array): ParsedCard {
-  const { raw, module, iconBuffer, assets } = readCharx(bytes);
+  const { raw, module, iconBuffer, assets, skipped } = readCharx(bytes);
   const card = normalizeCard(module ? cardWithRisuModule(raw, module) : raw);
-  return iconBuffer ? { card, iconBuffer, assets } : { card, assets };
+  return { card, ...(iconBuffer ? { iconBuffer } : {}), assets, ...(anySkipped(skipped) ? { skipped } : {}) };
 }
 
 /** Parses a character card from raw bytes (PNG / charx / JPEG with a charx / JSON) or a JSON value. */

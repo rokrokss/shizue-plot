@@ -4,7 +4,7 @@
  * the web held before the shapes moved here.
  */
 import { describe, expect, it } from 'vitest';
-import { realmCardId, realmCharacterUrl, sourceUrlFor } from '../src/sourceUrl.js';
+import { isLegacyRealmId, realmCardId, realmCharacterUrl, sourceUrlFor } from '../src/sourceUrl.js';
 
 const id = '0f8e6c1a-3b2d-4c5e-9f7a-1b2c3d4e5f60';
 const page = `https://realm.risuai.net/character/${id}`;
@@ -37,6 +37,25 @@ describe('realmCardId', () => {
     ]) {
       expect(realmCardId(input), input).toBeNull();
     }
+  });
+
+  it("reads a legacy card's 64-hex id in every shape, and only that length", () => {
+    const hex = 'c460b3f976e84ab07e639f1aed656817e64556b61e8d1ec8f25ae88f96febc09';
+    for (const input of [
+      hex,
+      `https://realm.risuai.net/character/${hex}`,
+      `https://realm.risuai.net/character/${hex}/`,
+      `https://risuai.xyz/?realm=${hex}`,
+    ]) {
+      expect(realmCardId(input), input).toBe(hex);
+    }
+    expect(isLegacyRealmId(hex)).toBe(true);
+    expect(isLegacyRealmId(id)).toBe(false);
+    for (const input of [hex.slice(1), `${hex}0`, `${hex.slice(1)}g`]) {
+      expect(realmCardId(input), input).toBeNull();
+      expect(realmCardId(`https://realm.risuai.net/character/${input}`), input).toBeNull();
+    }
+    expect(sourceUrlFor('realm', hex)).toBe(`https://realm.risuai.net/character/${hex}`);
   });
 
   it('stores one spelling', () => {

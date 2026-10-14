@@ -142,18 +142,22 @@ export interface Illustration {
   locked: boolean;
 }
 
+/** Whether an asset is a picture — the rest is a card's music, which no gallery draws. */
+export const isImageAsset = (asset: Pick<PlotAsset, 'mime'>): boolean => asset.mime.startsWith('image/');
+
 /**
  * The plot's images as one conversation sees them: open ones with their bytes,
  * locked ones with nothing but the kind of condition they wait on. An asset the
  * lock list says nothing about is one the server did not answer for (an older
- * state, a read that has not landed) and is simply shown.
+ * state, a read that has not landed) and is simply shown. A card's music is not
+ * among them.
  */
 export function illustrations(
   assets: readonly PlotAsset[],
   locks: readonly AssetLock[],
 ): Illustration[] {
   const bySlug = new Map(locks.map((lock) => [lock.slug, lock]));
-  return assets.map((asset) => {
+  return assets.filter(isImageAsset).map((asset) => {
     const lock = bySlug.get(asset.slug);
     const locked = lock?.locked ?? false;
     return {

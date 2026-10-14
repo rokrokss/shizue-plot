@@ -12,9 +12,9 @@
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ChatBackground, renderBackground } from '../src/components/ChatBackground';
+import { ChatBackground, MAX_BACKGROUND_RENDER_CHARS, renderBackground } from '../src/components/ChatBackground';
 import type { CbsContext } from '../src/lib/cbs';
-import { MAX_RENDER_INPUT_CHARS, PLAN_LIMITS, planDisplayScripts } from '../src/lib/displayScripts';
+import { PLAN_LIMITS, planDisplayScripts } from '../src/lib/displayScripts';
 import type { DisplayScript } from '../src/lib/types';
 
 /** The planner is a module singleton and there is no `Worker` here, so it is replaced. */
@@ -62,9 +62,14 @@ describe('the chat background', () => {
     );
   });
 
+  it('draws a background past a message’s budget, up to what a plot carries', () => {
+    const long = `<div>${'가'.repeat(150_000)}</div>`;
+    expect(renderBackground(long, ctx)).toBe(long);
+  });
+
   it('draws nothing rather than its source when it cannot be drawn', () => {
     expect(renderBackground('<div>{{#if 1}}열린 채</div>', ctx)).toBe('');
-    expect(renderBackground(`<div>${'가'.repeat(MAX_RENDER_INPUT_CHARS)}</div>`, ctx)).toBe('');
+    expect(renderBackground(`<div>${'가'.repeat(MAX_BACKGROUND_RENDER_CHARS)}</div>`, ctx)).toBe('');
     expect(renderBackground('<img src="https://tracker.example/x.png">', ctx)).toBe('');
   });
 });

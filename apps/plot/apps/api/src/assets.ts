@@ -1,5 +1,4 @@
-import { stripPngTextChunks } from '@shizue/core';
-import { detectImageType } from './avatar.js';
+import { sniffMedia, stripPngTextChunks } from '@shizue/core';
 import { badRequest } from './errors.js';
 import { assetKey, type ObjectStorage } from './storage.js';
 
@@ -95,15 +94,21 @@ interface StoredAsset {
  * Stores an asset. The key comes from the row id, so no user-supplied name
  * reaches the store, and PNGs are stripped exactly like avatars: an asset is
  * served to everyone who can see the plot.
- * Returns null for bytes that are not a supported image.
+ *
+ * What the bytes are decides what is stored, never a name or a declared type
+ * (`sniffMedia`). A picture always; music only where `audio` says so — what a
+ * card brings, which RisuAI plays (`{{audio::…}}`, `{{bgm::…}}`). The studio's
+ * own upload takes pictures alone.
+ * Returns null for bytes that are not a supported image (or music, with `audio`).
  */
 export async function saveAsset(
   storage: ObjectStorage,
   assetId: string,
   bytes: Uint8Array,
+  { audio = false }: { audio?: boolean } = {},
 ): Promise<StoredAsset | null> {
-  const type = detectImageType(bytes);
-  if (!type) return null;
+  const type = sniffMedia(bytes);
+  if (!type || (type.kind === 'audio' && !audio)) return null;
   const stored = type.ext === 'png' ? stripPngTextChunks(bytes) : bytes;
   if (!stored) return null;
   const key = assetKey(assetId, type.ext);

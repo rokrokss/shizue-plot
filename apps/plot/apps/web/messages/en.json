@@ -407,7 +407,18 @@
     "realmPlaceholder": "https://realm.risuai.net/character/…",
     "realmHint": "Your browser downloads the card straight from RisuRealm. Cards up to 1GB can be imported.",
     "realmBrowse": "Browse characters on <link>RisuRealm</link>.",
-    "realmSubmit": "Import"
+    "realmSubmit": "Import",
+    "importWarnings": "Not everything on the card came along:",
+    "importWarning": {
+      "assets_unsupported": "{count, plural, one {# file} other {# files}} that are neither a picture nor music",
+      "assets_missing": "{count, plural, one {# file} other {# files}} the card names but does not contain",
+      "assets_over_budget": "{count, plural, one {# file} other {# files}} past the import size limit",
+      "assets_over_limit": "{count, plural, one {# file} other {# files}} past the work’s limit of 1,000",
+      "greetings_over_limit": "{count, plural, one {# greeting} other {# greetings}} past the limit of 10 openings",
+      "greetings_cut": "{count, plural, one {# greeting} other {# greetings}} cut to 400,000 characters",
+      "stylesheet_over_limit": "The stylesheet, over 400,000 characters",
+      "background_over_limit": "The background, over 400,000 characters"
+    }
   },
   "stImport": {
     "title": "Move from SillyTavern",

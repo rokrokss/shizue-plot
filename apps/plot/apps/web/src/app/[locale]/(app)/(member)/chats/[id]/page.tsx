@@ -129,6 +129,7 @@ import type {
   SuggestionsResult,
   UserNote,
 } from '@/lib/types';
+import { useBackgroundMusic } from '@/lib/useBackgroundMusic';
 import { useDocumentTitle } from '@/lib/useDocumentTitle';
 import { ApiError } from '@/lib/api';
 import { useErrorMessage } from '@/lib/useErrorMessage';
@@ -908,6 +909,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const charMacro = soleRenamed ? soleRenamed.nickname?.trim() || renamed! : characterName;
   // Who the conversation is with, once either read has said so.
   useDocumentTitle(characterName);
+  // A card's `{{bgm::…}}`, wherever on the page its markup drew it.
+  useBackgroundMusic();
 
   /**
    * RisuAI's emotion screen: the picture each panel member shows on the branch

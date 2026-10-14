@@ -35,6 +35,7 @@ import {
 } from '@shizue/core/cbs';
 import { readVariable } from '@shizue/core/variables';
 import { lookupAsset, type AssetResolver } from './assets';
+import { MAX_BACKGROUND_RENDER_CHARS } from './types';
 import { isTainted, stripTaint, taint } from './taint';
 
 /** The relationship axes `{{rel::axis}}` exposes; mirrors RELATIONSHIP_AXES. */
@@ -127,6 +128,7 @@ export function escapeHtml(text: string): string {
  * template that fits on one line.
  */
 const MAX_RENDERED_NODES = 20_000;
+/** A message's; the chat's background has its own (`MAX_BACKGROUND_RENDER_CHARS`, `ChatBackground`). */
 const MAX_RENDERED_CHARS = 100_000;
 /**
  * `{{#each}}` iterations in one render, every block together. Kept below the
@@ -177,6 +179,19 @@ interface Budget {
 function read(value: string, budget: Budget): string {
   budget.charge(value.length);
   return value;
+}
+
+/**
+ * RisuAI's music, as its `parseAdditionalAssets` writes it: `{{audio::…}}` a
+ * player that starts by itself and loops (`<audio controls autoplay loop>`) —
+ * the browser decides whether it may start, and the controls stay either way —
+ * and `{{bgm::…}}` no player at all, a marker the chat page plays from
+ * (`useBackgroundMusic`), as RisuAI's DOM observer plays its `risu-ctrl`.
+ */
+export function musicMarkup(kind: 'audio' | 'bgm', src: string): string {
+  return kind === 'audio'
+    ? `<audio controls autoplay loop src="${escapeHtml(src)}"></audio>`
+    : `<span data-shizue-bgm="${escapeHtml(src)}"></span>`;
 }
 
 /* ------------------------------------------------------------ image context */
@@ -305,6 +320,7 @@ function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>): CbsHos
     if (!found) return { text: '' };
     const src = read(found.src, budget);
     if (kind === 'url' || call.mode === 'arg' || attributes.has(call.macro)) return { text: src };
+    if (kind === 'audio' || kind === 'bgm') return { text: musicMarkup(kind, src), markup: true };
     return { text: `<img src="${escapeHtml(src)}" alt="${escapeHtml(found.slug)}">`, markup: true };
   };
 
@@ -337,7 +353,9 @@ function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>): CbsHos
     },
     // Checking each intermediate bounds the final string too, since it is one.
     grow: (length) => {
-      if (length > MAX_RENDERED_CHARS) throw new RenderBudgetExhausted('output too large');
+      if (length > (ctx.background ? MAX_BACKGROUND_RENDER_CHARS : MAX_RENDERED_CHARS)) {
+        throw new RenderBudgetExhausted('output too large');
+      }
     },
     // A capture bound into a macro argument — `{{calc::$1 / 2}}`, `{{#if $2}}` —
     // arrives marked, and an argument is read rather than shown: the marks would

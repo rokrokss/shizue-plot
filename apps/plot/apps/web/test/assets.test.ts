@@ -166,6 +166,12 @@ describe('the lock a chat reads an image through', () => {
     ]);
   });
 
+  it("leaves a card's music out of the gallery", () => {
+    expect(illustrations([asset('smile'), { ...asset('bgm'), mime: 'audio/mpeg' }], locks)).toEqual([
+      { slug: 'smile', src: '/api/plots/c1/assets/smile', kind: null, locked: false },
+    ]);
+  });
+
   it('shows an asset no lock row speaks for', () => {
     expect(illustrations([asset('new')], locks)).toEqual([
       { slug: 'new', src: '/api/plots/c1/assets/new', kind: null, locked: false },

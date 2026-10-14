@@ -30,11 +30,13 @@ export * from './card/intro.js';
 export * from './card/narrator.js';
 export * from './card/png.js';
 export * from './card/charx.js';
+export { AUDIO_EXTENSIONS, sniffMedia, type MediaType } from './card/media.js';
 export {
   backgroundHtmlOf,
   backgroundWithoutStyles,
   cardLicense,
   creatorCssFromExtensions,
+  creatorCssOverCap,
   displayScriptsFromExtensions,
   isUtilityBot,
   MAX_BACKGROUND_HTML_LENGTH,

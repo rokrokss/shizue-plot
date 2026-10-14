@@ -68,6 +68,8 @@ const ALLOWED_TAGS = [
   // with them and left a greeting reading as one run-on line.
   'del', 'ins', 'strike', 'big', 'center', 'font', 'q', 'cite', 'kbd', 'ruby', 'rt', 'rp',
   'section', 'article', 'header', 'footer', 'aside', 'nav',
+  // A card's music, which loads from our own origin only (`rewriteElement`).
+  'audio', 'source',
 ];
 
 const ALLOWED_ATTR = [
@@ -81,6 +83,9 @@ const ALLOWED_ATTR = [
   // ours after it (`SCRIPT_ATTRIBUTES`).
   'risu-trigger', 'risu-id', 'risu-btn',
   'data-shizue-trigger', 'data-shizue-trigger-id', 'data-shizue-btn',
+  // A card's music: RisuAI's player (`{{audio::…}}`, or one the card writes out)
+  // and the background music the chat page plays (`{{bgm::…}}`, `useBackgroundMusic`).
+  'controls', 'autoplay', 'loop', 'muted', 'preload', 'data-shizue-bgm',
 ];
 
 /**
@@ -463,6 +468,17 @@ function rewriteElement(element: Element): void {
     if (!isSameOriginUrl(element.getAttribute('src') ?? '')) element.remove();
     return;
   }
+
+  // Music loads as a picture does, from our own origin or not at all. A player
+  // may name its file on itself or on the `<source>` inside it, so an absent
+  // `src` is no reason to drop it; the background music's marker is held to the
+  // same test.
+  if (tag === 'audio' || tag === 'source') {
+    const src = element.getAttribute('src');
+    if (src !== null && !isSameOriginUrl(src)) element.remove();
+  }
+  const bgm = element.getAttribute('data-shizue-bgm');
+  if (bgm !== null && !isSameOriginUrl(bgm)) element.removeAttribute('data-shizue-bgm');
 
   // A button never submits: forms cannot survive the whitelist, and the chat page
   // is the only thing that reads `data-shizue-fill` and the script attributes.

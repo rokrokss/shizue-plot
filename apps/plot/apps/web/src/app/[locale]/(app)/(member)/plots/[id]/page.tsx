@@ -8,7 +8,7 @@ import { use, useCallback, useEffect, useRef, useState } from 'react';
 import { AssetManager } from '@/components/AssetManager';
 import { AiBadge, PublicBadge } from '@/components/AudienceBadge';
 import { Avatar } from '@/components/Avatar';
-import { ImportedCardDetails, RealmImportForm, RightsConfirmation } from '@/components/CardImport';
+import { ImportedCardDetails, ImportWarnings, RealmImportForm, RightsConfirmation } from '@/components/CardImport';
 import { ComponentCodeEditor } from '@/components/ComponentCodeEditor';
 import { GroupTurnsEditor } from '@/components/GroupTurnsEditor';
 import { DefaultVariablesEditor, DisplayScriptEditor } from '@/components/DisplayScriptEditor';
@@ -35,6 +35,7 @@ import {
 import { Link, useRouter } from '@/i18n/navigation';
 import { locales } from '@/i18n/routing';
 import { apiDelete, apiGet, apiSend, apiUpload } from '@/lib/api';
+import { readImportWarnings, takeImportWarnings, type ImportWarning } from '@/lib/importWarnings';
 import { LORE_BUDGET_SHARE, loreBudget } from '@/lib/loreBudget';
 import { checkCardSize, downloadRealmCard, isRestrictiveLicense } from '@/lib/realm';
 import {
@@ -133,6 +134,8 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
   const [background, setBackground] = useState<string | undefined>(undefined);
   /** The default variables a companion's card brought that the work kept its own value for. */
   const [variableNotice, setVariableNotice] = useState('');
+  /** What the last card import left behind — the plot's own, handed over from the list, or a member's. */
+  const [importWarnings, setImportWarnings] = useState<ImportWarning[]>([]);
   const [componentCode, setComponentCode] = useState('');
   const [capabilities, setCapabilities] = useState<ComponentCapability[]>([]);
   /** Bumped when a module brought or took pictures, so the asset list reads them again. */
@@ -189,6 +192,13 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
   useEffect(() => {
     apiGet<PlotDetail>(`/api/plots/${id}`).then(adopt, () => setMissing(true));
   }, [id, adopt]);
+
+  // The import that made this plot, a moment ago, said what it left behind.
+  // Read once: a second run of the effect finds nothing and keeps what the first found.
+  useEffect(() => {
+    const taken = takeImportWarnings(id);
+    if (taken.length > 0) setImportWarnings(taken);
+  }, [id]);
 
   async function save(): Promise<void> {
     if (locked) return;
@@ -308,7 +318,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
         file = checkCardSize(source);
       }
       if (rightsConfirmed) fields['rightsConfirmed'] = 'true';
-      const created = await apiUpload<PlotMember & { variableConflicts?: string[] }>(
+      const created = await apiUpload<PlotMember & { variableConflicts?: string[]; importWarnings?: unknown }>(
         `/api/plots/${id}/characters/import`,
         file,
         fields,
@@ -338,6 +348,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
         },
         () => undefined,
       );
+      setImportWarnings(readImportWarnings(created.importWarnings));
       setVariableNotice(
         created.variableConflicts?.length
           ? t('memberImportVariableConflicts', { name: created.name, names: created.variableConflicts.join(', ') })
@@ -453,6 +464,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
             {variableNotice}
           </p>
         ) : null}
+        <ImportWarnings warnings={importWarnings} />
       </div>
 
       <div className="mt-6 grid gap-6 lg:grid-cols-3">

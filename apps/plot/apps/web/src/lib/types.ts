@@ -152,8 +152,20 @@ export type SafetyLevel = 'all' | 'adult';
 export const MAX_CHARACTERS_PER_PLOT = 10;
 export const MAX_INTROS_PER_PLOT = 10;
 /** One opening's length, and the reader-facing intro's; mirrors the API. */
-export const MAX_INTRO_TEXT_LENGTH = 16_000;
+export const MAX_INTRO_TEXT_LENGTH = 400_000;
 export const MAX_INTRO_LENGTH = 4000;
+/** The longest stylesheet and background a plot carries; mirrors `MAX_CREATOR_CSS_LENGTH` and `MAX_BACKGROUND_HTML_LENGTH` in @shizue/core. */
+export const MAX_BACKGROUND_HTML_LENGTH = 400_000;
+/**
+ * What drawing the background may spend: the source and what its CBS makes of
+ * it, charged together before each step, and the markup that comes out. Its own
+ * rather than a message's (`MAX_RENDER_INPUT_CHARS`): a work's background may be
+ * as long as a plot carries one, and it is drawn behind the whole chat rather
+ * than once per message. At the half microsecond a charged character costs
+ * (`displayScripts.ts`), the longest is under half a second; RisuRealm's
+ * backgrounds past their stylesheets run to a few thousand characters.
+ */
+export const MAX_BACKGROUND_RENDER_CHARS = 2 * MAX_BACKGROUND_HTML_LENGTH;
 /** One card file an import takes; mirrors `MAX_CARD_IMPORT_BYTES` in @shizue/core. */
 export const MAX_CARD_IMPORT_BYTES = 1024 * 1024 * 1024;
 

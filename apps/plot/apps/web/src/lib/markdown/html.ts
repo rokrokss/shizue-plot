@@ -25,6 +25,7 @@ import Markdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
 import { lookupAsset, readLockKind, type AssetResolver } from '../assets';
+import { musicMarkup } from '../cbs';
 import { keepsElement, sanitizeCustomHtml } from '../sanitizeHtml';
 import { splitBlocks } from './blocks';
 import type { HastNode } from './hast';
@@ -253,7 +254,7 @@ const escapeAttribute = (value: string): string =>
  * `renderImageTokens` for a markup chunk: the reference becomes an `<img>`,
  * because markdown's `![…](…)` is not read inside an HTML block — or the bare
  * address, where it stands in a tag or a stylesheet. RisuAI writes its asset
- * macros out the same way.
+ * macros out the same way, music included (`musicMarkup`).
  *
  * A picture this chat has not opened yet is left out entirely. Its stand-in is
  * a component, and markup cannot hold one; the marker it resolves to is an
@@ -279,6 +280,7 @@ export function renderImageTokensAsHtml(
     const found = lookupAsset(macro.ref, assets, resolve, macro.name);
     if (!found || readLockKind(found.src)) return '';
     if (isAddressPosition(content, macro.start)) return found.src;
+    if (macro.kind === 'audio' || macro.kind === 'bgm') return musicMarkup(macro.kind, found.src);
     if (macro.kind !== 'image') return '';
     return `<img src="${escapeAttribute(found.src)}" alt="${escapeAttribute(found.slug)}">`;
   });

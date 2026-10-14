@@ -9,6 +9,7 @@ import { Button, buttonClass, ErrorText, Field, Select, Spinner, TextArea, TextI
 import { Link, useRouter } from '@/i18n/navigation';
 import { apiGet, apiSend, apiUpload } from '@/lib/api';
 import { readDraftModel, writeDraftModel } from '@/lib/draftPrefs';
+import { keepImportWarnings } from '@/lib/importWarnings';
 import { checkCardSize, downloadRealmCard } from '@/lib/realm';
 import {
   MAX_PREMISE_LENGTH,
@@ -128,7 +129,9 @@ export default function PlotsPage() {
     setOperation('import');
     setError('');
     try {
-      const created = await apiUpload<PlotDetail>('/api/plots/import', checkCardSize(file));
+      const created = await apiUpload<PlotDetail & { importWarnings?: unknown }>('/api/plots/import', checkCardSize(file));
+      // What the import left behind, for the studio it moves on to to say.
+      keepImportWarnings(created.id, created.importWarnings);
       router.push(`/plots/${created.id}`);
     } catch (caught) {
       setError(toMessage(caught));
@@ -147,7 +150,8 @@ export default function PlotsPage() {
     setError('');
     try {
       const { file, sourceUrl } = await downloadRealmCard(url);
-      const created = await apiUpload<PlotDetail>('/api/plots/import', file, { sourceUrl });
+      const created = await apiUpload<PlotDetail & { importWarnings?: unknown }>('/api/plots/import', file, { sourceUrl });
+      keepImportWarnings(created.id, created.importWarnings);
       router.push(`/plots/${created.id}`);
       return true;
     } catch (caught) {
