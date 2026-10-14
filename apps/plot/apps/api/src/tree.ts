@@ -62,3 +62,38 @@ export function deepestLeaf(all: Message[], messageId: string): string {
     current = children[children.length - 1]!.id;
   }
 }
+
+/**
+ * How many times the other side has answered along a branch: its rounds. A group
+ * turn's replies share a round (`group_turn_id`) and count once together; every
+ * other assistant message — a scene reply, a greeting, a reply imported under
+ * one speaker — is a round of its own. On a branch without group replies this is
+ * the assistant messages on it, as it has always been counted.
+ */
+export function roundCount(path: readonly Pick<Message, 'role' | 'groupTurnId'>[]): number {
+  const rounds = new Set<string>();
+  let untagged = 0;
+  for (const message of path) {
+    if (message.role !== 'assistant') continue;
+    if (message.groupTurnId === null) untagged += 1;
+    else rounds.add(message.groupTurnId);
+  }
+  return untagged + rounds.size;
+}
+
+/**
+ * Where the round a branch ends on starts: the index of the first of the
+ * contiguous assistant messages at its end that share the last one's
+ * `group_turn_id`. The last index for an assistant message in no round, and the
+ * branch's length when it ends on a user turn or on nothing — nothing to replace.
+ */
+export function roundStart(path: readonly Pick<Message, 'role' | 'groupTurnId'>[]): number {
+  const last = path.at(-1);
+  if (!last || last.role !== 'assistant') return path.length;
+  let start = path.length - 1;
+  if (last.groupTurnId === null) return start;
+  while (start > 0 && path[start - 1]!.role === 'assistant' && path[start - 1]!.groupTurnId === last.groupTurnId) {
+    start -= 1;
+  }
+  return start;
+}

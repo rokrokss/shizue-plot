@@ -35,6 +35,12 @@ export const ChatExportMessageSchema = z.object({
   source: z.enum(['user', 'component']).optional(),
   /** Absent on every turn that carries no image, which is nearly all of them. */
   attachments: z.array(ChatExportAttachmentSchema).optional(),
+  /**
+   * The member a group turn's reply is wholly said by — its text then carries
+   * no `이름: ` prefix of its own. Absent on every other message, and on every
+   * message once the plot is withdrawn (the roster goes with it).
+   */
+  speaker: z.object({ id: z.string(), name: z.string() }).optional(),
 });
 
 /** `url` is a same-origin path, so the importer fetches it with the session cookie. */

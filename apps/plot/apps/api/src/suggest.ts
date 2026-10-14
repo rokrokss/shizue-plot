@@ -11,12 +11,12 @@
  * does not offer the button.
  * Nothing is stored — a suggestion the reader ignores must leave no trace.
  */
-import type { Message } from '@shizue/db';
+import type { Character, Message } from '@shizue/db';
 import type { ChatRequest } from '@shizue/llm';
 import type { AppDeps } from './deps.js';
 import { ApiError } from './errors.js';
 import { collect, memoryChannel } from './memory.js';
-import { transcriptLine } from './transcript.js';
+import { transcriptOf } from './transcript.js';
 
 /** How much of the branch tail the model reads. */
 const RECENT_TURNS = 10;
@@ -51,6 +51,8 @@ export interface SuggestInput {
   subModel: string | null;
   /** The branch tail, oldest first; the caller has already windowed it. */
   recent: Message[];
+  /** The roster, by whose ids a group reply names its speaker. */
+  members: readonly Pick<Character, 'id' | 'name' | 'card'>[];
   plotName: string;
   /** The persona's name, or the default one when this chat has no persona. */
   userName: string;
@@ -70,10 +72,7 @@ export async function suggestReplies(deps: AppDeps, input: SuggestInput): Promis
   }
 
   // Image references are markup for the chat, not something to answer.
-  const transcript = input.recent
-    .slice(-RECENT_TURNS)
-    .map((message) => transcriptLine(message, input.userName))
-    .join('\n');
+  const transcript = transcriptOf(input.recent.slice(-RECENT_TURNS), input.userName, input.members);
   const request: ChatRequest = {
     model: resolved.providerModel,
     system: SUGGEST_RULES,

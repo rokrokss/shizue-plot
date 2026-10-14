@@ -10,6 +10,7 @@ import {
   sceneFocusDirective,
   spokenBy,
   stripInlayMacros,
+  stripSpeakerPrefix,
   withBranchGreeting,
   withNarrationPrefix,
   type AssembledPrompt,
@@ -20,6 +21,7 @@ import {
   type LoreTimedState,
   type MacroClock,
   type NarratorConfig,
+  type NarratorSpeaker,
   type Preset,
   type PromptBranch,
   type PromptCharacter,
@@ -30,6 +32,7 @@ import {
 } from '@shizue/core';
 import { promptScriptJob, promptScriptsOf } from '@shizue/core/prompt-scripts';
 import {
+  cardScripts,
   checkScriptChat,
   hasTriggersFor,
   luaScriptsOf,
@@ -38,6 +41,7 @@ import {
   scriptChatOf,
   scriptedMember,
   upsertLocalLore,
+  type CardScripts,
   type MemberOverlay,
   type RequestTurn,
   type TriggerMessage,
@@ -48,6 +52,7 @@ import { ChatGPTError, getAdapter, getModel, supportsVision, type ChatGPTAccount
 import { and, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
+import { randomUUID } from 'node:crypto';
 import { withImageNote } from './attachments.js';
 import { ApiError, badRequest, notFound } from './errors.js';
 import type { AppDeps, AppEnv, Tx } from './deps.js';
@@ -222,12 +227,30 @@ export interface GenerationPlan {
    * one; continuing a narration appends to text that already carries the prefix.
    */
   narration?: boolean;
+  /**
+   * Who a group turn's reply is asked of (@shizue/core `group.ts`): an index into
+   * `characters`, or the narrator. Absent is the scene, as every reply was before
+   * group turns — and every reply of a work of one member still is.
+   */
+  speaker?: number | NarratorSpeaker;
+  /**
+   * The names a member speaker's own `이름: ` prefixes go by — its name in this
+   * chat, then its nickname — taken off what it writes before it is stored
+   * (`stripSpeakerPrefix`): the reply is the member's whole.
+   */
+  speakerNames?: string[];
+  /**
+   * Where a new group reply is stored: its speaker (null for the narrator) and
+   * its round — null opens a new one under the reply's own id. Absent for a
+   * scene reply, and for a continue, whose message keeps its own.
+   */
+  round?: { speakerMemberId: string | null; groupTurnId: string | null };
   target: GenerationTarget;
 }
 
 /** `GenerationPlan.scriptView`. */
 export interface ScriptView {
-  /** The scripted member, whose card the listeners' rewrites are of. */
+  /** The member whose scripts run — the speaker of a group turn, else the scripted member — whose card the listeners' rewrites are of. */
   memberId: string;
   /** The chat's own note, as this request's scripts left it — not the attached notes the prompt adds. */
   note: string;
@@ -542,6 +565,22 @@ async function buildRequestMessages(
 }
 
 /**
+ * The member whose card the request's scripts are of: a group turn's member
+ * speaker — whose scripts alone run, as RisuAI runs the character it asks
+ * (`sendChat(index)`), so nothing runs for one that carries none — and for
+ * everything else, the narrator's turn included, the scripted member
+ * (`scriptedMember`). Null when that member carries no scripts.
+ */
+export function requestScriptsOf(
+  plan: Pick<GenerationPlan, 'characters' | 'speaker'>,
+): { member: PromptCharacter; scripts: CardScripts } | null {
+  if (typeof plan.speaker !== 'number') return scriptedMember(plan.characters);
+  const member = plan.characters[plan.speaker];
+  const scripts = member ? cardScripts(member.card) : null;
+  return member && scripts ? { member, scripts } : null;
+}
+
+/**
  * What the card's `editRequest` listeners run with, or null for a plot whose
  * scripted member has none — read off its Lua's text, as the browser decides
  * which hooks a script has, so a plot without them spawns nothing. Every Lua
@@ -562,9 +601,10 @@ export function requestLuaInput(
     | 'globalVariables'
     | 'scriptView'
     | 'localLore'
+    | 'speaker'
   >,
 ): Omit<RequestLuaInput, 'request'> | null {
-  const found = scriptedMember(plan.characters);
+  const found = requestScriptsOf(plan);
   if (!found) return null;
   const scripts = luaScriptsOf(found.scripts.triggers);
   if (!/\beditRequest\b/.test(scripts.join('\n'))) return null;
@@ -601,7 +641,8 @@ export function requestLuaInput(
 
 /**
  * What the card's request triggers run with, or null for a plot whose scripted
- * member has none — which costs it nothing. The member, its card and its name
+ * member — or a group turn's speaker (`requestScriptsOf`) — has none, which
+ * costs it nothing. The member, its card and its name
  * are the ones the browser's runs read (`GET /:id/scripts`), with the reader's
  * overlay already on them; the chat is the whole branch, and the reader's side
  * of things (`data`) is what the browser hands its runs, from the plan — or
@@ -621,9 +662,10 @@ export function requestTriggerInput(
     | 'clock'
     | 'seed'
     | 'assetNames'
+    | 'speaker'
   >,
 ): Omit<TriggerRunInput, 'mode' | 'displayData'> | null {
-  const found = scriptedMember(plan.characters);
+  const found = requestScriptsOf(plan);
   if (!found || !hasTriggersFor(found.scripts.triggers, 'request')) return null;
   const { member, scripts } = found;
   const messages = plan.wholeBranch.slice(plan.branch.greeting ? 1 : 0).map(
@@ -689,12 +731,17 @@ async function assembleRequest(
   // resumes it, so it is re-attached after the post-history instructions.
   const isContinue = plan.target.kind === 'continue';
   // The partial bypasses the assembler, so it drops its own inlays as every other
-  // turn does — and one a script wrote as its character goes under its name, as it would there.
+  // turn does — and one a script wrote as its character, or another member's
+  // group reply, goes under its name, as it would there. A speaker continuing
+  // their own reply reads it plain.
   const last = isContinue ? plan.history[plan.history.length - 1] : undefined;
+  const tagged = last?.speakerId !== undefined ? plan.characters.find((member) => member.id === last.speakerId) : undefined;
+  const own = tagged !== undefined && typeof plan.speaker === 'number' && plan.characters[plan.speaker] === tagged;
+  const partialBy = tagged ? (own ? undefined : tagged.name) : last?.speaker;
   const partial = last
     ? stripInlayMacros(
-        last.speaker !== undefined && last.role === 'assistant'
-          ? spokenBy(last.content, last.speaker, plan.characters.map((member) => member.name))
+        partialBy !== undefined && last.role === 'assistant'
+          ? spokenBy(last.content, partialBy, plan.characters.map((member) => member.name))
           : last.content,
       ).trimEnd()
     : '';
@@ -751,6 +798,7 @@ async function assembleRequest(
     // tokens have to be declared here or depth lore lands one turn too early and
     // its text rides along uncounted.
     trailingTurns: partial ? 1 : 0,
+    ...(plan.speaker !== undefined ? { speaker: plan.speaker } : {}),
     // The trailing instruction bypasses the assembler too, so its tokens are
     // subtracted here; it is not a turn, so it does not shift depth lore.
     contextBudget: plan.contextBudget - countTokens(partial) - countTokens(trailingSystem),
@@ -769,6 +817,7 @@ async function assembleRequest(
     ],
     loreTriggers: prompt.loreTriggers,
     ...(prompt.variableWrites ? { variableWrites: prompt.variableWrites } : {}),
+    ...(prompt.stopSequences ? { stopSequences: prompt.stopSequences } : {}),
     // The two appended turns are part of what is sent, so the report says so —
     // and the budget it shows is the chat's, before they were taken out of it.
     ...(prompt.report
@@ -887,8 +936,9 @@ async function runGeneration(
           // ChatGPT sharing accepts the prompt's length directive, not a hard
           // token cap. Keep the budget here for prompt planning and test adapters.
           maxTokens: replyLengthTokens(plan.plot.style?.replyLength),
-          // ChatGPT sharing does not accept sampling parameters.
-          stop: [`\n${plan.userName}:`],
+          // ChatGPT sharing does not accept sampling parameters. A group reply also
+          // stops where it starts on another member's line (`stopSequences`).
+          stop: [`\n${plan.userName}:`, ...(request.stopSequences ?? [])],
           ...(reasoningEffort ? { reasoningEffort } : {}),
           abortSignal: controller.signal,
         });
@@ -941,6 +991,10 @@ async function runGeneration(
           // Only for a turn the browser said it would finish: the revision its
           // commit has to name, read from the row rather than assumed.
           ...(plan.postProcess ? { postProcess: true, scriptRev: stored.scriptRev } : {}),
+          // Only for a group reply: whose it is, and the round the next speaker joins.
+          ...(stored.groupTurnId !== null
+            ? { speakerMemberId: stored.speakerMemberId, groupTurnId: stored.groupTurnId }
+            : {}),
         }),
       });
       // Strictly after `done`: background work must not add latency to the turn.
@@ -974,11 +1028,13 @@ export async function openUnlocks(deps: AppDeps, chatId: string, content: string
   }
 }
 
-/** The stored turn: its id, the text the branch now holds for it, and its script revision. */
+/** The stored turn: its id, the text the branch now holds for it, its script revision, and its group-turn tags. */
 interface StoredTurn {
   id: string;
   content: string;
   scriptRev: number;
+  speakerMemberId: string | null;
+  groupTurnId: string | null;
 }
 
 /**
@@ -1102,9 +1158,12 @@ async function keepListenerEdits(
     if (!check.ok) {
       console.warn(`[api] editRequest's chat edits are not kept (${check.error}):`, label);
     } else if (check.chat) {
+      // The listeners are the speaker's, so a character message they add is the speaker's.
+      const memberId = typeof plan.speaker === 'number' ? plan.characters[plan.speaker]?.id : undefined;
       const planned = planScriptChat(path, check.chat, {
         inPlace: rewritableHead(all, path.at(-1)),
         ...(continuing ? { ownLast: true } : {}),
+        ...(memberId !== undefined ? { memberId } : {}),
       });
       if (continuing && planned.lastRole !== 'assistant') {
         console.warn('[api] editRequest left no reply at the end of the chat to continue; its chat edits are not kept:', label);
@@ -1148,6 +1207,11 @@ async function keepListenerEdits(
  * the `editRequest` listeners did (`keepListenerEdits`), which goes first. A
  * new turn records the lore that freshly triggered for its prompt; a continue
  * is the same turn, whose record was written when it was first generated.
+ *
+ * A member speaker's own `이름: ` prefixes come off what it wrote — of a continue,
+ * off the appended text alone — and a new group reply is stored under its
+ * speaker and its round (`GenerationPlan.round`); one that opens a round is the
+ * round's id.
  */
 async function persist(
   deps: AppDeps,
@@ -1163,14 +1227,15 @@ async function persist(
       // The message the listeners left last, where they edited the chat — its text as they left it.
       const target = place?.continued ?? plan.target.message;
       const continued: GenerationPlan = target === plan.target.message ? plan : { ...plan, target: { kind: 'continue', message: target } };
-      const content = target.content + text;
+      const appended = plan.speakerNames ? stripSpeakerPrefix(text, plan.speakerNames) : text;
+      const content = target.content + appended;
       const [updated] = await tx
         .update(messages)
         .set({
           content,
           promptTokens: usage.promptTokens,
           completionTokens: (target.completionTokens ?? 0) + usage.completionTokens,
-          variableDelta: storableDelta(generatedDelta(continued, content, text, variableWrites)),
+          variableDelta: storableDelta(generatedDelta(continued, content, appended, variableWrites)),
           scriptState,
           // The text changed in place, so a script commit computed on the old
           // text — another tab's, finishing the turn as it was — is refused.
@@ -1181,15 +1246,28 @@ async function persist(
       // The append mutates assistant content in place — same revision rules as
       // an edit, so a refresh whose snapshot predates the append is discarded.
       await invalidateMemoryForEdit(tx, plan.chatId, target.id);
-      return { id: target.id, content, scriptRev: updated?.scriptRev ?? target.scriptRev + 1 };
+      return {
+        id: target.id,
+        content,
+        scriptRev: updated?.scriptRev ?? target.scriptRev + 1,
+        speakerMemberId: target.speakerMemberId,
+        groupTurnId: target.groupTurnId,
+      };
     }
 
     // The prefix is the server's to write: the model was asked for the scene
     // alone, and the convention is what makes the stored turn a narration.
-    const content = plan.narration ? withNarrationPrefix(text) : text;
+    const content = plan.narration
+      ? withNarrationPrefix(text)
+      : plan.speakerNames
+        ? stripSpeakerPrefix(text, plan.speakerNames)
+        : text;
+    // Minted here, so a reply that opens a round can be stored as its id.
+    const id = randomUUID();
     const [created] = await tx
       .insert(messages)
       .values({
+        id,
         chatId: plan.chatId,
         // Under where the listeners left the chat, where they edited it.
         parentId: place ? place.parentId : plan.target.parentId,
@@ -1201,12 +1279,21 @@ async function persist(
         loreTriggers: loreTriggers.length > 0 ? loreTriggers : null,
         variableDelta: storableDelta(generatedDelta(plan, content, content, variableWrites)),
         scriptState,
+        ...(plan.round
+          ? { speakerMemberId: plan.round.speakerMemberId, groupTurnId: plan.round.groupTurnId ?? id }
+          : {}),
       })
       .returning();
     await tx
       .update(chats)
       .set({ headMessageId: created!.id, updatedAt: new Date() })
       .where(eq(chats.id, plan.chatId));
-    return { id: created!.id, content: created!.content, scriptRev: created!.scriptRev };
+    return {
+      id: created!.id,
+      content: created!.content,
+      scriptRev: created!.scriptRev,
+      speakerMemberId: created!.speakerMemberId,
+      groupTurnId: created!.groupTurnId,
+    };
   });
 }

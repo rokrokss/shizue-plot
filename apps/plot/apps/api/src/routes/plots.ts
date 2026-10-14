@@ -4,10 +4,13 @@ import {
   cardLicense,
   characterName,
   coerceAssetUnlock,
+  coerceGroupSettings,
   coerceNarrator,
   coercePlotProfiles,
   coercePlotStyle,
+  coerceTalkativeness,
   computeVariables,
+  DEFAULT_GROUP_SETTINGS,
   constantLoreTokens,
   DEFAULT_USER_NAME,
   detectContentLanguage,
@@ -24,6 +27,7 @@ import {
   parseCard,
   type CharxAssetFile,
   type CharxExportAsset,
+  type GroupSettings,
   type ImportProvenance,
   type LoreEntry,
   type MacroContext,
@@ -237,6 +241,39 @@ function optionalProfiles(body: Record<string, unknown>): PlotProfile[] | null |
   return profiles.length > 0 ? profiles : null;
 }
 
+/**
+ * How a work of several members picks a round's speakers, on the coercion's
+ * terms (`coerceGroupSettings`): an unknown order is the default and a cap out of
+ * range is clamped, as a style's unknown option is dropped. Settings that say
+ * what the default says are stored as nothing.
+ */
+function optionalGroupSettings(body: Record<string, unknown>): GroupSettings | null | undefined {
+  const value = body['groupSettings'];
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw badRequest('invalid_request', 'groupSettings must be an object or null');
+  }
+  const settings = coerceGroupSettings(value);
+  return settings.order === DEFAULT_GROUP_SETTINGS.order && settings.maxSpeakers === DEFAULT_GROUP_SETTINGS.maxSpeakers
+    ? null
+    : settings;
+}
+
+/**
+ * A member's 대화량 (talkativeness): an integer 0..100, or null for the default.
+ * A number is the creator's setting as the studio sends it, so one that is not
+ * such an integer is a client to refuse rather than a value to guess at.
+ */
+function optionalTalkativeness(body: Record<string, unknown>): number | null | undefined {
+  const value = body['talkativeness'];
+  if (value === undefined || value === null) return value;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 100) {
+    throw badRequest('invalid_request', 'talkativeness must be an integer from 0 to 100, or null');
+  }
+  return value;
+}
+
 /** Same shape of answer for the custom UI: nothing declared is stored as nothing. */
 function optionalCustomUi(body: Record<string, unknown>): PlotCustomUi | null | undefined {
   const value = body['customUi'];
@@ -293,6 +330,8 @@ const toPlotJson = (plot: Plot) => ({
   /** Always an array on the way out; the column is null until one is written. */
   profiles: plot.profiles ?? [],
   customUi: plot.customUi,
+  /** How a work of several members picks a round's speakers, the default filled in. */
+  groupSettings: coerceGroupSettings(plot.groupSettings),
   language: plot.language,
   visibility: plot.visibility,
   safetyLevel: plot.safetyLevel,
@@ -354,6 +393,8 @@ const toMemberJson = (plot: Plot, member: Character) => ({
   card: member.card,
   avatarUrl: avatarUrl(member),
   orderIndex: member.orderIndex,
+  /** 대화량, 0..100, the default (50) filled in. */
+  talkativeness: coerceTalkativeness(member.talkativeness),
   importedFrom: member.importedFrom,
   license: cardLicense(member.card.extensions) ?? null,
   loreConstantTokens: constantLoreTokens(member.card.lorebook, firstPromptMacro(plot, characterName(member))),
@@ -1009,6 +1050,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     const style = optionalStyle(body);
     const profiles = optionalProfiles(body);
     const customUi = optionalCustomUi(body);
+    const groupSettings = optionalGroupSettings(body);
     const safetyLevel = coerceSafetyLevel(optionalString(body, 'safetyLevel'));
     const commentsEnabled = optionalBoolean(body, 'commentsEnabled');
 
@@ -1025,6 +1067,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
         ...(style !== undefined ? { style } : {}),
         ...(profiles !== undefined ? { profiles } : {}),
         ...(customUi !== undefined ? { customUi } : {}),
+        ...(groupSettings !== undefined ? { groupSettings } : {}),
         ...(safetyLevel !== undefined ? { safetyLevel } : {}),
         ...(commentsEnabled !== undefined ? { commentsEnabled } : {}),
         ...(language ? { language } : {}),
@@ -1175,6 +1218,8 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       characters: members.map((member) => ({
         ...toPublicMemberJson(member),
         intro: member.card.intro ?? '',
+        // What the reader's browser rolls a round's speakers by (`groupOrder`).
+        talkativeness: coerceTalkativeness(member.talkativeness),
       })),
       // The openings, uncut — this is the page a reader decides on, and the
       // listings' `introPreview` is the only place the 200-character cut belongs.
@@ -1191,6 +1236,8 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       // the prompt — the persona a pick copies out does.
       profiles: plot.profiles ?? [],
       narrator: plot.narrator?.pov ? { pov: plot.narrator.pov } : null,
+      // How the reader's browser picks a round's speakers — options, like the style.
+      groupSettings: coerceGroupSettings(plot.groupSettings),
       displayScripts: plot.customUi?.displayScripts ?? [],
       css: plot.customUi?.css ?? '',
       // What the card draws behind the chat, past its stylesheet (`backgroundOf`).
@@ -1322,12 +1369,14 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     const name = optionalString(body, 'name')?.trim();
     if (name !== undefined && !name) throw badRequest('invalid_request', 'name must not be empty');
     const card = body['card'] === undefined ? undefined : coerceCard(body['card'], name ?? member.name);
+    const talkativeness = optionalTalkativeness(body);
 
     const [updated] = await deps.db
       .update(characters)
       .set({
         ...(name !== undefined ? { name } : {}),
         ...(card !== undefined ? { card } : {}),
+        ...(talkativeness !== undefined ? { talkativeness } : {}),
         updatedAt: new Date(),
       })
       .where(and(eq(characters.id, characterId), eq(characters.plotId, id)))

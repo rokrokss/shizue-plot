@@ -3,7 +3,7 @@ import { extractChoices } from './choices.js';
 import { applyMacros, stripInlayMacros, type MacroClock, type MacroContext, type MacroHostData } from './macro.js';
 import { activateLore, loreEntryKey, type LoreActivationVia, type LoreTimedState } from './lorebook.js';
 import { isNarration, narrationBody } from './narration.js';
-import { spokenBy } from './speech.js';
+import { readerLine, spokenBy, type ReaderMember } from './speech.js';
 import type { NarratorSpeaker } from './group.js';
 import {
   DEFAULT_PRESET,
@@ -450,6 +450,27 @@ export const NARRATION_HEADER = '[나레이션]';
  */
 export const NARRATION_NOTE =
   '[나레이션] 표시가 붙은 메시지는 캐릭터나 유저의 발화가 아니라 장면·상황 전개 서술입니다.';
+
+/**
+ * A reader's turn as the model reads it: a `@이름: …` line the reader wrote as a
+ * member goes under that member's roster name (`names[0]`, through `spokenBy`),
+ * so it reads as the member's line; a `@내레이터: …` or `@: …` line goes under the
+ * narration header, as a whole-turn `@:` does; every other line is the reader's,
+ * as typed. A turn without such a line comes back as it is. A whole-turn `@:` is
+ * not this function's: the caller sends it as narration whole.
+ */
+export function readerTurnText(content: string, members: readonly ReaderMember[]): string {
+  let changed = false;
+  const lines = content.split('\n').map((line) => {
+    const written = readerLine(line, members);
+    if (!written) return line;
+    changed = true;
+    return written.kind === 'member'
+      ? spokenBy(written.text, written.member.names[0]!)
+      : `${NARRATION_HEADER} ${written.text.trim()}`.trim();
+  });
+  return changed ? lines.join('\n') : content;
+}
 
 /**
  * What closes a group turn's prompt: who speaks next. The name stands bare,
@@ -1015,6 +1036,11 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const byId = new Map(
     characters.flatMap((member) => (member.id !== undefined ? [[member.id, member] as const] : [])),
   );
+  /** Whom a reader's `@이름:` line may name: every member, by its name and its `{{char}}`. */
+  const readers: ReaderMember[] = characters.map((member, index) => ({
+    id: member.id ?? String(index),
+    names: [member.name, characterName(member)],
+  }));
   const historyMessages: PromptMessage[] = [];
   /** What each kept turn was charged, images included; parallel to historyMessages. */
   const historyCosts: number[] = [];
@@ -1027,14 +1053,18 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     // model's — but it is labelled, so the model reads it as the scene moving
     // rather than as someone acting. The prefix never reaches the model. A turn a
     // script wrote as its character, or a group turn's reply, is that member's,
-    // line by line — but a speaker reads their own replies plain.
+    // line by line — but a speaker reads their own replies plain. A reader's line
+    // written as a member is that member's, and one written as the narrator is
+    // narration (`readerTurnText`).
     const tagged = turn.speakerId !== undefined ? byId.get(turn.speakerId) : undefined;
     const saidBy = tagged ? (tagged === speakerMember ? undefined : tagged.name) : turn.speaker;
     const raw = isNarration(said)
       ? `${NARRATION_HEADER} ${narrationBody(said)}`.trim()
-      : saidBy !== undefined && turn.role === 'assistant'
-        ? spokenBy(said, saidBy, speakers)
-        : said;
+      : turn.role === 'user'
+        ? readerTurnText(said, readers)
+        : saidBy !== undefined
+          ? spokenBy(said, saidBy, speakers)
+          : said;
     // A turn's inlays name pictures in someone's own RisuAI storage; RisuAI takes
     // them out of the turns it sends, and so does this.
     const text = send(applyMacros(stripInlayMacros(raw), turnMacroOf(turn, i)));

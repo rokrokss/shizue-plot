@@ -8,12 +8,14 @@
  * roster. So this is pure, and every roll goes through the `random` the caller
  * hands in — a seeded one in tests.
  *
- * The narrator never takes a turn on its own. It speaks when the reader asks
- * for it — called by name (`@내레이터:`, `explicitCalls`) or with the narration
- * button — and then it opens the round.
+ * Nothing the reader types forces a speaker. A `@이름: …` line is the reader
+ * writing that member's line themselves, as Zeta reads it (`readerRuns`), so the
+ * member has just spoken and sits the round out like the last speaker does. The
+ * narrator never takes a turn on its own: it speaks when the reader presses the
+ * narration button, and only then.
  */
 
-import { lineSpeaker } from './speech.js';
+import { lineSpeaker, NARRATOR_NAMES, readerRuns, type ReaderMember } from './speech.js';
 
 /**
  * How a round's speakers are ordered. `natural`: whoever the reader called,
@@ -40,15 +42,12 @@ export const DEFAULT_GROUP_SETTINGS: GroupSettings = { order: 'natural', maxSpea
 /** How readily a member speaks unprompted, when nobody set it. */
 export const DEFAULT_TALKATIVENESS = 50;
 
-/** Where a member's id would be in a round, the narrator's turn. No member id (a uuid) can be this. */
+/**
+ * The narrator as a speaker: what `assemblePrompt` is asked for on the narration
+ * button, and how a round names the narrator's turn. No member id (a uuid) can be this.
+ */
 export const NARRATOR_SPEAKER = 'narrator';
 export type NarratorSpeaker = typeof NARRATOR_SPEAKER;
-
-/**
- * What a reader calls the narrator by in an explicit call (`@내레이터:`), in the
- * three catalog languages, both Korean spellings included.
- */
-export const NARRATOR_CALL_NAMES: readonly string[] = ['내레이터', '나레이터', 'narrator', 'ナレーター'];
 
 /**
  * The round settings a value describes. An unknown order is the default one, a
@@ -92,15 +91,11 @@ export interface GroupMember {
 export interface GroupOrderInput {
   /** The members on the stage, in roster order. */
   members: readonly GroupMember[];
-  /** The stored text being answered — what the reader sent, after the input scripts. */
-  text: string;
   /**
-   * Whom the reader called by name (`explicitCalls`), in typed order: member ids
-   * and `NARRATOR_SPEAKER`. They speak whatever their talkativeness, whether or
-   * not they spoke last, and beyond the cap. This is the only way into a round
-   * for the narrator.
+   * The stored text being answered — what the reader sent, after the input
+   * scripts. The members it writes lines as (`writtenAs`) have just spoken.
    */
-  calls?: readonly string[];
+  text: string;
   /** The member who spoke last, for a round the reader did not start; else null. */
   lastSpeakerId: string | null;
   order: GroupOrder;
@@ -111,45 +106,63 @@ export interface GroupOrderInput {
 }
 
 /**
- * Who answers the turn, in the order they speak: member ids, and
- * `NARRATOR_SPEAKER` first when the narrator is among them.
+ * The members and the narrator a reader's turn writes lines as (`readerRuns`):
+ * member ids for `@이름: …` lines, `NARRATOR_SPEAKER` for `@내레이터: …` and `@: …`
+ * (a whole-turn `@:` included), in the order they first appear, once each. A
+ * marker naming nobody on `members` is the reader's own line and names nobody.
+ */
+export function writtenAs(
+  text: string,
+  members: readonly ReaderMember[],
+  narratorNames: readonly string[] = NARRATOR_NAMES,
+): string[] {
+  const found: string[] = [];
+  for (const run of readerRuns(text, members, narratorNames)) {
+    const id = run.kind === 'member' ? run.memberId : run.kind === 'narration' ? NARRATOR_SPEAKER : undefined;
+    if (id !== undefined && !found.includes(id)) found.push(id);
+  }
+  return found;
+}
+
+/**
+ * Who answers the turn: member ids, in the order they speak. The narrator is
+ * never among them — it speaks on the narration button alone.
  *
- * Natural order:
- * 1. The reader's explicit calls, in typed order — they always speak, the
- *    narrator first among them.
- * 2. Of the other members who speak unprompted (talkativeness above 0) and did
- *    not speak last: those the text mentions, in order of first mention.
- * 3. The rest of them, shuffled, each joining when `talkativeness / 100` is at
+ * A member the text writes a line as (`writtenAs`) has just spoken, as the last
+ * speaker has; neither is among the eligible below. Natural order:
+ * 1. Of the members who speak unprompted (talkativeness above 0) and are
+ *    eligible: those the text mentions, in order of first mention. A `@이름:`
+ *    marker is not a mention; the words after it may be.
+ * 2. The rest of them, shuffled, each joining when `talkativeness / 100` is at
  *    least a roll.
- * 4. A round nobody was called to is never empty: when steps 2–3 found nobody,
- *    one member is drawn from those who speak unprompted and did not speak last,
- *    else from those who speak unprompted, else from the whole stage.
- * 5. The cap: the seats the calls leave go to the mentioned members first, then
- *    to the rest.
+ * 3. A round is never empty: when steps 1–2 found nobody, one member is drawn
+ *    from the eligible who speak unprompted, else from all who speak unprompted
+ *    (whoever just spoke included), else from the whole stage.
+ * 4. The cap: the mentioned members first, then the rest.
  *
- * List order is the same without mentions, rolls or the last speaker's rest:
- * every member who speaks unprompted, in roster order.
+ * List order is every eligible member who speaks unprompted, in roster order,
+ * without mentions or rolls — and without the last speaker's rest: the order is
+ * the order. Its fallback and cap are the same.
  *
- * The result is empty only when nobody can speak: no member on the stage and no
- * call.
+ * The result is empty only when nobody is on the stage.
  */
 export function groupOrder(input: GroupOrderInput): string[] {
-  const { members, text, calls = [], lastSpeakerId, order, random } = input;
+  const { members, text, lastSpeakerId, order, random } = input;
   const cap = Math.max(MIN_GROUP_SPEAKERS, input.max);
-  const onStage = new Set(members.map((member) => member.id));
-  const called = [...new Set(calls)].filter((id) => id === NARRATOR_SPEAKER || onStage.has(id));
-  const pool = members.filter((member) => !called.includes(member.id));
+  const runs = readerRuns(text, members);
+  const written = new Set(runs.flatMap((run) => (run.kind === 'member' ? [run.memberId] : [])));
   const speaks = (member: GroupMember): boolean => member.talkativeness > 0;
 
   let mentioned: string[] = [];
   let others: string[];
   let eligible: GroupMember[];
   if (order === 'list') {
-    eligible = pool.filter(speaks);
+    eligible = members.filter((member) => speaks(member) && !written.has(member.id));
     others = eligible.map((member) => member.id);
   } else {
-    eligible = pool.filter((member) => speaks(member) && member.id !== lastSpeakerId);
-    mentioned = mentionedMembers(text, eligible);
+    eligible = members.filter((member) => speaks(member) && member.id !== lastSpeakerId && !written.has(member.id));
+    // What the reader wrote, without the markers that say as whom.
+    mentioned = mentionedMembers(runs.map((run) => run.text).join('\n'), eligible);
     others = shuffle(
       eligible.filter((member) => !mentioned.includes(member.id)),
       random,
@@ -158,17 +171,12 @@ export function groupOrder(input: GroupOrderInput): string[] {
       .map((member) => member.id);
   }
 
-  if (called.length === 0 && mentioned.length === 0 && others.length === 0) {
-    const tier = [eligible, pool.filter(speaks), pool].find((candidates) => candidates.length > 0);
+  if (mentioned.length === 0 && others.length === 0) {
+    const tier = [eligible, members.filter(speaks), members].find((candidates) => candidates.length > 0);
     if (tier) others = [tier[Math.floor(random() * tier.length)]!.id];
   }
 
-  const seats = [...mentioned, ...others].slice(0, Math.max(0, cap - called.length));
-  return [
-    ...(called.includes(NARRATOR_SPEAKER) ? [NARRATOR_SPEAKER] : []),
-    ...called.filter((id) => id !== NARRATOR_SPEAKER),
-    ...seats,
-  ];
+  return [...mentioned, ...others].slice(0, cap);
 }
 
 /** Fisher–Yates over a copy, drawing from `random`. */
@@ -283,88 +291,6 @@ export function mentionedMembers(text: string, members: readonly Pick<GroupMembe
   return [...first.entries()]
     .sort(([, a], [, b]) => a.at - b.at || a.rank - b.rank)
     .map(([id]) => id);
-}
-
-/** An explicit call at a line's start: who, and where its marker ends. */
-interface Call {
-  speaker: string;
-  /** Index in the composed text just past the marker and its `:`. */
-  end: number;
-}
-
-/**
- * The call a line opens with, if it opens with one: `@`, a name, then a `:`
- * (half or full width), a space, punctuation or the end — not a letter, so
- * `@세이야는` is a mention and not a call. Where one name starts another, the
- * longest that fits is the one called.
- */
-function callAt(
-  text: string,
-  at: number,
-  members: readonly Pick<GroupMember, 'id' | 'names'>[],
-  narratorNames: readonly string[],
-): Call | undefined {
-  let start = at;
-  while (start < text.length && (text[start] === ' ' || text[start] === '\t')) start += 1;
-  if (text[start] !== '@') return undefined;
-  const candidates = [
-    ...members.flatMap((member) => member.names.map((name) => ({ speaker: member.id, name }))),
-    ...narratorNames.map((name) => ({ speaker: NARRATOR_SPEAKER, name })),
-  ];
-  let best: { speaker: string; end: number } | undefined;
-  for (const { speaker, name } of candidates) {
-    const folded = fold(name.trim());
-    if (!folded) continue;
-    const end = start + 1 + folded.length;
-    if (fold(text.slice(start + 1, end)) !== folded) continue;
-    if (end < text.length && WORD_CHAR_RE.test(text[end]!)) continue;
-    if (!best || end > best.end) best = { speaker, end };
-  }
-  if (!best) return undefined;
-  const colon = text[best.end] === ':' || text[best.end] === '：' ? 1 : 0;
-  return { speaker: best.speaker, end: best.end + colon };
-}
-
-/**
- * Whom the reader called by name, as Zeta's multi-character chats call a member:
- * `@이름` — a member's name, nickname or alias — or `@내레이터` (`NARRATOR_CALL_NAMES`)
- * at the start of the text or of a line, optionally followed by `:`. Member ids
- * and `NARRATOR_SPEAKER`, in typed order, each once. Compared like mentions:
- * composed, and without case.
- *
- * A bare `@:` calls nobody — it is the reader writing narration (`narration.ts`).
- * A member off the stage is not among `members`, so calling one calls nobody.
- */
-export function explicitCalls(
-  text: string,
-  members: readonly Pick<GroupMember, 'id' | 'names'>[],
-  narratorNames: readonly string[] = NARRATOR_CALL_NAMES,
-): string[] {
-  const composed = text.normalize('NFC');
-  const found: string[] = [];
-  for (let at = 0; at !== -1 && at <= composed.length; ) {
-    const call = callAt(composed, at, members, narratorNames);
-    if (call && !found.includes(call.speaker)) found.push(call.speaker);
-    const next = composed.indexOf('\n', at);
-    at = next === -1 ? -1 : next + 1;
-  }
-  return found;
-}
-
-/**
- * The text without the call that opens it (`explicitCalls`) — the `@이름:` and the
- * space after it — for whoever decides the stored turn should not keep it. Only
- * the first line's: a call further down is left where it is. A text that opens
- * with no call comes back as it is; one that does comes back composed (NFC).
- */
-export function stripCallMarker(
-  text: string,
-  members: readonly Pick<GroupMember, 'id' | 'names'>[],
-  narratorNames: readonly string[] = NARRATOR_CALL_NAMES,
-): string {
-  const composed = text.normalize('NFC');
-  const call = callAt(composed, 0, members, narratorNames);
-  return call ? composed.slice(call.end).replace(/^[ \t]+/, '') : text;
 }
 
 /**

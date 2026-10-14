@@ -106,6 +106,12 @@ export interface GenerationScripts {
    * it was.
    */
   chat: ScriptChat | null;
+  /**
+   * The member whose scripts wrote `chat`, in a work of several: a character
+   * message they add is that member's (`ScriptChatOptions.memberId`). Shape only
+   * here; the route holds it to the roster (`scriptMemberOf`).
+   */
+  memberId: string | undefined;
 }
 
 export const NO_SCRIPTS: GenerationScripts = {
@@ -118,6 +124,7 @@ export const NO_SCRIPTS: GenerationScripts = {
   note: undefined,
   localLore: undefined,
   chat: null,
+  memberId: undefined,
 };
 
 /**
@@ -184,7 +191,27 @@ export function readGenerationScripts(
     localLore: optionalLocalLore(body),
     // A send places its own turn in it; the other generations add none.
     chat: readScriptChat(body, { turn: !startDelta }),
+    memberId: optionalMemberId(body),
   };
+}
+
+/** `body.memberId`, the member whose scripts ran: a member id, or absent. */
+export function optionalMemberId(body: Record<string, unknown>): string | undefined {
+  const value = body['memberId'];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string' || !isUuid(value)) throw badRequest('invalid_request', 'memberId must be a member id');
+  return value;
+}
+
+/**
+ * The member a body's `memberId` names, held to the roster (400 otherwise);
+ * undefined when it names none.
+ */
+export function scriptMemberOf<T extends { id: string }>(memberId: string | undefined, members: readonly T[]): T | undefined {
+  if (memberId === undefined) return undefined;
+  const member = members.find((candidate) => candidate.id === memberId);
+  if (!member) throw badRequest('invalid_request', 'memberId must name a member of the plot');
+  return member;
 }
 
 /* ---------------------------------------------------------- the overlay */

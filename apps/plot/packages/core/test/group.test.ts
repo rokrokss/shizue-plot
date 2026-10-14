@@ -3,13 +3,12 @@ import {
   coerceGroupSettings,
   coerceTalkativeness,
   DEFAULT_GROUP_SETTINGS,
-  explicitCalls,
   groupOrder,
   mentionedMembers,
   mentionIndex,
   NARRATOR_SPEAKER,
-  stripCallMarker,
   stripSpeakerPrefix,
+  writtenAs,
   type GroupMember,
   type GroupOrderInput,
 } from '../src/group.js';
@@ -125,31 +124,21 @@ describe('groupOrder - natural', () => {
 });
 
 describe('groupOrder - the narrator', () => {
-  it('never takes a turn on its own: no roll, no mention, no fallback', () => {
+  it('never takes a turn: no roll, no mention, no fallback, not even when the reader writes as it', () => {
     const random = seeded(3);
     for (let i = 0; i < 500; i += 1) {
       expect(order({ text: '내레이터, narrator, 나레이터', random })).not.toContain(NARRATOR_SPEAKER);
+      expect(order({ text: '@내레이터: 밤이 깊어진다\n@: 바람이 분다', random })).not.toContain(NARRATOR_SPEAKER);
     }
     expect(order({ members: [] })).toEqual([]);
-  });
-
-  it('opens the round when called, ahead of members called before it', () => {
-    expect(order({ calls: ['kai', NARRATOR_SPEAKER], text: '미오야' })).toEqual([NARRATOR_SPEAKER, 'kai', 'mio']);
-    // Called alone, it may answer alone, and does on an empty stage too.
-    expect(order({ calls: [NARRATOR_SPEAKER] })).toEqual([NARRATOR_SPEAKER]);
-    expect(order({ members: [], calls: [NARRATOR_SPEAKER] })).toEqual([NARRATOR_SPEAKER]);
+    expect(order({ members: [], text: '@내레이터: 밤이다' })).toEqual([]);
   });
 });
 
 describe('groupOrder - list', () => {
-  it('takes every member who speaks unprompted, in roster order, the narrator only when called', () => {
+  it('takes every member who speaks unprompted, in roster order', () => {
     const shy = { ...kai, talkativeness: 0 };
     expect(order({ order: 'list', members: [mio, shy, seiya], text: '세이야!' })).toEqual(['mio', 'seiya']);
-    expect(order({ order: 'list', members: [mio, seiya], calls: [NARRATOR_SPEAKER] })).toEqual([
-      NARRATOR_SPEAKER,
-      'mio',
-      'seiya',
-    ]);
     // The last speaker is not dropped: the order is the order.
     expect(order({ order: 'list', members: [mio, seiya], lastSpeakerId: 'mio' })).toEqual(['mio', 'seiya']);
   });
@@ -161,36 +150,30 @@ describe('groupOrder - list', () => {
   });
 });
 
-describe('groupOrder - explicit calls', () => {
-  it('puts the called first, in typed order, whatever their talkativeness and the cap', () => {
-    const shy = { ...mio, talkativeness: 0 };
-    expect(order({ members: [seiya, kai, shy], calls: ['mio', 'seiya'], max: 1, random: always })).toEqual([
-      'mio',
-      'seiya',
-    ]);
-    // Seats the calls leave are filled as usual.
-    expect(order({ calls: ['mio'], max: 2, text: '카이야' })).toEqual(['mio', 'kai']);
+describe('groupOrder - lines the reader wrote as a member', () => {
+  it('sits out whoever the reader wrote a line as, as if they had just spoken', () => {
+    const loud = [seiya, kai, mio].map((member) => ({ ...member, talkativeness: 100 }));
+    expect(order({ members: loud, text: '@카이: 한 잔 더.', random: always }).sort()).toEqual(['mio', 'seiya']);
+    expect(order({ order: 'list', members: loud, text: '@미오: 응.\n@세이: 나도.' })).toEqual(['kai']);
+    // A nickname or an alias names the member just as well, and so does a full-width colon.
+    expect(order({ members: loud, text: '@세이：うん', random: always }).sort()).toEqual(['kai', 'mio']);
   });
 
-  it('calls back the last speaker, and the narrator ahead of everyone', () => {
-    expect(order({ calls: ['kai'], lastSpeakerId: 'kai' })).toEqual(['kai']);
-    expect(order({ calls: ['kai', NARRATOR_SPEAKER], max: 1 })).toEqual([NARRATOR_SPEAKER, 'kai']);
+  it('does not read the marker as a mention, only the words after it', () => {
+    expect(order({ text: '@카이: 세이야, 이리 와.' })).toEqual(['seiya']);
+    expect(order({ text: '@카이: 한 잔 더.' })).not.toContain('kai');
+    // A name the reader merely mentions is still a mention.
+    expect(order({ text: '카이, 한 잔 더.' })).toEqual(['kai']);
   });
 
-  it('takes what explicitCalls reads off the text', () => {
-    const text = '@카이: 한 잔 더\n@내레이터: 밤이 깊어진다';
-    expect(order({ text, calls: explicitCalls(text, [seiya, kai, mio]), max: 1 })).toEqual([
-      NARRATOR_SPEAKER,
-      'kai',
-    ]);
+  it('lets them back only when nobody else may speak', () => {
+    expect(order({ members: [seiya, kai], text: '@세이야: 왔어.', random: never })).toEqual(['kai']);
+    expect(order({ members: [seiya, { ...kai, talkativeness: 0 }], text: '@세이야: 왔어.' })).toEqual(['seiya']);
+    expect(order({ members: [seiya, kai], text: '@세이야: 왔어.\n@카이: 응.' })).toHaveLength(1);
   });
 
-  it('ignores a call to anyone not on the stage', () => {
-    expect(order({ calls: ['ghost'], text: '미오' })).toEqual(['mio']);
-  });
-
-  it('works on the list order too', () => {
-    expect(order({ order: 'list', calls: ['mio'], max: 2 })).toEqual(['mio', 'seiya']);
+  it('leaves a marker naming nobody on the stage as the reader\'s own words', () => {
+    expect(order({ text: '@유령: 카이야' })).toEqual(['kai']);
   });
 });
 
@@ -247,58 +230,48 @@ describe('mentionedMembers', () => {
   });
 });
 
-describe('explicitCalls', () => {
+describe('writtenAs', () => {
   const members = [seiya, kai, mio];
 
-  it('reads @name at the start of the text or a line, colon optional, in typed order once each', () => {
-    expect(explicitCalls('@카이: 술 한 잔\n@세이 너도\n@카이: 또', members)).toEqual(['kai', 'seiya']);
-    expect(explicitCalls('  @미오', members)).toEqual(['mio']);
-    expect(explicitCalls('@미오：うん', members)).toEqual(['mio']);
+  it('reads @name: at the start of a line, by any name, in written order once each', () => {
+    expect(writtenAs('@카이: 술 한 잔\n안녕\n  @세이: 너도\n@카이: 또', members)).toEqual(['kai', 'seiya']);
+    expect(writtenAs('@미오：うん', members)).toEqual(['mio']);
   });
 
-  it('calls the narrator by any of its names, without case', () => {
-    expect(explicitCalls('@내레이터: 밤이 깊어진다', members)).toEqual([NARRATOR_SPEAKER]);
-    expect(explicitCalls('@나레이터 계속', members)).toEqual([NARRATOR_SPEAKER]);
-    expect(explicitCalls('@Narrator: go on', members)).toEqual([NARRATOR_SPEAKER]);
-    expect(explicitCalls('@ナレーター：続けて', members)).toEqual([NARRATOR_SPEAKER]);
-    expect(explicitCalls('@내레이터', members, [])).toEqual([]);
+  it('reads the narrator by any of its names without case, and a bare @: as narration', () => {
+    expect(writtenAs('@내레이터: 밤이 깊어진다', members)).toEqual([NARRATOR_SPEAKER]);
+    expect(writtenAs('안녕\n@나레이터: 비가 온다', members)).toEqual([NARRATOR_SPEAKER]);
+    expect(writtenAs('@Narrator: night falls', members)).toEqual([NARRATOR_SPEAKER]);
+    expect(writtenAs('@ナレーター：夜が更ける', members)).toEqual([NARRATOR_SPEAKER]);
+    expect(writtenAs('@: 문이 열린다', members)).toEqual([NARRATOR_SPEAKER]);
+    expect(writtenAs('안녕\n@: 문이 열린다\n@카이: 응', members)).toEqual([NARRATOR_SPEAKER, 'kai']);
+    expect(writtenAs('@내레이터: 밤', members, [])).toEqual([]);
   });
 
-  it('is not a bare @:, a name with a suffix, or a call in the middle of a line', () => {
-    expect(explicitCalls('@: 문이 열린다', members)).toEqual([]);
-    expect(explicitCalls('@ 카이', members)).toEqual([]);
-    expect(explicitCalls('@세이야는 어디 있어?', members)).toEqual([]);
-    expect(explicitCalls('안녕 @카이', members)).toEqual([]);
-    expect(explicitCalls('', members)).toEqual([]);
+  it('reads English and Japanese names', () => {
+    const alice = { id: 'alice', names: ['Alice'] };
+    const rin = { id: 'rin', names: ['凛', 'リン'] };
+    expect(writtenAs('@alice: Hi.\n@リン: こんにちは', [alice, rin])).toEqual(['alice', 'rin']);
   });
 
-  it('calls the longest name that fits', () => {
-    const aria: GroupMember = { id: 'aria', names: ['아리아'], talkativeness: 50 };
-    const blanc: GroupMember = { id: 'blanc', names: ['아리아 블랑'], talkativeness: 50 };
-    expect(explicitCalls('@아리아 블랑: 안녕', [aria, blanc])).toEqual(['blanc']);
-    expect(explicitCalls('@아리아 안녕', [aria, blanc])).toEqual(['aria']);
+  it('is not a name without a colon, a name in the middle of a line, or a name nobody has', () => {
+    expect(writtenAs('@카이 술 줘', members)).toEqual([]);
+    expect(writtenAs('안녕 @카이: 응', members)).toEqual([]);
+    expect(writtenAs('@유령: 안녕', members)).toEqual([]);
+    expect(writtenAs('@카이:', members)).toEqual([]);
+    expect(writtenAs('', members)).toEqual([]);
   });
 
-  it('reads composed text', () => {
-    expect(explicitCalls('@카이: 응'.normalize('NFD'), members)).toEqual(['kai']);
-  });
-});
-
-describe('stripCallMarker', () => {
-  const members = [seiya, kai];
-
-  it('takes the opening call and the space after it off', () => {
-    expect(stripCallMarker('@세이야: 안녕', members)).toBe('안녕');
-    expect(stripCallMarker('  @카이 술 줘', members)).toBe('술 줘');
-    expect(stripCallMarker('@내레이터: 밤이 깊다', members)).toBe('밤이 깊다');
+  it('takes a whole-turn @: as narration whatever its later lines say', () => {
+    expect(writtenAs('@: 문이 열린다\n@카이: 응', members)).toEqual([NARRATOR_SPEAKER]);
   });
 
-  it('leaves everything else as it is', () => {
-    expect(stripCallMarker('@:  문이 열린다', members)).toBe('@:  문이 열린다');
-    expect(stripCallMarker('안녕 @세이야', members)).toBe('안녕 @세이야');
-    expect(stripCallMarker('@세이야는?', members)).toBe('@세이야는?');
-    // Only the first line's.
-    expect(stripCallMarker('@세이야: 안녕\n@카이: 너도', members)).toBe('안녕\n@카이: 너도');
+  it('reads the whole name before the colon, composed', () => {
+    const aria = { id: 'aria', names: ['아리아'] };
+    const blanc = { id: 'blanc', names: ['아리아 블랑'] };
+    expect(writtenAs('@아리아 블랑: 안녕', [aria, blanc])).toEqual(['blanc']);
+    expect(writtenAs('@아리아: 안녕', [aria, blanc])).toEqual(['aria']);
+    expect(writtenAs('@카이: 응'.normalize('NFD'), members)).toEqual(['kai']);
   });
 });
 
@@ -356,5 +329,26 @@ describe('transcriptLine', () => {
       `${NARRATION_HEADER} 눈이 그쳤다.`,
     );
     expect(transcriptLine({ role: 'user', content: '{{img::x}}안녕' }, '민준', '카이')).toBe('민준: 안녕');
+  });
+
+  it('names the reader, and carries a narrating turn speaker-less under the narration header', () => {
+    expect(transcriptLine({ role: 'user', content: '누구세요?' }, '민준')).toBe('민준: 누구세요?');
+    expect(transcriptLine({ role: 'user', content: '@: 문이 열리고 바람이 들이쳤다.' }, '민준')).toBe(
+      `${NARRATION_HEADER} 문이 열리고 바람이 들이쳤다.`,
+    );
+    expect(transcriptLine({ role: 'user', content: '@: {{img::map}} 지도가 펼쳐진다.' }, '민준')).toBe(
+      `${NARRATION_HEADER} 지도가 펼쳐진다.`,
+    );
+  });
+
+  it('puts the lines the reader wrote as someone under them', () => {
+    const members = [seiya, kai];
+    expect(
+      transcriptLine({ role: 'user', content: '안녕.\n@세이: 왔어?\n@내레이터: 문이 닫힌다.' }, '민준', undefined, members),
+    ).toBe(`민준: 안녕.\n세이야: 왔어?\n${NARRATION_HEADER} 문이 닫힌다.`);
+    // Without a marker the turn is the reader's, as before.
+    expect(transcriptLine({ role: 'user', content: '안녕.\n잘 지냈어?' }, '민준', undefined, members)).toBe(
+      '민준: 안녕.\n잘 지냈어?',
+    );
   });
 });

@@ -16,8 +16,9 @@
  * backlog, which the `memory_backfill` job folds off the queue (`memoryBackfill`).
  */
 import { countTokens, DEFAULT_CONTEXT_BUDGET, DEFAULT_USER_NAME, stripImageMacros } from '@shizue/core';
-import { transcriptLine } from './transcript.js';
-import { chats, memories, messages, personas, type Chat, type JobPayloadMap, type Message } from '@shizue/db';
+import { transcriptOf } from './transcript.js';
+import { loadMembers } from './hub.js';
+import { chats, memories, messages, personas, type Character, type Chat, type JobPayloadMap, type Message } from '@shizue/db';
 import { getAdapter, listEnabledModels, type ChatRequest, type LLMAdapter } from '@shizue/llm';
 import { and, asc, cosineDistance, desc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import type { AppDeps, Tx } from './deps.js';
@@ -277,6 +278,7 @@ async function updateMemory(deps: AppDeps, chatId: string): Promise<boolean> {
     summary,
     evicted: chunk,
     userName: row.personaName ?? DEFAULT_USER_NAME,
+    members: await loadMembers(deps.db, chat.plotId),
     extractFacts: embedder !== undefined,
   });
   if (!result) return false;
@@ -497,6 +499,8 @@ interface SummarizeInput {
   summary: string;
   evicted: Message[];
   userName: string;
+  /** The roster, by whose ids a group reply names its speaker. */
+  members: Character[];
   extractFacts: boolean;
 }
 
@@ -570,9 +574,7 @@ async function summarize(deps: AppDeps, input: SummarizeInput): Promise<SummaryR
   if (!resolved) return null;
 
   // Image references are markup for the chat, not content to summarize.
-  const transcript = input.evicted
-    .map((message) => transcriptLine(message, input.userName))
-    .join('\n');
+  const transcript = transcriptOf(input.evicted, input.userName, input.members);
   const request: ChatRequest = {
     model: resolved.providerModel,
     system: MEMORY_RULES + (input.extractFacts ? OUTPUT_WITH_FACTS : OUTPUT_SUMMARY_ONLY),

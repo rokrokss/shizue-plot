@@ -10,8 +10,9 @@
  * roster plays at the right temperature.
  *
  * "Every fifth turn" is read off the branch, not counted per generation: the
- * trigger compares the assistant messages on the current path against the depth
- * the last extraction was attempted at. A regenerate swaps a reply and a continue
+ * trigger compares the rounds on the current path (`roundCount` — a group turn's
+ * replies are one round, every other assistant message one of its own) against
+ * the depth the last extraction was attempted at. A regenerate swaps a reply and a continue
  * extends one, so neither moves the count; a branch switch to a shorter path
  * rebases it; and a turn completing while an extraction is in flight still counts,
  * because the next completion re-derives everything from the path.
@@ -21,13 +22,14 @@
  * counter either: the extraction is the only writer and the last write wins.
  */
 import { DEFAULT_USER_NAME } from '@shizue/core';
-import { transcriptLine } from './transcript.js';
+import { transcriptOf } from './transcript.js';
 import {
   chats,
   messages,
   personas,
   plots,
   RELATIONSHIP_AXES,
+  type Character,
   type Chat,
   type ChatRelationship,
   type Message,
@@ -39,10 +41,10 @@ import { asc, eq } from 'drizzle-orm';
 import type { AppDeps } from './deps.js';
 import { loadMembers } from './hub.js';
 import { collect, memoryChannel } from './memory.js';
-import { buildPath } from './tree.js';
+import { buildPath, roundCount } from './tree.js';
 import { unlockByRelationship } from './unlocks.js';
 
-/** Assistant messages the branch must gain before the next extraction attempt. */
+/** Rounds the branch must gain before the next extraction attempt (`roundCount`). */
 const TURNS_PER_UPDATE = 5;
 /** How much of the branch tail the model reads. */
 const RECENT_TURNS = 10;
@@ -167,7 +169,7 @@ async function updateRelationship(deps: AppDeps, chatId: string): Promise<void> 
     .where(eq(messages.chatId, chatId))
     .orderBy(asc(messages.createdAt));
   const path = buildPath(all, chat.headMessageId);
-  const depth = path.filter((message) => message.role === 'assistant').length;
+  const depth = roundCount(path);
   const extractedAt = current?.lastExtractedAssistantDepth ?? 0;
 
   // A branch switch can land on a path shorter than the one the last extraction
@@ -185,7 +187,7 @@ async function updateRelationship(deps: AppDeps, chatId: string): Promise<void> 
     axes: current?.axes ?? DEFAULT_RELATIONSHIP_AXES,
     recent: path.slice(-RECENT_TURNS),
     plotName: row.plotName,
-    members: (await loadMembers(deps.db, chat.plotId)).map((member) => member.name),
+    members: await loadMembers(deps.db, chat.plotId),
     userName: row.personaName ?? DEFAULT_USER_NAME,
   });
   // Either way the attempt is recorded at the depth it read, never back at zero:
@@ -256,7 +258,7 @@ interface ExtractInput {
   recent: Message[];
   plotName: string;
   /** The roster, in the creator's order; empty for a plot nobody has cast yet. */
-  members: string[];
+  members: Character[];
   userName: string;
 }
 
@@ -269,9 +271,7 @@ async function extract(
   if (!resolved) return null;
 
   // Image references are markup for the chat: nothing to read a relationship from.
-  const transcript = input.recent
-    .map((message) => transcriptLine(message, input.userName))
-    .join('\n');
+  const transcript = transcriptOf(input.recent, input.userName, input.members);
   const request: ChatRequest = {
     model: resolved.providerModel,
     system: EXTRACTION_RULES,
@@ -280,7 +280,7 @@ async function extract(
         role: 'user',
         content: [
           `[작품] ${input.plotName}`,
-          `[등장인물] ${input.members.join(', ') || '(없음)'}`,
+          `[등장인물] ${input.members.map((member) => member.name).join(', ') || '(없음)'}`,
           `[상대] ${input.userName}`,
           '',
           '[현재 수치]',

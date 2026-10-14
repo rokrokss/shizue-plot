@@ -1,7 +1,7 @@
 import { stripImageMacros } from './macro.js';
 import { isNarration, narrationBody } from './narration.js';
 import { NARRATION_HEADER } from './prompt.js';
-import { spokenBy } from './speech.js';
+import { readerRuns, spokenBy, type ReaderMember } from './speech.js';
 
 /**
  * One transcript line for the sidecar models (memory, relationship, suggestions).
@@ -15,21 +15,31 @@ import { spokenBy } from './speech.js';
  * is already attributed and one name in front of the whole turn would be wrong
  * for every line but the first. The exception is a reply stored under one
  * member — a group turn's — which carries no prefix of its own: given
- * `speakerName`, its lines go under that name (`spokenBy`). The reader's own turn
- * is the persona's.
+ * `speakerName`, its lines go under that name (`spokenBy`).
  *
- * The API's copy (`apps/api/src/transcript.ts`) is this without the speaker; it
- * moves here when the API tags its transcripts.
+ * The reader's own turn is the persona's — except, given the `members`, the
+ * lines the reader wrote as someone else (`readerRuns`): a `@이름:` line goes
+ * under that member's roster name and a `@내레이터:` line under the narration
+ * header, as the main prompt sends them.
  */
 export function transcriptLine(
   message: { role: 'user' | 'assistant'; content: string },
   userName: string,
   speakerName?: string,
+  members: readonly ReaderMember[] = [],
 ): string {
   if (isNarration(message.content)) {
     return `${NARRATION_HEADER} ${stripImageMacros(narrationBody(message.content)).trim()}`;
   }
   const text = stripImageMacros(message.content);
-  if (message.role === 'user') return `${userName}: ${text}`;
-  return speakerName !== undefined ? spokenBy(text, speakerName) : text;
+  if (message.role === 'assistant') return speakerName !== undefined ? spokenBy(text, speakerName) : text;
+  const runs = readerRuns(text, members);
+  if (runs.every((run) => run.kind === 'user')) return `${userName}: ${text}`;
+  return runs
+    .map((run) => {
+      if (run.kind === 'narration') return `${NARRATION_HEADER} ${run.text}`;
+      const name = run.kind === 'member' ? members.find((member) => member.id === run.memberId)?.names[0] : undefined;
+      return name !== undefined ? spokenBy(run.text, name) : `${userName}: ${run.text}`;
+    })
+    .join('\n');
 }

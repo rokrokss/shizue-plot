@@ -63,6 +63,30 @@ describe('ChatExportSchema', () => {
     expect(withdrawn.messages).toHaveLength(3);
   });
 
+  it("carries a group reply's speaker, and still parses a message without one", () => {
+    const parsed = ChatExportSchema.parse({
+      ...bundle,
+      messages: [
+        ...bundle.messages,
+        {
+          id: 'msg_4',
+          role: 'assistant',
+          text: '*잔을 든다* 건배.',
+          createdAt: '2026-08-06T12:00:00.000Z',
+          speaker: { id: 'chr_2', name: '민수' },
+        },
+      ],
+    });
+    expect(parsed.messages[3]?.speaker).toEqual({ id: 'chr_2', name: '민수' });
+    expect(parsed.messages[1]?.speaker).toBeUndefined();
+    expect(
+      ChatExportSchema.safeParse({
+        ...bundle,
+        messages: [{ ...bundle.messages[1], speaker: { id: 'chr_2' } }],
+      }).success,
+    ).toBe(false);
+  });
+
   it('rejects a message role outside user/assistant', () => {
     expect(
       ChatExportSchema.safeParse({

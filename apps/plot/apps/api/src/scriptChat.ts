@@ -61,6 +61,12 @@ export interface ScriptChatOptions {
   turn?: ScriptTurn;
   /** The message the branch ends on is rewritten afterwards (a continue), so it must be one this may rewrite. */
   ownLast?: boolean;
+  /**
+   * The member whose scripts ran, in a work of several: a character message they
+   * add, or a message they turn into one, is stored as that member's
+   * (`speaker_member_id`). Absent leaves it untagged — the lead's, as it has always been read.
+   */
+  memberId?: string;
 }
 
 /** What `applyScriptChat` writes, decided before anything is — every refusal comes from here. */
@@ -79,6 +85,8 @@ export interface ScriptChatPlan {
   changed: boolean;
   /** The role of the message the branch ends on; null for a branch with none. */
   lastRole: MessageRole | null;
+  /** `ScriptChatOptions.memberId`. */
+  memberId: string | undefined;
 }
 
 /** The greeting a branch opened on — the root reply — which RisuAI's `chat.message` leaves out. */
@@ -98,6 +106,21 @@ export const rewritableHead = (all: readonly Message[], head: Message | undefine
  */
 const sourceOf = (role: MessageRole, row?: Message): MessageSource =>
   row && row.role === role ? row.source : role === 'assistant' ? 'script' : 'user';
+
+/**
+ * Who a message is said by once a run left it with `role` (the group-turn tags):
+ * a stored one keeps its own while its role stands — a copy is the same turn —
+ * and one turned into a character message, or added as one, is the member whose
+ * scripts ran, in no round. A user turn has neither.
+ */
+const speakerOf = (
+  role: MessageRole,
+  memberId: string | undefined,
+  row?: Message,
+): { speakerMemberId: string | null; groupTurnId: string | null } =>
+  row && row.role === role
+    ? { speakerMemberId: row.speakerMemberId, groupTurnId: row.groupTurnId }
+    : { speakerMemberId: role === 'assistant' ? (memberId ?? null) : null, groupTurnId: null };
 
 /** Same names, same values — a message's delta as `lastDelta` would leave it. */
 function sameDelta(a: VariableDelta | null | undefined, b: VariableDelta | null): boolean {
@@ -185,6 +208,7 @@ export function planScriptChat(path: Message[], chat: ScriptChat | null, options
     turn: options.turn,
     changed: created.length > 0 || rewrite !== null || shared < path.length,
     lastRole: !end ? null : end.kind === 'turn' ? 'user' : end.role,
+    memberId: options.memberId,
   };
 }
 
@@ -208,9 +232,10 @@ export interface AppliedScriptChat {
  * where a swipe back to the branch lands (`deepestLeaf`).
  *
  * A copy carries everything its message did — role and text unless the run
- * changed them, who wrote it (`source`, `sourceOf`), the ruling on it (`directions`, a user
- * turn's only), the lore it triggered, the values its scripts left, the model
- * and the tokens, and its images: a copy is the same turn on another branch, and
+ * changed them, who wrote it (`source`, `sourceOf`), who said it and in which
+ * round (`speakerOf`), the ruling on it (`directions`, a user turn's only), the
+ * lore it triggered, the values its scripts left, the model and the tokens, and
+ * its images: a copy is the same turn on another branch, and
  * nothing runs again for it. It is never `pending` (its output scripts ran, or
  * were given up on, on the original) and starts its own script revision.
  */
@@ -231,7 +256,7 @@ export async function applyScriptChat(
       .set({
         role,
         content,
-        ...(role !== row.role ? { source: sourceOf(role), directions: null } : {}),
+        ...(role !== row.role ? { source: sourceOf(role), directions: null, ...speakerOf(role, plan.memberId) } : {}),
         ...(delta !== undefined ? { variableDelta: storableDelta(delta) } : {}),
         scriptRev: sql`${messages.scriptRev} + 1`,
       })
@@ -262,7 +287,15 @@ export async function applyScriptChat(
         ...(turn.directions ? { directions: turn.directions } : {}),
       };
     }
-    if (entry.kind === 'new') return { ...base, role: entry.role, content: entry.content, source: sourceOf(entry.role) };
+    if (entry.kind === 'new') {
+      return {
+        ...base,
+        role: entry.role,
+        content: entry.content,
+        source: sourceOf(entry.role),
+        ...(entry.role === 'assistant' && plan.memberId !== undefined ? { speakerMemberId: plan.memberId } : {}),
+      };
+    }
     const { row } = entry;
     copies.set(row.id, id);
     const stillUser = entry.role === 'user' && row.role === 'user';
@@ -271,6 +304,7 @@ export async function applyScriptChat(
       role: entry.role,
       content: entry.content,
       source: sourceOf(entry.role, row),
+      ...speakerOf(entry.role, plan.memberId, row),
       directions: stillUser ? row.directions : null,
       loreTriggers: row.loreTriggers,
       variableDelta: row.variableDelta,

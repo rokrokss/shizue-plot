@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { lineSpeaker, parseAssistantSpeech, parseUserSpeech, spokenBy, type SpeechBlock } from '../src/speech.js';
+import {
+  lineSpeaker,
+  parseAssistantSpeech,
+  parseUserSpeech,
+  readerLine,
+  readerRuns,
+  spokenBy,
+  type SpeechBlock,
+} from '../src/speech.js';
 
 const roster = ['아리아', '민수'] as const;
 
@@ -130,6 +138,70 @@ describe('parseUserSpeech', () => {
   it('has nothing to say about an empty turn', () => {
     expect(parseUserSpeech('   ')).toEqual([]);
     expect(parseUserSpeech('@:  ')).toEqual([]);
+  });
+
+  const readers = [
+    { id: 'aria', names: ['아리아', '아리'] },
+    { id: 'minsu', names: ['민수'] },
+  ];
+
+  it('gives the lines the reader wrote as a member to that member, and narration lines to the narrator', () => {
+    expect(
+      shape(parseUserSpeech('*문을 연다* 왔어.\n@아리: 늦었네요.\n@내레이터: 바람이 분다.\n그래?', readers)),
+    ).toEqual([
+      'user → description:문을 연다 | dialogue:왔어.',
+      'character(아리아) → dialogue:늦었네요.',
+      'narrator → description:바람이 분다.',
+      'user → dialogue:그래?',
+    ]);
+  });
+
+  it('reads a turn with no marker, and a whole @: turn, exactly as without the members', () => {
+    for (const content of ['아리아: 안녕.\n잘 지냈어?', '*문을 밀며* 들어가도 될까요?', '@: 문이 열린다.\n@아리아: 응', '   ']) {
+      expect(parseUserSpeech(content, readers)).toEqual(parseUserSpeech(content));
+    }
+  });
+});
+
+describe('readerRuns', () => {
+  const readers = [
+    { id: 'aria', names: ['아리아', '아리'] },
+    { id: 'rin', names: ['凛', 'Rin'] },
+  ];
+
+  it('cuts a turn into who the reader wrote each stretch as, in ko, en and ja', () => {
+    expect(
+      readerRuns('안녕.\n\n@아리아: 늦었네요.\n@아리：*웃는다*\n@rin: Hi.\n@凛: やあ\n@ナレーター：夜だ\n@: 비\n끝', readers),
+    ).toEqual([
+      { kind: 'user', text: '안녕.' },
+      { kind: 'member', memberId: 'aria', text: '늦었네요.\n*웃는다*' },
+      { kind: 'member', memberId: 'rin', text: 'Hi.\nやあ' },
+      { kind: 'narration', text: '夜だ\n비' },
+      { kind: 'user', text: '끝' },
+    ]);
+  });
+
+  it('keeps a blank line inside a stretch and leaves a marker naming nobody as the reader’s', () => {
+    expect(readerRuns('@아리아: 하나\n\n@아리아: 둘\n@유령: 셋', readers)).toEqual([
+      { kind: 'member', memberId: 'aria', text: '하나\n\n둘' },
+      { kind: 'user', text: '@유령: 셋' },
+    ]);
+  });
+
+  it('takes a whole-turn @: as narration whole, and drops what has no text', () => {
+    expect(readerRuns('@: 문이 열린다.\n@아리아: 응', readers)).toEqual([
+      { kind: 'narration', text: '문이 열린다.\n@아리아: 응' },
+    ]);
+    expect(readerRuns('@아리아:\n  ', readers)).toEqual([]);
+    expect(readerRuns('평범한 말.\n둘째 줄.', readers)).toEqual([{ kind: 'user', text: '평범한 말.\n둘째 줄.' }]);
+  });
+
+  it('reads a line split off CRLF text the same as one split off LF', () => {
+    expect(readerLine('@아리: 안녕\r', readers)).toEqual({ kind: 'member', member: readers[0], text: '안녕' });
+    expect(readerRuns('안녕\r\n@아리아: 응\r\n', readers)).toEqual([
+      { kind: 'user', text: '안녕' },
+      { kind: 'member', memberId: 'aria', text: '응' },
+    ]);
   });
 });
 

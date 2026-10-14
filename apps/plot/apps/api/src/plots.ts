@@ -58,12 +58,14 @@ export function isSillyTavernCard(card: NormalizedCard): boolean {
  * card's: it is the speaker prefix the script protocol matches, so the name the
  * model is taught to write has to be the name the parser looks for. `absent` are
  * the ids a chat sent off the stage; an id no member has any more matches nothing.
+ * The id is what a group reply names its speaker by (`HistoryMessage.speakerId`).
  */
 export const toPromptCharacters = (
   members: Character[],
   absent: ReadonlySet<string> = new Set(),
 ): PromptCharacter[] =>
   members.map((member) => ({
+    id: member.id,
     name: member.name,
     card: member.card,
     ...(absent.has(member.id) ? { absent: true } : {}),

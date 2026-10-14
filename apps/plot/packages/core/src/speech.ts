@@ -14,6 +14,10 @@
  * The cost of a content convention is the same one narration pays — a character
  * whose dialogue happens to open with another member's name reads as that member.
  * That is the convention working as specified, not a case to detect.
+ *
+ * The reader's own turn has a convention of its own, Zeta's: a `@이름: …` line is
+ * the reader writing that member's line, and `@내레이터: …` or `@: …` narration
+ * (`readerRuns`). It is stored as typed, like everything here.
  */
 
 import { isNarration, narrationBody } from './narration.js';
@@ -147,14 +151,133 @@ export function parseAssistantSpeech(content: string, roster: readonly SpeechRos
 }
 
 /**
+ * What a reader writes the narrator as, at a line's start (`@내레이터: …`), in the
+ * three catalog languages, both Korean spellings included. A bare `@: …` is the
+ * same thing.
+ */
+export const NARRATOR_NAMES: readonly string[] = ['내레이터', '나레이터', 'narrator', 'ナレーター'];
+
+/**
+ * A member a reader may write a line as: its id, and every name a `@이름:` line
+ * may give it — the roster name first, then its nickname and aliases.
+ */
+export interface ReaderMember {
+  readonly id: string;
+  readonly names: readonly string[];
+}
+
+/**
+ * One stretch of a user turn, by who the reader wrote it as: themselves, a
+ * member (`@이름: …`), or the narrator (`@내레이터: …`, `@: …`).
+ */
+export type ReaderRun =
+  | { kind: 'user'; text: string }
+  | { kind: 'member'; memberId: string; text: string }
+  | { kind: 'narration'; text: string };
+
+/**
+ * A line the reader wrote as someone: `@`, a name or nothing, a colon (half or
+ * full width), at most one space — and a line split off CRLF text keeps no `\r`.
+ */
+const WRITTEN_AS_RE = /^\s*@([^:：\n]{0,40})[:：]\s?(.*?)\r?$/;
+
+/** What marker names are compared as: composed, trimmed, and without case. */
+const foldName = (name: string): string => name.normalize('NFC').trim().toLowerCase();
+
+/**
+ * Who a line of a user turn is written as, and its text without the marker; null
+ * for a line that is the reader's own. `@이름:` names a member by any of its
+ * names — members are asked before the narrator's names — and `@내레이터:` or a
+ * bare `@:` is narration. A marker naming nobody leaves the line the reader's,
+ * marker and all.
+ */
+export function readerLine(
+  line: string,
+  members: readonly ReaderMember[],
+  narratorNames: readonly string[] = NARRATOR_NAMES,
+): { kind: 'member'; member: ReaderMember; text: string } | { kind: 'narration'; text: string } | null {
+  const match = WRITTEN_AS_RE.exec(line);
+  if (!match) return null;
+  const name = foldName(match[1]!);
+  const text = match[2]!;
+  if (!name) return { kind: 'narration', text };
+  const member = members.find((candidate) => candidate.names.some((other) => foldName(other) === name));
+  if (member) return { kind: 'member', member, text };
+  return narratorNames.some((other) => foldName(other) === name) ? { kind: 'narration', text } : null;
+}
+
+/**
+ * A user turn cut into who the reader wrote each stretch as, as Zeta reads a
+ * reader's `@이름:` line: the reader writing that member's line themselves — not
+ * asking the member to speak.
+ *
+ * A turn that opens with `@:` is narration whole, as it has always been, every
+ * line of it. Any other turn is read line by line: `@이름: …` (name, nickname or
+ * alias) is that member's, `@내레이터: …` and `@: …` are narration, and every other
+ * line is the reader's own. Consecutive lines written as the same one are one
+ * run; a blank line is spacing and neither starts a run nor ends one. The text
+ * is the run's lines without their markers, trimmed, and a run left with none is
+ * dropped. A turn with no marker is one `user` run of the whole turn, trimmed.
+ */
+export function readerRuns(
+  content: string,
+  members: readonly ReaderMember[],
+  narratorNames: readonly string[] = NARRATOR_NAMES,
+): ReaderRun[] {
+  if (isNarration(content)) {
+    const text = narrationBody(content);
+    return text ? [{ kind: 'narration', text }] : [];
+  }
+  const groups: { run: ReaderRun; lines: string[] }[] = [];
+  let pending: string[] = [];
+  for (const line of content.split(/\r?\n/)) {
+    if (!line.trim()) {
+      pending.push(line);
+      continue;
+    }
+    const written = readerLine(line, members, narratorNames);
+    const run: ReaderRun =
+      written === null
+        ? { kind: 'user', text: '' }
+        : written.kind === 'member'
+          ? { kind: 'member', memberId: written.member.id, text: '' }
+          : { kind: 'narration', text: '' };
+    const body = written === null ? line : written.text;
+    const last = groups.at(-1);
+    if (last && last.run.kind === run.kind && (run.kind !== 'member' || (last.run as { memberId: string }).memberId === run.memberId)) {
+      last.lines.push(...pending, body);
+    } else {
+      groups.push({ run, lines: [body] });
+    }
+    pending = [];
+  }
+  return groups
+    .map(({ run, lines }) => ({ ...run, text: lines.join('\n').trim() }))
+    .filter((run) => run.text.length > 0);
+}
+
+/**
  * A user turn: `@:` makes the whole turn the reader writing narrator 상황묘사,
  * and anything else is the user speaking, with `*…*` spans as their own 상황묘사.
- * Unlike an assistant turn it is never split by speaker — one turn is one voice.
+ *
+ * Given the members, lines the reader wrote as someone else are theirs
+ * (`readerRuns`): a `@이름:` line is that member's block, under its roster name
+ * (`names[0]`), and a `@내레이터:` line is the narrator's. Without them, or in a
+ * turn with no such line, the turn is one voice, as it has always been.
  */
-export function parseUserSpeech(content: string): SpeechBlock[] {
+export function parseUserSpeech(content: string, members?: readonly ReaderMember[]): SpeechBlock[] {
   if (isNarration(content)) return narratorBlocks(narrationBody(content));
-  const parts = splitParts(content.trim());
-  return parts.length > 0 ? [{ speaker: { kind: 'user' }, parts }] : [];
+  if (!members) {
+    const parts = splitParts(content.trim());
+    return parts.length > 0 ? [{ speaker: { kind: 'user' }, parts }] : [];
+  }
+  return readerRuns(content, members).flatMap((run): SpeechBlock[] => {
+    if (run.kind === 'narration') return narratorBlocks(run.text);
+    const name = run.kind === 'member' ? members.find((member) => member.id === run.memberId)?.names[0] : undefined;
+    const parts = splitParts(run.text);
+    if (parts.length === 0) return [];
+    return [{ speaker: name !== undefined ? { kind: 'character', name } : { kind: 'user' }, parts }];
+  });
 }
 
 /**

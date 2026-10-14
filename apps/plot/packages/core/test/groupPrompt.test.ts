@@ -264,3 +264,28 @@ describe('assemblePrompt - a group turn', () => {
     expect(() => group({ speaker: 3 })).toThrow(RangeError);
   });
 });
+
+describe('assemblePrompt - lines the reader wrote as someone', () => {
+  const turnsOf = (content: string, speaker?: number): string[] =>
+    assemblePrompt({
+      plot,
+      characters: [{ ...seiya, id: 'seiya-id' }, { ...kai, id: 'kai-id' }],
+      history: [{ role: 'user', content }],
+      userName: '민준',
+      contextBudget: 100_000,
+      ...(speaker === undefined ? {} : { speaker }),
+    }).messages.map((message) => promptText(message.content));
+
+  it("sends a @name: line as that member's, under the roster name, and a @내레이터: line as narration", () => {
+    const content = '*잔을 든다* 건배.\n@세이: 마시지 마.\n\n@카이: 한 잔 더!\n@내레이터: 바람이 분다.\n@: 눈이 그친다.\n@유령: 누구?';
+    const expected = `*잔을 든다* 건배.\n세이야: 마시지 마.\n\n카이: 한 잔 더!\n${NARRATION_HEADER} 바람이 분다.\n${NARRATION_HEADER} 눈이 그친다.\n@유령: 누구?`;
+    expect(turnsOf(content)).toContain(expected);
+    // A group turn reads the reader's lines the same way, the speaker's own included.
+    expect(turnsOf(content, 1)).toContain(expected);
+  });
+
+  it('sends a whole-turn @: and a turn without markers exactly as before', () => {
+    expect(turnsOf('@: 문이 열린다.\n@세이: 응')).toContain(`${NARRATION_HEADER} 문이 열린다.\n@세이: 응`);
+    expect(turnsOf('세이야: 안녕.\n@ 카이 왔어?')).toContain('세이야: 안녕.\n@ 카이 왔어?');
+  });
+});

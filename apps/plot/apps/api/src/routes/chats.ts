@@ -16,6 +16,7 @@ import {
   MAX_COMPONENT_TURN_LENGTH,
   MAX_DIRECTIONS_LENGTH,
   NARRATION_PREFIX,
+  NARRATOR_SPEAKER,
   readVariable,
   stripImageMacros,
   stripVariableMacros,
@@ -26,6 +27,8 @@ import {
   type MacroClock,
   type MacroContext,
   type NarratorConfig,
+  type NarratorSpeaker,
+  type PlotStyle,
   type FoldItem,
   type FoldOptions,
   type PromptBranch,
@@ -55,7 +58,14 @@ import {
   type Plot,
 } from '@shizue/db';
 import { contentText, getModel, type ChatMessage } from '@shizue/llm';
-import { hasTriggersFor, overlaidCard, scriptedMember, type ScriptOverlay } from '@shizue/core/triggers';
+import {
+  cardScripts,
+  hasTriggersFor,
+  overlaidCard,
+  scriptedMember,
+  type CardScripts,
+  type ScriptOverlay,
+} from '@shizue/core/triggers';
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { randomUUID } from 'node:crypto';
@@ -108,6 +118,7 @@ import {
   mergeGlobalVariables,
   mergeReaderOverlay,
   NO_SCRIPTS,
+  optionalMemberId,
   optionalScriptNote,
   optionalVariableDelta,
   overlaidWith,
@@ -116,6 +127,7 @@ import {
   readOverlay,
   readScriptChat,
   saveScriptWrites,
+  scriptMemberOf,
   scriptRevMoved,
   storableDelta,
   type GenerationScripts,
@@ -133,7 +145,7 @@ import { editRequestTurns } from '../requestTriggers.js';
 import { createScriptFetch } from '../scriptFetch.js';
 import { readScriptLlmMessages, readScriptLlmModel, runScriptLlm } from '../scriptLlm.js';
 import { suggestReplies } from '../suggest.js';
-import { buildPath, deepestLeaf, siblingInfo } from '../tree.js';
+import { buildPath, deepestLeaf, roundStart, siblingInfo } from '../tree.js';
 import { assetLocks, openAssetNames } from '../unlocks.js';
 import {
   isUuid,
@@ -213,6 +225,13 @@ const toMessageJson = (message: Message, attachments: ChatAttachment[] = []) => 
   scriptState: message.scriptState,
   /** The revision a script commit to this turn has to name. */
   scriptRev: message.scriptRev,
+  /**
+   * A group turn's reply: the member who says it whole (null for the narrator's,
+   * and once the member is deleted), and the round it belongs to — the id of the
+   * round's first reply. Both null on every other message.
+   */
+  speakerMemberId: message.speakerMemberId,
+  groupTurnId: message.groupTurnId,
   model: message.model,
   promptTokens: message.promptTokens,
   completionTokens: message.completionTokens,
@@ -628,8 +647,10 @@ async function loadGenerationContext(
   plot: PromptPlot;
   /** The whole roster, the members the reader sent off the stage marked absent. */
   characters: PromptCharacter[];
-  /** The members still on the stage — the ones a reply may be asked to center on. */
+  /** The members still on the stage — the ones a reply may be asked to center on, or of. */
   onStage: Character[];
+  /** The whole roster as this chat reads it — renamed and rewritten by the reader's overlay — parallel to `characters`. */
+  members: Character[];
   /** The row itself, for the settings that are the plot's rather than the prompt's. */
   row: Plot;
   personaText: string;
@@ -654,6 +675,8 @@ async function loadGenerationContext(
   firstMessage: string | undefined;
   /** What the scripted member's Lua reads beyond the prompt (`GenerationPlan.scriptView`). */
   scriptView: ScriptView | undefined;
+  /** The same for any member — a group turn's speaker, whose scripts run for its reply. */
+  scriptViewFor: (member: Character) => ScriptView;
   /** Who says a character message a card's script wrote (`HistoryMessage.speaker`); undefined when no one can. */
   scriptSpeaker: string | undefined;
   all: Message[];
@@ -684,6 +707,7 @@ async function loadGenerationContext(
     plot: { ...toPromptPlot(row, chat), ...(plotChar !== undefined ? { char: plotChar } : {}) },
     characters: toPromptCharacters(rewritten, absent),
     onStage: rewritten.filter((member) => !absent.has(member.id)),
+    members: rewritten,
     row,
     personaText: overlay?.persona ?? persona?.description ?? '',
     userName: persona?.name ?? DEFAULT_USER_NAME,
@@ -703,6 +727,7 @@ async function loadGenerationContext(
     localLore: scripts.localLore ?? localLoreOf(chat),
     firstMessage: scripted ? overlay?.members?.[scripted.id]?.firstMessage : undefined,
     scriptView: scripted ? scriptViewOf(scripted, overlay, scripts.note ?? chat.note, persona) : undefined,
+    scriptViewFor: (member) => scriptViewOf(member, overlay, scripts.note ?? chat.note, persona),
     // The member whose scripts run, under its name in this chat — or a plot's one
     // member, should its scripts be gone. As the page draws it.
     scriptSpeaker: (scripted ? rewritten.find((member) => member.id === scripted.id) : only)?.name,
@@ -744,12 +769,17 @@ async function keepScriptChat(
   return deps.db.transaction((tx) => applyScriptChat(tx, chat.id, plan, all));
 }
 
-/** The branch as the assembler takes it; a character message a script wrote is said by `speaker`. */
+/**
+ * The branch as the assembler takes it: a group reply names its member
+ * (`speakerId`), and an untagged character message a script wrote is said by
+ * `speaker`.
+ */
 const toHistory = (path: Message[], speaker: string | undefined): HistoryMessage[] =>
   path.map((message) => ({
     role: message.role,
     content: message.content,
     createdAt: message.createdAt.getTime(),
+    ...(message.speakerMemberId !== null ? { speakerId: message.speakerMemberId } : {}),
     ...(speaker !== undefined && message.role === 'assistant' && message.source === 'script' ? { speaker } : {}),
   }));
 
@@ -1157,6 +1187,93 @@ function focusNamesOf(onStage: Character[], ids: string[]): string[] {
   return onStage.filter((member) => ids.includes(member.id)).map((member) => member.name);
 }
 
+/** `body.speakerId`, shape only: a member id, or the narrator's marker. */
+function optionalSpeakerId(body: Record<string, unknown>): string | undefined {
+  const value = body['speakerId'];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string' || (value !== NARRATOR_SPEAKER && !isUuid(value))) {
+    throw badRequest('invalid_request', `speakerId must be a member id or "${NARRATOR_SPEAKER}"`);
+  }
+  return value;
+}
+
+/** Who a group turn's reply is asked of: `GenerationPlan.speaker`, and the member, or null for the narrator. */
+interface GroupVoice {
+  speaker: number | NarratorSpeaker;
+  member: Character | null;
+}
+
+/**
+ * The speaker a group-turn request names, held to the work. Group turns are a
+ * work of two or more members' (the whole roster counted, on the stage or not)
+ * — a work of one answers as it always has, so a `speakerId` there is a client
+ * bug. A member must be on the stage. The narrator speaks only on the narration
+ * button (`/narrate`), so it is named only where a round that button opened is
+ * redone (`narrator`).
+ */
+function groupVoiceOf(
+  context: { members: Character[]; onStage: Character[] },
+  speakerId: string,
+  { narrator }: { narrator: boolean },
+): GroupVoice {
+  if (context.members.length < 2) {
+    throw badRequest('invalid_request', 'speakerId is only for a work of two or more members');
+  }
+  if (speakerId === NARRATOR_SPEAKER) {
+    if (!narrator) throw badRequest('invalid_request', 'The narrator speaks only on the narration button');
+    return { speaker: NARRATOR_SPEAKER, member: null };
+  }
+  const index = context.members.findIndex((member) => member.id === speakerId);
+  if (index < 0 || !context.onStage.some((member) => member.id === speakerId)) {
+    throw badRequest('invalid_request', 'speakerId must name a member who is in the scene');
+  }
+  return { speaker: index, member: context.members[index]! };
+}
+
+/** The names a member speaker's own `이름: ` prefixes go by: its name in this chat, then its nickname. */
+const speakerNamesOf = (member: Character): string[] => {
+  const nickname = member.card.nickname?.trim();
+  return [member.name, ...(nickname ? [nickname] : [])];
+};
+
+/**
+ * What a group voice adds to a plan: the speaker, the names its own prefixes
+ * come off by, where the reply is stored (`round`, null opening a new one), the
+ * Lua view of whoever's scripts run for it, and — for the narrator — the
+ * narration it writes. `notLast` is the round's speakers before the last
+ * (`finalSpeaker: false`): the status window and the choices are the last one's.
+ */
+function voicePlan(
+  context: {
+    scriptView: ScriptView | undefined;
+    scriptViewFor: (member: Character) => ScriptView;
+    plot: PromptPlot;
+    userName: string;
+  },
+  voice: GroupVoice,
+  groupTurnId: string | null,
+  notLast: boolean,
+  trailing: string[] = [],
+): Pick<GenerationPlan, 'speaker' | 'speakerNames' | 'round' | 'scriptView' | 'narration' | 'trailingSystem'> {
+  const macro = { char: context.plot.char ?? context.plot.name, user: context.userName };
+  const lines = [
+    ...(voice.member ? trailing : [NARRATION_NUDGE]),
+    ...(notLast && closesWithState(context.plot.style) ? [NOT_LAST_SPEAKER_NUDGE] : []),
+  ].map((line) => applyMacros(line, macro));
+  return {
+    speaker: voice.speaker,
+    ...(voice.member ? { speakerNames: speakerNamesOf(voice.member) } : {}),
+    round: { speakerMemberId: voice.member?.id ?? null, groupTurnId },
+    scriptView: voice.member ? context.scriptViewFor(voice.member) : context.scriptView,
+    ...(voice.member ? {} : { narration: true }),
+    ...(lines.length > 0 ? { trailingSystem: lines.join('\n') } : {}),
+  };
+}
+
+/** Whether this chat's replies end on a status window or choices (`chatStyle`, crossed with the reader's toggles). */
+const closesWithState = (style: PlotStyle | undefined): boolean =>
+  style?.statusWindow === true || (style?.choices !== undefined && style.choices !== 'off');
+
 /**
  * The body of a generation POST that needs none. The client sends one only to
  * name the next speaker, so no body at all is an empty request rather than a
@@ -1238,6 +1355,12 @@ function requireSceneBlocks(body: Record<string, unknown>): SceneBlock[] {
  * What a regenerate of the chat would generate from, right now. The route runs it
  * inside the generation slot; the creator's prompt inspector runs it bare, since
  * building a plan writes nothing.
+ *
+ * With a `group` speaker it redoes the round the chat ends on ("턴 다시"): every
+ * reply of it goes, and the new one — the round's first speaker's — is a sibling
+ * of the round's first reply, opening a round of its own. The browser asks the
+ * rest of the round after it (`/reply`). A head in no round is the round, and a
+ * user head is answered, as without one.
  */
 async function regeneratePlan(
   c: Context<AppEnv>,
@@ -1245,38 +1368,47 @@ async function regeneratePlan(
   chat: Chat,
   focusIds: string[] = [],
   scripts: GenerationScripts = NO_SCRIPTS,
+  group?: { speakerId: string; notLast: boolean },
 ): Promise<GenerationPlan> {
   await requireEnabledModel(deps, chat.userId, chat.model);
   const context = await loadGenerationContext(deps, chat, scripts);
   const focusNames = focusNamesOf(context.onStage, focusIds);
+  // A round the narration button opened is redone by the narrator.
+  const voice = group ? groupVoiceOf(context, group.speakerId, { narrator: true }) : null;
+  const scriptMember = scriptMemberOf(scripts.memberId, context.members);
   const path = buildPath(context.all, chat.headMessageId);
   const head = path[path.length - 1];
   if (!head) throw badRequest('invalid_state', 'The chat has no messages to generate from');
   await settleHead(deps, chat, head, scripts, false);
 
-  // An assistant head is replaced by a sibling; a user head (edit fork, or a
-  // failed generation) gets a fresh assistant child instead.
+  // An assistant head is replaced by a sibling — a group head with the rest of
+  // its round; a user head (edit fork, or a failed generation) gets a fresh
+  // assistant child instead.
   const isAssistantHead = head.role === 'assistant';
   // Regenerating a narration asks for a narration again. Without this the
   // replacement would come back as ordinary dialogue and the swipe would move
-  // between two different kinds of turn.
-  const narration = isAssistantHead && isNarration(head.content);
+  // between two different kinds of turn. A group speaker says what it is.
+  const narration = !voice && isAssistantHead && isNarration(head.content);
   // The head is about to be replaced, so whatever it set is not part of the
   // state the replacement is generated from — and the start triggers ran on the
   // branch without it, so what they did to the chat is said against that. Its
   // end is not the head when the head is replaced, so nothing there is rewritten
   // in place: an edit of it forks, and the reply follows the fork.
-  const replaced = isAssistantHead ? path.slice(0, -1) : path;
+  const replaced = path.slice(0, voice ? roundStart(path) : isAssistantHead ? -1 : path.length);
   const edit = scripts.chat
-    ? planScriptChat(replaced, scripts.chat, { inPlace: isAssistantHead ? null : rewritableHead(context.all, head) })
+    ? planScriptChat(replaced, scripts.chat, {
+        inPlace: isAssistantHead ? null : rewritableHead(context.all, head),
+        ...(scriptMember ? { memberId: scriptMember.id } : {}),
+      })
     : null;
   await keepScriptWrites(deps, chat, context, scripts);
   const edited = edit ? await keepScriptChat(deps, chat, edit, context.all) : null;
   const kept = edited ? edited.path : replaced;
   const all = edited ? edited.all : context.all;
   // Memory is applied to the whole path first — it only ever trims the front,
-  // so the mode-specific trim of the last turn still lines up.
+  // so the mode-specific trim of the replaced turns at the end still lines up.
   const memory = await buildMemoryInput(deps, chat, edited ? kept : path, lastUserText(kept));
+  const gone = path.length - replaced.length;
 
   return {
     chatId: chat.id,
@@ -1289,7 +1421,7 @@ async function regeneratePlan(
       deps,
       chat.userId,
       chat.model,
-      isAssistantHead && !edited ? memory.history.slice(0, -1) : memory.history,
+      gone > 0 && !edited ? memory.history.slice(0, Math.max(0, memory.history.length - gone)) : memory.history,
       context.scriptSpeaker,
     ),
     wholeBranch: kept,
@@ -1327,7 +1459,9 @@ async function regeneratePlan(
           narration: true,
         }
       : {}),
-    // The head's parent or the head, or where the scripts left the branch.
+    ...(voice ? voicePlan(context, voice, null, group!.notLast) : {}),
+    // The head's parent or the head — the round's first reply's parent for a
+    // round — or where the scripts left the branch.
     target: { kind: 'new', parentId: kept.at(-1)?.id ?? null },
   };
 }
@@ -1338,18 +1472,22 @@ async function regeneratePlan(
  * script's own turns, in order, as RisuAI's triggers see a script's
  * (`editRequestTurns`); the chat they read is the branch as stored now, with the
  * variables, the overlay and the reader's side of things a generation on it
- * would have. Unedited where the run fails, as a generation's.
+ * would have. Unedited where the run fails, as a generation's. The triggers are
+ * those of the member whose script called (`memberId`), else the scripted member's.
  */
 async function withScriptRequestTriggers(
   c: Context<AppEnv>,
   deps: AppDeps,
   chat: Chat,
   messages: ChatMessage[],
+  memberId: string | undefined,
 ): Promise<ChatMessage[]> {
   const context = await loadGenerationContext(deps, chat);
   const path = buildPath(context.all, chat.headMessageId);
+  const index = memberId === undefined ? -1 : context.members.findIndex((member) => member.id === memberId);
   const input = requestTriggerInput({
     characters: context.characters,
+    ...(index >= 0 ? { speaker: index } : {}),
     wholeBranch: path,
     branch: promptBranch(context.all, path, context.firstMessage),
     authorNote: context.authorNote,
@@ -1364,6 +1502,70 @@ async function withScriptRequestTriggers(
   if (!input) return messages;
   const turns = messages.map((message) => ({ role: message.role, content: contentText(message.content) }));
   return (await editRequestTurns(turns, input, { run: deps.runRequestTriggers, label: chat.id })) ?? messages;
+}
+
+/**
+ * The scripts a script's call is held to: those of the member whose runtime
+ * made it (`memberId`, which must be on the roster — 400 otherwise), else the
+ * scripted member's, the lead's (`scriptedMember`). Null where that member
+ * carries none.
+ */
+function callingScripts(
+  members: Character[],
+  memberId: string | undefined,
+): { member: Character; scripts: CardScripts } | null {
+  const named = scriptMemberOf(memberId, members);
+  if (!named) return scriptedMember(members);
+  const scripts = cardScripts(named.card);
+  return scripts ? { member: named, scripts } : null;
+}
+
+/**
+ * One member's scripts as the reader's browser runs them (`GET /:id/scripts`):
+ * its triggers and `editinput`/`editoutput` regex, the parts of its card the
+ * scripts may read, and what the reader's scripts rewrote of it on this plot
+ * (its slice of the overlay, and the persona's), with the chat's own lore.
+ */
+function scriptBundleOf(
+  member: Character,
+  scripts: CardScripts,
+  overlay: ScriptOverlay | null,
+  chat: Chat,
+) {
+  const card = member.card;
+  const own = overlay?.members?.[member.id] ?? null;
+  const nickname = card.nickname?.trim() ?? '';
+  return {
+    memberId: member.id,
+    // `{{char}}` in a card's own text: its nickname where it sets one, else its
+    // name as the reader's scripts left it.
+    name: nickname || own?.name || member.name,
+    triggers: scripts.triggers,
+    editScripts: scripts.editScripts,
+    lowLevelAccess: scripts.lowLevelAccess,
+    character: {
+      // RisuAI's `char.name` (Lua's `getName`), and the nickname `{{char}}` stays.
+      name: member.name,
+      nickname,
+      description: card.description,
+      personality: card.personality,
+      scenario: card.scenario,
+      exampleDialogue: card.mesExample,
+      lorebook: card.lorebook,
+      postHistoryInstructions: card.postHistoryInstructions,
+      // What `/test_lorebook` and Lua's `loadLoreBooks` activate the book by, as the prompt does.
+      loreSettings: card.loreSettings,
+      // RisuAI's `backgroundHTML` whole, styles and all, as Lua's `getBackgroundEmbedding` reads it.
+      backgroundHtml: backgroundHtmlOf(card.extensions) ?? '',
+      // RisuAI's `char.image`, for Lua's `getCharacterImage`: a same-origin address, or null.
+      avatarUrl: avatarUrl(member),
+    },
+    overlay: {
+      member: own,
+      persona: overlay?.persona ?? null,
+    },
+    localLore: localLoreOf(chat),
+  };
 }
 
 export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
@@ -1512,6 +1714,9 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     // drawn. Unlike the plot's assets these are not the creator's to withdraw,
     // so they travel whatever became of the work.
     const attachments = await attachmentsByMessage(deps, path.map((message) => message.id));
+    // The roster is the creator's to withdraw, and with it who said a group reply.
+    const members = plot ? await loadMembers(deps.db, plot.id) : [];
+    const memberNames = new Map(members.map((member) => [member.id, member.name]));
 
     const payload: ChatExport = {
       version: 1,
@@ -1532,6 +1737,10 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         createdAt: message.createdAt.toISOString(),
         // Carried only where it says something — every other turn is the reader's.
         ...(message.source === 'component' ? { source: message.source } : {}),
+        // A group reply carries no `이름:` prefix of its own: who said it travels beside it.
+        ...(message.speakerMemberId !== null && memberNames.has(message.speakerMemberId)
+          ? { speaker: { id: message.speakerMemberId, name: memberNames.get(message.speakerMemberId)! } }
+          : {}),
         ...(attachments.has(message.id)
           ? {
               attachments: attachments
@@ -1546,13 +1755,11 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       assets: plot ? await referencedAssets(deps, chat, plot.id, path) : [],
       // The roster, in the creator's order: the names are the speaker prefixes the
       // transcript carries, so an importer can tell whose lines are whose.
-      characters: plot
-        ? (await loadMembers(deps.db, plot.id)).map((member) => ({
-            id: member.id,
-            name: member.name,
-            avatarUrl: avatarUrl(member),
-          }))
-        : [],
+      characters: members.map((member) => ({
+        id: member.id,
+        name: member.name,
+        avatarUrl: avatarUrl(member),
+      })),
       coverUrl: plot ? coverUrl(plot) : null,
       // The plot is read for its variable defaults and for nothing else; without one, the
       // fold starts empty and reflects only what the conversation itself set.
@@ -1964,6 +2171,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         // …and what its scripts left: they ran once, for the turn the copy still
         // is, and nothing runs them again for a rewording.
         ...(original?.variableDelta ? { variableDelta: original.variableDelta } : {}),
+        // …and who said it in which round: a reworded group reply is still theirs.
+        ...(original ? { speakerMemberId: original.speakerMemberId, groupTurnId: original.groupTurnId } : {}),
         // Distinct stamps, like the greeting roots: siblings order by creation, and
         // one insert's rows would otherwise share the transaction's `now()`.
         createdAt: new Date(stamp + position),
@@ -1993,68 +2202,38 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   });
 
   /**
-   * What the reader's browser runs for this chat: the triggers and the
-   * `editinput`/`editoutput` regex scripts of the plot's scripted member (the
-   * first in roster order that carries any — `scriptedMember`), and the parts of
-   * that member's card the scripts may read — its name and nickname, its
-   * description and the rest of its character text, its lorebook and the book's
-   * settings, its post-history instructions, its background HTML and its avatar —
-   * with what the reader's scripts rewrote of them on this plot beside it (the
-   * overlay every chat of theirs on it reads), and the chat's own lore
-   * (`localLore`, what Lua's `upsertLocalLoreBook` wrote in this chat). `name` is
+   * What the reader's browser runs for this chat: for every member that carries
+   * scripts, in roster order (`members`), its triggers and `editinput`/
+   * `editoutput` regex scripts and the parts of its card the scripts may read —
+   * its name and nickname, its description and the rest of its character text,
+   * its lorebook and the book's settings, its post-history instructions, its
+   * background HTML and its avatar — with what the reader's scripts rewrote of it
+   * on this plot beside it (its slice of the overlay every chat of theirs on it
+   * reads, and the persona's), and the chat's own lore (`localLore`, what Lua's
+   * `upsertLocalLoreBook` wrote in this chat) — `scriptBundleOf`. `name` is
    * `{{char}}` as it stands for the reader: the nickname, else the name the
-   * scripts left.
+   * scripts left. `scripts` is the first of them, the scripted member
+   * (`scriptedMember`), which is all a page from before group turns reads.
    *
    * This is the one place a reader receives a member's card internals, and only
    * for a plot that carries scripts: RisuAI's scripts read the card they belong
    * to, so a card that plays in RisuAI has to be able to read it here too. The
    * creator is told so when they publish such a plot. Everything else a reader
-   * gets of the work stays as it was — `{ scripts: null }` for a plot without.
+   * gets of the work stays as it was — `{ scripts: null, members: [] }` for a
+   * plot without.
    */
   app.get('/:id/scripts', async (c) => {
     const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
     // The same gate as generating: a plot withdrawn from the reader runs nothing.
     const plot = await loadVisiblePlot(deps.db, chat.plotId, chat.userId);
-    const found = scriptedMember(await loadMembers(deps.db, plot.id));
-    if (!found) return c.json({ scripts: null });
-    const { member, scripts } = found;
-    const card = member.card;
-    const overlay = await loadReaderOverlay(deps.db, chat.userId, chat.plotId);
-    const own = overlay?.members?.[member.id] ?? null;
-    const nickname = card.nickname?.trim() ?? '';
-    return c.json({
-      scripts: {
-        memberId: member.id,
-        // `{{char}}` in a card's own text: its nickname where it sets one, else its
-        // name as the reader's scripts left it.
-        name: nickname || own?.name || member.name,
-        triggers: scripts.triggers,
-        editScripts: scripts.editScripts,
-        lowLevelAccess: scripts.lowLevelAccess,
-        character: {
-          // RisuAI's `char.name` (Lua's `getName`), and the nickname `{{char}}` stays.
-          name: member.name,
-          nickname,
-          description: card.description,
-          personality: card.personality,
-          scenario: card.scenario,
-          exampleDialogue: card.mesExample,
-          lorebook: card.lorebook,
-          postHistoryInstructions: card.postHistoryInstructions,
-          // What `/test_lorebook` and Lua's `loadLoreBooks` activate the book by, as the prompt does.
-          loreSettings: card.loreSettings,
-          // RisuAI's `backgroundHTML` whole, styles and all, as Lua's `getBackgroundEmbedding` reads it.
-          backgroundHtml: backgroundHtmlOf(card.extensions) ?? '',
-          // RisuAI's `char.image`, for Lua's `getCharacterImage`: a same-origin address, or null.
-          avatarUrl: avatarUrl(member),
-        },
-        overlay: {
-          member: own,
-          persona: overlay?.persona ?? null,
-        },
-        localLore: localLoreOf(chat),
-      },
+    const scripted = (await loadMembers(deps.db, plot.id)).flatMap((member) => {
+      const scripts = cardScripts(member.card);
+      return scripts ? [{ member, scripts }] : [];
     });
+    if (scripted.length === 0) return c.json({ scripts: null, members: [] });
+    const overlay = await loadReaderOverlay(deps.db, chat.userId, chat.plotId);
+    const members = scripted.map(({ member, scripts }) => scriptBundleOf(member, scripts, overlay, chat));
+    return c.json({ scripts: members[0]!, members });
   });
 
   /**
@@ -2102,6 +2281,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const note = optionalScriptNote(body);
     const localLore = readLocalLore(body['localLore']);
     const edits = readScriptChat(body, { turn: false });
+    // The member whose runtime ran: a character message its scripts add is its own.
+    const memberId = optionalMemberId(body);
     if (
       variableDelta === undefined &&
       content === undefined &&
@@ -2115,7 +2296,9 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     }
 
     const chat = await loadWritableChat(deps, id, userId);
-    const memberIds = overlay ? new Set((await loadMembers(deps.db, chat.plotId)).map((member) => member.id)) : null;
+    const roster = overlay || memberId !== undefined ? await loadMembers(deps.db, chat.plotId) : [];
+    const memberIds = overlay ? new Set(roster.map((member) => member.id)) : null;
+    scriptMemberOf(memberId, roster);
     if (!(await acquireChatSlot(deps, chat.id, userId))) await rejectBusyChat(deps, chat.id, userId);
     let committed: { chat: Chat; message: Message; written: Message[] };
     try {
@@ -2162,6 +2345,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           const plan = planScriptChat(buildPath(all, messageId), edits, {
             inPlace: rewritableHead(all, message!),
             ...(variableDelta !== undefined ? { lastDelta: variableDelta } : {}),
+            ...(memberId !== undefined ? { memberId } : {}),
           });
           if (plan.changed) written = (await applyScriptChat(tx, chat.id, plan, all)).written;
         }
@@ -2225,8 +2409,10 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * (`scriptLlm.ts`). `model` is `'main'` (the default), the chat's own model, or
    * `'sub'`, its auxiliary model, resolved as the background work resolves it.
    *
-   * Held as RisuAI holds the functions: the plot's scripted member must grant
-   * low-level access (403 `script_llm_forbidden` otherwise). Held as a turn is:
+   * Held as RisuAI holds the functions: the card of the member whose runtime
+   * called (`memberId`, a roster member; the plot's scripted member without one)
+   * must grant low-level access (403 `script_llm_forbidden` otherwise), and its
+   * request triggers are the ones that run over the call. Held as a turn is:
    * the reader's writable chat on a plot still visible to them, and the
    * generation slot for the length of the call (429 `generation_in_progress`),
    * renewed as a stream renews it. No count limit — the reader's account pays.
@@ -2237,9 +2423,10 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const body = await readJsonBody(c);
     const messages = readScriptLlmMessages(body['messages']);
     const which = readScriptLlmModel(body['model']);
+    const memberId = optionalMemberId(body);
     const chat = await loadWritableChat(deps, id, userId);
     const plot = await loadVisiblePlot(deps.db, chat.plotId, chat.userId);
-    const scripted = scriptedMember(await loadMembers(deps.db, plot.id));
+    const scripted = callingScripts(await loadMembers(deps.db, plot.id), memberId);
     if (!scripted?.scripts.lowLevelAccess) {
       throw forbidden('script_llm_forbidden', "This plot's scripts may not call the model");
     }
@@ -2251,7 +2438,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const model = which === 'sub' ? await auxiliaryModelOf(deps, chat) : chat.model;
       // RisuAI runs the request triggers over a script's call as over any request it sends.
       const sent = hasTriggersFor(scripted.scripts.triggers, 'request')
-        ? await withScriptRequestTriggers(c, deps, chat, messages)
+        ? await withScriptRequestTriggers(c, deps, chat, messages, scripted.member.id)
         : messages;
       return c.json({
         result: await runScriptLlm(deps, { userId, model, messages: sent, signal: c.req.raw.signal }),
@@ -2270,8 +2457,9 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * target's own status — is a 200 here with that answer as the body; only this
    * route's own refusals are HTTP errors.
    *
-   * Held as RisuAI holds it: the plot's scripted member must grant low-level
-   * access, the same gate and the same 403 as `script-llm`. The chat must be the
+   * Held as RisuAI holds it: the calling member's card (`memberId`, else the
+   * scripted member's) must grant low-level access, the same gate and the same
+   * 403 as `script-llm`. The chat must be the
    * reader's and writable. It does not take the generation slot: it writes
    * nothing and spends nothing of the reader's account, and a script may have
    * several in flight at once in RisuAI (deps' `suggesting` is the same rule).
@@ -2281,9 +2469,10 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const body = await readJsonBody(c);
+    const memberId = optionalMemberId(body);
     const chat = await loadWritableChat(deps, id, userId);
     const plot = await loadVisiblePlot(deps.db, chat.plotId, chat.userId);
-    if (!scriptedMember(await loadMembers(deps.db, plot.id))?.scripts.lowLevelAccess) {
+    if (!callingScripts(await loadMembers(deps.db, plot.id), memberId)?.scripts.lowLevelAccess) {
       throw forbidden('script_fetch_forbidden', "This plot's scripts may not make requests");
     }
     // The URL is not checked here: what RisuAI answers for one that is not text is part of its answer.
@@ -2444,6 +2633,9 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     // A start trigger said not to send (`stop`): the turn is stored as a send
     // stores it, and nothing is generated (see `stopped` below).
     const stopped = optionalBoolean(body, 'stopped') ?? false;
+    // A work of several members: the round's first speaker, whose reply opens it.
+    const speakerId = optionalSpeakerId(body);
+    const notLast = optionalBoolean(body, 'finalSpeaker') === false;
 
     /**
      * Everything a send writes before its prompt is planned: the head checks, the
@@ -2455,6 +2647,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       // Still before any write, and it needs the card the context just loaded.
       if (source === 'component') requireComponentTurnAllowed(chat, context.row);
       const focusNames = focusNamesOf(context.onStage, focusIds);
+      const voice = speakerId === undefined ? null : groupVoiceOf(context, speakerId, { narrator: false });
+      const scriptMember = scriptMemberOf(scripts.memberId, context.members);
       const path = buildPath(context.all, chat.headMessageId);
       await settleHead(deps, chat, path.at(-1), scripts, true);
       // The turn goes where the scripts left it — after the branch, unless they
@@ -2465,6 +2659,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         // Stored on the turn rather than on the request, so a regenerate of it
         // re-applies the same ruling.
         turn: { content, source, ...(directions ? { directions } : {}), attachmentIds },
+        ...(scriptMember ? { memberId: scriptMember.id } : {}),
       });
       await keepScriptWrites(deps, chat, context, scripts);
 
@@ -2472,7 +2667,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       // not this chat's own — or that another turn already claimed — must leave
       // no message behind for the client to find on its retry.
       const edited = await keepScriptChat(deps, chat, edit, context.all);
-      return { context, focusNames, edited };
+      return { context, focusNames, edited, voice };
     };
 
     /**
@@ -2499,7 +2694,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       // Fail before any write: a 400 here must leave the chat untouched, otherwise
       // the client resends a turn that was already persisted.
       await requireEnabledModel(deps, userId, chat.model);
-      const { context, focusNames, edited } = await storeTurn(chat);
+      const { context, focusNames, edited, voice } = await storeTurn(chat);
       const branch = edited.path;
 
       const memory = await buildMemoryInput(deps, chat, branch.slice(0, -1), content);
@@ -2542,21 +2737,122 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         auxiliaryModel: context.auxiliaryModel,
         contextBudget: memorySettingsOf(chat).contextBudget,
         focusNames,
+        // The round's first reply, which is the round's id.
+        ...(voice ? voicePlan(context, voice, null, notLast) : {}),
         target: { kind: 'new', parentId: branch.at(-1)?.id ?? null },
       };
     });
   });
 
+  // In a work of several members, with `speakerId`: the whole round again, from
+  // its first speaker (`regeneratePlan`). Without it, the head as it always was.
   app.post('/:id/regenerate', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const body = await optionalJsonBody(c);
     const focusIds = optionalMemberIds(body, 'focusCharacterIds') ?? [];
     const scripts = readGenerationScripts(body, { startDelta: true });
+    const speakerId = optionalSpeakerId(body);
+    const group =
+      speakerId === undefined ? undefined : { speakerId, notLast: optionalBoolean(body, 'finalSpeaker') === false };
 
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> =>
-      regeneratePlan(c, deps, await loadWritableChat(deps, id, userId), focusIds, scripts),
+      regeneratePlan(c, deps, await loadWritableChat(deps, id, userId), focusIds, scripts, group),
     );
+  });
+
+  /**
+   * One more reply in a work of several members: `speakerId`'s, an assistant
+   * child of the head. With `groupTurnId` it joins that round, whose reply the
+   * head must be — the next speaker of a round a send or a regenerate opened.
+   * Without it, it opens a round of its own: after a reply, the scene goes on
+   * without the reader (an "auto" round), and under the reader's turn it answers
+   * it. The narrator is not asked here; it has the narration button.
+   *
+   * It takes what the other generations take of the card's scripts, and checks
+   * the head as they do — a head the browser still owes its output scripts is a
+   * 409 `post_processing_pending`, so the next speaker's start triggers never run
+   * before the last reply is finished.
+   */
+  app.post('/:id/reply', async (c) => {
+    const id = requireUuidParam(c);
+    const userId = c.get('userId');
+    const body = await readJsonBody(c);
+    const speakerId = optionalSpeakerId(body);
+    if (speakerId === undefined) throw badRequest('invalid_request', 'speakerId is required');
+    const groupTurnId = body['groupTurnId'];
+    if (groupTurnId !== undefined && groupTurnId !== null && (typeof groupTurnId !== 'string' || !isUuid(groupTurnId))) {
+      throw badRequest('invalid_request', 'groupTurnId must be a round id');
+    }
+    const round = (groupTurnId ?? null) as string | null;
+    const notLast = optionalBoolean(body, 'finalSpeaker') === false;
+    const scripts = readGenerationScripts(body, { startDelta: true });
+
+    return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
+      const chat = await loadWritableChat(deps, id, userId);
+      await requireEnabledModel(deps, userId, chat.model);
+      const context = await loadGenerationContext(deps, chat, scripts);
+      const voice = groupVoiceOf(context, speakerId, { narrator: false });
+      const scriptMember = scriptMemberOf(scripts.memberId, context.members);
+      const before = buildPath(context.all, chat.headMessageId);
+      const head = before.at(-1);
+      if (!head) throw badRequest('invalid_state', 'The chat has no messages to reply to');
+      if (round !== null && (head.role !== 'assistant' || head.groupTurnId !== round)) {
+        throw badRequest('invalid_state', 'The head is not a reply of that round');
+      }
+      await settleHead(deps, chat, head, scripts, true);
+      // What the round answers: the message before its first reply, or the head
+      // for a round this reply opens. The reader's turn brings its ruling; a reply
+      // means the scene goes on without the reader.
+      const answered = round === null ? head : before[roundStart(before) - 1];
+      const answersReader = answered?.role === 'user';
+      // The reply follows whatever the start triggers left last.
+      const edit = scripts.chat
+        ? planScriptChat(before, scripts.chat, {
+            inPlace: rewritableHead(context.all, head),
+            ...(scriptMember ? { memberId: scriptMember.id } : {}),
+          })
+        : null;
+      await keepScriptWrites(deps, chat, context, scripts);
+      const edited = edit ? await keepScriptChat(deps, chat, edit, context.all) : null;
+      const path = edited ? edited.path : before;
+      const end = path.at(-1);
+      const memory = await buildMemoryInput(deps, chat, path, lastUserText(path));
+      // The turn being answered must be in the prompt, so the end is re-attached
+      // when the summary swallowed it.
+      const history = memory.history.length > 0 || !end ? memory.history : [end];
+
+      return {
+        chatId: chat.id,
+        model: chat.model,
+        plot: context.plot,
+        characters: context.characters,
+        personaText: context.personaText,
+        userName: context.userName,
+        history: await promptHistory(deps, c.get('userId'), chat.model, history, context.scriptSpeaker),
+        wholeBranch: path,
+        memoryText: memory.memoryText,
+        relationshipText: buildRelationshipText(chat),
+        authorNote: context.authorNote,
+        ...(context.narrator ? { narrator: context.narrator } : {}),
+        ...(answersReader ? { directions: lastUserDirections(path) } : {}),
+        preset: getPreset(chat.preset),
+        ...startedFrom(pathVariables(context.row, path, context.fold), scripts),
+        fold: context.fold,
+        globalVariables: context.globalVariables,
+        clock: requestClock(c, context.row, path),
+        seed: chat.id,
+        branch: promptBranch(edited?.all ?? context.all, path, context.firstMessage),
+        loreState: loreStateOf(path),
+        assetNames: context.assetNames,
+        scriptView: context.scriptView,
+        localLore: context.localLore,
+        auxiliaryModel: context.auxiliaryModel,
+        contextBudget: memorySettingsOf(chat).contextBudget,
+        ...voicePlan(context, voice, round, notLast, answersReader ? [] : [AUTO_CONTINUE_NUDGE]),
+        target: { kind: 'new', parentId: end?.id ?? null },
+      };
+    });
   });
 
   /**
@@ -2596,8 +2892,13 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       // continues whatever ends its chat — written in place, so a stored one other
       // branches read is copied first. A chat they left ending on a user turn, or
       // on nothing, has no reply to continue.
+      const scriptMember = scriptMemberOf(scripts.memberId, context.members);
       const edit = scripts.chat
-        ? planScriptChat(before, scripts.chat, { inPlace: rewritableHead(context.all, before.at(-1)), ownLast: true })
+        ? planScriptChat(before, scripts.chat, {
+            inPlace: rewritableHead(context.all, before.at(-1)),
+            ownLast: true,
+            ...(scriptMember ? { memberId: scriptMember.id } : {}),
+          })
         : null;
       if (edit && edit.lastRole !== 'assistant') {
         throw badRequest('invalid_state', 'The scripts left no assistant message to continue');
@@ -2610,6 +2911,15 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       // The partial assistant turn must stay last for the model to resume it, so it
       // is re-attached when the summary swallowed it.
       const history = memory.history.length > 0 ? memory.history : [head];
+      // A group reply is continued by whoever said it, while they are on the
+      // stage — a round's narration by the narrator; anything else as the scene.
+      const group = context.members.length >= 2;
+      const speaker = group ? context.onStage.find((member) => member.id === head.speakerMemberId) : undefined;
+      const voice = speaker
+        ? context.members.indexOf(speaker)
+        : group && head.groupTurnId !== null && isNarration(head.content)
+          ? NARRATOR_SPEAKER
+          : undefined;
 
       return {
         chatId: chat.id,
@@ -2648,6 +2958,10 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         auxiliaryModel: context.auxiliaryModel,
         contextBudget: memorySettingsOf(chat).contextBudget,
         focusNames,
+        // The message keeps its own speaker and round; only the names its own
+        // prefixes come off by, and whose scripts run, travel.
+        ...(voice !== undefined ? { speaker: voice } : {}),
+        ...(speaker ? { speakerNames: speakerNamesOf(speaker), scriptView: context.scriptViewFor(speaker) } : {}),
         target: { kind: 'continue', message: head },
       };
     });
@@ -2674,8 +2988,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       }
       await settleHead(deps, chat, before.at(-1), scripts, true);
       // The reply follows whatever the start triggers left last.
+      const scriptMember = scriptMemberOf(scripts.memberId, context.members);
       const edit = scripts.chat
-        ? planScriptChat(before, scripts.chat, { inPlace: rewritableHead(context.all, before.at(-1)) })
+        ? planScriptChat(before, scripts.chat, {
+            inPlace: rewritableHead(context.all, before.at(-1)),
+            ...(scriptMember ? { memberId: scriptMember.id } : {}),
+          })
         : null;
       await keepScriptWrites(deps, chat, context, scripts);
       const edited = edit ? await keepScriptChat(deps, chat, edit, context.all) : null;
@@ -2745,8 +3063,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       if (!before.at(-1)) throw badRequest('invalid_state', 'The chat has no messages to narrate from');
       await settleHead(deps, chat, before.at(-1), scripts, true);
       // The narration follows whatever the start triggers left last.
+      const scriptMember = scriptMemberOf(scripts.memberId, context.members);
       const edit = scripts.chat
-        ? planScriptChat(before, scripts.chat, { inPlace: rewritableHead(context.all, before.at(-1)) })
+        ? planScriptChat(before, scripts.chat, {
+            inPlace: rewritableHead(context.all, before.at(-1)),
+            ...(scriptMember ? { memberId: scriptMember.id } : {}),
+          })
         : null;
       await keepScriptWrites(deps, chat, context, scripts);
       const edited = edit ? await keepScriptChat(deps, chat, edit, context.all) : null;
@@ -2789,6 +3111,19 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           user: context.userName,
         }),
         narration: true,
+        // In a work of several members the narration is the narrator's turn: it
+        // ends the round the head is a reply of, joining it, or opens one of its
+        // own — under the reader's turn, or a reply in no round. Its prompt is the
+        // scene's, stopped where it starts on a member's line.
+        ...(context.members.length >= 2
+          ? {
+              speaker: NARRATOR_SPEAKER,
+              round: {
+                speakerMemberId: null,
+                groupTurnId: head?.role === 'assistant' ? head.groupTurnId : null,
+              },
+            }
+          : {}),
         target: { kind: 'new', parentId: head?.id ?? null },
       };
     });
@@ -2826,6 +3161,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           userId: chat.userId,
           subModel: chat.subModel,
           recent: buildPath(context.all, chat.headMessageId),
+          members: context.members,
           plotName: context.plot.name,
           userName: context.userName,
           personaText: context.personaText,
@@ -2939,6 +3275,14 @@ const AUTO_CONTINUE_NUDGE =
  */
 const NARRATION_NUDGE =
   '(다음 응답은 {{char}}의 등장인물이 말하거나 움직이는 장면이 아니라 나레이터의 장면 서술만 출력한다. 접두사 없는 줄로만 쓴다. 나레이터 설정(문체·시점)이 있으면 따른다. 유저나 등장인물의 대사를 만들지 않는다)';
+
+/**
+ * For a group round's speakers before the last: the round ends on the last
+ * reply, and the status window and the choices are what it closes on. Appended
+ * to the prompt, never persisted — and only where the chat has either.
+ */
+const NOT_LAST_SPEAKER_NUDGE =
+  '(이 응답 뒤에 다른 인물이 이어서 답한다. 이번 응답에는 상태창과 선택지를 붙이지 않는다)';
 
 /** Intro roots a chat may hold — a plot offering more is truncated here too. */
 const MAX_INTRO_ROOTS = 10;

@@ -1,5 +1,6 @@
 import type {
   AssetUnlock,
+  GroupSettings,
   ImportProvenance,
   LoreEntry,
   NarratorConfig,
@@ -10,6 +11,7 @@ import type {
   VariableDelta,
   Variables,
 } from '@shizue/core';
+import { sql } from 'drizzle-orm';
 import {
   boolean,
   index,
@@ -17,6 +19,7 @@ import {
   jsonb,
   pgTable,
   primaryKey,
+  smallint,
   text,
   timestamp,
   unique,
@@ -110,7 +113,8 @@ export interface ChatRelationship {
   note: string;
   updatedAt: string;
   /**
-   * Assistant messages the branch held when the last extraction was attempted.
+   * Rounds the branch held when the last extraction was attempted — assistant
+   * messages, a group turn's replies counted once together (the API's `roundCount`).
    * The trigger compares it against the current branch rather than counting
    * generation events, so regenerate/continue do not inflate it and a turn that
    * lands while an extraction runs is not lost.
@@ -179,6 +183,10 @@ export const plots = pgTable(
     // They belong to the work because a chat is the work's: an imported card
     // carries them and the import lifts them here.
     customUi: jsonb('custom_ui').$type<PlotCustomUi>(),
+    // How a work of two or more members picks a round's speakers (@shizue/core
+    // group.ts): the order and the cap. Null is the default — natural order,
+    // three a round; the coercion decides what a stored value may say.
+    groupSettings: jsonb('group_settings').$type<GroupSettings>(),
     language: text('language').$type<ContentLanguage>().notNull().default('ko'),
     visibility: text('visibility').$type<Visibility>().notNull().default('private'),
     // Chosen on publish. Not part of the explore indexes: 'all' is the default and
@@ -238,6 +246,10 @@ export const characters = pgTable(
     // in and the order the roster renders in. Not unique: a reorder rewrites the
     // whole set, and two members briefly sharing an index only ties their order.
     orderIndex: integer('order_index').notNull().default(0),
+    // 대화량: how readily the member speaks unprompted in a group round, 0..100,
+    // 0 being only when the reader writes them a line or picks them. Null is the
+    // default, 50 (`coerceTalkativeness`).
+    talkativeness: smallint('talkativeness'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -531,9 +543,23 @@ export const messages = pgTable(
     model: text('model'),
     promptTokens: integer('prompt_tokens'),
     completionTokens: integer('completion_tokens'),
+    // A group turn's reply is one member's whole (@shizue/core group.ts): who said
+    // it. Null for every other message — the reader's, a scene reply naming its
+    // speakers in `이름:` lines, a narration — and once the member is deleted.
+    speakerMemberId: uuid('speaker_member_id').references(() => characters.id, { onDelete: 'set null' }),
+    // The round a group reply belongs to: the id of the round's first reply,
+    // which carries its own. Unconstrained, as `head_message_id` is — a label the
+    // round's replies share, which outlives the message it was taken from.
+    groupTurnId: uuid('group_turn_id'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('messages_chat_id_idx').on(t.chatId), index('messages_parent_id_idx').on(t.parentId)],
+  (t) => [
+    index('messages_chat_id_idx').on(t.chatId),
+    index('messages_parent_id_idx').on(t.parentId),
+    // What a member's delete walks to clear its replies' speaker; only the
+    // tagged few are in it.
+    index('messages_speaker_member_id_idx').on(t.speakerMemberId).where(sql`${t.speakerMemberId} is not null`),
+  ],
 );
 
 // Images the reader attached to one of their own turns. Uploaded before the turn

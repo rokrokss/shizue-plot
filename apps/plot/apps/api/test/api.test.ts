@@ -17,6 +17,7 @@ import {
   countTokens,
   DEFAULT_CONTEXT_BUDGET,
   DEFAULT_MAX_RESPONSE_TOKENS,
+  groupSpeakerLine,
   IMAGE_ATTACHED_PLACEHOLDER,
   loreEntryKey,
   MAX_ASSETS,
@@ -27,6 +28,7 @@ import {
   MAX_INTRO_TEXT_LENGTH,
   MAX_INTROS_PER_PLOT,
   MAX_VARIABLE_VALUE_LENGTH,
+  NARRATOR_SPEAKER,
   parseCard,
   placeholderPng,
   plotHeader,
@@ -116,6 +118,7 @@ import { runRequestTriggers } from '../src/requestTriggers.js';
 import { createScriptFetch, type HopResponse, type Transport } from '../src/scriptFetch.js';
 import { MAX_GLOBAL_VARIABLE_KEYS } from '../src/scriptState.js';
 import { createLocalStorage, type ObjectStorage } from '../src/storage.js';
+import { roundCount, roundStart } from '../src/tree.js';
 import { connectS3Server } from './s3Server.js';
 
 loadRootEnv();
@@ -9009,6 +9012,8 @@ describe('plot hub', () => {
       // prompt text and must not appear here.
       style: null,
       narrator: null,
+      // How the reader's browser picks a round's speakers: options too, the default filled in.
+      groupSettings: { order: 'natural', maxSpeakers: 3 },
       // The follow edge to the creator — nobody follows anyone in this fixture.
       creatorFollow: { followerCount: 0, followedByMe: false },
       // Written for readers too, and empty until the creator recommends one.
@@ -9025,6 +9030,8 @@ describe('plot hub', () => {
           nickname: null,
           avatarUrl: null,
           intro: '멤버를 소개하는 한 줄.',
+          // 대화량, which the reader's browser rolls a round by.
+          talkativeness: 50,
         },
       ],
       // Presentation, so it travels even though the definition does not.
@@ -13130,7 +13137,7 @@ describe('the browser script runtime', () => {
     const plot = await createPlot(cookie, { description: '설명', intros: ['안녕'] });
     await addCharacter(cookie, plot.id, { card: { description: '평범한 사서' } });
     const chat = await startChat(cookie, plot.id);
-    expect(await scriptsOf(cookie, chat.chat.id)).toEqual({ scripts: null });
+    expect(await scriptsOf(cookie, chat.chat.id)).toEqual({ scripts: null, members: [] });
   });
 
   it("ships the scripted member's scripts and card text to a reader, and nothing of the others", async () => {
@@ -14084,5 +14091,601 @@ describe('script requests', () => {
     expect(await send('https://site.test/')).toEqual({ status: 200, data: '본문' });
     release();
     expect((await call).status).toBe(200);
+  });
+});
+
+describe('group turns', () => {
+  /** An app answering from `replies` in order (the last one again after that), keeping every request the model was sent. */
+  function replyingApp(...replies: string[]): { target: Hono<AppEnv>; sent: ChatRequest[] } {
+    const sent: ChatRequest[] = [];
+    let call = 0;
+    const target = makeApp({
+      getAdapter: () => ({
+        providerModel: 'group',
+        adapter: {
+          stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
+            sent.push(req);
+            const reply = replies[Math.min(call, replies.length - 1)] ?? '';
+            call += 1;
+            yield { type: 'text', text: reply };
+            return { usage: { promptTokens: 1, completionTokens: 1 } };
+          },
+        },
+      }),
+    });
+    return { target, sent };
+  }
+
+  /** A work of three — 세이야 (nickname 세이), 카이, 미오 — and its owner's chat on it. */
+  async function groupChat(
+    email: string,
+    plot: Record<string, unknown> = {},
+    cards: Record<string, Record<string, unknown>> = {},
+  ): Promise<{ cookie: string; plotId: string; chatId: string; seiya: string; kai: string; mio: string }> {
+    const cookie = await signUp(email);
+    const created = await createPlot(cookie, { name: '은빛 여관', description: '눈 덮인 여관.', intros: ['문이 열린다.'], ...plot });
+    const seiya = await addCharacter(cookie, created.id, {
+      name: '세이야',
+      card: { description: '기사', nickname: '세이', ...cards['세이야'] },
+    });
+    const kai = await addCharacter(cookie, created.id, { name: '카이', card: { description: '주인', ...cards['카이'] } });
+    const mio = await addCharacter(cookie, created.id, { name: '미오', card: { description: '악사', ...cards['미오'] } });
+    const state = await startChat(cookie, created.id);
+    return { cookie, plotId: created.id, chatId: state.chat.id, seiya: seiya.id, kai: kai.id, mio: mio.id };
+  }
+
+  const post = (cookie: string, chatId: string, route: string, body: unknown, target: Hono<AppEnv> = app): Promise<Response> =>
+    json(cookie, `/api/chats/${chatId}/${route}`, 'POST', body, target);
+
+  /** The `done` payload of a stream that has to finish. */
+  async function done(res: Response): Promise<any> {
+    expect(res.status, await res.clone().text()).toBe(200);
+    const events = await readSse(res);
+    expect(events.at(-1)!.event, JSON.stringify(events.at(-1))).toBe('done');
+    return events.at(-1)!.data;
+  }
+
+  /** A 400 with its code, after which the chat holds what it held. */
+  async function refused(res: Response, code = 'invalid_request', status = 400): Promise<void> {
+    expect(res.status, await res.clone().text()).toBe(status);
+    expect((await readJson(res)).code).toBe(code);
+  }
+
+  const rowsOf = (chatId: string) =>
+    db.select().from(messages).where(eq(messages.chatId, chatId)).orderBy(asc(messages.createdAt));
+  const textsOf = (req: ChatRequest): string[] => req.messages.map((message) => contentText(message.content));
+
+  /** user → 세이야 → 카이, the first round of `groupChat`'s chat, through `target`. */
+  async function firstRound(chat: Awaited<ReturnType<typeof groupChat>>, target: Hono<AppEnv>) {
+    const a = await done(await post(chat.cookie, chat.chatId, 'messages', { content: '안녕', speakerId: chat.seiya }, target));
+    const b = await done(
+      await post(chat.cookie, chat.chatId, 'reply', { speakerId: chat.kai, groupTurnId: a.groupTurnId }, target),
+    );
+    return { a, b };
+  }
+
+  it('answers a turn one speaker at a time, each reply its own message in one round', async () => {
+    const chat = await groupChat('group-tree@example.com', { style: { statusWindow: true } });
+    const { cookie, chatId, seiya, kai } = chat;
+    const { target, sent } = replyingApp('세이야: *검을 거둔다* 왔군.\n세이: 앉아.', '카이: 어서 와!');
+    const a = await done(
+      await post(cookie, chatId, 'messages', { content: '안녕.\n@카이: 대신 인사할게.', speakerId: seiya, finalSpeaker: false }, target),
+    );
+    expect(a.speakerMemberId).toBe(seiya);
+    expect(a.groupTurnId).toBe(a.messageId);
+    const b = await done(await post(cookie, chatId, 'reply', { speakerId: kai, groupTurnId: a.groupTurnId }, target));
+    expect(b).toMatchObject({ speakerMemberId: kai, groupTurnId: a.messageId });
+
+    const [greeting, user, first, second] = await rowsOf(chatId);
+    expect(user).toMatchObject({ parentId: greeting!.id, role: 'user', speakerMemberId: null, groupTurnId: null });
+    // The speaker's own prefixes — by name and by nickname — come off what it wrote.
+    expect(first).toMatchObject({ id: a.messageId, parentId: user!.id, speakerMemberId: seiya, groupTurnId: a.messageId });
+    expect(first!.content).toBe('*검을 거둔다* 왔군.\n앉아.');
+    expect(second).toMatchObject({ parentId: first!.id, speakerMemberId: kai, groupTurnId: a.messageId, content: '어서 와!' });
+
+    // Each request is the speaker's: its line closes the prompt, the others' names stop it.
+    expect(sent[0]!.stop).toEqual(['\n유저:', '\n카이:', '\n미오:']);
+    const firstTexts = textsOf(sent[0]!);
+    expect(firstTexts.at(-2)).toBe(groupSpeakerLine('세이야'));
+    // Not the round's last: the status window is the last speaker's to write.
+    expect(firstTexts.at(-1)).toContain('상태창과 선택지를 붙이지 않는다');
+    // The line the reader wrote as 카이 is sent as 카이's.
+    expect(firstTexts).toContain('안녕.\n카이: 대신 인사할게.');
+    const secondTexts = textsOf(sent[1]!);
+    expect(sent[1]!.stop).toEqual(['\n유저:', '\n세이야:', '\n세이:', '\n미오:']);
+    expect(secondTexts.at(-1)).toBe(groupSpeakerLine('카이'));
+    expect(secondTexts).toContain('세이야: *검을 거둔다* 왔군.\n세이야: 앉아.');
+    expect(secondTexts.join('\n')).not.toContain('상태창과 선택지를 붙이지 않는다');
+
+    // The chat reads both tags back.
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    expect(state.path.slice(-3).map((message: any) => [message.speakerMemberId, message.groupTurnId])).toEqual([
+      [null, null],
+      [seiya, a.messageId],
+      [kai, a.messageId],
+    ]);
+  });
+
+  it('holds /reply to a speaker on the stage and to the round the head is a reply of', async () => {
+    const chat = await groupChat('group-reply@example.com');
+    const { cookie, chatId, seiya, kai, mio } = chat;
+    const { target, sent } = replyingApp('응.');
+    const a = await done(await post(cookie, chatId, 'messages', { content: '안녕', speakerId: seiya }, target));
+    await refused(await post(cookie, chatId, 'reply', {}, target));
+    await refused(await post(cookie, chatId, 'reply', { speakerId: NARRATOR_SPEAKER }, target));
+    await refused(await post(cookie, chatId, 'reply', { speakerId: randomUUID() }, target));
+    await refused(await post(cookie, chatId, 'reply', { speakerId: '카이' }, target));
+    await refused(await post(cookie, chatId, 'reply', { speakerId: kai, groupTurnId: 'round' }, target));
+    await refused(await post(cookie, chatId, 'reply', { speakerId: kai, groupTurnId: randomUUID() }, target), 'invalid_state');
+    expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { absentCharacterIds: [mio] })).status).toBe(200);
+    await refused(await post(cookie, chatId, 'reply', { speakerId: mio, groupTurnId: a.groupTurnId }, target));
+    expect(await rowsOf(chatId)).toHaveLength(3);
+
+    // Without a round it opens one of its own: after a reply, the scene goes on without the reader.
+    const auto = await done(await post(cookie, chatId, 'reply', { speakerId: kai }, target));
+    expect(auto.groupTurnId).toBe(auto.messageId);
+    expect(textsOf(sent.at(-1)!).join('\n')).toContain('유저 개입 없이');
+    // …and its next speaker joins it.
+    const joined = await done(await post(cookie, chatId, 'reply', { speakerId: seiya, groupTurnId: auto.groupTurnId }, target));
+    expect(joined.groupTurnId).toBe(auto.messageId);
+  });
+
+  it('redoes the whole round from its first speaker, as a sibling of its first reply', async () => {
+    const chat = await groupChat('group-reroll@example.com');
+    const { cookie, chatId, mio, kai } = chat;
+    const { target, sent } = replyingApp('세이야의 말.', '카이의 말.', '미오의 말.');
+    const { a } = await firstRound(chat, target);
+    const c = await done(await post(cookie, chatId, 'regenerate', { speakerId: mio }, target));
+    expect(c).toMatchObject({ speakerMemberId: mio, groupTurnId: c.messageId });
+    const rows = await rowsOf(chatId);
+    const user = rows.find((row) => row.role === 'user')!;
+    const rerolled = rows.find((row) => row.id === c.messageId)!;
+    expect(rerolled.parentId).toBe(user.id);
+    // The replaced round is in none of the new prompt.
+    const texts = textsOf(sent.at(-1)!);
+    expect(texts.join('\n')).not.toContain('세이야의 말.');
+    expect(texts.join('\n')).not.toContain('카이의 말.');
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    expect(state.chat.headMessageId).toBe(c.messageId);
+    expect(state.siblings[c.messageId].ids).toEqual([a.messageId, c.messageId]);
+
+    // The round goes on under the new first reply.
+    const d = await done(await post(cookie, chatId, 'reply', { speakerId: kai, groupTurnId: c.groupTurnId }, target));
+    expect(d.groupTurnId).toBe(c.messageId);
+    // A one-speaker round is redone as one, and so is a head in no round.
+    await refused(await post(cookie, chatId, 'regenerate', { speakerId: randomUUID() }, target));
+    const scene = await done(await post(cookie, chatId, 'regenerate', {}, target));
+    expect(scene).not.toHaveProperty('groupTurnId');
+    const sceneRow = (await rowsOf(chatId)).find((row) => row.id === scene.messageId)!;
+    expect(sceneRow).toMatchObject({ parentId: c.messageId, speakerMemberId: null, groupTurnId: null });
+  });
+
+  it('holds the next speaker back until the last reply is finished, and keeps a stopped reply with its speaker', async () => {
+    const chat = await groupChat('group-pending@example.com');
+    const { cookie, chatId, seiya, kai } = chat;
+    const { target } = replyingApp('세이야의 말.');
+    const a = await done(await post(cookie, chatId, 'messages', { content: '안녕', speakerId: seiya, postProcess: true }, target));
+    expect(a.postProcess).toBe(true);
+    await refused(
+      await post(cookie, chatId, 'reply', { speakerId: kai, groupTurnId: a.groupTurnId }, target),
+      'post_processing_pending',
+      409,
+    );
+    const commit = await json(cookie, `/api/chats/${chatId}/script-commit`, 'POST', {
+      messageId: a.messageId,
+      scriptRev: a.scriptRev,
+      clearPending: true,
+    });
+    expect(commit.status, await commit.clone().text()).toBe(200);
+
+    // The reader stops the round mid-reply: what was written is kept, under its speaker and round.
+    const slow = makeApp({
+      getAdapter: () => ({
+        providerModel: 'slow',
+        adapter: {
+          stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
+            yield { type: 'text', text: '카이: 반쯤' };
+            await new Promise<void>((_resolve, reject) => {
+              const fail = (): void => reject(new Error('aborted'));
+              if (req.abortSignal?.aborted) fail();
+              else req.abortSignal?.addEventListener('abort', fail);
+            });
+            return { usage: { promptTokens: 0, completionTokens: 0 } };
+          },
+        },
+      }),
+    });
+    const client = new AbortController();
+    const res = await slow.request(`/api/chats/${chatId}/reply`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ speakerId: kai, groupTurnId: a.groupTurnId }),
+      signal: client.signal,
+    });
+    await res.body!.getReader().read();
+    client.abort();
+    await until(async () => (await claimOf(chatId)) === null, 'the claim was never released');
+    const kept = (await rowsOf(chatId)).at(-1)!;
+    expect(kept).toMatchObject({ content: '반쯤', speakerMemberId: kai, groupTurnId: a.messageId, parentId: a.messageId });
+  });
+
+  it('continues a reply as its speaker, the partial plain and only the new text stripped', async () => {
+    const chat = await groupChat('group-continue@example.com');
+    const { cookie, chatId, kai } = chat;
+    const { target, sent } = replyingApp('세이야의 말.', '어서 와!', '카이: 더 마셔.');
+    const { b } = await firstRound(chat, target);
+    const more = await done(await post(cookie, chatId, 'continue', {}, target));
+    expect(more).toMatchObject({ messageId: b.messageId, speakerMemberId: kai, groupTurnId: b.groupTurnId });
+    const texts = textsOf(sent.at(-1)!);
+    expect(texts.at(-1)).toBe('어서 와!');
+    expect(texts.at(-2)).toBe(groupSpeakerLine('카이'));
+    expect(sent.at(-1)!.stop).toEqual(['\n유저:', '\n세이야:', '\n세이:', '\n미오:']);
+    expect((await rowsOf(chatId)).find((row) => row.id === b.messageId)!.content).toBe('어서 와!더 마셔.');
+  });
+
+  it("narrates as the narrator's turn: ending the round it follows, or opening one", async () => {
+    const chat = await groupChat('group-narrate@example.com');
+    const { cookie, chatId } = chat;
+    const { target, sent } = replyingApp('세이야의 말.', '카이의 말.', '바람이 분다.');
+    const { a } = await firstRound(chat, target);
+    const ended = await done(await post(cookie, chatId, 'narrate', {}, target));
+    expect(ended).toMatchObject({ speakerMemberId: null, groupTurnId: a.messageId });
+    expect(sent.at(-1)!.stop).toEqual(['\n유저:', '\n세이야:', '\n세이:', '\n카이:', '\n미오:']);
+    expect((await rowsOf(chatId)).at(-1)!.content).toBe('@: 바람이 분다.');
+
+    // Under the reader's turn it opens a round of its own, which the narrator redoes.
+    const stopped = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '잠깐', stopped: true });
+    expect(stopped.status).toBe(200);
+    const opened = await done(await post(cookie, chatId, 'narrate', {}, target));
+    expect(opened.groupTurnId).toBe(opened.messageId);
+    const again = await done(await post(cookie, chatId, 'regenerate', { speakerId: NARRATOR_SPEAKER }, target));
+    expect(again.groupTurnId).toBe(again.messageId);
+    const rows = await rowsOf(chatId);
+    expect(rows.find((row) => row.id === again.messageId)).toMatchObject({
+      parentId: rows.find((row) => row.id === opened.messageId)!.parentId,
+      content: '@: 바람이 분다.',
+      speakerMemberId: null,
+    });
+    // The narrator is asked for on the narration button only.
+    await refused(await post(cookie, chatId, 'messages', { content: '안녕', speakerId: NARRATOR_SPEAKER }, target));
+  });
+
+  it('leaves a work of one member exactly as it was, and a group work without a speaker on the scene', async () => {
+    const cookie = await signUp('group-single@example.com');
+    const { chatId } = await setupChat(cookie);
+    const [member] = await db.select().from(characters);
+    const { target, sent } = replyingApp('리안: 어서 오세요.');
+    const before = (await rowsOf(chatId)).length;
+    await refused(await post(cookie, chatId, 'messages', { content: '안녕', speakerId: member!.id }, target));
+    await refused(await post(cookie, chatId, 'messages', { content: '안녕', speakerId: member!.id, stopped: true }, target));
+    await refused(await post(cookie, chatId, 'reply', { speakerId: member!.id }, target));
+    await refused(await post(cookie, chatId, 'regenerate', { speakerId: member!.id }, target));
+    expect(await rowsOf(chatId)).toHaveLength(before);
+    const plain = await done(await post(cookie, chatId, 'messages', { content: '안녕' }, target));
+    expect(Object.keys(plain).sort()).toEqual(['messageId', 'usage']);
+    expect(sent.at(-1)!.stop).toEqual(['\n유저:']);
+    expect((await rowsOf(chatId)).at(-1)).toMatchObject({ content: '리안: 어서 오세요.', speakerMemberId: null, groupTurnId: null });
+
+    // A work of several asked without a speaker answers as the scene, a tab from before group turns.
+    const group = await groupChat('group-scene@example.com');
+    const scenes = replyingApp('세이야의 말.', '카이의 말.', '둘 다 반가워.');
+    await firstRound(group, scenes.target);
+    const scene = await done(await post(group.cookie, group.chatId, 'messages', { content: '둘 다 고마워' }, scenes.target));
+    expect(scene).not.toHaveProperty('speakerMemberId');
+    expect(scenes.sent.at(-1)!.stop).toEqual(['\n유저:']);
+    const texts = textsOf(scenes.sent.at(-1)!);
+    expect(texts.some((text) => text.startsWith('[다음 응답의 화자'))).toBe(false);
+    // The scene still reads each tagged reply under its member.
+    expect(texts).toContain('세이야: 세이야의 말.');
+    expect(texts).toContain('카이: 카이의 말.');
+    expect((await rowsOf(group.chatId)).at(-1)).toMatchObject({ speakerMemberId: null, groupTurnId: null });
+  });
+
+  it("runs the request's scripts of the speaker's card, and the lead's for the scene", async () => {
+    const setSystem = (value: string) => [
+      { type: 'v2SetRequestState', value, valueType: 'value', index: '0', indexType: 'value', indent: 0 },
+    ];
+    const listening = `listenEdit('editRequest', function(id, req, meta)\nreq[1].content = req[1].content .. '\\n루아: ' .. getName(id)\nreturn req\nend)`;
+    const chat = await groupChat('group-request@example.com', {}, {
+      세이야: { extensions: { risuai: { triggerscript: [{ comment: '', type: 'request', conditions: [], effect: setSystem('세이야의 요청') }] } } },
+      카이: {
+        extensions: {
+          risuai: { triggerscript: [{ comment: '', type: 'start', conditions: [], effect: [{ type: 'triggerlua', code: listening }] }] },
+        },
+      },
+    });
+    const { cookie, chatId, seiya, kai, mio } = chat;
+    const { app: capturing, prompts } = capturingApp();
+    await done(await post(cookie, chatId, 'messages', { content: '안녕', speakerId: kai }, capturing));
+    expect(prompts.at(-1)!.system.endsWith('\n루아: 카이')).toBe(true);
+    expect(prompts.at(-1)!.system).not.toContain('세이야의 요청');
+    const last = (await rowsOf(chatId)).at(-1)!;
+    await done(await post(cookie, chatId, 'reply', { speakerId: seiya, groupTurnId: last.groupTurnId }, capturing));
+    expect(prompts.at(-1)!.system).toBe('세이야의 요청');
+    // 미오 carries no scripts: nothing runs for its reply.
+    const next = (await rowsOf(chatId)).at(-1)!;
+    await done(await post(cookie, chatId, 'reply', { speakerId: mio, groupTurnId: next.groupTurnId }, capturing));
+    expect(prompts.at(-1)!.system).not.toContain('세이야의 요청');
+    expect(prompts.at(-1)!.system).not.toContain('루아:');
+    // The scene and the narrator are the lead's — the first member with scripts.
+    await done(await post(cookie, chatId, 'messages', { content: '또' }, capturing));
+    expect(prompts.at(-1)!.system).toBe('세이야의 요청');
+    await done(await post(cookie, chatId, 'narrate', {}, capturing));
+    expect(prompts.at(-1)!.system).toBe('세이야의 요청');
+  });
+
+  it("holds a script's model call and request to the calling member's card", async () => {
+    const lua = [{ comment: '', type: 'start', conditions: [], effect: [{ type: 'triggerlua', code: 'function onStart(id) end' }] }];
+    const fetched: unknown[] = [];
+    const target = makeApp({
+      getAdapter: stubGetAdapter,
+      scriptFetch: { request: async (_reader, url) => (fetched.push(url), { status: 200, data: 'ok' }) },
+    });
+    const chat = await groupChat('group-gates@example.com', {}, {
+      세이야: { extensions: { risuai: { triggerscript: lua, lowLevelAccess: false } } },
+      카이: { extensions: { risuai: { triggerscript: lua, lowLevelAccess: true } } },
+    });
+    const { cookie, chatId, kai, mio } = chat;
+    const llm = (body: Record<string, unknown>) =>
+      post(cookie, chatId, 'script-llm', { messages: [{ role: 'user', content: '질문' }], ...body }, target);
+    const fetchAs = (body: Record<string, unknown>) => post(cookie, chatId, 'script-fetch', { url: 'https://site.test/', ...body }, target);
+
+    // The lead, 세이야, may not; 카이 may; 미오 carries no scripts at all.
+    await refused(await llm({}), 'script_llm_forbidden', 403);
+    expect(await readJson(await llm({ memberId: kai }))).toEqual({ result: '스텁 응답' });
+    await refused(await llm({ memberId: mio }), 'script_llm_forbidden', 403);
+    await refused(await llm({ memberId: randomUUID() }));
+    await refused(await llm({ memberId: 'kai' }));
+    await refused(await fetchAs({}), 'script_fetch_forbidden', 403);
+    expect(await readJson(await fetchAs({ memberId: kai }))).toEqual({ status: 200, data: 'ok' });
+    await refused(await fetchAs({ memberId: randomUUID() }));
+    expect(fetched).toEqual(['https://site.test/']);
+  });
+
+  it("ships every scripted member's bundle with its own slice of the overlay", async () => {
+    const triggerscript = [{ comment: '', type: 'manual', conditions: [], effect: [] }];
+    const chat = await groupChat('group-scripts@example.com', {}, {
+      세이야: { extensions: { risuai: { triggerscript } } },
+      미오: { extensions: { risuai: { triggerscript, lowLevelAccess: true } } },
+    });
+    const { cookie, chatId, seiya, mio } = chat;
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    const commit = await json(cookie, `/api/chats/${chatId}/script-commit`, 'POST', {
+      messageId: state.chat.headMessageId,
+      scriptRev: 0,
+      overlay: { members: { [mio]: { description: '바뀐 악사' } } },
+    });
+    expect(commit.status, await commit.clone().text()).toBe(200);
+    const answer = await readJson(await request(cookie, `/api/chats/${chatId}/scripts`));
+    expect(answer.members.map((bundle: any) => [bundle.memberId, bundle.name, bundle.lowLevelAccess])).toEqual([
+      [seiya, '세이', false],
+      [mio, '미오', true],
+    ]);
+    // The page from before group turns reads the lead alone, as it always has.
+    expect(answer.scripts).toEqual(answer.members[0]);
+    expect(answer.members[0].overlay.member).toBeNull();
+    expect(answer.members[1].overlay.member).toEqual({ description: '바뀐 악사' });
+  });
+
+  it("tags what a member's scripts write as that member's, and carries both tags on every copy", async () => {
+    const chat = await groupChat('group-copies@example.com');
+    const { cookie, chatId, seiya, kai } = chat;
+    const { target } = replyingApp('세이야의 말.', '카이의 말.');
+    const { a, b } = await firstRound(chat, target);
+    // An output script of 카이's appends a character message, and turns the reader's turn into one.
+    const [, user] = await rowsOf(chatId);
+    await refused(
+      await json(cookie, `/api/chats/${chatId}/script-commit`, 'POST', {
+        messageId: b.messageId,
+        scriptRev: 0,
+        memberId: randomUUID(),
+        chat: { keep: 3, messages: [] },
+      }),
+    );
+    const appended = await json(cookie, `/api/chats/${chatId}/script-commit`, 'POST', {
+      messageId: b.messageId,
+      scriptRev: 0,
+      memberId: kai,
+      chat: { keep: 3, messages: [{ role: 'assistant', content: '카이가 덧붙인다.' }] },
+    });
+    expect(appended.status, await appended.clone().text()).toBe(200);
+    expect((await rowsOf(chatId)).at(-1)).toMatchObject({ content: '카이가 덧붙인다.', speakerMemberId: kai, groupTurnId: null, source: 'script' });
+
+    // A rewrite of the round's first reply forks: the copies are the same turns, under the same speakers in the same round.
+    const head = (await rowsOf(chatId)).at(-1)!;
+    const forked = await json(cookie, `/api/chats/${chatId}/script-commit`, 'POST', {
+      messageId: head.id,
+      scriptRev: head.scriptRev,
+      memberId: kai,
+      chat: { keep: 0, messages: [{ id: user!.id, role: 'assistant' }, { id: a.messageId, content: '고친 말.' }, { id: b.messageId }] },
+    });
+    expect(forked.status, await forked.clone().text()).toBe(200);
+    const path = (await readJson(forked)).path.slice(-3);
+    expect(path.map((message: any) => [message.role, message.speakerMemberId, message.groupTurnId])).toEqual([
+      ['assistant', kai, null],
+      ['assistant', seiya, a.messageId],
+      ['assistant', kai, a.messageId],
+    ]);
+
+    // A rewritten scene keeps who said each line, and in which round.
+    const scene = path.slice(1).map((message: any) => message.id);
+    const rewritten = await json(cookie, `/api/chats/${chatId}/edit-scene`, 'POST', {
+      messageIds: scene,
+      blocks: [
+        { originId: scene[0], kind: 'dialogue', content: '다시 고친 말.' },
+        { originId: scene[1], kind: 'dialogue', content: '카이의 말.' },
+      ],
+    });
+    expect(rewritten.status, await rewritten.clone().text()).toBe(200);
+    const after = (await readJson(rewritten)).path.slice(-2);
+    expect(after.map((message: any) => [message.content, message.speakerMemberId, message.groupTurnId])).toEqual([
+      ['다시 고친 말.', seiya, a.messageId],
+      ['카이의 말.', kai, a.messageId],
+    ]);
+  });
+
+  it('exports who said each group reply, and imports it back', async () => {
+    const chat = await groupChat('group-export@example.com');
+    const { cookie, chatId, plotId, seiya, kai } = chat;
+    const { target } = replyingApp('세이야의 말.', '카이의 말.');
+    await firstRound(chat, target);
+    const exported = ChatExportSchema.parse(await readJson(await request(cookie, `/api/chats/${chatId}/export`)));
+    expect(exported.messages.map((message) => message.speaker)).toEqual([
+      undefined,
+      undefined,
+      { id: seiya, name: '세이야' },
+      { id: kai, name: '카이' },
+    ]);
+
+    const imported = exported.messages.map((message) => ({
+      role: message.role,
+      versions: [message.text],
+      selected: 0,
+      ...(message.speaker ? { speakerId: message.speaker.id } : {}),
+    }));
+    const start = (messages: unknown[], sha = 'a') =>
+      json(cookie, '/api/chats/import', 'POST', { plotId, fileName: 'group.jsonl', sha256: sha.repeat(64), messages });
+    const res = await start(imported);
+    expect(res.status, await res.clone().text()).toBe(201);
+    const importedId = (await readJson(res)).chat.id;
+    expect((await rowsOf(importedId)).map((row) => [row.content, row.speakerMemberId, row.groupTurnId])).toEqual([
+      ['문이 열린다.', null, null],
+      ['안녕', null, null],
+      ['세이야의 말.', seiya, null],
+      ['카이의 말.', kai, null],
+    ]);
+
+    // Held to the roster, and to a reply.
+    await refused(await start([{ role: 'assistant', versions: ['응'], selected: 0, speakerId: randomUUID() }], 'b'));
+    await refused(await start([{ role: 'user', versions: ['응'], selected: 0, speakerId: kai }], 'c'));
+    await refused(await start([{ role: 'assistant', versions: ['응'], selected: 0, speakerId: 'kai' }], 'd'));
+    const single = await importCard(cookie, cardFile());
+    const [member] = await db.select().from(characters).where(eq(characters.plotId, single.id));
+    const lone = await json(cookie, '/api/chats/import', 'POST', {
+      plotId: single.id,
+      fileName: 'one.jsonl',
+      sha256: 'e'.repeat(64),
+      messages: [{ role: 'assistant', versions: ['응'], selected: 0, speakerId: member!.id }],
+    });
+    await refused(lone);
+  });
+
+  it("clears a deleted member's replies of their speaker, and keeps their round", async () => {
+    const chat = await groupChat('group-delete@example.com');
+    const { cookie, chatId, plotId, kai } = chat;
+    const { target } = replyingApp('세이야의 말.', '카이의 말.');
+    const { a, b } = await firstRound(chat, target);
+    expect((await request(cookie, `/api/plots/${plotId}/characters/${kai}`, 'DELETE')).status).toBe(204);
+    expect((await rowsOf(chatId)).find((row) => row.id === b.messageId)).toMatchObject({
+      speakerMemberId: null,
+      groupTurnId: a.messageId,
+    });
+    const exported = await readJson(await request(cookie, `/api/chats/${chatId}/export`));
+    expect(exported.messages.at(-1)).not.toHaveProperty('speaker');
+  });
+
+  it('counts a round once toward the turn unlocks and the relationship cadence', async () => {
+    expect(roundCount([])).toBe(0);
+    const row = (role: 'user' | 'assistant', groupTurnId: string | null = null) => ({ role, groupTurnId });
+    const branch = [row('assistant'), row('user'), row('assistant', 'r1'), row('assistant', 'r1'), row('user'), row('assistant', 'r2'), row('assistant')];
+    expect(roundCount(branch)).toBe(4);
+    expect(roundStart(branch)).toBe(6);
+    expect(roundStart(branch.slice(0, 4))).toBe(2);
+    expect(roundStart(branch.slice(0, 5))).toBe(5);
+
+    const owner = await signUp('group-unlock-owner@example.com');
+    const plot = await createPlot(owner, { name: '해금 여관', description: '설명', intros: ['문이 열린다.'] });
+    const seiya = await addCharacter(owner, plot.id, { name: '세이야' });
+    const kai = await addCharacter(owner, plot.id, { name: '카이' });
+    // The greeting is a round, and so is each turn's answer: three rounds is two turns in.
+    await db.insert(plotAssets).values({ plotId: plot.id, slug: 'deep', path: 'assets/deep.gif', mime: 'image/gif', unlock: { kind: 'turns', count: 3 } });
+    await publishPlot(owner, plot.id);
+    const reader = await signUp('group-unlock-reader@example.com');
+    const chatId = (await startChat(reader, plot.id)).chat.id;
+    const { target } = replyingApp('응.');
+    const first = await done(await post(reader, chatId, 'messages', { content: '하나', speakerId: seiya.id }, target));
+    expect(first).not.toHaveProperty('unlockedAssetIds');
+    // Counted by message, the greeting and two replies would have opened it here.
+    const second = await done(await post(reader, chatId, 'reply', { speakerId: kai.id, groupTurnId: first.groupTurnId }, target));
+    expect(second).not.toHaveProperty('unlockedAssetIds');
+    const third = await done(await post(reader, chatId, 'messages', { content: '둘', speakerId: kai.id }, target));
+    expect(third.unlockedAssetIds).toHaveLength(1);
+  });
+
+  it("reads a round's replies and the reader's written lines under their speakers in the side transcripts", async () => {
+    const chat = await groupChat('group-transcript@example.com');
+    const { cookie, chatId, seiya, kai } = chat;
+    const { target } = replyingApp('왔군.', '어서 와!');
+    const a = await done(await post(cookie, chatId, 'messages', { content: '안녕.\n@세이: 대신 말할게.', speakerId: seiya }, target));
+    await done(await post(cookie, chatId, 'reply', { speakerId: kai, groupTurnId: a.groupTurnId }, target));
+    const asked: ChatRequest[] = [];
+    const suggesting = makeApp({
+      getAdapter: () => ({
+        providerModel: 'suggest',
+        adapter: {
+          stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
+            asked.push(req);
+            yield { type: 'text', text: JSON.stringify({ suggestions: ['좋아', '싫어', '글쎄'] }) };
+            return { usage: { promptTokens: 1, completionTokens: 1 } };
+          },
+        },
+      }),
+    });
+    expect((await post(cookie, chatId, 'suggest', undefined, suggesting)).status).toBe(200);
+    expect(contentText(asked[0]!.messages[0]!.content)).toContain('문이 열린다.\n유저: 안녕.\n세이야: 대신 말할게.\n세이야: 왔군.\n카이: 어서 와!');
+  });
+
+  it('keeps the round settings and each member’s 대화량, through the coercion', async () => {
+    const cookie = await signUp('group-settings@example.com');
+    const plot = await createPlot(cookie, { name: '설정 여관', description: '설명', intros: ['안녕'] });
+    const member = await addCharacter(cookie, plot.id, { name: '세이야' });
+    expect((await readPlot(cookie, plot.id)).groupSettings).toEqual({ order: 'natural', maxSpeakers: 3 });
+    expect(member.talkativeness).toBe(50);
+
+    expect((await patchPlot(cookie, plot.id, { groupSettings: { order: 'list', maxSpeakers: 99 } })).groupSettings).toEqual({
+      order: 'list',
+      maxSpeakers: 10,
+    });
+    const [stored] = await db.select({ groupSettings: plots.groupSettings }).from(plots).where(eq(plots.id, plot.id));
+    expect(stored!.groupSettings).toEqual({ order: 'list', maxSpeakers: 10 });
+    // What the default says is stored as nothing.
+    await patchPlot(cookie, plot.id, { groupSettings: { order: 'shuffle', maxSpeakers: 3 } });
+    const [cleared] = await db.select({ groupSettings: plots.groupSettings }).from(plots).where(eq(plots.id, plot.id));
+    expect(cleared!.groupSettings).toBeNull();
+    await refused(await json(cookie, `/api/plots/${plot.id}`, 'PATCH', { groupSettings: 'list' }));
+
+    expect((await patchCharacter(cookie, plot.id, member.id, { talkativeness: 0 })).talkativeness).toBe(0);
+    for (const talkativeness of [101, -1, 2.5, '80']) {
+      await refused(await json(cookie, `/api/plots/${plot.id}/characters/${member.id}`, 'PATCH', { talkativeness }));
+    }
+    await patchPlot(cookie, plot.id, { groupSettings: { order: 'list', maxSpeakers: 2 } });
+    await publishPlot(cookie, plot.id);
+    const view = await readPublicPlot(undefined, plot.id);
+    expect(view.groupSettings).toEqual({ order: 'list', maxSpeakers: 2 });
+    expect(view.characters[0].talkativeness).toBe(0);
+    expect((await patchCharacter(cookie, plot.id, member.id, { talkativeness: null })).talkativeness).toBe(50);
+    const [row] = await db.select({ talkativeness: characters.talkativeness }).from(characters).where(eq(characters.id, member.id));
+    expect(row!.talkativeness).toBeNull();
+  });
+
+  it('migrates the four columns, the speaker set null on delete and found by a partial index', async () => {
+    const columns = await sql<{ table_name: string; column_name: string; data_type: string; is_nullable: string }[]>`
+      select table_name, column_name, data_type, is_nullable from information_schema.columns
+      where (table_name = 'plots' and column_name = 'group_settings')
+         or (table_name = 'characters' and column_name = 'talkativeness')
+         or (table_name = 'messages' and column_name in ('speaker_member_id', 'group_turn_id'))
+      order by table_name, column_name`;
+    expect(columns.map((column) => [column.table_name, column.column_name, column.data_type, column.is_nullable])).toEqual([
+      ['characters', 'talkativeness', 'smallint', 'YES'],
+      ['messages', 'group_turn_id', 'uuid', 'YES'],
+      ['messages', 'speaker_member_id', 'uuid', 'YES'],
+      ['plots', 'group_settings', 'jsonb', 'YES'],
+    ]);
+    const [fk] = await sql<{ rule: string }[]>`
+      select delete_rule as rule from information_schema.referential_constraints
+      where constraint_name = 'messages_speaker_member_id_characters_id_fk'`;
+    expect(fk!.rule).toBe('SET NULL');
+    const [index] = await sql<{ indexdef: string }[]>`select indexdef from pg_indexes where indexname = 'messages_speaker_member_id_idx'`;
+    expect(index!.indexdef).toContain('WHERE (speaker_member_id IS NOT NULL)');
   });
 });

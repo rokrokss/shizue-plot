@@ -1,24 +1,31 @@
-import { isNarration, narrationBody, NARRATION_HEADER, stripImageMacros } from '@shizue/core';
+import { transcriptLine, type ReaderMember } from '@shizue/core';
+import type { Character, Message } from '@shizue/db';
 
 /**
- * One transcript line for the sidecar models (memory, relationship). A narrating
- * turn moves the scene rather than speaking — whoever sent it — so attributing it
- * to the reader or to a character would write false memories either way, and it
- * goes out speaker-less under the same header the main prompt uses.
- *
- * An assistant turn names its own speakers: the script protocol writes each
- * member's lines under `이름: ` and the scene under no prefix at all, so the text
- * is already attributed and one name in front of the whole turn would be wrong
- * for every line but the first. Only the reader's own turn needs a speaker put on
- * it, and that one is the persona's.
+ * A stretch of the branch as the sidecar models read it (memory, relationship,
+ * suggestions), one `transcriptLine` (@shizue/core) per message: a group turn's
+ * reply under its speaker's name, and the lines the reader wrote as a member or
+ * as the narrator under them. `members` is the roster, by whose ids the replies
+ * name their speakers; a speaker no longer on it leaves the reply as it reads.
  */
-export function transcriptLine(
-  message: { role: 'user' | 'assistant'; content: string },
+export function transcriptOf(
+  path: readonly Pick<Message, 'role' | 'content' | 'speakerMemberId'>[],
   userName: string,
+  members: readonly Pick<Character, 'id' | 'name' | 'card'>[],
 ): string {
-  if (isNarration(message.content)) {
-    return `${NARRATION_HEADER} ${stripImageMacros(narrationBody(message.content)).trim()}`;
-  }
-  const text = stripImageMacros(message.content);
-  return message.role === 'user' ? `${userName}: ${text}` : text;
+  const readers: ReaderMember[] = members.map((member) => ({
+    id: member.id,
+    names: [member.name, ...(member.card.nickname?.trim() ? [member.card.nickname.trim()] : [])],
+  }));
+  const names = new Map(members.map((member) => [member.id, member.name]));
+  return path
+    .map((message) =>
+      transcriptLine(
+        message,
+        userName,
+        message.speakerMemberId !== null ? names.get(message.speakerMemberId) : undefined,
+        readers,
+      ),
+    )
+    .join('\n');
 }

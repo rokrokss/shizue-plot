@@ -21,7 +21,7 @@ import {
 } from '@shizue/db';
 import { asc, eq } from 'drizzle-orm';
 import type { AppDeps } from './deps.js';
-import { buildPath } from './tree.js';
+import { buildPath, roundCount } from './tree.js';
 
 /** What a reader is told about one of a plot's images, inside their own chat. */
 export interface AssetLock {
@@ -71,14 +71,14 @@ async function unlockedIds(deps: AppDeps, chatId: string): Promise<Set<string>> 
   return new Set(rows.map((row) => row.assetId));
 }
 
-/** Assistant turns on the branch the chat currently ends on. */
+/** Rounds on the branch the chat currently ends on (`roundCount`): a group turn's replies count once. */
 async function assistantDepth(deps: AppDeps, chat: Chat): Promise<number> {
   const all = await deps.db
     .select()
     .from(messages)
     .where(eq(messages.chatId, chat.id))
     .orderBy(asc(messages.createdAt));
-  return buildPath(all, chat.headMessageId).filter((message) => message.role === 'assistant').length;
+  return roundCount(buildPath(all, chat.headMessageId));
 }
 
 /**
@@ -94,7 +94,7 @@ const axisReached = (
 
 /**
  * Whether one condition is met. `text` is the assistant turn that has just been
- * persisted and `depth` the branch's assistant count including it.
+ * persisted and `depth` the branch's rounds including it (`roundCount`).
  */
 function satisfied(
   unlock: AssetUnlock,

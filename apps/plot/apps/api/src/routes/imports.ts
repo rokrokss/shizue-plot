@@ -20,10 +20,11 @@ import { ApiError, badRequest, notFound } from '../errors.js';
 import { enqueueJob } from '../jobs.js';
 import { memoryChannel, overSummaryThreshold } from '../memory.js';
 import { attachedNoteIds } from '../notes.js';
+import { loadMembers } from '../hub.js';
 import { loadOwnedPlot } from '../plots.js';
 import { rebased } from '../relationship.js';
 import { optionalVariableDelta, storableDelta } from '../scriptState.js';
-import { buildPath } from '../tree.js';
+import { buildPath, roundCount } from '../tree.js';
 import { isUuid, optionalBoolean, optionalString, readJsonBody, requireString, requireUuidParam } from '../util.js';
 import { resolvePersona, toChatJson } from './chats.js';
 
@@ -105,8 +106,31 @@ function requireImportedMessages(body: Record<string, unknown>): ParsedMessage[]
       at = typeof createdAt === 'string' ? Date.parse(createdAt) : Number.NaN;
       if (Number.isNaN(at)) throw badRequest('invalid_request', `${where}.createdAt must be an ISO 8601 time`);
     }
-    return { role, versions: versions as string[], selected, ...(at === undefined ? {} : { at }) };
+    const speakerId = message['speakerId'];
+    if (speakerId !== undefined && (role !== 'assistant' || typeof speakerId !== 'string' || !isUuid(speakerId))) {
+      throw badRequest('invalid_request', `${where}.speakerId must be a member id, on an assistant message`);
+    }
+    return {
+      role,
+      versions: versions as string[],
+      selected,
+      ...(at === undefined ? {} : { at }),
+      ...(speakerId === undefined ? {} : { speakerId: speakerId as string }),
+    };
   });
+}
+
+/**
+ * The speakers a batch names, held to the plot's roster: a group chat comes
+ * into a work of two or more members, and each reply is said by one of them
+ * (400 `invalid_request` otherwise). A batch naming none asks nothing.
+ */
+async function requireSpeakers(tx: Tx, plotId: string, batch: ParsedMessage[]): Promise<void> {
+  const named = batch.flatMap((message) => (message.speakerId === undefined ? [] : [message.speakerId]));
+  if (named.length === 0) return;
+  const roster = new Set((await loadMembers(tx, plotId)).map((member) => member.id));
+  if (roster.size < 2) throw badRequest('invalid_request', 'speakerId is only for a work of two or more members');
+  if (named.some((id) => !roster.has(id))) throw badRequest('invalid_request', 'speakerId must name a member of the plot');
 }
 
 const rowsOf = (batch: ParsedMessage[]): number =>
@@ -164,6 +188,8 @@ async function appendImported(
         parentId: parent,
         role: message.role,
         content: message.versions[version]!,
+        // Every version is the same member's reply; each is a round of its own.
+        ...(message.speakerId !== undefined ? { speakerMemberId: message.speakerId } : {}),
         createdAt: new Date(stamp),
       });
     });
@@ -286,6 +312,7 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
       if (earlier.length > 0) {
         await tx.delete(chats).where(inArray(chats.id, earlier.map((chat) => chat.id)));
       }
+      await requireSpeakers(tx, plotId, batch);
 
       const [created] = await tx
         .insert(chats)
@@ -336,6 +363,7 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
         .where(eq(messages.chatId, id));
       const rows = stored?.rows ?? 0;
       requireRoom(rows, batch);
+      await requireSpeakers(tx, chat.plotId, batch);
       const head = await appendImported(tx, id, chat.headMessageId, stored?.latest ?? null, batch);
       await tx.update(chats).set({ headMessageId: head, updatedAt: new Date() }).where(eq(chats.id, id));
       return { inserted: rowsOf(batch), total: rows + rowsOf(batch) };
@@ -395,7 +423,7 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
         .where(eq(messages.chatId, id))
         .orderBy(asc(messages.createdAt));
       const path = buildPath(all, locked.headMessageId);
-      const depth = path.filter((message) => message.role === 'assistant').length;
+      const depth = roundCount(path);
       const memoryBackfill: 'queued' | 'not_needed' | 'unavailable' =
         !backfill || !overSummaryThreshold(locked, path) ? 'not_needed' : channel ? 'queued' : 'unavailable';
 
