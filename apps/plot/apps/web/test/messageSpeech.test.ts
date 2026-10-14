@@ -329,3 +329,56 @@ describe('a reply a round is waiting on', () => {
   });
 
 });
+
+describe('a scene title in a greeting', () => {
+  const GREETING = '# 아스텔리아 아카데미\n입학식 날 아침이었다.\n\n## 사역마와의 계약\n마법진이 빛난다.';
+
+  /**
+   * The body's own children that are its flow — titles, and speakers' blocks by
+   * the name each says — past the row's actions over the gap above it.
+   */
+  const flow = (): string[] =>
+    [...host.querySelector('.message-body')!.children].flatMap((node) =>
+      node.getAttribute('data-testid') === 'scene-heading'
+        ? [`title:${node.textContent}`]
+        : node.getAttribute('data-testid') === 'speech-character'
+          ? [`block:${node.querySelector('.chat-name')?.textContent ?? '-'}:${node.querySelector('.chat-bubble')?.textContent}`]
+          : node.className.includes('bottom-full')
+            ? []
+            : [`other:${node.textContent}`],
+    );
+
+  it('stands above the face and the name at the column’s width, and the speaker goes on under a later one unnamed', () => {
+    render(row(GREETING, 'assistant', { roster: [ROSTER[0]!], intro: true }));
+
+    expect(flow()).toEqual([
+      'title:아스텔리아 아카데미',
+      'block:아리아:입학식 날 아침이었다.',
+      'title:사역마와의 계약',
+      'block:-:마법진이 빛난다.',
+    ]);
+    // One face: the second stretch keeps the column and says nothing again.
+    expect([...host.querySelectorAll('img')].map((img) => img.getAttribute('src'))).toEqual(['/avatars/aria.png']);
+  });
+
+  it('does the same under the work’s own face where no roster names the speaker', () => {
+    render(row(GREETING, 'assistant', { roster: [], intro: true, footer: createElement('div', { 'data-testid': 'actions' }) }));
+
+    expect(flow()).toEqual([
+      'title:아스텔리아 아카데미',
+      'block:겨울의 문:입학식 날 아침이었다.',
+      'title:사역마와의 계약',
+      'block:-:마법진이 빛난다.',
+    ]);
+    expect([...host.querySelectorAll('img')].map((img) => img.getAttribute('src'))).toEqual(['/covers/plot.png']);
+    // What hangs under the bubble stays in the bubble's column.
+    expect(host.querySelector('[data-testid="actions"]')!.parentElement!.className).toBe('pl-12.5');
+  });
+
+  it('stays a bold line inside the bubble of a reply', () => {
+    render(row('# 아스텔리아 아카데미\n입학식 날 아침이었다.', 'assistant', { roster: [] }));
+
+    expect(host.querySelector('[data-testid="scene-heading"]')).toBeNull();
+    expect(host.querySelector('.chat-bubble h1')?.textContent).toBe('아스텔리아 아카데미');
+  });
+});

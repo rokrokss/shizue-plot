@@ -13,6 +13,7 @@ import { GroupTurnsEditor } from '@/components/GroupTurnsEditor';
 import { DefaultVariablesEditor, DisplayScriptEditor } from '@/components/DisplayScriptEditor';
 import { LorebookEditor } from '@/components/LorebookEditor';
 import { LorebookFileActions } from '@/components/LorebookFileActions';
+import { OpeningEditor } from '@/components/OpeningEditor';
 import { PlotStyleEditor } from '@/components/PlotStyleEditor';
 import { TagInput } from '@/components/TagInput';
 import {
@@ -553,30 +554,17 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
           >
             <p className="text-xs text-muted">{t('introsHint')}</p>
             <p className="text-xs text-muted">{t('speechProtocolHint')}</p>
+            <p className="text-xs text-muted">{t('sceneTitleHint')}</p>
             {intros.length === 0 ? <p className="text-sm text-muted">{t('introsEmpty')}</p> : null}
             {intros.map((text, index) => (
-              <Field key={index} label={t('introLabel', { index: index + 1 })} badge={<PublicBadge />}>
-                <div className="flex gap-2">
-                  <TextArea
-                    rows={5}
-                    value={text}
-                    data-testid="plot-intro"
-                    maxLength={MAX_INTRO_TEXT_LENGTH}
-                    placeholder={t('introTextPlaceholder')}
-                    onChange={(event) =>
-                      setIntros(intros.map((item, i) => (i === index ? event.target.value : item)))
-                    }
-                  />
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    aria-label={common('remove')}
-                    onClick={() => setIntros(intros.filter((_, i) => i !== index))}
-                  >
-                    ✕
-                  </Button>
-                </div>
-              </Field>
+              <OpeningEditor
+                key={index}
+                index={index}
+                value={text}
+                maxLength={MAX_INTRO_TEXT_LENGTH}
+                onChange={(value) => setIntros(intros.map((item, i) => (i === index ? value : item)))}
+                onRemove={() => setIntros(intros.filter((_, i) => i !== index))}
+              />
             ))}
           </Section>
 

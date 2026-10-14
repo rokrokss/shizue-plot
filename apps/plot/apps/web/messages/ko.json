@@ -185,6 +185,8 @@
     "introLabel": "도입부 {index}",
     "introTextPlaceholder": "예: 비가 그치지 않는 밤이었다.\n세라: *우산을 접으며 문을 밀었다.* \"늦었네. 기다렸어.\"",
     "speechProtocolHint": "'이름: 대사' 줄은 그 등장인물의 말이고, 접두사 없는 줄은 장면 서술(지문)입니다. 등장인물이 한 명인 작품에서는 지문도 그 인물의 말풍선 안에 그려집니다. 행동·표정은 줄 안에서 *별표*로 감쌉니다.",
+    "sceneTitle": "장면 제목",
+    "sceneTitleHint": "'# 제목' 줄은 큰 장면 제목으로 보이고, 모델에는 쓴 그대로 갑니다.",
     "lorebook": "로어북",
     "lorebookHint": "등장인물 카드의 로어북과 합쳐져 같은 토큰 예산 안에서 활성화됩니다.",
     "loreBudgetUsage": "항상 포함 항목 약 {constant, number}토큰 / 예산 {budget, number}토큰",
@@ -858,6 +860,7 @@
       "fear": "두려움"
     },
     "lockedWhileGenerating": "응답을 생성하는 동안에는 바꿀 수 없습니다.",
+    "modelPill": "모델 바꾸기",
     "sendMaybeDelivered": "메시지가 이미 전송되었을 수도 있습니다. 다시 보내기 전에 새로고침해 확인하세요.",
     "backToPlot": "플롯으로",
     "you": "나",

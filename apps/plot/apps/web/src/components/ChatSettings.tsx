@@ -4,6 +4,7 @@ import { useTranslations } from 'next-intl';
 import { useId, type ReactNode } from 'react';
 import type { ModelInfo, Persona, PresetInfo } from '@/lib/types';
 import { PersonaFace } from './Avatar';
+import { ModelOptions } from './ModelOptions';
 import { Select } from './ui';
 
 /** Effort words the catalogues translate; any other word a model advertises is shown as it is. */
@@ -103,13 +104,7 @@ export function ChatSettings({
           className={selectClass}
           onChange={(event) => onChange({ model: event.target.value })}
         >
-          {/* Keep a historical model visible until the reader selects an available ChatGPT model. */}
-          {models.some((entry) => entry.id === model) ? null : <option value={model}>{model}</option>}
-          {models.map((entry) => (
-            <option key={entry.id} value={entry.id}>
-              {entry.label}
-            </option>
-          ))}
+          <ModelOptions model={model} models={models} />
         </Select>,
       )}
       {efforts.length > 0

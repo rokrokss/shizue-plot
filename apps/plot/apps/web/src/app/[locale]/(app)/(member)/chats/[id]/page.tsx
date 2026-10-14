@@ -21,6 +21,7 @@ import { ChatPanel } from '@/components/ChatPanel';
 import { ChatSettings } from '@/components/ChatSettings';
 import { FocusPicker } from '@/components/FocusPicker';
 import { MessageRow } from '@/components/MessageRow';
+import { ModelPill } from '@/components/ModelPill';
 import { MoreActions } from '@/components/MoreActions';
 import { ScriptDialog, type ScriptPrompt } from '@/components/ScriptDialog';
 import { SceneDraft } from '@/components/SceneDraft';
@@ -2639,7 +2640,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     // below is the only thing that scrolls and the composer never moves.
     <div className="chat-workspace flex h-[calc(100dvh-3.5rem)] flex-col">
       <div className="shrink-0 border-b border-line bg-surface">
-        <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-3 px-5 py-2.5">
+        {/* One row on a phone, where the title is what gives way; the wide row wraps its controls. */}
+        <div className="mx-auto flex max-w-3xl items-center gap-3 px-5 py-2.5 lg:flex-wrap">
           <Link
             // The work's own page, which is the same one for creator and reader.
             href={`/p/${state.chat.plotId}`}
@@ -2675,11 +2677,19 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               {t('notes')}
             </Button>
           </div>
+          {/* Zeta's "zeta ⌄": the main model, where the row has no room for the controls above. */}
+          <ModelPill
+            model={state.chat.model}
+            models={models}
+            disabled={settingsLocked}
+            className="ml-auto lg:hidden"
+            onChange={(model) => void updateSettings({ model })}
+          />
           <Button
             size="sm"
             variant={sheetOpen ? 'secondary' : 'ghost'}
             aria-expanded={sheetOpen}
-            className="ml-auto lg:hidden"
+            className="shrink-0 lg:hidden"
             onClick={() => setSheetOpen(true)}
           >
             {t('settings')}

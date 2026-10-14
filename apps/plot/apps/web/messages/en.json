@@ -185,6 +185,8 @@
     "introLabel": "Opening {index}",
     "introTextPlaceholder": "e.g. The rain had not stopped all night.\nSera: *She folds the umbrella and pushes the door open.* \"You're late. I waited.\"",
     "speechProtocolHint": "A 'Name: line' is that character speaking; a line with no prefix describes the scene. In a work with one character, that description is drawn inside the character's bubble too. Wrap action and expression in *asterisks* inside the line.",
+    "sceneTitle": "Scene title",
+    "sceneTitleHint": "A '# Title' line shows as a large scene heading, and goes to the model as written.",
     "lorebook": "Lorebook",
     "lorebookHint": "Merged with the characters' own lorebooks and activated within the same token budget.",
     "loreBudgetUsage": "Always-included entries ≈ {constant, number} tokens / budget {budget, number} tokens",
@@ -858,6 +860,7 @@
       "fear": "Fear"
     },
     "lockedWhileGenerating": "Can't be changed while a reply is generating.",
+    "modelPill": "Change model",
     "sendMaybeDelivered": "This message may already have been sent. Reload to check before sending it again.",
     "backToPlot": "Back to the plot",
     "you": "You",

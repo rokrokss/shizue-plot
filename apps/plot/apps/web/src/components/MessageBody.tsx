@@ -544,6 +544,7 @@ export const MessageBody = memo(function MessageBody({
   componentNames,
   roster = NO_ROSTER,
   speaker,
+  face,
   previousSameRole = '',
   chatIndex,
   streaming = false,
@@ -585,6 +586,13 @@ export const MessageBody = memo(function MessageBody({
    * owner (`speechRuns`): they are drawn in that member's block, not as the scene.
    */
   speaker?: string;
+  /**
+   * Who a reply with no roster to name its speakers is drawn under — the work's
+   * own face and name, before the roster has arrived or in a work with no
+   * members: its prose goes in that block, as a member's does, so a scene title
+   * stands outside it.
+   */
+  face?: { name: string; avatarUrl: string | null };
   /** Raw text of the previous message with the same role, for `repeat_back`. */
   previousSameRole?: string;
   /** This message's place on the branch, RisuAI's way, for `{{chat_index}}`. */
@@ -654,7 +662,8 @@ export const MessageBody = memo(function MessageBody({
           }
           const text = renderImageTokens(chunk.text, assets, resolveAsset);
           if (roster.length === 0) {
-            return [{ name: null, narration: false, html: false, blocks: splitBlocks(unescapeCbs(text, 'html')) }];
+            const name = face?.name ?? null;
+            return [{ name, narration: false, html: false, blocks: splitBlocks(unescapeCbs(text, 'html')) }];
           }
           return speechRuns(text, names, aliases, speaker ?? null).map((run) => ({
             name: run.name,
@@ -665,7 +674,7 @@ export const MessageBody = memo(function MessageBody({
         });
       });
     },
-    [segments, assets, resolveAsset, roster, speaker, userImage],
+    [segments, assets, resolveAsset, roster, speaker, face?.name, userImage],
   );
 
   // Only the very last block of the last run of text is still being written.
@@ -689,9 +698,10 @@ export const MessageBody = memo(function MessageBody({
    * reader's turn, a scene with several speakers and no owner — it is drawn as
    * it always was.
    */
+  const voice = speaker ?? face?.name;
   const dressed = (item: RunItem): boolean => {
     if (mode === 'plain') return false;
-    if (speaker) pieces.push({ kind: 'speaker', name: speaker, items: [item], caret: item.live });
+    if (voice) pieces.push({ kind: 'speaker', name: voice, items: [item], caret: item.live });
     else if (mode === 'narration' || roster.length === 0) {
       pieces.push({ kind: 'prose', box: mode === 'narration' ? 'narration' : 'bubble', scene: false, items: [item], caret: item.live });
     } else return false;
@@ -780,7 +790,7 @@ export const MessageBody = memo(function MessageBody({
   }
 
   // A continued turn (`continued`) said its speaker's name in the row above.
-  let named: string | null = continued && speaker ? speaker : null;
+  let named: string | null = continued && voice ? voice : null;
   const first = pieces[0];
   const headerInside = header !== undefined && first?.kind === 'speaker' && first.name !== named;
   const last = pieces.at(-1);
@@ -799,8 +809,9 @@ export const MessageBody = memo(function MessageBody({
         const end = index === pieces.length - 1;
         if (piece.kind === 'segment') return <Fragment key={index}>{piece.node}</Fragment>;
         if (piece.kind === 'heading') {
-          // A new scene: whoever speaks next says their name again.
-          named = null;
+          // Zeta's title stands outside every speaker's block, at the column's
+          // width; the speaker it cuts into goes on under it without saying
+          // their name again.
           return <SceneHeading key={index} text={piece.item.text} live={piece.item.live} />;
         }
         if (piece.kind === 'plain') {
@@ -838,7 +849,10 @@ export const MessageBody = memo(function MessageBody({
           <div key={index} data-testid="speech-character" data-speaker={piece.name} className="flex gap-2.5">
             {says ? (
               <Avatar
-                src={roster.find((member) => member.name === piece.name)?.avatarUrl ?? null}
+                src={
+                  roster.find((member) => member.name === piece.name)?.avatarUrl ??
+                  (piece.name === face?.name ? face.avatarUrl : null)
+                }
                 name={piece.name}
                 className="size-10 text-sm"
               />

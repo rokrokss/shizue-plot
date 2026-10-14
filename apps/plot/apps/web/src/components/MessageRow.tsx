@@ -654,6 +654,39 @@ export const MessageRow = memo(function MessageRow({
     );
   }
 
+  // A greeting before the roster has arrived, or in a work with no members: the
+  // body draws the plot's face and name as a member's (`face`), so a scene title
+  // it opens on or cuts to stands outside them, at the column's width. What hangs
+  // under the bubble keeps the bubble's column.
+  if (intro) {
+    return (
+      <div data-testid="message-assistant" {...memberProps} className="group min-w-0">
+        {editor ?? (
+          <>
+            <MessageBody
+              {...bodyProps}
+              content={body}
+              face={{ name, avatarUrl: avatar }}
+              mode="reply"
+              sceneHeadings
+              continued={grouped ?? false}
+              {...(hasActions ? { header: actions } : {})}
+              {...(modelLabel ? { trailer: modelLabel } : {})}
+            />
+            {thinking ? (
+              <div className={cx('pl-12.5', body.trim() && 'mt-3')}>
+                <ThinkingClock />
+              </div>
+            ) : null}
+            {statusCard ? <div className="mt-3 pl-12.5">{statusCard}</div> : null}
+          </>
+        )}
+        {offerAt('pl-12.5')}
+        {footer ? <div className="pl-12.5">{footer}</div> : null}
+      </div>
+    );
+  }
+
   // Before the roster has arrived, or in a work with no members: the row is the
   // speaker, as it always was — the plot's face and name, then its bubble.
   return (

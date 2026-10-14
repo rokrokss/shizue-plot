@@ -185,6 +185,8 @@
     "introLabel": "導入 {index}",
     "introTextPlaceholder": "例：雨の止まない夜だった。\nセラ：*傘をたたみ、扉を押した。*「遅かったね。待ってた。」",
     "speechProtocolHint": "「名前：セリフ」の行はその登場人物の発話、接頭辞のない行は場面の描写（ト書き）です。登場人物が一人の作品では、その描写もその人物の吹き出しの中に描かれます。行動や表情は行の中で *アスタリスク* で囲みます。",
+    "sceneTitle": "場面タイトル",
+    "sceneTitleHint": "「# タイトル」の行は大きな場面タイトルとして表示され、モデルには書いたまま渡ります。",
     "lorebook": "ロアブック",
     "lorebookHint": "登場人物カードのロアブックと統合され、同じトークン予算の中で発動します。",
     "loreBudgetUsage": "常に含める項目 約{constant, number}トークン / 予算 {budget, number}トークン",
@@ -858,6 +860,7 @@
       "fear": "恐れ"
     },
     "lockedWhileGenerating": "応答の生成中は変更できません。",
+    "modelPill": "モデルを変更",
     "sendMaybeDelivered": "このメッセージはすでに送信されている可能性があります。再送する前に再読み込みして確認してください。",
     "backToPlot": "プロットに戻る",
     "you": "自分",

@@ -113,6 +113,7 @@ import {
 import { BACKFILL_CHUNKS_PER_RUN } from '../src/memory.js';
 import { createJobHandlers, notificationFanout } from '../src/notifications.js';
 import { repairDisplayOrder } from '../src/maintenance/displayOrder.js';
+import { repairMemberScripts } from '../src/maintenance/memberScripts.js';
 import { NARRATION_NUDGE } from '../src/routes/chats.js';
 import { MAX_ASSET_NAME_LENGTH, MAX_CARD_IMPORT_BYTES } from '../src/routes/plots.js';
 import { runRequestLua } from '../src/requestLua.js';
@@ -5845,6 +5846,76 @@ describe('custom UI in a work of several members', () => {
     };
     expect(await exported(plot.characters[0].id)).toEqual(['\\[lumi\\]', '\\[all\\]']);
     expect(await exported(nox)).toEqual(['\\[nox\\]', '\\[all\\]']);
+  });
+
+  it('lifts what companions imported before 355e738 left on their cards, once, and leaves works changed since', async () => {
+    const owner = await signUp('w4-repair@example.com');
+    const lumiCard = () =>
+      risu('lumi', { backgroundHTML: '<div class="sky">밤</div><style>.lumi { color: red; }</style>', defaultVariables: 'hp=100' });
+    const noxCard = () =>
+      risu('nox', { backgroundHTML: '<div class="cave">동굴</div><style>.nox { color: blue; }</style>', defaultVariables: 'hp=50\ngold=3' });
+    const storedOf = async (id: string) => {
+      const [row] = await db
+        .select({ customUi: plots.customUi, updatedAt: plots.updatedAt })
+        .from(plots)
+        .where(eq(plots.id, id));
+      return row!;
+    };
+    /** What the plot import before 355e738 left: lumi's lift, untagged, and nothing of a companion's. */
+    const OLD = { displayScripts: [script('lumi', 0)], css: '.lumi { color: red; }', defaultVariables: { hp: '100' } };
+    const asImportedBefore = (id: string, customUi: object) =>
+      db.update(plots).set({ customUi: customUi as never }).where(eq(plots.id, id));
+
+    // Lumi made the work and nox joined it; the roster has moved since, nox in front.
+    const old = await importCard(owner, lumiCard());
+    const lumi = old.characters[0].id;
+    const nox = (await importMember(owner, old.id, noxCard())).id;
+    await asImportedBefore(old.id, OLD);
+    await json(owner, `/api/plots/${old.id}/characters/reorder`, 'POST', { ids: [nox, lumi] });
+
+    // A work script added since the import: the creator's, and left as it is.
+    const edited = await importCard(owner, lumiCard());
+    await importMember(owner, edited.id, noxCard());
+    const mine = { ...OLD, displayScripts: [script('lumi', 0), script('all', 1)] };
+    await asImportedBefore(edited.id, mine);
+
+    // Today's import lifts it already.
+    const today = await importCard(owner, lumiCard());
+    await importMember(owner, today.id, noxCard());
+    const todayUi = (await storedOf(today.id)).customUi;
+
+    const before = await storedOf(old.id);
+    const backgroundBefore = (await readPlot(owner, old.id)).backgroundHtml;
+
+    // A dry run says what it would do and writes nothing.
+    const lines: string[] = [];
+    const dry = await repairMemberScripts(db, { apply: false, log: (line) => lines.push(line) });
+    expect(dry).toEqual({ scanned: 3, fixed: [old.id], current: 1, unaffected: 0, orderFirst: [], edited: [edited.id] });
+    expect(lines.join('\n')).toContain(`would lift into plot ${old.id} "lumi"`);
+    expect(lines.join('\n')).toContain('"nox": 1 display script, its stylesheet');
+    expect(lines.join('\n')).toContain(`kept the work's value of hp over "nox"'s`);
+    expect((await storedOf(old.id)).customUi).toEqual(OLD);
+
+    const applied = await repairMemberScripts(db, { apply: true, log: () => undefined });
+    expect(applied).toEqual(dry);
+    const after = await storedOf(old.id);
+    expect(after.customUi).toEqual({
+      // Lumi's stay the work's own, untagged; nox's run after them, on its messages.
+      displayScripts: [script('lumi', 0), script('nox', 1, nox)],
+      css: '.lumi { color: red; }',
+      memberCss: { [nox]: '.nox { color: blue; }' },
+      defaultVariables: { hp: '100', gold: '3' },
+    });
+    // A correction, not an edit; and the work draws what it drew.
+    expect(after.updatedAt).toEqual(before.updatedAt);
+    expect((await readPlot(owner, old.id)).backgroundHtml).toBe(backgroundBefore);
+    expect((await storedOf(edited.id)).customUi).toEqual(mine);
+    expect((await storedOf(today.id)).customUi).toEqual(todayUi);
+
+    // Again: nothing left to do.
+    const again = await repairMemberScripts(db, { apply: true, log: () => undefined });
+    expect(again).toEqual({ scanned: 3, fixed: [], current: 2, unaffected: 0, orderFirst: [], edited: [edited.id] });
+    expect((await storedOf(old.id)).customUi).toEqual(after.customUi);
   });
 });
 
