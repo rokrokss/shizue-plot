@@ -61,6 +61,7 @@ vi.mock('@/components/MessageRow', async () => {
       roster?: readonly { name: string; aliases?: readonly string[] }[];
       speaker?: string;
       member?: string;
+      spoken?: boolean;
       footer?: ReactNode;
     }) =>
       h(
@@ -68,6 +69,7 @@ vi.mock('@/components/MessageRow', async () => {
         {
           'data-testid': 'row',
           ...(props.member !== undefined ? { 'data-shizue-member': props.member } : {}),
+          ...(props.spoken ? { 'data-shizue-spoken': '' } : {}),
           'data-name': props.name,
           'data-roster': JSON.stringify((props.roster ?? []).map((member) => [member.name, member.aliases ?? []])),
           ...(props.speaker !== undefined ? { 'data-speaker': props.speaker } : {}),
@@ -782,7 +784,7 @@ describe('a work of two members', () => {
     expect(commit.body).toMatchObject({ messageId: 'm2', clearPending: true, memberId: 'chr_2', variableDelta: { finishedBy: '카이' } });
   });
 
-  it('draws each message through its own member’s display triggers, the reader’s and the greeting through the first member’s', async () => {
+  it('draws each message through its own member’s display triggers, the reader’s and the greeting through the lead’s', async () => {
     await render();
     expect(rows().map((row) => row.querySelector('span')!.textContent)).toEqual(['어서 와. ★', '안녕 ★', '응. ♥']);
     expect(rows().map((row) => row.dataset['shizueMember'])).toEqual(['chr_1', 'chr_1', 'chr_2']);
@@ -797,6 +799,54 @@ describe('a work of two members', () => {
     });
     await click(rows()[0]!.querySelector('button[data-shizue-trigger]')!);
     expect(sent.at(-1)).toMatchObject({ body: { memberId: 'chr_1', variableDelta: { hit: '리안' } } });
+  });
+
+  describe('whose first member carries no scripts', () => {
+    beforeEach(() => {
+      // 리안 heads the roster with no scripts of its own, and is the one who speaks; 카이 leads.
+      bundles = [card('chr_2', '카이', ' ♥')];
+      publicPlot = {
+        characters: [
+          { id: 'chr_1', name: '리안', avatarUrl: null, intro: '', talkativeness: 50 },
+          { id: 'chr_2', name: '카이', avatarUrl: null, intro: '', talkativeness: 0 },
+        ],
+        groupSettings: { order: 'list', maxSpeakers: 1 },
+      };
+      chatState = stateWith([
+        greeting,
+        message('m1', 'm0', 'user', '안녕'),
+        message('m2', 'm1', 'assistant', '응.', { speakerMemberId: 'chr_1', groupTurnId: 'm2' }),
+      ]);
+    });
+
+    it('runs none of the lead’s start or output for its reply, the lead’s input pass still taken', async () => {
+      await render();
+      await sendText('들어간다');
+      const body = streamed[0]!.body as Record<string, unknown>;
+      expect(body).toMatchObject({ content: '들어간다', speakerId: 'chr_1', variableDelta: { input카이: 'null+카이' } });
+      expect(body['variableDelta']).not.toHaveProperty('start카이');
+      expect(body).not.toHaveProperty('postProcess');
+      expect(body).not.toHaveProperty('memberId');
+    });
+
+    it('draws its reply through no display triggers, and the messages no member speaks through the lead’s', async () => {
+      await render();
+      expect(rows().map((row) => row.querySelector('span')!.textContent)).toEqual(['어서 와. ♥', '안녕 ♥', '응.']);
+      // All three dressed as the first member's; only its reply is its own.
+      expect(rows().map((row) => row.dataset['shizueMember'])).toEqual(['chr_1', 'chr_1', 'chr_1']);
+      expect(rows().map((row) => row.hasAttribute('data-shizue-spoken'))).toEqual([false, false, true]);
+    });
+
+    it('runs nothing for a button in its reply, and the lead’s triggers for one in the greeting', async () => {
+      await render();
+      await click(rows()[2]!.querySelector('button[data-shizue-trigger]')!);
+      expect(sent.filter((call) => call.path.endsWith('/script-commit'))).toEqual([]);
+      await click(rows()[0]!.querySelector('button[data-shizue-trigger]')!);
+      expect(sent.at(-1)).toMatchObject({
+        path: '/api/chats/cht_1/script-commit',
+        body: { memberId: 'chr_2', variableDelta: { hit: '카이' } },
+      });
+    });
   });
 
   it('draws a work of one with no member on its rows, as it always was', async () => {

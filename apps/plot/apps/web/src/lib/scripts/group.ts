@@ -14,10 +14,11 @@
  *   one per member.
  *
  * Messages no member is the speaker of — the reader's, a greeting, a narration,
- * a scene written before group turns — are the work's first member's, who
- * stands for the lead: its runtime where it carries scripts, else the lead's.
- * The same goes for its own replies. Any other member uses its own scripts or
- * none.
+ * a scene written before group turns — are the work's, and run the lead's
+ * scripts. A member's own replies run its own scripts or none, the first member
+ * no differently from the rest: as in RisuAI, whose start, output and request
+ * triggers are the speaking character's, and as the server's request triggers
+ * are (`requestScriptsOf`).
  */
 
 import { NARRATOR_SPEAKER } from '@shizue/core/group';
@@ -28,18 +29,15 @@ export interface ScriptCast {
   byMember: ReadonlyMap<string, ScriptRuntime>;
   /** The lead's: the first member that carries scripts. */
   lead: ScriptRuntime;
-  /** The work's first member, who speaks for the messages no member speaks. */
-  firstMemberId: string | null;
 }
 
 /**
- * Whose scripts a member's message or turn runs: its own, or — for the work's
- * first member, and for no member at all (`null`, the narrator) — the lead's.
- * Null for a member with no scripts.
+ * Whose scripts a member's message or turn runs: its own, or — for no member at
+ * all (`null`, the narrator) — the lead's. Null for a member with no scripts.
  */
 export function runtimeOf(cast: ScriptCast, memberId: string | null | undefined): ScriptRuntime | null {
   if (memberId === null || memberId === undefined || memberId === NARRATOR_SPEAKER) return cast.lead;
-  return cast.byMember.get(memberId) ?? (memberId === cast.firstMemberId ? cast.lead : null);
+  return cast.byMember.get(memberId) ?? null;
 }
 
 /**

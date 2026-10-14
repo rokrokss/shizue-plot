@@ -215,7 +215,8 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
             defaultVariables: variables,
             componentCode,
             componentCapabilities: capabilities,
-            memberCss,
+            // A sheet left empty is no sheet, as the server keeps it.
+            memberCss: Object.fromEntries(Object.entries(memberCss).filter(([, sheet]) => sheet.trim() !== '')),
             ...(background !== undefined ? { backgroundHtml: background } : {}),
           },
         }),
@@ -617,7 +618,8 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
               />
             </Field>
 
-            {/* A companion's own stylesheet, as its card brought it: for its messages. */}
+            {/* A member's own stylesheet, as its card brought it or as the creator
+                started one: for its messages. */}
             {members.length >= 2
               ? members
                   .filter((member) => memberCss[member.id] !== undefined)
@@ -634,6 +636,23 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
                     </Field>
                   ))
               : null}
+            {members.length >= 2 && members.some((member) => memberCss[member.id] === undefined) ? (
+              <div className="flex flex-wrap gap-2">
+                {members
+                  .filter((member) => memberCss[member.id] === undefined)
+                  .map((member) => (
+                    <Button
+                      key={member.id}
+                      size="sm"
+                      variant="ghost"
+                      data-testid="member-css-add"
+                      onClick={() => setMemberCss((current) => ({ ...current, [member.id]: '' }))}
+                    >
+                      {t('memberCssAdd', { name: member.name })}
+                    </Button>
+                  ))}
+              </div>
+            ) : null}
 
             <Field label={t('workBackground')} hint={t('workBackgroundHint')}>
               <TextArea

@@ -122,9 +122,8 @@ const greeting = message('m0', null, 'assistant', '어서 와.');
 /** The runtimes of one chat, as the page builds them: one per scripted member, sharing what members share. */
 function castOf(
   bundles: ScriptBundle[],
-  { api, firstMemberId = bundles[0]!.memberId, engines = {} }: {
+  { api, engines = {} }: {
     api: ReturnType<typeof fakeApi>['api'];
-    firstMemberId?: string;
     engines?: Record<string, ScriptEngine[]>;
   },
 ): ScriptCast {
@@ -143,7 +142,7 @@ function castOf(
       }),
     ]),
   );
-  return { byMember, lead: byMember.get(bundles[0]!.memberId)!, firstMemberId };
+  return { byMember, lead: byMember.get(bundles[0]!.memberId)! };
 }
 
 /** Two RisuAI cards: each an input trigger, an `editinput` script, a start trigger, an output trigger. */
@@ -244,15 +243,14 @@ describe('the other moments, by whose they are', () => {
     expect(commit.body).toMatchObject({ messageId: 'm2', clearPending: true, memberId: B, variableDelta: { finishedBy: 'B' } });
   });
 
-  it('routes a member’s message to its own runtime, the first member’s and untagged ones to the lead’s, and a member with none to nothing', () => {
+  it('routes a member’s message to its own runtime, one no member speaks to the lead’s, and a member with none to nothing', () => {
     const { api } = fakeApi();
-    // The work's first member, C, carries no scripts; A leads, B is its own.
-    const cast = castOf(two(), { api, firstMemberId: C });
+    // A leads, B is its own; C — the work's first member or not — carries none and borrows none.
+    const cast = castOf(two(), { api });
     expect(runtimeOf(cast, A)).toBe(cast.lead);
     expect(runtimeOf(cast, B)).toBe(cast.byMember.get(B));
     expect(runtimeOf(cast, null)).toBe(cast.lead);
-    expect(runtimeOf(cast, C)).toBe(cast.lead);
-    expect(runtimeOf(cast, '00000000-0000-4000-8000-0000000000dd')).toBeNull();
+    expect(runtimeOf(cast, C)).toBeNull();
     expect(runtimeOf(cast, 'narrator')).toBe(cast.lead);
   });
 

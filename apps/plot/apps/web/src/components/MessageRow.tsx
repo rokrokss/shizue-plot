@@ -126,6 +126,7 @@ export const MessageRow = memo(function MessageRow({
   roster = NO_ROSTER,
   speaker,
   member,
+  spoken = false,
   typing,
   previousSameRole,
   chatIndex,
@@ -184,10 +185,14 @@ export const MessageRow = memo(function MessageRow({
   speaker?: string;
   /**
    * In a work of several members, whose message this is for its custom UI: that
-   * member's stylesheet dresses it (`data-shizue-member`, `sanitizeCustomHtml`)
-   * and its buttons run that member's scripts.
+   * member's stylesheet dresses it (`data-shizue-member`, `sanitizeCustomHtml`).
    */
   member?: string;
+  /**
+   * Whether `member` spoke this message (`data-shizue-spoken`): its buttons then
+   * run that member's scripts, and otherwise the lead's.
+   */
+  spoken?: boolean;
   /**
    * Whom the row is waiting on while `thinking`, in a round of several members:
    * drawn as their face and "{이름} 입력 중…".
@@ -511,7 +516,7 @@ export const MessageRow = memo(function MessageRow({
       </span>
     ) : undefined;
 
-  const memberProps = member ? { 'data-shizue-member': member } : {};
+  const memberProps = member ? { 'data-shizue-member': member, ...(spoken ? { 'data-shizue-spoken': '' } : {}) } : {};
 
   // No bubble, no face and no label: the ≡ at its start and muted italics mark
   // it, as Zeta marks its narrator and RisuAI draws its *scene text*.

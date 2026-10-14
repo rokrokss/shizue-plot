@@ -266,10 +266,15 @@ interface ViewMessage {
    */
   speaker?: string;
   /**
-   * In a work of several members, whose message it is for its custom UI and
-   * its buttons (`memberOf`): the speaker, else the work's first member.
+   * In a work of several members, whose message it is for its custom UI: the
+   * speaker, else the work's first member.
    */
   member?: string;
+  /**
+   * Whether `member` spoke it: then its buttons run that member's scripts, and
+   * otherwise the lead's (`runtimeOf`).
+   */
+  spoken?: boolean;
   /** The chat's opening, whose `#` lines are scene titles. */
   intro?: boolean;
   /** The model a stored reply was written with, by name — the chat's where the reply names none. */
@@ -950,7 +955,10 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     [scriptBundles],
   );
   const triggerNames = scriptBundle ? triggerNamesByMember.get(scriptBundle.memberId) : undefined;
-  /** The work's first member, who speaks for the messages no member speaks (`lib/scripts/group`). */
+  /**
+   * The work's first member, whose display scripts and stylesheet dress the
+   * messages no member speaks — their scripts are the lead's (`lib/scripts/group`).
+   */
   const firstMemberId = cast[0]?.id ?? null;
 
   const display = useMemo<DisplayContext | undefined>(() => {
@@ -1010,29 +1018,34 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   }, [group, scripts, cast]);
   /**
    * What a member's messages are drawn with, in a work of several: its display
-   * scripts, and the buttons its own triggers answer — the lead's for the work's
-   * first member, as its messages run the lead's scripts (`runtimeOf`). Missing
-   * for a member none of the plot's scripts apply to.
+   * scripts, and the buttons its own triggers answer — none for a member with no
+   * scripts, the first no differently (`runtimeOf`). Missing for a member none of
+   * the plot's scripts apply to. The messages no member speaks (`sceneDisplay`)
+   * take the first member's display scripts and the lead's buttons, as they run
+   * the lead's scripts.
    */
-  const displayByMember = useMemo(() => {
-    const contexts = new Map<string, DisplayContext>();
-    if (!display || !group) return contexts;
+  const { byMember: displayByMember, scene: sceneDisplay } = useMemo(() => {
+    const byMember = new Map<string, DisplayContext>();
+    let scene: DisplayContext | undefined;
+    if (!display || !group) return { byMember, scene };
+    const { triggerNames: _lead, ...rest } = display;
+    const contextOf = (list: DisplayScript[], names: ReadonlySet<string> | undefined): DisplayContext =>
+      list === scripts && names === triggerNames ? display : { ...rest, scripts: list, ...(names ? { triggerNames: names } : {}) };
     for (const member of cast) {
       const list = scriptsByMember.get(member.id) ?? scripts;
       if (list.length === 0) continue;
-      const names = triggerNamesByMember.get(member.id) ?? (member.id === firstMemberId ? triggerNames : undefined);
-      if (list === scripts && names === triggerNames) {
-        contexts.set(member.id, display);
-        continue;
-      }
-      const { triggerNames: _lead, ...rest } = display;
-      contexts.set(member.id, { ...rest, scripts: list, ...(names ? { triggerNames: names } : {}) });
+      const own = triggerNamesByMember.get(member.id);
+      byMember.set(member.id, contextOf(list, own));
+      if (member.id === firstMemberId) scene = contextOf(list, triggerNames);
     }
-    return contexts;
+    return { byMember, scene };
   }, [display, group, cast, scripts, scriptsByMember, triggerNamesByMember, firstMemberId, triggerNames]);
-  /** The display context of a row: its member's in a work of several, else the plot's. */
-  const displayOf = (member: string | undefined): DisplayContext | undefined =>
-    member !== undefined && group ? displayByMember.get(member) : display;
+  /**
+   * The display context of a row: in a work of several, its speaker's, or the
+   * scene's for a message no member speaks; else the plot's.
+   */
+  const displayOf = (row: Pick<ViewMessage, 'member' | 'spoken'>): DisplayContext | undefined =>
+    row.member !== undefined && group ? (row.spoken ? displayByMember.get(row.member) : sceneDisplay) : display;
   /** The background is the work's, drawn with the first member's display scripts — the untagged ones in a work of one. */
   const backgroundScripts = (firstMemberId !== null && scriptsByMember.get(firstMemberId)) || scripts;
   /**
@@ -1312,8 +1325,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   useEffect(() => () => runtimes?.dispose(), [runtimes]);
   /** Where each moment's scripts run (`runtimeOf`). */
   const scriptCast = useMemo<ScriptCast | null>(
-    () => (runtimes ? { byMember: runtimes.byMember, lead: runtimes.lead, firstMemberId } : null),
-    [runtimes, firstMemberId],
+    () => (runtimes ? { byMember: runtimes.byMember, lead: runtimes.lead } : null),
+    [runtimes],
   );
   /** The lead's runtime: a work of one's only one. */
   const runtime = runtimes?.lead ?? null;
@@ -1324,18 +1337,16 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const editsDisplay = anyRuntime((one) => one.editsDisplay);
   const rewritesOnServer = anyRuntime((one) => one.rewritesOnServer);
   /**
-   * Whose message a stored one is, for the scripts it is drawn through and the
-   * buttons in it (`lib/scripts/group`): in a work of several members, a reply's
-   * speaker, else the work's first member; null in a work of one, the lead's.
+   * Whose scripts a stored message is drawn through (`lib/scripts/group`): in a
+   * work of several members, a reply's speaker; null — the lead's — for a message
+   * no member speaks, and in a work of one.
    */
   const memberOfMessage = useCallback(
     (message: ChatMessage): string | null =>
-      !group
-        ? null
-        : message.role === 'assistant' && message.speakerMemberId && cast.some((member) => member.id === message.speakerMemberId)
-          ? message.speakerMemberId
-          : firstMemberId,
-    [group, cast, firstMemberId],
+      group && message.role === 'assistant' && message.speakerMemberId && cast.some((member) => member.id === message.speakerMemberId)
+        ? message.speakerMemberId
+        : null,
+    [group, cast],
   );
   /**
    * The scripts fold the branch as the server does, from the plot's defaults, so
@@ -2481,6 +2492,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           ? { speaker: scriptSpeaker }
           : {}),
       ...(group && (tagged?.id ?? firstMemberId) ? { member: tagged?.id ?? firstMemberId! } : {}),
+      ...(group && tagged ? { spoken: true } : {}),
       ...(opening ? { intro: true } : {}),
       ...(written ? { model: modelName(message.model ?? state.chat.model) } : {}),
     };
@@ -2524,7 +2536,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       streaming: mode !== null,
       ...(streamMember ? { speaker: streamMember.name } : {}),
       // Dressed as its speaker's from the first token, as it will be once stored.
-      ...(group && streamMember ? { member: streamMember.id } : {}),
+      ...(group && streamMember ? { member: streamMember.id, spoken: true } : {}),
     });
   }
 
@@ -2758,8 +2770,10 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               const target = event.target as HTMLElement;
               const scripted = target.closest?.('[data-shizue-trigger], [data-shizue-btn]');
               if (scripted) {
-                // The scripts of the member whose message holds the button.
-                const member = scripted.closest('[data-shizue-member]')?.getAttribute('data-shizue-member') ?? null;
+                // The scripts of the member who spoke the message holding the button;
+                // the lead's in a message no member speaks.
+                const row = scripted.closest('[data-shizue-member]');
+                const member = row?.hasAttribute('data-shizue-spoken') ? row.getAttribute('data-shizue-member') : null;
                 const name = scripted.getAttribute('data-shizue-trigger');
                 if (name !== null) void runManualTrigger(name, scripted.getAttribute('data-shizue-trigger-id'), member);
                 else void runLuaButton(scripted.getAttribute('data-shizue-btn') ?? '', member);
@@ -2851,11 +2865,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                     userImage={personaAvatarUrl}
                     roster={members}
                     {...(message.speaker ? { speaker: message.speaker } : {})}
-                    {...(message.member ? { member: message.member } : {})}
+                    {...(message.member ? { member: message.member, ...(message.spoken ? { spoken: true } : {}) } : {})}
                     assets={messageAssets}
                     resolveAsset={resolveAsset}
                     attachments={message.attachments}
-                    {...(displayOf(message.member) ? { display: displayOf(message.member)! } : {})}
+                    {...(displayOf(message) ? { display: displayOf(message)! } : {})}
                     {...(components ? { components } : {})}
                     componentNames={declaredComponents}
                     previousSameRole={meta.previousSameRole}

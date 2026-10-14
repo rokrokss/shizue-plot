@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 /**
  * The studio's custom UI in a work of several members: each display script says
- * whose messages it is for (적용 대상), a companion's stylesheet and the work's
- * one background ride the one Save, a member's removal takes what came with it,
+ * whose messages it is for (적용 대상), a member's stylesheet — a companion's, or
+ * one started from nothing — and the work's one background ride the one Save, a
+ * member's removal takes what came with it,
  * and a companion's import takes up what its card brought — saying which of its
  * default variables the work already had.
  */
@@ -114,6 +115,38 @@ describe('적용 대상', () => {
     plot = { ...plot, characters: [member('m1', '세이야')] };
     await render();
     expect(targets()).toHaveLength(0);
+  });
+});
+
+describe('a member’s stylesheet', () => {
+  const adds = () => [...host.querySelectorAll<HTMLButtonElement>('[data-testid="member-css-add"]')];
+  const sheets = () => [...host.querySelectorAll<HTMLTextAreaElement>('[data-testid="member-css"]')];
+
+  it('starts from nothing for a member without one, and rides the save', async () => {
+    await render();
+    // 카이's came with its card; 세이야 has none, and is offered one.
+    expect(adds().map((node) => node.textContent)).toEqual([messages.plot.memberCssAdd.replace('{name}', '세이야')]);
+    await click(adds()[0]!);
+    expect(adds()).toHaveLength(0);
+    expect(sheets().map((field) => field.value)).toEqual(['', '.kai { color: blue; }']);
+    await type(sheets()[0]!, '.seiya { color: red; }');
+    await click(button(host, messages.common.save));
+    expect(savedUi()['memberCss']).toEqual({ m1: '.seiya { color: red; }', m2: '.kai { color: blue; }' });
+  });
+
+  it('is dropped when saved empty', async () => {
+    await render();
+    await click(adds()[0]!);
+    await type(sheets()[1]!, '  ');
+    await click(button(host, messages.common.save));
+    expect(savedUi()['memberCss']).toEqual({});
+  });
+
+  it('is not offered in a work of one', async () => {
+    plot = { ...plot, characters: [member('m1', '세이야')], customUi: { displayScripts: [], defaultVariables: {} } };
+    await render();
+    expect(adds()).toHaveLength(0);
+    expect(sheets()).toHaveLength(0);
   });
 });
 
