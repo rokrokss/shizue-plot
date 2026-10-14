@@ -68,7 +68,7 @@ const risuExtensionOf = (card: NormalizedCard): Record<string, unknown> | undefi
   return risu !== null && typeof risu === 'object' && !Array.isArray(risu) ? (risu as Record<string, unknown>) : undefined;
 };
 
-/** The fields the roster editor writes — the card's, and the member's 대화량; the rest of the card is carried. */
+/** The fields the roster editor writes — the card's, and the member's 대화량; the rest of the card stays on the server. */
 const memberFields = (member: PlotMember): string =>
   JSON.stringify([
     member.name,
@@ -84,6 +84,29 @@ const memberFields = (member: PlotMember): string =>
     emotionModeOf(member.card),
     risuExtensionOf(member.card)?.['utilityBot'] === true,
   ]);
+
+/**
+ * What Save sends for a member: the fields `memberFields` tracks and no more.
+ * The server lays them over the card it holds, so the rest — the original card,
+ * a RisuAI card's extensions with its scripts — never travels back, and the two
+ * RisuAI settings go as values rather than as the extension they live in.
+ */
+const memberSave = (member: PlotMember) => ({
+  name: member.name.trim() || member.card.name,
+  talkativeness: member.talkativeness,
+  card: {
+    intro: member.card.intro ?? '',
+    description: member.card.description,
+    personality: member.card.personality,
+    mesExample: member.card.mesExample,
+    systemPrompt: member.card.systemPrompt,
+    postHistoryInstructions: member.card.postHistoryInstructions,
+    lorebook: member.card.lorebook,
+    loreSettings: member.card.loreSettings,
+  },
+  emotionMode: emotionModeOf(member.card),
+  utilityBot: risuExtensionOf(member.card)?.['utilityBot'] === true,
+});
 
 /** The card files a member exports to, and their labels. Only CharX carries the plot's images. */
 const EXPORT_FORMATS = [
@@ -212,11 +235,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
       // adopting it after the writes is what leaves the editor consistent.
       for (const member of members) {
         if (saved.get(member.id) === memberFields(member)) continue;
-        await apiSend<PlotMember>('PATCH', `/api/plots/${id}/characters/${member.id}`, {
-          name: member.name.trim() || member.card.name,
-          card: member.card,
-          talkativeness: member.talkativeness,
-        });
+        await apiSend<PlotMember>('PATCH', `/api/plots/${id}/characters/${member.id}`, memberSave(member));
       }
       adopt(
         await apiSend<PlotDetail>('PATCH', `/api/plots/${id}`, {

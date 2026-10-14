@@ -17,7 +17,7 @@ const card = {
   alternateGreetings: [], mesExample: '', systemPrompt: '', postHistoryInstructions: '',
   creatorNotes: '', tags: [], creator: '', characterVersion: '', lorebook: [],
   loreSettings: { scanDepth: 4, recursiveScanning: false } as { scanDepth: number; recursiveScanning: boolean; tokenBudget?: number },
-  extensions: {}, raw: null,
+  extensions: {} as Record<string, unknown>, raw: null as unknown,
 };
 const plot = {
   id: 'plot-1', name: '제목', intro: '', description: '', language: 'ko', tags: [],
@@ -47,6 +47,8 @@ let root: Root;
 beforeEach(() => {
   send.mockReset();
   card.loreSettings = { scanDepth: 4, recursiveScanning: false };
+  card.extensions = {};
+  card.raw = null;
   send.mockImplementation((_method, path) => Promise.resolve(path === '/api/plots/plot-1' ? plot : {}));
   host = document.createElement('div'); document.body.appendChild(host); root = createRoot(host);
 });
@@ -103,4 +105,24 @@ it('clears the book budget on the first card back to automatic', async () => {
     scanDepth: 4,
     recursiveScanning: false,
   });
+});
+
+/**
+ * A RisuAI card from the Realm carries megabytes the studio never edits — its
+ * original JSON, and its extension with the scripts and triggers — which once
+ * put the save past the API's 5MB body. Save sends what the editor writes, and
+ * the card's two RisuAI settings as values, so the body stays small.
+ */
+it('saves a big card’s member without its original card or extensions', async () => {
+  const blob = 'x'.repeat(3 * 1024 * 1024);
+  card.raw = { data: { description: blob } };
+  card.extensions = { risuai: { customScripts: [{ in: blob, out: '' }], viewScreen: 'emotion', utilityBot: true } };
+  await render();
+  const row = host.querySelector('[data-testid="plot-member"]')!;
+  await type(field(row, messages.plot.memberDescription), '고친 설정');
+  await act(async () => button(host, messages.common.save).click());
+
+  const body = memberPatch()?.[2] as Record<string, unknown>;
+  expect(JSON.stringify(body).length).toBeLessThan(1000);
+  expect(body).toMatchObject({ card: { description: '고친 설정' }, emotionMode: 'panel', utilityBot: true });
 });

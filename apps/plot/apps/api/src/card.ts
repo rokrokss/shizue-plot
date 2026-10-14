@@ -7,6 +7,8 @@ import {
   creatorCssFromExtensions,
   DEFAULT_LORE_SETTINGS,
   displayScriptPatternError,
+  emotionModeOf,
+  extensionsWithEmotionMode,
   LORE_POSITIONS,
   emptyCard,
   emptyVariables,
@@ -18,6 +20,7 @@ import {
   type ComponentCapability,
   type DisplayScript,
   type EmotionImage,
+  type EmotionMode,
   type LoreEntry,
   type LorePosition,
   type LoreSelectiveLogic,
@@ -530,4 +533,83 @@ export function coerceCard(value: unknown, fallbackName: string): NormalizedCard
         : {},
     raw: raw['raw'] ?? null,
   };
+}
+
+/**
+ * Every field a card has: the keys `mergeCard` may take from a sent card. Typed
+ * against the card, so a field added there has to be named here.
+ */
+const CARD_FIELDS = Object.keys({
+  spec: true,
+  name: true,
+  nickname: true,
+  intro: true,
+  description: true,
+  personality: true,
+  scenario: true,
+  firstMes: true,
+  alternateGreetings: true,
+  groupOnlyGreetings: true,
+  mesExample: true,
+  systemPrompt: true,
+  postHistoryInstructions: true,
+  creatorNotes: true,
+  tags: true,
+  creator: true,
+  characterVersion: true,
+  lorebook: true,
+  loreSettings: true,
+  displayScripts: true,
+  defaultVariables: true,
+  componentCode: true,
+  componentCapabilities: true,
+  narrator: true,
+  emotionImages: true,
+  extensions: true,
+  raw: true,
+} satisfies Record<keyof NormalizedCard, true>);
+
+/**
+ * A member's card with the fields the client sent laid over the stored one
+ * (`PATCH /:id/characters/:characterId`). Each sent field passes `coerceCard`
+ * as it would in a whole card, and one it leaves out — an emptied intro — is
+ * taken off. A field not sent is the stored one as it was, so a save need not
+ * carry the original card (`raw`, `extensions`) back.
+ */
+export function mergeCard(stored: NormalizedCard, sent: unknown, fallbackName: string): NormalizedCard {
+  if (sent === null || typeof sent !== 'object' || Array.isArray(sent)) {
+    throw badRequest('invalid_request', 'card must be an object');
+  }
+  const coerced: Record<string, unknown> = { ...coerceCard(sent, fallbackName) };
+  const merged: Record<string, unknown> = { ...stored };
+  for (const key of CARD_FIELDS) {
+    if (!Object.hasOwn(sent, key)) continue;
+    if (Object.hasOwn(coerced, key)) merged[key] = coerced[key];
+    else delete merged[key];
+  }
+  return merged as unknown as NormalizedCard;
+}
+
+/**
+ * The two RisuAI settings the studio sets on a member — its emotion screen and
+ * its utility-bot switch — written into the card's extensions where RisuAI keeps
+ * them. They travel as values rather than as `extensions.risuai`, which also
+ * holds the card's scripts and triggers. A value the card already has changes
+ * nothing: setting the emotion mode drops `newGenData`, as RisuAI's switch does,
+ * and only a switch should.
+ */
+export function extensionsWithSettings(
+  extensions: Record<string, unknown>,
+  { emotionMode, utilityBot }: { emotionMode?: EmotionMode | null; utilityBot?: boolean },
+): Record<string, unknown> {
+  let next = extensions;
+  if (emotionMode !== undefined && emotionMode !== emotionModeOf({ extensions })) {
+    next = extensionsWithEmotionMode(next, emotionMode);
+  }
+  const held = next['risuai'];
+  const risu = held !== null && typeof held === 'object' && !Array.isArray(held) ? (held as Record<string, unknown>) : {};
+  if (utilityBot !== undefined && (risu['utilityBot'] === true) !== utilityBot) {
+    next = { ...next, risuai: { ...risu, utilityBot } };
+  }
+  return next;
 }

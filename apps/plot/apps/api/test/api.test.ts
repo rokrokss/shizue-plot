@@ -1543,6 +1543,71 @@ describe('plot characters', () => {
     expect(after.characters.map((m: any) => m.name)).toEqual(['리안']);
   });
 
+  /**
+   * The studio's Save sends only what it edits — a big RisuAI card's original
+   * JSON and extensions are megabytes, past the body limit — so the server lays
+   * a partial card over the one it holds and leaves the rest as it came.
+   */
+  it('lays a partial card over the stored one, every field it was not sent left as it came', async () => {
+    const cookie = await signUp('member-partial@example.com');
+    const risuai = {
+      viewScreen: 'emotion',
+      newGenData: { prompt: '', negative: '', instructions: '', emotionInstructions: '표정: {{slot}}' },
+      customScripts: [{ comment: '상태', in: '\\[상태\\]', out: '<b>$&</b>', type: 'editdisplay', flag: 'g' }],
+      triggerscript: [{ comment: '시작', type: 'start', conditions: [], effect: [{ type: 'setvar', var: 'hp', value: '100', operator: '=' }] }],
+      backgroundHTML: '<div class="sky">밤</div>',
+    };
+    const file = new File([JSON.stringify({ ...v3Card, data: { ...v3Card.data, extensions: { risuai } } })], 'sei.json');
+    const plot = await importCard(cookie, file);
+    const before = plot.characters[0];
+    expect(before.card.displayScripts).toHaveLength(1);
+    const without = (card: Record<string, unknown>, ...keys: string[]) =>
+      JSON.stringify(Object.fromEntries(Object.entries(card).filter(([key]) => !keys.includes(key))));
+
+    // What the studio sends for a description edit: its fields, and the two
+    // RisuAI settings as the card already has them, which change nothing.
+    const body = {
+      name: before.name,
+      talkativeness: before.talkativeness,
+      card: {
+        intro: '',
+        description: '고친 설정.',
+        personality: before.card.personality,
+        mesExample: before.card.mesExample,
+        systemPrompt: before.card.systemPrompt,
+        postHistoryInstructions: before.card.postHistoryInstructions,
+        lorebook: before.card.lorebook,
+        loreSettings: before.card.loreSettings,
+      },
+      emotionMode: 'panel',
+      utilityBot: false,
+    };
+    const patched = await patchCharacter(cookie, plot.id, before.id, body);
+    expect(patched.card.description).toBe('고친 설정.');
+    expect(without(patched.card, 'description')).toBe(without(before.card, 'description'));
+    expect(without((await firstMember(cookie, plot.id)).card, 'description')).toBe(without(before.card, 'description'));
+
+    // A setting that differs is written where RisuAI keeps it, and only there.
+    const switched = await patchCharacter(cookie, plot.id, before.id, { emotionMode: null, utilityBot: true });
+    const { newGenData: _reset, ...kept } = risuai;
+    expect(switched.card.extensions).toEqual({ risuai: { ...kept, viewScreen: 'none', utilityBot: true } });
+    expect(without(switched.card, 'extensions')).toBe(without(patched.card, 'extensions'));
+
+    // Each sent field is held to what a whole card is; a card that is not one is refused.
+    const path = `/api/plots/${plot.id}/characters/${before.id}`;
+    for (const refused of [
+      { card: { intro: '가'.repeat(MAX_INTRO_LENGTH + 1) } },
+      { card: { displayScripts: [{ in: '(', out: '' }] } },
+      { card: '설정' },
+      { card: null },
+      { emotionMode: 'sideways' },
+      { utilityBot: 'yes' },
+    ]) {
+      expect((await json(cookie, path, 'PATCH', refused)).status, JSON.stringify(refused)).toBe(400);
+    }
+    expect(without((await firstMember(cookie, plot.id)).card)).toBe(without(switched.card));
+  });
+
   it('takes an avatar upload directly and gives it back', async () => {
     const alice = await signUp('avatar-upload@example.com');
     const bob = await signUp('avatar-upload-other@example.com');
@@ -15609,11 +15674,10 @@ describe('emotion images', () => {
       { mode: 'inlay', images: added.card.emotionImages },
     ]);
 
-    // The studio sends the whole card back; the pictures survive it, and the
-    // mode is the extension's to switch.
-    const patched = await patchCharacter(cookie, plot.id, member.id, {
-      card: { ...member.card, extensions: { risuai: { viewScreen: 'none' } } },
-    });
+    // The studio switches the mode as a value, written into the extension; the
+    // pictures survive it.
+    const patched = await patchCharacter(cookie, plot.id, member.id, { emotionMode: null });
+    expect(patched.card.extensions.risuai).toEqual({ viewScreen: 'none' });
     expect(patched.card.emotionImages).toEqual(member.card.emotionImages);
     expect((await readPublicPlot(cookie, plot.id)).characters[0].emotion).toBeNull();
   });

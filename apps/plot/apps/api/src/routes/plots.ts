@@ -35,6 +35,7 @@ import {
   type CharxAssetFile,
   type CharxExportAsset,
   type EmotionImage,
+  type EmotionMode,
   type GroupSettings,
   type ImportProvenance,
   type LoreEntry,
@@ -93,7 +94,9 @@ import {
   customUiOfCard,
   customUiOfRoster,
   customUiWithoutModules,
+  extensionsWithSettings,
   liftCompanion,
+  mergeCard,
   readerCustomUi,
   withoutMember,
   withStoredModules,
@@ -293,6 +296,16 @@ function optionalTalkativeness(body: Record<string, unknown>): number | null | u
   if (value === undefined || value === null) return value;
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 100) {
     throw badRequest('invalid_request', 'talkativeness must be an integer from 0 to 100, or null');
+  }
+  return value;
+}
+
+/** A member's RisuAI emotion screen as the studio sets it: shown in a panel, inline, or (null) not at all. */
+function optionalEmotionMode(body: Record<string, unknown>): EmotionMode | null | undefined {
+  const value = body['emotionMode'];
+  if (value === undefined || value === null) return value;
+  if (value !== 'panel' && value !== 'inlay') {
+    throw badRequest('invalid_request', "emotionMode must be 'panel', 'inlay' or null");
   }
   return value;
 }
@@ -1615,29 +1628,50 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.json(members.map((member) => toMemberJson(plot, member)));
   });
 
+  /**
+   * A member's card is written as a patch: the fields sent are laid over the
+   * card the row holds (`mergeCard`), read under the row's lock so two saves do
+   * not undo each other, and everything not sent — the original card, a RisuAI
+   * card's extensions with its scripts — stays as it was. The studio's two
+   * RisuAI settings come as values (`emotionMode`, `utilityBot`) rather than as
+   * the extension that holds them.
+   */
   app.patch('/:id/characters/:characterId', requireUser, async (c) => {
     const id = requireUuidParam(c);
     const characterId = requireUuidParam(c, 'characterId');
-    const userId = c.get('userId');
-    const { plot, member } = await loadOwnedMember(deps, id, characterId, userId);
+    const plot = await loadOwnedPlot(deps, id, c.get('userId'));
     const body = await readJsonBody(c);
 
     const name = optionalString(body, 'name')?.trim();
     if (name !== undefined && !name) throw badRequest('invalid_request', 'name must not be empty');
-    const card = body['card'] === undefined ? undefined : coerceCard(body['card'], name ?? member.name);
     const talkativeness = optionalTalkativeness(body);
+    const emotionMode = optionalEmotionMode(body);
+    const utilityBot = optionalBoolean(body, 'utilityBot');
 
-    const [updated] = await deps.db
-      .update(characters)
-      .set({
-        ...(name !== undefined ? { name } : {}),
-        ...(card !== undefined ? { card } : {}),
-        ...(talkativeness !== undefined ? { talkativeness } : {}),
-        updatedAt: new Date(),
-      })
-      .where(and(eq(characters.id, characterId), eq(characters.plotId, id)))
-      .returning();
-    return c.json(toMemberJson(plot, updated!));
+    const updated = await deps.db.transaction(async (tx) => {
+      const [member] = await tx
+        .select()
+        .from(characters)
+        .where(and(eq(characters.id, characterId), eq(characters.plotId, id)))
+        .for('update');
+      if (!member) throw notFound('Character not found');
+      const merged =
+        body['card'] === undefined ? member.card : mergeCard(member.card, body['card'], name ?? member.name);
+      const extensions = extensionsWithSettings(merged.extensions, { emotionMode, utilityBot });
+      const card = merged === member.card && extensions === merged.extensions ? undefined : { ...merged, extensions };
+      const [row] = await tx
+        .update(characters)
+        .set({
+          ...(name !== undefined ? { name } : {}),
+          ...(card !== undefined ? { card } : {}),
+          ...(talkativeness !== undefined ? { talkativeness } : {}),
+          updatedAt: new Date(),
+        })
+        .where(eq(characters.id, characterId))
+        .returning();
+      return row!;
+    });
+    return c.json(toMemberJson(plot, updated));
   });
 
   app.delete('/:id/characters/:characterId', requireUser, async (c) => {
