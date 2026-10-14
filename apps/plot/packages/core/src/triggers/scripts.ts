@@ -21,7 +21,7 @@
  */
 
 import type { LuaLoreBook } from '../lua/runtime.js';
-import type { LoreEntry, NormalizedCard } from '../types.js';
+import type { LoreEntry, NormalizedCard, PlotModule } from '../types.js';
 
 /** When a trigger runs, in RisuAI's words. */
 export type TriggerMode = 'start' | 'manual' | 'output' | 'input' | 'display' | 'request';
@@ -44,6 +44,14 @@ export interface TriggerScript {
   readonly type: TriggerMode;
   readonly conditions: readonly TriggerStep[];
   readonly effect: readonly TriggerStep[];
+  /**
+   * RisuAI's per-trigger `lowLevelAccess`, which its `runTrigger` sets on every
+   * trigger before it runs: the character's flag on the character's own, the
+   * module's on a module's. Set here only where a work's modules join the
+   * card's (`cardScripts`); absent, the run's character decides. Never read off
+   * card data — RisuAI overwrites whatever a stored trigger says.
+   */
+  readonly lowLevelAccess?: boolean;
 }
 
 /** The effect types that hold code for another language rather than steps. */
@@ -182,40 +190,77 @@ function readEditScript(value: unknown): EditScript | null {
   };
 }
 
+/** What a work's module brings to the scripts (`PlotModule`). */
+export type ModuleScripts = Pick<PlotModule, 'regex' | 'trigger' | 'lowLevelAccess'>;
+
+/** The triggers and edit scripts in RisuAI's two lists, read defensively. */
+function readScripts(triggerscript: unknown, customScripts: unknown): { triggers: TriggerScript[]; editScripts: EditScript[] } {
+  return {
+    triggers: Array.isArray(triggerscript)
+      ? triggerscript.map(readTrigger).filter((trigger): trigger is TriggerScript => trigger !== null)
+      : [],
+    editScripts: Array.isArray(customScripts)
+      ? customScripts.map(readEditScript).filter((script): script is EditScript => script !== null)
+      : [],
+  };
+}
+
 /**
  * The scripts on one card, or null when it carries none the browser runs. A card
  * whose only triggers are empty shells (no effect at all) still counts: RisuAI
  * would loop over them, and a manual trigger with no effect is still a button
  * that does nothing rather than one that falls back to filling the composer.
+ *
+ * The work's `modules` run after the card's own, as RisuAI's `runTrigger`
+ * concatenates `char.triggerscript` and `getModuleTriggers()` and its
+ * `processScript` the character's `customscript` and `getModuleRegexScripts()`.
+ * Where they bring any, every trigger carries its own `lowLevelAccess` — the
+ * card's on its own, the module's on the module's, as RisuAI's `runTrigger`
+ * marks them — and the whole is `lowLevelAccess` where any trigger is: what a
+ * gate that cannot tell one trigger's call from another's (`script-llm`,
+ * `script-fetch`, a Lua button) is held to.
  */
-export function cardScripts(card: Pick<NormalizedCard, 'extensions'>): CardScripts | null {
+export function cardScripts(
+  card: Pick<NormalizedCard, 'extensions'>,
+  modules: readonly ModuleScripts[] = [],
+): CardScripts | null {
   const risu = risuOf(card);
-  if (!risu) return null;
-  const triggers = Array.isArray(risu['triggerscript'])
-    ? risu['triggerscript'].map(readTrigger).filter((trigger): trigger is TriggerScript => trigger !== null)
-    : [];
-  const editScripts = Array.isArray(risu['customScripts'])
-    ? risu['customScripts'].map(readEditScript).filter((script): script is EditScript => script !== null)
-    : [];
-  if (triggers.length === 0 && editScripts.length === 0) return null;
-  return { triggers, editScripts, lowLevelAccess: risu['lowLevelAccess'] === true };
+  const own = readScripts(risu?.['triggerscript'], risu?.['customScripts']);
+  const ownAccess = risu?.['lowLevelAccess'] === true;
+  const added = modules
+    .map((module) => ({ ...readScripts(module.trigger, module.regex), lowLevelAccess: module.lowLevelAccess === true }))
+    .filter((read) => read.triggers.length > 0 || read.editScripts.length > 0);
+  if (added.length === 0) {
+    if (own.triggers.length === 0 && own.editScripts.length === 0) return null;
+    return { ...own, lowLevelAccess: ownAccess };
+  }
+  const marked = (triggers: TriggerScript[], lowLevelAccess: boolean): TriggerScript[] =>
+    triggers.map((trigger) => ({ ...trigger, lowLevelAccess }));
+  return {
+    triggers: [...marked(own.triggers, ownAccess), ...added.flatMap((read) => marked(read.triggers, read.lowLevelAccess))],
+    editScripts: [...own.editScripts, ...added.flatMap((read) => read.editScripts)],
+    lowLevelAccess: ownAccess || added.some((read) => read.lowLevelAccess && read.triggers.length > 0),
+  };
 }
 
-/** Whether a card carries anything the reader's browser would run. */
-export const carriesScripts = (card: Pick<NormalizedCard, 'extensions'>): boolean => cardScripts(card) !== null;
+/** Whether a card — with the work's modules — carries anything the reader's browser would run. */
+export const carriesScripts = (card: Pick<NormalizedCard, 'extensions'>, modules: readonly ModuleScripts[] = []): boolean =>
+  cardScripts(card, modules) !== null;
 
 /**
  * The member whose scripts a chat runs: the first in roster order that carries
  * any. RisuAI runs one character's triggers — the one the chat is with — and a
  * plot with several imported members has no single answer to "which character
  * is this", so the roster's order, which already decides whose card stands in
- * for the work in the prompt, decides this too.
+ * for the work in the prompt, decides this too. A work's modules are every
+ * member's, so where they carry scripts that is the first member.
  */
 export function scriptedMember<T extends { card: Pick<NormalizedCard, 'extensions'> }>(
   members: readonly T[],
+  modules: readonly ModuleScripts[] = [],
 ): { member: T; scripts: CardScripts } | null {
   for (const member of members) {
-    const scripts = cardScripts(member.card);
+    const scripts = cardScripts(member.card, modules);
     if (scripts) return { member, scripts };
   }
   return null;

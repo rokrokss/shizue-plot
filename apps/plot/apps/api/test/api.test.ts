@@ -86,6 +86,7 @@ import { createEmbedder } from '../../../packages/llm/test/helpers/embed.js';
 import { stCard, v3Card } from '../../../packages/core/test/fixtures/cards.js';
 import { buildCharx, type CharxAssetSpec } from '../../../packages/core/test/helpers/charx.js';
 import { buildPngWithTextChunks } from '../../../packages/core/test/helpers/png.js';
+import { buildRisum } from '../../../packages/core/test/helpers/risum.js';
 import { createApp } from '../src/app.js';
 import { MAX_ASSETS_PER_PLOT } from '../src/assets.js';
 import {
@@ -13219,7 +13220,7 @@ describe('request triggers', () => {
     expect(prompts.at(-1)!.system).toBe('다음 시스템');
   });
 
-  it('keeps the images on the reader’s turn that names them, and drops one whose turn is no longer the reader’s', async () => {
+  it('keeps the images on the turn that names them — the reader’s, or a system turn it became', async () => {
     const { app: seeing, prompts } = capturingApp({ env: { SHIZUE_TEST_MODELS: '1' } });
     const gif = Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1]);
     const image = { type: 'image', url: `data:image/gif;base64,${Buffer.from(gif).toString('base64')}` };
@@ -13252,10 +13253,10 @@ describe('request triggers', () => {
     ]);
     expect(userTurn()).toEqual({ role: 'user', content: [{ type: 'text', text: '이건 뭐야?' }, image] });
 
-    // Its own turn became a system turn, which a provider may refuse a picture on: not sent.
+    // Its own turn became a system turn: sent there, beside its text, as RisuAI's Responses request sends one.
     const turned = await requestChat('request-image-turned@example.com', atTurn('이건 뭐야?', setRole('system')), { model: 'test/vision' }, seeing);
     await sendWithImage(turned.cookie, turned.chatId);
-    expect(userTurn()).toEqual({ role: 'system', content: '이건 뭐야?' });
+    expect(userTurn()).toEqual({ role: 'system', content: [{ type: 'text', text: '이건 뭐야?' }, image] });
   });
 
   it('runs nothing for a plot whose scripts have no request triggers', async () => {
@@ -13464,6 +13465,42 @@ describe('editRequest listeners', () => {
     const after = await luaChat('lua-after@example.com', [lua(listening(`req[1].content = '다음 시스템' return req`))]);
     await send(after.cookie, after.chatId, capturing);
     expect(prompts.at(-1)!.system).toBe('다음 시스템');
+  });
+
+  it('fits a request the listener grew past the context again, as RisuAI’s token recheck does, and refuses one it cannot', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    // The greeting — removable, as RisuAI marks the character's first message — made longer than the whole context.
+    const grown = await luaChat('lua-refit@example.com', [
+      lua(
+        listening(`
+          for _, turn in ipairs(req) do
+            if turn.role == 'assistant' and turn.removable and turn.memo == nil then turn.content = string.rep('word ', 20000) end
+          end
+          return req`),
+      ),
+    ]);
+    expect((await send(grown.cookie, grown.chatId, capturing)).at(-1)!.event).toBe('done');
+    const sent = prompts.at(-1)!;
+    expect(JSON.stringify(sent.messages)).not.toContain('word word');
+    // What went from the front was what RisuAI may drop: the separator and the greeting, not the reader's turn.
+    expect(sent.messages.some((message) => message.role === 'user' && message.content === '안녕')).toBe(true);
+    expect(sent.messages.some((message) => message.content === '[Start a new chat]')).toBe(false);
+
+    // Grown where nothing may be dropped: not sent at all, and nothing but the reader's turn is stored.
+    const stuck = await luaChat('lua-too-long@example.com', [
+      lua(listening(`req[1].content = req[1].content .. string.rep('word ', 20000) return req`)),
+    ]);
+    const before = prompts.length;
+    const events = await send(stuck.cookie, stuck.chatId, capturing);
+    expect(events.at(-1)!.event).toBe('error');
+    expect(events.at(-1)!.data).toMatchObject({ code: 'prompt_too_long' });
+    expect(prompts.length).toBe(before);
+    const stored = await db.select().from(messages).where(eq(messages.chatId, stuck.chatId));
+    expect(stored.filter((message) => message.role === 'assistant').map((message) => message.content)).toEqual(['문 앞이다.']);
+    // The slot is free again: the inspector answers, with the same refusal.
+    const inspected = await json(stuck.cookie, `/api/chats/${stuck.chatId}/inspect`, 'GET', undefined, capturing);
+    expect(inspected.status).toBe(400);
+    expect((await readJson(inspected)).code).toBe('prompt_too_long');
   });
 
   it('runs nothing for a plot whose scripts have no editRequest listener', async () => {
@@ -15912,5 +15949,164 @@ describe('emotion images', () => {
       select data_type, is_nullable from information_schema.columns
       where table_name = 'messages' and column_name = 'emotion'`;
     expect(column).toEqual({ data_type: 'text', is_nullable: 'YES' });
+  });
+});
+
+describe('RisuAI modules', () => {
+  const gif = (marker: number): Uint8Array => new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, marker]);
+  const assetsOf = async (cookie: string, id: string): Promise<any[]> =>
+    readJson(await request(cookie, `/api/plots/${id}/assets`));
+  /** A RisuAI module as its `.risum` export lays it out (`buildRisum`), or as its JSON. */
+  const weather = {
+    name: '날씨 모듈',
+    description: '비가 온다.',
+    id: 'risu-id',
+    lowLevelAccess: true,
+    backgroundEmbedding: '<style>.rain{color:blue}</style><div class="rain">비</div>',
+    regex: [
+      { comment: '표시', in: '비', out: '<b>비</b>', type: 'editdisplay', ableFlag: false },
+      { comment: '프롬프트', in: '맑음', out: '흐림', type: 'editprocess', ableFlag: false },
+    ],
+    trigger: [{ comment: '모듈 시작', type: 'start', conditions: [], effect: [{ type: 'setvar', var: 'rain', value: '1', operator: '=' }] }],
+    lorebook: [{ key: '', secondkey: '', insertorder: 0, comment: '날씨', content: '골짜기에는 늘 비가 온다.', mode: 'normal', alwaysActive: true, selective: false }],
+    assets: [['rain', '', 'gif']],
+  };
+  const risum = (): File => new File([buildRisum({ module: weather, type: 'risuModule' }, [gif(7)])], 'weather.risum');
+  const importModule = (cookie: string, plotId: string, file: File): Promise<Response> => {
+    const form = new FormData();
+    form.append('file', file);
+    return request(cookie, `/api/plots/${plotId}/modules`, 'POST', form);
+  };
+
+  it('brings a .risum into the work: listed for the studio, kept apart from its editors, drawn after the work’s', async () => {
+    const cookie = await signUp('module-import@example.com');
+    const plot = await createPlot(cookie, {
+      description: '골짜기',
+      customUi: { displayScripts: [{ in: '해', out: '<i>해</i>', order: 4 }], css: '.sun{}' },
+    });
+    await addCharacter(cookie, plot.id, { name: '아리아' });
+
+    const res = await importModule(cookie, plot.id, risum());
+    expect(res.status, await res.clone().text()).toBe(201);
+    const owner = await readJson(res);
+    expect(owner.modules).toEqual([
+      {
+        id: expect.any(String),
+        name: '날씨 모듈',
+        description: '비가 온다.',
+        loreCount: 1,
+        regexCount: 2,
+        triggerCount: 1,
+        displayScriptCount: 1,
+        assetCount: 1,
+        background: true,
+        lowLevelAccess: true,
+        scripts: true,
+        importedFrom: { fileName: 'weather.risum', sha256: expect.stringMatching(/^[0-9a-f]{64}$/), importedAt: expect.any(String) },
+      },
+    ]);
+    // The editors' part carries none of it, and the work's own display scripts and stylesheet are as they were.
+    expect(owner.customUi.modules).toBeUndefined();
+    expect(owner.customUi.displayScripts).toHaveLength(1);
+    expect(owner.customUi.css).toBe('.sun{}');
+    // Its picture joins the work's under its own name.
+    expect((await assetsOf(cookie, plot.id)).map((asset) => [asset.slug, asset.name])).toEqual([['rain', 'rain']]);
+
+    // A reader's chat draws the work's, then the module's: its script numbered after, for every member.
+    const shown = await readPublicPlot(cookie, plot.id);
+    expect(shown.displayScripts.map((script: any) => [script.in, script.order, script.memberId ?? null])).toEqual([
+      ['해', 4, null],
+      ['비', 5, null],
+    ]);
+    expect(shown.css).toBe('.sun{}\n\n.rain{color:blue}');
+    expect(shown.backgroundHtml).toBe('<div class="rain">비</div>');
+
+    // A studio save sends no modules and clears none.
+    const saved = await patchPlot(cookie, plot.id, { customUi: { displayScripts: [], css: '' } });
+    expect(saved.modules).toHaveLength(1);
+    expect((await readPublicPlot(cookie, plot.id)).displayScripts.map((script: any) => script.in)).toEqual(['비']);
+    const cleared = await patchPlot(cookie, plot.id, { customUi: null });
+    expect(cleared.modules).toHaveLength(1);
+  });
+
+  it('runs the module after the cards: its lore last in the prompt, its prompt script, its triggers in every member’s scripts', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const cookie = await signUp('module-runtime@example.com');
+    const plot = await createPlot(cookie, { description: '골짜기', intros: ['오늘은 맑음.'] });
+    await addCharacter(cookie, plot.id, {
+      name: '아리아',
+      card: {
+        description: '마녀.',
+        lorebook: [{ keys: [], content: '아리아의 로어', constant: true }],
+        extensions: { risuai: { triggerscript: [{ comment: '카드 시작', type: 'start', conditions: [], effect: [] }] } },
+      },
+    });
+    await addCharacter(cookie, plot.id, { name: '벨', card: { description: '기사.' } });
+    expect((await importModule(cookie, plot.id, risum())).status).toBe(201);
+
+    const chatId = (await startChat(cookie, plot.id)).chat.id;
+    expect((await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing))).at(-1)!.event).toBe('done');
+    const sent = prompts.at(-1)!;
+    expect(sent.system.indexOf('아리아의 로어')).toBeLessThan(sent.system.indexOf('골짜기에는 늘 비가 온다.'));
+    // The module's `editprocess` rewrote the greeting as it is sent; the stored one is as it was.
+    expect(JSON.stringify(sent.messages)).toContain('오늘은 흐림.');
+
+    // Every member runs the module's scripts after its own, each trigger with its own access.
+    const scripts = await readJson(await request(cookie, `/api/chats/${chatId}/scripts`));
+    expect(scripts.members.map((bundle: any) => bundle.triggers.map((trigger: any) => [trigger.comment, trigger.lowLevelAccess]))).toEqual([
+      [
+        ['카드 시작', false],
+        ['모듈 시작', true],
+      ],
+      [['모듈 시작', true]],
+    ]);
+    expect(scripts.scripts.memberId).toBe(scripts.members[0].memberId);
+    expect(scripts.members.every((bundle: any) => bundle.lowLevelAccess === true)).toBe(true);
+
+    // The inspector says where the lore came from.
+    const report = await readJson(await request(cookie, `/api/chats/${chatId}/inspect`, 'GET', undefined, capturing));
+    expect(report.lore.map((entry: any) => entry.source)).toEqual(['아리아', '날씨 모듈']);
+  });
+
+  it('takes a module out cleanly: its record, its scripts and its pictures', async () => {
+    const cookie = await signUp('module-remove@example.com');
+    const plot = await createPlot(cookie);
+    const owner = await readJson(await importModule(cookie, plot.id, risum()));
+    // A picture of the creator's own stays.
+    const form = new FormData();
+    form.append('file', new File([gif(9)], 'own.gif'));
+    form.append('slug', 'own');
+    expect((await request(cookie, `/api/plots/${plot.id}/assets`, 'POST', form)).status).toBe(201);
+
+    const removed = await request(cookie, `/api/plots/${plot.id}/modules/${owner.modules[0].id}`, 'DELETE');
+    expect(removed.status).toBe(200);
+    expect((await readJson(removed)).modules).toEqual([]);
+    expect((await assetsOf(cookie, plot.id)).map((asset) => asset.slug)).toEqual(['own']);
+    const shown = await readPublicPlot(cookie, plot.id);
+    expect(shown.displayScripts).toEqual([]);
+    expect(shown.backgroundHtml).toBe('');
+    const [row] = await db.select({ customUi: plots.customUi }).from(plots).where(eq(plots.id, plot.id));
+    expect(row!.customUi).toBeNull();
+
+    expect((await request(cookie, `/api/plots/${plot.id}/modules/${owner.modules[0].id}`, 'DELETE')).status).toBe(404);
+  });
+
+  it('takes RisuAI’s module JSON, refuses what is not a module, and answers only the owner', async () => {
+    const cookie = await signUp('module-json@example.com');
+    const plot = await createPlot(cookie);
+    const json = new File([JSON.stringify({ ...weather, type: 'risuModule' })], 'weather.json');
+    const owner = await readJson(await importModule(cookie, plot.id, json));
+    // JSON names its pictures in the exporter's own storage: none come along.
+    expect(owner.modules[0]).toMatchObject({ name: '날씨 모듈', assetCount: 0, loreCount: 1 });
+
+    const bad = await importModule(cookie, plot.id, new File(['{"type":"risu"}'], 'x.json'));
+    expect(bad.status).toBe(400);
+    expect((await readJson(bad)).code).toBe('invalid_module');
+    const nameless = await importModule(cookie, plot.id, new File([JSON.stringify({ ...weather, type: 'risuModule', name: '' })], 'x.json'));
+    expect(nameless.status).toBe(400);
+
+    const stranger = await signUp('module-stranger@example.com');
+    expect((await importModule(stranger, plot.id, risum())).status).toBe(404);
+    expect((await request(stranger, `/api/plots/${plot.id}/modules/${owner.modules[0].id}`, 'DELETE')).status).toBe(404);
   });
 });

@@ -620,7 +620,9 @@ function* execute(
  */
 function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, unknown> {
   const { input } = shared;
-  const lowLevelAccess = input.character.lowLevelAccess;
+  // RisuAI's is each trigger's own (`trigger.lowLevelAccess`): a work's module
+  // brings its own flag to its triggers (`cardScripts`). Set per trigger below.
+  let lowLevelAccess = input.character.lowLevelAccess;
 
   /* ---------------------------------------------------------- variables */
 
@@ -881,6 +883,7 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
   for (const trigger of input.character.triggers) {
     /** The loop counters, RisuAI's inner `tempVars`: per trigger, keyed by the loop's position. */
     const counters: Record<string, number> = {};
+    lowLevelAccess = trigger.lowLevelAccess ?? input.character.lowLevelAccess;
 
     if (isCodeTrigger(trigger)) {
       // Code triggers run in every mode; the code decides.

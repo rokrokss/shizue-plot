@@ -502,6 +502,50 @@ export interface PlotCustomUi {
    * what it always drew: the scripted member's card background.
    */
   backgroundHtml?: string;
+  /**
+   * The RisuAI modules the creator brought into the work (`POST
+   * /api/plots/:id/modules`), in the order they came. The server keeps them: a
+   * custom-UI save neither sends nor clears them, and only the module routes
+   * write them.
+   */
+  modules?: PlotModule[];
+}
+
+/**
+ * A RisuAI module (`.risum`, or its JSON) brought into a work. RisuAI stacks a
+ * module on a chat beside the character rather than into it, so one is the
+ * work's — every member's, untagged by any — and each runs after the card's own,
+ * as RisuAI concatenates them: the card's regex scripts then the module's, the
+ * card's triggers then the module's, the card's lore and the chat's then the
+ * module's, the card's background then the module's. Kept whole under its own
+ * id, so the studio lists it and takes it out cleanly.
+ */
+export interface PlotModule {
+  /** Ours, minted on import — RisuAI mints a new one on every import too. */
+  id: string;
+  name: string;
+  description: string;
+  /** RisuAI's `lorebook`, as entries (`risuLoreBookEntry`). */
+  lorebook: LoreEntry[];
+  /** RisuAI's `regex`: `customScripts` as the module wrote them, every type. */
+  regex: unknown[];
+  /** RisuAI's `trigger`: the module's `triggerscript`, as written. */
+  trigger: unknown[];
+  /** RisuAI's `lowLevelAccess`, for the module's own triggers alone. */
+  lowLevelAccess?: true;
+  /** The `editdisplay` scripts of `regex`, as display scripts — run after the work's, on every message. */
+  displayScripts?: DisplayScript[];
+  /** The `<style>` elements of the module's `backgroundEmbedding`, drawn after the work's stylesheet. */
+  css?: string;
+  /** The rest of its `backgroundEmbedding`, drawn after the work's background. */
+  backgroundHtml?: string;
+  /**
+   * The ids of the plot assets the import stored — its pictures join the work's,
+   * as RisuAI's `getModuleAssets` joins the character's — which go with the module.
+   */
+  assets: string[];
+  /** The file as it arrived. */
+  importedFrom: { fileName: string; sha256: string; importedAt: string };
 }
 
 /**

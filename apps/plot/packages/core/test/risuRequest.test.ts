@@ -218,3 +218,24 @@ describe('the request as RisuAI’s items', () => {
     expect(assemblePrompt({ plot, characters: [aria], history: chat, userName: '민준', branch: opening }).risu).toEqual({ fromStart: true });
   });
 });
+
+describe('the request of a RisuAI utility bot', () => {
+  it('keeps the newest turn removable, as RisuAI’s prompt template keeps it among the chat', () => {
+    const utility: PromptCharacter = { name: '아리아', card: { ...card, mesExample: '', extensions: { risuai: { utilityBot: true } } } };
+    const history: HistoryMessage[] = [
+      { role: 'user', content: '안녕', id: 'm-1' },
+      { role: 'user', content: '또 왔어', id: 'm-2' },
+    ];
+    const { items } = risuRequestView(assemblePrompt({ plot, characters: [utility], history, userName: '민준' }));
+    expect(items.filter((item) => item.memo?.startsWith('m-'))).toEqual([
+      { role: 'user', content: '안녕', memo: 'm-1', removable: true, attr: [], thoughts: [] },
+      { role: 'user', content: '또 왔어', memo: 'm-2', removable: true, attr: [], thoughts: [] },
+    ]);
+  });
+
+  it('sends no system turn with nothing in it, as RisuAI’s pushPrompts skips one', () => {
+    const empty = risuRequestView({ system: '', messages: [{ role: 'user', content: '안녕' }] });
+    expect(empty.items).toEqual([{ role: 'user', content: '안녕' }]);
+    expect(empty.origins).toEqual([{ kind: 'message', at: 0 }]);
+  });
+});

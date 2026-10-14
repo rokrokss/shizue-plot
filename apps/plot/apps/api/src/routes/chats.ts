@@ -28,6 +28,7 @@ import {
   type MacroContext,
   type NarratorConfig,
   type NarratorSpeaker,
+  type PlotModule,
   type PlotStyle,
   type FoldItem,
   type FoldOptions,
@@ -706,7 +707,7 @@ async function loadGenerationContext(
   // A plot of one member is that character: RisuAI's `{{char}}` follows its rename.
   const only = rewritten.length === 1 ? rewritten[0]! : undefined;
   const plotChar = only && overlay?.members?.[only.id]?.name !== undefined ? characterName(only) : undefined;
-  const scripted = scriptedMember(members)?.member;
+  const scripted = scriptedMember(members, row.customUi?.modules)?.member;
 
   const persona = await loadPersona(deps, chat);
   return {
@@ -1505,6 +1506,7 @@ async function withScriptRequestTriggers(
   const path = buildPath(context.all, chat.headMessageId);
   const index = memberId === undefined ? -1 : context.members.findIndex((member) => member.id === memberId);
   const input = requestTriggerInput({
+    plot: context.plot,
     characters: context.characters,
     ...(index >= 0 ? { speaker: index } : {}),
     wholeBranch: path,
@@ -1533,10 +1535,11 @@ async function withScriptRequestTriggers(
 function callingScripts(
   members: Character[],
   memberId: string | undefined,
+  modules: readonly PlotModule[] = [],
 ): { member: Character; scripts: CardScripts } | null {
   const named = scriptMemberOf(memberId, members);
-  if (!named) return scriptedMember(members);
-  const scripts = cardScripts(named.card);
+  if (!named) return scriptedMember(members, modules);
+  const scripts = cardScripts(named.card, modules);
   return scripts ? { member: named, scripts } : null;
 }
 
@@ -2305,8 +2308,11 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
     // The same gate as generating: a plot withdrawn from the reader runs nothing.
     const plot = await loadVisiblePlot(deps.db, chat.plotId, chat.userId);
+    // A work's modules ride in every member's scripts, after the card's own: in a
+    // group RisuAI runs them for whichever character it asks.
+    const modules = plot.customUi?.modules ?? [];
     const scripted = (await loadMembers(deps.db, plot.id)).flatMap((member) => {
-      const scripts = cardScripts(member.card);
+      const scripts = cardScripts(member.card, modules);
       return scripts ? [{ member, scripts }] : [];
     });
     if (scripted.length === 0) return c.json({ scripts: null, members: [] });
@@ -2514,7 +2520,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const memberId = optionalMemberId(body);
     const chat = await loadWritableChat(deps, id, userId);
     const plot = await loadVisiblePlot(deps.db, chat.plotId, chat.userId);
-    const scripted = callingScripts(await loadMembers(deps.db, plot.id), memberId);
+    const scripted = callingScripts(await loadMembers(deps.db, plot.id), memberId, plot.customUi?.modules);
     if (!scripted?.scripts.lowLevelAccess) {
       throw forbidden('script_llm_forbidden', "This plot's scripts may not call the model");
     }
@@ -2560,7 +2566,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const memberId = optionalMemberId(body);
     const chat = await loadWritableChat(deps, id, userId);
     const plot = await loadVisiblePlot(deps.db, chat.plotId, chat.userId);
-    if (!callingScripts(await loadMembers(deps.db, plot.id), memberId)?.scripts.lowLevelAccess) {
+    if (!callingScripts(await loadMembers(deps.db, plot.id), memberId, plot.customUi?.modules)?.scripts.lowLevelAccess) {
       throw forbidden('script_fetch_forbidden', "This plot's scripts may not make requests");
     }
     // The URL is not checked here: what RisuAI answers for one that is not text is part of its answer.

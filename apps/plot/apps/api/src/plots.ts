@@ -36,6 +36,8 @@ export const toPromptPlot = (plot: Plot, chat: Chat): PromptPlot => ({
   lorebook: plot.lorebook,
   ...(plot.narrator ? { narrator: plot.narrator } : {}),
   ...(plot.style ? { style: chatStyle(plot.style, chat) } : {}),
+  // The work's RisuAI modules: their lore for the assembler, their scripts for the request's runs.
+  ...(plot.customUi?.modules?.length ? { modules: plot.customUi.modules } : {}),
 });
 
 /**

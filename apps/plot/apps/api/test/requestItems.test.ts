@@ -5,9 +5,23 @@
  * budget, by the stand-ins that name them. The generation side is in
  * `api.test.ts` (`editRequest listeners`).
  */
-import { assemblePrompt, DEFAULT_LORE_SETTINGS, type AssembledPrompt, type PromptCharacter, type RisuRequestItem } from '@shizue/core';
+import {
+  assemblePrompt,
+  countTokens,
+  DEFAULT_LORE_SETTINGS,
+  IMAGE_TOKEN_ESTIMATE,
+  type AssembledPrompt,
+  type PromptCharacter,
+  type RisuRequestItem,
+} from '@shizue/core';
 import { describe, expect, it } from 'vitest';
-import { REQUEST_IMAGE_BUDGET, withEditedRequest, type EditedTurn } from '../src/requestTriggers.js';
+import {
+  refitRequest,
+  REQUEST_IMAGE_BUDGET,
+  RequestTooLongError,
+  withEditedRequest,
+  type EditedTurn,
+} from '../src/requestTriggers.js';
 
 const aria: PromptCharacter = {
   name: '아리아',
@@ -147,6 +161,40 @@ describe('the request the editors read, and what goes back', () => {
     expect(strays.sent.messages.some((message) => typeof message.content !== 'string')).toBe(false);
   });
 
+  it('sends a picture an editor moved onto a system turn beside its text, as RisuAI’s Responses request does', async () => {
+    const prompt = promptWith([gif, png]);
+    const user = (items: RisuRequestItem[]): RisuRequestItem => items.find((item) => item.memo === 'm-1')!;
+
+    // Onto the memory's turn: a system message with its pictures, the system string as it was.
+    const memory = await edited(prompt, (items) => {
+      const pictures = user(items).multimodals;
+      delete user(items).multimodals;
+      return items.map((item) => (item.memo === 'supaMemory' ? { ...item, multimodals: pictures } : item));
+    });
+    expect(memory.sent.system).toBe(memory.seen[0]!.content);
+    expect(memory.sent.messages[0]).toEqual({
+      role: 'system',
+      content: [
+        { type: 'text', text: '[지난 이야기 요약]\n둘은 만났다.' },
+        { type: 'image', url: gif },
+        { type: 'image', url: png },
+      ],
+    });
+
+    // Onto the first turn: it is no longer the provider's instructions, which are text, but the first message.
+    const lead = await edited(prompt, (items) => {
+      const pictures = user(items).multimodals;
+      delete user(items).multimodals;
+      return items.map((item, at) => (at === 0 ? { ...item, multimodals: pictures } : item));
+    });
+    expect(lead.sent.system).toBe('');
+    expect(lead.sent.messages[0]).toEqual({
+      role: 'system',
+      content: [{ type: 'text', text: lead.seen[0]!.content }, { type: 'image', url: gif }, { type: 'image', url: png }],
+    });
+    expect(lead.sent.messages).toHaveLength(lead.seen.length);
+  });
+
   it('names the pictures instead, for that request alone, when their data is past the budget', async () => {
     const prompt = promptWith([gif, png]);
     const size = gif.length + png.length;
@@ -191,5 +239,57 @@ describe('the request the editors read, and what goes back', () => {
       ['post_history', null, sent.messages.at(-1)!.content],
     ]);
     expect(sent.report!.totals).toEqual(prompt.report!.totals);
+  });
+});
+
+describe('fitting the edited request to the context again (RisuAI’s token recheck)', () => {
+  const turn = (role: 'system' | 'user' | 'assistant', content: string, extra: Record<string, unknown> = {}): EditedTurn =>
+    ({ role, content, ...extra }) as EditedTurn;
+  const tokens = (turns: readonly EditedTurn[]): number => turns.reduce((sum, item) => sum + countTokens(item.content), 0);
+
+  it('leaves a request that fits as it is', () => {
+    const turns = [turn('system', '규칙'), turn('user', '안녕', { removable: true }), turn('user', '지금')];
+    expect(refitRequest(turns, tokens(turns))).toEqual(turns);
+  });
+
+  it('blanks the removable turns from the front until it fits, and drops them unless a picture is on them', () => {
+    const big = 'word '.repeat(400);
+    const turns = [
+      turn('system', '규칙'),
+      turn('system', '[Start a new chat]', { memo: 'NewChat', removable: true }),
+      turn('assistant', '어서 와.', { removable: true }),
+      turn('user', '이거 봐', { memo: 'm-1', removable: true, multimodals: [{ type: 'image', base64: gif }] }),
+      turn('assistant', big, { memo: 'm-2', removable: true }),
+      turn('user', '늦은 턴', { memo: 'm-3', removable: true }),
+      turn('system', '', {}),
+      turn('user', '지금'),
+    ];
+    // The picture's estimate and the long turn have to go: what `tokens` counts, the long turn's text
+    // taken off it, and one over — the picture's estimate is on top of that.
+    expect(IMAGE_TOKEN_ESTIMATE).toBeGreaterThan(0);
+    const limit = tokens(turns) - countTokens(big) + 1;
+    const fitted = refitRequest(turns, limit);
+    // Everything removable up to and including the long turn went; the picture's turn stays, empty; the
+    // empty system turn the editor left goes with the blanked ones; the turns after it stay.
+    expect(fitted.map((item) => [item.role, item.content, (item as { memo?: string }).memo ?? null])).toEqual([
+      ['system', '규칙', null],
+      ['user', '', 'm-1'],
+      ['user', '늦은 턴', 'm-3'],
+      ['user', '지금', null],
+    ]);
+    expect((fitted[1] as { multimodals?: unknown }).multimodals).toEqual([{ type: 'image', base64: gif }]);
+    // The input is left as it was.
+    expect(turns[4]!.content).toBe(big);
+  });
+
+  it('refuses to send what still does not fit once nothing removable is left', () => {
+    const turns = [turn('system', 'word '.repeat(200)), turn('user', '안녕', { removable: true }), turn('user', '지금')];
+    expect(() => refitRequest(turns, 50)).toThrow(RequestTooLongError);
+    try {
+      refitRequest(turns, 50);
+    } catch (error) {
+      expect((error as RequestTooLongError).code).toBe('prompt_too_long');
+      expect((error as RequestTooLongError).limit).toBe(50);
+    }
   });
 });

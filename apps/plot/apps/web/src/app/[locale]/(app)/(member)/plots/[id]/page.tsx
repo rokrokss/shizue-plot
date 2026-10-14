@@ -14,6 +14,7 @@ import { GroupTurnsEditor } from '@/components/GroupTurnsEditor';
 import { DefaultVariablesEditor, DisplayScriptEditor } from '@/components/DisplayScriptEditor';
 import { LorebookEditor } from '@/components/LorebookEditor';
 import { LorebookFileActions } from '@/components/LorebookFileActions';
+import { ModuleManager } from '@/components/ModuleManager';
 import { OpeningEditor } from '@/components/OpeningEditor';
 import { PlotStyleEditor } from '@/components/PlotStyleEditor';
 import { TagInput } from '@/components/TagInput';
@@ -60,6 +61,12 @@ import {
 import { useDocumentTitle } from '@/lib/useDocumentTitle';
 import { useErrorMessage } from '@/lib/useErrorMessage';
 
+/** A RisuAI card's extension block (`extensions.risuai`), where the card has one. */
+const risuExtensionOf = (card: NormalizedCard): Record<string, unknown> | undefined => {
+  const risu = card.extensions?.['risuai'];
+  return risu !== null && typeof risu === 'object' && !Array.isArray(risu) ? (risu as Record<string, unknown>) : undefined;
+};
+
 /** The fields the roster editor writes — the card's, and the member's 대화량; the rest of the card is carried. */
 const memberFields = (member: PlotMember): string =>
   JSON.stringify([
@@ -74,6 +81,7 @@ const memberFields = (member: PlotMember): string =>
     member.card.lorebook,
     member.card.loreSettings,
     emotionModeOf(member.card),
+    risuExtensionOf(member.card)?.['utilityBot'] === true,
   ]);
 
 /** The card files a member exports to, and their labels. Only CharX carries the plot's images. */
@@ -127,6 +135,8 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
   const [variableNotice, setVariableNotice] = useState('');
   const [componentCode, setComponentCode] = useState('');
   const [capabilities, setCapabilities] = useState<ComponentCapability[]>([]);
+  /** Bumped when a module brought or took pictures, so the asset list reads them again. */
+  const [assetRevision, setAssetRevision] = useState(0);
   /** The roster as it is being edited, and as the server last answered with it. */
   const [members, setMembers] = useState<PlotMember[]>([]);
   const [saved, setSaved] = useState<Map<string, string>>(new Map());
@@ -585,12 +595,24 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
             <LorebookEditor entries={lorebook} onChange={setLorebook} />
           </Section>
 
-          <AssetManager plotId={id} />
+          <AssetManager plotId={id} revision={assetRevision} />
 
           {/* The editors carry their own controls, so they sit beside a heading
               rather than inside a Field, whose <label> would swallow the clicks. */}
           <Section title={t('customUi')}>
             <p className="text-xs text-muted">{t('customUiHint')}</p>
+
+            {/* RisuAI modules land at once, outside the Save: only the plot's
+                list of them is taken up, so what is being written here stays. */}
+            <ModuleManager
+              plotId={id}
+              modules={plot.modules ?? []}
+              disabled={locked}
+              onChange={(detail) => {
+                setPlot((current) => current && { ...current, modules: detail.modules });
+                setAssetRevision((current) => current + 1);
+              }}
+            />
 
             <h3 className="text-xs font-medium text-muted">
               {t('displayScripts')}
@@ -945,6 +967,7 @@ function MembersSection({
             {index > 0 && member.card.postHistoryInstructions.trim() ? (
               <p className="text-xs text-link">{t('memberFirstOnlyIdle', { first: members[0]!.name })}</p>
             ) : null}
+            <UtilityBotToggle member={member} onPatch={onPatch} />
 
             {/* Beside a heading rather than inside a Field, like the plot's own
                 lorebook: the editor's buttons and checkboxes are its own. */}
@@ -1119,6 +1142,38 @@ function LoreBudgetInput({
           }}
         />
       </Field>
+    </div>
+  );
+}
+
+/**
+ * RisuAI's utility-bot setting (`extensions.risuai.utilityBot`), which an
+ * imported card keeps in its extensions and the prompt reads there. A quiet
+ * switch: only a RisuAI card — one that carries the extension — shows it, and
+ * it writes the extension back so the card still round-trips.
+ */
+function UtilityBotToggle({
+  member,
+  onPatch,
+}: {
+  member: PlotMember;
+  onPatch: (id: string, patch: Partial<NormalizedCard>) => void;
+}) {
+  const t = useTranslations('plot');
+  const risu = risuExtensionOf(member.card);
+  if (!risu) return null;
+  const on = risu['utilityBot'] === true;
+
+  return (
+    <div className="space-y-1" data-testid="utility-bot">
+      <Checkbox
+        label={t('memberUtilityBot')}
+        checked={on}
+        onChange={(checked) =>
+          onPatch(member.id, { extensions: { ...member.card.extensions, risuai: { ...risu, utilityBot: checked } } })
+        }
+      />
+      <p className="text-xs text-muted">{t('memberUtilityBotHint')}</p>
     </div>
   );
 }
@@ -1340,7 +1395,8 @@ function VisibilitySection({
   const [rightsConfirmed, setRightsConfirmed] = useState(false);
   // A RisuAI card's triggers and regex scripts run in the reader's browser, so
   // readers receive them — and the card text they read — once the plot is public.
-  const scripted = members.some((member) => carriesScripts(member.card));
+  // A work's modules run theirs in every member's place.
+  const scripted = members.some((member) => carriesScripts(member.card)) || (plot.modules ?? []).some((module) => module.scripts);
 
   async function toggle(): Promise<void> {
     if (busy) return;

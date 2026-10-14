@@ -19,8 +19,8 @@ import { MAX_CARD_IMPORT_BYTES, plotRoutes } from './routes/plots.js';
 import { requireUser } from './session.js';
 
 const MB = 1024 * 1024;
-/** The two card-import routes: a card as a new plot, and one as another member. */
-const IMPORT_PATH = /^\/api\/plots\/(import|[^/]+\/characters\/import)$/;
+/** The file-import routes: a card as a new plot, one as another member, and a RisuAI module into a work. */
+const IMPORT_PATH = /^\/api\/plots\/(import|[^/]+\/characters\/import|[^/]+\/modules)$/;
 /** `POST /api/chats/:id/attachments` — an image upload, not the 5MB of JSON. */
 const ATTACHMENT_PATH = /^\/api\/chats\/[^/]+\/attachments$/;
 

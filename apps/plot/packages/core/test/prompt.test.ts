@@ -2194,3 +2194,72 @@ describe("assemblePrompt - SillyTavern's World Info settings", () => {
     expect(activated(1)).toEqual(['열쇠']);
   });
 });
+
+describe('assemblePrompt - a RisuAI utility bot', () => {
+  const utilityCard: NormalizedCard = {
+    ...bareCard,
+    systemPrompt: '카드의 시스템 프롬프트',
+    postHistoryInstructions: '카드의 끝 지시 [{{original}}] {{char}}',
+    extensions: { risuai: { utilityBot: true } },
+  };
+  const utility: PromptCharacter = { name: '아리아', card: utilityCard };
+  const input = {
+    plot,
+    history,
+    preset,
+    userName: '민준',
+    personaText: '페르소나 설명',
+    authorNote: '작가 노트',
+    memoryText: '[지난 이야기 요약]\n둘은 만났다.',
+    injections: { start: 'START', historyend: 'END', promptend: 'LAST' },
+    report: true,
+  };
+
+  it('sends RisuAI’s template for one: the card’s own parts, none of our preset, persona or note', () => {
+    const prompt = assemblePrompt({ ...input, characters: [utility] });
+    // RisuAI's utility template: description, lore, chat, the card's global note, what goes after everything.
+    expect(prompt.system).toBe([PLOT_BLOCK, ARIA_BLOCK, '[지난 이야기 요약]\n둘은 만났다.'].join('\n\n'));
+    for (const gone of ['MAIN', '카드의 시스템 프롬프트', NARRATION_NOTE, REPLY_FORMAT_HINT, '페르소나 설명']) {
+      expect(prompt.system).not.toContain(gone);
+    }
+    const texts = prompt.messages.map((message) => promptText(message.content));
+    // The chat whole, then the card's replacement with `{{original}}` as nothing and no protocol reminder,
+    // then what goes after everything. The note and the start triggers' `start` and `historyend` have no place.
+    expect(texts).toEqual([...history.map((turn) => turn.content), '카드의 끝 지시 [] 아리아', 'LAST']);
+    expect(prompt.report!.blocks.map((block) => block.kind)).not.toContain('author_note');
+    expect(prompt.risu).toEqual({ memory: expect.any(Object), fromStart: true, utilityBot: true });
+
+    // The same card without the flag is read as it always was.
+    const roleplay = assemblePrompt({ ...input, characters: [{ name: '아리아', card: { ...utilityCard, extensions: {} } }] });
+    expect(roleplay.system).toContain('카드의 시스템 프롬프트');
+    expect(roleplay.system).toContain('페르소나 설명');
+    expect(roleplay.messages.map((message) => promptText(message.content))).toEqual(
+      expect.arrayContaining(['작가 노트', 'START', 'END', 'LAST']),
+    );
+    expect(roleplay.risu!.utilityBot).toBeUndefined();
+  });
+
+  it('sends no post-history turn when the card has no replacement, and keeps the lore', () => {
+    const lore = loreEntry({ content: '항상 켜진 설정', constant: true });
+    const bare: PromptCharacter = {
+      name: '아리아',
+      card: { ...bareCard, lorebook: [lore], extensions: { risuai: { utilityBot: true } } },
+    };
+    const prompt = assemblePrompt({ ...input, characters: [bare] });
+    expect(prompt.system).toContain('항상 켜진 설정');
+    expect(prompt.messages.map((message) => promptText(message.content))).toEqual([...history.map((turn) => turn.content), 'LAST']);
+    expect(prompt.sources!.map((source) => source.kind)).not.toContain('post_history');
+  });
+
+  it('is the asked member’s setting in a work of several, as RisuAI reads it off the character it asks', () => {
+    const other: PromptCharacter = { name: '벨', card: { ...bareCard, name: '벨' } };
+    const asked = assemblePrompt({ ...input, characters: [other, utility], speaker: 1 });
+    expect(asked.system).not.toContain('MAIN');
+    expect(asked.system).not.toContain('페르소나 설명');
+    // The group's next-speaker line is RisuAI's `postEverything` too, and stays.
+    expect(promptText(asked.messages.at(-1)!.content)).toContain('아리아');
+    const scene = assemblePrompt({ ...input, characters: [other, utility], speaker: 0 });
+    expect(scene.system).toContain('MAIN');
+    expect(scene.system).toContain('페르소나 설명');
+  });
+});

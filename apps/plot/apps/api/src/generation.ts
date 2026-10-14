@@ -73,7 +73,7 @@ import {
   type LuaCharacterRewrite,
   type RequestLuaInput,
 } from './requestLua.js';
-import { editRequestTurns, withEditedRequest, type EditedTurn } from './requestTriggers.js';
+import { editRequestTurns, refitRequest, RequestTooLongError, withEditedRequest, type EditedTurn } from './requestTriggers.js';
 import { applyScriptChat, planScriptChat, rewritableHead } from './scriptChat.js';
 import {
   MAX_OVERLAY_TEXT_LENGTH,
@@ -496,15 +496,21 @@ async function withPromptScripts(
   branch: PromptBranch,
 ): Promise<HistoryMessage[]> {
   if (history.length === 0) return history;
-  const scripts = promptScriptsOf(
-    plan.characters.map((member) => member.card),
-    (text, index) =>
-      applyMacros(text, {
-        char: characterName(plan.characters[index]!),
-        user: plan.userName,
-        variables: plan.variables,
-        globalVariables: plan.globalVariables,
-      }),
+  // The work's modules after every card, once — RisuAI's `processScript` runs
+  // the character's `customscript` and then the modules' regex — read as the
+  // first member's, the work's stand-in.
+  const modules = (plan.plot.modules ?? []).map((module) => ({ extensions: { risuai: { customScripts: module.regex } } }));
+  const charOf = (index: number): string => {
+    const member = plan.characters[index] ?? plan.characters[0];
+    return member ? characterName(member) : plan.plot.name;
+  };
+  const scripts = promptScriptsOf([...plan.characters.map((member) => member.card), ...modules], (text, index) =>
+    applyMacros(text, {
+      char: charOf(index),
+      user: plan.userName,
+      variables: plan.variables,
+      globalVariables: plan.globalVariables,
+    }),
   );
   if (scripts.length === 0) return history;
   const texts = await runPromptScriptJob(promptScriptJob(history, scripts, branch));
@@ -551,13 +557,16 @@ async function buildRequestMessages(
         const restore = kept && kept.hash === luaStateHash(lua.scripts[0]!) ? kept.state : undefined;
         const keep = { ...(restore !== undefined ? { restore } : {}), ...(report ? {} : { capture: true }) };
         const result = await editRequestLua(items, { ...lua, keep }, { run: deps.runRequestLua, label });
-        request = result.turns;
         listened.writes = result.writes;
         if (!report) {
           listened.edits = result.edits;
           if (result.state === null) states.delete(key);
           else if (result.state !== undefined) states.set(key, { hash: luaStateHash(lua.scripts.at(-1)!), state: result.state });
         }
+        // RisuAI fits the request to the context again once its listeners left
+        // it, before the request triggers see it (`refitRequest`) — after the
+        // state is kept, as RisuAI's outlives a request it then refuses.
+        request = result.turns && refitRequest(result.turns, plan.contextBudget);
       }
       if (triggers) {
         const input = { ...triggers, variables: applyVariableDelta(triggers.variables, listened.writes) };
@@ -583,11 +592,14 @@ async function buildRequestMessages(
  * (`scriptedMember`). Null when that member carries no scripts.
  */
 export function requestScriptsOf(
-  plan: Pick<GenerationPlan, 'characters' | 'speaker'>,
+  plan: Pick<GenerationPlan, 'characters' | 'speaker' | 'plot'>,
 ): { member: PromptCharacter; scripts: CardScripts } | null {
-  if (typeof plan.speaker !== 'number') return scriptedMember(plan.characters);
+  // The work's modules run after whichever card's do, as RisuAI's run the
+  // character it asks's triggers and then the modules' (`cardScripts`).
+  const modules = plan.plot.modules ?? [];
+  if (typeof plan.speaker !== 'number') return scriptedMember(plan.characters, modules);
   const member = plan.characters[plan.speaker];
-  const scripts = member ? cardScripts(member.card) : null;
+  const scripts = member ? cardScripts(member.card, modules) : null;
   return member && scripts ? { member, scripts } : null;
 }
 
@@ -613,6 +625,7 @@ export function requestLuaInput(
     | 'scriptView'
     | 'localLore'
     | 'speaker'
+    | 'plot'
   >,
 ): Omit<RequestLuaInput, 'request'> | null {
   const found = requestScriptsOf(plan);
@@ -674,6 +687,7 @@ export function requestTriggerInput(
     | 'seed'
     | 'assetNames'
     | 'speaker'
+    | 'plot'
   >,
 ): Omit<TriggerRunInput, 'mode' | 'displayData'> | null {
   const found = requestScriptsOf(plan);
@@ -721,10 +735,15 @@ export function requestTriggerInput(
 /**
  * The roster with the chat's own lore after the scripted member's book — whose
  * Lua wrote it — as RisuAI activates the character's lore and then the chat's.
+ * (The work's modules' lore comes after both: the assembler puts it last.)
  */
-function withChatLore(characters: PromptCharacter[], localLore: LoreEntry[] | undefined): PromptCharacter[] {
+function withChatLore(
+  characters: PromptCharacter[],
+  localLore: LoreEntry[] | undefined,
+  modules: PromptPlot['modules'],
+): PromptCharacter[] {
   if (!localLore?.length) return characters;
-  const scripted = scriptedMember(characters)?.member;
+  const scripted = scriptedMember(characters, modules)?.member;
   if (!scripted) return characters;
   return characters.map((member) =>
     member === scripted ? { ...member, card: { ...member.card, lorebook: [...member.card.lorebook, ...localLore] } } : member,
@@ -781,7 +800,7 @@ async function assembleRequest(
     .join('\n');
   const prompt = assemblePrompt({
     plot: plan.plot,
-    characters: withChatLore(plan.characters, plan.localLore),
+    characters: withChatLore(plan.characters, plan.localLore, plan.plot.modules),
     personaText: plan.personaText,
     userName: plan.userName,
     memoryText: plan.memoryText,
@@ -881,8 +900,14 @@ export async function inspectGeneration(
   reader: string,
   account?: ChatGPTAccount,
 ): Promise<PromptReport> {
-  const { report } = await buildRequestMessages(plan, deps, reader, account, true);
-  return report!;
+  try {
+    const { report } = await buildRequestMessages(plan, deps, reader, account, true);
+    return report!;
+  } catch (error) {
+    // What a generation would fail on, the inspector is told as a refusal.
+    if (error instanceof RequestTooLongError) throw badRequest(error.code, error.message);
+    throw error;
+  }
 }
 
 /**
@@ -969,6 +994,18 @@ async function runGeneration(
     request = await buildRequestMessages(plan, deps, c.get('userId'), account);
     reasoningEffort = await chosenReasoningEffort(deps, plan, account);
   } catch (error) {
+    // The card's listeners grew the request past the chat's context: it fails
+    // as RisuAI's `toomuchtoken` does, as a provider failure does here —
+    // nothing stored, the turn it would have answered still the head.
+    if (error instanceof RequestTooLongError) {
+      return streamSSE(c, async (stream) => {
+        try {
+          await stream.writeSSE({ event: 'error', data: JSON.stringify({ message: error.message, code: error.code }) });
+        } finally {
+          await release();
+        }
+      });
+    }
     await release();
     if (error instanceof ChatGPTError) throw error;
     throw badRequest('model_unavailable', error instanceof Error ? error.message : 'Model unavailable');

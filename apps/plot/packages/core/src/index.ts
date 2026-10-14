@@ -22,6 +22,7 @@ export * from './presets.js';
 export * from './prompt.js';
 export * from './risuRequest.js';
 export * from './card/parse.js';
+export * from './card/risuModule.js';
 export * from './card/export.js';
 export * from './card/normalize.js';
 export * from './card/componentCode.js';
@@ -35,6 +36,7 @@ export {
   cardLicense,
   creatorCssFromExtensions,
   displayScriptsFromExtensions,
+  isUtilityBot,
   MAX_BACKGROUND_HTML_LENGTH,
   MAX_CREATOR_CSS_LENGTH,
 } from './card/risu.js';

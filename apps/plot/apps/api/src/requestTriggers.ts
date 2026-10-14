@@ -46,11 +46,22 @@
  * which have no name, and RisuAI's own Responses request drops it too.
  *
  * **Images.** A picture goes on the first turn whose `multimodals` still holds
- * it — its data, or its stand-in — when that turn is a user turn; one no turn
- * holds any more was removed, and is not sent. One left on the system string or
- * on a system or an assistant turn is not sent either (logged): a provider may
- * refuse it there. (RisuAI sends the pictures on their turn whatever its role.)
- * An editor never adds one: data or a name we did not hand out is nothing.
+ * it — its data, or its stand-in — when that turn is a user or a system turn;
+ * one no turn holds any more was removed, and is not sent. A system turn goes as
+ * a developer message with the picture beside its text, as RisuAI's own
+ * Responses request (`buildResponseInputItems`) sends a system turn's pictures —
+ * and a first turn that carries one is not folded into the system string, which
+ * our provider sends as `instructions`, a string, but leads the messages, the
+ * system string left empty. One left on an assistant turn is not sent (logged):
+ * the Responses API takes only `output_text` and `refusal` in an assistant turn,
+ * and RisuAI's Responses request drops it too. An editor never adds one: data or
+ * a name we did not hand out is nothing.
+ *
+ * **Fitting again.** RisuAI counts the request again once its `editRequest`
+ * listeners left it (`sendChat`, between `runLuaEditTrigger` and
+ * `requestChatData`), and one over the context is cut down to fit
+ * (`refitRequest`) — or not sent at all. The request triggers come after it and
+ * are not measured again.
  *
  * **Failure.** The triggers run in a worker thread against a clock: a card's
  * regex runs on the native engine (`v2ExtractRegex`, `v2RegexTest`,
@@ -62,6 +73,7 @@
  */
 import {
   countTokens,
+  IMAGE_TOKEN_ESTIMATE,
   risuRequestView,
   type AssembledPrompt,
   type PromptMessage,
@@ -316,6 +328,52 @@ export function turnsOf(value: unknown): EditedTurn[] | null {
   return value as EditedTurn[];
 }
 
+/** A request still over the context once every turn RisuAI may drop is gone: RisuAI's `toomuchtoken`. */
+export class RequestTooLongError extends Error {
+  readonly code = 'prompt_too_long';
+  constructor(
+    readonly tokens: number,
+    readonly limit: number,
+  ) {
+    super(`The edited request needs ${tokens} tokens, more than the chat's ${limit}`);
+  }
+}
+
+/** What a turn costs the context, counted as the assembler counts it: its text, and a flat estimate a picture. */
+const turnTokens = (turn: RequestTurn): number =>
+  countTokens(turn.content) + imagesNamed(turn).length * IMAGE_TOKEN_ESTIMATE;
+
+/**
+ * The request the `editRequest` listeners left, fitted to the chat's context
+ * again, as RisuAI's `sendChat` does after them ("token rechecking"): counted
+ * whole, and when it is over `limit` — the whole context, not the context less
+ * the reply's share the prompt was put together in — the turns are walked from
+ * the first, each one still `removable` as the listeners left it blanked, until
+ * it fits. The blanked turns are then dropped, and with them any other turn
+ * left empty, unless a picture is still on it (its count went with its text,
+ * as RisuAI's does). Walking off the end still over is RisuAI's `toomuchtoken`:
+ * the request is not sent (`RequestTooLongError`).
+ *
+ * Counted the way the assembler counts the prompt (`countTokens`, and
+ * `IMAGE_TOKEN_ESTIMATE` a picture), where RisuAI's tokenizer adds a few tokens
+ * a turn on top — ours did not count those when the prompt was put together
+ * either. A request that fits comes back as it was.
+ */
+export function refitRequest<T extends RequestTurn>(turns: readonly T[], limit: number): T[] {
+  let total = turns.reduce((sum, turn) => sum + turnTokens(turn), 0);
+  if (total <= limit) return [...turns];
+  const fitted = [...turns];
+  for (let at = 0; total > limit; at += 1) {
+    if (at >= fitted.length) throw new RequestTooLongError(total, limit);
+    const turn = fitted[at]!;
+    if ((turn as { removable?: unknown }).removable) {
+      total -= turnTokens(turn);
+      fitted[at] = { ...turn, content: '' };
+    }
+  }
+  return fitted.filter((turn) => turn.content !== '' || imagesNamed(turn).length > 0);
+}
+
 /** A turn the editors changed, in the report: one `request` block under the role it goes as. */
 const requestBlock = (turn: RequestTurn): PromptReportBlock => ({
   kind: 'request',
@@ -413,28 +471,32 @@ export async function withEditedRequest(
   const edited = await edit(view.items);
   if (!edited || sameRequest(view.items, edited)) return prompt;
 
-  const system = edited[0]?.role === 'system' ? edited[0].content : null;
-  // Each picture on the first turn that still holds it, if that turn is the reader's.
+  // A leading system turn is the system string — the provider's `instructions`,
+  // which is text — unless it carries a picture we handed out, when it stays a
+  // turn of its own that can.
+  const first = edited[0];
+  const system =
+    first?.role === 'system' && !imagesNamed(first).some((name) => view.images.has(name)) ? first.content : null;
+  // Each picture on the first turn that still holds it, if that turn may carry one.
   let refused = 0;
-  const partsOf = (turn: EditedTurn, isSystem: boolean): PromptPart[] =>
+  const partsOf = (turn: EditedTurn): PromptPart[] =>
     imagesNamed(turn).flatMap((name): PromptPart[] => {
       const url = view.images.get(name)?.shift();
       if (url === undefined) return [];
-      if (isSystem || turn.role !== 'user') {
+      if (turn.role === 'assistant') {
         refused += 1;
         return [];
       }
       return [{ type: 'image', url }];
     });
-  if (system !== null) partsOf(edited[0]!, true);
   const messages: PromptMessage[] = (system !== null ? edited.slice(1) : edited).map((turn) => {
-    const parts = partsOf(turn, false);
+    const parts = partsOf(turn);
     return {
       role: turn.role,
       content: parts.length > 0 ? [{ type: 'text', text: turn.content }, ...parts] : turn.content,
     };
   });
-  if (refused > 0) console.warn(`[api] the request's scripts left ${refused} image(s) on a turn not the reader's; not sent:`, label);
+  if (refused > 0) console.warn(`[api] the request's scripts left ${refused} image(s) on an assistant turn; not sent:`, label);
   const { sources: _stale, risu: _view, ...rest } = prompt;
   return {
     ...rest,

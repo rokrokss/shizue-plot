@@ -28,6 +28,10 @@
  * - the rest — depth lore, author's note, what goes after everything — with no
  *   field (RisuAI marks no lore).
  *
+ * A RisuAI utility bot's request (`isUtilityBot`) is built from RisuAI's utility
+ * prompt template instead, which keeps the newest turn among `chats` — removable
+ * like the rest — and an empty turn is never sent, its system string included.
+ *
  * `cachePoint` (Claude's prompt caching) is only set by a prompt template, and
  * `attr: ['nameAdded']` only with a template's `sendName`; `thoughts` is what
  * RisuAI's chain-of-thought option lifts out of a message, which we do not have.
@@ -248,7 +252,10 @@ export function risuRequestView(prompt: Pick<AssembledPrompt, 'system' | 'messag
     );
   };
 
-  push({ role: 'system', content: risu?.memory?.system ?? prompt.system }, { kind: 'system' });
+  // RisuAI sends no turn with nothing in it (`pushPrompts`) — a utility bot's
+  // system string can be empty.
+  const system = risu?.memory?.system ?? prompt.system;
+  if (system) push({ role: 'system', content: system }, { kind: 'system' });
   let at = 0;
   if (risu && sources) {
     for (; at < messages.length && sources[at]?.kind === 'directions'; at += 1) whole(at);
@@ -278,8 +285,9 @@ export function risuRequestView(prompt: Pick<AssembledPrompt, 'system' | 'messag
   }
   for (; at < messages.length; at += 1) whole(at);
 
-  // RisuAI moves the newest turn of `chats` to `lastChat` before it marks the rest removable.
-  const last = chats.at(-1);
+  // RisuAI moves the newest turn of `chats` to `lastChat` before it marks the rest
+  // removable — but for a utility bot, whose prompt template keeps it among them.
+  const last = risu?.utilityBot ? undefined : chats.at(-1);
   if (last !== undefined) {
     const { removable: _marked, ...item } = items[last]!;
     items[last] = item;

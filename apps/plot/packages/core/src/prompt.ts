@@ -1,5 +1,6 @@
 import { unescapeCbs, type CbsChat, type CbsCharacter, type CbsModel } from './cbs.js';
 import { extractChoices } from './choices.js';
+import { isUtilityBot } from './card/risu.js';
 import { emotionInstructionsOf } from './emotion.js';
 import { applyMacros, stripInlayMacros, type MacroClock, type MacroContext, type MacroHostData } from './macro.js';
 import { activateLore, loreEntryKey, type LoreActivationVia, type LoreTimedState } from './lorebook.js';
@@ -29,6 +30,7 @@ import {
   type PlotDifficulty,
   type PlotMood,
   type PlotPacing,
+  type PlotModule,
   type PlotStyle,
   type PlotTense,
   type StorytellingStyle,
@@ -182,6 +184,13 @@ export interface PromptPlot {
    * reader's own toggle, and only the crossing reaches here.
    */
   style?: PlotStyle;
+  /**
+   * The RisuAI modules brought into the work (`PlotModule`). Their lore joins
+   * the one book after every member's — and after the chat's own, which rides
+   * on the scripted member's — as RisuAI activates `characterLore`, then
+   * `chatLore`, then `moduleLorebook`. Their scripts are the caller's to run.
+   */
+  modules?: readonly PlotModule[];
 }
 
 /**
@@ -421,6 +430,13 @@ export interface RisuPromptParts {
   memory?: { text: string; system: string };
   /** Whether the history is sent from the branch's first message: nothing trimmed off its front, by the budget or the memory. */
   fromStart: boolean;
+  /**
+   * The prompt is a RisuAI utility bot's (`isUtilityBot`), which RisuAI builds
+   * from a prompt template — and a template keeps the newest turn among the
+   * chat's, `removable` like the rest, where without one it goes apart as
+   * `lastChat`.
+   */
+  utilityBot?: true;
 }
 
 export interface PromptReportBlock {
@@ -434,7 +450,7 @@ export interface PromptReportBlock {
 /** One lore entry that made it into the prompt. */
 export interface PromptReportLore {
   key: string;
-  /** `'plot'`, or the name of the member whose card carries the entry. */
+  /** `'plot'`, or the name of the member whose card carries the entry — or of the module that brought it. */
   source: string;
   keys: string[];
   /** The first characters of the content as the model reads it. */
@@ -784,7 +800,11 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const chatOf = (): CbsChat => (chat ??= cbsChat(history, branch));
   const seedLength = branch ? cbsChat([], branch).length : undefined;
   const lorebookOf = (): readonly object[] =>
-    [...plot.lorebook, ...cast.flatMap((member) => member.card.lorebook)]
+    [
+      ...plot.lorebook,
+      ...cast.flatMap((member) => member.card.lorebook),
+      ...(plot.modules ?? []).flatMap((module) => module.lorebook),
+    ]
       .filter((entry) => entry.enabled)
       .map(risuLoreEntry);
   const shared: MacroHostData = {
@@ -853,8 +873,21 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     return { ...macro, data: { ...macro.data, chat: () => ({ ...chatOf(), index }) } };
   };
 
+  // 0. A RisuAI utility bot (`isUtilityBot`) — the card asked of, as RisuAI's
+  // `sendChat` reads `currentChar.utilityBot` — is sent RisuAI's fixed template
+  // for one: the card's description, its lore, the chat and its global-note
+  // replacement, with nothing of the reader's prompt around them. So none of
+  // our preset goes — its main prompt and speech protocol, the reply format
+  // hint, the narration note, the post-history block — nor the card's own
+  // system prompt (the template never reads it), nor the persona and the
+  // author's note, nor the start triggers' `start` and `historyend` turns
+  // (RisuAI's template has no place for its `lastChat`, which holds them).
+  // What RisuAI has no counterpart of stays: the work and its members, the
+  // narrator, the style, the memory, the relationship, the directions.
+  const utility = isUtilityBot(voice?.card.extensions);
+
   // 1. main system prompt
-  const main = resolveOverride(voice?.card.systemPrompt ?? '', expand(preset.main), voiceMacro, protocol);
+  const main = utility ? '' : resolveOverride(voice?.card.systemPrompt ?? '', expand(preset.main), voiceMacro, protocol);
 
   // 1b. how a reply marks its 지문 when it has any (`REPLY_FORMAT_HINT`), and
   // the least of what the system string says: right behind the preset whose
@@ -862,6 +895,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // Only beside one of our presets — a card that writes its own instructions
   // has its own form — and never on a narration, which is not a reply's lines.
   const formatHint =
+    !utility &&
     !narration &&
     typeof speaker !== 'string' &&
     preset.main.includes(protocol) &&
@@ -888,6 +922,15 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
       lorebook.push(entry);
       loreMacro.set(entry, macro);
       loreSource.set(entry, member.name);
+    }
+  }
+  // The work's modules last, as RisuAI's `loadLoreBookV3Prompt` puts the module
+  // lore after the character's and the chat's. Read as the work's own text.
+  for (const module of plot.modules ?? []) {
+    for (const entry of module.lorebook) {
+      lorebook.push(entry);
+      loreMacro.set(entry, plotMacro);
+      loreSource.set(entry, module.name);
     }
   }
   // One book means one set of settings decides its depth and budget: the first
@@ -1017,7 +1060,8 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const styleBlock = plot.style ? expand(styleDirectives(plot.style)) : '';
 
   // 5. persona
-  const personaBlock = personaText.trim() ? `${expand('유저({{user}}) 정보: ')}${expand(personaText)}` : '';
+  const personaBlock =
+    !utility && personaText.trim() ? `${expand('유저({{user}}) 정보: ')}${expand(personaText)}` : '';
 
   // 5b. memory — the summary of the evicted history plus any retrieved facts.
   const memoryBlock = memoryText.trim() ? expand(memoryText).trim() : '';
@@ -1028,7 +1072,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const sections: SystemSection[] = [
     { kind: 'main', text: main },
     { kind: 'format', text: formatHint },
-    { kind: 'narration_note', text: NARRATION_NOTE },
+    { kind: 'narration_note', text: utility ? '' : NARRATION_NOTE },
     { kind: 'lore_before', text: loreText('before_char') },
     { kind: 'plot', text: plotBlock },
     ...characterBlocks,
@@ -1057,7 +1101,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const authorNoteBlock = send(
     [
       ...loreAt('before_author_note').map(expandLore),
-      expand(authorNote).trim(),
+      utility ? '' : expand(authorNote).trim(),
       ...loreAt('after_author_note').map(expandLore),
     ]
       .filter((text) => text.length > 0)
@@ -1065,14 +1109,18 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
       .trim(),
   );
 
-  // 8. post-history instructions
+  // 8. post-history instructions — for a utility bot RisuAI's `globalNote` slot:
+  // the card's replacement with `{{original}}` read as nothing, and no reminder
+  // of a protocol it was never taught.
   const postHistory = send(
-    resolveOverride(
-      voice?.card.postHistoryInstructions ?? '',
-      expand(preset.postHistory),
-      voiceMacro,
-      protocolReminder,
-    ),
+    utility
+      ? applyMacros(voice?.card.postHistoryInstructions ?? '', { ...voiceMacro, original: '' }).trim()
+      : resolveOverride(
+          voice?.card.postHistoryInstructions ?? '',
+          expand(preset.postHistory),
+          voiceMacro,
+          protocolReminder,
+        ),
   );
 
   // 8b. what the card's start triggers asked for, RisuAI's three places: just
@@ -1082,8 +1130,8 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     const text = injections[place]?.trim();
     return text ? { kind: 'injection', label: place, message: { role: 'system', content: send(text) } } : null;
   };
-  const startInjection = injected('start');
-  const historyEndInjection = injected('historyend');
+  const startInjection = utility ? null : injected('start');
+  const historyEndInjection = utility ? null : injected('historyend');
   const promptEndInjection = injected('promptend');
   const injectedTokens = [startInjection, historyEndInjection, promptEndInjection].reduce(
     (sum, slot) => sum + (slot ? countTokens(promptText(slot.message.content)) : 0),
@@ -1291,7 +1339,9 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
       : []),
     ...exampleSlots,
     ...historyBlock,
-    { kind: 'post_history', message: { role: 'system', content: postHistory } },
+    ...(postHistory
+      ? [{ kind: 'post_history', message: { role: 'system', content: postHistory } } satisfies MessageSlot]
+      : []),
     ...(promptEndInjection ? [promptEndInjection] : []),
     ...(emotionSlot ? [emotionSlot] : []),
     ...(speakerSlot ? [speakerSlot] : []),
@@ -1378,6 +1428,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
       // The branch index of the first turn sent: the history's own start, past what the budget dropped.
       // A turn hidden from the AI before it is not one the budget dropped.
       fromStart: historyStart === 0 && !history.slice(0, oldestSent).some((turn) => !turn.hidden),
+      ...(utility ? { utilityBot: true as const } : {}),
     },
     loreTriggers,
     ...(variableWrites ? { variableWrites } : {}),

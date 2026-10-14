@@ -61,11 +61,10 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 
 /**
- * Reads a module's regex scripts and triggers. Never throws: anything that is not
- * a module this reader understands comes back undefined, and the caller goes on
- * without it — a module must never cost a card its import.
+ * A `.risum`'s main block: the module RisuAI wrote, as JSON, and where the asset
+ * blocks after it begin. Undefined for bytes that are not one. Never throws.
  */
-export function readRisum(bytes: Uint8Array): RisuModuleScripts | undefined {
+export function readRisumMain(bytes: Uint8Array): { module: Record<string, unknown>; end: number } | undefined {
   if (bytes.length < HEADER_BYTES || bytes[0] !== MAGIC || bytes[1] !== VERSION) return undefined;
   const length = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(2, true);
   if (HEADER_BYTES + length > bytes.length) return undefined;
@@ -78,8 +77,17 @@ export function readRisum(bytes: Uint8Array): RisuModuleScripts | undefined {
     return undefined;
   }
   if (!isObject(main) || main['type'] !== 'risuModule' || !isObject(main['module'])) return undefined;
+  return { module: main['module'], end: HEADER_BYTES + length };
+}
 
-  const module = main['module'];
+/**
+ * Reads a module's regex scripts and triggers. Never throws: anything that is not
+ * a module this reader understands comes back undefined, and the caller goes on
+ * without it — a module must never cost a card its import.
+ */
+export function readRisum(bytes: Uint8Array): RisuModuleScripts | undefined {
+  const module = readRisumMain(bytes)?.module;
+  if (!module) return undefined;
   return {
     ...(Array.isArray(module['regex']) ? { regex: module['regex'] as unknown[] } : {}),
     ...(Array.isArray(module['trigger']) ? { trigger: module['trigger'] as unknown[] } : {}),

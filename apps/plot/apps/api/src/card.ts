@@ -292,6 +292,54 @@ export function coerceCustomUi(value: unknown): PlotCustomUi {
 }
 
 /**
+ * A custom UI the creator sent (`coerceCustomUi`, which never takes `modules`)
+ * with the modules the plot holds put back: the module routes alone write them,
+ * so a studio save neither carries nor clears them. Null stays null only where
+ * there are none to keep.
+ */
+export function withStoredModules(sent: PlotCustomUi | null, stored: PlotCustomUi | null | undefined): PlotCustomUi | null {
+  const modules = stored?.modules;
+  if (!modules?.length) return sent;
+  return { ...(sent ?? {}), modules };
+}
+
+/** A plot's custom UI without its modules: what the studio's editors hold and send back. */
+export function customUiWithoutModules(customUi: PlotCustomUi | null): PlotCustomUi | null {
+  if (!customUi?.modules) return customUi;
+  const { modules: _modules, ...rest } = customUi;
+  return rest;
+}
+
+/**
+ * What a reader's chat draws of the work with its modules, as RisuAI stacks a
+ * module on the chat: the work's display scripts and then each module's
+ * (`customscript.concat(getModuleRegexScripts())`), numbered on after the work's
+ * so they run after them, untagged by member — a module is every member's; the
+ * work's stylesheet and then each module's; and the background with each
+ * module's after it (`backgroundHTML + '\n' + moduleBackgroundEmbedding`).
+ */
+export function readerCustomUi(
+  customUi: PlotCustomUi | null,
+  background: string,
+): { displayScripts: DisplayScript[]; css: string; backgroundHtml: string } {
+  const own = customUi?.displayScripts ?? [];
+  const modules = customUi?.modules ?? [];
+  let next = own.reduce((last, script) => Math.max(last, script.order), -1) + 1;
+  const added = modules.flatMap((module) =>
+    [...(module.displayScripts ?? [])]
+      .sort((a, b) => a.order - b.order)
+      .map((script) => ({ ...script, order: next++ })),
+  );
+  return {
+    displayScripts: [...own, ...added],
+    css: [customUi?.css ?? '', ...modules.map((module) => module.css ?? '')].filter((css) => css.trim()).join('\n\n'),
+    backgroundHtml: [background, ...modules.map((module) => module.backgroundHtml ?? '')]
+      .filter((html) => html.trim())
+      .join('\n'),
+  };
+}
+
+/**
  * A plot's custom UI held to its roster: a script tagged with, or a stylesheet
  * kept for, a member the plot no longer has is dropped — that member speaks no
  * message, so it would never be drawn — the way the member's removal drops them

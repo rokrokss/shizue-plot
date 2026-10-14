@@ -41,7 +41,14 @@ const UNLOCK_LABEL: Record<UnlockChoice, string> = {
  * from the file name but stays editable: the card refers to the slug, not to the
  * file, and re-uploading a slug replaces the image behind it.
  */
-export function AssetManager({ plotId }: { plotId: string }) {
+export function AssetManager({
+  plotId,
+  revision = 0,
+}: {
+  plotId: string;
+  /** Bumped by whatever else adds or takes pictures (a module's import or removal), to read the list again. */
+  revision?: number;
+}) {
   const t = useTranslations('plot');
   const common = useTranslations('common');
   const toMessage = useErrorMessage();
@@ -62,7 +69,7 @@ export function AssetManager({ plotId }: { plotId: string }) {
     apiGet<PlotAsset[]>(`/api/plots/${plotId}/assets`).then(setAssets, (caught: unknown) =>
       setError(toMessage(caught)),
     );
-  }, [plotId, toMessage]);
+  }, [plotId, revision, toMessage]);
 
   async function upload(): Promise<void> {
     const stored = normalizeSlug(slug);

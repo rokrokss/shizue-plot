@@ -196,6 +196,21 @@ export function cardLicense(extensions: Record<string, unknown>): string | undef
   return typeof license === 'string' && license.trim() ? license.trim() : undefined;
 }
 
+/**
+ * Whether a RisuAI card is a utility bot (`extensions.risuai.utilityBot`, the
+ * character setting RisuAI's help calls "a bot made for utility, not for
+ * roleplay"). RisuAI's `sendChat` then builds the request from a fixed template
+ * of the card's own parts — description, lore, chat, the card's global-note
+ * replacement and what goes after everything — and none of the reader's main
+ * prompt, jailbreak, global note, persona or author's note; the assembler does
+ * the same with its own (`assemblePrompt`). The flag rides in the extensions,
+ * which the card keeps verbatim, so it round-trips with no field of ours.
+ */
+export function isUtilityBot(extensions: Record<string, unknown> | undefined): boolean {
+  const risu = extensions?.['risuai'];
+  return risu !== null && typeof risu === 'object' && (risu as Record<string, unknown>)['utilityBot'] === true;
+}
+
 /** Maps `extensions.risuai.defaultVariables` (a `key=value` block, or an object). */
 export function defaultVariablesFromExtensions(
   extensions: Record<string, unknown>,

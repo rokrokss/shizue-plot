@@ -27,7 +27,10 @@ import {
   MAX_INTRO_LENGTH,
   MAX_INTRO_TEXT_LENGTH,
   MAX_INTROS_PER_PLOT,
+  ModuleParseError,
   parseCard,
+  parseRisuModule,
+  plotModuleOf,
   type CharxAssetFile,
   type CharxExportAsset,
   type EmotionImage,
@@ -38,6 +41,7 @@ import {
   type NarratorConfig,
   type NormalizedCard,
   type PlotCustomUi,
+  type PlotModule,
   type PlotProfile,
   type PlotStyle,
 } from '@shizue/core';
@@ -48,7 +52,7 @@ import {
   type MigrationPlatform,
 } from '@shizue/core/migrate';
 import { sourceUrlFor } from '@shizue/core/source-url';
-import { scriptedMember } from '@shizue/core/triggers';
+import { cardScripts, scriptedMember } from '@shizue/core/triggers';
 import { fromLorebookFile, LorebookFileError } from '@shizue/core/world-info';
 import {
   characters,
@@ -62,7 +66,7 @@ import {
   type Plot,
   type PlotAsset,
 } from '@shizue/db';
-import { and, asc, desc, eq, isNotNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -86,8 +90,11 @@ import {
   coerceLorebook,
   customUiOfCard,
   customUiOfRoster,
+  customUiWithoutModules,
   liftCompanion,
+  readerCustomUi,
   withoutMember,
+  withStoredModules,
 } from '../card.js';
 import type { AppDeps, AppEnv, Tx } from '../deps.js';
 import { draftPlot, MAX_PREMISE_LENGTH } from '../draft.js';
@@ -130,6 +137,8 @@ export { MAX_CARD_IMPORT_BYTES };
 const MAX_IMPORT_FILE_NAME_LENGTH = 255;
 /** An uploaded asset's reference name (`name`), the one a pasted `{{img::name}}` is written in. */
 export const MAX_ASSET_NAME_LENGTH = 100;
+/** A module's name as the studio lists it — a label, as a member's roster name is. */
+const MAX_MODULE_NAME_LENGTH = 100;
 
 /**
  * What an import that would show someone else's characters to readers is
@@ -329,6 +338,23 @@ function requirePublishable(plot: Plot, members: Character[]): void {
 }
 
 /** The whole plot as its owner edits it. Nothing here is public but by choice. */
+/** A module as the studio lists it: what it is and what it brought, not its scripts. */
+const toModuleJson = (module: PlotModule) => ({
+  id: module.id,
+  name: module.name,
+  description: module.description,
+  loreCount: module.lorebook.length,
+  regexCount: module.regex.length,
+  triggerCount: module.trigger.length,
+  displayScriptCount: module.displayScripts?.length ?? 0,
+  assetCount: module.assets.length,
+  background: Boolean(module.css || module.backgroundHtml),
+  lowLevelAccess: module.lowLevelAccess === true,
+  /** Whether it brings anything the reader's browser runs — what a publish tells the owner readers receive. */
+  scripts: cardScripts({ extensions: {} }, [module]) !== null,
+  importedFrom: module.importedFrom,
+});
+
 const toPlotJson = (plot: Plot) => ({
   id: plot.id,
   name: plot.name,
@@ -341,7 +367,10 @@ const toPlotJson = (plot: Plot) => ({
   style: plot.style,
   /** Always an array on the way out; the column is null until one is written. */
   profiles: plot.profiles ?? [],
-  customUi: plot.customUi,
+  // The editors' part: the modules, which the server keeps apart, are listed below.
+  customUi: customUiWithoutModules(plot.customUi),
+  /** The RisuAI modules brought into the work, as the studio lists them. */
+  modules: (plot.customUi?.modules ?? []).map(toModuleJson),
   /** How a work of several members picks a round's speakers, the default filled in. */
   groupSettings: coerceGroupSettings(plot.groupSettings),
   language: plot.language,
@@ -545,7 +574,7 @@ async function storeImportedAssets(
   deps: AppDeps,
   plotId: string,
   assets: CharxAssetFile[],
-): Promise<EmotionImage[]> {
+): Promise<{ emotions: EmotionImage[]; ids: string[] }> {
   /** An image already in the store, still waiting for a row to name it. */
   interface StoredCandidate {
     id: string;
@@ -565,6 +594,8 @@ async function storeImportedAssets(
   // Keys go in as each put lands, so a throw anywhere — the nth put included —
   // takes every already-stored object with it.
   let orphaned: string[] = [];
+  /** The ids of the rows written, for a caller that keeps them (a module). */
+  const written: string[] = [];
   try {
     for (const [index, asset] of assets.entries()) {
       if (candidates.length >= MAX_ASSETS_PER_PLOT) break;
@@ -574,7 +605,7 @@ async function storeImportedAssets(
       candidates.push({ id, name: asset.name, index, key: stored.key, mime: stored.mime });
       orphaned.push(stored.key);
     }
-    if (candidates.length === 0) return [];
+    if (candidates.length === 0) return { emotions, ids: written };
 
     orphaned = await deps.db.transaction(async (tx) => {
       await tx.select({ id: plots.id }).from(plots).where(eq(plots.id, plotId)).for('update');
@@ -606,6 +637,7 @@ async function storeImportedAssets(
       emotions = fitting.flatMap((candidate, at) =>
         assets[candidate.index]!.emotion ? [{ name: candidate.name, slug: rows[at]!.slug }] : [],
       );
+      written.push(...rows.map((row) => row.id!));
       return candidates.slice(rows.length).map((candidate) => candidate.key);
     });
   } finally {
@@ -613,7 +645,7 @@ async function storeImportedAssets(
     // no row will ever name it.
     for (const key of orphaned) await deleteQuietly(deps.storage, key);
   }
-  return emotions;
+  return { emotions, ids: written };
 }
 
 /**
@@ -630,6 +662,20 @@ async function recordEmotionImages(deps: AppDeps, member: Character, emotionImag
     .where(eq(characters.id, member.id))
     .returning();
   return updated ?? member;
+}
+
+/**
+ * Deletes a plot's assets by row id, their stored files with them — what a
+ * removed module brought, as far as the creator has not removed it already.
+ * By id rather than slug: a slug the creator freed and reused is not the module's.
+ */
+async function deleteAssets(deps: AppDeps, plotId: string, ids: readonly string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const deleted = await deps.db
+    .delete(plotAssets)
+    .where(and(eq(plotAssets.plotId, plotId), inArray(plotAssets.id, [...ids])))
+    .returning({ path: plotAssets.path });
+  for (const { path } of deleted) await deleteQuietly(deps.storage, path);
 }
 
 /**
@@ -972,7 +1018,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       plot = await writeImportedCover(deps, plot, parsed.iconBuffer);
     }
     if (parsed.assets?.length) {
-      await recordEmotionImages(deps, member, await storeImportedAssets(deps, plot.id, parsed.assets));
+      await recordEmotionImages(deps, member, (await storeImportedAssets(deps, plot.id, parsed.assets)).emotions);
     }
 
     return c.json(await ownerView(deps, plot), 201);
@@ -1135,28 +1181,41 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     const safetyLevel = coerceSafetyLevel(optionalString(body, 'safetyLevel'));
     const commentsEnabled = optionalBoolean(body, 'commentsEnabled');
 
-    const [updated] = await deps.db
-      .update(plots)
-      .set({
-        ...(name !== undefined ? { name } : {}),
-        ...(intro !== undefined ? { intro } : {}),
-        ...(description !== undefined ? { description } : {}),
-        ...(body['lorebook'] === undefined ? {} : { lorebook: coerceLorebook(body['lorebook']) }),
-        ...(intros !== undefined ? { intros } : {}),
-        ...(tags !== undefined ? { tags } : {}),
-        ...(narrator !== undefined ? { narrator } : {}),
-        ...(style !== undefined ? { style } : {}),
-        ...(profiles !== undefined ? { profiles } : {}),
-        ...(customUi !== undefined ? { customUi: customUi && Object.keys(customUi).length > 0 ? customUi : null } : {}),
-        ...(groupSettings !== undefined ? { groupSettings } : {}),
-        ...(safetyLevel !== undefined ? { safetyLevel } : {}),
-        ...(commentsEnabled !== undefined ? { commentsEnabled } : {}),
-        ...(language ? { language } : {}),
-        updatedAt: new Date(),
-      })
-      .where(and(eq(plots.id, id), eq(plots.ownerId, userId)))
-      .returning();
-    return c.json(await ownerView(deps, updated!));
+    const lorebook = body['lorebook'] === undefined ? undefined : coerceLorebook(body['lorebook']);
+    const updated = await deps.db.transaction(async (tx) => {
+      // The modules are the module routes' to write: what the editor sent is
+      // laid over the ones the plot holds, read under the lock an import or a
+      // removal takes, so a save racing one neither undoes nor revives it.
+      const stored =
+        customUi === undefined
+          ? undefined
+          : (await tx.select({ customUi: plots.customUi }).from(plots).where(eq(plots.id, id)).for('update'))[0]
+              ?.customUi;
+      const kept = customUi === undefined ? undefined : withStoredModules(customUi, stored);
+      const [row] = await tx
+        .update(plots)
+        .set({
+          ...(name !== undefined ? { name } : {}),
+          ...(intro !== undefined ? { intro } : {}),
+          ...(description !== undefined ? { description } : {}),
+          ...(lorebook !== undefined ? { lorebook } : {}),
+          ...(intros !== undefined ? { intros } : {}),
+          ...(tags !== undefined ? { tags } : {}),
+          ...(narrator !== undefined ? { narrator } : {}),
+          ...(style !== undefined ? { style } : {}),
+          ...(profiles !== undefined ? { profiles } : {}),
+          ...(kept !== undefined ? { customUi: kept && Object.keys(kept).length > 0 ? kept : null } : {}),
+          ...(groupSettings !== undefined ? { groupSettings } : {}),
+          ...(safetyLevel !== undefined ? { safetyLevel } : {}),
+          ...(commentsEnabled !== undefined ? { commentsEnabled } : {}),
+          ...(language ? { language } : {}),
+          updatedAt: new Date(),
+        })
+        .where(and(eq(plots.id, id), eq(plots.ownerId, userId)))
+        .returning();
+      return row!;
+    });
+    return c.json(await ownerView(deps, updated));
   });
 
   // Everything hanging off the plot goes with it — the roster, the assets, the
@@ -1289,6 +1348,8 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     // The follow edge to the creator rides along so the page's follow button
     // does not have to fetch the creator's whole public listing for two numbers.
     const creatorFollow = await followState(deps.db, plot.ownerId, viewerId);
+    // What the chat draws: the work's and, after it, its modules' (`readerCustomUi`).
+    const drawn = readerCustomUi(plot.customUi, backgroundOf(plot, members));
 
     return c.json({
       public: true,
@@ -1322,12 +1383,12 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       narrator: plot.narrator?.pov ? { pov: plot.narrator.pov } : null,
       // How the reader's browser picks a round's speakers — options, like the style.
       groupSettings: coerceGroupSettings(plot.groupSettings),
-      displayScripts: plot.customUi?.displayScripts ?? [],
-      css: plot.customUi?.css ?? '',
+      displayScripts: drawn.displayScripts,
+      css: drawn.css,
       // Each member's own stylesheet, for its messages, in a work of several.
       memberCss: plot.customUi?.memberCss ?? {},
-      // What is drawn behind the chat (`backgroundOf`).
-      backgroundHtml: backgroundOf(plot, members),
+      // What is drawn behind the chat (`backgroundOf`), and the modules' after it.
+      backgroundHtml: drawn.backgroundHtml,
       defaultVariables: plot.customUi?.defaultVariables ?? {},
       componentCode: plot.customUi?.componentCode ?? '',
       componentCapabilities: plot.customUi?.componentCapabilities ?? [],
@@ -1402,7 +1463,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     let member = await insertMember(deps, id, name, parsed.card, imported);
     if (parsed.iconBuffer) member = await writeMemberAvatar(deps, member, parsed.iconBuffer);
     if (parsed.assets?.length) {
-      member = await recordEmotionImages(deps, member, await storeImportedAssets(deps, id, parsed.assets));
+      member = await recordEmotionImages(deps, member, (await storeImportedAssets(deps, id, parsed.assets)).emotions);
     }
     await addGroupGreetings(deps, id, parsed.card);
     const variableConflicts = await liftCustomUi(deps, id, member);
@@ -1819,6 +1880,102 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     if (!deleted) throw notFound('Asset not found');
     await deleteQuietly(deps.storage, deleted.path);
     return c.body(null, 204);
+  });
+
+  /* ------------------------------------------------------------ the modules */
+
+  /**
+   * A RisuAI module brought into the work — a `.risum` file or the module's JSON
+   * (`parseRisuModule`) — the creator's side of RisuAI's module list. RisuAI
+   * stacks a module on the chat rather than into the character, so this one is
+   * the work's: kept whole under an id of its own (`PlotModule`), every member's,
+   * and run after the cards' own wherever theirs run (§6 of ARCHITECTURE.md).
+   * Its pictures join the work's assets under the plot's cap, as a card's do
+   * (`storeImportedAssets`); its stylesheet and background, past the plot's caps,
+   * are left out as a card's are. A module carries no default variables, so
+   * there is nothing to merge into the work's. Unreadable is a 400, like a card.
+   */
+  app.post('/:id/modules', requireUser, async (c) => {
+    const id = requireUuidParam(c);
+    await loadOwnedPlot(deps, id, c.get('userId'));
+    let form: FormData;
+    try {
+      form = await c.req.formData();
+    } catch {
+      throw badRequest('invalid_request', 'Expected multipart/form-data with a file field');
+    }
+    const file = form.get('file');
+    if (!(file instanceof File)) throw badRequest('invalid_request', 'file field is required');
+    if (file.size > MAX_CARD_IMPORT_BYTES) {
+      throw new ApiError(413, 'payload_too_large', `A module file is at most ${MAX_CARD_IMPORT_BYTES} bytes`);
+    }
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let parsed: ReturnType<typeof parseRisuModule>;
+    try {
+      parsed = parseRisuModule(bytes);
+    } catch (error) {
+      if (error instanceof ModuleParseError) throw badRequest('invalid_module', error.message);
+      throw error;
+    }
+
+    // A module names no emotion pictures: its assets are only `additionalAssets`.
+    const assets = (await storeImportedAssets(deps, id, parsed.assets)).ids;
+    const module = plotModuleOf(parsed, {
+      id: randomUUID(),
+      name: (parsed.name || file.name.replace(/\.[^.]+$/, '').trim() || 'Module').slice(0, MAX_MODULE_NAME_LENGTH),
+      description: parsed.description.trim().slice(0, MAX_INTRO_LENGTH),
+      // Held to what any lorebook the work stores is held to.
+      lorebook: coerceLorebook(parsed.lorebook),
+      assets,
+      importedFrom: {
+        fileName: file.name.slice(0, MAX_IMPORT_FILE_NAME_LENGTH),
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+        importedAt: new Date().toISOString(),
+      },
+    });
+    let plot: Plot;
+    try {
+      plot = await deps.db.transaction(async (tx) => {
+        const [locked] = await tx.select({ customUi: plots.customUi }).from(plots).where(eq(plots.id, id)).for('update');
+        const customUi = locked?.customUi ?? {};
+        const [row] = await tx
+          .update(plots)
+          .set({ customUi: { ...customUi, modules: [...(customUi.modules ?? []), module] }, updatedAt: new Date() })
+          .where(eq(plots.id, id))
+          .returning();
+        return row!;
+      });
+    } catch (error) {
+      // The pictures were stored ahead of the record that names them.
+      await deleteAssets(deps, id, assets);
+      throw error;
+    }
+    return c.json(await ownerView(deps, plot), 201);
+  });
+
+  /** Takes a module out of the work: its record, and the pictures it brought that are still there. */
+  app.delete('/:id/modules/:moduleId', requireUser, async (c) => {
+    const id = requireUuidParam(c);
+    await loadOwnedPlot(deps, id, c.get('userId'));
+    const moduleId = c.req.param('moduleId');
+    const removed = await deps.db.transaction(async (tx) => {
+      const [locked] = await tx.select({ customUi: plots.customUi }).from(plots).where(eq(plots.id, id)).for('update');
+      const modules = locked?.customUi?.modules ?? [];
+      const gone = modules.find((module) => module.id === moduleId);
+      if (!locked?.customUi || !gone) return null;
+      const { modules: _modules, ...rest } = locked.customUi;
+      const kept = modules.filter((module) => module !== gone);
+      const customUi: PlotCustomUi = kept.length > 0 ? { ...rest, modules: kept } : rest;
+      const [row] = await tx
+        .update(plots)
+        .set({ customUi: Object.keys(customUi).length > 0 ? customUi : null, updatedAt: new Date() })
+        .where(eq(plots.id, id))
+        .returning();
+      return { plot: row!, gone };
+    });
+    if (!removed) throw notFound('Module not found');
+    await deleteAssets(deps, id, removed.gone.assets);
+    return c.json(await ownerView(deps, removed.plot));
   });
 
   /* -------------------------------------------------------------- the cover */

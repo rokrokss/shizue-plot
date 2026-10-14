@@ -181,6 +181,8 @@ export interface Plot {
   profiles: PlotProfile[];
   /** Display scripts, variable seeds and the component module the work shares. */
   customUi: PlotCustomUi | null;
+  /** The RisuAI modules brought into the work, which the server keeps apart from `customUi`. */
+  modules: PlotModuleSummary[];
   language: ContentLanguage;
   visibility: string;
   /** 'adult' only on rows saved before the level was disabled; those stay unlisted. */
@@ -226,6 +228,27 @@ export interface PlotMember {
  * GET /api/plots/:id — the plot, its roster and its comment count. The
  * listings are card grids, so only the owner view carries the count.
  */
+/**
+ * A RisuAI module in a work, as the studio lists it (`POST /api/plots/:id/modules`):
+ * what it is and how much it brought, not its scripts.
+ */
+export interface PlotModuleSummary {
+  id: string;
+  name: string;
+  description: string;
+  loreCount: number;
+  regexCount: number;
+  triggerCount: number;
+  displayScriptCount: number;
+  assetCount: number;
+  /** It draws a stylesheet or a background behind the chat. */
+  background: boolean;
+  lowLevelAccess: boolean;
+  /** It brings triggers or input/output scripts the reader's browser runs. */
+  scripts: boolean;
+  importedFrom: { fileName: string; sha256: string; importedAt: string };
+}
+
 export interface PlotDetail extends Plot {
   characters: PlotMember[];
   /**
