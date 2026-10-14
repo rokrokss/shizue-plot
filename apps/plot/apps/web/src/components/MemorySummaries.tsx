@@ -1,0 +1,296 @@
+'use client';
+
+import { useTranslations } from 'next-intl';
+import { useCallback, useEffect, useState } from 'react';
+import { apiGet, apiSend } from '@/lib/api';
+import type { MemorySummary } from '@/lib/types';
+import { useErrorMessage } from '@/lib/useErrorMessage';
+import { Button, ErrorText, Spinner, TextArea, cx } from './ui';
+
+/** Summaries of the current branch shown at a time, newest first; the rest one press away. */
+const PAGE = 20;
+/** When the list is read again after a change, for the summary the background writes after a turn. */
+const BACKGROUND_DELAY_MS = 6000;
+
+const ACTION =
+  'rounded-md px-1.5 py-0.5 text-xs transition-colors disabled:opacity-50 focus-visible:outline-2 ' +
+  'focus-visible:outline-offset-2 focus-visible:outline-focus';
+
+/**
+ * The chat's memory, as RisuAI's HypaV3 shows it: every summary with the
+ * messages it covers, and for each a pin (important — selected before any
+ * other), an edit, a regenerate that offers a new text to keep or throw away,
+ * and a delete. The summaries the current branch holds come first, newest at
+ * the top; ones written on another branch wait folded below.
+ *
+ * The list is the panel's own to fetch: it is read again whenever `version`
+ * moves — the branch's head (a turn, a swipe) or the chat's memory revision (an
+ * edit, a hide, a delete) — since any of them can change which summaries apply,
+ * and once more a little later, by when the background has usually written
+ * the summary the change was due.
+ */
+export function MemorySummaries({
+  chatId,
+  version,
+  disabled,
+}: {
+  chatId: string;
+  /** Changes whenever the summaries may have: the head and the memory revision. */
+  version: string;
+  /** True while a reply streams or another setting is being saved. */
+  disabled: boolean;
+}) {
+  const t = useTranslations('chat');
+  const toMessage = useErrorMessage();
+  const [summaries, setSummaries] = useState<MemorySummary[] | null>(null);
+  const [shown, setShown] = useState(PAGE);
+  const [error, setError] = useState('');
+
+  const load = useCallback(
+    async (signal?: AbortSignal): Promise<void> => {
+      try {
+        const answer = await apiGet<{ summaries: MemorySummary[] }>(`/api/chats/${chatId}/memory`, signal);
+        setSummaries(answer.summaries);
+        setError('');
+      } catch (caught) {
+        if (signal?.aborted) return;
+        setError(toMessage(caught));
+      }
+    },
+    [chatId, toMessage],
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void load(controller.signal);
+    const later = setTimeout(() => void load(controller.signal), BACKGROUND_DELAY_MS);
+    return () => {
+      clearTimeout(later);
+      controller.abort();
+    };
+  }, [load, version]);
+
+  const replace = (next: MemorySummary): void =>
+    setSummaries((current) => current?.map((summary) => (summary.id === next.id ? next : summary)) ?? null);
+  const remove = (id: string): void =>
+    setSummaries((current) => current?.filter((summary) => summary.id !== id) ?? null);
+
+  const applied = (summaries ?? []).filter((summary) => summary.applies).reverse();
+  const elsewhere = (summaries ?? []).filter((summary) => !summary.applies);
+  const card = (summary: MemorySummary) => (
+    <SummaryCard
+      key={summary.id}
+      chatId={chatId}
+      summary={summary}
+      disabled={disabled}
+      onChanged={replace}
+      onDeleted={remove}
+      onError={(caught) => setError(caught === null ? '' : toMessage(caught))}
+    />
+  );
+
+  return (
+    <section data-testid="chat-memory" className="space-y-3 border-t border-line pt-5">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-xs font-medium text-muted">{t('memory')}</h2>
+        {applied.length > 0 ? (
+          <span className="text-xs text-muted">{t('memoryCount', { count: applied.length })}</span>
+        ) : null}
+      </div>
+      {summaries === null && !error ? <Spinner label={t('memoryLoading')} /> : null}
+      {summaries !== null && applied.length === 0 ? <p className="text-sm text-muted">{t('memoryEmpty')}</p> : null}
+      <p className="text-xs text-muted">{t('memoryHint')}</p>
+      <ErrorText>{error}</ErrorText>
+
+      {applied.length > 0 ? <ol className="space-y-3">{applied.slice(0, shown).map(card)}</ol> : null}
+      {applied.length > shown ? (
+        <Button size="sm" variant="ghost" onClick={() => setShown((count) => count + PAGE)}>
+          {t('memoryShowOlder', { count: applied.length - shown })}
+        </Button>
+      ) : null}
+
+      {elsewhere.length > 0 ? (
+        <details data-testid="memory-elsewhere" className="space-y-3">
+          <summary className="cursor-pointer text-xs text-muted">
+            {t('memoryElsewhere', { count: elsewhere.length })}
+          </summary>
+          <ol className="mt-3 space-y-3">{elsewhere.map(card)}</ol>
+        </details>
+      ) : null}
+    </section>
+  );
+}
+
+function SummaryCard({
+  chatId,
+  summary,
+  disabled,
+  onChanged,
+  onDeleted,
+  onError,
+}: {
+  chatId: string;
+  summary: MemorySummary;
+  disabled: boolean;
+  onChanged: (summary: MemorySummary) => void;
+  onDeleted: (id: string) => void;
+  /** A failure to say, or null as an action starts and the last one is no longer news. */
+  onError: (error: unknown) => void;
+}) {
+  const t = useTranslations('chat');
+  const common = useTranslations('common');
+  const [draft, setDraft] = useState<string | null>(null);
+  const [candidate, setCandidate] = useState<string | null>(null);
+  const [working, setWorking] = useState<'pin' | 'save' | 'regenerate' | 'delete' | null>(null);
+  const base = `/api/chats/${chatId}/memory/${summary.id}`;
+  const busy = disabled || working !== null;
+
+  async function run(kind: NonNullable<typeof working>, action: () => Promise<void>): Promise<void> {
+    if (busy) return;
+    setWorking(kind);
+    onError(null);
+    try {
+      await action();
+    } catch (caught) {
+      onError(caught);
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  const patch = (body: { text?: string; important?: boolean }) =>
+    run(body.text === undefined ? 'pin' : 'save', async () => {
+      const answer = await apiSend<{ summary: MemorySummary }>('PATCH', base, body);
+      onChanged(answer.summary);
+      if (body.text !== undefined) {
+        setDraft(null);
+        setCandidate(null);
+      }
+    });
+
+  const positions = summary.messages.flatMap((message) => (message.position === null ? [] : [message.position + 1]));
+  const range =
+    !summary.applies || positions.length === 0
+      ? t('memoryOtherBranch')
+      : positions.length === 1
+        ? t('memoryCoversOne', { at: positions[0]! })
+        : t('memoryCovers', { from: Math.min(...positions), to: Math.max(...positions) });
+
+  return (
+    <li
+      data-testid="memory-summary"
+      className={cx('space-y-2 rounded-xl border bg-surface p-3', summary.important ? 'border-fg/40' : 'border-line')}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+        <span className="text-xs text-muted">{range}</span>
+        <div className="flex flex-wrap items-center gap-1">
+          <button
+            type="button"
+            aria-pressed={summary.important}
+            disabled={busy}
+            onClick={() => void patch({ important: !summary.important })}
+            className={cx(ACTION, summary.important ? 'font-medium text-fg' : 'text-muted hover:text-fg')}
+          >
+            <span aria-hidden="true">{summary.important ? '★ ' : '☆ '}</span>
+            {t('memoryImportant')}
+          </button>
+          <button
+            type="button"
+            disabled={busy || draft !== null}
+            onClick={() => setDraft(summary.text)}
+            className={cx(ACTION, 'text-muted hover:text-fg')}
+          >
+            {common('edit')}
+          </button>
+          <button
+            type="button"
+            disabled={busy || summary.messages.length === 0}
+            onClick={() =>
+              void run('regenerate', async () => {
+                const answer = await apiSend<{ text: string }>('POST', `${base}/regenerate`);
+                setCandidate(answer.text);
+              })
+            }
+            className={cx(ACTION, 'text-muted hover:text-fg')}
+          >
+            {working === 'regenerate' ? t('memoryRegenerating') : t('memoryRegenerate')}
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              if (!window.confirm(t('memoryDeleteConfirm'))) return;
+              void run('delete', async () => {
+                await apiSend<void>('DELETE', base);
+                onDeleted(summary.id);
+              });
+            }}
+            className={cx(ACTION, 'text-danger hover:bg-danger/10')}
+          >
+            {common('delete')}
+          </button>
+        </div>
+      </div>
+
+      {draft === null ? (
+        <p className="whitespace-pre-wrap break-keep text-sm text-fg [overflow-wrap:anywhere]">{summary.text}</p>
+      ) : (
+        <div className="space-y-2">
+          <TextArea
+            rows={6}
+            value={draft}
+            disabled={busy}
+            aria-label={t('memoryEditLabel')}
+            onChange={(event) => setDraft(event.target.value)}
+          />
+          <div className="flex justify-end gap-2">
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => setDraft(null)}>
+              {common('cancel')}
+            </Button>
+            <Button
+              size="sm"
+              variant="primary"
+              busy={working === 'save'}
+              disabled={busy || draft.trim() === ''}
+              onClick={() => void patch({ text: draft })}
+            >
+              {common('save')}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {candidate !== null ? (
+        <div data-testid="memory-candidate" className="space-y-2 rounded-lg border border-dashed border-line bg-raised/40 p-3">
+          <p className="text-xs font-medium text-muted">{t('memoryRegenerated')}</p>
+          <p className="whitespace-pre-wrap break-keep text-sm text-fg [overflow-wrap:anywhere]">{candidate}</p>
+          <div className="flex justify-end gap-2">
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => setCandidate(null)}>
+              {common('cancel')}
+            </Button>
+            <Button size="sm" variant="primary" busy={working === 'save'} disabled={busy} onClick={() => void patch({ text: candidate })}>
+              {t('memoryApply')}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      <details>
+        <summary className="cursor-pointer text-xs text-muted">
+          {t('memoryMessages', { count: summary.messages.length })}
+        </summary>
+        <ul className="mt-2 space-y-1">
+          {summary.messages.map((message) => (
+            <li key={message.id} className="flex gap-2 text-xs">
+              <span className="shrink-0 text-muted">
+                {message.position === null ? '·' : `#${message.position + 1}`}{' '}
+                {message.role === 'user' ? t('memoryRoleUser') : t('memoryRoleAssistant')}
+              </span>
+              <span className="min-w-0 break-keep text-fg [overflow-wrap:anywhere]">{message.preview}</span>
+            </li>
+          ))}
+        </ul>
+      </details>
+    </li>
+  );
+}

@@ -9,6 +9,10 @@ import {
   computeVariables,
   DEFAULT_USER_NAME,
   getPreset,
+  HYPA_V3_DEFAULTS,
+  MAX_CHATS_PER_SUMMARY,
+  MAX_QUERY_CHAT_COUNT,
+  MAX_SUMMARIZATION_PROMPT_LENGTH,
   imageMacroRefs,
   isNarration,
   isPresetId,
@@ -41,9 +45,7 @@ import {
   chatAttachments,
   chatNoteLinks,
   chats,
-  MAX_MEMORY_RETRIEVAL_COUNT,
   MEMORY_CONTEXT_BUDGETS,
-  MEMORY_SUMMARY_THRESHOLDS,
   messages,
   personas,
   plots,
@@ -102,7 +104,7 @@ import {
 } from '../generation.js';
 import { avatarUrl, coverUrl, loadMembers, loadVisiblePlot, visibleToViewer } from '../hub.js';
 import { emotionNamed, replyMemberOf } from '../emotion.js';
-import { auxiliaryModelOf, buildMemoryInput, invalidateMemoryForEdit, memorySettingsOf } from '../memory.js';
+import { auxiliaryModelOf, buildMemoryInput, invalidateMemoryForEdit, memorySettingsOf, scheduleMemoryUpdate } from '../memory.js';
 import {
   attachedNoteIds,
   attachedNoteIdsByChat,
@@ -173,8 +175,9 @@ export const toChatJson = (chat: Chat, noteIds: string[]) => ({
   note: chat.note,
   preset: chat.preset,
   headMessageId: chat.headMessageId,
-  memory: chat.memory,
   memorySettings: chat.memorySettings,
+  /** Moves with every edit, hide and delete of a message: the memory's summaries may have changed with it. */
+  memoryRevision: chat.memoryRevision,
   relationship: chat.relationship,
   relationshipEnabled: chat.relationshipEnabled,
   /** This chat's narrator override; null leaves the plot's own in force. */
@@ -485,10 +488,13 @@ function optionalPreset(body: Record<string, unknown>): string | undefined {
 }
 
 /**
- * Validates `memorySettings`. Every key is optional and only the whitelisted
- * values pass; keys the pipeline does not know are dropped rather than stored, so
- * the column never grows a setting nothing reads. `null` resets the chat to the
- * pipeline defaults.
+ * Validates `memorySettings`: the context budget from its whitelist, and
+ * HypaV3's settings (`HypaV3Settings`) in their ranges — the two shares of the
+ * memory budget together at most all of it, the extra summarization at most
+ * what the memory leaves. Every key is optional; keys the pipeline does not
+ * know (the retired `summaryThreshold` and `retrievalCount` among them) are
+ * dropped rather than stored, so the column never grows a setting nothing
+ * reads. `null` resets the chat to the defaults.
  */
 function optionalMemorySettings(body: Record<string, unknown>): ChatMemorySettings | null | undefined {
   const value = body['memorySettings'];
@@ -498,36 +504,70 @@ function optionalMemorySettings(body: Record<string, unknown>): ChatMemorySettin
     throw badRequest('invalid_request', 'memorySettings must be an object or null');
   }
   const input = value as Record<string, unknown>;
+  const invalid = (key: string, rule: string) => badRequest('invalid_request', `${key} must be ${rule}`);
 
-  const pick = <T extends number>(key: string, allowed: readonly T[]): T | undefined => {
+  const contextBudget = input['contextBudget'];
+  if (contextBudget !== undefined && !MEMORY_CONTEXT_BUDGETS.includes(contextBudget as never)) {
+    throw badRequest('invalid_request', `Unsupported contextBudget: ${String(contextBudget)}`);
+  }
+  const ratio = (key: string, max = 1): number | undefined => {
     const setting = input[key];
     if (setting === undefined) return undefined;
-    if (!allowed.includes(setting as T)) {
-      throw badRequest('invalid_request', `Unsupported ${key}: ${String(setting)}`);
+    if (typeof setting !== 'number' || !Number.isFinite(setting) || setting < 0 || setting > max + 1e-9) {
+      throw invalid(key, `a number between 0 and ${max}`);
     }
-    return setting as T;
+    return setting;
+  };
+  const count = (key: string, max: number): number | undefined => {
+    const setting = input[key];
+    if (setting === undefined) return undefined;
+    if (typeof setting !== 'number' || !Number.isInteger(setting) || setting < 1 || setting > max) {
+      throw invalid(key, `an integer between 1 and ${max}`);
+    }
+    return setting;
   };
 
-  const contextBudget = pick('contextBudget', MEMORY_CONTEXT_BUDGETS);
-  const summaryThreshold = pick('summaryThreshold', MEMORY_SUMMARY_THRESHOLDS);
-  const retrievalCount = input['retrievalCount'];
+  const memoryTokensRatio = ratio('memoryTokensRatio');
+  const extraSummarizationRatio = ratio(
+    'extraSummarizationRatio',
+    1 - (memoryTokensRatio ?? HYPA_V3_DEFAULTS.memoryTokensRatio),
+  );
+  const recentMemoryRatio = ratio('recentMemoryRatio');
+  const similarMemoryRatio = ratio('similarMemoryRatio');
+  // HypaV3 refuses the two shares adding up to more than the budget. With a
+  // hair of slack: 0.7 + 0.3 is over 1 in floating point.
+  const shares =
+    (recentMemoryRatio ?? HYPA_V3_DEFAULTS.recentMemoryRatio) + (similarMemoryRatio ?? HYPA_V3_DEFAULTS.similarMemoryRatio);
+  if (shares > 1 + 1e-9) {
+    throw badRequest('invalid_request', 'recentMemoryRatio and similarMemoryRatio must add up to at most 1');
+  }
+  const maxChatsPerSummary = count('maxChatsPerSummary', MAX_CHATS_PER_SUMMARY);
+  const queryChatCount = count('queryChatCount', MAX_QUERY_CHAT_COUNT);
+  const doNotSummarizeUserMessage = input['doNotSummarizeUserMessage'];
+  if (doNotSummarizeUserMessage !== undefined && typeof doNotSummarizeUserMessage !== 'boolean') {
+    throw invalid('doNotSummarizeUserMessage', 'a boolean');
+  }
+  const summarizationPrompt = input['summarizationPrompt'];
   if (
-    retrievalCount !== undefined &&
-    (typeof retrievalCount !== 'number' ||
-      !Number.isInteger(retrievalCount) ||
-      retrievalCount < 0 ||
-      retrievalCount > MAX_MEMORY_RETRIEVAL_COUNT)
+    summarizationPrompt !== undefined &&
+    (typeof summarizationPrompt !== 'string' ||
+      summarizationPrompt.length > MAX_SUMMARIZATION_PROMPT_LENGTH ||
+      summarizationPrompt.includes('\u0000'))
   ) {
-    throw badRequest(
-      'invalid_request',
-      `retrievalCount must be an integer between 0 and ${MAX_MEMORY_RETRIEVAL_COUNT}`,
-    );
+    throw invalid('summarizationPrompt', `a string of at most ${MAX_SUMMARIZATION_PROMPT_LENGTH} characters, without U+0000`);
   }
 
   return {
-    ...(contextBudget !== undefined ? { contextBudget } : {}),
-    ...(summaryThreshold !== undefined ? { summaryThreshold } : {}),
-    ...(retrievalCount !== undefined ? { retrievalCount: retrievalCount as number } : {}),
+    ...(contextBudget !== undefined ? { contextBudget: contextBudget as ChatMemorySettings['contextBudget'] } : {}),
+    ...(memoryTokensRatio !== undefined ? { memoryTokensRatio } : {}),
+    ...(extraSummarizationRatio !== undefined ? { extraSummarizationRatio } : {}),
+    ...(maxChatsPerSummary !== undefined ? { maxChatsPerSummary } : {}),
+    ...(recentMemoryRatio !== undefined ? { recentMemoryRatio } : {}),
+    ...(similarMemoryRatio !== undefined ? { similarMemoryRatio } : {}),
+    ...(queryChatCount !== undefined ? { queryChatCount } : {}),
+    ...(doNotSummarizeUserMessage !== undefined ? { doNotSummarizeUserMessage } : {}),
+    // An empty prompt is the default one, which a missing key already says.
+    ...(typeof summarizationPrompt === 'string' && summarizationPrompt.trim() !== '' ? { summarizationPrompt } : {}),
   };
 }
 
@@ -1070,10 +1110,6 @@ async function referencedAssets(
 const lastUserMessage = (path: Message[]): Message | undefined =>
   [...path].reverse().find((message) => message.role === 'user');
 
-/** Retrieval query for the memory layer: the reader's newest turn the AI reads. */
-const lastUserText = (path: Message[]): string =>
-  [...path].reverse().find((message) => message.role === 'user' && !message.hiddenFromPrompt)?.content ?? '';
-
 /**
  * Stage directions of the turn being answered. Only the last user message's are
  * injected, so a regenerate re-applies exactly what the original turn carried and
@@ -1423,7 +1459,7 @@ async function regeneratePlan(
   const all = edited ? edited.all : context.all;
   // Memory is applied to the whole path first — it only ever trims the front,
   // so the mode-specific trim of the replaced turns at the end still lines up.
-  const memory = await buildMemoryInput(deps, chat, edited ? kept : path, lastUserText(kept));
+  const memory = await buildMemoryInput(deps, chat, edited ? kept : path, kept);
   const gone = path.length - replaced.length;
   // A member's round answers what stands before it, as `/reply` asked it: the
   // reader's turn, with its ruling — or a reply, the scene going on without the
@@ -1895,38 +1931,6 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.body(null, 204);
   });
 
-  // User-edited summary. The anchor is kept: it says which turns the summary
-  // stands for, and the user is only rewriting the text.
-  app.put('/:id/memory', async (c) => {
-    const chat = await loadWritableChat(deps, requireUuidParam(c), c.get('userId'));
-    const body = await readJsonBody(c);
-    const summary = requireString(body, 'summary');
-
-    const updated = await deps.db.transaction(async (tx) => {
-      // Re-read under the row lock: a concurrent covered edit may have just
-      // cleared the memory, and writing back the copy read outside the lock
-      // would resurrect the invalidated summary.
-      const [locked] = await tx
-        .select({ memory: chats.memory })
-        .from(chats)
-        .where(eq(chats.id, chat.id))
-        .for('update');
-      if (!locked?.memory) throw badRequest('invalid_state', 'This chat has no memory yet');
-
-      const [row] = await tx
-        .update(chats)
-        .set({
-          memory: { ...locked.memory, summary, updatedAt: new Date().toISOString() },
-          // Any refresh already in flight is now writing about the old summary.
-          memoryRevision: sql`${chats.memoryRevision} + 1`,
-        })
-        .where(eq(chats.id, chat.id))
-        .returning();
-      return row!;
-    });
-    return c.json(await chatState(deps, updated));
-  });
-
   // Attaching a reusable note. Idempotent: re-attaching an attached note is a
   // no-op rather than a conflict, so a double click cannot fail the request.
   app.post('/:id/notes/:noteId', async (c) => {
@@ -2050,11 +2054,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         .from(chatAttachments)
         .where(inArray(chatAttachments.messageId, [...pruned]));
 
-      // One transaction, as the edits are: the summary must stop standing for text
-      // that is gone at the same moment the text goes.
+      // One transaction, as the edits are: a summary must stop standing for text
+      // that is gone at the same moment the text goes — every message the
+      // delete takes, since a summary may cover only the later ones.
+      let dropped = 0;
       const updated = await deps.db.transaction(async (tx) => {
-        // Before the rows are gone — the check reads the tree the delete removes.
-        await invalidateMemoryForEdit(tx, chat.id, messageId);
+        dropped = await invalidateMemoryForEdit(tx, chat.id, [...pruned]);
         await tx
           .delete(messages)
           .where(and(eq(messages.chatId, chat.id), inArray(messages.id, [...pruned])));
@@ -2092,6 +2097,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
             )
           : new Set<string>();
       for (const path of paths) if (!shared.has(path)) await deleteQuietly(deps.storage, path);
+      // What the dropped summaries covered and is still on a branch is summarized again.
+      if (dropped > 0) scheduleMemoryUpdate(deps, chat.id);
       return c.json(await chatState(deps, updated));
     } finally {
       await releaseChatSlot(deps, chat.id);
@@ -2105,9 +2112,10 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * node's, so every branch through it shares it.
    *
    * The memory is invalidated as an in-place edit invalidates it, in the same
-   * transaction: a summary that already covers the message is dropped, so the
-   * next refresh writes it again with the message in or out. Like an edit it
-   * takes no generation claim — a refresh racing it loses on the revision.
+   * transaction: a summary that already covers the message is dropped, and the
+   * refresh scheduled once it commits writes it again with the message in or
+   * out. Like an edit it takes no generation claim — a refresh racing it loses
+   * on the revision.
    */
   app.put('/:id/messages/:messageId/hidden', async (c) => {
     const userId = c.get('userId');
@@ -2117,6 +2125,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const hidden = optionalBoolean(body, 'hidden');
     if (hidden === undefined) throw badRequest('invalid_request', 'hidden must be a boolean');
 
+    let changed = false;
     await deps.db.transaction(async (tx) => {
       const [message] = await tx
         .select({ hidden: messages.hiddenFromPrompt })
@@ -2128,7 +2137,11 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       if (message.hidden === hidden) return;
       await tx.update(messages).set({ hiddenFromPrompt: hidden }).where(eq(messages.id, messageId));
       await invalidateMemoryForEdit(tx, chat.id, messageId);
+      changed = true;
     });
+    // Either way the memory has a stretch to summarize again: the one a dropped
+    // summary covered, or a message shown again among covered ones.
+    if (changed) scheduleMemoryUpdate(deps, chat.id);
     return c.json(await chatState(deps, await loadOwnedChat(deps, chat.id, userId)));
   });
 
@@ -2270,9 +2283,10 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     // One transaction, like the in-place edit: the rewrite and the memory
     // invalidation it forces must not be observable apart. The edit is felt from
     // the first original turn the branch now leaves behind.
+    let dropped = 0;
     const updated = await deps.db.transaction(async (tx) => {
       await tx.insert(messages).values(rebuilt);
-      await invalidateMemoryForEdit(tx, chat.id, scene[kept]!.id);
+      dropped = await invalidateMemoryForEdit(tx, chat.id, scene[kept]!.id);
       const [row] = await tx
         .update(chats)
         .set({ headMessageId: head, updatedAt: new Date() })
@@ -2280,6 +2294,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         .returning();
       return row!;
     });
+    if (dropped > 0) scheduleMemoryUpdate(deps, chat.id);
     return c.json(await chatState(deps, updated));
   });
 
@@ -2390,6 +2405,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     scriptMemberOf(memberId, roster);
     if (!(await acquireChatSlot(deps, chat.id, userId))) await rejectBusyChat(deps, chat.id, userId);
     let committed: { chat: Chat; message: Message; written: Message[] };
+    let dropped = 0;
     try {
       committed = await deps.db.transaction(async (tx) => {
         // Both rows locked, the message first: a hand edit takes no slot, and it
@@ -2429,7 +2445,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           .where(eq(messages.id, messageId))
           .returning();
         if (content !== undefined && content !== current.content) {
-          await invalidateMemoryForEdit(tx, chat.id, messageId);
+          dropped = await invalidateMemoryForEdit(tx, chat.id, messageId);
         }
         // Checked against the branch as it stands under the lock; a refusal
         // rolls the rest of the commit back with it.
@@ -2472,6 +2488,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const unlockedAssetIds = unlockText.length > 0 ? await openUnlocks(deps, chat.id, unlockText.join('\n')) : [];
     // The turn is finished, so the work it held back can start.
     if (clearPending) scheduleBackgroundUpdates(deps, chat.id, messageId);
+    else if (dropped > 0) scheduleMemoryUpdate(deps, chat.id);
     const state = (await chatState(deps, committed.chat)) as Record<string, unknown>;
     return c.json({ ...state, ...(unlockedAssetIds.length > 0 ? { unlockedAssetIds } : {}) });
   });
@@ -2791,7 +2808,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const { context, focusNames, edited, voice } = await storeTurn(chat);
       const branch = edited.path;
 
-      const memory = await buildMemoryInput(deps, chat, branch.slice(0, -1), content);
+      const memory = await buildMemoryInput(deps, chat, branch.slice(0, -1), branch);
       // The turn just written is the last of the history, and the images ride on
       // it; the rest of the branch's are not re-sent (see `withTurnImages`).
       const history = await promptHistory(
@@ -2911,7 +2928,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const edited = edit ? await keepScriptChat(deps, chat, edit, context.all) : null;
       const path = edited ? edited.path : before;
       const end = path.at(-1);
-      const memory = await buildMemoryInput(deps, chat, path, lastUserText(path));
+      const memory = await buildMemoryInput(deps, chat, path, path);
       // The turn being answered must be in the prompt, so the end is re-attached
       // when the summary swallowed it.
       const history = memory.history.length > 0 || !end ? memory.history : [end];
@@ -3005,7 +3022,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const edited = edit ? await keepScriptChat(deps, chat, edit, context.all) : null;
       const path = edited ? edited.path : before;
       const head = path[path.length - 1]!;
-      const memory = await buildMemoryInput(deps, chat, path, lastUserText(path));
+      const memory = await buildMemoryInput(deps, chat, path, path);
       // The partial assistant turn must stay last for the model to resume it, so it
       // is re-attached when the summary swallowed it.
       const history = memory.history.length > 0 ? memory.history : [head];
@@ -3097,7 +3114,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const edited = edit ? await keepScriptChat(deps, chat, edit, context.all) : null;
       const path = edited ? edited.path : before;
       const head = path.at(-1);
-      const memory = await buildMemoryInput(deps, chat, path, lastUserText(path));
+      const memory = await buildMemoryInput(deps, chat, path, path);
       // The scene to continue must be in the prompt, so the head is re-attached
       // when the summary swallowed it.
       const history = memory.history.length > 0 || !head ? memory.history : [head];
@@ -3172,7 +3189,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const edited = edit ? await keepScriptChat(deps, chat, edit, context.all) : null;
       const path = edited ? edited.path : before;
       const head = path.at(-1);
-      const memory = await buildMemoryInput(deps, chat, path, lastUserText(path));
+      const memory = await buildMemoryInput(deps, chat, path, path);
       // The scene to narrate must be in the prompt, so the head is re-attached
       // when the summary swallowed it.
       const history = memory.history.length > 0 || !head ? memory.history : [head];
@@ -3440,7 +3457,7 @@ export function messageRoutes(deps: AppDeps): Hono<AppEnv> {
     if (row.message.role === 'assistant') {
       // One transaction: the edit and the memory invalidation it forces must not be
       // observable apart, or a refresh could snapshot the old text and still win.
-      await deps.db.transaction(async (tx) => {
+      const dropped = await deps.db.transaction(async (tx) => {
         await tx
           .update(messages)
           // The delta stays: it holds the values the scripts set, not a reading of
@@ -3448,8 +3465,10 @@ export function messageRoutes(deps: AppDeps): Hono<AppEnv> {
           // text cannot land on top of the reader's own words.
           .set({ content, scriptRev: sql`${messages.scriptRev} + 1` })
           .where(eq(messages.id, id));
-        await invalidateMemoryForEdit(tx, row.chat.id, id);
+        return invalidateMemoryForEdit(tx, row.chat.id, id);
       });
+      // The summary that covered the old words is gone; the new ones are summarized again.
+      if (dropped > 0) scheduleMemoryUpdate(deps, row.chat.id);
       return c.json({ messageId: id });
     }
 

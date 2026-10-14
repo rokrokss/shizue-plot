@@ -4,6 +4,7 @@ import { createApp } from './app.js';
 import { createAuth } from './auth.js';
 import { createChatGPTAccounts } from './chatgptAccounts.js';
 import type { AppDeps } from './deps.js';
+import { createLocalEmbedder } from './embedder.js';
 import { createHostedAuth, createSessionStore } from './hostedAuth.js';
 import { loadRootEnv, readConfig } from './env.js';
 import { startJobWorker } from './jobs.js';
@@ -50,6 +51,9 @@ const deps: AppDeps = {
   suggesting: new Set<string>(),
   drafting: new Set<string>(),
 };
+// Lazy: the model loads on the first search, not here (`embedder.ts`).
+const embedder = createLocalEmbedder(config.env);
+if (embedder) deps.embedder = embedder;
 const app = createApp(deps);
 // Whether this Node can sandbox a card's editRequest Lua, asked now so the log says so at startup.
 void probeRequestLua();
@@ -69,6 +73,7 @@ const stopJobWorker = startJobWorker({ db, handlers: createJobHandlers(deps) });
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, () => {
     stopJobWorker();
-    process.exit(0);
+    // The embedder's thread is ended first: onnxruntime does not survive an exit around it.
+    void (deps.embedder?.close() ?? Promise.resolve()).finally(() => process.exit(0));
   });
 }

@@ -1,6 +1,7 @@
 import type {
   AssetUnlock,
   GroupSettings,
+  HypaV3Settings,
   ImportProvenance,
   LoreEntry,
   NarratorConfig,
@@ -14,6 +15,7 @@ import type {
 import { sql } from 'drizzle-orm';
 import {
   boolean,
+  customType,
   index,
   integer,
   jsonb,
@@ -56,7 +58,7 @@ export interface JobPayloadMap {
     actorId: string;
     publishedAt: string;
   };
-  /** Folds an imported chat's history into its rolling summary, a chunk per call. */
+  /** Summarizes an imported chat's history into its memory, a batch per call. */
   memory_backfill: {
     chatId: string;
   };
@@ -66,7 +68,11 @@ export type JobPayload = JobPayloadMap[JobKind];
 /** Dimension of the stored embeddings — fixed by the column type. */
 export const EMBEDDING_DIMENSIONS = 1536;
 
-/** Rolling summary of the turns that fell out of the context budget. */
+/**
+ * The single rolling summary the memory kept before HypaV3 (`chats.memory`).
+ * Retired: migration 0011 turned each one into a summary of `chat_summaries`,
+ * and nothing reads or writes the column since.
+ */
 export interface ChatMemory {
   summary: string;
   /** Last message the summary covers; only valid while it is on the current path. */
@@ -76,19 +82,14 @@ export interface ChatMemory {
 
 /** Context budgets a chat may pick from; the middle one is the default. */
 export const MEMORY_CONTEXT_BUDGETS = [8000, 16000, 32000] as const;
-/** Path token share that triggers a re-summary. */
-export const MEMORY_SUMMARY_THRESHOLDS = [0.4, 0.6, 0.8] as const;
-/** Long-term facts injected per turn; 0 turns retrieval off. */
-export const MAX_MEMORY_RETRIEVAL_COUNT = 10;
 
 /**
- * Per-chat overrides for the memory layer. A missing key (or a null column) means
- * the pipeline default, so the whole feature is opt-in per chat.
+ * Per-chat overrides for the memory layer: the context budget, and RisuAI
+ * HypaV3's settings a chat may tune (`HypaV3Settings` in @shizue/core, which
+ * holds the defaults). A missing key (or a null column) means the default.
  */
-export interface ChatMemorySettings {
+export interface ChatMemorySettings extends Partial<HypaV3Settings> {
   contextBudget?: (typeof MEMORY_CONTEXT_BUDGETS)[number];
-  summaryThreshold?: (typeof MEMORY_SUMMARY_THRESHOLDS)[number];
-  retrievalCount?: number;
 }
 
 /** The six relationship axes (WHIF benchmark), in display order. */
@@ -449,11 +450,15 @@ export const chats = pgTable(
     // Leaf of the currently selected branch. Intentionally unconstrained to avoid a
     // circular FK with messages.chat_id.
     headMessageId: uuid('head_message_id'),
+    // Retired: the rolling summary before HypaV3. Migration 0011 moved each into
+    // `chat_summaries`; the column stays unread, as `script_overlay` does, for a
+    // process still running the code before it.
     memory: jsonb('memory').$type<ChatMemory>(),
     // Memory tuning for this chat; null means every pipeline default.
     memorySettings: jsonb('memory_settings').$type<ChatMemorySettings>(),
-    // Bumped by every event that can invalidate the memory layer (assistant edits,
-    // user summary edits). A background refresh writes only if it still matches.
+    // Bumped by every event that can invalidate the memory layer (an edit, a
+    // hide or a delete of a message). A background summary is written only if
+    // it still matches.
     memoryRevision: integer('memory_revision').notNull().default(0),
     // Relationship stats. No user-edit path, so no revision counter: the background
     // extraction is the only writer and last write wins.
@@ -603,8 +608,59 @@ export const chatAttachments = pgTable(
   ],
 );
 
-// Long-term facts extracted from a chat. `embedding` stays null when no embedding
-// provider is configured, in which case the row is simply never retrieved.
+/**
+ * A pgvector `vector` of any dimension. Each row says which embedding model
+ * made it, and only vectors of one model are ever compared, so the column is
+ * not tied to one model's size — a model change re-embeds rather than migrates.
+ * pgvector's text form is the JSON array's.
+ */
+const anyVector = customType<{ data: number[]; driverData: string }>({
+  dataType: () => 'vector',
+  toDriver: (value) => JSON.stringify(value),
+  fromDriver: (value) => JSON.parse(value) as number[],
+});
+
+// The chat's memory, as RisuAI HypaV3's summaries: each a summary of a batch of
+// the branch's messages (`message_ids`, oldest first), pinned (`important`) or
+// not. A summary applies to a branch only while every message it covers is on
+// it; editing, hiding or deleting one of them deletes the summary.
+export const chatSummaries = pgTable(
+  'chat_summaries',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    chatId: uuid('chat_id')
+      .notNull()
+      .references(() => chats.id, { onDelete: 'cascade' }),
+    text: text('text').notNull(),
+    messageIds: uuid('message_ids').array().notNull(),
+    important: boolean('important').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('chat_summaries_chat_id_idx').on(t.chatId)],
+);
+
+// A summary's text split as HypaV3 splits it for the similarity search
+// (`summaryChunkSeparator`), each piece embedded by the server's embedder.
+// `model` is the embedder's id: a row of another model is stale, never compared,
+// and replaced when the summary is embedded again. Rewriting the summary's
+// text deletes its rows.
+export const chatSummaryChunks = pgTable(
+  'chat_summary_chunks',
+  {
+    summaryId: uuid('summary_id')
+      .notNull()
+      .references(() => chatSummaries.id, { onDelete: 'cascade' }),
+    chunkIndex: integer('chunk_index').notNull(),
+    content: text('content').notNull(),
+    model: text('model').notNull(),
+    embedding: anyVector('embedding').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.summaryId, t.chunkIndex] })],
+);
+
+// Long-term facts extracted from a chat — unused since the memory became
+// HypaV3's summaries. Kept for a fact layer the server embedder could revive.
 export const memories = pgTable(
   'memories',
   {
@@ -777,6 +833,8 @@ export type Message = typeof messages.$inferSelect;
 export type NewMessage = typeof messages.$inferInsert;
 export type ChatAttachment = typeof chatAttachments.$inferSelect;
 export type NewChatAttachment = typeof chatAttachments.$inferInsert;
+export type ChatSummary = typeof chatSummaries.$inferSelect;
+export type ChatSummaryChunk = typeof chatSummaryChunks.$inferSelect;
 export type Memory = typeof memories.$inferSelect;
 export type NewMemory = typeof memories.$inferInsert;
 export type UserNote = typeof userNotes.$inferSelect;

@@ -109,7 +109,7 @@ const stateWith = (path: ChatMessage[]): ChatState => ({
     note: '',
     preset: 'default',
     headMessageId: path.at(-1)!.id,
-    memory: null,
+    memoryRevision: 0,
     memorySettings: null,
     relationship: null,
     relationshipEnabled: true,

@@ -129,7 +129,7 @@ const base = (overrides: Partial<AssemblePromptInput> = {}): AssemblePromptInput
 // (`sources`) and the request editors' view (`risu`) came later, beside the
 // prompt rather than in it.
 const pinned = (input: AssemblePromptInput) => {
-  const { sources: _sources, risu: _risu, ...prompt } = assemblePrompt(input);
+  const { sources: _sources, risu: _risu, fixedTokens: _fixed, ...prompt } = assemblePrompt(input);
   return prompt;
 };
 

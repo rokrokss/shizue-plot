@@ -48,6 +48,9 @@ importers:
       '@hono/node-server':
         specifier: ^2.1.0
         version: 2.1.0(hono@4.13.13)
+      '@huggingface/transformers':
+        specifier: 3.8.1
+        version: 3.8.1
       '@shizue/contracts':
         specifier: workspace:*
         version: link:../../../../packages/contracts

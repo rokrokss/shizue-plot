@@ -31,7 +31,7 @@ const state = (head: string | null, path: ChatMessage[]): ChatState => ({
     note: '',
     preset: 'standard',
     headMessageId: head,
-    memory: null,
+    memoryRevision: 0,
     memorySettings: null,
     relationship: null,
     relationshipEnabled: true,

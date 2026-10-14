@@ -153,7 +153,7 @@ const state = (locked: boolean): ChatState => ({
     note: '',
     preset: 'default',
     headMessageId: 'msg_1',
-    memory: null,
+    memoryRevision: 0,
     memorySettings: null,
     relationship: null,
     relationshipEnabled: true,

@@ -1,6 +1,7 @@
 import type { Db } from '@shizue/db';
 import type { getAdapter } from '@shizue/llm';
 import type { ChatGPTAccounts } from './chatgptAccounts.js';
+import type { Embedder } from './embedder.js';
 import type { AppAuth, SessionStore } from './hostedAuth.js';
 import type { SceneImageGenerator } from './sceneImage.js';
 import type { LuaStateStore, RequestLuaRunner } from './requestLua.js';
@@ -66,8 +67,13 @@ export interface AppDeps {
   suggesting: Set<string>;
   /** User ids with a plot draft in flight — one draft at a time per creator. */
   drafting: Set<string>;
-  /** Historical vector-memory tests can inject an embedder; local ChatGPT has none. */
-  createEmbedder?: (timeoutMs?: number) => { embed(input: string[]): Promise<number[][]> } | undefined;
+  /**
+   * The server's text embedder (`embedder.ts`), for the memory's similar
+   * summaries and whatever else searches by meaning; absent when it is off or
+   * its weights were never fetched, and every caller then falls back. Tests
+   * hand in their own.
+   */
+  embedder?: Embedder;
   /**
    * Lua `request`, made by this server for a card script (`scriptFetch.ts`): its
    * rate limit lives here, one per process. Defaults to the real network with

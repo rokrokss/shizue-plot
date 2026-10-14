@@ -9,7 +9,7 @@
  * Cards come in through the ordinary card imports; only the chats need routes of
  * their own.
  */
-import type { ImportedChatMessage } from '@shizue/core';
+import { replyLengthTokens, type ImportedChatMessage } from '@shizue/core';
 import { characters, chats, messages, plots, type NewMessage } from '@shizue/db';
 import { listEnabledModels } from '@shizue/llm';
 import { and, asc, count, eq, inArray, isNull, max, sql } from 'drizzle-orm';
@@ -18,7 +18,7 @@ import { randomUUID } from 'node:crypto';
 import type { AppDeps, AppEnv, Tx } from '../deps.js';
 import { ApiError, badRequest, notFound } from '../errors.js';
 import { enqueueJob } from '../jobs.js';
-import { memoryChannel, overSummaryThreshold } from '../memory.js';
+import { memoryChannel, summaryDue } from '../memory.js';
 import { attachedNoteIds } from '../notes.js';
 import { loadMembers } from '../hub.js';
 import { loadOwnedPlot } from '../plots.js';
@@ -386,9 +386,9 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
    * set to where the history ends, and the stats start moving with the reader's
    * own turns. The history itself is only summarized when the reader asks for it
    * (`backfillMemory`) and it is long enough to need it: the `memory_backfill` job
-   * is queued in this transaction and folds it a chunk at a time on the owner's
-   * account. Over the threshold with no memory channel to fold it with, nothing is
-   * queued and the answer says so.
+   * is queued in this transaction and summarizes it a batch at a time on the
+   * owner's account. Too long with no memory channel to summarize it with,
+   * nothing is queued and the answer says so.
    *
    * What the source kept for the chat as a whole rather than for any one message
    * comes here, once the messages are all in:
@@ -431,8 +431,13 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
         .orderBy(asc(messages.createdAt));
       const path = buildPath(all, locked.headMessageId);
       const depth = roundCount(path);
+      // An importing chat has no summaries yet: nothing generates on it.
+      const due = async (): Promise<boolean> => {
+        const [plot] = await tx.select({ style: plots.style }).from(plots).where(eq(plots.id, locked.plotId)).limit(1);
+        return summaryDue(locked, path, [], replyLengthTokens(plot?.style?.replyLength));
+      };
       const memoryBackfill: 'queued' | 'not_needed' | 'unavailable' =
-        !backfill || !overSummaryThreshold(locked, path) ? 'not_needed' : channel ? 'queued' : 'unavailable';
+        !backfill || !(await due()) ? 'not_needed' : channel ? 'queued' : 'unavailable';
 
       const [row] = await tx
         .update(chats)

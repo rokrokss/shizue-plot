@@ -27,8 +27,16 @@ pgvector and RustFS (an S3-compatible store) for local development.
 ```sh
 pnpm install
 cp apps/plot/.env.example apps/plot/.env
+pnpm --filter @shizue/api embedder:fetch
 make dev
 ```
+
+`embedder:fetch` downloads the weights of the embedding model the API runs for
+the chat memory (135 MB, into `apps/plot/data/embedder`) and checks they load
+offline. Run it once per checkout and on every deploy: the server never
+downloads them itself, and without them the memory picks recent and random
+summaries instead of similar ones. Loaded, the model adds about 750 MB to the
+API's memory; `EMBEDDER=off` turns it off.
 
 Open http://localhost:13000 in Chrome with [Shizue](https://chromewebstore.google.com/detail/mpcbgfkoholfgapcgcmfjobnfcbnfanm) installed (below).
 Next.js forwards `/api/*` to Hono on port 8787. `make stop` stops the app
@@ -61,7 +69,8 @@ reader's sessions. A former local installation's owner, with its plots and
 chats, is taken over by the first account that signs in.
 
 ChatGPT plan sharing supports the Responses route, not image generation or
-embeddings: the scene-generation button and vector-memory retrieval are disabled.
+embeddings: the scene-generation button is disabled, and the memory's embeddings
+come from the model the API runs itself (above).
 Image attachments are sent only when the account's model catalog advertises image
 input. Reply length is requested in the prompt; this route accepts no hard
 output-token limit.

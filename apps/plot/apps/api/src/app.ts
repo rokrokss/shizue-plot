@@ -6,6 +6,7 @@ import { normalizeAuthResponse } from './auth.js';
 import { originGuard } from './originGuard.js';
 import type { AppDeps, AppEnv } from './deps.js';
 import { errorResponse, type ErrorBody } from './errors.js';
+import { chatMemoryRoutes } from './routes/chatMemory.js';
 import { chatRoutes, messageRoutes } from './routes/chats.js';
 import { commentRoutes, plotCommentRoutes } from './routes/comments.js';
 import { creatorRoutes, exploreRoutes } from './routes/explore.js';
@@ -109,6 +110,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   app.route('/api/chats', chatRoutes(deps));
   // A chat brought over from another app, written in batches (`POST /api/chats/import`).
   app.route('/api/chats', chatImportRoutes(deps));
+  // The memory's summaries, as the reader reads and tends them (`GET /api/chats/:id/memory`).
+  app.route('/api/chats', chatMemoryRoutes(deps));
   app.route('/api/messages', messageRoutes(deps));
   app.route('/api/imports', importRoutes(deps));
 

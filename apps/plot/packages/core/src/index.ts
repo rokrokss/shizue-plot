@@ -21,6 +21,7 @@ export * from './language.js';
 export * from './presets.js';
 export * from './prompt.js';
 export * from './risuRequest.js';
+export * from './memory.js';
 export * from './card/parse.js';
 export * from './card/risuModule.js';
 export * from './card/export.js';

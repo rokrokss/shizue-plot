@@ -7,6 +7,7 @@ import type {
   EmotionImage,
   EmotionMode,
   GroupSettings,
+  HypaV3Settings,
   ImportProvenance,
   LoreEntry,
   LoreRole,
@@ -482,23 +483,40 @@ export interface PresetInfo {
   id: string;
 }
 
-/** Rolling summary of the turns that fell out of the context budget. */
-export interface ChatMemory {
-  summary: string;
-  anchorMessageId: string;
-  updatedAt: string;
+/** Mirrors the whitelist in packages/db — also the order the select uses. */
+export const MEMORY_CONTEXT_BUDGETS = [8000, 16000, 32000] as const;
+
+/**
+ * Per-chat memory tuning — the context budget and RisuAI HypaV3's settings; a
+ * missing key means the default (`HYPA_V3_DEFAULTS` in @shizue/core).
+ */
+export interface ChatMemorySettings extends Partial<HypaV3Settings> {
+  contextBudget?: number;
 }
 
-/** Mirrors the whitelists in packages/db — also the order the selects use. */
-export const MEMORY_CONTEXT_BUDGETS = [8000, 16000, 32000] as const;
-export const MEMORY_SUMMARY_THRESHOLDS = [0.4, 0.6, 0.8] as const;
-export const MEMORY_RETRIEVAL_COUNTS = [0, 3, 5, 10] as const;
+/** A message one of the memory's summaries covers, as `GET /api/chats/:id/memory` lists it. */
+export interface MemorySummaryMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  /** The start of its text, images left out. */
+  preview: string;
+  /** Its index on the chat's current branch (0: the greeting), or null where it is on another. */
+  position: number | null;
+}
 
-/** Per-chat memory tuning; a missing key means the server-side default. */
-export interface ChatMemorySettings {
-  contextBudget?: number;
-  summaryThreshold?: number;
-  retrievalCount?: number;
+/** One of the memory's summaries (HypaV3's), as `GET /api/chats/:id/memory` lists it. */
+export interface MemorySummary {
+  id: string;
+  text: string;
+  /** Pinned: selected before any other while it fits. */
+  important: boolean;
+  /** Whether it applies to the current branch — every message it covers is on it. */
+  applies: boolean;
+  messageIds: string[];
+  /** The covered messages that still exist, in order. */
+  messages: MemorySummaryMessage[];
+  createdAt: string;
+  updatedAt: string;
 }
 
 /** Characters one note may hold; mirrors MAX_NOTE_LENGTH in the API. */
@@ -553,7 +571,8 @@ export interface Chat {
   /** Prompt preset id, one of the ids GET /api/presets lists. */
   preset: string;
   headMessageId: string | null;
-  memory: ChatMemory | null;
+  /** Moves with every edit, hide and delete of a message — what may drop one of the memory's summaries. */
+  memoryRevision: number;
   /** Null while the chat runs on every pipeline default. */
   memorySettings: ChatMemorySettings | null;
   relationship: ChatRelationship | null;

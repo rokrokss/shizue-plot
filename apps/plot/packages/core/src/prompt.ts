@@ -366,6 +366,14 @@ export interface AssembledPrompt {
    */
   risu?: RisuPromptParts;
   /**
+   * What the budget charged before any history, the memory section aside: the
+   * rest of the system string, the post-history block, the directions, the
+   * notes, the injections and the trailing blocks — everything never dropped.
+   * The memory's summarizer (API §7.3) counts the history it lets stand against
+   * what is left beside it. Always there from the assembler.
+   */
+  fixedTokens?: number;
+  /**
    * For a group turn (`AssemblePromptInput.speaker`): where the reply has strayed
    * into another member's line — `\n이름:` and `\n별명:` of every member on the
    * stage but the speaker. The caller stops the stream on them.
@@ -1175,6 +1183,10 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     (speakerSlot ? countTokens(promptText(speakerSlot.message.content)) : 0) -
     (emotionSlot ? countTokens(promptText(emotionSlot.message.content)) : 0) -
     depthLore.reduce((sum, entry) => sum + countTokens(entry.content), 0);
+  const fixedTokens = Math.max(
+    0,
+    contextBudget - maxResponseTokens - available - (memorySection ? countTokens(memorySection.text) : 0),
+  );
 
   // 7. history, newest first. The newest message is always kept so the request
   // is never empty.
@@ -1407,6 +1419,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   return {
     system,
     messages: slots.map((slot) => slot.message),
+    fixedTokens,
     sources: slots.map(({ kind, id, greeting, speakers }) => ({
       kind,
       ...(id !== undefined ? { id } : {}),

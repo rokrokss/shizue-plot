@@ -18,6 +18,8 @@ import {
   DEFAULT_CONTEXT_BUDGET,
   DEFAULT_MAX_RESPONSE_TOKENS,
   groupSpeakerLine,
+  HYPA_V3_DEFAULTS,
+  HYPA_V3_SUMMARIZATION_PROMPT,
   IMAGE_ATTACHED_PLACEHOLDER,
   loreEntryKey,
   MAX_ASSETS,
@@ -31,6 +33,7 @@ import {
   MAX_INTRO_TEXT_LENGTH,
   MAX_INTROS_PER_PLOT,
   MAX_VARIABLE_VALUE_LENGTH,
+  MEMORY_HEADING,
   NARRATOR_SPEAKER,
   parseCard,
   placeholderPng,
@@ -52,12 +55,13 @@ import {
   chatAttachments,
   chats,
   chatNoteLinks,
+  chatSummaries,
+  chatSummaryChunks,
   comments,
   createDb,
   feedCursors,
   follows,
   jobs,
-  memories,
   messages,
   notifications,
   plots,
@@ -83,8 +87,7 @@ import { mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Hono } from 'hono';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createEmbedder } from '../../../packages/llm/test/helpers/embed.js';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { stCard, v3Card } from '../../../packages/core/test/fixtures/cards.js';
 import { buildCharx, type CharxAssetSpec } from '../../../packages/core/test/helpers/charx.js';
 import { buildPngWithTextChunks } from '../../../packages/core/test/helpers/png.js';
@@ -114,7 +117,8 @@ import {
   startJobWorker,
   type JobHandlers,
 } from '../src/jobs.js';
-import { BACKFILL_CHUNKS_PER_RUN } from '../src/memory.js';
+import type { Embedder } from '../src/embedder.js';
+import { BACKFILL_BATCHES_PER_RUN, embedPendingSummaries } from '../src/memory.js';
 import { createJobHandlers, notificationFanout } from '../src/notifications.js';
 import { repairDisplayOrder } from '../src/maintenance/displayOrder.js';
 import { repairMemberScripts } from '../src/maintenance/memberScripts.js';
@@ -292,7 +296,6 @@ function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps {
     auth,
     storage,
     env: {},
-    createEmbedder: (timeout) => createEmbedder(overrides.env ?? {}, timeout),
     generating: new Set<string>(),
     generationClaims: new Map(),
     refreshingMemory: new Set<string>(),
@@ -4195,41 +4198,62 @@ describe('chats', () => {
     expect('variableDefaults' in patched).toBe(false);
   });
 
-  it('exposes memory on GET, null until the first summary', async () => {
+  it('keeps the memory out of the chat, which carries only its settings', async () => {
     const cookie = await signUp('memory-shape@example.com');
     const { state } = await setupChat(cookie);
-    expect(state.chat.memory).toBeNull();
+    // The summaries are a list of their own (`GET /api/chats/:id/memory`).
+    expect('memory' in state.chat).toBe(false);
     expect(state.chat.memorySettings).toBeNull();
     expect(state.chat.noteIds).toEqual([]);
   });
 
-  it('stores whitelisted memory settings and rejects everything else', async () => {
+  it('stores the memory settings in their ranges and rejects everything else', async () => {
     const cookie = await signUp('memory-settings@example.com');
     const other = await signUp('memory-settings-other@example.com');
     const { chatId } = await setupChat(cookie);
 
+    const settings = {
+      contextBudget: 32000,
+      memoryTokensRatio: 0.3,
+      extraSummarizationRatio: 0.1,
+      maxChatsPerSummary: 10,
+      recentMemoryRatio: 0.7,
+      similarMemoryRatio: 0.3,
+      queryChatCount: 5,
+      doNotSummarizeUserMessage: true,
+      summarizationPrompt: '요약해 주세요.',
+    };
     const patched = await readJson(
       await json(cookie, `/api/chats/${chatId}`, 'PATCH', {
-        // The unknown key is dropped rather than stored: nothing reads it.
-        memorySettings: { contextBudget: 32000, summaryThreshold: 0.4, retrievalCount: 0, nope: 1 },
+        // Unknown keys — the retired ones among them — are dropped rather than
+        // stored: nothing reads them. An empty prompt is the default one.
+        memorySettings: { ...settings, summaryThreshold: 0.4, retrievalCount: 0, nope: 1 },
       }),
     );
-    expect(patched.chat.memorySettings).toEqual({
-      contextBudget: 32000,
-      summaryThreshold: 0.4,
-      retrievalCount: 0,
-    });
+    expect(patched.chat.memorySettings).toEqual(settings);
+    expect(
+      (await readJson(await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { summarizationPrompt: '' } })))
+        .chat.memorySettings,
+    ).toEqual({});
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: patched.chat.memorySettings });
     expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.memorySettings).toEqual(
       patched.chat.memorySettings,
     );
 
     for (const settings of [
       { contextBudget: 12000 },
-      { summaryThreshold: 0.5 },
-      { retrievalCount: 11 },
-      { retrievalCount: -1 },
-      { retrievalCount: 2.5 },
       { contextBudget: '32000' },
+      { memoryTokensRatio: 1.5 },
+      { memoryTokensRatio: -0.1 },
+      { memoryTokensRatio: 0.5, extraSummarizationRatio: 0.6 },
+      { recentMemoryRatio: 0.7, similarMemoryRatio: 0.4 },
+      { similarMemoryRatio: 0.7 },
+      { maxChatsPerSummary: 0 },
+      { maxChatsPerSummary: 2.5 },
+      { maxChatsPerSummary: 51 },
+      { queryChatCount: 21 },
+      { doNotSummarizeUserMessage: 'yes' },
+      { summarizationPrompt: 'x'.repeat(10_001) },
     ]) {
       const bad = await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: settings });
       expect(bad.status, JSON.stringify(settings)).toBe(400);
@@ -4247,7 +4271,7 @@ describe('chats', () => {
     expect(reset.chat.memorySettings).toBeNull();
 
     expect(
-      (await json(other, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { retrievalCount: 1 } }))
+      (await json(other, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { queryChatCount: 1 } }))
         .status,
     ).toBe(404);
   });
@@ -7488,8 +7512,6 @@ describe('presets', () => {
 
 describe('memory', () => {
   const SUMMARY = '리안과 유저는 폐관 후 도서관에서 여러 번 마주쳤다. 리안은 열람실 열쇠를 맡기로 했다.';
-  /** Where the rolling summary kicks in — see docs/ARCHITECTURE.md Chunk 4. */
-  const TRIGGER_TOKENS = DEFAULT_CONTEXT_BUDGET * 0.6;
 
   interface Captured {
     system: string;
@@ -7498,15 +7520,16 @@ describe('memory', () => {
 
   interface Harness {
     app: Hono<AppEnv>;
+    deps: AppDeps;
     /** The job handlers of the same instance, for the backfill the queue runs. */
     handlers: JobHandlers;
     /** Chat-model requests, in order. */
     prompts: Captured[];
-    /** Memory-channel requests, in order. */
+    /** Summary requests to the memory channel, in order. */
     summaries: Captured[];
     /** Every background refresh actually scheduled — one entry per refresh. */
     tasks: Promise<void>[];
-    /** Awaits the fire-and-forget work started so far, of either kind. */
+    /** Awaits the fire-and-forget work started so far, of every kind. */
     settle: () => Promise<void>;
   }
 
@@ -7523,7 +7546,7 @@ describe('memory', () => {
 
   /**
    * App whose chat model is the real echo adapter (captured on the way in) and whose
-   * memory channel is a stub returning a fixed summary.
+   * memory channel is a stub answering a fixed summary.
    */
   function memoryApp(
     options: Partial<AppDeps> & { summaryText?: string; summaryGate?: Promise<void> } = {},
@@ -7579,6 +7602,7 @@ describe('memory', () => {
     });
     return {
       app: createApp(deps),
+      deps,
       handlers: createJobHandlers(deps),
       prompts,
       summaries,
@@ -7589,93 +7613,139 @@ describe('memory', () => {
     };
   }
 
+  const longTurn = (turn: number): string =>
+    `${turn}번째 이야기. ${'서가 사이에서 나눈 긴 대화입니다. '.repeat(50)}`;
+
+  /** The text a summary request was made from: the user turn the transcript is. */
+  const transcriptOf = (captured: Captured): string => contentText(captured.messages[0]!.content);
+
   /**
-   * Sends turns until a refresh actually starts. Roughly TRIGGER_TOKENS worth of
-   * turns are needed — the echo model replies with the user's own text, so a turn
-   * costs twice its content — and the cap only bounds a runaway.
+   * Sends long turns until a summary request reaches the memory channel, each
+   * turn's background work settled before the next. The echo model replies
+   * with the user's own text, so a turn costs twice its content.
    */
-  async function fillPastThreshold(
-    cookie: string,
-    chatId: string,
-    harness: Harness,
-    target = 1,
-  ): Promise<string[]> {
-    const maxTurns = Math.ceil(TRIGGER_TOKENS / countTokens(longTurn(1))) + 4;
+  async function fillUntilSummary(cookie: string, chatId: string, harness: Harness, target = 1): Promise<string[]> {
     const sent: string[] = [];
-    for (let turn = 1; turn <= maxTurns && harness.summaries.length < target; turn += 1) {
+    for (let turn = 1; turn <= 40 && harness.summaries.length < target; turn += 1) {
       const content = longTurn(turn);
       const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }, harness.app);
       expect((await readSse(res)).at(-1)!.event).toBe('done');
       sent.push(content);
+      // The turn's refresh settles, or reaches the model — where a gated one stays.
+      let settled = false;
+      void harness.settle().then(() => {
+        settled = true;
+      });
+      for (let i = 0; i < 400 && !settled && harness.summaries.length < target; i += 1) await delay(5);
     }
-    // The last turn's refresh is fire-and-forget: give it a moment to reach the model.
-    for (let i = 0; i < 50 && harness.summaries.length < target; i += 1) await delay(10);
     expect(harness.summaries.length).toBeGreaterThanOrEqual(target);
     return sent;
   }
 
-  const longTurn = (turn: number): string =>
-    `${turn}번째 이야기. ${'서가 사이에서 나눈 긴 대화입니다. '.repeat(50)}`;
-
-  /** Polls until a refresh has written its summary. */
-  async function waitForMemory(cookie: string, chatId: string, harness: Harness): Promise<any> {
-    for (let i = 0; i < 100; i += 1) {
-      const state = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
-      if (state.chat.memory) return state;
-      await delay(10);
+  /** Short turns, `대화 0`…: a branch to lay summaries over without the budget ever pressing. */
+  async function shortTurns(cookie: string, chatId: string, harness: Harness, count: number): Promise<any[]> {
+    for (let index = 0; index < count; index += 1) {
+      const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: `대화 ${index}` }, harness.app);
+      expect((await readSse(res)).at(-1)!.event).toBe('done');
     }
-    throw new Error('the refresh never wrote a summary');
+    await harness.settle();
+    return (await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app))).path;
   }
 
-  /** Stores one long-term fact directly, standing in for a completed extraction. */
-  async function insertFact(
-    cookie: string,
-    chatId: string,
-    fact: { content: string; sourceMessageId: string | null; embedding?: number[] },
-  ): Promise<void> {
-    const session = await readJson(await request(cookie, '/api/auth/get-session'));
-    const [chat] = await db.select().from(chats).where(eq(chats.id, chatId));
-    await db.insert(memories).values({
-      userId: session.user.id,
-      plotId: chat!.plotId,
-      chatId,
-      content: fact.content,
-      embedding: fact.embedding ?? null,
-      sourceMessageId: fact.sourceMessageId,
-    });
+  /** Stores a summary directly, as a finished refresh would. */
+  async function seedSummary(chatId: string, messageIds: string[], text = SUMMARY, important = false) {
+    const [row] = await db.insert(chatSummaries).values({ chatId, text, messageIds, important }).returning();
+    return row!;
   }
 
-  /** Pins a summary onto an existing chat, as a completed update would. */
-  async function seedMemory(chatId: string, anchorMessageId: string): Promise<ChatMemory> {
-    const memory: ChatMemory = {
-      summary: SUMMARY,
-      anchorMessageId,
-      updatedAt: new Date().toISOString(),
+  const summariesOf = async (cookie: string, chatId: string, target: Hono<AppEnv> = app): Promise<any[]> => {
+    const res = await request(cookie, `/api/chats/${chatId}/memory`, 'GET', undefined, target);
+    expect(res.status).toBe(200);
+    return (await readJson(res)).summaries;
+  };
+
+  const revisionOf = async (chatId: string): Promise<number> =>
+    (await db.select({ revision: chats.memoryRevision }).from(chats).where(eq(chats.id, chatId)))[0]!.revision;
+
+  /** An embedder of a few keywords: each text is a vector with a slot per keyword it contains. */
+  function keywordEmbedder(model = 'test-embedder', fail = false): Embedder & { calls: string[][] } {
+    const keys = ['고양이', '등대', '지도'];
+    const calls: string[][] = [];
+    return {
+      model,
+      dims: keys.length + 1,
+      calls,
+      async embed(texts) {
+        calls.push([...texts]);
+        if (fail) throw new Error('embedder down');
+        return texts.map((text) => {
+          const vector = [0.1, ...keys.map((key) => (text.includes(key) ? 1 : 0))];
+          const norm = Math.hypot(...vector);
+          return vector.map((value) => value / norm);
+        });
+      },
+      warm() {},
+      async close() {},
     };
-    await db.update(chats).set({ memory }).where(eq(chats.id, chatId));
-    return memory;
   }
+
+  it('summarizes the oldest batch in the background once the branch no longer fits', async () => {
+    const cookie = await signUp('memory-roll@example.com');
+    const { chatId } = await setupChat(cookie);
+    const harness = memoryApp();
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000 } });
+
+    const sent = await fillUntilSummary(cookie, chatId, harness);
+    await harness.settle();
+
+    // HypaV3's request: the messages, then its instruction as a system turn.
+    const ask = harness.summaries[0]!;
+    expect(ask.system).toBe('');
+    expect(ask.messages).toHaveLength(2);
+    expect(ask.messages[1]).toEqual({ role: 'system', content: HYPA_V3_SUMMARIZATION_PROMPT });
+    expect(transcriptOf(ask)).toContain(sent[0]!);
+    expect(transcriptOf(ask)).not.toContain(sent[3]!);
+
+    // One summary, of the oldest maxChatsPerSummary messages — the greeting first.
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
+    expect('memory' in state.chat).toBe(false);
+    const [summary, ...rest] = await summariesOf(cookie, chatId);
+    expect(rest).toEqual([]);
+    expect(summary).toMatchObject({ text: SUMMARY, important: false, applies: true });
+    expect(summary.messageIds).toEqual(state.path.slice(0, HYPA_V3_DEFAULTS.maxChatsPerSummary).map((m: any) => m.id));
+    expect(summary.messages.map((m: any) => m.position)).toEqual([0, 1, 2, 3, 4, 5]);
+
+    // The next turn carries the summary instead of the messages it stands for.
+    const next = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '그 다음은?' }, harness.app);
+    expect((await readSse(next)).at(-1)!.event).toBe('done');
+    const prompt = harness.prompts.at(-1)!;
+    expect(prompt.system).toContain(`${MEMORY_HEADING}\n${SUMMARY}`);
+    for (const covered of sent.slice(0, 2)) {
+      expect(prompt.messages.some((message) => contentText(message.content).includes(covered))).toBe(false);
+    }
+    expect(contentText(prompt.messages.at(-2)!.content)).toBe('그 다음은?');
+  });
 
   it('strips image references from the summarization transcript', async () => {
     const cookie = await signUp('memory-image@example.com');
     const { chatId } = await setupChat(cookie);
     const harness = memoryApp();
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000 } });
 
-    // The oldest turn is the first the summary swallows.
+    // The oldest turn is in the first batch.
     const first = `첫 장면입니다 {{img::smile}} ${'서가 사이에서 나눈 긴 대화입니다. '.repeat(50)}`;
-    const opening = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: first }, harness.app);
-    expect((await readSse(opening)).at(-1)!.event).toBe('done');
-    await fillPastThreshold(cookie, chatId, harness);
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: first }, harness.app));
+    await fillUntilSummary(cookie, chatId, harness);
 
-    const transcript = harness.summaries.at(-1)!.messages[0]!.content;
-    expect(transcript).toContain('첫 장면입니다');
-    expect(transcript).not.toContain('{{img');
+    expect(transcriptOf(harness.summaries[0]!)).toContain('첫 장면입니다');
+    expect(transcriptOf(harness.summaries[0]!)).not.toContain('{{img');
   });
 
-  it('leaves a message hidden from the AI out of the summary', async () => {
+  it('leaves a message hidden from the AI out of the summary and its coverage', async () => {
     const cookie = await signUp('memory-hidden@example.com');
     const { chatId } = await setupChat(cookie);
     const harness = memoryApp();
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000 } });
 
     const secret = `숨긴 장면입니다 ${'서가 사이에서 나눈 긴 대화입니다. '.repeat(50)}`;
     await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: secret }, harness.app));
@@ -7684,154 +7754,136 @@ describe('memory', () => {
       const res = await json(cookie, `/api/chats/${chatId}/messages/${message.id}/hidden`, 'PUT', { hidden: true });
       expect(res.status).toBe(200);
     }
-    const sent = await fillPastThreshold(cookie, chatId, harness);
+    const sent = await fillUntilSummary(cookie, chatId, harness);
 
-    const transcript = harness.summaries.at(-1)!.messages[0]!.content;
-    expect(transcript).toContain(sent[0]!);
-    expect(transcript).not.toContain('숨긴 장면입니다');
-  });
-
-  it('drops a summary that covers a message hidden from the AI or shown to it again', async () => {
-    const cookie = await signUp('memory-hide-covered@example.com');
-    const { chatId } = await setupChat(cookie);
-    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '첫 질문' }));
-    const [greeting, turn, reply] = (await readJson(await request(cookie, `/api/chats/${chatId}`))).path;
-    const revision = async (): Promise<number> =>
-      (await db.select({ revision: chats.memoryRevision }).from(chats).where(eq(chats.id, chatId)))[0]!.revision;
-    const hide = (messageId: string, hidden: boolean) =>
-      json(cookie, `/api/chats/${chatId}/messages/${messageId}/hidden`, 'PUT', { hidden });
-
-    // After the anchor: the summary still says what it said, but a refresh in flight loses.
-    await seedMemory(chatId, greeting.id);
-    const first = await revision();
-    const kept = await readJson(await hide(reply.id, true));
-    expect(kept.chat.memory.summary).toBe(SUMMARY);
-    expect(await revision()).toBe(first + 1);
-    // Asking for what already holds changes nothing.
-    await hide(reply.id, true);
-    expect(await revision()).toBe(first + 1);
-
-    // Covered by it: the summary goes, facts and all, to be written again without it.
-    await seedMemory(chatId, reply.id);
-    await insertFact(cookie, chatId, { content: '리안은 고양이를 무서워한다.', sourceMessageId: reply.id });
-    const cleared = await readJson(await hide(turn.id, true));
-    expect(cleared.chat.memory).toBeNull();
-    expect(await db.select().from(memories).where(eq(memories.chatId, chatId))).toEqual([]);
-    // …and so does showing it to the AI again.
-    await seedMemory(chatId, reply.id);
-    expect((await readJson(await hide(turn.id, false))).chat.memory).toBeNull();
-  });
-
-  it('summarizes earlier when the chat lowers its threshold', async () => {
-    const cookie = await signUp('memory-threshold@example.com');
-    const harness = memoryApp();
-    const tuned = await setupChat(cookie);
-    const plain = await setupChat(cookie);
-    // A smaller budget and an earlier trigger: 8000 * 0.4 against 16000 * 0.6.
-    await json(cookie, `/api/chats/${tuned.chatId}`, 'PATCH', {
-      memorySettings: { contextBudget: 8000, summaryThreshold: 0.4 },
-    });
-
-    /** Turns this chat needed before a refresh actually called the memory model. */
-    async function turnsUntilSummary(chatId: string): Promise<number> {
-      const maxTurns = Math.ceil(TRIGGER_TOKENS / countTokens(longTurn(1))) + 4;
-      for (let turn = 1; turn <= maxTurns; turn += 1) {
-        const before = harness.summaries.length;
-        const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: longTurn(turn) }, harness.app);
-        expect((await readSse(res)).at(-1)!.event).toBe('done');
-        // The refresh is scheduled during `done`, so awaiting the background work
-        // settles it before the next turn.
-        await harness.settle();
-        if (harness.summaries.length > before) return turn;
-      }
-      throw new Error('no refresh was ever triggered');
-    }
-
-    expect(await turnsUntilSummary(tuned.chatId)).toBeLessThan(await turnsUntilSummary(plain.chatId));
-  });
-
-  it('folds the evicted turns into chats.memory once the branch crosses the threshold', async () => {
-    const cookie = await signUp('memory-roll@example.com');
-    const { chatId } = await setupChat(cookie);
-    const harness = memoryApp();
-
-    const sent = await fillPastThreshold(cookie, chatId, harness);
+    expect(transcriptOf(harness.summaries[0]!)).toContain(sent[0]!);
+    expect(transcriptOf(harness.summaries[0]!)).not.toContain('숨긴 장면입니다');
     await harness.settle();
-
-    // The memory channel saw the running summary slot and the oldest turn.
-    expect(harness.summaries.length).toBeGreaterThan(0);
-    const ask = harness.summaries.at(-1)!.messages[0]!.content;
-    expect(ask).toContain('[기존 요약]');
-    expect(ask).toContain(sent[0]!);
-
-    const state = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
-    expect(state.chat.memory.summary).toBe(SUMMARY);
-    expect(state.chat.memory.updatedAt).toEqual(expect.any(String));
-    // The anchor is a real message on the current branch.
-    const anchorIndex = state.path.findIndex((m: any) => m.id === state.chat.memory.anchorMessageId);
-    expect(anchorIndex).toBeGreaterThanOrEqual(0);
-    expect(anchorIndex).toBeLessThan(state.path.length - 1);
-
-    // The next turn carries the summary instead of the messages it stands for.
-    const next = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '그 다음은?' }, harness.app);
-    expect((await readSse(next)).at(-1)!.event).toBe('done');
-    const prompt = harness.prompts.at(-1)!;
-    expect(prompt.system).toContain('[지난 이야기 요약]');
-    expect(prompt.system).toContain(SUMMARY);
-    expect(prompt.messages.some((message) => contentText(message.content).includes(sent[0]!))).toBe(
-      false,
-    );
-    expect(prompt.messages.at(-2)!.content).toBe('그 다음은?');
-
-    // Embeddings are not configured, so nothing is extracted or stored.
-    const [{ count }] = await sql<{ count: number }[]>`SELECT count(*)::int AS count FROM memories`;
-    expect(count).toBe(0);
-    expect(harness.summaries.at(-1)!.system).not.toContain('"facts"');
+    const [summary] = await summariesOf(cookie, chatId);
+    expect(summary.messageIds).not.toContain(turn.id);
+    expect(summary.messageIds).not.toContain(reply.id);
   });
 
-  it('drops the summary when the branch no longer contains the anchor', async () => {
+  it('applies a summary only on a branch that holds every message it covers', async () => {
     const cookie = await signUp('memory-branch@example.com');
     const { chatId } = await setupChat(cookie);
     const harness = memoryApp();
 
     await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '첫 질문' }, harness.app));
     const before = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
-    await seedMemory(chatId, before.path[1].id);
+    const [greeting, turn] = before.path;
+    await seedSummary(chatId, [greeting.id, turn.id]);
 
-    // On the anchored branch the summary is injected and history starts after it.
+    // On its branch the summary is sent and the history starts after it.
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app));
     expect(harness.prompts.at(-1)!.system).toContain(SUMMARY);
-    expect(harness.prompts.at(-1)!.messages.some((m) => m.content === '첫 질문')).toBe(false);
+    expect(harness.prompts.at(-1)!.messages.some((m) => contentText(m.content) === '첫 질문')).toBe(false);
 
-    // Editing the user turn forks a branch that does not contain the anchor.
+    // Editing the user turn forks a branch without it.
     const patched = await readJson(
-      await json(cookie, `/api/messages/${before.path[1].id}`, 'PATCH', { content: '다른 질문' }, harness.app),
+      await json(cookie, `/api/messages/${turn.id}`, 'PATCH', { content: '다른 질문' }, harness.app),
     );
-    expect(patched.messageId).not.toBe(before.path[1].id);
-
+    expect(patched.messageId).not.toBe(turn.id);
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app));
     const forked = harness.prompts.at(-1)!;
     expect(forked.system).not.toContain(SUMMARY);
-    expect(forked.system).not.toContain('[지난 이야기 요약]');
-    expect(forked.messages.some((m) => m.content === '다른 질문')).toBe(true);
-    // The stored memory is untouched: switching back to the anchored branch restores it.
-    const state = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
-    expect(state.chat.memory.summary).toBe(SUMMARY);
+    expect(forked.system).not.toContain(MEMORY_HEADING);
+    expect(forked.messages.some((m) => contentText(m.content) === '다른 질문')).toBe(true);
+    expect((await summariesOf(cookie, chatId))[0]).toMatchObject({ applies: false });
+
+    // Kept, not deleted: back on its branch it applies again.
+    await json(cookie, `/api/chats/${chatId}/head`, 'POST', { messageId: turn.id }, harness.app);
+    expect((await summariesOf(cookie, chatId))[0]).toMatchObject({ applies: true });
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app));
+    expect(harness.prompts.at(-1)!.system).toContain(SUMMARY);
   });
 
-  it('runs one refresh per chat at a time and reschedules once it finishes', async () => {
+  it('drops only the summary an edit, a hide or a delete reaches, and summarizes its stretch again', async () => {
+    const cookie = await signUp('memory-drop@example.com');
+    const { chatId } = await setupChat(cookie);
+    const harness = memoryApp({ summaryText: '다시 쓴 요약.' });
+    const path = await shortTurns(cookie, chatId, harness, 6);
+    const ids = path.map((message: any) => message.id);
+    const first = await seedSummary(chatId, ids.slice(0, 4), '앞 요약.');
+    await seedSummary(chatId, ids.slice(4, 8), '가운데 요약.');
+    const last = await seedSummary(chatId, ids.slice(8, 10), '뒤 요약.');
+    const revision = await revisionOf(chatId);
+
+    // An assistant message the middle summary covers.
+    expect(path[6].role).toBe('assistant');
+    await json(cookie, `/api/messages/${ids[6]}`, 'PATCH', { content: '고친 답변' }, harness.app);
+    expect(await revisionOf(chatId)).toBe(revision + 1);
+    // The refresh it scheduled closes the gap: the stretch, with the new words.
+    await harness.settle();
+    expect(harness.summaries).toHaveLength(1);
+    expect(transcriptOf(harness.summaries[0]!)).toContain('고친 답변');
+    expect(transcriptOf(harness.summaries[0]!)).not.toContain('대화 0');
+    const after = await summariesOf(cookie, chatId);
+    expect(after.map((summary) => summary.text)).toEqual(['앞 요약.', '다시 쓴 요약.', '뒤 요약.']);
+    expect(after[0].id).toBe(first.id);
+    expect(after[1].messageIds).toEqual(ids.slice(4, 8));
+    expect(after[2].id).toBe(last.id);
+
+    // Hiding a covered message drops that summary too; its stretch comes back without it.
+    const hidden = await json(cookie, `/api/chats/${chatId}/messages/${ids[5]}/hidden`, 'PUT', { hidden: true }, harness.app);
+    expect(hidden.status).toBe(200);
+    await harness.settle();
+    expect(harness.summaries).toHaveLength(2);
+    expect(transcriptOf(harness.summaries[1]!)).not.toContain('대화 2');
+    const rehidden = await summariesOf(cookie, chatId);
+    expect(rehidden.map((summary) => summary.messageIds)).toEqual([
+      ids.slice(0, 4),
+      [ids[4], ids[6], ids[7]],
+      ids.slice(8, 10),
+    ]);
+
+    // Dropping the last one hands its messages back to the history as they are.
+    await json(cookie, `/api/messages/${ids[8]}`, 'PATCH', { content: '또 고친 답변' }, harness.app);
+    await harness.settle();
+    expect(harness.summaries).toHaveLength(2);
+    expect((await summariesOf(cookie, chatId)).map((summary) => summary.text)).toEqual(['앞 요약.', '다시 쓴 요약.']);
+
+    // Deleting a covered message — and everything after it — drops what covered any of it.
+    const res = await request(cookie, `/api/chats/${chatId}/messages/${ids[3]}`, 'DELETE', undefined, harness.app);
+    expect(res.status).toBe(200);
+    await harness.settle();
+    expect(await summariesOf(cookie, chatId)).toEqual([]);
+  });
+
+  it('discards a summary whose messages changed while it was written', async () => {
+    const cookie = await signUp('memory-cas@example.com');
+    const { chatId } = await setupChat(cookie);
+    const blocked = gate();
+    const harness = memoryApp({ summaryGate: blocked.wait });
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000 } });
+
+    // A refresh reads the branch and then stalls in the model call.
+    await fillUntilSummary(cookie, chatId, harness);
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    const reply = state.path[2];
+    expect(reply.role).toBe('assistant');
+    await json(cookie, `/api/messages/${reply.id}`, 'PATCH', { content: '고친 답변' });
+
+    blocked.open();
+    await harness.settle();
+    // The stale summary was dropped; the next pass wrote one from the new words.
+    expect(harness.summaries).toHaveLength(2);
+    expect(transcriptOf(harness.summaries[0]!)).not.toContain('고친 답변');
+    expect(transcriptOf(harness.summaries[1]!)).toContain('고친 답변');
+    expect(await summariesOf(cookie, chatId)).toHaveLength(1);
+  });
+
+  it('runs one refresh per chat at a time', async () => {
     const cookie = await signUp('memory-inflight@example.com');
     const { chatId } = await setupChat(cookie);
     const blocked = gate();
     const harness = memoryApp({ summaryGate: blocked.wait });
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000 } });
 
-    await fillPastThreshold(cookie, chatId, harness);
-    // Turns below the threshold schedule a refresh that returns immediately; the
-    // one that crossed it is now stuck in the model call.
+    await fillUntilSummary(cookie, chatId, harness);
     const scheduled = harness.tasks.length;
-
-    // The branch stays over the threshold, so every further turn would schedule a
-    // duplicate refresh if the in-flight one were not guarding the chat.
+    // The branch is still over what fits, so every further turn would schedule
+    // a duplicate if the one in flight were not guarding the chat.
     for (const content of ['그 다음은?', '또 그 다음은?']) {
       await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }, harness.app));
     }
@@ -7840,502 +7892,267 @@ describe('memory', () => {
 
     blocked.open();
     await harness.settle();
-    expect(harness.tasks).toHaveLength(scheduled);
-
-    // Guard cleared: the chat refreshes again once it is back over the threshold.
-    await fillPastThreshold(cookie, chatId, harness, 2);
-    await harness.settle();
+    // Guard cleared: the next turn refreshes again.
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '다시' }, harness.app));
     expect(harness.tasks.length).toBeGreaterThan(scheduled);
-    expect(harness.summaries).toHaveLength(2);
   });
 
-  it('drops a refresh whose result lost a race with the user', async () => {
-    const cookie = await signUp('memory-cas@example.com');
-    const { chatId } = await setupChat(cookie);
-    const blocked = gate();
-    const harness = memoryApp({ summaryGate: blocked.wait });
-
-    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '첫 질문' }, harness.app));
-    const before = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
-    const seeded = await seedMemory(chatId, before.path[1].id);
-
-    // A refresh reads the seeded memory and then stalls in the model call.
-    await fillPastThreshold(cookie, chatId, harness);
-
-    // Meanwhile the user rewrites the summary the refresh started from.
-    const edited = await readJson(
-      await json(cookie, `/api/chats/${chatId}/memory`, 'PUT', { summary: '유저가 직접 쓴 요약.' }),
-    );
-    expect(edited.chat.memory.updatedAt).not.toBe(seeded.updatedAt);
-
-    blocked.open();
-    await harness.settle();
-
-    const after = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
-    expect(after.chat.memory.summary).toBe('유저가 직접 쓴 요약.');
-    expect(after.chat.memory.anchorMessageId).toBe(seeded.anchorMessageId);
-  });
-
-  it('keeps a summary a later edit does not invalidate, but still drops the refresh', async () => {
-    const cookie = await signUp('memory-noncovered@example.com');
-    const { chatId } = await setupChat(cookie);
-    const blocked = gate();
-    const harness = memoryApp({ summaryGate: blocked.wait, summaryText: '리프레시가 쓴 요약.' });
-
-    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '첫 질문' }, harness.app));
-    const before = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
-    const seeded = await seedMemory(chatId, before.path[1].id);
-    await fillPastThreshold(cookie, chatId, harness);
-
-    // Editing a reply that sits after the anchor leaves the summary describing it
-    // correctly, so the summary stays...
-    const state = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
-    await json(cookie, `/api/messages/${state.path.at(-1).id}`, 'PATCH', { content: '고친 답변' });
-    const kept = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    expect(kept.chat.memory.summary).toBe(SUMMARY);
-
-    // ...but the refresh that read the pre-edit text still loses.
-    blocked.open();
-    await harness.settle();
-
-    const after = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    expect(after.chat.memory.summary).toBe(SUMMARY);
-    expect(after.chat.memory.anchorMessageId).toBe(seeded.anchorMessageId);
-  });
-
-  it('clears a summary that already covers an edited assistant message', async () => {
-    const cookie = await signUp('memory-edit-covered@example.com');
+  it('selects the pinned summaries first, within the memory budget', async () => {
+    const cookie = await signUp('memory-pinned@example.com');
     const { chatId } = await setupChat(cookie);
     const harness = memoryApp();
+    const ids = (await shortTurns(cookie, chatId, harness, 5)).map((message: any) => message.id);
+    const texts = ['첫째 요약입니다.', '둘째 요약입니다.', '셋째 요약입니다.', '넷째 요약입니다.'];
+    for (const [index, text] of texts.entries()) await seedSummary(chatId, ids.slice(index * 2, index * 2 + 2), text, index === 0);
+    // Room for one summary only.
+    const one = Math.max(...texts.map((text) => countTokens(`${text}\n\n`)));
+    const ratio = (countTokens(`${MEMORY_HEADING}\n`) + one + 1) / 8000;
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000, memoryTokensRatio: ratio } });
 
-    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '첫 질문' }, harness.app));
-    const path = (await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app))).path;
-    const [greeting, , reply] = path;
-
-    // Anchored at the greeting: the later reply is not covered by the summary.
-    await seedMemory(chatId, greeting.id);
-    await json(cookie, `/api/messages/${reply.id}`, 'PATCH', { content: '고친 답변' });
-    const kept = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    expect(kept.chat.memory.summary).toBe(SUMMARY);
-
-    // Anchored at the reply: editing it now rewrites text the summary stands for.
-    await seedMemory(chatId, reply.id);
-    await insertFact(cookie, chatId, { content: '리안은 고양이를 무서워한다.', sourceMessageId: reply.id });
-    await insertFact(cookie, chatId, { content: '도서관은 자정에 닫는다.', sourceMessageId: null });
-
-    await json(cookie, `/api/messages/${reply.id}`, 'PATCH', { content: '다시 고친 답변' });
-    const cleared = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    expect(cleared.chat.memory).toBeNull();
-    expect(cleared.path.at(-1).content).toBe('다시 고친 답변');
-
-    // Facts are a derived cache of a summary that no longer holds, so they all go.
-    const rows = await db.select().from(memories).where(eq(memories.chatId, chatId));
-    expect(rows).toEqual([]);
-  });
-
-  describe('with embeddings configured', () => {
-    const EMBEDDING_ENV = {
-      EMBEDDING_BASE_URL: 'https://embed.test/v1',
-      EMBEDDING_API_KEY: 'embed-key',
-      EMBEDDING_MODEL: 'text-embedding-test',
-    };
-    const FACTS = ['리안은 고양이를 무서워한다.', '유저는 목요일마다 도서관에 온다.'];
-    /** One-hot slot per keyword: cosine similarity is 1 for a match and 0 otherwise. */
-    const SLOTS: Record<string, number> = { 고양이: 11, 목요일: 7 };
-
-    function vectorFor(text: string): number[] {
-      const vector = new Array<number>(1536).fill(0);
-      const keyword = Object.keys(SLOTS).find((key) => text.includes(key));
-      vector[keyword === undefined ? 0 : SLOTS[keyword]!] = 1;
-      return vector;
-    }
-
-    /** Every text the embedding provider was asked to embed, in order. */
-    const embedded: string[] = [];
-
-    /** Routes /embeddings to the one-hot stub and everything else to the real fetch. */
-    function stubEmbeddings(embedGate?: Promise<void>): void {
-      const realFetch = globalThis.fetch;
-      vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
-        if (typeof url !== 'string' || !url.startsWith(EMBEDDING_ENV.EMBEDDING_BASE_URL)) {
-          return realFetch(url, init);
-        }
-        // A held call still honours its deadline, like a real slow provider would:
-        // the caller that gives up (retrieval) must not be stuck behind the caller
-        // the test is holding (fact extraction, which runs on a 60s budget).
-        if (embedGate) {
-          await Promise.race([
-            embedGate,
-            new Promise((_resolve, reject) => {
-              init.signal?.addEventListener('abort', () => reject(new Error('aborted')));
-            }),
-          ]);
-        }
-        const { input } = JSON.parse(init.body as string) as { input: string[] };
-        embedded.push(...input);
-        return Response.json({
-          data: input.map((text, index) => ({ index, embedding: vectorFor(text) })),
-        });
-      });
-    }
-
-    afterEach(() => {
-      vi.unstubAllGlobals();
-      embedded.length = 0;
-    });
-
-    it('embeds the retrieval query without its image references', async () => {
-      const cookie = await signUp('memory-embed-image@example.com');
-      const { chatId, state } = await setupChat(cookie);
-      stubEmbeddings();
-      const harness = memoryApp({ env: EMBEDDING_ENV });
-      // Retrieval only runs for a chat that already has a summary.
-      await seedMemory(chatId, state.path.at(-1).id);
-      embedded.length = 0;
-
-      const res = await json(
-        cookie,
-        `/api/chats/${chatId}/messages`,
-        'POST',
-        { content: '목요일 {{img::smile}} 에도 오시나요?' },
-        harness.app,
-      );
-      expect((await readSse(res)).at(-1)!.event).toBe('done');
-
-      // The query is embedded for its meaning, which an image token has none of,
-      // so it is stripped even though the roleplay prompt keeps it.
-      expect(embedded.some((text) => text.includes('목요일'))).toBe(true);
-      expect(embedded.some((text) => text.includes('{{img'))).toBe(false);
-    });
-
-    it('extracts and stores no facts at all when the chat turns retrieval off', async () => {
-      const cookie = await signUp('memory-facts-off@example.com');
-      const { chatId } = await setupChat(cookie);
-      stubEmbeddings();
-      const harness = memoryApp({ env: EMBEDDING_ENV });
-      await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { retrievalCount: 0 } });
-      embedded.length = 0;
-
-      await fillPastThreshold(cookie, chatId, harness);
-      await harness.settle();
-
-      // The rolling summary still runs...
-      const state = await waitForMemory(cookie, chatId, harness);
-      expect(state.chat.memory.summary).toBe(SUMMARY);
-      // ...but the fact layer is off end to end: not asked for, not embedded, not
-      // stored. Nothing derived from the chat reaches the embedding provider.
-      expect(harness.summaries.at(-1)!.system).not.toContain('"facts"');
-      expect(embedded).toEqual([]);
-      const [{ count }] = await sql<{ count: number }[]>`SELECT count(*)::int AS count FROM memories`;
-      expect(count).toBe(0);
-    });
-
-    it('stops retrieving facts when the chat asks for none', async () => {
-      const cookie = await signUp('memory-retrieval-count@example.com');
-      const { chatId, state } = await setupChat(cookie);
-      stubEmbeddings();
-      const harness = memoryApp({ env: EMBEDDING_ENV });
-      await seedMemory(chatId, state.path.at(-1).id);
-      await insertFact(cookie, chatId, {
-        content: FACTS[1]!,
-        sourceMessageId: null,
-        embedding: vectorFor(FACTS[1]!),
-      });
-
-      await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { retrievalCount: 0 } });
-      embedded.length = 0;
-      const off = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '목요일에도 오시나요?' }, harness.app);
-      expect((await readSse(off)).at(-1)!.event).toBe('done');
-      expect(harness.prompts.at(-1)!.system).not.toContain('[기억]');
-      // Retrieval is off, not filtered: the query never reaches the embedder.
-      expect(embedded).toEqual([]);
-
-      await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { retrievalCount: 5 } });
-      const on = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '목요일에도 오시나요?' }, harness.app);
-      expect((await readSse(on)).at(-1)!.event).toBe('done');
-      expect(harness.prompts.at(-1)!.system).toContain('[기억]');
-      expect(harness.prompts.at(-1)!.system).toContain(FACTS[1]!);
-    });
-
-    it('extracts, embeds and retrieves long-term facts', async () => {
-      const cookie = await signUp('memory-embed@example.com');
-      const { chatId } = await setupChat(cookie);
-      stubEmbeddings();
-      const harness = memoryApp({
-        env: EMBEDDING_ENV,
-        // The extraction prompt asks for JSON; answer in the requested shape.
-        summaryText: JSON.stringify({ summary: SUMMARY, facts: FACTS }),
-      });
-
-      await fillPastThreshold(cookie, chatId, harness);
-      await harness.settle();
-
-      expect(harness.summaries.at(-1)!.system).toContain('"facts"');
-      const session = await readJson(await request(cookie, '/api/auth/get-session'));
-      const stored = await db.select().from(memories).where(eq(memories.chatId, chatId));
-      expect(stored.map((row) => row.content).sort()).toEqual([...FACTS].sort());
-      expect(stored.every((row) => row.embedding?.length === 1536)).toBe(true);
-      expect(stored.every((row) => row.userId === session.user.id)).toBe(true);
-
-      const state = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
-      expect(stored.every((row) => row.sourceMessageId === state.chat.memory.anchorMessageId)).toBe(true);
-
-      // The next user message retrieves the closest fact first.
-      const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '목요일에도 오시나요?' }, harness.app);
-      expect((await readSse(res)).at(-1)!.event).toBe('done');
-      const { system } = harness.prompts.at(-1)!;
-      expect(system).toContain('[기억]');
-      expect(system.indexOf('[기억]')).toBeGreaterThan(system.indexOf('[지난 이야기 요약]'));
-      expect(system.indexOf(FACTS[1]!)).toBeLessThan(system.indexOf(FACTS[0]!));
-    });
-
-    it('discards a first refresh when a message is edited while it runs', async () => {
-      const cookie = await signUp('memory-first-race@example.com');
-      const { chatId } = await setupChat(cookie);
-      stubEmbeddings();
-      const blocked = gate();
-      const harness = memoryApp({
-        env: EMBEDDING_ENV,
-        summaryGate: blocked.wait,
-        summaryText: JSON.stringify({ summary: SUMMARY, facts: FACTS }),
-      });
-
-      // Nothing to compare against yet — the chat has no memory at all.
-      await fillPastThreshold(cookie, chatId, harness);
-      const state = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
-      expect(state.chat.memory).toBeNull();
-
-      // The edit changes text the in-flight refresh already read.
-      await json(cookie, `/api/messages/${state.path[0].id}`, 'PATCH', { content: '고친 인사' });
-
-      blocked.open();
-      await harness.settle();
-
-      const after = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
-      expect(after.chat.memory).toBeNull();
-      expect(await db.select().from(memories).where(eq(memories.chatId, chatId))).toEqual([]);
-    });
-
-    it('does not store facts when an edit lands between the summary write and the insert', async () => {
-      const cookie = await signUp('memory-fact-race@example.com');
-      const { chatId } = await setupChat(cookie);
-      const embedding = gate();
-      stubEmbeddings(embedding.wait);
-      const harness = memoryApp({
-        // Filling past the threshold may send one more turn than it takes, and
-        // that turn retrieves. Retrieval is best-effort, so a short deadline lets
-        // it give up on the held provider instead of waiting for the gate.
-        env: { ...EMBEDDING_ENV, EMBEDDING_TIMEOUT_MS: '30' },
-        summaryText: JSON.stringify({ summary: SUMMARY, facts: FACTS }),
-      });
-
-      // The summary is committed; the refresh is now stuck embedding its facts.
-      await fillPastThreshold(cookie, chatId, harness);
-      const state = await waitForMemory(cookie, chatId, harness);
-      expect(state.chat.memory.summary).toBe(SUMMARY);
-
-      // The newest reply sits after the anchor, so the summary itself stays valid.
-      const tail = state.path.at(-1);
-      expect(tail.role).toBe('assistant');
-      await json(cookie, `/api/messages/${tail.id}`, 'PATCH', { content: '고친 답변' });
-
-      embedding.open();
-      await harness.settle();
-
-      expect(await db.select().from(memories).where(eq(memories.chatId, chatId))).toEqual([]);
-      const after = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
-      expect(after.chat.memory.summary).toBe(SUMMARY);
-    });
-
-    it('ignores facts that belong to a branch this path left behind', async () => {
-      const cookie = await signUp('memory-offbranch@example.com');
-      const { chatId } = await setupChat(cookie);
-      stubEmbeddings();
-      const harness = memoryApp({ env: EMBEDDING_ENV });
-
-      await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '첫 질문' }, harness.app));
-      const before = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
-      await seedMemory(chatId, before.path[1].id);
-      await insertFact(cookie, chatId, {
-        content: FACTS[1]!,
-        sourceMessageId: before.path[1].id,
-        embedding: vectorFor(FACTS[1]!),
-      });
-      // Same chat, but extracted from a message that is not on this path.
-      await insertFact(cookie, chatId, {
-        content: FACTS[0]!,
-        sourceMessageId: randomUUID(),
-        embedding: vectorFor(FACTS[0]!),
-      });
-
-      await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app));
-      const onBranch = harness.prompts.at(-1)!.system;
-      expect(onBranch).toContain('[기억]');
-      expect(onBranch).toContain(FACTS[1]!);
-      expect(onBranch).not.toContain(FACTS[0]!);
-
-      // Forking away from the anchor drops the whole memory layer, facts included.
-      await json(cookie, `/api/messages/${before.path[1].id}`, 'PATCH', { content: '다른 질문' }, harness.app);
-      await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app));
-      const forked = harness.prompts.at(-1)!.system;
-      expect(forked).not.toContain('[기억]');
-      expect(forked).not.toContain(FACTS[1]!);
-    });
-
-    it('gives up on retrieval that misses its deadline and streams anyway', async () => {
-      const cookie = await signUp('memory-embed-slow@example.com');
-      const { chatId } = await setupChat(cookie);
-      const harness = memoryApp({ env: { ...EMBEDDING_ENV, EMBEDDING_TIMEOUT_MS: '30' } });
-
-      await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '첫 질문' }, harness.app));
-      const before = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
-      await seedMemory(chatId, before.path[1].id);
-      await insertFact(cookie, chatId, {
-        content: FACTS[1]!,
-        sourceMessageId: before.path[1].id,
-        embedding: vectorFor(FACTS[1]!),
-      });
-
-      // An embedding provider that accepts the request and never answers.
-      const realFetch = globalThis.fetch;
-      vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
-        if (typeof url !== 'string' || !url.startsWith(EMBEDDING_ENV.EMBEDDING_BASE_URL)) {
-          return realFetch(url, init);
-        }
-        return new Promise((_resolve, reject) => {
-          init.signal?.addEventListener('abort', () => reject(new Error('aborted')));
-        });
-      });
-
-      const res = await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app);
-      expect((await readSse(res)).at(-1)!.event).toBe('done');
-      // The summary still goes in; only the facts are missing.
-      expect(harness.prompts.at(-1)!.system).toContain(SUMMARY);
-      expect(harness.prompts.at(-1)!.system).not.toContain('[기억]');
-    });
-
-    it('keeps working when the embedding provider fails', async () => {
-      const cookie = await signUp('memory-embed-down@example.com');
-      const { chatId } = await setupChat(cookie);
-      vi.stubGlobal('fetch', async () => new Response('down', { status: 503 }));
-      const harness = memoryApp({ env: EMBEDDING_ENV });
-
-      await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '첫 질문' }, harness.app));
-      const before = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
-      await seedMemory(chatId, before.path[1].id);
-
-      // Retrieval fails, but the turn still runs and the summary is still injected.
-      await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app));
-      expect(harness.prompts.at(-1)!.system).toContain(SUMMARY);
-      expect(harness.prompts.at(-1)!.system).not.toContain('[기억]');
-    });
-  });
-
-  it('lets the user rewrite the summary, keeping the anchor', async () => {
-    const cookie = await signUp('memory-edit@example.com');
-    const other = await signUp('memory-other@example.com');
-    const { chatId } = await setupChat(cookie);
-    const harness = memoryApp();
-
-    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '첫 질문' }, harness.app));
-    const before = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
-
-    // Nothing to edit yet.
-    const early = await json(cookie, `/api/chats/${chatId}/memory`, 'PUT', { summary: '아무거나' });
-    expect(early.status).toBe(400);
-    expect((await readJson(early)).code).toBe('invalid_state');
-
-    const seeded = await seedMemory(chatId, before.path[1].id);
-    const edited = await readJson(
-      await json(cookie, `/api/chats/${chatId}/memory`, 'PUT', { summary: '유저가 고쳐 쓴 요약.' }),
-    );
-    expect(edited.chat.memory.summary).toBe('유저가 고쳐 쓴 요약.');
-    expect(edited.chat.memory.anchorMessageId).toBe(seeded.anchorMessageId);
-    expect(edited.path).toHaveLength(3);
-
-    const reread = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    expect(reread.chat.memory.summary).toBe('유저가 고쳐 쓴 요약.');
-
-    // The edit is what the next generation sees.
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app));
-    expect(harness.prompts.at(-1)!.system).toContain('유저가 고쳐 쓴 요약.');
-    expect(harness.prompts.at(-1)!.system).not.toContain(SUMMARY);
-
-    expect((await json(cookie, `/api/chats/${chatId}/memory`, 'PUT', {})).status).toBe(400);
-    expect((await json(other, `/api/chats/${chatId}/memory`, 'PUT', { summary: 'x' })).status).toBe(404);
+    const system = harness.prompts.at(-1)!.system;
+    expect(system).toContain(`${MEMORY_HEADING}\n첫째 요약입니다.`);
+    for (const text of texts.slice(1)) expect(system).not.toContain(text);
+    // The history still starts after the last covered message, selected or not.
+    const sent = harness.prompts.at(-1)!.messages.map((message) => contentText(message.content));
+    expect(sent).not.toContain('대화 2');
   });
 
-  it('folds an imported backlog a capped chunk per call, a few calls per job run', async () => {
-    const cookie = await signUp('memory-backfill@example.com');
+  describe('similar summaries', () => {
+    // Each about something: a summary about nothing would match the turns about nothing.
+    const TEXTS = ['등대 앞에서 하루를 보냈다.', '고양이가 서점에 들어왔다.', '지도를 펼친 저녁이었다.', '등대 불빛이 꺼진 아침이었다.'];
+
+    /** Four summaries over a short branch, room for one, all of it the similar share. */
+    async function similarChat(cookie: string, harness: Harness): Promise<string> {
+      const { chatId } = await setupChat(cookie);
+      const ids = (await shortTurns(cookie, chatId, harness, 5)).map((message: any) => message.id);
+      for (const [index, text] of TEXTS.entries()) await seedSummary(chatId, ids.slice(index * 2, index * 2 + 2), text);
+      const one = Math.max(...TEXTS.map((text) => countTokens(`${text}\n\n`)));
+      await json(cookie, `/api/chats/${chatId}`, 'PATCH', {
+        memorySettings: {
+          contextBudget: 8000,
+          memoryTokensRatio: (countTokens(`${MEMORY_HEADING}\n`) + one + 1) / 8000,
+          recentMemoryRatio: 0,
+          similarMemoryRatio: 1,
+        },
+      });
+      return chatId;
+    }
+
+    const ask = async (cookie: string, chatId: string, harness: Harness, content: string): Promise<string> => {
+      const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }, harness.app);
+      expect((await readSse(res)).at(-1)!.event).toBe('done');
+      return harness.prompts.at(-1)!.system;
+    };
+
+    it('ranks the summaries by the server embedder against the latest turns', async () => {
+      const cookie = await signUp('memory-similar@example.com');
+      const embedder = keywordEmbedder();
+      const harness = memoryApp({ embedder });
+      const chatId = await similarChat(cookie, harness);
+      // A refresh embeds the summaries it finds without vectors.
+      await embedPendingSummaries(harness.deps, chatId);
+      const stored = await db.select().from(chatSummaryChunks);
+      expect(stored).toHaveLength(TEXTS.length);
+      expect(stored.every((chunk) => chunk.model === 'test-embedder' && chunk.embedding.length === 4)).toBe(true);
+
+      const system = await ask(cookie, chatId, harness, '고양이는 어디 갔지?');
+      expect(system).toContain(`${MEMORY_HEADING}\n고양이가 서점에 들어왔다.`);
+      for (const text of TEXTS.filter((text) => !text.includes('고양이'))) expect(system).not.toContain(text);
+      // The latest turns were the queries, as queries.
+      expect(embedder.calls.at(-1)).toContain('고양이는 어디 갔지?');
+    });
+
+    it('compares only vectors of the current model, and embeds the stale ones again', async () => {
+      const cookie = await signUp('memory-stale@example.com');
+      const old = memoryApp({ embedder: keywordEmbedder('test-embedder') });
+      const chatId = await similarChat(cookie, old);
+      await embedPendingSummaries(old.deps, chatId);
+
+      const harness = memoryApp({ embedder: keywordEmbedder('test-embedder-2') });
+      // No vector of this model yet: nothing ranks, and the share goes unused.
+      expect(await ask(cookie, chatId, harness, '고양이?')).not.toContain(MEMORY_HEADING);
+      // That turn's refresh embedded them again, with this model.
+      await harness.settle();
+      const stored = await db.select().from(chatSummaryChunks);
+      expect(stored.every((chunk) => chunk.model === 'test-embedder-2')).toBe(true);
+      expect(await ask(cookie, chatId, harness, '고양이 말이야')).toContain('고양이가 서점에 들어왔다.');
+    });
+
+    it('embeds a summary longer than one refresh allows on its own, and the rest after it', async () => {
+      const cookie = await signUp('memory-oversize@example.com');
+      const harness = memoryApp({ embedder: keywordEmbedder() });
+      const { chatId } = await setupChat(cookie);
+      const ids = (await shortTurns(cookie, chatId, harness, 2)).map((message: any) => message.id);
+      const long = Array.from({ length: 70 }, (_, index) => `문단 ${index}.`).join('\n\n');
+      const oversize = await seedSummary(chatId, ids.slice(0, 2), long);
+      const after = await seedSummary(chatId, ids.slice(2, 4), '고양이가 왔다.');
+      const chunksOf = async (summaryId: string) =>
+        db.select().from(chatSummaryChunks).where(eq(chatSummaryChunks.summaryId, summaryId));
+
+      await embedPendingSummaries(harness.deps, chatId);
+      expect(await chunksOf(oversize.id)).toHaveLength(70);
+      await embedPendingSummaries(harness.deps, chatId);
+      expect(await chunksOf(after.id)).toHaveLength(1);
+    });
+
+    it('falls back to the recent summaries, never failing the turn, when the embedder is down', async () => {
+      const cookie = await signUp('memory-embedder-down@example.com');
+      const harness = memoryApp({ embedder: keywordEmbedder('test-embedder', true) });
+      const chatId = await similarChat(cookie, harness);
+
+      const system = await ask(cookie, chatId, harness, '고양이는 어디 갔지?');
+      // The share went to the newest summary instead.
+      expect(system).toContain(`${MEMORY_HEADING}\n등대 불빛이 꺼진 아침이었다.`);
+      await harness.settle();
+      expect(await db.select().from(chatSummaryChunks)).toEqual([]);
+    });
+
+    it('falls back without an embedder at all', async () => {
+      const cookie = await signUp('memory-no-embedder@example.com');
+      const harness = memoryApp();
+      const chatId = await similarChat(cookie, harness);
+      expect(await ask(cookie, chatId, harness, '고양이는 어디 갔지?')).toContain(`${MEMORY_HEADING}\n등대 불빛이 꺼진 아침이었다.`);
+    });
+  });
+
+  it('lists, pins, rewrites, regenerates and deletes a summary, for its owner only', async () => {
+    const cookie = await signUp('memory-routes@example.com');
+    const other = await signUp('memory-routes-other@example.com');
+    const { chatId } = await setupChat(cookie);
+    const harness = memoryApp({ summaryText: '새로 쓴 요약.' });
+    const ids = (await shortTurns(cookie, chatId, harness, 2)).map((message: any) => message.id);
+    const seeded = await seedSummary(chatId, ids.slice(0, 3));
+    await db
+      .insert(chatSummaryChunks)
+      .values({ summaryId: seeded.id, chunkIndex: 0, content: SUMMARY, model: 'test-embedder', embedding: [1, 0] });
+    const base = `/api/chats/${chatId}/memory/${seeded.id}`;
+
+    const [listed] = await summariesOf(cookie, chatId);
+    expect(listed).toMatchObject({ id: seeded.id, text: SUMMARY, important: false, applies: true, messageIds: ids.slice(0, 3) });
+    expect(listed.messages[1]).toMatchObject({ id: ids[1], role: 'user', preview: '대화 0', position: 1 });
+
+    // Regenerate answers a new text and keeps nothing.
+    const regenerated = await json(cookie, `${base}/regenerate`, 'POST', undefined, harness.app);
+    expect(await readJson(regenerated)).toEqual({ text: '새로 쓴 요약.' });
+    expect(transcriptOf(harness.summaries.at(-1)!)).toContain('대화 0');
+    expect((await summariesOf(cookie, chatId))[0].text).toBe(SUMMARY);
+    // Without a model to summarize with, it says so.
+    const unavailable = await json(cookie, `${base}/regenerate`, 'POST');
+    expect(unavailable.status).toBe(503);
+    expect((await readJson(unavailable)).code).toBe('memory_unavailable');
+
+    // The pin, then the rewrite — which drops the old vectors.
+    const pinned = await readJson(await json(cookie, base, 'PATCH', { important: true }, harness.app));
+    expect(pinned.summary).toMatchObject({ important: true, text: SUMMARY });
+    expect(await db.select().from(chatSummaryChunks)).toHaveLength(1);
+    const rewritten = await readJson(await json(cookie, base, 'PATCH', { text: '  고쳐 쓴 요약.  ' }, harness.app));
+    expect(rewritten.summary).toMatchObject({ important: true, text: '고쳐 쓴 요약.' });
+    expect(await db.select().from(chatSummaryChunks)).toEqual([]);
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app));
+    expect(harness.prompts.at(-1)!.system).toContain('고쳐 쓴 요약.');
+
+    for (const body of [{}, { text: '   ' }, { text: 'x'.repeat(20_001) }, { important: 'yes' }]) {
+      const bad = await json(cookie, base, 'PATCH', body);
+      expect(bad.status, JSON.stringify(body)).toBe(400);
+    }
+    for (const res of [
+      await request(other, `/api/chats/${chatId}/memory`),
+      await json(other, base, 'PATCH', { important: false }),
+      await json(other, `${base}/regenerate`, 'POST'),
+      await request(other, base, 'DELETE'),
+      await json(cookie, `/api/chats/${chatId}/memory/${randomUUID()}`, 'PATCH', { important: false }),
+    ]) {
+      expect(res.status).toBe(404);
+    }
+
+    expect((await request(cookie, base, 'DELETE')).status).toBe(204);
+    expect(await summariesOf(cookie, chatId)).toEqual([]);
+    expect((await request(cookie, base, 'DELETE')).status).toBe(404);
+  });
+
+  it('turns an old rolling summary into one summary covering up to its anchor (migration 0011)', async () => {
+    const cookie = await signUp('memory-convert@example.com');
+    const { chatId } = await setupChat(cookie);
     const harness = memoryApp();
+    const path = await shortTurns(cookie, chatId, harness, 3);
+    const ids = path.map((message: any) => message.id);
+    // A hidden message above the anchor was never in the summary.
+    await db.update(messages).set({ hiddenFromPrompt: true }).where(eq(messages.id, ids[1]));
+    const memory: ChatMemory = { summary: `  ${SUMMARY}  `, anchorMessageId: ids[4], updatedAt: '2026-10-01T00:00:00.000Z' };
+    await db
+      .update(chats)
+      .set({ memory, memorySettings: { contextBudget: 8000, summaryThreshold: 0.4, retrievalCount: 3 } as never })
+      .where(eq(chats.id, chatId));
+
+    const migration = await readFile(new URL('../../../packages/db/drizzle/0011_hypav3_memory.sql', import.meta.url), 'utf8');
+    for (const statement of migration.split('--> statement-breakpoint')) {
+      if (statement.includes('INSERT INTO "chat_summaries"') || statement.includes('UPDATE "chats"')) await sql.unsafe(statement);
+    }
+
+    const [summary] = await db.select().from(chatSummaries).where(eq(chatSummaries.chatId, chatId));
+    expect(summary).toMatchObject({ text: SUMMARY, important: false, messageIds: [ids[0], ids[2], ids[3], ids[4]] });
+    expect(summary!.createdAt.toISOString()).toBe('2026-10-01T00:00:00.000Z');
+    const [chat] = await db.select({ memorySettings: chats.memorySettings }).from(chats).where(eq(chats.id, chatId));
+    expect(chat!.memorySettings).toEqual({ contextBudget: 8000 });
+    // It applies like any other: the history starts after the anchor.
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app));
+    expect(harness.prompts.at(-1)!.system).toContain(`${MEMORY_HEADING}\n${SUMMARY}`);
+  });
+
+  /** An imported history of `length` long messages, its import completed with a backfill. */
+  async function importedBacklog(cookie: string, target: Hono<AppEnv>, length: number, sha: string): Promise<string> {
     const plot = await createPlot(cookie);
-    const BUDGET = 8000;
-    // `#n#` keeps every text out of every other one, so a call's chunk can be read back.
-    const text = (index: number): string => `#${index}# ${'서가 사이에서 나눈 긴 대화입니다. '.repeat(50)}`;
-    // More history than one run's calls can fold at one budget each.
-    const length = Math.ceil((BUDGET * (BACKFILL_CHUNKS_PER_RUN + 1.5)) / countTokens(text(10)));
     const history = Array.from({ length }, (_, index) => ({
       role: index % 2 === 0 ? 'assistant' : 'user',
-      versions: [text(index)],
+      versions: [`#${index}# ${'서가 사이에서 나눈 긴 대화입니다. '.repeat(50)}`],
       selected: 0,
     }));
     const started = await json(
       cookie,
       '/api/chats/import',
       'POST',
-      { plotId: plot.id, fileName: 'long.jsonl', sha256: 'a'.repeat(64), messages: history },
-      harness.app,
+      { plotId: plot.id, fileName: 'long.jsonl', sha256: sha.repeat(64), messages: history },
+      target,
     );
     expect(started.status, await started.clone().text()).toBe(201);
     const chatId = (await readJson(started)).chat.id;
     // Straight into the row: the settings route takes no writes while the import runs.
-    await db
-      .update(chats)
-      .set({ memorySettings: { contextBudget: BUDGET, summaryThreshold: 0.4 } })
-      .where(eq(chats.id, chatId));
-    const done = await json(cookie, `/api/chats/${chatId}/import/complete`, 'POST', { backfillMemory: true }, harness.app);
+    await db.update(chats).set({ memorySettings: { contextBudget: 8000 } }).where(eq(chats.id, chatId));
+    const done = await json(cookie, `/api/chats/${chatId}/import/complete`, 'POST', { backfillMemory: true }, target);
     expect((await readJson(done)).memoryBackfill).toBe('queued');
+    return chatId;
+  }
 
-    /** Where on the branch the summary's anchor stands. */
-    const anchorIndex = async (): Promise<number> => {
-      const [row] = await db.select({ memory: chats.memory }).from(chats).where(eq(chats.id, chatId));
-      const ids = (
-        await db.select().from(messages).where(eq(messages.chatId, chatId)).orderBy(asc(messages.createdAt))
-      ).map((message) => message.id);
-      return ids.indexOf(row!.memory!.anchorMessageId);
-    };
+  it('summarizes an imported backlog a batch per call, a few calls per job run', async () => {
+    const cookie = await signUp('memory-backfill@example.com');
+    const harness = memoryApp();
+    const chatId = await importedBacklog(cookie, harness.app, 40, 'a');
     const pendingJobs = () => db.select().from(jobs).where(eq(jobs.status, 'pending'));
 
     // One run makes its calls and leaves the rest to a successor.
     expect(await drainJobs(db, harness.handlers, { maxJobs: 1 })).toBe(1);
-    expect(harness.summaries).toHaveLength(BACKFILL_CHUNKS_PER_RUN);
-    const afterFirstRun = await anchorIndex();
+    expect(harness.summaries).toHaveLength(BACKFILL_BATCHES_PER_RUN);
     expect(await pendingJobs()).toMatchObject([{ kind: 'memory_backfill', payload: { chatId } }]);
-
     await drainJobs(db, harness.handlers);
-    expect(harness.summaries.length).toBeGreaterThan(BACKFILL_CHUNKS_PER_RUN);
-    expect(await anchorIndex()).toBeGreaterThan(afterFirstRun);
     expect(await pendingJobs()).toEqual([]);
 
-    // Each call was handed the oldest stretch the one before it left, within the
-    // budget, and the summary so far; the anchor is the last message folded.
+    // Each summary is the next maxChatsPerSummary messages from the oldest.
+    const rows = await db.select().from(messages).where(eq(messages.chatId, chatId)).orderBy(asc(messages.createdAt));
+    const summaries = await summariesOf(cookie, chatId);
+    expect(summaries.length).toBeGreaterThan(BACKFILL_BATCHES_PER_RUN);
     let next = 0;
-    for (const [call, sent] of harness.summaries.entries()) {
-      const ask = contentText(sent.messages[0]!.content);
-      const folded = history.flatMap((message, index) => (ask.includes(message.versions[0]!) ? [index] : []));
-      expect(folded.length).toBeGreaterThan(0);
-      expect(folded).toEqual(folded.map((_, offset) => next + offset));
-      const tokens = folded.reduce((sum, index) => sum + countTokens(history[index]!.versions[0]!), 0);
-      expect(tokens).toBeLessThanOrEqual(BUDGET);
-      if (call > 0) expect(ask).toContain(SUMMARY);
-      next += folded.length;
+    for (const summary of summaries) {
+      expect(summary.messageIds).toEqual(rows.slice(next, next + HYPA_V3_DEFAULTS.maxChatsPerSummary).map((m) => m.id));
+      next += summary.messageIds.length;
     }
-    expect(await anchorIndex()).toBe(next - 1);
-    // What is left verbatim is the tail the prompt keeps.
-    expect(next).toBeLessThan(history.length);
+    // What is left verbatim fits beside the memory and the reply.
+    const tail = rows.slice(next).reduce((sum, message) => sum + countTokens(message.content), 0);
+    expect(tail).toBeLessThanOrEqual(8000 - 8000 * HYPA_V3_DEFAULTS.memoryTokensRatio - DEFAULT_MAX_RESPONSE_TOKENS);
+    expect(rows.length - next).toBeGreaterThanOrEqual(HYPA_V3_DEFAULTS.queryChatCount);
   });
 
-  it("folds on the chat's auxiliary model, and on the default once the catalog no longer lists it", async () => {
+  it("summarizes on the chat's auxiliary model, and on the default once the catalog no longer lists it", async () => {
     const cookie = await signUp('memory-sub-model@example.com');
     const asked: string[] = [];
     const summarizing: AppDeps['getAdapter'] = (modelId) => {
@@ -8353,37 +8170,13 @@ describe('memory', () => {
     // One account that offers the pick, and the same account once it no longer does.
     const offering = makeDeps({ env: { SHIZUE_TEST_MODELS: '1' }, getAdapter: summarizing });
     const dropped = makeDeps({ getAdapter: summarizing });
-    const plot = await createPlot(cookie);
-    const BUDGET = 8000;
-    const text = (index: number): string => `#${index}# ${'서가 사이에서 나눈 긴 대화입니다. '.repeat(50)}`;
-    // More history than one run's calls can fold, so a successor run is left to drain.
-    const length = Math.ceil((BUDGET * (BACKFILL_CHUNKS_PER_RUN + 1.5)) / countTokens(text(10)));
-    const history = Array.from({ length }, (_, index) => ({
-      role: index % 2 === 0 ? 'assistant' : 'user',
-      versions: [text(index)],
-      selected: 0,
-    }));
-    const started = await json(
-      cookie,
-      '/api/chats/import',
-      'POST',
-      { plotId: plot.id, fileName: 'sub.jsonl', sha256: 'b'.repeat(64), messages: history },
-      createApp(offering),
-    );
-    expect(started.status, await started.clone().text()).toBe(201);
-    const chatId = (await readJson(started)).chat.id;
-    // Straight into the row: the settings route takes no writes while the import runs.
-    await db
-      .update(chats)
-      .set({ memorySettings: { contextBudget: BUDGET, summaryThreshold: 0.4 }, subModel: 'test/text' })
-      .where(eq(chats.id, chatId));
-    const done = await json(cookie, `/api/chats/${chatId}/import/complete`, 'POST', { backfillMemory: true }, createApp(offering));
-    expect((await readJson(done)).memoryBackfill).toBe('queued');
-    // Completing only asked whether the owner has a model to fold with at all.
+    const chatId = await importedBacklog(cookie, createApp(offering), 40, 'b');
+    await db.update(chats).set({ subModel: 'test/text' }).where(eq(chats.id, chatId));
+    // Completing only asked whether the owner has a model to summarize with at all.
     asked.length = 0;
 
     expect(await drainJobs(db, createJobHandlers(offering), { maxJobs: 1 })).toBe(1);
-    expect(asked).toEqual(Array.from({ length: BACKFILL_CHUNKS_PER_RUN }, () => 'test/text'));
+    expect(asked).toEqual(Array.from({ length: BACKFILL_BATCHES_PER_RUN }, () => 'test/text'));
 
     asked.length = 0;
     await drainJobs(db, createJobHandlers(dropped));
@@ -8548,7 +8341,8 @@ describe('chat import', () => {
     await refused(await json(cookie, `/api/chats/${id}/regenerate`, 'POST'));
     await refused(await json(cookie, `/api/chats/${id}`, 'PATCH', { note: '메모' }));
     await refused(await json(cookie, `/api/chats/${id}/head`, 'POST', { messageId: userTurn.id }));
-    await refused(await json(cookie, `/api/chats/${id}/memory`, 'PUT', { summary: '요약' }));
+    await refused(await json(cookie, `/api/chats/${id}/memory/${randomUUID()}`, 'PATCH', { important: true }));
+    await refused(await request(cookie, `/api/chats/${id}/memory/${randomUUID()}`, 'DELETE'));
     await refused(await request(cookie, `/api/chats/${id}/messages/${userTurn.id}`, 'DELETE'));
     await refused(await json(cookie, `/api/messages/${userTurn.id}`, 'PATCH', { content: '고침' }));
     expect(await rowsOf(id)).toHaveLength(2);
@@ -8656,9 +8450,10 @@ describe('chat import', () => {
     });
     expect(await db.select().from(jobs)).toEqual([]);
 
-    // Past the summary threshold of the default budget.
+    // More than fits the default budget beside the memory and the reply.
     const longText = (index: number): string => `${index}. ${'서가 사이에서 나눈 긴 대화입니다. '.repeat(50)}`;
-    const length = Math.ceil((DEFAULT_CONTEXT_BUDGET * 0.6) / countTokens(longText(0))) + 2;
+    const fits = DEFAULT_CONTEXT_BUDGET * (1 - HYPA_V3_DEFAULTS.memoryTokensRatio) - DEFAULT_MAX_RESPONSE_TOKENS;
+    const length = Math.ceil(fits / countTokens(longText(0))) + 4;
     const long = Array.from({ length }, (_, index) =>
       turn(index % 2 === 0 ? 'assistant' : 'user', [longText(index)]),
     );
@@ -12588,10 +12383,7 @@ describe('card scripts', () => {
     it('rebuilds the branch from a cut in the middle, leaving the old one a swipe away and dropping the summary it covered', async () => {
       const { cookie, chatId, path } = await twoTurns('script-chat-middle@example.com');
       const [greeting, u1, a1, u2, a2] = path;
-      await db
-        .update(chats)
-        .set({ memory: { summary: '요약', anchorMessageId: a1.id, updatedAt: new Date().toISOString() } })
-        .where(eq(chats.id, chatId));
+      await db.insert(chatSummaries).values({ chatId, text: '요약', messageIds: [greeting.id, u1.id, a1.id] });
       const [{ memoryRevision: revision }] = await db.select({ memoryRevision: chats.memoryRevision }).from(chats).where(eq(chats.id, chatId));
 
       // `removeChat(0)` twice: the first exchange goes.
@@ -12610,7 +12402,7 @@ describe('card scripts', () => {
       for (const original of path) expect(await rowOf(original.id)).toMatchObject({ parentId: original.parentId, content: original.content });
       // The summary stood for a message the reader's branch left behind.
       const [after] = await db.select().from(chats).where(eq(chats.id, chatId));
-      expect(after!.memory).toBeNull();
+      expect(await db.select().from(chatSummaries).where(eq(chatSummaries.chatId, chatId))).toEqual([]);
       expect(after!.memoryRevision).toBe(revision + 1);
 
       // A swipe back lands where the old branch ended.
@@ -13809,21 +13601,28 @@ describe('editRequest listeners', () => {
       'system|nil|nil|nil|nil|nil|nil|nil|',
     ]);
 
-    // The memory summarized the front away: its summary is a turn of its own, and the separator went with the front.
-    const memory: ChatMemory = { summary: '둘은 문 앞에서 만났다.', anchorMessageId: first.id, updatedAt: new Date().toISOString() };
-    await db.update(chats).set({ memory }).where(eq(chats.id, chatId));
+    // The memory summarized the front away: its summaries are one turn of their own,
+    // oldest first, as HypaV3's are — and the separator went with the front.
+    const greeting = (await stored())[0]!;
+    await db.insert(chatSummaries).values([
+      { chatId, text: '둘은 문 앞에서 만났다.', messageIds: [greeting.id] },
+      { chatId, text: '유저가 먼저 인사했다.', messageIds: [first.id] },
+    ]);
     await send(cookie, chatId, capturing, '또 왔어');
     const second = (await stored()).filter((message) => message.role === 'user').at(-1)!;
     expect(prompts.at(-1)!.system.split('\n')).toEqual([
       'system|nil|nil|nil|nil|nil|nil|nil|',
-      'system|supaMemory|nil|nil|nil|nil|nil|nil|[지난 이야기 요약]/둘은 문 앞에서 만났다.',
+      'system|supaMemory|nil|nil|nil|nil|nil|nil|[지난 이야기 요약]/둘은 문 앞에서 만났다.//유저가 먼저 인사했다.',
       ...examples,
       `assistant|${reply.id}|true|0|0|nil|nil|nil|`,
       `user|${second.id}|nil|0|0|nil|nil|nil|`,
       'system|nil|nil|nil|nil|nil|nil|nil|',
     ]);
     // The listener changed the request, so it went in that shape: the summary a system turn of its own.
-    expect(prompts.at(-1)!.messages[0]).toEqual({ role: 'system', content: '[지난 이야기 요약]\n둘은 문 앞에서 만났다.' });
+    expect(prompts.at(-1)!.messages[0]).toEqual({
+      role: 'system',
+      content: '[지난 이야기 요약]\n둘은 문 앞에서 만났다.\n\n유저가 먼저 인사했다.',
+    });
   });
 
   it('lets a listener filter the request by memo and by name, as RisuAI’s cards do, and sends the rest', async () => {

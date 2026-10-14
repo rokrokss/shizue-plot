@@ -1,5 +1,6 @@
 'use client';
 
+import { DEFAULT_CONTEXT_BUDGET, HYPA_V3_DEFAULTS, HYPA_V3_SUMMARIZATION_PROMPT } from '@shizue/core';
 import { useFormatter, useTranslations } from 'next-intl';
 import { useEffect, useId, useState, type ReactNode } from 'react';
 import { assetHref, type Illustration } from '@/lib/assets';
@@ -8,9 +9,6 @@ import { withNarratorField } from '@/lib/narrator';
 import { relationshipRows } from '@/lib/relationship';
 import {
   MEMORY_CONTEXT_BUDGETS,
-  MEMORY_RETRIEVAL_COUNTS,
-  MEMORY_SUMMARY_THRESHOLDS,
-  type ChatMemory,
   type ChatMemorySettings,
   type ChatRelationship,
   type NarratorConfig,
@@ -20,11 +18,29 @@ import {
 } from '@/lib/types';
 import { Avatar } from './Avatar';
 import { Lightbox } from './Lightbox';
+import { MemorySummaries } from './MemorySummaries';
 import { PromptInspector } from './PromptInspector';
 import { Button, Checkbox, Field, Select, TextArea, cx } from './ui';
 
-/** What the server falls back to for a key the chat has not set. */
-const DEFAULTS = { contextBudget: 16000, summaryThreshold: 0.6, retrievalCount: 5 };
+/**
+ * The steps the memory settings offer (the API takes any value in range; a
+ * chat holding another keeps it as one more option). RisuAI's sliders run in
+ * hundredths; a select of the useful ones is this panel's way.
+ */
+const MEMORY_STEPS = {
+  memoryTokensRatio: [0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5],
+  extraSummarizationRatio: [0, 0.05, 0.1, 0.2, 0.3],
+  maxChatsPerSummary: [2, 4, 6, 8, 10, 15, 20],
+  queryChatCount: [1, 2, 3, 4, 5, 8, 10],
+  share: [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1],
+} as const;
+
+/** The steps, and the chat's own value among them where it is not one. */
+const withValue = (steps: readonly number[], value: number): number[] =>
+  [...new Set([...steps, value])].sort((a, b) => a - b);
+
+/** A share as the selects show it. Rounded: 1 - 0.4 - 0.4 is not 0.2 in floating point. */
+const percent = (share: number): string => String(Math.round(share * 100));
 
 /**
  * What this conversation has opened of the plot's images, and what it has not.
@@ -95,7 +111,7 @@ function IllustrationGallery({ illustrations }: { illustrations: readonly Illust
 }
 
 /** The panel's fields that are edited as a draft and saved on a button. */
-type Saveable = 'note' | 'memory' | 'narrator';
+type Saveable = 'note' | 'prompt' | 'narrator';
 
 /**
  * The model the plot's scripts compare texts with, picked as RisuAI's
@@ -134,16 +150,19 @@ function EmbeddingModelSetting() {
 
 /**
  * Chat-scoped notes: the author's note that goes into every prompt, the reusable
- * notes attached to this chat, the memory knobs, the rolling summary the memory
- * layer keeps, and the relationship the background job extracts. Saving is the
- * page's job — it owns the chat state the endpoints answer with.
+ * notes attached to this chat, the memory's summaries and its settings, and the
+ * relationship the background job extracts. Saving is the page's job — it owns
+ * the chat state the endpoints answer with — but for the summaries, which are
+ * a list of their own (`MemorySummaries`).
  */
 export function ChatPanel({
+  chatId,
+  headMessageId,
+  memoryRevision,
   members,
   note,
   notes,
   noteIds,
-  memory,
   memorySettings,
   relationship,
   relationshipEnabled,
@@ -158,7 +177,6 @@ export function ChatPanel({
   disabled,
   onSaveNote,
   onToggleNote,
-  onSaveMemory,
   onSaveMemorySettings,
   onToggleRelationship,
   onSaveNarrator,
@@ -172,6 +190,10 @@ export function ChatPanel({
   inspectChatId,
   scriptSimilarity = false,
 }: {
+  chatId: string;
+  /** The branch's head and the chat's memory revision: the summaries are read again whenever either moves. */
+  headMessageId: string | null;
+  memoryRevision: number;
   /** Everyone the plot's replies may be written in the voice of, in its order. */
   members: readonly PublicMember[];
   note: string;
@@ -179,7 +201,6 @@ export function ChatPanel({
   notes: UserNote[];
   /** Ids of the notes attached to this chat. */
   noteIds: string[];
-  memory: ChatMemory | null;
   memorySettings: ChatMemorySettings | null;
   relationship: ChatRelationship | null;
   relationshipEnabled: boolean;
@@ -209,7 +230,6 @@ export function ChatPanel({
   disabled: boolean;
   onSaveNote: (note: string) => Promise<void>;
   onToggleNote: (noteId: string, attached: boolean) => Promise<void>;
-  onSaveMemory: (summary: string) => Promise<void>;
   onSaveMemorySettings: (settings: ChatMemorySettings) => Promise<void>;
   onToggleRelationship: (enabled: boolean) => Promise<void>;
   /** null clears the override, which is how the character's narrator comes back. */
@@ -243,16 +263,16 @@ export function ChatPanel({
   const format = useFormatter();
 
   const [noteDraft, setNoteDraft] = useState(note);
-  const [summaryDraft, setSummaryDraft] = useState(memory?.summary ?? '');
+  const [promptDraft, setPromptDraft] = useState(memorySettings?.summarizationPrompt ?? '');
   const [voiceDraft, setVoiceDraft] = useState(narrator?.voice ?? '');
   const [saving, setSaving] = useState<Saveable | null>(null);
 
   // Adopt whatever the server holds. Only a real change re-runs these, so text
   // typed while a reply streams is not thrown away by the state refresh.
-  const summary = memory?.summary ?? '';
+  const prompt = memorySettings?.summarizationPrompt ?? '';
   const voice = narrator?.voice ?? '';
   useEffect(() => setNoteDraft(note), [note]);
-  useEffect(() => setSummaryDraft(summary), [summary]);
+  useEffect(() => setPromptDraft(prompt), [prompt]);
   useEffect(() => setVoiceDraft(voice), [voice]);
 
   async function save(kind: Saveable): Promise<void> {
@@ -260,7 +280,7 @@ export function ChatPanel({
     setSaving(kind);
     try {
       if (kind === 'note') await onSaveNote(noteDraft);
-      else if (kind === 'memory') await onSaveMemory(summaryDraft);
+      else if (kind === 'prompt') await saveMemorySettings({ summarizationPrompt: promptDraft });
       else await onSaveNarrator(withNarratorField(narrator, { voice: voiceDraft }));
     } finally {
       setSaving(null);
@@ -286,7 +306,49 @@ export function ChatPanel({
   const rows = relationshipRows(relationship);
   // The selects always show a concrete value: what the chat set, or the default
   // the server would apply for a key it has not set.
-  const settings = { ...DEFAULTS, ...memorySettings };
+  const settings = { contextBudget: DEFAULT_CONTEXT_BUDGET, ...HYPA_V3_DEFAULTS, ...memorySettings };
+  const randomShare = Math.max(0, 1 - settings.recentMemoryRatio - settings.similarMemoryRatio);
+
+  /**
+   * One change on top of what the chat set — never the defaults, which a key
+   * left unset already means. The two shares may not add up to more than the
+   * whole: moving one past it takes the other down, as RisuAI's settings do.
+   */
+  function saveMemorySettings(change: ChatMemorySettings): Promise<void> {
+    const next = { ...(memorySettings ?? {}), ...change };
+    const recent = next.recentMemoryRatio ?? HYPA_V3_DEFAULTS.recentMemoryRatio;
+    const similar = next.similarMemoryRatio ?? HYPA_V3_DEFAULTS.similarMemoryRatio;
+    if (recent + similar > 1 + 1e-9) {
+      if (change.recentMemoryRatio !== undefined) next.similarMemoryRatio = Math.round((1 - recent) * 100) / 100;
+      else next.recentMemoryRatio = Math.round((1 - similar) * 100) / 100;
+    }
+    const memory = next.memoryTokensRatio ?? HYPA_V3_DEFAULTS.memoryTokensRatio;
+    if ((next.extraSummarizationRatio ?? 0) > 1 - memory) next.extraSummarizationRatio = 0;
+    return onSaveMemorySettings(next);
+  }
+
+  /** A select of `steps` for one numeric setting, saved on the spot. */
+  const memorySelect = (
+    key: 'memoryTokensRatio' | 'extraSummarizationRatio' | 'maxChatsPerSummary' | 'queryChatCount' | 'recentMemoryRatio' | 'similarMemoryRatio',
+    steps: readonly number[],
+    label: (value: number) => string,
+  ): ReactNode => (
+    <Field label={t(`memorySetting.${key}`)}>
+      <Select
+        value={String(settings[key])}
+        disabled={busy}
+        className="h-9 py-0 text-xs"
+        onChange={(event) => void saveMemorySettings({ [key]: Number(event.target.value) })}
+      >
+        {withValue(steps, settings[key]).map((value) => (
+          <option key={value} value={value}>
+            {label(value)}
+          </option>
+        ))}
+      </Select>
+    </Field>
+  );
+  const share = (value: number): string => t('percentValue', { percent: percent(value) });
   const saveButton = (kind: Saveable): ReactNode => (
     <div className="flex justify-end">
       <Button
@@ -389,38 +451,17 @@ export function ChatPanel({
         <p className="text-xs text-muted">{t('attachedNotesHint')}</p>
       </section>
 
-      <section data-testid="chat-memory" className="space-y-3 border-t border-line pt-5">
-        {memory ? (
-          <>
-            <Field label={t('memory')} hint={t('memoryHint')}>
-              <TextArea
-                rows={6}
-                value={summaryDraft}
-                disabled={busy}
-                onChange={(event) => setSummaryDraft(event.target.value)}
-              />
-            </Field>
-            {saveButton('memory')}
-          </>
-        ) : (
-          <>
-            <h2 className="text-xs font-medium text-muted">{t('memory')}</h2>
-            <p className="text-sm text-muted">{t('memoryEmpty')}</p>
-          </>
-        )}
-      </section>
+      <MemorySummaries chatId={chatId} version={`${headMessageId}:${memoryRevision}`} disabled={busy} />
 
       <section data-testid="memory-settings" className="space-y-3 border-t border-line pt-5">
         <h2 className="text-xs font-medium text-muted">{t('memorySettings')}</h2>
-        <div className="grid gap-3 sm:grid-cols-3">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
           <Field label={t('contextBudget')}>
             <Select
               value={String(settings.contextBudget)}
               disabled={busy}
               className="h-9 py-0 text-xs"
-              onChange={(event) =>
-                void onSaveMemorySettings({ ...settings, contextBudget: Number(event.target.value) })
-              }
+              onChange={(event) => void saveMemorySettings({ contextBudget: Number(event.target.value) })}
             >
               {MEMORY_CONTEXT_BUDGETS.map((budget) => (
                 <option key={budget} value={budget}>
@@ -429,40 +470,37 @@ export function ChatPanel({
               ))}
             </Select>
           </Field>
-          <Field label={t('summaryThreshold')}>
-            <Select
-              value={String(settings.summaryThreshold)}
-              disabled={busy}
-              className="h-9 py-0 text-xs"
-              onChange={(event) =>
-                void onSaveMemorySettings({ ...settings, summaryThreshold: Number(event.target.value) })
-              }
-            >
-              {MEMORY_SUMMARY_THRESHOLDS.map((threshold) => (
-                <option key={threshold} value={threshold}>
-                  {t('summaryThresholdValue', { percent: String(Math.round(threshold * 100)) })}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <Field label={t('retrievalCount')}>
-            <Select
-              value={String(settings.retrievalCount)}
-              disabled={busy}
-              className="h-9 py-0 text-xs"
-              onChange={(event) =>
-                void onSaveMemorySettings({ ...settings, retrievalCount: Number(event.target.value) })
-              }
-            >
-              {/* The API takes 0-10; these are the steps the UI offers. */}
-              {MEMORY_RETRIEVAL_COUNTS.map((count) => (
-                <option key={count} value={count}>
-                  {count === 0 ? t('retrievalOff') : t('retrievalCountValue', { count: String(count) })}
-                </option>
-              ))}
-            </Select>
-          </Field>
+          {memorySelect('memoryTokensRatio', MEMORY_STEPS.memoryTokensRatio, share)}
+          {memorySelect('extraSummarizationRatio', MEMORY_STEPS.extraSummarizationRatio, share)}
+          {memorySelect('maxChatsPerSummary', MEMORY_STEPS.maxChatsPerSummary, (count) =>
+            t('messageCountValue', { count }),
+          )}
+          {memorySelect('queryChatCount', MEMORY_STEPS.queryChatCount, (count) => t('messageCountValue', { count }))}
+          {memorySelect('recentMemoryRatio', MEMORY_STEPS.share, share)}
+          {memorySelect('similarMemoryRatio', MEMORY_STEPS.share, share)}
+          <div className="space-y-1.5">
+            <span className="block text-xs font-semibold text-muted">{t('memorySetting.randomMemoryRatio')}</span>
+            <p data-testid="memory-random-share" className="flex h-9 items-center text-xs text-fg">
+              {share(randomShare)}
+            </p>
+          </div>
         </div>
+        <Checkbox
+          label={t('memorySetting.doNotSummarizeUserMessage')}
+          checked={settings.doNotSummarizeUserMessage}
+          disabled={busy}
+          onChange={(checked) => void saveMemorySettings({ doNotSummarizeUserMessage: checked })}
+        />
+        <Field label={t('memorySetting.summarizationPrompt')} hint={t('memorySetting.summarizationPromptHint')}>
+          <TextArea
+            rows={3}
+            value={promptDraft}
+            disabled={busy}
+            placeholder={HYPA_V3_SUMMARIZATION_PROMPT}
+            onChange={(event) => setPromptDraft(event.target.value)}
+          />
+        </Field>
+        {saveButton('prompt')}
         <p className="text-xs text-muted">{t('memorySettingsHint')}</p>
       </section>
 

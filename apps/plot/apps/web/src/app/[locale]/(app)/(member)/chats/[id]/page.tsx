@@ -2492,19 +2492,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     await updateSettings({ absentCharacterIds: absent ? [...kept, memberId] : kept });
   }
 
-  /** The rolling summary has its own endpoint, but the same whole-state answer. */
-  async function saveMemory(summary: string): Promise<void> {
-    if (!beginMutation()) return;
-    setSettingsError('');
-    try {
-      applyState(await apiSend<ChatState>('PUT', `/api/chats/${id}/memory`, { summary }));
-    } catch (caught) {
-      setSettingsError(toMessage(caught));
-    } finally {
-      endMutation();
-    }
-  }
-
   /** Attaching a reusable note, which answers with the whole state as well. */
   async function toggleNote(noteId: string, attached: boolean): Promise<void> {
     if (!beginMutation()) return;
@@ -2811,11 +2798,13 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         <div className="max-h-[35dvh] shrink-0 overflow-y-auto border-b border-line">
           <div className="mx-auto w-full max-w-3xl px-5 py-5">
             <ChatPanel
+              chatId={id}
+              headMessageId={state.chat.headMessageId}
+              memoryRevision={state.chat.memoryRevision}
               members={members}
               note={state.chat.note}
               notes={notes}
               noteIds={state.chat.noteIds}
-              memory={state.chat.memory}
               memorySettings={state.chat.memorySettings}
               relationship={state.chat.relationship}
               relationshipEnabled={state.chat.relationshipEnabled}
@@ -2825,7 +2814,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               disabled={settingsLocked}
               onSaveNote={(note) => updateSettings({ note })}
               onToggleNote={toggleNote}
-              onSaveMemory={saveMemory}
               onSaveMemorySettings={(memorySettings) => updateSettings({ memorySettings })}
               onToggleRelationship={(relationshipEnabled) => updateSettings({ relationshipEnabled })}
               allowComponentTurns={state.chat.allowComponentTurns}

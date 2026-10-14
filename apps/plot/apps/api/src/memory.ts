@@ -1,232 +1,268 @@
 /**
- * Two-layer chat memory (see docs/ARCHITECTURE.md, Phase 2 / Chunk 4).
+ * The chat memory: RisuAI's HypaV3 (see @shizue/core `memory.ts` and
+ * ARCHITECTURE §7.3) on the server.
  *
- * Layer 1 — rolling summary: once the current path grows past a fraction of the
- * context budget, the oldest turns are folded into `chats.memory` by the memory
- * channel model and replaced in the prompt by a summary block. The anchor is the
- * last summarized message; a branch that does not contain it silently ignores the
- * summary (the next update recomputes it).
- *
- * Layer 2 — long-term facts: only when the EMBEDDING_* env is configured. Facts are
- * extracted in the same summarization call, embedded and stored in `memories`, then
- * retrieved by cosine similarity against the latest user message.
+ * - **Summaries are written in the background.** After a reply is done, the
+ *   oldest messages a branch can no longer fit are summarized a batch at a time
+ *   (`nextSummaryBatch`) by the chat's auxiliary model into `chat_summaries`,
+ *   one per batch. Never while a request is being built: the request only
+ *   selects, and the assembler's budget drops the oldest turns until a summary
+ *   lands. An imported chat's backlog goes through the `memory_backfill` job.
+ * - **A summary applies to a branch while every message it covers is on it.**
+ *   The prompt's history starts after the last message an applying summary
+ *   covers; editing, hiding or deleting a covered message deletes that summary
+ *   only, and the stretch it covered is summarized again first.
+ * - **Each request selects** (`selectSummaries`): the pinned ones, the most
+ *   recent, the ones most similar to the latest turns — by the server
+ *   embedder's vectors (`embedder.ts`) — and random ones, into a share of the
+ *   context budget. Without an embedder the similar share goes to random ones.
  *
  * Everything in the update path is fire-and-forget: it runs after the SSE `done`
- * event and swallows its own failures. The one exception is an imported chat's
- * backlog, which the `memory_backfill` job folds off the queue (`memoryBackfill`).
+ * event and swallows its own failures.
  */
-import { countTokens, DEFAULT_CONTEXT_BUDGET, DEFAULT_USER_NAME, stripImageMacros } from '@shizue/core';
-import { transcriptOf } from './transcript.js';
-import { loadMembers } from './hub.js';
-import { chats, memories, messages, personas, type Character, type Chat, type JobPayloadMap, type Message } from '@shizue/db';
+import {
+  countTokens,
+  DEFAULT_CONTEXT_BUDGET,
+  DEFAULT_USER_NAME,
+  fnv1a,
+  hypaV3SettingsOf,
+  MEMORY_HEADING,
+  memoryBlock,
+  memoryTokenBudget,
+  nextSummaryBatch,
+  rankBySimilarity,
+  replyLengthTokens,
+  selectSummaries,
+  similarityQueries,
+  stripImageMacros,
+  summarizationTurns,
+  summaryChunks,
+  SUMMARY_SEPARATOR,
+  type BatchMessage,
+  type HypaV3Settings,
+  type SummaryBatch,
+} from '@shizue/core';
+import {
+  chats,
+  chatSummaries,
+  chatSummaryChunks,
+  messages,
+  personas,
+  plots,
+  type Chat,
+  type ChatSummary,
+  type JobPayloadMap,
+  type Message,
+} from '@shizue/db';
 import { getAdapter, listEnabledModels, type ChatRequest, type LLMAdapter } from '@shizue/llm';
-import { and, asc, cosineDistance, desc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, notExists, sql } from 'drizzle-orm';
 import type { AppDeps, Tx } from './deps.js';
+import type { Embedder } from './embedder.js';
+import { loadMembers } from './hub.js';
 import { enqueueJob } from './jobs.js';
+import { transcriptOf } from './transcript.js';
 import { buildPath, visibleToAi } from './tree.js';
 
-// Measured 2026-08-10 (45-call eval, production prompt): 9/9 JSON-parse, the
-// lowest latency of the field, ~1/5 of haiku's cost. Internal catalog entry —
-// served, never listed to users.
-/** Path token share that triggers a re-summary, for a chat that has not tuned it. */
-const DEFAULT_SUMMARY_THRESHOLD = 0.6;
-/** Path token share kept verbatim after a re-summary; the rest is folded in. */
-const KEEP_RATIO = 0.4;
-/** The tail is never summarized away entirely — the prompt needs real turns. */
-const MIN_RETAINED_MESSAGES = 2;
+/** What one summary call may write; HypaV3 does not cap it, the API needs a number. */
 const SUMMARY_MAX_TOKENS = 1600;
-/** Deadline for one background refresh call, so a hung provider frees its slot. */
+/** Deadline for one background summary call, so a hung provider frees its slot. */
 const MEMORY_TIMEOUT_MS = 60_000;
-const MAX_FACTS = 8;
-const DEFAULT_RETRIEVAL_COUNT = 5;
-/** Turns scanned for facts the model can already see, which are not re-injected. */
-const RECENT_TURNS_SCANNED = 6;
-/** Summarize calls one `memory_backfill` run makes before a successor job takes over. */
-export const BACKFILL_CHUNKS_PER_RUN = 3;
+/** Summaries one finished turn's refresh writes at most; the next turn takes up the rest. */
+export const REFRESH_BATCHES_PER_RUN = 3;
+/** Summaries one `memory_backfill` run writes before a successor job takes over. */
+export const BACKFILL_BATCHES_PER_RUN = 3;
 /** How long a backfill stands back from a refresh a finished turn is already running. */
 const BACKFILL_RETRY_MS = 30_000;
-
-const SUMMARY_HEADING = '[지난 이야기 요약]';
-const FACTS_HEADING = '[기억]';
-
-const MEMORY_RULES = `당신은 롤플레이 대화의 기록 담당자입니다. 컨텍스트에서 밀려나는 대화 구간을 압축해 "지난 이야기 요약"을 갱신합니다.
-
-규칙:
-- 기존 요약과 새 구간을 하나의 요약으로 통합합니다. 기존 요약의 내용은 새 구간과 모순되지 않는 한 유지합니다.
-- 인물의 이름·호칭·관계, 약속과 목표, 실제로 일어난 사건, 장소와 시간의 이동, 되돌릴 수 없는 상태 변화를 우선 기록합니다.
-- 사실만 건조하게 적습니다. 묘사·수식·감상·연출 문장은 쓰지 않습니다.
-- 시간 순서대로 짧은 문장을 나열합니다. 대사를 그대로 옮기지 말고 요약합니다.
-- 대명사 대신 이름을 씁니다. 확실하지 않은 내용은 추측하지 말고 생략합니다.
-- 요약 전체가 800토큰(한국어 약 1200자)을 넘지 않게 합니다.`;
-
-const OUTPUT_SUMMARY_ONLY = `
-- 요약 본문만 출력합니다. 인사말·머리말·설명을 덧붙이지 않습니다.`;
-
-const OUTPUT_WITH_FACTS = `
-
-출력 형식: 아래 스키마를 따르는 JSON 객체 하나만 출력합니다. 코드 블록이나 다른 텍스트를 덧붙이지 않습니다.
-{
-  "summary": string,   // 위 규칙에 따라 통합한 요약 본문
-  "facts": string[]    // 대화가 이어지는 동안 계속 참인 영구적 사실 3~8개
-}
-facts의 각 항목은 한 문장이며, 앞뒤 맥락 없이 그 자체로 이해되어야 합니다(대명사 대신 이름 사용). 장면에 한정된 일시적 상태는 넣지 않습니다.`;
+/** How long a request waits to embed its queries before the similar share goes to random ones. */
+const QUERY_EMBED_TIMEOUT_MS = 3_000;
+/** Summary chunks one refresh embeds at most, for summaries still without vectors of the current model. */
+const CHUNKS_PER_REFRESH = 64;
+/** Longest summary a reader may write. */
+export const MAX_SUMMARY_LENGTH = 20_000;
 
 /* --------------------------------------------------------------- settings */
 
-interface MemorySettings {
+export interface MemorySettings extends HypaV3Settings {
   contextBudget: number;
-  summaryThreshold: number;
-  retrievalCount: number;
 }
 
 /**
- * The knobs this chat runs the memory layer with — its own overrides where it has
- * them, the pipeline defaults everywhere else. The values themselves are validated
- * against the whitelist when they are written.
+ * The knobs this chat runs the memory with — its own overrides where it has
+ * them, HypaV3's defaults everywhere else. The values are validated when they
+ * are written.
  */
-export function memorySettingsOf(chat: Chat): MemorySettings {
-  const settings = chat.memorySettings;
+export function memorySettingsOf(chat: Pick<Chat, 'memorySettings'>): MemorySettings {
+  const { contextBudget, ...hypa } = chat.memorySettings ?? {};
+  return { ...hypaV3SettingsOf(hypa), contextBudget: contextBudget ?? DEFAULT_CONTEXT_BUDGET };
+}
+
+/* ------------------------------------------------------------ applicability */
+
+/**
+ * The summaries that apply to `path` — every message they cover is on it —
+ * ordered by where their last message stands on it, and the index of the last
+ * message any of them covers (-1: none). The prompt's history starts after it.
+ */
+export function applicableSummaries<S extends Pick<ChatSummary, 'messageIds'>>(
+  summaries: readonly S[],
+  path: readonly Pick<Message, 'id'>[],
+): { applicable: S[]; frontier: number } {
+  const index = new Map(path.map((message, at) => [message.id, at]));
+  const placed = summaries
+    .filter((summary) => summary.messageIds.length > 0 && summary.messageIds.every((id) => index.has(id)))
+    .map((summary) => ({ summary, last: Math.max(...summary.messageIds.map((id) => index.get(id)!)) }));
+  // Stable: two summaries ending on one message (a gap's and a neighbour's cannot,
+  // but a pasted one could) keep the order they were made in.
+  placed.sort((a, b) => a.last - b.last);
   return {
-    contextBudget: settings?.contextBudget ?? DEFAULT_CONTEXT_BUDGET,
-    summaryThreshold: settings?.summaryThreshold ?? DEFAULT_SUMMARY_THRESHOLD,
-    retrievalCount: settings?.retrievalCount ?? DEFAULT_RETRIEVAL_COUNT,
+    applicable: placed.map(({ summary }) => summary),
+    frontier: placed.reduce((max, { last }) => Math.max(max, last), -1),
   };
+}
+
+/** A chat's summaries, oldest first. */
+export function loadSummaries(db: AppDeps['db'] | Tx, chatId: string): Promise<ChatSummary[]> {
+  return db
+    .select()
+    .from(chatSummaries)
+    .where(eq(chatSummaries.chatId, chatId))
+    .orderBy(asc(chatSummaries.createdAt), asc(chatSummaries.id));
 }
 
 /* -------------------------------------------------------------- injection */
 
 /**
- * Splits the path at the memory anchor. The summary only applies when the anchor is
- * on this branch; otherwise the whole path is history and the memory is ignored
- * (`anchored: false`), including the facts extracted alongside it.
- */
-function applyMemory(
-  path: Message[],
-  chat: Chat,
-): { summary: string; history: Message[]; anchored: boolean } {
-  const memory = chat.memory;
-  if (!memory?.summary.trim()) return { summary: '', history: path, anchored: false };
-  const index = path.findIndex((message) => message.id === memory.anchorMessageId);
-  if (index < 0) return { summary: '', history: path, anchored: false };
-  return { summary: memory.summary, history: path.slice(index + 1), anchored: true };
-}
-
-function formatMemoryText(summary: string, facts: string[]): string {
-  const blocks: string[] = [];
-  if (summary.trim()) blocks.push(`${SUMMARY_HEADING}\n${summary.trim()}`);
-  if (facts.length > 0) blocks.push(`${FACTS_HEADING}\n${facts.map((fact) => `- ${fact}`).join('\n')}`);
-  return blocks.join('\n\n');
-}
-
-/**
- * Memory inputs for one generation: the text injected after the persona and the
- * history the model still sees verbatim.
+ * Memory inputs for one generation: the memory block injected after the persona,
+ * and the history the model still sees verbatim — `path` after the last message
+ * an applying summary covers.
+ *
+ * `answering` is the branch the reply answers, as the model will read it: the
+ * latest `queryChatCount` of its turns are the similarity search's queries
+ * (HypaV3's `chats.slice(-queryChatCount)`). The random picks are drawn from the
+ * chat and the branch's length, as `{{pick}}` is — a regenerate and the prompt
+ * inspector see the same selection the turn did.
  */
 export async function buildMemoryInput(
   deps: AppDeps,
   chat: Chat,
   path: Message[],
-  query: string,
+  answering: readonly Message[],
 ): Promise<{ memoryText: string; history: Message[] }> {
-  const { summary, history, anchored } = applyMemory(path, chat);
-  // Branch divergence invalidates the whole memory layer, facts included. The
-  // query is embedded for its meaning, which an image token has none of, so it
-  // is stripped even though the roleplay prompt keeps it.
-  const facts = anchored
-    ? await retrieveFacts(
-        deps,
-        chat,
-        stripImageMacros(query),
-        summary,
-        path,
-        history,
-        memorySettingsOf(chat).retrievalCount,
-      )
-    : [];
-  return { memoryText: formatMemoryText(summary, facts), history };
+  const { applicable, frontier } = applicableSummaries(await loadSummaries(deps.db, chat.id), path);
+  const history = path.slice(frontier + 1);
+  if (applicable.length === 0) return { memoryText: '', history };
+
+  const settings = memorySettingsOf(chat);
+  const available = memoryTokenBudget(settings.contextBudget, settings) - countTokens(`${MEMORY_HEADING}\n`);
+  const queries = similarityQueries(
+    visibleToAi(answering).map((message) => stripImageMacros(message.content)),
+    settings,
+  );
+  const embedder = deps.embedder;
+  const selection = await selectSummaries(
+    applicable.map((summary) => ({
+      summary,
+      important: summary.important,
+      tokens: countTokens(summary.text + SUMMARY_SEPARATOR),
+    })),
+    available,
+    settings,
+    embedder ? (unused) => rankSimilar(deps, embedder, unused, queries) : null,
+    seededRandom(`${chat.id}\u0000${answering.length}`),
+  );
+  return { memoryText: memoryBlock(selection.selected.map((summary) => summary.text)), history };
 }
 
-/** Punctuation- and space-insensitive form, for the redundancy filter. */
-const normalize = (text: string): string => text.toLowerCase().replace(/[\s\p{P}\p{S}]/gu, '');
-
-/** Top matches for `query`, minus facts the prompt already states verbatim. */
-async function retrieveFacts(
+/**
+ * HypaV3's similar ranking over `unused`: each query embedded, each chunk of the
+ * current model scored by cosine in pgvector, fused by `rankBySimilarity`. A
+ * summary with no vectors of the current model yet is not ranked (the
+ * background refresh embeds it). Throws when the embedder does, which hands the
+ * share to random ones.
+ */
+async function rankSimilar(
   deps: AppDeps,
-  chat: Chat,
-  query: string,
-  summary: string,
-  path: Message[],
-  history: Message[],
-  limit: number,
-): Promise<string[]> {
-  // Facts are only ever written together with chats.memory, so a chat without a
-  // summary has none — no need to pay for an embedding call. A chat that asked
-  // for no facts skips the call for the same reason.
-  if (!chat.memory || limit <= 0) return [];
-  const embedder = deps.createEmbedder?.();
-  if (!embedder || !query.trim()) return [];
+  embedder: Embedder,
+  unused: ChatSummary[],
+  queries: string[],
+): Promise<ChatSummary[]> {
+  if (unused.length === 0 || queries.length === 0) return [];
+  const vectors = await embedder.embed(queries, { kind: 'query', timeoutMs: QUERY_EMBED_TIMEOUT_MS });
+  const ids = unused.map((summary) => summary.id);
+  const lists = await Promise.all(
+    vectors.map(async (vector) => {
+      const rows = await deps.db
+        .select({
+          summaryId: chatSummaryChunks.summaryId,
+          chunkIndex: chatSummaryChunks.chunkIndex,
+          score: sql<number>`1 - (${chatSummaryChunks.embedding} <=> ${JSON.stringify(vector)}::vector)`,
+        })
+        .from(chatSummaryChunks)
+        .where(and(inArray(chatSummaryChunks.summaryId, ids), eq(chatSummaryChunks.model, embedder.model)));
+      return rows.map((row) => [`${row.summaryId}:${row.chunkIndex}`, Number(row.score)] as const);
+    }),
+  );
+  const byId = new Map(unused.map((summary) => [summary.id, summary]));
+  return rankBySimilarity(lists, (chunk: string) => chunk.slice(0, chunk.lastIndexOf(':')))
+    .map((id) => byId.get(id))
+    .filter((summary): summary is ChatSummary => summary !== undefined);
+}
 
-  try {
-    // A timeout rejects here and is handled like any other retrieval failure.
-    const [vector] = await embedder.embed([query]);
-    if (!vector) return [];
-
-    const similarity = sql<number>`1 - (${cosineDistance(memories.embedding, vector)})`;
-    const rows = await deps.db
-      .select({ content: memories.content })
-      .from(memories)
-      .where(
-        and(
-          eq(memories.chatId, chat.id),
-          isNotNull(memories.embedding),
-          // Facts extracted on a branch this path left behind do not apply. The
-          // filter is in SQL so the top-N is taken over eligible rows only.
-          or(
-            isNull(memories.sourceMessageId),
-            inArray(
-              memories.sourceMessageId,
-              path.map((message) => message.id),
-            ),
-          ),
-        ),
-      )
-      .orderBy(desc(similarity))
-      .limit(limit * 2);
-
-    const seen = normalize(
-      [summary, ...visibleToAi(history).slice(-RECENT_TURNS_SCANNED).map((message) => message.content)].join('\n'),
-    );
-    const picked: string[] = [];
-    for (const row of rows) {
-      const key = normalize(row.content);
-      if (!key || seen.includes(key) || picked.some((fact) => normalize(fact) === key)) continue;
-      picked.push(row.content);
-      if (picked.length === limit) break;
-    }
-    return picked;
-  } catch (error) {
-    // Retrieval is best-effort: a failing embedding provider must not break the turn.
-    console.error('[memory] retrieval failed', error);
-    return [];
-  }
+/** mulberry32 over a string's FNV-1a: the same seed draws the same numbers. */
+function seededRandom(seed: string): () => number {
+  let state = fnv1a(seed) >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 /* ------------------------------------------------------------------ update */
 
 /**
- * Fire-and-forget memory refresh. Must only be called after the response is done:
- * it reloads everything itself and never propagates a failure.
+ * What the chat's last request spent besides its history and memory
+ * (`AssembledPrompt.fixedTokens`), by chat: how much history fits beside it,
+ * which decides when to summarize. Kept in this process, newest last, for the
+ * chats that generated lately; a chat it does not know counts 0.
+ */
+const fixedTokensOf = new Map<string, number>();
+const MAX_REMEMBERED_CHATS = 10_000;
+
+function rememberFixedTokens(chatId: string, tokens: number): void {
+  fixedTokensOf.delete(chatId);
+  fixedTokensOf.set(chatId, tokens);
+  if (fixedTokensOf.size > MAX_REMEMBERED_CHATS) fixedTokensOf.delete(fixedTokensOf.keys().next().value!);
+}
+
+/** Records what a request the chat just sent spent besides history and memory (`fixedTokens`). */
+export function noteRequestOverhead(chatId: string, fixedTokens: number): void {
+  rememberFixedTokens(chatId, fixedTokens);
+}
+
+/**
+ * Fire-and-forget memory refresh. Must only be called after the response is
+ * done, or after a write that dropped summaries has committed: it reloads
+ * everything itself and never propagates a failure.
  */
 export function scheduleMemoryUpdate(deps: AppDeps, chatId: string): void {
-  // One refresh per chat at a time. While a refresh runs the branch stays over the
-  // threshold, so every following turn would otherwise start a duplicate; there is
-  // nothing to queue, the next completed turn reschedules.
+  // One refresh per chat at a time. While a refresh runs the branch stays over
+  // what fits, so every following turn would otherwise start a duplicate; there
+  // is nothing to queue, the next completed turn reschedules.
   if (deps.refreshingMemory.has(chatId)) return;
   deps.refreshingMemory.add(chatId);
 
-  const task = updateMemory(deps, chatId)
-    // Whether more is left is the backfill's question; the next turn folds the next chunk.
-    .then(() => undefined)
+  const task = (async () => {
+    let continuing = false;
+    for (let pass = 0; pass < REFRESH_BATCHES_PER_RUN; pass += 1) {
+      const result = await updateMemory(deps, chatId, continuing);
+      continuing = result.continuing;
+      if (!result.more) break;
+    }
+    await embedPendingSummaries(deps, chatId);
+  })()
     .catch((error: unknown) => {
       console.error('[memory] update failed', error);
     })
@@ -234,21 +270,28 @@ export function scheduleMemoryUpdate(deps: AppDeps, chatId: string): void {
   deps.onBackgroundTask?.(task, 'memory');
 }
 
+/** One summary's worth of work: what it did, and whether a later pass has more to do. */
+interface PassResult {
+  /** Whether a later pass may have more to summarize (or an edit discarded this one's). */
+  more: boolean;
+  /** Whether the next pass continues a run past fitting, by `extraSummarizationRatio`. */
+  continuing: boolean;
+}
+
 /**
- * One fold: the oldest chunk of what the summary does not yet cover goes into it.
- * Answers whether a later pass has more to fold — the chunk cap stopped this one
- * short of the eviction target, or an edit discarded its result while the backlog
- * is still there. Only the backfill job asks; a finished turn's refresh does not
- * loop, the next turn folds the next chunk.
+ * One batch: the next summary the branch is due (`nextSummaryBatch`), written
+ * by the chat's auxiliary model.
  */
-async function updateMemory(deps: AppDeps, chatId: string): Promise<boolean> {
+async function updateMemory(deps: AppDeps, chatId: string, continuing: boolean): Promise<PassResult> {
+  const nothing: PassResult = { more: false, continuing };
   const [row] = await deps.db
-    .select({ chat: chats, personaName: personas.name })
+    .select({ chat: chats, personaName: personas.name, style: plots.style })
     .from(chats)
+    .innerJoin(plots, eq(chats.plotId, plots.id))
     .leftJoin(personas, eq(chats.personaId, personas.id))
     .where(eq(chats.id, chatId))
     .limit(1);
-  if (!row) return false;
+  if (!row) return nothing;
   const chat = row.chat;
   // Read-modify-write over a slow model call: remember the revision this refresh
   // snapshotted, so any edit landing in the meantime discards its result.
@@ -259,107 +302,188 @@ async function updateMemory(deps: AppDeps, chatId: string): Promise<boolean> {
     .from(messages)
     .where(eq(messages.chatId, chatId))
     .orderBy(asc(messages.createdAt));
-  const { summary, history: path } = applyMemory(buildPath(all, chat.headMessageId), chat);
-  // The summary is written from what a model may read: a message hidden from the
-  // AI is not counted, not kept and not folded in. Showing it again drops a
-  // summary that covers it (`invalidateMemoryForEdit`), so it is folded then.
-  const history = visibleToAi(path);
-  if (!overThreshold(chat, summary, history)) return false;
+  const path = buildPath(all, chat.headMessageId);
+  const settings = memorySettingsOf(chat);
+  const budget = {
+    contextBudget: settings.contextBudget,
+    responseReserve: replyLengthTokens(row.style?.replyLength),
+    fixedTokens: fixedTokensOf.get(chatId) ?? 0,
+  };
+  const planned = planBatch(path, await loadSummaries(deps.db, chatId), settings, budget, continuing);
+  if (!planned) return nothing;
+  const { batch, plan } = planned;
 
-  const { contextBudget, retrievalCount } = memorySettingsOf(chat);
-  const evicted = history.slice(0, evictionCount(history, contextBudget));
-  const chunk = foldChunk(evicted, contextBudget);
-  const anchor = chunk[chunk.length - 1];
-  if (!anchor) return false;
-
-  // Retrieval off means the fact layer is off end to end: nothing derived from
-  // this chat is sent to the embedding provider, nothing is stored, and the
-  // summarizer is not even asked for facts. The rolling summary still runs.
-  const embedder = retrievalCount > 0 ? deps.createEmbedder?.(MEMORY_TIMEOUT_MS) : undefined;
-  const result = await summarize(deps, {
-    userId: chat.userId,
-    subModel: chat.subModel,
-    summary,
-    evicted: chunk,
+  const byId = new Map(path.map((message) => [message.id, message]));
+  const text = await summarize(deps, chat, {
+    messages: batch.summarizedIds.map((id) => byId.get(id)!),
     userName: row.personaName ?? DEFAULT_USER_NAME,
-    members: await loadMembers(deps.db, chat.plotId),
-    extractFacts: embedder !== undefined,
+    prompt: settings.summarizationPrompt,
   });
-  if (!result) return false;
+  if (!text) return nothing;
 
-  const written = await deps.db
-    .update(chats)
-    .set({
-      memory: {
-        summary: result.summary,
-        anchorMessageId: anchor.id,
-        updatedAt: new Date().toISOString(),
-      },
-    })
-    .where(and(eq(chats.id, chatId), eq(chats.memoryRevision, captured)))
-    .returning({ id: chats.id });
-  // The chat changed under this refresh (an edit, or the user's own summary): the
-  // result describes history that no longer holds, and its facts go with it. The
-  // backlog it was folding is still there for the next pass to read afresh.
-  if (written.length === 0) return true;
-  const more = chunk.length < evicted.length;
-
-  if (!embedder || result.facts.length === 0) return more;
-  const vectors = await embedder.embed(result.facts);
-  await deps.db.transaction(async (tx) => {
-    // Embedding is another window for an edit to land. Locking the chat row
-    // serializes this check against the bump an edit performs.
+  const written = await deps.db.transaction(async (tx) => {
+    // The revision is compared under the chat row's lock, which an edit's own
+    // bump takes too: the two cannot interleave.
     const [current] = await tx
       .select({ revision: chats.memoryRevision })
       .from(chats)
       .where(eq(chats.id, chatId))
       .for('update');
-    if (current?.revision !== captured) return;
-
-    await tx.insert(memories).values(
-      result.facts.map((content, index) => ({
-        userId: chat.userId,
-        plotId: chat.plotId,
-        chatId: chat.id,
-        content,
-        embedding: vectors[index] ?? null,
-        sourceMessageId: anchor.id,
-      })),
-    );
+    if (current?.revision !== captured) return null;
+    const [summary] = await tx
+      .insert(chatSummaries)
+      .values({ chatId, text, messageIds: batch.messageIds })
+      .returning();
+    return summary ?? null;
   });
-  return more;
+  // The chat changed under this pass (an edit, a hide, a delete): the summary
+  // describes history that no longer holds. The backlog is still there for the
+  // next pass to read afresh.
+  if (!written) return { more: true, continuing };
+
+  const next = { continuing: continuing || !batch.gap };
+  const covered = plan.map((message) =>
+    batch.messageIds.includes(message.id) ? { ...message, covered: true } : message,
+  );
+  return { more: nextSummaryBatch(covered, settings, budget, next.continuing) !== null, ...next };
+}
+
+/** The branch as the batching reads it, and the batch it is due — or null. */
+function planBatch(
+  path: Message[],
+  summaries: ChatSummary[],
+  settings: MemorySettings,
+  budget: { contextBudget: number; responseReserve: number; fixedTokens: number },
+  continuing: boolean,
+): { batch: SummaryBatch; plan: BatchMessage[] } | null {
+  const { applicable } = applicableSummaries(summaries, path);
+  const covered = new Set(applicable.flatMap((summary) => summary.messageIds));
+  // What a model may read and there is something to summarize in: a message
+  // hidden from the AI is neither counted nor covered, nor is an empty one.
+  const plan: BatchMessage[] = visibleToAi(path)
+    .filter((message) => message.content.trim().length > 0)
+    .map((message) => ({
+      id: message.id,
+      role: message.role,
+      tokens: countTokens(message.content),
+      covered: covered.has(message.id),
+    }));
+  const batch = nextSummaryBatch(plan, settings, budget, continuing);
+  return batch ? { batch, plan } : null;
 }
 
 /**
- * The `memory_backfill` job (§7.3): folds an imported chat's history into its
- * rolling summary, one capped chunk per summarize call, a few calls per run.
+ * Whether a branch is due a summary: what an import asks before it queues a
+ * backfill. `responseReserve` is the plot's reply length's.
+ */
+export function summaryDue(
+  chat: Pick<Chat, 'memorySettings'>,
+  path: Message[],
+  summaries: ChatSummary[],
+  responseReserve: number,
+): boolean {
+  const settings = memorySettingsOf(chat);
+  return planBatch(path, summaries, settings, { contextBudget: settings.contextBudget, responseReserve, fixedTokens: 0 }, false) !== null;
+}
+
+/**
+ * Embeds the chat's summaries that have no vectors of the embedder's model yet —
+ * new ones, rewritten ones, ones another model embedded — a bounded number of
+ * chunks per call, oldest summary first. Best effort: an embedder that fails
+ * leaves them for the next refresh. A summary rewritten meanwhile is skipped.
+ */
+export async function embedPendingSummaries(deps: AppDeps, chatId: string): Promise<void> {
+  const embedder = deps.embedder;
+  if (!embedder) return;
+  const pending = await deps.db
+    .select({ id: chatSummaries.id, text: chatSummaries.text })
+    .from(chatSummaries)
+    .where(
+      and(
+        eq(chatSummaries.chatId, chatId),
+        notExists(
+          deps.db
+            .select({ one: sql`1` })
+            .from(chatSummaryChunks)
+            .where(and(eq(chatSummaryChunks.summaryId, chatSummaries.id), eq(chatSummaryChunks.model, embedder.model))),
+        ),
+      ),
+    )
+    .orderBy(asc(chatSummaries.createdAt), asc(chatSummaries.id));
+
+  let budget = CHUNKS_PER_REFRESH;
+  for (const summary of pending) {
+    const chunks = summaryChunks(summary.text);
+    if (chunks.length === 0) continue;
+    // One summary longer than the whole allowance is still embedded, alone —
+    // left for later it would stand first in line on every refresh, forever.
+    if (chunks.length > budget && budget < CHUNKS_PER_REFRESH) continue;
+    budget -= chunks.length;
+    let vectors: number[][];
+    try {
+      vectors = await embedder.embed(chunks, { kind: 'document' });
+    } catch (error) {
+      console.warn('[memory] embedding summaries failed; they are searched once it works', error);
+      return;
+    }
+    await deps.db.transaction(async (tx) => {
+      const [current] = await tx
+        .select({ text: chatSummaries.text })
+        .from(chatSummaries)
+        .where(eq(chatSummaries.id, summary.id))
+        .for('update');
+      if (current?.text !== summary.text) return;
+      await tx.delete(chatSummaryChunks).where(eq(chatSummaryChunks.summaryId, summary.id));
+      await tx.insert(chatSummaryChunks).values(
+        chunks.map((content, chunkIndex) => ({
+          summaryId: summary.id,
+          chunkIndex,
+          content,
+          model: embedder.model,
+          embedding: vectors[chunkIndex]!,
+        })),
+      );
+    });
+  }
+}
+
+/**
+ * The `memory_backfill` job (§7.3): summarizes an imported chat's history, a
+ * batch per summary call, a few calls per run.
  *
  * A run is bounded so one long import does not hold this instance's worker — the
  * queue runs one job at a time — for an hour; what is left goes to a successor
  * job, behind whatever else is due. It takes the same per-chat guard a finished
- * turn's refresh takes and stands back when one is running, and every fold still
- * goes through the revision CAS, so a reader who starts chatting meanwhile only
- * shares the work. A chat that is gone, or an owner with no memory channel, ends
- * the chain quietly: `updateMemory` folds nothing and says there is nothing more.
- * A provider failure throws, and the queue retries the run with its backoff.
+ * turn's refresh takes and stands back when one is running, and every summary
+ * still goes through the revision CAS, so a reader who starts chatting meanwhile
+ * only shares the work. A chat that is gone, or an owner with no memory channel,
+ * ends the chain quietly: nothing is summarized and nothing more is said to be
+ * left. A provider failure throws, and the queue retries the run with its backoff.
  */
 export async function memoryBackfill(
   deps: AppDeps,
   { chatId }: JobPayloadMap['memory_backfill'],
 ): Promise<void> {
-  for (let pass = 0; pass < BACKFILL_CHUNKS_PER_RUN; pass += 1) {
+  let continuing = false;
+  for (let pass = 0; pass < BACKFILL_BATCHES_PER_RUN; pass += 1) {
     if (deps.refreshingMemory.has(chatId)) {
       await enqueueBackfill(deps, chatId, new Date(Date.now() + BACKFILL_RETRY_MS));
       return;
     }
     deps.refreshingMemory.add(chatId);
-    let more: boolean;
+    let result: PassResult;
     try {
-      more = await updateMemory(deps, chatId);
+      result = await updateMemory(deps, chatId, continuing);
     } finally {
       deps.refreshingMemory.delete(chatId);
     }
-    if (!more) return;
+    continuing = result.continuing;
+    if (!result.more) {
+      await embedPendingSummaries(deps, chatId).catch((error: unknown) => {
+        console.error('[memory] embedding a backfill failed', error);
+      });
+      return;
+    }
   }
   await enqueueBackfill(deps, chatId);
 }
@@ -370,148 +494,84 @@ async function enqueueBackfill(deps: AppDeps, chatId: string, runAt?: Date): Pro
 }
 
 /**
- * Invalidates the memory layer for an in-place assistant edit — and for a delete,
- * and a message hidden from the AI or shown to it again. Runs inside the edit's
- * own transaction, so the bump and the edit land together.
+ * Invalidates the memory for an edit of messages — an in-place edit, a delete
+ * (every message it takes), a message hidden from the AI or shown to it again.
+ * Runs inside the edit's own transaction, so the bump and the edit land together.
  *
- * Every edit bumps `memory_revision`, which discards any refresh whose snapshot
- * may still contain the old text. An edit the summary already covers additionally
- * drops the summary — the edited words would otherwise stay hidden behind it —
- * and the chat's facts, which are a derived cache the next refresh rebuilds.
+ * Every call bumps `memory_revision`, which discards any summary being written
+ * from a snapshot that may still hold the old text. The summaries covering one
+ * of the messages are deleted — that one summary each, not the memory: the
+ * stretch it covered is summarized again (as a gap) on the next refresh. Answers
+ * how many were deleted; a caller with any should schedule that refresh once
+ * its transaction has committed.
  *
  * Also touches `chats.updated_at`, since it owns the chat row write for this edit.
  */
 export async function invalidateMemoryForEdit(
   tx: Tx,
   chatId: string,
-  editedMessageId: string,
-): Promise<void> {
-  // Lock the chat row first: a concurrent refresh write serializes behind this, so
-  // the anchor read below cannot go stale between the check and the write.
-  const [locked] = await tx
-    .select({ memory: chats.memory })
-    .from(chats)
-    .where(eq(chats.id, chatId))
-    .for('update');
-  if (!locked) return;
-
-  const covered = locked.memory
-    ? await coversMessage(tx, chatId, locked.memory.anchorMessageId, editedMessageId)
-    : false;
-
+  editedMessageIds: string | readonly string[],
+): Promise<number> {
+  const ids = typeof editedMessageIds === 'string' ? [editedMessageIds] : [...editedMessageIds];
+  // Lock the chat row first: a background summary's write serializes behind this,
+  // so it either lands before and is deleted here, or sees the bump and is dropped.
+  const [locked] = await tx.select({ id: chats.id }).from(chats).where(eq(chats.id, chatId)).for('update');
+  if (!locked) return 0;
   await tx
     .update(chats)
-    .set({
-      memoryRevision: sql`${chats.memoryRevision} + 1`,
-      updatedAt: new Date(),
-      ...(covered ? { memory: null } : {}),
-    })
+    .set({ memoryRevision: sql`${chats.memoryRevision} + 1`, updatedAt: new Date() })
     .where(eq(chats.id, chatId));
-  if (covered) await tx.delete(memories).where(eq(memories.chatId, chatId));
+  if (ids.length === 0) return 0;
+  const dropped = await tx
+    .delete(chatSummaries)
+    .where(
+      and(
+        eq(chatSummaries.chatId, chatId),
+        sql`${chatSummaries.messageIds} && ARRAY[${sql.join(
+          ids.map((id) => sql`${id}`),
+          sql`, `,
+        )}]::uuid[]`,
+      ),
+    )
+    .returning({ id: chatSummaries.id });
+  return dropped.length;
 }
 
-/** True when the summary anchored at `anchorId` stands for `messageId`. */
-async function coversMessage(
-  tx: Tx,
-  chatId: string,
-  anchorId: string,
-  messageId: string,
-): Promise<boolean> {
-  const all = await tx
-    .select({ id: messages.id, parentId: messages.parentId })
-    .from(messages)
-    .where(eq(messages.chatId, chatId));
-  const parents = new Map(all.map((message) => [message.id, message.parentId]));
-
-  // The summary covers the anchor and every message above it.
-  let current: string | null | undefined = anchorId;
-  while (current) {
-    if (current === messageId) return true;
-    current = parents.get(current);
-  }
-  return false;
-}
-
-/**
- * Whether the summary and the history it does not cover yet have outgrown
- * `contextBudget × summaryThreshold`. Counted from the oldest message and stopped
- * as soon as the answer is yes, so an imported backlog of thousands of turns is
- * not tokenized whole on every pass — none of the passes needs its exact size.
- */
-function overThreshold(chat: Chat, summary: string, history: Message[]): boolean {
-  const { contextBudget, summaryThreshold } = memorySettingsOf(chat);
-  const limit = contextBudget * summaryThreshold;
-  let total = countTokens(summary);
-  for (const message of history) {
-    if (total > limit) return true;
-    total += countTokens(message.content);
-  }
-  return total > limit;
-}
-
-/** Whether this branch is due a fold: what an import asks before it queues a backfill. */
-export function overSummaryThreshold(chat: Chat, path: Message[]): boolean {
-  const { summary, history } = applyMemory(path, chat);
-  return overThreshold(chat, summary, visibleToAi(history));
-}
-
-/**
- * How many of the oldest messages to fold into the summary so the retained tail
- * fits KEEP_RATIO of the budget, while keeping at least MIN_RETAINED_MESSAGES.
- * Walked from the newest and counted as it goes, so only the tail is tokenized.
- */
-function evictionCount(history: Message[], contextBudget: number): number {
-  const keep = contextBudget * KEEP_RATIO;
-  let kept = 0;
-  let cut = history.length;
-  for (let i = history.length - 1; i >= 0; i -= 1) {
-    const cost = countTokens(history[i]!.content);
-    const retained = history.length - i;
-    if (kept + cost > keep && retained > MIN_RETAINED_MESSAGES) break;
-    kept += cost;
-    cut = i;
-  }
-  return cut;
-}
-
-/**
- * The oldest stretch of `evicted` one summarize call is given: at most
- * `contextBudget` tokens, and never less than one message. A chat that grows a
- * turn at a time never reaches the cap — it evicts the stretch between the
- * threshold and the keep-tail, well under the budget — but an imported backlog,
- * or a branch switch away from the anchor, puts the whole history past the
- * keep-tail at once, and one call over all of it would outgrow the model's
- * context. Folded a chunk at a time, each call continues from the anchor the
- * last one left.
- */
-function foldChunk(evicted: Message[], contextBudget: number): Message[] {
-  let total = 0;
-  let end = 0;
-  while (end < evicted.length) {
-    const cost = countTokens(evicted[end]!.content);
-    if (end > 0 && total + cost > contextBudget) break;
-    total += cost;
-    end += 1;
-  }
-  return evicted.slice(0, end);
-}
+/* -------------------------------------------------------------- the model */
 
 interface SummarizeInput {
-  /** The chat's owner, whose ChatGPT account does the summarizing. */
-  userId: string;
-  /** The chat's auxiliary model, which does it; null for the default. */
-  subModel: string | null;
-  summary: string;
-  evicted: Message[];
+  /** The messages the summary is made from, oldest first. */
+  messages: Message[];
   userName: string;
-  /** The roster, by whose ids a group reply names its speaker. */
-  members: Character[];
-  extractFacts: boolean;
+  /** The chat's summarization prompt; empty for HypaV3's. */
+  prompt: string;
 }
 
-interface SummaryResult {
-  summary: string;
-  facts: string[];
+/**
+ * The summary of `input.messages`, as HypaV3's `summarize` asks for it — our
+ * transcript (a group reply under its speaker's name) in place of RisuAI's
+ * `role: content` lines, images left out. Null when the chat's auxiliary model
+ * is unusable or answers nothing; never throws for that.
+ */
+export async function summarize(
+  deps: AppDeps,
+  chat: Pick<Chat, 'userId' | 'subModel' | 'plotId'>,
+  input: SummarizeInput,
+): Promise<string | null> {
+  const resolved = await memoryChannel(deps, chat);
+  if (!resolved) return null;
+  const transcript = transcriptOf(input.messages, input.userName, await loadMembers(deps.db, chat.plotId));
+  const request: ChatRequest = {
+    model: resolved.providerModel,
+    system: '',
+    messages: summarizationTurns(transcript, input.prompt),
+    maxTokens: SUMMARY_MAX_TOKENS,
+    // A hung provider must not hold this chat's refresh slot indefinitely.
+    abortSignal: AbortSignal.timeout(MEMORY_TIMEOUT_MS),
+  };
+  // HypaV3 strips a model's `<Thoughts>` before it keeps the summary.
+  const text = (await collect(resolved.adapter, request)).replace(/<Thoughts>[\s\S]*?<\/Thoughts>/g, '').trim();
+  return text || null;
 }
 
 /** Memory models already reported as unusable — a config state, not a per-turn failure. */
@@ -573,34 +633,6 @@ export async function memoryChannel(
   }
 }
 
-/** Calls the memory channel model. Returns null when it is unusable — never throws. */
-async function summarize(deps: AppDeps, input: SummarizeInput): Promise<SummaryResult | null> {
-  const resolved = await memoryChannel(deps, input);
-  if (!resolved) return null;
-
-  // Image references are markup for the chat, not content to summarize.
-  const transcript = transcriptOf(input.evicted, input.userName, input.members);
-  const request: ChatRequest = {
-    model: resolved.providerModel,
-    system: MEMORY_RULES + (input.extractFacts ? OUTPUT_WITH_FACTS : OUTPUT_SUMMARY_ONLY),
-    messages: [
-      {
-        role: 'user',
-        content: `[기존 요약]\n${input.summary.trim() || '(없음)'}\n\n[새로 요약할 구간]\n${transcript}`,
-      },
-    ],
-    maxTokens: SUMMARY_MAX_TOKENS,
-    // A hung provider must not hold this chat's refresh slot indefinitely.
-    abortSignal: AbortSignal.timeout(MEMORY_TIMEOUT_MS),
-  };
-
-  const raw = (await collect(resolved.adapter, request)).trim();
-  if (!raw) return null;
-  if (!input.extractFacts) return { summary: raw, facts: [] };
-  // Defensive: a model that ignored the schema still gives a usable summary.
-  return parseSummaryJson(raw) ?? { summary: raw, facts: [] };
-}
-
 /** Drains a non-streaming side-channel call into one string. */
 export async function collect(adapter: LLMAdapter, request: ChatRequest): Promise<string> {
   const generator = adapter.stream(request);
@@ -611,28 +643,4 @@ export async function collect(adapter: LLMAdapter, request: ChatRequest): Promis
     next = await generator.next();
   }
   return text;
-}
-
-function parseSummaryJson(raw: string): SummaryResult | null {
-  const start = raw.indexOf('{');
-  const end = raw.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw.slice(start, end + 1));
-  } catch {
-    return null;
-  }
-  if (parsed === null || typeof parsed !== 'object') return null;
-
-  const { summary, facts } = parsed as { summary?: unknown; facts?: unknown };
-  if (typeof summary !== 'string' || !summary.trim()) return null;
-  return {
-    summary: summary.trim(),
-    facts: (Array.isArray(facts) ? facts : [])
-      .filter((fact): fact is string => typeof fact === 'string' && fact.trim().length > 0)
-      .map((fact) => fact.trim())
-      .slice(0, MAX_FACTS),
-  };
 }

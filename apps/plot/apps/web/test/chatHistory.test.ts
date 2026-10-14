@@ -55,7 +55,7 @@ const state = (ids: string[], hasMore?: boolean): ChatState => ({
     note: '',
     preset: 'standard',
     headMessageId: ids[ids.length - 1] ?? null,
-    memory: null,
+    memoryRevision: 0,
     memorySettings: null,
     relationship: null,
     relationshipEnabled: true,

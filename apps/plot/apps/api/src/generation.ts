@@ -59,7 +59,7 @@ import { randomUUID } from 'node:crypto';
 import { withImageNote } from './attachments.js';
 import { ApiError, badRequest, notFound } from './errors.js';
 import type { AppDeps, AppEnv, Tx } from './deps.js';
-import { invalidateMemoryForEdit, scheduleMemoryUpdate } from './memory.js';
+import { invalidateMemoryForEdit, noteRequestOverhead, scheduleMemoryUpdate } from './memory.js';
 import { runPromptScriptJob } from './regexWorker.js';
 import { scheduleRelationshipUpdate } from './relationship.js';
 import { replyMemberOf, scheduleEmotionDetection } from './emotion.js';
@@ -125,7 +125,7 @@ export interface GenerationPlan {
    * the request goes out: not `history`, which the memory trims.
    */
   wholeBranch: Message[];
-  /** Summary/facts block for the turns that are no longer in `history`. */
+  /** The memory block: the summaries selected for the turns no longer in `history`. */
   memoryText: string;
   /** Relationship state block, empty when the chat has none or turned it off. */
   relationshipText: string;
@@ -540,6 +540,9 @@ async function buildRequestMessages(
   report = false,
 ): Promise<BuiltRequest> {
   const prompt = await assembleRequest(plan, deps, account, report);
+  // How much history fits beside the rest of this request is what the memory
+  // summarizes against (§7.3); the inspector's look changes nothing.
+  if (!report && prompt.fixedTokens !== undefined) noteRequestOverhead(plan.chatId, prompt.fixedTokens);
   const lua = requestLuaInput(plan);
   const triggers = requestTriggerInput(plan);
   if (!lua && !triggers) return prompt;
@@ -878,6 +881,7 @@ async function assembleRequest(
         : []),
     ],
     ...(prompt.risu ? { risu: prompt.risu } : {}),
+    ...(prompt.fixedTokens !== undefined ? { fixedTokens: prompt.fixedTokens } : {}),
     loreTriggers: prompt.loreTriggers,
     ...(prompt.variableWrites ? { variableWrites: prompt.variableWrites } : {}),
     ...(prompt.stopSequences ? { stopSequences: prompt.stopSequences } : {}),
