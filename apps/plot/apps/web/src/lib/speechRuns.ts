@@ -1,4 +1,5 @@
 import { parseAssistantSpeech } from '@shizue/core/speech';
+import { splitBlocks } from './markdown/blocks';
 
 /**
  * A reply, cut into the runs its speakers wrote.
@@ -78,20 +79,29 @@ export function speechRuns(
 ): SpeechRun[] {
   const named = aliases.size > 0 ? [...roster, ...aliases.keys()] : roster;
   const runs: SpeechRun[] = [];
-  for (const block of parseAssistantSpeech(content, named)) {
-    const run: SpeechRun =
-      block.speaker.kind === 'character'
-        ? {
-            name: aliases.get(block.speaker.name) ?? block.speaker.name,
-            text: block.parts
-              .map((part) => (part.kind === 'description' ? `*${part.text}*` : part.text))
-              .join(' '),
-          }
-        : { name: speaker, text: block.parts.map((part) => part.text).join('\n\n') };
-    const last = runs[runs.length - 1];
-    // Only a character's: the parser already keeps the scene's lines together.
-    if (last && run.name !== null && last.name === run.name) last.text += `\n${run.text}`;
-    else runs.push(run);
+  // Paragraph by paragraph: the parser reads a blank line as spacing and drops
+  // it, and a run that goes on past one is still a paragraph apart — a reply
+  // that writes a `*지문*` and its line as two paragraphs keeps them two.
+  for (const paragraph of splitBlocks(content)) {
+    let fresh = true;
+    for (const block of parseAssistantSpeech(paragraph, named)) {
+      const run: SpeechRun =
+        block.speaker.kind === 'character'
+          ? {
+              name: aliases.get(block.speaker.name) ?? block.speaker.name,
+              text: block.parts
+                .map((part) => (part.kind === 'description' ? `*${part.text}*` : part.text))
+                .join(' '),
+            }
+          : { name: speaker, text: block.parts.map((part) => part.text).join('\n\n') };
+      const last = runs[runs.length - 1];
+      // Within a paragraph, only a character's: the parser already keeps the
+      // scene's lines together. Across one, the scene's too.
+      if (last && last.name === run.name && (run.name !== null || fresh)) {
+        last.text += fresh ? `\n\n${run.text}` : `\n${run.text}`;
+      } else runs.push(run);
+      fresh = false;
+    }
   }
   return runs;
 }

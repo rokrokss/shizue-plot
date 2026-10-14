@@ -23,24 +23,27 @@ export function AiNotice() {
 
   if (!visible) return null;
 
+  // Zeta's small centred line at the top of the conversation, ⓘ first.
   return (
-    <div
-      role="note"
-      data-testid="ai-notice"
-      className="mx-auto flex w-full max-w-3xl items-center gap-3 rounded-xl border border-line bg-surface/60 px-4 py-2.5"
-    >
-      <p className="min-w-0 flex-1 text-xs text-muted">{t('aiNotice')}</p>
-      <button
-        type="button"
-        aria-label={common('close')}
-        onClick={() => {
-          window.localStorage.setItem(AI_NOTICE_KEY, '1');
-          setVisible(false);
-        }}
-        className="text-xs text-muted transition-colors hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-      >
-        {common('close')}
-      </button>
+    <div role="note" data-testid="ai-notice" className="flex justify-center">
+      <p className="chat-meta inline-flex max-w-full items-center gap-1.5 rounded-full px-2.5 py-1 text-xs text-muted">
+        <span aria-hidden="true" className="flex size-3.5 shrink-0 items-center justify-center rounded-full border border-current text-[0.5625rem] font-semibold leading-none">
+          i
+        </span>
+        <span className="min-w-0">{t('aiNotice')}</span>
+        <button
+          type="button"
+          aria-label={common('close')}
+          title={common('close')}
+          onClick={() => {
+            window.localStorage.setItem(AI_NOTICE_KEY, '1');
+            setVisible(false);
+          }}
+          className="-mr-1 ml-0.5 shrink-0 rounded-full px-1 text-muted transition-colors hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+        >
+          <span aria-hidden="true">✕</span>
+        </button>
+      </p>
     </div>
   );
 }

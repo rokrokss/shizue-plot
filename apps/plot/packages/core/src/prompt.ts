@@ -10,6 +10,7 @@ import {
   GROUP_SPEECH_PROTOCOL,
   GROUP_SPEECH_PROTOCOL_REMINDER,
   groupPreset,
+  REPLY_FORMAT_HINT,
   SPEECH_PROTOCOL,
   SPEECH_PROTOCOL_REMINDER,
   type Preset,
@@ -299,6 +300,12 @@ export interface AssemblePromptInput {
    * Either way the result carries `stopSequences`.
    */
   speaker?: number | NarratorSpeaker;
+  /**
+   * The reply is a narration (the narration button): the scene told, with no
+   * one's lines in it, so the reply format hint (`REPLY_FORMAT_HINT`) is left out.
+   * The narrator's group turn (`speaker`) is one without being told.
+   */
+  narration?: boolean;
 }
 
 export interface AssembledPrompt {
@@ -330,6 +337,7 @@ export interface AssembledPrompt {
 /** What each piece of an assembled prompt is, in the creator's prompt inspector. */
 export type PromptBlockKind =
   | 'main'
+  | 'format'
   | 'narration_note'
   | 'lore_before'
   | 'plot'
@@ -685,6 +693,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     maxResponseTokens = DEFAULT_MAX_RESPONSE_TOKENS,
     preset: scenePreset = DEFAULT_PRESET,
     speaker,
+    narration = false,
   } = input;
   const history = withBranchGreeting(given, branch);
 
@@ -787,6 +796,20 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
 
   // 1. main system prompt
   const main = resolveOverride(voice?.card.systemPrompt ?? '', expand(preset.main), voiceMacro, protocol);
+
+  // 1b. how a reply marks its 지문 when it has any (`REPLY_FORMAT_HINT`), and
+  // the least of what the system string says: right behind the preset whose
+  // protocol it refines, so everything the work itself says comes after it.
+  // Only beside one of our presets — a card that writes its own instructions
+  // has its own form — and never on a narration, which is not a reply's lines.
+  const formatHint =
+    !narration &&
+    typeof speaker !== 'string' &&
+    preset.main.includes(protocol) &&
+    !voice?.card.systemPrompt.trim() &&
+    !voice?.card.postHistoryInstructions.trim()
+      ? REPLY_FORMAT_HINT
+      : '';
 
   // 2/4. lorebook — the plot's entries and every member's, activated as one book
   // against the last scanDepth messages. The sort inside `activateLore` is stable,
@@ -943,6 +966,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
 
   const sections: SystemSection[] = [
     { kind: 'main', text: main },
+    { kind: 'format', text: formatHint },
     { kind: 'narration_note', text: NARRATION_NOTE },
     { kind: 'lore_before', text: loreText('before_char') },
     { kind: 'plot', text: plotBlock },

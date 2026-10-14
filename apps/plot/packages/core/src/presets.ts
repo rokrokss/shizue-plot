@@ -48,6 +48,18 @@ export const GROUP_SPEECH_PROTOCOL = `발화 규칙:
 - [나레이션] 표시가 붙은 메시지는 독자가 나레이션을 부를 때만 들어오는 장면 서술이며, 어느 인물의 말도 아닙니다. 장면 묘사가 필요하면 화자 자신의 별표 묘사로 씁니다.
 - 등장인물 목록에 없는 인물을 지어내지 않습니다.`;
 
+/**
+ * How a reply marks what is not dialogue, worded after RisuAI's default preset
+ * ("Use italics in markdown for non-dialogues.") and as short: the chat dims
+ * only what is marked (`*…*`) inside a bubble, as RisuAI greys its italics.
+ * Conditional and a preference only — a reply may be dialogue only, 지문 only,
+ * or both, and the hint asks for no order and no length. `assemblePrompt` sends
+ * it only beside one of these presets, never beside a card's own instructions,
+ * and never on a narration.
+ */
+export const REPLY_FORMAT_HINT =
+  '응답 형식(권장): 대사가 아닌 부분(행동·표정·묘사)은 *…*로 감싸고, 대사는 그대로 씁니다. 둘 중 하나만 있어도 됩니다.';
+
 /** The group protocol as a one-line reminder, in place of `SPEECH_PROTOCOL_REMINDER`. */
 export const GROUP_SPEECH_PROTOCOL_REMINDER =
   '이번 응답은 지정된 화자 한 명의 말과 행동만 이름 접두사 없이 쓰고, 그 안의 행동과 곁의 묘사는 *별표*로 적으며, 다른 인물의 몫은 쓰지 않습니다.';

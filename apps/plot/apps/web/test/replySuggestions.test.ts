@@ -208,7 +208,7 @@ const chips = (): HTMLButtonElement[] => [
 ];
 const composer = (): HTMLTextAreaElement => host.querySelector('textarea')!;
 const send = (): HTMLButtonElement =>
-  [...host.querySelectorAll('button')].find((node) => node.textContent === '보내기')!;
+  [...host.querySelectorAll('button')].find((node) => node.getAttribute('aria-label') === '보내기')!;
 
 async function click(node: Element): Promise<void> {
   await act(async () => {

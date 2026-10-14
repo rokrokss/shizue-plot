@@ -25,7 +25,7 @@ const OPEN = '/api/plots/sty_1/assets/kiss';
 let host: HTMLElement;
 let root: Root;
 
-async function render(content: string): Promise<void> {
+async function render(content: string, extra: Record<string, unknown> = {}): Promise<void> {
   await act(async () => {
     root.render(
       createElement(NextIntlClientProvider, {
@@ -34,6 +34,7 @@ async function render(content: string): Promise<void> {
         children: createElement(MessageBody, {
           content,
           assets: new Map([['kiss', OPEN]]),
+          ...extra,
         }) as ReactNode,
       }),
     );
@@ -72,5 +73,31 @@ describe('an image a message writes in markdown', () => {
     await render(`{{img::kiss}} 그리고 ![kiss](${OPEN})`);
 
     expect(images().map((image) => image.getAttribute('src'))).toEqual([OPEN, OPEN]);
+  });
+});
+
+/** Zeta's pictures: in the flow between the bubbles, never inside one. */
+describe('a picture on a line of its own', () => {
+  const owned = { roster: [{ id: 'c1', name: '아리아', avatarUrl: null }], speaker: '아리아', mode: 'reply' };
+
+  it('stands outside the bubble, between what was said before and after it', async () => {
+    await render('*문을 연다.*\n{{img::kiss}}\n들어와.', owned);
+
+    const figure = host.querySelector('[data-testid="chat-figure"]')!;
+    expect(figure.querySelector('img')?.getAttribute('src')).toBe(OPEN);
+    expect(figure.closest('.chat-bubble')).toBeNull();
+    expect([...host.querySelectorAll('.chat-bubble')].map((node) => node.textContent)).toEqual(['문을 연다.', '들어와.']);
+  });
+
+  it('stays in the sentence it is written in', async () => {
+    await render('여기 {{img::kiss}} 봐.', owned);
+    expect(host.querySelector('[data-testid="chat-figure"]')).toBeNull();
+    expect(host.querySelector('.chat-bubble img')?.getAttribute('src')).toBe(OPEN);
+  });
+
+  it('breaks a narration into the stretch before it and the one after, each with its mark', async () => {
+    await render('바람이 분다.\n\n{{img::kiss}}\n\n늑대가 운다.', { mode: 'narration' });
+    expect(host.querySelectorAll('.chat-narration')).toHaveLength(2);
+    expect(host.querySelector('[data-testid="chat-figure"]')?.closest('.chat-narration')).toBeNull();
   });
 });

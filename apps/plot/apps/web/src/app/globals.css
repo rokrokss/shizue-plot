@@ -15,6 +15,7 @@
   --color-accent-ink: #10302b;
   --color-mint-soft: #cbfbf6;
   --color-accent-hover: #cbfbf6;
+  --color-bubble: #ffffff;
   --color-link: #126b61;
   --color-focus: #126b61;
   --color-danger: #b43e35;
@@ -57,6 +58,7 @@
     --color-muted: #a3bab6;
     --color-mint-soft: #1a4540;
     --color-accent-hover: #90f7ec;
+    --color-bubble: #1b2c29;
     --color-link: #90f7ec;
     --color-focus: #90f7ec;
     --color-danger: #f0877b;
@@ -177,15 +179,28 @@ a, button, input, select, textarea, summary { -webkit-tap-highlight-color: trans
 .intro-body > * + * {
   margin-top: 0.85em;
 }
-/* A speaker's run is a box of its own, so its paragraphs need the rule too —
-   and so is HTML written into a message (HtmlBlock). */
-.message-body .speech-run > * + *,
+/* A bubble is a box of its own, so its paragraphs need the rule too — and so
+   is HTML written into a message (HtmlBlock). A narration breathes wider. */
+.chat-bubble > * + *,
 .message-html > * + * {
   margin-top: 0.85em;
 }
-.message-body em,
-.intro-body em {
+.chat-narration-text > * + * {
+  margin-top: 1.1em;
+}
+.chat-narration-mark {
+  opacity: 0.7;
+}
+/*
+ * A character's *지문* is muted inside their bubble, and only there: the
+ * reader's own `*…*` keeps the ink of their bubble, and markup keeps the
+ * colours its creator gave it. A narration is muted whole.
+ */
+.message-body em {
   font-style: italic;
+}
+.chat-bubble em,
+.intro-body em {
   color: color-mix(in oklab, var(--color-muted) 85%, var(--color-fg));
 }
 .message-body strong,
@@ -239,23 +254,48 @@ a, button, input, select, textarea, summary { -webkit-tap-highlight-color: trans
 .intro-body h3 {
   font-weight: 600;
 }
-.message-body table,
-.intro-body table {
+/* Markdown's tables. A table in markup is laid out by its creator, as RisuAI leaves it. */
+.message-body table:not(.shizue-msg *),
+.intro-body table:not(.shizue-msg *) {
   display: block;
   overflow-x: auto;
   border-collapse: collapse;
 }
-.message-body th,
-.message-body td,
-.intro-body th,
-.intro-body td {
+.message-body :is(th, td):not(.shizue-msg *),
+.intro-body :is(th, td):not(.shizue-msg *) {
   padding: 0.35rem 0.7rem;
   border: 1px solid var(--color-line);
   text-align: left;
 }
-.message-body th,
-.intro-body th {
+.message-body th:not(.shizue-msg *),
+.intro-body th:not(.shizue-msg *) {
   font-weight: 600;
+}
+
+/*
+ * A scene's title in a narration or an intro (`#`/`##`): Zeta's large bold
+ * line beside its ≡, in the flow rather than in anyone's bubble.
+ */
+.scene-heading :is(h1, h2) {
+  letter-spacing: -0.0125rem;
+  font-size: 1.25rem;
+  line-height: 1.75rem;
+  font-weight: 600;
+  color: var(--color-fg);
+}
+
+/*
+ * A picture on a line of its own, in the flow outside any bubble: the width of
+ * the column at most, its own ratio, and never taller than most of the screen.
+ */
+.chat-figure p {
+  text-align: center;
+}
+.chat-figure .chat-image {
+  margin-block: 0;
+}
+.chat-figure [data-chat-image] {
+  max-height: min(70dvh, 32rem);
 }
 
 /*
@@ -269,6 +309,34 @@ a, button, input, select, textarea, summary { -webkit-tap-highlight-color: trans
 .message-body q[data-dialogue] {
   quotes: none;
   color: var(--color-fg);
+}
+
+/*
+ * Over a work's own background the quiet ground is gone, so what stands on it
+ * with no bubble of its own — a name, a narration, a scene title, the model's
+ * label, the row of actions — is set on a veil of that ground. The bubbles are
+ * opaque already, and the creator's markup keeps its own colours.
+ */
+.chat-backdrop :is(.chat-name, .chat-meta, .chat-narration, .scene-heading, .chat-veil) {
+  background-color: color-mix(in oklab, var(--reading) 84%, transparent);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  border-radius: 0.5rem;
+}
+.chat-backdrop :is(.chat-name, .chat-meta) {
+  padding-inline: 0.375rem;
+}
+.chat-backdrop :is(.chat-narration, .scene-heading) {
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.75rem;
+}
+
+/* The reader's bubble is mint in both themes, so what is drawn in it keeps its ink. */
+.user-bubble :is(strong, a, q[data-dialogue]) {
+  color: inherit;
+}
+.user-bubble :is(code, pre) {
+  background-color: rgb(255 255 255 / 0.4);
 }
 
 /*

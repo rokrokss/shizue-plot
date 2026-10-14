@@ -270,6 +270,10 @@ interface ViewMessage {
    * its buttons (`memberOf`): the speaker, else the work's first member.
    */
   member?: string;
+  /** The chat's opening, whose `#` lines are scene titles. */
+  intro?: boolean;
+  /** The model a stored reply was written with, by name — the chat's where the reply names none. */
+  model?: string;
 }
 
 /** Nothing attached, shared so a row without images keeps a stable prop. */
@@ -2447,9 +2451,14 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
 
   /** A member by id, for the replies that name their speaker by it. */
   const memberById = new Map(members.map((member) => [member.id, member]));
+  /** A model as the settings name it; an id the catalog no longer lists, as it is. */
+  const modelName = (id: string): string => models.find((entry) => entry.id === id)?.label ?? id;
   const view: ViewMessage[] = messages.map((message) => {
     const continued = active === 'continue' && message.id === last?.id;
     const tagged = message.role === 'assistant' && message.speakerMemberId ? memberById.get(message.speakerMemberId) : undefined;
+    const opening = isGreeting(message);
+    // A reply the model wrote — not the opening, nor a turn a card's script wrote.
+    const written = message.role === 'assistant' && !opening && message.source !== 'script';
     return {
       key: message.id,
       id: message.id,
@@ -2472,6 +2481,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           ? { speaker: scriptSpeaker }
           : {}),
       ...(group && (tagged?.id ?? firstMemberId) ? { member: tagged?.id ?? firstMemberId! } : {}),
+      ...(opening ? { intro: true } : {}),
+      ...(written ? { model: modelName(message.model ?? state.chat.model) } : {}),
     };
   });
 
@@ -2725,8 +2736,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         ) : null}
         <div
           ref={scrollRef}
-          // Positioned only over a background, which it has to paint above.
-          className={cx('min-h-0 flex-1 overflow-y-auto overscroll-contain', backgroundContext && 'relative')}
+          // Positioned only over a background, which it has to paint above —
+          // and what stands on it with no bubble of its own gets a veil there.
+          className={cx('min-h-0 flex-1 overflow-y-auto overscroll-contain', backgroundContext && 'chat-backdrop relative')}
           // Reading upwards into a long chat: near the top, the window before this
           // one is fetched and put in above without moving what is on screen.
           onScroll={(event) => {
@@ -2805,7 +2817,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               const divider = meta.dayStart ? (
                 <div className="flex items-center gap-3">
                   <span className="h-px flex-1 bg-line" />
-                  <span className="text-xs text-muted">{dayLabel(meta.dayStart)}</span>
+                  <span className="chat-meta text-xs text-muted">{dayLabel(meta.dayStart)}</span>
                   <span className="h-px flex-1 bg-line" />
                 </div>
               ) : null;
@@ -2834,7 +2846,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                     role={message.role}
                     content={message.content}
                     {...(message.shown !== undefined ? { shown: message.shown } : {})}
-                    name={message.role === 'user' ? t('you') : characterName}
+                    name={message.role === 'user' ? (personaName ?? t('you')) : characterName}
                     avatar={plot?.coverUrl ?? null}
                     userImage={personaAvatarUrl}
                     roster={members}
@@ -2859,6 +2871,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                     disabled={settingsLocked}
                     {...(message.createdAt ? { createdAt: message.createdAt } : {})}
                     grouped={meta.grouped}
+                    {...(message.intro ? { intro: true } : {})}
+                    {...(message.model ? { model: message.model } : {})}
                     statusCollapsed={statusCollapsed}
                     onToggleStatus={toggleStatus}
                     // The offer stands under the newest reply and nowhere else, and
@@ -2879,7 +2893,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                       isLast && showActions ? (
                         <div
                           className={cx(
-                            'mt-2 flex items-center gap-1',
+                            'chat-veil mt-2 flex w-fit items-center gap-1',
                             message.role === 'user' && 'justify-end',
                           )}
                         >
@@ -3017,16 +3031,22 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
 
       <div className="relative shrink-0 border-t border-line bg-surface">
         {/* Only while the reader has scrolled away: new text never drags them
-            back down, so this is how they choose to follow it again. */}
+            back down, so this is how they choose to follow it again. Round, at
+            the column's bottom-right, as Zeta has it. */}
         {isAtBottom ? null : (
-          <button
-            type="button"
-            onClick={() => void scrollToBottom()}
-            className="absolute -top-11 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-line bg-raised/95 px-3.5 py-1.5 text-xs text-fg shadow-lg backdrop-blur transition-colors hover:border-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-          >
-            <span aria-hidden="true">↓</span>
-            {t('jumpToLatest')}
-          </button>
+          <div className="pointer-events-none absolute inset-x-0 -top-14 px-5">
+            <div className="mx-auto flex max-w-3xl justify-end">
+              <button
+                type="button"
+                aria-label={t('jumpToLatest')}
+                title={t('jumpToLatest')}
+                onClick={() => void scrollToBottom()}
+                className="pointer-events-auto flex size-10 items-center justify-center rounded-full border border-line bg-surface text-fg shadow-lg transition-colors hover:border-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+              >
+                <Icon name="arrow" className="size-5 rotate-90" />
+              </button>
+            </div>
+          </div>
         )}
         {importing ? (
           <div
@@ -3158,50 +3178,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               who every reply is about anyway. */}
           {stage.length > 1 ? <FocusPicker members={stage} selected={focus} onChange={setFocus} /> : null}
         </div>
-        <div className="mx-auto grid max-w-3xl grid-cols-[auto_auto_1fr_auto] items-end gap-2 px-5 pt-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
-          <TextArea
-            ref={composerRef}
-            rows={2}
-            value={input}
-            // Unlike a streaming reply, an import has no end the reader is waiting
-            // on in the composer, so the field itself is held with the rest.
-            disabled={importing}
-            aria-label={t('placeholder')}
-            placeholder={t('placeholder')}
-            // Typing goes on while the reply streams — only sending waits for it
-            // (`submit` checks `mode`). Locking the field would also throw the
-            // keyboard user's focus away mid-turn.
-            onChange={(event) => setInput(event.target.value)}
-            // An image on the clipboard is an image to attach; text pastes into
-            // the field as it always did, because nothing here touches it.
-            onPaste={(event) => {
-              const files = [...event.clipboardData.files];
-              if (files.length === 0) return;
-              event.preventDefault();
-              addFiles(files);
-            }}
-            onKeyDown={(event) => {
-              // Exactly Cmd/Ctrl+I: with shift or alt it is the browser's own
-              // shortcut (devtools), and taking that would be worse than useful.
-              if (
-                (event.metaKey || event.ctrlKey) &&
-                !event.shiftKey &&
-                !event.altKey &&
-                event.key.toLowerCase() === 'i'
-              ) {
-                event.preventDefault();
-                toggleDirection();
-                return;
-              }
-              if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-                event.preventDefault();
-                submit();
-              }
-            }}
-            // Its height is written by `autoGrow`, so the drag handle would only
-            // be overruled on the next keystroke; past `max-h-48` it scrolls.
-            className="col-span-4 max-h-48 min-h-12 resize-none overflow-y-auto border-focus/50 bg-surface"
-          />
+        {/* Zeta's composer: the picture button, the field with its `*` inside,
+            and the round send. */}
+        <div className="mx-auto flex max-w-3xl items-end gap-2 px-5 pt-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
           {/* The picker is the button's doing; the input itself is never seen. */}
           <input
             ref={filePicker}
@@ -3221,37 +3200,95 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             aria-label={t('attach')}
             title={t('attach')}
             disabled={Boolean(mode) || importing}
+            className="mb-1 shrink-0 rounded-full! px-2.5!"
             onClick={() => filePicker.current?.click()}
           >
             <Icon name="attach" className="size-4" />
           </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            aria-label={t('direction')}
-            title={t('directionHint')}
-            disabled={Boolean(mode) || importing}
-            onClick={toggleDirection}
-          >
-            {/* The asterisk sits high in its em box, so what is centred is the box
-                and not the glyph. The nudge centres the glyph. */}
-            <span className="translate-y-[0.18em] text-base leading-none">*</span>
-          </Button>
+          <div className="relative min-w-0 flex-1">
+            <TextArea
+              ref={composerRef}
+              rows={1}
+              value={input}
+              // Unlike a streaming reply, an import has no end the reader is waiting
+              // on in the composer, so the field itself is held with the rest.
+              disabled={importing}
+              aria-label={t('placeholder')}
+              placeholder={t('placeholder')}
+              // Typing goes on while the reply streams — only sending waits for it
+              // (`submit` checks `mode`). Locking the field would also throw the
+              // keyboard user's focus away mid-turn.
+              onChange={(event) => setInput(event.target.value)}
+              // An image on the clipboard is an image to attach; text pastes into
+              // the field as it always did, because nothing here touches it.
+              onPaste={(event) => {
+                const files = [...event.clipboardData.files];
+                if (files.length === 0) return;
+                event.preventDefault();
+                addFiles(files);
+              }}
+              onKeyDown={(event) => {
+                // Exactly Cmd/Ctrl+I: with shift or alt it is the browser's own
+                // shortcut (devtools), and taking that would be worse than useful.
+                if (
+                  (event.metaKey || event.ctrlKey) &&
+                  !event.shiftKey &&
+                  !event.altKey &&
+                  event.key.toLowerCase() === 'i'
+                ) {
+                  event.preventDefault();
+                  toggleDirection();
+                  return;
+                }
+                if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                  event.preventDefault();
+                  submit();
+                }
+              }}
+              // Its height is written by `autoGrow`, so the drag handle would only
+              // be overruled on the next keystroke; past `max-h-48` it scrolls.
+              // The right padding is the `*` button's, which sits inside the field.
+              className="block max-h-48 min-h-11 resize-none! overflow-y-auto rounded-3xl border-focus/50 bg-surface py-2.5 pr-11 pl-4"
+            />
+            <button
+              type="button"
+              aria-label={t('direction')}
+              title={t('directionHint')}
+              disabled={Boolean(mode) || importing}
+              onClick={toggleDirection}
+              className="absolute right-1.5 bottom-1.5 flex size-8 items-center justify-center rounded-full text-muted transition-colors hover:bg-raised hover:text-fg disabled:opacity-45 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+            >
+              {/* The asterisk sits high in its em box, so what is centred is the box
+                  and not the glyph. The nudge centres the glyph. */}
+              <span aria-hidden="true" className="translate-y-[0.18em] text-base leading-none">*</span>
+            </button>
+          </div>
+          {/* Icon-only, so the label is the name: the same word the button said.
+              Round, so the button's own radius and padding give way (`!`). */}
           {mode ? (
             <Button
-              className="col-start-4 min-w-24"
+              className="size-11 shrink-0 rounded-full! px-0!"
               variant="secondary"
+              aria-label={t('stop')}
+              title={t('stop')}
               onClick={() => {
                 // A round's speakers still to come are not asked; what is stored stays.
                 roundStopped.current = true;
                 abortRef.current?.abort();
               }}
             >
-              {t('stop')}
+              <span aria-hidden="true" className="size-3 rounded-[3px] bg-current" />
             </Button>
           ) : (
-            <Button className="col-start-4 min-w-24" variant="primary" disabled={!input.trim() || attaching || drawing || mutating || importing || scriptsPending || castPending} onClick={submit}>
-              {t('send')}
+            <Button
+              className="size-11 shrink-0 rounded-full! px-0!"
+              variant="primary"
+              aria-label={t('send')}
+              title={t('send')}
+              disabled={!input.trim() || attaching || drawing || mutating || importing || scriptsPending || castPending}
+              onClick={submit}
+            >
+              <Icon name="arrow" className="size-5 -rotate-90" />
             </Button>
           )}
         </div>

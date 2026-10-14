@@ -957,6 +957,7 @@
       "sourcePlot": "작품",
       "kinds": {
         "main": "메인 프롬프트",
+        "format": "응답 형식",
         "narration_note": "나레이션 규약",
         "lore_before": "로어북 (캐릭터 앞)",
         "plot": "작품 설정",

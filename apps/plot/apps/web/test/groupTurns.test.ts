@@ -223,7 +223,8 @@ async function render(): Promise<void> {
 }
 
 const button = (label: string): HTMLButtonElement | undefined =>
-  [...host.querySelectorAll('button')].find((node) => node.textContent === label);
+  // By what it says, or — an icon button — by its name.
+  [...host.querySelectorAll('button')].find((node) => node.textContent === label || node.getAttribute('aria-label') === label);
 
 async function click(node: Element): Promise<void> {
   await act(async () => {

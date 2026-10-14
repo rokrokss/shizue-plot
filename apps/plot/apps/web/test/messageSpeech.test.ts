@@ -268,15 +268,14 @@ describe('a turn the reader wrote partly as others', () => {
     const spoken = host.querySelector('[data-testid="speech-character"]')!;
     expect(spoken.textContent).toContain('반가워.');
     expect(spoken.textContent).toContain('오랜만이네.');
-    // Narration as a narration row has it: no label, a line down the side in italics, no bubble.
+    // Narration as a narration row has it: no label, the ≡ and italics, no bubble.
     const narration = host.querySelector('[data-testid="reader-narration"]')!;
     expect(narration.textContent).toBe('바람이 분다.');
-    expect(narration.classList.contains('border-l-2')).toBe(true);
-    expect(narration.classList.contains('italic')).toBe(true);
-    expect(narration.querySelector('.bg-mint-soft\\/50')).toBeNull();
+    expect(narration.querySelector('.chat-narration.italic')).not.toBeNull();
+    expect(narration.querySelector('.user-bubble, .chat-bubble')).toBeNull();
     expect(host.textContent).not.toContain('@');
     // The reader's own stretches keep their bubble and their 상황묘사.
-    const bubbles = [...host.querySelectorAll('[data-testid="reader-runs"] .bg-mint-soft\\/50')];
+    const bubbles = [...host.querySelectorAll('[data-testid="reader-runs"] .user-bubble')];
     expect(bubbles.map((node) => node.textContent)).toEqual(['안녕 손을 흔든다', '다시 나.']);
   });
 
@@ -308,6 +307,25 @@ describe('a reply a round is waiting on', () => {
     expect(typing.getAttribute('data-speaker')).toBe('아리아');
     expect(typing.textContent).toBe('아리아 입력 중… 0초');
     expect(typing.querySelector('img')?.getAttribute('src')).toBe('/avatars/aria.png');
+  });
+
+  it('holds its actions over the gap above it when it opens on a title, not in a line of their own', () => {
+    render(row('# 은빛 여관\n\n눈이 내린다.', 'assistant', { roster: [ROSTER[0]!], intro: true, createdAt: new Date().toISOString() }));
+
+    const time = host.querySelector('time')!;
+    expect(time.parentElement!.className).toContain('absolute');
+    expect(time.parentElement!.className).toContain('bottom-full');
+    // The title is the first thing in the flow.
+    expect(host.querySelector('.message-body')!.firstElementChild?.getAttribute('data-testid')).toBe('scene-heading');
+  });
+
+  it('waits under the reply a continue goes on from, with no second face', () => {
+    render(row('*책을 덮는다.* 그래서', 'assistant', { roster: [ROSTER[0]!], streaming: true, thinking: true }));
+
+    // The reply's own face once, and the clock after its bubble.
+    expect(host.querySelectorAll('img')).toHaveLength(1);
+    const bubbles = [...host.querySelectorAll('.chat-bubble')];
+    expect(bubbles.map((node) => node.textContent)).toEqual(['책을 덮는다. 그래서', '생각 중… 0초']);
   });
 
 });

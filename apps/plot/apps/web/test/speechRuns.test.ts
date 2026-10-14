@@ -26,9 +26,17 @@ describe('a reply with more than one voice in it', () => {
     expect(runs).toEqual([{ name: '아리아', text: '*문틈으로 밖을 살피며* 아직도 안 그쳤네.' }]);
   });
 
-  it('keeps the narrator\'s own line breaks, which are its paragraphs', () => {
-    const runs = speechRuns('비가 그쳤다.\n\n문이 열렸다.', ROSTER);
-    expect(runs).toEqual([{ name: null, text: '비가 그쳤다.\n문이 열렸다.' }]);
+  it('keeps the narrator\'s own line breaks, and its paragraphs apart', () => {
+    expect(speechRuns('비가 그쳤다.\n문이 열렸다.', ROSTER)).toEqual([{ name: null, text: '비가 그쳤다.\n문이 열렸다.' }]);
+    expect(speechRuns('비가 그쳤다.\n\n문이 열렸다.', ROSTER)).toEqual([{ name: null, text: '비가 그쳤다.\n\n문이 열렸다.' }]);
+  });
+
+  it('keeps a speaker\'s *지문* a paragraph apart from their line, as it was written', () => {
+    expect(speechRuns('아리아: *웃으며*\n\n아리아: 안녕', ROSTER)).toEqual([{ name: '아리아', text: '*웃으며*\n\n안녕' }]);
+    // A reply with an owner: the unprefixed paragraph and the named one are theirs alike.
+    expect(speechRuns('*문을 열며*\n\n아리아: 들어와.', ROSTER, undefined, '아리아')).toEqual([
+      { name: '아리아', text: '*문을 열며*\n\n들어와.' },
+    ]);
   });
 
   it('leaves a name nobody on the roster answers to as the narrator\'s text', () => {

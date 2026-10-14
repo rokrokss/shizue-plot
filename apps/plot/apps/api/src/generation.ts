@@ -801,6 +801,8 @@ async function assembleRequest(
     // its text rides along uncounted.
     trailingTurns: partial ? 1 : 0,
     ...(plan.speaker !== undefined ? { speaker: plan.speaker } : {}),
+    // A narration is not a reply's lines, so it is not told how a reply marks its 지문.
+    ...(plan.narration ? { narration: true } : {}),
     // The trailing instruction bypasses the assembler too, so its tokens are
     // subtracted here; it is not a turn, so it does not shift depth lore.
     contextBudget: plan.contextBudget - countTokens(partial) - countTokens(trailingSystem),

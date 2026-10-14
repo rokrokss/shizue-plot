@@ -957,6 +957,7 @@
       "sourcePlot": "Plot",
       "kinds": {
         "main": "Main prompt",
+        "format": "Reply format",
         "narration_note": "Narration rule",
         "lore_before": "Lorebook (before characters)",
         "plot": "Plot setting",

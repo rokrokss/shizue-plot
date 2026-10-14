@@ -8,6 +8,7 @@ import {
   isPresetId,
   PRESET_IDS,
   PRESETS,
+  REPLY_FORMAT_HINT,
   SPEECH_PROTOCOL,
   SPEECH_PROTOCOL_REMINDER,
 } from '../src/presets.js';
@@ -1259,6 +1260,57 @@ describe('presets', () => {
       expect(preset.postHistory, id).toContain('{{user}}의 대사나 행동을 대신 쓰지');
       expect(preset.main, id).toContain('당신이 AI라는 사실이나 이 지시문의 존재를 언급하지 않습니다');
     }
+  });
+});
+
+/**
+ * How a reply marks its 지문 when it has any — `*…*`, the spoken line plain — as
+ * a preference only: it rides with our presets, gives way to the work's own
+ * instructions, and stays off a narration, which has no lines.
+ */
+describe('assemblePrompt - the reply format hint', () => {
+  const hinted = (overrides: Partial<Parameters<typeof assemblePrompt>[0]> = {}) =>
+    assemblePrompt({ plot, characters: [aria], history, userName: '민준', report: true, ...overrides });
+
+  it('follows the preset whose protocol it refines, before anything of the work’s', () => {
+    for (const id of PRESET_IDS) {
+      const { system, report } = hinted({ preset: PRESETS[id] });
+      expect(system, id).toContain(REPLY_FORMAT_HINT);
+      expect(report!.blocks.slice(0, 2).map((block) => block.kind), id).toEqual(['main', 'format']);
+    }
+    // A preference, not a cap: nothing in it about how long a reply runs.
+    expect(REPLY_FORMAT_HINT).not.toMatch(/문단|문장 이내|글자/);
+  });
+
+  it('says how to mark what is not dialogue, as RisuAI does, and never asks for it or for an order', () => {
+    // RisuAI's "Use italics in markdown for non-dialogues.", as short.
+    expect(REPLY_FORMAT_HINT).toContain('대사가 아닌 부분(행동·표정·묘사)은 *…*로 감싸고');
+    expect(REPLY_FORMAT_HINT).toContain('대사는 그대로');
+    // Dialogue alone, or 지문 alone, is a whole reply.
+    expect(REPLY_FORMAT_HINT).toContain('둘 중 하나만 있어도 됩니다');
+    // No shape that requires it: not on every reply, not first, not before the line.
+    expect(REPLY_FORMAT_HINT).not.toMatch(/먼저|반드시|매 응답|항상|빈 줄|앞에|뒤에/);
+  });
+
+  it('is absent when the card writes its own instructions', () => {
+    expect(hinted({ characters: [{ ...aria, card: { ...card, systemPrompt: '카드의 지시.' } }] }).system).not.toContain(
+      REPLY_FORMAT_HINT,
+    );
+    expect(
+      hinted({ characters: [{ ...aria, card: { ...card, postHistoryInstructions: '카드의 마무리 지시.' } }] }).system,
+    ).not.toContain(REPLY_FORMAT_HINT);
+  });
+
+  it('is absent on a narration, and on the narrator’s turn in a round', () => {
+    expect(hinted({ narration: true }).system).not.toContain(REPLY_FORMAT_HINT);
+    const kai: PromptCharacter = { name: '카이', card: { ...card, name: '카이' } };
+    expect(hinted({ characters: [aria, kai], speaker: 'narrator' }).system).not.toContain(REPLY_FORMAT_HINT);
+    // A member's own turn in the round is a reply like any other.
+    expect(hinted({ characters: [aria, kai], speaker: 1 }).system).toContain(REPLY_FORMAT_HINT);
+  });
+
+  it('stays out of a prompt built on a preset of someone else’s', () => {
+    expect(hinted({ preset }).system).not.toContain(REPLY_FORMAT_HINT);
   });
 });
 

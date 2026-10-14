@@ -23,6 +23,13 @@ import { Button, TextArea, cx } from './ui';
 const QUIET_ACTION =
   'text-xs text-muted opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100';
 
+/**
+ * Where the actions go when there is no name for them to stand beside — a
+ * narration, a continued turn: over the gap above the row, so they take no
+ * room until they are shown.
+ */
+const ACTIONS_ABOVE = 'absolute bottom-full flex h-5 items-center gap-2';
+
 /** The standard ring. These are plain buttons, so each one wears it itself. */
 const FOCUS_RING = 'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
 
@@ -30,15 +37,33 @@ const FOCUS_RING = 'focus-visible:outline-2 focus-visible:outline-offset-2 focus
 const NO_ROSTER: readonly PublicMember[] = [];
 
 /**
+ * The reader's bubble: solid mint with ink on it — the accent pair, which reads
+ * in both themes and over a work's own background — content-sized, at most
+ * the width a reply's bubble may take.
+ */
+const USER_BUBBLE =
+  'user-bubble w-fit max-w-[min(100%,36rem)] min-w-0 rounded-2xl rounded-tr-md bg-accent px-3.5 py-2.5 text-accent-ink';
+
+/**
  * How long the reply has been waited for, counted from when the row began to
  * wait. The time is all there is to show: a reasoning model's thoughts can
  * paraphrase the creator's hidden prompt, so they are never asked for. Its own
  * component, so the tick re-renders this line and not the row around it.
  *
- * In a round of a work of several members the row knows who it is waiting on
- * (`typing`), and says so with their face — the face their reply will carry.
+ * Drawn where the reply will be — in a bubble, and beside the face the reply
+ * will carry where the row knows it (`face`): the one member of a work of one,
+ * or, in a round of a work of several, the member it waits on (`typing`), which
+ * it then says by name. A narration has no bubble to wait in (`plain`).
  */
-function ThinkingClock({ typing }: { typing?: { name: string; avatarUrl: string | null } | undefined }) {
+function ThinkingClock({
+  face,
+  typing = false,
+  plain = false,
+}: {
+  face?: { name: string; avatarUrl: string | null } | undefined;
+  typing?: boolean;
+  plain?: boolean;
+}) {
   const t = useTranslations('chat');
   const [start] = useState(() => Date.now());
   const [seconds, setSeconds] = useState(0);
@@ -46,14 +71,26 @@ function ThinkingClock({ typing }: { typing?: { name: string; avatarUrl: string 
     const timer = setInterval(() => setSeconds(Math.floor((Date.now() - start) / 1000)), 1000);
     return () => clearInterval(timer);
   }, [start]);
-  if (!typing) return <span className="text-sm text-muted tabular-nums">{t('thinking', { seconds })}</span>;
+  const line = (
+    <span className="text-sm text-muted tabular-nums">
+      {typing && face ? t('typing', { name: face.name, seconds }) : t('thinking', { seconds })}
+    </span>
+  );
+  if (plain) return line;
+  const bubble = (
+    <span className="chat-bubble w-fit rounded-2xl rounded-tl-md border border-line/70 bg-bubble px-3.5 py-2.5">{line}</span>
+  );
+  if (!face) return <span className="flex">{bubble}</span>;
   return (
-    <span data-testid="typing" data-speaker={typing.name} className="flex items-center gap-3">
+    <span
+      {...(typing ? { 'data-testid': 'typing', 'data-speaker': face.name } : {})}
+      className="flex items-start gap-2.5"
+    >
       {/* The line says the name; the face is the same name drawn. */}
       <span aria-hidden="true">
-        <Avatar src={typing.avatarUrl} name={typing.name} className="size-9 text-sm" />
+        <Avatar src={face.avatarUrl} name={face.name} className="size-10 text-sm" />
       </span>
-      <span className="text-sm text-muted tabular-nums">{t('typing', { name: typing.name, seconds })}</span>
+      {bubble}
     </span>
   );
 }
@@ -97,6 +134,8 @@ export const MessageRow = memo(function MessageRow({
   disabled = false,
   createdAt,
   grouped,
+  intro = false,
+  model,
   statusCollapsed,
   onToggleStatus,
   onChoice,
@@ -169,6 +208,10 @@ export const MessageRow = memo(function MessageRow({
    * name are what a group says once, so a continued row simply keeps the column.
    */
   grouped?: boolean;
+  /** A chat's opening: its `#`/`##` lines are scene titles, as a narration's are. */
+  intro?: boolean;
+  /** The name of the model that wrote this reply, shown small by it once it is finished. */
+  model?: string;
   /** Whether this chat's status cards are folded away; one answer for all of them. */
   statusCollapsed?: boolean | undefined;
   onToggleStatus?: (() => void) | undefined;
@@ -297,243 +340,352 @@ export const MessageRow = memo(function MessageRow({
 
   const showActions = !streaming && !editing;
 
-  return (
-    <div
-      data-testid={narration ? 'message-narration' : `message-${role}`}
-      {...(member ? { 'data-shizue-member': member } : {})}
-      className={cx('group flex gap-3', isUser && !narration && !written && 'justify-end')}
-    >
-      {!isUser && !narration && !attributed ? (
-        grouped ? (
-          // The avatar's own space, so a continued turn stays in the column.
-          <div aria-hidden="true" className="size-9 shrink-0" />
-        ) : (
-          <Avatar src={avatar} name={name} className="mt-0.5 size-9 text-sm" />
-        )
+  /**
+   * The row's quiet actions. Beside the name where the row says one — the
+   * reader's, a fallback reply's — and beside the first name a reply says, which
+   * its body draws (`MessageBody` `header`).
+   */
+  const actions = (
+    <>
+      {(onSave || onEditScene) && showActions ? (
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => (onEditScene ? onEditScene() : setEditing(true))}
+          title={onEditScene ? t('sceneHint') : isUser ? t('editUserHint') : undefined}
+          className={cx(QUIET_ACTION, FOCUS_RING, 'hover:text-link')}
+        >
+          {t('edit')}
+        </button>
       ) : null}
-
-      <div className={cx('min-w-0', isUser && !narration && !written ? 'max-w-[85%]' : 'flex-1')}>
-        <div className={cx('flex items-center gap-2', isUser && !narration && 'justify-end')}>
-          {/* A continued turn is the same speaker moments later: the name was
-              already said, and saying it again is what makes a run look like a list.
-              A narration names no one and needs no label: its line and its
-              italics say what it is, as Zeta and RisuAI draw scene text. */}
-          {narration || grouped || attributed ? null : (
-            <span className="text-xs font-medium text-muted">{name}</span>
-          )}
-          {(onSave || onEditScene) && showActions ? (
-            <button
-              type="button"
-              disabled={disabled}
-              onClick={() => (onEditScene ? onEditScene() : setEditing(true))}
-              title={onEditScene ? t('sceneHint') : isUser ? t('editUserHint') : undefined}
-              className={cx(QUIET_ACTION, FOCUS_RING, 'hover:text-link')}
-            >
-              {t('edit')}
-            </button>
-          ) : null}
-          {showActions ? (
-            <button
-              type="button"
-              onClick={() => void copy()}
-              title={t('copyMessage')}
-              className={cx(QUIET_ACTION, FOCUS_RING, 'hover:text-link', copied && 'opacity-100')}
-            >
-              {copied ? t('copied') : t('copyMessage')}
-            </button>
-          ) : null}
-          {onDelete && showActions ? (
-            <button
-              type="button"
-              disabled={disabled}
-              onClick={onDelete}
-              title={t('deleteMessage')}
-              className={cx(QUIET_ACTION, FOCUS_RING, 'hover:text-danger')}
-            >
-              {t('deleteMessage')}
-            </button>
-          ) : null}
-          {/* Quiet like the edit affordance: a branched turn says so on hover, and
-              to the keyboard as soon as one of its buttons takes focus. */}
-          {branches && showActions ? (
-            <div className="flex items-center gap-1 text-xs text-muted opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-              <button
-                type="button"
-                disabled={disabled || !branches.onPrev}
-                title={t('swipePrev')}
-                aria-label={t('swipePrev')}
-                onClick={() => branches.onPrev?.()}
-                className={cx('px-1 hover:text-fg focus-visible:text-fg disabled:opacity-30', FOCUS_RING)}
-              >
-                <span aria-hidden="true">◀</span>
-              </button>
-              <span className="tabular-nums">
-                {branches.index + 1}/{branches.total}
-              </span>
-              <button
-                type="button"
-                disabled={disabled || !branches.onNext}
-                title={t('swipeNext')}
-                aria-label={t('swipeNext')}
-                onClick={() => branches.onNext?.()}
-                className={cx('px-1 hover:text-fg focus-visible:text-fg disabled:opacity-30', FOCUS_RING)}
-              >
-                <span aria-hidden="true">▶</span>
-              </button>
-            </div>
-          ) : null}
-          {/* The clock is context, not chrome: it is there when the row is asked
-              about, and the full date is one hover further in. */}
-          {createdAt ? (
-            <time
-              dateTime={createdAt}
-              title={format.dateTime(new Date(createdAt), { dateStyle: 'long', timeStyle: 'short' })}
-              className={cx(QUIET_ACTION, 'tabular-nums')}
-            >
-              {format.dateTime(new Date(createdAt), { timeStyle: 'short' })}
-            </time>
-          ) : null}
+      {showActions ? (
+        <button
+          type="button"
+          onClick={() => void copy()}
+          title={t('copyMessage')}
+          className={cx(QUIET_ACTION, FOCUS_RING, 'hover:text-link', copied && 'opacity-100')}
+        >
+          {copied ? t('copied') : t('copyMessage')}
+        </button>
+      ) : null}
+      {onDelete && showActions ? (
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={onDelete}
+          title={t('deleteMessage')}
+          className={cx(QUIET_ACTION, FOCUS_RING, 'hover:text-danger')}
+        >
+          {t('deleteMessage')}
+        </button>
+      ) : null}
+      {/* Quiet like the edit affordance: a branched turn says so on hover, and
+          to the keyboard as soon as one of its buttons takes focus. */}
+      {branches && showActions ? (
+        <div className="flex items-center gap-1 text-xs text-muted opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+          <button
+            type="button"
+            disabled={disabled || !branches.onPrev}
+            title={t('swipePrev')}
+            aria-label={t('swipePrev')}
+            onClick={() => branches.onPrev?.()}
+            className={cx('px-1 hover:text-fg focus-visible:text-fg disabled:opacity-30', FOCUS_RING)}
+          >
+            <span aria-hidden="true">◀</span>
+          </button>
+          <span className="tabular-nums">
+            {branches.index + 1}/{branches.total}
+          </span>
+          <button
+            type="button"
+            disabled={disabled || !branches.onNext}
+            title={t('swipeNext')}
+            aria-label={t('swipeNext')}
+            onClick={() => branches.onNext?.()}
+            className={cx('px-1 hover:text-fg focus-visible:text-fg disabled:opacity-30', FOCUS_RING)}
+          >
+            <span aria-hidden="true">▶</span>
+          </button>
         </div>
+      ) : null}
+      {/* The clock is context, not chrome: it is there when the row is asked
+          about, and the full date is one hover further in. */}
+      {createdAt ? (
+        <time
+          dateTime={createdAt}
+          title={format.dateTime(new Date(createdAt), { dateStyle: 'long', timeStyle: 'short' })}
+          className={cx(QUIET_ACTION, 'tabular-nums')}
+        >
+          {format.dateTime(new Date(createdAt), { timeStyle: 'short' })}
+        </time>
+      ) : null}
+    </>
+  );
+  const hasActions = showActions || Boolean(createdAt);
 
-        {editing && onSave ? (
-          <fieldset disabled={busy || disabled} aria-busy={busy || undefined} className="mt-1.5 min-w-0 space-y-2">
-            <TextArea
-              autoFocus
-              aria-label={t('editMessage')}
-              rows={Math.min(16, Math.max(3, draft.split('\n').length + 1))}
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              // Enter belongs to the text being written, so the two ways out are
-              // the ones a field like this always has: Escape leaves it as it was,
-              // Cmd/Ctrl+Enter saves. Never mid-composition — that Escape is the
-              // IME's, and taking it would drop the reader out of the editor.
-              onKeyDown={(event) => {
-                if (busy || disabled || event.nativeEvent.isComposing) return;
-                if (event.key === 'Escape') {
-                  event.preventDefault();
-                  setEditing(false);
-                  return;
-                }
-                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                  event.preventDefault();
-                  void saveEdit();
-                }
-              }}
-            />
-            <div className="flex justify-end gap-2">
-              <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
-                {common('cancel')}
-              </Button>
-              <Button size="sm" variant="primary" busy={busy} onClick={() => void saveEdit()}>
-                {common('save')}
-              </Button>
-            </div>
-          </fieldset>
-        ) : written ? (
-          // Each stretch as who wrote it: the reader's own in their bubble, a
-          // member's as that member's speech, the narrator's as narration — the
-          // same components a reply is drawn with, one per stretch.
-          <div data-testid="reader-runs" className="mt-1 space-y-3">
-            {attachments?.length ? <MessageAttachments attachments={attachments} /> : null}
-            {written.map((run, index) => {
-              const runBody = (
-                <MessageBody
-                  content={run.text}
-                  assets={assets}
-                  {...(resolveAsset ? { resolveAsset } : {})}
-                  {...(display ? { display } : {})}
-                  {...(components ? { components } : {})}
-                  {...(componentNames ? { componentNames } : {})}
-                  {...(run.kind === 'member'
-                    ? { roster, speaker: roster.find((member) => member.id === run.memberId)?.name ?? '' }
-                    : {})}
-                  previousSameRole={previousSameRole ?? ''}
-                  {...(chatIndex !== undefined ? { chatIndex } : {})}
-                  streaming={streaming}
-                  {...(userImage ? { userImage } : {})}
-                />
-              );
-              return run.kind === 'user' ? (
-                <div key={index} className="flex justify-end">
-                  <div className="max-w-[85%] min-w-0 rounded-2xl rounded-tr-sm border border-accent/30 bg-mint-soft/50 px-4 py-3">
-                    {runBody}
-                  </div>
-                </div>
-              ) : run.kind === 'narration' ? (
-                // As a narration row is drawn: a line down the side, in italics.
-                <div key={index} data-testid="reader-narration" className="border-l-2 border-line pl-3 italic text-muted">
-                  {runBody}
-                </div>
-              ) : (
-                <div key={index} data-testid="reader-member">
-                  {runBody}
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <div
+  const editor =
+    editing && onSave ? (
+      <fieldset disabled={busy || disabled} aria-busy={busy || undefined} className="mt-1.5 w-full min-w-0 space-y-2">
+        <TextArea
+          autoFocus
+          aria-label={t('editMessage')}
+          rows={Math.min(16, Math.max(3, draft.split('\n').length + 1))}
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          // Enter belongs to the text being written, so the two ways out are
+          // the ones a field like this always has: Escape leaves it as it was,
+          // Cmd/Ctrl+Enter saves. Never mid-composition — that Escape is the
+          // IME's, and taking it would drop the reader out of the editor.
+          onKeyDown={(event) => {
+            if (busy || disabled || event.nativeEvent.isComposing) return;
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              setEditing(false);
+              return;
+            }
+            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+              event.preventDefault();
+              void saveEdit();
+            }
+          }}
+        />
+        <div className="flex justify-end gap-2">
+          <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
+            {common('cancel')}
+          </Button>
+          <Button size="sm" variant="primary" busy={busy} onClick={() => void saveEdit()}>
+            {common('save')}
+          </Button>
+        </div>
+      </fieldset>
+    ) : null;
+
+  /** What the body takes however the row lays it out. */
+  const bodyProps = {
+    assets,
+    ...(resolveAsset ? { resolveAsset } : {}),
+    ...(display ? { display } : {}),
+    ...(components ? { components } : {}),
+    ...(componentNames ? { componentNames } : {}),
+    previousSameRole: previousSameRole ?? '',
+    ...(chatIndex !== undefined ? { chatIndex } : {}),
+    streaming,
+    ...(userImage ? { userImage } : {}),
+  };
+
+  /**
+   * The offer, under the reply that made it. Taking one writes it into the
+   * composer and stops there — sending is the reader's, as it is for a display
+   * script's button. In line with what it answers (`indent`): the bubbles past
+   * the face, a narration's text past its ≡.
+   */
+  const offerAt = (indent?: string) =>
+    onChoice && !streaming && choices.length > 0 ? (
+      <div data-testid="message-choices" className={cx('mt-2 flex flex-col items-start gap-1.5', indent)}>
+        {choices.map((choice, index) => (
+          <button
+            key={index}
+            type="button"
+            onClick={() => onChoice(choice)}
             className={cx(
-              'mt-1',
-              isUser &&
-                !narration &&
-                'rounded-2xl rounded-tr-sm border border-accent/30 bg-mint-soft/50 px-4 py-3',
-              // No bubble, no face and no label: a line down the side and
-              // muted italics mark it, as Zeta marks its narrator and RisuAI
-              // draws its *scene text*.
-              narration && 'border-l-2 border-line pl-3 italic text-muted',
+              'max-w-full rounded-lg border border-line bg-surface/60 px-3 py-1.5 text-left text-sm text-muted',
+              'transition-colors hover:border-muted/60 hover:text-fg',
+              FOCUS_RING,
             )}
           >
-            {/* Above the text, in the same bubble: the picture is part of the
-                turn, and the words are usually about it. */}
-            {attachments?.length ? <MessageAttachments attachments={attachments} /> : null}
-            <MessageBody
-              content={narration ? narrationBody(body) : body}
-              assets={assets}
-              {...(resolveAsset ? { resolveAsset } : {})}
-              {...(display ? { display } : {})}
-              {...(components ? { components } : {})}
-              {...(componentNames ? { componentNames } : {})}
-              {...(attributed ? { roster } : {})}
-              {...(attributed && owner ? { speaker: owner } : {})}
-              previousSameRole={previousSameRole ?? ''}
-              {...(chatIndex !== undefined ? { chatIndex } : {})}
-              streaming={streaming}
-              {...(userImage ? { userImage } : {})}
-            />
-            {thinking ? <ThinkingClock typing={typing} /> : null}
-            {streaming ? (
-              <span className="ml-0.5 inline-block h-4 w-[2px] translate-y-0.5 animate-pulse bg-accent" />
-            ) : null}
-            {/* At the end of the message, where the turn left the scene. */}
-            {status !== null ? (
-              <StatusCard status={status} collapsed={statusCollapsed} onToggle={onToggleStatus} />
-            ) : null}
+            {choice}
+          </button>
+        ))}
+      </div>
+    ) : null;
+
+  /** At the end of the message, where the turn left the scene. */
+  const statusCard =
+    status !== null ? <StatusCard status={status} collapsed={statusCollapsed} onToggle={onToggleStatus} /> : null;
+
+  /** The model that wrote a finished reply: faint, outside its last bubble, at the corner. */
+  const modelLabel =
+    model && !streaming && !thinking ? (
+      <span data-testid="message-model" className="chat-meta caption2 text-muted/80">
+        {model}
+      </span>
+    ) : undefined;
+
+  const memberProps = member ? { 'data-shizue-member': member } : {};
+
+  // No bubble, no face and no label: the ≡ at its start and muted italics mark
+  // it, as Zeta marks its narrator and RisuAI draws its *scene text*.
+  if (narration) {
+    return (
+      <div data-testid="message-narration" {...memberProps} className="group relative min-w-0">
+        {editor ?? (
+          <div>
+            <MessageBody {...bodyProps} content={narrationBody(body)} mode="narration" sceneHeadings />
+            {thinking ? <ThinkingClock plain /> : null}
+            {statusCard}
           </div>
         )}
+        {/* The ≡ and the gap after it: in line with the narration's text. */}
+        {offerAt('pl-6')}
+        {footer}
+        <div className={cx(ACTIONS_ABOVE, 'left-0')}>{actions}</div>
+      </div>
+    );
+  }
 
-        {/* The offer, under the reply that made it. Taking one writes it into the
-            composer and stops there — sending is the reader's, as it is for a
-            display script's button. */}
-        {onChoice && !streaming && choices.length > 0 ? (
-          <div data-testid="message-choices" className="mt-2 flex flex-col items-start gap-1.5">
-            {choices.map((choice, index) => (
-              <button
-                key={index}
-                type="button"
-                onClick={() => onChoice(choice)}
-                className={cx(
-                  'max-w-full rounded-lg border border-line bg-surface/60 px-3 py-1.5 text-left text-sm text-muted',
-                  'transition-colors hover:border-muted/60 hover:text-fg',
-                  FOCUS_RING,
+  // The reader's, mirrored: their face at the far right, their name beside it,
+  // and the bubble in mint under the name.
+  if (isUser) {
+    return (
+      <div data-testid="message-user" {...memberProps} className="group flex flex-row-reverse gap-2.5">
+        {grouped ? (
+          <div aria-hidden="true" className="w-10 shrink-0" />
+        ) : (
+          <Avatar src={userImage ?? null} name={name} className="size-10 text-sm" />
+        )}
+        <div className="relative flex min-w-0 flex-1 flex-col items-end">
+          {/* A continued turn is the same reader moments later: the name was
+              already said, and the actions wait above the row. */}
+          {grouped ? (
+            <div className={cx(ACTIONS_ABOVE, 'right-0')}>{actions}</div>
+          ) : (
+            <div className="flex min-h-5 items-center justify-end gap-2">
+              {actions}
+              <span className="chat-name text-xs font-medium text-link">{name}</span>
+            </div>
+          )}
+          {editor ??
+            (written ? (
+              // Each stretch as who wrote it: the reader's own in their bubble, a
+              // member's as that member's speech, the narrator's as narration — the
+              // same components a reply is drawn with, one per stretch.
+              <div data-testid="reader-runs" className="mt-1 w-full space-y-3">
+                {attachments?.length ? (
+                  <div className="flex justify-end">
+                    <MessageAttachments attachments={attachments} />
+                  </div>
+                ) : null}
+                {written.map((run, index) =>
+                  run.kind === 'user' ? (
+                    <div key={index} className="flex justify-end">
+                      <div className={USER_BUBBLE}>
+                        <MessageBody {...bodyProps} content={run.text} />
+                      </div>
+                    </div>
+                  ) : run.kind === 'narration' ? (
+                    <div key={index} data-testid="reader-narration">
+                      <MessageBody {...bodyProps} content={run.text} mode="narration" sceneHeadings />
+                    </div>
+                  ) : (
+                    <div key={index} data-testid="reader-member">
+                      <MessageBody
+                        {...bodyProps}
+                        content={run.text}
+                        roster={roster}
+                        speaker={roster.find((entry) => entry.id === run.memberId)?.name ?? ''}
+                        mode="reply"
+                      />
+                    </div>
+                  ),
                 )}
-              >
-                {choice}
-              </button>
+              </div>
+            ) : (
+              <>
+                {/* Above the bubble, in the flow: the picture is part of the turn,
+                    and the words are usually about it. */}
+                {attachments?.length ? (
+                  <div className="mt-1 max-w-[min(100%,36rem)]">
+                    <MessageAttachments attachments={attachments} />
+                  </div>
+                ) : null}
+                <div className={cx(USER_BUBBLE, 'mt-1')}>
+                  <MessageBody {...bodyProps} content={body} />
+                </div>
+              </>
             ))}
-          </div>
-        ) : null}
+          {footer}
+        </div>
+      </div>
+    );
+  }
 
+  // A reply with a roster draws its own speakers — each one's face, name and
+  // bubble (`MessageBody`) — so the row keeps none of its own.
+  if (attributed) {
+    const ownMember = owner ? roster.find((entry) => entry.name === owner) : undefined;
+    const waitingOn = typing ?? (owner ? { name: owner, avatarUrl: ownMember?.avatarUrl ?? null } : undefined);
+    // A continue waits under the reply it goes on from, whose face is already there.
+    const clock = thinking ? (
+      body.trim() ? (
+        <div className="mt-3 pl-12.5">
+          <ThinkingClock />
+        </div>
+      ) : (
+        <ThinkingClock face={waitingOn} typing={typing !== undefined} />
+      )
+    ) : null;
+    return (
+      <div data-testid="message-assistant" {...memberProps} className="group min-w-0">
+        {editor ?? (
+          <>
+            <MessageBody
+              {...bodyProps}
+              content={body}
+              roster={roster}
+              {...(owner ? { speaker: owner } : {})}
+              mode="reply"
+              sceneHeadings={intro}
+              continued={grouped ?? false}
+              {...(hasActions ? { header: actions } : {})}
+              {...(modelLabel ? { trailer: modelLabel } : {})}
+            />
+            {clock}
+            {statusCard ? <div className="mt-3">{statusCard}</div> : null}
+          </>
+        )}
+        {offerAt('pl-12.5')}
+        {footer}
+      </div>
+    );
+  }
+
+  // Before the roster has arrived, or in a work with no members: the row is the
+  // speaker, as it always was — the plot's face and name, then its bubble.
+  return (
+    <div data-testid="message-assistant" {...memberProps} className="group flex gap-2.5">
+      {grouped ? (
+        // The avatar's own width, so a continued turn stays in the column.
+        <div aria-hidden="true" className="w-10 shrink-0" />
+      ) : (
+        <Avatar src={avatar} name={name} className="size-10 text-sm" />
+      )}
+      <div className="relative min-w-0 flex-1">
+        {grouped ? (
+          <div className={cx(ACTIONS_ABOVE, 'left-0')}>{actions}</div>
+        ) : (
+          <div className="flex min-h-5 items-center gap-2">
+            <span className="chat-name text-xs font-medium text-muted">{name}</span>
+            {actions}
+          </div>
+        )}
+        {editor ?? (
+          <div className={grouped ? undefined : 'mt-1'}>
+            <MessageBody
+              {...bodyProps}
+              content={body}
+              mode="reply"
+              sceneHeadings={intro}
+              {...(modelLabel ? { trailer: modelLabel } : {})}
+            />
+            {thinking ? (
+              <div className={body.trim() ? 'mt-3' : undefined}>
+                <ThinkingClock />
+              </div>
+            ) : null}
+            {statusCard ? <div className="mt-3">{statusCard}</div> : null}
+          </div>
+        )}
+        {offerAt()}
         {footer}
       </div>
     </div>

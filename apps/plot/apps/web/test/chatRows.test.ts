@@ -52,6 +52,15 @@ describe('chatRowMeta', () => {
     expect(meta.map((entry) => entry.grouped)).toEqual([false, true, false, false]);
   });
 
+  it('keeps two members of a round apart, though both replies are the model’s', () => {
+    const meta = chatRowMeta([
+      { ...row('assistant', '세이야의 답', at(2026, 8, 11, 9)), speaker: '세이야' },
+      { ...row('assistant', '카이의 답', at(2026, 8, 11, 9, 1)), speaker: '카이' },
+      { ...row('assistant', '카이가 이어서', at(2026, 8, 11, 9, 2)), speaker: '카이' },
+    ]);
+    expect(meta.map((entry) => entry.grouped)).toEqual([false, false, true]);
+  });
+
   it('leaves narration out of every group, and the row after it too', () => {
     const meta = chatRowMeta([
       row('assistant', '대사 하나', at(2026, 8, 11, 9)),

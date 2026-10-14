@@ -15,6 +15,11 @@ export interface ChatRowInput {
   content: string;
   /** ISO timestamp; null while a row is optimistic and not stored yet. */
   createdAt: string | null;
+  /**
+   * Who a reply is by where the page knows (a group reply's member); absent for
+   * a work of one, whose replies are all its one member's.
+   */
+  speaker?: string | undefined;
 }
 
 export interface ChatRowMeta {
@@ -39,7 +44,7 @@ export interface ChatRowMeta {
 export function chatRowMeta(rows: readonly ChatRowInput[]): ChatRowMeta[] {
   const latestByRole = new Map<MessageRole, string>();
   let day = '';
-  let previous: { role: MessageRole; time: number | null; narration: boolean } | null = null;
+  let previous: { role: MessageRole; speaker: string | undefined; time: number | null; narration: boolean } | null = null;
 
   return rows.map((row) => {
     const previousSameRole = latestByRole.get(row.role) ?? '';
@@ -54,14 +59,16 @@ export function chatRowMeta(rows: readonly ChatRowInput[]): ChatRowMeta[] {
 
     // Narration is the scene moving rather than anyone speaking, so it neither
     // joins a run nor continues one — and a divider always begins a new group.
+    // Two members' replies in a round are two speakers, though both the model's.
     const grouped =
       previous !== null &&
       dayStart === null &&
       !narration &&
       !previous.narration &&
       previous.role === row.role &&
+      previous.speaker === row.speaker &&
       (time === null || previous.time === null || time - previous.time < GROUP_WINDOW_MS);
-    previous = { role: row.role, time, narration };
+    previous = { role: row.role, speaker: row.speaker, time, narration };
 
     return { previousSameRole, dayStart, grouped };
   });

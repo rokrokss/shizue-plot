@@ -48,7 +48,9 @@ import { Avatar } from './Avatar';
 import { ChatImage } from './ChatImage';
 import { ComponentFrame } from './ComponentFrame';
 import { HtmlBlock } from './HtmlBlock';
+import { Icon } from './Icon';
 import { LockedImage } from './LockedImage';
+import { cx } from './ui';
 
 const remarkPlugins = [remarkGfm, remarkBreaks, remarkNoIndentedCode];
 
@@ -109,7 +111,10 @@ function CodeBlock({ children }: { children?: ReactNode }) {
   );
 }
 
-/** Character images stay inside the bubble and never push the layout around. */
+/**
+ * Character images never push the layout around: one inside a sentence stays
+ * in its bubble, one on a line of its own is drawn in the flow (`RunItems`).
+ */
 const components: Components = {
   // React's `img` src is `string | Blob` (the experimental srcObject overload).
   // Markdown only ever produces the string form, so the Blob half is narrowed
@@ -186,6 +191,191 @@ interface TextRun {
    */
   html: boolean;
   blocks: string[];
+}
+
+/**
+ * How the prose that names no speaker is drawn: a reply's, in a bubble of its
+ * own (the row says whose); a narration's, with its ≡ and in muted italics; or
+ * as it is, inside a bubble the row draws around it (the reader's turn).
+ */
+export type BodyMode = 'reply' | 'narration' | 'plain';
+
+/** A line that is nothing but pictures — drawn in the flow, outside any bubble. */
+const FIGURE_LINE_RE = /^\s*(?:!\[[^\]\n]*\]\([^)\s]*\)\s*)+$/;
+/** `#` or `##` — a scene's title, where the message is a scene's (`sceneHeadings`). */
+const HEADING_LINE_RE = /^ {0,3}#{1,2}[ \t]+\S/;
+const FENCE_START_RE = /^ {0,3}(?:`{3,}|~{3,})/;
+
+/**
+ * One stretch of a run as it is drawn: prose, a picture on a line of its own, a
+ * scene title, or markup that only dresses its words (`inlineMarkup`) — a block
+ * of the message's own HTML (`markup`, its source) or a display script's island
+ * (`island`, already sanitized).
+ */
+interface RunItem {
+  kind: 'prose' | 'figure' | 'heading' | 'markup' | 'island';
+  text: string;
+  live: boolean;
+}
+
+/** The elements that dress words rather than lay out a box. */
+const INLINE_TAGS = new Set([
+  'a', 'abbr', 'b', 'bdi', 'bdo', 'big', 'br', 'cite', 'code', 'data', 'del', 'dfn', 'em', 'font', 'i', 'ins',
+  'kbd', 'mark', 'q', 'rp', 'rt', 'ruby', 's', 'samp', 'small', 'span', 'strike', 'strong', 'sub', 'sup', 'time',
+  'tt', 'u', 'var', 'wbr',
+]);
+const TAG_NAME_RE = /<\/?([A-Za-z][\w-]*)/g;
+
+/**
+ * Whether markup is words in a colour or a weight — a `<span>` around a line,
+ * a `<br>` — and so stays in the speaker's bubble. Anything that lays out a box
+ * of its own (a status window's `<div>`, a `<table>`, a `<style>`) is the
+ * creator's layout, and stands outside it.
+ */
+function inlineMarkup(markup: string): boolean {
+  for (const match of markup.matchAll(TAG_NAME_RE)) {
+    if (!INLINE_TAGS.has(match[1]!.toLowerCase())) return false;
+  }
+  return true;
+}
+
+/**
+ * A run's blocks, with the lines that stand outside a bubble taken out of them:
+ * a picture alone on its line, and — in a narration or an intro — a `#`/`##`
+ * title. A fenced block is left whole, and so is everything else: a picture
+ * inside a sentence is part of the sentence. Only the last piece of the live
+ * block is still being written.
+ */
+function runItems(blocks: readonly string[], live: boolean, headings: boolean): RunItem[] {
+  const items: RunItem[] = [];
+  blocks.forEach((block, nth) => {
+    const blockLive = live && nth === blocks.length - 1;
+    if (FENCE_START_RE.test(block)) {
+      items.push({ kind: 'prose', text: block, live: blockLive });
+      return;
+    }
+    const start = items.length;
+    let prose = '';
+    for (const line of block.match(/[^\n]*\n|[^\n]+/g) ?? []) {
+      const kind = FIGURE_LINE_RE.test(line) ? 'figure' : headings && HEADING_LINE_RE.test(line) ? 'heading' : null;
+      if (!kind) {
+        prose += line;
+        continue;
+      }
+      if (prose.trim()) items.push({ kind: 'prose', text: prose, live: false });
+      prose = '';
+      items.push({ kind, text: line, live: false });
+    }
+    if (prose.trim()) items.push({ kind: 'prose', text: prose, live: false });
+    if (blockLive && items.length > start) items[items.length - 1]!.live = true;
+  });
+  return items;
+}
+
+/** The caret a reply is written behind, at the end of the stretch still arriving. */
+const STREAM_CARET = <span className="ml-0.5 inline-block h-4 w-[2px] translate-y-0.5 animate-pulse bg-accent" />;
+
+/**
+ * A stretch of prose and pictures with no title in it, in order: consecutive
+ * prose in one box — a bubble or a narration — and each picture between them
+ * at the width of the flow. What hangs off the end: the caret while it is
+ * written, and under a bubble the label at its corner (`trailer`).
+ */
+function RunItems({
+  items,
+  box,
+  caret,
+  trailer,
+}: {
+  items: readonly RunItem[];
+  box: 'bubble' | 'narration';
+  caret: boolean;
+  trailer?: ReactNode;
+}) {
+  const groups: { kind: 'prose' | 'figure'; items: RunItem[] }[] = [];
+  for (const item of items) {
+    const kind = item.kind === 'figure' ? 'figure' : 'prose';
+    const last = groups.at(-1);
+    if (kind === 'prose' && last?.kind === 'prose') last.items.push(item);
+    else groups.push({ kind, items: [item] });
+  }
+  return groups.map((group, index) => {
+    const blocks = group.items.map((item, nth) =>
+      item.kind === 'markup' ? (
+        <HtmlBlock key={nth} content={item.text} live={item.live} />
+      ) : item.kind === 'island' ? (
+        <div
+          key={nth}
+          className={MESSAGE_SCOPE_CLASS}
+          // Sanitized by lib/sanitizeHtml — the only place markup is trusted.
+          dangerouslySetInnerHTML={{ __html: item.text }}
+        />
+      ) : (
+        <MarkdownBlock key={nth} content={item.text} live={item.live} />
+      ),
+    );
+    if (group.kind === 'figure') {
+      return (
+        <div key={index} data-testid="chat-figure" className="chat-figure w-full">
+          {blocks}
+        </div>
+      );
+    }
+    const end = index === groups.length - 1;
+    const text = (
+      <>
+        {blocks}
+        {end && caret ? STREAM_CARET : null}
+      </>
+    );
+    if (box === 'narration') {
+      // The mark once at the block's start, the paragraphs hung past it.
+      return (
+        <div key={index} className="chat-narration flex w-full gap-2 italic text-muted">
+          <Icon name="menu" className="chat-narration-mark mt-0.5 size-4 shrink-0" />
+          <div className="chat-narration-text min-w-0 flex-1">{text}</div>
+        </div>
+      );
+    }
+    const bubble = (
+      <div className="chat-bubble w-fit max-w-[min(100%,36rem)] min-w-0 rounded-2xl rounded-tl-md border border-line/70 bg-bubble px-3.5 py-2.5">
+        {text}
+      </div>
+    );
+    if (!end || !trailer) return <Fragment key={index}>{bubble}</Fragment>;
+    // Content-sized like the bubble, so the label sits at the bubble's own corner.
+    return (
+      <div key={index} className="flex w-fit max-w-full min-w-0 flex-col items-start">
+        {bubble}
+        <div className="mt-1 self-end">{trailer}</div>
+      </div>
+    );
+  });
+}
+
+/**
+ * A run's items, cut at its titles: each title stands alone in the flow, and
+ * what is between them is one stretch (`RunItems`).
+ */
+function atHeadings(items: readonly RunItem[]): ({ heading: RunItem } | { items: RunItem[] })[] {
+  const parts: ({ heading: RunItem } | { items: RunItem[] })[] = [];
+  for (const item of items) {
+    const last = parts.at(-1);
+    if (item.kind === 'heading') parts.push({ heading: item });
+    else if (last && 'items' in last) last.items.push(item);
+    else parts.push({ items: [item] });
+  }
+  return parts;
+}
+
+/** A scene's title (`#`/`##`) in a narration or an intro: Zeta's ≡ and a large bold line. */
+function SceneHeading({ text, live }: { text: string; live: boolean }) {
+  return (
+    <div data-testid="scene-heading" className="scene-heading flex w-full items-center gap-2">
+      <Icon name="menu" className="size-5 shrink-0 text-muted" />
+      <MarkdownBlock content={text} live={live} />
+    </div>
+  );
 }
 
 /**
@@ -336,6 +526,14 @@ const COLD_HOLD_MS = 500;
  * component. So a message that a script
  * turned into a status window keeps its status window, and the prose around it is
  * still told apart by who wrote it.
+ *
+ * Drawn as Zeta draws a reply: each speaker's prose in a content-sized bubble
+ * under their face and name, their `*지문*` muted in it. Everything that is not
+ * a speaker's prose stands outside the bubbles, in the flow at its full width —
+ * markup (the creator's layout is not squeezed into a bubble), a component, a
+ * picture on a line of its own, and in a narration or an intro a `#`/`##` scene
+ * title. A speaker's next stretch in the same message keeps the column and says
+ * neither face nor name again.
  */
 export const MessageBody = memo(function MessageBody({
   content,
@@ -350,6 +548,11 @@ export const MessageBody = memo(function MessageBody({
   chatIndex,
   streaming = false,
   userImage,
+  mode = 'plain',
+  sceneHeadings = false,
+  continued = false,
+  header,
+  trailer,
 }: {
   content: string;
   /** Asset url by slug — memoize it, or this component re-renders on every keystroke. */
@@ -390,6 +593,16 @@ export const MessageBody = memo(function MessageBody({
   streaming?: boolean;
   /** The reader's persona picture, for RisuAI's `{{source::user}}` in the message's own markup. */
   userImage?: string | null;
+  /** How the prose no speaker owns is drawn (`BodyMode`); a speaker's is always their bubble. */
+  mode?: BodyMode;
+  /** Draws `#`/`##` lines as Zeta's scene titles: a narration's and an intro's. */
+  sceneHeadings?: boolean;
+  /** The row above already said `speaker`'s name, so the first of their stretches does not. */
+  continued?: boolean;
+  /** The row's quiet actions, beside the first name the message says (or above it, if it says none first). */
+  header?: ReactNode;
+  /** Hung under the last bubble at its corner (the model's name), or at the end where the last thing is no bubble. */
+  trailer?: ReactNode;
 }) {
   const t = useTranslations('chat');
   const common = useTranslations('common');
@@ -458,95 +671,202 @@ export const MessageBody = memo(function MessageBody({
   // Only the very last block of the last run of text is still being written.
   const liveSegment = streaming ? runs.findLastIndex((run) => run !== null) : -1;
 
+  /**
+   * What is drawn, in order, before any of it is: the header goes into the
+   * first piece where that piece says a name, and the trailer under the last
+   * where that piece is a bubble — so both have to know which pieces those are.
+   */
+  type Piece =
+    | { kind: 'segment'; node: ReactNode }
+    | { kind: 'heading'; item: RunItem }
+    | { kind: 'speaker'; name: string; items: RunItem[]; caret: boolean }
+    | { kind: 'prose'; box: 'bubble' | 'narration'; scene: boolean; items: RunItem[]; caret: boolean }
+    | { kind: 'plain'; blocks: string[]; live: boolean };
+  const pieces: Piece[] = [];
+  /**
+   * Markup that only dresses words goes where the words around it go: into the
+   * owner's bubble, the fallback reply's, or the narration. Elsewhere — a
+   * reader's turn, a scene with several speakers and no owner — it is drawn as
+   * it always was.
+   */
+  const dressed = (item: RunItem): boolean => {
+    if (mode === 'plain') return false;
+    if (speaker) pieces.push({ kind: 'speaker', name: speaker, items: [item], caret: item.live });
+    else if (mode === 'narration' || roster.length === 0) {
+      pieces.push({ kind: 'prose', box: mode === 'narration' ? 'narration' : 'bubble', scene: false, items: [item], caret: item.live });
+    } else return false;
+    return true;
+  };
+  segments.forEach((segment, index) => {
+    if (segment.kind === 'component') {
+      pieces.push({
+        kind: 'segment',
+        node: (
+          <ComponentFrame
+            code={componentContext!.code}
+            name={segment.name}
+            props={segment.props}
+            platform={componentContext!.platform}
+            errorLabel={t('componentError')}
+            navigatedLabel={t('componentNavigated')}
+            timeoutLabel={t('componentTimeout')}
+            retryLabel={common('retry')}
+            {...(componentContext!.onSuggestInput
+              ? { onSuggestInput: componentContext!.onSuggestInput }
+              : {})}
+            {...(componentContext!.onSendTurn
+              ? { onSendTurn: componentContext!.onSendTurn }
+              : {})}
+          />
+        ),
+      });
+      return;
+    }
+    if (segment.kind === 'html') {
+      if (inlineMarkup(segment.html) && dressed({ kind: 'island', text: segment.html, live: false })) return;
+      pieces.push({
+        kind: 'segment',
+        node: (
+          <div
+            className={MESSAGE_SCOPE_CLASS}
+            // Sanitized by lib/sanitizeHtml — the only place markup is trusted.
+            dangerouslySetInnerHTML={{ __html: segment.html }}
+          />
+        ),
+      });
+      return;
+    }
+    const own = runs[index]!;
+    own.forEach((run, at) => {
+      const liveRun = index === liveSegment && at === own.length - 1;
+      // A box of markup is the creator's own layout: never squeezed into a
+      // bubble, it stands in the flow at its full width.
+      if (run.html) {
+        const markup = run.blocks[0]!;
+        if (inlineMarkup(markup) && dressed({ kind: 'markup', text: markup, live: liveRun })) return;
+        pieces.push({ kind: 'segment', node: <HtmlBlock content={markup} live={liveRun} /> });
+        return;
+      }
+      if (run.name === null && !run.narration && mode === 'plain') {
+        pieces.push({ kind: 'plain', blocks: run.blocks, live: liveRun });
+        return;
+      }
+      for (const part of atHeadings(runItems(run.blocks, liveRun, sceneHeadings))) {
+        if ('heading' in part) pieces.push({ kind: 'heading', item: part.heading });
+        else if (run.name !== null) pieces.push({ kind: 'speaker', name: run.name, items: part.items, caret: liveRun });
+        else {
+          // The scene's own lines in a message with several speakers and no
+          // owner (written before group turns) are narration; so is a narration
+          // row's text. A reply with an owner has none: its unprefixed lines are
+          // the owner's. What names no one in the fallback row is the reply.
+          const box = run.narration || mode === 'narration' ? 'narration' : 'bubble';
+          pieces.push({ kind: 'prose', box, scene: run.narration, items: part.items, caret: liveRun });
+        }
+      }
+    });
+  });
+
+  // What one voice says around the markup that only dressed it is one bubble:
+  // pieces of one speaker, or of one box, that meet are one piece.
+  for (let at = pieces.length - 1; at > 0; at -= 1) {
+    const before = pieces[at - 1]!;
+    const piece = pieces[at]!;
+    const joins =
+      (before.kind === 'speaker' && piece.kind === 'speaker' && before.name === piece.name) ||
+      (before.kind === 'prose' && piece.kind === 'prose' && before.box === piece.box && before.scene === piece.scene);
+    if (!joins) continue;
+    pieces[at - 1] = { ...before, items: [...before.items, ...piece.items], caret: piece.caret } as Piece;
+    pieces.splice(at, 1);
+  }
+
+  // A continued turn (`continued`) said its speaker's name in the row above.
+  let named: string | null = continued && speaker ? speaker : null;
+  const first = pieces[0];
+  const headerInside = header !== undefined && first?.kind === 'speaker' && first.name !== named;
+  const last = pieces.at(-1);
+  const trailerInside =
+    trailer !== undefined && (last?.kind === 'speaker' || (last?.kind === 'prose' && last.box === 'bubble'));
+
+  const headerAbove = header !== undefined && !headerInside;
+
   return (
     <div
-      className={settling ? 'message-body shizue-settling' : 'message-body'}
+      className={cx('message-body', settling && 'shizue-settling', headerAbove && 'relative')}
       // Laid out, so the chat does not jump when it shows; not yet seen.
       {...(held ? { style: { visibility: 'hidden' }, 'data-held': '' } : {})}
     >
-      {segments.map((segment, index) => {
-        if (segment.kind === 'component') {
+      {pieces.map((piece, index) => {
+        const end = index === pieces.length - 1;
+        if (piece.kind === 'segment') return <Fragment key={index}>{piece.node}</Fragment>;
+        if (piece.kind === 'heading') {
+          // A new scene: whoever speaks next says their name again.
+          named = null;
+          return <SceneHeading key={index} text={piece.item.text} live={piece.item.live} />;
+        }
+        if (piece.kind === 'plain') {
           return (
-            <ComponentFrame
-              key={index}
-              code={componentContext!.code}
-              name={segment.name}
-              props={segment.props}
-              platform={componentContext!.platform}
-              errorLabel={t('componentError')}
-              navigatedLabel={t('componentNavigated')}
-              timeoutLabel={t('componentTimeout')}
-              retryLabel={common('retry')}
-              {...(componentContext!.onSuggestInput
-                ? { onSuggestInput: componentContext!.onSuggestInput }
-                : {})}
-              {...(componentContext!.onSendTurn
-                ? { onSendTurn: componentContext!.onSendTurn }
-                : {})}
-            />
+            <Fragment key={index}>
+              {piece.blocks.map((block, nth) => (
+                <MarkdownBlock key={nth} content={block} live={piece.live && nth === piece.blocks.length - 1} />
+              ))}
+            </Fragment>
           );
         }
-        if (segment.kind === 'html') {
-          return (
-            <div
-              key={index}
-              className={MESSAGE_SCOPE_CLASS}
-              // Sanitized by lib/sanitizeHtml — the only place markup is trusted.
-              dangerouslySetInnerHTML={{ __html: segment.html }}
+        if (piece.kind === 'prose') {
+          const drawn = (
+            <RunItems
+              items={piece.items}
+              box={piece.box}
+              caret={piece.caret && streaming}
+              {...(end && trailerInside ? { trailer } : {})}
             />
           );
-        }
-        const own = runs[index]!;
-        return own.map((run, at) => {
-          const liveRun = index === liveSegment && at === own.length - 1;
-          if (run.html) {
-            return <HtmlBlock key={`${index}:${at}`} content={run.blocks[0]!} live={liveRun} />;
-          }
-          const body = run.blocks.map((block, nth) => (
-            <MarkdownBlock
-              key={nth}
-              content={block}
-              live={liveRun && nth === run.blocks.length - 1}
-            />
-          ));
-          // The scene's own lines in a message with several speakers and no
-          // owner (written before group turns): no face, no name, the whole
-          // width — set apart from the lines that are spoken. A reply with an
-          // owner has none of these; its unprefixed lines are the owner's.
-          // The narrator proper is a narration row (MessageRow).
-          if (run.name === null) {
-            return run.narration ? (
-              <div
-                key={`${index}:${at}`}
-                data-testid="speech-narration"
-                className="speech-run text-muted italic"
-              >
-                {body}
-              </div>
-            ) : (
-              <Fragment key={`${index}:${at}`}>{body}</Fragment>
-            );
-          }
-          return (
-            <div
-              key={`${index}:${at}`}
-              data-testid="speech-character"
-              data-speaker={run.name}
-              className="flex gap-3"
-            >
-              <Avatar
-                src={roster.find((member) => member.name === run.name)?.avatarUrl ?? null}
-                name={run.name}
-                className="mt-0.5 size-9 text-sm"
-              />
-              <div className="min-w-0 flex-1">
-                <span className="text-xs font-medium text-muted">{run.name}</span>
-                <div className="speech-run mt-1">{body}</div>
-              </div>
+          return piece.scene ? (
+            <div key={index} data-testid="speech-narration" className="flex flex-col gap-3 italic text-muted">
+              {drawn}
             </div>
+          ) : (
+            <Fragment key={index}>{drawn}</Fragment>
           );
-        });
+        }
+        // A character's: the face and the name once, the bubbles under the name.
+        // Their next stretch in the same message — after a status window, say —
+        // keeps the column and says neither again.
+        const says = piece.name !== named;
+        named = piece.name;
+        return (
+          <div key={index} data-testid="speech-character" data-speaker={piece.name} className="flex gap-2.5">
+            {says ? (
+              <Avatar
+                src={roster.find((member) => member.name === piece.name)?.avatarUrl ?? null}
+                name={piece.name}
+                className="size-10 text-sm"
+              />
+            ) : (
+              <div aria-hidden="true" className="w-10 shrink-0" />
+            )}
+            <div className="flex min-w-0 flex-1 flex-col items-start gap-3">
+              {says ? (
+                <div className="-mb-2 flex min-h-5 items-center gap-2">
+                  <span className="chat-name text-xs font-medium text-muted">{piece.name}</span>
+                  {index === 0 && headerInside ? header : null}
+                </div>
+              ) : null}
+              <RunItems
+                items={piece.items}
+                box="bubble"
+                caret={piece.caret && streaming}
+                {...(end && trailerInside ? { trailer } : {})}
+              />
+            </div>
+          </div>
+        );
       })}
+      {trailer !== undefined && !trailerInside ? <div className="flex justify-end">{trailer}</div> : null}
+      {/* No name to stand beside (the message opens on a title or markup, or
+          continues the row above): over the gap above the message, taking no
+          room until it is shown. Last, so it is no sibling the spacing counts. */}
+      {headerAbove ? <div className="absolute bottom-full left-0 flex h-5 items-center gap-2">{header}</div> : null}
     </div>
   );
 });

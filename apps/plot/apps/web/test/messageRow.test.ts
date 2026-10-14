@@ -82,13 +82,37 @@ describe('a narrating user turn', () => {
     expect(host.textContent).toContain('문이 열리고 바람이 들이쳤다');
     expect(host.textContent).not.toContain('@:');
     // No speaker, no label and none of the bubble the reader's own lines get:
-    // a line down its side and italics mark it, as Zeta's does.
-    expect(narration!.querySelectorAll('span.text-xs')).toHaveLength(0);
+    // the ≡ at its start and italics mark it, as Zeta's does.
+    expect(narration!.querySelectorAll('.chat-name')).toHaveLength(0);
     expect(host.textContent).not.toContain('나레이션');
-    expect(narration!.querySelector('.border-l-2')?.classList.contains('italic')).toBe(true);
-    expect(host.querySelector('.bg-surface')).toBeNull();
-    expect(host.querySelector('.bg-mint-soft\\/50')).toBeNull();
-    expect(narration!.querySelector('.border-l-2')?.textContent).toContain('문이 열리고 바람이 들이쳤다');
+    const block = narration!.querySelector('.chat-narration')!;
+    expect(block.classList.contains('italic')).toBe(true);
+    expect(block.querySelector('svg')).not.toBeNull();
+    expect(host.querySelector('.chat-bubble, .user-bubble')).toBeNull();
+    expect(block.textContent).toContain('문이 열리고 바람이 들이쳤다');
+  });
+
+  it('keeps its actions out of the flow, and its offer in line with its text', () => {
+    render(row('@: 문이 열렸다\n\n>> 들어간다\n>> 돌아선다', 'assistant', { onSave: async () => undefined, onChoice: () => undefined }));
+
+    const narration = host.querySelector('[data-testid="message-narration"]')!;
+    // Over the gap above the row: nothing takes room until it is shown.
+    const edit = [...narration.querySelectorAll('button')].find((node) => node.textContent === '수정')!;
+    expect(edit.parentElement!.className).toContain('absolute');
+    expect(edit.parentElement!.className).toContain('bottom-full');
+    // Past the ≡ and its gap, where the narration's text starts — not past a face.
+    const offer = narration.querySelector('[data-testid="message-choices"]')!;
+    expect(offer.className).toContain('pl-6');
+    expect(offer.className).not.toContain('pl-12.5');
+  });
+
+  it('draws a `#` line as the scene’s title, outside the narration it opens', () => {
+    render(row('@: # 사역마와의 계약\n\n마법진이 빛난다.'));
+
+    const title = host.querySelector('[data-testid="scene-heading"]')!;
+    expect(title.querySelector('h1')?.textContent).toBe('사역마와의 계약');
+    expect(title.closest('.chat-narration')).toBeNull();
+    expect(host.querySelector('.chat-narration')?.textContent).toBe('마법진이 빛난다.');
   });
 
   it('still renders the markdown of its body', () => {
@@ -192,8 +216,8 @@ describe('a generated narration', () => {
     // No speaker, and none of the character's own chrome: no name, no avatar.
     expect(host.textContent).not.toContain('아리아');
     expect(host.querySelector('img')).toBeNull();
-    expect(narration!.querySelector('span.text-xs')).toBeNull();
-    expect(narration!.querySelector('.border-l-2.italic')).not.toBeNull();
+    expect(narration!.querySelector('.chat-name')).toBeNull();
+    expect(narration!.querySelector('.chat-narration.italic')).not.toBeNull();
   });
 });
 
@@ -343,7 +367,19 @@ describe('the furniture on a row', () => {
     expect(host.textContent).not.toContain('아리아');
     expect(host.querySelector('img')).toBeNull();
     // The avatar's space is kept, so the run stays in one column.
-    expect(host.querySelector('[data-testid="message-assistant"] > .size-9')).not.toBeNull();
+    expect(host.querySelector('[data-testid="message-assistant"] > .w-10')).not.toBeNull();
+  });
+
+  it('names the model that wrote a finished reply, outside its bubble, and nothing while it streams', () => {
+    render(row('눈이 그쳤다', 'assistant', { name: '아리아', model: 'GPT-5' }));
+    const label = host.querySelector('[data-testid="message-model"]')!;
+    expect(label.textContent).toBe('GPT-5');
+    expect(label.closest('.chat-bubble')).toBeNull();
+    // At the bubble's own corner: in the box the bubble sizes, after it.
+    expect(label.parentElement!.previousElementSibling?.classList.contains('chat-bubble')).toBe(true);
+
+    render(row('눈이 그', 'assistant', { name: '아리아', model: 'GPT-5', streaming: true }));
+    expect(host.querySelector('[data-testid="message-model"]')).toBeNull();
   });
 });
 

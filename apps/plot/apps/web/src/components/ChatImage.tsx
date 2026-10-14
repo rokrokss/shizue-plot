@@ -87,7 +87,7 @@ export function ChatImage({ src, alt }: { src?: string | undefined; alt: string 
         role="img"
         aria-label={t('imageError')}
         style={box}
-        className="my-2 flex max-h-96 max-w-full items-center justify-center rounded-xl border border-line bg-raised/40 px-4 py-6 text-xs text-muted"
+        className="chat-image my-2 flex max-h-96 max-w-full items-center justify-center rounded-xl border border-line bg-raised/40 px-4 py-6 text-xs text-muted"
       >
         {t('imageError')}
       </span>
@@ -96,7 +96,7 @@ export function ChatImage({ src, alt }: { src?: string | undefined; alt: string 
 
   return (
     <span
-      className="my-2 inline-block max-w-full overflow-hidden rounded-xl bg-cover bg-center align-middle"
+      className="chat-image my-2 inline-block max-w-full overflow-hidden rounded-xl bg-cover bg-center align-middle"
       style={placeholder ? { backgroundImage: `url(${placeholder})` } : undefined}
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}

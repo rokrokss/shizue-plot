@@ -168,6 +168,46 @@ describe('beside the speaker split', () => {
 });
 
 /**
+ * The bubble rule (docs/design/shizue-ui.md): a box of markup — a status window —
+ * is the creator's layout and stands outside the speaker's bubble at the flow's
+ * width; markup that only dresses words stays in the bubble with them.
+ */
+describe('a reply with markup in it, in its speaker’s bubbles', () => {
+  const owned = { roster: ROSTER, speaker: '아리아', mode: 'reply' };
+
+  it('stands a status window outside the bubbles, and says the name once', () => {
+    render({ ...owned, content: '*책을 덮는다.*\n\n<div class="hp">HP 10</div>\n\n가자.' });
+
+    const panel = host.querySelector('.message-html')!;
+    expect(panel.textContent).toBe('HP 10');
+    expect(panel.closest('.chat-bubble, [data-testid="speech-character"]')).toBeNull();
+    const bubbles = [...host.querySelectorAll('.chat-bubble')];
+    expect(bubbles.map((node) => node.textContent)).toEqual(['책을 덮는다.', '가자.']);
+    // The second stretch keeps the column and says neither face nor name again.
+    expect([...host.querySelectorAll('.chat-name')].map((node) => node.textContent)).toEqual(['아리아']);
+    expect(host.querySelectorAll('[data-testid="speech-character"]')).toHaveLength(2);
+  });
+
+  it('keeps a coloured line in the bubble it is part of', () => {
+    render({ ...owned, content: '*웃는다.*\n\n그럼 <span style="color:red">들어와.</span>\n\n어서.' });
+
+    const bubbles = [...host.querySelectorAll('.chat-bubble')];
+    expect(bubbles).toHaveLength(1);
+    expect(bubbles[0]!.querySelector('.message-html span')?.textContent).toBe('들어와.');
+    expect(bubbles[0]!.textContent).toContain('어서.');
+  });
+
+  it('dims the 지문 in the bubble and leaves the reader’s own bare', () => {
+    render({ ...owned, content: '*웃는다.* 안녕.' });
+    expect(host.querySelector('.chat-bubble em')?.textContent).toBe('웃는다.');
+
+    render({ content: '*손을 흔든다.* 안녕.' });
+    expect(host.querySelector('.chat-bubble')).toBeNull();
+    expect(host.querySelector('em')?.textContent).toBe('손을 흔든다.');
+  });
+});
+
+/**
  * A reader who turned custom UI off gets no frames, and the call codes the
  * frames would have stood in for read as the text they are — not as a tag the
  * HTML path draws as an unknown element, which is to say not at all.
