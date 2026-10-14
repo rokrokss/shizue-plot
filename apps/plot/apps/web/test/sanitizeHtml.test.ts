@@ -7,7 +7,8 @@
  * a creator's card running script is an incident.
  */
 import { describe, expect, it } from 'vitest';
-import { sanitizeCustomHtml } from '../src/lib/sanitizeHtml';
+import { parse } from '@adobe/css-tools';
+import { sanitizeCustomHtml, splitStylesheet } from '../src/lib/sanitizeHtml';
 import { TAINT } from '../src/lib/taint';
 
 /** Case-insensitive "the output does not contain any of these" assertion. */
@@ -230,7 +231,7 @@ describe('css', () => {
     expect(output).toContain('.shizue-msg .x-shizue-pk-q:hover::before');
     expect(output).toContain('width: 95vw');
     expect(output).not.toContain('all:');
-    expect(output).not.toContain('@keyframes');
+    expect(output).toContain('@keyframes x-shizue-pulse');
   });
 });
 
@@ -285,7 +286,6 @@ describe('css property and function allowlists', () => {
       'behavior:url(/x.htc)',
       'mix-blend-mode:difference',
       '-webkit-user-modify:read-write',
-      'animation:spin 1s',
       'backdrop-filter:blur(2px)',
     ]) {
       expectClean(`<style>.a{${declaration}}</style>`, declaration.split(':')[0]!);
@@ -353,8 +353,9 @@ describe('url resolution', () => {
 });
 
 describe('attributes and structure', () => {
-  it('drops id, so nothing can be targeted from outside the message', () => {
-    expectClean('<div id="app">x</div>', 'id=');
+  it('folds an id into the namespace, so it never names an element of the page', () => {
+    const output = expectClean('<div id="app">x</div>', 'id="app"');
+    expect(output).toContain('id="x-shizue-app"');
   });
 
   it('keeps the button bridge attribute and forces an inert button', () => {
@@ -532,5 +533,205 @@ describe('a member’s own stylesheet', () => {
 
   it('cannot be claimed by markup: a template writes no member attribute', () => {
     expectClean(`<div data-shizue-member="${member}" class="shizue-msg">x</div>`, 'data-shizue-member', 'class="shizue-msg"');
+  });
+});
+
+describe('CSS-only toggles', () => {
+  /** Sanitized markup inside a message wrapper, in a page that has chrome of its own. */
+  function mount(html: string): { page: HTMLElement; message: HTMLElement } {
+    document.body.innerHTML =
+      '<main id="page"><input type="checkbox" id="settings-open"><textarea id="composer"></textarea></main>' +
+      '<div class="shizue-msg" id="message"></div>';
+    const message = document.getElementById('message')!;
+    message.innerHTML = sanitizeCustomHtml(html);
+    return { page: document.getElementById('page')!, message };
+  }
+
+  it('keeps a checkbox, its label and the :checked rule that opens the panel', () => {
+    const output = sanitizeCustomHtml(
+      '<style>.panel{display:none}.t:checked ~ .panel{display:block}#t1:checked + label{color:red}</style>' +
+        '<input type="checkbox" id="t1" class="t" checked><label for="t1">열기</label><div class="panel">x</div>',
+    );
+    expect(output).toContain('.shizue-msg .x-shizue-t:checked ~ .x-shizue-panel');
+    expect(output).toContain('.shizue-msg #x-shizue-t1:checked + label');
+    expect(output).toMatch(/<input[^>]*type="checkbox"/);
+    expect(output).toMatch(/<input[^>]*id="x-shizue-t1"/);
+    expect(output).toMatch(/<input[^>]*checked/);
+    expect(output).toContain('<label for="x-shizue-t1">열기</label>');
+  });
+
+  it('flips the message’s own checkbox from its label', () => {
+    const { message } = mount('<input type="checkbox" id="t1"><label for="t1">열기</label>');
+    message.querySelector('label')!.click();
+    expect(message.querySelector<HTMLInputElement>('input')!.checked).toBe(true);
+  });
+
+  it('groups radios by a name in the namespace, so a tab bar switches', () => {
+    const output = sanitizeCustomHtml(
+      '<label><input type="radio" name="tab-3" checked>A</label><label><input type="radio" name="tab-3">B</label>',
+    );
+    expect(output.match(/name="x-shizue-tab-3"/g)).toHaveLength(2);
+    const { message } = mount(
+      '<label><input type="radio" name="tab" checked>A</label><label class="b"><input type="radio" name="tab">B</label>',
+    );
+    message.querySelector<HTMLElement>('label.x-shizue-b')!.click();
+    const [a, b] = Array.from(message.querySelectorAll<HTMLInputElement>('input'));
+    expect([a!.checked, b!.checked]).toEqual([false, true]);
+  });
+
+  it('never lets an id stand in for one of the page’s', () => {
+    mount('<div id="composer">가짜</div><input type="checkbox" id="settings-open">');
+    expect(document.getElementById('composer')!.tagName).toBe('TEXTAREA');
+    expect(document.getElementById('settings-open')!.closest('#page')).not.toBeNull();
+  });
+
+  it('points a label only at the creator’s own inputs, never at the page’s', () => {
+    const { page, message } = mount('<label for="settings-open">설정</label><label for="composer">입력</label>');
+    for (const label of Array.from(message.querySelectorAll('label'))) label.click();
+    expect(page.querySelector<HTMLInputElement>('#settings-open')!.checked).toBe(false);
+    expect(document.activeElement).not.toBe(page.querySelector('#composer'));
+    expect(message.innerHTML).toContain('for="x-shizue-settings-open"');
+  });
+
+  it('keeps no input but a checkbox or a radio', () => {
+    for (const type of ['text', 'password', 'hidden', 'submit', 'image', 'file', 'range', '']) {
+      expectClean(`<input type="${type}" name="q" src="/a.png" value="x">`, '<input');
+    }
+    expectClean('<input name="q">', '<input');
+    expect(sanitizeCustomHtml('<input type="CheckBox">')).toContain('type="checkbox"');
+  });
+
+  it('drops a name or an id with nothing left once it is folded', () => {
+    const output = sanitizeCustomHtml('<input type="radio" name="탭" id="상태">');
+    expect(output).not.toContain('name=');
+    expect(output).not.toContain('id=');
+  });
+});
+
+describe('animations', () => {
+  const member = '0a1b2c3d-0000-4000-8000-00000000000b';
+
+  it('keeps a sheet’s keyframes under its own name and points its animations at them', () => {
+    const output = sanitizeCustomHtml(
+      '<style>@keyframes blink{50%{opacity:0}}.b{animation:blink 1s steps(1) infinite}' +
+        '.c{animation-name:blink, none;animation-duration:2s}</style>',
+    );
+    expect(output).toContain('@keyframes x-shizue-blink');
+    expect(output).toContain('animation: x-shizue-blink 1s steps(1) infinite');
+    expect(output).toContain('animation-name: x-shizue-blink, none');
+    expect(output).toContain('animation-duration: 2s');
+  });
+
+  it('renames in a style attribute too, so a card never runs the page’s own animations', () => {
+    const output = sanitizeCustomHtml('<div style="animation: spin 1s linear infinite">x</div>');
+    expect(output).toContain('animation: x-shizue-spin 1s linear infinite');
+  });
+
+  it('holds every frame to the declaration filter', () => {
+    const output = expectClean(
+      '<style>@keyframes go{from{position:fixed;top:0}to{background:url(https://evil.test/x);opacity:1}}</style>',
+      'fixed',
+      'evil.test',
+    );
+    expect(output).toContain('@keyframes x-shizue-go');
+    expect(output).toContain('opacity: 1');
+  });
+
+  it('refuses an animation it cannot read rather than passing it through', () => {
+    for (const value of ['var(--animate-spin)', 'a\\3b position\\3a fixed', 'a b 1s', 'url(/x) 1s']) {
+      expect(sanitizeCustomHtml(`<style>.a{animation:${value}}</style>`)).not.toContain('animation');
+    }
+    expect(sanitizeCustomHtml('<style>@keyframes ease{to{opacity:1}}</style>')).toBe('');
+  });
+
+  it('keeps a member’s animations that member’s', () => {
+    const output = sanitizeCustomHtml('<style>@keyframes glow{to{opacity:1}}.g{animation:glow 1s}</style>', { member });
+    expect(output).toContain(`@keyframes x-shizue-${member}-glow`);
+    expect(output).toContain(`animation: x-shizue-${member}-glow 1s`);
+  });
+});
+
+describe('fonts', () => {
+  it('keeps a font face of our own origin under its own family, which the sheet then asks for first', () => {
+    const output = sanitizeCustomHtml(
+      '<style>@font-face{font-family:"Hand";src:url(/api/assets/hand.woff2) format("woff2");font-display:swap}' +
+        ".a{font-family:'Hand', -apple-system, serif}</style>",
+    );
+    expect(output).toContain('font-family: "x-shizue-Hand"');
+    expect(output).toContain('src: url(/api/assets/hand.woff2) format("woff2")');
+    expect(output).toContain('font-display: swap');
+    expect(output).toContain('font-family: "x-shizue-Hand", "Hand", "x-shizue--apple-system", -apple-system, serif');
+  });
+
+  it('drops a font face that loads from anywhere else, or from the reader’s machine', () => {
+    expectClean('<style>@font-face{font-family:F;src:url(https://fonts.example.test/f.woff)}</style>', '@font-face', 'example.test');
+    expectClean('<style>@font-face{font-family:Pretendard;src:local("Comic Sans MS")}</style>', '@font-face', 'comic');
+    expectClean('<style>@font-face{font-family:F}</style>', '@font-face');
+  });
+
+  it('never declares a family under the page’s own name', () => {
+    const output = sanitizeCustomHtml('<style>@font-face{font-family:"Pretendard Variable";src:url(/a.woff2)}</style>');
+    expect(output).toContain('font-family: "x-shizue-Pretendard Variable"');
+    expect(output).not.toMatch(/font-family:\s*"Pretendard Variable"/);
+  });
+
+  it('leaves a family list it cannot read as it was', () => {
+    const output = sanitizeCustomHtml('<style>.a{font-family:var(--font-sans)}</style>');
+    expect(output).toContain('font-family: var(--font-sans)');
+  });
+});
+
+describe('a long stylesheet, parsed a top-level block at a time', () => {
+  /** A sheet with every shape that could fool a cut: nesting, strings, comments and escapes holding braces and semicolons. */
+  const tricky = [
+    '@import url("https://fonts.example.test/a.css");',
+    '/* a { comment } with; braces */',
+    '.a::before { content: "}{;"; color: red }',
+    ".b[title='{x;}'] { color: blue; }",
+    '.c\\{ { margin: 0 }',
+    '@media (max-width: 600px) { .d { width: 1px } @supports (display: grid) { .e { display: grid } } }',
+    '@keyframes spin { from { opacity: 0 } to { opacity: 1 } }',
+    '@font-face { font-family: "F"; src: url(/api/plots/p1/assets/f.woff2) }',
+    'stray: junk; .f { color: green }',
+    '.g { background: url(/api/plots/p1/assets/x.png); }',
+  ].join('\n');
+
+  /** The parsed rules without their places in the source, which a cut moves. */
+  const rules = (css: string): unknown =>
+    JSON.parse(JSON.stringify(parse(css, { silent: true }).stylesheet.rules, (key, value) => (key === 'position' ? undefined : value)));
+
+  it('cuts only where a top-level block ends, and parses to the same rules as the whole', () => {
+    const pieces = splitStylesheet(tricky);
+    expect(pieces.length).toBeGreaterThan(5);
+    expect(pieces.join('').replace(/\s+/g, '')).toBe(tricky.replace(/\s+/g, ''));
+    expect(pieces.flatMap((piece) => rules(piece) as unknown[])).toEqual(rules(tricky));
+    expect(parse(tricky, { silent: true }).stylesheet.parsingErrors).toEqual([]);
+  });
+
+  it('sanitizes to what the whole sheet did', () => {
+    const output = sanitizeCustomHtml(`<style>${tricky}</style>`);
+    expect(output).not.toContain('@import');
+    expect(output).toContain('.shizue-msg .x-shizue-a::before {\n  content: "}{;";\n  color: red;\n}');
+    expect(output).toContain('@media (max-width: 600px) {\n  .shizue-msg .x-shizue-d');
+    expect(output).toContain('@keyframes x-shizue-spin');
+    expect(output).toContain('font-family: "x-shizue-F"');
+    // The junk before `.f` is read into its selector, as a whole parse reads it, and the rule goes.
+    expect(output).not.toContain('green');
+    expect(output).toContain('.shizue-msg .x-shizue-g {\n  background: url(/api/plots/p1/assets/x.png);\n}');
+    // Rules a line apart, as the library writes one sheet.
+    expect(output).toMatch(/color: red;\n\}\n\n@media/);
+  });
+
+  it('still drops a sheet the parser refuses anywhere in it', () => {
+    expect(sanitizeCustomHtml('<style>.a { color: red } } .b { color: blue }</style>')).toBe('');
+    expect(sanitizeCustomHtml('<style>.a { color: red } /* never closed .b { color: blue }</style>')).toBe('');
+    expect(sanitizeCustomHtml('<style>.a { color: red } .b { color: blue</style>')).toBe('');
+  });
+
+  it('keeps a quarter-megabyte sheet whole, every rule of it', () => {
+    const big = Array.from({ length: 7200 }, (_, i) => `.r${i} { color: #${(i % 4096).toString(16).padStart(3, '0')}; margin: ${i % 9}px }`).join('\n');
+    expect(big.length).toBeGreaterThan(250_000);
+    const output = sanitizeCustomHtml(`<style>${big}</style>`);
+    expect(output.match(/\.shizue-msg \.x-shizue-r\d+ \{/g)).toHaveLength(7200);
   });
 });

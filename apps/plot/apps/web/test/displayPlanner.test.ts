@@ -2,25 +2,20 @@
 /**
  * The half of the transform that can hang, and the thread it hangs on.
  *
- * Two things are proved here. That the shipped worker source — the very string the
- * blob is built from — plans a message correctly, since it is a function torn out
- * of its module by `toString()` and would fail silently if it had kept a reference
- * to anything. And that a pattern which never returns costs one worker and one
- * message, rather than the reader's tab.
+ * Two things are proved here. That the worker's job (`serveDisplayPlans`) plans a
+ * message correctly from what crosses to it — a context as data, sent once, and
+ * a request per message — and that a pattern which never returns costs one
+ * worker and one message, rather than the reader's tab.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  createDisplayPlanner,
-  displayPlanner,
-  displayPlannerSource,
-  type PlannerWorker,
-} from '../src/lib/displayPlanner';
+import { KEPT_CONTEXTS, serveDisplayPlans, type PlanWorkerScope } from '../src/lib/displayPlanJob';
+import { createDisplayPlanner, displayPlanner, type PlannerWorker, type PlanRequest } from '../src/lib/displayPlanner';
 import {
   displayContextAt,
   displayScriptsAt,
   PLAN_LIMITS,
-  planDisplayScripts,
   renderDisplayPlan,
+  transformDisplay,
   type DisplayContext,
   type DisplayPlan,
 } from '../src/lib/displayScripts';
@@ -34,7 +29,7 @@ const script = (overrides: Partial<DisplayScript> = {}): DisplayScript => ({
   ...overrides,
 });
 
-const context = (scripts: DisplayScript[]): DisplayContext => ({
+const context = (scripts: DisplayScript[], overrides: Partial<DisplayContext> = {}): DisplayContext => ({
   scripts,
   variables: { gold: '12' },
   assets: new Map(),
@@ -42,87 +37,92 @@ const context = (scripts: DisplayScript[]): DisplayContext => ({
   turn: 1,
   char: '아리아',
   user: '민준',
+  ...overrides,
 });
 
-/* -------------------------------------------------------------- the source */
+/* ----------------------------------------------------------------- the job */
 
-interface WorkerScope extends Record<string, unknown> {
-  onmessage?: ((event: { data: unknown }) => void) | undefined;
-}
-
-/** Runs the shipped worker source against a stand-in global, as the blob would. */
-function bootPlanner(): { send: (message: unknown) => void; sent: Record<string, unknown>[] } {
+/** The job against a stand-in global, as the worker entry runs it. */
+function bootJob(): { send: (message: unknown) => void; sent: Record<string, unknown>[] } {
   const sent: Record<string, unknown>[] = [];
-  const scope: WorkerScope = {
-    postMessage: (data: unknown) => sent.push(data as Record<string, unknown>),
+  const scope: PlanWorkerScope = {
+    onmessage: null,
+    postMessage: (data) => sent.push(structuredClone(data) as Record<string, unknown>),
   };
-  new Function('scope', displayPlannerSource('scope'))(scope);
-  return { send: (message) => scope.onmessage?.({ data: message }), sent };
+  serveDisplayPlans(scope);
+  // Everything crosses by structured clone, as it would between threads.
+  return { send: (message) => scope.onmessage?.({ data: structuredClone(message) }), sent };
 }
 
-describe('the worker source', () => {
+/** A context as the page sends it: data only. */
+const bindings = (ctx: DisplayContext): Record<string, unknown> => {
+  const { scripts: _scripts, resolveAsset: _resolver, ...rest } = ctx;
+  return rest;
+};
+
+describe('the worker’s job', () => {
   it('announces itself before it is asked for anything', () => {
-    expect(bootPlanner().sent).toEqual([{ type: 'ready' }]);
+    expect(bootJob().sent).toEqual([{ type: 'ready' }]);
   });
 
-  it('plans a status line, and the plan renders to the same markup', () => {
-    const planner = bootPlanner();
-    planner.send({
-      type: 'plan',
-      id: 7,
-      content: '앞 [status] hp=50 뒤',
-      scripts: [script()],
-      previousSameRole: '',
-    });
-    const answer = planner.sent[1]!;
+  it('plans a status line from a context it was sent once, and the plan sanitizes to the markup', () => {
+    const job = bootJob();
+    const ctx = context([script({ out: '<div class="hp">HP $1 · {{getvar::gold}} · {{chat_index}}</div>' })]);
+    job.send({ type: 'context', id: 1, bindings: bindings(ctx), scripts: ctx.scripts });
+    job.send({ type: 'plan', id: 7, context: 1, content: '앞 [status] hp=50 뒤', previousSameRole: '', chatIndex: 3 });
+    const answer = job.sent[1]!;
     expect(answer['type']).toBe('plan');
     expect(answer['id']).toBe(7);
-
     const plan = answer['plan'] as DisplayPlan;
-    // The message as pieces that remember whose words they are: the creator's
-    // template text, the model's capture inside it, and the prose around them.
-    expect(plan.body.map(({ kind, text }) => [kind, text])).toEqual([
-      ['text', '앞 '],
-      ['out', '<div class="hp">HP '],
-      ['capture', '50'],
-      ['out', '</div>'],
-      ['text', ' 뒤'],
+    // Prose, and the creator's markup with the bindings already read into it.
+    expect(plan.body).toEqual([
+      { kind: 'text', text: '앞 ' },
+      { kind: 'html', html: '<div class="hp">HP \u000250\u0003 · \u000112\u0001 · 3</div>' },
+      { kind: 'text', text: ' 뒤' },
     ]);
-    // One match, one island; prose belongs to none.
-    expect(plan.body.map((piece) => piece.island > 0)).toEqual([false, true, true, true, false]);
-    expect(new Set(plan.body.map((piece) => piece.island)).size).toBe(2);
-    // What the reader gets out of it, rendered on the other side.
-    const segments = renderDisplayPlan(plan, context([script()]))!;
-    expect(segments.map((segment) => (segment.kind === 'html' ? segment.html : segment.text))).toEqual([
-      '앞 ',
-      '<div class="x-shizue-hp">HP 50</div>',
-      ' 뒤',
+    // Sanitized on the other side, the marks taken off.
+    expect(renderDisplayPlan(plan)).toEqual([
+      { kind: 'text', text: '앞 ' },
+      { kind: 'html', html: '<div class="x-shizue-hp">HP 50 · 12 · 3</div>' },
+      { kind: 'text', text: ' 뒤' },
     ]);
   });
 
-  it('survives a structured clone, which is how the answer travels', () => {
-    const planner = bootPlanner();
-    planner.send({
-      type: 'plan',
-      id: 1,
-      content: '[status] hp=50',
-      scripts: [script({ in: '\\[status\\] hp=(?<hp>\\d+)', out: '<i>$<hp></i>' })],
-      previousSameRole: '',
+  it('builds the image resolver again from the names it was sent', () => {
+    const job = bootJob();
+    const ctx = context([script({ out: '<p>{{img::profile.png}}</p>' })], {
+      assets: new Map([['aria', '/api/plots/p1/assets/aria']]),
+      namedAssets: [{ slug: 'aria', name: 'profile.png' }],
     });
-    const plan = structuredClone(planner.sent[1]!['plan']) as DisplayPlan;
-    const segments = renderDisplayPlan(
-      plan,
-      context([script({ in: '\\[status\\] hp=(?<hp>\\d+)', out: '<i>$<hp></i>' })]),
-    )!;
-    expect(segments).toEqual([{ kind: 'html', html: '<i>50</i>' }]);
+    job.send({ type: 'context', id: 1, bindings: bindings(ctx), scripts: ctx.scripts });
+    job.send({ type: 'plan', id: 1, context: 1, content: '[status] hp=1', previousSameRole: '' });
+    const plan = job.sent[1]!['plan'] as DisplayPlan;
+    expect(renderDisplayPlan(plan)).toEqual([
+      { kind: 'html', html: '<p><img src="/api/plots/p1/assets/aria" alt="aria"></p>' },
+    ]);
   });
 
-  it('answers a message with nothing to do with null, and says nothing else', () => {
-    const planner = bootPlanner();
-    planner.send({ type: 'plan', id: 2, content: '안녕', scripts: [], previousSameRole: '' });
-    expect(planner.sent[1]).toEqual({ type: 'plan', id: 2, plan: null });
-    planner.send({ type: 'nonsense' });
-    expect(planner.sent).toHaveLength(2);
+  it('answers a message with nothing to do with null, one it holds no context for as missing, and nothing else', () => {
+    const job = bootJob();
+    job.send({ type: 'context', id: 1, bindings: bindings(context([])), scripts: [] });
+    job.send({ type: 'plan', id: 2, context: 1, content: '안녕', previousSameRole: '' });
+    expect(job.sent[1]).toEqual({ type: 'plan', id: 2, plan: null });
+    job.send({ type: 'plan', id: 3, context: 9, content: '안녕', previousSameRole: '' });
+    expect(job.sent[2]).toEqual({ type: 'plan', id: 3, plan: null, missing: true });
+    job.send({ type: 'nonsense' });
+    expect(job.sent).toHaveLength(3);
+  });
+
+  it('keeps the contexts it was sent last, as many as the page counts on', () => {
+    const job = bootJob();
+    const ctx = context([script()]);
+    for (let id = 1; id <= KEPT_CONTEXTS + 1; id += 1) {
+      job.send({ type: 'context', id, bindings: bindings(ctx), scripts: ctx.scripts });
+    }
+    job.send({ type: 'plan', id: 1, context: 1, content: '[status] hp=1', previousSameRole: '' });
+    job.send({ type: 'plan', id: 2, context: 2, content: '[status] hp=1', previousSameRole: '' });
+    expect(job.sent[1]!['missing']).toBe(true);
+    expect(job.sent[2]!['plan']).not.toBeNull();
   });
 });
 
@@ -134,6 +134,8 @@ class StubWorker implements PlannerWorker {
   onmessage: ((event: { data: unknown }) => void) | null = null;
   onerror: ((event: unknown) => void) | null = null;
   terminated = false;
+  /** Contexts it was sent. */
+  contexts: Record<string, unknown>[] = [];
   /** Requests it received and has not answered. */
   asked: Record<string, unknown>[] = [];
   /** When set, it takes requests and never answers — a pattern that will not return. */
@@ -149,14 +151,16 @@ class StubWorker implements PlannerWorker {
 
   postMessage(message: unknown): void {
     if (this.terminated) return;
-    this.asked.push(message as Record<string, unknown>);
+    const data = message as Record<string, unknown>;
+    if (data['type'] === 'context') this.contexts.push(data);
+    else this.asked.push(data);
   }
 
   /** Answers the oldest outstanding request with a plan of its own choosing. */
-  answer(plan: DisplayPlan | null): void {
+  answer(plan: DisplayPlan | null, extra: Record<string, unknown> = {}): void {
     const request = this.asked.shift()!;
     if (this.deaf || this.terminated) return;
-    this.onmessage?.({ data: { type: 'plan', id: request['id'], plan } });
+    this.onmessage?.({ data: { type: 'plan', id: request['id'], plan, ...extra } });
   }
 
   terminate(): void {
@@ -164,8 +168,10 @@ class StubWorker implements PlannerWorker {
   }
 }
 
-const EMPTY: DisplayPlan = { top: [], body: [{ kind: 'text', text: 'x', island: 0 }], bottom: [] };
-const request = { content: '[status] hp=50', scripts: [script()], previousSameRole: '' };
+const EMPTY: DisplayPlan = { top: [], body: [{ kind: 'text', text: 'x' }], bottom: [] };
+const SCRIPTS = [script()];
+const CONTEXT = context(SCRIPTS);
+const request: PlanRequest = { content: '[status] hp=50', scripts: SCRIPTS, previousSameRole: '', context: CONTEXT };
 
 describe('a worker that stops answering', () => {
   afterEach(() => {
@@ -173,10 +179,7 @@ describe('a worker that stops answering', () => {
     vi.useRealTimers();
   });
 
-  const start = () => {
-    const planner = createDisplayPlanner(() => new StubWorker());
-    return planner;
-  };
+  const start = () => createDisplayPlanner(() => new StubWorker());
 
   it('times nothing until the worker exists', async () => {
     vi.useFakeTimers();
@@ -206,7 +209,7 @@ describe('a worker that stops answering', () => {
     await expect(pending).resolves.toBeNull();
   });
 
-  it('gives the next message a thread of its own', async () => {
+  it('gives the next message a thread of its own, and sends it the context again', async () => {
     vi.useFakeTimers();
     const planner = start();
     const hung = planner.plan(request);
@@ -221,6 +224,7 @@ describe('a worker that stops answering', () => {
     const second = StubWorker.made[1]!;
     expect(second.terminated).toBe(false);
     second.ready();
+    expect(second.contexts).toHaveLength(1);
     second.answer(EMPTY);
     await expect(after).resolves.toEqual(EMPTY);
   });
@@ -243,8 +247,8 @@ describe('a worker that stops answering', () => {
     await expect(after).resolves.toBeNull();
   });
 
-  it('answers one at a time, in order', async () => {
-    const planner = createDisplayPlanner(() => new StubWorker());
+  it('answers one at a time, in order, sending a context once', async () => {
+    const planner = start();
     const first = planner.plan({ ...request, content: 'a' });
     const second = planner.plan({ ...request, content: 'b' });
     const worker = StubWorker.made[0]!;
@@ -255,13 +259,36 @@ describe('a worker that stops answering', () => {
     expect(worker.asked.map((message) => message['content'])).toEqual(['b']);
     worker.answer(null);
     await expect(second).resolves.toBeNull();
+    // One context for both, as data: the scripts beside it, no function in it.
+    expect(worker.contexts).toHaveLength(1);
+    expect(worker.contexts[0]!['scripts']).toBe(SCRIPTS);
+    expect(() => structuredClone(worker.contexts[0])).not.toThrow();
   });
 
   it('takes a worker that fails to start as a message to draw plainly', async () => {
-    const planner = createDisplayPlanner(() => new StubWorker());
+    const planner = start();
     const pending = planner.plan(request);
     StubWorker.made[0]!.onerror?.({ message: 'no' });
     await expect(pending).resolves.toBeNull();
+  });
+
+  it('lets go of a request every asker gave up on before its turn', async () => {
+    const planner = start();
+    const first = planner.plan({ ...request, content: 'a' });
+    const gone = new AbortController();
+    const stale = planner.plan({ ...request, content: 'b' }, gone.signal);
+    const third = planner.plan({ ...request, content: 'c' });
+    gone.abort();
+    const worker = StubWorker.made[0]!;
+    worker.ready();
+    worker.answer(EMPTY);
+    await first;
+    await expect(stale).resolves.toBeNull();
+    // Not asked, and not kept: drawn again, it is a question again.
+    expect(worker.asked.map((message) => message['content'])).toEqual(['c']);
+    expect(planner.cached({ ...request, content: 'b' })).toBeUndefined();
+    worker.answer(EMPTY);
+    await expect(third).resolves.toEqual(EMPTY);
   });
 });
 
@@ -288,18 +315,11 @@ describe('the answers it keeps', () => {
     expect(planner.cached(request)).toEqual(EMPTY);
     await expect(planner.plan(request)).resolves.toEqual(EMPTY);
     expect(worker.asked).toHaveLength(0);
-    // Its own text, scripts and previous turn: another message is another question.
+    // Its own text, previous turn, place and bindings: another message is another question.
     expect(planner.cached({ ...request, previousSameRole: '전' })).toBeUndefined();
+    expect(planner.cached({ ...request, chatIndex: 4 })).toBeUndefined();
+    expect(planner.cached({ ...request, context: context(SCRIPTS, { variables: { gold: '99' } }) })).toBeUndefined();
     expect(planner.cached({ ...request, scripts: [script({ out: '<b>$1</b>' })] })).toBeUndefined();
-  });
-
-  it('knows the scripts by what they say, so a plot read again keeps its answers', async () => {
-    const planner = createDisplayPlanner(() => new StubWorker());
-    const first = planner.plan(request);
-    StubWorker.made[0]!.ready();
-    StubWorker.made[0]!.answer(EMPTY);
-    await first;
-    expect(planner.cached({ ...request, scripts: [script()] })).toEqual(EMPTY);
   });
 
   it('asks once for a message drawn twice before its answer lands', async () => {
@@ -324,6 +344,15 @@ describe('the answers it keeps', () => {
     expect(planner.cached(request)).toBeNull();
     await expect(planner.plan(request)).resolves.toBeNull();
     expect(StubWorker.made).toHaveLength(1);
+  });
+
+  it('keeps nothing of an answer about a context the worker no longer held', async () => {
+    const planner = createDisplayPlanner(() => new StubWorker());
+    const pending = planner.plan(request);
+    StubWorker.made[0]!.ready();
+    StubWorker.made[0]!.answer(null, { missing: true });
+    await expect(pending).resolves.toBeNull();
+    expect(planner.cached(request)).toBeUndefined();
   });
 });
 
@@ -354,17 +383,16 @@ describe('the range a script runs in', () => {
     expect(displayContextAt(lone, 0)).toBe(lone);
 
     const all = context(scripts);
-    const at = (depth: number) => ({
-      content: 'far always',
-      scripts: displayContextAt(all, depth)!.scripts,
-      previousSameRole: '',
-    });
+    const at = (depth: number): PlanRequest => {
+      const narrowed = displayContextAt(all, depth)!;
+      return { content: 'far always', scripts: narrowed.scripts, previousSameRole: '', context: narrowed };
+    };
     expect(displayContextAt(all, 3)).toBe(displayContextAt(all, 9));
     const planner = createDisplayPlanner(() => new StubWorker());
     const asked = planner.plan(at(3));
     const worker = StubWorker.made[0]!;
     worker.ready();
-    expect((worker.asked[0]!['scripts'] as DisplayScript[]).map((one) => one.in)).toEqual(['far', 'always']);
+    expect((worker.contexts[0]!['scripts'] as DisplayScript[]).map((one) => one.in)).toEqual(['far', 'always']);
     worker.answer(EMPTY);
     await asked;
     // A turn later the message is deeper, its scripts the same: its plan is kept.
@@ -393,12 +421,21 @@ describe('the cooperative deadline', () => {
       clock += 30;
       return clock;
     };
-    const plan = planDisplayScripts(
-      'hp=1 hp=2 hp=3 hp=4 hp=5',
-      [script({ in: 'hp=(\\d)' })],
-      '',
+    const plan = transformDisplay(
+      { content: 'hp=1 hp=2 hp=3 hp=4 hp=5', scripts: [script({ in: 'hp=(\\d)' })], previousSameRole: '' },
+      CONTEXT,
       PLAN_LIMITS,
       now,
+    );
+    expect(plan).toBeNull();
+  });
+
+  it('gives up whole on CBS that reads more than it may, rather than showing a template’s source', () => {
+    const plan = transformDisplay(
+      { content: '[status] hp=50', scripts: [script({ out: '<b>{{getvar::gold}}</b>' })], previousSameRole: '' },
+      CONTEXT,
+      { ...PLAN_LIMITS, evaluated: 40 },
+      Date.now,
     );
     expect(plan).toBeNull();
   });

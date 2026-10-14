@@ -148,6 +148,8 @@ a, button, input, select, textarea, summary { -webkit-tap-highlight-color: trans
 .skip-link:focus { transform: translateY(0); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0s !important; }
+  /* A card's own `@keyframes` (lib/sanitizeHtml) stand still too. */
+  .shizue-msg *, .shizue-msg *::before, .shizue-msg *::after { animation: none !important; }
 }
 
 /*
@@ -174,6 +176,20 @@ a, button, input, select, textarea, summary { -webkit-tap-highlight-color: trans
   position: relative;
   isolation: isolate;
   contain: paint;
+}
+/* RisuAI's `{{button}}` (its `button-default`), in this palette; a card's own sheet comes later and wins. */
+.shizue-msg .x-shizue-button-default {
+  border: 1px solid var(--color-line);
+  border-radius: 0.5rem;
+  background: var(--color-surface);
+  color: var(--color-fg);
+  padding: 0.375rem 0.875rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.25rem;
+}
+.shizue-msg .x-shizue-button-default:hover {
+  background: var(--color-accent-hover);
 }
 .message-body > * + *,
 .intro-body > * + * {

@@ -3,8 +3,8 @@
  * The message body, mounted.
  *
  * This is where the two halves of the display transform meet: the plan arrives
- * from somewhere else and asynchronously, and the bindings are applied here on
- * every render. Both of the ways that can go wrong are about *time* — a plan that
+ * from somewhere else and asynchronously, made with the bindings it was asked
+ * with, and is sanitized here. Both of the ways that can go wrong are about *time* — a plan that
  * belongs to text the message no longer has, and a message that is still being
  * written — so they are only visible with the component actually mounted and the
  * planner actually answering late.
@@ -41,7 +41,7 @@ vi.mock('@/lib/displayPlanner', () => ({
 }));
 
 const { MessageBody } = await import('../src/components/MessageBody');
-const { planDisplayScripts, PLAN_LIMITS } = await import('../src/lib/displayScripts');
+const { transformDisplay, PLAN_LIMITS } = await import('../src/lib/displayScripts');
 
 const script: DisplayScript = {
   in: '\\[status\\] hp=(\\d+)',
@@ -65,8 +65,8 @@ const display = (overrides: Partial<DisplayContext> = {}): DisplayContext => ({
 });
 
 /** The plan the real worker would have sent back for this text. */
-const planFor = (content: string): unknown =>
-  planDisplayScripts(content, SCRIPTS, '', PLAN_LIMITS, Date.now);
+const planFor = (content: string, context: DisplayContext = display()): unknown =>
+  transformDisplay({ content, scripts: SCRIPTS, previousSameRole: '' }, context, PLAN_LIMITS, Date.now);
 
 // React refuses to believe `act` outside a test environment that says so.
 (globalThis as Record<string, unknown>)['IS_REACT_ACT_ENVIRONMENT'] = true;
@@ -128,7 +128,6 @@ describe('while the plan is outstanding', () => {
     const island = host.querySelector('.shizue-msg');
     expect(island).not.toBeNull();
     expect(island!.textContent).toContain('HP 50');
-    // The bindings were applied here, not in the plan.
     expect(island!.textContent).toContain('금화 12');
     expect(host.textContent).not.toContain('[status]');
   });
@@ -226,19 +225,21 @@ describe('when the message changes under a plan', () => {
     expect(host.querySelector('.shizue-msg')?.textContent).toContain('HP 9');
   });
 
-  it('re-renders a landed plan against new bindings without asking again', async () => {
+  it('keeps the plan it has on screen while it asks again for new bindings', async () => {
     const content = '[status] hp=50';
     render(createElement(MessageBody, { content, display: display() }));
     await land(planFor(content));
     expect(host.querySelector('.shizue-msg')?.textContent).toContain('금화 12');
 
-    // A `{{setvar}}` moved the variable. This is the case the split exists to keep
-    // synchronous: same plan, new bindings, no round trip.
-    render(
-      createElement(MessageBody, { content, display: display({ variables: { gold: '99' } }) }),
-    );
+    // A `{{setvar}}` moved the variable. RisuAI reads each script's output as CBS
+    // before the next one matches, so the plan reads the bindings and is asked for
+    // again — but the message's own plan stands meanwhile: no prose flashes.
+    const moved = display({ variables: { gold: '99' } });
+    render(createElement(MessageBody, { content, display: moved }));
+    expect(asked).toHaveLength(2);
+    expect(host.querySelector('.shizue-msg')?.textContent).toContain('금화 12');
+    await land(planFor(content, moved));
     expect(host.querySelector('.shizue-msg')?.textContent).toContain('금화 99');
-    expect(asked).toHaveLength(1);
   });
 });
 
@@ -293,5 +294,52 @@ describe('with a roster', () => {
     expect(host.querySelector('[data-testid="speech-character"]')?.getAttribute('data-speaker')).toBe(
       '아리아',
     );
+  });
+});
+
+describe('a reply that is all markup', () => {
+  const ROSTER = [{ id: 'c1', name: '아리아', avatarUrl: '/api/plots/p1/assets/aria' }];
+
+  it('still says whose it is: the face and the name over the markup', async () => {
+    const content = '[status] hp=50';
+    render(createElement(MessageBody, { content, display: display(), roster: ROSTER, speaker: '아리아', mode: 'reply' }));
+    await land(planFor(content));
+    const face = host.querySelector('[data-testid="speech-character"]')!;
+    expect(face.getAttribute('data-speaker')).toBe('아리아');
+    expect(face.textContent).toContain('아리아');
+    // The markup stands under it at its own width, not in the column beside the face.
+    expect(face.querySelector('.shizue-msg')).toBeNull();
+    expect(host.querySelector('.shizue-msg')!.textContent).toContain('HP 50');
+  });
+
+  it('says nothing again where the row above already said it, nor in a narration', async () => {
+    const content = '[status] hp=50';
+    render(
+      createElement(MessageBody, { content, display: display(), roster: ROSTER, speaker: '아리아', mode: 'reply', continued: true }),
+    );
+    await land(planFor(content));
+    expect(host.querySelector('[data-testid="speech-character"]')).toBeNull();
+  });
+});
+
+describe('a {{button}} in the message’s own prose', () => {
+  it('is a button that runs the trigger it names, as a template’s is', () => {
+    render(
+      createElement(MessageBody, {
+        content: '고르세요.\n\n{{button::Start war::war}}\n{{button::Peace::peace}}',
+        buttons: new Set(['war']),
+      }),
+    );
+    const [war, peace] = Array.from(host.querySelectorAll('button'));
+    expect(war!.textContent).toBe('Start war');
+    expect(war!.getAttribute('data-shizue-trigger')).toBe('war');
+    expect(peace!.getAttribute('data-shizue-fill')).toBe('peace');
+    expect(host.textContent).not.toContain('{{button');
+  });
+
+  it('stays as written with custom UI off', () => {
+    render(createElement(MessageBody, { content: '{{button::Start war::war}}' }));
+    expect(host.querySelector('button')).toBeNull();
+    expect(host.textContent).toContain('{{button::Start war::war}}');
   });
 });

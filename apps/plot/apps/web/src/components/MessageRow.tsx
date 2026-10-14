@@ -128,6 +128,7 @@ export const MessageRow = memo(function MessageRow({
   resolveAsset,
   attachments,
   display,
+  buttons,
   components,
   componentNames,
   roster = NO_ROSTER,
@@ -174,6 +175,11 @@ export const MessageRow = memo(function MessageRow({
   attachments?: ChatAttachment[];
   /** Display scripts and their bindings; omitted when custom UI is off. */
   display?: DisplayContext;
+  /**
+   * The manual triggers the message's own `{{button}}`s run (`MessageBody`
+   * `buttons`); omitted when custom UI is off.
+   */
+  buttons?: ReadonlySet<string>;
   /** Component code and its bindings; omitted when custom UI is off. */
   components?: ComponentContext;
   /** The declared components, even when custom UI is off, so their call codes show as text. */
@@ -501,6 +507,7 @@ export const MessageRow = memo(function MessageRow({
     assets,
     ...(resolveAsset ? { resolveAsset } : {}),
     ...(display ? { display } : {}),
+    ...(buttons ? { buttons } : {}),
     ...(components ? { components } : {}),
     ...(componentNames ? { componentNames } : {}),
     previousSameRole: previousSameRole ?? '',

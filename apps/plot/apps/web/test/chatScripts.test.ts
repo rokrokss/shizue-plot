@@ -9,7 +9,7 @@
  * sceneFocus.test.ts; the stream and the API are where the requests are read.
  */
 import { NextIntlClientProvider } from 'next-intl';
-import { act, createElement, type ReactNode } from 'react';
+import { act, createElement, StrictMode, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import messages from '../messages/ko.json';
@@ -41,6 +41,25 @@ let publicPlot: Record<string, unknown> = {};
 let refuseTurn = false;
 /** When set, the plot's public read waits for it. */
 let plotGate: Promise<void> | null = null;
+
+/** How many script runtimes the page built, and how many it let go. */
+const runtimeLife = { made: 0, disposed: 0 };
+vi.mock('@/lib/scripts/runtime', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../src/lib/scripts/runtime')>();
+  return {
+    ...original,
+    createScriptRuntime: (...args: Parameters<typeof original.createScriptRuntime>) => {
+      runtimeLife.made += 1;
+      const runtime = original.createScriptRuntime(...args);
+      const dispose = runtime.dispose.bind(runtime);
+      (runtime as { dispose: () => void }).dispose = () => {
+        runtimeLife.disposed += 1;
+        dispose();
+      };
+      return runtime;
+    },
+  };
+});
 
 vi.mock('@/i18n/navigation', async () => {
   const { createElement: h } = await import('react');
@@ -284,6 +303,8 @@ beforeEach(() => {
   publicPlot = {};
   refuseTurn = false;
   plotGate = null;
+  runtimeLife.made = 0;
+  runtimeLife.disposed = 0;
   store.delete('shizue.customUi');
   chatState = stateWith([greeting, message('m1', 'm0', 'user', '안녕'), message('m2', 'm1', 'assistant', '응.')]);
   host = document.createElement('div');
@@ -291,9 +312,12 @@ beforeEach(() => {
   root = createRoot(host);
 });
 
-afterEach(() => {
+afterEach(async () => {
   act(() => root.unmount());
   host.remove();
+  // The page gives its script runtimes back a tick after it goes; let that land
+  // here rather than in the next test's counts.
+  await new Promise((resolve) => setTimeout(resolve, 0));
 });
 
 describe('opening', () => {
@@ -757,6 +781,43 @@ describe('a work of two members', () => {
       message('m1', 'm0', 'user', '안녕'),
       message('m2', 'm1', 'assistant', '응.', { speakerMemberId: 'chr_2', groupTurnId: 'm2' }),
     ]);
+  });
+
+  it('builds the runtimes once both reads are in, and not again as the plot’s lands after the scripts’', async () => {
+    // A rebuild takes the Lua sandbox down with the set it replaces, and an
+    // `editDisplay` in flight with it.
+    let open!: () => void;
+    plotGate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    await render();
+    expect(runtimeLife.made).toBe(0);
+    await act(async () => open());
+    await act(async () => undefined);
+    expect(runtimeLife).toEqual({ made: 2, disposed: 0 });
+  });
+
+  it('builds the runtimes once under strict mode, and gives them back a tick after the page goes', async () => {
+    await act(async () => {
+      root.render(
+        createElement(StrictMode, null,
+          createElement(NextIntlClientProvider, {
+            locale: 'ko',
+            timeZone: 'Asia/Seoul',
+            messages,
+            children: createElement(ChatPage, { params: Promise.resolve({ id: 'cht_1' }) }) as ReactNode,
+          }),
+        ),
+      );
+    });
+    await act(async () => undefined);
+    await act(async () => undefined);
+    expect(runtimeLife).toEqual({ made: 2, disposed: 0 });
+    act(() => root.unmount());
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5)));
+    expect(runtimeLife).toEqual({ made: 2, disposed: 2 });
+    // The suite's own unmount finds nothing left to do.
+    root = createRoot(host);
   });
 
   it('chains both input passes on a send, and runs only the speaker’s start, naming it', async () => {

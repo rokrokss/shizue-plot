@@ -14,7 +14,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ChatBackground, MAX_BACKGROUND_RENDER_CHARS, renderBackground } from '../src/components/ChatBackground';
 import type { CbsContext } from '../src/lib/cbs';
-import { PLAN_LIMITS, planDisplayScripts } from '../src/lib/displayScripts';
+import { PLAN_LIMITS, transformDisplay } from '../src/lib/displayScripts';
 import type { DisplayScript } from '../src/lib/types';
 
 /** The planner is a module singleton and there is no `Worker` here, so it is replaced. */
@@ -90,7 +90,8 @@ const context: CbsContext = {
   user: '나',
 };
 
-const planFor = (content: string): unknown => planDisplayScripts(content, SCRIPTS, '', PLAN_LIMITS, Date.now);
+const planFor = (content: string): unknown =>
+  transformDisplay({ content, scripts: SCRIPTS, previousSameRole: '', background: true }, context, PLAN_LIMITS, Date.now);
 
 (globalThis as Record<string, unknown>)['IS_REACT_ACT_ENVIRONMENT'] = true;
 
@@ -130,7 +131,7 @@ describe('the background under the display scripts', () => {
 
   const html = '<div class="hud">HP %%HP%% · **굵게** <i>밤</i></div>';
 
-  it('draws what the scripts made of it — matched before CBS, no markdown, the moves moved', async () => {
+  it('draws what the scripts made of it — its CBS read first, as RisuAI reads it, no markdown, the moves moved', async () => {
     render(html);
     // Scenery with no prose to fall back to: nothing until the plan is in hand.
     expect(drawn()).toBeNull();

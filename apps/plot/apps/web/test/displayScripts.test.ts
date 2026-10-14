@@ -133,19 +133,39 @@ describe('applyDisplayScripts', () => {
     expect(html(segments)).toEqual(['<p>12 아리아 25</p>']);
   });
 
-  it('never lets a captured value introduce markup or a macro', () => {
+  it('reads a captured value as markup and CBS, as RisuAI does, and the sanitizer still holds it', () => {
+    // The owner's call of 2026-10-14 (`bindCapture`): the model's words in a
+    // template are the template's, as in RisuAI, and only the sanitizer stands
+    // between them and the page.
     const segments = applyDisplayScripts(
       'say:<img src=x onerror=alert(1)>',
       context([script({ in: 'say:(.*)', out: '<p>$1</p>' })]),
     );
-    expect(html(segments)[0]).toBe('<p>&lt;img src=x onerror=alert(1)&gt;</p>');
+    expect(html(segments)[0]).toBe('<p><img src="x"></p>');
 
     const macro = applyDisplayScripts(
       'say:{{button::라벨::텍스트}}',
       context([script({ in: 'say:(.*)', out: '<p>$1</p>' })]),
     );
-    expect(macro.filter((segment) => segment.kind === 'html')[0]).toBeDefined();
-    expect(html(macro)[0]).not.toContain('<button');
+    expect(html(macro)[0]).toBe(
+      '<p><button type="button" class="x-shizue-button-default" data-shizue-fill="텍스트">라벨</button></p>',
+    );
+  });
+
+  it('walks a list a capture holds, as RisuAI does', () => {
+    const segments = applyDisplayScripts(
+      'items:["검","방패"]',
+      context([script({ in: 'items:(.+)', out: '<ul>{{#each $1 as item}}<li>{{slot::item}}</li>{{/each}}</ul>' })]),
+    );
+    expect(html(segments)).toEqual(['<ul><li>검</li><li>방패</li></ul>']);
+  });
+
+  it('reads a macro a capture completes', () => {
+    const segments = applyDisplayScripts(
+      'stat:gold',
+      context([script({ in: 'stat:(\\w+)', out: '<b>{{getvar::$1}}</b>' })]),
+    );
+    expect(html(segments)).toEqual(['<b>12</b>']);
   });
 
   it('disables a script whose pattern does not compile', () => {
@@ -171,7 +191,22 @@ describe('chaining', () => {
     expect(html(applyDisplayScripts('[pic face]', context(scripts, { variables: { show: '1' } })))).toEqual([
       '<p><b>face</b></p>',
     ]);
-    expect(html(applyDisplayScripts('[pic face]', context(scripts, { variables: { show: '0' } })))).toEqual(['']);
+    // Read before the next script runs, as RisuAI reads it: the block is gone, and
+    // the later script finds nothing to rewrite.
+    expect(html(applyDisplayScripts('[pic face]', context(scripts, { variables: { show: '0' } })))).toEqual([]);
+  });
+
+  it('leaves a block one script opened for a later one to close', () => {
+    const segments = applyDisplayScripts(
+      '[a]',
+      context(
+        ordered(
+          { in: '\\[a\\]', out: '{{#if {{equal::{{getvar::gold}}::12}}}}<i>open [close]' },
+          { in: '\\[close\\]', out: 'shut</i>{{/if}}' },
+        ),
+      ),
+    );
+    expect(html(segments)).toEqual(['<i>open shut</i>']);
   });
 
   it('matches across the model’s words and an earlier script’s markup', () => {
@@ -188,9 +223,9 @@ describe('chaining', () => {
     expect(html(segments)).toEqual(['<div class="x-shizue-card"><i>5</i></div>']);
   });
 
-  it('never reads the model’s words as markup or syntax, however many scripts move them', () => {
+  it('reads the model’s words as RisuAI does, however many scripts move them, and nothing runs', () => {
     const segments = applyDisplayScripts(
-      '<pk-panel>{{getvar::secret}} {{/if}} $1 </div><script>alert(1)</script></pk-panel>',
+      '<pk-panel>{{getvar::secret}} <b>굵게</b><script>alert(1)</script><img src="x" onerror="alert(1)"></pk-panel>',
       context(
         ordered(
           {
@@ -198,16 +233,15 @@ describe('chaining', () => {
             out: '{{#if {{equal::1::1}}}}<div class="card">$1</div>{{/if}}',
           },
           // A later script reaches into the captured words and wraps part of them.
-          { in: 'secret', out: '<u>$&</u>' },
+          { in: '굵게', out: '<u>$&</u>' },
         ),
-        { variables: { secret: 'LEAKED' } },
+        { variables: { secret: 'SHOWN' } },
       ),
     );
     const [island] = html(segments);
-    expect(island).toContain('<div class="x-shizue-card">{{getvar::<u>secret</u>}} {{/if}} $1 ');
-    expect(island).toContain('&lt;/div&gt;&lt;script&gt;alert(1)&lt;/script&gt;</div>');
-    expect(island).not.toContain('LEAKED');
+    expect(island).toContain('<div class="x-shizue-card">SHOWN <b><u>굵게</u></b>');
     expect(island).not.toContain('<script');
+    expect(island).not.toContain('onerror');
   });
 
   it('lets $& put the model’s words back for a later script to match again', () => {
@@ -277,6 +311,49 @@ describe('chaining', () => {
     expect(html(applyDisplayScripts(content, bound({ chatIndex: 0, lastMessageId: 9 })))[0]).not.toContain(
       'image-container',
     );
+  });
+});
+
+describe('RisuAI’s order', () => {
+  const ordered = (...scripts: Partial<DisplayScript>[]): DisplayScript[] =>
+    scripts.map((overrides, order) => script({ order, ...overrides }));
+
+  it('reads the message’s own CBS before any script matches', () => {
+    const segments = applyDisplayScripts(
+      '{#if {{equal::{{getvar::gold}}::12}} #}보임',
+      context(ordered({ in: '\\{#if 1 #\\}', out: '' }, { in: '\\{#if 0 #\\}', out: '' })),
+    );
+    expect(segments).toEqual([{ kind: 'text', text: '보임' }]);
+  });
+
+  it('reads each script’s output again before the next one sees it', () => {
+    // A RisuAI card's picker (Ivy, Kang Seo-woo): one script writes a marker out
+    // of a condition, and a later one strips the marker the condition became.
+    const segments = applyDisplayScripts(
+      'R10 start.\n{#if {{equal::1::1}} #}R10 GREETING\n[PICK]',
+      context(
+        ordered(
+          { in: '\\[PICK\\]', out: '<div class="r10">{#if {{equal::1::0}} #}R10 PICKER</div>' },
+          { in: '\\{#if 1 #\\}', out: '' },
+          { in: '\\{#if 0 #\\}', out: '' },
+        ),
+      ),
+    );
+    expect(text(segments).join('')).toBe('R10 start.\nR10 GREETING\n');
+    expect(html(segments)).toEqual(['<div class="x-shizue-r10">R10 PICKER</div>']);
+  });
+
+  it('leaves the message’s pictures to its prose, and draws one a script takes into its markup', () => {
+    const assets = new Map([['smile', '/api/plots/c1/assets/smile']]);
+    const prose = applyDisplayScripts('앞 {{img::smile}} 뒤', context(ordered({ in: '없음', out: 'x' }), { assets }));
+    expect(prose).toEqual([{ kind: 'text', text: '앞 {{img::smile}} 뒤' }]);
+    const wrapped = applyDisplayScripts(
+      '앞 {{img::smile}} 뒤',
+      context(ordered({ in: '^[\\s\\S]*$', out: '<div class="wrap">$&</div>' }), { assets }),
+    );
+    expect(html(wrapped)).toEqual([
+      '<div class="x-shizue-wrap">앞 <img src="/api/plots/c1/assets/smile" alt="smile"> 뒤</div>',
+    ]);
   });
 });
 
@@ -635,11 +712,12 @@ describe('work that produces nothing', () => {
     expect(plain(segments, manyMatches)).toBe(true);
   });
 
-  it('does not reach the sanitizer even once', () => {
-    // The first match is charged for its template and for what it rendered before
-    // either is handed on, so a single hostile template costs nothing either.
-    const segments = applyDisplayScripts('hp=1', context([counter(hostile)]));
-    expect(plain(segments, 'hp=1')).toBe(true);
+  it('pays for what it hands the sanitizer before it hands it over', () => {
+    // The template's reads are paid for in the worker; what reaches this thread is
+    // charged before the sanitizer sees any of it, so two hostile islands are
+    // refused whole rather than sanitized one after the other.
+    const segments = applyDisplayScripts('hp=1 hp=1', context([counter(hostile)]));
+    expect(plain(segments, 'hp=1 hp=1')).toBe(true);
   });
 
   it('returns promptly rather than eventually', () => {

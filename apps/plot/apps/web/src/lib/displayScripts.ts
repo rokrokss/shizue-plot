@@ -12,6 +12,16 @@
  * never half-transformed, because a partial status window is a lie about the state
  * rather than a missing decoration.
  *
+ * ## RisuAI's order
+ *
+ * RisuAI's `processScriptFull` reads the whole message as CBS first, then runs
+ * each `editdisplay` script in order and reads what it produced as CBS again
+ * before the next script sees it. A card leans on that: one script writes
+ * `{#if {{equal::…}} #}` and a later one strips the `{#if 0 #}` it became, and a
+ * `{{getvar}}` in a script's output decides what the next one matches. So it is
+ * done that way here (`transformDisplay`): the message's own macros answered
+ * (`renderProse`), then each script, then its output read again (`reparse`).
+ *
  * ## Why this is in two halves
  *
  * The patterns are written by a stranger whose card the reader opened, and a
@@ -21,29 +31,25 @@
  * `hp=\d+ a+a+a+a+a+a+a+a+a+a+b` has no parentheses for a screen to look at and
  * doubles its running time for every two characters the model adds.
  *
- * So the matching is separated from the rendering:
+ * So the transform is separated from the sanitizing:
  *
- *   - `planDisplayScripts` runs every pattern and answers with *where* the matches
- *     are — plain data, no DOM, nothing evaluated. That is the half that can hang,
- *     so `lib/displayPlanner.ts` runs it in a worker it can terminate.
- *   - `renderDisplayPlan` turns a plan into markup: it binds the captures, renders
- *     the CBS template and sanitizes the result. That half needs a DOM (DOMPurify
- *     is the trust boundary and there is no DOM in a worker), and everything in it
- *     is bounded by construction.
- *
- * The split falls where the data does. A plan depends only on the message text,
- * the scripts and the previous message — all fixed once a message has finished
- * streaming — so it is computed once and kept. The rendering depends on the live
- * bindings (`{{getvar}}`, `{{rel::}}`, `{{turn}}`), so it stays synchronous and a
- * changed variable still redraws the status window on the next render, with no
- * round trip at all.
+ *   - `transformDisplay` runs every pattern and every read of CBS between them,
+ *     and answers with the message cut into prose and markup that is not yet
+ *     trusted. That is the half that can hang, so `lib/displayPlanner.ts` runs it
+ *     in a worker it can terminate. It reads the bindings (`{{getvar}}`,
+ *     `{{chat_index}}`, …) — a script's next match can depend on them — so a
+ *     changed variable asks the worker again.
+ *   - `renderDisplayPlan` puts the markup through the sanitizer. That half needs a
+ *     DOM (DOMPurify is the trust boundary and there is no DOM in a worker), and
+ *     it is bounded by the budget it charges.
  */
 
+import { unescapeCbs } from '@shizue/core/cbs';
 import { inDisplayDepth } from '@shizue/core/display-script';
 import { stripVariableMacros, type Variables } from '@shizue/core/variables';
-import { escapeHtml, renderTemplate, RenderBudgetExhausted, type CbsContext } from './cbs';
+import { renderProse, renderTemplate, RenderBudgetExhausted, type CbsContext } from './cbs';
 import { sanitizeCustomHtml } from './sanitizeHtml';
-import { stripTaint, taint } from './taint';
+import { CAPTURE_CLOSE, CAPTURE_OPEN, markCapture, stripTaint, taint, TAINT } from './taint';
 import type { DisplayScript } from './types';
 
 /** Where the per-browser custom-UI opt-out lives, like the hidden-tag set. */
@@ -162,8 +168,8 @@ export const MAX_WORKING_CHARS = 100_000;
 /** Total sanitized HTML one message may produce. */
 export const MAX_HTML_CHARS = 100_000;
 /**
- * Raw input the rendering half may take on across one message — charged *before*
- * the work, not measured after it.
+ * Raw input the sanitizer may take on across one message — charged *before* the
+ * work, not measured after it.
  *
  * This is not a duplicate of `MAX_HTML_CHARS`, and the difference is the whole
  * point. Sanitizing is what *discards* the expensive input: a `<style>` block of
@@ -173,10 +179,8 @@ export const MAX_HTML_CHARS = 100_000;
  * droppable stylesheet produced 8 characters each and blocked the main thread for
  * 8.5 seconds with `produced` at 800 of 100,000.
  *
- * So each match is charged for the template it is about to parse and again for the
- * string it is about to hand the sanitizer, before either happens. The second
- * charge is what catches the reverse shape too — a one-line template whose
- * `{{#each}}` fans out to a hundred kilobytes.
+ * So each island is charged for the string it is about to hand the sanitizer,
+ * before it does.
  *
  * The number is the same 100,000 as its neighbours (this, the intermediate cap in
  * `cbs.ts`, and the output cap above), which keeps all three holdable in one
@@ -186,26 +190,35 @@ export const MAX_HTML_CHARS = 100_000;
  */
 export const MAX_RENDER_INPUT_CHARS = 100_000;
 /**
- * Wall clock the matching half may spend, checked between matches.
+ * What the CBS reads of one message may take on, every read together: the
+ * message's own, each script's output read again before the next script, and
+ * the islands' last read. Charged before each read — the template — and again for
+ * what it produced, and for every variable the engine expands on the way. Four
+ * times the sanitizer's allowance, since an island is read more than once; it is
+ * paid in the worker, under the planner's deadline, not on the reader's thread.
+ */
+export const MAX_EVALUATED_CHARS = 4 * MAX_RENDER_INPUT_CHARS;
+/**
+ * Wall clock the matching may spend, checked between matches. The CBS reads in
+ * between are not counted against it: they have their own budget, and both are
+ * under the planner's own deadline.
  *
  * This is the cooperative half of the bound, and it holds for everything except a
  * single `exec` that never returns. The hard half is `lib/displayPlanner.ts`,
- * which runs the matching in a worker and terminates it — so this deadline is what
+ * which runs the transform in a worker and terminates it — so this deadline is what
  * keeps an *honest* transform from being slow, and termination is what keeps a
  * dishonest one from being fatal.
  */
 const TRANSFORM_DEADLINE_MS = 50;
 
-/**
- * The caps the matching half carries, passed in rather than closed over: that
- * function is stringified into a worker, so it can reach nothing but its arguments.
- */
+/** The caps the transform carries, passed in so a test can tighten them. */
 export interface PlanLimits {
   scanned: number;
   matches: number;
   segments: number;
   pieces: number;
   working: number;
+  evaluated: number;
   deadlineMs: number;
 }
 
@@ -215,6 +228,7 @@ export const PLAN_LIMITS: PlanLimits = {
   segments: MAX_SEGMENTS,
   pieces: MAX_PLAN_PIECES,
   working: MAX_WORKING_CHARS,
+  evaluated: MAX_EVALUATED_CHARS,
   deadlineMs: TRANSFORM_DEADLINE_MS,
 };
 
@@ -224,16 +238,16 @@ export const PLAN_LIMITS: PlanLimits = {
  * One run of the message as the scripts have rewritten it so far, and whose
  * words they are.
  *
- *   - `text`: the model's, never taken into a template — drawn as prose.
- *   - `capture`: the model's, taken into a template through `$1`, `$&` or
- *     `$<name>` — drawn inside that template's markup, escaped.
- *   - `out`: the creator's own template text — the only thing ever read as markup
- *     or as CBS.
+ *   - `text`: prose, outside any script's markup — drawn as the message's prose.
+ *   - `capture`: the model's words, or a value it controls, inside a script's
+ *     markup — taken in through `$1`, `$&` or `$<name>`, or a `{{getvar}}` the
+ *     markup read. Read as CBS like the rest (`bindCapture`), and marked, so a
+ *     link built out of one is the model's link.
+ *   - `out`: the creator's own markup, as the scripts and their reads made it.
  *
- * Where a word came from follows it through every later script. A pattern may
+ * Where a word came from follows it through every later script: a pattern may
  * match across all three kinds and a template may move any of them, but a
- * capture is never promoted to `out`: nothing the model wrote becomes markup by
- * being matched twice.
+ * capture is never promoted to `out`.
  *
  * `island` says which drawn block a piece belongs to — 0 for prose. Every match
  * starts a block of its own, and a match that begins or ends inside an earlier
@@ -246,39 +260,71 @@ export interface PlanPiece {
   island: number;
 }
 
-/** Where every island goes, before any of them has been rendered. */
+/**
+ * What a display pass makes of a message: prose, and markup that is not yet
+ * trusted (`renderDisplayPlan` sanitizes it). `top` and `bottom` are what
+ * `move_top`/`move_bottom` lifted, one block each.
+ */
 export interface DisplayPlan {
-  /** `move_top` matches, and the carry-over `repeat_back` reuses — one island each. */
-  top: PlanPiece[][];
-  body: PlanPiece[];
-  /** `move_bottom` matches, one island each. */
-  bottom: PlanPiece[][];
+  top: string[];
+  body: Segment[];
+  bottom: string[];
+}
+
+/** What a display pass is asked to rewrite. */
+export interface DisplayRequest {
+  content: string;
+  scripts: readonly DisplayScript[];
+  /** Raw text of the previous message with the same role, for `repeat_back`. */
+  previousSameRole: string;
+  /**
+   * The chat's background (`ChatBackground`) rather than a message: the creator's
+   * template from end to end, read as markup from the start, so its `{{getvar}}`s
+   * come out marked and its malformed source draws nothing.
+   */
+  background?: boolean;
 }
 
 /**
- * Runs every enabled script over the message and answers with what it became —
- * plain data, nothing evaluated. Returns null when the message should be left as
- * prose: no scripts, too long to scan, or a blown cap.
+ * How a capture — the model's words a script took with `$1`, `$&` or `$<name>` —
+ * enters the template it is bound into.
  *
- * The scripts **chain**, as RisuAI's and SillyTavern's do: each runs over what
- * the ones before it wrote, so a card can turn `<img src="x">` into markup in one
- * script and wrap the whole panel around it in the next. What keeps that safe is
- * that the text is never one string to a renderer — it is pieces that remember
- * who wrote them (`PlanPiece`), and the renderer reads only the creator's pieces
- * as template.
+ * The owner's call (2026-10-14), following RisuAI, whose `processScriptFull`
+ * reads each script's output as CBS whole: a capture is read as CBS like any
+ * other text there, the model's own macros included, and its markup is markup.
+ * Until then it was escaped twice over — HTML-escaped and brace-escaped — so
+ * nothing the model wrote became markup or syntax; this is the one place to put
+ * that back.
  *
- * **Self-contained by contract.** `lib/displayPlanner.ts` stringifies this function
- * into a worker, so it may not reference a single thing outside itself: no imports,
- * no module constants, no helpers from this file. The limits and the clock arrive
- * as arguments for that reason.
+ * What stays: it is marked (`markCapture`), so the sanitizer still finds a link
+ * built out of one to be the model's link, and its `{{setvar}}`s are protocol,
+ * hidden here as they are in prose. Whatever it becomes is still sanitized.
  */
-export function planDisplayScripts(
-  content: string,
-  scripts: readonly DisplayScript[],
-  previousSameRole: string,
+export const bindCapture = (text: string): string => markCapture(stripVariableMacros(stripTaint(text)));
+
+/**
+ * Runs every enabled script over the message the way RisuAI does, and answers
+ * with what it became — prose, and markup not yet sanitized. Returns null when
+ * the message should be left as prose: no scripts, too long to scan, or a blown
+ * cap.
+ *
+ * The order is RisuAI's: the message's own CBS first (`renderProse`, or for the
+ * background the template engine itself), then the scripts in order, each over
+ * what the ones before it wrote, the blocks a script touched read as CBS again
+ * before the next one runs. What keeps that safe is that the text is never one
+ * string to a renderer — it is pieces that remember who wrote them (`PlanPiece`),
+ * so prose stays prose and only what a script made is drawn as markup.
+ *
+ * It runs in the display worker (`lib/displayPlanner.ts`), which is why it needs
+ * no DOM: `ctx` is the bindings as they crossed to it.
+ */
+export function transformDisplay(
+  request: DisplayRequest,
+  ctx: CbsContext,
   limits: PlanLimits,
   now: () => number,
 ): DisplayPlan | null {
+  const { scripts, previousSameRole } = request;
   const ordered: { index: number; script: DisplayScript }[] = [];
   for (let i = 0; i < scripts.length; i += 1) {
     const script = scripts[i]!;
@@ -289,7 +335,7 @@ export function planDisplayScripts(
   if (ordered.length === 0) return null;
   // Scanning a wall of text with a creator's regex is the expensive case, and a
   // message this long is prose rather than a status block.
-  if (content.length > limits.scanned) return null;
+  if (request.content.length > limits.scanned) return null;
 
   type Piece = PlanPiece;
   type Match = RegExpExecArray & {
@@ -352,7 +398,7 @@ export function planDisplayScripts(
   /* -- the budget, shared by the whole run */
 
   /** Characters of rewritten text that exist, across body, top and bottom. */
-  let size = content.length;
+  let size = 0;
   /** Pieces created by expansions in this run — what a `$1` storm is caught by. */
   let created = 0;
   const grow = (chars: number): void => {
@@ -363,12 +409,42 @@ export function planDisplayScripts(
     created += 1;
     if (created > limits.pieces) throw OVER;
   };
+  /**
+   * Characters the CBS reads have taken on, paid before each read. Running out
+   * throws the engine's own `RenderBudgetExhausted`, the one thing the engine lets
+   * through: anything else thrown inside a read it would take for a malformed
+   * template, and answer with that template's source.
+   */
+  let evaluated = 0;
+  const charge = (chars: number): void => {
+    evaluated += chars;
+    if (evaluated > limits.evaluated) throw new RenderBudgetExhausted('evaluated');
+  };
+  let deadline = now() + limits.deadlineMs;
+  /** The bindings every read of a template sees; `{{bg::…}}` draws its picture only in the background. */
+  const evalCtx: CbsContext = request.background ? { ...ctx, background: true } : ctx;
+
+  /**
+   * A read of CBS, not counted against the matching's clock: the time it took is
+   * added back to the deadline.
+   */
+  const timed = <T>(read: () => T): T => {
+    const started = now();
+    try {
+      return read();
+    } finally {
+      deadline += now() - started;
+    }
+  };
 
   /* -- islands: which drawn block each piece belongs to */
 
   const parent: number[] = [0];
+  /** Blocks made by the script running now, whose output is read again after it. */
+  let madeByScript: number[] = [];
   const fresh = (): number => {
     parent.push(parent.length);
+    madeByScript.push(parent.length - 1);
     return parent.length - 1;
   };
   const find = (id: number): number => {
@@ -387,6 +463,58 @@ export function planDisplayScripts(
     const rb = find(b);
     if (ra !== rb) parent[rb] = ra;
   };
+
+  /* -- reading CBS */
+
+  /** A block's pieces as one template: the creator's text as it stands, the model's bound (`bindCapture`). */
+  const templateOf = (pieces: readonly Piece[]): string =>
+    pieces.map((piece) => (piece.kind === 'out' ? stripTaint(piece.text) : bindCapture(piece.text))).join('');
+
+  /**
+   * What a read of CBS made, cut back into pieces by its marks: what lies inside a
+   * capture's marks (`CAPTURE_OPEN`…`CAPTURE_CLOSE`) or a value's (`TAINT` pairs —
+   * the engine marks each value it writes, and never one inside another) is the
+   * model's; the rest is the creator's. The marks themselves go, so no later
+   * pattern ever sees one.
+   */
+  function cut(text: string, island: number, plain: Piece['kind'] = 'out'): Piece[] {
+    const pieces: Piece[] = [];
+    let depth = 0;
+    let value = false;
+    let run = '';
+    const flush = (): void => {
+      if (!run) return;
+      const kind: Piece['kind'] = depth > 0 || value ? 'capture' : plain;
+      const last = pieces[pieces.length - 1];
+      if (last && last.kind === kind) last.text += run;
+      else pieces.push({ kind, text: run, island });
+      run = '';
+    };
+    for (const char of text) {
+      if (char === CAPTURE_OPEN || char === CAPTURE_CLOSE || char === TAINT) {
+        flush();
+        if (char === CAPTURE_OPEN) depth += 1;
+        else if (char === CAPTURE_CLOSE) depth = Math.max(0, depth - 1);
+        else value = !value;
+      } else run += char;
+    }
+    flush();
+    return pieces;
+  }
+
+  /**
+   * A block read as CBS again before the next script sees it — RisuAI's re-parse
+   * of each script's output. Stand-ins stay stand-ins until the last read
+   * (`finish`), and a block a later script has yet to close is left as it is.
+   */
+  function reparse(pieces: Piece[], island: number): Piece[] {
+    const template = templateOf(pieces);
+    if (!template.includes('{{')) return pieces;
+    charge(template.length);
+    const rendered = timed(() => renderTemplate(template, evalCtx, charge, (source) => source, { unescape: false }));
+    charge(rendered.length);
+    return cut(rendered, island);
+  }
 
   /* -- the working text as pieces, addressed by offset into their concatenation */
 
@@ -529,7 +657,7 @@ export function planDisplayScripts(
     return pieces.map((piece) =>
       block
         ? { kind: piece.kind === 'text' ? 'capture' : piece.kind, text: piece.text, island }
-        : { kind: 'text', text: piece.text, island: 0 },
+        : { kind: piece.kind, text: piece.text, island: 0 },
     );
   }
 
@@ -545,15 +673,62 @@ export function planDisplayScripts(
     return count;
   }
 
+  /**
+   * Every run of `pieces` that belongs to one of `blocks`, read again
+   * (`reparse`); the rest as they were.
+   */
+  function reparseRuns(pieces: Piece[], blocks: ReadonlySet<number>): Piece[] {
+    const out: Piece[] = [];
+    let run: Piece[] = [];
+    const close = (): void => {
+      if (run.length > 0) out.push(...reparse(run, run[0]!.island));
+      run = [];
+    };
+    for (const piece of pieces) {
+      const island = piece.island === 0 ? 0 : find(piece.island);
+      if (island !== 0 && blocks.has(island)) {
+        if (run.length > 0 && run[0]!.island !== island) close();
+        run.push({ ...piece, island });
+      } else {
+        close();
+        out.push(piece);
+      }
+    }
+    close();
+    return out;
+  }
+
   const total = (pieces: Piece[]): number => pieces.reduce((sum, piece) => sum + piece.text.length, 0);
 
-  const deadline = now() + limits.deadlineMs;
   const top: Piece[][] = [];
   const bottom: Piece[][] = [];
-  let body: Piece[] = content ? [{ kind: 'text', text: content, island: 0 }] : [];
+  let body: Piece[];
 
   try {
-    for (const entry of ordered) {
+    // The message's own CBS first, as RisuAI reads it before any script runs. A
+    // message's is prose and stays text; the background's is the creator's
+    // template and is read as markup, its values marked.
+    if (request.background) {
+      charge(request.content.length);
+      const read = timed(() =>
+        renderTemplate(request.content, evalCtx, charge, () => '', { unescape: false }),
+      );
+      charge(read.length);
+      body = cut(read, 0, 'text');
+    } else {
+      charge(request.content.length);
+      const read = timed(() => renderProse(request.content, ctx, charge));
+      charge(read.length);
+      body = read ? [{ kind: 'text', text: read, island: 0 }] : [];
+    }
+    size = total(body);
+    if (size > limits.scanned) return null;
+
+    for (let step = 0; step < ordered.length; step += 1) {
+      const entry = ordered[step]!;
+      madeByScript = [];
+      const topBefore = top.length;
+      const bottomBefore = bottom.length;
       const pattern = compile(entry.script);
       if (!pattern) continue;
       const unicode = pattern.flags.includes('u') || pattern.flags.includes('v');
@@ -605,6 +780,17 @@ export function planDisplayScripts(
         }
       }
 
+      // What this script made is read as CBS again before the next one sees it.
+      // After the last one, the last read (`finish`) is the only one left.
+      if (step < ordered.length - 1 && madeByScript.length > 0) {
+        const blocks = new Set(madeByScript.map(find));
+        body = merge(reparseRuns(body, blocks));
+        for (let at = topBefore; at < top.length; at += 1) top[at] = merge(reparse(top[at]!, find(top[at]![0]?.island ?? 0)));
+        for (let at = bottomBefore; at < bottom.length; at += 1) {
+          bottom[at] = merge(reparse(bottom[at]!, find(bottom[at]![0]?.island ?? 0)));
+        }
+      }
+
       const pieces = body.length + top.reduce((sum, group) => sum + group.length, 0) +
         bottom.reduce((sum, group) => sum + group.length, 0);
       if (pieces > limits.pieces) return null;
@@ -615,103 +801,88 @@ export function planDisplayScripts(
       if (size > limits.working) return null;
       created = 0;
     }
+
+    return finish();
   } catch (error) {
-    if (error === OVER) return null;
+    if (error === OVER || error instanceof RenderBudgetExhausted) return null;
     throw error;
   }
 
-  return {
-    top: top.map(merge),
-    body: merge(body),
-    bottom: bottom.map(merge),
-  };
+  /**
+   * The last read of every block, as a template is read: the display unescape
+   * once at the end, and a source the parser refuses shown as its own escaped
+   * text — or, in the background, as nothing.
+   */
+  function finish(): DisplayPlan {
+    const island = (pieces: readonly Piece[]): string => {
+      const template = templateOf(pieces);
+      charge(template.length);
+      const rendered = timed(() =>
+        renderTemplate(template, evalCtx, charge, request.background ? () => '' : undefined),
+      );
+      charge(rendered.length);
+      return rendered;
+    };
+    const plan: DisplayPlan = { top: top.map(merge).map(island), body: [], bottom: bottom.map(merge).map(island) };
+    let block: Piece[] = [];
+    let prose = '';
+    const close = (): void => {
+      if (block.length > 0) plan.body.push({ kind: 'html', html: island(block) });
+      block = [];
+      if (prose) plan.body.push({ kind: 'text', text: prose });
+      prose = '';
+    };
+    for (const piece of merge(body)) {
+      if (piece.island === 0) {
+        if (block.length > 0) close();
+        // The background's prose is markup too, and its marked values stay marked
+        // for the sanitizer; a message's is the message's own text.
+        prose += request.background
+          ? unescapeCbs(piece.kind === 'capture' ? taint(piece.text) : piece.text, 'html')
+          : piece.text;
+      } else {
+        if (prose || (block.length > 0 && block[0]!.island !== piece.island)) close();
+        block.push(piece);
+      }
+    }
+    close();
+    return plan;
+  }
 }
 
 /* ------------------------------------------------------------- the rewriting */
 
 /**
- * Captured text comes from the model, so it is neutralized twice over: HTML-escaped
- * so it cannot introduce markup, and brace-escaped so it cannot introduce a macro
- * the creator did not write. It is then marked, for the same reason `{{getvar}}` is
- * — a capture is model output, and a link built out of one is the model's link.
- * Its `{{setvar}}`s are protocol, hidden here as they are in prose.
+ * Turns a plan into the segments to draw, its markup through the sanitizer.
+ * Returns null when the message should be left as prose.
+ *
+ * Two budgets, and they bound different things. `MAX_RENDER_INPUT_CHARS` is what
+ * the sanitizer is allowed to be handed, charged before the work;
+ * `MAX_HTML_CHARS` is what all the islands together are allowed to put on the
+ * page. Only the first of them can see work that produces nothing.
  */
-const escapeCapture = (text: string): string =>
-  taint(escapeHtml(stripVariableMacros(text)).replace(/\{/g, '&#123;').replace(/\}/g, '&#125;'));
-
-/**
- * Turns a plan into the segments to draw, with the bindings as they are *now* —
- * which is why this is not part of the plan and does not go near a worker. Returns
- * null when the message should be left as prose.
- *
- * An island's template is its pieces put back together: the creator's own text as
- * it was written, and the model's words escaped (`escapeCapture`). Only then is it
- * read as CBS — so a block one script opened and another closed parses as one, and
- * nothing the model wrote can be part of the syntax.
- *
- * Two budgets, and they bound different things. `MAX_RENDER_INPUT_CHARS` is what an
- * island is allowed to *cost*, charged before the work; `MAX_HTML_CHARS` is what all
- * of them together are allowed to put on the page. Only the first of them can see
- * work that produces nothing.
- *
- * One allowance runs through all of it — reassembly, the template engine, and the
- * sanitizer — because every one of those stages can be made to do a great deal and
- * hand back very little, and a stage that keeps its own books can always be asked
- * to open them again for the next island.
- */
-export function renderDisplayPlan(plan: DisplayPlan, ctx: DisplayContext): Segment[] | null {
+export function renderDisplayPlan(plan: DisplayPlan): Segment[] | null {
   let taken = 0;
   let produced = 0;
 
-  /** Pay first. A stage that has not been paid for does not run. */
-  const charge = (chars: number): void => {
-    taken += chars;
+  const island = (html: string): Segment => {
+    // Pay first. A stage that has not been paid for does not run.
+    taken += html.length;
     if (taken > MAX_RENDER_INPUT_CHARS) throw new RenderBudgetExhausted('input');
-  };
-
-  const island = (pieces: readonly PlanPiece[]): Segment => {
-    let template = '';
-    for (const piece of pieces) {
-      // Charged raw, before escaping or stripping allocates anything.
-      charge(piece.text.length);
-      // Stripped so that the only markers in the string handed to the sanitizer are
-      // the ones this render put there — a creator who typed a U+0001 does not get
-      // to say a link is trustworthy.
-      template += piece.kind === 'out' ? stripTaint(piece.text) : escapeCapture(piece.text);
-    }
-    // The engine charges the same allowance for every variable it reads, before it
-    // expands one, and throws rather than returning a small answer when it runs out.
-    const rendered = renderTemplate(template, ctx, charge);
-    // …and again before the sanitizer, which is both the expensive stage and the
-    // one that throws the input away.
-    charge(rendered.length);
-    const html = sanitizeCustomHtml(rendered);
-    produced += html.length;
+    const clean = sanitizeCustomHtml(html);
+    produced += clean.length;
     if (produced > MAX_HTML_CHARS) throw new RenderBudgetExhausted('html');
-    return { kind: 'html', html };
+    return { kind: 'html', html: clean };
   };
 
   try {
-    const segments: Segment[] = plan.top.map(island);
-    let block: PlanPiece[] = [];
-    const close = (): void => {
-      if (block.length > 0) segments.push(island(block));
-      block = [];
-    };
-    for (const piece of plan.body) {
-      if (piece.island === 0) {
-        close();
-        segments.push({ kind: 'text', text: piece.text });
-      } else {
-        if (block.length > 0 && block[0]!.island !== piece.island) close();
-        block.push(piece);
-      }
-    }
-    close();
-    segments.push(...plan.bottom.map(island));
-    return segments;
+    return [
+      ...plan.top.map(island),
+      ...plan.body.map((segment) => (segment.kind === 'html' ? island(segment.html) : segment)),
+      ...plan.bottom.map(island),
+    ];
   } catch (error) {
-    // Anything at all — a blown cap, a template that threw — leaves the message
+    // Anything at all — a blown cap, a sanitizer that threw — leaves the message
     // exactly as the model wrote it. Half a status window is worse than none.
     if (!(error instanceof RenderBudgetExhausted)) console.error('[display] transform failed', error);
     return null;
@@ -722,9 +893,9 @@ export function renderDisplayPlan(plan: DisplayPlan, ctx: DisplayContext): Segme
  * Both halves in one call, on this thread.
  *
  * This is what the transform *means*, and what the tests exercise; it is not how
- * the chat runs it. `MessageBody` plans in a worker and renders here, because the
- * planning half is the half a creator's pattern can hang. Anything that calls this
- * accepts that a pathological pattern stops the caller.
+ * the chat runs it. `MessageBody` transforms in a worker and sanitizes here,
+ * because the transform is the half a creator's pattern can hang. Anything that
+ * calls this accepts that a pathological pattern stops the caller.
  *
  * `previousSameRole` is the raw text of the previous message with the same role —
  * the only thing `repeat_back` needs, and the reason it is a parameter rather than
@@ -740,13 +911,13 @@ export function applyDisplayScripts(
   const plain: Segment[] = [{ kind: 'text', text: content }];
   let plan: DisplayPlan | null = null;
   try {
-    plan = planDisplayScripts(content, ctx.scripts, previousSameRole, PLAN_LIMITS, now);
+    plan = transformDisplay({ content, scripts: ctx.scripts, previousSameRole }, ctx, PLAN_LIMITS, now);
   } catch (error) {
     console.error('[display] transform failed', error);
     return plain;
   }
   if (!plan) return plain;
-  return renderDisplayPlan(plan, ctx) ?? plain;
+  return renderDisplayPlan(plan) ?? plain;
 }
 
 /**

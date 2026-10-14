@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { pickHashRand } from '@shizue/core/cbs';
-import { renderTemplate, RenderBudgetExhausted, type CbsContext } from '../src/lib/cbs';
+import { renderProse, renderProseButtons, renderTemplate, RenderBudgetExhausted, type CbsContext } from '../src/lib/cbs';
 import { TAINT, stripTaint } from '../src/lib/taint';
 
 const ctx = (overrides: Partial<CbsContext> = {}): CbsContext => ({
@@ -114,32 +114,71 @@ describe('names that belong to Object.prototype', () => {
 });
 
 describe('{{button}}', () => {
-  it('emits an inert button carrying the text to fill in', () => {
+  it('emits an inert button carrying the text to fill in, in RisuAI’s class', () => {
     expect(render('{{button::인사::안녕하세요}}')).toBe(
-      '<button type="button" data-shizue-fill="안녕하세요">인사</button>',
+      '<button type="button" class="button-default" data-shizue-fill="안녕하세요">인사</button>',
     );
   });
 
   it('uses the label as the fill text when only one argument is given', () => {
-    expect(render('{{button::안녕}}')).toBe('<button type="button" data-shizue-fill="안녕">안녕</button>');
+    expect(render('{{button::안녕}}')).toBe(
+      '<button type="button" class="button-default" data-shizue-fill="안녕">안녕</button>',
+    );
   });
 
-  it('escapes both the label and the fill text', () => {
+  it('escapes the fill text, and keeps the label the card’s markup, as RisuAI does', () => {
+    // The sanitizer is what holds the label, as it holds the rest of the template.
     expect(render('{{button::<b>::" onclick="alert(1)}}')).toBe(
-      '<button type="button" data-shizue-fill="&quot; onclick=&quot;alert(1)">&lt;b&gt;</button>',
+      '<button type="button" class="button-default" data-shizue-fill="&quot; onclick=&quot;alert(1)"><b></button>',
+    );
+  });
+
+  it('writes a label the model controls as text', () => {
+    expect(render('{{button::{{getvar::mood}}::x}}', { variables: { mood: '<b>angry</b>' } })).toBe(
+      '<button type="button" class="button-default" data-shizue-fill="x">&lt;b&gt;angry&lt;/b&gt;</button>',
     );
   });
 
   it('runs the plot’s manual trigger of that name, as RisuAI’s does, and fills the composer otherwise', () => {
     const triggerNames = new Set(['공격', '"x']);
     expect(render('{{button::베기::공격}}', { triggerNames })).toBe(
-      '<button type="button" risu-trigger="공격">베기</button>',
+      '<button type="button" class="button-default" risu-trigger="공격">베기</button>',
     );
     expect(render('{{button::인사::안녕}}', { triggerNames })).toBe(
-      '<button type="button" data-shizue-fill="안녕">인사</button>',
+      '<button type="button" class="button-default" data-shizue-fill="안녕">인사</button>',
     );
     // A trigger's name is escaped like any other value.
-    expect(render('{{button::a::"x}}', { triggerNames })).toBe('<button type="button" risu-trigger="&quot;x">a</button>');
+    expect(render('{{button::a::"x}}', { triggerNames })).toBe(
+      '<button type="button" class="button-default" risu-trigger="&quot;x">a</button>',
+    );
+  });
+
+  it('is drawn the same in a message’s own prose', () => {
+    const triggerNames = new Set(['war']);
+    expect(renderProseButtons('고르세요.\n\n{{button::Start war::war}}\n{{button::Peace::peace}}', triggerNames)).toBe(
+      '고르세요.\n\n<button type="button" class="button-default" risu-trigger="war">Start war</button>\n' +
+        '<button type="button" class="button-default" data-shizue-fill="peace">Peace</button>',
+    );
+    expect(renderProseButtons('no buttons {{getvar::x}}', triggerNames)).toBe('no buttons {{getvar::x}}');
+  });
+});
+
+describe('a message’s own text (renderProse)', () => {
+  const prose = (text: string, overrides?: Partial<CbsContext>): string => renderProse(text, ctx(overrides), generous());
+
+  it('answers its macros as text: neither escaped nor marked', () => {
+    expect(prose('{{char}}: HP {{getvar::hp}} <{{getvar::mood}}>', { variables: { hp: '40', mood: 'a&b' } })).toBe(
+      '아리아: HP 40 <a&b>',
+    );
+  });
+
+  it('leaves what only markup can draw for the markup that holds it', () => {
+    const text = '{{img::smile}} {{button::a::b}} {{source::user}} {{setvar::x::1}}';
+    expect(prose(text)).toBe(text);
+  });
+
+  it('reads past a stray brace the model wrote rather than giving up on the rest', () => {
+    expect(prose('{{ oops {{char}}')).toBe('{{ oops 아리아');
   });
 });
 
@@ -376,7 +415,8 @@ describe('RisuAI templates', () => {
   });
 
   it('lays out by the window width, as RisuAI cards do', () => {
-    vi.stubGlobal('window', { innerWidth: 500 });
+    vi.stubGlobal('innerWidth', 500);
+    vi.stubGlobal('innerHeight', 900);
     try {
       expect(render('{{#if {{? {{screen_width}} <= 768 }} }}좁음{{/if}}')).toBe('좁음');
     } finally {
@@ -603,7 +643,8 @@ describe('what the browser tells RisuAI’s functions', () => {
     expect(render('{{metadata::language}}', { locale: 'ko' })).toBe('ko');
     expect(render('{{comment::메모}}')).toBe('<div class="risu-comment">메모</div>');
     expect(render('{{unixtime}}')).toMatch(/^\d+$/);
-    vi.stubGlobal('window', { innerWidth: 500, innerHeight: 900 });
+    vi.stubGlobal('innerWidth', 500);
+    vi.stubGlobal('innerHeight', 900);
     try {
       expect(render('{{screen_width}}x{{screen_height}}')).toBe('500x900');
     } finally {

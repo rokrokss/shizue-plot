@@ -304,6 +304,16 @@ const NO_ATTACHMENTS: ChatAttachment[] = [];
 /** Held until the plot read lands, so a row's roster prop never changes for nothing. */
 const NO_MEMBERS: readonly PublicMember[] = [];
 
+/** A work whose scripts name no manual trigger: its `{{button}}`s fill the composer. */
+const NO_TRIGGERS: ReadonlySet<string> = new Set();
+
+/** One runtime per scripted member, the lead's among them, given back together. */
+interface ScriptRuntimes {
+  byMember: ReadonlyMap<string, ScriptRuntime>;
+  lead: ScriptRuntime;
+  dispose(): void;
+}
+
 /** The background's key among the messages the card's display scripts draw — an id no message has. */
 const BACKGROUND_ITEM = 'background';
 
@@ -767,6 +777,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    * wrote it under (`{{img::profile.png}}`), which no slug can stand in for.
    */
   const resolveAsset = useMemo(() => assetResolver(assets), [assets]);
+  /** The same names as data, for the display worker to build the resolver again (`CbsContext.namedAssets`). */
+  const namedAssets = useMemo(() => assets.map((asset) => ({ slug: asset.slug, name: asset.name })), [assets]);
 
   /** The gallery's rows: every image of the work, open or not. */
   const gallery = useMemo(() => illustrations(assets, locks ?? []), [assets, locks]);
@@ -1040,6 +1052,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       variables,
       assets: assetUrls,
       resolveAsset,
+      namedAssets,
       relationship: axes,
       turn,
       char: charMacro,
@@ -1060,6 +1073,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     variables,
     assetUrls,
     resolveAsset,
+    namedAssets,
     axes,
     turn,
     charMacro,
@@ -1118,6 +1132,16 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    */
   const displayOf = (row: Pick<ViewMessage, 'member' | 'spoken'>): DisplayContext | undefined =>
     row.member !== undefined && group ? (row.spoken ? displayByMember.get(row.member) : sceneDisplay) : display;
+  /**
+   * The manual triggers a row's own `{{button}}`s run, as a template's do: in a
+   * work of several, its speaker's, the lead's for a message no member speaks.
+   * Custom UI, so none with it off — the macro then reads as written.
+   */
+  const buttonsOf = (row: Pick<ViewMessage, 'member' | 'spoken'>): ReadonlySet<string> | undefined =>
+    customUi
+      ? ((group && row.member !== undefined && row.spoken ? triggerNamesByMember.get(row.member) : triggerNames) ??
+        NO_TRIGGERS)
+      : undefined;
   /** The background is the work's, drawn with the first member's display scripts — the untagged ones in a work of one. */
   const backgroundScripts = (firstMemberId !== null && scriptsByMember.get(firstMemberId)) || scripts;
   /**
@@ -1233,6 +1257,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             variables,
             assets: assetUrls,
             resolveAsset,
+            namedAssets,
             relationship: axes,
             turn,
             char: charMacro,
@@ -1252,6 +1277,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       variables,
       assetUrls,
       resolveAsset,
+      namedAssets,
       axes,
       turn,
       charMacro,
@@ -1307,9 +1333,43 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    * as RisuAI's outlive a chat — the persona and the chat's lore their scripts
    * rewrite, and in a work of several members every request names its member
    * (`group`).
+   *
+   * Built once what they are built from has all arrived — the scripts, and the
+   * plot read that says whether the work has several members — so the first load
+   * never builds a set only to replace it a moment later, taking a Lua start or
+   * `editDisplay` in flight down with the sandbox. Built in an effect rather than
+   * during the render, so the set disposed is always the set that was used; and
+   * given back a tick after its effect is cleaned up (`lingering`), so a remount
+   * from the same inputs — React's strict mode runs every effect's cleanup and
+   * the effect again — takes the same set back instead of starting another.
    */
-  const runtimes = useMemo<{ byMember: ReadonlyMap<string, ScriptRuntime>; lead: ScriptRuntime; dispose(): void } | null>(() => {
-    if (!scriptBundles?.length) return null;
+  const [runtimes, setRuntimes] = useState<ScriptRuntimes | null>(null);
+  const lingering = useRef<{ made: ScriptRuntimes; from: readonly unknown[]; timer: ReturnType<typeof setTimeout> } | null>(
+    null,
+  );
+  useEffect(() => {
+    if (!scriptBundles?.length || !plotRead) {
+      setRuntimes(null);
+      return;
+    }
+    const from = [id, scriptBundles, scriptUi, group, reader] as const;
+    /** The cleanup that gives a set back, a tick late. */
+    const release = (made: ScriptRuntimes) => (): void => {
+      setRuntimes((current) => (current === made ? null : current));
+      const timer = setTimeout(() => {
+        if (lingering.current?.made === made) lingering.current = null;
+        // The lease on the sandbox goes with the runtimes that took it.
+        made.dispose();
+      }, 0);
+      lingering.current = { made, from, timer };
+    };
+    const kept = lingering.current;
+    if (kept && kept.from.every((input, at) => input === from[at])) {
+      clearTimeout(kept.timer);
+      lingering.current = null;
+      setRuntimes(kept.made);
+      return release(kept.made);
+    }
     const log = (entry: { kind: string; effect?: string; message: string }): void =>
       console.warn('[scripts]', entry.kind, entry.effect ?? '', entry.message);
     // The embedding search of `checkSimilarity` and Lua's `similarity`, one for both:
@@ -1390,7 +1450,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         return [bundle.memberId, runtime] as const;
       }),
     );
-    return {
+    const made: ScriptRuntimes = {
       byMember,
       lead: byMember.get(scriptBundles[0]!.memberId)!,
       dispose: () => {
@@ -1398,9 +1458,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         sandbox?.dispose();
       },
     };
-  }, [id, scriptBundles, scriptUi, group, reader]);
-  // The lease on the sandbox goes with the runtimes that took it.
-  useEffect(() => () => runtimes?.dispose(), [runtimes]);
+    setRuntimes(made);
+    return release(made);
+  }, [id, scriptBundles, scriptUi, group, reader, plotRead]);
   /** Where each moment's scripts run (`runtimeOf`). */
   const scriptCast = useMemo<ScriptCast | null>(
     () => (runtimes ? { byMember: runtimes.byMember, lead: runtimes.lead } : null),
@@ -1429,9 +1489,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   /**
    * The scripts fold the branch as the server does, from the plot's defaults, so
    * nothing runs before both reads are in: a turn sent in the meantime would be
-   * measured against the wrong starting state.
+   * measured against the wrong starting state. Nor before the runtimes that
+   * run them are built, a render after the reads (`runtimes`).
    */
-  const scriptsPending = scriptBundle === undefined || (scriptBundle !== null && plot === null);
+  const scriptsPending =
+    scriptBundle === undefined || (scriptBundle !== null && (plot === null || runtimes === null));
 
   /** The page's latest state, for the steps of a turn that outlive the render they began in. */
   const stateRef = useRef<ChatState | null>(null);
@@ -2983,6 +3045,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                         {...(displayContextAt(displayOf(message), meta.depth)
                           ? { display: displayContextAt(displayOf(message), meta.depth)! }
                           : {})}
+                        {...(buttonsOf(message) ? { buttons: buttonsOf(message)! } : {})}
                         {...(components ? { components } : {})}
                         componentNames={declaredComponents}
                         previousSameRole={meta.previousSameRole}

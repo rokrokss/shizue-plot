@@ -25,6 +25,7 @@ import {
   type BodySegment,
   type ComponentContext,
 } from '@/lib/componentCalls';
+import { renderProseButtons } from '@/lib/cbs';
 import { displayPlanner, type PlanRequest } from '@/lib/displayPlanner';
 import {
   renderDisplayPlan,
@@ -43,7 +44,7 @@ import { rehypeDialogueQuotes } from '@/lib/markdown/quotes';
 import { rehypeWordReveal } from '@/lib/markdown/reveal';
 import { isExternalUrl, isSameOriginUrl, MESSAGE_SCOPE_CLASS } from '@/lib/sanitizeHtml';
 import { speakerAliases, speechRuns } from '@/lib/speechRuns';
-import type { DisplayScript, PublicMember } from '@/lib/types';
+import type { PublicMember } from '@/lib/types';
 import { Avatar } from './Avatar';
 import { ChatImage } from './ChatImage';
 import { ComponentFrame } from './ComponentFrame';
@@ -218,9 +219,9 @@ interface RunItem {
   live: boolean;
 }
 
-/** The elements that dress words rather than lay out a box. */
+/** The elements that dress words rather than lay out a box — and a `{{button}}` among them. */
 const INLINE_TAGS = new Set([
-  'a', 'abbr', 'b', 'bdi', 'bdo', 'big', 'br', 'cite', 'code', 'data', 'del', 'dfn', 'em', 'font', 'i', 'ins',
+  'a', 'abbr', 'b', 'bdi', 'bdo', 'big', 'br', 'button', 'cite', 'code', 'data', 'del', 'dfn', 'em', 'font', 'i', 'ins',
   'kbd', 'mark', 'q', 'rp', 'rt', 'ruby', 's', 'samp', 'small', 'span', 'strike', 'strong', 'sub', 'sup', 'time',
   'tt', 'u', 'var', 'wbr',
 ]);
@@ -403,7 +404,8 @@ function useSettleFade(streaming: boolean): boolean {
 }
 
 /**
- * Asks the planner where this message's matches are, and holds the answer.
+ * Asks the planner what this message's display scripts make of it, and holds the
+ * answer.
  *
  * Null means draw it plain, and that covers three different situations on purpose:
  * the card has no scripts, the message is still streaming, and the plan has not
@@ -411,11 +413,12 @@ function useSettleFade(streaming: boolean): boolean {
  * terminated). All three want the same thing on screen — the message as the model
  * wrote it — and none of them wants a blank space while we decide.
  *
- * The plan is asked for once per settled message, and the planner keeps it: a
- * message drawn again — remounted, scrolled back in, its text back to one it had
- * — takes the kept plan on its first render and never shows as prose. What a
- * plan does *not* contain is the bindings, so a `{{setvar}}` moving a gauge
- * redraws from the plan already in hand, with no worker in the loop.
+ * The planner keeps what it answered: a message drawn again — remounted,
+ * scrolled back in, its text back to one it had — takes the kept plan on its
+ * first render and never shows as prose. A plan reads the bindings (RisuAI reads
+ * each script's output as CBS before the next one matches), so a `{{setvar}}`
+ * that moves a gauge asks again; until the answer lands, the message keeps the
+ * plan it was showing, made from the same text with the bindings as they were.
  *
  * One exception to "prose while we wait": a page opening cold — a reload, a
  * chat's first open — has no plan back yet and its worker is still starting, so
@@ -427,7 +430,8 @@ function useSettleFade(streaming: boolean): boolean {
  */
 function useDisplayPlan(
   content: string,
-  scripts: DisplayScript[] | undefined,
+  display: DisplayContext | undefined,
+  chatIndex: number | undefined,
   previousSameRole: string,
   streaming: boolean,
 ): { plan: DisplayPlan | null; held: boolean } {
@@ -437,13 +441,21 @@ function useDisplayPlan(
   // A half-streamed status block is not a status block: matching a line the
   // model is still in the middle of writing gets an answer about a state that
   // was never reported. It is worth the wait, and the wait is one turn.
-  const kept = useMemo(
-    () => (scripts && !streaming ? displayPlanner.cached({ content, scripts, previousSameRole }) : undefined),
-    [content, scripts, previousSameRole, streaming],
+  const request = useMemo<PlanRequest | null>(
+    () =>
+      display && !streaming
+        ? {
+            content,
+            scripts: display.scripts,
+            previousSameRole,
+            context: display,
+            ...(chatIndex !== undefined ? { chatIndex } : {}),
+          }
+        : null,
+    [content, display, chatIndex, previousSameRole, streaming],
   );
-  const [holding, setHolding] = useState(
-    () => scripts !== undefined && !streaming && kept === undefined && !displayPlanner.warm(),
-  );
+  const kept = useMemo(() => (request ? displayPlanner.cached(request) : undefined), [request]);
+  const [holding, setHolding] = useState(() => request !== null && kept === undefined && !displayPlanner.warm());
 
   useEffect(() => {
     if (!holding) return;
@@ -452,26 +464,28 @@ function useDisplayPlan(
   }, [holding]);
 
   useEffect(() => {
-    if (!scripts || streaming || kept !== undefined) return;
-    const asked: PlanRequest = { content, scripts, previousSameRole };
-    let live = true;
-    void displayPlanner.plan(asked).then((plan) => {
-      if (!live) return;
+    if (!request || kept !== undefined) return;
+    const asked = request;
+    // A request whose bindings moved on before its turn is not worth the worker's time.
+    const gone = new AbortController();
+    void displayPlanner.plan(asked, gone.signal).then((plan) => {
+      if (gone.signal.aborted) return;
       setAnswered({ asked, plan });
       setHolding(false);
     });
-    return () => {
-      live = false;
-    };
-  }, [content, scripts, previousSameRole, streaming, kept]);
+    return () => gone.abort();
+  }, [request, kept]);
 
   if (kept !== undefined) return { plan: kept, held: false };
   // A plan carries the message it was made from, so an edit does not get one
   // render of the text it replaced: until the new plan lands, there is no plan.
+  // Bindings that moved are another matter — the plan in hand is the same
+  // message's, and it stands until its successor lands.
   if (
+    !request ||
     !answered ||
     answered.asked.content !== content ||
-    answered.asked.scripts !== scripts ||
+    answered.asked.scripts !== request.scripts ||
     answered.asked.previousSameRole !== previousSameRole
   ) {
     return { plan: null, held: holding };
@@ -508,7 +522,8 @@ const COLD_HOLD_MS = 500;
  * turned custom UI off, or the character has no scripts — the whole message is
  * one text run and nothing else changes.
  *
- * The scripts' patterns are matched in a worker (`lib/displayPlanner`), so a
+ * The scripts — their patterns, and the CBS RisuAI reads before and between
+ * them — run in a worker (`lib/displayPlanner`), so a
  * message reads as prose until its plan arrives and then settles into its status
  * windows. For a settled message that is one round trip, and a message that is
  * still streaming is deliberately left as prose until it is not.
@@ -540,6 +555,7 @@ export const MessageBody = memo(function MessageBody({
   assets = NO_ASSETS,
   resolveAsset,
   display,
+  buttons,
   components: componentContext,
   componentNames,
   roster = NO_ROSTER,
@@ -567,6 +583,13 @@ export const MessageBody = memo(function MessageBody({
    * plan on every token.
    */
   display?: DisplayContext;
+  /**
+   * Draws the message's own `{{button::label::trigger}}`s as RisuAI does
+   * (`renderProseButtons`), running the manual triggers named here and filling
+   * the composer otherwise. Omitted when the viewer opted out of custom UI, which
+   * leaves the macro as written. Memoize it.
+   */
+  buttons?: ReadonlySet<string>;
   /** Omitted when the viewer opted out or the character declares no components. */
   components?: ComponentContext;
   /**
@@ -614,23 +637,23 @@ export const MessageBody = memo(function MessageBody({
 }) {
   const t = useTranslations('chat');
   const common = useTranslations('common');
-  const { plan, held } = useDisplayPlan(content, display?.scripts, previousSameRole, streaming);
+  const { plan, held } = useDisplayPlan(content, display, chatIndex, previousSameRole, streaming);
   const settling = useSettleFade(streaming);
 
   const segments = useMemo<BodySegment[]>(() => {
     const plain: Segment[] = [{ kind: 'text', text: content }];
-    // The plan says where the islands are; the bindings, which change on every
-    // token, are applied here and now.
-    const bound = display && chatIndex !== undefined ? { ...display, chatIndex } : display;
-    const base = bound && plan ? (renderDisplayPlan(plan, bound) ?? plain) : plain;
+    // The plan is the message as the scripts and their CBS made it; only the
+    // sanitizing is left, and it is done here, where there is a DOM.
+    const base = plan ? (renderDisplayPlan(plan) ?? plain) : plain;
     if (componentContext) return splitComponentCalls(base, componentContext.names);
     return componentNames ? escapeComponentCalls(base, componentNames) : base;
-  }, [content, display, chatIndex, componentContext, componentNames, plan]);
+  }, [content, componentContext, componentNames, plan]);
 
   /**
    * Each text segment, already resolved, attributed and cut into blocks. The
    * variable macros go first, over the whole segment, since one may hold a blank
-   * line. Then the segment is cut into prose and markup by block, and only then
+   * line, and the message's own `{{button}}`s become buttons (`buttons`), so the
+   * line that holds one is markup. Then the segment is cut into prose and markup by block, and only then
    * are the image references resolved — as markdown in prose, as `<img>` in
    * markup, where markdown is not read. A reference holds no blank line, so no
    * cut ever splits one. The speaker split runs over each stretch of prose; a
@@ -655,7 +678,8 @@ export const MessageBody = memo(function MessageBody({
       const aliases = speakerAliases(roster);
       return segments.map((segment) => {
         if (segment.kind !== 'text') return null;
-        return markupChunks(stripVariableMacros(segment.text)).flatMap((chunk): TextRun[] => {
+        const own = stripVariableMacros(segment.text);
+        return markupChunks(buttons ? renderProseButtons(own, buttons) : own).flatMap((chunk): TextRun[] => {
           if (chunk.html) {
             const markup = unescapeCbs(renderImageTokensAsHtml(chunk.text, assets, resolveAsset, userImage), 'html');
             return [{ name: null, narration: false, html: true, blocks: [markup] }];
@@ -674,7 +698,7 @@ export const MessageBody = memo(function MessageBody({
         });
       });
     },
-    [segments, assets, resolveAsset, roster, speaker, face?.name, userImage],
+    [segments, assets, resolveAsset, roster, speaker, face?.name, userImage, buttons],
   );
 
   // Only the very last block of the last run of text is still being written.
@@ -699,6 +723,9 @@ export const MessageBody = memo(function MessageBody({
    * it always was.
    */
   const voice = speaker ?? face?.name;
+  /** A speaker's face: their member picture, or the work's own for the work's own name. */
+  const avatarOf = (name: string): string | null =>
+    roster.find((member) => member.name === name)?.avatarUrl ?? (name === face?.name ? face.avatarUrl : null);
   const dressed = (item: RunItem): boolean => {
     if (mode === 'plain') return false;
     if (voice) pieces.push({ kind: 'speaker', name: voice, items: [item], caret: item.live });
@@ -791,8 +818,17 @@ export const MessageBody = memo(function MessageBody({
 
   // A continued turn (`continued`) said its speaker's name in the row above.
   let named: string | null = continued && voice ? voice : null;
+  /**
+   * A reply its display scripts turned wholly into markup — a status window, a
+   * scene picker — still says whose it is, as every RisuAI message does: the
+   * face and the name on a line of their own, the markup under them at its own
+   * width rather than squeezed into the column beside the face.
+   */
+  const lone =
+    mode === 'reply' && voice !== undefined && named === null && pieces.length > 0 &&
+    !pieces.some((piece) => piece.kind === 'speaker');
   const first = pieces[0];
-  const headerInside = header !== undefined && first?.kind === 'speaker' && first.name !== named;
+  const headerInside = header !== undefined && (lone || (first?.kind === 'speaker' && first.name !== named));
   const last = pieces.at(-1);
   const trailerInside =
     trailer !== undefined && (last?.kind === 'speaker' || (last?.kind === 'prose' && last.box === 'bubble'));
@@ -805,6 +841,15 @@ export const MessageBody = memo(function MessageBody({
       // Laid out, so the chat does not jump when it shows; not yet seen.
       {...(held ? { style: { visibility: 'hidden' }, 'data-held': '' } : {})}
     >
+      {lone ? (
+        <div data-testid="speech-character" data-speaker={voice} className="flex items-center gap-2.5">
+          <Avatar src={avatarOf(voice)} name={voice} className="size-10 text-sm" />
+          <div className="flex min-h-5 min-w-0 flex-1 items-center gap-2">
+            <span className="chat-name text-xs font-medium text-muted">{voice}</span>
+            {header}
+          </div>
+        </div>
+      ) : null}
       {pieces.map((piece, index) => {
         const end = index === pieces.length - 1;
         if (piece.kind === 'segment') return <Fragment key={index}>{piece.node}</Fragment>;
@@ -848,14 +893,7 @@ export const MessageBody = memo(function MessageBody({
         return (
           <div key={index} data-testid="speech-character" data-speaker={piece.name} className="flex gap-2.5">
             {says ? (
-              <Avatar
-                src={
-                  roster.find((member) => member.name === piece.name)?.avatarUrl ??
-                  (piece.name === face?.name ? face.avatarUrl : null)
-                }
-                name={piece.name}
-                className="size-10 text-sm"
-              />
+              <Avatar src={avatarOf(piece.name)} name={piece.name} className="size-10 text-sm" />
             ) : (
               <div aria-hidden="true" className="w-10 shrink-0" />
             )}

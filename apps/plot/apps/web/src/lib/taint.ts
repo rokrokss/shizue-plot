@@ -27,14 +27,28 @@
 /** Wraps a stretch of interpolated content. Never appears in output. */
 export const TAINT = '\u0001';
 
-const TAINT_RE = /\u0001/g;
+/**
+ * Open and close a capture — the model's words a display script bound into its
+ * template (`lib/displayScripts`). A pair rather than one mark, because a capture
+ * is evaluated as CBS and its own `{{getvar}}` comes out marked inside it: with
+ * one symmetric mark the inner pair would read as the outer one closing. Taint
+ * all the same, to everything that asks.
+ */
+export const CAPTURE_OPEN = '\u0002';
+export const CAPTURE_CLOSE = '\u0003';
+
+const MARKS_RE = /[\u0001-\u0003]/;
+const MARKS_GLOBAL_RE = /[\u0001-\u0003]/g;
 
 /** Marks a value as having come from model-controlled content. */
 export const taint = (value: string): string => `${TAINT}${value}${TAINT}`;
 
+/** Marks a display script's capture (`CAPTURE_OPEN`). */
+export const markCapture = (value: string): string => `${CAPTURE_OPEN}${value}${CAPTURE_CLOSE}`;
+
 /** Whether any part of this string was interpolated. */
-export const isTainted = (value: string): boolean => value.includes(TAINT);
+export const isTainted = (value: string): boolean => MARKS_RE.test(value);
 
 /** The same string with the bookkeeping removed. */
 export const stripTaint = (value: string): string =>
-  value.includes(TAINT) ? value.replace(TAINT_RE, '') : value;
+  MARKS_RE.test(value) ? value.replace(MARKS_GLOBAL_RE, '') : value;

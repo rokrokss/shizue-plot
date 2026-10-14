@@ -32,6 +32,7 @@ import {
   type CbsMessage,
   type CbsNode,
   type CbsValue,
+  type NamedAsset,
 } from '@shizue/core/cbs';
 import { readVariable } from '@shizue/core/variables';
 import { lookupAsset, type AssetResolver } from './assets';
@@ -48,6 +49,17 @@ export interface CbsContext {
   assets: ReadonlyMap<string, string>;
   /** Resolves a reference by an imported card's own image names too; slugs only without it. */
   resolveAsset?: AssetResolver;
+  /**
+   * The plot's images by slug and imported name — what `resolveAsset` is built
+   * from (`assetResolver`), so the display worker, which a function cannot reach,
+   * can build it again.
+   */
+  namedAssets?: readonly NamedAsset[];
+  /**
+   * The reader's window when the context was made, for `{{screen_width}}` where
+   * there is no window to ask — the display worker. Read live where there is one.
+   */
+  screen?: { width: number; height: number };
   /** Relationship axes 0-100, or null while the chat has none. */
   relationship: Record<string, number> | null;
   /** User turns taken on this branch, for `{{turn}}`. */
@@ -260,6 +272,24 @@ function attributePositions(nodes: CbsNode[]): Set<CbsNode> {
 
 /* ---------------------------------------------------------------- the host */
 
+/** A macro left exactly as it was written, for a later pass to answer. */
+const AS_WRITTEN: CbsValue = { text: '', deferred: true };
+
+/**
+ * RisuAI's `{{button::label::trigger}}`, as its CBS writes one —
+ * `<button class="button-default" risu-trigger="…">label</button>` — in a
+ * display script's output or in a message's own prose alike. It carries no
+ * behaviour of its own: the chat page delegates on its attribute, running the
+ * plot's manual trigger of that name (`risu-trigger`, which the sanitizer keeps
+ * under our name). A target that names no trigger is text, and the click puts it
+ * in the composer (`data-shizue-fill`). `label` is markup; the sanitizer is what
+ * holds it.
+ */
+export function buttonMarkup(label: string, target: string, triggerNames?: ReadonlySet<string>): string {
+  const attribute = triggerNames?.has(target) ? 'risu-trigger' : 'data-shizue-fill';
+  return `<button type="button" class="button-default" ${attribute}="${escapeHtml(target)}">${label}</button>`;
+}
+
 /**
  * The page's side of the evaluation.
  *
@@ -283,7 +313,7 @@ function attributePositions(nodes: CbsNode[]): Set<CbsNode> {
  * set anything. SillyTavern's `{{if}}` still finds it false: the core keeps the
  * word and the fact that nothing was set apart.
  */
-function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>): CbsHost {
+function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>, prose = false): CbsHost {
   // Own-property reads throughout: a variable may legitimately be called
   // `toString`, and inheriting one would put a function where a string belongs.
   const variable = (name: string): string | undefined => {
@@ -363,8 +393,17 @@ function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>): CbsHos
     // to the value; what the macro *emits* is marked again on the way out, so the
     // taint follows the value rather than the spelling.
     text: (raw) => ({ text: stripTaint(raw), untrusted: isTainted(raw) }),
+    // Prose is text for the message's own markdown to read, so it is written out
+    // as it is: escaping it here would show the entities, and marking it would put
+    // control characters into what the display scripts match.
     emit: (value) =>
-      value.markup ? value.text : value.untrusted ? taint(escapeHtml(value.text)) : escapeHtml(value.text),
+      prose
+        ? stripTaint(value.text)
+        : value.markup
+          ? value.text
+          : value.untrusted
+            ? taint(escapeHtml(value.text))
+            : escapeHtml(value.text),
     // A condition written as RisuAI writes it — with a macro inside — is RisuAI's
     // (`1` or `true`); one written out is ours, an expression.
     condition: (head) => (head.literal ? expressionHolds(head.value().text) : isCbsTrue(head.value().text)),
@@ -391,20 +430,17 @@ function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>): CbsHos
           return { text: String(ctx.relationship?.[axis] ?? 0) };
         }
         case 'button': {
-          // The only interactive element a template can produce. It carries no
-          // behaviour of its own — the chat page delegates on its attribute. RisuAI's
-          // `{{button::label::trigger}}` runs the plot's manual trigger of that name
-          // (`risu-trigger`, which the sanitizer keeps under our name); a target that
-          // names none is text, and the click puts it in the composer.
-          const label = call.args.at(1)?.value().text ?? '';
-          const fill = call.args.rest(2)?.value().text ?? label;
-          const attribute = ctx.triggerNames?.has(fill) ? 'risu-trigger' : 'data-shizue-fill';
-          return {
-            text: `<button type="button" ${attribute}="${escapeHtml(fill)}">${escapeHtml(label)}</button>`,
-            markup: true,
-          };
+          if (prose) return AS_WRITTEN;
+          const label = call.args.at(1)?.value();
+          const target = call.args.rest(2)?.value().text ?? label?.text ?? '';
+          // The label is markup as the card wrote it, as in RisuAI; one a value
+          // the model controls filled in is text, as every such value is.
+          const shown = label ? (label.untrusted ? escapeHtml(label.text) : label.text) : '';
+          return { text: buttonMarkup(shown, target, ctx.triggerNames), markup: true };
         }
       }
+      // What only markup can draw waits for the markup that holds it (`renderProse`).
+      if (prose && (call.name === 'bg' || call.name === 'source' || assetMacroKind(call.name))) return AS_WRITTEN;
       if (call.name === 'bg' && ctx.background) return backdrop(call);
       // RisuAI's `{{source::user}}` is the address of the reader's own picture, in
       // markup or out. `{{source::char}}` names the one character of a RisuAI chat,
@@ -456,9 +492,14 @@ function hostData(ctx: CbsContext): CbsHostData {
   if (ctx.assetNames) data.assets = { names: ctx.assetNames, display: ctx.assetNames };
   const zone = Intl.DateTimeFormat().resolvedOptions();
   data.clock = { now: new Date(), timeZone: zone.timeZone, locale: zone.locale };
-  if (typeof window !== 'undefined') {
-    // RisuAI cards lay out by them. The size when the message was drawn.
-    data.screen = { width: window.innerWidth, height: window.innerHeight };
+  // RisuAI cards lay out by them: the size when the message was drawn, or when
+  // the context left for the display worker. Asked of `globalThis` rather than
+  // `window`: the bundler folds `typeof window` to a constant in client code, a
+  // worker included, where there is no window to read.
+  const view = globalThis as { innerWidth?: unknown; innerHeight?: unknown };
+  if (ctx.screen) data.screen = ctx.screen;
+  else if (typeof view.innerWidth === 'number' && typeof view.innerHeight === 'number') {
+    data.screen = { width: view.innerWidth, height: view.innerHeight };
   }
   const browser = typeof navigator === 'undefined' ? undefined : navigator;
   data.meta = {
@@ -491,19 +532,66 @@ function hostData(ctx: CbsContext): CbsHostData {
  * stylesheet that gained its `:` or its `(` after being judged
  * (`src="https{{dec}}//…"`, `url{{(}}…`) would be one it never saw. The result is
  * never read as CBS again, so the restored braces stay braces.
+ *
+ * Except by a display pass, which reads a script's output as CBS again before the
+ * next script sees it, as RisuAI's does (`lib/displayScripts`): it asks for no
+ * unescape (`unescape: false`) until its last read, so a stand-in stays a stand-in
+ * through every read but that one.
  */
 export function renderTemplate(
   template: string,
   ctx: CbsContext,
   charge: (chars: number) => void,
   malformed: (template: string) => string = escapeHtml,
+  options: { unescape?: boolean } = {},
 ): string {
   const budget: Budget = { nodes: MAX_RENDERED_NODES, iterations: MAX_EACH_ITERATIONS, charge };
   try {
     const nodes = parseCbs(template, { strict: true });
-    return unescapeCbs(evaluateCbs(template, nodes, host(ctx, budget, attributePositions(nodes))), 'html');
+    const rendered = evaluateCbs(template, nodes, host(ctx, budget, attributePositions(nodes)));
+    return options.unescape === false ? rendered : unescapeCbs(rendered, 'html');
   } catch (error) {
     if (error instanceof RenderBudgetExhausted) throw error;
     return malformed(template);
   }
+}
+
+/**
+ * A message's own text through the same engine, as RisuAI reads a whole message
+ * before its display scripts run: still text, for the message's markdown to
+ * read. Values are written out as they are, neither escaped nor marked, and what
+ * only markup can draw — an image, a `{{button}}`, `{{bg}}`, `{{source}}` — is left
+ * as written: the prose path draws those itself (`renderImageTokens`,
+ * `renderProseButtons`), and a display script that takes one into its markup has
+ * it drawn there. The display unescape is left for the very end, as in a template.
+ * A text the parser rejects comes back unread.
+ */
+export function renderProse(text: string, ctx: CbsContext, charge: (chars: number) => void): string {
+  if (!text.includes('{{')) return text;
+  const budget: Budget = { nodes: MAX_RENDERED_NODES, iterations: MAX_EACH_ITERATIONS, charge };
+  try {
+    // Read leniently, as RisuAI reads a message: one stray `{{` the model wrote
+    // must not keep every macro after it from being answered.
+    const nodes = parseCbs(text);
+    return evaluateCbs(text, nodes, host(ctx, budget, new Set(), true));
+  } catch (error) {
+    if (error instanceof RenderBudgetExhausted) throw error;
+    return text;
+  }
+}
+
+/** `{{button::label::trigger}}` as a message's prose writes it — the label and the rest. */
+const PROSE_BUTTON = /\{\{button::([^{}]*?)(?:::([^{}]*))?\}\}/g;
+
+/**
+ * A message's own `{{button}}`s drawn as RisuAI draws them (`buttonMarkup`), so
+ * a greeting that offers its routes as buttons offers buttons, wired as a
+ * template's are. Before the message is cut into prose and markup, so the line
+ * that holds one is read as markup and sanitized as any is.
+ */
+export function renderProseButtons(text: string, triggerNames?: ReadonlySet<string>): string {
+  if (!text.includes('{{button::')) return text;
+  return text.replace(PROSE_BUTTON, (_macro, label: string, target?: string) =>
+    buttonMarkup(label, target ?? label, triggerNames),
+  );
 }

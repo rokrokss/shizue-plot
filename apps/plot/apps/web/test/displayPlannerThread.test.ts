@@ -4,32 +4,48 @@
  *
  * Everything else about the planner is exercised against a stand-in worker, which
  * proves the bookkeeping and nothing about the thing the bookkeeping is for. This
- * file runs the shipped planner source in an actual worker thread and gives it a
- * pattern that does not come back: a `Worker` is a `Worker`, `terminate()` is
- * `terminate()`, and what is being demonstrated — that a creator's regular
- * expression can no longer take the reader's thread with it — is the same claim in
- * a browser as it is here.
+ * file hosts the shipped job module (`displayPlanJob.ts`) in an actual worker
+ * thread and gives it a pattern that does not come back: a `Worker` is a
+ * `Worker`, `terminate()` is `terminate()`, and what is being demonstrated — that
+ * a creator's regular expression can no longer take the reader's thread with it —
+ * is the same claim in a browser as it is here.
  *
  * The pattern is one the authoring screen accepts, which is the point: it has no
  * parenthesised group for the screen to look at, and it is exponential in the
  * length of the line it scans.
  */
+import { pathToFileURL } from 'node:url';
 import { Worker as NodeWorker } from 'node:worker_threads';
 import { displayScriptPatternError } from '@shizue/core/display-script';
 import { describe, expect, it } from 'vitest';
-import {
-  createDisplayPlanner,
-  displayPlannerSource,
-  type PlannerWorker,
-} from '../src/lib/displayPlanner';
+import { createDisplayPlanner, type PlannerWorker } from '../src/lib/displayPlanner';
+import type { DisplayContext } from '../src/lib/displayScripts';
 import type { DisplayScript } from '../src/lib/types';
 
-/** The same source the blob is built from, wired to this runtime's message plumbing. */
+const JOB_MODULE = pathToFileURL(new URL('../src/lib/displayPlanJob.ts', import.meta.url).pathname).href;
+
+/**
+ * The job module as the worker entry serves it, over this runtime's message
+ * plumbing. Node reads the TypeScript as it is; the one thing it needs told is
+ * where an extensionless import of a sibling module points, which the bundler
+ * otherwise works out.
+ */
 const BOOTSTRAP = `
 const { parentPort } = require('node:worker_threads');
-const scope = { postMessage: (message) => parentPort.postMessage(message) };
+const { registerHooks } = require('node:module');
+registerHooks({
+  resolve(specifier, context, next) {
+    try {
+      return next(specifier, context);
+    } catch (error) {
+      if (/^\\.\\.?\\//.test(specifier) && !/\\.[a-z]+$/.test(specifier)) return next(specifier + '.ts', context);
+      throw error;
+    }
+  },
+});
+const scope = { onmessage: null, postMessage: (message) => parentPort.postMessage(message) };
 parentPort.on('message', (data) => { if (scope.onmessage) scope.onmessage({ data }); });
-${displayPlannerSource('scope')}
+import(${JSON.stringify(JOB_MODULE)}).then((job) => job.serveDisplayPlans(scope));
 `;
 
 const threads: NodeWorker[] = [];
@@ -50,10 +66,22 @@ function spawnThread(): PlannerWorker {
 
 const script = (overrides: Partial<DisplayScript> = {}): DisplayScript => ({
   in: '\\[status\\] hp=(\\d+)',
-  out: '<div>HP $1</div>',
+  out: '<div>HP $1 · {{getvar::gold}}</div>',
   order: 0,
   enabled: true,
   ...overrides,
+});
+
+const context = (scripts: DisplayScript[]): DisplayContext => ({
+  scripts,
+  variables: { gold: '12' },
+  assets: new Map(),
+  relationship: null,
+  turn: 1,
+  char: '아리아',
+  user: '민준',
+  // There is no window on a thread: the page sends the one it has.
+  screen: { width: 375, height: 812 },
 });
 
 /** No group to inspect, and doubling for every two characters the model adds. */
@@ -65,17 +93,26 @@ describe('a pattern that does not come back', () => {
     expect(displayScriptPatternError(CATASTROPHIC)).toBeNull();
   });
 
-  it('plans an ordinary message on a real thread', async () => {
+  it('plans an ordinary message on a real thread, its CBS read there', async () => {
     const planner = createDisplayPlanner(spawnThread);
+    const ctx = context([script()]);
     const plan = await planner.plan({
       content: '앞 [status] hp=50 뒤',
-      scripts: [script()],
+      scripts: ctx.scripts,
       previousSameRole: '',
+      context: ctx,
     });
-    // The provenance survives the thread boundary along with the text.
-    expect(plan?.body.map((piece) => piece.kind)).toEqual(['text', 'out', 'capture', 'out', 'text']);
+    expect(plan?.body).toEqual([
+      { kind: 'text', text: '앞 ' },
+      { kind: 'html', html: '<div>HP \u000250\u0003 · \u000112\u0001</div>' },
+      { kind: 'text', text: ' 뒤' },
+    ]);
+    // A card's phone layout reads the window the page sent, the thread having none.
+    const wide = context([script({ out: '{{#if {{? {{screen_width}} > 768 }}}}넓다{{/if}}{{screen_width}}' })]);
+    const laid = await planner.plan({ content: '[status] hp=1', scripts: wide.scripts, previousSameRole: '', context: wide });
+    expect(laid?.body).toEqual([{ kind: 'html', html: '375' }]);
     planner.stop();
-  });
+  }, 20_000);
 
   it('costs a thread and a message, and nothing else', async () => {
     const planner = createDisplayPlanner(spawnThread);
@@ -88,12 +125,11 @@ describe('a pattern that does not come back', () => {
       ticks += 1;
     }, 50);
 
+    const hanging = context([script({ in: CATASTROPHIC, out: '<div>x</div>' })]);
+    // The thread's own start-up is not the pattern's to pay for.
+    await planner.plan({ content: 'warm-up', scripts: hanging.scripts, previousSameRole: '', context: hanging });
     const started = Date.now();
-    const hung = await planner.plan({
-      content: FEEDS_IT,
-      scripts: [script({ in: CATASTROPHIC, out: '<div>x</div>' })],
-      previousSameRole: '',
-    });
+    const hung = await planner.plan({ content: FEEDS_IT, scripts: hanging.scripts, previousSameRole: '', context: hanging });
     const waited = Date.now() - started;
     clearInterval(beating);
 
@@ -105,14 +141,16 @@ describe('a pattern that does not come back', () => {
 
     // …and the next message gets a thread of its own, so one bad pattern does not
     // end the transform for the whole chat.
+    const ordinary = context([script()]);
     const after = await planner.plan({
       content: '[status] hp=50',
-      scripts: [script()],
+      scripts: ordinary.scripts,
       previousSameRole: '',
+      context: ordinary,
     });
-    expect(after?.body.map((piece) => piece.kind)).toEqual(['out', 'capture', 'out']);
+    expect(after?.body).toEqual([{ kind: 'html', html: '<div>HP \u000250\u0003 · \u000112\u0001</div>' }]);
     planner.stop();
-  }, 20_000);
+  }, 30_000);
 
   it('leaves nothing running behind it', async () => {
     // Every thread this file started is gone: the hung one was terminated rather
