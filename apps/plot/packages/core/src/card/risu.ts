@@ -134,6 +134,12 @@ export function displayScriptsFromExtensions(
 /** Longest stylesheet a plot may carry. A real RisuAI card's runs to a few tens of kilobytes. */
 export const MAX_CREATOR_CSS_LENGTH = 100_000;
 
+/**
+ * Longest background a plot may draw behind its chats — past it the chat's
+ * renderer, whose budget is this, would draw none of it anyway.
+ */
+export const MAX_BACKGROUND_HTML_LENGTH = 100_000;
+
 /** A complete `<style>` element and its body. */
 const STYLE_ELEMENT = /<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi;
 

@@ -69,6 +69,10 @@ describe('which plots are rewritten', () => {
     const stored = OLD.map((script) => Object.fromEntries(Object.entries(script).reverse()) as unknown as DisplayScript);
     expect(judgeDisplayOrder(stored, [{}, ordered])).toEqual({ kind: 'fix', scripts: NOW });
     expect(judgeDisplayOrder(NOW, [ordered])).toEqual({ kind: 'current' });
+    // Today's import tags them as the member's own, and that is current too — for that member's card.
+    const tagged = NOW.map((script) => ({ ...script, memberId: 'member-2' }));
+    expect(judgeDisplayOrder(tagged, [{}, ordered], ['member-1', 'member-2'])).toEqual({ kind: 'current' });
+    expect(judgeDisplayOrder(tagged, [ordered, {}], ['member-1', 'member-2'])).toEqual({ kind: 'edited' });
   });
 
   it('leaves scripts the creator changed', () => {

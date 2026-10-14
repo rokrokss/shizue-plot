@@ -489,3 +489,28 @@ describe("RisuAI's script buttons", () => {
     expect(output).not.toContain(TAINT);
   });
 });
+
+describe('a member’s own stylesheet', () => {
+  const member = '0a1b2c3d-0000-4000-8000-00000000000b';
+
+  it('reaches only the rows of that member’s messages, whatever its rules nest in', () => {
+    const output = sanitizeCustomHtml(
+      '<style>.status { color: red } @media (min-width: 1px) { .gauge b { width: 10px } }</style>',
+      { member },
+    );
+    expect(output).toContain(`[data-shizue-member="${member}"] .shizue-msg .x-shizue-status`);
+    expect(output).toContain(`[data-shizue-member="${member}"] .shizue-msg .x-shizue-gauge b`);
+    // No rule escapes to every message: each one names the member.
+    expect(output.match(/\.shizue-msg/g)).toHaveLength(2);
+    expect(output.match(/\[data-shizue-member="[^"]+"\] \.shizue-msg/g)).toHaveLength(2);
+  });
+
+  it('is nothing at all for a scope that is not a member id', () => {
+    expect(sanitizeCustomHtml('<style>.a { color: red }</style>', { member: '"] *, x[y="' })).toBe('');
+    expect(sanitizeCustomHtml('<style>.a { color: red }</style>', { member: '' })).toBe('');
+  });
+
+  it('cannot be claimed by markup: a template writes no member attribute', () => {
+    expectClean(`<div data-shizue-member="${member}" class="shizue-msg">x</div>`, 'data-shizue-member', 'class="shizue-msg"');
+  });
+});

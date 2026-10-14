@@ -88,6 +88,7 @@ export const MessageRow = memo(function MessageRow({
   componentNames,
   roster = NO_ROSTER,
   speaker,
+  member,
   typing,
   previousSameRole,
   chatIndex,
@@ -142,6 +143,12 @@ export const MessageRow = memo(function MessageRow({
    * (`speakerMemberId`) — the reply is that member's whole.
    */
   speaker?: string;
+  /**
+   * In a work of several members, whose message this is for its custom UI: that
+   * member's stylesheet dresses it (`data-shizue-member`, `sanitizeCustomHtml`)
+   * and its buttons run that member's scripts.
+   */
+  member?: string;
   /**
    * Whom the row is waiting on while `thinking`, in a round of several members:
    * drawn as their face and "{이름} 입력 중…".
@@ -293,6 +300,7 @@ export const MessageRow = memo(function MessageRow({
   return (
     <div
       data-testid={narration ? 'message-narration' : `message-${role}`}
+      {...(member ? { 'data-shizue-member': member } : {})}
       className={cx('group flex gap-3', isUser && !narration && !written && 'justify-end')}
     >
       {!isUser && !narration && !attributed ? (

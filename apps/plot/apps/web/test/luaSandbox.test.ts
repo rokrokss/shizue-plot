@@ -232,6 +232,27 @@ describe('the Lua sandbox', () => {
     expect((await done(sandbox, code + '\n')).vars).toEqual([['count', '1']]);
   });
 
+  it('keeps each member’s Lua state its own, mode by mode, and closes the one used longest ago past the cap', async () => {
+    const sandbox = sandboxWith();
+    const code = `count = 0
+      function onStart(id) count = count + 1 setChatVar(id, 'count', count) end`;
+    const count = async (member?: string) => {
+      const outcome = await sandbox.call(code, start, snapshot(), host, member);
+      if (outcome.kind !== 'done') throw new Error(`expected done, got ${JSON.stringify(outcome)}`);
+      return outcome.result.vars;
+    };
+    expect(await count('a')).toEqual([['count', '1']]);
+    // Another member's card, with the same code and mode, counts on its own…
+    expect(await count('b')).toEqual([['count', '1']]);
+    expect(await count('a')).toEqual([['count', '2']]);
+    // …and so does a work of one's, which names no member.
+    expect(await count()).toEqual([['count', '1']]);
+    // Past the cap the state used longest ago goes: b's, not a's.
+    for (let other = 0; other < LUA_LIMITS.engines - 2; other += 1) await count(`m${other}`);
+    expect(await count('a')).toEqual([['count', '3']]);
+    expect(await count('b')).toEqual([['count', '1']]);
+  });
+
   it('answers a false return as a stop, and calls a manual run’s global by name', async () => {
     const sandbox = sandboxWith();
     expect((await done(sandbox, 'function onInput(id) return false end', { kind: 'trigger', mode: 'input' })).stopSending).toBe(true);

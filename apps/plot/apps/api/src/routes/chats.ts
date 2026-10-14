@@ -1409,6 +1409,10 @@ async function regeneratePlan(
   // so the mode-specific trim of the replaced turns at the end still lines up.
   const memory = await buildMemoryInput(deps, chat, edited ? kept : path, lastUserText(kept));
   const gone = path.length - replaced.length;
+  // A member's round answers what stands before it, as `/reply` asked it: the
+  // reader's turn, with its ruling — or a reply, the scene going on without the
+  // reader (이어가기), which is told so again rather than handed an older turn's ruling.
+  const answersReader = !voice?.member || kept.at(-1)?.role === 'user';
 
   return {
     chatId: chat.id,
@@ -1431,7 +1435,7 @@ async function regeneratePlan(
     ...(context.narrator ? { narrator: context.narrator } : {}),
     // The user turn being answered is still on the branch, so its ruling comes
     // back with it — a regenerate is the same turn, judged the same way.
-    directions: lastUserDirections(kept),
+    ...(answersReader ? { directions: lastUserDirections(kept) } : {}),
     preset: getPreset(chat.preset),
     // The kept branch only: the head being replaced takes its delta with it, so
     // a regenerate starts from where the turn before it left things.
@@ -1459,7 +1463,7 @@ async function regeneratePlan(
           narration: true,
         }
       : {}),
-    ...(voice ? voicePlan(context, voice, null, group!.notLast) : {}),
+    ...(voice ? voicePlan(context, voice, null, group!.notLast, answersReader ? [] : [AUTO_CONTINUE_NUDGE]) : {}),
     // The head's parent or the head — the round's first reply's parent for a
     // round — or where the scripts left the branch.
     target: { kind: 'new', parentId: kept.at(-1)?.id ?? null },

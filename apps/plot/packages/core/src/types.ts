@@ -462,10 +462,21 @@ export interface PlotCustomUi {
   componentCode?: string;
   componentCapabilities?: ComponentCapability[];
   /**
-   * Each member's own stylesheet, by member id, in a work of several — scoped
-   * to the messages that member speaks, and to the untagged ones.
+   * Each member's own stylesheet, by member id, in a work of several — what
+   * `/characters/import` lifts off a companion's `backgroundHTML`. Scoped to the
+   * messages that member speaks (`data-shizue-member`); the work's first member
+   * also speaks for the messages no member is the speaker of. `css` above stays
+   * the work's, on every message.
    */
   memberCss?: Record<string, string>;
+  /**
+   * The HTML drawn behind the chat — one for the whole work, as a RisuAI group
+   * has its own `backgroundHTML` and draws no member's. The import lifts it off
+   * the first card (past its `<style>`, which is `css`), and the creator may edit
+   * it; '' draws nothing. Absent on a plot from before the field, which draws
+   * what it always drew: the scripted member's card background.
+   */
+  backgroundHtml?: string;
 }
 
 /**

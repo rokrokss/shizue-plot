@@ -5345,6 +5345,8 @@ describe('custom UI', () => {
         order: 0,
         action: 'move_top',
         enabled: true,
+        // The card's own: in a work of several it dresses the member the card became.
+        memberId: plot.characters[0].id,
       },
     ]);
     expect(plot.customUi.defaultVariables).toEqual({ hp: '100' });
@@ -5373,6 +5375,7 @@ describe('custom UI', () => {
         order: 5,
         action: 'repeat_back',
         enabled: true,
+        memberId: plot.characters[0].id,
       },
     ]);
     expect(saved.customUi.defaultVariables).toEqual({ hp: '80', mood: '평온' });
@@ -5421,7 +5424,7 @@ describe('custom UI', () => {
     // A whole card is not worth refusing over one script, and a script the creator
     // can see and rewrite is better than one silently dropped.
     expect(plot.customUi.displayScripts).toEqual([
-      { in: '^(a+)+$', out: '<b>$1</b>', order: 0, enabled: false },
+      { in: '^(a+)+$', out: '<b>$1</b>', order: 0, enabled: false, memberId: plot.characters[0].id },
     ]);
   });
 
@@ -5674,6 +5677,177 @@ describe('custom UI', () => {
   });
 });
 
+describe('custom UI in a work of several members', () => {
+  /** A RisuAI card named `name`: one display script for its own `[name]` tag, and what else it is given. */
+  const risu = (name: string, extensions: Record<string, unknown> = {}): File =>
+    new File(
+      [
+        JSON.stringify({
+          spec: 'chara_card_v2',
+          spec_version: '2.0',
+          data: {
+            name,
+            description: `${name}의 설명.`,
+            personality: '',
+            scenario: '',
+            first_mes: `${name}의 인사`,
+            mes_example: '',
+            creator_notes: '',
+            system_prompt: '',
+            post_history_instructions: '',
+            alternate_greetings: [],
+            tags: [],
+            creator: '',
+            character_version: '1.0',
+            extensions: {
+              risuai: {
+                customScripts: [{ comment: '', in: `\\[${name}\\]`, out: `<div class="${name}">$&</div>`, type: 'editdisplay' }],
+                ...extensions,
+              },
+            },
+          },
+        }),
+      ],
+      `${name}.json`,
+      { type: 'application/json' },
+    );
+
+  /** A card as one more member of the plot; the member and what the import said come back. */
+  async function importMember(cookie: string, plotId: string, file: File): Promise<any> {
+    const form = new FormData();
+    form.append('file', file);
+    const res = await request(cookie, `/api/plots/${plotId}/characters/import`, 'POST', form);
+    expect(res.status, await res.clone().text()).toBe(201);
+    return readJson(res);
+  }
+
+  const script = (name: string, order: number, memberId?: string) => ({
+    in: `\\[${name}\\]`,
+    out: `<div class="${name}">$&</div>`,
+    order,
+    enabled: true,
+    ...(memberId ? { memberId } : {}),
+  });
+
+  it("tags the first card's display scripts as its own, and makes its background the work's", async () => {
+    const owner = await signUp('w4-first-card@example.com');
+    const plot = await importCard(
+      owner,
+      risu('lumi', { backgroundHTML: '<div class="sky">밤</div>\n<style>.lumi { color: red; }</style>', defaultVariables: 'hp=100' }),
+    );
+    const lumi = plot.characters[0].id;
+    expect(plot.customUi.displayScripts).toEqual([script('lumi', 0, lumi)]);
+    expect(plot.customUi.css).toBe('.lumi { color: red; }');
+    // Past its stylesheet, which is `css` already.
+    expect(plot.customUi.backgroundHtml).toBe('<div class="sky">밤</div>');
+    expect(plot.backgroundHtml).toBe('<div class="sky">밤</div>');
+  });
+
+  it("lifts a companion's scripts, stylesheet and variables as its own, and keeps the work's background", async () => {
+    const owner = await signUp('w4-companion-owner@example.com');
+    const reader = await signUp('w4-companion-reader@example.com');
+    const plot = await importCard(owner, risu('lumi', { backgroundHTML: '<div class="sky">밤</div>', defaultVariables: 'hp=100\nmood=calm' }));
+    const lumi = plot.characters[0].id;
+    const added = await importMember(
+      owner,
+      plot.id,
+      risu('nox', { backgroundHTML: '<div class="cave">동굴</div><style>.nox { color: blue; }</style>', defaultVariables: 'hp=50\ngold=3' }),
+    );
+    const nox = added.id;
+    // The name the work already had another value for, for the studio to say so.
+    expect(added.variableConflicts).toEqual(['hp']);
+
+    const after = await readPlot(owner, plot.id);
+    // Its scripts run after the work's, as its own.
+    expect(after.customUi.displayScripts).toEqual([script('lumi', 0, lumi), script('nox', 1, nox)]);
+    expect(after.customUi.memberCss).toEqual({ [nox]: '.nox { color: blue; }' });
+    // One namespace, the work's value kept.
+    expect(after.customUi.defaultVariables).toEqual({ hp: '100', mood: 'calm', gold: '3' });
+    // The work keeps one background, the first card's; the companion's is drawn nowhere.
+    expect(after.customUi.backgroundHtml).toBe('<div class="sky">밤</div>');
+    expect(after.customUi.css).toBeUndefined();
+
+    await patchPlot(owner, plot.id, { description: '마을.' });
+    await publishPlot(owner, plot.id, { rightsConfirmed: true });
+    const view = await readPublicPlot(reader, plot.id);
+    expect(view.memberCss).toEqual({ [nox]: '.nox { color: blue; }' });
+    expect(view.backgroundHtml).toBe('<div class="sky">밤</div>');
+    expect(view.displayScripts.map((one: any) => one.memberId)).toEqual([lumi, nox]);
+  });
+
+  it("draws a plot's own background where it has one, and its card's on a plot from before the field", async () => {
+    const owner = await signUp('w4-background@example.com');
+    const plot = await importCard(owner, risu('lumi', { backgroundHTML: '<div class="sky">밤</div><style>.a { color: red; }</style>' }));
+    // A save from before the field writes the custom UI without it: the card's background is drawn, as it was.
+    const legacy = await patchPlot(owner, plot.id, { customUi: { css: '.a { color: red; }' } });
+    expect(legacy.customUi.backgroundHtml).toBeUndefined();
+    expect(legacy.backgroundHtml).toBe('<div class="sky">밤</div>');
+    // The creator's own wins, and emptied it draws nothing.
+    expect((await patchPlot(owner, plot.id, { customUi: { backgroundHtml: '<div>새벽</div>' } })).backgroundHtml).toBe('<div>새벽</div>');
+    const emptied = await patchPlot(owner, plot.id, { customUi: { backgroundHtml: '' } });
+    expect(emptied.customUi).toEqual({ backgroundHtml: '' });
+    expect(emptied.backgroundHtml).toBe('');
+    // Refused over the cap rather than cut.
+    const tooLong = await json(owner, `/api/plots/${plot.id}`, 'PATCH', { customUi: { backgroundHtml: 'a'.repeat(100_001) } });
+    expect(tooLong.status).toBe(400);
+    expect((await readJson(tooLong)).code).toBe('invalid_request');
+
+    // A plot from before the field takes the background it drew until then before a
+    // companion joins, so the companion's never shows.
+    const studio = await createPlot(owner, { name: '스튜디오 작품' });
+    await addCharacter(owner, studio.id, { name: '리안' });
+    await importMember(owner, studio.id, risu('nox', { backgroundHTML: '<div class="cave">동굴</div>' }));
+    const joined = await readPlot(owner, studio.id);
+    expect(joined.customUi.backgroundHtml).toBe('');
+    expect(joined.backgroundHtml).toBe('');
+    // A card that opens an empty roster brings its own, as a card that makes a plot does.
+    const empty = await createPlot(owner, { name: '빈 작품' });
+    await importMember(owner, empty.id, risu('nox', { backgroundHTML: '<div class="cave">동굴</div>' }));
+    expect((await readPlot(owner, empty.id)).backgroundHtml).toBe('<div class="cave">동굴</div>');
+  });
+
+  it("keeps the tags through a save, drops those naming no member, and drops a member's with it", async () => {
+    const owner = await signUp('w4-tags@example.com');
+    const plot = await importCard(owner, risu('lumi'));
+    const lumi = plot.characters[0].id;
+    const nox = (await importMember(owner, plot.id, risu('nox', { backgroundHTML: '<style>.nox { color: blue; }</style>' }))).id;
+    const gone = randomUUID();
+    const saved = await patchPlot(owner, plot.id, {
+      customUi: {
+        displayScripts: [script('lumi', 0, lumi), script('nox', 1, nox), script('ghost', 2, gone), script('all', 3), { ...script('bad', 4), memberId: '리안' }],
+        memberCss: { [nox]: '.nox { color: green; }', [gone]: '.ghost { color: red; }', 'not-an-id': '.x { color: red; }' },
+      },
+    });
+    // A tag naming no member of the plot would never be drawn, so it goes; a tag that is not an id is no tag.
+    expect(saved.customUi.displayScripts).toEqual([script('lumi', 0, lumi), script('nox', 1, nox), script('all', 3), script('bad', 4)]);
+    expect(saved.customUi.memberCss).toEqual({ [nox]: '.nox { color: green; }' });
+
+    expect((await request(owner, `/api/plots/${plot.id}/characters/${nox}`, 'DELETE')).status).toBe(204);
+    const after = await readPlot(owner, plot.id);
+    expect(after.customUi.displayScripts).toEqual([script('lumi', 0, lumi), script('all', 3), script('bad', 4)]);
+    expect(after.customUi.memberCss).toBeUndefined();
+  });
+
+  it("exports a member with the work's own display scripts and its own, not another member's", async () => {
+    const owner = await signUp('w4-export@example.com');
+    const plot = await importCard(owner, risu('lumi'));
+    const nox = (await importMember(owner, plot.id, risu('nox'))).id;
+    await patchPlot(owner, plot.id, {
+      customUi: { displayScripts: [...(await readPlot(owner, plot.id)).customUi.displayScripts, script('all', 9)] },
+    });
+    const exported = async (memberId: string): Promise<string[]> => {
+      const res = await request(owner, `/api/plots/${plot.id}/characters/${memberId}/export?format=json`);
+      expect(res.status).toBe(200);
+      const card = await readJson(res);
+      return card.data.extensions.risuai.customScripts
+        .filter((entry: any) => entry.type === 'editdisplay')
+        .map((entry: any) => entry.in);
+    };
+    expect(await exported(plot.characters[0].id)).toEqual(['\\[lumi\\]', '\\[all\\]']);
+    expect(await exported(nox)).toEqual(['\\[nox\\]', '\\[all\\]']);
+  });
+});
+
 describe('display-order repair', () => {
   /** RisuAI runs beta (`<order 3>`), then alpha (`<order 1>`), then gamma (none, 0). */
   const orderedCard = (name: string, customScripts?: unknown[]): File =>
@@ -5731,9 +5905,10 @@ describe('display-order repair', () => {
 
   it('rewrites the plots an old import left, leaves edited ones and cards without an order, and runs once', async () => {
     const cookie = await signUp('display-order@example.com');
-    // Today's import already gets it right.
+    // Today's import already gets it right — the scripts its member's own.
     const imported = await importCard(cookie, orderedCard('정렬'));
-    expect(imported.customUi.displayScripts).toEqual(NOW);
+    const tagged = NOW.map((script) => ({ ...script, memberId: imported.characters[0].id }));
+    expect(imported.customUi.displayScripts).toEqual(tagged);
 
     const old = await importCard(cookie, orderedCard('예전'));
     await asImportedBefore(old.id, OLD);
@@ -5773,7 +5948,7 @@ describe('display-order repair', () => {
     expect(after.updatedAt).toEqual(before.updatedAt);
     expect((await storedOf(edited.id)).customUi?.displayScripts).toEqual(mine);
     expect((await storedOf(plain.id)).customUi?.displayScripts).toEqual(plainOld);
-    expect((await storedOf(imported.id)).customUi?.displayScripts).toEqual(NOW);
+    expect((await storedOf(imported.id)).customUi?.displayScripts).toEqual(tagged);
 
     // Again: nothing left to do.
     const again = await repairDisplayOrder(db, { apply: true, log: () => undefined });
@@ -9221,6 +9396,7 @@ describe('plot hub', () => {
       // Presentation, so it travels even though the definition does not.
       displayScripts: [],
       css: '',
+      memberCss: {},
       backgroundHtml: '',
       defaultVariables: {},
       componentCode: '',
@@ -14412,6 +14588,30 @@ describe('group turns', () => {
     // …and its next speaker joins it.
     const joined = await done(await post(cookie, chatId, 'reply', { speakerId: seiya, groupTurnId: auto.groupTurnId }, target));
     expect(joined.groupTurnId).toBe(auto.messageId);
+  });
+
+  it('redoes an 이어가기 round as the carry-on it was, not as an answer to the older turn', async () => {
+    const chat = await groupChat('group-reroll-carry-on@example.com');
+    const { cookie, chatId, seiya, kai, mio } = chat;
+    const { target, sent } = replyingApp('응.');
+    const told = (req: ChatRequest): string => textsOf(req).join('\n');
+    await done(await post(cookie, chatId, 'messages', { content: '자물쇠를 딴다', directions: '주사위 6. 성공한다.', speakerId: seiya }, target));
+    expect(told(sent.at(-1)!)).toContain('게임 판정');
+    // 이어가기: a round of its own after the reply, the scene going on without the reader.
+    await done(await post(cookie, chatId, 'reply', { speakerId: kai }, target));
+    expect(told(sent.at(-1)!)).toContain('유저 개입 없이');
+    expect(told(sent.at(-1)!)).not.toContain('게임 판정');
+    // Redone, it is the same carry-on: told so again, and not handed the reader's older ruling.
+    await done(await post(cookie, chatId, 'regenerate', { speakerId: mio }, target));
+    expect(told(sent.at(-1)!)).toContain('유저 개입 없이');
+    expect(told(sent.at(-1)!)).not.toContain('게임 판정');
+
+    // A round that answered the reader is redone answering them, ruling and all.
+    const other = await groupChat('group-reroll-answer@example.com');
+    await done(await post(other.cookie, other.chatId, 'messages', { content: '자물쇠를 딴다', directions: '주사위 6. 성공한다.', speakerId: other.seiya }, target));
+    await done(await post(other.cookie, other.chatId, 'regenerate', { speakerId: other.kai }, target));
+    expect(told(sent.at(-1)!)).toContain('게임 판정');
+    expect(told(sent.at(-1)!)).not.toContain('유저 개입 없이');
   });
 
   it('redoes the whole round from its first speaker, as a sibling of its first reply', async () => {

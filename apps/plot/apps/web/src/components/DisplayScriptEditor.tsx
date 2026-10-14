@@ -24,12 +24,20 @@ const patternError = (source: string): string | null =>
  * row per entry, opened to edit. The regex is authored raw — it is the same
  * string a RisuAI card carries, so an imported card round-trips through here
  * without translation.
+ *
+ * In a work of several members (`members`, two or more) each script says whose
+ * messages it is for (적용 대상, `DisplayScript.memberId`): every character's,
+ * or one member's — then it is not drawn on another member's messages. A
+ * companion's card brings its scripts already set to it.
  */
 export function DisplayScriptEditor({
   scripts,
+  members = [],
   onChange,
 }: {
   scripts: DisplayScript[];
+  /** The roster, in order; the selector is offered once there are two. */
+  members?: readonly { id: string; name: string }[];
   onChange: (scripts: DisplayScript[]) => void;
 }) {
   const t = useTranslations('plot');
@@ -37,6 +45,17 @@ export function DisplayScriptEditor({
 
   const update = (index: number, patch: Partial<DisplayScript>): void =>
     onChange(scripts.map((script, i) => (i === index ? { ...script, ...patch } : script)));
+  /** Whose messages a script is for: a member's id, or every character (no tag). */
+  const target = (index: number, memberId: string): void =>
+    onChange(
+      scripts.map((script, i) => {
+        if (i !== index) return script;
+        const { memberId: _was, ...untagged } = script;
+        return memberId ? { ...untagged, memberId } : untagged;
+      }),
+    );
+  const memberName = (memberId: string | undefined): string | undefined =>
+    memberId === undefined ? undefined : members.find((member) => member.id === memberId)?.name;
 
   return (
     <div className="space-y-3">
@@ -53,6 +72,11 @@ export function DisplayScriptEditor({
             <span className="min-w-0 flex-1 truncate font-mono text-xs text-fg">
               {script.in || t('displayScriptIn')}
             </span>
+            {members.length >= 2 && memberName(script.memberId) ? (
+              <span data-testid="display-script-member-name" className="max-w-[8rem] truncate text-xs text-muted">
+                {memberName(script.memberId)}
+              </span>
+            ) : null}
             {/* Folded shut, the mark is all there is to go on, so it says what is
                 wrong rather than only that something is — the same sentence the
                 opened row shows against the field. */}
@@ -68,6 +92,23 @@ export function DisplayScriptEditor({
           </summary>
 
           <div className="space-y-4 border-t border-line px-3 py-4">
+            {members.length >= 2 ? (
+              <Field label={t('displayScriptMember')} hint={t('displayScriptMemberHint')}>
+                <Select
+                  data-testid="display-script-member"
+                  value={script.memberId ?? ''}
+                  onChange={(event) => target(index, event.target.value)}
+                >
+                  <option value="">{t('displayScriptMemberAll')}</option>
+                  {members.map((member) => (
+                    <option key={member.id} value={member.id}>
+                      {member.name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            ) : null}
+
             <Field label={t('displayScriptIn')} hint={t('displayScriptInHint')}>
               <TextInput
                 data-testid="display-script-in"

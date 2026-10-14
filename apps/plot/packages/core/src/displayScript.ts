@@ -36,6 +36,8 @@
  * without pulling the tokenizer and the card parser into the bundle.
  */
 
+import type { DisplayScript } from './types.js';
+
 /**
  * Longest pattern a display script may carry. RisuAI sets none, and a card that
  * names each of its images in one alternation runs to thousands of characters;
@@ -152,4 +154,18 @@ export function displayScriptPatternError(source: string): PatternRejection | nu
     }
   }
   return null;
+}
+
+/**
+ * The scripts that dress a message `memberId` is the speaker of, in a work of
+ * several members: every untagged script, and the ones tagged with that member
+ * (`DisplayScript.memberId`, the card a script came with). A tagged script is
+ * skipped only on another member's messages. The same list is what a member's
+ * card export carries out, the untagged scripts being the work's own.
+ */
+export function displayScriptsFor<T extends Pick<DisplayScript, 'memberId'>>(
+  scripts: readonly T[],
+  memberId: string,
+): T[] {
+  return scripts.filter((script) => script.memberId === undefined || script.memberId === memberId);
 }

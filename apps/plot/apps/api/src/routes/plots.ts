@@ -14,11 +14,13 @@ import {
   constantLoreTokens,
   DEFAULT_USER_NAME,
   detectContentLanguage,
+  displayScriptsFor,
   emptyCard,
   exportCardCharx,
   exportCardPng,
   exportCardV3,
   introFromCreatorNotes,
+  MAX_BACKGROUND_HTML_LENGTH,
   MAX_CARD_IMPORT_BYTES,
   MAX_CHARACTERS_PER_PLOT,
   MAX_INTRO_LENGTH,
@@ -76,7 +78,15 @@ import {
   saveAvatar,
   storableImage,
 } from '../avatar.js';
-import { coerceCard, coerceCustomUi, coerceLorebook, customUiOfCard } from '../card.js';
+import {
+  coerceCard,
+  coerceCustomUi,
+  coerceLorebook,
+  customUiOfCard,
+  customUiOfRoster,
+  liftCompanion,
+  withoutMember,
+} from '../card.js';
 import type { AppDeps, AppEnv, Tx } from '../deps.js';
 import { draftPlot, MAX_PREMISE_LENGTH } from '../draft.js';
 import { ApiError, badRequest, notFound } from '../errors.js';
@@ -357,19 +367,25 @@ const firstPromptMacro = (plot: Plot, char: string): MacroContext => ({
   variables: computeVariables([], plot.customUi?.defaultVariables),
 });
 
-/** Longest background the public view carries: past this the chat's renderer would draw none of it anyway. */
-const MAX_BACKGROUND_HTML_LENGTH = 100_000;
+/**
+ * What a plot draws behind its chats: the work's own background
+ * (`PlotCustomUi.backgroundHtml`) — one for the whole work, as a RisuAI group
+ * has — or, on a plot from before the field, `cardBackgroundOf` its roster.
+ * Presentation, like the stylesheet, so it travels with the public view; ''
+ * when nothing is left to draw.
+ */
+const backgroundOf = (plot: Plot, members: Character[]): string =>
+  plot.customUi?.backgroundHtml ?? cardBackgroundOf(members);
 
 /**
- * The HTML a RisuAI card draws behind the chat (`backgroundHTML`), for the chat
- * screen: the card whose scripts run — the character the chat is with, whose
- * `getBackgroundEmbedding` it is — or, in a plot without scripts, the first that
- * carries one. Its `<style>` elements are left out: they are the plot's
- * stylesheet already (`customUi.css`, lifted at import), which the creator may
- * have edited since. Presentation, like that stylesheet, so it travels with the
- * public view; '' when nothing is left to draw.
+ * The HTML a RisuAI card draws behind the chat (`backgroundHTML`), where a plot
+ * has no background of its own: the card whose scripts run — the character the
+ * chat is with, whose `getBackgroundEmbedding` it is — or, in a plot without
+ * scripts, the first that carries one. Its `<style>` elements are left out: they
+ * are the plot's stylesheet already (`customUi.css`, lifted at import), which the
+ * creator may have edited since.
  */
-function backgroundOf(members: Character[]): string {
+function cardBackgroundOf(members: Character[]): string {
   const lead =
     scriptedMember(members)?.member ?? members.find((member) => backgroundHtmlOf(member.card.extensions) !== undefined);
   const html = lead ? backgroundHtmlOf(lead.card.extensions) : undefined;
@@ -466,6 +482,8 @@ async function insertMember(
   name: string,
   card: NormalizedCard,
   imported?: CardImport,
+  /** The member's id, where the caller has already written it somewhere (`customUiOfCard`). */
+  id?: string,
 ): Promise<Character> {
   return deps.db.transaction(async (tx) => {
     const [plot] = await tx
@@ -488,6 +506,7 @@ async function insertMember(
     const [created] = await tx
       .insert(characters)
       .values({
+        ...(id ? { id } : {}),
         plotId,
         name,
         card,
@@ -587,6 +606,35 @@ async function storeImportedAssets(
     // no row will ever name it.
     for (const key of orphaned) await deleteQuietly(deps.storage, key);
   }
+}
+
+/**
+ * What a card joining a plot's roster brings to the work (`liftCompanion`): its
+ * display scripts and stylesheet as its own, its default variables into the
+ * work's namespace. The work keeps one background, as a RisuAI group draws its
+ * own and no member's: a plot that has none of its own yet takes the one it drew
+ * until now — its scripted card's — so the new card's never shows; the first
+ * card of an empty plot brings its own, as a card that makes a plot does. Under
+ * the plot's row lock, so an edit racing it is not undone. Answers with the
+ * variable names the work kept another value for.
+ */
+async function liftCustomUi(deps: AppDeps, plotId: string, member: Character): Promise<string[]> {
+  return deps.db.transaction(async (tx) => {
+    const [locked] = await tx.select({ customUi: plots.customUi }).from(plots).where(eq(plots.id, plotId)).for('update');
+    const before = locked?.customUi ?? {};
+    const others = (await loadMembers(tx, plotId)).filter((other) => other.id !== member.id);
+    const background = cardBackgroundOf(others.length > 0 ? others : [member]);
+    const pinned: PlotCustomUi =
+      before.backgroundHtml !== undefined || (others.length === 0 && !background)
+        ? before
+        : { ...before, backgroundHtml: background };
+    const { customUi, conflicts } = liftCompanion(pinned, member.card, member.id);
+    const stored = Object.keys(customUi).length > 0 ? customUi : null;
+    if (JSON.stringify(stored) !== JSON.stringify(locked?.customUi ?? null)) {
+      await tx.update(plots).set({ customUi: stored, updatedAt: new Date() }).where(eq(plots.id, plotId));
+    }
+    return conflicts;
+  });
 }
 
 /**
@@ -865,7 +913,9 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       .filter((intro) => intro.trim().length > 0)
       .slice(0, MAX_INTROS_PER_PLOT)
       .map((intro) => intro.slice(0, MAX_INTRO_TEXT_LENGTH));
-    const customUi = customUiOfCard(card);
+    // The member the card becomes: its display scripts are tagged as its own.
+    const memberId = randomUUID();
+    const customUi = customUiOfCard(card, memberId);
     // What the reader meets first says what the work is written in; a card with
     // no opening to read is judged by its description, and an undecided one
     // keeps the column's default.
@@ -892,7 +942,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
 
     // A new plot is private, so this records where the card came from and asks
     // for nothing yet: the owner vouches for it when they publish.
-    const member = await insertMember(deps, plot.id, name, card, imported);
+    const member = await insertMember(deps, plot.id, name, card, imported, memberId);
     if (parsed.iconBuffer) {
       await writeMemberAvatar(deps, member, parsed.iconBuffer);
       plot = await writeImportedCover(deps, plot, parsed.iconBuffer);
@@ -1049,7 +1099,12 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     const narrator = optionalNarrator(body);
     const style = optionalStyle(body);
     const profiles = optionalProfiles(body);
-    const customUi = optionalCustomUi(body);
+    const sent = optionalCustomUi(body);
+    // What a member brought is held to the roster as it stands: an editor that
+    // still showed a member deleted since does not bring its scripts back.
+    const customUi = sent
+      ? customUiOfRoster(sent, new Set((await loadMembers(deps.db, id)).map((member) => member.id)))
+      : sent;
     const groupSettings = optionalGroupSettings(body);
     const safetyLevel = coerceSafetyLevel(optionalString(body, 'safetyLevel'));
     const commentsEnabled = optionalBoolean(body, 'commentsEnabled');
@@ -1066,7 +1121,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
         ...(narrator !== undefined ? { narrator } : {}),
         ...(style !== undefined ? { style } : {}),
         ...(profiles !== undefined ? { profiles } : {}),
-        ...(customUi !== undefined ? { customUi } : {}),
+        ...(customUi !== undefined ? { customUi: customUi && Object.keys(customUi).length > 0 ? customUi : null } : {}),
         ...(groupSettings !== undefined ? { groupSettings } : {}),
         ...(safetyLevel !== undefined ? { safetyLevel } : {}),
         ...(commentsEnabled !== undefined ? { commentsEnabled } : {}),
@@ -1240,8 +1295,10 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       groupSettings: coerceGroupSettings(plot.groupSettings),
       displayScripts: plot.customUi?.displayScripts ?? [],
       css: plot.customUi?.css ?? '',
-      // What the card draws behind the chat, past its stylesheet (`backgroundOf`).
-      backgroundHtml: backgroundOf(members),
+      // Each member's own stylesheet, for its messages, in a work of several.
+      memberCss: plot.customUi?.memberCss ?? {},
+      // What is drawn behind the chat (`backgroundOf`).
+      backgroundHtml: backgroundOf(plot, members),
       defaultVariables: plot.customUi?.defaultVariables ?? {},
       componentCode: plot.customUi?.componentCode ?? '',
       componentCapabilities: plot.customUi?.componentCapabilities ?? [],
@@ -1307,17 +1364,19 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     const { parsed, fileName, imported } = await readCardUpload(c);
     const name = parsed.card.name.trim() || fileName.replace(/\.[^.]+$/, '') || 'Unnamed';
 
-    // Nothing is lifted onto the plot: it already has a narrator and a custom UI
-    // of its own, and a member joining a cast does not get to redecorate it. Its
-    // images do land as the plot's, because `{{img::slug}}` resolves there, and
-    // so do its group-only greetings once there is a cast for them to greet
+    // The work's narrator and openings stay its own. What the card dresses its
+    // own messages in comes along as its own (`liftCustomUi`), and so do its
+    // images, as the plot's, because `{{img::slug}}` resolves there, and its
+    // group-only greetings once there is a cast for them to greet
     // (`addGroupGreetings`). Into a public plot it needs `rightsConfirmed`
     // (`insertMember`).
     let member = await insertMember(deps, id, name, parsed.card, imported);
     if (parsed.iconBuffer) member = await writeMemberAvatar(deps, member, parsed.iconBuffer);
     if (parsed.assets?.length) await storeImportedAssets(deps, id, parsed.assets);
     await addGroupGreetings(deps, id, parsed.card);
-    return c.json(toMemberJson(plot, member), 201);
+    const variableConflicts = await liftCustomUi(deps, id, member);
+    // The default variables the work already had another value for, for the studio to say so.
+    return c.json({ ...toMemberJson(plot, member), variableConflicts }, 201);
   });
 
   /**
@@ -1388,9 +1447,19 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     const id = requireUuidParam(c);
     const characterId = requireUuidParam(c, 'characterId');
     const { member } = await loadOwnedMember(deps, id, characterId, c.get('userId'));
-    await deps.db
-      .delete(characters)
-      .where(and(eq(characters.id, characterId), eq(characters.plotId, id)));
+    // What came with the member goes with it — its tagged display scripts and its
+    // stylesheet — under the plot's row lock, so an edit racing it is not undone.
+    await deps.db.transaction(async (tx) => {
+      const [locked] = await tx.select({ customUi: plots.customUi }).from(plots).where(eq(plots.id, id)).for('update');
+      await tx.delete(characters).where(and(eq(characters.id, characterId), eq(characters.plotId, id)));
+      if (!locked?.customUi) return;
+      const kept = withoutMember(locked.customUi, characterId);
+      if (JSON.stringify(kept) === JSON.stringify(locked.customUi)) return;
+      await tx
+        .update(plots)
+        .set({ customUi: Object.keys(kept).length > 0 ? kept : null, updatedAt: new Date() })
+        .where(eq(plots.id, id));
+    });
     if (member.avatarPath) await deleteQuietly(deps.storage, member.avatarPath);
     return c.body(null, 204);
   });
@@ -1502,11 +1571,15 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       throw badRequest('invalid_request', 'format must be json, png or charx');
     }
 
+    const customUi = plot.customUi ?? {};
     const card = exportCardV3(member.card, {
       narrator: plot.narrator ?? undefined,
       // The plot's custom UI is the whole answer even when empty: the card's own
-      // copies are what the import lifted off it.
-      customUi: plot.customUi ?? {},
+      // copies are what the import lifted off it. Of its display scripts, the
+      // work's own and this member's — not another member's.
+      customUi: customUi.displayScripts
+        ? { ...customUi, displayScripts: displayScriptsFor(customUi.displayScripts, member.id) }
+        : customUi,
       intros: plot.intros,
       lorebook: plot.lorebook,
     });
@@ -1803,6 +1876,9 @@ async function ownerView(deps: AppDeps, plot: Plot): Promise<unknown> {
     ...toPlotJson(plot),
     plotLoreConstantTokens: constantLoreTokens(plot.lorebook, firstPromptMacro(plot, plot.name)),
     characters: members.map((member) => toMemberJson(plot, member)),
+    // What the chat draws behind the work now — its own, or its card's on a plot
+    // from before it — for the studio's field to start from.
+    backgroundHtml: backgroundOf(plot, members),
     // Only the owner view carries the comment count: the listings are card grids,
     // and a count per card would cost a query per card.
     commentCount: await countComments(deps.db, plot),

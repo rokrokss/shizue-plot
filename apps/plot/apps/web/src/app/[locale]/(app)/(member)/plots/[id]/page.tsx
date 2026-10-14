@@ -111,6 +111,17 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
   const [scripts, setScripts] = useState<DisplayScript[]>([]);
   const [variables, setVariables] = useState<Record<string, string>>({});
   const [css, setCss] = useState('');
+  /** Each member's own stylesheet in a work of several, by member id (`PlotCustomUi.memberCss`). */
+  const [memberCss, setMemberCss] = useState<Record<string, string>>({});
+  /**
+   * The work's background as the editor holds it: undefined until the creator
+   * touches it on a plot from before the field, which keeps drawing its card's
+   * (`PlotDetail.backgroundHtml`) — the field shows that, and only an edit makes
+   * it the work's own.
+   */
+  const [background, setBackground] = useState<string | undefined>(undefined);
+  /** The default variables a companion's card brought that the work kept its own value for. */
+  const [variableNotice, setVariableNotice] = useState('');
   const [componentCode, setComponentCode] = useState('');
   const [capabilities, setCapabilities] = useState<ComponentCapability[]>([]);
   /** The roster as it is being edited, and as the server last answered with it. */
@@ -149,6 +160,8 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
     setScripts(detail.customUi?.displayScripts ?? []);
     setVariables(detail.customUi?.defaultVariables ?? {});
     setCss(detail.customUi?.css ?? '');
+    setMemberCss(detail.customUi?.memberCss ?? {});
+    setBackground(detail.customUi?.backgroundHtml);
     setComponentCode(detail.customUi?.componentCode ?? '');
     setCapabilities(detail.customUi?.componentCapabilities ?? []);
     setMembers(detail.characters);
@@ -202,6 +215,8 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
             defaultVariables: variables,
             componentCode,
             componentCapabilities: capabilities,
+            memberCss,
+            ...(background !== undefined ? { backgroundHtml: background } : {}),
           },
         }),
       );
@@ -279,9 +294,41 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
         file = checkCardSize(source);
       }
       if (rightsConfirmed) fields['rightsConfirmed'] = 'true';
-      const created = await apiUpload<PlotMember>(`/api/plots/${id}/characters/import`, file, fields);
+      const created = await apiUpload<PlotMember & { variableConflicts?: string[] }>(
+        `/api/plots/${id}/characters/import`,
+        file,
+        fields,
+      );
       setMembers((current) => [...current, created]);
       setSaved((current) => new Map(current).set(created.id, memberFields(created)));
+      // The card brought its own custom UI to the work (its scripts, its stylesheet,
+      // its default variables, and the background the work now keeps). The editor
+      // takes that up beside whatever is being written here, or the next save would
+      // put the old lists back over it. A failed read does not unmake the import.
+      await apiGet<PlotDetail>(`/api/plots/${id}`).then(
+        (detail) => {
+          const lifted = detail.customUi ?? {};
+          const brought = (lifted.displayScripts ?? []).filter((script) => script.memberId === created.id);
+          if (brought.length > 0) setScripts((current) => [...current, ...brought]);
+          const sheet = lifted.memberCss?.[created.id];
+          if (sheet) setMemberCss((current) => ({ ...current, [created.id]: sheet }));
+          setVariables((current) => {
+            const next = Object.assign(Object.create(null) as Record<string, string>, current);
+            for (const [key, value] of Object.entries(lifted.defaultVariables ?? {})) {
+              if (!Object.hasOwn(next, key)) next[key] = value;
+            }
+            return next;
+          });
+          setBackground((current) => current ?? lifted.backgroundHtml);
+          setPlot((current) => current && { ...current, ...(detail.backgroundHtml !== undefined ? { backgroundHtml: detail.backgroundHtml } : {}) });
+        },
+        () => undefined,
+      );
+      setVariableNotice(
+        created.variableConflicts?.length
+          ? t('memberImportVariableConflicts', { name: created.name, names: created.variableConflicts.join(', ') })
+          : '',
+      );
       if (rightsConfirmed) {
         setPlot((current) => current && { ...current, rightsConfirmedAt: new Date().toISOString() });
       }
@@ -316,6 +363,9 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
     try {
       await apiDelete(`/api/plots/${id}/characters/${memberId}`);
       setMembers((current) => current.filter((member) => member.id !== memberId));
+      // What came with the member went with it on the server; the editor follows.
+      setScripts((current) => current.filter((script) => script.memberId !== memberId));
+      setMemberCss(({ [memberId]: _gone, ...rest }) => rest);
     } catch (caught) {
       setError(toMessage(caught));
     } finally {
@@ -384,6 +434,11 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
 
       <div className="mt-4">
         <ErrorText>{error}</ErrorText>
+        {variableNotice ? (
+          <p role="status" data-testid="variable-conflicts" className="text-xs text-link">
+            {variableNotice}
+          </p>
+        ) : null}
       </div>
 
       <div className="mt-6 grid gap-6 lg:grid-cols-3">
@@ -550,7 +605,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
               {t('displayScripts')}
             </h3>
             <p className="text-xs text-muted">{t('displayScriptsHint')}</p>
-            <DisplayScriptEditor scripts={scripts} onChange={setScripts} />
+            <DisplayScriptEditor scripts={scripts} members={members} onChange={setScripts} />
 
             <Field label={t('creatorCss')} hint={t('creatorCssHint')}>
               <TextArea
@@ -559,6 +614,35 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
                 className="font-mono text-xs"
                 value={css}
                 onChange={(event) => setCss(event.target.value)}
+              />
+            </Field>
+
+            {/* A companion's own stylesheet, as its card brought it: for its messages. */}
+            {members.length >= 2
+              ? members
+                  .filter((member) => memberCss[member.id] !== undefined)
+                  .map((member) => (
+                    <Field key={member.id} label={t('memberCss', { name: member.name })} hint={t('memberCssHint')}>
+                      <TextArea
+                        rows={4}
+                        spellCheck={false}
+                        data-testid="member-css"
+                        className="font-mono text-xs"
+                        value={memberCss[member.id]}
+                        onChange={(event) => setMemberCss((current) => ({ ...current, [member.id]: event.target.value }))}
+                      />
+                    </Field>
+                  ))
+              : null}
+
+            <Field label={t('workBackground')} hint={t('workBackgroundHint')}>
+              <TextArea
+                rows={4}
+                spellCheck={false}
+                data-testid="work-background"
+                className="font-mono text-xs"
+                value={background ?? plot.backgroundHtml ?? ''}
+                onChange={(event) => setBackground(event.target.value)}
               />
             </Field>
 

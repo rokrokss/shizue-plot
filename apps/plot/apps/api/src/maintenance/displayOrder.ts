@@ -153,20 +153,28 @@ export type OrderVerdict =
  * Where a plot's display scripts stand. Any member's card may be the one they
  * were lifted from — an import makes the card the first member, but the roster
  * can be reordered since — so each one with an `<order N>` is tried.
+ * `memberIds`, beside the cards, are their members': today's import tags the
+ * scripts as the member's own (`DisplayScript.memberId`), and that is current
+ * too. A fix only reorders, as the old import's scripts were never tagged.
  */
 export function judgeDisplayOrder(
   stored: readonly DisplayScript[] | undefined,
   cards: readonly Record<string, unknown>[],
+  memberIds: readonly string[] = [],
 ): OrderVerdict {
   if (!stored || stored.length === 0) return { kind: 'unaffected' };
   let ordered = false;
-  for (const extensions of cards) {
+  for (const [index, extensions] of cards.entries()) {
     const legacy = legacyDisplayScripts(extensions);
     if (!legacy.ordered) continue;
     ordered = true;
     const current = currentDisplayScripts(extensions);
     if (!current) continue;
+    const memberId = memberIds[index];
     if (sameScripts(stored, current)) return { kind: 'current' };
+    if (memberId !== undefined && sameScripts(stored, current.map((script) => ({ ...script, memberId })))) {
+      return { kind: 'current' };
+    }
     if (sameScripts(stored, legacy.scripts)) return { kind: 'fix', scripts: current };
   }
   return ordered ? { kind: 'edited' } : { kind: 'unaffected' };
@@ -224,13 +232,14 @@ export async function repairDisplayOrder(
       report.scanned += 1;
 
       const members = await tx
-        .select({ card: characters.card })
+        .select({ id: characters.id, card: characters.card })
         .from(characters)
         .where(eq(characters.plotId, id))
         .orderBy(asc(characters.orderIndex));
       const verdict = judgeDisplayOrder(
         stored,
         members.map((member) => member.card.extensions ?? {}),
+        members.map((member) => member.id),
       );
       const label = `plot ${plot.id} ${JSON.stringify(plot.name)}`;
 

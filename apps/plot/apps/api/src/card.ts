@@ -1,4 +1,6 @@
 import {
+  backgroundHtmlOf,
+  backgroundWithoutStyles,
   coerceNarrator,
   COMPONENT_CAPABILITIES,
   creatorCssFromExtensions,
@@ -7,6 +9,7 @@ import {
   LORE_POSITIONS,
   emptyCard,
   emptyVariables,
+  MAX_BACKGROUND_HTML_LENGTH,
   MAX_COMPONENT_CODE_LENGTH,
   MAX_CREATOR_CSS_LENGTH,
   MAX_DISPLAY_PATTERN_LENGTH,
@@ -21,6 +24,7 @@ import {
   type Variables,
 } from '@shizue/core';
 import { badRequest } from './errors.js';
+import { isUuid } from './util.js';
 
 const str = (value: unknown, fallback = ''): string => (typeof value === 'string' ? value : fallback);
 const bool = (value: unknown, fallback: boolean): boolean =>
@@ -114,6 +118,7 @@ function coerceDisplayScript(value: unknown, index: number): DisplayScript {
   const raw = (value ?? {}) as Record<string, unknown>;
   const flags = str(raw['flags']);
   const action = raw['action'];
+  const memberId = raw['memberId'];
   return {
     in: str(raw['in']),
     out: str(raw['out']),
@@ -123,6 +128,9 @@ function coerceDisplayScript(value: unknown, index: number): DisplayScript {
       ? { action }
       : {}),
     enabled: bool(raw['enabled'], true),
+    // The member the script is for (`DisplayScript.memberId`). Whether it is one
+    // of this plot's is the route's to check, holding the roster.
+    ...(typeof memberId === 'string' && isUuid(memberId) ? { memberId: memberId.toLowerCase() } : {}),
   };
 }
 
@@ -178,6 +186,36 @@ function coerceCreatorCss(value: unknown): string {
     throw badRequest('invalid_request', `css may be at most ${MAX_CREATOR_CSS_LENGTH} characters`);
   }
   return css.trim() ? css : '';
+}
+
+/**
+ * Each member's stylesheet, by member id, held to the plot stylesheet's cap one
+ * by one. Keys that are not member ids and empty sheets are not kept; whether a
+ * key is one of this plot's members is the route's to check.
+ */
+function coerceMemberCss(value: unknown): Record<string, string> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return {};
+  const sheets: Record<string, string> = {};
+  for (const [memberId, css] of Object.entries(value as Record<string, unknown>)) {
+    if (!isUuid(memberId)) continue;
+    const sheet = coerceCreatorCss(css);
+    if (sheet) sheets[memberId.toLowerCase()] = sheet;
+  }
+  return sheets;
+}
+
+/**
+ * The work's background. Kept when it is text, '' included — an emptied field
+ * is the creator's word that nothing is drawn, where a plot without the field
+ * draws its scripted card's (`PlotCustomUi.backgroundHtml`). Refused over the
+ * cap rather than cut, as the stylesheet is.
+ */
+function coerceBackgroundHtml(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  if (value.length > MAX_BACKGROUND_HTML_LENGTH) {
+    throw badRequest('invalid_request', `backgroundHtml may be at most ${MAX_BACKGROUND_HTML_LENGTH} characters`);
+  }
+  return value.trim() ? value : '';
 }
 
 function coerceComponentCode(value: unknown): string {
@@ -236,25 +274,77 @@ export function coerceCustomUi(value: unknown): PlotCustomUi {
   const defaultVariables = coerceVariables(raw['defaultVariables']);
   const componentCode = coerceComponentCode(raw['componentCode']);
   const componentCapabilities = coerceComponentCapabilities(raw['componentCapabilities']);
+  const memberCss = coerceMemberCss(raw['memberCss']);
+  const backgroundHtml = coerceBackgroundHtml(raw['backgroundHtml']);
   return {
     ...(displayScripts.length > 0 ? { displayScripts } : {}),
     ...(css ? { css } : {}),
     ...(Object.keys(defaultVariables).length > 0 ? { defaultVariables } : {}),
     ...(componentCode ? { componentCode } : {}),
     ...(componentCapabilities.length > 0 ? { componentCapabilities } : {}),
+    ...(Object.keys(memberCss).length > 0 ? { memberCss } : {}),
+    ...(backgroundHtml !== undefined ? { backgroundHtml } : {}),
   };
+}
+
+/**
+ * A plot's custom UI held to its roster: a script tagged with, or a stylesheet
+ * kept for, a member the plot no longer has is dropped — that member speaks no
+ * message, so it would never be drawn — the way the member's removal drops them
+ * (`withoutMember`).
+ */
+export function customUiOfRoster(customUi: PlotCustomUi, memberIds: ReadonlySet<string>): PlotCustomUi {
+  const { displayScripts, memberCss, ...rest } = customUi;
+  const scripts = (displayScripts ?? []).filter((script) => script.memberId === undefined || memberIds.has(script.memberId));
+  const sheets = Object.fromEntries(Object.entries(memberCss ?? {}).filter(([memberId]) => memberIds.has(memberId)));
+  return {
+    ...rest,
+    ...(scripts.length > 0 ? { displayScripts: scripts } : {}),
+    ...(Object.keys(sheets).length > 0 ? { memberCss: sheets } : {}),
+  };
+}
+
+/** A plot's custom UI without what came with one member: its tagged scripts and its stylesheet. */
+export const withoutMember = (customUi: PlotCustomUi, memberId: string): PlotCustomUi => {
+  const { displayScripts, memberCss, ...rest } = customUi;
+  const scripts = (displayScripts ?? []).filter((script) => script.memberId !== memberId);
+  const { [memberId]: _gone, ...sheets } = memberCss ?? {};
+  return {
+    ...rest,
+    ...(scripts.length > 0 ? { displayScripts: scripts } : {}),
+    ...(Object.keys(sheets).length > 0 ? { memberCss: sheets } : {}),
+  };
+};
+
+/**
+ * The HTML a card draws behind the chat past its `<style>` elements, which the
+ * import makes the work's background — or nothing, for none or one longer than
+ * a plot carries.
+ */
+function backgroundOfCard(card: NormalizedCard): string | undefined {
+  const html = backgroundHtmlOf(card.extensions);
+  const shown = html ? backgroundWithoutStyles(html) : '';
+  return shown && shown.length <= MAX_BACKGROUND_HTML_LENGTH ? shown : undefined;
 }
 
 /**
  * What the import lifts off a card onto the plot that wraps it. The stylesheet is
  * read straight off the card's RisuAI extension rather than carried on the card:
- * the extension already travels with it, so the card round-trips as it came.
+ * the extension already travels with it, so the card round-trips as it came. So
+ * is the rest of its `backgroundHTML`, which becomes the work's background.
+ * `memberId` is the member the card becomes, whose own its display scripts are
+ * (`DisplayScript.memberId`): in a work of several they dress its messages and
+ * the ones no member speaks.
  */
-export function customUiOfCard(card: NormalizedCard): PlotCustomUi {
+export function customUiOfCard(card: NormalizedCard, memberId: string): PlotCustomUi {
   const css = creatorCssFromExtensions(card.extensions);
+  const backgroundHtml = backgroundOfCard(card);
   return {
-    ...(card.displayScripts?.length ? { displayScripts: card.displayScripts } : {}),
+    ...(card.displayScripts?.length
+      ? { displayScripts: card.displayScripts.map((script) => ({ ...script, memberId })) }
+      : {}),
     ...(css ? { css } : {}),
+    ...(backgroundHtml ? { backgroundHtml } : {}),
     ...(card.defaultVariables && Object.keys(card.defaultVariables).length > 0
       ? { defaultVariables: card.defaultVariables }
       : {}),
@@ -262,6 +352,41 @@ export function customUiOfCard(card: NormalizedCard): PlotCustomUi {
     ...(card.componentCapabilities?.length
       ? { componentCapabilities: card.componentCapabilities }
       : {}),
+  };
+}
+
+/**
+ * What a companion's card brings to the work it joins (`/characters/import`):
+ * its display scripts, tagged as its own (`DisplayScript.memberId`) and run after
+ * the work's; its stylesheet, as its own (`memberCss`); and its default
+ * variables, merged into the one namespace the work's members share — a name the
+ * work already has keeps its value. `conflicts` are the names whose values
+ * differ, for the studio to say so.
+ */
+export function liftCompanion(
+  customUi: PlotCustomUi,
+  card: NormalizedCard,
+  memberId: string,
+): { customUi: PlotCustomUi; conflicts: string[] } {
+  const scripts = customUi.displayScripts ?? [];
+  const after = scripts.reduce((last, script) => Math.max(last, script.order), -1) + 1;
+  const added = (card.displayScripts ?? []).map((script, index) => ({ ...script, order: after + index, memberId }));
+  const css = creatorCssFromExtensions(card.extensions);
+  const variables = emptyVariables();
+  Object.assign(variables, customUi.defaultVariables ?? {});
+  const conflicts: string[] = [];
+  for (const [name, value] of Object.entries(card.defaultVariables ?? {})) {
+    if (!Object.hasOwn(variables, name)) variables[name] = value;
+    else if (variables[name] !== value) conflicts.push(name);
+  }
+  return {
+    customUi: {
+      ...customUi,
+      ...(added.length > 0 ? { displayScripts: [...scripts, ...added] } : {}),
+      ...(css ? { memberCss: { ...(customUi.memberCss ?? {}), [memberId]: css } } : {}),
+      ...(Object.keys(variables).length > 0 ? { defaultVariables: variables } : {}),
+    },
+    conflicts,
   };
 }
 

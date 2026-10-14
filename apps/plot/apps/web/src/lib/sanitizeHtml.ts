@@ -33,6 +33,13 @@
  *
  * It never throws and never returns markup it could not fully process: on any
  * failure the answer is the empty string, and the caller falls back to plain text.
+ *
+ * In a work of several members a member's own stylesheet is scoped further, to
+ * the rows of that member's messages (`member`): every selector under
+ * `[data-shizue-member="<id>"] .shizue-msg`. The attribute is the chat page's,
+ * on the row around the markup; nothing a template writes can carry it — data
+ * attributes do not survive the whitelist — so no card can dress another
+ * member's messages, or claim its scope.
  */
 
 import { CssTypes, parse, stringify, type CssAtRuleAST, type CssRuleAST } from '@adobe/css-tools';
@@ -43,6 +50,10 @@ import { isTainted, stripTaint } from './taint';
 export const MESSAGE_SCOPE_CLASS = 'shizue-msg';
 /** Namespace every creator class is folded into, so nothing can target app chrome. */
 const CLASS_PREFIX = 'x-shizue-';
+/** The attribute the chat page puts on a message row in a work of several members, naming whose message it is. */
+export const MEMBER_ATTRIBUTE = 'data-shizue-member';
+/** A member id, which is all a member scope may name: it goes into a selector. */
+const MEMBER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const ALLOWED_TAGS = [
   'div', 'span', 'p', 'br', 'hr', 'b', 'strong', 'i', 'em', 'u', 's', 'small', 'sub', 'sup',
@@ -248,11 +259,11 @@ const foldClass = (name: string): string => `${CLASS_PREFIX}${name.replace(/[^A-
  * null for a selector that should not exist at all — a selector that fails to
  * match is harmless, one that escapes its rule is not.
  */
-function scopeSelector(selector: string): string | null {
+function scopeSelector(selector: string, scope: string): string | null {
   const trimmed = selector.trim();
   if (!trimmed || SELECTOR_FORBIDDEN.test(trimmed)) return null;
   const renamed = trimmed.replace(SELECTOR_CLASS, (_match, name: string) => `.${foldClass(name)}`);
-  return `.${MESSAGE_SCOPE_CLASS} ${renamed}`;
+  return `${scope} ${renamed}`;
 }
 
 /**
@@ -308,12 +319,12 @@ function unquoteUrl(body: string): string | null {
   return /['"]/.test(trimmed) ? null : trimmed;
 }
 
-function rewriteRules(rules: readonly CssAtRuleAST[]): CssAtRuleAST[] {
+function rewriteRules(rules: readonly CssAtRuleAST[], scope: string): CssAtRuleAST[] {
   const kept: CssAtRuleAST[] = [];
   for (const rule of rules) {
     if (rule.type === CssTypes.rule) {
       const selectors = (rule.selectors ?? [])
-        .map(scopeSelector)
+        .map((selector) => scopeSelector(selector, scope))
         .filter((selector): selector is string => selector !== null);
       const declarations = rule.declarations.filter(
         (declaration) =>
@@ -329,7 +340,7 @@ function rewriteRules(rules: readonly CssAtRuleAST[]): CssAtRuleAST[] {
     if (rule.type === CssTypes.media || rule.type === CssTypes.supports) {
       const condition = rule.type === CssTypes.media ? rule.media : rule.supports;
       if (SELECTOR_FORBIDDEN.test(condition ?? '')) continue;
-      const inner = rewriteRules((rule.rules ?? []) as CssAtRuleAST[]);
+      const inner = rewriteRules((rule.rules ?? []) as CssAtRuleAST[], scope);
       if (inner.length > 0) kept.push({ ...rule, rules: inner } as CssAtRuleAST);
     }
     // Everything else — @import, @keyframes, @font-face, @charset, @namespace,
@@ -339,11 +350,11 @@ function rewriteRules(rules: readonly CssAtRuleAST[]): CssAtRuleAST[] {
 }
 
 /** Rewrites a `<style>` body. Anything unparseable becomes no stylesheet at all. */
-function rewriteStylesheet(css: string): string {
+function rewriteStylesheet(css: string, scope: string): string {
   try {
     const ast = parse(css, { silent: true });
     if ((ast.stylesheet.parsingErrors?.length ?? 0) > 0) return '';
-    const rules = rewriteRules(ast.stylesheet.rules);
+    const rules = rewriteRules(ast.stylesheet.rules, scope);
     if (rules.length === 0) return '';
     const output = stringify({ ...ast, stylesheet: { ...ast.stylesheet, rules } });
     // `<style>` is a raw-text element: a `<` in it would end the element early,
@@ -464,10 +475,17 @@ const STYLE_BLOCK = /<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi;
 /**
  * Sanitizes creator-authored HTML for insertion into a `.shizue-msg` container.
  * Returns '' when the markup cannot be processed — including on the server, where
- * there is no DOM and therefore no way to sanitize anything.
+ * there is no DOM and therefore no way to sanitize anything. With `member` its
+ * stylesheets reach only that member's message rows (`MEMBER_ATTRIBUTE`); a
+ * `member` that is not a member id sanitizes to nothing.
  */
-export function sanitizeCustomHtml(html: string): string {
+export function sanitizeCustomHtml(html: string, options: { member?: string } = {}): string {
   if (!html) return '';
+  if (options.member !== undefined && !MEMBER_ID.test(options.member)) return '';
+  const scope =
+    options.member === undefined
+      ? `.${MESSAGE_SCOPE_CLASS}`
+      : `[${MEMBER_ATTRIBUTE}="${options.member.toLowerCase()}"] .${MESSAGE_SCOPE_CLASS}`;
   try {
     if (!DOMPurify.isSupported) return '';
 
@@ -481,7 +499,7 @@ export function sanitizeCustomHtml(html: string): string {
       // A stylesheet has no navigable attribute in it, and the one thing that can
       // name a resource — `url()` — is held to our own origin whoever wrote it. So
       // the markers are of no use here and would only fail the parse.
-      const rewritten = rewriteStylesheet(stripTaint(css));
+      const rewritten = rewriteStylesheet(stripTaint(css), scope);
       if (rewritten) sheets.push(rewritten);
       return '';
     });

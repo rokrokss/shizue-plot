@@ -88,6 +88,12 @@ export interface LuaEngineOptions {
   /** The scripted member's avatar, a same-origin address — RisuAI's `char.image` — or null. */
   avatarUrl?: string | null;
   /**
+   * The member whose card this is, in a work of several whose engines share one
+   * sandbox: its Lua keeps states of its own (`LuaSandbox.call`). Absent in a
+   * work of one, where the states are the modes' alone as they always were.
+   */
+  member?: string;
+  /**
    * The chat's persona's picture as it stands when a call starts, a same-origin
    * address — RisuAI's user icon — or null. Asked per call: the reader can switch
    * the persona mid-chat, while the member is the plot's for good.
@@ -257,7 +263,8 @@ export function createLuaEngine(options: LuaEngineOptions): ScriptEngine {
       if (!options.lore) return Promise.reject(new Error('lore cannot be activated here'));
       return options.lore(history, [...scope.character.lorebook, ...upsertLocalLore(scope.localLore, upserts)]);
     };
-    const outcome = await sandbox.call(code, entry, snapshotOf(scope, lowLevel, options.avatarUrl, options.personaAvatarUrl?.()), { ...host, lore });
+    const snapshot = snapshotOf(scope, lowLevel, options.avatarUrl, options.personaAvatarUrl?.());
+    const outcome = await sandbox.call(code, entry, snapshot, { ...host, lore }, options.member);
     if (outcome.kind !== 'done') {
       report(outcome, entry.kind === 'display');
       return null;

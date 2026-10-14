@@ -33,6 +33,7 @@ export {
   cardLicense,
   creatorCssFromExtensions,
   displayScriptsFromExtensions,
+  MAX_BACKGROUND_HTML_LENGTH,
   MAX_CREATOR_CSS_LENGTH,
 } from './card/risu.js';
 export { displayScriptsWithRegexScripts } from './card/sillyTavern.js';

@@ -33,6 +33,8 @@ let chatState: ChatState;
 /** What the server holds after a generation, if it differs from `chatState`. */
 let afterTurn: ChatState | null = null;
 let bundle: ScriptBundle | null = null;
+/** A work of several members: one bundle per scripted member, in roster order. */
+let bundles: ScriptBundle[] | null = null;
 /** What the plot's public read says besides the fixture's own. */
 let publicPlot: Record<string, unknown> = {};
 /** The server refuses a turn stored without a reply. */
@@ -58,12 +60,14 @@ vi.mock('@/components/MessageRow', async () => {
       name: string;
       roster?: readonly { name: string; aliases?: readonly string[] }[];
       speaker?: string;
+      member?: string;
       footer?: ReactNode;
     }) =>
       h(
         'div',
         {
           'data-testid': 'row',
+          ...(props.member !== undefined ? { 'data-shizue-member': props.member } : {}),
           'data-name': props.name,
           'data-roster': JSON.stringify((props.roster ?? []).map((member) => [member.name, member.aliases ?? []])),
           ...(props.speaker !== undefined ? { 'data-speaker': props.speaker } : {}),
@@ -102,7 +106,9 @@ vi.mock('@/lib/api', async (importOriginal) => {
   return {
     ...original,
     apiGet: (url: string) => {
-      if (url.endsWith('/scripts')) return Promise.resolve({ scripts: bundle });
+      if (url.endsWith('/scripts')) {
+        return Promise.resolve(bundles ? { scripts: bundles[0], members: bundles } : { scripts: bundle, members: bundle ? [bundle] : [] });
+      }
       if (url.startsWith('/api/chats/')) return Promise.resolve(chatState);
       if (url.endsWith('/public')) {
         return (plotGate ?? Promise.resolve()).then(() => ({
@@ -269,6 +275,7 @@ beforeEach(() => {
   sent = [];
   afterTurn = null;
   bundle = null;
+  bundles = null;
   publicPlot = {};
   refuseTurn = false;
   plotGate = null;
@@ -691,5 +698,112 @@ describe('what the scripts rewrote of their character', () => {
     await render();
     expect(host.querySelector('[data-testid="chat-background"]')).toBeNull();
     expect(texts()).toEqual(['어서 와.', '안녕', '응.']);
+  });
+});
+
+describe('a work of two members', () => {
+  const rows = (): HTMLElement[] => [...host.querySelectorAll<HTMLElement>('[data-testid="row"]')];
+  const setvar = (variable: string, value: string) => ({
+    type: 'v2SetVar',
+    var: variable,
+    value,
+    operator: '=',
+    valueType: 'value',
+    indent: 0,
+  });
+  /** A display trigger that marks what it draws. */
+  const marks = (mark: string) => ({
+    comment: '',
+    type: 'display' as const,
+    conditions: [],
+    effect: [
+      { type: 'v2GetDisplayState', outputVar: 'text', indent: 0 },
+      { type: 'v2ConcatString', source1: 'text', source1Type: 'var', source2: mark, source2Type: 'value', outputVar: 'text', indent: 0 },
+      { type: 'v2SetDisplayState', value: 'text', valueType: 'var', indent: 0 },
+    ],
+  });
+  /** Each member's card: an input trigger, a start, an output, a button and a display trigger of its own. */
+  const card = (memberId: string, name: string, mark: string, extra: ScriptBundle['triggers'] = []): ScriptBundle =>
+    scripted({
+      memberId,
+      name,
+      triggers: [
+        { comment: '', type: 'input', conditions: [], effect: [setvar(`input${name}`, `{{getvar::input리안}}+${name}`)] },
+        { comment: '', type: 'start', conditions: [], effect: [setvar(`start${name}`, '1')] },
+        { comment: '', type: 'output', conditions: [], effect: [setvar('finishedBy', name)] },
+        { comment: '공격', type: 'manual', conditions: [], effect: [setvar('hit', name)] },
+        marks(mark),
+        ...extra,
+      ],
+    });
+
+  beforeEach(() => {
+    bundles = [card('chr_1', '리안', ' ★'), card('chr_2', '카이', ' ♥')];
+    // 리안 speaks only when picked, so the round in list order is 카이's alone.
+    publicPlot = {
+      characters: [
+        { id: 'chr_1', name: '리안', avatarUrl: null, intro: '', talkativeness: 0 },
+        { id: 'chr_2', name: '카이', avatarUrl: null, intro: '', talkativeness: 50 },
+      ],
+      groupSettings: { order: 'list', maxSpeakers: 1 },
+    };
+    chatState = stateWith([
+      greeting,
+      message('m1', 'm0', 'user', '안녕'),
+      message('m2', 'm1', 'assistant', '응.', { speakerMemberId: 'chr_2', groupTurnId: 'm2' }),
+    ]);
+  });
+
+  it('chains both input passes on a send, and runs only the speaker’s start, naming it', async () => {
+    await render();
+    await sendText('들어간다');
+    expect(streamed[0]!.path).toBe('/api/chats/cht_1/messages');
+    expect(streamed[0]!.body).toMatchObject({
+      content: '들어간다',
+      speakerId: 'chr_2',
+      memberId: 'chr_2',
+      postProcess: true,
+      // 카이's input pass read what 리안's left; 리안's start never ran.
+      variableDelta: { input리안: 'null+리안', input카이: 'null+리안+카이', start카이: '1' },
+    });
+    expect((streamed[0]!.body as { variableDelta: Record<string, string> }).variableDelta).not.toHaveProperty('start리안');
+  });
+
+  it('finishes a reply with its speaker’s output pass', async () => {
+    chatState = stateWith([
+      greeting,
+      message('m1', 'm0', 'user', '안녕'),
+      message('m2', 'm1', 'assistant', '응.', { speakerMemberId: 'chr_2', groupTurnId: 'm2', scriptState: 'pending' }),
+    ]);
+    await render();
+    await act(async () => undefined);
+    const commit = sent.find((call) => call.path.endsWith('/script-commit'))!;
+    expect(commit.body).toMatchObject({ messageId: 'm2', clearPending: true, memberId: 'chr_2', variableDelta: { finishedBy: '카이' } });
+  });
+
+  it('draws each message through its own member’s display triggers, the reader’s and the greeting through the first member’s', async () => {
+    await render();
+    expect(rows().map((row) => row.querySelector('span')!.textContent)).toEqual(['어서 와. ★', '안녕 ★', '응. ♥']);
+    expect(rows().map((row) => row.dataset['shizueMember'])).toEqual(['chr_1', 'chr_1', 'chr_2']);
+  });
+
+  it('runs a button with the triggers of the member whose message holds it', async () => {
+    await render();
+    await click(rows()[2]!.querySelector('button[data-shizue-trigger]')!);
+    expect(sent.at(-1)).toMatchObject({
+      path: '/api/chats/cht_1/script-commit',
+      body: { messageId: 'm2', memberId: 'chr_2', variableDelta: { hit: '카이' } },
+    });
+    await click(rows()[0]!.querySelector('button[data-shizue-trigger]')!);
+    expect(sent.at(-1)).toMatchObject({ body: { memberId: 'chr_1', variableDelta: { hit: '리안' } } });
+  });
+
+  it('draws a work of one with no member on its rows, as it always was', async () => {
+    bundles = null;
+    bundle = scripted({ memberId: 'chr_1', triggers: [marks(' ★')] });
+    publicPlot = {};
+    await render();
+    expect(rows().map((row) => row.dataset['shizueMember'])).toEqual([undefined, undefined, undefined]);
+    expect(rows().map((row) => row.querySelector('span')!.textContent)).toEqual(['어서 와. ★', '안녕 ★', '응. ★']);
   });
 });

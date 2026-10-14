@@ -224,6 +224,12 @@ export interface PlotMember {
  */
 export interface PlotDetail extends Plot {
   characters: PlotMember[];
+  /**
+   * What the chat draws behind the work today: its own background where it has
+   * one, else the scripted card's (`PublicPlotDetail.backgroundHtml`) — what the
+   * studio's background field starts from.
+   */
+  backgroundHtml?: string;
   commentCount: number;
   /** Tokens the plot lorebook's always-on entries take, counted from the saved plot. */
   plotLoreConstantTokens: number;
@@ -312,9 +318,16 @@ export interface PublicPlotDetail extends PublicPlot {
   /** The stylesheet the scripts' markup is drawn with; '' when the plot has none. */
   css: string;
   /**
-   * What a RisuAI card draws behind the chat (`backgroundHTML`), past the
-   * stylesheet above, which is its `<style>` elements; '' when there is nothing
-   * else. Optional for a detail built by hand.
+   * Each member's own stylesheet in a work of several, by member id
+   * (`PlotCustomUi.memberCss`), for that member's messages. Optional for a
+   * detail built by hand.
+   */
+  memberCss?: Record<string, string>;
+  /**
+   * What is drawn behind the chat: the work's own background
+   * (`PlotCustomUi.backgroundHtml`), or — on a plot from before it — the
+   * scripted card's `backgroundHTML` past the stylesheet above; '' when there is
+   * nothing to draw. Optional for a detail built by hand.
    */
   backgroundHtml?: string;
   defaultVariables: Record<string, string>;

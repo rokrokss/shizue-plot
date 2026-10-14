@@ -3,6 +3,7 @@
 import { Icon } from '@/components/Icon';
 import { assetResolver, type CbsMessage } from '@shizue/core/cbs';
 import { componentNames } from '@shizue/core/component';
+import { displayScriptsFor } from '@shizue/core/display-script';
 import { NARRATOR_SPEAKER } from '@shizue/core/group';
 import { NARRATION_PREFIX } from '@shizue/core/narration';
 import { isSceneMessage, sceneSpanAt } from '@shizue/core/scene';
@@ -88,9 +89,11 @@ import { loadWholeBranch } from '@/lib/scripts/branch';
 import { readEmbeddingModel } from '@/lib/scripts/embeddingModels';
 import { createLuaEngine, luaFunctionNames, luaScriptsOf } from '@/lib/scripts/lua/engine';
 import { createLuaSandbox, type LuaRequestAnswer } from '@/lib/scripts/lua/sandbox';
+import { groupDisplayEdits, prepareGroupSend, runtimeOf, type ScriptCast } from '@/lib/scripts/group';
 import {
   activeLore,
   createScriptRuntime,
+  sharedScripts,
   type CommandOutcome,
   type PreparedGeneration,
   type PrepareOptions,
@@ -194,6 +197,18 @@ interface RunOutcome {
   state: ChatState | null;
 }
 
+/**
+ * The member whose start triggers a generation runs, in a work of several: the
+ * one its round asks, the head's for a continue (the server goes on as that
+ * speaker), and none — the lead's scripts — for a narration, a carry-on of the
+ * scene, or a send no round was picked for.
+ */
+function speakerOf(mode: StreamMode, step: GroupStep | undefined, current: ChatState): string | null {
+  if (step?.request) return step.request.speakerId;
+  const head = current.path.at(-1);
+  return mode === 'continue' && head?.role === 'assistant' ? (head.speakerMemberId ?? null) : null;
+}
+
 /** How a round in a work of several members begins (`playRound`). */
 type RoundStart =
   | { opening: 'send'; content: string; options?: SendOptions; prepareOptions?: PrepareOptions }
@@ -250,6 +265,11 @@ interface ViewMessage {
    * character message a card's script wrote (`source` `script`).
    */
   speaker?: string;
+  /**
+   * In a work of several members, whose message it is for its custom UI and
+   * its buttons (`memberOf`): the speaker, else the work's first member.
+   */
+  member?: string;
 }
 
 /** Nothing attached, shared so a row without images keeps a stable prop. */
@@ -286,28 +306,40 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const [missing, setMissing] = useState(false);
 
   /**
-   * The card's scripts (`lib/scripts`): undefined while the read is out, null for
-   * a plot that carries none. Read once per chat — what they rewrite of the work
-   * afterwards, the runtime keeps track of itself.
+   * The cards' scripts (`lib/scripts`), one bundle per member that carries any,
+   * in roster order: undefined while the read is out, null for a plot that
+   * carries none. Read once per chat — what they rewrite of the work afterwards,
+   * the runtimes keep track of themselves. The first is the lead's
+   * (`scriptBundle`), the scripted member a work of one has.
    */
-  const [scriptBundle, setScriptBundle] = useState<ScriptBundle | null | undefined>(undefined);
+  const [scriptBundles, setScriptBundles] = useState<readonly ScriptBundle[] | null | undefined>(undefined);
   useEffect(() => {
-    setScriptBundle(undefined);
-    apiGet<{ scripts: ScriptBundle | null }>(`/api/chats/${id}/scripts`).then(
-      (answer) => setScriptBundle(answer?.scripts ?? null),
+    setScriptBundles(undefined);
+    apiGet<{ scripts: ScriptBundle | null; members?: ScriptBundle[] }>(`/api/chats/${id}/scripts`).then(
+      (answer) =>
+        setScriptBundles(answer?.members?.length ? answer.members : answer?.scripts ? [answer.scripts] : null),
       // A plot that cannot be read runs nothing, and a pending reply is kept as written.
-      () => setScriptBundle(null),
+      () => setScriptBundles(null),
     );
   }, [id]);
+  const scriptBundle = scriptBundles === undefined ? undefined : (scriptBundles?.[0] ?? null);
   /**
-   * What the card's scripts rewrote of their member for this reader on the plot —
-   * in this chat or another of theirs (`MemberOverlay`):
-   * the bundle's on load, then the runtime's each time the server took a run's
-   * rewrite. The screen draws the member's name, the first greeting and the
-   * background from it, as RisuAI draws them from its character.
+   * What the cards' scripts rewrote of their members for this reader on the plot —
+   * in this chat or another of theirs (`MemberOverlay`), by member id:
+   * the bundles' on load, then the runtimes' each time the server took a run's
+   * rewrite. The screen draws a member's name from it, and the first greeting and
+   * the background from the lead's, as RisuAI draws them from its character.
    */
-  const [scriptOverlay, setScriptOverlay] = useState<MemberOverlay | null>(null);
-  useEffect(() => setScriptOverlay(scriptBundle?.overlay.member ?? null), [scriptBundle]);
+  const [scriptOverlays, setScriptOverlays] = useState<Readonly<Record<string, MemberOverlay>>>({});
+  useEffect(
+    () =>
+      setScriptOverlays(
+        Object.fromEntries((scriptBundles ?? []).flatMap((bundle) => (bundle.overlay.member ? [[bundle.memberId, bundle.overlay.member]] : []))),
+      ),
+    [scriptBundles],
+  );
+  /** The lead's: the scripted member a work of one has. */
+  const scriptOverlay = scriptBundle ? (scriptOverlays[scriptBundle.memberId] ?? null) : null;
 
   const [input, setInput] = useState('');
   /** How the composer's text is meant: a line, a description, or the narrator's. */
@@ -802,24 +834,25 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const variables = useStableVariables(liveVariables);
 
   /**
-   * The plot's cast, which is what a reply's `이름:` lines are read against — the
-   * scripted member under the name its scripts gave it in this chat (`setName`),
-   * its lines under the old name still its own (`aliases`).
+   * The plot's cast, which is what a reply's `이름:` lines are read against — a
+   * scripted member under the name its scripts gave it for this reader
+   * (`setName`), its lines under the old name still its own (`aliases`).
    */
   const scriptedId = scriptBundle?.memberId;
   const renamed = scriptOverlay?.name;
   const cast = plot?.characters ?? NO_MEMBERS;
-  const members = useMemo(
-    () =>
-      renamed === undefined || !scriptedId
-        ? cast
-        : cast.map((member) =>
-            member.id === scriptedId && member.name !== renamed
-              ? { ...member, name: renamed, aliases: [member.name] }
-              : member,
-          ),
-    [cast, scriptedId, renamed],
-  );
+  const members = useMemo(() => {
+    const renamedTo = (member: PublicMember): string | undefined => {
+      const name = scriptOverlays[member.id]?.name;
+      return name !== undefined && name !== member.name ? name : undefined;
+    };
+    return cast.some((member) => renamedTo(member) !== undefined)
+      ? cast.map((member) => {
+          const name = renamedTo(member);
+          return name === undefined ? member : { ...member, name, aliases: [member.name] };
+        })
+      : cast;
+  }, [cast, scriptOverlays]);
   const absentIds = state?.chat.absentCharacterIds;
   /** Who is on the stage — the members a round's speakers are picked from. */
   const stage = useMemo(
@@ -894,18 +927,27 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const chatId = state?.chat.id ?? '';
   const locale = useLocale();
 
-  /** The manual triggers a `{{button}}` may name, which then runs one rather than filling the composer. */
-  const triggerNames = useMemo(
+  /**
+   * The manual triggers a `{{button}}` may name, which then runs one rather than
+   * filling the composer — each scripted member's own, and the lead's.
+   */
+  const triggerNamesByMember = useMemo(
     () =>
-      scriptBundle
-        ? new Set([
-            ...manualTriggerNames(scriptBundle.triggers),
+      new Map(
+        (scriptBundles ?? []).map((bundle) => [
+          bundle.memberId,
+          new Set([
+            ...manualTriggerNames(bundle.triggers),
             // A manual run calls the Lua global of its name, so a button may name one.
-            ...luaFunctionNames(luaScriptsOf(scriptBundle.triggers)),
-          ])
-        : undefined,
-    [scriptBundle],
+            ...luaFunctionNames(luaScriptsOf(bundle.triggers)),
+          ]),
+        ]),
+      ),
+    [scriptBundles],
   );
+  const triggerNames = scriptBundle ? triggerNamesByMember.get(scriptBundle.memberId) : undefined;
+  /** The work's first member, who speaks for the messages no member speaks (`lib/scripts/group`). */
+  const firstMemberId = cast[0]?.id ?? null;
 
   const display = useMemo<DisplayContext | undefined>(() => {
     if (!customUi || scripts.length === 0) return undefined;
@@ -949,6 +991,61 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     globalVariables,
     triggerNames,
   ]);
+
+  /**
+   * Each member's display scripts in a work of several (`displayScriptsFor`):
+   * the untagged ones and its own. The same array for a member as long as the
+   * plot's scripts are the same — the planner tells a fresh plan by it — and,
+   * while no script is tagged, nobody's but the plot's own.
+   */
+  const scriptsByMember = useMemo(() => {
+    const lists = new Map<string, DisplayScript[]>();
+    if (!group || !scripts.some((script) => script.memberId !== undefined)) return lists;
+    for (const member of cast) lists.set(member.id, displayScriptsFor(scripts, member.id));
+    return lists;
+  }, [group, scripts, cast]);
+  /**
+   * What a member's messages are drawn with, in a work of several: its display
+   * scripts, and the buttons its own triggers answer — the lead's for the work's
+   * first member, as its messages run the lead's scripts (`runtimeOf`). Missing
+   * for a member none of the plot's scripts apply to.
+   */
+  const displayByMember = useMemo(() => {
+    const contexts = new Map<string, DisplayContext>();
+    if (!display || !group) return contexts;
+    for (const member of cast) {
+      const list = scriptsByMember.get(member.id) ?? scripts;
+      if (list.length === 0) continue;
+      const names = triggerNamesByMember.get(member.id) ?? (member.id === firstMemberId ? triggerNames : undefined);
+      if (list === scripts && names === triggerNames) {
+        contexts.set(member.id, display);
+        continue;
+      }
+      const { triggerNames: _lead, ...rest } = display;
+      contexts.set(member.id, { ...rest, scripts: list, ...(names ? { triggerNames: names } : {}) });
+    }
+    return contexts;
+  }, [display, group, cast, scripts, scriptsByMember, triggerNamesByMember, firstMemberId, triggerNames]);
+  /** The display context of a row: its member's in a work of several, else the plot's. */
+  const displayOf = (member: string | undefined): DisplayContext | undefined =>
+    member !== undefined && group ? displayByMember.get(member) : display;
+  /** The background is the work's, drawn with the first member's display scripts — the untagged ones in a work of one. */
+  const backgroundScripts = (firstMemberId !== null && scriptsByMember.get(firstMemberId)) || scripts;
+  /**
+   * Each member's own stylesheet in a work of several (`PlotCustomUi.memberCss`),
+   * scoped to the rows of that member's messages (`data-shizue-member`), and gone
+   * with the rest of the custom UI.
+   */
+  const memberSheets = useMemo(
+    () =>
+      customUi && group
+        ? Object.entries(plot?.memberCss ?? {}).flatMap(([memberId, css]) => {
+            const sheet = css ? sanitizeCustomHtml(`<style>${css}</style>`, { member: memberId }) : '';
+            return sheet ? [{ memberId, sheet }] : [];
+          })
+        : [],
+    [customUi, group, plot],
+  );
 
   /**
    * Whether the branch opens on the plot's first opening, where the first message
@@ -1031,9 +1128,12 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   ]);
 
   /**
-   * The HTML behind the conversation (`ChatBackground`): what the scripts set in
-   * this chat (`setBackgroundEmbedding`), else the card's past its stylesheet. It
-   * is custom UI, so it goes when custom UI does, as the stylesheet does.
+   * The HTML behind the conversation (`ChatBackground`): what the lead's scripts
+   * set for this reader (`setBackgroundEmbedding`), else the work's own
+   * (`PlotCustomUi.backgroundHtml`, or the card's past its stylesheet on a plot
+   * from before it) — one for the whole work, as a RisuAI group has; a
+   * companion's card background is drawn nowhere. It is custom UI, so it goes
+   * when custom UI does, as the stylesheet does.
    */
   const backgroundHtml = customUi ? (scriptOverlay?.backgroundHtml ?? plot?.backgroundHtml ?? '') : '';
   /** What its CBS reads: the screen's own, as a display script's template reads it. */
@@ -1109,8 +1209,14 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     }),
     [],
   );
-  const runtime = useMemo<ScriptRuntime | null>(() => {
-    if (!scriptBundle) return null;
+  /**
+   * One runtime per member that carries scripts (`lib/scripts`), the lead's
+   * first. In a work of several members they share one Lua sandbox — each
+   * member's Lua in states of its own — the persona and the chat's lore their
+   * scripts rewrite, and every request names its member (`group`).
+   */
+  const runtimes = useMemo<{ byMember: ReadonlyMap<string, ScriptRuntime>; lead: ScriptRuntime; dispose(): void } | null>(() => {
+    if (!scriptBundles?.length) return null;
     const log = (entry: { kind: string; effect?: string; message: string }): void =>
       console.warn('[scripts]', entry.kind, entry.effect ?? '', entry.message);
     // The embedding search of `checkSimilarity` and Lua's `similarity`, one for both:
@@ -1129,54 +1235,104 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         setScriptNotice((current) => (current === notice ? '' : current));
       }
     };
-    // A plot that carries Lua gets the sandbox; wasmoon is fetched on its first call, never before.
-    const engines = luaScriptsOf(scriptBundle.triggers).length
-      ? [
-          createLuaEngine({
-            triggers: scriptBundle.triggers,
-            lowLevelAccess: scriptBundle.lowLevelAccess,
-            sandbox: createLuaSandbox({
-              loadAssets: () => import('@/lib/scripts/lua/assets').then((assets) => assets.loadLuaAssets()),
-              onIdleKill: (reason) => log({ kind: 'limit', effect: 'triggerlua', message: `a Lua script still running between calls was stopped (${reason})` }),
-            }),
-            ui: scriptUi,
-            llm: async (messages, model) =>
-              (await apiSend<{ result: string }>('POST', `/api/chats/${id}/script-llm`, { messages, model })).result,
-            similarity,
-            // Our server makes the GET, under RisuAI's limits, and answers as RisuAI does.
-            request: (url) => apiSend<LuaRequestAnswer>('POST', `/api/chats/${id}/script-fetch`, { url }),
-            // `loadLoreBooks`: activated as `/test_lorebook` is, against RisuAI's
-            // `maxContext`, which is the chat's context budget here.
-            lore: async (history, lorebook) => ({
-              actives: (await activeLore(lorebook, history, scriptBundle.character.loreSettings)).actives.map(
-                (active) => ({ prompt: active.prompt, role: active.role }),
-              ),
-              maxContext: stateRef.current?.chat.memorySettings?.contextBudget ?? DEFAULT_CONTEXT_BUDGET,
-            }),
-            avatarUrl: scriptBundle.character.avatarUrl ?? null,
-            // The persona the chat is on when the call starts — the reader may switch it.
-            personaAvatarUrl: () =>
-              personasRef.current.find((persona) => persona.id === stateRef.current?.chat.personaId)?.avatarUrl ??
-              null,
-            log,
-          }),
-        ]
-      : [];
-    return createScriptRuntime({
-      chatId: id,
-      bundle: scriptBundle,
-      api: { send: apiSend },
-      ui: scriptUi,
-      engines,
-      similarity,
-      log,
-      onGlobalVariables: (globals) =>
-        setState((current) => (current ? { ...current, globalVariables: globals } : current)),
-      onOverlay: setScriptOverlay,
-    });
-  }, [id, scriptBundle, scriptUi]);
-  // The sandbox goes with the runtime that opened it.
-  useEffect(() => () => runtime?.dispose(), [runtime]);
+    // A plot that carries Lua gets the sandbox; wasmoon is fetched on its first call,
+    // never before. One for the chat, ended with the runtimes rather than by each engine.
+    const sandbox = scriptBundles.some((bundle) => luaScriptsOf(bundle.triggers).length > 0)
+      ? createLuaSandbox({
+          loadAssets: () => import('@/lib/scripts/lua/assets').then((assets) => assets.loadLuaAssets()),
+          onIdleKill: (reason) => log({ kind: 'limit', effect: 'triggerlua', message: `a Lua script still running between calls was stopped (${reason})` }),
+        })
+      : null;
+    const shared = sharedScripts(scriptBundles[0]!);
+    const byMember = new Map(
+      scriptBundles.map((bundle) => {
+        /** In a work of several members, the member a call is made for. */
+        const tag = group ? { memberId: bundle.memberId } : {};
+        const engines = sandbox && luaScriptsOf(bundle.triggers).length
+          ? [
+              createLuaEngine({
+                triggers: bundle.triggers,
+                lowLevelAccess: bundle.lowLevelAccess,
+                sandbox: { call: (...args) => sandbox.call(...args), dispose: () => undefined },
+                ...(group ? { member: bundle.memberId } : {}),
+                ui: scriptUi,
+                llm: async (messages, model) =>
+                  (await apiSend<{ result: string }>('POST', `/api/chats/${id}/script-llm`, { messages, model, ...tag })).result,
+                similarity,
+                // Our server makes the GET, under RisuAI's limits, and answers as RisuAI does.
+                request: (url) => apiSend<LuaRequestAnswer>('POST', `/api/chats/${id}/script-fetch`, { url, ...tag }),
+                // `loadLoreBooks`: activated as `/test_lorebook` is, against RisuAI's
+                // `maxContext`, which is the chat's context budget here.
+                lore: async (history, lorebook) => ({
+                  actives: (await activeLore(lorebook, history, bundle.character.loreSettings)).actives.map(
+                    (active) => ({ prompt: active.prompt, role: active.role }),
+                  ),
+                  maxContext: stateRef.current?.chat.memorySettings?.contextBudget ?? DEFAULT_CONTEXT_BUDGET,
+                }),
+                avatarUrl: bundle.character.avatarUrl ?? null,
+                // The persona the chat is on when the call starts — the reader may switch it.
+                personaAvatarUrl: () =>
+                  personasRef.current.find((persona) => persona.id === stateRef.current?.chat.personaId)?.avatarUrl ??
+                  null,
+                log,
+              }),
+            ]
+          : [];
+        const runtime = createScriptRuntime({
+          chatId: id,
+          bundle,
+          api: { send: apiSend },
+          ui: scriptUi,
+          engines,
+          similarity,
+          log,
+          onGlobalVariables: (globals) =>
+            setState((current) => (current ? { ...current, globalVariables: globals } : current)),
+          onOverlay: (member, memberId) => setScriptOverlays((current) => ({ ...current, [memberId]: member })),
+          shared,
+          ...(group ? { group: true } : {}),
+        });
+        return [bundle.memberId, runtime] as const;
+      }),
+    );
+    return {
+      byMember,
+      lead: byMember.get(scriptBundles[0]!.memberId)!,
+      dispose: () => {
+        for (const runtime of byMember.values()) runtime.dispose();
+        sandbox?.dispose();
+      },
+    };
+  }, [id, scriptBundles, scriptUi, group]);
+  // The sandbox goes with the runtimes that opened it.
+  useEffect(() => () => runtimes?.dispose(), [runtimes]);
+  /** Where each moment's scripts run (`runtimeOf`). */
+  const scriptCast = useMemo<ScriptCast | null>(
+    () => (runtimes ? { byMember: runtimes.byMember, lead: runtimes.lead, firstMemberId } : null),
+    [runtimes, firstMemberId],
+  );
+  /** The lead's runtime: a work of one's only one. */
+  const runtime = runtimes?.lead ?? null;
+  const anyRuntime = (has: (runtime: ScriptRuntime) => boolean): boolean =>
+    runtimes ? [...runtimes.byMember.values()].some(has) : false;
+  /** Whether any member's scripts rewrite what messages show — its display triggers, its Lua's `editDisplay` — or listen to the request. */
+  const rewritesDisplay = anyRuntime((one) => one.rewritesDisplay);
+  const editsDisplay = anyRuntime((one) => one.editsDisplay);
+  const rewritesOnServer = anyRuntime((one) => one.rewritesOnServer);
+  /**
+   * Whose message a stored one is, for the scripts it is drawn through and the
+   * buttons in it (`lib/scripts/group`): in a work of several members, a reply's
+   * speaker, else the work's first member; null in a work of one, the lead's.
+   */
+  const memberOfMessage = useCallback(
+    (message: ChatMessage): string | null =>
+      !group
+        ? null
+        : message.role === 'assistant' && message.speakerMemberId && cast.some((member) => member.id === message.speakerMemberId)
+          ? message.speakerMemberId
+          : firstMemberId,
+    [group, cast, firstMemberId],
+  );
   /**
    * The scripts fold the branch as the server does, from the plot's defaults, so
    * nothing runs before both reads are in: a turn sent in the meantime would be
@@ -1251,6 +1407,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     if (!head || head.scriptState !== 'pending') return null;
     const rev = head.scriptRev ?? 0;
     finishTried.current.add(`${head.id}:${rev}`);
+    // The speaker's output pass: a reply is its speaker's to finish.
+    const runtime = scriptCast ? runtimeOf(scriptCast, head.speakerMemberId ?? null) : null;
     try {
       if (!runtime || finishMarked(head.id, rev)) {
         unmarkFinish(head.id, rev);
@@ -1369,9 +1527,14 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     })();
   }, [queuedTurns, takingTurn, mode, mutating, drawing, state]);
 
-  /** A `risu-trigger` or `{{button}}` click: the plot's manual triggers of that name, committed on the head. */
-  async function runManualTrigger(name: string, triggerId: string | null): Promise<void> {
+  /**
+   * A `risu-trigger` or `{{button}}` click: the manual triggers of that name of
+   * the member whose message holds the button (`member`, the lead's without
+   * one), committed on the head.
+   */
+  async function runManualTrigger(name: string, triggerId: string | null, member: string | null): Promise<void> {
     const current = stateRef.current;
+    const runtime = scriptCast ? runtimeOf(scriptCast, member) : null;
     if (!runtime || !current || scriptsPending || !beginMutation()) return;
     try {
       const next = await runtime.manual(name, triggerId, await scriptViewOf(current));
@@ -1426,11 +1589,13 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   }
 
   /**
-   * A `risu-btn` click: the card's Lua `onButtonClick`, and what it did
-   * committed on the head, as a manual trigger's is.
+   * A `risu-btn` click: the card's Lua `onButtonClick` — the card of the member
+   * whose message holds the button — and what it did committed on the head, as a
+   * manual trigger's is.
    */
-  async function runLuaButton(data: string): Promise<void> {
+  async function runLuaButton(data: string, member: string | null): Promise<void> {
     const current = stateRef.current;
+    const runtime = scriptCast ? runtimeOf(scriptCast, member) : null;
     if (!runtime || !current || scriptsPending || !beginMutation()) return;
     try {
       const next = await runtime.button(data, await scriptViewOf(current));
@@ -1453,7 +1618,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    */
   const [luaShown, setLuaShown] = useState<ReadonlyMap<string, string>>(() => new Map());
   useEffect(() => {
-    if (!runtime?.editsDisplay || !customUi || !state) return;
+    if (!scriptCast || !editsDisplay || !customUi || !state) return;
     let current = true;
     const persona = personas.find((entry) => entry.id === state.chat.personaId);
     const view: ScriptView = {
@@ -1466,9 +1631,14 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       ...(globalVariables ? { globalVariables } : {}),
       data: scriptData(lastMessageId + 1),
     };
-    const items = messages.map((message) => ({ id: message.id, text: shownGreetings.get(message.id) ?? message.content }));
-    if (backgroundHtml) items.push({ id: BACKGROUND_ITEM, text: backgroundHtml });
-    runtime.displayEdits(items, view, persistedVariables).then(
+    // Each message to the listeners of the member it is (`runtimeOf`), the background to the lead's.
+    const items = messages.map((message) => ({
+      id: message.id,
+      text: shownGreetings.get(message.id) ?? message.content,
+      memberId: memberOfMessage(message),
+    }));
+    if (backgroundHtml) items.push({ id: BACKGROUND_ITEM, text: backgroundHtml, memberId: null });
+    groupDisplayEdits(scriptCast, items, (owner, list) => owner.displayEdits(list, view, persistedVariables)).then(
       (shown) => {
         if (current) setLuaShown(shown);
       },
@@ -1478,7 +1648,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       current = false;
     };
   }, [
-    runtime,
+    scriptCast,
+    editsDisplay,
+    memberOfMessage,
     customUi,
     state,
     personas,
@@ -1503,8 +1675,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    */
   const scriptShown = useMemo(() => {
     const shown = new Map<string, string>();
-    if (!runtime || !customUi || !state) return shown;
-    if (!runtime.rewritesDisplay) return runtime.editsDisplay ? new Map(luaShown) : shown;
+    if (!scriptCast || !customUi || !state) return shown;
+    if (!rewritesDisplay) return editsDisplay ? new Map(luaShown) : shown;
     const persona = personas.find((entry) => entry.id === state.chat.personaId);
     const view: ScriptView = {
       messages,
@@ -1516,18 +1688,23 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       ...(globalVariables ? { globalVariables } : {}),
       data: scriptData(lastMessageId + 1),
     };
+    // Each message through the display triggers of the member it is (`runtimeOf`).
     for (const message of messages) {
       const text = shownGreetings.get(message.id) ?? message.content;
-      const drawn = runtime.display(luaShown.get(message.id) ?? text, view, persistedVariables);
+      const listened = luaShown.get(message.id) ?? text;
+      const drawn = runtimeOf(scriptCast, memberOfMessage(message))?.display(listened, view, persistedVariables) ?? listened;
       if (drawn !== text) shown.set(message.id, drawn);
     }
     if (backgroundHtml) {
-      const drawn = runtime.display(luaShown.get(BACKGROUND_ITEM) ?? backgroundHtml, view, persistedVariables);
+      const drawn = scriptCast.lead.display(luaShown.get(BACKGROUND_ITEM) ?? backgroundHtml, view, persistedVariables);
       if (drawn !== backgroundHtml) shown.set(BACKGROUND_ITEM, drawn);
     }
     return shown;
   }, [
-    runtime,
+    scriptCast,
+    rewritesDisplay,
+    editsDisplay,
+    memberOfMessage,
     customUi,
     state,
     personas,
@@ -1598,9 +1775,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     // scripts — and what they decide rides on the request (`lib/scripts`).
     let scriptBody: Record<string, unknown> = {};
     let prepared: PreparedGeneration | null = null;
-    // One runtime — the lead member's — runs for every reply of a round in this
-    // wave; a runtime per member is where the speaker would pick it.
-    if (runtime && start) {
+    /** A send's round, picked between its members' input passes and the speaker's start (`prepareGroupSend`). */
+    const pickedRound: { request?: RoundRequest | null } = {};
+    if (scriptCast && start) {
       try {
         let current = start;
         // A reply still owed its output scripts is finished before anything builds
@@ -1616,7 +1793,29 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         }
         const view = await scriptViewOf(current);
         const replaces = step?.request?.replaces;
-        prepared = await runtime.prepare(next, view, content, replaces ? { ...prepareOptions, replaces } : prepareOptions);
+        const options = replaces ? { ...prepareOptions, replaces } : prepareOptions;
+        const pick = step?.pick;
+        if (group && next === 'send' && pick) {
+          // Every member on the stage takes its input pass, the round is picked off
+          // the turn they left, and the speaker's start triggers run.
+          prepared = (
+            await prepareGroupSend(scriptCast, view, content ?? '', options, {
+              stage: stage.map((member) => member.id),
+              pick: (text) => {
+                pickedRound.request = pick(text);
+                return pickedRound.request?.speakerId ?? null;
+              },
+            })
+          ).prepared;
+        } else {
+          // Any other moment is one member's: the speaker's — the head's for a
+          // continue — or the lead's where no member speaks. A speaker with no
+          // scripts runs none, and the request only says what it was built on.
+          const runner = group ? runtimeOf(scriptCast, speakerOf(next, step, current)) : scriptCast.lead;
+          prepared = runner
+            ? await runner.prepare(next, view, content, options)
+            : { body: { baseHeadId: current.chat.headMessageId }, stop: false, accept: () => undefined };
+        }
         if (prepared.state) mergeState(prepared.state);
         // A head still pending here is one this tab could not finish: the turn
         // goes on without its output scripts rather than being refused for them.
@@ -1661,7 +1860,13 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     const stoppedTurn = next === 'send' && prepared?.stop === true;
     // Who this request asks, in a round: known up front, or — on a send — picked
     // now, off the turn as its input scripts left it. A stopped turn asks no one.
-    const request = stoppedTurn ? null : step?.pick ? step.pick(content ?? '') : (step?.request ?? null);
+    const request = stoppedTurn
+      ? null
+      : 'request' in pickedRound
+        ? (pickedRound.request ?? null)
+        : step?.pick
+          ? step.pick(content ?? '')
+          : (step?.request ?? null);
     const speakerBody = request
       ? {
           speakerId: request.speakerId,
@@ -1713,10 +1918,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     // RisuAI's `editRequest` listener rewrites the live character and the chat's
     // lore; here the server ran it with the reply, so the page asks what it left
     // before the output scripts read them.
-    if (rejection === null && !stoppedTurn && runtime?.rewritesOnServer) {
-      await apiGet<{ scripts: ScriptBundle | null }>(`/api/chats/${id}/scripts`).then(
+    if (rejection === null && !stoppedTurn && runtimes && rewritesOnServer) {
+      await apiGet<{ scripts: ScriptBundle | null; members?: ScriptBundle[] }>(`/api/chats/${id}/scripts`).then(
         (answer) => {
-          if (answer?.scripts) runtime.adopt(answer.scripts);
+          const bundles = answer?.members?.length ? answer.members : answer?.scripts ? [answer.scripts] : [];
+          for (const bundle of bundles) runtimes.byMember.get(bundle.memberId)?.adopt(bundle);
         },
         () => undefined,
       );
@@ -2265,6 +2471,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         : message.role === 'assistant' && message.source === 'script' && scriptSpeaker
           ? { speaker: scriptSpeaker }
           : {}),
+      ...(group && (tagged?.id ?? firstMemberId) ? { member: tagged?.id ?? firstMemberId! } : {}),
     };
   });
 
@@ -2284,6 +2491,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       attachments: pendingAttachments,
       createdAt: null,
       streaming: false,
+      ...(group && firstMemberId ? { member: firstMemberId } : {}),
     });
   }
   // Auto-continue appends a new reply, so unlike regenerate it keeps the head
@@ -2304,6 +2512,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       createdAt: null,
       streaming: mode !== null,
       ...(streamMember ? { speaker: streamMember.name } : {}),
+      // Dressed as its speaker's from the first token, as it will be once stored.
+      ...(group && streamMember ? { member: streamMember.id } : {}),
     });
   }
 
@@ -2511,7 +2721,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           in it while the list scrolls over it, as RisuAI's background does. */}
       <div className="relative flex min-h-0 flex-1 flex-col">
         {backgroundContext ? (
-          <ChatBackground html={shownBackground} context={backgroundContext} scripts={scripts} />
+          <ChatBackground html={shownBackground} context={backgroundContext} scripts={backgroundScripts} />
         ) : null}
         <div
           ref={scrollRef}
@@ -2536,9 +2746,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               const target = event.target as HTMLElement;
               const scripted = target.closest?.('[data-shizue-trigger], [data-shizue-btn]');
               if (scripted) {
+                // The scripts of the member whose message holds the button.
+                const member = scripted.closest('[data-shizue-member]')?.getAttribute('data-shizue-member') ?? null;
                 const name = scripted.getAttribute('data-shizue-trigger');
-                if (name !== null) void runManualTrigger(name, scripted.getAttribute('data-shizue-trigger-id'));
-                else void runLuaButton(scripted.getAttribute('data-shizue-btn') ?? '');
+                if (name !== null) void runManualTrigger(name, scripted.getAttribute('data-shizue-trigger-id'), member);
+                else void runLuaButton(scripted.getAttribute('data-shizue-btn') ?? '', member);
                 return;
               }
               const button = target.closest?.('[data-shizue-fill]');
@@ -2555,6 +2767,15 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                 dangerouslySetInnerHTML={{ __html: creatorSheet }}
               />
             ) : null}
+            {memberSheets.map(({ memberId, sheet }) => (
+              <div
+                key={memberId}
+                hidden
+                data-testid="member-css"
+                // Sanitized by lib/sanitizeHtml, scoped to this member's rows.
+                dangerouslySetInnerHTML={{ __html: sheet }}
+              />
+            ))}
 
             {loadingEarlier ? (
               <p className="text-center text-xs text-muted" role="status">
@@ -2618,10 +2839,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                     userImage={personaAvatarUrl}
                     roster={members}
                     {...(message.speaker ? { speaker: message.speaker } : {})}
+                    {...(message.member ? { member: message.member } : {})}
                     assets={messageAssets}
                     resolveAsset={resolveAsset}
                     attachments={message.attachments}
-                    {...(display ? { display } : {})}
+                    {...(displayOf(message.member) ? { display: displayOf(message.member)! } : {})}
                     {...(components ? { components } : {})}
                     componentNames={declaredComponents}
                     previousSameRole={meta.previousSameRole}

@@ -56,8 +56,12 @@ export const LUA_LIMITS = {
   boot: 20_000,
   /** Bytes one Lua state may allocate. */
   memory: 32 * 1024 * 1024,
-  /** Lua states the worker keeps — RisuAI keeps one per mode, and a manual name is a mode. */
-  engines: 8,
+  /**
+   * Lua states the worker keeps — RisuAI keeps one per mode, and a manual name is
+   * a mode; in a work of several members, one per member and mode
+   * (`LuaCallMessage.member`). Past it, the one used longest ago is closed.
+   */
+  engines: 12,
   /** A single `sleep` is cut to this, as a trigger's wait is. */
   sleep: MAX_TRIGGER_WAIT_MS,
 };
@@ -142,6 +146,12 @@ export interface LuaCallMessage {
   entry: LuaEntry;
   snapshot: LuaSnapshot;
   /**
+   * The member whose card the code is, in a work of several: each member's Lua
+   * keeps its own state per mode, as each RisuAI character runs its own. Absent,
+   * the state is the mode's alone — a work of one, and the server.
+   */
+  member?: string;
+  /**
    * The server's `editRequest` runs only (`luaWorkerSource`'s `server`): the
    * Lua state's plain-data globals as an earlier call left them, put back once
    * the code has loaded (`restore`), and taken again once this call is done
@@ -207,7 +217,7 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
 
   let factory: Any = null;
   let ready: Any = null;
-  /** RisuAI's engines: one Lua state per mode, recreated when the code changes. */
+  /** RisuAI's engines: one Lua state per mode (and member), recreated when the code changes. */
   const engines = new Map();
   /** RisuAI's access keys: a call's `id` argument, and what it opens. */
   const safeIds = new Set();
@@ -1138,7 +1148,8 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
     }
     ready
       .then(function () {
-        const state = stateFor(engineName(request.entry));
+        const name = engineName(request.entry);
+        const state = stateFor(typeof request.member === 'string' ? request.member + ':' + name : name);
         const next = state.queue.then(function () {
           return invoke(state, request);
         });

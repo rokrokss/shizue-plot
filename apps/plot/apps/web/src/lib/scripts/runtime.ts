@@ -14,8 +14,7 @@
  *   triggers asked for (`injections`) and anything they rewrote of the work.
  * - **Any other generation** (`prepare('regenerate' | 'continue' | 'auto' |
  *   'narrate' | 'reply')`): the start triggers alone, on the branch the generation
- *   reads; what they left goes as `startDelta`. In a work of several members every
- *   reply of a round runs this one runtime's (the lead member's) for now.
+ *   reads; what they left goes as `startDelta`.
  * - **The reply** (`finish`): when the plot has output scripts the POST says
  *   `postProcess`, the server stores the reply `pending`, and once it lands the
  *   `editoutput` scripts rewrite it and the output triggers run — and the result
@@ -49,6 +48,15 @@
  * stays this chat's: the note goes to its own `note`, and the lore Lua's
  * `upsertLocalLoreBook` writes to its own lore (`localLore`, RisuAI's chat
  * `localLore`).
+ *
+ * In a work of several members each member that carries scripts has a runtime
+ * of its own, and the page routes each moment to one (`group.ts`): a send's
+ * input triggers and `editinput` scripts run for every member on the stage in
+ * roster order, each on what the one before left (`beginSend`, `input`), and
+ * then the speaker's start triggers (`startSend`); every other moment is one
+ * member's. The runtimes of one chat share the persona and the chat's lore they
+ * rewrite (`shared`), and in a group every request names its member
+ * (`memberId`), whose card the server holds it to.
  *
  * The runtime holds no React state and talks to the API through what it is
  * given, so it is tested with a fake fetch.
@@ -185,8 +193,36 @@ export interface ScriptRuntimeOptions {
    * it — the page draws the member's name, the first greeting and the background
    * from it.
    */
-  onOverlay?: (member: MemberOverlay) => void;
+  onOverlay?: (member: MemberOverlay, memberId: string) => void;
+  /**
+   * What the runtimes of one chat share, in a work of several members: the
+   * persona as the scripts rewrote it and the chat's own lore, which any
+   * member's scripts may rewrite and every member's read. Alone, a runtime keeps
+   * its own (`sharedScripts`).
+   */
+  shared?: SharedScripts;
+  /**
+   * The runtime is one member's of several: what it asks of the server names its
+   * member (`memberId`) — a generation, a commit, a model call — so the server
+   * holds the call to that member's card and makes a character message its
+   * scripts add that member's. A work of one sends what it always sent.
+   */
+  group?: boolean;
 }
+
+/** The part of the reader's overlay and chat every member's scripts read and write (`ScriptRuntimeOptions.shared`). */
+export interface SharedScripts {
+  /** The persona as the reader's scripts rewrote it on the plot; null where they did not. */
+  persona: string | null;
+  /** The chat's own lore, RisuAI's chat `localLore`, as the server last took it. */
+  localLore: LoreEntry[];
+}
+
+/** What a bundle says the members share, for the runtimes of one chat to start from. */
+export const sharedScripts = (bundle: Pick<ScriptBundle, 'overlay' | 'localLore'>): SharedScripts => ({
+  persona: bundle.overlay.persona,
+  localLore: bundle.localLore ?? [],
+});
 
 /**
  * The chat as the page holds it at the moment a script runs. `messages` is the
@@ -233,6 +269,29 @@ export interface PreparedGeneration {
    * copy moves with it. A refused generation kept nothing, and is not accepted.
    */
   accept(): void;
+}
+
+const CHAIN = Symbol('send chain');
+
+/**
+ * A send on its way through its members' scripts (`beginSend`, `input`,
+ * `startSend`): the turn's text as the input passes so far left it, and —
+ * opaque — the chat, the variables and what the passes rewrote.
+ */
+export interface SendChain {
+  readonly text: string;
+  readonly [CHAIN]: ChainState;
+}
+
+interface ChainState {
+  session: Session;
+  options: PrepareOptions;
+  /** The trigger chat the passes were given, and its greeting. */
+  chat: TriggerMessage[];
+  greeting: string | null;
+  /** The chat and the variables as the passes left them. */
+  messages: TriggerMessage[];
+  variables: Variables;
 }
 
 export interface FinishedReply {
@@ -412,6 +471,29 @@ const sameChat = (a: readonly TriggerMessage[], b: readonly TriggerMessage[]): b
 const withHeadText = (before: readonly TriggerMessage[], text: string): TriggerMessage[] =>
   before.map((message, index) => (index === before.length - 1 ? { ...message, data: text } : message));
 
+/**
+ * One operation's view of the work: it starts from the runtime's copy, each run
+ * reads what the runs before it left, and the patches are what the operation
+ * sends — each member's rewrite of its own card, by member id, since a send's
+ * input passes are several members' runs on one session.
+ */
+interface Session {
+  view: ScriptView;
+  persona: string;
+  note: string;
+  noteChanged: boolean;
+  patches: Record<string, MemberOverlay>;
+  personaPatch: string | undefined;
+  /** The chat's own lore as the runs left it, and whether one rewrote it. */
+  localLore: LoreEntry[];
+  localLoreChanged: boolean;
+  /** The reader's global variables as the runs left them, and what they wrote. */
+  globals: Variables;
+  globalWrites: VariableDelta | null;
+  /** Each runtime that ran in it moves its copy this way once the server has what they wrote. */
+  ran: Set<(s: Session) => void>;
+}
+
 export interface ScriptRuntime {
   readonly bundle: ScriptBundle;
   /** Names a `{{button}}` or a `risu-trigger` can run. */
@@ -433,6 +515,26 @@ export interface ScriptRuntime {
    */
   adopt(scripts: Pick<ScriptBundle, 'overlay' | 'localLore'>): void;
   prepare(mode: StreamMode, view: ScriptView, content?: string, options?: PrepareOptions): Promise<PreparedGeneration>;
+  /**
+   * A send's first step, before any script runs on it: what `input` and
+   * `startSend` carry on. `prepare('send')` is the three in a row; a work of
+   * several members runs every member's `input` on one chain, then the
+   * speaker's `startSend` (`group.ts`).
+   */
+  beginSend(view: ScriptView, content: string, options?: PrepareOptions): SendChain;
+  /**
+   * This member's input pass over a send — its input triggers, then its
+   * `editinput` listeners and scripts — on the chat, the variables and the text
+   * the passes before it left. A raw send (`/multisend`'s) runs none.
+   */
+  input(chain: SendChain): Promise<SendChain>;
+  /**
+   * The send's start pass: this member's start triggers on the chat with the
+   * turn on it, and the generation's body, measured against what the server will
+   * hold. `triggers: false` runs none and asks no output pass — a speaker with
+   * no scripts of its own, whose send other members' input passes ran on.
+   */
+  startSend(chain: SendChain, options?: { triggers?: boolean }): Promise<PreparedGeneration>;
   /** Finishes the head reply the server holds `pending`; null when the head is not one. */
   finish(view: ScriptView): Promise<FinishedReply | null>;
   /** Runs the manual triggers named `name`; null when there was nothing to commit. */
@@ -481,19 +583,20 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
   const runsAt = (mode: Exclude<TriggerMode, 'request'>): boolean =>
     hasTriggersFor(triggers, mode) || (codeTriggers && engineHandles(mode));
 
-  /** The work as the scripts see it: the card, with what this chat already rewrote of it. */
-  let overlay: { member: MemberOverlay; persona: string | null } = {
-    member: bundle.overlay.member ?? {},
-    persona: bundle.overlay.persona,
-  };
-  /** The chat's own lore, as the server last took it. */
-  let localLore: LoreEntry[] = bundle.localLore ?? [];
+  const memberId = bundle.memberId;
+  /** In a work of several members, the member every request is made for. */
+  const tag: { memberId?: string } = options.group ? { memberId } : {};
+
+  /** What the reader's scripts rewrote of this member's card, as the server last took it. */
+  let own: MemberOverlay = bundle.overlay.member ?? {};
+  /** The persona and the chat's lore, as every member's scripts left them. */
+  const shared = options.shared ?? sharedScripts(bundle);
 
   /** RisuAI's `char.name` and `{{char}}`, over a session's patch: the nickname stays `{{char}}` through a rename. */
   const memberName = (patch: MemberOverlay): string =>
-    patch.name ?? overlay.member.name ?? bundle.character.name ?? bundle.name;
+    patch.name ?? own.name ?? bundle.character.name ?? bundle.name;
   const charName = (patch: MemberOverlay): string => {
-    const renamed = patch.name ?? overlay.member.name;
+    const renamed = patch.name ?? own.name;
     return renamed === undefined ? bundle.name : bundle.character.nickname || renamed;
   };
 
@@ -501,63 +604,49 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     name: charName({}),
     memberName: memberName({}),
     ...(bundle.character.nickname ? { nickname: bundle.character.nickname } : {}),
-    ...(overlay.member.firstMessage !== undefined ? { firstMessage: overlay.member.firstMessage } : {}),
-    backgroundHtml: overlay.member.backgroundHtml ?? bundle.character.backgroundHtml ?? '',
-    description: overlay.member.description ?? bundle.character.description,
+    ...(own.firstMessage !== undefined ? { firstMessage: own.firstMessage } : {}),
+    backgroundHtml: own.backgroundHtml ?? bundle.character.backgroundHtml ?? '',
+    description: own.description ?? bundle.character.description,
     personality: bundle.character.personality,
     scenario: bundle.character.scenario,
     exampleDialogue: bundle.character.exampleDialogue,
-    lorebook: overlay.member.lorebook ?? bundle.character.lorebook,
-    postHistoryInstructions: overlay.member.postHistoryInstructions ?? bundle.character.postHistoryInstructions,
+    lorebook: own.lorebook ?? bundle.character.lorebook,
+    postHistoryInstructions: own.postHistoryInstructions ?? bundle.character.postHistoryInstructions,
     lowLevelAccess: bundle.lowLevelAccess,
     triggers,
   });
 
-  /**
-   * One operation's view of the work: it starts from the runtime's copy, each run
-   * reads what the runs before it left, and the patch is what the operation sends.
-   */
-  interface Session {
-    view: ScriptView;
-    persona: string;
-    note: string;
-    noteChanged: boolean;
-    patch: MemberOverlay;
-    personaPatch: string | undefined;
-    /** The chat's own lore as the runs left it, and whether one rewrote it. */
-    localLore: LoreEntry[];
-    localLoreChanged: boolean;
-    /** The reader's global variables as the runs left them, and what they wrote. */
-    globals: Variables;
-    globalWrites: VariableDelta | null;
-  }
-
   const session = (view: ScriptView): Session => ({
     view,
-    persona: overlay.persona ?? view.persona,
+    persona: shared.persona ?? view.persona,
     note: view.note,
     noteChanged: false,
-    patch: {},
+    patches: {},
     personaPatch: undefined,
-    localLore,
+    localLore: shared.localLore,
     localLoreChanged: false,
     globals: applyVariableDelta(view.globalVariables ?? {}, null),
     globalWrites: null,
+    ran: new Set([kept]),
   });
+
+  /** This member's rewrite of its card in a session, made on first use. */
+  const patchOf = (s: Session): MemberOverlay => (s.patches[memberId] ??= {});
 
   /** The character as one operation's runs have it: the runtime's copy, with what the runs before rewrote. */
   const sessionCharacter = (s: Session): TriggerCharacter => {
     const base = character();
-    const firstMessage = s.patch.firstMessage ?? base.firstMessage;
+    const patch = patchOf(s);
+    const firstMessage = patch.firstMessage ?? base.firstMessage;
     return {
       ...base,
-      name: charName(s.patch),
-      memberName: memberName(s.patch),
-      description: s.patch.description ?? base.description,
-      lorebook: s.patch.lorebook ?? base.lorebook,
-      postHistoryInstructions: s.patch.postHistoryInstructions ?? base.postHistoryInstructions,
+      name: charName(patch),
+      memberName: memberName(patch),
+      description: patch.description ?? base.description,
+      lorebook: patch.lorebook ?? base.lorebook,
+      postHistoryInstructions: patch.postHistoryInstructions ?? base.postHistoryInstructions,
       ...(firstMessage !== undefined ? { firstMessage } : {}),
-      backgroundHtml: s.patch.backgroundHtml ?? base.backgroundHtml ?? '',
+      backgroundHtml: patch.backgroundHtml ?? base.backgroundHtml ?? '',
     };
   };
 
@@ -569,7 +658,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
    */
   const branchOf = (s: Session, messages: readonly ChatMessage[]): ReturnType<typeof triggerMessages> => {
     const read = triggerMessages(messages);
-    const set = s.patch.firstMessage ?? overlay.member.firstMessage;
+    const set = patchOf(s).firstMessage ?? own.firstMessage;
     return read.greeting !== null && s.view.firstGreeting === true && set !== undefined ? { ...read, greeting: set } : read;
   };
 
@@ -610,6 +699,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
         const answer = await api.send<{ result: string }>('POST', `/api/chats/${chatId}/script-llm`, {
           messages: request.messages,
           model: request.model === 'submodel' ? 'sub' : 'main',
+          ...tag,
         });
         return { ok: true, text: answer.result };
       } catch (error) {
@@ -694,18 +784,20 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
   }
 
   function absorb(s: Session, rewrite: CharacterRewrite): void {
-    if (rewrite.description !== undefined) s.patch.description = rewrite.description;
-    if (rewrite.lorebook !== undefined) s.patch.lorebook = rewrite.lorebook;
-    if (rewrite.postHistoryInstructions !== undefined) s.patch.postHistoryInstructions = rewrite.postHistoryInstructions;
-    if (rewrite.name !== undefined) s.patch.name = rewrite.name;
-    if (rewrite.firstMessage !== undefined) s.patch.firstMessage = rewrite.firstMessage;
-    if (rewrite.backgroundHtml !== undefined) s.patch.backgroundHtml = rewrite.backgroundHtml;
+    const patch = patchOf(s);
+    if (rewrite.description !== undefined) patch.description = rewrite.description;
+    if (rewrite.lorebook !== undefined) patch.lorebook = rewrite.lorebook;
+    if (rewrite.postHistoryInstructions !== undefined) patch.postHistoryInstructions = rewrite.postHistoryInstructions;
+    if (rewrite.name !== undefined) patch.name = rewrite.name;
+    if (rewrite.firstMessage !== undefined) patch.firstMessage = rewrite.firstMessage;
+    if (rewrite.backgroundHtml !== undefined) patch.backgroundHtml = rewrite.backgroundHtml;
   }
 
-  /** The session's rewrites as the request fields that carry them. */
+  /** The session's rewrites as the request fields that carry them — every member's that ran in it. */
   function writes(s: Session): { overlay?: ScriptOverlay; note?: string; localLore?: LoreEntry[] } {
+    const members = Object.fromEntries(Object.entries(s.patches).filter(([, patch]) => Object.keys(patch).length > 0));
     const patch: ScriptOverlay | null = mergeScriptOverlay(null, {
-      ...(Object.keys(s.patch).length > 0 ? { members: { [bundle.memberId]: s.patch } } : {}),
+      ...(Object.keys(members).length > 0 ? { members } : {}),
       ...(s.personaPatch !== undefined ? { persona: s.personaPatch } : {}),
     });
     return {
@@ -717,13 +809,17 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
 
   /** Once the server has them, the runtime's copy of the overlay moves too — and the page's. */
   function kept(s: Session): void {
-    overlay = {
-      member: { ...overlay.member, ...s.patch },
-      persona: s.personaPatch ?? overlay.persona,
-    };
-    if (s.localLoreChanged) localLore = s.localLore;
-    if (Object.keys(s.patch).length > 0) options.onOverlay?.(overlay.member);
+    const patch = s.patches[memberId] ?? {};
+    own = { ...own, ...patch };
+    if (s.personaPatch !== undefined) shared.persona = s.personaPatch;
+    if (s.localLoreChanged) shared.localLore = s.localLore;
+    if (Object.keys(patch).length > 0) options.onOverlay?.(own, memberId);
   }
+
+  /** What every runtime that ran in a session wrote, kept once the server has it. */
+  const keepAll = (s: Session): void => {
+    for (const keep of s.ran) keep(s);
+  };
 
   /**
    * A `CodeScope` over one operation's session, for an engine called outside a
@@ -764,10 +860,10 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
         return sessionCharacter(s);
       },
       setDescription: (text) => {
-        s.patch.description = text;
+        patchOf(s).description = text;
       },
       setLorebook: (entries) => {
-        s.patch.lorebook = entries;
+        patchOf(s).lorebook = entries;
       },
       get localLore() {
         return s.localLore;
@@ -777,13 +873,13 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
         s.localLoreChanged = true;
       },
       setName: (name) => {
-        s.patch.name = name;
+        patchOf(s).name = name;
       },
       setFirstMessage: (text) => {
-        s.patch.firstMessage = text;
+        patchOf(s).firstMessage = text;
       },
       setBackgroundHtml: (html) => {
-        s.patch.backgroundHtml = html;
+        patchOf(s).backgroundHtml = html;
       },
       user: s.view.names.user ?? s.view.data?.user ?? '',
       persona: s.persona,
@@ -832,9 +928,9 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       data: {
         ...s.view.data,
         user: s.view.names.user ?? s.view.data?.user,
-        char: charName(s.patch),
+        char: charName(patchOf(s)),
         persona: s.persona,
-        character: { description: s.patch.description ?? character().description },
+        character: { description: patchOf(s).description ?? character().description },
       },
     });
     for (const { reason } of outcome.skipped) log({ kind: 'error', effect: phase, message: reason });
@@ -864,11 +960,11 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
   const displayBranches = new WeakMap<readonly ChatMessage[], ReturnType<typeof triggerMessages>>();
 
   const commit = (body: Record<string, unknown>): Promise<ChatState> =>
-    api.send<ChatState>('POST', `/api/chats/${chatId}/script-commit`, body);
+    api.send<ChatState>('POST', `/api/chats/${chatId}/script-commit`, { ...body, ...tag });
 
   const finishesReplies = runsAt('output') || hasEditScripts(bundle.editScripts, 'editoutput') || engineHandles('editoutput');
 
-  return {
+  const runtime: ScriptRuntime = {
     bundle,
     triggerNames: new Set([...manualTriggerNames(triggers), ...engines.flatMap((engine) => engine.manualNames?.() ?? [])]),
     finishesReplies,
@@ -876,85 +972,23 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     rewritesOnServer: /\beditRequest\b/.test(luaScriptsOf(triggers).join('\n')),
 
     adopt(scripts) {
-      overlay = { member: scripts.overlay.member ?? {}, persona: scripts.overlay.persona };
-      localLore = scripts.localLore ?? [];
-      options.onOverlay?.(overlay.member);
+      own = scripts.overlay.member ?? {};
+      shared.persona = scripts.overlay.persona;
+      shared.localLore = scripts.localLore ?? [];
+      options.onOverlay?.(own, memberId);
     },
 
     async prepare(mode, view, content, prepareOptions = {}) {
+      if (mode === 'send') return runtime.startSend(await runtime.input(runtime.beginSend(view, content ?? '', prepareOptions)));
+
       const s = session(view);
       const head = view.messages[view.messages.length - 1];
       const headId = head?.id ?? null;
       const body: Record<string, unknown> = {
         baseHeadId: headId,
         ...(finishesReplies ? { postProcess: true } : {}),
+        ...tag,
       };
-
-      if (mode === 'send') {
-        const text = content ?? '';
-        const base = computeVariables(view.messages, view.defaults, view.names);
-        const { greeting, chat } = branchOf(s, view.messages);
-        let variables = base;
-        let messages: TriggerMessage[] = chat;
-        let input: TriggerRunResult | null = null;
-        if (!prepareOptions.raw && runsAt('input')) {
-          input = await run(s, 'input', variables, chat, greeting);
-          variables = input.variables;
-          messages = input.messages;
-        }
-        const typed = prepareOptions.raw
-          ? { text, variables, chat: messages }
-          : await edit('editinput', text, variables, s, { chatIndex: -1 }, messages, greeting);
-        // RisuAI's editInput listener edits the chat as stored, and the send then
-        // puts the input run's copy, with the turn on it, in its place
-        // (`DefaultChatScreen`'s `sendMain`): what the listener did is gone. Not
-        // when that run ended early — it hands back nothing, and the turn is
-        // pushed onto the stored chat itself.
-        if (input?.aborted) messages = typed.chat;
-        else if (!sameChat(messages, typed.chat)) {
-          log({ kind: 'dropped', effect: 'editinput', message: 'an editInput listener changed the chat, which the input run’s chat replaces' });
-        }
-        let sent = typed.text;
-        variables = computeVariables([sent], typed.variables, view.names);
-        // RisuAI pushes the turn onto the chat the input run left, and the start
-        // run reads it there — and may edit around it, or cut it.
-        let final: TriggerMessage[] = [...(prepareOptions.clear ? [] : messages), { role: 'user', data: sent, id: NEW_TURN }];
-        let injections: PromptInjectionText | null = null;
-        let stop = false;
-        if (runsAt('start')) {
-          const start = await run(s, 'start', variables, final, greeting);
-          // What the runs wrote, without the macros of a turn that is not stored.
-          const ran = applyVariableDelta(typed.variables, diffVariables(start.variables, variables));
-          // RisuAI's `sendChat` saves the chat the start triggers left and only then
-          // reads their `stop`: the turn stays — or stays cut, if they cut it — with
-          // every value they wrote, and nothing is generated for it.
-          stop = start.stopSending;
-          variables = start.messages.some((message) => message.id === NEW_TURN) ? start.variables : ran;
-          if (!stop) injections = start.injections;
-          final = start.messages;
-        }
-        // A start trigger may rewrite the turn being sent; that is the text it goes as.
-        sent = final.find((message) => message.id === NEW_TURN)?.data ?? sent;
-        const edits = chatEdits([...chat, { role: 'user', data: sent, id: NEW_TURN }], final, NEW_TURN);
-        // Against what the server folds the message the chat ends on to without its
-        // delta — the stored turn, unless the runs edited the chat around it.
-        const plain = computeVariables(withoutLastDelta(resultFold(view.messages, chat, edits, sent)), view.defaults, view.names);
-        const delta = storable(diffVariables(variables, plain), log);
-        await flushGlobals(s);
-        return {
-          body: {
-            // A stopped turn has no reply for the output scripts to finish.
-            ...(stop ? { baseHeadId: headId } : body),
-            ...(delta ? { variableDelta: delta } : {}),
-            ...(injections ? injectionFields(injections) : {}),
-            ...(edits ? { chat: edits } : {}),
-            ...writes(s),
-          },
-          content: sent,
-          stop,
-          accept: () => kept(s),
-        };
-      }
 
       // Every other mode starts no turn of its own: the start triggers run on the
       // branch the generation reads — without the head a regenerate replaces, or
@@ -983,6 +1017,100 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
         },
         stop: false,
         accept: () => kept(s),
+      };
+    },
+
+    beginSend(view, content, prepareOptions = {}) {
+      const s = session(view);
+      const { greeting, chat } = branchOf(s, view.messages);
+      return chainOf(content, {
+        session: s,
+        options: prepareOptions,
+        chat,
+        greeting,
+        messages: chat,
+        variables: computeVariables(view.messages, view.defaults, view.names),
+      });
+    },
+
+    async input(chain) {
+      const state = chain[CHAIN];
+      // RisuAI pushes `/multisend`'s text as it is: no input triggers, no `editinput`.
+      if (state.options.raw) return chain;
+      const s = state.session;
+      s.ran.add(kept);
+      let variables = state.variables;
+      let messages = state.messages;
+      let input: TriggerRunResult | null = null;
+      if (runsAt('input')) {
+        input = await run(s, 'input', variables, messages, state.greeting);
+        variables = input.variables;
+        messages = input.messages;
+      }
+      const typed = await edit('editinput', chain.text, variables, s, { chatIndex: -1 }, messages, state.greeting);
+      // RisuAI's editInput listener edits the chat as stored, and the send then
+      // puts the input run's copy, with the turn on it, in its place
+      // (`DefaultChatScreen`'s `sendMain`): what the listener did is gone. Not
+      // when that run ended early — it hands back nothing, and the turn is
+      // pushed onto the stored chat itself.
+      if (input?.aborted) messages = typed.chat;
+      else if (!sameChat(messages, typed.chat)) {
+        log({ kind: 'dropped', effect: 'editinput', message: 'an editInput listener changed the chat, which the input run’s chat replaces' });
+      }
+      return chainOf(typed.text, { ...state, messages, variables: typed.variables });
+    },
+
+    async startSend(chain, { triggers: starts = true } = {}) {
+      const state = chain[CHAIN];
+      const s = state.session;
+      const { view, chat, greeting } = { view: s.view, chat: state.chat, greeting: state.greeting };
+      s.ran.add(kept);
+      const headId = view.messages[view.messages.length - 1]?.id ?? null;
+      const body: Record<string, unknown> = {
+        baseHeadId: headId,
+        // The output pass is the speaker's, and a speaker with no scripts has none.
+        ...(starts && finishesReplies ? { postProcess: true } : {}),
+        ...(starts ? tag : {}),
+      };
+      let sent = chain.text;
+      let variables = computeVariables([sent], state.variables, view.names);
+      // RisuAI pushes the turn onto the chat the input run left, and the start
+      // run reads it there — and may edit around it, or cut it.
+      let final: TriggerMessage[] = [...(state.options.clear ? [] : state.messages), { role: 'user', data: sent, id: NEW_TURN }];
+      let injections: PromptInjectionText | null = null;
+      let stop = false;
+      if (starts && runsAt('start')) {
+        const start = await run(s, 'start', variables, final, greeting);
+        // What the runs wrote, without the macros of a turn that is not stored.
+        const ran = applyVariableDelta(state.variables, diffVariables(start.variables, variables));
+        // RisuAI's `sendChat` saves the chat the start triggers left and only then
+        // reads their `stop`: the turn stays — or stays cut, if they cut it — with
+        // every value they wrote, and nothing is generated for it.
+        stop = start.stopSending;
+        variables = start.messages.some((message) => message.id === NEW_TURN) ? start.variables : ran;
+        if (!stop) injections = start.injections;
+        final = start.messages;
+      }
+      // A start trigger may rewrite the turn being sent; that is the text it goes as.
+      sent = final.find((message) => message.id === NEW_TURN)?.data ?? sent;
+      const edits = chatEdits([...chat, { role: 'user', data: sent, id: NEW_TURN }], final, NEW_TURN);
+      // Against what the server folds the message the chat ends on to without its
+      // delta — the stored turn, unless the runs edited the chat around it.
+      const plain = computeVariables(withoutLastDelta(resultFold(view.messages, chat, edits, sent)), view.defaults, view.names);
+      const delta = storable(diffVariables(variables, plain), log);
+      await flushGlobals(s);
+      return {
+        body: {
+          // A stopped turn has no reply for the output scripts to finish.
+          ...(stop ? { baseHeadId: headId, ...(starts ? tag : {}) } : body),
+          ...(delta ? { variableDelta: delta } : {}),
+          ...(injections ? injectionFields(injections) : {}),
+          ...(edits ? { chat: edits } : {}),
+          ...writes(s),
+        },
+        content: sent,
+        stop,
+        accept: () => keepAll(s),
       };
     },
 
@@ -1133,8 +1261,8 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
         messages: chat,
         greeting,
         note: view.note,
-        localLore,
-        persona: overlay.persona ?? view.persona,
+        localLore: shared.localLore,
+        persona: shared.persona ?? view.persona,
         variables,
         displayData: text,
         ...(view.globalVariables ? { globalVariables: view.globalVariables } : {}),
@@ -1170,6 +1298,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       for (const engine of engines) engine.dispose?.();
     },
   };
+  return runtime;
 
   /** A line's `/multisend`s as the turns RisuAI ends up taking for them (`ScriptTurn`). */
   function multisendTurns(multisend: readonly CommandMultisend[]): ScriptTurn[] {
@@ -1251,3 +1380,6 @@ function injectionFields(injections: { start: string; historyend: string; prompt
   const kept = Object.fromEntries(Object.entries(injections).filter(([, text]) => text.trim() !== ''));
   return Object.keys(kept).length > 0 ? { injections: kept } : {};
 }
+
+/** A send chain over `state`, its text `text`. */
+const chainOf = (text: string, state: ChainState): SendChain => ({ text, [CHAIN]: state });
