@@ -112,6 +112,7 @@ import {
 } from '../src/jobs.js';
 import { BACKFILL_CHUNKS_PER_RUN } from '../src/memory.js';
 import { createJobHandlers, notificationFanout } from '../src/notifications.js';
+import { repairDisplayOrder } from '../src/maintenance/displayOrder.js';
 import { MAX_ASSET_NAME_LENGTH, MAX_CARD_IMPORT_BYTES } from '../src/routes/plots.js';
 import { runRequestLua } from '../src/requestLua.js';
 import { runRequestTriggers } from '../src/requestTriggers.js';
@@ -5595,6 +5596,114 @@ describe('custom UI', () => {
     expect(view.introPreview).toBe('안녕하세요');
     expect(view.intros).toEqual(['안녕하세요', '문 앞이다']);
     expect(view.introPreviews).toEqual(['안녕하세요', '문 앞이다']);
+  });
+});
+
+describe('display-order repair', () => {
+  /** RisuAI runs beta (`<order 3>`), then alpha (`<order 1>`), then gamma (none, 0). */
+  const orderedCard = (name: string, customScripts?: unknown[]): File =>
+    new File(
+      [
+        JSON.stringify({
+          ...v2Card,
+          data: {
+            ...v2Card.data,
+            name,
+            extensions: {
+              risuai: {
+                defaultVariables: 'hp=100',
+                customScripts: customScripts ?? [
+                  { comment: '', in: 'alpha', out: '<i>A</i>', type: 'editdisplay', ableFlag: true, flag: 'g<order 1>' },
+                  { comment: '', in: 'beta', out: '<i>B</i>', type: 'editdisplay', ableFlag: true, flag: '<order 3>' },
+                  { comment: '', in: 'gamma', out: '<i>C</i>', type: 'editdisplay' },
+                ],
+              },
+            },
+          },
+        }),
+      ],
+      `${name}.json`,
+      { type: 'application/json' },
+    );
+
+  /** What the import before 353c976 stored for that card: RisuAI's numbers, run lowest first. */
+  const OLD = [
+    { in: 'alpha', out: '<i>A</i>', flags: 'g', order: 1, enabled: true },
+    { in: 'beta', out: '<i>B</i>', order: 3, enabled: true },
+    { in: 'gamma', out: '<i>C</i>', order: 2, enabled: true },
+  ];
+  /** Today's import of it. */
+  const NOW = [
+    { in: 'beta', out: '<i>B</i>', order: 0, enabled: true },
+    { in: 'alpha', out: '<i>A</i>', flags: 'g', order: 1, enabled: true },
+    { in: 'gamma', out: '<i>C</i>', order: 2, enabled: true },
+  ];
+
+  const storedOf = async (id: string) => {
+    const [row] = await db
+      .select({ customUi: plots.customUi, updatedAt: plots.updatedAt })
+      .from(plots)
+      .where(eq(plots.id, id));
+    return row!;
+  };
+
+  /** Puts a plot back the way an import before the fix left it. */
+  const asImportedBefore = (id: string, displayScripts: unknown[]) =>
+    db
+      .update(plots)
+      .set({ customUi: { displayScripts: displayScripts as never, defaultVariables: { hp: '100' } } })
+      .where(eq(plots.id, id));
+
+  it('rewrites the plots an old import left, leaves edited ones and cards without an order, and runs once', async () => {
+    const cookie = await signUp('display-order@example.com');
+    // Today's import already gets it right.
+    const imported = await importCard(cookie, orderedCard('정렬'));
+    expect(imported.customUi.displayScripts).toEqual(NOW);
+
+    const old = await importCard(cookie, orderedCard('예전'));
+    await asImportedBefore(old.id, OLD);
+    // A second member in front of the one the scripts came from.
+    await addCharacter(cookie, old.id, { name: '조연' });
+    await json(cookie, `/api/plots/${old.id}/characters/reorder`, 'POST', {
+      ids: [...(await readPlot(cookie, old.id)).characters.map((member: { id: string }) => member.id)].reverse(),
+    });
+
+    const edited = await importCard(cookie, orderedCard('고친'));
+    const mine = [OLD[0], { ...OLD[1], out: '<b>B</b>' }, OLD[2]];
+    await asImportedBefore(edited.id, mine);
+
+    // No `<order N>` on the card: its scripts are never this repair's.
+    const plain = await importCard(
+      cookie,
+      orderedCard('평범', [{ comment: '', in: 'hp', out: '<b>hp</b>', type: 'editdisplay', ableFlag: true, flag: 'g<move_top>' }]),
+    );
+    const plainOld = [{ in: 'hp', out: '<b>hp</b>', flags: 'g', order: 0, action: 'move_top', enabled: true }];
+    await asImportedBefore(plain.id, plainOld);
+    const before = await storedOf(old.id);
+
+    // A dry run says what it would do and writes nothing.
+    const lines: string[] = [];
+    const dry = await repairDisplayOrder(db, { apply: false, log: (line) => lines.push(line) });
+    expect(dry).toEqual({ scanned: 4, fixed: [old.id], current: 1, edited: [edited.id] });
+    expect(lines.join('\n')).toContain(`would fix plot ${old.id} "예전"`);
+    expect(lines.join('\n')).toContain('was: "alpha" → "gamma" → "beta"');
+    expect(lines.join('\n')).toContain('now: "beta" → "alpha" → "gamma"');
+    expect((await storedOf(old.id)).customUi?.displayScripts).toEqual(OLD);
+
+    const applied = await repairDisplayOrder(db, { apply: true, log: () => undefined });
+    expect(applied).toEqual(dry);
+    const after = await storedOf(old.id);
+    // The rest of the custom UI stays, and so does the plot's place in its owner's list.
+    expect(after.customUi).toEqual({ displayScripts: NOW, defaultVariables: { hp: '100' } });
+    expect(after.updatedAt).toEqual(before.updatedAt);
+    expect((await storedOf(edited.id)).customUi?.displayScripts).toEqual(mine);
+    expect((await storedOf(plain.id)).customUi?.displayScripts).toEqual(plainOld);
+    expect((await storedOf(imported.id)).customUi?.displayScripts).toEqual(NOW);
+
+    // Again: nothing left to do.
+    const again = await repairDisplayOrder(db, { apply: true, log: () => undefined });
+    expect(again).toEqual({ scanned: 4, fixed: [], current: 2, edited: [edited.id] });
+    expect((await storedOf(old.id)).customUi?.displayScripts).toEqual(NOW);
   });
 });
 

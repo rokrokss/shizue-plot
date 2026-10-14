@@ -32,5 +32,7 @@ export {
   backgroundWithoutStyles,
   cardLicense,
   creatorCssFromExtensions,
+  displayScriptsFromExtensions,
   MAX_CREATOR_CSS_LENGTH,
 } from './card/risu.js';
+export { displayScriptsWithRegexScripts } from './card/sillyTavern.js';

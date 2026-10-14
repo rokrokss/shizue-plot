@@ -208,6 +208,9 @@ const NO_ATTACHMENTS: ChatAttachment[] = [];
 /** Held until the plot read lands, so a row's roster prop never changes for nothing. */
 const NO_MEMBERS: readonly PublicMember[] = [];
 
+/** The background's key among the messages the card's display scripts draw — an id no message has. */
+const BACKGROUND_ITEM = 'background';
+
 export default function ChatPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const t = useTranslations('chat');
@@ -1377,7 +1380,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    * screen's alone, and asked for whenever the branch or its fold moves. A
    * message keeps the last answer it had until the next one arrives, so a
    * redraw does not flash the text the listeners hide; the first time, it shows
-   * as it stands until they answer.
+   * as it stands until they answer. The background is drawn through them too,
+   * under `BACKGROUND_ITEM` and at no message's index (-1), as RisuAI's
+   * `BackgroundDom` runs its display pass.
    */
   const [luaShown, setLuaShown] = useState<ReadonlyMap<string, string>>(() => new Map());
   useEffect(() => {
@@ -1395,6 +1400,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       data: scriptData(lastMessageId + 1),
     };
     const items = messages.map((message) => ({ id: message.id, text: shownGreetings.get(message.id) ?? message.content }));
+    if (backgroundHtml) items.push({ id: BACKGROUND_ITEM, text: backgroundHtml });
     runtime.displayEdits(items, view, persistedVariables).then(
       (shown) => {
         if (current) setLuaShown(shown);
@@ -1418,13 +1424,15 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     firstGreeting,
     shownGreetings,
     persistedVariables,
+    backgroundHtml,
   ]);
 
   /**
    * The messages as the display triggers draw them, where the plot has any —
    * text for the screen alone, never stored — over what the Lua display
    * listeners made of them, as RisuAI runs the two. Over the stored branch and
-   * its fold, so a streamed token redraws none of it.
+   * its fold, so a streamed token redraws none of it. The background too, under
+   * `BACKGROUND_ITEM`: RisuAI's display pass over it runs the triggers as well.
    */
   const scriptShown = useMemo(() => {
     const shown = new Map<string, string>();
@@ -1446,6 +1454,10 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       const drawn = runtime.display(luaShown.get(message.id) ?? text, view, persistedVariables);
       if (drawn !== text) shown.set(message.id, drawn);
     }
+    if (backgroundHtml) {
+      const drawn = runtime.display(luaShown.get(BACKGROUND_ITEM) ?? backgroundHtml, view, persistedVariables);
+      if (drawn !== backgroundHtml) shown.set(BACKGROUND_ITEM, drawn);
+    }
     return shown;
   }, [
     runtime,
@@ -1462,7 +1474,10 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     shownGreetings,
     persistedVariables,
     luaShown,
+    backgroundHtml,
   ]);
+  /** The background as the card's scripts draw it; their display scripts come after, in `ChatBackground`. */
+  const shownBackground = scriptShown.get(BACKGROUND_ITEM) ?? backgroundHtml;
 
   async function run(
     next: StreamMode,
@@ -2192,7 +2207,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       {/* The conversation's area. What a card draws behind the chat stands still
           in it while the list scrolls over it, as RisuAI's background does. */}
       <div className="relative flex min-h-0 flex-1 flex-col">
-        {backgroundContext ? <ChatBackground html={backgroundHtml} context={backgroundContext} /> : null}
+        {backgroundContext ? (
+          <ChatBackground html={shownBackground} context={backgroundContext} scripts={scripts} />
+        ) : null}
         <div
           ref={scrollRef}
           // Positioned only over a background, which it has to paint above.

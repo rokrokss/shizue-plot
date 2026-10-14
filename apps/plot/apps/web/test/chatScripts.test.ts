@@ -644,6 +644,27 @@ describe('what the scripts rewrote of their character', () => {
     await render();
     expect(host.querySelector('[data-testid="chat-background"] .shizue-msg')!.innerHTML).toBe('<p>밤</p>');
 
+    // RisuAI's display pass over the background runs the display triggers too.
+    root.unmount();
+    root = createRoot(host);
+    bundle = scripted({
+      overlay: { member: { backgroundHtml: '<p>밤</p>' }, persona: null },
+      triggers: [
+        {
+          comment: '',
+          type: 'display',
+          conditions: [],
+          effect: [
+            { type: 'v2GetDisplayState', outputVar: 'text', indent: 0 },
+            { type: 'v2ConcatString', source1: 'text', source1Type: 'var', source2: '<p>별</p>', source2Type: 'value', outputVar: 'text', indent: 0 },
+            { type: 'v2SetDisplayState', value: 'text', valueType: 'var', indent: 0 },
+          ],
+        },
+      ],
+    });
+    await render();
+    expect(host.querySelector('[data-testid="chat-background"] .shizue-msg')!.innerHTML).toBe('<p>밤</p><p>별</p>');
+
     // The reader who turned custom UI off gets none of it.
     root.unmount();
     root = createRoot(host);
