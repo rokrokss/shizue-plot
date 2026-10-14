@@ -470,6 +470,7 @@ export function ChatPanel({
             <option value="">{t('narratorPovUnset')}</option>
             <option value="first">{t('narratorPovFirst')}</option>
             <option value="third">{t('narratorPovThird')}</option>
+            <option value="third-limited">{t('narratorPovThirdLimited')}</option>
             <option value="omniscient">{t('narratorPovOmniscient')}</option>
           </Select>
         </Field>

@@ -176,7 +176,7 @@ const NO_ROSTER: readonly PublicMember[] = [];
  * into top-level markdown blocks so a settled one is not re-parsed per token.
  */
 interface TextRun {
-  /** The member speaking; null for the narrator, and for a message never split. */
+  /** The member speaking; null for the scene's own lines, and for a message never split. */
   name: string | null;
   /** Drawn as 상황묘사 standing outside the dialogue rather than as prose. */
   narration: boolean;
@@ -378,8 +378,8 @@ export const MessageBody = memo(function MessageBody({
    */
   roster?: readonly PublicMember[];
   /**
-   * The member who says the lines that name no one, instead of the narrator: on
-   * a message a card's script wrote as its character (`speechRuns`).
+   * The member who says the lines that name no one, in a reply that has one
+   * owner (`speechRuns`): they are drawn in that member's block, not as the scene.
    */
   speaker?: string;
   /** Raw text of the previous message with the same role, for `repeat_back`. */
@@ -509,8 +509,11 @@ export const MessageBody = memo(function MessageBody({
               live={liveRun && nth === run.blocks.length - 1}
             />
           ));
-          // The narrator moves the scene rather than speaking in it: no face, no
-          // name, the whole width — and set apart from the lines that are spoken.
+          // The scene's own lines in a message with several speakers and no
+          // owner (written before group turns): no face, no name, the whole
+          // width — set apart from the lines that are spoken. A reply with an
+          // owner has none of these; its unprefixed lines are the owner's.
+          // The narrator proper is a narration row (MessageRow).
           if (run.name === null) {
             return run.narration ? (
               <div

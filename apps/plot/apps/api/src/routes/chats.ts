@@ -3271,10 +3271,25 @@ const AUTO_CONTINUE_NUDGE =
 /**
  * Asks for the scene alone. The prefix that marks the answer as narration is the
  * server's to write, so the model is only told what to produce — a model that
- * writes the prefix as well is deduplicated on the way in.
+ * writes the prefix as well is deduplicated on the way in, and one that slips
+ * into a member's line is cut there (`narrationKept` in generation.ts).
+ *
+ * The rules are the ones the services before us learned the hard way: a
+ * narrator that may say anything about the scene says things about the reader
+ * too — decides what they do, restates what they wrote, overrules it — and is
+ * read as the system's own voice when it does. So the reader's half is kept
+ * theirs, said as what to do with it where that can be said. The length is
+ * shorter than a reply's, whatever the plot's length setting says (its cap is
+ * `NARRATION_MAX_TOKENS`), and one register runs through the whole of it.
+ * The same particle rule as the presets: nothing allomorphic after a macro.
  */
-const NARRATION_NUDGE =
-  '(다음 응답은 {{char}}의 등장인물이 말하거나 움직이는 장면이 아니라 나레이터의 장면 서술만 출력한다. 접두사 없는 줄로만 쓴다. 나레이터 설정(문체·시점)이 있으면 따른다. 유저나 등장인물의 대사를 만들지 않는다)';
+export const NARRATION_NUDGE = `(다음 응답은 {{char}}의 등장인물이 말하거나 움직이는 장면이 아니라 나레이터의 장면 서술만 출력한다. 접두사 없는 줄로만 쓰고, 서술 문체·서술 시점 설정이 있으면 따른다.
+- 직전 메시지를 지금 이 순간으로 삼아, 거기서 이어지는 장면과 세계의 변화, 다른 인물들이 겉으로 보이는 움직임, 공기와 분위기를 쓴다. 이미 묘사한 날씨나 분위기를 되풀이하지 말고 새로 달라진 것을 보여 준다.
+- {{user}}의 말과 행동은 이미 일어난 일로 두고, 그 결과로 달라진 주변과 인물들의 반응을 쓴다. {{user}}의 행동·감정·생각·다음 움직임은 서술하지도 정하지도 않고 {{user}}의 몫으로 남겨 둔다.
+- {{user}}의 글을 다시 옮겨 적거나 인용하지 않고, 그 내용을 부정하거나 뒤집지 않는다. 인물들과 {{user}}에 대해 평가나 판정을 내리지 않는다.
+- 유저나 등장인물의 대사를 만들지 않는다.
+- 응답 길이 설정과 상관없이 1~2문단, 모두 여섯 문장 안쪽으로 짧게 쓴다.
+- 종결어미는 처음부터 끝까지 한 가지로 맞춘다. 서술 문체가 정한 어미가 있으면 그것을, 없으면 이 대화의 지난 서술이 쓴 어미를 따르고, 반말과 존댓말을 섞지 않는다.)`;
 
 /**
  * For a group round's speakers before the last: the round ends on the last

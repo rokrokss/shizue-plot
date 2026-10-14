@@ -169,13 +169,14 @@ export const COMPONENT_CAPABILITIES: readonly ComponentCapability[] = ['sendTurn
 
 /**
  * Whose vantage a narration is written from. `first` is the user character's own,
- * the other two are outside it — an observer who sees what a camera would, and one
- * who also sees what everyone thinks.
+ * the others are outside it — an observer who sees what a camera would, one held
+ * to the scene and the members (`third-limited`: never the user's inner life),
+ * and one who also sees what everyone thinks.
  */
-export type NarratorPov = 'first' | 'third' | 'omniscient';
+export type NarratorPov = 'first' | 'third' | 'third-limited' | 'omniscient';
 
 /** Every point of view a narrator may declare; anything else is dropped. */
-export const NARRATOR_POVS: readonly NarratorPov[] = ['first', 'third', 'omniscient'];
+export const NARRATOR_POVS: readonly NarratorPov[] = ['first', 'third', 'third-limited', 'omniscient'];
 
 /**
  * How the scene is narrated, as opposed to how the character speaks. Set on a

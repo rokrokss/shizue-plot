@@ -512,6 +512,7 @@ export const sceneFocusDirective = (names: string[]): string =>
 export const NARRATOR_POV_LABELS: Record<NarratorPov, string> = {
   first: '1인칭 (유저 캐릭터의 시점)',
   third: '3인칭 관찰자',
+  'third-limited': '3인칭 제한 (장면과 등장인물만 서술하고, 유저의 속마음은 쓰지 않음)',
   omniscient: '3인칭 전지적',
 };
 
@@ -914,10 +915,13 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const absentBlock = absentNames.length > 0 ? absentCastLine(absentNames) : '';
 
   // 4b. narrator — how the scene is told, as against how the members speak.
-  // Static text in the cached prefix like the blocks it follows.
+  // Static text in the cached prefix like the blocks it follows. The labels name
+  // the prose rather than a narrator: the settings govern every 지문 — a reply's
+  // unprefixed lines as well as a narration — and a model writing an ordinary
+  // reply would find nothing in it that a "narrator" label could be about.
   const narratorBlock = [
-    narrator?.voice?.trim() ? `나레이터 문체: ${expand(narrator.voice).trim()}` : '',
-    narrator?.pov ? `나레이션 시점: ${NARRATOR_POV_LABELS[narrator.pov]}` : '',
+    narrator?.voice?.trim() ? `서술 문체: ${expand(narrator.voice).trim()}` : '',
+    narrator?.pov ? `서술 시점: ${NARRATOR_POV_LABELS[narrator.pov]}` : '',
   ]
     .filter((line) => line.length > 0)
     .join('\n');

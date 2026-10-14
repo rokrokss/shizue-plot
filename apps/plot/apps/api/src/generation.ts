@@ -6,6 +6,8 @@ import {
   computeVariables,
   countTokens,
   diffVariables,
+  narrationBody,
+  narrationUntilSpeech,
   replyLengthTokens,
   sceneFocusDirective,
   spokenBy,
@@ -793,7 +795,7 @@ async function assembleRequest(
     // The budget reserves what the stream may actually spend — the same value
     // the request's maxTokens is set from, so a `long` plot does not assemble
     // a prompt whose history has eaten into its own reply.
-    maxResponseTokens: replyLengthTokens(plan.plot.style?.replyLength),
+    maxResponseTokens: responseTokens(plan),
     // The partial is appended below rather than assembled, so its slot and its
     // tokens have to be declared here or depth lore lands one turn too early and
     // its text rides along uncounted.
@@ -884,6 +886,44 @@ async function chosenReasoningEffort(
   }
 }
 
+/**
+ * The cap a narration is asked under: the `short` reply's, which pairs with the
+ * 1~2문단 the narration nudge asks for, as each reply length pairs a directive
+ * with a cap. ChatGPT sharing takes no hard cap, so there it is the response
+ * reserve the prompt is planned with and the directive does the holding.
+ */
+const NARRATION_MAX_TOKENS = replyLengthTokens('short');
+
+/** What the stream may spend, which the prompt's budget reserves too: one number for both. */
+const responseTokens = (plan: GenerationPlan): number =>
+  plan.narration ? NARRATION_MAX_TOKENS : replyLengthTokens(plan.plot.style?.replyLength);
+
+/** `\n이름:` and `\n별명:` of every member, on the stage or off it. */
+const memberStops = (characters: PromptCharacter[]): string[] =>
+  characters.flatMap((member) =>
+    [member.name, member.card.nickname?.trim() ?? ''].filter((name) => name.length > 0).map((name) => `\n${name}:`),
+  );
+
+/**
+ * What a new narration keeps of the text the model wrote: the scene up to the
+ * first line the parser reads as a member — or the reader — speaking. The stop
+ * sequences end the stream on such a line, but not on the first one, which no
+ * line break comes before, nor on one the parser reads more loosely than the
+ * stop matches. Empty when nothing of the scene is left; null when the turn is
+ * not a new narration and keeps what it was given.
+ */
+function narrationKept(plan: GenerationPlan, text: string): string | null {
+  if (!plan.narration || plan.target.kind !== 'new') return null;
+  const roster = [
+    ...plan.characters.map((member) => {
+      const nickname = member.card.nickname?.trim();
+      return { name: member.name, aliases: nickname ? [nickname] : [] };
+    }),
+    plan.userName,
+  ];
+  return narrationUntilSpeech(narrationBody(text), roster);
+}
+
 async function runGeneration(
   c: Context<AppEnv>,
   deps: AppDeps,
@@ -935,10 +975,17 @@ async function runGeneration(
           messages: request.messages,
           // ChatGPT sharing accepts the prompt's length directive, not a hard
           // token cap. Keep the budget here for prompt planning and test adapters.
-          maxTokens: replyLengthTokens(plan.plot.style?.replyLength),
+          maxTokens: responseTokens(plan),
           // ChatGPT sharing does not accept sampling parameters. A group reply also
-          // stops where it starts on another member's line (`stopSequences`).
-          stop: [`\n${plan.userName}:`, ...(request.stopSequences ?? [])],
+          // stops where it starts on another member's line (`stopSequences`), and
+          // so does a narration, on every member's.
+          stop: [
+            ...new Set([
+              `\n${plan.userName}:`,
+              ...(request.stopSequences ?? []),
+              ...(plan.narration ? memberStops(plan.characters) : []),
+            ]),
+          ],
           ...(reasoningEffort ? { reasoningEffort } : {}),
           abortSignal: controller.signal,
         });
@@ -962,12 +1009,16 @@ async function runGeneration(
         }
       }
 
+      // A narration keeps the scene and nothing a member says (`narrationKept`).
+      const kept = narrationKept(plan, text);
+      const reply = kept ?? text;
+
       // Client gone: keep whatever was received so far, but send nothing.
       if (controller.signal.aborted) {
-        if (text) {
+        if (reply) {
           // Stored pending all the same, if the browser meant to post-process
           // it: the next time it opens the chat it finds the mark and finishes.
-          const stored = await persist(deps, plan, text, usage, request);
+          const stored = await persist(deps, plan, reply, usage, request);
           // The turn is on the branch whether or not anyone was listening, so what
           // it opened is opened; there is simply no event to say so on.
           await openUnlocks(deps, plan.chatId, stored.content);
@@ -976,7 +1027,17 @@ async function runGeneration(
         return;
       }
 
-      const stored = await persist(deps, plan, text, usage, request);
+      // Nothing of the scene was left: it fails as a provider failure does —
+      // nothing stored, and the turn it would have followed is still the head.
+      if (kept === '') {
+        await stream.writeSSE({
+          event: 'error',
+          data: JSON.stringify({ message: 'The narration held nothing but dialogue', code: 'narration_empty' }),
+        });
+        return;
+      }
+
+      const stored = await persist(deps, plan, reply, usage, request);
       // Evaluated on the raw text as well as at the commit: unlocks only ever
       // open, so the earlier answer costs nothing and saves the reader a wait.
       const unlockedAssetIds = await openUnlocks(deps, plan.chatId, stored.content);

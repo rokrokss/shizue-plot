@@ -29,6 +29,8 @@ let root: Root;
 /** Every toggle the panel has sent, as `feature: answer`. */
 let sent: string[];
 let saveNote: () => Promise<void> = async () => undefined;
+/** Every narrator override the panel has saved. */
+let savedNarrators: unknown[];
 
 function render(features: { statusWindow: boolean; choices: boolean; scriptSimilarity?: boolean }): void {
   act(() => {
@@ -60,7 +62,7 @@ function render(features: { statusWindow: boolean; choices: boolean; scriptSimil
           onSaveMemory: async () => undefined,
           onSaveMemorySettings: async () => undefined,
           onToggleRelationship: async () => undefined,
-          onSaveNarrator: async () => undefined,
+          onSaveNarrator: async (narrator: unknown) => void savedNarrators.push(narrator),
           onToggleCustomUi: () => undefined,
           onToggleComponentTurns: async () => undefined,
           onToggleStatusWindow: async (enabled: boolean) => void sent.push(`status:${enabled}`),
@@ -81,6 +83,7 @@ const box = (label: string): HTMLInputElement =>
 
 beforeEach(() => {
   sent = [];
+  savedNarrators = [];
   saveNote = async () => undefined;
   host = document.createElement('div');
   document.body.appendChild(host);
@@ -116,6 +119,19 @@ describe('the plot features in the notes panel', () => {
     });
     expect(sent).toEqual(['status:false', 'choices:false']);
   });
+});
+
+it('saves the limited third person as this chat’s point of view', async () => {
+  render({ statusWindow: false, choices: false });
+  const select = host.querySelector<HTMLSelectElement>('[data-testid="chat-narrator"] select')!;
+  expect(select.querySelector('option[value="third-limited"]')?.textContent).toBe(
+    messages.chat.narratorPovThirdLimited,
+  );
+  await act(async () => {
+    select.value = 'third-limited';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  expect(savedNarrators).toEqual([{ pov: 'third-limited' }]);
 });
 
 it('locks note and narrator drafts while its own save is pending', async () => {

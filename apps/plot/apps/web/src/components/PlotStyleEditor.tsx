@@ -189,6 +189,7 @@ export function PlotStyleEditor({
             <option value="">{plot('narratorPovUnset')}</option>
             <option value="first">{plot('narratorPovFirst')}</option>
             <option value="third">{plot('narratorPovThird')}</option>
+            <option value="third-limited">{plot('narratorPovThirdLimited')}</option>
             <option value="omniscient">{plot('narratorPovOmniscient')}</option>
           </Select>
         </Field>

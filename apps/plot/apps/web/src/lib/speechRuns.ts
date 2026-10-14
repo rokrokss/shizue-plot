@@ -10,11 +10,13 @@ import { parseAssistantSpeech } from '@shizue/core/speech';
  * is what keeps a line reading as a line: `안녕 *웃으며* 반가워` is one sentence
  * with a description inside it, not three stacked blocks.
  *
- * The narrator's text is left exactly as it was written, newlines and all: it is
- * all 상황묘사, so it needs no marks — the run itself is drawn in italics.
+ * The unattributed text is left exactly as it was written, newlines and all: in
+ * a reply with an owner it is the owner's (`speaker`, below), and in a scene with
+ * several speakers and none it is all 상황묘사, which needs no marks — the run
+ * itself is drawn in italics.
  */
 export interface SpeechRun {
-  /** The roster member speaking, or null for the narrator. */
+  /** The roster member speaking, or null for the scene's own lines. */
   name: string | null;
   /** The run as markdown. */
   text: string;
@@ -60,11 +62,13 @@ export function speakerAliases(
  * under a nickname is attributed to the member's own name, and runs of one
  * member under both spellings are one run.
  *
- * `speaker` says the lines that name no one, where they are not the narrator's:
- * a message a card's script wrote as its character (`source` `script`), which
- * RisuAI draws as that character's own and which names no speaker, stored as
- * the script wrote it. Its text stays exactly as written, as the narrator's
- * would; a line that names someone is still theirs.
+ * `speaker` says the lines that name no one in a reply that has one owner: a
+ * message a card's script wrote as its character (`source` `script`), which
+ * RisuAI draws as that character's own; a group reply, stored under its
+ * speaker; any reply of a one-member plot. Those lines are the owner's own 지문
+ * and speech, and go in the owner's run exactly as written — a line that names
+ * someone is still theirs. Without it they are the scene's (a message with
+ * several speakers and no owner).
  */
 export function speechRuns(
   content: string,
@@ -85,7 +89,7 @@ export function speechRuns(
           }
         : { name: speaker, text: block.parts.map((part) => part.text).join('\n\n') };
     const last = runs[runs.length - 1];
-    // Only a character's: the parser already keeps the narrator's lines together.
+    // Only a character's: the parser already keeps the scene's lines together.
     if (last && run.name !== null && last.name === run.name) last.text += `\n${run.text}`;
     else runs.push(run);
   }

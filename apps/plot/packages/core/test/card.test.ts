@@ -966,6 +966,8 @@ describe('the narrator round trip', () => {
     expect(stranger('나레이터')).toBeUndefined();
     // …and nothing it says extra travels with it.
     expect(stranger({ pov: 'omniscient', tone: 'x' })).toEqual({ pov: 'omniscient' });
+    // The limited view is one this build has a label for.
+    expect(stranger({ pov: 'third-limited' })).toEqual({ pov: 'third-limited' });
   });
 });
 

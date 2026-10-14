@@ -113,6 +113,7 @@ import {
 import { BACKFILL_CHUNKS_PER_RUN } from '../src/memory.js';
 import { createJobHandlers, notificationFanout } from '../src/notifications.js';
 import { repairDisplayOrder } from '../src/maintenance/displayOrder.js';
+import { NARRATION_NUDGE } from '../src/routes/chats.js';
 import { MAX_ASSET_NAME_LENGTH, MAX_CARD_IMPORT_BYTES } from '../src/routes/plots.js';
 import { runRequestLua } from '../src/requestLua.js';
 import { runRequestTriggers } from '../src/requestTriggers.js';
@@ -4341,6 +4342,9 @@ describe('narration turns', () => {
     // `{{char}}` is the work now, so the nudge names the plot and asks for the
     // scene rather than any one member's lines.
     expect(nudge.content).toContain('리안의 등장인물');
+    // The reader's half stays theirs, and the narration is shorter than a reply.
+    expect(nudge.content).toContain('유저의 행동·감정·생각·다음 움직임은 서술하지도 정하지도 않고');
+    expect(nudge.content).toContain('1~2문단');
 
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
     const head = state.path.at(-1);
@@ -4410,6 +4414,77 @@ describe('narration turns', () => {
     ).toBe(true);
   });
 
+  /** An app answering every request with `reply`, keeping what each one asked for. */
+  function answering(reply: string): { app: Hono<AppEnv>; sent: ChatRequest[] } {
+    const sent: ChatRequest[] = [];
+    const app = makeApp({
+      getAdapter: () => ({
+        providerModel: 'answering',
+        adapter: {
+          stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
+            sent.push(req);
+            yield { type: 'text', text: reply };
+            return { usage: { promptTokens: 1, completionTokens: 1 } };
+          },
+        },
+      }),
+    });
+    return { app, sent };
+  }
+
+  it('stops a narration on the member, caps it short, and keeps it up to where the member speaks', async () => {
+    const cookie = await signUp('narrate-guard@example.com');
+    const { chatId } = await setupChat(cookie);
+    const { app: guarded, sent } = answering('바람이 서가 사이를 지나간다.\n리안: 누구세요?\n발소리가 멎는다.');
+    await userHead(cookie, chatId, guarded);
+    // An ordinary reply is as it was: the reader's name stops it, at the reply cap.
+    expect(sent[0]!.stop).toEqual(['\n유저:']);
+    expect(sent[0]!.maxTokens).toBe(DEFAULT_MAX_RESPONSE_TOKENS);
+
+    expect((await readSse(await json(cookie, `/api/chats/${chatId}/narrate`, 'POST', undefined, guarded))).at(-1)!.event).toBe('done');
+    // A work of one member gets the member's stop too, not only a group's narrator.
+    expect(sent.at(-1)!.stop).toEqual(['\n유저:', '\n리안:']);
+    expect(sent.at(-1)!.maxTokens).toBe(600);
+    const narrated = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    expect(narrated.path.at(-1).content).toBe('@: 바람이 서가 사이를 지나간다.');
+
+    // Redoing it is the same request, guarded the same way.
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, guarded));
+    expect(sent.at(-1)!.stop).toEqual(['\n유저:', '\n리안:']);
+    const redone = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    expect(redone.path.at(-1).content).toBe('@: 바람이 서가 사이를 지나간다.');
+    expect(redone.path.at(-1).id).not.toBe(narrated.path.at(-1).id);
+  });
+
+  it('fails a narration that is a member speaking from its first line, and stores nothing', async () => {
+    const cookie = await signUp('narrate-empty@example.com');
+    const { chatId } = await setupChat(cookie);
+    const before = await readJson(await request(cookie, `/api/chats/${chatId}`));
+
+    const events = await readSse(
+      await json(cookie, `/api/chats/${chatId}/narrate`, 'POST', undefined, answering('리안: 누구세요?').app),
+    );
+    expect(events.at(-1)).toMatchObject({ event: 'error', data: { code: 'narration_empty' } });
+    const after = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    expect(after.chat.headMessageId).toBe(before.chat.headMessageId);
+    expect(after.path).toHaveLength(before.path.length);
+
+    // The slot is free again, so the reader can simply ask once more.
+    const retry = await readSse(
+      await json(cookie, `/api/chats/${chatId}/narrate`, 'POST', undefined, answering('바람이 분다.').app),
+    );
+    expect(retry.at(-1)!.event).toBe('done');
+  });
+
+  it('writes the narration nudge with no allomorphic particle after a macro', () => {
+    // The presets' rule (prompt.test.ts): the name a macro becomes is unknown here.
+    const allowed = /^(?:$|[\s.,!?):\]'"]|의|에게|에서|에|도|만|까지|부터|처럼|보다|한테)/;
+    for (const match of NARRATION_NUDGE.matchAll(/\{\{(?:char|user)\}\}/g)) {
+      const tail = NARRATION_NUDGE.slice(match.index + match[0].length);
+      expect(allowed.test(tail), `"${match[0]}${tail.slice(0, 12)}"`).toBe(true);
+    }
+  });
+
   it('takes a narrator on the plot and puts it in the cached prefix', async () => {
     const cookie = await signUp('narrator-card@example.com');
     const { plotId, chatId } = await setupChat(cookie);
@@ -4424,8 +4499,8 @@ describe('narration turns', () => {
     await readSse(
       await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing),
     );
-    expect(prompts.at(-1)!.system).toContain('나레이터 문체: 건조하고 짧게 끊어 쓴다.');
-    expect(prompts.at(-1)!.system).not.toContain('나레이션 시점');
+    expect(prompts.at(-1)!.system).toContain('서술 문체: 건조하고 짧게 끊어 쓴다.');
+    expect(prompts.at(-1)!.system).not.toContain('서술 시점');
   });
 
   it('lets a chat override the plot narrator, and clears it with null', async () => {
@@ -4446,8 +4521,8 @@ describe('narration turns', () => {
       await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing),
     );
     // The override stands in for the plot's whole narrator, not field by field.
-    expect(prompts.at(-1)!.system).toContain('나레이터 문체: 대화의 문체.');
-    expect(prompts.at(-1)!.system).toContain('나레이션 시점: 3인칭 전지적');
+    expect(prompts.at(-1)!.system).toContain('서술 문체: 대화의 문체.');
+    expect(prompts.at(-1)!.system).toContain('서술 시점: 3인칭 전지적');
     expect(prompts.at(-1)!.system).not.toContain('작품의 문체.');
 
     // An object that says nothing clears the column, and so does null.
@@ -4465,8 +4540,8 @@ describe('narration turns', () => {
     await readSse(
       await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '또 안녕' }, capturing),
     );
-    expect(prompts.at(-1)!.system).toContain('나레이터 문체: 작품의 문체.');
-    expect(prompts.at(-1)!.system).toContain('나레이션 시점: 3인칭 관찰자');
+    expect(prompts.at(-1)!.system).toContain('서술 문체: 작품의 문체.');
+    expect(prompts.at(-1)!.system).toContain('서술 시점: 3인칭 관찰자');
 
     expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { narrator: 'nope' })).status).toBe(400);
   });
@@ -6941,8 +7016,8 @@ describe('presets', () => {
     const { state } = await setupChat(cookie);
     expect(state.chat.preset).toBe('standard');
     await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing));
-    expect(prompts.at(-1)!.system).toContain('등장인물 전원과 내레이터를 연기하는 작가');
-    expect(prompts.at(-1)!.messages.at(-1)!.content).toContain('등장인물과 내레이터만 연기합니다');
+    expect(prompts.at(-1)!.system).toContain('등장인물 전원을 연기하는 작가');
+    expect(prompts.at(-1)!.messages.at(-1)!.content).toContain('등장인물을 연기합니다');
 
     const patched = await readJson(
       await json(cookie, `/api/chats/${chatId}`, 'PATCH', { preset: 'screenplay' }),
@@ -6953,7 +7028,7 @@ describe('presets', () => {
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
     const screenplay = prompts.at(-1)!;
     expect(screenplay.system).toContain('각본가');
-    expect(screenplay.system).not.toContain('등장인물 전원과 내레이터를 연기하는 작가');
+    expect(screenplay.system).not.toContain('등장인물 전원을 연기하는 작가');
     // The post-history reminder switches with it.
     expect(screenplay.messages.at(-1)!.content).toContain('대사 2~5줄');
   });

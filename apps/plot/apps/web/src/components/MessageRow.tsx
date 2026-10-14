@@ -114,9 +114,10 @@ export const MessageRow = memo(function MessageRow({
    */
   roster?: readonly PublicMember[];
   /**
-   * The member a card's script wrote this message as (`source` `script`): its
-   * lines that name no one are that member's, not the narrator's — RisuAI draws
-   * it as the character's own message.
+   * The member who says this message's lines that name no one: the one a card's
+   * script wrote it as (`source` `script`, which RisuAI draws as the character's
+   * own message), or the speaker a group reply is stored under
+   * (`speakerMemberId`) — the reply is that member's whole.
    */
   speaker?: string;
   /** Raw text of the previous message with the same role, for `repeat_back`. */
@@ -210,6 +211,16 @@ export const MessageRow = memo(function MessageRow({
    * the reader's is one voice — and only against a roster to name them from.
    */
   const attributed = !isUser && !narration && roster.length > 0;
+  /**
+   * Who owns the lines that name no one. A reply with one owner is that
+   * character's whole, so its unprefixed lines are the character's own 지문 and
+   * are drawn inside its block, not as a narrator: the member the page names, or
+   * the one member of a one-member plot — its greeting included, as a card's
+   * first message is the character's own. A message with several speakers and
+   * no owner (a scene written before group turns) keeps those lines the
+   * scene's. The narrator is the narration rows alone.
+   */
+  const owner = speaker ?? (roster.length === 1 ? roster[0]!.name : undefined);
 
   async function copy(): Promise<void> {
     try {
@@ -256,10 +267,13 @@ export const MessageRow = memo(function MessageRow({
       ) : null}
 
       <div className={cx('min-w-0', isUser && !narration ? 'max-w-[85%]' : 'flex-1')}>
-        <div className={cx('flex items-center gap-2', isUser && 'justify-end')}>
+        <div className={cx('flex items-center gap-2', isUser && !narration && 'justify-end')}>
           {/* A continued turn is the same speaker moments later: the name was
-              already said, and saying it again is what makes a run look like a list. */}
-          {narration || grouped || attributed ? null : (
+              already said, and saying it again is what makes a run look like a list.
+              A narration names no one, so it says what it is — quietly. */}
+          {narration ? (
+            <span className="text-xs font-medium text-muted">{t('narrationLabel')}</span>
+          ) : grouped || attributed ? null : (
             <span className="text-xs font-medium text-muted">{name}</span>
           )}
           {(onSave || onEditScene) && showActions ? (
@@ -377,7 +391,9 @@ export const MessageRow = memo(function MessageRow({
               isUser &&
                 !narration &&
                 'rounded-2xl rounded-tr-sm border border-accent/30 bg-mint-soft/50 px-4 py-3',
-              narration && 'text-muted italic',
+              // No bubble and no face: a line down the side is all that marks it,
+              // as Zeta marks its narrator.
+              narration && 'border-l-2 border-line pl-3 text-muted',
             )}
           >
             {/* Above the text, in the same bubble: the picture is part of the
@@ -391,7 +407,7 @@ export const MessageRow = memo(function MessageRow({
               {...(components ? { components } : {})}
               {...(componentNames ? { componentNames } : {})}
               {...(attributed ? { roster } : {})}
-              {...(attributed && speaker ? { speaker } : {})}
+              {...(attributed && owner ? { speaker: owner } : {})}
               previousSameRole={previousSameRole ?? ''}
               {...(chatIndex !== undefined ? { chatIndex } : {})}
               streaming={streaming}

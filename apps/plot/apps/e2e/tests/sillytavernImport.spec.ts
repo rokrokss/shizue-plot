@@ -331,7 +331,7 @@ test('the chats come over with their swipes, speakers and persona', async () => 
   expect(state.path.map((message) => message.content)).toEqual([
     '안녕하세요',
     `${alice}: 첫 번째 대답`,
-    '시계가 여섯 시를 친다.',
+    '@: 시계가 여섯 시를 친다.',
     '차 마실래요?',
     `${alice}: 좋아요.`,
   ]);
@@ -347,7 +347,7 @@ test('the chats come over with their swipes, speakers and persona', async () => 
 
   await page.goto(`/ko/chats/${solo.id}`);
   await expect(page.locator(`[data-testid="speech-character"][data-speaker="${alice}"]`).first()).toBeVisible();
-  await expect(page.getByTestId('speech-narration').filter({ hasText: '시계가 여섯 시를 친다.' })).toBeVisible();
+  await expect(page.getByTestId('message-narration').filter({ hasText: '시계가 여섯 시를 친다.' })).toBeVisible();
   await expect(page.getByText('숨겨진 줄')).toHaveCount(0);
   await expect(page.getByTestId('chat-importing')).toHaveCount(0);
 });

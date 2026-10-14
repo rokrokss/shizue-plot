@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   lineSpeaker,
+  narrationUntilSpeech,
   parseAssistantSpeech,
   parseUserSpeech,
   readerLine,
@@ -224,5 +225,24 @@ describe('parseAssistantSpeech - aliases', () => {
     expect(lineSpeaker('아리: 안녕', roster)).toBeUndefined();
     expect(lineSpeaker('아리: 안녕', members)).toBe('아리아 블랑');
     expect(spokenBy('안녕\n아리: 응', '민수', members)).toBe('민수: 안녕\n아리: 응');
+  });
+});
+
+describe('narrationUntilSpeech', () => {
+  const members = [{ name: '아리아 블랑', aliases: ['아리'] }, '민수'];
+
+  it('keeps a narration that speaks for nobody whole', () => {
+    expect(narrationUntilSpeech('바람이 분다.\n\n문이 덜컹거린다.', members)).toBe('바람이 분다.\n\n문이 덜컹거린다.');
+    // A name nobody on the roster answers to is the narration's own text.
+    expect(narrationUntilSpeech('바람이 분다.\n지나가던 사람: 비켜요.', members)).toBe('바람이 분다.\n지나가던 사람: 비켜요.');
+  });
+
+  it('ends where a line turns into a member speaking, by name or alias', () => {
+    expect(narrationUntilSpeech('바람이 분다.\n민수: 춥다.\n문이 닫힌다.', members)).toBe('바람이 분다.');
+    expect(narrationUntilSpeech('바람이 분다.\r\n\r\n 아리 : *떨며* 춥다.', members)).toBe('바람이 분다.');
+  });
+
+  it('keeps nothing when the first line is already a member speaking', () => {
+    expect(narrationUntilSpeech('아리아 블랑: 안녕.\n바람이 분다.', members)).toBe('');
   });
 });

@@ -6,7 +6,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import messages from '../messages/ko.json';
 import { PlotStyleEditor } from '../src/components/PlotStyleEditor';
-import type { PlotStyle } from '../src/lib/types';
+import type { NarratorConfig, PlotStyle } from '../src/lib/types';
 
 (globalThis as Record<string, unknown>)['IS_REACT_ACT_ENVIRONMENT'] = true;
 
@@ -14,6 +14,8 @@ let host: HTMLElement;
 let root: Root;
 /** Every style the editor has handed back, newest last. */
 let handed: (PlotStyle | null)[];
+/** Every narrator it has handed back, newest last. */
+let narrated: (NarratorConfig | null)[];
 
 function render(style: PlotStyle | null): void {
   act(() => {
@@ -25,7 +27,7 @@ function render(style: PlotStyle | null): void {
           style,
           narrator: null,
           onChange: (next: PlotStyle | null) => void handed.push(next),
-          onChangeNarrator: () => {},
+          onChangeNarrator: (next: NarratorConfig | null) => void narrated.push(next),
         }),
       }),
     );
@@ -46,6 +48,7 @@ const last = (): PlotStyle | null => handed[handed.length - 1] ?? null;
 
 beforeEach(() => {
   handed = [];
+  narrated = [];
   host = document.createElement('div');
   document.body.appendChild(host);
   root = createRoot(host);
@@ -77,5 +80,30 @@ describe('the style section', () => {
     render({ moods: ['healing', 'angst'] });
     await press(chip('moods', 'healing'));
     expect(last()).toEqual({ moods: ['angst'] });
+  });
+});
+
+describe('the narrator point of view', () => {
+  it('offers the limited third person, held to the scene and the members', async () => {
+    render(null);
+    const select = [...host.querySelectorAll('select')].find((node) =>
+      [...node.options].some((option) => option.value === 'omniscient'),
+    )!;
+    expect([...select.options].map((option) => option.value)).toEqual([
+      '',
+      'first',
+      'third',
+      'third-limited',
+      'omniscient',
+    ]);
+    expect(select.querySelector('option[value="third-limited"]')?.textContent).toBe(
+      messages.plot.narratorPovThirdLimited,
+    );
+
+    await act(async () => {
+      select.value = 'third-limited';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(narrated.at(-1)).toEqual({ pov: 'third-limited' });
   });
 });

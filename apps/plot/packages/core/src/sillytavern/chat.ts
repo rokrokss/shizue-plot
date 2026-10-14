@@ -8,7 +8,9 @@
  * Who said what goes into our speech protocol here (`speech.ts`): a character's
  * lines are prefixed with their roster name, and ST's narrator (`/sys`,
  * `extra.type === 'narrator'`, `sendNarratorMessage` in
- * `public/scripts/slash-commands.js`) stays unprefixed, which is our narrator.
+ * `public/scripts/slash-commands.js`) becomes our narration (`@:`,
+ * `narration.ts`). An unprefixed line is no longer the narrator's: in a work of
+ * one member it is that character's own 지문.
  * Messages ST keeps out of the prompt (`is_system`: hidden by the reader,
  * comments, tool calls) are left out.
  *
@@ -20,6 +22,7 @@
  * becomes of each is the import's to decide; this only reads them.
  */
 
+import { withNarrationPrefix } from '../narration.js';
 import { spokenBy } from '../speech.js';
 import type { ImportedChatMessage } from '../types.js';
 import {
@@ -365,7 +368,9 @@ export function convertSillyTavernChat(jsonl: string, cast: StCast): StConverted
 
     if (isUser) {
       if (!userName && name) userName = name;
-    } else if (!narrator) {
+    } else if (narrator) {
+      versions = versions.map((text) => withNarrationPrefix(text));
+    } else {
       if (!characterName && name) characterName = name;
       const speaker = speakerOf(cast, parsed['original_avatar'], name);
       if (speaker) versions = versions.map((text) => spokenBy(text, speaker));

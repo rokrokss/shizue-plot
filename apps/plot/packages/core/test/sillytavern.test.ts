@@ -577,7 +577,7 @@ describe('convertSillyTavernChat', () => {
     });
   });
 
-  it('keeps the narrator unprefixed, skips hidden messages and counts what it could not use', () => {
+  it('makes the narrator a narration, skips hidden messages and counts what it could not use', () => {
     const bom = String.fromCharCode(0xfeff);
     const chat = convertSillyTavernChat(
       bom +
@@ -598,7 +598,8 @@ describe('convertSillyTavernChat', () => {
     expect(chat.characterName).toBe('하루');
     expect(chat.createdAt).toBe('2024-06-05T14:56:50.682Z');
     expect(chat.messages).toEqual([
-      { role: 'assistant', versions: ['해가 진다.'], selected: 0 },
+      // ST's `/sys` is our `@:`: an unprefixed line would be the character's own 지문.
+      { role: 'assistant', versions: ['@: 해가 진다.'], selected: 0 },
       { role: 'assistant', versions: ['하루: 이미 붙어 있다\n하루:붙어 있다\n하루: 둘째 줄'], selected: 0 },
     ]);
     expect(chat.skipped).toEqual({ hidden: 2, empty: 1, unknownSpeaker: 0, malformed: 2, overLimit: 0, variables: 0 });

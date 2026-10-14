@@ -35,6 +35,7 @@ const messages = {
     copied: '복사됨',
     editMessage: '메시지 수정',
     deleteMessage: '삭제',
+    narrationLabel: '나레이션',
   },
   common: { cancel: '취소', save: '저장', saving: '저장 중…' },
 };
@@ -166,6 +167,40 @@ describe('a message a card’s script wrote as its character', () => {
     expect(narrations()).toHaveLength(0);
     expect(host.querySelector('.message-body img')?.getAttribute('src')).toBe('/avatars/aria.png');
     expect(host.querySelector('[data-testid="speech-character"] em')?.textContent).toBe('문틈으로 밖을 살피며');
+  });
+});
+
+describe('a reply in a work of one member', () => {
+  const SOLE: PublicMember[] = [ROSTER[0]!];
+
+  it('is that character\'s whole: its unprefixed lines are their 지문, inside their block', () => {
+    render(row('창밖은 아직 어둡다.\n아리아: 안녕 *웃으며* 반가워\n\n난로의 불이 낮게 탄다.', 'assistant', { roster: SOLE }));
+
+    expect(speakers()).toEqual(['아리아']);
+    expect(narrations()).toHaveLength(0);
+    const block = host.querySelector('[data-testid="speech-character"]')!;
+    expect(block.textContent).toContain('창밖은 아직 어둡다.');
+    expect(block.textContent).toContain('난로의 불이 낮게 탄다.');
+    // The *지문* inside a spoken line is still dimmed where it was written.
+    expect(block.querySelector('em')?.textContent).toBe('웃으며');
+    // One face, the member's — the row no longer speaks for the reply.
+    expect([...host.querySelectorAll('img')].map((node) => node.getAttribute('src'))).toEqual(['/avatars/aria.png']);
+  });
+
+  it('is theirs from its first unprefixed word while it streams, not the scene\'s', () => {
+    render(row('창밖은', 'assistant', { roster: SOLE, streaming: true }));
+    expect(speakers()).toEqual(['아리아']);
+    expect(narrations()).toHaveLength(0);
+  });
+});
+
+describe('a group reply stored under its speaker', () => {
+  it('is that member\'s whole, its unprefixed lines included', () => {
+    render(row('*잔을 내려놓으며* 왔어?\n문 밖에서 바람이 분다.', 'assistant', { speaker: '카이' }));
+
+    expect(speakers()).toEqual(['카이']);
+    expect(narrations()).toHaveLength(0);
+    expect(host.querySelector('[data-testid="speech-character"]')!.textContent).toContain('문 밖에서 바람이 분다.');
   });
 });
 

@@ -40,6 +40,7 @@ import {
   CHOICES_MODES,
   DEFAULT_LORE_SETTINGS,
   NARRATIVE_DELIVERIES,
+  NARRATOR_POVS,
   REPLY_LENGTHS,
   PLOT_DIFFICULTIES,
   PLOT_MOODS,
@@ -1199,7 +1200,7 @@ describe('presets', () => {
   /** A marker per preset that its authorial voice cannot be missing. */
   const markers: Record<string, string[]> = {
     standard: ['2~4문단', '오감과 사소한 몸짓'],
-    novel: ['3~5문단', '내레이터 줄이 무게를 집니다'],
+    novel: ['3~5문단', '지문 줄이 무게를 집니다'],
     concise: ['1~2문단', '세 문장', '메신저'],
     literary: ['오감 중 최소 두 가지', '비유', '2~4문단'],
     screenplay: ['장소 / 시간', '대사 2~5줄'],
@@ -1235,6 +1236,16 @@ describe('presets', () => {
       expect(preset.main, id).toContain('장면·배경·상황은 접두사 없는 줄에 씁니다');
       expect(preset.main, id).toContain('여러 등장인물이 번갈아 나올 수 있습니다');
       expect(preset.postHistory, id).toContain('인물의 말과 행동은 `이름: ` 줄로');
+    }
+  });
+
+  it("calls a reply's unprefixed lines its own 지문, never a narrator's", () => {
+    // The narrator speaks on the narration button alone. A preset that framed the
+    // writer as playing it too, or called a reply's scene lines its lines, would
+    // let every reply bring it in — the narrator the button replaced.
+    for (const [id, preset] of Object.entries(PRESETS)) {
+      expect(preset.main, id).toContain('이 응답이 인물의 말과 함께 직접 쓰는 지문');
+      expect(`${preset.main}\n${preset.postHistory}`, id).not.toMatch(/[내나]레이터/);
     }
   });
 
@@ -1473,8 +1484,8 @@ describe('assemblePrompt - narrator', () => {
     });
 
   it('says nothing about a narrator the plot never set', () => {
-    expect(assembleWith({}).system).not.toContain('나레이터');
-    expect(assembleWith({}).system).not.toContain('나레이션 시점');
+    expect(assembleWith({}).system).not.toContain('서술 문체');
+    expect(assembleWith({}).system).not.toContain('서술 시점');
   });
 
   it('carries the voice and the point of view after the roster blocks', () => {
@@ -1482,28 +1493,33 @@ describe('assemblePrompt - narrator', () => {
       plot: { ...plot, narrator: { voice: '{{char}}를 멀리서 지켜보는 건조한 문장.', pov: 'third' } },
     });
     const sections = system.split('\n\n');
-    // The narrator is the plot's, so its macros resolve against the plot.
+    // The narrator is the plot's, so its macros resolve against the plot. The
+    // labels name the prose, not a narrator: they govern a reply's 지문 as well.
     expect(sections).toContain(
-      `나레이터 문체: 서리 골짜기의 밤를 멀리서 지켜보는 건조한 문장.\n나레이션 시점: ${NARRATOR_POV_LABELS.third}`,
+      `서술 문체: 서리 골짜기의 밤를 멀리서 지켜보는 건조한 문장.\n서술 시점: ${NARRATOR_POV_LABELS.third}`,
     );
-    expect(system.indexOf('나레이터 문체')).toBeGreaterThan(system.indexOf('서리 골짜기의 마녀.'));
+    expect(system.indexOf('서술 문체')).toBeGreaterThan(system.indexOf('서리 골짜기의 마녀.'));
   });
 
   it('carries either field on its own', () => {
     const voiced = assembleWith({ plot: { ...plot, narrator: { voice: '짧게 끊어 쓴다.' } } }).system;
-    expect(voiced).toContain('나레이터 문체: 짧게 끊어 쓴다.');
-    expect(voiced).not.toContain('나레이션 시점');
+    expect(voiced).toContain('서술 문체: 짧게 끊어 쓴다.');
+    expect(voiced).not.toContain('서술 시점');
 
     const { system } = assembleWith({ plot: { ...plot, narrator: { pov: 'first' } } });
-    expect(system).toContain(`나레이션 시점: ${NARRATOR_POV_LABELS.first}`);
-    expect(system).not.toContain('나레이터 문체');
+    expect(system).toContain(`서술 시점: ${NARRATOR_POV_LABELS.first}`);
+    expect(system).not.toContain('서술 문체');
   });
 
   it('names each point of view without a macro, so no particle can disagree', () => {
-    for (const pov of ['first', 'third', 'omniscient'] as const) {
+    for (const pov of NARRATOR_POVS) {
       const { system } = assembleWith({ plot: { ...plot, narrator: { pov } } });
-      expect(system).toContain(`나레이션 시점: ${NARRATOR_POV_LABELS[pov]}`);
+      expect(system).toContain(`서술 시점: ${NARRATOR_POV_LABELS[pov]}`);
     }
+    // The limited view keeps the reader's character to what can be seen of them.
+    expect(NARRATOR_POV_LABELS['third-limited']).toBe(
+      '3인칭 제한 (장면과 등장인물만 서술하고, 유저의 속마음은 쓰지 않음)',
+    );
   });
 
   it('lets the chat stand in for the plot, whole rather than field by field', () => {
@@ -1512,11 +1528,11 @@ describe('assemblePrompt - narrator', () => {
       narrator: { voice: '플롯의 문체.', pov: 'third' as const },
     };
     const { system } = assembleWith({ plot: narrating, narrator: { pov: 'omniscient' } });
-    expect(system).toContain(`나레이션 시점: ${NARRATOR_POV_LABELS.omniscient}`);
+    expect(system).toContain(`서술 시점: ${NARRATOR_POV_LABELS.omniscient}`);
     // The override is the narrator now — the plot's voice does not leak into it.
     expect(system).not.toContain('플롯의 문체.');
     // …and no override leaves the plot's own in force.
-    expect(assembleWith({ plot: narrating }).system).toContain('나레이터 문체: 플롯의 문체.');
+    expect(assembleWith({ plot: narrating }).system).toContain('서술 문체: 플롯의 문체.');
   });
 });
 
@@ -1542,7 +1558,7 @@ describe('assemblePrompt - style', () => {
     const after = loreEntry({ content: 'AFTER_CHAR_LORE', position: 'after_char' });
     const { system } = assembleWith({ tense: 'past', pacing: 'slow' }, [after]);
     expect(system).toContain(styleDirectives({ tense: 'past', pacing: 'slow' }));
-    expect(system.indexOf(STYLE_DIRECTIVES_HEADER)).toBeGreaterThan(system.indexOf('나레이터 문체'));
+    expect(system.indexOf(STYLE_DIRECTIVES_HEADER)).toBeGreaterThan(system.indexOf('서술 문체'));
     expect(system.indexOf(STYLE_DIRECTIVES_HEADER)).toBeLessThan(system.indexOf('AFTER_CHAR_LORE'));
   });
 
