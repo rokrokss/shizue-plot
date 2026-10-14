@@ -912,6 +912,18 @@ describe('request runs', () => {
     ]);
   });
 
+  it('leave a turn’s other fields as they were, as RisuAI writes back the whole item', () => {
+    const items = [
+      { role: 'system', content: '규칙' },
+      { role: 'user', content: '안녕', memo: 'm-1', removable: true, attr: [], thoughts: [], multimodals: [{ type: 'image', base64: 'image:0' }] },
+    ];
+    const result = run([setState('1', '고침'), setRole('1', 'system')], { displayData: JSON.stringify(items) });
+    expect(JSON.parse(result.displayData!)).toEqual([
+      items[0],
+      { ...items[1], role: 'system', content: '고침' },
+    ]);
+  });
+
   it('end the run on a write to a turn that is not there, dropping the whole edit', () => {
     for (const missing of [setState('3', '없음'), setRole('3', 'user'), setState('{{getvar::nothing}}', '없음')]) {
       const result = run([setState('1', '고침'), missing, setState('2', '뒤')]);

@@ -2,6 +2,7 @@
 
 import { useEffect, useSyncExternalStore } from 'react';
 import { apiGet, apiSend } from './api';
+import { endReaderLuaSandbox } from './scripts/lua/readerSandbox';
 
 interface Session { user: { id: string; name: string; email: string; image: string | null } }
 interface State { data: Session | null; isPending: boolean }
@@ -19,7 +20,11 @@ const serverSnapshot = (): State => initial;
 function loadSession(): Promise<void> {
   if (pending) return pending;
   pending = apiGet<Session | null>('/api/auth/get-session', AbortSignal.timeout(10_000))
-    .then((data) => { state = { data, isPending: false }; })
+    .then((data) => {
+      // The reader's Lua states are theirs alone: another reader, or none, ends them.
+      if (state.data && state.data.user.id !== data?.user.id) endReaderLuaSandbox();
+      state = { data, isPending: false };
+    })
     .catch(() => { state = { data: null, isPending: false }; })
     .finally(() => { pending = undefined; for (const listener of listeners) listener(); });
   return pending;
@@ -44,5 +49,6 @@ export function useSession(): State {
 
 export async function signOut(): Promise<void> {
   await apiSend('POST', '/api/auth/sign-out', {}, AbortSignal.timeout(45_000));
+  endReaderLuaSandbox();
   await refreshSession();
 }

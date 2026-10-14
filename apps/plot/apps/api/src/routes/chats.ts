@@ -778,6 +778,7 @@ const toHistory = (path: Message[], speaker: string | undefined): HistoryMessage
   path.map((message) => ({
     role: message.role,
     content: message.content,
+    id: message.id,
     createdAt: message.createdAt.getTime(),
     ...(message.speakerMemberId !== null ? { speakerId: message.speakerMemberId } : {}),
     ...(speaker !== undefined && message.role === 'assistant' && message.source === 'script' ? { speaker } : {}),
@@ -1505,7 +1506,8 @@ async function withScriptRequestTriggers(
   });
   if (!input) return messages;
   const turns = messages.map((message) => ({ role: message.role, content: contentText(message.content) }));
-  return (await editRequestTurns(turns, input, { run: deps.runRequestTriggers, label: chat.id })) ?? messages;
+  const edited = await editRequestTurns(turns, input, { run: deps.runRequestTriggers, label: chat.id });
+  return edited ? edited.map(({ role, content }) => ({ role, content })) : messages;
 }
 
 /**
@@ -2872,7 +2874,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const chat = await loadOwnedChat(deps, requireUuidParam(c), userId);
     if (!(await ownsPlot(deps, chat.plotId, userId))) throw notFound('Chat not found');
     const plan = await regeneratePlan(c, deps, chat);
-    return c.json(await inspectGeneration(deps, plan, deps.chatgpt?.accounts.forUser(userId)));
+    return c.json(await inspectGeneration(deps, plan, userId, deps.chatgpt?.accounts.forUser(userId)));
   });
 
   app.post('/:id/continue', async (c) => {

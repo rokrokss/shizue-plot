@@ -11,7 +11,8 @@
  * would honour it (no dialogs from a display pass, no model call, embedding
  * search, request or lore activation without low-level access), and only once.
  *
- * The frame is opened on the first call and kept for the life of the chat. A
+ * The frame is opened on the first call and kept for the life of the sandbox —
+ * the reader's, across their chats in the tab (`readerSandbox.ts`). A
  * worker the watchdog killed is replaced by the frame on the next call; a frame
  * that is lost (it navigated, or its document went away) is replaced here; a
  * wasmoon that could not load at all is not retried, and every call answers
@@ -105,8 +106,8 @@ export type LuaOutcome =
 
 export interface LuaSandbox {
   /**
-   * Runs `code` at `entry`. `member` keeps the Lua state the member's own, in a
-   * work of several whose members' engines share one sandbox — each RisuAI
+   * Runs `code` at `entry`. `member` keeps the Lua state the member's own, as
+   * the members of every work the reader opens share one sandbox — each RisuAI
    * character has its own states. Without it the state is the mode's alone.
    */
   call(code: string, entry: LuaEntry, snapshot: LuaSnapshot, host: LuaHost, member?: string): Promise<LuaOutcome>;

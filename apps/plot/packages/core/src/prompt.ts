@@ -60,6 +60,11 @@ export interface HistoryMessage {
   role: 'user' | 'assistant';
   content: string;
   /**
+   * The stored message the turn is — what a card's request editors read as the
+   * turn's `memo`, as RisuAI's carry its message's `chatId` (`MessageSource`).
+   */
+  id?: string;
+  /**
    * What the model is sent for the turn where that is not what is stored: the
    * text after the cards' prompt scripts rewrote it — RisuAI's `editprocess`,
    * SillyTavern's prompt-only regex (`promptScripts.ts`). The caller runs them,
@@ -327,6 +332,14 @@ export interface AssembledPrompt {
   /** Present only when the input asked for it. */
   report?: PromptReport;
   /**
+   * What each of `messages` is, in order — the block it was put together as,
+   * and for a turn of the chat the stored message it came from. A card's
+   * request editors read them as RisuAI's item fields (`risuRequestExtras`).
+   * Always there from the assembler; gone once the request was edited, when
+   * they no longer line up.
+   */
+  sources?: MessageSource[];
+  /**
    * For a group turn (`AssemblePromptInput.speaker`): where the reply has strayed
    * into another member's line — `\n이름:` and `\n별명:` of every member on the
    * stage but the speaker. The caller stops the stream on them.
@@ -363,6 +376,15 @@ export type PromptBlockKind =
    * stands for every block the turn was made of; turns they left alone keep theirs.
    */
   | 'request';
+
+/** What one message of an assembled prompt is (`AssembledPrompt.sources`). */
+export interface MessageSource {
+  kind: PromptBlockKind;
+  /** A turn of the chat: the stored message it is (`HistoryMessage.id`). */
+  id?: string;
+  /** A turn of the chat that is the branch's greeting, which RisuAI sends from the character rather than the chat. */
+  greeting?: true;
+}
 
 export interface PromptReportBlock {
   kind: PromptBlockKind;
@@ -1072,6 +1094,8 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const historyMessages: PromptMessage[] = [];
   /** What each kept turn was charged, images included; parallel to historyMessages. */
   const historyCosts: number[] = [];
+  /** Which stored message each kept turn is, and whether it is the greeting; parallel to historyMessages. */
+  const historySources: Pick<MessageSource, 'id' | 'greeting'>[] = [];
   for (let i = history.length - 1; i >= 0; i -= 1) {
     const turn = history[i]!;
     // What the cards' prompt scripts made of the turn, where they rewrote it.
@@ -1111,6 +1135,10 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
           ];
     historyMessages.unshift({ role: turn.role, content });
     historyCosts.unshift(cost);
+    historySources.unshift({
+      ...(turn.id !== undefined ? { id: turn.id } : {}),
+      ...(branch?.greeting && historyStart + i === 0 ? { greeting: true as const } : {}),
+    });
   }
 
   // 6. example dialogue — every member's blocks, each named so the model can tell
@@ -1180,6 +1208,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
       label: message.role,
       message,
       tokens: historyCosts[i]!,
+      ...historySources[i]!,
     });
   }
   historyBlock.push(...depthAt(historyMessages.length));
@@ -1257,6 +1286,11 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   return {
     system,
     messages: slots.map((slot) => slot.message),
+    sources: slots.map(({ kind, id, greeting }) => ({
+      kind,
+      ...(id !== undefined ? { id } : {}),
+      ...(greeting ? { greeting } : {}),
+    })),
     loreTriggers,
     ...(variableWrites ? { variableWrites } : {}),
     ...(input.report ? { report: report() } : {}),
@@ -1272,7 +1306,7 @@ interface SystemSection {
 }
 
 /** One message of the assembled list, kept with what it is until the report. */
-interface MessageSlot {
+interface MessageSlot extends Omit<MessageSource, 'kind'> {
   kind: PromptBlockKind;
   label?: string;
   message: PromptMessage;

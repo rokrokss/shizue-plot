@@ -58,8 +58,9 @@ export const LUA_LIMITS = {
   memory: 32 * 1024 * 1024,
   /**
    * Lua states the worker keeps — RisuAI keeps one per mode, and a manual name is
-   * a mode; in a work of several members, one per member and mode
-   * (`LuaCallMessage.member`). Past it, the one used longest ago is closed.
+   * a mode; the browser keeps one per member and mode (`LuaCallMessage.member`),
+   * for every chat of the reader's in the tab. Past it, the one used longest ago
+   * is closed, and its member's next call in that mode starts afresh.
    */
   engines: 12,
   /** A single `sleep` is cut to this, as a trigger's wait is. */
@@ -146,9 +147,10 @@ export interface LuaCallMessage {
   entry: LuaEntry;
   snapshot: LuaSnapshot;
   /**
-   * The member whose card the code is, in a work of several: each member's Lua
-   * keeps its own state per mode, as each RisuAI character runs its own. Absent,
-   * the state is the mode's alone — a work of one, and the server.
+   * The member whose card the code is: each member's Lua keeps its own state
+   * per mode, as each RisuAI character runs its own — the browser names one on
+   * every call, as its sandbox is the reader's and outlives a chat. Absent, the
+   * state is the mode's alone, as on the server.
    */
   member?: string;
   /**

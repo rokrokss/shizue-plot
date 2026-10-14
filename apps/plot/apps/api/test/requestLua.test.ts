@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createLuaStateStore,
   luaStateHash,
+  luaStateKey,
   probeRequestLua,
   runRequestLua,
   runRequestLuaAt,
@@ -487,7 +488,18 @@ describe('the parent’s side of the protocol', () => {
 });
 
 describe('the kept states', () => {
-  it('keep the most recently used chats within their count and their size', () => {
+  it('are one a reader and member: never another reader’s, never another member’s', () => {
+    const keys = [
+      luaStateKey('reader-a', 'member-1'),
+      luaStateKey('reader-b', 'member-1'),
+      luaStateKey('reader-a', 'member-2'),
+    ];
+    expect(new Set(keys).size).toBe(3);
+    // A separator no id holds: one reader's id cannot run into another's member.
+    expect(luaStateKey('a:b', 'c')).not.toBe(luaStateKey('a', 'b:c'));
+  });
+
+  it('keep the most recently used within their count and their size', () => {
     const store = createLuaStateStore({ entries: 2, chars: 10 });
     store.set('a', { hash: 'h', state: 'aaaa' });
     store.set('b', { hash: 'h', state: 'bbbb' });

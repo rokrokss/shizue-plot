@@ -34,17 +34,21 @@
  * for a card with one Lua script; with more, the code alternates and the state
  * is rebuilt every call. The closest thing here: the last script's plain-data
  * globals are taken when a run ends (`LUA_STATE` — strings, numbers, booleans
- * and tables of them, never code), kept by chat and tagged with that script's
- * hash (`LuaStateStore`, in memory), and put back into the next run's first
- * script once its code has loaded — only when it is the same code, so a card
- * with several scripts starts every one fresh, as in RisuAI. They go in as
- * data, read by the keeper the state made before the card's code ran.
+ * and tables of them, never code), kept by reader and member (`luaStateKey`:
+ * RisuAI's one state lives in one reader's app, and the browser keeps one per
+ * member too) and tagged with that script's hash (`LuaStateStore`, in memory),
+ * and put back into the next run's first script once its code has loaded —
+ * whichever of the reader's chats with that member it runs for, and only when
+ * it is the same code, so a card with several scripts starts every one fresh,
+ * as in RisuAI. They go in as data, read by the keeper the state made before
+ * the card's code ran.
  *
  * **What a listener has.** What the browser hands its worker: the chat (the
  * whole branch), its variables, the reader's global variables, the character
  * as the reader's overlay has it, the chat's own lore, the persona and the
- * chat's note — and the
- * request, `[{role, content}, …]`, as the request triggers read it. RisuAI's
+ * chat's note — and the request as the request triggers read it: RisuAI's
+ * `OpenAIChat` items, `memo` and the rest beside `role` and `content`, the
+ * pictures as stand-ins (`requestTriggers.ts`). RisuAI's
  * `runLuaEditTrigger` gives its listeners no low-level access, so `LLM`,
  * `axLLM`, `simpleLLM`, `request`, `similarity` and `loadLoreBooks` answer nil
  * in the worker, and the child asking for any of them anyway is a broken child.
@@ -53,7 +57,8 @@
  *
  * **What comes back.** Each script's value replaces the request unless it is
  * null, as RisuAI's `res ?? data`; the last must be a list of turns we can
- * send (`turnsOf`). Chat variables a listener wrote are the generated turn's,
+ * send (`turnsOf`), and goes on to the request triggers as it was left, every
+ * field of it. Chat variables a listener wrote are the generated turn's,
  * as RisuAI's listener writes the live chat — so the browser's output run folds
  * from them. What it did to the chat, the character and the chat's lore comes
  * back too (`ListenerEdits`), read as the browser's sandbox reads a call's, and
@@ -78,7 +83,7 @@ import { createRequire } from 'node:module';
 import type { Socket } from 'node:net';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { turnsOf } from './requestTriggers.js';
+import { turnsOf, type EditedTurn } from './requestTriggers.js';
 
 /**
  * How long a whole run may take, from the child it is handed to its last
@@ -137,7 +142,8 @@ const MAX_LORE = 2_000;
 /** What one run takes: the card's Lua scripts in trigger order, the request, and what a script may read. */
 export interface RequestLuaInput {
   scripts: string[];
-  request: RequestTurn[];
+  /** RisuAI's `OpenAIChat` items (`requestTriggers.ts`), as JSON goes. */
+  request: readonly RequestTurn[];
   snapshot: LuaSnapshot;
   /**
    * The state's globals across runs (`LUA_STATE`): `restore` is put into the
@@ -694,17 +700,18 @@ export interface ListenerEdits {
 }
 
 /**
- * `turns` as the card's `editRequest` listeners left them, or null when
- * unchanged; the chat variables they wrote; what else they did (`edits`, null
- * when nothing); and, with `keep.capture`, their state's globals (`state`:
- * null when there were none to keep, undefined when the run was not made or
- * failed — what an earlier run kept then stands).
+ * `turns` as the card's `editRequest` listeners left them, every field of them
+ * — or null when the run failed or left something that is not a request; the
+ * chat variables they wrote; what else they did (`edits`, null when nothing);
+ * and, with `keep.capture`, their state's globals (`state`: null when there
+ * were none to keep, undefined when the run was not made or failed — what an
+ * earlier run kept then stands).
  */
 export async function editRequestLua(
-  turns: RequestTurn[],
+  turns: readonly RequestTurn[],
   input: Omit<RequestLuaInput, 'request'>,
   { run = runRequestLua, label }: { run?: RequestLuaRunner | undefined; label: string },
-): Promise<{ turns: RequestTurn[] | null; writes: VariableDelta | null; edits: ListenerEdits | null; state?: string | null }> {
+): Promise<{ turns: EditedTurn[] | null; writes: VariableDelta | null; edits: ListenerEdits | null; state?: string | null }> {
   let outcome: RequestLuaOutcome;
   try {
     outcome = await run({ ...input, request: turns });
@@ -723,33 +730,38 @@ export async function editRequestLua(
   const edits = messages || Object.keys(character).length > 0 || lore.length > 0 ? { messages, character, lore } : null;
   const kept = outcome.state !== undefined ? { state: outcome.state } : {};
   const edited = turnsOf(outcome.request);
-  if (!edited) {
-    console.warn('[api] editRequest left something that is not a request; sent unedited:', label);
-    return { turns: null, writes, edits, ...kept };
-  }
-  const same = edited.length === turns.length && edited.every((turn, at) => turn.role === turns[at]!.role && turn.content === turns[at]!.content);
-  return { turns: same ? null : edited, writes, edits, ...kept };
+  if (!edited) console.warn('[api] editRequest left something that is not a request; sent unedited:', label);
+  return { turns: edited, writes, edits, ...kept };
 }
 
 /* ------------------------------------------------------- state across runs */
 
-/** One chat's kept `editRequest` globals (`LUA_STATE`), and the code they were taken from. */
+/** One kept `editRequest` state's globals (`LUA_STATE`), and the code they were taken from. */
 export interface KeptLuaState {
   /** `luaStateHash` of the script whose state they are — the run's last. */
   hash: string;
   state: string;
 }
 
-/** Where the server keeps them between generations, by chat id. */
+/** Where the server keeps them between generations, by `luaStateKey`. */
 export interface LuaStateStore {
-  get(chatId: string): KeptLuaState | undefined;
-  set(chatId: string, kept: KeptLuaState): void;
-  delete(chatId: string): void;
+  get(key: string): KeptLuaState | undefined;
+  set(key: string, kept: KeptLuaState): void;
+  delete(key: string): void;
 }
 
 /**
- * The chats' states this process keeps: the most recently used first to stay,
- * up to `entries` chats and `chars` characters in all — each one is at most
+ * Whose `editRequest` state it is: one reader's, for one member's card —
+ * RisuAI keeps one state a mode in the reader's own app, and the reader's
+ * browser keeps one a member and mode (web `lua/readerSandbox.ts`). So every
+ * chat the reader has with that member shares it, as RisuAI's chats do while
+ * the code stays the same; another reader never sees it.
+ */
+export const luaStateKey = (reader: string, member: string): string => `${reader}\u0000${member}\u0000editRequest`;
+
+/**
+ * The states this process keeps: the most recently used first to stay, up to
+ * `entries` of them and `chars` characters in all — each one is at most
  * `LUA_STATE_LIMIT` bytes. In memory, as RisuAI's states live in the reader's
  * tab and go with it: a restart, or another instance of the API, starts the
  * next run without them, which is RisuAI's after a reload.
@@ -757,24 +769,24 @@ export interface LuaStateStore {
 export function createLuaStateStore({ entries = 1_000, chars = 32_000_000 }: { entries?: number; chars?: number } = {}): LuaStateStore {
   const kept = new Map<string, KeptLuaState>();
   let total = 0;
-  const drop = (chatId: string): void => {
-    const was = kept.get(chatId);
+  const drop = (key: string): void => {
+    const was = kept.get(key);
     if (!was) return;
-    kept.delete(chatId);
+    kept.delete(key);
     total -= was.state.length;
   };
   return {
-    get(chatId) {
-      const found = kept.get(chatId);
+    get(key) {
+      const found = kept.get(key);
       if (found) {
-        kept.delete(chatId);
-        kept.set(chatId, found);
+        kept.delete(key);
+        kept.set(key, found);
       }
       return found;
     },
-    set(chatId, value) {
-      drop(chatId);
-      kept.set(chatId, value);
+    set(key, value) {
+      drop(key);
+      kept.set(key, value);
       total += value.state.length;
       for (const oldest of kept.keys()) {
         if (kept.size <= entries && total <= chars) break;

@@ -58,6 +58,8 @@ vi.mock('use-stick-to-bottom', async () => {
 vi.mock('@/lib/sse', () => ({
   streamGeneration: async (): Promise<unknown> => ({ kind: 'done', messageId: 'msg_9', usage: {} }),
 }));
+// The member layout's session, by which the page leases the reader's Lua sandbox.
+vi.mock('@/lib/authClient', () => ({ useSession: () => ({ data: { user: { id: 'reader' } }, isPending: false }) }));
 vi.mock('@/lib/api', async (importOriginal) => {
   const original = await importOriginal<typeof import('../src/lib/api')>();
   return {

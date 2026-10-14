@@ -88,9 +88,10 @@ export interface LuaEngineOptions {
   /** The scripted member's avatar, a same-origin address — RisuAI's `char.image` — or null. */
   avatarUrl?: string | null;
   /**
-   * The member whose card this is, in a work of several whose engines share one
-   * sandbox: its Lua keeps states of its own (`LuaSandbox.call`). Absent in a
-   * work of one, where the states are the modes' alone as they always were.
+   * The member whose card this is: its Lua keeps states of its own
+   * (`LuaSandbox.call`) in the reader's sandbox, which every member of the
+   * work — and of the reader's other chats — shares (`readerLuaSandbox`).
+   * Absent, the states are the modes' alone.
    */
   member?: string;
   /**

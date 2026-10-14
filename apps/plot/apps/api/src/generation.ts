@@ -45,7 +45,6 @@ import {
   upsertLocalLore,
   type CardScripts,
   type MemberOverlay,
-  type RequestTurn,
   type TriggerMessage,
   type TriggerRunInput,
 } from '@shizue/core/triggers';
@@ -65,12 +64,13 @@ import {
   characterImage,
   editRequestLua,
   luaStateHash,
+  luaStateKey,
   luaStates,
   type ListenerEdits,
   type LuaCharacterRewrite,
   type RequestLuaInput,
 } from './requestLua.js';
-import { editRequestTurns, withEditedRequest } from './requestTriggers.js';
+import { editRequestTurns, withEditedRequest, type EditedTurn } from './requestTriggers.js';
 import { applyScriptChat, planScriptChat, rewritableHead } from './scriptChat.js';
 import {
   MAX_OVERLAY_TEXT_LENGTH,
@@ -516,12 +516,14 @@ async function withPromptScripts(
  * (`requestTriggers.ts`). The chat variables the listeners wrote are the
  * triggers' to read, and the generated turn's to keep, as is what else they did
  * (`listenerEdits`). The listeners' state's globals are put back from the
- * chat's last generation, and a generation keeps them for the next
- * (`LuaStateStore`); the inspector reads them and keeps nothing.
+ * reader's last generation with that member, in whichever of their chats, and
+ * a generation keeps them for the next (`LuaStateStore`, `luaStateKey`); the
+ * inspector reads them and keeps nothing.
  */
 async function buildRequestMessages(
   plan: GenerationPlan,
   deps: AppDeps,
+  reader: string,
   account?: ChatGPTAccount,
   report = false,
 ): Promise<BuiltRequest> {
@@ -533,26 +535,27 @@ async function buildRequestMessages(
   const listened: { writes: VariableDelta | null; edits: ListenerEdits | null } = { writes: null, edits: null };
   const edited = await withEditedRequest(
     prompt,
-    async (turns) => {
-      let request: RequestTurn[] | null = null;
+    async (items) => {
+      let request: EditedTurn[] | null = null;
       if (lua) {
         const states = deps.luaStates ?? luaStates;
-        const kept = states.get(plan.chatId);
+        const key = luaStateKey(reader, requestScriptsOf(plan)?.member.id ?? '');
+        const kept = states.get(key);
         // RisuAI's one state holds the code it ran last: the next run's first script finds it only if it is that code.
         const restore = kept && kept.hash === luaStateHash(lua.scripts[0]!) ? kept.state : undefined;
         const keep = { ...(restore !== undefined ? { restore } : {}), ...(report ? {} : { capture: true }) };
-        const result = await editRequestLua(turns, { ...lua, keep }, { run: deps.runRequestLua, label });
+        const result = await editRequestLua(items, { ...lua, keep }, { run: deps.runRequestLua, label });
         request = result.turns;
         listened.writes = result.writes;
         if (!report) {
           listened.edits = result.edits;
-          if (result.state === null) states.delete(plan.chatId);
-          else if (result.state !== undefined) states.set(plan.chatId, { hash: luaStateHash(lua.scripts.at(-1)!), state: result.state });
+          if (result.state === null) states.delete(key);
+          else if (result.state !== undefined) states.set(key, { hash: luaStateHash(lua.scripts.at(-1)!), state: result.state });
         }
       }
       if (triggers) {
         const input = { ...triggers, variables: applyVariableDelta(triggers.variables, listened.writes) };
-        request = (await editRequestTurns(request ?? turns, input, { run: deps.runRequestTriggers, label })) ?? request;
+        request = (await editRequestTurns(request ?? items, input, { run: deps.runRequestTriggers, label })) ?? request;
       }
       return request;
     },
@@ -819,6 +822,20 @@ async function assembleRequest(
       ...(trailingSystem ? [{ role: 'system' as const, content: trailingSystem }] : []),
       ...(partial ? [{ role: 'assistant' as const, content: partial }] : []),
     ],
+    // The partial is the head being continued — the greeting itself on a branch of one.
+    sources: [
+      ...(prompt.sources ?? []),
+      ...(trailingSystem ? [{ kind: 'trailing' as const }] : []),
+      ...(partial
+        ? [
+            {
+              kind: 'history' as const,
+              ...(last?.id !== undefined ? { id: last.id } : {}),
+              ...(plan.branch.greeting && plan.branch.length <= 1 ? { greeting: true as const } : {}),
+            },
+          ]
+        : []),
+    ],
     loreTriggers: prompt.loreTriggers,
     ...(prompt.variableWrites ? { variableWrites: prompt.variableWrites } : {}),
     ...(prompt.stopSequences ? { stopSequences: prompt.stopSequences } : {}),
@@ -854,9 +871,10 @@ async function assembleRequest(
 export async function inspectGeneration(
   deps: AppDeps,
   plan: GenerationPlan,
+  reader: string,
   account?: ChatGPTAccount,
 ): Promise<PromptReport> {
-  const { report } = await buildRequestMessages(plan, deps, account, true);
+  const { report } = await buildRequestMessages(plan, deps, reader, account, true);
   return report!;
 }
 
@@ -941,7 +959,7 @@ async function runGeneration(
     // The reader's own ChatGPT account answers their chat.
     const account = deps.chatgpt?.accounts.forUser(c.get('userId'));
     resolved = await (deps.getAdapter ?? getAdapter)(plan.model, deps.env, account);
-    request = await buildRequestMessages(plan, deps, account);
+    request = await buildRequestMessages(plan, deps, c.get('userId'), account);
     reasoningEffort = await chosenReasoningEffort(deps, plan, account);
   } catch (error) {
     await release();

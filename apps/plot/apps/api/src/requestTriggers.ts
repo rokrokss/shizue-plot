@@ -15,11 +15,17 @@
  * (`withEditedRequest`).
  *
  * **The request as the triggers see it.** RisuAI hands them its request as
- * JSON, a list of `{role, content}` turns. Ours is a system string and a list
+ * JSON, a list of its `OpenAIChat` items. Ours is a system string and a list
  * of messages, so the list is `[{role: 'system', content: system},
- * ...messages]`, each message's content as its text. A turn's images are set
- * aside: RisuAI keeps them beside the text too (`multimodals`), and the effects
- * only read and write the text and the role.
+ * ...messages]`, each message's content as its text, with the fields RisuAI
+ * sets beside them on the turn it stands for — `memo`, `removable`, `attr`,
+ * `thoughts` (`risuRequestExtras` in @shizue/core, from what each block is).
+ * A turn's pictures are its `multimodals`, as RisuAI's are, but each one's
+ * `base64` is a stand-in that names it (`image:0`, …) rather than its bytes:
+ * the reader's pictures run to 16 MB a turn, past what a listener's Lua state
+ * (32 MB, holding the request's JSON and its decoding at once) or a line of the
+ * Lua child's (8 MB) holds. `name` (RisuAI's per-side example turns) and
+ * `cachePoint` (Claude's prompt caching) are never set.
  *
  * **What comes back.** RisuAI takes any array; this takes one whose every turn
  * has a role of `system`, `user` or `assistant` and string content, and sends
@@ -28,14 +34,16 @@
  * leads the messages — and every other turn is a message, in order, `system`
  * ones included (an adapter sends those where they stand). Leading system
  * turns are not folded into the system string: the directions block opens the
- * messages on purpose, outside the cached prefix (§6 of ARCHITECTURE.md).
+ * messages on purpose, outside the cached prefix (§6 of ARCHITECTURE.md). Of
+ * a turn's other fields only `multimodals` is read, for the pictures it still
+ * names; the rest are the next editor's to read and are not sent.
  *
- * **Images.** They go back on their turns by position, but only while the
- * request has the same number of turns in the same roles. Once a role changed,
- * none are sent (logged): a picture on a turn that became a system or an
- * assistant turn is one a provider may refuse, and RisuAI's own effects never
- * change the number of turns, so any reshaping is a role change. (RisuAI sends
- * the pictures on their turn whatever its role.)
+ * **Images.** A picture goes on the first turn whose `multimodals` still names
+ * it, when that turn is a user turn; one no turn names any more was removed,
+ * and is not sent. One left on the system string or on a system or an
+ * assistant turn is not sent either (logged): a provider may refuse it there.
+ * (RisuAI sends the pictures on their turn whatever its role.) An editor never
+ * adds one: a name we did not hand out is nothing.
  *
  * **Failure.** The triggers run in a worker thread against a clock: a card's
  * regex runs on the native engine (`v2ExtractRegex`, `v2RegexTest`,
@@ -45,7 +53,16 @@
  * thread or runs out the clock sends the request as it was, and says so in the
  * log — as RisuAI's try/catch around the run sends it unedited.
  */
-import { countTokens, promptText, type AssembledPrompt, type PromptMessage, type PromptPart, type PromptReport } from '@shizue/core';
+import {
+  countTokens,
+  promptText,
+  risuRequestExtras,
+  type AssembledPrompt,
+  type PromptMessage,
+  type PromptPart,
+  type PromptReport,
+  type RisuRequestItem,
+} from '@shizue/core';
 import type { RequestTurn, TriggerLogEntry, TriggerRunInput } from '@shizue/core/triggers';
 import { Worker } from 'node:worker_threads';
 
@@ -179,21 +196,69 @@ export function runRequestTriggers(
 
 const ROLES: readonly string[] = ['system', 'user', 'assistant'];
 
-/** The request as the triggers read it, and each message's images, by position. */
-function requestOf(prompt: AssembledPrompt): { turns: RequestTurn[]; images: (PromptPart[] | undefined)[] } {
-  return {
-    turns: [
-      { role: 'system', content: prompt.system },
-      ...prompt.messages.map((message) => ({ role: message.role, content: promptText(message.content) })),
-    ],
-    images: prompt.messages.map((message) =>
-      typeof message.content === 'string' ? undefined : message.content.filter((part) => part.type === 'image'),
-    ),
-  };
+/**
+ * A turn as an editor of the request left it: a role and text we can send,
+ * and whatever else it carries, kept for the next editor and read here only
+ * for the pictures it names.
+ */
+export type EditedTurn = RequestTurn & { readonly [field: string]: unknown };
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** What a picture is called in the request the editors read: a stand-in, not its bytes. */
+const imageName = (at: number): string => `image:${at}`;
+
+/** The request as its editors read it, and each picture by the name it goes by there. */
+function requestOf(prompt: AssembledPrompt): { items: RisuRequestItem[]; images: Map<string, PromptPart> } {
+  const images = new Map<string, PromptPart>();
+  const items: RisuRequestItem[] = [
+    { role: 'system', content: prompt.system },
+    ...prompt.messages.map((message, at): RisuRequestItem => {
+      const parts = typeof message.content === 'string' ? [] : message.content.filter((part) => part.type === 'image');
+      const multimodals = parts.map((part) => {
+        const name = imageName(images.size);
+        images.set(name, part);
+        return { type: 'image' as const, base64: name };
+      });
+      return {
+        role: message.role,
+        content: promptText(message.content),
+        ...risuRequestExtras(prompt.sources?.[at]),
+        ...(multimodals.length > 0 ? { multimodals } : {}),
+      };
+    }),
+  ];
+  return { items, images };
+}
+
+/** The pictures a turn's `multimodals` names, in order — whatever an editor left there. */
+function imagesNamed(turn: RequestTurn): string[] {
+  const list = (turn as { multimodals?: unknown }).multimodals;
+  if (!Array.isArray(list)) return [];
+  return list.flatMap((entry) => (isRecord(entry) && typeof entry['base64'] === 'string' ? [entry['base64']] : []));
+}
+
+/** Whether `edited` sends what `items` would: the same turns, roles, text and pictures. */
+function sameRequest(items: readonly RequestTurn[], edited: readonly RequestTurn[]): boolean {
+  return (
+    edited.length === items.length &&
+    edited.every((turn, at) => {
+      const was = items[at]!;
+      const names = imagesNamed(turn);
+      const wasNames = imagesNamed(was);
+      return (
+        turn.role === was.role &&
+        turn.content === was.content &&
+        names.length === wasNames.length &&
+        names.every((name, index) => name === wasNames[index])
+      );
+    })
+  );
 }
 
 /** The run's JSON as a request, or null for anything but a list of turns we can send. */
-function readTurns(json: string): RequestTurn[] | null {
+function readTurns(json: string): EditedTurn[] | null {
   let value: unknown;
   try {
     value = JSON.parse(json);
@@ -205,18 +270,17 @@ function readTurns(json: string): RequestTurn[] | null {
 
 /**
  * A value an editor of the request left, as a request — or null for anything
- * but a list of turns we can send. A turn's other fields are not kept.
+ * but a list of turns we can send. A turn's other fields stay as they were
+ * left, for the next editor; only its pictures are read here.
  */
-export function turnsOf(value: unknown): RequestTurn[] | null {
+export function turnsOf(value: unknown): EditedTurn[] | null {
   if (!Array.isArray(value)) return null;
-  const turns: RequestTurn[] = [];
   for (const item of value as unknown[]) {
-    if (typeof item !== 'object' || item === null) return null;
-    const { role, content } = item as Record<string, unknown>;
+    if (!isRecord(item)) return null;
+    const { role, content } = item;
     if (typeof role !== 'string' || !ROLES.includes(role) || typeof content !== 'string') return null;
-    turns.push({ role: role as RequestTurn['role'], content });
   }
-  return turns;
+  return value as EditedTurn[];
 }
 
 /**
@@ -225,7 +289,7 @@ export function turnsOf(value: unknown): RequestTurn[] | null {
  * it went as. The totals stay the assembler's — the budget was spent before the
  * triggers ran, and RisuAI does not measure their edit either.
  */
-function editedReport(report: PromptReport, before: RequestTurn[], after: RequestTurn[]): PromptReport {
+function editedReport(report: PromptReport, before: readonly RequestTurn[], after: readonly RequestTurn[]): PromptReport {
   const messages = before.length - 1;
   const groups = [
     report.blocks.slice(0, report.blocks.length - messages),
@@ -253,10 +317,10 @@ interface RunOptions {
  * nothing, or what it left is not a request. A failure is said in the log.
  */
 export async function editRequestTurns(
-  turns: RequestTurn[],
+  turns: readonly RequestTurn[],
   input: Omit<TriggerRunInput, 'mode' | 'displayData'>,
   { run = runRequestTriggers, label }: RunOptions,
-): Promise<RequestTurn[] | null> {
+): Promise<EditedTurn[] | null> {
   const sent = JSON.stringify(turns);
   let outcome: RequestTriggerOutcome;
   try {
@@ -277,33 +341,47 @@ export async function editRequestTurns(
 /**
  * The prompt a generation sends, as `edit` leaves its request — the card's
  * `editRequest` listeners (`requestLua.ts`), then its request triggers
- * (`editRequestTurns`). `edit` answers null for a request it leaves as it was.
+ * (`editRequestTurns`). `edit` hands the request's items (RisuAI's
+ * `OpenAIChat`) on and answers null for a request it leaves as it was.
  */
 export async function withEditedRequest(
   prompt: AssembledPrompt,
-  edit: (turns: RequestTurn[]) => Promise<RequestTurn[] | null>,
+  edit: (items: RisuRequestItem[]) => Promise<EditedTurn[] | null>,
   label: string,
 ): Promise<AssembledPrompt> {
-  const { turns, images } = requestOf(prompt);
-  const edited = await edit(turns);
-  if (!edited) return prompt;
+  const { items, images } = requestOf(prompt);
+  const edited = await edit(items);
+  if (!edited || sameRequest(items, edited)) return prompt;
 
-  const sameShape = edited.length === turns.length && edited.every((turn, index) => turn.role === turns[index]!.role);
-  const dropped = sameShape ? 0 : images.reduce((count, parts) => count + (parts?.length ?? 0), 0);
-  if (dropped > 0) console.warn(`[api] the request's scripts changed a role; ${dropped} image(s) not sent:`, label);
   const system = edited[0]?.role === 'system' ? edited[0].content : null;
-  const messages: PromptMessage[] = (system !== null ? edited.slice(1) : edited).map((turn, index) => {
-    // Same shape: the first turn is still the system string, so a message's index is its own.
-    const parts = sameShape ? images[index] : undefined;
+  // Each picture on the first turn that still names it, if that turn is the reader's.
+  const placed = new Set<string>();
+  let refused = 0;
+  const partsOf = (turn: EditedTurn, isSystem: boolean): PromptPart[] =>
+    imagesNamed(turn).flatMap((name) => {
+      const part = images.get(name);
+      if (!part || placed.has(name)) return [];
+      placed.add(name);
+      if (isSystem || turn.role !== 'user') {
+        refused += 1;
+        return [];
+      }
+      return [part];
+    });
+  if (system !== null) partsOf(edited[0]!, true);
+  const messages: PromptMessage[] = (system !== null ? edited.slice(1) : edited).map((turn) => {
+    const parts = partsOf(turn, false);
     return {
       role: turn.role,
-      content: parts?.length ? [{ type: 'text', text: turn.content }, ...parts] : turn.content,
+      content: parts.length > 0 ? [{ type: 'text', text: turn.content }, ...parts] : turn.content,
     };
   });
+  if (refused > 0) console.warn(`[api] the request's scripts left ${refused} image(s) on a turn not the reader's; not sent:`, label);
+  const { sources: _stale, ...rest } = prompt;
   return {
-    ...prompt,
+    ...rest,
     system: system ?? '',
     messages,
-    ...(prompt.report ? { report: editedReport(prompt.report, turns, edited) } : {}),
+    ...(prompt.report ? { report: editedReport(prompt.report, items, edited) } : {}),
   };
 }

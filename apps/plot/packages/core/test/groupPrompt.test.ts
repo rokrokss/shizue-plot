@@ -125,21 +125,27 @@ const base = (overrides: Partial<AssemblePromptInput> = {}): AssemblePromptInput
 });
 
 // Pinned against the assembler as it stood before group turns: without a
-// `speaker`, every byte it returns stays what it was.
+// `speaker`, every byte it returns stays what it was. What each message is
+// (`sources`) came later, beside the prompt rather than in it.
+const pinned = (input: AssemblePromptInput) => {
+  const { sources: _sources, ...prompt } = assemblePrompt(input);
+  return prompt;
+};
+
 describe('assemblePrompt - without a speaker, as before group turns', () => {
   it('assembles a one-member plot as it always has', () => {
-    expect(assemblePrompt(base({ characters: [seiya] }))).toMatchSnapshot();
+    expect(pinned(base({ characters: [seiya] }))).toMatchSnapshot();
   });
 
   it('assembles a multi-member scene call as it always has', () => {
-    expect(assemblePrompt(base())).toMatchSnapshot();
+    expect(pinned(base())).toMatchSnapshot();
   });
 
   it('assembles a narration as it always has', () => {
     // Today's narration is the scene prompt; the narrate route adds its nudge
     // behind it as `trailingSystem`.
     const narrated = [...history, { role: 'assistant' as const, content: '@: 눈이 그쳤다.' }];
-    expect(assemblePrompt(base({ preset: PRESETS.standard, directions: '', history: narrated }))).toMatchSnapshot();
+    expect(pinned(base({ preset: PRESETS.standard, directions: '', history: narrated }))).toMatchSnapshot();
   });
 });
 

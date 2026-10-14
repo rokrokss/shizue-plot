@@ -89,6 +89,8 @@ import { loadWholeBranch } from '@/lib/scripts/branch';
 import { readEmbeddingModel } from '@/lib/scripts/embeddingModels';
 import { createLuaEngine, luaFunctionNames, luaScriptsOf } from '@/lib/scripts/lua/engine';
 import { createLuaSandbox, type LuaRequestAnswer } from '@/lib/scripts/lua/sandbox';
+import { readerLuaSandbox } from '@/lib/scripts/lua/readerSandbox';
+import { useSession } from '@/lib/authClient';
 import { groupDisplayEdits, prepareGroupSend, runtimeOf, type ScriptCast } from '@/lib/scripts/group';
 import {
   activeLore,
@@ -1226,11 +1228,15 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     }),
     [],
   );
+  /** Whose Lua sandbox the scripts run in: the reader's, kept across their chats (`readerLuaSandbox`). */
+  const reader = useSession().data?.user.id ?? '';
   /**
    * One runtime per member that carries scripts (`lib/scripts`), the lead's
-   * first. In a work of several members they share one Lua sandbox — each
-   * member's Lua in states of its own — the persona and the chat's lore their
-   * scripts rewrite, and every request names its member (`group`).
+   * first. They share the reader's Lua sandbox — each member's Lua in states of
+   * its own, which outlive this page for the reader's next chat with the member,
+   * as RisuAI's outlive a chat — the persona and the chat's lore their scripts
+   * rewrite, and in a work of several members every request names its member
+   * (`group`).
    */
   const runtimes = useMemo<{ byMember: ReadonlyMap<string, ScriptRuntime>; lead: ScriptRuntime; dispose(): void } | null>(() => {
     if (!scriptBundles?.length) return null;
@@ -1252,13 +1258,15 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         setScriptNotice((current) => (current === notice ? '' : current));
       }
     };
-    // A plot that carries Lua gets the sandbox; wasmoon is fetched on its first call,
-    // never before. One for the chat, ended with the runtimes rather than by each engine.
+    // A plot that carries Lua leases the reader's sandbox; wasmoon is fetched on its
+    // first call, never before. Given back with the runtimes rather than by each engine.
     const sandbox = scriptBundles.some((bundle) => luaScriptsOf(bundle.triggers).length > 0)
-      ? createLuaSandbox({
-          loadAssets: () => import('@/lib/scripts/lua/assets').then((assets) => assets.loadLuaAssets()),
-          onIdleKill: (reason) => log({ kind: 'limit', effect: 'triggerlua', message: `a Lua script still running between calls was stopped (${reason})` }),
-        })
+      ? readerLuaSandbox(reader, () =>
+          createLuaSandbox({
+            loadAssets: () => import('@/lib/scripts/lua/assets').then((assets) => assets.loadLuaAssets()),
+            onIdleKill: (reason) => log({ kind: 'limit', effect: 'triggerlua', message: `a Lua script still running between calls was stopped (${reason})` }),
+          }),
+        )
       : null;
     const shared = sharedScripts(scriptBundles[0]!);
     const byMember = new Map(
@@ -1271,7 +1279,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                 triggers: bundle.triggers,
                 lowLevelAccess: bundle.lowLevelAccess,
                 sandbox: { call: (...args) => sandbox.call(...args), dispose: () => undefined },
-                ...(group ? { member: bundle.memberId } : {}),
+                // Always: the sandbox outlives the page, and another work's member is not this one.
+                member: bundle.memberId,
                 ui: scriptUi,
                 llm: async (messages, model) =>
                   (await apiSend<{ result: string }>('POST', `/api/chats/${id}/script-llm`, { messages, model, ...tag })).result,
@@ -1320,8 +1329,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         sandbox?.dispose();
       },
     };
-  }, [id, scriptBundles, scriptUi, group]);
-  // The sandbox goes with the runtimes that opened it.
+  }, [id, scriptBundles, scriptUi, group, reader]);
+  // The lease on the sandbox goes with the runtimes that took it.
   useEffect(() => () => runtimes?.dispose(), [runtimes]);
   /** Where each moment's scripts run (`runtimeOf`). */
   const scriptCast = useMemo<ScriptCast | null>(

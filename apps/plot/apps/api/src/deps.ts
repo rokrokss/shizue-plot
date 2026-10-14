@@ -81,7 +81,7 @@ export interface AppDeps {
    */
   runRequestLua?: RequestLuaRunner;
   /**
-   * The chats' `editRequest` globals kept between generations (`requestLua.ts`);
+   * The readers' `editRequest` globals kept between generations, a reader and member each (`requestLua.ts`);
    * the process's own store by default. Tests hand their own to look inside.
    */
   luaStates?: LuaStateStore;

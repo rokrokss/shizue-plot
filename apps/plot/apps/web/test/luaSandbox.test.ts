@@ -31,6 +31,7 @@ import {
   type LuaSandbox,
   type OpenLuaChannel,
 } from '../src/lib/scripts/lua/sandbox';
+import { endReaderLuaSandbox, readerLuaSandbox } from '../src/lib/scripts/lua/readerSandbox';
 import {
   LUA_LIMITS,
   luaFrameCsp,
@@ -758,6 +759,68 @@ describe('the Lua sandbox', () => {
       { role: 'char', data: 'b', key: 1 },
       { role: 'char', data: 'c', key: null },
     ]);
+  });
+});
+
+describe('the reader’s Lua sandbox', () => {
+  afterEach(() => endReaderLuaSandbox());
+
+  const code = `count = 0
+    function onStart(id) count = count + 1 setChatVar(id, 'count', count) end`;
+  /** What a chat page's start run of `source` counted, on its lease. */
+  const count = async (lease: LuaSandbox, source = code): Promise<string | null | undefined> => {
+    const outcome = await lease.call(source, start, snapshot(), host, 'member-1');
+    if (outcome.kind !== 'done') throw new Error(`expected done, got ${JSON.stringify(outcome)}`);
+    return Object.fromEntries(outcome.result.vars)['count'];
+  };
+
+  it('keeps a member’s Lua state from one of the reader’s chats to the next while the code is the same', async () => {
+    let opened = 0;
+    const open = (): LuaSandbox => {
+      opened += 1;
+      return sandboxWith();
+    };
+    const first = readerLuaSandbox('reader-a', open);
+    expect(await count(first)).toBe('1');
+    expect(await count(first)).toBe('2');
+    // The page goes; the next chat's page takes the same sandbox, its states as they were.
+    first.dispose();
+    const next = readerLuaSandbox('reader-a', open);
+    expect(await count(next)).toBe('3');
+    expect(opened).toBe(1);
+    // New code is a new state, as RisuAI makes one when the code changes.
+    expect(await count(next, `${code}\n`)).toBe('1');
+  });
+
+  it('never hands one reader’s states to another, and ends them on signing out', async () => {
+    const theirs = readerLuaSandbox('reader-a', () => sandboxWith());
+    expect(await count(theirs)).toBe('1');
+    expect(await count(theirs)).toBe('2');
+    const mine = readerLuaSandbox('reader-b', () => sandboxWith());
+    expect(await count(mine)).toBe('1');
+    // The first reader's lease is spent: their sandbox went with them.
+    expect((await theirs.call(code, start, snapshot(), host, 'member-1')).kind).toBe('unavailable');
+    endReaderLuaSandbox();
+    expect(await count(readerLuaSandbox('reader-b', () => sandboxWith()))).toBe('1');
+  });
+
+  it('ends the sandbox when a page goes with a call still waiting on a dialog nobody will answer', async () => {
+    const lease = readerLuaSandbox('reader-a', () => sandboxWith());
+    expect(await count(lease)).toBe('1');
+    const asking: LuaHost = { ...host, input: () => new Promise<string>(() => undefined) };
+    const waiting = lease.call(
+      `${code}
+      onStart = async(function(id) count = count + 1 alertInput(id, '이름?'):await() end)`,
+      start,
+      snapshot(),
+      asking,
+      'member-1',
+    );
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    lease.dispose();
+    expect(await waiting).toMatchObject({ kind: 'killed' });
+    // The next page starts afresh rather than queueing behind the call for good.
+    expect(await count(readerLuaSandbox('reader-a', () => sandboxWith()))).toBe('1');
   });
 });
 

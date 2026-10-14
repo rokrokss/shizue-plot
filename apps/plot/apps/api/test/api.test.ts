@@ -12928,7 +12928,7 @@ describe('request triggers', () => {
     expect(prompts.at(-1)!.system).toBe('다음 시스템');
   });
 
-  it('keeps the images on their turn while the shape holds, and drops them once a role changed', async () => {
+  it('keeps the images on the reader’s turn that names them, and drops one whose turn is no longer the reader’s', async () => {
     const { app: seeing, prompts } = capturingApp({ env: { SHIZUE_TEST_MODELS: '1' } });
     const gif = Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1]);
     const image = { type: 'image', url: `data:image/gif;base64,${Buffer.from(gif).toString('base64')}` };
@@ -12952,10 +12952,16 @@ describe('request triggers', () => {
     await sendWithImage(edited.cookie, edited.chatId);
     expect(userTurn()).toEqual({ role: 'user', content: [{ type: 'text', text: '바뀐 질문' }, image] });
 
+    // Another turn's role changed: the picture's own turn is still the reader's, and it carries it.
     const reshaped = await requestChat('request-image-role@example.com', atTurn('문 앞이다.', setRole('system')), { model: 'test/vision' }, seeing);
     await sendWithImage(reshaped.cookie, reshaped.chatId);
     expect(prompts.at(-1)!.messages[0]).toEqual({ role: 'system', content: '문 앞이다.' });
-    expect(userTurn()).toEqual({ role: 'user', content: '이건 뭐야?' });
+    expect(userTurn()).toEqual({ role: 'user', content: [{ type: 'text', text: '이건 뭐야?' }, image] });
+
+    // Its own turn became a system turn, which a provider may refuse a picture on: not sent.
+    const turned = await requestChat('request-image-turned@example.com', atTurn('이건 뭐야?', setRole('system')), { model: 'test/vision' }, seeing);
+    await sendWithImage(turned.cookie, turned.chatId);
+    expect(userTurn()).toEqual({ role: 'system', content: '이건 뭐야?' });
   });
 
   it('runs nothing for a plot whose scripts have no request triggers', async () => {
@@ -13345,7 +13351,128 @@ describe('editRequest listeners', () => {
     expect(last.content.length).toBeGreaterThan('바뀐 끝'.length);
   });
 
-  it('keeps the listener’s Lua globals for the chat’s next generation while the code stays the same', async () => {
+  it('hands the listener RisuAI’s items: a chat message’s id as its memo, and what else sendChat sets', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const { cookie, chatId } = await luaChat('lua-items@example.com', [
+      lua(
+        listening(`
+          local seen = {}
+          for _, turn in ipairs(req) do
+            seen[#seen + 1] = table.concat({
+              turn.role, tostring(turn.memo), tostring(turn.removable), tostring(turn.attr and #turn.attr),
+              tostring(turn.thoughts and #turn.thoughts), tostring(turn.name), tostring(turn.cachePoint), tostring(turn.multimodals),
+            }, '|')
+          end
+          req[1].content = table.concat(seen, '\\n')
+          return req`),
+      ),
+    ]);
+    await send(cookie, chatId, capturing);
+    const stored = await db.select().from(messages).where(eq(messages.chatId, chatId)).orderBy(asc(messages.createdAt));
+    const turn = stored.find((message) => message.role === 'user')!;
+    expect(prompts.at(-1)!.system.split('\n')).toEqual([
+      'system|nil|nil|nil|nil|nil|nil|nil',
+      // The greeting, which RisuAI sends from the character: removable, and nothing else.
+      'assistant|nil|true|nil|nil|nil|nil|nil',
+      `user|${turn.id}|true|0|0|nil|nil|nil`,
+      'system|nil|nil|nil|nil|nil|nil|nil',
+    ]);
+  });
+
+  it('lets a listener drop the turns it finds by their memo — the examples — and sends the rest', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const cookie = await signUp('lua-memo@example.com');
+    const plot = await createPlot(cookie, { name: '루아 작품', description: '설명', intros: ['문 앞이다.'] });
+    const code = listening(`
+      if getChat(id, -1).data ~= '빼 줘' then return req end
+      local kept = {}
+      for _, turn in ipairs(req) do
+        if turn.memo ~= 'NewChatExample' then kept[#kept + 1] = turn end
+      end
+      return kept`);
+    await addCharacter(cookie, plot.id, {
+      name: '아리아',
+      card: {
+        description: '설명',
+        mesExample: '<START>\n{{user}}: 예시 질문\n{{char}}: 예시 답변',
+        extensions: { risuai: { triggerscript: [lua(code)] } },
+      },
+    });
+    const chatId = (await startChat(cookie, plot.id)).chat.id;
+    const texts = (): string[] => prompts.at(-1)!.messages.map((message) => contentText(message.content));
+    await send(cookie, chatId, capturing);
+    expect(texts().some((text) => text.includes('예시 답변'))).toBe(true);
+    await send(cookie, chatId, capturing, '빼 줘');
+    expect(texts().some((text) => text.includes('예시 답변'))).toBe(false);
+    expect(prompts.at(-1)!.messages.filter((message) => message.role === 'user').map((message) => contentText(message.content))).toEqual([
+      '안녕',
+      '빼 줘',
+    ]);
+  });
+
+  it('sends the pictures a listener leaves on the reader’s turn — after it drops other turns too — and none it removed', async () => {
+    const { app: seeing, prompts } = capturingApp({ env: { SHIZUE_TEST_MODELS: '1' } });
+    const gif = Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1]);
+    const image = { type: 'image', url: `data:image/gif;base64,${Buffer.from(gif).toString('base64')}` };
+    const cookie = await signUp('lua-images@example.com');
+    const plot = await createPlot(cookie, { name: '루아 작품', description: '설명', intros: ['문 앞이다.'] });
+    const code = listening(`
+      local said = getChat(id, -1).data
+      for i = #req, 1, -1 do
+        local turn = req[i]
+        if turn.multimodals and said == '보여 줘' then
+          req[1].content = turn.multimodals[1].type .. '/' .. turn.multimodals[1].base64 .. '/' .. #turn.multimodals
+        end
+        if turn.multimodals and said == '지워' then turn.multimodals = nil end
+        if turn.multimodals and said == '옮겨' then
+          req[1].multimodals = turn.multimodals
+          turn.multimodals = nil
+        end
+        if turn.memo == 'NewChatExample' and said == '예시 빼고' then table.remove(req, i) end
+      end
+      return req`);
+    await addCharacter(cookie, plot.id, {
+      name: '아리아',
+      card: {
+        description: '설명',
+        mesExample: '<START>\n{{user}}: 예시 질문\n{{char}}: 예시 답변',
+        extensions: { risuai: { triggerscript: [lua(code)] } },
+      },
+    });
+    const chatId = (await json(cookie, '/api/chats', 'POST', { plotId: plot.id, model: 'test/vision' }, seeing).then(readJson)).chat.id;
+    const sendWithImage = async (content: string): Promise<void> => {
+      const form = new FormData();
+      form.append('file', new File([gif], 'shot.gif'));
+      form.append('width', '800');
+      form.append('height', '600');
+      form.append('thumbhash', 'HBkSHYSIeHiPiHh8eJd4h4eAeIhw==');
+      const upload = await request(cookie, `/api/chats/${chatId}/attachments`, 'POST', form);
+      expect(upload.status, await upload.clone().text()).toBe(201);
+      const { id } = await readJson(upload);
+      const events = await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content, attachmentIds: [id] }, seeing));
+      expect(events.at(-1)!.event).toBe('done');
+    };
+    const lastTurn = () => prompts.at(-1)!.messages.findLast((message) => message.role === 'user');
+
+    // The listener sees the picture as RisuAI's item holds one, named rather than carried.
+    await sendWithImage('보여 줘');
+    expect(prompts.at(-1)!.system).toBe('image/image:0/1');
+    expect(lastTurn()).toEqual({ role: 'user', content: [{ type: 'text', text: '보여 줘' }, image] });
+
+    // The request is a turn shorter, and the picture still goes with the turn that names it.
+    await sendWithImage('예시 빼고');
+    expect(prompts.at(-1)!.messages.some((message) => contentText(message.content).includes('예시 답변'))).toBe(false);
+    expect(lastTurn()).toEqual({ role: 'user', content: [{ type: 'text', text: '예시 빼고' }, image] });
+
+    // Removed: not sent. Moved onto the system string: not sent there either.
+    await sendWithImage('지워');
+    expect(lastTurn()).toEqual({ role: 'user', content: '지워' });
+    await sendWithImage('옮겨');
+    expect(lastTurn()).toEqual({ role: 'user', content: '옮겨' });
+    expect(prompts.at(-1)!.messages.some((message) => typeof message.content !== 'string')).toBe(false);
+  });
+
+  it('keeps the listener’s Lua globals for the reader’s next generation with that member, in any of their chats, while the code stays the same', async () => {
     const { app: capturing, prompts } = capturingApp();
     const counting = listening(`counter = counter + 1 req[1].content = 'n=' .. counter return req`);
     const code = `counter = 0\n${counting}`;
@@ -13360,15 +13487,25 @@ describe('editRequest listeners', () => {
     await send(cookie, chatId, capturing);
     await send(cookie, chatId, capturing, '또');
     expect(prompts.at(-1)!.system).toBe('n=2');
-    // Another chat has its own.
+    // The reader's other chat with the member goes on from there, as RisuAI's one state does across its chats.
     await send(cookie, otherChat, capturing);
+    expect(prompts.at(-1)!.system).toBe('n=3');
+
+    // Another reader on the same work, the same member and the same code, has their own…
+    await publishPlot(cookie, plot.id);
+    const stranger = await signUp('lua-state-stranger@example.com');
+    const theirs = (await startChat(stranger, plot.id)).chat.id;
+    await send(stranger, theirs, capturing);
     expect(prompts.at(-1)!.system).toBe('n=1');
+    // …and leaves this reader's where it was.
+    await send(cookie, chatId, capturing, '셋');
+    expect(prompts.at(-1)!.system).toBe('n=4');
 
     // The creator's inspector reads the state and keeps nothing of its run.
     const report = await readJson(await request(cookie, `/api/chats/${chatId}/inspect`));
-    expect(report.blocks[0].text).toBe('n=3');
+    expect(report.blocks[0].text).toBe('n=5');
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
-    expect(prompts.at(-1)!.system).toBe('n=3');
+    expect(prompts.at(-1)!.system).toBe('n=5');
 
     // New code is a new state, as RisuAI rebuilds one when the code differs.
     await patchCharacter(cookie, plot.id, member.id, {
