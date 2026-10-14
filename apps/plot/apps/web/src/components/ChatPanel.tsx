@@ -152,7 +152,10 @@ function EmbeddingModelSetting() {
       >
         {embeddingModels.map((name) => (
           <option key={name} value={name}>
-            {t('similarityModelOption', { name: EMBEDDING_MODELS[name].label, size: EMBEDDING_MODELS[name].megabytes })}
+            {t(EMBEDDING_MODELS[name].heavy ? 'similarityModelOptionHeavy' : 'similarityModelOption', {
+              name: EMBEDDING_MODELS[name].label,
+              size: EMBEDDING_MODELS[name].megabytes,
+            })}
           </option>
         ))}
       </Select>

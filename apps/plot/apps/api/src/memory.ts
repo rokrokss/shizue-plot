@@ -14,8 +14,9 @@
  *   only, and the stretch it covered is summarized again first.
  * - **Each request selects** (`selectSummaries`): the pinned ones, the most
  *   recent, the ones most similar to the latest turns — by the server
- *   embedder's vectors (`embedder.ts`) — and random ones, into a share of the
- *   context budget. Without an embedder the similar share goes to random ones.
+ *   embedder's vectors of the plot's model (`embedder.ts`) — and random ones,
+ *   into a share of the context budget. Without an embedder for the plot's
+ *   language the similar share goes to random ones.
  *
  * Everything in the update path is fire-and-forget: it runs after the SSE `done`
  * event and swallows its own failures.
@@ -51,13 +52,14 @@ import {
   plots,
   type Chat,
   type ChatSummary,
+  type ContentLanguage,
   type JobPayloadMap,
   type Message,
 } from '@shizue/db';
 import { getAdapter, listEnabledModels, type ChatRequest, type LLMAdapter } from '@shizue/llm';
 import { and, asc, eq, inArray, notExists, sql } from 'drizzle-orm';
 import type { AppDeps, Tx } from './deps.js';
-import type { Embedder } from './embedder.js';
+import type { Embedder, Embedding } from './embedder.js';
 import { loadMembers } from './hub.js';
 import { enqueueJob } from './jobs.js';
 import { transcriptOf } from './transcript.js';
@@ -159,6 +161,7 @@ export async function buildMemoryInput(
     settings,
   );
   const embedder = deps.embedder;
+  const plotLanguage = embedder ? await plotLanguageOf(deps, chat.plotId) : null;
   const selection = await selectSummaries(
     applicable.map((summary) => ({
       summary,
@@ -167,27 +170,40 @@ export async function buildMemoryInput(
     })),
     available,
     settings,
-    embedder ? (unused) => rankSimilar(deps, embedder, unused, queries) : null,
+    embedder && plotLanguage && embedder.modelFor(plotLanguage)
+      ? (unused) => rankSimilar(deps, embedder, plotLanguage, unused, queries)
+      : null,
     seededRandom(`${chat.id}\u0000${answering.length}`),
   );
   return { memoryText: memoryBlock(selection.selected.map((summary) => summary.text)), history };
 }
 
+/** The plot's content language, which picks its embedding model; null for a plot that is gone. */
+async function plotLanguageOf(deps: AppDeps, plotId: string): Promise<ContentLanguage | null> {
+  const [plot] = await deps.db.select({ language: plots.language }).from(plots).where(eq(plots.id, plotId)).limit(1);
+  return plot?.language ?? null;
+}
+
 /**
- * HypaV3's similar ranking over `unused`: each query embedded, each chunk of the
- * current model scored by cosine in pgvector, fused by `rankBySimilarity`. A
- * summary with no vectors of the current model yet is not ranked (the
- * background refresh embeds it). Throws when the embedder does, which hands the
- * share to random ones.
+ * HypaV3's similar ranking over `unused`: each query embedded with the plot's
+ * model, each chunk of that model scored by cosine in pgvector, fused by
+ * `rankBySimilarity`. A summary with no vectors of that model yet is not ranked
+ * (the background refresh embeds it). Throws when the embedder does, which
+ * hands the share to random ones.
  */
 async function rankSimilar(
   deps: AppDeps,
   embedder: Embedder,
+  plotLanguage: ContentLanguage,
   unused: ChatSummary[],
   queries: string[],
 ): Promise<ChatSummary[]> {
   if (unused.length === 0 || queries.length === 0) return [];
-  const vectors = await embedder.embed(queries, { kind: 'query', timeoutMs: QUERY_EMBED_TIMEOUT_MS });
+  const { model, vectors } = await embedder.embed(queries, {
+    plotLanguage,
+    kind: 'query',
+    timeoutMs: QUERY_EMBED_TIMEOUT_MS,
+  });
   const ids = unused.map((summary) => summary.id);
   const lists = await Promise.all(
     vectors.map(async (vector) => {
@@ -198,7 +214,7 @@ async function rankSimilar(
           score: sql<number>`1 - (${chatSummaryChunks.embedding} <=> ${JSON.stringify(vector)}::vector)`,
         })
         .from(chatSummaryChunks)
-        .where(and(inArray(chatSummaryChunks.summaryId, ids), eq(chatSummaryChunks.model, embedder.model)));
+        .where(and(inArray(chatSummaryChunks.summaryId, ids), eq(chatSummaryChunks.model, model)));
       return rows.map((row) => [`${row.summaryId}:${row.chunkIndex}`, Number(row.score)] as const);
     }),
   );
@@ -387,14 +403,23 @@ export function summaryDue(
 }
 
 /**
- * Embeds the chat's summaries that have no vectors of the embedder's model yet —
- * new ones, rewritten ones, ones another model embedded — a bounded number of
- * chunks per call, oldest summary first. Best effort: an embedder that fails
- * leaves them for the next refresh. A summary rewritten meanwhile is skipped.
+ * Embeds the chat's summaries that have no vectors of its plot's model yet —
+ * new ones, rewritten ones, ones another model embedded (an older default, the
+ * plot's language since changed) — a bounded number of chunks per call, oldest
+ * summary first. Best effort: an embedder that fails leaves them for the next
+ * refresh. A summary rewritten meanwhile is skipped.
  */
 export async function embedPendingSummaries(deps: AppDeps, chatId: string): Promise<void> {
   const embedder = deps.embedder;
   if (!embedder) return;
+  const [chat] = await deps.db
+    .select({ plotLanguage: plots.language })
+    .from(chats)
+    .innerJoin(plots, eq(chats.plotId, plots.id))
+    .where(eq(chats.id, chatId))
+    .limit(1);
+  const model = chat ? embedder.modelFor(chat.plotLanguage) : null;
+  if (!chat || !model) return;
   const pending = await deps.db
     .select({ id: chatSummaries.id, text: chatSummaries.text })
     .from(chatSummaries)
@@ -405,7 +430,7 @@ export async function embedPendingSummaries(deps: AppDeps, chatId: string): Prom
           deps.db
             .select({ one: sql`1` })
             .from(chatSummaryChunks)
-            .where(and(eq(chatSummaryChunks.summaryId, chatSummaries.id), eq(chatSummaryChunks.model, embedder.model))),
+            .where(and(eq(chatSummaryChunks.summaryId, chatSummaries.id), eq(chatSummaryChunks.model, model))),
         ),
       ),
     )
@@ -419,9 +444,9 @@ export async function embedPendingSummaries(deps: AppDeps, chatId: string): Prom
     // left for later it would stand first in line on every refresh, forever.
     if (chunks.length > budget && budget < CHUNKS_PER_REFRESH) continue;
     budget -= chunks.length;
-    let vectors: number[][];
+    let embedded: Embedding;
     try {
-      vectors = await embedder.embed(chunks, { kind: 'document' });
+      embedded = await embedder.embed(chunks, { plotLanguage: chat.plotLanguage, kind: 'document' });
     } catch (error) {
       console.warn('[memory] embedding summaries failed; they are searched once it works', error);
       return;
@@ -439,8 +464,8 @@ export async function embedPendingSummaries(deps: AppDeps, chatId: string): Prom
           summaryId: summary.id,
           chunkIndex,
           content,
-          model: embedder.model,
-          embedding: vectors[chunkIndex]!,
+          model: embedded.model,
+          embedding: embedded.vectors[chunkIndex]!,
         })),
       );
     });

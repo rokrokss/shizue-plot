@@ -29,10 +29,14 @@ describe('the embedding model setting', () => {
   });
 
   it('offers RisuAI’s local wasm models under RisuAI’s names, the multilingual one first and by default', () => {
-    expect(embeddingModels).toEqual(['multiMiniLM', 'MiniLM', 'bgeSmallEn', 'nomic']);
+    expect(embeddingModels).toEqual(['multiMiniLM', 'MiniLM', 'bgeSmallEn', 'nomic', 'bgem3', 'bgeM3Ko']);
     expect(DEFAULT_EMBEDDING_MODEL).toBe('multiMiniLM');
     expect(EMBEDDING_MODELS.multiMiniLM.repo).toBe('Xenova/paraphrase-multilingual-MiniLM-L12-v2');
     expect(EMBEDDING_MODELS.MiniLM.repo).toBe('Xenova/all-MiniLM-L6-v2');
+    // RisuAI's bge-m3 pair, offered as heavy.
+    expect(EMBEDDING_MODELS.bgem3).toMatchObject({ repo: 'Xenova/bge-m3', heavy: true });
+    expect(EMBEDDING_MODELS.bgeM3Ko).toMatchObject({ repo: 'HyperBlaze/BGE-m3-ko', heavy: true });
+    expect(embeddingModels.filter((model) => EMBEDDING_MODELS[model].heavy)).toEqual(['bgem3', 'bgeM3Ko']);
     expect(readEmbeddingModel()).toBe('multiMiniLM');
   });
 
@@ -45,7 +49,7 @@ describe('the embedding model setting', () => {
   });
 
   it.each([
-    ['a RisuAI model not offered here', 'bgem3'],
+    ['a RisuAI model not offered here', 'custom'],
     ['a RisuAI API model', 'openai3small'],
     ['a GPU twin', 'MiniLMGPU'],
     ['a name off the prototype', 'toString'],

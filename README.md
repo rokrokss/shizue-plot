@@ -31,12 +31,17 @@ pnpm --filter @shizue/api embedder:fetch
 make dev
 ```
 
-`embedder:fetch` downloads the weights of the embedding model the API runs for
-the chat memory (135 MB, into `apps/plot/data/embedder`) and checks they load
-offline. Run it once per checkout and on every deploy: the server never
-downloads them itself, and without them the memory picks recent and random
-summaries instead of similar ones. Loaded, the model adds about 750 MB to the
-API's memory; `EMBEDDER=off` turns it off.
+`embedder:fetch` puts the weights of the embedding models the API runs for the
+chat memory into `apps/plot/data/embedder` and checks they load offline:
+bge-m3 from Hugging Face (587 MB) and, for Korean plots, KURE-v1 (738 MB) from
+the S3 bucket `S3_*` names — the compose RustFS in development, where
+`embedder:publish` has to have put our ONNX conversion first (ARCHITECTURE
+§7.3). Run it once per checkout and on every deploy: the server never
+downloads them itself, and a plot whose model is missing has its memory pick
+recent and random summaries instead of similar ones. Loaded, each model adds
+about 2 GB to the API's memory and is unloaded after ten idle minutes;
+`EMBEDDER_ROUTING=single EMBEDDER_MODEL=multiMiniLM` runs one light model
+(135 MB, about 750 MB loaded), and `EMBEDDER=off` none.
 
 Open http://localhost:13000 in Chrome with [Shizue](https://chromewebstore.google.com/detail/mpcbgfkoholfgapcgcmfjobnfcbnfanm) installed (below).
 Next.js forwards `/api/*` to Hono on port 8787. `make stop` stops the app

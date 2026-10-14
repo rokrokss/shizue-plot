@@ -76,6 +76,7 @@ import {
   userNotes,
   type ChatMemory,
   type ChatRelationship,
+  type ContentLanguage,
   type Db,
   type JobPayloadMap,
 } from '@shizue/db';
@@ -7854,22 +7855,36 @@ describe('memory', () => {
   const revisionOf = async (chatId: string): Promise<number> =>
     (await db.select({ revision: chats.memoryRevision }).from(chats).where(eq(chats.id, chatId)))[0]!.revision;
 
-  /** An embedder of a few keywords: each text is a vector with a slot per keyword it contains. */
-  function keywordEmbedder(model = 'test-embedder', fail = false): Embedder & { calls: string[][] } {
+  /**
+   * An embedder of a few keywords: each text is a vector with a slot per keyword
+   * it contains. `model` is every plot's model, or each language's; a model in
+   * `wider` pads its vectors with that many zeros, as KURE-v1's 1024 dimensions
+   * stand beside multiMiniLM's 384.
+   */
+  function keywordEmbedder(
+    model: string | ((plotLanguage: ContentLanguage) => string) = 'test-embedder',
+    fail = false,
+    wider: Record<string, number> = {},
+  ): Embedder & { calls: string[][]; models: string[] } {
     const keys = ['고양이', '등대', '지도'];
     const calls: string[][] = [];
+    const models: string[] = [];
+    const modelFor = typeof model === 'string' ? () => model : model;
     return {
-      model,
-      dims: keys.length + 1,
       calls,
-      async embed(texts) {
+      models,
+      modelFor,
+      async embed(texts, { plotLanguage }) {
+        const model = modelFor(plotLanguage);
         calls.push([...texts]);
+        models.push(model);
         if (fail) throw new Error('embedder down');
-        return texts.map((text) => {
-          const vector = [0.1, ...keys.map((key) => (text.includes(key) ? 1 : 0))];
+        const vectors = texts.map((text) => {
+          const vector = [0.1, ...keys.map((key) => (text.includes(key) ? 1 : 0)), ...Array<number>(wider[model] ?? 0).fill(0)];
           const norm = Math.hypot(...vector);
           return vector.map((value) => value / norm);
         });
+        return { model, vectors };
       },
       warm() {},
       async close() {},
@@ -8164,6 +8179,47 @@ describe('memory', () => {
       const stored = await db.select().from(chatSummaryChunks);
       expect(stored.every((chunk) => chunk.model === 'test-embedder-2')).toBe(true);
       expect(await ask(cookie, chatId, harness, '고양이 말이야')).toContain('고양이가 서점에 들어왔다.');
+    });
+
+    it('embeds each plot with its language’s model, and again when the language changes', async () => {
+      const cookie = await signUp('memory-routing@example.com');
+      // Korean's vectors are 4 long and the others' 8: pgvector refuses to compare the two.
+      const embedder = keywordEmbedder((language) => (language === 'ko' ? 'test-ko' : 'test-other'), false, { 'test-other': 4 });
+      const harness = memoryApp({ embedder });
+      const chatId = await similarChat(cookie, harness);
+      const [{ plotId }] = await db.select({ plotId: chats.plotId }).from(chats).where(eq(chats.id, chatId));
+      await db.update(plots).set({ language: 'ko' }).where(eq(plots.id, plotId!));
+
+      await embedPendingSummaries(harness.deps, chatId);
+      let stored = await db.select().from(chatSummaryChunks);
+      expect(stored.map((chunk) => [chunk.model, chunk.embedding.length])).toEqual(TEXTS.map(() => ['test-ko', 4]));
+      expect(await ask(cookie, chatId, harness, '고양이는 어디 갔지?')).toContain('고양이가 서점에 들어왔다.');
+      expect(embedder.models.at(-1)).toBe('test-ko');
+      await harness.settle();
+
+      // The plot now says it is English: its queries are of the other model, and
+      // until its summaries are embedded again nothing ranks — the 4-long vectors
+      // are never compared with an 8-long query, which would have thrown and
+      // handed the share to the most recent summary.
+      await db.update(plots).set({ language: 'en' }).where(eq(plots.id, plotId!));
+      expect(await ask(cookie, chatId, harness, '고양이?')).not.toContain(MEMORY_HEADING);
+      expect(embedder.models.at(-1)).toBe('test-other');
+      await harness.settle();
+      stored = await db.select().from(chatSummaryChunks);
+      expect(stored.map((chunk) => [chunk.model, chunk.embedding.length])).toEqual(TEXTS.map(() => ['test-other', 8]));
+      expect(await ask(cookie, chatId, harness, '고양이 말이야')).toContain('고양이가 서점에 들어왔다.');
+    });
+
+    it('leaves a plot whose model is not here to the fallback, embedding nothing for it', async () => {
+      const cookie = await signUp('memory-no-model@example.com');
+      const embedder = { ...keywordEmbedder(), modelFor: () => null };
+      const harness = memoryApp({ embedder });
+      const chatId = await similarChat(cookie, harness);
+      await embedPendingSummaries(harness.deps, chatId);
+      expect(await db.select().from(chatSummaryChunks)).toEqual([]);
+      // The similar share went to the most recent summary; the embedder was never asked.
+      expect(await ask(cookie, chatId, harness, '고양이는 어디 갔지?')).toContain(`${MEMORY_HEADING}\n등대 불빛이 꺼진 아침이었다.`);
+      expect(embedder.calls).toEqual([]);
     });
 
     it('embeds a summary longer than one refresh allows on its own, and the rest after it', async () => {

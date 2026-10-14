@@ -1,6 +1,7 @@
 import { config } from 'dotenv';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { S3Config } from './s3.js';
 import type { StorageConfig } from './storage.js';
 
 /** Repo root, three levels up from both `src/` and the built `dist/`. */
@@ -115,10 +116,19 @@ function readStorageConfig(env: NodeJS.ProcessEnv): StorageConfig {
   if (driver !== 's3') {
     throw new Error(`STORAGE_DRIVER must be "local" or "s3", got "${driver}"`);
   }
+  if (!env['S3_BUCKET']) throw new Error('S3_BUCKET is not set, and STORAGE_DRIVER=s3 has nowhere to write');
+  return { driver: 's3', ...readS3Config(env) };
+}
+
+/**
+ * The S3 store `S3_*` names, whatever `STORAGE_DRIVER` says: the media driver's
+ * when it is `s3`, and always where the embedder's own weights are kept
+ * (`embedder:fetch`, `embedder:publish`).
+ */
+export function readS3Config(env: NodeJS.ProcessEnv): S3Config {
   const bucket = env['S3_BUCKET'];
-  if (!bucket) throw new Error('S3_BUCKET is not set, and STORAGE_DRIVER=s3 has nowhere to write');
+  if (!bucket) throw new Error('S3_BUCKET is not set');
   return {
-    driver: 's3',
     bucket,
     // Every S3-compatible store wants a region in the signature; a local one ignores
     // which one, so the AWS default is as good a name as any.

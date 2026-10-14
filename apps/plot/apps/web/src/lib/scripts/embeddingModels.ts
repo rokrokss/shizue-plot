@@ -4,8 +4,12 @@
  * (`process/memory/hypamemory.ts`) that run on wasm and fetch in a browser tab,
  * under RisuAI's names, which are also the second half of the vector cache's key.
  * Left out: its API models (openai, voyage, a custom URL), which need a key the
- * reader has no place for here; its `…GPU` twins, the same weights on WebGPU,
- * which the worker does not run; and `bgem3`/`bgeM3Ko`, 570 MB each.
+ * reader has no place for here; and its `…GPU` twins, the same weights on
+ * WebGPU, which the worker does not run. `bgem3` and `bgeM3Ko` are offered as
+ * `heavy`: 587 MB each to download, and well over a gigabyte of the tab's
+ * memory once loaded. The worker runs them as RisuAI does, with mean pooling
+ * like every other model, where bge-m3's own dense vector is its [CLS] token's
+ * (the server's embedder pools them so).
  *
  * The default is not RisuAI's. Its `MiniLM` breaks Hangul into jamo and unknown
  * tokens, and much of the kanji into unknown tokens: it put the right text first
@@ -18,14 +22,17 @@
  */
 
 /**
- * Each model's Hugging Face repo, the name RisuAI's settings show it under, and
- * what the first search fetches, in MB: the q8 weights and the tokenizer.
+ * Each model's Hugging Face repo, the name RisuAI's settings show it under,
+ * what the first search fetches, in MB: the q8 weights and the tokenizer — and
+ * whether the setting warns that it is heavy.
  */
 export const EMBEDDING_MODELS = {
-  multiMiniLM: { repo: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2', label: 'Multilingual MiniLM L12 v2', megabytes: 135 },
-  MiniLM: { repo: 'Xenova/all-MiniLM-L6-v2', label: 'MiniLM L6 v2', megabytes: 24 },
-  bgeSmallEn: { repo: 'Xenova/bge-small-en-v1.5', label: 'BGE Small English', megabytes: 35 },
-  nomic: { repo: 'nomic-ai/nomic-embed-text-v1.5', label: 'Nomic Embed Text v1.5', megabytes: 138 },
+  multiMiniLM: { repo: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2', label: 'Multilingual MiniLM L12 v2', megabytes: 135, heavy: false },
+  MiniLM: { repo: 'Xenova/all-MiniLM-L6-v2', label: 'MiniLM L6 v2', megabytes: 24, heavy: false },
+  bgeSmallEn: { repo: 'Xenova/bge-small-en-v1.5', label: 'BGE Small English', megabytes: 35, heavy: false },
+  nomic: { repo: 'nomic-ai/nomic-embed-text-v1.5', label: 'Nomic Embed Text v1.5', megabytes: 138, heavy: false },
+  bgem3: { repo: 'Xenova/bge-m3', label: 'BGE Medium 3', megabytes: 587, heavy: true },
+  bgeM3Ko: { repo: 'HyperBlaze/BGE-m3-ko', label: 'BGE Medium 3 Korean', megabytes: 587, heavy: true },
 } as const;
 
 export type EmbeddingModel = keyof typeof EMBEDDING_MODELS;

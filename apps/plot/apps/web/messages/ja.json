@@ -978,12 +978,15 @@
     "scriptSimilarityPreparing": "作品のスクリプトが文章を比べるモデルを読み込んでいます。初回は時間がかかることがあります。",
     "similarityModel": "スクリプトの類似度検索モデル",
     "similarityModelOption": "{name} · {size}MB",
+    "similarityModelOptionHeavy": "{name} · {size}MB · 重い",
     "similarityModelHint": "作品のスクリプトが文章を比べるときに使うモデルです。このブラウザのすべての会話に適用され、初めて使うモデルはダウンロードに時間がかかります。",
     "similarityModels": {
       "multiMiniLM": "既定。韓国語・日本語・英語の文章を区別できます。",
       "MiniLM": "RisuAIの既定。軽量ですが英語専用で、韓国語や日本語の文章はほとんど区別できません。",
       "bgeSmallEn": "軽量な英語専用モデルです。",
-      "nomic": "英語専用で、サイズが大きいモデルです。"
+      "nomic": "英語専用で、サイズが大きいモデルです。",
+      "bgem3": "重いモデルです。ダウンロード量が大きく、読み込むとこのタブのメモリを1GB以上使います。多言語に対応し、意味をより細かく区別します。",
+      "bgeM3Ko": "重いモデルです。ダウンロード量が大きく、読み込むとこのタブのメモリを1GB以上使います。BGE Medium 3を韓国語向けに調整したモデルです。"
     },
     "scriptFollowUpConsent": "{name}のスクリプトが続けてもう一つ返信を求めています。この会話で許可しますか？ ノートパネルからいつでも取り消せます。",
     "scriptMultisendConsent": "/multisendがあなたの代わりにメッセージを送り、{name}の返信を受け取ろうとしています。この会話で許可しますか？ ノートパネルからいつでも取り消せます。",

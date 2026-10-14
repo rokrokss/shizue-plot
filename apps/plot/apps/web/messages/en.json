@@ -978,12 +978,15 @@
     "scriptSimilarityPreparing": "The story's scripts are loading a model to compare texts. The first time can take a while.",
     "similarityModel": "Script similarity model",
     "similarityModelOption": "{name} · {size} MB",
+    "similarityModelOptionHeavy": "{name} · {size} MB · heavy",
     "similarityModelHint": "The model the story's scripts compare texts with. It applies to every chat in this browser, and a model's first use downloads it, which can take a while.",
     "similarityModels": {
       "multiMiniLM": "Default. Tells Korean, Japanese and English texts apart.",
       "MiniLM": "RisuAI's default. Small, but English only: it barely tells Korean or Japanese texts apart.",
       "bgeSmallEn": "Small, English only.",
-      "nomic": "English only, and large."
+      "nomic": "English only, and large.",
+      "bgem3": "Heavy: a large download, and over a gigabyte of this tab's memory once loaded. Multilingual, and finer at telling meanings apart.",
+      "bgeM3Ko": "Heavy: a large download, and over a gigabyte of this tab's memory once loaded. BGE Medium 3 tuned for Korean."
     },
     "scriptFollowUpConsent": "A script of {name} wants to ask for another reply right away. Allow it in this chat? You can take it back from the notes panel at any time.",
     "scriptMultisendConsent": "/multisend wants to send a message for you and have {name} answer it. Allow it in this chat? You can take it back from the notes panel at any time.",

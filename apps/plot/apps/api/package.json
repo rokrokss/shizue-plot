@@ -12,7 +12,8 @@
     "test": "vitest run",
     "fix:display-order": "tsx src/maintenance/fixDisplayOrder.ts",
     "fix:member-scripts": "tsx src/maintenance/fixMemberScripts.ts",
-    "embedder:fetch": "tsx src/maintenance/fetchEmbedder.ts"
+    "embedder:fetch": "tsx src/maintenance/fetchEmbedder.ts",
+    "embedder:publish": "tsx src/maintenance/publishEmbedder.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1105.0",

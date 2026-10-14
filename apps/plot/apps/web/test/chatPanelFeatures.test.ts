@@ -181,6 +181,8 @@ describe('the similarity model in the notes panel', () => {
       ['MiniLM', 'MiniLM L6 v2 · 24MB'],
       ['bgeSmallEn', 'BGE Small English · 35MB'],
       ['nomic', 'Nomic Embed Text v1.5 · 138MB'],
+      ['bgem3', 'BGE Medium 3 · 587MB · 무거움'],
+      ['bgeM3Ko', 'BGE Medium 3 Korean · 587MB · 무거움'],
     ]);
     expect(select().value).toBe('multiMiniLM');
     expect(picker()!.textContent).toContain(messages.chat.similarityModels.multiMiniLM);
