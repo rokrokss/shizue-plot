@@ -48,8 +48,7 @@ Worktree setup:
    `pgrep -f '<pattern>'`. Every command runs as `zsh -c '…'`, so the pattern
    also matches other waiting shells, and on 2026-10-14 two such loops waited
    on each other for hours. If you must poll, wait on a concrete PID and bound
-   the loop (`[ $SECONDS -lt 900 ]` or `timeout`). `.claude/hooks/guard-wait.mjs`
-   blocks plain-pattern `pgrep -f`/`pkill -f` and unbounded sleep loops.
+   the loop (`[ $SECONDS -lt 900 ]` or `timeout`).
 
 ## shizue UI
 
