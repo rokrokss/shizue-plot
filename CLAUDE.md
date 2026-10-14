@@ -43,6 +43,13 @@ Worktree setup:
    merging. If you really need one, offset with `API_PORT` and
    `next dev --port <port>`, and if you changed the web port, adjust
    `BETTER_AUTH_URL` to match.
+5. Waiting on long commands (e2e, servers, builds): run them with
+   `run_in_background` and wait for the completion notice. Don't poll with
+   `pgrep -f '<pattern>'`. Every command runs as `zsh -c '…'`, so the pattern
+   also matches other waiting shells, and on 2026-10-14 two such loops waited
+   on each other for hours. If you must poll, wait on a concrete PID and bound
+   the loop (`[ $SECONDS -lt 900 ]` or `timeout`). `.claude/hooks/guard-wait.mjs`
+   blocks plain-pattern `pgrep -f`/`pkill -f` and unbounded sleep loops.
 
 ## shizue UI
 

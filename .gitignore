@@ -23,6 +23,7 @@ coverage/
 # vim swap files — a swap of .env carries the key material
 *.swp
 
-# Share project settings only; local settings and worktrees stay private.
+# Share project settings and hooks only; local settings and worktrees stay private.
 .claude/*
 !.claude/settings.json
+!.claude/hooks/
