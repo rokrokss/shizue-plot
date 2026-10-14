@@ -12,10 +12,10 @@
  *                                                   → { model, vectors }
  *
  * - **The model is the plot's.** `EMBEDDER_ROUTING` says how a plot gets it:
- *   `by-language` (the default) by its content language (`plots.language`) —
- *   `ko` embeds with KURE-v1 (`nlpai-lab/KURE-v1`, bge-m3 fine-tuned on
- *   Korean), every other language with bge-m3 — and `single` the one model
- *   `EMBEDDER_MODEL` names (bge-m3 by default) for every plot. It is used for
+ *   `single` (the default) the one model `EMBEDDER_MODEL` names — KURE-v1
+ *   (`nlpai-lab/KURE-v1`, bge-m3 fine-tuned on Korean) unless set — for every
+ *   plot, and `by-language` by its content language (`plots.language`): `ko`
+ *   with KURE-v1, every other language with bge-m3. It is used for
  *   every vector of the plot's chats and lore, and for the queries compared
  *   with them. `model` in the answer is the `EMBEDDING_MODELS` key, which each
  *   vector is stored with; only vectors of one model are ever compared. A
@@ -204,10 +204,15 @@ export interface ModelRoutes {
   default: EmbeddingModelId;
 }
 
-/** `EMBEDDER_ROUTING=by-language`, the owner's choice (2026-10-15): KURE-v1 for Korean, bge-m3 for everything else. */
+/** `EMBEDDER_ROUTING=by-language`: KURE-v1 for Korean, bge-m3 for everything else. */
 export const LANGUAGE_MODELS: ModelRoutes = { languages: { ko: 'KURE-v1' }, default: 'bge-m3' };
-/** `EMBEDDER_ROUTING=single` without an `EMBEDDER_MODEL`. */
-export const DEFAULT_SINGLE_MODEL: EmbeddingModelId = 'bge-m3';
+/**
+ * `EMBEDDER_ROUTING=single` without an `EMBEDDER_MODEL` — the owner's choice
+ * (2026-10-15): KURE-v1 for every plot. Benchmarked against bge-m3 the two were
+ * within two hits on every set (ko, en, ja and across them), and one model
+ * holds about 2 GB where routing by language holds both (§12).
+ */
+export const DEFAULT_SINGLE_MODEL: EmbeddingModelId = 'KURE-v1';
 export const ROUTINGS = ['by-language', 'single'] as const;
 export type Routing = (typeof ROUTINGS)[number];
 
@@ -281,7 +286,7 @@ export function embedderConfig(env: NodeJS.ProcessEnv): EmbedderConfig | { off: 
   const cacheDir = resolve(PLOT_ROOT, env['EMBEDDER_CACHE_DIR']?.trim() || './data/embedder');
   const threads = Number(env['EMBEDDER_THREADS']);
   const base = { cacheDir, ...(Number.isInteger(threads) && threads > 0 ? { threads } : {}) };
-  const routing = env['EMBEDDER_ROUTING']?.trim() || 'by-language';
+  const routing = env['EMBEDDER_ROUTING']?.trim() || 'single';
   if (routing === 'by-language') return { routing, routes: LANGUAGE_MODELS, ...base };
   if (routing !== 'single') return { off: `unknown EMBEDDER_ROUTING "${routing}" (one of ${ROUTINGS.join(', ')})` };
   const model = env['EMBEDDER_MODEL']?.trim() || DEFAULT_SINGLE_MODEL;

@@ -72,7 +72,12 @@ function fetched(...models: EmbeddingModelId[]): void {
   }
 }
 
-const envWith = (env: Record<string, string> = {}): NodeJS.ProcessEnv => ({ EMBEDDER_CACHE_DIR: cacheDir, ...env });
+/** Routing by language unless a test says otherwise: most of these tests need two models to tell apart. */
+const envWith = (env: Record<string, string> = {}): NodeJS.ProcessEnv => ({
+  EMBEDDER_CACHE_DIR: cacheDir,
+  EMBEDDER_ROUTING: 'by-language',
+  ...env,
+});
 
 beforeEach(() => {
   cacheDir = mkdtempSync(join(tmpdir(), 'embedder-'));
@@ -88,7 +93,14 @@ afterEach(() => {
 });
 
 describe('routing', () => {
-  it('routes by language by default: KURE-v1 for Korean, bge-m3 for the rest', async () => {
+  it('runs KURE-v1 for every plot when nothing is set', () => {
+    expect(embedderConfig({ EMBEDDER_CACHE_DIR: cacheDir })).toMatchObject({
+      routing: 'single',
+      routes: { languages: {}, default: 'KURE-v1' },
+    });
+  });
+
+  it('routes by language with EMBEDDER_ROUTING=by-language: KURE-v1 for Korean, bge-m3 for the rest', async () => {
     fetched('KURE-v1', 'bge-m3');
     const embedder = createLocalEmbedder(envWith(), { spawn })!;
     expect(embedder.modelFor('ko')).toBe('KURE-v1');
@@ -109,11 +121,11 @@ describe('routing', () => {
     await embedder.close();
   });
 
-  it('runs one model for every plot with EMBEDDER_ROUTING=single, bge-m3 unless EMBEDDER_MODEL says otherwise', async () => {
+  it('runs one model for every plot with EMBEDDER_ROUTING=single, KURE-v1 unless EMBEDDER_MODEL says otherwise', async () => {
     fetched('KURE-v1', 'bge-m3', 'multiMiniLM');
     const single = createLocalEmbedder(envWith({ EMBEDDER_ROUTING: 'single' }), { spawn })!;
-    expect(['ko', 'en', 'ja'].map((language) => single.modelFor(language as 'ko'))).toEqual(['bge-m3', 'bge-m3', 'bge-m3']);
-    expect((await single.embed(['고양이'], { plotLanguage: 'ko' })).model).toBe('bge-m3');
+    expect(['ko', 'en', 'ja'].map((language) => single.modelFor(language as 'ko'))).toEqual(['KURE-v1', 'KURE-v1', 'KURE-v1']);
+    expect((await single.embed(['고양이'], { plotLanguage: 'en' })).model).toBe('KURE-v1');
     await single.close();
 
     const light = createLocalEmbedder(envWith({ EMBEDDER_ROUTING: 'single', EMBEDDER_MODEL: 'multiMiniLM' }), { spawn })!;
