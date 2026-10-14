@@ -16372,7 +16372,7 @@ const withLocale = (
   target: Hono<AppEnv> = app,
   method = 'POST',
 ): Promise<Response> =>
-  target.request(path, {
+  Promise.resolve(target.request(path, {
     method,
     headers: {
       cookie,
@@ -16380,7 +16380,7 @@ const withLocale = (
       ...(body === undefined ? {} : { 'content-type': 'application/json' }),
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
+  }));
 
 /** An English work whose one member carries post-history instructions of its own. */
 async function englishChat(cookie: string): Promise<{ plotId: string; chatId: string; state: any }> {
