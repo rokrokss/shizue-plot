@@ -626,19 +626,26 @@ describe('convertSillyTavernChat', () => {
         { role: 'assistant', versions: ['하루: 첫째', '하루: 좋아.'], selected: 1 },
       ],
       variables: null,
-      skipped: { hidden: 0, empty: 0, unknownSpeaker: 0, malformed: 0, overLimit: 0, variables: 0 },
+      skipped: { system: 0, empty: 0, unknownSpeaker: 0, malformed: 0, overLimit: 0, variables: 0 },
     });
   });
 
-  it('makes the narrator a narration, skips hidden messages and counts what it could not use', () => {
+  it('makes the narrator a narration, hides what ST kept from the prompt and counts what it could not use', () => {
     const bom = String.fromCharCode(0xfeff);
     const chat = convertSillyTavernChat(
       bom +
       [
         JSON.stringify({ user_name: '여행자', character_name: '하루', create_date: '2024-6-5 @14h 56m 50s 682ms', chat_metadata: {} }),
-        JSON.stringify({ name: 'System', is_user: false, is_system: true, mes: '해가 진다.', extra: { type: 'narrator' } }),
+        JSON.stringify({ name: 'System', is_user: false, mes: '해가 진다.', extra: { type: 'narrator' } }),
+        // Hidden by the reader (the ghost): the character's, the reader's and the narrator's.
         JSON.stringify({ name: '하루', is_user: false, is_system: true, mes: '숨긴 말' }),
+        JSON.stringify({ name: '여행자', is_user: true, is_system: true, mes: '숨긴 내 말' }),
+        JSON.stringify({ name: 'System', is_user: false, is_system: true, mes: '숨긴 장면', extra: { type: 'narrator' } }),
+        // A comment is nobody's line: a narration, and never the AI's to read.
         JSON.stringify({ name: 'Note', is_user: false, is_system: true, mes: '메모', extra: { type: 'comment' } }),
+        // What ST writes itself is not the conversation.
+        JSON.stringify({ name: 'SillyTavern System', is_user: false, is_system: true, mes: '도움말', extra: { type: 'help' } }),
+        JSON.stringify({ name: 'SillyTavern System', is_user: false, is_system: true, mes: '도구 호출', extra: { tool_invocations: [] } }),
         '{"name": "하루", "mes": "잘린 줄',
         '[1, 2]',
         JSON.stringify({ name: '하루', is_user: false, mes: '   ', swipes: ['', ' '] }),
@@ -653,9 +660,13 @@ describe('convertSillyTavernChat', () => {
     expect(chat.messages).toEqual([
       // ST's `/sys` is our `@:`: an unprefixed line would be the character's own 지문.
       { role: 'assistant', versions: ['@: 해가 진다.'], selected: 0 },
+      { role: 'assistant', versions: ['하루: 숨긴 말'], selected: 0, hidden: true },
+      { role: 'user', versions: ['숨긴 내 말'], selected: 0, hidden: true },
+      { role: 'assistant', versions: ['@: 숨긴 장면'], selected: 0, hidden: true },
+      { role: 'assistant', versions: ['@: 메모'], selected: 0, hidden: true },
       { role: 'assistant', versions: ['하루: 이미 붙어 있다\n하루:붙어 있다\n하루: 둘째 줄'], selected: 0 },
     ]);
-    expect(chat.skipped).toEqual({ hidden: 2, empty: 1, unknownSpeaker: 0, malformed: 2, overLimit: 0, variables: 0 });
+    expect(chat.skipped).toEqual({ system: 2, empty: 1, unknownSpeaker: 0, malformed: 2, overLimit: 0, variables: 0 });
   });
 
   it('attributes group turns by avatar, then by name, and counts a speaker it cannot place', () => {
@@ -686,7 +697,7 @@ describe('convertSillyTavernChat', () => {
         { name: '여행자', is_user: true, mes: '모두 안녕' },
         { name: '하루 (old name)', is_user: false, mes: '*손을 흔든다*\n안녕!', swipes: ['어서 와', '*손을 흔든다*\n안녕!'], swipe_id: 1, original_avatar: '하루.png' },
         { name: 'Ren', is_user: false, mes: '반가워' },
-        { name: 'System', is_user: false, is_system: true, mes: '해가 진다.', extra: { type: 'narrator' } },
+        { name: 'System', is_user: false, is_system: false, mes: '해가 진다.', extra: { type: 'narrator' } },
         { name: 'Stranger', is_user: false, mes: '누구?' },
       ]),
       tagged,

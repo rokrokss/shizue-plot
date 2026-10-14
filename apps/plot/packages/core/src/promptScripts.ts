@@ -302,24 +302,30 @@ export interface PromptScriptJob {
  * RisuAI counts its messages from the greeting, which it keeps apart. The
  * newest turn of `history` is depth 0, as ST counts a prompt — a turn the caller
  * appends after the prompt (a continue's partial) is ST's depth -1, so it does
- * not move the others.
+ * not move the others. A turn hidden from the AI (`HistoryMessage.hidden`) is not
+ * counted, as ST counts depth over the `coreChat` that leaves it out; it is never
+ * sent, so what the scripts make of it is not read.
  */
 export function promptScriptJob(
-  history: readonly { role: 'user' | 'assistant'; content: string }[],
+  history: readonly { role: 'user' | 'assistant'; content: string; hidden?: boolean }[],
   scripts: PromptScript[],
   branch?: { length: number; greeting?: { text: string } },
 ): PromptScriptJob {
   const total = Math.max(branch?.length ?? history.length, history.length);
   const start = total - history.length;
   const after = branch?.greeting ? 1 : 0;
+  let depth = history.filter((turn) => !turn.hidden).length;
   return {
     scripts,
-    messages: history.map((turn, index) => ({
-      text: turn.content,
-      role: turn.role,
-      chatIndex: start + index - after,
-      depth: history.length - 1 - index,
-    })),
+    messages: history.map((turn, index) => {
+      if (!turn.hidden) depth -= 1;
+      return {
+        text: turn.content,
+        role: turn.role,
+        chatIndex: start + index - after,
+        depth,
+      };
+    }),
     ...(branch?.greeting ? { greeting: branch.greeting.text } : {}),
   };
 }

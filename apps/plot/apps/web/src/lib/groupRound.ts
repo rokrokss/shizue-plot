@@ -63,11 +63,15 @@ export interface RoundCue {
   lastSpeakerId: string | null;
 }
 
-/** The cue of a round that follows `message`. */
+/**
+ * The cue of a round that follows `message`. One hidden from the AI names no one
+ * — SillyTavern reads no activation text off a hidden last message — though who
+ * said it still spoke last.
+ */
 export function cueOf(message: ChatMessage | undefined): RoundCue {
   if (!message) return { text: '', lastSpeakerId: null };
   return {
-    text: message.content,
+    text: message.hiddenFromPrompt ? '' : message.content,
     lastSpeakerId: message.role === 'assistant' ? (message.speakerMemberId ?? null) : null,
   };
 }

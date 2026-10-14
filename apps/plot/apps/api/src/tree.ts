@@ -40,6 +40,16 @@ export function buildPath(all: Message[], headId: string | null): Message[] {
   return path.reverse();
 }
 
+/**
+ * The messages a model may read: the path without the ones the reader hid from
+ * the AI (`hidden_from_prompt`) — what SillyTavern's `coreChat` leaves out. For the
+ * side calls that read the branch as text (memory, relationships, suggestions, a
+ * scene picture); the prompt keeps hidden turns in its history and skips them there.
+ */
+export function visibleToAi<T extends Pick<Message, 'hiddenFromPrompt'>>(path: readonly T[]): T[] {
+  return path.filter((message) => !message.hiddenFromPrompt);
+}
+
 /** Position/count among siblings for every message on the path. */
 export function siblingInfo(all: Message[], path: Message[]): Record<string, SiblingInfo> {
   const groups = groupByParent(all);

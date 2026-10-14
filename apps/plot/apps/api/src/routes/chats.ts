@@ -145,7 +145,7 @@ import { editRequestTurns } from '../requestTriggers.js';
 import { createScriptFetch } from '../scriptFetch.js';
 import { readScriptLlmMessages, readScriptLlmModel, runScriptLlm } from '../scriptLlm.js';
 import { suggestReplies } from '../suggest.js';
-import { buildPath, deepestLeaf, roundStart, siblingInfo } from '../tree.js';
+import { buildPath, deepestLeaf, roundStart, siblingInfo, visibleToAi } from '../tree.js';
 import { assetLocks, openAssetNames } from '../unlocks.js';
 import {
   isUuid,
@@ -232,6 +232,8 @@ const toMessageJson = (message: Message, attachments: ChatAttachment[] = []) => 
    */
   speakerMemberId: message.speakerMemberId,
   groupTurnId: message.groupTurnId,
+  /** Hidden from the AI: on screen, never in what a model reads (`PUT …/messages/:id/hidden`). */
+  hiddenFromPrompt: message.hiddenFromPrompt,
   model: message.model,
   promptTokens: message.promptTokens,
   completionTokens: message.completionTokens,
@@ -782,6 +784,8 @@ const toHistory = (path: Message[], speaker: string | undefined): HistoryMessage
     createdAt: message.createdAt.getTime(),
     ...(message.speakerMemberId !== null ? { speakerId: message.speakerMemberId } : {}),
     ...(speaker !== undefined && message.role === 'assistant' && message.source === 'script' ? { speaker } : {}),
+    // Left in, so the chat functions read the stored chat; the assembler sends none of it.
+    ...(message.hiddenFromPrompt ? { hidden: true } : {}),
   }));
 
 /**
@@ -1059,15 +1063,19 @@ async function referencedAssets(
 const lastUserMessage = (path: Message[]): Message | undefined =>
   [...path].reverse().find((message) => message.role === 'user');
 
-/** Retrieval query for the memory layer. */
-const lastUserText = (path: Message[]): string => lastUserMessage(path)?.content ?? '';
+/** Retrieval query for the memory layer: the reader's newest turn the AI reads. */
+const lastUserText = (path: Message[]): string =>
+  [...path].reverse().find((message) => message.role === 'user' && !message.hiddenFromPrompt)?.content ?? '';
 
 /**
  * Stage directions of the turn being answered. Only the last user message's are
  * injected, so a regenerate re-applies exactly what the original turn carried and
- * an earlier turn's ruling never comes back.
+ * an earlier turn's ruling never comes back — nor its own, once it is hidden from the AI.
  */
-const lastUserDirections = (path: Message[]): string => lastUserMessage(path)?.directions ?? '';
+const lastUserDirections = (path: Message[]): string => {
+  const last = lastUserMessage(path);
+  return last && !last.hiddenFromPrompt ? (last.directions ?? '') : '';
+};
 
 /**
  * A component turn is only the reader's turn if the reader agreed to it.
@@ -1747,6 +1755,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         ...(message.speakerMemberId !== null && memberNames.has(message.speakerMemberId)
           ? { speaker: { id: message.speakerMemberId, name: memberNames.get(message.speakerMemberId)! } }
           : {}),
+        // Only on a message the reader hid from the AI.
+        ...(message.hiddenFromPrompt ? { hiddenFromPrompt: true } : {}),
         ...(attachments.has(message.id)
           ? {
               attachments: attachments
@@ -2080,6 +2090,40 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   });
 
   /**
+   * Hides one message from the AI, or shows it to the AI again — SillyTavern's
+   * /hide and /unhide. The message stays on screen; what a model reads leaves it
+   * out (the prompt, the lore scan, the memory, suggestions). The flag is the
+   * node's, so every branch through it shares it.
+   *
+   * The memory is invalidated as an in-place edit invalidates it, in the same
+   * transaction: a summary that already covers the message is dropped, so the
+   * next refresh writes it again with the message in or out. Like an edit it
+   * takes no generation claim — a refresh racing it loses on the revision.
+   */
+  app.put('/:id/messages/:messageId/hidden', async (c) => {
+    const userId = c.get('userId');
+    const chat = await loadWritableChat(deps, requireUuidParam(c), userId);
+    const messageId = requireUuidParam(c, 'messageId');
+    const body = await readJsonBody(c);
+    const hidden = optionalBoolean(body, 'hidden');
+    if (hidden === undefined) throw badRequest('invalid_request', 'hidden must be a boolean');
+
+    await deps.db.transaction(async (tx) => {
+      const [message] = await tx
+        .select({ hidden: messages.hiddenFromPrompt })
+        .from(messages)
+        .where(and(eq(messages.id, messageId), eq(messages.chatId, chat.id)))
+        .limit(1);
+      if (!message) throw notFound('Message not found');
+      // Already so: nothing the memory read has changed.
+      if (message.hidden === hidden) return;
+      await tx.update(messages).set({ hiddenFromPrompt: hidden }).where(eq(messages.id, messageId));
+      await invalidateMemoryForEdit(tx, chat.id, messageId);
+    });
+    return c.json(await chatState(deps, await loadOwnedChat(deps, chat.id, userId)));
+  });
+
+  /**
    * Rewriting a whole scene — the run of narration and replies the reader reads as
    * one — in a single edit.
    *
@@ -2179,6 +2223,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         ...(original?.variableDelta ? { variableDelta: original.variableDelta } : {}),
         // …and who said it in which round: a reworded group reply is still theirs.
         ...(original ? { speakerMemberId: original.speakerMemberId, groupTurnId: original.groupTurnId } : {}),
+        // …and whether the AI reads it.
+        ...(original?.hiddenFromPrompt ? { hiddenFromPrompt: true } : {}),
         // Distinct stamps, like the greeting roots: siblings order by creation, and
         // one insert's rows would otherwise share the transaction's `now()`.
         createdAt: new Date(stamp + position),
@@ -2893,6 +2939,10 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       if (before.at(-1)?.role !== 'assistant') {
         throw badRequest('invalid_state', 'The current head is not an assistant message');
       }
+      // Its text would go out as the reply being resumed — the AI would read it.
+      if (before.at(-1)?.hiddenFromPrompt) {
+        throw badRequest('invalid_state', 'The current head is hidden from the AI');
+      }
       await settleHead(deps, chat, before.at(-1), scripts, true);
       // What is continued is the message the start triggers left last, as RisuAI
       // continues whatever ends its chat — written in place, so a stored one other
@@ -3166,7 +3216,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         suggestions: await suggestReplies(deps, {
           userId: chat.userId,
           subModel: chat.subModel,
-          recent: buildPath(context.all, chat.headMessageId),
+          recent: visibleToAi(buildPath(context.all, chat.headMessageId)),
           members: context.members,
           plotName: context.plot.name,
           userName: context.userName,
@@ -3217,7 +3267,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           sceneImagePrompt(
             context.plot,
             context.characters.filter((member) => !member.absent),
-            path,
+            visibleToAi(path),
           ),
         );
         const attachmentId = randomUUID();
@@ -3372,6 +3422,8 @@ export function messageRoutes(deps: AppDeps): Hono<AppEnv> {
         // The scripts that ran for the turn are not run again for an edit of it —
         // RisuAI never re-runs a trigger on one either — so what they left stays.
         ...(row.message.variableDelta ? { variableDelta: row.message.variableDelta } : {}),
+        // A new version of the same turn: still hidden from the AI if it was.
+        ...(row.message.hiddenFromPrompt ? { hiddenFromPrompt: true } : {}),
       })
       .returning();
     await deps.db

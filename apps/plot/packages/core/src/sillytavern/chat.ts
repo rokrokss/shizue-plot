@@ -13,8 +13,12 @@
  * `public/scripts/slash-commands.js`) becomes our narration (`@:`,
  * `narration.ts`). An unprefixed line is no longer the narrator's: in a work of
  * one member it is that character's own 지문.
- * Messages ST keeps out of the prompt (`is_system`: hidden by the reader,
- * comments, tool calls) are left out.
+ * A message ST keeps out of the prompt (`is_system`) arrives hidden from the AI
+ * (`ImportedChatMessage.hidden`): one the reader hid (`/hide`, the ghost), and a
+ * comment (`/comment`, `extra.type === 'comment'`), which is nobody's line and
+ * comes in as a narration. What ST writes itself — its notices
+ * (`systemUserName`, `public/scripts/system-messages.js`) and its tool calls
+ * (`extra.tool_invocations`) — is not the conversation and is left out.
  *
  * The header's `chat_metadata` is where ST keeps what belongs to the chat rather
  * than to any one message, and three parts of it come along: the chat's
@@ -98,8 +102,8 @@ export interface StConvertedChat {
   /** The World Info file bound to this chat (`world_info`), by name. */
   worldName?: string;
   skipped: {
-    /** `is_system` messages — hidden, comments, tool calls. */
-    hidden: number;
+    /** What ST wrote itself — its notices and tool calls (`is_system`, see `convertSillyTavernChat`). */
+    system: number;
     /** Messages with no text in any version. */
     empty: number;
     /** Character messages kept unprefixed and untagged because no roster member matched. */
@@ -112,6 +116,9 @@ export interface StConvertedChat {
     variables: number;
   };
 }
+
+/** ST's name for the messages it writes itself (`systemUserName` in `public/script.js`). */
+const ST_SYSTEM_NAME = 'SillyTavern System';
 
 /** Messages converted per chat; the rest are counted in `overLimit`. */
 export const MAX_CHAT_MESSAGES = 20_000;
@@ -314,7 +321,7 @@ function readAuthorNote(meta: Json): StAuthorNote | undefined {
  * and untagged — the scene's, by our protocol — and are counted.
  */
 export function convertSillyTavernChat(jsonl: string, cast: StCast): StConvertedChat {
-  const skipped = { hidden: 0, empty: 0, unknownSpeaker: 0, malformed: 0, overLimit: 0, variables: 0 };
+  const skipped = { system: 0, empty: 0, unknownSpeaker: 0, malformed: 0, overLimit: 0, variables: 0 };
   const grouped = cast.members.filter((member) => member.id).length >= 2;
   const messages: ImportedChatMessage[] = [];
   let userName = '';
@@ -359,8 +366,19 @@ export function convertSillyTavernChat(jsonl: string, cast: StCast): StConverted
 
     const extra = isObject(parsed['extra']) ? parsed['extra'] : {};
     const narrator = extra['type'] === 'narrator';
-    if (parsed['is_system'] === true && !narrator) {
-      skipped.hidden += 1;
+    const comment = extra['type'] === 'comment';
+    const name = typeof parsed['name'] === 'string' ? parsed['name'].trim() : '';
+    // Kept out of ST's prompt: hidden from the AI here. Unless ST wrote it itself
+    // — a notice (any other `extra.type`) or a tool call — which is not the
+    // conversation at all.
+    const hidden = parsed['is_system'] === true;
+    if (
+      hidden &&
+      (name === ST_SYSTEM_NAME ||
+        Array.isArray(extra['tool_invocations']) ||
+        (typeof extra['type'] === 'string' && !narrator && !comment))
+    ) {
+      skipped.system += 1;
       continue;
     }
     if (messages.length >= MAX_CHAT_MESSAGES) {
@@ -368,7 +386,6 @@ export function convertSillyTavernChat(jsonl: string, cast: StCast): StConverted
       continue;
     }
 
-    const name = typeof parsed['name'] === 'string' ? parsed['name'].trim() : '';
     const isUser = parsed['is_user'] === true;
     const { versions: texts, selected } = versionsOf(parsed);
     let versions = texts;
@@ -380,7 +397,7 @@ export function convertSillyTavernChat(jsonl: string, cast: StCast): StConverted
     let speakerId: string | undefined;
     if (isUser) {
       if (!userName && name) userName = name;
-    } else if (narrator) {
+    } else if (narrator || comment) {
       versions = versions.map((text) => withNarrationPrefix(text));
     } else {
       if (!characterName && name) characterName = name;
@@ -398,6 +415,7 @@ export function convertSillyTavernChat(jsonl: string, cast: StCast): StConverted
       selected,
       ...(at ? { createdAt: at } : {}),
       ...(speakerId ? { speakerId } : {}),
+      ...(hidden ? { hidden: true } : {}),
     });
   }
 

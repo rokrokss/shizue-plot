@@ -39,6 +39,7 @@
  * round trip at all.
  */
 
+import { inDisplayDepth } from '@shizue/core/display-script';
 import { stripVariableMacros, type Variables } from '@shizue/core/variables';
 import { escapeHtml, renderTemplate, RenderBudgetExhausted, type CbsContext } from './cbs';
 import { sanitizeCustomHtml } from './sanitizeHtml';
@@ -72,6 +73,70 @@ export type Segment = { kind: 'text'; text: string } | { kind: 'html'; html: str
 export interface DisplayContext extends CbsContext {
   /** The card's display scripts, in any order — `order` decides. */
   scripts: DisplayScript[];
+}
+
+/* -------------------------------------------------------------- the range */
+
+/** A list's in-range subsets, by which of its scripts they keep. */
+const subsetsOf = new WeakMap<readonly DisplayScript[], Map<string, DisplayScript[]>>();
+/** A context's narrowed copies, by the subset they carry. */
+const contextsOf = new WeakMap<DisplayContext, Map<DisplayScript[], DisplayContext>>();
+
+/**
+ * The scripts that run on a message `depth` deep — SillyTavern's regex min/max
+ * depth (`inDisplayDepth`): a script out of range is never matched, so its
+ * pattern costs that message nothing. The list itself wherever all of it runs —
+ * every list with no range in it, and every message with no depth (one hidden
+ * from the AI) — and otherwise the same array for the same subset, since the
+ * planner tells a fresh plan by the list: a row whose subset did not change as
+ * the chat grew keeps its plan.
+ */
+export function displayScriptsAt(scripts: DisplayScript[], depth: number | undefined): DisplayScript[] {
+  if (depth === undefined || !scripts.some((script) => script.minDepth !== undefined || script.maxDepth !== undefined)) {
+    return scripts;
+  }
+  const keep = scripts.map((script) => inDisplayDepth(script, depth));
+  if (keep.every(Boolean)) return scripts;
+  const key = keep.map((kept) => (kept ? '1' : '0')).join('');
+  let subsets = subsetsOf.get(scripts);
+  if (!subsets) {
+    subsets = new Map();
+    subsetsOf.set(scripts, subsets);
+  }
+  let subset = subsets.get(key);
+  if (!subset) {
+    subset = scripts.filter((_, index) => keep[index]);
+    subsets.set(key, subset);
+  }
+  return subset;
+}
+
+/**
+ * The display context a message `depth` deep is drawn with: `context` narrowed
+ * to the scripts in range (`displayScriptsAt`), the same object for the same
+ * subset so a memoized row is not drawn again for nothing — and none at all
+ * where no script is in range, which leaves the message as prose with no plan
+ * asked for.
+ */
+export function displayContextAt(
+  context: DisplayContext | undefined,
+  depth: number | undefined,
+): DisplayContext | undefined {
+  if (!context) return undefined;
+  const scripts = displayScriptsAt(context.scripts, depth);
+  if (scripts === context.scripts) return context;
+  if (scripts.length === 0) return undefined;
+  let narrowed = contextsOf.get(context);
+  if (!narrowed) {
+    narrowed = new Map();
+    contextsOf.set(context, narrowed);
+  }
+  let at = narrowed.get(scripts);
+  if (!at) {
+    at = { ...context, scripts };
+    narrowed.set(scripts, at);
+  }
+  return at;
 }
 
 /* --------------------------------------------------------------- the budget */

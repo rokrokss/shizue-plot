@@ -95,6 +95,25 @@ describe('chatRowMeta', () => {
     ]);
     expect(run[1]!.grouped).toBe(true);
   });
+
+  it('numbers depth from the newest row, the one streaming included, as ST does', () => {
+    const meta = chatRowMeta([
+      row('assistant', '인사', at(2026, 8, 11, 9)),
+      row('user', '안녕', at(2026, 8, 11, 9, 1)),
+      row('assistant', '생성 중', null),
+    ]);
+    expect(meta.map((entry) => entry.depth)).toEqual([2, 1, 0]);
+  });
+
+  it('counts no row hidden from the AI, and numbers it no depth', () => {
+    const meta = chatRowMeta([
+      row('assistant', '인사', at(2026, 8, 11, 9)),
+      { ...row('user', '숨긴 말', at(2026, 8, 11, 9, 1)), hidden: true },
+      row('assistant', '답', at(2026, 8, 11, 9, 2)),
+      { ...row('user', '숨긴 끝', at(2026, 8, 11, 9, 3)), hidden: true },
+    ]);
+    expect(meta.map((entry) => entry.depth)).toEqual([1, undefined, 0, undefined]);
+  });
 });
 
 describe('relativeDay', () => {

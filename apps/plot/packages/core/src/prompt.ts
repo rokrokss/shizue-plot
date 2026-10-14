@@ -97,6 +97,13 @@ export interface HistoryMessage {
    * `speaker` does; an id no member has leaves `speaker` to decide.
    */
   speakerId?: string;
+  /**
+   * The reader hid the turn from the AI (`messages.hidden_from_prompt`,
+   * SillyTavern's `is_system`): it is neither sent nor scanned for lore, as ST
+   * leaves it out of `coreChat`. It stays in `history` all the same, so the
+   * chat functions and every other turn's index read the stored chat.
+   */
+  hidden?: boolean;
 }
 
 /**
@@ -904,7 +911,9 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     triggered: loreTriggers,
     via: loreVia,
   } = activateLore(lorebook, {
-    history: history.map((message) => message.content),
+    // A turn hidden from the AI is not scanned either — ST builds its scan from
+    // the same `coreChat` it sends.
+    history: history.filter((message) => !message.hidden).map((message) => message.content),
     scanDepth: loreSettings.scanDepth,
     budgetTokens:
       loreSettings.tokenBudget ??
@@ -1110,7 +1119,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // Only the newest assistant turn keeps its status window and choice lines: it
   // carries the current state and shows the model the format, and every older
   // copy is a superseded state the model would otherwise re-read each turn.
-  const newestAssistant = history.findLastIndex((turn) => turn.role === 'assistant');
+  const newestAssistant = history.findLastIndex((turn) => turn.role === 'assistant' && !turn.hidden);
   /** Every name a line may already be under, for the turns a script wrote as its character. */
   const speakers = characters.map((member) => member.name);
   const byId = new Map(
@@ -1126,8 +1135,12 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const historyCosts: number[] = [];
   /** Which stored message each kept turn is, and whether it is the greeting; parallel to historyMessages. */
   const historySources: Pick<MessageSource, 'id' | 'greeting'>[] = [];
+  /** Where in `history` the turns sent begin. */
+  let oldestSent = history.length;
   for (let i = history.length - 1; i >= 0; i -= 1) {
     const turn = history[i]!;
+    // Hidden from the AI: on screen, never sent — and never the newest turn kept.
+    if (turn.hidden) continue;
     // What the cards' prompt scripts made of the turn, where they rewrote it.
     const source = turn.promptContent ?? turn.content;
     const said = turn.role === 'assistant' && i !== newestAssistant ? withoutStateTail(source) : source;
@@ -1154,6 +1167,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     const cost = countTokens(text) + images.length * IMAGE_TOKEN_ESTIMATE;
     if (cost > available && historyMessages.length > 0) break;
     available -= cost;
+    oldestSent = i;
     // The parts form is only used where there is something besides words: the
     // image goes after the text, which is the order the turn was sent in.
     const content: string | PromptPart[] =
@@ -1295,7 +1309,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
       // What the budget gave out: the room it started with, less what is left.
       used: contextBudget - maxResponseTokens - available,
     },
-    history: { included: historyMessages.length, total: history.length },
+    history: { included: historyMessages.length, total: history.filter((turn) => !turn.hidden).length },
     examples: { included: exampleSlots.length, total: exampleBlocks.length },
     lore: activated.map((entry) => ({
       key: loreEntryKey(entry),
@@ -1346,7 +1360,8 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
           }
         : {}),
       // The branch index of the first turn sent: the history's own start, past what the budget dropped.
-      fromStart: historyStart + history.length - historyMessages.length === 0,
+      // A turn hidden from the AI before it is not one the budget dropped.
+      fromStart: historyStart === 0 && !history.slice(0, oldestSent).some((turn) => !turn.hidden),
     },
     loreTriggers,
     ...(variableWrites ? { variableWrites } : {}),

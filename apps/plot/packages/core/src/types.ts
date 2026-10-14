@@ -154,6 +154,14 @@ export interface DisplayScript {
    * every message.
    */
   memberId?: string;
+  /**
+   * The messages the script runs on, by depth — SillyTavern's regex min/max
+   * depth: 0 the newest message on the branch, counting every message the AI
+   * reads, the reader's included. Both bounds inclusive; absent, no limit
+   * (`inDisplayDepth`). A message out of range is not matched at all.
+   */
+  minDepth?: number;
+  maxDepth?: number;
 }
 
 export type DisplayScriptAction = 'move_top' | 'move_bottom' | 'repeat_back';
@@ -519,6 +527,8 @@ export interface ImportedChatMessage {
    * into a work of several: its text then carries no `이름: ` prefix.
    */
   speakerId?: string;
+  /** Hidden from the AI, every version (`messages.hidden_from_prompt`): what ST keeps out of the prompt. */
+  hidden?: boolean;
 }
 
 /** No `tokenBudget`: a card that names none gets the automatic one. */

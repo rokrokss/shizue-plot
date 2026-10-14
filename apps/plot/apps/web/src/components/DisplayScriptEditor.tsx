@@ -1,6 +1,6 @@
 'use client';
 
-import { displayScriptPatternError } from '@shizue/core/display-script';
+import { coerceDisplayDepth, displayScriptPatternError } from '@shizue/core/display-script';
 import { useTranslations } from 'next-intl';
 import type { DisplayScript } from '@/lib/types';
 import { Button, Checkbox, ErrorText, Field, Select, TextArea, TextInput } from './ui';
@@ -29,6 +29,10 @@ const patternError = (source: string): string | null =>
  * messages it is for (적용 대상, `DisplayScript.memberId`): every character's,
  * or one member's — then it is not drawn on another member's messages. A
  * companion's card brings its scripts already set to it.
+ *
+ * 적용 범위 is SillyTavern's regex min/max depth (`minDepth`/`maxDepth`): which
+ * messages, counted back from the newest, the script runs on. A blank bound is
+ * no limit.
  */
 export function DisplayScriptEditor({
   scripts,
@@ -56,6 +60,16 @@ export function DisplayScriptEditor({
     );
   const memberName = (memberId: string | undefined): string | undefined =>
     memberId === undefined ? undefined : members.find((member) => member.id === memberId)?.name;
+  /** One end of the range as typed, read as the API reads it: blank, or below 0, is no limit. */
+  const bound = (index: number, key: 'minDepth' | 'maxDepth', value: string): void =>
+    onChange(
+      scripts.map((script, i) => {
+        if (i !== index) return script;
+        const { [key]: _was, ...rest } = script;
+        const next = coerceDisplayDepth({ [key]: value })[key];
+        return next === undefined ? rest : { ...rest, [key]: next };
+      }),
+    );
 
   return (
     <div className="space-y-3">
@@ -136,6 +150,38 @@ export function DisplayScriptEditor({
                 onChange={(event) => update(index, { out: event.target.value })}
               />
             </Field>
+
+            {/* Two fields under one name, so a group rather than the one label a
+                Field is. */}
+            <div role="group" aria-label={t('displayScriptRange')} className="space-y-1.5">
+              <span className="block text-xs font-semibold text-muted">{t('displayScriptRange')}</span>
+              <div className="flex items-center gap-2">
+                <TextInput
+                  type="number"
+                  min={0}
+                  inputMode="numeric"
+                  data-testid="display-script-min-depth"
+                  aria-label={t('displayScriptRangeFrom')}
+                  className="w-24"
+                  value={script.minDepth ?? ''}
+                  onChange={(event) => bound(index, 'minDepth', event.target.value)}
+                />
+                <span aria-hidden="true" className="text-sm text-muted">
+                  ~
+                </span>
+                <TextInput
+                  type="number"
+                  min={0}
+                  inputMode="numeric"
+                  data-testid="display-script-max-depth"
+                  aria-label={t('displayScriptRangeTo')}
+                  className="w-24"
+                  value={script.maxDepth ?? ''}
+                  onChange={(event) => bound(index, 'maxDepth', event.target.value)}
+                />
+              </div>
+              <span className="block text-xs text-muted">{t('displayScriptRangeHint')}</span>
+            </div>
 
             <div className="grid gap-4 sm:grid-cols-3">
               <Field label={t('displayScriptOrder')}>

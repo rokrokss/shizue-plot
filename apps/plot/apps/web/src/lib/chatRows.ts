@@ -20,6 +20,8 @@ export interface ChatRowInput {
    * a work of one, whose replies are all its one member's.
    */
   speaker?: string | undefined;
+  /** Hidden from the AI: on screen, but not counted in anyone's depth, and of none itself. */
+  hidden?: boolean | undefined;
 }
 
 export interface ChatRowMeta {
@@ -29,6 +31,13 @@ export interface ChatRowMeta {
   dayStart: string | null;
   /** Continues the row above it: same speaker, minutes apart, neither narrating. */
   grouped: boolean;
+  /**
+   * SillyTavern's depth, which a display script's range reads: 0 the newest row,
+   * counting every row after this one but those hidden from the AI — the one being
+   * streamed included, as ST's is already in its chat. Undefined on a hidden row,
+   * which ST numbers no depth (`messageFormatting`).
+   */
+  depth: number | undefined;
 }
 
 /**
@@ -43,6 +52,8 @@ export interface ChatRowMeta {
  */
 export function chatRowMeta(rows: readonly ChatRowInput[]): ChatRowMeta[] {
   const latestByRole = new Map<MessageRole, string>();
+  /** Rows a depth counts that are still ahead of the row in hand. */
+  let below = rows.reduce((count, row) => (row.hidden ? count : count + 1), 0);
   let day = '';
   let previous: { role: MessageRole; speaker: string | undefined; time: number | null; narration: boolean } | null = null;
 
@@ -70,7 +81,8 @@ export function chatRowMeta(rows: readonly ChatRowInput[]): ChatRowMeta[] {
       (time === null || previous.time === null || time - previous.time < GROUP_WINDOW_MS);
     previous = { role: row.role, speaker: row.speaker, time, narration };
 
-    return { previousSameRole, dayStart, grouped };
+    if (!row.hidden) below -= 1;
+    return { previousSameRole, dayStart, grouped, depth: row.hidden ? undefined : below };
   });
 }
 

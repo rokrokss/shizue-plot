@@ -339,7 +339,7 @@ function deps(api: Api): ImportDeps & { casts: { members: { name: string; avatar
         variables: variables ?? null,
         ...(authorNote ? { authorNote } : {}),
         ...(worldName ? { worldName } : {}),
-        skipped: { hidden: 1, empty: 0, unknownSpeaker: 0, malformed: 0, overLimit: 0, variables: droppedVariables },
+        skipped: { system: 1, empty: 0, unknownSpeaker: 0, malformed: 0, overLimit: 0, variables: droppedVariables },
       };
     },
     lorebookEntries: (json) => (json as { entries: string[] }).entries.map(lore),
@@ -603,7 +603,7 @@ describe('runImport', () => {
     expect(byPlot.get('plot-5')!.personaId).toBeUndefined();
     expect(byPlot.get('plot-8')!.personaId).toBe(kim!.id);
     expect(results['chat:chats/Alice/one.jsonl']!.memoryBackfill).toBe('queued');
-    expect(results['chat:chats/Alice/one.jsonl']!.dropped).toMatchObject({ hidden: 1, swipes: 0 });
+    expect(results['chat:chats/Alice/one.jsonl']!.dropped).toMatchObject({ system: 1, swipes: 0 });
   });
 
   it('leaves the global lorebooks and regex alone by default', async () => {
@@ -1021,7 +1021,7 @@ describe("runImport - how SillyTavern ran a group's turns", () => {
               { name: 'Kim', is_user: true, mes: 'Everyone here?' },
               { name: 'Alice', is_user: false, mes: 'Tea first.', original_avatar: 'Alice.png' },
               { name: 'Bob', is_user: false, mes: '*sighs*\nCoffee.', original_avatar: 'Bob.png' },
-              { name: 'System', is_user: false, is_system: true, mes: 'The clock strikes six.', extra: { type: 'narrator' } },
+              { name: 'System', is_user: false, is_system: false, mes: 'The clock strikes six.', extra: { type: 'narrator' } },
             ]),
           ],
         },

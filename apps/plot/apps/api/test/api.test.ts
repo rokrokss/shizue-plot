@@ -23,6 +23,7 @@ import {
   MAX_ASSETS,
   MAX_CHARACTERS_PER_PLOT,
   MAX_DELTA_KEYS,
+  MAX_DISPLAY_DEPTH,
   MAX_DISPLAY_PATTERN_LENGTH,
   MAX_INTRO_LENGTH,
   MAX_INTRO_TEXT_LENGTH,
@@ -5405,6 +5406,27 @@ describe('custom UI', () => {
     expect((await save('\\[status\\] hp=(\\d+)')).status).toBe(200);
   });
 
+  it("keeps a display script's depth range where it limits something", async () => {
+    const cookie = await signUp('display-depth@example.com');
+    const plot = await createPlot(cookie, { name: '범위' });
+    const script = { in: 'x', out: 'y', order: 0, enabled: true };
+    const res = await json(cookie, `/api/plots/${plot.id}`, 'PATCH', {
+      customUi: {
+        displayScripts: [
+          { ...script, minDepth: 0, maxDepth: 2 },
+          { ...script, in: 'open', minDepth: -1, maxDepth: null },
+          { ...script, in: 'far', minDepth: 10 ** 9, maxDepth: 'z' },
+        ],
+      },
+    });
+    expect(res.status, await res.clone().text()).toBe(200);
+    expect((await readPlot(cookie, plot.id)).customUi.displayScripts).toEqual([
+      { ...script, minDepth: 0, maxDepth: 2 },
+      { ...script, in: 'open' },
+      { ...script, in: 'far', minDepth: MAX_DISPLAY_DEPTH },
+    ]);
+  });
+
   it('imports a hazardous pattern switched off instead of refusing the whole card', async () => {
     const cookie = await signUp('redos-import@example.com');
     const hazardous = {
@@ -7246,6 +7268,124 @@ describe('chat export', () => {
   });
 });
 
+describe('hiding a message from the AI', () => {
+  const hide = (cookie: string | undefined, chatId: string, messageId: string, hidden: unknown, target = app) =>
+    json(cookie, `/api/chats/${chatId}/messages/${messageId}/hidden`, 'PUT', { hidden }, target);
+  const sentTexts = (prompt: { messages: ChatRequest['messages'] }): string[] =>
+    prompt.messages.map((message) => contentText(message.content));
+
+  it('keeps the message on screen and out of the prompt and its lore scan, until it is shown again', async () => {
+    const cookie = await signUp('hide-prompt@example.com');
+    const { plotId, chatId } = await setupChat(cookie);
+    const member = await firstMember(cookie, plotId);
+    await patchCharacter(cookie, plotId, member.id, {
+      card: { ...member.card, lorebook: [{ keys: ['용'], content: 'DRAGON LORE' }] },
+    });
+    const { app: capturing, prompts } = capturingApp();
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '용이 나타났다' }, capturing));
+    expect(prompts[0]!.system).toContain('DRAGON LORE');
+
+    // The reader's turn and the reply that echoed it.
+    const before = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    const [, turn, reply] = before.path;
+    expect(turn.hiddenFromPrompt).toBe(false);
+    const hidden = await hide(cookie, chatId, turn.id, true);
+    expect(hidden.status, await hidden.clone().text()).toBe(200);
+    const state = await readJson(hidden);
+    expect(state.path.map((m: any) => m.hiddenFromPrompt)).toEqual([false, true, false]);
+    expect(state.path[1].content).toBe('용이 나타났다');
+    expect((await hide(cookie, chatId, reply.id, true)).status).toBe(200);
+
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '다음' }, capturing));
+    expect(sentTexts(prompts[1]!).some((text) => text.includes('용이 나타났다'))).toBe(false);
+    expect(prompts[1]!.system).not.toContain('DRAGON LORE');
+
+    // Shown again, the turn is read — and scanned — as before.
+    expect((await hide(cookie, chatId, turn.id, false)).status).toBe(200);
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
+    expect(sentTexts(prompts[2]!)).toContain('용이 나타났다');
+    expect(prompts[2]!.system).toContain('DRAGON LORE');
+  });
+
+  it('takes a boolean, on a message of the reader’s own chat', async () => {
+    const cookie = await signUp('hide-checks@example.com');
+    const { chatId, state } = await setupChat(cookie);
+    const greeting = state.path[0].id;
+    const bad = await hide(cookie, chatId, greeting, 'yes');
+    expect(bad.status).toBe(400);
+    expect((await hide(cookie, chatId, randomUUID(), true)).status).toBe(404);
+    const stranger = await signUp('hide-stranger@example.com');
+    expect((await hide(stranger, chatId, greeting, true)).status).toBe(404);
+    expect((await hide(undefined, chatId, greeting, true)).status).toBe(401);
+    // A message of another chat is not this chat's to hide.
+    const other = await setupChat(cookie);
+    expect((await hide(cookie, chatId, other.state.path[0].id, true)).status).toBe(404);
+    const [row] = await db.select().from(messages).where(eq(messages.id, other.state.path[0].id));
+    expect(row!.hiddenFromPrompt).toBe(false);
+  });
+
+  it('refuses while an import is still writing the chat', async () => {
+    const cookie = await signUp('hide-importing@example.com');
+    const plot = await createPlot(cookie, { name: '도서관' });
+    const res = await json(cookie, '/api/chats/import', 'POST', {
+      plotId: plot.id,
+      fileName: 'chat.jsonl',
+      sha256: createHash('sha256').update('hide').digest('hex'),
+      messages: [{ role: 'assistant', versions: ['인사'], selected: 0 }],
+    });
+    expect(res.status, await res.clone().text()).toBe(201);
+    const { chat } = await readJson(res);
+    const [row] = await db.select().from(messages).where(eq(messages.chatId, chat.id));
+    const refused = await hide(cookie, chat.id, row!.id, true);
+    expect(refused.status).toBe(409);
+    expect((await readJson(refused)).code).toBe('chat_importing');
+  });
+
+  it('carries the flag to a new version of the turn, and into the export', async () => {
+    const cookie = await signUp('hide-export@example.com');
+    const { chatId } = await setupChat(cookie);
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '숨길 말' }));
+    const [, turn] = (await readJson(await request(cookie, `/api/chats/${chatId}`))).path;
+    await hide(cookie, chatId, turn.id, true);
+
+    const exported = await readJson(await request(cookie, `/api/chats/${chatId}/export`));
+    expect(ChatExportSchema.parse(exported).messages.map((m) => m.hiddenFromPrompt)).toEqual([undefined, true, undefined]);
+
+    // An edit of the reader's turn is the same turn, still hidden from the AI.
+    const edited = await json(cookie, `/api/messages/${turn.id}`, 'PATCH', { content: '고친 말' });
+    const { messageId } = await readJson(edited);
+    const [row] = await db.select().from(messages).where(eq(messages.id, messageId));
+    expect(row!.hiddenFromPrompt).toBe(true);
+  });
+
+  it('leaves a hidden turn out of the reply suggestions', async () => {
+    const cookie = await signUp('hide-suggest@example.com');
+    const { chatId } = await setupChat(cookie);
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '비밀 고백' }));
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '보이는 인사' }));
+    const path = (await readJson(await request(cookie, `/api/chats/${chatId}`))).path;
+    await hide(cookie, chatId, path[1].id, true);
+    await hide(cookie, chatId, path[2].id, true);
+
+    const asked: string[] = [];
+    const suggesting = makeApp({
+      getAdapter: () => ({
+        providerModel: 'scripted',
+        adapter: {
+          stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
+            asked.push(req.messages.map((message) => contentText(message.content)).join('\n'));
+            yield { type: 'text', text: JSON.stringify({ suggestions: ['하나', '둘', '셋'] }) };
+            return { usage: { promptTokens: 1, completionTokens: 1 } };
+          },
+        },
+      }),
+    });
+    expect((await json(cookie, `/api/chats/${chatId}/suggest`, 'POST', undefined, suggesting)).status).toBe(200);
+    expect(asked[0]).toContain('보이는 인사');
+    expect(asked[0]).not.toContain('비밀 고백');
+  });
+});
+
 describe('presets', () => {
   it('lists the catalogue without a session', async () => {
     const res = await request(undefined, '/api/presets');
@@ -7482,6 +7622,56 @@ describe('memory', () => {
     const transcript = harness.summaries.at(-1)!.messages[0]!.content;
     expect(transcript).toContain('첫 장면입니다');
     expect(transcript).not.toContain('{{img');
+  });
+
+  it('leaves a message hidden from the AI out of the summary', async () => {
+    const cookie = await signUp('memory-hidden@example.com');
+    const { chatId } = await setupChat(cookie);
+    const harness = memoryApp();
+
+    const secret = `숨긴 장면입니다 ${'서가 사이에서 나눈 긴 대화입니다. '.repeat(50)}`;
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: secret }, harness.app));
+    const [, turn, reply] = (await readJson(await request(cookie, `/api/chats/${chatId}`))).path;
+    for (const message of [turn, reply]) {
+      const res = await json(cookie, `/api/chats/${chatId}/messages/${message.id}/hidden`, 'PUT', { hidden: true });
+      expect(res.status).toBe(200);
+    }
+    const sent = await fillPastThreshold(cookie, chatId, harness);
+
+    const transcript = harness.summaries.at(-1)!.messages[0]!.content;
+    expect(transcript).toContain(sent[0]!);
+    expect(transcript).not.toContain('숨긴 장면입니다');
+  });
+
+  it('drops a summary that covers a message hidden from the AI or shown to it again', async () => {
+    const cookie = await signUp('memory-hide-covered@example.com');
+    const { chatId } = await setupChat(cookie);
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '첫 질문' }));
+    const [greeting, turn, reply] = (await readJson(await request(cookie, `/api/chats/${chatId}`))).path;
+    const revision = async (): Promise<number> =>
+      (await db.select({ revision: chats.memoryRevision }).from(chats).where(eq(chats.id, chatId)))[0]!.revision;
+    const hide = (messageId: string, hidden: boolean) =>
+      json(cookie, `/api/chats/${chatId}/messages/${messageId}/hidden`, 'PUT', { hidden });
+
+    // After the anchor: the summary still says what it said, but a refresh in flight loses.
+    await seedMemory(chatId, greeting.id);
+    const first = await revision();
+    const kept = await readJson(await hide(reply.id, true));
+    expect(kept.chat.memory.summary).toBe(SUMMARY);
+    expect(await revision()).toBe(first + 1);
+    // Asking for what already holds changes nothing.
+    await hide(reply.id, true);
+    expect(await revision()).toBe(first + 1);
+
+    // Covered by it: the summary goes, facts and all, to be written again without it.
+    await seedMemory(chatId, reply.id);
+    await insertFact(cookie, chatId, { content: '리안은 고양이를 무서워한다.', sourceMessageId: reply.id });
+    const cleared = await readJson(await hide(turn.id, true));
+    expect(cleared.chat.memory).toBeNull();
+    expect(await db.select().from(memories).where(eq(memories.chatId, chatId))).toEqual([]);
+    // …and so does showing it to the AI again.
+    await seedMemory(chatId, reply.id);
+    expect((await readJson(await hide(turn.id, false))).chat.memory).toBeNull();
   });
 
   it('summarizes earlier when the chat lowers its threshold', async () => {
@@ -8340,6 +8530,25 @@ describe('chat import', () => {
     expect((await request(cookie, `/api/chats/${other.chat.id}`, 'DELETE')).status).toBe(204);
   });
 
+  it('brings what the source kept out of the prompt in hidden from the AI, every version of it', async () => {
+    const cookie = await signUp('chat-import-hidden@example.com');
+    const plot = await createPlot(cookie, { name: '도서관' });
+    const imported = await importChat(cookie, plot.id, [
+      turn('assistant', ['인사']),
+      { ...turn('user', ['숨긴 말']), hidden: true },
+      { ...turn('assistant', ['숨긴 답 1', '숨긴 답 2'], 1), hidden: true },
+      { ...turn('user', ['보이는 말']), hidden: false },
+    ]);
+    const rows = await rowsOf(imported.chat.id);
+    expect(rows.map((row) => [row.content, row.hiddenFromPrompt])).toEqual([
+      ['인사', false],
+      ['숨긴 말', true],
+      ['숨긴 답 1', true],
+      ['숨긴 답 2', true],
+      ['보이는 말', false],
+    ]);
+  });
+
   it('checks a batch whole, and whose plot, persona and chat it is, before writing', async () => {
     const alice = await signUp('chat-import-check@example.com');
     const plot = await createPlot(alice);
@@ -8350,6 +8559,7 @@ describe('chat import', () => {
       [{ role: 'user', versions: Array(21).fill('a'), selected: 0 }],
       [{ role: 'user', versions: ['a'.repeat(100_001)], selected: 0 }],
       [{ role: 'user', versions: ['a'], selected: 0, createdAt: '어제' }],
+      [{ ...turn('user', ['a']), hidden: 'yes' }],
       [turn('user', ['a']), 'b'],
       Array.from({ length: 501 }, () => turn('user', ['a'])),
     ]) {

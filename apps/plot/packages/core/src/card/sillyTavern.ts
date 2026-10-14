@@ -9,7 +9,7 @@
  * (`public/scripts/extensions/regex/engine.js`).
  */
 
-import { displayScriptPatternError } from '../displayScript.js';
+import { coerceDisplayDepth, displayScriptPatternError } from '../displayScript.js';
 import type { DisplayScript, LoreEntry } from '../types.js';
 import { roleFromSillyTavern } from './bookEntry.js';
 
@@ -112,7 +112,8 @@ export function displayScriptsWithRegexScripts(
       typeof script['replaceString'] === 'string' ? script['replaceString'] : '',
     );
     if (result.some((known) => known.in === source && known.out === out)) continue;
-    result.push({ in: source, out, ...(flags ? { flags } : {}), order, enabled: true });
+    // ST's min/max depth, which it applies to the screen as it does to the prompt.
+    result.push({ in: source, out, ...(flags ? { flags } : {}), order, enabled: true, ...coerceDisplayDepth(script) });
     order += 1;
   }
   return result.length > 0 ? result : undefined;

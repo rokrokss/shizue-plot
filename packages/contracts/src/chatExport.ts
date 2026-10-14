@@ -41,6 +41,11 @@ export const ChatExportMessageSchema = z.object({
    * message once the plot is withdrawn (the roster goes with it).
    */
   speaker: z.object({ id: z.string(), name: z.string() }).optional(),
+  /**
+   * True on a message the reader hid from the AI (SillyTavern's hide): it is on
+   * screen and left out of everything a model reads. Absent on every other message.
+   */
+  hiddenFromPrompt: z.boolean().optional(),
 });
 
 /** `url` is a same-origin path, so the importer fetches it with the session cookie. */

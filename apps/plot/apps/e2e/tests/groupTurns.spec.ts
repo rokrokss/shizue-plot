@@ -165,6 +165,21 @@ test('재생성 redoes the whole round, and the swipe moves between whole rounds
   await expect(counter).toHaveText('2/2');
 });
 
+test('hiding one reply of a round hides that reply alone', async () => {
+  const second = assistantMessages().nth(2);
+  await second.hover();
+  await second.getByRole('button', { name: 'AI에게 숨기기' }).click();
+  await expect(second.getByTestId('message-hidden')).toHaveText('AI에게 숨김');
+  await expect(page.getByTestId('message-hidden')).toHaveCount(1);
+  // Still the same member's bubble, in its place in the round.
+  expect(await replySpeakers()).toEqual([null, ...cast]);
+
+  await second.hover();
+  await second.getByRole('button', { name: 'AI에게 다시 보이기' }).click();
+  await expect(page.getByTestId('message-hidden')).toHaveCount(0);
+  await expectComposerIdle();
+});
+
 test('이어가기 opens a round of its own after the last reply', async () => {
   generations.length = 0;
   await page.getByRole('button', { name: '이어가기' }).click();

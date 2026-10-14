@@ -41,7 +41,7 @@ import { asc, eq } from 'drizzle-orm';
 import type { AppDeps } from './deps.js';
 import { loadMembers } from './hub.js';
 import { collect, memoryChannel } from './memory.js';
-import { buildPath, roundCount } from './tree.js';
+import { buildPath, roundCount, visibleToAi } from './tree.js';
 import { unlockByRelationship } from './unlocks.js';
 
 /** Rounds the branch must gain before the next extraction attempt (`roundCount`). */
@@ -185,7 +185,7 @@ async function updateRelationship(deps: AppDeps, chatId: string): Promise<void> 
     userId: chat.userId,
     subModel: chat.subModel,
     axes: current?.axes ?? DEFAULT_RELATIONSHIP_AXES,
-    recent: path.slice(-RECENT_TURNS),
+    recent: visibleToAi(path).slice(-RECENT_TURNS),
     plotName: row.plotName,
     members: await loadMembers(deps.db, chat.plotId),
     userName: row.personaName ?? DEFAULT_USER_NAME,

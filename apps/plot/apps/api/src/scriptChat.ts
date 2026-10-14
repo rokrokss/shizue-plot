@@ -308,6 +308,8 @@ export async function applyScriptChat(
       directions: stillUser ? row.directions : null,
       loreTriggers: row.loreTriggers,
       variableDelta: row.variableDelta,
+      // The same turn on another branch: hidden from the AI if the original was.
+      hiddenFromPrompt: row.hiddenFromPrompt,
       model: row.model,
       promptTokens: row.promptTokens,
       completionTokens: row.completionTokens,

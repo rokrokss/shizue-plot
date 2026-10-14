@@ -305,6 +305,33 @@ test('edits the user message and regenerates the reply', async () => {
   await expectComposerIdle();
 });
 
+test('hides a message from the AI and shows it again, on screen either way', async () => {
+  const turn = userMessages().last();
+  const reply = assistantMessages().last();
+  for (const row of [turn, reply]) {
+    await row.hover();
+    const hidden = page.waitForResponse((response) => response.url().endsWith('/hidden'));
+    await row.getByRole('button', { name: 'AI에게 숨기기' }).click();
+    expect((await hidden).status()).toBe(200);
+    await expect(row.getByTestId('message-hidden')).toHaveText('AI에게 숨김');
+  }
+  // Dimmed, not gone: the words are still there to read.
+  await expect(turn).toContainText(editedTurn);
+  await expect(turn.locator('[class*="opacity-[0.58]"]').first()).toHaveCSS('opacity', '0.58');
+  // A reply the AI no longer reads is not one it can go on writing.
+  await expect(page.getByRole('button', { name: '이어쓰기' })).toHaveCount(0);
+
+  await page.reload();
+  await expect(page.getByTestId('message-hidden')).toHaveCount(2);
+
+  for (const row of [userMessages().last(), assistantMessages().last()]) {
+    await row.hover();
+    await row.getByRole('button', { name: 'AI에게 다시 보이기' }).click();
+  }
+  await expect(page.getByTestId('message-hidden')).toHaveCount(0);
+  await expectComposerIdle();
+});
+
 test('saves a user note that survives a reload', async () => {
   await openPanel();
   const panel = page.getByTestId('chat-panel');

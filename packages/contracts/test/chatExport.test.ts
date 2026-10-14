@@ -87,6 +87,19 @@ describe('ChatExportSchema', () => {
     ).toBe(false);
   });
 
+  it('carries a message hidden from the AI, and nothing on the others', () => {
+    const parsed = ChatExportSchema.parse({
+      ...bundle,
+      messages: [{ ...bundle.messages[0], hiddenFromPrompt: true }, bundle.messages[1]],
+    });
+    expect(parsed.messages[0]?.hiddenFromPrompt).toBe(true);
+    expect(parsed.messages[1]?.hiddenFromPrompt).toBeUndefined();
+    expect(
+      ChatExportSchema.safeParse({ ...bundle, messages: [{ ...bundle.messages[0], hiddenFromPrompt: 'yes' }] })
+        .success,
+    ).toBe(false);
+  });
+
   it('rejects a message role outside user/assistant', () => {
     expect(
       ChatExportSchema.safeParse({

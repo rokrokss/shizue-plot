@@ -210,7 +210,9 @@ export function defaultVariablesFromExtensions(
  * the flags plus the action in `flag`. No `<order N>` goes out — the caller writes
  * the scripts in the sequence they run here, which is the sequence RisuAI runs a
  * list without one in, and a re-import reads them back the same way. Our numbers
- * would run backwards there, and the editor's need not even be whole.
+ * would run backwards there, and the editor's need not even be whole. The range
+ * (`minDepth`/`maxDepth`) does not go out: RisuAI's scripts have no such field,
+ * so an exported script runs on every message there.
  */
 function toCustomScript(script: DisplayScript): Record<string, unknown> {
   const flag = [script.flags ?? '', ...(script.action ? [`<${script.action}>`] : [])].join('');

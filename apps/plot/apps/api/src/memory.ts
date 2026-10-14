@@ -23,7 +23,7 @@ import { getAdapter, listEnabledModels, type ChatRequest, type LLMAdapter } from
 import { and, asc, cosineDistance, desc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import type { AppDeps, Tx } from './deps.js';
 import { enqueueJob } from './jobs.js';
-import { buildPath } from './tree.js';
+import { buildPath, visibleToAi } from './tree.js';
 
 // Measured 2026-08-10 (45-call eval, production prompt): 9/9 JSON-parse, the
 // lowest latency of the field, ~1/5 of haiku's cost. Internal catalog entry —
@@ -194,7 +194,7 @@ async function retrieveFacts(
       .limit(limit * 2);
 
     const seen = normalize(
-      [summary, ...history.slice(-RECENT_TURNS_SCANNED).map((message) => message.content)].join('\n'),
+      [summary, ...visibleToAi(history).slice(-RECENT_TURNS_SCANNED).map((message) => message.content)].join('\n'),
     );
     const picked: string[] = [];
     for (const row of rows) {
@@ -259,7 +259,11 @@ async function updateMemory(deps: AppDeps, chatId: string): Promise<boolean> {
     .from(messages)
     .where(eq(messages.chatId, chatId))
     .orderBy(asc(messages.createdAt));
-  const { summary, history } = applyMemory(buildPath(all, chat.headMessageId), chat);
+  const { summary, history: path } = applyMemory(buildPath(all, chat.headMessageId), chat);
+  // The summary is written from what a model may read: a message hidden from the
+  // AI is not counted, not kept and not folded in. Showing it again drops a
+  // summary that covers it (`invalidateMemoryForEdit`), so it is folded then.
+  const history = visibleToAi(path);
   if (!overThreshold(chat, summary, history)) return false;
 
   const { contextBudget, retrievalCount } = memorySettingsOf(chat);
@@ -366,8 +370,9 @@ async function enqueueBackfill(deps: AppDeps, chatId: string, runAt?: Date): Pro
 }
 
 /**
- * Invalidates the memory layer for an in-place assistant edit. Runs inside the
- * edit's own transaction, so the bump and the edit land together.
+ * Invalidates the memory layer for an in-place assistant edit — and for a delete,
+ * and a message hidden from the AI or shown to it again. Runs inside the edit's
+ * own transaction, so the bump and the edit land together.
  *
  * Every edit bumps `memory_revision`, which discards any refresh whose snapshot
  * may still contain the old text. An edit the summary already covers additionally
@@ -447,7 +452,7 @@ function overThreshold(chat: Chat, summary: string, history: Message[]): boolean
 /** Whether this branch is due a fold: what an import asks before it queues a backfill. */
 export function overSummaryThreshold(chat: Chat, path: Message[]): boolean {
   const { summary, history } = applyMemory(path, chat);
-  return overThreshold(chat, summary, history);
+  return overThreshold(chat, summary, visibleToAi(history));
 }
 
 /**

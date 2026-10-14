@@ -157,6 +157,56 @@ export function displayScriptPatternError(source: string): PatternRejection | nu
 }
 
 /**
+ * The deepest bound a display script's range may name: past the length of any
+ * chat (an import holds 20,000 messages), so the cap never changes what runs.
+ */
+export const MAX_DISPLAY_DEPTH = 100_000;
+
+/**
+ * One depth bound as SillyTavern reads one — a number, or the numeric string an
+ * old export left — rounded inward to whole messages and capped. Undefined where
+ * ST sets no limit on a message on screen: no value, not a number, or below 0
+ * (a min of -1 only reaches a prompt's continue, and ST ignores a negative max).
+ */
+function displayDepthBound(value: unknown, round: (value: number) => number): number | undefined {
+  if (value === null || value === undefined || value === '') return undefined;
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) return undefined;
+  return Math.min(MAX_DISPLAY_DEPTH, round(number));
+}
+
+/**
+ * A display script's range (`DisplayScript.minDepth`/`maxDepth`), each bound
+ * only where it limits something. A min above the max is kept as written: ST
+ * runs such a script on no message, and so does this.
+ */
+export function coerceDisplayDepth(raw: {
+  minDepth?: unknown;
+  maxDepth?: unknown;
+}): Pick<DisplayScript, 'minDepth' | 'maxDepth'> {
+  const minDepth = displayDepthBound(raw.minDepth, Math.ceil);
+  const maxDepth = displayDepthBound(raw.maxDepth, Math.floor);
+  return {
+    ...(minDepth !== undefined ? { minDepth } : {}),
+    ...(maxDepth !== undefined ? { maxDepth } : {}),
+  };
+}
+
+/**
+ * Whether a script runs on a message `depth` deep — SillyTavern's
+ * `getRegexedString`: both bounds inclusive. Undefined depth is ST's hidden
+ * message, which it numbers no depth and so holds to no range.
+ */
+export function inDisplayDepth(
+  script: Pick<DisplayScript, 'minDepth' | 'maxDepth'>,
+  depth: number | undefined,
+): boolean {
+  if (depth === undefined) return true;
+  if (script.minDepth !== undefined && depth < script.minDepth) return false;
+  return script.maxDepth === undefined || depth <= script.maxDepth;
+}
+
+/**
  * The scripts that dress a message `memberId` is the speaker of, in a work of
  * several members: every untagged script, and the ones tagged with that member
  * (`DisplayScript.memberId`, the card a script came with). A tagged script is

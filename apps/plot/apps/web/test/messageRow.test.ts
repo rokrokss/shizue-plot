@@ -35,6 +35,10 @@ const messages = {
     copied: '복사됨',
     editMessage: '메시지 수정',
     deleteMessage: '삭제',
+    hideFromAi: 'AI에게 숨기기',
+    hideFromAiHint: '숨기기 힌트',
+    showToAi: 'AI에게 다시 보이기',
+    hiddenFromAi: 'AI에게 숨김',
   },
   common: { cancel: '취소', save: '저장', saving: '저장 중…' },
 };
@@ -397,4 +401,60 @@ it('locks editing and cancellation until save settles, preserving a rejected dra
   await act(async () => fail(new Error('save failed')));
   expect(host.querySelector('textarea')!.value).toBe('보존할 메시지');
   expect(host.querySelector('textarea')!.matches(':disabled')).toBe(false);
+});
+
+describe('a message hidden from the AI', () => {
+  const button = (label: string): HTMLButtonElement | undefined =>
+    [...host.querySelectorAll('button')].find((node) => node.textContent === label);
+  const ROSTER = [
+    { id: 'c1', name: '아리아', avatarUrl: null },
+    { id: 'c2', name: '카이', avatarUrl: null },
+  ];
+  /** The mark, and whether the box around what the message says is dimmed. */
+  const drawn = () => ({
+    mark: host.querySelector('[data-testid="message-hidden"]')?.textContent ?? null,
+    dimmed: host.querySelector('.opacity-\\[0\\.58\\]') !== null,
+  });
+
+  it('is dimmed and says so, as a reply, the reader’s turn, a narration and a member’s round reply', () => {
+    const kinds: [string, MessageRole, Record<string, unknown>][] = [
+      ['눈이 그쳤다', 'assistant', { name: '아리아', model: 'GPT-5' }],
+      ['문을 열었다', 'user', {}],
+      ['@: 바람이 분다', 'assistant', {}],
+      ['*잔을 든다* 건배.', 'assistant', { roster: ROSTER, speaker: '카이', model: 'GPT-5' }],
+    ];
+    for (const [content, role, extra] of kinds) {
+      render(row(content, role, extra));
+      expect(drawn(), content).toEqual({ mark: null, dimmed: false });
+      render(row(content, role, { ...extra, hidden: true }));
+      expect(drawn(), content).toEqual({ mark: 'AI에게 숨김', dimmed: true });
+    }
+  });
+
+  it('says so beside the model that wrote the reply, under its bubble', () => {
+    render(row('눈이 그쳤다', 'assistant', { roster: ROSTER, speaker: '아리아', model: 'GPT-5', hidden: true }));
+    const mark = host.querySelector('[data-testid="message-hidden"]')!;
+    expect(mark.closest('.chat-bubble')).toBeNull();
+    expect(mark.nextElementSibling?.getAttribute('data-testid')).toBe('message-model');
+  });
+
+  it('dims none of the controls under the last row', () => {
+    const footer = createElement('button', { type: 'button' }, '다시 생성');
+    render(row('눈이 그쳤다', 'assistant', { name: '아리아', hidden: true, footer }));
+    expect(button('다시 생성')!.closest('.opacity-\\[0\\.58\\]')).toBeNull();
+  });
+
+  it('is hidden and shown again from the row’s own actions, where the page hands them down', async () => {
+    render(row('문을 열었다'));
+    expect(button('AI에게 숨기기')).toBeUndefined();
+
+    const toggled: string[] = [];
+    render(row('문을 열었다', 'user', { onToggleHidden: () => toggled.push('hide') }));
+    const hide = button('AI에게 숨기기')!;
+    expect(hide.className).toContain('opacity-0');
+    await act(async () => hide.click());
+    render(row('문을 열었다', 'user', { hidden: true, onToggleHidden: () => toggled.push('show') }));
+    await act(async () => button('AI에게 다시 보이기')!.click());
+    expect(toggled).toEqual(['hide', 'show']);
+  });
 });

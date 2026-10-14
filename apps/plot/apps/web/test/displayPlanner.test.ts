@@ -16,6 +16,8 @@ import {
   type PlannerWorker,
 } from '../src/lib/displayPlanner';
 import {
+  displayContextAt,
+  displayScriptsAt,
   PLAN_LIMITS,
   planDisplayScripts,
   renderDisplayPlan,
@@ -322,6 +324,52 @@ describe('the answers it keeps', () => {
     expect(planner.cached(request)).toBeNull();
     await expect(planner.plan(request)).resolves.toBeNull();
     expect(StubWorker.made).toHaveLength(1);
+  });
+});
+
+describe('the range a script runs in', () => {
+  afterEach(() => {
+    StubWorker.made = [];
+  });
+
+  const near = script({ in: 'near', maxDepth: 1 });
+  const far = script({ in: 'far', minDepth: 2 });
+  const always = script({ in: 'always' });
+  const scripts = [near, far, always];
+
+  it('keeps out the scripts out of range, the same list for the same ones', () => {
+    expect(displayScriptsAt(scripts, 0)).toEqual([near, always]);
+    expect(displayScriptsAt(scripts, 1)).toBe(displayScriptsAt(scripts, 0));
+    expect(displayScriptsAt(scripts, 2)).toEqual([far, always]);
+    expect(displayScriptsAt(scripts, 40)).toBe(displayScriptsAt(scripts, 2));
+    // No range in the list, or no depth on the message (hidden from the AI): the list itself.
+    const plain = [always];
+    expect(displayScriptsAt(plain, 5)).toBe(plain);
+    expect(displayScriptsAt(scripts, undefined)).toBe(scripts);
+  });
+
+  it('asks the worker nothing for a message out of every range, and only for the scripts in it', async () => {
+    const lone = context([near]);
+    expect(displayContextAt(lone, 2)).toBeUndefined();
+    expect(displayContextAt(lone, 0)).toBe(lone);
+
+    const all = context(scripts);
+    const at = (depth: number) => ({
+      content: 'far always',
+      scripts: displayContextAt(all, depth)!.scripts,
+      previousSameRole: '',
+    });
+    expect(displayContextAt(all, 3)).toBe(displayContextAt(all, 9));
+    const planner = createDisplayPlanner(() => new StubWorker());
+    const asked = planner.plan(at(3));
+    const worker = StubWorker.made[0]!;
+    worker.ready();
+    expect((worker.asked[0]!['scripts'] as DisplayScript[]).map((one) => one.in)).toEqual(['far', 'always']);
+    worker.answer(EMPTY);
+    await asked;
+    // A turn later the message is deeper, its scripts the same: its plan is kept.
+    expect(planner.cached(at(4))).toEqual(EMPTY);
+    expect(planner.cached(at(0))).toBeUndefined();
   });
 });
 

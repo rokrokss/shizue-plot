@@ -551,6 +551,10 @@ export const messages = pgTable(
     // which carries its own. Unconstrained, as `head_message_id` is — a label the
     // round's replies share, which outlives the message it was taken from.
     groupTurnId: uuid('group_turn_id'),
+    // Hidden from the AI (SillyTavern's /hide): still on screen, never in what a
+    // model reads — the prompt, the lore scan, the memory, suggestions. On the
+    // node, so every branch through it shares it. Card scripts still see it.
+    hiddenFromPrompt: boolean('hidden_from_prompt').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

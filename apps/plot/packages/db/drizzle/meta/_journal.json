@@ -64,6 +64,13 @@
       "when": 1791935255308,
       "tag": "0008_group_turns",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1791969473551,
+      "tag": "0009_hidden_from_prompt",
+      "breakpoints": true
     }
   ]
 }

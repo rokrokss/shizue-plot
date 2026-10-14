@@ -362,3 +362,28 @@ test('the window channel stays shut after the handshake', async () => {
   await page.evaluate(() => window.postMessage({ type: 'suggestInput', text: '악성 입력' }, '*'));
   await expect(composer).toHaveValue('');
 });
+
+test('a script given a range dresses only the messages in it', async () => {
+  // SillyTavern's max depth 0: the newest message alone.
+  await page.goto(`/ko/plots/${plotId}`);
+  await page.getByTestId('display-script').first().locator('summary').click();
+  await page.getByRole('spinbutton', { name: '적용 범위 끝' }).fill('0');
+  await page.getByRole('button', { name: '저장', exact: true }).click();
+  await expect(page.getByText('저장했습니다')).toBeVisible();
+  await page.reload();
+  await page.getByTestId('display-script').first().locator('summary').click();
+  await expect(page.getByRole('spinbutton', { name: '적용 범위 끝' })).toHaveValue('0');
+  await expect(page.getByRole('spinbutton', { name: '적용 범위 시작' })).toHaveValue('');
+
+  await startChat();
+  for (const turns of [2, 3]) {
+    await page.getByPlaceholder('메시지를 입력하세요').fill(statusTurn);
+    await page.getByRole('button', { name: '보내기' }).click();
+    await expect(assistantMessages()).toHaveCount(turns);
+  }
+  // The reply before it is two messages deep now: its block is the text it was.
+  const earlier = assistantMessages().nth(1);
+  await expect(earlier.locator('.x-shizue-status')).toHaveCount(0);
+  await expect(earlier).toContainText('[status] hp=50');
+  await expect(assistantMessages().last().locator('.shizue-msg .x-shizue-status')).toContainText('HP 50');
+});

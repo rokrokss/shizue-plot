@@ -64,6 +64,7 @@ import type { ComponentContext } from '@/lib/componentCalls';
 import { toggleDirectionMarkup } from '@/lib/directionMarkup';
 import { streamsNarration } from '@/lib/narrator';
 import {
+  displayContextAt,
   readCustomUiEnabled,
   sameVariables,
   writeCustomUiEnabled,
@@ -282,6 +283,8 @@ interface ViewMessage {
   intro?: boolean;
   /** The model a stored reply was written with, by name — the chat's where the reply names none. */
   model?: string;
+  /** Hidden from the AI: drawn dimmed, and numbered no depth for the display scripts. */
+  hidden?: boolean;
 }
 
 /** Nothing attached, shared so a row without images keeps a stable prop. */
@@ -2284,6 +2287,26 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     }
   }
 
+  /**
+   * Hides a message from the AI or shows it to the AI again (SillyTavern's
+   * /hide): it stays on screen either way. The server answers with the chat, as
+   * a delete does — the memory may have dropped a summary that covered it.
+   */
+  async function toggleHidden(message: ChatMessage): Promise<void> {
+    if (!beginMutation()) return;
+    try {
+      applyState(
+        await apiSend<ChatState>('PUT', `/api/chats/${id}/messages/${message.id}/hidden`, {
+          hidden: !message.hiddenFromPrompt,
+        }),
+      );
+    } catch (caught) {
+      setError(toMessage(caught));
+    } finally {
+      endMutation();
+    }
+  }
+
   /** Today and yesterday by name; anything further back by its date. */
   function dayLabel(iso: string): string {
     const named = relativeDay(iso, new Date());
@@ -2504,6 +2527,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       ...(group && tagged ? { spoken: true } : {}),
       ...(opening ? { intro: true } : {}),
       ...(written ? { model: modelName(message.model ?? state.chat.model) } : {}),
+      ...(message.hiddenFromPrompt ? { hidden: true } : {}),
     };
   });
 
@@ -2887,7 +2911,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                     assets={messageAssets}
                     resolveAsset={resolveAsset}
                     attachments={message.attachments}
-                    {...(displayOf(message) ? { display: displayOf(message)! } : {})}
+                    {...(displayContextAt(displayOf(message), meta.depth)
+                      ? { display: displayContextAt(displayOf(message), meta.depth)! }
+                      : {})}
                     {...(components ? { components } : {})}
                     componentNames={declaredComponents}
                     previousSameRole={meta.previousSameRole}
@@ -2920,6 +2946,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                       ? { onEditScene: () => setSceneEdit(source.id) }
                       : {})}
                     {...(source && !mode ? { onDelete: () => void deleteMessage(source.id) } : {})}
+                    {...(message.hidden ? { hidden: true } : {})}
+                    {...(source && !mode ? { onToggleHidden: () => void toggleHidden(source) } : {})}
                     {...(branches ? { branches } : {})}
                     footer={
                       isLast && showActions ? (
@@ -2982,9 +3010,13 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                                   without on a phone: the least reached for, and the
                                   easiest to describe in a menu. */}
                               <div className="hidden items-center gap-1 sm:flex">
-                                <Button size="sm" variant="ghost" onClick={() => void generate('continue')}>
-                                  {t('continue')}
-                                </Button>
+                                {/* A reply hidden from the AI is not continued: its
+                                    text would go out as the reply being resumed. */}
+                                {!last.hiddenFromPrompt ? (
+                                  <Button size="sm" variant="ghost" onClick={() => void generate('continue')}>
+                                    {t('continue')}
+                                  </Button>
+                                ) : null}
                                 <Button
                                   size="sm"
                                   variant="ghost"
@@ -2998,11 +3030,15 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                                 label={t('moreActions')}
                                 className="sm:hidden"
                                 actions={[
-                                  {
-                                    key: 'continue',
-                                    label: t('continue'),
-                                    onSelect: () => void generate('continue'),
-                                  },
+                                  ...(!last.hiddenFromPrompt
+                                    ? [
+                                        {
+                                          key: 'continue',
+                                          label: t('continue'),
+                                          onSelect: () => void generate('continue'),
+                                        },
+                                      ]
+                                    : []),
                                   { key: 'auto', label: t('auto'), onSelect: () => void generate('auto') },
                                 ]}
                               />

@@ -1444,6 +1444,22 @@ describe('SillyTavern cards', () => {
     expect(reimported.displayScripts).toHaveLength(1);
   });
 
+  it("carries a display-only regex script's depth range, as ST reads it", () => {
+    const script = stCard().data.extensions.regex_scripts[0]!;
+    const ranged = (minDepth: unknown, maxDepth: unknown) => {
+      const raw = stCard();
+      const extensions = { ...raw.data.extensions, regex_scripts: [{ ...script, minDepth, maxDepth }] };
+      const [first] = normalizeCard({ ...raw, data: { ...raw.data, extensions } }).displayScripts!;
+      return { minDepth: first!.minDepth, maxDepth: first!.maxDepth };
+    };
+    expect(ranged(1, 3)).toEqual({ minDepth: 1, maxDepth: 3 });
+    // An old export's strings, and the nulls ST writes for "no limit".
+    expect(ranged('2', '5')).toEqual({ minDepth: 2, maxDepth: 5 });
+    expect(ranged(null, null)).toEqual({ minDepth: undefined, maxDepth: undefined });
+    // ST's -1 minimum and a negative maximum limit nothing on screen.
+    expect(ranged(-1, -1)).toEqual({ minDepth: undefined, maxDepth: undefined });
+  });
+
   it('exports the settings where ST reads them, and reads its own export back', () => {
     const { card } = parseCard(stPng());
     const exported = exportCardV3(card);

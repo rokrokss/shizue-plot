@@ -110,12 +110,17 @@ function requireImportedMessages(body: Record<string, unknown>): ParsedMessage[]
     if (speakerId !== undefined && (role !== 'assistant' || typeof speakerId !== 'string' || !isUuid(speakerId))) {
       throw badRequest('invalid_request', `${where}.speakerId must be a member id, on an assistant message`);
     }
+    const hidden = message['hidden'];
+    if (hidden !== undefined && typeof hidden !== 'boolean') {
+      throw badRequest('invalid_request', `${where}.hidden must be a boolean`);
+    }
     return {
       role,
       versions: versions as string[],
       selected,
       ...(at === undefined ? {} : { at }),
       ...(speakerId === undefined ? {} : { speakerId: speakerId as string }),
+      ...(hidden ? { hidden: true } : {}),
     };
   });
 }
@@ -190,6 +195,8 @@ async function appendImported(
         content: message.versions[version]!,
         // Every version is the same member's reply; each is a round of its own.
         ...(message.speakerId !== undefined ? { speakerMemberId: message.speakerId } : {}),
+        // What the source kept out of the prompt (SillyTavern's `is_system`), every version.
+        ...(message.hidden ? { hiddenFromPrompt: true } : {}),
         createdAt: new Date(stamp),
       });
     });

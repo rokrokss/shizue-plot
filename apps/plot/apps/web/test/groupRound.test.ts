@@ -133,6 +133,10 @@ describe('reading the branch', () => {
     expect(cueOf(undefined)).toEqual({ text: '', lastSpeakerId: null });
   });
 
+  it('reads no names off a message hidden from the AI, as ST reads no activation text off one', () => {
+    expect(cueOf({ ...second, hiddenFromPrompt: true })).toEqual({ text: '', lastSpeakerId: 'kai' });
+  });
+
   it('redoes the whole round, answering what it answered', () => {
     expect(redoOf([user, first, second])).toEqual({ replaces: 2, cue: { text: '안녕', lastSpeakerId: null }, narrator: false });
     // Under the reader's own turn there is nothing to replace: the turn is answered.

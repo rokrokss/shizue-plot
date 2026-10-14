@@ -1,6 +1,7 @@
 import {
   backgroundHtmlOf,
   backgroundWithoutStyles,
+  coerceDisplayDepth,
   coerceNarrator,
   COMPONENT_CAPABILITIES,
   creatorCssFromExtensions,
@@ -131,6 +132,8 @@ function coerceDisplayScript(value: unknown, index: number): DisplayScript {
     // The member the script is for (`DisplayScript.memberId`). Whether it is one
     // of this plot's is the route's to check, holding the roster.
     ...(typeof memberId === 'string' && isUuid(memberId) ? { memberId: memberId.toLowerCase() } : {}),
+    // The messages it runs on, by depth; absent bounds limit nothing.
+    ...coerceDisplayDepth(raw),
   };
 }
 

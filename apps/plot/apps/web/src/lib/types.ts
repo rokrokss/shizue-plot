@@ -614,6 +614,11 @@ export interface ChatMessage {
    */
   speakerMemberId?: string | null;
   groupTurnId?: string | null;
+  /**
+   * Hidden from the AI (SillyTavern's hide): drawn dimmed and left out of what a
+   * model reads. Optional for a message built by hand.
+   */
+  hiddenFromPrompt?: boolean;
   createdAt: string;
 }
 

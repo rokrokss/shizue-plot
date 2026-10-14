@@ -5,7 +5,7 @@ import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 /**
  * The SillyTavern move along the owner's path: a backup zip built here — two
  * characters (one with a linked World Info file, an extra lorebook and a chat
- * with swipes, a narrator line and a hidden line), a group of both with a group
+ * with swipes, a narrator line and a line hidden from the AI), a group of both with a group
  * chat — run in list order with Bob muted, and each card with its talkativeness —
  * a persona with its picture, and a settings.json holding a proxy password
  * beside a secrets.json — goes through the wizard; the plots, members, lorebooks,
@@ -175,7 +175,7 @@ const backup = storedZip({
     { user_name: persona, character_name: alice, create_date: '2024-05-01@12h00m00s', chat_metadata: {} },
     { name: persona, is_user: true, is_system: false, send_date: at(1), mes: '안녕하세요' },
     { name: alice, is_user: false, is_system: false, send_date: at(2), mes: '첫 번째 대답', swipes: ['첫 번째 대답', '두 번째 대답'], swipe_id: 0 },
-    { name: 'System', is_user: false, is_system: true, send_date: at(3), mes: '시계가 여섯 시를 친다.', extra: { type: 'narrator' } },
+    { name: 'System', is_user: false, is_system: false, send_date: at(3), mes: '시계가 여섯 시를 친다.', extra: { type: 'narrator' } },
     { name: alice, is_user: false, is_system: true, send_date: at(4), mes: '숨겨진 줄' },
     { name: persona, is_user: true, is_system: false, send_date: at(5), mes: '차 마실래요?' },
     { name: alice, is_user: false, is_system: false, send_date: at(6), mes: '좋아요.' },
@@ -222,7 +222,7 @@ interface ChatRow {
 }
 interface ChatState {
   chat: ChatRow;
-  path: { id: string; content: string; speakerMemberId?: string | null }[];
+  path: { id: string; content: string; speakerMemberId?: string | null; hiddenFromPrompt?: boolean }[];
   siblings: Record<string, { total: number }>;
 }
 
@@ -347,9 +347,12 @@ test('the chats come over with their swipes, speakers and persona', async () => 
     '안녕하세요',
     `${alice}: 첫 번째 대답`,
     '@: 시계가 여섯 시를 친다.',
+    `${alice}: 숨겨진 줄`,
     '차 마실래요?',
     `${alice}: 좋아요.`,
   ]);
+  // The line ST kept out of the prompt comes over hidden from the AI.
+  expect(state.path.map((message) => message.hiddenFromPrompt)).toEqual([false, false, false, true, false, false]);
   // The other swipe is the reply's sibling.
   expect(state.siblings[state.path[1]!.id]?.total).toBe(2);
 
@@ -373,7 +376,10 @@ test('the chats come over with their swipes, speakers and persona', async () => 
   await page.goto(`/ko/chats/${solo.id}`);
   await expect(page.locator(`[data-testid="speech-character"][data-speaker="${alice}"]`).first()).toBeVisible();
   await expect(page.getByTestId('message-narration').filter({ hasText: '시계가 여섯 시를 친다.' })).toBeVisible();
-  await expect(page.getByText('숨겨진 줄')).toHaveCount(0);
+  // On screen, dimmed and marked, as the ghost is in ST.
+  const ghost = page.getByTestId('message-assistant').filter({ hasText: '숨겨진 줄' });
+  await expect(ghost.getByTestId('message-hidden')).toHaveText('AI에게 숨김');
+  await expect(page.getByTestId('message-hidden')).toHaveCount(1);
   await expect(page.getByTestId('chat-importing')).toHaveCount(0);
 
   // Each imported group reply is drawn under its own member.

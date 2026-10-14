@@ -11,6 +11,7 @@ import type { ComponentContext } from '@/lib/componentCalls';
 import type { DisplayContext } from '@/lib/displayScripts';
 import type { ChatAttachment, MessageRole, PublicMember } from '@/lib/types';
 import { Avatar } from './Avatar';
+import { Icon } from './Icon';
 import { MessageAttachments } from './MessageAttachments';
 import { MessageBody } from './MessageBody';
 import { StatusCard } from './StatusCard';
@@ -32,6 +33,12 @@ const ACTIONS_ABOVE = 'absolute bottom-full flex h-5 items-center gap-2';
 
 /** The standard ring. These are plain buttons, so each one wears it itself. */
 const FOCUS_RING = 'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
+
+/**
+ * A message hidden from the AI: still there to read, a step back from the rest.
+ * Only what the message says is dimmed — never the controls under the last row.
+ */
+const HIDDEN_DIM = 'opacity-[0.58]';
 
 /** Nothing to attribute the reply to, so the row speaks for it. */
 const NO_ROSTER: readonly PublicMember[] = [];
@@ -143,6 +150,8 @@ export const MessageRow = memo(function MessageRow({
   onSave,
   onEditScene,
   onDelete,
+  hidden = false,
+  onToggleHidden,
   branches,
   footer,
 }: {
@@ -236,6 +245,13 @@ export const MessageRow = memo(function MessageRow({
   onEditScene?: () => void;
   /** Deletes this turn and everything under it; the page owns the confirmation. */
   onDelete?: () => void;
+  /**
+   * Hidden from the AI (SillyTavern's hide): drawn dimmed, and said so beside the
+   * model's name — still on screen, never in what a model reads.
+   */
+  hidden?: boolean;
+  /** Hides the message from the AI, or shows it to the AI again; the page owns the request. */
+  onToggleHidden?: () => void;
   /**
    * Where this message sits among its siblings, when it has any. A fork can land
    * anywhere on the branch — a scene edit makes one mid-path — so the way back to
@@ -371,6 +387,21 @@ export const MessageRow = memo(function MessageRow({
           className={cx(QUIET_ACTION, FOCUS_RING, 'hover:text-link', copied && 'opacity-100')}
         >
           {copied ? t('copied') : t('copyMessage')}
+        </button>
+      ) : null}
+      {onToggleHidden && showActions ? (
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={onToggleHidden}
+          aria-label={hidden ? t('showToAi') : t('hideFromAi')}
+          title={hidden ? t('showToAi') : t('hideFromAiHint')}
+          className={cx(QUIET_ACTION, FOCUS_RING, 'inline-flex items-center hover:text-link')}
+        >
+          {/* A phone's row has no room for these words beside the others, and the
+              name would be squeezed for them: the eye says it there. */}
+          <Icon name={hidden ? 'eye' : 'eyeOff'} className="size-3.5 sm:hidden" />
+          <span className="hidden sm:inline">{hidden ? t('showToAi') : t('hideFromAi')}</span>
         </button>
       ) : null}
       {onDelete && showActions ? (
@@ -516,6 +547,23 @@ export const MessageRow = memo(function MessageRow({
       </span>
     ) : undefined;
 
+  /** Says the message is hidden from the AI, in the meta line by the model's name. */
+  const hiddenMark = hidden ? (
+    <span data-testid="message-hidden" className="chat-meta caption2 inline-flex items-center gap-1 text-muted">
+      <Icon name="eyeOff" className="size-3" />
+      {t('hiddenFromAi')}
+    </span>
+  ) : null;
+  /** The meta line under a reply's last bubble: the mark, then the model. */
+  const meta = hiddenMark ? (
+    <span className="inline-flex items-center gap-2">
+      {hiddenMark}
+      {modelLabel}
+    </span>
+  ) : modelLabel;
+  /** What a hidden message's own content is drawn with; nothing while it is edited. */
+  const dim = hidden && !editing ? HIDDEN_DIM : undefined;
+
   const memberProps = member ? { 'data-shizue-member': member, ...(spoken ? { 'data-shizue-spoken': '' } : {}) } : {};
 
   // No bubble, no face and no label: the ≡ at its start and muted italics mark
@@ -524,8 +572,14 @@ export const MessageRow = memo(function MessageRow({
     return (
       <div data-testid="message-narration" {...memberProps} className="group relative min-w-0">
         {editor ?? (
-          <div>
-            <MessageBody {...bodyProps} content={narrationBody(body)} mode="narration" sceneHeadings />
+          <div className={dim}>
+            <MessageBody
+              {...bodyProps}
+              content={narrationBody(body)}
+              mode="narration"
+              sceneHeadings
+              {...(hiddenMark ? { trailer: hiddenMark } : {})}
+            />
             {thinking ? <ThinkingClock plain /> : null}
             {statusCard}
           </div>
@@ -546,7 +600,7 @@ export const MessageRow = memo(function MessageRow({
         {grouped ? (
           <div aria-hidden="true" className="w-10 shrink-0" />
         ) : (
-          <Avatar src={userImage ?? null} name={name} className="size-10 text-sm" />
+          <Avatar src={userImage ?? null} name={name} className={cx('size-10 text-sm', dim)} />
         )}
         <div className="relative flex min-w-0 flex-1 flex-col items-end">
           {/* A continued turn is the same reader moments later: the name was
@@ -556,58 +610,63 @@ export const MessageRow = memo(function MessageRow({
           ) : (
             <div className="flex min-h-5 items-center justify-end gap-2">
               {actions}
-              <span className="chat-name text-xs font-medium text-link">{name}</span>
+              <span className={cx('chat-name text-xs font-medium text-link', dim)}>{name}</span>
             </div>
           )}
-          {editor ??
-            (written ? (
-              // Each stretch as who wrote it: the reader's own in their bubble, a
-              // member's as that member's speech, the narrator's as narration — the
-              // same components a reply is drawn with, one per stretch.
-              <div data-testid="reader-runs" className="mt-1 w-full space-y-3">
-                {attachments?.length ? (
-                  <div className="flex justify-end">
-                    <MessageAttachments attachments={attachments} />
-                  </div>
-                ) : null}
-                {written.map((run, index) =>
-                  run.kind === 'user' ? (
-                    <div key={index} className="flex justify-end">
-                      <div className={USER_BUBBLE}>
-                        <MessageBody {...bodyProps} content={run.text} />
+          {editor ?? (
+            <div className={cx('flex w-full min-w-0 flex-col items-end', dim)}>
+              {written ? (
+                // Each stretch as who wrote it: the reader's own in their bubble, a
+                // member's as that member's speech, the narrator's as narration — the
+                // same components a reply is drawn with, one per stretch.
+                <div data-testid="reader-runs" className="mt-1 w-full space-y-3">
+                  {attachments?.length ? (
+                    <div className="flex justify-end">
+                      <MessageAttachments attachments={attachments} />
+                    </div>
+                  ) : null}
+                  {written.map((run, index) =>
+                    run.kind === 'user' ? (
+                      <div key={index} className="flex justify-end">
+                        <div className={USER_BUBBLE}>
+                          <MessageBody {...bodyProps} content={run.text} />
+                        </div>
                       </div>
-                    </div>
-                  ) : run.kind === 'narration' ? (
-                    <div key={index} data-testid="reader-narration">
-                      <MessageBody {...bodyProps} content={run.text} mode="narration" sceneHeadings />
-                    </div>
-                  ) : (
-                    <div key={index} data-testid="reader-member">
-                      <MessageBody
-                        {...bodyProps}
-                        content={run.text}
-                        roster={roster}
-                        speaker={roster.find((entry) => entry.id === run.memberId)?.name ?? ''}
-                        mode="reply"
-                      />
-                    </div>
-                  ),
-                )}
-              </div>
-            ) : (
-              <>
-                {/* Above the bubble, in the flow: the picture is part of the turn,
-                    and the words are usually about it. */}
-                {attachments?.length ? (
-                  <div className="mt-1 max-w-[min(100%,36rem)]">
-                    <MessageAttachments attachments={attachments} />
-                  </div>
-                ) : null}
-                <div className={cx(USER_BUBBLE, 'mt-1')}>
-                  <MessageBody {...bodyProps} content={body} />
+                    ) : run.kind === 'narration' ? (
+                      <div key={index} data-testid="reader-narration">
+                        <MessageBody {...bodyProps} content={run.text} mode="narration" sceneHeadings />
+                      </div>
+                    ) : (
+                      <div key={index} data-testid="reader-member">
+                        <MessageBody
+                          {...bodyProps}
+                          content={run.text}
+                          roster={roster}
+                          speaker={roster.find((entry) => entry.id === run.memberId)?.name ?? ''}
+                          mode="reply"
+                        />
+                      </div>
+                    ),
+                  )}
                 </div>
-              </>
-            ))}
+              ) : (
+                <>
+                  {/* Above the bubble, in the flow: the picture is part of the turn,
+                      and the words are usually about it. */}
+                  {attachments?.length ? (
+                    <div className="mt-1 max-w-[min(100%,36rem)]">
+                      <MessageAttachments attachments={attachments} />
+                    </div>
+                  ) : null}
+                  <div className={cx(USER_BUBBLE, 'mt-1')}>
+                    <MessageBody {...bodyProps} content={body} />
+                  </div>
+                </>
+              )}
+              {/* Under the bubble, at its corner, as a reply's model name is. */}
+              {hiddenMark ? <div className="mt-1">{hiddenMark}</div> : null}
+            </div>
+          )}
           {footer}
         </div>
       </div>
@@ -632,7 +691,7 @@ export const MessageRow = memo(function MessageRow({
     return (
       <div data-testid="message-assistant" {...memberProps} className="group min-w-0">
         {editor ?? (
-          <>
+          <div className={dim}>
             <MessageBody
               {...bodyProps}
               content={body}
@@ -642,11 +701,11 @@ export const MessageRow = memo(function MessageRow({
               sceneHeadings={intro}
               continued={grouped ?? false}
               {...(hasActions ? { header: actions } : {})}
-              {...(modelLabel ? { trailer: modelLabel } : {})}
+              {...(meta ? { trailer: meta } : {})}
             />
             {clock}
             {statusCard ? <div className="mt-3">{statusCard}</div> : null}
-          </>
+          </div>
         )}
         {offerAt('pl-12.5')}
         {footer}
@@ -662,7 +721,7 @@ export const MessageRow = memo(function MessageRow({
     return (
       <div data-testid="message-assistant" {...memberProps} className="group min-w-0">
         {editor ?? (
-          <>
+          <div className={dim}>
             <MessageBody
               {...bodyProps}
               content={body}
@@ -671,7 +730,7 @@ export const MessageRow = memo(function MessageRow({
               sceneHeadings
               continued={grouped ?? false}
               {...(hasActions ? { header: actions } : {})}
-              {...(modelLabel ? { trailer: modelLabel } : {})}
+              {...(meta ? { trailer: meta } : {})}
             />
             {thinking ? (
               <div className={cx('pl-12.5', body.trim() && 'mt-3')}>
@@ -679,7 +738,7 @@ export const MessageRow = memo(function MessageRow({
               </div>
             ) : null}
             {statusCard ? <div className="mt-3 pl-12.5">{statusCard}</div> : null}
-          </>
+          </div>
         )}
         {offerAt('pl-12.5')}
         {footer ? <div className="pl-12.5">{footer}</div> : null}
@@ -695,25 +754,25 @@ export const MessageRow = memo(function MessageRow({
         // The avatar's own width, so a continued turn stays in the column.
         <div aria-hidden="true" className="w-10 shrink-0" />
       ) : (
-        <Avatar src={avatar} name={name} className="size-10 text-sm" />
+        <Avatar src={avatar} name={name} className={cx('size-10 text-sm', dim)} />
       )}
       <div className="relative min-w-0 flex-1">
         {grouped ? (
           <div className={cx(ACTIONS_ABOVE, 'left-0')}>{actions}</div>
         ) : (
           <div className="flex min-h-5 items-center gap-2">
-            <span className="chat-name text-xs font-medium text-muted">{name}</span>
+            <span className={cx('chat-name text-xs font-medium text-muted', dim)}>{name}</span>
             {actions}
           </div>
         )}
         {editor ?? (
-          <div className={grouped ? undefined : 'mt-1'}>
+          <div className={cx(!grouped && 'mt-1', dim)}>
             <MessageBody
               {...bodyProps}
               content={body}
               mode="reply"
               sceneHeadings={intro}
-              {...(modelLabel ? { trailer: modelLabel } : {})}
+              {...(meta ? { trailer: meta } : {})}
             />
             {thinking ? (
               <div className={body.trim() ? 'mt-3' : undefined}>

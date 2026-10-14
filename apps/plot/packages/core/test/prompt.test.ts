@@ -2077,6 +2077,57 @@ describe('assemblePrompt - what the prompt scripts made of the history', () => {
   });
 });
 
+describe('assemblePrompt - messages hidden from the AI', () => {
+  const turns: HistoryMessage[] = [
+    { role: 'assistant', content: '인사 {{chat_index}}' },
+    { role: 'user', content: '숨긴 말: 비밀 열쇠', hidden: true },
+    { role: 'assistant', content: '대답 {{chat_index}}' },
+    { role: 'user', content: '보이는 말' },
+  ];
+  const assembleWith = (turnsSent: HistoryMessage[], extra: { report?: boolean; contextBudget?: number } = {}) =>
+    assemblePrompt({ plot, characters: [bareAria], history: turnsSent, preset, userName: '민준', maxResponseTokens: 0, ...extra });
+
+  it('sends none of a hidden turn, and still counts it where the stored chat is read', () => {
+    const { messages, report, risu } = assembleWith(turns, { report: true });
+    // The turn after it reads its index on the stored chat, the hidden turn among it.
+    expect(messages.map((message) => promptText(message.content))).toEqual(['인사 0', '대답 2', '보이는 말', 'POST']);
+    expect(report!.history).toEqual({ included: 3, total: 3 });
+    // Nothing was cut off the front for the request editors: a hidden turn is not dropped history.
+    expect(risu!.fromStart).toBe(true);
+    expect(assembleWith([{ ...turns[0]!, hidden: true }, ...turns.slice(1)]).risu!.fromStart).toBe(true);
+  });
+
+  it('scans no hidden turn for lore keywords', () => {
+    const lorebook = [loreEntry({ content: 'KEY-LORE', constant: false, keys: ['열쇠'] })];
+    const scanned = (turnsSent: HistoryMessage[]): string =>
+      assemblePrompt({
+        plot,
+        characters: [{ name: '아리아', card: { ...bareCard, lorebook } }],
+        history: turnsSent,
+        preset,
+        userName: '민준',
+      }).system;
+    expect(scanned(turns)).not.toContain('KEY-LORE');
+    expect(scanned(turns.map(({ hidden: _hidden, ...turn }) => turn))).toContain('KEY-LORE');
+  });
+
+  it('keeps the newest turn the AI reads when the budget is spent, never a hidden one', () => {
+    const tail: HistoryMessage[] = [...turns, { role: 'assistant', content: '숨긴 답', hidden: true }];
+    const tiny = assembleWith(tail, { contextBudget: 1 });
+    expect(tiny.messages.map((message) => promptText(message.content))).toEqual(['보이는 말', 'POST']);
+    expect(tiny.risu!.fromStart).toBe(false);
+  });
+
+  it('sends no history at all when every turn is hidden', () => {
+    const { messages, report } = assembleWith(
+      turns.map((turn) => ({ ...turn, hidden: true })),
+      { report: true },
+    );
+    expect(messages.map((message) => promptText(message.content))).toEqual(['POST']);
+    expect(report!.history).toEqual({ included: 0, total: 0 });
+  });
+});
+
 describe("assemblePrompt - SillyTavern's World Info settings", () => {
   it('gives the automatic budget the share the book names', () => {
     const words = '단어 '.repeat(40).trim();

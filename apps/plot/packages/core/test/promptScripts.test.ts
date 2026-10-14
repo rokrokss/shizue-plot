@@ -162,6 +162,18 @@ describe('promptScriptJob', () => {
     });
     expect(promptScriptJob(turns, []).messages.map((message) => message.chatIndex)).toEqual([0, 1]);
   });
+
+  it('counts no turn hidden from the AI toward depth, as ST counts its coreChat', () => {
+    const turns = [
+      { role: 'user' as const, content: 'a' },
+      { role: 'assistant' as const, content: 'b', hidden: true },
+      { role: 'user' as const, content: 'c' },
+      { role: 'assistant' as const, content: 'd', hidden: true },
+    ];
+    const job = promptScriptJob(turns, []);
+    expect(job.messages.map((message) => message.chatIndex)).toEqual([0, 1, 2, 3]);
+    expect([job.messages[0]!.depth, job.messages[2]!.depth]).toEqual([1, 0]);
+  });
 });
 
 describe('runPromptScripts - RisuAI', () => {

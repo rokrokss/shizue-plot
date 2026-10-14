@@ -1,8 +1,50 @@
 import { describe, expect, it } from 'vitest';
 import {
+  coerceDisplayDepth,
   displayScriptPatternError,
+  inDisplayDepth,
+  MAX_DISPLAY_DEPTH,
   MAX_DISPLAY_PATTERN_LENGTH,
 } from '../src/displayScript.js';
+
+describe('coerceDisplayDepth', () => {
+  it('keeps whole, non-negative bounds and drops the rest as no limit', () => {
+    expect(coerceDisplayDepth({ minDepth: 0, maxDepth: 4 })).toEqual({ minDepth: 0, maxDepth: 4 });
+    expect(coerceDisplayDepth({})).toEqual({});
+    expect(coerceDisplayDepth({ minDepth: null, maxDepth: '' })).toEqual({});
+    expect(coerceDisplayDepth({ minDepth: -1, maxDepth: -3 })).toEqual({});
+    expect(coerceDisplayDepth({ minDepth: 'abc', maxDepth: Number.NaN })).toEqual({});
+    expect(coerceDisplayDepth({ minDepth: Infinity })).toEqual({});
+  });
+
+  it('reads numeric strings and rounds inward, so whole depths run as ST runs them', () => {
+    expect(coerceDisplayDepth({ minDepth: '2', maxDepth: '7' })).toEqual({ minDepth: 2, maxDepth: 7 });
+    expect(coerceDisplayDepth({ minDepth: 1.2, maxDepth: 3.8 })).toEqual({ minDepth: 2, maxDepth: 3 });
+  });
+
+  it('caps a bound, and keeps a minimum above the maximum as written', () => {
+    expect(coerceDisplayDepth({ minDepth: 10 ** 9 })).toEqual({ minDepth: MAX_DISPLAY_DEPTH });
+    expect(coerceDisplayDepth({ minDepth: 5, maxDepth: 2 })).toEqual({ minDepth: 5, maxDepth: 2 });
+  });
+});
+
+describe('inDisplayDepth', () => {
+  it('runs inside both bounds, inclusive, and everywhere without them', () => {
+    const range = { minDepth: 1, maxDepth: 3 };
+    expect([0, 1, 2, 3, 4].map((depth) => inDisplayDepth(range, depth))).toEqual([false, true, true, true, false]);
+    expect(inDisplayDepth({}, 1000)).toBe(true);
+    expect(inDisplayDepth({ maxDepth: 0 }, 0)).toBe(true);
+    expect(inDisplayDepth({ maxDepth: 0 }, 1)).toBe(false);
+  });
+
+  it('holds a message with no depth — one hidden from the AI — to no range', () => {
+    expect(inDisplayDepth({ minDepth: 1, maxDepth: 1 }, undefined)).toBe(true);
+  });
+
+  it('runs a script whose minimum is above its maximum nowhere', () => {
+    expect([0, 2, 5].some((depth) => inDisplayDepth({ minDepth: 5, maxDepth: 2 }, depth))).toBe(false);
+  });
+});
 
 describe('displayScriptPatternError', () => {
   it('accepts the patterns a status window is actually written with', () => {

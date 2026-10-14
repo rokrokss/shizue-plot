@@ -118,6 +118,39 @@ describe('적용 대상', () => {
   });
 });
 
+describe('적용 범위', () => {
+  const bounds = (testId: string) => [...host.querySelectorAll<HTMLInputElement>(`[data-testid="${testId}"]`)];
+  async function enter(field: HTMLInputElement, value: string) {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+    await act(async () => {
+      setter.call(field, value);
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }
+
+  it('shows each script’s range, blank for no limit, and saves what is typed as the API reads it', async () => {
+    plot = {
+      ...plot,
+      customUi: { displayScripts: [script('\\[all\\]'), { ...script('\\[kai\\]', 'm2'), minDepth: 1, maxDepth: 3 }] },
+    };
+    await render();
+    const group = host.querySelector(`[role="group"][aria-label="${messages.plot.displayScriptRange}"]`)!;
+    expect(group.textContent).toContain(messages.plot.displayScriptRangeHint);
+    expect(bounds('display-script-min-depth').map((field) => field.value)).toEqual(['', '1']);
+    expect(bounds('display-script-max-depth').map((field) => field.value)).toEqual(['', '3']);
+    expect(bounds('display-script-min-depth')[0]!.getAttribute('aria-label')).toBe(messages.plot.displayScriptRangeFrom);
+
+    await enter(bounds('display-script-max-depth')[0]!, '0');
+    await enter(bounds('display-script-min-depth')[1]!, '');
+    await enter(bounds('display-script-max-depth')[1]!, '-2');
+    await click(button(host, messages.common.save));
+    expect(savedUi()['displayScripts']).toEqual([
+      { ...script('\\[all\\]'), maxDepth: 0 },
+      script('\\[kai\\]', 'm2'),
+    ]);
+  });
+});
+
 describe('a member’s stylesheet', () => {
   const adds = () => [...host.querySelectorAll<HTMLButtonElement>('[data-testid="member-css-add"]')];
   const sheets = () => [...host.querySelectorAll<HTMLTextAreaElement>('[data-testid="member-css"]')];
