@@ -143,7 +143,7 @@ const PATTERN_REJECTION: Record<string, string> = {
   too_long: `A display script pattern may be at most ${MAX_DISPLAY_PATTERN_LENGTH} characters`,
   invalid: 'A display script pattern must be a valid regular expression',
   unsafe_repetition:
-    'A display script pattern may not repeat a group that itself repeats or offers a choice — it would hang the reader',
+    'A display script pattern may not repeat a group whose own repeat is not closed by a character it cannot match, or whose choice is not between plain words none of which starts another — it could hang the reader',
 };
 
 /**

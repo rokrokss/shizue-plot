@@ -51,6 +51,20 @@ describe('the import before 353c976', () => {
     });
   });
 
+  it('switched off a repeat inside a repeat with the screen it had, which today’s lets through', () => {
+    // A closed status run: the old screen refused it, today's does not. The
+    // repair still has to recognise the plot the old import left, and hand it
+    // today's — switched on.
+    const card = risu([
+      { in: '(?:⟦[^⟧]*⟧)+', out: '<i>$&</i>', type: 'editdisplay', ableFlag: true, flag: '<order 2>' },
+      { in: 'b', out: 'B', type: 'editdisplay' },
+    ]);
+    const old = legacyDisplayScripts(card);
+    expect(old.scripts?.[0]).toMatchObject({ in: '(?:⟦[^⟧]*⟧)+', enabled: false });
+    expect(currentDisplayScripts(card)?.[0]).toMatchObject({ in: '(?:⟦[^⟧]*⟧)+', enabled: true });
+    expect(judgeDisplayOrder(old.scripts, [card])).toEqual({ kind: 'fix', scripts: currentDisplayScripts(card) });
+  });
+
   it('counted an entry without a pattern before dropping it', () => {
     const card = risu([
       { in: '', out: 'nothing', type: 'editdisplay' },

@@ -34,6 +34,7 @@
  */
 
 import { MAX_TRIGGER_WAIT_MS } from '../triggers/interpreter.js';
+import type { LuaCbsData } from './cbsEngine.js';
 import { JSON_LUA, LUA_WRAPPER } from './prelude.js';
 
 /** The stringified runtime is written loosely; it is erased to plain JavaScript anyway. */
@@ -135,6 +136,13 @@ export interface LuaSnapshot {
   personaImage: string;
   note: string;
   lowLevel: boolean;
+  /**
+   * What RisuAI's `risuChatParser` reads besides the above, for `cbs()` and the
+   * persona and lore readers (`luaCbs`): the reader's clock and the rest of a
+   * run's `data`, and the manual trigger that fired. Absent, they read nothing
+   * more, and `{{trigger_id}}` reads `null`.
+   */
+  cbs?: LuaCbsData;
 }
 
 /** Where in the script a call enters. */
@@ -214,14 +222,15 @@ export type LuaHostName = 'alert' | 'input' | 'select' | 'confirm' | 'llm' | 'si
 /**
  * The worker's program, after wasmoon. `scope` is the worker global; `prelude`
  * is `json.lua` and the two halves of RisuAI's wrapper, and for the server
- * `proxy: false` (`luaWorkerSource`).
+ * `proxy: false` (`luaWorkerSource`); `cbs` is the CBS evaluator the build
+ * bundled (`./cbsEngine.ts`, `@shizue/core/lua-cbs`).
  *
  * The functions declared on each Lua state are RisuAI's (`runScripted` in its
  * `process/scriptings.ts`) — the same names, arguments, gating by access key,
  * sync or promise return — over the call's snapshot instead of the live app.
  * The web's `LUA_CLASSIFICATION` says where each one ends up.
  */
-function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
+function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any, cbs: Any): void {
   'use strict';
 
   // Captured before `lockDown` takes the names off the global.
@@ -355,23 +364,19 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
   }
 
   /**
-   * The macros a script's `cbs()` can be answered with from inside the
-   * sandbox: the names and the variables. RisuAI runs its whole evaluator here;
-   * ours lives on the page, which a synchronous call cannot reach, so the rest
-   * is left as written.
+   * RisuAI's `risuChatParser(text, { chara })`, which `cbs()` and the persona
+   * and lore readers go through: the whole evaluator, with the call as it
+   * stands — the variables as the script has left them so far, the chat as it
+   * has it (`luaCbs`). A text that grows past what one evaluation may hold is
+   * left as written, and noted.
    */
-  function cbsLite(ctx: Any, value: Any): string {
-    return text(value).replace(/\{\{\s*([^{}]*?)\s*\}\}/g, function (whole: string, inner: string) {
-      const at = inner.indexOf('::');
-      const name = (at === -1 ? inner : inner.slice(0, at)).toLowerCase().replace(/[\s_-]/g, '');
-      const arg = at === -1 ? '' : inner.slice(at + 2);
-      if (name === 'char' || name === 'bot') return ctx.char.nickname || ctx.char.name;
-      if (name === 'user') return ctx.user;
-      if (name === 'getvar') return readMap(ctx.vars, arg);
-      if (name === 'getglobalvar') return readMap(ctx.globals, arg);
-      note(ctx, 'cbs', 'only {{char}}, {{user}}, {{getvar}} and {{getglobalvar}} are answered inside the sandbox');
-      return whole;
-    });
+  function parse(ctx: Any, value: Any): string {
+    try {
+      return cbs.luaCbs(value, ctx);
+    } catch (error) {
+      note(ctx, 'cbs', 'a text was left as written: ' + messageOf(error));
+      return text(value);
+    }
   }
 
   function role(value: Any): string {
@@ -629,7 +634,7 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
       });
     });
     set('cbs', function (value: Any) {
-      return cbsLite(c(), value);
+      return parse(c(), value);
     });
     set('setFullChatMain', function (id: Any, value: Any) {
       if (!safe(id)) return;
@@ -793,7 +798,7 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
     });
     set('getPersonaDescription', function () {
       const ctx = c();
-      return cbsLite(ctx, ctx.persona);
+      return parse(ctx, ctx.persona);
     });
     set('getAuthorsNote', function () {
       return c().note;
@@ -819,7 +824,7 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
         const source = sources[s];
         for (let i = 0; i < source.length; i += 1) {
           const book = source[i];
-          if (book.comment === search) found.push(Object.assign({}, book, { content: cbsLite(ctx, book.content) }));
+          if (book.comment === search) found.push(Object.assign({}, book, { content: parse(ctx, book.content) }));
         }
       }
       return JSON.stringify(found);
@@ -865,7 +870,7 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
           const books: Any[] = [];
           const actives = answer.value.actives;
           for (let i = 0; i < actives.length; i += 1) {
-            const parsed = cbsLite(ctx, actives[i].prompt).trim();
+            const parsed = parse(ctx, actives[i].prompt).trim();
             if (parsed.length === 0) continue;
             // As `getTokens` counts them.
             const tokens = Math.ceil(parsed.length / 4);
@@ -924,6 +929,7 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
       persona: snap.persona,
       personaImage: snap.personaImage,
       note: snap.note,
+      cbs: snap.cbs || null,
       stopSending: false,
       res: undefined,
       notes: new Map(),
@@ -1418,6 +1424,13 @@ end
  * browser loader, then our runtime. `scope` is the worker global — `self`, or a
  * stand-in in a test.
  *
+ * `cbs` is the CBS evaluator as the build bundled it (`LUA_CBS_ENGINE` from
+ * `@shizue/core/lua-cbs`): an expression the runtime takes as its own, so
+ * `cbs()` answers at once with the whole language. It is our code, made from
+ * `./cbsEngine.ts`, and runs before the worker locks its global; it compiles
+ * nothing from strings, so the frame's CSP and the server's
+ * `--disallow-code-generation-from-strings` hold over it.
+ *
  * `server` is the API's child, where no CSP keeps `Function` from compiling:
  * its states are made without wasmoon's proxy, so a script cannot index any
  * JavaScript value it is handed (an error's `constructor`, a returned object's
@@ -1427,8 +1440,12 @@ end
  */
 export function luaWorkerSource(
   wasmoonSource: string,
-  scope = 'self',
-  { server = false, check = (runtime: string): string => runtime }: { server?: boolean; check?: (runtime: string) => string } = {},
+  scope: string,
+  {
+    cbs,
+    server = false,
+    check = (runtime: string): string => runtime,
+  }: { cbs: string; server?: boolean; check?: (runtime: string) => string },
 ): string {
   const runtime = check(luaWorkerRuntime.toString());
   const prelude = server
@@ -1439,6 +1456,6 @@ export function luaWorkerSource(
     '(function (exports, module, define, require, process, __filename, __dirname) {',
     wasmoonSource,
     `}).call(${scope});`,
-    `(${runtime})(${scope}, ${JSON.stringify(limits)}, ${JSON.stringify(prelude)});`,
+    `(${runtime})(${scope}, ${JSON.stringify(limits)}, ${JSON.stringify(prelude)}, ${cbs});`,
   ].join('\n');
 }

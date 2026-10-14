@@ -80,12 +80,18 @@ export type FoldItem = string | { readonly content: string; readonly variableDel
 
 /**
  * The limits a stored delta is held to — the API refuses one past them, and the
- * browser that computes one checks the same numbers first. A value may be as
- * long as anything the fold itself lets grow (`MAX_FOLD_CHARS`); a delta is
- * capped in keys and in total size, since it is read back on every fold of the
- * branch. A name the length of a sentence is not a variable anyone reads.
+ * browser and the server's Lua that compute one fit it to them first
+ * (`fitVariableDelta`), keeping what fits. A value may be as long as anything
+ * the fold itself lets grow (`MAX_FOLD_CHARS`); a delta is capped in keys and in
+ * total size, since it is read back on every fold of the branch. A name the
+ * length of a sentence is not a variable anyone reads.
+ *
+ * RisuAI caps none of it. The key cap sits far above what a card writes in one
+ * turn — a Realm card's first reply sets 370 — and the size cap is what bounds
+ * storage: a delta lives only on a message scripts ran for, so what a chat keeps
+ * of its scripts is at most `MAX_DELTA_CHARS` (names and values) per message.
  */
-export const MAX_DELTA_KEYS = 512;
+export const MAX_DELTA_KEYS = 10_000;
 export const MAX_VARIABLE_NAME_LENGTH = 256;
 export const MAX_DELTA_CHARS = 1_000_000;
 
@@ -248,6 +254,64 @@ export function checkVariableDelta(
     delta[key] = entry;
   }
   return { ok: true, delta: keys.length > 0 ? delta : null };
+}
+
+/** What `fitVariableDelta` kept, and how many writes it could not. */
+export interface FittedDelta {
+  delta: VariableDelta | null;
+  /** Writes left out; 0 when everything fit. */
+  dropped: number;
+  /** Why the first write left out was, for a log line; absent when none was. */
+  reason?: string;
+}
+
+/**
+ * `delta` cut to what `checkVariableDelta` takes, for a delta the scripts wrote
+ * rather than one a request carried: every write that fits is kept, in the
+ * order it was made, and only the ones that do not are left out — a name or a
+ * value past its length or holding U+0000, and, once the count or the size is
+ * reached, each one that would pass it. An unset (`null`) costs its name alone,
+ * so it is kept wherever there is room for that.
+ */
+export function fitVariableDelta(
+  delta: VariableDelta | null,
+  limits: DeltaLimits = { keys: MAX_DELTA_KEYS, chars: MAX_DELTA_CHARS },
+): FittedDelta {
+  if (!delta) return { delta: null, dropped: 0 };
+  const kept: VariableDelta = Object.create(null) as VariableDelta;
+  let count = 0;
+  let chars = 0;
+  let dropped = 0;
+  let reason: string | undefined;
+  const drop = (why: string): void => {
+    dropped += 1;
+    reason ??= why;
+  };
+  for (const key of Object.keys(delta)) {
+    const entry = delta[key];
+    if (entry !== null && typeof entry !== 'string') {
+      drop('values must be strings or null');
+    } else if (!key || key.length > MAX_VARIABLE_NAME_LENGTH) {
+      drop(`variable names must be 1 to ${MAX_VARIABLE_NAME_LENGTH} characters`);
+    } else if (entry !== null && entry.length > MAX_VARIABLE_VALUE_LENGTH) {
+      drop(`values may be at most ${MAX_VARIABLE_VALUE_LENGTH} characters`);
+    } else if (key.includes('\u0000') || entry?.includes('\u0000')) {
+      drop('must not contain U+0000');
+    } else if (count >= limits.keys) {
+      drop(`may hold at most ${limits.keys} variables`);
+    } else if (chars + key.length + (entry?.length ?? 0) > limits.chars) {
+      drop(`may hold at most ${limits.chars} characters in all`);
+    } else {
+      kept[key] = entry;
+      count += 1;
+      chars += key.length + (entry?.length ?? 0);
+    }
+  }
+  return {
+    delta: count > 0 ? kept : null,
+    dropped,
+    ...(reason !== undefined ? { reason } : {}),
+  };
 }
 
 /** Thrown by the fold's `grow`, and caught a message at a time. */

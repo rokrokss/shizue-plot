@@ -12,25 +12,35 @@
  * where it can be explained, rather than showing up later as somebody's status
  * window quietly refusing to render.
  *
- * The rule is deliberately blunt: **an unbounded quantifier may not be applied to
- * a group whose body contains another unbounded quantifier or an alternation.**
- * Ambiguity is what makes backtracking explode, and both of those introduce it —
- * `(a|aa)+` is as bad as `(a+)+` and looks nothing like it, so no test for
- * "the branches are the same" would have caught it.
+ * The rule: **an unboundedly repeated group may hold another unbounded repeat or
+ * a `|` choice only in the two shapes that cannot be split two ways.** Ambiguity
+ * is what makes backtracking explode — `(a+)+` can cut a run of a's into
+ * iterations in exponentially many ways, and `(a|aa)+` can too while looking
+ * nothing like it — so a group is refused when its body could match one stretch
+ * of text as more than one sequence of iterations, unless it is one of:
  *
- * That rejects safe patterns too. `(foo|bar)+` is linear and is refused anyway,
- * because deciding which alternations are ambiguous is the analysis this screen
- * exists to avoid. Creators write `[ab]+` rather than `(a|b)+`, and literals,
- * character classes and bounded quantifiers under a quantifier all stay legal, so
- * the patterns status windows are actually made of are unaffected.
+ * - **a delimited run**: a flat sequence (no nested group, no choice) in which
+ *   every unbounded atom is followed at once by a single literal character the
+ *   atom cannot match. `(?:⟦[^⟧]*⟧)+` and `(?:[ \t]*\n)+` are this — the run
+ *   has to stop at the first `⟧` or newline, so where each iteration ends is
+ *   forced. Cards write their status lines this way, and the earlier rule, which
+ *   refused every repeat inside a repeat, disabled 8 of one popular card's 65
+ *   display scripts for it.
+ * - **a choice of plain words** none of which starts another
+ *   (`(?:<br>|</div><div>)*`, `(cat|dog)+`): at each point at most one of them
+ *   can match.
+ *
+ * Whether an atom can match the character after it is asked of the engine
+ * itself, with `i` and `s` on — the screen never sees the script's flags, so
+ * `.` is taken to match a newline and a letter its other case.
  *
  * It remains a syntactic bound and not a completeness proof: it says a pattern has
- * none of these shapes, never that a pattern is safe. Nothing here looks at a
- * pattern with no groups in it at all, and `a+a+a+a+a+a+a+a+a+a+b` is exponential
- * without a single parenthesis; a bounded quantifier over an alternation,
- * `(a|aa){1,20}`, is exponential and is deliberately allowed. Deciding the general
- * case is regular-expression ambiguity analysis, which is why the guarantee lives
- * in the runtime instead — see `apps/web/src/lib/displayPlanner.ts`.
+ * none of the refused shapes, never that a pattern is safe. Nothing here looks at
+ * a pattern with no groups in it at all, and `a+a+a+a+a+a+a+a+a+a+b` is
+ * exponential without a single parenthesis; a bounded quantifier over an
+ * alternation, `(a|aa){1,20}`, is exponential and is deliberately allowed.
+ * Deciding the general case is regular-expression ambiguity analysis, which is why
+ * the guarantee lives in the runtime instead — see `apps/web/src/lib/displayPlanner.ts`.
  *
  * Dependency-free, so the web editor can import it (`@shizue/core/display-script`)
  * without pulling the tokenizer and the card parser into the bundle.
@@ -128,13 +138,128 @@ function groupsOf(source: string): Group[] {
 const isUnbounded = (quantifier: string): boolean =>
   quantifier === '*' || quantifier === '+' || /^\{\d*,\}$/.test(quantifier);
 
+/** One atom of a flat sequence, with the quantifier written after it. */
+interface Atom {
+  /** As written, to be compiled on its own; null for an assertion or a backreference. */
+  source: string | null;
+  /** The one character it matches, when it is a literal. */
+  literal: string | null;
+  quantifier: string;
+}
+
+/** A quantifier after an atom: `*`, `+`, `?`, `{n}`, `{n,}`, `{n,m}`, each maybe lazy. */
+const ATOM_QUANTIFIER = /^(?:[*+?]|\{\d+(?:,\d*)?\})\??/;
+
+/** The control escapes, as the characters they stand for. */
+const CONTROL_ESCAPES: Record<string, string> = { n: '\n', r: '\r', t: '\t', f: '\f', v: '\v' };
+
+/**
+ * Reads one atom at `at`: its text, and its literal character when it has one.
+ * Null at a group or a `|` — the body is not a flat sequence. Never called past
+ * a pattern that failed to compile, so a quantifier is never where an atom is.
+ */
+function atomAt(body: string, at: number): { end: number; source: string | null; literal: string | null } | null {
+  const char = body[at]!;
+  if (char === '(' || char === ')' || char === '|') return null;
+  if (char === '^' || char === '$') return { end: at + 1, source: null, literal: null };
+  if (char === '.') return { end: at + 1, source: '.', literal: null };
+  if (char === '[') {
+    let end = at + 1;
+    while (end < body.length && body[end] !== ']') end += body[end] === '\\' ? 2 : 1;
+    return { end: end + 1, source: body.slice(at, end + 1), literal: null };
+  }
+  if (char !== '\\') return { end: at + 1, source: char, literal: char };
+
+  const next = body[at + 1] ?? '';
+  const escape = (length: number, literal: string | null): { end: number; source: string; literal: string | null } => ({
+    end: at + length,
+    source: body.slice(at, at + length),
+    literal,
+  });
+  if (/[dDwWsS]/.test(next)) return escape(2, null);
+  if (CONTROL_ESCAPES[next] !== undefined) return escape(2, CONTROL_ESCAPES[next]!);
+  const hex = /^x([0-9a-fA-F]{2})|^u([0-9a-fA-F]{4})/.exec(body.slice(at + 1));
+  if (hex) return escape(1 + hex[0].length, String.fromCharCode(Number.parseInt(hex[1] ?? hex[2]!, 16)));
+  const control = /^c([A-Za-z])/.exec(body.slice(at + 1));
+  if (control) return escape(3, String.fromCharCode(control[1]!.charCodeAt(0) % 32));
+  if (next === '0' && !/\d/.test(body[at + 2] ?? '')) return escape(2, '\0');
+  // A backreference, `\b`, and every other letter or digit: nothing this reads as one character.
+  if (/[0-9A-Za-z]/.test(next)) return { end: at + 2, source: null, literal: null };
+  return escape(2, next);
+}
+
+/** The body as atoms, or null when it is not a flat sequence (a group, a `|`). */
+function atomsOf(body: string): Atom[] | null {
+  const atoms: Atom[] = [];
+  let at = 0;
+  while (at < body.length) {
+    const atom = atomAt(body, at);
+    if (!atom) return null;
+    const quantifier = ATOM_QUANTIFIER.exec(body.slice(atom.end))?.[0] ?? '';
+    atoms.push({ source: atom.source, literal: atom.literal, quantifier });
+    at = atom.end + quantifier.length;
+  }
+  return atoms;
+}
+
+/** Whether `atom` could match `char`, read as broadly as any flags would read it. */
+function mayMatch(atom: string, char: string): boolean {
+  try {
+    return new RegExp(`^(?:${atom})$`, 'is').test(char);
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * A delimited run: a flat sequence whose every unbounded atom is followed at
+ * once by a literal character it cannot match, so each run, and with it each
+ * iteration of the group, has only one place it can end.
+ */
+function isDelimitedRun(body: string): boolean {
+  const atoms = atomsOf(body);
+  if (!atoms) return false;
+  return atoms.every((atom, index) => {
+    if (!UNBOUNDED_QUANTIFIER.test(atom.quantifier)) return true;
+    const next = atoms[index + 1];
+    return (
+      atom.source !== null &&
+      next !== undefined &&
+      next.literal !== null &&
+      next.quantifier === '' &&
+      !mayMatch(atom.source, next.literal)
+    );
+  });
+}
+
+/** A choice of plain words, none empty and none the start of another (case aside). */
+function isWordChoice(body: string): boolean {
+  const words: string[] = [];
+  let branch = '';
+  // Split at the `|`s outside classes and escapes, which `stripLiterals` keeps.
+  const structure = stripLiterals(body);
+  for (let i = 0; i <= body.length; i += 1) {
+    if (i < body.length && structure[i] !== '|') {
+      branch += body[i];
+      continue;
+    }
+    const atoms = atomsOf(branch);
+    if (!atoms || atoms.length === 0) return false;
+    if (atoms.some((atom) => atom.literal === null || atom.quantifier !== '')) return false;
+    words.push(atoms.map((atom) => atom.literal).join('').toLowerCase());
+    branch = '';
+  }
+  return words.every((word, i) => words.every((other, j) => i === j || !other.startsWith(word)));
+}
+
 /**
  * Screens a pattern. Returns null when it may be stored, or the reason it may not.
  *
  * Rejected: anything the regex engine will not compile, anything over the length
  * cap, and any unboundedly quantified group whose body repeats unboundedly itself
- * (`(a+)+`, `(x*)*`, `(a+)*`) or offers the engine a choice (`(a|aa)+`, `(a|b)*`,
- * `(\s|\s\s)+`). See the module comment for why the second half is this blunt.
+ * (`(a+)+`, `(x*)*`, `([a-z]+\s*)+`, `(?:a*ba*)+`) or offers the engine a choice
+ * (`(a|aa)+`, `(\s|\s\s)+`) — unless the body is one of the two shapes the
+ * module comment names, `(?:⟦[^⟧]*⟧)+` and `(cat|dog)+`.
  */
 export function displayScriptPatternError(source: string): PatternRejection | null {
   if (source.length > MAX_DISPLAY_PATTERN_LENGTH) return 'too_long';
@@ -149,9 +274,9 @@ export function displayScriptPatternError(source: string): PatternRejection | nu
     // Escapes and classes blanked first, so the `+` in `(a\+)+` and the `|` in
     // `([a|b])+` are the literals they are rather than structure.
     const structure = stripLiterals(body);
-    if (UNBOUNDED_QUANTIFIER.test(structure) || structure.includes('|')) {
-      return 'unsafe_repetition';
-    }
+    if (!UNBOUNDED_QUANTIFIER.test(structure) && !structure.includes('|')) continue;
+    if (isDelimitedRun(body) || isWordChoice(body)) continue;
+    return 'unsafe_repetition';
   }
   return null;
 }

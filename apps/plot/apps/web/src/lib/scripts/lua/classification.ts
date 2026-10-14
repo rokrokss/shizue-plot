@@ -92,7 +92,7 @@ export const LUA_CLASSIFICATION: Readonly<Record<string, LuaSupport>> = {
   ),
   insertChat: host('server', 'as addChat, at its place'),
   getTokens: host('browser', 'estimated, four characters a token'),
-  cbs: host('browser', 'only {{char}}, {{user}}, {{getvar}}, {{getglobalvar}}; the rest is left as written'),
+  cbs: host('browser', 'RisuAI’s `risuChatParser` on the core evaluator, in the sandbox: the variables as the script left them, the chat as it has it, `{{trigger_id}}` the manual run’s (else `null`)'),
 
   // The character, the persona, the note
   getName: host(
@@ -111,7 +111,7 @@ export const LUA_CLASSIFICATION: Readonly<Record<string, LuaSupport>> = {
     'reader overlay: what the plot’s first opening reads as, on screen and in the prompt, while the branch opens on it (RisuAI’s `fmIndex` -1); the stored greeting stays; answers true',
   ),
   getPersonaName: host('browser'),
-  getPersonaDescription: host('browser', 'its {{char}}/{{user}}/variables answered as cbs() answers them'),
+  getPersonaDescription: host('browser', 'read as cbs() reads it'),
   getAuthorsNote: host('browser', 'the chat note'),
   getBackgroundEmbedding: host('browser', 'the overlay’s, else the card’s `backgroundHTML`, whole'),
   setBackgroundEmbedding: host(

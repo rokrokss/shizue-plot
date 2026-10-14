@@ -26,6 +26,10 @@
       "types": "./dist/lua/index.d.ts",
       "default": "./dist/lua/index.js"
     },
+    "./lua-cbs": {
+      "types": "./dist/lua/cbsEngineSource.d.ts",
+      "default": "./dist/lua/cbsEngineSource.js"
+    },
     "./macro": {
       "types": "./dist/macro.d.ts",
       "default": "./dist/macro.js"
@@ -95,7 +99,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/build-lua-cbs.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
@@ -106,6 +110,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
+    "esbuild": "0.25.12",
     "typescript": "^5.9.3"
   }
 }

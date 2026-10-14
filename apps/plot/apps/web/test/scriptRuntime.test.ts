@@ -3,7 +3,7 @@
  * to the server, and that every delta it sends folds back, on the server's side,
  * to the state the scripts ended in.
  */
-import { applyVariableDelta, computeVariables, emptyVariables, type Variables } from '@shizue/core/variables';
+import { applyVariableDelta, computeVariables, emptyVariables, MAX_DELTA_KEYS, type Variables } from '@shizue/core/variables';
 import { MAX_SCRIPT_CHAT_MESSAGES, type TriggerScript, type TriggerStep } from '@shizue/core/triggers';
 import { describe, expect, it } from 'vitest';
 import { loadWholeBranch } from '../src/lib/scripts/branch';
@@ -1012,6 +1012,45 @@ describe('the chat a run leaves', () => {
     const prepared = await runtime.prepare('auto', view(exchange));
     expect(prepared.body['chat']).toBeUndefined();
     expect(logged.some((line) => line.includes('could not be kept'))).toBe(true);
+  });
+
+  /** A start run whose Lua sets `count` variables, and what it logged. */
+  const writing = (count: number) => {
+    const logged: string[] = [];
+    const runtime = createScriptRuntime({
+      chatId: 'c1',
+      api: fakeApi().api,
+      ui: silentUi,
+      bundle: bundle({ triggers: [trigger('start', [{ type: 'triggerlua', code: 'x' }])] }),
+      log: (entry) => logged.push(entry.message),
+      engines: [
+        {
+          name: 'lua',
+          handles: () => true,
+          runCode: async (request) => {
+            for (let i = 0; i < count; i += 1) request.scope.setVar(`v${i}`, String(i));
+          },
+        },
+      ],
+    });
+    return { runtime, logged };
+  };
+
+  it('keeps the hundreds of variables a turn writes', async () => {
+    // 치트용사's first reply writes 370-odd; past the old cap of 512 every one was lost.
+    const { runtime, logged } = writing(700);
+    const prepared = await runtime.prepare('auto', view(exchange));
+    expect(Object.keys(prepared.body['startDelta'] as object)).toHaveLength(700);
+    expect(logged).toEqual([]);
+  });
+
+  it('keeps what fits of a turn past the cap, and says how much it left out', async () => {
+    const { runtime, logged } = writing(MAX_DELTA_KEYS + 2);
+    const prepared = await runtime.prepare('auto', view(exchange));
+    const delta = prepared.body['startDelta'] as Record<string, string>;
+    expect(Object.keys(delta)).toHaveLength(MAX_DELTA_KEYS);
+    expect(delta['v0']).toBe('0');
+    expect(logged).toEqual([expect.stringContaining('2 of the scripts\' variable writes could not be kept')]);
   });
 });
 

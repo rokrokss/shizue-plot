@@ -96,9 +96,9 @@ import type { LoreSettings } from '@shizue/core';
 import type { CbsHostData } from '@shizue/core/cbs';
 import {
   applyVariableDelta,
-  checkVariableDelta,
   computeVariables,
   diffVariables,
+  fitVariableDelta,
   readVariable,
   type FoldItem,
   type FoldOptions,
@@ -407,12 +407,20 @@ function triggerMessages(messages: readonly ChatMessage[]): {
   };
 }
 
-/** A delta the server will take, or nothing — logged — when the scripts made one too big to store. */
+/**
+ * The delta the server will take: what the scripts wrote, less only the writes
+ * past the limits a stored delta is held to (`fitVariableDelta`) — those are
+ * logged, and every other write is kept.
+ */
 function storable(delta: VariableDelta | null, log: (entry: TriggerLogEntry) => void): VariableDelta | null {
-  const check = checkVariableDelta(delta);
-  if (check.ok) return check.delta;
-  log({ kind: 'limit', message: `the scripts' variables could not be kept: ${check.error}` });
-  return null;
+  const fitted = fitVariableDelta(delta);
+  if (fitted.dropped > 0) {
+    log({
+      kind: 'limit',
+      message: `${fitted.dropped} of the scripts' variable writes could not be kept (a delta ${fitted.reason}); the rest were`,
+    });
+  }
+  return fitted.delta;
 }
 
 /**
@@ -885,6 +893,8 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       persona: s.persona,
       note: s.note,
       greeting,
+      // No manual run is under way here: `{{trigger_id}}` reads `null`.
+      data: { ...s.view.data, triggerId: null },
     };
     return { scope, variables: () => vars, changed: () => changed };
   }

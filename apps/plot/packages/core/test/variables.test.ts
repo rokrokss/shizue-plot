@@ -6,6 +6,7 @@ import {
   computeVariables,
   diffVariables,
   emptyVariables,
+  fitVariableDelta,
   MAX_DELTA_KEYS,
   MAX_VARIABLE_NAME_LENGTH,
   MAX_VARIABLE_VALUE_LENGTH,
@@ -485,6 +486,56 @@ describe('checkVariableDelta', () => {
     expect(checkVariableDelta({ a: '1', b: '2' }, { keys: 1, chars: 100 }).ok).toBe(false);
     expect(checkVariableDelta({ a: '12345' }, { keys: 5, chars: 5 }).ok).toBe(false);
     expect(checkVariableDelta({ a: '1234' }, { keys: 5, chars: 5 }).ok).toBe(true);
+  });
+
+  it('takes the hundreds of writes a Realm card makes in one turn', () => {
+    // 치트용사's first reply sets 370-odd; the old cap of 512 refused a delta past it whole.
+    const turn = Object.fromEntries(Array.from({ length: 600 }, (_, i) => [`status_${i}`, `값 ${i}`]));
+    expect(checkVariableDelta(turn)).toMatchObject({ ok: true });
+  });
+});
+
+describe('fitVariableDelta', () => {
+  it('keeps every write that fits, and drops nothing when all do', () => {
+    const turn = Object.fromEntries(Array.from({ length: 600 }, (_, i) => [`status_${i}`, `값 ${i}`]));
+    const fitted = fitVariableDelta(turn);
+    expect(fitted.dropped).toBe(0);
+    expect(fitted.reason).toBeUndefined();
+    expect(Object.keys(fitted.delta!)).toHaveLength(600);
+    expect(Object.getPrototypeOf(fitted.delta)).toBeNull();
+    expect(fitVariableDelta(null)).toEqual({ delta: null, dropped: 0 });
+  });
+
+  it('leaves out only the writes past a limit, in the order they were made, and says why', () => {
+    const many = Object.fromEntries(Array.from({ length: MAX_DELTA_KEYS + 3 }, (_, i) => [`k${i}`, '1']));
+    const fitted = fitVariableDelta(many);
+    expect(fitted.dropped).toBe(3);
+    expect(fitted.reason).toBe(`may hold at most ${MAX_DELTA_KEYS} variables`);
+    expect(Object.keys(fitted.delta!)).toEqual(Object.keys(many).slice(0, MAX_DELTA_KEYS));
+    // What it keeps is a delta the API takes.
+    expect(checkVariableDelta(fitted.delta)).toMatchObject({ ok: true });
+  });
+
+  it('drops a bad write on its own, and keeps an unset wherever its name fits', () => {
+    const fitted = fitVariableDelta(
+      {
+        hp: '7',
+        ['k'.repeat(MAX_VARIABLE_NAME_LENGTH + 1)]: '1',
+        big: 'v'.repeat(30),
+        gone: null,
+        'h\u0000p': '1',
+        mp: '3',
+      },
+      { keys: 10, chars: 20 },
+    );
+    // `big` would pass the size; `gone` (4) and `mp` (3) still fit after it.
+    expect(fitted.delta).toEqual({ hp: '7', gone: null, mp: '3' });
+    expect(fitted.dropped).toBe(3);
+    expect(fitted.reason).toBe(`variable names must be 1 to ${MAX_VARIABLE_NAME_LENGTH} characters`);
+  });
+
+  it('answers with no delta when nothing fits', () => {
+    expect(fitVariableDelta({ hp: 'a\u0000b' })).toEqual({ delta: null, dropped: 1, reason: 'must not contain U+0000' });
   });
 });
 

@@ -7,3 +7,4 @@
 
 export * from './runtime.js';
 export { JSON_LUA, LUA_WRAPPER } from './prelude.js';
+export type { LuaCbsCall, LuaCbsData } from './cbsEngine.js';

@@ -185,7 +185,7 @@ describe('the Lua sandbox', () => {
         local last = getChat(id, -1)
         setChatVar(id, 'last', last.role .. ':' .. last.data .. ':' .. getChatLength(id))
         setChatVar(id, 'who', getName(id) .. '/' .. getPersonaName(id) .. '/' .. getAuthorsNote(id))
-        setChatVar(id, 'cbs', cbs('{{char}}와 {{user}}, hp={{getvar::hp}} {{random}}'))
+        setChatVar(id, 'cbs', cbs('{{char}}와 {{user}}, hp={{getvar::hp}} {{calc::{{getvar::hp}}*2}}'))
         setChat(id, -1, '고쳐 쓴 답')
         setDescription(id, getDescription(id) .. ' 바뀜')
         upsertLocalLoreBook(id, '탑', '높은 탑', { key = '탑', alwaysActive = true })
@@ -199,7 +199,7 @@ describe('the Lua sandbox', () => {
       __bag: '["열쇠","지도"]',
       last: 'char:어서 와:2',
       who: '리안/아린/노트',
-      cbs: '리안와 아린, hp=7 {{random}}',
+      cbs: '리안와 아린, hp=7 14',
     });
     expect(result.stopSending).toBe(true);
     expect(result.messages).toEqual([
@@ -208,20 +208,42 @@ describe('the Lua sandbox', () => {
     ]);
     expect(result.description).toBe('사서. 바뀜');
     expect(result.lore).toEqual([expect.objectContaining({ comment: '탑', content: '높은 탑', key: '탑', alwaysActive: true })]);
-    expect(result.notes.map(([name]) => name)).toContain('cbs');
+    expect(result.notes).toEqual([]);
   });
 
-  it('notes cbs() only when it leaves a macro as written', async () => {
+  it('answers cbs() at once with the whole language, {{trigger_id}} the manual run’s', async () => {
+    // As Magical Girl Life and 당나라 무협 call it: from a plain function, outside any coroutine.
+    const code = `
+      local function dlcEnabled(id)
+        return cbs('{{#when::DLC_First::tis::1}}1{{:else}}0{{/when}}') == '1'
+      end
+      function user_v1_repair_body(id)
+        local data = tostring(cbs('{{trigger_id}}') or '')
+        setChatVar(id, 'row', data)
+        setChatVar(id, 'dlc', tostring(dlcEnabled(id)))
+        setChatVar(id, 'persona', getPersonaDescription(id))
+      end`;
+    const manual: LuaEntry = { kind: 'trigger', mode: 'user_v1_repair_body' };
+    const sandbox = sandboxWith();
+    const clicked = await done(sandbox, code, manual, snapshot({ globals: [['toggle_DLC_First', '1']], cbs: { triggerId: '3' } }));
+    expect(clicked.error).toBeNull();
+    expect(Object.fromEntries(clicked.vars)).toEqual({ row: '3', dlc: 'true', persona: '아린는 여행자' });
+    const bare = await done(sandbox, code, manual);
+    expect(Object.fromEntries(bare.vars)).toMatchObject({ row: 'null', dlc: 'false' });
+  });
+
+  it('leaves a cbs() text that grows past the evaluator’s limit as written, and says so', async () => {
     const result = await done(
       sandboxWith(),
       `
       function onStart(id)
-        setChatVar(id, 'cbs', cbs('{{char}}와 {{user}}, hp={{getvar::hp}} 그대로'))
+        local big = string.rep('x', 600000)
+        setChatVar(id, 'length', tostring(#cbs(big .. '{{getvar::hp}}' .. big)))
       end`,
     );
     expect(result.error).toBeNull();
-    expect(Object.fromEntries(result.vars)).toMatchObject({ cbs: '리안와 아린, hp=10 그대로' });
-    expect(result.notes.map(([name]) => name)).not.toContain('cbs');
+    expect(Object.fromEntries(result.vars)).toEqual({ length: String(1_200_000 + '{{getvar::hp}}'.length) });
+    expect(result.notes.map(([name]) => name)).toEqual(['cbs']);
   });
 
   it('keeps one Lua state per mode, as RisuAI does, until the code changes', async () => {

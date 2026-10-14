@@ -18,9 +18,9 @@
  */
 
 import {
-  displayScriptPatternError,
   displayScriptsFromExtensions,
   displayScriptsWithRegexScripts,
+  MAX_DISPLAY_PATTERN_LENGTH,
   type DisplayScript,
   type DisplayScriptAction,
 } from '@shizue/core';
@@ -66,6 +66,94 @@ function parseOutDirectives(out: string): Directives & { template: string } {
   };
 }
 
+// The pattern screen as it stood then (`displayScriptPatternError` in
+// `packages/core/src/displayScript.ts` at 353c976^, unchanged until the Realm
+// sweep narrowed it), which switched off every repeat inside a repeat. Today's
+// narrower screen would turn some of those scripts on, and a plot the old import
+// left would no longer read as exactly its work. SillyTavern's display regexes
+// below (`displayScriptsWithRegexScripts`) still go through today's screen: a
+// card carrying both an `<order N>` and an ST regex the two screens disagree on
+// reads as changed by its creator, and is left alone.
+
+const LEGACY_UNBOUNDED_QUANTIFIER = /[*+]|\{\d*,\}/;
+
+function legacyStripLiterals(source: string): string {
+  let out = '';
+  let inClass = false;
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i]!;
+    if (char === '\\') {
+      out += '  ';
+      i += 1;
+      continue;
+    }
+    if (inClass) {
+      out += char === ']' ? ']' : ' ';
+      if (char === ']') inClass = false;
+      continue;
+    }
+    if (char === '[') inClass = true;
+    out += char;
+  }
+  return out;
+}
+
+function legacyGroupsOf(source: string): { body: string; quantifier: string }[] {
+  const groups: { body: string; quantifier: string }[] = [];
+  const open: number[] = [];
+  let inClass = false;
+
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i]!;
+    if (char === '\\') {
+      i += 1;
+      continue;
+    }
+    if (inClass) {
+      if (char === ']') inClass = false;
+      continue;
+    }
+    if (char === '[') {
+      inClass = true;
+      continue;
+    }
+    if (char === '(') {
+      open.push(i);
+      continue;
+    }
+    if (char !== ')') continue;
+
+    const start = open.pop();
+    if (start === undefined) continue;
+    const body = source.slice(start + 1, i).replace(/^\?(?::|<?[=!]|<[A-Za-z_$][\w$]*>)/, '');
+    const rest = source.slice(i + 1);
+    const quantifier = /^(?:[*+?]|\{\d*(?:,\d*)?\})/.exec(rest)?.[0] ?? '';
+    groups.push({ body, quantifier });
+  }
+  return groups;
+}
+
+const legacyIsUnbounded = (quantifier: string): boolean =>
+  quantifier === '*' || quantifier === '+' || /^\{\d*,\}$/.test(quantifier);
+
+function legacyPatternError(source: string): string | null {
+  if (source.length > MAX_DISPLAY_PATTERN_LENGTH) return 'too_long';
+  try {
+    new RegExp(source);
+  } catch {
+    return 'invalid';
+  }
+
+  for (const { body, quantifier } of legacyGroupsOf(source)) {
+    if (!legacyIsUnbounded(quantifier)) continue;
+    const structure = legacyStripLiterals(body);
+    if (LEGACY_UNBOUNDED_QUANTIFIER.test(structure) || structure.includes('|')) {
+      return 'unsafe_repetition';
+    }
+  }
+  return null;
+}
+
 /** One script as that import read it, and whether it took an `<order N>` from it. */
 function toLegacyScript(raw: Record<string, unknown>, index: number): { script: DisplayScript; ordered: boolean } | null {
   const source = typeof raw['in'] === 'string' ? raw['in'] : '';
@@ -83,7 +171,7 @@ function toLegacyScript(raw: Record<string, unknown>, index: number): { script: 
       ...(flags ? { flags } : {}),
       order: explicit ?? index,
       ...(action ? { action } : {}),
-      enabled: displayScriptPatternError(source) === null,
+      enabled: legacyPatternError(source) === null,
     },
     ordered: explicit !== undefined,
   };

@@ -53,7 +53,7 @@
  * evaluator's own dice, both drawn from the run's `random`.
  */
 
-import type { CbsChat, CbsHostData, CbsMessage } from '../cbs.js';
+import type { CbsChat, CbsCharacter, CbsHostData, CbsMessage } from '../cbs.js';
 import type { LoreEntry } from '../types.js';
 import { applyVariableDelta, emptyVariables, readVariable, type VariableDelta, type Variables } from '../variables.js';
 import { risuCalculate } from './calc.js';
@@ -235,6 +235,16 @@ function similarityAnswer(raw: unknown): ScriptSimilarityAnswer {
 const llmTurns = (text: string): ScriptChatTurn[] => parseChatML(text) ?? [{ role: 'user', content: text }];
 
 /**
+ * What RisuAI's `risuChatParser` reads in code besides the run's own state — a
+ * run's `data`, the card internals past the description, and the manual
+ * trigger that fired (`{{trigger_id}}`; null outside one, which reads `null`) —
+ * for Lua's `cbs()` (`luaCbs` in `lua/cbsEngine.ts`).
+ */
+export type CodeCbsData = Omit<CbsHostData, 'chat' | 'character' | 'persona' | 'lorebook' | 'char'> & {
+  character?: Omit<CbsCharacter, 'description'>;
+};
+
+/**
  * What code running inside a trigger may touch: the chat variables and the chat
  * of this run, the reader's global variables, and the parts of the character,
  * the persona and the chat note RisuAI's Lua reads — `getChatVar`/`setChatVar`,
@@ -293,6 +303,8 @@ export interface CodeScope {
   readonly note: string;
   /** The greeting the branch opened on, or null. */
   readonly greeting: string | null;
+  /** What the code's CBS reads besides the above; absent, it reads no more than that. */
+  readonly data?: CodeCbsData;
 }
 
 /* ----------------------------------------------------------------- results */
@@ -1128,6 +1140,18 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
               persona: shared.persona,
               note: shared.note,
               greeting: input.greeting ?? null,
+              // What `p` reads besides the run's state, for the code's `cbs()`.
+              data: {
+                ...input.data,
+                character: {
+                  ...(input.character.personality !== undefined ? { personality: input.character.personality } : {}),
+                  ...(input.character.scenario !== undefined ? { scenario: input.character.scenario } : {}),
+                  ...(input.character.exampleDialogue !== undefined
+                    ? { exampleDialogue: input.character.exampleDialogue }
+                    : {}),
+                },
+                triggerId: input.triggerId ?? null,
+              },
             },
           };
           if (answer && typeof answer === 'object' && (answer as { stopSending?: unknown }).stopSending === true) {

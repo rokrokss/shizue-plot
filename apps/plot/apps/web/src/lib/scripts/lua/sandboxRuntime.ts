@@ -74,6 +74,7 @@ import {
   luaWorkerSource as sharedWorkerSource,
   type LuaLimits,
 } from '@shizue/core/lua';
+import { LUA_CBS_ENGINE } from '@shizue/core/lua-cbs';
 import { selfContained } from '../../componentRuntime';
 
 export {
@@ -404,10 +405,15 @@ export function luaFrameCsp(): string {
 /**
  * The worker's whole program (`@shizue/core/lua`), its runtime held to the
  * frame's contract: the bundler compiles it too, and must leave it
- * self-contained.
+ * self-contained. The CBS evaluator `cbs()` answers with comes built
+ * (`@shizue/core/lua-cbs`), in this module's chunk, which only a chat whose
+ * scripts reach Lua loads.
  */
 export function luaWorkerSource(wasmoonSource: string, scope = 'self'): string {
-  return sharedWorkerSource(wasmoonSource, scope, { check: (runtime) => selfContained(runtime, 'luaWorkerRuntime') });
+  return sharedWorkerSource(wasmoonSource, scope, {
+    cbs: LUA_CBS_ENGINE,
+    check: (runtime) => selfContained(runtime, 'luaWorkerRuntime'),
+  });
 }
 
 /** The frame runtime as a value, for the tests to drive with a stand-in `env`. */

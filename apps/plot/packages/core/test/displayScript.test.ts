@@ -82,10 +82,10 @@ describe('displayScriptPatternError', () => {
     }
   });
 
-  it('rejects every alternation under an unbounded quantifier, ambiguous or not', () => {
+  it('rejects an alternation under an unbounded quantifier that can split a text two ways', () => {
     // `(a|aa)+` is the one that motivated the rule: exponential, and its branches
     // are not duplicates, so no "are these the same?" test would ever see it.
-    for (const source of ['(a|aa)+', '(a|b)*', '(\\s|\\s\\s)+', '(a|a)+', '(ab|ab)*', '(foo|bar)+']) {
+    for (const source of ['(a|aa)+', '(\\s|\\s\\s)+', '(a|a)+', '(ab|ab)*', '(ab|AB)+', '(a|b+)+', '(a|)+', '(?:a|[ab])+']) {
       expect(displayScriptPatternError(source), source).toBe('unsafe_repetition');
     }
     // Bounded repetition of a choice is finite, so it stays legal.
@@ -94,9 +94,55 @@ describe('displayScriptPatternError', () => {
     expect(displayScriptPatternError('^(status|state): (\\d+)$')).toBeNull();
   });
 
+  it('accepts a repeated choice of plain words none of which starts another', () => {
+    // At each point at most one of them can match, so there is one way through.
+    for (const source of ['(a|b)*', '(foo|bar)+', '(?:<br>|<\\/div><div class="ep-p">)*', '(\\n|\\t)+', '(?:x\\||y)+']) {
+      expect(displayScriptPatternError(source), source).toBeNull();
+    }
+  });
+
+  it('accepts a repeat inside a repeat when a character it cannot match closes it', () => {
+    // The status-line shapes Realm cards are written with, which the earlier
+    // rule refused: the run has to stop at the first closing mark, so where each
+    // iteration ends is forced.
+    for (const source of [
+      '((?:⟦호감:[^⟧]*⟧)+)\\s*♣️\\[status\\]♣️',
+      '♣️\\[status\\]♣️((?:⟦호감:[^⟧]*⟧)*)\\s+(?=⟦호감:)',
+      '[ \\t]*\\n(?:[ \\t]*\\n)+[ \\t]*',
+      '\\n\\s*-\\s*(?:의뢰|퀘스트)완료\\s*:\\s*⟦[^⟧\\n]*⟧(?:⟦[^⟧\\n]*⟧)*',
+      '(?:\\s*-\\s*⟦[^⟧]*⟧)+',
+      '(?:[^\\u2016]*?\\u2016)+',
+    ]) {
+      expect(displayScriptPatternError(source), source).toBeNull();
+    }
+  });
+
+  it('rejects a closed repeat whose closing mark it could match, or that is left open', () => {
+    for (const source of [
+      // `\s` takes a newline, so the run is not closed by it.
+      '(?:\\s*\\n)+',
+      // `.` is read with `s`: the screen never sees the flags.
+      '(?:.*\\n)+',
+      // Case-insensitively `[a-z]` takes `A`.
+      '(?:[a-z]+A)+',
+      // The second run is open, and the gaps between b's split any number of ways.
+      '(?:a*ba*)+',
+      // Two runs back to back.
+      '(?:a*a*b)+',
+      // A closing mark that may be missing closes nothing.
+      '(?:⟦[^⟧]*⟧?)+',
+      // A choice nested inside, even of words, is not looked into.
+      '(?:⟦(?:호감|신뢰):[^⟧]*⟧)+',
+    ]) {
+      expect(displayScriptPatternError(source), source).toBe('unsafe_repetition');
+    }
+  });
+
   it('reads a pipe inside a character class as the literal it is', () => {
     expect(displayScriptPatternError('([a|b])+')).toBeNull();
     expect(displayScriptPatternError('(a\\|b)+')).toBeNull();
+    // …and a run closed by an escaped pipe as closed by that character.
+    expect(displayScriptPatternError('(?:[^|]*\\|)+')).toBeNull();
   });
 
   it('is not fooled by an escaped quantifier or one inside a character class', () => {

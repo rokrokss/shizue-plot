@@ -626,6 +626,9 @@ export function requestLuaInput(
     | 'localLore'
     | 'speaker'
     | 'plot'
+    | 'clock'
+    | 'seed'
+    | 'assetNames'
   >,
 ): Omit<RequestLuaInput, 'request'> | null {
   const found = requestScriptsOf(plan);
@@ -659,6 +662,19 @@ export function requestLuaInput(
       personaImage: characterImage(view?.personaAvatarUrl),
       note: view?.note ?? '',
       lowLevel: false,
+      // What `cbs()` reads besides the above: the reader's side the request triggers get (`requestTriggerInput`).
+      cbs: {
+        clock: { now: plan.clock.now.getTime(), timeZone: plan.clock.timeZone, locale: plan.clock.locale },
+        seed: { key: plan.seed, length: plan.wholeBranch.length - (plan.branch.greeting ? 1 : 0) },
+        meta: { language: plan.clock.locale },
+        assets: { names: plan.assetNames, display: plan.assetNames },
+        character: {
+          personality: member.card.personality,
+          scenario: member.card.scenario,
+          exampleDialogue: member.card.mesExample,
+        },
+        triggerId: null,
+      },
     },
   };
 }

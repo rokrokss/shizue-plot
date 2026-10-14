@@ -195,7 +195,7 @@ describe('editRequest listeners in the child', () => {
         local last = getChat(id, -1)
         setChatVar(id, 'last', last.role .. ':' .. last.data .. ':' .. getChatLength(id))
         setChatVar(id, 'who', getName(id) .. '/' .. getPersonaName(id) .. '/' .. getAuthorsNote(id))
-        setChatVar(id, 'cbs', cbs('{{char}}와 {{user}}, hp={{getvar::hp}} {{random}}'))
+        setChatVar(id, 'cbs', cbs('{{char}}와 {{user}}, hp={{getvar::hp}} {{calc::{{getvar::hp}}*2}} {{trigger_id}}'))
         setChatVar(id, 'card', getDescription(id) .. '/' .. getCharacterFirstMessage(id) .. '/' .. getBackgroundEmbedding(id))
         setChatVar(id, 'persona', getPersonaDescription(id))
         setChatVar(id, 'lore', getLoreBooks(id, '탑')[1].content)
@@ -213,7 +213,8 @@ describe('editRequest listeners in the child', () => {
       __bag: '["열쇠","지도"]',
       last: 'char:어서 와:2',
       who: '리안/아린/노트',
-      cbs: '리안와 아린, hp=7 {{random}}',
+      // The whole evaluator, here as in the browser; no manual run is under way.
+      cbs: '리안와 아린, hp=7 14 null',
       card: '사서./첫 인사/<div>배경</div>',
       persona: '아린는 여행자',
       lore: '리안의 탑',
@@ -225,7 +226,7 @@ describe('editRequest listeners in the child', () => {
       meta: '[]',
     });
     expect(edited).toEqual([...request, { role: 'assistant', content: '안녕|어서 와' }]);
-    expect(notes).toContain('cbs: only {{char}}, {{user}}, {{getvar}} and {{getglobalvar}} are answered inside the sandbox');
+    expect(notes.filter((note) => note.startsWith('cbs'))).toEqual([]);
   });
 
   it('chain the scripts: each reads the request and the variables the one before left', async () => {

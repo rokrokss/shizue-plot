@@ -74,8 +74,9 @@
  * the request goes as it was — RisuAI's try/catch around the run sends it
  * unedited too. So does a listener that throws (its writes stand, as RisuAI's).
  */
-import { checkVariableDelta, type VariableDelta } from '@shizue/core';
+import { fitVariableDelta, type VariableDelta } from '@shizue/core';
 import { LUA_LIMITS, LUA_STATE_LIMIT, luaWorkerSource, type LuaLoreBook, type LuaSnapshot } from '@shizue/core/lua';
+import { LUA_CBS_ENGINE } from '@shizue/core/lua-cbs';
 import { MAX_TRIGGER_VALUE_LENGTH, type RequestTurn } from '@shizue/core/triggers';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -287,7 +288,7 @@ let program: string | null = null;
 function programLine(): string {
   if (program === null) {
     const dist = dirname(createRequire(import.meta.url).resolve('wasmoon'));
-    const source = luaWorkerSource(readFileSync(join(dist, 'index.js'), 'utf8'), 'globalThis', { server: true });
+    const source = luaWorkerSource(readFileSync(join(dist, 'index.js'), 'utf8'), 'globalThis', { server: true, cbs: LUA_CBS_ENGINE });
     const wasm = readFileSync(join(dist, 'glue.wasm')).toString('base64');
     program = `${JSON.stringify({ type: 'program', source, wasm })}\n`;
   }
@@ -683,14 +684,15 @@ function runIn(child: LuaChild, input: RequestLuaInput, deadlineMs: number): Pro
 
 /* --------------------------------------------------------------- the edit */
 
-/** The chat variables a run wrote, as the turn can keep them: a value past what a trigger may write is dropped, as the browser drops it. */
+/** The chat variables a run wrote, as the turn can keep them: a value past what a trigger may write is dropped, as the browser drops it, and so is each write past a delta's limits (`fitVariableDelta`) — the rest are kept. */
 function keptWrites(vars: [string, string | null][], label: string): VariableDelta | null {
   const kept = vars.filter(([, value]) => value === null || value.length <= MAX_TRIGGER_VALUE_LENGTH);
   if (kept.length < vars.length) console.warn('[api] editRequest wrote a variable past its length; dropped:', label);
-  const checked = checkVariableDelta(Object.fromEntries(kept));
-  if (checked.ok) return checked.delta;
-  console.warn(`[api] editRequest's variable writes are not kept (${checked.error}):`, label);
-  return null;
+  const fitted = fitVariableDelta(Object.fromEntries(kept));
+  if (fitted.dropped > 0) {
+    console.warn(`[api] ${fitted.dropped} of editRequest's variable writes are not kept (a delta ${fitted.reason}); the rest are:`, label);
+  }
+  return fitted.delta;
 }
 
 /**

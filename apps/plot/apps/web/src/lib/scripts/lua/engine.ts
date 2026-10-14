@@ -186,6 +186,17 @@ export function snapshotOf(
     personaImage: characterImage(personaAvatarUrl),
     note: scope.note,
     lowLevel,
+    cbs: cbsDataOf(scope.data),
+  };
+}
+
+/** What the scope's CBS reads besides its state, made plain for the sandbox: the clock as ms. */
+function cbsDataOf(data: CodeScope['data']): LuaSnapshot['cbs'] {
+  const { clock, ...rest }: NonNullable<CodeScope['data']> = data ?? {};
+  return {
+    ...rest,
+    triggerId: rest.triggerId ?? null,
+    ...(clock ? { clock: { now: clock.now.getTime(), timeZone: clock.timeZone, locale: clock.locale } } : {}),
   };
 }
 
