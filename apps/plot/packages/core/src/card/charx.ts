@@ -89,6 +89,11 @@ export interface CharxAssetFile {
   /** Asset name as the card declares it; falls back to the entry file name. */
   name: string;
   bytes: Uint8Array;
+  /**
+   * Declared one of the card's emotion pictures (RisuAI's `emotionImages` — a
+   * V3 asset of type `emotion`, a V2 card's `extensions.risuai.emotions`).
+   */
+  emotion?: true;
 }
 
 export interface CharxContents {
@@ -266,12 +271,16 @@ export function readCharx(bytes: Uint8Array): CharxContents {
   // The names to inflate are picked before anything is read, so the cap bounds
   // the work rather than the result.
   const wanted: WantedEntry[] = iconEntry ? [{ name: iconEntry, required: true }] : [];
-  const declaredAssets: { name: string; entry: string }[] = [];
+  const declaredAssets: { name: string; entry: string; emotion: boolean }[] = [];
   for (const asset of declared) {
     const entry = entryOf(asset);
     if (!entry || entry === iconEntry || !looksLikeImage(asset, entry)) continue;
     if (declaredAssets.some((item) => item.entry === entry)) continue;
-    declaredAssets.push({ name: asset.name?.trim() || fileNameOf(entry), entry });
+    declaredAssets.push({
+      name: asset.name?.trim() || fileNameOf(entry),
+      entry,
+      emotion: asset.type === 'emotion',
+    });
     wanted.push({ name: entry, required: false });
     if (declaredAssets.length >= MAX_ASSETS) break;
   }
@@ -281,7 +290,8 @@ export function readCharx(bytes: Uint8Array): CharxContents {
   const assets: CharxAssetFile[] = [];
   for (const item of declaredAssets) {
     const entry = inflated.get(item.entry);
-    if (entry) assets.push({ name: item.name, bytes: entry });
+    if (!entry) continue;
+    assets.push({ name: item.name, bytes: entry, ...(item.emotion ? { emotion: true as const } : {}) });
   }
 
   const iconBuffer = iconEntry ? inflated.get(iconEntry) : undefined;

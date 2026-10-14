@@ -15,6 +15,7 @@ import {
   DEFAULT_USER_NAME,
   detectContentLanguage,
   displayScriptsFor,
+  emotionScreenOf,
   emptyCard,
   exportCardCharx,
   exportCardPng,
@@ -29,6 +30,7 @@ import {
   parseCard,
   type CharxAssetFile,
   type CharxExportAsset,
+  type EmotionImage,
   type GroupSettings,
   type ImportProvenance,
   type LoreEntry,
@@ -543,7 +545,7 @@ async function storeImportedAssets(
   deps: AppDeps,
   plotId: string,
   assets: CharxAssetFile[],
-): Promise<void> {
+): Promise<EmotionImage[]> {
   /** An image already in the store, still waiting for a row to name it. */
   interface StoredCandidate {
     id: string;
@@ -553,6 +555,8 @@ async function storeImportedAssets(
     key: string;
     mime: string;
   }
+  /** The card's emotion pictures among the rows written, by the slug each got. */
+  let emotions: EmotionImage[] = [];
 
   // Never more candidates than an empty plot could hold: a larger archive must
   // not pay to store what could not fit under any reading of the cap.
@@ -570,7 +574,7 @@ async function storeImportedAssets(
       candidates.push({ id, name: asset.name, index, key: stored.key, mime: stored.mime });
       orphaned.push(stored.key);
     }
-    if (candidates.length === 0) return;
+    if (candidates.length === 0) return [];
 
     orphaned = await deps.db.transaction(async (tx) => {
       await tx.select({ id: plots.id }).from(plots).where(eq(plots.id, plotId)).for('update');
@@ -599,6 +603,9 @@ async function storeImportedAssets(
         };
       });
       if (rows.length > 0) await tx.insert(plotAssets).values(rows);
+      emotions = fitting.flatMap((candidate, at) =>
+        assets[candidate.index]!.emotion ? [{ name: candidate.name, slug: rows[at]!.slug }] : [],
+      );
       return candidates.slice(rows.length).map((candidate) => candidate.key);
     });
   } finally {
@@ -606,6 +613,23 @@ async function storeImportedAssets(
     // no row will ever name it.
     for (const key of orphaned) await deleteQuietly(deps.storage, key);
   }
+  return emotions;
+}
+
+/**
+ * The card's emotion pictures, written onto the member the import made once
+ * the images are stored (`NormalizedCard.emotionImages`): the card names them,
+ * and only now is it known which of the plot's slugs each became — a second
+ * member's `neutral` is another slug than the first's.
+ */
+async function recordEmotionImages(deps: AppDeps, member: Character, emotionImages: EmotionImage[]): Promise<Character> {
+  if (emotionImages.length === 0) return member;
+  const [updated] = await deps.db
+    .update(characters)
+    .set({ card: { ...member.card, emotionImages } })
+    .where(eq(characters.id, member.id))
+    .returning();
+  return updated ?? member;
 }
 
 /**
@@ -942,12 +966,14 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
 
     // A new plot is private, so this records where the card came from and asks
     // for nothing yet: the owner vouches for it when they publish.
-    const member = await insertMember(deps, plot.id, name, card, imported, memberId);
+    let member = await insertMember(deps, plot.id, name, card, imported, memberId);
     if (parsed.iconBuffer) {
-      await writeMemberAvatar(deps, member, parsed.iconBuffer);
+      member = await writeMemberAvatar(deps, member, parsed.iconBuffer);
       plot = await writeImportedCover(deps, plot, parsed.iconBuffer);
     }
-    if (parsed.assets?.length) await storeImportedAssets(deps, plot.id, parsed.assets);
+    if (parsed.assets?.length) {
+      await recordEmotionImages(deps, member, await storeImportedAssets(deps, plot.id, parsed.assets));
+    }
 
     return c.json(await ownerView(deps, plot), 201);
   });
@@ -1275,6 +1301,9 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
         intro: member.card.intro ?? '',
         // What the reader's browser rolls a round's speakers by (`groupOrder`).
         talkativeness: coerceTalkativeness(member.talkativeness),
+        // How the member's emotion pictures are shown, and which they are — the
+        // names are already every reader's through the plot's images.
+        emotion: emotionScreenOf(member.card),
       })),
       // The openings, uncut — this is the page a reader decides on, and the
       // listings' `introPreview` is the only place the 200-character cut belongs.
@@ -1372,7 +1401,9 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     // (`insertMember`).
     let member = await insertMember(deps, id, name, parsed.card, imported);
     if (parsed.iconBuffer) member = await writeMemberAvatar(deps, member, parsed.iconBuffer);
-    if (parsed.assets?.length) await storeImportedAssets(deps, id, parsed.assets);
+    if (parsed.assets?.length) {
+      member = await recordEmotionImages(deps, member, await storeImportedAssets(deps, id, parsed.assets));
+    }
     await addGroupGreetings(deps, id, parsed.card);
     const variableConflicts = await liftCustomUi(deps, id, member);
     // The default variables the work already had another value for, for the studio to say so.
@@ -1608,6 +1639,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       .where(eq(plotAssets.plotId, plot.id))
       .orderBy(asc(plotAssets.createdAt), asc(plotAssets.slug));
     const assets: CharxExportAsset[] = [];
+    const emotions = new Map((member.card.emotionImages ?? []).map((image) => [image.slug, image.name]));
     for (const row of rows) {
       // A row whose file is gone stays out of the card as well: RisuAI refuses
       // a whole card over one image it names and does not carry.
@@ -1618,6 +1650,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
         name: row.name,
         ext: extensionOf(row.path),
         bytes: await readAll(stored.body),
+        ...(emotions.has(row.slug) ? { emotion: emotions.get(row.slug)! } : {}),
       });
     }
     const icon = image && imagePath ? { ext: extensionOf(imagePath), bytes: image } : undefined;

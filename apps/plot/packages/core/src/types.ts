@@ -383,6 +383,14 @@ export const MAX_UNLOCK_TURNS = 500;
 /** Axis values run 0-100, and an unlock waiting for 0 would never be one. */
 export const MAX_UNLOCK_RELATIONSHIP = 100;
 
+/** One of a card's emotion pictures (`NormalizedCard.emotionImages`). */
+export interface EmotionImage {
+  /** The card's name for it — what the model is asked to choose, and what a message stores. */
+  name: string;
+  /** The plot asset it became. */
+  slug: string;
+}
+
 export interface NormalizedCard {
   /** Spec of the source card, informational only. */
   spec: CardSpec;
@@ -444,6 +452,15 @@ export interface NormalizedCard {
    * extension, so an imported card never starts with one.
    */
   narrator?: NarratorConfig;
+  /**
+   * RisuAI's `emotionImages`: the card's expression pictures, by the name the
+   * card gave each, and the plot asset each became. Written by the import once
+   * the images are stored (a card file names them, but only the plot knows the
+   * slugs), so a member's own pictures are told apart from another member's of
+   * the same name. Whether they are shown is the card's RisuAI extension
+   * (`emotionScreenOf`). Absent when the card brought none.
+   */
+  emotionImages?: EmotionImage[];
   /** Original extensions, preserved for round-tripping. */
   extensions: Record<string, unknown>;
   /** Original card JSON, kept for export/preservation. */

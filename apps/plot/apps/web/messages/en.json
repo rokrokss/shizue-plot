@@ -378,7 +378,14 @@
     "noModels": "Connect ChatGPT in AI settings.",
     "chats": "Chats",
     "chatsEmpty": "No chats with this plot yet.",
-    "deletePlot": "Delete plot"
+    "deletePlot": "Delete plot",
+    "memberEmotion": "Expression images",
+    "memberEmotionHint": "How the card's {count} expression images are shown. The panel beside the chat (above it on a narrow screen) shows the expression the auxiliary model picks after each reply; in the message, the model names one at the end of its reply and it is drawn there.",
+    "memberEmotionModes": {
+      "off": "Off",
+      "panel": "Panel beside the chat",
+      "inlay": "In the message"
+    }
   },
   "cardImport": {
     "realmOpen": "Import from RisuRealm",
@@ -1014,7 +1021,11 @@
       }
     },
     "importing": "This chat is still being imported. You can carry on once everything is in.",
-    "importingReload": "Refresh"
+    "importingReload": "Refresh",
+    "emotionScreen": "Expressions",
+    "emotionAlt": "{name}'s expression: {emotion}",
+    "emotionCollapse": "Collapse expressions",
+    "emotionExpand": "Expand expressions"
   },
   "personas": {
     "title": "Personas",

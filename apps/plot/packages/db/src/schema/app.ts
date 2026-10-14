@@ -555,6 +555,13 @@ export const messages = pgTable(
     // model reads — the prompt, the lore scan, the memory, suggestions. On the
     // node, so every branch through it shares it. Card scripts still see it.
     hiddenFromPrompt: boolean('hidden_from_prompt').notNull().default(false),
+    // The expression its member wears after this reply — the name of one of the
+    // member's emotion pictures (`NormalizedCard.emotionImages`), chosen by the
+    // auxiliary model after the reply or by the card's `@@emo` script. RisuAI
+    // keeps the latest few in memory; here it is the reply's own, so a reload or
+    // a swipe to another branch shows the picture that branch left. Null until
+    // one is chosen, and on every message no emotion screen reads.
+    emotion: text('emotion'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

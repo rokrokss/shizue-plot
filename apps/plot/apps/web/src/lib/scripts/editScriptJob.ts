@@ -41,6 +41,8 @@ export interface EditSkip {
 export interface EditJobResult {
   text: string;
   skipped: EditSkip[];
+  /** The emotion picture a matching `@@emo` script named — the last one's. */
+  emotion?: string;
 }
 
 /**
@@ -56,6 +58,7 @@ export function runEditJob(
   const variables = applyVariableDelta(job.variables, null);
   const globals = applyVariableDelta(job.globals, null);
   const skipped: EditSkip[] = [];
+  let emotion: string | undefined;
   const text = runEditScripts(job.text, job.scripts, job.mode, {
     chatIndex: job.chatIndex,
     ...(job.previousSameRole !== undefined ? { previousSameRole: job.previousSameRole } : {}),
@@ -66,9 +69,12 @@ export function runEditJob(
       ...(job.data ? { data: job.data } : {}),
     },
     onSkip: (script, reason) => skipped.push({ index: job.scripts.indexOf(script), reason }),
+    onEmotion: (name) => {
+      emotion = name;
+    },
     ...(hooks.onScript ? { onScript: hooks.onScript } : {}),
   });
-  return { text, skipped };
+  return { text, skipped, ...(emotion !== undefined ? { emotion } : {}) };
 }
 
 /** What the worker and its parent say to each other. */

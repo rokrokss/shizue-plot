@@ -276,7 +276,7 @@ export function renderImageTokensAsHtml(
       return own && isAddressPosition(content, macro.start) ? own : '';
     }
     if (macro.kind === 'drop' || macro.ref === null) return '';
-    const found = lookupAsset(macro.ref, assets, resolve);
+    const found = lookupAsset(macro.ref, assets, resolve, macro.name);
     if (!found || readLockKind(found.src)) return '';
     if (isAddressPosition(content, macro.start)) return found.src;
     if (macro.kind !== 'image') return '';

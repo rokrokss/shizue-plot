@@ -181,6 +181,11 @@ export interface CharxExportAsset extends CharxExportImage {
   slug: string;
   /** The card's own name for the image; null (an upload without one) goes out as the slug. */
   name: string | null;
+  /**
+   * The name it goes by among the member's emotion pictures, when it is one
+   * (`NormalizedCard.emotionImages`): declared as RisuAI's `emotion` too.
+   */
+  emotion?: string;
 }
 
 const EMBEDDED_PREFIX = 'embeded://'; // sic — the CCv3 spec spells it this way.
@@ -226,6 +231,12 @@ export function exportCardCharx(
   for (const asset of assets) {
     const name = asset.name?.trim() ? asset.name : asset.slug;
     const path = `assets/other/image/${asset.slug}.${asset.ext}`;
+    // One of the member's emotion pictures goes in as RisuAI's `emotion` first —
+    // what its import puts in `emotionImages`, and the declaration our own import
+    // keeps for the file — and as an asset as well, for `{{img::…}}`.
+    if (asset.emotion !== undefined) {
+      declared.push({ type: 'emotion', uri: `${EMBEDDED_PREFIX}${path}`, name: asset.emotion, ext: asset.ext });
+    }
     embed('x-risu-asset', name, path, asset);
     // The studio hands creators `{{img::slug}}`, and RisuAI knows an image only
     // by its names — so one imported under a name of its own (any Korean one)

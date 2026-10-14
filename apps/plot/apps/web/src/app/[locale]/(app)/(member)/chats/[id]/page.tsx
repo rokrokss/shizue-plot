@@ -19,6 +19,7 @@ import { BottomSheet } from '@/components/BottomSheet';
 import { ChatBackground } from '@/components/ChatBackground';
 import { ChatPanel } from '@/components/ChatPanel';
 import { ChatSettings } from '@/components/ChatSettings';
+import { EmotionScreen } from '@/components/EmotionScreen';
 import { FocusPicker } from '@/components/FocusPicker';
 import { MessageRow } from '@/components/MessageRow';
 import { ModelPill } from '@/components/ModelPill';
@@ -62,6 +63,7 @@ import { COMPOSER_MODES, composeTurn, type ComposerMode } from '@/lib/composerMo
 import type { CbsContext } from '@/lib/cbs';
 import type { ComponentContext } from '@/lib/componentCalls';
 import { toggleDirectionMarkup } from '@/lib/directionMarkup';
+import { awaitingEmotion, emotionResolver, emotionSlots, withEmotions } from '@/lib/emotion';
 import { streamsNarration } from '@/lib/narrator';
 import {
   displayContextAt,
@@ -166,6 +168,14 @@ const ABORT_POLL_MS = 250;
 const LOAD_EARLIER_PX = 400;
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * How long a finished reply's emotion picture is waited for. The server chooses
+ * it after the turn (its auxiliary model has 20 seconds), so the page asks about
+ * that one reply on a short beat and gives up a little after the server would.
+ */
+const EMOTION_POLL_TRIES = 15;
+const EMOTION_POLL_MS = 1500;
 
 /**
  * Replies a card's scripts may ask for in a row (`sendAIprompt`) before the
@@ -898,6 +908,59 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const charMacro = soleRenamed ? soleRenamed.nickname?.trim() || renamed! : characterName;
   // Who the conversation is with, once either read has said so.
   useDocumentTitle(characterName);
+
+  /**
+   * RisuAI's emotion screen: the picture each panel member shows on the branch
+   * on screen (`emotionSlots`) — nothing at all for a work whose cards show none.
+   */
+  const emotionScreen = useMemo(() => emotionSlots(messages, members, assetUrls), [messages, members, assetUrls]);
+  /** What `{{emotion::name}}` in a member's reply is drawn from: its own pictures first (`emotionResolver`). */
+  const emotionResolvers = useMemo(
+    () =>
+      new Map(
+        members.flatMap((member) =>
+          member.emotion ? [[member.id, emotionResolver(member.emotion.images, resolveAsset)] as const] : [],
+        ),
+      ),
+    [members, resolveAsset],
+  );
+  /**
+   * Replies this page saw finish. Their pictures are chosen after the turn, so
+   * the ones still without one are asked about until they have it.
+   */
+  const [freshReplies, setFreshReplies] = useState<ReadonlySet<string>>(() => new Set());
+  const waitingEmotion = awaitingEmotion(messages, members, freshReplies).join(',');
+  useEffect(() => {
+    if (!waitingEmotion) return;
+    const ids = waitingEmotion.split(',');
+    let cancelled = false;
+    void (async () => {
+      for (let attempt = 0; attempt < EMOTION_POLL_TRIES; attempt += 1) {
+        await sleep(EMOTION_POLL_MS);
+        if (cancelled) return;
+        const answers = await Promise.all(
+          ids.map((messageId) =>
+            apiGet<{ emotion: string | null }>(`/api/chats/${id}/messages/${messageId}/emotion`).then(
+              (answer) => answer.emotion,
+              () => null,
+            ),
+          ),
+        );
+        if (cancelled) return;
+        const chosen = new Map(ids.flatMap((messageId, index) => (answers[index] ? [[messageId, answers[index]!] as const] : [])));
+        // The rest, if any, are asked about by the run this change starts.
+        if (chosen.size > 0) {
+          setState((current) => (current ? withEmotions(current, chosen) : current));
+          return;
+        }
+      }
+      // None came: a choice that failed is not waited for again.
+      setFreshReplies((current) => new Set([...current].filter((messageId) => !ids.includes(messageId))));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [waitingEmotion, id]);
   const chatPersona = personas.find((persona) => persona.id === state?.chat.personaId);
   const personaName = chatPersona?.name;
   /** The persona's picture, for RisuAI's `{{source::user}}` on screen. */
@@ -1928,6 +1991,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         aborted = result.kind === 'aborted';
         landed = result.kind === 'done';
         if (result.kind === 'done') groupTurnId = result.groupTurnId ?? null;
+        // Its emotion picture, where its member shows one, comes after it (`awaitingEmotion`).
+        if (result.kind === 'done' && result.messageId) {
+          const reply = result.messageId;
+          setFreshReplies((current) => new Set(current).add(reply));
+        }
         // What the turn opened, celebrated on the spot: the refetch below carries
         // the same answer, and a reveal that waits for it arrives a beat late.
         if (result.kind === 'done' && result.unlockedAssetIds.length > 0) {
@@ -2782,583 +2850,595 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         </div>
       ) : null}
 
-      {/* The conversation's area. What a card draws behind the chat stands still
-          in it while the list scrolls over it, as RisuAI's background does. */}
-      <div className="relative flex min-h-0 flex-1 flex-col">
-        {backgroundContext ? (
-          <ChatBackground html={shownBackground} context={backgroundContext} scripts={backgroundScripts} />
-        ) : null}
-        <div
-          ref={scrollRef}
-          // Positioned only over a background, which it has to paint above —
-          // and what stands on it with no bubble of its own gets a veil there.
-          className={cx('min-h-0 flex-1 overflow-y-auto overscroll-contain', backgroundContext && 'chat-backdrop relative')}
-          // Reading upwards into a long chat: near the top, the window before this
-          // one is fetched and put in above without moving what is on screen.
-          onScroll={(event) => {
-            if (event.currentTarget.scrollTop < LOAD_EARLIER_PX) void loadEarlier();
-          }}
-        >
-          <div
-            ref={contentRef}
-            // The bottom padding is for the jump-to-latest pill, which floats over
-            // the last line of the conversation when it is showing.
-            className="mx-auto w-full max-w-3xl space-y-7 px-5 pt-7 pb-12"
-            // What a button in a message can do: run one of the card's manual
-            // triggers (`risu-trigger`, `{{button}}` naming one) or hand a Lua button
-            // its data (`risu-btn`), or put its text in the composer — sending that
-            // stays the reader's decision.
-            onClick={(event) => {
-              const target = event.target as HTMLElement;
-              const scripted = target.closest?.('[data-shizue-trigger], [data-shizue-btn]');
-              if (scripted) {
-                // The scripts of the member who spoke the message holding the button;
-                // the lead's in a message no member speaks.
-                const row = scripted.closest('[data-shizue-member]');
-                const member = row?.hasAttribute('data-shizue-spoken') ? row.getAttribute('data-shizue-member') : null;
-                const name = scripted.getAttribute('data-shizue-trigger');
-                if (name !== null) void runManualTrigger(name, scripted.getAttribute('data-shizue-trigger-id'), member);
-                else void runLuaButton(scripted.getAttribute('data-shizue-btn') ?? '', member);
-                return;
-              }
-              const button = target.closest?.('[data-shizue-fill]');
-              if (button) setInput(button.getAttribute('data-shizue-fill') ?? '');
-            }}
-          >
-            <AiNotice />
-
-            {creatorSheet ? (
-              <div
-                hidden
-                data-testid="creator-css"
-                // Sanitized by lib/sanitizeHtml — the only place markup is trusted.
-                dangerouslySetInnerHTML={{ __html: creatorSheet }}
-              />
+      {/* The chat area: the emotion screen, where the work's cards show one, and
+          the column of the conversation and the composer. The screen is a band
+          above the column on a narrow screen and a column beside it on a wide one. */}
+      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+        {emotionScreen.length > 0 ? <EmotionScreen chatId={state.chat.id} slots={emotionScreen} /> : null}
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {/* The conversation's area. What a card draws behind the chat stands still
+              in it while the list scrolls over it, as RisuAI's background does. */}
+          <div className="relative flex min-h-0 flex-1 flex-col">
+            {backgroundContext ? (
+              <ChatBackground html={shownBackground} context={backgroundContext} scripts={backgroundScripts} />
             ) : null}
-            {memberSheets.map(({ memberId, sheet }) => (
+            <div
+              ref={scrollRef}
+              // Positioned only over a background, which it has to paint above —
+              // and what stands on it with no bubble of its own gets a veil there.
+              className={cx('min-h-0 flex-1 overflow-y-auto overscroll-contain', backgroundContext && 'chat-backdrop relative')}
+              // Reading upwards into a long chat: near the top, the window before this
+              // one is fetched and put in above without moving what is on screen.
+              onScroll={(event) => {
+                if (event.currentTarget.scrollTop < LOAD_EARLIER_PX) void loadEarlier();
+              }}
+            >
               <div
-                key={memberId}
-                hidden
-                data-testid="member-css"
-                // Sanitized by lib/sanitizeHtml, scoped to this member's rows.
-                dangerouslySetInnerHTML={{ __html: sheet }}
-              />
-            ))}
-
-            {loadingEarlier ? (
-              <p className="text-center text-xs text-muted" role="status">
-                {t('loadingEarlier')}
-              </p>
-            ) : null}
-
-            {view.length === 0 ? <p className="py-16 text-center text-sm text-muted">{t('empty')}</p> : null}
-
-            {view.map((message, index) => {
-              const meta = rowMeta[index]!;
-              const source = message.id ? messageById.get(message.id) : undefined;
-              const isLast = index === view.length - 1;
-              // Every forked message carries its own way back, except the last assistant
-              // one — the footer's swipe already sits under that — and, in a work of
-              // several members, the first reply of the last round, whose takes the
-              // footer moves between.
-              const branches =
-                source &&
-                !mode &&
-                !(isLast && last?.role === 'assistant') &&
-                !(group && last?.role === 'assistant' && source.id === roundHead?.id)
-                  ? branchNav(source)
-                  : undefined;
-              // Where the conversation crossed midnight. It belongs to the row it
-              // stands above, so the scene editor gets it as readily as a message.
-              const divider = meta.dayStart ? (
-                <div className="flex items-center gap-3">
-                  <span className="h-px flex-1 bg-line" />
-                  <span className="chat-meta text-xs text-muted">{dayLabel(meta.dayStart)}</span>
-                  <span className="h-px flex-1 bg-line" />
-                </div>
-              ) : null;
-              // The scene's rows give way to one editor, drawn where the first of them was.
-              if (message.id && sceneIds.has(message.id)) {
-                return (
-                  <Fragment key={message.key}>
-                    {divider}
-                    {message.id === scene[0]?.id ? (
-                      <SceneEditor
-                        scene={scene}
-                        characterName={characterName}
-                        youName={t('you')}
-                        disabled={settingsLocked}
-                        onCancel={() => setSceneEdit(null)}
-                        onSave={(blocks) => saveScene(scene.map((item) => item.id), blocks)}
-                      />
-                    ) : null}
-                  </Fragment>
-                );
-              }
-              return (
-                <Fragment key={message.key}>
-                  {divider}
-                  <MessageRow
-                    role={message.role}
-                    content={message.content}
-                    {...(message.shown !== undefined ? { shown: message.shown } : {})}
-                    name={message.role === 'user' ? (personaName ?? t('you')) : characterName}
-                    avatar={plot?.coverUrl ?? null}
-                    userImage={personaAvatarUrl}
-                    roster={members}
-                    {...(message.speaker ? { speaker: message.speaker } : {})}
-                    {...(message.member ? { member: message.member, ...(message.spoken ? { spoken: true } : {}) } : {})}
-                    assets={messageAssets}
-                    resolveAsset={resolveAsset}
-                    attachments={message.attachments}
-                    {...(displayContextAt(displayOf(message), meta.depth)
-                      ? { display: displayContextAt(displayOf(message), meta.depth)! }
-                      : {})}
-                    {...(components ? { components } : {})}
-                    componentNames={declaredComponents}
-                    previousSameRole={meta.previousSameRole}
-                    chatIndex={indexBase + index}
-                    streaming={message.streaming}
-                    // Nothing of the reply on screen yet: the time it has been
-                    // waited for, which is all of the model's thinking that is shown.
-                    thinking={message.streaming && streamText === ''}
-                    // In a round, whom the row waits on: the face its reply will carry.
-                    {...(message.id === null && message.role === 'assistant' && streamMember
-                      ? { typing: { name: streamMember.name, avatarUrl: streamMember.avatarUrl } }
-                      : {})}
-                    disabled={settingsLocked}
-                    {...(message.createdAt ? { createdAt: message.createdAt } : {})}
-                    grouped={meta.grouped}
-                    {...(message.intro ? { intro: true } : {})}
-                    {...(message.model ? { model: message.model } : {})}
-                    statusCollapsed={statusCollapsed}
-                    onToggleStatus={toggleStatus}
-                    // The offer stands under the newest reply and nowhere else, and
-                    // only while nothing is being generated over it.
-                    {...(isLast && showActions && message.role === 'assistant' && choicesOffered
-                      ? { onChoice: suggestInput }
-                      : {})}
-                    {...(source && !mode && !isSceneMessage(source)
-                      ? { onSave: (content: string) => editMessage(source, content) }
-                      : {})}
-                    // A turn the scene is made of is edited with the whole scene.
-                    {...(source && !mode && isSceneMessage(source)
-                      ? { onEditScene: () => setSceneEdit(source.id) }
-                      : {})}
-                    {...(source && !mode ? { onDelete: () => void deleteMessage(source.id) } : {})}
-                    {...(message.hidden ? { hidden: true } : {})}
-                    {...(source && !mode ? { onToggleHidden: () => void toggleHidden(source) } : {})}
-                    {...(branches ? { branches } : {})}
-                    footer={
-                      isLast && showActions ? (
-                        <div
-                          className={cx(
-                            'chat-veil mt-2 flex w-fit items-center gap-1',
-                            message.role === 'user' && 'justify-end',
-                          )}
-                        >
-                          {last?.role === 'assistant' && info && info.total > 1 ? (
-                            <div className="mr-1 flex items-center gap-1 text-xs text-muted">
-                              <button
-                                type="button"
-                                disabled={!prevTarget}
-                                title={t('swipePrev')}
-                                aria-label={t('swipePrev')}
-                                onClick={() => prevTarget && void moveHead(prevTarget)}
-                                className="px-1 hover:text-fg disabled:opacity-30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-                              >
-                                <span aria-hidden="true">◀</span>
-                              </button>
-                              <span className="tabular-nums">
-                                {info.index + 1}/{info.total}
-                              </span>
-                              <button
-                                type="button"
-                                disabled={!nextTarget}
-                                title={t('swipeNext')}
-                                aria-label={t('swipeNext')}
-                                onClick={() => nextTarget && void moveHead(nextTarget)}
-                                className="px-1 hover:text-fg disabled:opacity-30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-                              >
-                                <span aria-hidden="true">▶</span>
-                              </button>
-                            </div>
-                          ) : null}
-                          {/* In a work of several members: the whole round again, and
-                              a round of its own after the last reply. */}
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            {...(group ? { title: t('regenerateRoundHint') } : {})}
-                            onClick={() => void generate('regenerate')}
-                          >
-                            {t('regenerate')}
-                          </Button>
-                          {/* A narration answers a user turn as readily as it follows a
-                              reply, so unlike continue/auto it is offered under both. */}
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            title={t('narrateHint')}
-                            onClick={() => void generate('narrate')}
-                          >
-                            {t('narrate')}
-                          </Button>
-                          {last?.role === 'assistant' ? (
-                            <>
-                              {/* Continue and auto are the two the row can do
-                                  without on a phone: the least reached for, and the
-                                  easiest to describe in a menu. */}
-                              <div className="hidden items-center gap-1 sm:flex">
-                                {/* A reply hidden from the AI is not continued: its
-                                    text would go out as the reply being resumed. */}
-                                {!last.hiddenFromPrompt ? (
-                                  <Button size="sm" variant="ghost" onClick={() => void generate('continue')}>
-                                    {t('continue')}
-                                  </Button>
-                                ) : null}
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  {...(group ? { title: t('autoRoundHint') } : {})}
-                                  onClick={() => void generate('auto')}
-                                >
-                                  {t('auto')}
-                                </Button>
-                              </div>
-                              <MoreActions
-                                label={t('moreActions')}
-                                className="sm:hidden"
-                                actions={[
-                                  ...(!last.hiddenFromPrompt
-                                    ? [
-                                        {
-                                          key: 'continue',
-                                          label: t('continue'),
-                                          onSelect: () => void generate('continue'),
-                                        },
-                                      ]
-                                    : []),
-                                  { key: 'auto', label: t('auto'), onSelect: () => void generate('auto') },
-                                ]}
-                              />
-                            </>
-                          ) : null}
-                          {/* Only where the deployment has an image provider: the
-                              server decides, and says so on every chat read. */}
-                          {state.capabilities?.drawScene ? (
-                            <Button size="sm" variant="ghost" onClick={() => void drawScene()}>
-                              {t('drawScene')}
-                            </Button>
-                          ) : null}
-                        </div>
-                      ) : null
-                    }
-                  />
-                </Fragment>
-              );
-            })}
-
-            {/* Where the drawn scene will land: a box of its own aspect while the
-                provider works, and the same box with the retry in it if it never
-                came. The message the refetch brings back replaces this outright. */}
-            {drawing || drawFailed ? (
-              <SceneDraft
-                status={drawing ? 'drawing' : 'failed'}
-                onRetry={() => void drawScene()}
-              />
-            ) : null}
-
-            {/* Directly under the row it belongs to, which is the streaming one when
-                a stream failed part-way: its text is still up there, unstored. */}
-            {error ? (
-              <div
-                role="alert"
-                className="flex items-center gap-3 rounded-lg border border-danger/40 bg-danger/5 px-3.5 py-2.5"
+                ref={contentRef}
+                // The bottom padding is for the jump-to-latest pill, which floats over
+                // the last line of the conversation when it is showing.
+                className="mx-auto w-full max-w-3xl space-y-7 px-5 pt-7 pb-12"
+                // What a button in a message can do: run one of the card's manual
+                // triggers (`risu-trigger`, `{{button}}` naming one) or hand a Lua button
+                // its data (`risu-btn`), or put its text in the composer — sending that
+                // stays the reader's decision.
+                onClick={(event) => {
+                  const target = event.target as HTMLElement;
+                  const scripted = target.closest?.('[data-shizue-trigger], [data-shizue-btn]');
+                  if (scripted) {
+                    // The scripts of the member who spoke the message holding the button;
+                    // the lead's in a message no member speaks.
+                    const row = scripted.closest('[data-shizue-member]');
+                    const member = row?.hasAttribute('data-shizue-spoken') ? row.getAttribute('data-shizue-member') : null;
+                    const name = scripted.getAttribute('data-shizue-trigger');
+                    if (name !== null) void runManualTrigger(name, scripted.getAttribute('data-shizue-trigger-id'), member);
+                    else void runLuaButton(scripted.getAttribute('data-shizue-btn') ?? '', member);
+                    return;
+                  }
+                  const button = target.closest?.('[data-shizue-fill]');
+                  if (button) setInput(button.getAttribute('data-shizue-fill') ?? '');
+                }}
               >
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm text-danger">{error}</p>
-                  {ambiguous ? <p className="mt-1 text-xs text-muted">{t('sendMaybeDelivered')}</p> : null}
-                  {held ? <p className="mt-1 text-xs text-muted">{t('streamError')}</p> : null}
-                </div>
-                {retryable && !mode ? (
-                  <Button
-                    size="sm"
-                    variant="danger"
-                    // A round that failed asks the same speaker again and goes on.
-                    onClick={() => void (round?.failed ? retryRound() : generate('regenerate'))}
+                <AiNotice />
+
+                {creatorSheet ? (
+                  <div
+                    hidden
+                    data-testid="creator-css"
+                    // Sanitized by lib/sanitizeHtml — the only place markup is trusted.
+                    dangerouslySetInnerHTML={{ __html: creatorSheet }}
+                  />
+                ) : null}
+                {memberSheets.map(({ memberId, sheet }) => (
+                  <div
+                    key={memberId}
+                    hidden
+                    data-testid="member-css"
+                    // Sanitized by lib/sanitizeHtml, scoped to this member's rows.
+                    dangerouslySetInnerHTML={{ __html: sheet }}
+                  />
+                ))}
+
+                {loadingEarlier ? (
+                  <p className="text-center text-xs text-muted" role="status">
+                    {t('loadingEarlier')}
+                  </p>
+                ) : null}
+
+                {view.length === 0 ? <p className="py-16 text-center text-sm text-muted">{t('empty')}</p> : null}
+
+                {view.map((message, index) => {
+                  const meta = rowMeta[index]!;
+                  const source = message.id ? messageById.get(message.id) : undefined;
+                  const isLast = index === view.length - 1;
+                  // Every forked message carries its own way back, except the last assistant
+                  // one — the footer's swipe already sits under that — and, in a work of
+                  // several members, the first reply of the last round, whose takes the
+                  // footer moves between.
+                  const branches =
+                    source &&
+                    !mode &&
+                    !(isLast && last?.role === 'assistant') &&
+                    !(group && last?.role === 'assistant' && source.id === roundHead?.id)
+                      ? branchNav(source)
+                      : undefined;
+                  // Where the conversation crossed midnight. It belongs to the row it
+                  // stands above, so the scene editor gets it as readily as a message.
+                  const divider = meta.dayStart ? (
+                    <div className="flex items-center gap-3">
+                      <span className="h-px flex-1 bg-line" />
+                      <span className="chat-meta text-xs text-muted">{dayLabel(meta.dayStart)}</span>
+                      <span className="h-px flex-1 bg-line" />
+                    </div>
+                  ) : null;
+                  // The scene's rows give way to one editor, drawn where the first of them was.
+                  if (message.id && sceneIds.has(message.id)) {
+                    return (
+                      <Fragment key={message.key}>
+                        {divider}
+                        {message.id === scene[0]?.id ? (
+                          <SceneEditor
+                            scene={scene}
+                            characterName={characterName}
+                            youName={t('you')}
+                            disabled={settingsLocked}
+                            onCancel={() => setSceneEdit(null)}
+                            onSave={(blocks) => saveScene(scene.map((item) => item.id), blocks)}
+                          />
+                        ) : null}
+                      </Fragment>
+                    );
+                  }
+                  return (
+                    <Fragment key={message.key}>
+                      {divider}
+                      <MessageRow
+                        role={message.role}
+                        content={message.content}
+                        {...(message.shown !== undefined ? { shown: message.shown } : {})}
+                        name={message.role === 'user' ? (personaName ?? t('you')) : characterName}
+                        avatar={plot?.coverUrl ?? null}
+                        userImage={personaAvatarUrl}
+                        roster={members}
+                        {...(message.speaker ? { speaker: message.speaker } : {})}
+                        {...(message.member ? { member: message.member, ...(message.spoken ? { spoken: true } : {}) } : {})}
+                        assets={messageAssets}
+                        resolveAsset={
+                          emotionResolvers.get(
+                            (message.spoken ? message.member : members.length === 1 ? members[0]!.id : undefined) ?? '',
+                          ) ?? resolveAsset
+                        }
+                        attachments={message.attachments}
+                        {...(displayContextAt(displayOf(message), meta.depth)
+                          ? { display: displayContextAt(displayOf(message), meta.depth)! }
+                          : {})}
+                        {...(components ? { components } : {})}
+                        componentNames={declaredComponents}
+                        previousSameRole={meta.previousSameRole}
+                        chatIndex={indexBase + index}
+                        streaming={message.streaming}
+                        // Nothing of the reply on screen yet: the time it has been
+                        // waited for, which is all of the model's thinking that is shown.
+                        thinking={message.streaming && streamText === ''}
+                        // In a round, whom the row waits on: the face its reply will carry.
+                        {...(message.id === null && message.role === 'assistant' && streamMember
+                          ? { typing: { name: streamMember.name, avatarUrl: streamMember.avatarUrl } }
+                          : {})}
+                        disabled={settingsLocked}
+                        {...(message.createdAt ? { createdAt: message.createdAt } : {})}
+                        grouped={meta.grouped}
+                        {...(message.intro ? { intro: true } : {})}
+                        {...(message.model ? { model: message.model } : {})}
+                        statusCollapsed={statusCollapsed}
+                        onToggleStatus={toggleStatus}
+                        // The offer stands under the newest reply and nowhere else, and
+                        // only while nothing is being generated over it.
+                        {...(isLast && showActions && message.role === 'assistant' && choicesOffered
+                          ? { onChoice: suggestInput }
+                          : {})}
+                        {...(source && !mode && !isSceneMessage(source)
+                          ? { onSave: (content: string) => editMessage(source, content) }
+                          : {})}
+                        // A turn the scene is made of is edited with the whole scene.
+                        {...(source && !mode && isSceneMessage(source)
+                          ? { onEditScene: () => setSceneEdit(source.id) }
+                          : {})}
+                        {...(source && !mode ? { onDelete: () => void deleteMessage(source.id) } : {})}
+                        {...(message.hidden ? { hidden: true } : {})}
+                        {...(source && !mode ? { onToggleHidden: () => void toggleHidden(source) } : {})}
+                        {...(branches ? { branches } : {})}
+                        footer={
+                          isLast && showActions ? (
+                            <div
+                              className={cx(
+                                'chat-veil mt-2 flex w-fit items-center gap-1',
+                                message.role === 'user' && 'justify-end',
+                              )}
+                            >
+                              {last?.role === 'assistant' && info && info.total > 1 ? (
+                                <div className="mr-1 flex items-center gap-1 text-xs text-muted">
+                                  <button
+                                    type="button"
+                                    disabled={!prevTarget}
+                                    title={t('swipePrev')}
+                                    aria-label={t('swipePrev')}
+                                    onClick={() => prevTarget && void moveHead(prevTarget)}
+                                    className="px-1 hover:text-fg disabled:opacity-30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                                  >
+                                    <span aria-hidden="true">◀</span>
+                                  </button>
+                                  <span className="tabular-nums">
+                                    {info.index + 1}/{info.total}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    disabled={!nextTarget}
+                                    title={t('swipeNext')}
+                                    aria-label={t('swipeNext')}
+                                    onClick={() => nextTarget && void moveHead(nextTarget)}
+                                    className="px-1 hover:text-fg disabled:opacity-30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                                  >
+                                    <span aria-hidden="true">▶</span>
+                                  </button>
+                                </div>
+                              ) : null}
+                              {/* In a work of several members: the whole round again, and
+                                  a round of its own after the last reply. */}
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                {...(group ? { title: t('regenerateRoundHint') } : {})}
+                                onClick={() => void generate('regenerate')}
+                              >
+                                {t('regenerate')}
+                              </Button>
+                              {/* A narration answers a user turn as readily as it follows a
+                                  reply, so unlike continue/auto it is offered under both. */}
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                title={t('narrateHint')}
+                                onClick={() => void generate('narrate')}
+                              >
+                                {t('narrate')}
+                              </Button>
+                              {last?.role === 'assistant' ? (
+                                <>
+                                  {/* Continue and auto are the two the row can do
+                                      without on a phone: the least reached for, and the
+                                      easiest to describe in a menu. */}
+                                  <div className="hidden items-center gap-1 sm:flex">
+                                    {/* A reply hidden from the AI is not continued: its
+                                        text would go out as the reply being resumed. */}
+                                    {!last.hiddenFromPrompt ? (
+                                      <Button size="sm" variant="ghost" onClick={() => void generate('continue')}>
+                                        {t('continue')}
+                                      </Button>
+                                    ) : null}
+                                    <Button
+                                      size="sm"
+                                      variant="ghost"
+                                      {...(group ? { title: t('autoRoundHint') } : {})}
+                                      onClick={() => void generate('auto')}
+                                    >
+                                      {t('auto')}
+                                    </Button>
+                                  </div>
+                                  <MoreActions
+                                    label={t('moreActions')}
+                                    className="sm:hidden"
+                                    actions={[
+                                      ...(!last.hiddenFromPrompt
+                                        ? [
+                                            {
+                                              key: 'continue',
+                                              label: t('continue'),
+                                              onSelect: () => void generate('continue'),
+                                            },
+                                          ]
+                                        : []),
+                                      { key: 'auto', label: t('auto'), onSelect: () => void generate('auto') },
+                                    ]}
+                                  />
+                                </>
+                              ) : null}
+                              {/* Only where the deployment has an image provider: the
+                                  server decides, and says so on every chat read. */}
+                              {state.capabilities?.drawScene ? (
+                                <Button size="sm" variant="ghost" onClick={() => void drawScene()}>
+                                  {t('drawScene')}
+                                </Button>
+                              ) : null}
+                            </div>
+                          ) : null
+                        }
+                      />
+                    </Fragment>
+                  );
+                })}
+
+                {/* Where the drawn scene will land: a box of its own aspect while the
+                    provider works, and the same box with the retry in it if it never
+                    came. The message the refetch brings back replaces this outright. */}
+                {drawing || drawFailed ? (
+                  <SceneDraft
+                    status={drawing ? 'drawing' : 'failed'}
+                    onRetry={() => void drawScene()}
+                  />
+                ) : null}
+
+                {/* Directly under the row it belongs to, which is the streaming one when
+                    a stream failed part-way: its text is still up there, unstored. */}
+                {error ? (
+                  <div
+                    role="alert"
+                    className="flex items-center gap-3 rounded-lg border border-danger/40 bg-danger/5 px-3.5 py-2.5"
                   >
-                    {common('retry')}
-                  </Button>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm text-danger">{error}</p>
+                      {ambiguous ? <p className="mt-1 text-xs text-muted">{t('sendMaybeDelivered')}</p> : null}
+                      {held ? <p className="mt-1 text-xs text-muted">{t('streamError')}</p> : null}
+                    </div>
+                    {retryable && !mode ? (
+                      <Button
+                        size="sm"
+                        variant="danger"
+                        // A round that failed asks the same speaker again and goes on.
+                        onClick={() => void (round?.failed ? retryRound() : generate('regenerate'))}
+                      >
+                        {common('retry')}
+                      </Button>
+                    ) : null}
+                  </div>
                 ) : null}
               </div>
-            ) : null}
-          </div>
-        </div>
-      </div>
-
-      <div className="relative shrink-0 border-t border-line bg-surface">
-        {/* Only while the reader has scrolled away: new text never drags them
-            back down, so this is how they choose to follow it again. Round, at
-            the column's bottom-right, as Zeta has it. */}
-        {isAtBottom ? null : (
-          <div className="pointer-events-none absolute inset-x-0 -top-14 px-5">
-            <div className="mx-auto flex max-w-3xl justify-end">
-              <button
-                type="button"
-                aria-label={t('jumpToLatest')}
-                title={t('jumpToLatest')}
-                onClick={() => void scrollToBottom()}
-                className="pointer-events-auto flex size-10 items-center justify-center rounded-full border border-line bg-surface text-fg shadow-lg transition-colors hover:border-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-              >
-                <Icon name="arrow" className="size-5 rotate-90" />
-              </button>
             </div>
           </div>
-        )}
-        {importing ? (
-          <div
-            role="status"
-            data-testid="chat-importing"
-            className="mx-auto flex max-w-3xl items-center gap-3 px-5 pt-3"
-          >
-            <p className="min-w-0 flex-1 rounded-xl border border-line bg-raised/60 px-4 py-2.5 text-xs text-muted">
-              {t('importing')}
-            </p>
-            <Button size="sm" onClick={() => void reload()}>
-              {t('importingReload')}
-            </Button>
-          </div>
-        ) : null}
-        <div className="mx-auto w-full max-w-3xl">
-          <AttachmentChips chips={chips} onRemove={dropChip} onRetry={retryChip} />
-          {attachError ? (
-            <p className="px-5 pt-2 text-xs text-danger" role="status">
-              {attachError}
-            </p>
-          ) : null}
-        </div>
-        {/* What the reader could say next, for the turns where nothing comes to
-            mind. A chip fills the composer and stops there — sending stays the
-            reader's own act, exactly as it is for a display script's button. */}
-        {suggestions.length > 0 ? (
-          <ul
-            data-testid="reply-suggestions"
-            className="mx-auto flex max-w-3xl flex-wrap gap-2 px-5 pt-3"
-          >
-            {suggestions.map((suggestion, index) => (
-              <li key={index} className="min-w-0">
+
+          <div className="relative shrink-0 border-t border-line bg-surface">
+            {/* Only while the reader has scrolled away: new text never drags them
+                back down, so this is how they choose to follow it again. Round, at
+                the column's bottom-right, as Zeta has it. */}
+            {isAtBottom ? null : (
+              <div className="pointer-events-none absolute inset-x-0 -top-14 px-5">
+                <div className="mx-auto flex max-w-3xl justify-end">
+                  <button
+                    type="button"
+                    aria-label={t('jumpToLatest')}
+                    title={t('jumpToLatest')}
+                    onClick={() => void scrollToBottom()}
+                    className="pointer-events-auto flex size-10 items-center justify-center rounded-full border border-line bg-surface text-fg shadow-lg transition-colors hover:border-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                  >
+                    <Icon name="arrow" className="size-5 rotate-90" />
+                  </button>
+                </div>
+              </div>
+            )}
+            {importing ? (
+              <div
+                role="status"
+                data-testid="chat-importing"
+                className="mx-auto flex max-w-3xl items-center gap-3 px-5 pt-3"
+              >
+                <p className="min-w-0 flex-1 rounded-xl border border-line bg-raised/60 px-4 py-2.5 text-xs text-muted">
+                  {t('importing')}
+                </p>
+                <Button size="sm" onClick={() => void reload()}>
+                  {t('importingReload')}
+                </Button>
+              </div>
+            ) : null}
+            <div className="mx-auto w-full max-w-3xl">
+              <AttachmentChips chips={chips} onRemove={dropChip} onRetry={retryChip} />
+              {attachError ? (
+                <p className="px-5 pt-2 text-xs text-danger" role="status">
+                  {attachError}
+                </p>
+              ) : null}
+            </div>
+            {/* What the reader could say next, for the turns where nothing comes to
+                mind. A chip fills the composer and stops there — sending stays the
+                reader's own act, exactly as it is for a display script's button. */}
+            {suggestions.length > 0 ? (
+              <ul
+                data-testid="reply-suggestions"
+                className="mx-auto flex max-w-3xl flex-wrap gap-2 px-5 pt-3"
+              >
+                {suggestions.map((suggestion, index) => (
+                  <li key={index} className="min-w-0">
+                    <button
+                      type="button"
+                      data-testid="reply-suggestion"
+                      aria-label={t('suggestionLabel', { text: suggestion })}
+                      onClick={() => {
+                        setInput(suggestion);
+                        composerRef.current?.focus();
+                      }}
+                      className="max-w-full rounded-lg border border-line px-3 py-1.5 text-left text-xs text-muted transition-colors hover:border-muted/60 hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                    >
+                      <span className="line-clamp-2 block">{suggestion}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {suggestError ? (
+              <p className="mx-auto max-w-3xl px-5 pt-2 text-xs text-muted" role="status">
+                {suggestError}
+              </p>
+            ) : null}
+            {scriptNotice ? (
+              <p data-testid="script-notice" className="mx-auto max-w-3xl px-5 pt-2 text-xs text-muted" role="status">
+                {scriptNotice}
+              </p>
+            ) : null}
+            {/* Who the round in hand still has to ask, quietly: the row above the
+                composer already shows whom it is waiting on now. */}
+            {upNext.length > 0 ? (
+              <div className="mx-auto max-w-3xl px-5 pt-3" role="status">
+                <span
+                  data-testid="round-next"
+                  className="inline-flex max-w-full rounded-full border border-line px-3 py-1 text-xs text-muted"
+                >
+                  <span className="truncate">{t('roundNext', { names: upNext.join(', ') })}</span>
+                </span>
+              </div>
+            ) : null}
+
+            {/* What the reader is about to write: their own line, their 상황묘사, or
+                the narrator's — and in a work of several members, whose line it is.
+                It marks the text on its way out and nothing more — the message is
+                stored in the same notation either way. */}
+            <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-2 px-5 pt-3">
+              <div
+                role="group"
+                aria-label={t('composerMode')}
+                className="flex gap-1 rounded-lg border border-line bg-surface/60 p-1"
+              >
+                {COMPOSER_MODES.map((value) => (
+                  <button
+                    key={value}
+                    type="button"
+                    aria-pressed={composerMode === value}
+                    title={t(`composerModes.${value}Hint`)}
+                    onClick={() => {
+                      setComposerMode(value);
+                      // The narrator is no member: a narration is nobody's line.
+                      if (value === 'narration') setWriteAs(null);
+                    }}
+                    className={cx(
+                      'rounded-md px-3 py-1 text-xs transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
+                      composerMode === value ? 'bg-mint-soft font-medium text-fg' : 'text-muted hover:text-fg',
+                    )}
+                  >
+                    {t(`composerModes.${value}`)}
+                  </button>
+                ))}
+              </div>
+              {group && stage.length > 0 ? (
+                <WriteAsPicker
+                  members={stage}
+                  selected={writer?.id ?? null}
+                  onChange={(memberId) => {
+                    setWriteAs(memberId);
+                    if (memberId !== null && composerMode === 'narration') setComposerMode('dialogue');
+                  }}
+                />
+              ) : null}
+              {/* Beside the chips, because it is about the same thing they are: what
+                  the reader is about to write. Withheld while a reply streams — what
+                  it would suggest is an answer to a turn that has not arrived. */}
+              <Button
+                size="sm"
+                variant="ghost"
+                data-testid="suggest-button"
+                title={t('suggestHint')}
+                busy={suggesting}
+                disabled={Boolean(mode) || drawing || importing}
+                onClick={() => void suggest()}
+              >
+                <span aria-hidden="true">✦</span>
+                {t('suggest')}
+              </Button>
+              {/* Only where there is a choice to make: a lone member on the stage is
+                  who every reply is about anyway. */}
+              {stage.length > 1 ? <FocusPicker members={stage} selected={focus} onChange={setFocus} /> : null}
+            </div>
+            {/* Zeta's composer: the picture button, the field with its `*` inside,
+                and the round send. */}
+            <div className="mx-auto flex max-w-3xl items-end gap-2 px-5 pt-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
+              {/* The picker is the button's doing; the input itself is never seen. */}
+              <input
+                ref={filePicker}
+                type="file"
+                accept="image/*"
+                multiple
+                hidden
+                onChange={(event) => {
+                  addFiles([...(event.target.files ?? [])]);
+                  // Cleared so picking the same file again still counts as a change.
+                  event.target.value = '';
+                }}
+              />
+              <Button
+                size="sm"
+                variant="ghost"
+                aria-label={t('attach')}
+                title={t('attach')}
+                disabled={Boolean(mode) || importing}
+                className="mb-1 shrink-0 rounded-full! px-2.5!"
+                onClick={() => filePicker.current?.click()}
+              >
+                <Icon name="attach" className="size-4" />
+              </Button>
+              <div className="relative min-w-0 flex-1">
+                <TextArea
+                  ref={composerRef}
+                  rows={1}
+                  value={input}
+                  // Unlike a streaming reply, an import has no end the reader is waiting
+                  // on in the composer, so the field itself is held with the rest.
+                  disabled={importing}
+                  aria-label={t('placeholder')}
+                  placeholder={t('placeholder')}
+                  // Typing goes on while the reply streams — only sending waits for it
+                  // (`submit` checks `mode`). Locking the field would also throw the
+                  // keyboard user's focus away mid-turn.
+                  onChange={(event) => setInput(event.target.value)}
+                  // An image on the clipboard is an image to attach; text pastes into
+                  // the field as it always did, because nothing here touches it.
+                  onPaste={(event) => {
+                    const files = [...event.clipboardData.files];
+                    if (files.length === 0) return;
+                    event.preventDefault();
+                    addFiles(files);
+                  }}
+                  onKeyDown={(event) => {
+                    // Exactly Cmd/Ctrl+I: with shift or alt it is the browser's own
+                    // shortcut (devtools), and taking that would be worse than useful.
+                    if (
+                      (event.metaKey || event.ctrlKey) &&
+                      !event.shiftKey &&
+                      !event.altKey &&
+                      event.key.toLowerCase() === 'i'
+                    ) {
+                      event.preventDefault();
+                      toggleDirection();
+                      return;
+                    }
+                    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                      event.preventDefault();
+                      submit();
+                    }
+                  }}
+                  // Its height is written by `autoGrow`, so the drag handle would only
+                  // be overruled on the next keystroke; past `max-h-48` it scrolls.
+                  // The right padding is the `*` button's, which sits inside the field.
+                  className="block max-h-48 min-h-11 resize-none! overflow-y-auto rounded-3xl border-focus/50 bg-surface py-2.5 pr-11 pl-4"
+                />
                 <button
                   type="button"
-                  data-testid="reply-suggestion"
-                  aria-label={t('suggestionLabel', { text: suggestion })}
-                  onClick={() => {
-                    setInput(suggestion);
-                    composerRef.current?.focus();
-                  }}
-                  className="max-w-full rounded-lg border border-line px-3 py-1.5 text-left text-xs text-muted transition-colors hover:border-muted/60 hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                  aria-label={t('direction')}
+                  title={t('directionHint')}
+                  disabled={Boolean(mode) || importing}
+                  onClick={toggleDirection}
+                  className="absolute right-1.5 bottom-1.5 flex size-8 items-center justify-center rounded-full text-muted transition-colors hover:bg-raised hover:text-fg disabled:opacity-45 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
                 >
-                  <span className="line-clamp-2 block">{suggestion}</span>
+                  {/* The asterisk sits high in its em box, so what is centred is the box
+                      and not the glyph. The nudge centres the glyph. */}
+                  <span aria-hidden="true" className="translate-y-[0.18em] text-base leading-none">*</span>
                 </button>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-        {suggestError ? (
-          <p className="mx-auto max-w-3xl px-5 pt-2 text-xs text-muted" role="status">
-            {suggestError}
-          </p>
-        ) : null}
-        {scriptNotice ? (
-          <p data-testid="script-notice" className="mx-auto max-w-3xl px-5 pt-2 text-xs text-muted" role="status">
-            {scriptNotice}
-          </p>
-        ) : null}
-        {/* Who the round in hand still has to ask, quietly: the row above the
-            composer already shows whom it is waiting on now. */}
-        {upNext.length > 0 ? (
-          <div className="mx-auto max-w-3xl px-5 pt-3" role="status">
-            <span
-              data-testid="round-next"
-              className="inline-flex max-w-full rounded-full border border-line px-3 py-1 text-xs text-muted"
-            >
-              <span className="truncate">{t('roundNext', { names: upNext.join(', ') })}</span>
-            </span>
+              </div>
+              {/* Icon-only, so the label is the name: the same word the button said.
+                  Round, so the button's own radius and padding give way (`!`). */}
+              {mode ? (
+                <Button
+                  className="size-11 shrink-0 rounded-full! px-0!"
+                  variant="secondary"
+                  aria-label={t('stop')}
+                  title={t('stop')}
+                  onClick={() => {
+                    // A round's speakers still to come are not asked; what is stored stays.
+                    roundStopped.current = true;
+                    abortRef.current?.abort();
+                  }}
+                >
+                  <span aria-hidden="true" className="size-3 rounded-[3px] bg-current" />
+                </Button>
+              ) : (
+                <Button
+                  className="size-11 shrink-0 rounded-full! px-0!"
+                  variant="primary"
+                  aria-label={t('send')}
+                  title={t('send')}
+                  disabled={!input.trim() || attaching || drawing || mutating || importing || scriptsPending || castPending}
+                  onClick={submit}
+                >
+                  <Icon name="arrow" className="size-5 -rotate-90" />
+                </Button>
+              )}
+            </div>
           </div>
-        ) : null}
-
-        {/* What the reader is about to write: their own line, their 상황묘사, or
-            the narrator's — and in a work of several members, whose line it is.
-            It marks the text on its way out and nothing more — the message is
-            stored in the same notation either way. */}
-        <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-2 px-5 pt-3">
-          <div
-            role="group"
-            aria-label={t('composerMode')}
-            className="flex gap-1 rounded-lg border border-line bg-surface/60 p-1"
-          >
-            {COMPOSER_MODES.map((value) => (
-              <button
-                key={value}
-                type="button"
-                aria-pressed={composerMode === value}
-                title={t(`composerModes.${value}Hint`)}
-                onClick={() => {
-                  setComposerMode(value);
-                  // The narrator is no member: a narration is nobody's line.
-                  if (value === 'narration') setWriteAs(null);
-                }}
-                className={cx(
-                  'rounded-md px-3 py-1 text-xs transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
-                  composerMode === value ? 'bg-mint-soft font-medium text-fg' : 'text-muted hover:text-fg',
-                )}
-              >
-                {t(`composerModes.${value}`)}
-              </button>
-            ))}
-          </div>
-          {group && stage.length > 0 ? (
-            <WriteAsPicker
-              members={stage}
-              selected={writer?.id ?? null}
-              onChange={(memberId) => {
-                setWriteAs(memberId);
-                if (memberId !== null && composerMode === 'narration') setComposerMode('dialogue');
-              }}
-            />
-          ) : null}
-          {/* Beside the chips, because it is about the same thing they are: what
-              the reader is about to write. Withheld while a reply streams — what
-              it would suggest is an answer to a turn that has not arrived. */}
-          <Button
-            size="sm"
-            variant="ghost"
-            data-testid="suggest-button"
-            title={t('suggestHint')}
-            busy={suggesting}
-            disabled={Boolean(mode) || drawing || importing}
-            onClick={() => void suggest()}
-          >
-            <span aria-hidden="true">✦</span>
-            {t('suggest')}
-          </Button>
-          {/* Only where there is a choice to make: a lone member on the stage is
-              who every reply is about anyway. */}
-          {stage.length > 1 ? <FocusPicker members={stage} selected={focus} onChange={setFocus} /> : null}
-        </div>
-        {/* Zeta's composer: the picture button, the field with its `*` inside,
-            and the round send. */}
-        <div className="mx-auto flex max-w-3xl items-end gap-2 px-5 pt-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
-          {/* The picker is the button's doing; the input itself is never seen. */}
-          <input
-            ref={filePicker}
-            type="file"
-            accept="image/*"
-            multiple
-            hidden
-            onChange={(event) => {
-              addFiles([...(event.target.files ?? [])]);
-              // Cleared so picking the same file again still counts as a change.
-              event.target.value = '';
-            }}
-          />
-          <Button
-            size="sm"
-            variant="ghost"
-            aria-label={t('attach')}
-            title={t('attach')}
-            disabled={Boolean(mode) || importing}
-            className="mb-1 shrink-0 rounded-full! px-2.5!"
-            onClick={() => filePicker.current?.click()}
-          >
-            <Icon name="attach" className="size-4" />
-          </Button>
-          <div className="relative min-w-0 flex-1">
-            <TextArea
-              ref={composerRef}
-              rows={1}
-              value={input}
-              // Unlike a streaming reply, an import has no end the reader is waiting
-              // on in the composer, so the field itself is held with the rest.
-              disabled={importing}
-              aria-label={t('placeholder')}
-              placeholder={t('placeholder')}
-              // Typing goes on while the reply streams — only sending waits for it
-              // (`submit` checks `mode`). Locking the field would also throw the
-              // keyboard user's focus away mid-turn.
-              onChange={(event) => setInput(event.target.value)}
-              // An image on the clipboard is an image to attach; text pastes into
-              // the field as it always did, because nothing here touches it.
-              onPaste={(event) => {
-                const files = [...event.clipboardData.files];
-                if (files.length === 0) return;
-                event.preventDefault();
-                addFiles(files);
-              }}
-              onKeyDown={(event) => {
-                // Exactly Cmd/Ctrl+I: with shift or alt it is the browser's own
-                // shortcut (devtools), and taking that would be worse than useful.
-                if (
-                  (event.metaKey || event.ctrlKey) &&
-                  !event.shiftKey &&
-                  !event.altKey &&
-                  event.key.toLowerCase() === 'i'
-                ) {
-                  event.preventDefault();
-                  toggleDirection();
-                  return;
-                }
-                if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-                  event.preventDefault();
-                  submit();
-                }
-              }}
-              // Its height is written by `autoGrow`, so the drag handle would only
-              // be overruled on the next keystroke; past `max-h-48` it scrolls.
-              // The right padding is the `*` button's, which sits inside the field.
-              className="block max-h-48 min-h-11 resize-none! overflow-y-auto rounded-3xl border-focus/50 bg-surface py-2.5 pr-11 pl-4"
-            />
-            <button
-              type="button"
-              aria-label={t('direction')}
-              title={t('directionHint')}
-              disabled={Boolean(mode) || importing}
-              onClick={toggleDirection}
-              className="absolute right-1.5 bottom-1.5 flex size-8 items-center justify-center rounded-full text-muted transition-colors hover:bg-raised hover:text-fg disabled:opacity-45 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-            >
-              {/* The asterisk sits high in its em box, so what is centred is the box
-                  and not the glyph. The nudge centres the glyph. */}
-              <span aria-hidden="true" className="translate-y-[0.18em] text-base leading-none">*</span>
-            </button>
-          </div>
-          {/* Icon-only, so the label is the name: the same word the button said.
-              Round, so the button's own radius and padding give way (`!`). */}
-          {mode ? (
-            <Button
-              className="size-11 shrink-0 rounded-full! px-0!"
-              variant="secondary"
-              aria-label={t('stop')}
-              title={t('stop')}
-              onClick={() => {
-                // A round's speakers still to come are not asked; what is stored stays.
-                roundStopped.current = true;
-                abortRef.current?.abort();
-              }}
-            >
-              <span aria-hidden="true" className="size-3 rounded-[3px] bg-current" />
-            </Button>
-          ) : (
-            <Button
-              className="size-11 shrink-0 rounded-full! px-0!"
-              variant="primary"
-              aria-label={t('send')}
-              title={t('send')}
-              disabled={!input.trim() || attaching || drawing || mutating || importing || scriptsPending || castPending}
-              onClick={submit}
-            >
-              <Icon name="arrow" className="size-5 -rotate-90" />
-            </Button>
-          )}
         </div>
       </div>
 

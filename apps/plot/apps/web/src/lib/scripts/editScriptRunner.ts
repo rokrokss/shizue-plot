@@ -55,6 +55,8 @@ export interface EditOutcome {
   skipped: { script: EditScript; reason: string }[];
   /** What the clock did: a script set aside, a pass given up. For the runtime's log. */
   notices: string[];
+  /** The emotion picture a matching `@@emo` script named (`EditJobResult.emotion`). */
+  emotion?: string;
 }
 
 export type EditScriptRunner = (job: EditJob) => Promise<EditOutcome>;
@@ -69,7 +71,7 @@ export interface EditWorker {
 
 /** How one try ended: the pass, the script it was stopped in (-1: none had started), or no worker to run it. */
 type TryResult =
-  | { kind: 'done'; text: string; skipped: { index: number; reason: string }[] }
+  | { kind: 'done'; text: string; skipped: { index: number; reason: string }[]; emotion?: string }
   | { kind: 'stopped'; at: number }
   | { kind: 'unavailable'; reason: string };
 
@@ -86,6 +88,7 @@ const outcomeOf = (job: EditJob, result: Extract<TryResult, { kind: 'done' }>, n
     return script ? [{ script, reason }] : [];
   }),
   notices,
+  ...(result.emotion !== undefined ? { emotion: result.emotion } : {}),
 });
 
 export function createEditScriptRunner(
@@ -136,7 +139,7 @@ export function createEditScriptRunner(
     // Anything about a job that is not the live one is from a worker given up on.
     if (!active || message.id !== active.id) return;
     if (message.type === 'at') active.at = message.index;
-    else if (message.type === 'done') finish({ kind: 'done', text: message.result.text, skipped: message.result.skipped });
+    else if (message.type === 'done') finish({ kind: 'done', ...message.result });
     else if (message.type === 'failed') finish({ kind: 'unavailable', reason: message.error });
   }
 

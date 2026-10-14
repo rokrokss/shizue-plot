@@ -50,6 +50,8 @@ interface DeclaredPngAsset {
   name: string;
   uri: string;
   ext: string;
+  /** One of the card's emotion pictures (`CharxAssetFile.emotion`). */
+  emotion?: true;
 }
 
 /**
@@ -67,7 +69,12 @@ function declaredPngAssets(raw: unknown): DeclaredPngAsset[] {
     const assets = Array.isArray(data['assets']) ? data['assets'].filter(isObject) : [];
     return assets
       .filter((asset) => !(asset['type'] === 'icon' && asset['name'] === 'main'))
-      .map((asset) => ({ name: text(asset['name']), uri: text(asset['uri']), ext: text(asset['ext']) }));
+      .map((asset) => ({
+        name: text(asset['name']),
+        uri: text(asset['uri']),
+        ext: text(asset['ext']),
+        ...(asset['type'] === 'emotion' ? { emotion: true as const } : {}),
+      }));
   }
   if (raw['spec'] !== 'chara_card_v2') return [];
 
@@ -76,7 +83,12 @@ function declaredPngAssets(raw: unknown): DeclaredPngAsset[] {
   const rows = (list: unknown): unknown[][] =>
     Array.isArray(list) ? list.filter((row): row is unknown[] => Array.isArray(row)) : [];
   return [
-    ...rows(risu['emotions']).map((row) => ({ name: text(row[0]), uri: text(row[1]), ext: 'png' })),
+    ...rows(risu['emotions']).map((row) => ({
+      name: text(row[0]),
+      uri: text(row[1]),
+      ext: 'png',
+      emotion: true as const,
+    })),
     ...rows(risu['additionalAssets']).map((row) => ({
       name: text(row[0]),
       uri: text(row[1]),
@@ -109,7 +121,11 @@ function pngAssets(raw: unknown, chunks: Map<string, Uint8Array>): CharxAssetFil
     if (size > MAX_ENTRY_BYTES || spent > MAX_TOTAL_BYTES) break;
     // Copied off Buffer's shared pool, so each asset owns its bytes.
     const bytes = new Uint8Array(Buffer.from(textOf(base64), 'base64'));
-    assets.push({ name: asset.name.trim() || `asset_${key}`, bytes });
+    assets.push({
+      name: asset.name.trim() || `asset_${key}`,
+      bytes,
+      ...(asset.emotion ? { emotion: true as const } : {}),
+    });
   }
   return assets;
 }

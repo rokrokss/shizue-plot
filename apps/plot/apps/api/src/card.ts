@@ -17,6 +17,7 @@ import {
   MAX_INTRO_LENGTH,
   type ComponentCapability,
   type DisplayScript,
+  type EmotionImage,
   type LoreEntry,
   type LorePosition,
   type LoreSelectiveLogic,
@@ -393,6 +394,29 @@ export function liftCompanion(
   };
 }
 
+/** As many emotion pictures as a plot holds images (`MAX_ASSETS_PER_PLOT`). */
+const MAX_EMOTION_IMAGES = 1000;
+
+/**
+ * The card's emotion pictures as the client sent them back: the import wrote
+ * them (`NormalizedCard.emotionImages`) and the studio only carries them, so
+ * this keeps what has the shape and drops what does not.
+ */
+function coerceEmotionImages(value: unknown): EmotionImage[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter(
+      (entry): entry is EmotionImage =>
+        entry !== null &&
+        typeof entry === 'object' &&
+        typeof (entry as Record<string, unknown>)['name'] === 'string' &&
+        typeof (entry as Record<string, unknown>)['slug'] === 'string' &&
+        (entry as Record<string, unknown>)['slug'] !== '',
+    )
+    .slice(0, MAX_EMOTION_IMAGES)
+    .map(({ name, slug }) => ({ name, slug }));
+}
+
 /**
  * Normalizes a client-supplied card (already in NormalizedCard shape) so that a
  * malformed field can never break prompt assembly later.
@@ -416,6 +440,7 @@ export function coerceCard(value: unknown, fallbackName: string): NormalizedCard
   const narrator = coerceNarrator(raw['narrator']);
   const intro = coerceIntro(raw['intro']);
   const groupOnlyGreetings = strArray(raw['groupOnlyGreetings']);
+  const emotionImages = coerceEmotionImages(raw['emotionImages']);
 
   return {
     spec: spec === 'v1' || spec === 'v2' ? spec : 'v3',
@@ -450,6 +475,7 @@ export function coerceCard(value: unknown, fallbackName: string): NormalizedCard
     ...(componentCode ? { componentCode } : {}),
     ...(componentCapabilities.length > 0 ? { componentCapabilities } : {}),
     ...(Object.keys(narrator).length > 0 ? { narrator } : {}),
+    ...(emotionImages.length > 0 ? { emotionImages } : {}),
     extensions:
       raw['extensions'] && typeof raw['extensions'] === 'object' && !Array.isArray(raw['extensions'])
         ? (raw['extensions'] as Record<string, unknown>)

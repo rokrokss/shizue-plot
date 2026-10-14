@@ -6,6 +6,8 @@ import {
   computeVariables,
   countTokens,
   diffVariables,
+  emotionScreenOf,
+  inlayEmotionTags,
   narrationBody,
   narrationUntilSpeech,
   replyLengthTokens,
@@ -60,6 +62,7 @@ import type { AppDeps, AppEnv, Tx } from './deps.js';
 import { invalidateMemoryForEdit, scheduleMemoryUpdate } from './memory.js';
 import { runPromptScriptJob } from './regexWorker.js';
 import { scheduleRelationshipUpdate } from './relationship.js';
+import { replyMemberOf, scheduleEmotionDetection } from './emotion.js';
 import {
   characterImage,
   editRequestLua,
@@ -90,9 +93,12 @@ import { unlockAssets } from './unlocks.js';
  * would be built on words the commit is about to replace, and the commit's own
  * edit would throw it away again.
  */
-export function scheduleBackgroundUpdates(deps: AppDeps, chatId: string): void {
+export function scheduleBackgroundUpdates(deps: AppDeps, chatId: string, reply?: string): void {
   scheduleMemoryUpdate(deps, chatId);
   scheduleRelationshipUpdate(deps, chatId);
+  // The emotion picture `reply` leaves its member wearing — only for a reply that
+  // finished: RisuAI chooses none for one the reader stopped.
+  if (reply !== undefined) scheduleEmotionDetection(deps, chatId, reply);
 }
 
 /** Where the generated text ends up. */
@@ -1039,7 +1045,7 @@ async function runGeneration(
         if (reply) {
           // Stored pending all the same, if the browser meant to post-process
           // it: the next time it opens the chat it finds the mark and finishes.
-          const stored = await persist(deps, plan, reply, usage, request);
+          const stored = await persist(deps, plan, reply, usage, request, { stopped: true });
           // The turn is on the branch whether or not anyone was listening, so what
           // it opened is opened; there is simply no event to say so on.
           await openUnlocks(deps, plan.chatId, stored.content);
@@ -1080,7 +1086,7 @@ async function runGeneration(
         }),
       });
       // Strictly after `done`: background work must not add latency to the turn.
-      if (!plan.postProcess) scheduleBackgroundUpdates(deps, plan.chatId);
+      if (!plan.postProcess) scheduleBackgroundUpdates(deps, plan.chatId, stored.id);
     } finally {
       clearInterval(heartbeat);
       c.req.raw.signal?.removeEventListener('abort', abort);
@@ -1285,6 +1291,17 @@ async function keepListenerEdits(
 }
 
 /**
+ * The reply's text as it is stored: where it is wholly by a member whose card
+ * shows its emotion pictures inline (RisuAI's `inlayViewScreen`), the
+ * `<Emotion="…">` tags the model was told to end with become the picture
+ * (`inlayEmotionTags`), as RisuAI's `runInlayScreen` rewrites a reply.
+ */
+function withInlayEmotions(plan: GenerationPlan, text: string, speakerMemberId: string | null, whole: string): string {
+  const member = replyMemberOf({ role: 'assistant', content: whole, source: 'user', speakerMemberId }, plan.characters);
+  return member && emotionScreenOf(member.card)?.mode === 'inlay' ? inlayEmotionTags(text) : text;
+}
+
+/**
  * Writes the generated text and moves the head, in one transaction with what
  * the `editRequest` listeners did (`keepListenerEdits`), which goes first. A
  * new turn records the lore that freshly triggered for its prompt; a continue
@@ -1301,6 +1318,8 @@ async function persist(
   text: string,
   usage: Usage,
   { loreTriggers, variableWrites, listenerEdits }: Pick<BuiltRequest, 'loreTriggers' | 'variableWrites' | 'listenerEdits'>,
+  /** The reader stopped it: nothing chooses its emotion picture again (`scheduleBackgroundUpdates`). */
+  { stopped = false }: { stopped?: boolean } = {},
 ): Promise<StoredTurn> {
   const scriptState = plan.postProcess ? ('pending' as const) : null;
   return deps.db.transaction(async (tx) => {
@@ -1309,7 +1328,8 @@ async function persist(
       // The message the listeners left last, where they edited the chat — its text as they left it.
       const target = place?.continued ?? plan.target.message;
       const continued: GenerationPlan = target === plan.target.message ? plan : { ...plan, target: { kind: 'continue', message: target } };
-      const appended = plan.speakerNames ? stripSpeakerPrefix(text, plan.speakerNames) : text;
+      const stripped = plan.speakerNames ? stripSpeakerPrefix(text, plan.speakerNames) : text;
+      const appended = withInlayEmotions(plan, stripped, target.speakerMemberId, target.content);
       const content = target.content + appended;
       const [updated] = await tx
         .update(messages)
@@ -1322,6 +1342,9 @@ async function persist(
           // The text changed in place, so a script commit computed on the old
           // text — another tab's, finishing the turn as it was — is refused.
           scriptRev: sql`${messages.scriptRev} + 1`,
+          // Chosen again for the longer reply, as RisuAI chooses after a continue —
+          // unless the reader stopped it, which chooses none and keeps the one it had.
+          ...(stopped ? {} : { emotion: null }),
         })
         .where(eq(messages.id, target.id))
         .returning({ scriptRev: messages.scriptRev });
@@ -1339,11 +1362,12 @@ async function persist(
 
     // The prefix is the server's to write: the model was asked for the scene
     // alone, and the convention is what makes the stored turn a narration.
-    const content = plan.narration
+    const said = plan.narration
       ? withNarrationPrefix(text)
       : plan.speakerNames
         ? stripSpeakerPrefix(text, plan.speakerNames)
         : text;
+    const content = withInlayEmotions(plan, said, plan.round?.speakerMemberId ?? null, said);
     // Minted here, so a reply that opens a round can be stored as its id.
     const id = randomUUID();
     const [created] = await tx

@@ -1,5 +1,6 @@
 'use client';
 
+import { emotionModeOf, extensionsWithEmotionMode } from '@shizue/core/emotion';
 import { coerceGroupSettings, DEFAULT_GROUP_SETTINGS, type GroupSettings } from '@shizue/core/group';
 import { carriesScripts } from '@shizue/core/triggers';
 import { useFormatter, useTranslations } from 'next-intl';
@@ -72,6 +73,7 @@ const memberFields = (member: PlotMember): string =>
     member.card.postHistoryInstructions,
     member.card.lorebook,
     member.card.loreSettings,
+    emotionModeOf(member.card),
   ]);
 
 /** The card files a member exports to, and their labels. Only CharX carries the plot's images. */
@@ -965,6 +967,35 @@ function MembersSection({
                 onChange={(lorebook) => onPatch(member.id, { lorebook })}
               />
             </div>
+
+            {/* Only for a card that brought expression pictures: how RisuAI's
+                emotion screen shows them, written where RisuAI keeps it. */}
+            {member.card.emotionImages?.length ? (
+              <Field
+                label={t('memberEmotion')}
+                hint={t('memberEmotionHint', { count: member.card.emotionImages.length })}
+              >
+                <Select
+                  data-testid="member-emotion-mode"
+                  value={emotionModeOf(member.card) ?? 'off'}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    onPatch(member.id, {
+                      extensions: extensionsWithEmotionMode(
+                        member.card.extensions,
+                        value === 'panel' || value === 'inlay' ? value : null,
+                      ),
+                    });
+                  }}
+                >
+                  {(['off', 'panel', 'inlay'] as const).map((value) => (
+                    <option key={value} value={value}>
+                      {t(`memberEmotionModes.${value}`)}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            ) : null}
 
             {/* Links rather than buttons: the route answers with the file itself,
                 built from the saved card — which is what the hint tells the creator. */}

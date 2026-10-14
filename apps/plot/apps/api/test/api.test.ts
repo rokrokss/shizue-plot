@@ -294,6 +294,7 @@ function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps {
     generationClaims: new Map(),
     refreshingMemory: new Set<string>(),
     extractingRelationship: new Set<string>(),
+    detectingEmotion: new Set<string>(),
     suggesting: new Set<string>(),
     drafting: new Set<string>(),
     ...overrides,
@@ -2159,6 +2160,8 @@ describe('card export', () => {
     const declared = (readCharx(charx).raw as any).data.assets;
     expect(declared.map((asset: any) => [asset.type, asset.name, asset.ext])).toEqual([
       ['icon', 'main', 'png'],
+      // The card's emotion picture goes out as one again, ahead of its asset entry.
+      ['emotion', '웃음', 'gif'],
       ['x-risu-asset', '웃음', 'gif'],
       // The same file again under the slug the studio shows for it (a Korean name folds to `asset-N`).
       ['x-risu-asset', expect.stringMatching(/^asset-\d+$/), 'gif'],
@@ -2169,7 +2172,7 @@ describe('card export', () => {
     expect(parsed.card.name).toBe('세이');
     expect(parsed.iconBuffer).toEqual(stripPngTextChunks(icon));
     expect(parsed.assets).toEqual([
-      { name: '웃음', bytes: gif(2) },
+      { name: '웃음', bytes: gif(2), emotion: true },
       { name: 'Smile', bytes: gif(1) },
       { name: 'castle', bytes: gif(3) },
     ]);
@@ -9672,6 +9675,8 @@ describe('plot hub', () => {
           intro: '멤버를 소개하는 한 줄.',
           // 대화량, which the reader's browser rolls a round by.
           talkativeness: 50,
+          // How its emotion pictures are shown; a card without the screen shows none.
+          emotion: null,
         },
       ],
       // Presentation, so it travels even though the definition does not.
@@ -15589,5 +15594,323 @@ describe('group turns', () => {
     expect(fk!.rule).toBe('SET NULL');
     const [index] = await sql<{ indexdef: string }[]>`select indexdef from pg_indexes where indexname = 'messages_speaker_member_id_idx'`;
     expect(index!.indexdef).toContain('WHERE (speaker_member_id IS NOT NULL)');
+  });
+});
+
+describe('emotion images', () => {
+  /** Minimal bytes that sniff as a GIF; the marker tells two of them apart. */
+  const gif = (marker: number): Uint8Array => Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, marker]);
+
+  /** A charx whose card shows its emotions as RisuAI's `viewScreen` says. */
+  const emotionCard = (
+    risuai: Record<string, unknown>,
+    name = '세이',
+    emotions: string[] = ['neutral', 'happy', 'Angry'],
+    marker = 0,
+  ): File =>
+    new File(
+      [
+        buildCharx({ ...v3Card, data: { ...v3Card.data, name, extensions: { risuai } } }, [
+          ...emotions.map((emotion, index) => ({
+            type: 'emotion',
+            name: emotion,
+            ext: 'gif',
+            entry: `assets/emotion/${index}.gif`,
+            bytes: gif(marker + index),
+          })),
+          { type: 'x-risu-asset', name: 'room', ext: 'gif', entry: 'assets/other/room.gif', bytes: gif(99) },
+        ]),
+      ],
+      `${name}.charx`,
+    );
+
+  /** An app whose chat model echoes and whose auxiliary model answers `answer`. */
+  function emotionApp(answer: string) {
+    const tasks: Promise<void>[] = [];
+    const asked: { system: string; messages: ChatRequest['messages']; maxTokens: number }[] = [];
+    const prompts: { system: string; messages: ChatRequest['messages'] }[] = [];
+    const echo = createEchoAdapter();
+    const harness = {
+      answer,
+      asked,
+      prompts,
+      app: makeApp({
+        getAdapter: (modelId) =>
+          modelId === 'echo/echo'
+            ? {
+                providerModel: 'echo',
+                adapter: {
+                  stream: (req) => {
+                    prompts.push({ system: req.system, messages: req.messages });
+                    return echo.stream(req);
+                  },
+                },
+              }
+            : {
+                providerModel: 'emotion-stub',
+                adapter: {
+                  stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
+                    asked.push({ system: req.system, messages: req.messages, maxTokens: req.maxTokens });
+                    yield { type: 'text', text: harness.answer };
+                    return { usage: { promptTokens: 0, completionTokens: 0 } };
+                  },
+                },
+              },
+        onBackgroundTask: (task) => void tasks.push(task),
+      }),
+      settle: async () => {
+        await Promise.all(tasks);
+      },
+    };
+    return harness;
+  }
+
+  async function send(cookie: string, chatId: string, body: Record<string, unknown>, target: Hono<AppEnv>): Promise<any> {
+    const events = await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', body, target));
+    expect(events.at(-1)!.event, JSON.stringify(events.at(-1))).toBe('done');
+    return events.at(-1)!.data;
+  }
+
+  const emotionOf = async (cookie: string, chatId: string, messageId: string, target: Hono<AppEnv>): Promise<any> =>
+    readJson(await request(cookie, `/api/chats/${chatId}/messages/${messageId}/emotion`, 'GET', undefined, target));
+
+  it("keeps the card's emotion pictures by slug and shows the screen on the public page", async () => {
+    const cookie = await signUp('emotion-import@example.com');
+    const plot = await importCard(cookie, emotionCard({ viewScreen: 'emotion' }));
+    const member = plot.characters[0];
+    // Only the emotions, in the card's order, each by the slug it became.
+    expect(member.card.emotionImages).toEqual([
+      { name: 'neutral', slug: 'neutral' },
+      { name: 'happy', slug: 'happy' },
+      { name: 'Angry', slug: 'angry' },
+    ]);
+    // The extension stays as it came, so an export says the same.
+    expect(member.card.extensions.risuai).toEqual({ viewScreen: 'emotion' });
+
+    // A second card with the same names keeps its own pictures.
+    const form = new FormData();
+    form.append('file', emotionCard({ viewScreen: 'emotion', inlayViewScreen: true }, '카이', ['neutral', 'happy'], 10));
+    const added = await readJson(await request(cookie, `/api/plots/${plot.id}/characters/import`, 'POST', form));
+    expect(added.card.emotionImages).toEqual([
+      { name: 'neutral', slug: 'neutral-2' },
+      { name: 'happy', slug: 'happy-2' },
+    ]);
+
+    const view = await readPublicPlot(cookie, plot.id);
+    expect(view.characters.map((character: any) => character.emotion)).toEqual([
+      { mode: 'panel', images: member.card.emotionImages },
+      { mode: 'inlay', images: added.card.emotionImages },
+    ]);
+
+    // The studio sends the whole card back; the pictures survive it, and the
+    // mode is the extension's to switch.
+    const patched = await patchCharacter(cookie, plot.id, member.id, {
+      card: { ...member.card, extensions: { risuai: { viewScreen: 'none' } } },
+    });
+    expect(patched.card.emotionImages).toEqual(member.card.emotionImages);
+    expect((await readPublicPlot(cookie, plot.id)).characters[0].emotion).toBeNull();
+  });
+
+  it('chooses a picture after the reply with the auxiliary model, as RisuAI asks for one', async () => {
+    const cookie = await signUp('emotion-detect@example.com');
+    const plot = await importCard(cookie, emotionCard({ viewScreen: 'emotion' }));
+    const harness = emotionApp(' Happy\n');
+    const chat = await startChat(cookie, plot.id);
+    const chatId = chat.chat.id;
+
+    const done = await send(cookie, chatId, { content: '반가워' }, harness.app);
+    await harness.settle();
+
+    // RisuAI's sub-model prompt: the list, one word, the worked example, the reply.
+    expect(harness.asked).toHaveLength(1);
+    const [question] = harness.asked;
+    expect(question!.system).toMatch(/^From the list below, choose a word/);
+    expect(question!.system).toMatch(/\n\n list: .+ \noutput only one word\.$/);
+    expect(question!.system.split(' list: ')[1]!.split(' \n')[0]!.split(', ').sort()).toEqual(['Angry', 'happy', 'neutral']);
+    expect(question!.maxTokens).toBe(30);
+    expect(question!.messages.map((message) => [message.role, message.content])).toEqual([
+      ['user', '"Good morning, Master! Is there anything I can do for you today?"'],
+      ['assistant', 'happy'],
+      ['user', '반가워'],
+    ]);
+
+    // Stored on the reply, which the page reads back.
+    expect(await emotionOf(cookie, chatId, done.messageId, harness.app)).toEqual({ emotion: 'happy' });
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
+    expect(state.path.at(-1).emotion).toBe('happy');
+    expect(state.path[0].emotion).toBeNull();
+
+    // An answer naming none falls back to `neutral`; one inside a sentence still counts.
+    harness.answer = '모르겠다';
+    const fallback = await send(cookie, chatId, { content: '흠' }, harness.app);
+    await harness.settle();
+    harness.answer = 'I pick angry.';
+    const contained = await send(cookie, chatId, { content: '화났어?' }, harness.app);
+    await harness.settle();
+    expect(await emotionOf(cookie, chatId, fallback.messageId, harness.app)).toEqual({ emotion: 'neutral' });
+    expect(await emotionOf(cookie, chatId, contained.messageId, harness.app)).toEqual({ emotion: 'Angry' });
+
+    // Someone else's chat is not there to ask about.
+    const other = await signUp('emotion-detect-other@example.com');
+    expect(
+      (await request(other, `/api/chats/${chatId}/messages/${done.messageId}/emotion`, 'GET', undefined, harness.app)).status,
+    ).toBe(404);
+  });
+
+  it('chooses again after a continue, and keeps the picture of one the reader stopped', async () => {
+    const cookie = await signUp('emotion-continue@example.com');
+    const plot = await importCard(cookie, emotionCard({ viewScreen: 'emotion' }));
+    const harness = emotionApp('happy');
+    const chat = await startChat(cookie, plot.id);
+    const chatId = chat.chat.id;
+    const done = await send(cookie, chatId, { content: '좋아' }, harness.app);
+    await harness.settle();
+
+    harness.answer = 'Angry';
+    const continued = await readSse(await json(cookie, `/api/chats/${chatId}/continue`, 'POST', undefined, harness.app));
+    expect(continued.at(-1)!.event).toBe('done');
+    await harness.settle();
+    expect(await emotionOf(cookie, chatId, done.messageId, harness.app)).toEqual({ emotion: 'Angry' });
+
+    // A continue the reader walks away from keeps its text and the picture it had.
+    const tasks: Promise<void>[] = [];
+    const stopping = makeApp({
+      getAdapter: () => ({
+        providerModel: 'slow',
+        adapter: {
+          stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
+            yield { type: 'text', text: ' 그리고' };
+            await new Promise<void>((_resolve, reject) => {
+              const fail = (): void => reject(new Error('aborted'));
+              if (req.abortSignal?.aborted) fail();
+              else req.abortSignal?.addEventListener('abort', fail);
+            });
+            return { usage: { promptTokens: 0, completionTokens: 0 } };
+          },
+        },
+      }),
+      onBackgroundTask: (task) => void tasks.push(task),
+    });
+    const client = new AbortController();
+    const res = await stopping.request(`/api/chats/${chatId}/continue`, {
+      method: 'POST',
+      headers: { cookie },
+      signal: client.signal,
+    });
+    await res.body!.getReader().read();
+    client.abort();
+    await until(async () => (await claimOf(chatId)) === null, 'the claim was never released');
+    await Promise.all(tasks);
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    expect(state.path.at(-1).content).toMatch(/ 그리고$/);
+    expect(state.path.at(-1).emotion).toBe('Angry');
+  });
+
+  it('asks nothing of a card without the screen, and nothing of an inlay one', async () => {
+    const cookie = await signUp('emotion-none@example.com');
+    const harness = emotionApp('happy');
+    for (const risuai of [{}, { viewScreen: 'emotion', inlayViewScreen: true }]) {
+      const plot = await importCard(cookie, emotionCard(risuai));
+      const chat = await startChat(cookie, plot.id);
+      const done = await send(cookie, chat.chat.id, { content: '안녕' }, harness.app);
+      await harness.settle();
+      expect(await emotionOf(cookie, chat.chat.id, done.messageId, harness.app)).toEqual({ emotion: null });
+    }
+    expect(harness.asked).toHaveLength(0);
+  });
+
+  it('tells an inlay card to name its picture, and stores the name as the picture', async () => {
+    const cookie = await signUp('emotion-inlay@example.com');
+    const plot = await importCard(cookie, emotionCard({ viewScreen: 'emotion', inlayViewScreen: true }));
+    const harness = emotionApp('happy');
+    const chat = await startChat(cookie, plot.id);
+    const chatId = chat.chat.id;
+
+    const done = await send(cookie, chatId, { content: '그래. <Emotion="happy">' }, harness.app);
+    const prompt = harness.prompts.at(-1)!;
+    // RisuAI's default instructions with the list, at the very end.
+    const last = prompt.messages.at(-1)!;
+    expect(last.role).toBe('system');
+    expect(contentText(last.content)).toBe(
+      "You must always output the character's emotional image as a command at the end of a conversation. The command must be selected from a given list, and it's better to have variety than to repeat images used in previous chats. Use one image, depending on the character's emotion. See the list below. Form: <Emotion=\"<image command>\"> Example: <Emotion=\"Agree\"> List of commands: neutral, happy, Angry",
+    );
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
+    const reply = state.path.find((message: any) => message.id === done.messageId);
+    // On a line of its own, so it stands in the flow as a figure.
+    expect(reply.content).toBe('그래.\n{{emotion::happy}}');
+    await harness.settle();
+    expect(harness.asked).toHaveLength(0);
+
+    // The card's own instructions win over the default.
+    const own = await importCard(
+      cookie,
+      emotionCard({
+        viewScreen: 'emotion',
+        inlayViewScreen: true,
+        newGenData: { prompt: '', negative: '', instructions: '', emotionInstructions: '표정: {{slot}}' },
+      }),
+    );
+    const ownChat = await startChat(cookie, own.id);
+    await send(cookie, ownChat.chat.id, { content: '좋아' }, harness.app);
+    expect(contentText(harness.prompts.at(-1)!.messages.at(-1)!.content)).toBe('표정: neutral, happy, Angry');
+  });
+
+  it("keeps the picture a card's @@emo named at the commit, and chooses none over it", async () => {
+    const cookie = await signUp('emotion-emo@example.com');
+    const plot = await importCard(cookie, emotionCard({ viewScreen: 'emotion' }));
+    const harness = emotionApp('happy');
+    const chat = await startChat(cookie, plot.id);
+    const chatId = chat.chat.id;
+    const commit = (messageId: string, emotion: string) =>
+      json(
+        cookie,
+        `/api/chats/${chatId}/script-commit`,
+        'POST',
+        { messageId, scriptRev: 0, clearPending: true, variableDelta: null, emotion },
+        harness.app,
+      );
+
+    // Pending: nothing is chosen until the browser commits the scripts' pass.
+    const named = await send(cookie, chatId, { content: '웃는다', postProcess: true }, harness.app);
+    await harness.settle();
+    expect(harness.asked).toHaveLength(0);
+    expect((await commit(named.messageId, 'Angry')).status).toBe(200);
+    await harness.settle();
+    expect(await emotionOf(cookie, chatId, named.messageId, harness.app)).toEqual({ emotion: 'Angry' });
+    expect(harness.asked).toHaveLength(0);
+
+    // A name the member has no picture for is no choice: the model chooses.
+    const unknown = await send(cookie, chatId, { content: '또 웃는다', postProcess: true }, harness.app);
+    expect((await commit(unknown.messageId, 'sleepy')).status).toBe(200);
+    await harness.settle();
+    expect(harness.asked).toHaveLength(1);
+    expect(await emotionOf(cookie, chatId, unknown.messageId, harness.app)).toEqual({ emotion: 'happy' });
+  });
+
+  it("chooses each group reply's picture for its own speaker", async () => {
+    const cookie = await signUp('emotion-group@example.com');
+    const plot = await importCard(cookie, emotionCard({ viewScreen: 'emotion' }));
+    const form = new FormData();
+    form.append('file', emotionCard({ viewScreen: 'emotion' }, '카이', ['neutral', 'happy'], 10));
+    const kai = await readJson(await request(cookie, `/api/plots/${plot.id}/characters/import`, 'POST', form));
+    const harness = emotionApp('happy');
+    const chat = await startChat(cookie, plot.id);
+    const chatId = chat.chat.id;
+
+    const first = await send(cookie, chatId, { content: '둘 다 안녕', speakerId: plot.characters[0].id }, harness.app);
+    const second = await readSse(
+      await json(cookie, `/api/chats/${chatId}/reply`, 'POST', { speakerId: kai.id, groupTurnId: first.groupTurnId }, harness.app),
+    );
+    await harness.settle();
+    expect(harness.asked).toHaveLength(2);
+    expect(await emotionOf(cookie, chatId, first.messageId, harness.app)).toEqual({ emotion: 'happy' });
+    expect(await emotionOf(cookie, chatId, second.at(-1)!.data.messageId, harness.app)).toEqual({ emotion: 'happy' });
+  });
+
+  it('migrates the emotion column as nullable text', async () => {
+    const [column] = await sql<{ data_type: string; is_nullable: string }[]>`
+      select data_type, is_nullable from information_schema.columns
+      where table_name = 'messages' and column_name = 'emotion'`;
+    expect(column).toEqual({ data_type: 'text', is_nullable: 'YES' });
   });
 });

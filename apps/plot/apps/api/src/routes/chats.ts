@@ -100,6 +100,7 @@ import {
   type ScriptView,
 } from '../generation.js';
 import { avatarUrl, coverUrl, loadMembers, loadVisiblePlot, visibleToViewer } from '../hub.js';
+import { emotionNamed, replyMemberOf } from '../emotion.js';
 import { auxiliaryModelOf, buildMemoryInput, invalidateMemoryForEdit, memorySettingsOf } from '../memory.js';
 import {
   attachedNoteIds,
@@ -234,6 +235,11 @@ const toMessageJson = (message: Message, attachments: ChatAttachment[] = []) => 
   groupTurnId: message.groupTurnId,
   /** Hidden from the AI: on screen, never in what a model reads (`PUT …/messages/:id/hidden`). */
   hiddenFromPrompt: message.hiddenFromPrompt,
+  /**
+   * The name of the emotion picture its member wears after this reply, or null
+   * (`messages.emotion`) — what the chat's emotion screen draws.
+   */
+  emotion: message.emotion,
   model: message.model,
   promptTokens: message.promptTokens,
   completionTokens: message.completionTokens,
@@ -2124,6 +2130,23 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   });
 
   /**
+   * The emotion picture a reply left its member wearing (`messages.emotion`), by
+   * name, or null while none is chosen. The choice is made after the turn is done
+   * (`emotion.ts`), so the page asks here for the one reply it is waiting on
+   * rather than reading the whole chat again.
+   */
+  app.get('/:id/messages/:messageId/emotion', async (c) => {
+    const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
+    const [message] = await deps.db
+      .select({ emotion: messages.emotion })
+      .from(messages)
+      .where(and(eq(messages.id, requireUuidParam(c, 'messageId')), eq(messages.chatId, chat.id)))
+      .limit(1);
+    if (!message) throw notFound('Message not found');
+    return c.json({ emotion: message.emotion });
+  });
+
+  /**
    * Rewriting a whole scene — the run of narration and replies the reader reads as
    * one — in a single edit.
    *
@@ -2225,6 +2248,10 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         ...(original ? { speakerMemberId: original.speakerMemberId, groupTurnId: original.groupTurnId } : {}),
         // …and whether the AI reads it.
         ...(original?.hiddenFromPrompt ? { hiddenFromPrompt: true } : {}),
+        // …and the face its member wore after it, which a rewording does not change.
+        ...(original?.role === 'assistant' && role === 'assistant' && original.emotion
+          ? { emotion: original.emotion }
+          : {}),
         // Distinct stamps, like the greeting roots: siblings order by creation, and
         // one insert's rows would otherwise share the transaction's `now()`.
         createdAt: new Date(stamp + position),
@@ -2335,9 +2362,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const edits = readScriptChat(body, { turn: false });
     // The member whose runtime ran: a character message its scripts add is its own.
     const memberId = optionalMemberId(body);
+    // The emotion picture an `@@emo` script named for the reply (`emotion.ts`).
+    const emotion = optionalString(body, 'emotion');
     if (
       variableDelta === undefined &&
       content === undefined &&
+      emotion === undefined &&
       !clearPending &&
       !overlay &&
       note === undefined &&
@@ -2348,7 +2378,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     }
 
     const chat = await loadWritableChat(deps, id, userId);
-    const roster = overlay || memberId !== undefined ? await loadMembers(deps.db, chat.plotId) : [];
+    const roster =
+      overlay || memberId !== undefined || emotion !== undefined ? await loadMembers(deps.db, chat.plotId) : [];
     const memberIds = overlay ? new Set(roster.map((member) => member.id)) : null;
     scriptMemberOf(memberId, roster);
     if (!(await acquireChatSlot(deps, chat.id, userId))) await rejectBusyChat(deps, chat.id, userId);
@@ -2374,6 +2405,10 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         if (clearPending && current.scriptState !== 'pending') {
           throw new ApiError(409, 'not_pending', 'This turn is not waiting for the scripts of the card');
         }
+        // Kept only as one of the reply's own member's pictures, as RisuAI's
+        // `@@emo` sets one only where the character has it; any other is no choice.
+        const owner = emotion === undefined ? undefined : replyMemberOf(current, roster);
+        const chosen = owner && emotion !== undefined ? emotionNamed(owner.card.emotionImages ?? [], emotion) : undefined;
 
         const [message] = await tx
           .update(messages)
@@ -2382,6 +2417,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
             ...(variableDelta !== undefined && !edits ? { variableDelta: storableDelta(variableDelta) } : {}),
             ...(content !== undefined ? { content } : {}),
             ...(clearPending ? { scriptState: null } : {}),
+            ...(chosen ? { emotion: chosen.name } : {}),
             scriptRev: sql`${messages.scriptRev} + 1`,
           })
           .where(eq(messages.id, messageId))
@@ -2429,7 +2465,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     ];
     const unlockedAssetIds = unlockText.length > 0 ? await openUnlocks(deps, chat.id, unlockText.join('\n')) : [];
     // The turn is finished, so the work it held back can start.
-    if (clearPending) scheduleBackgroundUpdates(deps, chat.id);
+    if (clearPending) scheduleBackgroundUpdates(deps, chat.id, messageId);
     const state = (await chatState(deps, committed.chat)) as Record<string, unknown>;
     return c.json({ ...state, ...(unlockedAssetIds.length > 0 ? { unlockedAssetIds } : {}) });
   });

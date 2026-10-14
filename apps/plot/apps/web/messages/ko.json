@@ -378,7 +378,14 @@
     "noModels": "AI 설정에서 ChatGPT를 연결해 주세요.",
     "chats": "대화 목록",
     "chatsEmpty": "아직 이 플롯과의 대화가 없습니다.",
-    "deletePlot": "플롯 삭제"
+    "deletePlot": "플롯 삭제",
+    "memberEmotion": "표정 그림",
+    "memberEmotionHint": "카드의 표정 그림 {count}장을 보여 주는 방식입니다. 대화 옆 화면은 답장마다 보조 모델이 고른 표정을 대화 옆(좁은 화면에서는 위)에 띄우고, 메시지 안은 모델이 답장 끝에 고른 표정을 그 메시지에 그립니다.",
+    "memberEmotionModes": {
+      "off": "끄기",
+      "panel": "대화 옆 화면",
+      "inlay": "메시지 안"
+    }
   },
   "cardImport": {
     "realmOpen": "RisuRealm에서 가져오기",
@@ -1014,7 +1021,11 @@
       }
     },
     "importing": "이 대화는 아직 가져오는 중입니다. 다 들어오면 이어서 쓸 수 있어요.",
-    "importingReload": "새로고침"
+    "importingReload": "새로고침",
+    "emotionScreen": "표정",
+    "emotionAlt": "{name}의 표정: {emotion}",
+    "emotionCollapse": "표정 접기",
+    "emotionExpand": "표정 펼치기"
   },
   "personas": {
     "title": "페르소나",

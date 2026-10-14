@@ -12,7 +12,7 @@ import type { ObjectStorage } from './storage.js';
 export type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 
 /** The fire-and-forget jobs a finished turn can start. */
-type BackgroundTaskKind = 'memory' | 'relationship';
+type BackgroundTaskKind = 'memory' | 'relationship' | 'emotion';
 
 /**
  * A generation claim this instance holds: the exact `chats.generating_at` it
@@ -53,6 +53,11 @@ export interface AppDeps {
   refreshingMemory: Set<string>;
   /** Chat ids with a relationship extraction in flight; separate from the memory guard. */
   extractingRelationship: Set<string>;
+  /**
+   * Message ids whose emotion picture is being chosen (`emotion.ts`) — per
+   * message rather than per chat, since a round's replies each want one.
+   */
+  detectingEmotion: Set<string>;
   /**
    * Chat ids with a reply suggestion in flight — one per chat. Its own guard
    * rather than the generation slot: a suggestion writes nothing, so it must not

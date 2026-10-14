@@ -288,10 +288,11 @@ describe('parseCard - PNG assets', () => {
     // The PNG is still the avatar; non-images, missing chunks and external uris are
     // left alone, and a nameless asset is named after its index.
     expect(iconBuffer).toBe(png);
+    // The emotions say so, for the import to record them as the card's.
     expect(assets).toEqual([
-      { name: 'smile', bytes: smile },
+      { name: 'smile', bytes: smile, emotion: true },
       { name: 'bg.webp', bytes: background },
-      { name: 'asset_4', bytes: nameless },
+      { name: 'asset_4', bytes: nameless, emotion: true },
     ]);
   });
 
@@ -324,7 +325,7 @@ describe('parseCard - PNG assets', () => {
     });
 
     expect(parseCard(png).assets).toEqual([
-      { name: 'happy', bytes: happy },
+      { name: 'happy', bytes: happy, emotion: true },
       { name: 'map.png', bytes: map },
       { name: 'old', bytes: old },
     ]);
@@ -359,7 +360,7 @@ describe('parseCard - PNG assets', () => {
 
     const { card, assets } = parseCard(png);
     expect(card.name).toBe('세이');
-    expect(assets).toEqual([{ name: 'early', bytes: early }]);
+    expect(assets).toEqual([{ name: 'early', bytes: early, emotion: true }]);
   });
 });
 
@@ -443,9 +444,9 @@ describe('parseCard - charx', () => {
     // Non-images and external uris are left alone; a nameless asset falls back to
     // its file name.
     expect(assets).toEqual([
-      { name: 'smile', bytes: smile },
+      { name: 'smile', bytes: smile, emotion: true },
       { name: 'bg', bytes: background },
-      { name: 'wave', bytes: nameless },
+      { name: 'wave', bytes: nameless, emotion: true },
     ]);
   });
 
@@ -481,7 +482,7 @@ describe('parseCard - charx', () => {
     expect(card.name).toBe('세이');
     // Reading stops at the offender rather than paying to inflate past it, so
     // what was declared before it survives and what comes after does not.
-    expect(assets).toEqual([{ name: 'early', bytes: early }]);
+    expect(assets).toEqual([{ name: 'early', bytes: early, emotion: true }]);
   });
 
   it('shares one inflate budget between the icon and the assets', () => {
@@ -1103,6 +1104,16 @@ describe('exportCardCharx', () => {
       expect(bytesBefore.get(before(ref)!), ref).toBeDefined();
       expect(bytesAfter.get(after(ref)!), ref).toEqual(bytesBefore.get(before(ref)!));
     }
+  });
+
+  it("declares the member's emotion pictures as RisuAI's emotions, which an import reads back as such", () => {
+    const charx = exportCardCharx(card, [{ slug: 'happy-2', name: 'happy', ext: 'gif', bytes: gif(4), emotion: 'happy' }]);
+    expect(declaredIn(charx)).toEqual([
+      { type: 'emotion', uri: 'embeded://assets/other/image/happy-2.gif', name: 'happy', ext: 'gif' },
+      { type: 'x-risu-asset', uri: 'embeded://assets/other/image/happy-2.gif', name: 'happy', ext: 'gif' },
+      { type: 'x-risu-asset', uri: 'embeded://assets/other/image/happy-2.gif', name: 'happy-2', ext: 'gif' },
+    ]);
+    expect(parseCard(charx).assets).toEqual([{ name: 'happy', bytes: gif(4), emotion: true }]);
   });
 
   it('declares no icon when the member has no picture', () => {

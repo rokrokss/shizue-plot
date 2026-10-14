@@ -1,5 +1,6 @@
 import { unescapeCbs, type CbsChat, type CbsCharacter, type CbsModel } from './cbs.js';
 import { extractChoices } from './choices.js';
+import { emotionInstructionsOf } from './emotion.js';
 import { applyMacros, stripInlayMacros, type MacroClock, type MacroContext, type MacroHostData } from './macro.js';
 import { activateLore, loreEntryKey, type LoreActivationVia, type LoreTimedState } from './lorebook.js';
 import { isNarration, narrationBody } from './narration.js';
@@ -1099,6 +1100,19 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
       }
     : null;
 
+  // 8d. the replying member's inlay emotion screen (`emotionInstructionsOf`):
+  // RisuAI's system turn after everything, which tells the model to close its
+  // reply with one of the card's pictures. The member is the group turn's
+  // speaker, or the one member of a work of one — a scene reply in a work of
+  // several and a narration are no one member's, and RisuAI asks it of the
+  // character replying. Never evicted.
+  const emotionMember =
+    narration || typeof speaker === 'string' ? undefined : (speakerMember ?? (characters.length === 1 ? first : undefined));
+  const emotionText = emotionMember ? emotionInstructionsOf(emotionMember.card) : '';
+  const emotionSlot: MessageSlot | null = emotionText
+    ? { kind: 'trailing', label: 'emotion', message: { role: 'system', content: send(emotionText) } }
+    : null;
+
   // Everything that is never evicted is charged up front. Depth lore is charged
   // here too — it is counted against the lorebook budget by activateLore, but it
   // still occupies context that history would otherwise use.
@@ -1111,6 +1125,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     countTokens(authorNoteBlock) -
     injectedTokens -
     (speakerSlot ? countTokens(promptText(speakerSlot.message.content)) : 0) -
+    (emotionSlot ? countTokens(promptText(emotionSlot.message.content)) : 0) -
     depthLore.reduce((sum, entry) => sum + countTokens(entry.content), 0);
 
   // 7. history, newest first. The newest message is always kept so the request
@@ -1278,6 +1293,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     ...historyBlock,
     { kind: 'post_history', message: { role: 'system', content: postHistory } },
     ...(promptEndInjection ? [promptEndInjection] : []),
+    ...(emotionSlot ? [emotionSlot] : []),
     ...(speakerSlot ? [speakerSlot] : []),
   ];
 

@@ -85,6 +85,10 @@
     "./source-url": {
       "types": "./dist/sourceUrl.d.ts",
       "default": "./dist/sourceUrl.js"
+    },
+    "./emotion": {
+      "types": "./dist/emotion.d.ts",
+      "default": "./dist/emotion.js"
     }
   },
   "files": [

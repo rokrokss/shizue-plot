@@ -97,10 +97,24 @@ describe('runEditScripts', () => {
     expect(run('aa', [sticky])).toBe(fresh);
     expect(run('aa', [sticky])).toBe(fresh);
     // One pattern, two scripts: the first's search matched and nothing reset it
-    // (`@@emo` is skipped here); the second must still find the match at 0.
+    // (`@@emo` leaves the text alone); the second must still find the match at 0.
     const emotion = output('a', '@@emo 웃음');
     const inject = output('a', '', { flag: 'g<inject>', ableFlag: true });
     expect(run('a', [emotion, inject])).toBe('');
+  });
+});
+
+describe('@@emo', () => {
+  it("names the emotion picture where it matches, and leaves the text as it is", () => {
+    const named: string[] = [];
+    const scripts = [output('웃', '@@emo happy'), output('울', '@@emo sad'), output('웃', '@@emo  joy ')];
+    const text = runEditScripts('웃었다', scripts, 'editoutput', {
+      chatIndex: 1,
+      env,
+      onEmotion: (name) => named.push(name),
+    });
+    expect(text).toBe('웃었다');
+    expect(named).toEqual(['happy', 'joy']);
   });
 });
 

@@ -378,7 +378,14 @@
     "noModels": "AI 設定で ChatGPT を接続してください。",
     "chats": "チャット一覧",
     "chatsEmpty": "このプロットとのチャットはまだありません。",
-    "deletePlot": "プロットを削除"
+    "deletePlot": "プロットを削除",
+    "memberEmotion": "表情画像",
+    "memberEmotionHint": "カードの表情画像{count}枚の見せ方です。チャット横のパネルは、返信ごとに補助モデルが選んだ表情をチャットの横(狭い画面では上)に表示し、メッセージ内では、モデルが返信の最後に選んだ表情をそのメッセージに描きます。",
+    "memberEmotionModes": {
+      "off": "オフ",
+      "panel": "チャット横のパネル",
+      "inlay": "メッセージ内"
+    }
   },
   "cardImport": {
     "realmOpen": "RisuRealmから読み込む",
@@ -1014,7 +1021,11 @@
       }
     },
     "importing": "このチャットはまだ読み込み中です。すべて入ったら続きを書けます。",
-    "importingReload": "再読み込み"
+    "importingReload": "再読み込み",
+    "emotionScreen": "表情",
+    "emotionAlt": "{name}の表情: {emotion}",
+    "emotionCollapse": "表情を折りたたむ",
+    "emotionExpand": "表情を広げる"
   },
   "personas": {
     "title": "ペルソナ",

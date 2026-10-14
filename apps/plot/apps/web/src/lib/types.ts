@@ -4,6 +4,8 @@ import type {
   ChoicesMode,
   ComponentCapability,
   DisplayScript,
+  EmotionImage,
+  EmotionMode,
   GroupSettings,
   ImportProvenance,
   LoreEntry,
@@ -35,6 +37,8 @@ export type {
   ChoicesMode,
   ComponentCapability,
   DisplayScript,
+  EmotionImage,
+  EmotionMode,
   GroupSettings,
   ImportProvenance,
   LoreEntry,
@@ -256,6 +260,12 @@ export interface PublicMember {
    * public view fills the default in; optional for a member built by hand.
    */
   talkativeness?: number;
+  /**
+   * How the member's emotion pictures are shown — beside the chat (`panel`) or
+   * in its replies (`inlay`) — and which they are, by the card's names and the
+   * plot's slugs. Null when it shows none; absent outside the plot's own page.
+   */
+  emotion?: { mode: EmotionMode; images: EmotionImage[] } | null;
 }
 
 /** The only shape a non-owner ever sees of a plot: no definitions. */
@@ -619,6 +629,12 @@ export interface ChatMessage {
    * model reads. Optional for a message built by hand.
    */
   hiddenFromPrompt?: boolean;
+  /**
+   * The name of the emotion picture the reply left its member wearing
+   * (`messages.emotion`), or null while none is chosen. Optional for a message
+   * built by hand.
+   */
+  emotion?: string | null;
   createdAt: string;
 }
 

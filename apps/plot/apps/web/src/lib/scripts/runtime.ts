@@ -904,7 +904,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     meta: { chatIndex: number; previousSameRole?: string },
     chat: readonly TriggerMessage[],
     greeting: string | null,
-  ): Promise<{ text: string; variables: Variables; chat: TriggerMessage[] }> {
+  ): Promise<{ text: string; variables: Variables; chat: TriggerMessage[]; emotion?: string }> {
     let data = text;
     let current = variables;
     const working = chat.map((message) => ({ ...message }));
@@ -935,7 +935,12 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     });
     for (const { reason } of outcome.skipped) log({ kind: 'error', effect: phase, message: reason });
     for (const notice of outcome.notices) log({ kind: 'limit', effect: phase, message: notice });
-    return { text: outcome.text, variables: current, chat: working };
+    return {
+      text: outcome.text,
+      variables: current,
+      chat: working,
+      ...(outcome.emotion !== undefined ? { emotion: outcome.emotion } : {}),
+    };
   }
 
   /**
@@ -1183,6 +1188,8 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
         // The reply as its edit scripts left it, in place; the chat is said against it.
         ...(text !== head.content ? { content: text } : {}),
         ...(edits ? { chat: edits } : {}),
+        // The picture an `@@emo` script set, which the server keeps in place of choosing one.
+        ...(reply.emotion !== undefined ? { emotion: reply.emotion } : {}),
         ...writes(s),
       });
       kept(s);

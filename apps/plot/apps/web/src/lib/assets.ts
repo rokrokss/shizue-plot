@@ -60,8 +60,10 @@ export const slugFromFileName = (name: string): string => normalizeSlug(name.rep
 /**
  * The slug a reference names — a slug, or the name an imported card gave the
  * image (`assetResolver` in @shizue/core/cbs builds one from the plot's assets).
+ * `macro` is the macro that names it where one does (`emotion` for
+ * `{{emotion::…}}`), which a member's own pictures answer first (`emotionResolver`).
  */
-export type AssetResolver = (ref: string) => string | undefined;
+export type AssetResolver = (ref: string, macro?: string) => string | undefined;
 
 /** With no names to go by, a reference is a slug or nothing. */
 const bySlug: AssetResolver = (ref) => ref.trim();
@@ -75,8 +77,9 @@ export function lookupAsset(
   ref: string,
   assets: ReadonlyMap<string, string>,
   resolve: AssetResolver = bySlug,
+  macro?: string,
 ): { slug: string; src: string } | undefined {
-  const slug = resolve(ref);
+  const slug = resolve(ref, macro);
   const src = slug === undefined ? undefined : assets.get(slug);
   return slug === undefined || src === undefined ? undefined : { slug, src };
 }
@@ -100,7 +103,7 @@ export function renderImageTokens(
 ): string {
   return replaceAssetMacros(content, (macro) => {
     if (macro.kind !== 'image' || macro.ref === null) return '';
-    const found = lookupAsset(macro.ref, assets, resolve);
+    const found = lookupAsset(macro.ref, assets, resolve, macro.name);
     return found ? `![${found.slug}](${found.src})` : '';
   });
 }

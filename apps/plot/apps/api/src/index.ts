@@ -46,6 +46,7 @@ const deps: AppDeps = {
   generationClaims: new Map(),
   refreshingMemory: new Set<string>(),
   extractingRelationship: new Set<string>(),
+  detectingEmotion: new Set<string>(),
   suggesting: new Set<string>(),
   drafting: new Set<string>(),
 };

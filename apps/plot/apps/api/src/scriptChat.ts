@@ -310,6 +310,8 @@ export async function applyScriptChat(
       variableDelta: row.variableDelta,
       // The same turn on another branch: hidden from the AI if the original was.
       hiddenFromPrompt: row.hiddenFromPrompt,
+      // …and still its member's reply, with the face it left, while it stays one.
+      emotion: entry.role === 'assistant' && row.role === 'assistant' ? row.emotion : null,
       model: row.model,
       promptTokens: row.promptTokens,
       completionTokens: row.completionTokens,

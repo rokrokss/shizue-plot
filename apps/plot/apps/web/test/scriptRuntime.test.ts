@@ -294,6 +294,19 @@ describe('finish', () => {
     expect(calls[0]!.body['content']).toBeUndefined();
   });
 
+  it('commits the emotion picture an @@emo script names, leaving the text alone', async () => {
+    const { api, calls } = fakeApi();
+    const runtime = createScriptRuntime({
+      chatId: 'c1',
+      api,
+      ui: silentUi,
+      bundle: bundle({ editScripts: [{ type: 'editoutput', in: '다친 것 같다', out: '@@emo hurt' }] }),
+    });
+    await runtime.finish(view(branch));
+    expect(calls[0]!.body).toMatchObject({ clearPending: true, emotion: 'hurt' });
+    expect(calls[0]!.body['content']).toBeUndefined();
+  });
+
   it('keeps an output trigger’s rewrite of the reply, and passes a low-level follow-up on', async () => {
     const { api, calls } = fakeApi();
     const runtime = createScriptRuntime({

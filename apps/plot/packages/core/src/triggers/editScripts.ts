@@ -33,6 +33,13 @@ export interface EditRunOptions {
   /** Told about every script that was skipped, and why. */
   onSkip?: (script: EditScript, reason: string) => void;
   /**
+   * Told the name a matching `@@emo name` script gives — RisuAI's way for a card
+   * to set its character's emotion picture itself, which then stands in place
+   * of the one its auxiliary model would choose (`emoChanged`). The last one
+   * told is the one shown.
+   */
+  onEmotion?: (name: string) => void;
+  /**
    * Told which script is about to run, by its index in the list given — before
    * its pattern is compiled. A caller that can stop the run from outside (the
    * browser's worker, `lib/scripts/editScriptRunner.ts`) learns from the last
@@ -156,8 +163,8 @@ function execute(data: string, entry: Parsed, mode: EditScriptType, options: Edi
 
   if (regex.test(data)) {
     if (template.startsWith('@@emo ')) {
-      // An expression image for RisuAI's emotion box, which has no counterpart here.
-      options.onSkip?.(script, '@@emo is not supported');
+      // The text is left as it is; the name is the caller's to keep (`onEmotion`).
+      options.onEmotion?.(script.out.substring(6).trim());
       return data;
     }
     if ((template.startsWith('@@inject') || actions.includes('inject')) && options.chatIndex !== -1) {
