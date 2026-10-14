@@ -1,6 +1,14 @@
 'use client';
 
-import { DEFAULT_CONTEXT_BUDGET, HYPA_V3_DEFAULTS, HYPA_V3_SUMMARIZATION_PROMPT } from '@shizue/core';
+import {
+  AUTHOR_NOTE_DEFAULTS,
+  AUTHOR_NOTE_ROLES,
+  DEFAULT_CONTEXT_BUDGET,
+  HYPA_V3_DEFAULTS,
+  HYPA_V3_SUMMARIZATION_PROMPT,
+  type AuthorNoteRole,
+  type AuthorNoteSettings,
+} from '@shizue/core';
 import { useFormatter, useTranslations } from 'next-intl';
 import { useEffect, useId, useState, type ReactNode } from 'react';
 import { assetHref, type Illustration } from '@/lib/assets';
@@ -33,6 +41,12 @@ const MEMORY_STEPS = {
   maxChatsPerSummary: [2, 4, 6, 8, 10, 15, 20],
   queryChatCount: [1, 2, 3, 4, 5, 8, 10],
   share: [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1],
+} as const;
+
+/** The author's note's steps; SillyTavern takes 0–9999, and a chat holding another keeps it as one more option. */
+const NOTE_STEPS = {
+  depth: [0, 1, 2, 3, 4, 5, 6, 8, 10, 15, 20],
+  frequency: [0, 1, 2, 3, 4, 5, 10],
 } as const;
 
 /** The steps, and the chat's own value among them where it is not one. */
@@ -161,6 +175,7 @@ export function ChatPanel({
   memoryRevision,
   members,
   note,
+  noteSettings,
   notes,
   noteIds,
   memorySettings,
@@ -176,6 +191,7 @@ export function ChatPanel({
   choicesEnabled,
   disabled,
   onSaveNote,
+  onSaveNoteSettings,
   onToggleNote,
   onSaveMemorySettings,
   onToggleRelationship,
@@ -197,6 +213,8 @@ export function ChatPanel({
   /** Everyone the plot's replies may be written in the voice of, in its order. */
   members: readonly PublicMember[];
   note: string;
+  /** Where the note goes and how often; absent, the defaults. */
+  noteSettings?: AuthorNoteSettings | undefined;
   /** Every reusable note of the account, in creation order. */
   notes: UserNote[];
   /** Ids of the notes attached to this chat. */
@@ -229,6 +247,8 @@ export function ChatPanel({
   /** True while a reply streams or another setting is being saved. */
   disabled: boolean;
   onSaveNote: (note: string) => Promise<void>;
+  /** Saves the note's depth, frequency and role; without it they are not offered. */
+  onSaveNoteSettings?: (settings: Required<AuthorNoteSettings>) => Promise<void>;
   onToggleNote: (noteId: string, attached: boolean) => Promise<void>;
   onSaveMemorySettings: (settings: ChatMemorySettings) => Promise<void>;
   onToggleRelationship: (enabled: boolean) => Promise<void>;
@@ -303,6 +323,7 @@ export function ChatPanel({
   }
 
   const busy = disabled || saving !== null;
+  const placement = { ...AUTHOR_NOTE_DEFAULTS, ...noteSettings };
   const rows = relationshipRows(relationship);
   // The selects always show a concrete value: what the chat set, or the default
   // the server would apply for a key it has not set.
@@ -427,6 +448,56 @@ export function ChatPanel({
             onChange={(event) => setNoteDraft(event.target.value)}
           />
         </Field>
+        {/* SillyTavern's Author's Note settings, beside the note they place. Saved on the spot, as the memory's. */}
+        {onSaveNoteSettings ? (
+          <div data-testid="author-note-settings" className="grid grid-cols-3 gap-3">
+            <Field label={t('noteDepth')}>
+              <Select
+                value={String(placement.depth)}
+                disabled={busy}
+                className="h-9 py-0 text-xs"
+                onChange={(event) => void onSaveNoteSettings({ ...placement, depth: Number(event.target.value) })}
+              >
+                {withValue(NOTE_STEPS.depth, placement.depth).map((depth) => (
+                  <option key={depth} value={depth}>
+                    {t('noteDepthValue', { depth })}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label={t('noteFrequency')}>
+              <Select
+                value={String(placement.frequency)}
+                disabled={busy}
+                className="h-9 py-0 text-xs"
+                onChange={(event) => void onSaveNoteSettings({ ...placement, frequency: Number(event.target.value) })}
+              >
+                {withValue(NOTE_STEPS.frequency, placement.frequency).map((frequency) => (
+                  <option key={frequency} value={frequency}>
+                    {t('noteFrequencyValue', { frequency })}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label={t('noteRole')}>
+              <Select
+                value={placement.role}
+                disabled={busy}
+                className="h-9 py-0 text-xs"
+                onChange={(event) =>
+                  void onSaveNoteSettings({ ...placement, role: event.target.value as AuthorNoteRole })
+                }
+              >
+                {AUTHOR_NOTE_ROLES.map((role) => (
+                  <option key={role} value={role}>
+                    {t(`noteRoles.${role}`)}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+        ) : null}
+        {onSaveNoteSettings ? <p className="text-xs text-muted">{t('noteSettingsHint')}</p> : null}
         {saveButton('note')}
       </section>
 

@@ -1,6 +1,8 @@
 import type {
   AssetUnlock,
   AssetUnlockKind,
+  AuthorNoteSettings,
+  ChatTranslationSettings,
   ChoicesMode,
   ComponentCapability,
   DisplayScript,
@@ -580,8 +582,19 @@ export interface Chat {
    * the reader's catalog.
    */
   subModel: string | null;
-  /** Author's note, injected four messages from the end of the history. */
+  /** Author's note, injected into the history at `noteSettings.depth`. */
   note: string;
+  /**
+   * Where the note goes and how often — SillyTavern's depth, frequency and role.
+   * Optional so a state built by hand needs none; absent is the defaults.
+   */
+  noteSettings?: Required<AuthorNoteSettings>;
+  /**
+   * The reader's language mode as they chose it; a key left out is decided by
+   * the plot's language against the reader's (`resolveTranslation`). Optional
+   * for the same reason.
+   */
+  translation?: ChatTranslationSettings;
   /** Prompt preset id, one of the ids GET /api/presets lists. */
   preset: string;
   /** The reader's own preset on top of `preset`; null adds nothing. */

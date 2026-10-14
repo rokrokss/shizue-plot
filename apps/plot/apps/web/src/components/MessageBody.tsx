@@ -44,6 +44,7 @@ import { rehypeDialogueQuotes } from '@/lib/markdown/quotes';
 import { rehypeWordReveal } from '@/lib/markdown/reveal';
 import { isExternalUrl, isSameOriginUrl, MESSAGE_SCOPE_CLASS } from '@/lib/sanitizeHtml';
 import { speakerAliases, speechRuns } from '@/lib/speechRuns';
+import { useBodyTranslation, type BodyTranslation } from '@/lib/translation';
 import type { PublicMember } from '@/lib/types';
 import { Avatar } from './Avatar';
 import { ChatImage } from './ChatImage';
@@ -570,6 +571,7 @@ export const MessageBody = memo(function MessageBody({
   continued = false,
   header,
   trailer,
+  translation,
 }: {
   content: string;
   /** Asset url by slug — memoize it, or this component re-renders on every keystroke. */
@@ -634,6 +636,8 @@ export const MessageBody = memo(function MessageBody({
   header?: ReactNode;
   /** Hung under the last bubble at its corner (the model's name), or at the end where the last thing is no bubble. */
   trailer?: ReactNode;
+  /** The row's translation (`lib/translation`): the body says what it shows, and draws what has arrived. */
+  translation?: BodyTranslation | undefined;
 }) {
   const t = useTranslations('chat');
   const common = useTranslations('common');
@@ -700,6 +704,8 @@ export const MessageBody = memo(function MessageBody({
     },
     [segments, assets, resolveAsset, roster, speaker, face?.name, userImage, buttons],
   );
+  // RisuAI translates here: after the display scripts and the speaker split, before the markdown.
+  const shown = useBodyTranslation(segments, runs, translation, streaming);
 
   // Only the very last block of the last run of text is still being written.
   const liveSegment = streaming ? runs.findLastIndex((run) => run !== null) : -1;
@@ -734,7 +740,7 @@ export const MessageBody = memo(function MessageBody({
     } else return false;
     return true;
   };
-  segments.forEach((segment, index) => {
+  shown.segments.forEach((segment, index) => {
     if (segment.kind === 'component') {
       pieces.push({
         kind: 'segment',
@@ -773,7 +779,7 @@ export const MessageBody = memo(function MessageBody({
       });
       return;
     }
-    const own = runs[index]!;
+    const own = shown.runs[index]!;
     own.forEach((run, at) => {
       const liveRun = index === liveSegment && at === own.length - 1;
       // A box of markup is the creator's own layout: never squeezed into a
@@ -837,6 +843,7 @@ export const MessageBody = memo(function MessageBody({
 
   return (
     <div
+      ref={shown.ref}
       className={cx('message-body', settling && 'shizue-settling', headerAbove && 'relative')}
       // Laid out, so the chat does not jump when it shows; not yet seen.
       {...(held ? { style: { visibility: 'hidden' }, 'data-held': '' } : {})}

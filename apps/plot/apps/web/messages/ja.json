@@ -1105,7 +1105,41 @@
     "emotionScreen": "表情",
     "emotionAlt": "{name}の表情: {emotion}",
     "emotionCollapse": "表情を折りたたむ",
-    "emotionExpand": "表情を広げる"
+    "emotionExpand": "表情を広げる",
+    "translating": "翻訳中…",
+    "translationFailed": "翻訳できませんでした · 再試行",
+    "showOriginal": "翻訳済み · 原文を見る",
+    "showTranslation": "原文 · 翻訳を見る",
+    "languageMode": "言語モード",
+    "languageModes": {
+      "off": "原文のまま",
+      "instruct": "返答の言語を指定",
+      "translate": "翻訳（RisuAI方式）"
+    },
+    "languageModeAuto": "自動（{mode}）",
+    "languageModeHints": {
+      "off": "作品が書かれた言語のまま読みます。",
+      "instruct": "モデルが{language}で返答します。導入部だけ一度翻訳し、原文はいつでも見られます。",
+      "translate": "モデルは{work}で書き、画面の文章を補助モデルが{language}に翻訳します。原文はメッセージごとに見られます。"
+    },
+    "languageSame": "この作品は{language}で書かれているため、翻訳するものはありません。",
+    "translateRecommended": "このカードは翻訳モードをおすすめします",
+    "readerLanguage": "自分の言語",
+    "readerLanguageAuto": "表示言語（{language}）",
+    "translateInput": "自分のメッセージを{work}に翻訳して送る",
+    "translateInputHint": "送信前に補助モデルで翻訳します。保存され、モデルが読むのは翻訳後の文章です。",
+    "placeholderTranslated": "{work}に翻訳して送信…",
+    "noteDepth": "挿入の深さ",
+    "noteDepthValue": "{depth, plural, =0 {末尾} other {末尾から#}}",
+    "noteFrequency": "挿入の頻度",
+    "noteFrequencyValue": "{frequency, plural, =0 {入れない} =1 {毎ターン} other {#ターンごと}}",
+    "noteRole": "役割",
+    "noteRoles": {
+      "system": "システム",
+      "user": "ユーザー",
+      "assistant": "アシスタント"
+    },
+    "noteSettingsHint": "SillyTavernの作者ノート設定です。深さは末尾から何番目のメッセージの前に入れるか、頻度は自分のメッセージ何件ごとに入れるかです。付けたノートとその位置のロアも一緒に動きます。"
   },
   "personas": {
     "title": "ペルソナ",

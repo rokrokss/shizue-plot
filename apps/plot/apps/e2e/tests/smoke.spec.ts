@@ -349,6 +349,25 @@ test('saves a user note that survives a reload', async () => {
   await expect(page.getByTestId('chat-panel').getByLabel('유저노트')).toHaveValue(note);
 });
 
+test('places the user note by depth, frequency and role, which survive a reload', async () => {
+  await openPanel();
+  const settings = page.getByTestId('author-note-settings');
+  // SillyTavern's defaults: four from the end, every turn, a system message.
+  await expect(settings.getByLabel('넣는 깊이')).toHaveValue('4');
+  await expect(settings.getByLabel('넣는 빈도')).toHaveValue('1');
+  await expect(settings.getByLabel('역할')).toHaveValue('system');
+  await Promise.all([chatWrite('PATCH'), settings.getByLabel('넣는 깊이').selectOption('0')]);
+  await Promise.all([chatWrite('PATCH'), settings.getByLabel('넣는 빈도').selectOption('2')]);
+  await Promise.all([chatWrite('PATCH'), settings.getByLabel('역할').selectOption('user')]);
+
+  await page.reload();
+  await openPanel();
+  const reloaded = page.getByTestId('author-note-settings');
+  await expect(reloaded.getByLabel('넣는 깊이')).toHaveValue('0');
+  await expect(reloaded.getByLabel('넣는 빈도')).toHaveValue('2');
+  await expect(reloaded.getByLabel('역할')).toHaveValue('user');
+});
+
 test('picks a prompt preset that survives a reload', async () => {
   await Promise.all([chatWrite('PATCH'), page.getByLabel('프리셋').selectOption('novel')]);
 

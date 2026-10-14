@@ -7,6 +7,7 @@ import { originGuard } from './originGuard.js';
 import type { AppDeps, AppEnv } from './deps.js';
 import { errorResponse, type ErrorBody } from './errors.js';
 import { chatMemoryRoutes } from './routes/chatMemory.js';
+import { chatTranslationRoutes } from './routes/chatTranslation.js';
 import { chatRoutes, messageRoutes } from './routes/chats.js';
 import { commentRoutes, plotCommentRoutes } from './routes/comments.js';
 import { creatorRoutes, exploreRoutes } from './routes/explore.js';
@@ -116,6 +117,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   app.route('/api/chats', chatImportRoutes(deps));
   // The memory's summaries, as the reader reads and tends them (`GET /api/chats/:id/memory`).
   app.route('/api/chats', chatMemoryRoutes(deps));
+  // What the reader's page shows translated, and what they write before it is sent (§7.8).
+  app.route('/api/chats', chatTranslationRoutes(deps));
   app.route('/api/messages', messageRoutes(deps));
   app.route('/api/imports', importRoutes(deps));
 

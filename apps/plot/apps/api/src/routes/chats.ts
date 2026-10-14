@@ -3,9 +3,15 @@ import {
   applyMacros,
   applyVariableDelta,
   assetResolver,
+  authorNoteSettingsOf,
   backgroundHtmlOf,
   characterName,
+  coerceAuthorNoteSettings,
   coerceNarrator,
+  coerceTranslationSettings,
+  isTranslationLanguage,
+  resolveTranslation,
+  type TranslationLanguage,
   computeVariables,
   DEFAULT_USER_NAME,
   getPreset,
@@ -175,6 +181,14 @@ export const toChatJson = (chat: Chat, noteIds: string[]) => ({
    */
   subModel: chat.subModel,
   note: chat.note,
+  /** Where the note goes and how often (SillyTavern's depth, frequency and role), the defaults filled in. */
+  noteSettings: authorNoteSettingsOf(chat.noteSettings),
+  /**
+   * What the reader chose of the language mode, as stored: a key left out is
+   * decided by the plot's language against the reader's (`resolveTranslation`),
+   * which only the reader's browser knows — so it resolves it.
+   */
+  translation: chat.translation ?? {},
   preset: chat.preset,
   /** The reader's own preset on top of `preset`; null adds nothing. */
   readerPresetId: chat.readerPresetId,
@@ -500,6 +514,25 @@ function optionalPreset(body: Record<string, unknown>): string | undefined {
  * dropped rather than stored, so the column never grows a setting nothing
  * reads. `null` resets the chat to the defaults.
  */
+/**
+ * A settings object the PATCH replaces whole — the author's note's placement,
+ * the language mode. What the setting does not know is dropped by its coercion,
+ * as the narrator's is; only something that is not an object at all is refused.
+ * `null`, and an object left with nothing, store null: every default.
+ */
+function optionalSettings<T>(
+  body: Record<string, unknown>,
+  key: string,
+  coerce: (value: unknown) => T | null,
+): T | null | undefined {
+  const value = body[key];
+  if (value === undefined) return undefined;
+  if (value !== null && (typeof value !== 'object' || Array.isArray(value))) {
+    throw badRequest('invalid_request', `${key} must be an object or null`);
+  }
+  return coerce(value);
+}
+
 function optionalMemorySettings(body: Record<string, unknown>): ChatMemorySettings | null | undefined {
   const value = body['memorySettings'];
   if (value === undefined) return undefined;
@@ -877,6 +910,33 @@ function requestTimeZone(c: Context<AppEnv>): string {
   } catch {
     return 'UTC';
   }
+}
+
+/** Header the web client names the reader's UI language in. */
+const LOCALE_HEADER = 'x-shizue-locale';
+
+/** The reader's UI language as the client reported it; undefined where it said none the server knows. */
+export function readerLocale(c: Context<AppEnv>): TranslationLanguage | undefined {
+  const locale = c.req.header(LOCALE_HEADER);
+  return isTranslationLanguage(locale) ? locale : undefined;
+}
+
+/**
+ * The reader's side of how the prompt is put together: where the chat's author's
+ * note goes and how often, and — in the `instruct` language mode — the language
+ * the reply is asked for (§6 언어 모드). The mode is resolved per request: an
+ * unset one follows the plot's language against the UI the reader reads in now.
+ */
+function readerPromptSettings(
+  c: Context<AppEnv>,
+  chat: Chat,
+  plot: Plot,
+): Pick<GenerationPlan, 'authorNoteSettings' | 'replyLanguage'> {
+  const language = resolveTranslation(chat.translation, plot.language, readerLocale(c));
+  return {
+    ...(chat.noteSettings ? { authorNoteSettings: chat.noteSettings } : {}),
+    ...(language.mode === 'instruct' && language.language ? { replyLanguage: language.language } : {}),
+  };
 }
 
 /**
@@ -1491,6 +1551,7 @@ async function regeneratePlan(
     memoryText: memory.memoryText,
     relationshipText: buildRelationshipText(chat),
     authorNote: context.authorNote,
+    ...readerPromptSettings(c, chat, context.row),
     ...(context.narrator ? { narrator: context.narrator } : {}),
     // The user turn being answered is still on the branch, so its ruling comes
     // back with it — a regenerate is the same turn, judged the same way.
@@ -1881,8 +1942,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const narrator = optionalNarrator(body);
       const reasoningEffort = await patchedReasoningEffort(deps, userId, body, chat, model);
       const absentCharacterIds = await patchedAbsentIds(deps, body, chat);
+      const noteSettings = optionalSettings(body, 'noteSettings', coerceAuthorNoteSettings);
+      const translation = optionalSettings(body, 'translation', coerceTranslationSettings);
 
       if (
+        noteSettings === undefined &&
+        translation === undefined &&
         model === undefined &&
         subModel === undefined &&
         personaId === undefined &&
@@ -1918,6 +1983,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           ...(narrator !== undefined ? { narrator } : {}),
           ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
           ...(absentCharacterIds !== undefined ? { absentCharacterIds } : {}),
+          ...(noteSettings !== undefined ? { noteSettings } : {}),
+          ...(translation !== undefined ? { translation } : {}),
           updatedAt: new Date(),
         })
         .where(and(eq(chats.id, id), eq(chats.userId, userId)))
@@ -2843,6 +2910,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         memoryText: memory.memoryText,
         relationshipText: buildRelationshipText(chat),
         authorNote: context.authorNote,
+        ...readerPromptSettings(c, chat, context.row),
         ...(context.narrator ? { narrator: context.narrator } : {}),
         ...(directions && edited.turn ? { directions } : {}),
         preset: getPreset(chat.preset),
@@ -2958,6 +3026,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         memoryText: memory.memoryText,
         relationshipText: buildRelationshipText(chat),
         authorNote: context.authorNote,
+        ...readerPromptSettings(c, chat, context.row),
         ...(context.narrator ? { narrator: context.narrator } : {}),
         ...(answersReader ? { directions: lastUserDirections(path) } : {}),
         preset: getPreset(chat.preset),
@@ -3063,6 +3132,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         memoryText: memory.memoryText,
         relationshipText: buildRelationshipText(chat),
         authorNote: context.authorNote,
+        ...readerPromptSettings(c, chat, context.row),
         ...(context.narrator ? { narrator: context.narrator } : {}),
         // Continue finishes the reply to the last user turn, so that turn's ruling
         // is still the one in force. Auto-continue, below, is a beat past it.
@@ -3146,6 +3216,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         memoryText: memory.memoryText,
         relationshipText: buildRelationshipText(chat),
         authorNote: context.authorNote,
+        ...readerPromptSettings(c, chat, context.row),
         ...(context.narrator ? { narrator: context.narrator } : {}),
         preset: getPreset(chat.preset),
         readerAdditions: context.readerAdditions,
@@ -3222,6 +3293,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         memoryText: memory.memoryText,
         relationshipText: buildRelationshipText(chat),
         authorNote: context.authorNote,
+        ...readerPromptSettings(c, chat, context.row),
         ...(context.narrator ? { narrator: context.narrator } : {}),
         preset: getPreset(chat.preset),
         readerAdditions: context.readerAdditions,

@@ -92,6 +92,13 @@
       "when": 1792008335532,
       "tag": "0012_reader_presets",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1792010854325,
+      "tag": "0013_translation_note_settings",
+      "breakpoints": true
     }
   ]
 }

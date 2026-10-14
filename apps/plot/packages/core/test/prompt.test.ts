@@ -960,6 +960,101 @@ describe('assemblePrompt - author note', () => {
   });
 });
 
+describe('assemblePrompt - author note settings', () => {
+  const authorNote = '{{user}}는 지금 초조하다.';
+  const note = '민준는 지금 초조하다.';
+  // Three of the reader's turns: u1 a u2 a u3.
+  const turns: HistoryMessage[] = [
+    { role: 'assistant', content: 'a0' },
+    { role: 'user', content: 'u1' },
+    { role: 'assistant', content: 'a1' },
+    { role: 'user', content: 'u2' },
+    { role: 'assistant', content: 'a2' },
+    { role: 'user', content: 'u3' },
+  ];
+  const sent = (overrides: Partial<Parameters<typeof assemblePrompt>[0]> = {}) =>
+    assemblePrompt({
+      plot,
+      characters: [bareAria],
+      history: turns,
+      preset,
+      userName: '민준',
+      authorNote,
+      ...overrides,
+    }).messages;
+  const contents = (messages: { content: unknown }[]) => messages.map((m) => m.content);
+
+  it('sits at the depth the chat sets, where depth lore of that depth would', () => {
+    expect(contents(sent({ authorNoteSettings: { depth: 0 } }))).toEqual([
+      ...turns.map((m) => m.content),
+      note,
+      'POST',
+    ]);
+    expect(contents(sent({ authorNoteSettings: { depth: 1 } }))).toEqual([
+      ...turns.slice(0, 5).map((m) => m.content),
+      note,
+      'u3',
+      'POST',
+    ]);
+    // Same slot as a depth-2 lore entry, after it.
+    const withLore = sent({
+      authorNoteSettings: { depth: 2 },
+      characters: [{ name: '아리아', card: { ...bareCard, lorebook: [loreEntry({ content: 'DEPTH2', depth: 2 })] } }],
+    });
+    expect(contents(withLore).slice(4, 7)).toEqual(['DEPTH2', note, 'a2']);
+    // Deeper than the history: its start.
+    expect(contents(sent({ authorNoteSettings: { depth: 9999 } }))[0]).toBe(note);
+  });
+
+  it('goes in under the role the chat sets', () => {
+    for (const role of ['system', 'user', 'assistant'] as const) {
+      const message = sent({ authorNoteSettings: { role } }).find((m) => m.content === note);
+      expect(message?.role).toBe(role);
+    }
+  });
+
+  it('keeps the old placement with no settings: depth 4, every turn, system', () => {
+    const plain = sent();
+    expect(contents(plain)).toEqual(contents(sent({ authorNoteSettings: { depth: 4, frequency: 1, role: 'system' } })));
+    expect(contents(plain).indexOf(note)).toBe(turns.length - AUTHOR_NOTE_DEPTH);
+    expect(plain.find((m) => m.content === note)?.role).toBe('system');
+  });
+
+  it('is inserted every N of the reader messages, as SillyTavern counts them', () => {
+    const due = (frequency: number, userTurns: number) =>
+      contents(sent({ authorNoteSettings: { frequency }, userTurns })).includes(note);
+    expect([1, 2, 3, 4].map((count) => due(2, count))).toEqual([false, true, false, true]);
+    expect([1, 2, 3, 6].map((count) => due(3, count))).toEqual([false, false, true, true]);
+    // Every turn, the first one too; never at 0.
+    expect(due(1, 0)).toBe(true);
+    expect([1, 2, 5].map((count) => due(0, count))).toEqual([false, false, false]);
+    // Counted off the history when the caller does not say: three user turns here.
+    expect(contents(sent({ authorNoteSettings: { frequency: 3 } }))).toContain(note);
+    expect(contents(sent({ authorNoteSettings: { frequency: 2 } }))).not.toContain(note);
+  });
+
+  it('takes the lore around it with it on a turn it is not due', () => {
+    const characters = [
+      {
+        name: '아리아',
+        card: {
+          ...bareCard,
+          lorebook: [
+            loreEntry({ content: 'BEFORE-AN', position: 'before_author_note' }),
+            loreEntry({ content: 'AFTER-AN', position: 'after_author_note' }),
+          ],
+        },
+      },
+    ];
+    const dueNow = contents(sent({ characters, authorNoteSettings: { frequency: 3 }, userTurns: 3 }));
+    expect(dueNow).toContain(`BEFORE-AN\n${note}\nAFTER-AN`);
+    const notDue = contents(sent({ characters, authorNoteSettings: { frequency: 3 }, userTurns: 2 })).join('\n');
+    expect(notDue).not.toContain('BEFORE-AN');
+    expect(notDue).not.toContain('AFTER-AN');
+    expect(notDue).not.toContain(note);
+  });
+});
+
 describe('assemblePrompt - old status windows and choices', () => {
   const status = (place: string) => `\`\`\`status\n위치: ${place}\n\`\`\``;
   const stated: HistoryMessage[] = [

@@ -21,6 +21,8 @@ export * from './language.js';
 export * from './presets.js';
 export * from './readerPreset.js';
 export * from './prompt.js';
+export * from './authorNote.js';
+export * from './translation.js';
 export * from './risuRequest.js';
 export * from './memory.js';
 export * from './card/parse.js';

@@ -52,15 +52,21 @@ export async function apiGet<T>(
 
 /**
  * The reader's IANA time zone, for the clock macros the server expands a turn or
- * an opening with. Empty where the runtime cannot say, and the server reads UTC.
+ * an opening with — empty where the runtime cannot say, and the server reads
+ * UTC — and the language the page is read in (`<html lang>`), which decides a
+ * chat's language mode where the reader has not picked one (§6 언어 모드).
  */
-export function timeZoneHeaders(): Record<string, string> {
+export function readerHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
   try {
     const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    return zone ? { 'x-shizue-tz': zone } : {};
+    if (zone) headers['x-shizue-tz'] = zone;
   } catch {
-    return {};
+    // No zone: the server reads UTC.
   }
+  const locale = typeof document === 'undefined' ? '' : document.documentElement.lang;
+  if (locale) headers['x-shizue-locale'] = locale;
+  return headers;
 }
 
 export async function apiSend<T>(

@@ -9,6 +9,7 @@ import { memo, useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { AssetResolver } from '@/lib/assets';
 import type { ComponentContext } from '@/lib/componentCalls';
 import type { DisplayContext } from '@/lib/displayScripts';
+import { useRowTranslation, type ChatTranslator } from '@/lib/translation';
 import type { ChatAttachment, MessageRole, PublicMember } from '@/lib/types';
 import { Avatar } from './Avatar';
 import { Icon } from './Icon';
@@ -155,6 +156,8 @@ export const MessageRow = memo(function MessageRow({
   onToggleHidden,
   branches,
   footer,
+  translator,
+  translationId,
 }: {
   role: MessageRole;
   content: string;
@@ -271,6 +274,13 @@ export const MessageRow = memo(function MessageRow({
     onNext: (() => void) | null;
   };
   footer?: ReactNode;
+  /**
+   * The chat's translator (`lib/translation`), and the stored message it
+   * translates — absent where this row is not translated: another language
+   * mode, a reply still being written, a turn not stored yet.
+   */
+  translator?: ChatTranslator | null;
+  translationId?: string;
 }) {
   const t = useTranslations('chat');
   const common = useTranslations('common');
@@ -279,6 +289,7 @@ export const MessageRow = memo(function MessageRow({
   const [draft, setDraft] = useState(content);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const translation = useRowTranslation(translator, streaming ? undefined : translationId);
 
   useEffect(() => {
     if (!editing) setDraft(content);
@@ -514,6 +525,7 @@ export const MessageRow = memo(function MessageRow({
     ...(chatIndex !== undefined ? { chatIndex } : {}),
     streaming,
     ...(userImage ? { userImage } : {}),
+    translation: translation.body,
   };
 
   /**
@@ -561,10 +573,50 @@ export const MessageRow = memo(function MessageRow({
       {t('hiddenFromAi')}
     </span>
   ) : null;
-  /** The meta line under a reply's last bubble: the mark, then the model. */
-  const meta = hiddenMark ? (
+  /**
+   * A translated message says so, quietly, where its meta goes: "번역 중…" while
+   * the original stands in for it, then a switch between the translation and
+   * the original. Not on a row that is not translated.
+   */
+  const translationMark =
+    translation.status === 'idle' ? null : translation.status === 'pending' ? (
+      <span data-testid="message-translation" data-state="pending" className="chat-meta caption2 animate-pulse text-muted">
+        {t('translating')}
+      </span>
+    ) : translation.status === 'failed' ? (
+      <button
+        type="button"
+        data-testid="message-translation"
+        data-state="failed"
+        onClick={translation.retry}
+        className={cx('chat-meta caption2 text-muted hover:text-link', FOCUS_RING)}
+      >
+        {t('translationFailed')}
+      </button>
+    ) : (
+      <button
+        type="button"
+        data-testid="message-translation"
+        data-state={translation.original ? 'original' : 'translated'}
+        aria-pressed={translation.original}
+        onClick={translation.toggleOriginal}
+        className={cx('chat-meta caption2 text-muted hover:text-link', FOCUS_RING)}
+      >
+        {translation.original ? t('showTranslation') : t('showOriginal')}
+      </button>
+    );
+  /** The marks a row says of itself, in the meta line. */
+  const marks =
+    hiddenMark && translationMark ? (
+      <span className="inline-flex items-center gap-2">
+        {translationMark}
+        {hiddenMark}
+      </span>
+    ) : (hiddenMark ?? translationMark);
+  /** The meta line under a reply's last bubble: the marks, then the model. */
+  const meta = marks ? (
     <span className="inline-flex items-center gap-2">
-      {hiddenMark}
+      {marks}
       {modelLabel}
     </span>
   ) : modelLabel;
@@ -585,7 +637,7 @@ export const MessageRow = memo(function MessageRow({
               content={narrationBody(body)}
               mode="narration"
               sceneHeadings
-              {...(hiddenMark ? { trailer: hiddenMark } : {})}
+              {...(marks ? { trailer: marks } : {})}
             />
             {thinking ? <ThinkingClock plain /> : null}
             {statusCard}
@@ -671,7 +723,7 @@ export const MessageRow = memo(function MessageRow({
                 </>
               )}
               {/* Under the bubble, at its corner, as a reply's model name is. */}
-              {hiddenMark ? <div className="mt-1">{hiddenMark}</div> : null}
+              {marks ? <div className="mt-1">{marks}</div> : null}
             </div>
           )}
           {footer}

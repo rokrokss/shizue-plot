@@ -1105,7 +1105,41 @@
     "emotionScreen": "Expressions",
     "emotionAlt": "{name}'s expression: {emotion}",
     "emotionCollapse": "Collapse expressions",
-    "emotionExpand": "Expand expressions"
+    "emotionExpand": "Expand expressions",
+    "translating": "Translating…",
+    "translationFailed": "Translation failed · Retry",
+    "showOriginal": "Translated · Show original",
+    "showTranslation": "Original · Show translation",
+    "languageMode": "Language mode",
+    "languageModes": {
+      "off": "As written",
+      "instruct": "Reply in my language",
+      "translate": "Translate (RisuAI style)"
+    },
+    "languageModeAuto": "Automatic ({mode})",
+    "languageModeHints": {
+      "off": "Read the work in the language it is written in.",
+      "instruct": "The model replies in {language}. Only the openings are translated, once, and the original is always one tap away.",
+      "translate": "The model writes in {work} and the auxiliary model translates what you see into {language}. Each message keeps its original."
+    },
+    "languageSame": "This work is written in {language}, so there is nothing to translate.",
+    "translateRecommended": "This card recommends the translate mode",
+    "readerLanguage": "My language",
+    "readerLanguageAuto": "Page language ({language})",
+    "translateInput": "Translate my messages into {work} before sending",
+    "translateInputHint": "The auxiliary model translates them before they are sent. The translated text is what is stored and what the model reads.",
+    "placeholderTranslated": "Sent in {work}…",
+    "noteDepth": "Depth",
+    "noteDepthValue": "{depth, plural, =0 {At the end} other {# from end}}",
+    "noteFrequency": "Frequency",
+    "noteFrequencyValue": "{frequency, plural, =0 {Never} =1 {Every turn} other {Every # turns}}",
+    "noteRole": "Role",
+    "noteRoles": {
+      "system": "System",
+      "user": "User",
+      "assistant": "Assistant"
+    },
+    "noteSettingsHint": "SillyTavern's Author's Note settings: depth is how many messages from the end the note goes, frequency is every how many of your messages. Attached notes and the lore placed with the note move with it."
   },
   "personas": {
     "title": "Personas",

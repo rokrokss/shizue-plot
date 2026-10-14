@@ -1,5 +1,7 @@
 import type {
   AssetUnlock,
+  AuthorNoteSettings,
+  ChatTranslationSettings,
   GroupSettings,
   HypaV3Settings,
   ImportProvenance,
@@ -462,9 +464,16 @@ export const chats = pgTable(
     // summaries, relationship, reply suggestions. Null leaves it to the memory
     // channel's default, the first model in the owner's ChatGPT catalog.
     subModel: text('sub_model'),
-    // Author's note: per-chat instruction injected four messages from the end of
-    // the history (`AUTHOR_NOTE_DEPTH`).
+    // Author's note: per-chat instruction injected into the history, by default
+    // four messages from its end (`AUTHOR_NOTE_DEPTH`).
     note: text('note').notNull().default(''),
+    // Where and how often the note goes in — SillyTavern's depth, frequency and
+    // role (`AuthorNoteSettings`). Null, and any key left out, is the default.
+    noteSettings: jsonb('note_settings').$type<AuthorNoteSettings>(),
+    // The reader's language mode for this chat (`ChatTranslationSettings`): off,
+    // a reply-language instruction, or RisuAI's translation. Null decides it by
+    // the plot's language against the reader's.
+    translation: jsonb('translation').$type<ChatTranslationSettings>(),
     // Prompt preset id (see @shizue/core presets); unknown values fall back to the default.
     preset: text('preset').notNull().default('standard'),
     // The reader's own preset on top of it; null adds nothing. Always one of the
@@ -682,6 +691,25 @@ export const chatSummaryChunks = pgTable(
   (t) => [primaryKey({ columns: [t.summaryId, t.chunkIndex] })],
 );
 
+// A message translated for display, per language the reader reads it in
+// (RisuAI's LLM translation cache, `LLMCacheStorage`). `texts` maps each text the
+// display asked about to its translation. `content_hash` is the message's
+// content when they were made: a row whose hash is not the message's any more is
+// stale — the text changed — and is neither served nor kept.
+export const messageTranslations = pgTable(
+  'message_translations',
+  {
+    messageId: uuid('message_id')
+      .notNull()
+      .references(() => messages.id, { onDelete: 'cascade' }),
+    language: text('language').$type<ContentLanguage>().notNull(),
+    contentHash: text('content_hash').notNull(),
+    texts: jsonb('texts').$type<Record<string, string>>().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.messageId, t.language] })],
+);
+
 // Long-term facts extracted from a chat — unused since the memory became
 // HypaV3's summaries. Kept for a fact layer the server embedder could revive.
 export const memories = pgTable(
@@ -859,6 +887,7 @@ export type ChatAttachment = typeof chatAttachments.$inferSelect;
 export type NewChatAttachment = typeof chatAttachments.$inferInsert;
 export type ChatSummary = typeof chatSummaries.$inferSelect;
 export type ChatSummaryChunk = typeof chatSummaryChunks.$inferSelect;
+export type MessageTranslation = typeof messageTranslations.$inferSelect;
 export type Memory = typeof memories.$inferSelect;
 export type NewMemory = typeof memories.$inferInsert;
 export type UserNote = typeof userNotes.$inferSelect;

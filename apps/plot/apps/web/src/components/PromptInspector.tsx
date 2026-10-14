@@ -2,7 +2,7 @@
 
 import { useFormatter, useTranslations } from 'next-intl';
 import { useState } from 'react';
-import { apiGet, timeZoneHeaders } from '@/lib/api';
+import { apiGet, readerHeaders } from '@/lib/api';
 import type { PromptReport } from '@/lib/types';
 import { useErrorMessage } from '@/lib/useErrorMessage';
 import { Button } from './ui';
@@ -50,7 +50,7 @@ export function PromptInspector({ chatId }: { chatId: string }) {
     setError('');
     try {
       // The clock macros expand in the reader's zone, as the regenerate it previews would.
-      setReport(await apiGet<PromptReport>(`/api/chats/${chatId}/inspect`, undefined, timeZoneHeaders()));
+      setReport(await apiGet<PromptReport>(`/api/chats/${chatId}/inspect`, undefined, readerHeaders()));
     } catch (caught) {
       setError(toMessage(caught));
     } finally {

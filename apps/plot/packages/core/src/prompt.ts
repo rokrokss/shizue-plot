@@ -1,3 +1,4 @@
+import { AUTHOR_NOTE_DEFAULTS, authorNoteDue, authorNoteSettingsOf, type AuthorNoteSettings } from './authorNote.js';
 import { unescapeCbs, type CbsChat, type CbsCharacter, type CbsModel } from './cbs.js';
 import { risuEscape } from './cbs/functions.js';
 import { extractChoices } from './choices.js';
@@ -243,10 +244,23 @@ export interface AssemblePromptInput {
    */
   relationshipText?: string;
   /**
-   * Author's note. Injected as a system message `AUTHOR_NOTE_DEPTH` messages from
-   * the end of the history and, like the post-history block, never evicted.
+   * Author's note. Injected `authorNoteSettings.depth` (default
+   * `AUTHOR_NOTE_DEPTH`) messages from the end of the history and, like the
+   * post-history block, never evicted.
    */
   authorNote?: string;
+  /**
+   * The chat's author's-note settings (SillyTavern's depth, frequency and role).
+   * Absent: depth 4, every turn, a system message — the fixed placement before
+   * they existed.
+   */
+  authorNoteSettings?: AuthorNoteSettings | null;
+  /**
+   * How many of the reader's messages the chat holds — the whole branch, hidden
+   * ones too, as SillyTavern counts them — which the note's frequency is read
+   * against. Absent: the user turns of `history`.
+   */
+  userTurns?: number;
   /**
    * Stage directions carried by the *last* user message — what a game component
    * decided about the turn the user just took. Injected as a `[게임 판정]` system
@@ -503,11 +517,11 @@ export interface PromptReport {
 const LORE_PREVIEW_LENGTH = 80;
 
 /**
- * How far from the end of the history the author's note sits — SillyTavern's
- * default. Close enough to the end to steer the next turn, without being the
- * last thing the model reads.
+ * How far from the end of the history the author's note sits unless the chat
+ * says otherwise — SillyTavern's default. Close enough to the end to steer the
+ * next turn, without being the last thing the model reads.
  */
-export const AUTHOR_NOTE_DEPTH = 4;
+export const AUTHOR_NOTE_DEPTH = AUTHOR_NOTE_DEFAULTS.depth;
 
 export const DEFAULT_CONTEXT_BUDGET = 16000;
 /**
@@ -771,6 +785,8 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     memoryText = '',
     relationshipText = '',
     authorNote = '',
+    authorNoteSettings,
+    userTurns,
     directions = '',
     narrator = plot.narrator,
     trailingTurns = 0,
@@ -1135,20 +1151,28 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // purpose: it changes every turn, and the system string is the cached prefix.
   const directionsBlock = directions.trim() ? send(`${DIRECTIONS_HEADER}\n${expand(directions).trim()}`) : '';
 
-  // 7c. author's note — spliced into the history at AUTHOR_NOTE_DEPTH, below —
-  // with the lore SillyTavern puts around it (World Info positions 2 and 3), one
-  // per line as ST joins them. Like ST, which adds them whenever the note is due,
-  // the entries take the note's place even when the chat has no note of its own.
-  const authorNoteBlock = send(
-    [
-      ...loreAt('before_author_note').map(expandLore),
-      utility ? '' : expand(authorNote).trim(),
-      ...loreAt('after_author_note').map(expandLore),
-    ]
-      .filter((text) => text.length > 0)
-      .join('\n')
-      .trim(),
+  // 7c. author's note — spliced into the history at its depth, below — with the
+  // lore SillyTavern puts around it (World Info positions 2 and 3), one per line
+  // as ST joins them. Like ST, which adds them whenever the note is due, the
+  // entries take the note's place even when the chat has no note of its own —
+  // and like ST (`shouldWIAddPrompt`), a turn the note is not due on has neither.
+  const noteSettings = authorNoteSettingsOf(authorNoteSettings);
+  const noteDue = authorNoteDue(
+    noteSettings.frequency,
+    userTurns ?? history.filter((message) => message.role === 'user').length,
   );
+  const authorNoteBlock = noteDue
+    ? send(
+        [
+          ...loreAt('before_author_note').map(expandLore),
+          utility ? '' : expand(authorNote).trim(),
+          ...loreAt('after_author_note').map(expandLore),
+        ]
+          .filter((text) => text.length > 0)
+          .join('\n')
+          .trim(),
+      )
+    : '';
 
   // 8. post-history instructions — for a utility bot RisuAI's `globalNote` slot:
   // the card's replacement with `{{original}}` read as nothing, and no reminder
@@ -1347,7 +1371,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // takes the same slots, after any depth lore that shares its slot.
   const end = historyMessages.length;
   const indexOf = (depth: number): number => Math.min(end, Math.max(0, end + trailingTurns - depth));
-  const noteIndex = authorNoteBlock ? indexOf(AUTHOR_NOTE_DEPTH) : -1;
+  const noteIndex = authorNoteBlock ? indexOf(noteSettings.depth) : -1;
   const depthAt = (index: number): MessageSlot[] => [
     ...depthLore
       .filter(({ depth }) => indexOf(depth) === index)
@@ -1357,7 +1381,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
         message: { role, content },
       })),
     ...(index === noteIndex
-      ? [{ kind: 'author_note', message: { role: 'system', content: authorNoteBlock } } satisfies MessageSlot]
+      ? [{ kind: 'author_note', message: { role: noteSettings.role, content: authorNoteBlock } } satisfies MessageSlot]
       : []),
   ];
 

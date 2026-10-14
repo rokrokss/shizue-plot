@@ -97,6 +97,10 @@
     "./emotion": {
       "types": "./dist/emotion.d.ts",
       "default": "./dist/emotion.js"
+    },
+    "./translation": {
+      "types": "./dist/translation.d.ts",
+      "default": "./dist/translation.js"
     }
   },
   "files": [

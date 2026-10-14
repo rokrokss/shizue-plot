@@ -1,12 +1,33 @@
 'use client';
 
+import {
+  defaultTranslationMode,
+  resolveTranslation,
+  TRANSLATION_LANGUAGES,
+  TRANSLATION_MODES,
+  type ChatTranslationSettings,
+  type TranslationLanguage,
+  type TranslationMode,
+} from '@shizue/core/translation';
 import { useTranslations } from 'next-intl';
 import { useId, type ReactNode } from 'react';
 import type { ModelInfo, Persona, PresetInfo, ReaderPreset } from '@/lib/types';
 import { PersonaFace } from './Avatar';
 import { ModelOptions } from './ModelOptions';
 import { ReaderPresetField } from './ReaderPresets';
-import { Select } from './ui';
+import { Checkbox, Select } from './ui';
+
+/** The chat's language mode as the controls read it (§11 언어 모드). */
+export interface LanguageSettingsView {
+  /** What the reader picked, as stored; a key left out is decided for them. */
+  settings: ChatTranslationSettings;
+  /** The work's content language. */
+  plotLanguage: TranslationLanguage;
+  /** The language the page is read in, which an unpicked language is. */
+  locale: TranslationLanguage;
+  /** Whether the work's scripts read what the model writes (`recommendsTranslateMode`). */
+  recommended: boolean;
+}
 
 /** Effort words the catalogues translate; any other word a model advertises is shown as it is. */
 const KNOWN_EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh']);
@@ -40,6 +61,7 @@ export function ChatSettings({
   onReaderPresetsChange,
   disabled,
   stacked,
+  language,
   onChange,
 }: {
   model: string;
@@ -58,6 +80,8 @@ export function ChatSettings({
   onReaderPresetsChange?: (presets: ReaderPreset[]) => void;
   disabled: boolean;
   stacked?: boolean;
+  /** The language mode's controls; none until the plot read says what language the work is in. */
+  language?: LanguageSettingsView;
   onChange: (patch: {
     model?: string;
     subModel?: string | null;
@@ -65,9 +89,11 @@ export function ChatSettings({
     preset?: string;
     readerPresetId?: string | null;
     personaId?: string | null;
+    translation?: ChatTranslationSettings;
   }) => void;
 }) {
   const t = useTranslations('chat');
+  const locales = useTranslations('locales');
   const locked = disabled ? t('lockedWhileGenerating') : undefined;
   const selectClass = stacked ? undefined : 'h-8 w-auto py-0 text-xs';
   const id = useId();
@@ -231,6 +257,97 @@ export function ChatSettings({
           </Select>
         </PersonaFace>,
       )}
+      {language ? languageFields(language) : null}
     </div>
   );
+
+  /**
+   * The language mode: what the reader reads the work in. Decided for them until
+   * they pick — the work's own language reads as written, another one is
+   * answered in theirs — and a card whose scripts read the model's words is
+   * recommended the translation mode, quietly, never switched to it.
+   */
+  function languageFields({ settings, plotLanguage, locale, recommended }: LanguageSettingsView): ReactNode {
+    const resolved = resolveTranslation(settings, plotLanguage, locale);
+    const reader = settings.language ?? locale;
+    const same = reader === plotLanguage;
+    // A work in the reader's own language has nothing to choose between: the
+    // controls stay out of the way until the page is read in another language —
+    // or the reader picked something here, which they can take back.
+    if (same && settings.mode === undefined && settings.language === undefined) return null;
+    const save = (change: ChatTranslationSettings) => {
+      const next: ChatTranslationSettings = { ...settings, ...change };
+      for (const key of Object.keys(next) as (keyof ChatTranslationSettings)[]) {
+        if (next[key] === undefined) delete next[key];
+      }
+      onChange({ translation: next });
+    };
+    const recommend = recommended && !same && resolved.mode !== 'translate';
+    const modeName = (mode: TranslationMode) => t(`languageModes.${mode}`);
+    const hint = same
+      ? t('languageSame', { language: locales(plotLanguage) })
+      : t(`languageModeHints.${resolved.mode}`, { language: locales(reader), work: locales(plotLanguage) });
+    return (
+      <>
+        {field(
+          'languageMode',
+          t('languageMode'),
+          <Select
+            value={settings.mode ?? ''}
+            disabled={disabled}
+            title={locked ?? (recommend ? t('translateRecommended') : hint)}
+            data-recommended={recommend || undefined}
+            {...nameOf('languageMode', t('languageMode'))}
+            className={selectClass}
+            onChange={(event) => save({ mode: (event.target.value || undefined) as TranslationMode | undefined })}
+          >
+            <option value="">{t('languageModeAuto', { mode: modeName(defaultTranslationMode(plotLanguage, reader)) })}</option>
+            {TRANSLATION_MODES.map((mode) => (
+              <option key={mode} value={mode}>
+                {modeName(mode)}
+              </option>
+            ))}
+          </Select>,
+          hint,
+        )}
+        {stacked && recommend ? (
+          <p data-testid="translate-recommended" className="-mt-2 text-xs text-link">
+            {t('translateRecommended')}
+          </p>
+        ) : null}
+        {field(
+          'readerLanguage',
+          t('readerLanguage'),
+          <Select
+            value={settings.language ?? ''}
+            disabled={disabled}
+            {...(locked ? { title: locked } : {})}
+            {...nameOf('readerLanguage', t('readerLanguage'))}
+            className={selectClass}
+            onChange={(event) =>
+              save({ language: (event.target.value || undefined) as TranslationLanguage | undefined })
+            }
+          >
+            <option value="">{t('readerLanguageAuto', { language: locales(locale) })}</option>
+            {TRANSLATION_LANGUAGES.map((code) => (
+              <option key={code} value={code}>
+                {locales(code)}
+              </option>
+            ))}
+          </Select>,
+        )}
+        {resolved.mode === 'translate' ? (
+          <div className={stacked ? 'space-y-1.5' : undefined}>
+            <Checkbox
+              label={t('translateInput', { work: locales(plotLanguage) })}
+              checked={settings.input === true}
+              disabled={disabled}
+              onChange={(input) => save({ input: input || undefined })}
+            />
+            {stacked ? <p className="text-xs text-muted">{t('translateInputHint')}</p> : null}
+          </div>
+        ) : null}
+      </>
+    );
+  }
 }

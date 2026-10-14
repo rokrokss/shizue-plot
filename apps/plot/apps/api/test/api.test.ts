@@ -44,6 +44,7 @@ import {
   READER_PRESET_TEXT_MAX,
   readCharx,
   readPngTextChunks,
+  replyLanguageInstruction,
   stripPngTextChunks,
 } from '@shizue/core';
 import { draftFingerprint, MIGRATION_PLATFORMS_ENABLED, type MigrationDraft } from '@shizue/core/migrate';
@@ -66,6 +67,7 @@ import {
   follows,
   jobs,
   messages,
+  messageTranslations,
   notifications,
   plots,
   plotAssets,
@@ -16246,5 +16248,218 @@ describe('RisuAI modules', () => {
     const preset = await upload('hypa.json', { type: 'risu', data: { summaries: [] } });
     expect(preset.status).toBe(400);
     expect((await readJson(preset)).code).toBe('invalid_module');
+  });
+});
+
+/* ------------------------------------------------- language modes, author note */
+
+/** A JSON request carrying the reader's UI language, as the web client sends it. */
+const withLocale = (
+  cookie: string,
+  path: string,
+  locale: string | null,
+  body?: unknown,
+  target: Hono<AppEnv> = app,
+  method = 'POST',
+): Promise<Response> =>
+  target.request(path, {
+    method,
+    headers: {
+      cookie,
+      ...(locale ? { 'x-shizue-locale': locale } : {}),
+      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+
+/** An English work whose one member carries post-history instructions of its own. */
+async function englishChat(cookie: string): Promise<{ plotId: string; chatId: string; state: any }> {
+  const plot = await publishablePlot(
+    cookie,
+    { language: 'en', intros: ['Hello there.'] },
+    { name: 'Rian', card: { description: 'A ranger.', postHistoryInstructions: 'CARD-POST-HISTORY' } },
+  );
+  const state = await startChat(cookie, plot.id);
+  return { plotId: plot.id, chatId: state.chat.id, state };
+}
+
+describe('language modes', () => {
+  it('asks for the reply in the reader language last, after the card post-history, where the work is in another one', async () => {
+    const cookie = await signUp('language-instruct@example.com');
+    const { chatId } = await englishChat(cookie);
+    const { app: capturing, prompts } = capturingApp();
+
+    await readSse(await withLocale(cookie, `/api/chats/${chatId}/messages`, 'ko', { content: '안녕' }, capturing));
+    // One call for the turn: the reply is not translated afterwards.
+    expect(prompts).toHaveLength(1);
+    const sent = prompts[0]!.messages.map((message) => [message.role, contentText(message.content)]);
+    expect(sent.at(-1)).toEqual(['system', replyLanguageInstruction('ko')]);
+    const post = sent.findIndex(([, text]) => text.includes('CARD-POST-HISTORY'));
+    expect(post).toBeGreaterThan(-1);
+    expect(post).toBeLessThan(sent.length - 1);
+
+    // A narration is read by the reader too, and a regenerate is the same turn.
+    await readSse(await withLocale(cookie, `/api/chats/${chatId}/regenerate`, 'ko', undefined, capturing));
+    await readSse(await withLocale(cookie, `/api/chats/${chatId}/narrate`, 'ko', undefined, capturing));
+    expect(prompts).toHaveLength(3);
+    for (const prompt of prompts.slice(1)) {
+      expect(contentText(prompt.messages.at(-1)!.content)).toBe(replyLanguageInstruction('ko'));
+    }
+
+    // The prompt inspector shows it as the trailing block it is.
+    const report = await readJson(await withLocale(cookie, `/api/chats/${chatId}/inspect`, 'ko', undefined, app, 'GET'));
+    expect(report.blocks.at(-1)).toMatchObject({ kind: 'trailing', label: 'language', text: replyLanguageInstruction('ko') });
+  });
+
+  it('says nothing where the reader reads the work language, where the request names none, or where the reader picked another mode', async () => {
+    const cookie = await signUp('language-off@example.com');
+    const { chatId } = await englishChat(cookie);
+    const { app: capturing, prompts } = capturingApp();
+    const last = () => contentText(prompts.at(-1)!.messages.at(-1)!.content);
+
+    await readSse(await withLocale(cookie, `/api/chats/${chatId}/messages`, 'en', { content: 'hi' }, capturing));
+    expect(last()).not.toContain('[Reply language]');
+    await readSse(await withLocale(cookie, `/api/chats/${chatId}/regenerate`, null, undefined, capturing));
+    expect(last()).not.toContain('[Reply language]');
+
+    for (const mode of ['off', 'translate']) {
+      const patched = await readJson(await json(cookie, `/api/chats/${chatId}`, 'PATCH', { translation: { mode } }));
+      expect(patched.chat.translation).toEqual({ mode });
+      await readSse(await withLocale(cookie, `/api/chats/${chatId}/regenerate`, 'ko', undefined, capturing));
+      expect(last()).not.toContain('[Reply language]');
+    }
+    // The chat's own language wins over the UI's.
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { translation: { mode: 'instruct', language: 'ja' } });
+    await readSse(await withLocale(cookie, `/api/chats/${chatId}/regenerate`, 'ko', undefined, capturing));
+    expect(last()).toBe(replyLanguageInstruction('ja'));
+  });
+
+  it('stores what the reader chose, and only that', async () => {
+    const cookie = await signUp('language-settings@example.com');
+    const { chatId, state } = await englishChat(cookie);
+    expect(state.chat.translation).toEqual({});
+    expect(state.chat.noteSettings).toEqual({ depth: 4, frequency: 1, role: 'system' });
+
+    const patched = await readJson(
+      await json(cookie, `/api/chats/${chatId}`, 'PATCH', {
+        translation: { mode: 'translate', input: true, language: 'ko', engine: 'google' },
+        noteSettings: { depth: 2.4, frequency: -1, role: 'user' },
+      }),
+    );
+    expect(patched.chat.translation).toEqual({ mode: 'translate', input: true, language: 'ko' });
+    expect(patched.chat.noteSettings).toEqual({ depth: 2, frequency: 0, role: 'user' });
+
+    const cleared = await readJson(
+      await json(cookie, `/api/chats/${chatId}`, 'PATCH', { translation: null, noteSettings: { depth: 4 } }),
+    );
+    expect(cleared.chat.translation).toEqual({});
+    expect(cleared.chat.noteSettings).toEqual({ depth: 4, frequency: 1, role: 'system' });
+    const [row] = await db.select({ translation: chats.translation, noteSettings: chats.noteSettings }).from(chats).where(eq(chats.id, chatId));
+    expect(row).toEqual({ translation: null, noteSettings: null });
+
+    expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { translation: 'translate' })).status).toBe(400);
+  });
+});
+
+describe('translation', () => {
+  it('translates an opening once and serves it from the cache until its text changes', async () => {
+    const cookie = await signUp('translate-opening@example.com');
+    const { chatId, state } = await englishChat(cookie);
+    const opening = state.path[0];
+    const scripted = scriptedGetAdapter('안녕하세요.', '다시 안녕.');
+    const translating = makeApp({ getAdapter: scripted.getAdapter });
+    const ask = () =>
+      withLocale(cookie, `/api/chats/${chatId}/messages/${opening.id}/translation`, 'ko', { language: 'ko', texts: ['Hello there.'] }, translating);
+
+    expect(await readJson(await ask())).toEqual({ texts: { 'Hello there.': '안녕하세요.' } });
+    expect(await readJson(await ask())).toEqual({ texts: { 'Hello there.': '안녕하세요.' } });
+    expect(scripted.calls()).toBe(1);
+    // A page opening reads every one at once.
+    expect(await readJson(await request(cookie, `/api/chats/${chatId}/translations?language=ko`))).toEqual({
+      translations: { [opening.id]: { 'Hello there.': '안녕하세요.' } },
+    });
+    expect(await readJson(await request(cookie, `/api/chats/${chatId}/translations?language=ja`))).toEqual({ translations: {} });
+
+    // An edit makes the row stale: not served, made again when asked.
+    expect((await json(cookie, `/api/messages/${opening.id}`, 'PATCH', { content: 'Hello again.' })).status).toBe(200);
+    expect((await readJson(await request(cookie, `/api/chats/${chatId}/translations?language=ko`))).translations).toEqual({});
+    expect(await readJson(await ask())).toEqual({ texts: { 'Hello there.': '다시 안녕.' } });
+    expect(scripted.calls()).toBe(2);
+  });
+
+  it('sends the texts of one message joined as RisuAI does, halving a batch whose answer does not split', async () => {
+    const cookie = await signUp('translate-batch@example.com');
+    const { chatId, state } = await englishChat(cookie);
+    const ask = (target: Hono<AppEnv>) =>
+      withLocale(cookie, `/api/chats/${chatId}/messages/${state.path[0].id}/translation`, 'ko', { language: 'ko', texts: ['One.', 'Two.'] }, target);
+
+    const joined = scriptedGetAdapter('하나.\n■\n둘.');
+    expect((await readJson(await ask(makeApp({ getAdapter: joined.getAdapter })))).texts).toEqual({ 'One.': '하나.', 'Two.': '둘.' });
+    expect(joined.calls()).toBe(1);
+
+    await db.delete(messageTranslations);
+    const merged = scriptedGetAdapter('하나 둘.', '하나.', '둘.');
+    expect((await readJson(await ask(makeApp({ getAdapter: merged.getAdapter })))).texts).toEqual({ 'One.': '하나.', 'Two.': '둘.' });
+    expect(merged.calls()).toBe(3);
+
+    const broken = await ask(makeApp({ getAdapter: failingGetAdapter }));
+    expect(broken.status).toBe(200); // cached by now
+    await db.delete(messageTranslations);
+    const failed = await ask(makeApp({ getAdapter: failingGetAdapter }));
+    expect(failed.status).toBe(502);
+    expect((await readJson(failed)).code).toBe('translation_failed');
+  });
+
+  it('refuses another reader, a message of another chat and a language it does not know', async () => {
+    const cookie = await signUp('translate-owner@example.com');
+    const other = await signUp('translate-other@example.com');
+    const { chatId, state } = await englishChat(cookie);
+    const second = await englishChat(cookie);
+    const path = `/api/chats/${chatId}/messages/${state.path[0].id}/translation`;
+    expect((await json(other, path, 'POST', { language: 'ko', texts: ['x'] })).status).toBe(404);
+    expect((await json(cookie, `/api/chats/${chatId}/messages/${second.state.path[0].id}/translation`, 'POST', { language: 'ko', texts: ['x'] })).status).toBe(404);
+    expect((await json(cookie, path, 'POST', { language: 'zh', texts: ['x'] })).status).toBe(400);
+    expect((await json(cookie, path, 'POST', { language: 'ko', texts: [''] })).status).toBe(400);
+  });
+
+  it('translates what the reader wrote into the work language, keeping a writing-as prefix', async () => {
+    const cookie = await signUp('translate-input@example.com');
+    const { chatId } = await englishChat(cookie);
+    const scripted = scriptedGetAdapter('I open the door.\n■\nWho is there?');
+    const res = await json(
+      cookie,
+      `/api/chats/${chatId}/translate-input`,
+      'POST',
+      { text: '문을 연다.\n@Rian: 누구야?' },
+      makeApp({ getAdapter: scripted.getAdapter }),
+    );
+    expect(await readJson(res)).toEqual({ text: 'I open the door.\n@Rian: Who is there?' });
+    expect(scripted.calls()).toBe(1);
+  });
+});
+
+describe('author note settings', () => {
+  it('puts the note at the chat depth, under its role, every N reader turns', async () => {
+    const cookie = await signUp('note-settings@example.com');
+    const { chatId } = await setupChat(cookie);
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', {
+      note: 'NOTE-TEXT',
+      noteSettings: { depth: 0, frequency: 2, role: 'user' },
+    });
+    const { app: capturing, prompts } = capturingApp();
+    const noteOf = () => prompts.at(-1)!.messages.findIndex((message) => contentText(message.content) === 'NOTE-TEXT');
+
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '첫 턴' }, capturing));
+    expect(noteOf()).toBe(-1);
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '둘째 턴' }, capturing));
+    const sent = prompts.at(-1)!.messages;
+    const at = noteOf();
+    expect(at).toBeGreaterThan(-1);
+    expect(sent[at]!.role).toBe('user');
+    // Depth 0: after the newest turn, before the post-history block.
+    expect(contentText(sent[at - 1]!.content)).toContain('둘째 턴');
+    // A regenerate answers the same turn: two of the reader's turns still.
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
+    expect(noteOf()).toBeGreaterThan(-1);
   });
 });

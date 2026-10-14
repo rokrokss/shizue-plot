@@ -1105,7 +1105,41 @@
     "emotionScreen": "표정",
     "emotionAlt": "{name}의 표정: {emotion}",
     "emotionCollapse": "표정 접기",
-    "emotionExpand": "표정 펼치기"
+    "emotionExpand": "표정 펼치기",
+    "translating": "번역 중…",
+    "translationFailed": "번역하지 못했어요 · 다시",
+    "showOriginal": "번역됨 · 원문 보기",
+    "showTranslation": "원문 · 번역 보기",
+    "languageMode": "언어 모드",
+    "languageModes": {
+      "off": "원문 그대로",
+      "instruct": "답장 언어 지시",
+      "translate": "번역 (RisuAI 방식)"
+    },
+    "languageModeAuto": "자동 ({mode})",
+    "languageModeHints": {
+      "off": "작품이 쓰인 언어 그대로 읽습니다.",
+      "instruct": "모델이 {language}로 답합니다. 도입부만 한 번 번역해 두고, 원문은 언제든 볼 수 있어요.",
+      "translate": "모델은 {work}로 쓰고, 화면의 글을 보조 모델이 {language}로 번역합니다. 원문은 메시지마다 볼 수 있어요."
+    },
+    "languageSame": "이 작품은 {language}로 쓰여 있어 번역할 것이 없어요.",
+    "translateRecommended": "이 카드는 번역 모드를 권장해요",
+    "readerLanguage": "내 언어",
+    "readerLanguageAuto": "화면 언어 ({language})",
+    "translateInput": "내 메시지를 {work}로 번역해서 보내기",
+    "translateInputHint": "보내기 전에 보조 모델로 번역합니다. 저장되고 모델이 읽는 것은 번역된 글입니다.",
+    "placeholderTranslated": "{work}로 번역해 보내요…",
+    "noteDepth": "넣는 깊이",
+    "noteDepthValue": "{depth, plural, =0 {맨 끝} other {끝에서 #}}",
+    "noteFrequency": "넣는 빈도",
+    "noteFrequencyValue": "{frequency, plural, =0 {넣지 않음} =1 {매 턴} other {#턴마다}}",
+    "noteRole": "역할",
+    "noteRoles": {
+      "system": "시스템",
+      "user": "사용자",
+      "assistant": "어시스턴트"
+    },
+    "noteSettingsHint": "SillyTavern의 작가 노트 설정입니다. 깊이는 끝에서 몇 번째 메시지 앞에 넣을지, 빈도는 내 메시지 몇 개마다 넣을지입니다. 붙인 노트와 그 자리의 로어도 함께 움직입니다."
   },
   "personas": {
     "title": "페르소나",

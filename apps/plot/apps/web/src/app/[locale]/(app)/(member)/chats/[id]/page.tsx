@@ -111,6 +111,15 @@ import {
 } from '@/lib/scripts/runtime';
 import { DEFAULT_CONTEXT_BUDGET } from '@/lib/loreBudget';
 import { readStatusCollapsed, writeStatusCollapsed } from '@/lib/statusCard';
+import { useChatTranslator } from '@/lib/translation';
+import {
+  isTranslationLanguage,
+  recommendsTranslateMode,
+  resolveTranslation,
+  translatesMessage,
+  type ChatTranslationSettings,
+} from '@shizue/core/translation';
+import type { AuthorNoteSettings } from '@shizue/core';
 import type {
   ChatAttachment,
   ChatMemorySettings,
@@ -322,6 +331,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const { id } = use(params);
   const t = useTranslations('chat');
   const common = useTranslations('common');
+  const localeNames = useTranslations('locales');
   const format = useFormatter();
   const toMessage = useErrorMessage();
 
@@ -415,6 +425,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   /** Why the last ask came back empty-handed; said quietly, beside the chips. */
   const [suggestError, setSuggestError] = useState('');
   const [error, setError] = useState('');
+  /** The reader's turn is being translated into the work's language before it is sent. */
+  const [translatingInput, setTranslatingInput] = useState(false);
   const [retryable, setRetryable] = useState(false);
   /** The send may or may not have landed — the reconcile refetch failed. */
   const [ambiguous, setAmbiguous] = useState(false);
@@ -1022,6 +1034,28 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const globalVariables = state?.globalVariables;
   const chatId = state?.chat.id ?? '';
   const locale = useLocale();
+  /**
+   * The chat's language mode (§11 언어 모드): decided by the work's language
+   * against the one this page is read in until the reader picks. Nothing is
+   * translated before the plot read says what language the work is in.
+   */
+  const languageMode =
+    plot && isTranslationLanguage(plot.language)
+      ? resolveTranslation(state?.chat.translation, plot.language, isTranslationLanguage(locale) ? locale : null)
+      : null;
+  const translator = useChatTranslator(
+    chatId,
+    languageMode && languageMode.mode !== 'off' ? languageMode.language : null,
+  );
+  /** Whether the work's scripts read the model's words, which recommends the translation mode. */
+  const translateRecommended = useMemo(
+    () =>
+      recommendsTranslateMode({
+        displayScripts: scripts,
+        scripts: (scriptBundles ?? []).map(({ triggers, editScripts }) => ({ triggers, editScripts })),
+      }),
+    [scripts, scriptBundles],
+  );
 
   /**
    * The manual triggers a `{{button}}` may name, which then runs one rather than
@@ -2536,6 +2570,10 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     narrator?: NarratorConfig | null;
     /** Members sent off the stage; an empty list is the whole roster on. */
     absentCharacterIds?: string[];
+    /** The author's note's depth, frequency and role. */
+    noteSettings?: Required<AuthorNoteSettings>;
+    /** The language mode as the reader picked it, whole. */
+    translation?: ChatTranslationSettings;
   }): Promise<void> {
     if (!beginMutation()) return;
     setSettingsError('');
@@ -2740,19 +2778,49 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    * plot's read, and a send before it would answer a work of several as one.
    */
   const castPending = !plotRead;
+  /** RisuAI's input translation: the reader writes in their language, the turn goes out in the work's. */
+  const translateInput = languageMode?.input === true;
   function submit(): void {
-    if (!input.trim() || mode || drawing || mutationRef.current || attaching || importing || scriptsPending || castPending) return;
+    if (!input.trim() || mode || drawing || mutationRef.current || attaching || importing || scriptsPending || castPending || translatingInput) return;
     // The chip is a way of typing: what is stored is the plain convention, the
     // same one the reader could have written the marks of by hand — a member's
     // line included (`@이름: …`).
     const content = composeTurn(input, composerMode, writer?.name ?? null);
     const attachmentIds = uploadedIds(chips);
     const options = attachmentIds.length > 0 ? { attachmentIds } : undefined;
-    setInput('');
     // Slash commands only where RisuAI's scripts run; anywhere else `/…` is just text.
-    if (runtime && input.startsWith('/')) void runCommand(input, content, options);
-    else void generate('send', content, options);
+    if (runtime && input.startsWith('/')) {
+      setInput('');
+      void runCommand(input, content, options);
+      return;
+    }
+    if (!translateInput) {
+      setInput('');
+      void generate('send', content, options);
+      return;
+    }
+    // Translated first, as RisuAI's input box holds the translation before the
+    // send: the stored turn, the scripts and the model all read the work's
+    // language. The reader's words stay in the box until it has arrived, and a
+    // translation that fails sends nothing.
+    setTranslatingInput(true);
+    setError('');
+    void apiSend<{ text: string }>('POST', `/api/chats/${id}/translate-input`, { text: content })
+      .then(({ text }) => {
+        setInput('');
+        void generate('send', text, options);
+      }, (caught: unknown) => setError(toMessage(caught)))
+      .finally(() => setTranslatingInput(false));
   }
+  const languageView =
+    plot && isTranslationLanguage(plot.language)
+      ? {
+          settings: state.chat.translation ?? {},
+          plotLanguage: plot.language,
+          locale: isTranslationLanguage(locale) ? locale : plot.language,
+          recommended: translateRecommended,
+        }
+      : undefined;
 
   /**
    * The reply the footer's swipe moves: in a work of several members the first of
@@ -2818,6 +2886,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               onReaderPresetsChange={setReaderPresets}
               disabled={settingsLocked}
               onChange={(patch) => void updateSettings(patch)}
+              {...(languageView ? { language: languageView } : {})}
             />
             <Button
               size="sm"
@@ -2873,6 +2942,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               memoryRevision={state.chat.memoryRevision}
               members={members}
               note={state.chat.note}
+              noteSettings={state.chat.noteSettings}
+              onSaveNoteSettings={(noteSettings) => updateSettings({ noteSettings })}
               notes={notes}
               noteIds={state.chat.noteIds}
               memorySettings={state.chat.memorySettings}
@@ -3070,6 +3141,16 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                         {...(message.createdAt ? { createdAt: message.createdAt } : {})}
                         grouped={meta.grouped}
                         {...(message.intro ? { intro: true } : {})}
+                        // Translated once it is stored and its output scripts have run: every
+                        // message in the translation mode, the openings alone where the model
+                        // is asked to write in the reader's language.
+                        {...(translator &&
+                        languageMode &&
+                        source &&
+                        source.scriptState !== 'pending' &&
+                        translatesMessage(languageMode.mode, { intro: message.intro === true })
+                          ? { translator, translationId: source.id }
+                          : {})}
                         {...(message.model ? { model: message.model } : {})}
                         statusCollapsed={statusCollapsed}
                         onToggleStatus={toggleStatus}
@@ -3422,7 +3503,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                   // on in the composer, so the field itself is held with the rest.
                   disabled={importing}
                   aria-label={t('placeholder')}
-                  placeholder={t('placeholder')}
+                  placeholder={
+                    translateInput && plot
+                      ? t('placeholderTranslated', { work: localeNames(plot.language) })
+                      : t('placeholder')
+                  }
                   // Typing goes on while the reply streams — only sending waits for it
                   // (`submit` checks `mode`). Locking the field would also throw the
                   // keyboard user's focus away mid-turn.
@@ -3493,7 +3578,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                   variant="primary"
                   aria-label={t('send')}
                   title={t('send')}
-                  disabled={!input.trim() || attaching || drawing || mutating || importing || scriptsPending || castPending}
+                  busy={translatingInput}
+                  disabled={!input.trim() || attaching || drawing || mutating || importing || scriptsPending || castPending || translatingInput}
                   onClick={submit}
                 >
                   <Icon name="arrow" className="size-5 -rotate-90" />
@@ -3524,6 +3610,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             onReaderPresetsChange={setReaderPresets}
             disabled={settingsLocked}
             onChange={(patch) => void updateSettings(patch)}
+            {...(languageView ? { language: languageView } : {})}
           />
           <Button
             className="mt-5 w-full"

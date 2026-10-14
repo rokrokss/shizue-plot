@@ -3,7 +3,7 @@
 import { useTranslations } from 'next-intl';
 import { useEffect, useState } from 'react';
 import { Link, useRouter } from '@/i18n/navigation';
-import { apiGet, apiSend, timeZoneHeaders } from '@/lib/api';
+import { apiGet, apiSend, readerHeaders } from '@/lib/api';
 import { useSession } from '@/lib/authClient';
 import { signInHref } from '@/lib/nav';
 import type { ChatState, ModelInfo, Persona, PlotProfile } from '@/lib/types';
@@ -87,7 +87,7 @@ export function StartChatPanel({
         },
         undefined,
         // The openings are expanded now, so their clock macros read the reader's zone.
-        timeZoneHeaders(),
+        readerHeaders(),
       );
       router.push(`/chats/${state.chat.id}`);
     } catch (caught) {

@@ -10,6 +10,7 @@ import {
   inlayEmotionTags,
   narrationBody,
   narrationUntilSpeech,
+  replyLanguageInstruction,
   replyLengthTokens,
   sceneFocusDirective,
   spokenBy,
@@ -18,6 +19,8 @@ import {
   withBranchGreeting,
   withNarrationPrefix,
   type AssembledPrompt,
+  type AuthorNoteSettings,
+  type TranslationLanguage,
   type FoldItem,
   type FoldOptions,
   type HistoryMessage,
@@ -130,8 +133,16 @@ export interface GenerationPlan {
   memoryText: string;
   /** Relationship state block, empty when the chat has none or turned it off. */
   relationshipText: string;
-  /** The chat's author note, injected `AUTHOR_NOTE_DEPTH` messages from the end. */
+  /** The chat's author note, injected at its depth (`AUTHOR_NOTE_DEPTH` unless the chat sets one). */
   authorNote: string;
+  /** The chat's author's-note settings — depth, frequency, role; absent, the defaults. */
+  authorNoteSettings?: AuthorNoteSettings;
+  /**
+   * The language the reply is asked for, in the `instruct` language mode: a
+   * system line after everything else (`replyLanguageInstruction`), which no
+   * card's post-history instructions replace.
+   */
+  replyLanguage?: TranslationLanguage;
   /**
    * The narrator in force for this chat: its own override where it set one, the
    * plot's otherwise. Absent means neither declared one.
@@ -820,6 +831,11 @@ async function assembleRequest(
   ]
     .filter((line) => line.length > 0)
     .join('\n');
+  // The `instruct` language mode's line: a turn of its own after everything the
+  // assembler and the mode put there, so neither a card's post-history
+  // instructions nor its system prompt stand after it (a narration is read by
+  // the reader too, so it is asked in their language as well).
+  const languageLine = plan.replyLanguage ? replyLanguageInstruction(plan.replyLanguage) : '';
   const prompt = assemblePrompt({
     plot: plan.plot,
     characters: withChatLore(plan.characters, plan.localLore, plan.plot.modules),
@@ -828,6 +844,10 @@ async function assembleRequest(
     memoryText: plan.memoryText,
     relationshipText: plan.relationshipText,
     authorNote: plan.authorNote,
+    ...(plan.authorNoteSettings ? { authorNoteSettings: plan.authorNoteSettings } : {}),
+    // SillyTavern counts the reader's messages over the whole chat, not the
+    // history the memory left: the note's frequency is read against these.
+    userTurns: plan.wholeBranch.filter((message) => message.role === 'user').length,
     ...(plan.directions ? { directions: plan.directions } : {}),
     ...(plan.narrator ? { narrator: plan.narrator } : {}),
     preset: plan.preset,
@@ -856,24 +876,26 @@ async function assembleRequest(
     ...(plan.narration ? { narration: true } : {}),
     // The trailing instruction bypasses the assembler too, so its tokens are
     // subtracted here; it is not a turn, so it does not shift depth lore.
-    contextBudget: plan.contextBudget - countTokens(partial) - countTokens(trailingSystem),
+    contextBudget: plan.contextBudget - countTokens(partial) - countTokens(trailingSystem) - countTokens(languageLine),
     report,
   });
-  if (!partial && !trailingSystem) return prompt;
+  if (!partial && !trailingSystem && !languageLine) return prompt;
 
   // The partial is the turn the model resumes, so it stays last: a closing
-  // instruction on a continue (only a speaker focus can be one) goes before it.
+  // instruction on a continue (a speaker focus, the reply language) goes before it.
   return {
     system: prompt.system,
     messages: [
       ...prompt.messages,
       ...(trailingSystem ? [{ role: 'system' as const, content: trailingSystem }] : []),
+      ...(languageLine ? [{ role: 'system' as const, content: languageLine }] : []),
       ...(partial ? [{ role: 'assistant' as const, content: partial }] : []),
     ],
     // The partial is the head being continued — the greeting itself on a branch of one.
     sources: [
       ...(prompt.sources ?? []),
       ...(trailingSystem ? [{ kind: 'trailing' as const }] : []),
+      ...(languageLine ? [{ kind: 'trailing' as const }] : []),
       ...(partial
         ? [
             {
@@ -900,12 +922,15 @@ async function assembleRequest(
               ...(trailingSystem
                 ? [{ kind: 'trailing' as const, tokens: countTokens(trailingSystem), text: trailingSystem }]
                 : []),
+              ...(languageLine
+                ? [{ kind: 'trailing' as const, label: 'language', tokens: countTokens(languageLine), text: languageLine }]
+                : []),
               ...(partial ? [{ kind: 'history' as const, label: 'assistant', tokens: countTokens(partial), text: partial }] : []),
             ],
             totals: {
               ...prompt.report.totals,
               contextBudget: plan.contextBudget,
-              used: prompt.report.totals.used + countTokens(partial) + countTokens(trailingSystem),
+              used: prompt.report.totals.used + countTokens(partial) + countTokens(trailingSystem) + countTokens(languageLine),
             },
           },
         }
