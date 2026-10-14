@@ -31,6 +31,7 @@ import {
   type PromptCharacter,
   type PromptPlot,
   type PromptReport,
+  type ReaderAdditions,
   type VariableDelta,
   type Variables,
 } from '@shizue/core';
@@ -214,6 +215,8 @@ export interface GenerationPlan {
   localLore?: LoreEntry[];
   /** The chat's prompt preset. */
   preset: Preset;
+  /** The reader's own preset on top of it (`chats.reader_preset_id`), if the chat picked one. */
+  readerAdditions?: ReaderAdditions | undefined;
   /** Context budget this chat runs with (see memorySettings). */
   contextBudget: number;
   /**
@@ -828,6 +831,7 @@ async function assembleRequest(
     ...(plan.directions ? { directions: plan.directions } : {}),
     ...(plan.narrator ? { narrator: plan.narrator } : {}),
     preset: plan.preset,
+    ...(plan.readerAdditions ? { readerAdditions: plan.readerAdditions } : {}),
     variables: plan.variables,
     globalVariables: plan.globalVariables,
     clock: plan.clock,

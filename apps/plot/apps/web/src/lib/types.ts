@@ -483,6 +483,20 @@ export interface PresetInfo {
   id: string;
 }
 
+/**
+ * The reader's own preset (`GET /api/reader-presets`): what they add on top of
+ * the chat's preset — a main-instruction addition and a global note. Account-level,
+ * picked per chat.
+ */
+export interface ReaderPreset {
+  id: string;
+  name: string;
+  main: string;
+  globalNote: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 /** Mirrors the whitelist in packages/db — also the order the select uses. */
 export const MEMORY_CONTEXT_BUDGETS = [8000, 16000, 32000] as const;
 
@@ -570,6 +584,8 @@ export interface Chat {
   note: string;
   /** Prompt preset id, one of the ids GET /api/presets lists. */
   preset: string;
+  /** The reader's own preset on top of `preset`; null adds nothing. */
+  readerPresetId: string | null;
   headMessageId: string | null;
   /** Moves with every edit, hide and delete of a message — what may drop one of the memory's summaries. */
   memoryRevision: number;

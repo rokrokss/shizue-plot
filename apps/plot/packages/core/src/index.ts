@@ -19,6 +19,7 @@ export * from './scene.js';
 export * from './tokens.js';
 export * from './language.js';
 export * from './presets.js';
+export * from './readerPreset.js';
 export * from './prompt.js';
 export * from './risuRequest.js';
 export * from './memory.js';

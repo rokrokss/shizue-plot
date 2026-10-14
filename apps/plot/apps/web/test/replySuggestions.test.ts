@@ -152,6 +152,7 @@ const state = (locked: boolean): ChatState => ({
     subModel: null,
     note: '',
     preset: 'default',
+    readerPresetId: null,
     headMessageId: 'msg_1',
     memoryRevision: 0,
     memorySettings: null,

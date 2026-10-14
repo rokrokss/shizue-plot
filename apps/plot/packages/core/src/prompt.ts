@@ -1,10 +1,12 @@
 import { unescapeCbs, type CbsChat, type CbsCharacter, type CbsModel } from './cbs.js';
+import { risuEscape } from './cbs/functions.js';
 import { extractChoices } from './choices.js';
 import { isUtilityBot } from './card/risu.js';
 import { emotionInstructionsOf } from './emotion.js';
 import { applyMacros, stripInlayMacros, type MacroClock, type MacroContext, type MacroHostData } from './macro.js';
 import { activateLore, loreEntryKey, type LoreActivationVia, type LoreTimedState } from './lorebook.js';
 import { isNarration, narrationBody } from './narration.js';
+import type { ReaderAdditions } from './readerPreset.js';
 import { readerLine, spokenBy, type ReaderMember } from './speech.js';
 import type { NarratorSpeaker } from './group.js';
 import {
@@ -299,6 +301,16 @@ export interface AssemblePromptInput {
   contextBudget?: number;
   maxResponseTokens?: number;
   preset?: Preset;
+  /**
+   * The reader's own preset on top of `preset` (`ReaderAdditions`, §6 프리셋):
+   * the main addition follows the preset's main and the global note its
+   * post-history block, so a card's system prompt or post-history instructions
+   * replace either as they replace the preset — RisuAI's `mainPrompt` and
+   * `globalNote` — and bring it back only through `{{original}}`. A utility bot
+   * gets neither. Read with `{{char}}`, `{{user}}` and the clock and nothing
+   * else, so they cannot pull the creator's text into the prompt.
+   */
+  readerAdditions?: ReaderAdditions;
   /**
    * Also say how the prompt was put together (`PromptReport`). Off for every
    * generation: it measures each block again, which only the inspector needs.
@@ -775,6 +787,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     contextBudget = DEFAULT_CONTEXT_BUDGET,
     maxResponseTokens = DEFAULT_MAX_RESPONSE_TOKENS,
     preset: scenePreset = DEFAULT_PRESET,
+    readerAdditions,
     speaker,
     narration = false,
   } = input;
@@ -894,8 +907,28 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // narrator, the style, the memory, the relationship, the directions.
   const utility = isUtilityBot(voice?.card.extensions);
 
-  // 1. main system prompt
-  const main = utility ? '' : resolveOverride(voice?.card.systemPrompt ?? '', expand(preset.main), voiceMacro, protocol);
+  // 0b. the reader's own additions to the preset — RisuAI's `mainPrompt` and
+  // `globalNote` — read as their writer's text and nothing more: no card, lore,
+  // variables or prompts behind the macros, so `{{description}}`,
+  // `{{charPrompt}}` or `{{lorebook}}` stay words, and escaped once read, so no
+  // later pass — a card's `{{original}}`, an outlet — reads them as macros.
+  const readerMacro: MacroContext = {
+    char: plotMacro.char,
+    user: userName,
+    ...(clock ? { clock } : {}),
+    ...(seed !== undefined ? { seed } : {}),
+    ...(seed !== undefined && seedLength !== undefined ? { seedLength } : {}),
+  };
+  const withReader = (presetText: string, addition: string | undefined): string => {
+    const text = addition?.trim() ? applyMacros(addition, readerMacro).trim() : '';
+    return text ? [presetText, risuEscape(text)].filter((part) => part.length > 0).join('\n\n') : presetText;
+  };
+
+  // 1. main system prompt — the reader's main addition inside the preset's, so a
+  // card's own system prompt takes both or, through `{{original}}`, keeps both.
+  const main = utility
+    ? ''
+    : resolveOverride(voice?.card.systemPrompt ?? '', withReader(expand(preset.main), readerAdditions?.main), voiceMacro, protocol);
 
   // 1b. how a reply marks its 지문 when it has any (`REPLY_FORMAT_HINT`), and
   // the least of what the system string says: right behind the preset whose
@@ -1125,7 +1158,9 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
       ? applyMacros(voice?.card.postHistoryInstructions ?? '', { ...voiceMacro, original: '' }).trim()
       : resolveOverride(
           voice?.card.postHistoryInstructions ?? '',
-          expand(preset.postHistory),
+          // The reader's global note where RisuAI sends its global note: behind
+          // the history, inside what the card's post-history instructions replace.
+          withReader(expand(preset.postHistory), readerAdditions?.globalNote),
           voiceMacro,
           protocolReminder,
         ),

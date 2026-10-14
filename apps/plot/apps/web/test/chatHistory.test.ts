@@ -54,6 +54,7 @@ const state = (ids: string[], hasMore?: boolean): ChatState => ({
     subModel: null,
     note: '',
     preset: 'standard',
+    readerPresetId: null,
     headMessageId: ids[ids.length - 1] ?? null,
     memoryRevision: 0,
     memorySettings: null,

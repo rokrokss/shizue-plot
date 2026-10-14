@@ -16,6 +16,7 @@ import { notificationRoutes } from './routes/notifications.js';
 import { noteRoutes } from './routes/notes.js';
 import { personaRoutes } from './routes/personas.js';
 import { presetRoutes } from './routes/presets.js';
+import { readerPresetRoutes } from './routes/readerPresets.js';
 import { MAX_CARD_IMPORT_BYTES, plotRoutes } from './routes/plots.js';
 import { requireUser } from './session.js';
 
@@ -90,6 +91,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     '/api/comments',
     '/api/personas',
     '/api/notes',
+    '/api/reader-presets',
     '/api/notifications',
     '/api/chats',
     '/api/messages',
@@ -106,6 +108,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   app.route('/api/creators', creatorRoutes(deps));
   app.route('/api/personas', personaRoutes(deps));
   app.route('/api/notes', noteRoutes(deps));
+  // The reader's own presets on top of the catalog's (`chats.reader_preset_id`).
+  app.route('/api/reader-presets', readerPresetRoutes(deps));
   app.route('/api/notifications', notificationRoutes(deps));
   app.route('/api/chats', chatRoutes(deps));
   // A chat brought over from another app, written in batches (`POST /api/chats/import`).

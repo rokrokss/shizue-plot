@@ -39,6 +39,7 @@ import {
   type PromptBranch,
   type PromptCharacter,
   type PromptPlot,
+  type ReaderAdditions,
   type Variables,
 } from '@shizue/core';
 import {
@@ -112,6 +113,7 @@ import {
   loadOwnedNote,
   MAX_CHAT_NOTES,
 } from '../notes.js';
+import { loadReaderAdditions, resolveReaderPresetId } from '../readerPresets.js';
 import { buildRelationshipText } from '../relationship.js';
 import { drawSceneEnabled, generateSceneImage, sceneImagePrompt } from '../sceneImage.js';
 import {
@@ -174,6 +176,8 @@ export const toChatJson = (chat: Chat, noteIds: string[]) => ({
   subModel: chat.subModel,
   note: chat.note,
   preset: chat.preset,
+  /** The reader's own preset on top of `preset`; null adds nothing. */
+  readerPresetId: chat.readerPresetId,
   headMessageId: chat.headMessageId,
   memorySettings: chat.memorySettings,
   /** Moves with every edit, hide and delete of a message: the memory's summaries may have changed with it. */
@@ -705,6 +709,8 @@ async function loadGenerationContext(
   personaText: string;
   userName: string;
   authorNote: string;
+  /** The chat's reader preset (`chats.reader_preset_id`), the chat owner's own. */
+  readerAdditions: ReaderAdditions | undefined;
   narrator: NarratorConfig | undefined;
   /** The names this chat's open images go by, for `{{assetlist}}` in the prompt. */
   assetNames: string[];
@@ -767,6 +773,7 @@ async function loadGenerationContext(
     // The chat's own note plus the reusable notes attached to it — the note as
     // this request's scripts left it, when they rewrote it.
     authorNote: await loadAuthorNote(deps, scripts.note === undefined ? chat : { ...chat, note: scripts.note }),
+    readerAdditions: await loadReaderAdditions(deps, chat),
     assetNames: await openAssetNames(deps, chat),
     auxiliaryModel: await auxiliaryModelOf(deps, chat),
     fold: foldOptionsOf(row.name, persona),
@@ -1489,6 +1496,7 @@ async function regeneratePlan(
     // back with it — a regenerate is the same turn, judged the same way.
     ...(answersReader ? { directions: lastUserDirections(kept) } : {}),
     preset: getPreset(chat.preset),
+    readerAdditions: context.readerAdditions,
     // The kept branch only: the head being replaced takes its delta with it, so
     // a regenerate starts from where the turn before it left things.
     ...startedFrom(pathVariables(context.row, kept, context.fold), scripts),
@@ -1863,6 +1871,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         'personaId' in body ? ((await resolvePersona(deps, userId, body['personaId']))?.id ?? null) : undefined;
       const note = optionalString(body, 'note');
       const preset = optionalPreset(body);
+      const readerPresetId =
+        'readerPresetId' in body ? await resolveReaderPresetId(deps, userId, body['readerPresetId']) : undefined;
       const relationshipEnabled = optionalBoolean(body, 'relationshipEnabled');
       const memorySettings = optionalMemorySettings(body);
       const allowComponentTurns = optionalBoolean(body, 'allowComponentTurns');
@@ -1878,6 +1888,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         personaId === undefined &&
         note === undefined &&
         preset === undefined &&
+        readerPresetId === undefined &&
         relationshipEnabled === undefined &&
         memorySettings === undefined &&
         allowComponentTurns === undefined &&
@@ -1898,6 +1909,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           ...(personaId !== undefined ? { personaId } : {}),
           ...(note !== undefined ? { note } : {}),
           ...(preset !== undefined ? { preset } : {}),
+          ...(readerPresetId !== undefined ? { readerPresetId } : {}),
           ...(relationshipEnabled !== undefined ? { relationshipEnabled } : {}),
           ...(memorySettings !== undefined ? { memorySettings } : {}),
           ...(allowComponentTurns !== undefined ? { allowComponentTurns } : {}),
@@ -2834,6 +2846,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         ...(context.narrator ? { narrator: context.narrator } : {}),
         ...(directions && edited.turn ? { directions } : {}),
         preset: getPreset(chat.preset),
+        readerAdditions: context.readerAdditions,
         // The stored rows, so the turn's delta is folded with its text.
         ...startedFrom(pathVariables(context.row, branch, context.fold), scripts),
         fold: context.fold,
@@ -2948,6 +2961,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         ...(context.narrator ? { narrator: context.narrator } : {}),
         ...(answersReader ? { directions: lastUserDirections(path) } : {}),
         preset: getPreset(chat.preset),
+        readerAdditions: context.readerAdditions,
         ...startedFrom(pathVariables(context.row, path, context.fold), scripts),
         fold: context.fold,
         globalVariables: context.globalVariables,
@@ -3054,6 +3068,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         // is still the one in force. Auto-continue, below, is a beat past it.
         directions: lastUserDirections(path),
         preset: getPreset(chat.preset),
+        readerAdditions: context.readerAdditions,
         // The prompt reads the whole branch, head included; the head's new delta
         // is measured from the branch before it, since the continue rewrites it.
         ...startedFrom(pathVariables(context.row, path, context.fold), scripts),
@@ -3133,6 +3148,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         authorNote: context.authorNote,
         ...(context.narrator ? { narrator: context.narrator } : {}),
         preset: getPreset(chat.preset),
+        readerAdditions: context.readerAdditions,
         ...startedFrom(pathVariables(context.row, path, context.fold), scripts),
         fold: context.fold,
         globalVariables: context.globalVariables,
@@ -3208,6 +3224,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         authorNote: context.authorNote,
         ...(context.narrator ? { narrator: context.narrator } : {}),
         preset: getPreset(chat.preset),
+        readerAdditions: context.readerAdditions,
         ...startedFrom(pathVariables(context.row, path, context.fold), scripts),
         fold: context.fold,
         globalVariables: context.globalVariables,

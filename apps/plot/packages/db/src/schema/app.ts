@@ -424,6 +424,26 @@ export const personas = pgTable('personas', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+// A reader's own preset: what they add on top of the prompt preset a chat runs
+// with — a main-instruction addition and a global note (@shizue/core
+// `ReaderAdditions`). Account-level, picked per chat (`chats.reader_preset_id`).
+// Count and lengths capped by the API.
+export const readerPresets = pgTable(
+  'reader_presets',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    main: text('main').notNull().default(''),
+    globalNote: text('global_note').notNull().default(''),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('reader_presets_user_id_idx').on(t.userId)],
+);
+
 export const chats = pgTable(
   'chats',
   {
@@ -447,6 +467,9 @@ export const chats = pgTable(
     note: text('note').notNull().default(''),
     // Prompt preset id (see @shizue/core presets); unknown values fall back to the default.
     preset: text('preset').notNull().default('standard'),
+    // The reader's own preset on top of it; null adds nothing. Always one of the
+    // chat owner's, which the API checks on the way in and again when it reads it.
+    readerPresetId: uuid('reader_preset_id').references(() => readerPresets.id, { onDelete: 'set null' }),
     // Leaf of the currently selected branch. Intentionally unconstrained to avoid a
     // circular FK with messages.chat_id.
     headMessageId: uuid('head_message_id'),
@@ -826,6 +849,7 @@ export type Follow = typeof follows.$inferSelect;
 export type Notification = typeof notifications.$inferSelect;
 export type NewNotification = typeof notifications.$inferInsert;
 export type Persona = typeof personas.$inferSelect;
+export type ReaderPreset = typeof readerPresets.$inferSelect;
 export type NewPersona = typeof personas.$inferInsert;
 export type Chat = typeof chats.$inferSelect;
 export type NewChat = typeof chats.$inferInsert;

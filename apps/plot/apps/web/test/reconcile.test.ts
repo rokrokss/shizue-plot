@@ -30,6 +30,7 @@ const state = (head: string | null, path: ChatMessage[]): ChatState => ({
     subModel: null,
     note: '',
     preset: 'standard',
+    readerPresetId: null,
     headMessageId: head,
     memoryRevision: 0,
     memorySettings: null,

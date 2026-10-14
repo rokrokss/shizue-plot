@@ -32,6 +32,7 @@ import {
   MAX_INTRO_LENGTH,
   MAX_INTRO_TEXT_LENGTH,
   MAX_INTROS_PER_PLOT,
+  MAX_READER_PRESETS,
   MAX_VARIABLE_VALUE_LENGTH,
   MEMORY_HEADING,
   NARRATOR_SPEAKER,
@@ -39,6 +40,8 @@ import {
   placeholderPng,
   plotHeader,
   PRESET_IDS,
+  READER_PRESET_NAME_MAX,
+  READER_PRESET_TEXT_MAX,
   readCharx,
   readPngTextChunks,
   stripPngTextChunks,
@@ -66,6 +69,7 @@ import {
   notifications,
   plots,
   plotAssets,
+  readerPresets,
   user,
   userNotes,
   type ChatMemory,
@@ -7572,6 +7576,122 @@ describe('presets', () => {
     expect((await json(other, `/api/chats/${chatId}`, 'PATCH', { preset: 'novel' })).status).toBe(404);
 
     expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.preset).toBe('novel');
+  });
+});
+
+describe('reader presets', () => {
+  const create = (cookie: string, body: Record<string, unknown>) => json(cookie, '/api/reader-presets', 'POST', body);
+
+  it('keeps each reader’s own presets, capped, and nobody else’s', async () => {
+    const cookie = await signUp('reader-preset@example.com');
+    const other = await signUp('reader-preset-other@example.com');
+
+    const res = await create(cookie, { name: '  내 문체  ', main: '메인 추가', globalNote: '노트' });
+    expect(res.status).toBe(201);
+    const made = await readJson(res);
+    expect(made).toMatchObject({ name: '내 문체', main: '메인 추가', globalNote: '노트' });
+    expect((await readJson(await request(cookie, '/api/reader-presets'))).map((p: { id: string }) => p.id)).toEqual([made.id]);
+    expect(await readJson(await request(other, '/api/reader-presets'))).toEqual([]);
+
+    const edited = await readJson(await json(cookie, `/api/reader-presets/${made.id}`, 'PUT', { globalNote: '바뀐 노트' }));
+    expect(edited).toMatchObject({ name: '내 문체', main: '메인 추가', globalNote: '바뀐 노트' });
+
+    for (const body of [
+      {},
+      { name: '   ' },
+      { name: 'x'.repeat(READER_PRESET_NAME_MAX + 1) },
+      { name: 'n', main: 'x'.repeat(READER_PRESET_TEXT_MAX + 1) },
+      { name: 'n', globalNote: 'x'.repeat(READER_PRESET_TEXT_MAX + 1) },
+      { name: 'n', main: 42 },
+    ]) {
+      expect((await create(cookie, body)).status, JSON.stringify(body).slice(0, 40)).toBe(400);
+    }
+    // Someone else's preset is no preset at all.
+    expect((await json(other, `/api/reader-presets/${made.id}`, 'PUT', { name: '탈취' })).status).toBe(404);
+    expect((await json(other, `/api/reader-presets/${made.id}`, 'DELETE')).status).toBe(404);
+
+    const userId = (await db.select({ id: readerPresets.userId }).from(readerPresets))[0]!.id;
+    await db.insert(readerPresets).values(
+      Array.from({ length: MAX_READER_PRESETS - 1 }, (_, i) => ({ userId, name: `p${i}` })),
+    );
+    const full = await create(cookie, { name: '하나 더' });
+    expect(full.status).toBe(400);
+    expect((await readJson(full)).code).toBe('reader_preset_limit');
+  });
+
+  it('is picked per chat, only from the reader’s own, and lets go when deleted', async () => {
+    const cookie = await signUp('reader-preset-chat@example.com');
+    const other = await signUp('reader-preset-chat-other@example.com');
+    const { chatId } = await setupChat(cookie);
+    const mine = await readJson(await create(cookie, { name: '내 것', main: '독자의 메인 추가', globalNote: '독자의 글로벌 노트' }));
+    const theirs = await readJson(await create(other, { name: '남의 것' }));
+
+    const picked = await readJson(await json(cookie, `/api/chats/${chatId}`, 'PATCH', { readerPresetId: mine.id }));
+    expect(picked.chat.readerPresetId).toBe(mine.id);
+
+    for (const readerPresetId of [theirs.id, randomUUID(), 'nope']) {
+      expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { readerPresetId })).status).toBe(404);
+    }
+    expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { readerPresetId: 42 })).status).toBe(400);
+    expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.readerPresetId).toBe(mine.id);
+
+    // The main follows the preset's main, the note its post-history reminder.
+    const { app: capturing, prompts } = capturingApp();
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing));
+    const sent = prompts.at(-1)!;
+    expect(sent.system).toMatch(/등장인물 전원을 연기하는 작가[\s\S]*\n\n독자의 메인 추가/);
+    expect(contentText(sent.messages.at(-1)!.content)).toMatch(/등장인물을 연기합니다[\s\S]*\]\n\n독자의 글로벌 노트$/);
+
+    // A pointer at someone else's row — which the API never writes — adds nothing.
+    await db.update(chats).set({ readerPresetId: theirs.id }).where(eq(chats.id, chatId));
+    await json(other, `/api/reader-presets/${theirs.id}`, 'PUT', { main: 'OTHER-READER' });
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
+    expect(prompts.at(-1)!.system).not.toContain('OTHER-READER');
+
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { readerPresetId: mine.id });
+    expect((await json(cookie, `/api/reader-presets/${mine.id}`, 'DELETE')).status).toBe(204);
+    expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.readerPresetId).toBeNull();
+    const cleared = await readJson(await json(cookie, `/api/chats/${chatId}`, 'PATCH', { readerPresetId: null }));
+    expect(cleared.chat.readerPresetId).toBeNull();
+  });
+
+  it('gives way to the creator’s own instructions, and shows a reader none of them', async () => {
+    const creator = await signUp('reader-preset-creator@example.com');
+    const reader = await signUp('reader-preset-reader@example.com');
+    const plot = await publishablePlot(
+      creator,
+      { description: 'CREATOR-WORLD' },
+      { card: { description: 'CREATOR-DESC', systemPrompt: 'CREATOR-SYS', postHistoryInstructions: 'CREATOR-PH' } },
+    );
+    await publishPlot(creator, plot.id);
+    const started = await startChat(reader, plot.id);
+    const chatId = started.chat.id;
+    const preset = await readJson(
+      await create(reader, { name: '탐색', main: 'READER-MAIN {{charPrompt}} {{description}}', globalNote: 'READER-NOTE {{charJailbreak}}' }),
+    );
+    const state = await readJson(await json(reader, `/api/chats/${chatId}`, 'PATCH', { readerPresetId: preset.id }));
+
+    // The card's own system prompt and post-history instructions replace the
+    // reader's additions as they replace our preset: no {{original}}, no reader text.
+    const { app: capturing, prompts } = capturingApp();
+    await readSse(await json(reader, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing));
+    const sent = prompts.at(-1)!;
+    expect(sent.system).toContain('CREATOR-SYS');
+    expect(sent.system).not.toContain('READER-MAIN');
+    expect(contentText(sent.messages.at(-1)!.content)).toContain('CREATOR-PH');
+    expect(JSON.stringify(sent.messages)).not.toContain('READER-NOTE');
+
+    // Nothing the reader can read through presets carries the creator's text,
+    // and the prompt inspector stays the creator's own.
+    for (const body of [
+      await readJson(await request(reader, '/api/reader-presets')),
+      await readJson(await request(reader, '/api/chats')),
+      state,
+      await readJson(await request(reader, `/api/chats/${chatId}`)),
+    ]) {
+      expect(JSON.stringify(body)).not.toMatch(/CREATOR-(SYS|PH|DESC)/);
+    }
+    expect((await request(reader, `/api/chats/${chatId}/inspect`)).status).toBe(404);
   });
 });
 

@@ -2,9 +2,10 @@
 
 import { useTranslations } from 'next-intl';
 import { useId, type ReactNode } from 'react';
-import type { ModelInfo, Persona, PresetInfo } from '@/lib/types';
+import type { ModelInfo, Persona, PresetInfo, ReaderPreset } from '@/lib/types';
 import { PersonaFace } from './Avatar';
 import { ModelOptions } from './ModelOptions';
+import { ReaderPresetField } from './ReaderPresets';
 import { Select } from './ui';
 
 /** Effort words the catalogues translate; any other word a model advertises is shown as it is. */
@@ -12,7 +13,8 @@ const KNOWN_EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh']);
 
 /**
  * The choices a chat is run with: model, reasoning effort where the model offers
- * one, auxiliary model, preset and persona. The same controls stand in the
+ * one, auxiliary model, preset, the reader's own preset on top of it, and
+ * persona. The same controls stand in the
  * header on a wide screen and in the settings sheet on a narrow one, so they
  * live here rather than being written twice — `stacked` is the whole
  * difference: labelled rows at full width, or one compact row.
@@ -33,6 +35,9 @@ export function ChatSettings({
   models,
   presets,
   personas,
+  readerPresetId = null,
+  readerPresets,
+  onReaderPresetsChange,
   disabled,
   stacked,
   onChange,
@@ -46,6 +51,11 @@ export function ChatSettings({
   models: ModelInfo[];
   presets: PresetInfo[];
   personas: Persona[];
+  /** This chat's reader preset ("내 프리셋"); null adds nothing. */
+  readerPresetId?: string | null;
+  /** The reader's own presets. Without them the "내 프리셋" control is not drawn. */
+  readerPresets?: ReaderPreset[];
+  onReaderPresetsChange?: (presets: ReaderPreset[]) => void;
   disabled: boolean;
   stacked?: boolean;
   onChange: (patch: {
@@ -53,6 +63,7 @@ export function ChatSettings({
     subModel?: string | null;
     reasoningEffort?: string | null;
     preset?: string;
+    readerPresetId?: string | null;
     personaId?: string | null;
   }) => void;
 }) {
@@ -188,6 +199,17 @@ export function ChatSettings({
           ))}
         </Select>,
       )}
+      {/* The reader's own additions on top of the preset just above. */}
+      {readerPresets && onReaderPresetsChange ? (
+        <ReaderPresetField
+          stacked={stacked}
+          presets={readerPresets}
+          selectedId={readerPresetId}
+          disabled={disabled}
+          onSelect={(id) => onChange({ readerPresetId: id })}
+          onPresetsChange={onReaderPresetsChange}
+        />
+      ) : null}
       {field(
         'persona',
         t('persona'),

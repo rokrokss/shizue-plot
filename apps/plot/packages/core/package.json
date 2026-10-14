@@ -78,6 +78,10 @@
       "types": "./dist/worldInfo.d.ts",
       "default": "./dist/worldInfo.js"
     },
+    "./reader-preset": {
+      "types": "./dist/readerPreset.d.ts",
+      "default": "./dist/readerPreset.js"
+    },
     "./sillytavern": {
       "types": "./dist/sillytavern/index.d.ts",
       "default": "./dist/sillytavern/index.js"

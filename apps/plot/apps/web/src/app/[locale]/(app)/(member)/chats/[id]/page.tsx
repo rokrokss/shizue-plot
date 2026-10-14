@@ -123,6 +123,7 @@ import type {
   NarratorConfig,
   Persona,
   PresetInfo,
+  ReaderPreset,
   PublicMember,
   PublicPlotDetail,
   StreamMode,
@@ -338,6 +339,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [presets, setPresets] = useState<PresetInfo[]>([]);
   const [personas, setPersonas] = useState<Persona[]>([]);
+  const [readerPresets, setReaderPresets] = useState<ReaderPreset[]>([]);
   const [notes, setNotes] = useState<UserNote[]>([]);
   const [missing, setMissing] = useState(false);
 
@@ -717,6 +719,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     apiGet<ModelInfo[]>('/api/models').then(setModels, () => undefined);
     apiGet<PresetInfo[]>('/api/presets').then(setPresets, () => undefined);
     apiGet<Persona[]>('/api/personas').then(setPersonas, () => undefined);
+    apiGet<ReaderPreset[]>('/api/reader-presets').then(setReaderPresets, () => undefined);
     apiGet<UserNote[]>('/api/notes').then(setNotes, () => undefined);
   }, [id]);
 
@@ -2521,6 +2524,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     personaId?: string | null;
     note?: string;
     preset?: string;
+    /** The reader's own preset on top of `preset`; null picks none. */
+    readerPresetId?: string | null;
     relationshipEnabled?: boolean;
     memorySettings?: ChatMemorySettings;
     allowComponentTurns?: boolean;
@@ -2808,6 +2813,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               models={models}
               presets={presets}
               personas={personas}
+              readerPresetId={state.chat.readerPresetId}
+              readerPresets={readerPresets}
+              onReaderPresetsChange={setReaderPresets}
               disabled={settingsLocked}
               onChange={(patch) => void updateSettings(patch)}
             />
@@ -3511,6 +3519,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             models={models}
             presets={presets}
             personas={personas}
+            readerPresetId={state.chat.readerPresetId}
+            readerPresets={readerPresets}
+            onReaderPresetsChange={setReaderPresets}
             disabled={settingsLocked}
             onChange={(patch) => void updateSettings(patch)}
           />

@@ -356,6 +356,33 @@ test('picks a prompt preset that survives a reload', async () => {
   await expect(page.getByLabel('프리셋')).toHaveValue('novel');
 });
 
+test('adds my own preset on top of the chat preset, picked for the chat across a reload', async () => {
+  const name = `내 문체 ${run}`;
+  // A wide screen has room for one quiet button; the field opens in a sheet.
+  await page.getByRole('button', { name: '내 프리셋', exact: true }).click();
+  const sheet = page.getByTestId('bottom-sheet');
+  await sheet.getByRole('button', { name: '내 프리셋 관리' }).click();
+  await sheet.getByRole('button', { name: '새 프리셋' }).click();
+  await sheet.getByLabel('이름', { exact: true }).fill(name);
+  await sheet.getByLabel('메인 지시 추가').fill(`대사를 짧게 끊는다 ${run}`);
+  await sheet.getByLabel('글로벌 노트').fill(`응답 직전의 노트 ${run}`);
+  await Promise.all([
+    chatWrite('POST', '/api/reader-presets'),
+    sheet.getByRole('button', { name: '저장', exact: true }).click(),
+  ]);
+
+  await Promise.all([
+    chatWrite('PATCH'),
+    sheet.getByRole('combobox', { name: '내 프리셋' }).selectOption({ label: name }),
+  ]);
+  await page.keyboard.press('Escape');
+
+  await page.reload();
+  await expect(page.getByRole('button', { name: `내 프리셋 · ${name}` })).toBeVisible();
+  // The chat's own preset is untouched by it.
+  await expect(page.getByLabel('프리셋', { exact: true })).toHaveValue('novel');
+});
+
 test('shows the relationship section with its toggle', async () => {
   await openPanel();
   const section = page.getByTestId('chat-relationship');

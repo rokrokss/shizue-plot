@@ -224,6 +224,7 @@ const stateWith = (path: ChatMessage[]): ChatState => ({
     subModel: null,
     note: '',
     preset: 'default',
+    readerPresetId: null,
     headMessageId: path.at(-1)!.id,
     memoryRevision: 0,
     memorySettings: null,

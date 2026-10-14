@@ -180,6 +180,7 @@ function stateWith(path: ChatMessage[], absentCharacterIds: string[] = [], sibli
       subModel: null,
       note: '',
       preset: 'default',
+      readerPresetId: null,
       headMessageId: path.at(-1)?.id ?? null,
       memoryRevision: 0,
       memorySettings: null,
