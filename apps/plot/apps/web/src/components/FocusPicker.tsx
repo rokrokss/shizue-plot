@@ -6,10 +6,11 @@ import type { PublicMember } from '@/lib/types';
 import { Button, cx } from './ui';
 
 /**
- * Who the next reply should center on, for a plot with more than one member on
- * the stage. One button in the composer row; the members open above it, since
- * the composer sits at the bottom of the screen. The pick is for one reply only
- * — the page clears it once a reply carrying it has landed.
+ * Who speaks in the next round (다음 차례), for a work with more than one member
+ * on the stage: exactly the members picked, in roster order, past their 대화량
+ * and the round's cap. One button in the composer row; the members open above
+ * it, since the composer sits at the bottom of the screen. The pick is for one
+ * round only — the page clears it once the round's first reply has landed.
  */
 export function FocusPicker({
   members,

@@ -13,8 +13,9 @@
  *   what the triggers left as the turn's `variableDelta`, the prompt text the start
  *   triggers asked for (`injections`) and anything they rewrote of the work.
  * - **Any other generation** (`prepare('regenerate' | 'continue' | 'auto' |
- *   'narrate')`): the start triggers alone, on the branch the generation reads; what
- *   they left goes as `startDelta`.
+ *   'narrate' | 'reply')`): the start triggers alone, on the branch the generation
+ *   reads; what they left goes as `startDelta`. In a work of several members every
+ *   reply of a round runs this one runtime's (the lead member's) for now.
  * - **The reply** (`finish`): when the plot has output scripts the POST says
  *   `postProcess`, the server stores the reply `pending`, and once it lands the
  *   `editoutput` scripts rewrite it and the output triggers run — and the result
@@ -274,6 +275,12 @@ export interface PrepareOptions {
   raw?: boolean;
   /** The chat is emptied before the turn — the greeting stays. */
   clear?: boolean;
+  /**
+   * How many replies at the branch's end a regenerate replaces: in a work of
+   * several members, the whole round the head ends (`groupRound`). One where
+   * unset — the head.
+   */
+  replaces?: number;
 }
 
 /**
@@ -950,9 +957,10 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       }
 
       // Every other mode starts no turn of its own: the start triggers run on the
-      // branch the generation reads — without the head a regenerate replaces.
-      const replaces = mode === 'regenerate' && head?.role === 'assistant';
-      const branch = replaces ? view.messages.slice(0, -1) : view.messages;
+      // branch the generation reads — without the head a regenerate replaces, or
+      // the round it ends.
+      const replaces = mode === 'regenerate' && head?.role === 'assistant' ? (prepareOptions.replaces ?? 1) : 0;
+      const branch = view.messages.slice(0, view.messages.length - replaces);
       if (!runsAt('start')) return { body, stop: false, accept: () => undefined };
       const base = computeVariables(branch, view.defaults, view.names);
       const { greeting, chat } = branchOf(s, branch);

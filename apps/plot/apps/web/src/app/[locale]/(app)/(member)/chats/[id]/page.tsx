@@ -3,6 +3,7 @@
 import { Icon } from '@/components/Icon';
 import { assetResolver, type CbsMessage } from '@shizue/core/cbs';
 import { componentNames } from '@shizue/core/component';
+import { NARRATOR_SPEAKER } from '@shizue/core/group';
 import { NARRATION_PREFIX } from '@shizue/core/narration';
 import { isSceneMessage, sceneSpanAt } from '@shizue/core/scene';
 import { manualTriggerNames, type MemberOverlay } from '@shizue/core/triggers';
@@ -24,6 +25,7 @@ import { ScriptDialog, type ScriptPrompt } from '@/components/ScriptDialog';
 import { SceneDraft } from '@/components/SceneDraft';
 import { SceneEditor, type SceneBlock } from '@/components/SceneEditor';
 import { Button, CenteredMessage, Spinner, TextArea, cx } from '@/components/ui';
+import { WriteAsPicker } from '@/components/WriteAsPicker';
 import { Link } from '@/i18n/navigation';
 import { apiDelete, apiGet, apiSend, apiUpload } from '@/lib/api';
 import {
@@ -66,6 +68,19 @@ import {
   type DisplayContext,
 } from '@/lib/displayScripts';
 import { greetingText, isGreeting, opensOnFirstGreeting } from '@/lib/greeting';
+import {
+  cueOf,
+  isGroupWork,
+  openRound,
+  pickSpeakers,
+  redoOf,
+  roundRequest,
+  roundStart,
+  stepRound,
+  type Round,
+  type RoundCue,
+  type RoundRequest,
+} from '@/lib/groupRound';
 import { reconcileSend } from '@/lib/reconcile';
 import { sanitizeCustomHtml } from '@/lib/sanitizeHtml';
 import { streamGeneration } from '@/lib/sse';
@@ -152,8 +167,39 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  */
 const MAX_SCRIPT_FOLLOW_UPS = 3;
 
-/** The modes a next-speaker pick rides on; continuing or narrating has no speaker to pick. */
-const FOCUS_MODES: readonly StreamMode[] = ['send', 'regenerate', 'auto'];
+/**
+ * One request of a round, in a work of several members (`lib/groupRound`): who it
+ * asks and where the reply goes — or, on a send, how to pick the round once the
+ * turn's text is known, which is after the input scripts rewrote it.
+ */
+interface GroupStep {
+  request?: RoundRequest;
+  pick?: (text: string) => RoundRequest | null;
+  /**
+   * The branch as the round left it. The request after a reply runs before the
+   * page has rendered that reply, so this render's `state` does not have it yet.
+   */
+  base: ChatState | null;
+}
+
+/** What became of one generation, for a round to go on from. */
+interface RunOutcome {
+  /** `done`: a reply landed. `failed`: it may be asked again. `over`: nothing more comes of it. */
+  kind: 'done' | 'failed' | 'over';
+  /** The round the reply was stored in, where it was a group reply. */
+  groupTurnId: string | null;
+  /** The card's output scripts asked for another reply (`sendAIprompt`). */
+  followUp: boolean;
+  /** The branch as it now stands, its reply finished; null when it could not be read. */
+  state: ChatState | null;
+}
+
+/** How a round in a work of several members begins (`playRound`). */
+type RoundStart =
+  | { opening: 'send'; content: string; options?: SendOptions; prepareOptions?: PrepareOptions }
+  | { opening: 'regenerate' }
+  /** A round of its own after the head: 이어가기 rolls one, 지금 말하기 names its speaker. */
+  | { opening: 'reply'; speakers?: string[] };
 
 /**
  * Whether a generation left anything behind. Continue appends to the head in
@@ -198,8 +244,12 @@ interface ViewMessage {
   /** null for the same two: nothing is stored, so nothing has a time yet. */
   createdAt: string | null;
   streaming: boolean;
-  /** A character message a card's script wrote (`source` `script`), said by `scriptSpeaker`. */
-  scripted?: boolean;
+  /**
+   * The member whose lines are the ones naming no one: a group reply's speaker
+   * (`speakerMemberId`), whose whole message it is, or `scriptSpeaker` on a
+   * character message a card's script wrote (`source` `script`).
+   */
+  speaker?: string;
 }
 
 /** Nothing attached, shared so a row without images keeps a stable prop. */
@@ -262,12 +312,24 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const [input, setInput] = useState('');
   /** How the composer's text is meant: a line, a description, or the narrator's. */
   const [composerMode, setComposerMode] = useState<ComposerMode>('dialogue');
+  /** The member the reader writes the turn as (Zeta's `@이름:`); null is their own voice. */
+  const [writeAs, setWriteAs] = useState<string | null>(null);
   /**
-   * Members the next reply should center on. One reply's worth: it rides on the
-   * next send, regenerate or auto-continue and is cleared once that lands.
+   * Who speaks in the next round of a work of several members (다음 차례), exactly
+   * and in roster order. One round's worth: cleared once its first reply lands.
    */
   const [focus, setFocus] = useState<string[]>([]);
   const [mode, setMode] = useState<StreamMode | null>(null);
+  /**
+   * The round in hand in a work of several members (`lib/groupRound`): who is
+   * still to speak, and — once a request failed — what the retry asks again.
+   * Null in a work of one, and between rounds.
+   */
+  const [round, setRound] = useState<Round | null>(null);
+  /** The reader stopped the round: the speakers still queued are not asked. */
+  const roundStopped = useRef(false);
+  /** How many replies at the branch's end the running regenerate replaces, which the screen hides. */
+  const [replacing, setReplacing] = useState(0);
   /**
    * The mode whose optimistic row is still on screen after its stream failed.
    * Nothing of that reply was stored, so what arrived exists only here.
@@ -715,9 +777,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     () => computeVariables(fold.messages, fold.defaults, foldNames),
     [fold, foldNames],
   );
+  // A regenerate replaces the head, or in a work of several members the round it
+  // ends (`replacing`).
   const variablesBeforeHead = useMemo(
-    () => computeVariables(fold.messages.slice(0, -1), fold.defaults, foldNames),
-    [fold, foldNames],
+    () => computeVariables(fold.messages.slice(0, -Math.max(1, replacing)), fold.defaults, foldNames),
+    [fold, foldNames, replacing],
   );
 
   // The branch as it currently reads. `computeVariables` folds onto whatever it
@@ -727,13 +791,10 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   // fold cannot be run backwards.
   const liveVariables = useMemo(() => {
     if (active === null) return persistedVariables;
-    const base =
-      active === 'regenerate' && last?.role === 'assistant'
-        ? variablesBeforeHead
-        : persistedVariables;
+    const base = active === 'regenerate' && replacing > 0 ? variablesBeforeHead : persistedVariables;
     const pending = mode === 'send' ? [pendingUser, streamText] : [streamText];
     return computeVariables(pending, base, foldNames);
-  }, [active, mode, last, persistedVariables, variablesBeforeHead, pendingUser, streamText, foldNames]);
+  }, [active, mode, replacing, persistedVariables, variablesBeforeHead, pendingUser, streamText, foldNames]);
 
   // …and the same values keep the same object, so the memoized message bodies do
   // not re-run their regexes, their template and two DOMPurify passes for a token
@@ -760,11 +821,17 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     [cast, scriptedId, renamed],
   );
   const absentIds = state?.chat.absentCharacterIds;
-  /** Who is on the stage — the members a reply can be asked to center on. */
+  /** Who is on the stage — the members a round's speakers are picked from. */
   const stage = useMemo(
     () => members.filter((member) => !(absentIds ?? []).includes(member.id)),
     [members, absentIds],
   );
+  /**
+   * A work of two or more members answers one reply per speaker, each its own
+   * message, in rounds the page drives (`playRound`); a work of one answers as it
+   * always has and never names a speaker.
+   */
+  const group = isGroupWork(members);
   /**
    * Who says a character message a card's script wrote (`source` `script`), which
    * names no speaker, stored as the script wrote it: the member whose scripts run,
@@ -1216,15 +1283,20 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    * `finishPending`, its answer applied and a follow-up queued. Answers with the
    * branch as it now stands — `current` when there was nothing to finish or the
    * finish failed, which it says on the banner.
+   *
+   * Inside a round (`round`), a follow-up is the round's to take — the same
+   * speaker again — so it is noted there rather than queued as a turn.
    */
-  async function settlePending(current: ChatState): Promise<ChatState> {
+  async function settlePending(current: ChatState, round?: { followUp: boolean }): Promise<ChatState> {
     try {
       const done = await finishPending(current);
       if (!done) return current;
       mergeState(done.state);
       // RisuAI's `sendAIprompt` asks for the next reply at once. A few in a row at
       // most: a card that asks every time would otherwise never stop.
-      if (done.followUp && followUpChain.current < MAX_SCRIPT_FOLLOW_UPS) {
+      if (done.followUp && round) {
+        round.followUp = true;
+      } else if (done.followUp && followUpChain.current < MAX_SCRIPT_FOLLOW_UPS) {
         setQueuedTurns((turns) => [...turns, { kind: 'next' }]);
       }
       return mergeRefetched(current, done.state);
@@ -1258,7 +1330,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     void (async () => {
       try {
         if (turn.kind === 'own') {
-          await run('send', turn.content, turn.options);
+          await generate('send', turn.content, turn.options);
           return;
         }
         if (turn.kind === 'append') {
@@ -1273,28 +1345,23 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           }
           return;
         }
-        if (!state.chat.allowComponentTurns) {
-          const consent = turn.kind === 'next' ? 'scriptFollowUpConsent' : 'scriptMultisendConsent';
-          if (!window.confirm(t(consent, { name: characterName }))) {
-            setQueuedTurns([]);
-            return;
-          }
-          try {
-            applyState(await apiSend<ChatState>('PATCH', `/api/chats/${id}`, { allowComponentTurns: true }));
-          } catch (caught) {
-            setSettingsError(toMessage(caught));
-            setQueuedTurns([]);
-            return;
-          }
+        if (!(await allowScriptTurns(turn.kind === 'next' ? 'scriptFollowUpConsent' : 'scriptMultisendConsent', state))) {
+          setQueuedTurns([]);
+          return;
         }
         if (turn.kind === 'next') {
           followUpChain.current += 1;
           // RisuAI generates on whatever its chat now ends with: a reader's turn the
-          // output triggers added is answered, anything else is carried on from.
-          await run(state.path.at(-1)?.role === 'user' ? 'regenerate' : 'auto', undefined, undefined, true);
+          // output triggers added is answered, anything else is carried on from —
+          // in a work of several members, by the member who just spoke.
+          const head = state.path.at(-1);
+          if (head?.role === 'user') await generate('regenerate', undefined, undefined, true);
+          else if (group && head?.speakerMemberId && stage.some((member) => member.id === head.speakerMemberId)) {
+            await playRound({ opening: 'reply', speakers: [head.speakerMemberId] }, true);
+          } else await generate('auto', undefined, undefined, true);
         } else {
           // `/multisend`'s message, pushed as it is and answered.
-          await run('send', turn.content, undefined, true, { raw: true, clear: turn.clear });
+          await generate('send', turn.content, undefined, true, { raw: true, clear: turn.clear });
         }
       } finally {
         setTakingTurn(false);
@@ -1487,17 +1554,31 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     scripted = false,
     /** How the scripts take a send that is not the reader's typing (`/multisend`'s). */
     prepareOptions?: PrepareOptions,
-  ): Promise<void> {
+    /**
+     * One request of a round, in a work of several members. The round drives the
+     * next one once this resolves, so the composer stays held (`mode`) between them.
+     */
+    step?: GroupStep,
+  ): Promise<RunOutcome> {
+    const nothing: RunOutcome = { kind: 'over', groupTurnId: null, followUp: false, state: null };
     // A drawn scene holds the same per-chat slot a generation does, so asking for
-    // one while the picture is on its way would only come back a 429.
-    if (mode || drawing || mutationRef.current || scriptsPending) return;
+    // one while the picture is on its way would only come back a 429. A round's
+    // later speakers are asked from the render that began it, before any `mode`.
+    if (mode || drawing || mutationRef.current || scriptsPending) return nothing;
     if (!scripted) followUpChain.current = 0;
-    const headBefore = state?.chat.headMessageId ?? null;
+    const start = step?.base ?? stateRef.current ?? state;
+    const headBefore = start?.chat.headMessageId ?? null;
     /** What the branch looked like before, for reading whether the turn landed. */
-    const before = { id: headBefore, content: last?.content ?? '' };
+    const before = { id: headBefore, content: start?.path.at(-1)?.content ?? '' };
     const controller = new AbortController();
     abortRef.current = controller;
     setMode(next);
+    // A regenerate hides what it replaces: the head, or the round it ends.
+    setReplacing(
+      next !== 'regenerate' ? 0 : (step?.request?.replaces ?? (start?.path.at(-1)?.role === 'assistant' ? 1 : 0)),
+    );
+    // A generation outside a round leaves behind whatever round failed before it.
+    if (!step) setRound(null);
     // Whatever the last attempt left on screen belongs to the last attempt.
     setHeld(null);
     // Suggestions answer the turn as it stood; a new one is being taken, so
@@ -1517,9 +1598,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     // scripts — and what they decide rides on the request (`lib/scripts`).
     let scriptBody: Record<string, unknown> = {};
     let prepared: PreparedGeneration | null = null;
-    if (runtime && state) {
+    // One runtime — the lead member's — runs for every reply of a round in this
+    // wave; a runtime per member is where the speaker would pick it.
+    if (runtime && start) {
       try {
-        let current = stateRef.current ?? state;
+        let current = start;
         // A reply still owed its output scripts is finished before anything builds
         // on it — unless this tab already tried and failed, which the request then
         // says it gives up on (below). A regenerate replaces it, so it waits.
@@ -1532,7 +1615,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           current = await settlePending(current);
         }
         const view = await scriptViewOf(current);
-        prepared = await runtime.prepare(next, view, content, prepareOptions);
+        const replaces = step?.request?.replaces;
+        prepared = await runtime.prepare(next, view, content, replaces ? { ...prepareOptions, replaces } : prepareOptions);
         if (prepared.state) mergeState(prepared.state);
         // A head still pending here is one this tab could not finish: the turn
         // goes on without its output scripts rather than being refused for them.
@@ -1552,7 +1636,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         reset();
         setMode(null);
         setPendingUser('');
-        return;
+        return nothing;
       }
       if (prepared.content !== undefined && next === 'send') {
         content = prepared.content;
@@ -1565,12 +1649,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     let aborted = false;
     /** How much of a reply arrived, which decides whether there is any to keep. */
     let received = 0;
-    // Only the modes where someone speaks carry the pick, and only members still
-    // on the stage: the server refuses anyone else.
-    const focusIds = FOCUS_MODES.includes(next)
-      ? focus.filter((memberId) => stage.some((member) => member.id === memberId))
-      : [];
-    const focusBody = focusIds.length > 0 ? { focusCharacterIds: focusIds } : undefined;
+    /** The round the reply was stored in, for the round to go on in. */
+    let groupTurnId: string | null = null;
+    let landed = false;
     /**
      * RisuAI pushes the turn before its start triggers run, so their `stop` leaves
      * it in the chat with no reply, and the composer empty: the turn is stored as
@@ -1578,6 +1659,16 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
      * refetch, a rejection's reconcile, the images — goes as it does for a send.
      */
     const stoppedTurn = next === 'send' && prepared?.stop === true;
+    // Who this request asks, in a round: known up front, or — on a send — picked
+    // now, off the turn as its input scripts left it. A stopped turn asks no one.
+    const request = stoppedTurn ? null : step?.pick ? step.pick(content ?? '') : (step?.request ?? null);
+    const speakerBody = request
+      ? {
+          speakerId: request.speakerId,
+          finalSpeaker: request.finalSpeaker,
+          ...(request.mode === 'reply' && request.groupTurnId !== null ? { groupTurnId: request.groupTurnId } : {}),
+        }
+      : undefined;
     try {
       if (stoppedTurn) {
         await apiSend<ChatState>('POST', `/api/chats/${id}/messages`, {
@@ -1591,9 +1682,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         const result = await streamGeneration(
           next === 'send' ? `/api/chats/${id}/messages` : `/api/chats/${id}/${next}`,
           next === 'send'
-            ? { content, ...turnOptions, ...focusBody, ...scriptBody }
-            : focusBody || Object.keys(scriptBody).length > 0
-              ? { ...focusBody, ...scriptBody }
+            ? { content, ...turnOptions, ...speakerBody, ...scriptBody }
+            : speakerBody || Object.keys(scriptBody).length > 0
+              ? { ...speakerBody, ...scriptBody }
               : undefined,
           (text) => {
             received += text.length;
@@ -1603,8 +1694,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         );
         if (result.kind === 'error') streamError = result.code ? toMessage(new ApiError(0, result.code, result.message)) : result.message;
         aborted = result.kind === 'aborted';
-        // The pick was for this reply. A failed one keeps it, so the retry asks again.
-        if (result.kind === 'done' && focusIds.length > 0) setFocus([]);
+        landed = result.kind === 'done';
+        if (result.kind === 'done') groupTurnId = result.groupTurnId ?? null;
         // What the turn opened, celebrated on the spot: the refetch below carries
         // the same answer, and a reveal that waits for it arrives a beat late.
         if (result.kind === 'done' && result.unlockedAssetIds.length > 0) {
@@ -1654,24 +1745,31 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     const settled = refreshed.state;
     if (settled) mergeState(settled);
     // A reply the scripts still owe their output pass is finished before the turn
-    // ends, with the composer still held: until then it is not the reply.
-    if (settled && scriptBundle !== undefined) await settlePending(mergeRefetched(stateRef.current, settled));
+    // ends, with the composer still held: until then it is not the reply. In a
+    // round, the next speaker's request waits on it too — and reads the branch
+    // from here, before this render has it.
+    const roundNote = { followUp: false };
+    let latest = settled ? mergeRefetched(step?.base ?? stateRef.current, settled) : null;
+    if (latest && scriptBundle !== undefined) latest = await settlePending(latest, step ? roundNote : undefined);
+    if (latest && step) stateRef.current = latest;
 
     /** Whether the turn was written — and so whether its images went with it. */
     let delivered = next === 'send';
+    /** Whether asking again may still answer it — the retry beside the banner. */
+    let mayRetry = false;
     if (streamError !== null) {
       // The stream was open, so the user turn is stored: regenerate retries it.
       setError(streamError);
-      setRetryable(true);
+      mayRetry = true;
     } else if (rejection !== null) {
       setError(toMessage(rejection));
       if (next !== 'send') {
-        setRetryable(true);
+        mayRetry = true;
       } else {
         // A rejected send proves only that no stream was read. Whether the turn
         // was stored is decided by the head, never assumed.
         const recovery = reconcileSend(headBefore, refreshed.state);
-        setRetryable(recovery.kind === 'delivered' && recovery.retry);
+        mayRetry = recovery.kind === 'delivered' && recovery.retry;
         // The unsent text goes back into the composer — above whatever was
         // typed while it was on its way, never over it.
         if (recovery.kind !== 'delivered') {
@@ -1683,6 +1781,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     } else if (!refreshed.state) {
       setError(refreshed.error);
     }
+    setRetryable(mayRetry);
     // The images belong to the turn that carried them. A send that never landed
     // leaves them in the composer with the text, still uploaded, ready to go
     // again; one that did has handed them over to the message.
@@ -1702,8 +1801,168 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     setHeld(keepPartial ? next : null);
     if (!keepPartial) reset();
 
-    setMode(null);
+    // A round holds the composer through all its speakers, the next one's row
+    // already up; it lets go once the round is over (`playRound`).
+    setMode(step ? 'reply' : null);
     setPendingUser('');
+    return {
+      kind: landed && latest ? 'done' : mayRetry ? 'failed' : 'over',
+      groupTurnId,
+      followUp: roundNote.followUp,
+      state: latest,
+    };
+  }
+
+  /**
+   * The next turn, the way the work answers it. In a work of several members a
+   * send, a regenerate and a carry-on (`auto`, 이어가기) are rounds (`playRound`);
+   * continuing and narrating stay the one request they are, which the server
+   * gives to the head's speaker or to the narrator. A work of one is `run`.
+   */
+  async function generate(
+    next: StreamMode,
+    content?: string,
+    options?: SendOptions,
+    scripted = false,
+    prepareOptions?: PrepareOptions,
+  ): Promise<void> {
+    if (group && next === 'send') {
+      await playRound(
+        {
+          opening: 'send',
+          content: content ?? '',
+          ...(options ? { options } : {}),
+          ...(prepareOptions ? { prepareOptions } : {}),
+        },
+        scripted,
+      );
+    } else if (group && next === 'regenerate') await playRound({ opening: 'regenerate' }, scripted);
+    else if (group && next === 'auto') await playRound({ opening: 'reply' }, scripted);
+    else await run(next, content, options, scripted, prepareOptions);
+  }
+
+  /**
+   * The reader's one-off consent, for this chat, to the replies a card's scripts
+   * take for them (`allowComponentTurns`): asked where it was not given yet, and
+   * stored. False when they declined, or it could not be stored.
+   */
+  async function allowScriptTurns(
+    consent: 'scriptFollowUpConsent' | 'scriptMultisendConsent',
+    current: ChatState,
+  ): Promise<boolean> {
+    if (current.chat.allowComponentTurns) return true;
+    if (!window.confirm(t(consent, { name: characterName }))) return false;
+    try {
+      applyState(await apiSend<ChatState>('PATCH', `/api/chats/${id}`, { allowComponentTurns: true }));
+      return true;
+    } catch (caught) {
+      setSettingsError(toMessage(caught));
+      return false;
+    }
+  }
+
+  /**
+   * A round in a work of several members: one reply per speaker, each its own
+   * message. The speakers are picked here (`lib/groupRound`) — on a send once the
+   * input scripts have left the turn's text — and asked one at a time, each after
+   * the last reply is stored and finished. The 다음 차례 picks are this round's.
+   * With nobody on the stage there is no one to pick, and the work answers as the
+   * scene, as it did before group turns.
+   */
+  async function playRound(begin: RoundStart, scripted = false): Promise<void> {
+    const current = stateRef.current ?? state;
+    if (!current || mode || drawing || mutationRef.current || scriptsPending) return;
+    roundStopped.current = false;
+    // A round that failed before is given up by starting another.
+    setRound(null);
+    const picks = focus;
+    const pick = (cue: RoundCue): string[] =>
+      pickSpeakers({ stage, picks, cue, settings: plot?.groupSettings, random: Math.random });
+
+    if (begin.opening === 'send') {
+      const opened: { round: Round | null } = { round: null };
+      const outcome = await run('send', begin.content, begin.options, scripted, begin.prepareOptions, {
+        base: current,
+        pick: (text) => {
+          // What the turn answers is the turn as stored: after its input scripts.
+          opened.round = openRound('send', pick({ text, lastSpeakerId: null }));
+          setRound(opened.round);
+          return roundRequest(opened.round);
+        },
+      });
+      await carryRound(opened.round, outcome, picks);
+      return;
+    }
+
+    let round: Round | null;
+    if (begin.opening === 'regenerate') {
+      // The whole round again, rolled afresh — a reroll, and whoever spoke before
+      // may since have left the stage. A round the narration button opened is
+      // the narrator's to redo; a narration that only ended a round is not redone.
+      const redo = redoOf(current.path);
+      round = openRound('regenerate', redo.narrator ? [NARRATOR_SPEAKER] : pick(redo.cue), redo.replaces);
+    } else {
+      round = openRound('reply', begin.speakers ?? pick(cueOf(current.path.at(-1))));
+    }
+    if (!round) {
+      await run(begin.opening === 'regenerate' ? 'regenerate' : 'auto', undefined, undefined, scripted);
+      return;
+    }
+    setRound(round);
+    const request = roundRequest(round)!;
+    await carryRound(round, await run(request.mode, undefined, undefined, scripted, undefined, { base: current, request }), picks);
+  }
+
+  /**
+   * Takes a round on from what its last request came to, speaker by speaker,
+   * until it is over, the reader stopped it, or a request failed — which leaves
+   * the round in `round` for the retry to ask that speaker again and go on. The
+   * composer is held throughout and let go here.
+   */
+  async function carryRound(begun: Round | null, outcome: RunOutcome, picks: readonly string[]): Promise<void> {
+    let round = begun;
+    let result = outcome;
+    let latest = result.state;
+    try {
+      while (round) {
+        if (result.kind === 'done') {
+          // The picks were for this round; any made while it ran are the next one's.
+          if (round.groupTurnId === null) setFocus((now) => (now === picks ? [] : now));
+          // RisuAI's `sendAIprompt`: the same speaker again, a few times a round at most.
+          const followUp =
+            result.followUp && latest !== null && (await allowScriptTurns('scriptFollowUpConsent', latest));
+          round = stepRound(round, {
+            type: 'landed',
+            groupTurnId: result.groupTurnId,
+            ...(followUp ? { followUp: { cap: MAX_SCRIPT_FOLLOW_UPS } } : {}),
+          });
+        } else {
+          round = stepRound(round, { type: result.kind === 'failed' ? 'failed' : 'ended' });
+        }
+        if (!round || round.failed || roundStopped.current) break;
+        setRound(round);
+        const request = roundRequest(round)!;
+        result = await run(request.mode, undefined, undefined, true, undefined, { base: latest, request });
+        latest = result.state ?? latest;
+      }
+    } finally {
+      setRound(round?.failed ? round : null);
+      setMode(null);
+    }
+  }
+
+  /** The retry beside a failed round: the speaker it failed on, in the same round, and on from there. */
+  async function retryRound(): Promise<void> {
+    if (!round?.failed || mode || drawing || mutationRef.current || scriptsPending) return;
+    const again = stepRound(round, { type: 'retry' })!;
+    roundStopped.current = false;
+    setRound(again);
+    const request = roundRequest(again)!;
+    const outcome = await run(request.mode, undefined, undefined, false, undefined, {
+      base: stateRef.current ?? state,
+      request,
+    });
+    await carryRound(again, outcome, focus);
   }
 
   /**
@@ -1732,7 +1991,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           return;
         }
       }
-      await run('send', content, {
+      await generate('send', content, {
         source: 'component',
         ...(directions ? { directions } : {}),
       });
@@ -1980,8 +2239,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     );
   }
 
+  /** A member by id, for the replies that name their speaker by it. */
+  const memberById = new Map(members.map((member) => [member.id, member]));
   const view: ViewMessage[] = messages.map((message) => {
     const continued = active === 'continue' && message.id === last?.id;
+    const tagged = message.role === 'assistant' && message.speakerMemberId ? memberById.get(message.speakerMemberId) : undefined;
     return {
       key: message.id,
       id: message.id,
@@ -1996,11 +2258,23 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       attachments: message.attachments,
       createdAt: message.createdAt,
       streaming: continued && mode !== null,
-      ...(message.role === 'assistant' && message.source === 'script' ? { scripted: true } : {}),
+      // A group reply is wholly its speaker's; a character message a card's script
+      // wrote is the scripted member's.
+      ...(tagged
+        ? { speaker: tagged.name }
+        : message.role === 'assistant' && message.source === 'script' && scriptSpeaker
+          ? { speaker: scriptSpeaker }
+          : {}),
     };
   });
 
-  if (active === 'regenerate' && last?.role === 'assistant') view.pop();
+  if (active === 'regenerate' && replacing > 0) view.splice(view.length - replacing, replacing);
+  /**
+   * Who the round in hand asks now — and, after a failure, whose partial reply is
+   * still held on screen: a member's id, or the narrator's.
+   */
+  const roundSpeaker = active !== null ? round?.queue[0] : undefined;
+  const streamMember = roundSpeaker ? memberById.get(roundSpeaker) : undefined;
   if (mode === 'send') {
     view.push({
       key: 'pending-user',
@@ -2017,15 +2291,19 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   // prefix the server will store goes on the optimistic text — which is all
   // MessageRow needs to draw it as one while it streams, rather than flipping it
   // when the turn lands.
-  if (active === 'send' || active === 'regenerate' || active === 'auto' || active === 'narrate') {
+  // A round's next speaker streams below the last reply the same way, under
+  // their own face from the first moment.
+  if (active === 'send' || active === 'regenerate' || active === 'auto' || active === 'narrate' || active === 'reply') {
+    const narrates = roundSpeaker !== undefined ? roundSpeaker === NARRATOR_SPEAKER : streamsNarration(active, last);
     view.push({
       key: 'streaming',
       id: null,
       role: 'assistant',
-      content: streamsNarration(active, last) ? `${NARRATION_PREFIX} ${streamText}` : streamText,
+      content: narrates ? `${NARRATION_PREFIX} ${streamText}` : streamText,
       attachments: NO_ATTACHMENTS,
       createdAt: null,
       streaming: mode !== null,
+      ...(streamMember ? { speaker: streamMember.name } : {}),
     });
   }
 
@@ -2061,23 +2339,40 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    * far, and everything that would write is held — the composer included.
    */
   const importing = state.chat.importing === true;
+  /**
+   * The member the composer writes as, while still on the stage — or null for
+   * the reader's own voice. Only in a work of several members.
+   */
+  const writer = group && writeAs ? (stage.find((member) => member.id === writeAs) ?? null) : null;
+  /**
+   * Whether a send would know how the work answers. A work's cast comes with the
+   * plot's read, and a send before it would answer a work of several as one.
+   */
+  const castPending = !plotRead;
   function submit(): void {
-    if (!input.trim() || mode || drawing || mutationRef.current || attaching || importing || scriptsPending) return;
+    if (!input.trim() || mode || drawing || mutationRef.current || attaching || importing || scriptsPending || castPending) return;
     // The chip is a way of typing: what is stored is the plain convention, the
-    // same one the reader could have written the marks of by hand.
-    const content = composeTurn(input, composerMode);
+    // same one the reader could have written the marks of by hand — a member's
+    // line included (`@이름: …`).
+    const content = composeTurn(input, composerMode, writer?.name ?? null);
     const attachmentIds = uploadedIds(chips);
     const options = attachmentIds.length > 0 ? { attachmentIds } : undefined;
     setInput('');
     // Slash commands only where RisuAI's scripts run; anywhere else `/…` is just text.
     if (runtime && input.startsWith('/')) void runCommand(input, content, options);
-    else void run('send', content, options);
+    else void generate('send', content, options);
   }
 
-  const info = last ? state.siblings[last.id] : undefined;
+  /**
+   * The reply the footer's swipe moves: in a work of several members the first of
+   * the round the branch ends on, whose siblings are the round's other takes —
+   * moving to one brings its whole round back. The head itself otherwise.
+   */
+  const roundHead = group && last?.role === 'assistant' ? messages[roundStart(messages)] : last;
+  const info = roundHead ? state.siblings[roundHead.id] : undefined;
   // A drawn scene takes the same per-chat slot a generation does, so while one is
   // in flight the row of actions is withheld exactly as it is while text streams.
-  const showActions = !mode && !drawing && !mutating && !importing && !scriptsPending && Boolean(last);
+  const showActions = !mode && !drawing && !mutating && !importing && !scriptsPending && !castPending && Boolean(last);
   /**
    * The two features the plot turns on and the reader may turn back off. The
    * panel offers a toggle only where the plot asked for the feature at all — a
@@ -2089,8 +2384,13 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const plotChoices = (plot?.style?.choices ?? 'off') !== 'off';
   const choicesOffered = state.chat.choicesEnabled;
   const settingsLocked = Boolean(mode) || drawing || mutating || importing;
-  const prevTarget = last && !mode ? siblingTarget(last, -1) : null;
-  const nextTarget = last && !mode ? siblingTarget(last, 1) : null;
+  const prevTarget = roundHead && !mode ? siblingTarget(roundHead, -1) : null;
+  const nextTarget = roundHead && !mode ? siblingTarget(roundHead, 1) : null;
+  /** The speakers a running round has still to ask after the one it asks now. */
+  const upNext =
+    mode !== null && round
+      ? round.queue.slice(1).map((speaker) => memberById.get(speaker)?.name ?? t('narrator'))
+      : [];
 
   return (
     // A column exactly as tall as what is left under the header, so the list
@@ -2192,6 +2492,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               onToggleChoices={(choicesEnabled) => updateSettings({ choicesEnabled })}
               absentCharacterIds={state.chat.absentCharacterIds}
               onToggleAbsent={toggleAbsent}
+              {...(group
+                ? { onSpeakNow: (memberId: string) => void playRound({ opening: 'reply', speakers: [memberId] }) }
+                : {})}
               {...(state.isPlotOwner ? { inspectChatId: state.chat.id } : {})}
               customUi={customUi}
               onToggleCustomUi={(enabled) => {
@@ -2266,9 +2569,14 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               const source = message.id ? messageById.get(message.id) : undefined;
               const isLast = index === view.length - 1;
               // Every forked message carries its own way back, except the last assistant
-              // one — the footer's swipe already sits under that.
+              // one — the footer's swipe already sits under that — and, in a work of
+              // several members, the first reply of the last round, whose takes the
+              // footer moves between.
               const branches =
-                source && !mode && !(isLast && last?.role === 'assistant')
+                source &&
+                !mode &&
+                !(isLast && last?.role === 'assistant') &&
+                !(group && last?.role === 'assistant' && source.id === roundHead?.id)
                   ? branchNav(source)
                   : undefined;
               // Where the conversation crossed midnight. It belongs to the row it
@@ -2309,7 +2617,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                     avatar={plot?.coverUrl ?? null}
                     userImage={personaAvatarUrl}
                     roster={members}
-                    {...(message.scripted && scriptSpeaker ? { speaker: scriptSpeaker } : {})}
+                    {...(message.speaker ? { speaker: message.speaker } : {})}
                     assets={messageAssets}
                     resolveAsset={resolveAsset}
                     attachments={message.attachments}
@@ -2322,6 +2630,10 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                     // Nothing of the reply on screen yet: the time it has been
                     // waited for, which is all of the model's thinking that is shown.
                     thinking={message.streaming && streamText === ''}
+                    // In a round, whom the row waits on: the face its reply will carry.
+                    {...(message.id === null && message.role === 'assistant' && streamMember
+                      ? { typing: { name: streamMember.name, avatarUrl: streamMember.avatarUrl } }
+                      : {})}
                     disabled={settingsLocked}
                     {...(message.createdAt ? { createdAt: message.createdAt } : {})}
                     grouped={meta.grouped}
@@ -2376,7 +2688,14 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                               </button>
                             </div>
                           ) : null}
-                          <Button size="sm" variant="ghost" onClick={() => void run('regenerate')}>
+                          {/* In a work of several members: the whole round again, and
+                              a round of its own after the last reply. */}
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            {...(group ? { title: t('regenerateRoundHint') } : {})}
+                            onClick={() => void generate('regenerate')}
+                          >
                             {t('regenerate')}
                           </Button>
                           {/* A narration answers a user turn as readily as it follows a
@@ -2385,7 +2704,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                             size="sm"
                             variant="ghost"
                             title={t('narrateHint')}
-                            onClick={() => void run('narrate')}
+                            onClick={() => void generate('narrate')}
                           >
                             {t('narrate')}
                           </Button>
@@ -2395,10 +2714,15 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                                   without on a phone: the least reached for, and the
                                   easiest to describe in a menu. */}
                               <div className="hidden items-center gap-1 sm:flex">
-                                <Button size="sm" variant="ghost" onClick={() => void run('continue')}>
+                                <Button size="sm" variant="ghost" onClick={() => void generate('continue')}>
                                   {t('continue')}
                                 </Button>
-                                <Button size="sm" variant="ghost" onClick={() => void run('auto')}>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  {...(group ? { title: t('autoRoundHint') } : {})}
+                                  onClick={() => void generate('auto')}
+                                >
                                   {t('auto')}
                                 </Button>
                               </div>
@@ -2409,9 +2733,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                                   {
                                     key: 'continue',
                                     label: t('continue'),
-                                    onSelect: () => void run('continue'),
+                                    onSelect: () => void generate('continue'),
                                   },
-                                  { key: 'auto', label: t('auto'), onSelect: () => void run('auto') },
+                                  { key: 'auto', label: t('auto'), onSelect: () => void generate('auto') },
                                 ]}
                               />
                             </>
@@ -2454,7 +2778,12 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                   {held ? <p className="mt-1 text-xs text-muted">{t('streamError')}</p> : null}
                 </div>
                 {retryable && !mode ? (
-                  <Button size="sm" variant="danger" onClick={() => void run('regenerate')}>
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    // A round that failed asks the same speaker again and goes on.
+                    onClick={() => void (round?.failed ? retryRound() : generate('regenerate'))}
+                  >
                     {common('retry')}
                   </Button>
                 ) : null}
@@ -2535,11 +2864,24 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             {scriptNotice}
           </p>
         ) : null}
+        {/* Who the round in hand still has to ask, quietly: the row above the
+            composer already shows whom it is waiting on now. */}
+        {upNext.length > 0 ? (
+          <div className="mx-auto max-w-3xl px-5 pt-3" role="status">
+            <span
+              data-testid="round-next"
+              className="inline-flex max-w-full rounded-full border border-line px-3 py-1 text-xs text-muted"
+            >
+              <span className="truncate">{t('roundNext', { names: upNext.join(', ') })}</span>
+            </span>
+          </div>
+        ) : null}
 
         {/* What the reader is about to write: their own line, their 상황묘사, or
-            the narrator's. It marks the text on its way out and nothing more —
-            the message is stored in the same notation either way. */}
-        <div className="mx-auto flex max-w-3xl items-center gap-2 px-5 pt-3">
+            the narrator's — and in a work of several members, whose line it is.
+            It marks the text on its way out and nothing more — the message is
+            stored in the same notation either way. */}
+        <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-2 px-5 pt-3">
           <div
             role="group"
             aria-label={t('composerMode')}
@@ -2551,7 +2893,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                 type="button"
                 aria-pressed={composerMode === value}
                 title={t(`composerModes.${value}Hint`)}
-                onClick={() => setComposerMode(value)}
+                onClick={() => {
+                  setComposerMode(value);
+                  // The narrator is no member: a narration is nobody's line.
+                  if (value === 'narration') setWriteAs(null);
+                }}
                 className={cx(
                   'rounded-md px-3 py-1 text-xs transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
                   composerMode === value ? 'bg-mint-soft font-medium text-fg' : 'text-muted hover:text-fg',
@@ -2561,6 +2907,16 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               </button>
             ))}
           </div>
+          {group && stage.length > 0 ? (
+            <WriteAsPicker
+              members={stage}
+              selected={writer?.id ?? null}
+              onChange={(memberId) => {
+                setWriteAs(memberId);
+                if (memberId !== null && composerMode === 'narration') setComposerMode('dialogue');
+              }}
+            />
+          ) : null}
           {/* Beside the chips, because it is about the same thing they are: what
               the reader is about to write. Withheld while a reply streams — what
               it would suggest is an answer to a turn that has not arrived. */}
@@ -2660,11 +3016,19 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             <span className="translate-y-[0.18em] text-base leading-none">*</span>
           </Button>
           {mode ? (
-            <Button className="col-start-4 min-w-24" variant="secondary" onClick={() => abortRef.current?.abort()}>
+            <Button
+              className="col-start-4 min-w-24"
+              variant="secondary"
+              onClick={() => {
+                // A round's speakers still to come are not asked; what is stored stays.
+                roundStopped.current = true;
+                abortRef.current?.abort();
+              }}
+            >
               {t('stop')}
             </Button>
           ) : (
-            <Button className="col-start-4 min-w-24" variant="primary" disabled={!input.trim() || attaching || drawing || mutating || importing || scriptsPending} onClick={submit}>
+            <Button className="col-start-4 min-w-24" variant="primary" disabled={!input.trim() || attaching || drawing || mutating || importing || scriptsPending || castPending} onClick={submit}>
               {t('send')}
             </Button>
           )}

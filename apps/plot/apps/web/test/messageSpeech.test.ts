@@ -36,6 +36,8 @@ const messages = {
     editMessage: '메시지 수정',
     deleteMessage: '삭제',
     narrationLabel: '나레이션',
+    thinking: '생각 중… {seconds}초',
+    typing: '{name} 입력 중… {seconds}초',
   },
   common: { cancel: '취소', save: '저장', saving: '저장 중…' },
 };
@@ -244,4 +246,68 @@ describe('a turn of the reader\'s own', () => {
     expect(host.textContent).not.toContain('@:');
     expect(host.textContent).toContain('비가 그쳤다');
   });
+});
+
+/**
+ * Zeta's write-as (core `readerRuns`): a reader's `@이름: …` line is that member's
+ * line written by the reader, and `@내레이터: …` or `@: …` is narration. Stored as
+ * typed, drawn as who it is by.
+ */
+describe('a turn the reader wrote partly as others', () => {
+  const runs = (): string[] =>
+    [...host.querySelectorAll('[data-testid="reader-runs"] > div')].map(
+      (node) => node.getAttribute('data-testid') ?? 'reader-user',
+    );
+
+  it('keeps the reader’s own lines in their bubble, a member’s as that member’s speech, narration as narration', () => {
+    render(row('안녕 *손을 흔든다*\n@카이: 반가워.\n@카이: 오랜만이네.\n@내레이터: 바람이 분다.\n다시 나.', 'user'));
+
+    expect(host.querySelector('[data-testid="message-user"]')).not.toBeNull();
+    expect(runs()).toEqual(['reader-user', 'reader-member', 'reader-narration', 'reader-user']);
+    // The member's face and name, with both lines in one block and no marker left.
+    expect(speakers()).toEqual(['카이']);
+    const spoken = host.querySelector('[data-testid="speech-character"]')!;
+    expect(spoken.textContent).toContain('반가워.');
+    expect(spoken.textContent).toContain('오랜만이네.');
+    // Narration as a narration row has it: labelled, a line down the side, no bubble.
+    const narration = host.querySelector('[data-testid="reader-narration"]')!;
+    expect(narration.textContent).toBe('나레이션바람이 분다.');
+    expect(narration.querySelector('.border-l-2')).not.toBeNull();
+    expect(narration.querySelector('.bg-mint-soft\\/50')).toBeNull();
+    expect(host.textContent).not.toContain('@');
+    // The reader's own stretches keep their bubble and their 상황묘사.
+    const bubbles = [...host.querySelectorAll('[data-testid="reader-runs"] .bg-mint-soft\\/50')];
+    expect(bubbles.map((node) => node.textContent)).toEqual(['안녕 손을 흔든다', '다시 나.']);
+  });
+
+  it('reads a member by its nickname and a bare `@:` line as narration, and a name nobody has as the reader’s', () => {
+    const nicknamed: PublicMember[] = [{ ...ROSTER[0]!, nickname: '아리' }, ROSTER[1]!];
+    render(row('@아리: 왔어\n@: 비가 그쳤다\n@유령: 누구?', 'user', { roster: nicknamed }));
+
+    expect(speakers()).toEqual(['아리아']);
+    expect(host.querySelector('.message-body img')?.getAttribute('src')).toBe('/avatars/aria.png');
+    expect(host.querySelector('[data-testid="reader-narration"]')?.textContent).toContain('비가 그쳤다');
+    expect(host.textContent).toContain('@유령: 누구?');
+  });
+
+  it('edits the turn as it was typed, markers and all', async () => {
+    render(row('@카이: 반가워.', 'user', { onSave: async () => undefined }));
+    const edit = [...host.querySelectorAll('button')].find((node) => node.textContent === '수정')!;
+    await act(async () => {
+      edit.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(host.querySelector('textarea')?.value).toBe('@카이: 반가워.');
+  });
+});
+
+describe('a reply a round is waiting on', () => {
+  it('shows whose it will be, by face and name, before any of it arrives', () => {
+    render(row('', 'assistant', { streaming: true, thinking: true, typing: { name: '아리아', avatarUrl: '/avatars/aria.png' } }));
+
+    const typing = host.querySelector('[data-testid="typing"]')!;
+    expect(typing.getAttribute('data-speaker')).toBe('아리아');
+    expect(typing.textContent).toBe('아리아 입력 중… 0초');
+    expect(typing.querySelector('img')?.getAttribute('src')).toBe('/avatars/aria.png');
+  });
+
 });

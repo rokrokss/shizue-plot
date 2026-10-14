@@ -68,6 +68,18 @@ describe('streamGeneration', () => {
     });
   });
 
+  it('carries a group reply’s speaker and round, the narrator’s as null', async () => {
+    mockFetch([
+      'event: done\ndata: {"messageId":"m3","usage":{"promptTokens":1,"completionTokens":1},"speakerMemberId":"chr_1","groupTurnId":"m1"}\n\n',
+    ]);
+    expect((await collect()).result).toMatchObject({ kind: 'done', speakerMemberId: 'chr_1', groupTurnId: 'm1' });
+
+    mockFetch([
+      'event: done\ndata: {"messageId":"m4","usage":{"promptTokens":1,"completionTokens":1},"speakerMemberId":null,"groupTurnId":"m4"}\n\n',
+    ]);
+    expect((await collect()).result).toMatchObject({ kind: 'done', speakerMemberId: null, groupTurnId: 'm4' });
+  });
+
   it('reassembles events split across chunk boundaries', async () => {
     mockFetch([
       'event: delta\ndata: {"te',

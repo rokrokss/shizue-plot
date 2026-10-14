@@ -2,6 +2,7 @@
 
 import { extractChoices } from '@shizue/core/choices';
 import { isNarration, narrationBody } from '@shizue/core/narration';
+import { readerRuns, type ReaderRun } from '@shizue/core/speech';
 import { extractStatusBlock } from '@shizue/core/status-block';
 import { useFormatter, useTranslations } from 'next-intl';
 import { memo, useEffect, useMemo, useState, type ReactNode } from 'react';
@@ -33,8 +34,11 @@ const NO_ROSTER: readonly PublicMember[] = [];
  * wait. The time is all there is to show: a reasoning model's thoughts can
  * paraphrase the creator's hidden prompt, so they are never asked for. Its own
  * component, so the tick re-renders this line and not the row around it.
+ *
+ * In a round of a work of several members the row knows who it is waiting on
+ * (`typing`), and says so with their face — the face their reply will carry.
  */
-function ThinkingClock() {
+function ThinkingClock({ typing }: { typing?: { name: string; avatarUrl: string | null } | undefined }) {
   const t = useTranslations('chat');
   const [start] = useState(() => Date.now());
   const [seconds, setSeconds] = useState(0);
@@ -42,7 +46,24 @@ function ThinkingClock() {
     const timer = setInterval(() => setSeconds(Math.floor((Date.now() - start) / 1000)), 1000);
     return () => clearInterval(timer);
   }, [start]);
-  return <span className="text-sm text-muted tabular-nums">{t('thinking', { seconds })}</span>;
+  if (!typing) return <span className="text-sm text-muted tabular-nums">{t('thinking', { seconds })}</span>;
+  return (
+    <span data-testid="typing" data-speaker={typing.name} className="flex items-center gap-3">
+      {/* The line says the name; the face is the same name drawn. */}
+      <span aria-hidden="true">
+        <Avatar src={typing.avatarUrl} name={typing.name} className="size-9 text-sm" />
+      </span>
+      <span className="text-sm text-muted tabular-nums">{t('typing', { name: typing.name, seconds })}</span>
+    </span>
+  );
+}
+
+/** The roster as a reader's `@이름:` lines are read against: every name a member goes by. */
+function readersOf(roster: readonly PublicMember[]): { id: string; names: string[] }[] {
+  return roster.map((member) => {
+    const nickname = member.nickname?.trim();
+    return { id: member.id, names: [member.name, ...(nickname ? [nickname] : []), ...(member.aliases ?? [])] };
+  });
 }
 
 /**
@@ -67,6 +88,7 @@ export const MessageRow = memo(function MessageRow({
   componentNames,
   roster = NO_ROSTER,
   speaker,
+  typing,
   previousSameRole,
   chatIndex,
   streaming,
@@ -120,6 +142,11 @@ export const MessageRow = memo(function MessageRow({
    * (`speakerMemberId`) — the reply is that member's whole.
    */
   speaker?: string;
+  /**
+   * Whom the row is waiting on while `thinking`, in a round of several members:
+   * drawn as their face and "{이름} 입력 중…".
+   */
+  typing?: { name: string; avatarUrl: string | null };
   /** Raw text of the previous message with the same role, for `repeat_back`. */
   previousSameRole?: string;
   /** This message's place on the branch, RisuAI's way, for `{{chat_index}}`. */
@@ -221,6 +248,17 @@ export const MessageRow = memo(function MessageRow({
    * scene's. The narrator is the narration rows alone.
    */
   const owner = speaker ?? (roster.length === 1 ? roster[0]!.name : undefined);
+  /**
+   * A reader's turn with lines they wrote as someone else (Zeta's `@이름: …`, and
+   * `@내레이터: …` or `@: …`), cut into who each stretch is by (`readerRuns`).
+   * Null for every turn that is the reader's voice alone — which is drawn as it
+   * always was — and for a whole-turn `@:`, which is the narration row above.
+   */
+  const written = useMemo<ReaderRun[] | null>(() => {
+    if (!isUser || narration || roster.length === 0) return null;
+    const runs = readerRuns(body, readersOf(roster));
+    return runs.some((run) => run.kind !== 'user') ? runs : null;
+  }, [isUser, narration, roster, body]);
 
   async function copy(): Promise<void> {
     try {
@@ -255,7 +293,7 @@ export const MessageRow = memo(function MessageRow({
   return (
     <div
       data-testid={narration ? 'message-narration' : `message-${role}`}
-      className={cx('group flex gap-3', isUser && !narration && 'justify-end')}
+      className={cx('group flex gap-3', isUser && !narration && !written && 'justify-end')}
     >
       {!isUser && !narration && !attributed ? (
         grouped ? (
@@ -266,7 +304,7 @@ export const MessageRow = memo(function MessageRow({
         )
       ) : null}
 
-      <div className={cx('min-w-0', isUser && !narration ? 'max-w-[85%]' : 'flex-1')}>
+      <div className={cx('min-w-0', isUser && !narration && !written ? 'max-w-[85%]' : 'flex-1')}>
         <div className={cx('flex items-center gap-2', isUser && !narration && 'justify-end')}>
           {/* A continued turn is the same speaker moments later: the name was
               already said, and saying it again is what makes a run look like a list.
@@ -384,6 +422,49 @@ export const MessageRow = memo(function MessageRow({
               </Button>
             </div>
           </fieldset>
+        ) : written ? (
+          // Each stretch as who wrote it: the reader's own in their bubble, a
+          // member's as that member's speech, the narrator's as narration — the
+          // same components a reply is drawn with, one per stretch.
+          <div data-testid="reader-runs" className="mt-1 space-y-3">
+            {attachments?.length ? <MessageAttachments attachments={attachments} /> : null}
+            {written.map((run, index) => {
+              const runBody = (
+                <MessageBody
+                  content={run.text}
+                  assets={assets}
+                  {...(resolveAsset ? { resolveAsset } : {})}
+                  {...(display ? { display } : {})}
+                  {...(components ? { components } : {})}
+                  {...(componentNames ? { componentNames } : {})}
+                  {...(run.kind === 'member'
+                    ? { roster, speaker: roster.find((member) => member.id === run.memberId)?.name ?? '' }
+                    : {})}
+                  previousSameRole={previousSameRole ?? ''}
+                  {...(chatIndex !== undefined ? { chatIndex } : {})}
+                  streaming={streaming}
+                  {...(userImage ? { userImage } : {})}
+                />
+              );
+              return run.kind === 'user' ? (
+                <div key={index} className="flex justify-end">
+                  <div className="max-w-[85%] min-w-0 rounded-2xl rounded-tr-sm border border-accent/30 bg-mint-soft/50 px-4 py-3">
+                    {runBody}
+                  </div>
+                </div>
+              ) : run.kind === 'narration' ? (
+                // As a narration row is drawn: a quiet label, and a line down the side.
+                <div key={index} data-testid="reader-narration">
+                  <span className="text-xs font-medium text-muted">{t('narrationLabel')}</span>
+                  <div className="mt-1 border-l-2 border-line pl-3 text-muted">{runBody}</div>
+                </div>
+              ) : (
+                <div key={index} data-testid="reader-member">
+                  {runBody}
+                </div>
+              );
+            })}
+          </div>
         ) : (
           <div
             className={cx(
@@ -413,7 +494,7 @@ export const MessageRow = memo(function MessageRow({
               streaming={streaming}
               {...(userImage ? { userImage } : {})}
             />
-            {thinking ? <ThinkingClock /> : null}
+            {thinking ? <ThinkingClock typing={typing} /> : null}
             {streaming ? (
               <span className="ml-0.5 inline-block h-4 w-[2px] translate-y-0.5 animate-pulse bg-accent" />
             ) : null}

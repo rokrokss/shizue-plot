@@ -4,6 +4,7 @@ import type {
   ChoicesMode,
   ComponentCapability,
   DisplayScript,
+  GroupSettings,
   ImportProvenance,
   LoreEntry,
   LoreRole,
@@ -34,6 +35,7 @@ export type {
   ChoicesMode,
   ComponentCapability,
   DisplayScript,
+  GroupSettings,
   ImportProvenance,
   LoreEntry,
   LoreRole,
@@ -181,6 +183,11 @@ export interface Plot {
   safetyLevel: SafetyLevel;
   /** The creator's comment switch; a closed section hides what is already there. */
   commentsEnabled: boolean;
+  /**
+   * How a round of a work of two or more members is picked: the order and the
+   * cap. The API fills the defaults in, so it is always whole.
+   */
+  groupSettings: GroupSettings;
   tags: string[];
   likeCount: number;
   chatCount: number;
@@ -205,6 +212,8 @@ export interface PlotMember {
   license: string | null;
   /** Tokens the card lorebook's always-on entries take, counted by the server from the saved card. */
   loreConstantTokens: number;
+  /** 대화량, 0..100: how readily the member joins a round unprompted. 0 is only when picked. */
+  talkativeness: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -236,6 +245,11 @@ export interface PublicMember {
    * sets it; the API never sends it.
    */
   aliases?: readonly string[];
+  /**
+   * 대화량, 0..100, which the reader's browser picks a round's speakers by. The
+   * public view fills the default in; optional for a member built by hand.
+   */
+  talkativeness?: number;
 }
 
 /** The only shape a non-owner ever sees of a plot: no definitions. */
@@ -306,6 +320,11 @@ export interface PublicPlotDetail extends PublicPlot {
   defaultVariables: Record<string, string>;
   /** The Layer 2 module, for the same reason. '' when the plot has none. */
   componentCode: string;
+  /**
+   * How a round's speakers are picked in a work of two or more members, which
+   * the reader's browser does. Optional for a detail built by hand.
+   */
+  groupSettings?: GroupSettings;
   /** What its components may ask the chat for; empty grants nothing. */
   componentCapabilities: ComponentCapability[];
 }
@@ -524,9 +543,11 @@ export interface ChatListItem extends Chat {
 
 /**
  * How a chat asks for the next turn — the generation endpoint, by name. `send`
- * posts a message first; the other four act on the branch as it stands.
+ * posts a message first; the others act on the branch as it stands. `reply` is
+ * a work of several members' alone: the next speaker of a round, or a round of
+ * its own.
  */
-export type StreamMode = 'send' | 'regenerate' | 'continue' | 'auto' | 'narrate';
+export type StreamMode = 'send' | 'regenerate' | 'continue' | 'auto' | 'narrate' | 'reply';
 
 export type MessageRole = 'user' | 'assistant';
 
@@ -572,6 +593,14 @@ export interface ChatMessage {
   completionTokens: number | null;
   /** Images sent with the turn; empty on all but a few of them. */
   attachments: ChatAttachment[];
+  /**
+   * In a work of several members, the member a reply is wholly by (`messages.
+   * speaker_member_id`), and the round it belongs to — the id of the round's
+   * first reply. Null on the reader's turns, a narration's speaker, and every
+   * message from before group turns; optional for a message built by hand.
+   */
+  speakerMemberId?: string | null;
+  groupTurnId?: string | null;
   createdAt: string;
 }
 

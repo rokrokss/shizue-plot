@@ -10,6 +10,11 @@ import { expect, test, type BrowserContext, type Page } from '@playwright/test';
  * speakers who wrote it → regenerate/swipe → edit → author note → locale switch
  * → logout.
  *
+ * Two members make it a work of group turns — one reply per speaker. The second
+ * member is set to speak only when picked (대화량 0), so every round here is the
+ * first member's alone and the counts below hold on every run; groupTurns.spec.ts
+ * is where rounds of several speakers are walked through.
+ *
  * The steps share one browser context (the session cookie) and build on each
  * other, so the file runs serially and stops at the first failure. Every run
  * uses a fresh account and creates its own rows; nothing is deleted, because
@@ -156,6 +161,11 @@ test('puts two characters in the plot', async () => {
   await page.reload();
   await expect(page.getByTestId('plot-member').first()).toContainText(cast[0].name);
   await expect(page.getByTestId('plot-member').last()).toContainText(cast[1].name);
+
+  // The second member speaks only when the reader picks them.
+  await page.getByRole('button', { name: `${cast[1].name}의 대화량 0`, exact: true }).click();
+  await page.getByRole('button', { name: '저장', exact: true }).click();
+  await expect(page.getByText('저장했습니다')).toBeVisible();
 });
 
 test('writes two openings and publishes the plot', async () => {
@@ -246,12 +256,16 @@ test('streams an echo reply and attributes its speakers', async () => {
   await expect(userMessages().first()).toContainText('안녕');
   await expect(assistantMessages()).toHaveCount(2);
 
+  // The reply is wholly the member who gave it — the prefix it echoed of its
+  // own name comes off — so every line of it is theirs, under their face.
   const reply = assistantMessages().last();
-  await expect(reply.getByTestId('speech-narration')).toContainText('창밖은 아직 어둡다');
+  await expect(reply.getByTestId('speech-narration')).toHaveCount(0);
   const spoken = reply.getByTestId('speech-character');
   await expect(spoken).toHaveAttribute('data-speaker', cast[0].name);
+  await expect(spoken).toContainText('창밖은 아직 어둡다');
   await expect(spoken).toContainText('안녕');
   await expect(spoken.locator('em')).toHaveText('웃으며');
+  await expect(reply).not.toContainText(`${cast[0].name}:`);
   await expectComposerIdle();
 });
 
@@ -284,8 +298,8 @@ test('edits the user message and regenerates the reply', async () => {
   await page.getByRole('button', { name: '재생성' }).click();
 
   await expect(assistantMessages()).toHaveCount(2);
-  // No prefix, so the whole echoed turn reads as the narrator's.
-  await expect(assistantMessages().last().getByTestId('speech-narration')).toContainText(
+  // No prefix, and the reply is its speaker's whole.
+  await expect(assistantMessages().last().getByTestId('speech-character')).toContainText(
     editedTurn,
   );
   await expectComposerIdle();

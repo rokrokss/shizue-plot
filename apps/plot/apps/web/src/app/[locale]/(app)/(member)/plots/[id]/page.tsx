@@ -1,5 +1,6 @@
 'use client';
 
+import { coerceGroupSettings, DEFAULT_GROUP_SETTINGS, type GroupSettings } from '@shizue/core/group';
 import { carriesScripts } from '@shizue/core/triggers';
 import { useFormatter, useTranslations } from 'next-intl';
 import { use, useCallback, useEffect, useRef, useState } from 'react';
@@ -8,6 +9,7 @@ import { AiBadge, PublicBadge } from '@/components/AudienceBadge';
 import { Avatar } from '@/components/Avatar';
 import { ImportedCardDetails, RealmImportForm, RightsConfirmation } from '@/components/CardImport';
 import { ComponentCodeEditor } from '@/components/ComponentCodeEditor';
+import { GroupTurnsEditor } from '@/components/GroupTurnsEditor';
 import { DefaultVariablesEditor, DisplayScriptEditor } from '@/components/DisplayScriptEditor';
 import { LorebookEditor } from '@/components/LorebookEditor';
 import { LorebookFileActions } from '@/components/LorebookFileActions';
@@ -56,10 +58,11 @@ import {
 import { useDocumentTitle } from '@/lib/useDocumentTitle';
 import { useErrorMessage } from '@/lib/useErrorMessage';
 
-/** The card fields the roster editor writes; the rest of the card is carried. */
+/** The fields the roster editor writes — the card's, and the member's 대화량; the rest of the card is carried. */
 const memberFields = (member: PlotMember): string =>
   JSON.stringify([
     member.name,
+    member.talkativeness,
     member.card.intro ?? '',
     member.card.description,
     member.card.personality,
@@ -102,6 +105,8 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
   const [narrator, setNarrator] = useState<NarratorConfig | null>(null);
   const [style, setStyle] = useState<PlotStyle | null>(null);
   const [profiles, setProfiles] = useState<PlotProfile[]>([]);
+  /** How a round of the work's members is picked; only offered with two or more of them. */
+  const [groupSettings, setGroupSettings] = useState<GroupSettings>(DEFAULT_GROUP_SETTINGS);
   const [lorebook, setLorebook] = useState<LoreEntry[]>([]);
   const [scripts, setScripts] = useState<DisplayScript[]>([]);
   const [variables, setVariables] = useState<Record<string, string>>({});
@@ -139,6 +144,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
     setNarrator(detail.narrator);
     setStyle(detail.style);
     setProfiles(detail.profiles);
+    setGroupSettings(coerceGroupSettings(detail.groupSettings));
     setLorebook(detail.lorebook);
     setScripts(detail.customUi?.displayScripts ?? []);
     setVariables(detail.customUi?.defaultVariables ?? {});
@@ -173,6 +179,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
         await apiSend<PlotMember>('PATCH', `/api/plots/${id}/characters/${member.id}`, {
           name: member.name.trim() || member.card.name,
           card: member.card,
+          talkativeness: member.talkativeness,
         });
       }
       adopt(
@@ -187,6 +194,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
           narrator,
           style,
           profiles,
+          groupSettings,
           lorebook,
           customUi: {
             displayScripts: scripts,
@@ -457,6 +465,23 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
               )
             }
           />
+
+          {/* A work of one member answers as it always has, so there is nothing
+              to set until a second one joins. */}
+          {members.length >= 2 ? (
+            <Section title={t('groupFlow')}>
+              <GroupTurnsEditor
+                settings={groupSettings}
+                members={members}
+                onChange={setGroupSettings}
+                onTalkativeness={(memberId, talkativeness) =>
+                  setMembers((current) =>
+                    current.map((member) => (member.id === memberId ? { ...member, talkativeness } : member)),
+                  )
+                }
+              />
+            </Section>
+          ) : null}
 
           <Section
             title={t('intros')}

@@ -168,6 +168,7 @@ export function ChatPanel({
   onToggleChoices,
   absentCharacterIds = [],
   onToggleAbsent,
+  onSpeakNow,
   inspectChatId,
   scriptSimilarity = false,
 }: {
@@ -221,6 +222,11 @@ export function ChatPanel({
   absentCharacterIds?: readonly string[];
   /** Sends a member off the stage or brings them back; no toggles without it. */
   onToggleAbsent?: (memberId: string, absent: boolean) => Promise<void>;
+  /**
+   * A round of one, that member's (지금 말하기) — offered in a work of several
+   * members, for those on the stage.
+   */
+  onSpeakNow?: (memberId: string) => void;
   /**
    * The chat whose assembled prompt this reader may see — set only for the
    * plot's creator. Everyone else never gets the section.
@@ -316,6 +322,17 @@ export function ChatPanel({
                   <span className={cx('truncate text-sm', away ? 'text-muted line-through' : 'text-fg')}>
                     {member.name}
                   </span>
+                  {onSpeakNow && !away ? (
+                    <button
+                      type="button"
+                      data-testid="member-speak-now"
+                      disabled={busy}
+                      onClick={() => onSpeakNow(member.id)}
+                      className="rounded-md px-1.5 py-0.5 text-xs text-link transition-colors hover:text-fg disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                    >
+                      {t('speakNow')}
+                    </button>
+                  ) : null}
                   {onToggleAbsent ? (
                     <button
                       type="button"

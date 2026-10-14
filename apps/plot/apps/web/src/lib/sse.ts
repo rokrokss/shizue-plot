@@ -8,6 +8,12 @@ type StreamResult =
       usage: Usage;
       /** Plot assets this turn opened; empty on every turn that opened none. */
       unlockedAssetIds: string[];
+      /**
+       * A reply of a work of several members: its speaker (null for the narrator's)
+       * and its round. Absent on every other reply.
+       */
+      speakerMemberId?: string | null;
+      groupTurnId?: string;
     }
   /**
    * The stream was open and then failed: either `event: error` or a transport
@@ -109,6 +115,13 @@ export async function streamGeneration(
             // Only sent by a turn that opened something, so its absence is the
             // ordinary case rather than a payload to complain about.
             unlockedAssetIds: Array.isArray(unlocked) ? (unlocked as string[]) : [],
+            // Only on a group reply, the same way.
+            ...(typeof data['groupTurnId'] === 'string'
+              ? {
+                  groupTurnId: data['groupTurnId'],
+                  speakerMemberId: typeof data['speakerMemberId'] === 'string' ? data['speakerMemberId'] : null,
+                }
+              : {}),
           };
         } else if (event.event === 'error') {
           result = {

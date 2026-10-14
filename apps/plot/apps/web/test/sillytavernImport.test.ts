@@ -159,6 +159,7 @@ function fakeApi() {
       importedFrom: { fileName, sha256: sha(`characters/${fileName}`), importedAt: '' },
       license: null,
       loreConstantTokens: 0,
+      talkativeness: 50,
       createdAt: '',
       updatedAt: '',
     };
