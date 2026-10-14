@@ -422,6 +422,9 @@
       "noMembers": "None of the members has a card here, so the group can't be imported.",
       "overflow": "A plot holds up to 10 characters, so these members are left out: {names}",
       "missing": "Left out for lack of a card: {names}",
+      "strategyManual": "SillyTavern's Manual order has no match here, so the group comes in on natural order with one character answering each round. Readers can pick who speaks with Next turn in the chat.",
+      "strategyPooled": "SillyTavern's Pooled order has no match here, so the group comes in on natural order with one character answering each round.",
+      "disabledMembers": "Members muted in SillyTavern come in with talkativeness 0 (only when picked): {names}",
       "personaExists": "A persona with this name already exists.",
       "options": "Options",
       "optionChats": "Import chats",
@@ -500,7 +503,8 @@
         "world_unreadable": "Couldn't read the lorebook file, imported without it: {name}",
         "extras_failed": "Couldn't attach the extra lorebooks and scripts: {message}",
         "chat_world_failed": "Couldn't attach the chat's lorebook {name}: {message}",
-        "avatar_failed": "Couldn't bring over the persona's picture: {message}"
+        "avatar_failed": "Couldn't bring over the persona's picture: {message}",
+        "group_turns_failed": "Couldn't bring over the group's turn order and talkativeness: {message}"
       },
       "notices": {
         "chat_world_attached": "The lorebook bound to this chat, {name}, is now part of the plot's lorebook, so it also applies to the plot's other chats.",

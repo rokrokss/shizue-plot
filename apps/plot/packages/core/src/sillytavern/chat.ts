@@ -6,7 +6,9 @@
  * `public/script.js`, `saveReply` for the swipes.
  *
  * Who said what goes into our speech protocol here (`speech.ts`): a character's
- * lines are prefixed with their roster name, and ST's narrator (`/sys`,
+ * lines are prefixed with their roster name — or, in a group chat going into a
+ * work of two or more members, the message is tagged with its speaker and keeps
+ * its text, as a group turn's reply does (`group.ts`) — and ST's narrator (`/sys`,
  * `extra.type === 'narrator'`, `sendNarratorMessage` in
  * `public/scripts/slash-commands.js`) becomes our narration (`@:`,
  * `narration.ts`). An unprefixed line is no longer the narrator's: in a work of
@@ -34,8 +36,13 @@ import {
 } from '../variables.js';
 
 export interface StCast {
-  /** The plot's roster, under the names it was imported with. */
-  members: { name: string; avatar?: string }[];
+  /**
+   * The plot's roster, under the names it was imported with. With the member ids
+   * of two or more, the chat is a group chat going into a work of group turns:
+   * each character message is tagged with its speaker (`speakerId`) rather than
+   * prefixed. With fewer, every message is prefixed, as before group turns.
+   */
+  members: { name: string; avatar?: string; id?: string }[];
 }
 
 /**
@@ -95,7 +102,7 @@ export interface StConvertedChat {
     hidden: number;
     /** Messages with no text in any version. */
     empty: number;
-    /** Character messages kept unprefixed because no roster member matched. */
+    /** Character messages kept unprefixed and untagged because no roster member matched. */
     unknownSpeaker: number;
     /** Lines that are not a JSON object. */
     malformed: number;
@@ -174,13 +181,13 @@ export function parseSillyTavernDate(value: unknown): string | undefined {
   return undefined;
 }
 
-/** The roster name a character message is attributed to (see `convertSillyTavernChat`). */
-function speakerOf(cast: StCast, avatar: unknown, name: string): string | undefined {
-  const member =
+/** The roster member a character message is attributed to (see `convertSillyTavernChat`). */
+function speakerOf(cast: StCast, avatar: unknown, name: string): StCast['members'][number] | undefined {
+  return (
     (typeof avatar === 'string' && avatar ? cast.members.find((m) => m.avatar === avatar) : undefined) ??
     cast.members.find((m) => m.name.trim() === name) ??
-    (cast.members.length === 1 ? cast.members[0] : undefined);
-  return member?.name.trim() || undefined;
+    (cast.members.length === 1 ? cast.members[0] : undefined)
+  );
 }
 
 /**
@@ -300,11 +307,15 @@ function readAuthorNote(meta: Json): StAuthorNote | undefined {
  * Converts one chat file. Never throws: a line that is not JSON is counted and
  * passed over. The character's speaker is the roster member whose avatar is the
  * message's `original_avatar` (group chats record it), else whose name is the
- * message's `name`, else the only member; failing all three the lines stay
- * unprefixed — narration, by our protocol — and are counted.
+ * message's `name`, else the only member. In a group chat (`StCast`) the message
+ * then carries that member's id and its text as ST stored it — one speaker's
+ * whole reply, which is what ST's group chats hold; otherwise each line is
+ * prefixed with the member's name. Failing all three the lines stay unprefixed
+ * and untagged — the scene's, by our protocol — and are counted.
  */
 export function convertSillyTavernChat(jsonl: string, cast: StCast): StConvertedChat {
   const skipped = { hidden: 0, empty: 0, unknownSpeaker: 0, malformed: 0, overLimit: 0, variables: 0 };
+  const grouped = cast.members.filter((member) => member.id).length >= 2;
   const messages: ImportedChatMessage[] = [];
   let userName = '';
   let characterName = '';
@@ -366,14 +377,17 @@ export function convertSillyTavernChat(jsonl: string, cast: StCast): StConverted
       continue;
     }
 
+    let speakerId: string | undefined;
     if (isUser) {
       if (!userName && name) userName = name;
     } else if (narrator) {
       versions = versions.map((text) => withNarrationPrefix(text));
     } else {
       if (!characterName && name) characterName = name;
-      const speaker = speakerOf(cast, parsed['original_avatar'], name);
-      if (speaker) versions = versions.map((text) => spokenBy(text, speaker));
+      const member = speakerOf(cast, parsed['original_avatar'], name);
+      const speaker = member?.name.trim();
+      if (grouped && member?.id) speakerId = member.id;
+      else if (speaker) versions = versions.map((text) => spokenBy(text, speaker));
       else skipped.unknownSpeaker += 1;
     }
 
@@ -383,6 +397,7 @@ export function convertSillyTavernChat(jsonl: string, cast: StCast): StConverted
       versions,
       selected,
       ...(at ? { createdAt: at } : {}),
+      ...(speakerId ? { speakerId } : {}),
     });
   }
 

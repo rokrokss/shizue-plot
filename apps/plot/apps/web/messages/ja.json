@@ -422,6 +422,9 @@
       "noMembers": "カードのあるメンバーがいないため、読み込めません。",
       "overflow": "登場人物はプロットごとに10人までのため、次のメンバーは外れます:{names}",
       "missing": "カードがないため外れるメンバー:{names}",
+      "strategyManual": "SillyTavern の手動(Manual)順はここにないため、一回の順番に一人が応答する自然な順で入ります。話す人物はチャット画面の次の順番で選べます。",
+      "strategyPooled": "SillyTavern のプール(Pooled)順はここにないため、一回の順番に一人が応答する自然な順で入ります。",
+      "disabledMembers": "SillyTavern で無効にしていたメンバーは会話量0(指名したときだけ)で入ります:{names}",
       "personaExists": "同じ名前のペルソナがすでにあります。",
       "options": "オプション",
       "optionChats": "チャットを読み込む",
@@ -500,7 +503,8 @@
         "world_unreadable": "ロアブックのファイルを読み込めなかったため、除いて読み込みました:{name}",
         "extras_failed": "追加ロアブック・スクリプトを付けられませんでした:{message}",
         "chat_world_failed": "チャットに紐づいたロアブックを付けられませんでした:{name}({message})",
-        "avatar_failed": "ペルソナの画像を読み込めませんでした:{message}"
+        "avatar_failed": "ペルソナの画像を読み込めませんでした:{message}",
+        "group_turns_failed": "グループの会話の順番・会話量を移せませんでした:{message}"
       },
       "notices": {
         "chat_world_attached": "このチャットに紐づいていたロアブック「{name}」をプロットのロアブックに付けました。このプロットのほかのチャットにも適用されます。",

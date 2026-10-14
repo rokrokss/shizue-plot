@@ -6,14 +6,15 @@
  * cancel, a failure and a retry each leave behind.
  */
 import type { ImportedChatMessage } from '@shizue/core';
-import type {
-  StAuthorNote,
-  StCharacter,
-  StChatFile,
-  StFile,
-  StGroup,
-  StManifest,
-  StPersona,
+import {
+  convertSillyTavernChat,
+  type StAuthorNote,
+  type StCharacter,
+  type StChatFile,
+  type StFile,
+  type StGroup,
+  type StManifest,
+  type StPersona,
 } from '@shizue/core/sillytavern';
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../src/lib/api';
@@ -69,6 +70,13 @@ function character(avatar: string, name: string, extra: Partial<StCharacter> = {
 }
 
 const sha = (path: string): string => `sha:${path}`;
+
+/** How ST runs a group by default: natural order, nobody muted. */
+const natural = (): Pick<StGroup, 'strategy' | 'disabled' | 'settings'> => ({
+  strategy: 'natural',
+  disabled: [],
+  settings: { order: 'natural', maxSpeakers: 3 },
+});
 
 /** Every card and chat hashed as the review's fingerprint pass would. */
 function hashesOf(manifest: StManifest): Map<string, string> {
@@ -392,6 +400,7 @@ function sample(): StManifest {
         id: 'g1',
         name: 'Tea party',
         members: ['Alice.png', 'Bob.png', 'Ghost.png'],
+        ...natural(),
         chats: [chatFile('group chats/party.jsonl', { userName: 'Kim', messages: 2 })],
       },
     ],
@@ -463,7 +472,7 @@ describe('the review', () => {
     const cast = Array.from({ length: 12 }, (_, index) => character(`c${index}.png`, `C${index}`));
     const manifest = library({
       characters: cast,
-      groups: [{ id: 'big', name: 'Big', members: [...cast.map((item) => item.avatar), 'gone.png'], chats: [] }],
+      groups: [{ id: 'big', name: 'Big', members: [...cast.map((item) => item.avatar), 'gone.png'], ...natural(), chats: [] }],
     });
     const review = reviewImport(manifest, hashesOf(manifest), { characters: [], chats: [] }, []);
     const [group] = review.groups;
@@ -575,11 +584,16 @@ describe('runImport', () => {
     // The group's plot takes the group's name.
     expect(api.patches[2]!.body['name']).toBe('Tea party');
 
-    // Each chat is converted against its plot's cast; the group chat against both.
+    // Each chat is converted against its plot's cast, member ids and all; the group chat against both.
     expect(dependencies.casts).toEqual([
-      { members: [{ name: 'Alice', avatar: 'Alice.png' }] },
-      { members: [{ name: 'Bob', avatar: 'Bob.png' }] },
-      { members: [{ name: 'Alice', avatar: 'Alice.png' }, { name: 'Bob', avatar: 'Bob.png' }] },
+      { members: [{ name: 'Alice', avatar: 'Alice.png', id: 'member-3' }] },
+      { members: [{ name: 'Bob', avatar: 'Bob.png', id: 'member-6' }] },
+      {
+        members: [
+          { name: 'Alice', avatar: 'Alice.png', id: 'member-9' },
+          { name: 'Bob', avatar: 'Bob.png', id: 'member-10' },
+        ],
+      },
     ]);
     // A chat written as Kim starts on the Kim persona the run made; one that names
     // nobody starts on none.
@@ -961,6 +975,130 @@ describe('runImport', () => {
     expect(api.plots.size).toBe(1);
     expect(api.plots.get('plot-1')!.characters.map((each) => each.name)).toEqual(['Alice', 'Bob']);
     expect(second['group:g1']!.status).toBe('done');
+  });
+});
+
+// ── how ST ran a group's turns ──────────────────────────────────────────────
+
+describe("runImport - how SillyTavern ran a group's turns", () => {
+  /** A chat file in ST's own JSONL, for the real converter. */
+  const stChat = (path: string, lines: unknown[]): StChatFile => ({
+    file: file(path, lines.map((line) => JSON.stringify(line)).join('\n')),
+    name: path.split('/').pop()!.replace('.jsonl', ''),
+  });
+
+  /**
+   * Alice talks more than most and has a chat of her own; Bob is muted in the
+   * group; Carol is as talkative as the default. ST went round the list.
+   */
+  function party(): StManifest {
+    return library({
+      characters: [
+        character('Alice.png', 'Alice', {
+          talkativeness: 80,
+          chats: [
+            stChat('chats/Alice/solo.jsonl', [
+              { user_name: 'unused', character_name: 'unused', chat_metadata: {} },
+              { name: 'Kim', is_user: true, mes: 'Hi.' },
+              { name: 'Alice', is_user: false, mes: 'Hello there.\n*She smiles.*' },
+            ]),
+          ],
+        }),
+        character('Bob.png', 'Bob', { talkativeness: 30 }),
+        character('Carol.png', 'Carol'),
+      ],
+      groups: [
+        {
+          id: 'g1',
+          name: 'Tea party',
+          members: ['Alice.png', 'Bob.png', 'Carol.png'],
+          strategy: 'list',
+          disabled: ['Bob.png'],
+          settings: { order: 'list', maxSpeakers: 3 },
+          chats: [
+            stChat('group chats/party.jsonl', [
+              { user_name: 'unused', character_name: 'unused', chat_metadata: {} },
+              { name: 'Kim', is_user: true, mes: 'Everyone here?' },
+              { name: 'Alice', is_user: false, mes: 'Tea first.', original_avatar: 'Alice.png' },
+              { name: 'Bob', is_user: false, mes: '*sighs*\nCoffee.', original_avatar: 'Bob.png' },
+              { name: 'System', is_user: false, is_system: true, mes: 'The clock strikes six.', extra: { type: 'narrator' } },
+            ]),
+          ],
+        },
+      ],
+    });
+  }
+
+  const realConverter = (api: Api): ImportDeps => ({ ...deps(api), convertChat: convertSillyTavernChat });
+
+  it('sets the round settings on the new plot and each member’s 대화량 as it joins, and tags the group chat’s replies', async () => {
+    const api = fakeApi();
+    const manifest = party();
+    const review = await reviewOf(api, manifest);
+    const selection = { characters: new Set(['Alice.png']), groups: new Set(['g1']), personas: new Set<string>() };
+    const steps = planImport(review, selection, DEFAULT_OPTIONS);
+    const results = await runImport(inputOf(manifest, steps), initialResults(steps), realConverter(api));
+    expect(Object.values(results).every((result) => result.status === 'done')).toBe(true);
+
+    expect(api.writes()).toEqual([
+      // Alice on her own: one member, so no round settings and no 대화량.
+      'POST /api/plots/import',
+      'POST /api/chats/import',
+      'POST /api/chats/chat-3/import/complete',
+      'POST /api/plots/import',
+      'PATCH /api/plots/plot-4',
+      'PATCH /api/plots/plot-4',
+      'PATCH /api/plots/plot-4/characters/member-5',
+      'POST /api/plots/plot-4/characters/import',
+      'PATCH /api/plots/plot-4/characters/member-6',
+      // Carol's is the default, which a new member already has.
+      'POST /api/plots/plot-4/characters/import',
+      'POST /api/chats/import',
+      'POST /api/chats/chat-8/import/complete',
+    ]);
+    expect(api.patches.map((patch) => patch.body)).toEqual([
+      { name: 'Tea party' },
+      { groupSettings: { order: 'list', maxSpeakers: 3 } },
+    ]);
+    // Bob is muted in ST: here he speaks only when picked, whatever his card says.
+    expect(api.memberPatches.map(({ memberId, body }) => [memberId, body])).toEqual([
+      ['member-5', { talkativeness: 80 }],
+      ['member-6', { talkativeness: 0 }],
+    ]);
+
+    const byPlot = new Map([...api.chats.values()].map((chat) => [chat.plotId, chat.messages]));
+    // A one-member chat comes over as it always has: prefixed, and nobody's by id.
+    expect(byPlot.get('plot-1')).toEqual([
+      { role: 'user', versions: ['Hi.'], selected: 0 },
+      { role: 'assistant', versions: ['Alice: Hello there.\nAlice: *She smiles.*'], selected: 0 },
+    ]);
+    // The group chat's replies are each one member's, by id, with no prefix; the
+    // narrator is still a narration.
+    expect(byPlot.get('plot-4')).toEqual([
+      { role: 'user', versions: ['Everyone here?'], selected: 0 },
+      { role: 'assistant', versions: ['Tea first.'], selected: 0, speakerId: 'member-5' },
+      { role: 'assistant', versions: ['*sighs*\nCoffee.'], selected: 0, speakerId: 'member-6' },
+      { role: 'assistant', versions: ['@: The clock strikes six.'], selected: 0 },
+    ]);
+
+    // An earlier run's plot keeps the settings it has now: its owner may have changed them.
+    const again = await reviewOf(api, manifest);
+    const groupOnly = { characters: new Set<string>(), groups: new Set(['g1']), personas: new Set<string>() };
+    const rerun = planImport(again, groupOnly, DEFAULT_OPTIONS);
+    await runImport(inputOf(manifest, rerun), initialResults(rerun), realConverter(api));
+    expect(api.writes()).toEqual([]);
+  });
+
+  it('keeps the group when its turns cannot be set, and says so', async () => {
+    const api = fakeApi();
+    const manifest = party();
+    const review = await reviewOf(api, manifest);
+    const groupOnly = { characters: new Set<string>(), groups: new Set(['g1']), personas: new Set<string>() };
+    const steps = planImport(review, groupOnly, { ...DEFAULT_OPTIONS, chats: false });
+    api.failures.set('PATCH /api/plots/plot-1/characters/member-3', [{ status: 500, code: 'internal_error' }]);
+    const results = await runImport(inputOf(manifest, steps), initialResults(steps), realConverter(api));
+    expect(results['group:g1']).toMatchObject({ status: 'done', warnings: [{ code: 'group_turns_failed' }] });
+    expect(api.plots.get('plot-1')!.characters.map((member) => member.name)).toEqual(['Alice', 'Bob', 'Carol']);
   });
 });
 

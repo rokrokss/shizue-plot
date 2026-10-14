@@ -6,16 +6,18 @@
  * What leaves the browser is exactly what the API calls below send: the chosen
  * card files and their linked World Info files, the extra lorebook entries and
  * display scripts converted here, each new plot's first card again with ST's
- * World Info settings and its global prompt-only regex scripts on it, persona
- * names and descriptions, and the chats converted to our message shape in
- * batches — with each chat's variables, its author's note and the entries of the
- * World Info file bound to it. The scan's own inputs — `settings.json`, the rest
+ * World Info settings and its global prompt-only regex scripts on it, each
+ * group plot's round settings and its members' 대화량, persona names and
+ * descriptions, and the chats converted to our message shape in batches — with
+ * each chat's variables, its author's note and the entries of the World Info
+ * file bound to it. The scan's own inputs — `settings.json`, the rest
  * of the backup — are never part of a request.
  *
  * Every API call goes through the injected `fetch`, and the core converters come
  * in through `ImportDeps`, so the whole flow runs in a test without a server.
  */
 import type { DisplayScript, ImportedChatMessage, LoreEntry, NormalizedCard } from '@shizue/core';
+import { DEFAULT_GROUP_SETTINGS, DEFAULT_TALKATIVENESS } from '@shizue/core/group';
 import {
   FileTooLargeError,
   stNoteKeepsPlace,
@@ -509,7 +511,13 @@ export type SkipReason = 'already_imported' | 'persona_exists' | 'chat_empty' | 
 
 /** Something that went wrong on a step without failing it. */
 export interface StepWarning {
-  code: 'world_missing' | 'world_unreadable' | 'extras_failed' | 'chat_world_failed' | 'avatar_failed';
+  code:
+    | 'world_missing'
+    | 'world_unreadable'
+    | 'extras_failed'
+    | 'chat_world_failed'
+    | 'avatar_failed'
+    | 'group_turns_failed';
   /** The lorebook it is about. */
   name?: string;
   error?: ApiError;
@@ -527,10 +535,15 @@ export interface StepNotice {
   name?: string;
 }
 
-/** A member of the plot as the chat converter matches speakers against it. */
+/**
+ * A member of the plot as the chat converter matches speakers against it. The
+ * id is the member's row: a cast of two or more tags a chat's replies with it
+ * (`StCast`).
+ */
 export interface CastMember {
   name: string;
   avatar?: string;
+  id?: string;
 }
 
 export type MemoryBackfill = 'queued' | 'not_needed' | 'unavailable';
@@ -876,7 +889,7 @@ async function attachChatWorld(
 function castOf(members: PlotMember[], items: CharacterItem[]): CastMember[] {
   return items.flatMap((item) => {
     const member = members.find((candidate) => candidate.importedFrom?.sha256 === item.sha256);
-    return member ? [{ name: member.name, avatar: item.character.avatar }] : [];
+    return member ? [{ name: member.name, avatar: item.character.avatar, id: member.id }] : [];
   });
 }
 
@@ -884,7 +897,37 @@ function castOf(members: PlotMember[], items: CharacterItem[]): CastMember[] {
 function soloCast(plot: PlotDetail, item: CharacterItem): CastMember[] {
   const cast = castOf(plot.characters, [item]);
   const first = plot.characters[0];
-  return cast.length > 0 || !first ? cast : [{ name: first.name, avatar: item.character.avatar }];
+  return cast.length > 0 || !first ? cast : [{ name: first.name, avatar: item.character.avatar, id: first.id }];
+}
+
+/** A PATCH of how a group plot takes turns; one that fails is the step's warning. */
+async function patchTurns(ctx: RunContext, path: string, body: unknown, warnings: StepWarning[]): Promise<void> {
+  try {
+    await request(ctx, 'PATCH', path, body);
+  } catch (caught) {
+    ctx.signal?.throwIfAborted();
+    warnings.push({ code: 'group_turns_failed', error: asApiError(caught) });
+  }
+}
+
+/**
+ * A member's 대화량 as ST ran it in the group: 0 — only when picked — for one ST
+ * muted (`disabled_members`), else its card's talkativeness. The default is not
+ * sent; a new member already has it.
+ */
+async function applyTalkativeness(
+  ctx: RunContext,
+  plotId: string,
+  member: PlotMember,
+  item: GroupItem,
+  character: StCharacter,
+  warnings: StepWarning[],
+): Promise<void> {
+  const talkativeness = item.group.disabled.includes(character.avatar)
+    ? 0
+    : (character.talkativeness ?? DEFAULT_TALKATIVENESS);
+  if (talkativeness === DEFAULT_TALKATIVENESS) return;
+  await patchTurns(ctx, `/api/plots/${plotId}/characters/${member.id}`, { talkativeness }, warnings);
 }
 
 async function runPersona(
@@ -953,6 +996,11 @@ async function runCharacter(
  * one by one. A member that fails leaves the group failed but its plot kept, so
  * a retry adds only the members it does not have yet — read off the plot's own
  * roster by card hash rather than remembered.
+ *
+ * How ST ran the group's turns comes along as the plot is made (its round
+ * settings, `StGroup.settings`) and as each member joins (its 대화량). A plot an
+ * earlier run made keeps the settings it has now — its owner may have changed
+ * them since.
  */
 async function runGroup(ctx: RunContext, item: GroupItem, result: StepResult): Promise<void> {
   const [first] = item.members;
@@ -976,6 +1024,12 @@ async function runGroup(ctx: RunContext, item: GroupItem, result: StepResult): P
         item.group.name.trim() || undefined,
       )),
     );
+    const { settings } = item.group;
+    if (settings.order !== DEFAULT_GROUP_SETTINGS.order || settings.maxSpeakers !== DEFAULT_GROUP_SETTINGS.maxSpeakers) {
+      await patchTurns(ctx, `/api/plots/${plot.id}`, { groupSettings: settings }, warnings);
+    }
+    const [made] = plot.characters;
+    if (made) await applyTalkativeness(ctx, plot.id, made, item, first.character, warnings);
   }
   result.plotId = plot.id;
 
@@ -995,6 +1049,7 @@ async function runGroup(ctx: RunContext, item: GroupItem, result: StepResult): P
       members.push(joined);
       present.add(member.sha256);
       added += 1;
+      await applyTalkativeness(ctx, plot.id, joined, item, member.character, warnings);
     } catch (caught) {
       ctx.signal?.throwIfAborted();
       failed ??= asApiError(caught);

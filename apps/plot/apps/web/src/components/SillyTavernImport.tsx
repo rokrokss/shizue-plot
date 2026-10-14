@@ -12,6 +12,7 @@ import { Link } from '@/i18n/navigation';
 import {
   hasWork,
   type CharacterItem,
+  type GroupItem,
   type ImportOptions,
   type ImportStep,
   type Results,
@@ -271,6 +272,12 @@ function ChatSummary({ item }: { item: { plotId: string | null; chats: Character
   return <>{parts.join(' · ')}</>;
 }
 
+/** The members coming over that ST muted in the group: they come in at 대화량 0. */
+const disabledNames = (item: GroupItem): string[] =>
+  item.members
+    .filter((member) => item.group.disabled.includes(member.character.avatar))
+    .map((member) => member.character.name);
+
 /** Ticks or clears every row of a list that still has something to bring over. */
 function toggled(current: Set<string>, keys: string[], on: boolean): Set<string> {
   const next = new Set(current);
@@ -424,6 +431,16 @@ export function ReviewPanel({
                 {item.missing.length > 0 ? (
                   <span className="block text-xs text-danger">
                     {t('missing', { names: item.missing.join(', ') })}
+                  </span>
+                ) : null}
+                {item.group.strategy === 'manual' || item.group.strategy === 'pooled' ? (
+                  <span className="block text-xs text-muted" data-testid="st-group-strategy">
+                    {t(item.group.strategy === 'manual' ? 'strategyManual' : 'strategyPooled')}
+                  </span>
+                ) : null}
+                {disabledNames(item).length > 0 ? (
+                  <span className="block text-xs text-muted" data-testid="st-group-disabled">
+                    {t('disabledMembers', { names: disabledNames(item).join(', ') })}
                   </span>
                 ) : null}
               </ReviewRow>

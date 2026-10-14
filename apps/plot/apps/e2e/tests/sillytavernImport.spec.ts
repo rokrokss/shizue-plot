@@ -6,9 +6,11 @@ import { expect, test, type BrowserContext, type Page } from '@playwright/test';
  * The SillyTavern move along the owner's path: a backup zip built here — two
  * characters (one with a linked World Info file, an extra lorebook and a chat
  * with swipes, a narrator line and a hidden line), a group of both with a group
- * chat, a persona with its picture, and a settings.json holding a proxy password
+ * chat — run in list order with Bob muted, and each card with its talkativeness —
+ * a persona with its picture, and a settings.json holding a proxy password
  * beside a secrets.json — goes through the wizard; the plots, members, lorebooks,
- * chats and persona it makes are read back; no request the page made carries anything
+ * the group's turn settings, chats and persona it makes are read back; no request
+ * the page made carries anything
  * of settings.json or secrets.json; and a second pass over the same zip finds
  * everything already imported.
  *
@@ -156,12 +158,13 @@ const backup = storedZip({
   }),
   'secrets.json': JSON.stringify({ api_key_openai: API_KEY }),
   'User Avatars/traveler.png': picturePng(PICTURE_NOTE),
+  // ST saves talkativeness from its slider, as a string; a number reads the same.
   'characters/Alice.png': cardPng(
-    card(alice, { world: 'Wonderland' }, {
+    card(alice, { world: 'Wonderland', talkativeness: '0.8' }, {
       entries: [{ keys: ['stale'], content: 'stale embedded entry', enabled: true, insertion_order: 0, extensions: {} }],
     }),
   ),
-  'characters/Bob.png': cardPng(card(bob, {})),
+  'characters/Bob.png': cardPng(card(bob, { talkativeness: 0.3 })),
   'worlds/Wonderland.json': JSON.stringify({
     entries: { 0: { uid: 0, key: ['rabbit'], keysecondary: [], content: 'The white rabbit is late.', order: 100, position: 0, disable: false } },
   }),
@@ -183,6 +186,9 @@ const backup = storedZip({
     members: ['Alice.png', 'Bob.png'],
     chats: ['party'],
     chat_id: 'party',
+    // List order, with Bob muted.
+    activation_strategy: 1,
+    disabled_members: ['Bob.png'],
   }),
   'group chats/party.jsonl': jsonl([
     { user_name: 'unused', character_name: 'unused', chat_metadata: {} },
@@ -202,7 +208,9 @@ interface PlotRow {
   visibility: string;
 }
 interface Member {
+  id: string;
   name: string;
+  talkativeness: number;
   card: { lorebook: { content: string }[] };
   importedFrom: { fileName: string } | null;
 }
@@ -214,7 +222,7 @@ interface ChatRow {
 }
 interface ChatState {
   chat: ChatRow;
-  path: { id: string; content: string }[];
+  path: { id: string; content: string; speakerMemberId?: string | null }[];
   siblings: Record<string, { total: number }>;
 }
 
@@ -271,6 +279,8 @@ test('the wizard reads the backup and lists what it holds', async () => {
   // The persona's picture is its face in the list, as a card's is.
   await expect(page.getByTestId('st-persona').locator('img')).toBeVisible();
   await expect(page.getByTestId('st-group')).toContainText(`${alice}, ${bob}`);
+  // The member ST muted is named: here it speaks only when picked.
+  await expect(page.getByTestId('st-group-disabled')).toContainText(bob);
   await expect(page.getByTestId('st-character').filter({ hasText: alice })).toContainText('로어북 Wonderland');
   // The things that do not come over are named, not just left out.
   await page.getByTestId('st-not-imported').locator('summary').click();
@@ -304,8 +314,13 @@ test('the plots carry their cards, the linked world and the extra lorebook', asy
   // The extra book ST linked in settings.json is the plot's.
   expect(solo.lorebook.map((entry) => entry.content)).toContain('Tea is always at six.');
 
-  const party = await api<{ characters: Member[] }>(`/api/plots/${plotNamed(group).id}`);
+  const party = await api<{ characters: Member[]; groupSettings: unknown }>(`/api/plots/${plotNamed(group).id}`);
   expect(party.characters.map((member) => member.name)).toEqual([alice, bob]);
+  // How ST ran the group: list order, Alice's card talkativeness, Bob muted.
+  expect(party.groupSettings).toEqual({ order: 'list', maxSpeakers: 3 });
+  expect(party.characters.map((member) => member.talkativeness)).toEqual([80, 0]);
+  // A member's own plot is one member, never a round: it keeps the default.
+  expect(solo.characters[0]!.talkativeness).toBe(50);
 });
 
 test('the chats come over with their swipes, speakers and persona', async () => {
@@ -338,11 +353,21 @@ test('the chats come over with their swipes, speakers and persona', async () => 
   // The other swipe is the reply's sibling.
   expect(state.siblings[state.path[1]!.id]?.total).toBe(2);
 
+  // A one-member chat keeps its prefixes and names nobody by id.
+  expect(state.path.every((message) => !message.speakerMemberId)).toBe(true);
+
+  // The group chat's replies are each one member's, by id, with no prefix.
   const together = await api<ChatState>(`/api/chats/${party.id}`);
   expect(together.path.map((message) => message.content)).toEqual([
     '모두 모였네요.',
-    `${alice}: 차가 식기 전에 마셔요.`,
-    `${bob}: 저는 커피가 좋은데요.`,
+    '차가 식기 전에 마셔요.',
+    '저는 커피가 좋은데요.',
+  ]);
+  const cast = (await api<{ characters: Member[] }>(`/api/plots/${plotNamed(group).id}`)).characters;
+  expect(together.path.map((message) => message.speakerMemberId ?? null)).toEqual([
+    null,
+    cast[0]!.id,
+    cast[1]!.id,
   ]);
 
   await page.goto(`/ko/chats/${solo.id}`);
@@ -350,6 +375,16 @@ test('the chats come over with their swipes, speakers and persona', async () => 
   await expect(page.getByTestId('message-narration').filter({ hasText: '시계가 여섯 시를 친다.' })).toBeVisible();
   await expect(page.getByText('숨겨진 줄')).toHaveCount(0);
   await expect(page.getByTestId('chat-importing')).toHaveCount(0);
+
+  // Each imported group reply is drawn under its own member.
+  await page.goto(`/ko/chats/${party.id}`);
+  await expect(page.getByTestId('message-assistant')).toHaveCount(2);
+  const speakers = await page
+    .getByTestId('message-assistant')
+    .evaluateAll((rows) =>
+      rows.map((row) => row.querySelector('[data-testid="speech-character"]')?.getAttribute('data-speaker') ?? null),
+    );
+  expect(speakers).toEqual([alice, bob]);
 });
 
 test('nothing of settings.json, secrets.json or the rest of the backup was sent', async () => {

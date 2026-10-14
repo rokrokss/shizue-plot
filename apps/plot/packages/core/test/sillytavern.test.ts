@@ -508,6 +508,59 @@ describe('scanSillyTavern', () => {
     expect(manifest.characters[0]!.extraWorlds).toEqual(['x']);
   });
 
+  it("reads a group's turn-taking as round settings, and each card's talkativeness as its 대화량", async () => {
+    const png = (avatar: string, card: Record<string, unknown>): StFile => {
+      const bytes = buildPngWithTextChunks({ chara: Buffer.from(JSON.stringify(card)).toString('base64') });
+      return { path: `characters/${avatar}`, size: bytes.length, read: async () => bytes };
+    };
+    const v2 = (name: string, extensions: Record<string, unknown>) => ({
+      spec: 'chara_card_v2',
+      spec_version: '2.0',
+      name,
+      data: { name, extensions },
+    });
+    const group = (id: string, body: Record<string, unknown>): StFile => ({
+      path: `groups/${id}.json`,
+      size: 1,
+      read: async () => json({ id, name: id, chats: [], ...body }),
+    });
+    const five = ['a.png', 'b.png', 'c.png', 'd.png', 'e.png'];
+    const twelve = Array.from({ length: 12 }, (_, index) => `m${index}.png`);
+    const manifest = await scanSillyTavern([
+      // ST's card editor saves the slider's value as a string.
+      png('a.png', v2('A', { talkativeness: '0.75' })),
+      png('b.png', v2('B', { talkativeness: 0.2 })),
+      // The V1 copy at the top level, where `data` has none; `data`'s wins where it has one.
+      png('c.png', { ...v2('C', {}), talkativeness: '0.1' }),
+      png('d.png', { ...v2('D', { talkativeness: 1.5 }), talkativeness: 0 }),
+      png('e.png', v2('E', { talkativeness: 'lots' })),
+      group('1-list', { members: five, activation_strategy: 1, disabled_members: ['b.png', 'ghost.png'] }),
+      group('2-natural', { members: ['a.png', 'b.png'] }),
+      group('3-manual', { members: five, activation_strategy: 2 }),
+      group('4-pooled', { members: five, activation_strategy: 3 }),
+      group('5-unknown', { members: twelve, activation_strategy: 7 }),
+    ]);
+
+    expect(manifest.characters.map((character) => [character.name, character.talkativeness])).toEqual([
+      ['A', 75],
+      ['B', 20],
+      ['C', 10],
+      ['D', 100],
+      ['E', undefined],
+    ]);
+    expect(manifest.groups.map(({ name, strategy, disabled, settings }) => ({ name, strategy, disabled, settings }))).toEqual([
+      // Every enabled member answers in ST, so the cap is their number; one ST
+      // mutes is named, and one the group does not list is not.
+      { name: '1-list', strategy: 'list', disabled: ['b.png'], settings: { order: 'list', maxSpeakers: 4 } },
+      // ST's default, and never a cap below ours.
+      { name: '2-natural', strategy: 'natural', disabled: [], settings: { order: 'natural', maxSpeakers: 3 } },
+      // One member at a time, in both.
+      { name: '3-manual', strategy: 'manual', disabled: [], settings: { order: 'natural', maxSpeakers: 1 } },
+      { name: '4-pooled', strategy: 'pooled', disabled: [], settings: { order: 'natural', maxSpeakers: 1 } },
+      { name: '5-unknown', strategy: 'natural', disabled: [], settings: { order: 'natural', maxSpeakers: 10 } },
+    ]);
+  });
+
   it('skips oversized and unreadable files without failing', async () => {
     const files: StFile[] = [
       { path: 'characters/huge.png', size: 10, read: async () => cardPng({ name: 'H' }) },
@@ -618,6 +671,57 @@ describe('convertSillyTavernChat', () => {
     expect(chat.messages.map((message) => message.versions[0])).toEqual(['하루: 안녕', 'Ren: 반가워', '누구?']);
     expect(chat.characterName).toBe('하루 (old name)');
     expect(chat.skipped.unknownSpeaker).toBe(1);
+  });
+
+  it('tags a group chat’s replies with their speakers, and leaves their text as ST stored it', () => {
+    const tagged: StCast = {
+      members: [
+        { name: '하루', avatar: '하루.png', id: 'member-haru' },
+        { name: 'Ren', avatar: 'Ren.png', id: 'member-ren' },
+      ],
+    };
+    const chat = convertSillyTavernChat(
+      jsonl([
+        { user_name: 'unused', character_name: 'unused', chat_metadata: {} },
+        { name: '여행자', is_user: true, mes: '모두 안녕' },
+        { name: '하루 (old name)', is_user: false, mes: '*손을 흔든다*\n안녕!', swipes: ['어서 와', '*손을 흔든다*\n안녕!'], swipe_id: 1, original_avatar: '하루.png' },
+        { name: 'Ren', is_user: false, mes: '반가워' },
+        { name: 'System', is_user: false, is_system: true, mes: '해가 진다.', extra: { type: 'narrator' } },
+        { name: 'Stranger', is_user: false, mes: '누구?' },
+      ]),
+      tagged,
+    );
+    expect(chat.messages).toEqual([
+      { role: 'user', versions: ['모두 안녕'], selected: 0 },
+      // Every swipe is the same member's, as ST regenerates a group reply with its speaker.
+      { role: 'assistant', versions: ['어서 와', '*손을 흔든다*\n안녕!'], selected: 1, speakerId: 'member-haru' },
+      { role: 'assistant', versions: ['반가워'], selected: 0, speakerId: 'member-ren' },
+      // The narrator is still a narration, and nobody's.
+      { role: 'assistant', versions: ['@: 해가 진다.'], selected: 0 },
+      // A speaker it cannot place stays as it is, untagged and counted.
+      { role: 'assistant', versions: ['누구?'], selected: 0 },
+    ]);
+    expect(chat.skipped.unknownSpeaker).toBe(1);
+  });
+
+  it('prefixes as before group turns with the id of fewer than two members', () => {
+    const lines = jsonl([
+      { name: '하루', is_user: false, mes: '안녕', original_avatar: '하루.png' },
+      { name: 'Ren', is_user: false, mes: '반가워', original_avatar: 'Ren.png' },
+    ]);
+    // A one-member work: its member's id changes nothing.
+    const one = convertSillyTavernChat(lines, { members: [{ name: '하루', avatar: '하루.png', id: 'member-haru' }] });
+    expect(one.messages).toEqual([
+      { role: 'assistant', versions: ['하루: 안녕'], selected: 0 },
+      { role: 'assistant', versions: ['하루: 반가워'], selected: 0 },
+    ]);
+    const half = convertSillyTavernChat(lines, {
+      members: [{ name: '하루', avatar: '하루.png', id: 'member-haru' }, { name: 'Ren', avatar: 'Ren.png' }],
+    });
+    expect(half.messages.map((message) => [message.versions[0], message.speakerId])).toEqual([
+      ['하루: 안녕', undefined],
+      ['Ren: 반가워', undefined],
+    ]);
   });
 
   it('caps the messages it converts', () => {

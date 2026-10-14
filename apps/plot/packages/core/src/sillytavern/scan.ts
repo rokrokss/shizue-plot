@@ -17,6 +17,8 @@
  *   (`public/scripts/extensions/regex/engine.js`).
  * - The World Info settings sit beside `world_info`, as `world_info_depth`,
  *   `world_info_budget` and the rest (`getWorldInfoSettings`, `world-info.js`).
+ * - A group's turn-taking is its `activation_strategy` and `disabled_members`,
+ *   and each member's card `talkativeness` (`public/scripts/group-chats.js`).
  *
  * settings.json also holds API settings and, in places, credentials. It is parsed
  * here, in the browser, and only those six values leave this function; the file
@@ -24,6 +26,12 @@
  */
 
 import { readPngTextChunkBytes } from '../card/png.js';
+import {
+  coerceTalkativeness,
+  DEFAULT_GROUP_SETTINGS,
+  MAX_GROUP_SPEAKERS,
+  type GroupSettings,
+} from '../group.js';
 import type { LoreSettings } from '../types.js';
 import { FileTooLargeError } from './zip.js';
 import { ST_CAPS, stFileKind, type StCaps, type StFile } from './files.js';
@@ -43,14 +51,28 @@ export interface StCharacter {
   worldName?: string;
   /** settings.json's additional books for this character. */
   extraWorlds: string[];
+  /**
+   * The card's talkativeness — ST's 0..1, as a 대화량 0..100. Absent when the
+   * card has none, which ST reads as its default, the same 50 as here.
+   */
+  talkativeness?: number;
   chats: StChatFile[];
 }
+
+/** ST's `group_activation_strategy`, numbered 0..3 in that order. */
+export type StActivationStrategy = 'natural' | 'list' | 'manual' | 'pooled';
 
 export interface StGroup {
   id: string;
   name: string;
   /** Avatar file names, as ST stores them. */
   members: string[];
+  /** `activation_strategy`; natural where the file has none (ST's default) or one ST does not know. */
+  strategy: StActivationStrategy;
+  /** `disabled_members` — the members ST leaves out of every round — by avatar file name. */
+  disabled: string[];
+  /** How the plot made of the group picks a round's speakers (`groupSettingsOf`). */
+  settings: GroupSettings;
   chats: StChatFile[];
 }
 
@@ -141,8 +163,23 @@ function base64Bytes(base64: string): Uint8Array {
   return bytes;
 }
 
-/** A card's name and linked world, from the chunk ST reads first (`ccv3`, then `chara`). */
-function cardSummary(png: Uint8Array): { name: string; world: string } | undefined {
+/**
+ * ST's talkativeness, 0..1, as a 대화량 0..100. ST reads it with `Number()`
+ * (`activateNaturalOrder`), and its card editor saves the slider's string, so a
+ * numeric string counts as much as a number; anything else is no value.
+ */
+function talkativenessOf(value: unknown): number | undefined {
+  const number =
+    typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : Number.NaN;
+  return Number.isFinite(number) ? coerceTalkativeness(number * 100) : undefined;
+}
+
+/**
+ * A card's name, linked world and talkativeness, from the chunk ST reads first
+ * (`ccv3`, then `chara`). The talkativeness is `data.extensions.talkativeness`,
+ * else the V1 copy at the top level — ST's `readFromV2` lets the first win.
+ */
+function cardSummary(png: Uint8Array): { name: string; world: string; talkativeness?: number } | undefined {
   const chunks = readPngTextChunkBytes(png);
   const decoder = new TextDecoder('utf-8');
   for (const keyword of ['ccv3', 'chara']) {
@@ -155,9 +192,11 @@ function cardSummary(png: Uint8Array): { name: string; world: string } | undefin
       const extensions = isObject(data['extensions']) ? data['extensions'] : {};
       const name = [data['name'], card['name']].find((value) => typeof value === 'string' && value.trim());
       const world = extensions['world'];
+      const talkativeness = talkativenessOf(extensions['talkativeness'] ?? card['talkativeness']);
       return {
         name: typeof name === 'string' ? name.trim() : '',
         world: typeof world === 'string' ? world.trim() : '',
+        ...(talkativeness !== undefined ? { talkativeness } : {}),
       };
     } catch {
       continue;
@@ -261,6 +300,28 @@ function settingsValues(settings: Json): SettingsValues {
     globalWorlds: stringsOf(worldInfo['globalSelect']),
     globalRegex: Array.isArray(regex) ? regex.filter(isObject) : [],
     worldInfoSettings: worldInfoSettingsOf(worldSettings),
+  };
+}
+
+const STRATEGIES: readonly StActivationStrategy[] = ['natural', 'list', 'manual', 'pooled'];
+
+/**
+ * A group's turn-taking as a plot's round settings.
+ *
+ * - Natural and list order are ours too. ST caps neither — every member whose
+ *   roll passes, or every enabled member, answers — so the cap is the members ST
+ *   could have called on, and never below the default.
+ * - Manual and pooled have no order here, and both have one member answer at a
+ *   time: manual waits for the reader to pick one, pooled picks one who has not
+ *   spoken since the reader. Each becomes natural order with one speaker a round:
+ *   the reader may pick who, else the mentions and the roll do, and a round the
+ *   reader did not start passes over whoever just spoke.
+ */
+function groupSettingsOf(strategy: StActivationStrategy, enabled: number): GroupSettings {
+  if (strategy === 'manual' || strategy === 'pooled') return { order: 'natural', maxSpeakers: 1 };
+  return {
+    order: strategy,
+    maxSpeakers: Math.min(MAX_GROUP_SPEAKERS, Math.max(DEFAULT_GROUP_SETTINGS.maxSpeakers, enabled)),
   };
 }
 
@@ -370,6 +431,7 @@ export async function scanSillyTavern(
       name: card.name || stem,
       ...(card.world ? { worldName: card.world } : {}),
       extraWorlds,
+      ...(card.talkativeness !== undefined ? { talkativeness: card.talkativeness } : {}),
       chats: chats.sort(byName),
     });
   }
@@ -395,7 +457,19 @@ export async function scanSillyTavern(
     }
     const id = idsOf([group['id']])[0] ?? stemOf(file.path.slice('groups/'.length), '.json');
     const name = typeof group['name'] === 'string' ? group['name'].trim() : '';
-    groups.push({ id, name: name || id, members: stringsOf(group['members']), chats: chats.sort(byName) });
+    const members = stringsOf(group['members']);
+    const disabled = stringsOf(group['disabled_members']).filter((avatar) => members.includes(avatar));
+    const number = group['activation_strategy'];
+    const strategy = (typeof number === 'number' && STRATEGIES[number]) || 'natural';
+    groups.push({
+      id,
+      name: name || id,
+      members,
+      strategy,
+      disabled,
+      settings: groupSettingsOf(strategy, members.length - disabled.length),
+      chats: chats.sort(byName),
+    });
   }
   for (const [stem, file] of groupChats) {
     if (!claimed.has(stem)) skipped.push({ path: file.path, reason: 'no_group' });
