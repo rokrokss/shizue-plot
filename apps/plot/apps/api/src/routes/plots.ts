@@ -123,6 +123,7 @@ import { cbsModulesOf, loadOwnedPlot } from '../plots.js';
 import { realmCardId, realmCharacterUrl } from '../realm.js';
 import { coverKey, deleteQuietly, readAll } from '../storage.js';
 import { isUuid, optionalBoolean, optionalString, readJsonBody, requireString, requireUuidParam } from '../util.js';
+import { scheduleLoreEmbedding } from '../vectors.js';
 import { countComments } from './comments.js';
 import { followState } from './explore.js';
 
@@ -1097,6 +1098,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
         ...(language ? { language } : {}),
       })
       .returning();
+    scheduleLoreEmbedding(deps, created!.id);
     return c.json(toPlotJson(created!), 201);
   });
 
@@ -1169,6 +1171,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
         background !== undefined && backgroundWithoutStyles(background).length > MAX_BACKGROUND_HTML_LENGTH ? 1 : 0,
       ...localized.warnings,
     });
+    scheduleLoreEmbedding(deps, plot.id);
     return c.json({ ...((await ownerView(deps, plot)) as object), importWarnings: warnings }, 201);
   });
 
@@ -1256,6 +1259,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       );
       return created!;
     });
+    scheduleLoreEmbedding(deps, plot.id);
     return c.json(await ownerView(deps, plot), 201);
   });
 
@@ -1363,6 +1367,8 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
         .returning();
       return row!;
     });
+    // The book, or the language that picks the model its vectors are of.
+    scheduleLoreEmbedding(deps, id);
     return c.json(await ownerView(deps, updated));
   });
 
@@ -1603,7 +1609,9 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     const name = requireString(body, 'name').trim();
     if (!name) throw badRequest('invalid_request', 'name must not be empty');
     const card = body['card'] === undefined ? emptyCard(name) : coerceCard(body['card'], name);
-    return c.json(toMemberJson(plot, await insertMember(deps, id, name, card)), 201);
+    const member = await insertMember(deps, id, name, card);
+    scheduleLoreEmbedding(deps, id);
+    return c.json(toMemberJson(plot, member), 201);
   });
 
   // Registered before `/:characterId`, which would otherwise swallow both.
@@ -1640,6 +1648,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       stylesheet_over_limit: creatorCssOverCap(parsed.card.extensions) ? 1 : 0,
       ...localized.warnings,
     });
+    scheduleLoreEmbedding(deps, id);
     // The default variables the work already had another value for, and what the
     // import left behind, for the studio to say so.
     return c.json({ ...toMemberJson(plot, member), variableConflicts, importWarnings: importWarningList }, 201);
@@ -1681,6 +1690,8 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       }
       return loadMembers(tx, id);
     });
+    // The first member's settings are the book's, whether every entry activates by meaning among them.
+    scheduleLoreEmbedding(deps, id);
     return c.json(members.map((member) => toMemberJson(plot, member)));
   });
 
@@ -1727,6 +1738,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
         .returning();
       return row!;
     });
+    scheduleLoreEmbedding(deps, id);
     return c.json(toMemberJson(plot, updated));
   });
 
@@ -1748,6 +1760,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
         .where(eq(plots.id, id));
     });
     if (member.avatarPath) await deleteQuietly(deps.storage, member.avatarPath);
+    scheduleLoreEmbedding(deps, id);
     return c.body(null, 204);
   });
 
@@ -2205,6 +2218,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     const localized = await localizeImport(deps, id, { plot: false, modules: [module.id] });
     plot = (await deps.db.select().from(plots).where(eq(plots.id, id)).limit(1))[0] ?? plot;
     const warnings = importWarnings({ ...assetWarnings(undefined, stored), ...localized.warnings });
+    scheduleLoreEmbedding(deps, id);
     return c.json({ ...((await ownerView(deps, plot)) as object), importWarnings: warnings }, 201);
   });
 
@@ -2230,6 +2244,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     });
     if (!removed) throw notFound('Module not found');
     await deleteAssets(deps, id, removed.gone.assets);
+    scheduleLoreEmbedding(deps, id);
     return c.json(await ownerView(deps, removed.plot));
   });
 

@@ -216,6 +216,9 @@
     "loreSelective": "Require secondary keys",
     "loreCaseSensitive": "Case sensitive",
     "loreUseRegex": "Regex",
+    "loreVectorized": "Activate by meaning",
+    "loreVectorizeAll": "Activate every entry by meaning",
+    "loreVectorizeAllHint": "An entry turns on when the latest turns are close to it in meaning, even if no key matches (SillyTavern's vectorization). To choose entry by entry, use each entry's \"Activate by meaning\". Saved on {first}'s card.",
     "loreAdvanced": "Advanced",
     "loreAdvancedHint": "Leave a field empty for the default. Scan depth, delay, sticky and cooldown count messages.",
     "loreSelectiveLogic": "Secondary key logic",
@@ -1078,6 +1081,7 @@
         "lore_after": "Lorebook (after characters)",
         "persona": "Persona",
         "memory": "Memory",
+        "retrieval": "Recalled messages",
         "relationship": "Relationship",
         "directions": "Game ruling",
         "examples": "Example dialogue",
@@ -1108,7 +1112,8 @@
         "constant": "Always on",
         "keyword": "Keyword",
         "sticky": "Sticky",
-        "recursion": "Recursion"
+        "recursion": "Recursion",
+        "vector": "meaning"
       }
     },
     "importing": "This chat is still being imported. You can carry on once everything is in.",
@@ -1139,6 +1144,8 @@
     "readerLanguageAuto": "Page language ({language})",
     "translateInput": "Translate my messages into {work} before sending",
     "translateInputHint": "The auxiliary model translates them before they are sent. The translated text is what is stored and what the model reads.",
+    "retrieval": "Recall past messages",
+    "retrievalHint": "Finds earlier messages close in meaning to the latest turns and puts them back in the prompt (SillyTavern's chat vectorization). The newest five messages stay where they are.",
     "placeholderTranslated": "Sent in {work}…",
     "noteDepth": "Depth",
     "noteDepthValue": "{depth, plural, =0 {At the end} other {# from end}}",

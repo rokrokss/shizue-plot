@@ -25,6 +25,7 @@ export * from './authorNote.js';
 export * from './translation.js';
 export * from './risuRequest.js';
 export * from './memory.js';
+export * from './vectors.js';
 export * from './card/parse.js';
 export * from './card/risuModule.js';
 export * from './card/export.js';

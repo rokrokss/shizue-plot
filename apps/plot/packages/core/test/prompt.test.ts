@@ -407,6 +407,48 @@ describe('assemblePrompt', () => {
     expect(blank.system).toBe(assemble(100_000).system);
   });
 
+  it("sends the messages a search brought back after the memory, as ST's Past events follow its summary", () => {
+    const { system, report } = assemblePrompt({
+      plot,
+      characters: [aria],
+      history,
+      preset,
+      userName: '민준',
+      memoryText: '[지난 이야기 요약]\n요약.',
+      retrievalText: 'Past events:\n{{user}}: 등대에 가자',
+      relationshipText: '[현재 관계 상태]\n애정 70',
+      report: true,
+    });
+    const sections = system.split('\n\n');
+    expect(sections.slice(-3)).toEqual(['[지난 이야기 요약]\n요약.', 'Past events:\n민준: 등대에 가자', '[현재 관계 상태]\n애정 70']);
+    expect(report!.blocks.find((block) => block.kind === 'retrieval')?.text).toBe('Past events:\n민준: 등대에 가자');
+    expect(assemblePrompt({ plot, characters: [aria], history, preset, retrievalText: ' ' }).system).toBe(
+      assemble(100_000).system,
+    );
+  });
+
+  it('activates the lore a search by meaning found, and reports it as such', () => {
+    const tower: LoreEntry = {
+      keys: ['lighthouse'],
+      secondaryKeys: [],
+      selective: false,
+      content: '등대지기는 밤마다 불을 켠다.',
+      enabled: true,
+      constant: false,
+      insertionOrder: 0,
+      caseSensitive: false,
+      useRegex: false,
+      position: 'before_char',
+      vectorized: true,
+    };
+    const input = { plot: { ...plot, lorebook: [tower] }, characters: [aria], history, preset, report: true };
+    expect(assemblePrompt(input).system).not.toContain('등대지기');
+    const found = assemblePrompt({ ...input, vectorLore: (entry: LoreEntry) => entry === tower });
+    expect(found.system).toContain('등대지기는 밤마다 불을 켠다.');
+    expect(found.report!.lore.map((lore) => lore.via)).toEqual(['vector']);
+    expect(found.loreTriggers).toEqual([loreEntryKey(tower)]);
+  });
+
   it('charges memoryText to the same budget as the rest of the system prefix', () => {
     const memoryText = '[지난 이야기 요약]\n'.padEnd(400, '요약 ');
     const base = assemble(100_000);

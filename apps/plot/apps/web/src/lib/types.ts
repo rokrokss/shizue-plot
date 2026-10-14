@@ -601,6 +601,12 @@ export interface Chat {
    * for the same reason.
    */
   translation?: ChatTranslationSettings;
+  /**
+   * Whether the chat's earlier messages are searched by meaning and brought back
+   * into the prompt — SillyTavern's chat vectorization. Optional for the same
+   * reason; absent is off.
+   */
+  retrieval?: { enabled: boolean };
   /** Prompt preset id, one of the ids GET /api/presets lists. */
   preset: string;
   /** The reader's own preset on top of `preset`; null adds nothing. */

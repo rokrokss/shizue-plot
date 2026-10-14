@@ -9,6 +9,7 @@ import {
   coerceAuthorNoteSettings,
   coerceNarrator,
   coerceTranslationSettings,
+  retrievalEnabled,
   isTranslationLanguage,
   resolveTranslation,
   type TranslationLanguage,
@@ -31,6 +32,7 @@ import {
   stripImageMacros,
   stripVariableMacros,
   withNarrationPrefix,
+  type ChatRetrievalSettings,
   type HistoryMessage,
   type LoreEntry,
   type LoreTimedState,
@@ -167,6 +169,7 @@ import {
   requireString,
   requireUuidParam,
 } from '../util.js';
+import { scheduleMessageEmbedding } from '../vectors.js';
 import { personaAvatarUrl } from './personas.js';
 
 export const toChatJson = (chat: Chat, noteIds: string[]) => ({
@@ -189,6 +192,8 @@ export const toChatJson = (chat: Chat, noteIds: string[]) => ({
    * which only the reader's browser knows — so it resolves it.
    */
   translation: chat.translation ?? {},
+  /** Whether the chat's earlier messages are searched by meaning and brought back (SillyTavern's chat vectorization). */
+  retrieval: { enabled: retrievalEnabled(chat.retrieval) },
   preset: chat.preset,
   /** The reader's own preset on top of `preset`; null adds nothing. */
   readerPresetId: chat.readerPresetId,
@@ -531,6 +536,16 @@ function optionalSettings<T>(
     throw badRequest('invalid_request', `${key} must be an object or null`);
   }
   return coerce(value);
+}
+
+/** The chat's retrieval switch; off is stored as null, as it starts. */
+function coerceRetrievalSettings(value: unknown): ChatRetrievalSettings | null {
+  if (value === null) return null;
+  const enabled = (value as Record<string, unknown>)['enabled'];
+  if (enabled !== undefined && typeof enabled !== 'boolean') {
+    throw badRequest('invalid_request', 'retrieval.enabled must be a boolean');
+  }
+  return enabled ? { enabled: true } : null;
 }
 
 function optionalMemorySettings(body: Record<string, unknown>): ChatMemorySettings | null | undefined {
@@ -936,11 +951,12 @@ function readerPromptSettings(
   c: Context<AppEnv>,
   chat: Chat,
   plot: Plot,
-): Pick<GenerationPlan, 'authorNoteSettings' | 'replyLanguage'> {
+): Pick<GenerationPlan, 'authorNoteSettings' | 'replyLanguage' | 'vectors'> {
   const language = resolveTranslation(chat.translation, plot.language, readerLocale(c));
   return {
     ...(chat.noteSettings ? { authorNoteSettings: chat.noteSettings } : {}),
     ...(language.mode === 'instruct' && language.language ? { replyLanguage: language.language } : {}),
+    vectors: { plotId: plot.id, plotLanguage: plot.language, retrieval: retrievalEnabled(chat.retrieval) },
   };
 }
 
@@ -1949,10 +1965,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const absentCharacterIds = await patchedAbsentIds(deps, body, chat);
       const noteSettings = optionalSettings(body, 'noteSettings', coerceAuthorNoteSettings);
       const translation = optionalSettings(body, 'translation', coerceTranslationSettings);
+      const retrieval = optionalSettings(body, 'retrieval', coerceRetrievalSettings);
 
       if (
         noteSettings === undefined &&
         translation === undefined &&
+        retrieval === undefined &&
         model === undefined &&
         subModel === undefined &&
         personaId === undefined &&
@@ -1990,10 +2008,13 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           ...(absentCharacterIds !== undefined ? { absentCharacterIds } : {}),
           ...(noteSettings !== undefined ? { noteSettings } : {}),
           ...(translation !== undefined ? { translation } : {}),
+          ...(retrieval !== undefined ? { retrieval } : {}),
           updatedAt: new Date(),
         })
         .where(and(eq(chats.id, id), eq(chats.userId, userId)))
         .returning();
+      // Turned on: the branch so far is embedded now, not only after the next reply.
+      if (retrievalEnabled(retrieval)) scheduleMessageEmbedding(deps, id);
       return c.json(await chatState(deps, updated!));
     } finally {
       await releaseChatSlot(deps, id);

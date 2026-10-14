@@ -87,6 +87,7 @@ import {
   type PromptInjections,
 } from './scriptState.js';
 import { unlockAssets } from './unlocks.js';
+import { scheduleMessageEmbedding, searchByMeaning, type VectorPlan } from './vectors.js';
 
 /**
  * The fire-and-forget jobs a completed assistant turn starts. They own separate
@@ -100,6 +101,8 @@ import { unlockAssets } from './unlocks.js';
 export function scheduleBackgroundUpdates(deps: AppDeps, chatId: string, reply?: string): void {
   scheduleMemoryUpdate(deps, chatId);
   scheduleRelationshipUpdate(deps, chatId);
+  // The chat's retrieval searches the branch with the reply in it from the next turn on.
+  scheduleMessageEmbedding(deps, chatId);
   // The emotion picture `reply` leaves its member wearing — only for a reply that
   // finished: RisuAI chooses none for one the reader stopped.
   if (reply !== undefined) scheduleEmotionDetection(deps, chatId, reply);
@@ -224,6 +227,12 @@ export interface GenerationPlan {
    * `characters`, whose books the request triggers' lore effects read alone.
    */
   localLore?: LoreEntry[];
+  /**
+   * What SillyTavern's vector storage searches with (`vectors.ts`): the plot and
+   * its language, which picks the model, and whether the chat's retrieval is on.
+   * Absent: no search, lore by keyword only.
+   */
+  vectors?: VectorPlan;
   /** The chat's prompt preset. */
   preset: Preset;
   /** The reader's own preset on top of it (`chats.reader_preset_id`), if the chat picked one. */
@@ -817,10 +826,25 @@ async function assembleRequest(
     : plan.branch.length <= 1
       ? { length: 0 }
       : { ...plan.branch, length: plan.branch.length - 1 };
+  // SillyTavern's vector storage: the lore found by meaning, and the earlier
+  // messages brought back — which leave the history for this request, as ST
+  // takes them out of the chat it sends. Never the newest turns, so never the
+  // partial. Without an embedder, or past its deadline, nothing is found.
+  const found = await searchByMeaning(deps, {
+    vectors: plan.vectors,
+    plot: plan.plot,
+    characters: plan.characters,
+    branch: plan.wholeBranch,
+    userName: plan.userName,
+  });
+  const turns =
+    found.retrieved.size > 0
+      ? plan.history.map((turn) => (turn.id !== undefined && found.retrieved.has(turn.id) ? { ...turn, hidden: true } : turn))
+      : plan.history;
   // The scripts read the turns as stored, before an image note is added to them —
   // the greeting as the reader's overlay has it, which is what the assembler sends.
   const history = await withoutUnseeableImages(
-    await withPromptScripts(withBranchGreeting(isContinue ? plan.history.slice(0, -1) : plan.history, branch), plan, branch),
+    await withPromptScripts(withBranchGreeting(isContinue ? turns.slice(0, -1) : turns, branch), plan, branch),
     plan.model,
     deps,
     account,
@@ -844,6 +868,7 @@ async function assembleRequest(
     personaText: plan.personaText,
     userName: plan.userName,
     memoryText: plan.memoryText,
+    ...(found.retrievalText ? { retrievalText: found.retrievalText } : {}),
     relationshipText: plan.relationshipText,
     authorNote: plan.authorNote,
     ...(plan.authorNoteSettings ? { authorNoteSettings: plan.authorNoteSettings } : {}),
@@ -863,6 +888,7 @@ async function assembleRequest(
     model: { id: plan.model, maxContext: plan.contextBudget, prefill: false, auxiliary: plan.auxiliaryModel },
     ...(plan.injections ? { injections: plan.injections } : {}),
     loreState: plan.loreState,
+    ...(found.vectorLore ? { vectorLore: found.vectorLore } : {}),
     assetNames: plan.assetNames,
     history,
     // The budget reserves what the stream may actually spend — the same value

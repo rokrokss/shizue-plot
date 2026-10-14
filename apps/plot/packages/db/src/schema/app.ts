@@ -1,6 +1,7 @@
 import type {
   AssetUnlock,
   AuthorNoteSettings,
+  ChatRetrievalSettings,
   ChatTranslationSettings,
   GroupSettings,
   HypaV3Settings,
@@ -474,6 +475,10 @@ export const chats = pgTable(
     // a reply-language instruction, or RisuAI's translation. Null decides it by
     // the plot's language against the reader's.
     translation: jsonb('translation').$type<ChatTranslationSettings>(),
+    // Whether the chat's earlier messages are searched by meaning and brought back
+    // into the prompt — SillyTavern's chat vectorization (`ChatRetrievalSettings`).
+    // Null is off, as in ST.
+    retrieval: jsonb('retrieval').$type<ChatRetrievalSettings>(),
     // Prompt preset id (see @shizue/core presets); unknown values fall back to the default.
     preset: text('preset').notNull().default('standard'),
     // The reader's own preset on top of it; null adds nothing. Always one of the
@@ -689,6 +694,47 @@ export const chatSummaryChunks = pgTable(
     embedding: anyVector('embedding').notNull(),
   },
   (t) => [primaryKey({ columns: [t.summaryId, t.chunkIndex] })],
+);
+
+// A lore entry's content embedded for SillyTavern's vectorized World Info (@shizue/core
+// `vectors.ts`): one row per distinct content among the plot's entries that activate
+// by meaning — its own book's, its members' and its modules'. Keyed by a hash of the
+// content, as ST keys its World Info vectors, so an edited entry is a row of its own
+// and the old one goes on the next embedding pass. `model` as in `chat_summary_chunks`:
+// a row of another model is stale, never compared, and replaced when the entry is
+// embedded again.
+export const loreEntryVectors = pgTable(
+  'lore_entry_vectors',
+  {
+    plotId: uuid('plot_id')
+      .notNull()
+      .references(() => plots.id, { onDelete: 'cascade' }),
+    contentHash: text('content_hash').notNull(),
+    content: text('content').notNull(),
+    model: text('model').notNull(),
+    embedding: anyVector('embedding').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.plotId, t.contentHash] })],
+);
+
+// A message split as SillyTavern's chat vectorization splits it (`retrievalChunks`,
+// 400 characters), each piece embedded, for the chat's retrieval. `content_hash` is
+// the message's text when it was embedded: a row whose hash is not the message's any
+// more is stale — the text was edited — and is neither searched nor kept. `model` as
+// in `chat_summary_chunks`.
+export const messageChunks = pgTable(
+  'message_chunks',
+  {
+    messageId: uuid('message_id')
+      .notNull()
+      .references(() => messages.id, { onDelete: 'cascade' }),
+    chunkIndex: integer('chunk_index').notNull(),
+    contentHash: text('content_hash').notNull(),
+    content: text('content').notNull(),
+    model: text('model').notNull(),
+    embedding: anyVector('embedding').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.messageId, t.chunkIndex] })],
 );
 
 // A message translated for display, per language the reader reads it in

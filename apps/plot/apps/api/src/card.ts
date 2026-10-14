@@ -111,6 +111,8 @@ function coerceLoreEntry(value: unknown): LoreEntry {
     // Where the entry came from decides whether its scan reads the greeting
     // (`LoreEntry.sillyTavern`), so a save keeps it.
     ...(raw['sillyTavern'] === true ? { sillyTavern: true as const } : {}),
+    // SillyTavern's vectorized entry: activated by meaning as well as by its keys.
+    ...(raw['vectorized'] === true ? { vectorized: true as const } : {}),
   };
 }
 
@@ -523,6 +525,7 @@ export function coerceCard(value: unknown, fallbackName: string): NormalizedCard
       recursiveScanning: bool(lore['recursiveScanning'], DEFAULT_LORE_SETTINGS.recursiveScanning),
       ...wholeIn(lore['maxRecursionSteps'], 1, 1000, 'maxRecursionSteps'),
       ...(lore['risuMatching'] === true ? { risuMatching: true } : {}),
+      ...(lore['vectorizeAll'] === true ? { vectorizeAll: true } : {}),
     },
     ...(displayScripts.length > 0 ? { displayScripts } : {}),
     ...(Object.keys(defaultVariables).length > 0 ? { defaultVariables } : {}),

@@ -62,6 +62,7 @@ export function ChatSettings({
   disabled,
   stacked,
   language,
+  retrieval,
   onChange,
 }: {
   model: string;
@@ -82,6 +83,8 @@ export function ChatSettings({
   stacked?: boolean;
   /** The language mode's controls; none until the plot read says what language the work is in. */
   language?: LanguageSettingsView;
+  /** Whether the chat brings back its earlier messages by meaning; without it, no control. */
+  retrieval?: boolean;
   onChange: (patch: {
     model?: string;
     subModel?: string | null;
@@ -90,6 +93,7 @@ export function ChatSettings({
     readerPresetId?: string | null;
     personaId?: string | null;
     translation?: ChatTranslationSettings;
+    retrieval?: { enabled: boolean };
   }) => void;
 }) {
   const t = useTranslations('chat');
@@ -258,6 +262,19 @@ export function ChatSettings({
         </PersonaFace>,
       )}
       {language ? languageFields(language) : null}
+      {/* SillyTavern's chat vectorization, off as there. The compact row has no
+          room for the hint, so there it is the control's title. */}
+      {retrieval !== undefined ? (
+        <div className={stacked ? 'space-y-1.5' : 'shrink-0 whitespace-nowrap'} title={stacked ? undefined : (locked ?? t('retrievalHint'))}>
+          <Checkbox
+            label={t('retrieval')}
+            checked={retrieval}
+            disabled={disabled}
+            onChange={(enabled) => onChange({ retrieval: { enabled } })}
+          />
+          {stacked ? <p className="text-xs text-muted">{t('retrievalHint')}</p> : null}
+        </div>
+      ) : null}
     </div>
   );
 

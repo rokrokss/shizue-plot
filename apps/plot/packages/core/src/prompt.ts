@@ -240,9 +240,17 @@ export interface AssemblePromptInput {
    */
   memoryText?: string;
   /**
+   * The earlier messages a search by meaning brought back (SillyTavern's chat
+   * vectorization, `retrievalBlock`), already formatted. Injected right after
+   * the memory, where ST's `3_vectors` follows its summary. The caller takes the
+   * messages it holds out of `history` (as hidden), as ST takes them out of the
+   * chat it sends.
+   */
+  retrievalText?: string;
+  /**
    * Relationship state block (the six axes plus a one-line summary), already
-   * formatted. Injected right after the memory, so the model sees who the two
-   * are to each other before it reads the turns.
+   * formatted. Injected after the memory and what retrieval brought back, so
+   * the model sees who the two are to each other before it reads the turns.
    */
   relationshipText?: string;
   /**
@@ -312,6 +320,13 @@ export interface AssemblePromptInput {
    * the whole branch, which `history` may be only the newest stretch of.
    */
   loreState?: LoreTimedState;
+  /**
+   * The lore entries a search by meaning activated (SillyTavern's vectorized
+   * World Info): each one activates as a keyword match would
+   * (`ActivateLoreInput.vectorMatched`). The caller searched before the
+   * assembler, which never waits on an embedder. Absent: none.
+   */
+  vectorLore?: (entry: LoreEntry) => boolean;
   /** The names this chat's open images go by, for {{assetlist}} (`MacroContext.assetNames`). */
   assetNames?: readonly string[];
   contextBudget?: number;
@@ -423,6 +438,7 @@ export type PromptBlockKind =
   | 'lore_after'
   | 'persona'
   | 'memory'
+  | 'retrieval'
   | 'relationship'
   | 'directions'
   | 'examples'
@@ -785,6 +801,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     history: given,
     personaText = '',
     memoryText = '',
+    retrievalText = '',
     relationshipText = '',
     authorNote = '',
     authorNoteSettings,
@@ -800,6 +817,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     model,
     injections = {},
     loreState,
+    vectorLore,
     assetNames,
     userName = DEFAULT_USER_NAME,
     contextBudget = DEFAULT_CONTEXT_BUDGET,
@@ -1042,6 +1060,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     risuMatching: loreSettings.risuMatching ?? false,
     textOf: expandLore,
     ...(loreState ? { timed: loreState } : {}),
+    ...(vectorLore ? { vectorMatched: vectorLore } : {}),
   });
   /** The expanded entries a position holds, in insertionOrder, the empty ones left out. */
   const loreAt = (position: LorePosition): LoreEntry[] =>
@@ -1135,6 +1154,10 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // 5b. memory — the summary of the evicted history plus any retrieved facts.
   const memoryBlock = memoryText.trim() ? expand(memoryText).trim() : '';
 
+  // 5b'. the earlier messages a search by meaning found — ST's "Past events", which
+  // it sends after its summary.
+  const retrievalBlock = retrievalText.trim() ? expand(retrievalText).trim() : '';
+
   // 5c. relationship — how the plot's characters currently feel about the user.
   const relationshipBlock = relationshipText.trim() ? expand(relationshipText).trim() : '';
 
@@ -1151,6 +1174,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     { kind: 'lore_after', text: loreText('after_char') },
     { kind: 'persona', text: personaBlock },
     { kind: 'memory', text: memoryBlock },
+    { kind: 'retrieval', text: retrievalBlock },
     { kind: 'relationship', text: relationshipBlock },
   ];
   const systemSections = sections

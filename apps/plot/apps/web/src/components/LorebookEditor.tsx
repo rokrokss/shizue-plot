@@ -81,6 +81,18 @@ export function LorebookEditor({
       }),
     );
 
+  // Off is absent, as an imported entry that never had the flag stores it.
+  const setVectorized = (index: number, vectorized: boolean): void =>
+    onChange(
+      entries.map((entry, i) => {
+        if (i !== index) return entry;
+        const next = { ...entry };
+        if (vectorized) next.vectorized = true;
+        else delete next.vectorized;
+        return next;
+      }),
+    );
+
   // An emptied field goes back to absent — the default — rather than to 0, which
   // for most of these means something else entirely.
   const setOptional = (index: number, field: LoreNumberField | 'group', raw: string): void =>
@@ -224,6 +236,12 @@ export function LorebookEditor({
                 label={t('loreUseRegex')}
                 checked={entry.useRegex}
                 onChange={(useRegex) => update(index, { useRegex })}
+              />
+              {/* SillyTavern's vectorized entry: off unless set, and stored only when set. */}
+              <Checkbox
+                label={t('loreVectorized')}
+                checked={entry.vectorized === true}
+                onChange={(vectorized) => setVectorized(index, vectorized)}
               />
             </div>
 

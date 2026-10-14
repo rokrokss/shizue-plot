@@ -99,6 +99,13 @@
       "when": 1792010854325,
       "tag": "0013_translation_note_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1792015371149,
+      "tag": "0014_semantic_lore_retrieval",
+      "breakpoints": true
     }
   ]
 }

@@ -110,6 +110,8 @@ export const RISU_REQUEST_ITEMS: Record<PromptBlockKind, RisuItemRule> = {
   persona: {},
   // Its own turn, after the system string, and never removable.
   memory: { memo: 'supaMemory' },
+  // SillyTavern's, which RisuAI has no turn for: part of the system string.
+  retrieval: {},
   relationship: {},
   // Ours alone, beside the system string: as RisuAI's system turns, nothing.
   directions: {},

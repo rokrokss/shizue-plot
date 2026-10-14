@@ -216,6 +216,9 @@
     "loreSelective": "補助キーワード必須",
     "loreCaseSensitive": "大文字小文字を区別",
     "loreUseRegex": "正規表現",
+    "loreVectorized": "意味で発動",
+    "loreVectorizeAll": "すべてのエントリーを意味で発動",
+    "loreVectorizeAllHint": "キーワードが合わなくても、最近のやり取りと意味の近いエントリーが発動します（SillyTavern のベクトル化）。エントリーごとに選ぶには、各エントリーの「意味で発動」を使ってください。{first}のカードに保存されます。",
     "loreAdvanced": "詳細設定",
     "loreAdvancedHint": "空欄は既定値です。スキャン深度・遅延・持続・クールダウンはメッセージ数で数えます。",
     "loreSelectiveLogic": "補助キーワードの条件",
@@ -1078,6 +1081,7 @@
         "lore_after": "ロアブック（キャラクター後）",
         "persona": "ペルソナ",
         "memory": "記憶",
+        "retrieval": "呼び戻した会話",
         "relationship": "関係",
         "directions": "ゲーム判定",
         "examples": "例文対話",
@@ -1108,7 +1112,8 @@
         "constant": "常時",
         "keyword": "キーワード",
         "sticky": "持続",
-        "recursion": "再帰"
+        "recursion": "再帰",
+        "vector": "意味"
       }
     },
     "importing": "このチャットはまだ読み込み中です。すべて入ったら続きを書けます。",
@@ -1139,6 +1144,8 @@
     "readerLanguageAuto": "表示言語（{language}）",
     "translateInput": "自分のメッセージを{work}に翻訳して送る",
     "translateInputHint": "送信前に補助モデルで翻訳します。保存され、モデルが読むのは翻訳後の文章です。",
+    "retrieval": "過去の会話を呼び戻す",
+    "retrievalHint": "最近のやり取りと意味の近い以前のメッセージを探して、プロンプトに入れ直します（SillyTavern のチャットベクトル化）。最新の5件はその場に残ります。",
     "placeholderTranslated": "{work}に翻訳して送信…",
     "noteDepth": "挿入の深さ",
     "noteDepthValue": "{depth, plural, =0 {末尾} other {末尾から#}}",

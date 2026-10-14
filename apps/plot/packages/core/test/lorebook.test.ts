@@ -514,3 +514,88 @@ describe('activateLore - RisuAI matching', () => {
     expect(fires(regex, '마왕 성', true)).toBe(true);
   });
 });
+
+describe('activateLore - by meaning (SillyTavern vectorized entries)', () => {
+  const tower = entry({ content: 'The lighthouse keeper', keys: ['lighthouse'], insertionOrder: 2 });
+  const map = entry({ content: 'The old map', keys: ['map'], insertionOrder: 1 });
+  const found =
+    (...hits: LoreEntry[]) =>
+    (candidate: LoreEntry): boolean =>
+      hits.includes(candidate);
+
+  it('activates a found entry whatever its keys say, beside the keyword matches', () => {
+    const result = run([tower, map], { history: ['지도를 펼쳤다 map'], vectorMatched: found(tower) });
+    expect(contents(result)).toEqual(['The old map', 'The lighthouse keeper']);
+    expect(result.via.get(tower)).toBe('vector');
+    expect(result.via.get(map)).toBe('keyword');
+    // A trigger like any other, so its sticky and cooldown windows start from it.
+    expect(new Set(result.triggered)).toEqual(new Set([loreEntryKey(tower), loreEntryKey(map)]));
+  });
+
+  it('skips the secondary keys and the scan depth, as an external activation does', () => {
+    const selective = { ...tower, selective: true, secondaryKeys: ['night'], scanDepth: 0 };
+    expect(contents(run([selective], { history: ['낮'], vectorMatched: found(selective) }))).toEqual([
+      'The lighthouse keeper',
+    ]);
+  });
+
+  it('still answers to the budget, which pays for the highest insertionOrder first', () => {
+    const result = run([tower, map], {
+      history: ['map'],
+      budgetTokens: 'The lighthouse keeper'.length,
+      vectorMatched: found(tower),
+    });
+    expect(contents(result)).toEqual(['The lighthouse keeper']);
+    expect(result.triggered).toEqual([loreEntryKey(tower)]);
+  });
+
+  it('feeds recursion like a keyword match', () => {
+    const chained = entry({ content: 'keeper of the flame', keys: ['keeper'] });
+    const result = run([tower, chained], {
+      history: ['아무 말'],
+      recursiveScanning: true,
+      vectorMatched: found(tower),
+    });
+    expect(contents(result)).toContain('keeper of the flame');
+    expect(result.via.get(chained)).toBe('recursion');
+  });
+
+  it('leaves a delayed or cooling-down entry off, and does not renew a sticky one', () => {
+    const key = loreEntryKey(tower);
+    const timed = (chatLength: number, at?: number) => ({
+      chatLength,
+      lastTriggered: at === undefined ? {} : { [key]: at },
+    });
+    const delayed = { ...tower, delay: 5 };
+    expect(contents(run([delayed], { history: [''], vectorMatched: found(delayed), timed: timed(2) }))).toEqual([]);
+    const cooled = { ...tower, cooldown: 3 };
+    expect(contents(run([cooled], { history: [''], vectorMatched: found(cooled), timed: timed(4, 3) }))).toEqual([]);
+    const sticky = { ...tower, sticky: 3 };
+    const carried = run([sticky], { history: [''], vectorMatched: found(sticky), timed: timed(4, 3) });
+    expect(carried.via.get(sticky)).toBe('sticky');
+    expect(carried.triggered).toEqual([]);
+  });
+
+  it('rolls the probability and draws the inclusion group as for any trigger', () => {
+    const rolled = { ...tower, probability: 10 };
+    expect(contents(run([rolled], { history: [''], vectorMatched: found(rolled), random: () => 0.5 }))).toEqual([]);
+    const a = { ...tower, group: 'place' };
+    const b = { ...map, group: 'place' };
+    expect(run([a, b], { history: ['map'], vectorMatched: found(a), random: () => 0 }).entries).toHaveLength(1);
+  });
+
+  it('is asked on the first pass only', () => {
+    const asked: LoreEntry[] = [];
+    const chained = entry({ content: 'lighthouse', keys: ['아무'] });
+    run([chained, tower], {
+      history: ['아무 말'],
+      recursiveScanning: true,
+      vectorMatched: (candidate) => {
+        asked.push(candidate);
+        return false;
+      },
+    });
+    // The tower activates on the second pass by recursion, never by meaning.
+    expect(asked).toEqual([chained, tower]);
+  });
+});

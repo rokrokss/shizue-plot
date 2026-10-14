@@ -2676,6 +2676,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     noteSettings?: Required<AuthorNoteSettings>;
     /** The language mode as the reader picked it, whole. */
     translation?: ChatTranslationSettings;
+    /** Whether earlier messages are searched by meaning and brought back. */
+    retrieval?: { enabled: boolean };
   }): Promise<void> {
     if (!beginMutation()) return;
     setSettingsError('');
@@ -3006,6 +3008,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               readerPresets={readerPresets}
               onReaderPresetsChange={setReaderPresets}
               disabled={settingsLocked}
+              retrieval={state.chat.retrieval?.enabled ?? false}
               onChange={(patch) => void updateSettings(patch)}
               {...(languageView ? { language: languageView } : {})}
             />
@@ -3731,6 +3734,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             readerPresets={readerPresets}
             onReaderPresetsChange={setReaderPresets}
             disabled={settingsLocked}
+            retrieval={state.chat.retrieval?.enabled ?? false}
             onChange={(patch) => void updateSettings(patch)}
             {...(languageView ? { language: languageView } : {})}
           />

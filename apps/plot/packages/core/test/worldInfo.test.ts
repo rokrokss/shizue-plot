@@ -99,6 +99,8 @@ describe('toWorldInfo', () => {
       entry({ position: 'before_author_note' }),
       entry({ position: 'after_examples' }),
       entry({ position: 'outlet', outletName: '금고' }),
+      // ST's 🔗 status: activated by meaning as well.
+      entry({ vectorized: true }),
     ];
     // Through JSON, as the file travels — and read back as SillyTavern's, whose
     // scan reads the greeting; the file itself says nothing of it.
@@ -202,6 +204,21 @@ describe('fromLorebookFile', () => {
 
     const exported = exportCardV3(normalizeCard(stCard()));
     expect(fromLorebookFile(exported)).toEqual(normalizeCard(stCard()).lorebook);
+  });
+
+  it("keeps SillyTavern's vectorized flag from a character_book entry, and writes it back only when set", () => {
+    const book = {
+      entries: [
+        { keys: ['등대'], content: '등대지기', extensions: { position: 0, vectorized: true } },
+        { keys: ['지도'], content: '낡은 지도', extensions: { position: 0, vectorized: false } },
+      ],
+    };
+    const [marked, plain] = fromLorebookFile(book);
+    expect(marked!.vectorized).toBe(true);
+    expect('vectorized' in plain!).toBe(false);
+    const written = toWorldInfo([marked!, plain!]);
+    expect(written.entries['0']!['vectorized']).toBe(true);
+    expect('vectorized' in written.entries['1']!).toBe(false);
   });
 
   it('reads a CCv3 lorebook file', () => {

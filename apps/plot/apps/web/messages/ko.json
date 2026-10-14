@@ -216,6 +216,9 @@
     "loreSelective": "보조 키워드 필수",
     "loreCaseSensitive": "대소문자 구분",
     "loreUseRegex": "정규식",
+    "loreVectorized": "의미로 켜기",
+    "loreVectorizeAll": "모든 엔트리를 의미로 켜기",
+    "loreVectorizeAllHint": "키워드가 맞지 않아도 최근 대화와 뜻이 가까운 엔트리가 켜집니다(SillyTavern의 벡터화). 엔트리마다 켜려면 각 엔트리의 \"의미로 켜기\"를 고르세요. {first}의 카드에 저장됩니다.",
     "loreAdvanced": "고급",
     "loreAdvancedHint": "빈 칸은 기본값입니다. 스캔 깊이·지연·지속·재사용 대기는 메시지 수로 셉니다.",
     "loreSelectiveLogic": "보조 키워드 조건",
@@ -1078,6 +1081,7 @@
         "lore_after": "로어북 (캐릭터 뒤)",
         "persona": "페르소나",
         "memory": "기억",
+        "retrieval": "불러온 지난 대화",
         "relationship": "관계",
         "directions": "게임 판정",
         "examples": "예시 대화",
@@ -1108,7 +1112,8 @@
         "constant": "상시",
         "keyword": "키워드",
         "sticky": "지속",
-        "recursion": "재귀"
+        "recursion": "재귀",
+        "vector": "의미"
       }
     },
     "importing": "이 대화는 아직 가져오는 중입니다. 다 들어오면 이어서 쓸 수 있어요.",
@@ -1139,6 +1144,8 @@
     "readerLanguageAuto": "화면 언어 ({language})",
     "translateInput": "내 메시지를 {work}로 번역해서 보내기",
     "translateInputHint": "보내기 전에 보조 모델로 번역합니다. 저장되고 모델이 읽는 것은 번역된 글입니다.",
+    "retrieval": "지난 대화 불러오기",
+    "retrievalHint": "최근 대화와 뜻이 가까운 예전 메시지를 찾아 프롬프트에 다시 넣습니다(SillyTavern의 채팅 벡터화). 가장 최근 메시지 5개는 제자리에 둡니다.",
     "placeholderTranslated": "{work}로 번역해 보내요…",
     "noteDepth": "넣는 깊이",
     "noteDepthValue": "{depth, plural, =0 {맨 끝} other {끝에서 #}}",

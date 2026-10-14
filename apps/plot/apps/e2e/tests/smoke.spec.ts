@@ -375,6 +375,17 @@ test('picks a prompt preset that survives a reload', async () => {
   await expect(page.getByLabel('프리셋')).toHaveValue('novel');
 });
 
+test('turns on recalling past messages, off until then, which survives a reload', async () => {
+  const recall = () => page.getByRole('checkbox', { name: '지난 대화 불러오기' });
+  await expect(recall()).not.toBeChecked();
+  // Held by the chat's state, so it turns on once the write is answered.
+  await Promise.all([chatWrite('PATCH'), recall().click()]);
+  await expect(recall()).toBeChecked();
+
+  await page.reload();
+  await expect(recall()).toBeChecked();
+});
+
 test('adds my own preset on top of the chat preset, picked for the chat across a reload', async () => {
   const name = `내 문체 ${run}`;
   // A wide screen has room for one quiet button; the field opens in a sheet.

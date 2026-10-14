@@ -625,6 +625,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
             <LoreBudgetNote plotTokens={plot.plotLoreConstantTokens} members={members} />
             <p className="text-xs text-muted">{t('loreBudgetHint')}</p>
             {members[0] ? <LoreBudgetInput member={members[0]} onPatch={patchMember} /> : null}
+            {members[0] ? <LoreVectorizeAll member={members[0]} onPatch={patchMember} /> : null}
             <LorebookFileActions
               entries={lorebook}
               fileName={`${name.trim() || plot.name} ${t('lorebook')}`}
@@ -1188,6 +1189,33 @@ function LoreBudgetInput({
           }}
         />
       </Field>
+    </div>
+  );
+}
+
+/**
+ * SillyTavern's "Enabled for all entries": every entry of the one book
+ * activates by meaning too. Like the budget, a setting of the first member's
+ * card, and stored only while it is on.
+ */
+function LoreVectorizeAll({
+  member,
+  onPatch,
+}: {
+  member: PlotMember;
+  onPatch: (id: string, patch: Partial<NormalizedCard>) => void;
+}) {
+  const t = useTranslations('plot');
+  const { vectorizeAll, ...rest } = member.card.loreSettings;
+
+  return (
+    <div className="space-y-1">
+      <Checkbox
+        label={t('loreVectorizeAll')}
+        checked={vectorizeAll === true}
+        onChange={(on) => onPatch(member.id, { loreSettings: on ? { ...rest, vectorizeAll: true } : rest })}
+      />
+      <p className="text-xs text-muted">{t('loreVectorizeAllHint', { first: member.name })}</p>
     </div>
   );
 }

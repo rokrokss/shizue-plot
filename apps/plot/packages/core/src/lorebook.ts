@@ -191,6 +191,15 @@ export interface ActivateLoreInput {
    * budget on text the model never reads. The entry's key stays on the raw text.
    */
   textOf?: (entry: LoreEntry) => string;
+  /**
+   * The entries a search by meaning found (SillyTavern's vectorized activation,
+   * the API's `vectors.ts`): each activates on the first pass as a keyword match
+   * would, without its keys being read — ST's external activation, which comes
+   * after the timed effects have had their say and before constant, sticky and
+   * keys. Still subject to its probability, its inclusion groups and the budget,
+   * and its text is scanned by recursion like any other's. Absent: none.
+   */
+  vectorMatched?: (entry: LoreEntry) => boolean;
 }
 
 export interface LoreActivation {
@@ -207,9 +216,10 @@ export interface LoreActivation {
 
 /**
  * How an entry came to be active: always on, matched in the history, carried by
- * its sticky window, or matched in the content an earlier pass activated.
+ * its sticky window, matched in the content an earlier pass activated, or found
+ * by meaning (`ActivateLoreInput.vectorMatched`).
  */
-export type LoreActivationVia = 'constant' | 'keyword' | 'sticky' | 'recursion';
+export type LoreActivationVia = 'constant' | 'keyword' | 'sticky' | 'recursion' | 'vector';
 
 /**
  * Selects lore entries triggered by the newest history, keeps what fits in
@@ -239,6 +249,10 @@ export type LoreActivationVia = 'constant' | 'keyword' | 'sticky' | 'recursion';
  * subject to its `probability`, and to one-per-group among its inclusion groups
  * — where a group counts as taken once one of its members activates, whether or
  * not the budget then has room for it.
+ *
+ * An entry a search by meaning found (`vectorMatched`) is one more way in, on the
+ * first pass: it activates whatever its keys say, after the timed effects and
+ * before everything else that follows here, exactly as a keyword match does.
  */
 export function activateLore(entries: LoreEntry[], input: ActivateLoreInput): LoreActivation {
   const {
@@ -249,6 +263,7 @@ export function activateLore(entries: LoreEntry[], input: ActivateLoreInput): Lo
     risuMatching = false,
     random = Math.random,
     textOf = (entry: LoreEntry) => entry.content,
+    vectorMatched = () => false,
   } = input;
   const chatLength = input.timed?.chatLength ?? history.length;
   const lastTriggered = input.timed?.lastTriggered ?? {};
@@ -325,8 +340,10 @@ export function activateLore(entries: LoreEntry[], input: ActivateLoreInput): Lo
     ? Math.min(1 + MAX_RECURSION_PASSES, steps !== undefined && steps > 0 ? steps : Infinity)
     : 1;
   for (let pass = 0; pass < passLimit; pass += 1) {
+    // ST checks an external activation before the entry's constant flag and keys.
+    const byMeaning = new Set(pass === 0 ? pending.filter(vectorMatched) : []);
     const matched = pending
-      .filter((entry) => isTriggered(entry, scanFor(entry), pass > 0, risuMatching))
+      .filter((entry) => byMeaning.has(entry) || isTriggered(entry, scanFor(entry), pass > 0, risuMatching))
       .sort(byOrder);
     // A failed roll or a lost draw is final for this activation: the entry is not
     // rolled again on a later pass.
@@ -339,7 +356,15 @@ export function activateLore(entries: LoreEntry[], input: ActivateLoreInput): Lo
     for (const entry of activated) {
       via.set(
         entry,
-        !isFresh.has(entry) ? 'sticky' : entry.constant ? 'constant' : pass === 0 ? 'keyword' : 'recursion',
+        !isFresh.has(entry)
+          ? 'sticky'
+          : byMeaning.has(entry)
+            ? 'vector'
+            : entry.constant
+              ? 'constant'
+              : pass === 0
+                ? 'keyword'
+                : 'recursion',
       );
       for (const label of groupsOf(entry)) held.add(label);
     }

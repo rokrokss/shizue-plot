@@ -238,6 +238,7 @@ export interface SillyTavernFields {
   cooldown?: unknown;
   delay?: unknown;
   outletName?: unknown;
+  vectorized?: unknown;
 }
 
 /** The same settings as a character_book entry's `extensions` spells them. */
@@ -255,6 +256,7 @@ const fieldsOfBookExtensions = (extensions: Json): SillyTavernFields => ({
   cooldown: extensions['cooldown'],
   delay: extensions['delay'],
   outletName: extensions['outlet_name'],
+  vectorized: extensions['vectorized'],
 });
 
 /**
@@ -300,6 +302,8 @@ function loreFieldsOfSillyTavern(fields: SillyTavernFields): Partial<LoreEntry> 
     const value = wholeCount(fields[key]);
     if (value) out[key] = value;
   }
+  // The 🔗 status: the entry activates by meaning as well (`LoreEntry.vectorized`).
+  if (fields.vectorized === true) out.vectorized = true;
   return out;
 }
 
@@ -557,6 +561,7 @@ interface SillyTavernOut {
   cooldown?: number;
   delay?: number;
   outletName?: string;
+  vectorized?: true;
 }
 
 /** ST's settings for one entry, under the World Info names; the caller renames for a book. */
@@ -578,6 +583,8 @@ function sillyTavernFieldsOf(entry: LoreEntry): SillyTavernOut {
     ...(entry.delay !== undefined ? { delay: entry.delay } : {}),
     // Written for an outlet only, so every other entry exports as it always has.
     ...(entry.depth === undefined && entry.position === 'outlet' ? { outletName: entry.outletName ?? '' } : {}),
+    // Written when set only, so every other entry exports as it always has.
+    ...(entry.vectorized ? { vectorized: true as const } : {}),
   };
 }
 

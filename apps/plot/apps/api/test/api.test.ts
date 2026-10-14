@@ -42,6 +42,7 @@ import {
   PRESET_IDS,
   READER_PRESET_NAME_MAX,
   READER_PRESET_TEXT_MAX,
+  RETRIEVAL_DEFAULTS,
   readCharx,
   readPngTextChunks,
   replyLanguageInstruction,
@@ -66,6 +67,8 @@ import {
   feedCursors,
   follows,
   jobs,
+  loreEntryVectors,
+  messageChunks,
   messages,
   messageTranslations,
   notifications,
@@ -309,6 +312,7 @@ function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps {
     refreshingMemory: new Set<string>(),
     extractingRelationship: new Set<string>(),
     detectingEmotion: new Set<string>(),
+    embeddingVectors: new Map(),
     suggesting: new Set<string>(),
     drafting: new Set<string>(),
     // No test reaches another host: what a card loads from one is simply not brought in.
@@ -16783,5 +16787,297 @@ describe('what a card loads from other hosts, brought in at import', () => {
     const removed = await request(cookie, `/api/plots/${plot.id}/modules/${owner.modules[0].id}`, 'DELETE', undefined, target);
     expect(removed.status).toBe(200);
     expect(await readJson(await request(cookie, `/api/plots/${plot.id}/assets`, 'GET', undefined, target))).toEqual([]);
+  });
+});
+
+describe('vector storage (SillyTavern)', () => {
+  interface Captured {
+    system: string;
+    messages: ChatRequest['messages'];
+  }
+
+  /**
+   * An embedder of concepts, each named in either language: a text is a vector
+   * with a slot per concept it names — what a multilingual model does for
+   * `등대` and `lighthouse`. `fails` says which kinds of call throw.
+   */
+  function conceptEmbedder(
+    model = 'test-embedder',
+    fails: (kind: 'query' | 'document') => boolean = () => false,
+  ): Embedder & { calls: { texts: string[]; kind: 'query' | 'document' }[] } {
+    const concepts = [
+      ['등대', 'lighthouse'],
+      ['지도', 'map'],
+      ['고양이', 'cat'],
+    ];
+    const calls: { texts: string[]; kind: 'query' | 'document' }[] = [];
+    return {
+      calls,
+      modelFor: () => model,
+      async embed(texts, { kind = 'document' }) {
+        calls.push({ texts: [...texts], kind });
+        if (fails(kind)) throw new Error('embedder down');
+        const vectors = texts.map((text) => {
+          const lower = text.toLowerCase();
+          const vector = [0.1, ...concepts.map((names) => (names.some((name) => lower.includes(name)) ? 1 : 0))];
+          const norm = Math.hypot(...vector);
+          return vector.map((value) => value / norm);
+        });
+        return { model, vectors };
+      },
+      warm() {},
+      async close() {},
+    };
+  }
+
+  /** The echo model, its requests captured, and every background task awaited by `settle`. */
+  function vectorApp(embedder?: Embedder): {
+    app: Hono<AppEnv>;
+    prompts: Captured[];
+    settle: () => Promise<void>;
+  } {
+    const prompts: Captured[] = [];
+    const pending: Promise<void>[] = [];
+    const echo = createEchoAdapter();
+    const deps = makeDeps({
+      getAdapter: (modelId) =>
+        modelId === 'echo/echo'
+          ? {
+              providerModel: 'echo',
+              adapter: {
+                stream: (req) => {
+                  prompts.push({ system: req.system, messages: req.messages });
+                  return echo.stream(req);
+                },
+              },
+            }
+          : {
+              // The side channels (relationship, memory) answer nothing.
+              providerModel: 'side-stub',
+              adapter: {
+                stream: async function* (): AsyncGenerator<StreamDelta, StreamDone> {
+                  return { usage: { promptTokens: 0, completionTokens: 0 } };
+                },
+              },
+            },
+      onBackgroundTask: (task) => {
+        pending.push(task);
+      },
+      ...(embedder ? { embedder } : {}),
+    });
+    return {
+      app: createApp(deps),
+      prompts,
+      settle: async () => {
+        while (pending.length > 0) await Promise.all(pending.splice(0));
+      },
+    };
+  }
+
+  const lore = (overrides: Record<string, unknown>) => ({
+    keys: [],
+    secondaryKeys: [],
+    selective: false,
+    enabled: true,
+    constant: false,
+    caseSensitive: false,
+    useRegex: false,
+    position: 'before_char',
+    ...overrides,
+  });
+  const TOWER = 'The lighthouse keeper lights the lamp at dusk.';
+  const MAP = 'The old map shows a hidden cove.';
+  const tower = lore({ keys: ['lighthouse'], content: TOWER, insertionOrder: 10 });
+  const map = lore({ keys: ['map'], content: MAP, insertionOrder: 5 });
+
+  type VectorHarness = ReturnType<typeof vectorApp>;
+
+  async function send(cookie: string, chatId: string, content: string, harness: VectorHarness): Promise<Captured> {
+    const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }, harness.app);
+    expect((await readSse(res)).at(-1)!.event).toBe('done');
+    await harness.settle();
+    return harness.prompts.at(-1)!;
+  }
+
+  async function setLore(cookie: string, plotId: string, lorebook: unknown[], harness: VectorHarness): Promise<void> {
+    const res = await json(cookie, `/api/plots/${plotId}`, 'PATCH', { lorebook }, harness.app);
+    expect(res.status, await res.clone().text()).toBe(200);
+    await harness.settle();
+  }
+
+  const storedLore = async (plotId: string) =>
+    (await db.select().from(loreEntryVectors).where(eq(loreEntryVectors.plotId, plotId))).map((row) => ({
+      content: row.content,
+      model: row.model,
+    }));
+
+  it('activates a marked entry by meaning beside the keyword matches, and the book switch marks every one', async () => {
+    const cookie = await signUp('vectors-lore@example.com');
+    const { plotId, chatId } = await setupChat(cookie);
+    const embedder = conceptEmbedder();
+    const harness = vectorApp(embedder);
+
+    // Saved, the marked entry is embedded in the background with the plot's model.
+    await setLore(cookie, plotId, [{ ...tower, vectorized: true }, map], harness);
+    expect(await storedLore(plotId)).toEqual([{ content: TOWER, model: 'test-embedder' }]);
+    expect((await readPlot(cookie, plotId)).lorebook[0].vectorized).toBe(true);
+
+    // A Korean line about the lighthouse finds the English entry; the map comes by its key.
+    let prompt = await send(cookie, chatId, '등대까지 걸어가 보자. map도 챙기고', harness);
+    expect(prompt.system).toContain(TOWER);
+    expect(prompt.system).toContain(MAP);
+    // One query: the newest turns the model reads, newest first.
+    const query = embedder.calls.filter((call) => call.kind === 'query').at(-1)!;
+    expect(query.texts).toHaveLength(1);
+    expect(query.texts[0]!.startsWith('등대까지 걸어가 보자. map도 챙기고\n')).toBe(true);
+
+    // Unmarked, it is keyword only again and its vector goes.
+    await setLore(cookie, plotId, [tower, map], harness);
+    expect(await storedLore(plotId)).toEqual([]);
+    prompt = await send(cookie, chatId, '등대는 아직 멀었어?', harness);
+    expect(prompt.system).not.toContain(TOWER);
+
+    // The work's switch — the first member's book settings — takes every entry.
+    const member = await firstMember(cookie, plotId);
+    const patched = await json(
+      cookie,
+      `/api/plots/${plotId}/characters/${member.id}`,
+      'PATCH',
+      { card: { loreSettings: { ...member.card.loreSettings, vectorizeAll: true } } },
+      harness.app,
+    );
+    expect(patched.status).toBe(200);
+    expect((await readJson(patched)).card.loreSettings.vectorizeAll).toBe(true);
+    await harness.settle();
+    expect((await storedLore(plotId)).map((row) => row.content).sort()).toEqual([MAP, TOWER].sort());
+    prompt = await send(cookie, chatId, '지도를 펼쳐 봐', harness);
+    expect(prompt.system).toContain(MAP);
+  });
+
+  it('spends the one lore budget on what meaning and keywords found, the highest insertionOrder first', async () => {
+    const cookie = await signUp('vectors-budget@example.com');
+    const { plotId, chatId } = await setupChat(cookie);
+    const harness = vectorApp(conceptEmbedder());
+    const member = await firstMember(cookie, plotId);
+    await patchCharacter(cookie, plotId, member.id, {
+      card: { loreSettings: { ...member.card.loreSettings, tokenBudget: countTokens(TOWER) } },
+    });
+    await setLore(cookie, plotId, [{ ...tower, vectorized: true }, map], harness);
+
+    const prompt = await send(cookie, chatId, '등대 근처에서 map을 꺼냈다', harness);
+    expect(prompt.system).toContain(TOWER);
+    expect(prompt.system).not.toContain(MAP);
+  });
+
+  it('leaves the messages hidden from the AI out of the query', async () => {
+    const cookie = await signUp('vectors-hidden@example.com');
+    const { plotId, chatId } = await setupChat(cookie);
+    const embedder = conceptEmbedder();
+    const harness = vectorApp(embedder);
+    await setLore(cookie, plotId, [{ ...tower, vectorized: true }], harness);
+
+    expect((await send(cookie, chatId, '등대 이야기를 해 줘', harness)).system).toContain(TOWER);
+    const path = (await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app))).path;
+    for (const message of path.slice(-2)) {
+      const res = await json(cookie, `/api/chats/${chatId}/messages/${message.id}/hidden`, 'PUT', { hidden: true }, harness.app);
+      expect(res.status).toBe(200);
+    }
+
+    const prompt = await send(cookie, chatId, '안녕', harness);
+    expect(prompt.system).not.toContain(TOWER);
+    expect(embedder.calls.filter((call) => call.kind === 'query').at(-1)!.texts[0]).not.toContain('등대');
+  });
+
+  it('falls back to the keywords and the history, never failing the turn, without an embedder that answers', async () => {
+    const cookie = await signUp('vectors-down@example.com');
+    const { plotId, chatId } = await setupChat(cookie);
+    const harness = vectorApp(conceptEmbedder('test-embedder', (kind) => kind === 'query'));
+    await setLore(cookie, plotId, [{ ...tower, vectorized: true }, map], harness);
+    expect(await storedLore(plotId)).toHaveLength(1);
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { retrieval: { enabled: true } }, harness.app);
+
+    for (const content of ['등대를 봤어', '하나', '둘', '셋']) await send(cookie, chatId, content, harness);
+    const prompt = await send(cookie, chatId, '등대 근처에서 map을 꺼냈다', harness);
+    expect(prompt.system).toContain(MAP);
+    expect(prompt.system).not.toContain(TOWER);
+    expect(prompt.system).not.toContain('Past events');
+
+    // No embedder at all: the same, and nothing is asked of one.
+    const bare = vectorApp();
+    const again = await send(cookie, chatId, '등대 근처에서 map을 꺼냈다', bare);
+    expect(again.system).toContain(MAP);
+    expect(again.system).not.toContain(TOWER);
+  });
+
+  it('embeds the lore again for a model it has no vectors of, and finds it from then on', async () => {
+    const cookie = await signUp('vectors-stale@example.com');
+    const { plotId, chatId } = await setupChat(cookie);
+    await setLore(cookie, plotId, [{ ...tower, vectorized: true }], vectorApp(conceptEmbedder('test-embedder')));
+    expect(await storedLore(plotId)).toEqual([{ content: TOWER, model: 'test-embedder' }]);
+
+    // Another model: the old vector is never compared; the turn re-embeds it.
+    const harness = vectorApp(conceptEmbedder('test-embedder-2'));
+    expect((await send(cookie, chatId, '등대로 가자', harness)).system).not.toContain(TOWER);
+    expect(await storedLore(plotId)).toEqual([{ content: TOWER, model: 'test-embedder-2' }]);
+    expect((await send(cookie, chatId, '등대로 가자', harness)).system).toContain(TOWER);
+  });
+
+  it("brings back earlier messages of the branch by meaning, in ST's Past events after the memory, out of their place", async () => {
+    const cookie = await signUp('vectors-retrieval@example.com');
+    const { chatId } = await setupChat(cookie);
+    const harness = vectorApp(conceptEmbedder());
+    // Off until the reader turns it on, as in ST.
+    expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.retrieval).toEqual({ enabled: false });
+    const on = await json(cookie, `/api/chats/${chatId}`, 'PATCH', { retrieval: { enabled: true } }, harness.app);
+    expect((await readJson(on)).chat.retrieval).toEqual({ enabled: true });
+
+    // Fewer messages than the protected tail: nothing to bring back.
+    const KEEPER = '등대지기를 만났다';
+    expect((await send(cookie, chatId, KEEPER, harness)).system).not.toContain('Past events');
+    // The echo model answers with the reader's words, so the reply says it too.
+    for (const content of ['날씨 이야기', '빵 이야기', '책 이야기', '등대 불빛이 보였다']) await send(cookie, chatId, content, harness);
+    const chunks = await db.select().from(messageChunks);
+    expect(chunks.length).toBeGreaterThan(0);
+    expect(chunks.every((chunk) => chunk.model === 'test-embedder')).toBe(true);
+
+    const prompt = await send(cookie, chatId, '그 등대 기억나?', harness);
+    // The reader's turn, the earliest that says it, under the reader's name — and
+    // not the protected tail's lighthouse, however close it is.
+    expect(prompt.system).toMatch(new RegExp(`\\n\\nPast events:\\n[^\\n]+: ${KEEPER}(\\n|$)`));
+    expect(prompt.system).not.toContain('Past events:\n등대 불빛');
+    // Moved, not copied: the reader's turn left the history; the reply saying the same stays.
+    const saying = prompt.messages.filter((message) => contentText(message.content) === KEEPER);
+    expect(saying.map((message) => message.role)).toEqual(['assistant']);
+
+    // Hidden from the AI, the reader's turn cannot be brought back: the reply is, under no name.
+    const path = (await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app))).path;
+    const turn = path.find((message: any) => message.role === 'user' && message.content === KEEPER);
+    await json(cookie, `/api/chats/${chatId}/messages/${turn.id}/hidden`, 'PUT', { hidden: true }, harness.app);
+    const hidden = await send(cookie, chatId, '그 등대 기억나?', harness);
+    expect(hidden.system).toMatch(new RegExp(`\\n\\nPast events:\\n${KEEPER}(\\n|$)`));
+    expect(RETRIEVAL_DEFAULTS.template).toBe('Past events:\n{{text}}');
+  });
+
+  it('brings back only what is on the branch being read', async () => {
+    const cookie = await signUp('vectors-branch@example.com');
+    const { chatId } = await setupChat(cookie);
+    const harness = vectorApp(conceptEmbedder());
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { retrieval: { enabled: true } }, harness.app);
+    const KEEPER = '등대지기를 만났다';
+    await send(cookie, chatId, KEEPER, harness);
+    for (const content of ['날씨 이야기', '빵 이야기', '책 이야기']) await send(cookie, chatId, content, harness);
+    expect((await send(cookie, chatId, '그 등대 기억나?', harness)).system).toContain(`Past events:`);
+
+    // Editing the first turn forks a branch without it, whose messages are embedded as it is read.
+    const path = (await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app))).path;
+    const turn = path.find((message: any) => message.content === KEEPER);
+    const forked = await json(cookie, `/api/messages/${turn.id}`, 'PATCH', { content: '다른 이야기' }, harness.app);
+    expect(forked.status).toBe(200);
+    expect((await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app))).at(-1)!.event).toBe('done');
+    await harness.settle();
+    for (const content of ['날씨 이야기', '빵 이야기', '책 이야기']) await send(cookie, chatId, content, harness);
+    const prompt = await send(cookie, chatId, '그 등대 기억나?', harness);
+    expect(prompt.system).not.toContain('Past events');
+    expect(prompt.system).not.toContain(KEEPER);
   });
 });

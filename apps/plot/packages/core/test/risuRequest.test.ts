@@ -55,6 +55,7 @@ describe('the request as RisuAI’s items', () => {
       lore_after: {},
       persona: {},
       memory: { memo: 'supaMemory' },
+      retrieval: {},
       relationship: {},
       directions: {},
       examples: { memo: 'NewChatExample', removable: true },

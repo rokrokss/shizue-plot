@@ -14,7 +14,7 @@ import type { ObjectStorage } from './storage.js';
 export type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 
 /** The fire-and-forget jobs a finished turn can start. */
-type BackgroundTaskKind = 'memory' | 'relationship' | 'emotion';
+type BackgroundTaskKind = 'memory' | 'relationship' | 'emotion' | 'vectors';
 
 /**
  * A generation claim this instance holds: the exact `chats.generating_at` it
@@ -60,6 +60,12 @@ export interface AppDeps {
    * message rather than per chat, since a round's replies each want one.
    */
   detectingEmotion: Set<string>;
+  /**
+   * What is being embedded for SillyTavern's vector storage (`vectors.ts`): a
+   * plot's lore (`lore:<plot id>`) or a chat's messages (`chat:<chat id>`) — one
+   * pass each at a time, and a pass asked for meanwhile runs again after it.
+   */
+  embeddingVectors: Map<string, 'running' | 'again'>;
   /**
    * Chat ids with a reply suggestion in flight — one per chat. Its own guard
    * rather than the generation slot: a suggestion writes nothing, so it must not
