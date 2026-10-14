@@ -1279,9 +1279,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               createLuaEngine({
                 triggers: bundle.triggers,
                 lowLevelAccess: bundle.lowLevelAccess,
+                // Its states are its card's code's (`luaCodeKey`): the sandbox outlives the page.
                 sandbox: { call: (...args) => sandbox.call(...args), dispose: () => undefined },
-                // Always: the sandbox outlives the page, and another work's member is not this one.
-                member: bundle.memberId,
                 ui: scriptUi,
                 llm: async (messages, model) =>
                   (await apiSend<{ result: string }>('POST', `/api/chats/${id}/script-llm`, { messages, model, ...tag })).result,

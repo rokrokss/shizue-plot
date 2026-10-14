@@ -126,9 +126,10 @@ const base = (overrides: Partial<AssemblePromptInput> = {}): AssemblePromptInput
 
 // Pinned against the assembler as it stood before group turns: without a
 // `speaker`, every byte it returns stays what it was. What each message is
-// (`sources`) came later, beside the prompt rather than in it.
+// (`sources`) and the request editors' view (`risu`) came later, beside the
+// prompt rather than in it.
 const pinned = (input: AssemblePromptInput) => {
-  const { sources: _sources, ...prompt } = assemblePrompt(input);
+  const { sources: _sources, risu: _risu, ...prompt } = assemblePrompt(input);
   return prompt;
 };
 

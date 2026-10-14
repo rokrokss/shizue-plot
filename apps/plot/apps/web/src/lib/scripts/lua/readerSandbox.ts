@@ -3,13 +3,15 @@
  *
  * RisuAI keeps one Lua state a mode for the whole app, made anew only when the
  * code changes, so a script's globals outlive the chat they were set in. Here
- * the states live in the sandbox's worker (`@shizue/core/lua`, one a member and
- * mode, the oldest closed past `LUA_LIMITS.engines`), and the sandbox is this
- * module's, one for the reader: a chat page leases it and gives it back, so
- * moving between the reader's chats keeps what a member's scripts left, as long
- * as their code is the same. Never across readers — a different reader's lease
- * ends it, and so does signing out (`authClient.ts`). A reload ends it too, as
- * RisuAI's states are in memory.
+ * the states live in the sandbox's worker (`@shizue/core/lua`, one a card's code
+ * and mode — `luaCodeKey` — the oldest closed past `LUA_LIMITS.engines`), and
+ * the sandbox is this module's, one for the reader: a chat page leases it and
+ * gives it back, so moving between the reader's chats — in one work or another
+ * with the same card — keeps what the card's scripts left, as long as their code
+ * is the same. A group's members, whose code differs, keep theirs apart, where
+ * RisuAI's one state would start afresh at every speaker change. Never across
+ * readers — a different reader's lease ends it, and so does signing out
+ * (`authClient.ts`). A reload ends it too, as RisuAI's states are in memory.
  *
  * A page that goes with a call still running ends it as it always did: that
  * call may wait on a dialog nobody will answer now, which would hold the

@@ -58,9 +58,10 @@ export const LUA_LIMITS = {
   memory: 32 * 1024 * 1024,
   /**
    * Lua states the worker keeps — RisuAI keeps one per mode, and a manual name is
-   * a mode; the browser keeps one per member and mode (`LuaCallMessage.member`),
-   * for every chat of the reader's in the tab. Past it, the one used longest ago
-   * is closed, and its member's next call in that mode starts afresh.
+   * a mode; the browser keeps one per card's code and mode
+   * (`LuaCallMessage.stateKey`), for every chat of the reader's in the tab. Past
+   * it, the one used longest ago is closed, and that code's next call in that
+   * mode starts afresh.
    */
   engines: 12,
   /** A single `sleep` is cut to this, as a trigger's wait is. */
@@ -68,6 +69,16 @@ export const LUA_LIMITS = {
 };
 
 export type LuaLimits = typeof LUA_LIMITS;
+
+/**
+ * Bytes one Lua state may allocate in the server's `editRequest` child, in
+ * place of `LUA_LIMITS.memory`: the request a listener is handed carries the
+ * reader's pictures as data URLs, and RisuAI's wrapper holds the request's JSON,
+ * its decoding and the JSON it answers with at once — about ten times the
+ * pictures' data, measured: 6 MB of them fit in 64 MB, 8 MB did not. The API
+ * hands a listener at most 4 MB (its `REQUEST_IMAGE_BUDGET`).
+ */
+export const LUA_SERVER_MEMORY = 64 * 1024 * 1024;
 
 /* ------------------------------------------------------------- protocol */
 
@@ -147,12 +158,15 @@ export interface LuaCallMessage {
   entry: LuaEntry;
   snapshot: LuaSnapshot;
   /**
-   * The member whose card the code is: each member's Lua keeps its own state
-   * per mode, as each RisuAI character runs its own — the browser names one on
-   * every call, as its sandbox is the reader's and outlives a chat. Absent, the
-   * state is the mode's alone, as on the server.
+   * Whose states these are: the card's Lua, all its scripts, by a hash (web
+   * `lua/engine.ts`'s `luaCodeKey`) — so the same card in two works shares its
+   * states as RisuAI's do while the code is the same, and a group's members,
+   * whose code differs, keep theirs apart instead of wiping one another's as
+   * RisuAI's one state a mode would on every speaker change. The browser names
+   * one on every call, as its sandbox is the reader's and outlives a chat.
+   * Absent, the state is the mode's alone, as on the server.
    */
-  member?: string;
+  stateKey?: string;
   /**
    * The server's `editRequest` runs only (`luaWorkerSource`'s `server`): the
    * Lua state's plain-data globals as an earlier call left them, put back once
@@ -219,7 +233,7 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
 
   let factory: Any = null;
   let ready: Any = null;
-  /** RisuAI's engines: one Lua state per mode (and member), recreated when the code changes. */
+  /** RisuAI's engines: one Lua state per mode (and card's code), recreated when the code changes. */
   const engines = new Map();
   /** RisuAI's access keys: a call's `id` argument, and what it opens. */
   const safeIds = new Set();
@@ -1151,7 +1165,7 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any): void {
     ready
       .then(function () {
         const name = engineName(request.entry);
-        const state = stateFor(typeof request.member === 'string' ? request.member + ':' + name : name);
+        const state = stateFor(typeof request.stateKey === 'string' ? request.stateKey + ':' + name : name);
         const next = state.queue.then(function () {
           return invoke(state, request);
         });
@@ -1407,7 +1421,8 @@ end
  * `server` is the API's child, where no CSP keeps `Function` from compiling:
  * its states are made without wasmoon's proxy, so a script cannot index any
  * JavaScript value it is handed (an error's `constructor`, a returned object's
- * `__proto__`), and with `LUA_LOCK` between the wrapper and the card's code.
+ * `__proto__`), and with `LUA_LOCK` between the wrapper and the card's code;
+ * a state there may hold `LUA_SERVER_MEMORY`, for the request's pictures.
  * `check` vets the runtime's compiled text — the web's bundler check.
  */
 export function luaWorkerSource(
@@ -1419,10 +1434,11 @@ export function luaWorkerSource(
   const prelude = server
     ? { json: JSON_LUA, head: LUA_WRAPPER[0] + LUA_LOCK, tail: LUA_WRAPPER[1], proxy: false, state: LUA_STATE }
     : { json: JSON_LUA, head: LUA_WRAPPER[0], tail: LUA_WRAPPER[1] };
+  const limits = server ? { ...LUA_LIMITS, memory: LUA_SERVER_MEMORY } : LUA_LIMITS;
   return [
     '(function (exports, module, define, require, process, __filename, __dirname) {',
     wasmoonSource,
     `}).call(${scope});`,
-    `(${runtime})(${scope}, ${JSON.stringify(LUA_LIMITS)}, ${JSON.stringify(prelude)});`,
+    `(${runtime})(${scope}, ${JSON.stringify(limits)}, ${JSON.stringify(prelude)});`,
   ].join('\n');
 }

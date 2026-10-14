@@ -15,35 +15,42 @@
  * (`withEditedRequest`).
  *
  * **The request as the triggers see it.** RisuAI hands them its request as
- * JSON, a list of its `OpenAIChat` items. Ours is a system string and a list
- * of messages, so the list is `[{role: 'system', content: system},
- * ...messages]`, each message's content as its text, with the fields RisuAI
- * sets beside them on the turn it stands for — `memo`, `removable`, `attr`,
- * `thoughts` (`risuRequestExtras` in @shizue/core, from what each block is).
- * A turn's pictures are its `multimodals`, as RisuAI's are, but each one's
- * `base64` is a stand-in that names it (`image:0`, …) rather than its bytes:
- * the reader's pictures run to 16 MB a turn, past what a listener's Lua state
- * (32 MB, holding the request's JSON and its decoding at once) or a line of the
- * Lua child's (8 MB) holds. `name` (RisuAI's per-side example turns) and
- * `cachePoint` (Claude's prompt caching) are never set.
+ * JSON, a list of its `OpenAIChat` items, in the shape its `sendChat` put it
+ * together in. Ours is a system string and a list of messages, so the list is
+ * the view of it in that shape (`risuRequestView` in @shizue/core): the system
+ * string, the memory as RisuAI's `supaMemory` turn, each example block as
+ * RisuAI's `NewChatExample` separator and its lines named `example_user` and
+ * `example_assistant`, the `NewChat` separator while the chat is sent from its
+ * start, and each message as its text with the fields RisuAI sets on the turn
+ * it stands for. A turn's pictures are its `multimodals`, each `base64` the
+ * picture's data URL, as RisuAI's are — unless a request's pictures come to
+ * more than `REQUEST_IMAGE_BUDGET`, when each is a stand-in that names it
+ * (`image:0`, …) for that request alone. `cachePoint` (Claude's prompt
+ * caching) is never set.
  *
  * **What comes back.** RisuAI takes any array; this takes one whose every turn
  * has a role of `system`, `user` or `assistant` and string content, and sends
- * the request unedited otherwise. The first turn is the system string while it
- * is still a system turn — otherwise the system string is empty and that turn
- * leads the messages — and every other turn is a message, in order, `system`
- * ones included (an adapter sends those where they stand). Leading system
- * turns are not folded into the system string: the directions block opens the
- * messages on purpose, outside the cached prefix (§6 of ARCHITECTURE.md). Of
- * a turn's other fields only `multimodals` is read, for the pictures it still
- * names; the rest are the next editor's to read and are not sent.
+ * the request unedited otherwise. A request the editors left as the view had
+ * it — the same turns, roles, text and pictures — goes as the prompt was put
+ * together, which is not the view's shape. One they changed goes in the view's
+ * shape, as RisuAI sends what they leave: the first turn is the system string
+ * while it is still a system turn — otherwise the system string is empty and
+ * that turn leads the messages — and every other turn is a message, in order,
+ * `system` ones included (an adapter sends those where they stand), the
+ * separators among them, as RisuAI's Responses request sends its separators.
+ * Leading system turns are not folded into the system string: the directions
+ * block opens the messages on purpose, outside the cached prefix (§6 of
+ * ARCHITECTURE.md). Of a turn's other fields only `multimodals` is read, for
+ * the pictures it still holds; the rest are the next editor's to read and are
+ * not sent — `name` included: our provider takes the Responses API's turns,
+ * which have no name, and RisuAI's own Responses request drops it too.
  *
- * **Images.** A picture goes on the first turn whose `multimodals` still names
- * it, when that turn is a user turn; one no turn names any more was removed,
- * and is not sent. One left on the system string or on a system or an
- * assistant turn is not sent either (logged): a provider may refuse it there.
- * (RisuAI sends the pictures on their turn whatever its role.) An editor never
- * adds one: a name we did not hand out is nothing.
+ * **Images.** A picture goes on the first turn whose `multimodals` still holds
+ * it — its data, or its stand-in — when that turn is a user turn; one no turn
+ * holds any more was removed, and is not sent. One left on the system string or
+ * on a system or an assistant turn is not sent either (logged): a provider may
+ * refuse it there. (RisuAI sends the pictures on their turn whatever its role.)
+ * An editor never adds one: data or a name we did not hand out is nothing.
  *
  * **Failure.** The triggers run in a worker thread against a clock: a card's
  * regex runs on the native engine (`v2ExtractRegex`, `v2RegexTest`,
@@ -55,13 +62,14 @@
  */
 import {
   countTokens,
-  promptText,
-  risuRequestExtras,
+  risuRequestView,
   type AssembledPrompt,
   type PromptMessage,
   type PromptPart,
   type PromptReport,
+  type PromptReportBlock,
   type RisuRequestItem,
+  type RisuRequestView,
 } from '@shizue/core';
 import type { RequestTurn, TriggerLogEntry, TriggerRunInput } from '@shizue/core/triggers';
 import { Worker } from 'node:worker_threads';
@@ -206,33 +214,58 @@ export type EditedTurn = RequestTurn & { readonly [field: string]: unknown };
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-/** What a picture is called in the request the editors read: a stand-in, not its bytes. */
+/**
+ * The most picture data one request hands its editors as data — the length of
+ * its data URLs, all of them together: 4 MB, about a 3 MB picture, or a
+ * screenshot and a photo; a turn may carry up to 16 MB. Past it, that request's
+ * pictures are stand-ins that name them.
+ *
+ * Set by what a Lua listener pays for the data, which is time before memory:
+ * RisuAI's `json.lua` decodes the request byte by byte in Lua, every script of
+ * the card again, inside the run's three seconds (`REQUEST_LUA_DEADLINE_MS`).
+ * Measured on the Lua child (macOS, M-series; four pictures on one turn, the
+ * listener returning the request, the time including a child's ~120 ms start
+ * the pool hides): 1 MB 0.26–0.34 s, 2 MB 0.36–0.61 s, 4 MB 0.57–0.60 s and
+ * 1.0 s for a card of two scripts, 8 MB 1.4 s, 16 MB 3.4–3.5 s — past the
+ * deadline. A Lua state needed about ten times the data (6 MB fit in 64 MB, 8 MB
+ * did not), so `LUA_SERVER_MEMORY` is 64 MB, and the child peaked at about
+ * 210–240 MB resident at 4 MB, under the 512 MB watchdog. The request triggers
+ * take it in stride (about 5 ms a megabyte for a run that reads every turn).
+ */
+export const REQUEST_IMAGE_BUDGET = 4 * 1024 * 1024;
+
+/** What a picture is called in a request whose pictures are past the budget: a stand-in, not its bytes. */
 const imageName = (at: number): string => `image:${at}`;
 
-/** The request as its editors read it, and each picture by the name it goes by there. */
-function requestOf(prompt: AssembledPrompt): { items: RisuRequestItem[]; images: Map<string, PromptPart> } {
-  const images = new Map<string, PromptPart>();
-  const items: RisuRequestItem[] = [
-    { role: 'system', content: prompt.system },
-    ...prompt.messages.map((message, at): RisuRequestItem => {
-      const parts = typeof message.content === 'string' ? [] : message.content.filter((part) => part.type === 'image');
-      const multimodals = parts.map((part) => {
-        const name = imageName(images.size);
-        images.set(name, part);
-        return { type: 'image' as const, base64: name };
-      });
-      return {
-        role: message.role,
-        content: promptText(message.content),
-        ...risuRequestExtras(prompt.sources?.[at]),
-        ...(multimodals.length > 0 ? { multimodals } : {}),
-      };
-    }),
-  ];
-  return { items, images };
+/**
+ * The request as its editors read it, what each item is of ours, and each
+ * picture by what its `multimodals` entry holds — its data URL, or past
+ * `budget` its stand-in — as many times as the request carries it.
+ */
+function requestOf(prompt: AssembledPrompt, budget: number): RisuRequestView & { images: Map<string, string[]> } {
+  const view = risuRequestView(prompt);
+  const size = view.items.reduce(
+    (sum, item) => sum + (item.multimodals ?? []).reduce((total, image) => total + image.base64.length, 0),
+    0,
+  );
+  const named = size > budget;
+  const images = new Map<string, string[]>();
+  let count = 0;
+  const items = view.items.map((item): RisuRequestItem => {
+    if (!item.multimodals) return item;
+    return {
+      ...item,
+      multimodals: item.multimodals.map((image) => {
+        const shown = named ? imageName(count++) : image.base64;
+        images.set(shown, [...(images.get(shown) ?? []), image.base64]);
+        return { type: 'image', base64: shown };
+      }),
+    };
+  });
+  return { items, origins: view.origins, images };
 }
 
-/** The pictures a turn's `multimodals` names, in order — whatever an editor left there. */
+/** What a turn's `multimodals` holds, in order — whatever an editor left there. */
 function imagesNamed(turn: RequestTurn): string[] {
   const list = (turn as { multimodals?: unknown }).multimodals;
   if (!Array.isArray(list)) return [];
@@ -283,24 +316,49 @@ export function turnsOf(value: unknown): EditedTurn[] | null {
   return value as EditedTurn[];
 }
 
+/** A turn the editors changed, in the report: one `request` block under the role it goes as. */
+const requestBlock = (turn: RequestTurn): PromptReportBlock => ({
+  kind: 'request',
+  label: turn.role,
+  tokens: countTokens(turn.content),
+  text: turn.content,
+});
+
 /**
- * The report with the request as it is sent: a turn the triggers left as it was
- * keeps its blocks, and one they rewrote is one `request` block under the role
- * it went as. The totals stay the assembler's — the budget was spent before the
- * triggers ran, and RisuAI does not measure their edit either.
+ * The report with the request as it is sent: a turn the editors left as the
+ * view had it keeps the blocks it stands for — the system string its sections
+ * but the memory, the memory its section, a message its block, a separator or
+ * a line of an example block that block's kind and name — and one they
+ * rewrote, or RisuAI's `NewChat` separator, is one `request` block under the
+ * role it went as. The totals stay the assembler's — the budget was spent
+ * before the editors ran, and RisuAI does not measure their edit either.
  */
-function editedReport(report: PromptReport, before: readonly RequestTurn[], after: readonly RequestTurn[]): PromptReport {
-  const messages = before.length - 1;
-  const groups = [
-    report.blocks.slice(0, report.blocks.length - messages),
-    ...report.blocks.slice(report.blocks.length - messages).map((block) => [block]),
-  ];
+function editedReport(report: PromptReport, messages: number, view: RisuRequestView, after: readonly RequestTurn[]): PromptReport {
+  const sections = report.blocks.slice(0, report.blocks.length - messages);
+  const turns = report.blocks.slice(report.blocks.length - messages);
+  const blocksOf = (index: number): PromptReportBlock[] => {
+    const origin = view.origins[index]!;
+    const item = view.items[index]!;
+    switch (origin.kind) {
+      case 'system':
+        return sections.filter((block) => block.kind !== 'memory');
+      case 'memory':
+        return sections.filter((block) => block.kind === 'memory');
+      case 'message':
+        return [turns[origin.at]!];
+      case 'example': {
+        const label = turns[origin.at]?.label;
+        return [{ kind: 'examples', ...(label !== undefined ? { label } : {}), tokens: countTokens(item.content), text: item.content }];
+      }
+      case 'newChat':
+        return [requestBlock(item)];
+    }
+  };
   return {
     ...report,
     blocks: after.flatMap((turn, index) => {
-      const was = before[index];
-      if (was && was.role === turn.role && was.content === turn.content) return groups[index]!;
-      return [{ kind: 'request' as const, label: turn.role, tokens: countTokens(turn.content), text: turn.content }];
+      const was = view.items[index];
+      return was && was.role === turn.role && was.content === turn.content ? blocksOf(index) : [requestBlock(turn)];
     }),
   };
 }
@@ -342,31 +400,31 @@ export async function editRequestTurns(
  * The prompt a generation sends, as `edit` leaves its request — the card's
  * `editRequest` listeners (`requestLua.ts`), then its request triggers
  * (`editRequestTurns`). `edit` hands the request's items (RisuAI's
- * `OpenAIChat`) on and answers null for a request it leaves as it was.
+ * `OpenAIChat`, `risuRequestView`) on and answers null for a request it leaves
+ * as it was. `imageBudget` is `REQUEST_IMAGE_BUDGET` but for the tests.
  */
 export async function withEditedRequest(
   prompt: AssembledPrompt,
   edit: (items: RisuRequestItem[]) => Promise<EditedTurn[] | null>,
   label: string,
+  { imageBudget = REQUEST_IMAGE_BUDGET }: { imageBudget?: number } = {},
 ): Promise<AssembledPrompt> {
-  const { items, images } = requestOf(prompt);
-  const edited = await edit(items);
-  if (!edited || sameRequest(items, edited)) return prompt;
+  const view = requestOf(prompt, imageBudget);
+  const edited = await edit(view.items);
+  if (!edited || sameRequest(view.items, edited)) return prompt;
 
   const system = edited[0]?.role === 'system' ? edited[0].content : null;
-  // Each picture on the first turn that still names it, if that turn is the reader's.
-  const placed = new Set<string>();
+  // Each picture on the first turn that still holds it, if that turn is the reader's.
   let refused = 0;
   const partsOf = (turn: EditedTurn, isSystem: boolean): PromptPart[] =>
-    imagesNamed(turn).flatMap((name) => {
-      const part = images.get(name);
-      if (!part || placed.has(name)) return [];
-      placed.add(name);
+    imagesNamed(turn).flatMap((name): PromptPart[] => {
+      const url = view.images.get(name)?.shift();
+      if (url === undefined) return [];
       if (isSystem || turn.role !== 'user') {
         refused += 1;
         return [];
       }
-      return [part];
+      return [{ type: 'image', url }];
     });
   if (system !== null) partsOf(edited[0]!, true);
   const messages: PromptMessage[] = (system !== null ? edited.slice(1) : edited).map((turn) => {
@@ -377,11 +435,11 @@ export async function withEditedRequest(
     };
   });
   if (refused > 0) console.warn(`[api] the request's scripts left ${refused} image(s) on a turn not the reader's; not sent:`, label);
-  const { sources: _stale, ...rest } = prompt;
+  const { sources: _stale, risu: _view, ...rest } = prompt;
   return {
     ...rest,
     system: system ?? '',
     messages,
-    ...(prompt.report ? { report: editedReport(prompt.report, items, edited) } : {}),
+    ...(prompt.report ? { report: editedReport(prompt.report, prompt.messages.length, view, edited) } : {}),
   };
 }

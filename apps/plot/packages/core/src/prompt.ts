@@ -340,6 +340,15 @@ export interface AssembledPrompt {
    */
   sources?: MessageSource[];
   /**
+   * What the request editors' view of the request (`risuRequestView`) needs
+   * that `system` and `messages` fold away: the memory section — RisuAI sends
+   * its memory as a turn of its own — with the system string as it reads
+   * without it, and whether the history is sent from the branch's first
+   * message, where RisuAI's request has its `NewChat` separator. Always there
+   * from the assembler, like `sources`.
+   */
+  risu?: RisuPromptParts;
+  /**
    * For a group turn (`AssemblePromptInput.speaker`): where the reply has strayed
    * into another member's line — `\n이름:` and `\n별명:` of every member on the
    * stage but the speaker. The caller stops the stream on them.
@@ -384,6 +393,26 @@ export interface MessageSource {
   id?: string;
   /** A turn of the chat that is the branch's greeting, which RisuAI sends from the character rather than the chat. */
   greeting?: true;
+  /**
+   * An example block's speakers: the reader's name, and `{{char}}` with the
+   * name the block is under — whose lines RisuAI's `exampleMessage` makes the
+   * block's user and assistant turns (`risuExampleSides`).
+   */
+  speakers?: ExampleSpeakers;
+}
+
+/** `MessageSource.speakers`. */
+export interface ExampleSpeakers {
+  user: string;
+  char: string[];
+}
+
+/** `AssembledPrompt.risu`. */
+export interface RisuPromptParts {
+  /** The memory section as sent, and the system string as it reads without it; absent without one. */
+  memory?: { text: string; system: string };
+  /** Whether the history is sent from the branch's first message: nothing trimmed off its front, by the budget or the memory. */
+  fromStart: boolean;
 }
 
 export interface PromptReportBlock {
@@ -1005,6 +1034,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     .map((section) => ({ ...section, text: send(section.text) }))
     .filter((section) => section.text.length > 0);
   const system = systemSections.map((section) => section.text).join('\n\n');
+  const memorySection = systemSections.find((section) => section.kind === 'memory');
 
   // 5d. stage directions of the turn being answered. Outside the system string on
   // purpose: it changes every turn, and the system string is the cached prefix.
@@ -1148,31 +1178,42 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // `<START>` like a card's, ahead of every member's blocks or behind them, and
   // evicted with them — named for the book it came from.
   const exampleSlots: MessageSlot[] = [];
-  const exampleLore = (position: LorePosition): { name: string; content: string }[] =>
+  /** `char`: who speaks an example block's lines, for the request editors' view of it — `{{char}}` and the name it is under. */
+  type ExampleBlock = { name: string; content: string; char: string[] };
+  const exampleLore = (position: LorePosition): ExampleBlock[] =>
     loreAt(position).flatMap((entry) => {
       const source = loreSource.get(entry);
       const name = source === undefined || source === 'plot' ? plot.name : source;
+      const char = [(loreMacro.get(entry) ?? plotMacro).char, name];
       return splitExamples(expandLore(entry)).map((block) => ({
         name,
         content: send(`${exampleHeader(name)}\n${block}`),
+        char,
       }));
     });
-  const exampleBlocks = [
+  const exampleBlocks: ExampleBlock[] = [
     ...exampleLore('before_examples'),
     ...cast.flatMap((member) => {
       const macro = macroOf(member);
       return splitExamples(member.card.mesExample).map((block) => ({
         name: member.name,
         content: send(`${exampleHeader(member.name)}\n${applyMacros(block, macro)}`),
+        char: [characterName(member), member.name],
       }));
     }),
     ...exampleLore('after_examples'),
   ];
-  for (const { name, content } of exampleBlocks) {
+  for (const { name, content, char } of exampleBlocks) {
     const cost = countTokens(content);
     if (cost > available) break;
     available -= cost;
-    exampleSlots.push({ kind: 'examples', label: name, message: { role: 'system', content }, tokens: cost });
+    exampleSlots.push({
+      kind: 'examples',
+      label: name,
+      message: { role: 'system', content },
+      tokens: cost,
+      speakers: { user: userName, char },
+    });
   }
 
   // Depth 0 lands after the last message, depth N before the Nth message from the
@@ -1286,11 +1327,27 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   return {
     system,
     messages: slots.map((slot) => slot.message),
-    sources: slots.map(({ kind, id, greeting }) => ({
+    sources: slots.map(({ kind, id, greeting, speakers }) => ({
       kind,
       ...(id !== undefined ? { id } : {}),
       ...(greeting ? { greeting } : {}),
+      ...(speakers ? { speakers } : {}),
     })),
+    risu: {
+      ...(memorySection
+        ? {
+            memory: {
+              text: memorySection.text,
+              system: systemSections
+                .filter((section) => section !== memorySection)
+                .map((section) => section.text)
+                .join('\n\n'),
+            },
+          }
+        : {}),
+      // The branch index of the first turn sent: the history's own start, past what the budget dropped.
+      fromStart: historyStart + history.length - historyMessages.length === 0,
+    },
     loreTriggers,
     ...(variableWrites ? { variableWrites } : {}),
     ...(input.report ? { report: report() } : {}),

@@ -106,11 +106,11 @@ export type LuaOutcome =
 
 export interface LuaSandbox {
   /**
-   * Runs `code` at `entry`. `member` keeps the Lua state the member's own, as
-   * the members of every work the reader opens share one sandbox — each RisuAI
-   * character has its own states. Without it the state is the mode's alone.
+   * Runs `code` at `entry`. `stateKey` keeps the Lua states the card's code's
+   * own (`luaCodeKey`), as the cards of every work the reader opens share one
+   * sandbox. Without it the state is the mode's alone.
    */
-  call(code: string, entry: LuaEntry, snapshot: LuaSnapshot, host: LuaHost, member?: string): Promise<LuaOutcome>;
+  call(code: string, entry: LuaEntry, snapshot: LuaSnapshot, host: LuaHost, stateKey?: string): Promise<LuaOutcome>;
   /** Removes the frame, which ends the worker with it. Calls still waiting answer `killed`. */
   dispose(): void;
 }
@@ -510,7 +510,7 @@ export function createLuaSandbox(options: LuaSandboxOptions): LuaSandbox {
   }
 
   return {
-    async call(code, entry, snapshot, host, member) {
+    async call(code, entry, snapshot, host, stateKey) {
       if (broken) return { kind: 'unavailable', message: broken };
       let opened: LuaChannel;
       try {
@@ -529,7 +529,7 @@ export function createLuaSandbox(options: LuaSandboxOptions): LuaSandbox {
           lowLevel: snapshot.lowLevel && entry.kind !== 'edit' && entry.kind !== 'display',
           served: new Set(),
         });
-        opened.post({ type: 'call', call: id, code, entry, snapshot, ...(member !== undefined ? { member } : {}) });
+        opened.post({ type: 'call', call: id, code, entry, snapshot, ...(stateKey !== undefined ? { stateKey } : {}) });
       });
     },
 

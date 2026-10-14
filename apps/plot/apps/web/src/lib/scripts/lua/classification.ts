@@ -176,10 +176,10 @@ export const LUA_CLASSIFICATION: Readonly<Record<string, LuaSupport>> = {
   'listen:editDisplay': hook('browser', 'the screen only, before the display triggers'),
   'listen:editRequest': hook(
     'server',
-    'the request as RisuAI’s items (memo, removable, attr, thoughts; pictures named in multimodals), run by the API in a child process (no network, no files) before the request triggers, ' +
+    'the request as RisuAI’s items in the shape its sendChat makes (the memory as a supaMemory turn, examples split into NewChatExample and example_user/example_assistant turns, the NewChat separator; memo, removable, attr, thoughts; pictures as data URLs in multimodals, named stand-ins past a 4 MB request), run by the API in a child process (no network, no files) before the request triggers, ' +
       'without low-level access as in RisuAI; dialogs answer as they do in a display pass; its chat variable writes land on the reply’s ' +
       'delta, its chat edits make the branch the reply is stored under, its character rewrites go to the reader’s overlay and its lore ' +
       'upserts to the chat’s lore, all with the reply; its own Lua state, apart from the other hooks’ as RisuAI keeps one per mode, ' +
-      'whose plain-data globals carry to the reader’s next generation with the member, in any of their chats, while the code stays the same',
+      'whose plain-data globals carry to the reader’s next generation with the same card code, in any of their chats and works',
   ),
 };

@@ -12935,8 +12935,11 @@ describe('request triggers', () => {
     expect(sent.messages.filter((message) => message.role === 'user').map((message) => message.content)).toEqual([
       '바뀐 인사',
     ]);
-    // The greeting and the post-history block are where they were.
-    expect(sent.messages[0]).toEqual({ role: 'assistant', content: '문 앞이다.' });
+    // RisuAI's separator before the chat, then the greeting; the post-history block is where it was.
+    expect(sent.messages.slice(0, 2)).toEqual([
+      { role: 'system', content: '[Start a new chat]' },
+      { role: 'assistant', content: '문 앞이다.' },
+    ]);
     expect(sent.messages.at(-1)!.role).toBe('system');
 
     const stored = await db.select().from(messages).where(eq(messages.chatId, chatId)).orderBy(asc(messages.createdAt));
@@ -12948,7 +12951,9 @@ describe('request triggers', () => {
     const turned = await requestChat('request-role@example.com', atTurn('안녕', setRole('system')));
     await send(turned.cookie, turned.chatId, capturing);
     const kept = prompts.at(-1)!;
-    expect(kept.messages.slice(0, 2)).toEqual([
+    // In RisuAI's shape, as it sends what its triggers leave: the separator before the chat, then the chat.
+    expect(kept.messages.slice(0, 3)).toEqual([
+      { role: 'system', content: '[Start a new chat]' },
       { role: 'assistant', content: '문 앞이다.' },
       { role: 'system', content: '안녕' },
     ]);
@@ -12962,7 +12967,7 @@ describe('request triggers', () => {
     const first = prompts.at(-1)!;
     expect(first.system).toBe('');
     expect(first.messages[0]).toEqual({ role: 'user', content: system });
-    expect(first.messages[1]).toEqual({ role: 'assistant', content: '문 앞이다.' });
+    expect(first.messages[2]).toEqual({ role: 'assistant', content: '문 앞이다.' });
   });
 
   it('sends the request unedited when the run throws, and when it runs out the clock', async () => {
@@ -13026,7 +13031,10 @@ describe('request triggers', () => {
     // Another turn's role changed: the picture's own turn is still the reader's, and it carries it.
     const reshaped = await requestChat('request-image-role@example.com', atTurn('문 앞이다.', setRole('system')), { model: 'test/vision' }, seeing);
     await sendWithImage(reshaped.cookie, reshaped.chatId);
-    expect(prompts.at(-1)!.messages[0]).toEqual({ role: 'system', content: '문 앞이다.' });
+    expect(prompts.at(-1)!.messages.slice(0, 2)).toEqual([
+      { role: 'system', content: '[Start a new chat]' },
+      { role: 'system', content: '문 앞이다.' },
+    ]);
     expect(userTurn()).toEqual({ role: 'user', content: [{ type: 'text', text: '이건 뭐야?' }, image] });
 
     // Its own turn became a system turn, which a provider may refuse a picture on: not sent.
@@ -13113,9 +13121,11 @@ describe('request triggers', () => {
     // The rewritten system string stands in for every section it was made of.
     expect(report.blocks[0]).toMatchObject({ kind: 'request', label: 'system', text: '새 시스템' });
     expect(kinds).not.toContain('main');
-    // The greeting the triggers left alone keeps its block; the user turn went as a system turn.
-    expect(report.blocks[1]).toMatchObject({ kind: 'history', label: 'assistant', text: '문 앞이다.' });
-    expect(report.blocks[2]).toMatchObject({ kind: 'request', label: 'system', text: '안녕' });
+    // RisuAI's separator before the chat stands for nothing of ours; the greeting the triggers left alone
+    // keeps its block; the user turn went as a system turn.
+    expect(report.blocks[1]).toMatchObject({ kind: 'request', label: 'system', text: '[Start a new chat]' });
+    expect(report.blocks[2]).toMatchObject({ kind: 'history', label: 'assistant', text: '문 앞이다.' });
+    expect(report.blocks[3]).toMatchObject({ kind: 'request', label: 'system', text: '안녕' });
     expect(kinds).toContain('post_history');
   });
 });
@@ -13422,45 +13432,10 @@ describe('editRequest listeners', () => {
     expect(last.content.length).toBeGreaterThan('바뀐 끝'.length);
   });
 
-  it('hands the listener RisuAI’s items: a chat message’s id as its memo, and what else sendChat sets', async () => {
-    const { app: capturing, prompts } = capturingApp();
-    const { cookie, chatId } = await luaChat('lua-items@example.com', [
-      lua(
-        listening(`
-          local seen = {}
-          for _, turn in ipairs(req) do
-            seen[#seen + 1] = table.concat({
-              turn.role, tostring(turn.memo), tostring(turn.removable), tostring(turn.attr and #turn.attr),
-              tostring(turn.thoughts and #turn.thoughts), tostring(turn.name), tostring(turn.cachePoint), tostring(turn.multimodals),
-            }, '|')
-          end
-          req[1].content = table.concat(seen, '\\n')
-          return req`),
-      ),
-    ]);
-    await send(cookie, chatId, capturing);
-    const stored = await db.select().from(messages).where(eq(messages.chatId, chatId)).orderBy(asc(messages.createdAt));
-    const turn = stored.find((message) => message.role === 'user')!;
-    expect(prompts.at(-1)!.system.split('\n')).toEqual([
-      'system|nil|nil|nil|nil|nil|nil|nil',
-      // The greeting, which RisuAI sends from the character: removable, and nothing else.
-      'assistant|nil|true|nil|nil|nil|nil|nil',
-      `user|${turn.id}|true|0|0|nil|nil|nil`,
-      'system|nil|nil|nil|nil|nil|nil|nil',
-    ]);
-  });
-
-  it('lets a listener drop the turns it finds by their memo — the examples — and sends the rest', async () => {
-    const { app: capturing, prompts } = capturingApp();
-    const cookie = await signUp('lua-memo@example.com');
+  /** A plot whose one member has an example block and the Lua `code`, and its owner's chat on it. */
+  async function exampleChat(email: string, code: string): Promise<{ cookie: string; chatId: string }> {
+    const cookie = await signUp(email);
     const plot = await createPlot(cookie, { name: '루아 작품', description: '설명', intros: ['문 앞이다.'] });
-    const code = listening(`
-      if getChat(id, -1).data ~= '빼 줘' then return req end
-      local kept = {}
-      for _, turn in ipairs(req) do
-        if turn.memo ~= 'NewChatExample' then kept[#kept + 1] = turn end
-      end
-      return kept`);
     await addCharacter(cookie, plot.id, {
       name: '아리아',
       card: {
@@ -13469,16 +13444,128 @@ describe('editRequest listeners', () => {
         extensions: { risuai: { triggerscript: [lua(code)] } },
       },
     });
-    const chatId = (await startChat(cookie, plot.id)).chat.id;
-    const texts = (): string[] => prompts.at(-1)!.messages.map((message) => contentText(message.content));
+    return { cookie, chatId: (await startChat(cookie, plot.id)).chat.id };
+  }
+
+  it('hands the listener RisuAI’s request: the examples split and named, the separators, the memory a turn of its own, the newest turn not removable', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const { cookie, chatId } = await exampleChat(
+      'lua-items@example.com',
+      listening(`
+        local seen = {}
+        for _, turn in ipairs(req) do
+          local said = ''
+          if turn.name or turn.memo == 'NewChat' or turn.memo == 'NewChatExample' or turn.memo == 'supaMemory' then said = turn.content end
+          seen[#seen + 1] = table.concat({
+            turn.role, tostring(turn.memo), tostring(turn.removable), tostring(turn.attr and #turn.attr),
+            tostring(turn.thoughts and #turn.thoughts), tostring(turn.name), tostring(turn.cachePoint), tostring(turn.multimodals),
+            (said:gsub('\\n', '/')),
+          }, '|')
+        end
+        req[1].content = table.concat(seen, '\\n')
+        return req`),
+    );
+    const stored = () => db.select().from(messages).where(eq(messages.chatId, chatId)).orderBy(asc(messages.createdAt));
     await send(cookie, chatId, capturing);
-    expect(texts().some((text) => text.includes('예시 답변'))).toBe(true);
-    await send(cookie, chatId, capturing, '빼 줘');
-    expect(texts().some((text) => text.includes('예시 답변'))).toBe(false);
-    expect(prompts.at(-1)!.messages.filter((message) => message.role === 'user').map((message) => contentText(message.content))).toEqual([
-      '안녕',
-      '빼 줘',
+    const first = (await stored()).find((message) => message.role === 'user')!;
+    const reply = (await stored()).at(-1)!;
+    const examples = [
+      'system|NewChatExample|true|nil|nil|nil|nil|nil|[Start a new chat]',
+      'user|nil|true|nil|nil|example_user|nil|nil|예시 질문',
+      'assistant|nil|true|nil|nil|example_assistant|nil|nil|예시 답변',
+    ];
+    expect(prompts.at(-1)!.system.split('\n')).toEqual([
+      'system|nil|nil|nil|nil|nil|nil|nil|',
+      ...examples,
+      // Between the examples and the chat, while the chat is sent from its start.
+      'system|NewChat|true|nil|nil|nil|nil|nil|[Start a new chat]',
+      // The greeting, which RisuAI sends from the character: removable, and nothing else.
+      'assistant|nil|true|nil|nil|nil|nil|nil|',
+      // The newest turn is RisuAI's `lastChat`: not removable.
+      `user|${first.id}|nil|0|0|nil|nil|nil|`,
+      'system|nil|nil|nil|nil|nil|nil|nil|',
     ]);
+
+    // The memory summarized the front away: its summary is a turn of its own, and the separator went with the front.
+    const memory: ChatMemory = { summary: '둘은 문 앞에서 만났다.', anchorMessageId: first.id, updatedAt: new Date().toISOString() };
+    await db.update(chats).set({ memory }).where(eq(chats.id, chatId));
+    await send(cookie, chatId, capturing, '또 왔어');
+    const second = (await stored()).filter((message) => message.role === 'user').at(-1)!;
+    expect(prompts.at(-1)!.system.split('\n')).toEqual([
+      'system|nil|nil|nil|nil|nil|nil|nil|',
+      'system|supaMemory|nil|nil|nil|nil|nil|nil|[지난 이야기 요약]/둘은 문 앞에서 만났다.',
+      ...examples,
+      `assistant|${reply.id}|true|0|0|nil|nil|nil|`,
+      `user|${second.id}|nil|0|0|nil|nil|nil|`,
+      'system|nil|nil|nil|nil|nil|nil|nil|',
+    ]);
+    // The listener changed the request, so it went in that shape: the summary a system turn of its own.
+    expect(prompts.at(-1)!.messages[0]).toEqual({ role: 'system', content: '[지난 이야기 요약]\n둘은 문 앞에서 만났다.' });
+  });
+
+  it('lets a listener filter the request by memo and by name, as RisuAI’s cards do, and sends the rest', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const { cookie, chatId } = await exampleChat(
+      'lua-memo@example.com',
+      listening(`
+        local said = getChat(id, -1).data
+        local kept = {}
+        for _, turn in ipairs(req) do
+          local example = turn.name == 'example_user' or turn.name == 'example_assistant'
+          local separator = turn.memo == 'NewChatExample' or turn.memo == 'NewChat'
+          local drop = (said == '구분 빼' and turn.memo == 'NewChatExample') or (said == '예시 빼' and example)
+            or (said == '다 빼' and (example or separator))
+          if not drop then kept[#kept + 1] = turn end
+        end
+        return kept`),
+    );
+    const texts = (): string[] => prompts.at(-1)!.messages.map((message) => contentText(message.content));
+    const separators = (): number => texts().filter((text) => text === '[Start a new chat]').length;
+    // By memo: the separator that opened the block goes, its lines stay — and the chat's own separator.
+    await send(cookie, chatId, capturing, '구분 빼');
+    expect(separators()).toBe(1);
+    expect(texts()).toEqual(expect.arrayContaining(['예시 질문', '예시 답변']));
+    // By name: the lines go, both separators stay.
+    await send(cookie, chatId, capturing, '예시 빼');
+    expect(separators()).toBe(2);
+    expect(texts().filter((text) => text === '예시 질문' || text === '예시 답변')).toEqual([]);
+    await send(cookie, chatId, capturing, '다 빼');
+    expect(separators()).toBe(0);
+    expect(texts().filter((text) => text.includes('예시 질문') || text.includes('예시 답변'))).toEqual([]);
+    expect(prompts.at(-1)!.messages.filter((message) => message.role === 'user').map((message) => contentText(message.content))).toEqual([
+      '구분 빼',
+      '예시 빼',
+      '다 빼',
+    ]);
+  });
+
+  it('sends the request as it was put together when the listener leaves it as it was, and in RisuAI’s shape when it changes it', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const { cookie, chatId } = await exampleChat(
+      'lua-round-trip@example.com',
+      listening(`
+        if getChat(id, -1).data == '바꿔' then req[#req].content = req[#req].content .. ' (끝)' end
+        return req`),
+    );
+    await send(cookie, chatId, capturing);
+    const unedited = prompts.at(-1)!;
+    const texts = unedited.messages.map((message) => contentText(message.content));
+    // The assembler's own: one system turn for the example block, under its header, and no separator.
+    expect(texts.filter((text) => text.startsWith('[예시 대화: 아리아]\n'))).toHaveLength(1);
+    expect(texts).not.toContain('[Start a new chat]');
+
+    await send(cookie, chatId, capturing, '바꿔');
+    const sent = prompts.at(-1)!;
+    expect(sent.system).toBe(unedited.system);
+    // RisuAI's shape, as RisuAI sends what a listener leaves; the names stay behind — our provider takes none.
+    expect(sent.messages.slice(0, 5)).toEqual([
+      { role: 'system', content: '[Start a new chat]' },
+      { role: 'user', content: '예시 질문' },
+      { role: 'assistant', content: '예시 답변' },
+      { role: 'system', content: '[Start a new chat]' },
+      { role: 'assistant', content: '문 앞이다.' },
+    ]);
+    expect(contentText(sent.messages.at(-1)!.content)).toMatch(/ \(끝\)$/);
   });
 
   it('sends the pictures a listener leaves on the reader’s turn — after it drops other turns too — and none it removed', async () => {
@@ -13499,7 +13586,7 @@ describe('editRequest listeners', () => {
           req[1].multimodals = turn.multimodals
           turn.multimodals = nil
         end
-        if turn.memo == 'NewChatExample' and said == '예시 빼고' then table.remove(req, i) end
+        if (turn.memo == 'NewChatExample' or turn.name) and said == '예시 빼고' then table.remove(req, i) end
       end
       return req`);
     await addCharacter(cookie, plot.id, {
@@ -13525,12 +13612,12 @@ describe('editRequest listeners', () => {
     };
     const lastTurn = () => prompts.at(-1)!.messages.findLast((message) => message.role === 'user');
 
-    // The listener sees the picture as RisuAI's item holds one, named rather than carried.
+    // The listener sees the picture as RisuAI's item holds one: its data URL.
     await sendWithImage('보여 줘');
-    expect(prompts.at(-1)!.system).toBe('image/image:0/1');
+    expect(prompts.at(-1)!.system).toBe(`image/${image.url}/1`);
     expect(lastTurn()).toEqual({ role: 'user', content: [{ type: 'text', text: '보여 줘' }, image] });
 
-    // The request is a turn shorter, and the picture still goes with the turn that names it.
+    // The request is three turns shorter, and the picture still goes with the turn that holds it.
     await sendWithImage('예시 빼고');
     expect(prompts.at(-1)!.messages.some((message) => contentText(message.content).includes('예시 답변'))).toBe(false);
     expect(lastTurn()).toEqual({ role: 'user', content: [{ type: 'text', text: '예시 빼고' }, image] });
@@ -13543,7 +13630,7 @@ describe('editRequest listeners', () => {
     expect(prompts.at(-1)!.messages.some((message) => typeof message.content !== 'string')).toBe(false);
   });
 
-  it('keeps the listener’s Lua globals for the reader’s next generation with that member, in any of their chats, while the code stays the same', async () => {
+  it('keeps the listener’s Lua globals for the reader’s next generation with the same card code, in any of their chats and works', async () => {
     const { app: capturing, prompts } = capturingApp();
     const counting = listening(`counter = counter + 1 req[1].content = 'n=' .. counter return req`);
     const code = `counter = 0\n${counting}`;
@@ -13561,6 +13648,15 @@ describe('editRequest listeners', () => {
     // The reader's other chat with the member goes on from there, as RisuAI's one state does across its chats.
     await send(cookie, otherChat, capturing);
     expect(prompts.at(-1)!.system).toBe('n=3');
+    // So does the same card in another of their works: RisuAI's state holds while the code is the same.
+    const otherPlot = await createPlot(cookie, { name: '다른 작품', description: '설명', intros: ['문 앞이다.'] });
+    await addCharacter(cookie, otherPlot.id, {
+      name: '아리아',
+      card: { description: '설명', extensions: { risuai: { triggerscript: [lua(code)] } } },
+    });
+    const otherWork = (await startChat(cookie, otherPlot.id)).chat.id;
+    await send(cookie, otherWork, capturing);
+    expect(prompts.at(-1)!.system).toBe('n=4');
 
     // Another reader on the same work, the same member and the same code, has their own…
     await publishPlot(cookie, plot.id);
@@ -13570,13 +13666,13 @@ describe('editRequest listeners', () => {
     expect(prompts.at(-1)!.system).toBe('n=1');
     // …and leaves this reader's where it was.
     await send(cookie, chatId, capturing, '셋');
-    expect(prompts.at(-1)!.system).toBe('n=4');
+    expect(prompts.at(-1)!.system).toBe('n=5');
 
     // The creator's inspector reads the state and keeps nothing of its run.
     const report = await readJson(await request(cookie, `/api/chats/${chatId}/inspect`));
-    expect(report.blocks[0].text).toBe('n=5');
+    expect(report.blocks[0].text).toBe('n=6');
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
-    expect(prompts.at(-1)!.system).toBe('n=5');
+    expect(prompts.at(-1)!.system).toBe('n=6');
 
     // New code is a new state, as RisuAI rebuilds one when the code differs.
     await patchCharacter(cookie, plot.id, member.id, {
@@ -13584,6 +13680,10 @@ describe('editRequest listeners', () => {
     });
     await send(cookie, chatId, capturing, '바뀐 코드');
     expect(prompts.at(-1)!.system).toBe('n=11');
+    // The other work's card, still the old code, keeps its own: each code keeps a state, where RisuAI's
+    // one state would have started afresh once the other code ran (a group's speakers, turn by turn).
+    await send(cookie, otherWork, capturing, '다시');
+    expect(prompts.at(-1)!.system).toBe('n=7');
 
     // A card with two scripts alternates RisuAI's one state between them: nothing carries over.
     await patchCharacter(cookie, plot.id, member.id, {

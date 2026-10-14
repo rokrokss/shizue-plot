@@ -488,15 +488,19 @@ describe('the parent’s side of the protocol', () => {
 });
 
 describe('the kept states', () => {
-  it('are one a reader and member: never another reader’s, never another member’s', () => {
+  it('are one a reader and card code: never another reader’s, never another code’s', () => {
+    const card = [listener('return req')];
+    // The same card's Lua, in whatever work: one key.
+    expect(luaStateKey('reader-a', [...card])).toBe(luaStateKey('reader-a', card));
     const keys = [
-      luaStateKey('reader-a', 'member-1'),
-      luaStateKey('reader-b', 'member-1'),
-      luaStateKey('reader-a', 'member-2'),
+      luaStateKey('reader-a', card),
+      luaStateKey('reader-b', card),
+      luaStateKey('reader-a', [`${card[0]}\n`]),
+      // Every script of the card counts, and where one ends.
+      luaStateKey('reader-a', [...card, '-- 둘째']),
+      luaStateKey('reader-a', [`${card[0]}-- 둘째`]),
     ];
-    expect(new Set(keys).size).toBe(3);
-    // A separator no id holds: one reader's id cannot run into another's member.
-    expect(luaStateKey('a:b', 'c')).not.toBe(luaStateKey('a', 'b:c'));
+    expect(new Set(keys).size).toBe(5);
   });
 
   it('keep the most recently used within their count and their size', () => {

@@ -19,7 +19,8 @@ process.stdin.on('data', (chunk: string) => {
     if (message['type'] !== 'call') continue;
     const code = message['code'];
     if (code === 'garbage') process.stdout.write('not json\n');
-    else if (code === 'flood') process.stdout.write('x'.repeat(9 * 1024 * 1024));
+    // Past the 8 MB of text and the 4 MB of pictures a line may carry.
+    else if (code === 'flood') process.stdout.write('x'.repeat(13 * 1024 * 1024));
     else if (code === 'stray') write({ type: 'done', call: 7, result: {} });
     else write({ type: 'host', call: message['call'], host: 1, name: code, args: { url: 'https://example.com', messages: [] } });
   }

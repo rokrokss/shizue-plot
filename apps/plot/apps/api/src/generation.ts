@@ -516,9 +516,9 @@ async function withPromptScripts(
  * (`requestTriggers.ts`). The chat variables the listeners wrote are the
  * triggers' to read, and the generated turn's to keep, as is what else they did
  * (`listenerEdits`). The listeners' state's globals are put back from the
- * reader's last generation with that member, in whichever of their chats, and
- * a generation keeps them for the next (`LuaStateStore`, `luaStateKey`); the
- * inspector reads them and keeps nothing.
+ * reader's last generation with that card's Lua, in whichever of their chats
+ * and works, and a generation keeps them for the next (`LuaStateStore`,
+ * `luaStateKey`); the inspector reads them and keeps nothing.
  */
 async function buildRequestMessages(
   plan: GenerationPlan,
@@ -539,7 +539,7 @@ async function buildRequestMessages(
       let request: EditedTurn[] | null = null;
       if (lua) {
         const states = deps.luaStates ?? luaStates;
-        const key = luaStateKey(reader, requestScriptsOf(plan)?.member.id ?? '');
+        const key = luaStateKey(reader, lua.scripts);
         const kept = states.get(key);
         // RisuAI's one state holds the code it ran last: the next run's first script finds it only if it is that code.
         const restore = kept && kept.hash === luaStateHash(lua.scripts[0]!) ? kept.state : undefined;
@@ -836,6 +836,7 @@ async function assembleRequest(
           ]
         : []),
     ],
+    ...(prompt.risu ? { risu: prompt.risu } : {}),
     loreTriggers: prompt.loreTriggers,
     ...(prompt.variableWrites ? { variableWrites: prompt.variableWrites } : {}),
     ...(prompt.stopSequences ? { stopSequences: prompt.stopSequences } : {}),

@@ -23,7 +23,7 @@ import { runTriggers, scriptChatOf, type CodeScope, type TriggerMessage, type Tr
 import type { LoreEntry } from '../src/lib/types';
 import { afterEach, describe, expect, it } from 'vitest';
 import { LUA_CLASSIFICATION } from '../src/lib/scripts/lua/classification';
-import { createLuaEngine, luaFunctionNames } from '../src/lib/scripts/lua/engine';
+import { createLuaEngine, luaCodeKey, luaFunctionNames } from '../src/lib/scripts/lua/engine';
 import { LUA_WRAPPER } from '@shizue/core/lua';
 import {
   createLuaSandbox,
@@ -233,20 +233,20 @@ describe('the Lua sandbox', () => {
     expect((await done(sandbox, code + '\n')).vars).toEqual([['count', '1']]);
   });
 
-  it('keeps each member’s Lua state its own, mode by mode, and closes the one used longest ago past the cap', async () => {
+  it('keeps each state key’s Lua state its own, mode by mode, and closes the one used longest ago past the cap', async () => {
     const sandbox = sandboxWith();
     const code = `count = 0
       function onStart(id) count = count + 1 setChatVar(id, 'count', count) end`;
-    const count = async (member?: string) => {
-      const outcome = await sandbox.call(code, start, snapshot(), host, member);
+    const count = async (stateKey?: string) => {
+      const outcome = await sandbox.call(code, start, snapshot(), host, stateKey);
       if (outcome.kind !== 'done') throw new Error(`expected done, got ${JSON.stringify(outcome)}`);
       return outcome.result.vars;
     };
     expect(await count('a')).toEqual([['count', '1']]);
-    // Another member's card, with the same code and mode, counts on its own…
+    // Another key, with the same code and mode, counts on its own…
     expect(await count('b')).toEqual([['count', '1']]);
     expect(await count('a')).toEqual([['count', '2']]);
-    // …and so does a work of one's, which names no member.
+    // …and so does a call that names none.
     expect(await count()).toEqual([['count', '1']]);
     // Past the cap the state used longest ago goes: b's, not a's.
     for (let other = 0; other < LUA_LIMITS.engines - 2; other += 1) await count(`m${other}`);
@@ -774,7 +774,7 @@ describe('the reader’s Lua sandbox', () => {
     return Object.fromEntries(outcome.result.vars)['count'];
   };
 
-  it('keeps a member’s Lua state from one of the reader’s chats to the next while the code is the same', async () => {
+  it('keeps a card’s Lua state from one of the reader’s chats to the next while the code is the same', async () => {
     let opened = 0;
     const open = (): LuaSandbox => {
       opened += 1;
@@ -896,6 +896,47 @@ describe('the Lua engine', () => {
     // The message keeps its id, so the runtime can tell it is the head being rewritten.
     expect(result.messages.at(-1)).toEqual({ role: 'char', data: '바뀐 끝', id: 'm1' });
     expect(logs).toEqual([]);
+  });
+
+  it('keeps a card’s states by its code: the same card in another work shares them, a card of other code keeps its own', async () => {
+    const sandbox = sandboxWith();
+    const counting = (from: number): TriggerScript[] => [
+      lua(`count = ${from}\nfunction onStart(id) count = count + 1 setChatVar(id, 'count', count) end`),
+    ];
+    const run = async (triggers: TriggerScript[]): Promise<string | undefined> => {
+      // A chat page makes an engine for each member it shows; one here for each run.
+      const engine = createLuaEngine({
+        triggers,
+        lowLevelAccess: false,
+        sandbox,
+        ui: host,
+        llm: host.llm,
+        similarity: host.similarity,
+        request: host.request,
+        log: () => undefined,
+      });
+      const result = await runTriggers(
+        {
+          mode: 'start',
+          character: { name: '리안', description: '', lorebook: [], postHistoryInstructions: '', lowLevelAccess: false, triggers },
+          messages: [],
+          note: '',
+          persona: '',
+          variables: Object.create(null),
+        },
+        { code: (request) => engine.runCode!(request) },
+      );
+      return result.variables['count'];
+    };
+    expect(await run(counting(0))).toBe('1');
+    // The same card, another work's member: RisuAI's state, which holds while the code is the same.
+    expect(await run(counting(0))).toBe('2');
+    // Another card — a group's other member — counts on its own…
+    expect(await run(counting(100))).toBe('101');
+    // …and leaves the first where it was, where RisuAI's one state would have started afresh.
+    expect(await run(counting(0))).toBe('3');
+    expect(luaCodeKey(['a', 'b'])).toBe(luaCodeKey(['a', 'b']));
+    expect(new Set([luaCodeKey(['a', 'b']), luaCodeKey(['ab']), luaCodeKey(['a\nb']), luaCodeKey(['b', 'a'])]).size).toBe(4);
   });
 
   it('hands the run the chat the chat functions left: messages added, removed, cut, rewritten and turned', async () => {

@@ -14,7 +14,8 @@
  * a heap of `HEAP_MB`; its environment is empty, and everything it runs arrives
  * on stdin. Inside, the worker is `@shizue/core/lua`'s, the program the reader's
  * browser runs, in its `server` variant: no JavaScript object a script can
- * index, no Lua library that reaches past the state, 32 MB a Lua state.
+ * index, no Lua library that reaches past the state, `LUA_SERVER_MEMORY`
+ * (64 MB) a Lua state — twice the browser's, for the request's pictures.
  *
  * Node's permission model controls the network only from 25 on, and before
  * that a child under it can still connect anywhere. So the server asks once,
@@ -34,21 +35,22 @@
  * for a card with one Lua script; with more, the code alternates and the state
  * is rebuilt every call. The closest thing here: the last script's plain-data
  * globals are taken when a run ends (`LUA_STATE` — strings, numbers, booleans
- * and tables of them, never code), kept by reader and member (`luaStateKey`:
- * RisuAI's one state lives in one reader's app, and the browser keeps one per
- * member too) and tagged with that script's hash (`LuaStateStore`, in memory),
- * and put back into the next run's first script once its code has loaded —
- * whichever of the reader's chats with that member it runs for, and only when
- * it is the same code, so a card with several scripts starts every one fresh,
- * as in RisuAI. They go in as data, read by the keeper the state made before
- * the card's code ran.
+ * and tables of them, never code), kept by reader and the card's Lua
+ * (`luaStateKey`: RisuAI's one state lives in one reader's app and holds while
+ * the code is the same, and the browser keeps one per code too) and tagged with
+ * that script's hash (`LuaStateStore`, in memory), and put back into the next
+ * run's first script once its code has loaded — whichever of the reader's chats
+ * and works with that code it runs for, and only when it is the same script, so
+ * a card with several scripts starts every one fresh, as in RisuAI. They go in
+ * as data, read by the keeper the state made before the card's code ran.
  *
  * **What a listener has.** What the browser hands its worker: the chat (the
  * whole branch), its variables, the reader's global variables, the character
  * as the reader's overlay has it, the chat's own lore, the persona and the
  * chat's note — and the request as the request triggers read it: RisuAI's
- * `OpenAIChat` items, `memo` and the rest beside `role` and `content`, the
- * pictures as stand-ins (`requestTriggers.ts`). RisuAI's
+ * `OpenAIChat` items in the shape RisuAI's request has, `memo` and the rest
+ * beside `role` and `content`, the pictures as their data URLs — stand-ins past
+ * a request's budget (`requestTriggers.ts`). RisuAI's
  * `runLuaEditTrigger` gives its listeners no low-level access, so `LLM`,
  * `axLLM`, `simpleLLM`, `request`, `similarity` and `loadLoreBooks` answer nil
  * in the worker, and the child asking for any of them anyway is a broken child.
@@ -83,7 +85,7 @@ import { createRequire } from 'node:module';
 import type { Socket } from 'node:net';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { turnsOf, type EditedTurn } from './requestTriggers.js';
+import { REQUEST_IMAGE_BUDGET, turnsOf, type EditedTurn } from './requestTriggers.js';
 
 /**
  * How long a whole run may take, from the child it is handed to its last
@@ -108,26 +110,31 @@ export const REQUEST_LUA_DEADLINE_MS = 3_000;
  * threads. A run takes milliseconds and a reply tens of seconds, so two serve
  * many generations at once, and a card that hangs holds one for the deadline
  * at most. Each idles at about 70 MB of memory and is held to `HEAP_MB` of heap
- * and 32 MB of Lua; a third run waits for one to finish.
+ * and `LUA_SERVER_MEMORY` (64 MB) a Lua state; a third run waits for one to finish.
  */
 const POOL_SIZE = 2;
 
-/** The child's JavaScript heap: the request, the chat and their JSON, twice over. */
+/** The child's JavaScript heap: the request — its pictures too, up to `REQUEST_IMAGE_BUDGET` — the chat and their JSON, twice over. */
 const HEAP_MB = 128;
 
 /**
  * The most a child may hold in memory during a run, counted the way the
  * kernel counts it (resident set), so WebAssembly memory and anything else
  * off the V8 heap is in it. Set well above what a run uses (about 70 MB idle,
- * the 128 MB heap and the Lua states on top) so it only ever stops a child
+ * the 128 MB heap and the Lua states on top; a listener over a request with
+ * 4 MB of pictures peaked at about 210–240 MB) so it only ever stops a child
  * that is running away. Read from `/proc`, so only where there is one — Linux,
  * where the API is deployed; elsewhere the heap and Lua limits stand alone.
  */
 const RSS_LIMIT_MB = 512;
 const RSS_POLL_MS = 100;
 
-/** The longest line the parent reads from a child — far past any request a chat sends. */
-const MAX_LINE = 8 * 1024 * 1024;
+/**
+ * The longest line the parent reads from a child: 8 MB — far past any request
+ * a chat's text makes, or a whole 2,000-message chat — and the request's
+ * pictures, which a listener hands back as data up to `REQUEST_IMAGE_BUDGET`.
+ */
+const MAX_LINE = 8 * 1024 * 1024 + REQUEST_IMAGE_BUDGET;
 
 /** How long a child has to load wasmoon, and the probe to answer. */
 const BOOT_MS = 10_000;
@@ -751,13 +758,21 @@ export interface LuaStateStore {
 }
 
 /**
- * Whose `editRequest` state it is: one reader's, for one member's card —
- * RisuAI keeps one state a mode in the reader's own app, and the reader's
- * browser keeps one a member and mode (web `lua/readerSandbox.ts`). So every
- * chat the reader has with that member shares it, as RisuAI's chats do while
- * the code stays the same; another reader never sees it.
+ * Whose `editRequest` state it is: one reader's, for one card's Lua — all of
+ * its scripts, hashed. RisuAI keeps one state a mode in the reader's own app,
+ * kept while the code stays the same, and the reader's browser keeps one a
+ * card's code and mode (web `lua/engine.ts`). So every chat the reader has with
+ * that code shares it — the same card in two works too, as in RisuAI — while a
+ * group's members, whose code differs, keep theirs apart; another reader never
+ * sees it.
+ *
+ * One difference is kept on purpose: RisuAI's one state a mode is made anew
+ * whenever other code runs in it, as on every speaker change in a group, which
+ * would wipe a group card's globals every turn. Here each code keeps its own,
+ * in the store's LRU.
  */
-export const luaStateKey = (reader: string, member: string): string => `${reader}\u0000${member}\u0000editRequest`;
+export const luaStateKey = (reader: string, scripts: readonly string[]): string =>
+  `${reader}\u0000${luaStateHash(JSON.stringify(scripts))}\u0000editRequest`;
 
 /**
  * The states this process keeps: the most recently used first to stay, up to

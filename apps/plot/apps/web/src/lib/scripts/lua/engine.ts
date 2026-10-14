@@ -88,13 +88,6 @@ export interface LuaEngineOptions {
   /** The scripted member's avatar, a same-origin address — RisuAI's `char.image` — or null. */
   avatarUrl?: string | null;
   /**
-   * The member whose card this is: its Lua keeps states of its own
-   * (`LuaSandbox.call`) in the reader's sandbox, which every member of the
-   * work — and of the reader's other chats — shares (`readerLuaSandbox`).
-   * Absent, the states are the modes' alone.
-   */
-  member?: string;
-  /**
    * The chat's persona's picture as it stands when a call starts, a same-origin
    * address — RisuAI's user icon — or null. Asked per call: the reader can switch
    * the persona mid-chat, while the member is the plot's for good.
@@ -104,6 +97,26 @@ export interface LuaEngineOptions {
 }
 
 export { luaScriptsOf };
+
+/**
+ * Whose Lua states a card's calls use in the reader's sandbox
+ * (`LuaSandbox.call`), which every work the reader opens shares
+ * (`readerLuaSandbox`): its scripts, all of them, hashed. RisuAI keeps one
+ * state a mode for the whole app while the code stays the same, so the same
+ * card in two works shares its globals, as here; a group's members, whose code
+ * differs, keep theirs apart rather than wiping one another's on every speaker
+ * change, as RisuAI's one state would. Two codes that hash alike share a state,
+ * which then starts afresh whenever the other code runs — RisuAI's own rule.
+ */
+export function luaCodeKey(scripts: readonly string[]): string {
+  const text = JSON.stringify(scripts);
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `lua:${text.length.toString(36)}:${(hash >>> 0).toString(36)}`;
+}
 
 /**
  * The global functions the scripts declare, for a `{{button}}` that names one —
@@ -180,6 +193,7 @@ export function createLuaEngine(options: LuaEngineOptions): ScriptEngine {
   const { sandbox, ui, log } = options;
   const scripts = luaScriptsOf(options.triggers);
   const source = scripts.join('\n');
+  const stateKey = luaCodeKey(scripts);
   /** Display passes run on every redraw: each distinct complaint is said once. */
   const said = new Set<string>();
 
@@ -265,7 +279,7 @@ export function createLuaEngine(options: LuaEngineOptions): ScriptEngine {
       return options.lore(history, [...scope.character.lorebook, ...upsertLocalLore(scope.localLore, upserts)]);
     };
     const snapshot = snapshotOf(scope, lowLevel, options.avatarUrl, options.personaAvatarUrl?.());
-    const outcome = await sandbox.call(code, entry, snapshot, { ...host, lore }, options.member);
+    const outcome = await sandbox.call(code, entry, snapshot, { ...host, lore }, stateKey);
     if (outcome.kind !== 'done') {
       report(outcome, entry.kind === 'display');
       return null;
