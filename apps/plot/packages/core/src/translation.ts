@@ -20,7 +20,7 @@
 import type { MacroLocale } from './macro.js';
 import type { DisplayScript } from './types.js';
 import { hasTriggersFor } from './triggers/interpreter.js';
-import { luaScriptsOf, type EditScript, type TriggerScript } from './triggers/scripts.js';
+import { luaScriptsOf, type EditScript, type TranslationScript, type TriggerScript } from './triggers/scripts.js';
 
 export type TranslationMode = 'off' | 'instruct' | 'translate';
 export const TRANSLATION_MODES: readonly TranslationMode[] = ['off', 'instruct', 'translate'];
@@ -101,11 +101,13 @@ export function resolveTranslation(
  * Which messages are translated for display. In `translate` mode, every one —
  * RisuAI's `autoTranslate` reads every message the chat draws, the reader's own
  * included. In `instruct` mode the replies are already in the reader's language,
- * so only the openings are: fixed text a card wrote in its own language.
+ * so only what the card wrote in its own language is: the openings, and the
+ * messages its scripts wrote (`source` `script`) — fixed text no model was asked
+ * to write in the reader's language.
  */
-export function translatesMessage(mode: TranslationMode, message: { intro: boolean }): boolean {
+export function translatesMessage(mode: TranslationMode, message: { intro: boolean; scripted?: boolean }): boolean {
   if (mode === 'translate') return true;
-  if (mode === 'instruct') return message.intro;
+  if (mode === 'instruct') return message.intro || message.scripted === true;
   return false;
 }
 
@@ -418,6 +420,91 @@ export const partTexts = (parts: readonly TextPart[]): string[] => [
 /** `parts` put back together with what arrived; a text with no translation yet stays as it was. */
 export const applyParts = (parts: readonly TextPart[], translated: ReadonlyMap<string, string>): string =>
   parts.map((part) => (part.translate ? (translated.get(part.text) ?? part.text) : part.text)).join('');
+
+/** One `edittrans` script as RisuAI reads its flag field. */
+interface ParsedTranslationScript {
+  script: TranslationScript;
+  flag: string;
+  order: number;
+  actions: string[];
+}
+
+/**
+ * RisuAI's `applyEdittransRegex`: a translation through the card's `edittrans`
+ * scripts, run on what the translator returned and before it is shown — never
+ * on the original, and never on what the reader sends. Read the way RisuAI
+ * reads them, which is not quite how it reads the other regex scripts: the flag
+ * field's `<…>` directives are `<order N>` (the list sorted highest first once
+ * any script carries one), `move_top`/`move_bottom` (every match taken out and
+ * put on a line of its own at the top or the bottom) and `cbs` (the pattern read
+ * as CBS first — the caller's `cbs`; without one it stays as written); the
+ * replacement is a plain `String.replace` one (`$1`, `$&`), never read as CBS,
+ * with `$n` a line break; and a script that throws is skipped.
+ */
+export function applyTranslationScripts(
+  text: string,
+  scripts: readonly TranslationScript[],
+  options: { cbs?: (pattern: string) => string } = {},
+): string {
+  const parsed: ParsedTranslationScript[] = [];
+  let ordered = false;
+  for (const script of scripts) {
+    if (!script.in) continue;
+    let flag = script.ableFlag ? script.flag || 'g' : 'g';
+    let order = 0;
+    const actions: string[] = [];
+    flag = flag.replace(/<(.+?)>/g, (_whole, inner: string) => {
+      for (const meta of inner.split(',').map((part) => part.trim())) {
+        if (meta.startsWith('order ')) {
+          order = parseInt(meta.substring(6));
+          ordered = true;
+        } else actions.push(meta);
+      }
+      return '';
+    });
+    if (actions.includes('move_top') || actions.includes('move_bottom')) flag = flag.replace('g', '');
+    flag = flag
+      .trim()
+      .replace(/[^dgimsuvy]/g, '')
+      .split('')
+      .filter((char, index, all) => all.indexOf(char) === index)
+      .join('');
+    parsed.push({ script, flag: flag || 'u', order, actions });
+  }
+  // A stable sort, as RisuAI's: equal orders keep the list's sequence.
+  if (ordered) parsed.sort((a, b) => b.order - a.order);
+
+  let data = text;
+  for (const { script, flag, actions } of parsed) {
+    try {
+      const regex = new RegExp(actions.includes('cbs') && options.cbs ? options.cbs(script.in) : script.in, flag);
+      const out = script.out.replaceAll('$n', '\n');
+      if (!actions.includes('move_top') && !actions.includes('move_bottom')) {
+        data = data.replace(regex, out);
+        continue;
+      }
+      const found = flag.includes('g') ? [...data.matchAll(regex)] : [data.match(regex)];
+      data = data.replace(regex, '');
+      for (const match of found) {
+        if (!match) continue;
+        // RisuAI's own reading of the replacement here — a group it has not is
+        // `undefined`, and `$<name>` looks the name up by `parseInt`, which only
+        // a group named `NaN` answers — kept as it reads.
+        const moved = out
+          .replace(/(?<!\$)\$[0-9]+/g, (token) => {
+            const index = parseInt(token.substring(1));
+            return index < match.length ? String(match[index]) : token;
+          })
+          .replace(/\$&/g, match[0])
+          .replace(/(?<!\$)\$<([^>]+)>/g, (token) => match.groups?.[String(parseInt(token.substring(2, token.length - 1)))] || token);
+        data = actions.includes('move_top') ? `${moved}\n${data}` : `${data}\n${moved}`;
+      }
+    } catch {
+      // RisuAI logs the error and goes on to the next script.
+    }
+  }
+  return data;
+}
 
 /** What the recommendation reads of a work: its display scripts, and each scripted member's scripts. */
 export interface TranslationScriptInput {

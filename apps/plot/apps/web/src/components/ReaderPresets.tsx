@@ -6,6 +6,7 @@ import {
   READER_PRESET_TEXT_MAX,
   ReaderPresetImportError,
   type ReaderPresetImport,
+  type ReaderPresetPart,
 } from '@shizue/core/reader-preset';
 import { useFormatter, useTranslations } from 'next-intl';
 import { useId, useRef, useState } from 'react';
@@ -352,18 +353,23 @@ function TextField({
   );
 }
 
-/** What an import took, and — always — what it left behind. */
+/** What an import took and where each prompt went, and — always — what it left behind. */
 function ImportNotice({ imported }: { imported: ReaderPresetImport }) {
   const t = useTranslations('chat.readerPresets');
   const source = imported.source === 'risuai' ? 'RisuAI' : 'SillyTavern';
   const names = imported.ignoredPrompts.map((name) => name || t('unnamedPrompt'));
+  /** A prompt by the file's name for it, else by what RisuAI calls its field. */
+  const partName = (part: ReaderPresetPart): string =>
+    part.name ||
+    (part.kind === 'main'
+      ? t('partMain')
+      : part.kind === 'globalNote'
+        ? t('partGlobalNote')
+        : part.kind === 'jailbreak'
+          ? t('partJailbreak')
+          : t('unnamedPrompt'));
   const lines = [
-    imported.dropped.includes('jailbreak')
-      ? imported.source === 'sillytavern'
-        ? t('droppedJailbreakSillyTavern')
-        : t('droppedJailbreak')
-      : '',
-    imported.dropped.includes('nsfw') ? t('droppedNsfw') : '',
+    ...imported.imported.map((part) => t('takenInto', { name: partName(part), field: t(part.into) })),
     names.length > 0 ? t('ignoredPrompts', { count: names.length, names: names.join(', ') }) : '',
     imported.ignoredSettings ? t('ignoredSettings') : '',
   ].filter((line) => line.length > 0);
@@ -374,8 +380,9 @@ function ImportNotice({ imported }: { imported: ReaderPresetImport }) {
       <p className="font-medium text-fg">{nothing ? t('importedNothing', { source }) : t('imported', { source })}</p>
       {lines.length > 0 ? (
         <ul className="list-disc space-y-0.5 pl-4">
-          {lines.map((line) => (
-            <li key={line}>{line}</li>
+          {/* Two unnamed items of one kind read the same: the place keeps them apart. */}
+          {lines.map((line, index) => (
+            <li key={index}>{line}</li>
           ))}
         </ul>
       ) : null}

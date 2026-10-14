@@ -8,7 +8,7 @@ import { NARRATOR_SPEAKER } from '@shizue/core/group';
 import { fnv1a } from '@shizue/core/macro';
 import { NARRATION_PREFIX } from '@shizue/core/narration';
 import { isSceneMessage, sceneSpanAt } from '@shizue/core/scene';
-import { manualTriggerNames, type MemberOverlay } from '@shizue/core/triggers';
+import { manualTriggerNames, type MemberOverlay, type TranslationScript } from '@shizue/core/triggers';
 import { computeVariables, DEFAULT_USER_NAME, type FoldOptions, type Variables } from '@shizue/core/variables';
 import { useFormatter, useLocale, useTranslations } from 'next-intl';
 import { Fragment, use, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -334,6 +334,9 @@ const BACKGROUND_ITEM = 'background';
 /** How long a manual run's `risu-id` stays readable after it, as RisuAI keeps `{{trigger_id}}`. */
 const TRIGGER_ID_MS = 100;
 
+/** A work none of whose members carries an `edittrans` script. */
+const NO_TRANSLATION_SCRIPTS: ReadonlyMap<string, TranslationScript[]> = new Map();
+
 /** A fold's values as one number, the same for the same values in whatever order they were set. */
 function foldKey(values: Variables | undefined): number {
   if (!values) return 0;
@@ -379,11 +382,25 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    * (`scriptBundle`), the scripted member a work of one has.
    */
   const [scriptBundles, setScriptBundles] = useState<readonly ScriptBundle[] | null | undefined>(undefined);
+  /**
+   * Each member's `edittrans` scripts, which its messages' translations run
+   * through before they are shown (RisuAI's `applyEdittransRegex`), by member id.
+   */
+  const [translationScripts, setTranslationScripts] = useState<ReadonlyMap<string, TranslationScript[]>>(NO_TRANSLATION_SCRIPTS);
   useEffect(() => {
     setScriptBundles(undefined);
-    apiGet<{ scripts: ScriptBundle | null; members?: ScriptBundle[] }>(`/api/chats/${id}/scripts`).then(
-      (answer) =>
-        setScriptBundles(answer?.members?.length ? answer.members : answer?.scripts ? [answer.scripts] : null),
+    setTranslationScripts(NO_TRANSLATION_SCRIPTS);
+    apiGet<{
+      scripts: ScriptBundle | null;
+      members?: ScriptBundle[];
+      translation?: { memberId: string; scripts: TranslationScript[] }[];
+    }>(`/api/chats/${id}/scripts`).then(
+      (answer) => {
+        setScriptBundles(answer?.members?.length ? answer.members : answer?.scripts ? [answer.scripts] : null);
+        if (answer?.translation?.length) {
+          setTranslationScripts(new Map(answer.translation.map(({ memberId, scripts }) => [memberId, scripts])));
+        }
+      },
       // A plot that cannot be read runs nothing, and a pending reply is kept as written.
       () => setScriptBundles(null),
     );
@@ -3271,14 +3288,20 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                         grouped={meta.grouped}
                         {...(message.intro ? { intro: true } : {})}
                         // Translated once it is stored and its output scripts have run: every
-                        // message in the translation mode, the openings alone where the model
-                        // is asked to write in the reader's language.
+                        // message in the translation mode, and where the model is asked to write
+                        // in the reader's language, what the card wrote: its openings and the
+                        // messages its scripts wrote.
                         {...(translator &&
                         languageMode &&
                         source &&
                         source.scriptState !== 'pending' &&
-                        translatesMessage(languageMode.mode, { intro: message.intro === true })
-                          ? { translator, translationId: source.id }
+                        translatesMessage(languageMode.mode, { intro: message.intro === true, scripted: source.source === 'script' })
+                          ? {
+                              translator,
+                              translationId: source.id,
+                              // The edittrans scripts of the member the message is, as RisuAI runs its character's.
+                              translationScripts: translationScripts.get(message.member ?? members[0]?.id ?? ''),
+                            }
                           : {})}
                         {...(message.model ? { model: message.model } : {})}
                         statusCollapsed={statusCollapsed}

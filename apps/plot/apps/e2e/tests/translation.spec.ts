@@ -7,7 +7,9 @@ import { expect, test, type BrowserContext, type Page, type Route } from '@playw
  * The mode is decided for the reader — the reply-language instruction — and
  * only the opening is translated; a reply is never asked about. Picking the
  * translation mode (RisuAI's) translates every message, with the original a
- * tap away, and the reader's own turn goes out in English.
+ * tap away, and the reader's own turn goes out in English. A reply's status card
+ * and choices are translated with it, and the reader can have a row translated
+ * again or correct it.
  *
  * The test API's auxiliary model is echo, which would "translate" every text into
  * itself; the two translation routes are answered here instead, so what is drawn
@@ -34,15 +36,21 @@ let page: Page;
 let chatId = '';
 /** Every message the page asked to have translated, by id. */
 const asked: string[] = [];
+/** The asks that were the reader's 다시 번역. */
+let regenerated = 0;
 
 test.beforeAll(async ({ browser }) => {
   context = await browser.newContext();
   page = await context.newPage();
   await page.route('**/api/chats/*/messages/*/translation', async (route: Route) => {
-    const { texts } = route.request().postDataJSON() as { texts: string[] };
+    // The reader's own wording goes to the API as it is.
+    if (route.request().method() !== 'POST') return route.fallback();
+    const { texts, regenerate } = route.request().postDataJSON() as { texts: string[]; regenerate?: boolean };
     asked.push(route.request().url().split('/messages/')[1]!.split('/')[0]!);
+    if (regenerate) regenerated += 1;
+    const mark = regenerate ? '[ko2]' : '[ko]';
     await route.fulfill({
-      json: { texts: Object.fromEntries(texts.map((text) => [text, KOREAN[text] ?? `[ko] ${text}`])) },
+      json: { texts: Object.fromEntries(texts.map((text) => [text, (!regenerate && KOREAN[text]) || `${mark} ${text}`])) },
     });
   });
   await page.route('**/api/chats/*/translate-input', async (route: Route) => {
@@ -176,4 +184,54 @@ test('reads at a phone width, in both themes', async () => {
     await settings.scrollIntoViewIfNeeded();
     await page.screenshot({ path: `test-results/translation/author-note-${scheme}.png` });
   }
+});
+
+test('translates a reply’s status card and choices, again on request, and keeps the reader’s own wording', async () => {
+  // Off with the input translation: the turn goes out as written, and echo writes it back.
+  const off = await page.request.patch(`${base}/api/chats/${chatId}`, {
+    headers: { origin: base },
+    data: { translation: { mode: 'translate' } },
+  });
+  expect(off.status()).toBe(200);
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.goto(`/ko/chats/${chatId}`);
+
+  const turn = ['The rainy inn is quiet.', '```status', 'Location: The rainy inn', 'Mood: calm', '```', '>> Order a drink', '>> Go upstairs'].join('\n');
+  await page.getByPlaceholder('메시지를 입력하세요').fill(turn);
+  await page.getByRole('button', { name: '보내기', exact: true }).click();
+  const reply = assistantMessages().last();
+  // The card's keys and values apart, and each choice: text only, as the prose is.
+  const card = reply.getByTestId('status-card');
+  await expect(card.locator('dt')).toHaveText(['[ko] Location', '[ko] Mood']);
+  await expect(card.locator('dd')).toHaveText(['[ko] The rainy inn', '[ko] calm']);
+  const choices = reply.getByTestId('message-choices').getByRole('button');
+  await expect(choices).toHaveText(['[ko] Order a drink', '[ko] Go upstairs']);
+  await expect(reply).toContainText('[ko] The rainy inn is quiet.');
+  await reply.getByTestId('message-choices').scrollIntoViewIfNeeded();
+  await page.screenshot({ path: 'test-results/translation/status-choices-light.png' });
+
+  // A choice goes into the composer as the model wrote it: the work's language.
+  const composer = page.getByPlaceholder('메시지를 입력하세요');
+  await choices.first().click();
+  await expect(composer).toHaveValue('Order a drink');
+  await composer.fill('');
+
+  // RisuAI's 다시 번역: past the cache, for the whole row.
+  await reply.getByTestId('message-retranslate').click();
+  await expect(reply).toContainText('[ko2] The rainy inn is quiet.');
+  await expect(card.locator('dt')).toHaveText(['[ko2] Location', '[ko2] Mood']);
+  expect(regenerated).toBe(1);
+
+  // RisuAI's 번역 수정: one field per text, the reader's wording kept on the server.
+  await reply.getByTestId('message-correct-translation').click();
+  const editor = reply.getByTestId('translation-editor');
+  await editor.locator('label', { hasText: 'The rainy inn is quiet.' }).locator('textarea').fill('비 오는 여관은 조용하다.');
+  await Promise.all([
+    page.waitForResponse((response) => response.request().method() === 'PUT' && response.url().includes('/translation') && response.ok()),
+    editor.getByRole('button', { name: '번역 저장' }).click(),
+  ]);
+  await expect(editor).toHaveCount(0);
+  await expect(reply).toContainText('비 오는 여관은 조용하다.');
+  await expect(choices).toHaveText(['[ko2] Order a drink', '[ko2] Go upstairs']);
 });

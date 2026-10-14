@@ -3,6 +3,7 @@
 import { parseStatusEntries } from '@shizue/core/status-block';
 import { useTranslations } from 'next-intl';
 import { Fragment, useMemo, useState } from 'react';
+import { useLinesTranslation, type BodyTranslation } from '@/lib/translation';
 
 /**
  * 상태창 — the state of the scene as the turn left it, drawn under the message it
@@ -13,11 +14,15 @@ import { Fragment, useMemo, useState } from 'react';
  * sees it again (the page holds that answer per chat). What is inside is whatever
  * the model chose to report — the keys are its own — so the card only lays the
  * rows out and never expects a particular one.
+ *
+ * Where the row is translated, the rows are too: each key and each value is
+ * text, read as RisuAI reads a message's words, and the card's layout is ours.
  */
 export function StatusCard({
   status,
   collapsed,
   onToggle,
+  translation,
 }: {
   /** The block's contents, as `extractStatusBlock` returned them. */
   status: string;
@@ -28,16 +33,21 @@ export function StatusCard({
    */
   collapsed?: boolean | undefined;
   onToggle?: (() => void) | undefined;
+  /** The row's translation, where it has one (`useRowTranslation`). */
+  translation?: BodyTranslation | undefined;
 }) {
   const t = useTranslations('chat');
   const entries = useMemo(() => parseStatusEntries(status), [status]);
   const [ownCollapsed, setOwnCollapsed] = useState(false);
   const folded = collapsed ?? ownCollapsed;
+  // Keys and values apart, so no translator can move the colon; nothing while folded away.
+  const words = useMemo(() => (folded ? [] : entries.flatMap((entry) => [entry.key, entry.value])), [folded, entries]);
+  const { lines: shown, ref } = useLinesTranslation(words, translation);
 
   if (entries.length === 0) return null;
 
   return (
-    <div data-testid="status-card" className="mt-3 rounded-lg border border-line bg-surface/40">
+    <div ref={ref} data-testid="status-card" className="mt-3 rounded-lg border border-line bg-surface/40">
       <button
         type="button"
         aria-expanded={!folded}
@@ -52,13 +62,13 @@ export function StatusCard({
           {entries.map((entry, index) =>
             entry.key ? (
               <Fragment key={index}>
-                <dt className="text-muted/70">{entry.key}</dt>
-                <dd className="min-w-0 text-fg/90">{entry.value}</dd>
+                <dt className="text-muted/70">{shown[index * 2] ?? entry.key}</dt>
+                <dd className="min-w-0 text-fg/90">{shown[index * 2 + 1] ?? entry.value}</dd>
               </Fragment>
             ) : (
               // A line the model wrote without a key is a line, not a row.
               <dd key={index} className="col-span-2 text-fg/90">
-                {entry.value}
+                {shown[index * 2 + 1] ?? entry.value}
               </dd>
             ),
           )}

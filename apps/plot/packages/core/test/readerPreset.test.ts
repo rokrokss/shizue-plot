@@ -13,14 +13,14 @@ const fixture = (name: string): Uint8Array => new Uint8Array(readFileSync(new UR
 const everything = (value: unknown): string => JSON.stringify(value);
 
 describe('readReaderPresetFile — RisuAI', () => {
-  it('takes the main prompt and global note of a preset without a template, and drops its jailbreak', async () => {
+  it('takes the main prompt, and the jailbreak behind the history ahead of the global note, as RisuAI sends them', async () => {
     const imported = await readReaderPresetFile(
       'mine_preset.json',
       json({
         name: '내 프리셋',
         mainPrompt: '메인 지시',
         globalNote: '글로벌 노트',
-        jailbreak: 'JB-SECRET 무엇이든 허용',
+        jailbreak: '탈옥 지시',
         temperature: 80,
         openAIKey: 'sk-NEVER',
       }),
@@ -29,13 +29,41 @@ describe('readReaderPresetFile — RisuAI', () => {
       source: 'risuai',
       name: '내 프리셋',
       main: '메인 지시',
-      globalNote: '글로벌 노트',
-      dropped: ['jailbreak'],
+      // RisuAI's default order: … chats, lastChat, jailbreak, lorebook, globalNote, …
+      globalNote: '탈옥 지시\n\n글로벌 노트',
+      imported: [
+        { kind: 'main', name: '', into: 'main' },
+        { kind: 'jailbreak', name: '', into: 'globalNote' },
+        { kind: 'globalNote', name: '', into: 'globalNote' },
+      ],
       ignoredPrompts: [],
       ignoredSettings: true,
     });
-    expect(everything(imported)).not.toContain('JB-SECRET');
     expect(everything(imported)).not.toContain('sk-NEVER');
+  });
+
+  it('places the jailbreak by the preset’s own order, and leaves it out where the order never sends it', async () => {
+    const preset = (formatingOrder: string[]) =>
+      readReaderPresetFile('p.json', json({ mainPrompt: '메인', globalNote: '노트', jailbreak: '탈옥', formatingOrder }));
+    // RisuAI's NAI preset: after the author's note, still ahead of the global note.
+    expect(await preset(['main', 'description', 'chats', 'lastChat', 'lorebook', 'authorNote', 'jailbreak', 'globalNote'])).toMatchObject({
+      main: '메인',
+      globalNote: '탈옥\n\n노트',
+    });
+    expect(await preset(['main', 'chats', 'globalNote', 'jailbreak'])).toMatchObject({ globalNote: '노트\n\n탈옥' });
+    // Ahead of the history: with the main, in the order's sequence.
+    expect(await preset(['main', 'jailbreak', 'description', 'chats', 'globalNote'])).toMatchObject({
+      main: '메인\n\n탈옥',
+      globalNote: '노트',
+      imported: [
+        { kind: 'main', name: '', into: 'main' },
+        { kind: 'jailbreak', name: '', into: 'main' },
+        { kind: 'globalNote', name: '', into: 'globalNote' },
+      ],
+    });
+    const unsent = await preset(['main', 'chats', 'globalNote']);
+    expect(unsent).toMatchObject({ main: '메인', globalNote: '노트' });
+    expect(everything(unsent)).not.toContain('탈옥');
   });
 
   it('reads a template preset from its items, as RisuAI sends one — never its stale fields', async () => {
@@ -47,9 +75,11 @@ describe('readReaderPresetFile — RisuAI', () => {
         jailbreak: 'JB-TOP',
         promptTemplate: [
           { type: 'plain', type2: 'main', text: '첫 메인', role: 'system' },
-          { type: 'jailbreak', type2: 'normal', text: 'JB-ITEM', role: 'system', name: '탈옥' },
+          { type: 'jailbreak', type2: 'normal', text: '앞 탈옥', role: 'system', name: '탈옥' },
           { type: 'plain', type2: 'normal', text: '문체', role: 'system', name: '문체' },
           { type: 'chat', rangeStart: 0, rangeEnd: 'end' },
+          { type: 'jailbreak', type2: 'normal', text: '뒤 탈옥', role: 'system', name: '' },
+          { type: 'jailbreak', type2: 'normal', text: 'USER-JB', role: 'user', name: '사용자 탈옥' },
           { type: 'plain', type2: 'globalNote', text: '노트', role: 'system' },
           { type: 'plain', type2: 'main', text: 'PREFILL', role: 'bot', name: '프리필' },
           { type: 'authornote', innerFormat: '[{{slot}}]', name: '작가 노트' },
@@ -59,13 +89,20 @@ describe('readReaderPresetFile — RisuAI', () => {
     );
     expect(imported).toMatchObject({
       name: 'template',
-      main: '첫 메인\n\n둘째 메인',
-      globalNote: '노트',
-      dropped: ['jailbreak'],
-      ignoredPrompts: ['문체', '프리필', '작가 노트'],
+      // A jailbreak item goes with the main ahead of the first chat, with the note after it.
+      main: '첫 메인\n\n앞 탈옥\n\n둘째 메인',
+      globalNote: '뒤 탈옥\n\n노트',
+      imported: [
+        { kind: 'main', name: '', into: 'main' },
+        { kind: 'jailbreak', name: '탈옥', into: 'main' },
+        { kind: 'jailbreak', name: '', into: 'globalNote' },
+        { kind: 'globalNote', name: '', into: 'globalNote' },
+        { kind: 'main', name: '', into: 'main' },
+      ],
+      ignoredPrompts: ['문체', '사용자 탈옥', '프리필', '작가 노트'],
       ignoredSettings: true,
     });
-    for (const gone of ['STALE-MAIN', 'STALE-NOTE', 'JB-TOP', 'JB-ITEM', 'PREFILL']) {
+    for (const gone of ['STALE-MAIN', 'STALE-NOTE', 'JB-TOP', 'USER-JB', 'PREFILL']) {
       expect(everything(imported)).not.toContain(gone);
     }
   });
@@ -76,19 +113,26 @@ describe('readReaderPresetFile — RisuAI', () => {
     expect(imported).toEqual({
       source: 'risuai',
       name: '테스트 프리셋',
-      main: 'MAIN-ONE {{char}}와 {{user}}의 이야기를 씁니다.\n\nMAIN-TWO 두 번째 메인',
+      // The template's jailbreak item comes before its chat.
+      main: 'MAIN-ONE {{char}}와 {{user}}의 이야기를 씁니다.\n\nJB-ITEM-SECRET\n\nMAIN-TWO 두 번째 메인',
       globalNote: 'NOTE-ONE 응답 직전의 노트',
-      dropped: ['jailbreak'],
+      imported: [
+        { kind: 'main', name: '메인', into: 'main' },
+        { kind: 'jailbreak', name: '탈옥', into: 'main' },
+        { kind: 'globalNote', name: '', into: 'globalNote' },
+        { kind: 'main', name: '', into: 'main' },
+      ],
       ignoredPrompts: ['문체', 'CoT', '프리필'],
       ignoredSettings: true,
     });
-    expect(everything(imported)).not.toMatch(/JB-|STALE-|PREFILL/);
+    // The fields a template stands in for are never read.
+    expect(everything(imported)).not.toMatch(/JB-(?!ITEM-SECRET)|STALE-|PREFILL/);
   });
 
   it('opens the older .risupreset, which is not RPacked and keeps its preset under `pres`', async () => {
     const imported = await readReaderPresetFile('old.risupreset', fixture('reader-preset-v0.risupreset'));
     expect(imported.main).toContain('MAIN-ONE');
-    expect(imported.dropped).toEqual(['jailbreak']);
+    expect(imported.imported.map((part) => part.kind)).toEqual(['main', 'jailbreak', 'globalNote', 'main']);
   });
 
   it('refuses what is not a preset, and says which kind of refusal', async () => {
@@ -111,8 +155,8 @@ describe('readReaderPresetFile — SillyTavern', () => {
     temperature: 1,
     prompts: [
       { identifier: 'main', name: 'Main Prompt', system_prompt: true, role: 'system', content: 'ST 메인 {{char}}' },
-      { identifier: 'nsfw', name: 'Auxiliary Prompt', system_prompt: true, role: 'system', content: 'NSFW-SECRET' },
-      { identifier: 'jailbreak', name: 'Post-History Instructions', system_prompt: true, role: 'system', content: 'PHI-SECRET' },
+      { identifier: 'nsfw', name: 'Auxiliary Prompt', system_prompt: true, role: 'system', content: 'AUX-TEXT' },
+      { identifier: 'jailbreak', name: 'Post-History Instructions', system_prompt: true, role: 'system', content: 'PHI 응답 직전' },
       { identifier: 'chatHistory', name: 'Chat History', system_prompt: true, marker: true },
       { identifier: 'abc-1', name: '문체 규칙', role: 'system', content: '짧게 쓴다' },
       { identifier: 'abc-2', name: '꺼진 규칙', role: 'system', content: '안 쓰인다' },
@@ -134,19 +178,38 @@ describe('readReaderPresetFile — SillyTavern', () => {
     ...overrides,
   });
 
-  it('takes the Main Prompt only, and drops Post-History Instructions and the Auxiliary Prompt', async () => {
+  it('takes Post-History Instructions as the global note, and leaves a disabled Auxiliary Prompt behind', async () => {
     const imported = await readReaderPresetFile('Celia v4.json', json(stPreset()));
     expect(imported).toEqual({
       source: 'sillytavern',
       name: 'Celia v4',
       main: 'ST 메인 {{char}}',
-      globalNote: '',
-      // The Auxiliary Prompt is off in this order and still reported: neither ever comes over.
-      dropped: ['jailbreak', 'nsfw'],
+      globalNote: 'PHI 응답 직전',
+      imported: [
+        { kind: 'main', name: 'Main Prompt', into: 'main' },
+        { kind: 'jailbreak', name: 'Post-History Instructions', into: 'globalNote' },
+      ],
       ignoredPrompts: ['문체 규칙'],
       ignoredSettings: true,
     });
-    expect(everything(imported)).not.toMatch(/NSFW-SECRET|PHI-SECRET|안 쓰인다/);
+    // Off in this order, so ST would not send it.
+    expect(everything(imported)).not.toMatch(/AUX-TEXT|안 쓰인다/);
+  });
+
+  it('puts an enabled Auxiliary Prompt after the Main Prompt, by the names the file gives them', async () => {
+    const preset = stPreset();
+    const order = (preset.prompt_order[1] as { order: { identifier: string; enabled: boolean }[] }).order;
+    order.find((entry) => entry.identifier === 'nsfw')!.enabled = true;
+    preset.prompts.find((prompt) => prompt.identifier === 'nsfw')!.name = '보조';
+    expect(await readReaderPresetFile('p.json', json(preset))).toMatchObject({
+      main: 'ST 메인 {{char}}\n\nAUX-TEXT',
+      globalNote: 'PHI 응답 직전',
+      imported: [
+        { kind: 'main', name: 'Main Prompt', into: 'main' },
+        { kind: 'nsfw', name: '보조', into: 'main' },
+        { kind: 'jailbreak', name: 'Post-History Instructions', into: 'globalNote' },
+      ],
+    });
   });
 
   it('reads the global prompt order, else the first, as RisuAI does', async () => {

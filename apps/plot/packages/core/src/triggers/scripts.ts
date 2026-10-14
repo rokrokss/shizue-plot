@@ -190,6 +190,48 @@ function readEditScript(value: unknown): EditScript | null {
   };
 }
 
+/**
+ * A RisuAI `edittrans` regex script: run over a message's translation before it
+ * is shown (`applyTranslationScripts`, RisuAI's `applyEdittransRegex`).
+ */
+export interface TranslationScript {
+  readonly in: string;
+  readonly out: string;
+  readonly flag?: string;
+  readonly ableFlag?: boolean;
+}
+
+function readTranslationScript(value: unknown): TranslationScript | null {
+  if (!isRecord(value) || value['type'] !== 'edittrans') return null;
+  const pattern = value['in'];
+  if (typeof pattern !== 'string' || pattern === '') return null;
+  const out = value['out'];
+  const flag = value['flag'];
+  return {
+    in: pattern,
+    out: typeof out === 'string' ? out : '',
+    ...(typeof flag === 'string' ? { flag } : {}),
+    ...(value['ableFlag'] === true ? { ableFlag: true } : {}),
+  };
+}
+
+/**
+ * The `edittrans` scripts a member's messages are translated through, in
+ * RisuAI's sequence: the work's modules' first, then the card's own
+ * (`applyEdittransRegex` reads `presetRegex`, `getModuleRegexScripts()`, then the
+ * character's `customscript`). Kept apart from `cardScripts`: no runtime runs
+ * them, and a card that carries only these is not a scripted card — it does not
+ * become the member whose triggers a scene runs (`scriptedMember`).
+ */
+export function translationScriptsOf(
+  card: Pick<NormalizedCard, 'extensions'>,
+  modules: readonly Pick<PlotModule, 'regex'>[] = [],
+): TranslationScript[] {
+  const read = (list: unknown): TranslationScript[] =>
+    Array.isArray(list) ? list.map(readTranslationScript).filter((script): script is TranslationScript => script !== null) : [];
+  return [...modules.flatMap((module) => read(module.regex)), ...read(risuOf(card)?.['customScripts'])];
+}
+
 /** What a work's module brings to the scripts (`PlotModule`). */
 export type ModuleScripts = Pick<PlotModule, 'regex' | 'trigger' | 'lowLevelAccess'>;
 

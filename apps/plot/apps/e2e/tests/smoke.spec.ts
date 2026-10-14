@@ -413,6 +413,54 @@ test('adds my own preset on top of the chat preset, picked for the chat across a
   await expect(page.getByLabel('프리셋', { exact: true })).toHaveValue('novel');
 });
 
+test('imports a SillyTavern preset where ST sends its prompts, and says which field each went into', async () => {
+  const wide = page.viewportSize();
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.emulateMedia({ colorScheme: 'light' });
+  try {
+    await page.getByRole('button', { name: '대화 설정' }).click();
+    const sheet = page.getByRole('dialog');
+    await sheet.getByRole('button', { name: '내 프리셋 관리' }).click();
+    const preset = {
+      chat_completion_source: 'openai',
+      prompts: [
+        { identifier: 'main', name: 'Main Prompt', content: `ST 메인 ${run}` },
+        { identifier: 'nsfw', name: 'Auxiliary Prompt', content: `보조 지시 ${run}` },
+        { identifier: 'jailbreak', name: 'Post-History Instructions', content: `응답 직전 지시 ${run}` },
+        { identifier: 'style', name: '문체', content: '짧게' },
+      ],
+      prompt_order: [
+        {
+          character_id: 100000,
+          order: ['main', 'nsfw', 'jailbreak', 'style'].map((identifier) => ({ identifier, enabled: true })),
+        },
+      ],
+    };
+    await sheet.getByTestId('reader-preset-import-input').setInputFiles({
+      name: 'Celia.json',
+      mimeType: 'application/json',
+      buffer: Buffer.from(JSON.stringify(preset)),
+    });
+    const notice = sheet.getByTestId('reader-preset-import-notice');
+    await expect(notice.locator('li')).toHaveText([
+      'Main Prompt → 메인 지시 추가',
+      'Auxiliary Prompt → 메인 지시 추가',
+      'Post-History Instructions → 글로벌 노트',
+      '그 밖의 프롬프트 1개는 가져오지 않았습니다: 문체',
+      '모델·샘플링 등 나머지 설정도 가져오지 않았습니다.',
+    ]);
+    await expect(sheet.getByLabel('메인 지시 추가')).toHaveValue(`ST 메인 ${run}\n\n보조 지시 ${run}`);
+    await expect(sheet.getByLabel('글로벌 노트')).toHaveValue(`응답 직전 지시 ${run}`);
+    await notice.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: 'test-results/reader-preset/import-notice-light.png' });
+    // Nothing is kept until the reader saves.
+    await sheet.getByRole('button', { name: '취소', exact: true }).click();
+    await page.keyboard.press('Escape');
+  } finally {
+    if (wide) await page.setViewportSize(wide);
+  }
+});
+
 test('shows the relationship section with its toggle', async () => {
   await openPanel();
   const section = page.getByTestId('chat-relationship');

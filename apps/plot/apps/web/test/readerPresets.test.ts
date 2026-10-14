@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 /**
  * "내 프리셋" in the chat settings: picked per chat, managed behind one quiet
- * button, and an import that says what it left behind — the jailbreak first.
+ * button, and an import that says what it took into which field, and what it
+ * left behind.
  *
  * `createElement` rather than JSX, matching chatSettings.test.ts.
  */
@@ -142,24 +143,27 @@ describe('the stacked field', () => {
     expect(lists).toEqual([[created]]);
   });
 
-  it('imports a SillyTavern preset’s main only, and says the jailbreak and the rest were left behind', async () => {
+  it('imports a SillyTavern preset’s prompts where ST sends them, and says which went where', async () => {
     render([]);
     await click(button('내 프리셋 관리')!);
     const st = {
       chat_completion_source: 'openai',
       prompts: [
         { identifier: 'main', name: 'Main Prompt', content: 'ST 메인' },
-        { identifier: 'jailbreak', name: 'Post-History Instructions', content: 'PHI-SECRET' },
-        { identifier: 'nsfw', name: 'Auxiliary Prompt', content: 'NSFW-SECRET' },
+        { identifier: 'jailbreak', name: 'Post-History Instructions', content: 'PHI 지시' },
+        { identifier: 'nsfw', name: 'Auxiliary Prompt', content: 'AUX 지시' },
         { identifier: 'x', name: '문체', content: '짧게' },
+        { identifier: 'off', name: '꺼짐', content: 'OFF-TEXT' },
       ],
       prompt_order: [
         {
           character_id: 100000,
           order: [
             { identifier: 'main', enabled: true },
+            { identifier: 'nsfw', enabled: true },
             { identifier: 'jailbreak', enabled: true },
             { identifier: 'x', enabled: true },
+            { identifier: 'off', enabled: false },
           ],
         },
       ],
@@ -168,13 +172,30 @@ describe('the stacked field', () => {
 
     const notice = host.querySelector('[data-testid="reader-preset-import-notice"]')!;
     expect(notice.textContent).toContain('SillyTavern 프리셋에서 가져왔습니다');
-    expect(notice.textContent).toContain('Post-History Instructions는 탈옥 자리라 가져오지 않습니다.');
-    expect(notice.textContent).toContain('NSFW(Auxiliary) 프롬프트는 가져오지 않습니다.');
-    expect(notice.textContent).toContain('그 밖의 프롬프트 1개는 가져오지 않았습니다: 문체');
+    expect([...notice.querySelectorAll('li')].map((item) => item.textContent)).toEqual([
+      'Main Prompt → 메인 지시 추가',
+      'Auxiliary Prompt → 메인 지시 추가',
+      'Post-History Instructions → 글로벌 노트',
+      '그 밖의 프롬프트 1개는 가져오지 않았습니다: 문체',
+      '모델·샘플링 등 나머지 설정도 가져오지 않았습니다.',
+    ]);
     const manager = host.querySelector('[data-testid="reader-preset-manager"]')!;
     expect(manager.querySelector('input')!.value).toBe('Celia');
-    expect([...manager.querySelectorAll('textarea')].map((area) => area.value)).toEqual(['ST 메인', '']);
-    expect(host.innerHTML).not.toMatch(/PHI-SECRET|NSFW-SECRET/);
+    expect([...manager.querySelectorAll('textarea')].map((area) => area.value)).toEqual(['ST 메인\n\nAUX 지시', 'PHI 지시']);
+    // A prompt the order keeps off is not sent by ST, and not taken.
+    expect(host.innerHTML).not.toContain('OFF-TEXT');
+  });
+
+  it('names a RisuAI field it took by RisuAI’s name for it', async () => {
+    render([]);
+    await click(button('내 프리셋 관리')!);
+    const risu = { name: '리스', mainPrompt: '메인', jailbreak: '탈옥 글', globalNote: '' };
+    await upload(new File([JSON.stringify(risu)], 'risu.json', { type: 'application/json' }));
+    const notice = host.querySelector('[data-testid="reader-preset-import-notice"]')!;
+    expect([...notice.querySelectorAll('li')].map((item) => item.textContent)).toEqual([
+      '메인 프롬프트 → 메인 지시 추가',
+      '탈옥 프롬프트 → 글로벌 노트',
+    ]);
   });
 
   it('says so when a file is not a preset', async () => {

@@ -78,6 +78,7 @@ import {
   hasTriggersFor,
   overlaidCard,
   scriptedMember,
+  translationScriptsOf,
   type CardScripts,
   type ScriptOverlay,
 } from '@shizue/core/triggers';
@@ -2453,6 +2454,11 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * creator is told so when they publish such a plot. Everything else a reader
    * gets of the work stays as it was — `{ scripts: null, members: [] }` for a
    * plot without.
+   *
+   * `translation` rides beside them: each member's `edittrans` regex scripts
+   * (`translationScriptsOf`), which RisuAI runs over a message's translation
+   * before it is shown — display-side regex, as the display scripts every
+   * reader of a work receives are. Only members that carry any; `[]` for none.
    */
   app.get('/:id/scripts', async (c) => {
     const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
@@ -2461,14 +2467,19 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     // A work's modules ride in every member's scripts, after the card's own: in a
     // group RisuAI runs them for whichever character it asks.
     const modules = plot.customUi?.modules ?? [];
-    const scripted = (await loadMembers(deps.db, plot.id)).flatMap((member) => {
+    const roster = await loadMembers(deps.db, plot.id);
+    const translation = roster.flatMap((member) => {
+      const scripts = translationScriptsOf(member.card, modules);
+      return scripts.length > 0 ? [{ memberId: member.id, scripts }] : [];
+    });
+    const scripted = roster.flatMap((member) => {
       const scripts = cardScripts(member.card, modules);
       return scripts ? [{ member, scripts }] : [];
     });
-    if (scripted.length === 0) return c.json({ scripts: null, members: [] });
+    if (scripted.length === 0) return c.json({ scripts: null, members: [], translation });
     const overlay = await loadReaderOverlay(deps.db, chat.userId, chat.plotId);
     const members = scripted.map(({ member, scripts }) => scriptBundleOf(member, scripts, overlay, chat));
-    return c.json({ scripts: members[0]!, members });
+    return c.json({ scripts: members[0]!, members, translation });
   });
 
   /**

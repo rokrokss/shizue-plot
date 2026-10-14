@@ -14510,7 +14510,24 @@ describe('the browser script runtime', () => {
     const plot = await createPlot(cookie, { description: '설명', intros: ['안녕'] });
     await addCharacter(cookie, plot.id, { card: { description: '평범한 사서' } });
     const chat = await startChat(cookie, plot.id);
-    expect(await scriptsOf(cookie, chat.chat.id)).toEqual({ scripts: null, members: [] });
+    expect(await scriptsOf(cookie, chat.chat.id)).toEqual({ scripts: null, members: [], translation: [] });
+  });
+
+  it('ships a card’s edittrans scripts for its translations, without making it a scripted card', async () => {
+    const cookie = await signUp('scripts-edittrans@example.com');
+    const plot = await createPlot(cookie, { description: '설명', intros: ['안녕'] });
+    const member = await addCharacter(cookie, plot.id, {
+      card: {
+        description: '번역 고치는 사서',
+        extensions: { risuai: { customScripts: [{ type: 'edittrans', in: '레이안', out: '리안' }] } },
+      },
+    });
+    const chat = await startChat(cookie, plot.id);
+    expect(await scriptsOf(cookie, chat.chat.id)).toEqual({
+      scripts: null,
+      members: [],
+      translation: [{ memberId: member.id, scripts: [{ in: '레이안', out: '리안' }] }],
+    });
   });
 
   it("ships the scripted member's scripts and card text to a reader, and nothing of the others", async () => {
@@ -16889,6 +16906,39 @@ describe('translation', () => {
     const failed = await ask(makeApp({ getAdapter: failingGetAdapter }));
     expect(failed.status).toBe(502);
     expect((await readJson(failed)).code).toBe('translation_failed');
+  });
+
+  it('translates again past the cache when asked, and keeps the reader’s own wording', async () => {
+    const cookie = await signUp('translate-again@example.com');
+    const other = await signUp('translate-again-other@example.com');
+    const { chatId, state } = await englishChat(cookie);
+    const path = `/api/chats/${chatId}/messages/${state.path[0].id}/translation`;
+    const scripted = scriptedGetAdapter('하나.\n■\n둘.', '새 하나.\n■\n새 둘.');
+    const translating = makeApp({ getAdapter: scripted.getAdapter });
+    const ask = (extra: Record<string, unknown> = {}) =>
+      json(cookie, path, 'POST', { language: 'ko', texts: ['One.', 'Two.'], ...extra }, translating);
+
+    expect((await readJson(await ask())).texts).toEqual({ 'One.': '하나.', 'Two.': '둘.' });
+    // RisuAI's 다시 번역: the model again, and the cache takes what came back.
+    expect((await readJson(await ask({ regenerate: true }))).texts).toEqual({ 'One.': '새 하나.', 'Two.': '새 둘.' });
+    expect(scripted.calls()).toBe(2);
+    expect((await readJson(await ask())).texts).toEqual({ 'One.': '새 하나.', 'Two.': '새 둘.' });
+    expect(scripted.calls()).toBe(2);
+    expect((await ask({ regenerate: 'yes' })).status).toBe(400);
+
+    // RisuAI's 번역 수정: the reader's wording for one text, the other left as it was.
+    const corrected = await json(cookie, path, 'PUT', { language: 'ko', texts: { 'Two.': '내가 고친 둘.' } });
+    expect(await readJson(corrected)).toEqual({ texts: { 'Two.': '내가 고친 둘.' } });
+    expect((await readJson(await request(cookie, `/api/chats/${chatId}/translations?language=ko`))).translations).toEqual({
+      [state.path[0].id]: { 'One.': '새 하나.', 'Two.': '내가 고친 둘.' },
+    });
+    expect((await readJson(await ask())).texts).toEqual({ 'One.': '새 하나.', 'Two.': '내가 고친 둘.' });
+    expect(scripted.calls()).toBe(2);
+
+    expect((await json(cookie, path, 'PUT', { language: 'ko', texts: { 'One.': '  ' } })).status).toBe(400);
+    expect((await json(cookie, path, 'PUT', { language: 'ko', texts: ['One.'] })).status).toBe(400);
+    expect((await json(cookie, path, 'PUT', { language: 'zh', texts: { 'One.': '하나' } })).status).toBe(400);
+    expect((await json(other, path, 'PUT', { language: 'ko', texts: { 'One.': '남의 것' } })).status).toBe(404);
   });
 
   it('refuses another reader, a message of another chat and a language it does not know', async () => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { authorNoteDue, coerceAuthorNoteSettings } from '../src/authorNote.js';
 import {
   applyParts,
+  applyTranslationScripts,
   coerceTranslationSettings,
   DEFAULT_TRANSLATOR_PROMPT,
   defaultTranslationMode,
@@ -18,7 +19,7 @@ import {
   translationTurns,
   type TextPart,
 } from '../src/translation.js';
-import type { TriggerScript } from '../src/triggers/scripts.js';
+import { translationScriptsOf, type TriggerScript } from '../src/triggers/scripts.js';
 
 /** What a translator is asked for, and the text with every one of them marked as a stand-in translation. */
 const run = (parts: TextPart[]) => {
@@ -60,12 +61,15 @@ describe('language modes', () => {
     expect(coerceTranslationSettings('translate')).toBeNull();
   });
 
-  it('translates every message in translate mode and only the openings in instruct mode', () => {
+  it('translates every message in translate mode, and in instruct mode only what the card wrote', () => {
     expect(translatesMessage('translate', { intro: false })).toBe(true);
     expect(translatesMessage('instruct', { intro: true })).toBe(true);
+    // A message the card's scripts wrote is the card's language, like its openings.
+    expect(translatesMessage('instruct', { intro: false, scripted: true })).toBe(true);
     // No per-reply call where the model already writes in the reader language.
     expect(translatesMessage('instruct', { intro: false })).toBe(false);
     expect(translatesMessage('off', { intro: true })).toBe(false);
+    expect(translatesMessage('off', { intro: false, scripted: true })).toBe(false);
   });
 
   it('names the language and keeps the speaker prefixes in its trailing line', () => {
@@ -197,5 +201,53 @@ describe('author note settings', () => {
     expect(authorNoteDue(4, 0)).toBe(false);
     expect(authorNoteDue(4, 3)).toBe(false);
     expect(authorNoteDue(4, 8)).toBe(true);
+  });
+});
+
+describe('edittrans scripts', () => {
+  it('reads them off the modules first, then the card, apart from every other kind', () => {
+    const card = {
+      extensions: {
+        risuai: {
+          customScripts: [
+            { type: 'edittrans', in: '레이안', out: '리안' },
+            { type: 'editoutput', in: 'x', out: 'y' },
+            { type: 'edittrans', in: '', out: 'never' },
+          ],
+        },
+      },
+    };
+    const modules = [{ regex: [{ type: 'edittrans', in: 'A', out: 'B', flag: 'gi', ableFlag: true }] }];
+    expect(translationScriptsOf(card, modules)).toEqual([
+      { in: 'A', out: 'B', flag: 'gi', ableFlag: true },
+      { in: '레이안', out: '리안' },
+    ]);
+    expect(translationScriptsOf({ extensions: {} })).toEqual([]);
+  });
+
+  it('runs on the translation as RisuAI does: a plain replacement, its flags, its order and its moves', () => {
+    expect(applyTranslationScripts('레이안이 웃었다. 레이안!', [{ in: '레이안', out: '리안' }])).toBe('리안이 웃었다. 리안!');
+    // `$1` is the pattern's own, never CBS; `$n` is a line break.
+    expect(applyTranslationScripts('HP 30', [{ in: 'HP (\\d+)', out: '체력$n$1 {{getvar::x}}' }])).toBe('체력\n30 {{getvar::x}}');
+    // Without `ableFlag` the flag field is not read: `g` alone, case kept.
+    expect(applyTranslationScripts('a A', [{ in: 'a', out: 'b', flag: 'i' }])).toBe('b A');
+    expect(applyTranslationScripts('a A', [{ in: 'a', out: 'b', flag: 'gi', ableFlag: true }])).toBe('b b');
+    // `<order N>`: highest first once any script has one.
+    const ordered = [
+      { in: 'x', out: 'y' },
+      { in: 'y', out: 'z', flag: 'g<order 5>', ableFlag: true },
+    ];
+    expect(applyTranslationScripts('x', ordered)).toBe('y');
+    expect(applyTranslationScripts('x', [ordered[0]!, { ...ordered[1]!, flag: 'g' }])).toBe('z');
+    expect(applyTranslationScripts('본문 [상태] 끝', [{ in: '\\[(.+?)\\] ', out: '<$1>', flag: '<move_top>', ableFlag: true }])).toBe(
+      '<상태>\n본문 끝',
+    );
+    // A pattern that does not compile is passed over; `cbs` reads the pattern first.
+    expect(applyTranslationScripts('ab', [{ in: '(', out: '' }, { in: 'b', out: 'c' }])).toBe('ac');
+    expect(
+      applyTranslationScripts('Rian', [{ in: '{{char}}', out: '리안', flag: '<cbs>', ableFlag: true }], {
+        cbs: (pattern) => pattern.replace('{{char}}', 'Rian'),
+      }),
+    ).toBe('리안');
   });
 });

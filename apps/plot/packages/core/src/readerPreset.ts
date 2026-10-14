@@ -5,14 +5,18 @@
  * A reader keeps named presets on their account and picks one per chat. Each
  * holds two texts and nothing else: a main-instruction addition, which follows
  * our preset's main, and a global note, which follows its post-history block —
- * RisuAI's `mainPrompt` and `globalNote`, SillyTavern's Main Prompt. Where a
+ * RisuAI's `mainPrompt` and `globalNote`, SillyTavern's Main Prompt and
+ * Post-History Instructions. Where a
  * card brings its own system prompt or post-history instructions, the card's
  * win as RisuAI and ST let them win over the user's: the reader's text comes
  * back only through the card's `{{original}}` (`assemblePrompt`).
  *
- * An import takes those two texts and nothing else. Jailbreak and NSFW prompts
- * are always dropped, whatever they say, and the import says what it dropped and
- * what it ignored, so the reader is never left guessing.
+ * An import fills those two texts with the prompts the file sends where they
+ * send: its main prompt, its global note, and the general-purpose slots RisuAI
+ * calls the jailbreak and SillyTavern Post-History Instructions and the
+ * Auxiliary Prompt, each in the field that stands where its app sends it. The
+ * import says what it took and into which field, and what it ignored, so the
+ * reader is never left guessing.
  */
 import { decompressSync } from 'fflate';
 import { rpackDecode } from './card/risum.js';
@@ -37,6 +41,19 @@ export const READER_PRESET_TEXT_MAX = 10_000;
 
 export type ReaderPresetSource = 'risuai' | 'sillytavern';
 
+/** A prompt an import took: what the file calls it, and which text it went into. */
+export interface ReaderPresetPart {
+  /**
+   * Which of its app's prompts it is: the main prompt, RisuAI's global note,
+   * RisuAI's jailbreak or SillyTavern's Post-History Instructions (`jailbreak`),
+   * SillyTavern's Auxiliary Prompt (`nsfw`).
+   */
+  kind: 'main' | 'globalNote' | 'jailbreak' | 'nsfw';
+  /** The name the file gives it — a SillyTavern prompt's, a RisuAI template item's — '' where it gives none. */
+  name: string;
+  into: 'main' | 'globalNote';
+}
+
 /** What an import found in a file, for the reader to look over before saving. */
 export interface ReaderPresetImport {
   source: ReaderPresetSource;
@@ -44,8 +61,8 @@ export interface ReaderPresetImport {
   name: string;
   main: string;
   globalNote: string;
-  /** Jailbreak and NSFW prompts the file carried, in use or not: never taken. */
-  dropped: ('jailbreak' | 'nsfw')[];
+  /** The prompts taken, in the file's order, and where each went. */
+  imported: ReaderPresetPart[];
   /** Other prompt texts in use, which have no place among the additions — by the names the file gives them ('' for none). */
   ignoredPrompts: string[];
   /** Whether the file held anything more — model, sampling, the template's structure and the like. Always ignored. */
@@ -181,45 +198,80 @@ function risuRole(role: unknown): 'user' | 'bot' | 'system' {
 /** Keys of a RisuAI preset the import reads; any other one is a setting it ignores. */
 const RISU_READ_KEYS = new Set(['name', 'mainPrompt', 'globalNote', 'jailbreak', 'promptTemplate']);
 
+/** RisuAI's default `formatingOrder` (`database.svelte.ts`), for a preset that carries none. */
+const RISU_DEFAULT_ORDER = ['main', 'description', 'personaPrompt', 'chats', 'lastChat', 'jailbreak', 'lorebook', 'globalNote', 'authorNote'];
+
+/** Texts gathered for the two fields, in the order the file sends them, with what each was. */
+class Gathered {
+  readonly main: string[] = [];
+  readonly globalNote: string[] = [];
+  readonly imported: ReaderPresetPart[] = [];
+
+  add(into: ReaderPresetPart['into'], kind: ReaderPresetPart['kind'], name: string, text: string): void {
+    if (!text.trim()) return;
+    this[into].push(text);
+    this.imported.push({ kind, name, into });
+  }
+}
+
 /**
- * A RisuAI `botPreset`. Without a prompt template RisuAI sends `mainPrompt` and
- * `globalNote` (and `jailbreak` when toggled on); with one — even an empty one —
- * it reads neither and sends the template's items instead, so the main is then
- * the template's `plain` items marked `main` and the note those marked
- * `globalNote`, each sent as a system turn. A `jailbreak` item is dropped like the
- * field, and every other item that carries text — a plain item of another kind or
- * role (an assistant prefill among them), chain of thought, ChatML, an inner
- * format — is ignored by name.
+ * A RisuAI `botPreset`. Without a prompt template RisuAI sends `mainPrompt`,
+ * `globalNote` and `jailbreak` in its `formatingOrder` — by default `main, …,
+ * chats, lastChat, jailbreak, lorebook, globalNote, …` — so the jailbreak goes
+ * behind the history into the global note, ahead of the note's own text; an
+ * order that puts it before the chats puts it in the main, and one without it
+ * never sends it. With a template — even an empty one — RisuAI reads none of
+ * those fields and sends the template's items in their order instead: the main
+ * is the template's system `plain` items marked `main`, the note those marked
+ * `globalNote`, and a system `jailbreak` item joins the main where it comes
+ * before the template's first chat and the note where it comes after. Every
+ * other item that carries text — a plain item of another kind or role (an
+ * assistant prefill among them), chain of thought, ChatML, an inner format — is
+ * ignored by name.
+ *
+ * RisuAI sends a jailbreak only while its jailbreak toggle is on. That toggle is
+ * a setting of the RisuAI install, never saved in a preset, so a file cannot say
+ * it was off: its jailbreak text is taken, and the notice names it.
  */
 function fromRisuPreset(preset: Json, fileName: string): ReaderPresetImport {
   const ignoredSettings = Object.keys(preset).some((key) => !RISU_READ_KEYS.has(key));
   const base = { source: 'risuai' as const, name: nameOf(preset['name'], fileName), ignoredSettings };
   const template = preset['promptTemplate'];
+  const taken = new Gathered();
 
   if (!Array.isArray(template)) {
-    return {
-      ...base,
-      main: textOf(preset['mainPrompt']).trim(),
-      globalNote: textOf(preset['globalNote']).trim(),
-      dropped: textOf(preset['jailbreak']).trim() ? ['jailbreak'] : [],
-      ignoredPrompts: [],
+    const order = Array.isArray(preset['formatingOrder']) ? (preset['formatingOrder'] as unknown[]) : RISU_DEFAULT_ORDER;
+    const at = (item: string): number => order.indexOf(item);
+    const jailbreak = at('jailbreak');
+    const into = at('chats') !== -1 && jailbreak < at('chats') ? 'main' : 'globalNote';
+    // Ahead of its field's own text or behind it, as the order sends the two.
+    const first = into === 'main' ? jailbreak < at('main') : at('globalNote') === -1 || jailbreak < at('globalNote');
+    const addJailbreak = (here: ReaderPresetPart['into'], ahead: boolean) => {
+      if (jailbreak !== -1 && into === here && first === ahead) taken.add(into, 'jailbreak', '', textOf(preset['jailbreak']));
     };
+    addJailbreak('main', true);
+    taken.add('main', 'main', '', textOf(preset['mainPrompt']));
+    addJailbreak('main', false);
+    addJailbreak('globalNote', true);
+    taken.add('globalNote', 'globalNote', '', textOf(preset['globalNote']));
+    addJailbreak('globalNote', false);
+    return { ...base, main: joinTexts(taken.main), globalNote: joinTexts(taken.globalNote), imported: taken.imported, ignoredPrompts: [] };
   }
 
-  const main: string[] = [];
-  const note: string[] = [];
   const ignoredPrompts: string[] = [];
-  let jailbreak = false;
+  let pastChat = false;
   for (const item of template) {
     if (!isObject(item)) continue;
     const type = item['type'];
     const name = textOf(item['name']).trim();
+    if (type === 'chat') pastChat = true;
     if (type === 'plain' || type === 'jailbreak' || type === 'cot') {
       const text = textOf(item['text']);
       if (!text.trim()) continue;
-      if (type === 'jailbreak') jailbreak = true;
-      else if (type === 'plain' && risuRole(item['role']) === 'system' && item['type2'] === 'main') main.push(text);
-      else if (type === 'plain' && risuRole(item['role']) === 'system' && item['type2'] === 'globalNote') note.push(text);
+      const system = risuRole(item['role']) === 'system';
+      if (type === 'jailbreak' && system) taken.add(pastChat ? 'globalNote' : 'main', 'jailbreak', name, text);
+      else if (type === 'plain' && system && item['type2'] === 'main') taken.add('main', 'main', name, text);
+      else if (type === 'plain' && system && item['type2'] === 'globalNote') taken.add('globalNote', 'globalNote', name, text);
       else ignoredPrompts.push(name);
     } else if (type === 'chatML') {
       if (textOf(item['text']).trim()) ignoredPrompts.push(name);
@@ -230,9 +282,9 @@ function fromRisuPreset(preset: Json, fileName: string): ReaderPresetImport {
   }
   return {
     ...base,
-    main: joinTexts(main),
-    globalNote: joinTexts(note),
-    dropped: jailbreak ? ['jailbreak'] : [],
+    main: joinTexts(taken.main),
+    globalNote: joinTexts(taken.globalNote),
+    imported: taken.imported,
     ignoredPrompts,
     // The template's structure — chat ranges, the description's place, cache
     // points — is part of what is not taken.
@@ -255,40 +307,55 @@ const ST_MARKERS = new Set([
 /** ST's global prompt order — `PromptManager`'s `dummyId` — else the first, as RisuAI reads it. */
 const ST_GLOBAL_ORDER_ID = 100000;
 
+/** ST's own names for its three prompts (`chatCompletionDefaultPrompts`), for a file that names one nothing. */
+const ST_NAMES = { main: 'Main Prompt', nsfw: 'Auxiliary Prompt', jailbreak: 'Post-History Instructions' } as const;
+
 /**
  * A SillyTavern chat-completion preset. The prompts in use are the ones its
- * global prompt order has enabled, as RisuAI's own ST import reads them. `main`
- * is the Main Prompt. `jailbreak` is what ST now calls Post-History Instructions
- * and `nsfw` its Auxiliary Prompt — RisuAI's import makes both a jailbreak, and
- * both are dropped, enabled or not. The markers stand for the card's and the
- * chat's own text and carry none; every other prompt in use is ignored by name.
+ * global prompt order has enabled, as RisuAI's own ST import reads them; a
+ * disabled one is not sent and not taken. `main` is the Main Prompt. `nsfw` —
+ * ST's Auxiliary Prompt, a general-purpose slot despite the identifier ST keeps
+ * for compatibility — follows it in the main, as ST's default order sends it
+ * ahead of the chat history. `jailbreak` — Post-History Instructions — is the
+ * global note: ST sends it after the history, and a card's
+ * `post_history_instructions` replaces it there as it replaces our post-history
+ * block. The markers stand for the card's and the chat's own text and carry
+ * none; every other prompt in use is ignored by name.
  */
 function fromSillyTavernPreset(preset: Json, fileName: string): ReaderPresetImport {
   const orders = (preset['prompt_order'] as unknown[]).filter(isObject);
   const order = (orders.find((entry) => entry['character_id'] === ST_GLOBAL_ORDER_ID) ?? orders[0])!;
   const prompts = (preset['prompts'] as unknown[]).filter(isObject);
-  const carries = (identifier: string): boolean =>
-    prompts.some((prompt) => prompt['identifier'] === identifier && textOf(prompt['content']).trim().length > 0);
 
-  let main = '';
+  const enabled: Json[] = [];
   const ignoredPrompts: string[] = [];
   for (const entry of order['order'] as unknown[]) {
     if (!isObject(entry) || entry['enabled'] !== true) continue;
     const prompt = prompts.find((candidate) => candidate['identifier'] === entry['identifier']);
     if (!prompt) continue;
     const identifier = prompt['identifier'];
-    const content = textOf(prompt['content']);
     if (typeof identifier === 'string' && ST_MARKERS.has(identifier)) continue;
-    if (identifier === 'jailbreak' || identifier === 'nsfw' || !content.trim()) continue;
-    if (identifier === 'main') main = content.trim();
+    if (!textOf(prompt['content']).trim()) continue;
+    if (identifier === 'main' || identifier === 'nsfw' || identifier === 'jailbreak') enabled.push(prompt);
     else ignoredPrompts.push(textOf(prompt['name']).trim());
   }
+
+  const taken = new Gathered();
+  const take = (identifier: 'main' | 'nsfw' | 'jailbreak', into: ReaderPresetPart['into']) => {
+    const prompt = enabled.find((candidate) => candidate['identifier'] === identifier);
+    if (!prompt) return;
+    const name = textOf(prompt['name']).trim() || ST_NAMES[identifier];
+    taken.add(into, identifier, name, textOf(prompt['content']));
+  };
+  take('main', 'main');
+  take('nsfw', 'main');
+  take('jailbreak', 'globalNote');
   return {
     source: 'sillytavern',
     name: nameOf(undefined, fileName),
-    main,
-    globalNote: '',
-    dropped: [...(carries('jailbreak') ? ['jailbreak' as const] : []), ...(carries('nsfw') ? ['nsfw' as const] : [])],
+    main: joinTexts(taken.main),
+    globalNote: joinTexts(taken.globalNote),
+    imported: taken.imported,
     ignoredPrompts,
     ignoredSettings: true,
   };

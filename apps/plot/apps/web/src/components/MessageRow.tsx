@@ -4,19 +4,29 @@ import { extractChoices } from '@shizue/core/choices';
 import { isNarration, narrationBody } from '@shizue/core/narration';
 import { readerRuns, type ReaderRun } from '@shizue/core/speech';
 import { extractStatusBlock } from '@shizue/core/status-block';
+import { applyTranslationScripts } from '@shizue/core/translation';
+import type { TranslationScript } from '@shizue/core/triggers';
 import { useFormatter, useTranslations } from 'next-intl';
 import { memo, useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { AssetResolver } from '@/lib/assets';
+import { renderProse } from '@/lib/cbs';
 import type { ComponentContext } from '@/lib/componentCalls';
 import type { DisplayContext } from '@/lib/displayScripts';
-import { useRowTranslation, type ChatTranslator } from '@/lib/translation';
+import {
+  useLinesTranslation,
+  useRowTranslation,
+  type BodyTranslation,
+  type ChatTranslator,
+  type RowTranslation,
+} from '@/lib/translation';
 import type { ChatAttachment, MessageRole, PublicMember } from '@/lib/types';
+import { useErrorMessage } from '@/lib/useErrorMessage';
 import { Avatar } from './Avatar';
 import { Icon } from './Icon';
 import { MessageAttachments } from './MessageAttachments';
 import { MessageBody } from './MessageBody';
 import { StatusCard } from './StatusCard';
-import { Button, TextArea, cx } from './ui';
+import { Button, ErrorText, TextArea, cx } from './ui';
 
 /**
  * The row's own affordances: there for the hover and for the keyboard, invisible
@@ -34,6 +44,46 @@ const ACTIONS_ABOVE = 'absolute bottom-full flex h-5 items-center gap-2';
 
 /** The standard ring. These are plain buttons, so each one wears it itself. */
 const FOCUS_RING = 'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
+
+type RowPairs = RowTranslation['pairs'];
+
+/**
+ * The offer, under the reply that made it, in the reader's language where the
+ * row is translated. Taking one hands the page the choice as the model wrote
+ * it: what is sent is the work's language, as the rest of the chat is, and an
+ * input translation, where the reader has one on, leaves it as it is.
+ */
+function ChoiceOffer({
+  choices,
+  onChoice,
+  translation,
+  className,
+}: {
+  choices: readonly string[];
+  onChoice: (choice: string) => void;
+  translation: BodyTranslation | undefined;
+  className?: string | undefined;
+}) {
+  const { lines, ref } = useLinesTranslation(choices, translation);
+  return (
+    <div ref={ref} data-testid="message-choices" className={cx('mt-2 flex flex-col items-start gap-1.5', className)}>
+      {choices.map((choice, index) => (
+        <button
+          key={index}
+          type="button"
+          onClick={() => onChoice(choice)}
+          className={cx(
+            'max-w-full rounded-lg border border-line bg-surface/60 px-3 py-1.5 text-left text-sm text-muted',
+            'transition-colors hover:border-muted/60 hover:text-fg',
+            FOCUS_RING,
+          )}
+        >
+          {lines[index] ?? choice}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 /**
  * A message hidden from the AI: still there to read, a step back from the rest.
@@ -158,6 +208,7 @@ export const MessageRow = memo(function MessageRow({
   footer,
   translator,
   translationId,
+  translationScripts,
 }: {
   role: MessageRole;
   content: string;
@@ -281,6 +332,12 @@ export const MessageRow = memo(function MessageRow({
    */
   translator?: ChatTranslator | null;
   translationId?: string;
+  /**
+   * The card's `edittrans` scripts, which the translation runs through before it
+   * is shown (RisuAI's `applyEdittransRegex`) — with the display scripts, so
+   * only where the card's custom UI is on.
+   */
+  translationScripts?: readonly TranslationScript[] | undefined;
 }) {
   const t = useTranslations('chat');
   const common = useTranslations('common');
@@ -289,7 +346,24 @@ export const MessageRow = memo(function MessageRow({
   const [draft, setDraft] = useState(content);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
-  const translation = useRowTranslation(translator, streaming ? undefined : translationId);
+  /** The translation through the card's edittrans scripts, a `cbs` pattern read with the message's own values. */
+  const editTranslation = useMemo(
+    () =>
+      display && translationScripts?.length
+        ? (text: string) =>
+            applyTranslationScripts(text, translationScripts, { cbs: (pattern) => renderProse(pattern, display, () => {}) })
+        : undefined,
+    [display, translationScripts],
+  );
+  const translation = useRowTranslation(translator, streaming ? undefined : translationId, editTranslation);
+  /**
+   * The reader correcting the translation (RisuAI's 번역 수정): the texts the row
+   * showed when they began, and their wording of each.
+   */
+  const [correcting, setCorrecting] = useState<{ pairs: RowPairs; drafts: string[] } | null>(null);
+  const [correctBusy, setCorrectBusy] = useState(false);
+  const [correctError, setCorrectError] = useState('');
+  const toMessage = useErrorMessage();
 
   useEffect(() => {
     if (!editing) setDraft(content);
@@ -376,7 +450,31 @@ export const MessageRow = memo(function MessageRow({
     }
   }
 
-  const showActions = !streaming && !editing;
+  /** Keeps what the reader rewrote; a field left as it was, or emptied, keeps what it had. */
+  async function saveCorrection(): Promise<void> {
+    if (!correcting || correctBusy) return;
+    const corrected: Record<string, string> = {};
+    correcting.pairs.forEach(([text, now], index) => {
+      const next = correcting.drafts[index] ?? now;
+      if (next.trim() && next !== now) corrected[text] = next;
+    });
+    if (Object.keys(corrected).length === 0) {
+      setCorrecting(null);
+      return;
+    }
+    setCorrectBusy(true);
+    setCorrectError('');
+    try {
+      await translation.correct(corrected);
+      setCorrecting(null);
+    } catch (caught) {
+      setCorrectError(toMessage(caught));
+    } finally {
+      setCorrectBusy(false);
+    }
+  }
+
+  const showActions = !streaming && !editing && !correcting;
 
   /**
    * The row's quiet actions. Beside the name where the row says one — the
@@ -511,6 +609,53 @@ export const MessageRow = memo(function MessageRow({
           </Button>
         </div>
       </fieldset>
+    ) : correcting ? (
+      // RisuAI's 번역 수정 puts the translation in a field in place of the body.
+      // The translation here is kept text by text, so each text the row shows is
+      // a field of its own under its original — and the markup around them stays
+      // the creator's, byte for byte.
+      <fieldset
+        data-testid="translation-editor"
+        disabled={correctBusy}
+        aria-busy={correctBusy || undefined}
+        className="mt-1.5 w-full min-w-0 space-y-3"
+        onKeyDown={(event) => {
+          if (correctBusy || event.nativeEvent.isComposing) return;
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            setCorrecting(null);
+          } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+            event.preventDefault();
+            void saveCorrection();
+          }
+        }}
+      >
+        {correcting.pairs.map(([text], index) => (
+          <label key={index} className="block space-y-1">
+            <span className="line-clamp-3 block whitespace-pre-line text-xs text-muted">{text}</span>
+            <TextArea
+              autoFocus={index === 0}
+              rows={Math.min(8, Math.max(2, (correcting.drafts[index] ?? '').split('\n').length + 1))}
+              value={correcting.drafts[index] ?? ''}
+              onChange={(event) => {
+                const drafts = [...correcting.drafts];
+                drafts[index] = event.target.value;
+                setCorrecting({ ...correcting, drafts });
+              }}
+              className="w-full text-sm"
+            />
+          </label>
+        ))}
+        {correctError ? <ErrorText>{correctError}</ErrorText> : null}
+        <div className="flex justify-end gap-2">
+          <Button size="sm" variant="ghost" onClick={() => setCorrecting(null)}>
+            {common('cancel')}
+          </Button>
+          <Button size="sm" variant="primary" busy={correctBusy} onClick={() => void saveCorrection()}>
+            {t('saveTranslation')}
+          </Button>
+        </div>
+      </fieldset>
     ) : null;
 
   /** What the body takes however the row lays it out. */
@@ -536,27 +681,14 @@ export const MessageRow = memo(function MessageRow({
    */
   const offerAt = (indent?: string) =>
     onChoice && !streaming && choices.length > 0 ? (
-      <div data-testid="message-choices" className={cx('mt-2 flex flex-col items-start gap-1.5', indent)}>
-        {choices.map((choice, index) => (
-          <button
-            key={index}
-            type="button"
-            onClick={() => onChoice(choice)}
-            className={cx(
-              'max-w-full rounded-lg border border-line bg-surface/60 px-3 py-1.5 text-left text-sm text-muted',
-              'transition-colors hover:border-muted/60 hover:text-fg',
-              FOCUS_RING,
-            )}
-          >
-            {choice}
-          </button>
-        ))}
-      </div>
+      <ChoiceOffer choices={choices} onChoice={onChoice} translation={translation.body} className={indent} />
     ) : null;
 
   /** At the end of the message, where the turn left the scene. */
   const statusCard =
-    status !== null ? <StatusCard status={status} collapsed={statusCollapsed} onToggle={onToggleStatus} /> : null;
+    status !== null ? (
+      <StatusCard status={status} collapsed={statusCollapsed} onToggle={onToggleStatus} translation={translation.body} />
+    ) : null;
 
   /** The model that wrote a finished reply: faint, outside its last bubble, at the corner. */
   const modelLabel =
@@ -594,16 +726,42 @@ export const MessageRow = memo(function MessageRow({
         {t('translationFailed')}
       </button>
     ) : (
-      <button
-        type="button"
-        data-testid="message-translation"
-        data-state={translation.original ? 'original' : 'translated'}
-        aria-pressed={translation.original}
-        onClick={translation.toggleOriginal}
-        className={cx('chat-meta caption2 text-muted hover:text-link', FOCUS_RING)}
-      >
-        {translation.original ? t('showTranslation') : t('showOriginal')}
-      </button>
+      <span className="inline-flex items-center gap-2">
+        <button
+          type="button"
+          data-testid="message-translation"
+          data-state={translation.original ? 'original' : 'translated'}
+          aria-pressed={translation.original}
+          onClick={translation.toggleOriginal}
+          className={cx('chat-meta caption2 text-muted hover:text-link', FOCUS_RING)}
+        >
+          {translation.original ? t('showTranslation') : t('showOriginal')}
+        </button>
+        {/* RisuAI's two, there while the translation is what is shown. */}
+        {!translation.original && !editing && !correcting ? (
+          <>
+            <button
+              type="button"
+              data-testid="message-retranslate"
+              onClick={translation.retranslate}
+              className={cx('chat-meta caption2 text-muted hover:text-link', FOCUS_RING)}
+            >
+              {t('retranslate')}
+            </button>
+            <button
+              type="button"
+              data-testid="message-correct-translation"
+              onClick={() => {
+                setCorrectError('');
+                setCorrecting({ pairs: translation.pairs, drafts: translation.pairs.map(([, now]) => now) });
+              }}
+              className={cx('chat-meta caption2 text-muted hover:text-link', FOCUS_RING)}
+            >
+              {t('correctTranslation')}
+            </button>
+          </>
+        ) : null}
+      </span>
     );
   /** The marks a row says of itself, in the meta line. */
   const marks =

@@ -17,7 +17,7 @@ import type { AppDeps, AppEnv } from '../deps.js';
 import { badRequest, notFound } from '../errors.js';
 import { loadVisiblePlot } from '../hub.js';
 import { translateTexts, withTranslationSlot } from '../translate.js';
-import { readJsonBody, requireString, requireUuidParam } from '../util.js';
+import { optionalBoolean, readJsonBody, requireString, requireUuidParam } from '../util.js';
 import { loadOwnedChat } from './chats.js';
 
 /** How many texts one message may ask about, and how much of them in all. */
@@ -63,6 +63,10 @@ export function chatTranslationRoutes(deps: AppDeps): Hono<AppEnv> {
    * its `LLMCacheStorage`). The browser cuts the message into these texts, by
    * RisuAI's rules for what is translated; the cache keeps what this request
    * asked about, for as long as the message's text is what it was.
+   *
+   * `regenerate: true` is RisuAI's 다시 번역 (`translateLLM`'s `regenerate`):
+   * every text asked about goes to the model again, whatever the cache holds,
+   * and what comes back takes its place there.
    */
   app.post('/:id/messages/:messageId/translation', async (c) => {
     const userId = c.get('userId');
@@ -70,6 +74,7 @@ export function chatTranslationRoutes(deps: AppDeps): Hono<AppEnv> {
     const messageId = requireUuidParam(c, 'messageId');
     const body = await readJsonBody(c);
     const language = requireLanguage(body['language']);
+    const regenerate = optionalBoolean(body, 'regenerate') ?? false;
     const texts = body['texts'];
     if (!Array.isArray(texts) || texts.some((text) => typeof text !== 'string' || text.trim() === '')) {
       throw badRequest('invalid_request', 'texts must be a list of non-empty strings');
@@ -79,19 +84,8 @@ export function chatTranslationRoutes(deps: AppDeps): Hono<AppEnv> {
       throw badRequest('translation_too_long', 'Too much text to translate at once');
     }
 
-    const [message] = await deps.db
-      .select({ content: messages.content })
-      .from(messages)
-      .where(and(eq(messages.id, messageId), eq(messages.chatId, chat.id)));
-    if (!message) throw notFound('Message not found');
-    const hash = contentHash(message.content);
-
-    const [row] = await deps.db
-      .select()
-      .from(messageTranslations)
-      .where(and(eq(messageTranslations.messageId, messageId), eq(messageTranslations.language, language)));
-    const cached = row && row.contentHash === hash ? row.texts : {};
-    const missing = asked.filter((text) => cached[text] === undefined);
+    const { hash, cached } = await cachedTranslation(chat.id, messageId, language);
+    const missing = regenerate ? asked : asked.filter((text) => cached[text] === undefined);
     if (missing.length === 0) {
       return c.json({ texts: Object.fromEntries(asked.map((text) => [text, cached[text]!])) });
     }
@@ -99,19 +93,74 @@ export function chatTranslationRoutes(deps: AppDeps): Hono<AppEnv> {
     const made = await withTranslationSlot(userId, () => translateTexts(deps, chat, missing, language));
     const result: Record<string, string> = {};
     for (const text of asked) {
-      const translated = cached[text] ?? made.get(text);
+      const translated = regenerate ? (made.get(text) ?? cached[text]) : (cached[text] ?? made.get(text));
       if (translated !== undefined) result[text] = translated;
     }
     // What this message shows now: a text it no longer shows is not kept.
-    await deps.db
-      .insert(messageTranslations)
-      .values({ messageId, language, contentHash: hash, texts: result })
-      .onConflictDoUpdate({
-        target: [messageTranslations.messageId, messageTranslations.language],
-        set: { contentHash: hash, texts: result, updatedAt: new Date() },
-      });
+    await keepTranslation(messageId, language, hash, result);
     return c.json({ texts: result });
   });
+
+  /**
+   * RisuAI's 번역 수정: the reader's own wording for texts of a message, kept in
+   * the cache in place of the model's (`setLLMCache`), for as long as the
+   * message's text is what it was. Only the texts sent change; the others the
+   * cache holds stay. No model is asked.
+   */
+  app.put('/:id/messages/:messageId/translation', async (c) => {
+    const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
+    const messageId = requireUuidParam(c, 'messageId');
+    const body = await readJsonBody(c);
+    const language = requireLanguage(body['language']);
+    const texts = body['texts'];
+    if (
+      texts === null ||
+      typeof texts !== 'object' ||
+      Array.isArray(texts) ||
+      Object.entries(texts).some(([text, translated]) => text.trim() === '' || typeof translated !== 'string' || translated.trim() === '')
+    ) {
+      throw badRequest('invalid_request', 'texts must map non-empty strings to non-empty strings');
+    }
+    const corrected = texts as Record<string, string>;
+    const entries = Object.entries(corrected);
+    const chars = (pick: (entry: [string, string]) => string) => entries.reduce((sum, entry) => sum + pick(entry).length, 0);
+    if (entries.length > MAX_TRANSLATION_TEXTS || chars(([text]) => text) > MAX_TRANSLATION_CHARS || chars(([, translated]) => translated) > MAX_TRANSLATION_CHARS) {
+      throw badRequest('translation_too_long', 'Too much text to translate at once');
+    }
+
+    const { hash, cached } = await cachedTranslation(chat.id, messageId, language);
+    await keepTranslation(messageId, language, hash, { ...cached, ...corrected });
+    return c.json({ texts: corrected });
+  });
+
+  /** A message's text as the cache knows it, and what the cache holds for it — nothing where the text has changed since. */
+  async function cachedTranslation(
+    chatId: string,
+    messageId: string,
+    language: TranslationLanguage,
+  ): Promise<{ hash: string; cached: Record<string, string> }> {
+    const [message] = await deps.db
+      .select({ content: messages.content })
+      .from(messages)
+      .where(and(eq(messages.id, messageId), eq(messages.chatId, chatId)));
+    if (!message) throw notFound('Message not found');
+    const hash = contentHash(message.content);
+    const [row] = await deps.db
+      .select()
+      .from(messageTranslations)
+      .where(and(eq(messageTranslations.messageId, messageId), eq(messageTranslations.language, language)));
+    return { hash, cached: row && row.contentHash === hash ? row.texts : {} };
+  }
+
+  async function keepTranslation(messageId: string, language: TranslationLanguage, hash: string, texts: Record<string, string>) {
+    await deps.db
+      .insert(messageTranslations)
+      .values({ messageId, language, contentHash: hash, texts })
+      .onConflictDoUpdate({
+        target: [messageTranslations.messageId, messageTranslations.language],
+        set: { contentHash: hash, texts, updatedAt: new Date() },
+      });
+  }
 
   /**
    * RisuAI's input translation: what the reader wrote, in the work's language,
