@@ -308,10 +308,9 @@ export const MessageRow = memo(function MessageRow({
         <div className={cx('flex items-center gap-2', isUser && !narration && 'justify-end')}>
           {/* A continued turn is the same speaker moments later: the name was
               already said, and saying it again is what makes a run look like a list.
-              A narration names no one, so it says what it is — quietly. */}
-          {narration ? (
-            <span className="text-xs font-medium text-muted">{t('narrationLabel')}</span>
-          ) : grouped || attributed ? null : (
+              A narration names no one and needs no label: its line and its
+              italics say what it is, as Zeta and RisuAI draw scene text. */}
+          {narration || grouped || attributed ? null : (
             <span className="text-xs font-medium text-muted">{name}</span>
           )}
           {(onSave || onEditScene) && showActions ? (
@@ -453,10 +452,9 @@ export const MessageRow = memo(function MessageRow({
                   </div>
                 </div>
               ) : run.kind === 'narration' ? (
-                // As a narration row is drawn: a quiet label, and a line down the side.
-                <div key={index} data-testid="reader-narration">
-                  <span className="text-xs font-medium text-muted">{t('narrationLabel')}</span>
-                  <div className="mt-1 border-l-2 border-line pl-3 text-muted">{runBody}</div>
+                // As a narration row is drawn: a line down the side, in italics.
+                <div key={index} data-testid="reader-narration" className="border-l-2 border-line pl-3 italic text-muted">
+                  {runBody}
                 </div>
               ) : (
                 <div key={index} data-testid="reader-member">
@@ -472,9 +470,10 @@ export const MessageRow = memo(function MessageRow({
               isUser &&
                 !narration &&
                 'rounded-2xl rounded-tr-sm border border-accent/30 bg-mint-soft/50 px-4 py-3',
-              // No bubble and no face: a line down the side is all that marks it,
-              // as Zeta marks its narrator.
-              narration && 'border-l-2 border-line pl-3 text-muted',
+              // No bubble, no face and no label: a line down the side and
+              // muted italics mark it, as Zeta marks its narrator and RisuAI
+              // draws its *scene text*.
+              narration && 'border-l-2 border-line pl-3 italic text-muted',
             )}
           >
             {/* Above the text, in the same bubble: the picture is part of the

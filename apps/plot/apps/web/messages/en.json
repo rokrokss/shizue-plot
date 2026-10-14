@@ -749,7 +749,6 @@
     "autoRoundHint": "Carries the scene on with a new round, without you; its speakers are picked anew.",
     "narrate": "Narrate",
     "narrateHint": "Ask for the scene alone, with no lines from the characters.",
-    "narrationLabel": "Narration",
     "swipePrev": "Previous reply",
     "swipeNext": "Next reply",
     "edit": "Edit",

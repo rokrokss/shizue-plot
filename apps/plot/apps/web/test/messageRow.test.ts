@@ -35,7 +35,6 @@ const messages = {
     copied: '복사됨',
     editMessage: '메시지 수정',
     deleteMessage: '삭제',
-    narrationLabel: '나레이션',
   },
   common: { cancel: '취소', save: '저장', saving: '저장 중…' },
 };
@@ -82,10 +81,11 @@ describe('a narrating user turn', () => {
     expect(host.querySelector('[data-testid="message-user"]')).toBeNull();
     expect(host.textContent).toContain('문이 열리고 바람이 들이쳤다');
     expect(host.textContent).not.toContain('@:');
-    // No speaker, and none of the bubble the reader's own lines get: a quiet
-    // label says what it is, and a line down its side marks it, as Zeta's does.
-    const labels = [...narration!.querySelectorAll('span.text-xs')].map((node) => node.textContent);
-    expect(labels).toEqual(['나레이션']);
+    // No speaker, no label and none of the bubble the reader's own lines get:
+    // a line down its side and italics mark it, as Zeta's does.
+    expect(narration!.querySelectorAll('span.text-xs')).toHaveLength(0);
+    expect(host.textContent).not.toContain('나레이션');
+    expect(narration!.querySelector('.border-l-2')?.classList.contains('italic')).toBe(true);
     expect(host.querySelector('.bg-surface')).toBeNull();
     expect(host.querySelector('.bg-mint-soft\\/50')).toBeNull();
     expect(narration!.querySelector('.border-l-2')?.textContent).toContain('문이 열리고 바람이 들이쳤다');
@@ -192,8 +192,8 @@ describe('a generated narration', () => {
     // No speaker, and none of the character's own chrome: no name, no avatar.
     expect(host.textContent).not.toContain('아리아');
     expect(host.querySelector('img')).toBeNull();
-    expect(narration!.querySelector('span.text-xs')?.textContent).toBe('나레이션');
-    expect(narration!.querySelector('.border-l-2')).not.toBeNull();
+    expect(narration!.querySelector('span.text-xs')).toBeNull();
+    expect(narration!.querySelector('.border-l-2.italic')).not.toBeNull();
   });
 });
 

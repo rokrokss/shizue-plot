@@ -35,7 +35,6 @@ const messages = {
     copied: '복사됨',
     editMessage: '메시지 수정',
     deleteMessage: '삭제',
-    narrationLabel: '나레이션',
     thinking: '생각 중… {seconds}초',
     typing: '{name} 입력 중… {seconds}초',
   },
@@ -269,10 +268,11 @@ describe('a turn the reader wrote partly as others', () => {
     const spoken = host.querySelector('[data-testid="speech-character"]')!;
     expect(spoken.textContent).toContain('반가워.');
     expect(spoken.textContent).toContain('오랜만이네.');
-    // Narration as a narration row has it: labelled, a line down the side, no bubble.
+    // Narration as a narration row has it: no label, a line down the side in italics, no bubble.
     const narration = host.querySelector('[data-testid="reader-narration"]')!;
-    expect(narration.textContent).toBe('나레이션바람이 분다.');
-    expect(narration.querySelector('.border-l-2')).not.toBeNull();
+    expect(narration.textContent).toBe('바람이 분다.');
+    expect(narration.classList.contains('border-l-2')).toBe(true);
+    expect(narration.classList.contains('italic')).toBe(true);
     expect(narration.querySelector('.bg-mint-soft\\/50')).toBeNull();
     expect(host.textContent).not.toContain('@');
     // The reader's own stretches keep their bubble and their 상황묘사.

@@ -749,7 +749,6 @@
     "autoRoundHint": "自分の発言なしで次の順番へ進みます。話す人物を新たに選びます。",
     "narrate": "ナレーション",
     "narrateHint": "登場人物のセリフなしで、場面だけを語らせます。",
-    "narrationLabel": "ナレーション",
     "swipePrev": "前の応答",
     "swipeNext": "次の応答",
     "edit": "編集",
