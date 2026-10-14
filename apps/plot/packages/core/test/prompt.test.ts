@@ -337,6 +337,22 @@ describe('assemblePrompt', () => {
     expect(system).toContain('그림: ["웃음.png","door"] / 표정: ["웃음.png","door"]');
   });
 
+  it("answers {{moduleenabled}} and {{moduleassetlist}} from the work's modules", () => {
+    const description = '{{moduleenabled::weather}}{{moduleenabled::none}} {{moduleassetlist::weather}}|{{moduleassetlist::none}}|';
+    const { system } = assemblePrompt({
+      plot: { ...plot, description, cbsModules: [{ namespace: 'weather', assets: ['rain', '비.png'] }] },
+      characters: [aria],
+      history,
+      preset,
+    });
+    expect(system).toContain('10 ["rain","비.png"]||');
+    // A work with no module answers as RisuAI does with none; a caller that says nothing leaves them.
+    expect(assemblePrompt({ plot: { ...plot, description, cbsModules: [] }, characters: [aria], history, preset }).system).toContain('00 ||');
+    expect(assemblePrompt({ plot: { ...plot, description }, characters: [aria], history, preset }).system).toContain(
+      '{{moduleenabled::weather}}',
+    );
+  });
+
   it('injects memoryText after the persona, with macros expanded', () => {
     const memoryText = '[지난 이야기 요약]\n{{user}}와(과) {{char}}는 이미 만난 적이 있다.';
     const { system } = assemblePrompt({
@@ -2220,6 +2236,48 @@ describe('assemblePrompt - messages hidden from the AI', () => {
     );
     expect(messages.map((message) => promptText(message.content))).toEqual(['POST']);
     expect(report!.history).toEqual({ included: 0, total: 0 });
+  });
+});
+
+describe('assemblePrompt - the greeting in the lore scan', () => {
+  // Only the greeting, history[0], says 인사말.
+  const greeting = loreEntry({ content: 'GREETING-LORE', constant: false, keys: ['인사말'] });
+  const opened = { length: history.length, greeting: { text: history[0]!.content, index: -1 } };
+  const scanned = (
+    lore: { plot?: LoreEntry[]; member?: LoreEntry[] },
+    extra: { sillyTavern?: boolean; branch?: typeof opened; history?: HistoryMessage[] } = {},
+  ): boolean =>
+    assemblePrompt({
+      plot: { ...plot, lorebook: lore.plot ?? [] },
+      characters: [
+        {
+          name: '아리아',
+          card: { ...bareCard, lorebook: lore.member ?? [] },
+          ...(extra.sillyTavern ? { sillyTavern: true } : {}),
+        },
+      ],
+      history: extra.history ?? history,
+      preset,
+      userName: '민준',
+      branch: extra.branch ?? opened,
+    }).system.includes('GREETING-LORE');
+
+  it("leaves the greeting out of the scan, as RisuAI's chat never holds it", () => {
+    expect(scanned({ member: [greeting] })).toBe(false);
+    expect(scanned({ plot: [greeting] })).toBe(false);
+    // Trimmed by the memory, the history no longer opens on the greeting: its first turn is scanned.
+    expect(scanned({ member: [greeting] }, { branch: { ...opened, length: 6 } })).toBe(true);
+    // A greeting hidden from the AI is scanned by nobody.
+    const hidden = [{ ...history[0]!, hidden: true }, ...history.slice(1)];
+    expect(scanned({ member: [{ ...greeting, sillyTavern: true }] }, { history: hidden })).toBe(false);
+  });
+
+  it("scans it for SillyTavern's lore: a member card ST wrote, an entry of a World Info file", () => {
+    expect(scanned({ member: [greeting] }, { sillyTavern: true })).toBe(true);
+    expect(scanned({ plot: [{ ...greeting, sillyTavern: true }] })).toBe(true);
+    expect(scanned({ member: [{ ...greeting, sillyTavern: true }] })).toBe(true);
+    // The member's card is ST's, the work's own entry is not.
+    expect(scanned({ plot: [greeting] }, { sillyTavern: true })).toBe(false);
   });
 });
 

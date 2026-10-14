@@ -1,4 +1,4 @@
-import { sniffMedia, stripPngTextChunks } from '@shizue/core';
+import { sniffFont, sniffMedia, stripPngTextChunks } from '@shizue/core';
 import { badRequest } from './errors.js';
 import { assetKey, type ObjectStorage } from './storage.js';
 
@@ -98,17 +98,19 @@ interface StoredAsset {
  * What the bytes are decides what is stored, never a name or a declared type
  * (`sniffMedia`). A picture always; music only where `audio` says so — what a
  * card brings, which RisuAI plays (`{{audio::…}}`, `{{bgm::…}}`). The studio's
- * own upload takes pictures alone.
- * Returns null for bytes that are not a supported image (or music, with `audio`).
+ * own upload takes pictures alone. A web font only where `font` says so — what a
+ * stylesheet the import localized names (`localizeAssets.ts`, `sniffFont`).
+ * Returns null for bytes that are not a supported image (or music, with `audio`;
+ * or a font, with `font`).
  */
 export async function saveAsset(
   storage: ObjectStorage,
   assetId: string,
   bytes: Uint8Array,
-  { audio = false }: { audio?: boolean } = {},
+  { audio = false, font = false }: { audio?: boolean; font?: boolean } = {},
 ): Promise<StoredAsset | null> {
-  const type = sniffMedia(bytes);
-  if (!type || (type.kind === 'audio' && !audio)) return null;
+  const type = sniffMedia(bytes) ?? (font ? sniffFont(bytes) : null);
+  if (!type || ('kind' in type && type.kind === 'audio' && !audio)) return null;
   const stored = type.ext === 'png' ? stripPngTextChunks(bytes) : bytes;
   if (!stored) return null;
   const key = assetKey(assetId, type.ext);

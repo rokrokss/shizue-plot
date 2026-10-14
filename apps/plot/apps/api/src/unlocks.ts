@@ -9,7 +9,7 @@
  * and a failure here never costs a turn that is already persisted.
  */
 
-import type { AssetUnlock, AssetUnlockKind } from '@shizue/core';
+import { isLocalizedAssetName, type AssetUnlock, type AssetUnlockKind, type PlotModule } from '@shizue/core';
 import {
   chatAssetUnlocks,
   messages,
@@ -21,6 +21,7 @@ import {
 } from '@shizue/db';
 import { asc, eq } from 'drizzle-orm';
 import type { AppDeps } from './deps.js';
+import { cbsModulesOf } from './plots.js';
 import { buildPath, roundCount } from './tree.js';
 
 /** What a reader is told about one of a plot's images, inside their own chat. */
@@ -236,10 +237,28 @@ export async function assetLocks(deps: AppDeps, chat: Chat): Promise<AssetLock[]
  * The names this chat's open images go by — the card's own where it had one,
  * the slug otherwise — in the asset list's order. What `{{assetlist}}` reads in
  * the prompt: the same list the chat page gives the display scripts, so a locked
- * image is no more named to the model than it is drawn for the reader.
+ * image is no more named to the model than it is drawn for the reader. What
+ * the import fetched from another host for the card's markup
+ * (`isLocalizedAssetName`) is not among them: RisuAI loads that from there, and
+ * its list names the card's own.
  */
 export async function openAssetNames(deps: AppDeps, chat: Chat): Promise<string[]> {
   return (await lockStates(deps, chat))
-    .filter(({ locked }) => !locked)
+    .filter(({ locked, asset }) => !locked && !isLocalizedAssetName(asset.name))
     .map(({ asset }) => asset.name ?? asset.slug);
+}
+
+/**
+ * The work's modules as `{{moduleenabled}}` and `{{moduleassetlist}}` read them
+ * in this chat's prompt (`cbsModulesOf`), naming only the open pictures, as
+ * `openAssetNames` does. The assets are read only when a module has a namespace.
+ */
+export async function openModuleAssets(
+  deps: AppDeps,
+  chat: Chat,
+  modules: readonly PlotModule[] | undefined,
+): Promise<{ namespace: string; assets: string[] }[]> {
+  if (!modules?.some((module) => module.namespace)) return [];
+  const open = (await lockStates(deps, chat)).filter(({ locked, asset }) => !locked && !isLocalizedAssetName(asset.name));
+  return cbsModulesOf(modules, new Map(open.map(({ asset }) => [asset.id, asset.name ?? asset.slug])));
 }

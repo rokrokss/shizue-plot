@@ -142,6 +142,8 @@ function fakeApi() {
   const patches: { plotId: string; body: Record<string, unknown> }[] = [];
   const memberPatches: { plotId: string; memberId: string; body: Record<string, unknown> }[] = [];
   const uploads: { path: string; file: string; worldInfo: string | null }[] = [];
+  /** What an import route answers as `importWarnings` for a card, by its file name. */
+  const importWarnings = new Map<string, unknown[]>();
   const log: string[] = [];
   /** Requests that answer with an error instead, by `METHOD path`, consumed in order. */
   const failures = new Map<string, { status: number; code: string }[]>();
@@ -220,6 +222,8 @@ function fakeApi() {
       const world = form.get('worldInfo') as File | null;
       const worldInfo = world ? await world.text() : null;
       uploads.push({ path, file: card.name, worldInfo });
+      const cut = importWarnings.get(card.name);
+      const warned = cut ? { importWarnings: cut } : {};
       if (path === '/api/plots/import') {
         const plotId = id('plot');
         const plot = {
@@ -230,12 +234,12 @@ function fakeApi() {
           characters: [member(card.name, 0, worldInfo)],
         } as unknown as PlotDetail;
         plots.set(plotId, plot);
-        return json(201, plot);
+        return json(201, { ...plot, ...warned });
       }
       const plot = plots.get(path.split('/')[3]!)!;
       const joined = member(card.name, plot.characters.length, worldInfo);
       plot.characters.push(joined);
-      return json(201, joined);
+      return json(201, { ...joined, ...warned });
     }
     const memberMatch = /^PATCH \/api\/plots\/([^/]+)\/characters\/([^/]+)$/.exec(route);
     if (memberMatch) {
@@ -298,6 +302,7 @@ function fakeApi() {
     patches,
     memberPatches,
     uploads,
+    importWarnings,
     log,
     failures,
     setBefore: (hook: (route: string) => void) => {
@@ -604,6 +609,35 @@ describe('runImport', () => {
     expect(byPlot.get('plot-8')!.personaId).toBe(kim!.id);
     expect(results['chat:chats/Alice/one.jsonl']!.memoryBackfill).toBe('queued');
     expect(results['chat:chats/Alice/one.jsonl']!.dropped).toMatchObject({ system: 1, swipes: 0 });
+  });
+
+  it('keeps what each card import left behind or cut, one count per reason over the step', async () => {
+    const api = fakeApi();
+    api.importWarnings.set('Alice.png', [
+      { code: 'assets_missing', count: 1 },
+      { code: 'greetings_cut', count: 2 },
+    ]);
+    // A reason this build has no words for is left out, as the studio leaves it.
+    api.importWarnings.set('Bob.png', [
+      { code: 'assets_missing', count: 3 },
+      { code: 'not_a_code', count: 1 },
+    ]);
+    const { steps, results } = await runAll(api, sample());
+
+    expect(results['character:Alice.png']!.importWarnings).toEqual([
+      { code: 'assets_missing', count: 1 },
+      { code: 'greetings_cut', count: 2 },
+    ]);
+    expect(results['character:Bob.png']!.importWarnings).toEqual([{ code: 'assets_missing', count: 3 }]);
+    // The group uploads both cards, the second through the member import: the counts add up.
+    const group = steps.find((step) => step.kind === 'group')!;
+    expect(results[group.id]!.importWarnings).toEqual([
+      { code: 'assets_missing', count: 4 },
+      { code: 'greetings_cut', count: 2 },
+    ]);
+    // Nothing said, nothing kept.
+    const quiet = await runAll(fakeApi(), sample());
+    expect(Object.values(quiet.results).some((result) => result.importWarnings)).toBe(false);
   });
 
   it('leaves the global lorebooks and regex alone by default', async () => {

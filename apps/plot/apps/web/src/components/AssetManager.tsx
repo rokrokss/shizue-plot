@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import { apiDelete, apiGet, apiSend, apiUpload } from '@/lib/api';
 import {
   foldSlug,
+  isFontAsset,
   isImageAsset,
   MAX_ASSETS,
   measureImage,
@@ -126,6 +127,8 @@ export function AssetManager({
 
   /** The asset the editor below the grid belongs to, if any is open. */
   const edited = assets.find((asset) => asset.slug === editing) ?? null;
+  const tiles = assets.filter((asset) => !isFontAsset(asset));
+  const fonts = assets.length - tiles.length;
 
   return (
     <Section
@@ -139,9 +142,17 @@ export function AssetManager({
     >
       <p className="text-xs text-muted">{t('assetsHint')}</p>
 
-      {assets.length > 0 ? (
+      {/* A web font's slices — hundreds for a Korean family — are the stylesheet's,
+          not pictures to place: counted here rather than tiled. */}
+      {fonts > 0 ? (
+        <p data-testid="plot-asset-fonts" className="text-xs text-muted">
+          {t('assetFonts', { count: fonts })}
+        </p>
+      ) : null}
+
+      {tiles.length > 0 ? (
         <ul className="grid grid-cols-3 gap-3 sm:grid-cols-4">
-          {assets.map((asset) => (
+          {tiles.map((asset) => (
             <li
               key={asset.slug}
               data-testid="plot-asset"

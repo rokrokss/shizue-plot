@@ -129,6 +129,7 @@ import { BACKFILL_BATCHES_PER_RUN, embedPendingSummaries } from '../src/memory.j
 import { createJobHandlers, notificationFanout } from '../src/notifications.js';
 import { repairDisplayOrder } from '../src/maintenance/displayOrder.js';
 import { repairMemberScripts } from '../src/maintenance/memberScripts.js';
+import { localizePlot, type RemoteFetch } from '../src/localizeAssets.js';
 import { NARRATION_NUDGE } from '../src/routes/chats.js';
 import { MAX_ASSET_NAME_LENGTH, MAX_CARD_IMPORT_BYTES } from '../src/routes/plots.js';
 import { runRequestLua } from '../src/requestLua.js';
@@ -310,6 +311,10 @@ function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps {
     detectingEmotion: new Set<string>(),
     suggesting: new Set<string>(),
     drafting: new Set<string>(),
+    // No test reaches another host: what a card loads from one is simply not brought in.
+    remoteFetch: async () => {
+      throw new Error('no network in the API tests');
+    },
     ...overrides,
   };
 }
@@ -3572,9 +3577,14 @@ describe('chats', () => {
     const cookie = await signUp('status-strip@example.com');
     const intro = '문 앞.\n\n```status\n위치: 왕궁\n```';
     const { plotId, chatId } = await setupChat(cookie);
+    // The window is the greeting's, which only SillyTavern's entries scan; the
+    // work's own leave the greeting out, as RisuAI's scan does.
     await patchPlot(cookie, plotId, {
       intros: [intro],
-      lorebook: [{ keys: ['왕궁'], content: 'PALACE LORE' }],
+      lorebook: [
+        { keys: ['왕궁'], content: 'PALACE LORE', sillyTavern: true },
+        { keys: ['왕궁'], content: 'NATIVE LORE' },
+      ],
     });
     // A new chat, so the opening is the intro just written.
     const fresh = (await startChat(cookie, plotId)).chat.id;
@@ -3588,6 +3598,7 @@ describe('chats', () => {
     await readSse(await json(cookie, `/api/chats/${fresh}/messages`, 'POST', { content: '둘러본다' }, capturing));
     expect(prompts[1]!.messages[0]).toEqual({ role: 'assistant', content: '문 앞.' });
     expect(prompts[1]!.system).toContain('PALACE LORE');
+    expect(prompts[1]!.system).not.toContain('NATIVE LORE');
   });
 
   it('keeps the advanced lore fields a client sends, clamped, and invents none', async () => {
@@ -3632,6 +3643,23 @@ describe('chats', () => {
     expect(plot.lorebook.map((entry: Record<string, unknown>) => entry['name'])).toEqual([
       undefined,
       '글노덮',
+      undefined,
+    ]);
+  });
+
+  it('keeps the mark of a SillyTavern lore entry through a save, and takes nothing else for it', async () => {
+    const cookie = await signUp('lore-provenance@example.com');
+    const { plotId } = await setupChat(cookie);
+    const plot = await patchPlot(cookie, plotId, {
+      lorebook: [
+        { content: 'from a World Info file', sillyTavern: true },
+        { content: 'written here' },
+        { content: 'junk', sillyTavern: 'yes' },
+      ],
+    });
+    expect(plot.lorebook.map((entry: Record<string, unknown>) => entry['sillyTavern'])).toEqual([
+      true,
+      undefined,
       undefined,
     ]);
   });
@@ -9770,6 +9798,8 @@ describe('plot hub', () => {
       defaultVariables: {},
       componentCode: '',
       componentCapabilities: [],
+      // What `{{moduleenabled}}` reads: no module, so RisuAI's `0`.
+      modules: [],
       // Only this read carries them; the card grids do not count comments.
       commentsEnabled: true,
       commentCount: 0,
@@ -16180,6 +16210,30 @@ describe('RisuAI modules', () => {
     expect(report.lore.map((entry: any) => entry.source)).toEqual(['아리아', '날씨 모듈']);
   });
 
+  it('answers {{moduleenabled}} and {{moduleassetlist}} by namespace, in the prompt and on the reader’s screen', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const cookie = await signUp('module-namespace@example.com');
+    const plot = await createPlot(cookie, {
+      description: '모듈 {{moduleenabled::weather}}{{moduleenabled::none}} {{moduleassetlist::weather}}',
+    });
+    await addCharacter(cookie, plot.id, { name: '아리아' });
+    // No module yet: an empty list, which RisuAI answers `0` to rather than leaving the macro.
+    expect((await readPublicPlot(cookie, plot.id)).modules).toEqual([]);
+
+    const file = new File(
+      [buildRisum({ module: { ...weather, namespace: 'weather' }, type: 'risuModule' }, [gif(7)])],
+      'weather.risum',
+    );
+    expect((await importModule(cookie, plot.id, file)).status).toBe(201);
+    // A module without a namespace answers neither.
+    expect((await importModule(cookie, plot.id, risum())).status).toBe(201);
+    expect((await readPublicPlot(cookie, plot.id)).modules).toEqual([{ namespace: 'weather', assets: ['rain'] }]);
+
+    const chatId = (await startChat(cookie, plot.id)).chat.id;
+    expect((await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing))).at(-1)!.event).toBe('done');
+    expect(prompts.at(-1)!.system).toContain('모듈 10 ["rain"]');
+  });
+
   it('takes a module out cleanly: its record, its scripts and its pictures', async () => {
     const cookie = await signUp('module-remove@example.com');
     const plot = await createPlot(cookie);
@@ -16517,5 +16571,217 @@ describe('author note settings', () => {
     // A regenerate answers the same turn: two of the reader's turns still.
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
     expect(noteOf()).toBeGreaterThan(-1);
+  });
+});
+
+describe('what a card loads from other hosts, brought in at import', () => {
+  const gif = (marker: number): Uint8Array => new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, marker]);
+  const woff2 = new Uint8Array([0x77, 0x4f, 0x46, 0x32, 0, 1, 0, 0]);
+  const fontCss = "@font-face { font-family: 'Nanum'; src: url(https://fonts.test/nanum.woff2) format('woff2'); }";
+  /** Another host, as the import's fetch sees it: what each address answers, and what was asked. */
+  function remote(): { asked: string[]; remoteFetch: RemoteFetch } {
+    const files: Record<string, { status?: number; type: string; body: Uint8Array | string }> = {
+      'https://cdn.test/hello.png': { type: 'image/png', body: gif(1) },
+      'https://cdn.test/bg.png': { type: 'image/gif', body: gif(2) },
+      'https://cdn.test/gone.png': { status: 404, type: 'text/plain', body: 'nope' },
+      'https://cdn.test/face/Happy.png': { type: 'image/gif', body: gif(3) },
+      'https://cdn.test/face/Calm.png': { type: 'image/gif', body: gif(4) },
+      'https://cdn.test/face/Sad.png': { status: 404, type: 'text/plain', body: 'nope' },
+      'https://cdn.test/face/Angry.png': { status: 404, type: 'text/plain', body: 'nope' },
+      'https://cdn.test/page.html': { type: 'text/html', body: '<html></html>' },
+      'https://fonts.test/css?family=Nanum': { type: 'text/css; charset=utf-8', body: fontCss },
+      'https://fonts.test/nanum.woff2': { type: 'font/woff2', body: woff2 },
+      'https://fonts.test/sneaky.css': { type: 'text/css', body: '.x{color:red}</style><img src=x>' },
+    };
+    const asked: string[] = [];
+    return {
+      asked,
+      remoteFetch: async (url) => {
+        asked.push(url);
+        const file = files[url];
+        if (!file) throw new Error(`unreachable: ${url}`);
+        const bytes = typeof file.body === 'string' ? new TextEncoder().encode(file.body) : file.body;
+        return { status: file.status ?? 200, contentType: file.type, bytes };
+      },
+    };
+  }
+  const webCard = (): File =>
+    new File(
+      [
+        JSON.stringify({
+          ...v2Card,
+          data: {
+            ...v2Card.data,
+            first_mes: '<img src="https://cdn.test/hello.png"> [face:Happy] 안녕.',
+            alternate_greetings: [],
+            post_history_instructions: 'Faces: [Happy, Calm, Angry]',
+            extensions: {
+              risuai: {
+                backgroundHTML:
+                  "<style>@import url('https://fonts.test/css?family=Nanum');\n.box{background:url(\"https://cdn.test/bg.png\")}</style><div class=\"box\"><img src=\"https://cdn.test/gone.png\"></div>",
+                customScripts: [
+                  {
+                    comment: '',
+                    type: 'editdisplay',
+                    in: '\\[face:(\\w+)\\]',
+                    out: "<div style=\"background:url('https://cdn.test/face/$1.png'), url('https://cdn.test/face/{{random::Calm::Sad}}.png')\"></div><style>@import url(https://fonts.test/css?family=Nanum);</style>",
+                    flag: 'g',
+                    ableFlag: true,
+                  },
+                ],
+              },
+            },
+          },
+        }),
+      ],
+      'web.json',
+      { type: 'application/json' },
+    );
+
+  it('fetches the pictures, the stylesheet and its fonts once, stores them and points the work at them', async () => {
+    const { asked, remoteFetch } = remote();
+    const target = makeApp({ remoteFetch });
+    const cookie = await signUp('localize@example.com');
+    const form = new FormData();
+    form.append('file', webCard());
+    const res = await request(cookie, '/api/plots/import', 'POST', form, target);
+    expect(res.status, await res.clone().text()).toBe(201);
+    const plot = await readJson(res);
+    const base = `/api/plots/${plot.id}/assets`;
+
+    // The one address nothing answered stays as written and is said; the
+    // template's values that missed were guesses and are not.
+    expect(plot.importWarnings).toEqual([{ code: 'external_failed', count: 1 }]);
+    const assets = await readJson(await request(cookie, base, 'GET', undefined, target));
+    expect(assets.map((asset: any) => asset.name).sort()).toEqual([
+      'https://cdn.test/bg.png',
+      'https://cdn.test/face/Calm.png',
+      'https://cdn.test/face/Happy.png',
+      'https://cdn.test/hello.png',
+      'https://fonts.test/nanum.woff2',
+    ]);
+    const slugOf = (name: string): string => assets.find((asset: any) => asset.name === name).slug;
+    expect(assets.find((asset: any) => asset.name === 'https://fonts.test/nanum.woff2').mime).toBe('font/woff2');
+    // Each address once, though the stylesheet is imported twice.
+    expect(asked.filter((url) => url === 'https://fonts.test/css?family=Nanum')).toHaveLength(1);
+    expect(asked.filter((url) => url === 'https://fonts.test/nanum.woff2')).toHaveLength(1);
+    // The values the slot is known to take: the script's own capture in the greeting,
+    // the drawn words, and the rest of the list in the card's instructions that holds one.
+    expect(asked.filter((url) => url.startsWith('https://cdn.test/face/')).sort()).toEqual([
+      'https://cdn.test/face/Angry.png',
+      'https://cdn.test/face/Calm.png',
+      'https://cdn.test/face/Happy.png',
+      'https://cdn.test/face/Sad.png',
+    ]);
+
+    expect(plot.intros[0]).toBe(`<img src="${base}/${slugOf('https://cdn.test/hello.png')}"> [face:Happy] 안녕.`);
+    // The stylesheet inlined where the work's sheet imported it, under a note of
+    // where it came from; its font points here.
+    expect(plot.customUi.css).not.toMatch(/@import|url\(['"]?https?:/);
+    expect(plot.customUi.css).toContain('/* https://fonts.test/css?family=Nanum */');
+    expect(plot.customUi.css).toContain(`src: url(${base}/${slugOf('https://fonts.test/nanum.woff2')}) format('woff2')`);
+    expect(plot.customUi.css).toContain(`.box{background:url("${base}/${slugOf('https://cdn.test/bg.png')}")}`);
+    // Once: the template's own import of the same font went to the work's sheet, already there.
+    expect(plot.customUi.css.match(/@font-face/g)).toHaveLength(1);
+    expect(plot.customUi.backgroundHtml).toBe('<div class="box"><img src="https://cdn.test/gone.png"></div>');
+    const out = plot.customUi.displayScripts[0].out;
+    expect(out).toBe(
+      `<div style="background:url('${base}/by-name/cdn.test/face/$1.png'), url('${base}/by-name/cdn.test/face/{{random::Calm::Sad}}.png')"></div><style></style>`,
+    );
+
+    // By name, as RisuAI looks one up — without case — and a value nobody fetched is ours to 404.
+    const happy = await request(cookie, `${base}/by-name/cdn.test/face/happy.png`, 'GET', undefined, target);
+    expect(happy.status).toBe(200);
+    expect(happy.headers.get('content-type')).toBe('image/gif');
+    expect(new Uint8Array(await happy.arrayBuffer())).toEqual(gif(3));
+    expect((await request(cookie, `${base}/by-name/cdn.test/face/Bored.png`, 'GET', undefined, target)).status).toBe(404);
+    // Someone else's private plot is not reached by name either.
+    const stranger = await signUp('localize-stranger@example.com');
+    expect((await request(stranger, `${base}/by-name/cdn.test/face/Happy.png`, 'GET', undefined, target)).status).toBe(404);
+  });
+
+  it('refuses a stylesheet that would end its <style>, and a picture that is not one', async () => {
+    const { remoteFetch } = remote();
+    const cookie = await signUp('localize-refuse@example.com');
+    const plot = await createPlot(cookie, {
+      intros: ['<img src="https://cdn.test/page.html">'],
+      customUi: { css: '@import "https://fonts.test/sneaky.css";\n.a{color:red}' },
+    });
+    const outcome = await localizePlot({ db, storage, remoteFetch }, plot.id, { plot: true, modules: [] });
+    expect(outcome).toMatchObject({ failed: 2, overLimit: 0, stored: 0 });
+    const after = await readPlot(cookie, plot.id);
+    expect(after.intros).toEqual(['<img src="https://cdn.test/page.html">']);
+    expect(after.customUi.css).toBe('@import "https://fonts.test/sneaky.css";\n.a{color:red}');
+  });
+
+  it('localizes a plot imported before (fix:localize-assets): a dry run finds, a run brings in, a second has nothing to fetch', async () => {
+    const { asked, remoteFetch } = remote();
+    const cookie = await signUp('localize-fix@example.com');
+    const plot = await createPlot(cookie, {
+      intros: ['<img src="//cdn.test/hello.png">'],
+      customUi: { css: '@import url(https://fonts.test/css?family=Nanum) screen;' },
+    });
+    const before = (await readPlot(cookie, plot.id)).updatedAt;
+    const scope = { plot: true, modules: 'all' } as const;
+    const dry = await localizePlot({ db, storage, remoteFetch }, plot.id, scope, { dryRun: true });
+    expect(dry.found.map((ref) => ref.kind)).toEqual(['src', 'import']);
+    expect(asked).toEqual([]);
+
+    const done = await localizePlot({ db, storage, remoteFetch }, plot.id, scope, { touch: false });
+    expect(done).toMatchObject({ failed: 0, overLimit: 0, stored: 2 });
+    const after = await readPlot(cookie, plot.id);
+    expect(after.updatedAt).toBe(before);
+    expect(after.intros[0]).toBe(`<img src="/api/plots/${plot.id}/assets/hello">`);
+    expect(after.customUi.css).toMatch(/^@media screen \{\n\/\* https:\/\/fonts\.test\/css\?family=Nanum \*\/\n@font-face/);
+
+    const again = await localizePlot({ db, storage, remoteFetch }, plot.id, scope);
+    expect(again).toMatchObject({ failed: 0, overLimit: 0, stored: 0, found: [] });
+    expect(asked).toHaveLength(3);
+  });
+
+  it('asks a public plot’s owner before a module joins it, and keeps what the module fetched as its own', async () => {
+    const { remoteFetch } = remote();
+    const target = makeApp({ remoteFetch });
+    const cookie = await signUp('module-rights@example.com');
+    const plot = await publishablePlot(cookie);
+    await publishPlot(cookie, plot.id);
+    const module = {
+      name: '글꼴 모듈',
+      description: '',
+      id: 'risu-font',
+      backgroundEmbedding:
+        "<style>@import url('https://fonts.test/css?family=Nanum');</style><img src=\"https://cdn.test/bg.png\">",
+      regex: [],
+      trigger: [],
+      lorebook: [],
+      assets: [],
+    };
+    const upload = (fields: Record<string, string>): Promise<Response> => {
+      const form = new FormData();
+      form.append('file', new File([buildRisum({ module, type: 'risuModule' }, [])], 'font.risum'));
+      for (const [key, value] of Object.entries(fields)) form.append(key, value);
+      return request(cookie, `/api/plots/${plot.id}/modules`, 'POST', form, target);
+    };
+    for (const fields of [{}, { rightsConfirmed: 'false' }] as Record<string, string>[]) {
+      const refused = await upload(fields);
+      expect(refused.status).toBe(409);
+      expect((await readJson(refused)).code).toBe('rights_unconfirmed');
+    }
+    expect(await readPlot(cookie, plot.id)).toMatchObject({ rightsConfirmedAt: null, modules: [] });
+
+    const res = await upload({ rightsConfirmed: 'true' });
+    expect(res.status, await res.clone().text()).toBe(201);
+    const owner = await readJson(res);
+    expect(owner.rightsConfirmedAt).toEqual(expect.any(String));
+    expect(owner.importWarnings).toEqual([]);
+    expect(owner.modules[0].assetCount).toBe(2);
+    const shown = await readPublicPlot(cookie, plot.id);
+    expect(shown.css).toContain(`url(/api/plots/${plot.id}/assets/nanum)`);
+    expect(shown.backgroundHtml).toBe(`<img src="/api/plots/${plot.id}/assets/bg">`);
+
+    // Taking the module out takes what it fetched.
+    const removed = await request(cookie, `/api/plots/${plot.id}/modules/${owner.modules[0].id}`, 'DELETE', undefined, target);
+    expect(removed.status).toBe(200);
+    expect(await readJson(await request(cookie, `/api/plots/${plot.id}/assets`, 'GET', undefined, target))).toEqual([]);
   });
 });

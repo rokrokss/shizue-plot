@@ -1,5 +1,5 @@
 import { CCardLib, type CharacterCardV3 } from '@risuai/ccardlib';
-import { DEFAULT_LORE_SETTINGS, type CardSpec, type LoreSettings, type NormalizedCard } from '../types.js';
+import { DEFAULT_LORE_SETTINGS, type CardSpec, type LoreEntry, type LoreSettings, type NormalizedCard } from '../types.js';
 import { loreEntryFromBook } from './bookEntry.js';
 import { componentCapabilitiesFromExtensions, componentCodeFromExtensions } from './componentCode.js';
 import { introFromExtensions } from './intro.js';
@@ -124,8 +124,12 @@ function loreSettingsOf(book: Book, cardExtensions: Json): LoreSettings {
 /**
  * Detects the card spec and normalizes it. V1/V2 are lifted to V3 by ccardlib
  * first, so there is a single mapping path.
+ *
+ * `lorebook`, given, stands in for the entries of the card's `character_book` —
+ * a charx's embedded module's, which RisuAI's import takes over the card's
+ * (`overrideLorebook`). The book's settings are still the card's.
  */
-export function normalizeCard(raw: unknown): NormalizedCard {
+export function normalizeCard(raw: unknown, options: { lorebook?: LoreEntry[] } = {}): NormalizedCard {
   if (raw === null || typeof raw !== 'object') {
     throw new CardParseError('Card must be a JSON object');
   }
@@ -142,7 +146,7 @@ export function normalizeCard(raw: unknown): NormalizedCard {
       : CCardLib.character.convert(source as never, { to: 'v3' });
   const data = v3.data;
   const book = data.character_book;
-  const ownLore = (book?.entries ?? []).map((entry) => loreEntryFromBook(entry));
+  const ownLore = options.lorebook ?? (book?.entries ?? []).map((entry) => loreEntryFromBook(entry));
   // SillyTavern's character's note becomes a lore entry, and leaves the
   // extensions so an export (which writes the entry back) cannot double it.
   const note = depthPromptEntry(data.extensions ?? {}, ownLore);

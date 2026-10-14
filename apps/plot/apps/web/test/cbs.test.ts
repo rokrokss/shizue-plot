@@ -635,6 +635,15 @@ describe('what the browser tells RisuAI’s functions', () => {
     expect(marked('{{getglobalvar::met}}', globals)).toBe('#1#');
   });
 
+  it("answers {{moduleenabled}} and {{moduleassetlist}} from the work's modules", () => {
+    const modules = { modules: [{ namespace: 'weather', assets: ['rain'] }] };
+    expect(render('{{moduleenabled::weather}}{{moduleenabled::none}} {{moduleassetlist::weather}}|{{moduleassetlist::none}}|', modules)).toBe(
+      '10 [&quot;rain&quot;]||',
+    );
+    expect(render('{{moduleenabled::weather}}', { modules: [] })).toBe('0');
+    expect(render('{{moduleenabled::weather}}')).toBe('{{moduleenabled::weather}}');
+  });
+
   it('lists the open images, and answers for the screen, the clock and the language', () => {
     expect(render('{{assetlist}} {{emotionlist}}', { assetNames: ['face.png', 'smile'] })).toBe(
       '[&quot;face.png&quot;,&quot;smile&quot;] [&quot;face.png&quot;,&quot;smile&quot;]',

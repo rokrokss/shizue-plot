@@ -355,6 +355,13 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
           if (brought.length > 0) setScripts((current) => [...current, ...brought]);
           const sheet = lifted.memberCss?.[created.id];
           if (sheet) setMemberCss((current) => ({ ...current, [created.id]: sheet }));
+          // The web fonts its templates imported, which the import brought into the
+          // work's stylesheet — at the end of it, so a sheet that only grew is taken
+          // up; one being edited here keeps the edit.
+          setCss((current) => {
+            const grown = lifted.css ?? '';
+            return grown.length > current.length && grown.startsWith(current) ? grown : current;
+          });
           setVariables((current) => {
             const next = Object.assign(Object.create(null) as Record<string, string>, current);
             for (const [key, value] of Object.entries(lifted.defaultVariables ?? {})) {
@@ -638,9 +645,17 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
             <ModuleManager
               plotId={id}
               modules={plot.modules ?? []}
+              published={plot.visibility === 'public'}
               disabled={locked}
               onChange={(detail) => {
-                setPlot((current) => current && { ...current, modules: detail.modules });
+                setPlot(
+                  (current) =>
+                    current && {
+                      ...current,
+                      modules: detail.modules,
+                      ...(detail.rightsConfirmedAt ? { rightsConfirmedAt: detail.rightsConfirmedAt } : {}),
+                    },
+                );
                 setAssetRevision((current) => current + 1);
               }}
             />

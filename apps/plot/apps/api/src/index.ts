@@ -9,6 +9,7 @@ import { createHostedAuth, createSessionStore } from './hostedAuth.js';
 import { loadRootEnv, readConfig } from './env.js';
 import { startJobWorker } from './jobs.js';
 import { createJobHandlers } from './notifications.js';
+import { createRemoteFetch } from './localizeAssets.js';
 import { probeRequestLua } from './requestLua.js';
 import { createScriptFetch } from './scriptFetch.js';
 import { createStorage } from './storage.js';
@@ -42,6 +43,8 @@ const deps: AppDeps = {
   storage: createStorage(config.storage),
   // One for the process: card scripts' requests and the per-reader rate limit they share.
   scriptFetch: createScriptFetch({ ownOrigins: [config.authUrl, ...(config.apiOrigin ? [config.apiOrigin] : [])] }),
+  // What an import fetches of a card's pictures and fonts on other hosts, never this app's own.
+  remoteFetch: createRemoteFetch({ ownOrigins: [config.authUrl, ...(config.apiOrigin ? [config.apiOrigin] : [])] }),
   env: config.env,
   generating: new Set<string>(),
   generationClaims: new Map(),

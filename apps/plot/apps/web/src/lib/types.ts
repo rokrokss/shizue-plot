@@ -157,7 +157,7 @@ export const MAX_INTROS_PER_PLOT = 10;
 /** One opening's length, and the reader-facing intro's; mirrors the API. */
 export const MAX_INTRO_TEXT_LENGTH = 400_000;
 export const MAX_INTRO_LENGTH = 4000;
-/** The longest stylesheet and background a plot carries; mirrors `MAX_CREATOR_CSS_LENGTH` and `MAX_BACKGROUND_HTML_LENGTH` in @shizue/core. */
+/** The longest background a plot carries; mirrors `MAX_BACKGROUND_HTML_LENGTH` in @shizue/core. */
 export const MAX_BACKGROUND_HTML_LENGTH = 400_000;
 /**
  * What drawing the background may spend: the source and what its CBS makes of
@@ -388,6 +388,12 @@ export interface PublicPlotDetail extends PublicPlot {
   groupSettings?: GroupSettings;
   /** What its components may ask the chat for; empty grants nothing. */
   componentCapabilities: ComponentCapability[];
+  /**
+   * The work's RisuAI modules that have a namespace, each with the names its
+   * pictures go by, for `{{moduleenabled}}` and `{{moduleassetlist}}`. Optional
+   * for a detail built by hand.
+   */
+  modules?: { namespace: string; assets: string[] }[];
 }
 
 /** Characters one comment may hold; mirrors MAX_COMMENT_LENGTH in the API. */

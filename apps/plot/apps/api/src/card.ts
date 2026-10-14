@@ -108,6 +108,9 @@ function coerceLoreEntry(value: unknown): LoreEntry {
         }
       : {}),
     ...coerceLoreActivation(raw),
+    // Where the entry came from decides whether its scan reads the greeting
+    // (`LoreEntry.sillyTavern`), so a save keeps it.
+    ...(raw['sillyTavern'] === true ? { sillyTavern: true as const } : {}),
   };
 }
 

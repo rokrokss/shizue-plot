@@ -32,6 +32,7 @@ import {
   type StWorldInfoSettings,
 } from '@shizue/core/sillytavern';
 import { ApiError, toApiError } from '../api';
+import { readImportWarnings, type ImportWarning } from '../importWarnings';
 import {
   MAX_CARD_IMPORT_BYTES,
   MAX_CHARACTERS_PER_PLOT,
@@ -565,6 +566,11 @@ export interface StepResult {
   dropped?: StConvertedChat['skipped'] & { swipes: number; swipesOverRows: number };
   warnings?: StepWarning[];
   notices?: StepNotice[];
+  /**
+   * What the card imports left behind or cut (`importWarnings` on the import
+   * routes' answers), one count per reason over every card the step uploaded.
+   */
+  importWarnings?: ImportWarning[];
 }
 
 export type Results = Record<string, StepResult>;
@@ -681,13 +687,14 @@ async function cardForm(
  * Uploads a card to one of the two import routes. A linked World Info file that
  * cannot be read here, or that the API cannot read (`invalid_lorebook`), does not
  * cost the character: the card goes on its own, with its embedded lorebook, and
- * the step says so.
+ * the step says so. What the import left behind or cut goes into `cut`.
  */
 async function uploadCard<T>(
   ctx: RunContext,
   path: string,
   character: StCharacter,
   warnings: StepWarning[],
+  cut: ImportWarning[],
 ): Promise<T> {
   const unreadable = (): void => {
     warnings.push({ code: 'world_unreadable', ...(character.worldName ? { name: character.worldName } : {}) });
@@ -702,12 +709,24 @@ async function uploadCard<T>(
       unreadable();
     }
   }
+  let answer: T;
   try {
-    return await request<T>(ctx, 'POST', path, await cardForm(character, world));
+    answer = await request<T>(ctx, 'POST', path, await cardForm(character, world));
   } catch (caught) {
     if (!world || !(caught instanceof ApiError && caught.code === 'invalid_lorebook')) throw caught;
     unreadable();
-    return request<T>(ctx, 'POST', path, await cardForm(character, null));
+    answer = await request<T>(ctx, 'POST', path, await cardForm(character, null));
+  }
+  addImportWarnings(cut, (answer as { importWarnings?: unknown }).importWarnings);
+  return answer;
+}
+
+/** Adds an import's answer to a step's warnings, one count per reason, without touching the ones it had. */
+function addImportWarnings(into: ImportWarning[], value: unknown): void {
+  for (const warning of readImportWarnings(value)) {
+    const index = into.findIndex((one) => one.code === warning.code);
+    if (index < 0) into.push({ code: warning.code, count: warning.count });
+    else into[index] = { code: warning.code, count: into[index]!.count + warning.count };
   }
 }
 
@@ -983,9 +1002,11 @@ async function runCharacter(
     return;
   }
   const warnings: StepWarning[] = [];
-  const plot = await uploadCard<PlotDetail>(ctx, '/api/plots/import', item.character, warnings);
+  const cut: ImportWarning[] = [];
+  const plot = await uploadCard<PlotDetail>(ctx, '/api/plots/import', item.character, warnings, cut);
   result.plotId = plot.id;
   result.cast = soloCast(plot, item);
+  if (cut.length > 0) result.importWarnings = cut;
   warnings.push(...(await applyExtras(ctx, plot, [item.character])));
   if (warnings.length > 0) result.warnings = warnings;
   result.status = 'done';
@@ -1010,11 +1031,12 @@ async function runGroup(ctx: RunContext, item: GroupItem, result: StepResult): P
   const existing = ours ?? groupPlotOf(shas, ctx.index);
 
   const warnings = [...(result.warnings ?? [])];
+  const cut = [...(result.importWarnings ?? [])];
   let plot: PlotDetail;
   if (existing) {
     plot = await request<PlotDetail>(ctx, 'GET', `/api/plots/${existing}`);
   } else {
-    plot = await uploadCard<PlotDetail>(ctx, '/api/plots/import', first.character, warnings);
+    plot = await uploadCard<PlotDetail>(ctx, '/api/plots/import', first.character, warnings, cut);
     result.plotId = plot.id;
     warnings.push(
       ...(await applyExtras(
@@ -1045,6 +1067,7 @@ async function runGroup(ctx: RunContext, item: GroupItem, result: StepResult): P
         `/api/plots/${plot.id}/characters/import`,
         member.character,
         warnings,
+        cut,
       );
       members.push(joined);
       present.add(member.sha256);
@@ -1057,6 +1080,7 @@ async function runGroup(ctx: RunContext, item: GroupItem, result: StepResult): P
   }
   result.cast = castOf(members, item.members);
   if (warnings.length > 0) result.warnings = warnings;
+  if (cut.length > 0) result.importWarnings = cut;
   if (failed) throw failed;
   if (existing && !ours && added === 0) {
     result.status = 'skipped';

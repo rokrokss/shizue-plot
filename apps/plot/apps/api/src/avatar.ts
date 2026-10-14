@@ -1,4 +1,4 @@
-import { isPng, stripPngTextChunks } from '@shizue/core';
+import { isPng, sniffMedia, stripPngTextChunks } from '@shizue/core';
 import { avatarKey, readAll, type ObjectStorage } from './storage.js';
 
 /**
@@ -16,7 +16,11 @@ interface ImageType {
 const startsWith = (bytes: Uint8Array, signature: number[], offset = 0): boolean =>
   signature.every((byte, i) => bytes[offset + i] === byte);
 
-/** Sniffs the image type from magic bytes; unknown formats are rejected. */
+/**
+ * Sniffs the image type from magic bytes; unknown formats are rejected. The four
+ * a chat attachment may be — what the model providers it is sent on to take;
+ * a picture this app serves itself may also be AVIF (`pictureType`).
+ */
 export function detectImageType(bytes: Uint8Array): ImageType | null {
   if (startsWith(bytes, [0x89, 0x50, 0x4e, 0x47])) return { ext: 'png', mime: 'image/png' };
   if (startsWith(bytes, [0xff, 0xd8, 0xff])) return { ext: 'jpg', mime: 'image/jpeg' };
@@ -27,11 +31,22 @@ export function detectImageType(bytes: Uint8Array): ImageType | null {
   return null;
 }
 
+/**
+ * A picture this app stores and serves itself — an avatar, a cover, a persona's
+ * — by its bytes, as a plot asset is (`sniffMedia`): the attachment four and
+ * AVIF, which RisuAI cards carry (Jurassic girl Park's pictures are all AVIF).
+ */
+export function pictureType(bytes: Uint8Array): ImageType | null {
+  const type = sniffMedia(bytes);
+  return type?.kind === 'image' ? { ext: type.ext, mime: type.mime } : null;
+}
+
 export function mimeForPath(path: string): string {
   const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase();
   if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
   if (ext === 'gif') return 'image/gif';
   if (ext === 'webp') return 'image/webp';
+  if (ext === 'avif') return 'image/avif';
   return 'image/png';
 }
 
@@ -56,7 +71,7 @@ export interface StorableImage extends ImageType {
  * unstripped.
  */
 export function storableImage(bytes: Uint8Array): StorableImage | null {
-  const type = detectImageType(bytes);
+  const type = pictureType(bytes);
   if (!type) return null;
   const stored = type.ext === 'png' ? stripPngTextChunks(bytes) : bytes;
   if (!stored) return null;

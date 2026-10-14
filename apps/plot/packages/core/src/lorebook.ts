@@ -154,6 +154,20 @@ export interface LoreTimedState {
 export interface ActivateLoreInput {
   /** Branch message texts, newest last. */
   history: string[];
+  /**
+   * Which of `history` is the branch's greeting, when it holds it. RisuAI scans
+   * only the messages after the greeting (`loadLoreBookV3Prompt` reads
+   * `chat.message`, which never holds it), so an entry that does not scan it
+   * (`scansGreeting`) has it taken out before its depth counts. Absent: every
+   * message is scanned.
+   */
+  greeting?: number;
+  /**
+   * Whether an entry's keys look at the greeting too, as SillyTavern's do — its
+   * depth then counts the greeting like any other message. Absent:
+   * `LoreEntry.sillyTavern`.
+   */
+  scansGreeting?: (entry: LoreEntry) => boolean;
   /** The book's scan depth: how many of the newest messages are scanned. */
   scanDepth: number;
   budgetTokens: number;
@@ -201,7 +215,8 @@ export type LoreActivationVia = 'constant' | 'keyword' | 'sticky' | 'recursion';
  * Selects lore entries triggered by the newest history, keeps what fits in
  * budgetTokens, and returns them ordered by insertionOrder.
  *
- * Each entry scans the newest `scanDepth` messages — or its own `scanDepth`. With
+ * Each entry scans the newest `scanDepth` messages — or its own `scanDepth` —
+ * the greeting left out of them unless the entry scans it (`scansGreeting`). With
  * recursiveScanning, the content activated by a pass is appended to every
  * entry's scan text and the remaining entries are scanned again, until a pass
  * activates nothing new (or MAX_RECURSION_PASSES extra passes have run, or the
@@ -262,27 +277,36 @@ export function activateLore(entries: LoreEntry[], input: ActivateLoreInput): Lo
     pending.push(entry);
   }
 
+  // The messages an entry that leaves the greeting out scans, its depth counted
+  // in them.
+  const { greeting, scansGreeting = (entry: LoreEntry) => entry.sillyTavern === true } = input;
+  const afterGreeting = greeting === undefined ? history : history.filter((_, at) => at !== greeting);
+  const withGreeting = (entry: LoreEntry): boolean => greeting !== undefined && scansGreeting(entry);
   // `slice(-0)` would be the whole history, so depth 0 is spelled out: an entry
-  // that scans nothing but what recursion adds.
-  const scans = new Map<number, string>();
-  const historyScan = (depth: number): string => {
-    let scan = scans.get(depth);
+  // that scans nothing but what recursion adds. Keyed by depth and by whether
+  // the greeting is among the messages.
+  const scans = new Map<string, string>();
+  const historyScan = (depth: number, greeted: boolean): string => {
+    const key = `${depth}:${greeted}`;
+    let scan = scans.get(key);
     if (scan === undefined) {
-      scan = depth > 0 ? history.slice(-depth).join('\n') : '';
-      scans.set(depth, scan);
+      scan = depth > 0 ? (greeted ? history : afterGreeting).slice(-depth).join('\n') : '';
+      scans.set(key, scan);
     }
     return scan;
   };
   let recursion: string[] = [];
   // The recursion text stands still within a pass, so each depth's scan text is
   // built once per pass rather than once per entry.
-  let passScans = new Map<number, ScanText>();
+  let passScans = new Map<string, ScanText>();
   const scanFor = (entry: LoreEntry): ScanText => {
     const depth = entry.scanDepth ?? input.scanDepth;
-    let scan = passScans.get(depth);
+    const greeted = withGreeting(entry);
+    const key = `${depth}:${greeted}`;
+    let scan = passScans.get(key);
     if (scan === undefined) {
-      scan = { raw: [historyScan(depth), ...recursion].filter((text) => text).join('\n') };
-      passScans.set(depth, scan);
+      scan = { raw: [historyScan(depth, greeted), ...recursion].filter((text) => text).join('\n') };
+      passScans.set(key, scan);
     }
     return scan;
   };

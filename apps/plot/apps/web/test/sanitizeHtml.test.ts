@@ -217,7 +217,6 @@ describe('css', () => {
   it('drops a stylesheet it cannot parse rather than passing it through', () => {
     expect(sanitizeCustomHtml('<style>.a { color: red</style>')).not.toContain('color');
   });
-
   it("keeps a RisuAI card's plot-wide sheet, losing only what it cannot scope", () => {
     // The shapes a real backgroundHTML is made of: a reset, a universal child
     // selector, pseudo-elements, a keyframe animation and a phone breakpoint.
@@ -292,9 +291,18 @@ describe('css property and function allowlists', () => {
     }
   });
 
-  it('rejects a custom property, so var() has nothing foreign to expand to', () => {
+  it('holds a custom property to what any declaration carries, so var() has nothing foreign to expand to', () => {
     expectClean('<style>.a{--leak:url(https://evil.test/x);background:var(--leak)}</style>', 'evil.test');
+    expectClean('<div style="--leak:image-set(&quot;https://evil.test/x&quot; 1x)">x</div>', 'evil.test', '--leak');
     expectClean('<style>.a{background:var(--x, url(https://evil.test/y))}</style>', 'evil.test');
+    // What the value of one may not hold, no property reading it gets: `position` still takes no `fixed`.
+    expectClean('<style>.a{--p:fixed;position:var(--p)}</style>', 'position');
+    // Ivy, The Vampire Maid's portrait: layers of our own assets set on one, drawn by its sheet.
+    const kept = sanitizeCustomHtml(
+      `<style>.card{background:var(--asset-bg)}</style><div class="card" style="--asset-bg: url('/api/plots/x/assets/by-name/cdn.test/a.png') 20% / cover no-repeat, url('/api/plots/x/assets/b') 20% / cover no-repeat">x</div>`,
+    );
+    expect(kept).toContain('background:var(--asset-bg)'.replace(':', ': '));
+    expect(kept).toContain("--asset-bg: url('/api/plots/x/assets/by-name/cdn.test/a.png') 20% / cover no-repeat");
   });
 
   it('allows only the positions that stay inside the message', () => {

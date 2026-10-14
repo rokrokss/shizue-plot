@@ -254,6 +254,7 @@
     "loreOutletNameHint": "설명·로어처럼 프롬프트에 들어가는 글에 '{{outlet::이름}}'을 쓴 자리에만 들어갑니다. 아무 데도 쓰지 않으면 보내지 않습니다.",
     "assets": "이미지 에셋",
     "assetsHint": "도입부나 메시지에 '{{img::슬러그}}'를 쓰면 이미지가 표시됩니다.",
+    "assetFonts": "카드가 쓰던 웹 글꼴 파일 {count}개를 가져올 때 함께 받아 두었습니다. 스타일시트가 가리킵니다.",
     "assetCount": "{count}/{max}개",
     "assetsEmpty": "아직 에셋이 없습니다.",
     "assetPick": "이미지 선택",
@@ -416,8 +417,10 @@
       "assets_over_limit": "작품의 에셋 한도(1,000개)를 넘은 파일 {count}개",
       "greetings_over_limit": "도입부 한도(10개)를 넘은 첫 메시지 {count}개",
       "greetings_cut": "400,000자에서 잘린 첫 메시지 {count}개",
-      "stylesheet_over_limit": "400,000자를 넘는 스타일시트",
-      "background_over_limit": "400,000자를 넘는 배경"
+      "stylesheet_over_limit": "1,500,000자를 넘는 스타일시트",
+      "background_over_limit": "400,000자를 넘는 배경",
+      "external_failed": "다른 사이트에서 가져오지 못한 그림·글꼴·스타일시트 {count}개 (채팅에 표시되지 않아요)",
+      "external_over_limit": "가져오기 한도를 넘어 다른 사이트에서 가져오지 않은 그림·글꼴·스타일시트 {count}개"
     }
   },
   "stImport": {
@@ -583,6 +586,8 @@
     "importPublicNotice": "공개 중인 플롯이라 카드로 추가한 등장인물은 바로 독자에게 보입니다. shizue는 카드의 원작자를 확인할 수 없습니다.",
     "confirmPublish": "가져온 등장인물을 직접 만들었거나, 원작자에게 공개해도 좋다는 허락을 받았습니다.",
     "confirmImport": "추가할 등장인물을 직접 만들었거나, 원작자에게 공개해도 좋다는 허락을 받았습니다.",
+    "moduleImportPublicNotice": "공개 중인 플롯이라 가져온 모듈은 바로 독자에게 보입니다. shizue는 모듈의 원작자를 확인할 수 없습니다.",
+    "confirmModuleImport": "가져올 모듈을 직접 만들었거나, 원작자에게 공개해도 좋다는 허락을 받았습니다.",
     "confirmedAt": "권리 확인 {date}"
   },
   "style": {
@@ -993,6 +998,8 @@
     "scriptCommandFailed": "슬래시 명령이 오류로 멈췄습니다. 쓴 글은 입력창으로 돌아갔습니다.",
     "scriptCommandHelp": "슬래시 명령 (RisuAI). 명령은 |로 잇습니다. 앞 명령의 결과는 다음 명령에 '{{pipe}}'로 들어가고, 글 없이 쓴 명령은 앞 결과를 그대로 씁니다.\n/input [글] — 한 줄을 묻고, 그 답이 결과가 됩니다\n/echo [글], /popup [글] — 글을 보여 줍니다. 결과는 그대로입니다\n/pass [글] — 글이 결과가 됩니다\n/buttons labels=[\"가\",\"나\"] — 라벨 중 하나를 고르게 하고, 고른 것의 번호(0부터)가 결과가 됩니다\n/send [글] — 내 메시지로 챗에 붙입니다\n/sendas [글] — 캐릭터의 메시지로 챗에 붙입니다\n/comment [글] — 마지막 메시지에 주석을 붙입니다\n/cut [시작-끝] — 그 범위의 메시지만 남깁니다. /cut [n]은 n번 메시지만 남깁니다\n/del [n] — 마지막 n개 메시지만 남깁니다\n/len [JSON 목록] — 항목 수가 결과가 됩니다\n/setvar key=[이름] [값], /addvar key=[이름] [수], /getvar key=[이름] — 챗 변수\n/test_lorebook — 지금 켜지는 로어를 보여 줍니다\n/trigger [이름] — 그 이름의 작품 버튼 트리거를 실행합니다\n/speak — 여기서는 아무것도 하지 않습니다\n/? — 이 목록\n메시지 번호는 인사 다음부터 0입니다. 목록에 없는 명령이 든 글은 보통 메시지로 보냅니다.",
     "jumpToLatest": "맨 아래로",
+    "bgmMute": "음악 음소거",
+    "bgmUnmute": "음악 음소거 해제",
     "copyCode": "코드 복사",
     "copied": "복사됨",
     "streamError": "응답이 중간에 끊겼습니다. 이어서 다시 생성할 수 있습니다.",

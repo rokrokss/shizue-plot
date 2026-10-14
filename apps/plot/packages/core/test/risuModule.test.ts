@@ -123,6 +123,8 @@ describe('parseRisuModule', () => {
       { name: '검', keys: ['검'], content: '검은 녹슬었다.', insertionOrder: 5, depth: 2, constant: false },
       { name: '배경', content: '왕국은 망했다.', constant: true, position: 'before_char' },
     ]);
+    // A module's lore is scanned as RisuAI's, the greeting left out, though the file was SillyTavern's.
+    expect(parsed.lorebook.some((entry) => 'sillyTavern' in entry)).toBe(false);
     // A character_book's array of entries is an external lorebook too.
     expect(parseRisuModule(json({ name: '책', entries: [{ keys: ['문'], content: '열렸다.' }] })).lorebook[0]).toMatchObject({
       keys: ['문'],

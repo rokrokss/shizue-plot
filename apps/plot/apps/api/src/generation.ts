@@ -685,6 +685,7 @@ export function requestLuaInput(
         seed: { key: plan.seed, length: plan.wholeBranch.length - (plan.branch.greeting ? 1 : 0) },
         meta: { language: plan.clock.locale },
         assets: { names: plan.assetNames, display: plan.assetNames },
+        ...(plan.plot.cbsModules ? { modules: plan.plot.cbsModules } : {}),
         character: {
           personality: member.card.personality,
           scenario: member.card.scenario,
@@ -761,6 +762,7 @@ export function requestTriggerInput(
       seed: { key: plan.seed, length: messages.length },
       meta: { language: plan.clock.locale },
       assets: { names: plan.assetNames, display: plan.assetNames },
+      ...(plan.plot.cbsModules ? { modules: plan.plot.cbsModules } : {}),
     },
   };
 }

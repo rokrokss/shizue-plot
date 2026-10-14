@@ -142,8 +142,20 @@ export interface Illustration {
   locked: boolean;
 }
 
-/** Whether an asset is a picture — the rest is a card's music, which no gallery draws. */
+/** Whether an asset is a picture — the rest is a card's music or a web font, which no gallery draws. */
 export const isImageAsset = (asset: Pick<PlotAsset, 'mime'>): boolean => asset.mime.startsWith('image/');
+
+/** Whether an asset is a web font the import brought in for a card's stylesheet (`@font-face`). */
+export const isFontAsset = (asset: Pick<PlotAsset, 'mime'>): boolean => asset.mime.startsWith('font/');
+
+/**
+ * Whether an asset is one the import fetched from another host for the card's
+ * markup (named by its address, `https://…`). The markup points at it; it is
+ * not one of the card's own pictures, so neither the gallery nor
+ * `{{assetlist}}` names it — as RisuAI, which loads it from there, does not.
+ */
+export const isLocalizedAsset = (asset: Pick<PlotAsset, 'name'>): boolean =>
+  typeof asset.name === 'string' && asset.name.startsWith('https://');
 
 /**
  * The plot's images as one conversation sees them: open ones with their bytes,
@@ -157,7 +169,7 @@ export function illustrations(
   locks: readonly AssetLock[],
 ): Illustration[] {
   const bySlug = new Map(locks.map((lock) => [lock.slug, lock]));
-  return assets.filter(isImageAsset).map((asset) => {
+  return assets.filter((asset) => isImageAsset(asset) && !isLocalizedAsset(asset)).map((asset) => {
     const lock = bySlug.get(asset.slug);
     const locked = lock?.locked ?? false;
     return {

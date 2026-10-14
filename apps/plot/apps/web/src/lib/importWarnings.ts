@@ -16,6 +16,8 @@ export const IMPORT_WARNING_CODES = [
   'greetings_cut',
   'stylesheet_over_limit',
   'background_over_limit',
+  'external_failed',
+  'external_over_limit',
 ] as const;
 
 export type ImportWarningCode = (typeof IMPORT_WARNING_CODES)[number];

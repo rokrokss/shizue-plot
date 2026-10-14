@@ -12,6 +12,7 @@
     "test": "vitest run",
     "fix:display-order": "tsx src/maintenance/fixDisplayOrder.ts",
     "fix:member-scripts": "tsx src/maintenance/fixMemberScripts.ts",
+    "fix:localize-assets": "tsx src/maintenance/fixLocalizeAssets.ts",
     "embedder:fetch": "tsx src/maintenance/fetchEmbedder.ts",
     "embedder:publish": "tsx src/maintenance/publishEmbedder.ts"
   },

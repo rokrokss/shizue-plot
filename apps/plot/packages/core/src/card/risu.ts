@@ -135,15 +135,19 @@ export function displayScriptsFromExtensions(
  * Longest stylesheet a plot may carry. Most RisuAI cards' run to a few tens of
  * kilobytes; RisuRealm's largest run to about 260,000 characters (당나라 무협,
  * 도시 연대기 at 180,000), and a card's stylesheet is dropped whole when it is
- * over, so the cap leaves them half as much again.
+ * over. The web fonts an import localizes land here too (`localizeAssets.ts`):
+ * a Korean family is hundreds of `@font-face` slices — 당나라 무협's Noto Serif
+ * KR and SC at three weights are a 626,000-character sheet on top of its own.
+ * So the cap leaves room for both and then some; the sheet is sanitized once per
+ * chat page, not per message.
  */
-export const MAX_CREATOR_CSS_LENGTH = 400_000;
+export const MAX_CREATOR_CSS_LENGTH = 1_500_000;
 
 /**
  * Longest background a plot may draw behind its chats, past its `<style>`
- * elements (which are the stylesheet's, `MAX_CREATOR_CSS_LENGTH`). The same
- * number as the stylesheet: RisuAI holds `backgroundHTML` to nothing, and a
- * card's background over the cap is dropped whole.
+ * elements (which are the stylesheet's, `MAX_CREATOR_CSS_LENGTH`). RisuAI holds
+ * `backgroundHTML` to nothing, and a card's background over the cap is dropped
+ * whole; the largest Realm's run to about 260,000 characters.
  */
 export const MAX_BACKGROUND_HTML_LENGTH = 400_000;
 

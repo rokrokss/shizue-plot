@@ -14,6 +14,7 @@ import { MEDIA_SNIFF_BYTES, sniffMedia } from './media.js';
 import { CardParseError, normalizeCard } from './normalize.js';
 import { isPng, readPngTextChunkBytes } from './png.js';
 import { cardWithRisuModule } from './risum.js';
+import { risuLoreBookEntry } from './risuModule.js';
 
 export interface ParsedCard {
   card: NormalizedCard;
@@ -177,11 +178,16 @@ function parsePngCard(bytes: Uint8Array): ParsedCard {
 /**
  * A charx archive. The scripts RisuAI's export moves into `module.risum` are put
  * back on a copy of `card.json` before normalizing, so that copy becomes `raw`:
- * it is the card the archive carried, split over two entries.
+ * it is the card the archive carried, split over two entries. A module that
+ * carries a `lorebook` — even an empty one — gives the card its entries in
+ * place of `character_book`'s, read as a module import reads them
+ * (`risuLoreBookEntry`), as RisuAI's charx import takes the module's book over
+ * the card's (`overrideLorebook`); the book's settings stay the card's.
  */
 function parseCharx(bytes: Uint8Array): ParsedCard {
   const { raw, module, iconBuffer, assets, skipped } = readCharx(bytes);
-  const card = normalizeCard(module ? cardWithRisuModule(raw, module) : raw);
+  const lorebook = module?.lorebook?.map(risuLoreBookEntry);
+  const card = normalizeCard(module ? cardWithRisuModule(raw, module) : raw, lorebook ? { lorebook } : {});
   return { card, ...(iconBuffer ? { iconBuffer } : {}), assets, ...(anySkipped(skipped) ? { skipped } : {}) };
 }
 

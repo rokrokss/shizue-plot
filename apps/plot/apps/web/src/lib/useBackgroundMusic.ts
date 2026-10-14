@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect } from 'react';
+import { setBgmTrack } from './bgmMute';
 
 /** RisuAI's volume for `{{bgm::…}}` (`bgm___auto___`, its observer's `auto`). */
 const BGM_VOLUME = 0.5;
@@ -12,7 +13,8 @@ const MARKER = '[data-shizue-bgm]';
  * (`observer.svelte.ts`): one track at a time, at half volume, not looped. While
  * a track plays no other starts; once it ends, the first marker on the page
  * starts the next — the same one again, as long as it is still drawn. Nothing
- * about it is shown: `{{bgm::…}}` has no player, in RisuAI or here.
+ * about it is shown: `{{bgm::…}}` has no player, in RisuAI or here. The one
+ * control is the header's mute (`bgmMute`), which the track is handed to.
  *
  * The browser's autoplay rule stands: a start it refuses (no gesture on the page
  * yet) is not forced, and is tried once more on the reader's next press or key.
@@ -35,14 +37,17 @@ export function useBackgroundMusic(): void {
       const audio = new Audio(src);
       audio.volume = BGM_VOLUME;
       current = audio;
+      setBgmTrack(audio);
       audio.addEventListener('ended', () => {
         if (current !== audio) return;
         current = null;
+        setBgmTrack(null);
         scan();
       });
       audio.play().catch(() => {
         if (disposed || current !== audio) return;
         current = null;
+        setBgmTrack(null);
         waiting = true;
         window.addEventListener('pointerdown', resume);
         window.addEventListener('keydown', resume);
@@ -65,6 +70,7 @@ export function useBackgroundMusic(): void {
       window.removeEventListener('keydown', resume);
       current?.pause();
       current = null;
+      setBgmTrack(null);
     };
   }, []);
 }

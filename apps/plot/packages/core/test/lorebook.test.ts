@@ -326,6 +326,29 @@ describe('activateLore - scan depth', () => {
   });
 });
 
+describe('activateLore - the greeting', () => {
+  // The greeting first, as a branch opens on it; only it names the inn.
+  const history = ['여관에 온 걸 환영해', '중간', '최근'];
+  const inn = entry({ content: 'inn', keys: ['여관'] });
+
+  it("leaves the greeting out of an entry's scan, as RisuAI's does", () => {
+    expect(contents(run([inn], { history, greeting: 0, scanDepth: 10 }))).toEqual([]);
+    // No greeting named: every message is scanned.
+    expect(contents(run([inn], { history, scanDepth: 3 }))).toEqual(['inn']);
+  });
+
+  it("scans it for SillyTavern's entries, the greeting counted in their depth", () => {
+    const tavern = { ...inn, sillyTavern: true as const };
+    expect(contents(run([tavern], { history, greeting: 0, scanDepth: 3 }))).toEqual(['inn']);
+    expect(contents(run([tavern], { history, greeting: 0, scanDepth: 2 }))).toEqual([]);
+    // The two kinds side by side, each on its own messages.
+    expect(run([inn, tavern], { history, greeting: 0, scanDepth: 3 }).entries).toEqual([tavern]);
+    // Or whatever the caller says scans it: a member card SillyTavern wrote.
+    expect(contents(run([inn], { history, greeting: 0, scanDepth: 3, scansGreeting: () => true }))).toEqual(['inn']);
+    expect(contents(run([tavern], { history, greeting: 0, scanDepth: 3, scansGreeting: () => false }))).toEqual([]);
+  });
+});
+
 describe('activateLore - timed effects', () => {
   const dragon = entry({ content: 'dragon', keys: ['용'] });
   const key = loreEntryKey(dragon);

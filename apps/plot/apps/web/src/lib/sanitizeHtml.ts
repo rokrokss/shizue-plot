@@ -295,8 +295,22 @@ function normalizeCss(text: string): string {
   });
 }
 
+/**
+ * A custom property (`--asset-bg`): a value a rule then reads with `var()`. Ivy,
+ * The Vampire Maid sets its portrait's layered `url()`s on one in a `style`
+ * attribute and draws it from its sheet. Its value passes the same function
+ * and same-origin `url()` checks as any declaration's, and whatever reads it is
+ * itself a declaration held to this list — `position: var(--x)` is still not
+ * one of the allowed positions — so it carries nothing the template could not
+ * write out directly. Scoped like everything else: it reaches only the markup
+ * under the message it is set in.
+ */
+const CUSTOM_PROPERTY = /^--[A-Za-z0-9_-]+$/;
+
 const isAllowedProperty = (name: string): boolean =>
-  ALLOWED_PROPERTIES.has(name) || ALLOWED_PROPERTY_PREFIXES.some((prefix) => name.startsWith(prefix));
+  ALLOWED_PROPERTIES.has(name) ||
+  ALLOWED_PROPERTY_PREFIXES.some((prefix) => name.startsWith(prefix)) ||
+  CUSTOM_PROPERTY.test(name);
 
 const foldClass = (name: string): string => `${CLASS_PREFIX}${name.replace(/[^A-Za-z0-9_-]/g, '')}`;
 

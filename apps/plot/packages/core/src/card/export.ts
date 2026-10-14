@@ -191,6 +191,41 @@ export interface CharxExportAsset extends CharxExportImage {
 const EMBEDDED_PREFIX = 'embeded://'; // sic — the CCv3 spec spells it this way.
 
 /**
+ * The folder under `assets/<type>/` RisuAI's charx export files an asset in, by
+ * its extension (`exportCharacterCard`): pictures, audio, video and fonts each
+ * their own, anything else `other`.
+ */
+function charxAssetKind(ext: string): string {
+  switch (ext.toLowerCase()) {
+    case 'png':
+    case 'jpg':
+    case 'jpeg':
+    case 'gif':
+    case 'webp':
+    case 'avif':
+      return 'image';
+    case 'mp3':
+    case 'wav':
+    case 'ogg':
+    case 'flac':
+      return 'audio';
+    case 'mp4':
+    case 'webm':
+    case 'mov':
+    case 'avi':
+    case 'mkv':
+      return 'video';
+    case 'otf':
+    case 'ttf':
+    case 'woff':
+    case 'woff2':
+      return 'fonts';
+    default:
+      return 'other';
+  }
+}
+
+/**
  * The card as a .charx archive with its images in it — the one export that
  * carries a plot's assets, so the `{{img::…}}` references in it still resolve
  * once the card is somewhere else.
@@ -199,9 +234,10 @@ const EMBEDDED_PREFIX = 'embeded://'; // sic — the CCv3 spec spells it this wa
  * `exportCharacterCard` and `createBaseV3`), since RisuAI is the reader that
  * matters: the main icon as `{type: 'icon', name: 'main'}` under
  * `assets/icon/image/`, and every asset as `x-risu-asset` under
- * `assets/other/image/` — the type RisuAI's import files into
+ * `assets/other/<kind>/` — the type RisuAI's import files into
  * `additionalAssets`, the list its `{{img::name}}` looks names up in (without
- * case). An `emotion` would only answer `{{emotion::…}}`. The files are named by
+ * case), and the folder RisuAI's export picks by the file's extension
+ * (`charxAssetKind`). An `emotion` would only answer `{{emotion::…}}`. The files are named by
  * slug rather than by name as RisuAI names them: a card's names can hold a `/`,
  * a `..` or Hangul, and the path is only ever looked up through the `uri`, so
  * the name rides in `name` alone. RisuAI's `x_meta/` sidecars and its
@@ -230,7 +266,7 @@ export function exportCardCharx(
   if (icon) embed('icon', 'main', `assets/icon/image/main.${icon.ext}`, icon);
   for (const asset of assets) {
     const name = asset.name?.trim() ? asset.name : asset.slug;
-    const path = `assets/other/image/${asset.slug}.${asset.ext}`;
+    const path = `assets/other/${charxAssetKind(asset.ext)}/${asset.slug}.${asset.ext}`;
     // One of the member's emotion pictures goes in as RisuAI's `emotion` first —
     // what its import puts in `emotionImages`, and the declaration our own import
     // keeps for the file — and as an asset as well, for `{{img::…}}`.

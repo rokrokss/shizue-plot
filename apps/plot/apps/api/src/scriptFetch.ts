@@ -168,6 +168,8 @@ export interface PinnedRequest {
   url: URL;
   addresses: readonly LookupAddress[];
   signal: AbortSignal;
+  /** What the request says; `SCRIPT_FETCH_HEADERS` when absent. */
+  headers?: Readonly<Record<string, string>>;
 }
 
 export interface HopResponse {
@@ -204,7 +206,7 @@ const unbracketed = (hostname: string): string => hostname.replace(/^\[(.*)\]$/,
  * connection. SNI and the certificate are checked against the name and the
  * `Host` header carries it, as a browser's would; an address literal has no SNI.
  */
-export const httpsTransport: Transport = ({ url, addresses, signal }) =>
+export const httpsTransport: Transport = ({ url, addresses, signal, headers }) =>
   new Promise((resolve, reject) => {
     const host = unbracketed(url.hostname);
     const request = httpsRequest({
@@ -212,7 +214,7 @@ export const httpsTransport: Transport = ({ url, addresses, signal }) =>
       port: url.port || 443,
       path: `${url.pathname}${url.search}`,
       method: 'GET',
-      headers: { ...SCRIPT_FETCH_HEADERS },
+      headers: { ...(headers ?? SCRIPT_FETCH_HEADERS) },
       ...(isIP(host) ? {} : { servername: host }),
       lookup: pinnedLookup(addresses),
       agent: false,
@@ -236,6 +238,13 @@ export interface GuardOptions {
   timeoutMs?: number;
   maxBytes?: number;
   maxRedirects?: number;
+  /**
+   * What every hop says in place of `SCRIPT_FETCH_HEADERS`: the import's fetch
+   * of a card's pictures and fonts (`localizeAssets.ts`) asks as a browser
+   * would, since a font service picks the format by who asks. Nothing of the
+   * reader's goes in either way — the caller writes these out whole.
+   */
+  headers?: Readonly<Record<string, string>>;
 }
 
 /** `promise`, or the signal's reason once it aborts — for the steps that cannot be aborted themselves. */
@@ -266,8 +275,8 @@ async function vet(url: URL, options: GuardOptions, signal: AbortSignal): Promis
   return addresses;
 }
 
-/** The body as `Response.text()` reads it — UTF-8 whatever the header says, a BOM dropped — or a throw past the cap. */
-async function readText(response: HopResponse, maxBytes: number, signal: AbortSignal): Promise<string> {
+/** The body whole, or a throw past the cap — and for a compressed one: `identity` was asked for, so it is refused rather than decoded. */
+async function readBody(response: HopResponse, maxBytes: number, signal: AbortSignal): Promise<Uint8Array> {
   try {
     const coding = response.headers['content-encoding']?.trim().toLowerCase();
     if (coding && coding !== 'identity') throw new Error(`the body is ${coding}-encoded`);
@@ -280,19 +289,26 @@ async function readText(response: HopResponse, maxBytes: number, signal: AbortSi
       if (size > maxBytes) throw new Error('the body is too large');
       chunks.push(chunk);
     }
-    return new TextDecoder('utf-8').decode(Buffer.concat(chunks));
+    return Buffer.concat(chunks);
   } finally {
     response.close();
   }
 }
 
+/** What `guardedFetch` ends on: the last hop's status and headers, and its body. */
+export interface GuardedResponse {
+  status: number;
+  headers: IncomingHttpHeaders;
+  bytes: Uint8Array;
+}
+
 /**
- * A GET of `address` that reaches public addresses only: `{status, text}` of
- * the response it ends on, or a throw — for a URL that is not https, a name
- * that resolves to anything private, a redirect past the limit or into either,
- * a body past the cap, or the deadline.
+ * A GET of `address` that reaches public addresses only: the response it ends
+ * on, or a throw — for a URL that is not https, a name that resolves to
+ * anything private, a redirect past the limit or into either, a body past the
+ * cap, or the deadline.
  */
-export async function guardedGet(address: string, options: GuardOptions = {}): Promise<{ status: number; text: string }> {
+export async function guardedFetch(address: string, options: GuardOptions = {}): Promise<GuardedResponse> {
   const deadline = AbortSignal.timeout(options.timeoutMs ?? SCRIPT_FETCH_TIMEOUT_MS);
   const signal = options.signal ? AbortSignal.any([deadline, options.signal]) : deadline;
   const transport = options.transport ?? httpsTransport;
@@ -300,16 +316,26 @@ export async function guardedGet(address: string, options: GuardOptions = {}): P
   let url = new URL(address);
   for (let hop = 0; ; hop += 1) {
     const addresses = await vet(url, options, signal);
-    const response = await raced(transport({ url, addresses, signal }), signal);
+    const response = await raced(
+      transport({ url, addresses, signal, ...(options.headers ? { headers: options.headers } : {}) }),
+      signal,
+    );
     const location = REDIRECTS.has(response.status) ? response.headers.location : undefined;
     // A redirect without a place to go is the answer, as it is to `fetch`.
     if (location === undefined) {
-      return { status: response.status, text: await readText(response, options.maxBytes ?? SCRIPT_FETCH_MAX_BYTES, signal) };
+      const bytes = await readBody(response, options.maxBytes ?? SCRIPT_FETCH_MAX_BYTES, signal);
+      return { status: response.status, headers: response.headers, bytes };
     }
     response.close();
     if (hop >= maxRedirects) throw new Error('too many redirects');
     url = new URL(location, url);
   }
+}
+
+/** `guardedFetch` with the body as `Response.text()` reads it — UTF-8 whatever the header says, a BOM dropped. */
+export async function guardedGet(address: string, options: GuardOptions = {}): Promise<{ status: number; text: string }> {
+  const { status, bytes } = await guardedFetch(address, options);
+  return { status, text: new TextDecoder('utf-8').decode(bytes) };
 }
 
 /* ----------------------------------------------------- RisuAI's request */

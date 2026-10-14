@@ -194,6 +194,8 @@ export interface PromptPlot {
    * `chatLore`, then `moduleLorebook`. Their scripts are the caller's to run.
    */
   modules?: readonly PlotModule[];
+  /** `{{moduleenabled}}`/`{{moduleassetlist}}`'s modules, their asset names resolved by the caller; unset, both stay as written. */
+  cbsModules?: MacroHostData['modules'];
 }
 
 /**
@@ -856,6 +858,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     chat: chatOf,
     ...(model ? { model } : {}),
     lorebook: lorebookOf,
+    ...(plot.cbsModules ? { modules: plot.cbsModules } : {}),
   };
   const group = cast.map((member) => member.name);
   // The card RisuAI's `{{description}}` and the like read outside a member's own
@@ -967,6 +970,8 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const loreMacro = new Map<LoreEntry, MacroContext>();
   /** Whose book each entry came from, for the report. */
   const loreSource = new Map<LoreEntry, string>();
+  /** The book of each member card SillyTavern wrote, which scans the greeting as ST's does. */
+  const sillyTavernLore = new Set<LoreEntry>();
   const lorebook: LoreEntry[] = [];
   for (const entry of plot.lorebook) {
     lorebook.push(entry);
@@ -979,6 +984,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
       lorebook.push(entry);
       loreMacro.set(entry, macro);
       loreSource.set(entry, member.name);
+      if (member.sillyTavern) sillyTavernLore.add(entry);
     }
   }
   // The work's modules last, as RisuAI's `loadLoreBookV3Prompt` puts the module
@@ -1015,6 +1021,12 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     // A turn hidden from the AI is not scanned either — ST builds its scan from
     // the same `coreChat` it sends.
     history: history.filter((message) => !message.hidden).map((message) => message.content),
+    // The greeting, where the history still opens on it and it is not hidden, is
+    // scanned only by SillyTavern's entries — those read from its World Info
+    // files and the books of the cards it wrote. RisuAI's scan never reads it, and
+    // neither does an entry of the work's own or of a module.
+    ...(branch?.greeting && historyStart === 0 && history[0] && !history[0].hidden ? { greeting: 0 } : {}),
+    scansGreeting: (entry) => entry.sillyTavern === true || sillyTavernLore.has(entry),
     scanDepth: loreSettings.scanDepth,
     budgetTokens:
       loreSettings.tokenBudget ??

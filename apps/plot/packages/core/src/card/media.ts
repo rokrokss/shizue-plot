@@ -16,8 +16,12 @@ export interface MediaType {
   mime: string;
 }
 
-/** Bytes `sniffMedia` reads at most: an MP4 container's brand ends at the twelfth. */
-export const MEDIA_SNIFF_BYTES = 12;
+/**
+ * Bytes `sniffMedia` reads at most: an ISO media file's `ftyp` box — its major
+ * brand ends at the twelfth, and the compatible brands after it, where an AVIF
+ * written as a generic HEIF (`mif1`) says what it is, end well inside this.
+ */
+export const MEDIA_SNIFF_BYTES = 64;
 
 /**
  * Extensions a card may declare a picture under — a hint for what to read, never
@@ -44,18 +48,33 @@ function isMpegFrame(bytes: Uint8Array): boolean {
 }
 
 /**
+ * Whether an ISO media file is an AVIF picture: its major brand says so, or —
+ * written as a generic HEIF (`mif1`, `msf1`) — one of the compatible brands
+ * after it does, as far as the `ftyp` box and the bytes at hand reach.
+ */
+function isAvif(bytes: Uint8Array): boolean {
+  if (!at(bytes, 'ftyp', 4)) return false;
+  if (at(bytes, 'avif', 8) || at(bytes, 'avis', 8)) return true;
+  const box = ((bytes[0]! << 24) | (bytes[1]! << 16) | (bytes[2]! << 8) | bytes[3]!) >>> 0;
+  const end = Math.min(box, bytes.length);
+  for (let offset = 16; offset + 4 <= end; offset += 4) {
+    if (at(bytes, 'avif', offset) || at(bytes, 'avis', offset)) return true;
+  }
+  return false;
+}
+
+/**
  * The picture or music `bytes` are, or null for anything else. An ISO media
- * file (`ftyp`) is told by its brand: AVIF's for a picture, iTunes audio's
- * (`M4A `, `M4B `) for music — the same box holds video, which nothing here plays.
+ * file (`ftyp`) is told by its brands: AVIF's for a picture (`isAvif`), iTunes
+ * audio's (`M4A `, `M4B `) for music — the same box holds video, which nothing
+ * here plays.
  */
 export function sniffMedia(bytes: Uint8Array): MediaType | null {
   if (at(bytes, '\x89PNG')) return { kind: 'image', ext: 'png', mime: 'image/png' };
   if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return { kind: 'image', ext: 'jpg', mime: 'image/jpeg' };
   if (at(bytes, 'GIF8')) return { kind: 'image', ext: 'gif', mime: 'image/gif' };
   if (at(bytes, 'RIFF') && at(bytes, 'WEBP', 8)) return { kind: 'image', ext: 'webp', mime: 'image/webp' };
-  if (at(bytes, 'ftyp', 4) && (at(bytes, 'avif', 8) || at(bytes, 'avis', 8))) {
-    return { kind: 'image', ext: 'avif', mime: 'image/avif' };
-  }
+  if (isAvif(bytes)) return { kind: 'image', ext: 'avif', mime: 'image/avif' };
 
   if (at(bytes, 'ID3') || isMpegFrame(bytes)) return { kind: 'audio', ext: 'mp3', mime: 'audio/mpeg' };
   if (at(bytes, 'OggS')) return { kind: 'audio', ext: 'ogg', mime: 'audio/ogg' };
@@ -64,5 +83,24 @@ export function sniffMedia(bytes: Uint8Array): MediaType | null {
   if (at(bytes, 'ftyp', 4) && (at(bytes, 'M4A ', 8) || at(bytes, 'M4B ', 8))) {
     return { kind: 'audio', ext: 'm4a', mime: 'audio/mp4' };
   }
+  return null;
+}
+
+/** A web font file's type, as `sniffFont` reads it off its first bytes. */
+export interface FontType {
+  ext: 'woff2' | 'woff' | 'otf' | 'ttf';
+  mime: string;
+}
+
+/**
+ * The web font `bytes` are, or null. Apart from `sniffMedia` on purpose: a
+ * font is nothing a card's own assets are read as — only a stylesheet the
+ * import localized names one (`@font-face`), so only that path asks.
+ */
+export function sniffFont(bytes: Uint8Array): FontType | null {
+  if (at(bytes, 'wOF2')) return { ext: 'woff2', mime: 'font/woff2' };
+  if (at(bytes, 'wOFF')) return { ext: 'woff', mime: 'font/woff' };
+  if (at(bytes, 'OTTO')) return { ext: 'otf', mime: 'font/otf' };
+  if (at(bytes, '\x00\x01\x00\x00') || at(bytes, 'true')) return { ext: 'ttf', mime: 'font/ttf' };
   return null;
 }

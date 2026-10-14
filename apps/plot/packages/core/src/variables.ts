@@ -521,17 +521,20 @@ export function resolveGetVars(text: string, variables: Variables): string {
 /**
  * Parses RisuAI's `defaultVariables`, which is a newline-separated `key=value`
  * block. An object is accepted too, because that is what our own editor stores.
- * A line with nothing after its `=` sets nothing, as in RisuAI's `parseKeyValue`
- * (`if(key && value)`): the variable stays unset rather than becoming "".
+ * A line is read as RisuAI's `parseKeyValue` reads it: split at every `=`, the
+ * first piece the key and the second the value, so `a=b=c` sets `a` to `b`. A
+ * line with nothing after its `=` sets nothing (`if(key && value)`): the variable
+ * stays unset rather than becoming "". A key set twice keeps its first value, as
+ * RisuAI's lookup takes the first pair with that key.
  */
 export function parseDefaultVariables(value: unknown): Variables | undefined {
   if (typeof value === 'string') {
     const variables = emptyVariables();
     for (const line of value.split('\n')) {
-      const separator = line.indexOf('=');
-      if (separator <= 0 || separator === line.length - 1) continue;
-      const key = line.slice(0, separator).trim();
-      if (key) variables[key] = line.slice(separator + 1).trim();
+      const [rawKey = '', rawValue] = line.split('=');
+      const key = rawKey.trim();
+      if (!key || !rawValue || Object.hasOwn(variables, key)) continue;
+      variables[key] = rawValue.trim();
     }
     return Object.keys(variables).length > 0 ? variables : undefined;
   }

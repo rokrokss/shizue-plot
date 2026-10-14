@@ -85,6 +85,14 @@ export interface LoreEntry {
   cooldown?: number;
   /** The entry cannot trigger before the chat holds this many messages. */
   delay?: number;
+  /**
+   * Read from a SillyTavern World Info file, so scanned as ST scans: its keys
+   * look at the branch's greeting like any other message, where RisuAI's scan —
+   * and ours, for every other entry — leaves the greeting out. A member card ST
+   * wrote gets the same for its whole book through `PromptCharacter.sillyTavern`
+   * rather than per entry. Kept by the save; an export leaves it out.
+   */
+  sillyTavern?: true;
 }
 
 /** SillyTavern's selective logic, in its own terms. */
@@ -540,7 +548,7 @@ export interface PlotModule {
   trigger: unknown[];
   /** RisuAI's `lowLevelAccess`, for the module's own triggers alone. */
   lowLevelAccess?: true;
-  /** RisuAI's `namespace`, kept as it came; nothing here reads it yet. */
+  /** RisuAI's `namespace`, kept as it came: what `{{moduleenabled}}` and `{{moduleassetlist}}` find the module by. */
   namespace?: string;
   /** The `editdisplay` scripts of `regex`, as display scripts — run after the work's, on every message. */
   displayScripts?: DisplayScript[];

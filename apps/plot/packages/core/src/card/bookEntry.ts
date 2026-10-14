@@ -514,13 +514,16 @@ export function loreEntryFromBook(raw: unknown): LoreEntry {
   );
 }
 
-/** An entry of a SillyTavern World Info file (`{ entries: { [uid]: … } }`). */
+/**
+ * An entry of a SillyTavern World Info file (`{ entries: { [uid]: … } }`),
+ * marked as ST's (`LoreEntry.sillyTavern`) so it scans the greeting as ST does.
+ */
 export function loreEntryFromWorldInfo(raw: unknown): LoreEntry {
   const entry = isObject(raw) ? raw : {};
   const { decorators, body } = parseDecorators(
     typeof entry['content'] === 'string' ? entry['content'] : '',
   );
-  return assemble(
+  const read = assemble(
     {
       ...labelOf(entry['comment']),
       ...keysOfSillyTavern(strings(entry['key']), strings(entry['keysecondary'])),
@@ -535,6 +538,7 @@ export function loreEntryFromWorldInfo(raw: unknown): LoreEntry {
     decorators,
     loreFieldsOfSillyTavern(entry as SillyTavernFields),
   );
+  return { ...read, sillyTavern: true };
 }
 
 /* ---------------------------------------------------------------- export */

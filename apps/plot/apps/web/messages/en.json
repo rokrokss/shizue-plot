@@ -254,6 +254,7 @@
     "loreOutletNameHint": "Goes only where text that reaches the prompt, like a description or another entry, says '{{outlet::name}}'. Named nowhere, it is not sent.",
     "assets": "Image assets",
     "assetsHint": "Write '{{img::slug}}' in an opening or a message to show the image.",
+    "assetFonts": "{count, plural, one {# web font file} other {# web font files}} the card used came along with the import. The stylesheet points at them.",
     "assetCount": "{count}/{max}",
     "assetsEmpty": "No assets yet.",
     "assetPick": "Choose image",
@@ -416,8 +417,10 @@
       "assets_over_limit": "{count, plural, one {# file} other {# files}} past the work’s limit of 1,000",
       "greetings_over_limit": "{count, plural, one {# greeting} other {# greetings}} past the limit of 10 openings",
       "greetings_cut": "{count, plural, one {# greeting} other {# greetings}} cut to 400,000 characters",
-      "stylesheet_over_limit": "The stylesheet, over 400,000 characters",
-      "background_over_limit": "The background, over 400,000 characters"
+      "stylesheet_over_limit": "The stylesheet, over 1,500,000 characters",
+      "background_over_limit": "The background, over 400,000 characters",
+      "external_failed": "{count, plural, one {# picture, font or stylesheet} other {# pictures, fonts or stylesheets}} on other sites that could not be brought in (the chat won’t show them)",
+      "external_over_limit": "{count, plural, one {# picture, font or stylesheet} other {# pictures, fonts or stylesheets}} on other sites left past the import’s limits"
     }
   },
   "stImport": {
@@ -583,6 +586,8 @@
     "importPublicNotice": "This plot is public, so a character added from a card is shown to readers right away. shizue can't verify who made a card.",
     "confirmPublish": "I made the imported characters, or their authors have allowed me to publish them.",
     "confirmImport": "I made the character I'm adding, or its author has allowed me to publish it.",
+    "moduleImportPublicNotice": "This plot is public, so an imported module is shown to readers right away. shizue can't verify who made a module.",
+    "confirmModuleImport": "I made the module I'm importing, or its author has allowed me to publish it.",
     "confirmedAt": "Rights confirmed {date}"
   },
   "style": {
@@ -993,6 +998,8 @@
     "scriptCommandFailed": "A slash command stopped with an error. What you wrote is back in the composer.",
     "scriptCommandHelp": "Slash commands (RisuAI). Chain commands with |: each command's result goes into the next as '{{pipe}}', and a command given no text uses the result before it.\n/input [text] — asks for a line, and the answer is the result\n/echo [text], /popup [text] — shows the text; the result stays as it was\n/pass [text] — the text is the result\n/buttons labels=[\"a\",\"b\"] — offers the labels; the number of the one chosen, from 0, is the result\n/send [text] — adds it to the chat as your message\n/sendas [text] — adds it to the chat as the character's message\n/comment [text] — adds a comment to the last message\n/cut [from-to] — keeps only the messages in that range; /cut [n] keeps only message n\n/del [n] — keeps only the last n messages\n/len [JSON list] — the number of items is the result\n/setvar key=[name] [value], /addvar key=[name] [number], /getvar key=[name] — chat variables\n/test_lorebook — shows the lore that is active now\n/trigger [name] — runs the story's button trigger of that name\n/speak — does nothing here\n/? — this list\nMessages are numbered from 0 after the opening. A line with a command not on this list is sent as an ordinary message.",
     "jumpToLatest": "Jump to latest",
+    "bgmMute": "Mute music",
+    "bgmUnmute": "Unmute music",
     "copyCode": "Copy code",
     "copied": "Copied",
     "streamError": "The response was interrupted. You can regenerate to continue.",

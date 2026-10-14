@@ -1,4 +1,4 @@
-import type { NormalizedCard, PromptCharacter, PromptPlot, PlotStyle } from '@shizue/core';
+import type { NormalizedCard, PlotModule, PromptCharacter, PromptPlot, PlotStyle } from '@shizue/core';
 import { plots, type Chat, type Character, type Plot } from '@shizue/db';
 import { and, eq } from 'drizzle-orm';
 import type { AppDeps } from './deps.js';
@@ -39,6 +39,24 @@ export const toPromptPlot = (plot: Plot, chat: Chat): PromptPlot => ({
   // The work's RisuAI modules: their lore for the assembler, their scripts for the request's runs.
   ...(plot.customUi?.modules?.length ? { modules: plot.customUi.modules } : {}),
 });
+
+/**
+ * The work's modules as RisuAI's `{{moduleenabled}}` and `{{moduleassetlist}}`
+ * find them (`CbsHostData.modules`): each that has a namespace, with the names
+ * its pictures go by out of `names` — the plot's assets by id, each under the
+ * card's own name or else its slug. A picture `names` does not hold is left
+ * out. Empty for a work with none, rather than absent: RisuAI answers `0` then.
+ */
+export function cbsModulesOf(
+  modules: readonly PlotModule[] | undefined,
+  names: ReadonlyMap<string, string>,
+): { namespace: string; assets: string[] }[] {
+  return (modules ?? []).flatMap((module) =>
+    module.namespace
+      ? [{ namespace: module.namespace, assets: module.assets.flatMap((id) => names.get(id) ?? []) }]
+      : [],
+  );
+}
 
 /**
  * Whether a card was last written by SillyTavern, whose prompt runs the

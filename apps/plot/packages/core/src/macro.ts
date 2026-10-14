@@ -13,12 +13,13 @@ import { readVariable, runVariableMacro, type Variables } from './variables.js';
 /**
  * What the prompt hands RisuAI's functions besides the names and the clock: the
  * card's own fields, the persona, the prompts, the branch, the model, the book,
- * the role of the text. Only the prompt has these — a reader's screen never
- * holds a card's internals — so only `assemblePrompt` passes them.
+ * the role of the text, the work's modules. Only the prompt has these — a
+ * reader's screen never holds a card's internals — so only `assemblePrompt`
+ * passes them.
  */
 export type MacroHostData = Pick<
   CbsHostData,
-  'character' | 'persona' | 'prompts' | 'chat' | 'model' | 'lorebook' | 'role'
+  'character' | 'persona' | 'prompts' | 'chat' | 'model' | 'lorebook' | 'role' | 'modules'
 >;
 
 /**

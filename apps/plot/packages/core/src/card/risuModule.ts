@@ -308,7 +308,9 @@ function moduleOfJson(json: Json): ParsedRisuModule {
   if (json['entries']) {
     let lorebook: LoreEntry[];
     try {
-      lorebook = fromLorebookFile({ entries: json['entries'] });
+      // A module now, scanned as RisuAI scans one — so not as SillyTavern's,
+      // though a World Info file is what it was (`LoreEntry.sillyTavern`).
+      lorebook = fromLorebookFile({ entries: json['entries'] }).map(({ sillyTavern: _st, ...entry }) => entry);
     } catch (error) {
       if (error instanceof LorebookFileError) throw new ModuleParseError(error.message);
       throw error;

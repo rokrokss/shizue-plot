@@ -322,6 +322,14 @@ describe('defaultVariables serialization', () => {
     expect(parseDefaultVariables('only=')).toBeUndefined();
   });
 
+  it('reads a line with two = and a key set twice as RisuAI does', () => {
+    // parseKeyValue's `line.split('=')` keeps the piece between the first two;
+    // its lookup takes the first pair with the key.
+    expect(parseDefaultVariables('a=b=c\nx=1\nx=2')).toEqual({ a: 'b', x: '1' });
+    // A first line that sets nothing does not hold the key.
+    expect(parseDefaultVariables('x=\nx=2')).toEqual({ x: '2' });
+  });
+
   it('parses an object too, which is what our own editor stores', () => {
     expect(parseDefaultVariables({ hp: '100', bad: 3 })).toEqual({ hp: '100' });
   });

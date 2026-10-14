@@ -3,6 +3,7 @@ import type { getAdapter } from '@shizue/llm';
 import type { ChatGPTAccounts } from './chatgptAccounts.js';
 import type { Embedder } from './embedder.js';
 import type { AppAuth, SessionStore } from './hostedAuth.js';
+import type { RemoteFetch } from './localizeAssets.js';
 import type { SceneImageGenerator } from './sceneImage.js';
 import type { LuaStateStore, RequestLuaRunner } from './requestLua.js';
 import type { RequestTriggerRunner } from './requestTriggers.js';
@@ -80,6 +81,12 @@ export interface AppDeps {
    * the web origin refused; tests hand it a stub DNS and connection.
    */
   scriptFetch?: ScriptFetch;
+  /**
+   * What an import fetches of the pictures, stylesheets and fonts a card loads
+   * from other hosts (`localizeAssets.ts`): the guarded network with this app's
+   * own hosts refused by default; tests hand in their own.
+   */
+  remoteFetch?: RemoteFetch;
   /**
    * Runs a card's request triggers (`requestTriggers.ts`); the worker pool by
    * default. Tests wrap it to shorten its deadline or to count its runs.

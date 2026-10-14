@@ -82,6 +82,11 @@ export interface CbsContext {
   /** The names the plot's open images go by, for `{{assetlist}}` and `{{emotionlist}}`. */
   assetNames?: readonly string[];
   /**
+   * The work's modules by namespace, each with its open pictures' names, for
+   * `{{moduleenabled}}` and `{{moduleassetlist}}`. Unset, both stay as written.
+   */
+  modules?: readonly { namespace: string; assets: readonly string[] }[];
+  /**
    * The reader's global variables on the plot, for `{{getglobalvar}}`, `@name` in
    * an expression and `#when`'s toggles. Unset, `getglobalvar` stays as written.
    */
@@ -490,6 +495,7 @@ function hostData(ctx: CbsContext): CbsHostData {
   // A plot keeps one list of images, so RisuAI's emotion list and its display
   // assets are the same one: the open images, by the names the card asks for them by.
   if (ctx.assetNames) data.assets = { names: ctx.assetNames, display: ctx.assetNames };
+  if (ctx.modules) data.modules = ctx.modules;
   const zone = Intl.DateTimeFormat().resolvedOptions();
   data.clock = { now: new Date(), timeZone: zone.timeZone, locale: zone.locale };
   // RisuAI cards lay out by them: the size when the message was drawn, or when

@@ -10,6 +10,7 @@ import { assetResolver } from '../src/cbs.js';
 import { MAX_ASSETS, MAX_ENTRY_BYTES, MAX_TOTAL_BYTES } from '../src/card/charx.js';
 import { CardParseError, normalizeCard, parseDecorators } from '../src/card/normalize.js';
 import { parseCard } from '../src/card/parse.js';
+import { risuLoreBookEntry } from '../src/card/risuModule.js';
 import { introFromCreatorNotes, MAX_INTRO_LENGTH } from '../src/card/intro.js';
 import {
   insertPngTextChunks,
@@ -726,6 +727,30 @@ describe('parseCard - charx', () => {
       });
     });
 
+    it("takes the module's lorebook over the card's book, keeping the book's settings", () => {
+      const lorebook = [
+        { key: '비, 우산', secondkey: '', insertorder: 5, comment: '비', content: '비가 내린다.', mode: 'normal', alwaysActive: false, selective: false },
+      ];
+      const withLore = buildRisum({
+        module: { name: 'm', description: '', id: 'id', regex: [], trigger: [], lorebook },
+        type: 'risuModule',
+      });
+      // An unreadable module: the card as card.json alone has it.
+      const alone = parseCard(risuCharx(Uint8Array.from([1, 2, 3]))).card;
+      expect(alone.lorebook).toHaveLength(2);
+
+      const { card } = parseCard(risuCharx(withLore));
+      // Read as a module import reads the same entries.
+      expect(card.lorebook).toEqual(lorebook.map(risuLoreBookEntry));
+      expect(card.lorebook[0]).toMatchObject({ keys: ['비', '우산'], content: '비가 내린다.', insertionOrder: 5 });
+      expect(card.loreSettings).toEqual(alone.loreSettings);
+      // RisuAI's `if(md.lorebook)` takes an empty one too: the card's entries go.
+      expect(parseCard(risuCharx(moduleFile)).card.lorebook).toEqual([]);
+      // A module without one leaves the card's.
+      const noLore = buildRisum({ module: { name: 'm', description: '', id: 'id', regex: scripts }, type: 'risuModule' });
+      expect(parseCard(risuCharx(noLore)).card.lorebook).toEqual(alone.lorebook);
+    });
+
     it('keeps a list card.json carries itself', () => {
       const own = [{ comment: '', in: 'own', out: 'mine', type: 'editdisplay', ableFlag: false, flag: '' }];
       const { card } = parseCard(risuCharx(moduleFile, { customScripts: own }));
@@ -1165,6 +1190,23 @@ describe('exportCardCharx', () => {
       { type: 'x-risu-asset', uri: 'embeded://assets/other/image/happy-2.gif', name: 'happy-2', ext: 'gif' },
     ]);
     expect(parseCard(charx).assets).toEqual([{ name: 'happy', bytes: gif(4), emotion: true }]);
+  });
+
+  it('files each asset under the folder RisuAI picks by its extension', () => {
+    const mp3 = Uint8Array.from([...Buffer.from('ID3'), 4, 0, 1]);
+    const charx = exportCardCharx(card, [
+      { slug: 'bgm', name: 'bgm', ext: 'mp3', bytes: mp3 },
+      { slug: 'photo', name: 'photo', ext: 'JPEG', bytes: new Uint8Array([0xff, 0xd8, 0xff, 2]) },
+      { slug: 'blob', name: 'blob', ext: 'bin', bytes: new Uint8Array([1]) },
+    ]);
+    expect(Object.keys(unzipSync(charx)).sort()).toEqual([
+      'assets/other/audio/bgm.mp3',
+      'assets/other/image/photo.JPEG',
+      'assets/other/other/blob.bin',
+      'card.json',
+    ]);
+    // Our own import finds the music where the export put it.
+    expect(parseCard(charx).assets).toContainEqual({ name: 'bgm', bytes: mp3, additional: true });
   });
 
   it('declares no icon when the member has no picture', () => {

@@ -15,6 +15,7 @@ import { useStickToBottom } from 'use-stick-to-bottom';
 import { AiBadge, AiNotice } from '@/components/AiNotice';
 import { AttachmentChips } from '@/components/AttachmentChips';
 import { Avatar } from '@/components/Avatar';
+import { BgmMute } from '@/components/BgmMute';
 import { BottomSheet } from '@/components/BottomSheet';
 import { ChatBackground } from '@/components/ChatBackground';
 import { ChatPanel } from '@/components/ChatPanel';
@@ -34,6 +35,7 @@ import { apiDelete, apiGet, apiSend, apiUpload } from '@/lib/api';
 import {
   assetSrc,
   illustrations,
+  isLocalizedAsset,
   lockedSrc,
   measureImage,
   openAssetLocks,
@@ -1008,11 +1010,29 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    */
   const indexBase = !state?.hasMore && messages[0] && isGreeting(messages[0]) ? -1 : 0;
   const lastMessageId = indexBase + messages.length - 1;
-  /** The names a card asks for its images by — its own where it had them — open ones only. */
+  /**
+   * The names a card asks for its images by — its own where it had them — open
+   * ones only, and none the import fetched from another host for its markup.
+   */
   const assetNames = useMemo(
-    () => assets.filter((asset) => !lockedKinds.has(asset.slug)).map((asset) => asset.name ?? asset.slug),
+    () =>
+      assets
+        .filter((asset) => !lockedKinds.has(asset.slug) && !isLocalizedAsset(asset))
+        .map((asset) => asset.name ?? asset.slug),
     [assets, lockedKinds],
   );
+  /**
+   * The work's modules for `{{moduleenabled}}` and `{{moduleassetlist}}`, naming
+   * the open pictures only, as `assetNames` does. Unset until the plot is read.
+   */
+  const cbsModules = useMemo(() => {
+    if (!plot) return undefined;
+    const open = new Set(assetNames);
+    return (plot.modules ?? []).map((module) => ({
+      namespace: module.namespace,
+      assets: module.assets.filter((name) => open.has(name)),
+    }));
+  }, [plot, assetNames]);
   /**
    * The loaded messages after the greeting, as RisuAI's chat functions read them
    * and numbered as `chatIndex` numbers them. Stored messages only: a reply still
@@ -1097,6 +1117,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       ...(personaAvatarUrl ? { userImage: personaAvatarUrl } : {}),
       lastMessageId,
       assetNames,
+      ...(cbsModules ? { modules: cbsModules } : {}),
       messages: branchMessages,
       wholeBranch,
       chatId,
@@ -1119,6 +1140,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     youLabel,
     lastMessageId,
     assetNames,
+    cbsModules,
     branchMessages,
     wholeBranch,
     chatId,
@@ -1302,6 +1324,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             ...(personaAvatarUrl ? { userImage: personaAvatarUrl } : {}),
             lastMessageId,
             assetNames,
+            ...(cbsModules ? { modules: cbsModules } : {}),
             messages: branchMessages,
             wholeBranch,
             chatId,
@@ -1323,6 +1346,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       youLabel,
       lastMessageId,
       assetNames,
+      cbsModules,
       branchMessages,
       wholeBranch,
       chatId,
@@ -1548,9 +1572,10 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         seed: { key: chatId, length: afterGreeting },
         meta: { language: locale },
         assets: { names: assetNames, display: assetNames },
+        ...(cbsModules ? { modules: cbsModules } : {}),
       };
     },
-    [chatId, locale, assetNames],
+    [chatId, locale, assetNames, cbsModules],
   );
 
   /**
@@ -2868,6 +2893,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             <span className="truncate text-sm font-medium">{characterName}</span>
           </Link>
           <AiBadge />
+          {/* At every width, while the page has music. */}
+          <BgmMute />
 
           {/* Wide enough for the controls, and they stand in the header. Narrower
               than that, one button opens them in a sheet from the bottom edge. */}

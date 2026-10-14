@@ -3,9 +3,11 @@
 import { useTranslations } from 'next-intl';
 import { useRef, useState } from 'react';
 import { apiSend, apiUpload } from '@/lib/api';
+import { readImportWarnings, type ImportWarning } from '@/lib/importWarnings';
 import { checkCardSize } from '@/lib/realm';
 import type { PlotDetail, PlotModuleSummary } from '@/lib/types';
 import { useErrorMessage } from '@/lib/useErrorMessage';
+import { ImportWarnings, RightsConfirmation } from './CardImport';
 import { Badge, Button, ErrorText } from './ui';
 
 /**
@@ -13,31 +15,47 @@ import { Badge, Button, ErrorText } from './ui';
  * list. A module is the work's, every member's, and runs after the cards' own;
  * the server keeps it apart from the custom UI the editors here save, so an
  * import or a removal lands at once, outside the Save, and answers with the
- * plot's owner view (`onChange`).
+ * plot's owner view (`onChange`). Into a published work a module is someone
+ * else's work shown to readers the moment it lands, so it asks the owner's
+ * word as an imported member does (`rightsConfirmed`), and what the import left
+ * behind is said as a card import's is.
  */
 export function ModuleManager({
   plotId,
   modules,
+  published = false,
   disabled = false,
   onChange,
 }: {
   plotId: string;
   modules: readonly PlotModuleSummary[];
+  published?: boolean;
   disabled?: boolean;
   onChange: (detail: PlotDetail) => void;
 }) {
   const t = useTranslations('plot');
+  const rights = useTranslations('rights');
   const toMessage = useErrorMessage();
   const fileInput = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState<'import' | string | null>(null);
   const [error, setError] = useState('');
+  const [importRights, setImportRights] = useState(false);
+  const [warnings, setWarnings] = useState<ImportWarning[]>([]);
 
   async function importFile(file: File): Promise<void> {
     if (busy) return;
     setBusy('import');
     setError('');
+    setWarnings([]);
     try {
-      onChange(await apiUpload<PlotDetail>(`/api/plots/${plotId}/modules`, checkCardSize(file)));
+      const detail = await apiUpload<PlotDetail & { importWarnings?: unknown }>(
+        `/api/plots/${plotId}/modules`,
+        checkCardSize(file),
+        published && importRights ? { rightsConfirmed: 'true' } : {},
+      );
+      setWarnings(readImportWarnings(detail.importWarnings));
+      setImportRights(false);
+      onChange(detail);
     } catch (caught) {
       setError(toMessage(caught));
     } finally {
@@ -117,17 +135,26 @@ export function ModuleManager({
           if (file) void importFile(file);
         }}
       />
+      {published ? (
+        <RightsConfirmation
+          notice={rights('moduleImportPublicNotice')}
+          label={rights('confirmModuleImport')}
+          checked={importRights}
+          onChange={setImportRights}
+        />
+      ) : null}
       <div className="space-y-1">
         <Button
           size="sm"
           busy={busy === 'import'}
-          disabled={disabled || busy !== null}
+          disabled={disabled || busy !== null || (published && !importRights)}
           onClick={() => fileInput.current?.click()}
         >
           {t('moduleImport')}
         </Button>
         <p className="text-xs text-muted">{t('moduleImportHint')}</p>
       </div>
+      <ImportWarnings warnings={warnings} />
       {error ? <ErrorText>{error}</ErrorText> : null}
     </div>
   );

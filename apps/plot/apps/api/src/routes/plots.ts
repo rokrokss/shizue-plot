@@ -117,8 +117,9 @@ import {
   visibleToViewer,
 } from '../hub.js';
 import { enqueueJob } from '../jobs.js';
+import { createRemoteFetch, localizePlot, type LocalizeScope } from '../localizeAssets.js';
 import { requireUser } from '../session.js';
-import { loadOwnedPlot } from '../plots.js';
+import { cbsModulesOf, loadOwnedPlot } from '../plots.js';
 import { realmCardId, realmCharacterUrl } from '../realm.js';
 import { coverKey, deleteQuietly, readAll } from '../storage.js';
 import { isUuid, optionalBoolean, optionalString, readJsonBody, requireString, requireUuidParam } from '../util.js';
@@ -687,6 +688,9 @@ async function storeImportedAssets(
  * - `greetings_cut` openings cut to `MAX_INTRO_TEXT_LENGTH`
  * - `stylesheet_over_limit` a stylesheet over `MAX_CREATOR_CSS_LENGTH`, left out whole
  * - `background_over_limit` a background over `MAX_BACKGROUND_HTML_LENGTH`, left out whole
+ * - `external_failed` addresses on other hosts the import could not bring in
+ *   (`localizeAssets.ts`): left as written, so the chat does not draw them
+ * - `external_over_limit` the same, left because the import's fetch caps ran out
  */
 type ImportWarningCode =
   | 'assets_unsupported'
@@ -696,7 +700,9 @@ type ImportWarningCode =
   | 'greetings_over_limit'
   | 'greetings_cut'
   | 'stylesheet_over_limit'
-  | 'background_over_limit';
+  | 'background_over_limit'
+  | 'external_failed'
+  | 'external_over_limit';
 
 interface ImportWarning {
   code: ImportWarningCode;
@@ -714,8 +720,34 @@ function importWarnings(counts: Partial<Record<ImportWarningCode, number>>): Imp
     'greetings_cut',
     'stylesheet_over_limit',
     'background_over_limit',
+    'external_failed',
+    'external_over_limit',
   ];
   return order.flatMap((code) => ((counts[code] ?? 0) > 0 ? [{ code, count: counts[code]! }] : []));
+}
+
+/**
+ * Brings in what the texts of `scope` load from other hosts (`localizePlot`),
+ * and the warnings half of what it left. Never fails the import: a fetch that
+ * throws past its own handling leaves everything as written, counted as failed.
+ */
+async function localizeImport(
+  deps: AppDeps,
+  plotId: string,
+  scope: LocalizeScope,
+): Promise<{ warnings: Partial<Record<ImportWarningCode, number>>; moduleAssets: Map<string, string[]> }> {
+  const remoteFetch =
+    deps.remoteFetch ?? createRemoteFetch({ ownOrigins: deps.webOrigin ? [deps.webOrigin] : [] });
+  try {
+    const outcome = await localizePlot({ db: deps.db, storage: deps.storage, remoteFetch }, plotId, scope);
+    return {
+      warnings: { external_failed: outcome.failed, external_over_limit: outcome.overLimit },
+      moduleAssets: outcome.moduleAssets,
+    };
+  } catch (error) {
+    console.warn(`[api] localizing plot ${plotId}'s external assets failed:`, error);
+    return { warnings: { external_failed: 1 }, moduleAssets: new Map() };
+  }
 }
 
 /** The asset half of the counts: what the parse passed over, and what the store did. */
@@ -1122,6 +1154,10 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     const stored = parsed.assets?.length ? await storeImportedAssets(deps, plot.id, parsed.assets) : undefined;
     if (stored) await recordEmotionImages(deps, member, stored.emotions);
     const background = backgroundHtmlOf(card.extensions);
+    // After the card's own pictures, so they keep their slugs and the plot's room
+    // goes to them first: what the card loads from other hosts, brought in.
+    const localized = await localizeImport(deps, plot.id, { plot: true, modules: [] });
+    plot = (await deps.db.select().from(plots).where(eq(plots.id, plot.id)).limit(1))[0] ?? plot;
 
     // What was left behind or cut, for the studio to say quietly.
     const warnings = importWarnings({
@@ -1131,6 +1167,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       stylesheet_over_limit: creatorCssOverCap(card.extensions) ? 1 : 0,
       background_over_limit:
         background !== undefined && backgroundWithoutStyles(background).length > MAX_BACKGROUND_HTML_LENGTH ? 1 : 0,
+      ...localized.warnings,
     });
     return c.json({ ...((await ownerView(deps, plot)) as object), importWarnings: warnings }, 201);
   });
@@ -1461,6 +1498,16 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     const creatorFollow = await followState(deps.db, plot.ownerId, viewerId);
     // What the chat draws: the work's and, after it, its modules' (`readerCustomUi`).
     const drawn = readerCustomUi(plot.customUi, backgroundOf(plot, members));
+    // `{{moduleenabled}}`/`{{moduleassetlist}}` on the reader's screen: the
+    // modules by namespace, their pictures by name — every reader's already
+    // through the asset list — read only when some module has a namespace.
+    const modules = plot.customUi?.modules;
+    const moduleAssetRows = modules?.some((module) => module.namespace)
+      ? await deps.db
+          .select({ id: plotAssets.id, name: plotAssets.name, slug: plotAssets.slug })
+          .from(plotAssets)
+          .where(eq(plotAssets.plotId, plot.id))
+      : [];
 
     return c.json({
       public: true,
@@ -1503,6 +1550,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       defaultVariables: plot.customUi?.defaultVariables ?? {},
       componentCode: plot.customUi?.componentCode ?? '',
       componentCapabilities: plot.customUi?.componentCapabilities ?? [],
+      modules: cbsModulesOf(modules, new Map(moduleAssetRows.map((asset) => [asset.id, asset.name ?? asset.slug]))),
       commentsEnabled: plot.commentsEnabled,
       commentCount,
     });
@@ -1577,12 +1625,20 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     if (stored) member = await recordEmotionImages(deps, member, stored.emotions);
     const greetings = await addGroupGreetings(deps, id, parsed.card);
     const variableConflicts = await liftCustomUi(deps, id, member);
+    // What the companion's lifted scripts, sheet and greetings load from other hosts —
+    // only those: the rest of the work is the studio's, brought in at its own import.
+    const localized = await localizeImport(deps, id, {
+      plot: true,
+      modules: [],
+      member: { id: member.id, introsFrom: plot.intros.length },
+    });
     // The work keeps one background, so a companion's is never drawn and never missed.
     const importWarningList = importWarnings({
       ...assetWarnings(parsed.skipped, stored),
       greetings_over_limit: greetings.overLimit,
       greetings_cut: greetings.cut,
       stylesheet_over_limit: creatorCssOverCap(parsed.card.extensions) ? 1 : 0,
+      ...localized.warnings,
     });
     // The default variables the work already had another value for, and what the
     // import left behind, for the studio to say so.
@@ -1989,6 +2045,42 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
    * The web sanitizer accepts same-origin images, including `{{img::slug}}`.
    * Serving assets here preserves that boundary for both storage drivers.
    */
+  /**
+   * An asset by the address it was fetched from at import (`localizeAssets.ts`):
+   * `by-name/<host>/<path>` is the asset named `https://<host>/<path>` — the
+   * name matched as written, then without case, as RisuAI looks a name up. What
+   * a template address the import localized points at, with the renderer's value
+   * in its slot, so a value the import did not foresee is a 404 on our own
+   * origin. Streamed as the slug route streams.
+   */
+  app.get('/:id/assets/by-name/*', async (c) => {
+    const plot = await loadVisiblePlot(deps.db, requireUuidParam(c), c.get('viewerId'));
+    const marker = '/assets/by-name/';
+    const raw = c.req.path.slice(c.req.path.indexOf(marker) + marker.length);
+    let name = `https://${raw}`;
+    try {
+      name = `https://${decodeURIComponent(raw)}`;
+    } catch {
+      // Not percent-encoding after all: the name is as it came.
+    }
+    const [asset] = await deps.db
+      .select()
+      .from(plotAssets)
+      .where(and(eq(plotAssets.plotId, plot.id), sql`lower(${plotAssets.name}) = lower(${name})`))
+      .orderBy(sql`${plotAssets.name} = ${name} desc`, asc(plotAssets.createdAt))
+      .limit(1);
+    if (!asset) throw notFound('Asset not found');
+    const object = await deps.storage.get(asset.path);
+    if (!object) throw notFound('Asset file is missing');
+    return new Response(object.body, {
+      headers: {
+        'Content-Type': asset.mime,
+        'Content-Length': String(object.size),
+        'Cache-Control': 'private, max-age=3600',
+      },
+    });
+  });
+
   app.get('/:id/assets/:slug', async (c) => {
     const plot = await loadVisiblePlot(deps.db, requireUuidParam(c), c.get('viewerId'));
     const [asset] = await deps.db
@@ -2038,7 +2130,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
    */
   app.post('/:id/modules', requireUser, async (c) => {
     const id = requireUuidParam(c);
-    await loadOwnedPlot(deps, id, c.get('userId'));
+    const owned = await loadOwnedPlot(deps, id, c.get('userId'));
     let form: FormData;
     try {
       form = await c.req.formData();
@@ -2050,6 +2142,11 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     if (file.size > MAX_CARD_IMPORT_BYTES) {
       throw new ApiError(413, 'payload_too_large', `A module file is at most ${MAX_CARD_IMPORT_BYTES} bytes`);
     }
+    // Someone else's work shown to readers the moment it lands, as an imported
+    // member is: a public plot takes it only on the owner's word. Asked here
+    // before anything is stored, and again under the lock the write takes.
+    const rightsConfirmed = form.get('rightsConfirmed') === 'true';
+    if (owned.visibility === 'public' && !rightsConfirmed) throw rightsUnconfirmed();
     const bytes = new Uint8Array(await file.arrayBuffer());
     let parsed: ReturnType<typeof parseRisuModule>;
     try {
@@ -2060,7 +2157,8 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     }
 
     // A module names no emotion pictures: its assets are only `additionalAssets`.
-    const assets = (await storeImportedAssets(deps, id, parsed.assets)).ids;
+    const stored = await storeImportedAssets(deps, id, parsed.assets);
+    const assets = stored.ids;
     const module = plotModuleOf(parsed, {
       id: randomUUID(),
       name: (parsed.name || file.name.replace(/\.[^.]+$/, '').trim() || 'Module').slice(0, MAX_MODULE_NAME_LENGTH),
@@ -2077,11 +2175,22 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     let plot: Plot;
     try {
       plot = await deps.db.transaction(async (tx) => {
-        const [locked] = await tx.select({ customUi: plots.customUi }).from(plots).where(eq(plots.id, id)).for('update');
+        const [locked] = await tx
+          .select({ customUi: plots.customUi, visibility: plots.visibility })
+          .from(plots)
+          .where(eq(plots.id, id))
+          .for('update');
+        // The same lock a publish takes, so the two cannot pass each other unasked.
+        const vouching = locked?.visibility === 'public';
+        if (vouching && !rightsConfirmed) throw rightsUnconfirmed();
         const customUi = locked?.customUi ?? {};
         const [row] = await tx
           .update(plots)
-          .set({ customUi: { ...customUi, modules: [...(customUi.modules ?? []), module] }, updatedAt: new Date() })
+          .set({
+            customUi: { ...customUi, modules: [...(customUi.modules ?? []), module] },
+            updatedAt: new Date(),
+            ...(vouching ? { rightsConfirmedAt: new Date() } : {}),
+          })
           .where(eq(plots.id, id))
           .returning();
         return row!;
@@ -2091,7 +2200,12 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       await deleteAssets(deps, id, assets);
       throw error;
     }
-    return c.json(await ownerView(deps, plot), 201);
+    // What the module's stylesheet, background and scripts load from other hosts —
+    // stored as its own, so taking the module out takes them too.
+    const localized = await localizeImport(deps, id, { plot: false, modules: [module.id] });
+    plot = (await deps.db.select().from(plots).where(eq(plots.id, id)).limit(1))[0] ?? plot;
+    const warnings = importWarnings({ ...assetWarnings(undefined, stored), ...localized.warnings });
+    return c.json({ ...((await ownerView(deps, plot)) as object), importWarnings: warnings }, 201);
   });
 
   /** Takes a module out of the work: its record, and the pictures it brought that are still there. */

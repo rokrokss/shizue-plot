@@ -48,9 +48,9 @@ export function rpackDecode(bytes: Uint8Array): Uint8Array {
 
 /**
  * What an import takes from a charx's module. A card import puts the scripts
- * back and leaves the lorebook: RisuAI's export writes the same entries as the
- * card's `character_book`. A module import (`card/risuModule.ts`) takes the
- * lorebook over the card's book, as RisuAI's charx import does.
+ * back (`cardWithRisuModule`) and, as a module import (`card/risuModule.ts`)
+ * does, takes the lorebook over the entries of the card's book, as RisuAI's
+ * charx import does (`parseCharx`).
  */
 export interface RisuModuleScripts {
   /** Goes back to `extensions.risuai.customScripts`. */

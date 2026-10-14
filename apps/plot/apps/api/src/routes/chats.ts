@@ -158,7 +158,7 @@ import { createScriptFetch } from '../scriptFetch.js';
 import { readScriptLlmMessages, readScriptLlmModel, runScriptLlm } from '../scriptLlm.js';
 import { suggestReplies } from '../suggest.js';
 import { buildPath, deepestLeaf, roundStart, siblingInfo, visibleToAi } from '../tree.js';
-import { assetLocks, openAssetNames } from '../unlocks.js';
+import { assetLocks, openAssetNames, openModuleAssets } from '../unlocks.js';
 import {
   isUuid,
   optionalBoolean,
@@ -792,7 +792,12 @@ async function loadGenerationContext(
   return {
     // Crossed with this chat's own toggles: the style the assembler compiles is
     // the creator's, minus the two features this reader turned off.
-    plot: { ...toPromptPlot(row, chat), ...(plotChar !== undefined ? { char: plotChar } : {}) },
+    plot: {
+      ...toPromptPlot(row, chat),
+      ...(plotChar !== undefined ? { char: plotChar } : {}),
+      // `{{moduleenabled}}`/`{{moduleassetlist}}`, naming the pictures `{{assetlist}}` names.
+      cbsModules: await openModuleAssets(deps, chat, row.customUi?.modules),
+    },
     characters: toPromptCharacters(rewritten, absent),
     onStage: rewritten.filter((member) => !absent.has(member.id)),
     members: rewritten,

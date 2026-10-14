@@ -23,6 +23,7 @@ import {
 import type { LibrarySource } from '@/lib/sillytavern/scan';
 import { useErrorMessage } from '@/lib/useErrorMessage';
 import { Avatar } from './Avatar';
+import { ImportWarnings } from './CardImport';
 import { Badge, Button, buttonClass, Checkbox, cx, Spinner } from './ui';
 
 const PANEL = 'rounded-2xl border border-line bg-surface p-5 sm:p-6';
@@ -623,6 +624,8 @@ function StepRow({ step, result }: { step: ImportStep; result: StepResult }) {
           })}
         </p>
       ))}
+      {/* What the card imports left behind or cut, as the studio says it after a card import. */}
+      <ImportWarnings warnings={result.importWarnings ?? []} />
     </li>
   );
 }

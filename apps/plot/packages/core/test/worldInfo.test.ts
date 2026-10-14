@@ -100,8 +100,13 @@ describe('toWorldInfo', () => {
       entry({ position: 'after_examples' }),
       entry({ position: 'outlet', outletName: '금고' }),
     ];
-    // Through JSON, as the file travels.
-    expect(fromLorebookFile(JSON.parse(JSON.stringify(toWorldInfo(entries))))).toEqual(entries);
+    // Through JSON, as the file travels — and read back as SillyTavern's, whose
+    // scan reads the greeting; the file itself says nothing of it.
+    const written = toWorldInfo(entries.map((read) => ({ ...read, sillyTavern: true as const })));
+    expect(JSON.stringify(written)).not.toContain('sillyTavern');
+    expect(fromLorebookFile(JSON.parse(JSON.stringify(written)))).toEqual(
+      entries.map((read) => ({ ...read, sillyTavern: true })),
+    );
   });
 });
 
@@ -166,6 +171,7 @@ describe('fromLorebookFile', () => {
         role: 'assistant',
         selectiveLogic: 'not_any',
         cooldown: 3,
+        sillyTavern: true,
       },
       entry({
         keys: ['비밀'],
@@ -174,12 +180,13 @@ describe('fromLorebookFile', () => {
         insertionOrder: 1,
         position: 'outlet',
         outletName: '금고',
+        sillyTavern: true,
       }),
-      entry({ keys: ['노트'], content: '노트 위', insertionOrder: 2, position: 'before_author_note' }),
-      entry({ keys: ['노트'], content: '노트 아래', insertionOrder: 3, position: 'after_author_note' }),
-      entry({ keys: ['예시'], content: '예시 위', insertionOrder: 4, position: 'before_examples' }),
-      entry({ keys: ['예시'], content: '예시 아래', insertionOrder: 5, position: 'after_examples' }),
-      entry({ keys: ['이름'], content: '이름 없음', insertionOrder: 6, position: 'outlet' }),
+      entry({ keys: ['노트'], content: '노트 위', insertionOrder: 2, position: 'before_author_note', sillyTavern: true }),
+      entry({ keys: ['노트'], content: '노트 아래', insertionOrder: 3, position: 'after_author_note', sillyTavern: true }),
+      entry({ keys: ['예시'], content: '예시 위', insertionOrder: 4, position: 'before_examples', sillyTavern: true }),
+      entry({ keys: ['예시'], content: '예시 아래', insertionOrder: 5, position: 'after_examples', sillyTavern: true }),
+      entry({ keys: ['이름'], content: '이름 없음', insertionOrder: 6, position: 'outlet', sillyTavern: true }),
     ]);
   });
 
@@ -188,6 +195,9 @@ describe('fromLorebookFile', () => {
     const fromBook = fromLorebookFile(raw.data.character_book);
     // The card's own entries; the character note is the card's, not the book's.
     expect(fromBook).toEqual(normalizeCard(stCard()).lorebook.slice(0, 2));
+    // A book is RisuAI's as much as SillyTavern's, so it is not marked as ST's
+    // (`PromptCharacter.sillyTavern` speaks for a card ST wrote).
+    expect(fromBook.some((read) => 'sillyTavern' in read)).toBe(false);
     expect(fromLorebookFile(stCard())).toEqual(fromBook);
 
     const exported = exportCardV3(normalizeCard(stCard()));
