@@ -29,6 +29,7 @@ import { Hono } from 'hono';
 import type { AppDeps, AppEnv } from '../deps.js';
 import { ApiError, badRequest, notFound } from '../errors.js';
 import { branchFacts, keepEndedFacts, toFactJson } from '../facts.js';
+import { loadMembers } from '../hub.js';
 import {
   applicableSummaries,
   loadSummaries,
@@ -98,7 +99,7 @@ async function listMemory(deps: AppDeps, chat: Chat) {
       ...applicable.map((summary) => toSummaryJson(summary, true, covered)),
       ...summaries.filter((summary) => !on.has(summary)).map((summary) => toSummaryJson(summary, false, covered)),
     ],
-    facts: await branchFacts(deps, applicable),
+    facts: await branchFacts(deps, applicable, await loadMembers(deps.db, chat.plotId)),
   };
 }
 
@@ -148,7 +149,7 @@ export function chatMemoryRoutes(deps: AppDeps): Hono<AppEnv> {
     if (!fact) throw notFound();
     if (content !== undefined) scheduleMemoryUpdate(deps, chat.id);
     const listed = (await listMemory(deps, chat)).facts.find((item) => item.id === fact.id);
-    return c.json({ fact: listed ?? toFactJson(fact, new Set(), null) });
+    return c.json({ fact: listed ?? toFactJson(fact, new Set(), null, await loadMembers(deps.db, chat.plotId)) });
   });
 
   app.delete('/:id/memory/facts/:factId', async (c) => {

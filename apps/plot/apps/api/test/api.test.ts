@@ -7850,7 +7850,8 @@ describe('memory', () => {
             if (req.system.includes('관계 분석가')) {
               return { usage: { promptTokens: 0, completionTokens: 0 } };
             }
-            if (req.system.includes('{"facts": string[], ')) {
+            // The extraction's answer shape, a group work's included.
+            if (req.system.includes('"invalidated": number[]}')) {
               const captured = { system: req.system, messages: req.messages };
               facts.push(captured);
               if (factsGate) await factsGate;
@@ -8390,8 +8391,14 @@ describe('memory', () => {
       return undated(harness.prompts.at(-1)!.system);
     };
 
-    /** Stores a fact of `summaryId` as an extraction would, embedded by `embedder`. */
-    async function insertFact(chatId: string, summaryId: string, content: string, embedder?: Embedder) {
+    /** Stores a fact of `summaryId` as an extraction would, embedded by `embedder` — of a group scene, given one. */
+    async function insertFact(
+      chatId: string,
+      summaryId: string,
+      content: string,
+      embedder?: Embedder,
+      scene: { sceneMemberIds: string[] | null; knownToAll?: boolean } = { sceneMemberIds: null },
+    ) {
       const [chat] = await db.select().from(chats).where(eq(chats.id, chatId));
       const embedded = embedder ? await embedder.embed([content], { plotLanguage: 'ko' }) : null;
       const [row] = await db
@@ -8404,6 +8411,7 @@ describe('memory', () => {
           content,
           model: embedded?.model ?? null,
           embedding: embedded?.vectors[0] ?? null,
+          ...scene,
         })
         .returning();
       return row!;
@@ -8803,6 +8811,109 @@ describe('memory', () => {
       expect((await readSse(res)).at(-1)!.event).toBe('done');
       return harness.prompts.at(-1)!.system;
     };
+
+    /** A work of three — 세이야 (nickname 세이), 카이, 미오 — and its owner's chat on it. */
+    async function groupMemoryChat(email: string) {
+      const cookie = await signUp(email);
+      const plot = await createPlot(cookie, { name: '은빛 여관', description: '눈 덮인 여관.', intros: ['문이 열린다.'] });
+      const seiya: string = (await addCharacter(cookie, plot.id, { name: '세이야', card: { description: '기사', nickname: '세이' } })).id;
+      const kai: string = (await addCharacter(cookie, plot.id, { name: '카이', card: { description: '주인' } })).id;
+      const mio: string = (await addCharacter(cookie, plot.id, { name: '미오', card: { description: '악사' } })).id;
+      const chatId: string = (await startChat(cookie, plot.id)).chat.id;
+      return { cookie, chatId, seiya, kai, mio };
+    }
+
+    /** The system text a generation route sent, undated: a group member's when the body names one. */
+    const generated = async (cookie: string, chatId: string, harness: Harness, route: string, body: Record<string, unknown>) => {
+      const res = await json(cookie, `/api/chats/${chatId}/${route}`, 'POST', body, harness.app);
+      expect((await readSse(res)).at(-1)!.event, route).toBe('done');
+      await harness.settle();
+      return undated(harness.prompts.at(-1)!.system);
+    };
+
+    it('records who spoke in a group batch, marks what everyone knows, and tells each member only what it may know', async () => {
+      const { cookie, chatId, seiya, kai, mio } = await groupMemoryChat('facts-scene@example.com');
+      const secret = '세이야는 카이에게 등대 열쇠를 맡겼다.';
+      const notice = '영주가 마을 지도를 광장에 내걸었다.';
+      const harness = memoryApp({
+        embedder: keywordEmbedder(),
+        factsText: JSON.stringify({ facts: [{ fact: secret, public: false }, { fact: notice, public: true }] }),
+      });
+      await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000 } });
+      // 세이야 and 카이 take the rounds; 미오 never speaks — the reader talks about her, which is no presence.
+      for (let turn = 1; turn <= 40 && harness.summaries.length < 1; turn += 1) {
+        await generated(cookie, chatId, harness, 'messages', { content: `미오 몰래. ${longTurn(turn)}`, speakerId: turn % 2 ? seiya : kai });
+      }
+      const [summary] = await db.select().from(chatSummaries).where(eq(chatSummaries.chatId, chatId)).orderBy(asc(chatSummaries.createdAt));
+      expect(summary!.sceneMemberIds).toEqual([seiya, kai]);
+      // The extraction is told who was there and marks what everyone knows; each fact keeps both.
+      expect(harness.facts[0]!.system).toContain('이 구간의 장면에 있던 등장인물은 세이야, 카이입니다.');
+      expect((await factsOf(chatId)).map((row) => [row.content, row.sceneMemberIds, row.knownToAll])).toEqual([
+        [secret, [seiya, kai], false],
+        [notice, [seiya, kai], true],
+      ]);
+      const listed = (await readJson(await request(cookie, `/api/chats/${chatId}/memory`, 'GET', undefined, harness.app))).facts;
+      const stage = [{ id: seiya, name: '세이야' }, { id: kai, name: '카이' }];
+      expect(listed.map((fact: any) => [fact.content, fact.knownTo, fact.knownToAll])).toEqual([
+        [secret, stage, false],
+        [notice, stage, true],
+      ]);
+
+      // 미오's turns are told what everyone knows and nothing said where she was not:
+      // a send, the continue of her reply, a reply of her own, a round redone with her first.
+      const question = '등대 열쇠와 지도 이야기';
+      for (const [route, body] of [
+        ['messages', { content: question, speakerId: mio }],
+        ['continue', {}],
+        ['reply', { speakerId: mio }],
+        ['regenerate', { speakerId: mio }],
+      ] as const) {
+        const block = factsBlockOf(await generated(cookie, chatId, harness, route, body));
+        expect(block, route).toContain(notice);
+        expect(block, route).not.toContain(secret);
+      }
+      // 카이 was there; the narrator and a scene reply are told everything.
+      expect(factsBlockOf(await generated(cookie, chatId, harness, 'messages', { content: question, speakerId: kai }))).toContain(secret);
+      expect(factsBlockOf(await generated(cookie, chatId, harness, 'narrate', {}))).toContain(secret);
+      expect(factsBlockOf(await generated(cookie, chatId, harness, 'messages', { content: question }))).toContain(secret);
+    });
+
+    it("keeps a member's own copy of what another learned in private, and tells everyone a fact from before scenes", async () => {
+      const { cookie, chatId, seiya, kai, mio } = await groupMemoryChat('facts-scene-copy@example.com');
+      const embedder = keywordEmbedder();
+      const key = '유저는 등대 열쇠를 갖고 있다.';
+      const cat = '리안은 고양이를 무서워한다.';
+      // The stretch tells 카이 and 미오 what only 세이야 knew, and says again what everyone knew.
+      const harness = memoryApp({ embedder, factsText: JSON.stringify({ facts: [{ fact: key, public: false }, cat] }) });
+      const ids = (await shortTurns(cookie, chatId, harness, 4)).map((message: any) => message.id);
+      const front = await seedSummary(chatId, ids.slice(0, 3), '앞 요약.');
+      await insertFact(chatId, front.id, cat, embedder);
+      await insertFact(chatId, front.id, key, embedder, { sceneMemberIds: [seiya] });
+      const back = await seedSummary(chatId, ids.slice(3, 6), '뒤 요약.');
+      await db.update(chatSummaries).set({ sceneMemberIds: [kai, mio] }).where(eq(chatSummaries.id, back.id));
+
+      await extractFacts(harness.deps, embedder, {
+        ...(await extractionSource(chatId, ids.slice(3, 6))),
+        plotLanguage: 'ko',
+        summary: { ...back, sceneMemberIds: [kai, mio] },
+        userName: '유저',
+        branch: [{ id: front.id, earlier: true }],
+        conversationLanguage: 'ko',
+      });
+      // Shown with who knew it, the private one is 카이 and 미오's to learn; the one from before scenes stands for everyone.
+      expect(transcriptOf(harness.facts.at(-1)!)).toContain(`1. ${cat}\n2. ${key} [아는 인물: 세이야]\n`);
+      expect((await factsOf(chatId)).map((row) => [row.content, row.summaryId, row.sceneMemberIds])).toEqual([
+        [cat, front.id, null],
+        [key, front.id, [seiya]],
+        [key, back.id, [kai, mio]],
+      ]);
+      // Each of them is told it once, by its own copy; the fact from before scenes goes to all.
+      for (const member of [seiya, mio]) {
+        const block = factsBlockOf(await generated(cookie, chatId, harness, 'messages', { content: '등대 열쇠와 고양이', speakerId: member }));
+        expect(block.split(key)).toHaveLength(2);
+        expect(block).toContain(cat);
+      }
+    });
   });
 
   it('lists, pins, rewrites, regenerates and deletes a summary, for its owner only', async () => {

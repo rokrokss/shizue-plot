@@ -7,6 +7,7 @@ import {
   mentionedMembers,
   mentionIndex,
   NARRATOR_SPEAKER,
+  sceneMembers,
   stripSpeakerPrefix,
   writtenAs,
   type GroupMember,
@@ -227,6 +228,27 @@ describe('mentionedMembers', () => {
     expect(mentionedMembers('세이, 왔어?', [kai, seiya])).toEqual(['seiya']);
     const twin = { ...kai, id: 'twin' };
     expect(mentionedMembers('카이', [kai, twin])).toEqual(['kai', 'twin']);
+  });
+});
+
+describe('sceneMembers', () => {
+  const members = [seiya, kai, mio];
+  const user = (content: string) => ({ role: 'user' as const, content });
+  const reply = (content: string, speakerId: string | null = null) => ({ role: 'assistant' as const, content, speakerId });
+
+  it('is who speaks — a group reply, an untagged reply’s name lines, a line the reader wrote as — in roster order', () => {
+    expect(sceneMembers([user('안녕'), reply('왔군.', 'kai'), reply('앉아.', 'seiya')], members)).toEqual(['seiya', 'kai']);
+    // A scene reply names its speakers in lines, by name or nickname; the reader writes 미오's line.
+    expect(sceneMembers([reply('세이: 늦었네.\n문이 열린다.'), user('@미오: 나도 왔어')], members)).toEqual(['seiya', 'mio']);
+  });
+
+  it('is not someone the text only mentions, nor the narrator, and null when nobody speaks', () => {
+    // Talking about 미오 behind her back keeps her out of the scene.
+    expect(sceneMembers([user('미오 요즘 이상하지 않아?'), reply('미오? 글쎄, 카이한테 물어봐.', 'seiya')], members)).toEqual(['seiya']);
+    expect(sceneMembers([user('@내레이터: 비가 온다'), reply('@: 밤이 깊었다.\n카이: 응')], members)).toBeNull();
+    expect(sceneMembers([], members)).toBeNull();
+    // A speaker no longer on the roster is nobody.
+    expect(sceneMembers([reply('안녕.', 'gone')], members)).toBeNull();
   });
 });
 

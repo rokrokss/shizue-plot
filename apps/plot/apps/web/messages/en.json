@@ -931,6 +931,8 @@
     "memoryFactsCount": "{count} facts on this branch",
     "memoryFactEditLabel": "Fact",
     "memoryFactDeleteConfirm": "Delete this fact?",
+    "memoryFactKnownTo": "Known to {names}",
+    "memoryFactKnownToAll": "Known to everyone",
     "memoryEndedFacts": "Facts that no longer hold ({count})",
     "memoryEndedHint": "Changed or ended later in the story, so they are no longer sent. Restore one if it was changed by mistake.",
     "memoryEndedAt": "Ended at turn {turn}",

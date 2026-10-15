@@ -1714,7 +1714,8 @@ async function regeneratePlan(
   const all = edited ? edited.all : context.all;
   // Memory is applied to the whole path first — it only ever trims the front,
   // so the mode-specific trim of the replaced turns at the end still lines up.
-  const memory = await buildMemoryInput(deps, chat, edited ? kept : path, kept);
+  // A member's round is told only the facts that member may know.
+  const memory = await buildMemoryInput(deps, chat, edited ? kept : path, kept, voice?.member?.id);
   const gone = path.length - replaced.length;
   // A member's round answers what stands before it, as `/reply` asked it: the
   // reader's turn, with its ruling — or a reply, the scene going on without the
@@ -3256,7 +3257,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const { context, focusNames, edited, voice } = await storeTurn(chat);
       const branch = edited.path;
 
-      const memory = await buildMemoryInput(deps, chat, branch.slice(0, -1), branch);
+      const memory = await buildMemoryInput(deps, chat, branch.slice(0, -1), branch, voice?.member?.id);
       // The turn just written is the last of the history, and the images ride on
       // it; the rest of the branch's are not re-sent (see `withTurnImages`).
       const history = await promptHistory(
@@ -3378,7 +3379,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const edited = edit ? await keepScriptChat(deps, chat, edit, context.all) : null;
       const path = edited ? edited.path : before;
       const end = path.at(-1);
-      const memory = await buildMemoryInput(deps, chat, path, path);
+      const memory = await buildMemoryInput(deps, chat, path, path, voice.member?.id);
       // The turn being answered must be in the prompt, so the end is re-attached
       // when the summary swallowed it.
       const history = memory.history.length > 0 || !end ? memory.history : [end];
@@ -3474,14 +3475,14 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const edited = edit ? await keepScriptChat(deps, chat, edit, context.all) : null;
       const path = edited ? edited.path : before;
       const head = path[path.length - 1]!;
-      const memory = await buildMemoryInput(deps, chat, path, path);
-      // The partial assistant turn must stay last for the model to resume it, so it
-      // is re-attached when the summary swallowed it.
-      const history = memory.history.length > 0 ? memory.history : [head];
       // A group reply is continued by whoever said it, while they are on the
       // stage — a round's narration by the narrator; anything else as the scene.
       const group = context.members.length >= 2;
       const speaker = group ? context.onStage.find((member) => member.id === head.speakerMemberId) : undefined;
+      const memory = await buildMemoryInput(deps, chat, path, path, speaker?.id);
+      // The partial assistant turn must stay last for the model to resume it, so it
+      // is re-attached when the summary swallowed it.
+      const history = memory.history.length > 0 ? memory.history : [head];
       const voice = speaker
         ? context.members.indexOf(speaker)
         : group && head.groupTurnId !== null && isNarration(head.content)

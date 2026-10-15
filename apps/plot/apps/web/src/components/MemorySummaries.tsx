@@ -213,11 +213,26 @@ function FactCard({
     }
   }
 
+  // A group scene's fact says who may be told it; a fact of no scene (a work of one, or older) says nothing.
+  const knownTo =
+    fact.knownTo === null || (!fact.knownToAll && fact.knownTo.length === 0)
+      ? null
+      : fact.knownToAll
+        ? t('memoryFactKnownToAll')
+        : t('memoryFactKnownTo', { names: fact.knownTo.map((member) => member.name).join(', ') });
+
   return (
     <li data-testid="memory-fact" className="space-y-2 rounded-xl border border-line bg-surface p-3">
       {draft === null ? (
         <div className="flex items-start gap-3">
-          <p className="min-w-0 flex-1 break-keep text-sm text-fg [overflow-wrap:anywhere]">{fact.content}</p>
+          <div className="min-w-0 flex-1 space-y-1">
+            <p className="break-keep text-sm text-fg [overflow-wrap:anywhere]">{fact.content}</p>
+            {knownTo !== null ? (
+              <p data-testid="memory-fact-known-to" className="break-keep text-xs text-muted [overflow-wrap:anywhere]">
+                {knownTo}
+              </p>
+            ) : null}
+          </div>
           <div className="flex shrink-0 items-center gap-1">
             <button
               type="button"

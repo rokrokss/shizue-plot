@@ -634,6 +634,10 @@ export interface MemoryFact {
   invalidatedTurn: number | null;
   /** The fact that took its place, when ended by one. */
   supersededBy: { id: string; content: string } | null;
+  /** The members on the stage of the group scene it was taken in; null: known to every member. */
+  knownTo: { id: string; name: string }[] | null;
+  /** Marked as one every member knows, whatever scene it came from. */
+  knownToAll: boolean;
   createdAt: string;
   updatedAt: string;
 }

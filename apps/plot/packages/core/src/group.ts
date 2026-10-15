@@ -15,6 +15,7 @@
  * narration button, and only then.
  */
 
+import { isNarration } from './narration.js';
 import { lineSpeaker, NARRATOR_NAMES, readerRuns, type ReaderMember } from './speech.js';
 
 /**
@@ -291,6 +292,48 @@ export function mentionedMembers(text: string, members: readonly Pick<GroupMembe
   return [...first.entries()]
     .sort(([, a], [, b]) => a.at - b.at || a.rank - b.rank)
     .map(([id]) => id);
+}
+
+/**
+ * The members on the stage in a stretch of a group chat — whom a memory summary
+ * of it, and the facts taken from it, belong to (ARCHITECTURE §7.3 장면의 멤버):
+ * the members who speak in it. That is a group reply's speaker (`speakerId`), a
+ * member an untagged reply writes `이름:` lines as (a scene reply, one from before
+ * group turns, an import), and a member the reader writes a line as (`@이름:`,
+ * `writtenAs`). Roster order, once each.
+ *
+ * A mention is not presence: the members of a work name each other all the time,
+ * and talking about someone who is not there is the very scene they must not
+ * know. A member the reader addresses speaks next (`groupOrder` picks the
+ * mentioned first), so it counts by its reply.
+ *
+ * Null when nobody speaks — a stretch of narration and the reader's turns. A
+ * boundary needs evidence of who was there, and without it the stretch is known
+ * to everyone, as a summary from before scenes were kept is. The cost of the
+ * rule is the member who stood by in silence for the whole stretch: the stage is
+ * not kept per message, so it is left out.
+ */
+export function sceneMembers(
+  messages: readonly { role: 'user' | 'assistant'; content: string; speakerId?: string | null }[],
+  members: readonly ReaderMember[],
+): string[] | null {
+  const roster = members.map((member) => ({ name: member.names[0] ?? '', aliases: member.names.slice(1) }));
+  const present = new Set<string>();
+  for (const message of messages) {
+    if (message.role === 'user') {
+      for (const id of writtenAs(message.content, members)) if (id !== NARRATOR_SPEAKER) present.add(id);
+    } else if (message.speakerId) {
+      present.add(message.speakerId);
+    } else if (!isNarration(message.content)) {
+      for (const line of message.content.split('\n')) {
+        const name = lineSpeaker(line, roster);
+        const member = name === undefined ? undefined : members[roster.findIndex((entry) => entry.name === name)];
+        if (member) present.add(member.id);
+      }
+    }
+  }
+  const found = members.filter((member) => present.has(member.id)).map((member) => member.id);
+  return found.length > 0 ? found : null;
 }
 
 /**

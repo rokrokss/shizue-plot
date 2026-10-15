@@ -21,6 +21,8 @@
  * - **Facts ride along** (`facts.ts`): each summary written has its facts
  *   extracted right after it, and each request adds the relevant ones as a
  *   `[기억]` block after the summaries, searched with the same query vectors.
+ *   In a group work a summary keeps the members who spoke in its batch, its
+ *   facts carry them on, and a member's turn is told only what it may know.
  *
  * Everything in the update path is fire-and-forget: it runs after the SSE `done`
  * event and swallows its own failures.
@@ -43,6 +45,7 @@ import {
   nextSummaryBatch,
   rankBySimilarity,
   replyLengthTokens,
+  sceneMembers,
   selectSummaries,
   similarityQueries,
   stripImageMacros,
@@ -62,6 +65,7 @@ import {
   messages,
   personas,
   plots,
+  type Character,
   type Chat,
   type ChatSummary,
   type ContentLanguage,
@@ -77,7 +81,7 @@ import { embedPendingFacts, extractFacts, keepEndedFacts, selectFacts } from './
 import { loadMembers } from './hub.js';
 import { enqueueJob } from './jobs.js';
 import { noteLexicalSearch } from './lexicalHealth.js';
-import { transcriptOf } from './transcript.js';
+import { readerMembers, transcriptOf } from './transcript.js';
 import { buildPath, roundsAlong, visibleToAi } from './tree.js';
 
 /** What one summary call may write; HypaV3 does not cap it, the API needs a number. */
@@ -169,12 +173,18 @@ export function loadSummaries(db: AppDeps['db'] | Tx, chatId: string): Promise<C
  * the facts alike. The random picks are drawn from the chat and the branch's
  * length, as `{{pick}}` is — a regenerate and the prompt inspector see the same
  * selection the turn did.
+ *
+ * `speakerId` is the member a group turn's reply is asked of: its facts are only
+ * those it may know (`selectFacts`) — of a scene it was in, or known to all. The
+ * narrator, a scene reply and a work of one are told every fact. The summaries
+ * are HypaV3's and the same for every speaker, as the history they stand for is.
  */
 export async function buildMemoryInput(
   deps: AppDeps,
   chat: Chat,
   path: Message[],
   answering: readonly Message[],
+  speakerId?: string,
 ): Promise<{ memoryText: string; history: Message[] }> {
   const { applicable, frontier } = applicableSummaries(await loadSummaries(deps.db, chat.id), path);
   const history = path.slice(frontier + 1);
@@ -229,6 +239,7 @@ export async function buildMemoryInput(
         turn: queries.at(-1)!,
         count: settings.factCount,
         line: (fact) => withTimeLabel(fact.content, labels.get(fact.summaryId)!),
+        ...(speakerId !== undefined ? { speakerId } : {}),
       });
     } catch (error) {
       console.warn('[memory] the facts were left out: the queries could not be embedded', error);
@@ -404,6 +415,8 @@ async function updateMemory(deps: AppDeps, chatId: string, continuing: boolean):
   const rounds = roundsAlong(path);
   const first = position.get(batch.messageIds[0]!)!;
   const last = position.get(batch.messageIds.at(-1)!)!;
+  const roster = await loadMembers(deps.db, chat.plotId);
+  const sceneMemberIds = sceneOf(batch.messageIds.map((id) => byId.get(id)!), roster);
   const text = await summarize(deps, chat, {
     messages: summarized,
     userName,
@@ -422,7 +435,7 @@ async function updateMemory(deps: AppDeps, chatId: string, continuing: boolean):
     if (current?.revision !== captured) return null;
     const [summary] = await tx
       .insert(chatSummaries)
-      .values({ chatId, text, messageIds: batch.messageIds, turnFrom: rounds[first]!, turnTo: rounds[last]! })
+      .values({ chatId, text, messageIds: batch.messageIds, turnFrom: rounds[first]!, turnTo: rounds[last]!, sceneMemberIds })
       .returning();
     return summary ?? null;
   });
@@ -465,6 +478,19 @@ async function updateMemory(deps: AppDeps, chatId: string, continuing: boolean):
     batch.messageIds.includes(message.id) ? { ...message, covered: true } : message,
   );
   return { more: nextSummaryBatch(covered, settings, budget, next.continuing) !== null, ...next };
+}
+
+/**
+ * Whom a batch's summary and facts belong to: the members who speak in it (core
+ * `sceneMembers`). Null in a work of one — there is no other member to keep
+ * anything from — and, by the same rule, in a batch nobody spoke in.
+ */
+function sceneOf(batch: readonly Message[], roster: readonly Character[]): string[] | null {
+  if (roster.length < 2) return null;
+  return sceneMembers(
+    batch.map((message) => ({ role: message.role, content: message.content, speakerId: message.speakerMemberId })),
+    readerMembers(roster),
+  );
 }
 
 /** The branch as the batching reads it, and the batch it is due — or null. */

@@ -5,7 +5,9 @@ import {
   FACTS_HEADING,
   FACTS_TOKEN_CAP,
   factCoveredByText,
+  factCoversScene,
   factExtractionRequest,
+  factVisibleTo,
   factLanguageLine,
   factsBlock,
   fitFacts,
@@ -61,7 +63,7 @@ describe('facts', () => {
     expect(parseFacts('{"summary": "요약"}')).toEqual([]);
     expect(parseFacts('{"facts": "하나"}')).toEqual([]);
     expect(parseFacts('{facts: [}')).toEqual([]);
-    expect(parseFactExtraction('null')).toEqual({ added: [], updated: [], invalidated: [], rejected: 0 });
+    expect(parseFactExtraction('null')).toEqual({ added: [], updated: [], invalidated: [], rejected: 0, knownToAll: [] });
   });
 
   it('reads updates and invalidations of the facts it was shown, and no others', () => {
@@ -92,6 +94,7 @@ describe('facts', () => {
       invalidated: [],
       // 4, 0, 1.5, no id, null; then 7, -1 and 'x'.
       rejected: 8,
+      knownToAll: [],
     });
     // Ended with nothing in its place.
     expect(parseFactExtraction('{"facts": [], "invalidated": [2]}', known)).toEqual({
@@ -99,9 +102,60 @@ describe('facts', () => {
       updated: [],
       invalidated: [2],
       rejected: 0,
+      knownToAll: [],
     });
     // Shown nothing, it can change nothing.
     expect(parseFactExtraction('{"facts": [], "updates": [{"id": 1, "fact": "가."}], "invalidated": [1]}').rejected).toBe(2);
+  });
+
+  it("tells a group work's extraction who was on the stage, and reads which new facts everyone knows", () => {
+    const request = factExtractionRequest('세이야: 비밀이야.', 'ko', [], ['세이야', '카이']);
+    expect(request.system).toContain('이 구간의 장면에 있던 등장인물은 세이야, 카이입니다.');
+    expect(request.system).toContain('애매하면 false로 둡니다.');
+    expect(request.system.endsWith(
+      '{"facts": {"fact": string, "public": boolean}[], "updates": {"id": number, "fact": string, "public": boolean}[], "invalidated": number[]}',
+    )).toBe(true);
+    expect(request.system).toContain('사실은 한국어로 씁니다.');
+    // No stage, or a work of one: the instruction as it always was.
+    expect(factExtractionRequest('…', 'ko', [], []).system).toBe(factExtractionRequest('…', 'ko').system);
+
+    const known = ['리안은 살아 있다.'];
+    const answer = JSON.stringify({
+      facts: [{ fact: '왕이 내일 즉위식을 연다고 포고했다.', public: true }, { fact: '세이야는 카이에게 왕의 비밀을 털어놓았다.', public: false }, '카이는 검을 잃었다.', { fact: '' }, { public: true }],
+      updates: [{ id: 1, fact: '리안은 성문에서 죽었다.', public: true }],
+    });
+    expect(parseFactExtraction(answer, known)).toEqual({
+      added: ['왕이 내일 즉위식을 연다고 포고했다.', '세이야는 카이에게 왕의 비밀을 털어놓았다.', '카이는 검을 잃었다.'],
+      updated: [{ id: 1, content: '리안은 성문에서 죽었다.' }],
+      invalidated: [],
+      rejected: 0,
+      knownToAll: ['리안은 성문에서 죽었다.', '왕이 내일 즉위식을 연다고 포고했다.'],
+    });
+
+    // A shown fact only others knew says who did; said again, it is this stage's to learn — unless the answer changed it.
+    const shown = ['리안은 살아 있다.', { fact: '세이야는 왕의 서자다.', knownTo: ['세이야'] }];
+    expect(factExtractionRequest('카이: 들었어.', 'ko', shown, ['카이', '미오']).messages[0]!.content).toContain(
+      `${KNOWN_FACTS_HEADING}\n1. 리안은 살아 있다.\n2. 세이야는 왕의 서자다. [아는 인물: 세이야]\n\n`,
+    );
+    expect(factExtractionRequest('…', 'ko', shown, ['카이']).system).toContain('끝에 [아는 인물: …]이 붙은 사실은 그 인물들만 알던 사실');
+    expect(factExtractionRequest('…', 'ko', shown).messages[0]!.content).toContain('2. 세이야는 왕의 서자다.\n');
+    expect(parseFactExtraction(JSON.stringify({ facts: ['세이야는 왕의 서자다.', '리안은 살아 있다.'] }), shown).added).toEqual(['세이야는 왕의 서자다.']);
+    expect(parseFactExtraction(JSON.stringify({ facts: ['세이야는 왕의 서자다.'], invalidated: [2] }), shown).added).toEqual([]);
+  });
+
+  it('tells a member only the facts of the scenes it was in, and the ones everyone knows', () => {
+    const scene = (ids: string[] | null, knownToAll = false) => ({ sceneMemberIds: ids, knownToAll });
+    expect(factVisibleTo(scene(['seiya', 'kai']), 'kai')).toBe(true);
+    expect(factVisibleTo(scene(['seiya', 'kai']), 'mio')).toBe(false);
+    expect(factVisibleTo(scene(['seiya'], true), 'mio')).toBe(true);
+    expect(factVisibleTo(scene(null), 'mio')).toBe(true);
+    // A fact a fresh one says again covers it only when known to everyone the fresh one would be.
+    expect(factCoversScene(scene(['seiya', 'kai']), scene(['kai']))).toBe(true);
+    expect(factCoversScene(scene(['seiya']), scene(['mio']))).toBe(false);
+    expect(factCoversScene(scene(['seiya']), scene(['seiya'], true))).toBe(false);
+    expect(factCoversScene(scene(['seiya']), scene(null))).toBe(false);
+    expect(factCoversScene(scene(['seiya'], true), scene(['mio']))).toBe(true);
+    expect(factCoversScene(scene(null), scene(['mio'], true))).toBe(true);
   });
 
   it('tells a fact a summary already states, and two facts that say one thing', () => {

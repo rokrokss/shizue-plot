@@ -1,6 +1,13 @@
 import { transcriptLine, type ReaderMember } from '@shizue/core';
 import type { Character, Message } from '@shizue/db';
 
+/** The roster as a reader's `@이름:` lines are read against: every name a member goes by. */
+export const readerMembers = (members: readonly Pick<Character, 'id' | 'name' | 'card'>[]): ReaderMember[] =>
+  members.map((member) => ({
+    id: member.id,
+    names: [member.name, ...(member.card.nickname?.trim() ? [member.card.nickname.trim()] : [])],
+  }));
+
 /**
  * A stretch of the branch as the sidecar models read it (memory, relationship,
  * suggestions), one `transcriptLine` (@shizue/core) per message: a group turn's
@@ -13,10 +20,7 @@ export function transcriptOf(
   userName: string,
   members: readonly Pick<Character, 'id' | 'name' | 'card'>[],
 ): string {
-  const readers: ReaderMember[] = members.map((member) => ({
-    id: member.id,
-    names: [member.name, ...(member.card.nickname?.trim() ? [member.card.nickname.trim()] : [])],
-  }));
+  const readers = readerMembers(members);
   const names = new Map(members.map((member) => [member.id, member.name]));
   return path
     .map((message) =>

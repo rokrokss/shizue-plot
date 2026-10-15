@@ -492,11 +492,21 @@ test('tunes the memory settings, which survive a reload', async () => {
   await expect(page.getByTestId('memory-settings').getByLabel('컨텍스트 예산')).toHaveValue('32000');
 });
 
-test('folds the facts a later summary ended under their own heading, struck, and restores one', async () => {
+test('says who knows each fact, folds the ones a later summary ended under their own heading, struck, and restores one', async () => {
   // The echo model extracts nothing and this API runs without an embedder, so the
   // memory is stood in for: the panel's own reads and the restore it sends.
   const at = '2026-10-15T00:00:00.000Z';
-  const fact = (id: string, content: string, ended?: { turn: number; by?: string }) => ({
+  // A group scene's stage, as the API names it.
+  const stage = [
+    { id: '00000000-0000-4000-8000-0000000000a1', name: '리안' },
+    { id: '00000000-0000-4000-8000-0000000000a2', name: '하준' },
+  ];
+  const fact = (
+    id: string,
+    content: string,
+    ended?: { turn: number; by?: string },
+    scene: { knownTo: typeof stage | null; knownToAll: boolean } = { knownTo: null, knownToAll: false },
+  ) => ({
     id,
     content,
     summaryId: '00000000-0000-4000-8000-000000000001',
@@ -505,6 +515,7 @@ test('folds the facts a later summary ended under their own heading, struck, and
     invalidated: Boolean(ended),
     invalidatedTurn: ended?.turn ?? null,
     supersededBy: ended?.by ? { id: '00000000-0000-4000-8000-0000000000f3', content: ended.by } : null,
+    ...scene,
     createdAt: at,
     updatedAt: at,
   });
@@ -523,7 +534,12 @@ test('folds the facts a later summary ended under their own heading, struck, and
         updatedAt: at,
       },
     ],
-    facts: [ended, promise, fact('00000000-0000-4000-8000-0000000000f3', '리안은 하준에게 수영을 배워 이제 혼자 수영할 수 있다.')],
+    facts: [
+      ended,
+      promise,
+      fact('00000000-0000-4000-8000-0000000000f3', '리안은 하준에게 수영을 배워 이제 혼자 수영할 수 있다.', undefined, { knownTo: stage, knownToAll: false }),
+      fact('00000000-0000-4000-8000-0000000000f4', '강변 수영장은 여름 내내 마을 사람 모두에게 열려 있다.', undefined, { knownTo: stage, knownToAll: true }),
+    ],
   };
   // The panel reads the memory again a few seconds after it opens: once restored, it stays restored.
   const restored = { ...promise, invalidated: false, invalidatedTurn: null };
@@ -546,8 +562,17 @@ test('folds the facts a later summary ended under their own heading, struck, and
     // Read on a phone: the panel stays open as the window narrows.
     await page.setViewportSize({ width: 375, height: 812 });
     const facts = page.getByTestId('memory-facts');
-    await expect(facts.getByTestId('memory-fact')).toHaveCount(1);
-    await expect(facts.getByText('이 갈래의 사실 1개')).toBeVisible();
+    await expect(facts.getByTestId('memory-fact')).toHaveCount(2);
+    await expect(facts.getByText('이 갈래의 사실 2개')).toBeVisible();
+    // A group scene's fact names who may be told it; one everyone knows says so; one of no scene says nothing.
+    const knownTo = facts.getByTestId('memory-fact-known-to');
+    await expect(knownTo).toHaveText(['아는 인물: 리안, 하준', '모두가 아는 사실']);
+    for (const scheme of ['light', 'dark'] as const) {
+      await page.emulateMedia({ colorScheme: scheme });
+      await facts.getByTestId('memory-fact').first().scrollIntoViewIfNeeded();
+      await facts.locator('ul').first().screenshot({ path: `test-results/memory/known-to-${scheme}.png` });
+    }
+    await page.emulateMedia({ colorScheme: 'light' });
     const folded = facts.getByTestId('memory-ended-facts');
     await folded.getByText('더 이상 맞지 않는 사실 2개').click();
     const endedCards = folded.getByTestId('memory-ended-fact');
@@ -565,8 +590,9 @@ test('folds the facts a later summary ended under their own heading, struck, and
 
     // Restored, it stands with the facts that hold again.
     await endedCards.nth(1).getByRole('button', { name: '되살리기' }).click();
-    await expect(facts.getByTestId('memory-fact')).toHaveCount(2);
+    await expect(facts.getByTestId('memory-fact')).toHaveCount(3);
     await expect(facts.getByTestId('memory-fact').getByText(promise.content)).toBeVisible();
+    await expect(knownTo).toHaveCount(2);
     await expect(folded.getByTestId('memory-ended-fact')).toHaveCount(1);
   } finally {
     await page.unrouteAll({ behavior: 'wait' });

@@ -735,6 +735,10 @@ const tsvector = customType<{ data: string; driverData: string }>({
 // never changes, since a delete takes the messages under it too. Null on the
 // summaries written before they were kept; the memory reads a summary's turns
 // off the branch it applies to, so nothing depends on them.
+// `scene_member_ids` are the members on the stage of a group work's batch — who
+// speaks in it (@shizue/core `sceneMembers`) — which its facts carry on. Null
+// for a work of one, a batch nobody spoke in, and the summaries from before
+// scenes were kept: known to every member.
 export const chatSummaries = pgTable(
   'chat_summaries',
   {
@@ -747,6 +751,7 @@ export const chatSummaries = pgTable(
     important: boolean('important').notNull().default(false),
     turnFrom: integer('turn_from'),
     turnTo: integer('turn_to'),
+    sceneMemberIds: uuid('scene_member_ids').array(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -898,6 +903,12 @@ export const messageTranslations = pgTable(
 // the one that ended it stays moves to that one (`summary_id`), so the stretch
 // summarized again does not bring it back. `turn_from`/`turn_to` are the turns
 // its summary covered when it was extracted; null on older facts.
+//
+// In a group work a fact is known to the members on its summary's stage
+// (`scene_member_ids`, copied from the summary when it is extracted, so a fact
+// that moves to the summary that ended it keeps its own), unless the extraction
+// marked it as one everyone knows (`known_to_all`). A member's turn is told only
+// the facts it may know; null members, as on the summary, are known to all.
 export const memories = pgTable(
   'memories',
   {
@@ -924,6 +935,8 @@ export const memories = pgTable(
     }),
     invalidatedTurn: integer('invalidated_turn'),
     supersededById: uuid('superseded_by_id'),
+    sceneMemberIds: uuid('scene_member_ids').array(),
+    knownToAll: boolean('known_to_all').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

@@ -928,6 +928,8 @@
     "memoryFactsCount": "このブランチの事実 {count}件",
     "memoryFactEditLabel": "事実の内容",
     "memoryFactDeleteConfirm": "この事実を削除しますか？",
+    "memoryFactKnownTo": "知っている人物: {names}",
+    "memoryFactKnownToAll": "全員が知っている事実",
     "memoryEndedFacts": "もう当てはまらない事実 {count}件",
     "memoryEndedHint": "後の話で変わったり終わったりしたため、もう送らない事実です。誤って書き直された場合は元に戻せます。",
     "memoryEndedAt": "{turn}ターン目で終了",

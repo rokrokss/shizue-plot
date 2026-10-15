@@ -19,6 +19,12 @@
  *   summary goes while the one that ended it stays, it moves to that one
  *   (`keepEndedFacts`), so the stretch summarized again cannot bring it back: a
  *   new fact that says it again is left out.
+ * - **A group work's fact is known to its scene** (ARCHITECTURE §7.3 장면의
+ *   멤버): the members who spoke in its summary's batch (`scene_member_ids`,
+ *   copied onto the fact), unless the extraction marked it as one everyone knows
+ *   (`known_to_all`). A member's turn is told only those it may know; the
+ *   narrator, a scene reply and a work of one are told all. Null members — a
+ *   work of one, a batch nobody spoke in, a fact from before — are everyone's.
  * - **Vectors are the plot's model's**, as the summaries' chunks are; a fact
  *   without one of the current model is embedded by the next refresh.
  * - **Each request picks** the chat's `factCount` most similar to the latest
@@ -31,7 +37,9 @@
  */
 import {
   factCoveredByText,
+  factCoversScene,
   factExtractionRequest,
+  factVisibleTo,
   fitFacts,
   hybridRanking,
   lexicalRanking,
@@ -40,6 +48,8 @@ import {
   rankBySimilarity,
   sameFact,
   summaryChunks,
+  type FactScene,
+  type KnownFact,
 } from '@shizue/core';
 import {
   chats,
@@ -47,6 +57,7 @@ import {
   chatSummaryChunks,
   memories,
   plots,
+  type Character,
   type Chat,
   type ChatSummary,
   type ContentLanguage,
@@ -102,8 +113,8 @@ const holdsOnSql = (branchIds: readonly string[]) =>
 export interface ExtractionInput {
   chat: Pick<Chat, 'id' | 'userId' | 'plotId' | 'subModel'>;
   plotLanguage: ContentLanguage;
-  /** The summary just written, whose messages the facts come from. */
-  summary: Pick<ChatSummary, 'id' | 'text' | 'turnFrom' | 'turnTo'>;
+  /** The summary just written, whose messages the facts come from, and whose stage they are known on. */
+  summary: Pick<ChatSummary, 'id' | 'text' | 'turnFrom' | 'turnTo' | 'sceneMemberIds'>;
   /** Those messages, oldest first, as the summary was made from them. */
   messages: Message[];
   userName: string;
@@ -118,7 +129,7 @@ export interface ExtractionInput {
 }
 
 /** A fact of the branch as the extraction weighs it. */
-type BranchFact = Pick<Memory, 'id' | 'content' | 'summaryId' | 'invalidatedBySummaryId'>;
+type BranchFact = Pick<Memory, 'id' | 'content' | 'summaryId' | 'invalidatedBySummaryId' | 'sceneMemberIds' | 'knownToAll'>;
 
 /**
  * Extracts the facts of a summary just written and stores them, embedded where
@@ -129,9 +140,16 @@ type BranchFact = Pick<Memory, 'id' | 'content' | 'summaryId' | 'invalidatedBySu
  * A new fact — added, or an update's new words — that a fact holding on the
  * branch already says (the same words, or a vector at `FACT_DUPLICATE_SIMILARITY`)
  * is left out; an update that only says what another fact says ends the old one
- * in favour of that one. A new fact that says what a summary later on the branch
- * ended is left out too (a gap summarized again). Nothing is written once the
- * summary is gone (an edit dropped it while the model was answering).
+ * in favour of that one. In a group work that other fact must be known to every
+ * member the new one would be (`factCoversScene`): what one member learned in
+ * private does not stand in for what another learns in its own scene. A new fact
+ * that says what a summary later on the branch ended is left out too (a gap
+ * summarized again). Nothing is written once the summary is gone (an edit
+ * dropped it while the model was answering).
+ *
+ * In a group work (the summary has members, ARCHITECTURE §7.3 장면의 멤버) the
+ * model is told who was on the stage and marks what everyone knows; each fact
+ * keeps the summary's members and that mark.
  */
 export async function extractFacts(deps: AppDeps, embedder: Embedder, input: ExtractionInput): Promise<void> {
   try {
@@ -149,6 +167,8 @@ export async function extractFacts(deps: AppDeps, embedder: Embedder, input: Ext
               content: memories.content,
               summaryId: memories.summaryId,
               invalidatedBySummaryId: memories.invalidatedBySummaryId,
+              sceneMemberIds: memories.sceneMemberIds,
+              knownToAll: memories.knownToAll,
             })
             .from(memories)
             .where(inArray(memories.summaryId, [...branchIds]))
@@ -156,12 +176,17 @@ export async function extractFacts(deps: AppDeps, embedder: Embedder, input: Ext
     const holding = branchFactsNow.filter((fact) => holdsOn(fact, branchIds));
     const known = await knownFacts(deps, embedder, input, holding.filter((fact) => earlierIds.has(fact.summaryId)));
 
-    const transcript = transcriptOf(input.messages, input.userName, await loadMembers(deps.db, input.chat.plotId));
-    const request = factExtractionRequest(
-      transcript,
-      input.conversationLanguage,
-      known.map((fact) => fact.content),
-    );
+    const roster = await loadMembers(deps.db, input.chat.plotId);
+    const transcript = transcriptOf(input.messages, input.userName, roster);
+    const scene = input.summary.sceneMemberIds;
+    const namesOf = (ids: readonly string[]): string[] => roster.filter((member) => ids.includes(member.id)).map((member) => member.name);
+    // In a group work, a shown fact this stage did not all know says who did: learned here, it is said again.
+    const shown: KnownFact[] = known.map((fact) => {
+      const othersOnly = scene !== null && !factCoversScene(fact, { sceneMemberIds: scene, knownToAll: false });
+      const knownTo = othersOnly ? namesOf(fact.sceneMemberIds ?? []) : [];
+      return knownTo.length > 0 ? { fact: fact.content, knownTo } : fact.content;
+    });
+    const request = factExtractionRequest(transcript, input.conversationLanguage, shown, scene ? namesOf(scene) : undefined);
     const answer = await collect(resolved.adapter, {
       model: resolved.providerModel,
       system: request.system,
@@ -169,10 +194,7 @@ export async function extractFacts(deps: AppDeps, embedder: Embedder, input: Ext
       maxTokens: FACTS_MAX_TOKENS,
       abortSignal: AbortSignal.timeout(FACTS_TIMEOUT_MS),
     });
-    const parsed = parseFactExtraction(
-      answer.replace(/<Thoughts>[\s\S]*?<\/Thoughts>/g, ''),
-      known.map((fact) => fact.content),
-    );
+    const parsed = parseFactExtraction(answer.replace(/<Thoughts>[\s\S]*?<\/Thoughts>/g, ''), shown);
     const changed = new Set([...parsed.updated.map((update) => update.id), ...parsed.invalidated].map((id) => known[id - 1]!.id));
     // What a new fact must not repeat: what still holds once this answer's changes are made.
     const standing = holding.filter((fact) => !changed.has(fact.id));
@@ -204,11 +226,20 @@ export async function extractFacts(deps: AppDeps, embedder: Embedder, input: Ext
       return hit && Number(hit.score) >= FACT_DUPLICATE_SIMILARITY ? hit.id : null;
     };
 
+    /** Who a new sentence is known to: the summary's stage, or everyone where the answer says so. */
+    const sceneOf = (content: string): FactScene => ({
+      sceneMemberIds: scene,
+      knownToAll: scene !== null && parsed.knownToAll.includes(content),
+    });
+    /** The standing facts a new sentence would add nothing to: known to everyone it would be. */
+    const covering = (content: string): BranchFact[] =>
+      standing.filter((fact) => factCoversScene(fact, sceneOf(content)));
+
     let suppressed = 0;
     const added: { content: string; vector: number[] | null }[] = [];
     for (const [index, content] of parsed.added.entries()) {
       const vector = embedded?.vectors[index];
-      if (await saidBy(content, vector, standing)) continue;
+      if (await saidBy(content, vector, covering(content))) continue;
       if (await saidBy(content, vector, endedLater)) {
         suppressed += 1;
         continue;
@@ -219,14 +250,16 @@ export async function extractFacts(deps: AppDeps, embedder: Embedder, input: Ext
     for (const [at, update] of parsed.updated.entries()) {
       const vector = embedded?.vectors[parsed.added.length + at];
       const old = known[update.id - 1]!.id;
-      const already = await saidBy(update.content, vector, standing);
+      const already = await saidBy(update.content, vector, covering(update.content));
       updates.push({ old, content: update.content, vector: vector ?? null, supersededBy: already });
     }
     const invalidated = parsed.invalidated.map((id) => known[id - 1]!.id);
 
+    const written = [...added, ...updates.filter((update) => update.supersededBy === null)];
+    const shared = scene === null ? '' : `, ${written.filter((fact) => sceneOf(fact.content).knownToAll).length} known to all`;
     console.log(
       `[facts] chat ${input.chat.id}: ${added.length} added, ${updates.length} updated, ${invalidated.length} invalidated` +
-        ` of ${known.length} shown, ${parsed.rejected} rejected, ${suppressed} ended later`,
+        ` of ${known.length} shown, ${parsed.rejected} rejected, ${suppressed} ended later${shared}`,
     );
     if (added.length === 0 && updates.length === 0 && invalidated.length === 0) return;
 
@@ -244,14 +277,13 @@ export async function extractFacts(deps: AppDeps, embedder: Embedder, input: Ext
       if (!summary) return;
       // A millisecond apart, so the extraction's order is the order they are listed and sent in.
       const at = Date.now();
-      const fresh = [...added, ...updates.filter((update) => update.supersededBy === null)];
       const rows =
-        fresh.length === 0
+        written.length === 0
           ? []
           : await tx
               .insert(memories)
               .values(
-                fresh.map((fact, index) => ({
+                written.map((fact, index) => ({
                   createdAt: new Date(at + index),
                   userId: input.chat.userId,
                   plotId: input.chat.plotId,
@@ -261,6 +293,8 @@ export async function extractFacts(deps: AppDeps, embedder: Embedder, input: Ext
                   model: fact.vector ? model : null,
                   embedding: fact.vector,
                   ...turns,
+                  sceneMemberIds: scene,
+                  knownToAll: sceneOf(fact.content).knownToAll,
                 })),
               )
               .returning({ id: memories.id, content: memories.content });
@@ -409,6 +443,8 @@ export interface FactSelectionInput {
   count: number;
   /** A fact's line as the block carries it, from its summary: its time label and its words (`withTimeLabel`). */
   line: (fact: { content: string; summaryId: string }) => string;
+  /** The member a group turn's reply is asked of: only the facts it may know (`factVisibleTo`) are picked. */
+  speakerId?: string;
 }
 
 /**
@@ -418,16 +454,27 @@ export interface FactSelectionInput {
  * (`rankBySimilarity`, the newest turn weighing most) and fused with their BM25
  * ranking for the newest turn (`hybridRanking`), without the ones a selected
  * summary already says or another picked fact says, at most `count`, within the
- * block's cap. Empty when the branch has no fact of the plot's model; throws
- * when the query vectors do, which the caller turns into no block.
+ * block's cap. On a member's turn (`speakerId`) the facts of scenes it was not
+ * in are not eligible, unless everyone knows them. Empty when the branch has no
+ * fact of the plot's model; throws when the query vectors do, which the caller
+ * turns into no block.
  */
 export async function selectFacts(deps: AppDeps, input: FactSelectionInput): Promise<string[]> {
   if (input.count <= 0 || input.applicable.length === 0) return [];
   const summaryIds = input.applicable.map((summary) => summary.id);
-  const eligible = await deps.db
-    .select({ id: memories.id, content: memories.content, summaryId: memories.summaryId, createdAt: memories.createdAt })
-    .from(memories)
-    .where(and(inArray(memories.summaryId, summaryIds), eq(memories.model, input.model), holdsOnSql(summaryIds)));
+  const eligible = (
+    await deps.db
+      .select({
+        id: memories.id,
+        content: memories.content,
+        summaryId: memories.summaryId,
+        createdAt: memories.createdAt,
+        sceneMemberIds: memories.sceneMemberIds,
+        knownToAll: memories.knownToAll,
+      })
+      .from(memories)
+      .where(and(inArray(memories.summaryId, summaryIds), eq(memories.model, input.model), holdsOnSql(summaryIds)))
+  ).filter((fact) => input.speakerId === undefined || factVisibleTo(fact, input.speakerId));
   if (eligible.length === 0) return [];
 
   const { model, vectors } = await input.queryVectors();
@@ -514,11 +561,16 @@ export async function selectFacts(deps: AppDeps, input: FactSelectionInput): Pro
 
 /* ----------------------------------------------------------------- listing */
 
-/** A fact as the memory panel shows it; `branchIds` are the summaries applying to the branch it is read on. */
+/**
+ * A fact as the memory panel shows it; `branchIds` are the summaries applying to
+ * the branch it is read on, `roster` the work's members, by whose names its
+ * scene is told.
+ */
 export function toFactJson(
   row: Memory,
   branchIds: ReadonlySet<string>,
   supersededBy: Pick<Memory, 'id' | 'content'> | null,
+  roster: readonly Pick<Character, 'id' | 'name'>[],
 ) {
   const ended = !holdsOn(row, branchIds);
   return {
@@ -531,6 +583,13 @@ export function toFactJson(
     invalidated: ended,
     invalidatedTurn: ended ? row.invalidatedTurn : null,
     supersededBy: ended && supersededBy ? { id: supersededBy.id, content: supersededBy.content } : null,
+    /** The members of a group work's scene it was taken in, a member since deleted left out; null: known to everyone. */
+    knownTo:
+      row.sceneMemberIds === null
+        ? null
+        : roster.filter((member) => row.sceneMemberIds!.includes(member.id)).map(({ id, name }) => ({ id, name })),
+    /** Marked by the extraction as one every member knows, whatever scene it came from. */
+    knownToAll: row.knownToAll,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -540,7 +599,11 @@ export function toFactJson(
  * The facts of the summaries applying to the branch, in its order — those that
  * hold and those a summary on it ended alike: what the memory panel lists.
  */
-export async function branchFacts(deps: AppDeps, applicable: readonly Pick<ChatSummary, 'id'>[]) {
+export async function branchFacts(
+  deps: AppDeps,
+  applicable: readonly Pick<ChatSummary, 'id'>[],
+  roster: readonly Pick<Character, 'id' | 'name'>[],
+) {
   if (applicable.length === 0) return [];
   const summaryIds = applicable.map((summary) => summary.id);
   const rows = await deps.db
@@ -553,5 +616,5 @@ export async function branchFacts(deps: AppDeps, applicable: readonly Pick<ChatS
   const branchIds = new Set(summaryIds);
   return rows
     .sort((a, b) => position.get(a.summaryId)! - position.get(b.summaryId)!)
-    .map((row) => toFactJson(row, branchIds, row.supersededById ? byId.get(row.supersededById) ?? null : null));
+    .map((row) => toFactJson(row, branchIds, row.supersededById ? byId.get(row.supersededById) ?? null : null, roster));
 }
