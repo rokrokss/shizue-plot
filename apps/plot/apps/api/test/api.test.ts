@@ -91,7 +91,6 @@ import {
   readerPresets,
   user,
   userNotes,
-  type ChatMemory,
   type ChatRelationship,
   type ContentLanguage,
   type Db,
@@ -9031,35 +9030,6 @@ describe('memory', () => {
     expect((await request(cookie, base, 'DELETE')).status).toBe(404);
   });
 
-  it('turns an old rolling summary into one summary covering up to its anchor (migration 0011)', async () => {
-    const cookie = await signUp('memory-convert@example.com');
-    const { chatId } = await setupChat(cookie);
-    const harness = memoryApp();
-    const path = await shortTurns(cookie, chatId, harness, 3);
-    const ids = path.map((message: any) => message.id);
-    // A hidden message above the anchor was never in the summary.
-    await db.update(messages).set({ hiddenFromPrompt: true }).where(eq(messages.id, ids[1]));
-    const memory: ChatMemory = { summary: `  ${SUMMARY}  `, anchorMessageId: ids[4], updatedAt: '2026-10-01T00:00:00.000Z' };
-    await db
-      .update(chats)
-      .set({ memory, memorySettings: { contextBudget: 8000, summaryThreshold: 0.4, retrievalCount: 3 } as never })
-      .where(eq(chats.id, chatId));
-
-    const migration = await readFile(new URL('../../../packages/db/drizzle/0011_hypav3_memory.sql', import.meta.url), 'utf8');
-    for (const statement of migration.split('--> statement-breakpoint')) {
-      if (statement.includes('INSERT INTO "chat_summaries"') || statement.includes('UPDATE "chats"')) await sql.unsafe(statement);
-    }
-
-    const [summary] = await db.select().from(chatSummaries).where(eq(chatSummaries.chatId, chatId));
-    expect(summary).toMatchObject({ text: SUMMARY, important: false, messageIds: [ids[0], ids[2], ids[3], ids[4]] });
-    expect(summary!.createdAt.toISOString()).toBe('2026-10-01T00:00:00.000Z');
-    const [chat] = await db.select({ memorySettings: chats.memorySettings }).from(chats).where(eq(chats.id, chatId));
-    expect(chat!.memorySettings).toEqual({ contextBudget: 8000 });
-    // It applies like any other: the history starts after the anchor.
-    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app));
-    expect(undated(harness.prompts.at(-1)!.system)).toContain(`${MEMORY_HEADING}\n${SUMMARY}`);
-  });
-
   /** An imported history of `length` long messages, its import completed with a backfill. */
   async function importedBacklog(cookie: string, target: Hono<AppEnv>, length: number, sha: string): Promise<string> {
     const plot = await createPlot(cookie);
@@ -16147,46 +16117,6 @@ describe('the browser script runtime', () => {
     expect((await readJson(past)).code).toBe('script_overlay_limit');
     // Refused whole: the commit's other writes did not land either.
     expect((await scriptsOf(reader, two.chat.id)).scripts.overlay.member.firstMessage).toBeUndefined();
-  });
-
-  it("moves each reader's per-chat overlays to the reader and the plot, the chat touched last winning", async () => {
-    const { plotId, memberId } = await scriptedPlot('scripts-migrate@example.com');
-    const reader = await signUp('scripts-migrate-reader@example.com');
-    const older = await startChat(reader, plotId);
-    const newer = await startChat(reader, plotId);
-    const untouched = await startChat(reader, plotId);
-    const other = await signUp('scripts-migrate-other@example.com');
-    const theirs = await startChat(other, plotId);
-    const at = (minutes: number): Date => new Date(Date.UTC(2026, 9, 1, 0, minutes));
-    await db
-      .update(chats)
-      .set({ scriptOverlay: { members: { [memberId]: { description: '오래된 챗', name: '옛 이름' } } }, updatedAt: at(1) })
-      .where(eq(chats.id, older.chat.id));
-    await db
-      .update(chats)
-      .set({ scriptOverlay: { members: { [memberId]: { description: '최근 챗' } }, persona: '최근 페르소나' }, updatedAt: at(2) })
-      .where(eq(chats.id, newer.chat.id));
-    // Touched last of all, but nothing to move.
-    await db.update(chats).set({ updatedAt: at(3) }).where(eq(chats.id, untouched.chat.id));
-    await db
-      .update(chats)
-      .set({ scriptOverlay: { persona: '다른 독자' }, updatedAt: at(0) })
-      .where(eq(chats.id, theirs.chat.id));
-
-    // The migration's own statement, run over these rows as it ran over the stored ones.
-    const migration = await readFile(new URL('../../../packages/db/drizzle/0007_reader_overlay.sql', import.meta.url), 'utf8');
-    const move = migration.split('--> statement-breakpoint').at(-1)!;
-    expect(move).toContain('INSERT INTO "plot_reader_overlays"');
-    await sql.unsafe(move);
-
-    // Whole, from the chat touched last that had one — not merged with the older chat's name.
-    for (const chat of [older, newer, untouched]) {
-      expect((await scriptsOf(reader, chat.chat.id)).scripts.overlay).toEqual({
-        member: { description: '최근 챗' },
-        persona: '최근 페르소나',
-      });
-    }
-    expect((await scriptsOf(other, theirs.chat.id)).scripts.overlay).toEqual({ member: null, persona: '다른 독자' });
   });
 });
 

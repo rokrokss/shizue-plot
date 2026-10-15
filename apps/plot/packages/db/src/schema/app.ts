@@ -72,18 +72,6 @@ export interface JobPayloadMap {
 }
 export type JobPayload = JobPayloadMap[JobKind];
 
-/**
- * The single rolling summary the memory kept before HypaV3 (`chats.memory`).
- * Retired: migration 0011 turned each one into a summary of `chat_summaries`,
- * and nothing reads or writes the column since.
- */
-export interface ChatMemory {
-  summary: string;
-  /** Last message the summary covers; only valid while it is on the current path. */
-  anchorMessageId: string;
-  updatedAt: string;
-}
-
 /** Context budgets a chat may pick from; the middle one is the default. */
 export const MEMORY_CONTEXT_BUDGETS = [8000, 16000, 32000] as const;
 
@@ -528,10 +516,6 @@ export const chats = pgTable(
     // Leaf of the currently selected branch. Intentionally unconstrained to avoid a
     // circular FK with messages.chat_id.
     headMessageId: uuid('head_message_id'),
-    // Retired: the rolling summary before HypaV3. Migration 0011 moved each into
-    // `chat_summaries`; the column stays unread, as `script_overlay` does, for a
-    // process still running the code before it.
-    memory: jsonb('memory').$type<ChatMemory>(),
     // Memory tuning for this chat; null means every pipeline default.
     memorySettings: jsonb('memory_settings').$type<ChatMemorySettings>(),
     // Bumped by every event that can invalidate the memory layer (an edit, a
@@ -574,12 +558,6 @@ export const chats = pgTable(
     // True while an import is still writing the history in batches. Nothing but
     // the import may write to the chat until it is finished.
     importing: boolean('importing').notNull().default(false),
-    // Retired: the card's scripts' rewrites of the work were kept here, per chat,
-    // until they moved to the reader and the plot (`plot_reader_overlays`, which
-    // migration 0007 filled from this column). Nothing reads or writes it any
-    // more; it stays so a process still running the code from before that
-    // migration does not fail on a column it names.
-    scriptOverlay: jsonb('script_overlay').$type<ChatScriptOverlay>(),
     // RisuAI's chat `localLore`: the entries a card's Lua upserted
     // (`upsertLocalLoreBook`), which belong to this chat alone and are activated
     // after the scripted member's own lore. Null until a script writes one. Per

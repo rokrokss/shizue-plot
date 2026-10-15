@@ -169,6 +169,13 @@
       "when": 1792072537662,
       "tag": "0023_attachment_names_and_preset_defaults",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1792093129809,
+      "tag": "0024_drop_retired_chat_columns",
+      "breakpoints": true
     }
   ]
 }
