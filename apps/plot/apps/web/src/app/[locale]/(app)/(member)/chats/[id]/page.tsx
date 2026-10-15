@@ -284,8 +284,14 @@ interface ViewMessage {
   id: string | null;
   role: MessageRole;
   content: string;
-  /** A greeting with its conditions decided (`lib/greeting`), where that differs from what is stored. */
+  /**
+   * A greeting with its conditions decided (`lib/greeting`), or the text
+   * SillyTavern showed in the message's place, where that differs from what is stored.
+   */
   shown?: string;
+  /** What SillyTavern kept beside a message it brought in: the reasoning, and the reader's bias. */
+  reasoning?: string;
+  bias?: string;
   /** Images sent with the turn — already uploaded ones on the optimistic bubble. */
   attachments: ChatAttachment[];
   /** null for the same two: nothing is stored, so nothing has a time yet. */
@@ -2882,12 +2888,18 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       id: message.id,
       role: message.role,
       content: continued ? message.content + streamText : message.content,
-      // What the display triggers draw, else the greeting as its conditions decide it.
+      // What the display triggers draw, else what SillyTavern showed in the
+      // message's place (`extra.display_text || mes`), else the greeting as its
+      // conditions decide it.
       ...(!continued && scriptShown.has(message.id)
         ? { shown: scriptShown.get(message.id)! }
-        : shownGreetings.has(message.id)
-          ? { shown: shownGreetings.get(message.id)! }
-          : {}),
+        : !continued && message.displayText
+          ? { shown: message.displayText }
+          : shownGreetings.has(message.id)
+            ? { shown: shownGreetings.get(message.id)! }
+            : {}),
+      ...(message.reasoning ? { reasoning: message.reasoning } : {}),
+      ...(message.bias ? { bias: message.bias } : {}),
       attachments: message.attachments,
       createdAt: message.createdAt,
       streaming: continued && mode !== null,
@@ -3379,6 +3391,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                         role={message.role}
                         content={message.content}
                         {...(message.shown !== undefined ? { shown: message.shown } : {})}
+                        {...(message.reasoning ? { reasoning: message.reasoning } : {})}
+                        {...(message.bias ? { bias: message.bias } : {})}
                         name={message.role === 'user' ? (personaName ?? t('you')) : characterName}
                         avatar={plot?.coverUrl ?? null}
                         userImage={personaAvatarUrl}
@@ -3392,8 +3406,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                           ) ?? resolveAsset
                         }
                         attachments={message.attachments}
-                        {...(displayContextAt(displayOf(message), meta.depth)
-                          ? { display: displayContextAt(displayOf(message), meta.depth)! }
+                        {...(displayContextAt(displayOf(message), meta.depth, message.role)
+                          ? { display: displayContextAt(displayOf(message), meta.depth, message.role)! }
                           : {})}
                         {...(buttonsOf(message) ? { buttons: buttonsOf(message)! } : {})}
                         {...(components ? { components } : {})}

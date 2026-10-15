@@ -325,6 +325,13 @@ export interface DisplayScript {
    */
   minDepth?: number;
   maxDepth?: number;
+  /**
+   * The only messages the script runs on, by who wrote them — SillyTavern's
+   * placement of a display-only script: `USER_INPUT` alone is the reader's
+   * turns, `AI_OUTPUT` alone the replies. Absent, every message, as RisuAI's
+   * display scripts run (`inDisplayRole`).
+   */
+  role?: 'user' | 'assistant';
 }
 
 export type DisplayScriptAction = 'move_top' | 'move_bottom' | 'repeat_back';
@@ -759,6 +766,12 @@ export interface ImportProvenance {
   platform?: string;
   /** How it arrived. Absent means a card file, which is what every older row is. */
   method?: 'file' | 'url' | 'backup' | 'paste';
+  /**
+   * A chat's SillyTavern branch and checkpoint files that went into it as
+   * sibling branches (`chat_metadata.main_chat` naming the file it was made
+   * from) — what a second run recognizes them by.
+   */
+  branches?: { fileName: string; sha256: string }[];
 }
 
 /**
@@ -783,6 +796,22 @@ export interface ImportedChatMessage {
   speakerId?: string;
   /** Hidden from the AI, every version (`messages.hidden_from_prompt`): what ST keeps out of the prompt. */
   hidden?: boolean;
+  /**
+   * What SillyTavern kept beside each version (`extra` — the selected one's on
+   * the message, the others' in `swipe_info`), parallel to `versions`: null for
+   * a version that kept nothing. Absent when no version kept anything.
+   */
+  extras?: (ImportedMessageExtra | null)[];
+}
+
+/** The parts of a SillyTavern message's `extra` a message here keeps (`messages.display_text`, …). */
+export interface ImportedMessageExtra {
+  /** `display_text`: what ST shows in place of the text — its translation. */
+  displayText?: string;
+  /** `reasoning`: the model's thinking before the reply. */
+  reasoning?: string;
+  /** `bias`: the reader's `{{bias}}`, on their turn. */
+  bias?: string;
 }
 
 /** No `tokenBudget`: a card that names none gets the automatic one. */

@@ -45,7 +45,7 @@
  */
 
 import { unescapeCbs } from '@shizue/core/cbs';
-import { inDisplayDepth } from '@shizue/core/display-script';
+import { inDisplayDepth, inDisplayRole } from '@shizue/core/display-script';
 import { stripVariableMacros, type Variables } from '@shizue/core/variables';
 import { drawFrom, holdsCbs, renderProse, renderTemplate, RenderBudgetExhausted, type CbsContext } from './cbs';
 import { sanitizeCustomHtml } from './sanitizeHtml';
@@ -89,19 +89,28 @@ const subsetsOf = new WeakMap<readonly DisplayScript[], Map<string, DisplayScrip
 const contextsOf = new WeakMap<DisplayContext, Map<DisplayScript[], DisplayContext>>();
 
 /**
- * The scripts that run on a message `depth` deep — SillyTavern's regex min/max
- * depth (`inDisplayDepth`): a script out of range is never matched, so its
- * pattern costs that message nothing. The list itself wherever all of it runs —
- * every list with no range in it, and every message with no depth (one hidden
- * from the AI) — and otherwise the same array for the same subset, since the
- * planner tells a fresh plan by the list: a row whose subset did not change as
- * the chat grew keeps its plan.
+ * The scripts that run on a message `depth` deep of `role` — SillyTavern's
+ * regex min/max depth (`inDisplayDepth`) and its placement (`inDisplayRole`): a
+ * script out of range, or placed on the other side's messages, is never
+ * matched, so its pattern costs that message nothing. The list itself wherever
+ * all of it runs — every list with no range and no role in it, and every
+ * message with no depth (one hidden from the AI) in a list with no role — and
+ * otherwise the same array for the same subset, since the planner tells a fresh
+ * plan by the list: a row whose subset did not change as the chat grew keeps
+ * its plan.
  */
-export function displayScriptsAt(scripts: DisplayScript[], depth: number | undefined): DisplayScript[] {
-  if (depth === undefined || !scripts.some((script) => script.minDepth !== undefined || script.maxDepth !== undefined)) {
-    return scripts;
-  }
-  const keep = scripts.map((script) => inDisplayDepth(script, depth));
+export function displayScriptsAt(
+  scripts: DisplayScript[],
+  depth: number | undefined,
+  role?: 'user' | 'assistant',
+): DisplayScript[] {
+  const ranged =
+    depth !== undefined && scripts.some((script) => script.minDepth !== undefined || script.maxDepth !== undefined);
+  const placed = role !== undefined && scripts.some((script) => script.role !== undefined);
+  if (!ranged && !placed) return scripts;
+  const keep = scripts.map(
+    (script) => (!ranged || inDisplayDepth(script, depth)) && (!placed || inDisplayRole(script, role!)),
+  );
   if (keep.every(Boolean)) return scripts;
   const key = keep.map((kept) => (kept ? '1' : '0')).join('');
   let subsets = subsetsOf.get(scripts);
@@ -127,9 +136,10 @@ export function displayScriptsAt(scripts: DisplayScript[], depth: number | undef
 export function displayContextAt(
   context: DisplayContext | undefined,
   depth: number | undefined,
+  role?: 'user' | 'assistant',
 ): DisplayContext | undefined {
   if (!context) return undefined;
-  const scripts = displayScriptsAt(context.scripts, depth);
+  const scripts = displayScriptsAt(context.scripts, depth, role);
   if (scripts === context.scripts) return context;
   let narrowed = contextsOf.get(context);
   if (!narrowed) {

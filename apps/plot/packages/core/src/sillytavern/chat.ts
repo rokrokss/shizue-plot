@@ -31,7 +31,7 @@
 import { AUTHOR_NOTE_MAX, coerceAuthorNoteSettings, type AuthorNoteRole, type AuthorNoteSettings } from '../authorNote.js';
 import { withNarrationPrefix } from '../narration.js';
 import { spokenBy } from '../speech.js';
-import type { ImportedChatMessage } from '../types.js';
+import type { ImportedChatMessage, ImportedMessageExtra } from '../types.js';
 import {
   MAX_DELTA_CHARS,
   MAX_DELTA_KEYS,
@@ -216,16 +216,45 @@ function speakerOf(cast: StCast, avatar: unknown, name: string): StCast['members
   );
 }
 
+/** A string field of `extra`, without the U+0000 Postgres cannot store; undefined when blank. */
+function extraText(extra: Json, key: string): string | undefined {
+  const text = textOf(extra[key]).replace(/\u0000/g, '');
+  return text.trim() ? text : undefined;
+}
+
+/**
+ * What a message keeps of one version's `extra` (`ImportedMessageExtra`), or
+ * null for none: the text ST shows in its place (`display_text`, which ST draws
+ * as `extra.display_text || mes`, so a blank one is none), the reasoning, and the
+ * bias.
+ */
+function extraOf(extra: unknown): ImportedMessageExtra | null {
+  if (!isObject(extra)) return null;
+  const displayText = extraText(extra, 'display_text');
+  const reasoning = extraText(extra, 'reasoning');
+  const bias = extraText(extra, 'bias');
+  if (displayText === undefined && reasoning === undefined && bias === undefined) return null;
+  return {
+    ...(displayText !== undefined ? { displayText } : {}),
+    ...(reasoning !== undefined ? { reasoning } : {}),
+    ...(bias !== undefined ? { bias } : {}),
+  };
+}
+
 /**
  * The versions a message carries: its swipes when it has any, else its text.
  * `mes` is what ST shows and edits, so it fills the selected swipe's slot even
  * where the swipes array fell out of step. Blank versions are dropped, and the
  * selection follows the one it pointed at, or the first left when that is gone.
+ *
+ * Each version's `extra` comes with it: the message's own for the selected one
+ * — ST keeps the live swipe's there — and `swipe_info[i].extra` for the others,
+ * where ST keeps what each swipe had (`syncMesToSwipe`).
  */
-function versionsOf(message: Json): { versions: string[]; selected: number } {
+function versionsOf(message: Json): { versions: string[]; selected: number; extras: (ImportedMessageExtra | null)[] } {
   const mes = textOf(message['mes']);
   const swipes = Array.isArray(message['swipes']) ? message['swipes'].map(textOf) : [];
-  if (swipes.length === 0) return { versions: [mes], selected: 0 };
+  if (swipes.length === 0) return { versions: [mes], selected: 0, extras: [extraOf(message['extra'])] };
 
   const swipeId = message['swipe_id'];
   const selected =
@@ -233,10 +262,20 @@ function versionsOf(message: Json): { versions: string[]; selected: number } {
       ? Math.min(Math.max(swipeId, 0), swipes.length - 1)
       : 0;
   if (typeof message['mes'] === 'string') swipes[selected] = mes;
+  const info = Array.isArray(message['swipe_info']) ? message['swipe_info'] : [];
+  const extras = swipes.map((_, index) => {
+    if (index === selected) return extraOf(message['extra']);
+    const swipe = info[index];
+    return isObject(swipe) ? extraOf(swipe['extra']) : null;
+  });
 
   const kept = swipes.map((text, index) => ({ text, index })).filter(({ text }) => text.trim());
   const at = kept.findIndex(({ index }) => index === selected);
-  return { versions: kept.map(({ text }) => text), selected: Math.max(at, 0) };
+  return {
+    versions: kept.map(({ text }) => text),
+    selected: Math.max(at, 0),
+    extras: kept.map(({ index }) => extras[index] ?? null),
+  };
 }
 
 /**
@@ -330,6 +369,27 @@ function readAuthorNote(meta: Json): StAuthorNote | undefined {
 }
 
 /**
+ * The chat a chat file is a branch or a checkpoint of: `chat_metadata.main_chat`,
+ * the name ST saved it under — the file's stem — when it made this one from it
+ * (`createBranch`, `createNewBookmark` in `public/scripts/bookmarks.js`).
+ * Undefined for a chat of its own, and for a file whose header cannot be read.
+ */
+export function stChatMainChat(jsonl: string): string | undefined {
+  const body = jsonl.charCodeAt(0) === 0xfeff ? jsonl.slice(1) : jsonl;
+  const line = body.split(/\r?\n/, 64).find((one) => one.trim());
+  if (!line) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  if (!isObject(parsed) || !isHeader(parsed) || !isObject(parsed['chat_metadata'])) return undefined;
+  const main = parsed['chat_metadata']['main_chat'];
+  return typeof main === 'string' && main.trim() ? main.trim() : undefined;
+}
+
+/**
  * Converts one chat file. Never throws: a line that is not JSON is counted and
  * passed over. The character's speaker is the roster member whose avatar is the
  * message's `original_avatar` (group chats record it), else whose name is the
@@ -406,26 +466,33 @@ export function convertSillyTavernChat(jsonl: string, cast: StCast): StConverted
     }
 
     const isUser = parsed['is_user'] === true;
-    const { versions: texts, selected } = versionsOf(parsed);
+    const { versions: texts, selected, extras: read } = versionsOf(parsed);
     let versions = texts;
     if (versions.length === 0 || versions.every((text) => !text.trim())) {
       skipped.empty += 1;
       continue;
     }
 
+    // What a version's text becomes here — a narration's prefix, a speaker's
+    // lines — and the text shown in its place with it, so the two read alike.
+    let spoken = (text: string): string => text;
     let speakerId: string | undefined;
     if (isUser) {
       if (!userName && name) userName = name;
     } else if (narrator || comment) {
-      versions = versions.map((text) => withNarrationPrefix(text));
+      spoken = withNarrationPrefix;
     } else {
       if (!characterName && name) characterName = name;
       const member = speakerOf(cast, parsed['original_avatar'], name);
       const speaker = member?.name.trim();
       if (grouped && member?.id) speakerId = member.id;
-      else if (speaker) versions = versions.map((text) => spokenBy(text, speaker));
+      else if (speaker) spoken = (text) => spokenBy(text, speaker);
       else skipped.unknownSpeaker += 1;
     }
+    versions = versions.map(spoken);
+    const extras = read.map((extra) =>
+      extra?.displayText !== undefined ? { ...extra, displayText: spoken(extra.displayText) } : extra,
+    );
 
     const at = parseSillyTavernDate(parsed['send_date']);
     messages.push({
@@ -435,6 +502,7 @@ export function convertSillyTavernChat(jsonl: string, cast: StCast): StConverted
       ...(at ? { createdAt: at } : {}),
       ...(speakerId ? { speakerId } : {}),
       ...(hidden ? { hidden: true } : {}),
+      ...(extras.some((extra) => extra !== null) ? { extras } : {}),
     });
   }
 

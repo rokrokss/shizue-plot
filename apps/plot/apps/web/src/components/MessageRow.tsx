@@ -172,6 +172,8 @@ export const MessageRow = memo(function MessageRow({
   role,
   content,
   shown,
+  reasoning,
+  bias,
   name,
   avatar,
   userImage,
@@ -214,9 +216,17 @@ export const MessageRow = memo(function MessageRow({
   content: string;
   /**
    * What the reader sees, where it is not what is stored: a greeting with its
-   * conditions decided. Editing and copying still work on `content`.
+   * conditions decided, or the text SillyTavern showed in a message's place.
+   * Editing and copying still work on `content`.
    */
   shown?: string;
+  /**
+   * The model's reasoning before the reply, as SillyTavern kept it: drawn folded
+   * above the text, as ST draws its reasoning block (`auto_expand` off).
+   */
+  reasoning?: string;
+  /** The reader's `{{bias}}` on their turn, as SillyTavern kept it: drawn under the bubble (`.mes_bias`). */
+  bias?: string;
   name: string;
   avatar: string | null;
   /** The reader's persona picture, for RisuAI's `{{source::user}}` in the message's markup. */
@@ -783,6 +793,27 @@ export const MessageRow = memo(function MessageRow({
 
   const memberProps = member ? { 'data-shizue-member': member, ...(spoken ? { 'data-shizue-spoken': '' } : {}) } : {};
 
+  /** The reasoning, folded, where the reply's text starts. */
+  const reasoningBlock =
+    reasoning && !editing ? (
+      <details
+        data-testid="message-reasoning"
+        className="mb-2 max-w-[min(100%,36rem)] rounded-xl border border-line bg-raised"
+      >
+        <summary className={cx('cursor-pointer select-none rounded-xl px-3 py-1.5 text-xs font-medium text-muted', FOCUS_RING)}>
+          {t('reasoning')}
+        </summary>
+        <div className="whitespace-pre-wrap break-words px-3 pb-2 text-xs text-muted">{reasoning}</div>
+      </details>
+    ) : null;
+  /** The bias, quietly under the reader's bubble. */
+  const biasLine =
+    bias && !editing ? (
+      <p data-testid="message-bias" className="mt-1 max-w-[min(100%,36rem)] whitespace-pre-wrap text-right text-xs text-muted italic">
+        {bias}
+      </p>
+    ) : null;
+
   // No bubble, no face and no label: the ≡ at its start and muted italics mark
   // it, as Zeta marks its narrator and RisuAI draws its *scene text*.
   if (narration) {
@@ -790,6 +821,7 @@ export const MessageRow = memo(function MessageRow({
       <div data-testid="message-narration" {...memberProps} className="group relative min-w-0">
         {editor ?? (
           <div className={dim}>
+            {reasoningBlock}
             <MessageBody
               {...bodyProps}
               content={narrationBody(body)}
@@ -880,6 +912,7 @@ export const MessageRow = memo(function MessageRow({
                   </div>
                 </>
               )}
+              {biasLine}
               {/* Under the bubble, at its corner, as a reply's model name is. */}
               {marks ? <div className="mt-1">{marks}</div> : null}
             </div>
@@ -909,6 +942,7 @@ export const MessageRow = memo(function MessageRow({
       <div data-testid="message-assistant" {...memberProps} className="group min-w-0">
         {editor ?? (
           <div className={dim}>
+            {reasoningBlock ? <div className="pl-12.5">{reasoningBlock}</div> : null}
             <MessageBody
               {...bodyProps}
               content={body}
@@ -939,6 +973,7 @@ export const MessageRow = memo(function MessageRow({
       <div data-testid="message-assistant" {...memberProps} className="group min-w-0">
         {editor ?? (
           <div className={dim}>
+            {reasoningBlock ? <div className="pl-12.5">{reasoningBlock}</div> : null}
             <MessageBody
               {...bodyProps}
               content={body}
@@ -984,6 +1019,7 @@ export const MessageRow = memo(function MessageRow({
         )}
         {editor ?? (
           <div className={cx(!grouped && 'mt-1', dim)}>
+            {reasoningBlock}
             <MessageBody
               {...bodyProps}
               content={body}

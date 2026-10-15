@@ -466,6 +466,7 @@ function keepVersions(message: ImportedChatMessage, count: number): ImportedChat
     ...message,
     versions: kept.map((index) => message.versions[index]!),
     selected: kept.indexOf(message.selected),
+    ...(message.extras ? { extras: kept.map((index) => message.extras![index] ?? null) } : {}),
   };
 }
 
@@ -533,7 +534,7 @@ export interface StepWarning {
  * and so opens the chat history instead.
  */
 export interface StepNotice {
-  code: 'chat_world_attached' | 'note_moved';
+  code: 'chat_world_attached' | 'note_moved' | 'chat_branch_merged';
   /** The lorebook it is about. */
   name?: string;
 }
@@ -602,6 +603,8 @@ export interface ImportDeps {
   displayScripts: (scripts: unknown[]) => DisplayScript[];
   /** `promptRegexScripts`. */
   promptScripts: (scripts: unknown[]) => unknown[];
+  /** `stChatMainChat`: the chat a chat file is a branch or checkpoint of, by name. */
+  chatMainChat: (jsonl: string) => string | undefined;
 }
 
 export interface RunInput {
@@ -633,6 +636,8 @@ interface RunContext extends RunInput {
   globalPromptScripts: unknown[] | null;
   /** Set once the API says the reader has no model to start a chat on. */
   chatsBlocked: ApiError | null;
+  /** Each chat file's `chat_metadata.main_chat`, read once a run (null: none). */
+  mainChats: Map<string, string | null>;
 }
 
 async function request<T>(
@@ -763,10 +768,10 @@ function worldBytesWithFilters(ctx: RunContext, bytes: Uint8Array): Uint8Array {
 /**
  * The first member's card as SillyTavern ran it. Its book takes ST's global World
  * Info settings — ST reads those rather than a book's own, so a token budget the
- * card names goes too, ST never having spent it — and the global prompt-only
- * regex scripts go ahead of the card's own, where the prompt reads a card's and
- * ST runs its global ones first. A script the card already carries is not added
- * again.
+ * card names goes too, ST never having spent it — and the global regex scripts
+ * the server runs (prompt-only, and the ones that rewrite a stored turn) go
+ * ahead of the card's own, where the server reads a card's and ST runs its
+ * global ones first. A script the card already carries is not added again.
  */
 export function cardAsSillyTavernRan(
   card: NormalizedCard,
@@ -1110,63 +1115,94 @@ async function runGroup(ctx: RunContext, item: GroupItem, result: StepResult): P
 }
 
 /**
- * One chat file: converted against its plot's cast, created with its first
- * batch, filled with the rest, then closed — and only closing it lets anything
- * else write to it. A chat an interrupted run left open needs nothing here: the
- * create finds it by hash, deletes it and starts over, since what of it arrived
- * is not something either side can tell.
+ * A chat as it was sent: the conversation, version by version as the API took
+ * it, and the rows each version became — what a SillyTavern branch of it finds
+ * its fork in (`importBranch`).
  */
-async function runChat(
-  ctx: RunContext,
-  owner: string,
-  item: ChatItem,
-  result: StepResult,
-): Promise<void> {
-  const parent = ctx.results[owner];
-  if (!parent?.plotId || !parent.cast || parent.status === 'failed' || parent.status === 'cancelled') {
-    result.status = 'skipped';
-    result.reason = 'owner_failed';
-    return;
-  }
-  const found = ctx.index.chats.get(item.sha256);
-  if (found && !found.importing) {
-    result.status = 'skipped';
-    result.reason = 'already_imported';
-    result.chatId = found.chatId;
-    return;
-  }
-  if (ctx.chatsBlocked) throw ctx.chatsBlocked;
+interface SentChat {
+  chatId: string;
+  messages: ImportedChatMessage[];
+  /** By message, then by version: the row each version became. */
+  ids: string[][];
+}
 
-  const text = new TextDecoder().decode(await readFile(item.chat.file));
-  const converted = ctx.deps.convertChat(text, { members: parent.cast });
+/** What a chat file reads as, cut to what the import takes: the per-message and per-chat caps. */
+function convertedChat(
+  ctx: RunContext,
+  parent: StepResult,
+  text: string,
+): { converted: StConvertedChat; messages: ImportedChatMessage[]; swipes: number; overRows: number } {
+  const converted = ctx.deps.convertChat(text, { members: parent.cast ?? [] });
   let swipes = 0;
   const capped = converted.messages.map((source) => {
     const { message, dropped } = capVersions(source);
     swipes += dropped;
     return message;
   });
-  if (capped.length === 0) {
+  // Fitted before anything is written: the API refuses the batch that crosses
+  // the cap, after the ones before it went in.
+  const fitted = capped.length > 0 ? fitRows(capped) : { messages: capped, dropped: 0 };
+  if (!fitted) throw failure('message_limit', `An imported chat holds at most ${MAX_IMPORTED_ROWS} messages`);
+  if (fitted.messages.some((message) => message.versions.some((one) => one.length > MAX_IMPORT_VERSION_LENGTH))) {
+    throw failure('message_too_long', `One imported message is at most ${MAX_IMPORT_VERSION_LENGTH} characters`);
+  }
+  return { converted, messages: fitted.messages, swipes, overRows: fitted.dropped };
+}
+
+/** The owner step's result, when its plot and cast are there to take a chat; else the chat is skipped. */
+function chatOwner(ctx: RunContext, owner: string, result: StepResult): StepResult | null {
+  const parent = ctx.results[owner];
+  if (!parent?.plotId || !parent.cast || parent.status === 'failed' || parent.status === 'cancelled') {
+    result.status = 'skipped';
+    result.reason = 'owner_failed';
+    return null;
+  }
+  return parent;
+}
+
+/**
+ * One chat file: converted against its plot's cast, created with its first
+ * batch, filled with the rest, then — unless the caller still has its
+ * SillyTavern branches to put in it (`open`) — closed, and only closing it lets
+ * anything else write to it. A chat an interrupted run left open needs nothing
+ * here: the create finds it by hash, deletes it and starts over, since what of
+ * it arrived is not something either side can tell. Answers the chat as it was
+ * sent and how to close it, or null when nothing was made.
+ */
+async function runChat(
+  ctx: RunContext,
+  owner: string,
+  item: ChatItem,
+  result: StepResult,
+  { open = false }: { open?: boolean } = {},
+): Promise<{ sent: SentChat; close: () => Promise<void> } | null> {
+  const parent = chatOwner(ctx, owner, result);
+  if (!parent) return null;
+  const found = ctx.index.chats.get(item.sha256);
+  if (found && !found.importing) {
+    result.status = 'skipped';
+    result.reason = 'already_imported';
+    result.chatId = found.chatId;
+    return null;
+  }
+  if (ctx.chatsBlocked) throw ctx.chatsBlocked;
+
+  const text = new TextDecoder().decode(await readFile(item.chat.file));
+  const { converted, messages, swipes, overRows } = convertedChat(ctx, parent, text);
+  if (messages.length === 0) {
     result.dropped = { ...converted.skipped, swipes, swipesOverRows: 0 };
     result.status = 'skipped';
     result.reason = 'chat_empty';
-    return;
+    return null;
   }
-  // Fitted before anything is written: the API refuses the batch that crosses
-  // the cap, after the ones before it went in.
-  const fitted = fitRows(capped);
-  if (!fitted) throw failure('message_limit', `An imported chat holds at most ${MAX_IMPORTED_ROWS} messages`);
-  const { messages } = fitted;
-  if (messages.some((message) => message.versions.some((text) => text.length > MAX_IMPORT_VERSION_LENGTH))) {
-    throw failure('message_too_long', `One imported message is at most ${MAX_IMPORT_VERSION_LENGTH} characters`);
-  }
-  result.dropped = { ...converted.skipped, swipes, swipesOverRows: fitted.dropped };
+  result.dropped = { ...converted.skipped, swipes, swipesOverRows: overRows };
 
   // What the file keeps for the chat as a whole (`chat_metadata`): the lorebook
   // bound to it goes onto the plot now; the variables and the author's note, with
   // its settings, ride the completion, once the messages they belong to are in.
   const warnings: StepWarning[] = [];
   const notices: StepNotice[] = [];
-  if (converted.worldName) await attachChatWorld(ctx, parent.plotId, converted.worldName, warnings, notices);
+  if (converted.worldName) await attachChatWorld(ctx, parent.plotId!, converted.worldName, warnings, notices);
   // The note comes with its depth, interval and role as the chat's note settings —
   // switched off in ST (interval 0) it comes over never put in. Only a place
   // outside ST's chat is not carried, and the reader is told where it goes.
@@ -1205,7 +1241,7 @@ async function runChat(
       result.status = 'skipped';
       result.reason = 'already_imported';
       if (body.chatId) result.chatId = body.chatId;
-      return;
+      return null;
     }
   }
   if (!res.ok) {
@@ -1215,27 +1251,176 @@ async function runChat(
     if (error.code === 'model_unavailable') ctx.chatsBlocked = error;
     throw error;
   }
-  const created = (await res.json()) as { chat: { id: string } };
-  result.chatId = created.chat.id;
+  const created = (await res.json()) as { chat: { id: string }; ids?: string[][] };
+  const chatId = created.chat.id;
+  result.chatId = chatId;
+  const ids = [...(created.ids ?? [])];
 
   for (const batch of rest) {
     ctx.signal?.throwIfAborted();
-    await request(ctx, 'POST', `/api/chats/${created.chat.id}/import`, { messages: batch });
+    const answer = await request<{ ids?: string[][] }>(ctx, 'POST', `/api/chats/${chatId}/import`, { messages: batch });
+    ids.push(...(answer?.ids ?? []));
   }
-  const done = await request<{ memoryBackfill: MemoryBackfill }>(
-    ctx,
-    'POST',
-    `/api/chats/${created.chat.id}/import/complete`,
-    {
-      backfillMemory: ctx.options.memoryBackfill,
-      ...(converted.variables ? { variables: converted.variables } : {}),
-      ...(noteText ? { note: noteText } : {}),
-      ...(noteSettings ? { noteSettings } : {}),
-    },
-  );
-  result.memoryBackfill = done.memoryBackfill;
-  result.status = 'done';
+  const close = async (): Promise<void> => {
+    const done = await request<{ memoryBackfill: MemoryBackfill }>(
+      ctx,
+      'POST',
+      `/api/chats/${chatId}/import/complete`,
+      {
+        backfillMemory: ctx.options.memoryBackfill,
+        ...(converted.variables ? { variables: converted.variables } : {}),
+        ...(noteText ? { note: noteText } : {}),
+        ...(noteSettings ? { noteSettings } : {}),
+      },
+    );
+    result.memoryBackfill = done.memoryBackfill;
+    result.status = 'done';
+  };
+  if (!open) await close();
+  return { sent: { chatId, messages, ids }, close };
 }
+
+/** Two messages that read the same where a branch is matched against what it was made from. */
+const sameTurn = (a: ImportedChatMessage, b: ImportedChatMessage): boolean =>
+  a.role === b.role && a.versions[a.selected] === b.versions[b.selected] && a.speakerId === b.speakerId;
+
+/** The row a sent chat's message `at` goes on from: its selected version. */
+const selectedRow = (sent: SentChat, at: number): string => sent.ids[at]![sent.messages[at]!.selected]!;
+
+/**
+ * Where a SillyTavern branch parts from the chat it was made from, and what it
+ * adds there. ST makes a branch or a checkpoint by saving the chat up to a
+ * message under a new name (`createBranch`, `createNewBookmark` in
+ * `bookmarks.js`, with `chat_metadata.main_chat`), and the two go their own
+ * ways from there; so the branch is that chat for as long as their messages
+ * read alike, and parts at the first that does not. There it goes in as one
+ * more version of that message, as a swipe does — or, where the text it went on
+ * from is one of that message's swipes already (a branch made from a swipe),
+ * under that version, which it does not add again. Its other versions that the
+ * message already has are not added twice.
+ */
+export function branchFork(
+  parent: SentChat,
+  branch: ImportedChatMessage[],
+): { parentId: string | null; tail: ImportedChatMessage[]; prefix: { messages: ImportedChatMessage[]; ids: string[][] } } {
+  let shared = 0;
+  while (shared < parent.messages.length && shared < branch.length && sameTurn(parent.messages[shared]!, branch[shared]!)) {
+    shared += 1;
+  }
+  const prefix = { messages: parent.messages.slice(0, shared), ids: parent.ids.slice(0, shared) };
+  const above = shared > 0 ? selectedRow(parent, shared - 1) : null;
+  const ours = branch[shared];
+  const theirs = parent.messages[shared];
+  if (!ours || !theirs || ours.role !== theirs.role || ours.speakerId !== theirs.speakerId) {
+    return { parentId: above, tail: branch.slice(shared), prefix };
+  }
+  const chosen = theirs.versions.indexOf(ours.versions[ours.selected]!);
+  if (chosen !== -1) {
+    return {
+      parentId: parent.ids[shared]![chosen]!,
+      tail: branch.slice(shared + 1),
+      prefix: {
+        messages: [...prefix.messages, { ...theirs, selected: chosen }],
+        ids: [...prefix.ids, parent.ids[shared]!],
+      },
+    };
+  }
+  // Only the versions the message does not have yet, the one the branch went on from among them.
+  const keep = ours.versions.map((_, index) => index).filter((index) => index === ours.selected || !theirs.versions.includes(ours.versions[index]!));
+  const own: ImportedChatMessage = {
+    ...ours,
+    versions: keep.map((index) => ours.versions[index]!),
+    selected: keep.indexOf(ours.selected),
+    ...(ours.extras ? { extras: keep.map((index) => ours.extras![index] ?? null) } : {}),
+  };
+  return { parentId: above, tail: [own, ...branch.slice(shared + 1)], prefix };
+}
+
+/**
+ * A SillyTavern branch or checkpoint file put into the chat made from the file
+ * it was made from (`branchFork`), as sibling branches the reader swipes
+ * between. Its batches hang under the fork and leave the chat's head where it
+ * was; the last names the file, which the chat records so a second run finds it
+ * (`importedFrom.branches`). What the branch file keeps for a chat as a whole —
+ * its variables, its author's note, its bound lorebook — is the chat's it was
+ * made from, and is not read again. Answers the branch as it was sent, for a
+ * branch of it.
+ */
+async function importBranch(
+  ctx: RunContext,
+  owner: string,
+  item: ChatItem,
+  parent: SentChat,
+  rootName: string,
+  result: StepResult,
+): Promise<SentChat | null> {
+  const ownerResult = chatOwner(ctx, owner, result);
+  if (!ownerResult) return null;
+  const text = new TextDecoder().decode(await readFile(item.chat.file));
+  const { converted, messages, swipes, overRows } = convertedChat(ctx, ownerResult, text);
+  result.dropped = { ...converted.skipped, swipes, swipesOverRows: overRows };
+  const { parentId, tail, prefix } = branchFork(parent, messages);
+  const batches = tail.length > 0 ? batchMessages(tail) : [[]];
+  let under = parentId;
+  const ids: string[][] = [];
+  for (const [at, batch] of batches.entries()) {
+    ctx.signal?.throwIfAborted();
+    const last = at === batches.length - 1;
+    const answer = await request<{ ids: string[][]; tail: string | null }>(
+      ctx,
+      'POST',
+      `/api/chats/${parent.chatId}/import`,
+      {
+        messages: batch,
+        branch: {
+          parentId: under,
+          ...(last ? { file: { fileName: baseName(item.chat.file.path), sha256: item.sha256 } } : {}),
+        },
+      },
+    );
+    ids.push(...answer.ids);
+    under = answer.tail ?? under;
+  }
+  result.chatId = parent.chatId;
+  result.notices = [{ code: 'chat_branch_merged', name: rootName }];
+  delete result.warnings;
+  result.status = 'done';
+  return { chatId: parent.chatId, messages: [...prefix.messages, ...tail], ids: [...prefix.ids, ...ids] };
+}
+
+/**
+ * The chat files of `owner` this run brings, as SillyTavern's branches and
+ * checkpoints hang together: each one whose `chat_metadata.main_chat` names
+ * another of them, by its file stem, is that one's branch. Read off each file's
+ * header once a run; a file that cannot be read is no one's branch.
+ */
+async function branchesOf(ctx: RunContext, steps: ChatStep[]): Promise<Map<string, ChatStep[]>> {
+  const byName = new Map(steps.map((step) => [step.item.chat.name, step]));
+  const children = new Map<string, ChatStep[]>();
+  for (const step of steps) {
+    let main = ctx.mainChats.get(step.item.chat.file.path);
+    if (main === undefined) {
+      try {
+        main = ctx.deps.chatMainChat(new TextDecoder().decode(await readFile(step.item.chat.file))) ?? null;
+      } catch {
+        main = null;
+      }
+      ctx.mainChats.set(step.item.chat.file.path, main);
+    }
+    const parent = main !== null ? byName.get(main) : undefined;
+    if (!parent || parent === step) continue;
+    children.set(parent.id, [...(children.get(parent.id) ?? []), step]);
+  }
+  // A cycle of files naming each other is no family: each keeps its own chat.
+  const reaches = (from: string, target: string, seen = new Set<string>()): boolean =>
+    (children.get(from) ?? []).some(
+      (child) => child.id === target || (!seen.has(child.id) && (seen.add(child.id), reaches(child.id, target, seen))),
+    );
+  for (const [parent, list] of children) children.set(parent, list.filter((child) => !reaches(child.id, parent)));
+  return children;
+}
+
+type ChatStep = Extract<ImportStep, { kind: 'chat' }>;
 
 /** The chat files the steps still to run would bring over. */
 const chatHashes = (steps: ImportStep[]): string[] =>
@@ -1273,6 +1458,7 @@ export async function runImport(
     globalScripts: null,
     globalPromptScripts: null,
     chatsBlocked: null,
+    mainChats: new Map(),
   };
 
   try {
@@ -1295,16 +1481,93 @@ export async function runImport(
     return results;
   }
 
-  for (const step of todo) {
-    if (signal?.aborted) {
-      results[step.id] = { ...results[step.id], status: 'cancelled' };
-      continue;
-    }
+  /** A step's result, running from now, for the loop and for a family's branches alike. */
+  const begin = (step: ImportStep): StepResult => {
     const result: StepResult = { ...results[step.id], status: 'running' };
     delete result.error;
     delete result.reason;
     results[step.id] = result;
     publish();
+    return result;
+  };
+  const failed = (result: StepResult, caught: unknown): void => {
+    if (signal?.aborted) result.status = 'cancelled';
+    else {
+      result.status = 'failed';
+      result.error = asApiError(caught);
+    }
+  };
+  /** Each owner's chat files in this run, by their SillyTavern branches (`branchesOf`). */
+  const families = new Map<string, Map<string, ChatStep[]>>();
+  const familyOf = async (step: ChatStep): Promise<Map<string, ChatStep[]>> => {
+    let family = families.get(step.owner);
+    if (!family) {
+      const owned = todo.filter((one): one is ChatStep => one.kind === 'chat' && one.owner === step.owner);
+      family = owned.length > 1 ? await branchesOf(ctx, owned) : new Map();
+      families.set(step.owner, family);
+    }
+    return family;
+  };
+  /** The steps a family's root brings with it — the branches, and theirs — which the loop then passes. */
+  const handled = new Set<string>();
+
+  /**
+   * A chat file and the SillyTavern branches made from it, in one chat: the
+   * chat stays open until its branches are in, each hung where it parts from
+   * the file it was made from. A branch that fails is said so and the rest go
+   * on; one whose parent did not come over comes over as a chat of its own.
+   */
+  const runFamily = async (step: ChatStep, result: StepResult): Promise<void> => {
+    const branches = (await familyOf(step)).get(step.id) ?? [];
+    if (branches.length === 0) {
+      await runChat(ctx, step.owner, step.item, result);
+      return;
+    }
+    const made = await runChat(ctx, step.owner, step.item, result, { open: true });
+    try {
+      const queue: { step: ChatStep; parent: SentChat | null }[] = branches.map((branch) => ({
+        step: branch,
+        parent: made?.sent ?? null,
+      }));
+      while (queue.length > 0) {
+        const next = queue.shift()!;
+        handled.add(next.step.id);
+        if (signal?.aborted) {
+          results[next.step.id] = { ...results[next.step.id], status: 'cancelled' };
+          continue;
+        }
+        const branchResult = begin(next.step);
+        let sent: SentChat | null = null;
+        try {
+          sent = next.parent
+            ? await importBranch(ctx, next.step.owner, next.step.item, next.parent, step.item.chat.name, branchResult)
+            : (await runChat(ctx, next.step.owner, next.step.item, branchResult))?.sent ?? null;
+        } catch (caught) {
+          failed(branchResult, caught);
+        }
+        results[next.step.id] = { ...branchResult };
+        const own = (await familyOf(next.step)).get(next.step.id) ?? [];
+        queue.push(...own.map((child) => ({ step: child, parent: next.parent ? sent : null })));
+      }
+    } finally {
+      if (made && !signal?.aborted) await made.close();
+    }
+    // Cancelled with its branches half in: left open, for a retry to start over.
+    if (made && signal?.aborted) result.status = 'cancelled';
+  };
+
+  for (const step of todo) {
+    if (handled.has(step.id)) continue;
+    if (signal?.aborted) {
+      results[step.id] = { ...results[step.id], status: 'cancelled' };
+      continue;
+    }
+    // A branch whose chat file this run also brings goes in with that one.
+    if (step.kind === 'chat') {
+      const family = await familyOf(step);
+      if ([...family.values()].some((list) => list.includes(step))) continue;
+    }
+    const result = begin(step);
     try {
       switch (step.kind) {
         case 'persona':
@@ -1317,15 +1580,11 @@ export async function runImport(
           await runGroup(ctx, step.item, result);
           break;
         case 'chat':
-          await runChat(ctx, step.owner, step.item, result);
+          await runFamily(step, result);
           break;
       }
     } catch (caught) {
-      if (signal?.aborted) result.status = 'cancelled';
-      else {
-        result.status = 'failed';
-        result.error = asApiError(caught);
-      }
+      failed(result, caught);
     }
     results[step.id] = { ...result };
   }

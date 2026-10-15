@@ -28,7 +28,8 @@ import {
   type Preset,
 } from './presets.js';
 import { extractStatusBlock } from './statusBlock.js';
-import { countTokens } from './tokens.js';
+import { markTavernSegment, unmarkedText, type TavernLoreSegment } from './tavernLore.js';
+import { countTokens as countRawTokens } from './tokens.js';
 import {
   DEFAULT_LORE_SETTINGS,
   type LoreEntry,
@@ -57,6 +58,13 @@ import {
   type VariableDelta,
   type Variables,
 } from './variables.js';
+
+/**
+ * Tokens, not counting the marks the `WORLD_INFO` regex is asked over
+ * (`tavernLore.ts`), which never reach the model: a marked prompt is measured as
+ * the same prompt unmarked.
+ */
+const countTokens = (text: string): number => countRawTokens(unmarkedText(text));
 
 export type PromptRole = 'user' | 'assistant' | 'system';
 
@@ -368,6 +376,14 @@ export interface AssemblePromptInput {
    */
   report?: boolean;
   /**
+   * Mark the text of every SillyTavern World Info entry where it is inserted
+   * (`tavernLore.ts`), for the caller to run ST's `WORLD_INFO` regex over it —
+   * asynchronously, in its regex threads — and put the result in its place
+   * (`withTavernLore`). Set only where a card carries such a script; without it
+   * the prompt is the same, byte for byte.
+   */
+  markTavernLore?: boolean;
+  /**
    * Who a group turn asks the reply of (`group.ts`): an index into `characters`,
    * or `NARRATOR_SPEAKER`. Without it the prompt is the scene's, as it has always
    * been.
@@ -424,6 +440,12 @@ export interface AssembledPrompt {
   globalVariableWrites?: VariableDelta;
   /** Present only when the input asked for it. */
   report?: PromptReport;
+  /**
+   * With `markTavernLore`: one per marked segment, by its index — where ST's
+   * `WORLD_INFO` regex is asked it (`TavernLoreSegment`). Absent when nothing
+   * was marked.
+   */
+  tavernLore?: TavernLoreSegment[];
   /**
    * What each of `messages` is, in order — the block it was put together as,
    * and for a turn of the chat the stored message it came from. A card's
@@ -1233,7 +1255,29 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     activated.filter(
       (entry) => entry.depth === undefined && entry.position === position && expandLore(entry).length > 0,
     );
-  const loreText = (position: LorePosition): string => loreAt(position).map(expandLore).join('\n\n');
+  // SillyTavern regexes each World Info entry as it inserts it (`WORLD_INFO`):
+  // where the caller asked, an ST entry's text goes in marked, for the caller to
+  // rewrite. Not the character's note, which ST injects as no World Info.
+  const tavernLore: TavernLoreSegment[] = [];
+  const markedLore = new Map<LoreEntry, string>();
+  const markLore = (entry: LoreEntry, text: string): string => {
+    tavernLore.push(entry.depth !== undefined ? { depth: entry.depth } : {});
+    return markTavernSegment(text, tavernLore.length - 1);
+  };
+  const marksLore = (entry: LoreEntry): boolean =>
+    input.markTavernLore === true && !entry.depthPrompt && isTavernEntry(entry);
+  /** An entry's text as it is inserted: marked, once, where it is ST's and the caller asked. */
+  const placeLore = (entry: LoreEntry): string => {
+    const text = expandLore(entry);
+    if (!text || !marksLore(entry)) return text;
+    let marked = markedLore.get(entry);
+    if (marked === undefined) {
+      marked = markLore(entry, text);
+      markedLore.set(entry, marked);
+    }
+    return marked;
+  };
+  const loreText = (position: LorePosition): string => loreAt(position).map(placeLore).join('\n\n');
 
   // 2b. outlets — SillyTavern's World Info position 7. An outlet entry goes
   // nowhere by itself: what its outlet's entries say, one per line as ST joins
@@ -1243,7 +1287,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const outlets = new Map<string, string[]>();
   for (const entry of loreAt('outlet')) {
     const name = entry.outletName?.trim();
-    if (name) outlets.set(name, [...(outlets.get(name) ?? []), expandLore(entry)]);
+    if (name) outlets.set(name, [...(outlets.get(name) ?? []), placeLore(entry)]);
   }
   /**
    * A string as it is sent: its outlets filled, and RisuAI's display escapes —
@@ -1266,7 +1310,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     .map((entry) => ({
       depth: entry.depth!,
       role: (entry.role ?? 'system') as PromptRole,
-      content: send(expandLore(entry)),
+      content: send(placeLore(entry)),
     }));
 
   // 3. plot block — the work itself, ahead of the people in it.
@@ -1367,9 +1411,9 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const authorNoteBlock = noteDue
     ? send(
         [
-          ...loreAt('before_author_note').map(expandLore),
+          ...loreAt('before_author_note').map(placeLore),
           utility ? '' : expand(authorNote).trim(),
-          ...loreAt('after_author_note').map(expandLore),
+          ...loreAt('after_author_note').map(placeLore),
         ]
           .filter((text) => text.length > 0)
           .join('\n')
@@ -1545,9 +1589,10 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
       const source = loreSource.get(entry);
       const name = source === undefined || source === 'plot' ? plot.name : source;
       const char = [(loreMacro.get(entry) ?? plotMacro).char, name];
+      // Each block of ST's example lore marked on its own: the split would cut through one mark.
       return splitExamples(expandLore(entry)).map((block) => ({
         name,
-        content: send(`${exampleHeader(name)}\n${block}`),
+        content: send(`${exampleHeader(name)}\n${marksLore(entry) ? markLore(entry, block) : block}`),
         char,
       }));
     });
@@ -1720,6 +1765,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     ...(globalVariableWrites ? { globalVariableWrites } : {}),
     ...(input.report ? { report: report() } : {}),
     ...(stopSequences ? { stopSequences } : {}),
+    ...(tavernLore.length > 0 ? { tavernLore } : {}),
   };
 }
 

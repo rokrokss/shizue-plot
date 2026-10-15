@@ -794,6 +794,15 @@ export interface ChatMessage {
    */
   hiddenFromPrompt?: boolean;
   /**
+   * What SillyTavern kept beside a message it brought in — null (or absent, for
+   * a message built by hand) on every other: the text it showed in place of
+   * `content`, the model's reasoning, drawn folded above the text, and the
+   * reader's `{{bias}}`, drawn under their turn.
+   */
+  displayText?: string | null;
+  reasoning?: string | null;
+  bias?: string | null;
+  /**
    * The name of the emotion picture the reply left its member wearing
    * (`messages.emotion`), or null while none is chosen. Optional for a message
    * built by hand.

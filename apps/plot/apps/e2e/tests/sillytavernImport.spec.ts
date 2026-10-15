@@ -173,12 +173,28 @@ const backup = storedZip({
   }),
   'chats/Alice/Alice - 2024-05-01@12h00m00s.jsonl': jsonl([
     { user_name: persona, character_name: alice, create_date: '2024-05-01@12h00m00s', chat_metadata: {} },
-    { name: persona, is_user: true, is_system: false, send_date: at(1), mes: '안녕하세요' },
+    { name: persona, is_user: true, is_system: false, send_date: at(1), mes: '안녕하세요', extra: { bias: ' 웃으며' } },
     { name: alice, is_user: false, is_system: false, send_date: at(2), mes: '첫 번째 대답', swipes: ['첫 번째 대답', '두 번째 대답'], swipe_id: 0 },
     { name: 'System', is_user: false, is_system: false, send_date: at(3), mes: '시계가 여섯 시를 친다.', extra: { type: 'narrator' } },
     { name: alice, is_user: false, is_system: true, send_date: at(4), mes: '숨겨진 줄' },
     { name: persona, is_user: true, is_system: false, send_date: at(5), mes: '차 마실래요?' },
-    { name: alice, is_user: false, is_system: false, send_date: at(6), mes: '좋아요.' },
+    {
+      name: alice,
+      is_user: false,
+      is_system: false,
+      send_date: at(6),
+      mes: '좋아요.',
+      // ST's translation, shown in place of the text, and the model's reasoning.
+      extra: { display_text: 'Sure.', reasoning: '차를 좋아한다.' },
+    },
+  ]),
+  // A branch ST made of that chat after its first reply (`createBranch`).
+  'chats/Alice/Alice - 2024-05-01@12h00m00s - Branch #1.jsonl': jsonl([
+    { user_name: 'unused', character_name: 'unused', chat_metadata: { main_chat: 'Alice - 2024-05-01@12h00m00s' } },
+    { name: persona, is_user: true, is_system: false, send_date: at(1), mes: '안녕하세요', extra: { bias: ' 웃으며' } },
+    { name: alice, is_user: false, is_system: false, send_date: at(2), mes: '첫 번째 대답', swipes: ['첫 번째 대답', '두 번째 대답'], swipe_id: 0 },
+    { name: persona, is_user: true, is_system: false, send_date: at(7), mes: '산책할래요?' },
+    { name: alice, is_user: false, is_system: false, send_date: at(8), mes: '그래요.' },
   ]),
   'groups/1714564800000.json': JSON.stringify({
     id: '1714564800000',
@@ -222,8 +238,16 @@ interface ChatRow {
 }
 interface ChatState {
   chat: ChatRow;
-  path: { id: string; content: string; speakerMemberId?: string | null; hiddenFromPrompt?: boolean }[];
-  siblings: Record<string, { total: number }>;
+  path: {
+    id: string;
+    content: string;
+    speakerMemberId?: string | null;
+    hiddenFromPrompt?: boolean;
+    displayText?: string | null;
+    reasoning?: string | null;
+    bias?: string | null;
+  }[];
+  siblings: Record<string, { total: number; ids: string[] }>;
 }
 
 let context: BrowserContext;
@@ -285,7 +309,7 @@ test('the wizard reads the backup and lists what it holds', async () => {
   // The things that do not come over are named, not just left out.
   await page.getByTestId('st-not-imported').locator('summary').click();
   await expect(page.getByTestId('st-not-imported')).toContainText('퀵 리플라이');
-  await expect(page.getByTestId('st-start')).toHaveText('6개 항목 가져오기');
+  await expect(page.getByTestId('st-start')).toHaveText('7개 항목 가져오기');
 });
 
 test('the run brings over every chosen item', async () => {
@@ -293,10 +317,12 @@ test('the run brings over every chosen item', async () => {
   const runPanel = page.getByTestId('st-run');
   // The way out stands only once the run has finished.
   await expect(runPanel.getByRole('link', { name: '내 플롯으로' })).toBeVisible({ timeout: 60_000 });
-  await expect(page.getByTestId('st-step')).toHaveCount(6);
-  await expect(page.locator('[data-testid="st-step"][data-status="done"]')).toHaveCount(6);
+  await expect(page.getByTestId('st-step')).toHaveCount(7);
+  await expect(page.locator('[data-testid="st-step"][data-status="done"]')).toHaveCount(7);
   await expect(runPanel.getByRole('link', { name: '플롯 열기' })).toHaveCount(3);
-  await expect(runPanel.getByRole('link', { name: '대화 열기' })).toHaveCount(2);
+  // The branch's step opens the chat it went into.
+  await expect(runPanel.getByRole('link', { name: '대화 열기' })).toHaveCount(3);
+  await expect(runPanel).toContainText('대화의 가지로 들어갔습니다');
 
   plots = await api<PlotRow[]>('/api/plots');
   expect(plots.map((plot) => plot.name).sort()).toEqual([alice, bob, group].sort());
@@ -355,6 +381,28 @@ test('the chats come over with their swipes, speakers and persona', async () => 
   expect(state.path.map((message) => message.hiddenFromPrompt)).toEqual([false, false, false, true, false, false]);
   // The other swipe is the reply's sibling.
   expect(state.siblings[state.path[1]!.id]?.total).toBe(2);
+  // What ST kept beside the messages came with them.
+  expect(state.path[0]!.bias).toBe(' 웃으며');
+  expect([state.path[5]!.displayText, state.path[5]!.reasoning]).toEqual([`${alice}: Sure.`, '차를 좋아한다.']);
+  // The branch parts after the first reply: its turn is the narration's sibling, one swipe away.
+  const fork = state.siblings[state.path[2]!.id]!;
+  expect(fork.total).toBe(2);
+  const other = fork.ids.find((id) => id !== state.path[2]!.id)!;
+  const headers = { origin };
+  const swiped = await page.request.post(`${origin}/api/chats/${solo.id}/head`, { headers, data: { messageId: other } });
+  expect(swiped.ok()).toBe(true);
+  expect(((await swiped.json()) as ChatState).path.map((message) => message.content)).toEqual([
+    '안녕하세요',
+    `${alice}: 첫 번째 대답`,
+    '산책할래요?',
+    `${alice}: 그래요.`,
+  ]);
+  // Back to where the chat was.
+  const back = await page.request.post(`${origin}/api/chats/${solo.id}/head`, {
+    headers,
+    data: { messageId: state.path[2]!.id },
+  });
+  expect(back.ok()).toBe(true);
 
   // A one-member chat keeps its prefixes and names nobody by id.
   expect(state.path.every((message) => !message.speakerMemberId)).toBe(true);
@@ -381,6 +429,15 @@ test('the chats come over with their swipes, speakers and persona', async () => 
   await expect(ghost.getByTestId('message-hidden')).toHaveText('AI에게 숨김');
   await expect(page.getByTestId('message-hidden')).toHaveCount(1);
   await expect(page.getByTestId('chat-importing')).toHaveCount(0);
+  // ST's translation stands in for the text; the reasoning is folded above it, the bias under the reader's turn.
+  await expect(page.getByTestId('message-assistant').filter({ hasText: 'Sure.' })).toBeVisible();
+  const reasoning = page.getByTestId('message-reasoning');
+  await expect(reasoning).toHaveCount(1);
+  await expect(reasoning.locator('summary')).toHaveText('모델의 추론');
+  await expect(reasoning.getByText('차를 좋아한다.')).toBeHidden();
+  await reasoning.locator('summary').click();
+  await expect(reasoning.getByText('차를 좋아한다.')).toBeVisible();
+  await expect(page.getByTestId('message-bias')).toHaveText('웃으며');
 
   // Each imported group reply is drawn under its own member.
   await page.goto(`/ko/chats/${party.id}`);

@@ -36,6 +36,7 @@ import {
   type PromptPart,
   type PromptPlot,
 } from '../src/prompt.js';
+import { rewriteTavernLore, withTavernLore } from '../src/tavernLore.js';
 import { countTokens } from '../src/tokens.js';
 import {
   CHOICES_MODES,
@@ -2459,5 +2460,66 @@ describe('assemblePrompt - a RisuAI utility bot', () => {
     const scene = assemblePrompt({ ...input, characters: [other, utility], speaker: 0 });
     expect(scene.system).toContain('MAIN');
     expect(scene.system).toContain('페르소나 설명');
+  });
+});
+
+describe("assemblePrompt - SillyTavern's WORLD_INFO regex marks (world-info.js getRegexedString(entry.content, WORLD_INFO))", () => {
+  const stEntry = (content: string, overrides: Partial<LoreEntry> = {}): LoreEntry =>
+    loreEntry({ content, sillyTavern: true, ...overrides });
+  const assembled = (lorebook: LoreEntry[], markTavernLore = true) =>
+    assemblePrompt({
+      plot: { ...plot, lorebook },
+      characters: [bareAria],
+      history,
+      preset,
+      userName: '민준',
+      contextBudget: 100_000,
+      markTavernLore,
+    });
+  const upper = (segments: { text: string }[]) => Promise.resolve(segments.map((segment) => segment.text.toUpperCase()));
+
+  it("marks an ST entry's text where it is inserted, with its depth, and nothing else", async () => {
+    const prompt = assembled([
+      stEntry('st before {{user}}'),
+      loreEntry({ content: 'own lore' }),
+      stEntry('st deep', { depth: 2 }),
+    ]);
+    expect(prompt.tavernLore).toHaveLength(2);
+    expect(prompt.tavernLore).toEqual(expect.arrayContaining([{}, { depth: 2 }]));
+    expect(prompt.system).toContain('own lore');
+    // Rewritten after the macros, as ST runs the regex on the substituted content.
+    const rewritten = await rewriteTavernLore(prompt, upper);
+    expect(rewritten.system).toContain('ST BEFORE 민준');
+    expect(rewritten.system).toContain('own lore');
+    expect(rewritten.messages.map((message) => promptText(message.content))).toContain('ST DEEP');
+    expect(JSON.stringify(rewritten)).not.toMatch(/[\uFDD0-\uFDD2]/);
+    expect(rewritten.tavernLore).toBeUndefined();
+    // Not asked: the same prompt as ever.
+    expect(assembled([stEntry('st before {{user}}')], false)).toEqual(
+      (({ tavernLore: _segments, ...rest }) => rest)(await rewriteTavernLore(assembled([stEntry('st before {{user}}')]), (segments) => Promise.resolve(segments.map((segment) => segment.text)))),
+    );
+  });
+
+  it('leaves out an entry the scripts empty, with the separator beside it, and a depth turn with nothing left', async () => {
+    const prompt = assembled([
+      stEntry('keep one', { insertionOrder: 3 }),
+      stEntry('drop', { insertionOrder: 2 }),
+      stEntry('keep two', { insertionOrder: 1 }),
+      stEntry('drop', { depth: 1 }),
+    ]);
+    const emptied = await rewriteTavernLore(prompt, (segments) =>
+      Promise.resolve(segments.map((segment) => (segment.text === 'drop' ? '' : segment.text))),
+    );
+    expect(emptied.system).toMatch(/keep (one|two)\n\nkeep (one|two)/);
+    expect(emptied.system).not.toContain('drop');
+    expect(emptied.system).not.toMatch(/\n{3,}/);
+    expect(emptied.messages).toHaveLength(prompt.messages.length - 1);
+    expect(emptied.sources).toHaveLength(prompt.messages.length - 1);
+    expect(emptied.messages.map((message) => promptText(message.content))).not.toContain('');
+  });
+
+  it('keeps a segment no one rewrote as it was', () => {
+    const prompt = assembled([stEntry('kept')]);
+    expect(withTavernLore(prompt, new Map()).system).toBe(prompt.system);
   });
 });

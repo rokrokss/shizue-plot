@@ -25,6 +25,10 @@
 독자가 AI에게 숨긴 메시지(SillyTavern의 숨기기 — 화면에는 남고 모델이 읽는 어디에도 들어가지 않는다)에는
 `hiddenFromPrompt: true`가 실린다. 그 밖의 메시지에는 없다.
 
+SillyTavern에서 가져온 메시지가 ST의 `extra`에 남긴 것은 세 선택 필드로 실린다: `displayText`(ST가 글
+대신 보여 준 글 — 번역. 메시지를 고치면 없어진다), `reasoning`(답 앞의 모델 추론), `bias`(독자 턴의
+`{{bias}}`). 그 밖의 메시지에는 없다.
+
 세계관 설정, 카드 내부 설정, 로어북, 시스템 프롬프트와 아직 해금되지 않은
 이미지는 내보내지 않는다. URL은 같은 오리진의 API 경로다. 타임스탬프는
 ISO 8601 문자열이며, 상세 필드 정의는 `packages/contracts/src/chatExport.ts`가
@@ -37,4 +41,4 @@ API는 워크스페이스의 `@shizue/contracts`를 `workspace:*`로 참조한�
 스키마가 바뀌면 계약 테스트, 제품 타입체크와 API 테스트를 함께 검증한다.
 
 0.x 버전에서 필드 제거·이름 변경·타입 변경 등 호환성을 깨는 변경은 minor,
-호환되는 스키마 변경은 patch를 올린다. 현재 패키지 버전은 `0.3.2`이다(`0.3.0`은 플롯 이름 변경으로 `storyId`·`storyName`이 `plotId`·`plotName`이 된 것, `0.3.1`은 메시지의 선택 필드 `speaker`를, `0.3.2`는 선택 필드 `hiddenFromPrompt`를 더한 호환 변경).
+호환되는 스키마 변경은 patch를 올린다. 현재 패키지 버전은 `0.3.3`이다(`0.3.0`은 플롯 이름 변경으로 `storyId`·`storyName`이 `plotId`·`plotName`이 된 것, `0.3.1`은 메시지의 선택 필드 `speaker`를, `0.3.2`는 선택 필드 `hiddenFromPrompt`를, `0.3.3`은 선택 필드 `displayText`·`reasoning`·`bias`를 더한 호환 변경).

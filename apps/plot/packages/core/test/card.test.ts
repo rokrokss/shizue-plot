@@ -1626,10 +1626,27 @@ describe('SillyTavern cards', () => {
       { ...script, findRegex: '/(a+)+$/' },
       { ...script, findRegex: 'bare $', replaceString: '[$0]' },
     ]);
+    // Each on the side ST's placement names (`messageFormatting`'s USER_INPUT or AI_OUTPUT).
     expect(card.displayScripts).toEqual([
-      { in: '\\[status\\] hp=(\\d+)', out: '<div class="hp">$& → $1</div>', flags: 'gi', order: 0, enabled: true },
-      { in: 'bare $', out: '[$&]', order: 1, enabled: true },
+      {
+        in: '\\[status\\] hp=(\\d+)',
+        out: '<div class="hp">$& → $1</div>',
+        flags: 'gi',
+        order: 0,
+        enabled: true,
+        role: 'assistant',
+      },
+      { in: 'user', out: '<div class="hp">$& → $1</div>', order: 1, enabled: true, role: 'user' },
+      { in: 'bare $', out: '[$&]', order: 2, enabled: true, role: 'assistant' },
     ]);
+    // The same rewrite on both sides is one script on every message.
+    expect(
+      withScripts([
+        { ...script, placement: [1] },
+        { ...script, placement: [2] },
+        { ...script, findRegex: 'both', placement: [1, 2] },
+      ]).displayScripts?.map((one) => one.role),
+    ).toEqual([undefined, undefined]);
     // Left in place for SillyTavern on the way back out.
     expect(card.extensions['regex_scripts']).toHaveLength(7);
 
@@ -1783,7 +1800,10 @@ describe('the PNG card export', () => {
     expect(parsed.card.firstMes).toBe('첫 인사.');
     expect(parsed.card.narrator).toEqual({ pov: 'third' });
     expect(parsed.card.lorebook).toEqual(card.lorebook);
-    expect(parsed.card.displayScripts).toEqual(card.displayScripts);
+    // The side a script keeps to does not go out — RisuAI's list, which carries
+    // the export's display scripts, has no placement — and the copy that comes
+    // back from it runs on every message.
+    expect(parsed.card.displayScripts).toEqual(card.displayScripts?.map(({ role: _side, ...script }) => script));
     // The image underneath is the avatar's, without its old chunks.
     expect(stripPngTextChunks(png)).toEqual(stripPngTextChunks(avatar));
   });

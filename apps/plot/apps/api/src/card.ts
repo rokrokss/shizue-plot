@@ -1,6 +1,7 @@
 import {
   backgroundHtmlOf,
   coerceDisplayDepth,
+  coerceDisplayRole,
   coerceNarrator,
   COMPONENT_CAPABILITIES,
   creatorCssFromExtensions,
@@ -208,6 +209,8 @@ function coerceDisplayScript(value: unknown, index: number): DisplayScript {
     ...(typeof memberId === 'string' && isUuid(memberId) ? { memberId: memberId.toLowerCase() } : {}),
     // The messages it runs on, by depth; absent bounds limit nothing.
     ...coerceDisplayDepth(raw),
+    // And by who wrote them (SillyTavern's placement); absent, every message.
+    ...coerceDisplayRole(raw),
   };
 }
 

@@ -377,6 +377,21 @@ describe('the range a script runs in', () => {
     expect(displayScriptsAt(scripts, undefined)).toBe(scripts);
   });
 
+  it("keeps a script placed on one side to that side's messages, as ST's messageFormatting asks USER_INPUT or AI_OUTPUT", () => {
+    const user = script({ in: 'user', role: 'user' });
+    const reply = script({ in: 'reply', role: 'assistant', maxDepth: 1 });
+    const placed = [user, reply, always];
+    expect(displayScriptsAt(placed, 0, 'user')).toEqual([user, always]);
+    expect(displayScriptsAt(placed, 0, 'assistant')).toEqual([reply, always]);
+    // The depth still holds on its side, and a hidden message (no depth) still keeps to its side.
+    expect(displayScriptsAt(placed, 3, 'assistant')).toEqual([always]);
+    expect(displayScriptsAt(placed, undefined, 'assistant')).toEqual([reply, always]);
+    // A list with no role in it is untouched by the role.
+    expect(displayScriptsAt(scripts, undefined, 'user')).toBe(scripts);
+    const shown = context(placed);
+    expect(displayContextAt(shown, 0, 'user')).toBe(displayContextAt(shown, 5, 'user'));
+  });
+
   it('sends no script for a message out of every range, and only the scripts in range', async () => {
     const lone = context([near]);
     // Out of every range, the message's own CBS is still read, as RisuAI reads every message.

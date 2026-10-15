@@ -8,10 +8,12 @@ import {
   diffVariables,
   emotionScreenOf,
   inlayEmotionTags,
+  isNarration,
   narrationBody,
   narrationUntilSpeech,
   replyLanguageInstruction,
   replyLengthTokens,
+  rewriteTavernLore,
   sceneFocusDirective,
   spokenBy,
   stripInlayMacros,
@@ -39,7 +41,14 @@ import {
   type VariableDelta,
   type Variables,
 } from '@shizue/core';
-import { promptScriptJob, promptScriptsOf } from '@shizue/core/prompt-scripts';
+import {
+  AI_OUTPUT,
+  promptScriptJob,
+  promptScriptsOf,
+  SLASH_COMMAND,
+  WORLD_INFO,
+  worldInfoScriptsOf,
+} from '@shizue/core/prompt-scripts';
 import {
   cardScripts,
   checkScriptChat,
@@ -67,6 +76,7 @@ import type { AppDeps, AppEnv, Tx } from './deps.js';
 import { invalidateMemoryForEdit, noteRequestOverhead, scheduleMemoryUpdate } from './memory.js';
 import { runPromptScriptJob } from './regexWorker.js';
 import { scheduleRelationshipUpdate } from './relationship.js';
+import { regexStoredText } from './storedRegex.js';
 import { replyMemberOf, scheduleEmotionDetection } from './emotion.js';
 import {
   characterImage,
@@ -814,6 +824,49 @@ function withChatLore(
   );
 }
 
+/** The roster's cards, as the scripts on them are read. */
+const cardsOf = (plan: Pick<GenerationPlan, 'characters'>): { extensions: Record<string, unknown> }[] =>
+  plan.characters.map((member) => ({ extensions: member.card.extensions ?? {} }));
+
+/**
+ * The prompt with SillyTavern's `WORLD_INFO` scripts run over the World Info
+ * the assembler marked (`markTavernLore`, `rewriteTavernLore`): every card's
+ * prompt-only scripts placed there, in roster order, each with its pattern's
+ * macros read for its own card — over each entry's text as it was inserted,
+ * its macros already expanded, with the entry's depth for a depth entry, as
+ * ST's `getRegexedString` is asked in `world-info.js`. The scripts run in the
+ * regex threads; whatever happens there, no mark reaches the model.
+ */
+async function withWorldInfoScripts(prompt: AssembledPrompt, plan: GenerationPlan): Promise<AssembledPrompt> {
+  if (!prompt.tavernLore) return prompt;
+  const scripts = worldInfoScriptsOf(cardsOf(plan), (text, index) => {
+    const member = plan.characters[index];
+    return applyMacros(text, {
+      char: member ? characterName(member) : plan.plot.name,
+      user: plan.userName,
+      variables: plan.variables,
+      globalVariables: plan.globalVariables,
+      tavern: { sillyTavern: true },
+    });
+  });
+  return rewriteTavernLore(prompt, (segments) =>
+    runPromptScriptJob({
+      scripts,
+      messages: segments.map((segment) => ({
+        text: segment.text,
+        role: 'assistant' as const,
+        chatIndex: 0,
+        placement: WORLD_INFO,
+        ...(segment.depth !== undefined ? { depth: segment.depth } : {}),
+      })),
+    }),
+  );
+}
+
+/** SillyTavern's default reasoning template (`power_user.reasoning`): `<think>`, `</think>` and a line break. */
+const TAVERN_REASONING_PREFIX = '<think>';
+const TAVERN_REASONING_SUFFIX = '</think>\n';
+
 /** The prompt as it is put together, before the card's request triggers see it. */
 async function assembleRequest(
   plan: GenerationPlan,
@@ -832,13 +885,18 @@ async function assembleRequest(
   const tagged = last?.speakerId !== undefined ? plan.characters.find((member) => member.id === last.speakerId) : undefined;
   const own = tagged !== undefined && typeof plan.speaker === 'number' && plan.characters[plan.speaker] === tagged;
   const partialBy = tagged ? (own ? undefined : tagged.name) : last?.speaker;
-  const partial = last
+  const resumed = last
     ? stripInlayMacros(
         partialBy !== undefined && last.role === 'assistant'
           ? spokenBy(last.content, partialBy, plan.characters.map((member) => member.name))
           : last.content,
       ).trimEnd()
     : '';
+  // The reasoning SillyTavern kept on the message goes ahead of it, in ST's
+  // default template — the one message ST sends its reasoning with by default,
+  // as the prefix of the text it continues (`PromptReasoning.addToMessage`).
+  const reasoning = isContinue ? plan.target.kind === 'continue' && plan.target.message.reasoning : null;
+  const partial = resumed && reasoning ? `${TAVERN_REASONING_PREFIX}${reasoning}${TAVERN_REASONING_SUFFIX}${resumed}` : resumed;
   // The partial is not in the history the assembler reads, so not on its branch
   // either — and where the partial is the greeting itself, there is none apart.
   const branch: PromptBranch = !isContinue
@@ -882,7 +940,10 @@ async function assembleRequest(
   // instructions nor its system prompt stand after it (a narration is read by
   // the reader too, so it is asked in their language as well).
   const languageLine = plan.replyLanguage ? replyLanguageInstruction(plan.replyLanguage) : '';
-  const prompt = assemblePrompt({
+  // SillyTavern's `WORLD_INFO` regex runs over the lore the assembler marks for
+  // it, after the assembly — only where a card carries such a script.
+  const marksLore = worldInfoScriptsOf(cardsOf(plan)).length > 0;
+  const assembled = assemblePrompt({
     plot: plan.plot,
     characters: withChatLore(plan.characters, plan.localLore, plan.plot.modules),
     personaText: plan.personaText,
@@ -928,7 +989,9 @@ async function assembleRequest(
     // subtracted here; it is not a turn, so it does not shift depth lore.
     contextBudget: plan.contextBudget - countTokens(partial) - countTokens(trailingSystem) - countTokens(languageLine),
     report,
+    ...(marksLore ? { markTavernLore: true } : {}),
   });
+  const prompt = await withWorldInfoScripts(assembled, plan);
   if (!partial && !trailingSystem && !languageLine) return prompt;
 
   // The partial is the turn the model resumes, so it stays last: a closing
@@ -1467,6 +1530,50 @@ async function keepGlobalWrites(
 }
 
 /**
+ * A new reply's text as it is stored, before any stored-text script. The
+ * narration prefix is the server's to write: the model was asked for the scene
+ * alone, and the convention is what makes the stored turn a narration.
+ */
+function newReplyText(plan: GenerationPlan, text: string): string {
+  const said = plan.narration
+    ? withNarrationPrefix(text)
+    : plan.speakerNames
+      ? stripSpeakerPrefix(text, plan.speakerNames)
+      : text;
+  return withInlayEmotions(plan, said, plan.round?.speakerMemberId ?? null, said);
+}
+
+/**
+ * The reply as SillyTavern's stored-text scripts leave it (`storedRegex.ts`), or
+ * null where they change nothing — every work but one an ST card is in. ST
+ * cleans a reply up as it stores it (`cleanUpMessage`, `AI_OUTPUT`), and on a
+ * continue it cleans the whole message, the text it continued included; a
+ * narration is its narrator's, whose placement is `SLASH_COMMAND`. `appended`
+ * is what a continue added, for its macros' fold: the tail past the text it
+ * continued, or the reply as it came where a script rewrote that text too.
+ */
+async function regexedReply(plan: GenerationPlan, text: string): Promise<{ content: string; appended?: string } | null> {
+  const input = {
+    characters: plan.characters,
+    userName: plan.userName,
+    variables: plan.variables,
+    globalVariables: plan.globalVariables,
+  };
+  if (plan.target.kind === 'continue') {
+    const head = plan.target.message;
+    const stripped = plan.speakerNames ? stripSpeakerPrefix(text, plan.speakerNames) : text;
+    const appended = withInlayEmotions(plan, stripped, head.speakerMemberId, head.content);
+    const whole = head.content + appended;
+    const content = await regexStoredText(whole, isNarration(head.content) ? SLASH_COMMAND : AI_OUTPUT, input);
+    if (content === whole) return null;
+    return { content, appended: content.startsWith(head.content) ? content.slice(head.content.length) : appended };
+  }
+  const stored = newReplyText(plan, text);
+  const content = await regexStoredText(stored, plan.narration ? SLASH_COMMAND : AI_OUTPUT, input);
+  return content === stored ? null : { content };
+}
+
+/**
  * Writes the generated text and moves the head, in one transaction with what
  * the `editRequest` listeners did (`keepListenerEdits`), which goes first. A
  * new turn records the lore that freshly triggered for its prompt; a continue
@@ -1487,6 +1594,8 @@ async function persist(
   { stopped = false }: { stopped?: boolean } = {},
 ): Promise<StoredTurn> {
   const scriptState = plan.postProcess ? ('pending' as const) : null;
+  // Before the transaction: the stored-text scripts run in the regex threads.
+  const regexed = await regexedReply(plan, text);
   return deps.db.transaction(async (tx) => {
     const place = listenerEdits ? await keepListenerEdits(tx, plan, listenerEdits) : null;
     if (plan.target.kind === 'continue') {
@@ -1494,8 +1603,12 @@ async function persist(
       const target = place?.continued ?? plan.target.message;
       const continued: GenerationPlan = target === plan.target.message ? plan : { ...plan, target: { kind: 'continue', message: target } };
       const stripped = plan.speakerNames ? stripSpeakerPrefix(text, plan.speakerNames) : text;
-      const appended = withInlayEmotions(plan, stripped, target.speakerMemberId, target.content);
-      const content = target.content + appended;
+      // What the stored-text scripts made of the message — of the one the plan
+      // continued: one the listeners moved the reply to (RisuAI's Lua, which no
+      // ST card has) is stored as the reply came.
+      const ours = regexed && target === plan.target.message ? regexed : null;
+      const appended = ours?.appended ?? withInlayEmotions(plan, stripped, target.speakerMemberId, target.content);
+      const content = ours?.content ?? target.content + appended;
       const [updated] = await tx
         .update(messages)
         .set({
@@ -1510,6 +1623,9 @@ async function persist(
           // Chosen again for the longer reply, as RisuAI chooses after a continue —
           // unless the reader stopped it, which chooses none and keeps the one it had.
           ...(stopped ? {} : { emotion: null }),
+          // What SillyTavern showed in place of the shorter text would hide what
+          // was added: it goes, as on an edit.
+          displayText: null,
         })
         .where(eq(messages.id, target.id))
         .returning({ scriptRev: messages.scriptRev });
@@ -1525,14 +1641,7 @@ async function persist(
       };
     }
 
-    // The prefix is the server's to write: the model was asked for the scene
-    // alone, and the convention is what makes the stored turn a narration.
-    const said = plan.narration
-      ? withNarrationPrefix(text)
-      : plan.speakerNames
-        ? stripSpeakerPrefix(text, plan.speakerNames)
-        : text;
-    const content = withInlayEmotions(plan, said, plan.round?.speakerMemberId ?? null, said);
+    const content = regexed?.content ?? newReplyText(plan, text);
     // Minted here, so a reply that opens a round can be stored as its id.
     const id = randomUUID();
     const [created] = await tx

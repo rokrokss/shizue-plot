@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { AUTHOR_NOTE_MAX } from '../src/authorNote.js';
 import {
   convertSillyTavernChat,
+  stChatMainChat,
   FileTooLargeError,
   listZip,
   MAX_CHAT_MESSAGES,
@@ -423,7 +424,7 @@ describe('scanSillyTavern', () => {
     expect(manifest.globalWorlds).toEqual(['공용 설정', '없는 세계']);
     expect(manifest.globalRegex).toHaveLength(2);
     expect(regexScriptsToDisplayScripts(manifest.globalRegex)).toEqual([
-      { in: '\\*\\*(.+?)\\*\\*', out: '<b>$1</b>', flags: 'g', order: 0, enabled: true },
+      { in: '\\*\\*(.+?)\\*\\*', out: '<b>$1</b>', flags: 'g', order: 0, enabled: true, role: 'assistant' },
     ]);
     // The prompt-only one, as ST wrote it, for the prompt to run.
     expect(promptRegexScripts(manifest.globalRegex)).toEqual([manifest.globalRegex[1]]);
@@ -631,6 +632,22 @@ const party: StCast = {
   ],
 };
 
+describe('stChatMainChat', () => {
+  it("reads the chat a branch or checkpoint was made from (bookmarks.js main_chat), and nothing else", () => {
+    const header = (meta: unknown) => jsonl([{ user_name: 'unused', character_name: 'unused', chat_metadata: meta }, { mes: 'x' }]);
+    expect(stChatMainChat(header({ main_chat: ' Alice - 2024-05-01@12h00m00s ', integrity: 'x' }))).toBe(
+      'Alice - 2024-05-01@12h00m00s',
+    );
+    expect(stChatMainChat(`\uFEFF${header({ main_chat: 'main' })}`)).toBe('main');
+    expect(stChatMainChat(header({ integrity: 'x' }))).toBeUndefined();
+    expect(stChatMainChat(header({ main_chat: '' }))).toBeUndefined();
+    // A file that opens on a message has no header, and so no main chat.
+    expect(stChatMainChat(jsonl([{ name: 'a', mes: 'x' }, { chat_metadata: { main_chat: 'm' } }]))).toBeUndefined();
+    expect(stChatMainChat('not json')).toBeUndefined();
+    expect(stChatMainChat('')).toBeUndefined();
+  });
+});
+
 describe('convertSillyTavernChat', () => {
   it('converts turns into the speech protocol, with swipes as versions', () => {
     const chat = convertSillyTavernChat(
@@ -668,6 +685,35 @@ describe('convertSillyTavernChat', () => {
       variables: null,
       skipped: { system: 0, empty: 0, unknownSpeaker: 0, malformed: 0, overLimit: 0, variables: 0 },
     });
+  });
+
+  it("keeps each version's display_text, reasoning and bias — the message's extra, and swipe_info's for the other swipes", () => {
+    // script.js: the live swipe's extra is the message's; syncMesToSwipe keeps
+    // each swipe's in swipe_info[i].extra. A blank display_text is none (`display_text || mes`).
+    const chat = convertSillyTavernChat(
+      jsonl([
+        { user_name: 'unused', character_name: 'unused', chat_metadata: {} },
+        { name: '여행자', is_user: true, mes: '안녕', extra: { bias: ' 웃으며', display_text: '' } },
+        {
+          name: '하루',
+          is_user: false,
+          mes: 'B',
+          swipes: ['A', '', 'B'],
+          swipe_id: 2,
+          swipe_info: [{ extra: { reasoning: 'A의 생각' } }, {}, { extra: { reasoning: 'stale' } }],
+          extra: { reasoning: 'B의 생각', display_text: '비\u0000' },
+        },
+        { name: '하루', is_user: false, mes: 'C', extra: { type: 'narrator', display_text: '씨' } },
+        { name: '하루', is_user: false, mes: 'D', extra: { api: 'openai' } },
+      ]),
+      solo,
+    );
+    expect(chat.messages.map((message) => message.extras)).toEqual([
+      [{ bias: ' 웃으며' }],
+      [{ reasoning: 'A의 생각' }, { reasoning: 'B의 생각', displayText: '하루: 비' }],
+      [{ displayText: '@: 씨' }],
+      undefined,
+    ]);
   });
 
   it('makes the narrator a narration, hides what ST kept from the prompt and counts what it could not use', () => {

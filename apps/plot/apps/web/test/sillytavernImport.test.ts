@@ -57,6 +57,10 @@ interface Conversion {
   droppedVariables?: number;
   authorNote?: StAuthorNote;
   worldName?: string;
+  /** One message per line, the roles taking turns from the model's — instead of `messages`. */
+  lines?: string[];
+  /** `chat_metadata.main_chat`: the chat this file is a SillyTavern branch or checkpoint of. */
+  mainChat?: string;
 }
 
 /** A chat file whose text the stand-in converter reads as its whole conversion. */
@@ -125,6 +129,12 @@ interface FakeChat {
   variables?: Record<string, string>;
   note?: string;
   noteSettings?: AuthorNoteSettings;
+  /** Each message's rows, by version, as the API answers them. */
+  ids?: string[][];
+  /** The branch batches, in order: where each hung, what it held, the file its last one named. */
+  branches?: { parentId: string | null; texts: string[]; file?: string }[];
+  /** The branch files the chat records (`importedFrom.branches`). */
+  branchFiles?: string[];
 }
 
 /**
@@ -214,6 +224,9 @@ function fakeApi() {
       }
       for (const chat of chats.values()) {
         if (asked.has(chat.sha256)) answer.chats.push({ sha256: chat.sha256, chatId: chat.id, importing: chat.importing });
+        for (const file of chat.branchFiles ?? []) {
+          if (asked.has(file)) answer.chats.push({ sha256: file, chatId: chat.id, importing: chat.importing });
+        }
       }
       return json(200, answer);
     }
@@ -275,8 +288,9 @@ function fakeApi() {
         importing: true,
         messages: [...request.messages],
       };
+      const ids = rowsFor(chat, request.messages);
       chats.set(chat.id, chat);
-      return json(201, { chat: { id: chat.id }, inserted: request.messages.length });
+      return json(201, { chat: { id: chat.id }, inserted: request.messages.length, ids });
     }
     const chatMatch = /^POST \/api\/chats\/([^/]+)\/import(\/complete)?$/.exec(route);
     if (chatMatch) {
@@ -294,8 +308,27 @@ function fakeApi() {
         if (done.noteSettings) chat.noteSettings = done.noteSettings;
         return json(200, { chat: { id: chat.id }, memoryBackfill: done.backfillMemory ? 'queued' : 'not_needed' });
       }
-      chat.messages.push(...(read()['messages'] as ImportedChatMessage[]));
-      return json(200, { inserted: 1, total: chat.messages.length });
+      const body = read() as {
+        messages: ImportedChatMessage[];
+        branch?: { parentId: string | null; file?: { fileName: string; sha256: string } };
+      };
+      if (body.branch) {
+        const branches = (chat.branches ??= []);
+        const ids = body.messages.map((message, at) =>
+          message.versions.map((_, version) => `${chat.id}:b${branches.length}.${at}.${version}`),
+        );
+        branches.push({
+          parentId: body.branch.parentId,
+          texts: body.messages.map((message) => message.versions[message.selected]!),
+          ...(body.branch.file ? { file: body.branch.file.fileName } : {}),
+        });
+        if (body.branch.file) (chat.branchFiles ??= []).push(body.branch.file.sha256);
+        const tail = ids.length > 0 ? ids.at(-1)![body.messages.at(-1)!.selected]! : body.branch.parentId;
+        return json(200, { inserted: 1, total: chat.messages.length, ids, tail });
+      }
+      chat.messages.push(...body.messages);
+      const ids = rowsFor(chat, body.messages);
+      return json(200, { inserted: 1, total: chat.messages.length, ids, tail: ids.at(-1)?.[0] ?? null });
     }
     return json(500, { error: `unrouted ${route}`, code: 'internal_error' });
   });
@@ -323,6 +356,16 @@ function fakeApi() {
 
 type Api = ReturnType<typeof fakeApi>;
 
+/** The rows a conversation's messages become, version by version, named for the chat and the place. */
+function rowsFor(chat: FakeChat, messages: ImportedChatMessage[]): string[][] {
+  const rows = (chat.ids ??= []);
+  const ids = messages.map((message, at) =>
+    message.versions.map((_, version) => `${chat.id}:${rows.length + at}.${version}`),
+  );
+  rows.push(...ids);
+  return ids;
+}
+
 /** The stand-in converter: the file says how many messages it holds and whose. */
 function deps(api: Api): ImportDeps & { casts: { members: { name: string; avatar?: string }[] }[] } {
   const casts: { members: { name: string; avatar?: string }[] }[] = [];
@@ -339,15 +382,18 @@ function deps(api: Api): ImportDeps & { casts: { members: { name: string; avatar
         droppedVariables = 0,
         authorNote,
         worldName,
+        lines,
       } = JSON.parse(text) as Conversion;
       return {
         userName,
         characterName: '',
-        messages: Array.from({ length: messages }, (_, index) => ({
-          role: index % 2 ? 'user' : 'assistant',
-          versions: Array.from({ length: versions }, (__, version) => `line ${index}.${version}`),
-          selected: 0,
-        })),
+        messages: lines
+          ? lines.map((line, index) => ({ role: index % 2 ? 'user' : 'assistant', versions: line.split('|'), selected: 0 }))
+          : Array.from({ length: messages }, (_, index) => ({
+              role: index % 2 ? 'user' : 'assistant',
+              versions: Array.from({ length: versions }, (__, version) => `line ${index}.${version}`),
+              selected: 0,
+            })),
         variables: variables ?? null,
         ...(authorNote ? { authorNote } : {}),
         ...(worldName ? { worldName } : {}),
@@ -359,6 +405,7 @@ function deps(api: Api): ImportDeps & { casts: { members: { name: string; avatar
       scripts.map((script, order) => ({ in: String(script), out: '', order, enabled: true })),
     // The stand-in reads a script as prompt-only when it says so in its name.
     promptScripts: (scripts) => scripts.filter((script) => String(script).startsWith('prompt:')),
+    chatMainChat: (text) => (JSON.parse(text) as Conversion).mainChat,
   };
 }
 
@@ -1344,5 +1391,59 @@ describe("runImport - how SillyTavern ran the library", () => {
     const api = fakeApi();
     await runAll(api, { ...sample(), globalRegex: ['prompt:a'] }, DEFAULT_OPTIONS);
     expect(api.memberPatches).toEqual([]);
+  });
+});
+
+describe('runImport - SillyTavern branches and checkpoints', () => {
+  // bookmarks.js: a branch or checkpoint is the chat saved up to a message under
+  // a new name, with chat_metadata.main_chat naming the chat it was made from.
+  function branchedLibrary(): StManifest {
+    return library({
+      characters: [
+        character('Alice.png', 'Alice', {
+          chats: [
+            chatFile('chats/Alice/main - Branch #1.jsonl', { mainChat: 'main', lines: ['a', 'b', 'X', 'Y'] }),
+            chatFile('chats/Alice/main.jsonl', { lines: ['a', 'b|b2', 'c', 'd'] }),
+            chatFile('chats/Alice/deeper.jsonl', { mainChat: 'main - Branch #1', lines: ['a', 'b', 'X', 'Z'] }),
+            chatFile('chats/Alice/swiped.jsonl', { mainChat: 'main', lines: ['a', 'b2', 'S'] }),
+            chatFile('chats/Alice/Checkpoint #1.jsonl', { mainChat: 'main', lines: ['a', 'b', 'c'] }),
+            chatFile('chats/Alice/elsewhere.jsonl', { mainChat: 'not in this backup', lines: ['q'] }),
+          ],
+        }),
+      ],
+    });
+  }
+
+  it('puts each branch into the chat it was made from, under the message it parts at, and closes that chat last', async () => {
+    const api = fakeApi();
+    const { results } = await runAll(api, branchedLibrary());
+    const made = [...api.chats.values()];
+    // The main chat, and the one whose main chat is not here, which keeps a chat of its own.
+    expect(made.map((chat) => chat.messages.map((message) => message.versions[message.selected]))).toEqual([
+      ['a', 'b', 'c', 'd'],
+      ['q'],
+    ]);
+    const main = made[0]!;
+    expect(main.branches).toEqual([
+      // After `b`, where the branch's X parts from c.
+      { parentId: main.ids![1]![0], texts: ['X', 'Y'], file: 'main - Branch #1.jsonl' },
+      // Made from a swipe of `b`: it goes on under that version, which it does not add again.
+      { parentId: main.ids![1]![1], texts: ['S'], file: 'swiped.jsonl' },
+      // The checkpoint adds nothing past where the chat already is; its file is still recorded.
+      { parentId: main.ids![2]![0], texts: [], file: 'Checkpoint #1.jsonl' },
+      // A branch of the branch, under its X.
+      { parentId: expect.stringMatching(/:b0\.0\.0$/), texts: ['Z'], file: 'deeper.jsonl' },
+    ]);
+    const branchStep = results['chat:chats/Alice/main - Branch #1.jsonl']!;
+    expect(branchStep).toMatchObject({ status: 'done', chatId: main.id, notices: [{ code: 'chat_branch_merged', name: 'main' }] });
+    const writes = api.writes();
+    expect(writes.filter((route) => route.endsWith('/import/complete'))).toHaveLength(2);
+    expect(writes.indexOf(`POST /api/chats/${main.id}/import/complete`)).toBeGreaterThan(
+      writes.lastIndexOf(`POST /api/chats/${main.id}/import`),
+    );
+
+    // A second run finds every branch file in the chat it went into.
+    const again = await runAll(api, branchedLibrary());
+    expect(again.steps.filter((step) => step.kind === 'chat')).toEqual([]);
   });
 });

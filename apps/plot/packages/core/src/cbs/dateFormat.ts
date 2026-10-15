@@ -34,7 +34,7 @@ const MONTHS = [
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const DAY_MS = 86_400_000;
 
-interface Wall {
+export interface Wall {
   year: number;
   /** 1–12. */
   month: number;
@@ -51,7 +51,7 @@ interface Wall {
 const formatters = new Map<string, Intl.DateTimeFormat>();
 
 /** The wall clock in `timeZone` at `date`. */
-function wall(date: Date, timeZone: string): Wall {
+export function wall(date: Date, timeZone: string): Wall {
   let format = formatters.get(timeZone);
   if (!format) {
     format = new Intl.DateTimeFormat('en-US', {
@@ -82,7 +82,7 @@ function wall(date: Date, timeZone: string): Wall {
 }
 
 /** How far `timeZone` is ahead of UTC at `time`, in ms. */
-function offsetAt(time: number, timeZone: string): number {
+export function offsetAt(time: number, timeZone: string): number {
   const at = wall(new Date(time), timeZone);
   const ms = ((time % 1000) + 1000) % 1000;
   return Date.UTC(at.year, at.month - 1, at.day, at.hour, at.minute, at.second) + ms - time;

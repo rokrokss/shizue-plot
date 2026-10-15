@@ -6,6 +6,12 @@
  * neither do the lore scan and the chat functions, which read the turns as
  * stored — RisuAI's and SillyTavern's alike.
  *
+ * SillyTavern runs its regex in two more places, read here too and run by the
+ * same thread: the World Info a prompt inserts (`worldInfoScriptsOf`), and the
+ * text a turn is stored as — the scripts with neither `promptOnly` nor
+ * `markdownOnly` (`storedTextScriptsOf`), which the API runs as it writes the
+ * reader's turn, a reply, a chat's greetings and an edit.
+ *
  * Both are kept where their app keeps them, in the card's `extensions` —
  * RisuAI's in `risuai.customScripts` (a charx's `module.risum` merged in at
  * import), SillyTavern's in `regex_scripts` — and read from there each time a
@@ -102,7 +108,12 @@ export interface RisuProcessScript {
   actions: string[];
 }
 
-/** A SillyTavern regex script that alters the outgoing prompt (`promptOnly`). */
+/**
+ * A SillyTavern regex script, as one of the three places ST runs it reads it:
+ * a prompt-only one over the turns of the outgoing prompt (`tavernPromptScripts`)
+ * or over the World Info it inserts (`worldInfoScriptsOf`), and one with neither
+ * flag over the text a turn is stored as (`storedTextScriptsOf`).
+ */
 export interface TavernPromptScript {
   kind: 'sillytavern';
   /**
@@ -115,7 +126,11 @@ export interface TavernPromptScript {
   replace: string;
   /** Text taken out of every group a replacement quotes. Macros expanded by the caller. */
   trimStrings: string[];
-  /** ST's `regex_placement`s the script runs on: 1 the user's turns, 2 the model's. */
+  /**
+   * ST's `regex_placement`s the script runs on that this reading has: 1 the
+   * user's turns, 2 the model's, 3 a narration (ST's narrator, `SLASH_COMMAND`),
+   * 5 a World Info entry.
+   */
   placement: number[];
   /** Runs only on turns at least this deep — 0 the newest. */
   minDepth?: number;
@@ -123,6 +138,8 @@ export interface TavernPromptScript {
   maxDepth?: number;
   /** `substituteRegex`: 0 the pattern as written, 1 its macros expanded, 2 expanded and escaped. */
   substitute: 0 | 1 | 2;
+  /** `runOnEdit`, read on a stored-text script alone: it also rewrites a turn the reader edits. */
+  runOnEdit?: true;
 }
 
 export type PromptScript = RisuProcessScript | TavernPromptScript;
@@ -132,9 +149,15 @@ type Json = Record<string, unknown>;
 const isObject = (value: unknown): value is Json =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 
-/** ST's `regex_placement.USER_INPUT` and `AI_OUTPUT` — the two a chat turn is. */
-const USER_INPUT = 1;
-const AI_OUTPUT = 2;
+/**
+ * ST's `regex_placement`s: `USER_INPUT` and `AI_OUTPUT`, the two a chat turn
+ * is; `SLASH_COMMAND`, which is also what ST's narrator's messages are; and
+ * `WORLD_INFO`.
+ */
+export const USER_INPUT = 1;
+export const AI_OUTPUT = 2;
+export const SLASH_COMMAND = 3;
+export const WORLD_INFO = 5;
 
 /**
  * A card's `editprocess` scripts in the sequence RisuAI runs them. Until one
@@ -177,24 +200,46 @@ const depthBound = (value: unknown, floor: number): number | undefined => {
 };
 
 /**
- * A card's prompt-only SillyTavern scripts, in list order: `promptOnly`, not
- * disabled, with a pattern, and placed on the user's or the model's turns — the
- * two placements a turn of history is. One that is also `markdownOnly` runs here
- * too, as in ST, which reads the two flags apart. The display-only ones are the
- * display import's (`card/sillyTavern.ts`); the ones with neither flag edit the
- * turn as it is stored, which a prompt never does.
+ * Which of a card's SillyTavern scripts a reading takes — the three ways
+ * `getRegexedString` is asked (`extensions/regex/engine.js`):
+ *
+ *   - `prompt`: the turns of the outgoing prompt (`isPrompt`) — `promptOnly`
+ *     ones placed on the user's or the model's turns;
+ *   - `world`: the World Info it inserts (`isPrompt`, `WORLD_INFO`) — `promptOnly`
+ *     ones placed there;
+ *   - `stored`: the text a turn is stored as — ones with neither flag (ST runs
+ *     those only when it is asked neither `isPrompt` nor `isMarkdown`), on the
+ *     user's turns, the model's and the narrator's.
+ *
+ * One that is both `promptOnly` and `markdownOnly` runs in the prompt too, as
+ * in ST, which reads the two flags apart. The display-only ones are the display
+ * import's (`card/sillyTavern.ts`).
  */
-function tavernPromptScripts(extensions: Json): TavernPromptScript[] {
+type TavernReading = 'prompt' | 'world' | 'stored';
+
+const READ_PLACEMENTS: Record<TavernReading, readonly number[]> = {
+  prompt: [USER_INPUT, AI_OUTPUT],
+  world: [WORLD_INFO],
+  stored: [USER_INPUT, AI_OUTPUT, SLASH_COMMAND],
+};
+
+/**
+ * A card's SillyTavern scripts for one reading (`TavernReading`), in list order:
+ * not disabled, with a pattern, and placed somewhere the reading reaches.
+ */
+function tavernScripts(extensions: Json, reading: TavernReading): TavernPromptScript[] {
   const scripts = extensions['regex_scripts'];
   if (!Array.isArray(scripts)) return [];
   const read: TavernPromptScript[] = [];
   for (const raw of scripts) {
-    if (!isObject(raw) || raw['promptOnly'] !== true || raw['disabled'] === true) continue;
+    if (!isObject(raw) || raw['disabled'] === true) continue;
+    const promptOnly = raw['promptOnly'] === true;
+    if (reading === 'stored' ? promptOnly || raw['markdownOnly'] === true : !promptOnly) continue;
     const find = raw['findRegex'];
     if (typeof find !== 'string' || !find) continue;
     const placement = (Array.isArray(raw['placement']) ? raw['placement'] : [])
       .map(Number)
-      .filter((value) => value === USER_INPUT || value === AI_OUTPUT);
+      .filter((value) => READ_PLACEMENTS[reading].includes(value));
     if (placement.length === 0) continue;
     const substitute = Number(raw['substituteRegex']);
     const minDepth = depthBound(raw['minDepth'], -1);
@@ -210,6 +255,7 @@ function tavernPromptScripts(extensions: Json): TavernPromptScript[] {
       ...(minDepth !== undefined ? { minDepth } : {}),
       ...(maxDepth !== undefined ? { maxDepth } : {}),
       substitute: substitute === 1 || substitute === 2 ? substitute : 0,
+      ...(reading === 'stored' && raw['runOnEdit'] === true ? { runOnEdit: true as const } : {}),
     });
   }
   return read;
@@ -221,7 +267,82 @@ function tavernPromptScripts(extensions: Json): TavernPromptScript[] {
  * the two lists only matters to a card that carries both.
  */
 export function promptScriptsOfCard(extensions: Record<string, unknown>): PromptScript[] {
-  return [...risuProcessScripts(extensions), ...tavernPromptScripts(extensions)];
+  return [...risuProcessScripts(extensions), ...tavernScripts(extensions, 'prompt')];
+}
+
+/**
+ * Whether the server runs a SillyTavern script anywhere — over the prompt's
+ * turns, its World Info, or the text a turn is stored as. What the import keeps
+ * of ST's global scripts on the first card; the display-only ones go to the
+ * display scripts instead.
+ */
+export function tavernScriptRunsOnServer(script: unknown): boolean {
+  const extensions = { regex_scripts: [script] };
+  return (['prompt', 'world', 'stored'] as const).some((reading) => tavernScripts(extensions, reading).length > 0);
+}
+
+/**
+ * Every card's scripts of one SillyTavern reading, roster order deciding which
+ * run first, each expanded for its own card, a script two members carry once
+ * (`promptScriptsOf`).
+ */
+function tavernScriptsOf(
+  cards: readonly { extensions: Record<string, unknown> }[],
+  reading: TavernReading,
+  expand: ((text: string, card: number) => string) | undefined,
+  keep: (script: TavernPromptScript) => boolean = () => true,
+): TavernPromptScript[] {
+  const seen = new Set<string>();
+  const scripts: TavernPromptScript[] = [];
+  cards.forEach((card, index) => {
+    for (const read of tavernScripts(card.extensions ?? {}, reading)) {
+      if (!keep(read)) continue;
+      const own = (text: string): string => expand!(text, index);
+      let script = expand ? (expandPromptScript(read, own) as TavernPromptScript) : read;
+      // ST substitutes the macros of what a rewrite writes as it writes it
+      // (`substituteParams(replaceWithGroups)`): a stored turn keeps the name a
+      // `{{char}}` there wrote, and the World Info it rewrites is past every macro
+      // pass of the prompt. (A turn of the prompt's history is expanded whole
+      // after its scripts, which writes the same.) Expanded here, before the groups
+      // are put in: a macro that only a group's text completes is one the
+      // caller's engine leaves as written.
+      if (expand && reading !== 'prompt') script = { ...script, replace: own(script.replace) };
+      const identity = JSON.stringify(script);
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      scripts.push(script);
+    }
+  });
+  return scripts;
+}
+
+/**
+ * The scripts that rewrite a turn as it is stored: every card's SillyTavern
+ * scripts with neither `promptOnly` nor `markdownOnly` — what ST's
+ * `getRegexedString` runs when it is asked for neither, which it does when the
+ * reader sends (`sendMessageAsUser`), when a reply is stored (`cleanUpMessage`),
+ * when a chat opens on its greeting (`getFirstMessage`) and, for the ones with
+ * `runOnEdit` alone, when the reader edits a message (`updateMessage`, `edit`).
+ */
+export function storedTextScriptsOf(
+  cards: readonly { extensions: Record<string, unknown> }[],
+  expand?: (text: string, card: number) => string,
+  { edit = false }: { edit?: boolean } = {},
+): TavernPromptScript[] {
+  return tavernScriptsOf(cards, 'stored', expand, (script) => !edit || script.runOnEdit === true);
+}
+
+/**
+ * The scripts that rewrite the World Info a prompt inserts: every card's
+ * prompt-only SillyTavern scripts placed on `WORLD_INFO` — ST runs them on each
+ * activated entry as it builds the prompt (`getRegexedString(entry.content,
+ * WORLD_INFO, { isPrompt: true })` in `world-info.js`).
+ */
+export function worldInfoScriptsOf(
+  cards: readonly { extensions: Record<string, unknown> }[],
+  expand?: (text: string, card: number) => string,
+): TavernPromptScript[] {
+  return tavernScriptsOf(cards, 'world', expand);
 }
 
 const escapeRegex = (text: string): string => text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
@@ -280,8 +401,17 @@ export interface PromptScriptMessage {
   role: 'user' | 'assistant';
   /** RisuAI's `chatID`: -1 the greeting, then 0, 1, … for the messages after it. */
   chatIndex: number;
-  /** SillyTavern's depth: 0 the newest turn of the history, counting up into the past. */
-  depth: number;
+  /**
+   * SillyTavern's depth: 0 the newest turn of the history, counting up into the
+   * past. Absent where ST asks with none — a turn being stored, an entry not at
+   * a depth — and then a script's depth bounds do not apply, as there.
+   */
+  depth?: number;
+  /**
+   * The `regex_placement` the text is, where it is not the role's turn (1 the
+   * user's, 2 the model's): 3 a narration, 5 a World Info entry.
+   */
+  placement?: number;
 }
 
 /** What a worker is handed: the scripts, in the order they run, and the turns. */
@@ -515,9 +645,11 @@ function tavernRunner(script: TavernPromptScript): Runner | null {
 
   return (text, message) => {
     if (!text) return text;
-    if (!script.placement.includes(message.role === 'user' ? USER_INPUT : AI_OUTPUT)) return text;
-    if (script.minDepth !== undefined && message.depth < script.minDepth) return text;
-    if (script.maxDepth !== undefined && message.depth > script.maxDepth) return text;
+    const placement = message.placement ?? (message.role === 'user' ? USER_INPUT : AI_OUTPUT);
+    if (!script.placement.includes(placement)) return text;
+    const { depth } = message;
+    if (depth !== undefined && script.minDepth !== undefined && depth < script.minDepth) return text;
+    if (depth !== undefined && script.maxDepth !== undefined && depth > script.maxDepth) return text;
     pattern.lastIndex = 0;
     return text.replace(pattern, (...args: unknown[]) => {
       const named = typeof args.at(-1) === 'object' && args.at(-1) !== null;

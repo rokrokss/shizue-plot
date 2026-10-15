@@ -636,6 +636,15 @@ export const messages = pgTable(
     // a swipe to another branch shows the picture that branch left. Null until
     // one is chosen, and on every message no emotion screen reads.
     emotion: text('emotion'),
+    // What SillyTavern kept beside a message it brought in (`extra`), null on
+    // every other. `display_text` is shown in place of the text — ST's
+    // translation, which the prompt never reads — and goes when the reader
+    // edits the message, as ST's does. `reasoning` is the model's thinking,
+    // shown folded above the text and not sent, as ST sends none by default.
+    // `bias` is ST's `{{bias}}`, shown under the reader's turn it was written on.
+    displayText: text('display_text'),
+    reasoning: text('reasoning'),
+    bias: text('bias'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

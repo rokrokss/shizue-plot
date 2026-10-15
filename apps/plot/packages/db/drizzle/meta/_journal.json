@@ -127,6 +127,13 @@
       "when": 1792029164153,
       "tag": "0017_lore_aliases_and_chunks",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1792030907131,
+      "tag": "0018_st_message_extras",
+      "breakpoints": true
     }
   ]
 }

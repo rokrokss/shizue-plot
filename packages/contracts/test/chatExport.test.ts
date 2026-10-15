@@ -100,6 +100,22 @@ describe('ChatExportSchema', () => {
     ).toBe(false);
   });
 
+  it("carries what SillyTavern kept beside a message, and nothing on the others", () => {
+    const parsed = ChatExportSchema.parse({
+      ...bundle,
+      messages: [
+        { ...bundle.messages[0], bias: ' 웃으며' },
+        { ...bundle.messages[1], displayText: '번역', reasoning: '생각' },
+      ],
+    });
+    expect(parsed.messages[0]).toMatchObject({ bias: ' 웃으며' });
+    expect(parsed.messages[0]?.displayText).toBeUndefined();
+    expect(parsed.messages[1]).toMatchObject({ displayText: '번역', reasoning: '생각' });
+    expect(
+      ChatExportSchema.safeParse({ ...bundle, messages: [{ ...bundle.messages[0], reasoning: 1 }] }).success,
+    ).toBe(false);
+  });
+
   it('rejects a message role outside user/assistant', () => {
     expect(
       ChatExportSchema.safeParse({

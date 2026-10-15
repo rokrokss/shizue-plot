@@ -8865,7 +8865,13 @@ describe('chat import', () => {
       messages: [turn('user', ['다음'], 0, '2024-02-01T00:00:00.000Z'), turn('assistant', ['끝'])],
     });
     expect(second.status, await second.clone().text()).toBe(200);
-    expect(await readJson(second)).toEqual({ inserted: 2, total: 8 });
+    expect(await readJson(second)).toEqual({
+      inserted: 2,
+      total: 8,
+      // Each message's rows, by version, and where the batch ends: the new head.
+      ids: [[expect.any(String)], [expect.any(String)]],
+      tail: expect.any(String),
+    });
 
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
     expect(state.chat.importing).toBe(true);
@@ -9182,6 +9188,115 @@ describe('chat import', () => {
     }
     expect((await lookup(undefined, [cardHash])).status).toBe(401);
   });
+  it("keeps what SillyTavern kept beside each version — shown text, reasoning, bias — through the chat, its export and an edit", async () => {
+    // script.js draws `extra.display_text || mes`, keeps `extra.reasoning` folded
+    // above the text, and `extra.bias` under the reader's turn (`.mes_bias`).
+    const cookie = await signUp('chat-import-extras@example.com');
+    const plot = await createPlot(cookie, { name: '번역된 대화', intros: ['도입부'] });
+    const first = await importChat(cookie, plot.id, [
+      turn('assistant', ['Hello'], 0, '2024-03-01T09:00:00.000Z'),
+      { ...turn('user', ['안녕'], 0, '2024-03-01T09:01:00.000Z'), extras: [{ bias: ' 웃으며' }] },
+      {
+        ...turn('assistant', ['Answer A', 'Answer B'], 1, '2024-03-01T09:02:00.000Z'),
+        extras: [{ reasoning: 'A의 생각' }, { displayText: '대답 B', reasoning: 'B의 생각' }],
+      },
+    ]);
+    const chatId = first.chat.id;
+    expect((await complete(cookie, chatId)).status).toBe(200);
+
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    expect(state.path.map((m: any) => [m.content, m.displayText, m.reasoning, m.bias])).toEqual([
+      ['Hello', null, null, null],
+      ['안녕', null, null, ' 웃으며'],
+      ['Answer B', '대답 B', 'B의 생각', null],
+    ]);
+    const swipe = (await rowsOf(chatId)).find((row) => row.content === 'Answer A')!;
+    expect(swipe.reasoning).toBe('A의 생각');
+
+    const exported = ChatExportSchema.parse(await readJson(await request(cookie, `/api/chats/${chatId}/export`)));
+    expect(exported.messages.map((m) => [m.displayText, m.reasoning, m.bias])).toEqual([
+      [undefined, undefined, undefined],
+      [undefined, undefined, ' 웃으며'],
+      ['대답 B', 'B의 생각', undefined],
+    ]);
+
+    // An edit drops what was shown in place of the old words (ST's translation
+    // goes with them), and keeps the reasoning behind the reply.
+    const reply = state.path[2].id;
+    expect((await json(cookie, `/api/messages/${reply}`, 'PATCH', { content: 'Answer B, edited' })).status).toBe(200);
+    const [edited] = await db.select().from(messages).where(eq(messages.id, reply));
+    expect([edited!.content, edited!.displayText, edited!.reasoning]).toEqual(['Answer B, edited', null, 'B의 생각']);
+
+    // One extra per version, of the three fields, each a string.
+    for (const extras of [[{ displayText: 'x' }, null], [{ other: 'x' }], [{ reasoning: 1 }], 'x', [{ bias: 'a\u0000b' }]]) {
+      const res = await startImport(cookie, plot.id, [{ ...turn('user', ['a']), extras }], {}, app);
+      expect(res.status, JSON.stringify(extras)).toBe(400);
+    }
+  });
+
+  it('hangs a SillyTavern branch under the message it parts at, before the siblings there, and leaves the head where it was', async () => {
+    // bookmarks.js createBranch/createNewBookmark: the chat up to a message, saved
+    // under a new name with chat_metadata.main_chat — here, one more version there.
+    const cookie = await signUp('chat-import-branch@example.com');
+    const plot = await createPlot(cookie, { name: '갈래', intros: ['도입부'] });
+    const first = await importChat(cookie, plot.id, [
+      turn('assistant', ['인사'], 0, '2024-03-01T09:00:00.000Z'),
+      turn('user', ['질문'], 0, '2024-03-01T09:01:00.000Z'),
+      turn('assistant', ['본 대답', '다른 대답'], 0, '2024-03-01T09:02:00.000Z'),
+    ]);
+    const chatId = first.chat.id;
+    expect(first.ids.map((row: string[]) => row.length)).toEqual([1, 1, 2]);
+    const [[greeting], [question]] = first.ids as string[][];
+
+    const branchSha = hashOf('main - Branch #1.jsonl');
+    const branch = await json(cookie, `/api/chats/${chatId}/import`, 'POST', {
+      messages: [turn('assistant', ['갈래 대답'], 0, '2024-04-01T00:00:00.000Z'), turn('user', ['이어서'])],
+      branch: { parentId: question, file: { fileName: 'main - Branch #1.jsonl', sha256: branchSha } },
+    });
+    expect(branch.status, await branch.clone().text()).toBe(200);
+    const answer = await readJson(branch);
+    expect(answer.ids).toHaveLength(2);
+    expect(answer.tail).toBe(answer.ids[1][0]);
+
+    // A checkpoint that adds nothing is recorded all the same.
+    const checkpointSha = hashOf('Checkpoint #1.jsonl');
+    const checkpoint = await json(cookie, `/api/chats/${chatId}/import`, 'POST', {
+      messages: [],
+      branch: { parentId: greeting, file: { fileName: 'Checkpoint #1.jsonl', sha256: checkpointSha } },
+    });
+    expect(checkpoint.status).toBe(200);
+    for (const bad of [{ parentId: 'x' }, { parentId: randomUUID() }, { parentId: null, file: { fileName: 'a', sha256: 'x' } }]) {
+      const res = await json(cookie, `/api/chats/${chatId}/import`, 'POST', { messages: [], branch: bad });
+      expect(res.status, JSON.stringify(bad)).toBe(400);
+    }
+    expect((await complete(cookie, chatId)).status).toBe(200);
+
+    // The head is still the chat the file was on, which is still the newest under the question.
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    expect(state.path.map((m: any) => m.content)).toEqual(['인사', '질문', '본 대답']);
+    expect(state.siblings[state.path[2].id]).toMatchObject({ index: 2, total: 3 });
+    const rows = await rowsOf(chatId);
+    const byText = new Map(rows.map((row) => [row.content, row]));
+    expect(byText.get('갈래 대답')!.parentId).toBe(question);
+    expect(byText.get('이어서')!.parentId).toBe(byText.get('갈래 대답')!.id);
+    expect(byText.get('갈래 대답')!.createdAt.getTime()).toBeLessThan(byText.get('다른 대답')!.createdAt.getTime());
+    // Swiped to, the branch goes on to its own end.
+    const swiped = await readJson(await json(cookie, `/api/chats/${chatId}/head`, 'POST', { messageId: byText.get('갈래 대답')!.id }));
+    expect(swiped.path.map((m: any) => m.content)).toEqual(['인사', '질문', '갈래 대답', '이어서']);
+
+    // A second run finds both files as this chat.
+    const lookup = await readJson(
+      await json(cookie, '/api/imports/lookup', 'POST', { sha256: [FILE, branchSha, checkpointSha] }),
+    );
+    expect(lookup.chats.map((chat: any) => [chat.sha256, chat.chatId]).sort()).toEqual(
+      [
+        [FILE, chatId],
+        [branchSha, chatId],
+        [checkpointSha, chatId],
+      ].sort(),
+    );
+  });
+
 });
 
 describe('relationship', () => {
@@ -13659,6 +13774,153 @@ describe('prompt scripts and SillyTavern lore', () => {
     const globals = await json(cookie, `/api/chats/${created.chat.id}/global-variables`, 'GET');
     expect((await readJson(globals)).variables).toEqual({ seen: '1' });
   });
+});
+
+describe('SillyTavern regex on the stored text and on World Info', () => {
+  /** An app whose model answers each request with the next of `replies`, and records the turns it was sent. */
+  function repliesApp(replies: string[]): { app: Hono<AppEnv>; turns: string[][]; systems: string[] } {
+    const turns: string[][] = [];
+    const systems: string[] = [];
+    const app = makeApp({
+      getAdapter: () => ({
+        providerModel: 'fixed',
+        adapter: {
+          stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
+            systems.push(req.system);
+            turns.push(req.messages.map((message) => (typeof message.content === 'string' ? message.content : '')));
+            yield { type: 'text', text: replies.shift() ?? '' };
+            return { usage: { promptTokens: 1, completionTokens: 1 } };
+          },
+        },
+      }),
+    });
+    return { app, turns, systems };
+  }
+
+  /** A regex script as ST stores it: neither prompt-only nor display-only unless told. */
+  const script = (fields: Record<string, unknown>): Record<string, unknown> => ({
+    scriptName: 's',
+    replaceString: '',
+    trimStrings: [],
+    placement: [1, 2],
+    disabled: false,
+    markdownOnly: false,
+    promptOnly: false,
+    runOnEdit: false,
+    substituteRegex: 0,
+    minDepth: null,
+    maxDepth: null,
+    ...fields,
+  });
+
+  /** A chat on a plot of one SillyTavern card carrying `regexScripts`, opened on its intro. */
+  async function tavernChat(email: string, regexScripts: unknown[]): Promise<{ cookie: string; chatId: string }> {
+    const cookie = await signUp(email);
+    const plot = await createPlot(cookie, { name: '정규식 작품', description: '설명', intros: ['문 앞이다. 비밀이 있다.'] });
+    await addCharacter(cookie, plot.id, {
+      name: '아리아',
+      card: { description: '설명', extensions: { talkativeness: '0.5', fav: false, regex_scripts: regexScripts } },
+    });
+    const created = await startChat(cookie, plot.id);
+    return { cookie, chatId: created.chat.id };
+  }
+
+  const storedTexts = async (chatId: string): Promise<string[]> =>
+    (await db.select().from(messages).where(eq(messages.chatId, chatId)).orderBy(asc(messages.createdAt))).map(
+      (message) => message.content,
+    );
+
+  it('rewrites the greeting, the reader’s turn and the reply as they are stored — neither flag, no depth — and leaves the other kinds to the prompt and the screen', async () => {
+    // engine.js getRegexedString: a script with neither flag runs when it is
+    // asked with neither isPrompt nor isMarkdown — getFirstMessage, sendMessageAsUser
+    // and cleanUpMessage in script.js, none of which passes a depth.
+    const { cookie, chatId } = await tavernChat('st-stored@example.com', [
+      script({ findRegex: '/비밀/g', replaceString: '<{{match}}>' }),
+      script({ findRegex: '/대답/', replaceString: '{{char}}의 대답', placement: [2] }),
+      script({ findRegex: '/앞/g', replaceString: 'FRONT', placement: [2], minDepth: 5 }),
+      script({ findRegex: '/말해/g', replaceString: 'SAY', placement: [1], promptOnly: true }),
+      script({ findRegex: '/문/g', replaceString: 'DOOR', placement: [2], markdownOnly: true }),
+      script({ findRegex: '/있다/g', replaceString: 'OFF', disabled: true }),
+    ]);
+    expect(await storedTexts(chatId)).toEqual(['문 FRONT이다. <비밀>이 있다.']);
+
+    const { app, turns } = repliesApp(['대답이다 비밀']);
+    const events = await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '비밀을 말해' }, app));
+    expect(events.at(-1)!.event).toBe('done');
+    expect(await storedTexts(chatId)).toEqual(['문 FRONT이다. <비밀>이 있다.', '<비밀>을 말해', '아리아의 대답이다 <비밀>']);
+    // The prompt-only script still runs on the prompt, over the stored turn.
+    expect(turns[0]).toContain('<비밀>을 SAY');
+  });
+
+  it('cleans up a continued reply whole, as cleanUpMessage reads the message it continues', async () => {
+    const { cookie, chatId } = await tavernChat('st-stored-continue@example.com', [
+      script({ findRegex: '/ab/g', replaceString: 'AB', placement: [2] }),
+    ]);
+    const { app } = repliesApp(['a', 'b']);
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '시작' }, app));
+    await readSse(await json(cookie, `/api/chats/${chatId}/continue`, 'POST', undefined, app));
+    expect((await storedTexts(chatId)).at(-1)).toBe('AB');
+  });
+
+  it('runs only the runOnEdit scripts on an edit, on the edited message’s side (updateMessage with isEdit)', async () => {
+    const { cookie, chatId } = await tavernChat('st-stored-edit@example.com', [
+      script({ findRegex: '/x/g', replaceString: 'Y', runOnEdit: true }),
+      script({ findRegex: '/z/g', replaceString: 'Q', runOnEdit: false, placement: [2] }),
+    ]);
+    const { app } = repliesApp(['답']);
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '질문' }, app));
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    const [, user, reply] = state.path;
+
+    expect((await json(cookie, `/api/messages/${reply.id}`, 'PATCH', { content: 'x z' })).status).toBe(200);
+    const [edited] = await db.select().from(messages).where(eq(messages.id, reply.id));
+    expect(edited!.content).toBe('Y z');
+
+    const fork = await readJson(await json(cookie, `/api/messages/${user.id}`, 'PATCH', { content: 'x z' }));
+    const [sibling] = await db.select().from(messages).where(eq(messages.id, fork.messageId));
+    expect(sibling!.content).toBe('Y z');
+  });
+  it('runs the prompt-only WORLD_INFO scripts over each ST entry as it is inserted, and leaves out one they empty', async () => {
+    // world-info.js: getRegexedString(entry.content, WORLD_INFO, { depth: regexDepth, isPrompt: true })
+    // after substituteParams; regexDepth is the entry's depth at a depth, none
+    // otherwise; an entry whose content comes back empty is not added.
+    const cookie = await signUp('st-world-info@example.com');
+    const plot = await createPlot(cookie, { name: '세계 작품', description: '설명', intros: ['안녕'] });
+    await addCharacter(cookie, plot.id, {
+      name: '아리아',
+      card: {
+        description: '설명',
+        extensions: {
+          talkativeness: '0.5',
+          fav: false,
+          regex_scripts: [
+            script({ findRegex: '/비밀/g', replaceString: '[{{char}}의 {{match}}]', placement: [5], promptOnly: true }),
+            script({ findRegex: '/^지움$/', replaceString: '', placement: [5], promptOnly: true }),
+            script({ findRegex: '/깊이/g', replaceString: 'DEEP', placement: [5], promptOnly: true, maxDepth: 1 }),
+            script({ findRegex: '/설정/g', replaceString: 'TURNS', placement: [1, 2], promptOnly: true }),
+            script({ findRegex: '/설정/g', replaceString: 'STORED', placement: [5] }),
+          ],
+        },
+        lorebook: [
+          { keys: [], content: '{{user}}의 비밀 설정 깊이', constant: true, insertionOrder: 2 },
+          { keys: [], content: '지움', constant: true, insertionOrder: 1 },
+          { keys: [], content: '깊이 아래', constant: true, depth: 3 },
+        ],
+      },
+    });
+    const created = await startChat(cookie, plot.id);
+    const { app, turns, systems } = repliesApp(['대답']);
+    await readSse(await json(cookie, `/api/chats/${created.chat.id}/messages`, 'POST', { content: '안녕' }, app));
+    const system = systems.at(-1)!;
+    // After the entry's own macros, as ST runs the regex on the substituted content.
+    expect(system).toContain('유저의 [아리아의 비밀] 설정 DEEP');
+    expect(system).not.toContain('지움');
+    expect(system).not.toMatch(/\n{3,}/);
+    // The depth entry is at depth 3, past the script's maxDepth of 1.
+    expect(turns.at(-1)).toContain('깊이 아래');
+    expect(JSON.stringify([systems, turns])).not.toMatch(/[\uFDD0-\uFDD2]/);
+  });
+
 });
 
 describe('request triggers', () => {

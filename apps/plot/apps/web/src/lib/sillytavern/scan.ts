@@ -9,6 +9,7 @@ import {
   promptRegexScripts,
   regexScriptsToDisplayScripts,
   scanSillyTavern,
+  stChatMainChat,
   stFilesFromFolder,
   stFilesFromZip,
   type StFile,
@@ -52,4 +53,5 @@ export const IMPORT_DEPS: ImportDeps = {
   lorebookEntries: fromLorebookFile,
   displayScripts: regexScriptsToDisplayScripts,
   promptScripts: promptRegexScripts,
+  chatMainChat: stChatMainChat,
 };

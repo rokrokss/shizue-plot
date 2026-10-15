@@ -1018,6 +1018,12 @@ export interface CbsHost {
    * `{{if}}` has its own, which no host changes.
    */
   condition?(head: CbsArg): boolean;
+  /**
+   * The text is SillyTavern's: `{{if $name}}` reads the global variable, as ST's
+   * `$` shorthand does (`getglobalvar`), and `.name` the chat's. Elsewhere both
+   * read the chat's.
+   */
+  sillyTavern?: boolean;
   /** [0, 1), for `random`, `roll`, `randint` and `dice`. */
   random?(): number;
   /**
@@ -1662,8 +1668,9 @@ export function evaluateCbs(source: string, nodes: CbsNode[], host: CbsHost = {}
     if (!condition.literal) return { negated, value };
     const variable = /^[.$]([A-Za-z](?:[\w-]*\w)?)$/.exec(value.text);
     if (variable) {
-      if (!host.variable) return { negated, value: { text: value.text, deferred: true } };
-      return { negated, value: { text: host.variable(variable[1]!) ?? '', untrusted: true } };
+      const read = host.sillyTavern && value.text.startsWith('$') ? host.globalVariable : host.variable;
+      if (!read) return { negated, value: { text: value.text, deferred: true } };
+      return { negated, value: { text: read(variable[1]!) ?? '', untrusted: true } };
     }
     if (!/^[A-Za-z][\w-]*$/.test(value.text)) return { negated, value };
     const called = answer({

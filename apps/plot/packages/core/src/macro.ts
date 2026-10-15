@@ -8,6 +8,7 @@ import {
   type CbsMessage,
   type CbsValue,
 } from './cbs.js';
+import { momentFormat } from './cbs/momentFormat.js';
 import { readVariable, runVariableMacro, type Variables } from './variables.js';
 
 /**
@@ -181,6 +182,16 @@ function timeAtOffset(clock: MacroClock, offset: number): string | undefined {
     minute: '2-digit',
     hourCycle: 'h23',
   }).format(new Date(clock.now.getTime() + offset * HOUR_MS));
+}
+
+/**
+ * ST's clock in a moment format (`momentFormat`): the reader's wall clock, or
+ * the time `offsetHours` from UTC as `moment().utc().utcOffset(n)` reads one —
+ * moment takes a number under 16 as hours.
+ */
+function tavernTime(clock: MacroClock, format: string, offsetHours?: number): string {
+  if (offsetHours === undefined || !Number.isFinite(offsetHours)) return momentFormat(format, clock.now, clock.timeZone);
+  return momentFormat(format, clock.now, clock.timeZone, Math.abs(offsetHours) < 16 ? offsetHours * 60 : offsetHours);
 }
 
 /**
@@ -412,6 +423,14 @@ function tavernOnlyMacro(call: CbsCall, ctx: MacroContext, depth: number): CbsVa
   const number = (value: number | undefined): CbsValue | undefined =>
     value === undefined ? undefined : { text: String(value) };
 
+  if (name.startsWith('timeutc') && bare && ctx.clock) {
+    // The old `{{time_UTC±N}}`, which ST's engine reads as `{{time::UTC±N}}`.
+    const only = call.macro.body.length === 1 ? call.macro.body[0] : undefined;
+    const offset = only?.type === 'text' ? TIME_UTC_RE.exec(only.text)?.[1] : undefined;
+    if (offset !== undefined && /^[+-]\d+$/.test(offset)) {
+      return { text: tavernTime(ctx.clock, 'LT', Number.parseInt(offset, 10)) };
+    }
+  }
   switch (name) {
     case 'lastmessage': {
       if (!chat) return undefined;
@@ -505,13 +524,31 @@ function tavernOnlyMacro(call: CbsCall, ctx: MacroContext, depth: number): CbsVa
       if (match[3]) total += (match[3] === '-' ? -1 : 1) * Number(match[4]);
       return { text: String(total) };
     }
+    // ST's clock (`time-macros.js`), in moment's English whatever the reader's
+    // language, as ST never sets moment's locale (`momentFormat`).
     case 'time': {
-      if (bare || !ctx.clock) return undefined;
-      const offset = /^UTC([+-]\d+)$/.exec(arg(1)?.text.trim() ?? '')?.[1];
-      if (offset === undefined) return undefined;
-      const text = timeAtOffset(ctx.clock, Number(offset));
-      return text === undefined ? undefined : { text };
+      if (!ctx.clock) return undefined;
+      // `{{time::UTC±N}}` at that offset; any other argument is the local time there too.
+      const offset = bare ? undefined : /^UTC([+-]\d+)$/.exec(arg(1)?.text.trim() ?? '')?.[1];
+      return { text: tavernTime(ctx.clock, 'LT', offset === undefined ? undefined : Number.parseInt(offset, 10)) };
     }
+    case 'date':
+      return bare && ctx.clock ? { text: tavernTime(ctx.clock, 'LL') } : undefined;
+    case 'weekday':
+      return ctx.clock ? { text: tavernTime(ctx.clock, 'dddd') } : undefined;
+    case 'isotime':
+      return ctx.clock ? { text: tavernTime(ctx.clock, 'HH:mm') } : undefined;
+    case 'isodate':
+      return ctx.clock ? { text: tavernTime(ctx.clock, 'YYYY-MM-DD') } : undefined;
+    case 'datetimeformat': {
+      if (bare || !ctx.clock) return undefined;
+      const format = arg(1);
+      if (!format || format.deferred) return undefined;
+      return { text: tavernTime(ctx.clock, format.text) };
+    }
+    case 'idleduration':
+      // ST's `getTimeSinceLastMessage`: moment's `humanize()`, and "just now" with nothing to measure.
+      return ctx.clock ? { text: ctx.clock.idleMs === undefined ? 'just now' : humanizeDuration(ctx.clock.idleMs, false) } : undefined;
     case 'timediff': {
       if (call.args.length < 2) return undefined;
       const left = Date.parse(arg(1)?.text.trim() ?? '');
@@ -665,6 +702,7 @@ function expand(text: string, ctx: MacroContext, depth: number): string {
       random: rand,
       data,
       each: true,
+      ...(ctx.tavern?.sillyTavern ? { sillyTavern: true } : {}),
       iterate: () => {
         if ((iterations += 1) > MAX_EXPANDED_ITERATIONS) throw new ExpansionBudgetExhausted();
       },

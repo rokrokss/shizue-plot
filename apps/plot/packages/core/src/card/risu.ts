@@ -313,8 +313,8 @@ export function defaultVariablesFromExtensions(
  * whole. RisuAI's own `<order N>` the import kept (`rank`) goes back where the
  * caller says it still agrees with that sequence (`ranked`), so a module's
  * scripts sort among the card's there as they did before. The range
- * (`minDepth`/`maxDepth`) does not go out: RisuAI's scripts have no such field,
- * so an exported script runs on every message there.
+ * (`minDepth`/`maxDepth`) and the side (`role`) do not go out: RisuAI's scripts
+ * have no such fields, so an exported script runs on every message there.
  */
 function toCustomScript(script: DisplayScript, ranked: boolean): Record<string, unknown> {
   const flag = [

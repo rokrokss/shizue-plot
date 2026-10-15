@@ -6,6 +6,9 @@ import {
   promptScriptsOf,
   promptScriptsOfCard,
   runPromptScripts,
+  storedTextScriptsOf,
+  tavernScriptRunsOnServer,
+  worldInfoScriptsOf,
   type PromptScript,
   type PromptScriptMessage,
 } from '../src/promptScripts.js';
@@ -309,5 +312,102 @@ describe('runPromptScripts - SillyTavern', () => {
         false,
       ),
     ).toEqual(['x', 'D', 'U', 'x']);
+  });
+});
+
+describe('storedTextScriptsOf - SillyTavern getRegexedString without isPrompt or isMarkdown', () => {
+  // engine.js `getRegexedString`: a script runs on a stored text only when it is
+  // neither `markdownOnly` nor `promptOnly`, and on an edit (`isEdit`) only with
+  // `runOnEdit`; script.js asks it with no depth at `sendMessageAsUser`,
+  // `cleanUpMessage`, `getFirstMessage` and `updateMessage`.
+  const card = (...scripts: Record<string, unknown>[]) => [{ extensions: { regex_scripts: scripts } }];
+  const stored = (fields: Record<string, unknown>) => tavern({ promptOnly: false, ...fields });
+
+  it('reads the scripts with neither flag on the turns and the narrator, and keeps runOnEdit', () => {
+    const scripts = storedTextScriptsOf(
+      card(
+        stored({ findRegex: 'a', placement: [1, 2, 3, 5], runOnEdit: false }),
+        stored({ findRegex: 'b', runOnEdit: true }),
+        tavern({ findRegex: 'prompt' }),
+        stored({ findRegex: 'display', markdownOnly: true }),
+        stored({ findRegex: 'world', placement: [5] }),
+        stored({ findRegex: 'off', disabled: true }),
+      ),
+    );
+    expect(scripts.map((script) => [script.find, script.placement, script.runOnEdit])).toEqual([
+      ['a', [1, 2, 3], undefined],
+      ['b', [1, 2], true],
+    ]);
+  });
+
+  it('takes only the runOnEdit ones for an edit', () => {
+    const scripts = storedTextScriptsOf(
+      card(stored({ findRegex: 'a', runOnEdit: false }), stored({ findRegex: 'b', runOnEdit: true })),
+      undefined,
+      { edit: true },
+    );
+    expect(scripts.map((script) => script.find)).toEqual(['b']);
+  });
+
+  it("expands the replacement's macros for its card, as runRegexScript's substituteParams does, groups and all left", () => {
+    const [script] = storedTextScriptsOf(
+      card(stored({ findRegex: '/(x)/', replaceString: '{{char}}:$1:{{match}}' })),
+      (text) => text.replaceAll('{{char}}', 'Aria'),
+    );
+    expect(script).toMatchObject({ replace: 'Aria:$1:{{match}}' });
+    expect(
+      runPromptScripts({ scripts: [script!], messages: [{ text: 'x', role: 'user', chatIndex: 0 }] }),
+    ).toEqual(['Aria:x:x']);
+  });
+
+  it('ignores the depth bounds of a text asked with no depth, and runs on the placement it is given', () => {
+    const [script] = storedTextScriptsOf(
+      card(stored({ findRegex: '/x/g', replaceString: 'y', placement: [3], minDepth: 2, maxDepth: 4 })),
+    );
+    const job = (placement?: number) => ({
+      scripts: [script!],
+      messages: [{ text: 'x', role: 'assistant' as const, chatIndex: 0, ...(placement ? { placement } : {}) }],
+    });
+    expect(runPromptScripts(job(3))).toEqual(['y']);
+    expect(runPromptScripts(job())).toEqual(['x']);
+  });
+});
+
+describe('worldInfoScriptsOf - world-info.js getRegexedString(entry.content, WORLD_INFO, { isPrompt })', () => {
+  it('reads the prompt-only scripts placed on World Info, and runs their depth bounds on a depth entry alone', () => {
+    const scripts = worldInfoScriptsOf([
+      {
+        extensions: {
+          regex_scripts: [
+            tavern({ findRegex: '/a/g', replaceString: 'A', placement: [5], minDepth: 2 }),
+            tavern({ findRegex: '/b/g', replaceString: 'B', placement: [1, 2] }),
+            tavern({ findRegex: '/c/g', replaceString: 'C', placement: [5], promptOnly: false }),
+          ],
+        },
+      },
+    ]);
+    expect(scripts.map((script) => [script.find, script.placement])).toEqual([['/a/g', [5]]]);
+    const entry = (depth?: number) => ({
+      text: 'abc',
+      role: 'assistant' as const,
+      chatIndex: 0,
+      placement: 5,
+      ...(depth !== undefined ? { depth } : {}),
+    });
+    expect(runPromptScripts({ scripts, messages: [entry(), entry(1), entry(4)] })).toEqual(['Abc', 'abc', 'Abc']);
+  });
+});
+
+describe('tavernScriptRunsOnServer', () => {
+  it('keeps the prompt-only, World Info and stored-text scripts, and leaves the display-only ones', () => {
+    expect(
+      [
+        tavern({ findRegex: 'x' }),
+        tavern({ findRegex: 'x', placement: [5] }),
+        tavern({ findRegex: 'x', promptOnly: false }),
+        tavern({ findRegex: 'x', promptOnly: false, markdownOnly: true }),
+        tavern({ findRegex: 'x', disabled: true }),
+      ].map(tavernScriptRunsOnServer),
+    ).toEqual([true, true, true, false, false]);
   });
 });

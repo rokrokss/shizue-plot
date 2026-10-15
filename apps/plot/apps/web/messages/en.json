@@ -559,7 +559,8 @@
       },
       "notices": {
         "chat_world_attached": "The lorebook bound to this chat, {name}, is now part of the plot's lorebook, so it also applies to the plot's other chats.",
-        "note_moved": "The author's note came over with its frequency and role, but SillyTavern placed it before or after the story string, which has no match here, so it goes at the start of the chat history."
+        "note_moved": "The author's note came over with its frequency and role, but SillyTavern placed it before or after the story string, which has no match here, so it goes at the start of the chat history.",
+        "chat_branch_merged": "Added to the {name} chat as a branch (a SillyTavern branch or checkpoint). Swipe to it on the message where the two part."
       },
       "modelUnavailable": "Chats need a model to go on. Connect ChatGPT in <link>Settings</link>, then retry — the characters are already in."
     }
@@ -1043,6 +1044,7 @@
     "hideFromAiHint": "It stays on screen, but the AI no longer reads it.",
     "showToAi": "Show to AI again",
     "hiddenFromAi": "Hidden from AI",
+    "reasoning": "Model's reasoning",
     "deleteConfirm": "This deletes this message and every branch after it. Continue?",
     "imageError": "Could not load the image",
     "download": "Download",

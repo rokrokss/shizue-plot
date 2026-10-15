@@ -72,6 +72,7 @@ import {
   type Persona,
   type Plot,
 } from '@shizue/db';
+import { AI_OUTPUT, SLASH_COMMAND, USER_INPUT } from '@shizue/core/prompt-scripts';
 import { contentText, getModel, type ChatMessage } from '@shizue/llm';
 import {
   cardScripts,
@@ -161,6 +162,7 @@ import {
   type ScriptChatPlan,
 } from '../scriptChat.js';
 import { deleteQuietly } from '../storage.js';
+import { regexStoredText } from '../storedRegex.js';
 import { toPromptCharacters, toPromptPlot } from '../plots.js';
 import { editRequestTurns } from '../requestTriggers.js';
 import { createScriptFetch } from '../scriptFetch.js';
@@ -282,6 +284,14 @@ const toMessageJson = (message: Message, attachments: ChatAttachment[] = []) => 
    * (`messages.emotion`) — what the chat's emotion screen draws.
    */
   emotion: message.emotion,
+  /**
+   * What SillyTavern kept beside a message it brought in, each null on every
+   * other: the text shown in place of `content` (ST's translation), the model's
+   * reasoning, shown folded, and the reader's `{{bias}}`, shown under the turn.
+   */
+  displayText: message.displayText,
+  reasoning: message.reasoning,
+  bias: message.bias,
   model: message.model,
   promptTokens: message.promptTokens,
   completionTokens: message.completionTokens,
@@ -1881,10 +1891,13 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const subModel = await optionalSubModel(deps, userId, body);
     const persona = await startPersona(deps, userId, plot, body);
 
+    // SillyTavern's stored-text scripts rewrite the greetings a chat opens on, as
+    // written (`getFirstMessage`); only an ST card carries any (`storedRegex.ts`).
+    const greetings = await regexGreetings(deps, plot, persona?.name ?? DEFAULT_USER_NAME);
     // `{{char}}` in a plot's own writing is the work, not one of its members.
     // The clock is the reader's at the moment the chat opens. There is no seed:
     // the chat id is minted by the insert below, and an intro is expanded once.
-    const intros = introTexts(plot, {
+    const intros = introTexts(greetings, {
       char: plot.name,
       user: persona?.name ?? DEFAULT_USER_NAME,
       clock: requestClock(c, plot),
@@ -2014,6 +2027,10 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           : {}),
         // Only on a message the reader hid from the AI.
         ...(message.hiddenFromPrompt ? { hiddenFromPrompt: true } : {}),
+        // What SillyTavern kept beside a message it brought in.
+        ...(message.displayText !== null ? { displayText: message.displayText } : {}),
+        ...(message.reasoning !== null ? { reasoning: message.reasoning } : {}),
+        ...(message.bias !== null ? { bias: message.bias } : {}),
         ...(attachments.has(message.id)
           ? {
               attachments: attachments
@@ -2500,6 +2517,16 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         // …and the face its member wore after it, which a rewording does not change.
         ...(original?.role === 'assistant' && role === 'assistant' && original.emotion
           ? { emotion: original.emotion }
+          : {}),
+        // …and what SillyTavern kept beside it: the reasoning behind it, and — only
+        // while the words are the same, as an edit drops them — what was shown in
+        // their place and the bias written on it.
+        ...(original?.reasoning ? { reasoning: original.reasoning } : {}),
+        ...(original && original.content === contents[kept + position]
+          ? {
+              ...(original.displayText !== null ? { displayText: original.displayText } : {}),
+              ...(original.bias !== null ? { bias: original.bias } : {}),
+            }
           : {}),
         // Distinct stamps, like the greeting roots: siblings order by creation, and
         // one insert's rows would otherwise share the transaction's `now()`.
@@ -3054,6 +3081,14 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const scriptMember = scriptMemberOf(scripts.memberId, context.members);
       const path = buildPath(context.all, chat.headMessageId);
       await settleHead(deps, chat, path.at(-1), scripts, true);
+      // SillyTavern's stored-text scripts rewrite the turn as it is sent
+      // (`sendMessageAsUser`); only an ST card carries any (`storedRegex.ts`).
+      const sent = await regexStoredText(content, USER_INPUT, {
+        characters: context.characters,
+        userName: context.userName,
+        variables: pathVariables(context.row, path, context.fold),
+        globalVariables: context.globalVariables,
+      });
       // The turn goes where the scripts left it — after the branch, unless they
       // edited the chat around it, or cut it (RisuAI then sends without it).
       const edit = planScriptChat(path, scripts.chat, {
@@ -3061,7 +3096,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         lastDelta: variableDelta,
         // Stored on the turn rather than on the request, so a regenerate of it
         // re-applies the same ruling.
-        turn: { content, source, ...(directions ? { directions } : {}), attachmentIds },
+        turn: { content: sent, source, ...(directions ? { directions } : {}), attachmentIds },
         ...(scriptMember ? { memberId: scriptMember.id } : {}),
       });
       await keepScriptWrites(deps, chat, context, scripts);
@@ -3720,11 +3755,24 @@ const NOT_LAST_SPEAKER_NUDGE =
 /** Intro roots a chat may hold — a plot offering more is truncated here too. */
 const MAX_INTRO_ROOTS = 10;
 
-/** The plot's openings in the creator's order, macro-expanded and capped. */
-function introTexts(plot: Plot, macro: MacroContext): string[] {
-  return plot.intros
+/** The openings in the creator's order, macro-expanded and capped. */
+function introTexts(intros: readonly string[], macro: MacroContext): string[] {
+  return intros
     .slice(0, MAX_INTRO_ROOTS)
     .map((intro) => applyMacros(intro, macro).trim());
+}
+
+/**
+ * The plot's openings as SillyTavern's stored-text scripts leave them — ST runs
+ * its `AI_OUTPUT` ones over the first message and every alternate greeting as
+ * written, before any macro (`getFirstMessage`). As written where no card ST
+ * wrote has one.
+ */
+async function regexGreetings(deps: AppDeps, plot: Plot, userName: string): Promise<string[]> {
+  const intros = plot.intros.slice(0, MAX_INTRO_ROOTS);
+  if (intros.length === 0) return intros;
+  const members = await loadMembers(deps.db, plot.id);
+  return Promise.all(intros.map((intro) => regexStoredText(intro, AI_OUTPUT, { characters: members, userName })));
 }
 
 /** Which opening the chat starts on; the first one when the reader did not say. */
@@ -3736,6 +3784,24 @@ function pickIntroIndex(total: number, index: unknown): number {
   // Intros past the cap are not stored, so they cannot be started on either.
   if (index >= total) throw badRequest('invalid_request', 'introIndex is out of range');
   return index;
+}
+
+/**
+ * An edit as SillyTavern's `runOnEdit` scripts leave it (`updateMessage`, which
+ * asks `getRegexedString` with `isEdit`): on the placement of the message edited
+ * — the reader's turn, a reply, or a narration, which is ST's narrator's — with
+ * the macros of a pattern read for the plot's roster and the chat's persona.
+ * The text as written where no card ST wrote has one (`storedRegex.ts`).
+ */
+async function regexEdit(deps: AppDeps, chat: Chat, message: Message, content: string): Promise<string> {
+  const members = await loadMembers(deps.db, chat.plotId);
+  const placement = message.role === 'user' ? USER_INPUT : isNarration(message.content) ? SLASH_COMMAND : AI_OUTPUT;
+  return regexStoredText(
+    content,
+    placement,
+    { characters: members, userName: (await loadPersona(deps, chat))?.name ?? DEFAULT_USER_NAME },
+    { edit: true },
+  );
 }
 
 /** PATCH /api/messages/:id — edit a message; user edits fork a new branch. */
@@ -3756,6 +3822,7 @@ export function messageRoutes(deps: AppDeps): Hono<AppEnv> {
       .limit(1);
     if (!row) throw notFound('Message not found');
     if (row.chat.importing) throw chatImporting();
+    const edited = await regexEdit(deps, row.chat, row.message, content);
 
     if (row.message.role === 'assistant') {
       // One transaction: the edit and the memory invalidation it forces must not be
@@ -3765,8 +3832,11 @@ export function messageRoutes(deps: AppDeps): Hono<AppEnv> {
           .update(messages)
           // The delta stays: it holds the values the scripts set, not a reading of
           // the text. The revision moves, so a script commit computed on the old
-          // text cannot land on top of the reader's own words.
-          .set({ content, scriptRev: sql`${messages.scriptRev} + 1` })
+          // text cannot land on top of the reader's own words. What SillyTavern
+          // showed in its place goes with the old text, as ST's translation does
+          // (`translateMessageEdit`), and so does a bias, which ST clears on a
+          // reply's edit; its reasoning stays.
+          .set({ content: edited, displayText: null, bias: null, scriptRev: sql`${messages.scriptRev} + 1` })
           .where(eq(messages.id, id));
         return invalidateMemoryForEdit(tx, row.chat.id, id);
       });
@@ -3782,7 +3852,7 @@ export function messageRoutes(deps: AppDeps): Hono<AppEnv> {
         chatId: row.chat.id,
         parentId: row.message.parentId,
         role: 'user',
-        content,
+        content: edited,
         // The scripts that ran for the turn are not run again for an edit of it —
         // RisuAI never re-runs a trigger on one either — so what they left stays.
         ...(row.message.variableDelta ? { variableDelta: row.message.variableDelta } : {}),

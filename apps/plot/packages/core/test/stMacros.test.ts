@@ -125,8 +125,33 @@ describe('SillyTavern macros — core-macros.js', () => {
 describe('SillyTavern macros — time-macros.js', () => {
   const clock = { now: new Date('2026-10-15T00:30:00Z'), timeZone: 'Asia/Seoul', locale: 'en' as const };
 
-  it('reads {{time::UTC+N}} as {{time_UTC+N}}', () => {
-    expect(applyMacros('{{time::UTC+9}} {{time_UTC-5}}', { ...st, clock })).toBe('09:30 19:30');
+  it('reads {{time::UTC+N}} as {{time_UTC+N}}: moment().utc().utcOffset(N).format("LT")', () => {
+    expect(applyMacros('{{time::UTC+9}} {{time_UTC-5}}', { ...st, clock })).toBe('9:30 AM 7:30 PM');
+  });
+
+  it("writes the clock as moment's English formats do, in the reader's zone (date LL, time LT, weekday dddd, isotime, isodate)", () => {
+    expect(applyMacros('{{date}} | {{time}} | {{weekday}} | {{isotime}} | {{isodate}}', { ...st, clock })).toBe(
+      'October 15, 2026 | 9:30 AM | Thursday | 09:30 | 2026-10-15',
+    );
+    // RisuAI's reading of the same names stays: 24-hour time, UTC iso fields unpadded.
+    expect(applyMacros('{{time}} | {{isotime}}', { ...risu, clock })).toBe('09:30 | 0:30:0');
+  });
+
+  it('formats {{datetimeformat}} with moment tokens — escapes, ordinals, weeks, zones and long formats', () => {
+    const format = (spec: string) => applyMacros(`{{datetimeformat::${spec}}}`, { ...st, clock });
+    expect(format('dddd, MMMM Do YYYY, h:mm:ss a')).toBe('Thursday, October 15th 2026, 9:30:00 am');
+    expect(format('[Week] w, [ISO] W, Q[Q] DDD')).toBe('Week 42, ISO 42, 4Q 288');
+    expect(format('Z ZZ [at] HH:mm SSS')).toBe('+09:00 +0900 at 09:30 000');
+    expect(format('LLLL')).toBe('Thursday, October 15, 2026 9:30 AM');
+    expect(format('l LT')).toBe('10/15/2026 9:30 AM');
+    // RisuAI's tokens read A after MMMM: "October" becomes "OctoPMer" there, not here.
+    expect(applyMacros('{{datetimeformat::MMMM A}}', { ...st, clock })).toBe('October AM');
+  });
+
+  it("says how long the reader was away as moment's humanize does, and just now with nothing to measure", () => {
+    expect(applyMacros('{{idle_duration}}', { ...st, clock: { ...clock, idleMs: 30_000 } })).toBe('a few seconds');
+    expect(applyMacros('{{idle_duration}}', { ...st, clock: { ...clock, idleMs: 3 * 3_600_000 } })).toBe('3 hours');
+    expect(applyMacros('{{idle_duration}}', { ...st, clock })).toBe('just now');
   });
 
   it("says how far apart two times are, in moment's words", () => {
@@ -182,5 +207,20 @@ describe('SillyTavern macros — variable-macros.js', () => {
     const context: MacroContext = { ...risu, runVariableMacros: true, variables: vars({ hp: '10' }) };
     expect(applyMacros('{{incvar::hp}}', context)).toBe('');
     expect(context.variables!['hp']).toBe('11');
+  });
+});
+
+describe('SillyTavern macros — core-macros.js {{if}} shorthands', () => {
+  it('reads {{if $name}} as the global variable and {{if .name}} as the chat one, where RisuAI text reads both locally', () => {
+    const context = (base: MacroContext): MacroContext => ({
+      ...base,
+      variables: vars({ flag: '0' }),
+      globalVariables: vars({ flag: '1' }),
+    });
+    const text = '{{if $flag}}global{{else}}none{{/if}} {{if .flag}}local{{else}}none{{/if}}';
+    expect(applyMacros(text, context(st))).toBe('global none');
+    expect(applyMacros(text, context(risu))).toBe('none none');
+    // An unset global is empty, so false.
+    expect(applyMacros('{{if $missing}}a{{else}}b{{/if}}', context(st))).toBe('b');
   });
 });

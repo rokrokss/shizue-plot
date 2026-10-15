@@ -317,6 +317,20 @@ export function coerceDisplayDepth(raw: {
   };
 }
 
+/** A display script's role (`DisplayScript.role`), where it names one of the two; nothing otherwise. */
+export function coerceDisplayRole(raw: { role?: unknown }): Pick<DisplayScript, 'role'> {
+  return raw.role === 'user' || raw.role === 'assistant' ? { role: raw.role } : {};
+}
+
+/**
+ * Whether a script runs on a message of `role` — SillyTavern's placement, which
+ * `messageFormatting` asks as `USER_INPUT` for the reader's message and
+ * `AI_OUTPUT` for every other. A script with no role runs on both.
+ */
+export function inDisplayRole(script: Pick<DisplayScript, 'role'>, role: 'user' | 'assistant'): boolean {
+  return script.role === undefined || script.role === role;
+}
+
 /**
  * Whether a script runs on a message `depth` deep — SillyTavern's
  * `getRegexedString`: both bounds inclusive. Undefined depth is ST's hidden

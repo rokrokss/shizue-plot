@@ -76,7 +76,8 @@ export function extensionsWithDepthPrompt(
   };
 }
 
-/** ST's `regex_placement.AI_OUTPUT`. */
+/** ST's `regex_placement.USER_INPUT` and `AI_OUTPUT`. */
+const USER_INPUT = 1;
 const AI_OUTPUT = 2;
 /** Regex flags a display script may carry. */
 const NATIVE_FLAGS = 'dgimsuvy';
@@ -99,11 +100,13 @@ const replacementTemplate = (replaceString: string): string =>
 /**
  * Maps the card's display-only regex scripts onto display scripts, after the ones
  * already there (RisuAI's), skipping any that would duplicate one. Display-only is
- * ST's "Alter chat display" on AI output: `markdownOnly`, not `promptOnly`, not
- * disabled. The rest stay in the extensions untouched: the prompt-only ones are
- * read from there each time a prompt is built (`promptScripts.ts`), and the
- * ones that edit the stored text have no counterpart here — a display script
- * only ever rewrites what is drawn. A pattern the screen refuses is skipped.
+ * ST's "Alter chat display": `markdownOnly`, not `promptOnly`, not disabled, on
+ * the reader's input or the AI's output — `messageFormatting` asks the one for
+ * the reader's messages and the other for the rest, so a script placed on one
+ * alone keeps to those messages (`DisplayScript.role`). The rest stay in the
+ * extensions untouched: the server reads them from there — the prompt-only ones
+ * each time a prompt is built, the ones with neither flag each time a turn is
+ * stored (`promptScripts.ts`). A pattern the screen refuses is skipped.
  */
 export function displayScriptsWithRegexScripts(
   extensions: Record<string, unknown>,
@@ -122,19 +125,41 @@ export function displayScriptsWithRegexScripts(
       script['promptOnly'] === true ||
       script['disabled'] === true ||
       !Array.isArray(placement) ||
-      !placement.includes(AI_OUTPUT) ||
       typeof script['findRegex'] !== 'string'
     ) {
       continue;
     }
+    const user = placement.includes(USER_INPUT);
+    const ai = placement.includes(AI_OUTPUT);
+    if (!user && !ai) continue;
+    const role = user && ai ? undefined : user ? ('user' as const) : ('assistant' as const);
     const { source, flags } = parseFindRegex(script['findRegex']);
     if (!source || displayScriptPatternError(source) !== null) continue;
     const out = replacementTemplate(
       typeof script['replaceString'] === 'string' ? script['replaceString'] : '',
     );
-    if (result.some((known) => known.in === source && known.out === out)) continue;
+    // The same rewrite twice is kept once — a script our export also wrote into
+    // RisuAI's list (which runs everywhere, as that list has no placement or
+    // range) and comes back with this one; the same rewrite on each side is one
+    // on both.
+    const known = result.findIndex((script) => script.in === source && script.out === out);
+    if (known !== -1) {
+      if (result[known]!.role !== undefined && result[known]!.role !== role) {
+        const { role: _side, ...both } = result[known]!;
+        result[known] = both;
+      }
+      continue;
+    }
     // ST's min/max depth, which it applies to the screen as it does to the prompt.
-    result.push({ in: source, out, ...(flags ? { flags } : {}), order, enabled: true, ...coerceDisplayDepth(script) });
+    result.push({
+      in: source,
+      out,
+      ...(flags ? { flags } : {}),
+      order,
+      enabled: true,
+      ...coerceDisplayDepth(script),
+      ...(role ? { role } : {}),
+    });
     order += 1;
   }
   return result.length > 0 ? result : undefined;

@@ -9,10 +9,15 @@
  * Cards come in through the ordinary card imports; only the chats need routes of
  * their own.
  */
-import { coerceAuthorNoteSettings, replyLengthTokens, type ImportedChatMessage } from '@shizue/core';
+import {
+  coerceAuthorNoteSettings,
+  replyLengthTokens,
+  type ImportedChatMessage,
+  type ImportedMessageExtra,
+} from '@shizue/core';
 import { characters, chats, messages, plots, type NewMessage } from '@shizue/db';
 import { listEnabledModels } from '@shizue/llm';
-import { and, asc, count, eq, inArray, isNull, max, sql } from 'drizzle-orm';
+import { and, asc, count, eq, inArray, isNotNull, isNull, max, min, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { randomUUID } from 'node:crypto';
 import type { AppDeps, AppEnv, Tx } from '../deps.js';
@@ -114,6 +119,7 @@ function requireImportedMessages(body: Record<string, unknown>): ParsedMessage[]
     if (hidden !== undefined && typeof hidden !== 'boolean') {
       throw badRequest('invalid_request', `${where}.hidden must be a boolean`);
     }
+    const extras = requireExtras(message['extras'], versions.length, where);
     return {
       role,
       versions: versions as string[],
@@ -121,7 +127,39 @@ function requireImportedMessages(body: Record<string, unknown>): ParsedMessage[]
       ...(at === undefined ? {} : { at }),
       ...(speakerId === undefined ? {} : { speakerId: speakerId as string }),
       ...(hidden ? { hidden: true } : {}),
+      ...(extras ? { extras } : {}),
     };
+  });
+}
+
+/** The fields of a version's extra (`ImportedMessageExtra`), each a string a version's length at most. */
+const EXTRA_FIELDS = ['displayText', 'reasoning', 'bias'] as const;
+
+/**
+ * What SillyTavern kept beside each version, parallel to them: an object of the
+ * three fields or null. U+0000 is refused, as Postgres cannot store it.
+ */
+function requireExtras(value: unknown, count: number, where: string): (ImportedMessageExtra | null)[] | undefined {
+  if (value === undefined) return undefined;
+  const invalid = (): never => {
+    throw badRequest(
+      'invalid_request',
+      `${where}.extras must be one null or object of ${EXTRA_FIELDS.join(', ')} per version, each a string of at most ${MAX_IMPORT_VERSION_LENGTH} characters without U+0000`,
+    );
+  };
+  if (!Array.isArray(value) || value.length !== count) return invalid();
+  return value.map((extra): ImportedMessageExtra | null => {
+    if (extra === null) return null;
+    if (typeof extra !== 'object' || Array.isArray(extra)) return invalid();
+    const kept: ImportedMessageExtra = {};
+    for (const [key, text] of Object.entries(extra as Record<string, unknown>)) {
+      if (!(EXTRA_FIELDS as readonly string[]).includes(key)) return invalid();
+      if (typeof text !== 'string' || text.length > MAX_IMPORT_VERSION_LENGTH || text.includes('\u0000')) {
+        return invalid();
+      }
+      kept[key as (typeof EXTRA_FIELDS)[number]] = text;
+    }
+    return kept;
   });
 }
 
@@ -147,6 +185,16 @@ function requireRoom(stored: number, batch: ParsedMessage[]): void {
   }
 }
 
+/** A version's extra as the message's columns, each only where it has one. */
+const extraColumns = (extra: ImportedMessageExtra | null | undefined): Partial<NewMessage> =>
+  extra
+    ? {
+        ...(extra.displayText !== undefined ? { displayText: extra.displayText } : {}),
+        ...(extra.reasoning !== undefined ? { reasoning: extra.reasoning } : {}),
+        ...(extra.bias !== undefined ? { bias: extra.bias } : {}),
+      }
+    : {};
+
 /**
  * Hangs a batch under `parentId` — the head, which is the selected path's tail —
  * and answers the new head.
@@ -164,6 +212,13 @@ function requireRoom(stored: number, batch: ParsedMessage[]): void {
  * that is later than everything before it, and is otherwise one millisecond past
  * it — as is every version after the first. `latest` is the chat's newest stamp so
  * far, so a batch continues where the one before it stopped.
+ *
+ * A branch (`before`) is the exception: its first message joins siblings already
+ * there, and is stamped just before the oldest of them, so the conversation the
+ * head is on stays the newest child and a swipe away and back still lands on it.
+ * What follows in the branch goes on from there.
+ *
+ * Answers the new head, and each message's rows by version, in the batch's order.
  */
 async function appendImported(
   tx: Tx,
@@ -171,24 +226,29 @@ async function appendImported(
   parentId: string | null,
   latest: Date | null,
   batch: ParsedMessage[],
-): Promise<string | null> {
+  { before }: { before?: number } = {},
+): Promise<{ head: string | null; ids: string[][] }> {
   const rows: NewMessage[] = [];
+  const ids: string[][] = [];
   let parent = parentId;
-  let previous = latest?.getTime() ?? null;
-  for (const message of batch) {
+  let previous = before !== undefined ? before - (batch[0]?.versions.length ?? 0) - 1 : (latest?.getTime() ?? null);
+  batch.forEach((message, at) => {
     const order = message.versions.map((_, index) => index).filter((index) => index !== message.selected);
     order.push(message.selected);
+    const versionIds: string[] = [];
     order.forEach((version, position) => {
       const stamp =
         previous === null
           ? (message.at ?? Date.now())
-          : position === 0 && message.at !== undefined && message.at > previous
+          : position === 0 && message.at !== undefined && message.at > previous && !(before !== undefined && at === 0)
             ? message.at
             : previous + 1;
       previous = stamp;
+      // Minted here so the next message can be chained before any of it is written.
+      const id = randomUUID();
+      versionIds[version] = id;
       rows.push({
-        // Minted here so the next message can be chained before any of it is written.
-        id: randomUUID(),
+        id,
         chatId,
         parentId: parent,
         role: message.role,
@@ -197,15 +257,85 @@ async function appendImported(
         ...(message.speakerId !== undefined ? { speakerMemberId: message.speakerId } : {}),
         // What the source kept out of the prompt (SillyTavern's `is_system`), every version.
         ...(message.hidden ? { hiddenFromPrompt: true } : {}),
+        // …and what it kept beside this version: the text shown in its place, the reasoning, the bias.
+        ...extraColumns(message.extras?.[version]),
         createdAt: new Date(stamp),
       });
     });
+    ids.push(versionIds);
     parent = rows[rows.length - 1]!.id!;
-  }
+  });
   for (let start = 0; start < rows.length; start += INSERT_CHUNK_ROWS) {
     await tx.insert(messages).values(rows.slice(start, start + INSERT_CHUNK_ROWS));
   }
-  return parent;
+  return { head: parent, ids };
+}
+
+/** A branch file as the chat records it (`importedFrom.branches`), and a batch names it. */
+interface BranchFile {
+  fileName: string;
+  sha256: string;
+}
+
+/**
+ * Where a batch of a SillyTavern branch or checkpoint goes (`branch` on
+ * `POST /api/chats/:id/import`): under `parentId` — a message of this chat, or
+ * null for a new opening — rather than the head, which it leaves where it is.
+ * The last batch of a branch names its file, which the chat then records.
+ */
+function optionalBranch(body: Record<string, unknown>): { parentId: string | null; file?: BranchFile } | undefined {
+  const value = body['branch'];
+  if (value === undefined) return undefined;
+  const invalid = (): never => {
+    throw badRequest(
+      'invalid_request',
+      'branch must be { parentId: a message id or null, file?: { fileName, sha256 } }',
+    );
+  };
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return invalid();
+  const raw = value as Record<string, unknown>;
+  const parentId = raw['parentId'];
+  if (parentId !== null && (typeof parentId !== 'string' || !isUuid(parentId))) return invalid();
+  const file = raw['file'];
+  if (file === undefined) return { parentId: parentId as string | null };
+  if (file === null || typeof file !== 'object' || Array.isArray(file)) return invalid();
+  const fileName = (file as Record<string, unknown>)['fileName'];
+  const sha256 = (file as Record<string, unknown>)['sha256'];
+  if (typeof fileName !== 'string' || !fileName.trim() || !isSha256(sha256)) return invalid();
+  return {
+    parentId: parentId as string | null,
+    file: { fileName: fileName.trim().slice(0, MAX_IMPORT_FILE_NAME_LENGTH), sha256 },
+  };
+}
+
+/**
+ * Where a branch batch hangs (`POST /api/chats/:id/import` with `branch`): the
+ * oldest stamp of the messages already under `parentId` — the first message
+ * goes in before them — or, where there are none, the parent's own stamp to go
+ * on from. A parent that is not this chat's message is a 400.
+ */
+async function branchPlace(
+  tx: Tx,
+  chatId: string,
+  parentId: string | null,
+): Promise<{ before?: number; latest: Date | null }> {
+  let latest: Date | null = null;
+  if (parentId !== null) {
+    const [parent] = await tx
+      .select({ createdAt: messages.createdAt })
+      .from(messages)
+      .where(and(eq(messages.chatId, chatId), eq(messages.id, parentId)))
+      .limit(1);
+    if (!parent) throw badRequest('invalid_request', 'branch.parentId must be a message of this chat');
+    latest = parent.createdAt;
+  }
+  const [siblings] = await tx
+    .select({ oldest: min(messages.createdAt) })
+    .from(messages)
+    .where(
+      and(eq(messages.chatId, chatId), parentId === null ? isNull(messages.parentId) : eq(messages.parentId, parentId)),
+    );
+  return siblings?.oldest ? { before: siblings.oldest.getTime(), latest } : { latest };
 }
 
 /** The chat a batch or the completion writes to: the caller's, locked, still importing. */
@@ -264,6 +394,17 @@ export function importRoutes(deps: AppDeps): Hono<AppEnv> {
       .select({ sha256: chatHash, chatId: chats.id, importing: chats.importing })
       .from(chats)
       .where(and(eq(chats.userId, userId), inArray(chatHash, hashes)));
+    // A branch or checkpoint file is the chat it went into (`importedFrom.branches`).
+    const wanted = new Set(hashes);
+    const branched = await deps.db
+      .select({ chatId: chats.id, importing: chats.importing, importedFrom: chats.importedFrom })
+      .from(chats)
+      .where(and(eq(chats.userId, userId), isNotNull(sql`${chats.importedFrom}->'branches'`)));
+    for (const chat of branched) {
+      for (const branch of chat.importedFrom?.branches ?? []) {
+        if (wanted.has(branch.sha256)) imported.push({ sha256: branch.sha256, chatId: chat.chatId, importing: chat.importing });
+      }
+    }
     return c.json({ characters: members, chats: imported });
   });
 
@@ -333,13 +474,13 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
           importedFrom: { fileName, sha256, importedAt: new Date().toISOString() },
         })
         .returning();
-      const head = await appendImported(tx, created!.id, null, null, batch);
+      const { head, ids } = await appendImported(tx, created!.id, null, null, batch);
       const [chat] = await tx
         .update(chats)
         .set({ headMessageId: head })
         .where(eq(chats.id, created!.id))
         .returning();
-      return { chat: chat! };
+      return { chat: chat!, ids };
     });
 
     if ('conflict' in result) {
@@ -349,18 +490,30 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
       );
     }
     // Nothing can have attached a note to a chat that did not exist a moment ago.
-    return c.json({ chat: toChatJson(result.chat, []), inserted: rowsOf(batch) }, 201);
+    return c.json({ chat: toChatJson(result.chat, []), inserted: rowsOf(batch), ids: result.ids }, 201);
   });
 
   /**
    * The next batch, continuing from the head. The chat row is locked for the
    * whole of it, so two batches in flight at once land one after the other rather
-   * than both under the same parent.
+   * than both under the same parent. Answers each message's rows by version
+   * (`ids`) and where the batch ends (`tail`).
+   *
+   * With `branch` (`optionalBranch`) the batch is a SillyTavern branch or
+   * checkpoint of the conversation — a chat file whose `chat_metadata.main_chat`
+   * names the one this chat was made from — and hangs under `branch.parentId`,
+   * where its messages part from that conversation, as a swipe does: its first
+   * message joins the siblings there before them (`appendImported`), and the head
+   * stays where it is. A branch's later batches hang under the tail the one before
+   * it answered. Its last batch names its file, which the chat records in
+   * `importedFrom.branches`, so the lookup finds it as this chat.
    */
   app.post('/:id/import', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
-    const batch = requireImportedMessages(await readJsonBody(c));
+    const body = await readJsonBody(c);
+    const batch = requireImportedMessages(body);
+    const branch = optionalBranch(body);
 
     const result = await deps.db.transaction(async (tx) => {
       const chat = await lockImportingChat(tx, id, userId);
@@ -371,9 +524,24 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
       const rows = stored?.rows ?? 0;
       requireRoom(rows, batch);
       await requireSpeakers(tx, chat.plotId, batch);
-      const head = await appendImported(tx, id, chat.headMessageId, stored?.latest ?? null, batch);
-      await tx.update(chats).set({ headMessageId: head, updatedAt: new Date() }).where(eq(chats.id, id));
-      return { inserted: rowsOf(batch), total: rows + rowsOf(batch) };
+      if (!branch) {
+        const { head, ids } = await appendImported(tx, id, chat.headMessageId, stored?.latest ?? null, batch);
+        await tx.update(chats).set({ headMessageId: head, updatedAt: new Date() }).where(eq(chats.id, id));
+        return { inserted: rowsOf(batch), total: rows + rowsOf(batch), ids, tail: head };
+      }
+      const placed = await branchPlace(tx, id, branch.parentId);
+      const { head, ids } = await appendImported(tx, id, branch.parentId, placed.latest, batch, placed);
+      if (branch.file) {
+        const known = chat.importedFrom?.branches ?? [];
+        const branches = [...known.filter((one) => one.sha256 !== branch.file!.sha256), branch.file];
+        if (chat.importedFrom) {
+          await tx
+            .update(chats)
+            .set({ importedFrom: { ...chat.importedFrom, branches }, updatedAt: new Date() })
+            .where(eq(chats.id, id));
+        }
+      }
+      return { inserted: rowsOf(batch), total: rows + rowsOf(batch), ids, tail: head };
     });
     return c.json(result);
   });

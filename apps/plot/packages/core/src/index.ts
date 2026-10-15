@@ -22,6 +22,7 @@ export * from './presets.js';
 export * from './readerPreset.js';
 export * from './toggles.js';
 export * from './prompt.js';
+export * from './tavernLore.js';
 export * from './authorNote.js';
 export * from './translation.js';
 export * from './risuRequest.js';

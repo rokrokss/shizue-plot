@@ -46,6 +46,15 @@ export const ChatExportMessageSchema = z.object({
    * screen and left out of everything a model reads. Absent on every other message.
    */
   hiddenFromPrompt: z.boolean().optional(),
+  /**
+   * What SillyTavern kept beside a message brought in from it: the text it
+   * showed in place of `text` (its translation), the model's reasoning before
+   * the reply, and the reader's `{{bias}}` on their turn. Each absent on every
+   * other message, and `displayText` once the message is edited.
+   */
+  displayText: z.string().optional(),
+  reasoning: z.string().optional(),
+  bias: z.string().optional(),
 });
 
 /** `url` is a same-origin path, so the importer fetches it with the session cookie. */
