@@ -23,9 +23,10 @@ const isFile = (attachment: ChatAttachment): boolean => attachment.mime === 'tex
  *
  * A file a SillyTavern message brought — its text, which the prompt reads ahead
  * of the message — is a chip with its name that opens the text, as ST lists a
- * message's files above it.
+ * message's files above it. On the reader's own turn (`end`) the chips line up
+ * at the right edge, as its bubble does.
  */
-export function MessageAttachments({ attachments }: { attachments: ChatAttachment[] }) {
+export function MessageAttachments({ attachments, end = false }: { attachments: ChatAttachment[]; end?: boolean }) {
   const t = useTranslations('chat');
   const pictures = attachments.filter((attachment) => !isFile(attachment));
   const files = attachments.filter(isFile);
@@ -33,7 +34,7 @@ export function MessageAttachments({ attachments }: { attachments: ChatAttachmen
   return (
     <div className="mb-1.5 space-y-1.5">
       {files.length > 0 ? (
-        <div data-testid="message-files" className="flex flex-wrap gap-1.5">
+        <div data-testid="message-files" className={cx('flex flex-wrap gap-1.5', end && 'justify-end')}>
           {files.map((file) => (
             <a
               key={file.id}

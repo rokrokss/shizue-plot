@@ -883,7 +883,7 @@ export const MessageRow = memo(function MessageRow({
                 <div data-testid="reader-runs" className="mt-1 w-full space-y-3">
                   {attachments?.length ? (
                     <div className="flex justify-end">
-                      <MessageAttachments attachments={attachments} />
+                      <MessageAttachments attachments={attachments} end />
                     </div>
                   ) : null}
                   {written.map((run, index) =>
@@ -916,7 +916,7 @@ export const MessageRow = memo(function MessageRow({
                       and the words are usually about it. */}
                   {attachments?.length ? (
                     <div className="mt-1 max-w-[min(100%,36rem)]">
-                      <MessageAttachments attachments={attachments} />
+                      <MessageAttachments attachments={attachments} end />
                     </div>
                   ) : null}
                   {/* A turn with no words — a SillyTavern picture sent alone, or a turn
