@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
+import { createRemoteJWKSet, customFetch, decodeJwt, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from 'jose';
 import { CHATGPT_RESOURCE, providerError, requireOK } from './chatgptResponses.js';
 
 // Sign in with ChatGPT (OpenAI's open-source flow), stateless: the caller keeps the
@@ -102,10 +102,23 @@ export class ChatGPTOAuth {
       const response = await requireOK(await this.fetcher(`${AUTH}/.well-known/openid-configuration`, { signal: AbortSignal.timeout(15_000) }));
       const config = await response.json() as Discovery;
       if (config.issuer !== AUTH) throw providerError('chatgpt_invalid_issuer');
-      this.keys = createRemoteJWKSet(endpoint(config.jwks_uri));
+      this.keys = createRemoteJWKSet(endpoint(config.jwks_uri), { [customFetch]: this.fetcher });
       this.oidc = config;
     }
     return this.oidc;
+  }
+
+  /**
+   * Discovery and the signing keys, loaded before a token request spends a code or a
+   * refresh token: a refresh rotates the token, and one lost to a discovery or JWKS
+   * failure after the grant would make the next refresh look revoked. Failing here
+   * spends nothing, so it is only temporary.
+   */
+  private async ready(): Promise<void> {
+    try {
+      await this.discovery();
+      if (!this.keys!.fresh) await this.keys!.reload();
+    } catch { throw providerError('chatgpt_unavailable', 503); }
   }
 
   private async tokenRequest(parameters: Record<string, string>): Promise<TokenResponse> {
@@ -124,8 +137,26 @@ export class ChatGPTOAuth {
     let identity: JWTPayload | undefined;
     if (result.id_token) {
       const config = await this.discovery();
-      const verified = await this.verify(result.id_token, this.keys!, { issuer: config.issuer, audience: clientId, requiredClaims: ['sub', 'exp', ...(nonce ? ['nonce'] : [])] });
-      identity = verified.payload;
+      const options = { issuer: config.issuer, audience: clientId, requiredClaims: ['sub', 'exp', ...(nonce ? ['nonce'] : [])] };
+      let keyFailed = false;
+      const key: JWTVerifyGetKey = async (header, token) => {
+        try { return await this.keys!(header, token); } catch (error) { keyFailed = true; throw error; }
+      };
+      try {
+        identity = (await this.verify(result.id_token, key, options)).payload;
+      } catch (error) {
+        if (!keyFailed) throw error;
+        // The signing key was missing or unreachable: a rotation inside jose's refetch
+        // cooldown, or auth.openai.com failing after it answered. Fetch the keys again.
+        if (await this.keys!.reload().then(() => true, () => false)) {
+          identity = (await this.verify(result.id_token, this.keys!, options)).payload;
+        } else if (subject) {
+          // Unreachable keys are not a mismatch, and the refresh already rotated the
+          // token. The response came straight from the token endpoint over TLS, which
+          // OIDC accepts in place of the signature, so its `sub` is still compared below.
+          identity = decodeJwt(result.id_token);
+        } else throw providerError('chatgpt_unavailable', 503); // A sign-in spent only its code.
+      }
       if ((nonce && identity.nonce !== nonce) || (subject && identity.sub !== subject)) throw providerError('chatgpt_identity_mismatch', 401);
     } else if (nonce) throw providerError('chatgpt_missing_identity', 401);
     const refreshToken = result.refresh_token ?? previous?.refreshToken;
@@ -138,6 +169,7 @@ export class ChatGPTOAuth {
 
   /** Exchanges the callback's code and verifies who signed in. */
   async exchange(pending: PendingSignIn, code: string, clientId: string): Promise<{ tokens: ChatGPTTokens; identity: ChatGPTIdentity }> {
+    await this.ready();
     const result = await this.tokenRequest({ grant_type: 'authorization_code', client_id: clientId, code, redirect_uri: pending.redirectUri, code_verifier: pending.verifier });
     const { tokens, identity } = await this.validate(result, clientId, pending.nonce);
     const text = (value: unknown): string | null => typeof value === 'string' && value ? value : null;
@@ -146,6 +178,7 @@ export class ChatGPTOAuth {
 
   /** Rotates the refresh token; the caller stores the result before using it. */
   async refresh(clientId: string, previous: ChatGPTTokens, subject: string): Promise<ChatGPTTokens> {
+    await this.ready();
     const result = await this.tokenRequest({ grant_type: 'refresh_token', client_id: clientId, refresh_token: previous.refreshToken });
     return (await this.validate(result, clientId, undefined, subject, previous)).tokens;
   }

@@ -156,7 +156,12 @@ ping을 보내 `features: ['plotSignIn']`이 담긴 답이 오면 로그인 버�
    Referer도 없으므로 인증 근거는 state와 쿠키뿐이다.
 3. 토큰은 `account` 행에 AES-256-GCM으로 봉인한다(키는 `BETTER_AUTH_SECRET`에서 HKDF). 비밀을 바꾸면 봉인이
    열리지 않아 전원이 다시 로그인한다. 갱신은 그 행의 `for update` 락 아래에서 한 번만 하고, 다시 읽어 이미
-   회전됐으면 그 값을 쓴다. `invalid_grant` 등 권한이 사라진 응답이면 토큰을 지운다.
+   회전됐으면 그 값을 쓴다. `invalid_grant` 등 권한이 사라진 응답이면 토큰을 지운다. 코드 교환과 갱신은
+   OIDC discovery 문서와 JWKS를 먼저 받아 둔 뒤에 토큰을 요청한다 — 토큰 요청이 성공한 뒤에 그 둘이 실패하면
+   회전된 refresh token을 잃고, 다음 갱신이 `invalid_grant`를 받아 로그인을 지우기 때문이다. 받지 못하면 코드도
+   토큰도 쓰지 않은 채 일시 오류(`chatgpt_unavailable`, 503)로 끝난다. 갱신 응답의 ID 토큰은 서명 키를 다시
+   받으려 해도 받지 못하면, 토큰 엔드포인트에서 TLS로 직접 받은 응답이므로 서명 대신 `sub`만 대조하고 회전된
+   토큰을 저장한다. 키를 받았는데도 맞는 키가 없거나 `sub`가 다르면 저장하지 않는다.
 4. OpenAI가 계정마다 발급한 `client_id`는 `account.client_id`에 남고, 브라우저의 HttpOnly 쿠키가 그것을 기억해
    다음 로그인이 같은 등록을 다시 쓴다(등록이 쌓이지 않게). 서버는 OpenAI에게 호스트 하나이며
    `ext_agent_host_id`는 비밀에서 파생한 `urn:uuid`다.

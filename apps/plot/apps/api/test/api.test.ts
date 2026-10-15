@@ -750,13 +750,15 @@ describe('auth', () => {
  * they were issued to, so a test can see whose token reached which call.
  */
 function fakeOpenAI() {
-  const state = { subject: '', email: '', nonce: '', refreshes: 0, revoked: [] as string[] };
+  const state = { subject: '', email: '', nonce: '', refreshes: 0, revoked: [] as string[], discoveryDown: false };
   const fetcher: typeof fetch = async (input, init) => {
     const url = String(input);
     const body = new URLSearchParams(init?.body as string);
     if (url.endsWith('openid-configuration')) {
+      if (state.discoveryDown) return new Response('<html>502 Bad Gateway</html>', { status: 502 });
       return Response.json({ issuer: 'https://auth.openai.com', jwks_uri: 'https://auth.openai.com/jwks', revocation_endpoint: 'https://auth.openai.com/revoke' });
     }
+    if (url.endsWith('/jwks')) return Response.json({ keys: [] });
     if (url.endsWith('/revoke')) { state.revoked.push(body.get('token')!); return Response.json({}); }
     if (url.endsWith('/models')) {
       const bearer = String((init?.headers as Record<string, string>)['Authorization']);
@@ -891,6 +893,24 @@ describe('Sign in with ChatGPT', () => {
     const tokens = await Promise.all([1, 2, 3].map(() => accounts.forUser(me.id).accessToken()));
     expect(tokens).toEqual(['ACCESS-alice-1', 'ACCESS-alice-1', 'ACCESS-alice-1']);
     expect(openai.state.refreshes).toBe(1);
+  });
+
+  it('keeps the sign-in when OpenAI discovery fails before a refresh', async () => {
+    const { signIn, target } = hostedApp(fakeOpenAI());
+    const { cookie } = await signIn('alice');
+    const { user: me } = await readJson(await request(cookie, '/api/auth/get-session', 'GET', undefined, target));
+    await db.update(account).set({ accessTokenExpiresAt: new Date(0) }).where(eq(account.userId, me.id));
+    // A process that has not loaded discovery yet, while auth.openai.com answers 502.
+    const restarted = fakeOpenAI();
+    restarted.state.discoveryDown = true;
+    const { accounts } = hostedApp(restarted);
+    await expect(accounts.forUser(me.id).accessToken()).rejects.toMatchObject({ code: 'chatgpt_unavailable', status: 503 });
+    expect(restarted.state.refreshes).toBe(0);
+    const [kept] = await db.select().from(account).where(eq(account.userId, me.id));
+    expect(kept).toMatchObject({ accessToken: expect.any(String), refreshToken: expect.any(String) });
+    // Once discovery answers, the stored refresh token still works.
+    restarted.state.discoveryDown = false;
+    expect(await accounts.forUser(me.id).accessToken()).toBe('ACCESS-alice-1');
   });
 
   it("gives a former local installation's owner, and its plots, to the first account that signs in", async () => {

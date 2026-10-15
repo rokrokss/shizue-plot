@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { generateKeyPair, jwtVerify, SignJWT } from 'jose';
+import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { describe, expect, it } from 'vitest';
 import { authorizationUrl, callbackResult, ChatGPTOAuth, createPendingSignIn, loopbackRedirectUri } from '../src/chatgptAuth.js';
 import { createChatGPTAdapter, responseBody } from '../src/chatgptResponses.js';
@@ -9,16 +9,27 @@ const json = (value: unknown, status = 200): Response => new Response(JSON.strin
 const scope = 'openid profile email offline_access resource.invoke chatgpt.tokens.use.direct';
 async function fixture() {
   const keys = await generateKeyPair('RS256');
+  const published = { ...await exportJWK(keys.publicKey), kid: 'key-1' };
   const calls: { url: string; body: URLSearchParams }[] = [];
   let tokenScope = scope;
   let nonce = '';
   let subject = 'user-1';
   let revokeStatus = 200;
+  let kid = 'key-1';
+  /** `keysAfterGrant`: the JWKS goes down the moment a token request succeeds. */
+  const outage = { discovery: false, jwks: false, keysAfterGrant: false };
   const fetcher: typeof fetch = async (input, init) => {
     const url = String(input);
     const body = new URLSearchParams(init?.body as string);
     calls.push({ url, body });
-    if (url.endsWith('openid-configuration')) return json({ issuer: 'https://auth.openai.com', jwks_uri: 'https://auth.openai.com/jwks', revocation_endpoint: 'https://auth.openai.com/revoke' });
+    if (url.endsWith('openid-configuration')) {
+      if (outage.discovery) return new Response('<html>502 Bad Gateway</html>', { status: 502 });
+      return json({ issuer: 'https://auth.openai.com', jwks_uri: 'https://auth.openai.com/jwks', revocation_endpoint: 'https://auth.openai.com/revoke' });
+    }
+    if (url.endsWith('/jwks')) {
+      if (outage.jwks) throw new TypeError('fetch failed');
+      return json({ keys: [published] });
+    }
     if (url.endsWith('/revoke')) return json({}, revokeStatus);
     if (url.endsWith('/models')) return json({ models: [
       { slug: 'gpt-test', display_name: 'GPT test', visibility: 'list', input_modalities: ['text', 'image'] },
@@ -27,22 +38,36 @@ async function fixture() {
     ] });
     if (url.endsWith('/oauth/token')) {
       if (body.get('code') === 'bad') return json({ error: 'invalid_grant', error_description: 'SECRET_TOKEN' }, 400);
+      if (outage.keysAfterGrant) outage.jwks = true;
       const refresh = body.get('grant_type') === 'refresh_token';
       const id_token = await new SignJWT({ sub: subject, email: 'me@example.com', name: 'Me', ...(refresh ? {} : { nonce }) })
-        .setProtectedHeader({ alg: 'RS256' }).setIssuer('https://auth.openai.com').setAudience(body.get('client_id')!).setExpirationTime('1h').sign(keys.privateKey);
+        .setProtectedHeader({ alg: 'RS256', kid }).setIssuer('https://auth.openai.com').setAudience(body.get('client_id')!).setExpirationTime('1h').sign(keys.privateKey);
       return json({ access_token: refresh ? 'NEW_ACCESS' : 'ACCESS', refresh_token: refresh ? 'NEW_REFRESH' : 'REFRESH', id_token, expires_in: 3600, scope: tokenScope });
     }
     throw new Error(`Unexpected test endpoint: ${url}`);
   };
-  const verify = ((token: string, _keys: unknown, options: Parameters<typeof jwtVerify>[2]) => jwtVerify(token, keys.publicKey, options)) as typeof jwtVerify;
   return {
-    oauth: new ChatGPTOAuth({ fetch: fetcher, verify }), calls,
+    oauth: new ChatGPTOAuth({ fetch: fetcher }), calls, outage,
     setScope: (value: string) => { tokenScope = value; },
     setNonce: (value: string) => { nonce = value; },
     setSubject: (value: string) => { subject = value; },
     failRevoke: () => { revokeStatus = 503; },
+    /** Signs ID tokens with a key ID the published set may lack, as after a rotation. */
+    signWith: (value: string) => { kid = value; },
   };
 }
+type Fixture = Awaited<ReturnType<typeof fixture>>;
+const previous = { accessToken: 'ACCESS', refreshToken: 'REFRESH', scope, expiresAt: 0 };
+/** The two calls that spend something: the callback's code, or the stored refresh token. */
+const spend = {
+  exchange: (f: Fixture) => {
+    const pending = createPendingSignIn(loopbackRedirectUri(47801));
+    f.setNonce(pending.nonce);
+    return f.oauth.exchange(pending, 'code', 'oaiapp_test');
+  },
+  refresh: (f: Fixture) => f.oauth.refresh('oaiapp_test', previous, 'user-1'),
+};
+const paths = (f: Fixture): string[] => f.calls.map((call) => new URL(call.url).pathname);
 
 describe('ChatGPT OAuth', () => {
   it('starts with dynamic registration and PKCE, then reuses an issued registration', () => {
@@ -91,6 +116,38 @@ describe('ChatGPT OAuth', () => {
     expect(await f.oauth.refresh('oaiapp_test', previous, 'user-1')).toMatchObject({ accessToken: 'NEW_ACCESS', refreshToken: 'NEW_REFRESH' });
     f.setSubject('someone-else');
     await expect(f.oauth.refresh('oaiapp_test', previous, 'user-1')).rejects.toMatchObject({ code: 'chatgpt_identity_mismatch' });
+  });
+  it.each(['exchange', 'refresh'] as const)('%s loads discovery and the signing keys before spending anything, once per instance', async (step) => {
+    const f = await fixture();
+    await spend[step](f);
+    await spend[step](f);
+    expect(paths(f)).toEqual(['/.well-known/openid-configuration', '/jwks', '/api/accounts/oauth/token', '/api/accounts/oauth/token']);
+  });
+  it.each([
+    ['exchange', 'discovery'], ['exchange', 'jwks'], ['refresh', 'discovery'], ['refresh', 'jwks'],
+  ] as const)('%s spends nothing while %s is down, and fails as temporary', async (step, down) => {
+    const f = await fixture();
+    f.outage[down] = true;
+    await expect(spend[step](f)).rejects.toMatchObject({ code: 'chatgpt_unavailable', status: 503 });
+    expect(paths(f)).not.toContain('/api/accounts/oauth/token');
+    f.outage[down] = false;
+    await expect(spend[step](f)).resolves.toBeTruthy();
+  });
+  it('keeps a rotated refresh token whose new signing key cannot be fetched, for the same account only', async () => {
+    const f = await fixture();
+    f.signWith('key-2');
+    f.outage.keysAfterGrant = true;
+    expect(await spend.refresh(f)).toMatchObject({ accessToken: 'NEW_ACCESS', refreshToken: 'NEW_REFRESH' });
+    f.setSubject('someone-else');
+    await expect(spend.refresh(f)).rejects.toMatchObject({ code: 'chatgpt_identity_mismatch' });
+  });
+  it('refuses a key the fetched set lacks, and a sign-in whose key cannot be fetched', async () => {
+    const f = await fixture();
+    f.signWith('key-2');
+    // The keys loaded again and still lack it: not an outage, so nothing is kept.
+    await expect(spend.refresh(f)).rejects.toMatchObject({ code: 'ERR_JWKS_NO_MATCHING_KEY' });
+    f.outage.keysAfterGrant = true;
+    await expect(spend.exchange(f)).rejects.toMatchObject({ code: 'chatgpt_unavailable', status: 503 });
   });
   it('reports unconfirmed revocation without throwing and filters the model catalog', async () => {
     const f = await fixture();

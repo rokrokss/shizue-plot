@@ -7,6 +7,7 @@ export class ChatGPTError extends LLMError {
 
 const MESSAGES: Record<string, string> = {
   chatgpt_login_required: 'Connect ChatGPT in AI settings to continue.',
+  chatgpt_unavailable: 'Sign in with ChatGPT is temporarily unavailable. Try again later.',
   invalid_grant: 'Your ChatGPT connection expired. Reconnect in AI settings.',
   subscription_sharing_usage_limit_exceeded: 'Your ChatGPT usage limit has been reached. Try later or check your ChatGPT plan.',
   subscription_sharing_usage_unavailable: 'ChatGPT usage is temporarily unavailable. Try again later.',

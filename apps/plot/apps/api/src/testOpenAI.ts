@@ -13,6 +13,7 @@ export function fakeChatGPTOAuth(): ChatGPTOAuth {
     if (url.endsWith('openid-configuration')) {
       return Response.json({ issuer: 'https://auth.openai.com', jwks_uri: 'https://auth.openai.com/jwks', revocation_endpoint: 'https://auth.openai.com/revoke' });
     }
+    if (url.endsWith('/jwks')) return Response.json({ keys: [] });
     if (url.endsWith('/revoke')) return Response.json({});
     if (url.endsWith('/oauth/token')) {
       const code = body.get('code') ?? '';
