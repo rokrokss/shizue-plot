@@ -28,6 +28,7 @@ export * from './translation.js';
 export * from './risuRequest.js';
 export * from './memory.js';
 export * from './vectors.js';
+export * from './lexical.js';
 export * from './loreAliases.js';
 export * from './facts.js';
 export * from './card/parse.js';

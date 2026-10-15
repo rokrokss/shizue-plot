@@ -14,7 +14,8 @@
  *   only, and the stretch it covered is summarized again first.
  * - **Each request selects** (`selectSummaries`): the pinned ones, the most
  *   recent, the ones most similar to the latest turns — by the server
- *   embedder's vectors of the plot's model (`embedder.ts`) — and random ones,
+ *   embedder's vectors of the plot's model (`embedder.ts`), fused with BM25 over
+ *   the newest turn (core `lexical.ts`) — and random ones,
  *   into a share of the context budget. Without an embedder for the plot's
  *   language the similar share goes to random ones.
  * - **Facts ride along** (`facts.ts`): each summary written has its facts
@@ -32,7 +33,9 @@ import {
   detectContentLanguage,
   factsBlock,
   fnv1a,
+  hybridRanking,
   hypaV3SettingsOf,
+  lexicalRanking,
   MEMORY_HEADING,
   memoryBlock,
   memoryTokenBudget,
@@ -69,6 +72,7 @@ import type { Embedding } from './embedder.js';
 import { embedPendingFacts, extractFacts, selectFacts } from './facts.js';
 import { loadMembers } from './hub.js';
 import { enqueueJob } from './jobs.js';
+import { noteLexicalSearch } from './lexicalHealth.js';
 import { transcriptOf } from './transcript.js';
 import { buildPath, visibleToAi } from './tree.js';
 
@@ -203,6 +207,7 @@ export async function buildMemoryInput(
         selected: selection.selected,
         model,
         queryVectors,
+        turn: queries.at(-1)!,
         count: settings.factCount,
       });
     } catch (error) {
@@ -222,9 +227,12 @@ async function plotLanguageOf(deps: AppDeps, plotId: string): Promise<ContentLan
 /**
  * HypaV3's similar ranking over `unused`: the queries' vectors (the plot's
  * model, `queryVectors`), each chunk of that model scored by cosine in
- * pgvector, fused by `rankBySimilarity`. A summary with no vectors of that model
- * yet is not ranked (the background refresh embeds it). Throws when the
- * embedder does, which hands the share to random ones.
+ * pgvector, fused by `rankBySimilarity` — and then with the summaries' BM25
+ * ranking for the newest turn (`lexicalRanking`, only those with evidence) by
+ * reciprocal rank (`hybridRanking`, ARCHITECTURE §7.3 단어 검색). A summary
+ * with no vectors of that model yet is ranked by its words alone, if at all
+ * (the background refresh embeds it); none ranked by meaning, none ranked.
+ * Throws when the embedder does, which hands the share to random ones.
  */
 async function rankSimilar(
   deps: AppDeps,
@@ -249,7 +257,14 @@ async function rankSimilar(
     }),
   );
   const byId = new Map(unused.map((summary) => [summary.id, summary]));
-  return rankBySimilarity(lists, (chunk: string) => chunk.slice(0, chunk.lastIndexOf(':')))
+  const dense = rankBySimilarity(lists, (chunk: string) => chunk.slice(0, chunk.lastIndexOf(':')));
+  if (dense.length === 0) return [];
+  const lexical = lexicalRanking(
+    unused.map((summary) => [summary.id, summary.text] as const),
+    queries.at(-1)!,
+  );
+  noteLexicalSearch('memory', lexical.length > 0);
+  return hybridRanking(dense, lexical)
     .map((id) => byId.get(id))
     .filter((summary): summary is ChatSummary => summary !== undefined);
 }

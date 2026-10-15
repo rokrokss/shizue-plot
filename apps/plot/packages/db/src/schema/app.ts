@@ -698,6 +698,15 @@ const anyVector = customType<{ data: number[]; driverData: string }>({
   fromDriver: (value) => JSON.parse(value) as number[],
 });
 
+/**
+ * A Postgres `tsvector`, written in its literal form (`'리안':1,3 '안의':2`) so
+ * no text-search parser — whose idea of a letter is the locale's — touches the
+ * terms the app cut.
+ */
+const tsvector = customType<{ data: string; driverData: string }>({
+  dataType: () => 'tsvector',
+});
+
 // The chat's memory, as RisuAI HypaV3's summaries: each a summary of a batch of
 // the branch's messages (`message_ids`, oldest first), pinned (`important`) or
 // not. A summary applies to a branch only while every message it covers is on
@@ -885,15 +894,25 @@ export const memories = pgTable(
 // model is not the plot's current one is stale and embedded again. Written for
 // publicly listed plots only, and deleted when one stops being listed; the
 // search still filters by the listing rule itself.
-export const plotSearchVectors = pgTable('plot_search_vectors', {
-  plotId: uuid('plot_id')
-    .primaryKey()
-    .references(() => plots.id, { onDelete: 'cascade' }),
-  model: text('model').notNull(),
-  embedding: anyVector('embedding').notNull(),
-  textHash: text('text_hash').notNull(),
-  embeddedAt: timestamp('embedded_at', { withTimezone: true }).notNull().defaultNow(),
-});
+// `terms` is the same text's words (@shizue/core `lexicalTerms`, positions
+// counted from 1) for the search by words beside it, BM25 over the GIN index,
+// and `term_count` how many it holds; null on a row from before them, which the
+// next refresh fills without embedding again.
+export const plotSearchVectors = pgTable(
+  'plot_search_vectors',
+  {
+    plotId: uuid('plot_id')
+      .primaryKey()
+      .references(() => plots.id, { onDelete: 'cascade' }),
+    model: text('model').notNull(),
+    embedding: anyVector('embedding').notNull(),
+    textHash: text('text_hash').notNull(),
+    embeddedAt: timestamp('embedded_at', { withTimezone: true }).notNull().defaultNow(),
+    terms: tsvector('terms'),
+    termCount: integer('term_count'),
+  },
+  (t) => [index('plot_search_vectors_terms_idx').using('gin', t.terms)],
+);
 
 // Reusable author's notes, owned by the account rather than by one chat. The caps
 // (100 per account, 2,000 characters) are enforced by the API.

@@ -16,13 +16,17 @@
  *   last change (`scheduleSearchSweep`) — the lazy re-embedding after a model
  *   change, and the catch-up for plots published before this existed or while
  *   the embedder was down.
+ * - **Its words are stored beside the vector** (`terms`, a tsvector of core
+ *   `lexicalTerms`, written with it) for the search by words (`lexicalPlotIds`);
+ *   a row from before them gets its words on the next refresh, unembedded.
  * - The search itself is the explore route's: it filters by the same listing
  *   rule, language partition and tag as the text search, and falls back to it.
  */
 import { createHash } from 'node:crypto';
-import { plots, plotSearchVectors, type ContentLanguage, type Plot } from '@shizue/db';
-import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from 'drizzle-orm';
-import type { AppDeps } from './deps.js';
+import { bm25TermScore, hasLexicalEvidence, lexicalStems, lexicalTerms, rareLimit } from '@shizue/core';
+import { plots, plotSearchVectors, type ContentLanguage, type Db, type Plot } from '@shizue/db';
+import { and, desc, eq, gt, inArray, isNotNull, isNull, ne, or, sql, type SQL } from 'drizzle-orm';
+import type { AppDeps, Tx } from './deps.js';
 import { publicIntro, publiclyListed } from './hub.js';
 
 /** How much of the first opening the text carries: its start says what the work is. */
@@ -46,6 +50,30 @@ export function plotSearchText(plot: Pick<Plot, 'name' | 'tags' | 'intro' | 'int
 }
 
 const hashOf = (text: string): string => createHash('sha256').update(text).digest('hex');
+
+/** Postgres keeps a lexeme's positions up to 16383 and 256 of them; the text is cut long before either. */
+const MAX_POSITION = 16_383;
+const MAX_POSITIONS = 256;
+
+/**
+ * A text's terms (@shizue/core `lexicalTerms`) as a `tsvector` literal, each
+ * with its positions from 1, and how many there are. Written as a literal so
+ * the terms are the app's, not a text-search parser's.
+ */
+export function termsVector(text: string): { terms: string; count: number } {
+  const all = lexicalTerms(text);
+  const positions = new Map<string, number[]>();
+  all.forEach((term, at) => {
+    const list = positions.get(term) ?? [];
+    if (list.length < MAX_POSITIONS) list.push(Math.min(at + 1, MAX_POSITION));
+    positions.set(term, list);
+  });
+  const quote = (term: string): string => `'${term.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`;
+  return {
+    terms: [...positions].map(([term, list]) => `${quote(term)}:${list.join(',')}`).join(' '),
+    count: all.length,
+  };
+}
 
 /** Plots whose refresh is running, and whether another was asked for meanwhile. */
 const refreshing = new Map<string, boolean>();
@@ -98,8 +126,17 @@ export async function refreshSearchVectors(deps: AppDeps, plotIds: readonly stri
     if (!model) continue;
     const text = plotSearchText(row.plot);
     const hash = hashOf(text);
-    if (row.vector?.model === model && row.vector.textHash === hash) current.push(row.plot.id);
-    else due.push({ plot: row.plot, text, hash });
+    if (row.vector?.model === model && row.vector.textHash === hash) {
+      current.push(row.plot.id);
+      // A row from before the terms: its words are written now, its vector kept.
+      if (row.vector.terms === null) {
+        const { terms, count } = termsVector(text);
+        await deps.db
+          .update(plotSearchVectors)
+          .set({ terms, termCount: count })
+          .where(eq(plotSearchVectors.plotId, row.plot.id));
+      }
+    } else due.push({ plot: row.plot, text, hash });
   }
   if (current.length > 0) {
     await deps.db.update(plotSearchVectors).set({ embeddedAt: new Date() }).where(inArray(plotSearchVectors.plotId, current));
@@ -113,11 +150,14 @@ export async function refreshSearchVectors(deps: AppDeps, plotIds: readonly stri
       { plotLanguage: language, kind: 'document' },
     );
     for (const [index, item] of batch.entries()) {
+      const { terms, count } = termsVector(item.text);
       const values = {
         model: embedded.model,
         embedding: embedded.vectors[index]!,
         textHash: item.hash,
         embeddedAt: new Date(),
+        terms,
+        termCount: count,
       };
       await deps.db
         .insert(plotSearchVectors)
@@ -125,6 +165,66 @@ export async function refreshSearchVectors(deps: AppDeps, plotIds: readonly stri
         .onConflictDoUpdate({ target: plotSearchVectors.plotId, set: values });
     }
   }
+}
+
+/** A Postgres text array literal: every term quoted. */
+const textArray = (list: readonly string[]): string =>
+  `{${list.map((term) => `"${term.replace(/[\\"]/g, '\\$&')}"`).join(',')}}`;
+/** A term as a tsquery operand, quoted so no word is read as an operator. */
+const tsqueryTerm = (term: string): string => `'${term.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`;
+
+/**
+ * Explore's search by words (§10, ARCHITECTURE §7.3 단어 검색): the plots
+ * `filters` keep, best first by BM25 over their `terms` for `query`, at most
+ * `limit` — only those holding one of the query's stems that few of them
+ * hold (`hasLexicalEvidence`), which are the only ones that can show
+ * evidence. So it reads no more than that: each term's document frequency
+ * is counted only up to just past the evidence limit (`rareLimit`), a term
+ * past it counts for nothing, and only the plots holding a rare stem are
+ * scored — a common word in the query never makes it walk the catalogue.
+ */
+export async function lexicalPlotIds(db: Db | Tx, query: string, filters: SQL[], limit: number): Promise<string[]> {
+  const stems = lexicalStems(query);
+  const terms = [...new Set(lexicalTerms(query))];
+  if (stems.size === 0) return [];
+  const listed = and(...filters, isNotNull(plotSearchVectors.terms));
+  const pool = sql`${plotSearchVectors} join ${plots} on ${plots.id} = ${plotSearchVectors.plotId}`;
+  const [stats] = await db.execute<{ documents: number; average: number }>(sql`
+    select count(*)::int as documents, coalesce(avg(${plotSearchVectors.termCount}), 0)::float8 as average
+    from ${pool} where ${listed}`);
+  const documents = stats?.documents ?? 0;
+  if (documents === 0) return [];
+  const cap = rareLimit(documents);
+  const counted = await db.execute<{ term: string; frequency: number }>(sql`
+    select t.term, (
+      select count(*)::int from (
+        select 1 from ${pool} where ${listed} and ${plotSearchVectors.terms} @@ t.query::tsquery limit ${cap + 1}
+      ) held
+    ) as frequency
+    from unnest(${textArray(terms)}::text[], ${textArray(terms.map(tsqueryTerm))}::text[]) as t(term, query)`);
+  const frequency = new Map([...counted].map((row) => [row.term, row.frequency]));
+  const rare = terms.filter((term) => (frequency.get(term) ?? 0) > 0 && frequency.get(term)! <= cap);
+  const rareStems = rare.filter((term) => stems.has(term));
+  if (rareStems.length === 0) return [];
+  const candidates = await db.execute<{ id: string; length: number; held: [string, number][] }>(sql`
+    select ${plotSearchVectors.plotId} as id, ${plotSearchVectors.termCount} as length, (
+      select coalesce(json_agg(json_build_array(u.lexeme, cardinality(u.positions))), '[]'::json)
+      from unnest(${plotSearchVectors.terms}) u where u.lexeme = any(${textArray(rare)}::text[])
+    ) as held
+    from ${pool} where ${listed} and ${plotSearchVectors.terms} @@ ${rareStems.map(tsqueryTerm).join(' | ')}::tsquery`);
+  return [...candidates]
+    .map((row) => {
+      const matched = row.held.map(([term]) => ({ term, frequency: frequency.get(term)! }));
+      const score = row.held.reduce(
+        (sum, [term, tf]) => sum + bm25TermScore(tf, row.length, frequency.get(term)!, documents, stats!.average),
+        0,
+      );
+      return { id: row.id, score, evidence: hasLexicalEvidence(matched, stems, documents) };
+    })
+    .filter((row) => row.evidence)
+    .sort((a, b) => b.score - a.score || (a.id < b.id ? -1 : 1))
+    .slice(0, limit)
+    .map((row) => row.id);
 }
 
 /** Partitions with a sweep running, and until when one that found nothing is not repeated. */
@@ -153,6 +253,7 @@ export function scheduleSearchSweep(deps: AppDeps, language: ContentLanguage, mo
             isNull(plotSearchVectors.plotId),
             ne(plotSearchVectors.model, model),
             gt(plots.updatedAt, plotSearchVectors.embeddedAt),
+            isNull(plotSearchVectors.terms),
           ),
         ),
       )

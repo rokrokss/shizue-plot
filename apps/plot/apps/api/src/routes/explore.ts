@@ -1,3 +1,4 @@
+import { hybridRanking } from '@shizue/core';
 import { follows, plots, plotLikes, plotSearchVectors, user, type ContentLanguage, type Db, type Plot } from '@shizue/db';
 import { and, eq, ilike, inArray, notInArray, or, sql, type SQL } from 'drizzle-orm';
 import type { PgColumn } from 'drizzle-orm/pg-core';
@@ -6,7 +7,8 @@ import type { AppDeps, AppEnv } from '../deps.js';
 import { badRequest, notFound } from '../errors.js';
 import { pageSnapshotFeed } from '../feedCursor.js';
 import { publiclyListed, publicPlotList, publicPlotQuery, type PublicPlotRow } from '../hub.js';
-import { scheduleSearchSweep } from '../search.js';
+import { noteLexicalSearch } from '../lexicalHealth.js';
+import { lexicalPlotIds, scheduleSearchSweep } from '../search.js';
 import { requireUser } from '../session.js';
 import { isUuid } from '../util.js';
 import { requireLanguage } from './plots.js';
@@ -164,7 +166,8 @@ function meaningOffset(raw: string): number | null {
  * and the text search answers instead. The query is embedded with the
  * partition's model, so only the plots of that partition, which embed with the
  * same model, are compared. Every plot the text search would list stays in
- * reach: a name containing the query ranks first, then nearness.
+ * reach: a name containing the query ranks first, then nearness fused with the
+ * search by words (`lexicalPlotIds`) by reciprocal rank.
  */
 async function pageByMeaning(
   deps: AppDeps,
@@ -192,15 +195,37 @@ async function pageByMeaning(
   if (take === 0) return { rows: [], nextCursor: null };
   const distance = sql`(${plotSearchVectors.embedding} <=> ${JSON.stringify(vector)}::vector)`;
   const named = ilike(plots.name, `%${escapeLike(input.q)}%`);
-  const rows = await publicPlotQuery(deps.db, input.viewerId)
-    // Only a vector of the partition's model: another's is stale, and of another length.
-    .leftJoin(plotSearchVectors, and(eq(plotSearchVectors.plotId, plots.id), eq(plotSearchVectors.model, model)))
-    .where(and(...input.filters, or(named, sql`1 - ${distance} >= ${MEANING_MIN_SIMILARITY}`)))
-    .orderBy(sql`${named} desc`, sql`${distance} asc nulls last`, descNullsLast(plots.id))
-    .limit(take + 1)
-    .offset(input.offset);
-  const more = rows.length > take && input.offset + take < MEANING_RESULTS;
-  return { rows: rows.slice(0, take), nextCursor: more ? encodeMeaningCursor(input.offset + take) : null };
+  const [near, lexical] = await Promise.all([
+    deps.db
+      .select({ id: plots.id, named: sql<boolean>`${named}` })
+      .from(plots)
+      // Only a vector of the partition's model: another's is stale, and of another length.
+      .leftJoin(plotSearchVectors, and(eq(plotSearchVectors.plotId, plots.id), eq(plotSearchVectors.model, model)))
+      .where(and(...input.filters, or(named, sql`1 - ${distance} >= ${MEANING_MIN_SIMILARITY}`)))
+      .orderBy(sql`${named} desc`, sql`${distance} asc nulls last`, descNullsLast(plots.id))
+      .limit(MEANING_RESULTS),
+    lexicalPlotIds(deps.db, input.q, input.filters, MEANING_RESULTS),
+  ]);
+  noteLexicalSearch('explore', lexical.length > 0);
+  // A name holding the query first, then the fusion of nearness and words.
+  const names = near.filter((row) => row.named).map((row) => row.id);
+  const first = new Set(names);
+  const ranking = [
+    ...names,
+    ...hybridRanking(
+      near.filter((row) => !row.named).map((row) => row.id),
+      lexical,
+    ).filter((id) => !first.has(id)),
+  ].slice(0, MEANING_RESULTS);
+  const page = ranking.slice(input.offset, input.offset + take);
+  const rows =
+    page.length === 0
+      ? []
+      : await publicPlotQuery(deps.db, input.viewerId).where(and(...input.filters, inArray(plots.id, page)));
+  const at = new Map(page.map((id, index) => [id, index]));
+  rows.sort((a, b) => at.get(a.plot.id)! - at.get(b.plot.id)!);
+  const more = input.offset + take < ranking.length;
+  return { rows, nextCursor: more ? encodeMeaningCursor(input.offset + take) : null };
 }
 
 /**

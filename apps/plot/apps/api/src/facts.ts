@@ -12,7 +12,8 @@
  * - **Vectors are the plot's model's**, as the summaries' chunks are; a fact
  *   without one of the current model is embedded by the next refresh.
  * - **Each request picks** the chat's `factCount` most similar to the latest
- *   turns — the same query vectors the summaries were ranked with — leaving out
+ *   turns — the same query vectors the summaries were ranked with, fused with
+ *   the facts the newest turn names by words (BM25, `lexicalRanking`) — leaving out
  *   what a selected summary already says (in its words, or near enough by vector)
  *   and what another picked fact says, within the block's own token cap. Without
  *   an embedder for the plot, past the deadline, or with `factCount` 0: no block.
@@ -21,6 +22,8 @@ import {
   factCoveredByText,
   factExtractionRequest,
   fitFacts,
+  hybridRanking,
+  lexicalRanking,
   parseFacts,
   rankBySimilarity,
   sameFact,
@@ -41,6 +44,7 @@ import { and, asc, eq, inArray, isNull, ne, or, sql } from 'drizzle-orm';
 import type { AppDeps } from './deps.js';
 import type { Embedder, Embedding } from './embedder.js';
 import { loadMembers } from './hub.js';
+import { noteLexicalSearch } from './lexicalHealth.js';
 import { collect, memoryChannel } from './memory.js';
 import { transcriptOf } from './transcript.js';
 
@@ -220,6 +224,8 @@ export interface FactSelectionInput {
   model: string;
   /** The latest turns' vectors, shared with the summaries' ranking; throws when the embedder does. */
   queryVectors: () => Promise<Embedding>;
+  /** The newest of those turns, which the facts are searched by words with. */
+  turn: string;
   /** Facts the block may carry (`factCount`). */
   count: number;
 }
@@ -227,7 +233,8 @@ export interface FactSelectionInput {
 /**
  * The facts a request carries, in the branch's order: the eligible ones ranked
  * by HypaV3's fusion of their similarity to each query turn (`rankBySimilarity`,
- * the newest turn weighing most), without the ones a selected summary already
+ * the newest turn weighing most) and fused with their BM25 ranking for the
+ * newest turn (`hybridRanking`), without the ones a selected summary already
  * says or another picked fact says, at most `count`, within the block's cap.
  * Empty when the branch has no fact of the plot's model; throws when the query
  * vectors do, which the caller turns into no block.
@@ -257,7 +264,12 @@ export async function selectFacts(deps: AppDeps, input: FactSelectionInput): Pro
   );
   const byId = new Map(eligible.map((fact) => [fact.id, fact]));
   const selectedTexts = input.selected.map((summary) => summary.text);
-  const candidates = rankBySimilarity(lists, (id: string) => id)
+  const lexical = lexicalRanking(
+    eligible.map((fact) => [fact.id, fact.content] as const),
+    input.turn,
+  );
+  noteLexicalSearch('facts', lexical.length > 0);
+  const candidates = hybridRanking(rankBySimilarity(lists, (id: string) => id), lexical)
     .slice(0, input.count * CANDIDATES_PER_FACT)
     .map((id) => byId.get(id)!)
     .filter((fact) => !factCoveredByText(fact.content, selectedTexts));

@@ -8206,11 +8206,11 @@ describe('memory', () => {
     const TEXTS = ['등대 앞에서 하루를 보냈다.', '고양이가 서점에 들어왔다.', '지도를 펼친 저녁이었다.', '등대 불빛이 꺼진 아침이었다.'];
 
     /** Four summaries over a short branch, room for one, all of it the similar share. */
-    async function similarChat(cookie: string, harness: Harness): Promise<string> {
+    async function similarChat(cookie: string, harness: Harness, texts: readonly string[] = TEXTS): Promise<string> {
       const { chatId } = await setupChat(cookie);
       const ids = (await shortTurns(cookie, chatId, harness, 5)).map((message: any) => message.id);
-      for (const [index, text] of TEXTS.entries()) await seedSummary(chatId, ids.slice(index * 2, index * 2 + 2), text);
-      const one = Math.max(...TEXTS.map((text) => countTokens(`${text}\n\n`)));
+      for (const [index, text] of texts.entries()) await seedSummary(chatId, ids.slice(index * 2, index * 2 + 2), text);
+      const one = Math.max(...texts.map((text) => countTokens(`${text}\n\n`)));
       await json(cookie, `/api/chats/${chatId}`, 'PATCH', {
         memorySettings: {
           contextBudget: 8000,
@@ -8244,6 +8244,25 @@ describe('memory', () => {
       for (const text of TEXTS.filter((text) => !text.includes('고양이'))) expect(system).not.toContain(text);
       // The latest turns were the queries, as queries.
       expect(embedder.calls.at(-1)).toContain('고양이는 어디 갔지?');
+    });
+
+    it('lifts the summary the newest turn names by a rare word over the one nearest by meaning', async () => {
+      const cookie = await signUp('memory-lexical@example.com');
+      const harness = memoryApp({ embedder: keywordEmbedder() });
+      const chatId = await similarChat(cookie, harness, [
+        '등대 앞에서 하루를 보냈다.',
+        '고양이가 서점에 들어왔다.',
+        '한석이 지도를 건넸다.',
+        '등대 불빛이 꺼진 아침이었다.',
+      ]);
+      await embedPendingSummaries(harness.deps, chatId);
+      // By meaning the turn is about the cat (the keyword embedder sees only 고양이);
+      // by its words it names 한석, whom one summary alone holds — and RRF puts that first.
+      const system = await ask(cookie, chatId, harness, '새끼고양이랑 놀던 날, 한석이 뭐라고 했지?');
+      expect(system).toContain(`${MEMORY_HEADING}\n한석이 지도를 건넸다.`);
+      expect(system).not.toContain('고양이가 서점에 들어왔다.');
+      // Where the words and the meaning agree, the nearest stays first.
+      expect(await ask(cookie, chatId, harness, '고양이 얘기 해 줘')).toContain(`${MEMORY_HEADING}\n고양이가 서점에 들어왔다.`);
     });
 
     it('compares only vectors of the current model, and embeds the stale ones again', async () => {
@@ -18300,6 +18319,21 @@ describe('vector storage (SillyTavern)', () => {
     expect(RETRIEVAL_DEFAULTS.template).toBe('Past events:\n{{text}}');
   });
 
+  it('brings back too what the newest turn names by a rare word, beside what is near by meaning', async () => {
+    const cookie = await signUp('vectors-lexical@example.com');
+    const { chatId } = await setupChat(cookie);
+    const harness = vectorApp(conceptEmbedder());
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { retrieval: { enabled: true } }, harness.app);
+    const NAMED = '한석 할아버지가 지도를 줬다';
+    for (const content of [NAMED, '고양이 이야기', '고양이 밥', '책 이야기', '등대 불빛이 보였다']) await send(cookie, chatId, content, harness);
+    // By meaning the turn is about the cat, and ST's three are the cat's; by its
+    // words it names 한석, whom two messages alone hold — one of them comes back too.
+    const prompt = await send(cookie, chatId, '고양이 말고 한석 할아버지 기억나?', harness);
+    const block = prompt.system.slice(prompt.system.indexOf('Past events:'));
+    expect(block).toContain(NAMED);
+    expect(block).toContain('고양이 이야기');
+  });
+
   it('brings back only what is on the branch being read', async () => {
     const cookie = await signUp('vectors-branch@example.com');
     const { chatId } = await setupChat(cookie);
@@ -18656,6 +18690,39 @@ describe('explore search by meaning', () => {
     await harness.settle();
   });
 
+  it('finds by its words a plot whose public text names what nearness misses', async () => {
+    resetSearchSweeps();
+    const cookie = await signUp('search-words@example.com');
+    const embedder = searchEmbedder();
+    const harness = searchApp(embedder);
+    const cat = await published(cookie, harness, { name: '서점의 오후', intro: '고양이가 사는 서점 이야기' });
+    const selene = await published(cookie, harness, { name: '검은 숲', intro: '등대지기 셀레네의 제자가 되는 이야기' });
+    await published(cookie, harness, { name: '빛의 섬', intro: '등대 아래 고양이 이야기' });
+    // Its words are stored beside its vector.
+    const [row] = await db.select().from(plotSearchVectors).where(eq(plotSearchVectors.plotId, selene.id));
+    expect(row!.terms).toContain("'셀레':");
+    expect(row!.termCount).toBeGreaterThan(0);
+
+    // The keyword embedder sees nothing near in 셀레네; the words find her.
+    expect((await search(harness, '셀레네 나오는 거')).items.map((plot: any) => plot.id)).toEqual([selene.id]);
+    // Words every plot holds, or everyday ones, are no evidence: nothing is added.
+    expect((await search(harness, '이야기 뭐 있어')).items).toEqual([]);
+    // Where both agree, the plot near by meaning and named by words leads.
+    expect((await search(harness, '고양이 서점')).items.map((plot: any) => plot.id)[0]).toBe(cat.id);
+
+    // A row from before the words: a search's sweep writes them, embedding nothing again.
+    await db.update(plotSearchVectors).set({ terms: null, termCount: null }).where(eq(plotSearchVectors.plotId, selene.id));
+    const documents = embedder.calls.filter((call) => call.kind === 'document').length;
+    resetSearchSweeps();
+    await search(harness, '아무거나');
+    await harness.settle();
+    const [filled] = await db.select().from(plotSearchVectors).where(eq(plotSearchVectors.plotId, selene.id));
+    expect(filled!.terms).toBe(row!.terms);
+    expect(embedder.calls.filter((call) => call.kind === 'document')).toHaveLength(documents);
+    expect((await search(harness, '셀레네')).items.map((plot: any) => plot.id)).toEqual([selene.id]);
+    await harness.settle();
+  });
+
   it('never ranks a private, adult or other-language plot, however near', async () => {
     resetSearchSweeps();
     const cookie = await signUp('search-gate@example.com');
@@ -18729,8 +18796,9 @@ describe('explore search by meaning', () => {
 
     const embedder = searchEmbedder('test-new');
     const harness = searchApp(embedder);
-    // Nothing of this model yet: the first search finds no plot by nearness, and sweeps.
-    expect((await search(harness, '고양이')).items).toEqual([]);
+    // Nothing of this model yet: the first search finds no plot by nearness — only
+    // by its words, which no model made (the one without a row, not even so) — and sweeps.
+    expect((await search(harness, '고양이')).items.map((plot: any) => plot.id)).toEqual([cat.id]);
     await harness.settle();
     const swept = await db.select().from(plotSearchVectors);
     expect(swept.map((row) => [row.plotId, row.model]).sort()).toEqual(

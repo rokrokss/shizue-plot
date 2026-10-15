@@ -16,6 +16,8 @@
  *   the branch's in pgvector. It waits for the embedder no longer than
  *   `QUERY_EMBED_TIMEOUT_MS`; any failure leaves the turn to its keywords and its
  *   history, and the generation goes on.
+ *   The messages are found by the newest turn's words too (BM25, core
+ *   `lexical.ts`), fused with the search by meaning by reciprocal rank.
  *
  * - **A reader's own lore is embedded apart** (`scheduleReaderLoreEmbedding`):
  *   what their scripts rewrote of a member's lore, and their library modules'
@@ -36,7 +38,9 @@
  * Everything here swallows its own failures.
  */
 import {
+  hybridRanking,
   isVectorLoreCandidate,
+  lexicalRanking,
   loreChunks,
   RETRIEVAL_DEFAULTS,
   retrievalBlock,
@@ -72,6 +76,7 @@ import { createHash } from 'node:crypto';
 import type { AppDeps, BackgroundTaskKind } from './deps.js';
 import type { Embedder, Embedding } from './embedder.js';
 import { aliasPlotLore, loadWorkLore, loreAliasesEnabled, loreAliasesFor } from './loreAliases.js';
+import { noteLexicalSearch } from './lexicalHealth.js';
 import type { AuxiliaryOwner } from './memory.js';
 import { loadReaderOverlay } from './scriptState.js';
 import { buildPath, visibleToAi } from './tree.js';
@@ -724,7 +729,9 @@ export async function searchByMeaning(
   try {
     const [found, retrieval] = await Promise.all([
       lore && contents.size > 0 ? activatedLore(deps, vectors, model, contents, vector, lore) : null,
-      eligible.length > 0 ? retrievedMessages(deps, model, eligible, vector, input) : null,
+      eligible.length > 0
+        ? retrievedMessages(deps, model, eligible, vector, stripImageMacros(visible.at(-1)?.content ?? ''), input)
+        : null,
     ]);
     return {
       ...none,
@@ -827,17 +834,25 @@ function logCosines(
 }
 
 /**
- * ST's `rearrangeChat` over the branch: the `insert` chunks most like the query
- * among the messages it may bring back — on this branch, not hidden, older than
- * the protected tail, their vectors made from the text they still hold — at or
- * above the threshold, each text once, as ST keys messages by their text. Sent
- * least relevant first, so the most relevant stands nearest the turns.
+/** Chunks each side of the messages' search hands its fusion: enough to reach past the dense side's near-ties. */
+const RETRIEVAL_CANDIDATES = 20;
+
+/**
+ * ST's `rearrangeChat` over the branch: the `insert` chunks most relevant to
+ * the turn among the messages it may bring back — on this branch, not hidden,
+ * older than the protected tail — each text once, as ST keys messages by their
+ * text. Sent least relevant first, so the most relevant stands nearest the
+ * turns. Relevant is the fusion (`hybridRanking`, ARCHITECTURE §7.3 단어 검색)
+ * of ST's search, the chunks most like the query at or above its threshold
+ * whose vectors are of the text they still hold, and BM25 over the same chunks
+ * for the newest turn (`turn`), with evidence only.
  */
 async function retrievedMessages(
   deps: AppDeps,
   model: string,
   eligible: readonly Message[],
   vector: number[],
+  turn: string,
   input: { characters: readonly PromptCharacter[]; userName: string },
 ): Promise<{ text: string; ids: Set<string> }> {
   const score = similarity(messageChunks.embedding, vector);
@@ -845,7 +860,7 @@ async function retrievedMessages(
   const ids = `{${eligible.map((message) => message.id).join(',')}}`;
   const hashes = `{${eligible.map((message) => textHash(message.content)).join(',')}}`;
   const rows = await deps.db
-    .select({ messageId: messageChunks.messageId })
+    .select({ messageId: messageChunks.messageId, chunkIndex: messageChunks.chunkIndex })
     .from(messageChunks)
     .where(
       and(
@@ -855,12 +870,21 @@ async function retrievedMessages(
       ),
     )
     .orderBy(desc(score))
-    .limit(RETRIEVAL_DEFAULTS.insert);
+    .limit(RETRIEVAL_CANDIDATES);
+  const dense = rows.map((row) => `${row.messageId}:${row.chunkIndex}`);
+  const lexical = lexicalRanking(
+    eligible.flatMap((message) =>
+      retrievalChunks(stripImageMacros(message.content)).map((chunk, at) => [`${message.id}:${at}`, chunk] as const),
+    ),
+    turn,
+  ).slice(0, RETRIEVAL_CANDIDATES);
+  noteLexicalSearch('messages', lexical.length > 0);
+  const chunks = hybridRanking(dense, lexical).slice(0, RETRIEVAL_DEFAULTS.insert);
 
   // ST finds texts, not messages: each text found, most relevant first, goes in
   // as the earliest message of the branch that says it.
   const byId = new Map(eligible.map((message) => [message.id, message]));
-  const texts = [...new Set(rows.flatMap(({ messageId }) => byId.get(messageId)?.content ?? []))];
+  const texts = [...new Set(chunks.flatMap((chunk) => byId.get(chunk.slice(0, chunk.lastIndexOf(':')))?.content ?? []))];
   const found = texts.map((text) => eligible.find((message) => message.content === text)!);
   if (found.length === 0) return { text: '', ids: new Set() };
 
