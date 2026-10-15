@@ -2,13 +2,17 @@
  * The reader's own RisuAI modules (ARCHITECTURE §6 RisuAI 모듈 — 독자의 모듈): a
  * library per account, as RisuAI keeps one per app (`db.modules`), each module
  * on for every chat of the reader's (`enabled_globally`, RisuAI's
- * `enabledModules`) or for the chats that list it (`chats.modules`, RisuAI's
- * chat `modules`).
+ * `enabledModules`), for every chat of the works it lists (`plot_ids`, RisuAI's
+ * character `modules`), for the chats that list it (`chats.modules`, RisuAI's
+ * chat `modules`), or for a chat whose reader preset names it in its module
+ * integration (RisuAI's preset `moduleIntergration`).
  *
  * What a chat runs is RisuAI's `getModules()`: the set those lists name, read
  * over the library in the order it was filled (`getModuleByIds` filters
  * `db.modules`, so the library's order is the modules' order whatever list
- * turned one on). The work's own modules — what RisuAI would call the
+ * turned one on). A name on a list finds a module by its id or by its
+ * namespace — every module sharing the namespace — which only the integration's
+ * names can be here, the other lists holding ids. The work's own modules — what RisuAI would call the
  * character's — come first; RisuAI has no module a creator ships with a
  * character, so where they stand against the reader's is ours to say.
  *
@@ -17,6 +21,7 @@
  */
 import {
   chatToggleText,
+  moduleIntegrationNames,
   sniffMedia,
   stripPngTextChunks,
   type CharxAssetFile,
@@ -24,8 +29,8 @@ import {
   type PlotModule,
   type ReaderModuleAsset,
 } from '@shizue/core';
-import { readerModules, type Chat, type Plot, type ReaderModule } from '@shizue/db';
-import { and, asc, eq, inArray, or } from 'drizzle-orm';
+import { chats, readerModules, readerPresets, type Chat, type Plot, type ReaderModule } from '@shizue/db';
+import { and, asc, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import type { AppDeps } from './deps.js';
 import { deleteQuietly, readerModuleAssetKey } from './storage.js';
@@ -53,26 +58,79 @@ export async function readerLibrary(deps: AppDeps, userId: string): Promise<Read
 export const chatModuleIds = (chat: Pick<Chat, 'modules'>): string[] =>
   (chat.modules ?? []).filter((id) => typeof id === 'string' && isUuid(id));
 
+/** The fields of a chat that say which of its owner's library modules are on it. */
+export type ChatModuleSwitches = Pick<Chat, 'userId' | 'plotId' | 'modules' | 'readerPresetId'>;
+
 /**
- * The library modules on a chat: those on everywhere and those its list names,
- * in the library's order — RisuAI's `getModuleByIds` over `enabledModules` and
- * the chat's `modules`. A listed id that is gone, or not the chat owner's,
+ * The module integration of the chat's reader preset, as names
+ * (`moduleIntegrationNames`) — read under the chat owner's id, so a pointer at
+ * anyone else's preset names nothing.
+ */
+async function integrationNames(deps: AppDeps, chat: Pick<Chat, 'userId' | 'readerPresetId'>): Promise<string[]> {
+  if (!chat.readerPresetId) return [];
+  const [preset] = await deps.db
+    .select({ moduleIntegration: readerPresets.moduleIntegration })
+    .from(readerPresets)
+    .where(and(eq(readerPresets.id, chat.readerPresetId), eq(readerPresets.userId, chat.userId)))
+    .limit(1);
+  return moduleIntegrationNames(preset?.moduleIntegration);
+}
+
+/**
+ * RisuAI's `getModuleByIds` over the lists that turn a library module on, as a
+ * condition: on everywhere, on for one of `plotIds`' works, one of `ids`, or —
+ * the integration's `names` — a module whose namespace or id is one of them.
+ */
+function switchedOn(plotIds: readonly string[], ids: readonly string[], names: readonly string[]): SQL {
+  const namespace = sql<string>`${readerModules.module}->>'namespace'`;
+  return or(
+    eq(readerModules.enabledGlobally, true),
+    ...plotIds.map((plotId) => sql`${readerModules.plotIds} ? ${plotId}::text`),
+    ...(ids.length > 0 ? [inArray(readerModules.id, [...ids])] : []),
+    ...(names.length > 0 ? [inArray(namespace, [...names]), inArray(sql<string>`${readerModules.id}::text`, [...names])] : []),
+  )!;
+}
+
+/**
+ * The library modules on a chat, in the library's order — RisuAI's
+ * `getModuleByIds` over `enabledModules`, the character's `modules` (the work's
+ * list, `plot_ids`), the chat's `modules` and the preset's
+ * `moduleIntergration`. A listed id that is gone, or not the chat owner's,
  * matches nothing.
  */
-export async function activeReaderModules(
-  deps: AppDeps,
-  chat: Pick<Chat, 'userId' | 'modules'>,
-): Promise<ReaderModule[]> {
-  const ids = chatModuleIds(chat);
+export async function activeReaderModules(deps: AppDeps, chat: ChatModuleSwitches): Promise<ReaderModule[]> {
+  const names = await integrationNames(deps, chat);
   return deps.db
     .select()
     .from(readerModules)
-    .where(
-      and(
-        eq(readerModules.userId, chat.userId),
-        ids.length > 0 ? or(eq(readerModules.enabledGlobally, true), inArray(readerModules.id, ids)) : eq(readerModules.enabledGlobally, true),
-      ),
-    )
+    .where(and(eq(readerModules.userId, chat.userId), switchedOn([chat.plotId], chatModuleIds(chat), names)))
+    .orderBy(asc(readerModules.createdAt), asc(readerModules.id));
+}
+
+/**
+ * The library modules on any of one reader's chats with a work — what a search
+ * of that reader's lore on it may meet: every list each of those chats turns
+ * modules on by (`activeReaderModules`), together.
+ */
+export async function readerModulesOnPlot(deps: AppDeps, userId: string, plotId: string): Promise<ReaderModule[]> {
+  const owned = await deps.db
+    .select({ modules: chats.modules, readerPresetId: chats.readerPresetId })
+    .from(chats)
+    .where(and(eq(chats.userId, userId), eq(chats.plotId, plotId)));
+  const ids = [...new Set(owned.flatMap((chat) => chatModuleIds(chat)))];
+  const presetIds = [...new Set(owned.flatMap((chat) => (chat.readerPresetId ? [chat.readerPresetId] : [])))];
+  const presets =
+    presetIds.length > 0
+      ? await deps.db
+          .select({ moduleIntegration: readerPresets.moduleIntegration })
+          .from(readerPresets)
+          .where(and(eq(readerPresets.userId, userId), inArray(readerPresets.id, presetIds)))
+      : [];
+  const names = [...new Set(presets.flatMap((preset) => moduleIntegrationNames(preset.moduleIntegration)))];
+  return deps.db
+    .select()
+    .from(readerModules)
+    .where(and(eq(readerModules.userId, userId), switchedOn([plotId], ids, names)))
     .orderBy(asc(readerModules.createdAt), asc(readerModules.id));
 }
 
@@ -87,7 +145,7 @@ export interface ChatModules {
 
 export async function chatModulesOf(
   deps: AppDeps,
-  chat: Pick<Chat, 'userId' | 'modules'>,
+  chat: ChatModuleSwitches,
   plot: Pick<Plot, 'customUi'>,
 ): Promise<ChatModules> {
   const reader = await activeReaderModules(deps, chat);
@@ -104,6 +162,23 @@ export const readerCbsModules = (reader: readonly ReaderModule[]): { namespace: 
     row.module.namespace ? [{ namespace: row.module.namespace, assets: row.assets.map((asset) => asset.name) }] : [],
   );
 
+/**
+ * RisuAI's `HideIconStore` for a chat (`moduleUpdate`): the character's
+ * `hideChatIcon` or any module on the chat with `hideIcon`. A card brings its
+ * flag in `extensions.risuai.hideChatIcon`; a work of several members is
+ * RisuAI's group, which no card speaks for, so only a work of one member reads
+ * its card's. A work no RisuAI card or module came into hides nothing.
+ */
+export function hidesChatIcons(
+  modules: readonly Pick<PlotModule, 'hideIcon'>[],
+  members: readonly { card: Pick<NormalizedCard, 'extensions'> }[],
+): boolean {
+  if (modules.some((module) => module.hideIcon === true)) return true;
+  if (members.length !== 1) return false;
+  const risu = members[0]!.card.extensions?.['risuai'];
+  return risu !== null && typeof risu === 'object' && (risu as Record<string, unknown>)['hideChatIcon'] === true;
+}
+
 /** A member card's own toggles — RisuAI's character `customModuleToggle`, imported from `extensions.risuai.toggles`. */
 export function cardToggles(card: Pick<NormalizedCard, 'extensions'>): string {
   const risu = card.extensions?.['risuai'];
@@ -112,13 +187,29 @@ export function cardToggles(card: Pick<NormalizedCard, 'extensions'>): string {
 }
 
 /**
- * The toggle text a chat's settings draw (`chatToggleText`): the modules' on
- * it, in their order, then the members' own — each distinct text once, as a
- * work of several imported from one card would otherwise list it twice.
+ * The toggle text a chat's settings draw (`chatToggleText`): its reader
+ * preset's (RisuAI's preset toggles), the modules' on it, in their order, then
+ * the members' own — each distinct text once, as a work of several imported
+ * from one card would otherwise list it twice.
  */
-export function chatToggles(modules: readonly PlotModule[], members: readonly { card: Pick<NormalizedCard, 'extensions'> }[]): string {
+export function chatToggles(
+  modules: readonly PlotModule[],
+  members: readonly { card: Pick<NormalizedCard, 'extensions'> }[],
+  preset = '',
+): string {
   const own = [...new Set(members.map((member) => cardToggles(member.card)).filter((text) => text.trim()))];
-  return chatToggleText(modules, own);
+  return chatToggleText(modules, own, preset);
+}
+
+/** The chat's reader preset's toggles (RisuAI's `customPromptTemplateToggle`), read under its owner. */
+export async function presetToggles(deps: AppDeps, chat: Pick<Chat, 'userId' | 'readerPresetId'>): Promise<string> {
+  if (!chat.readerPresetId) return '';
+  const [preset] = await deps.db
+    .select({ toggles: readerPresets.toggles })
+    .from(readerPresets)
+    .where(and(eq(readerPresets.id, chat.readerPresetId), eq(readerPresets.userId, chat.userId)))
+    .limit(1);
+  return preset?.toggles ?? '';
 }
 
 /**

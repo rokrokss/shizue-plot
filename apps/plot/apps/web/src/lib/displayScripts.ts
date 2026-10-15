@@ -46,6 +46,7 @@
 
 import { unescapeCbs } from '@shizue/core/cbs';
 import { inDisplayDepth, inDisplayRole } from '@shizue/core/display-script';
+import type { DisplaySide } from '@shizue/core';
 import { stripVariableMacros, type Variables } from '@shizue/core/variables';
 import { drawFrom, holdsCbs, renderProse, renderTemplate, RenderBudgetExhausted, type CbsContext } from './cbs';
 import { sanitizeCustomHtml } from './sanitizeHtml';
@@ -90,8 +91,9 @@ const contextsOf = new WeakMap<DisplayContext, Map<DisplayScript[], DisplayConte
 
 /**
  * The scripts that run on a message `depth` deep of `role` — SillyTavern's
- * regex min/max depth (`inDisplayDepth`) and its placement (`inDisplayRole`): a
- * script out of range, or placed on the other side's messages, is never
+ * regex min/max depth (`inDisplayDepth`) and its placement (`inDisplayRole`,
+ * the reader's turn, a reply or a narration): a script out of range, or placed
+ * on another side's messages, is never
  * matched, so its pattern costs that message nothing. The list itself wherever
  * all of it runs — every list with no range and no role in it, and every
  * message with no depth (one hidden from the AI) in a list with no role — and
@@ -102,7 +104,7 @@ const contextsOf = new WeakMap<DisplayContext, Map<DisplayScript[], DisplayConte
 export function displayScriptsAt(
   scripts: DisplayScript[],
   depth: number | undefined,
-  role?: 'user' | 'assistant',
+  role?: DisplaySide,
 ): DisplayScript[] {
   const ranged =
     depth !== undefined && scripts.some((script) => script.minDepth !== undefined || script.maxDepth !== undefined);
@@ -136,7 +138,7 @@ export function displayScriptsAt(
 export function displayContextAt(
   context: DisplayContext | undefined,
   depth: number | undefined,
-  role?: 'user' | 'assistant',
+  role?: DisplaySide,
 ): DisplayContext | undefined {
   if (!context) return undefined;
   const scripts = displayScriptsAt(context.scripts, depth, role);

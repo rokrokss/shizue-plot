@@ -370,6 +370,10 @@ const toModuleJson = (module: PlotModule) => ({
   assetCount: module.assets.length,
   background: Boolean(module.css || module.backgroundHtml),
   lowLevelAccess: module.lowLevelAccess === true,
+  /** RisuAI's `hideIcon`: the work's chats show no sender picture or name. */
+  hideIcon: module.hideIcon === true,
+  /** What it would connect to or run that is never done here (`PlotModule.inert`). */
+  ...(module.inert ? { inert: module.inert } : {}),
   /** Whether it brings anything the reader's browser runs — what a publish tells the owner readers receive. */
   scripts: cardScripts({ extensions: {} }, [module]) !== null,
   importedFrom: module.importedFrom,
@@ -713,6 +717,8 @@ async function storeImportedAssets(
  * - `external_failed` addresses on other hosts the import could not bring in
  *   (`localizeAssets.ts`): left as written, so the chat does not draw them
  * - `external_over_limit` the same, left because the import's fetch caps ran out
+ * - `module_mcp_inert` / `module_cjs_inert` a module's MCP server or `cjs` code,
+ *   kept and never connected to or run (`PlotModule.inert`)
  */
 type ImportWarningCode =
   | 'assets_unsupported'
@@ -724,7 +730,9 @@ type ImportWarningCode =
   | 'stylesheet_over_limit'
   | 'background_over_limit'
   | 'external_failed'
-  | 'external_over_limit';
+  | 'external_over_limit'
+  | 'module_mcp_inert'
+  | 'module_cjs_inert';
 
 interface ImportWarning {
   code: ImportWarningCode;
@@ -744,6 +752,8 @@ function importWarnings(counts: Partial<Record<ImportWarningCode, number>>): Imp
     'background_over_limit',
     'external_failed',
     'external_over_limit',
+    'module_mcp_inert',
+    'module_cjs_inert',
   ];
   return order.flatMap((code) => ((counts[code] ?? 0) > 0 ? [{ code, count: counts[code]! }] : []));
 }
@@ -2249,7 +2259,12 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     // stored as its own, so taking the module out takes them too.
     const localized = await localizeImport(deps, id, { plot: false, modules: [module.id] });
     plot = (await deps.db.select().from(plots).where(eq(plots.id, id)).limit(1))[0] ?? plot;
-    const warnings = importWarnings({ ...assetWarnings(undefined, stored), ...localized.warnings });
+    const warnings = importWarnings({
+      ...assetWarnings(undefined, stored),
+      ...localized.warnings,
+      ...(module.inert?.mcp !== undefined ? { module_mcp_inert: 1 } : {}),
+      ...(module.inert?.cjs ? { module_cjs_inert: 1 } : {}),
+    });
     scheduleLoreUpdate(deps, id, c.get('userId'));
     return c.json({ ...((await ownerView(deps, plot)) as object), importWarnings: warnings }, 201);
   });

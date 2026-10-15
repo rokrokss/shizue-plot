@@ -442,6 +442,12 @@ export const readerPresets = pgTable(
     name: text('name').notNull(),
     main: text('main').notNull().default(''),
     globalNote: text('global_note').notNull().default(''),
+    // RisuAI's preset toggles (`customPromptTemplateToggle`): drawn first among a
+    // chat's toggles while the preset is the chat's, in RisuAI's toggle syntax.
+    toggles: text('toggles').notNull().default(''),
+    // RisuAI's `moduleIntergration`: a comma list of namespaces (or ids) whose
+    // library modules a chat on this preset turns on.
+    moduleIntegration: text('module_integration').notNull().default(''),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -451,8 +457,10 @@ export const readerPresets = pgTable(
 // A RisuAI module in a reader's own library — RisuAI's `db.modules`. Kept whole
 // as a work keeps one (`PlotModule`, its `assets` empty: its pictures are its own,
 // `assets` here, under `reader-modules/` and served to its owner alone). On for
-// every chat of theirs while `enabled_globally` (RisuAI's `enabledModules`), else
-// only in the chats that list it (`chats.modules`). A module on a chat runs after
+// every chat of theirs while `enabled_globally` (RisuAI's `enabledModules`), on
+// every chat of a work `plot_ids` lists (RisuAI's character `modules`), on the
+// chats that list it (`chats.modules`), and on a chat whose reader preset names
+// its namespace (RisuAI's `moduleIntergration`). A module on a chat runs after
 // the work's own modules, the library's in the order it was filled (`created_at`)
 // — RisuAI orders the modules on a chat by its library, never by the list that
 // turned one on. Never written into the work. Count and sizes capped by the API.
@@ -466,6 +474,9 @@ export const readerModules = pgTable(
     module: jsonb('module').$type<PlotModule>().notNull(),
     assets: jsonb('assets').$type<ReaderModuleAsset[]>().notNull().default([]),
     enabledGlobally: boolean('enabled_globally').notNull().default(false),
+    // The works whose every chat of this reader's runs it — RisuAI's character
+    // `modules`, the reader's side of it. Null is none; a gone plot matches nothing.
+    plotIds: jsonb('plot_ids').$type<string[]>(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -573,6 +584,13 @@ export const chats = pgTable(
     // turned on for this chat alone. Null is none. An id whose module is gone
     // matches nothing; the API keeps the list to the chat owner's own.
     modules: jsonb('modules').$type<string[]>(),
+    // RisuAI's "Local Toggles" (`useLocallySetGlobalVariables`): while on, the
+    // toggles set in this chat's settings are kept in `local_global_variables`
+    // rather than in the reader's globals on the work. Whatever that map holds
+    // (non-empty, not 'null') is read over the globals in this chat, on or off,
+    // as RisuAI's `getGlobalChatVar` reads `GLGlobalVariables`.
+    localToggles: boolean('local_toggles').notNull().default(false),
+    localGlobalVariables: jsonb('local_global_variables').$type<Variables>(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

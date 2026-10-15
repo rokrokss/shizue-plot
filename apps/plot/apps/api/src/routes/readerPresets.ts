@@ -1,4 +1,9 @@
-import { MAX_READER_PRESETS, READER_PRESET_NAME_MAX, READER_PRESET_TEXT_MAX } from '@shizue/core';
+import {
+  MAX_READER_PRESETS,
+  READER_PRESET_INTEGRATION_MAX,
+  READER_PRESET_NAME_MAX,
+  READER_PRESET_TEXT_MAX,
+} from '@shizue/core';
 import { readerPresets, user, type ReaderPreset } from '@shizue/db';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
@@ -13,28 +18,50 @@ const toReaderPresetJson = (preset: ReaderPreset) => ({
   name: preset.name,
   main: preset.main,
   globalNote: preset.globalNote,
+  /** RisuAI's preset toggles (`customPromptTemplateToggle`), drawn first among a chat's toggles. */
+  toggles: preset.toggles,
+  /** RisuAI's `moduleIntergration`: the namespaces whose library modules a chat on it turns on. */
+  moduleIntegration: preset.moduleIntegration,
   createdAt: preset.createdAt.toISOString(),
   updatedAt: preset.updatedAt.toISOString(),
 });
 
+interface PresetFields {
+  name?: string;
+  main?: string;
+  globalNote?: string;
+  toggles?: string;
+  moduleIntegration?: string;
+}
+
 /** The fields a body may set, each checked against its cap; `name` may not be blank. */
-function presetFields(body: Record<string, unknown>): { name?: string; main?: string; globalNote?: string } {
+function presetFields(body: Record<string, unknown>): PresetFields {
   const name = optionalString(body, 'name')?.trim();
   const main = optionalString(body, 'main');
   const globalNote = optionalString(body, 'globalNote');
+  const toggles = optionalString(body, 'toggles');
+  const moduleIntegration = optionalString(body, 'moduleIntegration');
   if (name === '') throw badRequest('invalid_request', 'name must not be blank');
   if (name !== undefined && name.length > READER_PRESET_NAME_MAX) {
     throw badRequest('reader_preset_limit', `name must be at most ${READER_PRESET_NAME_MAX} characters`);
   }
-  for (const [key, text] of [['main', main], ['globalNote', globalNote]] as const) {
+  for (const [key, text] of [['main', main], ['globalNote', globalNote], ['toggles', toggles]] as const) {
     if (text !== undefined && text.length > READER_PRESET_TEXT_MAX) {
       throw badRequest('reader_preset_limit', `${key} must be at most ${READER_PRESET_TEXT_MAX} characters`);
     }
+  }
+  if (moduleIntegration !== undefined && moduleIntegration.length > READER_PRESET_INTEGRATION_MAX) {
+    throw badRequest(
+      'reader_preset_limit',
+      `moduleIntegration must be at most ${READER_PRESET_INTEGRATION_MAX} characters`,
+    );
   }
   return {
     ...(name !== undefined ? { name } : {}),
     ...(main !== undefined ? { main } : {}),
     ...(globalNote !== undefined ? { globalNote } : {}),
+    ...(toggles !== undefined ? { toggles } : {}),
+    ...(moduleIntegration !== undefined ? { moduleIntegration } : {}),
   };
 }
 
@@ -73,7 +100,14 @@ export function readerPresetRoutes(deps: AppDeps): Hono<AppEnv> {
       }
       const [row] = await tx
         .insert(readerPresets)
-        .values({ userId, name: fields.name!, main: fields.main ?? '', globalNote: fields.globalNote ?? '' })
+        .values({
+          userId,
+          name: fields.name!,
+          main: fields.main ?? '',
+          globalNote: fields.globalNote ?? '',
+          toggles: fields.toggles ?? '',
+          moduleIntegration: fields.moduleIntegration ?? '',
+        })
         .returning();
       return row!;
     });

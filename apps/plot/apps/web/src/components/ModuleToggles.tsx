@@ -12,23 +12,32 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Checkbox, Select, TextArea, TextInput } from './ui';
 
 /**
- * RisuAI's custom toggles (`Toggles.svelte`) for one chat: what the modules on
- * it and the members' cards declare (`text`, RisuAI's syntax, read by
- * `parseToggleSyntax`), drawn as RisuAI draws them — a checkbox, a select, a
- * text field or box, a caption, a divider, a group folded under its title. A
- * value is the reader's global variable `toggle_<key>` on the work (`values`):
- * a checkbox `'1'`/`'0'`, a select the chosen option's index, a field its text;
- * unset reads as nothing. A field is saved when it is left, as RisuAI saves it
- * on change. Nothing is drawn where nothing is declared.
+ * RisuAI's custom toggles (`Toggles.svelte`) for one chat: what the reader's
+ * preset, the modules on it and the members' cards declare (`text`, RisuAI's
+ * syntax, read by `parseToggleSyntax`), drawn as RisuAI draws them — a
+ * checkbox, a select, a text field or box, a caption, a divider, a group folded
+ * under its title. A value is the reader's global variable `toggle_<key>` on
+ * the work (`values`, as the chat reads them): a checkbox `'1'`/`'0'`, a select
+ * the chosen option's index, a field its text; unset reads as nothing. A field
+ * is saved when it is left, as RisuAI saves it on change. Under them, RisuAI's
+ * "Local Toggles" switch (`local`): while on, what is set here stays this
+ * chat's. Nothing is drawn where nothing is declared.
  */
 export function ModuleToggles({
   text,
   values,
   onSet,
+  local = false,
+  disabled = false,
+  onLocal,
 }: {
   text: string;
   values: Readonly<Record<string, string>> | undefined;
   onSet: (variable: string, value: string) => Promise<void>;
+  /** RisuAI's `useLocallySetGlobalVariables` for this chat. */
+  local?: boolean;
+  disabled?: boolean;
+  onLocal?: (local: boolean) => Promise<void> | void;
 }) {
   const t = useTranslations('chat');
   const entries = useMemo(() => groupToggles(parseToggleSyntax(text)), [text]);
@@ -115,6 +124,12 @@ export function ModuleToggles({
       <h2 className="text-xs font-medium text-muted">{t('toggles')}</h2>
       <div className="space-y-2">{draw(entries)}</div>
       <p className="text-xs text-muted">{t('togglesHint')}</p>
+      {onLocal ? (
+        <div data-testid="local-toggles" className="space-y-1">
+          <Checkbox label={t('localToggles')} checked={local} disabled={disabled} onChange={(on) => void onLocal(on)} />
+          <p className="text-xs text-muted">{t('localTogglesHint')}</p>
+        </div>
+      ) : null}
     </section>
   );
 }

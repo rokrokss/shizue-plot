@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { isNarrationTurn } from '../src/speech.js';
 import {
   coerceDisplayDepth,
+  coerceDisplayRole,
   displayScriptPatternError,
   inDisplayDepth,
+  inDisplayRole,
   MAX_DISPLAY_DEPTH,
   MAX_DISPLAY_PATTERN_LENGTH,
 } from '../src/displayScript.js';
@@ -25,6 +28,35 @@ describe('coerceDisplayDepth', () => {
   it('caps a bound, and keeps a minimum above the maximum as written', () => {
     expect(coerceDisplayDepth({ minDepth: 10 ** 9 })).toEqual({ minDepth: MAX_DISPLAY_DEPTH });
     expect(coerceDisplayDepth({ minDepth: 5, maxDepth: 2 })).toEqual({ minDepth: 5, maxDepth: 2 });
+  });
+});
+
+describe('the side a script keeps to', () => {
+  it('runs a script on the sides it names, and on every one with none', () => {
+    expect(inDisplayRole({}, 'narration')).toBe(true);
+    expect(inDisplayRole({ role: 'assistant' }, 'narration')).toBe(false);
+    expect(inDisplayRole({ role: 'narration' }, 'narration')).toBe(true);
+    expect(inDisplayRole({ role: ['user', 'narration'] }, 'narration')).toBe(true);
+    expect(inDisplayRole({ role: ['user', 'narration'] }, 'assistant')).toBe(false);
+  });
+
+  it('keeps a saved role only where every side it names is one', () => {
+    expect(coerceDisplayRole({ role: 'narration' })).toEqual({ role: 'narration' });
+    expect(coerceDisplayRole({ role: ['narration', 'user'] })).toEqual({ role: ['user', 'narration'] });
+    expect(coerceDisplayRole({ role: ['user', 'assistant', 'narration'] })).toEqual({});
+    expect(coerceDisplayRole({ role: ['user', 'system'] })).toEqual({});
+    expect(coerceDisplayRole({ role: 'system' })).toEqual({});
+    expect(coerceDisplayRole({})).toEqual({});
+  });
+
+  it('reads a narration as the narrator’s message: the prefix, or a turn written wholly as the narrator', () => {
+    const members = [{ id: 'm', names: ['아리아'] }];
+    expect(isNarrationTurn('@: 비가 온다.')).toBe(true);
+    expect(isNarrationTurn('@내레이터: 비가 온다.\n\n@: 해가 진다.', members)).toBe(true);
+    // A line of the reader's own or a member's makes it the reader's turn.
+    expect(isNarrationTurn('안녕\n@내레이터: 비가 온다.', members)).toBe(false);
+    expect(isNarrationTurn('@아리아: 안녕', members)).toBe(false);
+    expect(isNarrationTurn('그냥 말')).toBe(false);
   });
 });
 

@@ -46,7 +46,7 @@
  * without pulling the tokenizer and the card parser into the bundle.
  */
 
-import type { DisplayScript } from './types.js';
+import type { DisplayScript, DisplaySide } from './types.js';
 
 /**
  * Longest pattern a display script may carry. RisuAI sets none, and a card that
@@ -317,18 +317,40 @@ export function coerceDisplayDepth(raw: {
   };
 }
 
-/** A display script's role (`DisplayScript.role`), where it names one of the two; nothing otherwise. */
+const DISPLAY_SIDES: readonly DisplaySide[] = ['user', 'assistant', 'narration'];
+
+/**
+ * A set of sides as `DisplayScript.role` keeps it: one side as itself, two as
+ * a list in a fixed order, all three (or none named) as nothing — every message.
+ */
+export function displayRoleOf(sides: Iterable<DisplaySide>): Pick<DisplayScript, 'role'> {
+  const kept = DISPLAY_SIDES.filter((side) => new Set(sides).has(side));
+  if (kept.length === 0 || kept.length === DISPLAY_SIDES.length) return {};
+  return { role: kept.length === 1 ? kept[0]! : kept };
+}
+
+/** The sides a script's role names, every one for none. */
+export function displaySidesOf(script: Pick<DisplayScript, 'role'>): DisplaySide[] {
+  if (script.role === undefined) return [...DISPLAY_SIDES];
+  return Array.isArray(script.role) ? [...script.role] : [script.role];
+}
+
+/** A display script's role (`DisplayScript.role`), where it names sides it keeps to; nothing otherwise. */
 export function coerceDisplayRole(raw: { role?: unknown }): Pick<DisplayScript, 'role'> {
-  return raw.role === 'user' || raw.role === 'assistant' ? { role: raw.role } : {};
+  const named = Array.isArray(raw.role) ? raw.role : [raw.role];
+  const sides = named.filter((side): side is DisplaySide => DISPLAY_SIDES.includes(side as DisplaySide));
+  return sides.length === named.length ? displayRoleOf(sides) : {};
 }
 
 /**
- * Whether a script runs on a message of `role` — SillyTavern's placement, which
- * `messageFormatting` asks as `USER_INPUT` for the reader's message and
- * `AI_OUTPUT` for every other. A script with no role runs on both.
+ * Whether a script runs on a message of `side` — SillyTavern's placement, which
+ * `messageFormatting` asks as `USER_INPUT` for the reader's message,
+ * `SLASH_COMMAND` for the narrator's and `AI_OUTPUT` for every other. A script
+ * with no role runs on every one.
  */
-export function inDisplayRole(script: Pick<DisplayScript, 'role'>, role: 'user' | 'assistant'): boolean {
-  return script.role === undefined || script.role === role;
+export function inDisplayRole(script: Pick<DisplayScript, 'role'>, side: DisplaySide): boolean {
+  if (script.role === undefined) return true;
+  return Array.isArray(script.role) ? script.role.includes(side) : script.role === side;
 }
 
 /**

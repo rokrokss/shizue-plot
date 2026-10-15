@@ -857,7 +857,7 @@ export const MessageBody = memo(function MessageBody({
     >
       {lone ? (
         <div data-testid="speech-character" data-speaker={voice} className="flex items-center gap-2.5">
-          <Avatar src={avatarOf(voice)} name={voice} className="size-10 text-sm" />
+          <Avatar src={avatarOf(voice)} name={voice} className="chat-face size-10 text-sm" />
           <div className="flex min-h-5 min-w-0 flex-1 items-center gap-2">
             <span className="chat-name text-xs font-medium text-muted">{voice}</span>
             {header}
@@ -907,9 +907,9 @@ export const MessageBody = memo(function MessageBody({
         return (
           <div key={index} data-testid="speech-character" data-speaker={piece.name} className="flex gap-2.5">
             {says ? (
-              <Avatar src={avatarOf(piece.name)} name={piece.name} className="size-10 text-sm" />
+              <Avatar src={avatarOf(piece.name)} name={piece.name} className="chat-face size-10 text-sm" />
             ) : (
-              <div aria-hidden="true" className="w-10 shrink-0" />
+              <div aria-hidden="true" className="chat-face w-10 shrink-0" />
             )}
             <div className="flex min-w-0 flex-1 flex-col items-start gap-3">
               {says ? (

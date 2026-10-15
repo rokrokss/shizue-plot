@@ -1062,12 +1062,17 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
 
   // 0b. the reader's own additions to the preset — RisuAI's `mainPrompt` and
   // `globalNote` — read as their writer's text and nothing more: no card, lore,
-  // variables or prompts behind the macros, so `{{description}}`,
+  // chat variables or prompts behind the macros, so `{{description}}`,
   // `{{charPrompt}}` or `{{lorebook}}` stay words, and escaped once read, so no
-  // later pass — a card's `{{original}}`, an outlet — reads them as macros.
+  // later pass — a card's `{{original}}`, an outlet — reads them as macros. The
+  // reader's own global variables are read, and only read: they hold the
+  // toggles the reader's preset defines (`customPromptTemplateToggle`), which
+  // its text asks with `{{#when::toggle::x}}` or `{{getglobalvar::toggle_x}}`,
+  // as a RisuAI preset's does — and they are on the reader's screen anyway.
   const readerMacro: MacroContext = {
     char: plotMacro.char,
     user: userName,
+    ...(globalVariables ? { globalVariables } : {}),
     ...(clock ? { clock } : {}),
     ...(seed !== undefined ? { seed } : {}),
     ...(seed !== undefined && seedLength !== undefined ? { seedLength } : {}),

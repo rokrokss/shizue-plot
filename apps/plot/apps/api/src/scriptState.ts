@@ -474,6 +474,79 @@ export async function loadGlobalVariables(deps: AppDeps, userId: string, plotId:
 }
 
 /**
+ * The global variables as a chat reads them — RisuAI's `getGlobalChatVar`: the
+ * chat's own value of a name (its "Local Toggles" values,
+ * `chats.local_global_variables`) wherever it is set and neither blank nor
+ * `'null'`, else the reader's on the work. Read so whether the chat's switch is
+ * on or off, as RisuAI reads `GLGlobalVariables` either way.
+ */
+export function withLocalGlobals(globals: Variables, local: Variables | null | undefined): Variables {
+  if (!local) return globals;
+  const kept: VariableDelta = Object.create(null) as VariableDelta;
+  for (const key of Object.keys(local)) {
+    const value = local[key];
+    if (typeof value === 'string' && value !== '' && value !== 'null') kept[key] = value;
+  }
+  return applyVariableDelta(globals, kept);
+}
+
+/** The reader's global variables as one chat of theirs reads them (`withLocalGlobals`). */
+export async function loadChatGlobalVariables(
+  deps: AppDeps,
+  chat: Pick<Chat, 'userId' | 'plotId' | 'localGlobalVariables'>,
+): Promise<Variables> {
+  return withLocalGlobals(await loadGlobalVariables(deps, chat.userId, chat.plotId), chat.localGlobalVariables);
+}
+
+/**
+ * A write of the chat's toggles — RisuAI's `setGlobalChatVar`, which only its
+ * toggles sidebar calls: with the chat's "Local Toggles" on, into the chat's own
+ * values; off, into the reader's globals on the work, the chat's own value of
+ * each name written taken away first so the global one shows. Answers the
+ * globals as the chat now reads them.
+ */
+export async function writeChatToggles(
+  deps: AppDeps,
+  chat: Pick<Chat, 'id' | 'userId' | 'plotId'>,
+  patch: unknown,
+): Promise<Variables> {
+  const check = checkVariableDelta(patch, GLOBAL_LIMITS);
+  if (!check.ok) throw badRequest('invalid_request', `variables ${check.error}`);
+  const delta = check.delta;
+  const { localToggles, local } = await deps.db.transaction(async (tx) => {
+    const [locked] = await tx
+      .select({ localToggles: chats.localToggles, local: chats.localGlobalVariables })
+      .from(chats)
+      .where(eq(chats.id, chat.id))
+      .for('update');
+    const own = locked?.local ?? null;
+    if (!locked || !delta) return { localToggles: locked?.localToggles ?? false, local: own };
+    let next: Variables | null;
+    if (locked.localToggles) {
+      next = applyVariableDelta(own ?? {}, delta);
+      if (!checkVariableDelta(next, GLOBAL_LIMITS).ok) {
+        throw badRequest(
+          'global_variables_limit',
+          `Global variables may hold at most ${MAX_GLOBAL_VARIABLE_KEYS} names and ${MAX_GLOBAL_VARIABLE_CHARS} characters`,
+        );
+      }
+    } else {
+      const cleared: VariableDelta = Object.create(null) as VariableDelta;
+      for (const key of Object.keys(delta)) cleared[key] = null;
+      next = own ? applyVariableDelta(own, cleared) : null;
+    }
+    const stored = next && Object.keys(next).length > 0 ? storableVariables(next) : null;
+    await tx.update(chats).set({ localGlobalVariables: stored }).where(eq(chats.id, chat.id));
+    return { localToggles: locked.localToggles, local: stored };
+  });
+  const globals =
+    delta && !localToggles
+      ? await mergeGlobalVariables(deps, chat.userId, chat.plotId, delta)
+      : await loadGlobalVariables(deps, chat.userId, chat.plotId);
+  return withLocalGlobals(globals, local);
+}
+
+/**
  * Merges `patch` into the reader's global variables — a string sets, `null`
  * unsets — and answers with the whole map. The row is created on the first
  * write and locked for the read-merge-write, so two writes at once each land on

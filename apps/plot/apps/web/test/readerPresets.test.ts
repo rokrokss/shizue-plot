@@ -24,6 +24,8 @@ const preset = (id: string, name: string): ReaderPreset => ({
   name,
   main: `${name} 메인`,
   globalNote: '',
+  toggles: '',
+  moduleIntegration: '',
   createdAt: '2026-10-15T00:00:00.000Z',
   updatedAt: '2026-10-15T00:00:00.000Z',
 });
@@ -139,7 +141,13 @@ describe('the stacked field', () => {
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe('/api/reader-presets');
     expect(init.method).toBe('POST');
-    expect(JSON.parse(String(init.body))).toEqual({ name: '내 문체', main: '내 문체 메인', globalNote: '' });
+    expect(JSON.parse(String(init.body))).toEqual({
+      name: '내 문체',
+      main: '내 문체 메인',
+      globalNote: '',
+      toggles: '',
+      moduleIntegration: '',
+    });
     expect(lists).toEqual([[created]]);
   });
 
@@ -181,9 +189,34 @@ describe('the stacked field', () => {
     ]);
     const manager = host.querySelector('[data-testid="reader-preset-manager"]')!;
     expect(manager.querySelector('input')!.value).toBe('Celia');
-    expect([...manager.querySelectorAll('textarea')].map((area) => area.value)).toEqual(['ST 메인\n\nAUX 지시', 'PHI 지시']);
+    expect([...manager.querySelectorAll('textarea')].map((area) => area.value)).toEqual(['ST 메인\n\nAUX 지시', 'PHI 지시', '']);
     // A prompt the order keeps off is not sent by ST, and not taken.
     expect(host.innerHTML).not.toContain('OFF-TEXT');
+  });
+
+  it('takes a RisuAI preset’s toggles and module integration into their fields, and says so', async () => {
+    render([]);
+    await click(button('내 프리셋 관리')!);
+    const risu = {
+      name: '토글 프리셋',
+      mainPrompt: '{{#when::toggle::rain}}비{{/when}}',
+      customPromptTemplateToggle: 'rain=비 오는 날',
+      moduleIntergration: 'weather, ui',
+    };
+    await upload(new File([JSON.stringify(risu)], 'risu.json', { type: 'application/json' }));
+    const notice = host.querySelector('[data-testid="reader-preset-import-notice"]')!;
+    expect([...notice.querySelectorAll('li')].map((item) => item.textContent)).toEqual([
+      '메인 프롬프트 → 메인 지시 추가',
+      '토글 → 토글',
+      '모듈 통합 → 모듈 통합 (weather, ui)',
+    ]);
+    const manager = host.querySelector('[data-testid="reader-preset-manager"]')!;
+    expect([...manager.querySelectorAll('textarea')].map((area) => area.value)).toEqual([
+      '{{#when::toggle::rain}}비{{/when}}',
+      '',
+      'rain=비 오는 날',
+    ]);
+    expect([...manager.querySelectorAll('input')].map((input) => input.value)).toEqual(['토글 프리셋', 'weather, ui']);
   });
 
   it('names a RisuAI field it took by RisuAI’s name for it', async () => {

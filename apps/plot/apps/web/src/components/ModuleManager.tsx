@@ -8,6 +8,7 @@ import { checkCardSize } from '@/lib/realm';
 import type { PlotDetail, PlotModuleSummary } from '@/lib/types';
 import { useErrorMessage } from '@/lib/useErrorMessage';
 import { ImportWarnings, RightsConfirmation } from './CardImport';
+import { ModuleInertNotice } from './ReaderModules';
 import { Badge, Button, ErrorText } from './ui';
 
 /**
@@ -112,12 +113,14 @@ export function ModuleManager({
                   assets: module.assetCount,
                 })}
               </p>
-              {module.background || module.lowLevelAccess ? (
+              {module.background || module.lowLevelAccess || module.hideIcon ? (
                 <div className="flex flex-wrap gap-1.5">
                   {module.background ? <Badge>{t('moduleBackground')}</Badge> : null}
+                  {module.hideIcon ? <Badge>{t('moduleHideIcon')}</Badge> : null}
                   {module.lowLevelAccess ? <Badge>{t('moduleLowLevelAccess')}</Badge> : null}
                 </div>
               ) : null}
+              <ModuleInertNotice inert={module.inert} />
             </li>
           ))}
         </ul>

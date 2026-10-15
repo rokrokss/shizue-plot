@@ -1,4 +1,4 @@
-import { MAX_CARD_IMPORT_BYTES, ModuleParseError, parseRisuModule, plotModuleOf } from '@shizue/core';
+import { MAX_CARD_IMPORT_BYTES, ModuleParseError, parseRisuModule, plotModuleOf, type PlotModule } from '@shizue/core';
 import { cardScripts } from '@shizue/core/triggers';
 import { chats, readerModules, user, type ReaderModule } from '@shizue/db';
 import { and, eq, sql } from 'drizzle-orm';
@@ -15,10 +15,12 @@ import {
   readerModuleAssetUrl,
   storeReaderModuleAssets,
 } from '../readerModules.js';
-import { readJsonBody, requireUuidParam } from '../util.js';
+import { isUuid, readJsonBody, requireUuidParam } from '../util.js';
 
 /** As a work's module: names and descriptions are cut to what the studio's are. */
 const MAX_NAME_LENGTH = 100;
+/** Works one library module may be on for (`plot_ids`) — far past any reader's shelf. */
+const MAX_MODULE_PLOTS = 1_000;
 const MAX_DESCRIPTION_LENGTH = 4_000;
 const MAX_FILE_NAME_LENGTH = 255;
 
@@ -41,6 +43,11 @@ export const toReaderModuleJson = (row: ReaderModule) => {
     background: Boolean(module.css || module.backgroundHtml),
     toggles: Boolean(module.toggles?.trim()),
     lowLevelAccess: module.lowLevelAccess === true,
+    /** RisuAI's `hideIcon`: the chats it is on show no sender picture or name. */
+    hideIcon: module.hideIcon === true,
+    /** What it would connect to or run that is never done here (`PlotModule.inert`). */
+    ...(module.inert ? { inert: module.inert } : {}),
+    namespace: module.namespace ?? null,
     scripts: cardScripts({ extensions: {} }, [module]) !== null,
     importedFrom: module.importedFrom,
     createdAt: row.createdAt.toISOString(),
@@ -143,21 +150,50 @@ export function readerModuleRoutes(deps: AppDeps): Hono<AppEnv> {
     const importWarnings = [
       ...(assets.unsupported > 0 ? [{ code: 'assets_unsupported', count: assets.unsupported }] : []),
       ...(assets.overLimit > 0 ? [{ code: 'assets_over_limit', count: assets.overLimit }] : []),
+      ...inertWarnings(module),
     ];
     return c.json({ ...toReaderModuleJson(created), importWarnings }, 201);
   });
 
-  /** `{ enabledGlobally }`: on for every chat of the reader's, or back to the chats that list it. */
+  /**
+   * `{ enabledGlobally }`: on for every chat of the reader's, or back to the
+   * lists. `{ plotId, onPlot }`: on for every chat of one work or not —
+   * RisuAI's character `modules`, which its chat menu toggles with a right
+   * click. Either or both.
+   */
   app.patch('/:id', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
-    await loadOwnedReaderModule(deps, id, userId);
+    const current = await loadOwnedReaderModule(deps, id, userId);
     const body = await readJsonBody(c);
     const enabledGlobally = body['enabledGlobally'];
-    if (typeof enabledGlobally !== 'boolean') throw badRequest('invalid_request', 'enabledGlobally must be a boolean');
+    if (enabledGlobally !== undefined && typeof enabledGlobally !== 'boolean') {
+      throw badRequest('invalid_request', 'enabledGlobally must be a boolean');
+    }
+    const plotId = body['plotId'];
+    const onPlot = body['onPlot'];
+    if (plotId !== undefined && (typeof plotId !== 'string' || !isUuid(plotId) || typeof onPlot !== 'boolean')) {
+      throw badRequest('invalid_request', 'plotId must be a plot id, with onPlot a boolean');
+    }
+    if (enabledGlobally === undefined && plotId === undefined) {
+      throw badRequest('invalid_request', 'enabledGlobally or plotId is required');
+    }
+    let plotIds = current.plotIds;
+    if (typeof plotId === 'string') {
+      const rest = (current.plotIds ?? []).filter((one) => one !== plotId);
+      if (onPlot === true && rest.length >= MAX_MODULE_PLOTS) {
+        throw badRequest('reader_module_limit', `A module is on for at most ${MAX_MODULE_PLOTS} works`);
+      }
+      const next = onPlot === true ? [...rest, plotId] : rest;
+      plotIds = next.length > 0 ? next : null;
+    }
     const [row] = await deps.db
       .update(readerModules)
-      .set({ enabledGlobally, updatedAt: new Date() })
+      .set({
+        ...(typeof enabledGlobally === 'boolean' ? { enabledGlobally } : {}),
+        ...(typeof plotId === 'string' ? { plotIds } : {}),
+        updatedAt: new Date(),
+      })
       .where(and(eq(readerModules.id, id), eq(readerModules.userId, userId)))
       .returning();
     return c.json(toReaderModuleJson(row!));
@@ -191,6 +227,15 @@ export function readerModuleRoutes(deps: AppDeps): Hono<AppEnv> {
 
   return app;
 }
+
+/**
+ * What an import says of a module's MCP server and `cjs` code (`PlotModule.inert`):
+ * kept, and never connected to or run — the same codes a work's module import answers.
+ */
+const inertWarnings = (module: Pick<PlotModule, 'inert'>): { code: string; count: number }[] => [
+  ...(module.inert?.mcp !== undefined ? [{ code: 'module_mcp_inert', count: 1 }] : []),
+  ...(module.inert?.cjs ? [{ code: 'module_cjs_inert', count: 1 }] : []),
+];
 
 /** Where each picture of the library's modules on a chat is served from, by the module's name for it. */
 export const readerModuleAssetsJson = (row: ReaderModule) =>

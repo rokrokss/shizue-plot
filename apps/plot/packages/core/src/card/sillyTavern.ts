@@ -9,8 +9,8 @@
  * (`public/scripts/extensions/regex/engine.js`).
  */
 
-import { coerceDisplayDepth, displayScriptPatternError } from '../displayScript.js';
-import type { DisplayScript, LoreEntry } from '../types.js';
+import { coerceDisplayDepth, displayRoleOf, displayScriptPatternError, displaySidesOf } from '../displayScript.js';
+import type { DisplayScript, DisplaySide, LoreEntry } from '../types.js';
 import { roleFromSillyTavern } from './bookEntry.js';
 
 type Json = Record<string, unknown>;
@@ -76,9 +76,10 @@ export function extensionsWithDepthPrompt(
   };
 }
 
-/** ST's `regex_placement.USER_INPUT` and `AI_OUTPUT`. */
+/** ST's `regex_placement.USER_INPUT`, `AI_OUTPUT` and `SLASH_COMMAND`. */
 const USER_INPUT = 1;
 const AI_OUTPUT = 2;
+const SLASH_COMMAND = 3;
 /** Regex flags a display script may carry. */
 const NATIVE_FLAGS = 'dgimsuvy';
 
@@ -94,6 +95,13 @@ function parseFindRegex(findRegex: string): { source: string; flags: string } {
  * ST binds the whole match as `{{match}}`, which it rewrites to `$0` and then
  * resolves itself — `$0` is not a JavaScript replacement pattern, `$&` is.
  */
+/** SillyTavern's `regex_placement` of what its screen draws, as the side a display script keeps to. */
+const SIDE_OF_PLACEMENT: ReadonlyMap<number, DisplaySide> = new Map([
+  [USER_INPUT, 'user'],
+  [AI_OUTPUT, 'assistant'],
+  [SLASH_COMMAND, 'narration'],
+]);
+
 const replacementTemplate = (replaceString: string): string =>
   replaceString.replace(/\{\{match\}\}/gi, '$$&').replace(/\$0(?!\d)/g, '$$&');
 
@@ -101,9 +109,11 @@ const replacementTemplate = (replaceString: string): string =>
  * Maps the card's display-only regex scripts onto display scripts, after the ones
  * already there (RisuAI's), skipping any that would duplicate one. Display-only is
  * ST's "Alter chat display": `markdownOnly`, not `promptOnly`, not disabled, on
- * the reader's input or the AI's output — `messageFormatting` asks the one for
- * the reader's messages and the other for the rest, so a script placed on one
- * alone keeps to those messages (`DisplayScript.role`). The rest stay in the
+ * the reader's input, the AI's output or the narrator's messages (`SLASH_COMMAND`)
+ * — `messageFormatting` asks the first for the reader's messages, the last for
+ * the narrator's and the second for the rest, so a script keeps to the sides it
+ * is placed on (`DisplayScript.role`; here the narrator's are the narrations).
+ * The rest stay in the
  * extensions untouched: the server reads them from there — the prompt-only ones
  * each time a prompt is built, the ones with neither flag each time a turn is
  * stored (`promptScripts.ts`). A pattern the screen refuses is skipped.
@@ -129,10 +139,12 @@ export function displayScriptsWithRegexScripts(
     ) {
       continue;
     }
-    const user = placement.includes(USER_INPUT);
-    const ai = placement.includes(AI_OUTPUT);
-    if (!user && !ai) continue;
-    const role = user && ai ? undefined : user ? ('user' as const) : ('assistant' as const);
+    const sides = placement.flatMap((at) => {
+      const side = SIDE_OF_PLACEMENT.get(at as number);
+      return side ? [side] : [];
+    });
+    if (sides.length === 0) continue;
+    const { role } = displayRoleOf(sides);
     const { source, flags } = parseFindRegex(script['findRegex']);
     if (!source || displayScriptPatternError(source) !== null) continue;
     const out = replacementTemplate(
@@ -140,14 +152,12 @@ export function displayScriptsWithRegexScripts(
     );
     // The same rewrite twice is kept once — a script our export also wrote into
     // RisuAI's list (which runs everywhere, as that list has no placement or
-    // range) and comes back with this one; the same rewrite on each side is one
-    // on both.
+    // range) and comes back with this one; the same rewrite on several sides is
+    // one on all of them.
     const known = result.findIndex((script) => script.in === source && script.out === out);
     if (known !== -1) {
-      if (result[known]!.role !== undefined && result[known]!.role !== role) {
-        const { role: _side, ...both } = result[known]!;
-        result[known] = both;
-      }
+      const { role: _sides, ...rest } = result[known]!;
+      result[known] = { ...rest, ...displayRoleOf([...displaySidesOf(result[known]!), ...sides]) };
       continue;
     }
     // ST's min/max depth, which it applies to the screen as it does to the prompt.

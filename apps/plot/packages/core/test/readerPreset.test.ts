@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { decodeMsgpack } from '../src/msgpack.js';
 import { groupPreset, REPLY_FORMAT_HINT, SPEECH_PROTOCOL, GROUP_SPEECH_PROTOCOL } from '../src/presets.js';
 import { assemblePrompt, promptText, type AssemblePromptInput, type HistoryMessage, type PromptCharacter } from '../src/prompt.js';
-import { readReaderPresetFile, ReaderPresetImportError } from '../src/readerPreset.js';
+import { moduleIntegrationNames, readReaderPresetFile, ReaderPresetImportError } from '../src/readerPreset.js';
 import { DEFAULT_LORE_SETTINGS, type LoreEntry, type NormalizedCard } from '../src/types.js';
 
 const json = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
@@ -28,6 +28,8 @@ describe('readReaderPresetFile — RisuAI', () => {
     expect(imported).toEqual({
       source: 'risuai',
       name: '내 프리셋',
+      toggles: '',
+      moduleIntegration: '',
       main: '메인 지시',
       // RisuAI's default order: … chats, lastChat, jailbreak, lorebook, globalNote, …
       globalNote: '탈옥 지시\n\n글로벌 노트',
@@ -40,6 +42,26 @@ describe('readReaderPresetFile — RisuAI', () => {
       ignoredSettings: true,
     });
     expect(everything(imported)).not.toContain('sk-NEVER');
+  });
+
+  it('keeps the preset’s toggles and module integration, which RisuAI saves beside its prompts', async () => {
+    const toggles = 'rain=비 오는 날\nmood=분위기=select=밝게,어둡게';
+    for (const promptTemplate of [undefined, [{ type: 'plain', type2: 'main', role: 'system', text: '메인' }]]) {
+      const imported = await readReaderPresetFile(
+        'p.json',
+        json({ mainPrompt: '메인', customPromptTemplateToggle: toggles, moduleIntergration: 'weather, ui,', promptTemplate }),
+      );
+      expect(imported.toggles).toBe(toggles);
+      expect(imported.moduleIntegration).toBe('weather, ui,');
+    }
+    // Both are fields the import reads, not settings it leaves behind.
+    expect((await readReaderPresetFile('p.json', json({ mainPrompt: 'm', customPromptTemplateToggle: 'a=b' }))).ignoredSettings).toBe(false);
+  });
+
+  it('reads a module integration as RisuAI’s getModules splits it', () => {
+    expect(moduleIntegrationNames(' weather, ui ,,status ')).toEqual(['weather', 'ui', 'status']);
+    expect(moduleIntegrationNames('')).toEqual([]);
+    expect(moduleIntegrationNames(null)).toEqual([]);
   });
 
   it('places the jailbreak by the preset’s own order, and leaves it out where the order never sends it', async () => {
@@ -113,6 +135,8 @@ describe('readReaderPresetFile — RisuAI', () => {
     expect(imported).toEqual({
       source: 'risuai',
       name: '테스트 프리셋',
+      toggles: '',
+      moduleIntegration: '',
       // The template's jailbreak item comes before its chat.
       main: 'MAIN-ONE {{char}}와 {{user}}의 이야기를 씁니다.\n\nJB-ITEM-SECRET\n\nMAIN-TWO 두 번째 메인',
       globalNote: 'NOTE-ONE 응답 직전의 노트',
@@ -183,6 +207,8 @@ describe('readReaderPresetFile — SillyTavern', () => {
     expect(imported).toEqual({
       source: 'sillytavern',
       name: 'Celia v4',
+      toggles: '',
+      moduleIntegration: '',
       main: 'ST 메인 {{char}}',
       globalNote: 'PHI 응답 직전',
       imported: [
@@ -366,5 +392,19 @@ describe('assemblePrompt — a reader preset', () => {
     expect(sent.split('CREATOR-PH')).toHaveLength(2);
     expect(sent.split('CREATOR-DESC')).toHaveLength(2);
     expect(sent).not.toContain('CREATOR-LORE');
+  });
+
+  it('reads the toggles its preset defines from the reader’s globals, and writes none', () => {
+    const text =
+      '{{#when::toggle::rain}}비가 온다{{:else}}맑다{{/when}} {{getglobalvar::toggle_mood}} {{setglobalvar::x::1}} {{getvar::hp}}';
+    const prompt = assemble([member()], {
+      readerAdditions: { main: text, globalNote: '' },
+      globalVariables: { toggle_rain: '1', toggle_mood: '어둡게' },
+      variables: { hp: '10' },
+    });
+    const main = prompt.report!.blocks.find((block) => block.kind === 'main')!.text;
+    // Chat variables stay out of the reader's text; a write is a word.
+    expect(main).toBe(`${preset.main}\n\n비가 온다 어둡게 {{setglobalvar::x::1}} {{getvar::hp}}`);
+    expect(prompt.globalVariableWrites).toBeUndefined();
   });
 });

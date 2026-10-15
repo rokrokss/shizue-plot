@@ -5,7 +5,7 @@ import { useRef, useState } from 'react';
 import { ApiError, apiSend, apiUpload } from '@/lib/api';
 import { readImportWarnings, type ImportWarning } from '@/lib/importWarnings';
 import { checkCardSize } from '@/lib/realm';
-import type { ReaderModuleSummary } from '@/lib/types';
+import type { ModuleInert, ReaderModuleSummary } from '@/lib/types';
 import { useErrorMessage } from '@/lib/useErrorMessage';
 import { ImportWarnings } from './CardImport';
 import { Badge, Button, Checkbox, ErrorText } from './ui';
@@ -14,20 +14,27 @@ import { Badge, Button, Checkbox, ErrorText } from './ui';
  * The reader's own RisuAI modules, in the chat's settings — RisuAI's module
  * list and its chat menu in one quiet section. The library is the reader's
  * account's (`/api/reader-modules`); a module is on in this chat when the chat
- * lists it (`chatIds`, RisuAI's chat `modules`) or everywhere (RisuAI's
- * `enabledModules`), which greys the chat's own switch as RisuAI greys it. A
+ * lists it (`chatIds`, RisuAI's chat `modules`), when every chat of this work
+ * does (`onThisWork`, RisuAI's character `modules` — its right click), or
+ * everywhere (RisuAI's `enabledModules`), which greys the narrower switches as
+ * RisuAI greys the chat's. The reader preset's module integration may turn one
+ * on as well (`onHere` with none of the switches), and the row says so. A
  * module never changes the work: it runs after the work's own, in the order it
  * was imported. One that asks for low-level access comes in only after the
- * reader says yes to RisuAI's warning.
+ * reader says yes to RisuAI's warning; an MCP server or `cjs` code it carries
+ * is kept and never run, and the row says that too.
  */
 export function ReaderModules({
   library,
+  plotId,
   chatIds,
   disabled = false,
   onChatIds,
   onChange,
 }: {
   library: readonly ReaderModuleSummary[];
+  /** This chat's work, the one "on for this work" names. */
+  plotId: string;
   /** The modules this chat's own list turns on. */
   chatIds: readonly string[];
   disabled?: boolean;
@@ -84,6 +91,12 @@ export function ReaderModules({
       await onChange();
     });
 
+  const setOnWork = (module: ReaderModuleSummary, onPlot: boolean) =>
+    act(module.id, async () => {
+      await apiSend('PATCH', `/api/reader-modules/${module.id}`, { plotId, onPlot });
+      await onChange();
+    });
+
   const remove = (module: ReaderModuleSummary) => {
     if (!window.confirm(t('readerModuleRemoveConfirm', { name: module.name }))) return;
     void act(module.id, async () => {
@@ -101,7 +114,10 @@ export function ReaderModules({
       ) : (
         <ul className="space-y-2">
           {library.map((module) => {
-            const here = module.enabledGlobally || chatIds.includes(module.id);
+            const onWork = module.enabledGlobally || module.onThisWork === true;
+            const here = onWork || chatIds.includes(module.id);
+            // On here by none of the three switches: the reader preset's module integration.
+            const byPreset = module.onHere === true && !here;
             const locked = disabled || busy !== null;
             return (
               <li key={module.id} data-testid="reader-module" className="space-y-2 rounded-xl border border-line bg-raised/50 p-3">
@@ -124,20 +140,28 @@ export function ReaderModules({
                     assets: module.assetCount,
                   })}
                 </p>
-                {module.lowLevelAccess || module.toggles || module.background ? (
+                {module.lowLevelAccess || module.toggles || module.background || module.hideIcon ? (
                   <div className="flex flex-wrap gap-1.5">
                     {module.toggles ? <Badge>{t('toggles')}</Badge> : null}
                     {module.background ? <Badge>{t('readerModuleBackground')}</Badge> : null}
+                    {module.hideIcon ? <Badge>{t('moduleHideIcon')}</Badge> : null}
                     {module.lowLevelAccess ? <Badge>{t('readerModuleLowLevelAccess')}</Badge> : null}
                   </div>
                 ) : null}
+                <ModuleInertNotice inert={module.inert} />
                 <div className="flex flex-wrap gap-x-4 gap-y-1">
-                  {/* On everywhere, the chat's own switch has nothing to say, as RisuAI greys it. */}
+                  {/* On more widely, the narrower switches have nothing to say, as RisuAI greys the chat's. */}
                   <Checkbox
                     label={t('readerModuleHere')}
                     checked={here}
-                    disabled={locked || module.enabledGlobally}
+                    disabled={locked || onWork}
                     onChange={(on) => void setHere(module, on)}
+                  />
+                  <Checkbox
+                    label={t('readerModuleThisWork')}
+                    checked={onWork}
+                    disabled={locked || module.enabledGlobally}
+                    onChange={(on) => void setOnWork(module, on)}
                   />
                   <Checkbox
                     label={t('readerModuleEverywhere')}
@@ -146,6 +170,11 @@ export function ReaderModules({
                     onChange={(on) => void setEverywhere(module, on)}
                   />
                 </div>
+                {byPreset ? (
+                  <p data-testid="reader-module-by-preset" className="text-xs text-muted">
+                    {t('readerModuleByPreset', { namespace: module.namespace ?? '' })}
+                  </p>
+                ) : null}
               </li>
             );
           })}
@@ -173,5 +202,25 @@ export function ReaderModules({
       <ImportWarnings warnings={warnings} />
       {error ? <ErrorText>{error}</ErrorText> : null}
     </section>
+  );
+}
+
+/**
+ * What a module carries that is never run here — RisuAI's MCP server
+ * (`mcp.url`) and `cjs` code — said where the module is listed, so the reader
+ * knows what of it does nothing. The studio's module list says it the same way.
+ */
+export function ModuleInertNotice({ inert }: { inert: ModuleInert | undefined }) {
+  const t = useTranslations('chat');
+  if (!inert || (inert.mcp === undefined && !inert.cjs)) return null;
+  return (
+    <div data-testid="module-inert" role="note" className="space-y-0.5 rounded-lg bg-raised px-3 py-2 text-xs text-muted">
+      {inert.mcp !== undefined ? (
+        <p className="break-keep [overflow-wrap:anywhere]">
+          {inert.mcp ? t('moduleMcpInert', { url: inert.mcp }) : t('moduleMcpInertUnnamed')}
+        </p>
+      ) : null}
+      {inert.cjs ? <p className="break-keep">{t('moduleCjsInert')}</p> : null}
+    </div>
   );
 }

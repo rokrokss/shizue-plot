@@ -9,7 +9,14 @@ import {
   type CbsValue,
 } from './cbs.js';
 import { momentFormat } from './cbs/momentFormat.js';
-import { readVariable, runVariableMacro, type Variables } from './variables.js';
+import {
+  applyVariableDelta,
+  diffVariables,
+  readVariable,
+  runVariableMacro,
+  type VariableDelta,
+  type Variables,
+} from './variables.js';
 
 /**
  * What the prompt hands RisuAI's functions besides the names and the clock: the
@@ -672,6 +679,43 @@ const formatTavernNumber = (value: number): string => String(value);
  */
 export function applyMacros(text: string, ctx: MacroContext): string {
   return expand(text, ctx, 0);
+}
+
+/** A text as SillyTavern stores it (`expandTavernStored`), and what its macros wrote. */
+export interface TavernStored {
+  text: string;
+  /** The chat variables its `{{setvar}}` and the like wrote, over `ctx.variables`; null for none. */
+  variableWrites: VariableDelta | null;
+  /** The reader's globals its `{{setglobalvar}}` and the like wrote, over `ctx.globalVariables`; null for none. */
+  globalVariableWrites: VariableDelta | null;
+}
+
+/**
+ * A text SillyTavern stores with its macros already expanded — the reader's
+ * turn as it is sent (`sendMessageAsUser`), a narrator's message
+ * (`sendNarratorMessage`) and an edit (`updateMessage`), each put through
+ * `substituteParams` before it is kept — read as ST reads its own text
+ * (`MacroTavernData.sillyTavern`), its variable macros run as ST runs them.
+ * What they wrote comes back beside the text, over the maps given (which are
+ * not touched), for the caller to keep where it keeps the message's variables
+ * and the reader's. A macro this context cannot answer — one that reads the
+ * chat or the card `data` would give it, an unknown one — stays as written.
+ */
+export function expandTavernStored(text: string, ctx: MacroContext): TavernStored {
+  const variables = applyVariableDelta(ctx.variables ?? {}, null);
+  const globals = ctx.globalVariables ? applyVariableDelta(ctx.globalVariables, null) : undefined;
+  const expanded = applyMacros(text, {
+    ...ctx,
+    variables,
+    ...(globals ? { globalVariables: globals } : {}),
+    tavern: { ...ctx.tavern, sillyTavern: true },
+    runVariableMacros: true,
+  });
+  return {
+    text: expanded,
+    variableWrites: diffVariables(variables, ctx.variables ?? {}),
+    globalVariableWrites: globals && ctx.globalVariables ? diffVariables(globals, ctx.globalVariables) : null,
+  };
 }
 
 function expand(text: string, ctx: MacroContext, depth: number): string {

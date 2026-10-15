@@ -26,6 +26,11 @@
  * read as the studio reads a lorebook file (`fromLorebookFile`). The regex
  * scripts and triggers stay as written, for the readers that already read a
  * card's.
+ *
+ * An MCP module (`mcp: {url}`, RisuAI's tool server) and `cjs` code come in as
+ * a record and nothing more (`PlotModule.inert`): a hosted service connects to
+ * no server a module names and runs no code it carries, so they stay inert and
+ * the reader is told. The rest of such a module works as any other's.
  */
 
 import type { LoreEntry, PlotModule } from '../types.js';
@@ -64,6 +69,10 @@ export interface ParsedRisuModule {
   namespace?: string;
   /** RisuAI's `customModuleToggle`, the module's toggles as written (`parseToggleSyntax`). */
   toggles?: string;
+  /** RisuAI's `hideIcon` (a charx's `hideChatIcon`): the chat shows no sender picture or name while it is on. */
+  hideIcon: boolean;
+  /** An MCP server (`mcp.url`) or `cjs` code the module carries — kept inert (`PlotModule.inert`). */
+  inert?: { mcp?: string; cjs?: true };
   /** The pictures a `.risum` or a charx carried, in its order, under the charx caps. */
   assets: CharxAssetFile[];
 }
@@ -76,6 +85,23 @@ const isObject = (value: unknown): value is Json =>
 const text = (value: unknown): string => (typeof value === 'string' ? value : '');
 
 const splitKeys = (keys: string): string[] => keys.split(',').map((key) => key.trim());
+
+/** The longest MCP address kept for the notice; RisuAI's are URLs or `internal:` names. */
+const MAX_MCP_URL_LENGTH = 2_000;
+
+/**
+ * What of RisuAI's MCP and `cjs` fields a module carries, to say so and never
+ * run: `mcp` is an object naming a server (`importMCPModule` writes
+ * `{url}` — RisuAI draws its glyph for any such object, so an empty address is
+ * still an MCP module), `cjs` any code at all.
+ */
+function inertOf(module: Json): ParsedRisuModule['inert'] {
+  const server = module['mcp'];
+  const mcp = isObject(server) ? text(server['url']).trim().slice(0, MAX_MCP_URL_LENGTH) : undefined;
+  const cjs = text(module['cjs']).trim() !== '';
+  if (mcp === undefined && !cjs) return undefined;
+  return { ...(mcp !== undefined ? { mcp } : {}), ...(cjs ? { cjs: true as const } : {}) };
+}
 
 /**
  * One of RisuAI's lore entries (`loreBook`) as ours: as RisuAI's V3 export
@@ -139,6 +165,7 @@ function moduleOf(module: Json, assets: CharxAssetFile[]): ParsedRisuModule {
   const background = text(module['backgroundEmbedding']);
   const namespace = text(module['namespace']);
   const toggles = text(module['customModuleToggle']);
+  const inert = inertOf(module);
   return {
     name: text(module['name']).trim(),
     description: text(module['description']),
@@ -149,6 +176,8 @@ function moduleOf(module: Json, assets: CharxAssetFile[]): ParsedRisuModule {
     ...(background.trim() ? { backgroundEmbedding: background } : {}),
     ...(namespace ? { namespace } : {}),
     ...(toggles.trim() ? { toggles } : {}),
+    hideIcon: module['hideIcon'] === true,
+    ...(inert ? { inert } : {}),
     assets,
   };
 }
@@ -220,15 +249,17 @@ export function indicatorLore(character: {
  * - The regex scripts and triggers: the module's when the archive has one, as
  *   RisuAI's import puts them in place of the card's, or else the card's.
  * - `lowLevelAccess`, the background HTML as the background embedding, the
- *   module namespace and the toggles (`toggles`, which RisuAI's character import
- *   makes its `customModuleToggle`), from `extensions.risuai`.
+ *   module namespace, the toggles (`toggles`, which RisuAI's character import
+ *   makes its `customModuleToggle`) and `hideChatIcon` (the module's
+ *   `hideIcon`), from `extensions.risuai`.
  * - The pictures RisuAI keeps, its `additionalAssets` (`x-risu-asset`) — not
  *   the icon, where RisuAI's module export puts a stand-in for a module with
  *   none (`moduleNoneImage`), nor emotion or other pictures.
  *
- * What RisuAI's module has and ours does not keep — the icon, `hideIcon` — is
- * left behind, as for a `.risum`. Whatever the archive's reader
- * throws is the file's doing, so it is a `ModuleParseError`.
+ * The icon is left behind, as for a `.risum`: RisuAI draws no module's icon —
+ * its lists show an MCP module's glyph and nothing else — and keeps one only to
+ * turn the module back into a character. Whatever the archive's reader throws
+ * is the file's doing, so it is a `ModuleParseError`.
  */
 function moduleOfCharx(archive: Uint8Array): ParsedRisuModule {
   let contents: CharxContents;
@@ -268,6 +299,8 @@ function moduleOfCharx(archive: Uint8Array): ParsedRisuModule {
     ...(background ? { backgroundEmbedding: background } : {}),
     ...(namespace ? { namespace } : {}),
     ...(toggles.trim() ? { toggles } : {}),
+    // RisuAI's character import reads it as `hideChatIcon`, which becomes the module's `hideIcon`.
+    hideIcon: risu['hideChatIcon'] === true,
     assets: contents.assets.filter((asset) => asset.additional),
   };
 }
@@ -285,6 +318,7 @@ function convertedModule(
     regex: parts.regex ?? [],
     trigger: [],
     lowLevelAccess: false,
+    hideIcon: false,
     assets: [],
   };
 }
@@ -365,6 +399,8 @@ export function plotModuleOf(
     ...(parsed.namespace ? { namespace: parsed.namespace } : {}),
     // Every chat it is on draws them: held to the background's cap, left out whole past it.
     ...(parsed.toggles && parsed.toggles.length <= MAX_BACKGROUND_HTML_LENGTH ? { toggles: parsed.toggles } : {}),
+    ...(parsed.hideIcon ? { hideIcon: true as const } : {}),
+    ...(parsed.inert ? { inert: parsed.inert } : {}),
     ...(displayScripts ? { displayScripts } : {}),
     ...(css ? { css } : {}),
     ...(shown ? { backgroundHtml: shown } : {}),

@@ -3,13 +3,18 @@
  * the RisuAI and SillyTavern preset files they may be imported from.
  *
  * A reader keeps named presets on their account and picks one per chat. Each
- * holds two texts and nothing else: a main-instruction addition, which follows
+ * holds two texts for the prompt and two RisuAI settings that travel in its
+ * presets: a main-instruction addition, which follows
  * our preset's main, and a global note, which follows its post-history block —
  * RisuAI's `mainPrompt` and `globalNote`, SillyTavern's Main Prompt and
  * Post-History Instructions. Where a
  * card brings its own system prompt or post-history instructions, the card's
  * win as RisuAI and ST let them win over the user's: the reader's text comes
- * back only through the card's `{{original}}` (`assemblePrompt`).
+ * back only through the card's `{{original}}` (`assemblePrompt`). The two
+ * settings are RisuAI's preset toggles (`customPromptTemplateToggle`, drawn
+ * first in the chat's toggles, their values the `toggle_<key>` globals the
+ * texts may read) and its module integration (`moduleIntergration`, the
+ * namespaces whose library modules the chat turns on — `moduleIntegrationNames`).
  *
  * An import fills those two texts with the prompts the file sends where they
  * send: its main prompt, its global note, and the general-purpose slots RisuAI
@@ -38,6 +43,21 @@ export const READER_PRESET_NAME_MAX = 60;
  * for a long RisuAI main prompt and still a fraction of the smallest budget.
  */
 export const READER_PRESET_TEXT_MAX = 10_000;
+/** Characters a preset's module integration may hold — a comma list of namespaces. */
+export const READER_PRESET_INTEGRATION_MAX = 2_000;
+
+/**
+ * The names a preset's module integration turns on, read as RisuAI's
+ * `getModules` reads `moduleIntergration`: split on commas and trimmed. Each
+ * matches a library module's namespace or its id (`getModuleByIds`); a blank
+ * one matches nothing.
+ */
+export function moduleIntegrationNames(text: string | null | undefined): string[] {
+  return (text ?? '')
+    .split(',')
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0);
+}
 
 export type ReaderPresetSource = 'risuai' | 'sillytavern';
 
@@ -61,6 +81,10 @@ export interface ReaderPresetImport {
   name: string;
   main: string;
   globalNote: string;
+  /** RisuAI's `customPromptTemplateToggle`, as written — '' for a file with none. */
+  toggles: string;
+  /** RisuAI's `moduleIntergration`, as written — '' for a file with none. */
+  moduleIntegration: string;
   /** The prompts taken, in the file's order, and where each went. */
   imported: ReaderPresetPart[];
   /** Other prompt texts in use, which have no place among the additions — by the names the file gives them ('' for none). */
@@ -196,7 +220,15 @@ function risuRole(role: unknown): 'user' | 'bot' | 'system' {
 }
 
 /** Keys of a RisuAI preset the import reads; any other one is a setting it ignores. */
-const RISU_READ_KEYS = new Set(['name', 'mainPrompt', 'globalNote', 'jailbreak', 'promptTemplate']);
+const RISU_READ_KEYS = new Set([
+  'name',
+  'mainPrompt',
+  'globalNote',
+  'jailbreak',
+  'promptTemplate',
+  'customPromptTemplateToggle',
+  'moduleIntergration',
+]);
 
 /** RisuAI's default `formatingOrder` (`database.svelte.ts`), for a preset that carries none. */
 const RISU_DEFAULT_ORDER = ['main', 'description', 'personaPrompt', 'chats', 'lastChat', 'jailbreak', 'lorebook', 'globalNote', 'authorNote'];
@@ -235,7 +267,14 @@ class Gathered {
  */
 function fromRisuPreset(preset: Json, fileName: string): ReaderPresetImport {
   const ignoredSettings = Object.keys(preset).some((key) => !RISU_READ_KEYS.has(key));
-  const base = { source: 'risuai' as const, name: nameOf(preset['name'], fileName), ignoredSettings };
+  const base = {
+    source: 'risuai' as const,
+    name: nameOf(preset['name'], fileName),
+    // Kept whatever the template: RisuAI saves and loads both beside it.
+    toggles: textOf(preset['customPromptTemplateToggle']).slice(0, READER_PRESET_TEXT_MAX),
+    moduleIntegration: textOf(preset['moduleIntergration']).slice(0, READER_PRESET_INTEGRATION_MAX),
+    ignoredSettings,
+  };
   const template = preset['promptTemplate'];
   const taken = new Gathered();
 
@@ -353,6 +392,9 @@ function fromSillyTavernPreset(preset: Json, fileName: string): ReaderPresetImpo
   return {
     source: 'sillytavern',
     name: nameOf(undefined, fileName),
+    // ST has neither: its prompt toggles are the prompts' own `enabled`, read above.
+    toggles: '',
+    moduleIntegration: '',
     main: joinTexts(taken.main),
     globalNote: joinTexts(taken.globalNote),
     imported: taken.imported,

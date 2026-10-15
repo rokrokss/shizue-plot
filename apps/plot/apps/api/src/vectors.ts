@@ -67,17 +67,17 @@ import {
   messages,
   plots,
   readerLoreVectors,
-  readerModules,
   type ContentLanguage,
   type Message,
 } from '@shizue/db';
-import { and, asc, desc, eq, inArray, isNotNull, notInArray, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, notInArray, sql } from 'drizzle-orm';
 import { createHash } from 'node:crypto';
 import type { AppDeps, BackgroundTaskKind } from './deps.js';
 import type { Embedder, Embedding } from './embedder.js';
 import { aliasPlotLore, loadWorkLore, loreAliasesEnabled, loreAliasesFor } from './loreAliases.js';
 import { noteLexicalSearch } from './lexicalHealth.js';
 import type { AuxiliaryOwner } from './memory.js';
+import { readerModulesOnPlot } from './readerModules.js';
 import { loadReaderOverlay } from './scriptState.js';
 import { buildPath, visibleToAi } from './tree.js';
 
@@ -96,8 +96,6 @@ const MAX_PASSES = 3;
  * on real turns, which run longer than the experiment's.
  */
 const COSINE_LOG_ONE_IN = 10;
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** The key a text's vectors are stored under: what was embedded, not where it sits. */
 export const textHash = (text: string): string => createHash('sha256').update(text).digest('hex');
@@ -454,23 +452,8 @@ async function embedReaderLore(deps: AppDeps, userId: string, plotId: string): P
     .where(eq(characters.plotId, plotId))
     .orderBy(asc(characters.orderIndex), asc(characters.createdAt));
   const overlay = await loadReaderOverlay(deps.db, userId, plotId);
-  // The reader's modules on any of their chats with the plot: on everywhere, or listed by one.
-  const listed = await deps.db
-    .select({ modules: chats.modules })
-    .from(chats)
-    .where(and(eq(chats.userId, userId), eq(chats.plotId, plotId), isNotNull(chats.modules)));
-  const ids = [...new Set(listed.flatMap((chat) => chat.modules ?? []))].filter((id) => UUID.test(id));
-  const modules = await deps.db
-    .select({ module: readerModules.module })
-    .from(readerModules)
-    .where(
-      and(
-        eq(readerModules.userId, userId),
-        ids.length > 0
-          ? or(eq(readerModules.enabledGlobally, true), inArray(readerModules.id, ids))
-          : eq(readerModules.enabledGlobally, true),
-      ),
-    );
+  // The reader's modules on any of their chats with the plot, by every list that turns one on.
+  const modules = await readerModulesOnPlot(deps, userId, plotId);
   const rewritten = members.flatMap((member) => {
     const own = overlay?.members?.[member.id];
     return own?.lorebook ? overlaidCard(member.card, own).lorebook : [];

@@ -257,6 +257,20 @@ export function readerRuns(
 }
 
 /**
+ * Whether a message is a narration as a whole — SillyTavern's narrator message,
+ * whose own screen placement (`SLASH_COMMAND`) and edits its regex scripts keep
+ * to: one that opens with `@:` (the 나레이션 button's, or a reader's turn), or a
+ * reader's turn every line of which is written as the narrator (`@내레이터: …`,
+ * `readerRuns`, given the members a `@이름:` line could name instead). A turn
+ * with any line of the reader's own or a member's is the reader's turn.
+ */
+export function isNarrationTurn(content: string, members: readonly ReaderMember[] = []): boolean {
+  if (isNarration(content)) return true;
+  const runs = readerRuns(content, members);
+  return runs.length > 0 && runs.every((run) => run.kind === 'narration');
+}
+
+/**
  * A user turn: `@:` makes the whole turn the reader writing narrator 상황묘사,
  * and anything else is the user speaking, with `*…*` spans as their own 상황묘사.
  *

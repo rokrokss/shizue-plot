@@ -392,6 +392,15 @@ describe('the range a script runs in', () => {
     expect(displayContextAt(shown, 0, 'user')).toBe(displayContextAt(shown, 5, 'user'));
   });
 
+  it("keeps a script placed on ST's narrator messages (SLASH_COMMAND) to the narrations", () => {
+    const narrator = script({ in: 'narrator', role: 'narration' });
+    const sides = script({ in: 'both', role: ['user', 'assistant'] });
+    const placed = [narrator, sides, always];
+    expect(displayScriptsAt(placed, 0, 'narration')).toEqual([narrator, always]);
+    expect(displayScriptsAt(placed, 0, 'assistant')).toEqual([sides, always]);
+    expect(displayScriptsAt(placed, 0, 'user')).toEqual([sides, always]);
+  });
+
   it('sends no script for a message out of every range, and only the scripts in range', async () => {
     const lone = context([near]);
     // Out of every range, the message's own CBS is still read, as RisuAI reads every message.

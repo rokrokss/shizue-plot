@@ -389,6 +389,18 @@ a, button, input, select, textarea, summary { -webkit-tap-highlight-color: trans
   border-radius: 0.75rem;
 }
 
+/*
+ * RisuAI's `hideIcon` (a module's) and `hideChatIcon` (a card's): the chat draws
+ * no message's sender picture or name, and the text takes the room they held.
+ * What hangs under a bubble at the face's indent moves left with it.
+ */
+[data-hide-icons] :is(.chat-face, .chat-name) {
+  display: none;
+}
+[data-hide-icons] .pl-12\.5 {
+  padding-left: 0;
+}
+
 /* The reader's bubble is mint in both themes, so what is drawn in it keeps its ink. */
 .user-bubble :is(strong, a, q[data-dialogue]) {
   color: inherit;

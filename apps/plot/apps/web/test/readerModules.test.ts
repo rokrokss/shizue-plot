@@ -96,6 +96,23 @@ describe('ModuleToggles', () => {
     ]);
   });
 
+  it('keeps a chat’s toggles to it while its Local Toggles is on', async () => {
+    const local: boolean[] = [];
+    await render(
+      createElement(ModuleToggles, {
+        text: 'rain=비 오는 날',
+        values: {},
+        onSet: async () => undefined,
+        local: false,
+        onLocal: (on: boolean) => void local.push(on),
+      }),
+    );
+    const box = host.querySelector<HTMLInputElement>('[data-testid="local-toggles"] input')!;
+    expect(box.checked).toBe(false);
+    await act(async () => box.click());
+    expect(local).toEqual([true]);
+  });
+
   it('draws nothing where nothing is declared', async () => {
     await render(createElement(ModuleToggles, { text: '\n\n', values: {}, onSet: async () => undefined }));
     expect(host.querySelector('[data-testid="chat-toggles"]')).toBeNull();
@@ -121,11 +138,18 @@ describe('ReaderModules', () => {
     createdAt: '2026-10-15T00:00:00.000Z',
   };
 
+  const switches = () => [...host.querySelectorAll<HTMLInputElement>('[data-testid="reader-module"] input[type="checkbox"]')];
+
   it('turns a module on in this chat, and greys that switch while it is on everywhere', async () => {
     const lists: string[][] = [];
-    const props = { chatIds: [] as string[], onChatIds: async (ids: string[]) => void lists.push(ids), onChange: async () => undefined };
+    const props = {
+      plotId: 'p-1',
+      chatIds: [] as string[],
+      onChatIds: async (ids: string[]) => void lists.push(ids),
+      onChange: async () => undefined,
+    };
     await render(createElement(ReaderModules, { ...props, library: [rain] }));
-    const [here, everywhere] = [...host.querySelectorAll<HTMLInputElement>('[data-testid="reader-module"] input[type="checkbox"]')];
+    const [here, , everywhere] = switches();
     expect(here!.disabled).toBe(false);
     await act(async () => here!.click());
     expect(lists).toEqual([['rm-1']]);
@@ -133,9 +157,47 @@ describe('ReaderModules', () => {
     expect(sends).toEqual([{ method: 'PATCH', path: '/api/reader-modules/rm-1', body: { enabledGlobally: true } }]);
 
     await render(createElement(ReaderModules, { ...props, library: [{ ...rain, enabledGlobally: true }] }));
-    const [greyed] = [...host.querySelectorAll<HTMLInputElement>('[data-testid="reader-module"] input[type="checkbox"]')];
+    const [greyed, work] = switches();
     expect(greyed!.checked).toBe(true);
     expect(greyed!.disabled).toBe(true);
+    expect(work!.checked).toBe(true);
+    expect(work!.disabled).toBe(true);
+  });
+
+  it('turns a module on for every chat of this work, as RisuAI’s character list does, and greys this chat’s switch', async () => {
+    const props = { plotId: 'p-1', chatIds: [] as string[], onChatIds: async () => undefined, onChange: async () => undefined };
+    await render(createElement(ReaderModules, { ...props, library: [rain] }));
+    const [, work] = switches();
+    await act(async () => work!.click());
+    expect(sends).toEqual([{ method: 'PATCH', path: '/api/reader-modules/rm-1', body: { plotId: 'p-1', onPlot: true } }]);
+
+    await render(createElement(ReaderModules, { ...props, library: [{ ...rain, onThisWork: true, onHere: true }] }));
+    const [here, on] = switches();
+    expect(here!.checked).toBe(true);
+    expect(here!.disabled).toBe(true);
+    expect(on!.checked).toBe(true);
+    expect(host.querySelector('[data-testid="reader-module-by-preset"]')).toBeNull();
+  });
+
+  it('says when the reader preset’s module integration is what turns a module on here', async () => {
+    const props = { plotId: 'p-1', chatIds: [] as string[], onChatIds: async () => undefined, onChange: async () => undefined };
+    await render(createElement(ReaderModules, { ...props, library: [{ ...rain, namespace: 'weather', onHere: true }] }));
+    expect(switches().map((box) => box.checked)).toEqual([false, false, false]);
+    expect(host.querySelector('[data-testid="reader-module-by-preset"]')!.textContent).toBe(messages.chat.readerModuleByPreset);
+  });
+
+  it('says that an MCP server and cjs code are kept and never run', async () => {
+    const props = { plotId: 'p-1', chatIds: [] as string[], onChatIds: async () => undefined, onChange: async () => undefined };
+    await render(
+      createElement(ReaderModules, {
+        ...props,
+        library: [{ ...rain, hideIcon: true, inert: { mcp: 'https://mcp.example/sse', cjs: true } }],
+      }),
+    );
+    const notice = host.querySelector('[data-testid="module-inert"]')!;
+    expect(notice.textContent).toContain('https://mcp.example/sse');
+    expect(notice.textContent).toContain(messages.chat.moduleCjsInert);
+    expect(host.querySelector('[data-testid="reader-module"]')!.textContent).toContain(messages.chat.moduleHideIcon);
   });
 
   it('asks before importing a module that wants low-level access, and imports it only on a yes', async () => {
@@ -149,6 +211,7 @@ describe('ReaderModules', () => {
     await render(
       createElement(ReaderModules, {
         library: [],
+        plotId: 'p-1',
         chatIds: [],
         onChatIds: async () => undefined,
         onChange: async () => void (changes += 1),

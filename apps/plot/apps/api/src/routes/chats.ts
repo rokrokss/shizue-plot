@@ -1,6 +1,8 @@
 import type { ChatExport, ChatExportVariableSnapshot } from '@shizue/contracts';
 import {
   applyMacros,
+  expandTavernStored,
+  isNarrationTurn,
   applyVariableDelta,
   assetResolver,
   authorNoteSettingsOf,
@@ -51,6 +53,9 @@ import {
   type PromptCharacter,
   type PromptPlot,
   type ReaderAdditions,
+  type ReaderMember,
+  type TavernStored,
+  type VariableDelta,
   type Variables,
 } from '@shizue/core';
 import {
@@ -128,13 +133,21 @@ import {
   MAX_CHAT_NOTES,
 } from '../notes.js';
 import { loadReaderAdditions, resolveReaderPresetId } from '../readerPresets.js';
-import { chatModuleIds, chatModulesOf, chatToggles, readerCbsModules, readerLibrary } from '../readerModules.js';
+import {
+  chatModuleIds,
+  chatModulesOf,
+  chatToggles,
+  hidesChatIcons,
+  presetToggles,
+  readerCbsModules,
+  readerLibrary,
+} from '../readerModules.js';
 import { readerModuleAssetsJson, toReaderModuleJson } from './readerModules.js';
 import { buildRelationshipText } from '../relationship.js';
 import { drawSceneEnabled, generateSceneImage, sceneImagePrompt } from '../sceneImage.js';
 import {
   headMoved,
-  loadGlobalVariables,
+  loadChatGlobalVariables,
   loadReaderOverlay,
   localLoreOf,
   mergeGlobalVariables,
@@ -152,6 +165,8 @@ import {
   scriptMemberOf,
   scriptRevMoved,
   storableDelta,
+  withLocalGlobals,
+  writeChatToggles,
   type GenerationScripts,
 } from '../scriptState.js';
 import {
@@ -163,7 +178,7 @@ import {
 } from '../scriptChat.js';
 import { deleteQuietly } from '../storage.js';
 import { regexStoredText } from '../storedRegex.js';
-import { toPromptCharacters, toPromptPlot } from '../plots.js';
+import { isSillyTavernCard, toPromptCharacters, toPromptPlot } from '../plots.js';
 import { editRequestTurns } from '../requestTriggers.js';
 import { createScriptFetch } from '../scriptFetch.js';
 import { readScriptLlmMessages, readScriptLlmModel, runScriptLlm } from '../scriptLlm.js';
@@ -239,6 +254,11 @@ export const toChatJson = (chat: Chat, noteIds: string[]) => ({
    * of them still exist and what they bring.
    */
   modules: chatModuleIds(chat),
+  /**
+   * RisuAI's "Local Toggles": while on, the toggles set in this chat's settings
+   * keep their values to this chat (`writeChatToggles`).
+   */
+  localToggles: chat.localToggles,
   /** Reusable notes attached to this chat, in injection order. */
   noteIds,
   /**
@@ -431,7 +451,7 @@ async function chatState(deps: AppDeps, chat: Chat, window?: PathWindow): Promis
      * The reader's global variables on this plot, shared by all their chats on
      * it and not by branch — what the card's scripts read as `getglobalvar`.
      */
-    globalVariables: await loadGlobalVariables(deps, chat.userId, chat.plotId),
+    globalVariables: await loadChatGlobalVariables(deps, chat),
     /**
      * What this deployment can do beyond the base chat. An env-gated action
      * answers here rather than 404ing a button the reader can already see —
@@ -880,7 +900,7 @@ async function loadGenerationContext(
     assetNames: await openAssetNames(deps, chat),
     auxiliaryModel: await auxiliaryModelOf(deps, chat),
     fold: foldOptionsOf(row.name, persona),
-    globalVariables: await loadGlobalVariables(deps, chat.userId, chat.plotId),
+    globalVariables: await loadChatGlobalVariables(deps, chat),
     overlay,
     memberIds,
     localLore: scripts.localLore ?? localLoreOf(chat),
@@ -1093,6 +1113,73 @@ const promptHistory = (
  */
 const pathVariables = (plot: Plot, branch: readonly FoldItem[], fold: FoldOptions): Variables =>
   computeVariables(branch, plot.customUi?.defaultVariables, fold);
+
+/** The roster as a reader's `@이름:` lines are read against: every name a member goes by. */
+const readerMembersOf = (members: readonly Pick<Character, 'id' | 'name' | 'card'>[]): ReaderMember[] =>
+  members.map((member) => ({
+    id: member.id,
+    names: [member.name, ...(member.card.nickname?.trim() ? [member.card.nickname.trim()] : [])],
+  }));
+
+/**
+ * What SillyTavern's `substituteParams` reads when it stores a text — the
+ * reader's turn as it is sent, a narrator's message, an edit — for a work ST
+ * wrote: one whose lead card (the roster's first) ST last saved
+ * (`PromptCharacter.sillyTavern`). `{{char}}` is the member of a work of one
+ * (ST's one-to-one chat) and the work's name otherwise, `{{user}}` the
+ * persona, the variables those at the chat's head (ST's are the chat's, not a
+ * message's), and the card's own fields its macros read are
+ * the lead's. Null for any other work: its stored texts keep their macros for
+ * the prompt to read, as RisuAI's do.
+ */
+function tavernStoreMacro(
+  context: Pick<Awaited<ReturnType<typeof loadGenerationContext>>, 'plot' | 'characters' | 'userName' | 'globalVariables'>,
+  variables: Variables,
+  clock: MacroClock,
+  seed: string,
+): MacroContext | null {
+  const lead = context.characters[0];
+  if (!lead?.sillyTavern) return null;
+  const note = lead.card.lorebook.find((entry) => entry.depthPrompt && entry.enabled);
+  return {
+    // ST's `name2`: the character of a one-to-one chat; a group's has none to name, so the work's.
+    char: context.characters.length === 1 ? lead.name : (context.plot.char ?? context.plot.name),
+    user: context.userName,
+    variables,
+    globalVariables: context.globalVariables,
+    clock,
+    seed,
+    tavern: {
+      sillyTavern: true,
+      charPrompt: lead.card.systemPrompt,
+      charJailbreak: lead.card.postHistoryInstructions,
+      group: context.characters.filter((member) => !member.absent).map((member) => member.name),
+      charVersion: lead.card.characterVersion,
+      creatorNotes: lead.card.creatorNotes,
+      firstMessage: lead.card.firstMes,
+      alternateGreetings: lead.card.alternateGreetings,
+      ...(note ? { depthPrompt: note.content } : {}),
+    },
+  };
+}
+
+/** A sent turn's delta with what its stored text's macros wrote laid under it — the scripts' values win, as they ran after. */
+const withMacroWrites = (writes: VariableDelta | null, delta: VariableDelta | null | undefined): VariableDelta | null =>
+  writes ? { ...writes, ...(delta ?? {}) } : (delta ?? null);
+
+/**
+ * What a stored text's `{{setglobalvar}}` and the like wrote, into the reader's
+ * globals on the work — as ST writes them when it stores the text. Past the
+ * globals' caps the text stands and the writes do not, as a prompt's do.
+ */
+async function keepStoredGlobalWrites(deps: AppDeps, chat: Pick<Chat, 'id' | 'userId' | 'plotId'>, stored: TavernStored | null): Promise<void> {
+  if (!stored?.globalVariableWrites) return;
+  try {
+    await mergeGlobalVariables(deps, chat.userId, chat.plotId, stored.globalVariableWrites);
+  } catch (error) {
+    console.warn(`chat ${chat.id}: global variable writes of a stored text not kept`, error);
+  }
+}
 
 /**
  * What a generation checks of the head before it writes anything, for the card's
@@ -2107,9 +2194,11 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const translation = optionalSettings(body, 'translation', coerceTranslationSettings);
       const retrieval = optionalSettings(body, 'retrieval', coerceRetrievalSettings);
       const modules = await patchedModules(deps, userId, body);
+      const localToggles = optionalBoolean(body, 'localToggles');
 
       if (
         modules === undefined &&
+        localToggles === undefined &&
         noteSettings === undefined &&
         translation === undefined &&
         retrieval === undefined &&
@@ -2154,6 +2243,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           ...(translation !== undefined ? { translation } : {}),
           ...(retrieval !== undefined ? { retrieval } : {}),
           ...(modules !== undefined ? { modules } : {}),
+          ...(localToggles !== undefined ? { localToggles } : {}),
           updatedAt: new Date(),
         })
         .where(and(eq(chats.id, id), eq(chats.userId, userId)))
@@ -2778,9 +2868,14 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * the library modules on here, in the order they run, with what the page
    * draws of them — display scripts, stylesheet, background, the pictures by
    * the module's names for them, the namespace `{{moduleenabled}}` reads; and
-   * `toggles`, the toggle text the chat's settings draw — the modules' on the
-   * chat (the work's, then the reader's) and then the members' own, as RisuAI's
-   * sidebar reads its modules' and the character's (`chatToggles`).
+   * `toggles`, the toggle text the chat's settings draw — the reader preset's,
+   * the modules' on the chat (the work's, then the reader's) and then the
+   * members' own, as RisuAI's sidebar reads its preset's, its modules' and the
+   * character's (`chatToggles`); and `hideIcons`, whether the chat draws its
+   * messages without their senders' pictures and names (`hidesChatIcons`).
+   * Each library module says which lists turn it on here — this chat's
+   * (`listedHere`), this work's (`onThisWork`) — and whether it is on here at
+   * all (`onHere`), which the reader preset's module integration may also do.
    */
   app.get('/:id/modules', async (c) => {
     const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
@@ -2791,8 +2886,15 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       chatModulesOf(deps, chat, plot),
       loadMembers(deps.db, plot.id),
     ]);
+    const on = new Set(reader.map((row) => row.id));
     return c.json({
-      library: library.map((row) => ({ ...toReaderModuleJson(row), listedHere: listed.has(row.id) })),
+      library: library.map((row) => ({
+        ...toReaderModuleJson(row),
+        listedHere: listed.has(row.id),
+        // RisuAI's character `modules`: on for every chat of this work.
+        onThisWork: (row.plotIds ?? []).includes(chat.plotId),
+        onHere: on.has(row.id),
+      })),
       active: reader.map((row) => ({
         id: row.id,
         name: row.module.name,
@@ -2802,14 +2904,16 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         namespace: row.module.namespace ?? null,
         assets: readerModuleAssetsJson(row),
       })),
-      toggles: chatToggles(modules, members),
+      toggles: chatToggles(modules, members, await presetToggles(deps, chat)),
+      /** RisuAI's `HideIconStore`: no message on this chat shows its sender's picture or name. */
+      hideIcons: hidesChatIcons(modules, members),
     });
   });
 
   /** The reader's global variables on this chat's plot (see `plotReaderVariables`). */
   app.get('/:id/global-variables', async (c) => {
     const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
-    return c.json({ variables: await loadGlobalVariables(deps, chat.userId, chat.plotId) });
+    return c.json({ variables: await loadChatGlobalVariables(deps, chat) });
   });
 
   /**
@@ -2822,7 +2926,13 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const body = await readJsonBody(c);
     if (!('variables' in body)) throw badRequest('invalid_request', 'variables is required');
     return c.json({
-      variables: await mergeGlobalVariables(deps, chat.userId, chat.plotId, body['variables']),
+      variables:
+        body['toggles'] === true
+          ? await writeChatToggles(deps, chat, body['variables'])
+          : withLocalGlobals(
+              await mergeGlobalVariables(deps, chat.userId, chat.plotId, body['variables']),
+              chat.localGlobalVariables,
+            ),
     });
   });
 
@@ -3081,19 +3191,29 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const scriptMember = scriptMemberOf(scripts.memberId, context.members);
       const path = buildPath(context.all, chat.headMessageId);
       await settleHead(deps, chat, path.at(-1), scripts, true);
+      const variables = pathVariables(context.row, path, context.fold);
       // SillyTavern's stored-text scripts rewrite the turn as it is sent
-      // (`sendMessageAsUser`); only an ST card carries any (`storedRegex.ts`).
-      const sent = await regexStoredText(content, USER_INPUT, {
-        characters: context.characters,
-        userName: context.userName,
-        variables: pathVariables(context.row, path, context.fold),
-        globalVariables: context.globalVariables,
-      });
+      // (`sendMessageAsUser`); only an ST card carries any (`storedRegex.ts`). A
+      // turn written wholly as the narrator is ST's narrator's message
+      // (`sendNarratorMessage`, `/sys`), which ST stores with no script run on it.
+      const regexed = isNarrationTurn(content, readerMembersOf(context.members))
+        ? content
+        : await regexStoredText(content, USER_INPUT, {
+            characters: context.characters,
+            userName: context.userName,
+            variables,
+            globalVariables: context.globalVariables,
+          });
+      // Then, in a work ST wrote, its macros as ST's `substituteParams` leaves them
+      // in the stored turn — what they wrote kept on the turn and in the globals.
+      const tavern = tavernStoreMacro(context, variables, requestClock(c, context.row, path), chat.id);
+      const stored = tavern ? expandTavernStored(regexed, tavern) : null;
+      const sent = stored?.text ?? regexed;
       // The turn goes where the scripts left it — after the branch, unless they
       // edited the chat around it, or cut it (RisuAI then sends without it).
       const edit = planScriptChat(path, scripts.chat, {
         inPlace: rewritableHead(context.all, path.at(-1)),
-        lastDelta: variableDelta,
+        lastDelta: withMacroWrites(stored?.variableWrites ?? null, variableDelta),
         // Stored on the turn rather than on the request, so a regenerate of it
         // re-applies the same ruling.
         turn: { content: sent, source, ...(directions ? { directions } : {}), attachmentIds },
@@ -3105,6 +3225,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       // not this chat's own — or that another turn already claimed — must leave
       // no message behind for the client to find on its retry.
       const edited = await keepScriptChat(deps, chat, edit, context.all);
+      await keepStoredGlobalWrites(deps, chat, stored);
       return { context, focusNames, edited, voice };
     };
 
@@ -3787,21 +3908,46 @@ function pickIntroIndex(total: number, index: unknown): number {
 }
 
 /**
- * An edit as SillyTavern's `runOnEdit` scripts leave it (`updateMessage`, which
- * asks `getRegexedString` with `isEdit`): on the placement of the message edited
- * — the reader's turn, a reply, or a narration, which is ST's narrator's — with
- * the macros of a pattern read for the plot's roster and the chat's persona.
- * The text as written where no card ST wrote has one (`storedRegex.ts`).
+ * An edit as SillyTavern stores one (`updateMessage`): its `runOnEdit` scripts
+ * first (`getRegexedString` with `isEdit`), on the placement of the message
+ * edited — the reader's turn, a reply, or a narration (a narration turn of the
+ * button's or one the reader wrote wholly as the narrator), which is ST's
+ * narrator's — with the macros of a pattern read for the plot's roster and the
+ * chat's persona; then, in a work ST wrote (`tavernStoreMacro`), the text's
+ * own macros as `substituteParams` leaves them, read at the chat's head, and
+ * what they wrote. The text as written where no card ST wrote has a script
+ * (`storedRegex.ts`) and the work is not ST's.
  */
-async function regexEdit(deps: AppDeps, chat: Chat, message: Message, content: string): Promise<string> {
+async function storedEdit(
+  deps: AppDeps,
+  c: Context<AppEnv>,
+  chat: Chat,
+  message: Message,
+  content: string,
+): Promise<{ text: string; stored: TavernStored | null }> {
   const members = await loadMembers(deps.db, chat.plotId);
-  const placement = message.role === 'user' ? USER_INPUT : isNarration(message.content) ? SLASH_COMMAND : AI_OUTPUT;
-  return regexStoredText(
+  const narration =
+    message.role === 'user' ? isNarrationTurn(message.content, readerMembersOf(members)) : isNarration(message.content);
+  const placement = narration ? SLASH_COMMAND : message.role === 'user' ? USER_INPUT : AI_OUTPUT;
+  const persona = await loadPersona(deps, chat);
+  const text = await regexStoredText(
     content,
     placement,
-    { characters: members, userName: (await loadPersona(deps, chat))?.name ?? DEFAULT_USER_NAME },
+    { characters: members, userName: persona?.name ?? DEFAULT_USER_NAME },
     { edit: true },
   );
+  if (!members[0] || !isSillyTavernCard(members[0].card)) return { text, stored: null };
+  const context = await loadGenerationContext(deps, chat);
+  const path = buildPath(context.all, chat.headMessageId);
+  const tavern = tavernStoreMacro(
+    context,
+    pathVariables(context.row, path, context.fold),
+    requestClock(c, context.row, path),
+    chat.id,
+  );
+  if (!tavern) return { text, stored: null };
+  const stored = expandTavernStored(text, tavern);
+  return { text: stored.text, stored };
 }
 
 /** PATCH /api/messages/:id — edit a message; user edits fork a new branch. */
@@ -3822,7 +3968,12 @@ export function messageRoutes(deps: AppDeps): Hono<AppEnv> {
       .limit(1);
     if (!row) throw notFound('Message not found');
     if (row.chat.importing) throw chatImporting();
-    const edited = await regexEdit(deps, row.chat, row.message, content);
+    const { text: edited, stored } = await storedEdit(deps, c, row.chat, row.message, content);
+    // What the edit's macros wrote stands on the message edited, over the values
+    // its scripts set when it was stored — ST runs them now, after those.
+    const delta = stored?.variableWrites
+      ? { ...(row.message.variableDelta ?? {}), ...stored.variableWrites }
+      : row.message.variableDelta;
 
     if (row.message.role === 'assistant') {
       // One transaction: the edit and the memory invalidation it forces must not be
@@ -3836,10 +3987,17 @@ export function messageRoutes(deps: AppDeps): Hono<AppEnv> {
           // showed in its place goes with the old text, as ST's translation does
           // (`translateMessageEdit`), and so does a bias, which ST clears on a
           // reply's edit; its reasoning stays.
-          .set({ content: edited, displayText: null, bias: null, scriptRev: sql`${messages.scriptRev} + 1` })
+          .set({
+            content: edited,
+            displayText: null,
+            bias: null,
+            scriptRev: sql`${messages.scriptRev} + 1`,
+            ...(stored?.variableWrites ? { variableDelta: storableDelta(delta) } : {}),
+          })
           .where(eq(messages.id, id));
         return invalidateMemoryForEdit(tx, row.chat.id, id);
       });
+      await keepStoredGlobalWrites(deps, row.chat, stored);
       // The summary that covered the old words is gone; the new ones are summarized again.
       if (dropped > 0) scheduleMemoryUpdate(deps, row.chat.id);
       return c.json({ messageId: id });
@@ -3855,7 +4013,7 @@ export function messageRoutes(deps: AppDeps): Hono<AppEnv> {
         content: edited,
         // The scripts that ran for the turn are not run again for an edit of it —
         // RisuAI never re-runs a trigger on one either — so what they left stays.
-        ...(row.message.variableDelta ? { variableDelta: row.message.variableDelta } : {}),
+        ...(delta ? { variableDelta: storableDelta(delta) } : {}),
         // A new version of the same turn: still hidden from the AI if it was.
         ...(row.message.hiddenFromPrompt ? { hiddenFromPrompt: true } : {}),
       })
@@ -3864,6 +4022,7 @@ export function messageRoutes(deps: AppDeps): Hono<AppEnv> {
       .update(chats)
       .set({ headMessageId: sibling!.id, updatedAt: new Date() })
       .where(eq(chats.id, row.chat.id));
+    await keepStoredGlobalWrites(deps, row.chat, stored);
     return c.json({ messageId: sibling!.id });
   });
 

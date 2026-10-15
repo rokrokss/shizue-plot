@@ -16,6 +16,7 @@ import {
   type StManifest,
   type StPersona,
 } from '@shizue/core/sillytavern';
+import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../src/lib/api';
 import { folderFiles, guardFiles } from '../src/lib/sillytavern/files';
@@ -135,6 +136,22 @@ interface FakeChat {
   branches?: { parentId: string | null; texts: string[]; file?: string }[];
   /** The branch files the chat records (`importedFrom.branches`). */
   branchFiles?: string[];
+  /** The file the chat was made of (`importedFrom.fileName`). */
+  fileName?: string;
+  /** Every row, as `GET /api/chats/:id/import/tree` reads them: where it hangs, whose, its text. */
+  rows?: { id: string; parentId: string | null; role: string; text: string }[];
+  /** Where the chat's own line goes on: the last message's selected row. */
+  tip?: string | null;
+}
+
+/** The rows a batch becomes, version by version, each message under the last one's selected row. */
+function treeRows(chat: FakeChat, parentId: string | null, messages: ImportedChatMessage[], ids: string[][]): string | null {
+  let parent = parentId;
+  messages.forEach((message, at) => {
+    message.versions.forEach((text, version) => (chat.rows ??= []).push({ id: ids[at]![version]!, parentId: parent, role: message.role, text }));
+    parent = ids[at]![message.selected]!;
+  });
+  return parent;
 }
 
 /**
@@ -215,7 +232,15 @@ function fakeApi() {
     }
     if (route === 'POST /api/imports/lookup') {
       const asked = new Set(read()['sha256'] as string[]);
-      const answer: ImportLookup = { characters: [], chats: [] };
+      const files = read()['chatFiles'] as string[] | undefined;
+      const answer: ImportLookup & { named?: unknown[] } = { characters: [], chats: [] };
+      if (files) {
+        answer.named = [...chats.values()].flatMap((chat) =>
+          [chat.fileName, ...(chat.branches ?? []).map((branch) => branch.file)]
+            .filter((name) => name !== undefined && files.includes(name))
+            .map((fileName) => ({ fileName, chatId: chat.id, plotId: chat.plotId, importing: chat.importing })),
+        );
+      }
       for (const plot of plots.values()) {
         for (const each of plot.characters) {
           const hash = each.importedFrom?.sha256;
@@ -275,7 +300,13 @@ function fakeApi() {
       return json(200, plot);
     }
     if (route === 'POST /api/chats/import') {
-      const request = read() as { plotId: string; personaId?: string; sha256: string; messages: ImportedChatMessage[] };
+      const request = read() as {
+        plotId: string;
+        personaId?: string;
+        sha256: string;
+        fileName: string;
+        messages: ImportedChatMessage[];
+      };
       const earlier = [...chats.values()].filter((chat) => chat.sha256 === request.sha256);
       const finished = earlier.find((chat) => !chat.importing);
       if (finished) return json(409, { error: 'dup', code: 'already_imported', chatId: finished.id });
@@ -285,12 +316,27 @@ function fakeApi() {
         plotId: request.plotId,
         ...(request.personaId ? { personaId: request.personaId } : {}),
         sha256: request.sha256,
+        fileName: request.fileName,
         importing: true,
         messages: [...request.messages],
       };
       const ids = rowsFor(chat, request.messages);
+      chat.tip = treeRows(chat, null, request.messages, ids);
       chats.set(chat.id, chat);
       return json(201, { chat: { id: chat.id }, inserted: request.messages.length, ids });
+    }
+    const treeMatch = /^GET \/api\/chats\/([^/]+)\/import\/tree$/.exec(route);
+    if (treeMatch) {
+      const chat = chats.get(treeMatch[1]!)!;
+      return json(200, {
+        messages: (chat.rows ?? []).map((row) => ({
+          id: row.id,
+          parentId: row.parentId,
+          role: row.role,
+          speakerId: null,
+          sha256: createHash('sha256').update(row.text).digest('hex'),
+        })),
+      });
     }
     const chatMatch = /^POST \/api\/chats\/([^/]+)\/import(\/complete)?$/.exec(route);
     if (chatMatch) {
@@ -323,11 +369,13 @@ function fakeApi() {
           ...(body.branch.file ? { file: body.branch.file.fileName } : {}),
         });
         if (body.branch.file) (chat.branchFiles ??= []).push(body.branch.file.sha256);
+        treeRows(chat, body.branch.parentId, body.messages, ids);
         const tail = ids.length > 0 ? ids.at(-1)![body.messages.at(-1)!.selected]! : body.branch.parentId;
         return json(200, { inserted: 1, total: chat.messages.length, ids, tail });
       }
       chat.messages.push(...body.messages);
       const ids = rowsFor(chat, body.messages);
+      chat.tip = treeRows(chat, chat.tip ?? null, body.messages, ids);
       return json(200, { inserted: 1, total: chat.messages.length, ids, tail: ids.at(-1)?.[0] ?? null });
     }
     return json(500, { error: `unrouted ${route}`, code: 'internal_error' });
@@ -1445,5 +1493,55 @@ describe('runImport - SillyTavern branches and checkpoints', () => {
     // A second run finds every branch file in the chat it went into.
     const again = await runAll(api, branchedLibrary());
     expect(again.steps.filter((step) => step.kind === 'chat')).toEqual([]);
+  });
+
+  it('puts a branch whose chat an earlier run brought in into that chat as it now stands, and makes no chat of its own', async () => {
+    const api = fakeApi();
+    const mainFile = chatFile('chats/Alice/main.jsonl', { lines: ['a', 'b|b2', 'c', 'd'] });
+    await runAll(api, library({ characters: [character('Alice.png', 'Alice', { chats: [mainFile] })] }));
+    const [main] = [...api.chats.values()];
+    expect(main!.importing).toBe(false);
+    // The chat was played on from `b` since: a reply, `X`, that the branch also says.
+    main!.rows!.push({ id: 'played', parentId: main!.ids![1]![0]!, role: 'assistant', text: 'X' });
+
+    const later = library({
+      characters: [
+        character('Alice.png', 'Alice', {
+          chats: [
+            mainFile,
+            chatFile('chats/Alice/main - Branch #1.jsonl', { mainChat: 'main', lines: ['a', 'b', 'X', 'Y'] }),
+            chatFile('chats/Alice/deeper.jsonl', { mainChat: 'main - Branch #1', lines: ['a', 'b', 'X', 'Z|Y'] }),
+          ],
+        }),
+      ],
+    });
+    const { results } = await runAll(api, later);
+    expect(api.chats.size).toBe(1);
+    expect(main!.branches).toEqual([
+      // Under the reader's own `X`, which the chat already has.
+      { parentId: 'played', texts: ['Y'], file: 'main - Branch #1.jsonl' },
+      // A branch of the branch, under the same `X`, with only the version the chat lacks.
+      { parentId: 'played', texts: ['Z'], file: 'deeper.jsonl' },
+    ]);
+    expect(results['chat:chats/Alice/main - Branch #1.jsonl']).toMatchObject({
+      status: 'done',
+      chatId: main!.id,
+      notices: [{ code: 'chat_branch_merged', name: 'main' }],
+    });
+    // Nothing reopened the finished chat or closed it again: this run's writes are the two branches' batches.
+    expect(api.writes()).toEqual([`POST /api/chats/${main!.id}/import`, `POST /api/chats/${main!.id}/import`]);
+
+    // A branch of a chat no longer in the backup finds it by its file's name; the files it went into, by their hashes.
+    const gone = library({
+      characters: [
+        character('Alice.png', 'Alice', {
+          chats: [chatFile('chats/Alice/main - Branch #2.jsonl', { mainChat: 'main', lines: ['a', 'b2', 'W'] })],
+        }),
+      ],
+    });
+    await runAll(api, gone);
+    expect(api.chats.size).toBe(1);
+    expect(main!.branches!.at(-1)).toEqual({ parentId: main!.ids![1]![1], texts: ['W'], file: 'main - Branch #2.jsonl' });
+    expect((await runAll(api, gone)).steps.filter((step) => step.kind === 'chat')).toEqual([]);
   });
 });

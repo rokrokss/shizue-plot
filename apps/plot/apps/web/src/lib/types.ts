@@ -263,7 +263,18 @@ export interface PlotModuleSummary {
   lowLevelAccess: boolean;
   /** It brings triggers or input/output scripts the reader's browser runs. */
   scripts: boolean;
+  /** RisuAI's `hideIcon`: the chats it is on show no sender picture or name. */
+  hideIcon?: boolean;
+  /** An MCP server or `cjs` code it carries, kept and never connected to or run. */
+  inert?: ModuleInert;
   importedFrom: { fileName: string; sha256: string; importedAt: string };
+}
+
+/** What of RisuAI's MCP and `cjs` a module carries (`PlotModule.inert` in @shizue/core). */
+export interface ModuleInert {
+  /** The MCP server's address, '' where the module names none. */
+  mcp?: string;
+  cjs?: true;
 }
 
 export interface PlotDetail extends Plot {
@@ -519,10 +530,20 @@ export interface ReaderModuleSummary {
   toggles: boolean;
   lowLevelAccess: boolean;
   scripts: boolean;
+  /** RisuAI's `hideIcon`: the chats it is on show no sender picture or name. */
+  hideIcon?: boolean;
+  /** An MCP server or `cjs` code it carries, kept and never connected to or run. */
+  inert?: ModuleInert;
+  /** RisuAI's `namespace`, what a reader preset's module integration names it by. */
+  namespace?: string | null;
   importedFrom: { fileName: string; sha256: string; importedAt: string };
   createdAt: string;
   /** In `GET /api/chats/:id/modules` only: whether that chat's own list names it. */
   listedHere?: boolean;
+  /** In `GET /api/chats/:id/modules` only: on for every chat of that chat's work (RisuAI's character `modules`). */
+  onThisWork?: boolean;
+  /** In `GET /api/chats/:id/modules` only: on in that chat, by whichever list — the preset's integration too. */
+  onHere?: boolean;
 }
 
 /** A library module on a chat, as the page draws it (`GET /api/chats/:id/modules` `active`). */
@@ -541,8 +562,10 @@ export interface ActiveReaderModule {
 export interface ChatModulesView {
   library: ReaderModuleSummary[];
   active: ActiveReaderModule[];
-  /** The toggle text the chat's settings draw: the modules' on the chat, then the members' own. */
+  /** The toggle text the chat's settings draw: the reader preset's, the modules' on the chat, then the members' own. */
   toggles: string;
+  /** RisuAI's `HideIconStore`: the chat draws no message's sender picture or name. Optional for a hand-built view. */
+  hideIcons?: boolean;
 }
 
 export interface ReaderPreset {
@@ -550,6 +573,10 @@ export interface ReaderPreset {
   name: string;
   main: string;
   globalNote: string;
+  /** RisuAI's preset toggles (`customPromptTemplateToggle`), drawn first among a chat's toggles. */
+  toggles: string;
+  /** RisuAI's `moduleIntergration`: namespaces whose library modules a chat on it turns on. */
+  moduleIntegration: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -705,6 +732,11 @@ export interface Chat {
    * hand needs none.
    */
   modules?: string[];
+  /**
+   * RisuAI's "Local Toggles": while on, the toggles set in this chat keep their
+   * values to it. Optional so a state built by hand needs none.
+   */
+  localToggles?: boolean;
   /** Reusable notes attached to this chat, in injection order. */
   noteIds: string[];
   /**

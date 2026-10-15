@@ -75,6 +75,11 @@ describe('toggles', () => {
     const text = chatToggleText([{ toggles: 'w=작품 모듈' }, {}, { toggles: 'r=독자 모듈' }], ['c=카드']);
     expect(parseToggleSyntax(text).map((toggle) => toggle.key)).toEqual(['w', 'r', 'c']);
   });
+
+  it('puts the reader preset’s toggles before the modules’, as RisuAI puts its preset’s', () => {
+    const text = chatToggleText([{ toggles: 'w=작품 모듈' }], ['c=카드'], 'p=프리셋');
+    expect(parseToggleSyntax(text).map((toggle) => toggle.key)).toEqual(['p', 'w', 'c']);
+  });
 });
 
 describe('a module’s toggles at import', () => {

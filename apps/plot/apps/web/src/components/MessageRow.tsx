@@ -145,7 +145,7 @@ function ThinkingClock({
       className="flex items-start gap-2.5"
     >
       {/* The line says the name; the face is the same name drawn. */}
-      <span aria-hidden="true">
+      <span aria-hidden="true" className="chat-face">
         <Avatar src={face.avatarUrl} name={face.name} className="size-10 text-sm" />
       </span>
       {bubble}
@@ -847,9 +847,9 @@ export const MessageRow = memo(function MessageRow({
     return (
       <div data-testid="message-user" {...memberProps} className="group flex flex-row-reverse gap-2.5">
         {grouped ? (
-          <div aria-hidden="true" className="w-10 shrink-0" />
+          <div aria-hidden="true" className="chat-face w-10 shrink-0" />
         ) : (
-          <Avatar src={userImage ?? null} name={name} className={cx('size-10 text-sm', dim)} />
+          <Avatar src={userImage ?? null} name={name} className={cx('chat-face size-10 text-sm', dim)} />
         )}
         <div className="relative flex min-w-0 flex-1 flex-col items-end">
           {/* A continued turn is the same reader moments later: the name was
@@ -1004,9 +1004,9 @@ export const MessageRow = memo(function MessageRow({
     <div data-testid="message-assistant" {...memberProps} className="group flex gap-2.5">
       {grouped ? (
         // The avatar's own width, so a continued turn stays in the column.
-        <div aria-hidden="true" className="w-10 shrink-0" />
+        <div aria-hidden="true" className="chat-face w-10 shrink-0" />
       ) : (
-        <Avatar src={avatar} name={name} className={cx('size-10 text-sm', dim)} />
+        <Avatar src={avatar} name={name} className={cx('chat-face size-10 text-sm', dim)} />
       )}
       <div className="relative min-w-0 flex-1">
         {grouped ? (

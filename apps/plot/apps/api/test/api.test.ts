@@ -9316,6 +9316,63 @@ describe('chat import', () => {
     );
   });
 
+  it('hangs a branch file of a later run onto the chat an earlier run finished, which the run finds by its file’s name and tree', async () => {
+    const cookie = await signUp('chat-import-branch-later@example.com');
+    const plot = await createPlot(cookie, { name: '나중 갈래', intros: ['도입부'] });
+    const first = await importChat(cookie, plot.id, [turn('assistant', ['인사']), turn('user', ['질문'])]);
+    const chatId = first.chat.id;
+    expect((await complete(cookie, chatId)).status).toBe(200);
+    const [[greeting], [question]] = first.ids as string[][];
+
+    // The file's name, as `importChat` sends it, and the branches it holds, find it.
+    const named = await readJson(
+      await json(cookie, '/api/imports/lookup', 'POST', { sha256: [], chatFiles: ['chat.jsonl', 'nothing.jsonl'] }),
+    );
+    expect(named.named).toEqual([{ fileName: 'chat.jsonl', chatId, plotId: plot.id, importing: false }]);
+    const stranger = await signUp('chat-import-branch-later-stranger@example.com');
+    expect((await readJson(await json(stranger, '/api/imports/lookup', 'POST', { sha256: [], chatFiles: ['chat.jsonl'] }))).named).toEqual([]);
+    expect((await json(cookie, '/api/imports/lookup', 'POST', { sha256: [], chatFiles: [1] })).status).toBe(400);
+
+    // The tree as it stands: each row's place, speaker and the SHA-256 of its text, never the text.
+    const tree = await readJson(await request(cookie, `/api/chats/${chatId}/import/tree`));
+    const digest = (text: string): string => createHash('sha256').update(text).digest('hex');
+    expect(tree.messages).toEqual([
+      { id: greeting, parentId: null, role: 'assistant', speakerId: null, sha256: digest('인사') },
+      { id: question, parentId: greeting, role: 'user', speakerId: null, sha256: digest('질문') },
+    ]);
+    expect((await request(stranger, `/api/chats/${chatId}/import/tree`)).status).toBe(404);
+
+    // A branch batch goes onto the finished chat, under the slot, and leaves the head; a plain batch does not.
+    const branchSha = hashOf('later - Branch #1.jsonl');
+    const branch = await json(cookie, `/api/chats/${chatId}/import`, 'POST', {
+      messages: [turn('assistant', ['갈래'])],
+      branch: { parentId: question, file: { fileName: 'later - Branch #1.jsonl', sha256: branchSha } },
+    });
+    expect(branch.status, await branch.clone().text()).toBe(200);
+    expect((await json(cookie, `/api/chats/${chatId}/import`, 'POST', { messages: [turn('assistant', ['끝'])] })).status).toBe(409);
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    expect(state.path.map((m: any) => m.content)).toEqual(['인사', '질문']);
+    expect(state.chat.importing).toBe(false);
+    const [row] = await db.select({ importedFrom: chats.importedFrom, generatingAt: chats.generatingAt }).from(chats).where(eq(chats.id, chatId));
+    expect(row!.importedFrom!.branches).toEqual([{ fileName: 'later - Branch #1.jsonl', sha256: branchSha }]);
+    expect(row!.generatingAt).toBeNull();
+    // By the branch file's name too, for a branch of it.
+    expect((await readJson(await json(cookie, '/api/imports/lookup', 'POST', { sha256: [], chatFiles: ['later - Branch #1.jsonl'] }))).named).toEqual([
+      { fileName: 'later - Branch #1.jsonl', chatId, plotId: plot.id, importing: false },
+    ]);
+
+    // While a turn is being generated on the chat, a branch waits for it.
+    await db.update(chats).set({ generatingAt: new Date() }).where(eq(chats.id, chatId));
+    const busy = await json(cookie, `/api/chats/${chatId}/import`, 'POST', { messages: [], branch: { parentId: question } });
+    expect(busy.status).toBe(429);
+    await db.update(chats).set({ generatingAt: null }).where(eq(chats.id, chatId));
+
+    // A chat the reader started here takes no branch.
+    const own = (await startChat(cookie, plot.id)).chat.id;
+    expect((await json(cookie, `/api/chats/${own}/import`, 'POST', { messages: [], branch: { parentId: null } })).status).toBe(409);
+    expect((await request(cookie, `/api/chats/${own}/import/tree`)).status).toBe(404);
+  });
+
 });
 
 describe('relationship', () => {
@@ -13785,9 +13842,9 @@ describe('prompt scripts and SillyTavern lore', () => {
     expect(system).not.toContain('NOT-ARIA');
     // A send is ST's `normal` generation; the continue-only entry waits for one.
     expect(system).not.toContain('ON-CONTINUE');
-    // ST expands a key's macros before it matches: the key is the reader's name,
-    // so the `{{user}}` written into the turn as text no longer finds it.
-    expect(system).not.toContain('USER-KEY');
+    // ST expands a key's macros before it matches, and the turn's own as it
+    // stores it (`sendMessageAsUser`): both read the reader's name, so they meet.
+    expect(system).toContain('USER-KEY');
     // The card's ST variable macros ran in its description, the global one among
     // them — ST's chat holds the greeting at 0, so the reader's turn is 1.
     const globals = await json(cookie, `/api/chats/${created.chat.id}/global-variables`, 'GET');
@@ -13899,6 +13956,73 @@ describe('SillyTavern regex on the stored text and on World Info', () => {
     const [sibling] = await db.select().from(messages).where(eq(messages.id, fork.messageId));
     expect(sibling!.content).toBe('Y z');
   });
+  /** The texts of the chat's branch, as it reads from its head — not by the stamps, which two clocks write. */
+  const pathTexts = async (cookie: string, chatId: string): Promise<string[]> =>
+    (await readJson(await request(cookie, `/api/chats/${chatId}`))).path.map((message: any) => message.content);
+
+  it('stores the reader’s turn and an edit with their macros expanded, as ST’s substituteParams leaves them, and keeps what they wrote', async () => {
+    const { cookie, chatId } = await tavernChat('st-stored-macros@example.com', []);
+    const { app } = repliesApp(['답 {{user}}', '또 답']);
+    const sent = '{{setvar::mood::좋음}}{{char}}에게 {{user}}가 {{getvar::mood}}{{setglobalvar::seen::1}} {{img::우산}}';
+    expect((await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: sent }, app))).at(-1)!.event).toBe('done');
+    // The reply is the model's: ST expands no macro of it when it stores it.
+    expect((await pathTexts(cookie, chatId)).slice(1)).toEqual(['아리아에게 유저가 좋음 {{img::우산}}', '답 {{user}}']);
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    const [, user, reply] = state.path;
+    const [turn] = await db.select().from(messages).where(eq(messages.id, user.id));
+    expect(turn!.variableDelta).toEqual({ mood: '좋음' });
+    expect((await readJson(await request(cookie, `/api/chats/${chatId}/global-variables`))).variables).toEqual({ seen: '1' });
+
+    // An edit: ST's updateMessage puts it through substituteParams too, over the chat's variables now.
+    expect((await json(cookie, `/api/messages/${reply.id}`, 'PATCH', { content: '{{getvar::mood}}인 {{char}}{{setvar::mood::나쁨}}' })).status).toBe(200);
+    const [edited] = await db.select().from(messages).where(eq(messages.id, reply.id));
+    expect(edited!.content).toBe('좋음인 아리아');
+    expect(edited!.variableDelta).toEqual({ mood: '나쁨' });
+    const fork = await readJson(await json(cookie, `/api/messages/${user.id}`, 'PATCH', { content: '{{user}}와 {{char}}' }));
+    const [sibling] = await db.select().from(messages).where(eq(messages.id, fork.messageId));
+    expect(sibling!.content).toBe('유저와 아리아');
+    // What the scripts and macros of the turn left stays with the new version of it…
+    expect(sibling!.variableDelta).toEqual({ mood: '좋음' });
+    // …under what the edit's own macros write now.
+    const again = await readJson(await json(cookie, `/api/messages/${sibling!.id}`, 'PATCH', { content: '{{setvar::mood::흐림}}다시' }));
+    const [rewritten] = await db.select().from(messages).where(eq(messages.id, again.messageId));
+    expect([rewritten!.content, rewritten!.variableDelta]).toEqual(['다시', { mood: '흐림' }]);
+  });
+
+  it('keeps the macros of a turn in a work SillyTavern did not write, for the prompt to read', async () => {
+    const cookie = await signUp('st-stored-macros-risu@example.com');
+    const plot = await createPlot(cookie, { name: '리스 작품', description: '설명', intros: ['안녕'] });
+    await addCharacter(cookie, plot.id, { name: '아리아', card: { description: '설명' } });
+    const chatId = (await startChat(cookie, plot.id)).chat.id;
+    const { app, turns } = repliesApp(['답']);
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '{{char}}에게 {{setvar::mood::좋음}}' }, app));
+    expect((await pathTexts(cookie, chatId))[1]).toBe('{{char}}에게 {{setvar::mood::좋음}}');
+    // Read when the prompt is built, as RisuAI reads a turn's.
+    expect(turns[0]!.join('\n')).toContain('리스 작품에게');
+  });
+
+  it('stores a turn written as the narrator as ST’s narrator message: its macros, none of the reader’s scripts, and edits it on the narrator’s side', async () => {
+    const { cookie, chatId } = await tavernChat('st-stored-narration@example.com', [
+      script({ findRegex: '/문/g', replaceString: 'DOOR', placement: [1] }),
+      script({ findRegex: '/창/g', replaceString: 'WINDOW', placement: [3], runOnEdit: true }),
+      script({ findRegex: '/창/g', replaceString: 'PANE', placement: [1], runOnEdit: true }),
+    ]);
+    const { app } = repliesApp(['하나', '둘', '셋']);
+    for (const content of ['@: {{user}}가 문을 연다', '@내레이터: 문이 열린다', '안녕\n@내레이터: 문']) {
+      await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }, app));
+    }
+    expect((await pathTexts(cookie, chatId)).filter((_, index) => index % 2 === 1)).toEqual([
+      '@: 유저가 문을 연다',
+      '@내레이터: 문이 열린다',
+      '안녕\n@내레이터: DOOR',
+    ]);
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    const narration = state.path.find((message: any) => message.content === '@: 유저가 문을 연다');
+    const fork = await readJson(await json(cookie, `/api/messages/${narration.id}`, 'PATCH', { content: '@: 창이 열린다' }));
+    const [sibling] = await db.select().from(messages).where(eq(messages.id, fork.messageId));
+    expect(sibling!.content).toBe('@: WINDOW이 열린다');
+  });
+
   it('runs the prompt-only WORLD_INFO scripts over each ST entry as it is inserted, and leaves out one they empty', async () => {
     // world-info.js: getRegexedString(entry.content, WORLD_INFO, { depth: regexDepth, isPrompt: true })
     // after substituteParams; regexDepth is the entry's depth at a depth, none
@@ -16932,6 +17056,7 @@ describe('RisuAI modules', () => {
         assetCount: 1,
         background: true,
         lowLevelAccess: true,
+        hideIcon: false,
         scripts: true,
         importedFrom: { fileName: 'weather.risum', sha256: expect.stringMatching(/^[0-9a-f]{64}$/), importedAt: expect.any(String) },
       },
@@ -17360,6 +17485,126 @@ describe('reader modules', () => {
     const disclosed = await readJson(await request(owner, `/api/chats/${ownerChat}/scripts`));
     expect(disclosed.scripts.concealed).toBeUndefined();
     expect(disclosed.scripts.character.description).toBe('비밀 설정');
+  });
+
+  it('turns a module on for every chat of a work, as RisuAI’s character list does, and by the reader preset’s module integration', async () => {
+    const { cookie, plotId, chatId } = await workWithModule('reader-module-lists@example.com');
+    const created = await readJson(await upload(cookie, rainFile(), true));
+    const other = (await startChat(cookie, plotId)).chat.id;
+    const triggersOf = async (id: string): Promise<string[]> =>
+      (await readJson(await request(cookie, `/api/chats/${id}/scripts`))).scripts.triggers.map((trigger: any) => trigger.comment);
+    const libraryOf = async (id: string): Promise<any> => (await readJson(await request(cookie, `/api/chats/${id}/modules`))).library[0];
+
+    // On for the work: every chat of it, and no list of a chat's names it.
+    const on = await readJson(await json(cookie, `/api/reader-modules/${created.id}`, 'PATCH', { plotId, onPlot: true }));
+    expect(on.enabledGlobally).toBe(false);
+    expect(await triggersOf(chatId)).toEqual(['카드', '작품 모듈', '독자 모듈']);
+    expect(await triggersOf(other)).toEqual(['카드', '작품 모듈', '독자 모듈']);
+    expect(await libraryOf(chatId)).toMatchObject({ listedHere: false, onThisWork: true, onHere: true });
+    // Another work of the reader's is not this one.
+    const elsewhere = await workWithModule('reader-module-lists-elsewhere@example.com');
+    expect(await readJson(await request(elsewhere.cookie, `/api/chats/${elsewhere.chatId}/modules`))).toMatchObject({ library: [] });
+    expect((await json(cookie, `/api/reader-modules/${created.id}`, 'PATCH', { plotId: 'nope', onPlot: true })).status).toBe(400);
+    expect((await json(cookie, `/api/reader-modules/${created.id}`, 'PATCH', { plotId })).status).toBe(400);
+    expect((await json(cookie, `/api/reader-modules/${created.id}`, 'PATCH', {})).status).toBe(400);
+    await json(cookie, `/api/reader-modules/${created.id}`, 'PATCH', { plotId, onPlot: false });
+    expect(await triggersOf(chatId)).toEqual(['카드', '작품 모듈']);
+    const [row] = await db.select({ plotIds: readerModules.plotIds }).from(readerModules).where(eq(readerModules.id, created.id));
+    expect(row!.plotIds).toBeNull();
+
+    // The preset's module integration names the module by its namespace, on the chats that use the preset.
+    const preset = await readJson(
+      await json(cookie, '/api/reader-presets', 'POST', {
+        name: '통합',
+        moduleIntegration: ' weather , rain',
+        toggles: 'mood=분위기=select=밝게,어둡게',
+      }),
+    );
+    expect(preset).toMatchObject({ moduleIntegration: ' weather , rain', toggles: 'mood=분위기=select=밝게,어둡게' });
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { readerPresetId: preset.id });
+    expect(await triggersOf(chatId)).toEqual(['카드', '작품 모듈', '독자 모듈']);
+    expect(await triggersOf(other)).toEqual(['카드', '작품 모듈']);
+    expect(await libraryOf(chatId)).toMatchObject({ listedHere: false, onThisWork: false, onHere: true });
+    // Its toggles come first, as RisuAI's preset toggles do.
+    const view = await readJson(await request(cookie, `/api/chats/${chatId}/modules`));
+    expect(parseToggleSyntax(view.toggles).map((toggle) => toggle.key)).toEqual(['mood', 'lamp', 'umbrella', 'sky', 'cape']);
+    // Or by its id; and a name nothing goes by turns nothing on.
+    await json(cookie, `/api/reader-presets/${preset.id}`, 'PUT', { moduleIntegration: created.id });
+    expect(await triggersOf(chatId)).toEqual(['카드', '작품 모듈', '독자 모듈']);
+    await json(cookie, `/api/reader-presets/${preset.id}`, 'PUT', { moduleIntegration: 'snow' });
+    expect(await triggersOf(chatId)).toEqual(['카드', '작품 모듈']);
+    expect((await json(cookie, `/api/reader-presets/${preset.id}`, 'PUT', { moduleIntegration: 'x'.repeat(2001) })).status).toBe(400);
+  });
+
+  it('keeps a chat’s toggles to it while its Local Toggles is on, as RisuAI’s setGlobalChatVar does', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const { cookie, plotId, chatId } = await workWithModule('reader-local-toggles@example.com');
+    const other = (await startChat(cookie, plotId)).chat.id;
+    const read = async (id: string): Promise<Record<string, string>> =>
+      (await readJson(await request(cookie, `/api/chats/${id}/global-variables`))).variables;
+    const toggle = async (id: string, value: string): Promise<Record<string, string>> =>
+      (await readJson(await json(cookie, `/api/chats/${id}/global-variables`, 'PATCH', { variables: { toggle_umbrella: value }, toggles: true }))).variables;
+
+    // Off: the reader's global on the work, every chat of it.
+    expect((await toggle(chatId, '1'))['toggle_umbrella']).toBe('1');
+    expect((await read(other))['toggle_umbrella']).toBe('1');
+
+    const local = await readJson(await json(cookie, `/api/chats/${chatId}`, 'PATCH', { localToggles: true }));
+    expect(local.chat.localToggles).toBe(true);
+    expect((await toggle(chatId, '0'))['toggle_umbrella']).toBe('0');
+    expect((await read(chatId))['toggle_umbrella']).toBe('0');
+    expect((await read(other))['toggle_umbrella']).toBe('1');
+    // The chat's own value is what this chat's prompt and state read.
+    expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).globalVariables['toggle_umbrella']).toBe('0');
+    expect((await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing))).at(-1)!.event).toBe('done');
+    expect(prompts.at(-1)!.system).toContain('골짜기 0');
+    // A script's write is not a toggle's: it goes to the reader's globals, under the chat's own value.
+    expect((await readJson(await json(cookie, `/api/chats/${chatId}/global-variables`, 'PATCH', { variables: { toggle_umbrella: '2' } }))).variables['toggle_umbrella']).toBe('0');
+    expect((await read(other))['toggle_umbrella']).toBe('2');
+
+    // Switched off again, a toggle written here takes the chat's own value away and writes the global.
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { localToggles: false });
+    expect((await read(chatId))['toggle_umbrella']).toBe('0');
+    expect((await toggle(chatId, '1'))['toggle_umbrella']).toBe('1');
+    expect((await read(other))['toggle_umbrella']).toBe('1');
+    const [row] = await db.select({ local: chats.localGlobalVariables }).from(chats).where(eq(chats.id, chatId));
+    expect(row!.local).toBeNull();
+  });
+
+  it('hides the senders’ icons where a module or the card says so, and keeps an MCP server or cjs code inert', async () => {
+    const cookie = await signUp('reader-module-icons@example.com');
+    const plot = await createPlot(cookie, { intros: ['안녕.'] });
+    await addCharacter(cookie, plot.id, { name: '아리아', card: { description: '마녀.' } });
+    const chatId = (await startChat(cookie, plot.id)).chat.id;
+    const view = async (): Promise<any> => readJson(await request(cookie, `/api/chats/${chatId}/modules`));
+    expect((await view()).hideIcons).toBe(false);
+
+    const dice = { type: 'risuModule', id: 'risu-mcp', name: 'Dice', description: 'MCP from internal:dice', mcp: { url: 'internal:dice' }, hideIcon: true };
+    const res = await upload(cookie, new File([JSON.stringify(dice)], 'dice.json'));
+    expect(res.status).toBe(201);
+    const created = await readJson(res);
+    expect(created).toMatchObject({ hideIcon: true, inert: { mcp: 'internal:dice' }, importWarnings: [{ code: 'module_mcp_inert', count: 1 }] });
+    // In the library only, it hides nothing; on the chat, it hides every sender's icon.
+    expect((await view()).hideIcons).toBe(false);
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { modules: [created.id] });
+    expect((await view()).hideIcons).toBe(true);
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { modules: [] });
+
+    // A work's module says the same; its cjs is kept as a word and nothing more.
+    const form = new FormData();
+    form.append('file', new File([JSON.stringify({ ...dice, mcp: undefined, hideIcon: false, cjs: 'module.exports = 1' })], 'cjs.json'));
+    const imported = await request(cookie, `/api/plots/${plot.id}/modules`, 'POST', form);
+    expect(imported.status).toBe(201);
+    const owner = await readJson(imported);
+    expect(owner.importWarnings).toEqual([{ code: 'module_cjs_inert', count: 1 }]);
+    expect(owner.modules[0]).toMatchObject({ hideIcon: false, inert: { cjs: true } });
+    expect(JSON.stringify(owner)).not.toContain('module.exports');
+    expect((await view()).hideIcons).toBe(false);
+
+    // A RisuAI card's own `hideChatIcon`, in a work of one member.
+    const member = (await readPlot(cookie, plot.id)).characters[0];
+    await json(cookie, `/api/plots/${plot.id}/characters/${member.id}`, 'PATCH', { card: { extensions: { risuai: { hideChatIcon: true } } } });
+    expect((await view()).hideIcons).toBe(true);
   });
 
   it('holds a script’s model call and request to the trigger that makes them', async () => {

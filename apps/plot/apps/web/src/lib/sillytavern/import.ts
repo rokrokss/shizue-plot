@@ -1388,6 +1388,141 @@ async function importBranch(
   return { chatId: parent.chatId, messages: [...prefix.messages, ...tail], ids: [...prefix.ids, ...ids] };
 }
 
+/** A message of a chat as `GET /api/chats/:id/import/tree` gives it: where it hangs, who says it, its text's SHA-256. */
+export interface TreeMessage {
+  id: string;
+  parentId: string | null;
+  role: 'user' | 'assistant';
+  speakerId: string | null;
+  sha256: string;
+}
+
+const textSha256 = (text: string): Promise<string> => sha256Hex(new TextEncoder().encode(text));
+
+/**
+ * Where a SillyTavern branch or checkpoint parts from a chat an earlier run
+ * made — which the reader may have played on and branched since, so it is a
+ * tree rather than the line a run sends (`branchFork`). Read as `branchFork`
+ * reads a line: from the openings down, the branch is the chat for as long as
+ * one of the messages under the last it matched reads as its next (the same
+ * role, speaker and selected text); at the first that none does it goes in as
+ * one more version there — with only its versions the place does not have yet,
+ * the one it went on from among them — and the rest of it under that. A branch
+ * the chat already holds whole adds nothing.
+ */
+export async function forkInTree(
+  tree: readonly TreeMessage[],
+  branch: ImportedChatMessage[],
+): Promise<{ parentId: string | null; tail: ImportedChatMessage[] }> {
+  const children = new Map<string | null, TreeMessage[]>();
+  for (const row of tree) children.set(row.parentId, [...(children.get(row.parentId) ?? []), row]);
+  let parentId: string | null = null;
+  for (const [at, ours] of branch.entries()) {
+    const kin: TreeMessage[] = (children.get(parentId) ?? []).filter(
+      (row) => row.role === ours.role && (row.speakerId ?? undefined) === ours.speakerId,
+    );
+    const hashes = await Promise.all(ours.versions.map(textSha256));
+    const same: TreeMessage | undefined = kin.find((row) => row.sha256 === hashes[ours.selected]);
+    if (same) {
+      parentId = same.id;
+      continue;
+    }
+    const have = new Set(kin.map((row) => row.sha256));
+    const keep = ours.versions.map((_, index) => index).filter((index) => index === ours.selected || !have.has(hashes[index]!));
+    const own: ImportedChatMessage = {
+      ...ours,
+      versions: keep.map((index) => ours.versions[index]!),
+      selected: keep.indexOf(ours.selected),
+      ...(ours.extras ? { extras: keep.map((index) => ours.extras![index] ?? null) } : {}),
+    };
+    return { parentId, tail: [own, ...branch.slice(at + 1)] };
+  }
+  return { parentId, tail: [] };
+}
+
+/**
+ * A SillyTavern branch or checkpoint file whose chat an earlier run brought in
+ * (`chatId`), put into that chat as sibling branches, as a run puts one into
+ * the chat it makes (`importBranch`) — where it parts from the chat as it now
+ * stands (`forkInTree`), its batches under the chat's generation slot, the
+ * chat's head left where the reader left it. A file the chat holds already
+ * (the lookup finds it there, `importedFrom.branches`) is not brought twice.
+ */
+async function attachBranch(
+  ctx: RunContext,
+  owner: string,
+  item: ChatItem,
+  chatId: string,
+  rootName: string,
+  result: StepResult,
+): Promise<void> {
+  const ownerResult = chatOwner(ctx, owner, result);
+  if (!ownerResult) return;
+  const found = ctx.index.chats.get(item.sha256);
+  if (found && !found.importing) {
+    result.status = 'skipped';
+    result.reason = 'already_imported';
+    result.chatId = found.chatId;
+    return;
+  }
+  const text = new TextDecoder().decode(await readFile(item.chat.file));
+  const { converted, messages, swipes, overRows } = convertedChat(ctx, ownerResult, text);
+  result.dropped = { ...converted.skipped, swipes, swipesOverRows: overRows };
+  const tree = await request<{ messages: TreeMessage[] }>(ctx, 'GET', `/api/chats/${chatId}/import/tree`);
+  const { parentId, tail } = await forkInTree(tree.messages, messages);
+  const batches = tail.length > 0 ? batchMessages(tail) : [[]];
+  let under = parentId;
+  for (const [at, batch] of batches.entries()) {
+    ctx.signal?.throwIfAborted();
+    const last = at === batches.length - 1;
+    const answer = await request<{ tail: string | null }>(ctx, 'POST', `/api/chats/${chatId}/import`, {
+      messages: batch,
+      branch: {
+        parentId: under,
+        ...(last ? { file: { fileName: baseName(item.chat.file.path), sha256: item.sha256 } } : {}),
+      },
+    });
+    under = answer.tail ?? under;
+  }
+  result.chatId = chatId;
+  result.notices = [{ code: 'chat_branch_merged', name: rootName }];
+  delete result.warnings;
+  result.status = 'done';
+}
+
+/** A chat file's `chat_metadata.main_chat`, read once a run; null for none, or a file that cannot be read. */
+async function mainChatOf(ctx: RunContext, step: ChatStep): Promise<string | null> {
+  let main = ctx.mainChats.get(step.item.chat.file.path);
+  if (main === undefined) {
+    try {
+      main = ctx.deps.chatMainChat(new TextDecoder().decode(await readFile(step.item.chat.file))) ?? null;
+    } catch {
+      main = null;
+    }
+    ctx.mainChats.set(step.item.chat.file.path, main);
+  }
+  return main;
+}
+
+/**
+ * The chat an earlier run made of the file a branch or checkpoint names
+ * (`main_chat`, the file's name without `.jsonl`), on the plot this run puts
+ * the branch's owner in — or onto which it hung that file as a branch: where a
+ * branch whose chat this run does not bring goes. Null for a file nothing here
+ * came of, or one still importing.
+ */
+async function earlierChatOf(ctx: RunContext, owner: string, main: string): Promise<string | null> {
+  const plotId = ctx.results[owner]?.plotId;
+  if (!plotId) return null;
+  const answer = await request<{ named?: { fileName: string; chatId: string; plotId: string; importing: boolean }[] }>(
+    ctx,
+    'POST',
+    '/api/imports/lookup',
+    { sha256: [], chatFiles: [`${main}.jsonl`] },
+  );
+  return answer.named?.find((chat) => chat.plotId === plotId && !chat.importing)?.chatId ?? null;
+}
+
 /**
  * The chat files of `owner` this run brings, as SillyTavern's branches and
  * checkpoints hang together: each one whose `chat_metadata.main_chat` names
@@ -1398,15 +1533,7 @@ async function branchesOf(ctx: RunContext, steps: ChatStep[]): Promise<Map<strin
   const byName = new Map(steps.map((step) => [step.item.chat.name, step]));
   const children = new Map<string, ChatStep[]>();
   for (const step of steps) {
-    let main = ctx.mainChats.get(step.item.chat.file.path);
-    if (main === undefined) {
-      try {
-        main = ctx.deps.chatMainChat(new TextDecoder().decode(await readFile(step.item.chat.file))) ?? null;
-      } catch {
-        main = null;
-      }
-      ctx.mainChats.set(step.item.chat.file.path, main);
-    }
+    const main = await mainChatOf(ctx, step);
     const parent = main !== null ? byName.get(main) : undefined;
     if (!parent || parent === step) continue;
     children.set(parent.id, [...(children.get(parent.id) ?? []), step]);
@@ -1515,15 +1642,25 @@ export async function runImport(
    * A chat file and the SillyTavern branches made from it, in one chat: the
    * chat stays open until its branches are in, each hung where it parts from
    * the file it was made from. A branch that fails is said so and the rest go
-   * on; one whose parent did not come over comes over as a chat of its own.
+   * on. Where the chat came over in an earlier run — its file is here and
+   * already imported, or a branch names a file this run does not bring that an
+   * earlier run made a chat of (`earlierChatOf`) — the branches go into that
+   * chat as it now stands (`attachBranch`); one whose parent came over nowhere
+   * comes over as a chat of its own.
    */
   const runFamily = async (step: ChatStep, result: StepResult): Promise<void> => {
     const branches = (await familyOf(step)).get(step.id) ?? [];
-    if (branches.length === 0) {
+    const main = await mainChatOf(ctx, step);
+    const earlier = main !== null ? await earlierChatOf(ctx, step.owner, main) : null;
+    let made: Awaited<ReturnType<typeof runChat>> = null;
+    if (earlier && main !== null) await attachBranch(ctx, step.owner, step.item, earlier, main, result);
+    else if (branches.length === 0) {
       await runChat(ctx, step.owner, step.item, result);
       return;
-    }
-    const made = await runChat(ctx, step.owner, step.item, result, { open: true });
+    } else made = await runChat(ctx, step.owner, step.item, result, { open: true });
+    // The chat its branches go into: this run's, or the one an earlier run made of it.
+    const onto = earlier ?? (!made && result.reason === 'already_imported' ? (result.chatId ?? null) : null);
+    const rootName = earlier && main !== null ? main : step.item.chat.name;
     try {
       const queue: { step: ChatStep; parent: SentChat | null }[] = branches.map((branch) => ({
         step: branch,
@@ -1539,9 +1676,13 @@ export async function runImport(
         const branchResult = begin(next.step);
         let sent: SentChat | null = null;
         try {
-          sent = next.parent
-            ? await importBranch(ctx, next.step.owner, next.step.item, next.parent, step.item.chat.name, branchResult)
-            : (await runChat(ctx, next.step.owner, next.step.item, branchResult))?.sent ?? null;
+          if (next.parent) {
+            sent = await importBranch(ctx, next.step.owner, next.step.item, next.parent, rootName, branchResult);
+          } else if (onto) {
+            await attachBranch(ctx, next.step.owner, next.step.item, onto, rootName, branchResult);
+          } else {
+            sent = (await runChat(ctx, next.step.owner, next.step.item, branchResult))?.sent ?? null;
+          }
         } catch (caught) {
           failed(branchResult, caught);
         }

@@ -2,6 +2,7 @@
 
 import {
   readReaderPresetFile,
+  READER_PRESET_INTEGRATION_MAX,
   READER_PRESET_NAME_MAX,
   READER_PRESET_TEXT_MAX,
   ReaderPresetImportError,
@@ -22,6 +23,10 @@ interface Draft {
   name: string;
   main: string;
   globalNote: string;
+  /** RisuAI's preset toggles (`customPromptTemplateToggle`), in its toggle syntax. */
+  toggles: string;
+  /** RisuAI's `moduleIntergration`: namespaces, separated by commas. */
+  moduleIntegration: string;
   /** What the file it came from held, when it came from one — for the notice. */
   imported?: ReaderPresetImport;
 }
@@ -177,6 +182,8 @@ function ReaderPresetManager({
         name: imported.name || t('importedName'),
         main: imported.main,
         globalNote: imported.globalNote,
+        toggles: imported.toggles,
+        moduleIntegration: imported.moduleIntegration,
         imported,
       });
     } catch (caught) {
@@ -192,7 +199,13 @@ function ReaderPresetManager({
     if (!draft || busy) return;
     setBusy(true);
     setError('');
-    const body = { name: draft.name, main: draft.main, globalNote: draft.globalNote };
+    const body = {
+      name: draft.name,
+      main: draft.main,
+      globalNote: draft.globalNote,
+      toggles: draft.toggles,
+      moduleIntegration: draft.moduleIntegration,
+    };
     try {
       if (draft.id === null) {
         const created = await apiSend<ReaderPreset>('POST', '/api/reader-presets', body);
@@ -251,6 +264,23 @@ function ReaderPresetManager({
             rows={4}
             onChange={(globalNote) => setDraft({ ...draft, globalNote })}
           />
+          <TextField
+            label={t('toggles')}
+            hint={t('togglesHint')}
+            value={draft.toggles}
+            rows={3}
+            mono
+            onChange={(toggles) => setDraft({ ...draft, toggles })}
+          />
+          <Field label={t('moduleIntegration')} hint={t('moduleIntegrationHint')}>
+            <TextInput
+              value={draft.moduleIntegration}
+              maxLength={READER_PRESET_INTEGRATION_MAX}
+              spellCheck={false}
+              className="h-10 w-full font-mono text-sm"
+              onChange={(event) => setDraft({ ...draft, moduleIntegration: event.target.value })}
+            />
+          </Field>
           <div className="flex justify-end gap-2">
             <Button size="sm" variant="ghost" onClick={() => setDraft(null)}>
               {common('cancel')}
@@ -278,7 +308,16 @@ function ReaderPresetManager({
                     variant="ghost"
                     disabled={busy}
                     aria-label={t('editNamed', { name: preset.name })}
-                    onClick={() => setDraft({ id: preset.id, name: preset.name, main: preset.main, globalNote: preset.globalNote })}
+                    onClick={() =>
+                      setDraft({
+                        id: preset.id,
+                        name: preset.name,
+                        main: preset.main,
+                        globalNote: preset.globalNote,
+                        toggles: preset.toggles ?? '',
+                        moduleIntegration: preset.moduleIntegration ?? '',
+                      })
+                    }
                   >
                     {common('edit')}
                   </Button>
@@ -299,7 +338,7 @@ function ReaderPresetManager({
             <Button
               size="sm"
               disabled={busy}
-              onClick={() => setDraft({ id: null, name: '', main: '', globalNote: '' })}
+              onClick={() => setDraft({ id: null, name: '', main: '', globalNote: '', toggles: '', moduleIntegration: '' })}
             >
               {t('new')}
             </Button>
@@ -333,19 +372,28 @@ function TextField({
   hint,
   value,
   rows,
+  mono = false,
   onChange,
 }: {
   label: string;
   hint: string;
   value: string;
   rows: number;
+  /** A text of RisuAI's syntax rather than prose. */
+  mono?: boolean;
   onChange: (value: string) => void;
 }) {
   const format = useFormatter();
   const over = value.length > READER_PRESET_TEXT_MAX;
   return (
     <Field label={label} hint={hint}>
-      <TextArea rows={rows} value={value} className="w-full text-sm" onChange={(event) => onChange(event.target.value)} />
+      <TextArea
+        rows={rows}
+        value={value}
+        {...(mono ? { spellCheck: false } : {})}
+        className={`w-full text-sm${mono ? ' font-mono' : ''}`}
+        onChange={(event) => onChange(event.target.value)}
+      />
       <span className={`block text-right caption2 ${over ? 'text-danger' : 'text-muted'}`}>
         {format.number(value.length)} / {format.number(READER_PRESET_TEXT_MAX)}
       </span>
@@ -370,10 +418,12 @@ function ImportNotice({ imported }: { imported: ReaderPresetImport }) {
           : t('unnamedPrompt'));
   const lines = [
     ...imported.imported.map((part) => t('takenInto', { name: partName(part), field: t(part.into) })),
+    imported.toggles.trim() ? t('tookToggles') : '',
+    imported.moduleIntegration.trim() ? t('tookIntegration', { names: imported.moduleIntegration.trim() }) : '',
     names.length > 0 ? t('ignoredPrompts', { count: names.length, names: names.join(', ') }) : '',
     imported.ignoredSettings ? t('ignoredSettings') : '',
   ].filter((line) => line.length > 0);
-  const nothing = !imported.main && !imported.globalNote;
+  const nothing = !imported.main && !imported.globalNote && !imported.toggles.trim() && !imported.moduleIntegration.trim();
 
   return (
     <div data-testid="reader-preset-import-notice" className="space-y-1 rounded-lg bg-raised px-3 py-2 text-xs text-muted">

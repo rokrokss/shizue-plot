@@ -6,7 +6,8 @@ import { componentNames } from '@shizue/core/component';
 import { displayScriptsFor, orderedWithModules } from '@shizue/core/display-script';
 import { NARRATOR_SPEAKER } from '@shizue/core/group';
 import { fnv1a } from '@shizue/core/macro';
-import { NARRATION_PREFIX } from '@shizue/core/narration';
+import { isNarration, NARRATION_PREFIX } from '@shizue/core/narration';
+import { isNarrationTurn } from '@shizue/core/speech';
 import { isSceneMessage, sceneSpanAt } from '@shizue/core/scene';
 import { manualTriggerNames, type MemberOverlay, type TranslationScript } from '@shizue/core/triggers';
 import { computeVariables, DEFAULT_USER_NAME, type FoldOptions, type Variables } from '@shizue/core/variables';
@@ -124,7 +125,7 @@ import {
   translatesMessage,
   type ChatTranslationSettings,
 } from '@shizue/core/translation';
-import type { AuthorNoteSettings, EmotionProcessor } from '@shizue/core';
+import type { AuthorNoteSettings, DisplaySide, EmotionProcessor } from '@shizue/core';
 import type {
   ChatAttachment,
   ChatMemorySettings,
@@ -797,6 +798,18 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   useEffect(() => {
     void loadChatModules();
   }, [loadChatModules]);
+  /**
+   * The reader's presets after one was made, changed or deleted: the chat's own
+   * may have brought other toggles or, by its module integration, other modules.
+   */
+  const changeReaderPresets = useCallback(
+    (next: ReaderPreset[]) => {
+      setReaderPresets(next);
+      void loadChatModules();
+      reloadScripts();
+    },
+    [loadChatModules, reloadScripts],
+  );
   /** The library modules on this chat, in the order they run after the work's own. */
   const readerModules = useMemo(() => chatModules?.active ?? [], [chatModules]);
   /**
@@ -1342,6 +1355,29 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    */
   const displayOf = (row: Pick<ViewMessage, 'member' | 'spoken'>): DisplayContext | undefined =>
     row.member !== undefined && group ? (row.spoken ? displayByMember.get(row.member) : sceneDisplay) : display;
+  /**
+   * Which of SillyTavern's placements a row's display scripts keep to
+   * (`DisplaySide`): a narration — the 나레이션 button's, or a turn the reader
+   * wrote wholly as the narrator (`isNarrationTurn`) — is its narrator's
+   * (`SLASH_COMMAND`). Read once per text, as the roster reads it.
+   */
+  const narrationTurns = useMemo(() => {
+    const readers = members.map((member) => ({
+      id: member.id,
+      names: [member.name, ...(member.nickname?.trim() ? [member.nickname.trim()] : []), ...(member.aliases ?? [])],
+    }));
+    const seen = new Map<string, boolean>();
+    return (content: string): boolean => {
+      let narration = seen.get(content);
+      if (narration === undefined) {
+        narration = isNarrationTurn(content, readers);
+        seen.set(content, narration);
+      }
+      return narration;
+    };
+  }, [members]);
+  const sideOf = (row: Pick<ViewMessage, 'role' | 'content'>): DisplaySide =>
+    (row.role === 'user' ? narrationTurns(row.content) : isNarration(row.content)) ? 'narration' : row.role;
   /**
    * The manual triggers a row's own `{{button}}`s run, as a template's do: in a
    * work of several, its speaker's, the lead's for a message no member speaks.
@@ -2775,11 +2811,18 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     retrieval?: { enabled: boolean };
     /** The reader's library modules this chat's own list turns on. */
     modules?: string[];
+    /** RisuAI's "Local Toggles": the toggles set here keep their values to this chat. */
+    localToggles?: boolean;
   }): Promise<void> {
     if (!beginMutation()) return;
     setSettingsError('');
     try {
       applyState(await apiSend<ChatState>('PATCH', `/api/chats/${id}`, patch));
+      // The reader preset brings its toggles and, by its module integration, modules.
+      if ('readerPresetId' in patch) {
+        void loadChatModules();
+        reloadScripts();
+      }
     } catch (caught) {
       setSettingsError(toMessage(caught));
     } finally {
@@ -2800,7 +2843,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
 
   /**
    * One of the reader's global variables on the work — a toggle's value
-   * (`toggle_<key>`) — written at once, as RisuAI writes it, and the page's copy
+   * (`toggle_<key>`) — written at once, as RisuAI writes it (`setGlobalChatVar`:
+   * to this chat alone while its "Local Toggles" is on), and the page's copy
    * taken from the answer, which the scripts and the next prompt read.
    */
   async function setGlobalVariable(name: string, value: string): Promise<void> {
@@ -2808,6 +2852,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     try {
       const answer = await apiSend<{ variables: Variables }>('PATCH', `/api/chats/${id}/global-variables`, {
         variables: { [name]: value },
+        toggles: true,
       });
       setState((current) => (current ? { ...current, globalVariables: answer.variables } : current));
     } catch (caught) {
@@ -3131,7 +3176,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               personas={personas}
               readerPresetId={state.chat.readerPresetId}
               readerPresets={readerPresets}
-              onReaderPresetsChange={setReaderPresets}
+              onReaderPresetsChange={changeReaderPresets}
               disabled={settingsLocked}
               retrieval={state.chat.retrieval?.enabled ?? false}
               onChange={(patch) => void updateSettings(patch)}
@@ -3240,10 +3285,14 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                     text={chatModules?.toggles ?? ''}
                     values={state.globalVariables}
                     onSet={setGlobalVariable}
+                    local={state.chat.localToggles ?? false}
+                    disabled={settingsLocked}
+                    onLocal={(localToggles) => updateSettings({ localToggles })}
                   />
                   {chatModules ? (
                     <ReaderModules
                       library={chatModules.library}
+                      plotId={state.chat.plotId}
                       chatIds={state.chat.modules ?? []}
                       disabled={settingsLocked}
                       onChatIds={async (modules) => {
@@ -3282,6 +3331,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               // Positioned only over a background, which it has to paint above —
               // and what stands on it with no bubble of its own gets a veil there.
               className={cx('min-h-0 flex-1 overflow-y-auto overscroll-contain', backgroundContext && 'chat-backdrop relative')}
+              // RisuAI's `HideIconStore`: a module or the card hides every sender's picture and name.
+              {...(chatModules?.hideIcons ? { 'data-hide-icons': '' } : {})}
               // Reading upwards into a long chat: near the top, the window before this
               // one is fetched and put in above without moving what is on screen.
               onScroll={(event) => {
@@ -3406,8 +3457,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                           ) ?? resolveAsset
                         }
                         attachments={message.attachments}
-                        {...(displayContextAt(displayOf(message), meta.depth, message.role)
-                          ? { display: displayContextAt(displayOf(message), meta.depth, message.role)! }
+                        {...(displayContextAt(displayOf(message), meta.depth, sideOf(message))
+                          ? { display: displayContextAt(displayOf(message), meta.depth, sideOf(message))! }
                           : {})}
                         {...(buttonsOf(message) ? { buttons: buttonsOf(message)! } : {})}
                         {...(components ? { components } : {})}
@@ -3900,7 +3951,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             personas={personas}
             readerPresetId={state.chat.readerPresetId}
             readerPresets={readerPresets}
-            onReaderPresetsChange={setReaderPresets}
+            onReaderPresetsChange={changeReaderPresets}
             disabled={settingsLocked}
             retrieval={state.chat.retrieval?.enabled ?? false}
             onChange={(patch) => void updateSettings(patch)}

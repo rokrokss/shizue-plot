@@ -327,12 +327,22 @@ export interface DisplayScript {
   maxDepth?: number;
   /**
    * The only messages the script runs on, by who wrote them — SillyTavern's
-   * placement of a display-only script: `USER_INPUT` alone is the reader's
-   * turns, `AI_OUTPUT` alone the replies. Absent, every message, as RisuAI's
-   * display scripts run (`inDisplayRole`).
+   * placement of a display-only script: `USER_INPUT` is the reader's turns,
+   * `AI_OUTPUT` the replies, `SLASH_COMMAND` ST's narrator's messages, which
+   * here are the narrations (`DisplaySide`). One side, or the two it runs on;
+   * absent, every message, as RisuAI's display scripts run (`inDisplayRole`).
    */
-  role?: 'user' | 'assistant';
+  role?: DisplaySide | DisplaySide[];
 }
+
+/**
+ * Which of SillyTavern's placements a message on screen is (`messageFormatting`'s
+ * `getRegexPlacement`): the reader's turn (`USER_INPUT`), a reply (`AI_OUTPUT`),
+ * or a narration — ST's narrator message (`SLASH_COMMAND`): a narration turn
+ * the 나레이션 button generated, or a turn of the reader's written wholly as the
+ * narrator (`isNarrationTurn`).
+ */
+export type DisplaySide = 'user' | 'assistant' | 'narration';
 
 export type DisplayScriptAction = 'move_top' | 'move_bottom' | 'repeat_back';
 
@@ -718,6 +728,18 @@ export interface PlotModule {
    * is on, their values the reader's global `toggle_<key>` variables.
    */
   toggles?: string;
+  /**
+   * RisuAI's `hideIcon`: while the module is on a chat, no message there shows
+   * its sender's picture or name (`moduleUpdate` → `HideIconStore`).
+   */
+  hideIcon?: true;
+  /**
+   * What RisuAI would connect to or run that this service never does, kept so
+   * the reader is told and nothing more: an MCP module's server (`mcp.url`,
+   * RisuAI's tool calls) and `cjs` code (a field RisuAI itself no longer reads).
+   * Never executed, fetched or sent anywhere — the module is inert in them.
+   */
+  inert?: { mcp?: string; cjs?: true };
   /** The `editdisplay` scripts of `regex`, as display scripts — run after the work's, on every message. */
   displayScripts?: DisplayScript[];
   /** The `<style>` elements of the module's `backgroundEmbedding`, drawn after the work's stylesheet. */

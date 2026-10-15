@@ -22,6 +22,7 @@ import { Hono } from 'hono';
 import { randomUUID } from 'node:crypto';
 import type { AppDeps, AppEnv, Tx } from '../deps.js';
 import { ApiError, badRequest, notFound } from '../errors.js';
+import { acquireChatSlot, rejectBusyChat, releaseChatSlot } from '../generation.js';
 import { enqueueJob } from '../jobs.js';
 import { memoryChannel, summaryDue } from '../memory.js';
 import { attachedNoteIds } from '../notes.js';
@@ -338,15 +339,22 @@ async function branchPlace(
   return siblings?.oldest ? { before: siblings.oldest.getTime(), latest } : { latest };
 }
 
-/** The chat a batch or the completion writes to: the caller's, locked, still importing. */
-async function lockImportingChat(tx: Tx, id: string, userId: string) {
+/**
+ * The chat a batch or the completion writes to: the caller's, locked, still
+ * importing — or, for a SillyTavern branch (`finished`), one an earlier import
+ * made and finished, which a branch file of it brought in a later run is hung
+ * onto (`importedFrom`).
+ */
+async function lockImportingChat(tx: Tx, id: string, userId: string, { finished = false }: { finished?: boolean } = {}) {
   const [chat] = await tx
     .select()
     .from(chats)
     .where(and(eq(chats.id, id), eq(chats.userId, userId)))
     .for('update');
   if (!chat) throw notFound('Chat not found');
-  if (!chat.importing) throw new ApiError(409, 'chat_not_importing', 'This chat has finished importing');
+  if (!chat.importing && !(finished && chat.importedFrom)) {
+    throw new ApiError(409, 'chat_not_importing', 'This chat has finished importing');
+  }
   return chat;
 }
 
@@ -369,6 +377,11 @@ export function importRoutes(deps: AppDeps): Hono<AppEnv> {
    * hashes. Only their own: someone else's library is not a thing a backup can
    * be checked against. A chat still importing is reported as such — the wizard
    * restarts it rather than treating the file as done.
+   *
+   * With `chatFiles` — file names — the chats an earlier run made of a file of
+   * that name, or hung a branch file of that name onto (`named`, with their
+   * plots): where a SillyTavern branch whose `main_chat` names a file this run
+   * does not bring goes.
    */
   app.post('/lookup', async (c) => {
     const userId = c.get('userId');
@@ -380,8 +393,18 @@ export function importRoutes(deps: AppDeps): Hono<AppEnv> {
         `sha256 must be an array of at most ${MAX_LOOKUP_HASHES} lowercase hex SHA-256 digests`,
       );
     }
+    const files = body['chatFiles'];
+    if (
+      files !== undefined &&
+      (!Array.isArray(files) ||
+        files.length > MAX_LOOKUP_HASHES ||
+        !files.every((name) => typeof name === 'string' && name.length > 0 && name.length <= MAX_IMPORT_FILE_NAME_LENGTH))
+    ) {
+      throw badRequest('invalid_request', `chatFiles must be an array of at most ${MAX_LOOKUP_HASHES} file names`);
+    }
+    const named = Array.isArray(files) ? await chatsNamed(userId, new Set(files as string[])) : undefined;
     const hashes = [...new Set(value)];
-    if (hashes.length === 0) return c.json({ characters: [], chats: [] });
+    if (hashes.length === 0) return c.json({ characters: [], chats: [], ...(named ? { named } : {}) });
 
     const memberHash = sql<string>`${characters.importedFrom}->>'sha256'`;
     const members = await deps.db
@@ -405,8 +428,25 @@ export function importRoutes(deps: AppDeps): Hono<AppEnv> {
         if (wanted.has(branch.sha256)) imported.push({ sha256: branch.sha256, chatId: chat.chatId, importing: chat.importing });
       }
     }
-    return c.json({ characters: members, chats: imported });
+    return c.json({ characters: members, chats: imported, ...(named ? { named } : {}) });
   });
+
+  /** The caller's chats an import made of a file of one of these names, or hung a branch file of one onto. */
+  async function chatsNamed(
+    userId: string,
+    names: ReadonlySet<string>,
+  ): Promise<{ fileName: string; chatId: string; plotId: string; importing: boolean }[]> {
+    if (names.size === 0) return [];
+    const imported = await deps.db
+      .select({ chatId: chats.id, plotId: chats.plotId, importing: chats.importing, importedFrom: chats.importedFrom })
+      .from(chats)
+      .where(and(eq(chats.userId, userId), isNotNull(chats.importedFrom)));
+    return imported.flatMap((chat) =>
+      [chat.importedFrom?.fileName, ...(chat.importedFrom?.branches ?? []).map((branch) => branch.fileName)]
+        .filter((name): name is string => name !== undefined && names.has(name))
+        .map((fileName) => ({ fileName, chatId: chat.chatId, plotId: chat.plotId, importing: chat.importing })),
+    );
+  }
 
   return app;
 }
@@ -506,7 +546,10 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
    * message joins the siblings there before them (`appendImported`), and the head
    * stays where it is. A branch's later batches hang under the tail the one before
    * it answered. Its last batch names its file, which the chat records in
-   * `importedFrom.branches`, so the lookup finds it as this chat.
+   * `importedFrom.branches`, so the lookup finds it as this chat. A branch may
+   * also go onto a chat an earlier run made and finished — its file came in a
+   * later run (`GET /:id/import/tree` says where it parts) — under the chat's
+   * generation slot, as the reader may be playing it (429 meanwhile).
    */
   app.post('/:id/import', async (c) => {
     const id = requireUuidParam(c);
@@ -514,9 +557,60 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
     const body = await readJsonBody(c);
     const batch = requireImportedMessages(body);
     const branch = optionalBranch(body);
+    // A branch onto a chat an earlier run finished: the reader may be playing it,
+    // so the batch waits for no turn and no turn for it — the generation slot.
+    const [current] = await deps.db
+      .select({ importing: chats.importing })
+      .from(chats)
+      .where(and(eq(chats.id, id), eq(chats.userId, userId)))
+      .limit(1);
+    if (!current) throw notFound('Chat not found');
+    const live = branch !== undefined && !current.importing;
+    if (live && !(await acquireChatSlot(deps, id, userId))) await rejectBusyChat(deps, id, userId);
+    try {
+      return c.json(await appendBatch(id, userId, batch, branch));
+    } finally {
+      if (live) await releaseChatSlot(deps, id);
+    }
+  });
 
-    const result = await deps.db.transaction(async (tx) => {
-      const chat = await lockImportingChat(tx, id, userId);
+  /**
+   * The chat as an earlier import left it and the reader has played it since,
+   * for a SillyTavern branch or checkpoint file brought in a later run to find
+   * where it parts from it (the web's `forkInTree`): every message of the chat,
+   * its place in the tree, who says it, and its text's SHA-256 rather than the
+   * text. The caller's own chats, and only ones an import made.
+   */
+  app.get('/:id/import/tree', async (c) => {
+    const id = requireUuidParam(c);
+    const [chat] = await deps.db
+      .select({ importedFrom: chats.importedFrom })
+      .from(chats)
+      .where(and(eq(chats.id, id), eq(chats.userId, c.get('userId'))))
+      .limit(1);
+    if (!chat?.importedFrom) throw notFound('Chat not found');
+    const rows = await deps.db
+      .select({
+        id: messages.id,
+        parentId: messages.parentId,
+        role: messages.role,
+        speakerId: messages.speakerMemberId,
+        sha256: sql<string>`encode(sha256(convert_to(${messages.content}, 'UTF8')), 'hex')`,
+      })
+      .from(messages)
+      .where(eq(messages.chatId, id))
+      .orderBy(asc(messages.createdAt), asc(messages.id));
+    return c.json({ messages: rows });
+  });
+
+  async function appendBatch(
+    id: string,
+    userId: string,
+    batch: ReturnType<typeof requireImportedMessages>,
+    branch: ReturnType<typeof optionalBranch>,
+  ) {
+    return deps.db.transaction(async (tx) => {
+      const chat = await lockImportingChat(tx, id, userId, { finished: branch !== undefined });
       const [stored] = await tx
         .select({ rows: count(), latest: max(messages.createdAt) })
         .from(messages)
@@ -543,8 +637,7 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
       }
       return { inserted: rowsOf(batch), total: rows + rowsOf(batch), ids, tail: head };
     });
-    return c.json(result);
-  });
+  }
 
   /**
    * The import is done: the chat becomes an ordinary one.

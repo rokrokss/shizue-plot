@@ -261,6 +261,7 @@ describe('a charx as a module', () => {
     expect(parsed.lowLevelAccess).toBe(true);
     expect(parsed.backgroundEmbedding).toBe(risuModule.backgroundEmbedding);
     expect(parsed.namespace).toBe('weather');
+    expect(parsed.hideIcon).toBe(false);
     // The x-risu-asset alone: the icon (here RisuAI's stand-in) is not a module's picture.
     expect(parsed.assets.map((asset) => [asset.name, asset.bytes])).toEqual([['rain', rainPicture]]);
 
@@ -326,6 +327,38 @@ describe('plotModuleOf', () => {
     expect(module.backgroundHtml).toBe('<div class="rain">비</div>');
     expect(module.lowLevelAccess).toBe(true);
     expect(module.regex).toHaveLength(3);
+    expect(module.hideIcon).toBeUndefined();
+    expect(module.inert).toBeUndefined();
+  });
+
+  it('keeps RisuAI’s hideIcon, and an MCP server and cjs code only as a record of what is never run', () => {
+    const json = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
+    const record = { id: 'm-2', name: 'x', description: '', lorebook: [], assets: [], importedFrom: { fileName: 'x.json', sha256: 'x', importedAt: '2026-10-15T00:00:00.000Z' } };
+    // `importMCPModule`'s module: a name, a description and the server, nothing else.
+    const mcp = parseRisuModule(
+      json({ type: 'risuModule', id: 'risu-mcp', name: 'Dice', description: 'MCP from internal:dice', mcp: { url: 'internal:dice' } }),
+    );
+    expect(mcp.inert).toEqual({ mcp: 'internal:dice' });
+    expect(plotModuleOf(mcp, record).inert).toEqual({ mcp: 'internal:dice' });
+
+    const both = parseRisuModule(
+      json({ ...risuModule, type: 'risuModule', hideIcon: true, cjs: 'module.exports = () => fetch("https://x")', mcp: {} }),
+    );
+    expect(both.hideIcon).toBe(true);
+    // An MCP object naming no server is still one (RisuAI draws its glyph); the code is not kept.
+    expect(both.inert).toEqual({ mcp: '', cjs: true });
+    const module = plotModuleOf(both, record);
+    expect(module.hideIcon).toBe(true);
+    expect(JSON.stringify(module)).not.toContain('fetch(');
+    // The rest of such a module is a module like any other.
+    expect(module.displayScripts).toHaveLength(1);
+
+    // A charx says it as the character's `hideChatIcon`, which RisuAI makes the module's `hideIcon`.
+    const charx = parseRisuModule(
+      buildCharx(v3({ name: '숨김', extensions: { risuai: { hideChatIcon: true } } }), [], {}),
+    );
+    expect(charx.hideIcon).toBe(true);
+    expect(charx.inert).toBeUndefined();
   });
 });
 

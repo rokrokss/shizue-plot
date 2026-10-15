@@ -101,13 +101,18 @@ export const isEmptyGroup = (entry: ToggleEntry): boolean => isToggleGroup(entry
 export const toggleVariable = (key: string): string => `toggle_${key}`;
 
 /**
- * The toggle text RisuAI's sidebar draws for a chat: the modules' toggles, each
- * on its own lines in the modules' order (`getModuleToggles`), then the
- * character's own (`customModuleToggle`, a card's `extensions.risuai.toggles`).
- * RisuAI puts the prompt preset's toggles first; a preset here has none.
+ * The toggle text RisuAI's sidebar draws for a chat (`Toggles.svelte`): the
+ * prompt preset's own (`customPromptTemplateToggle` — here the chat's reader
+ * preset's), then the modules' toggles, each on its own lines in the modules'
+ * order (`getModuleToggles`), then the character's own (`customModuleToggle`, a
+ * card's `extensions.risuai.toggles`).
  */
-export function chatToggleText(modules: readonly { toggles?: string }[], character: readonly string[]): string {
+export function chatToggleText(
+  modules: readonly { toggles?: string }[],
+  character: readonly string[],
+  preset = '',
+): string {
   let text = '';
   for (const module of modules) if (module.toggles) text += `\n${module.toggles}\n`;
-  return `${text}\n${character.filter(Boolean).join('\n')}`;
+  return `${preset}\n${text}\n${character.filter(Boolean).join('\n')}`;
 }

@@ -1639,14 +1639,31 @@ describe('SillyTavern cards', () => {
       { in: 'user', out: '<div class="hp">$& → $1</div>', order: 1, enabled: true, role: 'user' },
       { in: 'bare $', out: '[$&]', order: 2, enabled: true, role: 'assistant' },
     ]);
-    // The same rewrite on both sides is one script on every message.
+    // The same rewrite on two sides is one script on both — not on the narrator's
+    // messages (`SLASH_COMMAND`), which ST asks apart from the reader's and the replies.
     expect(
       withScripts([
         { ...script, placement: [1] },
         { ...script, placement: [2] },
         { ...script, findRegex: 'both', placement: [1, 2] },
       ]).displayScripts?.map((one) => one.role),
-    ).toEqual([undefined, undefined]);
+    ).toEqual([
+      ['user', 'assistant'],
+      ['user', 'assistant'],
+    ]);
+    // On the narrator's messages: the narrations; on all three, every message.
+    expect(
+      withScripts([
+        { ...script, findRegex: 'narrator', placement: [3] },
+        { ...script, findRegex: 'replies and narrator', placement: [2, 3] },
+        { ...script, findRegex: 'all', placement: [3, 2, 1] },
+        { ...script, findRegex: 'world info', placement: [5] },
+      ]).displayScripts?.map((one) => [one.in, one.role]),
+    ).toEqual([
+      ['narrator', 'narration'],
+      ['replies and narrator', ['assistant', 'narration']],
+      ['all', undefined],
+    ]);
     // Left in place for SillyTavern on the way back out.
     expect(card.extensions['regex_scripts']).toHaveLength(7);
 

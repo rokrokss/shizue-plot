@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { CbsChat } from '../src/cbs.js';
-import { applyMacros, type MacroContext } from '../src/macro.js';
+import { applyMacros, expandTavernStored, type MacroContext } from '../src/macro.js';
 import { emptyVariables, type Variables } from '../src/variables.js';
 
 const vars = (entries: Record<string, string> = {}): Variables => Object.assign(emptyVariables(), entries);
@@ -222,5 +222,27 @@ describe('SillyTavern macros — core-macros.js {{if}} shorthands', () => {
     expect(applyMacros(text, context(risu))).toBe('none none');
     // An unset global is empty, so false.
     expect(applyMacros('{{if $missing}}a{{else}}b{{/if}}', context(st))).toBe('b');
+  });
+});
+
+describe('a text SillyTavern stores (substituteParams on send, /sys and edit)', () => {
+  it('expands its macros as ST reads them and hands back what its variable macros wrote, leaving the maps given alone', () => {
+    const variables = vars({ hp: '3' });
+    const globals = vars({ seen: '0' });
+    const stored = expandTavernStored(
+      '{{setvar::mood::좋음}}{{char}}에게 {{user}}가 {{getvar::mood}} {{incvar::hp}} {{setglobalvar::seen::1}}{{getvar::none}}|{{img::우산}}|{{comment::메모}}',
+      { char: '엘라라', user: '민준', variables, globalVariables: globals },
+    );
+    // ST's incvar writes the new value in its place; an unset var is empty; what it cannot answer stays.
+    expect(stored.text).toBe('엘라라에게 민준가 좋음 4 |{{img::우산}}|{{comment::메모}}');
+    expect(stored.variableWrites).toEqual({ mood: '좋음', hp: '4' });
+    expect(stored.globalVariableWrites).toEqual({ seen: '1' });
+    expect(variables).toEqual(vars({ hp: '3' }));
+    expect(globals).toEqual(vars({ seen: '0' }));
+  });
+
+  it('writes nothing for a text that sets nothing', () => {
+    const stored = expandTavernStored('그냥 말', { char: 'c', user: 'u', variables: vars(), globalVariables: vars() });
+    expect(stored).toEqual({ text: '그냥 말', variableWrites: null, globalVariableWrites: null });
   });
 });
