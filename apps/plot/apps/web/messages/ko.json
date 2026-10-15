@@ -1207,7 +1207,7 @@
     "translateInput": "내 메시지를 {work}로 번역해서 보내기",
     "translateInputHint": "보내기 전에 보조 모델로 번역합니다. 저장되고 모델이 읽는 것은 번역된 글입니다.",
     "retrieval": "지난 대화 불러오기",
-    "retrievalHint": "최근 대화와 뜻이 가까운 예전 메시지를 찾아 프롬프트에 다시 넣습니다(SillyTavern의 채팅 벡터화). 가장 최근 메시지 5개는 제자리에 둡니다.",
+    "retrievalHint": "최근 대화와 뜻이 가까운 예전 메시지를 찾아 프롬프트에 함께 넣습니다(SillyTavern의 채팅 벡터화). 요약되어 대화에 원문으로 실리지 않는 메시지에서만 찾고, 대화는 그대로 둡니다.",
     "placeholderTranslated": "{work}로 번역해 보내요…",
     "noteDepth": "넣는 깊이",
     "noteDepthValue": "{depth, plural, =0 {맨 끝} other {끝에서 #}}",

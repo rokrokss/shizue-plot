@@ -8604,7 +8604,8 @@ describe('memory', () => {
       }
       await harness.settle();
       const path = (await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app))).path;
-      const summary = await seedSummary(chatId, [path[0].id], '첫 인사를 나눴다.');
+      // The greeting and the first exchange summarized: what retrieval may bring back.
+      const summary = await seedSummary(chatId, [path[0].id, path[1].id, path[2].id], '첫 인사를 나눴다.');
       await insertFact(chatId, summary.id, FACTS[1]!, embedder);
 
       await ask(cookie, chatId, harness, '그 등대 기억나?');
@@ -19000,6 +19001,18 @@ describe('vector storage (SillyTavern)', () => {
     return harness.prompts.at(-1)!;
   }
 
+  /**
+   * The branch as it stands, its first `count` messages covered by one summary,
+   * as a refresh would write it (this harness's memory model answers nothing):
+   * the history sent starts after them, and only they may be brought back.
+   */
+  async function summarizeFirst(cookie: string, chatId: string, harness: VectorHarness, count: number, skip: string[] = []): Promise<any[]> {
+    const path = (await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app))).path;
+    const covered = path.slice(0, count).filter((message: any) => !skip.includes(message.id));
+    await db.insert(chatSummaries).values({ chatId, text: '지난 이야기.', messageIds: covered.map((message: any) => message.id) });
+    return path;
+  }
+
   async function setLore(cookie: string, plotId: string, lorebook: unknown[], harness: VectorHarness): Promise<void> {
     const res = await json(cookie, `/api/plots/${plotId}`, 'PATCH', { lorebook }, harness.app);
     expect(res.status, await res.clone().text()).toBe(200);
@@ -19150,7 +19163,7 @@ describe('vector storage (SillyTavern)', () => {
     expect((await send(cookie, chatId, '등대로 가자', harness)).system).toContain(TOWER);
   });
 
-  it("brings back earlier messages of the branch by meaning, in ST's Past events just before the turn, out of their place", async () => {
+  it("brings back copies of earlier messages the summaries cover, by meaning, in ST's Past events just before the turn", async () => {
     const cookie = await signUp('vectors-retrieval@example.com');
     const { chatId } = await setupChat(cookie);
     const harness = vectorApp(conceptEmbedder());
@@ -19163,29 +19176,42 @@ describe('vector storage (SillyTavern)', () => {
     const KEEPER = '등대지기를 만났다';
     expect(recallOf(await send(cookie, chatId, KEEPER, harness))).not.toContain('Past events');
     // The echo model answers with the reader's words, so the reply says it too.
-    for (const content of ['날씨 이야기', '빵 이야기', '책 이야기', '등대 불빛이 보였다']) await send(cookie, chatId, content, harness);
+    const DRAWING = '등대 그림 이야기';
+    for (const content of [DRAWING, '빵 이야기', '책 이야기', '등대 불빛이 보였다']) await send(cookie, chatId, content, harness);
     const chunks = await db.select().from(messageChunks);
     expect(chunks.length).toBeGreaterThan(0);
     expect(chunks.every((chunk) => chunk.model === 'test-embedder')).toBe(true);
+    // No summary yet: the history sends every message, and none is sent twice.
+    expect(recallOf(await send(cookie, chatId, '그 등대 기억나?', harness))).not.toContain('Past events');
 
+    // The greeting and the first exchange summarized: the history starts after them.
+    await summarizeFirst(cookie, chatId, harness, 3);
     const prompt = await send(cookie, chatId, '그 등대 기억나?', harness);
     // The reader's turn, the earliest that says it, under the reader's name — and
-    // not the protected tail's lighthouse, however close it is.
+    // neither the drawing nor the protected tail's lighthouse, which the history
+    // sends anyway, however close they are.
     expect(recallOf(prompt)).toMatch(new RegExp(`^Past events:\\n[^\\n]+: ${KEEPER}(\\n|$)`));
-    expect(recallOf(prompt)).not.toContain('Past events:\n등대 불빛');
+    expect(recallOf(prompt)).not.toContain(DRAWING);
+    expect(recallOf(prompt)).not.toContain('등대 불빛');
     // Not in the system text, the cached prefix: a system turn of its own, right before the turn.
     expect(prompt.system).not.toContain('Past events');
     const at = prompt.messages.findIndex((message) => message.content === recallOf(prompt));
     expect(prompt.messages[at]!.role).toBe('system');
     expect(prompt.messages[at + 1]).toEqual({ role: 'user', content: '그 등대 기억나?' });
-    // Moved, not copied: the reader's turn left the history; the reply saying the same stays.
-    const saying = prompt.messages.filter((message) => contentText(message.content) === KEEPER);
-    expect(saying.map((message) => message.role)).toEqual(['assistant']);
+    // Copied, not moved: the history is what it would be without the search.
+    expect(prompt.messages.filter((message) => contentText(message.content) === DRAWING).map((message) => message.role)).toEqual([
+      'user',
+      'assistant',
+    ]);
+    expect(prompt.messages.some((message) => contentText(message.content) === KEEPER)).toBe(false);
 
     // Hidden from the AI, the reader's turn cannot be brought back: the reply is, under no name.
+    // (Hiding it drops the summary over it; the stretch is summarized again without it.)
     const path = (await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app))).path;
     const turn = path.find((message: any) => message.role === 'user' && message.content === KEEPER);
     await json(cookie, `/api/chats/${chatId}/messages/${turn.id}/hidden`, 'PUT', { hidden: true }, harness.app);
+    expect(await db.select().from(chatSummaries).where(eq(chatSummaries.chatId, chatId))).toEqual([]);
+    await summarizeFirst(cookie, chatId, harness, 3, [turn.id]);
     const hidden = await send(cookie, chatId, '그 등대 기억나?', harness);
     expect(recallOf(hidden)).toMatch(new RegExp(`^Past events:\\n${KEEPER}(\\n|$)`));
     expect(RETRIEVAL_DEFAULTS.template).toBe('Past events:\n{{text}}');
@@ -19198,6 +19224,7 @@ describe('vector storage (SillyTavern)', () => {
     await json(cookie, `/api/chats/${chatId}`, 'PATCH', { retrieval: { enabled: true } }, harness.app);
     const NAMED = '한석 할아버지가 지도를 줬다';
     for (const content of [NAMED, '고양이 이야기', '고양이 밥', '책 이야기', '등대 불빛이 보였다']) await send(cookie, chatId, content, harness);
+    await summarizeFirst(cookie, chatId, harness, 5);
     // By meaning the turn is about the cat, and ST's three are the cat's; by its
     // words it names 한석, whom two messages alone hold — one of them comes back too.
     const prompt = await send(cookie, chatId, '고양이 말고 한석 할아버지 기억나?', harness);
@@ -19214,16 +19241,18 @@ describe('vector storage (SillyTavern)', () => {
     const KEEPER = '등대지기를 만났다';
     await send(cookie, chatId, KEEPER, harness);
     for (const content of ['날씨 이야기', '빵 이야기', '책 이야기']) await send(cookie, chatId, content, harness);
+    const path = await summarizeFirst(cookie, chatId, harness, 3);
     expect(recallOf(await send(cookie, chatId, '그 등대 기억나?', harness))).toContain(`Past events:`);
 
     // Editing the first turn forks a branch without it, whose messages are embedded as it is read.
-    const path = (await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app))).path;
     const turn = path.find((message: any) => message.content === KEEPER);
     const forked = await json(cookie, `/api/messages/${turn.id}`, 'PATCH', { content: '다른 이야기' }, harness.app);
     expect(forked.status).toBe(200);
     expect((await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app))).at(-1)!.event).toBe('done');
     await harness.settle();
     for (const content of ['날씨 이야기', '빵 이야기', '책 이야기']) await send(cookie, chatId, content, harness);
+    // The new branch's own opening summarized: what may come back is on it alone.
+    await summarizeFirst(cookie, chatId, harness, 3);
     const prompt = await send(cookie, chatId, '그 등대 기억나?', harness);
     expect(recallOf(prompt)).not.toContain('Past events');
     expect(recallOf(prompt)).not.toContain(KEEPER);

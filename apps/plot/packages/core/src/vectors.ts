@@ -7,9 +7,11 @@
  *   `maxEntries` closest to the latest turns, scoring at least the threshold,
  *   as one more way in beside its keys (`ActivateLoreInput.vectorMatched`).
  * - **Chat vectorization.** The earlier messages of the branch most like the
- *   latest turns are taken out of the history and sent instead in one block
- *   just before the turn being answered, after the facts (`retrievalBlock`),
- *   so the model reads them however long ago they were.
+ *   latest turns — of those the history no longer sends, the ones the
+ *   summaries cover — are copied into one block just before the turn being
+ *   answered, after the facts (`retrievalBlock`), so the model reads them
+ *   however long ago they were. ST takes them out of the chat it sends instead;
+ *   here the history stays as it is, so the provider's prefix cache keeps it.
  *
  * Both search with one query, ST's `getQueryText`: the newest `query` messages
  * the model may read, newest first. The chat search keeps ST's defaults. The
@@ -68,7 +70,7 @@ export function vectorLoreBar(model: string): VectorLoreBar {
 
 /** ST's chat vectorization settings, at their defaults. */
 export const RETRIEVAL_DEFAULTS = {
-  /** `protect` (Retain#): the newest messages that are never taken out of their place. */
+  /** `protect` (Retain#): the newest messages, which are never brought back. */
   protect: 5,
   /** `insert` (Insert#): how many chunks the search returns, which become at most that many messages. */
   insert: 3,

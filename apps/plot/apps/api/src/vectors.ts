@@ -126,13 +126,11 @@ export interface VectorSearch {
   vectorLore?: (entry: LoreEntry) => boolean;
   /** The entries' Korean aliases, as `AssemblePromptInput.loreAliases` asks (`loreAliases.ts`). */
   loreAliases?: (entry: LoreEntry) => LoreAliases | undefined;
-  /** The found messages in ST's template (`retrievalBlock`). */
+  /** The found messages in ST's template (`retrievalBlock`), copies of messages the history does not send. */
   retrievalText?: string;
-  /** Their ids: the history leaves them out, as ST takes them out of the chat it sends. */
-  retrieved: ReadonlySet<string>;
 }
 
-const NOTHING: VectorSearch = { retrieved: new Set() };
+const NOTHING: VectorSearch = {};
 
 /* ------------------------------------------------------------------ guard */
 
@@ -600,10 +598,12 @@ export async function searchByMeaning(
     characters: readonly PromptCharacter[];
     /** The whole branch the turn is generated on, as stored. */
     branch: readonly Message[];
+    /** The ids of the history the prompt sends verbatim: none of it is brought back again. */
+    sent: ReadonlySet<string>;
     userName: string;
   },
 ): Promise<VectorSearch> {
-  const { vectors, branch } = input;
+  const { vectors, branch, sent } = input;
   if (!vectors) return NOTHING;
   // The lore the assembler will read: the work's, the members on the stage's —
   // not the chat's own, which its scripts write — under the first member's settings.
@@ -624,10 +624,11 @@ export async function searchByMeaning(
   const contents = candidateContents(entries, asked);
 
   // ST's `coreChat`: what the model may read. Too short a chat brings nothing
-  // back — every message of it is protected.
+  // back — every message of it is protected. Nor does a message the history
+  // sends anyway: what is brought back is a copy, of what the summaries cover.
   const visible = visibleToAi(branch);
   const eligible = vectors.retrieval && visible.length >= RETRIEVAL_DEFAULTS.protect
-    ? visible.slice(0, -RETRIEVAL_DEFAULTS.protect)
+    ? visible.slice(0, -RETRIEVAL_DEFAULTS.protect).filter((message) => !sent.has(message.id))
     : [];
   if (contents.size === 0 && eligible.length === 0) return none;
   // ST's query counts are one setting for both, so one query serves both.
@@ -661,8 +662,7 @@ export async function searchByMeaning(
     return {
       ...none,
       ...(found ? { vectorLore: (entry: LoreEntry) => asked(entry) && found.has(textHash(entry.content)) } : {}),
-      ...(retrieval?.text ? { retrievalText: retrieval.text } : {}),
-      retrieved: retrieval?.ids ?? new Set(),
+      ...(retrieval ? { retrievalText: retrieval } : {}),
     };
   } catch (error) {
     console.warn('[vectors] the search failed; lore by keyword only, no retrieval', error);
@@ -764,12 +764,13 @@ const RETRIEVAL_CANDIDATES = 20;
 /**
  * ST's `rearrangeChat` over the branch: the `insert` chunks most relevant to
  * the turn among the messages it may bring back — on this branch, not hidden,
- * older than the protected tail — each text once, as ST keys messages by their
- * text. Sent least relevant first, so the most relevant stands nearest the
- * turns. Relevant is the fusion (`hybridRanking`, ARCHITECTURE §7.3 단어 검색)
- * of ST's search, the chunks most like the query at or above its threshold
- * whose vectors are of the text they still hold, and BM25 over the same chunks
- * for the newest turn (`turn`), with evidence only.
+ * older than the protected tail, not in the history sent — each text once, as
+ * ST keys messages by their text. Sent least relevant first, so the most
+ * relevant stands nearest the turns. Relevant is the fusion (`hybridRanking`,
+ * ARCHITECTURE §7.3 단어 검색) of ST's search, the chunks most like the query at
+ * or above its threshold whose vectors are of the text they still hold, and
+ * BM25 over the same chunks for the newest turn (`turn`), with evidence only.
+ * Unlike ST, nothing leaves the history: the block is a copy.
  */
 async function retrievedMessages(
   deps: AppDeps,
@@ -778,7 +779,7 @@ async function retrievedMessages(
   vector: number[],
   turn: string,
   input: { characters: readonly PromptCharacter[]; userName: string },
-): Promise<{ text: string; ids: Set<string> }> {
+): Promise<string> {
   const score = similarity(messageChunks.embedding, vector);
   // Every id and hash is a uuid or hex, so the array literals need no quoting.
   const ids = `{${eligible.map((message) => message.id).join(',')}}`;
@@ -810,7 +811,7 @@ async function retrievedMessages(
   const byId = new Map(eligible.map((message) => [message.id, message]));
   const texts = [...new Set(chunks.flatMap((chunk) => byId.get(chunk.slice(0, chunk.lastIndexOf(':')))?.content ?? []))];
   const found = texts.map((text) => eligible.find((message) => message.content === text)!);
-  if (found.length === 0) return { text: '', ids: new Set() };
+  if (found.length === 0) return '';
 
   const readers: ReaderMember[] = input.characters.flatMap((member) =>
     member.id
@@ -826,5 +827,5 @@ async function retrievedMessages(
       readers,
     ),
   );
-  return { text: retrievalBlock(lines), ids: new Set(found.map((message) => message.id)) };
+  return retrievalBlock(lines);
 }

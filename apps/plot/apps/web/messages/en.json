@@ -1207,7 +1207,7 @@
     "translateInput": "Translate my messages into {work} before sending",
     "translateInputHint": "The auxiliary model translates them before they are sent. The translated text is what is stored and what the model reads.",
     "retrieval": "Recall past messages",
-    "retrievalHint": "Finds earlier messages close in meaning to the latest turns and puts them back in the prompt (SillyTavern's chat vectorization). The newest five messages stay where they are.",
+    "retrievalHint": "Finds earlier messages close in meaning to the latest turns and adds them to the prompt (SillyTavern’s chat vectorization). It looks only among messages the summaries cover, which the prompt no longer sends word for word, and leaves the conversation as it is.",
     "placeholderTranslated": "Sent in {work}…",
     "noteDepth": "Depth",
     "noteDepthValue": "{depth, plural, =0 {At the end} other {# from end}}",

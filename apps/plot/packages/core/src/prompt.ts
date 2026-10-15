@@ -276,8 +276,9 @@ export interface AssemblePromptInput {
    * vectorization, `retrievalBlock`), already formatted. In the recall turn,
    * after the facts — ST's "In-chat @ Depth" placement of its `3_vectors`
    * rather than its default after the story string, which would be the cached
-   * prefix here. The caller takes the messages it holds out of `history` (as
-   * hidden), as ST takes them out of the chat it sends.
+   * prefix here. The caller brings back only messages `history` does not
+   * send, and leaves `history` as it is — ST takes them out of the chat it
+   * sends, which would change the history, and the cached prefix, every turn.
    */
   retrievalText?: string;
   /**

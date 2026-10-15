@@ -1207,7 +1207,7 @@
     "translateInput": "自分のメッセージを{work}に翻訳して送る",
     "translateInputHint": "送信前に補助モデルで翻訳します。保存され、モデルが読むのは翻訳後の文章です。",
     "retrieval": "過去の会話を呼び戻す",
-    "retrievalHint": "最近のやり取りと意味の近い以前のメッセージを探して、プロンプトに入れ直します（SillyTavern のチャットベクトル化）。最新の5件はその場に残ります。",
+    "retrievalHint": "最近のやり取りと意味の近い以前のメッセージを探して、プロンプトに添えます（SillyTavern のチャットベクトル化）。要約されて原文のままでは送られないメッセージの中だけを探し、会話はそのままにします。",
     "placeholderTranslated": "{work}に翻訳して送信…",
     "noteDepth": "挿入の深さ",
     "noteDepthValue": "{depth, plural, =0 {末尾} other {末尾から#}}",

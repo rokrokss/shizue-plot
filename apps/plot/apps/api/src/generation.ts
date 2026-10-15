@@ -954,25 +954,22 @@ async function assembleRequest(
     : plan.branch.length <= 1
       ? { length: 0 }
       : { ...plan.branch, length: plan.branch.length - 1 };
-  // SillyTavern's vector storage: the lore found by meaning, and the earlier
-  // messages brought back — which leave the history for this request, as ST
-  // takes them out of the chat it sends. Never the newest turns, so never the
-  // partial. Without an embedder, or past its deadline, nothing is found.
+  // SillyTavern's vector storage: the lore found by meaning, and copies of
+  // earlier messages the history no longer sends — ST moves them out of the
+  // chat it sends; here the history stays as it is, the provider's cached
+  // prefix. Without an embedder, or past its deadline, nothing is found.
   const found = await searchByMeaning(deps, {
     vectors: plan.vectors,
     plot: plan.plot,
     characters: plan.characters,
     branch: plan.wholeBranch,
+    sent: new Set(plan.history.flatMap((turn) => (turn.id !== undefined ? [turn.id] : []))),
     userName: plan.userName,
   });
-  const turns =
-    found.retrieved.size > 0
-      ? plan.history.map((turn) => (turn.id !== undefined && found.retrieved.has(turn.id) ? { ...turn, hidden: true } : turn))
-      : plan.history;
   // The scripts read the turns as stored, before an image note is added to them —
   // the greeting as the reader's overlay has it, which is what the assembler sends.
   const history = await withoutUnseeableImages(
-    await withPromptScripts(withBranchGreeting(isContinue ? turns.slice(0, -1) : turns, branch), plan, branch),
+    await withPromptScripts(withBranchGreeting(isContinue ? plan.history.slice(0, -1) : plan.history, branch), plan, branch),
     plan.model,
     deps,
     account,
