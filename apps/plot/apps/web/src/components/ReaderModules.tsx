@@ -180,13 +180,13 @@ export function ReaderModules({
           })}
         </ul>
       )}
+      {/* Hidden, not sr-only: in the chat's notes panel an absolutely placed
+          input sits outside the panel's scroll and stretches the page under it. */}
       <input
         ref={fileInput}
         type="file"
         accept=".charx,.risum,.json,.lorebook,application/json"
-        className="sr-only"
-        tabIndex={-1}
-        aria-hidden
+        hidden
         data-testid="reader-module-file"
         onChange={(event) => {
           const file = event.target.files?.[0];

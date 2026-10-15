@@ -600,6 +600,15 @@ test('says who knows each fact, folds the ones a later summary ended under their
   }
 });
 
+test('the open notes panel scrolls inside itself, never the page under the sticky header', async () => {
+  await openPanel();
+  // Nothing in the panel may reach past it and stretch the page: a page that
+  // scrolls slides the chat's header and the panel's top under the site's header.
+  // The 1px is the site header's border, which the chat's 100dvh - 3.5rem leaves out.
+  const overflow = await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight);
+  expect(overflow).toBeLessThanOrEqual(1);
+});
+
 test('attaches a saved note to the chat', async () => {
   const chatPath = new URL(page.url()).pathname;
 
