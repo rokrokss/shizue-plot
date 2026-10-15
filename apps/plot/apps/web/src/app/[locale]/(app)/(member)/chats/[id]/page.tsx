@@ -409,6 +409,13 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const [scriptsVersion, setScriptsVersion] = useState(0);
   const reloadScripts = useCallback(() => setScriptsVersion((version) => version + 1), []);
   useEffect(() => {
+    /**
+     * Set once a later read has taken this one's place — another chat, the bundles
+     * read again, React's development double run. Its answer is dropped: new
+     * bundles build the runtimes anew, and the set they replace would take the Lua
+     * calls it had started down with the reader's sandbox (`readerLuaSandbox`).
+     */
+    let superseded = false;
     setScriptBundles(undefined);
     setTranslationScripts(NO_TRANSLATION_SCRIPTS);
     apiGet<{
@@ -417,14 +424,20 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       translation?: { memberId: string; scripts: TranslationScript[] }[];
     }>(`/api/chats/${id}/scripts`).then(
       (answer) => {
+        if (superseded) return;
         setScriptBundles(answer?.members?.length ? answer.members : answer?.scripts ? [answer.scripts] : null);
         if (answer?.translation?.length) {
           setTranslationScripts(new Map(answer.translation.map(({ memberId, scripts }) => [memberId, scripts])));
         }
       },
       // A plot that cannot be read runs nothing, and a pending reply is kept as written.
-      () => setScriptBundles(null),
+      () => {
+        if (!superseded) setScriptBundles(null);
+      },
     );
+    return () => {
+      superseded = true;
+    };
   }, [id, scriptsVersion]);
   const scriptBundle = scriptBundles === undefined ? undefined : (scriptBundles?.[0] ?? null);
   /**

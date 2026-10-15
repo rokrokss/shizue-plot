@@ -28,6 +28,7 @@ const headers = { origin: WEB };
 let context: BrowserContext;
 let page: Page;
 let plotId = '';
+let chatId = '';
 /** The two members' ids: the work's first card, and the companion. */
 let lumi = '';
 let nox = '';
@@ -148,7 +149,7 @@ test('a work of two RisuAI cards, the second joining the first', async () => {
 test('each card’s scripts run for its own reply and draw on its own bubble, over one namespace', async () => {
   const chat = await page.request.post(`${WEB}/api/chats`, { headers, data: { plotId, model: 'echo/echo' } });
   expect(chat.status(), await chat.text()).toBe(201);
-  const chatId = ((await chat.json()) as { chat: { id: string } }).chat.id;
+  chatId = ((await chat.json()) as { chat: { id: string } }).chat.id;
   await page.goto(`/ko/chats/${chatId}`);
   await expect(page.getByTestId('message-assistant')).toHaveCount(1);
 
@@ -179,6 +180,43 @@ test('each card’s scripts run for its own reply and draw on its own bubble, ov
   await expect(mine).toContainText('누름 녹스');
   await mine.getByRole('button', { name: '루미 버튼' }).click();
   await expect(theirs).toContainText('누름 루미');
+});
+
+test('a scripts read the page has moved past never rebuilds its runtimes', async () => {
+  // The development build runs the page's effects twice on load, so the chat's
+  // scripts are read twice. The first answer is held until the second has landed
+  // and then renames both members: a page that took it would build its runtimes
+  // again from it, ending the Lua calls the first set had started.
+  const stale = `낡은 답 ${run}`;
+  let reads = 0;
+  let secondLanded!: () => void;
+  const second = new Promise<void>((resolve) => (secondLanded = resolve));
+  let staleSent!: () => void;
+  const sent = new Promise<void>((resolve) => (staleSent = resolve));
+  await page.route(`**/api/chats/${chatId}/scripts`, async (route) => {
+    reads += 1;
+    const first = reads === 1;
+    const response = await route.fetch();
+    if (!first) {
+      await route.fulfill({ response });
+      secondLanded();
+      return;
+    }
+    const answer = (await response.json()) as { members: { overlay: { member: object | null } }[] };
+    // Bounded, so a page that reads once fails on the count below rather than hanging.
+    await Promise.race([second, new Promise((resolve) => setTimeout(resolve, 15_000))]);
+    for (const member of answer.members) member.overlay.member = { ...member.overlay.member, name: stale };
+    await route.fulfill({ response, json: answer });
+    staleSent();
+  });
+  await page.reload();
+  await sent;
+  expect(reads).toBe(2);
+  await expect(page.locator('.chat-name', { hasText: '녹스' }).first()).toBeVisible();
+  // Time for the held answer to have been taken, had the page taken it.
+  await page.waitForTimeout(1000);
+  await expect(page.getByText(stale)).toHaveCount(0);
+  await page.unroute(`**/api/chats/${chatId}/scripts`);
 });
 
 test('the studio shows the companion’s display script as its own', async () => {

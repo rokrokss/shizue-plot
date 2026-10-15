@@ -148,6 +148,14 @@ test('the translation mode translates every message and sends the reader turn in
   await expect(reply).toContainText('May I come in?');
   await reply.getByTestId('message-translation').click();
   await expect(reply).toContainText('들어가도 될까요?');
+
+  // The desktop header with every control it can carry, the language ones too,
+  // at the narrowest width that keeps them out of the sheet: they wrap inside the
+  // row, so the last of them is still on the screen.
+  await page.setViewportSize({ width: 1024, height: 768 });
+  const notes = await page.getByRole('button', { name: '노트', exact: true }).boundingBox();
+  expect(notes!.x + notes!.width).toBeLessThanOrEqual(1024);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBe(0);
 });
 
 /** Resolves once the chat's settings write has been answered. */

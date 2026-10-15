@@ -133,7 +133,7 @@ export function ChatSettings({
     );
 
   return (
-    <div className={stacked ? 'space-y-4' : 'flex items-center gap-2'}>
+    <div className={stacked ? 'space-y-4' : 'flex flex-wrap items-center gap-2'}>
       {field(
         'model',
         t('model'),
