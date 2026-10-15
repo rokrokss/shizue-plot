@@ -1029,6 +1029,54 @@ describe('the Lua engine', () => {
     expect(full.chat).toEqual({ keep: 1, messages: [{ id: 'm1', content: '바꾼 인사' }] });
   });
 
+  it('runs each script’s button with its own trigger’s access, and names that trigger to the server', async () => {
+    const asked: number[] = [];
+    const button = (name: string) =>
+      `onButtonClick = async(function(id, data) local r = LLM(id, { { role = 'user', content = '${name}' } }) setChatVar(id, '${name}', tostring(r and r.result)) end)`;
+    const engine = createLuaEngine({
+      triggers: [
+        // The card's, without access, and a module's, with it — as `cardScripts` marks them.
+        { ...lua(button('card')), lowLevelAccess: false },
+        { comment: '', type: 'start', conditions: [], effect: [] },
+        { ...lua(button('module')), lowLevelAccess: true },
+      ],
+      lowLevelAccess: true,
+      sandbox: sandboxWith(),
+      ui: host,
+      llm: async (messages, model, trigger) => (asked.push(trigger), host.llm(messages, model)),
+      similarity: host.similarity,
+      request: host.request,
+      log: () => undefined,
+    });
+    const vars: Record<string, string | null> = {};
+    const scope: CodeScope = {
+      getVar: (name) => vars[name] ?? 'null',
+      setVar: (name, value) => void (vars[name] = value),
+      variables: () => Object.assign(Object.create(null), vars),
+      getGlobalVar: () => 'null',
+      setGlobalVar: () => undefined,
+      globalVariables: () => Object.create(null),
+      messages: [],
+      character: { name: '리안', description: '', lorebook: [] },
+      setDescription: () => undefined,
+      setLorebook: () => undefined,
+      localLore: [],
+      setLocalLore: () => undefined,
+      setName: () => undefined,
+      setFirstMessage: () => undefined,
+      setBackgroundHtml: () => undefined,
+      user: '',
+      persona: '',
+      note: '',
+      greeting: null,
+    };
+    await engine.button!('x', scope);
+    // Only the module's script reached the model, and it said which trigger it was.
+    expect(asked).toEqual([2]);
+    expect(vars['module']).toContain('module');
+    expect(vars['card']).toBeUndefined();
+  });
+
   it('chains the edit hooks of every script, and reads the function names a button may call', async () => {
     const sandbox = sandboxWith();
     const engine = createLuaEngine({

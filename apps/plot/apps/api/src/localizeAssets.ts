@@ -23,11 +23,15 @@
  * - A picture, a font or music (`url()`, `src=`) is fetched and stored under a
  *   name that is its address (`localizedName`), and the reference points at the
  *   asset (`/api/plots/:id/assets/:slug`).
- * - A template address (a capture, a draw) is fetched once per value the slot is
- *   known to take (`templateCandidates`) and the reference points at the
- *   by-name route with the slot left in (`/api/plots/:id/assets/by-name/…`), so
- *   the value the renderer writes finds its copy — and one nobody foresaw is a
- *   missing picture on our own origin, not a request out.
+ * - A template address (a capture, a draw, a chat variable) is fetched once per
+ *   value the slot is known to take (`templateCandidates`) and the reference
+ *   points at the by-name route with the slot left in
+ *   (`/api/plots/:id/assets/by-name/…`), so the value the renderer writes finds
+ *   its copy — and one nobody foresaw is a missing picture on our own origin,
+ *   not a request out. A `{{getvar::…}}` slot — in the path, or holding the
+ *   host (`src="{{getvar::cdn}}/face.png"`) — takes what the card sets the
+ *   variable to: its default and its literal `setvar`s (`cardVariableValues`);
+ *   one the card never sets to an address is no miss, only nothing to bring.
  * - An `@import`ed stylesheet is fetched, its own `url()`s and `@import`s
  *   localized in turn (to `IMPORT_DEPTH`), and inlined where it stood, under its
  *   media list. A web font's stylesheet (`isFontStylesheet`) imported by a
@@ -55,6 +59,7 @@ import {
   ASSET_ADDRESS_MACRO,
   assetResolver,
   bracketLists,
+  cardVariableValues,
   findExternal,
   inlinableCss,
   isFontStylesheet,
@@ -429,7 +434,10 @@ export async function localizePlot(
   };
   /** Whether a stylesheet names one of the work's own assets the RisuAI way (`ASSET_ADDRESS_MACRO`). */
   let addressed = false;
+  /** Every drawn text, for the literal `setvar`s a `{{getvar::…}}` slot reads (`cardVariableValues`). */
+  const drawn: string[] = [];
   mapFields(state, scope, (field) => {
+    drawn.push(field.text);
     if (field.stylesheet && field.text.search(ASSET_ADDRESS_MACRO) >= 0) addressed = true;
     for (const ref of findExternal(field.text)) {
       outcome.found.push({ address: ref.address, kind: ref.kind });
@@ -522,7 +530,8 @@ export async function localizePlot(
       const font = media ? null : sniffFont(response.bytes);
       const kind = media?.kind ?? (font ? 'font' : null);
       // A guess is a picture or music where a template drew one; a font only where a stylesheet named it.
-      if (!kind || (guess && kind === 'font')) return 'failed';
+      // A video is a card's to bring in its own file, never fetched from another host.
+      if (!kind || kind === 'video' || (guess && kind === 'font')) return 'failed';
       if (response.bytes.byteLength > LOCALIZE_LIMITS.fileBytes[kind]) return 'failed';
       if (files >= LOCALIZE_LIMITS.maxFiles || bytes + response.bytes.byteLength > LOCALIZE_LIMITS.maxBytes) {
         return 'overLimit';
@@ -633,6 +642,23 @@ export async function localizePlot(
     state,
   );
   const lists = bracketLists(texts);
+  // What the card sets its variables to, for a `{{getvar::…}}` slot: the work's
+  // defaults and each member's, and every literal write the texts and triggers hold.
+  const risuOf = (card: NormalizedCard): Record<string, unknown> => {
+    const risu = card.extensions?.['risuai'];
+    return risu !== null && typeof risu === 'object' ? (risu as Record<string, unknown>) : {};
+  };
+  const variableValues = cardVariableValues(
+    Object.assign({}, ...cards.map((row) => row.card.defaultVariables ?? {}), state.customUi.defaultVariables ?? {}),
+    [...texts, ...drawn],
+    [
+      ...cards.flatMap((row) => {
+        const triggers = risuOf(row.card)['triggerscript'];
+        return Array.isArray(triggers) ? triggers : [];
+      }),
+      ...(state.customUi.modules ?? []).flatMap((module) => module.trigger),
+    ],
+  );
   /** Template address → the names of the values that arrived. */
   const filled = new Map<string, string[]>();
   for (const [address, { template, scripts, unit }] of templates) {
@@ -642,12 +668,15 @@ export async function localizePlot(
         captured.set(group, [...(captured.get(group) ?? []), ...values]);
       }
     }
-    const values = templateCandidates(template, captured, lists, LOCALIZE_LIMITS.guessesPerSlot);
+    const values = templateCandidates(template, captured, lists, LOCALIZE_LIMITS.guessesPerSlot, variableValues);
     const arrived: string[] = [];
     filled.set(address, arrived);
+    // A variable the card never sets to anything an address can hold is nothing to bring, not a miss.
+    if (template.variable !== undefined && values.length === 0) continue;
     let skipped = false;
     const runs = values.map((value) => {
       const url = templateUrl(template, value);
+      if (url === null) return Promise.resolve();
       // A value another template of the same address already asked for costs no second guess.
       if (!fileResults.has(localizedName(url))) {
         if (guesses >= LOCALIZE_LIMITS.maxGuesses) {

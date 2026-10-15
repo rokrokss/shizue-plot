@@ -500,6 +500,51 @@ export interface PresetInfo {
  * the chat's preset — a main-instruction addition and a global note. Account-level,
  * picked per chat.
  */
+/**
+ * A module in the reader's own library (`/api/reader-modules`), as they list it:
+ * what it is and what it brought, not its scripts.
+ */
+export interface ReaderModuleSummary {
+  id: string;
+  name: string;
+  description: string;
+  /** On for every chat of the reader's (RisuAI's `enabledModules`). */
+  enabledGlobally: boolean;
+  loreCount: number;
+  regexCount: number;
+  triggerCount: number;
+  displayScriptCount: number;
+  assetCount: number;
+  background: boolean;
+  toggles: boolean;
+  lowLevelAccess: boolean;
+  scripts: boolean;
+  importedFrom: { fileName: string; sha256: string; importedAt: string };
+  createdAt: string;
+  /** In `GET /api/chats/:id/modules` only: whether that chat's own list names it. */
+  listedHere?: boolean;
+}
+
+/** A library module on a chat, as the page draws it (`GET /api/chats/:id/modules` `active`). */
+export interface ActiveReaderModule {
+  id: string;
+  name: string;
+  displayScripts: DisplayScript[];
+  css: string;
+  backgroundHtml: string;
+  namespace: string | null;
+  /** Its pictures by the module's names for them, served to the reader alone. */
+  assets: { id: string; name: string; url: string; mime: string }[];
+}
+
+/** GET /api/chats/:id/modules. */
+export interface ChatModulesView {
+  library: ReaderModuleSummary[];
+  active: ActiveReaderModule[];
+  /** The toggle text the chat's settings draw: the modules' on the chat, then the members' own. */
+  toggles: string;
+}
+
 export interface ReaderPreset {
   id: string;
   name: string;
@@ -654,6 +699,12 @@ export interface Chat {
    * May name a member that has since been deleted, which matches nobody.
    */
   absentCharacterIds: string[];
+  /**
+   * The reader's library modules turned on for this chat alone (RisuAI's chat
+   * `modules`); one on everywhere is not listed. Optional so a state built by
+   * hand needs none.
+   */
+  modules?: string[];
   /** Reusable notes attached to this chat, in injection order. */
   noteIds: string[];
   /**

@@ -125,6 +125,14 @@ export interface TriggerRunInput {
    * effects read the character's alone, as RisuAI's read its `globalLore`.
    */
   localLore?: readonly LoreEntry[];
+  /**
+   * The lore of the modules on the chat (RisuAI's `getModuleLorebooks`): the
+   * work's and the reader's own. Read after the character's and the chat's
+   * wherever RisuAI reads all three — `{{lorebook}}`, `/test_lorebook`, Lua's
+   * `getLoreBooks` and `loadLoreBooks` — and never written: no effect edits it,
+   * so nothing of it can come back as the character's.
+   */
+  moduleLore?: readonly LoreEntry[];
   /** The reader's persona description. */
   persona: string;
   /** The chat variables the run starts from — the branch's fold. Not modified. */
@@ -174,14 +182,34 @@ export type TriggerRequest =
    * Answered with `{ stopSending?: boolean }`, or nothing when no engine took it.
    * `scope` is the run as the code sees it — RisuAI hands its Lua the same.
    */
-  | { kind: 'code'; language: 'lua'; code: string; mode: string; lowLevelAccess: boolean; scope: CodeScope }
+  | {
+      kind: 'code';
+      language: 'lua';
+      code: string;
+      mode: string;
+      lowLevelAccess: boolean;
+      scope: CodeScope;
+      /**
+       * The trigger running, by its place in `TriggerCharacter.triggers`: what a
+       * gate outside the run (the API's `script-llm` and `script-fetch`) holds
+       * the code's calls to, as RisuAI holds each run to its own trigger's
+       * `lowLevelAccess` (`ScriptingLowLevelIds`).
+       */
+      trigger: number;
+    }
   /**
    * A model call (`runLLM`, `v2RunLLM`) — on the chat's model, or on its
    * auxiliary model for `submodel`, and the reader's own account, through the
    * API. Answered with a `ScriptLlmAnswer`; a run with no one to answer it reads
    * that as a failure.
    */
-  | { kind: 'llm'; messages: ScriptChatTurn[]; model: 'model' | 'submodel' }
+  | {
+      kind: 'llm';
+      messages: ScriptChatTurn[];
+      model: 'model' | 'submodel';
+      /** The trigger whose effect asked, by its place in `TriggerCharacter.triggers`. */
+      trigger: number;
+    }
   /**
    * An embedding search (`checkSimilarity`, `v2CheckSimilarity`): `texts`
    * ordered by how close each is to `source`, by the reader's embedding model in
@@ -292,6 +320,8 @@ export interface CodeScope {
   /** RisuAI's chat `localLore`, which Lua's `upsertLocalLoreBook` writes: the chat's, not the character's. */
   readonly localLore: readonly LoreEntry[];
   setLocalLore(entries: LoreEntry[]): void;
+  /** The modules' lore on the chat (`TriggerRunInput.moduleLore`): read, never written. */
+  readonly moduleLore?: readonly LoreEntry[];
   /** Lua's `setName`, `setCharacterFirstMessage` and `setBackgroundEmbedding`: the reader's overlay. */
   setName(name: string): void;
   setFirstMessage(text: string): void;
@@ -635,6 +665,8 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
   // RisuAI's is each trigger's own (`trigger.lowLevelAccess`): a work's module
   // brings its own flag to its triggers (`cardScripts`). Set per trigger below.
   let lowLevelAccess = input.character.lowLevelAccess;
+  /** The trigger running, by its place in the list: what a call's gate is told. */
+  let triggerIndex = -1;
 
   /* ---------------------------------------------------------- variables */
 
@@ -764,8 +796,8 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
       },
       persona: shared.persona,
       chat: storedChat,
-      // RisuAI's `{{lorebook}}`: the character's book, then the chat's.
-      lorebook: () => [...shared.character.lorebook, ...shared.localLore].map(risuLoreEntry),
+      // RisuAI's `{{lorebook}}`: the character's book, then the chat's, then the modules'.
+      lorebook: () => [...shared.character.lorebook, ...shared.localLore, ...(input.moduleLore ?? [])].map(risuLoreEntry),
       triggerId: input.triggerId ?? null,
     },
   };
@@ -874,11 +906,11 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
     },
     *lore() {
       return loreTestOf(
-        // RisuAI's `loadLoreBookV3Prompt`: the character's book, then the chat's.
+        // RisuAI's `loadLoreBookV3Prompt`: the character's book, then the chat's, then the modules'.
         yield {
           kind: 'lore',
           history: shared.stored.messages.map((message) => message.data),
-          lorebook: [...shared.character.lorebook, ...shared.localLore],
+          lorebook: [...shared.character.lorebook, ...shared.localLore, ...(input.moduleLore ?? [])],
         },
       );
     },
@@ -892,10 +924,11 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
 
   /* ----------------------------------------------------------- the loop */
 
-  for (const trigger of input.character.triggers) {
+  for (const [index, trigger] of input.character.triggers.entries()) {
     /** The loop counters, RisuAI's inner `tempVars`: per trigger, keyed by the loop's position. */
     const counters: Record<string, number> = {};
     lowLevelAccess = trigger.lowLevelAccess ?? input.character.lowLevelAccess;
+    triggerIndex = index;
 
     if (isCodeTrigger(trigger)) {
       // Code triggers run in every mode; the code decides.
@@ -1019,7 +1052,7 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
         case 'runLLM': {
           if (!lowLevelAccess) break;
           const text = p(str(effect, 'value'));
-          const answer = llmAnswer(yield { kind: 'llm', messages: llmTurns(text), model: 'model' });
+          const answer = llmAnswer(yield { kind: 'llm', messages: llmTurns(text), model: 'model', trigger: triggerIndex });
           // A failure goes into the variable, prefixed, as RisuAI writes it.
           setVar(asText(str(effect, 'inputVar')), answer.ok ? answer.text : `Error: ${answer.error}`);
           break;
@@ -1064,6 +1097,7 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
             code: asText(str(effect, 'code') ?? ''),
             mode: run.mode === 'manual' ? (run.manualName ?? 'manual') : run.mode,
             lowLevelAccess,
+            trigger: triggerIndex,
             scope: {
               getVar,
               setVar: (name, text) => setVar(name, text),
@@ -1124,6 +1158,7 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
                 shared.localLore = entries.map((entry) => ({ ...entry }));
                 shared.localLoreChanged = true;
               },
+              moduleLore: input.moduleLore ?? [],
               setName: (name) => {
                 shared.character.name = name;
                 rewrite('name');
@@ -1296,7 +1331,7 @@ function* runOnce(shared: Shared, run: Run): Generator<TriggerRequest, boolean, 
           const text = value(effect, 'value', 'valueType');
           // RisuAI's sub model is the chat's auxiliary model here; anything else is its own.
           const model = str(effect, 'model') === 'submodel' ? 'submodel' : 'model';
-          const answer = llmAnswer(yield { kind: 'llm', messages: llmTurns(text), model });
+          const answer = llmAnswer(yield { kind: 'llm', messages: llmTurns(text), model, trigger: triggerIndex });
           // RisuAI writes `null` for a failed call (and reads a streamed one to its end).
           setVar(output(effect), answer.ok ? answer.text : 'null');
           break;

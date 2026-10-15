@@ -74,6 +74,7 @@ import { and, asc, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  assetResponse,
   assetUrl,
   coerceAssetPreview,
   MAX_ASSETS_PER_PLOT,
@@ -587,13 +588,13 @@ async function insertMember(
 }
 
 /**
- * Stores the pictures, music and web fonts a card carried beside the icon — a
- * font for a stylesheet to reach as `{{raw::name}}`, as RisuAI's charx export
- * carries one, and as this app's own does for the fonts it localized. Slugs come from
- * the asset names so `{{img::slug}}` written into the card keeps working; a name
- * with nothing sluggable left falls back to its position, and collisions get a
- * suffix. Bytes that turn out to be none of these are skipped rather than failing the
- * import, and counted (`unsupported`), as are those past the plot's cap
+ * Stores the pictures, music, video and web fonts a card carried beside the
+ * icon — a font for a stylesheet to reach as `{{raw::name}}`, as RisuAI's charx
+ * export carries one, and as this app's own does for the fonts it localized.
+ * Slugs come from the asset names so `{{img::slug}}` written into the card keeps
+ * working; a name with nothing sluggable left falls back to its position, and
+ * collisions get a suffix. Bytes that turn out to be none of these are skipped
+ * rather than failing the import, and counted (`unsupported`), as are those past the plot's cap
  * (`overLimit`), for the import to say so (`ImportWarning`).
  *
  * The rows are written under the plot's row lock, the same lock an upload takes:
@@ -643,7 +644,7 @@ async function storeImportedAssets(
         break;
       }
       const id = randomUUID();
-      const stored = await saveAsset(deps.storage, id, asset.bytes, { audio: true, font: true });
+      const stored = await saveAsset(deps.storage, id, asset.bytes, { audio: true, video: true, font: true });
       if (!stored) {
         unsupported += 1;
         continue;
@@ -700,7 +701,8 @@ async function storeImportedAssets(
  * the import's answer lists (`importWarnings`) and the studio says quietly. Every
  * one is a cap or a file the card itself got wrong — the import goes ahead.
  *
- * - `assets_unsupported` files that are neither a picture nor music (video, a font, a voice model)
+ * - `assets_unsupported` files that are none of a picture, music, a video a browser plays
+ *   or a web font (AVI, Matroska, a voice model)
  * - `assets_missing` files the card declares and does not hold
  * - `assets_over_budget` files past the parse budget (`MAX_TOTAL_BYTES`, `MAX_ASSETS`)
  * - `assets_over_limit` files past the plot's `MAX_ASSETS_PER_PLOT`
@@ -2103,7 +2105,8 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
    */
   /**
    * An asset by the address it was fetched from at import (`localizeAssets.ts`):
-   * `by-name/<host>/<path>` is the asset named `https://<host>/<path>` — the
+   * `by-name/<host>/<path>` is the asset named `https://<host>/<path>` (a scheme
+ * the renderer wrote in front of the host, from a variable, is passed over) — the
    * name matched as written, then without case, as RisuAI looks a name up. What
    * a template address the import localized points at, with the renderer's value
    * in its slot, so a value the import did not foresee is a 404 on our own
@@ -2112,10 +2115,11 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
   app.get('/:id/assets/by-name/*', async (c) => {
     const plot = await loadVisiblePlot(deps.db, requireUuidParam(c), c.get('viewerId'));
     const marker = '/assets/by-name/';
-    const raw = c.req.path.slice(c.req.path.indexOf(marker) + marker.length);
+    // A host the renderer wrote from a variable (`{{getvar::cdn}}/…`) comes with its scheme.
+    const raw = c.req.path.slice(c.req.path.indexOf(marker) + marker.length).replace(/^(?:https?:)?\/+/i, '');
     let name = `https://${raw}`;
     try {
-      name = `https://${decodeURIComponent(raw)}`;
+      name = `https://${decodeURIComponent(raw).replace(/^(?:https?:)?\/+/i, '')}`;
     } catch {
       // Not percent-encoding after all: the name is as it came.
     }
@@ -2126,15 +2130,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       .orderBy(sql`${plotAssets.name} = ${name} desc`, asc(plotAssets.createdAt))
       .limit(1);
     if (!asset) throw notFound('Asset not found');
-    const object = await deps.storage.get(asset.path);
-    if (!object) throw notFound('Asset file is missing');
-    return new Response(object.body, {
-      headers: {
-        'Content-Type': asset.mime,
-        'Content-Length': String(object.size),
-        'Cache-Control': 'private, max-age=3600',
-      },
-    });
+    return assetResponse(deps.storage, c, asset);
   });
 
   app.get('/:id/assets/:slug', async (c) => {
@@ -2145,16 +2141,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       .where(and(eq(plotAssets.plotId, plot.id), eq(plotAssets.slug, c.req.param('slug')!)))
       .limit(1);
     if (!asset) throw notFound('Asset not found');
-
-    const object = await deps.storage.get(asset.path);
-    if (!object) throw notFound('Asset file is missing');
-    return new Response(object.body, {
-      headers: {
-        'Content-Type': asset.mime,
-        'Content-Length': String(object.size),
-        'Cache-Control': 'private, max-age=3600',
-      },
-    });
+    return assetResponse(deps.storage, c, asset);
   });
 
   app.delete('/:id/assets/:slug', requireUser, async (c) => {

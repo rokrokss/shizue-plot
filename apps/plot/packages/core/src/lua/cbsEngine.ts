@@ -29,6 +29,8 @@ export interface LuaCbsCall {
   /** The character's book and the chat's, in RisuAI's shape. */
   lore: readonly object[];
   localLore: readonly object[];
+  /** The modules' lore on the chat, read after the other two (`getModuleLorebooks`). */
+  moduleLore?: readonly object[];
   user: string;
   persona: string;
   messages: readonly { role: string; data: string; time?: number }[];
@@ -66,7 +68,8 @@ export function luaCbs(text: unknown, call: LuaCbsCall): string {
       character: { ...character, description: call.char.description },
       persona: call.persona,
       chat,
-      lorebook: () => [...call.lore, ...call.localLore],
+      // RisuAI's `{{lorebook}}`: the character's, the chat's, then the modules'.
+      lorebook: () => [...call.lore, ...call.localLore, ...(call.moduleLore ?? [])],
       triggerId: data.triggerId ?? null,
     },
   });

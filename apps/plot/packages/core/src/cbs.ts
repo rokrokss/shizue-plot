@@ -2382,9 +2382,12 @@ export function evaluateCbs(source: string, nodes: CbsNode[], host: CbsHost = {}
  * What RisuAI's asset macros draw: an image, the image's address, music — a
  * player (`audio`, RisuAI's `<audio controls autoplay loop>`) or background
  * music with no player at all (`bgm`, RisuAI's `risu-ctrl` that its DOM observer
- * plays) — or something there is no counterpart for here (backgrounds, video,
- * inlays, profile pictures), which is dropped. Keys are normalized names —
- * `video-img` is `videoimg`.
+ * plays) — a video, as a player (`video`, RisuAI's `<video controls autoplay
+ * loop>`) or as a moving picture (`videoimg`, its `<video autoplay muted loop>`),
+ * or something there is no counterpart for here (backgrounds, inlays, profile
+ * pictures), which is dropped. `asset` is an image here; RisuAI draws it as the
+ * moving picture when the asset is a video, which only a renderer holding the
+ * assets can tell. Keys are normalized names — `video-img` is `videoimg`.
  */
 const ASSET_MACROS: Record<string, AssetMacroKind> = {
   img: 'image',
@@ -2395,16 +2398,16 @@ const ASSET_MACROS: Record<string, AssetMacroKind> = {
   path: 'url',
   audio: 'audio',
   bgm: 'bgm',
+  video: 'video',
+  videoimg: 'videoimg',
   bg: 'drop',
-  video: 'drop',
-  videoimg: 'drop',
   inlay: 'drop',
   inlayed: 'drop',
   inlayeddata: 'drop',
   source: 'drop',
 };
 
-export type AssetMacroKind = 'image' | 'url' | 'audio' | 'bgm' | 'drop';
+export type AssetMacroKind = 'image' | 'url' | 'audio' | 'bgm' | 'video' | 'videoimg' | 'drop';
 
 /** The kind of asset macro a normalized name is, or undefined for any other. */
 export const assetMacroKind = (name: string): AssetMacroKind | undefined =>

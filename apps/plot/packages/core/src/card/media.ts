@@ -4,13 +4,17 @@
  * it re-encoded (Nanachi's 28 emotions), and a PNG card's assets are named by an
  * index with no extension at all. So the bytes decide, here as in the store.
  *
- * Only what a chat can draw or play is anything: the images a message shows and
- * the music RisuAI's `{{audio::…}}` and `{{bgm::…}}` play (characterCards.ts files
- * mp3, wav, ogg and flac as audio; m4a is the iTunes spelling of the same).
+ * Only what a chat can draw or play is anything: the images a message shows, the
+ * music RisuAI's `{{audio::…}}` and `{{bgm::…}}` play (characterCards.ts files
+ * mp3, wav, ogg and flac as audio; m4a is the iTunes spelling of the same), and
+ * the videos its `{{video::…}}`, `{{video-img::…}}` and `{{asset::…}}` play —
+ * those a browser can: MP4 and WebM. RisuAI also counts AVI, MOV and MKV as
+ * video, which no browser (AVI) or not every one (MOV, MKV) plays, so they are
+ * nothing here.
  */
 
 export interface MediaType {
-  kind: 'image' | 'audio';
+  kind: 'image' | 'audio' | 'video';
   /** The extension it is stored under, without the dot. */
   ext: string;
   mime: string;
@@ -32,6 +36,12 @@ export const IMAGE_EXTENSIONS: ReadonlySet<string> = new Set(['png', 'jpg', 'jpe
 export const AUDIO_EXTENSIONS: ReadonlySet<string> = new Set(['mp3', 'ogg', 'wav', 'flac', 'm4a']);
 /** The same for web fonts (`sniffFont`), which RisuAI's charx export files under `assets/<type>/fonts/`. */
 export const FONT_EXTENSIONS: ReadonlySet<string> = new Set(['woff2', 'woff', 'otf', 'ttf']);
+/**
+ * The same for video: RisuAI's `videoExtensions` (`{{asset::…}}` plays these),
+ * and the rest its export files as video. Only a hint — the bytes keep what a
+ * browser plays (`sniffMedia`) and pass over the rest.
+ */
+export const VIDEO_EXTENSIONS: ReadonlySet<string> = new Set(['mp4', 'webm', 'm4v', 'm4p', 'mov', 'avi', 'mkv']);
 
 const at = (bytes: Uint8Array, signature: string, offset = 0): boolean =>
   bytes.length >= offset + signature.length &&
@@ -66,10 +76,47 @@ function isAvif(bytes: Uint8Array): boolean {
 }
 
 /**
- * The picture or music `bytes` are, or null for anything else. An ISO media
- * file (`ftyp`) is told by its brands: AVIF's for a picture (`isAvif`), iTunes
- * audio's (`M4A `, `M4B `) for music — the same box holds video, which nothing
- * here plays.
+ * Major brands of an ISO media file that is an MP4 video — the generic ISO ones,
+ * the MP4 versions, H.264's, Apple's M4V and DASH's. Named one by one, so what a
+ * browser does not play (QuickTime's `qt  `, HEIF's `heic`) stays nothing, and
+ * read after the picture's and the music's brands.
+ */
+const MP4_VIDEO_BRANDS: ReadonlySet<string> = new Set([
+  'isom', 'iso2', 'iso3', 'iso4', 'iso5', 'iso6', 'mp41', 'mp42', 'avc1', 'M4V ', 'M4VH', 'M4VP', 'dash',
+]);
+
+const brandAt = (bytes: Uint8Array, offset: number): string =>
+  String.fromCharCode(...bytes.subarray(offset, offset + 4));
+
+/** EBML's magic, which opens a WebM file — and a Matroska one, which its DocType tells apart. */
+const EBML_MAGIC = [0x1a, 0x45, 0xdf, 0xa3];
+
+/**
+ * Whether an EBML file is a WebM: its header's DocType element (`42 82`, a size,
+ * then the value) says `webm` rather than `matroska`, as far as the bytes at
+ * hand reach — the header is a few dozen bytes, so it is there.
+ */
+function isWebm(bytes: Uint8Array): boolean {
+  if (!EBML_MAGIC.every((byte, i) => bytes[i] === byte)) return false;
+  for (let offset = 4; offset + 3 < bytes.length; offset += 1) {
+    if (bytes[offset] !== 0x42 || bytes[offset + 1] !== 0x82) continue;
+    // The size is an EBML variable-length integer: its leading zeros say how many bytes it takes.
+    const first = bytes[offset + 2]!;
+    const width = Math.clz32(first) - 23;
+    if (width < 1 || width > 8) continue;
+    let size = first & (0xff >> width);
+    for (let i = 1; i < width; i += 1) size = size * 256 + (bytes[offset + 2 + i] ?? 0);
+    if (size === 4 && at(bytes, 'webm', offset + 2 + width)) return true;
+  }
+  return false;
+}
+
+/**
+ * The picture, music or video `bytes` are, or null for anything else. An ISO
+ * media file (`ftyp`) is told by its brands: AVIF's for a picture (`isAvif`),
+ * iTunes audio's (`M4A `, `M4B `) for music, an MP4 video's
+ * (`MP4_VIDEO_BRANDS`) for video — every one stored as MP4, the type RisuAI's
+ * own `<source>` names. An EBML file is a video when it is a WebM (`isWebm`).
  */
 export function sniffMedia(bytes: Uint8Array): MediaType | null {
   if (at(bytes, '\x89PNG')) return { kind: 'image', ext: 'png', mime: 'image/png' };
@@ -85,6 +132,11 @@ export function sniffMedia(bytes: Uint8Array): MediaType | null {
   if (at(bytes, 'ftyp', 4) && (at(bytes, 'M4A ', 8) || at(bytes, 'M4B ', 8))) {
     return { kind: 'audio', ext: 'm4a', mime: 'audio/mp4' };
   }
+
+  if (at(bytes, 'ftyp', 4) && MP4_VIDEO_BRANDS.has(brandAt(bytes, 8))) {
+    return { kind: 'video', ext: 'mp4', mime: 'video/mp4' };
+  }
+  if (isWebm(bytes)) return { kind: 'video', ext: 'webm', mime: 'video/webm' };
   return null;
 }
 

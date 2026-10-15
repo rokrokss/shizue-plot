@@ -297,6 +297,14 @@ export interface DisplayScript {
   /** Ascending application order. */
   order: number;
   /**
+   * RisuAI's `<order N>` as the card or module wrote it, where it wrote one. The
+   * import already ran the list in that order (`order`); this is kept because
+   * RisuAI sorts a character's regex scripts and its modules' as one list
+   * (`orderedWithModules`), so a module's `<order 5>` can run before the card's
+   * own. Absent counts as 0, as there.
+   */
+  rank?: number;
+  /**
    * `move_top` / `move_bottom` lift the rendered match to the top or bottom of the
    * message; `repeat_back` reuses the previous same-role message's match when this
    * one has none, which is how a status window survives a turn that omits it.
@@ -697,6 +705,12 @@ export interface PlotModule {
   lowLevelAccess?: true;
   /** RisuAI's `namespace`, kept as it came: what `{{moduleenabled}}` and `{{moduleassetlist}}` find the module by. */
   namespace?: string;
+  /**
+   * RisuAI's `customModuleToggle`: the module's toggles in RisuAI's syntax
+   * (`parseToggleSyntax`), drawn in the reader's chat settings while the module
+   * is on, their values the reader's global `toggle_<key>` variables.
+   */
+  toggles?: string;
   /** The `editdisplay` scripts of `regex`, as display scripts — run after the work's, on every message. */
   displayScripts?: DisplayScript[];
   /** The `<style>` elements of the module's `backgroundEmbedding`, drawn after the work's stylesheet. */
@@ -710,6 +724,21 @@ export interface PlotModule {
   assets: string[];
   /** The file as it arrived. */
   importedFrom: { fileName: string; sha256: string; importedAt: string };
+}
+
+/**
+ * A picture (or other media) a module in a reader's own library brought — kept
+ * apart from any work's assets, served to that reader alone, and found by its
+ * name after the work's own, as RisuAI's `getModuleAssets` comes after the
+ * character's `additionalAssets`.
+ */
+export interface ReaderModuleAsset {
+  id: string;
+  /** The module's name for it, what `{{img::…}}` finds it by. */
+  name: string;
+  /** The storage key (`reader-modules/…`). */
+  path: string;
+  mime: string;
 }
 
 /**

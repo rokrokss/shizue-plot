@@ -141,6 +141,20 @@ export interface ScriptBundle {
   overlay: { member: MemberOverlay | null; persona: string | null };
   /** The chat's own lore, RisuAI's chat `localLore`: what the card's Lua upserted in this chat. */
   localLore?: LoreEntry[];
+  /**
+   * Only the reader's own modules make this member scripted: the card's text
+   * came blank (it is the creator's, disclosed only where the work carries
+   * scripts), so what a run rewrites of it — description, lore, post-history
+   * instructions — is not kept, as it would stand in for text it never read.
+   */
+  concealed?: true;
+  /**
+   * The lore of the modules on the chat — the work's, then the reader's own —
+   * which `{{lorebook}}`, `/test_lorebook` and Lua's lore readers read after the
+   * character's and the chat's (RisuAI's `getModuleLorebooks`). Read-only: no
+   * script writes it, so none of it can go back as the member's.
+   */
+  moduleLore?: LoreEntry[];
 }
 
 /** How the runtime asks the reader something — the page draws it. */
@@ -598,6 +612,8 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     hasTriggersFor(triggers, mode) || (codeTriggers && engineHandles(mode));
 
   const memberId = bundle.memberId;
+  /** The card's text came blank (`ScriptBundle.concealed`): what a run rewrites of it is not kept. */
+  const concealed = bundle.concealed === true;
   /** In a work of several members, the member every request is made for. */
   const tag: { memberId?: string } = options.group ? { memberId } : {};
 
@@ -713,6 +729,8 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
         const answer = await api.send<{ result: string }>('POST', `/api/chats/${chatId}/script-llm`, {
           messages: request.messages,
           model: request.model === 'submodel' ? 'sub' : 'main',
+          // The trigger whose effect asked: the server holds the call to that trigger's access.
+          trigger: request.trigger,
           ...tag,
         });
         return { ok: true, text: answer.result };
@@ -753,6 +771,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
       greeting,
       note: s.note,
       localLore: s.localLore,
+      ...(bundle.moduleLore?.length ? { moduleLore: bundle.moduleLore } : {}),
       persona: s.persona,
       variables,
       globalVariables: s.globals,
@@ -799,9 +818,11 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
 
   function absorb(s: Session, rewrite: CharacterRewrite): void {
     const patch = patchOf(s);
-    if (rewrite.description !== undefined) patch.description = rewrite.description;
-    if (rewrite.lorebook !== undefined) patch.lorebook = rewrite.lorebook;
-    if (rewrite.postHistoryInstructions !== undefined) patch.postHistoryInstructions = rewrite.postHistoryInstructions;
+    if (!concealed) {
+      if (rewrite.description !== undefined) patch.description = rewrite.description;
+      if (rewrite.lorebook !== undefined) patch.lorebook = rewrite.lorebook;
+      if (rewrite.postHistoryInstructions !== undefined) patch.postHistoryInstructions = rewrite.postHistoryInstructions;
+    }
     if (rewrite.name !== undefined) patch.name = rewrite.name;
     if (rewrite.firstMessage !== undefined) patch.firstMessage = rewrite.firstMessage;
     if (rewrite.backgroundHtml !== undefined) patch.backgroundHtml = rewrite.backgroundHtml;
@@ -874,10 +895,10 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
         return sessionCharacter(s);
       },
       setDescription: (text) => {
-        patchOf(s).description = text;
+        if (!concealed) patchOf(s).description = text;
       },
       setLorebook: (entries) => {
-        patchOf(s).lorebook = entries;
+        if (!concealed) patchOf(s).lorebook = entries;
       },
       get localLore() {
         return s.localLore;
@@ -886,6 +907,7 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
         s.localLore = entries;
         s.localLoreChanged = true;
       },
+      moduleLore: bundle.moduleLore ?? [],
       setName: (name) => {
         patchOf(s).name = name;
       },

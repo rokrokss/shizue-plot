@@ -214,6 +214,7 @@ export function ChatPanel({
   onSpeakNow,
   inspectChatId,
   scriptSimilarity = false,
+  modules,
 }: {
   chatId: string;
   /** The branch's head and the chat's memory revision: the summaries are read again whenever either moves. */
@@ -290,6 +291,12 @@ export function ChatPanel({
    * behind their low-level access. Only then is there a model to pick.
    */
   scriptSimilarity?: boolean;
+  /**
+   * The chat's RisuAI modules: the toggles the modules on it and the members'
+   * cards declare, and the reader's own module library (`ModuleToggles`,
+   * `ReaderModules`) — drawn after the display settings.
+   */
+  modules?: ReactNode;
 }) {
   const t = useTranslations('chat');
   const common = useTranslations('common');
@@ -710,6 +717,8 @@ export function ChatPanel({
         </div>
         <p className="text-xs text-muted">{t('componentTurnsHint')}</p>
       </section>
+
+      {modules}
 
       {scriptSimilarity ? <EmbeddingModelSetting /> : null}
 

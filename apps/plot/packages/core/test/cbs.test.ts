@@ -750,12 +750,15 @@ describe('evaluateCbs - host data', () => {
 
 describe('asset macros', () => {
   it('finds every alias with its kind, and no ref for a composed one', () => {
-    const text = '{{img::a}} {{Image:: b }} {{raw::c}} {{video-img::d}} {{img::{{getvar::o}}.png}} {{char}}';
+    const text =
+      '{{img::a}} {{Image:: b }} {{raw::c}} {{video-img::d}} {{video::e}} {{bg::f}} {{img::{{getvar::o}}.png}} {{char}}';
     expect(findAssetMacros(text).map(({ kind, ref }) => [kind, ref])).toEqual([
       ['image', 'a'],
       ['image', 'b'],
       ['url', 'c'],
-      ['drop', 'd'],
+      ['videoimg', 'd'],
+      ['video', 'e'],
+      ['drop', 'f'],
       ['image', null],
     ]);
   });

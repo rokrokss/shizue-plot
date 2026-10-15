@@ -3,7 +3,7 @@
 import { Icon } from '@/components/Icon';
 import { assetResolver, type CbsMessage } from '@shizue/core/cbs';
 import { componentNames } from '@shizue/core/component';
-import { displayScriptsFor } from '@shizue/core/display-script';
+import { displayScriptsFor, orderedWithModules } from '@shizue/core/display-script';
 import { NARRATOR_SPEAKER } from '@shizue/core/group';
 import { fnv1a } from '@shizue/core/macro';
 import { NARRATION_PREFIX } from '@shizue/core/narration';
@@ -20,6 +20,8 @@ import { BgmMute } from '@/components/BgmMute';
 import { BottomSheet } from '@/components/BottomSheet';
 import { ChatBackground } from '@/components/ChatBackground';
 import { ChatPanel } from '@/components/ChatPanel';
+import { ModuleToggles } from '@/components/ModuleToggles';
+import { ReaderModules } from '@/components/ReaderModules';
 import { ChatSettings } from '@/components/ChatSettings';
 import { EmotionScreen } from '@/components/EmotionScreen';
 import { FocusPicker } from '@/components/FocusPicker';
@@ -127,6 +129,7 @@ import type {
   ChatAttachment,
   ChatMemorySettings,
   ChatMessage,
+  ChatModulesView,
   ChatState,
   DisplayScript,
   MessageRole,
@@ -367,6 +370,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   /** The plot's read has come back, either way. */
   const [plotRead, setPlotRead] = useState(false);
   const [assets, setAssets] = useState<PlotAsset[]>([]);
+  /**
+   * The reader's own modules on this chat and their library (`GET /:id/modules`):
+   * null until read. Read again whenever the reader changes which are on.
+   */
+  const [chatModules, setChatModules] = useState<ChatModulesView | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [presets, setPresets] = useState<PresetInfo[]>([]);
   const [personas, setPersonas] = useState<Persona[]>([]);
@@ -387,6 +395,12 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    * through before they are shown (RisuAI's `applyEdittransRegex`), by member id.
    */
   const [translationScripts, setTranslationScripts] = useState<ReadonlyMap<string, TranslationScript[]>>(NO_TRANSLATION_SCRIPTS);
+  /**
+   * Bumped when the reader turns a module of theirs on or off here: the bundles
+   * carry the modules' triggers, regex and lore, so they are read again.
+   */
+  const [scriptsVersion, setScriptsVersion] = useState(0);
+  const reloadScripts = useCallback(() => setScriptsVersion((version) => version + 1), []);
   useEffect(() => {
     setScriptBundles(undefined);
     setTranslationScripts(NO_TRANSLATION_SCRIPTS);
@@ -404,7 +418,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       // A plot that cannot be read runs nothing, and a pending reply is kept as written.
       () => setScriptBundles(null),
     );
-  }, [id]);
+  }, [id, scriptsVersion]);
   const scriptBundle = scriptBundles === undefined ? undefined : (scriptBundles?.[0] ?? null);
   /**
    * What the cards' scripts rewrote of their members for this reader on the plot —
@@ -769,6 +783,37 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     apiGet<ReaderPreset[]>('/api/reader-presets').then(setReaderPresets, () => undefined);
     apiGet<UserNote[]>('/api/notes').then(setNotes, () => undefined);
   }, [id]);
+  /** Reads the chat's modules again — on load, and after the reader changes which are on. */
+  const loadChatModules = useCallback(
+    () => apiGet<ChatModulesView>(`/api/chats/${id}/modules`).then(setChatModules, () => undefined),
+    [id],
+  );
+  useEffect(() => {
+    void loadChatModules();
+  }, [loadChatModules]);
+  /** The library modules on this chat, in the order they run after the work's own. */
+  const readerModules = useMemo(() => chatModules?.active ?? [], [chatModules]);
+  /**
+   * Their pictures, as assets after the work's — RisuAI's `getModuleAssets` after
+   * the character's, so a name the work has is the work's. Never locked, and never
+   * in the work's gallery or `{{assetlist}}`.
+   */
+  const readerAssets = useMemo<PlotAsset[]>(
+    () =>
+      readerModules.flatMap((module) =>
+        module.assets.map((asset) => ({
+          slug: `m-${asset.id}`,
+          name: asset.name,
+          url: asset.url,
+          mime: asset.mime,
+          width: null,
+          height: null,
+          thumbhash: null,
+          createdAt: '',
+        })),
+      ),
+    [readerModules],
+  );
 
   const plotId = state?.chat.plotId ?? null;
   useEffect(() => {
@@ -803,11 +848,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const assetUrls = useMemo(
     () =>
       new Map(
-        assets
+        [...assets, ...readerAssets]
           .filter((asset) => !lockedKinds.has(asset.slug))
           .map((asset) => [asset.slug, assetSrc(asset)]),
       ),
-    [assets, lockedKinds],
+    [assets, readerAssets, lockedKinds],
   );
 
   /**
@@ -826,9 +871,12 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    * What a reference names, for both maps: a slug, or the name an imported card
    * wrote it under (`{{img::profile.png}}`), which no slug can stand in for.
    */
-  const resolveAsset = useMemo(() => assetResolver(assets), [assets]);
+  const resolveAsset = useMemo(() => assetResolver([...assets, ...readerAssets]), [assets, readerAssets]);
   /** The same names as data, for the display worker to build the resolver again (`CbsContext.namedAssets`). */
-  const namedAssets = useMemo(() => assets.map((asset) => ({ slug: asset.slug, name: asset.name })), [assets]);
+  const namedAssets = useMemo(
+    () => [...assets, ...readerAssets].map((asset) => ({ slug: asset.slug, name: asset.name })),
+    [assets, readerAssets],
+  );
 
   /** The gallery's rows: every image of the work, open or not. */
   const gallery = useMemo(() => illustrations(assets, locks ?? []), [assets, locks]);
@@ -850,8 +898,17 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   // Display scripts and their seed variables are presentation, so the public
   // view of a plot carries them — otherwise a creator's status window would
   // only ever render for the creator.
-  const scripts: DisplayScript[] = useMemo(() => plot?.displayScripts ?? [], [plot]);
-  const creatorCss = plot?.css ?? '';
+  // The reader's own modules' after the work's, sorted with them by RisuAI's
+  // `<order N>` (`orderedWithModules`), as RisuAI runs a character's regex and
+  // every module's on the chat as one list.
+  const scripts: DisplayScript[] = useMemo(
+    () =>
+      readerModules.length > 0
+        ? orderedWithModules(plot?.displayScripts ?? [], readerModules.map((module) => module.displayScripts))
+        : (plot?.displayScripts ?? []),
+    [plot, readerModules],
+  );
+  const creatorCss = [plot?.css ?? '', ...readerModules.map((module) => module.css)].filter((css) => css.trim()).join('\n\n');
   /**
    * The plot's stylesheet, scoped and filtered exactly as a `<style>` in a
    * script's output is — but once for the whole chat, not once per message. It
@@ -1082,11 +1139,17 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const cbsModules = useMemo(() => {
     if (!plot) return undefined;
     const open = new Set(assetNames);
-    return (plot.modules ?? []).map((module) => ({
-      namespace: module.namespace,
-      assets: module.assets.filter((name) => open.has(name)),
-    }));
-  }, [plot, assetNames]);
+    return [
+      ...(plot.modules ?? []).map((module) => ({
+        namespace: module.namespace,
+        assets: module.assets.filter((name) => open.has(name)),
+      })),
+      // The reader's own modules on the chat, with their pictures by their names.
+      ...readerModules.flatMap((module) =>
+        module.namespace ? [{ namespace: module.namespace, assets: module.assets.map((asset) => asset.name) }] : [],
+      ),
+    ];
+  }, [plot, assetNames, readerModules]);
   /**
    * The loaded messages after the greeting, as RisuAI's chat functions read them
    * and numbered as `chatIndex` numbers them. Stored messages only: a reply still
@@ -1390,7 +1453,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    * companion's card background is drawn nowhere. It is custom UI, so it goes
    * when custom UI does, as the stylesheet does.
    */
-  const backgroundHtml = customUi ? (scriptOverlay?.backgroundHtml ?? plot?.backgroundHtml ?? '') : '';
+  const backgroundHtml = customUi
+    ? [scriptOverlay?.backgroundHtml ?? plot?.backgroundHtml ?? '', ...readerModules.map((module) => module.backgroundHtml)]
+        .filter((html) => html.trim())
+        .join('\n')
+    : '';
   /** What its CBS reads: the screen's own, as a display script's template reads it. */
   const backgroundContext = useMemo<CbsContext | null>(
     () =>
@@ -1558,11 +1625,14 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                 // Its states are its card's code's (`luaCodeKey`): the sandbox outlives the page.
                 sandbox: { call: (...args) => sandbox.call(...args), dispose: () => undefined },
                 ui: scriptUi,
-                llm: async (messages, model) =>
-                  (await apiSend<{ result: string }>('POST', `/api/chats/${id}/script-llm`, { messages, model, ...tag })).result,
+                // Each names the trigger whose code asked: the server holds the call to that trigger's access.
+                llm: async (messages, model, trigger) =>
+                  (await apiSend<{ result: string }>('POST', `/api/chats/${id}/script-llm`, { messages, model, trigger, ...tag }))
+                    .result,
                 similarity,
                 // Our server makes the GET, under RisuAI's limits, and answers as RisuAI does.
-                request: (url) => apiSend<LuaRequestAnswer>('POST', `/api/chats/${id}/script-fetch`, { url, ...tag }),
+                request: (url, trigger) =>
+                  apiSend<LuaRequestAnswer>('POST', `/api/chats/${id}/script-fetch`, { url, trigger, ...tag }),
                 // `loadLoreBooks`: activated as `/test_lorebook` is, against RisuAI's
                 // `maxContext`, which is the chat's context budget here.
                 lore: async (history, lorebook) => ({
@@ -2697,6 +2767,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     translation?: ChatTranslationSettings;
     /** Whether earlier messages are searched by meaning and brought back. */
     retrieval?: { enabled: boolean };
+    /** The reader's library modules this chat's own list turns on. */
+    modules?: string[];
   }): Promise<void> {
     if (!beginMutation()) return;
     setSettingsError('');
@@ -2718,6 +2790,23 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       (other) => other !== memberId && members.some((member) => member.id === other),
     );
     await updateSettings({ absentCharacterIds: absent ? [...kept, memberId] : kept });
+  }
+
+  /**
+   * One of the reader's global variables on the work — a toggle's value
+   * (`toggle_<key>`) — written at once, as RisuAI writes it, and the page's copy
+   * taken from the answer, which the scripts and the next prompt read.
+   */
+  async function setGlobalVariable(name: string, value: string): Promise<void> {
+    setSettingsError('');
+    try {
+      const answer = await apiSend<{ variables: Variables }>('PATCH', `/api/chats/${id}/global-variables`, {
+        variables: { [name]: value },
+      });
+      setState((current) => (current ? { ...current, globalVariables: answer.variables } : current));
+    } catch (caught) {
+      setSettingsError(toMessage(caught));
+    }
   }
 
   /** Attaching a reusable note, which answers with the whole state as well. */
@@ -3133,6 +3222,31 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                 setCustomUi(enabled);
               }}
               scriptSimilarity={scriptBundle?.lowLevelAccess ?? false}
+              modules={
+                <>
+                  <ModuleToggles
+                    text={chatModules?.toggles ?? ''}
+                    values={state.globalVariables}
+                    onSet={setGlobalVariable}
+                  />
+                  {chatModules ? (
+                    <ReaderModules
+                      library={chatModules.library}
+                      chatIds={state.chat.modules ?? []}
+                      disabled={settingsLocked}
+                      onChatIds={async (modules) => {
+                        await updateSettings({ modules });
+                        await loadChatModules();
+                        reloadScripts();
+                      }}
+                      onChange={async () => {
+                        await loadChatModules();
+                        reloadScripts();
+                      }}
+                    />
+                  ) : null}
+                </>
+              }
             />
           </div>
         </div>

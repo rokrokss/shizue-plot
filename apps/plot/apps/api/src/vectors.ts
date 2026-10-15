@@ -17,6 +17,12 @@
  *   `QUERY_EMBED_TIMEOUT_MS`; any failure leaves the turn to its keywords and its
  *   history, and the generation goes on.
  *
+ * - **A reader's own lore is embedded apart** (`scheduleReaderLoreEmbedding`):
+ *   what their scripts rewrote of a member's lore, and their library modules'
+ *   lore, into rows of theirs (`reader_lore_vectors`) searched beside the
+ *   work's — so an entry Lua rewrote is found by meaning too, and a search no
+ *   longer asks the work's pass for a vector it can never make.
+ *
  * Everything here swallows its own failures.
  */
 import {
@@ -35,11 +41,24 @@ import {
   type PromptCharacter,
   type ReaderMember,
 } from '@shizue/core';
-import { characters, chats, loreEntryVectors, messageChunks, messages, plots, type ContentLanguage, type Message } from '@shizue/db';
-import { and, asc, desc, eq, inArray, notInArray, sql } from 'drizzle-orm';
+import { overlaidCard } from '@shizue/core/triggers';
+import {
+  characters,
+  chats,
+  loreEntryVectors,
+  messageChunks,
+  messages,
+  plots,
+  readerLoreVectors,
+  readerModules,
+  type ContentLanguage,
+  type Message,
+} from '@shizue/db';
+import { and, asc, desc, eq, inArray, isNotNull, notInArray, or, sql } from 'drizzle-orm';
 import { createHash } from 'node:crypto';
 import type { AppDeps } from './deps.js';
 import type { Embedder, Embedding } from './embedder.js';
+import { loadReaderOverlay } from './scriptState.js';
 import { buildPath, visibleToAi } from './tree.js';
 
 /** How long a request waits to embed its query before it goes on without the search. */
@@ -52,12 +71,19 @@ const BACKGROUND_BATCH = 8;
 /** Passes one guarded job runs at most when it is asked again while it runs. */
 const MAX_PASSES = 3;
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /** The key a text's vectors are stored under: what was embedded, not where it sits. */
 export const textHash = (text: string): string => createHash('sha256').update(text).digest('hex');
 
 /** What a generation needs for the search, from its chat and plot (`readerPromptSettings`). */
 export interface VectorPlan {
   plotId: string;
+  /**
+   * The chat's reader, whose own lore — members' lore their scripts rewrote,
+   * their modules' — is embedded apart from the work's (`reader_lore_vectors`).
+   */
+  userId?: string;
   plotLanguage: ContentLanguage;
   /** The chat's retrieval is on (`chats.retrieval`). */
   retrieval: boolean;
@@ -224,6 +250,112 @@ async function embedPlotLore(deps: AppDeps, plotId: string): Promise<void> {
     });
 }
 
+/**
+ * Embeds the lore one reader's play on the plot holds and the work does not —
+ * the members' lore as their scripts rewrote it (`plot_reader_overlays`, Lua's
+ * and the triggers' lore edits) and the lore of their library modules on any of
+ * their chats with it (`reader_modules`, `chats.modules`) — into rows of theirs
+ * alone, and lets go of the rows of theirs no such entry says any more. What the
+ * plot's own rows already hold is not embedded again. Asked for by a search
+ * that met an entry with no vector (`activatedLore`), which is how a rewrite
+ * the scripts made, or a module the reader turned on, comes to be searched.
+ */
+export function scheduleReaderLoreEmbedding(deps: AppDeps, userId: string, plotId: string): void {
+  if (!deps.embedder) return;
+  runGuarded(deps, `lore:${plotId}:${userId}`, () => embedReaderLore(deps, userId, plotId));
+}
+
+async function embedReaderLore(deps: AppDeps, userId: string, plotId: string): Promise<void> {
+  const embedder = deps.embedder;
+  if (!embedder) return;
+  const [plot] = await deps.db.select({ language: plots.language }).from(plots).where(eq(plots.id, plotId)).limit(1);
+  const model = plot ? embedder.modelFor(plot.language) : null;
+  if (!plot || !model) return;
+  const members = await deps.db
+    .select({ id: characters.id, card: characters.card })
+    .from(characters)
+    .where(eq(characters.plotId, plotId))
+    .orderBy(asc(characters.orderIndex), asc(characters.createdAt));
+  const overlay = await loadReaderOverlay(deps.db, userId, plotId);
+  // The reader's modules on any of their chats with the plot: on everywhere, or listed by one.
+  const listed = await deps.db
+    .select({ modules: chats.modules })
+    .from(chats)
+    .where(and(eq(chats.userId, userId), eq(chats.plotId, plotId), isNotNull(chats.modules)));
+  const ids = [...new Set(listed.flatMap((chat) => chat.modules ?? []))].filter((id) => UUID.test(id));
+  const modules = await deps.db
+    .select({ module: readerModules.module })
+    .from(readerModules)
+    .where(
+      and(
+        eq(readerModules.userId, userId),
+        ids.length > 0
+          ? or(eq(readerModules.enabledGlobally, true), inArray(readerModules.id, ids))
+          : eq(readerModules.enabledGlobally, true),
+      ),
+    );
+  const rewritten = members.flatMap((member) => {
+    const own = overlay?.members?.[member.id];
+    return own?.lorebook ? overlaidCard(member.card, own).lorebook : [];
+  });
+  const entries = [...rewritten, ...modules.flatMap((row) => row.module.lorebook)];
+  const contents = candidateContents(entries, members[0]?.card.loreSettings);
+  if (contents.size > 0) {
+    // What the work's own rows hold is searched there.
+    const shared = await deps.db
+      .select({ hash: loreEntryVectors.contentHash })
+      .from(loreEntryVectors)
+      .where(
+        and(
+          eq(loreEntryVectors.plotId, plotId),
+          eq(loreEntryVectors.model, model),
+          inArray(loreEntryVectors.contentHash, [...contents.keys()]),
+        ),
+      );
+    for (const { hash } of shared) contents.delete(hash);
+  }
+
+  const mine = and(eq(readerLoreVectors.userId, userId), eq(readerLoreVectors.plotId, plotId));
+  await deps.db
+    .delete(readerLoreVectors)
+    .where(contents.size > 0 ? and(mine, notInArray(readerLoreVectors.contentHash, [...contents.keys()])) : mine);
+  if (contents.size === 0) return;
+
+  const current = await deps.db
+    .select({ hash: readerLoreVectors.contentHash })
+    .from(readerLoreVectors)
+    .where(and(mine, eq(readerLoreVectors.model, model)));
+  const done = new Set(current.map((row) => row.hash));
+  const pending = [...contents].filter(([hash]) => !done.has(hash));
+  if (pending.length === 0) return;
+  const embedded = await embedDocuments(
+    embedder,
+    pending.map(([, content]) => content),
+    plot.language,
+  );
+  if (!embedded) return;
+  await deps.db
+    .insert(readerLoreVectors)
+    .values(
+      pending.map(([contentHash, content], at) => ({
+        userId,
+        plotId,
+        contentHash,
+        content,
+        model: embedded.model,
+        embedding: embedded.vectors[at]!,
+      })),
+    )
+    .onConflictDoUpdate({
+      target: [readerLoreVectors.userId, readerLoreVectors.plotId, readerLoreVectors.contentHash],
+      set: {
+        content: sql`excluded.content`,
+        model: sql`excluded.model`,
+        embedding: sql`excluded.embedding`,
+      },
+    });
+}
+
 /* --------------------------------------------------------------- messages */
 
 /**
@@ -318,7 +450,10 @@ async function embedChatMessages(deps: AppDeps, chatId: string): Promise<void> {
 /* ----------------------------------------------------------------- search */
 
 /** pgvector's cosine similarity of a column with a vector. */
-const similarity = (column: typeof loreEntryVectors.embedding | typeof messageChunks.embedding, vector: number[]) =>
+const similarity = (
+  column: typeof loreEntryVectors.embedding | typeof readerLoreVectors.embedding | typeof messageChunks.embedding,
+  vector: number[],
+) =>
   sql<number>`1 - (${column} <=> ${JSON.stringify(vector)}::vector)`;
 
 /**
@@ -379,7 +514,7 @@ export async function searchByMeaning(
 
   try {
     const [found, retrieval] = await Promise.all([
-      contents.size > 0 ? activatedLore(deps, vectors.plotId, model, contents, vector) : null,
+      contents.size > 0 ? activatedLore(deps, vectors, model, contents, vector) : null,
       eligible.length > 0 ? retrievedMessages(deps, model, eligible, vector, input) : null,
     ]);
     return {
@@ -395,32 +530,54 @@ export async function searchByMeaning(
 
 /**
  * ST's `activateWorldInfo` over the one book: every candidate's similarity to
- * the query, the `maxEntries` best at or above the threshold. A candidate with
- * no vector of the model yet is not found this time; the plot's lore is
- * embedded again for the next.
+ * the query, the `maxEntries` best at or above the threshold — the work's rows
+ * and the reader's own (`reader_lore_vectors`) together. A candidate with no
+ * vector of the model yet is not found this time; the plot's lore and the
+ * reader's are embedded again for the next.
  */
 async function activatedLore(
   deps: AppDeps,
-  plotId: string,
+  plan: Pick<VectorPlan, 'plotId' | 'userId'>,
   model: string,
   contents: ReadonlyMap<string, string>,
   vector: number[],
 ): Promise<Set<string>> {
-  const score = similarity(loreEntryVectors.embedding, vector);
-  const rows = await deps.db
-    .select({ hash: loreEntryVectors.contentHash, score })
-    .from(loreEntryVectors)
-    .where(
-      and(
-        eq(loreEntryVectors.plotId, plotId),
-        eq(loreEntryVectors.model, model),
-        inArray(loreEntryVectors.contentHash, [...contents.keys()]),
+  const { plotId, userId } = plan;
+  const hashes = [...contents.keys()];
+  const [work, own] = await Promise.all([
+    deps.db
+      .select({ hash: loreEntryVectors.contentHash, score: similarity(loreEntryVectors.embedding, vector) })
+      .from(loreEntryVectors)
+      .where(
+        and(
+          eq(loreEntryVectors.plotId, plotId),
+          eq(loreEntryVectors.model, model),
+          inArray(loreEntryVectors.contentHash, hashes),
+        ),
       ),
-    );
-  if (rows.length < contents.size) scheduleLoreEmbedding(deps, plotId);
+    userId
+      ? deps.db
+          .select({ hash: readerLoreVectors.contentHash, score: similarity(readerLoreVectors.embedding, vector) })
+          .from(readerLoreVectors)
+          .where(
+            and(
+              eq(readerLoreVectors.userId, userId),
+              eq(readerLoreVectors.plotId, plotId),
+              eq(readerLoreVectors.model, model),
+              inArray(readerLoreVectors.contentHash, hashes),
+            ),
+          )
+      : Promise.resolve([]),
+  ]);
+  const scored = new Map<string, number>();
+  for (const row of [...work, ...own]) scored.set(row.hash, Math.max(scored.get(row.hash) ?? -Infinity, Number(row.score)));
+  if (scored.size < contents.size) {
+    scheduleLoreEmbedding(deps, plotId);
+    if (userId) scheduleReaderLoreEmbedding(deps, userId, plotId);
+  }
   return new Set(
-    rows
-      .map((row) => ({ hash: row.hash, score: Number(row.score) }))
+    [...scored]
+      .map(([hash, score]) => ({ hash, score }))
       .sort((a, b) => b.score - a.score)
       .filter((row) => row.score >= VECTOR_LORE.scoreThreshold)
       .slice(0, VECTOR_LORE.maxEntries)

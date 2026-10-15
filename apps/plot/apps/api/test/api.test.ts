@@ -55,6 +55,7 @@ import { draftFingerprint, MIGRATION_PLATFORMS_ENABLED, type MigrationDraft } fr
 import { LUA_STATE_LIMIT } from '@shizue/core/lua';
 import { MAX_SCRIPT_CHAT_MESSAGES, MAX_SCRIPT_CHAT_TEXT } from '@shizue/core/triggers';
 import { toWorldInfo } from '@shizue/core/world-info';
+import { parseToggleSyntax } from '@shizue/core/toggles';
 import { ChatExportSchema } from '@shizue/contracts';
 import {
   account,
@@ -78,7 +79,10 @@ import {
   notifications,
   plots,
   plotAssets,
+  plotReaderOverlays,
   plotSearchVectors,
+  readerLoreVectors,
+  readerModules,
   readerPresets,
   user,
   userNotes,
@@ -5533,8 +5537,10 @@ describe('custom UI', () => {
         out: '<div class="hp">HP $1</div>',
         // A move drops RisuAI's first `g`, and nothing left compiles as `u`: only the first match moves.
         flags: 'u',
-        // RisuAI's `<order N>` runs high first, so it comes in as a place in the run, not a number.
+        // RisuAI's `<order N>` runs high first, so it comes in as a place in the run, not a number…
         order: 0,
+        // …with RisuAI's number kept beside it, which sorts it among a module's scripts.
+        rank: 2,
         action: 'move_top',
         enabled: true,
         // The card's own: in a work of several it dresses the member the card became.
@@ -5565,6 +5571,7 @@ describe('custom UI', () => {
         // The editor changing the action does not recompute the flags the import stored.
         flags: 'u',
         order: 5,
+        rank: 2,
         action: 'repeat_back',
         enabled: true,
         memberId: plot.characters[0].id,
@@ -6190,7 +6197,13 @@ describe('display-order repair', () => {
     const cookie = await signUp('display-order@example.com');
     // Today's import already gets it right — the scripts its member's own.
     const imported = await importCard(cookie, orderedCard('정렬'));
-    const tagged = NOW.map((script) => ({ ...script, memberId: imported.characters[0].id }));
+    // RisuAI's own numbers ride beside the sequence (`rank`), for sorting with modules' scripts.
+    const RANKS: Record<string, number> = { beta: 3, alpha: 1 };
+    const tagged = NOW.map((script) => ({
+      ...script,
+      ...(RANKS[script.in] !== undefined ? { rank: RANKS[script.in] } : {}),
+      memberId: imported.characters[0].id,
+    }));
     expect(imported.customUi.displayScripts).toEqual(tagged);
 
     const old = await importCard(cookie, orderedCard('예전'));
@@ -13640,7 +13653,7 @@ describe('prompt scripts and SillyTavern lore', () => {
     // The card's ST variable macros ran in its description, the global one among
     // them — ST's chat holds the greeting at 0, so the reader's turn is 1.
     const globals = await json(cookie, `/api/chats/${created.chat.id}/global-variables`, 'GET');
-    expect((await globals.json()).variables).toEqual({ seen: '1' });
+    expect((await readJson(globals)).variables).toEqual({ seen: '1' });
   });
 });
 
@@ -16648,8 +16661,8 @@ describe('RisuAI modules', () => {
     // A reader's chat draws the work's, then the module's: its script numbered after, for every member.
     const shown = await readPublicPlot(cookie, plot.id);
     expect(shown.displayScripts.map((script: any) => [script.in, script.order, script.memberId ?? null])).toEqual([
-      ['해', 4, null],
-      ['비', 5, null],
+      ['해', 0, null],
+      ['비', 1, null],
     ]);
     expect(shown.css).toBe('.sun{}\n\n.rain{color:blue}');
     expect(shown.backgroundHtml).toBe('<div class="rain">비</div>');
@@ -16849,6 +16862,246 @@ describe('RisuAI modules', () => {
     const preset = await upload('hypa.json', { type: 'risu', data: { summaries: [] } });
     expect(preset.status).toBe(400);
     expect((await readJson(preset)).code).toBe('invalid_module');
+  });
+});
+
+describe('reader modules', () => {
+  const gif = (marker: number): Uint8Array => new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, marker]);
+  const lua = (comment: string) => ({ comment, type: 'manual', conditions: [], effect: [{ type: 'triggerlua', code: 'function x() end' }] });
+  /** A module of the reader's own, as RisuAI's `.risum` lays it out. */
+  const rain = {
+    name: '비 모듈',
+    description: '독자의 비.',
+    id: 'risu-rain',
+    namespace: 'rain',
+    lowLevelAccess: true,
+    customModuleToggle: 'umbrella=우산 들기\nsky=하늘=select=맑음,흐림',
+    backgroundEmbedding: '<style>.drop{color:navy}</style><div class="drop">빗방울</div>',
+    regex: [
+      { comment: '표시', in: '비', out: '<i>비</i>', type: 'editdisplay', ableFlag: true, flag: 'g<order 5>' },
+      { comment: '프롬프트', in: '눈', out: '진눈깨비', type: 'editprocess', ableFlag: true, flag: 'g<order 5>' },
+    ],
+    trigger: [lua('독자 모듈')],
+    lorebook: [{ key: '', secondkey: '', insertorder: 0, comment: '빗소리', content: '창밖에 빗소리가 들린다.', mode: 'normal', alwaysActive: true, selective: false }],
+    assets: [['drop', '', 'gif']],
+  };
+  const rainFile = (): File => new File([buildRisum({ module: rain, type: 'risuModule' }, [gif(3)])], 'rain.risum');
+  const upload = (cookie: string, file: File, confirm = false, target: Hono<AppEnv> = app): Promise<Response> => {
+    const form = new FormData();
+    form.append('file', file);
+    if (confirm) form.append('confirmLowLevelAccess', 'true');
+    return request(cookie, '/api/reader-modules', 'POST', form, target);
+  };
+  const workModule = {
+    name: '작품 모듈',
+    description: '',
+    id: 'risu-work',
+    customModuleToggle: 'lamp=등불',
+    regex: [{ comment: '프롬프트', in: '눈', out: '눈보라', type: 'editprocess', ableFlag: false }],
+    trigger: [lua('작품 모듈')],
+    lorebook: [{ key: '', secondkey: '', insertorder: 0, comment: '등불', content: '등불이 흔들린다.', mode: 'normal', alwaysActive: true, selective: false }],
+  };
+  /** A work of the creator's with a module of its own, a member with Lua and toggles of its own, and the creator's chat on it. */
+  async function workWithModule(email: string): Promise<{ cookie: string; plotId: string; chatId: string }> {
+    const cookie = await signUp(email);
+    const plot = await createPlot(cookie, { description: '골짜기 {{getglobalvar::toggle_umbrella}}', intros: ['눈이 온다.'] });
+    await addCharacter(cookie, plot.id, {
+      name: '아리아',
+      card: { description: '마녀.', extensions: { risuai: { triggerscript: [lua('카드')], lowLevelAccess: false, toggles: 'cape=망토' } } },
+    });
+    const form = new FormData();
+    form.append('file', new File([buildRisum({ module: workModule, type: 'risuModule' })], 'work.risum'));
+    expect((await request(cookie, `/api/plots/${plot.id}/modules`, 'POST', form)).status).toBe(201);
+    const chatId = (await startChat(cookie, plot.id)).chat.id;
+    return { cookie, plotId: plot.id, chatId };
+  }
+
+  it('keeps a library of the reader’s own, asking before a module that wants low-level access', async () => {
+    const cookie = await signUp('reader-module-library@example.com');
+    const unasked = await upload(cookie, rainFile());
+    expect(unasked.status).toBe(409);
+    expect((await readJson(unasked)).code).toBe('low_level_access_unconfirmed');
+    expect(await readJson(await request(cookie, '/api/reader-modules'))).toEqual([]);
+
+    const res = await upload(cookie, rainFile(), true);
+    expect(res.status, await res.clone().text()).toBe(201);
+    const created = await readJson(res);
+    expect(created).toMatchObject({
+      name: '비 모듈',
+      description: '독자의 비.',
+      enabledGlobally: false,
+      lowLevelAccess: true,
+      toggles: true,
+      background: true,
+      scripts: true,
+      loreCount: 1,
+      regexCount: 2,
+      triggerCount: 1,
+      displayScriptCount: 1,
+      assetCount: 1,
+      importWarnings: [],
+    });
+    // A module without low-level access comes in unasked.
+    const plain = new File([JSON.stringify({ ...rain, lowLevelAccess: false, type: 'risuModule' })], 'rain.json');
+    expect((await upload(cookie, plain)).status).toBe(201);
+    expect((await readJson(await request(cookie, '/api/reader-modules'))).map((row: any) => row.name)).toEqual(['비 모듈', '비 모듈']);
+    const bad = await upload(cookie, new File(['{"type":"risu"}'], 'x.json'));
+    expect(bad.status).toBe(400);
+    expect((await readJson(bad)).code).toBe('invalid_module');
+
+    // Its picture is its owner's alone.
+    const [row] = await db.select().from(readerModules).where(eq(readerModules.id, created.id));
+    const assetPath = `/api/reader-modules/${created.id}/assets/${row!.assets[0]!.id}`;
+    const picture = await request(cookie, assetPath);
+    expect(picture.status).toBe(200);
+    expect(picture.headers.get('content-type')).toBe('image/gif');
+    const stranger = await signUp('reader-module-stranger@example.com');
+    expect((await request(stranger, assetPath)).status).toBe(404);
+    expect((await json(stranger, `/api/reader-modules/${created.id}`, 'PATCH', { enabledGlobally: true })).status).toBe(404);
+    expect((await request(stranger, `/api/reader-modules/${created.id}`, 'DELETE')).status).toBe(404);
+    expect(await readJson(await request(stranger, '/api/reader-modules'))).toEqual([]);
+
+    const on = await json(cookie, `/api/reader-modules/${created.id}`, 'PATCH', { enabledGlobally: true });
+    expect((await readJson(on)).enabledGlobally).toBe(true);
+    expect((await json(cookie, `/api/reader-modules/${created.id}`, 'PATCH', { enabledGlobally: 'yes' })).status).toBe(400);
+  });
+
+  it('lays a module over the chats that turn it on — after the work’s, in RisuAI’s order — and never into the work', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const { cookie, plotId, chatId } = await workWithModule('reader-module-chat@example.com');
+    const created = await readJson(await upload(cookie, rainFile(), true));
+    const other = (await startChat(cookie, plotId)).chat.id;
+
+    // Off until a chat lists it: the chat runs the work's module alone.
+    const before = await readJson(await request(cookie, `/api/chats/${chatId}/scripts`));
+    expect(before.scripts.triggers.map((trigger: any) => trigger.comment)).toEqual(['카드', '작품 모듈']);
+
+    // Another reader's module id is not kept on the list.
+    const stranger = await signUp('reader-module-chat-stranger@example.com');
+    const theirs = await readJson(await upload(stranger, new File([JSON.stringify({ ...rain, lowLevelAccess: false, type: 'risuModule' })], 'x.json')));
+    const patched = await readJson(await json(cookie, `/api/chats/${chatId}`, 'PATCH', { modules: [created.id, theirs.id, created.id] }));
+    expect(patched.chat.modules).toEqual([created.id]);
+
+    const view = await readJson(await request(cookie, `/api/chats/${chatId}/modules`));
+    expect(view.library.map((row: any) => [row.name, row.listedHere])).toEqual([['비 모듈', true]]);
+    expect(view.active).toEqual([
+      {
+        id: created.id,
+        name: '비 모듈',
+        displayScripts: [expect.objectContaining({ in: '비', rank: 5 })],
+        css: '.drop{color:navy}',
+        backgroundHtml: '<div class="drop">빗방울</div>',
+        namespace: 'rain',
+        assets: [{ id: expect.any(String), name: 'drop', url: expect.stringMatching(`^/api/reader-modules/${created.id}/assets/`), mime: 'image/gif' }],
+      },
+    ]);
+    // The toggles RisuAI draws: the modules' in their order, then the card's own.
+    expect(parseToggleSyntax(view.toggles).map((toggle) => toggle.key)).toEqual(['lamp', 'umbrella', 'sky', 'cape']);
+
+    // Its triggers after the card's and the work module's, each with its own access; its lore read-only beside the card's.
+    const scripts = await readJson(await request(cookie, `/api/chats/${chatId}/scripts`));
+    expect(scripts.scripts.triggers.map((trigger: any) => [trigger.comment, trigger.lowLevelAccess])).toEqual([
+      ['카드', false],
+      ['작품 모듈', false],
+      ['독자 모듈', true],
+    ]);
+    expect(scripts.scripts.moduleLore.map((entry: any) => entry.content)).toEqual(['등불이 흔들린다.', '창밖에 빗소리가 들린다.']);
+    expect(scripts.scripts.character.lorebook).toEqual([]);
+
+    // A toggle's value is the reader's global variable, which the prompt reads.
+    await json(cookie, `/api/chats/${chatId}/global-variables`, 'PATCH', { variables: { toggle_umbrella: '1' } });
+    expect((await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing))).at(-1)!.event).toBe('done');
+    const sent = prompts.at(-1)!;
+    expect(sent.system).toContain('골짜기 1');
+    expect(sent.system.indexOf('등불이 흔들린다.')).toBeLessThan(sent.system.indexOf('창밖에 빗소리가 들린다.'));
+    // RisuAI's one list, sorted by `<order N>`: the reader's module (5) before the work's (0) — `눈` became
+    // `진눈깨비` first, and the work's `눈` → `눈보라` then ran inside it (the other way round is `진눈깨비보라`).
+    expect(JSON.stringify(sent.messages)).toContain('진눈보라깨비이 온다.');
+
+    // The other chat lists nothing: none of it there, until it is on everywhere.
+    const elsewhere = await readJson(await request(cookie, `/api/chats/${other}/scripts`));
+    expect(elsewhere.scripts.moduleLore.map((entry: any) => entry.content)).toEqual(['등불이 흔들린다.']);
+    await json(cookie, `/api/reader-modules/${created.id}`, 'PATCH', { enabledGlobally: true });
+    expect((await readJson(await request(cookie, `/api/chats/${other}/scripts`))).scripts.triggers.map((trigger: any) => trigger.comment)).toEqual([
+      '카드',
+      '작품 모듈',
+      '독자 모듈',
+    ]);
+
+    // The work itself is as it was: its modules, its public view.
+    const [plot] = await db.select({ customUi: plots.customUi }).from(plots).where(eq(plots.id, plotId));
+    expect(plot!.customUi!.modules!.map((module) => module.name)).toEqual(['작품 모듈']);
+    expect((await readPublicPlot(cookie, plotId)).css ?? '').not.toContain('.drop');
+
+    // Taken out of the library, it leaves every chat's list.
+    expect((await request(cookie, `/api/reader-modules/${created.id}`, 'DELETE')).status).toBe(204);
+    expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.modules).toEqual([]);
+    expect((await readJson(await request(cookie, `/api/chats/${chatId}/scripts`))).scripts.triggers.map((trigger: any) => trigger.comment)).toEqual([
+      '카드',
+      '작품 모듈',
+    ]);
+  });
+
+  it('runs a reader’s module on a work without scripts, but discloses none of the card to them', async () => {
+    const owner = await signUp('reader-module-conceal-owner@example.com');
+    const plot = await createPlot(owner, { name: '비밀 작품', description: '설명', intros: ['문 앞이다'] });
+    await addCharacter(owner, plot.id, {
+      name: '리안',
+      card: { description: '비밀 설정', personality: '비밀 성격', lorebook: [{ keys: ['열쇠'], content: '비밀 로어' }] },
+    });
+    await publishPlot(owner, plot.id);
+    const reader = await signUp('reader-module-conceal-reader@example.com');
+    const chatId = (await startChat(reader, plot.id)).chat.id;
+    // A work without scripts gives a reader nothing of its cards.
+    expect(await readJson(await request(reader, `/api/chats/${chatId}/scripts`))).toMatchObject({ scripts: null, members: [] });
+
+    const mine = { ...rain, lowLevelAccess: false, type: 'risuModule' };
+    const created = await readJson(await upload(reader, new File([JSON.stringify(mine)], 'mine.json')));
+    await json(reader, `/api/chats/${chatId}`, 'PATCH', { modules: [created.id] });
+    const scripts = await readJson(await request(reader, `/api/chats/${chatId}/scripts`));
+    // The reader's module runs for the member — with the card's text left blank.
+    expect(scripts.scripts.triggers.map((trigger: any) => trigger.comment)).toEqual(['독자 모듈']);
+    expect(scripts.scripts.concealed).toBe(true);
+    expect(scripts.scripts.character).toMatchObject({ name: '리안', description: '', personality: '', lorebook: [], postHistoryInstructions: '' });
+    expect(scripts.scripts.moduleLore.map((entry: any) => entry.content)).toEqual(['창밖에 빗소리가 들린다.']);
+    expect(JSON.stringify(scripts)).not.toContain('비밀');
+
+    // The creator's own scripts disclose the card as before.
+    const ownerChat = (await startChat(owner, plot.id)).chat.id;
+    const member = (await readPlot(owner, plot.id)).characters[0];
+    await json(owner, `/api/plots/${plot.id}/characters/${member.id}`, 'PATCH', {
+      card: { extensions: { risuai: { triggerscript: [lua('카드')] } } },
+    });
+    const disclosed = await readJson(await request(owner, `/api/chats/${ownerChat}/scripts`));
+    expect(disclosed.scripts.concealed).toBeUndefined();
+    expect(disclosed.scripts.character.description).toBe('비밀 설정');
+  });
+
+  it('holds a script’s model call and request to the trigger that makes them', async () => {
+    const fetched: unknown[] = [];
+    const target = makeApp({
+      getAdapter: stubGetAdapter,
+      scriptFetch: { request: async (_reader, url) => (fetched.push(url), { status: 200, data: 'ok' }) },
+    });
+    const { cookie, chatId } = await workWithModule('reader-module-gates@example.com');
+    const created = await readJson(await upload(cookie, rainFile(), true, target));
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { modules: [created.id] }, target);
+    const llm = (body: Record<string, unknown>) =>
+      json(cookie, `/api/chats/${chatId}/script-llm`, 'POST', { messages: [{ role: 'user', content: '질문' }], ...body }, target);
+    const fetchAs = (body: Record<string, unknown>) =>
+      json(cookie, `/api/chats/${chatId}/script-fetch`, 'POST', { url: 'https://site.test/', ...body }, target);
+
+    // The card's trigger and the work module's may not; the reader's module's may.
+    for (const trigger of [0, 1, 3, undefined]) {
+      const closed = await llm(trigger === undefined ? {} : { trigger });
+      expect(closed.status).toBe(403);
+      expect((await readJson(closed)).code).toBe('script_llm_forbidden');
+      expect((await fetchAs(trigger === undefined ? {} : { trigger })).status).toBe(403);
+    }
+    expect(await readJson(await llm({ trigger: 2 }))).toEqual({ result: '스텁 응답' });
+    expect(await readJson(await fetchAs({ trigger: 2 }))).toEqual({ status: 200, data: 'ok' });
+    expect(fetched).toEqual(['https://site.test/']);
+    expect((await llm({ trigger: 'x' })).status).toBe(400);
   });
 });
 
@@ -17161,6 +17414,50 @@ describe('what a card loads from other hosts, brought in at import', () => {
       'web.json',
       { type: 'application/json' },
     );
+
+  it('brings in an address a card builds from its variables, by what the card sets them to', async () => {
+    const asked: string[] = [];
+    const remoteFetch: RemoteFetch = async (url) => {
+      asked.push(url);
+      const known = ['https://pack.test/v1/bg.png', 'https://pack.test/face/smile.png'];
+      return known.includes(url)
+        ? { status: 200, contentType: 'image/gif', bytes: gif(9) }
+        : { status: 404, contentType: 'text/plain', bytes: new TextEncoder().encode('nope') };
+    };
+    const target = makeApp({ remoteFetch });
+    const cookie = await signUp('localize-getvar@example.com');
+    const card = {
+      ...v2Card,
+      data: {
+        ...v2Card.data,
+        first_mes: '{{setvar::mood::smile}}안녕.',
+        alternate_greetings: [],
+        extensions: {
+          risuai: {
+            defaultVariables: 'cdn=https://pack.test/v1\nmood=calm',
+            backgroundHTML: '<img src="{{getvar::cdn}}/bg.png"><img src="https://pack.test/face/{{getvar::mood}}.png"><img src="{{getvar::none}}/x.png">',
+          },
+        },
+      },
+    };
+    const form = new FormData();
+    form.append('file', new File([JSON.stringify(card)], 'vars.json', { type: 'application/json' }));
+    const res = await request(cookie, '/api/plots/import', 'POST', form, target);
+    expect(res.status, await res.clone().text()).toBe(201);
+    const plot = await readJson(res);
+    // The default and the literal setvar are what the slots were fetched with; a variable never set is no miss.
+    expect(asked.sort()).toEqual(['https://pack.test/face/calm.png', 'https://pack.test/face/smile.png', 'https://pack.test/v1/bg.png']);
+    expect(plot.importWarnings).toEqual([]);
+    const shown = (await readPublicPlot(cookie, plot.id)).backgroundHtml;
+    const byName = `/api/plots/${plot.id}/assets/by-name`;
+    expect(shown).toContain(`<img src="${byName}/{{getvar::cdn}}/bg.png">`);
+    expect(shown).toContain(`<img src="${byName}/pack.test/face/{{getvar::mood}}.png">`);
+    expect(shown).toContain('<img src="{{getvar::none}}/x.png">');
+    // What the renderer writes with the variable's value finds the copy, the host's scheme and all.
+    expect((await request(cookie, `${byName}/https://pack.test/v1/bg.png`, 'GET', undefined, target)).status).toBe(200);
+    expect((await request(cookie, `${byName}/pack.test/face/smile.png`, 'GET', undefined, target)).status).toBe(200);
+    expect((await request(cookie, `${byName}/https://pack.test/v2/bg.png`, 'GET', undefined, target)).status).toBe(404);
+  });
 
   it('fetches the pictures, the stylesheet and its fonts once, stores them and points the work at them', async () => {
     const { asked, remoteFetch } = remote();
@@ -17604,6 +17901,33 @@ describe('vector storage (SillyTavern)', () => {
     expect((await storedLore(plotId)).map((row) => row.content).sort()).toEqual([MAP, TOWER].sort());
     prompt = await send(cookie, chatId, '지도를 펼쳐 봐', harness);
     expect(prompt.system).toContain(MAP);
+  });
+
+  it('embeds the lore a reader’s scripts rewrote as theirs, and finds it by meaning without asking the work’s pass again', async () => {
+    const cookie = await signUp('vectors-overlay@example.com');
+    const { plotId, chatId } = await setupChat(cookie);
+    const embedder = conceptEmbedder();
+    const harness = vectorApp(embedder);
+    const member = await firstMember(cookie, plotId);
+    // What a Lua `setLoreBooks`-style rewrite leaves: the member's lore in the reader's overlay, marked by meaning.
+    const user = await db.select({ id: chats.userId }).from(chats).where(eq(chats.id, chatId));
+    await db.insert(plotReaderOverlays).values({
+      userId: user[0]!.id,
+      plotId,
+      overlay: { members: { [member.id]: { lorebook: [{ ...map, vectorized: true }] } } },
+    });
+
+    // The first turn meets an entry with no vector: the reader's pass embeds it into rows of theirs alone.
+    await send(cookie, chatId, '지도 이야기를 해 줘', harness);
+    const rows = await db.select().from(readerLoreVectors).where(eq(readerLoreVectors.plotId, plotId));
+    expect(rows.map((row) => [row.userId, row.content])).toEqual([[user[0]!.id, MAP]]);
+    expect(await storedLore(plotId)).toEqual([]);
+
+    // From then on it is found by meaning, and nothing asks for an embedding pass again.
+    const passes = embedder.calls.filter((call) => call.kind === 'document').length;
+    const prompt = await send(cookie, chatId, '지도를 다시 보자', harness);
+    expect(prompt.system).toContain(MAP);
+    expect(embedder.calls.filter((call) => call.kind === 'document').length).toBe(passes);
   });
 
   it('spends the one lore budget on what meaning and keywords found, the highest insertionOrder first', async () => {

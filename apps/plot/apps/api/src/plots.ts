@@ -29,15 +29,19 @@ const chatStyle = (style: PlotStyle, chat: Chat): PlotStyle => ({
   choices: chat.choicesEnabled ? (style.choices ?? 'off') : 'off',
 });
 
-/** The work as the assembler reads it; the reader-facing intro never travels. */
-export const toPromptPlot = (plot: Plot, chat: Chat): PromptPlot => ({
+/**
+ * The work as the assembler reads it; the reader-facing intro never travels.
+ * `modules` are the ones on the chat (`chatModulesOf`): the work's, then the
+ * reader's own; without them, the work's alone.
+ */
+export const toPromptPlot = (plot: Plot, chat: Chat, modules: readonly PlotModule[] = plot.customUi?.modules ?? []): PromptPlot => ({
   name: plot.name,
   description: plot.description,
   lorebook: plot.lorebook,
   ...(plot.narrator ? { narrator: plot.narrator } : {}),
   ...(plot.style ? { style: chatStyle(plot.style, chat) } : {}),
-  // The work's RisuAI modules: their lore for the assembler, their scripts for the request's runs.
-  ...(plot.customUi?.modules?.length ? { modules: plot.customUi.modules } : {}),
+  // The RisuAI modules on the chat: their lore for the assembler, their scripts for the request's runs.
+  ...(modules.length > 0 ? { modules: [...modules] } : {}),
 });
 
 /**

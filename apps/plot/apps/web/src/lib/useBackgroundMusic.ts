@@ -5,7 +5,7 @@ import { setBgmTrack } from './bgmMute';
 
 /** RisuAI's volume for `{{bgm::…}}` (`bgm___auto___`, its observer's `auto`). */
 const BGM_VOLUME = 0.5;
-/** What `{{bgm::…}}` leaves in the page (`musicMarkup`), the sanitizer having held its address to our origin. */
+/** What `{{bgm::…}}` leaves in the page (`mediaMarkup`), the sanitizer having held its address to our origin. */
 const MARKER = '[data-shizue-bgm]';
 
 /**

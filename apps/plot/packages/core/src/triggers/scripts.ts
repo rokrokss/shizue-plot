@@ -258,9 +258,9 @@ function readScripts(triggerscript: unknown, customScripts: unknown): { triggers
  * `processScript` the character's `customscript` and `getModuleRegexScripts()`.
  * Where they bring any, every trigger carries its own `lowLevelAccess` — the
  * card's on its own, the module's on the module's, as RisuAI's `runTrigger`
- * marks them — and the whole is `lowLevelAccess` where any trigger is: what a
- * gate that cannot tell one trigger's call from another's (`script-llm`,
- * `script-fetch`, a Lua button) is held to.
+ * marks them — and the whole is `lowLevelAccess` where any trigger is. A gate
+ * holds a call to the trigger that made it (`triggerLowLevelAccess`); the whole
+ * only says whether anything here may ask at all.
  */
 export function cardScripts(
   card: Pick<NormalizedCard, 'extensions'>,
@@ -283,6 +283,23 @@ export function cardScripts(
     editScripts: [...own.editScripts, ...added.flatMap((read) => read.editScripts)],
     lowLevelAccess: ownAccess || added.some((read) => read.lowLevelAccess && read.triggers.length > 0),
   };
+}
+
+/**
+ * Whether the trigger at `index` of a bundle's list may use what RisuAI keeps
+ * behind `lowLevelAccess` — its own flag (`TriggerScript.lowLevelAccess`: the
+ * card's on the card's triggers, a module's on the module's), as RisuAI holds
+ * each run to the trigger it runs (`runLuaButtonTrigger`, `runTrigger`), never
+ * to "any trigger". Where no module joined the card no trigger carries a flag,
+ * and the card's own decides. A call that names no trigger (`index` undefined)
+ * is held to the card alone, which only a bundle without modules can say.
+ */
+export function triggerLowLevelAccess(scripts: CardScripts, index: number | undefined): boolean {
+  const unmarked = scripts.triggers.every((trigger) => trigger.lowLevelAccess === undefined);
+  if (index === undefined) return unmarked && scripts.lowLevelAccess;
+  const trigger = Number.isInteger(index) && index >= 0 ? scripts.triggers[index] : undefined;
+  if (!trigger) return false;
+  return trigger.lowLevelAccess ?? scripts.lowLevelAccess;
 }
 
 /** Whether a card — with the work's modules — carries anything the reader's browser would run. */

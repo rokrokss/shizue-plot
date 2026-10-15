@@ -4,7 +4,7 @@ import {
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
-import type { ObjectStorage } from './storage.js';
+import type { ByteRange, ObjectPart, ObjectStorage, StoredObject } from './storage.js';
 
 /**
  * Everything the S3-compatible driver needs, read from the environment in
@@ -45,6 +45,23 @@ function isMissing(error: unknown): boolean {
   return name === 'NoSuchKey' || name === 'NotFound' || $metadata?.httpStatusCode === 404;
 }
 
+/** S3's answer to a range no byte of the object is in. */
+function isUnsatisfiable(error: unknown): boolean {
+  const { name, $metadata } = (error ?? {}) as { name?: string; $metadata?: { httpStatusCode?: number } };
+  return name === 'InvalidRange' || $metadata?.httpStatusCode === 416;
+}
+
+const rangeHeader = (range: ByteRange): string =>
+  'suffix' in range ? `bytes=-${range.suffix}` : `bytes=${range.start}-${range.end ?? ''}`;
+
+const CONTENT_RANGE_RE = /^bytes (\d+)-(\d+)\/(\d+)$/;
+
+/** Where the part S3 sent lies, off its `Content-Range`; undefined when it sent the whole. */
+function partOf(contentRange: string | undefined): ObjectPart | undefined {
+  const match = contentRange ? CONTENT_RANGE_RE.exec(contentRange) : null;
+  return match ? { start: Number(match[1]), end: Number(match[2]), total: Number(match[3]) } : undefined;
+}
+
 /** S3-compatible storage for chat images. */
 export function createS3Storage(config: S3Config): ObjectStorage {
   const client = new S3Client({
@@ -57,26 +74,34 @@ export function createS3Storage(config: S3Config): ObjectStorage {
   });
   const Bucket = config.bucket;
 
+  async function get(key: string, range?: ByteRange): Promise<StoredObject | null> {
+    let output;
+    try {
+      output = await client.send(
+        new GetObjectCommand({ Bucket, Key: key, ...(range ? { Range: rangeHeader(range) } : {}) }),
+      );
+    } catch (error) {
+      if (isMissing(error)) return null;
+      // A range past the end is answered with the whole object, as the local driver answers it.
+      if (range && isUnsatisfiable(error)) return get(key);
+      throw error;
+    }
+    if (!output.Body) return null;
+    const part = range ? partOf(output.ContentRange) : undefined;
+    return {
+      body: output.Body.transformToWebStream() as ReadableStream<Uint8Array>,
+      size: output.ContentLength ?? 0,
+      ...(part ? { part } : {}),
+    };
+  }
+
   return {
     async put(key, bytes, contentType) {
       await client.send(
         new PutObjectCommand({ Bucket, Key: key, Body: bytes, ContentType: contentType }),
       );
     },
-    async get(key) {
-      let output;
-      try {
-        output = await client.send(new GetObjectCommand({ Bucket, Key: key }));
-      } catch (error) {
-        if (isMissing(error)) return null;
-        throw error;
-      }
-      if (!output.Body) return null;
-      return {
-        body: output.Body.transformToWebStream() as ReadableStream<Uint8Array>,
-        size: output.ContentLength ?? 0,
-      };
-    },
+    get,
     async delete(key) {
       // S3 answers 204 for a key that was never there, which is the contract.
       await client.send(new DeleteObjectCommand({ Bucket, Key: key }));

@@ -82,6 +82,10 @@
       "types": "./dist/readerPreset.d.ts",
       "default": "./dist/readerPreset.js"
     },
+    "./toggles": {
+      "types": "./dist/toggles.d.ts",
+      "default": "./dist/toggles.js"
+    },
     "./sillytavern": {
       "types": "./dist/sillytavern/index.d.ts",
       "default": "./dist/sillytavern/index.js"

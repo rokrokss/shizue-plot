@@ -33,7 +33,7 @@ import { fromLorebookFile, LorebookFileError } from '../worldInfo.js';
 import { loreEntryFromBook, withoutTavernReading } from './bookEntry.js';
 import {
   charxInJpeg,
-  IMAGE_EXTENSIONS,
+  isMediaExtension,
   isZip,
   MAX_ASSETS,
   MAX_ENTRY_BYTES,
@@ -42,7 +42,7 @@ import {
   type CharxAssetFile,
   type CharxContents,
 } from './charx.js';
-import { backgroundHtmlOf, displayScriptsFromExtensions, splitBackground } from './risu.js';
+import { backgroundHtmlOf, displayScriptsFromExtensions, MAX_BACKGROUND_HTML_LENGTH, splitBackground } from './risu.js';
 import { readRisumMain, rpackDecode } from './risum.js';
 
 /** A file this reader cannot take as a RisuAI module. */
@@ -62,6 +62,8 @@ export interface ParsedRisuModule {
   backgroundEmbedding?: string;
   /** RisuAI's `namespace`: the name a character's module list and `{{moduleenabled}}` find the module by. */
   namespace?: string;
+  /** RisuAI's `customModuleToggle`, the module's toggles as written (`parseToggleSyntax`). */
+  toggles?: string;
   /** The pictures a `.risum` or a charx carried, in its order, under the charx caps. */
   assets: CharxAssetFile[];
 }
@@ -104,12 +106,12 @@ export function risuLoreBookEntry(raw: unknown): LoreEntry {
 }
 
 /**
- * The pictures after a `.risum`'s main block, paired with the module's `assets`
+ * The files after a `.risum`'s main block, paired with the module's `assets`
  * by position. Read as far as the file holds well-formed blocks and the charx
- * caps allow — a count, a size per picture and a total — stopping at the first
+ * caps allow — a count, a size per file and a total — stopping at the first
  * that breaks either, as a charx's asset pass does. A block whose entry names a
- * type that is not an image is passed over; one named without a type is tried,
- * and the store skips bytes that are not an image.
+ * type that is not a picture, music or a video is passed over; one named without
+ * a type is tried, and the store skips bytes that are none of them.
  */
 function risumAssets(bytes: Uint8Array, start: number, declared: unknown): CharxAssetFile[] {
   const entries = Array.isArray(declared) ? declared : [];
@@ -127,7 +129,7 @@ function risumAssets(bytes: Uint8Array, start: number, declared: unknown): Charx
     if (spent > MAX_TOTAL_BYTES || assets.length >= MAX_ASSETS) break;
     const entry = Array.isArray(entries[index]) ? (entries[index] as unknown[]) : [];
     const ext = text(entry[2]).toLowerCase();
-    if (ext && !IMAGE_EXTENSIONS.has(ext)) continue;
+    if (ext && !isMediaExtension(ext)) continue;
     assets.push({ name: text(entry[0]).trim() || `asset_${index}`, bytes: rpackDecode(bytes.subarray(from, at)) });
   }
   return assets;
@@ -136,6 +138,7 @@ function risumAssets(bytes: Uint8Array, start: number, declared: unknown): Charx
 function moduleOf(module: Json, assets: CharxAssetFile[]): ParsedRisuModule {
   const background = text(module['backgroundEmbedding']);
   const namespace = text(module['namespace']);
+  const toggles = text(module['customModuleToggle']);
   return {
     name: text(module['name']).trim(),
     description: text(module['description']),
@@ -145,6 +148,7 @@ function moduleOf(module: Json, assets: CharxAssetFile[]): ParsedRisuModule {
     lowLevelAccess: module['lowLevelAccess'] === true,
     ...(background.trim() ? { backgroundEmbedding: background } : {}),
     ...(namespace ? { namespace } : {}),
+    ...(toggles.trim() ? { toggles } : {}),
     assets,
   };
 }
@@ -215,14 +219,15 @@ export function indicatorLore(character: {
  *   first messages and the global-note replacement (`post_history_instructions`).
  * - The regex scripts and triggers: the module's when the archive has one, as
  *   RisuAI's import puts them in place of the card's, or else the card's.
- * - `lowLevelAccess`, the background HTML as the background embedding, and the
- *   module namespace, from `extensions.risuai`.
+ * - `lowLevelAccess`, the background HTML as the background embedding, the
+ *   module namespace and the toggles (`toggles`, which RisuAI's character import
+ *   makes its `customModuleToggle`), from `extensions.risuai`.
  * - The pictures RisuAI keeps, its `additionalAssets` (`x-risu-asset`) — not
  *   the icon, where RisuAI's module export puts a stand-in for a module with
  *   none (`moduleNoneImage`), nor emotion or other pictures.
  *
- * What RisuAI's module has and ours does not keep — the icon, `hideIcon`, the
- * toggles — is left behind, as for a `.risum`. Whatever the archive's reader
+ * What RisuAI's module has and ours does not keep — the icon, `hideIcon` — is
+ * left behind, as for a `.risum`. Whatever the archive's reader
  * throws is the file's doing, so it is a `ModuleParseError`.
  */
 function moduleOfCharx(archive: Uint8Array): ParsedRisuModule {
@@ -252,6 +257,7 @@ function moduleOfCharx(archive: Uint8Array): ParsedRisuModule {
   });
   const background = backgroundHtmlOf(extensions);
   const namespace = text(risu['moduleNamespace']);
+  const toggles = text(risu['toggles']);
   return {
     name: text(data['name']).trim(),
     description: text(data['creator_notes']),
@@ -261,6 +267,7 @@ function moduleOfCharx(archive: Uint8Array): ParsedRisuModule {
     lowLevelAccess: risu['lowLevelAccess'] === true,
     ...(background ? { backgroundEmbedding: background } : {}),
     ...(namespace ? { namespace } : {}),
+    ...(toggles.trim() ? { toggles } : {}),
     assets: contents.assets.filter((asset) => asset.additional),
   };
 }
@@ -356,6 +363,8 @@ export function plotModuleOf(
     trigger: parsed.trigger,
     ...(parsed.lowLevelAccess ? { lowLevelAccess: true as const } : {}),
     ...(parsed.namespace ? { namespace: parsed.namespace } : {}),
+    // Every chat it is on draws them: held to the background's cap, left out whole past it.
+    ...(parsed.toggles && parsed.toggles.length <= MAX_BACKGROUND_HTML_LENGTH ? { toggles: parsed.toggles } : {}),
     ...(displayScripts ? { displayScripts } : {}),
     ...(css ? { css } : {}),
     ...(shown ? { backgroundHtml: shown } : {}),

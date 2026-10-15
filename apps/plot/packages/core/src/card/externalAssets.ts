@@ -61,9 +61,14 @@ const FINDER = /@import\b|url\(|src\s*=/gi;
 const WHITESPACE = /\s/;
 const TEMPLATE_MARK = /\{\{|\$\d/;
 
-/** Whether an address names another host at all — the three absolute spellings. */
+/**
+ * Whether an address names another host at all — the three absolute spellings —
+ * or may, once its leading `{{getvar::…}}` is read: a card that keeps its host in
+ * a variable (`src="{{getvar::cdn}}/face.png"`), which only its variables can say
+ * (`parseUrlTemplate`).
+ */
 function isAbsolute(address: string): boolean {
-  return /^(?:https?:)?\/\//i.test(address);
+  return /^(?:(?:https?:)?\/\/|\{\{\s*getvar::)/i.test(address);
 }
 
 /** The few entities an attribute's address may carry, decoded as the browser decodes them. */
@@ -249,9 +254,12 @@ export function findExternal(text: string): ExternalRef[] {
 
 /** An address with one slot a value goes into, and what the slot is known to draw. */
 export interface UrlTemplate {
-  /** The https URL up to the slot. */
+  /**
+   * The https URL up to the slot — '' where the slot opens the address, a
+   * variable that holds the host (`variable`).
+   */
   prefix: string;
-  /** The slot as written: `$2`, `{{random::A::B}}`. */
+  /** The slot as written: `$2`, `{{random::A::B}}`, `{{getvar::cdn}}`. */
   slot: string;
   /** After the slot, a query included. */
   suffix: string;
@@ -259,9 +267,14 @@ export interface UrlTemplate {
   literals: string[];
   /** Capture numbers whose text the slot is. */
   captures: number[];
+  /**
+   * The chat variable the slot reads (`{{getvar::name}}`): its values are what
+   * the card sets it to — its default and every literal `setvar` (`cardVariableValues`).
+   */
+  variable?: string;
 }
 
-const SLOT = /\$(\d{1,2})|\{\{(random|pick)::([^{}]*)\}\}/g;
+const SLOT = /\$(\d{1,2})|\{\{(random|pick)::([^{}]*)\}\}|\{\{\s*getvar::([^{}:]+?)\s*\}\}/g;
 const CAPTURE_ITEM = /^\$(\d{1,2})$/;
 
 /**
@@ -277,6 +290,15 @@ export function parseUrlTemplate(address: string): UrlTemplate | null {
   const suffix = text.slice(slot.index + slot[0].length);
   // Anything else that a renderer would evaluate, the fetch cannot know.
   if (TEMPLATE_MARK.test(prefix) || TEMPLATE_MARK.test(suffix) || /\}\}/.test(prefix + suffix)) return null;
+  if (slot[4] !== undefined) {
+    const variable = slot[4].trim();
+    // The host in the variable, or the slot in the path of a URL of its own.
+    if (prefix === '') return { prefix, slot: slot[0], suffix, literals: [], captures: [], variable };
+    const head = fetchUrlOf(`${prefix}x`);
+    if (!head || !/^(?:https?:)?\/\/[^/]+\/./i.test(`${prefix}x`)) return null;
+    return { prefix: head.slice(0, -1), slot: slot[0], suffix, literals: [], captures: [], variable };
+  }
+  if (prefix === '') return null;
   const base = fetchUrlOf(`${prefix}x`);
   if (!base || !/^(?:https?:)?\/\/[^/]+\/./i.test(`${prefix}x`)) return null;
   const literals: string[] = [];
@@ -392,14 +414,28 @@ export function linearMatches(pattern: string, flags: string, text: string): boo
  * The values a template's slot is fetched with: its drawn words, the captures
  * it reads (`captured`, by capture number), and every item of a list in
  * `lists` that holds one of those already — once, as the model was told to
- * write them, held to what a path segment can be, at most `limit`.
+ * write them, held to what a path segment can be, at most `limit`. A variable's
+ * slot takes what the card sets the variable to (`variables`, `cardVariableValues`):
+ * a path segment's like the others, or — where it opens the address — a value
+ * that makes the whole an https URL.
  */
 export function templateCandidates(
   template: UrlTemplate,
   captured: ReadonlyMap<number, readonly string[]>,
   lists: readonly (readonly string[])[],
   limit = 200,
+  variables: ReadonlyMap<string, readonly string[]> = new Map(),
 ): string[] {
+  if (template.variable !== undefined) {
+    const values = [...new Set(variables.get(template.variable) ?? [])];
+    return values
+      .filter((value) =>
+        template.prefix === ''
+          ? value.length <= MAX_ADDRESS_LENGTH && !/[\s"'<>{}]/.test(value) && templateUrl(template, value) !== null
+          : SAFE_VALUE.test(value) && value !== '.' && value !== '..',
+      )
+      .slice(0, limit);
+  }
   const seed = new Set<string>(template.literals);
   for (const group of template.captures) for (const value of captured.get(group) ?? []) seed.add(value);
   const known = new Set([...seed].map((value) => value.toLowerCase()));
@@ -411,9 +447,15 @@ export function templateCandidates(
   return values.filter((value) => SAFE_VALUE.test(value) && value !== '.' && value !== '..').slice(0, limit);
 }
 
-/** The URL a template is fetched at for one value. */
-export const templateUrl = (template: UrlTemplate, value: string): string =>
-  `${template.prefix}${encodeURIComponent(value)}${template.suffix}`;
+/**
+ * The URL a template is fetched at for one value. A variable's value goes in
+ * as the renderer writes it, and one that opens the address must make it an
+ * https URL — null where it does not.
+ */
+export function templateUrl(template: UrlTemplate, value: string): string | null {
+  if (template.variable !== undefined && template.prefix === '') return fetchUrlOf(`${value}${template.suffix}`);
+  return `${template.prefix}${template.variable !== undefined ? value : encodeURIComponent(value)}${template.suffix}`;
+}
 
 /**
  * The name an asset fetched from `url` keeps (`plot_assets.name`): the address
@@ -442,6 +484,8 @@ export const isLocalizedAssetName = (name: string | null | undefined): boolean =
  * finds the asset fetched for it.
  */
 export function localizedTemplateName(template: UrlTemplate): string {
+  // The host in a variable: the by-name route takes the scheme off what the renderer writes there.
+  if (template.prefix === '') return `${template.slot}${template.suffix.replace(/[?#].*$/, '')}`;
   const prefix = localizedName(`${template.prefix}x`).slice(0, -1);
   const suffix = template.suffix.replace(/[?#].*$/, '');
   return `${prefix}${template.slot}${suffix}`;
@@ -501,3 +545,51 @@ export const withoutLocalSources = (css: string): string =>
 /** An inlined stylesheet under the media list its `@import` named, as the browser would apply it. */
 export const underMedia = (css: string, media: string): string =>
   media && media.toLowerCase() !== 'all' ? `@media ${media} {\n${css}\n}` : css;
+
+/* ------------------------------------------------------------- variables */
+
+/** RisuAI's literal writes of a variable in a text: `{{setvar::k::v}}`, `{{setdefaultvar::k::v}}`. */
+const LITERAL_SETVAR = /\{\{\s*(?:setvar|setdefaultvar)::([^{}:]+?)::([^{}]*?)\s*\}\}/gi;
+
+/**
+ * What a card sets each chat variable to that the import can read without
+ * playing it: its default variables (`defaults`), every literal `{{setvar}}` or
+ * `{{setdefaultvar}}` in `texts`, and every trigger effect that sets one to a
+ * written value (RisuAI's `setvar` with `=`, `v2SetVar` with a value) — the
+ * values a `{{getvar::…}}` slot of an address is fetched with
+ * (`templateCandidates`). Best effort: a value a script computes is not known.
+ */
+export function cardVariableValues(
+  defaults: Readonly<Record<string, string>>,
+  texts: readonly string[],
+  triggers: readonly unknown[] = [],
+): Map<string, string[]> {
+  const values = new Map<string, string[]>();
+  const add = (name: string, value: string): void => {
+    const key = name.trim();
+    const text = value.trim();
+    if (!key || !text) return;
+    const list = values.get(key) ?? [];
+    if (!list.includes(text)) list.push(text);
+    values.set(key, list);
+  };
+  for (const [name, value] of Object.entries(defaults)) add(name, value);
+  for (const text of texts) {
+    LITERAL_SETVAR.lastIndex = 0;
+    for (let found = LITERAL_SETVAR.exec(text); found; found = LITERAL_SETVAR.exec(text)) add(found[1]!, found[2]!);
+  }
+  for (const trigger of triggers) {
+    const effects = (trigger as { effect?: unknown })?.effect;
+    if (!Array.isArray(effects)) continue;
+    for (const effect of effects) {
+      const step = (effect ?? {}) as Record<string, unknown>;
+      if (step['type'] === 'setvar' && (step['operator'] ?? '=') === '=' && typeof step['var'] === 'string' && typeof step['value'] === 'string') {
+        add(step['var'], step['value']);
+      }
+      if (step['type'] === 'v2SetVar' && step['valueType'] === 'value' && step['varType'] !== 'var' && typeof step['var'] === 'string' && typeof step['value'] === 'string' && (step['operator'] ?? '=') === '=') {
+        add(step['var'], step['value']);
+      }
+    }
+  }
+  return values;
+}

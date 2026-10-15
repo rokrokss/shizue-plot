@@ -528,15 +528,22 @@ async function withPromptScripts(
   branch: PromptBranch,
 ): Promise<HistoryMessage[]> {
   if (history.length === 0) return history;
-  // The work's modules after every card, once — RisuAI's `processScript` runs
-  // the character's `customscript` and then the modules' regex — read as the
-  // first member's, the work's stand-in.
-  const modules = (plan.plot.modules ?? []).map((module) => ({ extensions: { risuai: { customScripts: module.regex } } }));
+  // The chat's modules once, on the first member's list — RisuAI's `processScript`
+  // runs the character's `customscript` and the modules' regex as one list, which
+  // `<order N>` sorts together — read as the first member's, the work's stand-in.
+  const moduleRegex = (plan.plot.modules ?? []).flatMap((module) => (Array.isArray(module.regex) ? module.regex : []));
+  const cards = plan.characters.map((member) => member.card.extensions ?? {});
+  if (moduleRegex.length > 0) {
+    const first = cards[0] ?? {};
+    const risu = first['risuai'] !== null && typeof first['risuai'] === 'object' ? (first['risuai'] as Record<string, unknown>) : {};
+    const own = Array.isArray(risu['customScripts']) ? risu['customScripts'] : [];
+    cards[0] = { ...first, risuai: { ...risu, customScripts: [...own, ...moduleRegex] } };
+  }
   const charOf = (index: number): string => {
     const member = plan.characters[index] ?? plan.characters[0];
     return member ? characterName(member) : plan.plot.name;
   };
-  const scripts = promptScriptsOf([...plan.characters.map((member) => member.card), ...modules], (text, index) =>
+  const scripts = promptScriptsOf(cards.map((extensions) => ({ extensions })), (text, index) =>
     applyMacros(text, {
       char: charOf(index),
       user: plan.userName,
@@ -691,6 +698,8 @@ export function requestLuaInput(
         image: characterImage(view?.avatarUrl),
         lore: member.card.lorebook.map(risuLore),
         localLore: (plan.localLore ?? []).map(risuLore),
+        // The modules' lore on the chat, read-only after the other two (`getModuleLorebooks`).
+        moduleLore: (plan.plot.modules ?? []).flatMap((module) => module.lorebook).map(risuLore),
       },
       user: plan.userName,
       persona: plan.personaText,
@@ -771,6 +780,8 @@ export function requestTriggerInput(
     messages,
     greeting: plan.branch.greeting?.text ?? null,
     note: plan.authorNote,
+    // The modules' lore on the chat, read-only, for `{{lorebook}}` (`getModuleLorebooks`).
+    moduleLore: (plan.plot.modules ?? []).flatMap((module) => module.lorebook),
     persona: plan.personaText,
     variables: plan.variables,
     globalVariables: plan.globalVariables,

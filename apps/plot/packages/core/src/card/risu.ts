@@ -129,7 +129,15 @@ export function displayScriptsFromExtensions(
   if (mapped.some((entry) => entry.rank !== undefined)) {
     mapped.sort((a, b) => (b.rank ?? 0) - (a.rank ?? 0));
   }
-  return mapped.length > 0 ? mapped.map(({ script }, order) => ({ ...script, order })) : undefined;
+  // The rank stays beside the sequence: RisuAI sorts the card's scripts and its
+  // modules' as one list (`orderedWithModules`). `order x` is NaN there, a tie.
+  return mapped.length > 0
+    ? mapped.map(({ script, rank }, order) => ({
+        ...script,
+        order,
+        ...(rank !== undefined ? { rank: Number.isFinite(rank) ? rank : 0 } : {}),
+      }))
+    : undefined;
 }
 
 /**
@@ -298,15 +306,22 @@ export function defaultVariablesFromExtensions(
 
 /**
  * Back to RisuAI's own schema: bare source in `in`, bare template in `out`, and
- * the flags plus the action in `flag`. No `<order N>` goes out — the caller writes
- * the scripts in the sequence they run here, which is the sequence RisuAI runs a
- * list without one in, and a re-import reads them back the same way. Our numbers
- * would run backwards there, and the editor's need not even be whole. The range
+ * the flags plus the action in `flag`. Our `order` does not go out — the caller
+ * writes the scripts in the sequence they run here, which is the sequence RisuAI
+ * runs a list without a directive in, and a re-import reads them back the same
+ * way; our numbers would run backwards there, and the editor's need not even be
+ * whole. RisuAI's own `<order N>` the import kept (`rank`) goes back where the
+ * caller says it still agrees with that sequence (`ranked`), so a module's
+ * scripts sort among the card's there as they did before. The range
  * (`minDepth`/`maxDepth`) does not go out: RisuAI's scripts have no such field,
  * so an exported script runs on every message there.
  */
-function toCustomScript(script: DisplayScript): Record<string, unknown> {
-  const flag = [script.flags ?? '', ...(script.action ? [`<${script.action}>`] : [])].join('');
+function toCustomScript(script: DisplayScript, ranked: boolean): Record<string, unknown> {
+  const flag = [
+    script.flags ?? '',
+    ...(script.action ? [`<${script.action}>`] : []),
+    ...(ranked && script.rank !== undefined ? [`<order ${script.rank}>`] : []),
+  ].join('');
   return {
     comment: '',
     in: script.in,
@@ -348,7 +363,12 @@ export function extensionsWithCustomUi(
       )
     : [];
 
-  const customScripts = [...kept, ...enabled.map(toCustomScript)];
+  // The ranks go back only where RisuAI's sort by them, highest first and stable,
+  // runs the scripts in the sequence they run here — none, once the creator moved one.
+  const ranked =
+    enabled.some((script) => script.rank !== undefined) &&
+    enabled.every((script, at) => at === 0 || (enabled[at - 1]!.rank ?? 0) >= (script.rank ?? 0));
+  const customScripts = [...kept, ...enabled.map((script) => toCustomScript(script, ranked))];
   if (customScripts.length > 0) risu['customScripts'] = customScripts;
   else delete risu['customScripts'];
   if (hasVariables) risu['defaultVariables'] = serializeDefaultVariables(defaultVariables);

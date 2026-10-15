@@ -207,9 +207,18 @@ export function legacyDisplayScripts(
   return { scripts: displayScriptsWithRegexScripts(extensions, mapped), ordered };
 }
 
-/** What today's import makes of the same card (`normalizeCard`). */
+/**
+ * RisuAI's own `<order N>` beside a script (`DisplayScript.rank`), which today's
+ * import keeps and the repairs here never wrote: what they compare and write is
+ * the sequence alone.
+ */
+const withoutRank = (scripts: readonly DisplayScript[]): DisplayScript[] =>
+  scripts.map(({ rank: _rank, ...script }) => script);
+
+/** What today's import makes of the same card (`normalizeCard`), as the sequence it runs in. */
 export function currentDisplayScripts(extensions: Record<string, unknown>): DisplayScript[] | undefined {
-  return displayScriptsWithRegexScripts(extensions, displayScriptsFromExtensions(extensions));
+  const scripts = displayScriptsWithRegexScripts(extensions, displayScriptsFromExtensions(extensions));
+  return scripts ? withoutRank(scripts) : undefined;
 }
 
 /* ------------------------------------------------------------- the verdict */
@@ -251,6 +260,8 @@ export function judgeDisplayOrder(
   memberIds: readonly string[] = [],
 ): OrderVerdict {
   if (!stored || stored.length === 0) return { kind: 'unaffected' };
+  // A plot imported since keeps RisuAI's ranks beside the sequence; the sequence is what is judged.
+  const sequence = withoutRank(stored);
   let ordered = false;
   for (const [index, extensions] of cards.entries()) {
     const legacy = legacyDisplayScripts(extensions);
@@ -259,8 +270,8 @@ export function judgeDisplayOrder(
     const current = currentDisplayScripts(extensions);
     if (!current) continue;
     const memberId = memberIds[index];
-    if (sameScripts(stored, current)) return { kind: 'current' };
-    if (memberId !== undefined && sameScripts(stored, current.map((script) => ({ ...script, memberId })))) {
+    if (sameScripts(sequence, current)) return { kind: 'current' };
+    if (memberId !== undefined && sameScripts(sequence, current.map((script) => ({ ...script, memberId })))) {
       return { kind: 'current' };
     }
     if (sameScripts(stored, legacy.scripts)) return { kind: 'fix', scripts: current };

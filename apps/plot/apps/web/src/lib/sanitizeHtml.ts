@@ -85,8 +85,8 @@ const ALLOWED_TAGS = [
   // with them and left a greeting reading as one run-on line.
   'del', 'ins', 'strike', 'big', 'center', 'font', 'q', 'cite', 'kbd', 'ruby', 'rt', 'rp',
   'section', 'article', 'header', 'footer', 'aside', 'nav',
-  // A card's music, which loads from our own origin only (`rewriteElement`).
-  'audio', 'source',
+  // A card's music and video, which load from our own origin only (`rewriteElement`).
+  'audio', 'video', 'source',
   // RisuAI's CSS-only toggles: a checkbox or a radio, a `<label>` that flips it,
   // and a `:checked ~ …` rule that shows a panel or switches a tab. Only those two
   // kinds of input survive (`rewriteElement`), and with no form to belong to
@@ -110,7 +110,7 @@ const ALLOWED_ATTR = [
   'data-shizue-trigger', 'data-shizue-trigger-id', 'data-shizue-btn',
   // A card's music: RisuAI's player (`{{audio::…}}`, or one the card writes out)
   // and the background music the chat page plays (`{{bgm::…}}`, `useBackgroundMusic`).
-  'controls', 'autoplay', 'loop', 'muted', 'preload', 'data-shizue-bgm',
+  'controls', 'autoplay', 'loop', 'muted', 'preload', 'playsinline', 'data-shizue-bgm',
 ];
 
 /**
@@ -1068,11 +1068,11 @@ function rewriteElement(element: Element): void {
     return;
   }
 
-  // Music loads as a picture does, from our own origin or not at all. A player
-  // may name its file on itself or on the `<source>` inside it, so an absent
-  // `src` is no reason to drop it; the background music's marker is held to the
-  // same test.
-  if (tag === 'audio' || tag === 'source') {
+  // Music and video load as a picture does, from our own origin or not at all.
+  // A player may name its file on itself or on the `<source>` inside it, so an
+  // absent `src` is no reason to drop it; the background music's marker is held
+  // to the same test.
+  if (tag === 'audio' || tag === 'video' || tag === 'source') {
     const src = element.getAttribute('src');
     if (src !== null && !isSameOriginUrl(src)) element.remove();
   }

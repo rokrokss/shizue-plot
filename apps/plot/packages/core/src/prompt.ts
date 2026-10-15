@@ -642,6 +642,30 @@ export function readerTurnText(content: string, members: readonly ReaderMember[]
 export const groupSpeakerLine = (name: string): string =>
   `[다음 응답의 화자: ${name}. 이 인물의 말과 행동만 씁니다.]`;
 
+/**
+ * RisuAI's `"Circumstances and context of the dialogue: " + scenario`, which its
+ * `sendChat` adds to the description of the character it asks — in a group,
+ * the turn's speaker.
+ */
+export const scenarioLine = (scenario: string): string => `대화의 상황과 맥락: ${scenario}`;
+
+/**
+ * A group speaker's own scenario, where it has one the work does not already
+ * say: the first member's card's became the work's description at import (`POST
+ * /api/plots/import`) and the creator owns it from there, so the first member
+ * brings none, and no member brings the description's own text again. Empty
+ * where there is nothing of its own.
+ */
+export const ownScenario = (
+  member: PromptCharacter,
+  characters: readonly PromptCharacter[],
+  plot: Pick<PromptPlot, 'description'>,
+): string => {
+  if (member === characters[0]) return '';
+  const scenario = member.card.scenario.trim();
+  return scenario && scenario !== plot.description.trim() ? member.card.scenario : '';
+};
+
 /** Wrapper the work's own setting is read under. */
 export const plotHeader = (name: string): string => `[작품: ${name}]`;
 
@@ -1247,8 +1271,9 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     .join('\n');
 
   // 4. one block per roster member on the stage, in the creator's order. The
-  // card's scenario is not read: a situation belongs to the plot or to an intro,
-  // not to a member.
+  // card's scenario is not read here: the first card's became the plot's, and a
+  // group turn's speaker brings its own beside the turn (8c), as RisuAI sends
+  // only the asked character's.
   const characterBlocks = cast.map((member): SystemSection => {
     const { name, card } = member;
     const macro = macroOf(member);
@@ -1377,12 +1402,21 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   );
 
   // 8c. a group turn's member speaker: who speaks next, after everything else
-  // and, like the injections, never evicted.
+  // and, like the injections, never evicted. With it the speaker's own scenario,
+  // as RisuAI's `sendChat` adds the asked character's to its description — here
+  // beside the turn rather than in the member's block, which the cached prefix
+  // shares with every other speaker's turn.
+  const speakerScenario = speakerMember ? ownScenario(speakerMember, characters, plot) : '';
   const speakerSlot: MessageSlot | null = speakerMember
     ? {
         kind: 'trailing',
         label: speakerMember.name,
-        message: { role: 'system', content: groupSpeakerLine(speakerMember.name) },
+        message: {
+          role: 'system',
+          content: speakerScenario.trim()
+            ? `${groupSpeakerLine(speakerMember.name)}\n${scenarioLine(applyMacros(speakerScenario, macroOf(speakerMember)).trim())}`
+            : groupSpeakerLine(speakerMember.name),
+        },
       }
     : null;
 
@@ -1724,8 +1758,9 @@ export const characterName = (member: Pick<PromptCharacter, 'name' | 'card'>): s
 
 /**
  * A member's card as RisuAI's `{{description}}` and the like read it. The
- * scenario is the plot's setting: an imported card's became the plot's, and a
- * member here has none of its own.
+ * scenario is the plot's setting: an imported card's became the plot's, and the
+ * creator owns it from there (a group turn's speaker brings its own beside the
+ * turn, `ownScenario`).
  */
 const cbsCharacter = (member: PromptCharacter, plot: PromptPlot): CbsCharacter => ({
   description: member.card.description,

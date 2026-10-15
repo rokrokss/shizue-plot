@@ -358,6 +358,7 @@ describe('model calls', () => {
       {
         kind: 'llm',
         model: 'model',
+        trigger: 0,
         messages: [
           { role: 'system', content: '짧게.' },
           { role: 'user', content: expect.stringContaining('에게 인사해') },
@@ -384,7 +385,7 @@ describe('model calls', () => {
         },
       },
     );
-    expect(asked).toEqual([{ kind: 'llm', model: 'submodel', messages: [{ role: 'user', content: '날씨?' }] }]);
+    expect(asked).toEqual([{ kind: 'llm', model: 'submodel', trigger: 0, messages: [{ role: 'user', content: '날씨?' }] }]);
     expect(v2.variables['out']).toBe('null');
   });
 
@@ -1044,6 +1045,39 @@ describe('code triggers', () => {
     expect(book.indexOf('북쪽')).toBeGreaterThan(-1);
     expect(book.indexOf('북쪽')).toBeLessThan(book.indexOf('깊다'));
     expect(book.indexOf('깊다')).toBeLessThan(book.indexOf('높다'));
+  });
+
+  it('read the modules’ lore after the card’s and the chat’s, and never hand it back as the card’s', async () => {
+    const triggers = [
+      trigger('start', [{ type: 'triggerlua', code: '' }]),
+      trigger('start', [
+        set('book', '{{lorebook}}'),
+        { type: 'v2CreateLorebook', name: '탑', nameType: 'value', key: '탑', keyType: 'value', content: '높다', contentType: 'value', insertOrder: '100', insertOrderType: 'value' },
+      ]),
+    ];
+    let seen = -1;
+    const result = await runTriggers(
+      input(triggers, {
+        character: character(triggers, { lorebook: [lore('성', '북쪽')] }),
+        localLore: [lore('숲', '깊다')],
+        moduleLore: [lore('날씨', '비가 온다')],
+      }),
+      {
+        code: ({ scope, trigger: at }) => {
+          // The code sees the modules' lore read-only, and is told which trigger it is.
+          seen = at;
+          expect(scope.moduleLore?.map((entry) => entry.content)).toEqual(['비가 온다']);
+          expect(scope.character.lorebook.map((entry) => entry.content)).toEqual(['북쪽']);
+        },
+      },
+    );
+    expect(seen).toBe(0);
+    // RisuAI's `{{lorebook}}`: the card's book, then the chat's, then the modules'.
+    const book = result.variables['book']!;
+    expect(book.indexOf('북쪽')).toBeLessThan(book.indexOf('깊다'));
+    expect(book.indexOf('깊다')).toBeLessThan(book.indexOf('비가 온다'));
+    // What the effects rewrote is the card's book alone.
+    expect(result.character.lorebook?.map((entry) => entry.content)).toEqual(['북쪽', '높다']);
   });
 
   it('take back a name, a first message and a background, and `{{char}}` follows the name where there is no nickname', async () => {

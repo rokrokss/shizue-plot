@@ -18,12 +18,13 @@ import { noteRoutes } from './routes/notes.js';
 import { personaRoutes } from './routes/personas.js';
 import { presetRoutes } from './routes/presets.js';
 import { readerPresetRoutes } from './routes/readerPresets.js';
+import { readerModuleRoutes } from './routes/readerModules.js';
 import { MAX_CARD_IMPORT_BYTES, plotRoutes } from './routes/plots.js';
 import { requireUser } from './session.js';
 
 const MB = 1024 * 1024;
-/** The file-import routes: a card as a new plot, one as another member, and a RisuAI module into a work. */
-const IMPORT_PATH = /^\/api\/plots\/(import|[^/]+\/characters\/import|[^/]+\/modules)$/;
+/** The file-import routes: a card as a new plot, one as another member, a RisuAI module into a work or into the reader's library. */
+const IMPORT_PATH = /^\/api\/(plots\/(import|[^/]+\/characters\/import|[^/]+\/modules)|reader-modules)$/;
 /** `POST /api/chats/:id/attachments` — an image upload, not the 5MB of JSON. */
 const ATTACHMENT_PATH = /^\/api\/chats\/[^/]+\/attachments$/;
 
@@ -93,6 +94,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     '/api/personas',
     '/api/notes',
     '/api/reader-presets',
+    '/api/reader-modules',
     '/api/notifications',
     '/api/chats',
     '/api/messages',
@@ -111,6 +113,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   app.route('/api/notes', noteRoutes(deps));
   // The reader's own presets on top of the catalog's (`chats.reader_preset_id`).
   app.route('/api/reader-presets', readerPresetRoutes(deps));
+  // The reader's own RisuAI modules, laid over their chats (`chats.modules`).
+  app.route('/api/reader-modules', readerModuleRoutes(deps));
   app.route('/api/notifications', notificationRoutes(deps));
   app.route('/api/chats', chatRoutes(deps));
   // A chat brought over from another app, written in batches (`POST /api/chats/import`).

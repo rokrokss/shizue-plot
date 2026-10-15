@@ -40,12 +40,13 @@ const risuModule = {
     ['rain', '', 'png'],
     ['song', '', 'mp3'],
     ['cloud', '', 'png'],
+    ['notes', '', 'txt'],
   ],
 };
 
 describe('parseRisuModule', () => {
   it('reads a .risum whole: its lore as entries, its scripts as written, its pictures by position', () => {
-    const file = buildRisum({ module: risuModule, type: 'risuModule' }, [png, Uint8Array.from([9]), png]);
+    const file = buildRisum({ module: risuModule, type: 'risuModule' }, [png, Uint8Array.from([9]), png, Uint8Array.from([7])]);
     const parsed = parseRisuModule(file);
     expect(parsed.name).toBe('날씨 모듈');
     expect(parsed.description).toBe('비가 온다.');
@@ -53,8 +54,9 @@ describe('parseRisuModule', () => {
     expect(parsed.trigger).toEqual(risuModule.trigger);
     expect(parsed.lowLevelAccess).toBe(true);
     expect(parsed.backgroundEmbedding).toBe(risuModule.backgroundEmbedding);
-    // The song is not a picture, and is passed over; the pictures keep their names.
-    expect(parsed.assets.map((asset) => asset.name)).toEqual(['rain', 'cloud']);
+    // The song is the module's as its pictures are (the store sniffs the bytes);
+    // the notes are none of them, and are passed over. Each keeps its name.
+    expect(parsed.assets.map((asset) => asset.name)).toEqual(['rain', 'song', 'cloud']);
     expect(parsed.assets[0]!.bytes).toEqual(png);
     // RisuAI's lore shape, as its V3 export writes it and the card import reads it.
     expect(parsed.lorebook.map(({ name, keys, constant, insertionOrder, depth, useRegex, content }) => ({

@@ -11,8 +11,10 @@ import type {
   NarratorConfig,
   NormalizedCard,
   PlotCustomUi,
+  PlotModule,
   PlotProfile,
   PlotStyle,
+  ReaderModuleAsset,
   VariableDelta,
   Variables,
 } from '@shizue/core';
@@ -446,6 +448,30 @@ export const readerPresets = pgTable(
   (t) => [index('reader_presets_user_id_idx').on(t.userId)],
 );
 
+// A RisuAI module in a reader's own library — RisuAI's `db.modules`. Kept whole
+// as a work keeps one (`PlotModule`, its `assets` empty: its pictures are its own,
+// `assets` here, under `reader-modules/` and served to its owner alone). On for
+// every chat of theirs while `enabled_globally` (RisuAI's `enabledModules`), else
+// only in the chats that list it (`chats.modules`). A module on a chat runs after
+// the work's own modules, the library's in the order it was filled (`created_at`)
+// — RisuAI orders the modules on a chat by its library, never by the list that
+// turned one on. Never written into the work. Count and sizes capped by the API.
+export const readerModules = pgTable(
+  'reader_modules',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    module: jsonb('module').$type<PlotModule>().notNull(),
+    assets: jsonb('assets').$type<ReaderModuleAsset[]>().notNull().default([]),
+    enabledGlobally: boolean('enabled_globally').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('reader_modules_user_id_idx').on(t.userId, t.createdAt)],
+);
+
 export const chats = pgTable(
   'chats',
   {
@@ -543,6 +569,10 @@ export const chats = pgTable(
     // after the scripted member's own lore. Null until a script writes one. Per
     // chat, not per branch: a swipe does not undo it.
     localLore: jsonb('local_lore').$type<LoreEntry[]>(),
+    // RisuAI's chat `modules`: the reader's library modules (`reader_modules` ids)
+    // turned on for this chat alone. Null is none. An id whose module is gone
+    // matches nothing; the API keeps the list to the chat owner's own.
+    modules: jsonb('modules').$type<string[]>(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -717,6 +747,28 @@ export const loreEntryVectors = pgTable(
     embedding: anyVector('embedding').notNull(),
   },
   (t) => [primaryKey({ columns: [t.plotId, t.contentHash] })],
+);
+
+// The same for lore one reader's play on a plot holds and the work does not: a
+// member's lore their scripts rewrote (`plot_reader_overlays`) and the lore of the
+// library modules on their chats with it (`reader_modules`). Kept per reader and
+// plot so nobody's rewrite is embedded into, or searched from, anyone else's; a
+// content the plot's own rows already hold is not embedded again here.
+export const readerLoreVectors = pgTable(
+  'reader_lore_vectors',
+  {
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    plotId: uuid('plot_id')
+      .notNull()
+      .references(() => plots.id, { onDelete: 'cascade' }),
+    contentHash: text('content_hash').notNull(),
+    content: text('content').notNull(),
+    model: text('model').notNull(),
+    embedding: anyVector('embedding').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.plotId, t.contentHash] })],
 );
 
 // A message split as SillyTavern's chat vectorization splits it (`retrievalChunks`,
@@ -971,6 +1023,7 @@ export type NewUserNote = typeof userNotes.$inferInsert;
 export type ChatNoteLink = typeof chatNoteLinks.$inferSelect;
 export type PlotReaderVariables = typeof plotReaderVariables.$inferSelect;
 export type PlotReaderOverlay = typeof plotReaderOverlays.$inferSelect;
+export type ReaderModule = typeof readerModules.$inferSelect;
 export type FeedCursor = typeof feedCursors.$inferSelect;
 export type Job = typeof jobs.$inferSelect;
 export type NewJob = typeof jobs.$inferInsert;

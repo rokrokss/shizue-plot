@@ -210,9 +210,21 @@ const META_RE = /#shizue=(\d+)x(\d+):([A-Za-z0-9+/]+={0,2})$/;
  * component, so it goes through here too.
  */
 export const assetSrc = (asset: PlotAsset | ChatAttachment): string =>
-  asset.width && asset.height && asset.thumbhash
-    ? `${asset.url}#shizue=${asset.width}x${asset.height}:${asset.thumbhash}`
-    : asset.url;
+  asset.mime.startsWith('video/')
+    ? `${asset.url}${VIDEO_MARK}`
+    : asset.width && asset.height && asset.thumbhash
+      ? `${asset.url}#shizue=${asset.width}x${asset.height}:${asset.thumbhash}`
+      : asset.url;
+
+/**
+ * What `assetSrc` puts after a video's address: the one thing the renderers
+ * need to know of an asset beyond where it is — RisuAI's `{{asset::…}}` plays a
+ * video where it would draw a picture. A fragment, so it never reaches the server.
+ */
+const VIDEO_MARK = '#shizue-video';
+
+/** Whether an asset's src (`assetSrc`) is a video's. */
+export const isVideoSrc = (src: string): boolean => src.endsWith(VIDEO_MARK);
 
 /** The measurement `assetSrc` wrote, or null for an image that carries none. */
 export function readAssetMeta(src: string): AssetPreview | null {

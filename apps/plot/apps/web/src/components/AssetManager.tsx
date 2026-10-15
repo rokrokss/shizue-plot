@@ -166,6 +166,17 @@ export function AssetManager({
                   loading="lazy"
                   className="aspect-[2/3] w-full object-contain"
                 />
+              ) : asset.mime.startsWith('video/') ? (
+                // A card's video (`{{video::…}}`): its player in the picture's
+                // place, nothing loaded until it is played.
+                <video
+                  data-testid="plot-asset-video"
+                  controls
+                  preload="none"
+                  playsInline
+                  src={asset.url}
+                  className="aspect-[2/3] w-full object-contain"
+                />
               ) : (
                 // A card's music (`{{audio::…}}`, `{{bgm::…}}`): its player in the
                 // picture's place, nothing loaded until it is played.
@@ -178,7 +189,13 @@ export function AssetManager({
               )}
               <p
                 className="truncate px-2 pt-1 text-xs text-muted"
-                title={isImageAsset(asset) ? `{{img::${asset.slug}}}` : `{{audio::${asset.slug}}}`}
+                title={
+                  isImageAsset(asset)
+                    ? `{{img::${asset.slug}}}`
+                    : asset.mime.startsWith('video/')
+                      ? `{{video::${asset.slug}}}`
+                      : `{{audio::${asset.slug}}}`
+                }
               >
                 {asset.slug}
               </p>

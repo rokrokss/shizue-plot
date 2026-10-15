@@ -79,6 +79,7 @@ import {
   overlaidCard,
   scriptedMember,
   translationScriptsOf,
+  triggerLowLevelAccess,
   type CardScripts,
   type ScriptOverlay,
 } from '@shizue/core/triggers';
@@ -126,6 +127,8 @@ import {
   MAX_CHAT_NOTES,
 } from '../notes.js';
 import { loadReaderAdditions, resolveReaderPresetId } from '../readerPresets.js';
+import { chatModuleIds, chatModulesOf, chatToggles, readerCbsModules, readerLibrary } from '../readerModules.js';
+import { readerModuleAssetsJson, toReaderModuleJson } from './readerModules.js';
 import { buildRelationshipText } from '../relationship.js';
 import { drawSceneEnabled, generateSceneImage, sceneImagePrompt } from '../sceneImage.js';
 import {
@@ -228,6 +231,12 @@ export const toChatJson = (chat: Chat, noteIds: string[]) => ({
    * nobody, so it is simply ignored.
    */
   absentCharacterIds: chat.absentCharacterIds ?? [],
+  /**
+   * The reader's library modules turned on for this chat alone (RisuAI's chat
+   * `modules`); one on everywhere is not listed. `GET /:id/modules` says which
+   * of them still exist and what they bring.
+   */
+  modules: chatModuleIds(chat),
   /** Reusable notes attached to this chat, in injection order. */
   noteIds,
   /**
@@ -830,17 +839,19 @@ async function loadGenerationContext(
   // A plot of one member is that character: RisuAI's `{{char}}` follows its rename.
   const only = rewritten.length === 1 ? rewritten[0]! : undefined;
   const plotChar = only && overlay?.members?.[only.id]?.name !== undefined ? characterName(only) : undefined;
-  const scripted = scriptedMember(members, row.customUi?.modules)?.member;
+  // The work's modules and the reader's own that are on in this chat, in RisuAI's order.
+  const { modules, reader } = await chatModulesOf(deps, chat, row);
+  const scripted = scriptedMember(members, modules)?.member;
 
   const persona = await loadPersona(deps, chat);
   return {
     // Crossed with this chat's own toggles: the style the assembler compiles is
     // the creator's, minus the two features this reader turned off.
     plot: {
-      ...toPromptPlot(row, chat),
+      ...toPromptPlot(row, chat, modules),
       ...(plotChar !== undefined ? { char: plotChar } : {}),
       // `{{moduleenabled}}`/`{{moduleassetlist}}`, naming the pictures `{{assetlist}}` names.
-      cbsModules: await openModuleAssets(deps, chat, row.customUi?.modules),
+      cbsModules: [...(await openModuleAssets(deps, chat, row.customUi?.modules)), ...readerCbsModules(reader)],
     },
     characters: toPromptCharacters(rewritten, absent),
     onStage: rewritten.filter((member) => !absent.has(member.id)),
@@ -999,7 +1010,7 @@ function readerPromptSettings(
   return {
     ...(chat.noteSettings ? { authorNoteSettings: chat.noteSettings } : {}),
     ...(language.mode === 'instruct' && language.language ? { replyLanguage: language.language } : {}),
-    vectors: { plotId: plot.id, plotLanguage: plot.language, retrieval: retrievalEnabled(chat.retrieval) },
+    vectors: { plotId: plot.id, userId: chat.userId, plotLanguage: plot.language, retrieval: retrievalEnabled(chat.retrieval) },
   };
 }
 
@@ -1707,6 +1718,38 @@ async function withScriptRequestTriggers(
 }
 
 /**
+ * `modules` on a chat's PATCH: the reader's library modules to turn on for this
+ * chat (RisuAI's chat `modules`), each once, in the order sent — what runs is
+ * still in the library's order. Only the chat owner's own modules are kept, so
+ * a list can never name another reader's; an empty list is stored as none.
+ */
+async function patchedModules(deps: AppDeps, userId: string, body: Record<string, unknown>): Promise<string[] | null | undefined> {
+  if (!('modules' in body)) return undefined;
+  const raw = body['modules'];
+  if (raw === null) return null;
+  if (!Array.isArray(raw) || raw.some((id) => typeof id !== 'string')) {
+    throw badRequest('invalid_request', 'modules must be a list of module ids');
+  }
+  const owned = new Set((await readerLibrary(deps, userId)).map((row) => row.id));
+  const ids = [...new Set((raw as string[]).map((id) => id.toLowerCase()))].filter((id) => owned.has(id));
+  return ids.length > 0 ? ids : null;
+}
+
+/**
+ * The trigger a script's call came from (`trigger`): its place in the calling
+ * member's list as `GET /:id/scripts` gave it, which the gate holds the call to
+ * (`triggerLowLevelAccess`). Undefined when the body names none.
+ */
+function optionalTriggerIndex(body: Record<string, unknown>): number | undefined {
+  const value = body['trigger'];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw badRequest('invalid_request', 'trigger must be the index of the trigger that called');
+  }
+  return value;
+}
+
+/**
  * The scripts a script's call is held to: those of the member whose runtime
  * made it (`memberId`, which must be on the roster — 400 otherwise), else the
  * scripted member's, the lead's (`scriptedMember`). Null where that member
@@ -1734,11 +1777,16 @@ function scriptBundleOf(
   scripts: CardScripts,
   overlay: ScriptOverlay | null,
   chat: Chat,
+  modules: readonly PlotModule[] = [],
+  disclosed = true,
 ) {
   const card = member.card;
   const own = overlay?.members?.[member.id] ?? null;
   const nickname = card.nickname?.trim() ?? '';
+  // A member only the reader's own modules make scripted: its card's text stays the creator's.
+  const text = (value: string): string => (disclosed ? value : '');
   return {
+    ...(disclosed ? {} : { concealed: true }),
     memberId: member.id,
     // `{{char}}` in a card's own text: its nickname where it sets one, else its
     // name as the reader's scripts left it.
@@ -1750,16 +1798,16 @@ function scriptBundleOf(
       // RisuAI's `char.name` (Lua's `getName`), and the nickname `{{char}}` stays.
       name: member.name,
       nickname,
-      description: card.description,
-      personality: card.personality,
-      scenario: card.scenario,
-      exampleDialogue: card.mesExample,
-      lorebook: card.lorebook,
-      postHistoryInstructions: card.postHistoryInstructions,
+      description: text(card.description),
+      personality: text(card.personality),
+      scenario: text(card.scenario),
+      exampleDialogue: text(card.mesExample),
+      lorebook: disclosed ? card.lorebook : [],
+      postHistoryInstructions: text(card.postHistoryInstructions),
       // What `/test_lorebook` and Lua's `loadLoreBooks` activate the book by, as the prompt does.
       loreSettings: card.loreSettings,
       // RisuAI's `backgroundHTML` whole, styles and all, as Lua's `getBackgroundEmbedding` reads it.
-      backgroundHtml: backgroundHtmlOf(card.extensions) ?? '',
+      backgroundHtml: text(backgroundHtmlOf(card.extensions) ?? ''),
       // RisuAI's `char.image`, for Lua's `getCharacterImage`: a same-origin address, or null.
       avatarUrl: avatarUrl(member),
     },
@@ -1768,6 +1816,11 @@ function scriptBundleOf(
       persona: overlay?.persona ?? null,
     },
     localLore: localLoreOf(chat),
+    // The modules' lore on the chat, which RisuAI's `{{lorebook}}`, `/test_lorebook`
+    // and Lua's lore readers read after the character's and the chat's
+    // (`getModuleLorebooks`). Apart from `character.lorebook` on purpose: what the
+    // scripts rewrite of that goes back as the member's, and this never may.
+    moduleLore: modules.flatMap((module) => module.lorebook),
   };
 }
 
@@ -2021,8 +2074,10 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const noteSettings = optionalSettings(body, 'noteSettings', coerceAuthorNoteSettings);
       const translation = optionalSettings(body, 'translation', coerceTranslationSettings);
       const retrieval = optionalSettings(body, 'retrieval', coerceRetrievalSettings);
+      const modules = await patchedModules(deps, userId, body);
 
       if (
+        modules === undefined &&
         noteSettings === undefined &&
         translation === undefined &&
         retrieval === undefined &&
@@ -2066,6 +2121,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           ...(noteSettings !== undefined ? { noteSettings } : {}),
           ...(translation !== undefined ? { translation } : {}),
           ...(retrieval !== undefined ? { retrieval } : {}),
+          ...(modules !== undefined ? { modules } : {}),
           updatedAt: new Date(),
         })
         .where(and(eq(chats.id, id), eq(chats.userId, userId)))
@@ -2490,21 +2546,29 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
     // The same gate as generating: a plot withdrawn from the reader runs nothing.
     const plot = await loadVisiblePlot(deps.db, chat.plotId, chat.userId);
-    // A work's modules ride in every member's scripts, after the card's own: in a
-    // group RisuAI runs them for whichever character it asks.
-    const modules = plot.customUi?.modules ?? [];
+    // The chat's modules — the work's, then the reader's own that are on here —
+    // ride in every member's scripts, after the card's own: in a group RisuAI
+    // runs them for whichever character it asks.
+    const { modules } = await chatModulesOf(deps, chat, plot);
     const roster = await loadMembers(deps.db, plot.id);
     const translation = roster.flatMap((member) => {
       const scripts = translationScriptsOf(member.card, modules);
       return scripts.length > 0 ? [{ memberId: member.id, scripts }] : [];
     });
+    // The card's internals go only where the work itself carries scripts for the
+    // member — what its creator is told at publish. A reader's own module makes a
+    // member scripted for them too, and runs, but discloses nothing of the card.
+    const workModules = plot.customUi?.modules ?? [];
+    const readerModules = modules.slice(workModules.length);
     const scripted = roster.flatMap((member) => {
       const scripts = cardScripts(member.card, modules);
-      return scripts ? [{ member, scripts }] : [];
+      return scripts ? [{ member, scripts, disclosed: cardScripts(member.card, workModules) !== null }] : [];
     });
     if (scripted.length === 0) return c.json({ scripts: null, members: [], translation });
     const overlay = await loadReaderOverlay(deps.db, chat.userId, chat.plotId);
-    const members = scripted.map(({ member, scripts }) => scriptBundleOf(member, scripts, overlay, chat));
+    const members = scripted.map(({ member, scripts, disclosed }) =>
+      scriptBundleOf(member, scripts, overlay, chat, disclosed ? modules : readerModules, disclosed),
+    );
     return c.json({ scripts: members[0]!, members, translation });
   });
 
@@ -2665,6 +2729,41 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.json({ ...state, ...(unlockedAssetIds.length > 0 ? { unlockedAssetIds } : {}) });
   });
 
+  /**
+   * The modules on this chat as the reader's page needs them (§6 RisuAI 모듈):
+   * `library`, the reader's whole library with whether this chat lists each
+   * (`listedHere`; one on everywhere is on whatever the list says); `active`,
+   * the library modules on here, in the order they run, with what the page
+   * draws of them — display scripts, stylesheet, background, the pictures by
+   * the module's names for them, the namespace `{{moduleenabled}}` reads; and
+   * `toggles`, the toggle text the chat's settings draw — the modules' on the
+   * chat (the work's, then the reader's) and then the members' own, as RisuAI's
+   * sidebar reads its modules' and the character's (`chatToggles`).
+   */
+  app.get('/:id/modules', async (c) => {
+    const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
+    const plot = await loadVisiblePlot(deps.db, chat.plotId, chat.userId);
+    const listed = new Set(chatModuleIds(chat));
+    const [library, { modules, reader }, members] = await Promise.all([
+      readerLibrary(deps, chat.userId),
+      chatModulesOf(deps, chat, plot),
+      loadMembers(deps.db, plot.id),
+    ]);
+    return c.json({
+      library: library.map((row) => ({ ...toReaderModuleJson(row), listedHere: listed.has(row.id) })),
+      active: reader.map((row) => ({
+        id: row.id,
+        name: row.module.name,
+        displayScripts: row.module.displayScripts ?? [],
+        css: row.module.css ?? '',
+        backgroundHtml: row.module.backgroundHtml ?? '',
+        namespace: row.module.namespace ?? null,
+        assets: readerModuleAssetsJson(row),
+      })),
+      toggles: chatToggles(modules, members),
+    });
+  });
+
   /** The reader's global variables on this chat's plot (see `plotReaderVariables`). */
   app.get('/:id/global-variables', async (c) => {
     const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
@@ -2692,10 +2791,11 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * (`scriptLlm.ts`). `model` is `'main'` (the default), the chat's own model, or
    * `'sub'`, its auxiliary model, resolved as the background work resolves it.
    *
-   * Held as RisuAI holds the functions: the card of the member whose runtime
-   * called (`memberId`, a roster member; the plot's scripted member without one)
-   * must grant low-level access (403 `script_llm_forbidden` otherwise), and its
-   * request triggers are the ones that run over the call. Held as a turn is:
+   * Held as RisuAI holds the functions: the trigger that called (`trigger`, its
+   * place in the bundle of the member whose runtime called — `memberId`, a
+   * roster member; the plot's scripted member without one) must hold low-level
+   * access (`triggerLowLevelAccess`; 403 `script_llm_forbidden` otherwise), and
+   * that member's request triggers are the ones that run over the call. Held as a turn is:
    * the reader's writable chat on a plot still visible to them, and the
    * generation slot for the length of the call (429 `generation_in_progress`),
    * renewed as a stream renews it. No count limit — the reader's account pays.
@@ -2707,10 +2807,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const messages = readScriptLlmMessages(body['messages']);
     const which = readScriptLlmModel(body['model']);
     const memberId = optionalMemberId(body);
+    const trigger = optionalTriggerIndex(body);
     const chat = await loadWritableChat(deps, id, userId);
     const plot = await loadVisiblePlot(deps.db, chat.plotId, chat.userId);
-    const scripted = callingScripts(await loadMembers(deps.db, plot.id), memberId, plot.customUi?.modules);
-    if (!scripted?.scripts.lowLevelAccess) {
+    const { modules } = await chatModulesOf(deps, chat, plot);
+    const scripted = callingScripts(await loadMembers(deps.db, plot.id), memberId, modules);
+    if (!scripted || !triggerLowLevelAccess(scripted.scripts, trigger)) {
       throw forbidden('script_llm_forbidden', "This plot's scripts may not call the model");
     }
     if (!(await acquireChatSlot(deps, chat.id, userId))) await rejectBusyChat(deps, chat.id, userId);
@@ -2740,9 +2842,9 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * target's own status — is a 200 here with that answer as the body; only this
    * route's own refusals are HTTP errors.
    *
-   * Held as RisuAI holds it: the calling member's card (`memberId`, else the
-   * scripted member's) must grant low-level access, the same gate and the same
-   * 403 as `script-llm`. The chat must be the
+   * Held as RisuAI holds it: the calling trigger (`trigger`, in the bundle of
+   * `memberId`, else of the scripted member) must hold low-level access, the
+   * same gate and the same 403 as `script-llm`. The chat must be the
    * reader's and writable. It does not take the generation slot: it writes
    * nothing and spends nothing of the reader's account, and a script may have
    * several in flight at once in RisuAI (deps' `suggesting` is the same rule).
@@ -2753,9 +2855,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const userId = c.get('userId');
     const body = await readJsonBody(c);
     const memberId = optionalMemberId(body);
+    const trigger = optionalTriggerIndex(body);
     const chat = await loadWritableChat(deps, id, userId);
     const plot = await loadVisiblePlot(deps.db, chat.plotId, chat.userId);
-    if (!callingScripts(await loadMembers(deps.db, plot.id), memberId, plot.customUi?.modules)?.scripts.lowLevelAccess) {
+    const { modules } = await chatModulesOf(deps, chat, plot);
+    const scripted = callingScripts(await loadMembers(deps.db, plot.id), memberId, modules);
+    if (!scripted || !triggerLowLevelAccess(scripted.scripts, trigger)) {
       throw forbidden('script_fetch_forbidden', "This plot's scripts may not make requests");
     }
     // The URL is not checked here: what RisuAI answers for one that is not text is part of its answer.

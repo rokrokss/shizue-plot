@@ -344,3 +344,25 @@ export function displayScriptsFor<T extends Pick<DisplayScript, 'memberId'>>(
 ): T[] {
   return scripts.filter((script) => script.memberId === undefined || script.memberId === memberId);
 }
+
+/**
+ * A work's display scripts with its modules' after them, as RisuAI runs a
+ * character's regex scripts with its modules' (`processScriptFull`): one list,
+ * the character's (`own`, by `order`) and then each module's (each by its own
+ * `order`), and — once any script on it carries RisuAI's `<order N>` (`rank`) —
+ * the whole list sorted by that number, highest first, stably, a script without
+ * one counting as 0. Renumbered 0, 1, 2… in the sequence it runs, so the
+ * renderer's ascending `order` runs it so. Applying it again with more modules
+ * gives what one pass over all of them gives, the sort being stable.
+ */
+export function orderedWithModules<T extends Pick<DisplayScript, 'order' | 'rank'>>(
+  own: readonly T[],
+  modules: readonly (readonly T[])[],
+): T[] {
+  const byOrder = (list: readonly T[]): T[] => [...list].sort((a, b) => a.order - b.order);
+  const list = [...byOrder(own), ...modules.flatMap(byOrder)];
+  if (list.some((script) => script.rank !== undefined)) {
+    list.sort((a, b) => (b.rank ?? 0) - (a.rank ?? 0));
+  }
+  return list.map((script, order) => ({ ...script, order }));
+}

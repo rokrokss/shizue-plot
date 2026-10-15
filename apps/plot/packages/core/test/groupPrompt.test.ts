@@ -13,6 +13,7 @@ import {
   groupSpeakerLine,
   NARRATION_HEADER,
   promptText,
+  scenarioLine,
   type AssemblePromptInput,
   type HistoryMessage,
   type PromptCharacter,
@@ -249,6 +250,24 @@ describe('assemblePrompt - a group turn', () => {
     expect(report!.totals.used).toBe(
       countTokens(prompt.system) + texts(prompt).reduce((sum, text) => sum + countTokens(text), 0),
     );
+  });
+
+  it("brings the speaker's own scenario beside the turn, as RisuAI sends the asked character's, never twice", () => {
+    const withScenario = (row: PromptCharacter, scenario: string): PromptCharacter => ({ ...row, card: { ...row.card, scenario } });
+    const characters = [withScenario(seiyaRow, '세이야는 순찰 중이다.'), withScenario(kaiRow, '{{char}}는 장부를 정리하는 중이다.'), mio];
+    const asKai = group({ characters, speaker: 1 });
+    expect(asKai.messages.at(-1)).toEqual({
+      role: 'system',
+      content: `${groupSpeakerLine('카이')}\n${scenarioLine('카이는 장부를 정리하는 중이다.')}`,
+    });
+    // Nothing of it in the cached prefix, which every speaker's turn shares.
+    expect(asKai.system).not.toContain('장부를 정리');
+    // The first member's became the work's description at import: it is not said again.
+    expect(promptText(group({ characters, speaker: 0 }).messages.at(-1)!.content)).toBe(groupSpeakerLine('세이야'));
+    // Nor a scenario that is the description itself, nor in a scene reply that is no one's turn.
+    const same = [characters[0]!, withScenario(kaiRow, plot.description), mio];
+    expect(promptText(group({ characters: same, speaker: 1 }).messages.at(-1)!.content)).toBe(groupSpeakerLine('카이'));
+    expect(texts(group({ characters })).join('\n')).not.toContain('장부를 정리');
   });
 
   it("stops on every other on-stage member's name and nickname", () => {

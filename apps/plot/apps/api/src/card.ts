@@ -6,6 +6,7 @@ import {
   creatorCssFromExtensions,
   DEFAULT_LORE_SETTINGS,
   displayScriptPatternError,
+  orderedWithModules,
   emotionModeOf,
   extensionsWithEmotionMode,
   LORE_MATCH_SOURCES,
@@ -196,6 +197,8 @@ function coerceDisplayScript(value: unknown, index: number): DisplayScript {
     out: str(raw['out']),
     ...(flags && DISPLAY_SCRIPT_FLAGS.test(flags) ? { flags } : {}),
     order: num(raw['order'], index),
+    // RisuAI's `<order N>` the import kept (`DisplayScript.rank`), for sorting with modules' scripts.
+    ...(typeof raw['rank'] === 'number' && Number.isFinite(raw['rank']) ? { rank: raw['rank'] } : {}),
     ...(action === 'move_top' || action === 'move_bottom' || action === 'repeat_back'
       ? { action }
       : {}),
@@ -383,10 +386,12 @@ export function customUiWithoutModules(customUi: PlotCustomUi | null): PlotCusto
 /**
  * What a reader's chat draws of the work with its modules, as RisuAI stacks a
  * module on the chat: the work's display scripts and then each module's
- * (`customscript.concat(getModuleRegexScripts())`), numbered on after the work's
- * so they run after them, untagged by member — a module is every member's; the
- * work's stylesheet and then each module's; and the background with each
- * module's after it (`backgroundHTML + '\n' + moduleBackgroundEmbedding`).
+ * (`customscript.concat(getModuleRegexScripts())`), untagged by member — a
+ * module is every member's — and sorted together by RisuAI's `<order N>` once
+ * any of them carries one (`orderedWithModules`); the work's stylesheet and
+ * then each module's; and the background with each module's after it
+ * (`backgroundHTML + '\n' + moduleBackgroundEmbedding`). The reader's own
+ * modules join on their page (`GET /api/chats/:id/modules`), the same way.
  */
 export function readerCustomUi(
   customUi: PlotCustomUi | null,
@@ -394,14 +399,8 @@ export function readerCustomUi(
 ): { displayScripts: DisplayScript[]; css: string; backgroundHtml: string } {
   const own = customUi?.displayScripts ?? [];
   const modules = customUi?.modules ?? [];
-  let next = own.reduce((last, script) => Math.max(last, script.order), -1) + 1;
-  const added = modules.flatMap((module) =>
-    [...(module.displayScripts ?? [])]
-      .sort((a, b) => a.order - b.order)
-      .map((script) => ({ ...script, order: next++ })),
-  );
   return {
-    displayScripts: [...own, ...added],
+    displayScripts: modules.length > 0 ? orderedWithModules(own, modules.map((module) => module.displayScripts ?? [])) : own,
     css: [customUi?.css ?? '', ...modules.map((module) => module.css ?? '')].filter((css) => css.trim()).join('\n\n'),
     backgroundHtml: [background, ...modules.map((module) => module.backgroundHtml ?? '')]
       .filter((html) => html.trim())

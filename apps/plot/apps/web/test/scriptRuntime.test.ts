@@ -365,7 +365,8 @@ describe('manual', () => {
     expect(calls[0]).toEqual({
       method: 'POST',
       path: '/api/chats/c1/script-llm',
-      body: { messages: [{ role: 'user', content: '날씨?' }], model: 'main' },
+      // The trigger that asked, by its place in the bundle: the server holds the call to its access.
+      body: { messages: [{ role: 'user', content: '날씨?' }], model: 'main', trigger: 0 },
     });
     expect(calls[1]!.body).toMatchObject({ messageId: 'm1', variableDelta: { weather: '맑음' } });
 

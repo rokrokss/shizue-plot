@@ -20,6 +20,7 @@ export * from './tokens.js';
 export * from './language.js';
 export * from './presets.js';
 export * from './readerPreset.js';
+export * from './toggles.js';
 export * from './prompt.js';
 export * from './authorNote.js';
 export * from './translation.js';

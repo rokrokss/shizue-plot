@@ -129,6 +129,12 @@ export interface LuaSnapshot {
      * of its name in it alone.
      */
     localLore?: LuaLoreBook[];
+    /**
+     * The modules' lore on this chat (RisuAI's `getModuleLorebooks`), after the
+     * other two wherever RisuAI reads all three. Read-only: nothing a script
+     * calls writes it, and it is never handed back as the character's.
+     */
+    moduleLore?: LuaLoreBook[];
   };
   user: string;
   persona: string;
@@ -818,8 +824,8 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any, cbs: Any): void
     set('getLoreBooksMain', function (_id: Any, search: Any) {
       const ctx = c();
       const found: Any[] = [];
-      // RisuAI's order: the chat's lore, then the character's.
-      const sources = [ctx.localLore, ctx.lore];
+      // RisuAI's order: the chat's lore, then the character's, then the modules'.
+      const sources = [ctx.localLore, ctx.lore, ctx.moduleLore];
       for (let s = 0; s < sources.length; s += 1) {
         const source = sources[s];
         for (let i = 0; i < source.length; i += 1) {
@@ -924,6 +930,7 @@ function luaWorkerRuntime(scope: Any, limits: Any, prelude: Any, cbs: Any): void
       backgroundChanged: false,
       lore: snap.char.lore.slice(),
       localLore: (snap.char.localLore || []).slice(),
+      moduleLore: (snap.char.moduleLore || []).slice(),
       loreUpserts: [],
       user: snap.user,
       persona: snap.persona,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   bracketLists,
+  cardVariableValues,
   fetchUrlOf,
   findExternal,
   inlinableCss,
@@ -76,7 +77,8 @@ describe('templates', () => {
     expect(parseUrlTemplate('https://cdn.test/{{random::Calm::Sad}}.png')).toMatchObject({ literals: ['Calm', 'Sad'] });
     // Two slots, another macro, a slot in the host: nothing it can fetch.
     expect(parseUrlTemplate('https://cdn.test/$1/$2.png')).toBeNull();
-    expect(parseUrlTemplate('https://cdn.test/{{getvar::mood}}.png')).toBeNull();
+    expect(parseUrlTemplate('https://cdn.test/{{getvar::a}}/{{getvar::b}}.png')).toBeNull();
+    expect(parseUrlTemplate('https://cdn.test/{{user}}.png')).toBeNull();
     expect(parseUrlTemplate('https://$1.test/a.png')).toBeNull();
   });
 
@@ -87,8 +89,46 @@ describe('templates', () => {
     expect(captured.get(1)).toEqual(['Happy', '../x']);
     expect(templateCandidates(template, captured, bracketLists(texts))).toEqual(['Calm', 'Happy', 'Angry', 'Very Sad']);
     expect(templateUrl(template, 'Very Sad')).toBe('https://cdn.test/Very%20Sad.png');
-    expect(localizedName(templateUrl(template, 'Very Sad'))).toBe('https://cdn.test/Very Sad.png');
+    expect(localizedName(templateUrl(template, 'Very Sad')!)).toBe('https://cdn.test/Very Sad.png');
     expect(localizedTemplateName(template)).toBe('https://cdn.test/{{random::$1::Calm}}.png');
+  });
+
+  it('reads a getvar slot by what the card sets the variable to — in the path, or holding the host', () => {
+    const values = cardVariableValues(
+      { mood: 'calm', cdn: 'https://cdn.test/pack' },
+      ['{{setvar::mood::angry}} and {{setdefaultvar::cdn::https://alt.test/p}}', '{{setvar::mood::{{random::a::b}}}}'],
+      [
+        { effect: [{ type: 'setvar', operator: '=', var: 'mood', value: 'sad' }] },
+        { effect: [{ type: 'setvar', operator: '+=', var: 'mood', value: '1' }] },
+        { effect: [{ type: 'v2SetVar', operator: '=', var: 'cdn', valueType: 'value', value: '//third.test/x' }] },
+      ],
+    );
+    expect(values.get('mood')).toEqual(['calm', 'angry', 'sad']);
+    expect(values.get('cdn')).toEqual(['https://cdn.test/pack', 'https://alt.test/p', '//third.test/x']);
+
+    const inPath = parseUrlTemplate('https://cdn.test/face/{{getvar::mood}}.png')!;
+    expect(inPath).toMatchObject({ prefix: 'https://cdn.test/face/', slot: '{{getvar::mood}}', variable: 'mood' });
+    expect(templateCandidates(inPath, new Map(), [], 200, values)).toEqual(['calm', 'angry', 'sad']);
+    expect(templateUrl(inPath, 'sad')).toBe('https://cdn.test/face/sad.png');
+    expect(localizedTemplateName(inPath)).toBe('https://cdn.test/face/{{getvar::mood}}.png');
+
+    const host = parseUrlTemplate('{{getvar::cdn}}/bg.webp')!;
+    expect(host).toMatchObject({ prefix: '', suffix: '/bg.webp', variable: 'cdn' });
+    expect(templateCandidates(host, new Map(), [], 200, values)).toEqual([
+      'https://cdn.test/pack',
+      'https://alt.test/p',
+      '//third.test/x',
+    ]);
+    expect(templateUrl(host, '//third.test/x')).toBe('https://third.test/x/bg.webp');
+    expect(templateUrl(host, 'not a url')).toBeNull();
+    // The by-name address keeps the slot; the renderer writes the host, scheme and all, into it.
+    expect(localizedTemplateName(host)).toBe('{{getvar::cdn}}/bg.webp');
+    // A variable the card never sets is nothing to fetch.
+    expect(templateCandidates(parseUrlTemplate('{{getvar::none}}/a.png')!, new Map(), [], 200, values)).toEqual([]);
+    // Found as an address at all only where it might be one.
+    expect(findExternal('<img src="{{getvar::cdn}}/bg.webp"><img src="{{img::face}}">').map((ref) => ref.address)).toEqual([
+      '{{getvar::cdn}}/bg.webp',
+    ]);
   });
 
   it('captures nothing with a pattern the linear engine cannot compile', () => {

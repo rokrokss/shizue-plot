@@ -22,9 +22,10 @@
  * From there the runtime carries them where a trigger's writes go.
  *
  * What RisuAI keeps behind the card's `lowLevelAccess` stays behind it: the
- * worker gates the functions as RisuAI does, the sandbox refuses a model call
- * from a call that was not given the access, and the API refuses one for a plot
- * whose card does not grant it. Model calls have no count limit — they run on
+ * worker gates the functions as RisuAI does, each call with its own trigger's
+ * access (`luaEntriesOf`), the sandbox refuses a model call from a call that was
+ * not given the access, and the API refuses one whose trigger does not hold it
+ * (the call names it, `trigger`). Model calls have no count limit — they run on
  * the reader's own account, through the chat's model, or its auxiliary model
  * for `axLLM`. An embedding search (`similarity`) runs on the page, in the
  * worker the trigger runs share, behind the same access. A `request` is made by
@@ -74,12 +75,16 @@ export interface LuaEngineOptions {
   lowLevelAccess: boolean;
   sandbox: LuaSandbox;
   ui: LuaUi;
-  /** A model call on the chat's model or its auxiliary one; the answer's text, or a throw. */
-  llm(messages: LuaLlmMessage[], model: LuaLlmModel): Promise<string>;
+  /**
+   * A model call on the chat's model or its auxiliary one; the answer's text, or
+   * a throw. `trigger` is the trigger whose code asked, by its place in
+   * `triggers` — what the server holds the call to.
+   */
+  llm(messages: LuaLlmMessage[], model: LuaLlmModel, trigger: number): Promise<string>;
   /** `similarity`: the texts closest to `source` first, or a throw. */
   similarity(source: string, texts: string[]): Promise<string[]>;
-  /** `request`: RisuAI's `{status, data}` for `url`, as our server answers it, or a throw. */
-  request(url: string | null): Promise<LuaRequestAnswer>;
+  /** `request`: RisuAI's `{status, data}` for `url`, as our server answers it, or a throw; `trigger` as for `llm`. */
+  request(url: string | null, trigger: number): Promise<LuaRequestAnswer>;
   /**
    * `loadLoreBooks`: what `lorebook` activates on `history`, and the chat's context
    * budget, or a throw. Without it the call fails in the script.
@@ -180,6 +185,7 @@ export function snapshotOf(
       image: characterImage(avatarUrl),
       lore: character.lorebook.map(risuLore),
       localLore: scope.localLore.map(risuLore),
+      moduleLore: (scope.moduleLore ?? []).map(risuLore),
     },
     user: scope.user,
     persona: scope.persona,
@@ -200,9 +206,29 @@ function cbsDataOf(data: CodeScope['data']): LuaSnapshot['cbs'] {
   };
 }
 
+/**
+ * The Lua scripts among `triggers`, each with its trigger's place in the list
+ * and its own `lowLevelAccess` — the card's flag on the card's, a module's on
+ * the module's (`TriggerScript.lowLevelAccess`), or `fallback`, the card's,
+ * where nothing marked them — as RisuAI's `runLuaButtonTrigger` hands each run
+ * its own trigger's.
+ */
+export function luaEntriesOf(
+  triggers: readonly TriggerScript[],
+  fallback: boolean,
+): { code: string; trigger: number; lowLevelAccess: boolean }[] {
+  return triggers.flatMap((trigger, index) => {
+    const first = trigger.effect[0];
+    if (first?.type !== 'triggerlua') return [];
+    const code = first['code'];
+    return [{ code: typeof code === 'string' ? code : '', trigger: index, lowLevelAccess: trigger.lowLevelAccess ?? fallback }];
+  });
+}
+
 export function createLuaEngine(options: LuaEngineOptions): ScriptEngine {
   const { sandbox, ui, log } = options;
-  const scripts = luaScriptsOf(options.triggers);
+  const entries = luaEntriesOf(options.triggers, options.lowLevelAccess);
+  const scripts = entries.map((entry) => entry.code);
   const source = scripts.join('\n');
   const stateKey = luaCodeKey(scripts);
   /** Display passes run on every redraw: each distinct complaint is said once. */
@@ -215,14 +241,12 @@ export function createLuaEngine(options: LuaEngineOptions): ScriptEngine {
     dialogs = next.catch(() => undefined);
     return next;
   };
-  const host: Omit<LuaHost, 'lore'> = {
+  const host: Omit<LuaHost, 'lore' | 'llm' | 'request'> = {
     alert: (text, error) => queued(() => ui.alert(text, error)),
     input: (text) => queued(() => ui.input(text)),
     select: (choices) => queued(() => ui.select(choices)),
     confirm: (text) => queued(() => ui.confirm(text)),
-    llm: (messages, model) => options.llm(messages, model),
     similarity: (source, texts) => options.similarity(source, texts),
-    request: (url) => options.request(url),
   };
 
   function report(outcome: Exclude<LuaOutcome, { kind: 'done' }>, quiet = false): void {
@@ -282,15 +306,28 @@ export function createLuaEngine(options: LuaEngineOptions): ScriptEngine {
     notes(result);
   }
 
-  async function call(code: string, entry: LuaEntry, scope: CodeScope, lowLevel: boolean): Promise<LuaCallResult | null> {
+  async function call(
+    code: string,
+    entry: LuaEntry,
+    scope: CodeScope,
+    lowLevel: boolean,
+    trigger = -1,
+  ): Promise<LuaCallResult | null> {
     // The lore is activated as RisuAI's `loadLoreBookV3Prompt` activates it: the character's book,
-    // then the chat's, with what the script upserted into the chat's on the way.
+    // then the chat's, with what the script upserted into the chat's on the way, then the modules'.
     const lore: LuaHost['lore'] = (history, upserts) => {
       if (!options.lore) return Promise.reject(new Error('lore cannot be activated here'));
-      return options.lore(history, [...scope.character.lorebook, ...upsertLocalLore(scope.localLore, upserts)]);
+      return options.lore(history, [
+        ...scope.character.lorebook,
+        ...upsertLocalLore(scope.localLore, upserts),
+        ...(scope.moduleLore ?? []),
+      ]);
     };
+    // A model call or a request names the trigger that made it, for the server's gate.
+    const llm: LuaHost['llm'] = (messages, model) => options.llm(messages, model, trigger);
+    const request: LuaHost['request'] = (url) => options.request(url, trigger);
     const snapshot = snapshotOf(scope, lowLevel, options.avatarUrl, options.personaAvatarUrl?.());
-    const outcome = await sandbox.call(code, entry, snapshot, { ...host, lore }, stateKey);
+    const outcome = await sandbox.call(code, entry, snapshot, { ...host, lore, llm, request }, stateKey);
     if (outcome.kind !== 'done') {
       report(outcome, entry.kind === 'display');
       return null;
@@ -308,7 +345,13 @@ export function createLuaEngine(options: LuaEngineOptions): ScriptEngine {
     },
 
     async runCode(request) {
-      const result = await call(request.code, { kind: 'trigger', mode: request.mode }, request.scope, request.lowLevelAccess);
+      const result = await call(
+        request.code,
+        { kind: 'trigger', mode: request.mode },
+        request.scope,
+        request.lowLevelAccess,
+        request.trigger,
+      );
       if (!result) return;
       apply(result, request.scope);
       return result.stopSending ? { stopSending: true } : undefined;
@@ -349,8 +392,9 @@ export function createLuaEngine(options: LuaEngineOptions): ScriptEngine {
     },
 
     async button(data, scope) {
-      for (const code of scripts) {
-        const result = await call(code, { kind: 'button', data }, scope, options.lowLevelAccess);
+      // Each script with its own trigger's access, as RisuAI's `runLuaButtonTrigger` runs them.
+      for (const { code, trigger, lowLevelAccess } of entries) {
+        const result = await call(code, { kind: 'button', data }, scope, lowLevelAccess, trigger);
         if (result) apply(result, scope);
       }
     },

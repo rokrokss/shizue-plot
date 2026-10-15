@@ -269,12 +269,14 @@ describe('parseCard - PNG assets', () => {
   const webp = (n: number) => Uint8Array.from([...Buffer.from('RIFF'), 0, 0, 0, 0, ...Buffer.from('WEBP'), n]);
   const gif = (n: number) => Uint8Array.from([...Buffer.from('GIF89a'), n]);
   const mp3 = (n: number) => Uint8Array.from([...Buffer.from('ID3'), 4, 0, n]);
+  const mp4 = (n: number) => Uint8Array.from([0, 0, 0, 0x18, ...Buffer.from('ftypisom'), n]);
 
-  it("returns a V3 card's chara-ext-asset pictures and music, in card order", () => {
+  it("returns a V3 card's chara-ext-asset pictures, music and video, in card order", () => {
     const smile = pic(10);
     const background = webp(20);
     const theme = mp3(40);
     const nameless = gif(30);
+    const intro = mp4(60);
     // RisuAI writes the asset chunks first and the card last.
     const png = buildPngWithTextChunks({
       'chara-ext-asset_:1': base64(smile),
@@ -282,6 +284,7 @@ describe('parseCard - PNG assets', () => {
       'chara-ext-asset_:3': base64(theme),
       'chara-ext-asset_:4': base64(nameless),
       'chara-ext-asset_:5': base64(Uint8Array.from([50, 51])),
+      'chara-ext-asset_:6': base64(intro),
       ccv3: v3WithAssets([
         { type: 'icon', name: 'main', uri: 'ccdefault:', ext: 'png' },
         { type: 'emotion', name: 'smile', uri: '__asset:1', ext: 'png' },
@@ -291,6 +294,7 @@ describe('parseCard - PNG assets', () => {
         { type: 'icon', name: 'remote', uri: 'https://example.com/remote.png', ext: 'png' },
         { type: 'emotion', name: '', uri: '__asset:4', ext: 'gif' },
         { type: 'x-risu-asset', name: 'model', uri: '__asset:5', ext: 'onnx' },
+        { type: 'x-risu-asset', name: 'intro', uri: '__asset:6', ext: 'mp4' },
       ]),
     });
 
@@ -305,6 +309,7 @@ describe('parseCard - PNG assets', () => {
       { name: 'bg.webp', bytes: background },
       { name: 'theme', bytes: theme },
       { name: 'asset_4', bytes: nameless, emotion: true },
+      { name: 'intro', bytes: intro },
     ]);
     // What was left behind, for the import to say so: the model, and `gone`.
     expect(skipped).toEqual({ unsupported: 1, missing: 1, overBudget: 0 });
@@ -474,6 +479,8 @@ describe('parseCard - charx', () => {
             { type: 'icon', name: 'remote', uri: 'https://example.com/remote.png', ext: 'png' },
             // Music is the plot's too (RisuAI's `{{audio::bgm}}`).
             { type: 'x-risu-asset', name: 'bgm', uri: 'embeded://assets/other/audio/bgm.mp3', ext: 'mp3' },
+            // And video (`{{video::intro}}`).
+            { type: 'x-risu-asset', name: 'intro', uri: 'embeded://assets/other/video/intro.mp4', ext: 'mp4' },
             { type: 'x-risu-asset', name: 'gone', uri: 'embeded://assets/other/gone.png', ext: 'png' },
           ],
         },
@@ -484,6 +491,7 @@ describe('parseCard - charx', () => {
       'assets/emotion/wave.gif': nameless,
       'assets/other/notes.txt': Uint8Array.from([40, 41]),
       'assets/other/audio/bgm.mp3': Uint8Array.from([50, 51]),
+      'assets/other/video/intro.mp4': Uint8Array.from([60, 61]),
     });
 
     const { iconBuffer, assets, skipped } = parseCard(zip);
@@ -495,6 +503,7 @@ describe('parseCard - charx', () => {
       { name: 'bg', bytes: background },
       { name: 'wave', bytes: nameless, emotion: true },
       { name: 'bgm', bytes: Uint8Array.from([50, 51]), additional: true },
+      { name: 'intro', bytes: Uint8Array.from([60, 61]), additional: true },
     ]);
     // What was left behind, for the import to say so: the notes, and a picture
     // the archive does not hold.

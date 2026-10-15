@@ -1,6 +1,7 @@
 import { sniffFont, sniffMedia, stripPngTextChunks } from '@shizue/core';
-import { badRequest } from './errors.js';
-import { assetKey, type ObjectStorage } from './storage.js';
+import type { Context } from 'hono';
+import { badRequest, notFound } from './errors.js';
+import { assetKey, byteRangeOf, type ObjectStorage } from './storage.js';
 
 /** Assets a single plot may hold. */
 export const MAX_ASSETS_PER_PLOT = 1000;
@@ -96,24 +97,59 @@ interface StoredAsset {
  * served to everyone who can see the plot.
  *
  * What the bytes are decides what is stored, never a name or a declared type
- * (`sniffMedia`). A picture always; music only where `audio` says so — what a
- * card brings, which RisuAI plays (`{{audio::…}}`, `{{bgm::…}}`). The studio's
- * own upload takes pictures alone. A web font only where `font` says so — what a
- * stylesheet the import localized names (`localizeAssets.ts`, `sniffFont`).
- * Returns null for bytes that are not a supported image (or music, with `audio`;
- * or a font, with `font`).
+ * (`sniffMedia`). A picture always; music only where `audio` says so, and video
+ * only where `video` does — what a card brings, which RisuAI plays
+ * (`{{audio::…}}`, `{{bgm::…}}`, `{{video::…}}`). The studio's own upload takes
+ * pictures alone. A web font only where `font` says so — what a stylesheet the
+ * import localized names (`localizeAssets.ts`, `sniffFont`). Returns null for
+ * bytes that are not a supported image (or music, with `audio`; or a video, with
+ * `video`; or a font, with `font`).
  */
 export async function saveAsset(
   storage: ObjectStorage,
   assetId: string,
   bytes: Uint8Array,
-  { audio = false, font = false }: { audio?: boolean; font?: boolean } = {},
+  {
+    audio = false,
+    video = false,
+    font = false,
+  }: { audio?: boolean; video?: boolean; font?: boolean } = {},
 ): Promise<StoredAsset | null> {
   const type = sniffMedia(bytes) ?? (font ? sniffFont(bytes) : null);
-  if (!type || ('kind' in type && type.kind === 'audio' && !audio)) return null;
+  if (!type) return null;
+  if ('kind' in type && ((type.kind === 'audio' && !audio) || (type.kind === 'video' && !video))) return null;
   const stored = type.ext === 'png' ? stripPngTextChunks(bytes) : bytes;
   if (!stored) return null;
   const key = assetKey(assetId, type.ext);
   await storage.put(key, stored, type.mime);
   return { key, mime: type.mime };
+}
+
+/**
+ * An asset's bytes as the answer to its GET: the whole, or — when a `Range`
+ * names a span the object has — that span alone (206), which is what lets a
+ * browser seek a card's video or music without fetching all of it first. A
+ * range is honoured only without `If-Range`: no asset answer carries a
+ * validator for one to match.
+ */
+export async function assetResponse(
+  storage: ObjectStorage,
+  c: Context,
+  asset: { path: string; mime: string },
+): Promise<Response> {
+  const range = c.req.header('if-range') === undefined ? byteRangeOf(c.req.header('range')) : undefined;
+  const object = await storage.get(asset.path, range);
+  if (!object) throw notFound('Asset file is missing');
+  const headers: Record<string, string> = {
+    'Content-Type': asset.mime,
+    'Content-Length': String(object.size),
+    'Cache-Control': 'private, max-age=3600',
+    'Accept-Ranges': 'bytes',
+  };
+  if (!object.part) return new Response(object.body, { headers });
+  const { start, end, total } = object.part;
+  return new Response(object.body, {
+    status: 206,
+    headers: { ...headers, 'Content-Range': `bytes ${start}-${end}/${total}` },
+  });
 }

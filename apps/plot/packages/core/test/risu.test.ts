@@ -90,6 +90,8 @@ describe('RisuAI customScripts import', () => {
       flags: 'i',
       // Its place in the run, not RisuAI's number: alone, it runs first.
       order: 0,
+      // RisuAI's number kept beside it, for sorting among a module's scripts.
+      rank: 3,
       action: 'move_top',
       enabled: true,
     });
@@ -216,7 +218,8 @@ describe('card export', () => {
       in: '\\[status\\] hp=(\\d+)',
       out: '<div class="hp">HP $1</div>',
       ableFlag: true,
-      flag: 'i<move_top>',
+      // RisuAI's own order, kept from the import, goes back with it.
+      flag: 'i<move_top><order 3>',
     });
   });
 

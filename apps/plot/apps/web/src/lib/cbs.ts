@@ -36,7 +36,7 @@ import {
 } from '@shizue/core/cbs';
 import { fnv1a } from '@shizue/core/macro';
 import { readVariable } from '@shizue/core/variables';
-import { lookupAsset, type AssetResolver } from './assets';
+import { isVideoSrc, lookupAsset, type AssetResolver } from './assets';
 import { MAX_BACKGROUND_RENDER_CHARS } from './types';
 import { isTainted, stripTaint, taint } from './taint';
 
@@ -240,16 +240,28 @@ function read(value: string, budget: Budget): string {
 }
 
 /**
- * RisuAI's music, as its `parseAdditionalAssets` writes it: `{{audio::…}}` a
- * player that starts by itself and loops (`<audio controls autoplay loop>`) —
- * the browser decides whether it may start, and the controls stay either way —
- * and `{{bgm::…}}` no player at all, a marker the chat page plays from
- * (`useBackgroundMusic`), as RisuAI's DOM observer plays its `risu-ctrl`.
+ * RisuAI's music and video, as its `parseAdditionalAssets` writes them:
+ * `{{audio::…}}` a player that starts by itself and loops (`<audio controls
+ * autoplay loop>`) — the browser decides whether it may start, and the controls
+ * stay either way — and `{{bgm::…}}` no player at all, a marker the chat page
+ * plays from (`useBackgroundMusic`), as RisuAI's DOM observer plays its
+ * `risu-ctrl`; `{{video::…}}` a player that starts and loops (`<video controls
+ * autoplay loop>`), and `{{video-img::…}}` — and `{{asset::…}}` naming a video —
+ * a moving picture, muted and looping with no controls (`<video autoplay muted
+ * loop>`). Every address is our own origin's; the sanitizer holds them to it.
  */
-export function musicMarkup(kind: 'audio' | 'bgm', src: string): string {
-  return kind === 'audio'
-    ? `<audio controls autoplay loop src="${escapeHtml(src)}"></audio>`
-    : `<span data-shizue-bgm="${escapeHtml(src)}"></span>`;
+export function mediaMarkup(kind: 'audio' | 'bgm' | 'video' | 'videoimg', src: string): string {
+  const at = escapeHtml(src);
+  switch (kind) {
+    case 'audio':
+      return `<audio controls autoplay loop src="${at}"></audio>`;
+    case 'bgm':
+      return `<span data-shizue-bgm="${at}"></span>`;
+    case 'video':
+      return `<video controls autoplay loop playsinline src="${at}"></video>`;
+    case 'videoimg':
+      return `<video autoplay muted loop playsinline src="${at}"></video>`;
+  }
 }
 
 /* ------------------------------------------------------------ image context */
@@ -396,7 +408,11 @@ function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>, prose =
     if (!found) return { text: '' };
     const src = read(found.src, budget);
     if (kind === 'url' || call.mode === 'arg' || attributes.has(call.macro)) return { text: src };
-    if (kind === 'audio' || kind === 'bgm') return { text: musicMarkup(kind, src), markup: true };
+    if (kind === 'audio' || kind === 'bgm' || kind === 'video' || kind === 'videoimg') {
+      return { text: mediaMarkup(kind, src), markup: true };
+    }
+    // RisuAI's `{{asset::…}}` plays a video asset as a moving picture.
+    if (call.name === 'asset' && isVideoSrc(src)) return { text: mediaMarkup('videoimg', src), markup: true };
     return { text: `<img src="${escapeHtml(src)}" alt="${escapeHtml(found.slug)}">`, markup: true };
   };
 
