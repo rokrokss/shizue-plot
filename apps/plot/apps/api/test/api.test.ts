@@ -2212,8 +2212,15 @@ describe('card export', () => {
     expect(card.firstMes).toBe('첫 인사.');
     expect(card.alternateGreetings).toEqual(['두 번째.']);
     expect(card.narrator).toEqual({ pov: 'third' });
-    expect(card.lorebook).toEqual([...member.card.lorebook, plotEntry]);
-    // The character note came in as a lorebook entry and goes out as one.
+    // The character note came in as a lorebook entry and goes back out to
+    // `depth_prompt`, where ST keeps it — so it comes back once, after the book.
+    const note = member.card.lorebook.find((entry: { depthPrompt?: true }) => entry.depthPrompt);
+    expect(exported.data.extensions.depth_prompt).toMatchObject({ prompt: note.content, depth: note.depth });
+    expect(card.lorebook).toEqual([
+      ...member.card.lorebook.filter((entry: { depthPrompt?: true }) => !entry.depthPrompt),
+      plotEntry,
+      note,
+    ]);
     expect(card.lorebook.filter((entry) => entry.content.includes('숲을 떠나지'))).toHaveLength(1);
 
     expect((await request(bob, exportPath(plot.id, member.id, 'json'))).status).toBe(404);
@@ -3550,7 +3557,8 @@ describe('chats', () => {
     const cookie = await signUp('sticky-lore@example.com');
     const { plotId, chatId } = await setupChat(cookie);
     const member = await firstMember(cookie, plotId);
-    const dragon = { keys: ['용'], content: 'DRAGON LORE', sticky: 2, scanDepth: 1 };
+    // ST's effect for a trigger at 2 is `{start: 2, end: 2 + 3}`: on at 3 and 4, gone at 5.
+    const dragon = { keys: ['용'], content: 'DRAGON LORE', sticky: 3, scanDepth: 1 };
     await patchCharacter(cookie, plotId, member.id, { card: { ...member.card, lorebook: [dragon] } });
     const key = loreEntryKey((await firstMember(cookie, plotId)).card.lorebook[0]);
     const { app: capturing, prompts } = capturingApp();
@@ -3569,8 +3577,8 @@ describe('chats', () => {
     await turn('continue');
     expect(await triggersOf(first.id)).toEqual([key]);
 
-    // Index 4 is within two messages of the trigger: active without the keyword,
-    // and not recorded again — for the turn and for its regenerate alike.
+    // Index 4 is inside the window: active without the keyword, and not
+    // recorded again — for the turn and for its regenerate alike.
     const second = await turn('messages', { content: '고요히 걷는다' });
     expect(second.system).toContain('DRAGON LORE');
     expect(await triggersOf(second.id)).toBeNull();
@@ -13554,6 +13562,85 @@ describe('prompt scripts and SillyTavern lore', () => {
     // The chat has no author's note of its own: the entry takes its place.
     expect(texts).toContain('AN-LORE');
     expect(texts).toContain('[예시 대화: 아리아]\nEX-LORE');
+  });
+
+  it("keeps SillyTavern's entry and book settings through a save, and runs the book as ST's", async () => {
+    const cookie = await signUp('st-world-info@example.com');
+    const plot = await createPlot(cookie, { name: 'ST 작품', description: '숲', intros: ['안녕'] });
+    const st = {
+      ignoreBudget: true,
+      preventRecursion: true,
+      excludeRecursion: true,
+      delayUntilRecursion: 2,
+      groupOverride: true,
+      useGroupScoring: false,
+      matchWholeWords: true,
+      caseSensitiveFromBook: true,
+      matchSources: ['persona', 'scenario', 'bogus'],
+      triggers: ['continue', 'normal', 'bogus'],
+      characterFilter: { names: ['아리아'], tags: ['판타지'], exclude: true },
+      sillyTavern: true,
+    };
+    const member = await addCharacter(cookie, plot.id, {
+      name: '아리아',
+      card: {
+        // What ST writes on every card it saves: the card is ST's.
+        extensions: { talkativeness: 0.5, fav: false },
+        description: '설명{{setglobalvar::seen::{{lastMessageId}}}}',
+        lorebook: [
+          { keys: [], content: 'KEPT', constant: true, ...st },
+          { keys: [], content: 'ON-CONTINUE', constant: true, triggers: ['continue'], sillyTavern: true },
+          { keys: [], content: 'FOR-ARIA', constant: true, characterFilter: { names: ['아리아'] }, sillyTavern: true },
+          { keys: [], content: 'NOT-ARIA', constant: true, characterFilter: { names: ['아리아'], exclude: true }, sillyTavern: true },
+          { keys: ['{{user}}'], content: 'USER-KEY', sillyTavern: true },
+        ],
+        loreSettings: {
+          scanDepth: 2,
+          recursiveScanning: true,
+          budgetCap: 500,
+          minActivations: 2,
+          minActivationsDepthMax: 9,
+          caseSensitive: true,
+          matchWholeWords: true,
+          useGroupScoring: true,
+          includeNames: false,
+          insertionStrategy: 'evenly',
+        },
+      },
+    });
+    expect(member.card.lorebook[0]).toMatchObject({
+      ...st,
+      matchSources: ['persona', 'scenario'],
+      triggers: ['continue', 'normal'],
+    });
+    expect(member.card.loreSettings).toEqual({
+      scanDepth: 2,
+      recursiveScanning: true,
+      budgetCap: 500,
+      minActivations: 2,
+      minActivationsDepthMax: 9,
+      caseSensitive: true,
+      matchWholeWords: true,
+      useGroupScoring: true,
+      includeNames: false,
+      insertionStrategy: 'evenly',
+    });
+
+    const created = await startChat(cookie, plot.id);
+    const { app, systems } = sentApp('대답');
+    await readSse(await json(cookie, `/api/chats/${created.chat.id}/messages`, 'POST', { content: '{{user}} 왔어' }, app));
+    const system = systems.at(-1)!;
+    expect(system).toContain('FOR-ARIA');
+    expect(system).not.toContain('NOT-ARIA');
+    // A send is ST's `normal` generation; the continue-only entry waits for one.
+    expect(system).not.toContain('ON-CONTINUE');
+    // ST expands a key's macros before it matches: the key is the reader's name,
+    // so the `{{user}}` written into the turn as text no longer finds it.
+    expect(system).not.toContain('USER-KEY');
+    // The card's ST variable macros ran in its description, the global one among
+    // them — ST's chat holds the greeting at 0, so the reader's turn is 1.
+    const globals = await json(cookie, `/api/chats/${created.chat.id}/global-variables`, 'GET');
+    expect((await globals.json()).variables).toEqual({ seen: '1' });
   });
 });
 

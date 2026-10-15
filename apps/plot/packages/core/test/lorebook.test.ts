@@ -364,26 +364,41 @@ describe('activateLore - timed effects', () => {
     const sticky = { ...dragon, sticky: 2 };
     const fresh = run([sticky], { history: ['용'], timed: at(3) });
     expect(fresh.triggered).toEqual([key]);
-    // Triggered at 3: active through 5 without its keyword, then it needs one again.
-    for (const g of [4, 5]) {
-      const carried = run([sticky], { history: ['고요한 밤'], timed: at(g, { [key]: 3 }) });
-      expect(contents(carried), `g=${g}`).toEqual(['dragon']);
-      expect(carried.triggered).toEqual([]);
-    }
-    expect(contents(run([sticky], { history: ['고요한 밤'], timed: at(6, { [key]: 3 }) }))).toEqual([]);
-    expect(run([sticky], { history: ['용'], timed: at(6, { [key]: 3 }) }).triggered).toEqual([key]);
+    // ST's effect for a trigger at 3 is `{start: 3, end: 3 + 2}`, removed once the
+    // chat reaches `end` (`#checkTimedEffectOfType`): active at 4 without its
+    // keyword, gone at 5, where it needs one again.
+    const carried = run([sticky], { history: ['고요한 밤'], timed: at(4, { [key]: 3 }) });
+    expect(contents(carried)).toEqual(['dragon']);
+    expect(carried.triggered).toEqual([]);
+    expect(contents(run([sticky], { history: ['고요한 밤'], timed: at(5, { [key]: 3 }) }))).toEqual([]);
+    expect(run([sticky], { history: ['용'], timed: at(5, { [key]: 3 }) }).triggered).toEqual([key]);
   });
 
   it('blocks a cooled-down entry for its window after the sticky one', () => {
+    // A cooldown alone is set on the trigger, `{start: 3, end: 5}`: off at 4, back at 5.
     const cooled = { ...dragon, cooldown: 2 };
     expect(contents(run([cooled], { history: ['용'], timed: at(4, { [key]: 3 }) }))).toEqual([]);
-    expect(contents(run([cooled], { history: ['용'], timed: at(5, { [key]: 3 }) }))).toEqual([]);
-    expect(contents(run([cooled], { history: ['용'], timed: at(6, { [key]: 3 }) }))).toEqual(['dragon']);
+    expect(contents(run([cooled], { history: ['용'], timed: at(5, { [key]: 3 }) }))).toEqual(['dragon']);
 
+    // Sticky 1 ends at 4 (`{3, 4}` holds at no length), and the scan that sees it
+    // end starts the cooldown there (`#onEnded.sticky`, protected): `{4, 5}`.
     const both = { ...dragon, sticky: 1, cooldown: 1 };
-    expect(contents(run([both], { history: [''], timed: at(4, { [key]: 3 }) }))).toEqual(['dragon']);
-    expect(contents(run([both], { history: ['용'], timed: at(5, { [key]: 3 }) }))).toEqual([]);
-    expect(contents(run([both], { history: ['용'], timed: at(6, { [key]: 3 }) }))).toEqual(['dragon']);
+    expect(contents(run([both], { history: [''], timed: at(4, { [key]: 3 }) }))).toEqual([]);
+    expect(contents(run([both], { history: ['용'], timed: at(4, { [key]: 3 }) }))).toEqual([]);
+    expect(contents(run([both], { history: ['용'], timed: at(5, { [key]: 3 }) }))).toEqual(['dragon']);
+  });
+
+  it('starts the cooldown at the scan that saw the sticky effect end', () => {
+    // Replies at 2, 4, 6, 8: sticky 3 from 2 holds at 4; the scan at 6 ends it
+    // and cools the entry for 3 — through 8 — where `2 + 3` would have let 8 in.
+    const both = { ...dragon, sticky: 3, cooldown: 3 };
+    const branch = (g: number) => ({ ...at(g, { [key]: 2 }), evaluatedAt: [2, 4, 6].filter((x) => x < g) });
+    expect(contents(run([both], { history: [''], timed: branch(4) }))).toEqual(['dragon']);
+    expect(contents(run([both], { history: ['용'], timed: branch(6) }))).toEqual([]);
+    expect(contents(run([both], { history: ['용'], timed: branch(8) }))).toEqual([]);
+    expect(contents(run([both], { history: ['용'], timed: { ...branch(10), evaluatedAt: [2, 4, 6, 8] } }))).toEqual([
+      'dragon',
+    ]);
   });
 
   it('ignores records of a disabled or edited entry', () => {
@@ -584,7 +599,7 @@ describe('activateLore - by meaning (SillyTavern vectorized entries)', () => {
     expect(run([a, b], { history: ['map'], vectorMatched: found(a), random: () => 0 }).entries).toHaveLength(1);
   });
 
-  it('is asked on the first pass only', () => {
+  it('is asked on every pass an entry is still waiting, as ST checks its external activations each loop', () => {
     const asked: LoreEntry[] = [];
     const chained = entry({ content: 'lighthouse', keys: ['아무'] });
     run([chained, tower], {
@@ -596,6 +611,6 @@ describe('activateLore - by meaning (SillyTavern vectorized entries)', () => {
       },
     });
     // The tower activates on the second pass by recursion, never by meaning.
-    expect(asked).toEqual([chained, tower]);
+    expect(asked).toEqual([chained, tower, tower]);
   });
 });

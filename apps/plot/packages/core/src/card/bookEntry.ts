@@ -9,7 +9,16 @@
  * Dependency-free, so `@shizue/core/world-info` can carry it into the web bundle.
  */
 
-import type { LoreEntry, LorePosition, LoreRole, LoreSelectiveLogic } from '../types.js';
+import {
+  LORE_TRIGGERS,
+  type LoreCharacterFilter,
+  type LoreEntry,
+  type LoreMatchSource,
+  type LorePosition,
+  type LoreRole,
+  type LoreSelectiveLogic,
+  type LoreTrigger,
+} from '../types.js';
 
 /** The V3 decorator subset this implementation understands. */
 export interface LoreDecorators {
@@ -239,7 +248,31 @@ export interface SillyTavernFields {
   delay?: unknown;
   outletName?: unknown;
   vectorized?: unknown;
+  ignoreBudget?: unknown;
+  preventRecursion?: unknown;
+  excludeRecursion?: unknown;
+  delayUntilRecursion?: unknown;
+  groupOverride?: unknown;
+  useGroupScoring?: unknown;
+  matchWholeWords?: unknown;
+  matchPersonaDescription?: unknown;
+  matchCharacterDescription?: unknown;
+  matchCharacterPersonality?: unknown;
+  matchCharacterDepthPrompt?: unknown;
+  matchScenario?: unknown;
+  matchCreatorNotes?: unknown;
+  triggers?: unknown;
 }
+
+/** ST's `match*` flags, each with the scan text it adds (`LoreEntry.matchSources`). */
+const ST_MATCH_FLAGS: readonly [keyof SillyTavernFields, LoreMatchSource][] = [
+  ['matchPersonaDescription', 'persona'],
+  ['matchCharacterDescription', 'description'],
+  ['matchCharacterPersonality', 'personality'],
+  ['matchCharacterDepthPrompt', 'depthPrompt'],
+  ['matchScenario', 'scenario'],
+  ['matchCreatorNotes', 'creatorNotes'],
+];
 
 /** The same settings as a character_book entry's `extensions` spells them. */
 const fieldsOfBookExtensions = (extensions: Json): SillyTavernFields => ({
@@ -257,6 +290,20 @@ const fieldsOfBookExtensions = (extensions: Json): SillyTavernFields => ({
   delay: extensions['delay'],
   outletName: extensions['outlet_name'],
   vectorized: extensions['vectorized'],
+  ignoreBudget: extensions['ignore_budget'],
+  preventRecursion: extensions['prevent_recursion'],
+  excludeRecursion: extensions['exclude_recursion'],
+  delayUntilRecursion: extensions['delay_until_recursion'],
+  groupOverride: extensions['group_override'],
+  useGroupScoring: extensions['use_group_scoring'],
+  matchWholeWords: extensions['match_whole_words'],
+  matchPersonaDescription: extensions['match_persona_description'],
+  matchCharacterDescription: extensions['match_character_description'],
+  matchCharacterPersonality: extensions['match_character_personality'],
+  matchCharacterDepthPrompt: extensions['match_character_depth_prompt'],
+  matchScenario: extensions['match_scenario'],
+  matchCreatorNotes: extensions['match_creator_notes'],
+  triggers: extensions['triggers'],
 });
 
 /**
@@ -304,7 +351,77 @@ function loreFieldsOfSillyTavern(fields: SillyTavernFields): Partial<LoreEntry> 
   }
   // The 🔗 status: the entry activates by meaning as well (`LoreEntry.vectorized`).
   if (fields.vectorized === true) out.vectorized = true;
+
+  if (fields.ignoreBudget === true) out.ignoreBudget = true;
+  if (fields.preventRecursion === true) out.preventRecursion = true;
+  if (fields.excludeRecursion === true) out.excludeRecursion = true;
+  // ST's `true` is the first level; a number is a level of its own.
+  const delayed = fields.delayUntilRecursion === true ? 1 : wholeCount(fields.delayUntilRecursion);
+  if (delayed) out.delayUntilRecursion = delayed;
+  if (fields.groupOverride === true) out.groupOverride = true;
+  // null — and anything else — is "the book decides", which is absent here.
+  if (typeof fields.useGroupScoring === 'boolean') out.useGroupScoring = fields.useGroupScoring;
+  if (typeof fields.matchWholeWords === 'boolean') out.matchWholeWords = fields.matchWholeWords;
+  const sources = ST_MATCH_FLAGS.filter(([flag]) => fields[flag] === true).map(([, source]) => source);
+  if (sources.length > 0) out.matchSources = sources;
+  // ST keeps only the kinds it knows (`arrayFilter` on `triggers`).
+  const triggers = strings(fields.triggers).filter((kind): kind is LoreTrigger =>
+    LORE_TRIGGERS.includes(kind as LoreTrigger),
+  );
+  if (triggers.length > 0) out.triggers = [...new Set(triggers)];
   return out;
+}
+
+/**
+ * A World Info entry's `characterFilter` (`{ isExclude, names, tags }`): ST names
+ * a character by its card file (`getCharaFilename`), which a backup import turns
+ * into roster names, and a tag by its id, which the import turns into the tag's
+ * name. Undefined when it filters nothing.
+ */
+function characterFilterOf(value: unknown): LoreCharacterFilter | undefined {
+  if (!isObject(value)) return undefined;
+  const names = strings(value['names']).filter((name) => name.length > 0);
+  const tags = strings(value['tags']).filter((tag) => tag.length > 0);
+  if (names.length === 0 && tags.length === 0) return undefined;
+  return {
+    ...(names.length > 0 ? { names } : {}),
+    ...(tags.length > 0 ? { tags } : {}),
+    ...(value['isExclude'] === true ? { exclude: true as const } : {}),
+  };
+}
+
+/**
+ * The decorators SillyTavern reads off an entry's content (`parseDecorators` in
+ * its `world-info.js`): only when the content starts with `@@`, every leading
+ * `@@` line comes off, and of them only `@@activate` and `@@dont_activate` mean
+ * anything — `@@activate` winning where both are written, as ST checks it first.
+ * A `@@@` line is a fallback, read only right after a decorator ST did not know.
+ * Every other V3 decorator (`@@depth`, `@@position`, …) is taken off and ignored,
+ * as there; content that is nothing but decorators is kept whole.
+ */
+export function parseTavernDecorators(content: string): { activate: boolean; dontActivate: boolean; body: string } {
+  const none = { activate: false, dontActivate: false, body: content };
+  if (!content.startsWith('@@')) return none;
+  const lines = content.split('\n');
+  const known: string[] = [];
+  let fallback = false;
+  for (let i = 0; i < lines.length; i += 1) {
+    let line = lines[i]!;
+    if (!line.startsWith('@@')) {
+      return { activate: known.includes('@@activate'), dontActivate: known.includes('@@dont_activate'), body: lines.slice(i).join('\n') };
+    }
+    if (line.startsWith('@@@')) {
+      if (!fallback) continue;
+      line = line.slice(1);
+    }
+    if (line.startsWith('@@activate') || line.startsWith('@@dont_activate')) {
+      known.push(line);
+      fallback = false;
+    } else {
+      fallback = true;
+    }
+  }
+  return { ...none, activate: known.includes('@@activate'), dontActivate: known.includes('@@dont_activate') };
 }
 
 /** `/pattern/flags`, the one form in which ST reads a key as a regex (`parseRegexFromString`). */
@@ -479,31 +596,82 @@ function secondaryOfDecorators(
   return undefined;
 }
 
-/** A CCv2/CCv3 character_book entry, from a card or from a stand-alone book. */
-export function loreEntryFromBook(raw: unknown): LoreEntry {
+/**
+ * An entry SillyTavern wrote, read as ST reads it (`convertCharacterBook` and its
+ * World Info loader): its keys exactly as written — ST tells a regex key by its
+ * `/pattern/flags` spelling, one key at a time, and expands macros in it, both
+ * at scan time (`LoreEntry.sillyTavern`) — its content past ST's own decorators
+ * (`parseTavernDecorators`), and its settings in ST's terms. A case left to the
+ * book (ST's `null`) is `caseSensitiveFromBook`.
+ */
+function tavernEntry(base: BaseEntry, content: string, settings: Partial<LoreEntry>, caseFromBook: boolean): LoreEntry {
+  const { activate, dontActivate, body } = parseTavernDecorators(content);
+  const { position: stPosition, depth, role, outletName, ...rest } = settings;
+  const position = stPosition ?? base.position;
+  return {
+    ...base,
+    content: body,
+    // ST skips a disabled entry before it reads either decorator, and reads
+    // `@@activate` before `@@dont_activate`.
+    enabled: base.enabled && (activate || !dontActivate),
+    constant: base.constant || activate,
+    position,
+    ...(position === 'outlet' && outletName ? { outletName } : {}),
+    ...(depth === undefined ? {} : { depth }),
+    ...(depth !== undefined && role ? { role } : {}),
+    ...rest,
+    ...(caseFromBook ? { caseSensitiveFromBook: true as const } : {}),
+    sillyTavern: true,
+  };
+}
+
+/**
+ * A CCv2/CCv3 character_book entry, from a card or from a stand-alone book.
+ *
+ * An entry that carries SillyTavern's settings in its `extensions` (a numeric
+ * `position`, which ST writes on every entry and nothing else does) is ST's and
+ * read as ST reads it (`tavernEntry`) — unless the caller knows the book is
+ * RisuAI's (`sillyTavern: false`): RisuAI keeps ST's extensions on a card it got
+ * from there, and matches that book its own way (`LoreSettings.risuMatching`).
+ */
+export function loreEntryFromBook(raw: unknown, options: { sillyTavern?: boolean } = {}): LoreEntry {
   const entry = isObject(raw) ? raw : {};
   const extensions = isObject(entry['extensions']) ? entry['extensions'] : {};
-  const { decorators, body } = parseDecorators(
-    typeof entry['content'] === 'string' ? entry['content'] : '',
-  );
+  const content = typeof entry['content'] === 'string' ? entry['content'] : '';
   // ST writes a numeric position on every entry; nothing else does.
   const fromSillyTavern = typeof extensions['position'] === 'number';
   const keys = strings(entry['keys']);
   const secondaryKeys = strings(entry['secondary_keys']);
+  const base = {
+    // RisuAI writes the label as both; ST writes only `comment`.
+    ...labelOf(entry['name'], entry['comment']),
+    selective: entry['selective'] === true,
+    enabled: entry['enabled'] !== false,
+    constant: entry['constant'] === true,
+    insertionOrder: finite(entry['insertion_order']) ?? 0,
+    position: (entry['position'] === 'after_char' ? 'after_char' : 'before_char') as LorePosition,
+  };
+
+  if (fromSillyTavern && options.sillyTavern !== false) {
+    // ST reads case from its extensions alone, and `null` there is the book's.
+    const caseSensitive = boolOf(extensions['case_sensitive']);
+    return tavernEntry(
+      { ...base, keys, secondaryKeys, useRegex: false, caseSensitive: caseSensitive ?? false, content: '' },
+      content,
+      loreFieldsOfSillyTavern(fieldsOfBookExtensions(extensions)),
+      caseSensitive === undefined,
+    );
+  }
+
+  const { decorators, body } = parseDecorators(content);
   const matching = fromSillyTavern
     ? keysOfSillyTavern(keys, secondaryKeys)
     : keysOfRisuAi(keys, secondaryKeys, entry['use_regex'] === true);
-
   return assemble(
     {
-      // RisuAI writes the label as both; ST writes only `comment`.
-      ...labelOf(entry['name'], entry['comment']),
+      ...base,
       ...matching,
-      selective: entry['selective'] === true,
       content: body,
-      enabled: entry['enabled'] !== false,
-      constant: entry['constant'] === true,
-      insertionOrder: finite(entry['insertion_order']) ?? 0,
       // A RisuAI regex's flags come first. ST keeps case in its extensions and
       // leaves the CCv3 field out.
       caseSensitive:
@@ -511,7 +679,6 @@ export function loreEntryFromBook(raw: unknown): LoreEntry {
         boolOf(entry['case_sensitive']) ??
         boolOf(extensions['case_sensitive']) ??
         false,
-      position: entry['position'] === 'after_char' ? 'after_char' : 'before_char',
     },
     decorators,
     fromSillyTavern ? loreFieldsOfSillyTavern(fieldsOfBookExtensions(extensions)) : {},
@@ -519,30 +686,74 @@ export function loreEntryFromBook(raw: unknown): LoreEntry {
 }
 
 /**
+ * An ST entry as every other book reads one — what a RisuAI module makes of a
+ * World Info file it carries: no longer ST's (`LoreEntry.sillyTavern`), so it
+ * leaves the greeting out, and its slash keys become one regex entry
+ * (`keysOfSillyTavern`), as ST entries were stored before their keys were kept
+ * as written.
+ */
+export function withoutTavernReading(entry: LoreEntry): LoreEntry {
+  const { sillyTavern, caseSensitiveFromBook: _book, ...rest } = entry;
+  if (!sillyTavern || entry.useRegex) return rest;
+  return { ...rest, ...keysOfSillyTavern(entry.keys, entry.secondaryKeys) };
+}
+
+/**
+ * The mark our export puts on a character_book's own `extensions`: the book was
+ * written here. ST rebuilds a book from scratch whenever it writes one
+ * (`convertWorldInfoToCharacterBook`), so a book it wrote again no longer has
+ * it. In a marked book only the entries our export flagged as ST's
+ * (`ENTRY_TAVERN_MARK`, which ST does carry along in the entry's extensions)
+ * are read as ST's; the rest are ours, whose ST extensions are only there for
+ * ST to read.
+ */
+export const BOOK_MARK = 'shizue';
+const ENTRY_TAVERN_MARK = 'shizue_sillytavern';
+
+/**
+ * A character_book's entries (`loreEntryFromBook`), with our own export told
+ * apart from ST's (`BOOK_MARK`). `sillyTavern: false` is the caller knowing the
+ * book is RisuAI's.
+ */
+export function loreEntriesOfBook(book: unknown, options: { sillyTavern?: boolean } = {}): LoreEntry[] {
+  const object = isObject(book) ? book : {};
+  const entries = Array.isArray(object['entries']) ? object['entries'] : [];
+  const ours = isObject(object['extensions']) && object['extensions'][BOOK_MARK] === true;
+  return entries.map((raw) => {
+    if (!ours) return loreEntryFromBook(raw, options);
+    const extensions = isObject(raw) && isObject(raw['extensions']) ? raw['extensions'] : {};
+    return loreEntryFromBook(raw, { sillyTavern: extensions[ENTRY_TAVERN_MARK] === true });
+  });
+}
+
+/**
  * An entry of a SillyTavern World Info file (`{ entries: { [uid]: … } }`),
- * marked as ST's (`LoreEntry.sillyTavern`) so it scans the greeting as ST does.
+ * read as ST reads it (`tavernEntry`), with the character filter only a World
+ * Info file carries.
  */
 export function loreEntryFromWorldInfo(raw: unknown): LoreEntry {
   const entry = isObject(raw) ? raw : {};
-  const { decorators, body } = parseDecorators(
-    typeof entry['content'] === 'string' ? entry['content'] : '',
-  );
-  const read = assemble(
+  const caseSensitive = boolOf(entry['caseSensitive']);
+  const filter = characterFilterOf(entry['characterFilter']);
+  const read = tavernEntry(
     {
       ...labelOf(entry['comment']),
-      ...keysOfSillyTavern(strings(entry['key']), strings(entry['keysecondary'])),
+      keys: strings(entry['key']),
+      secondaryKeys: strings(entry['keysecondary']),
+      useRegex: false,
       selective: entry['selective'] === true,
-      content: body,
+      content: '',
       enabled: entry['disable'] !== true,
       constant: entry['constant'] === true,
       insertionOrder: finite(entry['order']) ?? 0,
-      caseSensitive: entry['caseSensitive'] === true,
+      caseSensitive: caseSensitive ?? false,
       position: 'before_char',
     },
-    decorators,
+    typeof entry['content'] === 'string' ? entry['content'] : '',
     loreFieldsOfSillyTavern(entry as SillyTavernFields),
+    caseSensitive === undefined,
   );
-  return { ...read, sillyTavern: true };
+  return filter ? { ...read, characterFilter: filter } : read;
 }
 
 /* ---------------------------------------------------------------- export */
@@ -562,6 +773,43 @@ interface SillyTavernOut {
   delay?: number;
   outletName?: string;
   vectorized?: true;
+  ignoreBudget?: true;
+  preventRecursion?: true;
+  excludeRecursion?: true;
+  delayUntilRecursion?: number;
+  groupOverride?: true;
+  useGroupScoring?: boolean;
+  matchWholeWords?: boolean;
+  matchPersonaDescription?: true;
+  matchCharacterDescription?: true;
+  matchCharacterPersonality?: true;
+  matchCharacterDepthPrompt?: true;
+  matchScenario?: true;
+  matchCreatorNotes?: true;
+  triggers?: LoreTrigger[];
+}
+
+/**
+ * The settings SillyTavern has and V3 does not, each written only where the
+ * entry sets it — ST reads a missing one as its default — so every other entry
+ * exports as it always has.
+ */
+function tavernExtras(entry: LoreEntry): Partial<SillyTavernOut> {
+  const sources = new Set(entry.matchSources ?? []);
+  const out: Partial<SillyTavernOut> = {
+    ...(entry.ignoreBudget ? { ignoreBudget: true as const } : {}),
+    ...(entry.preventRecursion ? { preventRecursion: true as const } : {}),
+    ...(entry.excludeRecursion ? { excludeRecursion: true as const } : {}),
+    ...(entry.delayUntilRecursion ? { delayUntilRecursion: entry.delayUntilRecursion } : {}),
+    ...(entry.groupOverride ? { groupOverride: true as const } : {}),
+    ...(entry.useGroupScoring !== undefined ? { useGroupScoring: entry.useGroupScoring } : {}),
+    ...(entry.matchWholeWords !== undefined ? { matchWholeWords: entry.matchWholeWords } : {}),
+    ...(entry.triggers?.length ? { triggers: entry.triggers } : {}),
+  };
+  for (const [flag, source] of ST_MATCH_FLAGS) {
+    if (sources.has(source)) (out as Record<string, unknown>)[flag] = true;
+  }
+  return out;
 }
 
 /** ST's settings for one entry, under the World Info names; the caller renames for a book. */
@@ -585,8 +833,32 @@ function sillyTavernFieldsOf(entry: LoreEntry): SillyTavernOut {
     ...(entry.depth === undefined && entry.position === 'outlet' ? { outletName: entry.outletName ?? '' } : {}),
     // Written when set only, so every other entry exports as it always has.
     ...(entry.vectorized ? { vectorized: true as const } : {}),
+    ...tavernExtras(entry),
   };
 }
+
+/** A World Info field's name as a character_book entry's `extensions` spells it (`convertWorldInfoToCharacterBook`). */
+const BOOK_EXTENSION_NAMES: Partial<Record<keyof SillyTavernOut, string>> = {
+  groupWeight: 'group_weight',
+  scanDepth: 'scan_depth',
+  outletName: 'outlet_name',
+  ignoreBudget: 'ignore_budget',
+  preventRecursion: 'prevent_recursion',
+  excludeRecursion: 'exclude_recursion',
+  delayUntilRecursion: 'delay_until_recursion',
+  groupOverride: 'group_override',
+  useGroupScoring: 'use_group_scoring',
+  matchWholeWords: 'match_whole_words',
+  matchPersonaDescription: 'match_persona_description',
+  matchCharacterDescription: 'match_character_description',
+  matchCharacterPersonality: 'match_character_personality',
+  matchCharacterDepthPrompt: 'match_character_depth_prompt',
+  matchScenario: 'match_scenario',
+  matchCreatorNotes: 'match_creator_notes',
+};
+
+/** The case ST reads: the entry's own, or `null` where the entry left it to the book. */
+const tavernCaseOf = (entry: LoreEntry): boolean | null => (entry.caseSensitiveFromBook ? null : entry.caseSensitive);
 
 /** Keys as ST should read them: regexes in their slash form, plain text as is. */
 export function keysForSillyTavern(entry: LoreEntry): { keys: string[]; secondaryKeys: string[] } {
@@ -601,13 +873,15 @@ export function keysForSillyTavern(entry: LoreEntry): { keys: string[]; secondar
  * case only from there.
  */
 export function bookExtensionsOf(entry: LoreEntry): Record<string, unknown> {
-  const { groupWeight, scanDepth, outletName, ...fields } = sillyTavernFieldsOf(entry);
+  const out: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(sillyTavernFieldsOf(entry))) {
+    if (value !== undefined) out[BOOK_EXTENSION_NAMES[name as keyof SillyTavernOut] ?? name] = value;
+  }
   return {
-    ...fields,
-    group_weight: groupWeight,
-    ...(scanDepth !== undefined ? { scan_depth: scanDepth } : {}),
-    ...(outletName !== undefined ? { outlet_name: outletName } : {}),
-    case_sensitive: entry.caseSensitive,
+    ...out,
+    case_sensitive: tavernCaseOf(entry),
+    // Read back as ST's from a book of ours (`loreEntriesOfBook`).
+    ...(entry.sillyTavern ? { [ENTRY_TAVERN_MARK]: true } : {}),
   };
 }
 
@@ -627,11 +901,20 @@ export function worldInfoFieldsOf(entry: LoreEntry): Record<string, unknown> {
     selective: entry.selective,
     order: entry.insertionOrder,
     disable: !entry.enabled,
-    caseSensitive: entry.caseSensitive,
+    caseSensitive: tavernCaseOf(entry),
     ...fields,
     scanDepth: fields.scanDepth ?? null,
     sticky: fields.sticky ?? null,
     cooldown: fields.cooldown ?? null,
     delay: fields.delay ?? null,
+    ...(entry.characterFilter
+      ? {
+          characterFilter: {
+            isExclude: entry.characterFilter.exclude === true,
+            names: entry.characterFilter.names ?? [],
+            tags: entry.characterFilter.tags ?? [],
+          },
+        }
+      : {}),
   };
 }

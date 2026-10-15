@@ -22,6 +22,7 @@ import {
   FileTooLargeError,
   noteSettingsOfSt,
   stNoteInChat,
+  stWorldWithFilters,
   type convertSillyTavernChat,
   type StCharacter,
   type StChatFile,
@@ -604,7 +605,10 @@ export interface ImportDeps {
 }
 
 export interface RunInput {
-  manifest: Pick<StManifest, 'worlds' | 'globalWorlds' | 'globalRegex' | 'worldInfoSettings'>;
+  manifest: Pick<
+    StManifest,
+    'worlds' | 'globalWorlds' | 'globalRegex' | 'worldInfoSettings' | 'characters' | 'tagNames'
+  >;
   steps: ImportStep[];
   options: ImportOptions;
   /**
@@ -704,7 +708,7 @@ async function uploadCard<T>(
   let world: { name: string; bytes: Uint8Array } | null = null;
   if (file) {
     try {
-      world = { name: baseName(file.path), bytes: await readFile(file) };
+      world = { name: baseName(file.path), bytes: worldBytesWithFilters(ctx, await readFile(file)) };
     } catch {
       ctx.signal?.throwIfAborted();
       unreadable();
@@ -735,11 +739,25 @@ function worldEntries(ctx: RunContext, name: string, file: StFile): Promise<Lore
   let entries = ctx.worlds.get(name);
   if (!entries) {
     entries = readFile(file).then((bytes) =>
-      ctx.deps.lorebookEntries(JSON.parse(new TextDecoder().decode(bytes))),
+      ctx.deps.lorebookEntries(stWorldWithFilters(JSON.parse(new TextDecoder().decode(bytes)), ctx.manifest)),
     );
     ctx.worlds.set(name, entries);
   }
   return entries;
+}
+
+/**
+ * A World Info file's bytes with its character filters naming this library's
+ * cast (`stWorldWithFilters`), for the card import route to read. Bytes that are
+ * not JSON go as they are, for the route to refuse.
+ */
+function worldBytesWithFilters(ctx: RunContext, bytes: Uint8Array): Uint8Array {
+  try {
+    const json: unknown = JSON.parse(new TextDecoder().decode(bytes));
+    return new TextEncoder().encode(JSON.stringify(stWorldWithFilters(json, ctx.manifest)));
+  } catch {
+    return bytes;
+  }
 }
 
 /**

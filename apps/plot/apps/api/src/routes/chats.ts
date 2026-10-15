@@ -936,11 +936,25 @@ const toHistory = (path: Message[], speaker: string | undefined): HistoryMessage
  */
 function promptBranch(all: Message[], branch: Message[], firstMessage?: string): PromptBranch {
   const root = branch[0];
-  if (!root || root.parentId !== null || root.role !== 'assistant') return { length: branch.length };
+  const swipes = swipesOf(all, branch.at(-1));
+  if (!root || root.parentId !== null || root.role !== 'assistant') {
+    return { length: branch.length, ...(swipes ? { swipes } : {}) };
+  }
   const openings = all.filter((message) => message.parentId === null && message.role === 'assistant');
   const index = openings.indexOf(root) - 1;
   const text = index === -1 && firstMessage !== undefined ? firstMessage : root.content;
-  return { length: branch.length, greeting: { text, index } };
+  return { length: branch.length, greeting: { text, index }, ...(swipes ? { swipes } : {}) };
+}
+
+/**
+ * A reply's versions as SillyTavern's swipes (`PromptBranch.swipes`): the
+ * replies beside it under the same parent, and which of them it is. The
+ * reader's turns have none, as there.
+ */
+function swipesOf(all: Message[], last: Message | undefined): PromptBranch['swipes'] {
+  if (!last || last.role !== 'assistant') return undefined;
+  const siblings = all.filter((message) => message.parentId === last.parentId && message.role === 'assistant');
+  return { count: siblings.length, current: Math.max(0, siblings.indexOf(last)) };
 }
 
 /** Header the web client names the reader's IANA time zone in. */
@@ -1010,14 +1024,22 @@ function requestClock(c: Context<AppEnv>, plot: Plot, branch: Message[] = []): M
 /**
  * The lore records of the branch a new message is about to end, for the timed
  * effects: the whole branch, since a sticky entry outlives the history the
- * memory trims, and the new message's index is its length.
+ * memory trims, and the new message's index is its length. Counted as
+ * SillyTavern counts its `coreChat`, over the turns the AI is sent — a hidden
+ * turn moves nothing — and with the places a model wrote a reply, which are
+ * where ST ran its scans (`LoreTimedState.evaluatedAt`).
  */
 function loreStateOf(branch: Message[]): LoreTimedState {
   const lastTriggered: Record<string, number> = {};
-  branch.forEach((message, index) => {
+  const evaluatedAt: number[] = [];
+  let index = 0;
+  for (const message of branch) {
     for (const key of message.loreTriggers ?? []) lastTriggered[key] = index;
-  });
-  return { chatLength: branch.length, lastTriggered };
+    if (message.hiddenFromPrompt) continue;
+    if (message.role === 'assistant' && message.model) evaluatedAt.push(index);
+    index += 1;
+  }
+  return { chatLength: index, lastTriggered, evaluatedAt };
 }
 
 /**
@@ -1619,6 +1641,9 @@ async function regeneratePlan(
     // Without the head being replaced: its records belong to the swipe this
     // generation is an alternative to.
     loreState: loreStateOf(kept),
+    // A new version beside the reply is SillyTavern's swipe; a reply asked again
+    // of a reader's turn is its regenerate.
+    generationType: head.role === 'assistant' ? 'swipe' : 'regenerate',
     assetNames: context.assetNames,
     scriptView: context.scriptView,
     localLore: context.localLore,
@@ -3220,6 +3245,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         // is what it was first generated on — its own record must not read as a
         // trigger from the turn before.
         loreState: loreStateOf(path.slice(0, -1)),
+        generationType: 'continue',
         assetNames: context.assetNames,
         scriptView: context.scriptView,
         localLore: context.localLore,

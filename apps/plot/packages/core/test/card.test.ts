@@ -1427,6 +1427,8 @@ describe('RisuAI lorebook entries', () => {
         ...raw.data,
         character_book: {
           ...raw.data.character_book,
+          // What RisuAI's exporter writes on every book it exports.
+          extensions: { risu_fullWordMatching: false },
           entries: [
             {
               ...second!,
@@ -1480,9 +1482,9 @@ describe('SillyTavern cards', () => {
   it('reads the entry settings ST keeps in each entry\'s extensions', () => {
     const [first, second] = parseCard(stPng()).card.lorebook;
     expect(first).toEqual({
-      // ST reads a key as a regex only in its slash form, whatever use_regex says;
-      // the plain key beside it becomes an escaped literal.
-      keys: ['엘프', '숲(지기|의 왕)'],
+      // ST reads a key as a regex only in its slash form, one key at a time,
+      // whatever use_regex says — so the keys stay as ST wrote them.
+      keys: ['엘프', '/숲(지기|의 왕)/i'],
       secondaryKeys: [],
       selective: true,
       content: '엘프는 숲의 왕을 섬긴다.',
@@ -1490,7 +1492,9 @@ describe('SillyTavern cards', () => {
       constant: false,
       insertionOrder: 10,
       caseSensitive: false,
-      useRegex: true,
+      // ST's `case_sensitive: null`: the book's setting decides.
+      caseSensitiveFromBook: true,
+      useRegex: false,
       position: 'before_char',
       depth: 2,
       role: 'assistant',
@@ -1502,6 +1506,9 @@ describe('SillyTavern cards', () => {
       sticky: 3,
       cooldown: 2,
       delay: 5,
+      // ST's card writer turns an unset scoring into false (`useGroupScoring ?? false`).
+      useGroupScoring: false,
+      sillyTavern: true,
     });
     expect(second).toEqual({
       keys: ['활'],
@@ -1518,6 +1525,8 @@ describe('SillyTavern cards', () => {
       position: 'after_char',
       // NOT_ANY is 2; probability is off, so the 25 is not one.
       selectiveLogic: 'not_any',
+      useGroupScoring: false,
+      sillyTavern: true,
     });
   });
 
@@ -1536,13 +1545,17 @@ describe('SillyTavern cards', () => {
       useRegex: false,
       position: 'before_char',
       depth: 2,
+      depthPrompt: true,
     });
     expect(card.extensions['depth_prompt']).toBeUndefined();
     expect(card.extensions['world']).toBe('엘라라의 숲');
 
-    // The export writes it back as the entry it now is, so a re-import does not
-    // find it twice.
-    expect(normalizeCard(exportCardV3(card)).lorebook).toEqual(card.lorebook);
+    // The export writes it back where ST keeps it, out of the book, so a
+    // re-import finds it once, as the same entry.
+    const exported = exportCardV3(card);
+    expect(exported.data.extensions['depth_prompt']).toEqual({ prompt: '{{char}}는 숲을 떠나지 않는다.', depth: 2, role: 'system' });
+    expect(exported.data.character_book!.entries).toHaveLength(2);
+    expect(normalizeCard(exported).lorebook).toEqual(card.lorebook);
 
     const withNote = (depth_prompt: unknown) => {
       const raw = stCard();
@@ -1558,20 +1571,27 @@ describe('SillyTavern cards', () => {
     expect(empty.extensions['depth_prompt']).toEqual({ prompt: '  ', depth: 4, role: 'system' });
   });
 
-  it('lets V3 decorators win over the ST extensions', () => {
-    const entryWith = (content: string) => {
+  it("reads only ST's own decorators off an entry ST wrote, as ST does (parseDecorators)", () => {
+    const entryWith = (content: string, book: Record<string, unknown> = {}) => {
       const raw = stCard();
       const [first] = raw.data.character_book.entries;
       return normalizeCard({
         ...raw,
-        data: { ...raw.data, character_book: { ...raw.data.character_book, entries: [{ ...first!, content }] } },
+        data: { ...raw.data, character_book: { ...raw.data.character_book, ...book, entries: [{ ...first!, content }] } },
       }).lorebook[0]!;
     };
-    expect(entryWith('@@depth 1\n@@role user\n본문')).toMatchObject({ depth: 1, role: 'user' });
-    const positioned = entryWith('@@position after_desc\n본문');
+    // ST takes the V3 decorators off and ignores them: its extensions decide.
+    expect(entryWith('@@depth 1\n@@role user\n본문')).toMatchObject({ depth: 2, role: 'assistant', content: '본문' });
+    expect(entryWith('@@activate_only_after 9\n@@scan_depth 1\n본문')).toMatchObject({ delay: 5, scanDepth: 6 });
+    expect(entryWith('@@activate\n본문')).toMatchObject({ constant: true, content: '본문' });
+    expect(entryWith('@@dont_activate\n본문')).toMatchObject({ enabled: false, content: '본문' });
+    // A RisuAI book keeps ST's extensions on the way through, and RisuAI's
+    // decorators win there, as RisuAI reads them.
+    const risu = { extensions: { risu_fullWordMatching: false } };
+    expect(entryWith('@@depth 1\n@@role user\n본문', risu)).toMatchObject({ depth: 1, role: 'user' });
+    const positioned = entryWith('@@position after_desc\n본문', risu);
     expect(positioned.position).toBe('after_char');
     expect(positioned.depth).toBeUndefined();
-    expect(entryWith('@@activate_only_after 9\n@@scan_depth 1\n본문')).toMatchObject({ delay: 9, scanDepth: 1 });
   });
 
   it('maps display-only regex scripts onto display scripts, after RisuAI ones and without duplicates', () => {
@@ -1638,7 +1658,8 @@ describe('SillyTavern cards', () => {
     const { card } = parseCard(stPng());
     const exported = exportCardV3(card);
     const [first, second, note] = exported.data.character_book!.entries;
-    expect(first!.keys).toEqual(['/엘프/i', '/숲(지기|의 왕)/i']);
+    // Each key as ST wrote it, a regex in its slash form beside a plain one.
+    expect(first!.keys).toEqual(['엘프', '/숲(지기|의 왕)/i']);
     expect(first!.content).toBe('@@depth 2\n@@role assistant\n엘프는 숲의 왕을 섬긴다.');
     expect(first!.extensions).toEqual({
       position: 4,
@@ -1653,11 +1674,17 @@ describe('SillyTavern cards', () => {
       sticky: 3,
       cooldown: 2,
       delay: 5,
-      case_sensitive: false,
+      use_group_scoring: false,
+      // Left to the book, as ST wrote it.
+      case_sensitive: null,
+      shizue_sillytavern: true,
     });
     expect(second!.keys).toEqual(['활']);
     expect(second!.extensions).toMatchObject({ position: 1, selectiveLogic: 2, probability: 100, case_sensitive: true });
-    expect(note!.extensions).toMatchObject({ position: 4, depth: 2, role: 0 });
+    // The character's note is ST's `depth_prompt` again.
+    expect(note).toBeUndefined();
+    expect(exported.data.extensions['depth_prompt']).toEqual({ prompt: '{{char}}는 숲을 떠나지 않는다.', depth: 2, role: 'system' });
+    expect(exported.data.character_book!.extensions).toMatchObject({ shizue: true });
 
     expect(normalizeCard(exported).lorebook).toEqual(card.lorebook);
   });

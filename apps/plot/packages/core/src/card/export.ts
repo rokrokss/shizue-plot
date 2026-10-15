@@ -1,12 +1,13 @@
 import { CCardLib, type CharacterCardV3, type LorebookEntry } from '@risuai/ccardlib';
 import { zipSync } from 'fflate';
 import type { LoreEntry, NarratorConfig, NormalizedCard, PlotCustomUi } from '../types.js';
-import { bookExtensionsOf, FOREVER_MESSAGES, keysForSillyTavern } from './bookEntry.js';
+import { BOOK_MARK, bookExtensionsOf, FOREVER_MESSAGES, keysForSillyTavern } from './bookEntry.js';
 import { extensionsWithComponentCode } from './componentCode.js';
 import { extensionsWithIntro } from './intro.js';
 import { extensionsWithNarrator } from './narrator.js';
 import { insertPngTextChunks, placeholderPng, stripPngTextChunks } from './png.js';
 import { extensionsWithCustomUi } from './risu.js';
+import { extensionsWithDepthPrompt } from './sillyTavern.js';
 
 /**
  * depth/role have no V3 field of their own, so they go back out as decorators,
@@ -164,7 +165,8 @@ export function exportCardV3(card: NormalizedCard, overlay: CardPlotOverlay = {}
   const plotIntros = overlay.intros?.filter((intro) => !groupOnlyGreetings.includes(intro));
   // A plot with no openings has nothing to say about them, so the card's stand.
   const intros = plotIntros?.length ? plotIntros : undefined;
-  const lorebook = [...card.lorebook, ...(overlay.lorebook ?? [])];
+  // The character's note goes back to `extensions.depth_prompt`, where ST keeps it.
+  const lorebook = [...card.lorebook.filter((entry) => !entry.depthPrompt), ...(overlay.lorebook ?? [])];
 
   return {
     spec: 'chara_card_v3',
@@ -187,8 +189,13 @@ export function exportCardV3(card: NormalizedCard, overlay: CardPlotOverlay = {}
       character_version: card.characterVersion,
       character_book: {
         // What RisuAI's own exporter writes on every book, and how our import
-        // tells a RisuAI book from the rest — so its key matching survives the trip.
-        extensions: card.loreSettings.risuMatching ? { risu_fullWordMatching: false } : {},
+        // tells a RisuAI book from the rest — so its key matching survives the
+        // trip — and our own mark, which tells our ST-shaped entries from ST's
+        // own (`BOOK_MARK`).
+        extensions: {
+          ...(card.loreSettings.risuMatching ? { risu_fullWordMatching: false } : {}),
+          [BOOK_MARK]: true,
+        },
         scan_depth: card.loreSettings.scanDepth,
         // An automatic budget is no number to write down; the importer picks its own.
         ...(card.loreSettings.tokenBudget !== undefined
@@ -205,7 +212,11 @@ export function exportCardV3(card: NormalizedCard, overlay: CardPlotOverlay = {}
         extensionsWithNarrator(
           extensionsWithComponentCode(
             extensionsWithBackground(
-              extensionsWithCustomUi(card.extensions, displayScripts, defaultVariables),
+              extensionsWithCustomUi(
+                extensionsWithDepthPrompt(card.extensions, card.lorebook),
+                displayScripts,
+                defaultVariables,
+              ),
               overlay.backgroundHtml,
             ),
             componentCode,

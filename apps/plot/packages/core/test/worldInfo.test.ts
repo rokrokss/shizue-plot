@@ -103,12 +103,18 @@ describe('toWorldInfo', () => {
       entry({ vectorized: true }),
     ];
     // Through JSON, as the file travels — and read back as SillyTavern's, whose
-    // scan reads the greeting; the file itself says nothing of it.
+    // scan reads the greeting; the file itself says nothing of it. A regex entry
+    // comes back in ST's own terms: each key a `/pattern/flags` of its own.
     const written = toWorldInfo(entries.map((read) => ({ ...read, sillyTavern: true as const })));
     expect(JSON.stringify(written)).not.toContain('sillyTavern');
-    expect(fromLorebookFile(JSON.parse(JSON.stringify(written)))).toEqual(
-      entries.map((read) => ({ ...read, sillyTavern: true })),
+    const read = fromLorebookFile(JSON.parse(JSON.stringify(written)));
+    expect(read).toEqual(
+      entries.map((one) =>
+        one.useRegex ? { ...one, keys: ['/검(술|객)/'], useRegex: false, sillyTavern: true } : { ...one, sillyTavern: true },
+      ),
     );
+    // And from there it is a fixed point.
+    expect(fromLorebookFile(JSON.parse(JSON.stringify(toWorldInfo(read))))).toEqual(read);
   });
 });
 
@@ -157,23 +163,26 @@ describe('fromLorebookFile', () => {
         '6': { uid: 6, key: ['이름'], content: '이름 없음', order: 6, position: 7, outletName: '' },
       },
     });
+    // Keys stay as ST wrote them — `/숲(지기)?/` is a regex key, `엘프` a plain one
+    // — and a case ST leaves unset (null, or no field) is the book's.
+    const st = { sillyTavern: true as const, caseSensitiveFromBook: true as const };
     expect(entries).toEqual([
       {
         keys: ['엘프'],
-        secondaryKeys: ['숲(지기)?'],
+        secondaryKeys: ['/숲(지기)?/'],
         selective: true,
         content: '엘프는 숲을 지킨다.',
         enabled: true,
         constant: false,
         insertionOrder: 50,
         caseSensitive: false,
-        useRegex: true,
+        useRegex: false,
         position: 'before_char',
         depth: 1,
         role: 'assistant',
         selectiveLogic: 'not_any',
         cooldown: 3,
-        sillyTavern: true,
+        ...st,
       },
       entry({
         keys: ['비밀'],
@@ -182,13 +191,13 @@ describe('fromLorebookFile', () => {
         insertionOrder: 1,
         position: 'outlet',
         outletName: '금고',
-        sillyTavern: true,
+        ...st,
       }),
-      entry({ keys: ['노트'], content: '노트 위', insertionOrder: 2, position: 'before_author_note', sillyTavern: true }),
-      entry({ keys: ['노트'], content: '노트 아래', insertionOrder: 3, position: 'after_author_note', sillyTavern: true }),
-      entry({ keys: ['예시'], content: '예시 위', insertionOrder: 4, position: 'before_examples', sillyTavern: true }),
-      entry({ keys: ['예시'], content: '예시 아래', insertionOrder: 5, position: 'after_examples', sillyTavern: true }),
-      entry({ keys: ['이름'], content: '이름 없음', insertionOrder: 6, position: 'outlet', sillyTavern: true }),
+      entry({ keys: ['노트'], content: '노트 위', insertionOrder: 2, position: 'before_author_note', ...st }),
+      entry({ keys: ['노트'], content: '노트 아래', insertionOrder: 3, position: 'after_author_note', ...st }),
+      entry({ keys: ['예시'], content: '예시 위', insertionOrder: 4, position: 'before_examples', ...st }),
+      entry({ keys: ['예시'], content: '예시 아래', insertionOrder: 5, position: 'after_examples', ...st }),
+      entry({ keys: ['이름'], content: '이름 없음', insertionOrder: 6, position: 'outlet', ...st }),
     ]);
   });
 
@@ -197,13 +206,16 @@ describe('fromLorebookFile', () => {
     const fromBook = fromLorebookFile(raw.data.character_book);
     // The card's own entries; the character note is the card's, not the book's.
     expect(fromBook).toEqual(normalizeCard(stCard()).lorebook.slice(0, 2));
-    // A book is RisuAI's as much as SillyTavern's, so it is not marked as ST's
-    // (`PromptCharacter.sillyTavern` speaks for a card ST wrote).
-    expect(fromBook.some((read) => 'sillyTavern' in read)).toBe(false);
+    // Entries that carry ST's settings are ST's, read as ST reads them.
+    expect(fromBook.every((read) => read.sillyTavern)).toBe(true);
     expect(fromLorebookFile(stCard())).toEqual(fromBook);
 
+    // Our export keeps them ST's, and writes the note back to `depth_prompt`.
     const exported = exportCardV3(normalizeCard(stCard()));
-    expect(fromLorebookFile(exported)).toEqual(normalizeCard(stCard()).lorebook);
+    expect(fromLorebookFile(exported)).toEqual(normalizeCard(stCard()).lorebook.slice(0, 2));
+    // A book we wrote whose entries were ours stays ours on the way back.
+    const own = exportCardV3({ ...normalizeCard(stCard()), lorebook: [entry({ keys: ['검(술|객)'], useRegex: true })] });
+    expect(fromLorebookFile(own)).toEqual([entry({ keys: ['검(술|객)'], useRegex: true, caseSensitive: false })]);
   });
 
   it("keeps SillyTavern's vectorized flag from a character_book entry, and writes it back only when set", () => {

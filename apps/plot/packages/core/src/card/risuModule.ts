@@ -30,7 +30,7 @@
 
 import type { LoreEntry, PlotModule } from '../types.js';
 import { fromLorebookFile, LorebookFileError } from '../worldInfo.js';
-import { loreEntryFromBook } from './bookEntry.js';
+import { loreEntryFromBook, withoutTavernReading } from './bookEntry.js';
 import {
   charxInJpeg,
   IMAGE_EXTENSIONS,
@@ -83,20 +83,24 @@ export function risuLoreBookEntry(raw: unknown): LoreEntry {
   const lore = isObject(raw) ? raw : {};
   const extensions: Json = isObject(lore['extentions']) ? { ...lore['extentions'] } : {}; // sic
   const selective = lore['selective'] === true;
-  return loreEntryFromBook({
-    keys: splitKeys(text(lore['key'])),
-    ...(selective ? { secondary_keys: splitKeys(text(lore['secondkey'])) } : {}),
-    content: text(lore['content']),
-    extensions,
-    enabled: true,
-    insertion_order: typeof lore['insertorder'] === 'number' ? lore['insertorder'] : 0,
-    constant: lore['alwaysActive'] === true,
-    selective,
-    name: text(lore['comment']),
-    comment: text(lore['comment']),
-    case_sensitive: extensions['risu_case_sensitive'] === true,
-    use_regex: lore['useRegex'] === true,
-  });
+  // RisuAI's own entry, whatever ST settings it kept from where it came from.
+  return loreEntryFromBook(
+    {
+      keys: splitKeys(text(lore['key'])),
+      ...(selective ? { secondary_keys: splitKeys(text(lore['secondkey'])) } : {}),
+      content: text(lore['content']),
+      extensions,
+      enabled: true,
+      insertion_order: typeof lore['insertorder'] === 'number' ? lore['insertorder'] : 0,
+      constant: lore['alwaysActive'] === true,
+      selective,
+      name: text(lore['comment']),
+      comment: text(lore['comment']),
+      case_sensitive: extensions['risu_case_sensitive'] === true,
+      use_regex: lore['useRegex'] === true,
+    },
+    { sillyTavern: false },
+  );
 }
 
 /**
@@ -239,7 +243,7 @@ function moduleOfCharx(archive: Uint8Array): ParsedRisuModule {
 
   const ownLore = module?.lorebook
     ? module.lorebook.map(risuLoreBookEntry)
-    : list(book['entries']).map((entry) => loreEntryFromBook(entry));
+    : list(book['entries']).map((entry) => loreEntryFromBook(entry, { sillyTavern: false }));
   const indicators = indicatorLore({
     desc: text(data['description']),
     firstMessage: text(data['first_mes']),
@@ -304,7 +308,7 @@ function moduleOfJson(json: Json): ParsedRisuModule {
     try {
       // A module now, scanned as RisuAI scans one — so not as SillyTavern's,
       // though a World Info file is what it was (`LoreEntry.sillyTavern`).
-      lorebook = fromLorebookFile({ entries: json['entries'] }).map(({ sillyTavern: _st, ...entry }) => entry);
+      lorebook = fromLorebookFile({ entries: json['entries'] }).map(withoutTavernReading);
     } catch (error) {
       if (error instanceof LorebookFileError) throw new ModuleParseError(error.message);
       throw error;

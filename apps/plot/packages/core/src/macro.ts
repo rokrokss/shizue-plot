@@ -33,6 +33,32 @@ export interface MacroTavernData {
   charJailbreak?: string;
   /** The members on the stage, by roster name. One or none reads as `{{char}}`. */
   group?: readonly string[];
+  /**
+   * The text was written for SillyTavern — a member card ST wrote, an entry of
+   * its World Info. Where a macro's name means one thing to RisuAI and another
+   * to ST, ST's meaning wins, and ST's own macros that RisuAI has no name for
+   * answer (`tavernOnlyMacro`); every other text keeps RisuAI's reading, byte for
+   * byte. The fields below are what those macros read.
+   */
+  sillyTavern?: boolean;
+  /** The card's `character_version`, for `{{charVersion}}`. */
+  charVersion?: string;
+  /** The card's `creator_notes`, for `{{charCreatorNotes}}`. */
+  creatorNotes?: string;
+  /** The character's note (`depth_prompt`), for `{{charDepthPrompt}}`. */
+  depthPrompt?: string;
+  /** The card's `first_mes` and alternates, for `{{charFirstMessage::N}}`. */
+  firstMessage?: string;
+  alternateGreetings?: readonly string[];
+  /** Context and response sizes in tokens, for `{{maxPrompt}}`, `{{maxContext}}`, `{{maxResponse}}`. */
+  maxContext?: number;
+  maxResponse?: number;
+  /** The last message's versions — how many, and which one is shown (0 the first) — for the swipe macros. */
+  swipes?: { count: number; current: number };
+  /** ST's index (the greeting 0) of the first message the prompt sends, for `{{firstIncludedMessageId}}`. */
+  firstIncludedMessageId?: number;
+  /** ST's generation type, for `{{lastGenerationType}}`. */
+  generationType?: string;
 }
 
 export interface MacroContext {
@@ -56,7 +82,9 @@ export interface MacroContext {
    * RisuAI's {{setdefaultvar}} in this text run against `variables` — which is
    * then the caller's working map, changed in place — and leave nothing behind,
    * so a {{getvar}} later in the same prompt reads what they wrote. Everywhere
-   * else, RisuAI's prompt included, they stay as written.
+   * else, RisuAI's prompt included, they stay as written. In SillyTavern's own
+   * text (`MacroTavernData.sillyTavern`) they run as ST runs them
+   * (`tavernVariableMacro`), its global ones on `globalVariables` likewise.
    */
   runVariableMacros?: boolean;
   /**
@@ -298,6 +326,290 @@ function tavernMacro(call: CbsCall, ctx: MacroContext, depth: number): CbsValue 
   return undefined;
 }
 
+/** ST's `getLocalVariable`: a number-like value comes back as that number, an unset one as ''. */
+function tavernValue(value: string | undefined): string {
+  if (value === undefined) return '';
+  return value.trim() === '' || Number.isNaN(Number(value)) ? value : String(Number(value));
+}
+
+/** ST's `{{roll}}` (droll): `XdY`, `dY` (one die), `XdY+Z`, `XdY-Z`, or a bare `N` for `1dN`. */
+const TAVERN_ROLL = /^(\d*)d(\d+)(?:([+-])(\d+))?$/i;
+
+/** moment's `humanize()` thresholds, in English as ST's moment speaks by default. */
+function humanizeDuration(ms: number, suffix: boolean): string {
+  const seconds = Math.round(Math.abs(ms) / 1000);
+  const minutes = Math.round(seconds / 60);
+  const hours = Math.round(minutes / 60);
+  const days = Math.round(hours / 24);
+  const months = Math.round(days / 30.4375);
+  const years = Math.round(days / 365.25);
+  const text =
+    seconds < 45
+      ? 'a few seconds'
+      : seconds < 90
+        ? 'a minute'
+        : minutes < 45
+          ? `${minutes} minutes`
+          : minutes < 90
+            ? 'an hour'
+            : hours < 22
+              ? `${hours} hours`
+              : hours < 36
+                ? 'a day'
+                : days < 26
+                  ? `${days} days`
+                  : days < 46
+                    ? 'a month'
+                    : days < 320
+                      ? `${months} months`
+                      : days < 548
+                        ? 'a year'
+                        : `${years} years`;
+  if (!suffix) return text;
+  return ms > 0 ? `in ${text}` : `${text} ago`;
+}
+
+/**
+ * SillyTavern's macros in its own text (`MacroTavernData.sillyTavern`), where ST
+ * answers otherwise than RisuAI or answers where RisuAI has no name. The names
+ * that collide, and what each side means:
+ *
+ * - `lastMessage` / `lastMessageId`: RisuAI counts the messages after the
+ *   greeting (`{{lastmessageid}}` 0 for the first reply); ST's chat holds the
+ *   greeting at 0, so its id is one more, and its last message may be the
+ *   greeting itself.
+ * - `lastCharMessage`: both the latest character message; ST's may be the greeting.
+ * - `maxContext`: RisuAI's model context; ST's the same size — the context here.
+ * - `pick`: RisuAI draws anew each turn; ST keeps one choice per chat and place
+ *   (`expand` gives it the per-place seed).
+ * - `roll`: ST's droll formulas take a `+Z`/`-Z` and answer '' to what they
+ *   cannot read, where RisuAI's answer `NaN`.
+ * - `time::UTC±N`: ST's spelling of `time_UTC±N`; RisuAI reads an argument to
+ *   `time` as a format.
+ * - `getvar`/`getglobalvar`: an unset one is '' in ST and `null` in RisuAI, and
+ *   ST writes a number-like value as the number.
+ *
+ * And ST's own, which RisuAI leaves as written: `charInstruction`,
+ * `charDescription`, `charPersonality`, `charScenario`, `mesExamplesRaw`,
+ * `charDepthPrompt`, `charCreatorNotes`, `charFirstMessage`/`greeting`,
+ * `charVersion`, `notChar`, `groupNotMuted`, `maxPrompt`, `maxResponse`,
+ * `banned`, `isMobile`, `lastGenerationType`, `hasExtension`, `allChatRange`,
+ * `firstIncludedMessageId`, `firstDisplayedMessageId`, `currentSwipeId`,
+ * `lastSwipeId`, `timeDiff`.
+ */
+function tavernOnlyMacro(call: CbsCall, ctx: MacroContext, depth: number): CbsValue | undefined {
+  const tavern = ctx.tavern;
+  if (!tavern?.sillyTavern) return undefined;
+  const { name } = call;
+  const bare = call.args.length === 0;
+  const arg = (index: number): CbsValue | undefined => call.args.at(index)?.value();
+  const nested = (field: string | undefined): CbsValue =>
+    field === undefined || depth >= MAX_TAVERN_DEPTH ? { text: '' } : { text: expand(field, ctx, depth + 1) };
+  const chat = ctx.data?.chat?.();
+  // ST's chat: the greeting at 0, then every message after it.
+  const greeted = chat?.greeting ? 1 : 0;
+  const total = chat ? chat.length + greeted : 0;
+  const number = (value: number | undefined): CbsValue | undefined =>
+    value === undefined ? undefined : { text: String(value) };
+
+  switch (name) {
+    case 'lastmessage': {
+      if (!chat) return undefined;
+      const last = chat.messages.at(-1);
+      if (last && chat.offset + chat.messages.length === chat.length) return { text: last.data, untrusted: true };
+      return chat.length === 0 ? { text: chat.greeting?.text ?? '', untrusted: true } : undefined;
+    }
+    case 'lastmessageid':
+      return chat ? { text: total > 0 ? String(total - 1) : '' } : undefined;
+    case 'lastcharmessage': {
+      if (!chat) return undefined;
+      const latest = chat.messages.findLast((message) => message.role === 'char');
+      if (latest) return { text: latest.data, untrusted: true };
+      return chat.offset === 0 ? { text: chat.greeting?.text ?? '', untrusted: true } : undefined;
+    }
+    case 'allchatrange':
+      return chat ? { text: total > 0 ? `0-${total - 1}` : '' } : undefined;
+    case 'firstincludedmessageid':
+    case 'firstdisplayedmessageid':
+      return number(tavern.firstIncludedMessageId);
+    case 'currentswipeid':
+      return tavern.swipes ? { text: String(tavern.swipes.current + 1) } : { text: '' };
+    case 'lastswipeid':
+      return tavern.swipes ? { text: String(tavern.swipes.count) } : { text: '' };
+    case 'charinstruction':
+      return bare ? nested(tavern.charJailbreak) : undefined;
+    case 'chardescription':
+      return bare ? nested(ctx.data?.character?.description) : undefined;
+    case 'charpersonality':
+      return bare ? nested(ctx.data?.character?.personality) : undefined;
+    case 'charscenario':
+      return bare ? nested(ctx.data?.character?.scenario) : undefined;
+    case 'mesexamplesraw':
+      return bare ? nested(ctx.data?.character?.exampleDialogue) : undefined;
+    case 'chardepthprompt':
+      return bare ? nested(tavern.depthPrompt) : undefined;
+    case 'charcreatornotes':
+    case 'creatornotes':
+      return bare ? nested(tavern.creatorNotes) : undefined;
+    case 'charversion':
+    case 'version':
+      return bare ? { text: tavern.charVersion ?? '' } : undefined;
+    case 'charfirstmessage':
+    case 'greeting': {
+      const index = bare ? 0 : Number(arg(1)?.text.trim());
+      if (!Number.isInteger(index) || index < 0) return { text: '' };
+      return nested(index === 0 ? tavern.firstMessage : (tavern.alternateGreetings?.[index - 1] ?? ''));
+    }
+    case 'notchar': {
+      const group = tavern.group ?? [];
+      if (group.length <= 1) return { text: ctx.user };
+      return { text: group.filter((member) => member !== ctx.char).join(', ') };
+    }
+    case 'groupnotmuted': {
+      const group = tavern.group ?? [];
+      return { text: group.length > 1 ? group.join(', ') : ctx.char };
+    }
+    case 'maxcontext':
+    case 'maxcontexttokens':
+      return number(tavern.maxContext);
+    case 'maxresponse':
+    case 'maxresponsetokens':
+      return number(tavern.maxResponse);
+    case 'maxprompt':
+    case 'maxprompttokens':
+      return tavern.maxContext !== undefined && tavern.maxResponse !== undefined
+        ? { text: String(tavern.maxContext - tavern.maxResponse) }
+        : undefined;
+    case 'banned':
+      // Bans a word on Text Generation WebUI's backend; on every other, nothing.
+      return { text: '' };
+    case 'ismobile':
+    case 'hasextension':
+      return { text: 'false' };
+    case 'lastgenerationtype':
+      return { text: tavern.generationType ?? 'normal' };
+    case 'roll': {
+      if (bare) return undefined;
+      const value = arg(1);
+      if (!value || value.deferred) return undefined;
+      let formula = value.text.trim();
+      if (/^\d+$/.test(formula)) formula = `1d${formula}`;
+      const match = TAVERN_ROLL.exec(formula);
+      if (!match) return { text: '' };
+      const count = match[1] ? Number(match[1]) : 1;
+      const sides = Number(match[2]);
+      if (count < 1 || sides < 1 || count > 1000) return { text: '' };
+      const random = ctx.random ?? Math.random;
+      let total = 0;
+      for (let die = 0; die < count; die += 1) total += Math.floor(random() * sides) + 1;
+      if (match[3]) total += (match[3] === '-' ? -1 : 1) * Number(match[4]);
+      return { text: String(total) };
+    }
+    case 'time': {
+      if (bare || !ctx.clock) return undefined;
+      const offset = /^UTC([+-]\d+)$/.exec(arg(1)?.text.trim() ?? '')?.[1];
+      if (offset === undefined) return undefined;
+      const text = timeAtOffset(ctx.clock, Number(offset));
+      return text === undefined ? undefined : { text };
+    }
+    case 'timediff': {
+      if (call.args.length < 2) return undefined;
+      const left = Date.parse(arg(1)?.text.trim() ?? '');
+      const right = Date.parse(arg(2)?.text.trim() ?? '');
+      if (Number.isNaN(left) || Number.isNaN(right)) return { text: 'Invalid date' };
+      return { text: humanizeDuration(left - right, true) };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * SillyTavern's variable macros (`variable-macros.js` over `variables.js`), for
+ * its own text when its prompt runs them (`runVariableMacros`): the chat's on
+ * `variables`, the global ones on `globalVariables`, both the caller's working
+ * maps. Where ST differs from the fold every other text gets (`runVariableMacro`):
+ * `{{addvar}}` pushes onto a JSON array, adds numbers, and otherwise appends the
+ * text; `{{incvar}}`/`{{decvar}}` write the new value in their place; and ST's
+ * `hasvar`, `deletevar` and the JSON `setvarkey`/`getvarkey` are there too.
+ */
+function tavernVariableMacro(call: CbsCall, ctx: MacroContext): CbsValue | undefined {
+  if (!ctx.tavern?.sillyTavern) return undefined;
+  // `varexists` and `globalvarexists` are ST's other names for `hasvar` and `hasglobalvar`.
+  const spelled = call.name === 'varexists' ? 'hasvar' : call.name === 'globalvarexists' ? 'hasglobalvar' : call.name;
+  const match = /^(set|add|inc|dec|get|has|delete|flush)(global)?var(key|index)?$/.exec(spelled);
+  if (!match) return undefined;
+  const [, verb, global, suffix] = match;
+  const store = global ? ctx.globalVariables : ctx.variables;
+  if (!store) return undefined;
+  const writes = verb !== 'get' && verb !== 'has';
+  if (writes && !ctx.runVariableMacros) return undefined;
+  const values = Array.from({ length: call.args.length }, (_, i) => call.args.at(i + 1)!.value());
+  if (values.some((value) => value.deferred)) return undefined;
+  const name = values[0]?.text.trim() ?? '';
+  const keyed = suffix !== undefined;
+  const current = (): string | undefined => readVariable(store, name);
+
+  if (verb === 'has') return { text: current() === undefined ? 'false' : 'true' };
+  if (!name) return { text: '' };
+  if (verb === 'get') {
+    if (!keyed) return { text: tavernValue(current()), untrusted: true };
+    const index = values[1]?.text ?? '';
+    try {
+      const parsed: unknown = JSON.parse(current() ?? '');
+      const item = (parsed as Record<string, unknown>)?.[Number.isNaN(Number(index)) ? index : Number(index)];
+      if (item === undefined || item === null) return { text: '' };
+      return { text: typeof item === 'object' ? JSON.stringify(item) : tavernValue(String(item)), untrusted: true };
+    } catch {
+      return { text: tavernValue(current()), untrusted: true };
+    }
+  }
+  if (verb === 'delete' || verb === 'flush') {
+    delete store[name];
+    return { text: '' };
+  }
+  if (verb === 'set') {
+    if (!keyed) {
+      store[name] = values.slice(1).map((value) => value.text).join('::');
+      return { text: '' };
+    }
+    const index = values[1]?.text ?? '';
+    const value = values.slice(2).map((one) => one.text).join('::');
+    try {
+      let parsed: unknown = JSON.parse(current() ?? 'null');
+      const numeric = !Number.isNaN(Number(index));
+      parsed ??= numeric ? [] : {};
+      (parsed as Record<string, unknown>)[numeric ? Number(index) : index] = value;
+      store[name] = JSON.stringify(parsed);
+    } catch {
+      // ST leaves a value it cannot read as JSON alone.
+    }
+    return { text: '' };
+  }
+  // add, inc, dec: ST's `addLocalVariable`.
+  const delta = verb === 'inc' ? '1' : verb === 'dec' ? '-1' : values.slice(1).map((one) => one.text).join('::');
+  const before = tavernValue(current());
+  try {
+    const parsed: unknown = JSON.parse(before || '0');
+    if (Array.isArray(parsed)) {
+      parsed.push(delta);
+      store[name] = JSON.stringify(parsed);
+      return { text: verb === 'add' ? '' : store[name]! };
+    }
+  } catch {
+    // Not an array.
+  }
+  const base = before === '' ? '0' : before;
+  const next =
+    Number.isNaN(Number(delta)) || Number.isNaN(Number(base))
+      ? `${before}${delta}`
+      : formatTavernNumber(Number(base) + Number(delta));
+  store[name] = next;
+  return { text: verb === 'add' ? '' : next };
+}
+
+/** A sum as JavaScript writes it — `String(n)`, which is how ST stores one. */
+const formatTavernNumber = (value: number): string => String(value);
+
 /**
  * CBS for the prompt, on the shared evaluator (`cbs.ts`): {{char}}, {{user}},
  * {{getvar::k}}, {{random:a,b}} and {{random::a::b}}, {{pick::a,b}},
@@ -330,9 +642,12 @@ function expand(text: string, ctx: MacroContext, depth: number): string {
   const rand = ctx.random ?? Math.random;
   const { variables, globalVariables, clock } = ctx;
   const prompt = ctx.data !== undefined;
-  // RisuAI's draw needs both halves; the chat id alone is the older, per-position rule.
+  // RisuAI's draw needs both halves; the chat id alone is the older, per-position
+  // rule — which is also SillyTavern's `{{pick}}`, one choice per chat and place.
   const risuSeed =
-    ctx.seed !== undefined && ctx.seedLength !== undefined ? { key: ctx.seed, length: ctx.seedLength } : undefined;
+    !ctx.tavern?.sillyTavern && ctx.seed !== undefined && ctx.seedLength !== undefined
+      ? { key: ctx.seed, length: ctx.seedLength }
+      : undefined;
   const data: CbsHostData = {
     ...ctx.data,
     ...(prompt ? { phase: 'prompt' as const } : {}),
@@ -375,6 +690,9 @@ function expand(text: string, ctx: MacroContext, depth: number): string {
         if (name === 'original') return ctx.original === undefined ? undefined : { text: ctx.original };
         // A screen draws these; text that is stored or shown keeps them for it.
         if ((name === 'comment' || name === 'file') && !prompt) return AS_WRITTEN;
+        // SillyTavern's own text reads ST's meaning first (`MacroTavernData.sillyTavern`).
+        const tavernOwn = tavernVariableMacro(call, ctx) ?? tavernOnlyMacro(call, ctx, depth);
+        if (tavernOwn) return tavernOwn;
         if (ctx.runVariableMacros && variables) {
           const ran = runVariableMacro(call, variables);
           if (ran) return ran;

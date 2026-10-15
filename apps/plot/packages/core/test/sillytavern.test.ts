@@ -459,13 +459,19 @@ describe('scanSillyTavern', () => {
     expect(manifest.skipped).toEqual([{ path: 'User Avatars/b.webp', reason: 'too_large' }]);
   });
 
-  it("reads the World Info settings as a book's, and names the ones it leaves behind", async () => {
+  it("reads every World Info setting as a book's", async () => {
     const source = sourceOf(zipSync(syntheticBackup()));
     const manifest = await scanSillyTavern(stFilesFromZip(source, await listZip(source)));
     expect(manifest.worldInfoSettings).toEqual({
-      lore: { scanDepth: 3, budgetPercent: 40, recursiveScanning: true, maxRecursionSteps: 2 },
-      // Only what is set away from ST's default; the rest is what every import gets.
-      dropped: ['world_info_case_sensitive', 'world_info_match_whole_words'],
+      lore: {
+        scanDepth: 3,
+        budgetPercent: 40,
+        recursiveScanning: true,
+        maxRecursionSteps: 2,
+        caseSensitive: true,
+        matchWholeWords: true,
+      },
+      dropped: [],
     });
 
     // ST's defaults where the file says nothing, and nothing at all without a file.
@@ -478,8 +484,38 @@ describe('scanSillyTavern', () => {
         read: async () => json({ world_info_depth: 0, world_info_recursive: false, world_info_max_recursion_steps: 3 }),
       },
     ]);
-    // An older file keeps them at the top level; a step limit without recursion says nothing.
-    expect(flat.worldInfoSettings?.lore).toEqual({ scanDepth: 0, recursiveScanning: false });
+    // An older file keeps them at the top level; ST checks the step limit on
+    // every scan, its delay levels' too, so it holds without recursion.
+    expect(flat.worldInfoSettings?.lore).toEqual({ scanDepth: 0, recursiveScanning: false, maxRecursionSteps: 3 });
+    const rest = await scanSillyTavern([
+      {
+        path: 'settings.json',
+        size: 1,
+        read: async () =>
+          json({
+            world_info_settings: {
+              world_info_budget_cap: 500,
+              world_info_min_activations: 2,
+              world_info_min_activations_depth_max: 10,
+              world_info_use_group_scoring: true,
+              world_info_include_names: false,
+              world_info_character_strategy: 0,
+            },
+            tags: [{ id: '1700000000000', name: 'Fantasy' }],
+          }),
+      },
+    ]);
+    expect(rest.worldInfoSettings?.lore).toEqual({
+      scanDepth: 2,
+      recursiveScanning: true,
+      budgetCap: 500,
+      minActivations: 2,
+      minActivationsDepthMax: 10,
+      useGroupScoring: true,
+      includeNames: false,
+      insertionStrategy: 'evenly',
+    });
+    expect({ ...rest.tagNames }).toEqual({ '1700000000000': 'Fantasy' });
     expect((await scanSillyTavern([])).worldInfoSettings).toBeUndefined();
   });
 

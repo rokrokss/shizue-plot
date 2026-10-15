@@ -1,6 +1,6 @@
 import { CCardLib, type CharacterCardV3 } from '@risuai/ccardlib';
 import { DEFAULT_LORE_SETTINGS, type CardSpec, type LoreEntry, type LoreSettings, type NormalizedCard } from '../types.js';
-import { loreEntryFromBook } from './bookEntry.js';
+import { loreEntriesOfBook } from './bookEntry.js';
 import { componentCapabilitiesFromExtensions, componentCodeFromExtensions } from './componentCode.js';
 import { introFromExtensions } from './intro.js';
 import { narratorFromExtensions } from './narrator.js';
@@ -146,7 +146,10 @@ export function normalizeCard(raw: unknown, options: { lorebook?: LoreEntry[] } 
       : CCardLib.character.convert(source as never, { to: 'v3' });
   const data = v3.data;
   const book = data.character_book;
-  const ownLore = options.lorebook ?? (book?.entries ?? []).map((entry) => loreEntryFromBook(entry));
+  // A RisuAI book keeps ST's extensions on a card that went through ST, and is
+  // still matched RisuAI's way; every other entry ST wrote is read as ST's.
+  const sillyTavern = !isRisuAiBook(book, data.extensions ?? {});
+  const ownLore = options.lorebook ?? loreEntriesOfBook(book, { sillyTavern });
   // SillyTavern's character's note becomes a lore entry, and leaves the
   // extensions so an export (which writes the entry back) cannot double it.
   const note = depthPromptEntry(data.extensions ?? {}, ownLore);

@@ -4,7 +4,14 @@ import { risuEscape } from './cbs/functions.js';
 import { extractChoices } from './choices.js';
 import { isUtilityBot } from './card/risu.js';
 import { emotionInstructionsOf } from './emotion.js';
-import { applyMacros, stripInlayMacros, type MacroClock, type MacroContext, type MacroHostData } from './macro.js';
+import {
+  applyMacros,
+  stripInlayMacros,
+  type MacroClock,
+  type MacroContext,
+  type MacroHostData,
+  type MacroTavernData,
+} from './macro.js';
 import { activateLore, loreEntryKey, type LoreActivationVia, type LoreTimedState } from './lorebook.js';
 import { isNarration, narrationBody } from './narration.js';
 import type { ReaderAdditions } from './readerPreset.js';
@@ -25,7 +32,9 @@ import { countTokens } from './tokens.js';
 import {
   DEFAULT_LORE_SETTINGS,
   type LoreEntry,
+  type LoreMatchSource,
   type LorePosition,
+  type LoreTrigger,
   type NarratorConfig,
   type NarratorPov,
   type NormalizedCard,
@@ -128,6 +137,12 @@ export interface PromptBranch {
    * overlay of the first opening (`MemberOverlay.firstMessage`).
    */
   greeting?: { text: string; index: number };
+  /**
+   * The versions of the branch's last message, when it is a reply: how many
+   * there are beside it and which it is (0 the first) — SillyTavern's swipes,
+   * for `{{lastSwipeId}}` and `{{currentSwipeId}}`.
+   */
+  swipes?: { count: number; current: number };
 }
 
 /**
@@ -371,6 +386,12 @@ export interface AssemblePromptInput {
    * The narrator's group turn (`speaker`) is one without being told.
    */
   narration?: boolean;
+  /**
+   * What kind of generation this is, in SillyTavern's terms, for the lore
+   * entries that name the kinds they fire on (`LoreEntry.triggers`). Absent:
+   * `normal`.
+   */
+  generationType?: LoreTrigger;
 }
 
 export interface AssembledPrompt {
@@ -389,6 +410,13 @@ export interface AssembledPrompt {
    * nothing wrote anything.
    */
   variableWrites?: VariableDelta;
+  /**
+   * What SillyTavern's text wrote to the reader's global variables on this plot
+   * (`{{setglobalvar}}` and the rest), as values over the input's
+   * `globalVariables` — `null` for one it deleted. The caller merges them into
+   * the reader's globals once the turn is stored. Absent when nothing wrote any.
+   */
+  globalVariableWrites?: VariableDelta;
   /** Present only when the input asked for it. */
   report?: PromptReport;
   /**
@@ -826,6 +854,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     readerAdditions,
     speaker,
     narration = false,
+    generationType,
   } = input;
   const history = withBranchGreeting(given, branch);
 
@@ -882,6 +911,31 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // The card RisuAI's `{{description}}` and the like read outside a member's own
   // text: the first one still on the stage, as RisuAI reads its one character.
   const standIn = cast[0] ?? first;
+  // What SillyTavern's own text writes to the reader's globals, kept apart from
+  // the caller's map as `working` is, and diffed into `globalVariableWrites`.
+  const globalWorking = globalVariables ? applyVariableDelta(globalVariables, null) : undefined;
+  // SillyTavern's own macros read these in its text (`MacroTavernData.sillyTavern`).
+  const firstIncluded = Math.max(branch?.length ?? history.length, history.length) - history.length;
+  const tavernOf = (owner: PromptCharacter | undefined): MacroTavernData => {
+    const note = owner?.card.lorebook.find((entry) => entry.depthPrompt && entry.enabled);
+    return {
+      sillyTavern: true,
+      ...(owner
+        ? {
+            charVersion: owner.card.characterVersion,
+            creatorNotes: owner.card.creatorNotes,
+            firstMessage: owner.card.firstMes,
+            alternateGreetings: owner.card.alternateGreetings,
+          }
+        : {}),
+      ...(note ? { depthPrompt: note.content } : {}),
+      maxContext: contextBudget,
+      maxResponse: maxResponseTokens,
+      ...(branch?.swipes ? { swipes: branch.swipes } : {}),
+      firstIncludedMessageId: firstIncluded,
+      ...(generationType ? { generationType } : {}),
+    };
+  };
 
   // `{{char}}` resolves per text origin. A member's own card text is about that
   // member — under the nickname its card goes by, as RisuAI reads it — and
@@ -894,7 +948,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
       char: member ? characterName(member) : (plot.char ?? plot.name),
       user: userName,
       variables: working,
-      ...(globalVariables ? { globalVariables } : {}),
+      ...(globalWorking ? { globalVariables: globalWorking } : {}),
       ...(clock ? { clock } : {}),
       ...(seed !== undefined ? { seed } : {}),
       ...(seed !== undefined && seedLength !== undefined ? { seedLength } : {}),
@@ -909,11 +963,21 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
           ? { charPrompt: owner.card.systemPrompt, charJailbreak: owner.card.postHistoryInstructions }
           : {}),
         group,
+        ...(member?.sillyTavern ? tavernOf(owner) : {}),
       },
       ...(member?.sillyTavern ? { runVariableMacros: true } : {}),
     };
   };
   const plotMacro = macroOf(undefined);
+  /**
+   * The work's own text that SillyTavern wrote — an entry of a World Info file —
+   * read as ST reads it, its variable macros run, about the work's stand-in card.
+   */
+  const tavernPlotMacro: MacroContext = {
+    ...plotMacro,
+    tavern: { ...plotMacro.tavern, ...tavernOf(standIn) },
+    runVariableMacros: true,
+  };
   // Image references stay, as RisuAI leaves them: the card's own `{{img::…}}`
   // is how it tells the model to draw, and the model's earlier ones in the
   // history are how it keeps doing so.
@@ -990,18 +1054,25 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const loreSource = new Map<LoreEntry, string>();
   /** The book of each member card SillyTavern wrote, which scans the greeting as ST's does. */
   const sillyTavernLore = new Set<LoreEntry>();
+  /** Every member's book — SillyTavern's character lore, as against the work's global lore. */
+  const memberLore = new Set<LoreEntry>();
   const lorebook: LoreEntry[] = [];
   for (const entry of plot.lorebook) {
     lorebook.push(entry);
-    loreMacro.set(entry, plotMacro);
+    // An entry of ST's World Info is ST's text, and read as ST reads it.
+    loreMacro.set(entry, entry.sillyTavern ? tavernPlotMacro : plotMacro);
     loreSource.set(entry, 'plot');
   }
   for (const member of cast) {
     const macro = macroOf(member);
+    const tavernMacro: MacroContext = member.sillyTavern
+      ? macro
+      : { ...macro, tavern: { ...macro.tavern, ...tavernOf(member) }, runVariableMacros: true };
     for (const entry of member.card.lorebook) {
       lorebook.push(entry);
-      loreMacro.set(entry, macro);
+      loreMacro.set(entry, entry.sillyTavern ? tavernMacro : macro);
       loreSource.set(entry, member.name);
+      memberLore.add(entry);
       if (member.sillyTavern) sillyTavernLore.add(entry);
     }
   }
@@ -1029,6 +1100,48 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     }
     return text;
   };
+  const isTavernEntry = (entry: LoreEntry): boolean => entry.sillyTavern === true || sillyTavernLore.has(entry);
+  // The book runs as SillyTavern runs World Info where it is ST's: the card that
+  // decides its settings was written there, or every entry was.
+  const tavernBook = first?.sillyTavern === true || (lorebook.length > 0 && lorebook.every(isTavernEntry));
+  // SillyTavern's budget is its share of the prompt's room — the context less the
+  // response (`getMaxPromptTokens`) — rounded, never 0, and capped.
+  const share = loreSettings.budgetPercent !== undefined ? loreSettings.budgetPercent / 100 : LORE_BUDGET_SHARE;
+  const tavernBudget = Math.round(share * (contextBudget - maxResponseTokens)) || 1;
+  const budgetTokens =
+    loreSettings.tokenBudget ??
+    (tavernBook
+      ? Math.min(tavernBudget, loreSettings.budgetCap ?? Infinity)
+      : Math.floor(contextBudget * share));
+  // The character the reply is asked of, for SillyTavern's character filter and
+  // the texts its entries may scan besides the chat (`matchSources`).
+  const asked = voice && !voice.absent ? voice : undefined;
+  const askedNote = asked?.card.lorebook.find((entry) => entry.depthPrompt && entry.enabled)?.content;
+  let scanData: Partial<Record<LoreMatchSource, string>> | undefined;
+  if (lorebook.some((entry) => entry.matchSources?.length)) {
+    // Expanded as ST's `baseChatReplace` reads them, without running a variable
+    // macro a second time.
+    const { runVariableMacros: _writes, ...readOnly } = asked ? macroOf(asked) : plotMacro;
+    const read = (text: string | undefined): string => (text ? applyMacros(text, readOnly).trim() : '');
+    scanData = {
+      persona: read(personaText),
+      description: read(asked?.card.description),
+      personality: read(asked?.card.personality),
+      depthPrompt: read(askedNote),
+      scenario: read(asked?.card.scenario || plot.description),
+      creatorNotes: read(asked?.card.creatorNotes),
+    };
+  }
+  const memberName = new Map(characters.flatMap((member) => (member.id ? [[member.id, member.name] as const] : [])));
+  // What SillyTavern scans of a turn: what its prompt scripts left of it, under
+  // its speaker's name (`world_info_include_names`) — a reply that names no one
+  // already carries its speakers' names on its lines.
+  const tavernScanText = (message: HistoryMessage): string => {
+    const text = message.promptContent ?? message.content;
+    if (loreSettings.includeNames === false) return text;
+    const name = message.role === 'user' ? userName : message.speakerId ? memberName.get(message.speakerId) : undefined;
+    return name ? `${name}: ${text}` : text;
+  };
   // The raw texts: an old status block the model is no longer sent (7, below)
   // is still where the scene's place and people are written down.
   const {
@@ -1038,20 +1151,18 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   } = activateLore(lorebook, {
     // A turn hidden from the AI is not scanned either — ST builds its scan from
     // the same `coreChat` it sends.
-    history: history.filter((message) => !message.hidden).map((message) => message.content),
+    history: history
+      .filter((message) => !message.hidden)
+      .map((message) => (tavernBook ? tavernScanText(message) : message.content)),
     // The greeting, where the history still opens on it and it is not hidden, is
     // scanned only by SillyTavern's entries — those read from its World Info
-    // files and the books of the cards it wrote. RisuAI's scan never reads it, and
-    // neither does an entry of the work's own or of a module.
+    // files and the books of the cards it wrote — and by every entry of a book
+    // that runs as ST's. RisuAI's scan never reads it, and neither does an entry
+    // of the work's own or of a module.
     ...(branch?.greeting && historyStart === 0 && history[0] && !history[0].hidden ? { greeting: 0 } : {}),
-    scansGreeting: (entry) => entry.sillyTavern === true || sillyTavernLore.has(entry),
+    scansGreeting: tavernBook ? () => true : isTavernEntry,
     scanDepth: loreSettings.scanDepth,
-    budgetTokens:
-      loreSettings.tokenBudget ??
-      Math.floor(
-        contextBudget *
-          (loreSettings.budgetPercent !== undefined ? loreSettings.budgetPercent / 100 : LORE_BUDGET_SHARE),
-      ),
+    budgetTokens,
     countTokens,
     recursiveScanning: loreSettings.recursiveScanning,
     ...(loreSettings.maxRecursionSteps !== undefined
@@ -1061,6 +1172,30 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     textOf: expandLore,
     ...(loreState ? { timed: loreState } : {}),
     ...(vectorLore ? { vectorMatched: vectorLore } : {}),
+    ...(tavernBook ? { sillyTavern: true } : {}),
+    ...(generationType ? { trigger: generationType } : {}),
+    ...(asked
+      ? {
+          character: {
+            names: [asked.name, asked.card.name, asked.card.nickname ?? ''].filter((name) => name.length > 0),
+            tags: asked.card.tags,
+          },
+        }
+      : {}),
+    ...(scanData ? { scanData } : {}),
+    // SillyTavern expands a key's macros before it matches it (`substituteParams`).
+    keyText: (entry, key) => (key.includes('{{') || key.includes('<') ? applyMacros(key, loreMacro.get(entry) ?? plotMacro) : key),
+    ...(loreSettings.caseSensitive !== undefined ? { caseSensitive: loreSettings.caseSensitive } : {}),
+    ...(loreSettings.matchWholeWords !== undefined ? { matchWholeWords: loreSettings.matchWholeWords } : {}),
+    ...(loreSettings.useGroupScoring !== undefined ? { useGroupScoring: loreSettings.useGroupScoring } : {}),
+    ...(loreSettings.minActivations !== undefined ? { minActivations: loreSettings.minActivations } : {}),
+    ...(loreSettings.minActivationsDepthMax !== undefined
+      ? { minActivationsDepthMax: loreSettings.minActivationsDepthMax }
+      : {}),
+    ...(loreSettings.insertionStrategy ? { insertionStrategy: loreSettings.insertionStrategy } : {}),
+    // The work's own lore and its modules' are ST's global lore; a member's book
+    // is the character's.
+    source: (entry) => (memberLore.has(entry) ? 'character' : 'global'),
   });
   /** The expanded entries a position holds, in insertionOrder, the empty ones left out. */
   const loreAt = (position: LorePosition): LoreEntry[] =>
@@ -1456,6 +1591,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
 
   // Every text that could write has been expanded by now, examples last.
   const variableWrites = diffVariables(working, variables);
+  const globalVariableWrites = globalWorking && globalVariables ? diffVariables(globalWorking, globalVariables) : null;
 
   /** Measured here, after the fact, so a generation never pays for it. */
   const report = (): PromptReport => ({
@@ -1540,6 +1676,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     },
     loreTriggers,
     ...(variableWrites ? { variableWrites } : {}),
+    ...(globalVariableWrites ? { globalVariableWrites } : {}),
     ...(input.report ? { report: report() } : {}),
     ...(stopSequences ? { stopSequences } : {}),
   };

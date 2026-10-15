@@ -32,7 +32,7 @@ import {
   MAX_GROUP_SPEAKERS,
   type GroupSettings,
 } from '../group.js';
-import type { LoreSettings } from '../types.js';
+import type { LoreInsertionStrategy, LoreSettings } from '../types.js';
 import { FileTooLargeError } from './zip.js';
 import { ST_CAPS, stFileKind, type StCaps, type StFile } from './files.js';
 
@@ -111,6 +111,8 @@ export interface StManifest {
   globalRegex: unknown[];
   /** settings.json's World Info settings, read as a book's. Absent without a settings.json. */
   worldInfoSettings?: StWorldInfoSettings;
+  /** settings.json's tags, id → name, for the character filters of World Info entries (`stWorldWithFilters`). */
+  tagNames?: Record<string, string>;
   skipped: { path: string; reason: StSkipReason }[];
 }
 
@@ -121,7 +123,21 @@ export interface StManifest {
  */
 export interface StWorldInfoSettings {
   /** What every imported plot's book takes over. */
-  lore: Pick<LoreSettings, 'scanDepth' | 'budgetPercent' | 'recursiveScanning' | 'maxRecursionSteps'>;
+  lore: Pick<
+    LoreSettings,
+    | 'scanDepth'
+    | 'budgetPercent'
+    | 'recursiveScanning'
+    | 'maxRecursionSteps'
+    | 'budgetCap'
+    | 'minActivations'
+    | 'minActivationsDepthMax'
+    | 'caseSensitive'
+    | 'matchWholeWords'
+    | 'useGroupScoring'
+    | 'includeNames'
+    | 'insertionStrategy'
+  >;
   /**
    * The settings left behind, by ST's own name — only those set away from ST's
    * default: at the default, what shizue does instead is what every import gets.
@@ -212,56 +228,65 @@ interface SettingsValues {
   globalWorlds: string[];
   globalRegex: unknown[];
   worldInfoSettings: StWorldInfoSettings;
+  tagNames: Record<string, string>;
 }
 
 /** A whole number from `floor` up, or undefined. */
 const wholeAtLeast = (value: unknown, floor: number): number | undefined =>
   typeof value === 'number' && Number.isFinite(value) && value >= floor ? Math.floor(value) : undefined;
 
+/** ST's `world_info_insertion_strategy` numbers. */
+const ST_STRATEGIES: readonly LoreInsertionStrategy[] = ['evenly', 'character_first', 'global_first'];
+
 /**
  * ST's World Info settings (`world_info_*`), each read with ST's own default
- * where the file has none, as a book's lore settings:
+ * where the file has none, as a book's lore settings — a book that runs as ST's
+ * reads every one of them (`activateLore`):
  *
  *   - `world_info_depth` (2) is the scan depth;
  *   - `world_info_budget` (25, percent of the context) the automatic budget's
- *     share, left out at 25, which is the share here too;
+ *     share, left out at 25, which is the share here too, and
+ *     `world_info_budget_cap` (0, none) its cap in tokens;
  *   - `world_info_recursive` (on) recursive scanning, and
- *     `world_info_max_recursion_steps` (0, no limit) its step limit.
+ *     `world_info_max_recursion_steps` (0, no limit) its step limit — which ST
+ *     checks on every scan, a delay level's included, recursion on or off;
+ *   - `world_info_min_activations` (0) and `…_depth_max` (0, the whole chat);
+ *   - `world_info_case_sensitive`, `world_info_match_whole_words` and
+ *     `world_info_use_group_scoring` (all off), for the entries that leave them
+ *     to the book;
+ *   - `world_info_include_names` (on), and `world_info_character_strategy`
+ *     (1, character first).
  *
- * What a book here cannot say: the budget's token cap, scanning with names,
- * case sensitivity and whole-word matching as the default of an entry that sets
- * none (an entry here always carries its own), the minimum activations, the
- * group scoring, and the insertion strategy (a merged book here is one book in
- * insertion order). Those are named in `dropped` when they are set away from
- * ST's default.
+ * Only `world_info_overflow_alert`, a toast, has nothing to be here; nothing is
+ * dropped any more, so `dropped` stays empty.
  */
 function worldInfoSettingsOf(settings: Json): StWorldInfoSettings {
   const depth = wholeAtLeast(settings['world_info_depth'], 0) ?? 2;
   const budget = wholeAtLeast(settings['world_info_budget'], 1) ?? 25;
   const recursive = typeof settings['world_info_recursive'] === 'boolean' ? settings['world_info_recursive'] : true;
   const steps = wholeAtLeast(settings['world_info_max_recursion_steps'], 0) ?? 0;
-
-  const dropped: string[] = [];
-  const awayFrom = (key: string, fallback: unknown): void => {
-    const value = settings[key];
-    if (value !== undefined && value !== null && value !== fallback) dropped.push(key);
-  };
-  awayFrom('world_info_budget_cap', 0);
-  awayFrom('world_info_include_names', true);
-  awayFrom('world_info_case_sensitive', false);
-  awayFrom('world_info_match_whole_words', false);
-  awayFrom('world_info_min_activations', 0);
-  awayFrom('world_info_use_group_scoring', false);
-  awayFrom('world_info_character_strategy', 1);
+  const cap = wholeAtLeast(settings['world_info_budget_cap'], 0) ?? 0;
+  const minimum = wholeAtLeast(settings['world_info_min_activations'], 0) ?? 0;
+  const depthMax = wholeAtLeast(settings['world_info_min_activations_depth_max'], 0) ?? 0;
+  const flag = (key: string): boolean => settings[key] === true;
+  const strategy = ST_STRATEGIES[wholeAtLeast(settings['world_info_character_strategy'], 0) ?? 1] ?? 'character_first';
 
   return {
     lore: {
       scanDepth: depth,
       ...(budget !== 25 ? { budgetPercent: Math.min(100, budget) } : {}),
       recursiveScanning: recursive,
-      ...(recursive && steps > 0 ? { maxRecursionSteps: steps } : {}),
+      ...(steps > 0 ? { maxRecursionSteps: steps } : {}),
+      ...(cap > 0 ? { budgetCap: cap } : {}),
+      ...(minimum > 0 ? { minActivations: minimum } : {}),
+      ...(minimum > 0 && depthMax > 0 ? { minActivationsDepthMax: depthMax } : {}),
+      ...(flag('world_info_case_sensitive') ? { caseSensitive: true } : {}),
+      ...(flag('world_info_match_whole_words') ? { matchWholeWords: true } : {}),
+      ...(flag('world_info_use_group_scoring') ? { useGroupScoring: true } : {}),
+      ...(settings['world_info_include_names'] === false ? { includeNames: false } : {}),
+      ...(strategy !== 'character_first' ? { insertionStrategy: strategy } : {}),
     },
-    dropped,
+    dropped: [],
   };
 }
 
@@ -294,13 +319,53 @@ function settingsValues(settings: Json): SettingsValues {
 
   const extensionSettings = isObject(settings['extension_settings']) ? settings['extension_settings'] : {};
   const regex = extensionSettings['regex'];
+  // ST's tags (`tags.js`): `[{ id, name, … }]`, which a World Info character
+  // filter names by id. Null-prototype: the ids are whatever ST minted.
+  const tagNames: Record<string, string> = Object.create(null);
+  for (const tag of Array.isArray(settings['tags']) ? settings['tags'] : []) {
+    if (!isObject(tag)) continue;
+    const id = idsOf([tag['id']])[0];
+    if (id && typeof tag['name'] === 'string' && tag['name'].trim()) tagNames[id] = tag['name'].trim();
+  }
   return {
     personas,
     charLore,
     globalWorlds: stringsOf(worldInfo['globalSelect']),
     globalRegex: Array.isArray(regex) ? regex.filter(isObject) : [],
     worldInfoSettings: worldInfoSettingsOf(worldSettings),
+    tagNames,
   };
+}
+
+/**
+ * A World Info file (as parsed JSON) with its entries' character filters in this
+ * import's terms. ST names a character by its card file without the extension
+ * (`getCharaFilename`) and a tag by its id; here a filter names roster members
+ * (`LoreCharacterFilter`) and card tags. A file or an id this backup does not
+ * know is kept as written, and anything that is not a World Info file comes back
+ * as it was.
+ */
+export function stWorldWithFilters(json: unknown, manifest: Pick<StManifest, 'characters' | 'tagNames'>): unknown {
+  if (!isObject(json) || !isObject(json['entries'])) return json;
+  const names = new Map(manifest.characters.map((character) => [character.avatar.replace('.png', ''), character.name]));
+  const tags = manifest.tagNames ?? {};
+  const rename = (value: unknown, map: (item: string) => string): unknown =>
+    Array.isArray(value) ? value.map((item) => (typeof item === 'string' ? map(item) : item)) : value;
+  const entries: Json = Object.create(null);
+  for (const [uid, entry] of Object.entries(json['entries'])) {
+    const filter = isObject(entry) ? entry['characterFilter'] : undefined;
+    entries[uid] = isObject(filter)
+      ? {
+          ...(entry as Json),
+          characterFilter: {
+            ...filter,
+            names: rename(filter['names'], (name) => names.get(name) ?? name),
+            tags: rename(filter['tags'], (tag) => tags[tag] ?? tag),
+          },
+        }
+      : entry;
+  }
+  return { ...json, entries };
 }
 
 const STRATEGIES: readonly StActivationStrategy[] = ['natural', 'list', 'manual', 'pooled'];
@@ -504,7 +569,7 @@ export async function scanSillyTavern(
     worlds,
     globalWorlds: settings.globalWorlds,
     globalRegex: settings.globalRegex,
-    ...(settingsJson ? { worldInfoSettings: settings.worldInfoSettings } : {}),
+    ...(settingsJson ? { worldInfoSettings: settings.worldInfoSettings, tagNames: settings.tagNames } : {}),
     skipped,
   };
 }

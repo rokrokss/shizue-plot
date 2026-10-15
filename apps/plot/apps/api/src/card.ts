@@ -8,7 +8,9 @@ import {
   displayScriptPatternError,
   emotionModeOf,
   extensionsWithEmotionMode,
+  LORE_MATCH_SOURCES,
   LORE_POSITIONS,
+  LORE_TRIGGERS,
   emptyCard,
   emptyVariables,
   MAX_BACKGROUND_HTML_LENGTH,
@@ -22,8 +24,11 @@ import {
   type EmotionImage,
   type EmotionMode,
   type LoreEntry,
+  type LoreInsertionStrategy,
+  type LoreMatchSource,
   type LorePosition,
   type LoreSelectiveLogic,
+  type LoreTrigger,
   type NormalizedCard,
   type PlotCustomUi,
   type Variables,
@@ -71,6 +76,63 @@ function coerceLoreActivation(raw: Record<string, unknown>): Partial<LoreEntry> 
     ...int('sticky', 0, 10_000),
     ...int('cooldown', 0, 10_000),
     ...int('delay', 0, 10_000),
+    ...coerceTavernLore(raw),
+  };
+}
+
+const LORE_INSERTION_STRATEGIES: readonly LoreInsertionStrategy[] = ['evenly', 'character_first', 'global_first'];
+
+/** Names in a character filter: labels, not sentences, and not many. */
+const MAX_FILTER_ITEMS = 100;
+const MAX_FILTER_ITEM_LENGTH = 200;
+
+/**
+ * SillyTavern's per-entry settings (`LoreEntry`), each only where the client sent
+ * a meaningful one — an absent flag is ST's default — so an ST entry keeps them
+ * through every save, the studio's included.
+ */
+function coerceTavernLore(raw: Record<string, unknown>): Partial<LoreEntry> {
+  const flag = <K extends keyof LoreEntry>(key: K): Partial<LoreEntry> => (raw[key] === true ? { [key]: true } : {});
+  const tristate = <K extends keyof LoreEntry>(key: K): Partial<LoreEntry> =>
+    typeof raw[key] === 'boolean' ? { [key]: raw[key] } : {};
+  const delayed = raw['delayUntilRecursion'];
+  const sources = strArray(raw['matchSources']).filter((source): source is LoreMatchSource =>
+    LORE_MATCH_SOURCES.includes(source as LoreMatchSource),
+  );
+  const triggers = strArray(raw['triggers']).filter((trigger): trigger is LoreTrigger =>
+    LORE_TRIGGERS.includes(trigger as LoreTrigger),
+  );
+  const filter = raw['characterFilter'] as Record<string, unknown> | undefined;
+  const list = (value: unknown): string[] =>
+    strArray(value)
+      .map((item) => item.trim().slice(0, MAX_FILTER_ITEM_LENGTH))
+      .filter((item) => item.length > 0)
+      .slice(0, MAX_FILTER_ITEMS);
+  const names = filter && typeof filter === 'object' ? list(filter['names']) : [];
+  const tags = filter && typeof filter === 'object' ? list(filter['tags']) : [];
+  return {
+    ...flag('ignoreBudget'),
+    ...flag('preventRecursion'),
+    ...flag('excludeRecursion'),
+    ...(typeof delayed === 'number' && Number.isFinite(delayed) && delayed >= 1
+      ? { delayUntilRecursion: Math.min(1000, Math.floor(delayed)) }
+      : {}),
+    ...flag('groupOverride'),
+    ...tristate('useGroupScoring'),
+    ...tristate('matchWholeWords'),
+    ...flag('caseSensitiveFromBook'),
+    ...(sources.length > 0 ? { matchSources: [...new Set(sources)] } : {}),
+    ...(triggers.length > 0 ? { triggers: [...new Set(triggers)] } : {}),
+    ...(names.length > 0 || tags.length > 0
+      ? {
+          characterFilter: {
+            ...(names.length > 0 ? { names } : {}),
+            ...(tags.length > 0 ? { tags } : {}),
+            ...(filter!['exclude'] === true ? { exclude: true as const } : {}),
+          },
+        }
+      : {}),
+    ...flag('depthPrompt'),
   };
 }
 
@@ -516,6 +578,17 @@ export function coerceCard(value: unknown, fallbackName: string): NormalizedCard
       ...wholeIn(lore['maxRecursionSteps'], 1, 1000, 'maxRecursionSteps'),
       ...(lore['risuMatching'] === true ? { risuMatching: true } : {}),
       ...(lore['vectorizeAll'] === true ? { vectorizeAll: true } : {}),
+      // SillyTavern's global World Info settings, which a book that runs as ST's reads.
+      ...wholeIn(lore['budgetCap'], 1, 1_000_000, 'budgetCap'),
+      ...wholeIn(lore['minActivations'], 1, 1000, 'minActivations'),
+      ...wholeIn(lore['minActivationsDepthMax'], 1, 1000, 'minActivationsDepthMax'),
+      ...(typeof lore['caseSensitive'] === 'boolean' ? { caseSensitive: lore['caseSensitive'] } : {}),
+      ...(typeof lore['matchWholeWords'] === 'boolean' ? { matchWholeWords: lore['matchWholeWords'] } : {}),
+      ...(typeof lore['useGroupScoring'] === 'boolean' ? { useGroupScoring: lore['useGroupScoring'] } : {}),
+      ...(typeof lore['includeNames'] === 'boolean' ? { includeNames: lore['includeNames'] } : {}),
+      ...(LORE_INSERTION_STRATEGIES.includes(lore['insertionStrategy'] as LoreInsertionStrategy)
+        ? { insertionStrategy: lore['insertionStrategy'] as LoreInsertionStrategy }
+        : {}),
     },
     ...(displayScripts.length > 0 ? { displayScripts } : {}),
     ...(Object.keys(defaultVariables).length > 0 ? { defaultVariables } : {}),

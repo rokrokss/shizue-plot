@@ -26,6 +26,7 @@ import {
   type HistoryMessage,
   type LoreEntry,
   type LoreTimedState,
+  type LoreTrigger,
   type MacroClock,
   type NarratorConfig,
   type NarratorSpeaker,
@@ -81,6 +82,7 @@ import { editRequestTurns, refitRequest, RequestTooLongError, withEditedRequest,
 import { applyScriptChat, planScriptChat, rewritableHead } from './scriptChat.js';
 import {
   MAX_OVERLAY_TEXT_LENGTH,
+  mergeGlobalVariables,
   mergeReaderOverlay,
   readLocalLore,
   storableDelta,
@@ -209,6 +211,13 @@ export interface GenerationPlan {
    * effects — taken from the whole branch, not the history the budget kept.
    */
   loreState: LoreTimedState;
+  /**
+   * SillyTavern's name for this kind of generation, for the lore entries that
+   * fire on some kinds only (`LoreEntry.triggers`): a send, an auto turn and a
+   * narration are `normal`, a continue `continue`, a regenerate — a new version
+   * beside the one it replaces — `swipe`. Absent: `normal`.
+   */
+  generationType?: LoreTrigger;
   /** The names this chat's open images go by, for `{{assetlist}}` (see `openAssetNames`). */
   assetNames: string[];
   /** The chat's auxiliary model, for `{{axmodel}}` (see `auxiliaryModelOf`). */
@@ -888,6 +897,7 @@ async function assembleRequest(
     model: { id: plan.model, maxContext: plan.contextBudget, prefill: false, auxiliary: plan.auxiliaryModel },
     ...(plan.injections ? { injections: plan.injections } : {}),
     loreState: plan.loreState,
+    ...(plan.generationType ? { generationType: plan.generationType } : {}),
     ...(found.vectorLore ? { vectorLore: found.vectorLore } : {}),
     assetNames: plan.assetNames,
     history,
@@ -938,6 +948,7 @@ async function assembleRequest(
     ...(prompt.fixedTokens !== undefined ? { fixedTokens: prompt.fixedTokens } : {}),
     loreTriggers: prompt.loreTriggers,
     ...(prompt.variableWrites ? { variableWrites: prompt.variableWrites } : {}),
+    ...(prompt.globalVariableWrites ? { globalVariableWrites: prompt.globalVariableWrites } : {}),
     ...(prompt.stopSequences ? { stopSequences: prompt.stopSequences } : {}),
     // The two appended turns are part of what is sent, so the report says so —
     // and the budget it shows is the chat's, before they were taken out of it.
@@ -1160,6 +1171,7 @@ async function runGeneration(
           // Stored pending all the same, if the browser meant to post-process
           // it: the next time it opens the chat it finds the mark and finishes.
           const stored = await persist(deps, plan, reply, usage, request, { stopped: true });
+          await keepGlobalWrites(deps, plan, request);
           // The turn is on the branch whether or not anyone was listening, so what
           // it opened is opened; there is simply no event to say so on.
           await openUnlocks(deps, plan.chatId, stored.content);
@@ -1179,6 +1191,7 @@ async function runGeneration(
       }
 
       const stored = await persist(deps, plan, reply, usage, request);
+      await keepGlobalWrites(deps, plan, request);
       // Evaluated on the raw text as well as at the commit: unlocks only ever
       // open, so the earlier answer costs nothing and saves the reader a wait.
       const unlockedAssetIds = await openUnlocks(deps, plan.chatId, stored.content);
@@ -1413,6 +1426,32 @@ async function keepListenerEdits(
 function withInlayEmotions(plan: GenerationPlan, text: string, speakerMemberId: string | null, whole: string): string {
   const member = replyMemberOf({ role: 'assistant', content: whole, source: 'user', speakerMemberId }, plan.characters);
   return member && emotionScreenOf(member.card)?.mode === 'inlay' ? inlayEmotionTags(text) : text;
+}
+
+/**
+ * What SillyTavern's text wrote to the reader's global variables while the
+ * prompt was put together (`AssembledPrompt.globalVariableWrites`), merged into
+ * them once the turn it produced is stored — ST writes them as the prompt is
+ * built, so they stand whatever becomes of the reply.
+ */
+async function keepGlobalWrites(
+  deps: AppDeps,
+  plan: GenerationPlan,
+  { globalVariableWrites }: Pick<BuiltRequest, 'globalVariableWrites'>,
+): Promise<void> {
+  if (!globalVariableWrites) return;
+  const [chat] = await deps.db
+    .select({ userId: chats.userId, plotId: chats.plotId })
+    .from(chats)
+    .where(eq(chats.id, plan.chatId))
+    .limit(1);
+  if (!chat) return;
+  try {
+    await mergeGlobalVariables(deps, chat.userId, chat.plotId, globalVariableWrites);
+  } catch (error) {
+    // Past the globals' caps: the turn stands, the writes do not.
+    console.warn(`chat ${plan.chatId}: global variable writes not kept`, error);
+  }
 }
 
 /**

@@ -24,7 +24,10 @@ const DEPTH_PROMPT_DEFAULT_DEPTH = 4;
 /**
  * The character's note as a constant depth entry, which is what it is: text ST
  * injects N messages from the end on every turn. Ordered after the card's own
- * entries. Undefined when the card has no note to carry.
+ * entries. Marked `depthPrompt`: ST injects it as an extension prompt, not as
+ * World Info, so it is outside the book's budget and recursion
+ * (`activateLore`), and an export writes it back to `depth_prompt`. Undefined
+ * when the card has no note to carry.
  */
 export function depthPromptEntry(
   extensions: Record<string, unknown>,
@@ -52,6 +55,24 @@ export function depthPromptEntry(
         ? Math.floor(depth)
         : DEPTH_PROMPT_DEFAULT_DEPTH,
     ...(role ? { role } : {}),
+    depthPrompt: true,
+  };
+}
+
+/**
+ * The extensions with the character's note written back where ST keeps it
+ * (`depth_prompt: { prompt, depth, role }`, the role as ST's word), for a card
+ * whose book holds it as an entry (`depthPromptEntry`). Unchanged without one.
+ */
+export function extensionsWithDepthPrompt(
+  extensions: Record<string, unknown>,
+  lorebook: readonly LoreEntry[],
+): Record<string, unknown> {
+  const note = lorebook.find((entry) => entry.depthPrompt);
+  if (!note) return extensions;
+  return {
+    ...extensions,
+    depth_prompt: { prompt: note.content, depth: note.depth ?? DEPTH_PROMPT_DEFAULT_DEPTH, role: note.role ?? 'system' },
   };
 }
 

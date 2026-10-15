@@ -2318,8 +2318,11 @@ describe('assemblePrompt - the greeting in the lore scan', () => {
     expect(scanned({ member: [greeting] }, { sillyTavern: true })).toBe(true);
     expect(scanned({ plot: [{ ...greeting, sillyTavern: true }] })).toBe(true);
     expect(scanned({ member: [{ ...greeting, sillyTavern: true }] })).toBe(true);
-    // The member's card is ST's, the work's own entry is not.
-    expect(scanned({ plot: [greeting] }, { sillyTavern: true })).toBe(false);
+    // The member's card is ST's, so the whole book runs as ST's World Info, which
+    // scans the greeting for every entry — the work's own one too.
+    expect(scanned({ plot: [greeting] }, { sillyTavern: true })).toBe(true);
+    // Neither is: RisuAI's scan.
+    expect(scanned({ plot: [greeting] })).toBe(false);
   });
 });
 

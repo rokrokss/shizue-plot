@@ -7,7 +7,7 @@
  * browser and the result goes through the ordinary save.
  */
 
-import { loreEntryFromBook, loreEntryFromWorldInfo, worldInfoFieldsOf } from './card/bookEntry.js';
+import { loreEntriesOfBook, loreEntryFromWorldInfo, worldInfoFieldsOf } from './card/bookEntry.js';
 import type { LoreEntry } from './types.js';
 
 /** A file none of the accepted shapes describes. */
@@ -52,15 +52,15 @@ export function fromLorebookFile(json: unknown): LoreEntry[] {
   if (isObject(entries)) {
     return Object.values(entries).filter(isObject).map(loreEntryFromWorldInfo);
   }
-  if (Array.isArray(entries)) return entries.map((entry) => loreEntryFromBook(entry));
+  if (Array.isArray(entries)) return loreEntriesOfBook(json);
 
   const data = json['data'];
   if (json['spec'] === 'lorebook_v3' && isObject(data) && Array.isArray(data['entries'])) {
-    return data['entries'].map((entry) => loreEntryFromBook(entry));
+    return loreEntriesOfBook(data);
   }
   const book = isObject(data) ? data['character_book'] : undefined;
   if (isObject(book) && Array.isArray(book['entries'])) {
-    return book['entries'].map((entry) => loreEntryFromBook(entry));
+    return loreEntriesOfBook(book);
   }
   throw new LorebookFileError('No lorebook entries in this file');
 }

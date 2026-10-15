@@ -86,13 +86,77 @@ export interface LoreEntry {
   /** The entry cannot trigger before the chat holds this many messages. */
   delay?: number;
   /**
-   * Read from a SillyTavern World Info file, so scanned as ST scans: its keys
-   * look at the branch's greeting like any other message, where RisuAI's scan —
-   * and ours, for every other entry — leaves the greeting out. A member card ST
-   * wrote gets the same for its whole book through `PromptCharacter.sillyTavern`
-   * rather than per entry. Kept by the save; an export leaves it out.
+   * Written by SillyTavern — an entry of a World Info file, or of a card book
+   * whose entries carry ST's own settings (`loreEntryFromBook`) — so read and
+   * scanned as ST reads it: its keys look at the branch's greeting like any
+   * other message, where RisuAI's scan — and ours, for every other entry — leaves
+   * the greeting out; each key is ST's (`/pattern/flags` a regex with its own
+   * flags, anything else plain text under the entry's case and whole-word
+   * settings, macros expanded first); and only `@@activate`/`@@dont_activate`
+   * were read off its content. A member card ST wrote gets the scan for its
+   * whole book through `PromptCharacter.sillyTavern` too. Kept by the save; an
+   * export leaves it out.
    */
   sillyTavern?: true;
+  /**
+   * SillyTavern's `ignoreBudget`: the entry goes in whatever the book's budget
+   * says, and still counts against it for the entries after it.
+   */
+  ignoreBudget?: true;
+  /** SillyTavern's `preventRecursion`: what the entry says is never scanned by a recursive pass. */
+  preventRecursion?: true;
+  /** SillyTavern's `excludeRecursion`: a recursive pass never activates the entry — only the chat can. */
+  excludeRecursion?: true;
+  /**
+   * SillyTavern's `delayUntilRecursion`, as a level (ST's `true` is 1): the
+   * entry activates only on a recursive pass, once the scan has worked through
+   * every lower level — ST opens the next level only when a scan finds nothing
+   * more at the one before.
+   */
+  delayUntilRecursion?: number;
+  /**
+   * SillyTavern's `groupOverride`: in its inclusion group the entry wins over
+   * the weighted draw, the highest `insertionOrder` among such entries first.
+   */
+  groupOverride?: true;
+  /**
+   * SillyTavern's `useGroupScoring`: in its inclusion group only the entries
+   * whose keys matched most survive to the draw. Absent: the book's
+   * `LoreSettings.useGroupScoring`.
+   */
+  useGroupScoring?: boolean;
+  /**
+   * SillyTavern's `matchWholeWords`: a one-word plain key matches only between
+   * non-word characters. Absent: the book's `LoreSettings.matchWholeWords`.
+   */
+  matchWholeWords?: boolean;
+  /**
+   * SillyTavern's `caseSensitive: null` — the entry leaves its case to the
+   * book's `LoreSettings.caseSensitive`, and `caseSensitive` above is only the
+   * value when the book says nothing.
+   */
+  caseSensitiveFromBook?: true;
+  /**
+   * What the entry scans besides the chat — SillyTavern's `matchPersonaDescription`,
+   * `matchCharacterDescription`, `matchCharacterPersonality`,
+   * `matchCharacterDepthPrompt`, `matchScenario` and `matchCreatorNotes`, the
+   * texts of the reader's persona and of the character being answered.
+   */
+  matchSources?: LoreMatchSource[];
+  /**
+   * SillyTavern's generation-type triggers: the entry is considered only on a
+   * generation of one of these kinds (`ActivateLoreInput.trigger`). Absent or
+   * empty: every kind.
+   */
+  triggers?: LoreTrigger[];
+  /** SillyTavern's character filter: which characters the entry is for, or not for. */
+  characterFilter?: LoreCharacterFilter;
+  /**
+   * The character's note (SillyTavern's `extensions.depth_prompt`) this entry
+   * stands for: always on, at its depth, outside the budget and the recursion
+   * as ST injects it — and written back to `depth_prompt` by an export.
+   */
+  depthPrompt?: true;
   /**
    * Activates by meaning as well as by its keys: SillyTavern's vectorized entry
    * (`extensions.vectorized`, the 🔗 status). Its content is embedded with the
@@ -104,6 +168,51 @@ export interface LoreEntry {
 
 /** SillyTavern's selective logic, in its own terms. */
 export type LoreSelectiveLogic = 'and_any' | 'and_all' | 'not_any' | 'not_all';
+
+/**
+ * A text an entry scans besides the chat (`LoreEntry.matchSources`), named for
+ * SillyTavern's `WIGlobalScanData`: the persona, and the description,
+ * personality, character's note, scenario and creator's notes of the character
+ * being answered.
+ */
+export type LoreMatchSource = 'persona' | 'description' | 'personality' | 'depthPrompt' | 'scenario' | 'creatorNotes';
+
+/** Every `LoreMatchSource`, in the order SillyTavern appends them to the scan. */
+export const LORE_MATCH_SOURCES: readonly LoreMatchSource[] = [
+  'persona',
+  'description',
+  'personality',
+  'depthPrompt',
+  'scenario',
+  'creatorNotes',
+];
+
+/**
+ * SillyTavern's generation types (`GENERATION_TYPE_TRIGGERS`), which an entry's
+ * `triggers` name: a reply to the reader, a continue, an impersonation (a reply
+ * written for the reader), a swipe, a regenerate, and a quiet (background) call.
+ */
+export type LoreTrigger = 'normal' | 'continue' | 'impersonate' | 'swipe' | 'regenerate' | 'quiet';
+
+export const LORE_TRIGGERS: readonly LoreTrigger[] = ['normal', 'continue', 'impersonate', 'swipe', 'regenerate', 'quiet'];
+
+/**
+ * SillyTavern's `characterFilter`: an entry for these characters only — or, with
+ * `exclude`, for everyone but them. A character is named as the roster names it
+ * (ST names it by its card file, which the import resolves); a tag is a card
+ * tag. Either list matching is enough. Empty lists filter nothing.
+ */
+export interface LoreCharacterFilter {
+  names?: string[];
+  tags?: string[];
+  exclude?: true;
+}
+
+/**
+ * SillyTavern's `world_info_character_strategy`: in what order the character's
+ * lore and the rest are considered — and so paid for, when the budget runs out.
+ */
+export type LoreInsertionStrategy = 'evenly' | 'character_first' | 'global_first';
 
 export interface LoreSettings {
   scanDepth: number;
@@ -142,6 +251,31 @@ export interface LoreSettings {
    * off, as in ST.
    */
   vectorizeAll?: true;
+  /**
+   * SillyTavern's global settings for the entries that leave them to the book
+   * (`world_info_case_sensitive`, `world_info_match_whole_words`,
+   * `world_info_use_group_scoring`). Absent: off, ST's defaults.
+   */
+  caseSensitive?: boolean;
+  matchWholeWords?: boolean;
+  useGroupScoring?: boolean;
+  /** SillyTavern's `world_info_budget_cap`: the most tokens the automatic budget may come to. Absent: no cap. */
+  budgetCap?: number;
+  /**
+   * SillyTavern's `world_info_min_activations`: while fewer entries than this
+   * are active, the scan reaches one message further back, up to
+   * `minActivationsDepthMax` (absent: the whole chat). Only a book that runs as
+   * ST's reads it, and only without `maxRecursionSteps`, as there.
+   */
+  minActivations?: number;
+  minActivationsDepthMax?: number;
+  /**
+   * SillyTavern's `world_info_include_names`: a book that runs as ST's scans
+   * each message as `name: text`. Absent: on, ST's default.
+   */
+  includeNames?: boolean;
+  /** SillyTavern's `world_info_character_strategy`. Absent: `character_first`, ST's default. */
+  insertionStrategy?: LoreInsertionStrategy;
 }
 
 /**
