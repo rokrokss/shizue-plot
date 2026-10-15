@@ -176,7 +176,7 @@ import {
   requireString,
   requireUuidParam,
 } from '../util.js';
-import { scheduleMessageEmbedding } from '../vectors.js';
+import { scheduleLoreAliases, scheduleMessageEmbedding } from '../vectors.js';
 import { personaAvatarUrl } from './personas.js';
 
 export const toChatJson = (chat: Chat, noteIds: string[]) => ({
@@ -1010,7 +1010,15 @@ function readerPromptSettings(
   return {
     ...(chat.noteSettings ? { authorNoteSettings: chat.noteSettings } : {}),
     ...(language.mode === 'instruct' && language.language ? { replyLanguage: language.language } : {}),
-    vectors: { plotId: plot.id, userId: chat.userId, plotLanguage: plot.language, retrieval: retrievalEnabled(chat.retrieval) },
+    vectors: {
+      plotId: plot.id,
+      userId: chat.userId,
+      chatId: chat.id,
+      plotLanguage: plot.language,
+      ...(language.mode === 'instruct' && language.language ? { conversationLanguage: language.language } : {}),
+      subModel: chat.subModel,
+      retrieval: retrievalEnabled(chat.retrieval),
+    },
   };
 }
 
@@ -1934,6 +1942,13 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         .where(eq(chats.id, chat.id))
         .returning();
       chat = updated!;
+    }
+
+    // A Korean reader of a work in another language: its aliases are made now,
+    // on the reader's auxiliary model, if its creator's pass never made them.
+    const language = resolveTranslation(chat.translation, plot.language, readerLocale(c));
+    if (language.mode === 'instruct' && language.language === 'ko') {
+      scheduleLoreAliases(deps, plotId, { userId, subModel: chat.subModel });
     }
 
     return c.json(await chatState(deps, chat), 201);

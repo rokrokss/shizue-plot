@@ -120,6 +120,13 @@
       "when": 1792022940680,
       "tag": "0016_reader_modules",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1792029164153,
+      "tag": "0017_lore_aliases_and_chunks",
+      "breakpoints": true
     }
   ]
 }

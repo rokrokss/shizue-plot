@@ -910,6 +910,7 @@ async function assembleRequest(
     loreState: plan.loreState,
     ...(plan.generationType ? { generationType: plan.generationType } : {}),
     ...(found.vectorLore ? { vectorLore: found.vectorLore } : {}),
+    ...(found.loreAliases ? { loreAliases: found.loreAliases } : {}),
     assetNames: plan.assetNames,
     history,
     // The budget reserves what the stream may actually spend — the same value

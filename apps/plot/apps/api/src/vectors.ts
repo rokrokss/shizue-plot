@@ -22,11 +22,22 @@
  *   lore, into rows of theirs (`reader_lore_vectors`) searched beside the
  *   work's — so an entry Lua rewrote is found by meaning too, and a search no
  *   longer asks the work's pass for a vector it can never make.
+ * - **Which entries, and how near** (core `vectorLoreSearch`): what the entry
+ *   or the book asks for, and — for a Korean reader in the `instruct` mode
+ *   over a book without Korean keys — the keyed entries whose Korean aliases
+ *   have not landed yet (`loreAliases.ts`), at the bar measured for the model
+ *   and the language pair. A long entry is embedded in pieces (`loreChunks`)
+ *   and scores its best piece's similarity; a pass sends its pieces shortest
+ *   first.
+ * - **The aliases are scheduled here too** (`scheduleLoreAliases`), on the
+ *   same guard, so a plot's alias pass runs once at a time and its vectors are
+ *   brought up to date when it ends.
  *
  * Everything here swallows its own failures.
  */
 import {
   isVectorLoreCandidate,
+  loreChunks,
   RETRIEVAL_DEFAULTS,
   retrievalBlock,
   retrievalChunks,
@@ -34,12 +45,14 @@ import {
   stripImageMacros,
   transcriptLine,
   VECTOR_LORE,
+  vectorLoreSearch,
   vectorQueryText,
   type LoreEntry,
   type LoreSettings,
   type PlotModule,
   type PromptCharacter,
   type ReaderMember,
+  type VectorLoreBar,
 } from '@shizue/core';
 import { overlaidCard } from '@shizue/core/triggers';
 import {
@@ -56,8 +69,10 @@ import {
 } from '@shizue/db';
 import { and, asc, desc, eq, inArray, isNotNull, notInArray, or, sql } from 'drizzle-orm';
 import { createHash } from 'node:crypto';
-import type { AppDeps } from './deps.js';
+import type { AppDeps, BackgroundTaskKind } from './deps.js';
 import type { Embedder, Embedding } from './embedder.js';
+import { aliasPlotLore, loadWorkLore, loreAliasesEnabled, loreAliasesFor } from './loreAliases.js';
+import type { AuxiliaryOwner } from './memory.js';
 import { loadReaderOverlay } from './scriptState.js';
 import { buildPath, visibleToAi } from './tree.js';
 
@@ -70,6 +85,12 @@ const QUERY_EMBED_TIMEOUT_MS = 3_000;
 const BACKGROUND_BATCH = 8;
 /** Passes one guarded job runs at most when it is asked again while it runs. */
 const MAX_PASSES = 3;
+/**
+ * One chat in this many logs its lore search's best cosines across languages
+ * (`activatedLore`), always the same chats — so the bar can be measured again
+ * on real turns, which run longer than the experiment's.
+ */
+const COSINE_LOG_ONE_IN = 10;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -84,7 +105,16 @@ export interface VectorPlan {
    * their modules' — is embedded apart from the work's (`reader_lore_vectors`).
    */
   userId?: string;
+  /** The chat, which decides whether its searches are among the logged ones. */
+  chatId?: string;
   plotLanguage: ContentLanguage;
+  /**
+   * The reader's language in the `instruct` mode: the turns are in it, the lore
+   * in the plot's. What the aliases and the bar go by. Absent in the other modes.
+   */
+  conversationLanguage?: ContentLanguage;
+  /** The chat's own auxiliary model pick (`chats.sub_model`), for an alias pass its search starts. */
+  subModel?: string | null;
   /** The chat's retrieval is on (`chats.retrieval`). */
   retrieval: boolean;
 }
@@ -93,6 +123,8 @@ export interface VectorPlan {
 export interface VectorSearch {
   /** The lore entries to activate by meaning, as `AssemblePromptInput.vectorLore` asks. */
   vectorLore?: (entry: LoreEntry) => boolean;
+  /** The entries' Korean aliases, as `AssemblePromptInput.loreAliases` asks (`loreAliases.ts`). */
+  loreAliases?: (entry: LoreEntry) => readonly string[] | undefined;
   /** The found messages in ST's template (`retrievalBlock`). */
   retrievalText?: string;
   /** Their ids: the history leaves them out, as ST takes them out of the chat it sends. */
@@ -108,7 +140,7 @@ const NOTHING: VectorSearch = { retrieved: new Set() };
  * while one runs is not dropped: the running one goes again once it ends, so a
  * save that lands mid-pass is embedded too.
  */
-function runGuarded(deps: AppDeps, key: string, work: () => Promise<void>): void {
+function runGuarded(deps: AppDeps, key: string, work: () => Promise<void>, kind: BackgroundTaskKind = 'vectors'): void {
   if (deps.embeddingVectors.has(key)) {
     deps.embeddingVectors.set(key, 'again');
     return;
@@ -122,13 +154,16 @@ function runGuarded(deps: AppDeps, key: string, work: () => Promise<void>): void
     }
   })()
     .catch((error: unknown) => {
-      console.error(`[vectors] ${key} failed`, error);
+      console.error(`[${kind}] ${key} failed`, error);
     })
     .finally(() => deps.embeddingVectors.delete(key));
-  deps.onBackgroundTask?.(task, 'vectors');
+  deps.onBackgroundTask?.(task, kind);
 }
 
-/** Embeds `texts` as documents in calls of `BACKGROUND_BATCH`, or null once the embedder fails. */
+/**
+ * Embeds `texts` as documents in calls of `BACKGROUND_BATCH`, or null once the
+ * embedder fails. Lore goes through `embedLore`, which sorts it first.
+ */
 async function embedDocuments(
   embedder: Embedder,
   texts: readonly string[],
@@ -166,13 +201,104 @@ function workLore(
   };
 }
 
-/** The contents to embed, by hash: each candidate's, once. */
-function candidateContents(entries: readonly LoreEntry[], settings: LoreSettings | undefined): Map<string, string> {
-  const contents = new Map<string, string>();
+/** The candidates to embed, by the hash of their content: each content once, as its first entry says it. */
+function candidateContents(entries: readonly LoreEntry[], candidate: (entry: LoreEntry) => boolean): Map<string, LoreEntry> {
+  const contents = new Map<string, LoreEntry>();
   for (const entry of entries) {
-    if (isVectorLoreCandidate(entry, settings)) contents.set(textHash(entry.content), entry.content);
+    const hash = textHash(entry.content);
+    if (candidate(entry) && !contents.has(hash)) contents.set(hash, entry);
   }
   return contents;
+}
+
+/** A stored lore vector row, as the passes compare it with what an entry cuts into now. */
+interface StoredPiece {
+  hash: string;
+  chunkIndex: number;
+  content: string;
+}
+
+/**
+ * The candidates whose stored pieces of the model are not the ones they cut
+ * into now (`loreChunks`) — none yet, a whole-entry row from before entries
+ * were cut, another header — each with the pieces to embed.
+ */
+function pendingLore(
+  contents: ReadonlyMap<string, LoreEntry>,
+  stored: readonly StoredPiece[],
+): { hash: string; chunks: string[] }[] {
+  const held = new Map<string, string[]>();
+  for (const row of stored) {
+    const pieces = held.get(row.hash) ?? [];
+    pieces[row.chunkIndex] = row.content;
+    held.set(row.hash, pieces);
+  }
+  const pending: { hash: string; chunks: string[] }[] = [];
+  for (const [hash, entry] of contents) {
+    const chunks = loreChunks(entry);
+    const pieces = held.get(hash);
+    if (pieces?.length === chunks.length && chunks.every((chunk, at) => pieces[at] === chunk)) continue;
+    pending.push({ hash, chunks });
+  }
+  return pending;
+}
+
+/** Rows a lore pass writes at a time: each holds a vector, so a book's worth is written in slices. */
+const LORE_ROWS_PER_INSERT = 64;
+
+/**
+ * The entries a plot's lore passes keep vectors of: what is asked for, and —
+ * the work being read in another language — what the search stands in for
+ * until the aliases land, as it would for a Korean reader in the `instruct`
+ * mode (`vectorLoreSearch`). `book` is everything the search judges the book
+ * on; the pass takes the candidates among its own entries.
+ */
+async function storedCandidates(
+  deps: AppDeps,
+  plotId: string,
+  plotLanguage: ContentLanguage,
+  model: string,
+  book: readonly LoreEntry[],
+  settings: LoreSettings | undefined,
+): Promise<{ keep: (entry: LoreEntry) => boolean; asked: (entry: LoreEntry) => boolean }> {
+  const asked = (entry: LoreEntry): boolean => isVectorLoreCandidate(entry, settings);
+  const reader = plotLanguage === 'ko' ? undefined : ('ko' as const);
+  const aliases = reader ? await loreAliasesFor(deps, { plotId, plotLanguage, conversationLanguage: reader }, book) : null;
+  const search = vectorLoreSearch({
+    model,
+    entries: book,
+    settings,
+    ...(reader ? { crossLanguage: reader } : {}),
+    ...(aliases ? { aliased: aliases.aliased } : {}),
+  });
+  return { keep: search?.candidate ?? asked, asked };
+}
+
+/**
+ * Embeds the pieces of the pending lore (`pendingLore`) for storage, shortest
+ * first so a batch is padded to a neighbour's length rather than the book's
+ * longest — and none is longer than a chunk. The rows come back in the order
+ * of `pending`, its pieces in order.
+ */
+async function embedLore(
+  embedder: Embedder,
+  pending: readonly { hash: string; chunks: string[] }[],
+  plotLanguage: ContentLanguage,
+): Promise<{ model: string; rows: (StoredPiece & { embedding: number[] })[] } | null> {
+  const pieces = pending.flatMap(({ hash, chunks }) => chunks.map((content, chunkIndex) => ({ hash, chunkIndex, content })));
+  const texts = pieces.map((piece) => piece.content);
+  const order = texts.map((_, at) => at).sort((a, b) => texts[a]!.length - texts[b]!.length);
+  const embedded = await embedDocuments(
+    embedder,
+    order.map((at) => texts[at]!),
+    plotLanguage,
+  );
+  if (!embedded) return null;
+  const vectors: number[][] = new Array(texts.length);
+  order.forEach((at, position) => {
+    vectors[at] = embedded.vectors[position]!;
+  });
+  return { model: embedded.model, rows: pieces.map((piece, at) => ({ ...piece, embedding: vectors[at]! })) };
 }
 
 /**
@@ -180,11 +306,42 @@ function candidateContents(entries: readonly LoreEntry[], settings: LoreSettings
  * plot's model yet, and lets go of the rows no entry says any more. Called
  * after every write that can change the lore — the plot's book, a member's
  * card, the roster's order (the first member's settings are the book's), a
- * module — and by a request that found an entry without one.
+ * module — by a request that found an entry without one, and when the plot's
+ * alias pass ends.
  */
 export function scheduleLoreEmbedding(deps: AppDeps, plotId: string): void {
   if (!deps.embedder) return;
   runGuarded(deps, `lore:${plotId}`, () => embedPlotLore(deps, plotId));
+}
+
+/**
+ * The plot's Korean alias pass (`loreAliases.ts` `aliasPlotLore`) on `owner`'s
+ * auxiliary model, one at a time per plot, and its lore vectors brought up to
+ * date when it wrote aliases or gave up — what the search stands in for has
+ * changed, or waited for it in vain. A pass that is backing off changes nothing.
+ */
+export function scheduleLoreAliases(deps: AppDeps, plotId: string, owner: AuxiliaryOwner): void {
+  if (!loreAliasesEnabled(deps.env)) return;
+  runGuarded(
+    deps,
+    `aliases:${plotId}`,
+    async () => {
+      const result = await aliasPlotLore(deps, plotId, owner);
+      if (result.written > 0 || result.skipped === 'failed' || result.skipped === 'no_model') {
+        scheduleLoreEmbedding(deps, plotId);
+      }
+    },
+    'aliases',
+  );
+}
+
+/**
+ * Everything a write that can change a plot's lore starts: its aliases, on its
+ * creator's auxiliary model, and its vectors.
+ */
+export function scheduleLoreUpdate(deps: AppDeps, plotId: string, ownerId: string): void {
+  scheduleLoreAliases(deps, plotId, { userId: ownerId, subModel: null });
+  scheduleLoreEmbedding(deps, plotId);
 }
 
 async function embedPlotLore(deps: AppDeps, plotId: string): Promise<void> {
@@ -203,7 +360,8 @@ async function embedPlotLore(deps: AppDeps, plotId: string): Promise<void> {
     .where(eq(characters.plotId, plotId))
     .orderBy(asc(characters.orderIndex), asc(characters.createdAt));
   const { entries, settings } = workLore(plot.lorebook, members, plot.customUi?.modules);
-  const contents = candidateContents(entries, settings);
+  const { keep, asked } = await storedCandidates(deps, plotId, plot.language, model, entries, settings);
+  const contents = candidateContents(entries, keep);
 
   // What no entry says any more goes, whatever model made it.
   await deps.db
@@ -216,38 +374,52 @@ async function embedPlotLore(deps: AppDeps, plotId: string): Promise<void> {
   if (contents.size === 0) return;
 
   const current = await deps.db
-    .select({ hash: loreEntryVectors.contentHash })
+    .select({ hash: loreEntryVectors.contentHash, chunkIndex: loreEntryVectors.chunkIndex, content: loreEntryVectors.content })
     .from(loreEntryVectors)
     .where(and(eq(loreEntryVectors.plotId, plotId), eq(loreEntryVectors.model, model)));
-  const done = new Set(current.map((row) => row.hash));
-  const pending = [...contents].filter(([hash]) => !done.has(hash));
+  // While the plot's alias pass runs, what the search stands in for until the
+  // aliases land waits for it — the pass asks for this one again as it ends —
+  // so an import does not embed what its aliases are about to cover.
+  const wanted = deps.embeddingVectors.has(`aliases:${plotId}`) ? candidateContents(entries, asked) : contents;
+  const pending = pendingLore(wanted, current);
   if (pending.length === 0) return;
 
-  const embedded = await embedDocuments(
-    embedder,
-    pending.map(([, content]) => content),
-    plot.language,
-  );
+  const embedded = await embedLore(embedder, pending, plot.language);
   if (!embedded) return;
-  await deps.db
-    .insert(loreEntryVectors)
-    .values(
-      pending.map(([contentHash, content], at) => ({
-        plotId,
-        contentHash,
-        content,
-        model: embedded.model,
-        embedding: embedded.vectors[at]!,
-      })),
-    )
-    .onConflictDoUpdate({
-      target: [loreEntryVectors.plotId, loreEntryVectors.contentHash],
-      set: {
-        content: sql`excluded.content`,
-        model: sql`excluded.model`,
-        embedding: sql`excluded.embedding`,
-      },
-    });
+  await deps.db.transaction(async (tx) => {
+    // An entry's pieces are replaced whole: a cut of fewer pieces leaves none of the old behind.
+    await tx.delete(loreEntryVectors).where(
+      and(
+        eq(loreEntryVectors.plotId, plotId),
+        inArray(
+          loreEntryVectors.contentHash,
+          pending.map(({ hash }) => hash),
+        ),
+      ),
+    );
+    for (let at = 0; at < embedded.rows.length; at += LORE_ROWS_PER_INSERT) {
+      await tx
+        .insert(loreEntryVectors)
+        .values(
+          embedded.rows.slice(at, at + LORE_ROWS_PER_INSERT).map((row) => ({
+            plotId,
+            contentHash: row.hash,
+            chunkIndex: row.chunkIndex,
+            content: row.content,
+            model: embedded.model,
+            embedding: row.embedding,
+          })),
+        )
+        .onConflictDoUpdate({
+          target: [loreEntryVectors.plotId, loreEntryVectors.contentHash, loreEntryVectors.chunkIndex],
+          set: {
+            content: sql`excluded.content`,
+            model: sql`excluded.model`,
+            embedding: sql`excluded.embedding`,
+          },
+        });
+    }
+  });
 }
 
 /**
@@ -299,7 +471,17 @@ async function embedReaderLore(deps: AppDeps, userId: string, plotId: string): P
     return own?.lorebook ? overlaidCard(member.card, own).lorebook : [];
   });
   const entries = [...rewritten, ...modules.flatMap((row) => row.module.lorebook)];
-  const contents = candidateContents(entries, members[0]?.card.loreSettings);
+  // The book is judged whole — the work's lore with the reader's — as the search judges it.
+  const work = await loadWorkLore(deps, plotId);
+  const { keep } = await storedCandidates(
+    deps,
+    plotId,
+    plot.language,
+    model,
+    [...(work?.entries ?? []), ...entries],
+    members[0]?.card.loreSettings,
+  );
+  const contents = candidateContents(entries, keep);
   if (contents.size > 0) {
     // What the work's own rows hold is searched there.
     const shared = await deps.db
@@ -322,38 +504,47 @@ async function embedReaderLore(deps: AppDeps, userId: string, plotId: string): P
   if (contents.size === 0) return;
 
   const current = await deps.db
-    .select({ hash: readerLoreVectors.contentHash })
+    .select({ hash: readerLoreVectors.contentHash, chunkIndex: readerLoreVectors.chunkIndex, content: readerLoreVectors.content })
     .from(readerLoreVectors)
     .where(and(mine, eq(readerLoreVectors.model, model)));
-  const done = new Set(current.map((row) => row.hash));
-  const pending = [...contents].filter(([hash]) => !done.has(hash));
+  const pending = pendingLore(contents, current);
   if (pending.length === 0) return;
-  const embedded = await embedDocuments(
-    embedder,
-    pending.map(([, content]) => content),
-    plot.language,
-  );
+  const embedded = await embedLore(embedder, pending, plot.language);
   if (!embedded) return;
-  await deps.db
-    .insert(readerLoreVectors)
-    .values(
-      pending.map(([contentHash, content], at) => ({
-        userId,
-        plotId,
-        contentHash,
-        content,
-        model: embedded.model,
-        embedding: embedded.vectors[at]!,
-      })),
-    )
-    .onConflictDoUpdate({
-      target: [readerLoreVectors.userId, readerLoreVectors.plotId, readerLoreVectors.contentHash],
-      set: {
-        content: sql`excluded.content`,
-        model: sql`excluded.model`,
-        embedding: sql`excluded.embedding`,
-      },
-    });
+  await deps.db.transaction(async (tx) => {
+    await tx.delete(readerLoreVectors).where(
+      and(
+        mine,
+        inArray(
+          readerLoreVectors.contentHash,
+          pending.map(({ hash }) => hash),
+        ),
+      ),
+    );
+    for (let at = 0; at < embedded.rows.length; at += LORE_ROWS_PER_INSERT) {
+      await tx
+        .insert(readerLoreVectors)
+        .values(
+          embedded.rows.slice(at, at + LORE_ROWS_PER_INSERT).map((row) => ({
+            userId,
+            plotId,
+            contentHash: row.hash,
+            chunkIndex: row.chunkIndex,
+            content: row.content,
+            model: embedded.model,
+            embedding: row.embedding,
+          })),
+        )
+        .onConflictDoUpdate({
+          target: [readerLoreVectors.userId, readerLoreVectors.plotId, readerLoreVectors.contentHash, readerLoreVectors.chunkIndex],
+          set: {
+            content: sql`excluded.content`,
+            model: sql`excluded.model`,
+            embedding: sql`excluded.embedding`,
+          },
+        });
+    }
+  });
 }
 
 /* --------------------------------------------------------------- messages */
@@ -459,8 +650,11 @@ const similarity = (
 /**
  * The search a request runs before its prompt is put together: one query from
  * the newest turns the model may read, for the lore that activates by meaning
- * and for the chat's earlier messages. Nothing to search — no marked entry, the
- * retrieval off — asks nothing of the embedder. Never throws.
+ * and for the chat's earlier messages. Nothing to search — no candidate entry
+ * (`vectorLoreSearch`), the retrieval off — asks nothing of the embedder. The
+ * book's Korean aliases come with it (`loreAliasesFor`), embedder or not, and a
+ * keyed entry without them yet starts the plot's alias pass on the reader's
+ * auxiliary model. Never throws.
  */
 export async function searchByMeaning(
   deps: AppDeps,
@@ -474,15 +668,30 @@ export async function searchByMeaning(
   },
 ): Promise<VectorSearch> {
   const { vectors, branch } = input;
-  const embedder = deps.embedder;
-  const model = vectors && embedder ? embedder.modelFor(vectors.plotLanguage) : null;
-  if (!vectors || !embedder || !model) return NOTHING;
-
+  if (!vectors) return NOTHING;
   // The lore the assembler will read: the work's, the members on the stage's —
   // not the chat's own, which its scripts write — under the first member's settings.
   const onStage = input.characters.filter((member) => !member.absent);
   const { entries } = workLore(input.plot.lorebook, onStage, input.plot.modules);
-  const contents = candidateContents(entries, input.characters[0]?.card.loreSettings);
+  const settings = input.characters[0]?.card.loreSettings;
+
+  const aliases = await loreAliasesFor(deps, vectors, entries);
+  if (aliases?.pending && vectors.userId) {
+    scheduleLoreAliases(deps, vectors.plotId, { userId: vectors.userId, subModel: vectors.subModel ?? null });
+  }
+  const none: VectorSearch = aliases ? { ...NOTHING, loreAliases: aliases.lookup } : NOTHING;
+
+  const embedder = deps.embedder;
+  const model = embedder ? embedder.modelFor(vectors.plotLanguage) : null;
+  if (!embedder || !model) return none;
+  const lore = vectorLoreSearch({
+    model,
+    entries,
+    settings,
+    ...(vectors.conversationLanguage ? { crossLanguage: vectors.conversationLanguage } : {}),
+    ...(aliases ? { aliased: aliases.aliased } : {}),
+  });
+  const contents = lore ? candidateContents(entries, lore.candidate) : new Map<string, LoreEntry>();
 
   // ST's `coreChat`: what the model may read. Too short a chat brings nothing
   // back — every message of it is protected.
@@ -490,13 +699,13 @@ export async function searchByMeaning(
   const eligible = vectors.retrieval && visible.length >= RETRIEVAL_DEFAULTS.protect
     ? visible.slice(0, -RETRIEVAL_DEFAULTS.protect)
     : [];
-  if (contents.size === 0 && eligible.length === 0) return NOTHING;
+  if (contents.size === 0 && eligible.length === 0) return none;
   // ST's query counts are one setting for both, so one query serves both.
   const query = vectorQueryText(
     visible.map((message) => stripImageMacros(message.content)),
     Math.max(VECTOR_LORE.query, RETRIEVAL_DEFAULTS.query),
   );
-  if (!query) return NOTHING;
+  if (!query) return none;
 
   let vector: number[];
   try {
@@ -505,48 +714,53 @@ export async function searchByMeaning(
       kind: 'query',
       timeoutMs: QUERY_EMBED_TIMEOUT_MS,
     });
-    if (embedded.model !== model || !embedded.vectors[0]) return NOTHING;
+    if (embedded.model !== model || !embedded.vectors[0]) return none;
     vector = embedded.vectors[0];
   } catch (error) {
     console.warn('[vectors] the search could not embed its query; lore by keyword only, no retrieval', error);
-    return NOTHING;
+    return none;
   }
 
   try {
     const [found, retrieval] = await Promise.all([
-      contents.size > 0 ? activatedLore(deps, vectors, model, contents, vector) : null,
+      lore && contents.size > 0 ? activatedLore(deps, vectors, model, contents, vector, lore) : null,
       eligible.length > 0 ? retrievedMessages(deps, model, eligible, vector, input) : null,
     ]);
     return {
-      ...(found ? { vectorLore: (entry: LoreEntry) => isVectorLoreCandidate(entry, input.characters[0]?.card.loreSettings) && found.has(textHash(entry.content)) } : {}),
+      ...none,
+      ...(found && lore ? { vectorLore: (entry: LoreEntry) => lore.candidate(entry) && found.has(textHash(entry.content)) } : {}),
       ...(retrieval?.text ? { retrievalText: retrieval.text } : {}),
       retrieved: retrieval?.ids ?? new Set(),
     };
   } catch (error) {
     console.warn('[vectors] the search failed; lore by keyword only, no retrieval', error);
-    return NOTHING;
+    return none;
   }
 }
 
 /**
  * ST's `activateWorldInfo` over the one book: every candidate's similarity to
- * the query, the `maxEntries` best at or above the threshold — the work's rows
- * and the reader's own (`reader_lore_vectors`) together. A candidate with no
- * vector of the model yet is not found this time; the plot's lore and the
- * reader's are embedded again for the next.
+ * the query — its best piece's — the `maxEntries` best at or above the
+ * threshold (`search.bar`) —
+ * the work's rows and the reader's own (`reader_lore_vectors`) together. A
+ * candidate with no vector of the model yet is not found this time; the plot's
+ * lore and the reader's are embedded again for the next. Across languages, one
+ * chat in `COSINE_LOG_ONE_IN` logs its best cosines (`logCosines`).
  */
 async function activatedLore(
   deps: AppDeps,
-  plan: Pick<VectorPlan, 'plotId' | 'userId'>,
+  plan: Pick<VectorPlan, 'plotId' | 'userId' | 'chatId' | 'plotLanguage' | 'conversationLanguage'>,
   model: string,
-  contents: ReadonlyMap<string, string>,
+  contents: ReadonlyMap<string, LoreEntry>,
   vector: number[],
+  search: { bar: VectorLoreBar; fallback: boolean },
 ): Promise<Set<string>> {
   const { plotId, userId } = plan;
   const hashes = [...contents.keys()];
+  // An entry scores its best piece's similarity.
   const [work, own] = await Promise.all([
     deps.db
-      .select({ hash: loreEntryVectors.contentHash, score: similarity(loreEntryVectors.embedding, vector) })
+      .select({ hash: loreEntryVectors.contentHash, score: sql<number>`max(${similarity(loreEntryVectors.embedding, vector)})` })
       .from(loreEntryVectors)
       .where(
         and(
@@ -554,10 +768,11 @@ async function activatedLore(
           eq(loreEntryVectors.model, model),
           inArray(loreEntryVectors.contentHash, hashes),
         ),
-      ),
+      )
+      .groupBy(loreEntryVectors.contentHash),
     userId
       ? deps.db
-          .select({ hash: readerLoreVectors.contentHash, score: similarity(readerLoreVectors.embedding, vector) })
+          .select({ hash: readerLoreVectors.contentHash, score: sql<number>`max(${similarity(readerLoreVectors.embedding, vector)})` })
           .from(readerLoreVectors)
           .where(
             and(
@@ -567,6 +782,7 @@ async function activatedLore(
               inArray(readerLoreVectors.contentHash, hashes),
             ),
           )
+          .groupBy(readerLoreVectors.contentHash)
       : Promise.resolve([]),
   ]);
   const scored = new Map<string, number>();
@@ -575,13 +791,38 @@ async function activatedLore(
     scheduleLoreEmbedding(deps, plotId);
     if (userId) scheduleReaderLoreEmbedding(deps, userId, plotId);
   }
-  return new Set(
-    [...scored]
-      .map(([hash, score]) => ({ hash, score }))
-      .sort((a, b) => b.score - a.score)
-      .filter((row) => row.score >= VECTOR_LORE.scoreThreshold)
-      .slice(0, VECTOR_LORE.maxEntries)
-      .map((row) => row.hash),
+  const ranked = [...scored].map(([hash, score]) => ({ hash, score })).sort((a, b) => b.score - a.score);
+  const picked = ranked.filter((row) => row.score >= search.bar.scoreThreshold).slice(0, search.bar.maxEntries);
+  logCosines(plan, model, ranked, picked.length, search);
+  return new Set(picked.map((row) => row.hash));
+}
+
+/**
+ * One line per search for a sample of the chats read across languages: the
+ * best three cosines, the bar, what it kept, of how many candidates, and
+ * whether it searched in place of aliases (`fallback`). The bar was set on
+ * synthetic two-turn windows; these are real turns, to set it again on.
+ */
+function logCosines(
+  plan: Pick<VectorPlan, 'chatId' | 'plotLanguage' | 'conversationLanguage'>,
+  model: string,
+  ranked: readonly { score: number }[],
+  picked: number,
+  search: { bar: VectorLoreBar; fallback: boolean },
+): void {
+  if (!plan.conversationLanguage || !plan.chatId) return;
+  if (Number.parseInt(textHash(plan.chatId).slice(0, 8), 16) % COSINE_LOG_ONE_IN !== 0) return;
+  console.log(
+    `[vectors] lore cosines ${JSON.stringify({
+      chat: plan.chatId,
+      model,
+      pair: `${plan.conversationLanguage}>${plan.plotLanguage}`,
+      top: ranked.slice(0, 3).map((row) => Math.round(row.score * 1000) / 1000),
+      bar: search.bar.scoreThreshold,
+      picked,
+      candidates: ranked.length,
+      fallback: search.fallback,
+    })}`,
   );
 }
 

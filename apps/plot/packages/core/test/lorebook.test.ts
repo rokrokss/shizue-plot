@@ -614,3 +614,85 @@ describe('activateLore - by meaning (SillyTavern vectorized entries)', () => {
     expect(asked).toEqual([chained, tower, tower]);
   });
 });
+
+describe('activateLore - aliases', () => {
+  const dumbledore = entry({ content: 'Albus Dumbledore, headmaster', keys: ['Dumbledore'] });
+  const aliasesOf =
+    (table: Map<LoreEntry, string[]>) =>
+    (candidate: LoreEntry): readonly string[] | undefined =>
+      table.get(candidate);
+
+  it('takes an alias for a primary key, RisuAI-style: case and spaces aside, inside a word with its particle', () => {
+    const aliases = aliasesOf(new Map([[dumbledore, ['덤블 도어', 'ALBUS교장']]]));
+    expect(contents(run([dumbledore], { history: ['덤블도어가 웃었다'] }))).toEqual([]);
+    for (const risuMatching of [false, true]) {
+      const hit = run([dumbledore], { history: ['덤블도어가 웃었다'], aliases, risuMatching });
+      expect(contents(hit)).toEqual([dumbledore.content]);
+      expect(hit.via.get(dumbledore)).toBe('keyword');
+      expect(hit.triggered).toHaveLength(1);
+    }
+    expect(contents(run([dumbledore], { history: ['albus 교장 선생님'], aliases }))).toEqual([dumbledore.content]);
+    expect(contents(run([dumbledore], { history: ['교장 선생님'], aliases }))).toEqual([]);
+  });
+
+  it("ignores the entry's own regex, case and whole-word settings on both engines", () => {
+    const strict = { ...dumbledore, useRegex: true, caseSensitive: true, keys: ['^Dumbledore$'] };
+    const tavern = { ...dumbledore, sillyTavern: true as const, matchWholeWords: true, caseSensitive: true };
+    const aliases = aliasesOf(
+      new Map([
+        [strict, ['덤블도어']],
+        [tavern, ['덤블도어']],
+      ]),
+    );
+    expect(contents(run([strict], { history: ['덤블도어에게'], aliases }))).toEqual([dumbledore.content]);
+    // An entry SillyTavern wrote, in a RisuAI-run book and in a book ST runs.
+    expect(contents(run([tavern], { history: ['덤블도어에게'], aliases }))).toEqual([dumbledore.content]);
+    const st = run([tavern], { history: ['덤블도어에게'], aliases, sillyTavern: true, matchWholeWords: true });
+    expect(contents(st)).toEqual([dumbledore.content]);
+    expect(st.via.get(tavern)).toBe('keyword');
+    // Its own English key keeps ST's whole-word rule.
+    expect(contents(run([tavern], { history: ['Dumbledores'], sillyTavern: true }))).toEqual([]);
+  });
+
+  it('leaves the secondary keys their say, on both engines', () => {
+    const selective = { ...dumbledore, selective: true, secondaryKeys: ['wand'] };
+    const unless = { ...selective, selectiveLogic: 'not_any' as const };
+    const aliases = aliasesOf(
+      new Map([
+        [selective, ['덤블도어']],
+        [unless, ['덤블도어']],
+      ]),
+    );
+    for (const sillyTavern of [false, true]) {
+      expect(contents(run([selective], { history: ['덤블도어가 웃었다'], aliases, sillyTavern }))).toEqual([]);
+      expect(contents(run([selective], { history: ['덤블도어의 wand'], aliases, sillyTavern }))).toEqual([selective.content]);
+      expect(contents(run([unless], { history: ['덤블도어가 웃었다'], aliases, sillyTavern }))).toEqual([unless.content]);
+      expect(contents(run([unless], { history: ['덤블도어의 wand'], aliases, sillyTavern }))).toEqual([]);
+    }
+  });
+
+  it('is found in what recursion adds, and held back by a cooldown, as a key would be', () => {
+    const office = entry({ content: '덤블도어의 집무실은 탑 꼭대기에 있다', keys: ['집무실'] });
+    const aliases = aliasesOf(new Map([[dumbledore, ['덤블도어']]]));
+    for (const sillyTavern of [false, true]) {
+      const chained = run([office, dumbledore], { history: ['집무실로 가자'], aliases, recursiveScanning: true, sillyTavern });
+      expect(chained.via.get(dumbledore)).toBe('recursion');
+    }
+    const cooled = { ...dumbledore, cooldown: 3 };
+    const timed = { chatLength: 4, lastTriggered: { [loreEntryKey(cooled)]: 3 } };
+    const coolAliases = aliasesOf(new Map([[cooled, ['덤블도어']]]));
+    for (const sillyTavern of [false, true]) {
+      expect(contents(run([cooled], { history: ['덤블도어'], aliases: coolAliases, timed, sillyTavern }))).toEqual([]);
+    }
+  });
+
+  it('scores an alias hit as one more primary key in group scoring', () => {
+    const a = entry({ content: 'A', keys: ['Hogwarts', 'castle'], group: 'place', useGroupScoring: true });
+    const b = entry({ content: 'B', keys: ['Hogwarts'], group: 'place', useGroupScoring: true });
+    const aliases = aliasesOf(new Map([[b, ['호그와트']]]));
+    // Both match Hogwarts; b's alias is the second hit a has no castle for.
+    for (const sillyTavern of [false, true]) {
+      expect(contents(run([a, b], { history: ['Hogwarts 호그와트'], aliases, sillyTavern }))).toEqual(['B']);
+    }
+  });
+});

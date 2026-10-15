@@ -342,6 +342,11 @@ export interface AssemblePromptInput {
    * assembler, which never waits on an embedder. Absent: none.
    */
   vectorLore?: (entry: LoreEntry) => boolean;
+  /**
+   * Keys in the reader's language for entries whose own keys are not — the
+   * API's Korean aliases (`ActivateLoreInput.aliases`). Absent: none.
+   */
+  loreAliases?: (entry: LoreEntry) => readonly string[] | undefined;
   /** The names this chat's open images go by, for {{assetlist}} (`MacroContext.assetNames`). */
   assetNames?: readonly string[];
   contextBudget?: number;
@@ -870,6 +875,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     injections = {},
     loreState,
     vectorLore,
+    loreAliases,
     assetNames,
     userName = DEFAULT_USER_NAME,
     contextBudget = DEFAULT_CONTEXT_BUDGET,
@@ -1196,6 +1202,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     textOf: expandLore,
     ...(loreState ? { timed: loreState } : {}),
     ...(vectorLore ? { vectorMatched: vectorLore } : {}),
+    ...(loreAliases ? { aliases: loreAliases } : {}),
     ...(tavernBook ? { sillyTavern: true } : {}),
     ...(generationType ? { trigger: generationType } : {}),
     ...(asked

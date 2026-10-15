@@ -23,6 +23,8 @@ import {
   DEFAULT_SUMMARIZATION_INSTRUCTION,
   IMAGE_ATTACHED_PLACEHOLDER,
   loreEntryKey,
+  LORE_ALIAS_PROMPT,
+  LORE_CHUNK_TOKENS,
   MAX_ASSETS,
   MAX_BACKGROUND_HTML_LENGTH,
   MAX_CHARACTERS_PER_PLOT,
@@ -71,6 +73,7 @@ import {
   feedCursors,
   follows,
   jobs,
+  loreEntryAliases,
   loreEntryVectors,
   messageChunks,
   memories,
@@ -137,6 +140,7 @@ import {
   type JobHandlers,
 } from '../src/jobs.js';
 import type { Embedder } from '../src/embedder.js';
+import { aliasHash } from '../src/loreAliases.js';
 import { BACKFILL_BATCHES_PER_RUN, embedPendingSummaries } from '../src/memory.js';
 import { refreshSearchVectors, resetSearchSweeps } from '../src/search.js';
 import { createJobHandlers, notificationFanout } from '../src/notifications.js';
@@ -18055,6 +18059,241 @@ describe('vector storage (SillyTavern)', () => {
     const prompt = await send(cookie, chatId, '그 등대 기억나?', harness);
     expect(prompt.system).not.toContain('Past events');
     expect(prompt.system).not.toContain(KEEPER);
+  });
+
+  it('embeds a long entry in pieces under its header, and finds it by its best piece', async () => {
+    const cookie = await signUp('vectors-chunks@example.com');
+    const { plotId, chatId } = await setupChat(cookie);
+    const embedder = conceptEmbedder();
+    const harness = vectorApp(embedder);
+    const paragraph = (sentence: string) => `${sentence} `.repeat(60).trim();
+    const LONG = `${paragraph('The keeper climbs the stairs.')}\n\n${paragraph('The old map hangs by the door.')}`;
+    const long = lore({ name: 'North Light', keys: ['lighthouse'], content: LONG, insertionOrder: 3, vectorized: true });
+    await setLore(cookie, plotId, [long], harness);
+
+    const rows = await db
+      .select()
+      .from(loreEntryVectors)
+      .where(eq(loreEntryVectors.plotId, plotId))
+      .orderBy(asc(loreEntryVectors.chunkIndex));
+    expect(rows.length).toBeGreaterThan(1);
+    expect(rows.map((row) => row.chunkIndex)).toEqual(rows.map((_, at) => at));
+    expect(rows.every((row) => row.content.startsWith('North Light — lighthouse\n'))).toBe(true);
+    expect(rows.every((row) => countTokens(row.content) <= LORE_CHUNK_TOKENS + 2)).toBe(true);
+    // Only its later pieces speak of the map, and the entry is found by them.
+    expect((await send(cookie, chatId, '지도를 보여 줘', harness)).system).toContain('The old map hangs by the door.');
+    // Saved again as it is, nothing is embedded again.
+    const documents = embedder.calls.filter((call) => call.kind === 'document').length;
+    await setLore(cookie, plotId, [long], harness);
+    expect(embedder.calls.filter((call) => call.kind === 'document').length).toBe(documents);
+  });
+
+  describe('Korean aliases', () => {
+    /** What the alias model answers for each English key. */
+    const KOREAN: Record<string, string[]> = { lighthouse: ['등대'], map: ['옛 지도', '지도'] };
+    /** The alias call's answer from `KOREAN`, numbered as it asked. */
+    const dictionary = (user: string): string => {
+      const answer: Record<string, string[]> = {};
+      for (const match of user.matchAll(/^\[(\d+)\] keys: (.*)$/gm)) {
+        answer[match[1]!] = (JSON.parse(match[2]!) as string[]).flatMap((key) => KOREAN[key] ?? []);
+      }
+      return JSON.stringify(answer);
+    };
+    const RULE = 'Visitors sign the logbook.';
+    const rule = lore({ constant: true, content: RULE });
+
+    /** `vectorApp` whose auxiliary model answers the alias prompt (`answer`), every call it gets recorded. */
+    function aliasApp(options: { answer?: (user: string) => string; embedder?: Embedder; env?: NodeJS.ProcessEnv } = {}) {
+      const prompts: Captured[] = [];
+      const asked: string[] = [];
+      const pending: Promise<void>[] = [];
+      const echo = createEchoAdapter();
+      const answer = options.answer ?? dictionary;
+      const deps = makeDeps({
+        env: options.env ?? {},
+        getAdapter: (modelId) =>
+          modelId === 'echo/echo'
+            ? {
+                providerModel: 'echo',
+                adapter: {
+                  stream: (req) => {
+                    prompts.push({ system: req.system, messages: req.messages });
+                    return echo.stream(req);
+                  },
+                },
+              }
+            : {
+                providerModel: 'alias-stub',
+                adapter: {
+                  stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
+                    if (req.system === LORE_ALIAS_PROMPT) {
+                      const user = contentText(req.messages[0]!.content);
+                      asked.push(user);
+                      const text = answer(user);
+                      if (text) yield { type: 'text', text };
+                    }
+                    return { usage: { promptTokens: 0, completionTokens: 0 } };
+                  },
+                },
+              },
+        onBackgroundTask: (task) => {
+          pending.push(task);
+        },
+        ...(options.embedder ? { embedder: options.embedder } : {}),
+      });
+      return {
+        app: createApp(deps),
+        prompts,
+        asked,
+        settle: async () => {
+          while (pending.length > 0) await Promise.all(pending.splice(0));
+        },
+      };
+    }
+    type AliasHarness = ReturnType<typeof aliasApp>;
+
+    const storedAliases = async (plotId: string) =>
+      (await db.select().from(loreEntryAliases).where(eq(loreEntryAliases.plotId, plotId)))
+        .map((row) => row.aliases)
+        .sort((a, b) => a.join().localeCompare(b.join()));
+
+    /** An English work holding `book`, saved through `harness`, and a Korean reader's chat on it. */
+    async function englishWork(cookie: string, harness: AliasHarness, book: unknown[]): Promise<{ plotId: string; chatId: string }> {
+      const plot = await publishablePlot(cookie, { language: 'en', intros: ['Hello there.'] });
+      await setLore(cookie, plot.id, book, harness);
+      const started = await withLocale(cookie, '/api/chats', 'ko', { plotId: plot.id, model: 'echo/echo' }, harness.app);
+      expect(started.status, await started.clone().text()).toBe(201);
+      await harness.settle();
+      return { plotId: plot.id, chatId: (await readJson(started)).chat.id };
+    }
+
+    async function sendAs(cookie: string, chatId: string, content: string, locale: string, harness: AliasHarness): Promise<Captured> {
+      const res = await withLocale(cookie, `/api/chats/${chatId}/messages`, locale, { content }, harness.app);
+      expect((await readSse(res)).at(-1)!.event).toBe('done');
+      await harness.settle();
+      return harness.prompts.at(-1)!;
+    }
+
+    it("writes a work's aliases after an edit, apart from its book, and asks again only for what changed", async () => {
+      const cookie = await signUp('aliases-pass@example.com');
+      const harness = aliasApp();
+      const plot = await publishablePlot(cookie, { language: 'en' });
+      await setLore(cookie, plot.id, [tower, map, rule], harness);
+      expect(harness.asked).toHaveLength(1);
+      expect(harness.asked[0]).toMatch(/^\[1\] keys: \["lighthouse"\]/);
+      // An always-on entry has nothing to be found by.
+      expect(harness.asked[0]).not.toContain(RULE);
+      expect(await storedAliases(plot.id)).toEqual([['등대'], ['옛 지도', '지도']]);
+
+      // The same book again asks nothing; an edited entry is asked again, alone, and its old row goes.
+      await setLore(cookie, plot.id, [tower, map, rule], harness);
+      expect(harness.asked).toHaveLength(1);
+      await setLore(cookie, plot.id, [{ ...tower, content: `${TOWER} Twice a night.` }, map, rule], harness);
+      expect(harness.asked).toHaveLength(2);
+      expect(harness.asked[1]).toContain('"lighthouse"');
+      expect(harness.asked[1]).not.toContain('"map"');
+      expect(await storedAliases(plot.id)).toHaveLength(2);
+
+      // Derived: never in the work, nor in what it exports.
+      expect(JSON.stringify((await readPlot(cookie, plot.id)).lorebook)).not.toContain('등대');
+      const member = await firstMember(cookie, plot.id);
+      const exported = await request(cookie, `/api/plots/${plot.id}/characters/${member.id}/export?format=json`);
+      expect(exported.status).toBe(200);
+      const card = await exported.text();
+      expect(card).toContain('lighthouse');
+      expect(card).not.toContain('등대');
+    });
+
+    it('makes none for a Korean work, a book with Korean keys, or with LORE_ALIASES=off', async () => {
+      const cookie = await signUp('aliases-none@example.com');
+      const harness = aliasApp();
+      const korean = await publishablePlot(cookie, {});
+      await setLore(cookie, korean.id, [tower, map], harness);
+      const keyed = await publishablePlot(cookie, { language: 'en' });
+      await setLore(cookie, keyed.id, [{ ...tower, keys: ['lighthouse', '등대'] }, map], harness);
+      const off = aliasApp({ env: { LORE_ALIASES: 'off' } });
+      const english = await publishablePlot(cookie, { language: 'en' });
+      await setLore(cookie, english.id, [tower, map], off);
+      expect(harness.asked).toEqual([]);
+      expect(off.asked).toEqual([]);
+      expect(await db.select().from(loreEntryAliases)).toEqual([]);
+    });
+
+    it("activates an English entry by its Korean alias in a Korean reader's instruct mode, and only there", async () => {
+      const cookie = await signUp('aliases-instruct@example.com');
+      const harness = aliasApp();
+      const { chatId } = await englishWork(cookie, harness, [tower, map, rule]);
+
+      let prompt = await sendAs(cookie, chatId, '등대에 가 보자', 'ko', harness);
+      expect(prompt.system).toContain(TOWER);
+      expect(prompt.system).not.toContain(MAP);
+      expect(prompt.system).toContain(RULE);
+      // Read in English, the turns go by the keys as written.
+      prompt = await sendAs(cookie, chatId, '등대에 가 보자', 'en', harness);
+      expect(prompt.system).not.toContain(TOWER);
+      // Translated, the turns stand in the work's language: no aliases there either.
+      const patched = await json(cookie, `/api/chats/${chatId}`, 'PATCH', { translation: { mode: 'translate' } }, harness.app);
+      expect(patched.status).toBe(200);
+      prompt = await sendAs(cookie, chatId, '등대에 가 보자', 'ko', harness);
+      expect(prompt.system).not.toContain(TOWER);
+    });
+
+    it("starts the pass from a Korean reader's chat on a work without aliases, and from a turn that finds them gone", async () => {
+      const owner = await signUp('aliases-owner@example.com');
+      const reader = await signUp('aliases-reader@example.com');
+      const harness = aliasApp();
+      const plot = await publishablePlot(owner, { language: 'en', intros: ['Hello there.'] });
+      // A public work saved before the pass existed.
+      await db
+        .update(plots)
+        .set({ lorebook: [tower, map] as never, visibility: 'public', publishedAt: new Date() })
+        .where(eq(plots.id, plot.id));
+      const started = await withLocale(reader, '/api/chats', 'ko', { plotId: plot.id, model: 'echo/echo' }, harness.app);
+      expect(started.status, await started.clone().text()).toBe(201);
+      await harness.settle();
+      expect(harness.asked).toHaveLength(1);
+      expect(await storedAliases(plot.id)).toHaveLength(2);
+      const chatId = (await readJson(started)).chat.id;
+      expect((await sendAs(reader, chatId, '옛 지도를 펼쳤다', 'ko', harness)).system).toContain(MAP);
+
+      // Gone: that turn goes by the keys alone, and asks for them again.
+      await db.delete(loreEntryAliases).where(eq(loreEntryAliases.plotId, plot.id));
+      expect((await sendAs(reader, chatId, '옛 지도를 펼쳤다', 'ko', harness)).system).not.toContain(MAP);
+      expect(harness.asked).toHaveLength(2);
+      expect((await sendAs(reader, chatId, '옛 지도를 펼쳤다', 'ko', harness)).system).toContain(MAP);
+    });
+
+    it('stands in by meaning for the keyed entries until their aliases land, and goes quiet after', async () => {
+      const cookie = await signUp('aliases-fallback@example.com');
+      const embedder = conceptEmbedder('KURE-v1');
+      // The auxiliary model answers nothing, so no alias lands.
+      const harness = aliasApp({ embedder, answer: () => '' });
+      const { plotId, chatId } = await englishWork(cookie, harness, [tower, map, rule]);
+      // The keyed entries are embedded for the search; the always-on one is not.
+      expect((await storedLore(plotId)).map((row) => row.content).sort()).toEqual([MAP, TOWER].sort());
+      expect(await storedAliases(plotId)).toEqual([]);
+      const prompt = await sendAs(cookie, chatId, '등대까지 걸어가 보자', 'ko', harness);
+      expect(prompt.system).toContain(TOWER);
+      expect(prompt.system).not.toContain(MAP);
+
+      // The aliases land: the alias carries the entry, and nothing is searched.
+      const landed = [
+        { keys: ['lighthouse'], content: TOWER },
+        { keys: ['map'], content: MAP },
+      ];
+      await db.insert(loreEntryAliases).values(
+        landed.map((entry) => ({
+          plotId,
+          sourceHash: aliasHash(entry),
+          language: 'ko' as const,
+          aliases: KOREAN[entry.keys[0]!]!,
+          model: 'alias-stub',
+        })),
+      );
+      const queries = embedder.calls.filter((call) => call.kind === 'query').length;
+      expect((await sendAs(cookie, chatId, '등대까지 걸어가 보자', 'ko', harness)).system).toContain(TOWER);
+      expect(embedder.calls.filter((call) => call.kind === 'query').length).toBe(queries);
+    });
   });
 });
 

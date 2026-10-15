@@ -680,7 +680,7 @@ export type AuxiliaryOwner = Pick<Chat, 'userId' | 'subModel'>;
  * chat's own — so the default there is `MEMORY_MODEL`, or `test/memory`. A pick
  * is still checked against the catalog, which is how a vanished one is tested.
  */
-export async function auxiliaryModelOf(deps: AppDeps, owner: AuxiliaryOwner): Promise<string> {
+export async function auxiliaryModelOf(deps: Pick<AppDeps, 'env' | 'chatgpt'>, owner: AuxiliaryOwner): Promise<string> {
   const catalog = await listEnabledModels(deps.env, deps.chatgpt?.accounts.forUser(owner.userId));
   if (owner.subModel) {
     if (catalog.some((model) => model.id === owner.subModel)) return owner.subModel;
@@ -700,7 +700,7 @@ export async function auxiliaryModelOf(deps: AppDeps, owner: AuxiliaryOwner): Pr
  * (`auxiliaryModelOf`). A signed-out owner disables background work.
  */
 export async function memoryChannel(
-  deps: AppDeps,
+  deps: Pick<AppDeps, 'env' | 'chatgpt' | 'getAdapter'>,
   owner: AuxiliaryOwner,
 ): Promise<{ adapter: LLMAdapter; providerModel: string } | null> {
   let modelId = "chatgpt";
