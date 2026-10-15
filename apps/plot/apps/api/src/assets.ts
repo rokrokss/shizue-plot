@@ -113,16 +113,40 @@ export async function saveAsset(
     audio = false,
     video = false,
     font = false,
-  }: { audio?: boolean; video?: boolean; font?: boolean } = {},
+    key: keyOf = assetKey,
+  }: {
+    audio?: boolean;
+    video?: boolean;
+    font?: boolean;
+    /** Where it goes in the store: a plot asset's key unless told otherwise (a reader module's picture). */
+    key?: (assetId: string, ext: string) => string;
+  } = {},
 ): Promise<StoredAsset | null> {
   const type = sniffMedia(bytes) ?? (font ? sniffFont(bytes) : null);
   if (!type) return null;
   if ('kind' in type && ((type.kind === 'audio' && !audio) || (type.kind === 'video' && !video))) return null;
   const stored = type.ext === 'png' ? stripPngTextChunks(bytes) : bytes;
   if (!stored) return null;
-  const key = assetKey(assetId, type.ext);
+  const key = keyOf(assetId, type.ext);
   await storage.put(key, stored, type.mime);
   return { key, mime: type.mime };
+}
+
+/**
+ * The name a by-name route's path asks for (`localizeAssets.ts`): after
+ * `/assets/by-name/`, `<host>/<path>` is the asset named `https://<host>/<path>`
+ * — a scheme the renderer wrote in front of the host, from a variable, is passed
+ * over, and percent-encoding is read where it is that.
+ */
+export function byNameOf(path: string): string {
+  const marker = '/assets/by-name/';
+  const raw = path.slice(path.indexOf(marker) + marker.length).replace(/^(?:https?:)?\/+/i, '');
+  try {
+    return `https://${decodeURIComponent(raw).replace(/^(?:https?:)?\/+/i, '')}`;
+  } catch {
+    // Not percent-encoding after all: the name is as it came.
+    return `https://${raw}`;
+  }
 }
 
 /**

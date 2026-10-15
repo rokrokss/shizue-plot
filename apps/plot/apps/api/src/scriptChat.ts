@@ -44,6 +44,10 @@ export interface ScriptTurn {
   source: MessageSource;
   directions?: string;
   attachmentIds: string[];
+  /** SillyTavern's `{{bias}}` read off the turn (`messages.bias`). */
+  bias?: string;
+  /** Hidden from the AI: a turn that was only its bias, ST's system message. */
+  hidden?: boolean;
 }
 
 /** One message of the branch a run leaves. */
@@ -285,6 +289,8 @@ export async function applyScriptChat(
         content: turn.content,
         source: turn.source,
         ...(turn.directions ? { directions: turn.directions } : {}),
+        ...(turn.bias ? { bias: turn.bias } : {}),
+        ...(turn.hidden ? { hiddenFromPrompt: true } : {}),
       };
     }
     if (entry.kind === 'new') {

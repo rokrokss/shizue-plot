@@ -136,6 +136,12 @@ export interface MacroContext {
   data?: MacroHostData;
   /** SillyTavern's own macros, where the prompt has what they read. */
   tavern?: MacroTavernData;
+  /**
+   * The text is being stored, not sent (`expandTavernStored`): `data` is what
+   * its macros read, but it is not a prompt — `{{comment}}` and `{{file}}` stay
+   * as written for a screen to draw, as without `data`.
+   */
+  stored?: boolean;
 }
 
 /** Content languages a clock formats in — a plot's `language`. */
@@ -698,8 +704,9 @@ export interface TavernStored {
  * (`MacroTavernData.sillyTavern`), its variable macros run as ST runs them.
  * What they wrote comes back beside the text, over the maps given (which are
  * not touched), for the caller to keep where it keeps the message's variables
- * and the reader's. A macro this context cannot answer — one that reads the
- * chat or the card `data` would give it, an unknown one — stays as written.
+ * and the reader's. The card, the persona and the chat ST's macros read come in
+ * `ctx.data` (`tavernStoreData`); a macro the context cannot answer — one whose
+ * data it was not given, an unknown one — stays as written.
  */
 export function expandTavernStored(text: string, ctx: MacroContext): TavernStored {
   const variables = applyVariableDelta(ctx.variables ?? {}, null);
@@ -710,6 +717,7 @@ export function expandTavernStored(text: string, ctx: MacroContext): TavernStore
     ...(globals ? { globalVariables: globals } : {}),
     tavern: { ...ctx.tavern, sillyTavern: true },
     runVariableMacros: true,
+    stored: true,
   });
   return {
     text: expanded,
@@ -722,7 +730,7 @@ function expand(text: string, ctx: MacroContext, depth: number): string {
   if (!text || (!text.includes('{{') && !text.includes('<') && !text.includes('{#'))) return text;
   const rand = ctx.random ?? Math.random;
   const { variables, globalVariables, clock } = ctx;
-  const prompt = ctx.data !== undefined;
+  const prompt = ctx.data !== undefined && !ctx.stored;
   // RisuAI's draw needs both halves; the chat id alone is the older, per-position
   // rule — which is also SillyTavern's `{{pick}}`, one choice per chat and place.
   const risuSeed =

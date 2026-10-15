@@ -46,7 +46,19 @@ export const toAttachmentJson = (row: ChatAttachment) => ({
   width: row.width,
   height: row.height,
   thumbhash: row.thumbhash,
+  /** A text file's name (`TEXT_ATTACHMENT_MIME`); null for a picture. */
+  name: row.name,
 });
+
+/**
+ * What a text attachment is stored and served as. Only a SillyTavern chat import
+ * brings one — ST's attached files, every one text by the time ST keeps it — and
+ * the prompt reads its text (`withFileTexts`); the reader's composer still takes
+ * pictures alone.
+ */
+export const TEXT_ATTACHMENT_MIME = 'text/plain';
+
+export const isTextAttachment = (row: Pick<ChatAttachment, 'mime'>): boolean => row.mime === TEXT_ATTACHMENT_MIME;
 
 /**
  * Stores an attachment, under a key built from the row id so no user-supplied
@@ -67,6 +79,28 @@ export async function saveAttachment(
   const key = attachmentKey(attachmentId, type.ext);
   await storage.put(key, bytes, type.mime);
   return { key, mime: type.mime };
+}
+
+/**
+ * Stores a text attachment the way `saveAttachment` stores a picture, under a key
+ * built from the row id. Null for bytes that are not UTF-8 text, or that hold
+ * U+0000 — what the prompt could not carry.
+ */
+export async function saveTextAttachment(
+  storage: ObjectStorage,
+  attachmentId: string,
+  bytes: Uint8Array,
+): Promise<{ key: string; mime: string } | null> {
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+  if (text.includes('\u0000')) return null;
+  const key = attachmentKey(attachmentId, 'txt');
+  await storage.put(key, bytes, TEXT_ATTACHMENT_MIME);
+  return { key, mime: TEXT_ATTACHMENT_MIME };
 }
 
 /**
@@ -189,7 +223,9 @@ export async function withTurnImages(
 ): Promise<HistoryMessage[]> {
   const at = source.findLastIndex((message) => message.role === 'user');
   if (at < 0 || at >= history.length) return history;
-  const attachments = (await attachmentsByMessage(deps, [source[at]!.id])).get(source[at]!.id);
+  const attachments = (await attachmentsByMessage(deps, [source[at]!.id]))
+    .get(source[at]!.id)
+    ?.filter((attachment) => !isTextAttachment(attachment));
   if (!attachments?.length) return history;
   const noted = (skipped: number): HistoryMessage[] =>
     history.map((entry, index) =>
@@ -245,4 +281,52 @@ export async function attachmentImages(
     images.push(`data:${attachment.mime};base64,${bytes.toString('base64')}`);
   }
   return { images, skipped };
+}
+
+/**
+ * The branch's attached files folded into the turns that carry them, as
+ * SillyTavern sends them (`appendFileContent` in `chats.js`): every file's text,
+ * a blank line between, and a blank line before the turn's own words — on every
+ * turn of the history that has files, not only the one being answered, since ST
+ * does it for every message it sends. An earlier turn that carries pictures and
+ * has no words of its own says that pictures were attached (`withImageNote`), so
+ * it is never sent empty; the one being answered is `withTurnImages`' to say.
+ * Only an imported SillyTavern chat holds a file, or a turn with no words; any
+ * other branch passes through unchanged.
+ *
+ * `source` must be the array `history` was mapped from, one entry per message.
+ */
+export async function withFileTexts(
+  deps: AppDeps,
+  source: Message[],
+  history: HistoryMessage[],
+): Promise<HistoryMessage[]> {
+  const byMessage = await attachmentsByMessage(
+    deps,
+    source.map((message) => message.id),
+  );
+  if (byMessage.size === 0) return history;
+  // The turn being answered says its own pictures (`withTurnImages`).
+  const answered = source.findLastIndex((message) => message.role === 'user');
+  const out: HistoryMessage[] = [];
+  for (const [index, entry] of history.entries()) {
+    const attachments = byMessage.get(source[index]?.id ?? '');
+    if (!attachments) {
+      out.push(entry);
+      continue;
+    }
+    const texts: string[] = [];
+    for (const attachment of attachments.filter(isTextAttachment)) {
+      const object = await deps.storage.get(attachment.path);
+      // A file whose bytes are gone says nothing, as ST's failed download does.
+      if (!object) continue;
+      const text = (await readAll(object.body)).toString('utf8');
+      if (text) texts.push(text);
+    }
+    let content = texts.length > 0 ? `${texts.join('\n\n')}\n\n${entry.content}` : entry.content;
+    const pictures = attachments.length - attachments.filter(isTextAttachment).length;
+    if (!content.trim() && pictures > 0 && index !== answered) content = withImageNote(content, pictures);
+    out.push(content === entry.content ? entry : { ...entry, content });
+  }
+  return out;
 }

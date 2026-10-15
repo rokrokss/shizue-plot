@@ -9,14 +9,15 @@
  * World Info settings and its global prompt-only regex scripts on it, each
  * group plot's round settings and its members' 대화량, persona names and
  * descriptions, and the chats converted to our message shape in batches — with
- * each chat's variables, its author's note and that note's settings, and the
- * entries of the World Info file bound to it. The scan's own inputs —
+ * each chat's variables, its author's note and that note's settings, the
+ * entries of the World Info file bound to it, and the pictures and files its
+ * messages carried (`user/images/…`, `user/files/…`). The scan's own inputs —
  * `settings.json`, the rest of the backup — are never part of a request.
  *
  * Every API call goes through the injected `fetch`, and the core converters come
  * in through `ImportDeps`, so the whole flow runs in a test without a server.
  */
-import type { DisplayScript, ImportedChatMessage, LoreEntry, NormalizedCard } from '@shizue/core';
+import type { DisplayScript, ImportedAttachments, ImportedChatMessage, LoreEntry, NormalizedCard } from '@shizue/core';
 import { DEFAULT_GROUP_SETTINGS, DEFAULT_TALKATIVENESS } from '@shizue/core/group';
 import {
   FileTooLargeError,
@@ -34,6 +35,7 @@ import {
   type StWorldInfoSettings,
 } from '@shizue/core/sillytavern';
 import { ApiError, toApiError } from '../api';
+import { MAX_ATTACHMENTS } from '../attachments';
 import { readImportWarnings, type ImportWarning } from '../importWarnings';
 import {
   MAX_CARD_IMPORT_BYTES,
@@ -437,7 +439,7 @@ export function batchMessages(
   let current: ImportedChatMessage[] = [];
   // The array's brackets, then each element's bytes and the comma before it.
   let size = 2;
-  for (const message of messages) {
+  for (const message of messages.map(sendable)) {
     const bytes = jsonBytes(message);
     const grown = size + bytes + (current.length > 0 ? 1 : 0);
     if (current.length > 0 && (current.length >= maxMessages || grown > maxBytes)) {
@@ -462,13 +464,23 @@ function keepVersions(message: ImportedChatMessage, count: number): ImportedChat
     .slice(0, Math.max(count - 1, 0))
     .concat(message.selected)
     .sort((a, b) => a - b);
+  return { ...message, ...pickVersions(message, kept), selected: kept.indexOf(message.selected) };
+}
+
+/** The message's versions at `indexes`, with what each carries beside it (`extras`, `attachments`). */
+function pickVersions(
+  message: ImportedChatMessage,
+  indexes: number[],
+): Pick<ImportedChatMessage, 'versions' | 'extras' | 'attachments'> {
   return {
-    ...message,
-    versions: kept.map((index) => message.versions[index]!),
-    selected: kept.indexOf(message.selected),
-    ...(message.extras ? { extras: kept.map((index) => message.extras![index] ?? null) } : {}),
+    versions: indexes.map((index) => message.versions[index]!),
+    ...(message.extras ? { extras: indexes.map((index) => message.extras![index] ?? null) } : {}),
+    ...(message.attachments ? { attachments: indexes.map((index) => message.attachments![index] ?? null) } : {}),
   };
 }
+
+/** A message as a batch sends it: what it carries to be uploaded after (`attachments`) stays here. */
+const sendable = ({ attachments: _attachments, ...message }: ImportedChatMessage): ImportedChatMessage => message;
 
 /**
  * A message within the versions one imported message may carry: ST keeps every
@@ -610,7 +622,7 @@ export interface ImportDeps {
 export interface RunInput {
   manifest: Pick<
     StManifest,
-    'worlds' | 'globalWorlds' | 'globalRegex' | 'worldInfoSettings' | 'characters' | 'tagNames'
+    'worlds' | 'globalWorlds' | 'globalRegex' | 'worldInfoSettings' | 'characters' | 'tagNames' | 'attachments'
   >;
   steps: ImportStep[];
   options: ImportOptions;
@@ -1261,6 +1273,7 @@ async function runChat(
     const answer = await request<{ ids?: string[][] }>(ctx, 'POST', `/api/chats/${chatId}/import`, { messages: batch });
     ids.push(...(answer?.ids ?? []));
   }
+  await uploadAttachments(ctx, chatId, { messages, ids }, result);
   const close = async (): Promise<void> => {
     const done = await request<{ memoryBackfill: MemoryBackfill }>(
       ctx,
@@ -1278,6 +1291,60 @@ async function runChat(
   };
   if (!open) await close();
   return { sent: { chatId, messages, ids }, close };
+}
+
+/**
+ * The pictures and files a sent chat's messages carried (`ImportedAttachments`),
+ * onto the rows their versions became (`ids`): each read from the backup — or,
+ * for a file whose text ST kept on the message, that text — and uploaded as the
+ * row's attachment, files first (the prompt reads them), up to the cap of one
+ * message. One that cannot be read or is refused is counted, never failing the
+ * chat: its words came over all the same.
+ */
+async function uploadAttachments(
+  ctx: RunContext,
+  chatId: string,
+  sent: { messages: ImportedChatMessage[]; ids: string[][] },
+  result: StepResult,
+): Promise<void> {
+  let dropped = 0;
+  for (const [at, message] of sent.messages.entries()) {
+    for (const [version, attached] of (message.attachments ?? []).entries()) {
+      const messageId = sent.ids[at]?.[version];
+      if (!attached || !messageId) continue;
+      const items: ({ kind: 'file' } & ImportedAttachments['files'][number] | { kind: 'image'; path: string })[] = [
+        ...attached.files.map((file) => ({ kind: 'file' as const, ...file })),
+        ...attached.images.map((path) => ({ kind: 'image' as const, path })),
+      ];
+      dropped += Math.max(0, items.length - MAX_ATTACHMENTS);
+      for (const item of items.slice(0, MAX_ATTACHMENTS)) {
+        ctx.signal?.throwIfAborted();
+        try {
+          const file = item.path === undefined ? undefined : ctx.manifest.attachments[item.path];
+          const bytes =
+            item.kind === 'file' && item.text !== undefined
+              ? new TextEncoder().encode(item.text)
+              : file
+                ? await readFile(file)
+                : null;
+          if (!bytes) {
+            dropped += 1;
+            continue;
+          }
+          const form = new FormData();
+          form.set('messageId', messageId);
+          form.set('kind', item.kind);
+          if (item.kind === 'file') form.set('name', item.name);
+          form.set('file', new Blob([bytesPart(bytes)]), item.kind === 'file' ? item.name : baseName(item.path));
+          await request(ctx, 'POST', `/api/chats/${chatId}/import/attachments`, form);
+        } catch (caught) {
+          if (ctx.signal?.aborted) throw caught;
+          dropped += 1;
+        }
+      }
+    }
+  }
+  if (dropped > 0 && result.dropped) result.dropped = { ...result.dropped, attachments: result.dropped.attachments + dropped };
 }
 
 /** Two messages that read the same where a branch is matched against what it was made from. */
@@ -1327,12 +1394,7 @@ export function branchFork(
   }
   // Only the versions the message does not have yet, the one the branch went on from among them.
   const keep = ours.versions.map((_, index) => index).filter((index) => index === ours.selected || !theirs.versions.includes(ours.versions[index]!));
-  const own: ImportedChatMessage = {
-    ...ours,
-    versions: keep.map((index) => ours.versions[index]!),
-    selected: keep.indexOf(ours.selected),
-    ...(ours.extras ? { extras: keep.map((index) => ours.extras![index] ?? null) } : {}),
-  };
+  const own: ImportedChatMessage = { ...ours, ...pickVersions(ours, keep), selected: keep.indexOf(ours.selected) };
   return { parentId: above, tail: [own, ...branch.slice(shared + 1)], prefix };
 }
 
@@ -1381,6 +1443,7 @@ async function importBranch(
     ids.push(...answer.ids);
     under = answer.tail ?? under;
   }
+  await uploadAttachments(ctx, parent.chatId, { messages: tail, ids }, result);
   result.chatId = parent.chatId;
   result.notices = [{ code: 'chat_branch_merged', name: rootName }];
   delete result.warnings;
@@ -1429,12 +1492,7 @@ export async function forkInTree(
     }
     const have = new Set(kin.map((row) => row.sha256));
     const keep = ours.versions.map((_, index) => index).filter((index) => index === ours.selected || !have.has(hashes[index]!));
-    const own: ImportedChatMessage = {
-      ...ours,
-      versions: keep.map((index) => ours.versions[index]!),
-      selected: keep.indexOf(ours.selected),
-      ...(ours.extras ? { extras: keep.map((index) => ours.extras![index] ?? null) } : {}),
-    };
+    const own: ImportedChatMessage = { ...ours, ...pickVersions(ours, keep), selected: keep.indexOf(ours.selected) };
     return { parentId, tail: [own, ...branch.slice(at + 1)] };
   }
   return { parentId, tail: [] };
@@ -1472,18 +1530,21 @@ async function attachBranch(
   const { parentId, tail } = await forkInTree(tree.messages, messages);
   const batches = tail.length > 0 ? batchMessages(tail) : [[]];
   let under = parentId;
+  const ids: string[][] = [];
   for (const [at, batch] of batches.entries()) {
     ctx.signal?.throwIfAborted();
     const last = at === batches.length - 1;
-    const answer = await request<{ tail: string | null }>(ctx, 'POST', `/api/chats/${chatId}/import`, {
+    const answer = await request<{ ids?: string[][]; tail: string | null }>(ctx, 'POST', `/api/chats/${chatId}/import`, {
       messages: batch,
       branch: {
         parentId: under,
         ...(last ? { file: { fileName: baseName(item.chat.file.path), sha256: item.sha256 } } : {}),
       },
     });
+    ids.push(...(answer.ids ?? []));
     under = answer.tail ?? under;
   }
+  await uploadAttachments(ctx, chatId, { messages: tail, ids }, result);
   result.chatId = chatId;
   result.notices = [{ code: 'chat_branch_merged', name: rootName }];
   delete result.warnings;

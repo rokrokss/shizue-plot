@@ -290,6 +290,32 @@ export function renderImageTokensAsHtml(
   });
 }
 
+/**
+ * RisuAI's music and video in a message's own text, as its
+ * `parseAdditionalAssets` writes them wherever they stand — `{{video::…}}`,
+ * `{{video-img::…}}`, `{{audio::…}}`, `{{bgm::…}}`, and `{{asset::…}}` naming a
+ * video — their players (`mediaMarkup`), run before the text is cut into prose
+ * and markup (`markupChunks`) so the block holding one is drawn as the markup
+ * it now is. Pictures are left to `renderImageTokens`, and a macro standing in a
+ * tag or a stylesheet to `renderImageTokensAsHtml`, which writes its address
+ * there. One the chat has no asset for, or has not opened yet, is nothing.
+ */
+export function renderMediaTokens(
+  content: string,
+  assets: ReadonlyMap<string, string>,
+  resolve?: AssetResolver,
+): string {
+  return replaceAssetMacros(content, (macro) => {
+    const kept = content.slice(macro.start, macro.end);
+    const media = macro.kind === 'audio' || macro.kind === 'bgm' || macro.kind === 'video' || macro.kind === 'videoimg';
+    if ((!media && macro.name !== 'asset') || macro.ref === null || isAddressPosition(content, macro.start)) return kept;
+    const found = lookupAsset(macro.ref, assets, resolve, macro.name);
+    if (!found || readLockKind(found.src)) return media ? '' : kept;
+    if (media) return mediaMarkup(macro.kind as 'audio' | 'bgm' | 'video' | 'videoimg', found.src);
+    return isVideoSrc(found.src) ? mediaMarkup('videoimg', found.src) : kept;
+  });
+}
+
 /* ---------------------------------------------------------------- rendering */
 
 const escapeText = (value: string): string =>

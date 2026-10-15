@@ -1,10 +1,17 @@
-import { MAX_CARD_IMPORT_BYTES, ModuleParseError, parseRisuModule, plotModuleOf, type PlotModule } from '@shizue/core';
+import {
+  MAX_CARD_IMPORT_BYTES,
+  ModuleParseError,
+  parseRisuModule,
+  plotModuleOf,
+  type PlotModule,
+  type ReaderModuleAsset,
+} from '@shizue/core';
 import { cardScripts } from '@shizue/core/triggers';
 import { chats, readerModules, user, type ReaderModule } from '@shizue/db';
 import { and, eq, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { createHash, randomUUID } from 'node:crypto';
-import { assetResponse } from '../assets.js';
+import { assetResponse, byNameOf } from '../assets.js';
 import { coerceLorebook } from '../card.js';
 import type { AppDeps, AppEnv } from '../deps.js';
 import { ApiError, badRequest, notFound } from '../errors.js';
@@ -15,6 +22,7 @@ import {
   readerModuleAssetUrl,
   storeReaderModuleAssets,
 } from '../readerModules.js';
+import { createRemoteFetch, localizeReaderModule, type LocalizeOutcome } from '../localizeAssets.js';
 import { isUuid, readJsonBody, requireUuidParam } from '../util.js';
 
 /** As a work's module: names and descriptions are cut to what the studio's are. */
@@ -82,7 +90,10 @@ export function readerModuleRoutes(deps: AppDeps): Hono<AppEnv> {
    * (`confirmLowLevelAccess`), as RisuAI asks (`lowLevelAccessConfirm`) — 409
    * `low_level_access_unconfirmed` otherwise, before anything is stored. RisuAI
    * asks it of a module JSON and a charx but not of a `.risum`; here every file
-   * is asked alike. Unreadable is a 400 `invalid_module`.
+   * is asked alike. Unreadable is a 400 `invalid_module`. What it loads from
+   * other hosts is brought in as its own pictures and its references rewritten
+   * to them (`localizeReaderModule`), as a work's module is when its creator
+   * imports it — at render, a chat contacts no third host.
    */
   app.post('/', async (c) => {
     const userId = c.get('userId');
@@ -130,6 +141,16 @@ export function readerModuleRoutes(deps: AppDeps): Hono<AppEnv> {
         importedAt: new Date().toISOString(),
       },
     });
+    // Never fails the import: a fetch that throws past its own handling leaves
+    // everything as written, counted as failed — as a work's import does.
+    const remoteFetch = deps.remoteFetch ?? createRemoteFetch({ ownOrigins: deps.webOrigin ? [deps.webOrigin] : [] });
+    let localized: { module: PlotModule; assets: ReaderModuleAsset[]; outcome: Pick<LocalizeOutcome, 'failed' | 'overLimit'> };
+    try {
+      localized = await localizeReaderModule({ storage: deps.storage, remoteFetch }, module, assets.stored);
+    } catch (error) {
+      console.warn(`[api] localizing reader module ${id}'s external assets failed:`, error);
+      localized = { module, assets: assets.stored, outcome: { failed: 1, overLimit: 0 } };
+    }
     let created: ReaderModule;
     try {
       // The cap is a count: queue on the account row, as the reader's presets do.
@@ -140,16 +161,21 @@ export function readerModuleRoutes(deps: AppDeps): Hono<AppEnv> {
           .from(readerModules)
           .where(eq(readerModules.userId, userId));
         if ((again?.value ?? 0) >= MAX_READER_MODULES) throw full();
-        const [row] = await tx.insert(readerModules).values({ id, userId, module, assets: assets.stored }).returning();
+        const [row] = await tx
+          .insert(readerModules)
+          .values({ id, userId, module: localized.module, assets: localized.assets })
+          .returning();
         return row!;
       });
     } catch (error) {
-      await deleteReaderModuleAssets(deps, assets.stored);
+      await deleteReaderModuleAssets(deps, localized.assets);
       throw error;
     }
     const importWarnings = [
       ...(assets.unsupported > 0 ? [{ code: 'assets_unsupported', count: assets.unsupported }] : []),
       ...(assets.overLimit > 0 ? [{ code: 'assets_over_limit', count: assets.overLimit }] : []),
+      ...(localized.outcome.failed > 0 ? [{ code: 'external_failed', count: localized.outcome.failed }] : []),
+      ...(localized.outcome.overLimit > 0 ? [{ code: 'external_over_limit', count: localized.outcome.overLimit }] : []),
       ...inertWarnings(module),
     ];
     return c.json({ ...toReaderModuleJson(created), importWarnings }, 201);
@@ -213,6 +239,22 @@ export function readerModuleRoutes(deps: AppDeps): Hono<AppEnv> {
     });
     await deleteReaderModuleAssets(deps, row.assets);
     return c.body(null, 204);
+  });
+
+  /**
+   * A picture the module's import brought from another host, by the address it
+   * came from (`byNameOf`) — what a template address the import localized points
+   * at, with the renderer's value in its slot — matched as written, then without
+   * case, as the work's by-name route matches. To its owner alone.
+   */
+  app.get('/:id/assets/by-name/*', async (c) => {
+    const row = await loadOwnedReaderModule(deps, requireUuidParam(c), c.get('userId'));
+    const name = byNameOf(c.req.path);
+    const asset =
+      row.assets.find((one) => one.name === name) ??
+      row.assets.find((one) => one.name.toLowerCase() === name.toLowerCase());
+    if (!asset) throw notFound('Asset not found');
+    return assetResponse(deps.storage, c, asset);
   });
 
   /** A picture the module brought, to its owner alone, as a persona's picture is served. */

@@ -5,7 +5,7 @@
  * is asked for in which order, what a second run leaves alone, and what a
  * cancel, a failure and a retry each leave behind.
  */
-import { AUTHOR_NOTE_MAX, type AuthorNoteSettings, type ImportedChatMessage } from '@shizue/core';
+import { AUTHOR_NOTE_MAX, type AuthorNoteSettings, type ImportedAttachments, type ImportedChatMessage } from '@shizue/core';
 import {
   convertSillyTavernChat,
   type StAuthorNote,
@@ -62,6 +62,8 @@ interface Conversion {
   lines?: string[];
   /** `chat_metadata.main_chat`: the chat this file is a SillyTavern branch or checkpoint of. */
   mainChat?: string;
+  /** What a message's versions carried, by the message's place (`ImportedChatMessage.attachments`). */
+  attachments?: Record<number, (ImportedAttachments | null)[]>;
 }
 
 /** A chat file whose text the stand-in converter reads as its whole conversion. */
@@ -103,6 +105,7 @@ function library({
   worlds = {},
   globalWorlds = [],
   globalRegex = [],
+  attachments = {},
 }: {
   characters: StCharacter[];
   groups?: StGroup[];
@@ -110,8 +113,9 @@ function library({
   worlds?: Record<string, StFile>;
   globalWorlds?: string[];
   globalRegex?: unknown[];
+  attachments?: Record<string, StFile>;
 }): StManifest {
-  return { characters, groups, personas, worlds, globalWorlds, globalRegex, skipped: [] };
+  return { characters, groups, personas, worlds, globalWorlds, globalRegex, attachments, skipped: [] };
 }
 
 const lore = (content: string): LoreEntry =>
@@ -172,6 +176,8 @@ function fakeApi() {
   const uploads: { path: string; file: string; worldInfo: string | null }[] = [];
   /** What an import route answers as `importWarnings` for a card, by its file name. */
   const importWarnings = new Map<string, unknown[]>();
+  /** The pictures and files sent onto imported rows, in order. */
+  const attachments: { chatId: string; messageId: string; kind: string; name: string | null; file: string; text: string }[] = [];
   const log: string[] = [];
   /** Requests that answer with an error instead, by `METHOD path`, consumed in order. */
   const failures = new Map<string, { status: number; code: string }[]>();
@@ -338,6 +344,20 @@ function fakeApi() {
         })),
       });
     }
+    const attachmentMatch = /^POST \/api\/chats\/([^/]+)\/import\/attachments$/.exec(route);
+    if (attachmentMatch) {
+      const form = body as FormData;
+      const upload = form.get('file') as File;
+      attachments.push({
+        chatId: attachmentMatch[1]!,
+        messageId: String(form.get('messageId')),
+        kind: String(form.get('kind')),
+        name: (form.get('name') as string | null) ?? null,
+        file: upload.name,
+        text: await upload.text(),
+      });
+      return json(201, { id: id('attachment') });
+    }
     const chatMatch = /^POST \/api\/chats\/([^/]+)\/import(\/complete)?$/.exec(route);
     if (chatMatch) {
       const chat = chats.get(chatMatch[1]!)!;
@@ -391,6 +411,7 @@ function fakeApi() {
     memberPatches,
     uploads,
     importWarnings,
+    attachments,
     log,
     failures,
     setBefore: (hook: (route: string) => void) => {
@@ -431,21 +452,23 @@ function deps(api: Api): ImportDeps & { casts: { members: { name: string; avatar
         authorNote,
         worldName,
         lines,
+        attachments,
       } = JSON.parse(text) as Conversion;
+      const made: ImportedChatMessage[] = lines
+        ? lines.map((line, index) => ({ role: index % 2 ? 'user' : 'assistant', versions: line.split('|'), selected: 0 }))
+        : Array.from({ length: messages }, (_, index) => ({
+            role: index % 2 ? 'user' : 'assistant',
+            versions: Array.from({ length: versions }, (__, version) => `line ${index}.${version}`),
+            selected: 0,
+          }));
       return {
         userName,
         characterName: '',
-        messages: lines
-          ? lines.map((line, index) => ({ role: index % 2 ? 'user' : 'assistant', versions: line.split('|'), selected: 0 }))
-          : Array.from({ length: messages }, (_, index) => ({
-              role: index % 2 ? 'user' : 'assistant',
-              versions: Array.from({ length: versions }, (__, version) => `line ${index}.${version}`),
-              selected: 0,
-            })),
+        messages: made.map((message, at) => (attachments?.[at] ? { ...message, attachments: attachments[at] } : message)),
         variables: variables ?? null,
         ...(authorNote ? { authorNote } : {}),
         ...(worldName ? { worldName } : {}),
-        skipped: { system: 1, empty: 0, unknownSpeaker: 0, malformed: 0, overLimit: 0, variables: droppedVariables },
+        skipped: { system: 1, empty: 0, unknownSpeaker: 0, malformed: 0, overLimit: 0, variables: droppedVariables, attachments: 0 },
       };
     },
     lorebookEntries: (json) => (json as { entries: string[] }).entries.map(lore),
@@ -1439,6 +1462,61 @@ describe("runImport - how SillyTavern ran the library", () => {
     const api = fakeApi();
     await runAll(api, { ...sample(), globalRegex: ['prompt:a'] }, DEFAULT_OPTIONS);
     expect(api.memberPatches).toEqual([]);
+  });
+});
+
+describe('runImport - pictures and files', () => {
+  it("uploads what each version carried onto the row it became, files first, and sends none of it in the batch", async () => {
+    // chats.js `populateFileAttachment`: pictures under user/images, files as text
+    // under user/files; `appendFileContent` reads `file.text` before the file.
+    const api = fakeApi();
+    const manifest = library({
+      characters: [
+        character('Alice.png', 'Alice', {
+          chats: [
+            chatFile('chats/Alice/one.jsonl', {
+              lines: ['hello', 'look|again', 'nice'],
+              attachments: {
+                1: [
+                  {
+                    images: ['user/images/Alice/a.png', 'user/images/Alice/gone.png'],
+                    files: [
+                      { name: 'notes.pdf', path: 'user/files/1_b.txt' },
+                      { name: 'web.txt', text: '검색 결과' },
+                    ],
+                  },
+                  { images: ['user/images/Alice/b.webp'], files: [] },
+                ],
+              },
+            }),
+          ],
+        }),
+      ],
+      attachments: {
+        'user/images/Alice/a.png': file('user/images/Alice/a.png', 'PNG-A'),
+        'user/images/Alice/b.webp': file('user/images/Alice/b.webp', 'WEBP-B'),
+        'user/files/1_b.txt': file('user/files/1_b.txt', '파일 내용'),
+      },
+    });
+    const { results } = await runAll(api, manifest);
+    const chat = [...api.chats.values()][0]!;
+    // The batch is the words alone.
+    expect(chat.messages.some((message) => 'attachments' in message)).toBe(false);
+    expect(api.attachments.map(({ messageId, kind, name, file: sent, text }) => [messageId, kind, name, sent, text])).toEqual([
+      [chat.ids![1]![0], 'file', 'notes.pdf', 'notes.pdf', '파일 내용'],
+      [chat.ids![1]![0], 'file', 'web.txt', 'web.txt', '검색 결과'],
+      [chat.ids![1]![0], 'image', null, 'a.png', 'PNG-A'],
+      [chat.ids![1]![1], 'image', null, 'b.webp', 'WEBP-B'],
+    ]);
+    // The picture the backup does not hold is counted, and the chat still came over.
+    const step = results['chat:chats/Alice/one.jsonl']!;
+    expect(step.status).toBe('done');
+    expect(step.dropped?.attachments).toBe(1);
+    // Uploaded before the chat is closed, while the import may still write to it.
+    const writes = api.writes();
+    expect(writes.lastIndexOf(`POST /api/chats/${chat.id}/import/attachments`)).toBeLessThan(
+      writes.indexOf(`POST /api/chats/${chat.id}/import/complete`),
+    );
   });
 });
 

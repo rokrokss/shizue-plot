@@ -15,6 +15,7 @@ import {
   scanSillyTavern,
   ST_AUTHOR_NOTE_DEFAULTS,
   stFilesFromFolder,
+  stFileKind,
   stFilesFromZip,
   stNoteInChat,
   ZipError,
@@ -460,6 +461,25 @@ describe('scanSillyTavern', () => {
     expect(manifest.skipped).toEqual([{ path: 'User Avatars/b.webp', reason: 'too_large' }]);
   });
 
+  it("lists the pictures and files under user/ without reading them, ST's `userImages` and `files` folders only", async () => {
+    let reads = 0;
+    const file = (path: string): StFile => ({ path, size: 4, read: async () => (reads++, new Uint8Array(4)) });
+    const manifest = await scanSillyTavern([
+      { path: 'settings.json', size: 1, read: async () => json({}) },
+      file('user/images/하루/1_a.png'),
+      file('user/images/top.webp'),
+      file('user/files/1_b.txt'),
+      // Not ST's places for them, or not a picture.
+      file('user/images/하루/clip.mp4'),
+      file('user/files/deep/x.txt'),
+      file('user/workflows/a.json'),
+    ]);
+    expect(reads).toBe(0);
+    expect(Object.keys(manifest.attachments).sort()).toEqual(['user/files/1_b.txt', 'user/images/top.webp', 'user/images/하루/1_a.png']);
+    expect(stFileKind('user/images/하루/1_a.png')).toBe('image');
+    expect(stFileKind('user/files/1_b.txt')).toBe('file');
+  });
+
   it("reads every World Info setting as a book's", async () => {
     const source = sourceOf(zipSync(syntheticBackup()));
     const manifest = await scanSillyTavern(stFilesFromZip(source, await listZip(source)));
@@ -683,7 +703,7 @@ describe('convertSillyTavernChat', () => {
         { role: 'assistant', versions: ['하루: 첫째', '하루: 좋아.'], selected: 1 },
       ],
       variables: null,
-      skipped: { system: 0, empty: 0, unknownSpeaker: 0, malformed: 0, overLimit: 0, variables: 0 },
+      skipped: { system: 0, empty: 0, unknownSpeaker: 0, malformed: 0, overLimit: 0, variables: 0, attachments: 0 },
     });
   });
 
@@ -714,6 +734,66 @@ describe('convertSillyTavernChat', () => {
       [{ displayText: '@: 씨' }],
       undefined,
     ]);
+  });
+
+  it("reads each version's pictures and files as ST's migrateMediaToArray does, and keeps a turn that is only a picture", () => {
+    // script.js `migrateMediaToArray`: `image_swipes` then a single `image` join
+    // `media`, each address once; a single `file` joins `files`. The addresses are
+    // `clientRelativePath`'s (`/user/images/<ch_name>/…`, `/user/files/…`), and
+    // `appendFileContent` reads `file.text` before it fetches `file.url`.
+    const chat = convertSillyTavernChat(
+      jsonl([
+        { user_name: 'unused', character_name: 'unused', chat_metadata: {} },
+        {
+          name: '여행자',
+          is_user: true,
+          mes: '',
+          extra: {
+            media: [
+              { url: '/user/images/%ED%95%98%EB%A3%A8/1_a.png', type: 'image', source: 'upload' },
+              { url: '/user/images/하루/clip.mp4', type: 'video' },
+              { url: 'https://example.com/x.png', type: 'image' },
+            ],
+            image: '/user/images/하루/1_a.png',
+            files: [
+              { url: '/user/files/1_b.txt', name: 'notes.pdf', size: 3 },
+              { url: '', name: 'web.txt', text: '검색 결과' },
+              { url: 'data:text/plain;base64,eA==', name: 'x.txt' },
+            ],
+            file: { url: '/user/files/old.txt', name: 'old.txt' },
+          },
+        },
+        {
+          name: '하루',
+          is_user: false,
+          mes: 'B',
+          swipes: ['A', 'B'],
+          swipe_id: 1,
+          swipe_info: [{ extra: { image_swipes: ['/user/images/하루/g1.webp', '/user/images/하루/g2.webp'] } }, {}],
+          extra: {},
+        },
+      ]),
+      solo,
+    );
+    expect(chat.messages.map((message) => [message.versions, message.attachments])).toEqual([
+      [
+        [''],
+        [
+          {
+            images: ['user/images/하루/1_a.png'],
+            files: [
+              { name: 'old.txt', path: 'user/files/old.txt' },
+              { name: 'notes.pdf', path: 'user/files/1_b.txt' },
+              { name: 'web.txt', text: '검색 결과' },
+            ],
+          },
+        ],
+      ],
+      [['하루: A', '하루: B'], [{ images: ['user/images/하루/g1.webp', 'user/images/하루/g2.webp'], files: [] }, null]],
+    ]);
+    // The video, the other host's picture and the `data:` file.
+    expect(chat.skipped.attachments).toBe(3);
+    expect(chat.skipped.empty).toBe(0);
   });
 
   it('makes the narrator a narration, hides what ST kept from the prompt and counts what it could not use', () => {
@@ -752,7 +832,7 @@ describe('convertSillyTavernChat', () => {
       { role: 'assistant', versions: ['@: 메모'], selected: 0, hidden: true },
       { role: 'assistant', versions: ['하루: 이미 붙어 있다\n하루:붙어 있다\n하루: 둘째 줄'], selected: 0 },
     ]);
-    expect(chat.skipped).toEqual({ system: 2, empty: 1, unknownSpeaker: 0, malformed: 2, overLimit: 0, variables: 0 });
+    expect(chat.skipped).toEqual({ system: 2, empty: 1, unknownSpeaker: 0, malformed: 2, overLimit: 0, variables: 0, attachments: 0 });
   });
 
   it('attributes group turns by avatar, then by name, and counts a speaker it cannot place', () => {

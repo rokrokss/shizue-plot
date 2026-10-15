@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { decodeMsgpack } from '../src/msgpack.js';
 import { groupPreset, REPLY_FORMAT_HINT, SPEECH_PROTOCOL, GROUP_SPEECH_PROTOCOL } from '../src/presets.js';
 import { assemblePrompt, promptText, type AssemblePromptInput, type HistoryMessage, type PromptCharacter } from '../src/prompt.js';
-import { moduleIntegrationNames, readReaderPresetFile, ReaderPresetImportError } from '../src/readerPreset.js';
+import { moduleIntegrationNames, presetDefaultVariables, readReaderPresetFile, ReaderPresetImportError } from '../src/readerPreset.js';
 import { DEFAULT_LORE_SETTINGS, type LoreEntry, type NormalizedCard } from '../src/types.js';
 
 const json = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
@@ -30,6 +30,7 @@ describe('readReaderPresetFile — RisuAI', () => {
       name: '내 프리셋',
       toggles: '',
       moduleIntegration: '',
+      defaultVariables: '',
       main: '메인 지시',
       // RisuAI's default order: … chats, lastChat, jailbreak, lorebook, globalNote, …
       globalNote: '탈옥 지시\n\n글로벌 노트',
@@ -56,6 +57,19 @@ describe('readReaderPresetFile — RisuAI', () => {
     }
     // Both are fields the import reads, not settings it leaves behind.
     expect((await readReaderPresetFile('p.json', json({ mainPrompt: 'm', customPromptTemplateToggle: 'a=b' }))).ignoredSettings).toBe(false);
+  });
+
+  it("keeps the preset's default variables, and reads them under the work's as RisuAI's getChatVar does", async () => {
+    // database.svelte.ts saves `templateDefaultVariables` in the preset beside its
+    // prompts; chatVar.svelte.ts `getChatVar` reads an unset variable from
+    // `parseKeyValue(char.defaultVariables).concat(parseKeyValue(db.templateDefaultVariables))`,
+    // the first pair with the name — the character's before the preset's.
+    const imported = await readReaderPresetFile('p.json', json({ mainPrompt: 'm', templateDefaultVariables: 'hp=10\nmood=좋음\nempty=' }));
+    expect(imported.defaultVariables).toBe('hp=10\nmood=좋음\nempty=');
+    expect(imported.ignoredSettings).toBe(false);
+    expect({ ...presetDefaultVariables({ hp: '3' }, imported.defaultVariables) }).toEqual({ hp: '3', mood: '좋음' });
+    expect(presetDefaultVariables(undefined, '')).toBeUndefined();
+    expect({ ...presetDefaultVariables(undefined, 'a=b=c') }).toEqual({ a: 'b' });
   });
 
   it('reads a module integration as RisuAI’s getModules splits it', () => {
@@ -137,6 +151,7 @@ describe('readReaderPresetFile — RisuAI', () => {
       name: '테스트 프리셋',
       toggles: '',
       moduleIntegration: '',
+      defaultVariables: '',
       // The template's jailbreak item comes before its chat.
       main: 'MAIN-ONE {{char}}와 {{user}}의 이야기를 씁니다.\n\nJB-ITEM-SECRET\n\nMAIN-TWO 두 번째 메인',
       globalNote: 'NOTE-ONE 응답 직전의 노트',
@@ -209,6 +224,7 @@ describe('readReaderPresetFile — SillyTavern', () => {
       name: 'Celia v4',
       toggles: '',
       moduleIntegration: '',
+      defaultVariables: '',
       main: 'ST 메인 {{char}}',
       globalNote: 'PHI 응답 직전',
       imported: [

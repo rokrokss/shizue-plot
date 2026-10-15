@@ -7,8 +7,8 @@
  * nothing of any work, and every read is scoped by its owner — the chat's, when
  * a generation reads the one its chat points at.
  */
-import type { ReaderAdditions } from '@shizue/core';
-import { readerPresets, type Chat, type ReaderPreset } from '@shizue/db';
+import { presetDefaultVariables, type ReaderAdditions, type Variables } from '@shizue/core';
+import { readerPresets, type Chat, type Plot, type ReaderPreset } from '@shizue/db';
 import { and, eq } from 'drizzle-orm';
 import type { AppDeps } from './deps.js';
 import { badRequest, notFound } from './errors.js';
@@ -45,4 +45,24 @@ export async function loadReaderAdditions(deps: AppDeps, chat: Chat): Promise<Re
     .where(and(eq(readerPresets.id, chat.readerPresetId), eq(readerPresets.userId, chat.userId)))
     .limit(1);
   return preset;
+}
+
+/**
+ * The variables a chat reads where nothing set one: its work's defaults, then
+ * its reader preset's (RisuAI's `templateDefaultVariables`, `presetDefaultVariables`)
+ * — the preset read under the chat owner's id, as `loadReaderAdditions` reads it.
+ */
+export async function chatDefaultVariables(
+  deps: AppDeps,
+  chat: Pick<Chat, 'userId' | 'readerPresetId'>,
+  plot: Pick<Plot, 'customUi'> | null | undefined,
+): Promise<Variables | undefined> {
+  const work = plot?.customUi?.defaultVariables;
+  if (!chat.readerPresetId) return work;
+  const [preset] = await deps.db
+    .select({ defaultVariables: readerPresets.defaultVariables })
+    .from(readerPresets)
+    .where(and(eq(readerPresets.id, chat.readerPresetId), eq(readerPresets.userId, chat.userId)))
+    .limit(1);
+  return presetDefaultVariables(work, preset?.defaultVariables);
 }

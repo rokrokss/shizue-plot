@@ -13,40 +13,80 @@
  * readers — a different reader's lease ends it, and so does signing out
  * (`authClient.ts`). A reload ends it too, as RisuAI's states are in memory.
  *
- * A page that goes with a call still running ends it as it always did: that
- * call may wait on a dialog nobody will answer now, which would hold the
- * state's queue for good. The next call starts a fresh worker.
+ * Giving a lease back never ends the sandbox: another lease may be running in it
+ * — the set a page builds when the reader switches a module or a preset takes
+ * its own lease before the set it replaces gives its one back, and the next
+ * chat's page may have taken one already. A call of the lease still running is
+ * let go instead: it answers `killed` (`disposed`) at once to the scripts that
+ * made it, which are gone, and what it is waiting on or still asks of the page
+ * — a dialog nobody will answer now, a model call — fails, so the call ends in
+ * the worker on its own and the state's queue moves on. A call spinning without
+ * asking anything is the watchdog's, as ever.
  *
  * Imports no more than types, so the session code that ends it carries none of
  * the sandbox.
  */
-import type { LuaOutcome, LuaSandbox } from './sandbox';
+import type { LuaHost, LuaOutcome, LuaSandbox } from './sandbox';
 
 let held: { reader: string; sandbox: LuaSandbox } | null = null;
 
+/** What a call of a lease given back answers its scripts. */
+const LET_GO: LuaOutcome = { kind: 'killed', reason: 'disposed' };
+
 /**
  * A page's lease on `reader`'s sandbox, opened by `open` if they have none.
- * Its `dispose` gives the lease back, ending the sandbox only while one of its
- * calls is still running.
+ * Its `dispose` gives the lease back and lets its own calls go; the sandbox,
+ * and every other lease's calls, run on.
  */
 export function readerLuaSandbox(reader: string, open: () => LuaSandbox): LuaSandbox {
   if (held && held.reader !== reader) endReaderLuaSandbox();
   held ??= { reader, sandbox: open() };
   const mine = held;
-  let running = 0;
+  let given = false;
+  let giveBack!: () => void;
+  const gone = new Promise<void>((resolve) => {
+    giveBack = resolve;
+  });
   return {
-    async call(...args: Parameters<LuaSandbox['call']>): Promise<LuaOutcome> {
+    async call(code, entry, snapshot, host, stateKey): Promise<LuaOutcome> {
       if (held !== mine) return { kind: 'unavailable', message: 'the sandbox was closed for another reader' };
-      running += 1;
-      try {
-        return await mine.sandbox.call(...args);
-      } finally {
-        running -= 1;
-      }
+      if (given) return LET_GO;
+      return Promise.race([
+        mine.sandbox.call(code, entry, snapshot, untilGone(host, gone, () => given), stateKey),
+        gone.then(() => LET_GO),
+      ]);
     },
     dispose() {
-      if (running > 0) mine.sandbox.dispose();
+      given = true;
+      giveBack();
     },
+  };
+}
+
+/**
+ * `host` for a lease's call: each request answered as `host` answers it, until
+ * the lease is given back (`gone`) — then one still open fails, and one asked
+ * after fails without reaching the page.
+ */
+function untilGone(host: LuaHost, gone: Promise<void>, given: () => boolean): LuaHost {
+  const failed = gone.then((): never => {
+    throw new Error('the page that ran the script is gone');
+  });
+  // Nothing may be waiting on it when it fails.
+  failed.catch(() => undefined);
+  const guard =
+    <A extends unknown[], R>(request: (...args: A) => Promise<R>) =>
+    (...args: A): Promise<R> =>
+      given() ? failed : Promise.race([request(...args), failed]);
+  return {
+    alert: guard((text: string, error: boolean) => host.alert(text, error)),
+    input: guard((text: string) => host.input(text)),
+    select: guard((options: string[]) => host.select(options)),
+    confirm: guard((text: string) => host.confirm(text)),
+    llm: guard((messages: Parameters<LuaHost['llm']>[0], model: Parameters<LuaHost['llm']>[1]) => host.llm(messages, model)),
+    similarity: guard((source: string, texts: string[]) => host.similarity(source, texts)),
+    request: guard((url: string | null) => host.request(url)),
+    lore: guard((history: string[], upserts: Parameters<LuaHost['lore']>[1]) => host.lore(history, upserts)),
   };
 }
 

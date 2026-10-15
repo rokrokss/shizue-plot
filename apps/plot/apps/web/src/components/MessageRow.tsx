@@ -806,6 +806,17 @@ export const MessageRow = memo(function MessageRow({
         <div className="whitespace-pre-wrap break-words px-3 pb-2 text-xs text-muted">{reasoning}</div>
       </details>
     ) : null;
+  /**
+   * The pictures and files a reply or a narration came with — only a SillyTavern
+   * chat brings any — after its words, in the text's column, as ST draws a
+   * message's media and files under its text.
+   */
+  const attachedBlock =
+    attachments?.length && !editing ? (
+      <div className="mt-2 max-w-[min(100%,36rem)]">
+        <MessageAttachments attachments={attachments} />
+      </div>
+    ) : null;
   /** The bias, quietly under the reader's bubble. */
   const biasLine =
     bias && !editing ? (
@@ -829,6 +840,7 @@ export const MessageRow = memo(function MessageRow({
               sceneHeadings
               {...(marks ? { trailer: marks } : {})}
             />
+            {attachedBlock ? <div className="pl-6">{attachedBlock}</div> : null}
             {thinking ? <ThinkingClock plain /> : null}
             {statusCard}
           </div>
@@ -907,9 +919,13 @@ export const MessageRow = memo(function MessageRow({
                       <MessageAttachments attachments={attachments} />
                     </div>
                   ) : null}
-                  <div className={cx(USER_BUBBLE, 'mt-1')}>
-                    <MessageBody {...bodyProps} content={body} />
-                  </div>
+                  {/* A turn with no words — a SillyTavern picture sent alone, or a turn
+                      that was only its bias — draws no empty bubble. */}
+                  {body.trim() || !(attachments?.length || bias) ? (
+                    <div className={cx(USER_BUBBLE, 'mt-1')}>
+                      <MessageBody {...bodyProps} content={body} />
+                    </div>
+                  ) : null}
                 </>
               )}
               {biasLine}
@@ -954,6 +970,7 @@ export const MessageRow = memo(function MessageRow({
               {...(hasActions ? { header: actions } : {})}
               {...(meta ? { trailer: meta } : {})}
             />
+            {attachedBlock ? <div className="pl-12.5">{attachedBlock}</div> : null}
             {clock}
             {statusCard ? <div className="mt-3">{statusCard}</div> : null}
           </div>
@@ -984,6 +1001,7 @@ export const MessageRow = memo(function MessageRow({
               {...(hasActions ? { header: actions } : {})}
               {...(meta ? { trailer: meta } : {})}
             />
+            {attachedBlock ? <div className="pl-12.5">{attachedBlock}</div> : null}
             {thinking ? (
               <div className={cx('pl-12.5', body.trim() && 'mt-3')}>
                 <ThinkingClock />
@@ -1028,6 +1046,7 @@ export const MessageRow = memo(function MessageRow({
               sceneHeadings={intro}
               {...(meta ? { trailer: meta } : {})}
             />
+            {attachedBlock}
             {thinking ? (
               <div className={body.trim() ? 'mt-3' : undefined}>
                 <ThinkingClock />

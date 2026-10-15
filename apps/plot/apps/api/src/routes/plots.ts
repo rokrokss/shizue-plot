@@ -76,6 +76,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   assetResponse,
   assetUrl,
+  byNameOf,
   coerceAssetPreview,
   MAX_ASSETS_PER_PLOT,
   normalizeSlug,
@@ -2126,15 +2127,8 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
    */
   app.get('/:id/assets/by-name/*', async (c) => {
     const plot = await loadVisiblePlot(deps.db, requireUuidParam(c), c.get('viewerId'));
-    const marker = '/assets/by-name/';
     // A host the renderer wrote from a variable (`{{getvar::cdn}}/…`) comes with its scheme.
-    const raw = c.req.path.slice(c.req.path.indexOf(marker) + marker.length).replace(/^(?:https?:)?\/+/i, '');
-    let name = `https://${raw}`;
-    try {
-      name = `https://${decodeURIComponent(raw).replace(/^(?:https?:)?\/+/i, '')}`;
-    } catch {
-      // Not percent-encoding after all: the name is as it came.
-    }
+    const name = byNameOf(c.req.path);
     const [asset] = await deps.db
       .select()
       .from(plotAssets)

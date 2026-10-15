@@ -31,7 +31,7 @@
 import { AUTHOR_NOTE_MAX, coerceAuthorNoteSettings, type AuthorNoteRole, type AuthorNoteSettings } from '../authorNote.js';
 import { withNarrationPrefix } from '../narration.js';
 import { spokenBy } from '../speech.js';
-import type { ImportedChatMessage, ImportedMessageExtra } from '../types.js';
+import type { ImportedAttachments, ImportedChatMessage, ImportedMessageExtra } from '../types.js';
 import {
   MAX_DELTA_CHARS,
   MAX_DELTA_KEYS,
@@ -133,6 +133,11 @@ export interface StConvertedChat {
     overLimit: number;
     /** Chat variables past the delta limits — a name or a value too long, too many, too much in all. */
     variables: number;
+    /**
+     * Pictures and files a message carried that cannot come over: a video or a
+     * sound, or one that is not in the backup (another host's address, a `data:` URL).
+     */
+    attachments: number;
   };
 }
 
@@ -241,20 +246,95 @@ function extraOf(extra: unknown): ImportedMessageExtra | null {
   };
 }
 
+/** Where an attachment's address puts it under the backup's root, when it is there: ST's own `/user/images/…` or `/user/files/…`. */
+function backupPath(url: unknown, dir: 'images' | 'files'): string | undefined {
+  if (typeof url !== 'string') return undefined;
+  let path = url.trim().replace(/^\/+/, '');
+  try {
+    path = decodeURIComponent(path);
+  } catch {
+    // Not percent-encoded after all: as written.
+  }
+  const parts = path.split('/');
+  if (parts[0] !== 'user' || parts[1] !== dir || parts.length < 3 || parts.some((part) => !part || part === '..' || part === '.')) {
+    return undefined;
+  }
+  return path;
+}
+
+/**
+ * A version's pictures and files, as ST's `ensureMessageMediaIsArray` reads an
+ * `extra` (`migrateMediaToArray`): the `media` list's pictures, and before it the
+ * older shapes it moves into that list — `image_swipes`, then a single `image` —
+ * each address once; the `files` list, after an older single `file`. A video or a
+ * sound ST plays, and an address the backup does not hold (another host's, a
+ * `data:` URL), cannot come over, and are counted in `unsupported`.
+ */
+function attachmentsOf(extra: unknown): { attachments: ImportedAttachments | null; unsupported: number } {
+  if (!isObject(extra)) return { attachments: null, unsupported: 0 };
+  let unsupported = 0;
+  const images: string[] = [];
+  const picture = (url: unknown): void => {
+    const path = backupPath(url, 'images');
+    if (path === undefined) unsupported += 1;
+    else if (!images.includes(path)) images.push(path);
+  };
+  const media = Array.isArray(extra['media']) ? extra['media'] : [];
+  for (const item of media) {
+    if (!isObject(item)) continue;
+    // ST's `MEDIA_TYPE`: what it shows and sends as a picture is `image`.
+    if (item['type'] === undefined || item['type'] === 'image') picture(item['url']);
+    else unsupported += 1;
+  }
+  if (Array.isArray(extra['image_swipes'])) {
+    for (const url of extra['image_swipes']) if (typeof url === 'string' && url) picture(url);
+  }
+  if (typeof extra['image'] === 'string' && extra['image']) picture(extra['image']);
+  if (typeof extra['video'] === 'string' && extra['video']) unsupported += 1;
+
+  const files: ImportedAttachments['files'] = [];
+  const listed = [...(isObject(extra['file']) ? [extra['file']] : []), ...(Array.isArray(extra['files']) ? extra['files'] : [])];
+  for (const file of listed) {
+    if (!isObject(file)) continue;
+    const name = textOf(file['name']).trim() || 'file.txt';
+    // ST reads `file.text` first and fetches the file only without it (`appendFileContent`).
+    const text = typeof file['text'] === 'string' && file['text'] ? textOf(file['text']).replace(/\u0000/g, '') : undefined;
+    const path = backupPath(file['url'], 'files');
+    if (text !== undefined) files.push({ name, text });
+    else if (path !== undefined) files.push({ name, path });
+    else unsupported += 1;
+  }
+  return {
+    attachments: images.length > 0 || files.length > 0 ? { images, files } : null,
+    unsupported,
+  };
+}
+
 /**
  * The versions a message carries: its swipes when it has any, else its text.
  * `mes` is what ST shows and edits, so it fills the selected swipe's slot even
- * where the swipes array fell out of step. Blank versions are dropped, and the
- * selection follows the one it pointed at, or the first left when that is gone.
+ * where the swipes array fell out of step. Blank versions are dropped (unless
+ * they carry a picture or a file), and the selection follows the one it pointed
+ * at, or the first left when that is gone.
  *
  * Each version's `extra` comes with it: the message's own for the selected one
  * — ST keeps the live swipe's there — and `swipe_info[i].extra` for the others,
- * where ST keeps what each swipe had (`syncMesToSwipe`).
+ * where ST keeps what each swipe had (`syncMesToSwipe`). So do its pictures and
+ * files (`attachmentsOf`), which ST keeps in that same `extra`.
  */
-function versionsOf(message: Json): { versions: string[]; selected: number; extras: (ImportedMessageExtra | null)[] } {
+function versionsOf(message: Json): {
+  versions: string[];
+  selected: number;
+  extras: (ImportedMessageExtra | null)[];
+  attachments: (ImportedAttachments | null)[];
+  unsupported: number;
+} {
   const mes = textOf(message['mes']);
   const swipes = Array.isArray(message['swipes']) ? message['swipes'].map(textOf) : [];
-  if (swipes.length === 0) return { versions: [mes], selected: 0, extras: [extraOf(message['extra'])] };
+  if (swipes.length === 0) {
+    const { attachments, unsupported } = attachmentsOf(message['extra']);
+    return { versions: [mes], selected: 0, extras: [extraOf(message['extra'])], attachments: [attachments], unsupported };
+  }
 
   const swipeId = message['swipe_id'];
   const selected =
@@ -263,18 +343,25 @@ function versionsOf(message: Json): { versions: string[]; selected: number; extr
       : 0;
   if (typeof message['mes'] === 'string') swipes[selected] = mes;
   const info = Array.isArray(message['swipe_info']) ? message['swipe_info'] : [];
-  const extras = swipes.map((_, index) => {
-    if (index === selected) return extraOf(message['extra']);
+  const extraAt = (index: number): unknown => {
+    if (index === selected) return message['extra'];
     const swipe = info[index];
-    return isObject(swipe) ? extraOf(swipe['extra']) : null;
-  });
+    return isObject(swipe) ? swipe['extra'] : undefined;
+  };
+  const extras = swipes.map((_, index) => extraOf(extraAt(index)));
+  const attached = swipes.map((_, index) => attachmentsOf(extraAt(index)));
 
-  const kept = swipes.map((text, index) => ({ text, index })).filter(({ text }) => text.trim());
+  // A swipe with no words but a picture or a file is still what ST shows there.
+  const kept = swipes
+    .map((text, index) => ({ text, index }))
+    .filter(({ text, index }) => text.trim() || attached[index]?.attachments);
   const at = kept.findIndex(({ index }) => index === selected);
   return {
     versions: kept.map(({ text }) => text),
     selected: Math.max(at, 0),
     extras: kept.map(({ index }) => extras[index] ?? null),
+    attachments: kept.map(({ index }) => attached[index]?.attachments ?? null),
+    unsupported: kept.reduce((sum, { index }) => sum + (attached[index]?.unsupported ?? 0), 0),
   };
 }
 
@@ -400,7 +487,7 @@ export function stChatMainChat(jsonl: string): string | undefined {
  * and untagged — the scene's, by our protocol — and are counted.
  */
 export function convertSillyTavernChat(jsonl: string, cast: StCast): StConvertedChat {
-  const skipped = { system: 0, empty: 0, unknownSpeaker: 0, malformed: 0, overLimit: 0, variables: 0 };
+  const skipped = { system: 0, empty: 0, unknownSpeaker: 0, malformed: 0, overLimit: 0, variables: 0, attachments: 0 };
   const grouped = cast.members.filter((member) => member.id).length >= 2;
   const messages: ImportedChatMessage[] = [];
   let userName = '';
@@ -466,12 +553,14 @@ export function convertSillyTavernChat(jsonl: string, cast: StCast): StConverted
     }
 
     const isUser = parsed['is_user'] === true;
-    const { versions: texts, selected, extras: read } = versionsOf(parsed);
+    const { versions: texts, selected, extras: read, attachments, unsupported } = versionsOf(parsed);
     let versions = texts;
-    if (versions.length === 0 || versions.every((text) => !text.trim())) {
+    // ST sends a picture or a file with no words, and shows it so.
+    if (versions.length === 0 || versions.every((text, at) => !text.trim() && !attachments[at])) {
       skipped.empty += 1;
       continue;
     }
+    skipped.attachments += unsupported;
 
     // What a version's text becomes here — a narration's prefix, a speaker's
     // lines — and the text shown in its place with it, so the two read alike.
@@ -503,6 +592,7 @@ export function convertSillyTavernChat(jsonl: string, cast: StCast): StConverted
       ...(speakerId ? { speakerId } : {}),
       ...(hidden ? { hidden: true } : {}),
       ...(extras.some((extra) => extra !== null) ? { extras } : {}),
+      ...(attachments.some((one) => one !== null) ? { attachments } : {}),
     });
   }
 

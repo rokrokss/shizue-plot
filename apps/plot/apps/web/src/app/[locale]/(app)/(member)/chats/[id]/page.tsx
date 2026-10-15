@@ -126,6 +126,7 @@ import {
   type ChatTranslationSettings,
 } from '@shizue/core/translation';
 import type { AuthorNoteSettings, DisplaySide, EmotionProcessor } from '@shizue/core';
+import { presetDefaultVariables } from '@shizue/core/reader-preset';
 import type {
   ChatAttachment,
   ChatMemorySettings,
@@ -412,8 +413,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     /**
      * Set once a later read has taken this one's place — another chat, the bundles
      * read again, React's development double run. Its answer is dropped: new
-     * bundles build the runtimes anew, and the set they replace would take the Lua
-     * calls it had started down with the reader's sandbox (`readerLuaSandbox`).
+     * bundles build the runtimes anew, and the set they replace lets go of the Lua
+     * calls it had started (`readerLuaSandbox`).
      */
     let superseded = false;
     setScriptBundles(undefined);
@@ -950,7 +951,16 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     () => (customUi && creatorCss ? sanitizeCustomHtml(`<style>${creatorCss}</style>`) : ''),
     [customUi, creatorCss],
   );
-  const defaultVariables = useMemo(() => plot?.defaultVariables ?? {}, [plot]);
+  /**
+   * What a variable nothing set reads: the work's defaults, then the chat's
+   * reader preset's (RisuAI's `templateDefaultVariables`) — what the server folds
+   * the branch over too (`chatDefaultVariables`).
+   */
+  const presetVariables = readerPresets.find((preset) => preset.id === state?.chat.readerPresetId)?.defaultVariables;
+  const defaultVariables = useMemo(
+    () => presetDefaultVariables(plot?.defaultVariables, presetVariables) ?? {},
+    [plot, presetVariables],
+  );
   const componentCode = plot?.componentCode ?? '';
   /** Only these tags are call codes, so a plot without components never mounts a frame. */
   const declaredComponents = useMemo(() => componentNames(componentCode), [componentCode]);
@@ -1605,8 +1615,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    *
    * Built once what they are built from has all arrived — the scripts, and the
    * plot read that says whether the work has several members — so the first load
-   * never builds a set only to replace it a moment later, taking a Lua start or
-   * `editDisplay` in flight down with the sandbox. Built in an effect rather than
+   * never builds a set only to replace it a moment later, letting a Lua start or
+   * `editDisplay` in flight go. Built in an effect rather than
    * during the render, so the set disposed is always the set that was used; and
    * given back a tick after its effect is cleaned up (`lingering`), so a remount
    * from the same inputs — React's strict mode runs every effect's cleanup and

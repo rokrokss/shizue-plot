@@ -450,6 +450,9 @@ export const readerPresets = pgTable(
     // RisuAI's `moduleIntergration`: a comma list of namespaces (or ids) whose
     // library modules a chat on this preset turns on.
     moduleIntegration: text('module_integration').notNull().default(''),
+    // RisuAI's `templateDefaultVariables`, in its `key=value` lines: what a chat on
+    // this preset reads for a variable nothing set and its card has no default for.
+    defaultVariables: text('default_variables').notNull().default(''),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -698,6 +701,10 @@ export const chatAttachments = pgTable(
     width: integer('width'),
     height: integer('height'),
     thumbhash: text('thumbhash'),
+    // A text file's own name (`text/plain` rows only, which only a SillyTavern
+    // chat import brings: ST's attached files, whose text it folds into every
+    // prompt that sends the message). Null for every picture.
+    name: text('name'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

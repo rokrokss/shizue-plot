@@ -119,6 +119,32 @@ describe('HTML in a message', () => {
     expect(host.innerHTML).not.toContain('shizue-lock');
   });
 
+  it("plays the plot's music and video written in plain text, as RisuAI's parseAdditionalAssets does", () => {
+    // parser.svelte.ts `parseAdditionalAssets`: `{{video::…}}` is
+    // `<video controls autoplay loop>`, `{{audio::…}}` `<audio controls autoplay
+    // loop>`, `{{asset::…}}` naming a video a muted looping one, wherever they stand.
+    render({
+      content: '*문이 열린다.*\n\n{{video::clip}}\n\n{{audio::theme}} 노래가 흐른다.\n\n{{asset::clip}}{{video::secret}}{{video::없음}}',
+      assets: new Map([
+        ['clip', '/api/plots/sty_1/assets/clip#shizue-video'],
+        ['theme', '/api/plots/sty_1/assets/theme'],
+        ['secret', '#shizue-lock:keyword'],
+      ]),
+    });
+
+    const videos = [...host.querySelectorAll('video')];
+    expect(videos.map((video) => [video.getAttribute('src'), video.hasAttribute('controls'), video.hasAttribute('muted')])).toEqual([
+      ['/api/plots/sty_1/assets/clip#shizue-video', true, false],
+      ['/api/plots/sty_1/assets/clip#shizue-video', false, true],
+    ]);
+    expect(host.querySelector('audio')?.getAttribute('src')).toBe('/api/plots/sty_1/assets/theme');
+    expect(host.textContent).toContain('노래가 흐른다.');
+    expect(host.textContent).not.toContain('{{');
+    expect(host.innerHTML).not.toContain('shizue-lock');
+    // The prose around them is still the prose path's.
+    expect(host.querySelector('.message-body > p > em')?.textContent).toBe('문이 열린다.');
+  });
+
   it('holds a link to one rule however it is written', () => {
     render({
       content: '[밖](https://example.test/a) [안](/settings)\n\n<a href="https://example.test/b">밖2</a> <a href="/settings">안2</a>',

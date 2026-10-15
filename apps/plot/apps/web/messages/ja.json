@@ -549,7 +549,8 @@
         "overLimit": "2万件を超えたメッセージ{count}件",
         "swipes": "1メッセージ20件を超えたスワイプ{count}件",
         "swipesOverRows": "チャットごとの上限(2万件)に収めるために外したスワイプ{count}件",
-        "variables": "名前や値が長すぎるか上限を超えた変数{count}件"
+        "variables": "名前や値が長すぎるか上限を超えた変数{count}件",
+        "attachments": "持ち込めなかった画像・ファイル{count}件"
       },
       "unknownSpeaker": "話者が分からないメッセージ{count}件は、ナレーションとして入りました。",
       "warnings": {
@@ -866,7 +867,7 @@
       "closeManager": "閉じる",
       "new": "新しいプリセット",
       "import": "ファイルから読み込む",
-      "importHint": "RisuAI・SillyTavernのプリセットファイル（.json、.risup、.risupreset）からメイン指示とグローバルノートを読み込みます。脱獄・Post-History Instructions・Auxiliary Promptは、それぞれのアプリが送る位置に合う欄に入ります。RisuAIのプリセットのトグルとモジュール統合も一緒に読み込みます。",
+      "importHint": "RisuAI・SillyTavernのプリセットファイル（.json、.risup、.risupreset）からメイン指示とグローバルノートを読み込みます。脱獄・Post-History Instructions・Auxiliary Promptは、それぞれのアプリが送る位置に合う欄に入ります。RisuAIのプリセットのトグル・モジュール統合・デフォルト変数も一緒に読み込みます。",
       "name": "名前",
       "main": "メイン指示の追加",
       "mainHint": "プリセットのメイン指示のすぐ後、作品の設定より前に入ります。",
@@ -876,6 +877,8 @@
       "togglesHint": "RisuAIのプリセットトグルです。1行に1つずつ キー=名前（選択肢は キー=名前=select=A,B）と書くと会話設定のトグルの先頭に出て、指示の中では'{{#when::toggle::キー}}'で読みます。",
       "moduleIntegration": "モジュール統合",
       "moduleIntegrationHint": "カンマで区切ったモジュールの名前空間です（例：module1,module2）。このプリセットを使う会話で、その名前空間のマイモジュールがオンになります。",
+      "defaultVariables": "デフォルト変数",
+      "defaultVariablesHint": "RisuAIプリセットのデフォルト変数です。1行に1つずつ 名前=値 と書くと、このプリセットを使う会話で、まだ誰も設定していない変数がその値として読まれます。作品のデフォルト値が優先されます。",
       "editNamed": "{name}を編集",
       "deleteNamed": "{name}を削除",
       "importedName": "読み込んだプリセット",
@@ -884,6 +887,7 @@
       "takenInto": "{name} → {field}",
       "tookToggles": "トグル → トグル",
       "tookIntegration": "モジュール統合 → モジュール統合（{names}）",
+      "tookDefaultVariables": "デフォルト変数 → デフォルト変数",
       "partMain": "メインプロンプト",
       "partGlobalNote": "グローバルノート",
       "partJailbreak": "脱獄プロンプト",
@@ -1082,6 +1086,7 @@
     "attachLimit": "画像は1回に{max}枚まで添付できます",
     "attachTooLarge": "{max}MB以下の画像のみ添付できます",
     "attachFailed": "アップロードできませんでした",
+    "openAttachedFile": "添付ファイル {name} を開く",
     "attachUploading": "アップロード中…",
     "viewImage": "画像を大きく表示",
     "attachRemove": "添付を削除",

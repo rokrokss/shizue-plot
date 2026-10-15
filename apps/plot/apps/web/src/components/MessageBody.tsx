@@ -40,6 +40,7 @@ import {
   remarkNoIndentedCode,
   renderImageTokensAsHtml,
   renderIsland,
+  renderMediaTokens,
 } from '@/lib/markdown/html';
 import { rehypeDialogueQuotes } from '@/lib/markdown/quotes';
 import { rehypeWordReveal } from '@/lib/markdown/reveal';
@@ -663,8 +664,9 @@ export const MessageBody = memo(function MessageBody({
   /**
    * Each text segment, already resolved, attributed and cut into blocks. The
    * variable macros go first, over the whole segment, since one may hold a blank
-   * line, and the message's own `{{button}}`s become buttons (`buttons`), so the
-   * line that holds one is markup. Then the segment is cut into prose and markup by block, and only then
+   * line; RisuAI's music and video become their players (`renderMediaTokens`), and
+   * the message's own `{{button}}`s become buttons (`buttons`), so the line that
+   * holds either is markup. Then the segment is cut into prose and markup by block, and only then
    * are the image references resolved — as markdown in prose, as `<img>` in
    * markup, where markdown is not read. A reference holds no blank line, so no
    * cut ever splits one. The speaker split runs over each stretch of prose; a
@@ -689,7 +691,8 @@ export const MessageBody = memo(function MessageBody({
       const aliases = speakerAliases(roster);
       return segments.map((segment) => {
         if (segment.kind !== 'text') return null;
-        const own = stripVariableMacros(segment.text);
+        // RisuAI's music and video become their players first, wherever they stand.
+        const own = renderMediaTokens(stripVariableMacros(segment.text), assets, resolveAsset);
         return markupChunks(buttons ? renderProseButtons(own, buttons) : own).flatMap((chunk): TextRun[] => {
           if (chunk.html) {
             const markup = unescapeCbs(renderImageTokensAsHtml(chunk.text, assets, resolveAsset, userImage), 'html');

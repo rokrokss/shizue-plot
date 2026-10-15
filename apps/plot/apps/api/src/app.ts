@@ -25,8 +25,8 @@ import { requireUser } from './session.js';
 const MB = 1024 * 1024;
 /** The file-import routes: a card as a new plot, one as another member, a RisuAI module into a work or into the reader's library. */
 const IMPORT_PATH = /^\/api\/(plots\/(import|[^/]+\/characters\/import|[^/]+\/modules)|reader-modules)$/;
-/** `POST /api/chats/:id/attachments` — an image upload, not the 5MB of JSON. */
-const ATTACHMENT_PATH = /^\/api\/chats\/[^/]+\/attachments$/;
+/** `POST /api/chats/:id/attachments` and a chat import's (`…/import/attachments`) — an upload, not the 5MB of JSON. */
+const ATTACHMENT_PATH = /^\/api\/chats\/[^/]+\/(?:import\/)?attachments$/;
 
 /**
  * Route order matters: `/api/auth/*` and `/api/presets` are registered before

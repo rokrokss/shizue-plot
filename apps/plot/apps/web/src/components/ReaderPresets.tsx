@@ -27,6 +27,8 @@ interface Draft {
   toggles: string;
   /** RisuAI's `moduleIntergration`: namespaces, separated by commas. */
   moduleIntegration: string;
+  /** RisuAI's `templateDefaultVariables`: `key=value` lines. */
+  defaultVariables: string;
   /** What the file it came from held, when it came from one — for the notice. */
   imported?: ReaderPresetImport;
 }
@@ -184,6 +186,7 @@ function ReaderPresetManager({
         globalNote: imported.globalNote,
         toggles: imported.toggles,
         moduleIntegration: imported.moduleIntegration,
+        defaultVariables: imported.defaultVariables,
         imported,
       });
     } catch (caught) {
@@ -205,6 +208,7 @@ function ReaderPresetManager({
       globalNote: draft.globalNote,
       toggles: draft.toggles,
       moduleIntegration: draft.moduleIntegration,
+      defaultVariables: draft.defaultVariables,
     };
     try {
       if (draft.id === null) {
@@ -281,6 +285,14 @@ function ReaderPresetManager({
               onChange={(event) => setDraft({ ...draft, moduleIntegration: event.target.value })}
             />
           </Field>
+          <TextField
+            label={t('defaultVariables')}
+            hint={t('defaultVariablesHint')}
+            value={draft.defaultVariables}
+            rows={3}
+            mono
+            onChange={(defaultVariables) => setDraft({ ...draft, defaultVariables })}
+          />
           <div className="flex justify-end gap-2">
             <Button size="sm" variant="ghost" onClick={() => setDraft(null)}>
               {common('cancel')}
@@ -316,6 +328,7 @@ function ReaderPresetManager({
                         globalNote: preset.globalNote,
                         toggles: preset.toggles ?? '',
                         moduleIntegration: preset.moduleIntegration ?? '',
+                        defaultVariables: preset.defaultVariables ?? '',
                       })
                     }
                   >
@@ -338,7 +351,9 @@ function ReaderPresetManager({
             <Button
               size="sm"
               disabled={busy}
-              onClick={() => setDraft({ id: null, name: '', main: '', globalNote: '', toggles: '', moduleIntegration: '' })}
+              onClick={() =>
+                setDraft({ id: null, name: '', main: '', globalNote: '', toggles: '', moduleIntegration: '', defaultVariables: '' })
+              }
             >
               {t('new')}
             </Button>
@@ -420,10 +435,16 @@ function ImportNotice({ imported }: { imported: ReaderPresetImport }) {
     ...imported.imported.map((part) => t('takenInto', { name: partName(part), field: t(part.into) })),
     imported.toggles.trim() ? t('tookToggles') : '',
     imported.moduleIntegration.trim() ? t('tookIntegration', { names: imported.moduleIntegration.trim() }) : '',
+    imported.defaultVariables.trim() ? t('tookDefaultVariables') : '',
     names.length > 0 ? t('ignoredPrompts', { count: names.length, names: names.join(', ') }) : '',
     imported.ignoredSettings ? t('ignoredSettings') : '',
   ].filter((line) => line.length > 0);
-  const nothing = !imported.main && !imported.globalNote && !imported.toggles.trim() && !imported.moduleIntegration.trim();
+  const nothing =
+    !imported.main &&
+    !imported.globalNote &&
+    !imported.toggles.trim() &&
+    !imported.moduleIntegration.trim() &&
+    !imported.defaultVariables.trim();
 
   return (
     <div data-testid="reader-preset-import-notice" className="space-y-1 rounded-lg bg-raised px-3 py-2 text-xs text-muted">

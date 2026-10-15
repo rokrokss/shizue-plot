@@ -16,14 +16,16 @@ export interface StFile {
   read(): Promise<Uint8Array>;
 }
 
-export type StFileKind = 'settings' | 'character' | 'chat' | 'group' | 'world' | 'avatar';
+export type StFileKind = 'settings' | 'character' | 'chat' | 'group' | 'world' | 'avatar' | 'image' | 'file';
 
 /**
  * Largest file read, by kind, in bytes. A character card's limit is the card
  * import's own (`MAX_CARD_IMPORT_BYTES`); settings.json grows with every
  * extension's settings; a chat of tens of thousands of messages fits in 64 MiB;
  * a persona's picture is held to the API's cap on an uploaded image
- * (`MAX_IMAGE_BYTES`, apps/api `avatar.ts`), since that is where it goes.
+ * (`MAX_IMAGE_BYTES`, apps/api `avatar.ts`), since that is where it goes; and a
+ * picture or a file a chat message carries to the cap of a chat attachment
+ * (`MAX_ATTACHMENT_BYTES`, apps/api `attachments.ts`), which is what it becomes.
  */
 export interface StCaps {
   settings: number;
@@ -32,6 +34,8 @@ export interface StCaps {
   group: number;
   world: number;
   avatar: number;
+  image: number;
+  file: number;
 }
 
 const MIB = 1024 * 1024;
@@ -43,9 +47,11 @@ export const ST_CAPS: StCaps = {
   group: 1 * MIB,
   world: 16 * MIB,
   avatar: 5 * MIB,
+  image: 8 * MIB,
+  file: 8 * MIB,
 };
 
-/** The picture types a persona's avatar may be, as the API takes them. */
+/** The picture types a persona's avatar, or a picture a message carries, may be, as the API takes them. */
 const AVATAR_RE = /\.(?:png|jpe?g|gif|webp)$/i;
 
 /**
@@ -54,11 +60,20 @@ const AVATAR_RE = /\.(?:png|jpe?g|gif|webp)$/i;
  * `src/constants.js`) and the extensions ST itself lists by: a character is a
  * `.png` directly in `characters/`, its chats are `chats/<avatar stem>/*.jsonl`,
  * a group's are `group chats/<chat id>.jsonl`, and a persona's picture is the
- * file `power_user.personas` names it by, in `User Avatars/`.
+ * file `power_user.personas` names it by, in `User Avatars/`. A chat message's
+ * pictures are under `user/images/` — in a folder of the character's name when
+ * ST saved them for one (`/api/images/upload`'s `ch_name`) — and its files under
+ * `user/files/` (`/api/files/upload`, every one text by then); only the ones a
+ * chat names are ever read.
  */
 export function stFileKind(path: string): StFileKind | undefined {
   const parts = path.split('/');
   const [dir, name] = parts;
+  if (dir === 'user' && (parts.length === 3 || parts.length === 4) && parts.every(Boolean)) {
+    if (name === 'images' && AVATAR_RE.test(parts.at(-1)!)) return 'image';
+    if (name === 'files' && parts.length === 3) return 'file';
+    return undefined;
+  }
   if (parts.length === 1) return dir === 'settings.json' ? 'settings' : undefined;
   if (parts.length === 2) {
     if (dir === 'characters' && name!.endsWith('.png')) return 'character';

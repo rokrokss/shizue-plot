@@ -569,7 +569,7 @@ function StepRow({ step, result }: { step: ImportStep; result: StepResult }) {
   const toMessage = useErrorMessage();
   const dropped = result.dropped;
   const droppedParts = dropped
-    ? (['system', 'empty', 'malformed', 'overLimit', 'swipes', 'swipesOverRows', 'variables'] as const)
+    ? (['system', 'empty', 'malformed', 'overLimit', 'swipes', 'swipesOverRows', 'variables', 'attachments'] as const)
         .filter((key) => dropped[key] > 0)
         .map((key) => t(`dropped.${key}`, { count: dropped[key] }))
     : [];

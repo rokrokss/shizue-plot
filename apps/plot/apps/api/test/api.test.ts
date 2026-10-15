@@ -131,7 +131,7 @@ import { createHostedAuth, createSessionStore } from '../src/hostedAuth.js';
 import type { AppDeps, AppEnv } from '../src/deps.js';
 import { loadRootEnv } from '../src/env.js';
 import { ApiError } from '../src/errors.js';
-import { acquireChatSlot, releaseChatSlot, renewChatSlot } from '../src/generation.js';
+import { acquireChatSlot, releaseChatSlot, renewChatSlot, TAVERN_BIAS_NUDGE } from '../src/generation.js';
 import {
   drainJobs,
   enqueueJob,
@@ -6620,6 +6620,7 @@ describe('chat attachments', () => {
       width: 800,
       height: 600,
       thumbhash: measured.thumbhash,
+      name: null,
     });
     // Its own namespace in the store, and a key nothing user-supplied reaches.
     expect(await storedPath(created.id)).toBe(`attachments/${created.id}.gif`);
@@ -7116,6 +7117,7 @@ describe('drawing a scene', () => {
         width: 1024,
         height: 768,
         thumbhash: null,
+        name: null,
       },
     ]);
     const served = await request(cookie, drawn.attachments[0].url, 'GET', undefined, target);
@@ -7747,6 +7749,26 @@ describe('reader presets', () => {
     expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.readerPresetId).toBeNull();
     const cleared = await readJson(await json(cookie, `/api/chats/${chatId}`, 'PATCH', { readerPresetId: null }));
     expect(cleared.chat.readerPresetId).toBeNull();
+  });
+
+  it("reads a variable nothing set from the preset's default variables, under the work's own", async () => {
+    // chatVar.svelte.ts `getChatVar`: an unset variable is the character's
+    // `defaultVariables`, then the preset's `templateDefaultVariables`.
+    const cookie = await signUp('reader-preset-defaults@example.com');
+    const { chatId, plotId } = await setupChat(cookie);
+    await db.update(plots).set({ customUi: { defaultVariables: { hp: '3' } } }).where(eq(plots.id, plotId));
+    const preset = await readJson(await create(cookie, { name: '기본값', defaultVariables: 'hp=10\nmood=좋음' }));
+    expect(preset.defaultVariables).toBe('hp=10\nmood=좋음');
+    expect((await create(cookie, { name: 'n', defaultVariables: 'x'.repeat(READER_PRESET_TEXT_MAX + 1) })).status).toBe(400);
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { readerPresetId: preset.id });
+
+    const { app: capturing, prompts } = capturingApp();
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '[{{getvar::mood}}] [{{getvar::hp}}]' }, capturing));
+    expect(JSON.stringify(prompts.at(-1)!.messages)).toContain('[좋음] [3]');
+    // Off the preset, the chat has none of them.
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { readerPresetId: null });
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
+    expect(JSON.stringify(prompts.at(-1)!.messages)).toContain('[null] [3]');
   });
 
   it('gives way to the creator’s own instructions, and shows a reader none of them', async () => {
@@ -9332,6 +9354,82 @@ describe('chat import', () => {
       ['숨긴 답 2', true],
       ['보이는 말', false],
     ]);
+  });
+
+  it("puts a SillyTavern message's pictures and files on its rows, and folds the files into every prompt that sends it", async () => {
+    // chats.js `appendFileContent`: each file's text, a blank line between, and a
+    // blank line before the message's own words, on every message ST sends.
+    const cookie = await signUp('chat-import-attach@example.com');
+    const plot = await importCard(cookie, cardFile());
+    const { app: target, prompts } = capturingApp();
+    const imported = await importChat(
+      cookie,
+      plot.id,
+      [turn('assistant', ['인사']), turn('user', ['이 파일 봐']), turn('assistant', ['답']), turn('user', ['']), turn('assistant', ['또 답'])],
+      {},
+      target,
+    );
+    const chatId = imported.chat.id;
+    const [greeting, fileTurn, reply, pictureTurn] = imported.ids.map((versions: string[]) => versions[0]);
+    const send = (messageId: string, kind: string, bytes: Uint8Array, name?: string): Promise<Response> => {
+      const form = new FormData();
+      form.append('file', new File([bytes], name ?? 'x'));
+      form.append('messageId', messageId);
+      form.append('kind', kind);
+      if (name) form.append('name', name);
+      return request(cookie, `/api/chats/${chatId}/import/attachments`, 'POST', form, target);
+    };
+    const gif = Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1]);
+    const text = (value: string): Uint8Array => new TextEncoder().encode(value);
+
+    const notes = await send(fileTurn, 'file', text('첫 파일'), 'notes.pdf');
+    expect(notes.status, await notes.clone().text()).toBe(201);
+    const file = await readJson(notes);
+    expect(file).toMatchObject({ mime: 'text/plain', name: 'notes.pdf', width: null });
+    expect((await send(fileTurn, 'file', text('둘째 파일'), 'web.txt')).status).toBe(201);
+    expect((await send(reply, 'image', gif)).status).toBe(201);
+    expect((await send(pictureTurn, 'image', gif)).status).toBe(201);
+
+    // Text that is not UTF-8, a picture that is not one, a row of another chat, a fifth on one message.
+    expect((await readJson(await send(fileTurn, 'file', Uint8Array.from([0xff, 0xfe, 0x00])))).code).toBe('invalid_attachment');
+    expect((await readJson(await send(fileTurn, 'image', text('not a picture')))).code).toBe('invalid_attachment');
+    const other = await importChat(cookie, plot.id, [turn('assistant', ['다른 대화'])], { sha256: hashOf('other') }, target);
+    expect((await send(other.ids[0][0], 'image', gif)).status).toBe(400);
+    for (let n = 0; n < 3; n += 1) expect((await send(greeting, 'image', gif)).status).toBe(201);
+    expect((await send(greeting, 'image', gif)).status).toBe(201);
+    expect((await readJson(await send(greeting, 'image', gif))).code).toBe('attachment_limit');
+
+    // Served as UTF-8 text, never sniffed; on the branch with its name.
+    const served = await request(cookie, file.url, 'GET', undefined, target);
+    expect(served.headers.get('content-type')).toBe('text/plain; charset=utf-8');
+    expect(served.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(await served.text()).toBe('첫 파일');
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, target));
+    expect(state.path[1].attachments.map((one: any) => [one.mime, one.name])).toEqual([
+      ['text/plain', 'notes.pdf'],
+      ['text/plain', 'web.txt'],
+    ]);
+
+    // Finished, a reply's prompt carries the files ahead of the turn's words, and
+    // an earlier turn that is only a picture says one was attached.
+    expect((await complete(cookie, chatId, false, target)).status).toBe(200);
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, target));
+    const sent = prompts.at(-1)!.messages.map((message) => (typeof message.content === 'string' ? message.content : ''));
+    expect(sent).toContain('첫 파일\n\n둘째 파일\n\n이 파일 봐');
+    expect(sent).toContain(IMAGE_ATTACHED_PLACEHOLDER);
+    expect(sent.some((content) => content === '이 파일 봐')).toBe(false);
+    // The stored words are as they were.
+    expect((await rowsOf(chatId)).find((row) => row.id === fileTurn)!.content).toBe('이 파일 봐');
+
+    // An unfinished import of a file started over takes what it had uploaded with it.
+    const abandoned = await importChat(cookie, plot.id, [turn('user', ['버린 시도'])], { sha256: hashOf('again') }, target);
+    const form = new FormData();
+    form.append('file', new File([gif], 'a.gif'));
+    form.append('messageId', abandoned.ids[0][0]);
+    const left = await readJson(await request(cookie, `/api/chats/${abandoned.chat.id}/import/attachments`, 'POST', form, target));
+    const [leftRow] = await db.select().from(chatAttachments).where(eq(chatAttachments.id, left.id));
+    await importChat(cookie, plot.id, [turn('user', ['다시'])], { sha256: hashOf('again') }, target);
+    expect(await storage.get(leftRow!.path)).toBeNull();
   });
 
   it('checks a batch whole, and whose plot, persona and chat it is, before writing', async () => {
@@ -14308,6 +14406,123 @@ describe('SillyTavern regex on the stored text and on World Info', () => {
     expect([rewritten!.content, rewritten!.variableDelta]).toEqual(['다시', { mood: '흐림' }]);
   });
 
+  it('stores the macros that read the chat, the card and the persona as ST does — the turn sent before the chat it reads, an edit at the head', async () => {
+    // macros/definitions/chat-macros.js (`getLastMessage` …) over the chat as it
+    // stands, and the card fields of `MacroEnvBuilder`; `sendMessageAsUser`
+    // substitutes before it pushes the turn.
+    const { cookie, chatId } = await tavernChat('st-stored-history@example.com', []);
+    const persona = await readJson(await json(cookie, '/api/personas', 'POST', { name: '여행자', description: '길 잃은 여행자' }));
+    expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { personaId: persona.id })).status).toBe(200);
+    const { app } = repliesApp(['첫 답', '둘째 답']);
+    const sent =
+      '[{{lastMessage}}] [{{lastCharMessage}}] [{{lastUserMessage}}] [{{charDescription}}] [{{persona}}] [{{description}}] [{{comment::둔다}}]';
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: sent }, app));
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '[{{lastMessage}}] [{{lastUserMessage}}]' }, app));
+    const texts = await pathTexts(cookie, chatId);
+    expect(texts[1]).toBe('[문 앞이다. 비밀이 있다.] [문 앞이다. 비밀이 있다.] [] [설명] [길 잃은 여행자] [설명] [{{comment::둔다}}]');
+    expect(texts[2]).toContain('첫 답');
+    expect(texts[3]).toBe(`[${texts[2]}] [${texts[1]}]`);
+
+    // An edit reads the chat at its head, the reply included.
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    const reply = state.path.at(-1);
+    expect((await json(cookie, `/api/messages/${reply.id}`, 'PATCH', { content: '{{lastUserMessage}}!' })).status).toBe(200);
+    const [edited] = await db.select().from(messages).where(eq(messages.id, reply.id));
+    expect(edited!.content).toBe(`${texts[3]}!`);
+  });
+
+  it("expands a greeting's macros as ST first shows it, its variable writes kept on its root, and the scene editor's rewrites as edits", async () => {
+    // script.js `messageFormatting` writes message 0 back through `substituteParams`
+    // the first time it draws it; group-chats.js expands a group's as it makes them.
+    const cookie = await signUp('st-greeting-macros@example.com');
+    const plot = await createPlot(cookie, {
+      name: '정규식 작품',
+      description: '설명',
+      intros: ['{{setvar::met::1}}{{char}}가 {{user}}를 본다. [{{charDescription}}]', '{{char}}의 다른 인사'],
+    });
+    await addCharacter(cookie, plot.id, {
+      name: '아리아',
+      card: { description: '아리아의 설명', extensions: { talkativeness: '0.5', fav: false } },
+    });
+    const created = await startChat(cookie, plot.id);
+    const roots = (await db.select().from(messages).where(eq(messages.chatId, created.chat.id)).orderBy(asc(messages.createdAt)));
+    expect(roots.map((row) => [row.content, row.variableDelta])).toEqual([
+      ['아리아가 유저를 본다. [아리아의 설명]', { met: '1' }],
+      ['아리아의 다른 인사', null],
+    ]);
+
+    // A work SillyTavern did not write keeps the greeting as it always did: the work's name for {{char}}.
+    const risu = await createPlot(cookie, { name: '리스 작품', intros: ['{{char}}의 인사'] });
+    await addCharacter(cookie, risu.id, { name: '아리아', card: { description: '설명' } });
+    const native = await startChat(cookie, risu.id);
+    expect(native.path[0].content).toBe('리스 작품의 인사');
+
+    // The scene editor stores what it changed as an edit of each message is
+    // stored, and leaves what it did not change as it was.
+    const { app } = repliesApp(['아리아: 첫 답']);
+    await readSse(await json(cookie, `/api/chats/${created.chat.id}/messages`, 'POST', { content: '안녕' }, app));
+    const state = await readJson(await request(cookie, `/api/chats/${created.chat.id}`));
+    const reply = state.path.at(-1);
+    const res = await json(cookie, `/api/chats/${created.chat.id}/edit-scene`, 'POST', {
+      messageIds: [reply.id],
+      blocks: [
+        { originId: reply.id, kind: 'dialogue', content: '아리아: {{user}}, {{lastUserMessage}}{{setvar::mood::좋음}}' },
+        { kind: 'narration', content: '{{char}}가 웃는다' },
+      ],
+    });
+    expect(res.status, await res.clone().text()).toBe(200);
+    const after = (await readJson(res)).path;
+    expect(after.slice(-2).map((message: any) => message.content)).toEqual(['아리아: 유저, 안녕', '@: 아리아가 웃는다']);
+    const [rewritten] = await db.select().from(messages).where(eq(messages.id, after.at(-2).id));
+    expect(rewritten!.variableDelta).toEqual({ mood: '좋음' });
+  });
+
+  it("takes a {{bias}} off the reader's turn, sends it last as the start of the reply, and stores the reply after it, as ST does", async () => {
+    // script.js: `getBiasStrings` reads `{{bias "…"}}` off the turn
+    // (`extractMessageBias`, a leading space before them); `sendMessageAsUser`
+    // keeps it in `extra.bias` and takes every macro left out of the turn
+    // (`removeMacros`); openai.js sends it as the prompt's last message, the
+    // assistant's, and the reply ST stores is what came after it.
+    const { cookie, chatId } = await tavernChat('st-bias@example.com', []);
+    const { app, turns } = repliesApp(['그녀는 웃으며 고개를 끄덕였다.', '그녀는 웃었다.', ' 그녀는 웃으며 다시', '조용히 끝']);
+    const send = async (content: string): Promise<void> => {
+      expect((await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }, app))).at(-1)!.event).toBe('done');
+    };
+    await send('{{bias "그녀는 웃으며"}}안녕 {{user}} {{없는매크로}}');
+    let state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    const [, user, reply] = state.path;
+    expect([user.content, user.bias, user.hiddenFromPrompt]).toEqual(['안녕 유저', ' 그녀는 웃으며', false]);
+    // After everything else, the post-history block included: ST adds it last.
+    expect(turns[0]!.slice(-2)).toEqual([TAVERN_BIAS_NUDGE, '그녀는 웃으며']);
+    expect(turns[0]).toContain('안녕 유저');
+    // The model said the bias again: it comes off, as ST's reply never holds it.
+    expect(reply.content).toBe(' 고개를 끄덕였다.');
+
+    // A regenerate goes on from the same turn's bias (`getBiasStrings` with nothing
+    // typed); a reply that does not start with it is kept as it came.
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, app));
+    expect(turns[1]!.at(-1)).toBe('그녀는 웃으며');
+    state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    expect(state.path.at(-1).content).toBe('그녀는 웃었다.');
+
+    // An edit reads it again off the edited turn (`updateMessage`).
+    const fork = await readJson(await json(cookie, `/api/messages/${user.id}`, 'PATCH', { content: "{{bias '그녀는 웃으며'}}다시 {{char}}" }));
+    const [edited] = await db.select().from(messages).where(eq(messages.id, fork.messageId));
+    expect([edited!.content, edited!.bias]).toEqual(['다시 아리아', ' 그녀는 웃으며']);
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, app));
+    state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    expect(state.path.at(-1).content).toBe(' 다시');
+
+    // A turn that is only its bias is ST's system message with the bias on it:
+    // on screen with no words, out of the prompt, and its bias leads the reply.
+    await send('{{bias "조용히"}}');
+    state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    const only = state.path.at(-2);
+    expect([only.content, only.bias, only.hiddenFromPrompt]).toEqual(['', ' 조용히', true]);
+    expect(turns[3]!.at(-1)).toBe('조용히');
+    expect(turns[3]!).not.toContain('');
+  });
+
   it('keeps the macros of a turn in a work SillyTavern did not write, for the prompt to read', async () => {
     const cookie = await signUp('st-stored-macros-risu@example.com');
     const plot = await createPlot(cookie, { name: '리스 작품', description: '설명', intros: ['안녕'] });
@@ -18615,6 +18830,64 @@ describe('what a card loads from other hosts, brought in at import', () => {
     const removed = await request(cookie, `/api/plots/${plot.id}/modules/${owner.modules[0].id}`, 'DELETE', undefined, target);
     expect(removed.status).toBe(200);
     expect(await readJson(await request(cookie, `/api/plots/${plot.id}/assets`, 'GET', undefined, target))).toEqual([]);
+  });
+
+  it("brings in what a module put in a reader's library loads from other hosts, as the module's own pictures", async () => {
+    const { remoteFetch, asked } = remote();
+    const target = makeApp({ remoteFetch });
+    const cookie = await signUp('reader-module-web@example.com');
+    const other = await signUp('reader-module-web-other@example.com');
+    const module = {
+      name: '글꼴 모듈',
+      description: '',
+      id: 'risu-font',
+      backgroundEmbedding:
+        "<style>@import url('https://fonts.test/css?family=Nanum');</style><img src=\"https://cdn.test/bg.png\"><img src=\"https://cdn.test/gone.png\">",
+      regex: [
+        {
+          comment: '',
+          type: 'editdisplay',
+          in: '\\[face:(\\w+)\\]',
+          out: "<img src='https://cdn.test/face/$1.png'>",
+          flag: 'g',
+          ableFlag: true,
+        },
+      ],
+      trigger: [],
+      lorebook: [{ key: '', comment: '', content: '[face:Happy] [face:Angry]', mode: 'normal', insertorder: 0, alwaysActive: true, secondkey: '', selective: false }],
+      assets: [],
+    };
+    const form = new FormData();
+    form.append('file', new File([buildRisum({ module, type: 'risuModule' }, [])], 'font.risum'));
+    const res = await request(cookie, '/api/reader-modules', 'POST', form, target);
+    expect(res.status, await res.clone().text()).toBe(201);
+    const made = await readJson(res);
+    // The picture that answered 404 stays as written, counted.
+    expect(made.importWarnings).toEqual([{ code: 'external_failed', count: 1 }]);
+    expect(asked).toContain('https://cdn.test/face/Happy.png');
+
+    const [row] = await db.select().from(readerModules).where(eq(readerModules.id, made.id));
+    const named = new Map(row!.assets.map((asset) => [asset.name, asset]));
+    expect([...named.keys()].sort()).toEqual([
+      'https://cdn.test/bg.png',
+      'https://cdn.test/face/Happy.png',
+      'https://fonts.test/nanum.woff2',
+    ]);
+    expect(row!.assets.every((asset) => asset.path.startsWith('reader-modules/'))).toBe(true);
+    const at = (name: string): string => `/api/reader-modules/${made.id}/assets/${named.get(name)!.id}`;
+    expect(row!.module.css).toContain(`url(${at('https://fonts.test/nanum.woff2')})`);
+    expect(row!.module.backgroundHtml).toBe(`<img src="${at('https://cdn.test/bg.png')}"><img src="https://cdn.test/gone.png">`);
+    // A template's values by name, on the module's own route, to its owner alone.
+    expect(row!.module.displayScripts?.[0]?.out).toBe(`<img src='/api/reader-modules/${made.id}/assets/by-name/cdn.test/face/$1.png'>`);
+    const served = await request(cookie, `/api/reader-modules/${made.id}/assets/by-name/cdn.test/face/Happy.png`, 'GET', undefined, target);
+    expect(served.status).toBe(200);
+    expect(new Uint8Array(await served.arrayBuffer())).toEqual(gif(3));
+    expect((await request(cookie, `/api/reader-modules/${made.id}/assets/by-name/cdn.test/face/Angry.png`, 'GET', undefined, target)).status).toBe(404);
+    expect((await request(other, `/api/reader-modules/${made.id}/assets/by-name/cdn.test/face/Happy.png`, 'GET', undefined, target)).status).toBe(404);
+
+    // Taking it out of the library takes what it fetched.
+    expect((await request(cookie, `/api/reader-modules/${made.id}`, 'DELETE', undefined, target)).status).toBe(204);
+    for (const asset of row!.assets) expect(await storage.get(asset.path)).toBeNull();
   });
 });
 

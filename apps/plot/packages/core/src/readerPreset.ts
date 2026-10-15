@@ -13,8 +13,10 @@
  * back only through the card's `{{original}}` (`assemblePrompt`). The two
  * settings are RisuAI's preset toggles (`customPromptTemplateToggle`, drawn
  * first in the chat's toggles, their values the `toggle_<key>` globals the
- * texts may read) and its module integration (`moduleIntergration`, the
- * namespaces whose library modules the chat turns on — `moduleIntegrationNames`).
+ * texts may read), its module integration (`moduleIntergration`, the
+ * namespaces whose library modules the chat turns on — `moduleIntegrationNames`)
+ * and its default variables (`templateDefaultVariables`, what a chat on it reads
+ * for a variable nothing set — `presetDefaultVariables`).
  *
  * An import fills those two texts with the prompts the file sends where they
  * send: its main prompt, its global note, and the general-purpose slots RisuAI
@@ -26,6 +28,7 @@
 import { decompressSync } from 'fflate';
 import { rpackDecode } from './card/risum.js';
 import { decodeMsgpack } from './msgpack.js';
+import { parseDefaultVariables, type Variables } from './variables.js';
 
 /** What a chat's reader preset adds to the prompt. Either may be blank. */
 export interface ReaderAdditions {
@@ -59,6 +62,22 @@ export function moduleIntegrationNames(text: string | null | undefined): string[
     .filter((name) => name.length > 0);
 }
 
+/**
+ * A preset's default variables over a work's, as RisuAI reads a variable nothing
+ * set (`getChatVar`, and its triggers' `getvar`): the character's
+ * `defaultVariables` first, then the preset's `templateDefaultVariables` — so
+ * the work's win and the preset's fill in the rest. The preset's are its
+ * `key=value` lines (`parseDefaultVariables`). Undefined for neither.
+ */
+export function presetDefaultVariables(
+  work: Variables | null | undefined,
+  preset: string | null | undefined,
+): Variables | undefined {
+  const own = parseDefaultVariables(preset ?? '');
+  if (!own) return work ?? undefined;
+  return Object.assign(Object.create(null) as Variables, own, work ?? {});
+}
+
 export type ReaderPresetSource = 'risuai' | 'sillytavern';
 
 /** A prompt an import took: what the file calls it, and which text it went into. */
@@ -85,6 +104,8 @@ export interface ReaderPresetImport {
   toggles: string;
   /** RisuAI's `moduleIntergration`, as written — '' for a file with none. */
   moduleIntegration: string;
+  /** RisuAI's `templateDefaultVariables`, its `key=value` lines as written — '' for a file with none. */
+  defaultVariables: string;
   /** The prompts taken, in the file's order, and where each went. */
   imported: ReaderPresetPart[];
   /** Other prompt texts in use, which have no place among the additions — by the names the file gives them ('' for none). */
@@ -228,6 +249,7 @@ const RISU_READ_KEYS = new Set([
   'promptTemplate',
   'customPromptTemplateToggle',
   'moduleIntergration',
+  'templateDefaultVariables',
 ]);
 
 /** RisuAI's default `formatingOrder` (`database.svelte.ts`), for a preset that carries none. */
@@ -273,6 +295,7 @@ function fromRisuPreset(preset: Json, fileName: string): ReaderPresetImport {
     // Kept whatever the template: RisuAI saves and loads both beside it.
     toggles: textOf(preset['customPromptTemplateToggle']).slice(0, READER_PRESET_TEXT_MAX),
     moduleIntegration: textOf(preset['moduleIntergration']).slice(0, READER_PRESET_INTEGRATION_MAX),
+    defaultVariables: textOf(preset['templateDefaultVariables']).slice(0, READER_PRESET_TEXT_MAX),
     ignoredSettings,
   };
   const template = preset['promptTemplate'];
@@ -395,6 +418,7 @@ function fromSillyTavernPreset(preset: Json, fileName: string): ReaderPresetImpo
     // ST has neither: its prompt toggles are the prompts' own `enabled`, read above.
     toggles: '',
     moduleIntegration: '',
+    defaultVariables: '',
     main: joinTexts(taken.main),
     globalNote: joinTexts(taken.globalNote),
     imported: taken.imported,

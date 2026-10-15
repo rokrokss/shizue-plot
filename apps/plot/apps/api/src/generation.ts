@@ -20,6 +20,7 @@ import {
   stripSpeakerPrefix,
   withBranchGreeting,
   withNarrationPrefix,
+  withoutTavernBias,
   type AssembledPrompt,
   type AuthorNoteSettings,
   type TranslationLanguage,
@@ -888,6 +889,28 @@ function answeredTurn(plan: Pick<GenerationPlan, 'round' | 'target' | 'wholeBran
 const TAVERN_REASONING_PREFIX = '<think>';
 const TAVERN_REASONING_SUFFIX = '</think>\n';
 
+/**
+ * What the model is asked before a SillyTavern bias it is handed as the start of
+ * its reply: ST's model goes on from the assistant message it ends on (a
+ * prefill), where ChatGPT reads it as a turn already said — so it is told the
+ * turn is the start of this one, to go on from and not to say again.
+ */
+export const TAVERN_BIAS_NUDGE =
+  '(바로 뒤의 assistant 메시지는 이번 응답의 첫머리다. 그 글을 되풀이하지 말고, 그 글에서 바로 이어지는 나머지만 쓴다.)';
+
+/**
+ * SillyTavern's bias for this reply (`getBiasStrings` in `script.js`): the
+ * `{{bias}}` kept on the latest reader's turn on the branch — ST looks back past
+ * the replies since, a group's round of them, to the first reader's turn (or
+ * narration) and takes its bias, if it has one. A continue has none, nor has a
+ * narration, nor a work ST did not write. '' for none.
+ */
+export function tavernBiasOf(plan: Pick<GenerationPlan, 'target' | 'narration' | 'characters' | 'wholeBranch'>): string {
+  if (plan.target.kind === 'continue' || plan.narration || !plan.characters[0]?.sillyTavern) return '';
+  const latest = plan.wholeBranch.findLast((message) => message.role === 'user' || isNarration(message.content));
+  return latest?.bias?.trim() ? latest.bias : '';
+}
+
 /** The prompt as it is put together, before the card's request triggers see it. */
 async function assembleRequest(
   plan: GenerationPlan,
@@ -917,7 +940,13 @@ async function assembleRequest(
   // default template — the one message ST sends its reasoning with by default,
   // as the prefix of the text it continues (`PromptReasoning.addToMessage`).
   const reasoning = isContinue ? plan.target.kind === 'continue' && plan.target.message.reasoning : null;
-  const partial = resumed && reasoning ? `${TAVERN_REASONING_PREFIX}${reasoning}${TAVERN_REASONING_SUFFIX}${resumed}` : resumed;
+  // SillyTavern sends a reply's bias as the prompt's last message, the
+  // assistant's (`openai.js`, after everything else): the turn the model goes on
+  // from, as a continue's partial is.
+  const bias = isContinue ? '' : tavernBiasOf(plan);
+  const partial = resumed && reasoning
+    ? `${TAVERN_REASONING_PREFIX}${reasoning}${TAVERN_REASONING_SUFFIX}${resumed}`
+    : resumed || bias.trim();
   // The partial is not in the history the assembler reads, so not on its branch
   // either — and where the partial is the greeting itself, there is none apart.
   const branch: PromptBranch = !isContinue
@@ -953,6 +982,7 @@ async function assembleRequest(
   const trailingSystem = [
     plan.trailingSystem?.trim() ?? '',
     plan.focusNames?.length ? sceneFocusDirective(plan.focusNames) : '',
+    bias.trim() ? TAVERN_BIAS_NUDGE : '',
   ]
     .filter((line) => line.length > 0)
     .join('\n');
@@ -1618,6 +1648,9 @@ async function persist(
   { stopped = false }: { stopped?: boolean } = {},
 ): Promise<StoredTurn> {
   const scriptState = plan.postProcess ? ('pending' as const) : null;
+  // A SillyTavern reply is what the model wrote after the bias it went on from;
+  // the bias it was asked not to repeat and did comes off (`withoutTavernBias`).
+  text = withoutTavernBias(text, tavernBiasOf(plan));
   // Before the transaction: the stored-text scripts run in the regex threads.
   const regexed = await regexedReply(plan, text);
   return deps.db.transaction(async (tx) => {

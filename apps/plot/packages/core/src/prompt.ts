@@ -1868,11 +1868,33 @@ export const characterName = (member: Pick<PromptCharacter, 'name' | 'card'>): s
  * creator owns it from there (a group turn's speaker brings its own beside the
  * turn, `ownScenario`).
  */
-const cbsCharacter = (member: PromptCharacter, plot: PromptPlot): CbsCharacter => ({
+const cbsCharacter = (member: Pick<PromptCharacter, 'card'>, plot: Pick<PromptPlot, 'description'>): CbsCharacter => ({
   description: member.card.description,
   personality: member.card.personality,
   scenario: plot.description,
   exampleDialogue: member.card.mesExample,
+});
+
+/**
+ * What a text SillyTavern stores reads besides its names, its variables and its
+ * clock (`expandTavernStored`): ST puts the reader's turn, an edit and a
+ * greeting through `substituteParams` as it keeps them, and that reads the card
+ * it is about — `{{charDescription}}`, `{{description}}`, `{{mesExamples}}`, … —
+ * the persona (`{{persona}}`), and the chat as it stands (`{{lastMessage}}`,
+ * `{{lastCharMessage}}`, `{{lastUserMessage}}`), a sent turn not yet among it.
+ * `member` is the card of a work of one; a work of several is ST's group, whose
+ * turns no one card is about (ST has no selected character there), so it has none.
+ */
+export const tavernStoreData = (
+  member: Pick<PromptCharacter, 'card'> | undefined,
+  plot: Pick<PromptPlot, 'description'>,
+  personaText: string,
+  history: readonly HistoryMessage[],
+  branch: PromptBranch | undefined,
+): MacroHostData => ({
+  ...(member ? { character: cbsCharacter(member, plot) } : {}),
+  persona: personaText,
+  chat: () => cbsChat(history, branch),
 });
 
 /**

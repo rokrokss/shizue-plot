@@ -113,6 +113,12 @@ export interface StManifest {
   worldInfoSettings?: StWorldInfoSettings;
   /** settings.json's tags, id → name, for the character filters of World Info entries (`stWorldWithFilters`). */
   tagNames?: Record<string, string>;
+  /**
+   * The pictures and files chat messages may carry (`user/images/…`, `user/files/…`),
+   * by their path under the root — listed, never read here: a chat import reads
+   * the ones its messages name (`StAttachments`).
+   */
+  attachments: Record<string, StFile>;
   skipped: { path: string; reason: StSkipReason }[];
 }
 
@@ -451,10 +457,13 @@ export async function scanSillyTavern(
   const pngs: StFile[] = [];
   const groupFiles: StFile[] = [];
   const avatars = new Map<string, StFile>();
+  // Null-prototype, as the paths are the user's own file names.
+  const attachments: Record<string, StFile> = Object.create(null);
   for (const file of files) {
     const kind = stFileKind(file.path);
     const parts = file.path.split('/');
-    if (kind === 'character') pngs.push(file);
+    if (kind === 'image' || kind === 'file') attachments[file.path] = file;
+    else if (kind === 'character') pngs.push(file);
     else if (kind === 'group') groupFiles.push(file);
     else if (kind === 'avatar') avatars.set(parts[1]!, file);
     else if (kind === 'world' || kind === 'chat') {
@@ -570,6 +579,7 @@ export async function scanSillyTavern(
     globalWorlds: settings.globalWorlds,
     globalRegex: settings.globalRegex,
     ...(settingsJson ? { worldInfoSettings: settings.worldInfoSettings, tagNames: settings.tagNames } : {}),
+    attachments,
     skipped,
   };
 }

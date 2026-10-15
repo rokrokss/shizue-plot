@@ -549,7 +549,8 @@
         "overLimit": "{count, plural, one {# message} other {# messages}} past 20,000",
         "swipes": "{count, plural, one {# swipe} other {# swipes}} past 20 per message",
         "swipesOverRows": "{count, plural, one {# swipe} other {# swipes}} let go to fit the 20,000 per-chat limit",
-        "variables": "{count, plural, one {# variable} other {# variables}} too long or past the limits"
+        "variables": "{count, plural, one {# variable} other {# variables}} too long or past the limits",
+        "attachments": "{count, plural, one {# picture or file} other {# pictures or files}} that could not come over"
       },
       "unknownSpeaker": "{count, plural, one {# message} other {# messages}} with an unknown speaker came in as narration.",
       "warnings": {
@@ -866,7 +867,7 @@
       "closeManager": "Close",
       "new": "New preset",
       "import": "Import from file",
-      "importHint": "Takes the main instruction and global note from a RisuAI or SillyTavern preset file (.json, .risup, .risupreset). A jailbreak, Post-History Instructions and the Auxiliary Prompt go into whichever field stands where their app sends them. A RisuAI preset's toggles and module integration come along too.",
+      "importHint": "Takes the main instruction and global note from a RisuAI or SillyTavern preset file (.json, .risup, .risupreset). A jailbreak, Post-History Instructions and the Auxiliary Prompt go into whichever field stands where their app sends them. A RisuAI preset's toggles, module integration and default variables come along too.",
       "name": "Name",
       "main": "Main instruction addition",
       "mainHint": "Goes right after the preset's main instruction, before the work's settings.",
@@ -876,6 +877,8 @@
       "togglesHint": "RisuAI's preset toggles: one per line as key=name (a choice is key=name=select=a,b). They come first among the chat's toggles, and your instructions read them with '{{#when::toggle::key}}'.",
       "moduleIntegration": "Module integration",
       "moduleIntegrationHint": "Module namespaces separated by commas (e.g. module1,module2). A chat using this preset turns on your modules with those namespaces.",
+      "defaultVariables": "Default variables",
+      "defaultVariablesHint": "RisuAI's preset default variables. One name=value per line: in a chat using this preset, a variable nothing has set yet reads as that value. The work's own defaults come first.",
       "editNamed": "Edit {name}",
       "deleteNamed": "Delete {name}",
       "importedName": "Imported preset",
@@ -884,6 +887,7 @@
       "takenInto": "{name} → {field}",
       "tookToggles": "Toggles → Toggles",
       "tookIntegration": "Module integration → Module integration ({names})",
+      "tookDefaultVariables": "Default variables → Default variables",
       "partMain": "Main Prompt",
       "partGlobalNote": "Global Note",
       "partJailbreak": "Jailbreak Prompt",
@@ -1082,6 +1086,7 @@
     "attachLimit": "Up to {max} images per message",
     "attachTooLarge": "Images must be {max}MB or smaller",
     "attachFailed": "Upload failed",
+    "openAttachedFile": "Open attached file {name}",
     "attachUploading": "Uploading…",
     "viewImage": "View image",
     "attachRemove": "Remove attachment",

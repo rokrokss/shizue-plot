@@ -1,7 +1,10 @@
 import type { ChatExport, ChatExportVariableSnapshot } from '@shizue/contracts';
 import {
   applyMacros,
+  tavernStoreData,
   expandTavernStored,
+  extractTavernBias,
+  removeTavernMacros,
   isNarrationTurn,
   applyVariableDelta,
   assetResolver,
@@ -43,6 +46,8 @@ import {
   type LoreTimedState,
   type MacroClock,
   type MacroContext,
+  type MacroTavernData,
+  type NormalizedCard,
   type NarratorConfig,
   type NarratorSpeaker,
   type PlotModule,
@@ -97,12 +102,14 @@ import {
   attachmentsByMessage,
   attachmentUrl,
   countUnboundAttachments,
+  isTextAttachment,
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_UNBOUND_ATTACHMENTS,
   saveAttachment,
   sweepStaleAttachments,
   toAttachmentJson,
+  withFileTexts,
   withTurnImages,
 } from '../attachments.js';
 import type { AppDeps, AppEnv } from '../deps.js';
@@ -132,7 +139,7 @@ import {
   loadOwnedNote,
   MAX_CHAT_NOTES,
 } from '../notes.js';
-import { loadReaderAdditions, resolveReaderPresetId } from '../readerPresets.js';
+import { chatDefaultVariables, loadReaderAdditions, resolveReaderPresetId } from '../readerPresets.js';
 import {
   chatModuleIds,
   chatModulesOf,
@@ -164,6 +171,7 @@ import {
   saveScriptWrites,
   scriptMemberOf,
   scriptRevMoved,
+  loadGlobalVariables,
   storableDelta,
   withLocalGlobals,
   writeChatToggles,
@@ -403,7 +411,7 @@ async function windowVariableDefaults(
 ): Promise<Variables> {
   const plot = await loadChatPlot(deps, chat, chat.userId);
   const fold = foldOptionsOf(plot?.name ?? chat.title, await loadPersona(deps, chat));
-  return computeVariables(earlier, plot?.customUi?.defaultVariables, fold);
+  return computeVariables(earlier, await chatDefaultVariables(deps, chat, plot), fold);
 }
 
 /**
@@ -827,6 +835,8 @@ async function loadGenerationContext(
   authorNote: string;
   /** The chat's reader preset (`chats.reader_preset_id`), the chat owner's own. */
   readerAdditions: ReaderAdditions | undefined;
+  /** What the chat's variables are folded over: the work's defaults, then its reader preset's (`chatDefaultVariables`). */
+  defaults: Variables | undefined;
   narrator: NarratorConfig | undefined;
   /** The names this chat's open images go by, for `{{assetlist}}` in the prompt. */
   assetNames: string[];
@@ -897,6 +907,7 @@ async function loadGenerationContext(
     // this request's scripts left it, when they rewrote it.
     authorNote: await loadAuthorNote(deps, scripts.note === undefined ? chat : { ...chat, note: scripts.note }),
     readerAdditions: await loadReaderAdditions(deps, chat),
+    defaults: await chatDefaultVariables(deps, chat, row),
     assetNames: await openAssetNames(deps, chat),
     auxiliaryModel: await auxiliaryModelOf(deps, chat),
     fold: foldOptionsOf(row.name, persona),
@@ -1092,18 +1103,20 @@ function loreStateOf(branch: Message[]): LoreTimedState {
 }
 
 /**
- * The branch as the model reads it: the turns, plus the images the turn being
- * answered carries — or, for a model without vision, the note that says it
- * carried them. Every mode goes through here, `send` included: it appends the
+ * The branch as the model reads it: the turns, each with the text of the files
+ * it carries ahead of its words (`withFileTexts`, a SillyTavern chat's), plus the
+ * images the turn being answered carries — or, for a model without vision, the
+ * note that says it carried them. Every mode goes through here, `send` included: it appends the
  * turn it has just stored to the history and lets this find its uploads.
  */
-const promptHistory = (
+const promptHistory = async (
   deps: AppDeps,
   userId: string,
   model: string,
   source: Message[],
   speaker: string | undefined,
-): Promise<HistoryMessage[]> => withTurnImages(deps, userId, model, source, toHistory(source, speaker));
+): Promise<HistoryMessage[]> =>
+  withTurnImages(deps, userId, model, source, await withFileTexts(deps, source, toHistory(source, speaker)));
 
 /**
  * Chat variables of a branch. Folded over the *whole* branch rather than the
@@ -1111,8 +1124,8 @@ const promptHistory = (
  * its message being evicted, and the client derives the same map from the same
  * messages — macros and script deltas both — so both sides agree.
  */
-const pathVariables = (plot: Plot, branch: readonly FoldItem[], fold: FoldOptions): Variables =>
-  computeVariables(branch, plot.customUi?.defaultVariables, fold);
+const pathVariables = (defaults: Variables | undefined, branch: readonly FoldItem[], fold: FoldOptions): Variables =>
+  computeVariables(branch, defaults, fold);
 
 /** The roster as a reader's `@이름:` lines are read against: every name a member goes by. */
 const readerMembersOf = (members: readonly Pick<Character, 'id' | 'name' | 'card'>[]): ReaderMember[] =>
@@ -1129,19 +1142,32 @@ const readerMembersOf = (members: readonly Pick<Character, 'id' | 'name' | 'card
  * (ST's one-to-one chat) and the work's name otherwise, `{{user}}` the
  * persona, the variables those at the chat's head (ST's are the chat's, not a
  * message's), and the card's own fields its macros read are
- * the lead's. Null for any other work: its stored texts keep their macros for
+ * the lead's. What they read of the card, the persona and the chat comes as
+ * `data` (`tavernStoreData`): the chat is `path`, the branch as it stands where
+ * the text is stored — before a sent turn, which ST substitutes before it
+ * pushes it. Null for any other work: its stored texts keep their macros for
  * the prompt to read, as RisuAI's do.
  */
 function tavernStoreMacro(
-  context: Pick<Awaited<ReturnType<typeof loadGenerationContext>>, 'plot' | 'characters' | 'userName' | 'globalVariables'>,
+  context: Pick<
+    Awaited<ReturnType<typeof loadGenerationContext>>,
+    'plot' | 'characters' | 'userName' | 'globalVariables' | 'personaText' | 'all' | 'firstMessage' | 'scriptSpeaker'
+  >,
   variables: Variables,
   clock: MacroClock,
   seed: string,
+  path: Message[],
 ): MacroContext | null {
   const lead = context.characters[0];
   if (!lead?.sillyTavern) return null;
-  const note = lead.card.lorebook.find((entry) => entry.depthPrompt && entry.enabled);
   return {
+    data: tavernStoreData(
+      context.characters.length === 1 ? lead : undefined,
+      context.plot,
+      context.personaText,
+      toHistory(path, context.scriptSpeaker),
+      promptBranch(context.all, path, context.firstMessage),
+    ),
     // ST's `name2`: the character of a one-to-one chat; a group's has none to name, so the work's.
     char: context.characters.length === 1 ? lead.name : (context.plot.char ?? context.plot.name),
     user: context.userName,
@@ -1149,19 +1175,66 @@ function tavernStoreMacro(
     globalVariables: context.globalVariables,
     clock,
     seed,
-    tavern: {
-      sillyTavern: true,
-      charPrompt: lead.card.systemPrompt,
-      charJailbreak: lead.card.postHistoryInstructions,
-      group: context.characters.filter((member) => !member.absent).map((member) => member.name),
-      charVersion: lead.card.characterVersion,
-      creatorNotes: lead.card.creatorNotes,
-      firstMessage: lead.card.firstMes,
-      alternateGreetings: lead.card.alternateGreetings,
-      ...(note ? { depthPrompt: note.content } : {}),
-    },
+    tavern: tavernCardFields(lead.card, context.characters.filter((member) => !member.absent).map((member) => member.name)),
   };
 }
+
+/** What ST's own macros read of the lead's card, and who is on the stage (`MacroTavernData`). */
+function tavernCardFields(card: NormalizedCard, group: string[]): MacroTavernData {
+  const note = card.lorebook.find((entry) => entry.depthPrompt && entry.enabled);
+  return {
+    sillyTavern: true,
+    charPrompt: card.systemPrompt,
+    charJailbreak: card.postHistoryInstructions,
+    group,
+    charVersion: card.characterVersion,
+    creatorNotes: card.creatorNotes,
+    firstMessage: card.firstMes,
+    alternateGreetings: card.alternateGreetings,
+    ...(note ? { depthPrompt: note.content } : {}),
+  };
+}
+
+/**
+ * What ST's `substituteParams` reads when it first shows a chat's greeting, for a
+ * work ST wrote (`messageFormatting` writes the greeting back expanded the first
+ * time it draws it; a group's greetings are expanded as the chat is made,
+ * `getFirstCharacterMessage`): `{{char}}` and `{{user}}` as a stored turn's
+ * (`tavernStoreMacro`), the variables a new chat starts from, the reader's
+ * globals on the work, the clock now, and the lead's card and the persona for
+ * the macros that read them — a chat with nothing in it yet. Null for any other
+ * work, whose greetings keep the macros they are drawn with.
+ */
+async function tavernGreetingMacro(
+  deps: AppDeps,
+  plot: Plot,
+  persona: Persona | null,
+  userId: string,
+  clock: MacroClock,
+  seed: string,
+): Promise<MacroContext | null> {
+  const members = await loadMembers(deps.db, plot.id);
+  const lead = members[0];
+  if (!lead || !isSillyTavernCard(lead.card)) return null;
+  const one = members.length === 1;
+  return {
+    data: tavernStoreData(one ? lead : undefined, plot, persona?.description ?? '', [], undefined),
+    char: one ? lead.name : plot.name,
+    user: persona?.name ?? DEFAULT_USER_NAME,
+    variables: applyVariableDelta(plot.customUi?.defaultVariables ?? {}, null),
+    globalVariables: await loadGlobalVariables(deps, userId, plot.id),
+    clock,
+    seed,
+    tavern: tavernCardFields(lead.card, members.map((member) => member.name)),
+  };
+}
+
+/** A rewritten message's delta: what its scripts left, under what its stored text's macros wrote now (none: as it was). */
+const variableDeltaOf = (
+  delta: VariableDelta | null,
+  writes: VariableDelta | null,
+): { variableDelta?: VariableDelta | null } =>
+  writes ? { variableDelta: storableDelta({ ...(delta ?? {}), ...writes }) } : delta ? { variableDelta: delta } : {};
 
 /** A sent turn's delta with what its stored text's macros wrote laid under it — the scripts' values win, as they ran after. */
 const withMacroWrites = (writes: VariableDelta | null, delta: VariableDelta | null | undefined): VariableDelta | null =>
@@ -1750,7 +1823,7 @@ async function regeneratePlan(
     readerAdditions: context.readerAdditions,
     // The kept branch only: the head being replaced takes its delta with it, so
     // a regenerate starts from where the turn before it left things.
-    ...startedFrom(pathVariables(context.row, kept, context.fold), scripts),
+    ...startedFrom(pathVariables(context.defaults, kept, context.fold), scripts),
     fold: context.fold,
     globalVariables: context.globalVariables,
     clock: requestClock(c, context.row, kept),
@@ -1812,7 +1885,7 @@ async function withScriptRequestTriggers(
     authorNote: context.authorNote,
     personaText: context.personaText,
     userName: context.userName,
-    variables: pathVariables(context.row, path, context.fold),
+    variables: pathVariables(context.defaults, path, context.fold),
     globalVariables: context.globalVariables,
     clock: requestClock(c, context.row, path),
     seed: chat.id,
@@ -1983,19 +2056,25 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     // SillyTavern's stored-text scripts rewrite the greetings a chat opens on, as
     // written (`getFirstMessage`); only an ST card carries any (`storedRegex.ts`).
     const greetings = await regexGreetings(deps, plot, persona?.name ?? DEFAULT_USER_NAME);
-    // `{{char}}` in a plot's own writing is the work, not one of its members.
-    // The clock is the reader's at the moment the chat opens. There is no seed:
-    // the chat id is minted by the insert below, and an intro is expanded once.
-    const intros = introTexts(greetings, {
-      char: plot.name,
-      user: persona?.name ?? DEFAULT_USER_NAME,
-      clock: requestClock(c, plot),
-    });
+    const clock = requestClock(c, plot);
+    // Minted here, so a SillyTavern greeting's `{{pick}}` can draw from it.
+    const chatId = randomUUID();
+    // In a work SillyTavern wrote, each greeting as ST shows it the first time
+    // (`tavernGreetingMacro`): its macros expanded and what they wrote kept on
+    // its root. Otherwise `{{char}}` in a plot's own writing is the work, not one
+    // of its members; the clock is the reader's at the moment the chat opens, and
+    // there is no seed — an intro is expanded once.
+    const tavern = await tavernGreetingMacro(deps, plot, persona, userId, clock, chatId);
+    const expanded = tavern ? greetings.slice(0, MAX_INTRO_ROOTS).map((greeting) => expandTavernStored(greeting, tavern)) : null;
+    const intros = expanded
+      ? expanded.map((greeting) => greeting.text.trim())
+      : introTexts(greetings, { char: plot.name, user: persona?.name ?? DEFAULT_USER_NAME, clock });
     const chosen = pickIntroIndex(intros.length, body['introIndex']);
 
     const [created] = await deps.db
       .insert(chats)
       .values({
+        id: chatId,
         userId,
         plotId,
         personaId: persona?.id ?? null,
@@ -2031,11 +2110,14 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         role: 'assistant' as const,
         content: entry.content,
         model,
+        ...variableDeltaOf(null, expanded?.[entry.index]?.variableWrites ?? null),
         // Distinct timestamps: siblings are ordered by creation, and one bulk
         // insert would otherwise share a timestamp and fall back to ordering by id.
         createdAt: new Date(stamp + position),
       }));
       await deps.db.insert(messages).values(values);
+      // What the greeting the chat opens on wrote to the reader's globals.
+      await keepStoredGlobalWrites(deps, chat, expanded?.[chosen] ?? null);
 
       const head = values[stored.findIndex((entry) => entry.index === chosen)]!;
       const [updated] = await deps.db
@@ -2124,7 +2206,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           ? {
               attachments: attachments
                 .get(message.id)!
-                .map(({ id, mime }) => ({ id, url: attachmentUrl(chat.id, id), mime })),
+                .map(({ id, mime, name }) => ({
+                  id,
+                  url: attachmentUrl(chat.id, id),
+                  mime,
+                  ...(name !== null ? { name } : {}),
+                })),
             }
           : {}),
       })),
@@ -2143,7 +2230,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       // The plot is read for its variable defaults and for nothing else; without one, the
       // fold starts empty and reflects only what the conversation itself set.
       variableTimeline: variableTimeline(
-        plot?.customUi?.defaultVariables,
+        await chatDefaultVariables(deps, chat, plot),
         path,
         foldOptionsOf(plot?.name ?? chat.title, await loadPersona(deps, chat)),
       ),
@@ -2556,9 +2643,26 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       }
     }
 
-    const contents = blocks.map((block) =>
+    const written = blocks.map((block) =>
       block.kind === 'narration' ? withNarrationPrefix(block.content) : block.content.trim(),
     );
+    // A block the rewrite changed, or added, is stored as an edit of its message
+    // is (`editStorer`): its `runOnEdit` scripts and, in a work SillyTavern wrote,
+    // its macros as ST's `updateMessage` leaves them, one message at a time. A
+    // block left as it was keeps the text it was stored with.
+    const store = await editStorer(deps, c, chat);
+    const edits: (StoredEdit | null)[] = [];
+    for (const [index, block] of blocks.entries()) {
+      const original = block.originId === undefined ? undefined : scene[originIndex.get(block.originId)!]!;
+      const text = written[index]!;
+      if (original?.content === text) {
+        edits.push(null);
+        continue;
+      }
+      const role: MessageRole = original?.role ?? (block.kind === 'narration' ? 'user' : 'assistant');
+      edits.push(await store({ role, content: original?.content ?? text }, text));
+    }
+    const contents = written.map((text, index) => edits[index]?.text ?? text);
 
     // How much of the scene the rewrite left standing, in stored form: the fork
     // point, so an edit of the last line forks at the last line.
@@ -2600,8 +2704,9 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         // effects read the branch's records, and a typo fix must not end them.
         ...(original?.loreTriggers ? { loreTriggers: original.loreTriggers } : {}),
         // …and what its scripts left: they ran once, for the turn the copy still
-        // is, and nothing runs them again for a rewording.
-        ...(original?.variableDelta ? { variableDelta: original.variableDelta } : {}),
+        // is, and nothing runs them again for a rewording — under what the
+        // rewording's own macros wrote now, in a work SillyTavern wrote.
+        ...variableDeltaOf(original?.variableDelta ?? null, edits[kept + position]?.stored?.variableWrites ?? null),
         // …and who said it in which round: a reworded group reply is still theirs.
         ...(original ? { speakerMemberId: original.speakerMemberId, groupTurnId: original.groupTurnId } : {}),
         // …and whether the AI reads it.
@@ -2647,6 +2752,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       return row!;
     });
     if (dropped > 0) scheduleMemoryUpdate(deps, chat.id);
+    for (const edit of edits.slice(kept)) await keepStoredGlobalWrites(deps, chat, edit?.stored ?? null);
     return c.json(await chatState(deps, updated));
   });
 
@@ -3125,7 +3231,9 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     if (!object) throw notFound('Attachment file is missing');
     return new Response(object.body, {
       headers: {
-        'Content-Type': attachment.mime,
+        // A SillyTavern file is text, read as UTF-8 and never sniffed into markup.
+        'Content-Type': isTextAttachment(attachment) ? `${attachment.mime}; charset=utf-8` : attachment.mime,
+        'X-Content-Type-Options': 'nosniff',
         'Content-Length': String(object.size),
         'Cache-Control': 'private, max-age=3600',
       },
@@ -3193,12 +3301,13 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const scriptMember = scriptMemberOf(scripts.memberId, context.members);
       const path = buildPath(context.all, chat.headMessageId);
       await settleHead(deps, chat, path.at(-1), scripts, true);
-      const variables = pathVariables(context.row, path, context.fold);
+      const variables = pathVariables(context.defaults, path, context.fold);
       // SillyTavern's stored-text scripts rewrite the turn as it is sent
       // (`sendMessageAsUser`); only an ST card carries any (`storedRegex.ts`). A
       // turn written wholly as the narrator is ST's narrator's message
       // (`sendNarratorMessage`, `/sys`), which ST stores with no script run on it.
-      const regexed = isNarrationTurn(content, readerMembersOf(context.members))
+      const narrator = isNarrationTurn(content, readerMembersOf(context.members));
+      const regexed = narrator
         ? content
         : await regexStoredText(content, USER_INPUT, {
             characters: context.characters,
@@ -3208,9 +3317,15 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           });
       // Then, in a work ST wrote, its macros as ST's `substituteParams` leaves them
       // in the stored turn — what they wrote kept on the turn and in the globals.
-      const tavern = tavernStoreMacro(context, variables, requestClock(c, context.row, path), chat.id);
+      const tavern = tavernStoreMacro(context, variables, requestClock(c, context.row, path), chat.id, path);
       const stored = tavern ? expandTavernStored(regexed, tavern) : null;
-      const sent = stored?.text ?? regexed;
+      // ST's `{{bias}}`, read off the turn as written (`getBiasStrings`), its macros
+      // expanded: kept on the turn, and the turn keeps no macro at all
+      // (`removeMacros`). A turn that was nothing but its bias is ST's system
+      // message with the bias on it — on screen, out of the prompt.
+      const rawBias = tavern && !narrator ? extractTavernBias(content) : '';
+      const bias = rawBias && tavern ? expandTavernStored(rawBias, tavern).text : '';
+      const sent = bias ? removeTavernMacros(stored?.text ?? regexed) : (stored?.text ?? regexed);
       // The turn goes where the scripts left it — after the branch, unless they
       // edited the chat around it, or cut it (RisuAI then sends without it).
       const edit = planScriptChat(path, scripts.chat, {
@@ -3218,7 +3333,13 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         lastDelta: withMacroWrites(stored?.variableWrites ?? null, variableDelta),
         // Stored on the turn rather than on the request, so a regenerate of it
         // re-applies the same ruling.
-        turn: { content: sent, source, ...(directions ? { directions } : {}), attachmentIds },
+        turn: {
+          content: sent,
+          source,
+          ...(directions ? { directions } : {}),
+          attachmentIds,
+          ...(bias ? { bias, ...(sent ? {} : { hidden: true }) } : {}),
+        },
         ...(scriptMember ? { memberId: scriptMember.id } : {}),
       });
       await keepScriptWrites(deps, chat, context, scripts);
@@ -3288,7 +3409,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         preset: getPreset(chat.preset),
         readerAdditions: context.readerAdditions,
         // The stored rows, so the turn's delta is folded with its text.
-        ...startedFrom(pathVariables(context.row, branch, context.fold), scripts),
+        ...startedFrom(pathVariables(context.defaults, branch, context.fold), scripts),
         fold: context.fold,
         globalVariables: context.globalVariables,
         clock: requestClock(c, context.row, branch),
@@ -3404,7 +3525,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         ...(answersReader ? { directions: lastUserDirections(path) } : {}),
         preset: getPreset(chat.preset),
         readerAdditions: context.readerAdditions,
-        ...startedFrom(pathVariables(context.row, path, context.fold), scripts),
+        ...startedFrom(pathVariables(context.defaults, path, context.fold), scripts),
         fold: context.fold,
         globalVariables: context.globalVariables,
         clock: requestClock(c, context.row, path),
@@ -3515,8 +3636,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         readerAdditions: context.readerAdditions,
         // The prompt reads the whole branch, head included; the head's new delta
         // is measured from the branch before it, since the continue rewrites it.
-        ...startedFrom(pathVariables(context.row, path, context.fold), scripts),
-        turnBase: pathVariables(context.row, path.slice(0, -1), context.fold),
+        ...startedFrom(pathVariables(context.defaults, path, context.fold), scripts),
+        turnBase: pathVariables(context.defaults, path.slice(0, -1), context.fold),
         fold: context.fold,
         globalVariables: context.globalVariables,
         clock: requestClock(c, context.row, path),
@@ -3596,7 +3717,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         ...(context.narrator ? { narrator: context.narrator } : {}),
         preset: getPreset(chat.preset),
         readerAdditions: context.readerAdditions,
-        ...startedFrom(pathVariables(context.row, path, context.fold), scripts),
+        ...startedFrom(pathVariables(context.defaults, path, context.fold), scripts),
         fold: context.fold,
         globalVariables: context.globalVariables,
         clock: requestClock(c, context.row, path),
@@ -3674,7 +3795,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         ...(context.narrator ? { narrator: context.narrator } : {}),
         preset: getPreset(chat.preset),
         readerAdditions: context.readerAdditions,
-        ...startedFrom(pathVariables(context.row, path, context.fold), scripts),
+        ...startedFrom(pathVariables(context.defaults, path, context.fold), scripts),
         fold: context.fold,
         globalVariables: context.globalVariables,
         clock: requestClock(c, context.row, path),
@@ -3914,48 +4035,77 @@ function pickIntroIndex(total: number, index: unknown): number {
   return index;
 }
 
+/** An edit as stored (`editStorer`): its text, what its macros wrote, and a reader's turn's bias in a work ST wrote. */
+interface StoredEdit {
+  text: string;
+  stored: TavernStored | null;
+  bias?: string;
+}
+
 /**
- * An edit as SillyTavern stores one (`updateMessage`): its `runOnEdit` scripts
- * first (`getRegexedString` with `isEdit`), on the placement of the message
- * edited — the reader's turn, a reply, or a narration (a narration turn of the
- * button's or one the reader wrote wholly as the narrator), which is ST's
- * narrator's — with the macros of a pattern read for the plot's roster and the
- * chat's persona; then, in a work ST wrote (`tavernStoreMacro`), the text's
- * own macros as `substituteParams` leaves them, read at the chat's head, and
- * what they wrote. The text as written where no card ST wrote has a script
- * (`storedRegex.ts`) and the work is not ST's.
+ * Edits as SillyTavern stores them (`updateMessage`), for one chat's messages:
+ * its `runOnEdit` scripts first (`getRegexedString` with `isEdit`), on the
+ * placement of the message edited — the reader's turn, a reply, or a narration
+ * (a narration turn of the button's or one the reader wrote wholly as the
+ * narrator), which is ST's narrator's — with the macros of a pattern read for
+ * the plot's roster and the chat's persona; then, in a work ST wrote
+ * (`tavernStoreMacro`), the text's own macros as `substituteParams` leaves them,
+ * read at the chat's head, and what they wrote; and, of a reader's turn, the
+ * bias it says now. The text as written where no card ST wrote has a script
+ * (`storedRegex.ts`) and the work is not ST's. What it reads is loaded once,
+ * for every message a scene rewrite stores.
  */
-async function storedEdit(
+async function editStorer(
+  deps: AppDeps,
+  c: Context<AppEnv>,
+  chat: Chat,
+): Promise<(message: Pick<Message, 'role' | 'content'>, content: string) => Promise<StoredEdit>> {
+  const members = await loadMembers(deps.db, chat.plotId);
+  const persona = await loadPersona(deps, chat);
+  let tavern: Promise<MacroContext | null> | undefined;
+  const tavernContext = async (): Promise<MacroContext | null> => {
+    if (!members[0] || !isSillyTavernCard(members[0].card)) return null;
+    const context = await loadGenerationContext(deps, chat);
+    const path = buildPath(context.all, chat.headMessageId);
+    return tavernStoreMacro(
+      context,
+      pathVariables(context.defaults, path, context.fold),
+      requestClock(c, context.row, path),
+      chat.id,
+      path,
+    );
+  };
+  return async (message, content) => {
+    const narration =
+      message.role === 'user' ? isNarrationTurn(message.content, readerMembersOf(members)) : isNarration(message.content);
+    const placement = narration ? SLASH_COMMAND : message.role === 'user' ? USER_INPUT : AI_OUTPUT;
+    const text = await regexStoredText(
+      content,
+      placement,
+      { characters: members, userName: persona?.name ?? DEFAULT_USER_NAME },
+      { edit: true },
+    );
+    const macro = await (tavern ??= tavernContext());
+    if (!macro) return { text, stored: null };
+    const stored = expandTavernStored(text, macro);
+    // ST reads the bias again off the edited text, after its scripts
+    // (`updateMessage`): a reader's turn keeps what it says now, or none, and a
+    // turn that has one keeps no macro.
+    if (message.role !== 'user' || narration) return { text: stored.text, stored };
+    const raw = extractTavernBias(text);
+    const bias = raw ? expandTavernStored(raw, macro).text : '';
+    return { text: bias ? removeTavernMacros(stored.text) : stored.text, stored, bias };
+  };
+}
+
+/** One edit as SillyTavern stores it (`editStorer`). */
+const storedEdit = async (
   deps: AppDeps,
   c: Context<AppEnv>,
   chat: Chat,
   message: Message,
   content: string,
-): Promise<{ text: string; stored: TavernStored | null }> {
-  const members = await loadMembers(deps.db, chat.plotId);
-  const narration =
-    message.role === 'user' ? isNarrationTurn(message.content, readerMembersOf(members)) : isNarration(message.content);
-  const placement = narration ? SLASH_COMMAND : message.role === 'user' ? USER_INPUT : AI_OUTPUT;
-  const persona = await loadPersona(deps, chat);
-  const text = await regexStoredText(
-    content,
-    placement,
-    { characters: members, userName: persona?.name ?? DEFAULT_USER_NAME },
-    { edit: true },
-  );
-  if (!members[0] || !isSillyTavernCard(members[0].card)) return { text, stored: null };
-  const context = await loadGenerationContext(deps, chat);
-  const path = buildPath(context.all, chat.headMessageId);
-  const tavern = tavernStoreMacro(
-    context,
-    pathVariables(context.row, path, context.fold),
-    requestClock(c, context.row, path),
-    chat.id,
-  );
-  if (!tavern) return { text, stored: null };
-  const stored = expandTavernStored(text, tavern);
-  return { text: stored.text, stored };
-}
+): Promise<StoredEdit> => (await editStorer(deps, c, chat))(message, content);
 
 /** PATCH /api/messages/:id — edit a message; user edits fork a new branch. */
 export function messageRoutes(deps: AppDeps): Hono<AppEnv> {
@@ -3975,7 +4125,7 @@ export function messageRoutes(deps: AppDeps): Hono<AppEnv> {
       .limit(1);
     if (!row) throw notFound('Message not found');
     if (row.chat.importing) throw chatImporting();
-    const { text: edited, stored } = await storedEdit(deps, c, row.chat, row.message, content);
+    const { text: edited, stored, bias } = await storedEdit(deps, c, row.chat, row.message, content);
     // What the edit's macros wrote stands on the message edited, over the values
     // its scripts set when it was stored — ST runs them now, after those.
     const delta = stored?.variableWrites
@@ -4023,6 +4173,8 @@ export function messageRoutes(deps: AppDeps): Hono<AppEnv> {
         ...(delta ? { variableDelta: storableDelta(delta) } : {}),
         // A new version of the same turn: still hidden from the AI if it was.
         ...(row.message.hiddenFromPrompt ? { hiddenFromPrompt: true } : {}),
+        // In a work ST wrote, the bias it says now (`updateMessage`).
+        ...(bias ? { bias } : {}),
       })
       .returning();
     await deps.db

@@ -158,6 +158,8 @@ const backup = storedZip({
   }),
   'secrets.json': JSON.stringify({ api_key_openai: API_KEY }),
   'User Avatars/traveler.png': picturePng(PICTURE_NOTE),
+  [`user/images/${alice}/tea.png`]: picturePng('tea'),
+  'user/files/1_menu.txt': '홍차, 녹차',
   // ST saves talkativeness from its slider, as a string; a number reads the same.
   'characters/Alice.png': cardPng(
     card(alice, { world: 'Wonderland', talkativeness: '0.8' }, {
@@ -177,7 +179,15 @@ const backup = storedZip({
     { name: alice, is_user: false, is_system: false, send_date: at(2), mes: '첫 번째 대답', swipes: ['첫 번째 대답', '두 번째 대답'], swipe_id: 0 },
     { name: 'System', is_user: false, is_system: false, send_date: at(3), mes: '시계가 여섯 시를 친다.', extra: { type: 'narrator' } },
     { name: alice, is_user: false, is_system: true, send_date: at(4), mes: '숨겨진 줄' },
-    { name: persona, is_user: true, is_system: false, send_date: at(5), mes: '차 마실래요?' },
+    // A file the reader attached (its text, under user/files), and a picture with the reply.
+    {
+      name: persona,
+      is_user: true,
+      is_system: false,
+      send_date: at(5),
+      mes: '차 마실래요?',
+      extra: { files: [{ url: '/user/files/1_menu.txt', name: '메뉴.txt', size: 9 }] },
+    },
     {
       name: alice,
       is_user: false,
@@ -185,7 +195,11 @@ const backup = storedZip({
       send_date: at(6),
       mes: '좋아요.',
       // ST's translation, shown in place of the text, and the model's reasoning.
-      extra: { display_text: 'Sure.', reasoning: '차를 좋아한다.' },
+      extra: {
+        display_text: 'Sure.',
+        reasoning: '차를 좋아한다.',
+        media: [{ url: `/user/images/${alice}/tea.png`, type: 'image', source: 'generated' }],
+      },
     },
   ]),
   // A branch ST made of that chat after its first reply (`createBranch`).
@@ -246,6 +260,7 @@ interface ChatState {
     displayText?: string | null;
     reasoning?: string | null;
     bias?: string | null;
+    attachments?: { url: string; mime: string; name?: string | null }[];
   }[];
   siblings: Record<string, { total: number; ids: string[] }>;
 }
@@ -384,6 +399,11 @@ test('the chats come over with their swipes, speakers and persona', async () => 
   // What ST kept beside the messages came with them.
   expect(state.path[0]!.bias).toBe(' 웃으며');
   expect([state.path[5]!.displayText, state.path[5]!.reasoning]).toEqual([`${alice}: Sure.`, '차를 좋아한다.']);
+  // Its picture and its file came onto the rows they were on.
+  expect(state.path[4]!.attachments?.map((one) => [one.mime, one.name])).toEqual([['text/plain', '메뉴.txt']]);
+  expect(state.path[5]!.attachments?.map((one) => one.mime)).toEqual(['image/png']);
+  const menu = await page.request.get(`${origin}${state.path[4]!.attachments![0]!.url}`);
+  expect(await menu.text()).toBe('홍차, 녹차');
   // The branch parts after the first reply: its turn is the narration's sibling, one swipe away.
   const fork = state.siblings[state.path[2]!.id]!;
   expect(fork.total).toBe(2);
@@ -438,6 +458,8 @@ test('the chats come over with their swipes, speakers and persona', async () => 
   await reasoning.locator('summary').click();
   await expect(reasoning.getByText('차를 좋아한다.')).toBeVisible();
   await expect(page.getByTestId('message-bias')).toHaveText('웃으며');
+  await expect(page.getByTestId('message-files').getByRole('link', { name: '첨부 파일 메뉴.txt 열기' })).toBeVisible();
+  await expect(page.getByTestId('message-assistant').filter({ hasText: 'Sure.' }).getByTestId('message-attachments').locator('img')).toBeVisible();
 
   // Each imported group reply is drawn under its own member.
   await page.goto(`/ko/chats/${party.id}`);

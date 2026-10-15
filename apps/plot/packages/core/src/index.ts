@@ -1,6 +1,7 @@
 export * from './types.js';
 export * from './cbs.js';
 export * from './macro.js';
+export * from './tavernBias.js';
 export * from './variables.js';
 export * from './displayScript.js';
 export * from './component.js';

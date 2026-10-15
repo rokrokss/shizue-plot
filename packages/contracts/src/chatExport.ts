@@ -18,12 +18,15 @@ import { z } from 'zod';
  * An image the reader attached to their own turn. Same-origin like an asset url,
  * and fetched with the session cookie — but the reader's own picture rather than
  * the creator's, so it is carried on the message and never withdrawn with the
- * plot.
+ * plot. A SillyTavern chat's attached file comes the same way, as `text/plain`
+ * under its own `name`.
  */
 export const ChatExportAttachmentSchema = z.object({
   id: z.string(),
   url: z.string(),
   mime: z.string(),
+  /** A text file's name; absent on a picture. */
+  name: z.string().optional(),
 });
 
 export const ChatExportMessageSchema = z.object({

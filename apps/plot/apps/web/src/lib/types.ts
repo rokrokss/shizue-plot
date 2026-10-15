@@ -577,6 +577,8 @@ export interface ReaderPreset {
   toggles: string;
   /** RisuAI's `moduleIntergration`: namespaces whose library modules a chat on it turns on. */
   moduleIntegration: string;
+  /** RisuAI's `templateDefaultVariables`: `key=value` lines a chat on it reads for a variable nothing set. */
+  defaultVariables: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -790,7 +792,7 @@ export type MessageRole = 'user' | 'assistant';
  */
 export type MessageSource = 'user' | 'component' | 'script';
 
-/** An image the reader attached to one of their own turns. */
+/** An image the reader attached to one of their own turns, or a picture or file a SillyTavern chat brought. */
 export interface ChatAttachment {
   id: string;
   /** Served by the API, to this reader only. */
@@ -800,6 +802,8 @@ export interface ChatAttachment {
   width: number | null;
   height: number | null;
   thumbhash: string | null;
+  /** A SillyTavern file's name (`text/plain`); null or absent for a picture. */
+  name?: string | null;
 }
 
 export interface ChatMessage {

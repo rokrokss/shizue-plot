@@ -22,6 +22,8 @@ const toReaderPresetJson = (preset: ReaderPreset) => ({
   toggles: preset.toggles,
   /** RisuAI's `moduleIntergration`: the namespaces whose library modules a chat on it turns on. */
   moduleIntegration: preset.moduleIntegration,
+  /** RisuAI's `templateDefaultVariables`: `key=value` lines a chat on it reads for a variable nothing set. */
+  defaultVariables: preset.defaultVariables,
   createdAt: preset.createdAt.toISOString(),
   updatedAt: preset.updatedAt.toISOString(),
 });
@@ -32,6 +34,7 @@ interface PresetFields {
   globalNote?: string;
   toggles?: string;
   moduleIntegration?: string;
+  defaultVariables?: string;
 }
 
 /** The fields a body may set, each checked against its cap; `name` may not be blank. */
@@ -41,11 +44,17 @@ function presetFields(body: Record<string, unknown>): PresetFields {
   const globalNote = optionalString(body, 'globalNote');
   const toggles = optionalString(body, 'toggles');
   const moduleIntegration = optionalString(body, 'moduleIntegration');
+  const defaultVariables = optionalString(body, 'defaultVariables');
   if (name === '') throw badRequest('invalid_request', 'name must not be blank');
   if (name !== undefined && name.length > READER_PRESET_NAME_MAX) {
     throw badRequest('reader_preset_limit', `name must be at most ${READER_PRESET_NAME_MAX} characters`);
   }
-  for (const [key, text] of [['main', main], ['globalNote', globalNote], ['toggles', toggles]] as const) {
+  for (const [key, text] of [
+    ['main', main],
+    ['globalNote', globalNote],
+    ['toggles', toggles],
+    ['defaultVariables', defaultVariables],
+  ] as const) {
     if (text !== undefined && text.length > READER_PRESET_TEXT_MAX) {
       throw badRequest('reader_preset_limit', `${key} must be at most ${READER_PRESET_TEXT_MAX} characters`);
     }
@@ -62,6 +71,7 @@ function presetFields(body: Record<string, unknown>): PresetFields {
     ...(globalNote !== undefined ? { globalNote } : {}),
     ...(toggles !== undefined ? { toggles } : {}),
     ...(moduleIntegration !== undefined ? { moduleIntegration } : {}),
+    ...(defaultVariables !== undefined ? { defaultVariables } : {}),
   };
 }
 
@@ -107,6 +117,7 @@ export function readerPresetRoutes(deps: AppDeps): Hono<AppEnv> {
           globalNote: fields.globalNote ?? '',
           toggles: fields.toggles ?? '',
           moduleIntegration: fields.moduleIntegration ?? '',
+          defaultVariables: fields.defaultVariables ?? '',
         })
         .returning();
       return row!;

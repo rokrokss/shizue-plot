@@ -41,6 +41,9 @@
  *   every time it is drawn, and a font face is the page's whatever declares it.
  *   (A member's own stylesheet inlines it: its families are that member's.)
  *
+ * A RisuAI module a reader puts in their own library is localized the same way
+ * (`localizeReaderModule`), into pictures of the module's own.
+ *
  * Whatever fails stays as written — still refused at render — and is counted:
  * `failed` for an address that could not be fetched or was not one of the four
  * kinds, `overLimit` for one the caps below left unfetched. A template value
@@ -80,6 +83,7 @@ import {
   type NormalizedCard,
   type PlotCustomUi,
   type PlotModule,
+  type ReaderModuleAsset,
   type UrlTemplate,
 } from '@shizue/core';
 import { characters, plotAssets, plots, type NewPlotAsset } from '@shizue/db';
@@ -87,8 +91,9 @@ import { eq } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { assetUrl, MAX_ASSETS_PER_PLOT, normalizeSlug, saveAsset, uniqueSlug } from './assets.js';
 import type { AppDeps } from './deps.js';
+import { MAX_READER_MODULE_ASSETS, readerModuleAssetUrl } from './readerModules.js';
 import { guardedFetch, PinnedAgent, pooledTransport, type GuardOptions } from './scriptFetch.js';
-import { deleteQuietly } from './storage.js';
+import { deleteQuietly, readerModuleAssetKey } from './storage.js';
 
 /* ------------------------------------------------------------------ caps */
 
@@ -409,20 +414,54 @@ function pool(size: number): <T>(task: () => Promise<T>) => Promise<T> {
   };
 }
 
+/** A stylesheet fetched and localized in turn: its text with every reference it could resolve rewritten — later, once places exist. */
+interface Sheet {
+  css: string;
+  font: boolean;
+  imports: Map<string, Sheet | null>;
+}
+
+/** Where a run keeps what it brings: the names it has already, and how it stores a file. */
+interface Keep {
+  /** Names (`localizedName`) the unit's own assets already go by: fetched by nobody again. */
+  known: ReadonlySet<string>;
+  /** Stores a fetched file's bytes, or null for bytes that are none of the kinds it keeps. */
+  save(id: string, bytes: Uint8Array): Promise<{ key: string; mime: string } | null>;
+}
+
+/** What a run found in the texts and brought in, before any of it has a place (`gather`). */
+interface Gathered {
+  outcome: LocalizeOutcome;
+  /** Nothing to bring and nothing to rewrite, or a dry run: the run ends here. */
+  done: boolean;
+  stored: Stored[];
+  unitOfName: Map<string, string>;
+  imports: Map<string, string>;
+  promptImports: Map<string, { unit: string; media: string }>;
+  templates: Map<string, { template: UrlTemplate; scripts: DisplayScript[]; unit: string }>;
+  /** Template address → the names of the values that arrived. */
+  filled: Map<string, string[]>;
+  sheets: Map<string, Promise<Sheet | Miss | 'notFont'>>;
+  misses: Map<string, Miss>;
+  miss(address: string, why: Miss): void;
+}
+
 /**
- * Localizes the external references in `scope`'s texts of a plot: fetches,
- * stores, rewrites, and says what it left. With `dryRun`, only finds them.
+ * Steps 1 and 2 of a run: what `scope`'s texts in `state` name, and — unless a
+ * dry run — every file and stylesheet fetched and its bytes kept (`keep`).
+ * `cards` and `lore` are what the prompt reads (`promptSources`, `promptTexts`)
+ * besides the modules' own lore, which `state` carries.
  */
-export async function localizePlot(
-  deps: LocalizeDeps,
-  plotId: string,
+async function gather(
+  deps: Pick<LocalizeDeps, 'remoteFetch'>,
+  state: State,
   scope: LocalizeScope,
-  { dryRun = false, touch = true }: { dryRun?: boolean; touch?: boolean } = {},
-): Promise<LocalizeOutcome> {
+  cards: readonly { id: string; card: NormalizedCard }[],
+  lore: readonly { content: string }[],
+  keep: Keep,
+  dryRun: boolean,
+): Promise<Gathered> {
   const outcome: LocalizeOutcome = { failed: 0, overLimit: 0, stored: 0, found: [], moduleAssets: new Map() };
-  const [plot] = await deps.db.select().from(plots).where(eq(plots.id, plotId)).limit(1);
-  if (!plot) return outcome;
-  const state: State = { intros: plot.intros, customUi: plot.customUi ?? {} };
 
   // 1. What the texts name.
   const statics = new Map<string, { rank: number; unit: string }>();
@@ -464,42 +503,43 @@ export async function localizePlot(
     }
     return undefined;
   });
-  const cards = await deps.db
-    .select({ id: characters.id, card: characters.card })
-    .from(characters)
-    .where(eq(characters.plotId, plotId));
   /** The web fonts the prompt's texts import (`promptSources`), by address: whose, and under what media. */
   const promptImports = new Map<string, { unit: string; media: string }>();
-  for (const { text, unit } of promptSources(cards, plot.lorebook, state.customUi.modules ?? [], scope)) {
+  for (const { text, unit } of promptSources(cards, lore, state.customUi.modules ?? [], scope)) {
     for (const ref of findExternal(text)) {
       if (ref.kind !== 'import' || !ref.url || imports.has(ref.url) || promptImports.has(ref.url)) continue;
       outcome.found.push({ address: ref.address, kind: ref.kind });
       promptImports.set(ref.url, { unit, media: ref.media });
     }
   }
+  const gathered: Gathered = {
+    outcome,
+    done: false,
+    stored: [],
+    unitOfName: new Map(),
+    imports,
+    promptImports,
+    templates,
+    filled: new Map(),
+    sheets: new Map(),
+    misses,
+    miss,
+  };
   if (dryRun || (statics.size === 0 && imports.size === 0 && templates.size === 0 && promptImports.size === 0 && !addressed)) {
     outcome.failed = [...misses.values()].filter((why) => why === 'failed').length;
-    return outcome;
+    return { ...gathered, done: true };
   }
 
   // 2. Fetch, store the bytes.
-  const existing = await deps.db
-    .select({ id: plotAssets.id, slug: plotAssets.slug, name: plotAssets.name })
-    .from(plotAssets)
-    .where(eq(plotAssets.plotId, plotId));
-  const known = new Map<string, string>();
-  for (const asset of existing) if (asset.name && !known.has(asset.name)) known.set(asset.name, asset.slug);
-
   const deadline = AbortSignal.timeout(LOCALIZE_LIMITS.deadlineMs);
   const slot = pool(LOCALIZE_LIMITS.concurrency);
-  const stored: Stored[] = [];
+  const { stored, unitOfName, sheets, filled } = gathered;
   let files = 0;
   let bytes = 0;
   let guesses = 0;
   let order = 0;
   /** Each file once: what its address resolved to — a stored row to be, an asset already there, or nothing. */
   const fileResults = new Map<string, Promise<{ name: string } | Miss | 'missing'>>();
-  const unitOfName = new Map<string, string>();
 
   const request = async (url: string, kind: RemoteKind): Promise<RemoteResponse> => {
     if (deadline.aborted) throw new OverLimit();
@@ -516,7 +556,7 @@ export async function localizePlot(
     const done = fileResults.get(name);
     if (done) return done;
     const run = (async (): Promise<{ name: string } | Miss | 'missing'> => {
-      if (known.has(name)) return { name };
+      if (keep.known.has(name)) return { name };
       if (files >= LOCALIZE_LIMITS.maxFiles || bytes >= LOCALIZE_LIMITS.maxBytes) return 'overLimit';
       let response: RemoteResponse;
       try {
@@ -539,7 +579,7 @@ export async function localizePlot(
       files += 1;
       bytes += response.bytes.byteLength;
       const id = randomUUID();
-      const saved = await saveAsset(deps.storage, id, response.bytes, { audio: true, font: true });
+      const saved = await keep.save(id, response.bytes);
       if (!saved) {
         files -= 1;
         bytes -= response.bytes.byteLength;
@@ -553,13 +593,6 @@ export async function localizePlot(
     return run;
   };
 
-  /** A stylesheet fetched and localized in turn: its text with every reference it could resolve rewritten — later, once slugs exist. */
-  interface Sheet {
-    css: string;
-    font: boolean;
-    imports: Map<string, Sheet | null>;
-  }
-  const sheets = new Map<string, Promise<Sheet | Miss | 'notFont'>>();
   /** With `fontOnly` (a prompt's import), a sheet that is not a web font's is 'notFont', and nothing it names is fetched. */
   const fetchSheet = (url: string, depth: number, unit: string, fontOnly = false): Promise<Sheet | Miss | 'notFont'> => {
     const done = sheets.get(url);
@@ -638,7 +671,7 @@ export async function localizePlot(
   }
   const texts = promptTexts(
     cards.map((row) => row.card),
-    plot.lorebook,
+    lore,
     state,
   );
   const lists = bracketLists(texts);
@@ -659,8 +692,6 @@ export async function localizePlot(
       ...(state.customUi.modules ?? []).flatMap((module) => module.trigger),
     ],
   );
-  /** Template address → the names of the values that arrived. */
-  const filled = new Map<string, string[]>();
   for (const [address, { template, scripts, unit }] of templates) {
     const captured = new Map<number, string[]>();
     for (const script of scripts) {
@@ -697,6 +728,160 @@ export async function localizePlot(
     );
   }
   await Promise.all(tasks);
+  return gathered;
+}
+
+/** Where what a run brought is served, once it has a place (`rewrite`). */
+interface Places {
+  /** The address the file brought under `name` (`localizedName`) is served at; undefined where it was not kept. */
+  file(name: string): string | undefined;
+  /** The by-name address a template's values are served at, the template's name (`localizedTemplateName`) after it. */
+  byName(templateName: string): string;
+  /** The address of one of the unit's own assets a stylesheet names the RisuAI way (`{{raw::…}}`). */
+  addressOf(name: string): string | undefined;
+}
+
+/**
+ * Step 3's rewrite: the texts of `scope` in `before` with every reference the
+ * run brought pointed at its place, the imported stylesheets inlined, and the
+ * web fonts a template or the prompt imported hoisted into the stylesheet of the
+ * work or the module they belong to.
+ */
+async function rewrite(g: Gathered, before: State, scope: LocalizeScope, places: Places): Promise<State> {
+  const fileUrl = (url: string): string | undefined => places.file(localizedName(url));
+  /** A sheet's text with what resolved rewritten, its own imports inlined. */
+  const resolveSheet = async (url: string, seen: Set<string>): Promise<{ css: string; font: boolean } | null> => {
+    const result = await g.sheets.get(url);
+    if (!result || typeof result === 'string' || seen.has(url)) return null;
+    const inner = new Set(seen).add(url);
+    const inlined = new Map<string, string>();
+    for (const nested of result.imports.keys()) {
+      const done = await resolveSheet(nested, inner);
+      if (done) inlined.set(nested, done.css);
+    }
+    const css = rewriteExternal(result.css, (ref) => {
+      if (ref.kind === 'import') {
+        const text = ref.url ? inlined.get(ref.url) : undefined;
+        return text === undefined ? undefined : underMedia(text, ref.media);
+      }
+      return ref.url ? fileUrl(ref.url) : undefined;
+    });
+    return { css: `${sourceMark(url)}\n${css}`, font: result.font };
+  };
+  const resolvedSheets = new Map<string, { css: string; font: boolean }>();
+  for (const url of g.imports.keys()) {
+    const done = await resolveSheet(url, new Set());
+    if (done) resolvedSheets.set(url, done);
+  }
+  const byName = (address: string): string | undefined => {
+    const entry = g.templates.get(address);
+    if (!entry || !(g.filled.get(address)?.some((name) => places.file(name) !== undefined) ?? false)) return undefined;
+    return places.byName(localizedTemplateName(entry.template).replace(/^https:\/\//, ''));
+  };
+
+  // Hoisted font sheets, by unit, each once.
+  const hoisted = new Map<string, string[]>();
+  const hoist = (unit: string, url: string, css: string): boolean => {
+    const list = hoisted.get(unit) ?? [];
+    if (!hoisted.has(unit)) hoisted.set(unit, list);
+    if (!list.includes(url)) list.push(url, css);
+    return true;
+  };
+  const after = mapFields(before, scope, (field) => {
+    let text = rewriteExternal(field.text, (ref) => {
+      if (ref.kind === 'import') {
+        const sheet = ref.url ? resolvedSheets.get(ref.url) : undefined;
+        if (!sheet) return undefined;
+        if (sheet.font && !field.stylesheet) return hoist(field.unit, ref.url!, underMedia(sheet.css, ref.media)) ? '' : undefined;
+        return underMedia(sheet.css, ref.media);
+      }
+      return ref.url ? fileUrl(ref.url) : byName(ref.address);
+    });
+    // The unit's own assets a stylesheet names the RisuAI way, by the address
+    // each has now — a stylesheet is drawn as written, never read as CBS.
+    if (field.stylesheet) text = rewriteAssetAddresses(text, places.addressOf);
+    return text === field.text ? undefined : text;
+  });
+  // The fonts the prompt's texts import, after the templates' (`promptSources`).
+  for (const [url, { unit, media }] of g.promptImports) {
+    const sheet = await resolveSheet(url, new Set());
+    if (sheet?.font) hoist(unit, url, underMedia(sheet.css, media));
+  }
+  // The fonts a template imported, at the end of the stylesheet they now belong to —
+  // unless that sheet already holds them, inlined by this run or an earlier one.
+  const sheetWith = (css: string | undefined, unit: string): string | undefined => {
+    const list = hoisted.get(unit);
+    if (!list) return css;
+    const added = list
+      .filter((_, at) => at % 2 === 1)
+      .filter((_, at) => !(css ?? '').includes(sourceMark(list[at * 2]!)))
+      .join('\n\n');
+    if (!added) return css;
+    const joined = [css ?? '', added].filter((part) => part.trim()).join('\n\n');
+    if (joined.length > MAX_CREATOR_CSS_LENGTH) {
+      for (const url of list.filter((_, at) => at % 2 === 0)) g.miss(url, 'overLimit');
+      return css;
+    }
+    return joined;
+  };
+  const customUi: PlotCustomUi = { ...after.customUi };
+  if (scope.plot && hoisted.has(WORK)) {
+    const css = sheetWith(customUi.css, WORK);
+    if (css !== undefined) customUi.css = css;
+  }
+  if (customUi.modules) {
+    customUi.modules = customUi.modules.map((module) => {
+      const css = sheetWith(module.css, module.id);
+      return css !== undefined ? { ...module, css } : module;
+    });
+  }
+  return { intros: after.intros, customUi };
+}
+
+/** The run's misses, counted into its outcome. */
+function counted(g: Gathered): LocalizeOutcome {
+  for (const why of g.misses.values()) {
+    if (why === 'failed') g.outcome.failed += 1;
+    else g.outcome.overLimit += 1;
+  }
+  return g.outcome;
+}
+
+/**
+ * Localizes the external references in `scope`'s texts of a plot: fetches,
+ * stores, rewrites, and says what it left. With `dryRun`, only finds them.
+ */
+export async function localizePlot(
+  deps: LocalizeDeps,
+  plotId: string,
+  scope: LocalizeScope,
+  { dryRun = false, touch = true }: { dryRun?: boolean; touch?: boolean } = {},
+): Promise<LocalizeOutcome> {
+  const [plot] = await deps.db.select().from(plots).where(eq(plots.id, plotId)).limit(1);
+  if (!plot) return { failed: 0, overLimit: 0, stored: 0, found: [], moduleAssets: new Map() };
+  const state: State = { intros: plot.intros, customUi: plot.customUi ?? {} };
+  const cards = await deps.db
+    .select({ id: characters.id, card: characters.card })
+    .from(characters)
+    .where(eq(characters.plotId, plotId));
+  const existing = await deps.db
+    .select({ name: plotAssets.name })
+    .from(plotAssets)
+    .where(eq(plotAssets.plotId, plotId));
+  const g = await gather(
+    deps,
+    state,
+    scope,
+    cards,
+    plot.lorebook,
+    {
+      known: new Set(existing.flatMap((asset) => (asset.name ? [asset.name] : []))),
+      save: (id, bytes) => saveAsset(deps.storage, id, bytes, { audio: true, font: true }),
+    },
+    dryRun,
+  );
+  if (g.done) return g.outcome;
+  const { outcome, stored } = g;
 
   // 3. Rows and texts, under the plot's lock.
   let orphaned = stored.map((file) => file.key);
@@ -726,113 +911,32 @@ export async function localizePlot(
         taken.add(slug);
         slugOf.set(file.name, slug);
         inserts.push({ id: file.id, plotId, slug, name: file.name, path: file.key, mime: file.mime });
-        const unit = unitOfName.get(file.name) ?? WORK;
+        const unit = g.unitOfName.get(file.name) ?? WORK;
         if (unit !== WORK) outcome.moduleAssets.set(unit, [...(outcome.moduleAssets.get(unit) ?? []), file.id]);
       }
-      for (const file of ranked.slice(room)) miss(file.name, 'overLimit');
+      for (const file of ranked.slice(room)) g.miss(file.name, 'overLimit');
       if (inserts.length > 0) await tx.insert(plotAssets).values(inserts);
       outcome.stored = inserts.length;
 
-      const fileUrl = (url: string): string | undefined => {
-        const slug = slugOf.get(localizedName(url));
-        return slug ? assetUrl(plotId, slug) : undefined;
-      };
-      /** A sheet's text with what resolved rewritten, its own imports inlined. */
-      const resolveSheet = async (url: string, seen: Set<string>): Promise<{ css: string; font: boolean } | null> => {
-        const result = await sheets.get(url);
-        if (!result || typeof result === 'string' || seen.has(url)) return null;
-        const inner = new Set(seen).add(url);
-        const inlined = new Map<string, string>();
-        for (const nested of result.imports.keys()) {
-          const done = await resolveSheet(nested, inner);
-          if (done) inlined.set(nested, done.css);
-        }
-        const css = rewriteExternal(result.css, (ref) => {
-          if (ref.kind === 'import') {
-            const text = ref.url ? inlined.get(ref.url) : undefined;
-            return text === undefined ? undefined : underMedia(text, ref.media);
-          }
-          return ref.url ? fileUrl(ref.url) : undefined;
-        });
-        return { css: `${sourceMark(url)}\n${css}`, font: result.font };
-      };
-      const resolvedSheets = new Map<string, { css: string; font: boolean }>();
-      for (const url of imports.keys()) {
-        const done = await resolveSheet(url, new Set());
-        if (done) resolvedSheets.set(url, done);
-      }
-      const byName = (address: string): string | undefined => {
-        const entry = templates.get(address);
-        if (!entry || !(filled.get(address)?.some((name) => slugOf.has(name)) ?? false)) return undefined;
-        const name = localizedTemplateName(entry.template).replace(/^https:\/\//, '');
-        return `${assetUrl(plotId, 'by-name')}/${name}`;
-      };
-
-      // Hoisted font sheets, by unit, each once.
-      const hoisted = new Map<string, string[]>();
-      const hoist = (unit: string, url: string, css: string): boolean => {
-        const list = hoisted.get(unit) ?? [];
-        if (!hoisted.has(unit)) hoisted.set(unit, list);
-        if (!list.includes(url)) list.push(url, css);
-        return true;
-      };
-      const before: State = { intros: locked.intros, customUi: locked.customUi ?? {} };
-      // The work's own assets a stylesheet names the RisuAI way, by the address
-      // each has now — a stylesheet is drawn as written, never read as CBS.
+      // The work's own assets a stylesheet names the RisuAI way, by the address each has now.
       const resolveName = assetResolver([...rows, ...inserts].map(({ slug, name }) => ({ slug, name: name ?? null })));
-      const addressOf = (name: string): string | undefined => {
-        const slug = resolveName(name);
-        return slug ? assetUrl(plotId, slug) : undefined;
-      };
-      const after = mapFields(before, scope, (field) => {
-        let text = rewriteExternal(field.text, (ref) => {
-          if (ref.kind === 'import') {
-            const sheet = ref.url ? resolvedSheets.get(ref.url) : undefined;
-            if (!sheet) return undefined;
-            if (sheet.font && !field.stylesheet) return hoist(field.unit, ref.url!, underMedia(sheet.css, ref.media)) ? '' : undefined;
-            return underMedia(sheet.css, ref.media);
-          }
-          return ref.url ? fileUrl(ref.url) : byName(ref.address);
-        });
-        if (field.stylesheet) text = rewriteAssetAddresses(text, addressOf);
-        return text === field.text ? undefined : text;
+      const before: State = { intros: locked.intros, customUi: locked.customUi ?? {} };
+      const after = await rewrite(g, before, scope, {
+        file: (name) => {
+          const slug = slugOf.get(name);
+          return slug ? assetUrl(plotId, slug) : undefined;
+        },
+        byName: (name) => `${assetUrl(plotId, 'by-name')}/${name}`,
+        addressOf: (name) => {
+          const slug = resolveName(name);
+          return slug ? assetUrl(plotId, slug) : undefined;
+        },
       });
-      // The fonts the prompt's texts import, after the templates' (`promptSources`).
-      for (const [url, { unit, media }] of promptImports) {
-        const sheet = await resolveSheet(url, new Set());
-        if (sheet?.font) hoist(unit, url, underMedia(sheet.css, media));
-      }
-      // The fonts a template imported, at the end of the stylesheet they now belong to —
-      // unless that sheet already holds them, inlined by this run or an earlier one.
-      const sheetWith = (css: string | undefined, unit: string): string | undefined => {
-        const list = hoisted.get(unit);
-        if (!list) return css;
-        const added = list
-          .filter((_, at) => at % 2 === 1)
-          .filter((_, at) => !(css ?? '').includes(sourceMark(list[at * 2]!)))
-          .join('\n\n');
-        if (!added) return css;
-        const joined = [css ?? '', added].filter((part) => part.trim()).join('\n\n');
-        if (joined.length > MAX_CREATOR_CSS_LENGTH) {
-          for (const url of list.filter((_, at) => at % 2 === 0)) miss(url, 'overLimit');
-          return css;
-        }
-        return joined;
-      };
       const customUi: PlotCustomUi = { ...after.customUi };
-      if (scope.plot && hoisted.has(WORK)) {
-        const css = sheetWith(customUi.css, WORK);
-        if (css !== undefined) customUi.css = css;
-      }
       if (customUi.modules) {
         customUi.modules = customUi.modules.map((module) => {
-          const css = sheetWith(module.css, module.id);
           const assets = outcome.moduleAssets.get(module.id) ?? [];
-          return {
-            ...module,
-            ...(css !== undefined ? { css } : {}),
-            ...(assets.length > 0 ? { assets: [...module.assets, ...assets] } : {}),
-          };
+          return assets.length > 0 ? { ...module, assets: [...module.assets, ...assets] } : module;
         });
       }
       const changed =
@@ -855,9 +959,65 @@ export async function localizePlot(
   } finally {
     for (const key of orphaned) await deleteQuietly(deps.storage, key);
   }
-  for (const why of misses.values()) {
-    if (why === 'failed') outcome.failed += 1;
-    else outcome.overLimit += 1;
+  return counted(g);
+}
+
+/**
+ * Localizes what a RisuAI module a reader puts into their library loads from
+ * other hosts — its stylesheet, background and display scripts, and a web font
+ * its lore imports — as a work's module is localized when the creator imports it
+ * (`localizePlot`): fetched once through the same guard, kept as the module's
+ * own pictures (`ReaderModuleAsset`, under `reader-modules/`, served to its owner
+ * alone), and its references rewritten to them — a template's to the module's
+ * by-name route. `module` is not yet in the library (its id is already its row's),
+ * so nothing is locked; `assets` are the pictures its file brought, which keep
+ * their names and are never fetched again. What is past the module's asset cap,
+ * or failed, stays as written and is counted. The caller stores the module and
+ * the assets, and deletes the new assets' bytes (`deleteReaderModuleAssets`) if
+ * it does not.
+ */
+export async function localizeReaderModule(
+  deps: Pick<LocalizeDeps, 'storage' | 'remoteFetch'>,
+  module: PlotModule,
+  assets: readonly ReaderModuleAsset[],
+): Promise<{ module: PlotModule; assets: ReaderModuleAsset[]; outcome: LocalizeOutcome }> {
+  const scope: LocalizeScope = { plot: false, modules: [module.id] };
+  const state: State = { intros: [], customUi: { modules: [module] } };
+  const g = await gather(
+    deps,
+    state,
+    scope,
+    [],
+    [],
+    {
+      known: new Set(assets.map((asset) => asset.name)),
+      save: (id, bytes) => saveAsset(deps.storage, id, bytes, { audio: true, font: true, key: readerModuleAssetKey }),
+    },
+    false,
+  );
+  if (g.done) return { module, assets: [...assets], outcome: g.outcome };
+  const ranked = [...g.stored].sort((a, b) => a.rank - b.rank || a.order - b.order);
+  const room = Math.max(0, MAX_READER_MODULE_ASSETS - assets.length);
+  const added: ReaderModuleAsset[] = ranked.slice(0, room).map((file) => ({ id: file.id, name: file.name, path: file.key, mime: file.mime }));
+  for (const file of ranked.slice(room)) {
+    g.miss(file.name, 'overLimit');
+    await deleteQuietly(deps.storage, file.key);
   }
-  return outcome;
+  g.outcome.stored = added.length;
+  const all = [...assets, ...added];
+  const byName = new Map<string, string>();
+  for (const asset of all) if (!byName.has(asset.name)) byName.set(asset.name, asset.id);
+  const resolveName = assetResolver(all.map((asset) => ({ slug: asset.id, name: asset.name })));
+  const after = await rewrite(g, state, scope, {
+    file: (name) => {
+      const id = byName.get(name);
+      return id ? readerModuleAssetUrl(module.id, id) : undefined;
+    },
+    byName: (name) => `${readerModuleAssetUrl(module.id, 'by-name')}/${name}`,
+    addressOf: (name) => {
+      const id = resolveName(name);
+      return id ? readerModuleAssetUrl(module.id, id) : undefined;
+    },
+  });
+  return { module: after.customUi.modules?.[0] ?? module, assets: all, outcome: counted(g) };
 }

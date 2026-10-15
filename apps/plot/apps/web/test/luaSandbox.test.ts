@@ -826,23 +826,55 @@ describe('the reader’s Lua sandbox', () => {
     expect(await count(readerLuaSandbox('reader-b', () => sandboxWith()))).toBe('1');
   });
 
-  it('ends the sandbox when a page goes with a call still waiting on a dialog nobody will answer', async () => {
-    const lease = readerLuaSandbox('reader-a', () => sandboxWith());
+  it('lets a call go when its page goes waiting on a dialog nobody will answer, and keeps the state for the next', async () => {
+    let opened = 0;
+    const open = (): LuaSandbox => {
+      opened += 1;
+      return sandboxWith();
+    };
+    const lease = readerLuaSandbox('reader-a', open);
     expect(await count(lease)).toBe('1');
     const asking: LuaHost = { ...host, input: () => new Promise<string>(() => undefined) };
-    const waiting = lease.call(
-      `${code}
-      onStart = async(function(id) count = count + 1 alertInput(id, '이름?'):await() end)`,
-      start,
-      snapshot(),
-      asking,
-      'member-1',
-    );
+    const dialog = `asks = 0
+      onStart = async(function(id) asks = asks + 1 setChatVar(id, 'asks', asks) alertInput(id, '이름?'):await() end)`;
+    const waiting = lease.call(dialog, start, snapshot(), asking, 'member-2');
     await new Promise((resolve) => setTimeout(resolve, 200));
     lease.dispose();
-    expect(await waiting).toMatchObject({ kind: 'killed' });
-    // The next page starts afresh rather than queueing behind the call for good.
-    expect(await count(readerLuaSandbox('reader-a', () => sandboxWith()))).toBe('1');
+    expect(await waiting).toEqual({ kind: 'killed', reason: 'disposed' });
+    // The next page goes on in the same sandbox, every state as it was — and the
+    // dialog failed, so the call ended in the worker rather than holding its
+    // state's queue for good.
+    const next = readerLuaSandbox('reader-a', open);
+    expect(await count(next)).toBe('2');
+    const again = await next.call(dialog, start, snapshot(), host, 'member-2');
+    expect(again.kind === 'done' && Object.fromEntries(again.result.vars)['asks']).toBe('2');
+    expect(opened).toBe(1);
+    // A lease given back runs nothing more.
+    expect(await lease.call(code, start, snapshot(), host, 'member-1')).toEqual({ kind: 'killed', reason: 'disposed' });
+  });
+
+  it("never ends a newer lease's call when an older one is given back mid-call — a module or a preset switched", async () => {
+    // The chat page builds the new runtime set, with its lease, before it gives
+    // the one it replaces back (`release`, a tick late).
+    const old = readerLuaSandbox('reader-a', () => sandboxWith());
+    expect(await count(old)).toBe('1');
+    let answer!: (text: string) => void;
+    const slow: LuaHost = { ...host, llm: () => new Promise<string>((resolve) => (answer = resolve)) };
+    const stale = old.call(
+      `onStart = async(function(id) setChatVar(id, 'said', tostring(LLM(id, { { role = 'user', content = 'x' } }).result)) end)`,
+      start,
+      snapshot({ lowLevel: true }),
+      slow,
+      'member-2',
+    );
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const fresh = readerLuaSandbox('reader-a', () => sandboxWith());
+    old.dispose();
+    expect(await stale).toEqual({ kind: 'killed', reason: 'disposed' });
+    // The model answers late, to nobody; the newer set's calls run in the same sandbox and state.
+    answer('늦은 답');
+    expect(await count(fresh)).toBe('2');
+    expect(await count(fresh)).toBe('3');
   });
 });
 

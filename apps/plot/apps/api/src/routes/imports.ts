@@ -15,11 +15,18 @@ import {
   type ImportedChatMessage,
   type ImportedMessageExtra,
 } from '@shizue/core';
-import { characters, chats, messages, plots, type NewMessage } from '@shizue/db';
+import { characters, chatAttachments, chats, messages, plots, type NewMessage } from '@shizue/db';
 import { listEnabledModels } from '@shizue/llm';
 import { and, asc, count, eq, inArray, isNotNull, isNull, max, min, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { randomUUID } from 'node:crypto';
+import {
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+  saveAttachment,
+  saveTextAttachment,
+  toAttachmentJson,
+} from '../attachments.js';
 import type { AppDeps, AppEnv, Tx } from '../deps.js';
 import { ApiError, badRequest, notFound } from '../errors.js';
 import { acquireChatSlot, rejectBusyChat, releaseChatSlot } from '../generation.js';
@@ -29,6 +36,7 @@ import { attachedNoteIds } from '../notes.js';
 import { loadMembers } from '../hub.js';
 import { loadOwnedPlot } from '../plots.js';
 import { rebased } from '../relationship.js';
+import { deleteQuietly } from '../storage.js';
 import { optionalVariableDelta, storableDelta } from '../scriptState.js';
 import { buildPath, roundCount } from '../tree.js';
 import { isUuid, optionalBoolean, optionalString, readJsonBody, requireString, requireUuidParam } from '../util.js';
@@ -496,9 +504,15 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
         .where(and(eq(chats.userId, userId), sql`${chats.importedFrom}->>'sha256' = ${sha256}`));
       const finished = earlier.find((chat) => !chat.importing);
       if (finished) return { conflict: finished.id };
-      // An importing chat cannot have attachments, so the rows are all there is.
+      // The pictures and files it had brought go with it: the rows by the
+      // cascade, the bytes once the transaction is done.
+      let leftover: string[] = [];
       if (earlier.length > 0) {
-        await tx.delete(chats).where(inArray(chats.id, earlier.map((chat) => chat.id)));
+        const ids = earlier.map((chat) => chat.id);
+        leftover = (
+          await tx.select({ path: chatAttachments.path }).from(chatAttachments).where(inArray(chatAttachments.chatId, ids))
+        ).map((row) => row.path);
+        await tx.delete(chats).where(inArray(chats.id, ids));
       }
       await requireSpeakers(tx, plotId, batch);
 
@@ -520,7 +534,7 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
         .set({ headMessageId: head })
         .where(eq(chats.id, created!.id))
         .returning();
-      return { chat: chat!, ids };
+      return { chat: chat!, ids, leftover };
     });
 
     if ('conflict' in result) {
@@ -529,6 +543,7 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
         409,
       );
     }
+    for (const path of result.leftover) await deleteQuietly(deps.storage, path);
     // Nothing can have attached a note to a chat that did not exist a moment ago.
     return c.json({ chat: toChatJson(result.chat, []), inserted: rowsOf(batch), ids: result.ids }, 201);
   });
@@ -571,6 +586,76 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
       return c.json(await appendBatch(id, userId, batch, branch));
     } finally {
       if (live) await releaseChatSlot(deps, id);
+    }
+  });
+
+  /**
+   * A picture or a file a SillyTavern message carried (`ImportedAttachments`), onto
+   * the row it came in as (`messageId`, one of the ids a batch answered): a
+   * picture (`kind` `image`) as the composer's uploads are kept — the bytes
+   * sniffed, never believed — and a file (`kind` `file`) as UTF-8 text under its
+   * `name`, which the prompt folds into the turn as ST does (`withFileTexts`).
+   * Each under the cap of an upload, and at most `MAX_ATTACHMENTS_PER_MESSAGE` on
+   * a message. The chat must be one a batch may still write: the caller's, still
+   * importing — or finished, where a branch of a later run is hung on it.
+   */
+  app.post('/:id/import/attachments', async (c) => {
+    const id = requireUuidParam(c);
+    const userId = c.get('userId');
+    let form: FormData;
+    try {
+      form = await c.req.formData();
+    } catch {
+      throw badRequest('invalid_request', 'Expected multipart/form-data with a file field');
+    }
+    const file = form.get('file');
+    if (!(file instanceof File)) throw badRequest('invalid_request', 'file field is required');
+    const messageId = form.get('messageId');
+    if (typeof messageId !== 'string' || !isUuid(messageId)) {
+      throw badRequest('invalid_request', 'messageId must be a message id');
+    }
+    const kind = form.get('kind') ?? 'image';
+    if (kind !== 'image' && kind !== 'file') throw badRequest('invalid_request', 'kind must be "image" or "file"');
+    const rawName = form.get('name');
+    const name = kind === 'file' ? (typeof rawName === 'string' ? rawName.trim() : '').slice(0, MAX_IMPORT_FILE_NAME_LENGTH) || 'file.txt' : null;
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      throw badRequest('attachment_too_large', `An attachment may be at most ${MAX_ATTACHMENT_BYTES} bytes`);
+    }
+
+    const attachmentId = randomUUID();
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const stored =
+      kind === 'image'
+        ? await saveAttachment(deps.storage, attachmentId, bytes)
+        : await saveTextAttachment(deps.storage, attachmentId, bytes);
+    if (!stored) throw badRequest('invalid_attachment', kind === 'image' ? 'Unsupported image file' : 'Not UTF-8 text');
+    try {
+      const row = await deps.db.transaction(async (tx) => {
+        await lockImportingChat(tx, id, userId, { finished: true });
+        const [message] = await tx
+          .select({ id: messages.id })
+          .from(messages)
+          .where(and(eq(messages.id, messageId), eq(messages.chatId, id)))
+          .limit(1);
+        if (!message) throw badRequest('invalid_request', 'messageId must be a message of this chat');
+        const [held] = await tx
+          .select({ total: count() })
+          .from(chatAttachments)
+          .where(eq(chatAttachments.messageId, messageId));
+        if ((held?.total ?? 0) >= MAX_ATTACHMENTS_PER_MESSAGE) {
+          throw badRequest('attachment_limit', `A message carries at most ${MAX_ATTACHMENTS_PER_MESSAGE} attachments`);
+        }
+        const [inserted] = await tx
+          .insert(chatAttachments)
+          .values({ id: attachmentId, chatId: id, messageId, path: stored.key, mime: stored.mime, name })
+          .returning();
+        return inserted!;
+      });
+      return c.json(toAttachmentJson(row), 201);
+    } catch (error) {
+      // No row names the bytes, and nothing else ever would.
+      await deleteQuietly(deps.storage, stored.key);
+      throw error;
     }
   });
 

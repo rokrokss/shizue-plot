@@ -824,6 +824,29 @@ export interface ImportedChatMessage {
    * a version that kept nothing. Absent when no version kept anything.
    */
   extras?: (ImportedMessageExtra | null)[];
+  /**
+   * What SillyTavern attached to each version, parallel to `versions` as
+   * `extras` is: null for a version with none, absent when none has any. Never
+   * sent with a batch — the import uploads them once the rows they go on exist
+   * (`POST /api/chats/:id/import/attachments`).
+   */
+  attachments?: (ImportedAttachments | null)[];
+}
+
+/**
+ * A SillyTavern message's pictures and files (`extra.media`, `extra.files`, and
+ * the older single `image`, `image_swipes` and `file` ST still migrates), as a
+ * backup keeps them.
+ */
+export interface ImportedAttachments {
+  /** Pictures, by their path under the backup's root (`user/images/…`), in ST's order. */
+  images: string[];
+  /**
+   * Files, each with the name the reader gave it, and its text: where ST kept the
+   * text on the message (`text`), or the path of the file that holds it
+   * (`user/files/…`) — ST turns every file into text when it is attached.
+   */
+  files: { name: string; path?: string; text?: string }[];
 }
 
 /** The parts of a SillyTavern message's `extra` a message here keeps (`messages.display_text`, …). */
