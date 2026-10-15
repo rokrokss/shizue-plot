@@ -58,7 +58,6 @@ import {
   type PromptCharacter,
   type PromptPlot,
   type ReaderAdditions,
-  type ReaderMember,
   type TavernStored,
   type VariableDelta,
   type Variables,
@@ -191,6 +190,7 @@ import { editRequestTurns } from '../requestTriggers.js';
 import { createScriptFetch } from '../scriptFetch.js';
 import { readScriptLlmMessages, readScriptLlmModel, runScriptLlm } from '../scriptLlm.js';
 import { suggestReplies } from '../suggest.js';
+import { readerMembers } from '../transcript.js';
 import { buildPath, deepestLeaf, roundStart, siblingInfo, visibleToAi } from '../tree.js';
 import { assetLocks, openAssetNames, openModuleAssets } from '../unlocks.js';
 import {
@@ -1126,13 +1126,6 @@ const promptHistory = async (
  */
 const pathVariables = (defaults: Variables | undefined, branch: readonly FoldItem[], fold: FoldOptions): Variables =>
   computeVariables(branch, defaults, fold);
-
-/** The roster as a reader's `@이름:` lines are read against: every name a member goes by. */
-const readerMembersOf = (members: readonly Pick<Character, 'id' | 'name' | 'card'>[]): ReaderMember[] =>
-  members.map((member) => ({
-    id: member.id,
-    names: [member.name, ...(member.card.nickname?.trim() ? [member.card.nickname.trim()] : [])],
-  }));
 
 /**
  * What SillyTavern's `substituteParams` reads when it stores a text — the
@@ -3306,7 +3299,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       // (`sendMessageAsUser`); only an ST card carries any (`storedRegex.ts`). A
       // turn written wholly as the narrator is ST's narrator's message
       // (`sendNarratorMessage`, `/sys`), which ST stores with no script run on it.
-      const narrator = isNarrationTurn(content, readerMembersOf(context.members));
+      const narrator = isNarrationTurn(content, readerMembers(context.members));
       const regexed = narrator
         ? content
         : await regexStoredText(content, USER_INPUT, {
@@ -4077,7 +4070,7 @@ async function editStorer(
   };
   return async (message, content) => {
     const narration =
-      message.role === 'user' ? isNarrationTurn(message.content, readerMembersOf(members)) : isNarration(message.content);
+      message.role === 'user' ? isNarrationTurn(message.content, readerMembers(members)) : isNarration(message.content);
     const placement = narration ? SLASH_COMMAND : message.role === 'user' ? USER_INPUT : AI_OUTPUT;
     const text = await regexStoredText(
       content,

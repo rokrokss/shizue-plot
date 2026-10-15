@@ -435,7 +435,8 @@ function slashRegexSource(key: string): { source: string; flags: string } | null
   return { source: match[1]!.replaceAll('\\/', '/'), flags: match[2]! };
 }
 
-const escapeRegex = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** `text` as a pattern that matches it literally. */
+export const escapeRegex = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** A regex entry's key as our matcher reads it: a slash key's pattern, anything else as a literal. */
 const regexKeySource = (key: string): string => slashRegexSource(key)?.source ?? escapeRegex(key);

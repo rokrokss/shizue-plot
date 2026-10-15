@@ -463,6 +463,13 @@ export const MAX_GLOBAL_VARIABLE_CHARS = 256_000;
 
 const GLOBAL_LIMITS = { keys: MAX_GLOBAL_VARIABLE_KEYS, chars: MAX_GLOBAL_VARIABLE_CHARS };
 
+/** What a write that would take the global variables past `GLOBAL_LIMITS` is refused with. */
+const globalVariablesLimit = (): ApiError =>
+  badRequest(
+    'global_variables_limit',
+    `Global variables may hold at most ${MAX_GLOBAL_VARIABLE_KEYS} names and ${MAX_GLOBAL_VARIABLE_CHARS} characters`,
+  );
+
 /** The reader's global variables for the plot; empty until something set one. */
 export async function loadGlobalVariables(deps: AppDeps, userId: string, plotId: string): Promise<Variables> {
   const [row] = await deps.db
@@ -524,12 +531,7 @@ export async function writeChatToggles(
     let next: Variables | null;
     if (locked.localToggles) {
       next = applyVariableDelta(own ?? {}, delta);
-      if (!checkVariableDelta(next, GLOBAL_LIMITS).ok) {
-        throw badRequest(
-          'global_variables_limit',
-          `Global variables may hold at most ${MAX_GLOBAL_VARIABLE_KEYS} names and ${MAX_GLOBAL_VARIABLE_CHARS} characters`,
-        );
-      }
+      if (!checkVariableDelta(next, GLOBAL_LIMITS).ok) throw globalVariablesLimit();
     } else {
       const cleared: VariableDelta = Object.create(null) as VariableDelta;
       for (const key of Object.keys(delta)) cleared[key] = null;
@@ -574,12 +576,7 @@ export async function mergeGlobalVariables(
       .for('update');
     const merged = applyVariableDelta(row?.variables ?? {}, delta);
     // The merge, read as a delta from nothing, is held to the same caps.
-    if (!checkVariableDelta(merged, GLOBAL_LIMITS).ok) {
-      throw badRequest(
-        'global_variables_limit',
-        `Global variables may hold at most ${MAX_GLOBAL_VARIABLE_KEYS} names and ${MAX_GLOBAL_VARIABLE_CHARS} characters`,
-      );
-    }
+    if (!checkVariableDelta(merged, GLOBAL_LIMITS).ok) throw globalVariablesLimit();
     await tx
       .update(plotReaderVariables)
       .set({ variables: storableVariables(merged), updatedAt: new Date() })

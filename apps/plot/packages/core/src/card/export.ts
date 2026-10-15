@@ -1,7 +1,7 @@
 import { CCardLib, type CharacterCardV3, type LorebookEntry } from '@risuai/ccardlib';
 import { zipSync } from 'fflate';
 import type { LoreEntry, NarratorConfig, NormalizedCard, PlotCustomUi } from '../types.js';
-import { BOOK_MARK, bookExtensionsOf, FOREVER_MESSAGES, keysForSillyTavern } from './bookEntry.js';
+import { BOOK_MARK, bookExtensionsOf, escapeRegex, FOREVER_MESSAGES, keysForSillyTavern } from './bookEntry.js';
 import { extensionsWithComponentCode } from './componentCode.js';
 import { extensionsWithIntro } from './intro.js';
 import { extensionsWithNarrator } from './narrator.js';
@@ -99,8 +99,6 @@ const SAFE_ASSET_NAME = /^[^{}<>"'`\\\n\r]+$/;
 const nameInCard = (asset: RisuAssetName): string =>
   asset.name && SAFE_ASSET_NAME.test(asset.name) && !asset.name.includes('::') ? asset.name : asset.slug;
 
-const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
 /**
  * A text of the work with every address of one of the plot's assets written as
  * RisuAI reaches an asset a card carries: `{{raw::name}}`, which its
@@ -123,7 +121,7 @@ export function toRisuAssetRefs(text: string, plotId: string, assets: readonly R
   const base = `/api/plots/${plotId}/assets/`;
   if (!text.includes(base)) return text;
   const bySlug = new Map(assets.map((asset) => [asset.slug, asset]));
-  const prefix = escapeRegExp(base);
+  const prefix = escapeRegex(base);
   return text
     .replace(new RegExp(`${prefix}by-name/([^"'()\\s<>]+)`, 'g'), (_match, rest: string) => `{{raw::https://${rest}}}`)
     .replace(new RegExp(`${prefix}([a-z0-9_-]+)(?![\\w/-])`, 'g'), (match, slug: string) => {

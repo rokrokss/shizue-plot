@@ -96,6 +96,23 @@ const CANDIDATES_PER_FACT = 4;
 const vectorLiteral = (vector: readonly number[]) => sql`${JSON.stringify(vector)}::vector`;
 
 /**
+ * Each query vector's cosine to each of the facts `ids` that has a vector of
+ * `model`, as `rankBySimilarity` reads them — a tie goes to the fact extracted
+ * first.
+ */
+const factCosines = (deps: AppDeps, ids: string[], model: string, vectors: number[][]) =>
+  Promise.all(
+    vectors.map(async (vector) => {
+      const rows = await deps.db
+        .select({ id: memories.id, score: sql<number>`1 - (${memories.embedding} <=> ${vectorLiteral(vector)})` })
+        .from(memories)
+        .where(and(inArray(memories.id, ids), eq(memories.model, model)))
+        .orderBy(asc(memories.createdAt), asc(memories.id));
+      return rows.map((row) => [row.id, Number(row.score)] as const);
+    }),
+  );
+
+/**
  * Whether a fact holds on a branch: nothing ended it, or what ended it is a
  * summary of another branch (`branchIds`: the summaries applying to this one).
  */
@@ -338,17 +355,7 @@ async function knownFacts(
   try {
     const queries = summaryChunks(input.summary.text);
     const { model, vectors } = await embedder.embed(queries, { plotLanguage: input.plotLanguage, kind: 'query' });
-    const lists = await Promise.all(
-      vectors.map(async (vector) => {
-        const rows = await deps.db
-          .select({ id: memories.id, score: sql<number>`1 - (${memories.embedding} <=> ${vectorLiteral(vector)})` })
-          .from(memories)
-          .where(and(inArray(memories.id, ids), eq(memories.model, model)))
-          .orderBy(asc(memories.createdAt), asc(memories.id));
-        return rows.map((row) => [row.id, Number(row.score)] as const);
-      }),
-    );
-    dense = rankBySimilarity(lists, (id: string) => id);
+    dense = rankBySimilarity(await factCosines(deps, ids, model, vectors), (id: string) => id);
   } catch (error) {
     console.warn('[facts] ranking the facts to show by meaning failed; by words alone', error);
   }
@@ -479,17 +486,11 @@ export async function selectFacts(deps: AppDeps, input: FactSelectionInput): Pro
 
   const { model, vectors } = await input.queryVectors();
   if (model !== input.model || vectors.length === 0) return [];
-  const ids = eligible.map((fact) => fact.id);
-  const lists = await Promise.all(
-    vectors.map(async (vector) => {
-      const rows = await deps.db
-        .select({ id: memories.id, score: sql<number>`1 - (${memories.embedding} <=> ${vectorLiteral(vector)})` })
-        .from(memories)
-        .where(and(inArray(memories.id, ids), eq(memories.model, model)))
-        // A tie goes to the fact extracted first.
-        .orderBy(asc(memories.createdAt), asc(memories.id));
-      return rows.map((row) => [row.id, Number(row.score)] as const);
-    }),
+  const lists = await factCosines(
+    deps,
+    eligible.map((fact) => fact.id),
+    model,
+    vectors,
   );
   const byId = new Map(eligible.map((fact) => [fact.id, fact]));
   const selectedTexts = input.selected.map((summary) => summary.text);

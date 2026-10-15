@@ -98,11 +98,7 @@ function keyMatcher(
  */
 function aliasMatches(scan: ScanText, aliases: readonly string[] | undefined): boolean {
   if (!aliases || aliases.length === 0) return false;
-  const haystack = (scan.risu ??= risuFold(scan.raw));
-  return aliases.some((alias) => {
-    const needle = alias.trim().toLowerCase().replace(/ /g, '');
-    return needle.length > 0 && haystack.includes(needle);
-  });
+  return aliases.some(keyMatcher(scan, false, false, true));
 }
 
 /**

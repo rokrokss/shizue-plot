@@ -115,7 +115,7 @@ const base = (overrides: Partial<AssemblePromptInput> = {}): AssemblePromptInput
   history,
   personaText: '{{user}}는 길 잃은 여행자.',
   userName: '민준',
-  memoryText: '[기억]\n- 민준은 검을 좋아한다.',
+  memoryText: '[지난 이야기 요약]\n민준은 고개를 넘다 길을 잃고 여관에 들었다.',
   authorNote: '긴장을 유지한다.',
   directions: '주사위 4. 문이 열린다.',
   injections: { start: '시작 주입', historyend: '끝 주입', promptend: '맨끝 주입' },

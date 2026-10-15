@@ -161,9 +161,9 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
       },
       {
         "kind": "memory",
-        "text": "[기억]
-- 민준은 검을 좋아한다.",
-        "tokens": 13,
+        "text": "[지난 이야기 요약]
+민준은 고개를 넘다 길을 잃고 여관에 들었다.",
+        "tokens": 25,
       },
       {
         "kind": "directions",
@@ -287,7 +287,7 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
     "totals": {
       "contextBudget": 100000,
       "responseReserve": 1200,
-      "used": 1156,
+      "used": 1168,
     },
   },
   "system": "세이야 카드의 지시. 당신은 은빛 여관의 장면을 이어 쓰는 소설가입니다. 아래 설정을 바탕으로 각 인물의 성격과 말투를 일관되게 유지하며, 읽는 사람이 장면 안에 들어와 있다고 느끼도록 씁니다.
@@ -339,8 +339,8 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
 
 유저(민준) 정보: 민준는 길 잃은 여행자.
 
-[기억]
-- 민준은 검을 좋아한다.",
+[지난 이야기 요약]
+민준은 고개를 넘다 길을 잃고 여관에 들었다.",
 }
 `;
 
@@ -502,9 +502,9 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
       },
       {
         "kind": "memory",
-        "text": "[기억]
-- 민준은 검을 좋아한다.",
-        "tokens": 13,
+        "text": "[지난 이야기 요약]
+민준은 고개를 넘다 길을 잃고 여관에 들었다.",
+        "tokens": 25,
       },
       {
         "kind": "examples",
@@ -628,7 +628,7 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
     "totals": {
       "contextBudget": 100000,
       "responseReserve": 1200,
-      "used": 1035,
+      "used": 1047,
     },
   },
   "system": "세이야 카드의 지시. 당신은 은빛 여관의 등장인물 전원을 연기하는 작가입니다. 아래 설정을 바탕으로 각 인물의 성격과 말투를 일관되게 유지하며 장면을 이어 씁니다.
@@ -678,8 +678,8 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
 
 유저(민준) 정보: 민준는 길 잃은 여행자.
 
-[기억]
-- 민준은 검을 좋아한다.",
+[지난 이야기 요약]
+민준은 고개를 넘다 길을 잃고 여관에 들었다.",
 }
 `;
 
@@ -824,9 +824,9 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
       },
       {
         "kind": "memory",
-        "text": "[기억]
-- 민준은 검을 좋아한다.",
-        "tokens": 13,
+        "text": "[지난 이야기 요약]
+민준은 고개를 넘다 길을 잃고 여관에 들었다.",
+        "tokens": 25,
       },
       {
         "kind": "directions",
@@ -942,7 +942,7 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
     "totals": {
       "contextBudget": 100000,
       "responseReserve": 1200,
-      "used": 1075,
+      "used": 1087,
     },
   },
   "system": "세이야 카드의 지시. 당신은 은빛 여관의 장면을 이어 쓰는 소설가입니다. 아래 설정을 바탕으로 각 인물의 성격과 말투를 일관되게 유지하며, 읽는 사람이 장면 안에 들어와 있다고 느끼도록 씁니다.
@@ -987,7 +987,7 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
 
 유저(민준) 정보: 민준는 길 잃은 여행자.
 
-[기억]
-- 민준은 검을 좋아한다.",
+[지난 이야기 요약]
+민준은 고개를 넘다 길을 잃고 여관에 들었다.",
 }
 `;

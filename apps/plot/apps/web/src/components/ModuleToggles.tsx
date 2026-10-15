@@ -2,6 +2,7 @@
 
 import {
   groupToggles,
+  isEmptyGroup,
   isToggleGroup,
   parseToggleSyntax,
   toggleVariable,
@@ -61,9 +62,9 @@ export function ModuleToggles({
 
   const draw = (list: readonly ToggleEntry[]): ReactNode =>
     list.map((entry, index) => {
+      // A group nothing went into is a checkbox in RisuAI's sidebar.
+      if (isEmptyGroup(entry)) return checkbox(entry, index);
       if (isToggleGroup(entry)) {
-        // A group nothing went into is a checkbox in RisuAI's sidebar.
-        if (entry.children.length === 0) return checkbox(entry, index);
         return (
           <details key={`${entry.key}-${index}`} className="rounded-xl border border-line px-3 py-2">
             <summary className="cursor-pointer text-sm text-fg">{entry.value}</summary>

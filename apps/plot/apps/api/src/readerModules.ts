@@ -22,8 +22,6 @@
 import {
   chatToggleText,
   moduleIntegrationNames,
-  sniffMedia,
-  stripPngTextChunks,
   type CharxAssetFile,
   type NormalizedCard,
   type PlotModule,
@@ -32,6 +30,7 @@ import {
 import { chats, readerModules, readerPresets, type Chat, type Plot, type ReaderModule } from '@shizue/db';
 import { and, asc, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
+import { saveAsset } from './assets.js';
 import type { AppDeps } from './deps.js';
 import { deleteQuietly, readerModuleAssetKey } from './storage.js';
 import { isUuid } from './util.js';
@@ -213,9 +212,9 @@ export async function presetToggles(deps: AppDeps, chat: Pick<Chat, 'userId' | '
 }
 
 /**
- * Stores the pictures a library module brought — read by their bytes, never
- * their names (`sniffMedia`): an image, music or any other media the chat
- * plays, PNGs stripped of their text chunks as every stored picture is — under
+ * Stores the pictures a library module brought as a plot's are stored
+ * (`saveAsset`) — read by their bytes, never their names: an image, music or
+ * any other media the chat plays, PNGs stripped of their text chunks — under
  * `reader-modules/`, up to `MAX_READER_MODULE_ASSETS`. What is not media is
  * skipped and counted, as an import counts it.
  */
@@ -232,16 +231,13 @@ export async function storeReaderModuleAssets(
         overLimit = assets.length - index;
         break;
       }
-      const type = sniffMedia(asset.bytes);
-      const bytes = type?.ext === 'png' ? stripPngTextChunks(asset.bytes) : asset.bytes;
-      if (!type || !bytes) {
+      const id = randomUUID();
+      const saved = await saveAsset(deps.storage, id, asset.bytes, { audio: true, video: true, key: readerModuleAssetKey });
+      if (!saved) {
         unsupported += 1;
         continue;
       }
-      const id = randomUUID();
-      const path = readerModuleAssetKey(id, type.ext);
-      await deps.storage.put(path, bytes, type.mime);
-      stored.push({ id, name: asset.name, path, mime: type.mime });
+      stored.push({ id, name: asset.name, path: saved.key, mime: saved.mime });
     }
   } catch (error) {
     await deleteReaderModuleAssets(deps, stored);

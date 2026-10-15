@@ -106,8 +106,6 @@ async function aliasRows(deps: Pick<AppDeps, 'db'>, plotId: string): Promise<Map
 
 /** What one pass did, for the log and the backfill. */
 export interface AliasPassResult {
-  /** Entries that had no row when the pass began. */
-  pending: number;
   /** Rows it wrote, an entry's aliases or its empty answer. */
   written: number;
   /** Aliases in those rows. */
@@ -129,7 +127,7 @@ export async function aliasPlotLore(
   plotId: string,
   owner: AuxiliaryOwner,
 ): Promise<AliasPassResult> {
-  const result: AliasPassResult = { pending: 0, written: 0, aliases: 0, calls: 0 };
+  const result: AliasPassResult = { written: 0, aliases: 0, calls: 0 };
   if (!loreAliasesEnabled(deps.env)) return { ...result, skipped: 'off' };
   const work = await loadWorkLore(deps, plotId);
   if (!work) return result;
@@ -148,7 +146,6 @@ export async function aliasPlotLore(
 
   const done = await aliasRows(deps, plotId);
   const pending = [...wanted].filter(([hash]) => !done.has(hash));
-  result.pending = pending.length;
   if (pending.length === 0) return result;
   if (Date.now() < (backingOff.get(plotId) ?? 0)) return { ...result, skipped: 'backing_off' };
 

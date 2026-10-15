@@ -280,7 +280,7 @@ async function embedLore(
  * first member's settings are the book's), a module — and by a request that
  * found an entry without one.
  */
-export function scheduleLoreEmbedding(deps: AppDeps, plotId: string): void {
+function scheduleLoreEmbedding(deps: AppDeps, plotId: string): void {
   if (!deps.embedder) return;
   runGuarded(deps, `lore:${plotId}`, () => embedPlotLore(deps, plotId));
 }
@@ -615,7 +615,7 @@ export async function searchByMeaning(
   if (aliases?.pending && vectors.userId) {
     scheduleLoreAliases(deps, vectors.plotId, { userId: vectors.userId, subModel: vectors.subModel ?? null });
   }
-  const none: VectorSearch = aliases ? { ...NOTHING, loreAliases: aliases.lookup } : NOTHING;
+  const none: VectorSearch = aliases ? { loreAliases: aliases.lookup } : NOTHING;
 
   const embedder = deps.embedder;
   const model = embedder ? embedder.modelFor(vectors.plotLanguage) : null;

@@ -55,6 +55,9 @@ const hashOf = (text: string): string => createHash('sha256').update(text).diges
 const MAX_POSITION = 16_383;
 const MAX_POSITIONS = 256;
 
+/** A term as a quoted lexeme, in a `tsvector` and as a `tsquery` operand alike, so no word is read as an operator. */
+const quotedTerm = (term: string): string => `'${term.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`;
+
 /**
  * A text's terms (@shizue/core `lexicalTerms`) as a `tsvector` literal, each
  * with its positions from 1, and how many there are. Written as a literal so
@@ -68,9 +71,8 @@ export function termsVector(text: string): { terms: string; count: number } {
     if (list.length < MAX_POSITIONS) list.push(Math.min(at + 1, MAX_POSITION));
     positions.set(term, list);
   });
-  const quote = (term: string): string => `'${term.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`;
   return {
-    terms: [...positions].map(([term, list]) => `${quote(term)}:${list.join(',')}`).join(' '),
+    terms: [...positions].map(([term, list]) => `${quotedTerm(term)}:${list.join(',')}`).join(' '),
     count: all.length,
   };
 }
@@ -170,8 +172,6 @@ export async function refreshSearchVectors(deps: AppDeps, plotIds: readonly stri
 /** A Postgres text array literal: every term quoted. */
 const textArray = (list: readonly string[]): string =>
   `{${list.map((term) => `"${term.replace(/[\\"]/g, '\\$&')}"`).join(',')}}`;
-/** A term as a tsquery operand, quoted so no word is read as an operator. */
-const tsqueryTerm = (term: string): string => `'${term.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`;
 
 /**
  * Explore's search by words (§10, ARCHITECTURE §7.3 단어 검색): the plots
@@ -201,7 +201,7 @@ export async function lexicalPlotIds(db: Db | Tx, query: string, filters: SQL[],
         select 1 from ${pool} where ${listed} and ${plotSearchVectors.terms} @@ t.query::tsquery limit ${cap + 1}
       ) held
     ) as frequency
-    from unnest(${textArray(terms)}::text[], ${textArray(terms.map(tsqueryTerm))}::text[]) as t(term, query)`);
+    from unnest(${textArray(terms)}::text[], ${textArray(terms.map(quotedTerm))}::text[]) as t(term, query)`);
   const frequency = new Map([...counted].map((row) => [row.term, row.frequency]));
   const rare = terms.filter((term) => (frequency.get(term) ?? 0) > 0 && frequency.get(term)! <= cap);
   const rareStems = rare.filter((term) => stems.has(term));
@@ -211,7 +211,7 @@ export async function lexicalPlotIds(db: Db | Tx, query: string, filters: SQL[],
       select coalesce(json_agg(json_build_array(u.lexeme, cardinality(u.positions))), '[]'::json)
       from unnest(${plotSearchVectors.terms}) u where u.lexeme = any(${textArray(rare)}::text[])
     ) as held
-    from ${pool} where ${listed} and ${plotSearchVectors.terms} @@ ${rareStems.map(tsqueryTerm).join(' | ')}::tsquery`);
+    from ${pool} where ${listed} and ${plotSearchVectors.terms} @@ ${rareStems.map(quotedTerm).join(' | ')}::tsquery`);
   return [...candidates]
     .map((row) => {
       const matched = row.held.map(([term]) => ({ term, frequency: frequency.get(term)! }));
