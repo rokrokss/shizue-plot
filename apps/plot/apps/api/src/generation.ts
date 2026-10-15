@@ -147,6 +147,8 @@ export interface GenerationPlan {
   wholeBranch: Message[];
   /** The memory block: the summaries selected for the turns no longer in `history`. */
   memoryText: string;
+  /** The facts block (`[기억]`) the recall turn opens with; empty when none was selected. */
+  factsText: string;
   /** Relationship state block, empty when the chat has none or turned it off. */
   relationshipText: string;
   /** The chat's author note, injected at its depth (`AUTHOR_NOTE_DEPTH` unless the chat sets one). */
@@ -864,6 +866,24 @@ async function withWorldInfoScripts(prompt: AssembledPrompt, plan: GenerationPla
   );
 }
 
+/**
+ * The message a group round under way answers, which the recall turn goes
+ * before (`AssemblePromptInput.answered`) — so each of the round's speakers is
+ * sent the same prompt up to there. A reply that joins a round (`round`'s id:
+ * the next speaker, a narration closing it) or a continue of one of its replies
+ * answers what stands before the round's first reply. Anything else answers the
+ * newest turn it is sent, which is the assembler's own default.
+ */
+function answeredTurn(plan: Pick<GenerationPlan, 'round' | 'target' | 'wholeBranch'>): { answered?: string } {
+  const round = plan.round?.groupTurnId ?? (plan.target.kind === 'continue' ? plan.target.message.groupTurnId : null);
+  if (round === null || round === undefined) return {};
+  const branch = plan.wholeBranch;
+  let at = branch.length - 1;
+  while (at >= 0 && branch[at]!.role === 'assistant' && branch[at]!.groupTurnId === round) at -= 1;
+  const answered = branch[at];
+  return answered ? { answered: answered.id } : {};
+}
+
 /** SillyTavern's default reasoning template (`power_user.reasoning`): `<think>`, `</think>` and a line break. */
 const TAVERN_REASONING_PREFIX = '<think>';
 const TAVERN_REASONING_SUFFIX = '</think>\n';
@@ -950,8 +970,10 @@ async function assembleRequest(
     personaText: plan.personaText,
     userName: plan.userName,
     memoryText: plan.memoryText,
+    factsText: plan.factsText,
     ...(found.retrievalText ? { retrievalText: found.retrievalText } : {}),
     relationshipText: plan.relationshipText,
+    ...answeredTurn(plan),
     authorNote: plan.authorNote,
     ...(plan.authorNoteSettings ? { authorNoteSettings: plan.authorNoteSettings } : {}),
     // SillyTavern counts the reader's messages over the whole chat, not the

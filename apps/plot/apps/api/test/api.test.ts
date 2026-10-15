@@ -340,6 +340,21 @@ function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps {
   };
 }
 
+/**
+ * A request's recall turn — the facts, the messages a search brought back and
+ * the relationship, one system turn before the turn being answered — or ''
+ * where the request recalls nothing.
+ */
+function recallOf(prompt: { messages: ChatRequest['messages'] }): string {
+  const turn = prompt.messages.find(
+    (message) =>
+      message.role === 'system' &&
+      typeof message.content === 'string' &&
+      /^(?:\[기억\]|Past events:|\[현재 관계 상태\])/.test(message.content),
+  );
+  return typeof turn?.content === 'string' ? turn.content : '';
+}
+
 /** Empty env by default: only the always-on echo model is enabled. */
 function makeApp(overrides: Partial<AppDeps> = {}): Hono<AppEnv> {
   return createApp(makeDeps(overrides));
@@ -3818,6 +3833,17 @@ describe('chats', () => {
     expect(report.lore).toEqual([expect.objectContaining({ source: 'plot', via: 'constant', preview: 'ALWAYS ON' })]);
     expect(await count()).toBe(before);
     expect(await claimOf(own.chat.id)).toBeNull();
+
+    // What the turn recalls shows where it is sent: between the history turns, right before the one answered.
+    const axes = { affection: 70, obsession: 0, trust: 60, liking: 65, disgust: 0, fear: 5 };
+    await db
+      .update(chats)
+      .set({ relationship: { axes, note: '', updatedAt: new Date().toISOString(), lastExtractedAssistantDepth: 0 } })
+      .where(eq(chats.id, own.chat.id));
+    const recalled = await readJson(await request(owner, `/api/chats/${own.chat.id}/inspect`));
+    const kinds = recalled.blocks.map((block: { kind: string }) => block.kind);
+    expect(kinds.slice(kinds.indexOf('recall') - 1, kinds.indexOf('recall') + 3)).toEqual(['history', 'recall', 'history', 'post_history']);
+    expect(recalled.blocks[kinds.indexOf('recall')].text).toMatch(/^\[현재 관계 상태\]\n/);
 
     // The reader's own chat on someone else's plot, and the creator on a chat
     // that is not theirs, both read as no such chat.
@@ -8379,16 +8405,19 @@ describe('memory', () => {
     const factsOf = (chatId: string) =>
       db.select().from(memories).where(eq(memories.chatId, chatId)).orderBy(asc(memories.createdAt), asc(memories.id));
 
-    /** The facts block of a request's system text, or '' where it has none. */
-    const factsBlockOf = (system: string): string => {
-      const at = system.indexOf(FACTS_HEADING);
-      return at < 0 ? '' : system.slice(at).split('\n\n')[0]!;
+    /** The facts block of a request's memory (`memoryOf`), or '' where it has none. */
+    const factsBlockOf = (sent: string): string => {
+      const at = sent.indexOf(FACTS_HEADING);
+      return at < 0 ? '' : sent.slice(at).split('\n\n')[0]!;
     };
+
+    /** What a request carries of the memory: its system text — the summaries — then its recall turn — the facts. */
+    const memoryOf = (prompt: Captured): string => [prompt.system, recallOf(prompt)].join('\n\n');
 
     const ask = async (cookie: string, chatId: string, harness: Harness, content: string): Promise<string> => {
       const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }, harness.app);
       expect((await readSse(res)).at(-1)!.event).toBe('done');
-      return undated(harness.prompts.at(-1)!.system);
+      return undated(memoryOf(harness.prompts.at(-1)!));
     };
 
     /** Stores a fact of `summaryId` as an extraction would, embedded by `embedder` — of a group scene, given one. */
@@ -8453,7 +8482,13 @@ describe('memory', () => {
       await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000, factCount: 1 } });
       const system = await ask(cookie, chatId, harness, '등대 열쇠는 어디 있지?');
       expect(factsBlockOf(system)).toBe(`${FACTS_HEADING}\n- ${FACTS[1]}`);
-      expect(system.indexOf(FACTS_HEADING)).toBeGreaterThan(system.indexOf(MEMORY_HEADING));
+      // Not in the system string, the cached prefix, but a system turn right before the turn it answers.
+      const asked = harness.prompts.at(-1)!;
+      expect(asked.system).toContain(MEMORY_HEADING);
+      expect(asked.system).not.toContain(FACTS_HEADING);
+      const at = asked.messages.findIndex((message) => message.content === recallOf(asked));
+      expect(asked.messages[at]!.role).toBe('system');
+      expect(asked.messages[at + 1]).toEqual({ role: 'user', content: '등대 열쇠는 어디 있지?' });
 
       // Two, in the order their summaries stand on the branch, then extraction order.
       await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000, factCount: 2 } });
@@ -8537,7 +8572,7 @@ describe('memory', () => {
       expect(custom.summaries[0]!.messages.at(-1)).toEqual({ role: 'system', content: 'Summarize briefly.' });
     });
 
-    it('stands after the summaries and before the Past events retrieval brings back', async () => {
+    it('opens the recall turn, ahead of the Past events retrieval brings back, while the summaries stay in the system text', async () => {
       const cookie = await signUp('facts-order@example.com');
       const { chatId } = await setupChat(cookie);
       const embedder = keywordEmbedder();
@@ -8551,14 +8586,17 @@ describe('memory', () => {
       const summary = await seedSummary(chatId, [path[0].id], '첫 인사를 나눴다.');
       await insertFact(chatId, summary.id, FACTS[1]!, embedder);
 
-      const system = await ask(cookie, chatId, harness, '그 등대 기억나?');
-      const at = [
-        system.indexOf(`${MEMORY_HEADING}\n첫 인사를 나눴다.`),
-        system.indexOf(`${FACTS_HEADING}\n- ${FACTS[1]}`),
-        system.indexOf('Past events:'),
-      ];
-      expect(at.every((index) => index >= 0), system).toBe(true);
-      expect(at).toEqual([...at].sort((a, b) => a - b));
+      await ask(cookie, chatId, harness, '그 등대 기억나?');
+      const sent = harness.prompts.at(-1)!;
+      expect(undated(sent.system)).toContain(`${MEMORY_HEADING}\n첫 인사를 나눴다.`);
+      expect(sent.system).not.toContain(FACTS_HEADING);
+      expect(sent.system).not.toContain('Past events:');
+      const recall = undated(recallOf(sent));
+      expect(recall.startsWith(`${FACTS_HEADING}\n- ${FACTS[1]}\n\nPast events:\n`), recall).toBe(true);
+      // One turn, right before the turn it answers.
+      const at = sent.messages.findIndex((message) => message.content === recallOf(sent));
+      expect(sent.messages[at + 1]).toEqual({ role: 'user', content: '그 등대 기억나?' });
+      expect(sent.messages.filter((message) => typeof message.content === 'string' && message.content.includes('Past events:'))).toHaveLength(1);
     });
 
     it('stores nothing when an edit drops the summary while its facts are being extracted', async () => {
@@ -8805,11 +8843,11 @@ describe('memory', () => {
       await harness.settle();
     });
 
-    /** A turn's system text as sent, its time labels and all. */
+    /** A turn's memory as sent (`memoryOf`), its time labels and all. */
     const askRaw = async (cookie: string, chatId: string, harness: Harness, content: string): Promise<string> => {
       const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }, harness.app);
       expect((await readSse(res)).at(-1)!.event).toBe('done');
-      return harness.prompts.at(-1)!.system;
+      return memoryOf(harness.prompts.at(-1)!);
     };
 
     /** A work of three — 세이야 (nickname 세이), 카이, 미오 — and its owner's chat on it. */
@@ -8823,12 +8861,12 @@ describe('memory', () => {
       return { cookie, chatId, seiya, kai, mio };
     }
 
-    /** The system text a generation route sent, undated: a group member's when the body names one. */
+    /** The memory a generation route sent (`memoryOf`), undated: a group member's when the body names one. */
     const generated = async (cookie: string, chatId: string, harness: Harness, route: string, body: Record<string, unknown>) => {
       const res = await json(cookie, `/api/chats/${chatId}/${route}`, 'POST', body, harness.app);
       expect((await readSse(res)).at(-1)!.event, route).toBe('done');
       await harness.settle();
-      return undated(harness.prompts.at(-1)!.system);
+      return undated(memoryOf(harness.prompts.at(-1)!));
     };
 
     it('records who spoke in a group batch, marks what everyone knows, and tells each member only what it may know', async () => {
@@ -9790,7 +9828,7 @@ describe('relationship', () => {
     await turns(cookie, chatId, harness, SENDS_TO_FIRST - 1);
     expect(harness.extractions).toHaveLength(0);
     expect((await chatOf(cookie, chatId, harness)).chat.relationship).toBeNull();
-    expect(harness.prompts.at(-1)!.system).not.toContain('[현재 관계 상태]');
+    expect(recallOf(harness.prompts.at(-1)!)).not.toContain('[현재 관계 상태]');
 
     await turns(cookie, chatId, harness, 1);
     expect(harness.extractions).toHaveLength(1);
@@ -9809,14 +9847,21 @@ describe('relationship', () => {
     expect(updated.chat.relationship.lastExtractedAssistantDepth).toBe(TURNS_PER_UPDATE);
     expect(updated.chat.relationship.updatedAt).toEqual(expect.any(String));
 
-    // The next generation carries the block, after the persona and the memory.
+    // The next generation carries the block — not in the system text, the cached
+    // prefix, but last in the recall turn right before the turn it answers.
     await turns(cookie, chatId, harness, 1);
-    const system = harness.prompts.at(-1)!.system;
-    expect(system).toContain('[현재 관계 상태]');
-    expect(system).toContain('애정 100 / 집착 0 / 신뢰 62 / 호감 70 / 혐오 0 / 두려움 3');
-    expect(system).toContain(NOTE);
-    // Macros in the block are expanded like the rest of the system prefix.
-    expect(system).toContain('리안의 등장인물들이 유저에게 느끼는 마음의 온도');
+    const sent = harness.prompts.at(-1)!;
+    expect(sent.system).not.toContain('[현재 관계 상태]');
+    const recall = recallOf(sent);
+    expect(recall.startsWith('[현재 관계 상태]')).toBe(true);
+    expect(recall).toContain('애정 100 / 집착 0 / 신뢰 62 / 호감 70 / 혐오 0 / 두려움 3');
+    expect(recall).toContain(NOTE);
+    // Macros in the block are expanded like the rest of the prompt.
+    expect(recall).toContain('리안의 등장인물들이 유저에게 느끼는 마음의 온도');
+    const at = sent.messages.findIndex((message) => message.content === recall);
+    expect(sent.messages[at]!.role).toBe('system');
+    expect(sent.messages[at + 1]!.role).toBe('user');
+    expect(at + 1).toBe(sent.messages.findLastIndex((message) => message.role === 'user'));
 
     // The next cycle is another five assistant turns past that depth.
     await turns(cookie, chatId, harness, TURNS_PER_UPDATE - 2);
@@ -9921,7 +9966,7 @@ describe('relationship', () => {
     expect(off.chat.relationship.axes).toEqual(CLAMPED);
 
     await turns(cookie, chatId, harness, TURNS_PER_UPDATE);
-    expect(harness.prompts.at(-1)!.system).not.toContain('[현재 관계 상태]');
+    expect(recallOf(harness.prompts.at(-1)!)).not.toContain('[현재 관계 상태]');
     // Disabled means no model call and no bookkeeping either.
     expect(harness.extractions).toHaveLength(0);
     expect(
@@ -9933,7 +9978,7 @@ describe('relationship', () => {
     );
     expect(on.chat.relationshipEnabled).toBe(true);
     await turns(cookie, chatId, harness, 1);
-    expect(harness.prompts.at(-1)!.system).toContain('[현재 관계 상태]');
+    expect(recallOf(harness.prompts.at(-1)!)).toContain('[현재 관계 상태]');
 
     const bad = await json(cookie, `/api/chats/${chatId}`, 'PATCH', { relationshipEnabled: 'yes' });
     expect(bad.status).toBe(400);
@@ -9957,7 +10002,7 @@ describe('relationship', () => {
       note: '',
       lastExtractedAssistantDepth: TURNS_PER_UPDATE,
     });
-    expect(harness.prompts.at(-1)!.system).not.toContain('[현재 관계 상태]');
+    expect(recallOf(harness.prompts.at(-1)!)).not.toContain('[현재 관계 상태]');
 
     await turns(cookie, chatId, harness, TURNS_PER_UPDATE - 1);
     expect(harness.extractions).toHaveLength(1);
@@ -16396,6 +16441,36 @@ describe('group turns', () => {
     ]);
   });
 
+  it('recalls before the turn a round answers, so each of its speakers is sent the same prompt up to there', async () => {
+    const chat = await groupChat('group-recall@example.com');
+    const { cookie, chatId, seiya, kai } = chat;
+    const axes = { affection: 70, obsession: 0, trust: 60, liking: 65, disgust: 0, fear: 5 };
+    await db
+      .update(chats)
+      .set({ relationship: { axes, note: '', updatedAt: new Date().toISOString(), lastExtractedAssistantDepth: 0 } })
+      .where(eq(chats.id, chatId));
+    const { target, sent } = replyingApp('응.');
+    const a = await done(await post(cookie, chatId, 'messages', { content: '안녕', speakerId: seiya }, target));
+    await done(await post(cookie, chatId, 'reply', { speakerId: kai, groupTurnId: a.groupTurnId }, target));
+    // The next speaker's continue, and a narration closing the round, answer the reader's turn too.
+    await done(await post(cookie, chatId, 'continue', {}, target));
+    await done(await post(cookie, chatId, 'narrate', {}, target));
+    const recalled = sent.map((req) => {
+      const texts = textsOf(req);
+      return texts.findIndex((text) => text.startsWith('[현재 관계 상태]'));
+    });
+    expect(recalled.every((at) => at >= 0)).toBe(true);
+    sent.forEach((req, index) => expect(textsOf(req)[recalled[index]! + 1], `request ${index}`).toBe('안녕'));
+    // Up to and through the turn they answer, the round's two speakers are sent the same.
+    expect(sent[1]!.system).toBe(sent[0]!.system);
+    expect(sent[1]!.messages.slice(0, recalled[1]! + 2)).toEqual(sent[0]!.messages.slice(0, recalled[0]! + 2));
+    // A round of its own after the round answers what closed it: the recall goes right before the newest turn.
+    await done(await post(cookie, chatId, 'reply', { speakerId: seiya }, target));
+    const opened = sent.at(-1)!.messages;
+    const at = opened.findIndex((message) => contentText(message.content).startsWith('[현재 관계 상태]'));
+    expect(at + 1).toBe(opened.findLastIndex((message) => message.role !== 'system'));
+  });
+
   it('holds /reply to a speaker on the stage and to the round the head is a reply of', async () => {
     const chat = await groupChat('group-reply@example.com');
     const { cookie, chatId, seiya, kai, mio } = chat;
@@ -18781,7 +18856,7 @@ describe('vector storage (SillyTavern)', () => {
     const prompt = await send(cookie, chatId, '등대 근처에서 map을 꺼냈다', harness);
     expect(prompt.system).toContain(MAP);
     expect(prompt.system).not.toContain(TOWER);
-    expect(prompt.system).not.toContain('Past events');
+    expect(recallOf(prompt)).not.toContain('Past events');
 
     // No embedder at all: the same, and nothing is asked of one.
     const bare = vectorApp();
@@ -18803,7 +18878,7 @@ describe('vector storage (SillyTavern)', () => {
     expect((await send(cookie, chatId, '등대로 가자', harness)).system).toContain(TOWER);
   });
 
-  it("brings back earlier messages of the branch by meaning, in ST's Past events after the memory, out of their place", async () => {
+  it("brings back earlier messages of the branch by meaning, in ST's Past events just before the turn, out of their place", async () => {
     const cookie = await signUp('vectors-retrieval@example.com');
     const { chatId } = await setupChat(cookie);
     const harness = vectorApp(conceptEmbedder());
@@ -18814,7 +18889,7 @@ describe('vector storage (SillyTavern)', () => {
 
     // Fewer messages than the protected tail: nothing to bring back.
     const KEEPER = '등대지기를 만났다';
-    expect((await send(cookie, chatId, KEEPER, harness)).system).not.toContain('Past events');
+    expect(recallOf(await send(cookie, chatId, KEEPER, harness))).not.toContain('Past events');
     // The echo model answers with the reader's words, so the reply says it too.
     for (const content of ['날씨 이야기', '빵 이야기', '책 이야기', '등대 불빛이 보였다']) await send(cookie, chatId, content, harness);
     const chunks = await db.select().from(messageChunks);
@@ -18824,8 +18899,13 @@ describe('vector storage (SillyTavern)', () => {
     const prompt = await send(cookie, chatId, '그 등대 기억나?', harness);
     // The reader's turn, the earliest that says it, under the reader's name — and
     // not the protected tail's lighthouse, however close it is.
-    expect(prompt.system).toMatch(new RegExp(`\\n\\nPast events:\\n[^\\n]+: ${KEEPER}(\\n|$)`));
-    expect(prompt.system).not.toContain('Past events:\n등대 불빛');
+    expect(recallOf(prompt)).toMatch(new RegExp(`^Past events:\\n[^\\n]+: ${KEEPER}(\\n|$)`));
+    expect(recallOf(prompt)).not.toContain('Past events:\n등대 불빛');
+    // Not in the system text, the cached prefix: a system turn of its own, right before the turn.
+    expect(prompt.system).not.toContain('Past events');
+    const at = prompt.messages.findIndex((message) => message.content === recallOf(prompt));
+    expect(prompt.messages[at]!.role).toBe('system');
+    expect(prompt.messages[at + 1]).toEqual({ role: 'user', content: '그 등대 기억나?' });
     // Moved, not copied: the reader's turn left the history; the reply saying the same stays.
     const saying = prompt.messages.filter((message) => contentText(message.content) === KEEPER);
     expect(saying.map((message) => message.role)).toEqual(['assistant']);
@@ -18835,7 +18915,7 @@ describe('vector storage (SillyTavern)', () => {
     const turn = path.find((message: any) => message.role === 'user' && message.content === KEEPER);
     await json(cookie, `/api/chats/${chatId}/messages/${turn.id}/hidden`, 'PUT', { hidden: true }, harness.app);
     const hidden = await send(cookie, chatId, '그 등대 기억나?', harness);
-    expect(hidden.system).toMatch(new RegExp(`\\n\\nPast events:\\n${KEEPER}(\\n|$)`));
+    expect(recallOf(hidden)).toMatch(new RegExp(`^Past events:\\n${KEEPER}(\\n|$)`));
     expect(RETRIEVAL_DEFAULTS.template).toBe('Past events:\n{{text}}');
   });
 
@@ -18849,7 +18929,7 @@ describe('vector storage (SillyTavern)', () => {
     // By meaning the turn is about the cat, and ST's three are the cat's; by its
     // words it names 한석, whom two messages alone hold — one of them comes back too.
     const prompt = await send(cookie, chatId, '고양이 말고 한석 할아버지 기억나?', harness);
-    const block = prompt.system.slice(prompt.system.indexOf('Past events:'));
+    const block = recallOf(prompt);
     expect(block).toContain(NAMED);
     expect(block).toContain('고양이 이야기');
   });
@@ -18862,7 +18942,7 @@ describe('vector storage (SillyTavern)', () => {
     const KEEPER = '등대지기를 만났다';
     await send(cookie, chatId, KEEPER, harness);
     for (const content of ['날씨 이야기', '빵 이야기', '책 이야기']) await send(cookie, chatId, content, harness);
-    expect((await send(cookie, chatId, '그 등대 기억나?', harness)).system).toContain(`Past events:`);
+    expect(recallOf(await send(cookie, chatId, '그 등대 기억나?', harness))).toContain(`Past events:`);
 
     // Editing the first turn forks a branch without it, whose messages are embedded as it is read.
     const path = (await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app))).path;
@@ -18873,8 +18953,8 @@ describe('vector storage (SillyTavern)', () => {
     await harness.settle();
     for (const content of ['날씨 이야기', '빵 이야기', '책 이야기']) await send(cookie, chatId, content, harness);
     const prompt = await send(cookie, chatId, '그 등대 기억나?', harness);
-    expect(prompt.system).not.toContain('Past events');
-    expect(prompt.system).not.toContain(KEEPER);
+    expect(recallOf(prompt)).not.toContain('Past events');
+    expect(recallOf(prompt)).not.toContain(KEEPER);
   });
 
   it('embeds a long entry in pieces under its header, and finds it by its best piece', async () => {

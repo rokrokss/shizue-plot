@@ -3,7 +3,8 @@
  * promises, preferences, relationships, important objects — that a separate
  * call of the auxiliary model takes from the messages a HypaV3 summary covers,
  * and that each request carries the most relevant of in a small `[기억]` block
- * after the summaries. The same call is shown the facts already kept that are
+ * just before the turn it answers (`AssemblePromptInput.factsText`). The same
+ * call is shown the facts already kept that are
  * closest to those messages and says which of them the messages changed
  * (updates) or ended (invalidated) — mem0's update step, folded into the
  * extraction rather than a call of its own. In a work of several members the
@@ -15,7 +16,7 @@
 import type { MacroLocale } from './macro.js';
 import { countTokens } from './tokens.js';
 
-/** The facts block's head in the prompt; it stands after the summaries' block. */
+/** The facts block's head in the prompt; it opens the recall turn before the turn being answered. */
 export const FACTS_HEADING = '[기억]';
 /** Facts one summary's extraction keeps at most. */
 export const MAX_FACTS_PER_SUMMARY = 8;

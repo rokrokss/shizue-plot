@@ -1013,7 +1013,8 @@ export const MessageRow = memo(function MessageRow({
           <div className={cx(ACTIONS_ABOVE, 'left-0')}>{actions}</div>
         ) : (
           <div className="flex min-h-5 items-center gap-2">
-            <span className={cx('chat-name text-xs font-medium text-muted', dim)}>{name}</span>
+            {/* The chat text's letter-spacing, which a character's name line drawn by the body takes from `.message-body`. */}
+            <span className={cx('chat-name text-xs font-medium tracking-[-0.01876rem] text-muted', dim)}>{name}</span>
             {actions}
           </div>
         )}

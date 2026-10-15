@@ -382,50 +382,101 @@ describe('assemblePrompt', () => {
     expect(withBlank.system).toBe(assemble(100_000).system);
   });
 
-  it('injects relationshipText after the memory, and nothing when it is blank', () => {
-    const { system } = assemblePrompt({
-      plot,
-      characters: [aria],
-      history,
-      preset,
-      userName: '민준',
-      personaText: '대학생.',
-      memoryText: '[지난 이야기 요약]\n요약.',
-      relationshipText: '[현재 관계 상태]\n애정 70 / 두려움 5',
-    });
-    const sections = system.split('\n\n');
-    expect(sections.at(-2)).toBe('[지난 이야기 요약]\n요약.');
-    expect(sections.at(-1)).toBe('[현재 관계 상태]\n애정 70 / 두려움 5');
-
-    const blank = assemblePrompt({
-      plot,
-      characters: [aria],
-      history,
-      preset,
-      userName: '민준',
-      relationshipText: '  ',
-    });
-    expect(blank.system).toBe(assemble(100_000).system);
-  });
-
-  it("sends the messages a search brought back after the memory, as ST's Past events follow its summary", () => {
-    const { system, report } = assemblePrompt({
-      plot,
-      characters: [aria],
-      history,
-      preset,
-      userName: '민준',
-      memoryText: '[지난 이야기 요약]\n요약.',
+  describe('the recall turn', () => {
+    const recalled = {
+      factsText: '[기억]\n- (약 20턴 전) {{user}}는 등대 열쇠를 갖고 있다.',
       retrievalText: 'Past events:\n{{user}}: 등대에 가자',
       relationshipText: '[현재 관계 상태]\n애정 70',
-      report: true,
+    };
+    const RECALL = '[기억]\n- (약 20턴 전) 민준는 등대 열쇠를 갖고 있다.\n\nPast events:\n민준: 등대에 가자\n\n[현재 관계 상태]\n애정 70';
+    const turns = history.map((turn, at) => ({ ...turn, id: `m${at}` }));
+    const recall = (input: Partial<Parameters<typeof assemblePrompt>[0]> = {}) =>
+      assemblePrompt({ plot, characters: [aria], history: turns, preset, userName: '민준', report: true, ...recalled, ...input });
+
+    it('sends the facts, the messages a search brought back and the relationship as one system turn before the newest turn', () => {
+      const { system, messages, sources, report } = recall({ memoryText: '[지난 이야기 요약]\n요약.' });
+      // None of it is in the system string, the cached prefix: only the summaries are.
+      expect(system).toBe(`${assemble(100_000).system}\n\n[지난 이야기 요약]\n요약.`);
+      const at = messages.findIndex((message) => message.content === RECALL);
+      expect(messages[at]!.role).toBe('system');
+      expect(messages[at + 1]!.content).toBe(history[3]!.content);
+      expect(messages[at - 1]!.content).toBe(history[2]!.content);
+      expect(sources![at]).toEqual({ kind: 'recall' });
+      // The inspector shows it where it is sent.
+      const blocks = report!.blocks.map((block) => block.kind);
+      expect(blocks.slice(blocks.indexOf('recall') - 1, blocks.indexOf('recall') + 2)).toEqual(['history', 'recall', 'history']);
+      expect(report!.blocks.find((block) => block.kind === 'recall')!.text).toBe(RECALL);
     });
-    const sections = system.split('\n\n');
-    expect(sections.slice(-3)).toEqual(['[지난 이야기 요약]\n요약.', 'Past events:\n민준: 등대에 가자', '[현재 관계 상태]\n애정 70']);
-    expect(report!.blocks.find((block) => block.kind === 'retrieval')?.text).toBe('Past events:\n민준: 등대에 가자');
-    expect(assemblePrompt({ plot, characters: [aria], history, preset, retrievalText: ' ' }).system).toBe(
-      assemble(100_000).system,
-    );
+
+    it('keeps the order facts, retrieval, relationship, and leaves out what is blank', () => {
+      const only = (input: Partial<typeof recalled>) =>
+        recall({ factsText: '', retrievalText: '', relationshipText: '', ...input }).messages.at(-3)!.content;
+      expect(only({ relationshipText: recalled.relationshipText })).toBe('[현재 관계 상태]\n애정 70');
+      expect(only({ factsText: recalled.factsText, relationshipText: recalled.relationshipText })).toBe(
+        '[기억]\n- (약 20턴 전) 민준는 등대 열쇠를 갖고 있다.\n\n[현재 관계 상태]\n애정 70',
+      );
+      const none = recall({ factsText: ' ', retrievalText: '', relationshipText: '  ' });
+      expect(none.messages).toEqual(assemblePrompt({ plot, characters: [aria], history: turns, preset, userName: '민준' }).messages);
+    });
+
+    it('stands before the turn a group round answers, and before the newest turn when that is not sent', () => {
+      const round = [...turns, { role: 'assistant' as const, content: '다섯 번째, 첫 화자의 답장.', id: 'm4' }];
+      const before = (answered: string) => {
+        const { messages } = recall({ history: round, answered });
+        return messages[messages.findIndex((message) => message.content === RECALL) + 1]!.content;
+      };
+      expect(before('m3')).toBe(history[3]!.content);
+      expect(before('gone')).toBe('다섯 번째, 첫 화자의 답장.');
+      // A turn hidden from the AI is not sent, so neither is it where the recall goes.
+      const hidden = round.map((turn) => (turn.id === 'm3' ? { ...turn, hidden: true } : turn));
+      const { messages } = recall({ history: hidden, answered: 'm3' });
+      expect(messages[messages.findIndex((message) => message.content === RECALL) + 1]!.content).toBe('다섯 번째, 첫 화자의 답장.');
+    });
+
+    it('goes ahead of the depth lore, the note and the start injection placed before the same turn', () => {
+      const deep: LoreEntry = {
+        keys: [],
+        secondaryKeys: [],
+        selective: false,
+        content: '깊이 하나의 로어.',
+        enabled: true,
+        constant: true,
+        insertionOrder: 0,
+        caseSensitive: false,
+        useRegex: false,
+        position: 'before_char',
+        depth: 1,
+      };
+      const { messages } = recall({
+        plot: { ...plot, lorebook: [deep] },
+        authorNote: '유저노트.',
+        authorNoteSettings: { depth: 1, frequency: 1, role: 'system' },
+        injections: { start: '시작 주입.' },
+      });
+      expect(messages.slice(-6).map((message) => message.content)).toEqual([
+        RECALL,
+        '깊이 하나의 로어.',
+        '유저노트.',
+        '시작 주입.',
+        history[3]!.content,
+        'POST',
+      ]);
+    });
+
+    it('is charged up front and never evicted, and only its facts are left out of the fixed tokens', () => {
+      const bare = assemblePrompt({ plot, characters: [aria], history: turns, preset, userName: '민준', contextBudget: 100_000, maxResponseTokens: 0 });
+      const full = recall({ contextBudget: 100_000, maxResponseTokens: 0, report: false });
+      const facts = countTokens('[기억]\n- (약 20턴 전) 민준는 등대 열쇠를 갖고 있다.');
+      expect(full.fixedTokens! - bare.fixedTokens!).toBe(countTokens(RECALL) - facts);
+      // A budget that holds nothing but the newest turn still holds the recall turn.
+      const tight = recall({ contextBudget: countTokens(bare.system) + countTokens('POST') + countTokens(RECALL) + countTokens(history[3]!.content), maxResponseTokens: 0 });
+      expect(tight.messages.map((message) => message.content)).toEqual([RECALL, history[3]!.content, 'POST']);
+    });
+
+    it('stands where the turns would end when none of the history is sent', () => {
+      const { messages } = recall({ history: [] });
+      expect(messages.slice(-2).map((message) => message.content)).toEqual([RECALL, 'POST']);
+    });
   });
 
   it('activates the lore a search by meaning found, and reports it as such', () => {

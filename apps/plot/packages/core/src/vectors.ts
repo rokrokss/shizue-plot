@@ -8,8 +8,8 @@
  *   as one more way in beside its keys (`ActivateLoreInput.vectorMatched`).
  * - **Chat vectorization.** The earlier messages of the branch most like the
  *   latest turns are taken out of the history and sent instead in one block
- *   after the memory (`retrievalBlock`), so the model reads them however long
- *   ago they were.
+ *   just before the turn being answered, after the facts (`retrievalBlock`),
+ *   so the model reads them however long ago they were.
  *
  * Both search with one query, ST's `getQueryText`: the newest `query` messages
  * the model may read, newest first. The chat search keeps ST's defaults. The

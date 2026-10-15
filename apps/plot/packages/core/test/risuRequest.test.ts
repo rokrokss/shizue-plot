@@ -55,13 +55,12 @@ describe('the request as RisuAI’s items', () => {
       lore_after: {},
       persona: {},
       memory: { memo: 'supaMemory' },
-      retrieval: {},
-      relationship: {},
       directions: {},
       examples: { memo: 'NewChatExample', removable: true },
       history: { memo: 'chatId', removable: true, chat: true },
       depth_lore: {},
       author_note: {},
+      recall: {},
       post_history: {},
       injection: {},
       trailing: {},
@@ -217,6 +216,27 @@ describe('the request as RisuAI’s items', () => {
     expect(squeezed.sources!.some((source) => source.greeting)).toBe(false);
     expect(squeezed.risu).toEqual({ fromStart: false });
     expect(assemblePrompt({ plot, characters: [aria], history: chat, userName: '민준', branch: opening }).risu).toEqual({ fromStart: true });
+  });
+
+  it('keeps the supaMemory turn to the summaries, and hands the recall turn over among the chat as a plain system turn', () => {
+    const memoryText = '[지난 이야기 요약]\n둘은 여관에서 만났다.';
+    const factsText = '[기억]\n- 민준은 등대 열쇠를 갖고 있다.';
+    const prompt = assemblePrompt({ plot, characters: [aria], history: chat.slice(2), userName: '민준', memoryText, factsText, branch: opening });
+    expect(prompt.risu!.memory!.text).toBe(memoryText);
+    const { items } = risuRequestView(prompt);
+    const at = items.findIndex((item) => item.content === factsText);
+    // Nothing of RisuAI's: no memo, never removable — ahead of the card's depth
+    // lore, and the newest turn after them is still `lastChat`.
+    expect(items[at]).toEqual({ role: 'system', content: factsText });
+    expect(items[at + 1]).toEqual({ role: 'system', content: '깊은 곳의 이야기' });
+    expect(items[at + 2]).toEqual({
+      role: 'user',
+      content: '또 왔어',
+      memo: 'm-3',
+      attr: [],
+      thoughts: [],
+      multimodals: [{ type: 'image', base64: picture }],
+    });
   });
 });
 

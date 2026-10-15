@@ -160,12 +160,22 @@ export function loadSummaries(db: AppDeps['db'] | Tx, chatId: string): Promise<C
 
 /* -------------------------------------------------------------- injection */
 
+/** What one generation's prompt is given of the memory (`buildMemoryInput`). */
+export interface MemoryInput {
+  /** The selected summaries' block, for the system string; '' for none. */
+  memoryText: string;
+  /** The selected facts' block, for the recall turn; '' for none. */
+  factsText: string;
+  /** The branch after the last message an applying summary covers. */
+  history: Message[];
+}
+
 /**
- * Memory inputs for one generation: the memory block injected after the persona
- * — the selected summaries, then the facts (`[기억]`, `facts.ts`), each led by
- * a coarse "N turns ago" in the conversation's language — and the history the
- * model still sees verbatim: `path` after the last message an applying summary
- * covers.
+ * Memory inputs for one generation: the summaries' block injected after the
+ * persona, the facts' (`[기억]`, `facts.ts`) that open the recall turn before
+ * the turn being answered — each summary and fact led by a coarse "N turns
+ * ago" in the conversation's language — and the history the model still sees
+ * verbatim: `path` after the last message an applying summary covers.
  *
  * `answering` is the branch the reply answers, as the model will read it: the
  * latest `queryChatCount` of its turns are the similarity search's queries
@@ -185,10 +195,10 @@ export async function buildMemoryInput(
   path: Message[],
   answering: readonly Message[],
   speakerId?: string,
-): Promise<{ memoryText: string; history: Message[] }> {
+): Promise<MemoryInput> {
   const { applicable, frontier } = applicableSummaries(await loadSummaries(deps.db, chat.id), path);
   const history = path.slice(frontier + 1);
-  if (applicable.length === 0) return { memoryText: '', history };
+  if (applicable.length === 0) return { memoryText: '', factsText: '', history };
 
   const settings = memorySettingsOf(chat);
   const available = memoryTokenBudget(settings.contextBudget, settings) - countTokens(`${MEMORY_HEADING}\n`);
@@ -245,8 +255,7 @@ export async function buildMemoryInput(
       console.warn('[memory] the facts were left out: the queries could not be embedded', error);
     }
   }
-  const blocks = [memoryBlock(selection.selected.map(dated)), factsBlock(facts)];
-  return { memoryText: blocks.filter((block) => block !== '').join('\n\n'), history };
+  return { memoryText: memoryBlock(selection.selected.map(dated)), factsText: factsBlock(facts), history };
 }
 
 /** The plot's content language, which picks its embedding model; null for a plot that is gone. */

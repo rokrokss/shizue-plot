@@ -258,24 +258,42 @@ export interface AssemblePromptInput {
   personaText?: string;
   userName?: string;
   /**
-   * Rolling summary (and retrieved facts) of the turns that no longer fit, already
-   * formatted into blocks. Injected right after the persona.
+   * The summaries of the turns that no longer fit (HypaV3's, `memoryBlock`),
+   * already formatted. Injected right after the persona, in the system string,
+   * where RisuAI sends its memory.
    */
   memoryText?: string;
   /**
+   * The facts recalled for this turn (`[기억]`, `factsBlock`), already
+   * formatted. The first part of the recall turn (`recall`): searched against
+   * the latest turns, they change nearly every turn, so they stand just before
+   * the turn being answered rather than in the system string, the cached prefix.
+   */
+  factsText?: string;
+  /**
    * The earlier messages a search by meaning brought back (SillyTavern's chat
-   * vectorization, `retrievalBlock`), already formatted. Injected right after
-   * the memory, where ST's `3_vectors` follows its summary. The caller takes the
-   * messages it holds out of `history` (as hidden), as ST takes them out of the
-   * chat it sends.
+   * vectorization, `retrievalBlock`), already formatted. In the recall turn,
+   * after the facts — ST's "In-chat @ Depth" placement of its `3_vectors`
+   * rather than its default after the story string, which would be the cached
+   * prefix here. The caller takes the messages it holds out of `history` (as
+   * hidden), as ST takes them out of the chat it sends.
    */
   retrievalText?: string;
   /**
    * Relationship state block (the six axes plus a one-line summary), already
-   * formatted. Injected after the memory and what retrieval brought back, so
-   * the model sees who the two are to each other before it reads the turns.
+   * formatted. Last in the recall turn: it changes whenever the relationship is
+   * read again (every few turns), which in the system string would leave every
+   * turn of the history behind it out of the cached prefix.
    */
   relationshipText?: string;
+  /**
+   * The stored message the reply answers (`HistoryMessage.id`) where it is not
+   * the newest turn sent: in a group round already under way, the turn the
+   * round answers. The recall turn goes right before it, so every speaker of
+   * the round is sent the same prompt up to there. Absent, or not among the
+   * turns sent: the newest turn sent.
+   */
+  answered?: string;
   /**
    * Author's note. Injected `authorNoteSettings.depth` (default
    * `AUTHOR_NOTE_DEPTH`) messages from the end of the history and, like the
@@ -493,13 +511,16 @@ export type PromptBlockKind =
   | 'lore_after'
   | 'persona'
   | 'memory'
-  | 'retrieval'
-  | 'relationship'
   | 'directions'
   | 'examples'
   | 'history'
   | 'depth_lore'
   | 'author_note'
+  /**
+   * What this turn recalls — the facts, the messages a search brought back, the
+   * relationship — as one system turn just before the turn being answered.
+   */
+  | 'recall'
   | 'post_history'
   | 'injection'
   | 'trailing'
@@ -880,8 +901,10 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     history: given,
     personaText = '',
     memoryText = '',
+    factsText = '',
     retrievalText = '',
     relationshipText = '',
+    answered,
     authorNote = '',
     authorNoteSettings,
     userTurns,
@@ -1367,15 +1390,9 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const personaBlock =
     !utility && personaText.trim() ? `${expand('유저({{user}}) 정보: ')}${expand(personaText)}` : '';
 
-  // 5b. memory — the summary of the evicted history plus any retrieved facts.
+  // 5b. memory — the summaries of the evicted history, where RisuAI's HypaV3
+  // sends them. What this turn recalls besides goes beside the turn (7d).
   const memoryBlock = memoryText.trim() ? expand(memoryText).trim() : '';
-
-  // 5b'. the earlier messages a search by meaning found — ST's "Past events", which
-  // it sends after its summary.
-  const retrievalBlock = retrievalText.trim() ? expand(retrievalText).trim() : '';
-
-  // 5c. relationship — how the plot's characters currently feel about the user.
-  const relationshipBlock = relationshipText.trim() ? expand(relationshipText).trim() : '';
 
   const sections: SystemSection[] = [
     { kind: 'main', text: main },
@@ -1390,8 +1407,6 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     { kind: 'lore_after', text: loreText('after_char') },
     { kind: 'persona', text: personaBlock },
     { kind: 'memory', text: memoryBlock },
-    { kind: 'retrieval', text: retrievalBlock },
-    { kind: 'relationship', text: relationshipBlock },
   ];
   const systemSections = sections
     .map((section) => ({ ...section, text: send(section.text) }))
@@ -1489,6 +1504,22 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     ? { kind: 'trailing', label: 'emotion', message: { role: 'system', content: send(emotionText) } }
     : null;
 
+  // 7d. what this turn recalls: the facts closest to the latest turns, the
+  // earlier messages a search by meaning found (ST's "Past events") and the
+  // relationship's state, as one system turn just before the turn being
+  // answered (placed with the history, below). Each is read again for every
+  // turn — the facts and the messages change nearly every time — so none of it
+  // stands in the system string, the provider's cached prefix: there it would
+  // keep every turn of the history behind it out of the cache. Never evicted.
+  const recallPart = (text: string): string => (text.trim() ? send(expand(text).trim()) : '');
+  const factsPart = recallPart(factsText);
+  const recallText = [factsPart, recallPart(retrievalText), recallPart(relationshipText)]
+    .filter((part) => part.length > 0)
+    .join('\n\n');
+  const recallSlot: MessageSlot | null = recallText
+    ? { kind: 'recall', message: { role: 'system', content: recallText } }
+    : null;
+
   // Everything that is never evicted is charged up front. Depth lore is charged
   // here too — it is counted against the lorebook budget by activateLore, but it
   // still occupies context that history would otherwise use.
@@ -1499,13 +1530,20 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     countTokens(postHistory) -
     countTokens(directionsBlock) -
     countTokens(authorNoteBlock) -
+    countTokens(recallText) -
     injectedTokens -
     (speakerSlot ? countTokens(promptText(speakerSlot.message.content)) : 0) -
     (emotionSlot ? countTokens(promptText(emotionSlot.message.content)) : 0) -
     depthLore.reduce((sum, entry) => sum + countTokens(entry.content), 0);
+  // The memory's own text — the summaries and the facts — is not fixed: the
+  // summarizer reckons with it apart (§7.3), as it always has.
   const fixedTokens = Math.max(
     0,
-    contextBudget - maxResponseTokens - available - (memorySection ? countTokens(memorySection.text) : 0),
+    contextBudget -
+      maxResponseTokens -
+      available -
+      (memorySection ? countTokens(memorySection.text) : 0) -
+      countTokens(factsPart),
   );
 
   // 7. history, newest first. The newest message is always kept so the request
@@ -1647,11 +1685,18 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
       : []),
   ];
 
+  // The recall turn (7d) goes right before the turn being answered — the newest
+  // turn sent, or the one a group round under way answers (`answered`) — ahead
+  // of the depth lore, the note and the start injection that share its place.
+  const answeredAt = answered === undefined ? -1 : historySources.findIndex((source) => source.id === answered);
+  const recallAt = answeredAt >= 0 ? answeredAt : historyMessages.length - 1;
+
   // RisuAI's `start` goes right before the newest turn, behind whatever depth
   // lore is spliced in front of it; `historyend` after the whole history block.
   const historyBlock: MessageSlot[] = [];
   for (let i = 0; i < historyMessages.length; i += 1) {
     const message = historyMessages[i]!;
+    if (recallSlot && i === recallAt) historyBlock.push(recallSlot);
     historyBlock.push(...depthAt(i));
     if (startInjection && i === historyMessages.length - 1) historyBlock.push(startInjection);
     historyBlock.push({
@@ -1662,6 +1707,8 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
       ...historySources[i]!,
     });
   }
+  // Nothing of the history is sent: the recall turn still stands where the turns would end.
+  if (recallSlot && historyMessages.length === 0) historyBlock.push(recallSlot);
   historyBlock.push(...depthAt(historyMessages.length));
   if (startInjection && historyMessages.length === 0) historyBlock.push(startInjection);
   if (historyEndInjection) historyBlock.push(historyEndInjection);
