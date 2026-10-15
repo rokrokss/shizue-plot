@@ -12,7 +12,6 @@ import {
   splitRecursive,
   VECTOR_LORE,
   vectorLoreBar,
-  vectorLoreSearch,
   vectorQueryText,
 } from '../src/vectors.js';
 
@@ -55,66 +54,9 @@ describe('isVectorLoreCandidate', () => {
 });
 
 describe('vectorLoreBar', () => {
-  it("is KURE-v1's measured bar by language pair, and ST's defaults for a model nobody measured", () => {
-    expect(vectorLoreBar('KURE-v1', true, false)).toEqual({ scoreThreshold: 0.48, maxEntries: 3 });
-    expect(vectorLoreBar('KURE-v1', true, true)).toEqual({ scoreThreshold: 0.57, maxEntries: 3 });
-    expect(vectorLoreBar('KURE-v1', false, false)).toEqual({ scoreThreshold: 0.52, maxEntries: 3 });
-    expect(vectorLoreBar('bge-m3', true, false)).toEqual({ scoreThreshold: 0.25, maxEntries: 5 });
-  });
-});
-
-describe('vectorLoreSearch', () => {
-  const keyed = entry({ keys: ['lighthouse'] });
-  const map = entry({ keys: ['map'], content: 'The old map' });
-  const constant = entry({ constant: true, content: 'Always on' });
-  const keyless = entry({ content: 'Optional module' });
-  const switched = entry({ keys: ['__START_ADULT__'], content: 'Adult start' });
-  const toggled = entry({ keys: ['year one'], content: '{{#when::{{getvar::year}}::is::1}}First year{{/when}}' });
-  const recursionOnly = entry({ keys: ['tower'], content: 'Tower', delayUntilRecursion: 1 });
-  const book = [keyed, map, constant, keyless, switched, toggled, recursionOnly];
-  const ids = (search: ReturnType<typeof vectorLoreSearch>) => book.filter((e) => search?.candidate(e)).map((e) => e.content);
-
-  it('searches nothing by default in the same language, and what is asked for at the provisional bar', () => {
-    expect(vectorLoreSearch({ model: 'KURE-v1', entries: book, settings: undefined })).toBeNull();
-    const asked = vectorLoreSearch({ model: 'KURE-v1', entries: [{ ...keyed, vectorized: true }], settings: undefined });
-    expect(asked?.bar).toEqual({ scoreThreshold: 0.52, maxEntries: 3 });
-    expect(asked?.fallback).toBe(false);
-  });
-
-  it("stands in for a Korean reader's keys over an English book: keyed entries only, at the cross-language bar", () => {
-    const search = vectorLoreSearch({ model: 'KURE-v1', entries: book, settings: undefined, crossLanguage: 'ko' });
-    expect(search?.fallback).toBe(true);
-    expect(search?.bar).toEqual({ scoreThreshold: 0.48, maxEntries: 3 });
-    expect(ids(search)).toEqual([keyed.content, map.content]);
-  });
-
-  it('goes quiet entry by entry as the aliases land, and is off once they cover the book', () => {
-    const some = vectorLoreSearch({
-      model: 'KURE-v1',
-      entries: book,
-      settings: undefined,
-      crossLanguage: 'ko',
-      aliased: (e) => e === keyed,
-    });
-    expect(ids(some)).toEqual([map.content]);
-    const all = (e: LoreEntry) => e === keyed || e === map || e === toggled || e === recursionOnly;
-    expect(vectorLoreSearch({ model: 'KURE-v1', entries: book, settings: undefined, crossLanguage: 'ko', aliased: all })).toBeNull();
-    // What is asked for still is, above the bar the keys leave it.
-    const asked = vectorLoreSearch({ model: 'KURE-v1', entries: book, settings: { vectorizeAll: true }, crossLanguage: 'ko', aliased: all });
-    expect(asked?.fallback).toBe(false);
-    expect(asked?.bar).toEqual({ scoreThreshold: 0.57, maxEntries: 3 });
-    expect(ids(asked)).toEqual(book.map((e) => e.content));
-  });
-
-  it('leaves a book with Korean keys, another reader language and an unmeasured model to what is asked for', () => {
-    const korean = [entry({ keys: ['등대', 'lighthouse'] }), map];
-    expect(vectorLoreSearch({ model: 'KURE-v1', entries: korean, settings: undefined, crossLanguage: 'ko' })).toBeNull();
-    const asked = vectorLoreSearch({ model: 'KURE-v1', entries: korean, settings: { vectorizeAll: true }, crossLanguage: 'ko' });
-    expect(asked?.bar).toEqual({ scoreThreshold: 0.57, maxEntries: 3 });
-    expect(vectorLoreSearch({ model: 'KURE-v1', entries: book, settings: undefined, crossLanguage: 'ja' })).toBeNull();
-    expect(vectorLoreSearch({ model: 'bge-m3', entries: book, settings: undefined, crossLanguage: 'ko' })).toBeNull();
-    const other = vectorLoreSearch({ model: 'bge-m3', entries: [{ ...keyed, vectorized: true }], settings: undefined, crossLanguage: 'ko' });
-    expect(other?.bar).toEqual({ scoreThreshold: 0.25, maxEntries: 5 });
+  it("is KURE-v1's measured bar, and ST's defaults for a model nobody measured", () => {
+    expect(vectorLoreBar('KURE-v1')).toEqual({ scoreThreshold: 0.55, maxEntries: 3 });
+    expect(vectorLoreBar('bge-m3')).toEqual({ scoreThreshold: 0.25, maxEntries: 5 });
   });
 });
 

@@ -14,13 +14,9 @@
  * Both search with one query, ST's `getQueryText`: the newest `query` messages
  * the model may read, newest first. The chat search keeps ST's defaults. The
  * lore search keeps them only for a model nobody measured: a measured one gets
- * the bar measured for it and for where the turns stand against the lore
- * (`vectorLoreBar`), and in the `instruct` language mode it stands in for keys
- * a Korean reader never types until the book's Korean aliases land
- * (`vectorLoreSearch`).
+ * the bar measured for it (`vectorLoreBar`). Neither runs unless asked for.
  */
-import { isKeyedLoreEntry, lacksKoreanKeys, naturalKeys } from './loreAliases.js';
-import type { MacroLocale } from './macro.js';
+import { naturalKeys } from './loreAliases.js';
 import { countTokens } from './tokens.js';
 import type { LoreEntry, LoreSettings } from './types.js';
 
@@ -44,99 +40,30 @@ export interface VectorLoreBar {
 }
 
 /**
- * The bars measured for a model (ARCHITECTURE §7.3 의미로 켜는 로어의 문턱), by
- * where the turns stand against the lore:
+ * The bar measured for a model (ARCHITECTURE §7.3 의미로 켜는 로어의 문턱). Only
+ * an entry or a book that asks to be searched by meaning is
+ * (`isVectorLoreCandidate`), so one bar serves every turn, whatever its
+ * language. KURE-v1: 0.55, at most 3 —
  *
- * - `cross` — the turns are in the reader's language, the lore in another, and no
- *   key reaches the reader (the `instruct` mode over an English book with no
- *   aliases yet). KURE-v1, Korean turns against English lore: 0.48 and 3. 0.47
- *   had the best F1 (0.42) on 160 windows and every leave-one-card-out fold
- *   picked 0.46–0.47; 0.48 has the same F1 and was the first threshold no pure
- *   small-talk window reached (their best entry topped out at 0.475). ST's 0.25/5
- *   put 4.5 entries into every turn, 80% of them wrong. Cap 3 matched or beat 5
- *   at every threshold from 0.45 up.
- * - `crossKeyed` — the same, but the book's keys already reach the reader: its
- *   own Korean keys, or its aliases. On top of them the leave-one-card-out folds
- *   picked 0.56–0.61; below that the vector only adds wrong entries (shipped
- *   RisuRealm keys F1 0.78 alone, 0.63 with the vector at 0.47).
- * - `same` — the turns in the lore's language. Not measured: 0.52 is provisional,
- *   from the English-on-English control (related pairs about 0.08 higher than
- *   across languages). Only an entry or book that asks for it is searched.
+ * - over turns in the lore's own language (English on English) the search
+ *   alone reached F1 0.57 there, above the best small-talk window (0.51);
+ * - over Korean turns on lore in another language, where the book's Korean keys
+ *   or its Korean aliases (`loreAliases.ts`) already reach the reader, it left
+ *   them as they were — aliases F1 0.90, the creators' own Korean keys 0.78 —
+ *   where 0.47 took them down to 0.71 and 0.63;
+ * - cap 3 matched or beat 5 at every threshold from 0.45 up, and from 0.55 the
+ *   two are the same.
  *
  * Another model gets ST's defaults (`VECTOR_LORE`): a number measured on one
  * model says nothing about another's cosines.
  */
-export const VECTOR_LORE_BARS: Readonly<
-  Record<string, { cross: VectorLoreBar; crossKeyed: VectorLoreBar; same: VectorLoreBar }>
-> = {
-  'KURE-v1': {
-    cross: { scoreThreshold: 0.48, maxEntries: 3 },
-    crossKeyed: { scoreThreshold: 0.57, maxEntries: 3 },
-    same: { scoreThreshold: 0.52, maxEntries: 3 },
-  },
+export const VECTOR_LORE_BARS: Readonly<Record<string, VectorLoreBar>> = {
+  'KURE-v1': { scoreThreshold: 0.55, maxEntries: 3 },
 };
 
-/** The bar a search with `model` keeps to, where the turns stand as they do. */
-export function vectorLoreBar(model: string, crossLanguage: boolean, keysReach: boolean): VectorLoreBar {
-  const bars = VECTOR_LORE_BARS[model];
-  if (!bars) return { scoreThreshold: VECTOR_LORE.scoreThreshold, maxEntries: VECTOR_LORE.maxEntries };
-  return !crossLanguage ? bars.same : keysReach ? bars.crossKeyed : bars.cross;
-}
-
-/**
- * An entry the search takes by default in place of keys the reader cannot type
- * (`vectorLoreSearch`): keyed (`isKeyedLoreEntry` — no constant, which is sent
- * anyway, no keyless entry and no key that is only a script's switch, which
- * their authors gate on purpose), not waiting for recursion, and not wrapped in
- * a `{{#…}}` block that a toggle opens.
- */
-export function isVectorFallbackCandidate(entry: LoreEntry): boolean {
-  return isKeyedLoreEntry(entry) && !entry.delayUntilRecursion && !/^\s*\{\{#/.test(entry.content);
-}
-
-/** What one request's lore search looks for and keeps. */
-export interface VectorLoreSearch {
-  /** The entries it compares. */
-  candidate: (entry: LoreEntry) => boolean;
-  bar: VectorLoreBar;
-  /** Whether it searches by default, for a Korean reader whose keys are not there yet. */
-  fallback: boolean;
-}
-
-/**
- * The lore search one request runs, or null for none:
- *
- * - **Asked for**: an entry marked `vectorized`, or every entry under the book's
- *   `vectorizeAll` — ST's rule (`isVectorLoreCandidate`), constants included.
- * - **By default**, only in the `instruct` mode for a Korean reader
- *   (`crossLanguage` `ko`), only over a book without Korean keys
- *   (`lacksKoreanKeys`) and only with a measured model: its keyed entries that
- *   have no aliases yet (`aliased`) — so the search goes quiet entry by entry as
- *   the alias pass covers the book, and is off once it has.
- *
- * The bar is the model's for the language pair (`vectorLoreBar`); the keys reach
- * a Korean reader where the book has Korean keys of its own, or aliases for
- * every keyed entry.
- */
-export function vectorLoreSearch(input: {
-  model: string;
-  entries: readonly LoreEntry[];
-  settings: Pick<LoreSettings, 'vectorizeAll'> | undefined;
-  /** The reader's language where the turns are in it and the lore is not — the `instruct` mode's. */
-  crossLanguage?: MacroLocale;
-  /** Whether an entry has Korean aliases to be found by. Absent: none has. */
-  aliased?: (entry: LoreEntry) => boolean;
-}): VectorLoreSearch | null {
-  const { model, entries, settings, crossLanguage } = input;
-  const aliased = input.aliased ?? (() => false);
-  const korean = crossLanguage === 'ko';
-  const needsAliases = korean && VECTOR_LORE_BARS[model] !== undefined && lacksKoreanKeys(entries);
-  const fallback = (entry: LoreEntry): boolean => needsAliases && isVectorFallbackCandidate(entry) && !aliased(entry);
-  const candidate = (entry: LoreEntry): boolean => isVectorLoreCandidate(entry, settings) || fallback(entry);
-  if (!entries.some(candidate)) return null;
-  const pending = entries.some(fallback);
-  const keysReach = korean && entries.some(isKeyedLoreEntry) && (needsAliases ? !pending : !lacksKoreanKeys(entries));
-  return { candidate, bar: vectorLoreBar(model, crossLanguage !== undefined, keysReach), fallback: pending };
+/** The bar a search with `model` keeps to. */
+export function vectorLoreBar(model: string): VectorLoreBar {
+  return VECTOR_LORE_BARS[model] ?? { scoreThreshold: VECTOR_LORE.scoreThreshold, maxEntries: VECTOR_LORE.maxEntries };
 }
 
 /** ST's chat vectorization settings, at their defaults. */

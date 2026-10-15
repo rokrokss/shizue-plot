@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { activateLore, loreEntryKey, type ActivateLoreInput } from '../src/lorebook.js';
+import type { LoreAliases } from '../src/loreAliases.js';
 import type { LoreEntry } from '../src/types.js';
 
 const entry = (overrides: Partial<LoreEntry> & { content: string }): LoreEntry => ({
@@ -617,10 +618,13 @@ describe('activateLore - by meaning (SillyTavern vectorized entries)', () => {
 
 describe('activateLore - aliases', () => {
   const dumbledore = entry({ content: 'Albus Dumbledore, headmaster', keys: ['Dumbledore'] });
+  /** An entry's aliases by the entry: a list stands for its primary keys alone. */
   const aliasesOf =
-    (table: Map<LoreEntry, string[]>) =>
-    (candidate: LoreEntry): readonly string[] | undefined =>
-      table.get(candidate);
+    (table: Map<LoreEntry, string[] | LoreAliases>) =>
+    (candidate: LoreEntry): LoreAliases | undefined => {
+      const aliases = table.get(candidate);
+      return Array.isArray(aliases) ? { keys: aliases } : aliases;
+    };
 
   it('takes an alias for a primary key, RisuAI-style: case and spaces aside, inside a word with its particle', () => {
     const aliases = aliasesOf(new Map([[dumbledore, ['덤블 도어', 'ALBUS교장']]]));
@@ -652,6 +656,36 @@ describe('activateLore - aliases', () => {
     expect(st.via.get(tavern)).toBe('keyword');
     // Its own English key keeps ST's whole-word rule.
     expect(contents(run([tavern], { history: ['Dumbledores'], sillyTavern: true }))).toEqual([]);
+  });
+
+  it("takes a secondary key's alias for that secondary key under every selective logic, on both engines", () => {
+    const wand = { ...dumbledore, selective: true, secondaryKeys: ['wand', 'robe'] };
+    const anyOf = { ...wand, content: 'and_any' };
+    const allOf = { ...wand, content: 'and_all', selectiveLogic: 'and_all' as const };
+    const noneOf = { ...wand, content: 'not_any', selectiveLogic: 'not_any' as const };
+    const notAll = { ...wand, content: 'not_all', selectiveLogic: 'not_all' as const };
+    const book = [anyOf, allOf, noneOf, notAll];
+    const korean: LoreAliases = { keys: ['덤블도어'], secondary: [['지팡이'], ['로브']] };
+    const aliases = aliasesOf(new Map(book.map((candidate) => [candidate, korean])));
+    for (const sillyTavern of [false, true]) {
+      const active = (line: string) => contents(run(book, { history: [line], aliases, sillyTavern })).sort();
+      expect(active('덤블도어가 웃었다')).toEqual(['not_all', 'not_any']);
+      expect(active('덤블도어가 지팡이를 들었다')).toEqual(['and_any', 'not_all']);
+      expect(active('덤블도어가 지팡이를 들고 로브를 걸쳤다')).toEqual(['and_all', 'and_any']);
+      // A secondary key's own spelling still counts beside its alias, under a primary key's own.
+      expect(active('Dumbledore의 wand와 로브')).toEqual(['and_all', 'and_any']);
+    }
+  });
+
+  it('scores a secondary key found by its alias as found, in group scoring', () => {
+    const tower = entry({ content: 'A', keys: ['Hogwarts'], selective: true, secondaryKeys: ['tower'], group: 'place', useGroupScoring: true });
+    const hall = entry({ content: 'B', keys: ['Hogwarts'], group: 'place', useGroupScoring: true });
+    const aliases = aliasesOf(new Map([[tower, { keys: [], secondary: [['천문탑']] }]]));
+    // Tied, the draw's first roll would keep the hall.
+    for (const sillyTavern of [false, true]) {
+      const result = run([hall, tower], { history: ['Hogwarts 천문탑'], aliases, sillyTavern, random: () => 0 });
+      expect(contents(result)).toEqual(['A']);
+    }
   });
 
   it('leaves the secondary keys their say, on both engines', () => {

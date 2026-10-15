@@ -7,6 +7,7 @@ import type {
   GroupSettings,
   HypaV3Settings,
   ImportProvenance,
+  LoreAliases,
   LoreEntry,
   NarratorConfig,
   NormalizedCard,
@@ -827,10 +828,12 @@ export const readerLoreVectors = pgTable(
 // Aliases the auxiliary model wrote for a lore entry whose keys a reader of another
 // language never types (@shizue/core `loreAliases.ts`): derived data, kept apart from
 // the entry so no export, editor or card ever carries it. Keyed by a hash of what they
-// were made from — the entry's keys and content (`aliasSourceText`) — so an edited entry
-// is asked again and its old row goes on the next pass. An entry the model gave nothing
-// for keeps an empty row and is not asked again. `language` is the language they are
-// in, only Korean so far; `model` is the auxiliary model that wrote them.
+// were made from — the entry's keys and content, and a selective entry's secondary keys
+// (`aliasSourceText`) — so an edited entry is asked again and its old row goes on the
+// next pass. `aliases` is the list for the entry's keys, or, where its secondary keys
+// were asked about too, `{keys, secondary}` (`LoreAliases`). An entry the model gave
+// nothing for keeps an empty row and is not asked again. `language` is the language
+// they are in, only Korean so far; `model` is the auxiliary model that wrote them.
 export const loreEntryAliases = pgTable(
   'lore_entry_aliases',
   {
@@ -839,7 +842,7 @@ export const loreEntryAliases = pgTable(
       .references(() => plots.id, { onDelete: 'cascade' }),
     sourceHash: text('source_hash').notNull(),
     language: text('language').$type<ContentLanguage>().notNull(),
-    aliases: jsonb('aliases').$type<string[]>().notNull().default([]),
+    aliases: jsonb('aliases').$type<string[] | LoreAliases>().notNull().default([]),
     model: text('model').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },

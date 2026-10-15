@@ -4,18 +4,21 @@
  *
  * - **The pass** (`aliasPlotLore`): for a work whose language is not Korean and
  *   whose book has (next to) no Korean keys (`lacksKoreanKeys`), every keyed
- *   entry without a row of its current keys and content is sent to the
- *   auxiliary model — the one translation and the HypaV3 summaries use — in
- *   batches (`aliasBatches`), and its answer stored in `lore_entry_aliases`,
- *   apart from the entry. Rows no entry has any more go first. Scheduled after
- *   every write that can change the lore, on the creator's model, and lazily by
- *   a Korean reader's request that meets an entry without one, on theirs
- *   (`vectors.ts` `scheduleLoreAliases`, which guards it to one pass a plot);
- *   the backfill (`fix:lore-aliases`) runs it for works made before.
+ *   entry without a row of its current keys, content and secondary keys
+ *   (`aliasSourceText`) is sent to the auxiliary model — the one translation
+ *   and the HypaV3 summaries use — in batches (`aliasBatches`), and its answer
+ *   stored in `lore_entry_aliases`, apart from the entry. Rows no entry has any
+ *   more go first. Scheduled after every write that can change the lore, on the
+ *   creator's model, and lazily by a Korean reader's request that meets an
+ *   entry without one, on theirs (`vectors.ts` `scheduleLoreAliases`, which
+ *   guards it to one pass a plot); the backfill (`fix:lore-aliases`) runs it for
+ *   works made before.
  * - **A request reads them** (`loreAliasesFor`): only in the `instruct` mode for
  *   a Korean reader over such a book, as `ActivateLoreInput.aliases`. Until an
- *   entry's row lands it activates by its keys alone — and, where the embedder
- *   has a measured bar, by meaning in their place (`vectorLoreSearch`).
+ *   entry's row lands it activates by its keys alone.
+ *
+ * A row holds the entry's aliases as a list, or — where its secondary keys were
+ * asked about too — as `{keys, secondary}` (`LoreAliases`).
  *
  * `LORE_ALIASES=off` turns both off. The model's failures never reach a
  * request: the pass reports them and backs off, and a request whose rows cannot
@@ -29,6 +32,8 @@ import {
   lacksKoreanKeys,
   LORE_ALIAS_LANGUAGE,
   parseLoreAliases,
+  type AliasSource,
+  type LoreAliases,
   type LoreEntry,
   type PlotModule,
 } from '@shizue/core';
@@ -52,9 +57,11 @@ const backingOff = new Map<string, number>();
 /** Whether the alias pass and the aliases are on: everything but `LORE_ALIASES=off`. */
 export const loreAliasesEnabled = (env: NodeJS.ProcessEnv): boolean => env['LORE_ALIASES']?.trim() !== 'off';
 
-/** The key an entry's aliases are stored under: a hash of its keys and content. */
-export const aliasHash = (entry: Pick<LoreEntry, 'keys' | 'content'>): string =>
-  createHash('sha256').update(aliasSourceText(entry)).digest('hex');
+/** The key an entry's aliases are stored under: a hash of what they are made from (`aliasSourceText`). */
+export const aliasHash = (entry: AliasSource): string => createHash('sha256').update(aliasSourceText(entry)).digest('hex');
+
+/** A row's aliases as stored: the list alone where no secondary key was asked about. */
+const stored = (aliases: LoreAliases): string[] | LoreAliases => (aliases.secondary ? aliases : aliases.keys);
 
 /**
  * The entries the pass aliases, in a work of `language`: its keyed entries when
@@ -89,12 +96,12 @@ export async function loadWorkLore(
 }
 
 /** A plot's alias rows in `language`, by source hash. */
-async function aliasRows(deps: Pick<AppDeps, 'db'>, plotId: string): Promise<Map<string, string[]>> {
+async function aliasRows(deps: Pick<AppDeps, 'db'>, plotId: string): Promise<Map<string, LoreAliases>> {
   const rows = await deps.db
     .select({ hash: loreEntryAliases.sourceHash, aliases: loreEntryAliases.aliases })
     .from(loreEntryAliases)
     .where(and(eq(loreEntryAliases.plotId, plotId), eq(loreEntryAliases.language, LORE_ALIAS_LANGUAGE)));
-  return new Map(rows.map((row) => [row.hash, row.aliases]));
+  return new Map(rows.map((row) => [row.hash, Array.isArray(row.aliases) ? { keys: row.aliases } : row.aliases]));
 }
 
 /** What one pass did, for the log and the backfill. */
@@ -152,7 +159,7 @@ export async function aliasPlotLore(
   }
   const entries = pending.map(([, entry]) => entry);
   for (const batch of aliasBatches(entries)) {
-    let answers: string[][];
+    let answers: LoreAliases[];
     try {
       answers = await askAliases(channel, batch.map((index) => entries[index]!), true, result);
     } catch (error) {
@@ -164,12 +171,12 @@ export async function aliasPlotLore(
       plotId,
       sourceHash: pending[index]![0],
       language: LORE_ALIAS_LANGUAGE,
-      aliases: answers[at] ?? [],
+      aliases: stored(answers[at] ?? { keys: [] }),
       model: channel.providerModel,
     }));
     await deps.db.insert(loreEntryAliases).values(rows).onConflictDoNothing();
     result.written += rows.length;
-    result.aliases += rows.reduce((sum, row) => sum + row.aliases.length, 0);
+    result.aliases += answers.reduce((sum, answer) => sum + answer.keys.length + (answer.secondary?.flat().length ?? 0), 0);
   }
   backingOff.delete(plotId);
   console.log(
@@ -189,7 +196,7 @@ async function askAliases(
   entries: readonly LoreEntry[],
   split: boolean,
   result: AliasPassResult,
-): Promise<string[][]> {
+): Promise<LoreAliases[]> {
   const request = aliasRequest(entries);
   result.calls += 1;
   const answer = await collect(channel.adapter, {
@@ -200,9 +207,9 @@ async function askAliases(
     abortSignal: AbortSignal.timeout(ALIAS_TIMEOUT_MS),
   });
   if (!answer.trim()) throw new Error('the auxiliary model answered nothing');
-  const parsed = parseLoreAliases(answer, entries.length);
+  const parsed = parseLoreAliases(answer, entries);
   if (parsed) return parsed;
-  if (!split || entries.length < 2) return entries.map(() => []);
+  if (!split || entries.length < 2) return entries.map(() => ({ keys: [] }));
   const half = Math.ceil(entries.length / 2);
   return [
     ...(await askAliases(channel, entries.slice(0, half), false, result)),
@@ -213,9 +220,7 @@ async function askAliases(
 /** What a request reads of a book's aliases. */
 export interface RequestAliases {
   /** An entry's aliases, for `ActivateLoreInput.aliases`. */
-  lookup: (entry: LoreEntry) => readonly string[] | undefined;
-  /** Whether an entry has aliases to be found by — what the search by meaning stands in for until it does. */
-  aliased: (entry: LoreEntry) => boolean;
+  lookup: (entry: LoreEntry) => LoreAliases | undefined;
   /** Whether a keyed entry has no row yet: the pass has something to do. */
   pending: boolean;
 }
@@ -234,7 +239,7 @@ export async function loreAliasesFor(
   if (!loreAliasesEnabled(deps.env)) return null;
   if (plan.conversationLanguage !== LORE_ALIAS_LANGUAGE || plan.plotLanguage === LORE_ALIAS_LANGUAGE) return null;
   if (!lacksKoreanKeys(entries)) return null;
-  let rows: Map<string, string[]>;
+  let rows: Map<string, LoreAliases>;
   try {
     rows = await aliasRows(deps, plan.plotId);
   } catch (error) {
@@ -247,13 +252,8 @@ export async function loreAliasesFor(
     if (hash === undefined) hashes.set(entry, (hash = aliasHash(entry)));
     return hash;
   };
-  const lookup = (entry: LoreEntry): readonly string[] | undefined => {
-    const aliases = rows.get(hashOf(entry));
-    return aliases && aliases.length > 0 ? aliases : undefined;
-  };
   return {
-    lookup,
-    aliased: (entry) => lookup(entry) !== undefined,
+    lookup: (entry) => rows.get(hashOf(entry)),
     pending: entries.some((entry) => isKeyedLoreEntry(entry) && !rows.has(hashOf(entry))),
   };
 }

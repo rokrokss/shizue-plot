@@ -13,6 +13,7 @@ import {
   type MacroTavernData,
 } from './macro.js';
 import { activateLore, loreEntryKey, type LoreActivationVia, type LoreTimedState } from './lorebook.js';
+import type { LoreAliases } from './loreAliases.js';
 import { isNarration, narrationBody } from './narration.js';
 import type { ReaderAdditions } from './readerPreset.js';
 import { readerLine, spokenBy, type ReaderMember } from './speech.js';
@@ -372,7 +373,7 @@ export interface AssemblePromptInput {
    * Keys in the reader's language for entries whose own keys are not — the
    * API's Korean aliases (`ActivateLoreInput.aliases`). Absent: none.
    */
-  loreAliases?: (entry: LoreEntry) => readonly string[] | undefined;
+  loreAliases?: (entry: LoreEntry) => LoreAliases | undefined;
   /** The names this chat's open images go by, for {{assetlist}} (`MacroContext.assetNames`). */
   assetNames?: readonly string[];
   contextBudget?: number;

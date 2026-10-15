@@ -143,7 +143,6 @@ import {
 } from '../src/jobs.js';
 import type { Embedder } from '../src/embedder.js';
 import { extractFacts } from '../src/facts.js';
-import { aliasHash } from '../src/loreAliases.js';
 import { BACKFILL_BATCHES_PER_RUN, embedPendingSummaries } from '../src/memory.js';
 import { refreshSearchVectors, resetSearchSweeps } from '../src/search.js';
 import { createJobHandlers, notificationFanout } from '../src/notifications.js';
@@ -18987,11 +18986,14 @@ describe('vector storage (SillyTavern)', () => {
   describe('Korean aliases', () => {
     /** What the alias model answers for each English key. */
     const KOREAN: Record<string, string[]> = { lighthouse: ['등대'], map: ['옛 지도', '지도'] };
-    /** The alias call's answer from `KOREAN`, numbered as it asked. */
+    /** The alias call's answer from `KOREAN`, numbered as it asked — its secondary keys too. */
     const dictionary = (user: string): string => {
       const answer: Record<string, string[]> = {};
       for (const match of user.matchAll(/^\[(\d+)\] keys: (.*)$/gm)) {
         answer[match[1]!] = (JSON.parse(match[2]!) as string[]).flatMap((key) => KOREAN[key] ?? []);
+      }
+      for (const match of user.matchAll(/\[(\d+\.\d+)\] ("[^"]*")/g)) {
+        answer[match[1]!] = KOREAN[JSON.parse(match[2]!) as string] ?? [];
       }
       return JSON.stringify(answer);
     };
@@ -19051,7 +19053,7 @@ describe('vector storage (SillyTavern)', () => {
     const storedAliases = async (plotId: string) =>
       (await db.select().from(loreEntryAliases).where(eq(loreEntryAliases.plotId, plotId)))
         .map((row) => row.aliases)
-        .sort((a, b) => a.join().localeCompare(b.join()));
+        .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
 
     /** An English work holding `book`, saved through `harness`, and a Korean reader's chat on it. */
     async function englishWork(cookie: string, harness: AliasHarness, book: unknown[]): Promise<{ plotId: string; chatId: string }> {
@@ -19159,36 +19161,37 @@ describe('vector storage (SillyTavern)', () => {
       expect((await sendAs(reader, chatId, '옛 지도를 펼쳤다', 'ko', harness)).system).toContain(MAP);
     });
 
-    it('stands in by meaning for the keyed entries until their aliases land, and goes quiet after', async () => {
-      const cookie = await signUp('aliases-fallback@example.com');
+    it("aliases a selective entry's secondary keys in the same call, and a Korean turn meets them under its logic", async () => {
+      const cookie = await signUp('aliases-secondary@example.com');
+      const harness = aliasApp();
+      const COVE = 'The map marks a cove below the lighthouse.';
+      const cove = lore({ keys: ['map'], selective: true, secondaryKeys: ['lighthouse'], content: COVE, insertionOrder: 7 });
+      const { plotId, chatId } = await englishWork(cookie, harness, [cove, rule]);
+      expect(harness.asked).toHaveLength(1);
+      expect(harness.asked[0]).toContain('[1] keys: ["map"]\n  secondary keys: [1.1] "lighthouse"\n');
+      expect(await storedAliases(plotId)).toEqual([{ keys: ['옛 지도', '지도'], secondary: [['등대']] }]);
+
+      // `and_any`: the map's alias alone is not enough; the lighthouse's alias is its secondary key.
+      expect((await sendAs(cookie, chatId, '지도를 펼쳤다', 'ko', harness)).system).not.toContain(COVE);
+      expect((await sendAs(cookie, chatId, '등대 아래에서 지도를 펼쳤다', 'ko', harness)).system).toContain(COVE);
+    });
+
+    it('embeds and searches no lore by meaning for a Korean reader of an English work unless the work asks for it', async () => {
+      const cookie = await signUp('aliases-no-vectors@example.com');
       const embedder = conceptEmbedder('KURE-v1');
-      // The auxiliary model answers nothing, so no alias lands.
+      // The auxiliary model answers nothing, so no alias lands either.
       const harness = aliasApp({ embedder, answer: () => '' });
       const { plotId, chatId } = await englishWork(cookie, harness, [tower, map, rule]);
-      // The keyed entries are embedded for the search; the always-on one is not.
-      expect((await storedLore(plotId)).map((row) => row.content).sort()).toEqual([MAP, TOWER].sort());
-      expect(await storedAliases(plotId)).toEqual([]);
+      expect((await sendAs(cookie, chatId, '등대까지 걸어가 보자', 'ko', harness)).system).not.toContain(TOWER);
+      expect(await storedLore(plotId)).toEqual([]);
+      expect(embedder.calls).toEqual([]);
+
+      // Asked for, the entry is embedded and found at the model's measured bar.
+      await setLore(cookie, plotId, [{ ...tower, vectorized: true }, map, rule], harness);
+      expect(await storedLore(plotId)).toEqual([{ content: TOWER, model: 'KURE-v1' }]);
       const prompt = await sendAs(cookie, chatId, '등대까지 걸어가 보자', 'ko', harness);
       expect(prompt.system).toContain(TOWER);
       expect(prompt.system).not.toContain(MAP);
-
-      // The aliases land: the alias carries the entry, and nothing is searched.
-      const landed = [
-        { keys: ['lighthouse'], content: TOWER },
-        { keys: ['map'], content: MAP },
-      ];
-      await db.insert(loreEntryAliases).values(
-        landed.map((entry) => ({
-          plotId,
-          sourceHash: aliasHash(entry),
-          language: 'ko' as const,
-          aliases: KOREAN[entry.keys[0]!]!,
-          model: 'alias-stub',
-        })),
-      );
-      const queries = embedder.calls.filter((call) => call.kind === 'query').length;
-      expect((await sendAs(cookie, chatId, '등대까지 걸어가 보자', 'ko', harness)).system).toContain(TOWER);
-      expect(embedder.calls.filter((call) => call.kind === 'query').length).toBe(queries);
     });
   });
 });

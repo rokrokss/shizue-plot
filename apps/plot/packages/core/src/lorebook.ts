@@ -1,4 +1,5 @@
 import { RE2JS } from 're2js';
+import type { LoreAliases } from './loreAliases.js';
 import { fnv1a } from './macro.js';
 import {
   LORE_MATCH_SOURCES,
@@ -103,6 +104,30 @@ function aliasMatches(scan: ScanText, aliases: readonly string[] | undefined): b
     return needle.length > 0 && haystack.includes(needle);
   });
 }
+
+/**
+ * An entry's aliases against one scan (`aliasMatches`): whether one of its
+ * primary keys' is there, and whether one of a secondary key's is — the key at
+ * that index in `secondaryKeys`.
+ */
+interface AliasHits {
+  key: boolean;
+  secondary: (index: number) => boolean;
+}
+
+function aliasHits(scan: ScanText, aliases: LoreAliases | undefined): AliasHits | undefined {
+  if (!aliases) return undefined;
+  return {
+    key: aliasMatches(scan, aliases.keys),
+    secondary: (index) => aliasMatches(scan, aliases.secondary?.[index]),
+  };
+}
+
+/** Whether a secondary key is in the scan: by itself, or by one of its aliases. */
+const secondaryMatcher =
+  (matches: (key: string) => boolean, aliases: AliasHits | undefined) =>
+  (key: string, index: number): boolean =>
+    matches(key) || (aliases?.secondary(index) ?? false);
 
 /**
  * SillyTavern's `parseRegexFromString`: `/pattern/flags` with no unescaped `/`
@@ -210,32 +235,35 @@ export function loreEntryKey(entry: LoreEntry): string {
 
 /**
  * Whether the keys say the entry is triggered by the scan: one primary key — or
- * one of its aliases (`aliasHit`), which stands in for a primary key — and the
- * secondary keys by the entry's logic — `and_any` (one of them, also what an
- * absent logic means), `and_all`, `not_any`, `not_all`. Secondary keys count
- * only on a selective entry that has some.
+ * one of its aliases (`AliasHits.key`), which stands in for a primary key — and
+ * the secondary keys by the entry's logic — `and_any` (one of them, also what an
+ * absent logic means), `and_all`, `not_any`, `not_all` — each secondary key
+ * found by itself or by one of its own aliases. Secondary keys count only on a
+ * selective entry that has some.
  */
-function keysMatch(entry: LoreEntry, matches: (key: string) => boolean, aliasHit = false): boolean {
-  if (!aliasHit && !entry.keys.some(matches)) return false;
+function keysMatch(entry: LoreEntry, matches: (key: string) => boolean, aliases?: AliasHits): boolean {
+  if (!aliases?.key && !entry.keys.some(matches)) return false;
   if (!entry.selective || entry.secondaryKeys.length === 0) return true;
+  const secondary = secondaryMatcher(matches, aliases);
   const logic = entry.selectiveLogic;
-  if (logic === 'and_all') return entry.secondaryKeys.every(matches);
-  if (logic === 'not_any') return !entry.secondaryKeys.some(matches);
-  if (logic === 'not_all') return !entry.secondaryKeys.every(matches);
-  return entry.secondaryKeys.some(matches);
+  if (logic === 'and_all') return entry.secondaryKeys.every(secondary);
+  if (logic === 'not_any') return !entry.secondaryKeys.some(secondary);
+  if (logic === 'not_all') return !entry.secondaryKeys.every(secondary);
+  return entry.secondaryKeys.some(secondary);
 }
 
 /**
  * SillyTavern's group score (`WorldInfoBuffer.getScore`): how many primary keys
  * matched, plus the secondary keys that matched where the logic is a positive
  * one — all of them for `and_any`, and for `and_all` only once every one did.
- * No primary keys, no score. An alias hit counts as one more primary key.
+ * No primary keys, no score. An alias hit counts as one more primary key, and a
+ * secondary key found by its alias as found.
  */
-function keyScore(entry: LoreEntry, matches: (key: string) => boolean, aliasHit = false): number {
+function keyScore(entry: LoreEntry, matches: (key: string) => boolean, aliases?: AliasHits): number {
   if (entry.keys.length === 0) return 0;
-  const primary = entry.keys.filter(matches).length + (aliasHit ? 1 : 0);
+  const primary = entry.keys.filter(matches).length + (aliases?.key ? 1 : 0);
   if (entry.secondaryKeys.length === 0) return primary;
-  const secondary = entry.secondaryKeys.filter(matches).length;
+  const secondary = entry.secondaryKeys.filter(secondaryMatcher(matches, aliases)).length;
   const logic = entry.selectiveLogic ?? 'and_any';
   if (logic === 'and_any') return primary + secondary;
   if (logic === 'and_all') return secondary === entry.secondaryKeys.length ? primary + secondary : primary;
@@ -442,12 +470,13 @@ export interface ActivateLoreInput {
   /**
    * Derived keys in the reader's language for an entry whose own keys are in
    * another (the API's Korean alias pass, `loreAliases.ts`) — never the
-   * entry's, never exported. One in the scan counts as a primary key match
-   * (`aliasMatches`), on both engines, whatever the entry's matching settings;
-   * the secondary keys, groups, probability, budget, recursion and timed
-   * effects then go as for a key. Absent: none.
+   * entry's, never exported. One of `keys` in the scan counts as a primary key
+   * match, and one of a secondary key's (`secondary`) as that secondary key
+   * matching (`aliasMatches`), on both engines, whatever the entry's matching
+   * settings; its selective logic, groups, probability, budget, recursion and
+   * timed effects then go as for its keys. Absent: none.
    */
-  aliases?: (entry: LoreEntry) => readonly string[] | undefined;
+  aliases?: (entry: LoreEntry) => LoreAliases | undefined;
   /**
    * The book runs as SillyTavern runs World Info (`checkWorldInfo`) rather than
    * as RisuAI and the V3 spec do — see `activateLore`. Set where the book is
@@ -590,8 +619,9 @@ function prepare(input: ActivateLoreInput, historyLength: number): Prepared {
  * activates whatever its keys say, after the timed effects and before everything
  * else that follows here, exactly as a keyword match does.
  *
- * An entry's derived aliases (`aliases`) are one more primary key each, matched
- * as RisuAI matches plain keys on either engine (`aliasMatches`).
+ * An entry's derived aliases (`aliases`) are one more primary key each, and its
+ * secondary keys' one more spelling of that secondary key, matched as RisuAI
+ * matches plain keys on either engine (`aliasMatches`).
  *
  * A book that is SillyTavern's (`sillyTavern`) runs as ST's `checkWorldInfo`
  * runs instead — see `activateSillyTavern`.
@@ -679,7 +709,7 @@ function activateBook(entries: LoreEntry[], input: ActivateLoreInput): LoreActiv
     isTavern(entry)
       ? tavernMatcher(scanFor(entry), entry, input, prepared.keyText(entry))
       : keyMatcher(scanFor(entry), entry.caseSensitive, entry.useRegex, risuMatching);
-  const aliasHit = (entry: LoreEntry): boolean => aliasMatches(scanFor(entry), input.aliases?.(entry));
+  const aliasesOf = (entry: LoreEntry): AliasHits | undefined => aliasHits(scanFor(entry), input.aliases?.(entry));
   const passes = (entry: LoreEntry): boolean =>
     entry.probability === undefined || entry.probability >= 100 || random() * 100 < entry.probability;
   const byOrder = (a: LoreEntry, b: LoreEntry): number => a.insertionOrder - b.insertionOrder;
@@ -709,7 +739,7 @@ function activateBook(entries: LoreEntry[], input: ActivateLoreInput): LoreActiv
     // ST checks an external activation before the entry's constant flag and keys.
     const byMeaning = new Set(eligible.filter(vectorMatched));
     const matched = eligible
-      .filter((entry) => byMeaning.has(entry) || entry.constant || keysMatch(entry, matcherFor(entry), aliasHit(entry)))
+      .filter((entry) => byMeaning.has(entry) || entry.constant || keysMatch(entry, matcherFor(entry), aliasesOf(entry)))
       .sort(byOrder);
     // A failed roll or a lost draw is final for this activation: the entry is not
     // rolled again on a later pass.
@@ -720,7 +750,7 @@ function activateBook(entries: LoreEntry[], input: ActivateLoreInput): LoreActiv
       held,
       random,
       (entry) => entry.useGroupScoring ?? input.useGroupScoring ?? false,
-      (entry) => keyScore(entry, matcherFor(entry), aliasHit(entry)),
+      (entry) => keyScore(entry, matcherFor(entry), aliasesOf(entry)),
     );
 
     const activated = (pass === 0 ? [...sticky, ...fresh] : fresh).sort(byOrder);
@@ -972,8 +1002,8 @@ function activateSillyTavern(entries: LoreEntry[], input: ActivateLoreInput): Lo
   };
   const matcherFor = (entry: LoreEntry, state: ScanState): ((key: string) => boolean) =>
     tavernMatcher(scanFor(entry, state), entry, input, prepared.keyText(entry));
-  const aliasHit = (entry: LoreEntry, state: ScanState): boolean =>
-    aliasMatches(scanFor(entry, state), input.aliases?.(entry));
+  const aliasesOf = (entry: LoreEntry, state: ScanState): AliasHits | undefined =>
+    aliasHits(scanFor(entry, state), input.aliases?.(entry));
 
   const activated = new Map<LoreEntry, LoreActivationVia>();
   const failed = new Set<LoreEntry>();
@@ -1014,7 +1044,7 @@ function activateSillyTavern(entries: LoreEntry[], input: ActivateLoreInput): Lo
       if (vectorMatched(entry)) how = 'vector';
       else if (entry.constant) how = 'constant';
       else if (sticky) how = 'sticky';
-      else if (entry.keys.length > 0 && keysMatch(entry, matcherFor(entry, current), aliasHit(entry, current))) {
+      else if (entry.keys.length > 0 && keysMatch(entry, matcherFor(entry, current), aliasesOf(entry, current))) {
         how = current === ScanState.Recursion ? 'recursion' : 'keyword';
       }
       if (how) {
@@ -1032,7 +1062,7 @@ function activateSillyTavern(entries: LoreEntry[], input: ActivateLoreInput): Lo
       [...activated.keys()],
       isSticky,
       (entry) => entry.useGroupScoring ?? input.useGroupScoring ?? false,
-      (entry) => keyScore(entry, matcherFor(entry, current), aliasHit(entry, current)),
+      (entry) => keyScore(entry, matcherFor(entry, current), aliasesOf(entry, current)),
       input.useGroupScoring ?? false,
       random,
     );

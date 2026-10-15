@@ -13,6 +13,11 @@
  * Run again, it asks for nothing it already has. A plot whose creator has no
  * auxiliary model (signed out of ChatGPT) is listed and skipped: its first
  * Korean reader's chat starts the pass on theirs.
+ *
+ * Rows are found by what they were made from (`aliasSourceText`), so a selective
+ * entry with secondary keys aliased before its secondary keys were has no row of
+ * its own any more: it counts here as without aliases, and `--apply` asks for it
+ * again — its keys and its secondary keys in the one call — and drops its old row.
  */
 import { aliasBatches, LORE_ALIAS_LANGUAGE } from '@shizue/core';
 import { createDb, loreEntryAliases, plots } from '@shizue/db';
