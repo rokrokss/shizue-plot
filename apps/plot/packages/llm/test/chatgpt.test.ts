@@ -179,6 +179,11 @@ describe('ChatGPT Responses adapter', () => {
     const result = await collect(event({ type: 'response.output_text.delta', delta: '안녕\nUs' }) + event({ type: 'response.output_text.delta', delta: 'er: hidden' }) + event({ type: 'response.completed', response: { usage: { input_tokens: 9, output_tokens: 7 } } }));
     expect(result).toEqual({ text: '안녕', usage: { promptTokens: 9, completionTokens: 7 } });
   });
+  it('reads how much of the prompt the provider cached, where the usage says it', async () => {
+    const usage = { input_tokens: 2048, output_tokens: 7, input_tokens_details: { cached_tokens: 1536 } };
+    const result = await collect(event({ type: 'response.output_text.delta', delta: '네' }) + event({ type: 'response.completed', response: { usage } }));
+    expect(result.usage).toEqual({ promptTokens: 2048, completionTokens: 7, cachedPromptTokens: 1536 });
+  });
   it.each(['response.failed', 'response.incomplete', 'error', 'interrupted'])('does not accept %s after partial text as success', async (type) => {
     await expect(collect(event({ type: 'response.output_text.delta', delta: 'partial text' }) + (type === 'interrupted' ? '' : event({ type, response: { error: { code: 'subscription_sharing_usage_limit_exceeded' } } })))).rejects.toThrow();
   });

@@ -623,8 +623,17 @@ export interface MemorySummary {
 export interface MemoryFact {
   id: string;
   content: string;
-  /** The summary it was taken from, with whose messages it goes. */
+  /** The summary it goes with: the one it was taken from, or the one that ended it. */
   summaryId: string;
+  /** The turns its summary covered when it was taken; null for older facts. */
+  turnFrom: number | null;
+  turnTo: number | null;
+  /** Ended on this branch by a later summary: kept and listed, never sent, restorable. */
+  invalidated: boolean;
+  /** The turn it ended at, when ended. */
+  invalidatedTurn: number | null;
+  /** The fact that took its place, when ended by one. */
+  supersededBy: { id: string; content: string } | null;
   createdAt: string;
   updatedAt: string;
 }

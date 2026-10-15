@@ -11,6 +11,10 @@ import {
   similarityQueries,
   summarizationTurns,
   summaryChunks,
+  memoryClock,
+  turnsAgoBucket,
+  turnsAgoLabel,
+  withTimeLabel,
   type BatchMessage,
   type SummaryCandidate,
 } from '../src/memory.js';
@@ -43,6 +47,47 @@ describe('HypaV3 settings', () => {
     expect(summaryChunks('  첫 문단.\n\n\n\n둘째 문단.\n셋째 줄.\n\n  ')).toEqual(['첫 문단.', '둘째 문단.\n셋째 줄.']);
     expect(memoryBlock([])).toBe('');
     expect(memoryBlock(['하나.', '둘.'])).toBe('[지난 이야기 요약]\n하나.\n\n둘.');
+  });
+});
+
+describe('time labels', () => {
+  it('buckets turns coarsely, so a label changes only when its bucket does', () => {
+    const table: [turns: number, bucket: number][] = [
+      [0, 0], [9, 0], [10, 10], [14, 10], [15, 20], [44, 40], [94, 90], [95, 100],
+      [99, 100], [100, 100], [124, 100], [125, 150], [474, 450], [475, 500], [549, 500], [550, 600], [1234, 1200],
+    ];
+    for (const [turns, bucket] of table) expect([turns, turnsAgoBucket(turns)]).toEqual([turns, bucket]);
+    // From 10 on the label holds for at least ten turns at a time.
+    const changes = Array.from({ length: 1000 }, (_, turns) => turnsAgoBucket(turns)).filter(
+      (bucket, turns, all) => turns > 0 && bucket !== all[turns - 1],
+    );
+    expect(changes.length).toBeLessThan(1000 / 10);
+  });
+
+  it('reckons from a clock that moves every ten turns, so the labels move together, once in ten turns', () => {
+    expect([0, 9, 10, 19, 20, 234].map(memoryClock)).toEqual([0, 0, 10, 10, 20, 230]);
+    // Fifty summaries three turns apart, then a hundred turns of chat.
+    const ends = Array.from({ length: 50 }, (_, index) => 3 * (index + 1));
+    const block = (now: number, clock: (turns: number) => number): string =>
+      ends.map((end) => turnsAgoLabel(clock(now) - end, 'ko')).join('|');
+    const changes = (clock: (turns: number) => number): number =>
+      Array.from({ length: 100 }, (_, step) => 151 + step).filter((now) => block(now, clock) !== block(now - 1, clock)).length;
+    expect(changes(memoryClock)).toBeLessThanOrEqual(10);
+    // Reckoned from the turn itself, one label or another crosses into its next bucket on most turns.
+    expect(changes((turns) => turns)).toBeGreaterThan(50);
+  });
+
+  it('says it in the conversation’s language, Korean when that is unknown, and leads the text with it', () => {
+    expect(turnsAgoLabel(42, 'ko')).toBe('약 40턴 전');
+    expect(turnsAgoLabel(42, 'en')).toBe('~40 turns ago');
+    expect(turnsAgoLabel(42, 'ja')).toBe('約40ターン前');
+    expect(turnsAgoLabel(3, 'ko')).toBe('최근 10턴 이내');
+    expect(turnsAgoLabel(3, 'en')).toBe('within the last 10 turns');
+    expect(turnsAgoLabel(3, 'ja')).toBe('直近10ターン以内');
+    expect(turnsAgoLabel(-2, undefined)).toBe('최근 10턴 이내');
+    expect(turnsAgoLabel(260, undefined)).toBe('약 250턴 전');
+    expect(withTimeLabel('리안은 열쇠를 맡았다.', '약 40턴 전')).toBe('(약 40턴 전) 리안은 열쇠를 맡았다.');
+    expect(withTimeLabel('리안은 열쇠를 맡았다.', '')).toBe('리안은 열쇠를 맡았다.');
   });
 });
 

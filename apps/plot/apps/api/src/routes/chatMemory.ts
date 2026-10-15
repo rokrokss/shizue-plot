@@ -2,7 +2,8 @@
  * The chat's memory as the reader reads and tends it — RisuAI's HypaV3 summary
  * list (ARCHITECTURE §7.3, §10): every summary with the messages it covers, and
  * a pin, an edit, a delete and a regenerate for each; and the facts of the
- * summaries on the current branch (`facts.ts`), each to edit or delete.
+ * summaries on the current branch (`facts.ts`), each to edit or delete — and
+ * the ones a later summary ended, to restore.
  *
  * Only the chat's owner, as every chat route. A regenerate writes nothing — it
  * answers a new text for the reader to keep or throw away, as RisuAI's reroll
@@ -27,7 +28,7 @@ import { and, asc, eq, inArray } from 'drizzle-orm';
 import { Hono } from 'hono';
 import type { AppDeps, AppEnv } from '../deps.js';
 import { ApiError, badRequest, notFound } from '../errors.js';
-import { branchFacts } from '../facts.js';
+import { branchFacts, keepEndedFacts, toFactJson } from '../facts.js';
 import {
   applicableSummaries,
   loadSummaries,
@@ -38,7 +39,7 @@ import {
   summarize,
 } from '../memory.js';
 import { buildPath } from '../tree.js';
-import { optionalBoolean, optionalString, readJsonBody, requireString, requireUuidParam } from '../util.js';
+import { optionalBoolean, optionalString, readJsonBody, requireUuidParam } from '../util.js';
 import { loadOwnedChat, loadWritableChat } from './chats.js';
 
 /** How much of a covered message the list shows. */
@@ -119,32 +120,35 @@ export function chatMemoryRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.json(await listMemory(deps, chat));
   });
 
-  // `{content}`: the reader's rewrite of a fact. Its vector goes with the old
-  // words; the refresh it schedules embeds the new ones.
+  // `{content?, invalidated?}`: the reader's rewrite of a fact — its vector goes
+  // with the old words, and the refresh it schedules embeds the new ones — or,
+  // with `invalidated: false`, the restore of one a later summary ended: it
+  // holds again everywhere, and the fact that took its place stays as it is.
   app.patch('/:id/memory/facts/:factId', async (c) => {
     const chat = await loadWritableChat(deps, requireUuidParam(c), c.get('userId'));
     const factId = requireUuidParam(c, 'factId');
     const body = await readJsonBody(c);
-    const content = requireString(body, 'content').replace(/\s+/g, ' ').trim();
-    if (content.length === 0 || content.length > MAX_FACT_LENGTH || content.includes('\u0000')) {
+    const raw = optionalString(body, 'content');
+    const invalidated = optionalBoolean(body, 'invalidated');
+    if (raw === undefined && invalidated === undefined) throw badRequest('invalid_request', 'Send content or invalidated');
+    if (invalidated === true) throw badRequest('invalid_request', 'A fact is ended by the memory, not by hand');
+    const content = raw?.replace(/\s+/g, ' ').trim();
+    if (content !== undefined && (content.length === 0 || content.length > MAX_FACT_LENGTH || content.includes('\u0000'))) {
       throw badRequest('invalid_request', `content must be 1-${MAX_FACT_LENGTH} characters, without U+0000`);
     }
     const [fact] = await deps.db
       .update(memories)
-      .set({ content, model: null, embedding: null, updatedAt: new Date() })
+      .set({
+        ...(content !== undefined ? { content, model: null, embedding: null } : {}),
+        ...(invalidated === false ? { invalidatedBySummaryId: null, invalidatedTurn: null, supersededById: null } : {}),
+        updatedAt: new Date(),
+      })
       .where(and(eq(memories.id, factId), eq(memories.chatId, chat.id)))
       .returning();
     if (!fact) throw notFound();
-    scheduleMemoryUpdate(deps, chat.id);
-    return c.json({
-      fact: {
-        id: fact.id,
-        content: fact.content,
-        summaryId: fact.summaryId,
-        createdAt: fact.createdAt.toISOString(),
-        updatedAt: fact.updatedAt.toISOString(),
-      },
-    });
+    if (content !== undefined) scheduleMemoryUpdate(deps, chat.id);
+    const listed = (await listMemory(deps, chat)).facts.find((item) => item.id === fact.id);
+    return c.json({ fact: listed ?? toFactJson(fact, new Set(), null) });
   });
 
   app.delete('/:id/memory/facts/:factId', async (c) => {
@@ -197,14 +201,23 @@ export function chatMemoryRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.json({ summary });
   });
 
+  // A fact of the summary that a later summary ended moves to that one rather
+  // than going with it (`keepEndedFacts`), as on an edit.
   app.delete('/:id/memory/:summaryId', async (c) => {
     const chat = await loadWritableChat(deps, requireUuidParam(c), c.get('userId'));
     const summaryId = requireUuidParam(c, 'summaryId');
-    const deleted = await deps.db
-      .delete(chatSummaries)
-      .where(and(eq(chatSummaries.id, summaryId), eq(chatSummaries.chatId, chat.id)))
-      .returning({ id: chatSummaries.id });
-    if (deleted.length === 0) throw notFound();
+    const deleted = await deps.db.transaction(async (tx) => {
+      const [summary] = await tx
+        .select({ id: chatSummaries.id })
+        .from(chatSummaries)
+        .where(and(eq(chatSummaries.id, summaryId), eq(chatSummaries.chatId, chat.id)))
+        .for('update');
+      if (!summary) return false;
+      await keepEndedFacts(tx, [summaryId]);
+      await tx.delete(chatSummaries).where(eq(chatSummaries.id, summaryId));
+      return true;
+    });
+    if (!deleted) throw notFound();
     return c.body(null, 204);
   });
 

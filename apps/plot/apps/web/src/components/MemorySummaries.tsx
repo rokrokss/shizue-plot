@@ -25,7 +25,8 @@ const ACTION =
  * the top; ones written on another branch wait folded below.
  *
  * Below them, the facts of the summaries on the branch (`facts.ts` in the API):
- * the durable ones taken from what each summary covers, each to edit or delete.
+ * the durable ones taken from what each summary covers, each to edit or delete;
+ * the ones a later summary ended wait folded below them, struck, to restore.
  *
  * The list is the panel's own to fetch: it is read again whenever `version`
  * moves — the branch's head (a turn, a swipe) or the chat's memory revision (an
@@ -87,6 +88,11 @@ export function MemorySummaries({
     setFacts((current) => current.filter((fact) => fact.summaryId !== id));
   };
   const onFactError = (caught: unknown): void => setError(caught === null ? '' : toMessage(caught));
+  const changeFact = (next: MemoryFact): void =>
+    setFacts((current) => current.map((item) => (item.id === next.id ? next : item)));
+  // The facts that hold are sent; the ones a later summary ended wait folded below, to restore.
+  const holding = facts.filter((fact) => !fact.invalidated);
+  const ended = facts.filter((fact) => fact.invalidated);
 
   const applied = (summaries ?? []).filter((summary) => summary.applies).reverse();
   const elsewhere = (summaries ?? []).filter((summary) => !summary.applies);
@@ -134,26 +140,37 @@ export function MemorySummaries({
       <div data-testid="memory-facts" className="space-y-3 pt-2">
         <div className="flex items-center justify-between gap-3">
           <h3 className="text-xs font-medium text-muted">{t('memoryFacts')}</h3>
-          {facts.length > 0 ? (
-            <span className="text-xs text-muted">{t('memoryFactsCount', { count: facts.length })}</span>
+          {holding.length > 0 ? (
+            <span className="text-xs text-muted">{t('memoryFactsCount', { count: holding.length })}</span>
           ) : null}
         </div>
-        {summaries !== null && facts.length === 0 ? <p className="text-sm text-muted">{t('memoryFactsEmpty')}</p> : null}
+        {summaries !== null && holding.length === 0 ? <p className="text-sm text-muted">{t('memoryFactsEmpty')}</p> : null}
         <p className="text-xs text-muted">{t('memoryFactsHint')}</p>
-        {facts.length > 0 ? (
+        {holding.length > 0 ? (
           <ul className="space-y-2">
-            {facts.map((fact) => (
+            {holding.map((fact) => (
               <FactCard
                 key={fact.id}
                 chatId={chatId}
                 fact={fact}
                 disabled={disabled}
-                onChanged={(next) => setFacts((current) => current.map((item) => (item.id === next.id ? next : item)))}
+                onChanged={changeFact}
                 onDeleted={(id) => setFacts((current) => current.filter((item) => item.id !== id))}
                 onError={onFactError}
               />
             ))}
           </ul>
+        ) : null}
+        {ended.length > 0 ? (
+          <details data-testid="memory-ended-facts">
+            <summary className="cursor-pointer text-xs text-muted">{t('memoryEndedFacts', { count: ended.length })}</summary>
+            <p className="mt-2 text-xs text-muted">{t('memoryEndedHint')}</p>
+            <ul className="mt-2 space-y-2">
+              {ended.map((fact) => (
+                <EndedFactCard key={fact.id} chatId={chatId} fact={fact} disabled={disabled} onChanged={changeFact} onError={onFactError} />
+              ))}
+            </ul>
+          </details>
         ) : null}
       </div>
     </section>
@@ -258,6 +275,68 @@ function FactCard({
           </div>
         </div>
       )}
+    </li>
+  );
+}
+
+/**
+ * A fact a later summary ended: struck through, with what took its place and
+ * the turn it ended at, and a restore — it holds again, and is sent again.
+ */
+function EndedFactCard({
+  chatId,
+  fact,
+  disabled,
+  onChanged,
+  onError,
+}: {
+  chatId: string;
+  fact: MemoryFact;
+  disabled: boolean;
+  onChanged: (fact: MemoryFact) => void;
+  onError: (error: unknown) => void;
+}) {
+  const t = useTranslations('chat');
+  const [working, setWorking] = useState(false);
+  const busy = disabled || working;
+
+  async function restore(): Promise<void> {
+    if (busy) return;
+    setWorking(true);
+    onError(null);
+    try {
+      const answer = await apiSend<{ fact: MemoryFact }>('PATCH', `/api/chats/${chatId}/memory/facts/${fact.id}`, {
+        invalidated: false,
+      });
+      onChanged(answer.fact);
+    } catch (caught) {
+      onError(caught);
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  return (
+    <li data-testid="memory-ended-fact" className="space-y-1 rounded-xl border border-line bg-raised/40 p-3">
+      <div className="flex items-start gap-3">
+        <p className="min-w-0 flex-1 break-keep text-sm text-muted line-through [overflow-wrap:anywhere]">{fact.content}</p>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void restore()}
+          className={cx(ACTION, 'shrink-0 text-muted hover:text-fg')}
+        >
+          {t('memoryFactRestore')}
+        </button>
+      </div>
+      {fact.supersededBy ? (
+        <p className="break-keep text-xs text-fg [overflow-wrap:anywhere]">
+          {t('memoryReplacedBy', { content: fact.supersededBy.content })}
+        </p>
+      ) : null}
+      {fact.invalidatedTurn !== null ? (
+        <p className="text-xs text-muted">{t('memoryEndedAt', { turn: fact.invalidatedTurn })}</p>
+      ) : null}
     </li>
   );
 }

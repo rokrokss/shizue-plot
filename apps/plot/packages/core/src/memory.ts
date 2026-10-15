@@ -15,6 +15,7 @@
  * Pure: the API loads the summaries, counts nothing it does not pass in, and
  * ranks by the vectors it holds.
  */
+import type { MacroLocale } from './macro.js';
 
 /** HypaV3's settings a chat may tune (RisuAI's `HypaV3Settings`, the subset that applies here). */
 export interface HypaV3Settings {
@@ -102,6 +103,52 @@ export function summaryChunks(text: string): string[] {
 export function memoryBlock(texts: readonly string[]): string {
   return texts.length > 0 ? `${MEMORY_HEADING}\n${texts.join(SUMMARY_SEPARATOR)}` : '';
 }
+
+/* ------------------------------------------------------------ time labels */
+
+/** How often the memory's clock moves on, in turns (`memoryClock`). */
+export const MEMORY_CLOCK_STEP = 10;
+
+/**
+ * The turn the memory dates its summaries and facts from: the branch's turns
+ * (rounds) rounded down to a multiple of `MEMORY_CLOCK_STEP`. Every label is
+ * reckoned from it, so the labels move on together once every ten turns rather
+ * than one or another of them crossing into its next bucket on nearly every turn
+ * — the block is in the system string, which a provider caches as a prefix.
+ * The labels read up to nine turns young for it, well within their "about".
+ */
+export const memoryClock = (turns: number): number => Math.floor(turns / MEMORY_CLOCK_STEP) * MEMORY_CLOCK_STEP;
+
+/**
+ * How many turns ago a summary or a fact stands, as the memory block says it:
+ * 0 for within ten turns, then to the nearest ten under a hundred, fifty under
+ * five hundred, a hundred beyond — coarse, as a reader would say it.
+ */
+export function turnsAgoBucket(turns: number): number {
+  if (turns < 10) return 0;
+  const step = turns < 100 ? 10 : turns < 500 ? 50 : 100;
+  return Math.round(turns / step) * step;
+}
+
+const TURNS_AGO: Record<MacroLocale, { recent: string; ago: (turns: number) => string }> = {
+  ko: { recent: '최근 10턴 이내', ago: (turns) => `약 ${turns}턴 전` },
+  en: { recent: 'within the last 10 turns', ago: (turns) => `~${turns} turns ago` },
+  ja: { recent: '直近10ターン以内', ago: (turns) => `約${turns}ターン前` },
+};
+
+/**
+ * The relative time label of something `turns` turns (rounds) ago, bucketed
+ * (`turnsAgoBucket`), in the conversation's language — the language the memory
+ * itself builds up in — and Korean when that is not known.
+ */
+export function turnsAgoLabel(turns: number, language: MacroLocale | undefined): string {
+  const words = TURNS_AGO[language ?? 'ko'];
+  const bucket = turnsAgoBucket(Math.max(0, turns));
+  return bucket === 0 ? words.recent : words.ago(bucket);
+}
+
+/** A summary or a fact as the memory block carries it: its time label first, in parentheses. */
+export const withTimeLabel = (text: string, label: string): string => (label ? `(${label}) ${text}` : text);
 
 /* -------------------------------------------------------------- selection */
 

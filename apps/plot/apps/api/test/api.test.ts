@@ -52,6 +52,8 @@ import {
   readPngTextChunks,
   replyLanguageInstruction,
   stripPngTextChunks,
+  turnsAgoLabel,
+  withTimeLabel,
 } from '@shizue/core';
 import { draftFingerprint, MIGRATION_PLATFORMS_ENABLED, type MigrationDraft } from '@shizue/core/migrate';
 import { LUA_STATE_LIMIT } from '@shizue/core/lua';
@@ -140,6 +142,7 @@ import {
   type JobHandlers,
 } from '../src/jobs.js';
 import type { Embedder } from '../src/embedder.js';
+import { extractFacts } from '../src/facts.js';
 import { aliasHash } from '../src/loreAliases.js';
 import { BACKFILL_BATCHES_PER_RUN, embedPendingSummaries } from '../src/memory.js';
 import { refreshSearchVectors, resetSearchSweeps } from '../src/search.js';
@@ -7764,6 +7767,12 @@ describe('reader presets', () => {
 describe('memory', () => {
   const SUMMARY = '리안과 유저는 폐관 후 도서관에서 여러 번 마주쳤다. 리안은 열람실 열쇠를 맡기로 했다.';
 
+  /** A prompt's text without the memory's time labels (`turnsAgoLabel`): for what the block says rather than when. */
+  const undated = (text: string): string =>
+    text.replace(/\((?:최근 10턴 이내|약 \d+턴 전|within the last 10 turns|~\d+ turns ago|直近10ターン以内|約\d+ターン前)\) /g, '');
+  /** A summary or a fact as a short branch's block carries it: dated within ten turns. */
+  const recent = (text: string): string => withTimeLabel(text, turnsAgoLabel(0, 'ko'));
+
   interface Captured {
     system: string;
     messages: ChatRequest['messages'];
@@ -7806,7 +7815,8 @@ describe('memory', () => {
     options: Partial<AppDeps> & {
       summaryText?: string;
       summaryGate?: Promise<void>;
-      factsText?: string;
+      /** The answer to a fact extraction, or what makes it from the request. */
+      factsText?: string | ((request: Captured) => string);
       factsGate?: Promise<void>;
     } = {},
   ): Harness {
@@ -7840,10 +7850,12 @@ describe('memory', () => {
             if (req.system.includes('관계 분석가')) {
               return { usage: { promptTokens: 0, completionTokens: 0 } };
             }
-            if (req.system.includes('{"facts": string[]}')) {
-              facts.push({ system: req.system, messages: req.messages });
+            if (req.system.includes('{"facts": string[], ')) {
+              const captured = { system: req.system, messages: req.messages };
+              facts.push(captured);
               if (factsGate) await factsGate;
-              if (factsText) yield { type: 'text', text: factsText };
+              const answer = typeof factsText === 'function' ? factsText(captured) : factsText;
+              if (answer) yield { type: 'text', text: answer };
               return { usage: { promptTokens: 0, completionTokens: 0 } };
             }
             // Recorded before the gate, so a blocked refresh is still observable.
@@ -8002,7 +8014,7 @@ describe('memory', () => {
     const next = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '그 다음은?' }, harness.app);
     expect((await readSse(next)).at(-1)!.event).toBe('done');
     const prompt = harness.prompts.at(-1)!;
-    expect(prompt.system).toContain(`${MEMORY_HEADING}\n${SUMMARY}`);
+    expect(undated(prompt.system)).toContain(`${MEMORY_HEADING}\n${SUMMARY}`);
     for (const covered of sent.slice(0, 2)) {
       expect(prompt.messages.some((message) => contentText(message.content).includes(covered))).toBe(false);
     }
@@ -8187,14 +8199,14 @@ describe('memory', () => {
     const ids = (await shortTurns(cookie, chatId, harness, 5)).map((message: any) => message.id);
     const texts = ['첫째 요약입니다.', '둘째 요약입니다.', '셋째 요약입니다.', '넷째 요약입니다.'];
     for (const [index, text] of texts.entries()) await seedSummary(chatId, ids.slice(index * 2, index * 2 + 2), text, index === 0);
-    // Room for one summary only.
-    const one = Math.max(...texts.map((text) => countTokens(`${text}\n\n`)));
+    // Room for one summary only, its time label included.
+    const one = Math.max(...texts.map((text) => countTokens(`${recent(text)}\n\n`)));
     const ratio = (countTokens(`${MEMORY_HEADING}\n`) + one + 1) / 8000;
     await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000, memoryTokensRatio: ratio } });
 
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app));
     const system = harness.prompts.at(-1)!.system;
-    expect(system).toContain(`${MEMORY_HEADING}\n첫째 요약입니다.`);
+    expect(system).toContain(`${MEMORY_HEADING}\n${recent('첫째 요약입니다.')}`);
     for (const text of texts.slice(1)) expect(system).not.toContain(text);
     // The history still starts after the last covered message, selected or not.
     const sent = harness.prompts.at(-1)!.messages.map((message) => contentText(message.content));
@@ -8210,7 +8222,7 @@ describe('memory', () => {
       const { chatId } = await setupChat(cookie);
       const ids = (await shortTurns(cookie, chatId, harness, 5)).map((message: any) => message.id);
       for (const [index, text] of texts.entries()) await seedSummary(chatId, ids.slice(index * 2, index * 2 + 2), text);
-      const one = Math.max(...texts.map((text) => countTokens(`${text}\n\n`)));
+      const one = Math.max(...texts.map((text) => countTokens(`${recent(text)}\n\n`)));
       await json(cookie, `/api/chats/${chatId}`, 'PATCH', {
         memorySettings: {
           contextBudget: 8000,
@@ -8225,7 +8237,7 @@ describe('memory', () => {
     const ask = async (cookie: string, chatId: string, harness: Harness, content: string): Promise<string> => {
       const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }, harness.app);
       expect((await readSse(res)).at(-1)!.event).toBe('done');
-      return harness.prompts.at(-1)!.system;
+      return undated(harness.prompts.at(-1)!.system);
     };
 
     it('ranks the summaries by the server embedder against the latest turns', async () => {
@@ -8375,7 +8387,7 @@ describe('memory', () => {
     const ask = async (cookie: string, chatId: string, harness: Harness, content: string): Promise<string> => {
       const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }, harness.app);
       expect((await readSse(res)).at(-1)!.event).toBe('done');
-      return harness.prompts.at(-1)!.system;
+      return undated(harness.prompts.at(-1)!.system);
     };
 
     /** Stores a fact of `summaryId` as an extraction would, embedded by `embedder`. */
@@ -8639,6 +8651,158 @@ describe('memory', () => {
       const saved = await readJson(await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { factCount: 0 } }));
       expect(saved.chat.memorySettings).toEqual({ factCount: 0 });
     });
+
+    /** The chat row and the messages of `ids`, oldest first, as a refresh hands them to the extraction. */
+    async function extractionSource(chatId: string, ids: string[]) {
+      const [chat] = await db.select().from(chats).where(eq(chats.id, chatId));
+      const rows = await db.select().from(messages).where(inArray(messages.id, ids));
+      return { chat: chat!, messages: ids.map((id) => rows.find((row) => row.id === id)!) };
+    }
+
+    it('updates and ends the facts it was shown, keeps them, sends only what holds, and restores one', async () => {
+      const cookie = await signUp('facts-update@example.com');
+      const { chatId } = await setupChat(cookie);
+      const embedder = keywordEmbedder();
+      const answer = {
+        // Of none of the keyword embedder's words, so no near duplicate of the update's.
+        facts: ['리안은 새 사서가 되었다.'],
+        updates: [{ id: 2, fact: '유저는 등대 열쇠를 리안에게 돌려주었다.' }],
+        // 9 was never shown: left out.
+        invalidated: [3, 9],
+      };
+      const harness = memoryApp({ embedder, factsText: JSON.stringify(answer) });
+      const ids = (await shortTurns(cookie, chatId, harness, 4)).map((message: any) => message.id);
+      const front = await seedSummary(chatId, ids.slice(0, 3), '앞 요약.');
+      const old = [];
+      for (const fact of FACTS) old.push(await insertFact(chatId, front.id, fact, embedder));
+      const back = await seedSummary(chatId, ids.slice(3, 6), '뒤 요약.');
+      await db.update(chatSummaries).set({ turnFrom: 2, turnTo: 3 }).where(eq(chatSummaries.id, back.id));
+
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        await extractFacts(harness.deps, embedder, {
+          ...(await extractionSource(chatId, ids.slice(3, 6))),
+          plotLanguage: 'ko',
+          summary: { ...back, turnFrom: 2, turnTo: 3 },
+          userName: '유저',
+          branch: [{ id: front.id, earlier: true }],
+          conversationLanguage: 'ko',
+        });
+        expect(log.mock.calls.flat().join('\n')).toContain(
+          `[facts] chat ${chatId}: 1 added, 1 updated, 1 invalidated of 3 shown, 1 rejected, 0 ended later`,
+        );
+      } finally {
+        log.mockRestore();
+      }
+      // Shown the branch's facts from before it, numbered, ahead of the transcript.
+      expect(transcriptOf(harness.facts.at(-1)!)).toMatch(
+        new RegExp(`^\\[기록된 사실\\]\\n1\\. ${FACTS[0]}\\n2\\. ${FACTS[1]}\\n3\\. ${FACTS[2]}\\n\\n\\[대화\\]\\n`),
+      );
+
+      // Nothing deleted: the updated one and the ended one stay, marked, the update's words a fact of the new summary.
+      const stored = await factsOf(chatId);
+      const replacement = stored.find((row) => row.content === answer.updates[0]!.fact)!;
+      expect(stored.map((row) => [row.content, row.summaryId, row.invalidatedBySummaryId, row.supersededById, row.invalidatedTurn])).toEqual([
+        [FACTS[0], front.id, null, null, null],
+        [FACTS[1], front.id, back.id, replacement.id, 3],
+        [FACTS[2], front.id, back.id, null, 3],
+        [answer.facts[0], back.id, null, null, null],
+        [answer.updates[0]!.fact, back.id, null, null, null],
+      ]);
+      expect(replacement).toMatchObject({ turnFrom: 2, turnTo: 3, model: 'test-embedder' });
+
+      // Listed with what became of them; sent only while they hold.
+      const listed = async () =>
+        (await readJson(await request(cookie, `/api/chats/${chatId}/memory`, 'GET', undefined, harness.app))).facts;
+      expect((await listed()).map((fact: any) => [fact.content, fact.invalidated, fact.invalidatedTurn, fact.supersededBy?.content ?? null])).toEqual([
+        [FACTS[0], false, null, null],
+        [FACTS[1], true, 3, answer.updates[0]!.fact],
+        [FACTS[2], true, 3, null],
+        [answer.facts[0], false, null, null],
+        [answer.updates[0]!.fact, false, null, null],
+      ]);
+      const block = factsBlockOf(await ask(cookie, chatId, harness, '등대 열쇠와 지도는 어디 있지?'));
+      expect(block).toContain(answer.updates[0]!.fact);
+      expect(block).not.toContain(FACTS[1]);
+      expect(block).not.toContain(FACTS[2]);
+
+      // The reader restores one: it holds, and is sent, again; ending one by hand is not the reader's to do.
+      const base = `/api/chats/${chatId}/memory/facts/${old[2]!.id}`;
+      expect((await json(cookie, base, 'PATCH', { invalidated: true }, harness.app)).status).toBe(400);
+      const restored = await readJson(await json(cookie, base, 'PATCH', { invalidated: false }, harness.app));
+      expect(restored.fact).toMatchObject({ id: old[2]!.id, content: FACTS[2], invalidated: false, supersededBy: null });
+      expect(factsBlockOf(await ask(cookie, chatId, harness, '지도는 어디 있지?'))).toContain(FACTS[2]);
+      await harness.settle();
+    });
+
+    it('keeps a fact a later summary ended when its own stretch is summarized again, and does not bring it back', async () => {
+      const cookie = await signUp('facts-ended-gap@example.com');
+      const { chatId } = await setupChat(cookie);
+      const embedder = keywordEmbedder();
+      // The stretch summarized again says the ended fact again, and one new one.
+      const harness = memoryApp({ embedder, factsText: JSON.stringify({ facts: [FACTS[1], FACTS[0]] }) });
+      const ids = (await shortTurns(cookie, chatId, harness, 4)).map((message: any) => message.id);
+      const front = await seedSummary(chatId, ids.slice(0, 3), '앞 요약.');
+      const back = await seedSummary(chatId, ids.slice(3, 6), '뒤 요약.');
+      const ended = await insertFact(chatId, front.id, FACTS[1]!, embedder);
+      await db.update(memories).set({ invalidatedBySummaryId: back.id, invalidatedTurn: 3 }).where(eq(memories.id, ended.id));
+      const plain = await insertFact(chatId, front.id, FACTS[2]!, embedder);
+      // About the map: its own direction, apart from the lighthouse key's.
+      const later = await insertFact(chatId, back.id, '지도는 유저의 가방에 있다.', embedder);
+
+      // An edit of a message the front summary covers: the summary goes, its plain fact with it,
+      // and the fact the back summary ended moves to that one.
+      expect((await json(cookie, `/api/messages/${ids[2]}`, 'PATCH', { content: '고친 답변' }, harness.app)).status).toBe(200);
+      await harness.settle();
+      const summaries = await db.select().from(chatSummaries).where(eq(chatSummaries.chatId, chatId));
+      const gap = summaries.find((summary) => summary.id !== back.id)!;
+      expect(summaries.map((summary) => summary.id)).not.toContain(front.id);
+      // The stretch summarized again, with the turns it covers.
+      expect(gap).toMatchObject({ messageIds: ids.slice(0, 3), turnFrom: 1, turnTo: 2 });
+
+      // Its extraction stood before the back summary: it was shown nothing to change.
+      expect(transcriptOf(harness.facts.at(-1)!)).not.toContain('[기록된 사실]');
+      const stored = await factsOf(chatId);
+      expect(stored.map((row) => [row.content, row.summaryId, row.invalidatedBySummaryId])).toEqual([
+        [FACTS[1], back.id, back.id],
+        [later.content, back.id, null],
+        [FACTS[0], gap.id, null],
+      ]);
+      expect(stored.some((row) => row.id === plain.id)).toBe(false);
+      const block = factsBlockOf(await ask(cookie, chatId, harness, '등대 열쇠와 지도는?'));
+      expect(block).toContain(later.content);
+      expect(block).not.toContain(FACTS[1]);
+      await harness.settle();
+    });
+
+    it('dates each summary and fact by how many turns ago it stands, coarsely, in the conversation’s language', async () => {
+      const cookie = await signUp('facts-dated@example.com');
+      const { chatId } = await setupChat(cookie);
+      const embedder = keywordEmbedder();
+      const harness = memoryApp({ embedder });
+      // The greeting and 25 rounds; the summary's last message closes the second.
+      const ids = (await shortTurns(cookie, chatId, harness, 25)).map((message: any) => message.id);
+      const summary = await seedSummary(chatId, ids.slice(0, 3), '첫 인사를 나눴다.');
+      await insertFact(chatId, summary.id, FACTS[1]!, embedder);
+
+      // 26 rounds then: 24 ago, said as about 20.
+      const system = await askRaw(cookie, chatId, harness, '등대 열쇠?');
+      expect(system).toContain(`${MEMORY_HEADING}\n(약 20턴 전) 첫 인사를 나눴다.`);
+      expect(system).toContain(`${FACTS_HEADING}\n- (약 20턴 전) ${FACTS[1]}`);
+
+      // Six turns in English later — 30 ago — it is said in English.
+      let english = '';
+      for (let turn = 0; turn < 6; turn += 1) english = await askRaw(cookie, chatId, harness, `Where is the lighthouse key, round ${turn}?`);
+      expect(english).toContain(`${MEMORY_HEADING}\n(~30 turns ago) 첫 인사를 나눴다.`);
+      await harness.settle();
+    });
+
+    /** A turn's system text as sent, its time labels and all. */
+    const askRaw = async (cookie: string, chatId: string, harness: Harness, content: string): Promise<string> => {
+      const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }, harness.app);
+      expect((await readSse(res)).at(-1)!.event).toBe('done');
+      return harness.prompts.at(-1)!.system;
+    };
   });
 
   it('lists, pins, rewrites, regenerates and deletes a summary, for its owner only', async () => {
@@ -8722,7 +8886,7 @@ describe('memory', () => {
     expect(chat!.memorySettings).toEqual({ contextBudget: 8000 });
     // It applies like any other: the history starts after the anchor.
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app));
-    expect(harness.prompts.at(-1)!.system).toContain(`${MEMORY_HEADING}\n${SUMMARY}`);
+    expect(undated(harness.prompts.at(-1)!.system)).toContain(`${MEMORY_HEADING}\n${SUMMARY}`);
   });
 
   /** An imported history of `length` long messages, its import completed with a backfill. */
@@ -14720,7 +14884,7 @@ describe('editRequest listeners', () => {
     const second = (await stored()).filter((message) => message.role === 'user').at(-1)!;
     expect(prompts.at(-1)!.system.split('\n')).toEqual([
       'system|nil|nil|nil|nil|nil|nil|nil|',
-      'system|supaMemory|nil|nil|nil|nil|nil|nil|[지난 이야기 요약]/둘은 문 앞에서 만났다.//유저가 먼저 인사했다.',
+      'system|supaMemory|nil|nil|nil|nil|nil|nil|[지난 이야기 요약]/(최근 10턴 이내) 둘은 문 앞에서 만났다.//(최근 10턴 이내) 유저가 먼저 인사했다.',
       ...examples,
       `assistant|${reply.id}|true|0|0|nil|nil|nil|`,
       `user|${second.id}|nil|0|0|nil|nil|nil|`,
@@ -14729,7 +14893,7 @@ describe('editRequest listeners', () => {
     // The listener changed the request, so it went in that shape: the summary a system turn of its own.
     expect(prompts.at(-1)!.messages[0]).toEqual({
       role: 'system',
-      content: '[지난 이야기 요약]\n둘은 문 앞에서 만났다.\n\n유저가 먼저 인사했다.',
+      content: '[지난 이야기 요약]\n(최근 10턴 이내) 둘은 문 앞에서 만났다.\n\n(최근 10턴 이내) 유저가 먼저 인사했다.',
     });
   });
 

@@ -22,6 +22,7 @@ import { sql } from 'drizzle-orm';
 import {
   boolean,
   customType,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -729,6 +730,11 @@ const tsvector = customType<{ data: string; driverData: string }>({
 // the branch's messages (`message_ids`, oldest first), pinned (`important`) or
 // not. A summary applies to a branch only while every message it covers is on
 // it; editing, hiding or deleting one of them deletes the summary.
+// `turn_from`/`turn_to` are the turns (rounds, `roundCount`) its first and last
+// message close, as the branch stood when it was written — a message's turn
+// never changes, since a delete takes the messages under it too. Null on the
+// summaries written before they were kept; the memory reads a summary's turns
+// off the branch it applies to, so nothing depends on them.
 export const chatSummaries = pgTable(
   'chat_summaries',
   {
@@ -739,6 +745,8 @@ export const chatSummaries = pgTable(
     text: text('text').notNull(),
     messageIds: uuid('message_ids').array().notNull(),
     important: boolean('important').notNull().default(false),
+    turnFrom: integer('turn_from'),
+    turnTo: integer('turn_to'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -880,6 +888,16 @@ export const messageTranslations = pgTable(
 // message, or the reader deleting the summary. `model` is the embedder's id for
 // `embedding`; a fact without a vector of the plot's model is embedded again by
 // the next refresh, as a summary's chunks are.
+//
+// A later extraction may find that a fact no longer holds: it is never deleted
+// for that, but kept as no longer holding (`invalidated_by_summary_id`, the
+// summary whose messages showed it, and `invalidated_turn`, that summary's last
+// turn), with the fact that took its place where there is one
+// (`superseded_by_id`). It no longer holds on a branch that summary applies to,
+// and holds again once that summary is gone. A fact whose own summary goes while
+// the one that ended it stays moves to that one (`summary_id`), so the stretch
+// summarized again does not bring it back. `turn_from`/`turn_to` are the turns
+// its summary covered when it was extracted; null on older facts.
 export const memories = pgTable(
   'memories',
   {
@@ -899,10 +917,24 @@ export const memories = pgTable(
     content: text('content').notNull(),
     model: text('model'),
     embedding: anyVector('embedding'),
+    turnFrom: integer('turn_from'),
+    turnTo: integer('turn_to'),
+    invalidatedBySummaryId: uuid('invalidated_by_summary_id').references(() => chatSummaries.id, {
+      onDelete: 'set null',
+    }),
+    invalidatedTurn: integer('invalidated_turn'),
+    supersededById: uuid('superseded_by_id'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('memories_chat_id_idx').on(t.chatId), index('memories_summary_id_idx').on(t.summaryId)],
+  (t) => [
+    index('memories_chat_id_idx').on(t.chatId),
+    index('memories_summary_id_idx').on(t.summaryId),
+    // What a summary's or a fact's delete walks to let go of the facts it ended; only those few are in them.
+    index('memories_invalidated_by_idx').on(t.invalidatedBySummaryId).where(sql`${t.invalidatedBySummaryId} is not null`),
+    index('memories_superseded_by_idx').on(t.supersededById).where(sql`${t.supersededById} is not null`),
+    foreignKey({ columns: [t.supersededById], foreignColumns: [t.id] }).onDelete('set null'),
+  ],
 );
 
 // A public plot's searchable text — its name, tags, reader-facing intro and the

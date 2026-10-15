@@ -38,6 +38,7 @@ import {
   lexicalRanking,
   MEMORY_HEADING,
   memoryBlock,
+  memoryClock,
   memoryTokenBudget,
   nextSummaryBatch,
   rankBySimilarity,
@@ -48,6 +49,8 @@ import {
   summarizationTurns,
   summaryChunks,
   SUMMARY_SEPARATOR,
+  turnsAgoLabel,
+  withTimeLabel,
   type BatchMessage,
   type HypaV3Settings,
   type SummaryBatch,
@@ -69,12 +72,13 @@ import { getAdapter, listEnabledModels, type ChatRequest, type LLMAdapter } from
 import { and, asc, eq, inArray, notExists, sql } from 'drizzle-orm';
 import type { AppDeps, Tx } from './deps.js';
 import type { Embedding } from './embedder.js';
-import { embedPendingFacts, extractFacts, selectFacts } from './facts.js';
+import { noteCachedTokens } from './cacheHealth.js';
+import { embedPendingFacts, extractFacts, keepEndedFacts, selectFacts } from './facts.js';
 import { loadMembers } from './hub.js';
 import { enqueueJob } from './jobs.js';
 import { noteLexicalSearch } from './lexicalHealth.js';
 import { transcriptOf } from './transcript.js';
-import { buildPath, visibleToAi } from './tree.js';
+import { buildPath, roundsAlong, visibleToAi } from './tree.js';
 
 /** What one summary call may write; HypaV3 does not cap it, the API needs a number. */
 const SUMMARY_MAX_TOKENS = 1600;
@@ -154,9 +158,10 @@ export function loadSummaries(db: AppDeps['db'] | Tx, chatId: string): Promise<C
 
 /**
  * Memory inputs for one generation: the memory block injected after the persona
- * — the selected summaries, then the facts (`[기억]`, `facts.ts`) — and the
- * history the model still sees verbatim: `path` after the last message an
- * applying summary covers.
+ * — the selected summaries, then the facts (`[기억]`, `facts.ts`), each led by
+ * a coarse "N turns ago" in the conversation's language — and the history the
+ * model still sees verbatim: `path` after the last message an applying summary
+ * covers.
  *
  * `answering` is the branch the reply answers, as the model will read it: the
  * latest `queryChatCount` of its turns are the similarity search's queries
@@ -177,10 +182,24 @@ export async function buildMemoryInput(
 
   const settings = memorySettingsOf(chat);
   const available = memoryTokenBudget(settings.contextBudget, settings) - countTokens(`${MEMORY_HEADING}\n`);
-  const queries = similarityQueries(
-    visibleToAi(answering).map((message) => stripImageMacros(message.content)),
-    settings,
+  const turns = visibleToAi(answering).map((message) => stripImageMacros(message.content));
+  const queries = similarityQueries(turns, settings);
+
+  // Each summary, and each fact by its summary, dated by how many turns ago its
+  // last message stands (`turnsAgoLabel`, bucketed) from the memory's clock
+  // (`memoryClock`, which moves every ten turns), in the language the
+  // conversation runs in — the label counts against the share like the words.
+  const rounds = roundsAlong(path);
+  const now = memoryClock(rounds.at(-1) ?? 0);
+  const position = new Map(path.map((message, at) => [message.id, at]));
+  const language = detectContentLanguage(turns.slice(-LANGUAGE_TURNS).join('\n'));
+  const labels = new Map(
+    applicable.map((summary) => {
+      const last = Math.max(...summary.messageIds.map((id) => position.get(id)!));
+      return [summary.id, turnsAgoLabel(now - rounds[last]!, language)] as const;
+    }),
   );
+  const dated = (summary: ChatSummary): string => withTimeLabel(summary.text, labels.get(summary.id)!);
   const embedder = deps.embedder;
   const plotLanguage = embedder ? await plotLanguageOf(deps, chat.plotId) : null;
   const model = embedder && plotLanguage ? embedder.modelFor(plotLanguage) : null;
@@ -192,7 +211,7 @@ export async function buildMemoryInput(
     applicable.map((summary) => ({
       summary,
       important: summary.important,
-      tokens: countTokens(summary.text + SUMMARY_SEPARATOR),
+      tokens: countTokens(dated(summary) + SUMMARY_SEPARATOR),
     })),
     available,
     settings,
@@ -209,12 +228,13 @@ export async function buildMemoryInput(
         queryVectors,
         turn: queries.at(-1)!,
         count: settings.factCount,
+        line: (fact) => withTimeLabel(fact.content, labels.get(fact.summaryId)!),
       });
     } catch (error) {
       console.warn('[memory] the facts were left out: the queries could not be embedded', error);
     }
   }
-  const blocks = [memoryBlock(selection.selected.map((summary) => summary.text)), factsBlock(facts)];
+  const blocks = [memoryBlock(selection.selected.map(dated)), factsBlock(facts)];
   return { memoryText: blocks.filter((block) => block !== '').join('\n\n'), history };
 }
 
@@ -379,6 +399,11 @@ async function updateMemory(deps: AppDeps, chatId: string, continuing: boolean):
   const byId = new Map(path.map((message) => [message.id, message]));
   const summarized = batch.summarizedIds.map((id) => byId.get(id)!);
   const userName = row.personaName ?? DEFAULT_USER_NAME;
+  // Where the batch stands on the branch, and the turns it covers.
+  const position = new Map(path.map((message, at) => [message.id, at]));
+  const rounds = roundsAlong(path);
+  const first = position.get(batch.messageIds[0]!)!;
+  const last = position.get(batch.messageIds.at(-1)!)!;
   const text = await summarize(deps, chat, {
     messages: summarized,
     userName,
@@ -397,7 +422,7 @@ async function updateMemory(deps: AppDeps, chatId: string, continuing: boolean):
     if (current?.revision !== captured) return null;
     const [summary] = await tx
       .insert(chatSummaries)
-      .values({ chatId, text, messageIds: batch.messageIds })
+      .values({ chatId, text, messageIds: batch.messageIds, turnFrom: rounds[first]!, turnTo: rounds[last]! })
       .returning();
     return summary ?? null;
   });
@@ -411,13 +436,19 @@ async function updateMemory(deps: AppDeps, chatId: string, continuing: boolean):
   // here would pay for facts no request ever picks.
   const embedder = deps.embedder;
   if (settings.factCount > 0 && embedder?.modelFor(row.plotLanguage)) {
+    const { applicable } = applicableSummaries(summaries, path);
     await extractFacts(deps, embedder, {
       chat,
       plotLanguage: row.plotLanguage,
       summary: written,
       messages: summarized,
       userName,
-      branchSummaryIds: applicableSummaries(summaries, path).applicable.map((summary) => summary.id),
+      // A gap's batch stands before summaries already written: their facts are
+      // later in the story than its messages, and not its to change.
+      branch: applicable.map((summary) => ({
+        id: summary.id,
+        earlier: Math.max(...summary.messageIds.map((id) => position.get(id)!)) < first,
+      })),
       // The language the conversation runs in now — a Korean reader of an English
       // card writes Korean — rather than the plot's.
       conversationLanguage: detectContentLanguage(
@@ -601,9 +632,11 @@ async function enqueueBackfill(deps: AppDeps, chatId: string, runAt?: Date): Pro
  * Every call bumps `memory_revision`, which discards any summary being written
  * from a snapshot that may still hold the old text. The summaries covering one
  * of the messages are deleted — that one summary each, not the memory: the
- * stretch it covered is summarized again (as a gap) on the next refresh. Answers
- * how many were deleted; a caller with any should schedule that refresh once
- * its transaction has committed.
+ * stretch it covered is summarized again (as a gap) on the next refresh. A fact
+ * of theirs a later summary ended moves to that summary first (`keepEndedFacts`),
+ * so the stretch summarized again does not bring it back. Answers how many were
+ * deleted; a caller with any should schedule that refresh once its transaction
+ * has committed.
  *
  * Also touches `chats.updated_at`, since it owns the chat row write for this edit.
  */
@@ -622,8 +655,9 @@ export async function invalidateMemoryForEdit(
     .set({ memoryRevision: sql`${chats.memoryRevision} + 1`, updatedAt: new Date() })
     .where(eq(chats.id, chatId));
   if (ids.length === 0) return 0;
-  const dropped = await tx
-    .delete(chatSummaries)
+  const doomed = await tx
+    .select({ id: chatSummaries.id })
+    .from(chatSummaries)
     .where(
       and(
         eq(chatSummaries.chatId, chatId),
@@ -632,9 +666,12 @@ export async function invalidateMemoryForEdit(
           sql`, `,
         )}]::uuid[]`,
       ),
-    )
-    .returning({ id: chatSummaries.id });
-  return dropped.length;
+    );
+  if (doomed.length === 0) return 0;
+  const doomedIds = doomed.map((summary) => summary.id);
+  await keepEndedFacts(tx, doomedIds);
+  await tx.delete(chatSummaries).where(inArray(chatSummaries.id, doomedIds));
+  return doomed.length;
 }
 
 /* -------------------------------------------------------------- the model */
@@ -733,7 +770,7 @@ export async function memoryChannel(
   }
 }
 
-/** Drains a non-streaming side-channel call into one string. */
+/** Drains a non-streaming side-channel call into one string, its prompt cache's share noted (`cacheHealth.ts`). */
 export async function collect(adapter: LLMAdapter, request: ChatRequest): Promise<string> {
   const generator = adapter.stream(request);
   let text = '';
@@ -742,5 +779,7 @@ export async function collect(adapter: LLMAdapter, request: ChatRequest): Promis
     text += next.value.text;
     next = await generator.next();
   }
+  // A test's stub may end without saying anything of its usage.
+  if (next.value?.usage) noteCachedTokens('side', next.value.usage);
   return text;
 }

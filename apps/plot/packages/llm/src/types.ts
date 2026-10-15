@@ -4,7 +4,12 @@ export interface StreamDelta {
 }
 
 export interface StreamDone {
-  usage: { promptTokens: number; completionTokens: number };
+  usage: {
+    promptTokens: number;
+    completionTokens: number;
+    /** Of `promptTokens`, those the provider served from its prompt cache; absent where it does not say. */
+    cachedPromptTokens?: number;
+  };
 }
 
 /**

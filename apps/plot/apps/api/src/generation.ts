@@ -71,6 +71,7 @@ import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { randomUUID } from 'node:crypto';
 import { withImageNote } from './attachments.js';
+import { noteCachedTokens } from './cacheHealth.js';
 import { ApiError, badRequest, notFound } from './errors.js';
 import type { AppDeps, AppEnv, Tx } from './deps.js';
 import { invalidateMemoryForEdit, noteRequestOverhead, scheduleMemoryUpdate } from './memory.js';
@@ -1224,6 +1225,7 @@ async function runGeneration(
           next = await generator.next();
         }
         usage = next.value.usage;
+        noteCachedTokens('chat', next.value.usage, plan.chatId);
       } catch (error) {
         // A disconnect surfaces as an abort error; anything else is a real failure
         // and must not persist a message.

@@ -492,6 +492,88 @@ test('tunes the memory settings, which survive a reload', async () => {
   await expect(page.getByTestId('memory-settings').getByLabel('컨텍스트 예산')).toHaveValue('32000');
 });
 
+test('folds the facts a later summary ended under their own heading, struck, and restores one', async () => {
+  // The echo model extracts nothing and this API runs without an embedder, so the
+  // memory is stood in for: the panel's own reads and the restore it sends.
+  const at = '2026-10-15T00:00:00.000Z';
+  const fact = (id: string, content: string, ended?: { turn: number; by?: string }) => ({
+    id,
+    content,
+    summaryId: '00000000-0000-4000-8000-000000000001',
+    turnFrom: 1,
+    turnTo: 3,
+    invalidated: Boolean(ended),
+    invalidatedTurn: ended?.turn ?? null,
+    supersededBy: ended?.by ? { id: '00000000-0000-4000-8000-0000000000f3', content: ended.by } : null,
+    createdAt: at,
+    updatedAt: at,
+  });
+  const ended = fact('00000000-0000-4000-8000-0000000000f1', '리안은 수영을 하지 못한다.', { turn: 42, by: '리안은 하준에게 수영을 배워 이제 혼자 수영할 수 있다.' });
+  const promise = fact('00000000-0000-4000-8000-0000000000f2', '하준은 리안의 생일에 은반지를 선물하기로 약속했다.', { turn: 57 });
+  const memory = {
+    summaries: [
+      {
+        id: '00000000-0000-4000-8000-000000000001',
+        text: '여름 내내 하준은 강변 수영장에서 리안에게 수영을 가르쳤다.',
+        important: false,
+        applies: true,
+        messageIds: [],
+        messages: [],
+        createdAt: at,
+        updatedAt: at,
+      },
+    ],
+    facts: [ended, promise, fact('00000000-0000-4000-8000-0000000000f3', '리안은 하준에게 수영을 배워 이제 혼자 수영할 수 있다.')],
+  };
+  // The panel reads the memory again a few seconds after it opens: once restored, it stays restored.
+  const restored = { ...promise, invalidated: false, invalidatedTurn: null };
+  let restoredYet = false;
+  await page.route(/\/api\/chats\/[^/]+\/memory$/, (route) =>
+    route.request().method() === 'GET'
+      ? route.fulfill({ json: { ...memory, facts: memory.facts.map((item) => (restoredYet && item.id === promise.id ? restored : item)) } })
+      : route.fallback(),
+  );
+  await page.route(/\/api\/chats\/[^/]+\/memory\/facts\/[^/]+$/, async (route) => {
+    expect(route.request().method()).toBe('PATCH');
+    expect(route.request().postDataJSON()).toEqual({ invalidated: false });
+    restoredYet = true;
+    await route.fulfill({ json: { fact: restored } });
+  });
+  const wide = page.viewportSize();
+  try {
+    await page.reload();
+    await openPanel();
+    // Read on a phone: the panel stays open as the window narrows.
+    await page.setViewportSize({ width: 375, height: 812 });
+    const facts = page.getByTestId('memory-facts');
+    await expect(facts.getByTestId('memory-fact')).toHaveCount(1);
+    await expect(facts.getByText('이 갈래의 사실 1개')).toBeVisible();
+    const folded = facts.getByTestId('memory-ended-facts');
+    await folded.getByText('더 이상 맞지 않는 사실 2개').click();
+    const endedCards = folded.getByTestId('memory-ended-fact');
+    await expect(endedCards).toHaveCount(2);
+    await expect(endedCards.first()).toContainText('바뀐 사실: 리안은 하준에게 수영을 배워 이제 혼자 수영할 수 있다.');
+    await expect(endedCards.first()).toContainText('42턴에서 끝남');
+    await expect(endedCards.first().getByText(ended.content)).toHaveCSS('text-decoration-line', 'line-through');
+    for (const scheme of ['light', 'dark'] as const) {
+      await page.emulateMedia({ colorScheme: scheme });
+      await endedCards.last().scrollIntoViewIfNeeded();
+      await folded.screenshot({ path: `test-results/memory/ended-facts-${scheme}.png` });
+      await page.screenshot({ path: `test-results/memory/ended-facts-viewport-${scheme}.png` });
+    }
+    await page.emulateMedia({ colorScheme: 'light' });
+
+    // Restored, it stands with the facts that hold again.
+    await endedCards.nth(1).getByRole('button', { name: '되살리기' }).click();
+    await expect(facts.getByTestId('memory-fact')).toHaveCount(2);
+    await expect(facts.getByTestId('memory-fact').getByText(promise.content)).toBeVisible();
+    await expect(folded.getByTestId('memory-ended-fact')).toHaveCount(1);
+  } finally {
+    await page.unrouteAll({ behavior: 'wait' });
+    if (wide) await page.setViewportSize(wide);
+  }
+});
+
 test('attaches a saved note to the chat', async () => {
   const chatPath = new URL(page.url()).pathname;
 

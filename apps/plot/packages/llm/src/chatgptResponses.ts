@@ -77,7 +77,13 @@ export function createChatGPTAdapter(access: () => Promise<string>, fetcher: typ
             pending = pending.slice(boundary + 2);
             const data = block.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n');
             if (!data || data === '[DONE]') continue;
-            let event: { type: string; delta?: string; code?: string; response?: { error?: { code?: string }; usage?: { input_tokens?: number; output_tokens?: number } } };
+            let event: {
+              type: string; delta?: string; code?: string;
+              response?: {
+                error?: { code?: string };
+                usage?: { input_tokens?: number; output_tokens?: number; input_tokens_details?: { cached_tokens?: number } };
+              };
+            };
             try { event = JSON.parse(data) as typeof event; }
             catch { throw providerError('chatgpt_invalid_stream'); }
             if (event.type === 'response.output_text.delta' && !stopped && typeof event.delta === 'string') {
@@ -96,7 +102,16 @@ export function createChatGPTAdapter(access: () => Promise<string>, fetcher: typ
             if (event.type === 'response.incomplete') throw providerError('chatgpt_response_incomplete');
             if (event.type === 'response.completed') {
               if (text && !stopped) yield { type: 'text', text };
-              return { usage: { promptTokens: event.response?.usage?.input_tokens ?? 0, completionTokens: event.response?.usage?.output_tokens ?? 0 } } satisfies StreamDone;
+              const usage = event.response?.usage;
+              // The prompt cache's share, where the response says it (`input_tokens_details.cached_tokens`).
+              const cached = usage?.input_tokens_details?.cached_tokens;
+              return {
+                usage: {
+                  promptTokens: usage?.input_tokens ?? 0,
+                  completionTokens: usage?.output_tokens ?? 0,
+                  ...(typeof cached === 'number' ? { cachedPromptTokens: cached } : {}),
+                },
+              } satisfies StreamDone;
             }
           }
           if (pending.length > 8 * 1024 * 1024) throw providerError('chatgpt_invalid_stream');

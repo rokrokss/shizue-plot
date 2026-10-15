@@ -92,6 +92,24 @@ export function roundCount(path: readonly Pick<Message, 'role' | 'groupTurnId'>[
 }
 
 /**
+ * `roundCount` of every prefix of a branch: [i] is the rounds up to and
+ * including its i-th message — the turn that message closes, which is what the
+ * memory dates its summaries and facts by. A message's is the same on every
+ * branch it is on, since what stands before it never changes.
+ */
+export function roundsAlong(path: readonly Pick<Message, 'role' | 'groupTurnId'>[]): number[] {
+  const rounds = new Set<string>();
+  let untagged = 0;
+  return path.map((message) => {
+    if (message.role === 'assistant') {
+      if (message.groupTurnId === null) untagged += 1;
+      else rounds.add(message.groupTurnId);
+    }
+    return untagged + rounds.size;
+  });
+}
+
+/**
  * Where the round a branch ends on starts: the index of the first of the
  * contiguous assistant messages at its end that share the last one's
  * `group_turn_id`. The last index for an assistant message in no round, and the
