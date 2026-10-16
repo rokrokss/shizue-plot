@@ -29,6 +29,24 @@ describe('ChatGPT-only registry', () => {
     await expect(getAdapter('gpt-a', env, account('gpt-b', 'B'))).rejects.toMatchObject({ code: 'model_unavailable' });
     expect((await getAdapter('gpt-a', env, account('gpt-a', 'A'))).providerModel).toBe('gpt-a');
   });
+  it("hands a token the provider turned down back to the reader's account for another", async () => {
+    const asked: (string | undefined)[] = [];
+    const account: ChatGPTAccount = {
+      accessToken: async (rejected) => { asked.push(rejected); return rejected ? 'NEW' : 'OLD'; },
+      models: async () => [{ id: 'gpt-a', label: 'gpt-a', vision: false }],
+    };
+    const completed = `data: ${JSON.stringify({ type: 'response.completed', response: { usage: { input_tokens: 1, output_tokens: 0 } } })}\n\n`;
+    const network = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) =>
+      new Headers(init!.headers).get('authorization') === 'Bearer OLD'
+        ? Response.json({ error: { code: 'token_expired' } }, { status: 401 })
+        : new Response(completed));
+    try {
+      const { adapter } = await getAdapter('gpt-a', { NODE_ENV: 'development' }, account);
+      const stream = adapter.stream({ model: 'gpt-a', system: '', messages: [{ role: 'user', content: 'hi' }], maxTokens: 10 });
+      expect((await stream.next()).done).toBe(true);
+      expect(asked).toEqual([undefined, 'OLD']);
+    } finally { network.mockRestore(); }
+  });
   it('offers deterministic models only to the test runner', async () => {
     expect(await listEnabledModels({ NODE_ENV: 'test' })).toEqual([{ id: 'echo/echo', label: 'Echo (test)' }]);
     expect((await getAdapter('echo/echo', { NODE_ENV: 'test' })).providerModel).toBe('echo');

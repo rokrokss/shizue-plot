@@ -297,6 +297,46 @@ describe('ChatGPT Responses adapter', () => {
     const adapter = createChatGPTAdapter(async () => 'TOKEN', async () => json({ detail: 'subscription_sharing_usage_limit_exceeded', token: 'SECRET' }, 429));
     await expect(adapter.stream(request).next()).rejects.toMatchObject({ code: 'subscription_sharing_usage_limit_exceeded', status: 429 });
   });
+  /** Answers 401 `token_expired` to the tokens in `rejected` and a reply to any other. */
+  function tokenCheckingFetch(rejected: Set<string>): { fetcher: typeof fetch; bearers: string[] } {
+    const bearers: string[] = [];
+    const reply = streamFetch(event({ type: 'response.output_text.delta', delta: '네' }) + event({ type: 'response.completed', response: { usage: { input_tokens: 1, output_tokens: 1 } } }));
+    return {
+      bearers,
+      fetcher: async (input, init) => {
+        const bearer = new Headers(init!.headers).get('authorization')!.slice('Bearer '.length);
+        bearers.push(bearer);
+        if (rejected.has(bearer)) return json({ error: { message: 'Provided authentication token is expired.', type: 'invalid_request_error', code: 'token_expired' } }, 401);
+        return reply(input, init);
+      },
+    };
+  }
+  it('asks once for another token when the provider calls a fresh-looking one expired, and sends the request again with it', async () => {
+    const asked: (string | undefined)[] = [];
+    const access = async (rejected?: string) => { asked.push(rejected); return rejected ? 'NEW' : 'OLD'; };
+    const { fetcher, bearers } = tokenCheckingFetch(new Set(['OLD']));
+    const stream = createChatGPTAdapter(access, fetcher).stream(request);
+    let text = '';
+    for (let next = await stream.next(); !next.done; next = await stream.next()) text += next.value.text;
+    expect(text).toBe('네');
+    expect(asked).toEqual([undefined, 'OLD']);
+    expect(bearers).toEqual(['OLD', 'NEW']);
+  });
+  it('lets a second refusal through rather than asking again', async () => {
+    const asked: (string | undefined)[] = [];
+    const access = async (rejected?: string) => { asked.push(rejected); return rejected ? 'NEW' : 'OLD'; };
+    const { fetcher, bearers } = tokenCheckingFetch(new Set(['OLD', 'NEW']));
+    await expect(createChatGPTAdapter(access, fetcher).stream(request).next()).rejects.toMatchObject({ code: 'token_expired', status: 401 });
+    expect(asked).toEqual([undefined, 'OLD']);
+    expect(bearers).toEqual(['OLD', 'NEW']);
+  });
+  it('asks for no other token on a refusal that is not about the token', async () => {
+    const asked: (string | undefined)[] = [];
+    const access = async (rejected?: string) => { asked.push(rejected); return 'TOKEN'; };
+    const adapter = createChatGPTAdapter(access, async () => json({ error: { code: 'subscription_sharing_invalid_user' } }, 401));
+    await expect(adapter.stream(request).next()).rejects.toMatchObject({ code: 'subscription_sharing_invalid_user', status: 401 });
+    expect(asked).toEqual([undefined]);
+  });
 });
 
 /** A response that stays open for the test to feed, and fails when aborted as fetch's own body does. */

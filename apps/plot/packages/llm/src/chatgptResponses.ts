@@ -28,6 +28,33 @@ export async function requireOK(response: Response): Promise<Response> {
 }
 
 /**
+ * The provider's answer to an access token it no longer takes, which it can give
+ * before the token's recorded expiry (2026-10-16: 401 `token_expired` on the model
+ * catalog and on replies alike, the stored token fresh by its `expiresAt`).
+ */
+const REJECTED_ACCESS = ['token_expired'];
+const accessRejected = (error: unknown): boolean =>
+  error instanceof ChatGPTError && error.status === 401 && REJECTED_ACCESS.includes(error.code);
+
+/**
+ * `call` with the account's access token and, when the provider turns that token
+ * down, once more with the one `access(rejected)` gives back: refreshed, or
+ * another request's already rotated (§4.1). A second refusal goes out as it came.
+ */
+export async function withAccessToken<T>(
+  access: (rejected?: string) => Promise<string>,
+  call: (token: string) => Promise<T>,
+): Promise<T> {
+  const token = await access();
+  try {
+    return await call(token);
+  } catch (error) {
+    if (!accessRejected(error)) throw error;
+    return call(await access(token));
+  }
+}
+
+/**
  * `messages` with the run of system turns after the last user or assistant turn
  * as one turn, their contents joined by a blank line, pictures kept in place —
  * and nothing else joined: a system turn before or between the conversation's
@@ -109,11 +136,14 @@ export function cacheHeaders(req: Pick<ChatRequest, 'cacheKey'>): Record<string,
  */
 export const CHATGPT_IDLE_TIMEOUT_MS = 300_000;
 
-/** Success requires response.completed, including when an error follows text deltas. */
-export function createChatGPTAdapter(access: () => Promise<string>, fetcher: typeof fetch = fetch): LLMAdapter {
+/**
+ * Success requires response.completed, including when an error follows text deltas.
+ * A token the provider turns down is answered before the stream opens, so the one
+ * retry (`withAccessToken`) never repeats anything the caller was given.
+ */
+export function createChatGPTAdapter(access: (rejected?: string) => Promise<string>, fetcher: typeof fetch = fetch): LLMAdapter {
   return {
     async *stream(req) {
-      const authorization = `Bearer ${await access()}`;
       const idle = new AbortController();
       let timer: ReturnType<typeof setTimeout> | undefined;
       // Armed only while waiting on the upstream: a delta the caller is slow to
@@ -129,11 +159,11 @@ export function createChatGPTAdapter(access: () => Promise<string>, fetcher: typ
       const tailSize = Math.max(0, ...stops.map((stop) => stop.length - 1));
       try {
         arm();
-        const response = await requireOK(await fetcher(`${CHATGPT_RESOURCE}/responses`, {
+        const response = await withAccessToken(access, async (token) => requireOK(await fetcher(`${CHATGPT_RESOURCE}/responses`, {
           method: 'POST', signal,
-          headers: { Authorization: authorization, 'Content-Type': 'application/json', ...cacheHeaders(req) },
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...cacheHeaders(req) },
           body: JSON.stringify(responseBody(req)),
-        }));
+        })));
         clearTimeout(timer);
         if (!response.body) throw providerError('chatgpt_empty_stream');
         reader = response.body.getReader();

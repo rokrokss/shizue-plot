@@ -762,10 +762,15 @@ describe('auth', () => {
 
 /**
  * Stands in for auth.openai.com and the model catalog. Tokens name the account
- * they were issued to, so a test can see whose token reached which call.
+ * they were issued to, so a test can see whose token reached which call. The
+ * catalog turns down the access tokens in `expired` as the provider does,
+ * whatever their recorded expiry; `grantRevoked` fails every refresh.
  */
 function fakeOpenAI() {
-  const state = { subject: '', email: '', nonce: '', refreshes: 0, revoked: [] as string[], discoveryDown: false };
+  const state = {
+    subject: '', email: '', nonce: '', refreshes: 0, revoked: [] as string[], discoveryDown: false,
+    expired: new Set<string>(), grantRevoked: false,
+  };
   const fetcher: typeof fetch = async (input, init) => {
     const url = String(input);
     const body = new URLSearchParams(init?.body as string);
@@ -777,10 +782,14 @@ function fakeOpenAI() {
     if (url.endsWith('/revoke')) { state.revoked.push(body.get('token')!); return Response.json({}); }
     if (url.endsWith('/models')) {
       const bearer = String((init?.headers as Record<string, string>)['Authorization']);
+      if (state.expired.has(bearer.slice('Bearer '.length))) {
+        return Response.json({ error: { message: 'Provided authentication token is expired.', code: 'token_expired' } }, { status: 401 });
+      }
       return Response.json({ models: [{ slug: `gpt-for-${bearer.split('-')[1]}`, visibility: 'list' }] });
     }
     if (url.endsWith('/oauth/token')) {
       const refresh = body.get('grant_type') === 'refresh_token';
+      if (refresh && state.grantRevoked) return Response.json({ error: 'invalid_grant' }, { status: 400 });
       if (refresh) state.refreshes++;
       const subject = refresh ? body.get('refresh_token')!.split('-')[1]! : state.subject;
       return Response.json({
@@ -926,6 +935,50 @@ describe('Sign in with ChatGPT', () => {
     // Once discovery answers, the stored refresh token still works.
     restarted.state.discoveryDown = false;
     expect(await accounts.forUser(me.id).accessToken()).toBe('ACCESS-alice-1');
+  });
+
+  /** Alice signed in, her stored token `ACCESS-alice-0` fresh by its recorded expiry. */
+  async function signedInAlice() {
+    const openai = fakeOpenAI();
+    const { accounts, signIn, target } = hostedApp(openai);
+    const { cookie } = await signIn('alice');
+    const { user: me } = await readJson(await request(cookie, '/api/auth/get-session', 'GET', undefined, target));
+    return { openai, accounts, me: me as { id: string }, alice: accounts.forUser(me.id) };
+  }
+
+  it('refreshes a token the provider calls expired before its recorded expiry, and asks again with the new one', async () => {
+    const { openai, alice } = await signedInAlice();
+    openai.state.expired.add('ACCESS-alice-0');
+    expect(await alice.models()).toEqual([{ id: 'gpt-for-alice', label: 'gpt-for-alice', vision: false }]);
+    expect(openai.state.refreshes).toBe(1);
+    expect(await alice.accessToken()).toBe('ACCESS-alice-1');
+  });
+
+  it('lets a second refusal through after one refresh rather than refreshing again', async () => {
+    const { openai, alice } = await signedInAlice();
+    openai.state.expired.add('ACCESS-alice-0').add('ACCESS-alice-1');
+    await expect(alice.models()).rejects.toMatchObject({ code: 'token_expired', status: 401 });
+    expect(openai.state.refreshes).toBe(1);
+  });
+
+  it('takes a token another request already rotated instead of refreshing it again', async () => {
+    const { openai, alice } = await signedInAlice();
+    // Three requests turned down with the same token at once: one refresh among them.
+    const tokens = await Promise.all([1, 2, 3].map(() => alice.accessToken('ACCESS-alice-0')));
+    expect(tokens).toEqual(['ACCESS-alice-1', 'ACCESS-alice-1', 'ACCESS-alice-1']);
+    // And one that comes back with the old token after the rotation.
+    expect(await alice.accessToken('ACCESS-alice-0')).toBe('ACCESS-alice-1');
+    expect(openai.state.refreshes).toBe(1);
+  });
+
+  it('clears the sign-in when the refresh a refused token forced finds the grant gone', async () => {
+    const { openai, accounts, me, alice } = await signedInAlice();
+    openai.state.expired.add('ACCESS-alice-0');
+    openai.state.grantRevoked = true;
+    await expect(alice.models()).rejects.toMatchObject({ code: 'invalid_grant' });
+    const [row] = await db.select().from(account).where(eq(account.userId, me.id));
+    expect(row).toMatchObject({ clientId: 'app_alice', accessToken: null, refreshToken: null });
+    expect(await accounts.status(me.id)).toEqual({ connected: false, email: null });
   });
 
   it("gives a former local installation's owner, and its plots, to the first account that signs in", async () => {

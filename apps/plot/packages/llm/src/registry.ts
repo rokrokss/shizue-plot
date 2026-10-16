@@ -40,5 +40,5 @@ export async function supportsVision(modelId: string, env: LLMEnv, account?: Cha
 export async function getAdapter(modelId: string, env: LLMEnv, account?: ChatGPTAccount): Promise<{ adapter: LLMAdapter; providerModel: string }> {
   if (!await getModel(modelId, env, account)) throw providerError('model_unavailable', 400);
   if (testing(env)) return { adapter: createEchoAdapter({ delayMs: Number(env['ECHO_STREAM_DELAY_MS']) || 0 }), providerModel: modelId === echo.id ? 'echo' : modelId };
-  return { adapter: createChatGPTAdapter(() => account!.accessToken()), providerModel: modelId };
+  return { adapter: createChatGPTAdapter((rejected) => account!.accessToken(rejected)), providerModel: modelId };
 }

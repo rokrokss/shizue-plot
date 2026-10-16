@@ -27,7 +27,8 @@ export interface ChatGPTModel {
 export interface PendingSignIn { state: string; nonce: string; verifier: string; redirectUri: string; clientId?: string }
 /** What a model call needs from one signed-in account. */
 export interface ChatGPTAccount {
-  accessToken(): Promise<string>;
+  /** `rejected`: a token the provider turned down; another is returned, refreshed if need be. */
+  accessToken(rejected?: string): Promise<string>;
   models(): Promise<ChatGPTModel[]>;
 }
 

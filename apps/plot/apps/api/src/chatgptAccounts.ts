@@ -1,6 +1,6 @@
 import { account, session, user, verification, type Db } from '@shizue/db';
 import {
-  authorizationUrl, callbackResult, ChatGPTError, ChatGPTOAuth, createPendingSignIn, loopbackRedirectUri, providerError,
+  authorizationUrl, callbackResult, ChatGPTError, ChatGPTOAuth, createPendingSignIn, loopbackRedirectUri, providerError, withAccessToken,
   type ChatGPTAccount, type ChatGPTIdentity, type ChatGPTModel, type ChatGPTTokens, type PendingSignIn,
 } from '@shizue/llm';
 import { and, eq, gt, like, lt, sql } from 'drizzle-orm';
@@ -107,18 +107,23 @@ export function createChatGPTAccounts(db: Db, options: { secret: string; callbac
   const rowOf = async (userId: string): Promise<Row | undefined> =>
     (await db.select().from(account).where(and(eq(account.userId, userId), eq(account.providerId, PROVIDER))).limit(1))[0];
 
-  async function accessToken(userId: string): Promise<string> {
+  /**
+   * `rejected` is a token the provider turned down while its `expiresAt` still
+   * looked fresh: refreshed all the same, unless another request already rotated it.
+   */
+  async function accessToken(userId: string, rejected?: string): Promise<string> {
+    const usable = (tokens: ChatGPTTokens): boolean => fresh(tokens) && tokens.accessToken !== rejected;
     const row = await rowOf(userId);
     const tokens = opened(row);
     if (!row?.clientId || !tokens) throw providerError('chatgpt_login_required', 401);
-    if (fresh(tokens)) return tokens.accessToken;
+    if (usable(tokens)) return tokens.accessToken;
     // Refresh tokens rotate, so one refresh per account at a time: under the row lock,
     // and re-read there in case another request already rotated it.
     const outcome = await db.transaction(async (tx): Promise<{ token: string } | { error: unknown }> => {
       const [locked] = await tx.select().from(account).where(eq(account.id, row.id)).for('update');
       const current = opened(locked);
       if (!locked?.clientId || !current) return { error: providerError('chatgpt_login_required', 401) };
-      if (fresh(current)) return { token: current.accessToken };
+      if (usable(current)) return { token: current.accessToken };
       try {
         const next = await oauth.refresh(locked.clientId, current, locked.accountId);
         await tx.update(account).set(sealed(next)).where(eq(account.id, locked.id));
@@ -156,11 +161,11 @@ export function createChatGPTAccounts(db: Db, options: { secret: string; callbac
   return {
     forUser(userId) {
       return {
-        accessToken: () => accessToken(userId),
+        accessToken: (rejected) => accessToken(userId, rejected),
         async models() {
           const cached = catalogs.get(userId);
           if (cached && cached.expires > Date.now()) return cached.models;
-          const models = await oauth.models(await accessToken(userId));
+          const models = await withAccessToken((rejected) => accessToken(userId, rejected), (token) => oauth.models(token));
           catalogs.set(userId, { expires: Date.now() + CATALOG_TTL_MS, models });
           return models;
         },
