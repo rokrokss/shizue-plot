@@ -349,7 +349,7 @@ function loreFieldsOfSillyTavern(fields: SillyTavernFields): Partial<LoreEntry> 
     const value = wholeCount(fields[key]);
     if (value) out[key] = value;
   }
-  // The 🔗 status: the entry activates by meaning as well (`LoreEntry.vectorized`).
+  // The 🔗 status, kept only to be written back (`LoreEntry.vectorized`).
   if (fields.vectorized === true) out.vectorized = true;
 
   if (fields.ignoreBudget === true) out.ignoreBudget = true;

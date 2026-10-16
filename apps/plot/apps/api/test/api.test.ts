@@ -24,7 +24,6 @@ import {
   IMAGE_ATTACHED_PLACEHOLDER,
   loreEntryKey,
   LORE_ALIAS_PROMPT,
-  LORE_CHUNK_TOKENS,
   MAX_ASSETS,
   MAX_BACKGROUND_HTML_LENGTH,
   MAX_CHARACTERS_PER_PLOT,
@@ -76,7 +75,6 @@ import {
   follows,
   jobs,
   loreEntryAliases,
-  loreEntryVectors,
   messageChunks,
   memories,
   messages,
@@ -84,9 +82,7 @@ import {
   notifications,
   plots,
   plotAssets,
-  plotReaderOverlays,
   plotSearchVectors,
-  readerLoreVectors,
   readerModules,
   readerPresets,
   user,
@@ -19025,125 +19021,35 @@ describe('vector storage (SillyTavern)', () => {
     await harness.settle();
   }
 
-  const storedLore = async (plotId: string) =>
-    (await db.select().from(loreEntryVectors).where(eq(loreEntryVectors.plotId, plotId))).map((row) => ({
-      content: row.content,
-      model: row.model,
-    }));
-
-  it('activates a marked entry by meaning beside the keyword matches, and the book switch marks every one', async () => {
-    const cookie = await signUp('vectors-lore@example.com');
-    const { plotId, chatId } = await setupChat(cookie);
-    const embedder = conceptEmbedder();
-    const harness = vectorApp(embedder);
-
-    // Saved, the marked entry is embedded in the background with the plot's model.
-    await setLore(cookie, plotId, [{ ...tower, vectorized: true }, map], harness);
-    expect(await storedLore(plotId)).toEqual([{ content: TOWER, model: 'test-embedder' }]);
-    expect((await readPlot(cookie, plotId)).lorebook[0].vectorized).toBe(true);
-
-    // A Korean line about the lighthouse finds the English entry; the map comes by its key.
-    let prompt = await send(cookie, chatId, '등대까지 걸어가 보자. map도 챙기고', harness);
-    expect(prompt.system).toContain(TOWER);
-    expect(prompt.system).toContain(MAP);
-    // One query: the newest turns the model reads, newest first.
-    const query = embedder.calls.filter((call) => call.kind === 'query').at(-1)!;
-    expect(query.texts).toHaveLength(1);
-    expect(query.texts[0]!.startsWith('등대까지 걸어가 보자. map도 챙기고\n')).toBe(true);
-
-    // Unmarked, it is keyword only again and its vector goes.
-    await setLore(cookie, plotId, [tower, map], harness);
-    expect(await storedLore(plotId)).toEqual([]);
-    prompt = await send(cookie, chatId, '등대는 아직 멀었어?', harness);
-    expect(prompt.system).not.toContain(TOWER);
-
-    // The work's switch — the first member's book settings — takes every entry.
-    const member = await firstMember(cookie, plotId);
-    const patched = await json(
-      cookie,
-      `/api/plots/${plotId}/characters/${member.id}`,
-      'PATCH',
-      { card: { loreSettings: { ...member.card.loreSettings, vectorizeAll: true } } },
-      harness.app,
-    );
-    expect(patched.status).toBe(200);
-    expect((await readJson(patched)).card.loreSettings.vectorizeAll).toBe(true);
-    await harness.settle();
-    expect((await storedLore(plotId)).map((row) => row.content).sort()).toEqual([MAP, TOWER].sort());
-    prompt = await send(cookie, chatId, '지도를 펼쳐 봐', harness);
-    expect(prompt.system).toContain(MAP);
-  });
-
-  it('embeds the lore a reader’s scripts rewrote as theirs, and finds it by meaning without asking the work’s pass again', async () => {
-    const cookie = await signUp('vectors-overlay@example.com');
-    const { plotId, chatId } = await setupChat(cookie);
-    const embedder = conceptEmbedder();
-    const harness = vectorApp(embedder);
-    const member = await firstMember(cookie, plotId);
-    // What a Lua `setLoreBooks`-style rewrite leaves: the member's lore in the reader's overlay, marked by meaning.
-    const user = await db.select({ id: chats.userId }).from(chats).where(eq(chats.id, chatId));
-    await db.insert(plotReaderOverlays).values({
-      userId: user[0]!.id,
-      plotId,
-      overlay: { members: { [member.id]: { lorebook: [{ ...map, vectorized: true }] } } },
-    });
-
-    // The first turn meets an entry with no vector: the reader's pass embeds it into rows of theirs alone.
-    await send(cookie, chatId, '지도 이야기를 해 줘', harness);
-    const rows = await db.select().from(readerLoreVectors).where(eq(readerLoreVectors.plotId, plotId));
-    expect(rows.map((row) => [row.userId, row.content])).toEqual([[user[0]!.id, MAP]]);
-    expect(await storedLore(plotId)).toEqual([]);
-
-    // From then on it is found by meaning, and nothing asks for an embedding pass again.
-    const passes = embedder.calls.filter((call) => call.kind === 'document').length;
-    const prompt = await send(cookie, chatId, '지도를 다시 보자', harness);
-    expect(prompt.system).toContain(MAP);
-    expect(embedder.calls.filter((call) => call.kind === 'document').length).toBe(passes);
-  });
-
-  it('spends the one lore budget on what meaning and keywords found, the highest insertionOrder first', async () => {
-    const cookie = await signUp('vectors-budget@example.com');
-    const { plotId, chatId } = await setupChat(cookie);
-    const harness = vectorApp(conceptEmbedder());
-    const member = await firstMember(cookie, plotId);
-    await patchCharacter(cookie, plotId, member.id, {
-      card: { loreSettings: { ...member.card.loreSettings, tokenBudget: countTokens(TOWER) } },
-    });
-    await setLore(cookie, plotId, [{ ...tower, vectorized: true }, map], harness);
-
-    const prompt = await send(cookie, chatId, '등대 근처에서 map을 꺼냈다', harness);
-    expect(prompt.system).toContain(TOWER);
-    expect(prompt.system).not.toContain(MAP);
-  });
-
   it('leaves the messages hidden from the AI out of the query', async () => {
     const cookie = await signUp('vectors-hidden@example.com');
-    const { plotId, chatId } = await setupChat(cookie);
+    const { chatId } = await setupChat(cookie);
     const embedder = conceptEmbedder();
     const harness = vectorApp(embedder);
-    await setLore(cookie, plotId, [{ ...tower, vectorized: true }], harness);
-
-    expect((await send(cookie, chatId, '등대 이야기를 해 줘', harness)).system).toContain(TOWER);
-    const path = (await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app))).path;
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { retrieval: { enabled: true } }, harness.app);
+    for (const content of ['빵 이야기', '책 이야기', '등대 이야기를 해 줘']) await send(cookie, chatId, content, harness);
+    const path = await summarizeFirst(cookie, chatId, harness, 3);
     for (const message of path.slice(-2)) {
       const res = await json(cookie, `/api/chats/${chatId}/messages/${message.id}/hidden`, 'PUT', { hidden: true }, harness.app);
       expect(res.status).toBe(200);
     }
 
-    const prompt = await send(cookie, chatId, '안녕', harness);
-    expect(prompt.system).not.toContain(TOWER);
-    expect(embedder.calls.filter((call) => call.kind === 'query').at(-1)!.texts[0]).not.toContain('등대');
+    await send(cookie, chatId, '안녕', harness);
+    const query = embedder.calls.filter((call) => call.kind === 'query').at(-1)!;
+    expect(query.texts[0]!.startsWith('안녕\n')).toBe(true);
+    expect(query.texts[0]).not.toContain('등대');
   });
 
   it('falls back to the keywords and the history, never failing the turn, without an embedder that answers', async () => {
     const cookie = await signUp('vectors-down@example.com');
     const { plotId, chatId } = await setupChat(cookie);
     const harness = vectorApp(conceptEmbedder('test-embedder', (kind) => kind === 'query'));
-    await setLore(cookie, plotId, [{ ...tower, vectorized: true }, map], harness);
-    expect(await storedLore(plotId)).toHaveLength(1);
+    await setLore(cookie, plotId, [tower, map], harness);
     await json(cookie, `/api/chats/${chatId}`, 'PATCH', { retrieval: { enabled: true } }, harness.app);
 
     for (const content of ['등대를 봤어', '하나', '둘', '셋']) await send(cookie, chatId, content, harness);
+    // Something to bring back, so the turn asks for its query.
+    await summarizeFirst(cookie, chatId, harness, 3);
     const prompt = await send(cookie, chatId, '등대 근처에서 map을 꺼냈다', harness);
     expect(prompt.system).toContain(MAP);
     expect(prompt.system).not.toContain(TOWER);
@@ -19154,19 +19060,6 @@ describe('vector storage (SillyTavern)', () => {
     const again = await send(cookie, chatId, '등대 근처에서 map을 꺼냈다', bare);
     expect(again.system).toContain(MAP);
     expect(again.system).not.toContain(TOWER);
-  });
-
-  it('embeds the lore again for a model it has no vectors of, and finds it from then on', async () => {
-    const cookie = await signUp('vectors-stale@example.com');
-    const { plotId, chatId } = await setupChat(cookie);
-    await setLore(cookie, plotId, [{ ...tower, vectorized: true }], vectorApp(conceptEmbedder('test-embedder')));
-    expect(await storedLore(plotId)).toEqual([{ content: TOWER, model: 'test-embedder' }]);
-
-    // Another model: the old vector is never compared; the turn re-embeds it.
-    const harness = vectorApp(conceptEmbedder('test-embedder-2'));
-    expect((await send(cookie, chatId, '등대로 가자', harness)).system).not.toContain(TOWER);
-    expect(await storedLore(plotId)).toEqual([{ content: TOWER, model: 'test-embedder-2' }]);
-    expect((await send(cookie, chatId, '등대로 가자', harness)).system).toContain(TOWER);
   });
 
   it("brings back copies of earlier messages the summaries cover, by meaning, in ST's Past events just before the turn", async () => {
@@ -19262,33 +19155,6 @@ describe('vector storage (SillyTavern)', () => {
     const prompt = await send(cookie, chatId, '그 등대 기억나?', harness);
     expect(recallOf(prompt)).not.toContain('Past events');
     expect(recallOf(prompt)).not.toContain(KEEPER);
-  });
-
-  it('embeds a long entry in pieces under its header, and finds it by its best piece', async () => {
-    const cookie = await signUp('vectors-chunks@example.com');
-    const { plotId, chatId } = await setupChat(cookie);
-    const embedder = conceptEmbedder();
-    const harness = vectorApp(embedder);
-    const paragraph = (sentence: string) => `${sentence} `.repeat(60).trim();
-    const LONG = `${paragraph('The keeper climbs the stairs.')}\n\n${paragraph('The old map hangs by the door.')}`;
-    const long = lore({ name: 'North Light', keys: ['lighthouse'], content: LONG, insertionOrder: 3, vectorized: true });
-    await setLore(cookie, plotId, [long], harness);
-
-    const rows = await db
-      .select()
-      .from(loreEntryVectors)
-      .where(eq(loreEntryVectors.plotId, plotId))
-      .orderBy(asc(loreEntryVectors.chunkIndex));
-    expect(rows.length).toBeGreaterThan(1);
-    expect(rows.map((row) => row.chunkIndex)).toEqual(rows.map((_, at) => at));
-    expect(rows.every((row) => row.content.startsWith('North Light — lighthouse\n'))).toBe(true);
-    expect(rows.every((row) => countTokens(row.content) <= LORE_CHUNK_TOKENS + 2)).toBe(true);
-    // Only its later pieces speak of the map, and the entry is found by them.
-    expect((await send(cookie, chatId, '지도를 보여 줘', harness)).system).toContain('The old map hangs by the door.');
-    // Saved again as it is, nothing is embedded again.
-    const documents = embedder.calls.filter((call) => call.kind === 'document').length;
-    await setLore(cookie, plotId, [long], harness);
-    expect(embedder.calls.filter((call) => call.kind === 'document').length).toBe(documents);
   });
 
   describe('Korean aliases', () => {
@@ -19484,22 +19350,30 @@ describe('vector storage (SillyTavern)', () => {
       expect((await sendAs(cookie, chatId, '등대 아래에서 지도를 펼쳤다', 'ko', harness)).system).toContain(COVE);
     });
 
-    it('embeds and searches no lore by meaning for a Korean reader of an English work unless the work asks for it', async () => {
+    it("activates an entry SillyTavern marked vectorized by its keys alone, never by meaning, on either engine", async () => {
       const cookie = await signUp('aliases-no-vectors@example.com');
       const embedder = conceptEmbedder('KURE-v1');
-      // The auxiliary model answers nothing, so no alias lands either.
+      // The auxiliary model answers nothing, so no alias lands either: keys only.
       const harness = aliasApp({ embedder, answer: () => '' });
-      const { plotId, chatId } = await englishWork(cookie, harness, [tower, map, rule]);
-      expect((await sendAs(cookie, chatId, '등대까지 걸어가 보자', 'ko', harness)).system).not.toContain(TOWER);
-      expect(await storedLore(plotId)).toEqual([]);
-      expect(embedder.calls).toEqual([]);
+      const COVE = 'A hidden cove lies past the lighthouse, on the old map.';
+      const book = [{ ...tower, vectorized: true }, lore({ keys: [], content: COVE, vectorized: true }), map];
 
-      // Asked for, the entry is embedded and found at the model's measured bar.
-      await setLore(cookie, plotId, [{ ...tower, vectorized: true }, map, rule], harness);
-      expect(await storedLore(plotId)).toEqual([{ content: TOWER, model: 'KURE-v1' }]);
-      const prompt = await sendAs(cookie, chatId, '등대까지 걸어가 보자', 'ko', harness);
-      expect(prompt.system).toContain(TOWER);
-      expect(prompt.system).not.toContain(MAP);
+      // Run as RisuAI's book, then as SillyTavern's World Info.
+      for (const engine of [book, book.map((entry) => ({ ...entry, sillyTavern: true }))]) {
+        const { plotId, chatId } = await englishWork(cookie, harness, engine);
+        // The flag stays in the work, so an export writes it back.
+        expect((await readPlot(cookie, plotId)).lorebook.map((entry: any) => entry.vectorized ?? false)).toEqual([true, true, false]);
+        // Close in meaning to the lighthouse and the cove, by none of their keys.
+        let prompt = await sendAs(cookie, chatId, '등대 옆 숨은 만까지 걸어가 보자', 'ko', harness);
+        expect(prompt.system).not.toContain(TOWER);
+        expect(prompt.system).not.toContain(COVE);
+        prompt = await sendAs(cookie, chatId, 'the lighthouse and the map', 'ko', harness);
+        expect(prompt.system).toContain(TOWER);
+        expect(prompt.system).toContain(MAP);
+        expect(prompt.system).not.toContain(COVE);
+      }
+      // Nothing was embedded, and no query either: the retrieval is off.
+      expect(embedder.calls).toEqual([]);
     });
   });
 });

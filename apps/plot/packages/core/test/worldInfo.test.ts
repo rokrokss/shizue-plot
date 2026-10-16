@@ -99,7 +99,7 @@ describe('toWorldInfo', () => {
       entry({ position: 'before_author_note' }),
       entry({ position: 'after_examples' }),
       entry({ position: 'outlet', outletName: '금고' }),
-      // ST's 🔗 status: activated by meaning as well.
+      // ST's 🔗 status, kept only to be written back.
       entry({ vectorized: true }),
     ];
     // Through JSON, as the file travels — and read back as SillyTavern's, whose

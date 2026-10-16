@@ -27,7 +27,7 @@ import {
   type PlotModule,
   type ReaderModuleAsset,
 } from '@shizue/core';
-import { chats, readerModules, readerPresets, type Chat, type Plot, type ReaderModule } from '@shizue/db';
+import { readerModules, readerPresets, type Chat, type Plot, type ReaderModule } from '@shizue/db';
 import { and, asc, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { saveAsset } from './assets.js';
@@ -103,33 +103,6 @@ export async function activeReaderModules(deps: AppDeps, chat: ChatModuleSwitche
     .select()
     .from(readerModules)
     .where(and(eq(readerModules.userId, chat.userId), switchedOn([chat.plotId], chatModuleIds(chat), names)))
-    .orderBy(asc(readerModules.createdAt), asc(readerModules.id));
-}
-
-/**
- * The library modules on any of one reader's chats with a work — what a search
- * of that reader's lore on it may meet: every list each of those chats turns
- * modules on by (`activeReaderModules`), together.
- */
-export async function readerModulesOnPlot(deps: AppDeps, userId: string, plotId: string): Promise<ReaderModule[]> {
-  const owned = await deps.db
-    .select({ modules: chats.modules, readerPresetId: chats.readerPresetId })
-    .from(chats)
-    .where(and(eq(chats.userId, userId), eq(chats.plotId, plotId)));
-  const ids = [...new Set(owned.flatMap((chat) => chatModuleIds(chat)))];
-  const presetIds = [...new Set(owned.flatMap((chat) => (chat.readerPresetId ? [chat.readerPresetId] : [])))];
-  const presets =
-    presetIds.length > 0
-      ? await deps.db
-          .select({ moduleIntegration: readerPresets.moduleIntegration })
-          .from(readerPresets)
-          .where(and(eq(readerPresets.userId, userId), inArray(readerPresets.id, presetIds)))
-      : [];
-  const names = [...new Set(presets.flatMap((preset) => moduleIntegrationNames(preset.moduleIntegration)))];
-  return deps.db
-    .select()
-    .from(readerModules)
-    .where(and(eq(readerModules.userId, userId), switchedOn([plotId], ids, names)))
     .orderBy(asc(readerModules.createdAt), asc(readerModules.id));
 }
 

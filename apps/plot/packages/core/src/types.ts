@@ -158,10 +158,9 @@ export interface LoreEntry {
    */
   depthPrompt?: true;
   /**
-   * Activates by meaning as well as by its keys: SillyTavern's vectorized entry
-   * (`extensions.vectorized`, the 🔗 status). Its content is embedded with the
-   * plot's model, and when it is among the entries closest to the latest turns
-   * it activates as a keyword match would (`vectors.ts`). Absent is off, as in ST.
+   * SillyTavern's vectorized flag (`extensions.vectorized`, the 🔗 status), kept
+   * only so an export writes it back. Nothing reads it: no entry activates by
+   * meaning here, only by its keys and aliases. Absent is off, as in ST.
    */
   vectorized?: true;
 }
@@ -245,12 +244,6 @@ export interface LoreSettings {
    * Regex keys are not touched.
    */
   risuMatching?: boolean;
-  /**
-   * Every enabled entry of the book activates by meaning, not only the ones
-   * marked `vectorized` — SillyTavern's "Enabled for all entries". Absent is
-   * off, as in ST.
-   */
-  vectorizeAll?: true;
   /**
    * SillyTavern's global settings for the entries that leave them to the book
    * (`world_info_case_sensitive`, `world_info_match_whole_words`,

@@ -1054,7 +1054,6 @@ function readerPromptSettings(
     vectors: {
       plotId: plot.id,
       userId: chat.userId,
-      chatId: chat.id,
       plotLanguage: plot.language,
       ...(language.mode === 'instruct' && language.language ? { conversationLanguage: language.language } : {}),
       subModel: chat.subModel,

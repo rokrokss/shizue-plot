@@ -763,53 +763,6 @@ export const chatSummaryChunks = pgTable(
   (t) => [primaryKey({ columns: [t.summaryId, t.chunkIndex] })],
 );
 
-// A lore entry's content embedded for SillyTavern's vectorized World Info (@shizue/core
-// `vectors.ts`): rows per distinct content among the plot's entries that activate by
-// meaning — its own book's, its members' and its modules'. Keyed by a hash of the
-// content, as ST keys its World Info vectors, so an edited entry is a row of its own
-// and the old one goes on the next embedding pass. A long content is embedded in
-// pieces (`loreChunks`), a row each by `chunk_index`, and `content` is the piece as
-// embedded — a row whose piece is not what the entry cuts into now is embedded again.
-// `model` as in `chat_summary_chunks`: a row of another model is stale, never
-// compared, and replaced when the entry is embedded again.
-export const loreEntryVectors = pgTable(
-  'lore_entry_vectors',
-  {
-    plotId: uuid('plot_id')
-      .notNull()
-      .references(() => plots.id, { onDelete: 'cascade' }),
-    contentHash: text('content_hash').notNull(),
-    chunkIndex: integer('chunk_index').notNull().default(0),
-    content: text('content').notNull(),
-    model: text('model').notNull(),
-    embedding: anyVector('embedding').notNull(),
-  },
-  (t) => [primaryKey({ columns: [t.plotId, t.contentHash, t.chunkIndex] })],
-);
-
-// The same for lore one reader's play on a plot holds and the work does not: a
-// member's lore their scripts rewrote (`plot_reader_overlays`) and the lore of the
-// library modules on their chats with it (`reader_modules`). Kept per reader and
-// plot so nobody's rewrite is embedded into, or searched from, anyone else's; a
-// content the plot's own rows already hold is not embedded again here.
-export const readerLoreVectors = pgTable(
-  'reader_lore_vectors',
-  {
-    userId: text('user_id')
-      .notNull()
-      .references(() => user.id, { onDelete: 'cascade' }),
-    plotId: uuid('plot_id')
-      .notNull()
-      .references(() => plots.id, { onDelete: 'cascade' }),
-    contentHash: text('content_hash').notNull(),
-    chunkIndex: integer('chunk_index').notNull().default(0),
-    content: text('content').notNull(),
-    model: text('model').notNull(),
-    embedding: anyVector('embedding').notNull(),
-  },
-  (t) => [primaryKey({ columns: [t.userId, t.plotId, t.contentHash, t.chunkIndex] })],
-);
-
 // Aliases the auxiliary model wrote for a lore entry whose keys a reader of another
 // language never types (@shizue/core `loreAliases.ts`): derived data, kept apart from
 // the entry so no export, editor or card ever carries it. Keyed by a hash of what they

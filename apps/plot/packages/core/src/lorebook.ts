@@ -454,16 +454,6 @@ export interface ActivateLoreInput {
    */
   textOf?: (entry: LoreEntry) => string;
   /**
-   * The entries a search by meaning found (SillyTavern's vectorized activation,
-   * the API's `vectors.ts`): each activates as a keyword match would, without
-   * its keys being read — ST's external activation, which comes after the timed
-   * effects and the recursion settings have had their say and before constant,
-   * sticky and keys. Still subject to its probability, its inclusion groups and
-   * the budget, and its text is scanned by recursion like any other's. Absent:
-   * none.
-   */
-  vectorMatched?: (entry: LoreEntry) => boolean;
-  /**
    * Derived keys in the reader's language for an entry whose own keys are in
    * another (the API's Korean alias pass, `loreAliases.ts`) — never the
    * entry's, never exported. One of `keys` in the scan counts as a primary key
@@ -520,10 +510,9 @@ export interface LoreActivation {
 
 /**
  * How an entry came to be active: always on, matched in the history, carried by
- * its sticky window, matched in the content an earlier pass activated, or found
- * by meaning (`ActivateLoreInput.vectorMatched`).
+ * its sticky window, or matched in the content an earlier pass activated.
  */
-export type LoreActivationVia = 'constant' | 'keyword' | 'sticky' | 'recursion' | 'vector';
+export type LoreActivationVia = 'constant' | 'keyword' | 'sticky' | 'recursion';
 
 /** What both engines work out the same way before they scan. */
 interface Prepared {
@@ -611,10 +600,6 @@ function prepare(input: ActivateLoreInput, historyLength: number): Prepared {
  * counts as taken once one of its members activates, whether or not the budget
  * then has room for it.
  *
- * An entry a search by meaning found (`vectorMatched`) is one more way in: it
- * activates whatever its keys say, after the timed effects and before everything
- * else that follows here, exactly as a keyword match does.
- *
  * An entry's derived aliases (`aliases`) are one more primary key each, and its
  * secondary keys' one more spelling of that secondary key, matched as RisuAI
  * matches plain keys on either engine (`aliasMatches`).
@@ -649,7 +634,6 @@ function activateBook(entries: LoreEntry[], input: ActivateLoreInput): LoreActiv
     risuMatching = false,
     random = Math.random,
     textOf = (entry: LoreEntry) => entry.content,
-    vectorMatched = () => false,
   } = input;
   const prepared = prepare(input, history.length);
   const { keyOf, isTavern } = prepared;
@@ -732,10 +716,8 @@ function activateBook(entries: LoreEntry[], input: ActivateLoreInput): LoreActiv
       if (delayed > 0 && (!recursive || delayed > level)) return false;
       return !(recursive && recursiveScanning && entry.excludeRecursion);
     });
-    // ST checks an external activation before the entry's constant flag and keys.
-    const byMeaning = new Set(eligible.filter(vectorMatched));
     const matched = eligible
-      .filter((entry) => byMeaning.has(entry) || entry.constant || keysMatch(entry, matcherFor(entry), aliasesOf(entry)))
+      .filter((entry) => entry.constant || keysMatch(entry, matcherFor(entry), aliasesOf(entry)))
       .sort(byOrder);
     // A failed roll or a lost draw is final for this activation: the entry is not
     // rolled again on a later pass.
@@ -756,13 +738,11 @@ function activateBook(entries: LoreEntry[], input: ActivateLoreInput): LoreActiv
         entry,
         !isFresh.has(entry)
           ? 'sticky'
-          : byMeaning.has(entry)
-            ? 'vector'
-            : entry.constant
-              ? 'constant'
-              : pass === 0
-                ? 'keyword'
-                : 'recursion',
+          : entry.constant
+            ? 'constant'
+            : pass === 0
+              ? 'keyword'
+              : 'recursion',
       );
       for (const label of groupsOf(entry)) held.add(label);
     }
@@ -952,7 +932,6 @@ function activateSillyTavern(entries: LoreEntry[], input: ActivateLoreInput): Lo
     recursiveScanning = false,
     random = Math.random,
     textOf = (entry: LoreEntry) => entry.content,
-    vectorMatched = () => false,
   } = input;
   const prepared = prepare(input, history.length);
   const sorted = tavernOrder(entries, input);
@@ -1037,8 +1016,7 @@ function activateSillyTavern(entries: LoreEntry[], input: ActivateLoreInput): Lo
       if (current === ScanState.Recursion && recursiveScanning && entry.excludeRecursion && !sticky) continue;
       // `@@activate` and `@@dont_activate` were read into `constant` and `enabled`.
       let how: LoreActivationVia | undefined;
-      if (vectorMatched(entry)) how = 'vector';
-      else if (entry.constant) how = 'constant';
+      if (entry.constant) how = 'constant';
       else if (sticky) how = 'sticky';
       else if (entry.keys.length > 0 && keysMatch(entry, matcherFor(entry, current), aliasesOf(entry, current))) {
         how = current === ScanState.Recursion ? 'recursion' : 'keyword';

@@ -364,13 +364,6 @@ export interface AssemblePromptInput {
    */
   loreState?: LoreTimedState;
   /**
-   * The lore entries a search by meaning activated (SillyTavern's vectorized
-   * World Info): each one activates as a keyword match would
-   * (`ActivateLoreInput.vectorMatched`). The caller searched before the
-   * assembler, which never waits on an embedder. Absent: none.
-   */
-  vectorLore?: (entry: LoreEntry) => boolean;
-  /**
    * Keys in the reader's language for entries whose own keys are not — the
    * API's Korean aliases (`ActivateLoreInput.aliases`). Absent: none.
    */
@@ -921,7 +914,6 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     model,
     injections = {},
     loreState,
-    vectorLore,
     loreAliases,
     assetNames,
     userName = DEFAULT_USER_NAME,
@@ -1253,7 +1245,6 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     risuMatching: loreSettings.risuMatching ?? false,
     textOf: expandLore,
     ...(loreState ? { timed: loreState } : {}),
-    ...(vectorLore ? { vectorMatched: vectorLore } : {}),
     ...(loreAliases ? { aliases: loreAliases } : {}),
     ...(tavernBook ? { sillyTavern: true } : {}),
     ...(generationType ? { trigger: generationType } : {}),

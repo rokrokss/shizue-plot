@@ -216,9 +216,6 @@
     "loreSelective": "Require secondary keys",
     "loreCaseSensitive": "Case sensitive",
     "loreUseRegex": "Regex",
-    "loreVectorized": "Activate by meaning",
-    "loreVectorizeAll": "Activate every entry by meaning",
-    "loreVectorizeAllHint": "An entry turns on when the latest turns are close to it in meaning, even if no key matches (SillyTavern's vectorization). To choose entry by entry, use each entry's \"Activate by meaning\". Saved on {first}'s card.",
     "loreAdvanced": "Advanced",
     "loreAdvancedHint": "Leave a field empty for the default. Scan depth, delay, sticky and cooldown count messages.",
     "loreSelectiveLogic": "Secondary key logic",
@@ -1171,8 +1168,7 @@
         "constant": "Always on",
         "keyword": "Keyword",
         "sticky": "Sticky",
-        "recursion": "Recursion",
-        "vector": "meaning"
+        "recursion": "Recursion"
       }
     },
     "importing": "This chat is still being imported. You can carry on once everything is in.",

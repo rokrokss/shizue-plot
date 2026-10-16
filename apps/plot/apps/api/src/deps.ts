@@ -61,9 +61,9 @@ export interface AppDeps {
    */
   detectingEmotion: Set<string>;
   /**
-   * What is being embedded for SillyTavern's vector storage (`vectors.ts`): a
-   * plot's lore (`lore:<plot id>`) or a chat's messages (`chat:<chat id>`) — or
-   * a plot's Korean aliases being written (`aliases:<plot id>`, `loreAliases.ts`)
+   * What is being embedded for SillyTavern's chat vectorization (`vectors.ts`):
+   * a chat's messages (`chat:<chat id>`) — or a plot's Korean aliases being
+   * written (`aliases:<plot id>`, `loreAliases.ts`)
    * — one pass each at a time, and a pass asked for meanwhile runs again after it.
    */
   embeddingVectors: Map<string, 'running' | 'again'>;

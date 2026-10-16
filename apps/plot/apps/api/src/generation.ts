@@ -956,10 +956,10 @@ async function assembleRequest(
     : plan.branch.length <= 1
       ? { length: 0 }
       : { ...plan.branch, length: plan.branch.length - 1 };
-  // SillyTavern's vector storage: the lore found by meaning, and copies of
-  // earlier messages the history no longer sends — ST moves them out of the
-  // chat it sends; here the history stays as it is, the provider's cached
-  // prefix. Without an embedder, or past its deadline, nothing is found.
+  // SillyTavern's chat vectorization: copies of earlier messages the history no
+  // longer sends — ST moves them out of the chat it sends; here the history
+  // stays as it is, the provider's cached prefix. Without an embedder, or past
+  // its deadline, nothing is found. The lore's Korean aliases come with it.
   const found = await searchByMeaning(deps, {
     vectors: plan.vectors,
     plot: plan.plot,
@@ -1023,7 +1023,6 @@ async function assembleRequest(
     ...(plan.injections ? { injections: plan.injections } : {}),
     loreState: plan.loreState,
     ...(plan.generationType ? { generationType: plan.generationType } : {}),
-    ...(found.vectorLore ? { vectorLore: found.vectorLore } : {}),
     ...(found.loreAliases ? { loreAliases: found.loreAliases } : {}),
     assetNames: plan.assetNames,
     history,

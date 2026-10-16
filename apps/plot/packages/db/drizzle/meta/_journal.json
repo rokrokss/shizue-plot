@@ -176,6 +176,13 @@
       "when": 1792093129809,
       "tag": "0024_drop_retired_chat_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1792118963373,
+      "tag": "0025_drop_lore_vectors",
+      "breakpoints": true
     }
   ]
 }

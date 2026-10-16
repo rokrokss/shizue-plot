@@ -216,9 +216,6 @@
     "loreSelective": "補助キーワード必須",
     "loreCaseSensitive": "大文字小文字を区別",
     "loreUseRegex": "正規表現",
-    "loreVectorized": "意味で発動",
-    "loreVectorizeAll": "すべてのエントリーを意味で発動",
-    "loreVectorizeAllHint": "キーワードが合わなくても、最近のやり取りと意味の近いエントリーが発動します（SillyTavern のベクトル化）。エントリーごとに選ぶには、各エントリーの「意味で発動」を使ってください。{first}のカードに保存されます。",
     "loreAdvanced": "詳細設定",
     "loreAdvancedHint": "空欄は既定値です。スキャン深度・遅延・持続・クールダウンはメッセージ数で数えます。",
     "loreSelectiveLogic": "補助キーワードの条件",
@@ -1171,8 +1168,7 @@
         "constant": "常時",
         "keyword": "キーワード",
         "sticky": "持続",
-        "recursion": "再帰",
-        "vector": "意味"
+        "recursion": "再帰"
       }
     },
     "importing": "このチャットはまだ読み込み中です。すべて入ったら続きを書けます。",

@@ -479,28 +479,6 @@ describe('assemblePrompt', () => {
     });
   });
 
-  it('activates the lore a search by meaning found, and reports it as such', () => {
-    const tower: LoreEntry = {
-      keys: ['lighthouse'],
-      secondaryKeys: [],
-      selective: false,
-      content: '등대지기는 밤마다 불을 켠다.',
-      enabled: true,
-      constant: false,
-      insertionOrder: 0,
-      caseSensitive: false,
-      useRegex: false,
-      position: 'before_char',
-      vectorized: true,
-    };
-    const input = { plot: { ...plot, lorebook: [tower] }, characters: [aria], history, preset, report: true };
-    expect(assemblePrompt(input).system).not.toContain('등대지기');
-    const found = assemblePrompt({ ...input, vectorLore: (entry: LoreEntry) => entry === tower });
-    expect(found.system).toContain('등대지기는 밤마다 불을 켠다.');
-    expect(found.report!.lore.map((lore) => lore.via)).toEqual(['vector']);
-    expect(found.loreTriggers).toEqual([loreEntryKey(tower)]);
-  });
-
   it('charges memoryText to the same budget as the rest of the system prefix', () => {
     const memoryText = '[지난 이야기 요약]\n'.padEnd(400, '요약 ');
     const base = assemble(100_000);
