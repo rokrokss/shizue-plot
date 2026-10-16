@@ -86,11 +86,13 @@ const MISS_SHARE = 0.5;
 /** The least the provider caches; a request shorter than this is never served. */
 const MIN_CACHED = 1_024;
 /**
- * A guess, not a measurement: OpenAI keeps a prefix in memory 5–10 minutes
- * after its last use (from GPT-5.6 on the Platform API says 30 minutes); what
- * this route keeps is unknown, and every line says the gap for the owner to read.
+ * The longest gap this route was measured to still serve a whole prompt after:
+ * a 24.5k-token prompt repeated 10, 30 and 60 minutes after its first call was
+ * served all of it each time (2026-10-16, ARCHITECTURE §7.3 프롬프트 캐시 측정).
+ * Longer gaps are unmeasured, though the response reports a 24-hour
+ * `prompt_cache_retention`; every line says the gap for the owner to read.
  */
-const GAP_LONG_MS = 5 * 60_000;
+const GAP_LONG_MS = 60 * 60_000;
 
 interface Tally {
   requests: number;
