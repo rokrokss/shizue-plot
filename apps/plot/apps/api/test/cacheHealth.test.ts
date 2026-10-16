@@ -111,7 +111,9 @@ describe('the prompt cache log', () => {
     send(request({ turns: [...turns(0, 3), recall] }), 10, ids, 0, 30_000);
     expect(line()).toMatch(/miss: unknown$/);
     send(request({ turns: [...turns(0, 4), recall] }), 10, ids, 0, 30_000 + 6 * 60_000);
-    expect(line()).toMatch(/360 s after the chat's request before, ~\d+ expected; miss: gap_long$/);
+    expect(line()).toMatch(/360 s after the chat's request before, ~\d+ expected; miss: unknown$/);
+    send(request({ turns: [...turns(0, 5), recall] }), 10, ids, 0, 30_000 + 6 * 60_000 + 61 * 60_000);
+    expect(line()).toMatch(/3660 s after the chat's request before, ~\d+ expected; miss: gap_long$/);
   });
 
   it('compares a group member’s turn with that member’s own last one, and a regenerate with the turn it replaces', () => {
