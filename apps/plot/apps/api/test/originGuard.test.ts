@@ -25,3 +25,27 @@ describe('origin guard', () => {
     expect((await app.request('http://127.0.0.1:8787/api/chats', { headers: { 'x-forwarded-host': 'plot.example' } })).status).toBe(200);
   });
 });
+
+describe('origin guard with remote origins', () => {
+  // The dev app on loopback, and a tunnel to it a phone opens.
+  const app = new Hono<AppEnv>();
+  app.use('*', originGuard('http://localhost:13000', ['https://mac.example.ts.net:8444']));
+  app.all('*', (c) => c.text('ok'));
+  const post = (headers: Record<string, string>): Promise<Response> =>
+    Promise.resolve(app.request('http://127.0.0.1:8787/api/devices/claim', { method: 'POST', headers }));
+
+  it('takes the tunnel as the app itself, by Origin and by forwarded Host', async () => {
+    expect((await post({ origin: 'https://mac.example.ts.net:8444', 'x-forwarded-host': 'mac.example.ts.net:8444' })).status).toBe(200);
+    expect((await post({ origin: 'http://localhost:13000', 'x-forwarded-host': 'localhost:13000' })).status).toBe(200);
+    expect((await app.request('http://127.0.0.1:8787/api/chats', { headers: { 'x-forwarded-host': 'mac.example.ts.net:8444' } })).status).toBe(200);
+  });
+  it('still refuses every other origin and host, and writes without an origin', async () => {
+    for (const origin of ['https://mac.example.ts.net', 'http://mac.example.ts.net:8444', 'https://evil.example']) {
+      expect((await post({ origin })).status).toBe(403);
+    }
+    expect((await post({})).status).toBe(403);
+    for (const host of ['mac.example.ts.net', 'evil.example', 'mac.example.ts.net:8444, evil.example']) {
+      expect((await app.request('http://127.0.0.1:8787/api/chats', { headers: { 'x-forwarded-host': host } })).status).toBe(403);
+    }
+  });
+});

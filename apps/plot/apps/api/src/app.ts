@@ -12,6 +12,7 @@ import { chatMemoryRoutes } from './routes/chatMemory.js';
 import { chatTranslationRoutes } from './routes/chatTranslation.js';
 import { chatRoutes, messageRoutes } from './routes/chats.js';
 import { commentRoutes, plotCommentRoutes } from './routes/comments.js';
+import { deviceRoutes } from './routes/devices.js';
 import { creatorRoutes, exploreRoutes } from './routes/explore.js';
 import { chatImportRoutes, importRoutes } from './routes/imports.js';
 import { modelRoutes } from './routes/models.js';
@@ -43,7 +44,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
 
   // First, so every line a request says carries its id, and refusals are logged and counted too (`log.ts`).
   app.use('*', requestLog());
-  if (deps.webOrigin) app.use('*', originGuard(deps.webOrigin));
+  if (deps.webOrigin) app.use('*', originGuard(deps.webOrigin, deps.remoteOrigins));
 
   app.onError((error, c) => errorResponse(c, error));
   app.notFound((c) => c.json<ErrorBody>({ error: 'Not found', code: 'not_found' }, 404));
@@ -81,6 +82,9 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   // Both answer signed-out readers too: sign-in starts here, and the model list of
   // someone without a ChatGPT connection is empty.
   app.route('/api/chatgpt', chatGPTRoutes(deps));
+  // A phone joins the reader signed in on this machine here, so its claim answers
+  // signed-out browsers too. Only with REMOTE_ORIGINS: the hosted app has none of it.
+  app.route('/api/devices', deviceRoutes(deps));
   app.route('/api/models', modelRoutes(deps));
 
   /**

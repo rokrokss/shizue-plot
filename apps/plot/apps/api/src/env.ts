@@ -71,6 +71,34 @@ function readCallbackPort(env: NodeJS.ProcessEnv, authUrl: string): number {
   return port;
 }
 
+/** Whether `value` is an http(s) origin and nothing more — no path, no user. */
+function isWebOrigin(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return /^https?:$/.test(url.protocol) && url.origin === value;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `REMOTE_ORIGINS`: comma-separated origins, each as `BETTER_AUTH_URL` is written.
+ * The sign-in origin itself is dropped, so the list is only the others. It is
+ * for a shizue running on the reader's own machine — signing in on loopback —
+ * and is refused anywhere else: the hosted app has no phone pairing.
+ */
+function readRemoteOrigins(env: NodeJS.ProcessEnv, authUrl: string): string[] {
+  const listed = (env['REMOTE_ORIGINS'] ?? '').split(',').map((value) => value.trim()).filter(Boolean);
+  const wrong = listed.find((value) => !isWebOrigin(value));
+  if (wrong !== undefined) {
+    throw new Error(`REMOTE_ORIGINS must list web origins, e.g. https://my-mac.example.ts.net:8443 — got "${wrong}".`);
+  }
+  if (listed.length > 0 && !['localhost', '127.0.0.1', '[::1]'].includes(new URL(authUrl).hostname)) {
+    throw new Error(`REMOTE_ORIGINS is only for a shizue running on this machine, whose BETTER_AUTH_URL is a loopback origin such as http://localhost:13000 — not ${authUrl}.`);
+  }
+  return [...new Set(listed)].filter((value) => value !== authUrl);
+}
+
 interface ApiConfig {
   port: number;
   /** Where the API listens. Loopback beside the web app; `0.0.0.0` on a server of its own. */
@@ -82,6 +110,13 @@ interface ApiConfig {
   authSecret: string;
   /** The web app's origin: writes must come from it, and sign-in returns to it. */
   authUrl: string;
+  /**
+   * Other origins the same web app is reached at — a tunnel to this machine, for
+   * a phone (`REMOTE_ORIGINS`), and only on this machine. Writes may come from them
+   * too, but sign-in still returns to `authUrl`: a phone joins by pairing
+   * (`routes/devices.ts`), which exists only while this list does.
+   */
+  remoteOrigins: string[];
   /**
    * The API's own origin when it is served apart from the web app — the web's
    * `API_ORIGIN`, read here when the two share an environment. Card scripts'
@@ -173,6 +208,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
   const logFormat = env['LOG_FORMAT']?.trim() || 'text';
   if (logFormat !== 'text' && logFormat !== 'json') throw new Error(`LOG_FORMAT must be "text" or "json", got "${logFormat}"`);
   const metricsPort = readInteger(env, 'METRICS_PORT', 1, 65535);
+  const remoteOrigins = readRemoteOrigins(env, authUrl);
 
   return {
     port: Number(env['API_PORT'] ?? 8787),
@@ -181,6 +217,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     storage: readStorageConfig(env),
     authSecret: authSecret ?? DEV_AUTH_SECRET,
     authUrl,
+    remoteOrigins,
     ...(env['API_ORIGIN'] ? { apiOrigin: new URL(env['API_ORIGIN']).origin } : {}),
     authExtraTrustedOrigins: [DEV_AUTH_URL],
     chatgptCallbackPort: callbackPort,

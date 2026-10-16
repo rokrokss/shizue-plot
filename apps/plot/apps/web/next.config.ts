@@ -4,10 +4,17 @@ import createNextIntlPlugin from 'next-intl/plugin';
 
 const withNextIntl = createNextIntlPlugin('./src/i18n/request.ts');
 const apiOrigin = process.env['API_ORIGIN'] ?? 'http://localhost:8787';
+// The API's `REMOTE_ORIGINS` — a tunnel to a shizue running on this machine, for a
+// phone. `next dev` refuses `/_next/*` (the HMR socket among them) from any other
+// host, and phone pairing is shown only where they are set, never in the hosted app.
+const remoteHosts = (process.env['REMOTE_ORIGINS'] ?? '').split(',').map((value) => value.trim()).filter(Boolean)
+  .map((value) => new URL(value).hostname);
 
 const nextConfig: NextConfig = {
   devIndicators: false,
   agentRules: false,
+  allowedDevOrigins: remoteHosts,
+  env: { NEXT_PUBLIC_DEVICE_PAIRING: remoteHosts.length > 0 ? '1' : '' },
   turbopack: {
     root: fileURLToPath(new URL('../../../../', import.meta.url)),
     rules: {

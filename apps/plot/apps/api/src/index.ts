@@ -42,6 +42,9 @@ const fixture = testing ? createAuth(db, {
 
 // The background tasks the turns start, kept until they settle so a shutdown can wait for them.
 const background = createBackgroundTasks();
+// This app at every origin it answers: card scripts' requests and an import's fetches never go there.
+const ownOrigins = [config.authUrl, ...config.remoteOrigins, ...(config.apiOrigin ? [config.apiOrigin] : [])];
+
 // One set for the routes and the job worker: the memory backfill shares the
 // per-chat refresh guard with the turns the reader is sending meanwhile.
 const deps: AppDeps = {
@@ -49,11 +52,12 @@ const deps: AppDeps = {
   auth: createHostedAuth(sessions, accounts, fixture),
   chatgpt: { accounts, sessions },
   webOrigin: config.authUrl,
+  remoteOrigins: config.remoteOrigins,
   storage: createStorage(config.storage),
   // One for the process: card scripts' requests, their in-flight cap, and the per-reader rate limit in `rate_limits`.
-  scriptFetch: createScriptFetch({ db, ownOrigins: [config.authUrl, ...(config.apiOrigin ? [config.apiOrigin] : [])] }),
+  scriptFetch: createScriptFetch({ db, ownOrigins }),
   // What an import fetches of a card's pictures and fonts on other hosts, never this app's own.
-  remoteFetch: createRemoteFetch({ ownOrigins: [config.authUrl, ...(config.apiOrigin ? [config.apiOrigin] : [])] }),
+  remoteFetch: createRemoteFetch({ ownOrigins }),
   env: config.env,
   generating: new Set<string>(),
   generationClaims: new Map(),

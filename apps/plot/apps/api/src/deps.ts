@@ -41,6 +41,8 @@ export interface AppDeps {
   db: Db;
   /** The web app's origin, which every write must come from; tests may mount without it. */
   webOrigin?: string;
+  /** Other origins the web app is reached at (`REMOTE_ORIGINS`), trusted as `webOrigin` is. */
+  remoteOrigins?: string[];
   auth: AppAuth;
   /** Sign in with ChatGPT and the sessions it opens; absent in tests that do not sign in. */
   chatgpt?: { accounts: ChatGPTAccounts; sessions: SessionStore };

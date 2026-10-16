@@ -1348,7 +1348,8 @@
     "message_too_long": "One message in this chat is over 100,000 characters, so the chat can't be imported.",
     "migration_unconfirmed": "Agree to every confirmation before moving a character over.",
     "memory_unavailable": "No model is available to summarize with.",
-    "memory_failed": "The summary couldn't be written. Try again."
+    "memory_failed": "The summary couldn't be written. Try again.",
+    "pairing_invalid": "This pairing code has expired or was already used. Make a new QR code on your computer."
   },
   "rebrand": {
     "eyebrow": "A place for plots to grow",
@@ -1377,7 +1378,23 @@
     "extensionRequired": "Signing in requires the Shizue extension (0.3.6 or later) in desktop Chrome. If you already have it, update it to the latest version.",
     "extensionInstall": "Get Shizue from the Chrome Web Store",
     "extensionRecheck": "Check again",
-    "extensionStillMissing": "The extension wasn't found yet. If you just installed it, reload this page."
+    "extensionStillMissing": "The extension wasn't found yet. If you just installed it, reload this page.",
+    "disconnectDevice": "Disconnect this device",
+    "pairHint": "Phones can't run the extension. Sign in on a computer, then scan the QR code under Settings → Connect a phone."
+  },
+  "devices": {
+    "title": "Connect a phone",
+    "description": "Phone browsers can't sign in with ChatGPT. Make a QR code and scan it with your phone's camera to connect the phone to this account. A code works once, for 5 minutes.",
+    "start": "Make a QR code",
+    "again": "Make a new QR code",
+    "qrLabel": "QR code to scan with your phone",
+    "expiresIn": "Expires in {time}.",
+    "expired": "This code has expired. Make a new QR code.",
+    "pairedHere": "This device was connected from another one. Signing out here disconnects only this device.",
+    "pairTitle": "Connect this device",
+    "pairDescription": "Connects this browser to the account that made the QR code. Don't continue unless you made the code yourself.",
+    "pairConfirm": "Connect",
+    "pairMissing": "There's no pairing code here. Scan the QR code in your computer's settings again."
   },
   "migrate": {
     "title": "Move from another platform",
