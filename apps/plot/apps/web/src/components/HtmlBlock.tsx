@@ -29,10 +29,11 @@ export const useHydrated = (): boolean =>
  * a display script's output passes — inside the message scope, so a `<style>`
  * in it is scoped like a display script's.
  *
- * `live` is the block still being written. It is balanced like a prose block,
- * and an element the model has opened and not yet closed is closed by the
- * sanitizer's parse, so the box is on screen while its contents arrive. There is
- * no word reveal here; the markup is drawn as written.
+ * `live` is the block still being written. Unlike a speaker's prose, which is
+ * shown as written until it is done, it is drawn as it arrives: its open
+ * markdown markers are closed (`balancePartial`) and an element the model has
+ * opened and not yet closed is closed by the sanitizer's parse, so the box is on
+ * screen while its contents arrive.
  */
 export const HtmlBlock = memo(function HtmlBlock({
   content,

@@ -322,10 +322,11 @@ describe('a reply a round is waiting on', () => {
   it('waits under the reply a continue goes on from, with no second face', () => {
     render(row('*책을 덮는다.* 그래서', 'assistant', { roster: [ROSTER[0]!], streaming: true, thinking: true }));
 
-    // The reply's own face once, and the clock after its bubble.
+    // The reply's own face once, and the clock after its bubble — the reply
+    // still being written, so as written.
     expect(host.querySelectorAll('img')).toHaveLength(1);
     const bubbles = [...host.querySelectorAll('.chat-bubble')];
-    expect(bubbles.map((node) => node.textContent)).toEqual(['책을 덮는다. 그래서', '생각 중… 0초']);
+    expect(bubbles.map((node) => node.textContent)).toEqual(['*책을 덮는다.* 그래서', '생각 중… 0초']);
   });
 
 });

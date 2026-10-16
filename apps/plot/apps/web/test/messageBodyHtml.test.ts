@@ -279,11 +279,12 @@ describe('indented text', () => {
 });
 
 describe('while streaming', () => {
-  it('reveals the prose being written next to a settled panel', () => {
-    render({ content: '<div style="color:red">HP 10</div>\n\n그는 천천히 웃었다', streaming: true });
+  it('shows the prose being written as written, next to a drawn panel', () => {
+    render({ content: '<div style="color:red">HP 10</div>\n\n그는 *천천히* 웃었다', streaming: true });
 
     expect(islands()[0]!.querySelector('div')?.style.color).toBe('red');
-    expect(host.querySelectorAll('.shizue-reveal').length).toBeGreaterThan(0);
+    expect(host.querySelector('em')).toBeNull();
+    expect(host.textContent).toContain('그는 *천천히* 웃었다');
   });
 
   it('draws a panel the model has opened and not yet closed, without its half-typed tags', () => {

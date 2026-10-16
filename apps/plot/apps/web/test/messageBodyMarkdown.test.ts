@@ -3,8 +3,8 @@
  * The markdown half of the message body, mounted.
  *
  * The unit tests cover the pieces; what only shows up here is the seam between
- * them — that a streaming message balances the block it is writing and no other,
- * that the reveal spans go when the stream ends without the text changing, and
+ * them — that a streaming message shows the speaker's stretch it is writing as
+ * written, as Zeta does, and draws it as markdown once that stretch is done, and
  * that a settled message still comes out the way it always did.
  *
  * `createElement` rather than JSX, matching messageBody.test.ts.
@@ -79,42 +79,34 @@ describe('a settled message', () => {
     // rehype-highlight ran, and the quote plugin stayed out of the code.
     expect(host.querySelector('pre code')?.className).toContain('hljs');
   });
-
-  it('has no reveal spans', () => {
-    render({ content: '아리아가 돌아섰다' });
-    expect(host.querySelectorAll('.shizue-reveal')).toHaveLength(0);
-  });
 });
 
 describe('a message being written', () => {
-  it('closes the markers of the block it is writing, and only that block', () => {
-    render({ content: '**첫 문단**\n\n그는 **천천히', streaming: true });
-    const bolds = [...host.querySelectorAll('strong')].map((node) => node.textContent);
-    expect(bolds).toEqual(['첫 문단', '천천히']);
+  const ROSTER = [
+    { id: 'c1', name: '아리아', avatarUrl: null },
+    { id: 'c2', name: '레온', avatarUrl: null },
+  ];
+
+  it('shows the stretch it is writing as written, every block of it', () => {
+    render({ content: '**첫 문단**\n\n그는 *천천히* 돌아섰다', streaming: true });
+    expect(host.querySelector('strong, em')).toBeNull();
+    const body = host.querySelector('.message-body')!;
+    expect([...body.children].map((child) => child.textContent)).toEqual(['**첫 문단**', '그는 *천천히* 돌아섰다']);
   });
 
-  it('leaves a settled block exactly as written', () => {
-    render({ content: '별 하나 * 둘\n\n다음', streaming: true });
-    expect(host.querySelector('.message-body')!.children[0]!.textContent).toBe('별 하나 * 둘');
+  it('draws it as markdown once the stream ends', () => {
+    render({ content: '**첫 문단**\n\n그는 *천천히* 돌아섰다', streaming: true });
+    render({ content: '**첫 문단**\n\n그는 *천천히* 돌아섰다', streaming: false });
+    expect(host.querySelector('strong')?.textContent).toBe('첫 문단');
+    expect(host.querySelector('em')?.textContent).toBe('천천히');
   });
 
-  it('reveals words, and drops the spans when the stream ends without moving text', () => {
-    render({ content: '아리아가 천천히 돌아섰다', streaming: true });
-    const revealed = [...host.querySelectorAll('.shizue-reveal')].map((node) => node.textContent);
-    expect(revealed).toEqual(['아리아가', '천천히', '돌아섰다']);
-    const before = host.querySelector('.message-body')!.textContent;
-
-    render({ content: '아리아가 천천히 돌아섰다', streaming: false });
-    expect(host.querySelectorAll('.shizue-reveal')).toHaveLength(0);
-    expect(host.querySelector('.message-body')!.textContent).toBe(before);
-  });
-
-  it('keeps the span of a word already on screen as more arrive', () => {
-    render({ content: '아리아가 천천히', streaming: true });
-    const first = host.querySelector('.shizue-reveal');
-    render({ content: '아리아가 천천히 돌아섰다', streaming: true });
-    // Same node, not a new one: a remount would replay the fade.
-    expect(host.querySelector('.shizue-reveal')).toBe(first);
-    expect(host.querySelectorAll('.shizue-reveal')).toHaveLength(3);
+  it("draws a speaker's stretch once the next speaker begins", () => {
+    render({ content: '아리아: *웃는다* 왔구나.\n\n레온: *고개를 끄덕', roster: ROSTER, mode: 'reply', streaming: true });
+    const aria = host.querySelector('[data-speaker="아리아"]')!;
+    const leon = host.querySelector('[data-speaker="레온"]')!;
+    expect(aria.querySelector('em')?.textContent).toBe('웃는다');
+    expect(leon.querySelector('em')).toBeNull();
+    expect(leon.querySelector('.chat-bubble')?.textContent).toBe('*고개를 끄덕');
   });
 });

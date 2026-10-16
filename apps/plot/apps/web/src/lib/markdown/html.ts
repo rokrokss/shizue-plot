@@ -5,7 +5,7 @@
  * the result through DOMPurify, so a greeting's status panel, a `<br>`, a
  * `<details>` fold or a `<span style="color:…">` in a reply comes out as what it
  * says rather than as tag text. Here the same text has a second reader — the
- * React path that draws speakers, dialogue, the word reveal and the plot's own
+ * React path that draws speakers, dialogue and the plot's own
  * pictures — and that path cannot take raw markup without giving up the trust
  * boundary. So the choice is made per top-level block:
  *

@@ -33,7 +33,6 @@ import {
   type DisplayPlan,
   type Segment,
 } from '@/lib/displayScripts';
-import { balancePartial } from '@/lib/markdown/balance';
 import { splitBlocks } from '@/lib/markdown/blocks';
 import {
   markupChunks,
@@ -43,7 +42,6 @@ import {
   renderMediaTokens,
 } from '@/lib/markdown/html';
 import { rehypeDialogueQuotes } from '@/lib/markdown/quotes';
-import { rehypeWordReveal } from '@/lib/markdown/reveal';
 import { isExternalUrl, isSameOriginUrl, MESSAGE_SCOPE_CLASS } from '@/lib/sanitizeHtml';
 import { speakerAliases, speechRuns } from '@/lib/speechRuns';
 import { useBodyTranslation, type BodyTranslation } from '@/lib/translation';
@@ -58,13 +56,7 @@ import { cx } from './ui';
 
 const remarkPlugins = [remarkGfm, remarkBreaks, remarkNoIndentedCode];
 
-/**
- * A settled block is worth highlighting; the block still being written is not —
- * its last word changes on every token and the grammar it is half-way through
- * would be re-guessed each time, for a colour that is about to be wrong anyway.
- */
-const settledPlugins = [rehypeHighlight, rehypeDialogueQuotes];
-const livePlugins = [rehypeDialogueQuotes, rehypeWordReveal];
+const rehypePlugins = [rehypeHighlight, rehypeDialogueQuotes];
 
 /** `language-ts hljs` → `ts`. */
 const LANGUAGE_RE = /(?:^|\s)language-([\w+#.-]+)/;
@@ -155,8 +147,13 @@ const components: Components = {
  *
  * This is the whole reason the message is split up: a settled block is compared
  * by its string, so the twenty paragraphs already on screen are not re-parsed
- * when the twenty-first gains a word. Only `live` — the block being written —
- * pays for a re-render, and it is the one being balanced.
+ * when the twenty-first gains a word.
+ *
+ * `live` is a block of the stretch still being written, drawn as Zeta draws it
+ * (2026-10-17 owner decision): the text as written, its `*` and all, until the
+ * stretch is done and is drawn as markdown at once. One paragraph per block, so
+ * the spacing stays where it is when that happens. The `<` and `>` the CBS
+ * unescape leaves as entities for the markdown are read back here.
  */
 const MarkdownBlock = memo(function MarkdownBlock({
   content,
@@ -165,13 +162,13 @@ const MarkdownBlock = memo(function MarkdownBlock({
   content: string;
   live: boolean;
 }) {
+  if (live) {
+    const text = content.replace(/\n+$/, '').replaceAll('&lt;', '<').replaceAll('&gt;', '>');
+    return <p className="whitespace-pre-wrap">{text}</p>;
+  }
   return (
-    <Markdown
-      remarkPlugins={remarkPlugins}
-      rehypePlugins={live ? livePlugins : settledPlugins}
-      components={components}
-    >
-      {live ? balancePartial(content) : content}
+    <Markdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={components}>
+      {content}
     </Markdown>
   );
 });
@@ -247,53 +244,46 @@ function inlineMarkup(markup: string): boolean {
  * A run's blocks, with the lines that stand outside a bubble taken out of them:
  * a picture alone on its line, and — in a narration or an intro — a `#`/`##`
  * title. A fenced block is left whole, and so is everything else: a picture
- * inside a sentence is part of the sentence. Only the last piece of the live
- * block is still being written.
+ * inside a sentence is part of the sentence. All the prose of a run still being
+ * written is live, its titles kept in it: none of it is markdown until the run
+ * is done.
  */
 function runItems(blocks: readonly string[], live: boolean, headings: boolean): RunItem[] {
   const items: RunItem[] = [];
-  blocks.forEach((block, nth) => {
-    const blockLive = live && nth === blocks.length - 1;
+  const titles = headings && !live;
+  for (const block of blocks) {
     if (FENCE_START_RE.test(block)) {
-      items.push({ kind: 'prose', text: block, live: blockLive });
-      return;
+      items.push({ kind: 'prose', text: block, live });
+      continue;
     }
-    const start = items.length;
     let prose = '';
     for (const line of block.match(/[^\n]*\n|[^\n]+/g) ?? []) {
-      const kind = FIGURE_LINE_RE.test(line) ? 'figure' : headings && HEADING_LINE_RE.test(line) ? 'heading' : null;
+      const kind = FIGURE_LINE_RE.test(line) ? 'figure' : titles && HEADING_LINE_RE.test(line) ? 'heading' : null;
       if (!kind) {
         prose += line;
         continue;
       }
-      if (prose.trim()) items.push({ kind: 'prose', text: prose, live: false });
+      if (prose.trim()) items.push({ kind: 'prose', text: prose, live });
       prose = '';
       items.push({ kind, text: line, live: false });
     }
-    if (prose.trim()) items.push({ kind: 'prose', text: prose, live: false });
-    if (blockLive && items.length > start) items[items.length - 1]!.live = true;
-  });
+    if (prose.trim()) items.push({ kind: 'prose', text: prose, live });
+  }
   return items;
 }
-
-/** The caret a reply is written behind, at the end of the stretch still arriving. */
-const STREAM_CARET = <span className="ml-0.5 inline-block h-4 w-[2px] translate-y-0.5 animate-pulse bg-accent" />;
 
 /**
  * A stretch of prose and pictures with no title in it, in order: consecutive
  * prose in one box — a bubble or a narration — and each picture between them
- * at the width of the flow. What hangs off the end: the caret while it is
- * written, and under a bubble the label at its corner (`trailer`).
+ * at the width of the flow. Under a bubble, the label at its corner (`trailer`).
  */
 function RunItems({
   items,
   box,
-  caret,
   trailer,
 }: {
   items: readonly RunItem[];
   box: 'bubble' | 'narration';
-  caret: boolean;
   trailer?: ReactNode;
 }) {
   const groups: { kind: 'prose' | 'figure'; items: RunItem[] }[] = [];
@@ -326,24 +316,18 @@ function RunItems({
       );
     }
     const end = index === groups.length - 1;
-    const text = (
-      <>
-        {blocks}
-        {end && caret ? STREAM_CARET : null}
-      </>
-    );
     if (box === 'narration') {
       // The mark once at the block's start, the paragraphs hung past it.
       return (
         <div key={index} className="chat-narration flex w-full gap-2 italic text-muted">
           <Icon name="menu" className="chat-narration-mark mt-0.5 size-4 shrink-0" />
-          <div className="chat-narration-text min-w-0 flex-1">{text}</div>
+          <div className="chat-narration-text min-w-0 flex-1">{blocks}</div>
         </div>
       );
     }
     const bubble = (
       <div className="chat-bubble w-fit max-w-[min(100%,36rem)] min-w-0 rounded-2xl rounded-tl-md border border-line/70 bg-bubble px-3.5 py-2.5">
-        {text}
+        {blocks}
       </div>
     );
     if (!end || !trailer) return <Fragment key={index}>{bubble}</Fragment>;
@@ -373,37 +357,13 @@ function atHeadings(items: readonly RunItem[]): ({ heading: RunItem } | { items:
 }
 
 /** A scene's title (`#`/`##`) in a narration or an intro: Zeta's ≡ and a large bold line. */
-function SceneHeading({ text, live }: { text: string; live: boolean }) {
+function SceneHeading({ text }: { text: string }) {
   return (
     <div data-testid="scene-heading" className="scene-heading flex w-full items-center gap-2">
       <Icon name="menu" className="size-5 shrink-0 text-muted" />
-      <MarkdownBlock content={text} live={live} />
+      <MarkdownBlock content={text} live={false} />
     </div>
   );
-}
-
-/**
- * True for one animation's length after the stream ends.
- *
- * The last frame of a stream is not a quiet one: the reveal spans go, the
- * display scripts finally run and the message can rearrange itself into status
- * windows. A short fade over the whole body is not a decoration — it is what
- * keeps that rearrangement from reading as a glitch.
- */
-function useSettleFade(streaming: boolean): boolean {
-  const was = useRef(streaming);
-  const [settling, setSettling] = useState(false);
-
-  useEffect(() => {
-    const ended = was.current && !streaming;
-    was.current = streaming;
-    if (!ended) return;
-    setSettling(true);
-    const timer = setTimeout(() => setSettling(false), 200);
-    return () => clearTimeout(timer);
-  }, [streaming]);
-
-  return settling;
 }
 
 /**
@@ -649,7 +609,6 @@ export const MessageBody = memo(function MessageBody({
   const t = useTranslations('chat');
   const common = useTranslations('common');
   const { plan, held } = useDisplayPlan(content, display, chatIndex, previousSameRole, streaming);
-  const settling = useSettleFade(streaming);
 
   const segments = useMemo<BodySegment[]>(() => {
     const plain: Segment[] = [{ kind: 'text', text: content }];
@@ -717,7 +676,7 @@ export const MessageBody = memo(function MessageBody({
   // RisuAI translates here: after the display scripts and the speaker split, before the markdown.
   const shown = useBodyTranslation(segments, runs, translation, streaming);
 
-  // Only the very last block of the last run of text is still being written.
+  // Only the last run of text — one speaker's stretch — is still being written.
   const liveSegment = streaming ? runs.findLastIndex((run) => run !== null) : -1;
 
   /**
@@ -728,8 +687,8 @@ export const MessageBody = memo(function MessageBody({
   type Piece =
     | { kind: 'segment'; node: ReactNode }
     | { kind: 'heading'; item: RunItem }
-    | { kind: 'speaker'; name: string; items: RunItem[]; caret: boolean }
-    | { kind: 'prose'; box: 'bubble' | 'narration'; scene: boolean; items: RunItem[]; caret: boolean }
+    | { kind: 'speaker'; name: string; items: RunItem[] }
+    | { kind: 'prose'; box: 'bubble' | 'narration'; scene: boolean; items: RunItem[] }
     | { kind: 'plain'; blocks: string[]; live: boolean };
   const pieces: Piece[] = [];
   /**
@@ -744,9 +703,9 @@ export const MessageBody = memo(function MessageBody({
     roster.find((member) => member.name === name)?.avatarUrl ?? (name === face?.name ? face.avatarUrl : null);
   const dressed = (item: RunItem): boolean => {
     if (mode === 'plain') return false;
-    if (voice) pieces.push({ kind: 'speaker', name: voice, items: [item], caret: item.live });
+    if (voice) pieces.push({ kind: 'speaker', name: voice, items: [item] });
     else if (mode === 'narration' || roster.length === 0) {
-      pieces.push({ kind: 'prose', box: mode === 'narration' ? 'narration' : 'bubble', scene: false, items: [item], caret: item.live });
+      pieces.push({ kind: 'prose', box: mode === 'narration' ? 'narration' : 'bubble', scene: false, items: [item] });
     } else return false;
     return true;
   };
@@ -806,14 +765,14 @@ export const MessageBody = memo(function MessageBody({
       }
       for (const part of atHeadings(runItems(run.blocks, liveRun, sceneHeadings))) {
         if ('heading' in part) pieces.push({ kind: 'heading', item: part.heading });
-        else if (run.name !== null) pieces.push({ kind: 'speaker', name: run.name, items: part.items, caret: liveRun });
+        else if (run.name !== null) pieces.push({ kind: 'speaker', name: run.name, items: part.items });
         else {
           // The scene's own lines in a message with several speakers and no
           // owner (written before group turns) are narration; so is a narration
           // row's text. A reply with an owner has none: its unprefixed lines are
           // the owner's. What names no one in the fallback row is the reply.
           const box = run.narration || mode === 'narration' ? 'narration' : 'bubble';
-          pieces.push({ kind: 'prose', box, scene: run.narration, items: part.items, caret: liveRun });
+          pieces.push({ kind: 'prose', box, scene: run.narration, items: part.items });
         }
       }
     });
@@ -828,7 +787,7 @@ export const MessageBody = memo(function MessageBody({
       (before.kind === 'speaker' && piece.kind === 'speaker' && before.name === piece.name) ||
       (before.kind === 'prose' && piece.kind === 'prose' && before.box === piece.box && before.scene === piece.scene);
     if (!joins) continue;
-    pieces[at - 1] = { ...before, items: [...before.items, ...piece.items], caret: piece.caret } as Piece;
+    pieces[at - 1] = { ...before, items: [...before.items, ...piece.items] } as Piece;
     pieces.splice(at, 1);
   }
 
@@ -854,7 +813,7 @@ export const MessageBody = memo(function MessageBody({
   return (
     <div
       ref={shown.ref}
-      className={cx('message-body', settling && 'shizue-settling', headerAbove && 'relative')}
+      className={cx('message-body', headerAbove && 'relative')}
       // Laid out, so the chat does not jump when it shows; not yet seen.
       {...(held ? { style: { visibility: 'hidden' }, 'data-held': '' } : {})}
     >
@@ -874,13 +833,13 @@ export const MessageBody = memo(function MessageBody({
           // Zeta's title stands outside every speaker's block, at the column's
           // width; the speaker it cuts into goes on under it without saying
           // their name again.
-          return <SceneHeading key={index} text={piece.item.text} live={piece.item.live} />;
+          return <SceneHeading key={index} text={piece.item.text} />;
         }
         if (piece.kind === 'plain') {
           return (
             <Fragment key={index}>
               {piece.blocks.map((block, nth) => (
-                <MarkdownBlock key={nth} content={block} live={piece.live && nth === piece.blocks.length - 1} />
+                <MarkdownBlock key={nth} content={block} live={piece.live} />
               ))}
             </Fragment>
           );
@@ -890,7 +849,6 @@ export const MessageBody = memo(function MessageBody({
             <RunItems
               items={piece.items}
               box={piece.box}
-              caret={piece.caret && streaming}
               {...(end && trailerInside ? { trailer } : {})}
             />
           );
@@ -924,7 +882,6 @@ export const MessageBody = memo(function MessageBody({
               <RunItems
                 items={piece.items}
                 box="bubble"
-                caret={piece.caret && streaming}
                 {...(end && trailerInside ? { trailer } : {})}
               />
             </div>
