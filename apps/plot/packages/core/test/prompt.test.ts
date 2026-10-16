@@ -786,6 +786,34 @@ describe('assemblePrompt - merged lorebook', () => {
     expect(automatic(roomy)).toContain(first);
   });
 
+  it("gives a RisuAI book that names no budget half the context, and a SillyTavern one ST's quarter", () => {
+    const words = '단어 '.repeat(40).trim();
+    const lorebook = ['A', 'B', 'C', 'D', 'E', 'F'].map((letter, index) =>
+      loreEntry({ content: `${letter} ${words}`, insertionOrder: 6 - index }),
+    );
+    const cost = countTokens(`A ${words}`);
+    expect(lorebook.every((entry) => countTokens(entry.content) === cost)).toBe(true);
+    const activated = (loreSettings: NormalizedCard['loreSettings'], sillyTavern = false): string[] =>
+      assemblePrompt({
+        plot,
+        characters: [
+          { name: '아리아', card: { ...bareCard, lorebook, loreSettings }, ...(sillyTavern ? { sillyTavern } : {}) },
+        ],
+        history,
+        preset,
+        userName: '민준',
+        // Half is room for five and a half entries; ST's quarter, for two and three quarters.
+        contextBudget: 11 * cost,
+        maxResponseTokens: 0,
+        report: true,
+      }).report!.lore.map((entry) => entry.preview.slice(0, 1));
+    const risu = { ...DEFAULT_LORE_SETTINGS, risuMatching: true };
+    expect(activated(risu)).toEqual(['E', 'D', 'C', 'B', 'A']);
+    // A book with no source app, the studio's, takes the same half.
+    expect(activated({ ...DEFAULT_LORE_SETTINGS })).toEqual(['E', 'D', 'C', 'B', 'A']);
+    expect(activated({ ...DEFAULT_LORE_SETTINGS }, true)).toEqual(['B', 'A']);
+  });
+
   it('charges lore for its expanded text, and sends nothing for an entry that expands to nothing', () => {
     const conditional = `{{#if {{getvar::flag}}}}${'숨은 설정 '.repeat(50)}{{/if}}`;
     const later = '나중 항목.';
@@ -2628,12 +2656,12 @@ describe("assemblePrompt - SillyTavern's World Info settings", () => {
         history,
         preset,
         userName: '민준',
-        // Room for two entries at the default quarter, and for one at a tenth.
+        // Room for two entries at the default share, and for one at 30%.
         contextBudget: Math.ceil((cost * 2.5) / LORE_BUDGET_SHARE),
         report: true,
       }).report!.lore.map((entry) => entry.preview.slice(0, 1));
     expect(activated()).toEqual(['B', 'A']);
-    expect(activated(10)).toEqual(['A']);
+    expect(activated(30)).toEqual(['A']);
   });
 
   it('stops a recursive scan at the step limit, the first scan included', () => {

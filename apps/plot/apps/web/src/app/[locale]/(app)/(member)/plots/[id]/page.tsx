@@ -36,7 +36,7 @@ import { Link, useRouter } from '@/i18n/navigation';
 import { locales } from '@/i18n/routing';
 import { apiDelete, apiGet, apiSend, apiUpload } from '@/lib/api';
 import { readImportWarnings, takeImportWarnings, type ImportWarning } from '@/lib/importWarnings';
-import { LORE_BUDGET_SHARE, loreBudget } from '@/lib/loreBudget';
+import { loreBudget } from '@/lib/loreBudget';
 import { checkCardSize, downloadRealmCard, isRestrictiveLicense } from '@/lib/realm';
 import {
   MAX_CHARACTERS_PER_PLOT,
@@ -1143,13 +1143,13 @@ function MembersSection({
  */
 function LoreBudgetNote({ plotTokens, members }: { plotTokens: number; members: PlotMember[] }) {
   const t = useTranslations('plot');
-  const { constantTokens, budget, automatic, over } = loreBudget(plotTokens, members);
+  const { constantTokens, budget, automatic, share, over } = loreBudget(plotTokens, members);
 
   return (
     <div className="space-y-1">
       <p className="text-xs text-muted tabular-nums">
         {automatic
-          ? t('loreBudgetUsageAuto', { constant: constantTokens, budget, share: LORE_BUDGET_SHARE })
+          ? t('loreBudgetUsageAuto', { constant: constantTokens, budget, share })
           : t('loreBudgetUsage', { constant: constantTokens, budget })}
       </p>
       {over ? <p className="text-xs text-danger">{t('loreBudgetOver')}</p> : null}

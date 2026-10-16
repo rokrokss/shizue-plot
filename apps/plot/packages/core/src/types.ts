@@ -225,14 +225,15 @@ export interface LoreSettings {
   scanDepth: number;
   /**
    * The card's own `token_budget`. Absent is automatic: a share of the chat's
-   * context budget (`LORE_BUDGET_SHARE`), so the lore grows with the room it has.
+   * context budget (`LORE_BUDGET_SHARE`, or `TAVERN_LORE_BUDGET_SHARE` for a
+   * SillyTavern book), so the lore grows with the room it has.
    */
   tokenBudget?: number;
   /**
-   * The automatic budget's share of the context, in percent, where it is not the
-   * default quarter (`LORE_BUDGET_SHARE`) — SillyTavern's global
-   * `world_info_budget`, which its migration carries over. Absent is the default
-   * share; `tokenBudget`, when the card names one, wins over both.
+   * The automatic budget's share of the context, in percent, where it is not
+   * SillyTavern's default quarter (`TAVERN_LORE_BUDGET_SHARE`) — SillyTavern's
+   * global `world_info_budget`, which its migration carries over. Absent is the
+   * default share; `tokenBudget`, when the card names one, wins over both.
    */
   budgetPercent?: number;
   /** V3 `recursive_scanning`: rescan with the activated content added to the scan text. */

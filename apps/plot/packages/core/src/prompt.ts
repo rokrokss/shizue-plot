@@ -644,9 +644,19 @@ export const DEFAULT_CONTEXT_BUDGET = 64000;
 /**
  * The lore budget of a book whose card names none (`LoreSettings.tokenBudget`):
  * this share of the context budget, so a chat given more room gives its lore
- * more too.
+ * more too. Half, more than RisuAI's own default (the reader's lorebook setting,
+ * 8,000 on a fresh install): a cap that drops a card's content is a bug, and at a
+ * quarter Parma Knights, the one surveyed Realm card that names no budget, lost
+ * its own engine-state constants to the heroine profiles its recursion pulls in
+ * on nearly every turn, where half keeps them (2026-10-16, ARCHITECTURE §6
+ * 로어북). It is a cap, not a reservation: the history gets what the lore leaves.
  */
-export const LORE_BUDGET_SHARE = 0.25;
+export const LORE_BUDGET_SHARE = 0.5;
+/**
+ * A SillyTavern book's automatic share: ST's own `world_info_budget` default
+ * (25%), of the context less the reply.
+ */
+export const TAVERN_LORE_BUDGET_SHARE = 0.25;
 // Sized for the speech protocol: a turn carries several speakers plus narration,
 // and 600 (the single-character era value) cut replies mid-sentence.
 export const DEFAULT_MAX_RESPONSE_TOKENS = 1200;
@@ -1207,14 +1217,15 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // decides its settings was written there, or every entry was.
   const tavernBook = first?.sillyTavern === true || (lorebook.length > 0 && lorebook.every(isTavernEntry));
   // SillyTavern's budget is its share of the prompt's room — the context less the
-  // response (`getMaxPromptTokens`) — rounded, never 0, and capped.
-  const share = loreSettings.budgetPercent !== undefined ? loreSettings.budgetPercent / 100 : LORE_BUDGET_SHARE;
-  const tavernBudget = Math.round(share * (contextBudget - maxResponseTokens)) || 1;
+  // response (`getMaxPromptTokens`) — rounded, never 0, and capped. Every other
+  // book, RisuAI's and the studio's, gets its own larger share of the context.
+  const share = loreSettings.budgetPercent !== undefined ? loreSettings.budgetPercent / 100 : undefined;
+  const tavernBudget = Math.round((share ?? TAVERN_LORE_BUDGET_SHARE) * (contextBudget - maxResponseTokens)) || 1;
   const budgetTokens =
     loreSettings.tokenBudget ??
     (tavernBook
       ? Math.min(tavernBudget, loreSettings.budgetCap ?? Infinity)
-      : Math.floor(contextBudget * share));
+      : Math.floor(contextBudget * (share ?? LORE_BUDGET_SHARE)));
   // The character the reply is asked of, for SillyTavern's character filter and
   // the texts its entries may scan besides the chat (`matchSources`).
   const asked = voice && !voice.absent ? voice : undefined;

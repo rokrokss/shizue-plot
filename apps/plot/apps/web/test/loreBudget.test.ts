@@ -5,7 +5,7 @@
  * leaves the budget out is automatic, a share of the default context.
  */
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_CONTEXT_BUDGET, LORE_BUDGET_SHARE, loreBudget } from '../src/lib/loreBudget';
+import { DEFAULT_CONTEXT_BUDGET, LORE_BUDGET_SHARE, TAVERN_LORE_BUDGET_SHARE, loreBudget } from '../src/lib/loreBudget';
 import type { NormalizedCard } from '../src/lib/types';
 
 /** Only the lore settings matter here; the rest of the card is never read. */
@@ -31,8 +31,27 @@ describe('loreBudget', () => {
 
   it('is automatic at the default context when the first card sets none, or there is no card', () => {
     const automatic = Math.floor(DEFAULT_CONTEXT_BUDGET * LORE_BUDGET_SHARE);
-    expect(loreBudget(0, [member(0), member(0, 500)])).toMatchObject({ budget: automatic, automatic: true });
+    expect(loreBudget(0, [member(0), member(0, 500)])).toMatchObject({
+      budget: automatic,
+      automatic: true,
+      share: LORE_BUDGET_SHARE,
+    });
     expect(loreBudget(0, [])).toMatchObject({ budget: automatic, automatic: true });
+  });
+
+  it("gives a SillyTavern card's book ST's own share, and a RisuAI one the default", () => {
+    const withExtensions = (extensions: Record<string, unknown>) => ({
+      ...member(0),
+      card: { ...member(0).card, extensions } as NormalizedCard,
+    });
+    expect(loreBudget(0, [withExtensions({ talkativeness: '0.5', fav: false })])).toMatchObject({
+      budget: Math.floor(DEFAULT_CONTEXT_BUDGET * TAVERN_LORE_BUDGET_SHARE),
+      share: TAVERN_LORE_BUDGET_SHARE,
+    });
+    expect(loreBudget(0, [withExtensions({ talkativeness: '0.5', risuai: {} })])).toMatchObject({
+      budget: Math.floor(DEFAULT_CONTEXT_BUDGET * LORE_BUDGET_SHARE),
+      share: LORE_BUDGET_SHARE,
+    });
   });
 
   it('takes the share a book names for the automatic budget', () => {
