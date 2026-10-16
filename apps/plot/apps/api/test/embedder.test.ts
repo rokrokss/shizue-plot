@@ -19,6 +19,7 @@ import {
   type ThreadModel,
   type ThreadReply,
 } from '../src/embedder.js';
+import { ATTENTION_BUDGET, attentionBatches, MAX_TOKENS } from '../src/embedderThread.js';
 
 /** A thread that answers each text with [its length, its model's repo's length], or as told. */
 class FakeThread extends EventEmitter implements EmbedderWorker {
@@ -172,6 +173,34 @@ describe('routing', () => {
   it('is off when no model it routes to was fetched', () => {
     fetched('multiMiniLM');
     expect(createLocalEmbedder(envWith(), { spawn })).toBeUndefined();
+  });
+});
+
+describe('the thread’s calls', () => {
+  const budgetHeld = (lengths: number[], calls: number[][]): boolean =>
+    calls.every((call) => call.length === 1 || call.length * Math.max(...call.map((index) => lengths[index]!)) ** 2 <= ATTENTION_BUDGET);
+
+  it('takes short texts 32 at a time', () => {
+    expect(attentionBatches(Array.from({ length: 70 }, () => 40)).map((call) => call.length)).toEqual([32, 32, 6]);
+  });
+
+  it('keeps count × longest² within the budget, shortest first, every text once', () => {
+    const lengths = [2_048, 12, 1_536, 384, 1_536, 700, ...Array.from({ length: 40 }, () => 384), 5];
+    const calls = attentionBatches(lengths);
+    expect(budgetHeld(lengths, calls)).toBe(true);
+    expect(calls.flat().sort((a, b) => a - b)).toEqual(lengths.map((_, index) => index));
+    const longest = calls.map((call) => Math.max(...call.map((index) => lengths[index]!)));
+    expect(longest).toEqual([...longest].sort((a, b) => a - b));
+    expect(calls.at(-1)).toEqual([0]);
+  });
+
+  it('puts 1,536 tokens two to a call and 2,048 one, as measured', () => {
+    expect(attentionBatches([1_536, 1_536, 1_536])).toEqual([[0, 1], [2]]);
+    expect(attentionBatches([MAX_TOKENS, MAX_TOKENS])).toEqual([[0], [1]]);
+  });
+
+  it('sends a text over the budget alone rather than refusing it', () => {
+    expect(attentionBatches([MAX_TOKENS * 2, 10])).toEqual([[1], [0]]);
   });
 });
 
