@@ -29,6 +29,13 @@ interface SseEvent {
 }
 
 /**
+ * A stream that closed before the server said how it ended — a network drop, or
+ * the API restarting mid-reply. The code is the page's, not the server's: it is
+ * what the reader is told, in their language, instead of the transport's words.
+ */
+const INTERRUPTED = 'stream_interrupted';
+
+/**
  * One `\n\n`-terminated block as an event, or null when it carries no data — a
  * `:` comment line, or a heartbeat with an empty body. The server sends
  * `event: ping` every 15s so idle proxies keep a slow first token alive, and the
@@ -84,11 +91,11 @@ export async function streamGeneration(
     throw error;
   }
   if (!res.ok) throw await toApiError(res);
-  if (!res.body) return { kind: 'error', message: 'Empty response stream' };
+  if (!res.body) return { kind: 'error', code: INTERRUPTED, message: 'Empty response stream' };
 
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
   let buffer = '';
-  let result: StreamResult = { kind: 'error', message: 'The stream ended unexpectedly' };
+  let result: StreamResult = { kind: 'error', code: INTERRUPTED, message: 'The stream ended unexpectedly' };
 
   try {
     for (;;) {
@@ -138,7 +145,11 @@ export async function streamGeneration(
     // The stream was already open, so this is a transport drop, not a rejected
     // request — the user turn is persisted either way.
     if (signal.aborted) return { kind: 'aborted' };
-    return { kind: 'error', message: error instanceof Error ? error.message : 'The stream was interrupted' };
+    return {
+      kind: 'error',
+      code: INTERRUPTED,
+      message: error instanceof Error ? error.message : 'The stream was interrupted',
+    };
   } finally {
     await reader.cancel().catch(() => undefined);
   }

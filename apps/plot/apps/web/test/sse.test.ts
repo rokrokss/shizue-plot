@@ -142,7 +142,8 @@ describe('streamGeneration', () => {
     mockFetch(['event: delta\ndata: {"text":"잘린"}\n\n']);
 
     const { result } = await collect();
-    expect(result.kind).toBe('error');
+    // Told in the reader's language, not the transport's.
+    expect(result).toMatchObject({ kind: 'error', code: 'stream_interrupted' });
   });
 
   // The caller distinguishes the two failure modes by whether the promise
@@ -165,7 +166,7 @@ describe('streamGeneration', () => {
 
     const { result, text } = await collect();
     expect(text).toBe('부분');
-    expect(result).toEqual({ kind: 'error', message: 'network dropped' });
+    expect(result).toEqual({ kind: 'error', code: 'stream_interrupted', message: 'network dropped' });
   });
 
   it('rejects when the request never opens a stream', async () => {

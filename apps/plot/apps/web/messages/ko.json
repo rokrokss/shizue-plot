@@ -1318,6 +1318,7 @@
     "chatgpt_invalid_stream": "ChatGPT의 응답을 읽을 수 없었습니다. 다시 시도해 주세요.",
     "chatgpt_empty_stream": "ChatGPT가 빈 응답을 보냈습니다. 다시 시도해 주세요.",
     "chatgpt_request_failed": "ChatGPT가 이 요청에 답하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+    "stream_interrupted": "답장을 받는 도중 서버와의 연결이 끊겼습니다. 다시 시도해 주세요.",
     "chatgpt_missing_plan_scope": "ChatGPT 요금제를 사용할 권한을 받지 못했습니다. 다시 로그인해 주세요.",
     "chatgpt_invalid_state": "로그인 요청이 만료되었거나 다른 브라우저에서 열렸습니다. 이 브라우저에서 다시 로그인해 주세요.",
     "chatgpt_identity_mismatch": "ChatGPT 계정을 확인하지 못했습니다. 다시 로그인해 주세요.",

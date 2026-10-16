@@ -1318,6 +1318,7 @@
     "chatgpt_invalid_stream": "ChatGPT の応答を読み取れませんでした。もう一度お試しください。",
     "chatgpt_empty_stream": "ChatGPT から空の応答が返りました。もう一度お試しください。",
     "chatgpt_request_failed": "ChatGPT がこのリクエストに応答できませんでした。少し待ってから再試行してください。",
+    "stream_interrupted": "返信の受信中にサーバーとの接続が切れました。もう一度お試しください。",
     "chatgpt_missing_plan_scope": "ChatGPT プランの利用権限を取得できませんでした。もう一度ログインしてください。",
     "chatgpt_invalid_state": "ログインの有効期限が切れたか、別のブラウザで開かれました。このブラウザでもう一度ログインしてください。",
     "chatgpt_identity_mismatch": "ChatGPT アカウントを確認できませんでした。もう一度ログインしてください。",
