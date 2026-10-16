@@ -74,6 +74,7 @@ import { chatRequestSent } from './cacheHealth.js';
 import { ApiError, badRequest, notFound } from './errors.js';
 import type { AppDeps, AppEnv, OpenGeneration, Tx } from './deps.js';
 import { invalidateMemoryForEdit, noteRequestOverhead, scheduleMemoryUpdate } from './memory.js';
+import { countGeneration, type GenerationResult } from './metrics.js';
 import { runPromptScriptJob } from './regexWorker.js';
 import { withPromptScripts } from './sentHistory.js';
 import { scheduleRelationshipUpdate } from './relationship.js';
@@ -1153,6 +1154,7 @@ async function runGeneration(
     // as RisuAI's `toomuchtoken` does, as a provider failure does here —
     // nothing stored, the turn it would have answered still the head.
     if (error instanceof RequestTooLongError) {
+      countGeneration('error', error.code);
       return streamSSE(c, async (stream) => {
         try {
           await stream.writeSSE({
@@ -1169,6 +1171,7 @@ async function runGeneration(
       });
     }
     await release();
+    countGeneration('error', error instanceof ChatGPTError ? error.code : 'model_unavailable');
     if (error instanceof ChatGPTError) throw error;
     throw badRequest('model_unavailable', error instanceof Error ? error.message : 'Model unavailable');
   }
@@ -1213,6 +1216,8 @@ async function runGeneration(
     let usage: Usage = { promptTokens: 0, completionTokens: 0 };
     /** The upstream went quiet (`chatgpt_timeout`): what it sent is kept as a stopped reply is. */
     let timeout: ChatGPTError | null = null;
+    /** How the stream ended, for the metrics; a throw before any end below leaves `internal`. */
+    let outcome: [GenerationResult, string?] = ['error', 'internal'];
 
     try {
       try {
@@ -1260,6 +1265,7 @@ async function runGeneration(
         // failure and must not persist a message.
         timeout = error instanceof ChatGPTError && error.code === 'chatgpt_timeout' ? error : null;
         if (!controller.signal.aborted && !timeout) {
+          outcome = ['error', error instanceof ChatGPTError ? error.code : 'stream_failed'];
           await send({
             event: 'error',
             data: JSON.stringify({ message: error instanceof Error ? error.message : 'Generation failed', ...(error instanceof ChatGPTError ? { code: error.code } : {}) }),
@@ -1286,6 +1292,7 @@ async function runGeneration(
           await openUnlocks(deps, plan.chatId, stored.content);
           if (!plan.postProcess) scheduleBackgroundUpdates(deps, plan.chatId);
         }
+        outcome = [timeout && !controller.signal.aborted ? 'timeout' : 'stopped'];
         if (timeout && !controller.signal.aborted) {
           await send({ event: 'error', data: JSON.stringify({ message: timeout.message, code: timeout.code }) });
         }
@@ -1295,6 +1302,7 @@ async function runGeneration(
       // Nothing of the scene was left: it fails as a provider failure does —
       // nothing stored, and the turn it would have followed is still the head.
       if (kept === '') {
+        outcome = ['error', 'narration_empty'];
         await send({
           event: 'error',
           data: JSON.stringify({ message: 'The narration held nothing but dialogue', code: 'narration_empty' }),
@@ -1303,6 +1311,7 @@ async function runGeneration(
       }
 
       const stored = await persist(deps, plan, reply, usage, request);
+      outcome = ['done'];
       await keepGlobalWrites(deps, plan, request);
       // Evaluated on the raw text as well as at the commit: unlocks only ever
       // open, so the earlier answer costs nothing and saves the reader a wait.
@@ -1327,6 +1336,7 @@ async function runGeneration(
       // Strictly after `done`: background work must not add latency to the turn.
       if (!plan.postProcess) scheduleBackgroundUpdates(deps, plan.chatId, stored.id);
     } finally {
+      countGeneration(...outcome);
       clearInterval(heartbeat);
       c.req.raw.signal?.removeEventListener('abort', leave);
       try {

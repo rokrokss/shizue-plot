@@ -9,6 +9,9 @@ import { createHostedAuth, createSessionStore } from './hostedAuth.js';
 import { loadRootEnv, readConfig } from './env.js';
 import { startJobWorker } from './jobs.js';
 import { stopGenerations } from './generation.js';
+import { createBackgroundTasks, onUnhandledRejection } from './lifecycle.js';
+import { installJsonConsole } from './log.js';
+import { luaSandboxEnabled, startMetricsServer } from './metrics.js';
 import { createJobHandlers } from './notifications.js';
 import { createRemoteFetch } from './localizeAssets.js';
 import { probeRequestLua } from './requestLua.js';
@@ -18,6 +21,8 @@ import { fakeChatGPTOAuth } from './testOpenAI.js';
 
 loadRootEnv();
 const config = readConfig();
+// Before anything else is said: the embedder and the Lua probe speak at startup.
+if (config.logFormat === 'json') installJsonConsole();
 
 const { db } = createDb(config.databaseUrl);
 const testing = config.env['NODE_ENV'] === 'test';
@@ -34,6 +39,8 @@ const fixture = testing ? createAuth(db, {
   extraTrustedOrigins: config.authExtraTrustedOrigins,
 }) : undefined;
 
+// The background tasks the turns start, kept until they settle so a shutdown can wait for them.
+const background = createBackgroundTasks();
 // One set for the routes and the job worker: the memory backfill shares the
 // per-chat refresh guard with the turns the reader is sending meanwhile.
 const deps: AppDeps = {
@@ -56,13 +63,14 @@ const deps: AppDeps = {
   embeddingVectors: new Map(),
   suggesting: new Set<string>(),
   drafting: new Set<string>(),
+  onBackgroundTask: background.track,
 };
 // Lazy: the model loads on the first search, not here (`embedder.ts`).
 const embedder = createLocalEmbedder(config.env);
 if (embedder) deps.embedder = embedder;
 const app = createApp(deps);
 // Whether this Node can sandbox a card's editRequest Lua, asked now so the log says so at startup.
-void probeRequestLua();
+void probeRequestLua().then((enabled) => luaSandboxEnabled.set(enabled ? 1 : 0));
 
 const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
   console.log(`[api] listening on http://${config.host}:${info.port}`);
@@ -72,22 +80,62 @@ const server = serve({ fetch: app.fetch, port: config.port, hostname: config.hos
 // off each other's rows.
 const stopJobWorker = startJobWorker({ db, handlers: createJobHandlers(deps) });
 
-// A signal listener replaces node's own, which was the thing that ended the
-// process — so this has to end it. Only the claiming is stopped first: a job still
-// running is left where it is, and its lease expires two minutes later for the next
-// instance to take over.
-for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-  process.once(signal, () => {
+// Off unless METRICS_PORT is set, and never on the API's own port (`metrics.ts`).
+const metricsServer =
+  config.metricsPort === undefined
+    ? undefined
+    : startMetricsServer(deps, background, { port: config.metricsPort, host: config.metricsHost });
+
+let exitCode = 0;
+let stopping = false;
+
+/**
+ * The one way this process ends, whatever asks — a signal, an exception nothing
+ * caught — and once: a later ask only raises the exit code. Ordered so nothing
+ * that can be kept is cut (ARCHITECTURE §12).
+ */
+function shutdown(code: number): void {
+  if (code !== 0) exitCode = code;
+  if (stopping) return;
+  stopping = true;
+  void (async () => {
+    // `/api/ready` answers 503 from here on, for a balancer to stop sending readers.
+    deps.draining = true;
     // No new connections; the open streams are stopped below.
     server.close();
+    metricsServer?.close();
+    // Only the claiming is stopped: a job still running is left where it is, and
+    // its lease expires two minutes later for the next instance to take over.
     stopJobWorker();
-    // A reply mid-stream is stopped as a disconnect stops it — kept, and its chat
-    // freed — rather than cut by the exit. Five seconds is for that storing, which
-    // takes well under one, never for the replies, and leaves the rest of a host's
-    // grace (commonly 10–30s) to the embedder.
-    void stopGenerations(deps, 5_000)
-      // The embedder's thread is ended next: onnxruntime does not survive an exit around it.
-      .then(() => deps.embedder?.close())
-      .finally(() => process.exit(0));
-  });
+    // A reply mid-stream is stopped as the reader's stop stops it — kept, and its
+    // chat freed — rather than cut by the exit. Five seconds is for that storing,
+    // which takes well under one, never for the replies.
+    await stopGenerations(deps, 5_000);
+    // What the turns started — a summary, a relationship, vectors, and those the
+    // stopped replies just started — is let finish rather than cut, up to its own
+    // deadline (`SHUTDOWN_BACKGROUND_MS`).
+    const left = await background.drain(config.shutdownBackgroundMs);
+    if (left > 0) {
+      const kinds = [...background.inFlight()].map(([kind, count]) => `${kind} ${count}`).join(', ');
+      console.warn(`[api] ${left} background tasks still running after ${config.shutdownBackgroundMs} ms (${kinds}); exiting without them`);
+    }
+    // The embedder's thread last, after everything that may embed: onnxruntime
+    // does not survive an exit around it.
+    await deps.embedder?.close();
+  })()
+    .catch((error: unknown) => console.error('[api] shutdown failed', error))
+    .finally(() => process.exit(exitCode));
 }
+
+// A signal listener replaces node's own, which was the thing that ended the
+// process — so `shutdown` has to end it. Once: a second Ctrl-C finds node's own
+// again, and ends a shutdown that hangs.
+for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => shutdown(0));
+// Logged, and the process goes on (`onUnhandledRejection`).
+process.on('unhandledRejection', onUnhandledRejection);
+// An exception nothing caught leaves the process in a state nobody planned: it
+// is logged, and the process ends the way a signal ends it, exiting 1.
+process.on('uncaughtException', (error) => {
+  console.error('[api] uncaught exception; shutting down', error);
+  shutdown(1);
+});

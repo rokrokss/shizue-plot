@@ -134,6 +134,8 @@ export interface AppDeps {
    * the two independent jobs apart.
    */
   onBackgroundTask?: (task: Promise<void>, kind: BackgroundTaskKind) => void;
+  /** Set once a shutdown begins: `GET /api/ready` answers 503 from then on (`health.ts`, `index.ts`). */
+  draining?: boolean;
 }
 
 export interface AppEnv {
