@@ -36,6 +36,7 @@ import {
 } from '@shizue/core/sillytavern';
 import { ApiError, toApiError } from '../api';
 import { MAX_ATTACHMENTS } from '../attachments';
+import { importFile, type FileImportTransport } from '../fileImport';
 import { readImportWarnings, type ImportWarning } from '../importWarnings';
 import {
   MAX_CARD_IMPORT_BYTES,
@@ -617,6 +618,8 @@ export interface ImportDeps {
   promptScripts: (scripts: unknown[]) => unknown[];
   /** `stChatMainChat`: the chat a chat file is a branch or checkpoint of, by name. */
   chatMainChat: (jsonl: string) => string | undefined;
+  /** A card import's part uploads and waits (`lib/fileImport`); the browser's own when absent. */
+  fileImport?: Partial<Omit<FileImportTransport, 'fetch'>>;
 }
 
 export interface RunInput {
@@ -682,38 +685,28 @@ async function readFile(file: StFile): Promise<Uint8Array> {
   }
 }
 
-/**
- * The card and the World Info file it links, as the import routes take them. The
- * linked file replaces the lorebook embedded in the card, which ST only writes
- * back when the character is saved and so is often older than the file.
- */
-async function cardForm(
-  character: StCharacter,
-  world: { name: string; bytes: Uint8Array } | null,
-): Promise<FormData> {
+/** The card file as the import takes it, read now. */
+async function cardFile(character: StCharacter): Promise<File> {
   if (character.file.size > MAX_CARD_IMPORT_BYTES) {
     throw failure('card_too_large', `A card file is at most ${MAX_CARD_IMPORT_BYTES} bytes`);
   }
-  const form = new FormData();
-  form.append(
-    'file',
-    new File([bytesPart(await readFile(character.file))], character.avatar, { type: 'image/png' }),
-  );
-  if (world) {
-    form.append('worldInfo', new File([bytesPart(world.bytes)], world.name, { type: 'application/json' }));
-  }
-  return form;
+  return new File([bytesPart(await readFile(character.file))], character.avatar, { type: 'image/png' });
 }
 
 /**
- * Uploads a card to one of the two import routes. A linked World Info file that
- * cannot be read here, or that the API cannot read (`invalid_lorebook`), does not
- * cost the character: the card goes on its own, with its embedded lorebook, and
- * the step says so. What the import left behind or cut goes into `cut`.
+ * Imports a card as a new plot, or as a member of `plotId` (`lib/fileImport`),
+ * with the World Info file it links riding as text in the request that starts
+ * the import. The linked file replaces the lorebook embedded in the card, which
+ * ST only writes back when the character is saved and so is often older than
+ * the file. One that cannot be read here, or that the API cannot read
+ * (`invalid_lorebook`, refused before the card is uploaded) or will not take
+ * (`payload_too_large`, past its 32MB), does not cost the character: the card
+ * goes on its own, with its embedded lorebook, and the step says so. What the
+ * import left behind or cut goes into `cut`.
  */
 async function uploadCard<T>(
   ctx: RunContext,
-  path: string,
+  into: { target: 'plot' } | { target: 'member'; plotId: string },
   character: StCharacter,
   warnings: StepWarning[],
   cut: ImportWarning[],
@@ -722,22 +715,33 @@ async function uploadCard<T>(
     warnings.push({ code: 'world_unreadable', ...(character.worldName ? { name: character.worldName } : {}) });
   };
   const file = character.worldName ? ctx.manifest.worlds[character.worldName] : undefined;
-  let world: { name: string; bytes: Uint8Array } | null = null;
+  let world: string | null = null;
   if (file) {
     try {
-      world = { name: baseName(file.path), bytes: worldBytesWithFilters(ctx, await readFile(file)) };
+      world = worldTextWithFilters(ctx, await readFile(file));
     } catch {
       ctx.signal?.throwIfAborted();
       unreadable();
     }
   }
+  const card = await cardFile(character);
+  const send = (worldInfo: string | null): Promise<T> =>
+    importFile<T>(
+      into.target,
+      card,
+      { ...(into.target === 'member' ? { plotId: into.plotId } : {}), ...(worldInfo ? { worldInfo } : {}) },
+      { transport: { fetch: ctx.deps.fetch, ...ctx.deps.fileImport }, ...(ctx.signal ? { signal: ctx.signal } : {}) },
+    );
   let answer: T;
   try {
-    answer = await request<T>(ctx, 'POST', path, await cardForm(character, world));
+    answer = await send(world);
   } catch (caught) {
-    if (!world || !(caught instanceof ApiError && caught.code === 'invalid_lorebook')) throw caught;
+    // Unreadable, or past what an import takes beside a card (32MB): the card comes without it.
+    if (!world || !(caught instanceof ApiError && (caught.code === 'invalid_lorebook' || caught.code === 'payload_too_large'))) {
+      throw caught;
+    }
     unreadable();
-    answer = await request<T>(ctx, 'POST', path, await cardForm(character, null));
+    answer = await send(null);
   }
   addImportWarnings(cut, (answer as { importWarnings?: unknown }).importWarnings);
   return answer;
@@ -764,16 +768,16 @@ function worldEntries(ctx: RunContext, name: string, file: StFile): Promise<Lore
 }
 
 /**
- * A World Info file's bytes with its character filters naming this library's
- * cast (`stWorldWithFilters`), for the card import route to read. Bytes that are
- * not JSON go as they are, for the route to refuse.
+ * A World Info file's text with its character filters naming this library's
+ * cast (`stWorldWithFilters`), for the card import to read. Text that is not
+ * JSON goes as it is, for the import to refuse.
  */
-function worldBytesWithFilters(ctx: RunContext, bytes: Uint8Array): Uint8Array {
+function worldTextWithFilters(ctx: RunContext, bytes: Uint8Array): string {
+  const text = new TextDecoder().decode(bytes);
   try {
-    const json: unknown = JSON.parse(new TextDecoder().decode(bytes));
-    return new TextEncoder().encode(JSON.stringify(stWorldWithFilters(json, ctx.manifest)));
+    return JSON.stringify(stWorldWithFilters(JSON.parse(text), ctx.manifest));
   } catch {
-    return bytes;
+    return text;
   }
 }
 
@@ -1039,7 +1043,7 @@ async function runCharacter(
   }
   const warnings: StepWarning[] = [];
   const cut: ImportWarning[] = [];
-  const plot = await uploadCard<PlotDetail>(ctx, '/api/plots/import', item.character, warnings, cut);
+  const plot = await uploadCard<PlotDetail>(ctx, { target: 'plot' }, item.character, warnings, cut);
   result.plotId = plot.id;
   result.cast = soloCast(plot, item);
   if (cut.length > 0) result.importWarnings = cut;
@@ -1072,7 +1076,7 @@ async function runGroup(ctx: RunContext, item: GroupItem, result: StepResult): P
   if (existing) {
     plot = await request<PlotDetail>(ctx, 'GET', `/api/plots/${existing}`);
   } else {
-    plot = await uploadCard<PlotDetail>(ctx, '/api/plots/import', first.character, warnings, cut);
+    plot = await uploadCard<PlotDetail>(ctx, { target: 'plot' }, first.character, warnings, cut);
     result.plotId = plot.id;
     warnings.push(
       ...(await applyExtras(
@@ -1100,7 +1104,7 @@ async function runGroup(ctx: RunContext, item: GroupItem, result: StepResult): P
     try {
       const joined = await uploadCard<PlotMember>(
         ctx,
-        `/api/plots/${plot.id}/characters/import`,
+        { target: 'member', plotId: plot.id },
         member.character,
         warnings,
         cut,

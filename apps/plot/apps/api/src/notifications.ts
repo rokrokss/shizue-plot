@@ -2,6 +2,7 @@
 import { follows, notifications, plots, type Db, type JobPayloadMap } from '@shizue/db';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import type { AppDeps } from './deps.js';
+import { runFileImport } from './fileImports.js';
 import type { JobHandlers } from './jobs.js';
 import { memoryBackfill } from './memory.js';
 
@@ -139,5 +140,6 @@ export function createJobHandlers(deps: AppDeps): JobHandlers {
   return {
     notification_fanout: notificationFanout,
     memory_backfill: (_db, payload) => memoryBackfill(deps, payload),
+    file_import: (_db, payload) => runFileImport(deps, payload.importId),
   };
 }

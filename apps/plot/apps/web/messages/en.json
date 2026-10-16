@@ -424,6 +424,14 @@
       "external_over_limit": "{count, plural, one {# picture, font or stylesheet} other {# pictures, fonts or stylesheets}} on other sites left past the import’s limits",
       "module_mcp_inert": "{count, plural, one {# module MCP server} other {# module MCP servers}}, never connected to",
       "module_cjs_inert": "{count, plural, one {# piece} other {# pieces}} of module cjs code, never run"
+    },
+    "progress": {
+      "uploading": "Uploading {percent}%",
+      "queued": "Waiting its turn to import…",
+      "processing": "Importing…",
+      "reading": "Reading the file {percent}%",
+      "assets": "Saving assets {done}/{total}",
+      "localizing": "Fetching images and fonts from other sites…"
     }
   },
   "stImport": {
@@ -1306,6 +1314,8 @@
     "suggestion_in_progress": "Replies are already being suggested.",
     "rate_limited": "Too many requests. Try again in a moment.",
     "import_busy": "Another import is in progress. Try again in a moment.",
+    "upload_failed": "The file couldn’t be uploaded. Check your connection and try again.",
+    "import_state": "This import can’t continue. Pick the file again.",
     "length_required": "The file’s size wasn’t sent, so it couldn’t be imported. Try again.",
     "chatgpt_login_required": "Connect ChatGPT in AI settings.",
     "invalid_grant": "Your ChatGPT connection expired. Reconnect in AI settings.",

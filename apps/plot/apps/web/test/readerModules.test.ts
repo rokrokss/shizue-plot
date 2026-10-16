@@ -17,26 +17,44 @@ import type { ReaderModuleSummary } from '../src/lib/types';
 
 (globalThis as Record<string, unknown>)['IS_REACT_ACT_ENVIRONMENT'] = true;
 
-const uploads: { path: string; fields: Record<string, string> }[] = [];
+/** The file imports the library started, the yeses sent to one, and the ones given up. */
+const uploads: { target: string; fields: unknown }[] = [];
+const confirmed: string[] = [];
+const abandoned: string[] = [];
+let uploadAnswer: () => Promise<unknown>;
 const sends: { method: string; path: string; body: unknown }[] = [];
-let uploadAnswer: (fields: Record<string, string>) => Promise<unknown>;
 
 vi.mock('@/lib/api', async (importOriginal) => {
   const original = await importOriginal<typeof import('../src/lib/api')>();
   return {
     ...original,
-    apiUpload: (path: string, _file: File, fields: Record<string, string> = {}) => {
-      uploads.push({ path, fields });
-      return uploadAnswer(fields);
-    },
     apiSend: (method: string, path: string, body?: unknown) => {
       sends.push({ method, path, body });
       return Promise.resolve({});
     },
   };
 });
+// The exchange itself is `fileImport.test.ts`'s; the error class stays the real one.
+vi.mock('@/lib/fileImport', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../src/lib/fileImport')>();
+  return {
+    ...original,
+    importFile: (target: string, _file: File, fields: unknown = {}) => {
+      uploads.push({ target, fields });
+      return uploadAnswer();
+    },
+    confirmImport: (id: string) => {
+      confirmed.push(id);
+      return Promise.resolve({ importWarnings: [] });
+    },
+    abandonImport: (id: string) => {
+      abandoned.push(id);
+      return Promise.resolve();
+    },
+  };
+});
 
-const { ApiError } = await import('../src/lib/api');
+const { FileImportError } = await import('../src/lib/fileImport');
 const { ModuleToggles } = await import('../src/components/ModuleToggles');
 const { ReaderModules } = await import('../src/components/ReaderModules');
 
@@ -54,6 +72,8 @@ beforeEach(() => {
   document.body.appendChild(host);
   root = createRoot(host);
   uploads.length = 0;
+  confirmed.length = 0;
+  abandoned.length = 0;
   sends.length = 0;
 });
 
@@ -200,12 +220,10 @@ describe('ReaderModules', () => {
     expect(host.querySelector('[data-testid="reader-module"]')!.textContent).toContain(messages.chat.moduleHideIcon);
   });
 
-  it('asks before importing a module that wants low-level access, and imports it only on a yes', async () => {
-    uploadAnswer = async (fields) => {
-      if (fields['confirmLowLevelAccess'] !== 'true') {
-        throw new ApiError(409, 'low_level_access_unconfirmed', 'confirm');
-      }
-      return { importWarnings: [] };
+  it('asks before importing a module that wants low-level access, and on a yes imports the file the server kept', async () => {
+    let next = 0;
+    uploadAnswer = async () => {
+      throw new FileImportError(`import-${(next += 1)}`, 409, 'low_level_access_unconfirmed', 'confirm');
     };
     let changes = 0;
     await render(
@@ -226,12 +244,18 @@ describe('ReaderModules', () => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
     await pick();
     expect(confirm).toHaveBeenCalledWith(messages.chat.readerModuleLowLevelConfirm);
-    expect(uploads.map((upload) => upload.fields)).toEqual([{}]);
+    expect(uploads).toEqual([{ target: 'reader_module', fields: {} }]);
+    // A no gives the kept file up.
+    expect(abandoned).toEqual(['import-1']);
+    expect(confirmed).toEqual([]);
     expect(changes).toBe(0);
 
     confirm.mockReturnValue(true);
     await pick();
-    expect(uploads.map((upload) => upload.fields)).toEqual([{}, {}, { confirmLowLevelAccess: 'true' }]);
+    // The yes goes to the import that asked; the file is not sent again.
+    expect(uploads).toHaveLength(2);
+    expect(confirmed).toEqual(['import-2']);
+    expect(abandoned).toEqual(['import-1']);
     expect(changes).toBe(1);
   });
 });

@@ -3,7 +3,8 @@
  * run's lookup, the plan's order, the batches a chat is cut into, and the run
  * against an in-memory stand-in for the API behind the injected `fetch` — what
  * is asked for in which order, what a second run leaves alone, and what a
- * cancel, a failure and a retry each leave behind.
+ * cancel, a failure and a retry each leave behind. A card goes through the file
+ * import (`fileImportFake`), its parts through the injected `put`.
  */
 import { AUTHOR_NOTE_MAX, type AuthorNoteSettings, type ImportedAttachments, type ImportedChatMessage } from '@shizue/core';
 import {
@@ -38,6 +39,7 @@ import {
   type Results,
 } from '../src/lib/sillytavern/import';
 import type { LoreEntry, NormalizedCard, PlotDetail, PlotMember } from '../src/lib/types';
+import { fakeFileImports } from './fileImportFake';
 
 // ── the library ─────────────────────────────────────────────────────────────
 
@@ -159,9 +161,12 @@ function treeRows(chat: FakeChat, parentId: string | null, messages: ImportedCha
 }
 
 /**
- * The routes the run calls, kept as plain state. A card upload is recognized by
+ * The routes the run calls, kept as plain state. A card import is recognized by
  * its file name, which the run sets to the ST avatar, and recorded under the
  * hash the test library gives that card — the server's own SHA-256 stands in.
+ * The start of a card's file import is logged as `POST /api/file-imports plot`
+ * or `… member <plot>`, what it is an import into; its parts, completion and
+ * polls are left out of `writes()`.
  */
 function fakeApi() {
   let next = 0;
@@ -181,6 +186,8 @@ function fakeApi() {
   const log: string[] = [];
   /** Requests that answer with an error instead, by `METHOD path`, consumed in order. */
   const failures = new Map<string, { status: number; code: string }[]>();
+  /** Card imports whose job fails instead, by their start's label, consumed in order. */
+  const jobFailures = new Map<string, { status: number; code: string }[]>();
   /** Called before each request is answered; the cancel tests abort from here. */
   let before: (route: string) => void = () => undefined;
 
@@ -209,15 +216,52 @@ function fakeApi() {
     };
   }
 
+  const label = (body: Record<string, unknown>): string =>
+    body['target'] === 'member'
+      ? `POST /api/file-imports member ${String(body['plotId'])}`
+      : `POST /api/file-imports ${String(body['target'])}`;
+
+  /** The import job: the plot or the member a card makes, with the linked world as its lorebook. */
+  const fileImports = fakeFileImports({
+    job: ({ body }) => {
+      const failed = jobFailures.get(label(body))?.shift();
+      if (failed) return { error: { ...failed, message: 'stubbed' } };
+      const name = body['fileName'] as string;
+      const worldInfo = typeof body['worldInfo'] === 'string' ? body['worldInfo'] : null;
+      uploads.push({ path: label(body), file: name, worldInfo });
+      const cut = importWarnings.get(name);
+      const warned = cut ? { importWarnings: cut } : {};
+      if (body['target'] === 'plot') {
+        const plotId = id('plot');
+        const plot = {
+          id: plotId,
+          name: name.replace('.png', ''),
+          lorebook: [lore('own')],
+          customUi: { displayScripts: [{ in: 'card', out: '', order: 0, enabled: true }] },
+          characters: [member(name, 0, worldInfo)],
+        } as unknown as PlotDetail;
+        plots.set(plotId, plot);
+        return { result: { ...plot, ...warned } };
+      }
+      const plot = plots.get(body['plotId'] as string)!;
+      const joined = member(name, plot.characters.length, worldInfo);
+      plot.characters.push(joined);
+      return { result: { ...joined, ...warned } };
+    },
+  });
+
   const fetch = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
     const method = init.method ?? 'GET';
     const path = String(input);
-    const route = `${method} ${path}`;
+    const asked = `${method} ${path}`;
+    const route =
+      asked === 'POST /api/file-imports' ? label(JSON.parse(String(init.body)) as Record<string, unknown>) : asked;
     log.push(route);
     before(route);
     init.signal?.throwIfAborted();
     const queued = failures.get(route)?.shift();
     if (queued) return json(queued.status, { error: 'stubbed', code: queued.code });
+    if (path.startsWith('/api/file-imports')) return fileImports.fetch(input, init);
 
     const body = init.body;
     const read = (): Record<string, unknown> => JSON.parse(String(body)) as Record<string, unknown>;
@@ -260,31 +304,6 @@ function fakeApi() {
         }
       }
       return json(200, answer);
-    }
-    if (route === 'POST /api/plots/import' || /^POST \/api\/plots\/[^/]+\/characters\/import$/.test(route)) {
-      const form = body as FormData;
-      const card = form.get('file') as File;
-      const world = form.get('worldInfo') as File | null;
-      const worldInfo = world ? await world.text() : null;
-      uploads.push({ path, file: card.name, worldInfo });
-      const cut = importWarnings.get(card.name);
-      const warned = cut ? { importWarnings: cut } : {};
-      if (path === '/api/plots/import') {
-        const plotId = id('plot');
-        const plot = {
-          id: plotId,
-          name: card.name.replace('.png', ''),
-          lorebook: [lore('own')],
-          customUi: { displayScripts: [{ in: 'card', out: '', order: 0, enabled: true }] },
-          characters: [member(card.name, 0, worldInfo)],
-        } as unknown as PlotDetail;
-        plots.set(plotId, plot);
-        return json(201, { ...plot, ...warned });
-      }
-      const plot = plots.get(path.split('/')[3]!)!;
-      const joined = member(card.name, plot.characters.length, worldInfo);
-      plot.characters.push(joined);
-      return json(201, { ...joined, ...warned });
     }
     const memberMatch = /^PATCH \/api\/plots\/([^/]+)\/characters\/([^/]+)$/.exec(route);
     if (memberMatch) {
@@ -414,12 +433,19 @@ function fakeApi() {
     attachments,
     log,
     failures,
+    jobFailures,
+    fileImports,
     setBefore: (hook: (route: string) => void) => {
       before = hook;
     },
-    /** The writes, with the reads and the lookups left out. */
+    /** The writes, with the reads, the lookups and a file import's own steps after its start left out. */
     writes: () =>
-      log.filter((route) => !route.startsWith('GET ') && route !== 'POST /api/imports/lookup'),
+      log.filter(
+        (route) =>
+          !route.startsWith('GET ') &&
+          route !== 'POST /api/imports/lookup' &&
+          !/^(POST|DELETE) \/api\/file-imports\//.test(route),
+      ),
   };
 }
 
@@ -440,6 +466,7 @@ function deps(api: Api): ImportDeps & { casts: { members: { name: string; avatar
   const casts: { members: { name: string; avatar?: string }[] }[] = [];
   return {
     fetch: api.fetch as unknown as typeof fetch,
+    fileImport: { put: api.fileImports.put, sleep: async () => undefined },
     casts,
     convertChat: (text, cast) => {
       casts.push(cast);
@@ -679,17 +706,17 @@ describe('runImport', () => {
 
     expect(api.writes()).toEqual([
       'POST /api/personas',
-      'POST /api/plots/import',
+      'POST /api/file-imports plot',
       'PATCH /api/plots/plot-2',
       'POST /api/chats/import',
       'POST /api/chats/chat-4/import/complete',
-      'POST /api/plots/import',
+      'POST /api/file-imports plot',
       'PATCH /api/plots/plot-5',
       'POST /api/chats/import',
       'POST /api/chats/chat-7/import/complete',
-      'POST /api/plots/import',
+      'POST /api/file-imports plot',
       'PATCH /api/plots/plot-8',
-      'POST /api/plots/plot-8/characters/import',
+      'POST /api/file-imports member plot-8',
       'POST /api/chats/import',
       'POST /api/chats/chat-11/import/complete',
     ]);
@@ -891,7 +918,7 @@ describe('runImport', () => {
     });
     await runAll(api, manifest);
     expect(api.writes()).toEqual([
-      'POST /api/plots/import',
+      'POST /api/file-imports plot',
       'POST /api/chats/import',
       'POST /api/chats/chat-3/import',
       'POST /api/chats/chat-3/import',
@@ -951,7 +978,7 @@ describe('runImport', () => {
   it('records a failure and goes on; its chats wait, and a retry brings both', async () => {
     const api = fakeApi();
     const manifest = sample();
-    api.failures.set('POST /api/plots/import', [{ status: 500, code: 'internal_error' }]);
+    api.jobFailures.set('POST /api/file-imports plot', [{ status: 500, code: 'internal_error' }]);
     const review = await reviewOf(api, manifest);
     const steps = planImport(review, defaultSelection(review), DEFAULT_OPTIONS);
     const dependencies = deps(api);
@@ -967,7 +994,7 @@ describe('runImport', () => {
     const second = await runImport(inputOf(manifest, steps), first, dependencies);
     // Alice's card also sits in the group's plot now; that is not hers alone.
     expect(api.writes()).toEqual([
-      'POST /api/plots/import',
+      'POST /api/file-imports plot',
       'PATCH /api/plots/plot-9',
       'POST /api/chats/import',
       'POST /api/chats/chat-11/import/complete',
@@ -981,15 +1008,19 @@ describe('runImport', () => {
     const review = await reviewOf(api, manifest);
     const steps = planImport(review, defaultSelection(review), DEFAULT_OPTIONS);
     const dependencies = deps(api);
-    // The plot is made, and the answer never arrives.
+    // The plot is made, and no poll's answer arrives.
     const real = api.fetch.getMockImplementation()!;
-    api.fetch.mockImplementationOnce(real).mockImplementationOnce(real).mockImplementationOnce(async (input, init) => {
-      await real(input, init);
-      throw new TypeError('Failed to fetch');
+    api.fetch.mockImplementation(async (input, init) => {
+      const answer = await real(input, init);
+      if ((init?.method ?? 'GET') === 'GET' && String(input).startsWith('/api/file-imports/')) {
+        throw new TypeError('Failed to fetch');
+      }
+      return answer;
     });
     const first = await runImport(inputOf(manifest, steps), initialResults(steps), dependencies);
     expect(first['character:A.png']!.status).toBe('failed');
     expect(api.plots.size).toBe(1);
+    api.fetch.mockImplementation(real);
 
     const second = await runImport(inputOf(manifest, steps), first, dependencies);
     expect(second['character:A.png']).toMatchObject({ status: 'skipped', reason: 'already_imported' });
@@ -1034,7 +1065,7 @@ describe('runImport', () => {
       'POST /api/chats/chat-4/import',
       'POST /api/chats/chat-4/import',
       'POST /api/chats/chat-4/import/complete',
-      'POST /api/plots/import',
+      'POST /api/file-imports plot',
     ]);
     expect(Object.values(second).every((result) => result.status === 'done')).toBe(true);
     expect([...api.chats.values()].map((chat) => [chat.importing, chat.messages.length])).toEqual([[false, 1200]]);
@@ -1076,7 +1107,18 @@ describe('runImport', () => {
     const api = fakeApi();
     const manifest = sample();
     manifest.groups = [];
-    api.failures.set('POST /api/plots/import', [{ status: 400, code: 'invalid_lorebook' }]);
+    api.failures.set('POST /api/file-imports plot', [{ status: 400, code: 'invalid_lorebook' }]);
+    const { results } = await runAll(api, manifest);
+    expect(api.uploads[0]).toMatchObject({ file: 'Alice.png', worldInfo: null });
+    expect(results['character:Alice.png']!.status).toBe('done');
+    expect(results['character:Alice.png']!.warnings).toEqual([{ code: 'world_unreadable', name: 'Wonderland' }]);
+  });
+
+  it('sends the card without its linked world when the world is past what an import takes beside a card', async () => {
+    const api = fakeApi();
+    const manifest = sample();
+    manifest.groups = [];
+    api.failures.set('POST /api/file-imports plot', [{ status: 413, code: 'payload_too_large' }]);
     const { results } = await runAll(api, manifest);
     expect(api.uploads[0]).toMatchObject({ file: 'Alice.png', worldInfo: null });
     expect(results['character:Alice.png']!.status).toBe('done');
@@ -1118,7 +1160,7 @@ describe('runImport', () => {
     const review = await reviewOf(api, manifest);
     const selection = { ...defaultSelection(review), characters: new Set<string>(), personas: new Set<string>() };
     const steps = planImport(review, selection, DEFAULT_OPTIONS);
-    api.failures.set('POST /api/plots/plot-1/characters/import', [{ status: 500, code: 'internal_error' }]);
+    api.jobFailures.set('POST /api/file-imports member plot-1', [{ status: 500, code: 'internal_error' }]);
     const dependencies = deps(api);
     const first = await runImport(inputOf(manifest, steps), initialResults(steps), dependencies);
     expect(first['group:g1']).toMatchObject({ status: 'failed', plotId: 'plot-1' });
@@ -1127,7 +1169,7 @@ describe('runImport', () => {
     api.log.length = 0;
     const second = await runImport(inputOf(manifest, steps), first, dependencies);
     expect(api.writes()).toEqual([
-      'POST /api/plots/plot-1/characters/import',
+      'POST /api/file-imports member plot-1',
       'POST /api/chats/import',
       'POST /api/chats/chat-4/import/complete',
     ]);
@@ -1201,17 +1243,17 @@ describe("runImport - how SillyTavern ran a group's turns", () => {
 
     expect(api.writes()).toEqual([
       // Alice on her own: one member, so no round settings and no 대화량.
-      'POST /api/plots/import',
+      'POST /api/file-imports plot',
       'POST /api/chats/import',
       'POST /api/chats/chat-3/import/complete',
-      'POST /api/plots/import',
+      'POST /api/file-imports plot',
       'PATCH /api/plots/plot-4',
       'PATCH /api/plots/plot-4',
       'PATCH /api/plots/plot-4/characters/member-5',
-      'POST /api/plots/plot-4/characters/import',
+      'POST /api/file-imports member plot-4',
       'PATCH /api/plots/plot-4/characters/member-6',
       // Carol's is the default, which a new member already has.
-      'POST /api/plots/plot-4/characters/import',
+      'POST /api/file-imports member plot-4',
       'POST /api/chats/import',
       'POST /api/chats/chat-8/import/complete',
     ]);

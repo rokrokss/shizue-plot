@@ -42,7 +42,8 @@ export * from './card/intro.js';
 export * from './card/narrator.js';
 export * from './card/png.js';
 export * from './card/charx.js';
-export { AUDIO_EXTENSIONS, sniffFont, sniffMedia, type FontType, type MediaType } from './card/media.js';
+export * from './card/source.js';
+export { AUDIO_EXTENSIONS, MEDIA_SNIFF_BYTES, sniffFont, sniffMedia, type FontType, type MediaType } from './card/media.js';
 export * from './card/externalAssets.js';
 export {
   backgroundHtmlOf,

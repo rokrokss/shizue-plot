@@ -37,24 +37,30 @@ import type { LoreEntry, PlotModule } from '../types.js';
 import { fromLorebookFile, LorebookFileError } from '../worldInfo.js';
 import { loreEntryFromBook, withoutTavernReading } from './bookEntry.js';
 import {
-  charxInJpeg,
+  archiveOf,
+  collectAssets,
   isMediaExtension,
-  isZip,
   MAX_ASSETS,
   MAX_ENTRY_BYTES,
   MAX_TOTAL_BYTES,
-  readCharx,
+  readCharxSource,
+  type CardAsset,
   type CharxAssetFile,
   type CharxContents,
 } from './charx.js';
 import { backgroundHtmlOf, displayScriptsFromExtensions, MAX_BACKGROUND_HTML_LENGTH, splitBackground } from './risu.js';
-import { readRisumMain, rpackDecode } from './risum.js';
+import { isRisum, RisumTooLargeError, rpackDecodeStream, scanRisum, type RisumBlock } from './risum.js';
+import { ByteSourceError, bytesSource, MAX_READ_WHOLE_BYTES, type ByteSource } from './source.js';
 
 /** A file this reader cannot take as a RisuAI module. */
 export class ModuleParseError extends Error {}
 
-/** What a module brings, read: everything the work keeps of it but its id and record. */
-export interface ParsedRisuModule {
+/**
+ * What a module brings, read: everything the work keeps of it but its id and
+ * record. Its pictures are streams not yet read (`CardAsset`), or — read in
+ * memory (`readRisuModule`) — their bytes.
+ */
+export interface ParsedRisuModule<Asset = CardAsset> {
   name: string;
   description: string;
   lorebook: LoreEntry[];
@@ -74,7 +80,7 @@ export interface ParsedRisuModule {
   /** An MCP server (`mcp.url`) or `cjs` code the module carries — kept inert (`PlotModule.inert`). */
   inert?: { mcp?: string; cjs?: true };
   /** The pictures a `.risum` or a charx carried, in its order, under the charx caps. */
-  assets: CharxAssetFile[];
+  assets: Asset[];
 }
 
 type Json = Record<string, unknown>;
@@ -133,35 +139,34 @@ export function risuLoreBookEntry(raw: unknown): LoreEntry {
 
 /**
  * The files after a `.risum`'s main block, paired with the module's `assets`
- * by position. Read as far as the file holds well-formed blocks and the charx
- * caps allow — a count, a size per file and a total — stopping at the first
- * that breaks either, as a charx's asset pass does. A block whose entry names a
- * type that is not a picture, music or a video is passed over; one named without
- * a type is tried, and the store skips bytes that are none of them.
+ * by position. Taken as far as the file holds well-formed blocks (`scanRisum`)
+ * and the charx caps allow — a count, a size per file and a total — stopping at
+ * the first that breaks either, as a charx's asset pass does. A block whose
+ * entry names a type that is not a picture, music or a video is passed over;
+ * one named without a type is tried, and the store skips bytes that are none of
+ * them. Each is read from its offset when the import gets to it.
  */
-function risumAssets(bytes: Uint8Array, start: number, declared: unknown): CharxAssetFile[] {
+function risumAssets(source: ByteSource, blocks: readonly RisumBlock[], declared: unknown): CardAsset[] {
   const entries = Array.isArray(declared) ? declared : [];
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const assets: CharxAssetFile[] = [];
+  const assets: CardAsset[] = [];
   let spent = 0;
-  let at = start;
-  for (let index = 0; at < bytes.length; index += 1) {
-    if (bytes[at] !== 1 || at + 5 > bytes.length) break;
-    const length = view.getUint32(at + 1, true);
-    const from = at + 5;
-    at = from + length;
-    if (at > bytes.length || length > MAX_ENTRY_BYTES) break;
-    spent += length;
+  for (const [index, block] of blocks.entries()) {
+    if (block.length > MAX_ENTRY_BYTES) break;
+    spent += block.length;
     if (spent > MAX_TOTAL_BYTES || assets.length >= MAX_ASSETS) break;
     const entry = Array.isArray(entries[index]) ? (entries[index] as unknown[]) : [];
     const ext = text(entry[2]).toLowerCase();
     if (ext && !isMediaExtension(ext)) continue;
-    assets.push({ name: text(entry[0]).trim() || `asset_${index}`, bytes: rpackDecode(bytes.subarray(from, at)) });
+    assets.push({
+      name: text(entry[0]).trim() || `asset_${index}`,
+      size: block.length,
+      open: () => rpackDecodeStream(source.stream(block.start, block.length)),
+    });
   }
   return assets;
 }
 
-function moduleOf(module: Json, assets: CharxAssetFile[]): ParsedRisuModule {
+function moduleOf(module: Json, assets: CardAsset[]): ParsedRisuModule {
   const background = text(module['backgroundEmbedding']);
   const namespace = text(module['namespace']);
   const toggles = text(module['customModuleToggle']);
@@ -261,11 +266,12 @@ export function indicatorLore(character: {
  * turn the module back into a character. Whatever the archive's reader throws
  * is the file's doing, so it is a `ModuleParseError`.
  */
-function moduleOfCharx(archive: Uint8Array): ParsedRisuModule {
+async function moduleOfCharx(archive: ByteSource): Promise<ParsedRisuModule> {
   let contents: CharxContents;
   try {
-    contents = readCharx(archive);
+    contents = await readCharxSource(archive);
   } catch (error) {
+    if (error instanceof ByteSourceError) throw error;
     throw new ModuleParseError(`The charx could not be read: ${error instanceof Error ? error.message : String(error)}`);
   }
   const card = isObject(contents.raw) ? contents.raw : {};
@@ -412,16 +418,31 @@ export function plotModuleOf(
 /**
  * A file RisuAI's module import takes — a charx (also one behind a JPEG, which
  * RisuAI's charx reader takes too), a `.risum` or JSON, told apart by the bytes
- * rather than the name — as one module. Throws `ModuleParseError` for anything
- * else, and for what RisuAI itself would turn away.
+ * rather than the name — as one module. Its pictures are streams from their own
+ * offsets, read when the import stores them (`readCardAssets`). Throws
+ * `ModuleParseError` for anything else, and for what RisuAI itself would turn
+ * away.
  */
-export function parseRisuModule(bytes: Uint8Array): ParsedRisuModule {
-  const archive = isZip(bytes) ? bytes : charxInJpeg(bytes);
+export async function readRisuModuleSource(source: ByteSource): Promise<ParsedRisuModule> {
+  const head = await source.read(0, Math.min(source.size, 8));
+  const archive = await archiveOf(source, head);
   if (archive) return moduleOfCharx(archive);
 
-  const main = readRisumMain(bytes);
-  if (main) return moduleOf(main.module, risumAssets(bytes, main.end, main.module['assets']));
+  if (isRisum(head)) {
+    let risum: Awaited<ReturnType<typeof scanRisum>>;
+    try {
+      risum = await scanRisum(source);
+    } catch (error) {
+      if (error instanceof RisumTooLargeError) throw new ModuleParseError(error.message);
+      throw error;
+    }
+    if (risum) return moduleOf(risum.module, risumAssets(source, risum.blocks, risum.module['assets']));
+  }
 
+  if (source.size > MAX_READ_WHOLE_BYTES) {
+    throw new ModuleParseError(`Not a RisuAI module: neither a charx, a .risum file nor JSON of at most ${MAX_READ_WHOLE_BYTES / (1024 * 1024)}MB`);
+  }
+  const bytes = await source.read(0, source.size);
   let json: unknown;
   try {
     json = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
@@ -430,4 +451,10 @@ export function parseRisuModule(bytes: Uint8Array): ParsedRisuModule {
   }
   if (!isObject(json)) throw new ModuleParseError('Not a RisuAI module: the JSON is not an object');
   return moduleOfJson(json);
+}
+
+/** The same in memory, its pictures read whole — for the tests. */
+export async function readRisuModule(bytes: Uint8Array): Promise<ParsedRisuModule<CharxAssetFile>> {
+  const parsed = await readRisuModuleSource(bytesSource(bytes));
+  return { ...parsed, assets: (await collectAssets(parsed.assets)).assets };
 }

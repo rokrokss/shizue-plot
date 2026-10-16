@@ -1,4 +1,5 @@
 import { crc32, deflateSync } from 'node:zlib';
+import { importFile } from '../fileImport.js';
 import { seedSession } from '../seedSession.js';
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 
@@ -104,12 +105,12 @@ const slot = () => page.getByTestId('emotion-slot');
 
 test('opens on the card’s neutral and moves to the picture a reply leaves', async () => {
   await seedSession(page, account);
-  const imported = await page.request.post(`${base}/api/plots/import`, {
-    headers: { origin: base },
-    multipart: { file: { name: 'sei.png', mimeType: 'image/png', buffer: emotionCard() } },
+  const imported = await importFile(page.request, base, { origin: base }, { target: 'plot' }, {
+    name: 'sei.png',
+    buffer: emotionCard(),
   });
-  expect(imported.status()).toBe(201);
-  plotId = (await imported.json()).id;
+  expect(imported.status).toBe(201);
+  plotId = imported.json.id;
   // The echo model is the chat's auxiliary model too, so it is what picks the picture.
   const started = await page.request.post(`${base}/api/chats`, {
     headers: { origin: base },

@@ -4,8 +4,8 @@
  * Realm documents its API for client-side use only (realm.risuai.net/help/api),
  * so the download runs here, in the reader's browser, through the one documented
  * endpoint with `?cors=true` — never through our server, and `non_commercial` is
- * never sent. The bytes then go to the import routes like a picked file, with
- * the page they came from beside them as `sourceUrl`.
+ * never sent. The bytes then go to the file import like a picked file
+ * (`lib/fileImport`), with the page they came from beside them as `sourceUrl`.
  *
  * Failures are `ApiError`s with status 0 and a code of their own, so the forms
  * translate them from the `errors` catalogue the way they do the API's.

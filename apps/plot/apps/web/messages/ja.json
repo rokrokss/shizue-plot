@@ -424,6 +424,14 @@
       "external_over_limit": "取り込みの上限を超えたため他のサイトから取り込まなかった画像・フォント・スタイルシート {count}件",
       "module_mcp_inert": "接続しないモジュールのMCPサーバー{count}件",
       "module_cjs_inert": "実行しないモジュールのcjsコード{count}件"
+    },
+    "progress": {
+      "uploading": "アップロード中 {percent}%",
+      "queued": "読み込みの順番を待っています…",
+      "processing": "読み込み中…",
+      "reading": "ファイルを読み取り中 {percent}%",
+      "assets": "アセットを保存中 {done}/{total}",
+      "localizing": "他のサイトから画像・フォントを取得中…"
     }
   },
   "stImport": {
@@ -1306,6 +1314,8 @@
     "suggestion_in_progress": "すでに返信を提案しています。",
     "rate_limited": "リクエストが多すぎます。少し待ってから再試行してください。",
     "import_busy": "別の読み込みが進行中です。少し待ってから再試行してください。",
+    "upload_failed": "ファイルをアップロードできませんでした。ネットワークを確認して、もう一度お試しください。",
+    "import_state": "この読み込みはこれ以上続けられません。ファイルをもう一度選んでください。",
     "length_required": "ファイルのサイズが送られなかったため、読み込めませんでした。もう一度お試しください。",
     "chatgpt_login_required": "AI 設定で ChatGPT を接続してください。",
     "invalid_grant": "ChatGPT 接続の有効期限が切れました。AI 設定で再接続してください。",

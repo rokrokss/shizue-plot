@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { normalizeCard } from '../src/card/normalize.js';
 import { exportCardV3 } from '../src/card/export.js';
-import { parseRisuModule, plotModuleOf } from '../src/card/risuModule.js';
+import { plotModuleOf, readRisuModule } from '../src/card/risuModule.js';
 import { orderedWithModules } from '../src/displayScript.js';
 import { chatToggleText, groupToggles, isEmptyGroup, parseToggleSyntax } from '../src/toggles.js';
 import { cardScripts, triggerLowLevelAccess } from '../src/triggers/index.js';
@@ -15,7 +15,7 @@ import type { DisplayScript } from '../src/types.js';
 import { buildRisum } from './helpers/risum.js';
 
 describe('toggles', () => {
-  it('reads RisuAI’s syntax line by line, as parseToggleSyntax does', () => {
+  it('reads RisuAI’s syntax line by line, as parseToggleSyntax does', async () => {
     expect(
       parseToggleSyntax(
         [
@@ -52,7 +52,7 @@ describe('toggles', () => {
     expect(parseToggleSyntax(undefined)).toEqual([]);
   });
 
-  it('lays them out as RisuAI’s sidebar does: groups folded, a repeated divider once, an empty group a checkbox', () => {
+  it('lays them out as RisuAI’s sidebar does: groups folded, a repeated divider once, an empty group a checkbox', async () => {
     const entries = groupToggles(
       parseToggleSyntax(
         ['a=A', '=선=divider', '=선=divider', 'g=묶음=group', 'b=B', 'c=C=select=1,2', '==groupEnd', 'e=빈 묶음=group', '==groupEnd', 'd=D'].join(
@@ -71,28 +71,28 @@ describe('toggles', () => {
     expect(isEmptyGroup(entries[3]!)).toBe(true);
   });
 
-  it('puts the modules’ toggles first, in their order, then the members’ own', () => {
+  it('puts the modules’ toggles first, in their order, then the members’ own', async () => {
     const text = chatToggleText([{ toggles: 'w=작품 모듈' }, {}, { toggles: 'r=독자 모듈' }], ['c=카드']);
     expect(parseToggleSyntax(text).map((toggle) => toggle.key)).toEqual(['w', 'r', 'c']);
   });
 
-  it('puts the reader preset’s toggles before the modules’, as RisuAI puts its preset’s', () => {
+  it('puts the reader preset’s toggles before the modules’, as RisuAI puts its preset’s', async () => {
     const text = chatToggleText([{ toggles: 'w=작품 모듈' }], ['c=카드'], 'p=프리셋');
     expect(parseToggleSyntax(text).map((toggle) => toggle.key)).toEqual(['p', 'w', 'c']);
   });
 });
 
 describe('a module’s toggles at import', () => {
-  it('keeps customModuleToggle from a .risum and from module JSON, and toggles from a charx’s card', () => {
+  it('keeps customModuleToggle from a .risum and from module JSON, and toggles from a charx’s card', async () => {
     const module = { name: '토글 모듈', id: 'x', description: '', customModuleToggle: 'rain=비\nmood=기분=select=a,b' };
-    const parsed = parseRisuModule(buildRisum({ module, type: 'risuModule' }));
+    const parsed = (await readRisuModule(buildRisum({ module, type: 'risuModule' })));
     expect(parsed.toggles).toBe('rain=비\nmood=기분=select=a,b');
-    const json = parseRisuModule(new TextEncoder().encode(JSON.stringify({ ...module, type: 'risuModule' })));
+    const json = (await readRisuModule(new TextEncoder().encode(JSON.stringify({ ...module, type: 'risuModule' }))));
     expect(json.toggles).toBe(module.customModuleToggle);
     expect(plotModuleOf(parsed, { id: 'm', name: 'm', description: '', lorebook: [], assets: [], importedFrom: { fileName: 'f', sha256: 's', importedAt: 't' } }).toggles).toBe(
       module.customModuleToggle,
     );
-    expect(parseRisuModule(buildRisum({ module: { ...module, customModuleToggle: '' }, type: 'risuModule' })).toggles).toBeUndefined();
+    expect((await readRisuModule(buildRisum({ module: { ...module, customModuleToggle: '' }, type: 'risuModule' }))).toggles).toBeUndefined();
   });
 });
 
@@ -105,7 +105,7 @@ describe('display scripts with a module’s', () => {
     ...(rank !== undefined ? { rank } : {}),
   });
 
-  it('runs the card’s and then the modules’ as they stand while none names an order', () => {
+  it('runs the card’s and then the modules’ as they stand while none names an order', async () => {
     expect(orderedWithModules([script('b', 7), script('a', 2)], [[script('m', 0)]]).map((one) => [one.in, one.order])).toEqual([
       ['a', 0],
       ['b', 1],
@@ -113,7 +113,7 @@ describe('display scripts with a module’s', () => {
     ]);
   });
 
-  it('sorts them together, highest first and stably, once any names one — a module’s before the card’s', () => {
+  it('sorts them together, highest first and stably, once any names one — a module’s before the card’s', async () => {
     const sorted = orderedWithModules([script('a', 0), script('b', 1, 2)], [[script('m', 0, 5), script('n', 1)]]);
     expect(sorted.map((one) => [one.in, one.order])).toEqual([
       ['m', 0],
@@ -130,7 +130,7 @@ describe('display scripts with a module’s', () => {
     );
   });
 
-  it('keeps a card’s ranks through its export while they agree with the sequence, and drops them once moved', () => {
+  it('keeps a card’s ranks through its export while they agree with the sequence, and drops them once moved', async () => {
     const card = normalizeCard({
       spec: 'chara_card_v2',
       spec_version: '2.0',
@@ -176,7 +176,7 @@ describe('low-level access, held to the trigger that calls', () => {
   const lua = (comment: string) => ({ comment, type: 'manual', conditions: [], effect: [{ type: 'triggerlua', code: '' }] });
   const card = (lowLevelAccess: boolean) => ({ extensions: { risuai: { triggerscript: [lua('카드')], lowLevelAccess } } });
 
-  it('answers by the trigger’s own flag — the card’s on the card’s, a module’s on the module’s', () => {
+  it('answers by the trigger’s own flag — the card’s on the card’s, a module’s on the module’s', async () => {
     const scripts = cardScripts(card(false), [{ regex: [], trigger: [lua('모듈')], lowLevelAccess: true }])!;
     // The whole may ask; the card's own trigger may not.
     expect(scripts.lowLevelAccess).toBe(true);
@@ -188,7 +188,7 @@ describe('low-level access, held to the trigger that calls', () => {
     expect(triggerLowLevelAccess(scripts, undefined)).toBe(false);
   });
 
-  it('answers by the card where no module joined it', () => {
+  it('answers by the card where no module joined it', async () => {
     const open = cardScripts(card(true))!;
     expect(triggerLowLevelAccess(open, 0)).toBe(true);
     expect(triggerLowLevelAccess(open, undefined)).toBe(true);

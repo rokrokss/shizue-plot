@@ -1,21 +1,14 @@
-import {
-  MAX_CARD_IMPORT_BYTES,
-  ModuleParseError,
-  parseRisuModule,
-  plotModuleOf,
-  type PlotModule,
-  type ReaderModuleAsset,
-} from '@shizue/core';
+import { plotModuleOf, type ParsedRisuModule, type PlotModule, type ReaderModuleAsset } from '@shizue/core';
 import { cardScripts } from '@shizue/core/triggers';
-import { chats, readerModules, user, type ReaderModule } from '@shizue/db';
+import { chats, readerModules, user, type FileImportResult, type ReaderModule } from '@shizue/db';
 import { and, eq, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { assetResponse, byNameOf } from '../assets.js';
 import { coerceLorebook } from '../card.js';
 import type { AppDeps, AppEnv } from '../deps.js';
 import { ApiError, badRequest, notFound } from '../errors.js';
-import { admitImport } from '../importAdmission.js';
+import type { ImportHooks } from '../fileImports.js';
 import {
   deleteReaderModuleAssets,
   MAX_READER_MODULES,
@@ -73,6 +66,102 @@ async function loadOwnedReaderModule(deps: AppDeps, id: string, userId: string):
   return row;
 }
 
+/** A reader's library holds at most `MAX_READER_MODULES`: refused with this, before anything is stored. */
+export const readerLibraryFull = (): ApiError =>
+  badRequest('reader_module_limit', `A library holds at most ${MAX_READER_MODULES} modules`);
+
+/** How many modules a reader's library holds now. */
+export async function countReaderModules(deps: AppDeps, userId: string): Promise<number> {
+  const [counted] = await deps.db
+    .select({ value: sql<number>`count(*)::int` })
+    .from(readerModules)
+    .where(eq(readerModules.userId, userId));
+  return counted?.value ?? 0;
+}
+
+/**
+ * A module file into the reader's library, the end of RisuAI's `importModule`
+ * — run by the import job (`fileImports.ts`) once the file is read
+ * (`readRisuModuleSource`, the same reader the studio's module import uses). One
+ * that asks for `lowLevelAccess` comes in only on the reader's word
+ * (`confirmLowLevelAccess`), as RisuAI asks (`lowLevelAccessConfirm`) — 409
+ * `low_level_access_unconfirmed` otherwise, before anything is stored, and the
+ * import waits for the reader's yes on the file it already has. RisuAI asks it
+ * of a module JSON and a charx but not of a `.risum`; here every file is asked
+ * alike. What it loads from other hosts is brought in as its own pictures and
+ * its references rewritten to them (`localizeReaderModule`), as a work's module
+ * is when its creator imports it — at render, a chat contacts no third host.
+ */
+export async function importReaderModule(
+  deps: AppDeps,
+  userId: string,
+  {
+    parsed,
+    fileName,
+    sha256,
+    confirmLowLevelAccess,
+  }: { parsed: ParsedRisuModule; fileName: string; sha256: string; confirmLowLevelAccess: boolean },
+  hooks: ImportHooks,
+): Promise<FileImportResult> {
+  if (parsed.lowLevelAccess && !confirmLowLevelAccess) {
+    throw new ApiError(409, 'low_level_access_unconfirmed', 'This module asks for low-level access; confirm to import it');
+  }
+  if ((await countReaderModules(deps, userId)) >= MAX_READER_MODULES) throw readerLibraryFull();
+
+  const assets = await storeReaderModuleAssets(deps, parsed.assets, hooks);
+  const id = randomUUID();
+  const module = plotModuleOf(parsed, {
+    id,
+    name: (parsed.name || fileName.replace(/\.[^.]+$/, '').trim() || 'Module').slice(0, MAX_NAME_LENGTH),
+    description: parsed.description.trim().slice(0, MAX_DESCRIPTION_LENGTH),
+    lorebook: coerceLorebook(parsed.lorebook),
+    assets: [],
+    importedFrom: {
+      fileName: fileName.slice(0, MAX_FILE_NAME_LENGTH),
+      sha256,
+      importedAt: new Date().toISOString(),
+    },
+  });
+  // Never fails the import: a fetch that throws past its own handling leaves
+  // everything as written, counted as failed — as a work's import does.
+  hooks.progress('localizing');
+  const remoteFetch = deps.remoteFetch ?? createRemoteFetch({ ownOrigins: deps.webOrigin ? [deps.webOrigin] : [] });
+  let localized: { module: PlotModule; assets: ReaderModuleAsset[]; outcome: Pick<LocalizeOutcome, 'failed' | 'overLimit'> };
+  try {
+    localized = await localizeReaderModule({ storage: deps.storage, remoteFetch }, module, assets.stored);
+  } catch (error) {
+    console.warn(`[api] localizing reader module ${id}'s external assets failed:`, error);
+    localized = { module, assets: assets.stored, outcome: { failed: 1, overLimit: 0 } };
+  }
+  await hooks.wrote({ readerModuleId: id, keys: localized.assets.map((asset) => asset.path) });
+  try {
+    // The cap is a count: queue on the account row, as the reader's presets do.
+    await deps.db.transaction(async (tx) => {
+      await tx.select({ id: user.id }).from(user).where(eq(user.id, userId)).for('update');
+      const [again] = await tx
+        .select({ value: sql<number>`count(*)::int` })
+        .from(readerModules)
+        .where(eq(readerModules.userId, userId));
+      if ((again?.value ?? 0) >= MAX_READER_MODULES) throw readerLibraryFull();
+      await tx.insert(readerModules).values({ id, userId, module: localized.module, assets: localized.assets });
+    });
+  } catch (error) {
+    await deleteReaderModuleAssets(deps, localized.assets);
+    throw error;
+  }
+  return {
+    readerModuleId: id,
+    importWarnings: [
+      ...(assets.unsupported > 0 ? [{ code: 'assets_unsupported', count: assets.unsupported }] : []),
+      ...(assets.overLimit > 0 ? [{ code: 'assets_over_limit', count: assets.overLimit }] : []),
+      ...(assets.overBudget > 0 ? [{ code: 'assets_over_budget', count: assets.overBudget }] : []),
+      ...(localized.outcome.failed > 0 ? [{ code: 'external_failed', count: localized.outcome.failed }] : []),
+      ...(localized.outcome.overLimit > 0 ? [{ code: 'external_over_limit', count: localized.outcome.overLimit }] : []),
+      ...inertWarnings(module),
+    ],
+  };
+}
+
 /**
  * The reader's module library (§10): RisuAI's module list, the reader's side of
  * it. Import any file RisuAI's module import takes (`parseRisuModule`, the same
@@ -84,103 +173,6 @@ export function readerModuleRoutes(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
 
   app.get('/', async (c) => c.json((await readerLibrary(deps, c.get('userId'))).map(toReaderModuleJson)));
-
-  /**
-   * A module file into the library, the end of it: RisuAI's `importModule`. One
-   * that asks for `lowLevelAccess` comes in only on the reader's word
-   * (`confirmLowLevelAccess`), as RisuAI asks (`lowLevelAccessConfirm`) — 409
-   * `low_level_access_unconfirmed` otherwise, before anything is stored. RisuAI
-   * asks it of a module JSON and a charx but not of a `.risum`; here every file
-   * is asked alike. Unreadable is a 400 `invalid_module`. What it loads from
-   * other hosts is brought in as its own pictures and its references rewritten
-   * to them (`localizeReaderModule`), as a work's module is when its creator
-   * imports it — at render, a chat contacts no third host.
-   */
-  app.post('/', admitImport(deps), async (c) => {
-    const userId = c.get('userId');
-    let form: FormData;
-    try {
-      form = await c.req.formData();
-    } catch {
-      throw badRequest('invalid_request', 'Expected multipart/form-data with a file field');
-    }
-    const file = form.get('file');
-    if (!(file instanceof File)) throw badRequest('invalid_request', 'file field is required');
-    if (file.size > MAX_CARD_IMPORT_BYTES) {
-      throw new ApiError(413, 'payload_too_large', `A module file is at most ${MAX_CARD_IMPORT_BYTES} bytes`);
-    }
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    let parsed: ReturnType<typeof parseRisuModule>;
-    try {
-      parsed = parseRisuModule(bytes);
-    } catch (error) {
-      if (error instanceof ModuleParseError) throw badRequest('invalid_module', error.message);
-      throw error;
-    }
-    if (parsed.lowLevelAccess && form.get('confirmLowLevelAccess') !== 'true') {
-      throw new ApiError(409, 'low_level_access_unconfirmed', 'This module asks for low-level access; confirm to import it');
-    }
-    const full = (): ApiError =>
-      badRequest('reader_module_limit', `A library holds at most ${MAX_READER_MODULES} modules`);
-    const [counted] = await deps.db
-      .select({ value: sql<number>`count(*)::int` })
-      .from(readerModules)
-      .where(eq(readerModules.userId, userId));
-    if ((counted?.value ?? 0) >= MAX_READER_MODULES) throw full();
-
-    const assets = await storeReaderModuleAssets(deps, parsed.assets);
-    const id = randomUUID();
-    const module = plotModuleOf(parsed, {
-      id,
-      name: (parsed.name || file.name.replace(/\.[^.]+$/, '').trim() || 'Module').slice(0, MAX_NAME_LENGTH),
-      description: parsed.description.trim().slice(0, MAX_DESCRIPTION_LENGTH),
-      lorebook: coerceLorebook(parsed.lorebook),
-      assets: [],
-      importedFrom: {
-        fileName: file.name.slice(0, MAX_FILE_NAME_LENGTH),
-        sha256: createHash('sha256').update(bytes).digest('hex'),
-        importedAt: new Date().toISOString(),
-      },
-    });
-    // Never fails the import: a fetch that throws past its own handling leaves
-    // everything as written, counted as failed — as a work's import does.
-    const remoteFetch = deps.remoteFetch ?? createRemoteFetch({ ownOrigins: deps.webOrigin ? [deps.webOrigin] : [] });
-    let localized: { module: PlotModule; assets: ReaderModuleAsset[]; outcome: Pick<LocalizeOutcome, 'failed' | 'overLimit'> };
-    try {
-      localized = await localizeReaderModule({ storage: deps.storage, remoteFetch }, module, assets.stored);
-    } catch (error) {
-      console.warn(`[api] localizing reader module ${id}'s external assets failed:`, error);
-      localized = { module, assets: assets.stored, outcome: { failed: 1, overLimit: 0 } };
-    }
-    let created: ReaderModule;
-    try {
-      // The cap is a count: queue on the account row, as the reader's presets do.
-      created = await deps.db.transaction(async (tx) => {
-        await tx.select({ id: user.id }).from(user).where(eq(user.id, userId)).for('update');
-        const [again] = await tx
-          .select({ value: sql<number>`count(*)::int` })
-          .from(readerModules)
-          .where(eq(readerModules.userId, userId));
-        if ((again?.value ?? 0) >= MAX_READER_MODULES) throw full();
-        const [row] = await tx
-          .insert(readerModules)
-          .values({ id, userId, module: localized.module, assets: localized.assets })
-          .returning();
-        return row!;
-      });
-    } catch (error) {
-      await deleteReaderModuleAssets(deps, localized.assets);
-      throw error;
-    }
-    const importWarnings = [
-      ...(assets.unsupported > 0 ? [{ code: 'assets_unsupported', count: assets.unsupported }] : []),
-      ...(assets.overLimit > 0 ? [{ code: 'assets_over_limit', count: assets.overLimit }] : []),
-      ...(localized.outcome.failed > 0 ? [{ code: 'external_failed', count: localized.outcome.failed }] : []),
-      ...(localized.outcome.overLimit > 0 ? [{ code: 'external_over_limit', count: localized.outcome.overLimit }] : []),
-      ...inertWarnings(module),
-    ];
-    return c.json({ ...toReaderModuleJson(created), importWarnings }, 201);
-  });
 
   /**
    * `{ enabledGlobally }`: on for every chat of the reader's, or back to the

@@ -37,6 +37,10 @@ vi.mock('@/lib/api', async (original) => ({
   apiDelete: (path: string) => send('DELETE', path),
   apiUpload: (...args: unknown[]) => upload(...args),
 }));
+vi.mock('@/lib/fileImport', async (original) => ({
+  ...(await original<typeof import('../src/lib/fileImport')>()),
+  importFile: (...args: unknown[]) => upload(...args),
+}));
 vi.mock('@/i18n/navigation', () => ({
   Link: ({ href, children }: { href: string; children: ReactNode }) => createElement('a', { href }, children),
   useRouter: () => ({ push: vi.fn() }),

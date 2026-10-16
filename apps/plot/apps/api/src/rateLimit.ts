@@ -56,7 +56,7 @@ export const RATE_LIMITS = {
   signIn: { name: 'sign_in', by: 'ip', limit: 30, windowMs: 10 * MINUTE },
   /** The six SSE generation starts (`messages`, `regenerate`, `continue`, `auto`, `narrate`, `reply`). */
   generation: { name: 'generation', by: 'user', limit: 300, windowMs: 10 * MINUTE },
-  /** Card and module files (`admitImport`). */
+  /** Starting a card or module file import (`POST /api/file-imports`). */
   import: { name: 'import', by: 'user', limit: 600, windowMs: 10 * MINUTE },
   /** A chat brought over from another app: `POST /api/chats/import`, not its batches or attachments. */
   chatImport: { name: 'chat_import', by: 'user', limit: 600, windowMs: 10 * MINUTE },

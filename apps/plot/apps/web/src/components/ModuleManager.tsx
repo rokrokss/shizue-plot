@@ -2,12 +2,14 @@
 
 import { useTranslations } from 'next-intl';
 import { useRef, useState } from 'react';
-import { apiSend, apiUpload } from '@/lib/api';
+import { apiSend } from '@/lib/api';
+// Aliased: `importFile` below is this component's own handler.
+import { importFile as importUpload, type ImportProgress } from '@/lib/fileImport';
 import { readImportWarnings, type ImportWarning } from '@/lib/importWarnings';
 import { checkCardSize } from '@/lib/realm';
 import type { PlotDetail, PlotModuleSummary } from '@/lib/types';
 import { useErrorMessage } from '@/lib/useErrorMessage';
-import { ImportWarnings, RightsConfirmation } from './CardImport';
+import { ImportProgressLine, ImportWarnings, RightsConfirmation } from './CardImport';
 import { ModuleInertNotice } from './ReaderModules';
 import { Badge, Button, ErrorText } from './ui';
 
@@ -42,6 +44,7 @@ export function ModuleManager({
   const [error, setError] = useState('');
   const [importRights, setImportRights] = useState(false);
   const [warnings, setWarnings] = useState<ImportWarning[]>([]);
+  const [progress, setProgress] = useState<ImportProgress | null>(null);
 
   async function importFile(file: File): Promise<void> {
     if (busy) return;
@@ -49,10 +52,11 @@ export function ModuleManager({
     setError('');
     setWarnings([]);
     try {
-      const detail = await apiUpload<PlotDetail & { importWarnings?: unknown }>(
-        `/api/plots/${plotId}/modules`,
+      const detail = await importUpload<PlotDetail & { importWarnings?: unknown }>(
+        'plot_module',
         checkCardSize(file),
-        published && importRights ? { rightsConfirmed: 'true' } : {},
+        { plotId, ...(published && importRights ? { rightsConfirmed: true } : {}) },
+        { onProgress: setProgress },
       );
       setWarnings(readImportWarnings(detail.importWarnings));
       setImportRights(false);
@@ -61,6 +65,7 @@ export function ModuleManager({
       setError(toMessage(caught));
     } finally {
       setBusy(null);
+      setProgress(null);
       if (fileInput.current) fileInput.current.value = '';
     }
   }
@@ -156,6 +161,7 @@ export function ModuleManager({
           {t('moduleImport')}
         </Button>
         <p className="text-xs text-muted">{t('moduleImportHint')}</p>
+        <ImportProgressLine progress={progress} />
       </div>
       <ImportWarnings warnings={warnings} />
       {error ? <ErrorText>{error}</ErrorText> : null}

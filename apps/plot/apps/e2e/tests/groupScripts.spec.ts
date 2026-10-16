@@ -1,3 +1,4 @@
+import { importFile } from '../fileImport.js';
 import { seedSession } from '../seedSession.js';
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 
@@ -107,33 +108,21 @@ const bubbleOf = (memberId: string) => page.locator(`[data-testid="message-assis
 
 test('a work of two RisuAI cards, the second joining the first', async () => {
   await seedSession(page, account);
-  const made = await page.request.post(`${WEB}/api/plots/import`, {
-    headers,
-    multipart: {
-      file: {
-        name: 'lumi.json',
-        mimeType: 'application/json',
-        buffer: card('루미', 'A', 'rgb(255, 0, 0)', `루미의 하늘 ${run}`, 'startA=0\nstartB=0\noutA=0\noutB=0\npressed=-'),
-      },
-    },
+  const made = await importFile(page.request, WEB, headers, { target: 'plot' }, {
+    name: 'lumi.json',
+    buffer: card('루미', 'A', 'rgb(255, 0, 0)', `루미의 하늘 ${run}`, 'startA=0\nstartB=0\noutA=0\noutB=0\npressed=-'),
   });
-  expect(made.status(), await made.text()).toBe(201);
-  const plot = (await made.json()) as { id: string; characters: { id: string }[] };
+  expect(made.status, JSON.stringify(made.json)).toBe(201);
+  const plot = made.json as { id: string; characters: { id: string }[] };
   plotId = plot.id;
   lumi = plot.characters[0]!.id;
 
-  const joined = await page.request.post(`${WEB}/api/plots/${plotId}/characters/import`, {
-    headers,
-    multipart: {
-      file: {
-        name: 'nox.json',
-        mimeType: 'application/json',
-        buffer: card('녹스', 'B', 'rgb(0, 0, 255)', `녹스의 동굴 ${run}`, 'startA=9\ngold=3'),
-      },
-    },
+  const joined = await importFile(page.request, WEB, headers, { target: 'member', plotId }, {
+    name: 'nox.json',
+    buffer: card('녹스', 'B', 'rgb(0, 0, 255)', `녹스의 동굴 ${run}`, 'startA=9\ngold=3'),
   });
-  expect(joined.status(), await joined.text()).toBe(201);
-  const companion = (await joined.json()) as { id: string; variableConflicts: string[] };
+  expect(joined.status, JSON.stringify(joined.json)).toBe(201);
+  const companion = joined.json as { id: string; variableConflicts: string[] };
   nox = companion.id;
   // The work already had its own value for the companion's `startA`.
   expect(companion.variableConflicts).toEqual(['startA']);

@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 /**
  * The studio's RisuAI modules (`ModuleManager`): the list says what each module
- * brought, a picked file goes up as a module, and a removal asks first — each
- * answered with the plot's owner view, which the studio takes the list from.
+ * brought, a picked file goes up as a module (`importFile`, stood in for here —
+ * the exchange itself is `fileImport.test.ts`'s) and says how far it has got,
+ * and a removal asks first — each answered with the plot's owner view, which the
+ * studio takes the list from.
  *
  * `createElement` rather than JSX, matching the other component tests.
  */
@@ -11,22 +13,27 @@ import { act, createElement, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import messages from '../messages/ko.json';
+import type { FileImportOptions } from '../src/lib/fileImport';
 import type { PlotDetail, PlotModuleSummary } from '../src/lib/types';
 
 (globalThis as Record<string, unknown>)['IS_REACT_ACT_ENVIRONMENT'] = true;
 
-const uploads: { path: string; file: File }[] = [];
+const uploads: { target: string; file: File; fields: unknown }[] = [];
 const sends: { method: string; path: string }[] = [];
 let answer: () => Promise<PlotDetail>;
 
 vi.mock('@/lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/lib/api')>()),
-  apiUpload: (path: string, file: File) => {
-    uploads.push({ path, file });
-    return answer();
-  },
   apiSend: (method: string, path: string) => {
     sends.push({ method, path });
+    return answer();
+  },
+}));
+vi.mock('@/lib/fileImport', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/lib/fileImport')>()),
+  importFile: (target: string, file: File, fields: unknown, options: FileImportOptions) => {
+    uploads.push({ target, file, fields });
+    options.onProgress?.({ phase: 'uploading', loaded: 3, total: 10 });
     return answer();
   },
 }));
@@ -104,7 +111,24 @@ describe('the studio’s RisuAI modules', () => {
     await act(async () => {
       input.dispatchEvent(new Event('change', { bubbles: true }));
     });
-    expect(uploads.map((upload) => [upload.path, upload.file.name])).toEqual([['/api/plots/plot-1/modules', 'weather.risum']]);
+    expect(uploads.map((upload) => [upload.target, upload.file.name, upload.fields])).toEqual([
+      ['plot_module', 'weather.risum', { plotId: 'plot-1' }],
+    ]);
+    expect(changed).toHaveLength(1);
+  });
+
+  it('says how far the import has got while it runs, and nothing once it is in', async () => {
+    let land: (detail: PlotDetail) => void = () => undefined;
+    answer = () => new Promise((resolve) => (land = resolve));
+    await render([]);
+    const input = host.querySelector<HTMLInputElement>('[data-testid="module-file"]')!;
+    Object.defineProperty(input, 'files', { configurable: true, value: [new File(['risum'], 'weather.risum')] });
+    await act(async () => {
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(host.querySelector('[data-testid="import-progress"]')!.textContent).toBe('올리는 중 30%');
+    await act(async () => land({ modules: [weather] } as unknown as PlotDetail));
+    expect(host.querySelector('[data-testid="import-progress"]')).toBeNull();
     expect(changed).toHaveLength(1);
   });
 

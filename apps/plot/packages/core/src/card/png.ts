@@ -1,4 +1,5 @@
 import { zlibSync } from 'fflate';
+import { ChunkReader } from './source.js';
 
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
@@ -48,6 +49,47 @@ export function stripPngTextChunks(bytes: Uint8Array): Uint8Array | null {
     at += end - start;
   }
   return out;
+}
+
+/** A PNG whose chunks cannot be walked to IEND: what `stripPngTextChunks` answers null for. */
+export class PngUnwalkableError extends Error {}
+
+/** How much of a kept chunk is handed on at once. */
+const STRIP_SLICE_BYTES = 64 * 1024;
+
+/**
+ * `stripPngTextChunks` over a stream: every chunk but the textual ones handed
+ * on byte for byte as it comes, so a picture of any size is never held. Bytes
+ * whose chunks cannot be walked to IEND throw `PngUnwalkableError` — at the
+ * end, so a writer taking the stream must not keep what it wrote (an object
+ * store's multipart upload aborts on the throw).
+ */
+export async function* stripPngTextChunksStream(chunks: AsyncIterable<Uint8Array>): AsyncGenerator<Uint8Array> {
+  const reader = new ChunkReader(chunks);
+  const decoder = new TextDecoder('utf-8');
+  try {
+    const signature = await reader.take(PNG_SIGNATURE.length);
+    if (!isPng(signature)) throw new PngUnwalkableError('Not a PNG');
+    yield signature.slice();
+    for (;;) {
+      const header = await reader.take(8);
+      if (header.length < 8) throw new PngUnwalkableError('The PNG ends before IEND');
+      const length = new DataView(header.buffer, header.byteOffset, header.byteLength).getUint32(0);
+      const type = decoder.decode(header.subarray(4, 8));
+      const kept = !TEXT_CHUNK_TYPES.has(type);
+      if (kept) yield header.slice();
+      // The data and the CRC after it.
+      for (let left = length + 4; left > 0; ) {
+        const part = await reader.take(Math.min(left, STRIP_SLICE_BYTES));
+        if (part.length === 0) throw new PngUnwalkableError('The PNG ends inside a chunk');
+        left -= part.length;
+        if (kept) yield part.slice();
+      }
+      if (type === 'IEND') return;
+    }
+  } finally {
+    await reader.close();
+  }
 }
 
 /**

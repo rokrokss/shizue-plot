@@ -1,24 +1,17 @@
-import { Unzip, UnzipInflate, type UnzipFile } from 'fflate';
+import { FileTooLargeError, listZip, streamZipEntry, ZipError, type ZipEntry } from '../sillytavern/zip.js';
 import { MAX_CARD_IMPORT_BYTES } from '../types.js';
 import { AUDIO_EXTENSIONS, FONT_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS } from './media.js';
 import { CardParseError } from './normalize.js';
-import { readRisum, type RisuModuleScripts } from './risum.js';
+import { readRisumMainFrom, type RisuModuleScripts } from './risum.js';
+import { ByteSourceError, collectBytes, MAX_READ_WHOLE_BYTES, sliceSource, type ByteSource } from './source.js';
 
 const ZIP_SIGNATURE = [0x50, 0x4b, 0x03, 0x04];
 const EMBEDDED_PREFIX = 'embeded://'; // sic — the CCv3 spec spells it this way.
+export { MAX_READ_WHOLE_BYTES } from './source.js';
 /**
- * Decompressed-size cap per entry, so a hostile archive cannot exhaust memory.
- * Room for any one picture a card could reasonably carry: an image over it ends
- * the asset pass, and every image after it goes too.
- */
-export const MAX_ENTRY_BYTES = 100 * 1024 * 1024;
-/**
- * Budget for the pass that reads the icon and the assets. The per-entry cap bounds
- * memory but not work: an archive can name dozens of entries that each stop just
- * under it. `card.json` and `module.risum` are read by their own earlier passes —
- * the card's name is not known from the card, it *is* the card, and the module
- * must not share its fate with anything (see `readModule`) — so the worst case
- * for one archive is this budget plus one entry, on top of those two.
+ * Budget for the bytes the icon and the assets inflate to. The per-entry cap
+ * bounds one entry; this bounds the work: an archive can name dozens of entries
+ * that each stop just under it.
  *
  * As large as the file an import takes: images are stored rather than deflated,
  * so a card under that cap holds about this much of them, and a smaller budget
@@ -26,11 +19,12 @@ export const MAX_ENTRY_BYTES = 100 * 1024 * 1024;
  */
 export const MAX_TOTAL_BYTES = MAX_CARD_IMPORT_BYTES;
 /**
- * The archive is fed in small slices rather than one push: the inflater emits
- * output per slice, so an oversized entry trips the cap after a few MB instead
- * of being fully materialized first.
+ * Decompressed-size cap per asset. An asset is streamed into the store, never
+ * held, so nothing but the budget bounds it: a card's 300MB video comes in, as
+ * RisuAI plays it (2026-10-17 — until then 100MB, and an asset over it ended
+ * the asset pass).
  */
-const PUSH_CHUNK_BYTES = 16 * 1024;
+export const MAX_ENTRY_BYTES = MAX_TOTAL_BYTES;
 /**
  * Embedded assets kept per archive — a parse budget, at the plot's 1000-asset
  * cap: Realm's popular cards carry a few hundred images, and one card is
@@ -50,10 +44,13 @@ const EOCD_SIGNATURE = [0x50, 0x4b, 0x05, 0x06];
 const EOCD_BYTES = 22;
 const MAX_COMMENT_BYTES = 0xffff;
 
+export const isJpeg = (bytes: Uint8Array): boolean => JPEG_SIGNATURE.every((byte, i) => bytes[i] === byte);
+
 /**
- * The charx inside a JPEG — RisuAI's "charx jpeg" export writes the picture and
- * then streams a whole archive after it. Returns the archive's bytes, or
- * undefined when these are not a JPEG carrying one.
+ * Where the charx inside a JPEG starts — RisuAI's "charx jpeg" export writes the
+ * picture and then streams a whole archive after it — read off the file's last
+ * bytes: `tail` is the file from `tailStart` to its end. Undefined when there is
+ * no archive.
  *
  * The archive is found from its end-of-central-directory record rather than by
  * looking for a local header, since `PK\x03\x04` can turn up in JPEG data by
@@ -61,18 +58,39 @@ const MAX_COMMENT_BYTES = 0xffff;
  * RisuAI does not shift them for the picture in front — so the archive starts
  * where its central directory really is, minus where it claims to be.
  */
-export function charxInJpeg(bytes: Uint8Array): Uint8Array | undefined {
-  if (!JPEG_SIGNATURE.every((byte, i) => bytes[i] === byte)) return undefined;
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const last = bytes.length - EOCD_BYTES;
+function archiveStartIn(tail: Uint8Array, tailStart: number): number | undefined {
+  const view = new DataView(tail.buffer, tail.byteOffset, tail.byteLength);
+  const last = tail.length - EOCD_BYTES;
   for (let at = last; at >= 0 && at >= last - MAX_COMMENT_BYTES; at -= 1) {
-    if (!EOCD_SIGNATURE.every((byte, i) => bytes[at + i] === byte)) continue;
+    if (!EOCD_SIGNATURE.every((byte, i) => tail[at + i] === byte)) continue;
     // A real record's comment runs exactly to the end of the file.
-    if (at + EOCD_BYTES + view.getUint16(at + 20, true) !== bytes.length) continue;
-    const start = at - view.getUint32(at + 12, true) - view.getUint32(at + 16, true);
-    return start >= 0 && isZip(bytes.subarray(start)) ? bytes.subarray(start) : undefined;
+    if (at + EOCD_BYTES + view.getUint16(at + 20, true) !== tail.length) continue;
+    const start = tailStart + at - view.getUint32(at + 12, true) - view.getUint32(at + 16, true);
+    return start >= 0 ? start : undefined;
   }
   return undefined;
+}
+
+/** The charx inside a JPEG, in memory (`archiveOf` reads the same off a source). */
+export function charxInJpeg(bytes: Uint8Array): Uint8Array | undefined {
+  if (!isJpeg(bytes)) return undefined;
+  const start = archiveStartIn(bytes, 0);
+  return start !== undefined && isZip(bytes.subarray(start)) ? bytes.subarray(start) : undefined;
+}
+
+/**
+ * The charx a file is or carries: the file itself when it is a ZIP, the archive
+ * behind the picture when it is a JPEG with one (`charxInJpeg`), else undefined.
+ * `head` is the file's first bytes.
+ */
+export async function archiveOf(source: ByteSource, head: Uint8Array): Promise<ByteSource | undefined> {
+  if (isZip(head)) return source;
+  if (!isJpeg(head)) return undefined;
+  const tailLength = Math.min(source.size, EOCD_BYTES + MAX_COMMENT_BYTES);
+  const tailStart = source.size - tailLength;
+  const start = archiveStartIn(await source.read(tailStart, tailLength), tailStart);
+  if (start === undefined || !isZip(await source.read(start, ZIP_SIGNATURE.length))) return undefined;
+  return sliceSource(source, start);
 }
 
 interface CharxAsset {
@@ -83,9 +101,8 @@ interface CharxAsset {
 }
 
 /**
- * An embedded picture, piece of music, video or web font, ready to be sniffed,
- * slugged and stored by the caller (`sniffMedia`). A RisuAI PNG card's asset
- * chunks come out in the same shape.
+ * An embedded picture, piece of music, video or web font, read whole — what a
+ * parse in memory (`readCard`, the tests) hands back for each `CardAsset`.
  */
 export interface CharxAssetFile {
   /** Asset name as the card declares it; falls back to the entry file name. */
@@ -102,6 +119,22 @@ export interface CharxAssetFile {
    * module (`convertCharacterToModule`).
    */
   additional?: true;
+}
+
+/**
+ * An embedded file a card or module carries, not yet read: the import streams
+ * each into the store from its own offset (`readCardAssets`), sniffed, slugged
+ * and stored by the caller (`sniffMedia`).
+ */
+export interface CardAsset extends Omit<CharxAssetFile, 'bytes'> {
+  /**
+   * Its decoded size, where the file says it before a byte of it is read — a PNG
+   * card's chunk, a `.risum` block. A ZIP's own figure is the archive builder's
+   * claim and is not used: what an entry inflates to is counted as it is read.
+   */
+  size?: number;
+  /** Its bytes, decoded, as a stream; leaving the loop early stops the read. */
+  open(): AsyncIterable<Uint8Array>;
 }
 
 /**
@@ -126,119 +159,9 @@ export interface CharxContents {
   module?: RisuModuleScripts;
   iconBuffer?: Uint8Array;
   /** Embedded pictures, music, video and web fonts other than the main icon, in card order. */
-  assets: CharxAssetFile[];
-  /** The declared embedded files not among `assets`, by why. */
+  assets: CardAsset[];
+  /** The declared embedded files not among `assets`, by why — as far as the archive's directory tells. */
   skipped: SkippedAssets;
-}
-
-function concat(chunks: Uint8Array[], total: number): Uint8Array {
-  const out = new Uint8Array(total);
-  let at = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, at);
-    at += chunk.length;
-  }
-  return out;
-}
-
-interface WantedEntry {
-  name: string;
-  /** Blowing the per-entry cap fails the parse instead of dropping the entry. */
-  required: boolean;
-}
-
-/**
- * Inflates the named entries and nothing else, in one pass over the archive with
- * one shared byte budget. The caps count bytes the inflater actually emits — the
- * sizes declared in the ZIP headers are supplied by whoever built the archive and
- * can understate the real payload.
- *
- * A `required` entry over the per-entry cap fails the parse. Any other overrun —
- * an optional entry over the per-entry cap, or the archive budget running out —
- * **ends the pass** and returns whatever completed before it. Stopping is the only
- * way to stop paying: `file.terminate()` is a no-op for fflate's synchronous
- * inflater (it forwards to a decoder that has no terminate), so an archive whose
- * next entry inflates to gigabytes would keep burning CPU if the pass continued.
- * It is called anyway — the interface documents it as ending the stream, and an
- * async decoder would honour it — but the loop break is what bounds the work.
- */
-function extractEntries(
-  bytes: Uint8Array,
-  wanted: WantedEntry[],
-  /** Set when a cap ended the pass, so what it did not reach was not read rather than absent. */
-  report?: { stopped: boolean },
-): Map<string, Uint8Array> {
-  const names = new Set(wanted.map((entry) => entry.name));
-  const required = new Set(wanted.filter((entry) => entry.required).map((entry) => entry.name));
-  const entries = new Map<string, Uint8Array>();
-  const started = new Set<string>();
-  let pending = names.size;
-  let emitted = 0;
-  let oversized: string | undefined;
-  let failure: Error | undefined;
-  let stopped = false;
-
-  const stop = (file: UnzipFile): void => {
-    stopped = true;
-    file.terminate();
-  };
-
-  const unzip = new Unzip();
-  unzip.register(UnzipInflate);
-  unzip.onfile = (file) => {
-    // Only the first entry bearing a wanted name is read; later duplicates are
-    // skipped so a repeated name cannot multiply the decompression work.
-    const name = file.name;
-    if (stopped || !names.has(name) || started.has(name)) return;
-    started.add(name);
-
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    file.ondata = (err, data, final) => {
-      if (oversized || failure || stopped) return;
-      if (err) {
-        failure = err;
-        return;
-      }
-      // Counted before anything may decide to drop: emitted bytes are work
-      // already done, kept or not, and the budget exists to bound that work.
-      total += data.length;
-      emitted += data.length;
-      if (total > MAX_ENTRY_BYTES) {
-        if (required.has(name)) oversized = name;
-        else stop(file);
-        return;
-      }
-      if (emitted > MAX_TOTAL_BYTES) {
-        stop(file);
-        return;
-      }
-      chunks.push(data);
-      if (final) {
-        entries.set(name, concat(chunks, total));
-        pending -= 1;
-      }
-    };
-    file.start();
-  };
-
-  for (
-    let at = 0;
-    at < bytes.length && pending > 0 && !stopped && !oversized && !failure;
-    at += PUSH_CHUNK_BYTES
-  ) {
-    const end = Math.min(at + PUSH_CHUNK_BYTES, bytes.length);
-    unzip.push(bytes.subarray(at, end), end === bytes.length);
-  }
-
-  if (oversized) {
-    throw new CardParseError(
-      `charx entry exceeds the ${MAX_ENTRY_BYTES / (1024 * 1024)}MB limit: ${oversized}`,
-    );
-  }
-  if (failure) throw failure;
-  if (report) report.stopped = stopped;
-  return entries;
 }
 
 /** ZIP entry an asset points at, or undefined when it is not embedded. */
@@ -266,92 +189,175 @@ const looksLikeMedia = (asset: CharxAsset, entry: string): boolean =>
 /** Where RisuAI's charx export puts the scripts it takes out of `card.json`. */
 const MODULE_ENTRY = 'module.risum';
 
+/** Errors of the store under the parse go through as they are; the rest is the file's doing. */
+const rethrowSourceErrors = (error: unknown): void => {
+  if (error instanceof ByteSourceError) throw error;
+};
+
 /**
- * The archive's RisuAI module, in a pass of its own: nothing about the module
- * may fail the import, and a shared pass would tie its fate to another entry's.
- * RisuAI writes it after the assets and before `card.json`, so in the card's pass
- * an oversized module would end the pass before the card was reached, and in the
- * asset pass the budget can run out on the images ahead of it. Here an oversized
- * module ends the pass with nothing, and an inflate error is caught.
+ * An entry read whole, under `MAX_READ_WHOLE_BYTES`, counted on what it
+ * inflates to — the sizes in the ZIP's headers are the archive builder's word.
+ * Past the cap is a `CardParseError`: what is read whole is what the card is.
  */
-function readModule(bytes: Uint8Array): RisuModuleScripts | undefined {
+async function readWhole(source: ByteSource, entry: ZipEntry): Promise<Uint8Array> {
+  const tooLarge = (): Error =>
+    new CardParseError(`charx entry exceeds the ${MAX_READ_WHOLE_BYTES / (1024 * 1024)}MB limit: ${entry.name}`);
   try {
-    const entry = extractEntries(bytes, [{ name: MODULE_ENTRY, required: false }]).get(MODULE_ENTRY);
-    return entry ? readRisum(entry) : undefined;
-  } catch {
+    return await collectBytes(streamZipEntry(source, entry, { maxBytes: MAX_READ_WHOLE_BYTES }), MAX_READ_WHOLE_BYTES, tooLarge);
+  } catch (error) {
+    if (error instanceof FileTooLargeError) throw tooLarge();
+    throw error;
+  }
+}
+
+/**
+ * The archive's RisuAI module: only its main block, read off the front of the
+ * entry — the asset blocks after it are a module's own pictures, which a card
+ * import has no use for. Nothing about the module may fail the import, so an
+ * unreadable or oversized one is no module.
+ */
+async function readModule(source: ByteSource, entry: ZipEntry | undefined): Promise<RisuModuleScripts | undefined> {
+  if (!entry) return undefined;
+  try {
+    const main = await readRisumMainFrom(streamZipEntry(source, entry));
+    if (!main) return undefined;
+    const module = main.module;
+    return {
+      ...(Array.isArray(module['regex']) ? { regex: module['regex'] as unknown[] } : {}),
+      ...(Array.isArray(module['trigger']) ? { trigger: module['trigger'] as unknown[] } : {}),
+      ...(Array.isArray(module['lorebook']) ? { lorebook: module['lorebook'] as unknown[] } : {}),
+    };
+  } catch (error) {
+    rethrowSourceErrors(error);
     return undefined;
   }
 }
 
 /**
- * Unpacks a .charx archive: `card.json`, RisuAI's `module.risum`, the main icon,
- * and the embedded pictures, music, video and web fonts the card declares.
- * Nothing else is ever inflated.
- *
- * The card has to be read before the other names are known, and everything it
- * names is then read together so icon and assets share one budget. An archive
- * that exhausts it keeps whatever completed first — the icon is best-effort
- * there, like any other entry, since `required` governs the per-entry cap and
- * nothing else. The module is read in between, on its own (see `readModule`).
+ * Opens a .charx archive from its central directory: `card.json`, RisuAI's
+ * `module.risum`, the main icon read whole, and the embedded pictures, music,
+ * video and web fonts the card declares as streams not yet read. Nothing else
+ * is ever inflated. The directory's sizes are trusted for nothing but where an
+ * entry's bytes lie: RisuAI's export writes data descriptors, so a local header
+ * says 0. The first entry bearing a name is the one read; a repeated name
+ * cannot multiply the work.
  */
-export function readCharx(bytes: Uint8Array): CharxContents {
-  const cardJson = extractEntries(bytes, [{ name: 'card.json', required: true }]).get('card.json');
-  if (!cardJson) {
-    throw new CardParseError('charx archive has no card.json');
+export async function readCharxSource(source: ByteSource): Promise<CharxContents> {
+  let entries: ZipEntry[];
+  try {
+    entries = await listZip(source);
+  } catch (error) {
+    if (error instanceof ZipError) throw new CardParseError(`Unreadable charx archive: ${error.message}`);
+    throw error;
   }
+  const byName = new Map<string, ZipEntry>();
+  for (const entry of entries) if (!byName.has(entry.name)) byName.set(entry.name, entry);
 
-  const raw: unknown = JSON.parse(new TextDecoder('utf-8').decode(cardJson));
-  const module = readModule(bytes);
+  const cardEntry = byName.get('card.json');
+  if (!cardEntry) throw new CardParseError('charx archive has no card.json');
+  const raw: unknown = JSON.parse(new TextDecoder('utf-8').decode(await readWhole(source, cardEntry)));
+  const module = await readModule(source, byName.get(MODULE_ENTRY));
   const declared = (raw as { data?: { assets?: CharxAsset[] } }).data?.assets ?? [];
   const iconEntry = entryOf(declared.find((asset) => asset.type === 'icon' && asset.name === 'main'));
 
-  // The names to inflate are picked before anything is read, so the cap bounds
-  // the work rather than the result.
-  const wanted: WantedEntry[] = iconEntry ? [{ name: iconEntry, required: true }] : [];
-  const declaredAssets: { name: string; entry: string; emotion: boolean; additional: boolean }[] = [];
+  const assets: CardAsset[] = [];
   const skipped = noSkippedAssets();
-  const entries = new Set<string>();
+  const seen = new Set<string>();
   for (const asset of declared) {
-    const entry = entryOf(asset);
-    if (!entry || entry === iconEntry || entries.has(entry)) continue;
-    entries.add(entry);
-    if (!looksLikeMedia(asset, entry)) {
+    const name = entryOf(asset);
+    if (!name || name === iconEntry || seen.has(name)) continue;
+    seen.add(name);
+    if (!looksLikeMedia(asset, name)) {
       skipped.unsupported += 1;
       continue;
     }
-    if (declaredAssets.length >= MAX_ASSETS) {
+    if (assets.length >= MAX_ASSETS) {
       skipped.overBudget += 1;
       continue;
     }
-    declaredAssets.push({
-      name: asset.name?.trim() || fileNameOf(entry),
-      entry,
-      emotion: asset.type === 'emotion',
-      additional: asset.type === 'x-risu-asset',
-    });
-    wanted.push({ name: entry, required: false });
-  }
-
-  const pass = { stopped: false };
-  const inflated =
-    wanted.length > 0 ? extractEntries(bytes, wanted, pass) : new Map<string, Uint8Array>();
-  const assets: CharxAssetFile[] = [];
-  for (const item of declaredAssets) {
-    const entry = inflated.get(item.entry);
+    const entry = byName.get(name);
     if (!entry) {
-      // Past a cap the pass ended, and what it had not read yet is not known to be absent.
-      if (pass.stopped) skipped.overBudget += 1;
-      else skipped.missing += 1;
+      skipped.missing += 1;
       continue;
     }
     assets.push({
-      name: item.name,
-      bytes: entry,
-      ...(item.emotion ? { emotion: true as const } : {}),
-      ...(item.additional ? { additional: true as const } : {}),
+      name: asset.name?.trim() || fileNameOf(name),
+      open: () => streamZipEntry(source, entry),
+      ...(asset.type === 'emotion' ? { emotion: true as const } : {}),
+      ...(asset.type === 'x-risu-asset' ? { additional: true as const } : {}),
     });
   }
 
-  const iconBuffer = iconEntry ? inflated.get(iconEntry) : undefined;
+  const icon = iconEntry ? byName.get(iconEntry) : undefined;
+  const iconBuffer = icon ? await readWhole(source, icon) : undefined;
   return { raw, ...(module ? { module } : {}), ...(iconBuffer ? { iconBuffer } : {}), assets, skipped };
+}
+
+/** The asset that took the read past a cap: it and every asset after it are counted, never read. */
+class AssetOverBudget extends Error {}
+
+/**
+ * Reads the assets in order under the parse caps, handing each to `visit` as a
+ * stream: an asset's own (`MAX_ENTRY_BYTES`) and the budget they share with
+ * what was read before them (`MAX_TOTAL_BYTES`, `spent` — a charx's icon). The
+ * caps count what the bytes decode to, and the first asset past one ends the
+ * pass: `visit`'s read of it throws, and it and every asset after it come back
+ * as `overBudget` rather than failing the import. `visit` answers false to stop
+ * (the plot is full), and may leave a stream unread (bytes that are none of the
+ * kinds it keeps).
+ */
+export async function readCardAssets(
+  assets: readonly CardAsset[],
+  visit: (asset: CardAsset, body: AsyncIterable<Uint8Array>, index: number) => Promise<boolean>,
+  { spent = 0 }: { spent?: number } = {},
+): Promise<{ overBudget: number }> {
+  let total = spent;
+  for (const [index, asset] of assets.entries()) {
+    if (asset.size !== undefined && (asset.size > MAX_ENTRY_BYTES || total + asset.size > MAX_TOTAL_BYTES)) {
+      return { overBudget: assets.length - index };
+    }
+    async function* counted(): AsyncGenerator<Uint8Array> {
+      let entry = 0;
+      for await (const chunk of asset.open()) {
+        entry += chunk.length;
+        total += chunk.length;
+        if (entry > MAX_ENTRY_BYTES || total > MAX_TOTAL_BYTES) throw new AssetOverBudget(asset.name);
+        yield chunk;
+      }
+    }
+    try {
+      if (!(await visit(asset, counted(), index))) break;
+    } catch (error) {
+      if (isOverBudget(error)) return { overBudget: assets.length - index };
+      throw error;
+    }
+  }
+  return { overBudget: 0 };
+}
+
+/** Whether a failure is the read past a cap, however the writer it went through wrapped it. */
+function isOverBudget(error: unknown): boolean {
+  for (let at: unknown = error, depth = 0; at && depth < 5; depth += 1) {
+    if (at instanceof AssetOverBudget) return true;
+    at = (at as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/** The assets read whole, as a parse in memory hands them back (`readCard`, the tests). */
+export async function collectAssets(
+  assets: readonly CardAsset[],
+  options: { spent?: number } = {},
+): Promise<{ assets: CharxAssetFile[]; overBudget: number }> {
+  const files: CharxAssetFile[] = [];
+  const { overBudget } = await readCardAssets(
+    assets,
+    async (asset, body) => {
+      const { open: _open, size: _size, ...rest } = asset;
+      files.push({ ...rest, bytes: await collectBytes(body, Number.POSITIVE_INFINITY, () => new Error()) });
+      return true;
+    },
+    options,
+  );
+  return { assets: files, overBudget };
 }

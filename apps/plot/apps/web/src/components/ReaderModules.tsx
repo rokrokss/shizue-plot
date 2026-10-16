@@ -2,12 +2,20 @@
 
 import { useTranslations } from 'next-intl';
 import { useRef, useState } from 'react';
-import { ApiError, apiSend, apiUpload } from '@/lib/api';
+import { apiSend } from '@/lib/api';
+// Aliased: `importFile` below is this component's own handler.
+import {
+  abandonImport,
+  confirmImport,
+  FileImportError,
+  importFile as importUpload,
+  type ImportProgress,
+} from '@/lib/fileImport';
 import { readImportWarnings, type ImportWarning } from '@/lib/importWarnings';
 import { checkCardSize } from '@/lib/realm';
 import type { ModuleInert, ReaderModuleSummary } from '@/lib/types';
 import { useErrorMessage } from '@/lib/useErrorMessage';
-import { ImportWarnings } from './CardImport';
+import { ImportProgressLine, ImportWarnings } from './CardImport';
 import { Badge, Button, Checkbox, ErrorText } from './ui';
 
 /**
@@ -21,8 +29,9 @@ import { Badge, Button, Checkbox, ErrorText } from './ui';
  * on as well (`onHere` with none of the switches), and the row says so. A
  * module never changes the work: it runs after the work's own, in the order it
  * was imported. One that asks for low-level access comes in only after the
- * reader says yes to RisuAI's warning; an MCP server or `cjs` code it carries
- * is kept and never run, and the row says that too.
+ * reader says yes to RisuAI's warning — on the import that stopped to ask,
+ * whose file the server kept, so the yes sends nothing again; an MCP server or
+ * `cjs` code it carries is kept and never run, and the row says that too.
  */
 export function ReaderModules({
   library,
@@ -49,6 +58,7 @@ export function ReaderModules({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [warnings, setWarnings] = useState<ImportWarning[]>([]);
+  const [progress, setProgress] = useState<ImportProgress | null>(null);
 
   async function act(key: string, work: () => Promise<void>): Promise<void> {
     if (busy) return;
@@ -69,16 +79,20 @@ export function ReaderModules({
       const sized = checkCardSize(file);
       let created: { importWarnings?: unknown };
       try {
-        created = await apiUpload('/api/reader-modules', sized);
+        created = await importUpload('reader_module', sized, {}, { onProgress: setProgress });
       } catch (caught) {
         // RisuAI's `lowLevelAccessConfirm`: the module's scripts may reach the model and other hosts.
-        if (!(caught instanceof ApiError && caught.code === 'low_level_access_unconfirmed')) throw caught;
-        if (!window.confirm(t('readerModuleLowLevelConfirm'))) return;
-        created = await apiUpload('/api/reader-modules', sized, { confirmLowLevelAccess: 'true' });
+        if (!(caught instanceof FileImportError && caught.code === 'low_level_access_unconfirmed')) throw caught;
+        if (!window.confirm(t('readerModuleLowLevelConfirm'))) {
+          void abandonImport(caught.importId);
+          return;
+        }
+        created = await confirmImport(caught.importId, { onProgress: setProgress });
       }
       setWarnings(readImportWarnings(created.importWarnings));
       await onChange();
     });
+    setProgress(null);
     if (fileInput.current) fileInput.current.value = '';
   }
 
@@ -198,6 +212,7 @@ export function ReaderModules({
           {t('readerModuleImport')}
         </Button>
         <p className="text-xs text-muted">{t('readerModuleImportHint')}</p>
+        <ImportProgressLine progress={progress} />
       </div>
       <ImportWarnings warnings={warnings} />
       {error ? <ErrorText>{error}</ErrorText> : null}

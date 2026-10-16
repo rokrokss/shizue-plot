@@ -22,6 +22,8 @@ import {
   deleteQuietly,
   readAll,
   attachmentKey,
+  importFileKey,
+  PartSizeMismatch,
   type ObjectStorage,
 } from '../src/storage.js';
 import { connectS3Server } from './s3Server.js';
@@ -102,6 +104,112 @@ function contractOf(name: string, storage: ObjectStorage | null): void {
     });
   });
 }
+
+/** Bytes 0..255 over and over, so a part out of place or a byte lost shows. */
+const patterned = (size: number, salt = 0): Uint8Array => {
+  const bytes = new Uint8Array(size);
+  for (let i = 0; i < size; i += 1) bytes[i] = (i + salt) & 0xff;
+  return bytes;
+};
+
+/** Bytes as a stream of `piece`-sized chunks, as a parse hands an asset over. */
+async function* inPieces(bytes: Uint8Array, piece: number): AsyncGenerator<Uint8Array> {
+  for (let at = 0; at < bytes.length; at += piece) yield bytes.subarray(at, at + piece);
+}
+
+/** Sends a part as a reader's browser does: to the store's address, or to this API. */
+async function sendPart(store: ObjectStorage, key: string, uploadId: string, part: number, bytes: Uint8Array): Promise<Response | void> {
+  const url = await store.uploads.partUrl(key, uploadId, part, bytes.length);
+  if (url) return fetch(url, { method: 'PUT', body: Buffer.from(bytes) });
+  await store.uploads.write(key, uploadId, part, inPieces(bytes, 4096), bytes.length);
+}
+
+/** What streams and staged uploads hold for any driver. */
+function streamingContractOf(name: string, storage: ObjectStorage | null): void {
+  describe.runIf(storage !== null)(`${name} driver: streams and uploads`, () => {
+    const store = storage!;
+    const MiB = 1024 * 1024;
+
+    it('writes a stream of any length, past one part of it, and says its size', async () => {
+      const key = assetKey(randomUUID(), 'mp4');
+      const bytes = patterned(9 * MiB + 17);
+      await store.putStream(key, inPieces(bytes, 64 * 1024), 'video/mp4');
+      expect(await store.size(key)).toBe(bytes.length);
+      const object = await store.get(key);
+      expect(Buffer.from(await readAll(object!.body)).equals(bytes)).toBe(true);
+      expect(await store.size(assetKey(randomUUID(), 'mp4'))).toBeNull();
+    });
+
+    it('leaves nothing under the key for a stream that throws, and rejects with its error', async () => {
+      const key = assetKey(randomUUID(), 'mp4');
+      const cut = new Error('cut');
+      async function* failing(): AsyncGenerator<Uint8Array> {
+        yield* inPieces(patterned(9 * MiB), 64 * 1024);
+        throw cut;
+      }
+      const rejected = await store.putStream(key, failing(), 'video/mp4').then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      // However the driver wraps it, the stream's own error is in the chain.
+      let found = false;
+      for (let at: unknown = rejected; at; at = (at as { cause?: unknown }).cause) if (at === cut) found = true;
+      expect(found).toBe(true);
+      expect(await store.get(key)).toBeNull();
+    });
+
+    it('joins an upload\'s parts in order, whatever order they came in', async () => {
+      const key = importFileKey(randomUUID(), 'file');
+      const first = patterned(5 * MiB, 1);
+      const second = patterned(123_457, 2);
+      const uploadId = await store.uploads.create(key, 'application/octet-stream');
+      await sendPart(store, key, uploadId, 2, second);
+      await sendPart(store, key, uploadId, 1, first);
+
+      const parts = await store.uploads.parts(key, uploadId);
+      expect(parts.map(({ part, size }) => [part, size])).toEqual([
+        [1, first.length],
+        [2, second.length],
+      ]);
+      // Before the join there is nothing under the key.
+      expect(await store.size(key)).toBeNull();
+      await store.uploads.complete(key, uploadId, parts);
+      expect(await store.size(key)).toBe(first.length + second.length);
+      const tail = await store.get(key, { start: first.length - 3, end: first.length + 2 });
+      expect([...(await readAll(tail!.body))]).toEqual([...first.subarray(-3), ...second.subarray(0, 3)]);
+      await store.delete(key);
+    });
+
+    it('drops an upload with its parts, and an upload already gone is no error', async () => {
+      const key = importFileKey(randomUUID(), 'file');
+      const uploadId = await store.uploads.create(key, 'application/octet-stream');
+      await sendPart(store, key, uploadId, 1, patterned(1000));
+      await store.uploads.abort(key, uploadId);
+      await expect(store.uploads.abort(key, uploadId)).resolves.toBeUndefined();
+      expect(await store.size(key)).toBeNull();
+    });
+
+    it('keeps no part of another size than it was sent as', async () => {
+      const key = importFileKey(randomUUID(), 'file');
+      const uploadId = await store.uploads.create(key, 'application/octet-stream');
+      const url = await store.uploads.partUrl(key, uploadId, 1, 1000);
+      if (url) {
+        // The size is in the signature: the store itself refuses the PUT.
+        const res = await fetch(url, { method: 'PUT', body: Buffer.from(patterned(1001)) });
+        expect(res.ok).toBe(false);
+      } else {
+        await expect(store.uploads.write(key, uploadId, 1, inPieces(patterned(1001), 100), 1000)).rejects.toThrow(
+          PartSizeMismatch,
+        );
+      }
+      expect(await store.uploads.parts(key, uploadId)).toEqual([]);
+      await store.uploads.abort(key, uploadId);
+    });
+  });
+}
+
+streamingContractOf('local', local);
+streamingContractOf('s3 (RustFS)', s3);
 
 contractOf('local', local);
 contractOf('s3 (RustFS)', s3);

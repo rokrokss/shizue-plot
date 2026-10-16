@@ -22,7 +22,8 @@
 import {
   chatToggleText,
   moduleIntegrationNames,
-  type CharxAssetFile,
+  readCardAssets,
+  type CardAsset,
   type NormalizedCard,
   type PlotModule,
   type ReaderModuleAsset,
@@ -30,8 +31,9 @@ import {
 import { readerModules, readerPresets, type Chat, type Plot, type ReaderModule } from '@shizue/db';
 import { and, asc, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
-import { saveAsset } from './assets.js';
+import { saveAssetStream } from './assets.js';
 import type { AppDeps } from './deps.js';
+import type { ImportHooks } from './fileImports.js';
 import { deleteQuietly, readerModuleAssetKey } from './storage.js';
 import { isUuid } from './util.js';
 
@@ -186,37 +188,53 @@ export async function presetToggles(deps: AppDeps, chat: Pick<Chat, 'userId' | '
 
 /**
  * Stores the pictures a library module brought as a plot's are stored
- * (`saveAsset`) — read by their bytes, never their names: an image, music or
- * any other media the chat plays, PNGs stripped of their text chunks — under
- * `reader-modules/`, up to `MAX_READER_MODULE_ASSETS`. What is not media is
- * skipped and counted, as an import counts it.
+ * (`saveAssetStream`) — read by their bytes, never their names: an image, music
+ * or any other media the chat plays, PNGs stripped of their text chunks — under
+ * `reader-modules/`, up to `MAX_READER_MODULE_ASSETS`, streamed one at a time
+ * under the parse's caps (`readCardAssets`). What is not media is skipped and
+ * counted, as an import counts it; so is what the caps cut off.
  */
 export async function storeReaderModuleAssets(
   deps: AppDeps,
-  assets: readonly CharxAssetFile[],
-): Promise<{ stored: ReaderModuleAsset[]; unsupported: number; overLimit: number }> {
+  assets: readonly CardAsset[],
+  hooks: ImportHooks,
+): Promise<{ stored: ReaderModuleAsset[]; unsupported: number; overLimit: number; overBudget: number }> {
   const stored: ReaderModuleAsset[] = [];
+  /** Keys written to, named by a row or not yet: what a failure takes back. */
+  const keys: string[] = [];
   let unsupported = 0;
   let overLimit = 0;
+  let overBudget = 0;
   try {
-    for (const [index, asset] of assets.entries()) {
+    hooks.progress('assets', 0, assets.length);
+    ({ overBudget } = await readCardAssets(assets, async (asset, body, index) => {
       if (stored.length >= MAX_READER_MODULE_ASSETS) {
         overLimit = assets.length - index;
-        break;
+        return false;
       }
       const id = randomUUID();
-      const saved = await saveAsset(deps.storage, id, asset.bytes, { audio: true, video: true, key: readerModuleAssetKey });
+      const saved = await saveAssetStream(deps.storage, id, body, {
+        audio: true,
+        video: true,
+        key: readerModuleAssetKey,
+        onKey: async (key) => {
+          keys.push(key);
+          await hooks.wrote({ keys: [key] });
+        },
+      });
+      hooks.progress('assets', index + 1, assets.length);
       if (!saved) {
         unsupported += 1;
-        continue;
+        return true;
       }
       stored.push({ id, name: asset.name, path: saved.key, mime: saved.mime });
-    }
+      return true;
+    }));
   } catch (error) {
-    await deleteReaderModuleAssets(deps, stored);
+    for (const key of keys) await deleteQuietly(deps.storage, key);
     throw error;
   }
-  return { stored, unsupported, overLimit };
+  return { stored, unsupported, overLimit, overBudget };
 }
 
 export async function deleteReaderModuleAssets(deps: AppDeps, assets: readonly ReaderModuleAsset[]): Promise<void> {

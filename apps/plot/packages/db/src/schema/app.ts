@@ -21,6 +21,7 @@ import type {
 } from '@shizue/core';
 import { sql } from 'drizzle-orm';
 import {
+  bigint,
   boolean,
   customType,
   foreignKey,
@@ -54,7 +55,7 @@ export type ContentLanguage = 'ko' | 'en' | 'ja';
  */
 export type SafetyLevel = 'all' | 'adult';
 export type NotificationKind = 'plot_published';
-export type JobKind = 'notification_fanout' | 'memory_backfill';
+export type JobKind = 'notification_fanout' | 'memory_backfill' | 'file_import';
 export type JobStatus = 'pending' | 'done' | 'failed';
 
 /** The publication event and the follower cutoff captured in its transaction. */
@@ -68,6 +69,10 @@ export interface JobPayloadMap {
   /** Summarizes an imported chat's history into its memory, a batch per call. */
   memory_backfill: {
     chatId: string;
+  };
+  /** Reads a file a reader uploaded and imports it (`file_imports`). */
+  file_import: {
+    importId: string;
   };
 }
 export type JobPayload = JobPayloadMap[JobKind];
@@ -1048,6 +1053,121 @@ export const jobs = pgTable(
   ],
 );
 
+/** What an uploaded file is imported as: a new plot, one more member of a plot, a module of a plot, a module of the reader's library. */
+export type FileImportTarget = 'plot' | 'member' | 'plot_module' | 'reader_module';
+/**
+ * `uploading` while the browser sends the parts, `queued` once they are joined
+ * and the job is waiting, `processing` while the job reads and writes, then
+ * `done` or `failed` — or `abandoned`, an upload nobody finished.
+ */
+export type FileImportStatus = 'uploading' | 'queued' | 'processing' | 'done' | 'failed' | 'abandoned';
+
+/** What the reader sent beside the file, for the job to act on as the old form fields were. */
+export interface FileImportOptions {
+  /** The RisuRealm page the card came from, in its one spelling. */
+  sourceUrl?: string;
+  /** The owner's word that they may publish it, for a plot that is already public. */
+  rightsConfirmed?: boolean;
+  /** The reader's yes to a module that asks for low-level access. */
+  confirmLowLevelAccess?: boolean;
+  /** A World Info file came with the card, kept beside it in the store (`imports/<id>/world-info`). */
+  worldInfo?: boolean;
+}
+
+/** One reason an import left something of the file behind, and how much (`importWarnings`). */
+export interface FileImportWarning {
+  code: string;
+  count: number;
+}
+
+/** What a finished import made, for the status to answer with the same body the old routes did. */
+export interface FileImportResult {
+  plotId?: string;
+  characterId?: string;
+  readerModuleId?: string;
+  importWarnings: FileImportWarning[];
+  /** The default variables the work already had another value for (a member import). */
+  variableConflicts?: string[];
+}
+
+/** Why an import failed, as the API's error body says it. */
+export interface FileImportError {
+  status: number;
+  code: string;
+  message: string;
+}
+
+/**
+ * The rows a running import has made, so a failure — or a worker that died
+ * under it — can take them back; the objects it stored are `file_import_keys`.
+ * Set (if only to `{}`) from the import's first write: an attempt that finds it
+ * set knows the one before it died writing.
+ */
+export interface FileImportWritten {
+  plotId?: string;
+  characterId?: string;
+  moduleId?: string;
+  readerModuleId?: string;
+}
+
+/**
+ * Card and module files a reader imports (`apps/api/src/fileImports.ts`,
+ * ARCHITECTURE §10 파일 임포트). The browser uploads the file straight into the
+ * store in parts — never through the web or the API's body — and a job reads it
+ * back; this row is the import from the first request to the answer the page
+ * polls for. `upload_id` names the store's multipart upload while it is open;
+ * `staged` says whether the uploaded file may still be in the store under
+ * `imports/<id>/`, until the import has read it or given it up.
+ */
+export const fileImports = pgTable(
+  'file_imports',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    target: text('target').$type<FileImportTarget>().notNull(),
+    /** The plot a member or module goes into; set null if it is deleted first, which fails the import. */
+    plotId: uuid('plot_id').references(() => plots.id, { onDelete: 'set null' }),
+    fileName: text('file_name').notNull(),
+    size: bigint('size', { mode: 'number' }).notNull(),
+    partSize: integer('part_size').notNull(),
+    options: jsonb('options').$type<FileImportOptions>().notNull().default({}),
+    uploadId: text('upload_id'),
+    staged: boolean('staged').notNull().default(true),
+    status: text('status').$type<FileImportStatus>().notNull().default('uploading'),
+    /** Where a running import is (`reading`, `assets`, `localizing`, `saving`), and how far, for the page. */
+    stage: text('stage'),
+    progress: jsonb('progress').$type<{ done: number; total: number }>(),
+    result: jsonb('result').$type<FileImportResult>(),
+    error: jsonb('error').$type<FileImportError>(),
+    written: jsonb('written').$type<FileImportWritten>(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Touched by every step the browser or the job takes, which is how a stalled one is told. */
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('file_imports_user_id_idx').on(t.userId, t.status),
+    index('file_imports_status_idx').on(t.status, t.updatedAt),
+  ],
+);
+
+/**
+ * The objects a running import stored, each recorded before it is written, for
+ * a failure to delete (`FileImportWritten`). A row each rather than a list on
+ * the import, so recording the thousandth picture costs what the first did.
+ */
+export const fileImportKeys = pgTable(
+  'file_import_keys',
+  {
+    importId: uuid('import_id')
+      .notNull()
+      .references(() => fileImports.id, { onDelete: 'cascade' }),
+    key: text('key').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.importId, t.key] })],
+);
+
 /**
  * The request rate limits' fixed windows (`rateLimit.ts`), one row per bucket
  * and caller (`<bucket>:<user id or client address>`). Postgres rather than a
@@ -1079,6 +1199,7 @@ export const leases = pgTable('leases', {
   expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
 });
 
+export type FileImport = typeof fileImports.$inferSelect;
 export type Plot = typeof plots.$inferSelect;
 export type NewPlot = typeof plots.$inferInsert;
 export type Character = typeof characters.$inferSelect;

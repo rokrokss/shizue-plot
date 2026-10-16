@@ -13,6 +13,7 @@ import { chatTranslationRoutes } from './routes/chatTranslation.js';
 import { chatRoutes, messageRoutes } from './routes/chats.js';
 import { commentRoutes, plotCommentRoutes } from './routes/comments.js';
 import { deviceRoutes } from './routes/devices.js';
+import { FILE_IMPORT_PART_BYTES, fileImportRoutes, MAX_WORLD_INFO_BYTES } from './fileImports.js';
 import { creatorRoutes, exploreRoutes } from './routes/explore.js';
 import { chatImportRoutes, importRoutes } from './routes/imports.js';
 import { modelRoutes } from './routes/models.js';
@@ -22,12 +23,14 @@ import { personaRoutes } from './routes/personas.js';
 import { presetRoutes } from './routes/presets.js';
 import { readerPresetRoutes } from './routes/readerPresets.js';
 import { readerModuleRoutes } from './routes/readerModules.js';
-import { MAX_CARD_IMPORT_BYTES, plotRoutes } from './routes/plots.js';
+import { plotRoutes } from './routes/plots.js';
 import { requireUser } from './session.js';
 
 const MB = 1024 * 1024;
-/** The file-import routes: a card as a new plot, one as another member, a RisuAI module into a work or into the reader's library. */
-const IMPORT_PATH = /^\/api\/(plots\/(import|[^/]+\/characters\/import|[^/]+\/modules)|reader-modules)$/;
+/** Starting a file import, whose body carries the World Info file beside a card (`fileImports.ts`). */
+const FILE_IMPORT_PATH = /^\/api\/file-imports$/;
+/** A part of a file being imported, sent to this API where the store takes none itself (the local driver). */
+const FILE_IMPORT_PART_PATH = /^\/api\/file-imports\/[^/]+\/parts\/\d+$/;
 /** `POST /api/chats/:id/attachments` and a chat import's (`…/import/attachments`) — an upload, not the 5MB of JSON. */
 const ATTACHMENT_PATH = /^\/api\/chats\/[^/]+\/(?:import\/)?attachments$/;
 
@@ -51,11 +54,14 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
 
   const tooLarge = (c: Context): Response =>
     c.json<ErrorBody>({ error: 'Payload too large', code: 'payload_too_large' }, 413);
-  // Character cards arrive as charx archives and image-laden PNGs; everything
-  // else is small JSON. One card file plus its multipart framing and the
-  // provenance fields: the route caps the file itself, this caps what the
-  // parser is handed.
-  const importLimit = bodyLimit({ maxSize: MAX_CARD_IMPORT_BYTES + MB, onError: tooLarge });
+  // Everything is small JSON but for these. A card or module file never comes in
+  // a body: the browser uploads it in parts (`fileImports.ts`) — to the store
+  // itself, or here a part at a time where the store takes none (the local
+  // driver), streamed to disk. Starting an import carries a World Info file, as
+  // a JSON string: escaping its quotes, backslashes and line breaks at most
+  // doubles it.
+  const fileImportLimit = bodyLimit({ maxSize: 2 * MAX_WORLD_INFO_BYTES + MB, onError: tooLarge });
+  const partLimit = bodyLimit({ maxSize: FILE_IMPORT_PART_BYTES, onError: tooLarge });
   const jsonLimit = bodyLimit({ maxSize: 5 * MB, onError: tooLarge });
   // One 8MB image plus its multipart framing and the measurement fields. The
   // route caps the file itself; this caps what the parser is handed.
@@ -64,7 +70,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   app.use('/api/*', (c, next) => {
     const path = c.req.path;
     if (ATTACHMENT_PATH.test(path)) return attachmentLimit(c, next);
-    return (IMPORT_PATH.test(path) ? importLimit : jsonLimit)(c, next);
+    if (FILE_IMPORT_PART_PATH.test(path)) return partLimit(c, next);
+    return (FILE_IMPORT_PATH.test(path) ? fileImportLimit : jsonLimit)(c, next);
   });
 
   app.all('/api/auth/*', async (c) => normalizeAuthResponse(await deps.auth.handler(c.req.raw)));
@@ -109,6 +116,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     '/api/chats',
     '/api/messages',
     '/api/imports',
+    '/api/file-imports',
   ]) {
     gated(path);
   }
@@ -135,6 +143,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   app.route('/api/chats', chatTranslationRoutes(deps));
   app.route('/api/messages', messageRoutes(deps));
   app.route('/api/imports', importRoutes(deps));
+  // Card and module files: uploaded in parts, read by a job, polled for (`fileImports.ts`).
+  app.route('/api/file-imports', fileImportRoutes(deps));
 
   return app;
 }

@@ -137,6 +137,12 @@ interface ApiConfig {
   metricsHost: string;
   /** How long a shutdown waits for in-flight background tasks (`lifecycle.ts`). */
   shutdownBackgroundMs: number;
+  /**
+   * File imports this process reads at once (`fileImports.ts`), each on a job
+   * loop of its own: what bounds the memory imports take, at a few parts and a
+   * card's text each.
+   */
+  importWorkers: number;
   env: NodeJS.ProcessEnv;
 }
 
@@ -187,6 +193,7 @@ export function readS3Config(env: NodeJS.ProcessEnv): S3Config {
     // which one, so the AWS default is as good a name as any.
     region: env['S3_REGION'] ?? 'us-east-1',
     ...(env['S3_ENDPOINT'] ? { endpoint: env['S3_ENDPOINT'] } : {}),
+    ...(env['S3_PUBLIC_ENDPOINT'] ? { publicEndpoint: env['S3_PUBLIC_ENDPOINT'] } : {}),
     ...(env['S3_ACCESS_KEY_ID'] ? { accessKeyId: env['S3_ACCESS_KEY_ID'] } : {}),
     ...(env['S3_SECRET_ACCESS_KEY'] ? { secretAccessKey: env['S3_SECRET_ACCESS_KEY'] } : {}),
     forcePathStyle: readBoolean(env['S3_FORCE_PATH_STYLE']),
@@ -225,6 +232,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     ...(metricsPort !== undefined ? { metricsPort } : {}),
     metricsHost: env['METRICS_HOST']?.trim() || '127.0.0.1',
     shutdownBackgroundMs: readInteger(env, 'SHUTDOWN_BACKGROUND_MS', 0, 600_000) ?? 20_000,
+    importWorkers: readInteger(env, 'IMPORT_WORKERS', 1, 16) ?? 2,
     env,
   };
 }

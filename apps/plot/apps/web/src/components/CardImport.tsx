@@ -3,6 +3,7 @@
 import { useTranslations } from 'next-intl';
 import { useState } from 'react';
 import { isRestrictiveLicense, licenseTerms, REALM_ORIGIN } from '@/lib/realm';
+import type { ImportProgress } from '@/lib/fileImport';
 import { MIGRATION_PLATFORMS } from '@/lib/migrate/wizard';
 import type { PlotMember } from '@/lib/types';
 import type { ImportWarning } from '@/lib/importWarnings';
@@ -213,5 +214,37 @@ export function ImportWarnings({ warnings }: { warnings: readonly ImportWarning[
         ))}
       </ul>
     </div>
+  );
+}
+
+const percent = (done: number, total: number): number => (total > 0 ? Math.min(100, Math.floor((done / total) * 100)) : 0);
+
+/**
+ * Where a file import is (`lib/fileImport`), in one quiet line beside the
+ * control that started it: the share of the file sent, then what the server is
+ * doing with it. A line rather than the button's label, which stays put while
+ * the button is busy (`Button`). Nothing when no import runs.
+ */
+export function ImportProgressLine({ progress }: { progress: ImportProgress | null }) {
+  const t = useTranslations('cardImport.progress');
+  if (!progress) return null;
+  let text: string;
+  if (progress.phase === 'uploading') {
+    text = t('uploading', { percent: percent(progress.loaded, progress.total) });
+  } else if (progress.status === 'queued') {
+    text = t('queued');
+  } else if (progress.stage === 'reading' && progress.total) {
+    text = t('reading', { percent: percent(progress.done ?? 0, progress.total) });
+  } else if (progress.stage === 'assets' && progress.total) {
+    text = t('assets', { done: progress.done ?? 0, total: progress.total });
+  } else if (progress.stage === 'localizing') {
+    text = t('localizing');
+  } else {
+    text = t('processing');
+  }
+  return (
+    <p role="status" data-testid="import-progress" className="text-xs text-muted tabular-nums">
+      {text}
+    </p>
   );
 }

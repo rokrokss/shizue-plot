@@ -12,9 +12,16 @@
  * import has no use for them, so reading stops after the main block.
  */
 
+import { ChunkReader, MAX_READ_WHOLE_BYTES, type ByteSource } from './source.js';
+
 const MAGIC = 111;
 const VERSION = 0;
 const HEADER_BYTES = 6;
+/** An asset block's head: `0x01` and a u32 LE length. */
+const BLOCK_HEADER_BYTES = 5;
+
+/** Whether a file's first bytes are a `.risum`'s. */
+export const isRisum = (head: Uint8Array): boolean => head[0] === MAGIC && head[1] === VERSION;
 
 /**
  * RPack's decode table. RPack is a byte-wise substitution, `out[i] = table[in[i]]`.
@@ -64,6 +71,17 @@ export interface RisuModuleScripts {
 const isObject = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 
+/** A `.risum`'s main block, decoded: the module as JSON, or undefined for bytes that are not one. */
+function mainOf(packed: Uint8Array): Record<string, unknown> | undefined {
+  let main: unknown;
+  try {
+    main = JSON.parse(new TextDecoder('utf-8').decode(rpackDecode(packed)));
+  } catch {
+    return undefined;
+  }
+  return isObject(main) && main['type'] === 'risuModule' && isObject(main['module']) ? main['module'] : undefined;
+}
+
 /**
  * A `.risum`'s main block: the module RisuAI wrote, as JSON, and where the asset
  * blocks after it begin. Undefined for bytes that are not one. Never throws.
@@ -72,16 +90,86 @@ export function readRisumMain(bytes: Uint8Array): { module: Record<string, unkno
   if (bytes.length < HEADER_BYTES || bytes[0] !== MAGIC || bytes[1] !== VERSION) return undefined;
   const length = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(2, true);
   if (HEADER_BYTES + length > bytes.length) return undefined;
+  const module = mainOf(bytes.subarray(HEADER_BYTES, HEADER_BYTES + length));
+  return module ? { module, end: HEADER_BYTES + length } : undefined;
+}
 
-  let main: unknown;
+/** A `.risum` whose main block is past `MAX_READ_WHOLE_BYTES`, which is read whole to be parsed. */
+export class RisumTooLargeError extends Error {}
+
+/**
+ * The same, read off the front of a stream: the header, then the main block,
+ * and nothing after it is asked for — the asset blocks are read from their own
+ * offsets when they are wanted. Undefined for what is not one; a main block past
+ * the cap throws `RisumTooLargeError`.
+ */
+export async function readRisumMainFrom(
+  chunks: AsyncIterable<Uint8Array>,
+): Promise<{ module: Record<string, unknown>; end: number } | undefined> {
+  const reader = new ChunkReader(chunks);
   try {
-    const json = rpackDecode(bytes.subarray(HEADER_BYTES, HEADER_BYTES + length));
-    main = JSON.parse(new TextDecoder('utf-8').decode(json));
-  } catch {
-    return undefined;
+    const header = await reader.take(HEADER_BYTES);
+    if (header.length < HEADER_BYTES || header[0] !== MAGIC || header[1] !== VERSION) return undefined;
+    const length = new DataView(header.buffer, header.byteOffset, header.byteLength).getUint32(2, true);
+    if (length > MAX_READ_WHOLE_BYTES) {
+      throw new RisumTooLargeError(`A module's main block is at most ${MAX_READ_WHOLE_BYTES / (1024 * 1024)}MB`);
+    }
+    const packed = await reader.take(length);
+    if (packed.length < length) return undefined;
+    const module = mainOf(packed);
+    return module ? { module, end: HEADER_BYTES + length } : undefined;
+  } finally {
+    await reader.close();
   }
-  if (!isObject(main) || main['type'] !== 'risuModule' || !isObject(main['module'])) return undefined;
-  return { module: main['module'], end: HEADER_BYTES + length };
+}
+
+/** Where one of a `.risum`'s asset blocks lies: its RPack bytes, from `start`. */
+export interface RisumBlock {
+  start: number;
+  length: number;
+}
+
+/**
+ * A `.risum` file read front to back in one pass: the main block decoded, and
+ * where each asset block after it lies, as long as the blocks are well formed
+ * and inside the file — the blocks' bytes are passed over, to be read from their
+ * offsets when wanted. Undefined for what is not one; the read goes on to the
+ * file's end, so a reader that hashes what it streams has seen all of it.
+ */
+export async function scanRisum(
+  source: ByteSource,
+): Promise<{ module: Record<string, unknown>; blocks: RisumBlock[] } | undefined> {
+  const reader = new ChunkReader(source.stream(0, source.size));
+  try {
+    const header = await reader.take(HEADER_BYTES);
+    if (header.length < HEADER_BYTES || !isRisum(header)) return undefined;
+    const length = new DataView(header.buffer, header.byteOffset, header.byteLength).getUint32(2, true);
+    if (HEADER_BYTES + length > source.size) return undefined;
+    if (length > MAX_READ_WHOLE_BYTES) {
+      throw new RisumTooLargeError(`A module's main block is at most ${MAX_READ_WHOLE_BYTES / (1024 * 1024)}MB`);
+    }
+    const module = mainOf(await reader.take(length));
+    if (!module) return undefined;
+    const blocks: RisumBlock[] = [];
+    for (;;) {
+      const head = await reader.take(BLOCK_HEADER_BYTES);
+      if (head.length < BLOCK_HEADER_BYTES || head[0] !== 1) break;
+      const size = new DataView(head.buffer, head.byteOffset, head.byteLength).getUint32(1, true);
+      const start = reader.offset;
+      if (start + size > source.size) break;
+      blocks.push({ start, length: size });
+      await reader.skip(size);
+    }
+    await reader.skip(Number.POSITIVE_INFINITY);
+    return { module, blocks };
+  } finally {
+    await reader.close();
+  }
+}
+
+/** RPack undone over a stream, a chunk at a time. */
+export async function* rpackDecodeStream(chunks: AsyncIterable<Uint8Array>): AsyncGenerator<Uint8Array> {
+  for await (const chunk of chunks) yield rpackDecode(chunk);
 }
 
 /**

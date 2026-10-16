@@ -263,3 +263,80 @@ export async function readZipEntry(
   }
   return concat(chunks, total);
 }
+
+/** A source that can also stream a span — a store read by ranges — rather than only hand it over whole. */
+export type StreamableZipSource = ZipSource & {
+  stream?(offset: number, length: number): AsyncIterable<Uint8Array>;
+};
+
+/** The compressed span of an entry, as chunks: one ranged stream where the source has one, else reads of `READ_CHUNK_BYTES`. */
+async function* compressedChunks(source: StreamableZipSource, offset: number, length: number): AsyncGenerator<Uint8Array> {
+  if (offset + length > source.size) throw new ZipError('ZIP record points outside the archive');
+  if (source.stream) {
+    let seen = 0;
+    for await (const chunk of source.stream(offset, length)) {
+      seen += chunk.length;
+      yield chunk;
+    }
+    if (seen < length) throw new ZipError('ZIP archive ended early');
+    return;
+  }
+  for (let at = offset; at < offset + length; at += READ_CHUNK_BYTES) {
+    yield await readExact(source, at, Math.min(READ_CHUNK_BYTES, offset + length - at));
+  }
+}
+
+/**
+ * One entry's bytes as a stream, for an entry too large to hold — a card's
+ * picture, music or video. The same rules as `readZipEntry`: stored or
+ * deflated, `maxBytes` (when given) counted on what the inflater emits and
+ * thrown as `FileTooLargeError` the moment it passes, and the data found from
+ * the local header. Memory stays at one push's output: the inflater's output is
+ * handed on as it comes, a slice of `PUSH_CHUNK_BYTES` at a time.
+ */
+export async function* streamZipEntry(
+  source: StreamableZipSource,
+  entry: ZipEntry,
+  opts: { maxBytes?: number } = {},
+): AsyncGenerator<Uint8Array> {
+  const header = viewOf(await readExact(source, entry.localHeaderOffset, LOCAL_BYTES));
+  if (header.getUint32(0, true) !== LOCAL_SIGNATURE) throw new ZipError(`Corrupt entry ${entry.name}`);
+  if (header.getUint16(6, true) & 1) throw new ZipError(`${entry.name} is encrypted`);
+  const dataStart =
+    entry.localHeaderOffset + LOCAL_BYTES + header.getUint16(26, true) + header.getUint16(28, true);
+  const maxBytes = opts.maxBytes ?? Number.POSITIVE_INFINITY;
+
+  if (entry.method === 0) {
+    if (entry.compressedSize > maxBytes) throw new FileTooLargeError(entry.name, maxBytes);
+    yield* compressedChunks(source, dataStart, entry.compressedSize);
+    return;
+  }
+  if (entry.method !== 8) throw new ZipError(`${entry.name} uses an unsupported compression method`);
+  if (entry.compressedSize === 0) return;
+
+  let out: Uint8Array[] = [];
+  let total = 0;
+  const inflate = new Inflate((chunk) => {
+    out.push(chunk);
+    total += chunk.length;
+  });
+  let pushed = 0;
+  for await (const range of compressedChunks(source, dataStart, entry.compressedSize)) {
+    for (let at = 0; at < range.length; at += PUSH_CHUNK_BYTES) {
+      const slice = range.subarray(at, at + PUSH_CHUNK_BYTES);
+      pushed += slice.length;
+      try {
+        inflate.push(slice, pushed === entry.compressedSize);
+      } catch (error) {
+        throw new ZipError(`${entry.name} could not be inflated: ${(error as Error).message}`);
+      }
+      // The synchronous inflater has no working terminate; leaving is what stops it.
+      if (total > maxBytes) throw new FileTooLargeError(entry.name, maxBytes);
+      if (out.length > 0) {
+        const ready = out;
+        out = [];
+        yield* ready;
+      }
+    }
+  }
+}

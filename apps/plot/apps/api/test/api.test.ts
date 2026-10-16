@@ -48,7 +48,9 @@ import {
   READER_PRESET_TEXT_MAX,
   RECALLED_MEMORY_HEADING,
   RETRIEVAL_DEFAULTS,
-  readCharx,
+  bytesSource,
+  readCard,
+  readCharxSource,
   readPngTextChunks,
   replyLanguageInstruction,
   stripPngTextChunks,
@@ -73,6 +75,8 @@ import {
   comments,
   createDb,
   feedCursors,
+  fileImportKeys,
+  fileImports,
   follows,
   jobs,
   leases,
@@ -107,7 +111,7 @@ import {
   type StreamDone,
 } from '@shizue/llm';
 import { and, asc, desc, eq, inArray } from 'drizzle-orm';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -117,7 +121,7 @@ import { stCard, v3Card } from '../../../packages/core/test/fixtures/cards.js';
 import { buildCharx, type CharxAssetSpec } from '../../../packages/core/test/helpers/charx.js';
 import { buildPngWithTextChunks } from '../../../packages/core/test/helpers/png.js';
 import { buildRisum } from '../../../packages/core/test/helpers/risum.js';
-import { createApp } from '../src/app.js';
+import { createApp as createAppFrom } from '../src/app.js';
 import { MAX_ASSETS_PER_PLOT } from '../src/assets.js';
 import {
   MAX_ATTACHMENT_BYTES,
@@ -157,7 +161,7 @@ import { refreshSearchVectors, resetSearchSweeps } from '../src/search.js';
 import { createJobHandlers, notificationFanout } from '../src/notifications.js';
 import { repairDisplayOrder } from '../src/maintenance/displayOrder.js';
 import { repairMemberScripts } from '../src/maintenance/memberScripts.js';
-import { IMPORT_MEMORY_PER_BYTE } from '../src/importAdmission.js';
+import { FILE_IMPORT_PART_BYTES, MAX_WORLD_INFO_BYTES, runFileImport, sweepFileImports } from '../src/fileImports.js';
 import { localizePlot, type RemoteFetch } from '../src/localizeAssets.js';
 import { acquireLease, releaseLease, renewLease as renewHeldLease, withLease } from '../src/leases.js';
 import { NARRATION_NUDGE } from '../src/routes/chats.js';
@@ -167,7 +171,7 @@ import { runRequestLua } from '../src/requestLua.js';
 import { runRequestTriggers } from '../src/requestTriggers.js';
 import { createScriptFetch, type HopResponse, type Transport } from '../src/scriptFetch.js';
 import { MAX_GLOBAL_VARIABLE_KEYS } from '../src/scriptState.js';
-import { createLocalStorage, type ObjectStorage } from '../src/storage.js';
+import { createLocalStorage, importFileKey, PartSizeMismatch, partOf, readAll, type ObjectStorage } from '../src/storage.js';
 import { roundCount, roundStart } from '../src/tree.js';
 import { connectS3Server } from './s3Server.js';
 
@@ -377,6 +381,16 @@ function expectRecallAfter(prompt: { messages: ChatRequest['messages'] }, said: 
   expect(at - 1).toBe(prompt.messages.findLastIndex((message) => message.role !== 'system'));
 }
 
+/** The dependencies each app a test made runs on, for the import jobs it starts (`fileImport`). */
+const depsOfApp = new WeakMap<Hono<AppEnv>, AppDeps>();
+
+/** An app on `deps`, remembered so a file import through it runs its job on the same ones. */
+function createApp(deps: AppDeps): Hono<AppEnv> {
+  const made = createAppFrom(deps);
+  depsOfApp.set(made, deps);
+  return made;
+}
+
 /** Empty env by default: only the always-on echo model is enabled. */
 function makeApp(overrides: Partial<AppDeps> = {}): Hono<AppEnv> {
   return createApp(makeDeps(overrides));
@@ -501,7 +515,7 @@ function gatedGetAdapter(reply: string): {
 
 /* ---------------------------------------------------------------- helpers */
 
-type Body = string | FormData | undefined;
+type Body = string | FormData | Uint8Array | undefined;
 
 function cookieOf(res: Response): string {
   return res.headers
@@ -625,9 +639,100 @@ async function claimOf(chatId: string): Promise<Date | null> {
 async function importCard(cookie: string, file: File): Promise<any> {
   const form = new FormData();
   form.append('file', file);
-  const res = await request(cookie, '/api/plots/import', 'POST', form);
+  const res = await fileImport(cookie, '/api/plots/import', form);
   expect(res.status, await res.clone().text()).toBe(201);
   return readJson(res);
+}
+
+/**
+ * A card or module file imported as a reader's browser does it
+ * (`fileImports.ts`): the import started with the form's fields, the file sent
+ * in parts, the job run on the app's own dependencies, and the finished import
+ * read — answered as the import's route answered when the file came in its
+ * body: 201 and the same body, or the error the import ended with. `path` is
+ * that route, which says what the file is imported as; the form is what it
+ * took (`file`, `sourceUrl`, `rightsConfirmed`, `worldInfo`,
+ * `confirmLowLevelAccess`).
+ */
+async function fileImport(
+  cookie: string | undefined,
+  path: string,
+  form: FormData,
+  target: Hono<AppEnv> = app,
+): Promise<Response> {
+  const member = /^\/api\/plots\/([^/]+)\/characters\/import$/.exec(path);
+  const module = /^\/api\/plots\/([^/]+)\/modules$/.exec(path);
+  const kind =
+    path === '/api/plots/import'
+      ? { target: 'plot' }
+      : member
+        ? { target: 'member', plotId: member[1] }
+        : module
+          ? { target: 'plot_module', plotId: module[1] }
+          : path === '/api/reader-modules'
+            ? { target: 'reader_module' }
+            : undefined;
+  if (!kind) throw new Error(`not an import route: ${path}`);
+  const file = form.get('file');
+  const bytes = file instanceof File ? new Uint8Array(await file.arrayBuffer()) : undefined;
+  const world = form.get('worldInfo');
+  const field = (name: string): string | undefined => {
+    const value = form.get(name);
+    return typeof value === 'string' ? value : undefined;
+  };
+  const started = await json(
+    cookie,
+    '/api/file-imports',
+    'POST',
+    {
+      ...kind,
+      ...(file instanceof File ? { fileName: file.name, size: bytes!.length } : {}),
+      ...(form.has('sourceUrl') ? { sourceUrl: field('sourceUrl') ?? null } : {}),
+      ...(field('rightsConfirmed') === 'true' ? { rightsConfirmed: true } : {}),
+      ...(field('confirmLowLevelAccess') === 'true' ? { confirmLowLevelAccess: true } : {}),
+      ...(world !== null ? { worldInfo: typeof world === 'string' ? world : await world.text() } : {}),
+    },
+    target,
+  );
+  if (started.status !== 201) return started;
+  const { id, partSize, parts } = await readJson(started);
+  await sendParts(cookie, id, bytes!, partSize, Array.from({ length: parts }, (_, i) => i + 1), target);
+  const completed = await json(cookie, `/api/file-imports/${id}/complete`, 'POST', {}, target);
+  expect(completed.status, await completed.clone().text()).toBe(202);
+  return finishedImport(cookie, id, target);
+}
+
+/** Sends parts of a file being imported where the import says to: this API, or the store. */
+async function sendParts(
+  cookie: string | undefined,
+  id: string,
+  bytes: Uint8Array,
+  partSize: number,
+  numbers: number[],
+  target: Hono<AppEnv> = app,
+): Promise<void> {
+  const asked = await json(cookie, `/api/file-imports/${id}/parts`, 'POST', { numbers }, target);
+  expect(asked.status, await asked.clone().text()).toBe(200);
+  const { urls } = await readJson(asked);
+  for (const n of numbers) {
+    const part = bytes.subarray((n - 1) * partSize, n * partSize);
+    const url: string = urls[n];
+    const res = url.startsWith('/api/')
+      ? await request(cookie, url, 'PUT', part, target)
+      : await fetch(url, { method: 'PUT', body: Buffer.from(part) });
+    expect(res.ok, `part ${n}: ${res.status}`).toBe(true);
+  }
+}
+
+/** Runs the import jobs on the app's dependencies, then answers as the old route did. */
+async function finishedImport(cookie: string | undefined, id: string, target: Hono<AppEnv> = app): Promise<Response> {
+  await drainJobs(db, createJobHandlers(depsOfApp.get(target) ?? makeDeps()), { kinds: { only: ['file_import'] } });
+  const status = await readJson(await json(cookie, `/api/file-imports/${id}`, 'GET', undefined, target));
+  if (status.status === 'done') return Response.json(status.result, { status: 201 });
+  if (status.status === 'failed') {
+    return Response.json({ error: status.error.message, code: status.error.code }, { status: status.error.status });
+  }
+  throw new Error(`import ${id} ended ${status.status}`);
 }
 
 const cardFile = (): File =>
@@ -1472,7 +1577,7 @@ describe('plots', () => {
     });
     const form = new FormData();
     form.append('file', new File([png], 'lian.png', { type: 'image/png' }));
-    const res = await request(cookie, '/api/plots/import', 'POST', form, target);
+    const res = await fileImport(cookie, '/api/plots/import', form, target);
     expect(res.status, await res.clone().text()).toBe(201);
     const plot = await readJson(res);
     expect(plot.coverUrl).toBeNull();
@@ -1515,7 +1620,7 @@ describe('plots', () => {
     const cookie = await signUp('bad@example.com');
     const form = new FormData();
     form.append('file', new File([new Uint8Array([1, 2, 3, 4])], 'junk.bin'));
-    const res = await request(cookie, '/api/plots/import', 'POST', form);
+    const res = await fileImport(cookie, '/api/plots/import', form);
     expect(res.status).toBe(400);
     expect((await readJson(res)).code).toBe('invalid_card');
 
@@ -1524,12 +1629,12 @@ describe('plots', () => {
     corruptZip.set([0x50, 0x4b, 0x03, 0x04]);
     const zipForm = new FormData();
     zipForm.append('file', new File([corruptZip], 'broken.charx'));
-    const zipRes = await request(cookie, '/api/plots/import', 'POST', zipForm);
+    const zipRes = await fileImport(cookie, '/api/plots/import', zipForm);
     expect(zipRes.status).toBe(400);
     expect((await readJson(zipRes)).code).toBe('invalid_card');
 
     // And a request with no file at all.
-    expect((await request(cookie, '/api/plots/import', 'POST', new FormData())).status).toBe(400);
+    expect((await fileImport(cookie, '/api/plots/import', new FormData())).status).toBe(400);
   });
 
   it('lifts the narrator and the custom UI off an imported card onto the plot', async () => {
@@ -1644,7 +1749,7 @@ describe('plots', () => {
     };
     const form = new FormData();
     form.append('file', new File([JSON.stringify(card)], 'lian.json', { type: 'application/json' }));
-    const res = await request(cookie, `/api/plots/${plot.id}/characters/import`, 'POST', form);
+    const res = await fileImport(cookie, `/api/plots/${plot.id}/characters/import`, form);
     expect(res.status, await res.clone().text()).toBe(201);
     expect((await readJson(res)).loreConstantTokens).toBe(countTokens('리안의 서고.'));
   });
@@ -1795,7 +1900,7 @@ describe('plot characters', () => {
 
     const form = new FormData();
     form.append('file', cardFile());
-    const res = await request(cookie, `/api/plots/${plot.id}/characters/import`, 'POST', form);
+    const res = await fileImport(cookie, `/api/plots/${plot.id}/characters/import`, form);
     expect(res.status, await res.clone().text()).toBe(201);
     const member = await readJson(res);
     expect(member.name).toBe('리안');
@@ -1948,7 +2053,7 @@ describe('import provenance and publishing rights', () => {
     const form = new FormData();
     form.append('file', file);
     for (const [key, value] of Object.entries(fields)) form.append(key, value);
-    return request(cookie, path, 'POST', form);
+    return fileImport(cookie, path, form);
   }
 
   it('records the file, its hash and the canonical page it came from, for the owner', async () => {
@@ -2056,7 +2161,7 @@ describe('import provenance and publishing rights', () => {
       const form = new FormData();
       form.append('file', card());
       form.append('worldInfo', new File([worldInfo], 'sei-world.json'));
-      return request(cookie, path, 'POST', form);
+      return fileImport(cookie, path, form);
     };
     const contents = (member: any): string[] => member.card.lorebook.map((entry: any) => entry.content);
 
@@ -2486,7 +2591,7 @@ describe('card export', () => {
     const bare = await exportPng();
     expect(stripPngTextChunks(bare)).toEqual(placeholderPng());
     expect([...readPngTextChunks(bare).keys()]).toEqual(['chara', 'ccv3']);
-    const reparsed = parseCard(bare).card;
+    const reparsed = (await readCard(bare)).card;
     expect(reparsed.name).toBe('엘라라');
     expect(reparsed.lorebook).toEqual(member.card.lorebook);
 
@@ -2541,7 +2646,7 @@ describe('card export', () => {
 
     // Declared as RisuAI files them: the icon, and the plot's images where
     // `{{img::name}}` looks — under the card's own names, or the slug.
-    const declared = (readCharx(charx).raw as any).data.assets;
+    const declared = ((await readCharxSource(bytesSource(charx))).raw as any).data.assets;
     expect(declared.map((asset: any) => [asset.type, asset.name, asset.ext])).toEqual([
       ['icon', 'main', 'png'],
       // The card's emotion picture goes out as one again, ahead of its asset entry.
@@ -2552,7 +2657,7 @@ describe('card export', () => {
       ['x-risu-asset', 'Smile', 'gif'],
       ['x-risu-asset', 'castle', 'gif'],
     ]);
-    const parsed = parseCard(charx);
+    const parsed = await readCard(charx);
     expect(parsed.card.name).toBe('세이');
     expect(parsed.iconBuffer).toEqual(stripPngTextChunks(icon));
     expect(parsed.assets).toEqual([
@@ -2592,7 +2697,7 @@ describe('card export', () => {
     const joinCast = async (plotId: string, file: File): Promise<any> => {
       const form = new FormData();
       form.append('file', file);
-      const res = await request(cookie, `/api/plots/${plotId}/characters/import`, 'POST', form);
+      const res = await fileImport(cookie, `/api/plots/${plotId}/characters/import`, form);
       expect(res.status, await res.clone().text()).toBe(201);
       return readJson(res);
     };
@@ -6413,7 +6518,7 @@ describe('custom UI in a work of several members', () => {
   async function importMember(cookie: string, plotId: string, file: File): Promise<any> {
     const form = new FormData();
     form.append('file', file);
-    const res = await request(cookie, `/api/plots/${plotId}/characters/import`, 'POST', form);
+    const res = await fileImport(cookie, `/api/plots/${plotId}/characters/import`, form);
     expect(res.status, await res.clone().text()).toBe(201);
     return readJson(res);
   }
@@ -13116,7 +13221,9 @@ describe('plot assets', () => {
     expect(slugs.sort()).toEqual(
       Array.from({ length: CHARX_ASSET_BOUND }, (_, i) => `e${i}`).sort(),
     );
-  });
+    // A thousand pictures, each stored and recorded for the import to take back:
+    // a database round trip each, which through Docker on a Mac is a few ms.
+  }, 30_000);
 
   it('fits a member import into whatever room the plot has left', async () => {
     const cookie = await signUp('asset-member-import-cap@example.com');
@@ -13146,7 +13253,7 @@ describe('plot assets', () => {
     }));
     const form = new FormData();
     form.append('file', new File([buildCharx(v3Card, embedded)], 'many.charx'));
-    const res = await request(cookie, `/api/plots/${plot.id}/characters/import`, 'POST', form, target);
+    const res = await fileImport(cookie, `/api/plots/${plot.id}/characters/import`, form, target);
     expect(res.status, await res.clone().text()).toBe(201);
     // And says how many did not fit.
     expect((await readJson(res)).importWarnings).toEqual([{ code: 'assets_over_limit', count: 3 }]);
@@ -13667,15 +13774,54 @@ describe('storage drivers', () => {
   /** In-memory driver that signs URLs, so the redirect branch is exercised anywhere. */
   function stubStorage(): ObjectStorage & { objects: Map<string, Uint8Array> } {
     const objects = new Map<string, Uint8Array>();
+    const uploads = new Map<string, Map<number, Uint8Array>>();
+    const collect = async (body: AsyncIterable<Uint8Array>): Promise<Uint8Array> => {
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of body) chunks.push(chunk);
+      return new Uint8Array(Buffer.concat(chunks));
+    };
     return {
       objects,
       async put(key, bytes) {
         objects.set(key, bytes);
       },
-      async get(key) {
+      async putStream(key, body) {
+        objects.set(key, await collect(body));
+      },
+      async size(key) {
+        return objects.get(key)?.length ?? null;
+      },
+      uploads: {
+        async create() {
+          const id = randomUUID();
+          uploads.set(id, new Map());
+          return id;
+        },
+        async partUrl() {
+          return null;
+        },
+        async write(_key, uploadId, part, body, size) {
+          const bytes = await collect(body);
+          if (bytes.length !== size) throw new PartSizeMismatch('size');
+          uploads.get(uploadId)!.set(part, bytes);
+        },
+        async parts(_key, uploadId) {
+          return [...(uploads.get(uploadId) ?? new Map<number, Uint8Array>())].map(([part, bytes]) => ({ part, size: bytes.length }));
+        },
+        async complete(key, uploadId, parts) {
+          objects.set(key, new Uint8Array(Buffer.concat(parts.map(({ part }) => uploads.get(uploadId)!.get(part)!))));
+          uploads.delete(uploadId);
+        },
+        async abort(_key, uploadId) {
+          uploads.delete(uploadId);
+        },
+      },
+      async get(key, range) {
         const bytes = objects.get(key);
         if (!bytes) return null;
-        return { body: new Blob([bytes]).stream(), size: bytes.length };
+        const part = range ? partOf(range, bytes.length) : undefined;
+        const span = part ? bytes.subarray(part.start, part.end + 1) : bytes;
+        return { body: new Blob([span]).stream(), size: span.length, ...(part ? { part } : {}) };
       },
       async delete(key) {
         objects.delete(key);
@@ -13701,7 +13847,7 @@ describe('storage drivers', () => {
     });
     const form = new FormData();
     form.append('file', new File([png], 'lian.png', { type: 'image/png' }));
-    const res = await request(cookie, '/api/plots/import', 'POST', form, target);
+    const res = await fileImport(cookie, '/api/plots/import', form, target);
     expect(res.status, await res.clone().text()).toBe(201);
     return readJson(res);
   }
@@ -18023,7 +18169,7 @@ describe('emotion images', () => {
     // A second card with the same names keeps its own pictures.
     const form = new FormData();
     form.append('file', emotionCard({ viewScreen: 'emotion', inlayViewScreen: true }, '카이', ['neutral', 'happy'], 10));
-    const added = await readJson(await request(cookie, `/api/plots/${plot.id}/characters/import`, 'POST', form));
+    const added = await readJson(await fileImport(cookie, `/api/plots/${plot.id}/characters/import`, form));
     expect(added.card.emotionImages).toEqual([
       { name: 'neutral', slug: 'neutral-2' },
       { name: 'happy', slug: 'happy-2' },
@@ -18322,7 +18468,7 @@ describe('emotion images', () => {
     const plot = await importCard(cookie, emotionCard({ viewScreen: 'emotion' }));
     const form = new FormData();
     form.append('file', emotionCard({ viewScreen: 'emotion' }, '카이', ['neutral', 'happy'], 10));
-    const kai = await readJson(await request(cookie, `/api/plots/${plot.id}/characters/import`, 'POST', form));
+    const kai = await readJson(await fileImport(cookie, `/api/plots/${plot.id}/characters/import`, form));
     const harness = emotionApp('happy');
     const chat = await startChat(cookie, plot.id);
     const chatId = chat.chat.id;
@@ -18368,7 +18514,7 @@ describe('RisuAI modules', () => {
   const importModule = (cookie: string, plotId: string, file: File): Promise<Response> => {
     const form = new FormData();
     form.append('file', file);
-    return request(cookie, `/api/plots/${plotId}/modules`, 'POST', form);
+    return fileImport(cookie, `/api/plots/${plotId}/modules`, form);
   };
 
   it('brings a .risum into the work: listed for the studio, kept apart from its editors, drawn after the work’s', async () => {
@@ -18638,7 +18784,7 @@ describe('reader modules', () => {
     const form = new FormData();
     form.append('file', file);
     if (confirm) form.append('confirmLowLevelAccess', 'true');
-    return request(cookie, '/api/reader-modules', 'POST', form, target);
+    return fileImport(cookie, '/api/reader-modules', form, target);
   };
   const workModule = {
     name: '작품 모듈',
@@ -18659,7 +18805,7 @@ describe('reader modules', () => {
     });
     const form = new FormData();
     form.append('file', new File([buildRisum({ module: workModule, type: 'risuModule' })], 'work.risum'));
-    expect((await request(cookie, `/api/plots/${plot.id}/modules`, 'POST', form)).status).toBe(201);
+    expect((await fileImport(cookie, `/api/plots/${plot.id}/modules`, form)).status).toBe(201);
     const chatId = (await startChat(cookie, plot.id)).chat.id;
     return { cookie, plotId: plot.id, chatId };
   }
@@ -18931,7 +19077,7 @@ describe('reader modules', () => {
     // A work's module says the same; its cjs is kept as a word and nothing more.
     const form = new FormData();
     form.append('file', new File([JSON.stringify({ ...dice, mcp: undefined, hideIcon: false, cjs: 'module.exports = 1' })], 'cjs.json'));
-    const imported = await request(cookie, `/api/plots/${plot.id}/modules`, 'POST', form);
+    const imported = await fileImport(cookie, `/api/plots/${plot.id}/modules`, form);
     expect(imported.status).toBe(201);
     const owner = await readJson(imported);
     expect(owner.importWarnings).toEqual([{ code: 'module_cjs_inert', count: 1 }]);
@@ -19310,7 +19456,7 @@ describe('what a card loads from other hosts, brought in at import', () => {
     };
     const form = new FormData();
     form.append('file', new File([JSON.stringify(card)], 'vars.json', { type: 'application/json' }));
-    const res = await request(cookie, '/api/plots/import', 'POST', form, target);
+    const res = await fileImport(cookie, '/api/plots/import', form, target);
     expect(res.status, await res.clone().text()).toBe(201);
     const plot = await readJson(res);
     // The default and the literal setvar are what the slots were fetched with; a variable never set is no miss.
@@ -19333,7 +19479,7 @@ describe('what a card loads from other hosts, brought in at import', () => {
     const cookie = await signUp('localize@example.com');
     const form = new FormData();
     form.append('file', webCard());
-    const res = await request(cookie, '/api/plots/import', 'POST', form, target);
+    const res = await fileImport(cookie, '/api/plots/import', form, target);
     expect(res.status, await res.clone().text()).toBe(201);
     const plot = await readJson(res);
     const base = `/api/plots/${plot.id}/assets`;
@@ -19428,7 +19574,7 @@ describe('what a card loads from other hosts, brought in at import', () => {
         { type: 'application/json' },
       ),
     );
-    const res = await request(cookie, '/api/plots/import', 'POST', form, target);
+    const res = await fileImport(cookie, '/api/plots/import', form, target);
     expect(res.status, await res.clone().text()).toBe(201);
     const plot = await readJson(res);
     // The font's sheet, once, and its file; the description's import is no font's
@@ -19476,13 +19622,13 @@ describe('what a card loads from other hosts, brought in at import', () => {
     const cookie = await signUp('localize-roundtrip@example.com');
     const form = new FormData();
     form.append('file', webCard());
-    const imported = await readJson(await request(cookie, '/api/plots/import', 'POST', form, target));
+    const imported = await readJson(await fileImport(cookie, '/api/plots/import', form, target));
     const member = imported.characters[0];
 
     const res = await request(cookie, `/api/plots/${imported.id}/characters/${member.id}/export?format=charx`, 'GET', undefined, target);
     expect(res.status).toBe(200);
     const charx = new Uint8Array(await res.arrayBuffer());
-    const exported = parseCard(charx);
+    const exported = await readCard(charx);
     const raw = exported.card.raw as { data: { first_mes: string; extensions: { risuai: Record<string, unknown> } } };
     // Not one address of this server's goes out: each fetched file is the card's
     // own, by the address it came from — a template's slot left in.
@@ -19507,7 +19653,7 @@ describe('what a card loads from other hosts, brought in at import', () => {
     const second = remote();
     const again = new FormData();
     again.append('file', new File([charx], 'export.charx', { type: 'application/octet-stream' }));
-    const back = await request(cookie, '/api/plots/import', 'POST', again, makeApp({ remoteFetch: second.remoteFetch }));
+    const back = await fileImport(cookie, '/api/plots/import', again, makeApp({ remoteFetch: second.remoteFetch }));
     expect(back.status, await back.clone().text()).toBe(201);
     const reimported = await readJson(back);
     expect(second.asked).toEqual(['https://cdn.test/gone.png']);
@@ -19581,7 +19727,7 @@ describe('what a card loads from other hosts, brought in at import', () => {
       const form = new FormData();
       form.append('file', new File([buildRisum({ module, type: 'risuModule' }, [])], 'font.risum'));
       for (const [key, value] of Object.entries(fields)) form.append(key, value);
-      return request(cookie, `/api/plots/${plot.id}/modules`, 'POST', form, target);
+      return fileImport(cookie, `/api/plots/${plot.id}/modules`, form, target);
     };
     for (const fields of [{}, { rightsConfirmed: 'false' }] as Record<string, string>[]) {
       const refused = await upload(fields);
@@ -19633,7 +19779,7 @@ describe('what a card loads from other hosts, brought in at import', () => {
     };
     const form = new FormData();
     form.append('file', new File([buildRisum({ module, type: 'risuModule' }, [])], 'font.risum'));
-    const res = await request(cookie, '/api/reader-modules', 'POST', form, target);
+    const res = await fileImport(cookie, '/api/reader-modules', form, target);
     expect(res.status, await res.clone().text()).toBe(201);
     const made = await readJson(res);
     // The picture that answered 404 stays as written, counted.
@@ -20533,7 +20679,7 @@ describe('leases', () => {
   });
 });
 
-describe('import admission', () => {
+describe('file imports', () => {
   const pngCard = (): File =>
     new File(
       [buildPngWithTextChunks({ chara: Buffer.from(JSON.stringify(v2Card), 'utf-8').toString('base64') })],
@@ -20545,75 +20691,282 @@ describe('import admission', () => {
     form.append('file', pngCard());
     return form;
   };
+  /** A WebP's signature and then `size` bytes nothing compresses, so an archive of it is as large as it. */
+  const bigPicture = (size: number): Uint8Array => {
+    const bytes = new Uint8Array(randomBytes(size));
+    bytes.set([...Buffer.from('RIFF'), 0, 0, 0, 0, ...Buffer.from('WEBP')]);
+    return bytes;
+  };
+  /** A charx of one large picture, past two parts. */
+  const largeCharx = (picture: Uint8Array): Uint8Array =>
+    buildCharx(v3Card as { data: Record<string, unknown> }, [
+      { type: 'emotion', name: 'big', ext: 'webp', entry: 'assets/emotion/big.webp', bytes: picture },
+    ]);
+  const start = async (cookie: string, body: Record<string, unknown>, target: Hono<AppEnv> = app): Promise<Response> =>
+    json(cookie, '/api/file-imports', 'POST', body, target);
+  const statusOf = async (cookie: string, id: string): Promise<any> =>
+    readJson(await json(cookie, `/api/file-imports/${id}`));
+  const runImports = (deps: AppDeps = makeDeps()): Promise<number> =>
+    drainJobs(db, createJobHandlers(deps), { kinds: { only: ['file_import'] } });
 
-  /** Storage whose writes wait for `release`, so an import can be held part-way; `reached` settles at the first. */
-  function heldStorage(): { held: ObjectStorage; reached: Promise<void>; release: () => void } {
-    let release!: () => void;
-    let reach!: () => void;
-    const gate = new Promise<void>((resolve) => (release = resolve));
-    const reached = new Promise<void>((resolve) => (reach = resolve));
-    const held: ObjectStorage = {
-      ...storage,
-      put: async (...args) => {
-        reach();
-        await gate;
-        return storage.put(...args);
-      },
+  it('takes a file in parts, any order, and imports it once every part is there', async () => {
+    const cookie = await signUp('parts@example.com');
+    const picture = bigPicture(2 * FILE_IMPORT_PART_BYTES + 12_345);
+    const file = largeCharx(picture);
+    const started = await start(cookie, { target: 'plot', fileName: 'big.charx', size: file.length });
+    expect(started.status, await started.clone().text()).toBe(201);
+    const { id, partSize, parts } = await readJson(started);
+    expect([partSize, parts]).toEqual([FILE_IMPORT_PART_BYTES, 3]);
+
+    // Under the local driver the parts come to this API.
+    const asked = await readJson(await json(cookie, `/api/file-imports/${id}/parts`, 'POST', { numbers: [1, 2, 3] }));
+    expect(asked).toEqual({
+      urls: { 1: `/api/file-imports/${id}/parts/1`, 2: `/api/file-imports/${id}/parts/2`, 3: `/api/file-imports/${id}/parts/3` },
+      uploaded: [],
+    });
+    await sendParts(cookie, id, file, partSize, [3]);
+    // An upload that broke off asks again and learns what is already there.
+    expect((await readJson(await json(cookie, `/api/file-imports/${id}/parts`, 'POST', { numbers: [1] }))).uploaded).toEqual([3]);
+    const early = await json(cookie, `/api/file-imports/${id}/complete`, 'POST', {});
+    expect(early.status).toBe(409);
+    expect(await readJson(early)).toEqual({ error: expect.any(String), code: 'upload_incomplete', params: { missing: 2 } });
+
+    await sendParts(cookie, id, file, partSize, [2, 1]);
+    expect((await json(cookie, `/api/file-imports/${id}/complete`, 'POST', {})).status).toBe(202);
+    expect((await statusOf(cookie, id)).status).toBe('queued');
+    expect(await runImports()).toBe(1);
+
+    const done = await statusOf(cookie, id);
+    expect(done.status).toBe('done');
+    expect(done.result.name).toBe(v3Card.data.name);
+    expect(done.result.importWarnings).toEqual([]);
+    const [asset] = await db.select().from(plotAssets).where(eq(plotAssets.plotId, done.result.id));
+    expect(asset).toMatchObject({ name: 'big', mime: 'image/webp' });
+    const stored = await storage.get(asset!.path);
+    expect(Buffer.from(await readAll(stored!.body)).equals(picture)).toBe(true);
+    // The record is of the bytes as uploaded, and the uploaded file is gone.
+    const [member] = await db.select().from(characters).where(eq(characters.plotId, done.result.id));
+    expect(member!.importedFrom).toMatchObject({ fileName: 'big.charx', sha256: createHash('sha256').update(file).digest('hex') });
+    expect(await storage.size(importFileKey(id, 'file'))).toBeNull();
+    expect((await db.select().from(fileImports).where(eq(fileImports.id, id)))[0]).toMatchObject({ staged: false, uploadId: null });
+  });
+
+  it('refuses a part of another size or past the file, and parts once the upload is done', async () => {
+    const cookie = await signUp('bad-parts@example.com');
+    const file = new Uint8Array(await pngCard().arrayBuffer());
+    const { id } = await readJson(await start(cookie, { target: 'plot', fileName: 'lian.png', size: file.length }));
+    expect((await request(cookie, `/api/file-imports/${id}/parts/1`, 'PUT', file.subarray(1))).status).toBe(400);
+    expect((await request(cookie, `/api/file-imports/${id}/parts/2`, 'PUT', file)).status).toBe(404);
+    expect((await json(cookie, `/api/file-imports/${id}/parts`, 'POST', { numbers: [2] })).status).toBe(400);
+    // Someone else's import is not there at all.
+    const stranger = await signUp('bad-parts-stranger@example.com');
+    expect((await request(stranger, `/api/file-imports/${id}/parts/1`, 'PUT', file)).status).toBe(404);
+    expect((await json(stranger, `/api/file-imports/${id}`)).status).toBe(404);
+
+    expect((await request(cookie, `/api/file-imports/${id}/parts/1`, 'PUT', file)).status).toBe(204);
+    expect((await json(cookie, `/api/file-imports/${id}/complete`, 'POST', {})).status).toBe(202);
+    const late = await request(cookie, `/api/file-imports/${id}/parts/1`, 'PUT', file);
+    expect(late.status).toBe(409);
+    expect((await readJson(late)).code).toBe('import_state');
+    // Completing again only says where it is.
+    expect(await readJson(await json(cookie, `/api/file-imports/${id}/complete`, 'POST', {}))).toEqual({ id, status: 'queued' });
+  });
+
+  it('refuses what it can before the file is uploaded', async () => {
+    const cookie = await signUp('refuse-early@example.com');
+    const refusal = async (body: Record<string, unknown>): Promise<[number, string]> => {
+      const res = await start(cookie, { target: 'plot', fileName: 'lian.png', size: 100, ...body });
+      return [res.status, (await readJson(res)).code];
     };
-    return { held, reached, release };
-  }
-
-  it('refuses an import that does not state its length, on every import route', async () => {
-    const cookie = await signUp('length@example.com');
-    const plot = await createPlot(cookie);
-    for (const path of ['/api/plots/import', `/api/plots/${plot.id}/characters/import`, `/api/plots/${plot.id}/modules`, '/api/reader-modules']) {
-      const form = new FormData();
-      form.append('file', cardFile());
-      // A Request around a FormData states no length, as a chunked upload would not.
-      const res = await app.request(path, { method: 'POST', headers: { cookie }, body: form });
-      expect(res.status, path).toBe(411);
-      expect((await readJson(res)).code).toBe('length_required');
-    }
-    expect(await db.select({ id: plots.id }).from(plots)).toHaveLength(1);
+    expect(await refusal({ size: MAX_CARD_IMPORT_BYTES + 1 })).toEqual([413, 'payload_too_large']);
+    expect(await refusal({ size: 0 })).toEqual([400, 'invalid_card']);
+    expect(await refusal({ target: 'reader_module', size: 0 })).toEqual([400, 'invalid_module']);
+    expect(await refusal({ target: 'nope' })).toEqual([400, 'invalid_request']);
+    expect(await refusal({ sourceUrl: 'https://example.com/card' })).toEqual([400, 'invalid_request']);
+    expect(await refusal({ worldInfo: '{not json' })).toEqual([400, 'invalid_lorebook']);
+    expect(await refusal({ worldInfo: ' '.repeat(MAX_WORLD_INFO_BYTES + 1) })).toEqual([413, 'payload_too_large']);
+    expect(await refusal({ target: 'member', plotId: randomUUID() })).toEqual([404, 'not_found']);
+    expect(await db.select().from(fileImports)).toEqual([]);
   });
 
   it('lets a reader import one file at a time, across instances, while another reader’s goes on', async () => {
-    const { held, reached, release } = heldStorage();
     const other = makeApp();
     const alice = await signUp('one-at-a-time@example.com');
     const bob = await signUp('meanwhile@example.com');
-    const first = request(alice, '/api/plots/import', 'POST', cardForm(), makeApp({ storage: held }));
-    await reached;
-    // The same reader on another instance: refused while the first is running.
-    const second = await request(alice, '/api/plots/import', 'POST', cardForm(), other);
+    const size = (await pngCard().arrayBuffer()).byteLength;
+    const first = await start(alice, { target: 'plot', fileName: 'lian.png', size });
+    expect(first.status).toBe(201);
+    // The same reader on another instance: refused while the first is unfinished.
+    const second = await start(alice, { target: 'plot', fileName: 'lian.png', size }, other);
     expect(second.status).toBe(429);
     expect(await readJson(second)).toEqual({ error: expect.any(String), code: 'import_busy' });
-    expect((await request(bob, '/api/plots/import', 'POST', cardForm(), other)).status).toBe(201);
-    release();
-    expect((await first).status).toBe(201);
-    // Given back once it ended (the import's own; a background task it started may hold its own lease meanwhile).
-    expect((await db.select().from(leases)).filter((row) => row.key.startsWith('import:'))).toEqual([]);
-    expect((await request(alice, '/api/plots/import', 'POST', cardForm(), other)).status).toBe(201);
+    expect((await fileImport(bob, '/api/plots/import', cardForm(), other)).status).toBe(201);
+
+    // An upload left untouched gives way to the reader's next: a closed tab does not hold the slot.
+    const { id } = await readJson(first);
+    const [{ uploadId }] = await db.select({ uploadId: fileImports.uploadId }).from(fileImports).where(eq(fileImports.id, id));
+    expect(await readdir(join(storageDir, '.uploads'))).toContain(uploadId);
+    await db.update(fileImports).set({ updatedAt: new Date(Date.now() - 16 * 60_000) }).where(eq(fileImports.id, id));
+    expect((await fileImport(alice, '/api/plots/import', cardForm(), other)).status).toBe(201);
+    expect((await statusOf(alice, id)).status).toBe('abandoned');
+    expect(await readdir(join(storageDir, '.uploads'))).not.toContain(uploadId);
+    // A finished import holds nothing.
+    expect((await fileImport(alice, '/api/plots/import', cardForm(), other)).status).toBe(201);
   });
 
-  it('lets a lone import in whatever its size, and turns one away past the budget while another is being read', async () => {
-    const env = { IMPORT_MEMORY_BUDGET_MB: '0.001' };
-    const cookie = await signUp('lone@example.com');
-    expect(pngCard().size * IMPORT_MEMORY_PER_BYTE).toBeGreaterThan(0.001 * 1024 * 1024);
-    // Alone: in, though it reserves past the whole budget.
-    expect((await request(cookie, '/api/plots/import', 'POST', cardForm(), makeApp({ env }))).status).toBe(201);
+  it('ends an unreadable file as failed with the code the import gave, and keeps nothing of it', async () => {
+    const cookie = await signUp('unreadable@example.com');
+    const form = new FormData();
+    form.append('file', new File(['not a card'], 'x.json'));
+    const res = await fileImport(cookie, '/api/plots/import', form);
+    expect(res.status).toBe(400);
+    expect((await readJson(res)).code).toBe('invalid_card');
+    const [row] = await db.select().from(fileImports);
+    expect(row).toMatchObject({ status: 'failed', staged: false, written: null });
+    expect(await storage.size(importFileKey(row!.id, 'file'))).toBeNull();
+    expect(await db.select().from(plots)).toEqual([]);
+  });
 
-    const { held, reached, release } = heldStorage();
-    const running = request(cookie, '/api/plots/import', 'POST', cardForm(), makeApp({ env, storage: held }));
-    await reached;
-    // In the same process, by another reader: past the budget beside the one being read.
-    const other = await signUp('lone-other@example.com');
-    const busy = await request(other, '/api/plots/import', 'POST', cardForm(), makeApp({ env }));
-    expect(busy.status).toBe(503);
-    expect(await readJson(busy)).toEqual({ error: expect.any(String), code: 'import_busy' });
-    expect(Number(busy.headers.get('retry-after'))).toBeGreaterThan(0);
-    release();
-    expect((await running).status).toBe(201);
-    expect((await request(other, '/api/plots/import', 'POST', cardForm(), makeApp({ env }))).status).toBe(201);
+  it('takes back what a failed import wrote: the plot, its pictures and the file', async () => {
+    const cookie = await signUp('take-back@example.com');
+    const written: string[] = [];
+    let puts = 0;
+    const failing: ObjectStorage = {
+      ...storage,
+      putStream: async (key, body, type) => {
+        written.push(key);
+        puts += 1;
+        if (puts === 2) throw new Error('the store went down');
+        return storage.putStream(key, body, type);
+      },
+    };
+    const target = makeApp({ storage: failing });
+    const charx = buildCharx(v3Card as { data: Record<string, unknown> }, [
+      { type: 'icon', name: 'main', ext: 'png', entry: 'assets/icon/main.png', bytes: new Uint8Array(await pngCard().arrayBuffer()) },
+      { type: 'emotion', name: 'one', ext: 'webp', entry: 'assets/one.webp', bytes: bigPicture(1000) },
+      { type: 'emotion', name: 'two', ext: 'webp', entry: 'assets/two.webp', bytes: bigPicture(1000) },
+    ]);
+    const form = new FormData();
+    form.append('file', new File([charx], 'sei.charx'));
+    const res = await fileImport(cookie, '/api/plots/import', form, target);
+    expect(res.status).toBe(500);
+    expect((await readJson(res)).code).toBe('internal_error');
+    expect(written).toHaveLength(2);
+    for (const key of written) expect(await storage.size(key)).toBeNull();
+    expect(await db.select().from(plots)).toEqual([]);
+    expect(await db.select().from(characters)).toEqual([]);
+    const [row] = await db.select().from(fileImports);
+    expect(row).toMatchObject({ status: 'failed', staged: false, written: null });
+  });
+
+  it('takes back what an import wrote when the worker running it died, and fails it', async () => {
+    const cookie = await signUp('worker-died@example.com');
+    const size = (await pngCard().arrayBuffer()).byteLength;
+    const { id } = await readJson(await start(cookie, { target: 'plot', fileName: 'lian.png', size }));
+    const plot = await createPlot(cookie);
+    const key = `assets/${randomUUID()}.png`;
+    await storage.put(key, Uint8Array.from([1]), 'image/png');
+    // Where a worker leaves it that died writing: processing, with what it wrote recorded.
+    await db.update(fileImports).set({ status: 'processing', written: { plotId: plot.id } }).where(eq(fileImports.id, id));
+    await db.insert(fileImportKeys).values({ importId: id, key });
+    await runFileImport(makeDeps(), id);
+    const status = await statusOf(cookie, id);
+    expect(status).toMatchObject({ status: 'failed', error: { status: 500, code: 'internal_error' } });
+    expect(await db.select().from(plots).where(eq(plots.id, plot.id))).toEqual([]);
+    expect(await storage.size(key)).toBeNull();
+  });
+
+  it('waits for the reader’s yes to a module’s low-level access on the file it already has', async () => {
+    const cookie = await signUp('low-level@example.com');
+    const module = { type: 'risuModule', name: '저수준', id: 'm-1', description: '', lowLevelAccess: true };
+    const form = new FormData();
+    form.append('file', new File([JSON.stringify(module)], 'low.json'));
+    const refused = await fileImport(cookie, '/api/reader-modules', form);
+    expect(refused.status).toBe(409);
+    expect((await readJson(refused)).code).toBe('low_level_access_unconfirmed');
+    const [row] = await db.select().from(fileImports);
+    // The file stays for the yes: no second upload.
+    expect(row).toMatchObject({ status: 'failed', staged: true });
+    expect(await storage.size(importFileKey(row!.id, 'file'))).not.toBeNull();
+
+    expect((await json(cookie, `/api/file-imports/${row!.id}/confirm`, 'POST', { confirmLowLevelAccess: false })).status).toBe(400);
+    expect((await json(cookie, `/api/file-imports/${row!.id}/confirm`, 'POST', { confirmLowLevelAccess: true })).status).toBe(202);
+    const done = await finishedImport(cookie, row!.id);
+    expect(done.status).toBe(201);
+    expect(await readJson(done)).toMatchObject({ name: '저수준', lowLevelAccess: true });
+    expect(await storage.size(importFileKey(row!.id, 'file'))).toBeNull();
+    // Only a module waiting on the yes takes one.
+    const again = await json(cookie, `/api/file-imports/${row!.id}/confirm`, 'POST', { confirmLowLevelAccess: true });
+    expect(again.status).toBe(409);
+    expect((await readJson(again)).code).toBe('import_state');
+  });
+
+  it('lets a reader give an upload up, and leaves one being read alone', async () => {
+    const cookie = await signUp('give-up@example.com');
+    const file = new Uint8Array(await pngCard().arrayBuffer());
+    const { id } = await readJson(await start(cookie, { target: 'plot', fileName: 'lian.png', size: file.length }));
+    await request(cookie, `/api/file-imports/${id}/parts/1`, 'PUT', file);
+    const [{ uploadId }] = await db.select({ uploadId: fileImports.uploadId }).from(fileImports);
+    expect((await json(cookie, `/api/file-imports/${id}`, 'DELETE')).status).toBe(204);
+    expect((await statusOf(cookie, id)).status).toBe('abandoned');
+    expect(await readdir(join(storageDir, '.uploads'))).not.toContain(uploadId);
+
+    const queued = await readJson(await start(cookie, { target: 'plot', fileName: 'lian.png', size: file.length }));
+    await sendParts(cookie, queued.id, file, queued.partSize, [1]);
+    await json(cookie, `/api/file-imports/${queued.id}/complete`, 'POST', {});
+    expect((await json(cookie, `/api/file-imports/${queued.id}`, 'DELETE')).status).toBe(409);
+  });
+
+  it('sweeps what imports left behind', async () => {
+    const cookie = await signUp('sweep@example.com');
+    const size = (await pngCard().arrayBuffer()).byteLength;
+    const hours = (n: number): Date => new Date(Date.now() - n * 60 * 60_000);
+    // An upload nobody finished in a day.
+    const { id: stale } = await readJson(await start(cookie, { target: 'plot', fileName: 'a.png', size }));
+    await db.update(fileImports).set({ createdAt: hours(25), status: 'uploading' }).where(eq(fileImports.id, stale));
+    const [{ uploadId }] = await db.select({ uploadId: fileImports.uploadId }).from(fileImports).where(eq(fileImports.id, stale));
+    // A running import whose worker is gone with no job left, with what it wrote.
+    const plot = await createPlot(cookie);
+    const key = `assets/${randomUUID()}.png`;
+    await storage.put(key, Uint8Array.from([1]), 'image/png');
+    const [stalled] = await db
+      .insert(fileImports)
+      .values({ userId: (await db.select().from(user))[0]!.id, target: 'plot', fileName: 'b.png', size, partSize: FILE_IMPORT_PART_BYTES, status: 'processing', updatedAt: hours(1), written: { plotId: plot.id }, staged: false })
+      .returning();
+    await db.insert(fileImportKeys).values({ importId: stalled!.id, key });
+    // A finished one past a week.
+    const [old] = await db
+      .insert(fileImports)
+      .values({ userId: (await db.select().from(user))[0]!.id, target: 'plot', fileName: 'c.png', size, partSize: FILE_IMPORT_PART_BYTES, status: 'done', staged: false, updatedAt: hours(8 * 24) })
+      .returning();
+
+    await sweepFileImports(makeDeps());
+    expect((await statusOf(cookie, stale)).status).toBe('abandoned');
+    expect(await readdir(join(storageDir, '.uploads'))).not.toContain(uploadId);
+    expect(await statusOf(cookie, stalled!.id)).toMatchObject({ status: 'failed', error: { code: 'internal_error' } });
+    expect(await db.select().from(plots).where(eq(plots.id, plot.id))).toEqual([]);
+    expect(await storage.size(key)).toBeNull();
+    expect(await db.select().from(fileImports).where(eq(fileImports.id, old!.id))).toEqual([]);
+  });
+
+  it.runIf(s3Storage !== null)('sends the parts straight to the S3 store (RustFS), at addresses good for their size', async () => {
+    const cookie = await signUp('s3-import@example.com');
+    const target = makeApp({ storage: s3Storage! });
+    const picture = bigPicture(FILE_IMPORT_PART_BYTES + 777);
+    const file = largeCharx(picture);
+    const { id, partSize } = await readJson(await start(cookie, { target: 'plot', fileName: 'big.charx', size: file.length }, target));
+    const { urls } = await readJson(await json(cookie, `/api/file-imports/${id}/parts`, 'POST', { numbers: [1, 2] }, target));
+    expect(urls[1]).toMatch(/^http:\/\/localhost:19000\/.*X-Amz-Signature=/);
+    // A part of another size than the address was signed for is the store's to refuse.
+    expect((await fetch(urls[2], { method: 'PUT', body: Buffer.from(file.subarray(0, 10)) })).ok).toBe(false);
+    await sendParts(cookie, id, file, partSize, [1, 2], target);
+    expect((await json(cookie, `/api/file-imports/${id}/complete`, 'POST', {}, target)).status).toBe(202);
+    const done = await finishedImport(cookie, id, target);
+    expect(done.status).toBe(201);
+    const plot = await readJson(done);
+    const [asset] = await db.select().from(plotAssets).where(eq(plotAssets.plotId, plot.id));
+    const stored = await s3Storage!.get(asset!.path);
+    expect(Buffer.from(await readAll(stored!.body)).equals(picture)).toBe(true);
+    expect(await s3Storage!.size(importFileKey(id, 'file'))).toBeNull();
   });
 });

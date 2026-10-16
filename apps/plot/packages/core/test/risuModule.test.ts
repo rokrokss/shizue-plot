@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 import {
   indicatorLore,
   ModuleParseError,
-  parseRisuModule,
+  readRisuModule,
   plotModuleOf,
   risuLoreBookEntry,
 } from '../src/card/risuModule.js';
@@ -44,10 +44,10 @@ const risuModule = {
   ],
 };
 
-describe('parseRisuModule', () => {
-  it('reads a .risum whole: its lore as entries, its scripts as written, its pictures by position', () => {
+describe('readRisuModule', () => {
+  it('reads a .risum whole: its lore as entries, its scripts as written, its pictures by position', async () => {
     const file = buildRisum({ module: risuModule, type: 'risuModule' }, [png, Uint8Array.from([9]), png, Uint8Array.from([7])]);
-    const parsed = parseRisuModule(file);
+    const parsed = (await readRisuModule(file));
     expect(parsed.name).toBe('날씨 모듈');
     expect(parsed.description).toBe('비가 온다.');
     expect(parsed.regex).toEqual(risuModule.regex);
@@ -74,28 +74,28 @@ describe('parseRisuModule', () => {
     ]);
   });
 
-  it('stops at the first picture past the caps or a broken block, and keeps the module', () => {
+  it('stops at the first picture past the caps or a broken block, and keeps the module', async () => {
     const file = buildRisum({ module: risuModule, type: 'risuModule' }, [png]);
     // The closing byte gone and a stray block length after the one picture.
     const broken = Uint8Array.from([...file.slice(0, -1), 1, 0xff, 0xff, 0xff, 0x7f]);
-    expect(parseRisuModule(broken).assets.map((asset) => asset.name)).toEqual(['rain']);
+    expect((await readRisuModule(broken)).assets.map((asset) => asset.name)).toEqual(['rain']);
   });
 
-  it('reads RisuAI’s module JSON, which carries no pictures, and only with a name and an id', () => {
+  it('reads RisuAI’s module JSON, which carries no pictures, and only with a name and an id', async () => {
     const json = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
-    const parsed = parseRisuModule(json({ ...risuModule, type: 'risuModule' }));
+    const parsed = (await readRisuModule(json({ ...risuModule, type: 'risuModule' })));
     expect(parsed.name).toBe('날씨 모듈');
     expect(parsed.assets).toEqual([]);
     expect(parsed.lorebook).toHaveLength(3);
-    expect(() => parseRisuModule(json({ ...risuModule, type: 'risuModule', id: undefined }))).toThrow(ModuleParseError);
-    expect(() => parseRisuModule(json({ ...risuModule, type: 'risuModule', name: ' ' }))).toThrow(ModuleParseError);
-    expect(() => parseRisuModule(json({ ...risuModule, type: 'risu' }))).toThrow(ModuleParseError);
-    expect(() => parseRisuModule(Uint8Array.from([0x89, 0x50, 0x4e, 0x47]))).toThrow(ModuleParseError);
+    await expect(readRisuModule(json({ ...risuModule, type: 'risuModule', id: undefined }))).rejects.toThrow(ModuleParseError);
+    await expect(readRisuModule(json({ ...risuModule, type: 'risuModule', name: ' ' }))).rejects.toThrow(ModuleParseError);
+    await expect(readRisuModule(json({ ...risuModule, type: 'risu' }))).rejects.toThrow(ModuleParseError);
+    await expect(readRisuModule(Uint8Array.from([0x89, 0x50, 0x4e, 0x47]))).rejects.toThrow(ModuleParseError);
   });
 
-  it('reads RisuAI’s lorebook export as a module of lore, named as RisuAI names it', () => {
+  it('reads RisuAI’s lorebook export as a module of lore, named as RisuAI names it', async () => {
     const json = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
-    const parsed = parseRisuModule(json({ type: 'risu', ver: 1, data: risuModule.lorebook }));
+    const parsed = (await readRisuModule(json({ type: 'risu', ver: 1, data: risuModule.lorebook })));
     expect(parsed).toMatchObject({
       name: 'Imported Lorebook',
       description: 'Converted from risu lorebook',
@@ -105,12 +105,12 @@ describe('parseRisuModule', () => {
       assets: [],
     });
     expect(parsed.lorebook.map((entry) => entry.name)).toEqual(['우산', '날씨', '정규식']);
-    expect(parseRisuModule(json({ type: 'risu', name: '우산 책', data: [] })).name).toBe('우산 책');
+    expect((await readRisuModule(json({ type: 'risu', name: '우산 책', data: [] }))).name).toBe('우산 책');
     // A HypaV3 preset export has the same type with a record for its data: not a lorebook.
-    expect(() => parseRisuModule(json({ type: 'risu', data: { summaries: [] } }))).toThrow(ModuleParseError);
+    await expect(readRisuModule(json({ type: 'risu', data: { summaries: [] } }))).rejects.toThrow(ModuleParseError);
   });
 
-  it('reads an external lorebook — SillyTavern’s World Info — through the lorebook file mapping', () => {
+  it('reads an external lorebook — SillyTavern’s World Info — through the lorebook file mapping', async () => {
     const json = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
     const worldInfo = {
       entries: {
@@ -118,7 +118,7 @@ describe('parseRisuModule', () => {
         1: { uid: 1, key: [], keysecondary: [], comment: '배경', content: '왕국은 망했다.', constant: true, order: 1, position: 0 },
       },
     };
-    const parsed = parseRisuModule(json(worldInfo));
+    const parsed = (await readRisuModule(json(worldInfo)));
     expect(parsed.name).toBe('Imported Lorebook');
     expect(parsed.description).toBe('Converted from external lorebook');
     expect(parsed.lorebook).toMatchObject([
@@ -128,17 +128,17 @@ describe('parseRisuModule', () => {
     // A module's lore is scanned as RisuAI's, the greeting left out, though the file was SillyTavern's.
     expect(parsed.lorebook.some((entry) => 'sillyTavern' in entry)).toBe(false);
     // A character_book's array of entries is an external lorebook too.
-    expect(parseRisuModule(json({ name: '책', entries: [{ keys: ['문'], content: '열렸다.' }] })).lorebook[0]).toMatchObject({
+    expect((await readRisuModule(json({ name: '책', entries: [{ keys: ['문'], content: '열렸다.' }] }))).lorebook[0]).toMatchObject({
       keys: ['문'],
       content: '열렸다.',
     });
     // The other lorebook files the studio reads are not what RisuAI's module import takes.
-    expect(() => parseRisuModule(json({ spec: 'lorebook_v3', data: { entries: [] } }))).toThrow(ModuleParseError);
+    await expect(readRisuModule(json({ spec: 'lorebook_v3', data: { entries: [] } }))).rejects.toThrow(ModuleParseError);
   });
 
-  it('reads RisuAI’s regex export as a module of regex scripts', () => {
+  it('reads RisuAI’s regex export as a module of regex scripts', async () => {
     const json = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
-    const parsed = parseRisuModule(json({ type: 'regex', data: risuModule.regex }));
+    const parsed = (await readRisuModule(json({ type: 'regex', data: risuModule.regex })));
     expect(parsed).toMatchObject({ name: 'Imported Regex', description: 'Converted from risu regex', lorebook: [], trigger: [] });
     expect(parsed.regex).toEqual(risuModule.regex);
     const module = plotModuleOf(parsed, {
@@ -150,11 +150,11 @@ describe('parseRisuModule', () => {
       importedFrom: { fileName: 'regexscript_export.json', sha256: 'x', importedAt: '2026-10-14T00:00:00.000Z' },
     });
     expect(module.displayScripts).toEqual([{ in: '비', out: '<b>비</b>', order: 0, enabled: true }]);
-    expect(() => parseRisuModule(json({ type: 'regex' }))).toThrow(ModuleParseError);
-    expect(() => parseRisuModule(json([risuModule]))).toThrow(ModuleParseError);
+    await expect(readRisuModule(json({ type: 'regex' }))).rejects.toThrow(ModuleParseError);
+    await expect(readRisuModule(json([risuModule]))).rejects.toThrow(ModuleParseError);
   });
 
-  it('reads a lore entry RisuAI wrote selective with its secondary keys', () => {
+  it('reads a lore entry RisuAI wrote selective with its secondary keys', async () => {
     const entry = risuLoreBookEntry({ key: '문', secondkey: '열쇠', selective: true, content: '잠겨 있다.', insertorder: 1, comment: '', mode: 'normal', alwaysActive: false });
     expect(entry).toMatchObject({ keys: ['문'], secondaryKeys: ['열쇠'], selective: true, content: '잠겨 있다.' });
   });
@@ -214,7 +214,7 @@ const moduleCharx = (): Uint8Array =>
   );
 
 describe('a charx as a module', () => {
-  it('writes the description, first messages and global note as RisuAI’s indicator entries', () => {
+  it('writes the description, first messages and global note as RisuAI’s indicator entries', async () => {
     const entry = (comment: string, content: string, alwaysActive: boolean) => ({
       key: '',
       secondkey: '',
@@ -243,8 +243,8 @@ describe('a charx as a module', () => {
     ]);
   });
 
-  it('reads RisuAI’s .module.charx as convertCharacterToModule makes a module of it', () => {
-    const parsed = parseRisuModule(moduleCharx());
+  it('reads RisuAI’s .module.charx as convertCharacterToModule makes a module of it', async () => {
+    const parsed = (await readRisuModule(moduleCharx()));
     expect(parsed.name).toBe('날씨 모듈');
     expect(parsed.description).toBe('비가 온다.');
     // The module's lore over the card's book, then the three indicator entries in RisuAI's order.
@@ -277,7 +277,7 @@ describe('a charx as a module', () => {
     expect(module.css).toBe('.rain{color:blue}');
   });
 
-  it('makes any character’s charx a module: the card’s own book and scripts, its additional pictures only', () => {
+  it('makes any character’s charx a module: the card’s own book and scripts, its additional pictures only', async () => {
     const charx = buildCharx(
       v3({
         name: '아리아',
@@ -292,7 +292,7 @@ describe('a charx as a module', () => {
         { type: 'x-risu-asset', name: 'rain', ext: 'png', entry: 'assets/other/image/rain.png', bytes: rainPicture },
       ],
     );
-    const parsed = parseRisuModule(charx);
+    const parsed = (await readRisuModule(charx));
     expect(parsed.name).toBe('아리아');
     // Nothing to mark: no description, no first messages, no global note.
     expect(parsed.lorebook.map((entry) => [entry.keys, entry.content])).toEqual([[['검'], '검은 녹슬었다.']]);
@@ -303,17 +303,17 @@ describe('a charx as a module', () => {
     expect(parsed.assets.map((asset) => asset.name)).toEqual(['rain']);
   });
 
-  it('turns away a charx RisuAI would not read, as unreadable', () => {
+  it('turns away a charx RisuAI would not read, as unreadable', async () => {
     const v2 = zipSync({ 'card.json': encode({ spec: 'chara_card_v2', spec_version: '2.0', data: { name: '옛 카드' } }) });
-    expect(() => parseRisuModule(v2)).toThrow(ModuleParseError);
-    expect(() => parseRisuModule(zipSync({ 'other.json': encode({}) }))).toThrow(ModuleParseError);
-    expect(() => parseRisuModule(zipSync({ 'card.json': new TextEncoder().encode('{not json') }))).toThrow(ModuleParseError);
+    await expect(readRisuModule(v2)).rejects.toThrow(ModuleParseError);
+    await expect(readRisuModule(zipSync({ 'other.json': encode({}) }))).rejects.toThrow(ModuleParseError);
+    await expect(readRisuModule(zipSync({ 'card.json': new TextEncoder().encode('{not json') }))).rejects.toThrow(ModuleParseError);
   });
 });
 
 describe('plotModuleOf', () => {
-  it('lifts the display scripts and splits the background as a card import does', () => {
-    const parsed = parseRisuModule(buildRisum({ module: risuModule, type: 'risuModule' }));
+  it('lifts the display scripts and splits the background as a card import does', async () => {
+    const parsed = (await readRisuModule(buildRisum({ module: risuModule, type: 'risuModule' })));
     const module = plotModuleOf(parsed, {
       id: 'm-1',
       name: parsed.name,
@@ -331,19 +331,19 @@ describe('plotModuleOf', () => {
     expect(module.inert).toBeUndefined();
   });
 
-  it('keeps RisuAI’s hideIcon, and an MCP server and cjs code only as a record of what is never run', () => {
+  it('keeps RisuAI’s hideIcon, and an MCP server and cjs code only as a record of what is never run', async () => {
     const json = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
     const record = { id: 'm-2', name: 'x', description: '', lorebook: [], assets: [], importedFrom: { fileName: 'x.json', sha256: 'x', importedAt: '2026-10-15T00:00:00.000Z' } };
     // `importMCPModule`'s module: a name, a description and the server, nothing else.
-    const mcp = parseRisuModule(
+    const mcp = (await readRisuModule(
       json({ type: 'risuModule', id: 'risu-mcp', name: 'Dice', description: 'MCP from internal:dice', mcp: { url: 'internal:dice' } }),
-    );
+    ));
     expect(mcp.inert).toEqual({ mcp: 'internal:dice' });
     expect(plotModuleOf(mcp, record).inert).toEqual({ mcp: 'internal:dice' });
 
-    const both = parseRisuModule(
+    const both = (await readRisuModule(
       json({ ...risuModule, type: 'risuModule', hideIcon: true, cjs: 'module.exports = () => fetch("https://x")', mcp: {} }),
-    );
+    ));
     expect(both.hideIcon).toBe(true);
     // An MCP object naming no server is still one (RisuAI draws its glyph); the code is not kept.
     expect(both.inert).toEqual({ mcp: '', cjs: true });
@@ -354,9 +354,9 @@ describe('plotModuleOf', () => {
     expect(module.displayScripts).toHaveLength(1);
 
     // A charx says it as the character's `hideChatIcon`, which RisuAI makes the module's `hideIcon`.
-    const charx = parseRisuModule(
+    const charx = (await readRisuModule(
       buildCharx(v3({ name: '숨김', extensions: { risuai: { hideChatIcon: true } } }), [], {}),
-    );
+    ));
     expect(charx.hideIcon).toBe(true);
     expect(charx.inert).toBeUndefined();
   });
@@ -403,7 +403,7 @@ describe('a work’s modules in the scripts', () => {
     },
   });
 
-  it('runs after the card’s own, each trigger with its own low-level access', () => {
+  it('runs after the card’s own, each trigger with its own low-level access', async () => {
     const scripts = cardScripts(own, [work({ lowLevelAccess: true })])!;
     expect(scripts.triggers.map((trigger) => [trigger.comment, trigger.lowLevelAccess])).toEqual([
       ['카드', false],
@@ -418,7 +418,7 @@ describe('a work’s modules in the scripts', () => {
     expect(cardScripts(own, [work({ regex: [], trigger: [] })])).toEqual(cardScripts(own));
   });
 
-  it('makes a card with none of its own a scripted one, and the work’s first member the lead', () => {
+  it('makes a card with none of its own a scripted one, and the work’s first member the lead', async () => {
     const plain = { name: '벨', card: card({}) };
     const scripted = { name: '아리아', card: own };
     expect(scriptedMember([plain, scripted])!.member).toBe(scripted);
@@ -427,7 +427,7 @@ describe('a work’s modules in the scripts', () => {
     expect(lead.scripts.triggers.map((trigger) => trigger.comment)).toEqual(['모듈']);
   });
 
-  it('holds each trigger to its own low-level access in a run', () => {
+  it('holds each trigger to its own low-level access in a run', async () => {
     // `runtrigger` past ten nested calls needs low-level access: the module's has it, the card's not.
     const recursing = (comment: string) => ({
       comment,
@@ -471,7 +471,7 @@ describe('a work’s modules in the prompt', () => {
     position: 'before_char' as const,
   });
 
-  it('activates the module’s lore after every member’s, under the module’s name', () => {
+  it('activates the module’s lore after every member’s, under the module’s name', async () => {
     const aria: PromptCharacter = { name: '아리아', card: { ...card({}), lorebook: [lore('카드의 로어')] } };
     const plot: PromptPlot = {
       name: '골짜기',
@@ -486,8 +486,8 @@ describe('a work’s modules in the prompt', () => {
     expect(prompt.report!.lore.map((entry) => entry.source)).toEqual(['plot', '아리아', '날씨']);
   });
 
-  it('sends the indicator entries as RisuAI does in a module: description and global note as lore, never the first messages', () => {
-    const parsed = parseRisuModule(moduleCharx());
+  it('sends the indicator entries as RisuAI does in a module: description and global note as lore, never the first messages', async () => {
+    const parsed = (await readRisuModule(moduleCharx()));
     const aria: PromptCharacter = { name: '아리아', card: card({}) };
     const plot: PromptPlot = {
       name: '골짜기',

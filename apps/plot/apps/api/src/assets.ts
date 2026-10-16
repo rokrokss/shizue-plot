@@ -1,4 +1,13 @@
-import { sniffFont, sniffMedia, stripPngTextChunks } from '@shizue/core';
+import {
+  MEDIA_SNIFF_BYTES,
+  PngUnwalkableError,
+  sniffFont,
+  sniffMedia,
+  stripPngTextChunks,
+  stripPngTextChunksStream,
+  type FontType,
+  type MediaType,
+} from '@shizue/core';
 import type { Context } from 'hono';
 import { badRequest, notFound } from './errors.js';
 import { assetKey, byteRangeOf, type ObjectStorage } from './storage.js';
@@ -122,14 +131,95 @@ export async function saveAsset(
     key?: (assetId: string, ext: string) => string;
   } = {},
 ): Promise<StoredAsset | null> {
-  const type = sniffMedia(bytes) ?? (font ? sniffFont(bytes) : null);
+  const type = keptType(bytes, { audio, video, font });
   if (!type) return null;
-  if ('kind' in type && ((type.kind === 'audio' && !audio) || (type.kind === 'video' && !video))) return null;
   const stored = type.ext === 'png' ? stripPngTextChunks(bytes) : bytes;
   if (!stored) return null;
   const key = keyOf(assetId, type.ext);
   await storage.put(key, stored, type.mime);
   return { key, mime: type.mime };
+}
+
+/** What the first bytes say a file is, among the kinds a caller keeps; null for the rest. */
+function keptType(
+  head: Uint8Array,
+  { audio, video, font }: { audio: boolean; video: boolean; font: boolean },
+): MediaType | FontType | null {
+  const type = sniffMedia(head) ?? (font ? sniffFont(head) : null);
+  if (!type) return null;
+  if ('kind' in type && ((type.kind === 'audio' && !audio) || (type.kind === 'video' && !video))) return null;
+  return type;
+}
+
+/**
+ * `saveAsset` for a stream — an imported card's picture, music or video, of any
+ * size, never held: what it is is read off its first bytes, and the rest goes
+ * on to the store as it comes, a PNG without its text chunks
+ * (`stripPngTextChunksStream`). A stream that is none of the kinds kept is left
+ * unread past those bytes, and null comes back, as for bytes; so does a PNG
+ * that cannot be walked to its end, whose object is never kept. `onKey` hears
+ * the key before anything is written under it, for an import that must be able
+ * to take back what it stored.
+ */
+export async function saveAssetStream(
+  storage: ObjectStorage,
+  assetId: string,
+  body: AsyncIterable<Uint8Array>,
+  {
+    audio = false,
+    video = false,
+    font = false,
+    key: keyOf = assetKey,
+    onKey,
+  }: {
+    audio?: boolean;
+    video?: boolean;
+    font?: boolean;
+    key?: (assetId: string, ext: string) => string;
+    onKey?: (key: string) => Promise<void>;
+  } = {},
+): Promise<StoredAsset | null> {
+  const iterator = body[Symbol.asyncIterator]();
+  const head: Uint8Array[] = [];
+  let headBytes = 0;
+  let ended = false;
+  while (headBytes < MEDIA_SNIFF_BYTES) {
+    const next = await iterator.next();
+    if (next.done) {
+      ended = true;
+      break;
+    }
+    head.push(next.value);
+    headBytes += next.value.length;
+  }
+  const type = keptType(Buffer.concat(head), { audio, video, font });
+  if (!type) {
+    if (!ended) await iterator.return?.();
+    return null;
+  }
+  async function* whole(): AsyncGenerator<Uint8Array> {
+    yield* head;
+    if (ended) return;
+    for (let next = await iterator.next(); !next.done; next = await iterator.next()) yield next.value;
+  }
+  const key = keyOf(assetId, type.ext);
+  await onKey?.(key);
+  try {
+    await storage.putStream(key, type.ext === 'png' ? stripPngTextChunksStream(whole()) : whole(), type.mime);
+  } catch (error) {
+    if (causedBy(error, PngUnwalkableError)) return null;
+    throw error;
+  }
+  return { key, mime: type.mime };
+}
+
+/** Whether an error, or one it was wrapped around, is of a class. */
+function causedBy(error: unknown, kind: new (...args: never[]) => Error): boolean {
+  for (let at: unknown = error, depth = 0; at && depth < 5; depth += 1) {
+    if (at instanceof kind) return true;
+    at = (at as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 /**

@@ -2,13 +2,14 @@
 
 import { useFormatter, useTranslations } from 'next-intl';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { RealmImportForm } from '@/components/CardImport';
+import { ImportProgressLine, RealmImportForm } from '@/components/CardImport';
 import { CreatorTabs } from '@/components/CreatorTabs';
 import { DraftGuide } from '@/components/DraftGuide';
 import { Button, buttonClass, ErrorText, Field, Select, Spinner, TextArea, TextInput } from '@/components/ui';
 import { Link, useRouter } from '@/i18n/navigation';
-import { apiGet, apiSend, apiUpload } from '@/lib/api';
+import { apiGet, apiSend } from '@/lib/api';
 import { readDraftModel, writeDraftModel } from '@/lib/draftPrefs';
+import { importFile, type ImportProgress } from '@/lib/fileImport';
 import { keepImportWarnings } from '@/lib/importWarnings';
 import { checkCardSize, downloadRealmCard } from '@/lib/realm';
 import {
@@ -50,6 +51,8 @@ export default function PlotsPage() {
   const [realmOpen, setRealmOpen] = useState(false);
   const [error, setError] = useState('');
   const [operation, setOperation] = useState<'create' | 'draft' | 'import' | 'realm' | null>(null);
+  /** Where a card import is, said under the buttons while it runs. */
+  const [progress, setProgress] = useState<ImportProgress | null>(null);
   const busy = operation !== null;
 
   const load = useCallback(async () => {
@@ -129,13 +132,16 @@ export default function PlotsPage() {
     setOperation('import');
     setError('');
     try {
-      const created = await apiUpload<PlotDetail & { importWarnings?: unknown }>('/api/plots/import', checkCardSize(file));
+      const created = await importFile<PlotDetail & { importWarnings?: unknown }>('plot', checkCardSize(file), {}, {
+        onProgress: setProgress,
+      });
       // What the import left behind, for the studio it moves on to to say.
       keepImportWarnings(created.id, created.importWarnings);
       router.push(`/plots/${created.id}`);
     } catch (caught) {
       setError(toMessage(caught));
       setOperation(null);
+      setProgress(null);
     }
   }
 
@@ -150,13 +156,16 @@ export default function PlotsPage() {
     setError('');
     try {
       const { file, sourceUrl } = await downloadRealmCard(url);
-      const created = await apiUpload<PlotDetail & { importWarnings?: unknown }>('/api/plots/import', file, { sourceUrl });
+      const created = await importFile<PlotDetail & { importWarnings?: unknown }>('plot', file, { sourceUrl }, {
+        onProgress: setProgress,
+      });
       keepImportWarnings(created.id, created.importWarnings);
       router.push(`/plots/${created.id}`);
       return true;
     } catch (caught) {
       setError(toMessage(caught));
       setOperation(null);
+      setProgress(null);
       return false;
     }
   }
@@ -324,6 +333,7 @@ export default function PlotsPage() {
       </fieldset>
 
       <div className="mt-4">
+        <ImportProgressLine progress={progress} />
         <ErrorText>{error}</ErrorText>
       </div>
 

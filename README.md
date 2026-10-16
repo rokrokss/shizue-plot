@@ -51,6 +51,24 @@ Next.js forwards `/api/*` to Hono on port 8787. `make stop` stops the app
 processes; `make infra-down` stops the containers. The database and media
 volumes persist across restarts.
 
+### Card and module imports
+
+A reader's browser uploads a card or module file in 8 MB parts straight into
+storage, and a job in the API reads it back and imports it (ARCHITECTURE §10
+파일 임포트); the file never passes through Next.js or the API's request body.
+Under the local driver the parts come to the API instead, which streams each
+to disk. With `STORAGE_DRIVER=s3` the bucket needs:
+
+- CORS: `PUT` from the web origin (`AllowedOrigins` the site's origin,
+  `AllowedMethods: ["PUT"]`, `AllowedHeaders: ["*"]`).
+- A lifecycle rule on the `imports/` prefix: expire objects after 2 days and
+  abort incomplete multipart uploads after 1 day, for imports nobody finished.
+
+The compose `s3-init` sets both on the RustFS for `http://localhost:13000`.
+`S3_PUBLIC_ENDPOINT` is for a deployment whose API reaches the store at an
+address browsers cannot; `IMPORT_WORKERS` (default 2) is how many imports one
+API process reads at once.
+
 ## Sign in with ChatGPT
 
 Sign in with ChatGPT is the only login, and each reader's own ChatGPT plan runs

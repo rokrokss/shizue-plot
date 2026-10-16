@@ -99,8 +99,17 @@ const server = serve({ fetch: app.fetch, port: config.port, hostname: config.hos
 });
 
 // Every instance polls the same queue; `for update skip locked` is what keeps them
-// off each other's rows.
-const stopJobWorker = startJobWorker({ db, handlers: createJobHandlers(deps) });
+// off each other's rows. File imports run for minutes, so they have loops of their
+// own — `IMPORT_WORKERS` of them, what bounds the imports this process reads at once
+// — and the main loop leaves them alone.
+const handlers = createJobHandlers(deps);
+const jobWorkers = [
+  startJobWorker({ db, handlers, kinds: { except: ['file_import'] } }),
+  ...Array.from({ length: config.importWorkers }, () => startJobWorker({ db, handlers, kinds: { only: ['file_import'] } })),
+];
+const stopJobWorker = (): void => {
+  for (const stop of jobWorkers) stop();
+};
 
 // Off unless METRICS_PORT is set, and never on the API's own port (`metrics.ts`).
 const metricsServer =

@@ -28,12 +28,10 @@ import {
   MAX_INTRO_LENGTH,
   MAX_INTRO_TEXT_LENGTH,
   MAX_INTROS_PER_PLOT,
-  ModuleParseError,
-  parseCard,
-  parseRisuModule,
   plotModuleOf,
+  readCardAssets,
   toRisuAssetRefs,
-  type CharxAssetFile,
+  type CardAsset,
   type CharxExportAsset,
   type EmotionImage,
   type EmotionMode,
@@ -43,6 +41,8 @@ import {
   type MacroContext,
   type NarratorConfig,
   type NormalizedCard,
+  type ParsedCardSource,
+  type ParsedRisuModule,
   type PlotCustomUi,
   type PlotModule,
   type PlotProfile,
@@ -81,6 +81,7 @@ import {
   MAX_ASSETS_PER_PLOT,
   normalizeSlug,
   saveAsset,
+  saveAssetStream,
   uniqueSlug,
 } from '../assets.js';
 import {
@@ -105,9 +106,10 @@ import {
   withStoredModules,
 } from '../card.js';
 import type { AppDeps, AppEnv, Tx } from '../deps.js';
+import type { FileImportResult } from '@shizue/db';
 import { draftPlot, MAX_PREMISE_LENGTH } from '../draft.js';
 import { ApiError, badRequest, notFound } from '../errors.js';
-import { admitImport } from '../importAdmission.js';
+import type { ImportHooks } from '../fileImports.js';
 import {
   avatarUrl,
   coverUrl,
@@ -127,7 +129,7 @@ import { requireUser } from '../session.js';
 import { cbsModulesOf, loadOwnedPlot } from '../plots.js';
 import { RATE_LIMITS, rateLimit } from '../rateLimit.js';
 import { realmCardId, realmCharacterUrl } from '../realm.js';
-import { coverKey, deleteQuietly, readAll } from '../storage.js';
+import { avatarKey, coverKey, deleteQuietly, readAll } from '../storage.js';
 import { isUuid, optionalBoolean, optionalString, readJsonBody, requireString, requireUuidParam } from '../util.js';
 import { scheduleLoreAliases, scheduleLoreUpdate } from '../vectors.js';
 import { countComments } from './comments.js';
@@ -141,24 +143,23 @@ const LANGUAGES: ContentLanguage[] = ['ko', 'en', 'ja'];
 const SAFETY_LEVELS: SafetyLevel[] = ['all'];
 
 /**
- * One card file (`@shizue/core`). The body limit (app.ts) and the web's rewrite
- * proxy (next.config.ts) leave room for this plus the multipart framing, and the
- * import forms check it before uploading.
+ * One card file (`@shizue/core`): what a file import takes (`fileImports.ts`),
+ * which the import forms check before uploading.
  */
 export { MAX_CARD_IMPORT_BYTES };
-/** The upload's own name as the provenance keeps it; a multipart name has no cap of its own. */
-const MAX_IMPORT_FILE_NAME_LENGTH = 255;
+/** The upload's own name as the provenance keeps it; a file's name has no cap of its own. */
+export const MAX_IMPORT_FILE_NAME_LENGTH = 255;
 /** An uploaded asset's reference name (`name`), the one a pasted `{{img::name}}` is written in. */
 export const MAX_ASSET_NAME_LENGTH = 100;
 /** A module's name as the studio lists it — a label, as a member's roster name is. */
-const MAX_MODULE_NAME_LENGTH = 100;
+export const MAX_MODULE_NAME_LENGTH = 100;
 
 /**
  * What an import that would show someone else's characters to readers is
  * refused with until the owner vouches for them: a publish with imported
  * members, and an import into a plot that is already public.
  */
-const rightsUnconfirmed = (): ApiError =>
+export const rightsUnconfirmed = (): ApiError =>
   new ApiError(
     409,
     'rights_unconfirmed',
@@ -474,7 +475,7 @@ function exportedBackground(plot: Plot, members: Character[], memberId: string):
  * always-on lore costs once expanded (`constantLoreTokens`), which the studio
  * sets against the lore budget.
  */
-const toMemberJson = (plot: Plot, member: Character) => ({
+export const toMemberJson = (plot: Plot, member: Character) => ({
   id: member.id,
   name: member.name,
   // The same field every public member carries, so a screen reads one shape.
@@ -532,8 +533,8 @@ async function loadOwnedMember(
   return { plot, member };
 }
 
-/** What a card upload says about itself beside the card (`readCardUpload`). */
-interface CardImport {
+/** What a card upload says about itself beside the card. */
+export interface CardImport {
   importedFrom: ImportProvenance;
   /** The owner's word that they may publish the card, for a plot that is already public. */
   rightsConfirmed: boolean;
@@ -615,12 +616,19 @@ async function insertMember(
  * the length of an archive. What that costs is objects nobody ends up naming —
  * the ones that no longer fit once the lock is held, and every one of them if the
  * write fails — so they are deleted again on the way out.
+ *
+ * Each asset is streamed from the file into the store, one at a time and never
+ * held (`readCardAssets`, `saveAssetStream`), under the parse's caps: the first
+ * past one ends the pass, and it and the rest are counted (`overBudget`). `spent`
+ * is what the parse already read of the budget (a charx's icon). The import
+ * hears each key before it is written (`ImportHooks.wrote`).
  */
 async function storeImportedAssets(
   deps: AppDeps,
   plotId: string,
-  assets: CharxAssetFile[],
-): Promise<{ emotions: EmotionImage[]; ids: string[]; unsupported: number; overLimit: number }> {
+  assets: readonly CardAsset[],
+  { spent, hooks }: { spent?: number; hooks: ImportHooks },
+): Promise<{ emotions: EmotionImage[]; ids: string[]; unsupported: number; overLimit: number; overBudget: number }> {
   /** An image already in the store, still waiting for a row to name it. */
   interface StoredCandidate {
     id: string;
@@ -644,22 +652,37 @@ async function storeImportedAssets(
   const written: string[] = [];
   let unsupported = 0;
   let overLimit = 0;
+  let overBudget = 0;
   try {
-    for (const [index, asset] of assets.entries()) {
-      if (candidates.length >= MAX_ASSETS_PER_PLOT) {
-        overLimit = assets.length - index;
-        break;
-      }
-      const id = randomUUID();
-      const stored = await saveAsset(deps.storage, id, asset.bytes, { audio: true, video: true, font: true });
-      if (!stored) {
-        unsupported += 1;
-        continue;
-      }
-      candidates.push({ id, name: asset.name, index, key: stored.key, mime: stored.mime });
-      orphaned.push(stored.key);
-    }
-    if (candidates.length === 0) return { emotions, ids: written, unsupported, overLimit };
+    hooks.progress('assets', 0, assets.length);
+    ({ overBudget } = await readCardAssets(
+      assets,
+      async (asset, body, index) => {
+        if (candidates.length >= MAX_ASSETS_PER_PLOT) {
+          overLimit = assets.length - index;
+          return false;
+        }
+        const id = randomUUID();
+        const stored = await saveAssetStream(deps.storage, id, body, {
+          audio: true,
+          video: true,
+          font: true,
+          onKey: async (key) => {
+            orphaned.push(key);
+            await hooks.wrote({ keys: [key] });
+          },
+        });
+        hooks.progress('assets', index + 1, assets.length);
+        if (!stored) {
+          unsupported += 1;
+          return true;
+        }
+        candidates.push({ id, name: asset.name, index, key: stored.key, mime: stored.mime });
+        return true;
+      },
+      spent === undefined ? {} : { spent },
+    ));
+    if (candidates.length === 0) return { emotions, ids: written, unsupported, overLimit, overBudget };
 
     orphaned = await deps.db.transaction(async (tx) => {
       await tx.select({ id: plots.id }).from(plots).where(eq(plots.id, plotId)).for('update');
@@ -700,7 +723,7 @@ async function storeImportedAssets(
     // no row will ever name it.
     for (const key of orphaned) await deleteQuietly(deps.storage, key);
   }
-  return { emotions, ids: written, unsupported, overLimit };
+  return { emotions, ids: written, unsupported, overLimit, overBudget };
 }
 
 /**
@@ -788,11 +811,11 @@ async function localizeImport(
 /** The asset half of the counts: what the parse passed over, and what the store did. */
 const assetWarnings = (
   skipped: SkippedAssets | undefined,
-  stored: { unsupported: number; overLimit: number } | undefined,
+  stored: { unsupported: number; overLimit: number; overBudget: number } | undefined,
 ): Partial<Record<ImportWarningCode, number>> => ({
   assets_unsupported: (skipped?.unsupported ?? 0) + (stored?.unsupported ?? 0),
   assets_missing: skipped?.missing ?? 0,
-  assets_over_budget: skipped?.overBudget ?? 0,
+  assets_over_budget: (skipped?.overBudget ?? 0) + (stored?.overBudget ?? 0),
   assets_over_limit: stored?.overLimit ?? 0,
 });
 
@@ -923,7 +946,7 @@ async function addGroupGreetings(
  * recorded, and always in one spelling; anything else is refused rather than
  * dropped, because a client that sent it expects it to have been kept.
  */
-function coerceSourceUrl(value: unknown): string | undefined {
+export function coerceSourceUrl(value: unknown): string | undefined {
   if (value === null || (typeof value === 'string' && !value.trim())) return undefined;
   const id = typeof value === 'string' ? realmCardId(value) : null;
   if (!id) throw badRequest('invalid_request', 'sourceUrl must be a RisuRealm character page');
@@ -967,14 +990,13 @@ function coerceMigrationMembers(value: unknown): { name: string; card: Normalize
 }
 
 /**
- * The lorebook a SillyTavern World Info file beside the card carries (the optional
- * `worldInfo` field). ST writes a character's linked world back into the card only
- * when the character is saved, so the file is the fresher copy and its entries
- * stand in for the card's own. Unreadable is a 400, like an unreadable card.
+ * The lorebook a SillyTavern World Info file beside the card carries (the
+ * import's `worldInfo`). ST writes a character's linked world back into the card
+ * only when the character is saved, so the file is the fresher copy and its
+ * entries stand in for the card's own. Unreadable is a 400, like an unreadable
+ * card — answered when the import starts, before the card is uploaded.
  */
-async function readWorldInfo(value: ReturnType<FormData['get']>): Promise<LoreEntry[] | undefined> {
-  if (value === null || value === '') return undefined;
-  const text = typeof value === 'string' ? value : await value.text();
+export function readWorldInfo(text: string): LoreEntry[] {
   let entries: LoreEntry[];
   try {
     entries = fromLorebookFile(JSON.parse(text));
@@ -988,60 +1010,32 @@ async function readWorldInfo(value: ReturnType<FormData['get']>): Promise<LoreEn
   return coerceLorebook(entries);
 }
 
-/**
- * The card file a `multipart/form-data` import carries, and the record of it the
- * member keeps: the file's name, the hash of the bytes as they arrived and the
- * page the importer says they came from (`sourceUrl`, optional). Beside them
- * rides `rightsConfirmed=true`, which an import into a public plot needs, and the
- * character's World Info file (`worldInfo`, `readWorldInfo`).
- *
- * The cheap refusals come before the parse — a 30MB card is not read to be
- * turned away for its URL.
- */
-async function readCardUpload(c: { req: { formData: () => Promise<FormData> } }): Promise<{
-  parsed: ReturnType<typeof parseCard>;
+/** A card file read for an import (`fileImports.ts`): the card, and the record of the file. */
+export interface CardUpload {
+  parsed: ParsedCardSource;
+  /** The file's name as the reader's browser gave it. */
   fileName: string;
   imported: CardImport;
-}> {
-  let form: FormData;
-  try {
-    form = await c.req.formData();
-  } catch {
-    throw badRequest('invalid_request', 'Expected multipart/form-data with a file field');
-  }
-  const file = form.get('file');
-  if (!(file instanceof File)) throw badRequest('invalid_request', 'file field is required');
-  // The route's own statement of the cap; the body limit (app.ts) sits a
-  // little above it to leave room for the framing.
-  if (file.size > MAX_CARD_IMPORT_BYTES) {
-    throw new ApiError(413, 'payload_too_large', `A card file is at most ${MAX_CARD_IMPORT_BYTES} bytes`);
-  }
-  const sourceUrl = coerceSourceUrl(form.get('sourceUrl'));
-  const lorebook = await readWorldInfo(form.get('worldInfo'));
-
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  let parsed: ReturnType<typeof parseCard>;
-  try {
-    parsed = parseCard(bytes);
-  } catch (error) {
-    throw badRequest('invalid_card', error instanceof Error ? error.message : 'Unreadable character card');
-  }
-  return {
-    parsed: lorebook ? { ...parsed, card: { ...parsed.card, lorebook } } : parsed,
-    fileName: file.name,
-    imported: {
-      importedFrom: {
-        fileName: file.name.slice(0, MAX_IMPORT_FILE_NAME_LENGTH),
-        // The part of the record the server can vouch for: the URL is the
-        // importer's word, the hash is of what actually arrived.
-        sha256: createHash('sha256').update(bytes).digest('hex'),
-        ...(sourceUrl ? { sourceUrl } : {}),
-        importedAt: new Date().toISOString(),
-      },
-      rightsConfirmed: form.get('rightsConfirmed') === 'true',
-    },
-  };
 }
+
+/** A module file read for an import: the module, and what the record of the file needs. */
+export interface ModuleUpload {
+  parsed: ParsedRisuModule;
+  fileName: string;
+  /** Of the bytes as uploaded. */
+  sha256: string;
+  rightsConfirmed: boolean;
+}
+
+/** The provenance a card import records: the file's name and hash, and the page the importer says it came from. */
+export const importProvenance = (fileName: string, sha256: string, sourceUrl?: string): ImportProvenance => ({
+  fileName: fileName.slice(0, MAX_IMPORT_FILE_NAME_LENGTH),
+  // The part of the record the server can vouch for: the URL is the importer's
+  // word, the hash is of what actually arrived.
+  sha256,
+  ...(sourceUrl ? { sourceUrl } : {}),
+  importedAt: new Date().toISOString(),
+});
 
 /**
  * `Content-Disposition` for a download named after a character: the name as
@@ -1076,6 +1070,292 @@ async function bumpLikeCount(tx: Tx, plotId: string, delta: number): Promise<num
     .where(eq(plots.id, plotId))
     .returning({ likeCount: plots.likeCount });
   return row!.likeCount;
+}
+
+/**
+ * Importing a card creates the work it was always describing: the card becomes
+ * the first member and everything on it that belongs to a work rather than to a
+ * person — the situation, the openings, the narrator, the custom UI, the
+ * picture as the cover — is lifted onto the plot around it. Run by the import
+ * job (`fileImports.ts`) once the file is read; a file that is not a card never
+ * gets here (400 `invalid_card` there).
+ */
+export async function importCardAsPlot(
+  deps: AppDeps,
+  userId: string,
+  { parsed, fileName, imported }: CardUpload,
+  hooks: ImportHooks,
+): Promise<FileImportResult> {
+  const card = parsed.card;
+  const name = card.name.trim() || fileName.replace(/\.[^.]+$/, '') || 'Unnamed';
+  // The situation is the work's; the character's description stays on the
+  // member, which the prompt already reads it from — copying it here as well
+  // would tell the model the same thing twice.
+  const description = card.scenario.trim();
+  const greetings = introsOfGreetings([card.firstMes, ...card.alternateGreetings], MAX_INTROS_PER_PLOT);
+  const intros = greetings.intros;
+  // The member the card becomes: its display scripts are tagged as its own.
+  const memberId = randomUUID();
+  const customUi = customUiOfCard(card, memberId);
+  // What the reader meets first says what the work is written in; a card with
+  // no opening to read is judged by its description, and an undecided one
+  // keeps the column's default.
+  const language =
+    detectContentLanguage(intros[0] ?? '') ?? detectContentLanguage(card.description);
+
+  // Recorded before it exists, so a failure from here on takes the whole plot back.
+  const plotId = randomUUID();
+  await hooks.wrote({ plotId });
+  const [created] = await deps.db
+    .insert(plots)
+    .values({
+      id: plotId,
+      ownerId: userId,
+      name,
+      // Only the plot borrows the creator notes: the member keeps its card's own
+      // intro, or the public page would say the same thing twice.
+      intro: card.intro ?? introFromCreatorNotes(card.creatorNotes, language) ?? '',
+      description,
+      intros,
+      tags: normalizeTags(card.tags),
+      ...(card.narrator ? { narrator: card.narrator } : {}),
+      ...(Object.keys(customUi).length > 0 ? { customUi } : {}),
+      ...(language ? { language } : {}),
+    })
+    .returning();
+  let plot = created!;
+
+  // A new plot is private, so this records where the card came from and asks
+  // for nothing yet: the owner vouches for it when they publish.
+  let member = await insertMember(deps, plot.id, name, card, imported, memberId);
+  if (parsed.iconBuffer) {
+    member = await writeMemberAvatar(deps, member, parsed.iconBuffer);
+    plot = await writeImportedCover(deps, plot, parsed.iconBuffer);
+  }
+  const stored = parsed.assets.length
+    ? await storeImportedAssets(deps, plot.id, parsed.assets, { spent: parsed.spent, hooks })
+    : undefined;
+  if (stored) await recordEmotionImages(deps, member, stored.emotions);
+  const background = backgroundHtmlOf(card.extensions);
+  // After the card's own pictures, so they keep their slugs and the plot's room
+  // goes to them first: what the card loads from other hosts, brought in.
+  hooks.progress('localizing');
+  const localized = await localizeImport(deps, plot.id, { plot: true, modules: [] });
+
+  // What was left behind or cut, for the studio to say quietly.
+  const warnings = importWarnings({
+    ...assetWarnings(parsed.skipped, stored),
+    greetings_over_limit: greetings.overLimit,
+    greetings_cut: greetings.cut,
+    stylesheet_over_limit: creatorCssOverCap(card.extensions) ? 1 : 0,
+    background_over_limit:
+      background !== undefined && backgroundWithoutStyles(background).length > MAX_BACKGROUND_HTML_LENGTH ? 1 : 0,
+    ...localized.warnings,
+  });
+  scheduleLoreUpdate(deps, plot.id, userId);
+  return { plotId: plot.id, importWarnings: warnings };
+}
+
+/**
+ * A card as one more member of a plot the reader owns. The work's narrator and
+ * openings stay its own. What the card dresses its own messages in comes along
+ * as its own (`liftCustomUi`), and so do its images, as the plot's, because
+ * `{{img::slug}}` resolves there, and its group-only greetings once there is a
+ * cast for them to greet (`addGroupGreetings`). Into a public plot it needs
+ * `rightsConfirmed` (`insertMember`).
+ */
+export async function importCardAsMember(
+  deps: AppDeps,
+  userId: string,
+  plotId: string,
+  { parsed, fileName, imported }: CardUpload,
+  hooks: ImportHooks,
+): Promise<FileImportResult> {
+  const plot = await loadOwnedPlot(deps, plotId, userId);
+  const name = parsed.card.name.trim() || fileName.replace(/\.[^.]+$/, '') || 'Unnamed';
+
+  const memberId = randomUUID();
+  await hooks.wrote({ characterId: memberId });
+  let member = await insertMember(deps, plotId, name, parsed.card, imported, memberId);
+  if (parsed.iconBuffer) member = await writeMemberAvatar(deps, member, parsed.iconBuffer);
+  const stored = parsed.assets.length
+    ? await storeImportedAssets(deps, plotId, parsed.assets, { spent: parsed.spent, hooks })
+    : undefined;
+  if (stored) member = await recordEmotionImages(deps, member, stored.emotions);
+  const greetings = await addGroupGreetings(deps, plotId, parsed.card);
+  const variableConflicts = await liftCustomUi(deps, plotId, member);
+  // What the companion's lifted scripts, sheet and greetings load from other hosts —
+  // only those: the rest of the work is the studio's, brought in at its own import.
+  hooks.progress('localizing');
+  const localized = await localizeImport(deps, plotId, {
+    plot: true,
+    modules: [],
+    member: { id: member.id, introsFrom: plot.intros.length },
+  });
+  // The work keeps one background, so a companion's is never drawn and never missed.
+  const warnings = importWarnings({
+    ...assetWarnings(parsed.skipped, stored),
+    greetings_over_limit: greetings.overLimit,
+    greetings_cut: greetings.cut,
+    stylesheet_over_limit: creatorCssOverCap(parsed.card.extensions) ? 1 : 0,
+    ...localized.warnings,
+  });
+  scheduleLoreUpdate(deps, plotId, userId);
+  // The default variables the work already had another value for, and what the
+  // import left behind, for the studio to say so.
+  return { plotId, characterId: member.id, variableConflicts, importWarnings: warnings };
+}
+
+/**
+ * A RisuAI module brought into the work — any file RisuAI's module import
+ * takes: a charx (its `.module.charx` export, or a character's), a `.risum`,
+ * the module's JSON, a lorebook or a regex export (`readRisuModuleSource`) —
+ * the creator's side of RisuAI's module list. RisuAI stacks a module on the
+ * chat rather than into the character, so this one is the work's: kept whole
+ * under an id of its own (`PlotModule`), every member's, and run after the
+ * cards' own wherever theirs run (§6 of ARCHITECTURE.md). Its pictures join the
+ * work's assets under the plot's cap, as a card's do (`storeImportedAssets`);
+ * its stylesheet and background, past the plot's caps, are left out as a card's
+ * are. A module carries no default variables, so there is nothing to merge into
+ * the work's. Unreadable is a 400 `invalid_module`, answered by the job.
+ */
+export async function importPlotModule(
+  deps: AppDeps,
+  userId: string,
+  plotId: string,
+  { parsed, fileName, sha256, rightsConfirmed }: ModuleUpload,
+  hooks: ImportHooks,
+): Promise<FileImportResult> {
+  const owned = await loadOwnedPlot(deps, plotId, userId);
+  // Someone else's work shown to readers the moment it lands, as an imported
+  // member is: a public plot takes it only on the owner's word. Asked before
+  // anything is stored, and again under the lock the write takes.
+  if (owned.visibility === 'public' && !rightsConfirmed) throw rightsUnconfirmed();
+
+  // A module names no emotion pictures: its assets are only `additionalAssets`.
+  const stored = await storeImportedAssets(deps, plotId, parsed.assets, { hooks });
+  const assets = stored.ids;
+  const module = plotModuleOf(parsed, {
+    id: randomUUID(),
+    name: (parsed.name || fileName.replace(/\.[^.]+$/, '').trim() || 'Module').slice(0, MAX_MODULE_NAME_LENGTH),
+    description: parsed.description.trim().slice(0, MAX_INTRO_LENGTH),
+    // Held to what any lorebook the work stores is held to.
+    lorebook: coerceLorebook(parsed.lorebook),
+    assets,
+    importedFrom: {
+      fileName: fileName.slice(0, MAX_IMPORT_FILE_NAME_LENGTH),
+      sha256,
+      importedAt: new Date().toISOString(),
+    },
+  });
+  await hooks.wrote({ moduleId: module.id });
+  try {
+    await deps.db.transaction(async (tx) => {
+      const [locked] = await tx
+        .select({ customUi: plots.customUi, visibility: plots.visibility })
+        .from(plots)
+        .where(eq(plots.id, plotId))
+        .for('update');
+      // The same lock a publish takes, so the two cannot pass each other unasked.
+      const vouching = locked?.visibility === 'public';
+      if (vouching && !rightsConfirmed) throw rightsUnconfirmed();
+      const customUi = locked?.customUi ?? {};
+      await tx
+        .update(plots)
+        .set({
+          customUi: { ...customUi, modules: [...(customUi.modules ?? []), module] },
+          updatedAt: new Date(),
+          ...(vouching ? { rightsConfirmedAt: new Date() } : {}),
+        })
+        .where(eq(plots.id, plotId));
+    });
+  } catch (error) {
+    // The pictures were stored ahead of the record that names them.
+    await deleteAssets(deps, plotId, assets);
+    throw error;
+  }
+  // What the module's stylesheet, background and scripts load from other hosts —
+  // stored as its own, so taking the module out takes them too.
+  hooks.progress('localizing');
+  const localized = await localizeImport(deps, plotId, { plot: false, modules: [module.id] });
+  const warnings = importWarnings({
+    ...assetWarnings(undefined, stored),
+    ...localized.warnings,
+    ...(module.inert?.mcp !== undefined ? { module_mcp_inert: 1 } : {}),
+    ...(module.inert?.cjs ? { module_cjs_inert: 1 } : {}),
+  });
+  scheduleLoreUpdate(deps, plotId, userId);
+  return { plotId, importWarnings: warnings };
+}
+
+/**
+ * Takes back what an import wrote before it failed (`FileImportWritten`): a
+ * plot it made, whole; a member it added, with the pictures it stored; a module
+ * it added to a work. The objects it stored (`keys`) go too, named or not. What a member
+ * import lifted onto the work (`liftCustomUi`, the group greetings) stays, as it
+ * did when the import was one request.
+ */
+export async function undoImportWrites(
+  deps: AppDeps,
+  written: { plotId?: string; characterId?: string; moduleId?: string },
+  keys: readonly string[],
+  target: 'plot' | 'member' | 'plot_module',
+  plotId: string | null,
+): Promise<void> {
+  const paths = new Set(keys);
+  if (target === 'plot' && written.plotId) {
+    await deletePlotWithObjects(deps, written.plotId);
+  } else if (plotId && paths.size > 0) {
+    const rows = await deps.db
+      .delete(plotAssets)
+      .where(and(eq(plotAssets.plotId, plotId), inArray(plotAssets.path, [...paths])))
+      .returning({ path: plotAssets.path });
+    for (const row of rows) paths.add(row.path);
+  }
+  if (target === 'member' && written.characterId) {
+    const [gone] = await deps.db.delete(characters).where(eq(characters.id, written.characterId)).returning();
+    if (gone?.avatarPath) paths.add(gone.avatarPath);
+    // Written under a key of its id, maybe without the row naming it yet.
+    for (const ext of AVATAR_EXTENSIONS) paths.add(avatarKey(written.characterId, ext));
+  }
+  if (target === 'plot_module' && written.moduleId && plotId) {
+    await deps.db.transaction(async (tx) => {
+      const [locked] = await tx.select({ customUi: plots.customUi }).from(plots).where(eq(plots.id, plotId)).for('update');
+      const modules = locked?.customUi?.modules ?? [];
+      if (!locked?.customUi || !modules.some((module) => module.id === written.moduleId)) return;
+      const kept = modules.filter((module) => module.id !== written.moduleId);
+      const { modules: _modules, ...rest } = locked.customUi;
+      const customUi: PlotCustomUi = kept.length > 0 ? { ...rest, modules: kept } : rest;
+      await tx
+        .update(plots)
+        .set({ customUi: Object.keys(customUi).length > 0 ? customUi : null, updatedAt: new Date() })
+        .where(eq(plots.id, plotId));
+    });
+  }
+  for (const path of paths) await deleteQuietly(deps.storage, path);
+}
+
+/** The picture types an avatar or a cover is stored as (`pictureType`): what a key of an id may end in. */
+const AVATAR_EXTENSIONS = ['png', 'jpg', 'gif', 'webp', 'avif'];
+
+/**
+ * Deletes a plot and what it keeps in the store: its cover, its members'
+ * avatars, its assets. The rows go with the plot (`on delete cascade`).
+ */
+async function deletePlotWithObjects(deps: AppDeps, plotId: string): Promise<void> {
+  const [plot] = await deps.db.select().from(plots).where(eq(plots.id, plotId)).limit(1);
+  const members = await loadMembers(deps.db, plotId);
+  const assets = await deps.db.select({ path: plotAssets.path }).from(plotAssets).where(eq(plotAssets.plotId, plotId));
+  await deps.db.delete(plots).where(eq(plots.id, plotId));
+  const paths = new Set<string>(assets.map((asset) => asset.path));
+  if (plot?.coverPath) paths.add(plot.coverPath);
+  for (const member of members) if (member.avatarPath) paths.add(member.avatarPath);
+  // An import that died between a write and the row naming it leaves a key of the id.
+  for (const ext of AVATAR_EXTENSIONS) {
+    paths.add(coverKey(plotId, ext));
+    for (const member of members) paths.add(avatarKey(member.id, ext));
+  }
+  for (const path of paths) await deleteQuietly(deps.storage, path);
 }
 
 /**
@@ -1134,79 +1414,6 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       .returning();
     scheduleLoreUpdate(deps, created!.id, c.get('userId'));
     return c.json(toPlotJson(created!), 201);
-  });
-
-  /**
-   * Importing a card creates the work it was always describing: the card becomes
-   * the first member and everything on it that belongs to a work rather than to a
-   * person — the situation, the openings, the narrator, the custom UI, the
-   * picture as the cover — is lifted onto the plot around it. Card files are
-   * user-controlled bytes, so every parse failure is a 400, never a 500.
-   */
-  app.post('/import', requireUser, admitImport(deps), async (c) => {
-    const { parsed, fileName, imported } = await readCardUpload(c);
-    const card = parsed.card;
-    const name = card.name.trim() || fileName.replace(/\.[^.]+$/, '') || 'Unnamed';
-    // The situation is the work's; the character's description stays on the
-    // member, which the prompt already reads it from — copying it here as well
-    // would tell the model the same thing twice.
-    const description = card.scenario.trim();
-    const greetings = introsOfGreetings([card.firstMes, ...card.alternateGreetings], MAX_INTROS_PER_PLOT);
-    const intros = greetings.intros;
-    // The member the card becomes: its display scripts are tagged as its own.
-    const memberId = randomUUID();
-    const customUi = customUiOfCard(card, memberId);
-    // What the reader meets first says what the work is written in; a card with
-    // no opening to read is judged by its description, and an undecided one
-    // keeps the column's default.
-    const language =
-      detectContentLanguage(intros[0] ?? '') ?? detectContentLanguage(card.description);
-
-    const [created] = await deps.db
-      .insert(plots)
-      .values({
-        ownerId: c.get('userId'),
-        name,
-        // Only the plot borrows the creator notes: the member keeps its card's own
-        // intro, or the public page would say the same thing twice.
-        intro: card.intro ?? introFromCreatorNotes(card.creatorNotes, language) ?? '',
-        description,
-        intros,
-        tags: normalizeTags(card.tags),
-        ...(card.narrator ? { narrator: card.narrator } : {}),
-        ...(Object.keys(customUi).length > 0 ? { customUi } : {}),
-        ...(language ? { language } : {}),
-      })
-      .returning();
-    let plot = created!;
-
-    // A new plot is private, so this records where the card came from and asks
-    // for nothing yet: the owner vouches for it when they publish.
-    let member = await insertMember(deps, plot.id, name, card, imported, memberId);
-    if (parsed.iconBuffer) {
-      member = await writeMemberAvatar(deps, member, parsed.iconBuffer);
-      plot = await writeImportedCover(deps, plot, parsed.iconBuffer);
-    }
-    const stored = parsed.assets?.length ? await storeImportedAssets(deps, plot.id, parsed.assets) : undefined;
-    if (stored) await recordEmotionImages(deps, member, stored.emotions);
-    const background = backgroundHtmlOf(card.extensions);
-    // After the card's own pictures, so they keep their slugs and the plot's room
-    // goes to them first: what the card loads from other hosts, brought in.
-    const localized = await localizeImport(deps, plot.id, { plot: true, modules: [] });
-    plot = (await deps.db.select().from(plots).where(eq(plots.id, plot.id)).limit(1))[0] ?? plot;
-
-    // What was left behind or cut, for the studio to say quietly.
-    const warnings = importWarnings({
-      ...assetWarnings(parsed.skipped, stored),
-      greetings_over_limit: greetings.overLimit,
-      greetings_cut: greetings.cut,
-      stylesheet_over_limit: creatorCssOverCap(card.extensions) ? 1 : 0,
-      background_over_limit:
-        background !== undefined && backgroundWithoutStyles(background).length > MAX_BACKGROUND_HTML_LENGTH ? 1 : 0,
-      ...localized.warnings,
-    });
-    scheduleLoreUpdate(deps, plot.id, c.get('userId'));
-    return c.json({ ...((await ownerView(deps, plot)) as object), importWarnings: warnings }, 201);
   });
 
   /**
@@ -1652,46 +1859,6 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     const member = await insertMember(deps, id, name, card);
     scheduleLoreUpdate(deps, id, c.get('userId'));
     return c.json(toMemberJson(plot, member), 201);
-  });
-
-  // Registered before `/:characterId`, which would otherwise swallow both.
-  app.post('/:id/characters/import', requireUser, admitImport(deps), async (c) => {
-    const id = requireUuidParam(c);
-    const plot = await loadOwnedPlot(deps, id, c.get('userId'));
-    const { parsed, fileName, imported } = await readCardUpload(c);
-    const name = parsed.card.name.trim() || fileName.replace(/\.[^.]+$/, '') || 'Unnamed';
-
-    // The work's narrator and openings stay its own. What the card dresses its
-    // own messages in comes along as its own (`liftCustomUi`), and so do its
-    // images, as the plot's, because `{{img::slug}}` resolves there, and its
-    // group-only greetings once there is a cast for them to greet
-    // (`addGroupGreetings`). Into a public plot it needs `rightsConfirmed`
-    // (`insertMember`).
-    let member = await insertMember(deps, id, name, parsed.card, imported);
-    if (parsed.iconBuffer) member = await writeMemberAvatar(deps, member, parsed.iconBuffer);
-    const stored = parsed.assets?.length ? await storeImportedAssets(deps, id, parsed.assets) : undefined;
-    if (stored) member = await recordEmotionImages(deps, member, stored.emotions);
-    const greetings = await addGroupGreetings(deps, id, parsed.card);
-    const variableConflicts = await liftCustomUi(deps, id, member);
-    // What the companion's lifted scripts, sheet and greetings load from other hosts —
-    // only those: the rest of the work is the studio's, brought in at its own import.
-    const localized = await localizeImport(deps, id, {
-      plot: true,
-      modules: [],
-      member: { id: member.id, introsFrom: plot.intros.length },
-    });
-    // The work keeps one background, so a companion's is never drawn and never missed.
-    const importWarningList = importWarnings({
-      ...assetWarnings(parsed.skipped, stored),
-      greetings_over_limit: greetings.overLimit,
-      greetings_cut: greetings.cut,
-      stylesheet_over_limit: creatorCssOverCap(parsed.card.extensions) ? 1 : 0,
-      ...localized.warnings,
-    });
-    scheduleLoreUpdate(deps, id, c.get('userId'));
-    // The default variables the work already had another value for, and what the
-    // import left behind, for the studio to say so.
-    return c.json({ ...toMemberJson(plot, member), variableConflicts, importWarnings: importWarningList }, 201);
   });
 
   /**
@@ -2166,105 +2333,6 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
 
   /* ------------------------------------------------------------ the modules */
 
-  /**
-   * A RisuAI module brought into the work — any file RisuAI's module import
-   * takes: a charx (its `.module.charx` export, or a character's), a `.risum`,
-   * the module's JSON, a lorebook or a regex export (`parseRisuModule`) — the
-   * creator's side of RisuAI's module list. RisuAI
-   * stacks a module on the chat rather than into the character, so this one is
-   * the work's: kept whole under an id of its own (`PlotModule`), every member's,
-   * and run after the cards' own wherever theirs run (§6 of ARCHITECTURE.md).
-   * Its pictures join the work's assets under the plot's cap, as a card's do
-   * (`storeImportedAssets`); its stylesheet and background, past the plot's caps,
-   * are left out as a card's are. A module carries no default variables, so
-   * there is nothing to merge into the work's. Unreadable is a 400, like a card.
-   */
-  app.post('/:id/modules', requireUser, admitImport(deps), async (c) => {
-    const id = requireUuidParam(c);
-    const owned = await loadOwnedPlot(deps, id, c.get('userId'));
-    let form: FormData;
-    try {
-      form = await c.req.formData();
-    } catch {
-      throw badRequest('invalid_request', 'Expected multipart/form-data with a file field');
-    }
-    const file = form.get('file');
-    if (!(file instanceof File)) throw badRequest('invalid_request', 'file field is required');
-    if (file.size > MAX_CARD_IMPORT_BYTES) {
-      throw new ApiError(413, 'payload_too_large', `A module file is at most ${MAX_CARD_IMPORT_BYTES} bytes`);
-    }
-    // Someone else's work shown to readers the moment it lands, as an imported
-    // member is: a public plot takes it only on the owner's word. Asked here
-    // before anything is stored, and again under the lock the write takes.
-    const rightsConfirmed = form.get('rightsConfirmed') === 'true';
-    if (owned.visibility === 'public' && !rightsConfirmed) throw rightsUnconfirmed();
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    let parsed: ReturnType<typeof parseRisuModule>;
-    try {
-      parsed = parseRisuModule(bytes);
-    } catch (error) {
-      if (error instanceof ModuleParseError) throw badRequest('invalid_module', error.message);
-      throw error;
-    }
-
-    // A module names no emotion pictures: its assets are only `additionalAssets`.
-    const stored = await storeImportedAssets(deps, id, parsed.assets);
-    const assets = stored.ids;
-    const module = plotModuleOf(parsed, {
-      id: randomUUID(),
-      name: (parsed.name || file.name.replace(/\.[^.]+$/, '').trim() || 'Module').slice(0, MAX_MODULE_NAME_LENGTH),
-      description: parsed.description.trim().slice(0, MAX_INTRO_LENGTH),
-      // Held to what any lorebook the work stores is held to.
-      lorebook: coerceLorebook(parsed.lorebook),
-      assets,
-      importedFrom: {
-        fileName: file.name.slice(0, MAX_IMPORT_FILE_NAME_LENGTH),
-        sha256: createHash('sha256').update(bytes).digest('hex'),
-        importedAt: new Date().toISOString(),
-      },
-    });
-    let plot: Plot;
-    try {
-      plot = await deps.db.transaction(async (tx) => {
-        const [locked] = await tx
-          .select({ customUi: plots.customUi, visibility: plots.visibility })
-          .from(plots)
-          .where(eq(plots.id, id))
-          .for('update');
-        // The same lock a publish takes, so the two cannot pass each other unasked.
-        const vouching = locked?.visibility === 'public';
-        if (vouching && !rightsConfirmed) throw rightsUnconfirmed();
-        const customUi = locked?.customUi ?? {};
-        const [row] = await tx
-          .update(plots)
-          .set({
-            customUi: { ...customUi, modules: [...(customUi.modules ?? []), module] },
-            updatedAt: new Date(),
-            ...(vouching ? { rightsConfirmedAt: new Date() } : {}),
-          })
-          .where(eq(plots.id, id))
-          .returning();
-        return row!;
-      });
-    } catch (error) {
-      // The pictures were stored ahead of the record that names them.
-      await deleteAssets(deps, id, assets);
-      throw error;
-    }
-    // What the module's stylesheet, background and scripts load from other hosts —
-    // stored as its own, so taking the module out takes them too.
-    const localized = await localizeImport(deps, id, { plot: false, modules: [module.id] });
-    plot = (await deps.db.select().from(plots).where(eq(plots.id, id)).limit(1))[0] ?? plot;
-    const warnings = importWarnings({
-      ...assetWarnings(undefined, stored),
-      ...localized.warnings,
-      ...(module.inert?.mcp !== undefined ? { module_mcp_inert: 1 } : {}),
-      ...(module.inert?.cjs ? { module_cjs_inert: 1 } : {}),
-    });
-    scheduleLoreUpdate(deps, id, c.get('userId'));
-    return c.json({ ...((await ownerView(deps, plot)) as object), importWarnings: warnings }, 201);
-  });
-
   /** Takes a module out of the work: its record, and the pictures it brought that are still there. */
   app.delete('/:id/modules/:moduleId', requireUser, async (c) => {
     const id = requireUuidParam(c);
@@ -2373,7 +2441,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
  * Beside the plot's own book rides what its always-on lore costs, as each
  * member's does (`toMemberJson`).
  */
-async function ownerView(deps: AppDeps, plot: Plot): Promise<unknown> {
+export async function ownerView(deps: AppDeps, plot: Plot): Promise<unknown> {
   const members = await loadMembers(deps.db, plot.id);
   return {
     ...toPlotJson(plot),

@@ -8,9 +8,10 @@ import {
   type CharxExportAsset,
 } from '../src/card/export.js';
 import { assetResolver } from '../src/cbs.js';
-import { MAX_ASSETS, MAX_ENTRY_BYTES, MAX_TOTAL_BYTES } from '../src/card/charx.js';
+import { collectAssets, MAX_ASSETS, MAX_READ_WHOLE_BYTES, MAX_TOTAL_BYTES } from '../src/card/charx.js';
 import { CardParseError, normalizeCard, parseDecorators } from '../src/card/normalize.js';
-import { parseCard } from '../src/card/parse.js';
+import { parseCard, readCard, readCardSource } from '../src/card/parse.js';
+import { ByteSourceError, bytesSource, type ByteSource } from '../src/card/source.js';
 import { risuLoreBookEntry } from '../src/card/risuModule.js';
 import { introFromCreatorNotes, MAX_INTRO_LENGTH } from '../src/card/intro.js';
 import {
@@ -19,6 +20,8 @@ import {
   placeholderPng,
   readPngTextChunks,
   stripPngTextChunks,
+  stripPngTextChunksStream,
+  PngUnwalkableError,
 } from '../src/card/png.js';
 import { activateLore } from '../src/lorebook.js';
 import { assemblePrompt } from '../src/prompt.js';
@@ -31,7 +34,7 @@ const encode = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.str
 const toBase64 = (value: unknown): string => Buffer.from(JSON.stringify(value), 'utf-8').toString('base64');
 
 describe('parseDecorators', () => {
-  it('reads the supported subset off the leading decorator block', () => {
+  it('reads the supported subset off the leading decorator block', async () => {
     expect(parseDecorators('@@depth 2\n@@role user\n@@constant\n본문')).toEqual({
       decorators: { depth: 2, role: 'user', constant: true },
       body: '본문',
@@ -46,7 +49,7 @@ describe('parseDecorators', () => {
     });
   });
 
-  it('strips unknown decorators, fallbacks, and malformed arguments without effect', () => {
+  it('strips unknown decorators, fallbacks, and malformed arguments without effect', async () => {
     expect(
       parseDecorators(
         '@@ignore_on_max_context\n@@@depth 2\n@@depth abc\n@@role narrator\n@@position\n@@scan_depth many\n@@exclude_keys  , \n@@additional_keys ,\n@@probability often\n본문',
@@ -54,7 +57,7 @@ describe('parseDecorators', () => {
     ).toEqual({ decorators: {}, body: '본문' });
   });
 
-  it('marks any @@position as the author’s placement, a slot it cannot place included', () => {
+  it('marks any @@position as the author’s placement, a slot it cannot place included', async () => {
     // A prompt template's slot, or one RisuAI reads and we do not, leaves the
     // entry where it would be — but its author placed it, so it stays put.
     expect(parseDecorators('@@position pt_PI\n본문').decorators).toEqual({ positioned: true });
@@ -78,7 +81,7 @@ describe('parseDecorators', () => {
     ]);
   });
 
-  it('reads the activation decorators onto their SillyTavern-shaped fields', () => {
+  it('reads the activation decorators onto their SillyTavern-shaped fields', async () => {
     expect(
       parseDecorators(
         '@@activate_only_after 3\n@@scan_depth 0\n@@keep_activate_after_match\n@@dont_activate_after_match\n@@exclude_keys 왕비, Queen \n본문',
@@ -93,7 +96,7 @@ describe('parseDecorators', () => {
     });
   });
 
-  it('collects every line of the key decorators, and reads the rest RisuAI applies', () => {
+  it('collects every line of the key decorators, and reads the rest RisuAI applies', async () => {
     expect(
       parseDecorators(
         '@@probability 30\n@@additional_keys 밤\n@@additional_keys 달, 새벽\n@@exclude_keys 왕비\n@@exclude_keys 시녀, 기사\n@@exclude_keys_all 비,눈\n@@exclude_keys_all 안개\n@@dont_activate\n@@activate\n본문',
@@ -115,7 +118,7 @@ describe('parseDecorators', () => {
     expect(parseDecorators('@@activate\n@@dont_activate\n본문').decorators).toEqual({ force: 'deactivate' });
   });
 
-  it('turns @@exclude_keys into NOT_ANY secondary keys, only where there is room for them', () => {
+  it('turns @@exclude_keys into NOT_ANY secondary keys, only where there is room for them', async () => {
     const entry = (content: string, overrides: Record<string, unknown> = {}) =>
       parseCard({
         ...v3Card,
@@ -138,7 +141,7 @@ describe('parseDecorators', () => {
     expect(entry('@@exclude_keys 왕비\n본문', { secondary_keys: ['밤'] }).secondaryKeys).toEqual(['왕비']);
   });
 
-  it('ignores @@depth when a position decorator is present, per spec', () => {
+  it('ignores @@depth when a position decorator is present, per spec', async () => {
     const { card } = parseCard({
       ...v3Card,
       data: {
@@ -155,14 +158,14 @@ describe('parseDecorators', () => {
     expect(card.lorebook[0]!.position).toBe('after_char');
   });
 
-  it('only treats the leading lines as decorators', () => {
+  it('only treats the leading lines as decorators', async () => {
     expect(parseDecorators('본문\n@@depth 2')).toEqual({ decorators: {}, body: '본문\n@@depth 2' });
     expect(parseDecorators('').body).toBe('');
   });
 });
 
 describe('parseCard - JSON', () => {
-  it('maps a V1 card', () => {
+  it('maps a V1 card', async () => {
     const { card } = parseCard(v1Card);
     expect(card.spec).toBe('v1');
     expect(card.name).toBe('아리아');
@@ -179,7 +182,7 @@ describe('parseCard - JSON', () => {
     expect(card.raw).toBe(v1Card);
   });
 
-  it('maps a V2 card including the character book', () => {
+  it('maps a V2 card including the character book', async () => {
     const { card } = parseCard(v2Card);
     expect(card.spec).toBe('v2');
     expect(card.name).toBe('리안');
@@ -206,7 +209,7 @@ describe('parseCard - JSON', () => {
     ]);
   });
 
-  it('maps a V3 card, keeps use_regex, and parses the lorebook decorator subset', () => {
+  it('maps a V3 card, keeps use_regex, and parses the lorebook decorator subset', async () => {
     const { card } = parseCard(v3Card);
     expect(card.spec).toBe('v3');
     expect(card.nickname).toBe('세이 님');
@@ -244,7 +247,7 @@ describe('parseCard - JSON', () => {
     expect(card.lorebook[1]!.delay).toBe(2);
   });
 
-  it('keeps the decorators of the source card in raw', () => {
+  it('keeps the decorators of the source card in raw', async () => {
     const { card } = parseCard(v3Card);
     expect(card.raw).toBe(v3Card);
     const rawEntry = (card.raw as typeof v3Card).data.character_book.entries[0]!;
@@ -252,36 +255,37 @@ describe('parseCard - JSON', () => {
     expect(card.lorebook[0]!.content).not.toContain('@@');
   });
 
-  it('accepts a JSON string and raw JSON bytes', () => {
+  it('accepts a JSON string and raw JSON bytes', async () => {
     expect(parseCard(JSON.stringify(v2Card)).card.name).toBe('리안');
-    expect(parseCard(encode(v2Card)).card.name).toBe('리안');
+    expect((await readCard(encode(v2Card))).card.name).toBe('리안');
   });
 
-  it('rejects unrecognized payloads', () => {
+  it('rejects unrecognized payloads', async () => {
     expect(() => parseCard({ hello: 'world' })).toThrow(CardParseError);
-    expect(() => parseCard(new Uint8Array([1, 2, 3, 4]))).toThrow(CardParseError);
+    await expect(readCard(new Uint8Array([1, 2, 3, 4]))).rejects.toThrow(CardParseError);
   });
 });
 
 describe('parseCard - PNG', () => {
-  it('round-trips a card embedded in a chara tEXt chunk', () => {
+  it('round-trips a card embedded in a chara tEXt chunk', async () => {
     const png = buildPngWithTextChunks({ chara: toBase64(v2Card) });
-    const { card, iconBuffer } = parseCard(png);
+    const { card, iconBuffer } = (await readCard(png));
     expect(card.name).toBe('리안');
     expect(card.lorebook).toHaveLength(1);
-    expect(iconBuffer).toBe(png);
+    // The picture, without the text chunks that carry the card.
+    expect(iconBuffer).toEqual(stripPngTextChunks(png));
   });
 
-  it('prefers the ccv3 chunk over chara', () => {
+  it('prefers the ccv3 chunk over chara', async () => {
     const png = buildPngWithTextChunks({ chara: toBase64(v2Card), ccv3: toBase64(v3Card) });
-    const { card } = parseCard(png);
+    const { card } = (await readCard(png));
     expect(card.spec).toBe('v3');
     expect(card.name).toBe('세이');
   });
 
-  it('fails when no card chunk is present', () => {
+  it('fails when no card chunk is present', async () => {
     const png = buildPngWithTextChunks({ Comment: 'no card here' });
-    expect(() => parseCard(png)).toThrow(CardParseError);
+    await expect(readCard(png)).rejects.toThrow(CardParseError);
   });
 });
 
@@ -297,7 +301,7 @@ describe('parseCard - PNG assets', () => {
   const mp3 = (n: number) => Uint8Array.from([...Buffer.from('ID3'), 4, 0, n]);
   const mp4 = (n: number) => Uint8Array.from([0, 0, 0, 0x18, ...Buffer.from('ftypisom'), n]);
 
-  it("returns a V3 card's chara-ext-asset pictures, music and video, in card order", () => {
+  it("returns a V3 card's chara-ext-asset pictures, music and video, in card order", async () => {
     const smile = pic(10);
     const background = webp(20);
     const theme = mp3(40);
@@ -324,11 +328,11 @@ describe('parseCard - PNG assets', () => {
       ]),
     });
 
-    const { card, iconBuffer, assets, skipped } = parseCard(png);
+    const { card, iconBuffer, assets, skipped } = (await readCard(png));
     expect(card.name).toBe('세이');
-    // The PNG is still the avatar; external uris are left alone, and a nameless
-    // asset is named after its index.
-    expect(iconBuffer).toBe(png);
+    // The PNG's picture is still the avatar; external uris are left alone, and a
+    // nameless asset is named after its index.
+    expect(iconBuffer).toEqual(stripPngTextChunks(png));
     // The emotions say so, for the import to record them as the card's.
     expect(assets).toEqual([
       { name: 'smile', bytes: smile, emotion: true },
@@ -341,7 +345,7 @@ describe('parseCard - PNG assets', () => {
     expect(skipped).toEqual({ unsupported: 1, missing: 1, overBudget: 0 });
   });
 
-  it("goes by the bytes, not a declared ext of 'unknown' (RisuAI's re-encoded emotions)", () => {
+  it("goes by the bytes, not a declared ext of 'unknown' (RisuAI's re-encoded emotions)", async () => {
     const joy = pic(1);
     const anger = pic(2);
     const png = buildPngWithTextChunks({
@@ -357,7 +361,7 @@ describe('parseCard - PNG assets', () => {
       ]),
     });
 
-    const { assets, skipped } = parseCard(png);
+    const { assets, skipped } = (await readCard(png));
     expect(assets).toEqual([
       { name: 'joy', bytes: joy, emotion: true },
       { name: 'anger', bytes: anger, emotion: true },
@@ -365,7 +369,7 @@ describe('parseCard - PNG assets', () => {
     expect(skipped).toEqual({ unsupported: 1, missing: 0, overBudget: 0 });
   });
 
-  it("reads a V2 card's emotions and additional assets", () => {
+  it("reads a V2 card's emotions and additional assets", async () => {
     const happy = pic(1);
     const map = pic(2);
     const old = pic(4);
@@ -393,35 +397,35 @@ describe('parseCard - PNG assets', () => {
       }),
     });
 
-    expect(parseCard(png).assets).toEqual([
+    expect((await readCard(png)).assets).toEqual([
       { name: 'happy', bytes: happy, emotion: true },
       { name: 'map.png', bytes: map },
       { name: 'old', bytes: old },
     ]);
   });
 
-  it(`stops at ${MAX_ASSETS} assets`, () => {
+  it(`stops at ${MAX_ASSETS} assets`, async () => {
     const chunks: Record<string, string> = {};
     const declared: unknown[] = [];
     for (let i = 0; i < MAX_ASSETS + 10; i += 1) {
       chunks[`chara-ext-asset_:${i}`] = base64(pic(i & 0xff));
       declared.push({ type: 'emotion', name: `e${i}`, uri: `__asset:${i}`, ext: 'png' });
     }
-    const { assets, skipped } = parseCard(buildPngWithTextChunks({ ...chunks, ccv3: v3WithAssets(declared) }));
+    const { assets, skipped } = (await readCard(buildPngWithTextChunks({ ...chunks, ccv3: v3WithAssets(declared) })));
 
     expect(assets).toHaveLength(MAX_ASSETS);
     expect(assets!.at(-1)!.name).toBe(`e${MAX_ASSETS - 1}`);
     expect(skipped).toEqual({ unsupported: 0, missing: 0, overBudget: 10 });
   });
 
-  it('stops at an asset over the per-entry cap instead of failing the import', () => {
+  it('takes an asset past what is read whole, since assets are streamed', async () => {
     const early = pic(7);
+    // A PNG's signature, then a few megabytes past the read-whole cap.
+    const huge = new Uint8Array(MAX_READ_WHOLE_BYTES + 3 * 1024 * 1024);
+    huge.set(pic(0));
     const png = buildPngWithTextChunks({
       'chara-ext-asset_:1': base64(early),
-      // A PNG's signature, then base64 for a megabyte over the per-entry cap:
-      // sniffed from its first characters, refused from its length, never decoded.
-      'chara-ext-asset_:2':
-        base64(pic(0)).slice(0, 8) + 'A'.repeat(Math.ceil(((MAX_ENTRY_BYTES + 1024 * 1024) * 4) / 3)),
+      'chara-ext-asset_:2': base64(huge),
       'chara-ext-asset_:3': base64(pic(8)),
       ccv3: v3WithAssets([
         { type: 'emotion', name: 'early', uri: '__asset:1', ext: 'png' },
@@ -430,16 +434,21 @@ describe('parseCard - PNG assets', () => {
       ]),
     });
 
-    const { card, assets, skipped } = parseCard(png);
+    const { card, assets, skipped } = await readCard(png);
     expect(card.name).toBe('세이');
-    expect(assets).toEqual([{ name: 'early', bytes: early, emotion: true }]);
-    // The rest after the offender is not read, only counted.
-    expect(skipped).toEqual({ unsupported: 0, missing: 0, overBudget: 2 });
+    expect(assets!.map((asset) => [asset.name, asset.bytes.length])).toEqual([
+      ['early', early.length],
+      ['huge', huge.length],
+      ['late', pic(8).length],
+    ]);
+    // Compared as buffers: an element-wise diff of 100MB would not fit the heap.
+    expect(Buffer.from(assets![1]!.bytes).equals(huge)).toBe(true);
+    expect(skipped).toBeUndefined();
   });
 });
 
 describe('stripPngTextChunks', () => {
-  it('drops every text chunk and leaves the image bytes untouched', () => {
+  it('drops every text chunk and leaves the image bytes untouched', async () => {
     const bare = buildPngWithTextChunks({});
     const carded = buildPngWithTextChunks({ chara: toBase64(v2Card), Comment: '설명' });
 
@@ -449,15 +458,38 @@ describe('stripPngTextChunks', () => {
     expect(stripped).toEqual(bare);
     expect(readPngTextChunks(stripped).size).toBe(0);
     // The card is gone for good: the stripped bytes no longer parse as a card.
-    expect(() => parseCard(stripped)).toThrow(CardParseError);
+    await expect(readCard(stripped)).rejects.toThrow(CardParseError);
     // Idempotent.
     expect(stripPngTextChunks(stripped)).toEqual(stripped);
   });
 
-  it('refuses bytes it cannot walk', () => {
+  it('refuses bytes it cannot walk', async () => {
     const png = buildPngWithTextChunks({ chara: toBase64(v2Card) });
     expect(stripPngTextChunks(png.subarray(0, png.length - 6))).toBeNull();
     expect(stripPngTextChunks(new Uint8Array([1, 2, 3, 4]))).toBeNull();
+  });
+
+  /** Bytes in pieces of `size`, as a store's stream hands them over. */
+  async function* pieces(bytes: Uint8Array, size: number): AsyncGenerator<Uint8Array> {
+    for (let at = 0; at < bytes.length; at += size) yield bytes.subarray(at, at + size);
+  }
+  const streamed = async (bytes: Uint8Array, size: number): Promise<Uint8Array> => {
+    const parts: Uint8Array[] = [];
+    for await (const part of stripPngTextChunksStream(pieces(bytes, size))) parts.push(part);
+    return Uint8Array.from(Buffer.concat(parts));
+  };
+
+  it('strips the same over a stream, whatever the pieces', async () => {
+    const carded = buildPngWithTextChunks({ chara: toBase64(v2Card), Comment: '설명' });
+    for (const size of [1, 7, 64, carded.length]) {
+      expect(await streamed(carded, size)).toEqual(stripPngTextChunks(carded));
+    }
+  });
+
+  it('refuses over a stream what it cannot walk', async () => {
+    const png = buildPngWithTextChunks({ chara: toBase64(v2Card) });
+    await expect(streamed(png.subarray(0, png.length - 6), 5)).rejects.toThrow(PngUnwalkableError);
+    await expect(streamed(new Uint8Array([1, 2, 3, 4]), 2)).rejects.toThrow(PngUnwalkableError);
   });
 });
 
@@ -470,23 +502,23 @@ describe('parseCard - charx', () => {
       'assets/icon/main.png': iconBytes,
     });
 
-  it('reads card.json and the main icon asset', () => {
+  it('reads card.json and the main icon asset', async () => {
     const charx = buildCharx([
       { type: 'icon', name: 'main', uri: 'embeded://assets/icon/main.png', ext: 'png' },
       { type: 'background', name: 'bg', uri: 'embeded://assets/other/bg.png', ext: 'png' },
     ]);
-    const { card, iconBuffer } = parseCard(charx);
+    const { card, iconBuffer } = (await readCard(charx));
     expect(card.name).toBe('세이');
     expect(card.lorebook[0]!.content).toBe('세이의 검은 이가 빠져 있다.');
     expect(iconBuffer).toEqual(iconBytes);
   });
 
-  it('returns no icon when the card has no main icon asset', () => {
-    const { iconBuffer } = parseCard(buildCharx([]));
+  it('returns no icon when the card has no main icon asset', async () => {
+    const { iconBuffer } = (await readCard(buildCharx([])));
     expect(iconBuffer).toBeUndefined();
   });
 
-  it('extracts the embedded images beside the icon, in card order', () => {
+  it('extracts the embedded images beside the icon, in card order', async () => {
     const smile = Uint8Array.from([10, 11]);
     const background = Uint8Array.from([20, 21]);
     const nameless = Uint8Array.from([30, 31]);
@@ -520,7 +552,7 @@ describe('parseCard - charx', () => {
       'assets/other/video/intro.mp4': Uint8Array.from([60, 61]),
     });
 
-    const { iconBuffer, assets, skipped } = parseCard(zip);
+    const { iconBuffer, assets, skipped } = (await readCard(zip));
     expect(iconBuffer).toEqual(iconBytes);
     // Files that are neither pictures nor music and external uris are left alone;
     // a nameless asset falls back to its file name.
@@ -536,21 +568,21 @@ describe('parseCard - charx', () => {
     expect(skipped).toEqual({ unsupported: 1, missing: 1, overBudget: 0 });
   });
 
-  it(`stops at ${MAX_ASSETS} assets`, () => {
+  it(`stops at ${MAX_ASSETS} assets`, async () => {
     const files: Record<string, Uint8Array> = { 'assets/icon/main.png': iconBytes };
     const declared = [{ type: 'icon', name: 'main', uri: 'embeded://assets/icon/main.png', ext: 'png' }];
     for (let i = 0; i < MAX_ASSETS + 10; i += 1) {
       files[`assets/emotion/e${i}.png`] = Uint8Array.from([i]);
       declared.push({ type: 'emotion', name: `e${i}`, uri: `embeded://assets/emotion/e${i}.png`, ext: 'png' });
     }
-    const { assets, skipped } = parseCard(zipSync({ 'card.json': cardWithAssets(declared), ...files }));
+    const { assets, skipped } = (await readCard(zipSync({ 'card.json': cardWithAssets(declared), ...files })));
 
     expect(assets).toHaveLength(MAX_ASSETS);
     expect(assets!.at(-1)!.name).toBe(`e${MAX_ASSETS - 1}`);
     expect(skipped).toEqual({ unsupported: 0, missing: 0, overBudget: 10 });
   });
 
-  it('stops the asset pass at an oversized extra asset instead of failing the import', () => {
+  it('takes an extra asset past what is read whole, since assets are streamed', async () => {
     const early = Uint8Array.from([7, 7]);
     const late = Uint8Array.from([8, 8]);
     const zip = zipSync({
@@ -564,16 +596,16 @@ describe('parseCard - charx', () => {
       'assets/emotion/late.png': late,
     });
 
-    const { card, assets, skipped } = parseCard(zip);
-    // The card still imports — only card.json and the icon fail hard on the cap.
+    const { card, assets, skipped } = await readCard(zip);
+    // Only card.json and the icon fail hard on the read-whole cap; an asset is
+    // never held, so only the archive's budget bounds it.
     expect(card.name).toBe('세이');
-    // Reading stops at the offender rather than paying to inflate past it, so
-    // what was declared before it survives and what comes after does not.
-    expect(assets).toEqual([{ name: 'early', bytes: early, emotion: true }]);
-    expect(skipped).toEqual({ unsupported: 0, missing: 0, overBudget: 2 });
+    expect(assets!.map((asset) => asset.name)).toEqual(['early', 'huge', 'late']);
+    expect(Buffer.from(assets![1]!.bytes).equals(oversizedAsset())).toBe(true);
+    expect(skipped).toBeUndefined();
   });
 
-  it('shares one inflate budget between the icon and the assets', () => {
+  it('shares one inflate budget between the icon and the assets', async () => {
     // 19MB entries: each under the per-entry cap, one more than the archive
     // budget holds. Per-pass budgets would let all of them through.
     const big = new Uint8Array(19 * 1024 * 1024);
@@ -588,17 +620,17 @@ describe('parseCard - charx', () => {
       files[`assets/b${i}.png`] = [big, { level: 0 }];
     }
 
-    const { iconBuffer, assets } = parseCard(
+    const { iconBuffer, assets } = (await readCard(
       zipSync({ 'card.json': cardWithAssets(declared), ...files }),
-    );
+    ));
     // The icon is read in the same pass and comes first in the archive.
     expect(iconBuffer).toEqual(iconBytes);
     // `fit` of them fit; the next crosses the budget and ends the pass.
     expect(assets!.map((asset) => asset.name)).toEqual(Array.from({ length: fit }, (_, i) => `b${i}`));
   });
 
-  it('fails when card.json is missing', () => {
-    expect(() => parseCard(zipSync({ 'other.json': encode({}) }))).toThrow(CardParseError);
+  it('fails when card.json is missing', async () => {
+    await expect(readCard(zipSync({ 'other.json': encode({}) }))).rejects.toThrow(CardParseError);
   });
 
   const patterned = (size: number): Uint8Array => {
@@ -607,9 +639,9 @@ describe('parseCard - charx', () => {
     return bytes;
   };
 
-  // Above readCharx's per-entry cap. Built once and reused as zip input.
+  // Above what a charx reads whole. Built once and reused as zip input.
   let oversized: Uint8Array | undefined;
-  const oversizedAsset = (): Uint8Array => (oversized ??= patterned(MAX_ENTRY_BYTES + 4 * 1024 * 1024));
+  const oversizedAsset = (): Uint8Array => (oversized ??= patterned(MAX_READ_WHOLE_BYTES + 4 * 1024 * 1024));
 
   const cardWithAssets = (assets: unknown): Uint8Array =>
     encode({ ...v3Card, data: { ...v3Card.data, assets } });
@@ -663,7 +695,7 @@ describe('parseCard - charx', () => {
     return concat(...locals, directory, end);
   };
 
-  it('never inflates assets other than card.json and the main icon', () => {
+  it('never inflates assets other than card.json and the main icon', async () => {
     const zip = zipSync({
       'card.json': cardWithAssets([
         { type: 'icon', name: 'main', uri: 'embeded://assets/icon/main.png', ext: 'png' },
@@ -678,23 +710,23 @@ describe('parseCard - charx', () => {
     zip[at] ^= 0xff;
     expect(() => unzipSync(zip)).toThrow();
 
-    const { card, iconBuffer } = parseCard(zip);
+    const { card, iconBuffer } = (await readCard(zip));
     expect(card.name).toBe('세이');
     expect(iconBuffer).toEqual(iconBytes);
   });
 
-  it('rejects a main icon larger than the per-entry size cap', () => {
+  it('rejects a main icon larger than what is read whole', async () => {
     const zip = zipSync({
       'card.json': cardWithAssets([
         { type: 'icon', name: 'main', uri: 'embeded://assets/huge.bin', ext: 'png' },
       ]),
       'assets/huge.bin': oversizedAsset(),
     });
-    expect(() => parseCard(zip)).toThrow(CardParseError);
-    expect(() => parseCard(zip)).toThrow(`${MAX_ENTRY_BYTES / (1024 * 1024)}MB limit`);
+    await expect(readCard(zip)).rejects.toThrow(CardParseError);
+    await expect(readCard(zip)).rejects.toThrow(`${MAX_READ_WHOLE_BYTES / (1024 * 1024)}MB limit`);
   });
 
-  it('caps on emitted bytes, not on the sizes declared in the zip headers', () => {
+  it('caps on emitted bytes, not on the sizes declared in the zip headers', async () => {
     // The declared uncompressed size is attacker-controlled. Understate it and a
     // cap that trusts the headers waves through an entry that really inflates past it.
     const zip = zipSync({ 'card.json': oversizedAsset() });
@@ -702,11 +734,11 @@ describe('parseCard - charx', () => {
     view.setUint32(22, 1024, true); // local file header: uncompressed size
     view.setUint32(centralDirOffset(zip) + 24, 1024, true); // central directory: uncompressed size
 
-    expect(() => parseCard(zip)).toThrow(CardParseError);
-    expect(() => parseCard(zip)).toThrow(`${MAX_ENTRY_BYTES / (1024 * 1024)}MB limit`);
+    await expect(readCard(zip)).rejects.toThrow(CardParseError);
+    await expect(readCard(zip)).rejects.toThrow(`${MAX_READ_WHOLE_BYTES / (1024 * 1024)}MB limit`);
   });
 
-  it('inflates only the first entry when a name is duplicated', () => {
+  it('inflates only the first entry when a name is duplicated', async () => {
     // Five records share the name card.json: a small valid card, then four 10MB
     // decoys. Each decoy is individually under the cap, so a reader that inflates
     // every match decompresses 40MB and ends up with a decoy instead of the card.
@@ -718,7 +750,7 @@ describe('parseCard - charx', () => {
     // The archive is well-formed: a reader that walks every entry sees all five.
     expect(unzipSync(duplicated)['card.json']).toHaveLength(decoySize);
 
-    const { card } = parseCard(duplicated);
+    const { card } = (await readCard(duplicated));
     expect(card.name).toBe('세이');
   });
 
@@ -749,8 +781,8 @@ describe('parseCard - charx', () => {
         'card.json': cardWithRisu(risuai),
       });
 
-    it('puts the scripts the export moved into the module back on the card', () => {
-      const { card, iconBuffer } = parseCard(risuCharx(moduleFile));
+    it('puts the scripts the export moved into the module back on the card', async () => {
+      const { card, iconBuffer } = (await readCard(risuCharx(moduleFile)));
 
       expect(iconBuffer).toEqual(iconBytes);
       expect(card.displayScripts).toEqual([
@@ -763,7 +795,7 @@ describe('parseCard - charx', () => {
       });
     });
 
-    it("takes the module's lorebook over the card's book, keeping the book's settings", () => {
+    it("takes the module's lorebook over the card's book, keeping the book's settings", async () => {
       const lorebook = [
         { key: '비, 우산', secondkey: '', insertorder: 5, comment: '비', content: '비가 내린다.', mode: 'normal', alwaysActive: false, selective: false },
       ];
@@ -772,31 +804,31 @@ describe('parseCard - charx', () => {
         type: 'risuModule',
       });
       // An unreadable module: the card as card.json alone has it.
-      const alone = parseCard(risuCharx(Uint8Array.from([1, 2, 3]))).card;
+      const alone = (await readCard(risuCharx(Uint8Array.from([1, 2, 3])))).card;
       expect(alone.lorebook).toHaveLength(2);
 
-      const { card } = parseCard(risuCharx(withLore));
+      const { card } = (await readCard(risuCharx(withLore)));
       // Read as a module import reads the same entries.
       expect(card.lorebook).toEqual(lorebook.map(risuLoreBookEntry));
       expect(card.lorebook[0]).toMatchObject({ keys: ['비', '우산'], content: '비가 내린다.', insertionOrder: 5 });
       expect(card.loreSettings).toEqual(alone.loreSettings);
       // RisuAI's `if(md.lorebook)` takes an empty one too: the card's entries go.
-      expect(parseCard(risuCharx(moduleFile)).card.lorebook).toEqual([]);
+      expect((await readCard(risuCharx(moduleFile))).card.lorebook).toEqual([]);
       // A module without one leaves the card's.
       const noLore = buildRisum({ module: { name: 'm', description: '', id: 'id', regex: scripts }, type: 'risuModule' });
-      expect(parseCard(risuCharx(noLore)).card.lorebook).toEqual(alone.lorebook);
+      expect((await readCard(risuCharx(noLore))).card.lorebook).toEqual(alone.lorebook);
     });
 
-    it("takes the module's lists over the ones card.json carries, as RisuAI's charx import does", () => {
+    it("takes the module's lists over the ones card.json carries, as RisuAI's charx import does", async () => {
       const own = [{ comment: '', in: 'own', out: 'mine', type: 'editdisplay', ableFlag: false, flag: '' }];
       const ownTriggers = [{ comment: 'own', type: 'manual', conditions: [], effect: [] }];
-      const { card } = parseCard(risuCharx(moduleFile, { customScripts: own, triggerscript: ownTriggers }));
+      const { card } = (await readCard(risuCharx(moduleFile, { customScripts: own, triggerscript: ownTriggers })));
 
       expect(card.extensions['risuai']).toEqual({ customScripts: scripts, triggerscript: triggers });
       expect(card.displayScripts!.map((script) => script.in)).toEqual(['\\*\\*(.+?)\\*\\*']);
       // A list the module does not have is an empty one, whatever card.json says.
       const regexOnly = buildRisum({ module: { name: 'm', description: '', id: 'id', regex: [] }, type: 'risuModule' });
-      const bare = parseCard(risuCharx(regexOnly, { customScripts: own, triggerscript: ownTriggers })).card;
+      const bare = (await readCard(risuCharx(regexOnly, { customScripts: own, triggerscript: ownTriggers }))).card;
       expect(bare.extensions['risuai']).toEqual({ customScripts: [], triggerscript: [] });
       expect(bare.displayScripts).toBeUndefined();
     });
@@ -811,23 +843,83 @@ describe('parseCard - charx', () => {
       return out;
     };
 
-    it('imports without a module that cannot be read', () => {
+    it('imports without a module that cannot be read', async () => {
       const corrupt = corruptEntry(risuCharx(moduleFile), 'module.risum');
       expect(() => unzipSync(corrupt)).toThrow();
 
       const unreadable = [
         risuCharx(Uint8Array.from([1, 2, 3])),
         corrupt,
-        // Over the per-entry cap, and ahead of card.json as RisuAI writes it.
+        // Over what is read whole, and ahead of card.json as RisuAI writes it.
         risuCharx(oversizedAsset()),
       ];
       for (const zip of unreadable) {
-        const { card, iconBuffer } = parseCard(zip);
+        const { card, iconBuffer } = (await readCard(zip));
         expect(card.name).toBe('세이');
         expect(iconBuffer).toEqual(iconBytes);
         expect(card.displayScripts).toBeUndefined();
         expect(card.extensions['risuai']).toEqual({ bias: [] });
       }
+    });
+  });
+
+  describe('read from a source', () => {
+    /** A source over bytes that counts what is read from it, and fails the reads that `fail` says to. */
+    const watched = (bytes: Uint8Array, fail: (offset: number, length: number) => boolean = () => false) => {
+      const inner = bytesSource(bytes);
+      const seen = { bytes: 0 };
+      const check = (offset: number, length: number): void => {
+        if (fail(offset, length)) throw new ByteSourceError('the store is down');
+      };
+      const source: ByteSource = {
+        size: inner.size,
+        async read(offset, length) {
+          check(offset, length);
+          const part = await inner.read(offset, length);
+          seen.bytes += part.length;
+          return part;
+        },
+        async *stream(offset, length) {
+          check(offset, length);
+          for await (const chunk of inner.stream(offset, length)) {
+            seen.bytes += chunk.length;
+            yield chunk;
+          }
+        },
+      };
+      return { source, seen };
+    };
+
+    it('reads the card and its icon, and none of an asset until it is opened', async () => {
+      const big = patterned(8 * 1024 * 1024);
+      const zip = zipSync({
+        'card.json': cardWithAssets([
+          { type: 'icon', name: 'main', uri: 'embeded://assets/icon/main.png', ext: 'png' },
+          { type: 'emotion', name: 'big', uri: 'embeded://assets/big.png', ext: 'png' },
+        ]),
+        'assets/icon/main.png': iconBytes,
+        'assets/big.png': [big, { level: 0 }],
+      });
+      const { source, seen } = watched(zip);
+
+      const parsed = await readCardSource(source);
+      expect(parsed.iconBuffer).toEqual(iconBytes);
+      expect(parsed.assets.map((asset) => asset.name)).toEqual(['big']);
+      expect(seen.bytes).toBeLessThan(256 * 1024);
+
+      const { assets } = await collectAssets(parsed.assets, { spent: parsed.spent });
+      expect(Buffer.from(assets[0]!.bytes).equals(big)).toBe(true);
+      expect(seen.bytes).toBeGreaterThan(big.length);
+    });
+
+    it("lets a store failure through where a part's own failure would be passed over", async () => {
+      const moduleFile = buildRisum({ module: { name: 'm', description: '', id: 'id', regex: [] }, type: 'risuModule' });
+      const zip = zipSync({ 'module.risum': moduleFile, 'card.json': cardWithAssets([]) });
+      const at = Buffer.from(zip).indexOf(Buffer.from('module.risum'));
+      // The reads of the module entry — its local header, 30 bytes ahead of its
+      // name, and its data after it — fail as an unreachable store would.
+      const { source } = watched(zip, (offset) => offset >= at - 30 && offset <= at + 'module.risum'.length);
+      await expect(readCardSource(source)).rejects.toBeInstanceOf(ByteSourceError);
     });
   });
 
@@ -838,26 +930,26 @@ describe('parseCard - charx', () => {
       0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x08, 0x00, 0xff, 0xd9,
     ]);
 
-    it('reads the archive behind the picture, icon from the archive', () => {
+    it('reads the archive behind the picture, icon from the archive', async () => {
       const charx = zipSync({
         'assets/icon/image/main.png': iconBytes,
         'card.json': cardWithAssets([
           { type: 'icon', name: 'main', uri: 'embeded://assets/icon/image/main.png', ext: 'png' },
         ]),
       });
-      const { card, iconBuffer } = parseCard(concat(picture, charx));
+      const { card, iconBuffer } = (await readCard(concat(picture, charx)));
       expect(card.name).toBe('세이');
       expect(iconBuffer).toEqual(iconBytes);
     });
 
-    it('rejects a JPEG that carries no archive', () => {
-      expect(() => parseCard(picture)).toThrow(CardParseError);
+    it('rejects a JPEG that carries no archive', async () => {
+      await expect(readCard(picture)).rejects.toThrow(CardParseError);
     });
   });
 });
 
 describe('exportCardV3', () => {
-  it('exports V3 JSON that re-normalizes to the same card', () => {
+  it('exports V3 JSON that re-normalizes to the same card', async () => {
     const { card } = parseCard(v2Card);
     const exported = exportCardV3(card);
     expect(exported.spec).toBe('chara_card_v3');
@@ -872,7 +964,7 @@ describe('exportCardV3', () => {
     expect(reparsed.alternateGreetings).toEqual(card.alternateGreetings);
   });
 
-  it('re-emits depth/role as decorators so they survive the round-trip', () => {
+  it('re-emits depth/role as decorators so they survive the round-trip', async () => {
     const { card } = parseCard(v3Card);
     const exported = exportCardV3(card);
     expect(exported.data.character_book!.entries[0]!.content).toBe(
@@ -885,7 +977,7 @@ describe('exportCardV3', () => {
     expect(reparsed.loreSettings).toEqual(card.loreSettings);
   });
 
-  it("keeps an entry's label through the round trip, out of the prompt", () => {
+  it("keeps an entry's label through the round trip, out of the prompt", async () => {
     const entry = (fields: Record<string, unknown>) => ({
       keys: [''],
       content: '호그와트의 규칙.',
@@ -926,7 +1018,7 @@ describe('exportCardV3', () => {
     expect(system).not.toContain('글노덮');
   });
 
-  it('writes a token budget only where the card has one of its own', () => {
+  it('writes a token budget only where the card has one of its own', async () => {
     // The V3 fixture's book names none, so it reads (and stays) automatic.
     const automatic = parseCard(v3Card).card;
     expect(automatic.loreSettings.tokenBudget).toBeUndefined();
@@ -942,7 +1034,7 @@ describe('the intro round trip', () => {
   const exportedExtensions = (input: typeof card): Record<string, Record<string, unknown>> =>
     exportCardV3(input).data.extensions as Record<string, Record<string, unknown>>;
 
-  it('exports the intro under our own namespace and imports it back', () => {
+  it('exports the intro under our own namespace and imports it back', async () => {
     const introduced = { ...card, intro: '5년 만에 돌아온 소꿉친구.' };
     const extensions = exportedExtensions(introduced);
     expect(extensions['shizue']?.['intro']).toBe('5년 만에 돌아온 소꿉친구.');
@@ -952,13 +1044,13 @@ describe('the intro round trip', () => {
     expect(normalizeCard(exportCardV3(introduced)).intro).toBe(introduced.intro);
   });
 
-  it('leaves a card that has no intro without the field, or the namespace', () => {
+  it('leaves a card that has no intro without the field, or the namespace', async () => {
     expect(card.intro).toBeUndefined();
     expect(exportedExtensions(card)['shizue']).toBeUndefined();
     expect(normalizeCard(exportCardV3(card)).intro).toBeUndefined();
   });
 
-  it('takes the key back out once the creator clears the intro', () => {
+  it('takes the key back out once the creator clears the intro', async () => {
     const cleared = normalizeCard(exportCardV3({ ...card, intro: '한 줄.' }));
     expect(cleared.intro).toBe('한 줄.');
     delete cleared.intro;
@@ -966,7 +1058,7 @@ describe('the intro round trip', () => {
     expect(normalizeCard(exportCardV3(cleared)).intro).toBeUndefined();
   });
 
-  it('shares the namespace with the narrator rather than replacing it', () => {
+  it('shares the namespace with the narrator rather than replacing it', async () => {
     const both = { ...card, intro: '한 줄.', narrator: { pov: 'third' as const } };
     expect(exportedExtensions(both)['shizue']).toEqual({
       intro: '한 줄.',
@@ -977,7 +1069,7 @@ describe('the intro round trip', () => {
     expect(reparsed.narrator).toEqual({ pov: 'third' });
   });
 
-  it("holds a stranger's card to the same rules as our own", () => {
+  it("holds a stranger's card to the same rules as our own", async () => {
     const stranger = (intro: unknown) =>
       normalizeCard({
         ...v2Card,
@@ -995,7 +1087,7 @@ describe('the intro round trip', () => {
 
   // The whole point of the field: it is written for readers, so the prompt must
   // never see it.
-  it('never reaches the assembled prompt', () => {
+  it('never reaches the assembled prompt', async () => {
     const { system, messages } = assemblePrompt({
       plot: { name: '이야기', description: '', lorebook: [] },
       characters: [{ name: card.name, card: { ...card, intro: '유저에게만 보이는 소개문.' } }],
@@ -1007,7 +1099,7 @@ describe('the intro round trip', () => {
 });
 
 describe('introFromCreatorNotes', () => {
-  it('reads the section Realm would show the reader', () => {
+  it('reads the section Realm would show the reader', async () => {
     // As Realm cards write it: an English section, which Realm requires.
     const parma = '\n# `en`\nAn adult fantasy knight order roleplay set in the city of Parma.';
     expect(introFromCreatorNotes(parma, 'ko')).toBe('An adult fantasy knight order roleplay set in the city of Parma.');
@@ -1018,13 +1110,13 @@ describe('introFromCreatorNotes', () => {
     expect(introFromCreatorNotes(both)).toBe('Knights of Parma.');
   });
 
-  it('takes untagged notes whole, and nothing from blank ones', () => {
+  it('takes untagged notes whole, and nothing from blank ones', async () => {
     expect(introFromCreatorNotes('  **기사단**을 이끄는 이야기.\n')).toBe('**기사단**을 이끄는 이야기.');
     expect(introFromCreatorNotes('', 'ko')).toBeUndefined();
     expect(introFromCreatorNotes('# `ko`\n   ', 'ko')).toBeUndefined();
   });
 
-  it('cuts notes past the cap rather than dropping them', () => {
+  it('cuts notes past the cap rather than dropping them', async () => {
     expect(introFromCreatorNotes('가'.repeat(MAX_INTRO_LENGTH + 10))).toBe('가'.repeat(MAX_INTRO_LENGTH));
   });
 });
@@ -1035,7 +1127,7 @@ describe('the narrator round trip', () => {
   const exportedExtensions = (input: typeof card): Record<string, Record<string, unknown>> =>
     exportCardV3(input).data.extensions as Record<string, Record<string, unknown>>;
 
-  it('exports the narrator under our own namespace and imports it back', () => {
+  it('exports the narrator under our own namespace and imports it back', async () => {
     const narrating = { ...card, narrator: { voice: '건조하고 짧게 끊어 쓴다.', pov: 'third' as const } };
     const extensions = exportedExtensions(narrating);
     expect(extensions['shizue']?.['narrator']).toEqual({
@@ -1050,19 +1142,19 @@ describe('the narrator round trip', () => {
     expect(normalizeCard(exportCardV3(narrating)).narrator).toEqual(narrating.narrator);
   });
 
-  it('round-trips either field on its own', () => {
+  it('round-trips either field on its own', async () => {
     for (const narrator of [{ voice: '짧게 끊어 쓴다.' }, { pov: 'first' as const }]) {
       expect(normalizeCard(exportCardV3({ ...card, narrator })).narrator).toEqual(narrator);
     }
   });
 
-  it('leaves a card that has no narrator without the field, or the namespace', () => {
+  it('leaves a card that has no narrator without the field, or the namespace', async () => {
     expect(card.narrator).toBeUndefined();
     expect(exportedExtensions(card)['shizue']).toBeUndefined();
     expect(normalizeCard(exportCardV3(card)).narrator).toBeUndefined();
   });
 
-  it('takes the key back out once the creator clears the narrator', () => {
+  it('takes the key back out once the creator clears the narrator', async () => {
     const cleared = normalizeCard(exportCardV3({ ...card, narrator: { pov: 'third' } }));
     expect(cleared.narrator).toEqual({ pov: 'third' });
     // The extensions it carries still hold the old value; exporting without the
@@ -1097,7 +1189,7 @@ describe('the narrator round trip', () => {
 describe('the plot overlay on export', () => {
   const card = normalizeCard(v2Card);
 
-  it('writes the plot narrator and custom UI into the exported card', () => {
+  it('writes the plot narrator and custom UI into the exported card', async () => {
     const reimported = normalizeCard(
       exportCardV3(card, {
         narrator: { voice: '건조하게 끊어 쓴다.', pov: 'third' },
@@ -1114,7 +1206,7 @@ describe('the plot overlay on export', () => {
     expect(reimported.componentCapabilities).toEqual(['sendTurn']);
   });
 
-  it('stands in for whatever the stored card still carries', () => {
+  it('stands in for whatever the stored card still carries', async () => {
     const stored = {
       ...card,
       narrator: { pov: 'first' as const },
@@ -1129,12 +1221,12 @@ describe('the plot overlay on export', () => {
     expect(cleared.componentCode).toBeUndefined();
   });
 
-  it('falls back to the card when there is no plot to overlay', () => {
+  it('falls back to the card when there is no plot to overlay', async () => {
     const stored = { ...card, narrator: { pov: 'first' as const } };
     expect(normalizeCard(exportCardV3(stored)).narrator).toEqual({ pov: 'first' });
   });
 
-  it('writes the plot openings and appends the plot lorebook after the card entries', () => {
+  it('writes the plot openings and appends the plot lorebook after the card entries', async () => {
     const plotEntry: LoreEntry = {
       ...card.lorebook[0]!,
       keys: ['왕궁'],
@@ -1153,7 +1245,7 @@ describe('the plot overlay on export', () => {
     expect(bare.data.alternate_greetings).toEqual(card.alternateGreetings);
   });
 
-  it('keeps the group-only greetings and writes each back once, where it came from', () => {
+  it('keeps the group-only greetings and writes each back once, where it came from', async () => {
     const grouped = normalizeCard({
       ...v3Card,
       data: { ...v3Card.data, group_only_greetings: ['모두 모였군.', '셋이서 왔소?'] },
@@ -1185,7 +1277,7 @@ describe('exportCardCharx', () => {
   const declaredIn = (charx: Uint8Array): unknown =>
     JSON.parse(new TextDecoder().decode(unzipSync(charx)['card.json'])).data.assets;
 
-  it('declares the icon and every asset the way RisuAI reads them', () => {
+  it('declares the icon and every asset the way RisuAI reads them', async () => {
     const icon = { ext: 'jpg', bytes: new Uint8Array([0xff, 0xd8, 0xff, 1]) };
     const charx = exportCardCharx(card, plotAssets, icon);
     expect(declaredIn(charx)).toEqual([
@@ -1201,7 +1293,7 @@ describe('exportCardCharx', () => {
     expect(charx[6]! & 0x08).toBe(0);
     expect(charx[8]).toBe(0);
 
-    const parsed = parseCard(charx);
+    const parsed = (await readCard(charx));
     expect(parsed.card.name).toBe('세이');
     expect(parsed.iconBuffer).toEqual(icon.bytes);
     expect(parsed.assets).toEqual([
@@ -1211,8 +1303,8 @@ describe('exportCardCharx', () => {
     ]);
   });
 
-  it('brings every {{img::…}} reference back to the same picture', () => {
-    const parsed = parseCard(exportCardCharx(card, plotAssets)).assets!;
+  it('brings every {{img::…}} reference back to the same picture', async () => {
+    const parsed = (await readCard(exportCardCharx(card, plotAssets))).assets!;
     // A re-import mints slugs of its own; the names are what carry the references.
     const reimported = parsed.map((asset, i) => ({ slug: `re-${i}`, name: asset.name }));
     const before = assetResolver(plotAssets);
@@ -1225,17 +1317,17 @@ describe('exportCardCharx', () => {
     }
   });
 
-  it("declares the member's emotion pictures as RisuAI's emotions, which an import reads back as such", () => {
+  it("declares the member's emotion pictures as RisuAI's emotions, which an import reads back as such", async () => {
     const charx = exportCardCharx(card, [{ slug: 'happy-2', name: 'happy', ext: 'gif', bytes: gif(4), emotion: 'happy' }]);
     expect(declaredIn(charx)).toEqual([
       { type: 'emotion', uri: 'embeded://assets/other/image/happy-2.gif', name: 'happy', ext: 'gif' },
       { type: 'x-risu-asset', uri: 'embeded://assets/other/image/happy-2.gif', name: 'happy', ext: 'gif' },
       { type: 'x-risu-asset', uri: 'embeded://assets/other/image/happy-2.gif', name: 'happy-2', ext: 'gif' },
     ]);
-    expect(parseCard(charx).assets).toEqual([{ name: 'happy', bytes: gif(4), emotion: true }]);
+    expect((await readCard(charx)).assets).toEqual([{ name: 'happy', bytes: gif(4), emotion: true }]);
   });
 
-  it('files each asset under the folder RisuAI picks by its extension', () => {
+  it('files each asset under the folder RisuAI picks by its extension', async () => {
     const mp3 = Uint8Array.from([...Buffer.from('ID3'), 4, 0, 1]);
     const charx = exportCardCharx(card, [
       { slug: 'bgm', name: 'bgm', ext: 'mp3', bytes: mp3 },
@@ -1249,26 +1341,26 @@ describe('exportCardCharx', () => {
       'card.json',
     ]);
     // Our own import finds the music where the export put it.
-    expect(parseCard(charx).assets).toContainEqual({ name: 'bgm', bytes: mp3, additional: true });
+    expect((await readCard(charx)).assets).toContainEqual({ name: 'bgm', bytes: mp3, additional: true });
   });
 
-  it('declares no icon when the member has no picture', () => {
+  it('declares no icon when the member has no picture', async () => {
     const charx = exportCardCharx(card, [], undefined);
     expect(declaredIn(charx)).toEqual([]);
-    const parsed = parseCard(charx);
+    const parsed = (await readCard(charx));
     expect(parsed.iconBuffer).toBeUndefined();
     expect(parsed.assets).toEqual([]);
     expect(parsed.card.firstMes).toBe('자리 있소?');
   });
 
-  it('carries a web font the import fetched, which its own import takes back by the address it came from', () => {
+  it('carries a web font the import fetched, which its own import takes back by the address it came from', async () => {
     const woff2 = new Uint8Array([0x77, 0x4f, 0x46, 0x32, 0, 1, 0, 0]);
     const charx = exportCardCharx(card, [{ slug: 'nanum', name: 'https://fonts.test/nanum.woff2', ext: 'woff2', bytes: woff2 }]);
     expect(declaredIn(charx)).toEqual([
       { type: 'x-risu-asset', uri: 'embeded://assets/other/fonts/nanum.woff2', name: 'https://fonts.test/nanum.woff2', ext: 'woff2' },
       { type: 'x-risu-asset', uri: 'embeded://assets/other/fonts/nanum.woff2', name: 'nanum', ext: 'woff2' },
     ]);
-    expect(parseCard(charx).assets).toEqual([{ name: 'https://fonts.test/nanum.woff2', bytes: woff2, additional: true }]);
+    expect((await readCard(charx)).assets).toEqual([{ name: 'https://fonts.test/nanum.woff2', bytes: woff2, additional: true }]);
   });
 });
 
@@ -1281,7 +1373,7 @@ describe('toRisuAssetRefs', () => {
     { slug: 'odd', name: 'a "quoted" name' },
   ];
 
-  it('names each of the plot’s assets as RisuAI reaches a card’s own', () => {
+  it('names each of the plot’s assets as RisuAI reaches a card’s own', async () => {
     const text = [
       `<img src="/api/plots/${plot}/assets/smile">`,
       `<div style="background:url('/api/plots/${plot}/assets/castle')"></div>`,
@@ -1309,7 +1401,7 @@ describe('toRisuAssetRefs', () => {
     expect(resolve('Smile')).toBe('re-smile');
   });
 
-  it("writes the work's own background in place of the card's, or none", () => {
+  it("writes the work's own background in place of the card's, or none", async () => {
     const stored = normalizeCard({
       ...v3Card,
       data: { ...v3Card.data, extensions: { risuai: { backgroundHTML: '<style>@import url(https://fonts.test/a.css);</style>' } } },
@@ -1357,7 +1449,7 @@ describe('RisuAI lorebook entries', () => {
     activateLore([entry], { history: [text], scanDepth: 1, budgetTokens: 1000, countTokens: (t) => t.length, random })
       .entries.length === 1;
 
-  it('reads /pattern/flags keys as regexes, with `i` deciding the case', () => {
+  it('reads /pattern/flags keys as regexes, with `i` deciding the case', async () => {
     const sword = risuEntry({ keys: ['/검(술|객)/i'], use_regex: true });
     expect(sword).toMatchObject({ keys: ['검(술|객)'], useRegex: true, caseSensitive: false });
     expect(fires(sword, '떠돌이 검객이 들어온다')).toBe(true);
@@ -1384,7 +1476,7 @@ describe('RisuAI lorebook entries', () => {
     expect(fires(night, '한낮의 검객')).toBe(false);
   });
 
-  it('keeps use_regex only where RisuAI keeps it', () => {
+  it('keeps use_regex only where RisuAI keeps it', async () => {
     // A first key without a slash: RisuAI's import clears the flag, and every key is text.
     const plain = risuEntry({ keys: ['검(술|객)', '/칼/'], use_regex: true });
     expect(plain).toMatchObject({ keys: ['검(술|객)', '/칼/'], useRegex: false });
@@ -1399,7 +1491,7 @@ describe('RisuAI lorebook entries', () => {
     expect(fires(mixed, '칼날')).toBe(false);
   });
 
-  it('maps @@probability, @@activate and @@dont_activate', () => {
+  it('maps @@probability, @@activate and @@dont_activate', async () => {
     const rare = risuEntry({ keys: ['궁'], content: '@@probability 30\n본문' });
     expect(rare.probability).toBe(30);
     expect(fires(rare, '궁', () => 0.2)).toBe(true);
@@ -1419,7 +1511,7 @@ describe('RisuAI lorebook entries', () => {
     });
   });
 
-  it('turns the key decorators into secondary keys', () => {
+  it('turns the key decorators into secondary keys', async () => {
     const any = risuEntry({ keys: ['궁'], content: '@@additional_keys 밤, 새벽\n본문' });
     expect(any).toMatchObject({ secondaryKeys: ['밤', '새벽'], selective: true });
     expect(any.selectiveLogic).toBeUndefined();
@@ -1450,7 +1542,7 @@ describe('RisuAI lorebook entries', () => {
     expect(fires(regex, '궁의 기사')).toBe(true);
   });
 
-  it('reads an ST entry RisuAI re-exported once, from its decorators', () => {
+  it('reads an ST entry RisuAI re-exported once, from its decorators', async () => {
     // RisuAI's import moved the probability and the AND_ALL keys into decorators,
     // left position 1 and selectiveLogic in the extensions, and stopped exporting
     // the secondary keys once the entry was no longer selective.
@@ -1502,10 +1594,10 @@ describe('SillyTavern cards', () => {
       ccv3: toBase64({ ...stCard(), spec: 'chara_card_v3', spec_version: '3.0' }),
     });
 
-  it('imports the PNG SillyTavern writes, and its JSON', () => {
+  it('imports the PNG SillyTavern writes, and its JSON', async () => {
     // ccardlib's checker refuses both as written: the relabelled ccv3 has no
     // group_only_greetings, and an ST-built lorebook has no book-level extensions.
-    const { card } = parseCard(stPng());
+    const { card } = (await readCard(stPng()));
     expect(card.spec).toBe('v3');
     expect(card.name).toBe('엘라라');
     expect(card.lorebook).toHaveLength(3);
@@ -1515,8 +1607,8 @@ describe('SillyTavern cards', () => {
     expect(fromJson.lorebook).toEqual(card.lorebook);
   });
 
-  it('reads the entry settings ST keeps in each entry\'s extensions', () => {
-    const [first, second] = parseCard(stPng()).card.lorebook;
+  it('reads the entry settings ST keeps in each entry\'s extensions', async () => {
+    const [first, second] = (await readCard(stPng())).card.lorebook;
     expect(first).toEqual({
       // ST reads a key as a regex only in its slash form, one key at a time,
       // whatever use_regex says — so the keys stay as ST wrote them.
@@ -1566,8 +1658,8 @@ describe('SillyTavern cards', () => {
     });
   });
 
-  it('makes the character note a constant depth entry, and takes it out of the extensions', () => {
-    const { card } = parseCard(stPng());
+  it('makes the character note a constant depth entry, and takes it out of the extensions', async () => {
+    const { card } = (await readCard(stPng()));
     expect(card.lorebook[2]).toEqual({
       keys: [],
       secondaryKeys: [],
@@ -1607,7 +1699,7 @@ describe('SillyTavern cards', () => {
     expect(empty.extensions['depth_prompt']).toEqual({ prompt: '  ', depth: 4, role: 'system' });
   });
 
-  it("reads only ST's own decorators off an entry ST wrote, as ST does (parseDecorators)", () => {
+  it("reads only ST's own decorators off an entry ST wrote, as ST does (parseDecorators)", async () => {
     const entryWith = (content: string, book: Record<string, unknown> = {}) => {
       const raw = stCard();
       const [first] = raw.data.character_book.entries;
@@ -1630,7 +1722,7 @@ describe('SillyTavern cards', () => {
     expect(positioned.depth).toBeUndefined();
   });
 
-  it('maps display-only regex scripts onto display scripts, after RisuAI ones and without duplicates', () => {
+  it('maps display-only regex scripts onto display scripts, after RisuAI ones and without duplicates', async () => {
     const script = stCard().data.extensions.regex_scripts[0]!;
     const withScripts = (regexScripts: unknown[], risuai?: unknown) => {
       const raw = stCard();
@@ -1704,11 +1796,11 @@ describe('SillyTavern cards', () => {
 
     // Our export writes the script into RisuAI's block and keeps regex_scripts,
     // so a re-import meets it twice and keeps one.
-    const reimported = normalizeCard(exportCardV3(parseCard(stPng()).card));
+    const reimported = normalizeCard(exportCardV3((await readCard(stPng())).card));
     expect(reimported.displayScripts).toHaveLength(1);
   });
 
-  it("carries a display-only regex script's depth range, as ST reads it", () => {
+  it("carries a display-only regex script's depth range, as ST reads it", async () => {
     const script = stCard().data.extensions.regex_scripts[0]!;
     const ranged = (minDepth: unknown, maxDepth: unknown) => {
       const raw = stCard();
@@ -1724,8 +1816,8 @@ describe('SillyTavern cards', () => {
     expect(ranged(-1, -1)).toEqual({ minDepth: undefined, maxDepth: undefined });
   });
 
-  it('exports the settings where ST reads them, and reads its own export back', () => {
-    const { card } = parseCard(stPng());
+  it('exports the settings where ST reads them, and reads its own export back', async () => {
+    const { card } = (await readCard(stPng()));
     const exported = exportCardV3(card);
     const [first, second, note] = exported.data.character_book!.entries;
     // Each key as ST wrote it, a regex in its slash form beside a plain one.
@@ -1759,7 +1851,7 @@ describe('SillyTavern cards', () => {
     expect(normalizeCard(exported).lorebook).toEqual(card.lorebook);
   });
 
-  it("keeps ST's positions around the note and the examples, and an outlet's name, through the trip", () => {
+  it("keeps ST's positions around the note and the examples, and an outlet's name, through the trip", async () => {
     const raw = stCard();
     const [base] = raw.data.character_book.entries;
     const at = (position: number, extra: Record<string, unknown> = {}) => ({
@@ -1798,7 +1890,7 @@ describe('SillyTavern cards', () => {
     expect(normalizeCard(exportCardV3({ ...card, lorebook: own })).lorebook).toEqual(own);
   });
 
-  it('keeps an imported regex entry a regex through the round trip', () => {
+  it('keeps an imported regex entry a regex through the round trip', async () => {
     // A key with a slash in it has to be escaped, or ST would not read it as one.
     const { card } = parseCard(v3Card);
     const regex: LoreEntry = { ...card.lorebook[0]!, keys: ['a/b', '검(술|객)'], caseSensitive: true };
@@ -1807,7 +1899,7 @@ describe('SillyTavern cards', () => {
     expect(normalizeCard(exported).lorebook).toEqual([regex]);
   });
 
-  it('writes a sticky or cooldown at the cap back out as the after-match decorators', () => {
+  it('writes a sticky or cooldown at the cap back out as the after-match decorators', async () => {
     const { card } = parseCard(v3Card);
     const entry: LoreEntry = { ...card.lorebook[1]!, sticky: 10000, cooldown: 12000 };
     const exported = exportCardV3({ ...card, lorebook: [entry, { ...entry, sticky: 9999, cooldown: undefined }] });
@@ -1820,7 +1912,7 @@ describe('SillyTavern cards', () => {
     expect(normalizeCard(exported).lorebook[0]).toMatchObject({ sticky: 10000, cooldown: 10000 });
   });
 
-  it('writes a switched-off entry back out as @@dont_activate, the off switch RisuAI reads', () => {
+  it('writes a switched-off entry back out as @@dont_activate, the off switch RisuAI reads', async () => {
     const { card } = parseCard(v3Card);
     const { positioned: _placed, ...off }: LoreEntry = { ...card.lorebook[1]!, enabled: false };
     const exported = exportCardV3({ ...card, lorebook: [off] });
@@ -1832,14 +1924,14 @@ describe('SillyTavern cards', () => {
 describe('the PNG card export', () => {
   const { card } = parseCard(stCard());
 
-  it('writes ccv3 and chara before IEND, and the card parses back out', () => {
+  it('writes ccv3 and chara before IEND, and the card parses back out', async () => {
     const avatar = buildPngWithTextChunks({ chara: 'an old card', Comment: 'kept? no' });
     const overlay = { intros: ['첫 인사.'], narrator: { pov: 'third' as const } };
     const png = exportCardPng(exportCardV3(card, overlay), avatar);
 
     const chunks = readPngTextChunks(png);
     expect([...chunks.keys()]).toEqual(['chara', 'ccv3']);
-    const parsed = parseCard(png);
+    const parsed = (await readCard(png));
     expect(parsed.card.name).toBe(card.name);
     expect(parsed.card.firstMes).toBe('첫 인사.');
     expect(parsed.card.narrator).toEqual({ pov: 'third' });
@@ -1852,7 +1944,7 @@ describe('the PNG card export', () => {
     expect(stripPngTextChunks(png)).toEqual(stripPngTextChunks(avatar));
   });
 
-  it('carries the V2 backfill without decorators, and depth survives in the ST extensions', () => {
+  it('carries the V2 backfill without decorators, and depth survives in the ST extensions', async () => {
     const png = exportCardPng(exportCardV3(card));
     const v2 = JSON.parse(Buffer.from(readPngTextChunks(png).get('chara')!, 'base64').toString('utf-8'));
     expect(v2.spec).toBe('chara_card_v2');
@@ -1860,7 +1952,7 @@ describe('the PNG card export', () => {
     expect(normalizeCard(v2).lorebook).toEqual(card.lorebook);
   });
 
-  it('falls back to a drawable placeholder for anything that is not a PNG', () => {
+  it('falls back to a drawable placeholder for anything that is not a PNG', async () => {
     const jpeg = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0]);
     const png = exportCardPng(exportCardV3(card), jpeg);
     expect(stripPngTextChunks(png)).toEqual(placeholderPng());
@@ -1872,7 +1964,7 @@ describe('the PNG card export', () => {
     expect(unzlibSync(placeholder.subarray(41, 41 + idatLength))).toHaveLength(64 * (1 + 64 * 3));
   });
 
-  it('writes chunks byte for byte the way a PNG encoder would', () => {
+  it('writes chunks byte for byte the way a PNG encoder would', async () => {
     expect(insertPngTextChunks(buildPngWithTextChunks({}), [['chara', 'abc'], ['ccv3', 'def']])).toEqual(
       buildPngWithTextChunks({ chara: 'abc', ccv3: 'def' }),
     );
@@ -1894,7 +1986,7 @@ describe('normalizeCard - a RisuAI book', () => {
     };
   };
 
-  it("takes an entry RisuAI wrote with `insertion_order: null`, at RisuAI's default order", () => {
+  it("takes an entry RisuAI wrote with `insertion_order: null`, at RisuAI's default order", async () => {
     // Jurassic girl Park: 8 of 34 entries, which ccardlib's schema refuses whole.
     const [entry] = v3Card.data.character_book.entries;
     const raw = risuCard({
@@ -1910,7 +2002,7 @@ describe('normalizeCard - a RisuAI book', () => {
     expect((card.raw as typeof raw).data.character_book.entries[0]!.insertion_order).toBeNull();
   });
 
-  it('scans recursively and matches the RisuAI way when the card names no settings', () => {
+  it('scans recursively and matches the RisuAI way when the card names no settings', async () => {
     expect(normalizeCard(risuCard()).loreSettings).toEqual({
       scanDepth: 4,
       recursiveScanning: true,
@@ -1918,7 +2010,7 @@ describe('normalizeCard - a RisuAI book', () => {
     });
   });
 
-  it("keeps the card's settings when it names all three, as RisuAI does", () => {
+  it("keeps the card's settings when it names all three, as RisuAI does", async () => {
     const card = normalizeCard(risuCard({ scan_depth: 7, token_budget: 600, recursive_scanning: false }));
     expect(card.loreSettings).toEqual({
       scanDepth: 7,
@@ -1928,7 +2020,7 @@ describe('normalizeCard - a RisuAI book', () => {
     });
   });
 
-  it('knows a V2 card from RisuAI through the lift to V3', () => {
+  it('knows a V2 card from RisuAI through the lift to V3', async () => {
     // RisuAI's PNG export is V2. This book names a depth and a budget but no
     // recursion, which RisuAI reads as no settings at all: recursion on.
     const v2 = {
@@ -1951,11 +2043,11 @@ describe('normalizeCard - a RisuAI book', () => {
     expect(normalizeCard(older).loreSettings.risuMatching).toBe(true);
   });
 
-  it('reads recursion as on when the card names it without the other two, as RisuAI does', () => {
+  it('reads recursion as on when the card names it without the other two, as RisuAI does', async () => {
     expect(normalizeCard(risuCard({ recursive_scanning: false })).loreSettings.recursiveScanning).toBe(true);
   });
 
-  it('knows an older RisuAI card by its extension block when its entries are RisuAI-made', () => {
+  it('knows an older RisuAI card by its extension block when its entries are RisuAI-made', async () => {
     const older = risuCard({ extensions: {} });
     expect(normalizeCard(older).loreSettings.risuMatching).toBe(true);
     // Without the block, it is anyone's card.
@@ -1963,7 +2055,7 @@ describe('normalizeCard - a RisuAI book', () => {
     expect(normalizeCard(anyone).loreSettings).toEqual({ scanDepth: 4, recursiveScanning: false });
   });
 
-  it('does not take a book SillyTavern or our export rewrote for a RisuAI one', () => {
+  it('does not take a book SillyTavern or our export rewrote for a RisuAI one', async () => {
     // ST keeps the risuai block of a card it got from RisuAI, but writes every entry its own way.
     const viaSillyTavern = stCard();
     (viaSillyTavern.data.extensions as Record<string, unknown>)['risuai'] = { bias: [] };
@@ -1979,13 +2071,13 @@ describe('normalizeCard - a RisuAI book', () => {
     expect(normalizeCard(exported).loreSettings.risuMatching).toBeUndefined();
   });
 
-  it("leaves a book that asked for RisuAI's whole-word matching to exact matching", () => {
+  it("leaves a book that asked for RisuAI's whole-word matching to exact matching", async () => {
     const whole = normalizeCard(risuCard({ extensions: { risu_fullWordMatching: true } }));
     expect(whole.loreSettings.risuMatching).toBeUndefined();
     expect(whole.loreSettings.recursiveScanning).toBe(true);
   });
 
-  it('matches its keys without regard to spaces or case once in a prompt', () => {
+  it('matches its keys without regard to spaces or case once in a prompt', async () => {
     const card = normalizeCard(
       risuCard({
         entries: [

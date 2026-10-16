@@ -424,6 +424,14 @@
       "external_over_limit": "가져오기 한도를 넘어 다른 사이트에서 가져오지 않은 그림·글꼴·스타일시트 {count}개",
       "module_mcp_inert": "연결하지 않는 모듈의 MCP 서버 {count}개",
       "module_cjs_inert": "실행하지 않는 모듈의 cjs 코드 {count}개"
+    },
+    "progress": {
+      "uploading": "올리는 중 {percent}%",
+      "queued": "가져오기 순서를 기다리는 중…",
+      "processing": "가져오는 중…",
+      "reading": "파일을 읽는 중 {percent}%",
+      "assets": "에셋을 저장하는 중 {done}/{total}",
+      "localizing": "다른 사이트의 그림·글꼴을 받아 오는 중…"
     }
   },
   "stImport": {
@@ -1306,6 +1314,8 @@
     "suggestion_in_progress": "이미 답장을 제안하고 있습니다.",
     "rate_limited": "요청이 너무 잦습니다. 잠시 후 다시 시도하세요.",
     "import_busy": "다른 가져오기가 진행 중입니다. 잠시 후 다시 시도하세요.",
+    "upload_failed": "파일을 끝까지 올리지 못했습니다. 네트워크를 확인하고 다시 시도해 주세요.",
+    "import_state": "이 가져오기는 더 이상 이어 갈 수 없습니다. 파일을 다시 골라 주세요.",
     "length_required": "파일 크기가 전해지지 않아 가져오지 못했습니다. 다시 시도하세요.",
     "chatgpt_login_required": "AI 설정에서 ChatGPT를 연결해 주세요.",
     "invalid_grant": "ChatGPT 연결이 만료되었습니다. AI 설정에서 다시 연결해 주세요.",

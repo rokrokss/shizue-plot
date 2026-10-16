@@ -11,7 +11,7 @@
  * and given up on, and nothing about what any of them do.
  */
 import { jobs, type Db, type Job, type JobKind, type JobPayloadMap } from '@shizue/db';
-import { and, eq, isNotNull, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, notInArray, sql, type SQL } from 'drizzle-orm';
 import { hostname } from 'node:os';
 import type { Tx } from './deps.js';
 
@@ -40,6 +40,19 @@ const RENEW_MS = 60_000;
 
 /** Whose lease it is. Diagnostic — the claim is decided by the row, not by this. */
 const WORKER_ID = `${hostname()}:${process.pid}`;
+
+/**
+ * Which kinds a loop claims: only these, or every kind but these. A file import
+ * reads a file of up to a gigabyte and runs for minutes, so it has loops of its
+ * own (`index.ts`) and the main loop leaves it to them — a fan-out is never
+ * stuck behind one.
+ */
+export type JobKinds = { only: JobKind[] } | { except: JobKind[] };
+
+const kindFilter = (kinds: JobKinds | undefined): SQL | undefined => {
+  if (!kinds) return undefined;
+  return 'only' in kinds ? inArray(jobs.kind, kinds.only) : notInArray(jobs.kind, kinds.except);
+};
 
 /**
  * Puts a job on the queue inside the caller's transaction. Nothing is started
@@ -119,8 +132,9 @@ async function failExpiredFinalAttempts(db: Db): Promise<void> {
  * claim asks for attempts to be left: a job with none is finished being tried,
  * whether or not anybody got to write that down.
  */
-async function claimJob(db: Db, worker: string): Promise<Job | undefined> {
+async function claimJob(db: Db, worker: string, kinds?: JobKinds): Promise<Job | undefined> {
   await failExpiredFinalAttempts(db);
+  const filter = kindFilter(kinds);
   const [claimed] = await db
     .update(jobs)
     .set({ lockedAt: sql`now()`, lockedBy: worker, attempts: sql`${jobs.attempts} + 1` })
@@ -131,6 +145,7 @@ async function claimJob(db: Db, worker: string): Promise<Job | undefined> {
           and ${jobs.runAt} <= now()
           and ${jobs.attempts} < ${jobs.maxAttempts}
           and (${jobs.lockedAt} is null or ${jobs.lockedAt} < now() - ${LEASE})
+          ${filter ? sql`and ${filter}` : sql``}
         order by ${jobs.runAt}
         limit 1
         for update skip locked
@@ -217,8 +232,8 @@ export async function recordFailure(db: Db, job: Job, worker: string, error: unk
  * Claims one due job and runs it. False means there was nothing due — the caller
  * decides whether that is a reason to wait or to stop.
  */
-async function runNextJob(db: Db, handlers: JobHandlers, worker: string): Promise<boolean> {
-  const job = await claimJob(db, worker);
+async function runNextJob(db: Db, handlers: JobHandlers, worker: string, kinds?: JobKinds): Promise<boolean> {
+  const job = await claimJob(db, worker, kinds);
   if (!job) return false;
   const stopRenewing = renewLease(db, job, worker);
   try {
@@ -246,16 +261,18 @@ async function runNextJob(db: Db, handlers: JobHandlers, worker: string): Promis
 export async function drainJobs(
   db: Db,
   handlers: JobHandlers,
-  { maxJobs = 1_000 }: { maxJobs?: number } = {},
+  { maxJobs = 1_000, kinds }: { maxJobs?: number; kinds?: JobKinds } = {},
 ): Promise<number> {
   let ran = 0;
-  while (ran < maxJobs && (await runNextJob(db, handlers, WORKER_ID))) ran += 1;
+  while (ran < maxJobs && (await runNextJob(db, handlers, WORKER_ID, kinds))) ran += 1;
   return ran;
 }
 
 export interface JobWorkerDeps {
   db: Db;
   handlers: JobHandlers;
+  /** The kinds this loop claims; every kind when absent. */
+  kinds?: JobKinds;
 }
 
 /**
@@ -280,7 +297,7 @@ export function startJobWorker(
   const tick = async (): Promise<void> => {
     let ran = false;
     try {
-      ran = await runNextJob(deps.db, deps.handlers, WORKER_ID);
+      ran = await runNextJob(deps.db, deps.handlers, WORKER_ID, deps.kinds);
     } catch (error) {
       // The claim itself failed — a database that is going away, or gone. Swallowed
       // so the loop survives it: this is the only thing that will notice when it

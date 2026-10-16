@@ -8,7 +8,13 @@ import { use, useCallback, useEffect, useRef, useState } from 'react';
 import { AssetManager } from '@/components/AssetManager';
 import { AiBadge, PublicBadge } from '@/components/AudienceBadge';
 import { Avatar } from '@/components/Avatar';
-import { ImportedCardDetails, ImportWarnings, RealmImportForm, RightsConfirmation } from '@/components/CardImport';
+import {
+  ImportedCardDetails,
+  ImportProgressLine,
+  ImportWarnings,
+  RealmImportForm,
+  RightsConfirmation,
+} from '@/components/CardImport';
 import { ComponentCodeEditor } from '@/components/ComponentCodeEditor';
 import { GroupTurnsEditor } from '@/components/GroupTurnsEditor';
 import { DefaultVariablesEditor, DisplayScriptEditor } from '@/components/DisplayScriptEditor';
@@ -35,6 +41,7 @@ import {
 import { Link, useRouter } from '@/i18n/navigation';
 import { locales } from '@/i18n/routing';
 import { apiDelete, apiGet, apiSend, apiUpload } from '@/lib/api';
+import { importFile, type FileImportFields, type ImportProgress } from '@/lib/fileImport';
 import { readImportWarnings, takeImportWarnings, type ImportWarning } from '@/lib/importWarnings';
 import { loreBudget } from '@/lib/loreBudget';
 import { checkCardSize, downloadRealmCard, isRestrictiveLicense } from '@/lib/realm';
@@ -172,6 +179,8 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
   const [saving, setSaving] = useState(false);
   const [mutating, setMutating] = useState(false);
   const locked = saving || mutating;
+  /** Where a member's card import is, said under the roster's import buttons. */
+  const [importProgress, setImportProgress] = useState<ImportProgress | null>(null);
   const [justSaved, setJustSaved] = useState(false);
   const saveNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => {
@@ -328,19 +337,20 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
     setError('');
     try {
       let file: File;
-      const fields: Record<string, string> = {};
+      const fields: FileImportFields = { plotId: id };
       if (typeof source === 'string') {
         const realm = await downloadRealmCard(source);
         file = realm.file;
-        fields['sourceUrl'] = realm.sourceUrl;
+        fields.sourceUrl = realm.sourceUrl;
       } else {
         file = checkCardSize(source);
       }
-      if (rightsConfirmed) fields['rightsConfirmed'] = 'true';
-      const created = await apiUpload<PlotMember & { variableConflicts?: string[]; importWarnings?: unknown }>(
-        `/api/plots/${id}/characters/import`,
+      if (rightsConfirmed) fields.rightsConfirmed = true;
+      const created = await importFile<PlotMember & { variableConflicts?: string[]; importWarnings?: unknown }>(
+        'member',
         file,
         fields,
+        { onProgress: setImportProgress },
       );
       setMembers((current) => [...current, created]);
       setSaved((current) => new Map(current).set(created.id, memberFields(created)));
@@ -403,6 +413,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
       return false;
     } finally {
       setMutating(false);
+      setImportProgress(null);
     }
   }
 
@@ -562,6 +573,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
             onPatch={patchMember}
             onAdd={() => void addMember()}
             onImport={importMember}
+            importProgress={importProgress}
             onRemove={(memberId) => void removeMember(memberId)}
             onMove={(index, delta) => void move(index, delta)}
             onAvatar={(updated) =>
@@ -862,6 +874,7 @@ function MembersSection({
   onMove,
   onAvatar,
   onBusyChange,
+  importProgress,
 }: {
   onBusyChange: (busy: boolean) => void;
   plotId: string;
@@ -873,6 +886,8 @@ function MembersSection({
   onAdd: () => void;
   /** A file or a RisuRealm page; resolves true once the member is in. */
   onImport: (source: File | string, rightsConfirmed: boolean) => Promise<boolean>;
+  /** Where that import is, while it runs. */
+  importProgress: ImportProgress | null;
   onRemove: (id: string) => void;
   onMove: (index: number, delta: number) => void;
   onAvatar: (member: PlotMember) => void;
@@ -1128,6 +1143,7 @@ function MembersSection({
         </Button>
       </div>
       {realmOpen ? <RealmImportForm disabled={importBlocked} onSubmit={importCard} /> : null}
+      <ImportProgressLine progress={importProgress} />
     </Section>
   );
 }

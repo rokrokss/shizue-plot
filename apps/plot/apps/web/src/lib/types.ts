@@ -246,7 +246,7 @@ export interface PlotMember {
  * listings are card grids, so only the owner view carries the count.
  */
 /**
- * A RisuAI module in a work, as the studio lists it (`POST /api/plots/:id/modules`):
+ * A RisuAI module in a work, as the studio lists it (a `plot_module` file import, `lib/fileImport`):
  * what it is and how much it brought, not its scripts.
  */
 export interface PlotModuleSummary {

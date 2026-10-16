@@ -57,9 +57,15 @@ services:
       AWS_ACCESS_KEY_ID: shizue
       AWS_SECRET_ACCESS_KEY: shizue-secret
       AWS_DEFAULT_REGION: us-east-1
+    # A card or module import is uploaded by the browser straight into the bucket
+    # (ARCHITECTURE §10 파일 임포트): CORS lets the web origin PUT the parts, and
+    # the lifecycle rule drops what an abandoned import left under imports/. Set on
+    # every start, so a bucket made before them gets them too.
     entrypoint: >
-      sh -c "aws --endpoint-url http://s3:9000 s3api head-bucket --bucket shizue-media 2>/dev/null ||
-             aws --endpoint-url http://s3:9000 s3api create-bucket --bucket shizue-media"
+      sh -c "(aws --endpoint-url http://s3:9000 s3api head-bucket --bucket shizue-media 2>/dev/null ||
+              aws --endpoint-url http://s3:9000 s3api create-bucket --bucket shizue-media) &&
+             aws --endpoint-url http://s3:9000 s3api put-bucket-cors --bucket shizue-media --cors-configuration '{\"CORSRules\":[{\"AllowedOrigins\":[\"http://localhost:13000\",\"http://127.0.0.1:13000\"],\"AllowedMethods\":[\"PUT\"],\"AllowedHeaders\":[\"*\"],\"MaxAgeSeconds\":3600}]}' &&
+             aws --endpoint-url http://s3:9000 s3api put-bucket-lifecycle-configuration --bucket shizue-media --lifecycle-configuration '{\"Rules\":[{\"ID\":\"imports\",\"Status\":\"Enabled\",\"Filter\":{\"Prefix\":\"imports/\"},\"Expiration\":{\"Days\":2},\"AbortIncompleteMultipartUpload\":{\"DaysAfterInitiation\":1}}]}'"
 
 volumes:
   shizue-pgdata:

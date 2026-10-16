@@ -2,9 +2,9 @@ import { seedSession } from '../seedSession.js';
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 
 /**
- * Card import along the owner's path, through the web origin and its `/api`
- * rewrite: a card file past the rewrite proxy's 10MB default arrives whole and
- * becomes a plot → the studio says where it came from and under what license →
+ * Card import along the owner's path, through the web origin: a card file of
+ * more than one upload part arrives whole and becomes a plot (ARCHITECTURE §10
+ * 파일 임포트 — under the local driver the parts go through the `/api` rewrite) → the studio says where it came from and under what license →
  * publishing it waits for the owner's word → a second card comes in from a
  * RisuRealm page, which the browser downloads itself, and the now-public plot
  * asks for the word again first.
@@ -66,12 +66,12 @@ test.afterAll(async () => {
 
 const members = () => page.getByTestId('plot-member');
 
-test('a card past the rewrite proxy’s default body limit arrives whole', async () => {
+test('a card of more than one upload part arrives whole', async () => {
   await seedSession(page, owner);
   await page.goto('/ko/plots');
 
   // JSON takes whitespace anywhere, so this is one ordinary card in a 12MB
-  // file — the size at which the proxy used to hand the API a truncated body.
+  // file — two 8MB parts, which the job joins and reads as one.
   // Eleven greetings, one more than a plot's openings: the studio says so.
   const own = card(first, 'CC BY-NC-ND 4.0');
   const greeted = { ...own, data: { ...own.data, alternate_greetings: Array.from({ length: 10 }, (_, i) => `다른 시작 ${i}`) } };
