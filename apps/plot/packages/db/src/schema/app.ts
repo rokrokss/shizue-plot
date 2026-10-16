@@ -1048,6 +1048,37 @@ export const jobs = pgTable(
   ],
 );
 
+/**
+ * The request rate limits' fixed windows (`rateLimit.ts`), one row per bucket
+ * and caller (`<bucket>:<user id or client address>`). Postgres rather than a
+ * process's memory so every API instance counts against the same window, and
+ * rather than Redis because the owner keeps one store (2026-10-16). A hit is one
+ * upsert; rows long past their window are collected by the hits that open a
+ * new one, a capped batch at a time — there is no background loop.
+ */
+export const rateLimits = pgTable(
+  'rate_limits',
+  {
+    key: text('key').primaryKey(),
+    windowStart: timestamp('window_start', { withTimezone: true }).notNull(),
+    hits: integer('hits').notNull(),
+  },
+  (t) => [index('rate_limits_window_start_idx').on(t.windowStart)],
+);
+
+/**
+ * Short exclusivity across API instances (`leases.ts`): whoever holds `key`
+ * until `expires_at`. Taken in one statement, and only from nobody or from an
+ * expired holder; renewed and released only by the holder that took it, so a
+ * late release cannot free someone else's. An instance that dies leaves its
+ * lease to expire.
+ */
+export const leases = pgTable('leases', {
+  key: text('key').primaryKey(),
+  holder: text('holder').notNull(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+});
+
 export type Plot = typeof plots.$inferSelect;
 export type NewPlot = typeof plots.$inferInsert;
 export type Character = typeof characters.$inferSelect;

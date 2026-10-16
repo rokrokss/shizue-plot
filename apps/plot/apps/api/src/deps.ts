@@ -96,7 +96,8 @@ export interface AppDeps {
   embedder?: Embedder;
   /**
    * Lua `request`, made by this server for a card script (`scriptFetch.ts`): its
-   * rate limit lives here, one per process. Defaults to the real network with
+   * in-flight cap lives here, one per process, and its rate limit in
+   * `rate_limits`, shared by every instance. Defaults to the real network with
    * the web origin refused; tests hand it a stub DNS and connection.
    */
   scriptFetch?: ScriptFetch;

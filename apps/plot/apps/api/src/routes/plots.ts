@@ -107,6 +107,7 @@ import {
 import type { AppDeps, AppEnv, Tx } from '../deps.js';
 import { draftPlot, MAX_PREMISE_LENGTH } from '../draft.js';
 import { ApiError, badRequest, notFound } from '../errors.js';
+import { admitImport } from '../importAdmission.js';
 import {
   avatarUrl,
   coverUrl,
@@ -124,6 +125,7 @@ import { enqueueJob } from '../jobs.js';
 import { createRemoteFetch, localizePlot, type LocalizeScope } from '../localizeAssets.js';
 import { requireUser } from '../session.js';
 import { cbsModulesOf, loadOwnedPlot } from '../plots.js';
+import { RATE_LIMITS, rateLimit } from '../rateLimit.js';
 import { realmCardId, realmCharacterUrl } from '../realm.js';
 import { coverKey, deleteQuietly, readAll } from '../storage.js';
 import { isUuid, optionalBoolean, optionalString, readJsonBody, requireString, requireUuidParam } from '../util.js';
@@ -1095,7 +1097,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.json(rows.map(toPlotJson));
   });
 
-  app.post('/', requireUser, async (c) => {
+  app.post('/', requireUser, rateLimit(deps, RATE_LIMITS.plots), async (c) => {
     const body = await readJsonBody(c);
     const name = requireString(body, 'name').trim();
     if (!name) throw badRequest('invalid_request', 'name must not be empty');
@@ -1141,7 +1143,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
    * picture as the cover — is lifted onto the plot around it. Card files are
    * user-controlled bytes, so every parse failure is a 400, never a 500.
    */
-  app.post('/import', requireUser, async (c) => {
+  app.post('/import', requireUser, admitImport(deps), async (c) => {
     const { parsed, fileName, imported } = await readCardUpload(c);
     const card = parsed.card;
     const name = card.name.trim() || fileName.replace(/\.[^.]+$/, '') || 'Unnamed';
@@ -1221,7 +1223,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
    * the plot is private whatever the source rated it. The images follow through
    * the ordinary avatar and asset uploads, against the ids the answer carries.
    */
-  app.post('/migrate', requireUser, async (c) => {
+  app.post('/migrate', requireUser, rateLimit(deps, RATE_LIMITS.plots), async (c) => {
     const body = await readJsonBody(c);
     const confirmations = body['confirmations'];
     if (!isObject(confirmations) || confirmations['ownWork'] !== true || confirmations['notExclusive'] !== true) {
@@ -1435,7 +1437,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
    * here can check — and the publish stamps when it was given. Unpublishing
    * asks for nothing.
    */
-  app.post('/:id/publish', requireUser, async (c) => {
+  app.post('/:id/publish', requireUser, rateLimit(deps, RATE_LIMITS.plots), async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const plot = await loadOwnedPlot(deps, id, userId);
@@ -1601,7 +1603,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
   });
 
   // Idempotent: the counter moves only when a like row actually appears/disappears.
-  app.post('/:id/like', requireUser, async (c) => {
+  app.post('/:id/like', requireUser, rateLimit(deps, RATE_LIMITS.social), async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     await loadVisiblePlot(deps.db, id, userId);
@@ -1617,7 +1619,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.json({ liked: true, likeCount });
   });
 
-  app.delete('/:id/like', requireUser, async (c) => {
+  app.delete('/:id/like', requireUser, rateLimit(deps, RATE_LIMITS.social), async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     await loadVisiblePlot(deps.db, id, userId);
@@ -1653,7 +1655,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
   });
 
   // Registered before `/:characterId`, which would otherwise swallow both.
-  app.post('/:id/characters/import', requireUser, async (c) => {
+  app.post('/:id/characters/import', requireUser, admitImport(deps), async (c) => {
     const id = requireUuidParam(c);
     const plot = await loadOwnedPlot(deps, id, c.get('userId'));
     const { parsed, fileName, imported } = await readCardUpload(c);
@@ -1834,7 +1836,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
    * same call the import path makes, so a PNG carrying a card is stripped here
    * too — the bytes are served to everyone who can see the plot.
    */
-  app.post('/:id/characters/:characterId/avatar', requireUser, async (c) => {
+  app.post('/:id/characters/:characterId/avatar', requireUser, rateLimit(deps, RATE_LIMITS.upload), async (c) => {
     const id = requireUuidParam(c);
     const characterId = requireUuidParam(c, 'characterId');
     const { plot, member } = await loadOwnedMember(deps, id, characterId, c.get('userId'));
@@ -2002,7 +2004,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.json(rows.map((asset) => toAssetJson(asset, plot.ownerId === viewerId)));
   });
 
-  app.post('/:id/assets', requireUser, async (c) => {
+  app.post('/:id/assets', requireUser, rateLimit(deps, RATE_LIMITS.upload), async (c) => {
     const id = requireUuidParam(c);
     await loadOwnedPlot(deps, id, c.get('userId'));
 
@@ -2177,7 +2179,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
    * are left out as a card's are. A module carries no default variables, so
    * there is nothing to merge into the work's. Unreadable is a 400, like a card.
    */
-  app.post('/:id/modules', requireUser, async (c) => {
+  app.post('/:id/modules', requireUser, admitImport(deps), async (c) => {
     const id = requireUuidParam(c);
     const owned = await loadOwnedPlot(deps, id, c.get('userId'));
     let form: FormData;
@@ -2297,7 +2299,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
    * an avatar is: it is an `<img>` on our origin, and a presigned redirect would
    * fail the sanitizer's same-origin rule.
    */
-  app.post('/:id/cover', requireUser, async (c) => {
+  app.post('/:id/cover', requireUser, rateLimit(deps, RATE_LIMITS.upload), async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const plot = await loadOwnedPlot(deps, id, userId);

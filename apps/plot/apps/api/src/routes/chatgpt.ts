@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { SIGN_IN_LOCALES, SignInFailure, type SignInLocale } from '../chatgptAccounts.js';
 import type { AppDeps, AppEnv } from '../deps.js';
 import { ApiError, badRequest } from '../errors.js';
+import { RATE_LIMITS, rateLimit } from '../rateLimit.js';
 import { cookie, readCookie } from '../hostedAuth.js';
 import { requireUser } from '../session.js';
 import { optionalString, readJsonBody } from '../util.js';
@@ -36,7 +37,7 @@ export function chatGPTRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.json(viewer && deps.chatgpt ? await deps.chatgpt.accounts.status(viewer) : { connected: false, email: null });
   });
 
-  app.post('/sign-in', async (c) => {
+  app.post('/sign-in', rateLimit(deps, RATE_LIMITS.signIn), async (c) => {
     const body = await readJsonBody(c);
     const locale = optionalString(body, 'locale') ?? 'ko';
     if (!SIGN_IN_LOCALES.includes(locale as SignInLocale)) throw badRequest('invalid_request', 'Unknown locale');

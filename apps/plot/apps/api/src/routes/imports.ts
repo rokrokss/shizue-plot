@@ -29,6 +29,7 @@ import {
 } from '../attachments.js';
 import type { AppDeps, AppEnv, Tx } from '../deps.js';
 import { ApiError, badRequest, notFound } from '../errors.js';
+import { RATE_LIMITS, rateLimit } from '../rateLimit.js';
 import { acquireChatSlot, rejectBusyChat, releaseChatSlot } from '../generation.js';
 import { enqueueJob } from '../jobs.js';
 import { memoryChannel, summaryDue } from '../memory.js';
@@ -477,7 +478,7 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
    * the same file is a 409 that names it; an unfinished one is what an import
    * that died part-way left behind, so it is deleted and this run starts over.
    */
-  app.post('/import', async (c) => {
+  app.post('/import', rateLimit(deps, RATE_LIMITS.chatImport), async (c) => {
     const userId = c.get('userId');
     const body = await readJsonBody(c);
     const plotId = requireString(body, 'plotId');

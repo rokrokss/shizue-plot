@@ -75,6 +75,7 @@ import {
   feedCursors,
   follows,
   jobs,
+  leases,
   loreEntryAliases,
   messageChunks,
   memories,
@@ -84,6 +85,7 @@ import {
   plots,
   plotAssets,
   plotSearchVectors,
+  rateLimits,
   readerModules,
   readerPresets,
   user,
@@ -151,9 +153,12 @@ import { refreshSearchVectors, resetSearchSweeps } from '../src/search.js';
 import { createJobHandlers, notificationFanout } from '../src/notifications.js';
 import { repairDisplayOrder } from '../src/maintenance/displayOrder.js';
 import { repairMemberScripts } from '../src/maintenance/memberScripts.js';
+import { IMPORT_MEMORY_PER_BYTE } from '../src/importAdmission.js';
 import { localizePlot, type RemoteFetch } from '../src/localizeAssets.js';
+import { acquireLease, releaseLease, renewLease as renewHeldLease } from '../src/leases.js';
 import { NARRATION_NUDGE } from '../src/routes/chats.js';
 import { MAX_ASSET_NAME_LENGTH, MAX_CARD_IMPORT_BYTES } from '../src/routes/plots.js';
+import { hitRateLimit, RATE_LIMITS } from '../src/rateLimit.js';
 import { runRequestLua } from '../src/requestLua.js';
 import { runRequestTriggers } from '../src/requestTriggers.js';
 import { createScriptFetch, type HopResponse, type Transport } from '../src/scriptFetch.js';
@@ -165,7 +170,7 @@ import { connectS3Server } from './s3Server.js';
 loadRootEnv();
 
 /**
- * The connection string for a suite that TRUNCATEs twenty-three tables before every
+ * The connection string for a suite that TRUNCATEs twenty-five tables before every
  * test, so the target has to say out loud that it is disposable. There is no
  * fallback to DATABASE_URL: that is the app's own database, and it is the name a
  * CI secret is most likely to carry.
@@ -306,7 +311,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await sql`TRUNCATE TABLE memories, chat_asset_unlocks, chat_attachments, messages, chat_note_links, user_notes, plot_reader_variables, plot_reader_overlays, chats, personas, comments, plot_likes, plot_assets, characters, notifications, follows, plots, feed_cursors, jobs, "session", account, verification, "user" RESTART IDENTITY CASCADE`;
+  await sql`TRUNCATE TABLE memories, chat_asset_unlocks, chat_attachments, messages, chat_note_links, user_notes, plot_reader_variables, plot_reader_overlays, chats, personas, comments, plot_likes, plot_assets, characters, notifications, follows, plots, feed_cursors, jobs, rate_limits, leases, "session", account, verification, "user" RESTART IDENTITY CASCADE`;
   auth = createAuth(db, {
     secret: 'test-secret-test-secret-test-secret',
     baseUrl: 'http://localhost:13000',
@@ -521,7 +526,16 @@ async function request(
   const headers: Record<string, string> = {};
   if (cookie) headers['cookie'] = cookie;
   if (typeof body === 'string') headers['content-type'] = 'application/json';
-  return target.request(path, { method, headers, ...(body === undefined ? {} : { body }) });
+  let payload: string | FormData | Uint8Array | undefined = body;
+  if (body instanceof FormData) {
+    // Sent as a browser sends a form, its length stated: a Request built around a
+    // FormData has no Content-Length until fetch sends it, and the imports want one.
+    const encoded = new Response(body);
+    headers['content-type'] = encoded.headers.get('content-type')!;
+    payload = new Uint8Array(await encoded.arrayBuffer());
+    headers['content-length'] = String(payload.byteLength);
+  }
+  return target.request(path, { method, headers, ...(payload === undefined ? {} : { body: payload }) });
 }
 
 const json = (
@@ -16890,9 +16904,10 @@ describe('script requests', () => {
    * as `answer` says. The clock is the test's.
    */
   function fetchingApp(answer: Transport, options: { timeoutMs?: number; maxBytes?: number } = {}) {
-    const clock = { now: 1_000_000 };
+    const clock = { now: Date.now() };
     const connected: { url: string; addresses: unknown }[] = [];
     const scriptFetch = createScriptFetch({
+      db,
       ownOrigins: ['https://plot.example', 'https://api.plot.example'],
       resolve: async (hostname) => [{ address: hostname === 'inside.test' ? '10.0.0.7' : '93.184.215.14', family: 4 }],
       transport: async (request) => {
@@ -16948,6 +16963,24 @@ describe('script requests', () => {
     clock.now += 1;
     expect(await send('https://site.test/8')).toEqual({ status: 200, data: '본문' });
     expect(connected.map((hop) => hop.url)).toEqual(['https://site.test/1', 'https://site.test/2', 'https://site.test/6', 'https://site.test/8']);
+  });
+
+  it('keeps one window per reader across API instances', async () => {
+    // Two instances: their own requesters, the one table.
+    const first = fetchingApp(async () => ok(200, '본문'));
+    const second = fetchingApp(async () => ok(200, '본문'));
+    second.clock.now = first.clock.now;
+    const { reader, chatId } = await luaChat('fetch-instances@example.com', true, first.target);
+    const sendTo = async (target: Hono<AppEnv>, url: string) =>
+      readJson(await json(reader, `/api/chats/${chatId}/script-fetch`, 'POST', { url }, target));
+    for (let i = 0; i < 3; i += 1) {
+      expect((await sendTo(first.target, `https://site.test/a${i}`)).status).toBe(200);
+      expect((await sendTo(second.target, `https://site.test/b${i}`)).status).toBe(200);
+    }
+    expect(await sendTo(first.target, 'https://site.test/a3')).toEqual({ status: 429, data: 'Too many requests. you can request 5 times per minute' });
+    expect(await sendTo(second.target, 'https://site.test/b3')).toEqual({ status: 429, data: 'Too many requests. you can request 5 times per minute' });
+    expect(first.connected).toHaveLength(3);
+    expect(second.connected).toHaveLength(3);
   });
 
   it('checks the address in RisuAI’s order, with its messages, and refuses this app’s own hosts as it refuses RisuAI’s', async () => {
@@ -17035,6 +17068,7 @@ describe('script requests', () => {
   it('does not take the generation slot: a request answers while a model call holds it', async () => {
     const { getAdapter, started, release } = gatedGetAdapter('대답');
     const scriptFetch = createScriptFetch({
+      db,
       resolve: async () => [{ address: '93.184.215.14', family: 4 }],
       transport: async () => ok(200, '본문'),
     });
@@ -20116,5 +20150,221 @@ describe('explore search by meaning', () => {
     await harness.settle();
     expect((await search(harness, '재벌')).items.map((plot: any) => plot.id)).toEqual([cat.id]);
     await harness.settle();
+  });
+});
+
+describe('rate limits', () => {
+  const window = { limit: 3, windowMs: 60_000 };
+
+  it('counts a fixed window in one statement: the limit goes through, the next waits for the window, which starts again once it has run out', async () => {
+    const start = new Date('2030-01-01T00:00:00Z');
+    const at = (ms: number) => new Date(start.getTime() + ms);
+    const hits = [];
+    for (const ms of [0, 10_000, 20_000, 30_000]) hits.push(await hitRateLimit(db, 'test:a', window, at(ms)));
+    expect(hits.map((hit) => [hit.hits, hit.allowed])).toEqual([[1, true], [2, true], [3, true], [4, false]]);
+    // Refused at 30s into a minute: thirty seconds to wait, the window's start unmoved.
+    expect(hits[3]).toMatchObject({ retryAfterSeconds: 30, windowStart: start });
+    // At the window's length exactly it still holds; a moment past it, it starts again.
+    expect(await hitRateLimit(db, 'test:a', window, at(60_000))).toMatchObject({ hits: 5, allowed: false, retryAfterSeconds: 1 });
+    expect(await hitRateLimit(db, 'test:a', window, at(60_001))).toMatchObject({ hits: 1, allowed: true, windowStart: at(60_001) });
+    // Another key has a window of its own.
+    expect(await hitRateLimit(db, 'test:b', window, at(60_001))).toMatchObject({ hits: 1, allowed: true });
+  });
+
+  it('counts hits that arrive together exactly once each', async () => {
+    const at = new Date();
+    const hits = await Promise.all(Array.from({ length: 20 }, () => hitRateLimit(db, 'test:burst', { limit: 10, windowMs: 60_000 }, at)));
+    expect(hits.map((hit) => hit.hits).sort((a, b) => a - b)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1));
+    expect(hits.filter((hit) => hit.allowed)).toHaveLength(10);
+  });
+
+  it('collects windows that ended a day ago when one opens, a batch at a time, and leaves the rest', async () => {
+    const now = Date.now();
+    await db.insert(rateLimits).values([
+      ...Array.from({ length: 60 }, (_, i) => ({ key: `test:dead${i}`, windowStart: new Date(now - 25 * 3_600_000), hits: 9 })),
+      { key: 'test:recent', windowStart: new Date(now - 3_600_000), hits: 9 },
+    ]);
+    const left = async () => (await db.select({ key: rateLimits.key }).from(rateLimits)).map((row) => row.key);
+    // A hit inside an open window collects nothing.
+    await hitRateLimit(db, 'test:recent', { limit: 3, windowMs: 2 * 3_600_000 });
+    expect(await left()).toHaveLength(61);
+    await hitRateLimit(db, 'test:new', window);
+    expect(await left()).toHaveLength(62 - 50);
+    await hitRateLimit(db, 'test:newer', window);
+    expect((await left()).sort()).toEqual(['test:new', 'test:newer', 'test:recent']);
+  });
+
+  it('throttles sign-in starts by client address, the proxy’s header first when one is named', async () => {
+    const openai = fakeOpenAI();
+    const { target } = hostedApp(openai);
+    const start = (on: Hono<AppEnv>, headers: Record<string, string>) =>
+      on.request('/api/chatgpt/sign-in', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...headers },
+        body: JSON.stringify({ next: '/', locale: 'ko' }),
+      });
+    // The rightmost forwarded entry is the one counted: what came before it is the client's own word.
+    for (let i = 0; i < RATE_LIMITS.signIn.limit; i += 1) {
+      expect((await start(target, { 'x-forwarded-for': `198.51.100.${i}, 203.0.113.7` })).status).toBe(200);
+    }
+    const refused = await start(target, { 'x-forwarded-for': '203.0.113.7' });
+    expect(refused.status).toBe(429);
+    expect(await readJson(refused)).toEqual({ error: expect.any(String), code: 'rate_limited' });
+    expect(Number(refused.headers.get('retry-after'))).toBeGreaterThan(500);
+    expect((await start(target, { 'x-forwarded-for': '203.0.113.8' })).status).toBe(200);
+    const rows = await db.select({ key: rateLimits.key }).from(rateLimits);
+    expect(rows.map((row) => row.key).sort()).toEqual(['sign_in:ip:203.0.113.7', 'sign_in:ip:203.0.113.8']);
+
+    // Behind a proxy that names the client in a header of its own, the header decides.
+    const named = hostedApp(fakeOpenAI(), { CLIENT_IP_HEADER: 'cf-connecting-ip' }).target;
+    expect((await start(named, { 'cf-connecting-ip': '203.0.113.7', 'x-forwarded-for': '192.0.2.1' })).status).toBe(429);
+    expect((await start(named, { 'cf-connecting-ip': '192.0.2.1', 'x-forwarded-for': '203.0.113.7' })).status).toBe(200);
+  });
+
+  it('refuses a generation start past the reader’s window, on all six routes, before anything is stored', async () => {
+    const cookie = await signUp('gen-limit@example.com');
+    const { chatId } = await setupChat(cookie);
+    const userId = (await readJson(await request(cookie, '/api/auth/get-session'))).user.id;
+    const key = `generation:user:${userId}`;
+    // A start goes through and is counted.
+    expect((await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }))).at(-1)!.event).toBe('done');
+    const [counted] = await db.select().from(rateLimits).where(eq(rateLimits.key, key));
+    expect(counted!.hits).toBe(1);
+
+    await db.update(rateLimits).set({ hits: RATE_LIMITS.generation.limit }).where(eq(rateLimits.key, key));
+    const before = await db.select({ id: messages.id }).from(messages).where(eq(messages.chatId, chatId));
+    for (const route of ['messages', 'regenerate', 'continue', 'auto', 'narrate', 'reply']) {
+      const res = await json(cookie, `/api/chats/${chatId}/${route}`, 'POST', { content: '또', speakerId: randomUUID() });
+      expect(res.status, route).toBe(429);
+      expect((await readJson(res)).code).toBe('rate_limited');
+      expect(Number(res.headers.get('retry-after'))).toBeGreaterThan(0);
+    }
+    expect(await db.select({ id: messages.id }).from(messages).where(eq(messages.chatId, chatId))).toHaveLength(before.length);
+
+    // Another reader has a window of their own; this one's opens again once it runs out.
+    const other = await signUp('gen-limit-other@example.com');
+    const theirs = await setupChat(other);
+    expect((await readSse(await json(other, `/api/chats/${theirs.chatId}/messages`, 'POST', { content: '안녕' }))).at(-1)!.event).toBe('done');
+    await db
+      .update(rateLimits)
+      .set({ windowStart: new Date(Date.now() - RATE_LIMITS.generation.windowMs - 1_000) })
+      .where(eq(rateLimits.key, key));
+    expect((await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST'))).at(-1)!.event).toBe('done');
+  });
+});
+
+describe('leases', () => {
+  it('holds one holder at a time: taken from nobody or an expired holder, renewed and released only by its own', async () => {
+    const ttl = 60_000;
+    expect(await acquireLease(db, 'test:lease', 'a', ttl)).toBe(true);
+    // Live: nobody else takes it, renews it or frees it — and its own holder does not take it twice.
+    expect(await acquireLease(db, 'test:lease', 'b', ttl)).toBe(false);
+    expect(await acquireLease(db, 'test:lease', 'a', ttl)).toBe(false);
+    expect(await renewHeldLease(db, 'test:lease', 'b', ttl)).toBe(false);
+    await releaseLease(db, 'test:lease', 'b');
+    expect(await db.select().from(leases)).toMatchObject([{ key: 'test:lease', holder: 'a' }]);
+    expect(await renewHeldLease(db, 'test:lease', 'a', ttl)).toBe(true);
+
+    // Expired: taken over, and the late holder can neither renew nor free the new one's.
+    await db.update(leases).set({ expiresAt: new Date(Date.now() - 1_000) });
+    expect(await acquireLease(db, 'test:lease', 'b', ttl)).toBe(true);
+    expect(await renewHeldLease(db, 'test:lease', 'a', ttl)).toBe(false);
+    await releaseLease(db, 'test:lease', 'a');
+    expect(await db.select().from(leases)).toMatchObject([{ key: 'test:lease', holder: 'b' }]);
+    await releaseLease(db, 'test:lease', 'b');
+    expect(await db.select().from(leases)).toEqual([]);
+    expect(await acquireLease(db, 'test:lease', 'a', ttl)).toBe(true);
+  });
+
+  it('gives a lease asked for by many at once to exactly one of them', async () => {
+    const taken = await Promise.all(Array.from({ length: 10 }, (_, i) => acquireLease(db, 'test:race', `holder-${i}`, 60_000)));
+    expect(taken.filter(Boolean)).toHaveLength(1);
+    const [row] = await db.select().from(leases);
+    expect(row!.holder).toBe(`holder-${taken.indexOf(true)}`);
+  });
+});
+
+describe('import admission', () => {
+  const pngCard = (): File =>
+    new File(
+      [buildPngWithTextChunks({ chara: Buffer.from(JSON.stringify(v2Card), 'utf-8').toString('base64') })],
+      'lian.png',
+      { type: 'image/png' },
+    );
+  const cardForm = (): FormData => {
+    const form = new FormData();
+    form.append('file', pngCard());
+    return form;
+  };
+
+  /** Storage whose writes wait for `release`, so an import can be held part-way; `reached` settles at the first. */
+  function heldStorage(): { held: ObjectStorage; reached: Promise<void>; release: () => void } {
+    let release!: () => void;
+    let reach!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const reached = new Promise<void>((resolve) => (reach = resolve));
+    const held: ObjectStorage = {
+      ...storage,
+      put: async (...args) => {
+        reach();
+        await gate;
+        return storage.put(...args);
+      },
+    };
+    return { held, reached, release };
+  }
+
+  it('refuses an import that does not state its length, on every import route', async () => {
+    const cookie = await signUp('length@example.com');
+    const plot = await createPlot(cookie);
+    for (const path of ['/api/plots/import', `/api/plots/${plot.id}/characters/import`, `/api/plots/${plot.id}/modules`, '/api/reader-modules']) {
+      const form = new FormData();
+      form.append('file', cardFile());
+      // A Request around a FormData states no length, as a chunked upload would not.
+      const res = await app.request(path, { method: 'POST', headers: { cookie }, body: form });
+      expect(res.status, path).toBe(411);
+      expect((await readJson(res)).code).toBe('length_required');
+    }
+    expect(await db.select({ id: plots.id }).from(plots)).toHaveLength(1);
+  });
+
+  it('lets a reader import one file at a time, across instances, while another reader’s goes on', async () => {
+    const { held, reached, release } = heldStorage();
+    const other = makeApp();
+    const alice = await signUp('one-at-a-time@example.com');
+    const bob = await signUp('meanwhile@example.com');
+    const first = request(alice, '/api/plots/import', 'POST', cardForm(), makeApp({ storage: held }));
+    await reached;
+    // The same reader on another instance: refused while the first is running.
+    const second = await request(alice, '/api/plots/import', 'POST', cardForm(), other);
+    expect(second.status).toBe(429);
+    expect(await readJson(second)).toEqual({ error: expect.any(String), code: 'import_busy' });
+    expect((await request(bob, '/api/plots/import', 'POST', cardForm(), other)).status).toBe(201);
+    release();
+    expect((await first).status).toBe(201);
+    // Given back once it ended.
+    expect(await db.select().from(leases)).toEqual([]);
+    expect((await request(alice, '/api/plots/import', 'POST', cardForm(), other)).status).toBe(201);
+  });
+
+  it('lets a lone import in whatever its size, and turns one away past the budget while another is being read', async () => {
+    const env = { IMPORT_MEMORY_BUDGET_MB: '0.001' };
+    const cookie = await signUp('lone@example.com');
+    expect(pngCard().size * IMPORT_MEMORY_PER_BYTE).toBeGreaterThan(0.001 * 1024 * 1024);
+    // Alone: in, though it reserves past the whole budget.
+    expect((await request(cookie, '/api/plots/import', 'POST', cardForm(), makeApp({ env }))).status).toBe(201);
+
+    const { held, reached, release } = heldStorage();
+    const running = request(cookie, '/api/plots/import', 'POST', cardForm(), makeApp({ env, storage: held }));
+    await reached;
+    // In the same process, by another reader: past the budget beside the one being read.
+    const other = await signUp('lone-other@example.com');
+    const busy = await request(other, '/api/plots/import', 'POST', cardForm(), makeApp({ env }));
+    expect(busy.status).toBe(503);
+    expect(await readJson(busy)).toEqual({ error: expect.any(String), code: 'import_busy' });
+    expect(Number(busy.headers.get('retry-after'))).toBeGreaterThan(0);
+    release();
+    expect((await running).status).toBe(201);
+    expect((await request(other, '/api/plots/import', 'POST', cardForm(), makeApp({ env }))).status).toBe(201);
   });
 });

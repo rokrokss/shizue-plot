@@ -183,6 +183,13 @@
       "when": 1792118963373,
       "tag": "0025_drop_lore_vectors",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1792155507300,
+      "tag": "0026_rate_limits_and_leases",
+      "breakpoints": true
     }
   ]
 }

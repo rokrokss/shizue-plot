@@ -42,8 +42,8 @@ const deps: AppDeps = {
   chatgpt: { accounts, sessions },
   webOrigin: config.authUrl,
   storage: createStorage(config.storage),
-  // One for the process: card scripts' requests and the per-reader rate limit they share.
-  scriptFetch: createScriptFetch({ ownOrigins: [config.authUrl, ...(config.apiOrigin ? [config.apiOrigin] : [])] }),
+  // One for the process: card scripts' requests, their in-flight cap, and the per-reader rate limit in `rate_limits`.
+  scriptFetch: createScriptFetch({ db, ownOrigins: [config.authUrl, ...(config.apiOrigin ? [config.apiOrigin] : [])] }),
   // What an import fetches of a card's pictures and fonts on other hosts, never this app's own.
   remoteFetch: createRemoteFetch({ ownOrigins: [config.authUrl, ...(config.apiOrigin ? [config.apiOrigin] : [])] }),
   env: config.env,

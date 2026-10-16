@@ -4,6 +4,7 @@ import { Hono } from 'hono';
 import { MAX_IMAGE_BYTES, mimeForPath, storableImage } from '../avatar.js';
 import type { AppDeps, AppEnv } from '../deps.js';
 import { badRequest, notFound } from '../errors.js';
+import { RATE_LIMITS, rateLimit } from '../rateLimit.js';
 import { deleteQuietly, personaAvatarKey } from '../storage.js';
 import { optionalString, readJsonBody, requireString, requireUuidParam } from '../util.js';
 
@@ -100,7 +101,7 @@ export function personaRoutes(deps: AppDeps): Hono<AppEnv> {
    * every read goes through `loadOwnedPersona` — so its picture is served the way
    * a chat attachment is: to that one account, never to a plot's readers.
    */
-  app.post('/:id/avatar', async (c) => {
+  app.post('/:id/avatar', rateLimit(deps, RATE_LIMITS.upload), async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const persona = await loadOwnedPersona(deps, id, userId);

@@ -3,6 +3,7 @@ import { and, asc, desc, eq, inArray, isNull, sql, type SQL } from 'drizzle-orm'
 import { Hono } from 'hono';
 import type { AppDeps, AppEnv } from '../deps.js';
 import { badRequest, forbidden, notFound } from '../errors.js';
+import { RATE_LIMITS, rateLimit } from '../rateLimit.js';
 import { loadVisiblePlot } from '../hub.js';
 import { requireUser } from '../session.js';
 import { isUuid, optionalBoolean, readJsonBody, requireString, requireUuidParam } from '../util.js';
@@ -209,7 +210,7 @@ export function plotCommentRoutes(deps: AppDeps): Hono<AppEnv> {
     });
   });
 
-  app.post('/:id/comments', requireUser, async (c) => {
+  app.post('/:id/comments', requireUser, rateLimit(deps, RATE_LIMITS.comment), async (c) => {
     const userId = c.get('userId');
     const plot = await loadVisiblePlot(deps.db, requireUuidParam(c), userId);
     if (!plot.commentsEnabled) {

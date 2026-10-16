@@ -15,8 +15,8 @@
  *   for check and answer for answer: the rate limit, the 120-character cap,
  *   https only, its banned addresses — and this app's own — then a GET, and
  *   `{status, data}`, with `internal error` for anything that threw. RisuAI
- *   keeps one counter per app session; here it is one per reader, in this
- *   process's memory.
+ *   keeps one counter per app session; here it is one per reader, in the
+ *   `rate_limits` table every API instance counts against (`rateLimit.ts`).
  * - `guardedGet` is what a server inside someone's network must add: the GET
  *   never reaches an address that is not public. It resolves the name itself,
  *   refuses the lot when any answer is private, and connects only to the
@@ -28,10 +28,12 @@
  * DNS and the connection are both injectable (`resolve`, `transport`), so the
  * tests never touch the network.
  */
+import type { Db } from '@shizue/db';
 import { ADDRCONFIG, promises as dns, type LookupAddress } from 'node:dns';
 import type { IncomingHttpHeaders } from 'node:http';
 import { Agent, request as httpsRequest, type RequestOptions } from 'node:https';
 import { isIP, type LookupFunction } from 'node:net';
+import { hitRateLimit } from './rateLimit.js';
 
 /** What a script gets back, before RisuAI's `JSON.stringify`. */
 export interface ScriptFetchAnswer {
@@ -46,10 +48,12 @@ const INTERNAL_ERROR: ScriptFetchAnswer = { status: 400, data: 'internal error' 
  * RisuAI's rate limit: a window that starts again on the first request more
  * than a minute after it last started, and a refusal once *more than five*
  * came in it. The check comes before the count, so six get through and the
- * seventh is refused — whatever its message says.
+ * seventh is refused — whatever its message says. The shared limiter counts
+ * first and lets through up to its limit, so the limit is six; it also counts
+ * the refused ones, which RisuAI does not, but a refused reader stays refused
+ * until the window runs out either way.
  */
-const WINDOW_MS = 60_000;
-const MORE_THAN = 5;
+const SCRIPT_FETCH_WINDOW = { limit: 6, windowMs: 60_000 };
 const MAX_URL_LENGTH = 120;
 /** RisuAI's own, matched as it matches them: on the start of the text. */
 const BANNED_PREFIXES = ['https://realm.risuai.net', 'https://risuai.net', 'https://risuai.xyz'];
@@ -113,7 +117,7 @@ const BLOCKED_V4_NUMBERS = BLOCKED_V4.map(([base, bits]) => [v4Number(base) >>> 
 const publicV4 = (value: number): boolean => !BLOCKED_V4_NUMBERS.some(([prefix, bits]) => value >>> (32 - bits) === prefix);
 
 /** An IPv6 address — one `net.isIPv6` accepts — as its eight 16-bit words. */
-function v6Words(address: string): number[] {
+export function v6Words(address: string): number[] {
   let text = address.toLowerCase().replace(/%.*$/, '');
   let tail: number[] = [];
   const dotted = /\d+\.\d+\.\d+\.\d+$/.exec(text);
@@ -425,8 +429,11 @@ export interface ScriptFetch {
 }
 
 export interface ScriptFetchOptions extends Omit<GuardOptions, 'refuse' | 'signal'> {
+  /** Where the readers' windows are counted (`rate_limits`), shared by every instance. */
+  db: Db;
   /** This app's own origins — the web app, and the API's when it has one of its own — refused as RisuAI refuses its. */
   ownOrigins?: readonly string[];
+  /** The windows' clock; the tests drive it. */
   now?: () => number;
   maxInFlight?: number;
 }
@@ -434,37 +441,22 @@ export interface ScriptFetchOptions extends Omit<GuardOptions, 'refuse' | 'signa
 /** A host as two spellings of it compare equal: `new URL` lowercased it; a trailing dot is the same name. */
 const sameHost = (hostname: string): string => hostname.replace(/\.$/, '');
 
-export function createScriptFetch(options: ScriptFetchOptions = {}): ScriptFetch {
+export function createScriptFetch(options: ScriptFetchOptions): ScriptFetch {
   const now = options.now ?? Date.now;
   const maxInFlight = options.maxInFlight ?? SCRIPT_FETCH_MAX_IN_FLIGHT;
   const ownHosts = new Set((options.ownOrigins ?? []).map((origin) => sameHost(new URL(origin).hostname)));
   const ours = (url: URL): boolean => ownHosts.has(sameHost(url.hostname));
   /** A redirect may not go where the first address could not. */
   const refuse = (url: URL): boolean => BANNED_PREFIXES.some((prefix) => url.href.startsWith(prefix)) || ours(url);
-  /** RisuAI's `lastRequestResetTime` and `lastRequestsCount`, per reader. */
-  const counters = new Map<string, { resetAt: number; count: number }>();
-  let swept = 0;
+  /** Requests this process has open: a resource guard of its own, not part of RisuAI's limit. */
   let inFlight = 0;
-
-  /** A reader whose window has ended counts as one never seen, so ended windows are dropped now and then. */
-  function sweep(at: number): void {
-    if (at - swept <= WINDOW_MS) return;
-    swept = at;
-    for (const [reader, counter] of counters) if (counter.resetAt + WINDOW_MS < at) counters.delete(reader);
-  }
 
   return {
     async request(readerId, url, signal) {
-      const at = now();
-      sweep(at);
-      let counter = counters.get(readerId);
-      if (!counter || counter.resetAt + WINDOW_MS < at) {
-        counter = { resetAt: at, count: 0 };
-        counters.set(readerId, counter);
-      }
-      if (counter.count > MORE_THAN) return { status: 429, data: 'Too many requests. you can request 5 times per minute' };
-      // Counted before the address is looked at: a refused one spends a request too, as in RisuAI.
-      counter.count += 1;
+      // RisuAI's `lastRequestResetTime` and `lastRequestsCount`, per reader, counted
+      // before the address is looked at: a refused one spends a request too, as in RisuAI.
+      const { allowed } = await hitRateLimit(options.db, `script_fetch:user:${readerId}`, SCRIPT_FETCH_WINDOW, new Date(now()));
+      if (!allowed) return { status: 429, data: 'Too many requests. you can request 5 times per minute' };
 
       // RisuAI reads `url.length` and `url.startsWith` inside its `try`: anything but text ends in its catch.
       if (typeof url !== 'string') return INTERNAL_ERROR;
