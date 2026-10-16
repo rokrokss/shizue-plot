@@ -15,6 +15,7 @@ import { assetResponse, byNameOf } from '../assets.js';
 import { coerceLorebook } from '../card.js';
 import type { AppDeps, AppEnv } from '../deps.js';
 import { ApiError, badRequest, notFound } from '../errors.js';
+import { admitImport } from '../importAdmission.js';
 import {
   deleteReaderModuleAssets,
   MAX_READER_MODULES,
@@ -95,7 +96,7 @@ export function readerModuleRoutes(deps: AppDeps): Hono<AppEnv> {
    * to them (`localizeReaderModule`), as a work's module is when its creator
    * imports it — at render, a chat contacts no third host.
    */
-  app.post('/', async (c) => {
+  app.post('/', admitImport(deps), async (c) => {
     const userId = c.get('userId');
     let form: FormData;
     try {

@@ -5,6 +5,7 @@ import type { PgColumn } from 'drizzle-orm/pg-core';
 import { Hono } from 'hono';
 import type { AppDeps, AppEnv } from '../deps.js';
 import { badRequest, notFound } from '../errors.js';
+import { RATE_LIMITS, rateLimit } from '../rateLimit.js';
 import { pageSnapshotFeed } from '../feedCursor.js';
 import { publiclyListed, publicPlotList, publicPlotQuery, type PublicPlotRow } from '../hub.js';
 import { noteLexicalSearch } from '../lexicalHealth.js';
@@ -366,7 +367,7 @@ export function creatorRoutes(deps: AppDeps): Hono<AppEnv> {
 
   // Idempotent, like the plot like: the pair is the key, so following twice is
   // the same row and both calls answer with the state that now holds.
-  app.post('/:userId/follow', requireUser, async (c) => {
+  app.post('/:userId/follow', requireUser, rateLimit(deps, RATE_LIMITS.social), async (c) => {
     const creatorId = c.req.param('userId')!;
     const userId = c.get('userId');
     // Refused rather than quietly dropped: a self-follow is a client that got
@@ -378,7 +379,7 @@ export function creatorRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.json(await followState(deps.db, creator.id, userId));
   });
 
-  app.delete('/:userId/follow', requireUser, async (c) => {
+  app.delete('/:userId/follow', requireUser, rateLimit(deps, RATE_LIMITS.social), async (c) => {
     const userId = c.get('userId');
     const creator = await loadCreator(deps, c.req.param('userId')!);
 

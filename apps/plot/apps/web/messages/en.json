@@ -1305,6 +1305,8 @@
     "suggestions_failed": "No replies could be suggested.",
     "suggestion_in_progress": "Replies are already being suggested.",
     "rate_limited": "Too many requests. Try again in a moment.",
+    "import_busy": "Another import is in progress. Try again in a moment.",
+    "length_required": "The file’s size wasn’t sent, so it couldn’t be imported. Try again.",
     "chatgpt_login_required": "Connect ChatGPT in AI settings.",
     "invalid_grant": "Your ChatGPT connection expired. Reconnect in AI settings.",
     "subscription_sharing_usage_limit_exceeded": "Your ChatGPT usage limit has been reached. Try later or check your ChatGPT plan.",

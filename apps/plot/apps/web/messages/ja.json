@@ -1305,6 +1305,8 @@
     "suggestions_failed": "返信を提案できませんでした。",
     "suggestion_in_progress": "すでに返信を提案しています。",
     "rate_limited": "リクエストが多すぎます。少し待ってから再試行してください。",
+    "import_busy": "別の読み込みが進行中です。少し待ってから再試行してください。",
+    "length_required": "ファイルのサイズが送られなかったため、読み込めませんでした。もう一度お試しください。",
     "chatgpt_login_required": "AI 設定で ChatGPT を接続してください。",
     "invalid_grant": "ChatGPT 接続の有効期限が切れました。AI 設定で再接続してください。",
     "subscription_sharing_usage_limit_exceeded": "ChatGPT の利用上限に達しました。後で再試行するか、ChatGPT プランを確認してください。",

@@ -149,6 +149,7 @@ import {
   readerLibrary,
 } from '../readerModules.js';
 import { readerModuleAssetsJson, toReaderModuleJson } from './readerModules.js';
+import { RATE_LIMITS, rateLimit } from '../rateLimit.js';
 import { buildRelationshipText } from '../relationship.js';
 import { drawSceneEnabled, generateSceneImage, sceneImagePrompt } from '../sceneImage.js';
 import {
@@ -1946,7 +1947,7 @@ function scriptBundleOf(
 
 export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
-  const scriptFetch = deps.scriptFetch ?? createScriptFetch({ ownOrigins: deps.webOrigin ? [deps.webOrigin] : [] });
+  const scriptFetch = deps.scriptFetch ?? createScriptFetch({ db: deps.db, ownOrigins: deps.webOrigin ? [deps.webOrigin] : [] });
 
   // The reader's own chats, newest activity first. Each row carries what a list
   // of conversations is read by — the plot's cover and how the chat currently
@@ -3076,7 +3077,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * all — and the 8MB cap is enforced here as well as by the body limit in front
    * of the route, which bounds the multipart parse.
    */
-  app.post('/:id/attachments', async (c) => {
+  app.post('/:id/attachments', rateLimit(deps, RATE_LIMITS.upload), async (c) => {
     const chat = await loadWritableChat(deps, requireUuidParam(c), c.get('userId'));
 
     let form: FormData;
@@ -3202,7 +3203,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.body(null, 204);
   });
 
-  app.post('/:id/messages', async (c) => {
+  app.post('/:id/messages', rateLimit(deps, RATE_LIMITS.generation), async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const body = await readJsonBody(c);
@@ -3373,7 +3374,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
 
   // In a work of several members, with `speakerId`: the whole round again, from
   // its first speaker (`regeneratePlan`). Without it, the head as it always was.
-  app.post('/:id/regenerate', async (c) => {
+  app.post('/:id/regenerate', rateLimit(deps, RATE_LIMITS.generation), async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const body = await optionalJsonBody(c);
@@ -3416,7 +3417,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * 409 `post_processing_pending`, so the next speaker's start triggers never run
    * before the last reply is finished.
    */
-  app.post('/:id/reply', async (c) => {
+  app.post('/:id/reply', rateLimit(deps, RATE_LIMITS.generation), async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const body = await readJsonBody(c);
@@ -3518,7 +3519,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.json(await inspectGeneration(deps, plan, userId, deps.chatgpt?.accounts.forUser(userId)));
   });
 
-  app.post('/:id/continue', async (c) => {
+  app.post('/:id/continue', rateLimit(deps, RATE_LIMITS.generation), async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const body = await optionalJsonBody(c);
@@ -3627,7 +3628,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   // Auto-continue: one more assistant turn with no user message in between. The
   // nudge that asks for it is appended to the prompt and never stored, so the
   // branch holds nothing but the two assistant messages.
-  app.post('/:id/auto', async (c) => {
+  app.post('/:id/auto', rateLimit(deps, RATE_LIMITS.generation), async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const body = await optionalJsonBody(c);
@@ -3709,7 +3710,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   // with the plot's characters is the ordinary way to use it. The stored turn carries the
   // narration prefix, which is what makes it one; the nudge that asked for it is
   // appended to the prompt and never stored.
-  app.post('/:id/narrate', async (c) => {
+  app.post('/:id/narrate', rateLimit(deps, RATE_LIMITS.generation), async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const body = await optionalJsonBody(c);

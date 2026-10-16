@@ -1305,6 +1305,8 @@
     "suggestions_failed": "답장을 제안하지 못했습니다.",
     "suggestion_in_progress": "이미 답장을 제안하고 있습니다.",
     "rate_limited": "요청이 너무 잦습니다. 잠시 후 다시 시도하세요.",
+    "import_busy": "다른 가져오기가 진행 중입니다. 잠시 후 다시 시도하세요.",
+    "length_required": "파일 크기가 전해지지 않아 가져오지 못했습니다. 다시 시도하세요.",
     "chatgpt_login_required": "AI 설정에서 ChatGPT를 연결해 주세요.",
     "invalid_grant": "ChatGPT 연결이 만료되었습니다. AI 설정에서 다시 연결해 주세요.",
     "subscription_sharing_usage_limit_exceeded": "ChatGPT 사용 한도에 도달했습니다. 나중에 다시 시도하거나 ChatGPT 요금제를 확인해 주세요.",
