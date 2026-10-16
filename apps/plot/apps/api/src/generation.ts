@@ -150,6 +150,8 @@ export interface GenerationPlan {
   memoryText: string;
   /** The facts block (`[기억]`) the recall turn opens with; empty when none was selected. */
   factsText: string;
+  /** The turn the time labels count back from (`MemoryInput.clock`): the facts' and summaries', and retrieval's. */
+  memoryClock: number;
   /** Relationship state block, empty when the chat has none or turned it off. */
   relationshipText: string;
   /** The chat's author note, injected at its depth (`AUTHOR_NOTE_DEPTH` unless the chat sets one). */
@@ -965,6 +967,7 @@ async function assembleRequest(
     branch: plan.wholeBranch,
     sent: new Set(plan.history.flatMap((turn) => (turn.id !== undefined ? [turn.id] : []))),
     userName: plan.userName,
+    clock: plan.memoryClock,
   });
   // The scripts read the turns as stored, before an image note is added to them —
   // the greeting as the reader's overlay has it, which is what the assembler sends.

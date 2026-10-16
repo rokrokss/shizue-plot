@@ -8912,6 +8912,34 @@ describe('memory', () => {
       await harness.settle();
     });
 
+    it('dates a regenerate’s facts and retrieved messages from one clock, the turn’s own, when its reply closes the tenth round', async () => {
+      const cookie = await signUp('retrieval-dated-regenerate@example.com');
+      const { chatId } = await setupChat(cookie);
+      const embedder = keywordEmbedder();
+      const harness = memoryApp({ embedder });
+      await json(cookie, `/api/chats/${chatId}`, 'PATCH', { retrieval: { enabled: true } }, harness.app);
+      const KEEPER = '등대지기를 만났다';
+      await ask(cookie, chatId, harness, KEEPER);
+      // The greeting and 28 rounds; the summary covers the first exchange.
+      const ids = (await shortTurns(cookie, chatId, harness, 27)).map((message: any) => message.id);
+      const summary = await seedSummary(chatId, ids.slice(0, 3), '첫 인사를 나눴다.');
+      await insertFact(chatId, summary.id, FACTS[1]!, embedder);
+
+      // Asked on 29 rounds, the clock at 20; the reply closes the 30th.
+      await ask(cookie, chatId, harness, '그 등대 기억나?');
+      const asked = harness.prompts.at(-1)!;
+      // Its regenerate is asked on the same 29 rounds, not counting the reply it replaces:
+      // the summary, its fact and the message brought back all stand about 20 ago, as they did.
+      expect((await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app))).at(-1)!.event).toBe('done');
+      const again = harness.prompts.at(-1)!;
+      expect(again).not.toBe(asked);
+      expect(again.system).toContain(`${MEMORY_HEADING}\n(약 20턴 전) 첫 인사를 나눴다.`);
+      expect(recallOf(again)).toContain(`${FACTS_HEADING}\n- (약 20턴 전) ${FACTS[1]}`);
+      expect(recallOf(again)).toMatch(new RegExp(`\\n\\nPast events:\\n\\(약 20턴 전\\) [^\\n]+: ${KEEPER}$`));
+      expect(recallOf(again)).toBe(recallOf(asked));
+      await harness.settle();
+    });
+
     /** A turn's memory as sent (`memoryOf`), its time labels and all. */
     const askRaw = async (cookie: string, chatId: string, harness: Harness, content: string): Promise<string> => {
       const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }, harness.app);

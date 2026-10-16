@@ -82,7 +82,7 @@ import { loadMembers } from './hub.js';
 import { enqueueJob } from './jobs.js';
 import { noteLexicalSearch } from './lexicalHealth.js';
 import { readerMembers, transcriptOf } from './transcript.js';
-import { buildPath, roundsAlong, visibleToAi } from './tree.js';
+import { buildPath, roundCount, roundsAlong, visibleToAi } from './tree.js';
 
 /** What one summary call may write; HypaV3 does not cap it, the API needs a number. */
 const SUMMARY_MAX_TOKENS = 1600;
@@ -168,6 +168,8 @@ export interface MemoryInput {
   factsText: string;
   /** The branch after the last message an applying summary covers. */
   history: Message[];
+  /** The turn this generation's time labels count back from (`memoryClock`): the memory's, and retrieval's (`searchByMeaning`). */
+  clock: number;
 }
 
 /**
@@ -198,7 +200,10 @@ export async function buildMemoryInput(
 ): Promise<MemoryInput> {
   const { applicable, frontier } = applicableSummaries(await loadSummaries(deps.db, chat.id), path);
   const history = path.slice(frontier + 1);
-  if (applicable.length === 0) return { memoryText: '', factsText: '', history };
+  // The turns of the branch the reply answers, not `path`'s: a regenerate's
+  // `path` still holds the reply it replaces, which closed a round of its own.
+  const now = memoryClock(roundCount(answering));
+  if (applicable.length === 0) return { memoryText: '', factsText: '', history, clock: now };
 
   const settings = memorySettingsOf(chat);
   const available = memoryTokenBudget(settings.contextBudget, settings) - countTokens(`${MEMORY_HEADING}\n`);
@@ -210,7 +215,6 @@ export async function buildMemoryInput(
   // (`memoryClock`, which moves every ten turns), in the language the
   // conversation runs in — the label counts against the share like the words.
   const rounds = roundsAlong(path);
-  const now = memoryClock(rounds.at(-1) ?? 0);
   const position = new Map(path.map((message, at) => [message.id, at]));
   const language = detectContentLanguage(turns.slice(-LANGUAGE_TURNS).join('\n'));
   const labels = new Map(
@@ -255,7 +259,7 @@ export async function buildMemoryInput(
       console.warn('[memory] the facts were left out: the queries could not be embedded', error);
     }
   }
-  return { memoryText: memoryBlock(selection.selected.map(dated)), factsText: factsBlock(facts), history };
+  return { memoryText: memoryBlock(selection.selected.map(dated)), factsText: factsBlock(facts), history, clock: now };
 }
 
 /** The plot's content language, which picks its embedding model; null for a plot that is gone. */

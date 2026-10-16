@@ -40,7 +40,6 @@ import {
   isVectorLoreCandidate,
   lexicalRanking,
   loreChunks,
-  memoryClock,
   RETRIEVAL_DEFAULTS,
   retrievalBlock,
   retrievalChunks,
@@ -605,6 +604,8 @@ export async function searchByMeaning(
     /** The ids of the history the prompt sends verbatim: none of it is brought back again. */
     sent: ReadonlySet<string>;
     userName: string;
+    /** The turn the time labels count back from: the memory's for this generation (`MemoryInput.clock`). */
+    clock: number;
   },
 ): Promise<VectorSearch> {
   const { vectors, branch, sent } = input;
@@ -783,7 +784,7 @@ async function retrievedMessages(
   eligible: readonly Message[],
   vector: number[],
   turn: string,
-  input: { characters: readonly PromptCharacter[]; userName: string; branch: readonly Message[] },
+  input: { characters: readonly PromptCharacter[]; userName: string; branch: readonly Message[]; clock: number },
 ): Promise<string> {
   const score = similarity(messageChunks.embedding, vector);
   // Every id and hash is a uuid or hex, so the array literals need no quoting.
@@ -826,11 +827,10 @@ async function retrievedMessages(
   const names = new Map(input.characters.flatMap((member) => (member.id ? [[member.id, member.name] as const] : [])));
   // Each dated as the memory dates its summaries and facts (`buildMemoryInput`):
   // the turn the message closes on the branch (`roundsAlong`), counted back from
-  // the memory's ten-turn clock (`memoryClock`), in the language of the latest
+  // the memory's own ten-turn clock (`clock`), in the language of the latest
   // turns — so an old value brought back reads as older than a newer fact.
   const rounds = roundsAlong(input.branch);
   const roundOf = new Map(input.branch.map((message, at) => [message.id, rounds[at]!]));
-  const now = memoryClock(rounds.at(-1) ?? 0);
   const language = detectContentLanguage(
     visibleToAi(input.branch)
       .slice(-LANGUAGE_TURNS)
@@ -845,7 +845,7 @@ async function retrievedMessages(
         message.speakerMemberId !== null ? names.get(message.speakerMemberId) : undefined,
         readers,
       ).trim(),
-      turnsAgoLabel(now - roundOf.get(message.id)!, language),
+      turnsAgoLabel(input.clock - roundOf.get(message.id)!, language),
     ),
   );
   return retrievalBlock(lines);
