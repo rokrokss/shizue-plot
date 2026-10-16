@@ -12,5 +12,5 @@
   isn't committed in main isn't there. Commit first if the task depends on it.
   Read main's live state through absolute paths into the main checkout.
 - Run long commands with `run_in_background` and wait for the completion notice.
-- Run at most two subagents at a time, and tell each one not to spawn its own.
-  The machine ran out of memory with eight.
+- Run at most two subagents at a time, and tell each one not to spawn its own:
+  each can start servers, test workers and a browser on the shared 24 GB machine.

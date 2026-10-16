@@ -141,8 +141,8 @@ done
   style of `git log`.
 - Wait for long commands such as e2e, builds and servers by their own PID or
   the tool's background-completion notice, with a time limit.
-  `pgrep -f <pattern>` also matches other shells waiting on the same pattern.
-  Two such loops once waited on each other for hours.
+  `pgrep -f <pattern>` also matches other shells waiting on the same pattern,
+  so two such loops can wait on each other indefinitely.
 - The dev machine has 24 GB shared with Docker and other sessions. Run vitest
   with `--maxWorkers=2` and Playwright with `--workers=1`, keep at most one Next
   dev server per agent, and stop servers once the check is done.
