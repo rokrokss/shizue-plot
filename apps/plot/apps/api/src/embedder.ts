@@ -31,7 +31,9 @@
  *   share goes to recent and random summaries. A generation never waits on it
  *   for longer than its deadline. `kind` puts the model's query or document
  *   prefix before each text (none for KURE-v1 and bge-m3). Texts go to the
- *   thread 32 at a time and come back one vector per text, in order.
+ *   thread 32 at a time and come back one vector per text, in order. While the
+ *   embedder cannot be had at all it throws `EmbedderUnavailable`, which the
+ *   caller logs as one short line (`embedErrorForLog`).
  * - **Weights are fetched on deploy, never on a request.** `pnpm --filter
  *   @shizue/api embedder:fetch` puts them in `EMBEDDER_CACHE_DIR` (default
  *   `apps/plot/data/embedder`): bge-m3 from Hugging Face, KURE-v1 — which has no
@@ -244,6 +246,23 @@ export interface Embedding {
   vectors: number[][];
 }
 
+/**
+ * What `embed` throws while the embedder cannot be had for a while — a model
+ * whose load failed within the last minute, or a shared embedder that cannot be
+ * reached or is shutting down (`embedderRemote.ts`). Its message is all there
+ * is to it, and the embedder logged the cause once as it began.
+ */
+export class EmbedderUnavailable extends Error {}
+
+/**
+ * What a caller that falls back puts after its own words in the log: the reason
+ * alone, on the same line, for an unavailable embedder — every call meets it
+ * until it is back, a turn's several of them too — and any other failure whole,
+ * with its stack.
+ */
+export const embedErrorForLog = (error: unknown): unknown =>
+  error instanceof EmbedderUnavailable ? `(${error.message})` : error;
+
 export interface Embedder {
   /** The model a plot in `plotLanguage` embeds with, or null when it cannot run here. */
   modelFor(plotLanguage: ContentLanguage): string | null;
@@ -404,7 +423,7 @@ interface ModelState {
   idleTimer: NodeJS.Timeout | undefined;
   /** Until when a failed load is not retried. */
   failedUntil: number;
-  lastError: Error | null;
+  lastError: EmbedderUnavailable | null;
 }
 
 interface Pending {
@@ -454,7 +473,7 @@ class ServerEmbedder implements Embedder {
     const state = this.state(model);
     if (Date.now() < state.failedUntil) {
       embedFailures.inc({ model, reason: 'unavailable' });
-      throw state.lastError ?? new Error('embedder unavailable');
+      throw state.lastError ?? new EmbedderUnavailable('embedder unavailable');
     }
     const spec: EmbeddingModelSpec = EMBEDDING_MODELS[model];
     const prefix = kind === 'query' ? spec.queryPrefix : spec.documentPrefix;
@@ -572,7 +591,7 @@ class ServerEmbedder implements Embedder {
       const state = this.state(pending.model);
       state.inFlight -= 1;
       if (message.loadFailed) {
-        state.lastError = new Error(`embedder could not load ${pending.model}: ${message.error}`);
+        state.lastError = new EmbedderUnavailable(`embedder could not load ${pending.model}: ${message.error}`);
         state.failedUntil = Date.now() + LOAD_RETRY_MS;
         state.loaded = false;
         console.error(`[embedder] ${state.lastError.message}`);

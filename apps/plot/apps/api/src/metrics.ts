@@ -4,6 +4,7 @@
  * `METRICS_PORT` on `METRICS_HOST` (loopback by default), never under `/api`,
  * which the web's rewrite makes public. Unset, nothing listens and the counts go
  * unread, so a worktree's or the browser suite's own API never takes a port.
+ * `embedder:serve` reads the same two and serves the embedder's metrics alone.
  *
  * Every label is low-cardinality: a route's pattern (`/api/chats/:id`), never
  * its ids or its query; a kind, a status, a code, a model.
@@ -14,12 +15,21 @@ import { jobs } from '@shizue/db';
 import { inArray, sql } from 'drizzle-orm';
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from '@prometheus-io/client';
 import type { AppDeps } from './deps.js';
+import type { Embedder } from './embedder.js';
 import type { BackgroundTasks } from './lifecycle.js';
 
 export const registry = new Registry();
+/**
+ * What `embedder:serve` serves (`embedderServe.ts`): the embedder's metrics,
+ * which `registry` holds too, and the process defaults. Not the API's, which
+ * would read 0 in a process with no routes — `lua_sandbox_enabled 0` among them.
+ */
+const embedderRegistry = new Registry();
 
 /** What the collect-time gauges read; set by `startMetricsServer`, so nothing is read with the listener off. */
 let watched: { deps: AppDeps; background: BackgroundTasks } | null = null;
+/** `embedder:serve`'s embedder, set by `startEmbedderMetricsServer`; an API's is `deps.embedder`. */
+let watchedEmbedder: Embedder | undefined;
 
 /* -------------------------------------------------------------------- http */
 
@@ -148,9 +158,9 @@ new Gauge({
 new Gauge({
   name: 'embedder_models_loaded',
   help: 'Embedding models the embedder thread holds or is loading.',
-  registers: [registry],
+  registers: [registry, embedderRegistry],
   collect() {
-    this.set(watched?.deps.embedder?.loadedModels?.() ?? 0);
+    this.set((watchedEmbedder ?? watched?.deps.embedder)?.loadedModels?.() ?? 0);
   },
 });
 
@@ -159,14 +169,14 @@ export const embedDuration = new Histogram({
   help: 'Time an embed call that answered took, by model.',
   labelNames: ['model'] as const,
   buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30],
-  registers: [registry],
+  registers: [registry, embedderRegistry],
 });
 
 export const embedFailures = new Counter({
   name: 'embedder_embed_failures_total',
   help: 'Embed calls that threw, by model and reason: timeout (past its deadline), unavailable (a load failed within the last minute), error.',
   labelNames: ['model', 'reason'] as const,
-  registers: [registry],
+  registers: [registry, embedderRegistry],
 });
 
 /* --------------------------------------------------------------------- lua */
@@ -179,30 +189,41 @@ export const luaSandboxEnabled = new Gauge({
 
 /* ---------------------------------------------------------------- listener */
 
-let defaultsCollected = false;
+interface ListenOn {
+  port: number;
+  host: string;
+}
 
 /**
  * Serves `GET /metrics` on a listener of its own, and starts the process's
  * default collectors (event-loop lag, heap, RSS, GC) — only here, so a process
  * without the listener pays for neither.
  */
-export function startMetricsServer(
-  deps: AppDeps,
-  background: BackgroundTasks,
-  { port, host }: { port: number; host: string },
-): Server {
+export function startMetricsServer(deps: AppDeps, background: BackgroundTasks, listen: ListenOn): Server {
   watched = { deps, background };
-  if (!defaultsCollected) {
-    collectDefaultMetrics({ register: registry });
-    defaultsCollected = true;
+  return serveMetrics(registry, listen);
+}
+
+/** The same for `embedder:serve`, which has no routes or database: the embedder's metrics and the process defaults. */
+export function startEmbedderMetricsServer(embedder: Embedder, listen: ListenOn): Server {
+  watchedEmbedder = embedder;
+  return serveMetrics(embedderRegistry, listen);
+}
+
+const defaultsCollected = new Set<Registry>();
+
+function serveMetrics(served: Registry, { port, host }: ListenOn): Server {
+  if (!defaultsCollected.has(served)) {
+    collectDefaultMetrics({ register: served });
+    defaultsCollected.add(served);
   }
   const server = createServer((req, res) => {
     if (req.method !== 'GET' || req.url !== '/metrics') {
       res.writeHead(404).end();
       return;
     }
-    registry.metrics().then(
-      (text) => res.writeHead(200, { 'content-type': registry.contentType }).end(text),
+    served.metrics().then(
+      (text) => res.writeHead(200, { 'content-type': served.contentType }).end(text),
       (error: unknown) => {
         console.error('[metrics] collecting failed', error);
         res.writeHead(500).end();

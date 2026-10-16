@@ -68,7 +68,7 @@ import {
 import type { MacroLocale } from '@shizue/core';
 import { and, asc, eq, inArray, isNotNull, isNull, ne, notInArray, or, sql } from 'drizzle-orm';
 import type { AppDeps, Tx } from './deps.js';
-import type { Embedder, Embedding } from './embedder.js';
+import { embedErrorForLog, type Embedder, type Embedding } from './embedder.js';
 import { loadMembers } from './hub.js';
 import { noteLexicalSearch } from './lexicalHealth.js';
 import { collect, memoryChannel } from './memory.js';
@@ -235,7 +235,7 @@ export async function extractFacts(deps: AppDeps, embedder: Embedder, input: Ext
       try {
         embedded = await embedder.embed(texts, { plotLanguage: input.plotLanguage, kind: 'document' });
       } catch (error) {
-        console.warn('[facts] embedding new facts failed; the next refresh embeds them', error);
+        console.warn('[facts] embedding new facts failed; the next refresh embeds them', embedErrorForLog(error));
       }
     }
     /** The fact of `among` a new text says again, by its words or its vector; null for none. */
@@ -366,7 +366,7 @@ async function knownFacts(
     const { model, vectors } = await embedder.embed(queries, { plotLanguage: input.plotLanguage, kind: 'query' });
     dense = rankBySimilarity(await factCosines(deps, ids, model, vectors), (id: string) => id);
   } catch (error) {
-    console.warn('[facts] ranking the facts to show by meaning failed; by words alone', error);
+    console.warn('[facts] ranking the facts to show by meaning failed; by words alone', embedErrorForLog(error));
   }
   const lexical = lexicalRanking(
     candidates.map((fact) => [fact.id, fact.content] as const),
@@ -431,7 +431,7 @@ export async function embedPendingFacts(deps: AppDeps, chatId: string): Promise<
       { plotLanguage, kind: 'document' },
     );
   } catch (error) {
-    console.warn('[facts] embedding facts failed; they are searched once it works', error);
+    console.warn('[facts] embedding facts failed; they are searched once it works', embedErrorForLog(error));
     return;
   }
   for (const [index, fact] of pending.entries()) {

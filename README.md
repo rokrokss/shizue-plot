@@ -151,7 +151,8 @@ cookies, auth headers, prompts and card text are never logged.
 once a shutdown has begun or when the database does not answer within two
 seconds. Set `METRICS_PORT` to serve Prometheus metrics at `/metrics` on a
 separate listener (`METRICS_HOST`, loopback by default); nothing under `/api`
-exposes them. On SIGTERM the API stops taking connections, stores the replies in
+exposes them. `embedder:serve` reads the same two and serves its embedder's
+metrics and the process defaults. On SIGTERM the API stops taking connections, stores the replies in
 flight, waits up to `SHUTDOWN_BACKGROUND_MS` (20 s) for background work and then
 exits, so give the host a grace period above 25 seconds. Details are in
 ARCHITECTURE §12.

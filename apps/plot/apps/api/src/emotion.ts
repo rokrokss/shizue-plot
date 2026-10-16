@@ -28,7 +28,7 @@ import {
 import { chats, messages, plots, type Character, type Chat, type Message } from '@shizue/db';
 import { and, asc, eq, isNull } from 'drizzle-orm';
 import type { AppDeps } from './deps.js';
-import type { Embedder } from './embedder.js';
+import { embedErrorForLog, type Embedder } from './embedder.js';
 import { loadMembers } from './hub.js';
 import { acquireLease, newLeaseHolder, withLease } from './leases.js';
 import { collect, memoryChannel } from './memory.js';
@@ -204,7 +204,7 @@ async function chooseByEmbedding(
     }
     return pickEmotionByEmbedding(images, scores, await recentEmotions(deps, chat.id, message.id, member, roster));
   } catch (error) {
-    console.warn('[emotion] the embedder could not choose; the auxiliary model does', error);
+    console.warn('[emotion] the embedder could not choose; the auxiliary model does', embedErrorForLog(error));
     return null;
   }
 }

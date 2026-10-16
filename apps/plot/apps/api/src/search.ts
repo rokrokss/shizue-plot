@@ -27,6 +27,7 @@ import { bm25TermScore, hasLexicalEvidence, lexicalStems, lexicalTerms, rareLimi
 import { plots, plotSearchVectors, type ContentLanguage, type Db, type Plot } from '@shizue/db';
 import { and, desc, eq, gt, inArray, isNotNull, isNull, ne, or, sql, type SQL } from 'drizzle-orm';
 import type { AppDeps, Tx } from './deps.js';
+import { embedErrorForLog } from './embedder.js';
 import { BACKGROUND_LEASE_MS, withLease } from './leases.js';
 import { publicIntro, publiclyListed } from './hub.js';
 
@@ -98,7 +99,7 @@ export function scheduleSearchVector(deps: AppDeps, plotId: string): void {
       await refreshSearchVectors(deps, [plotId]);
     } while (refreshing.get(plotId));
   })()
-    .catch((error: unknown) => console.error('[search] refreshing a plot vector failed', error))
+    .catch((error: unknown) => console.error('[search] refreshing a plot vector failed', embedErrorForLog(error)))
     .finally(() => refreshing.delete(plotId));
   deps.onBackgroundTask?.(task, 'search');
 }
@@ -272,7 +273,7 @@ export function scheduleSearchSweep(deps: AppDeps, language: ContentLanguage, mo
     );
   })
     .then(() => undefined)
-    .catch((error: unknown) => console.error('[search] sweeping plot vectors failed', error))
+    .catch((error: unknown) => console.error('[search] sweeping plot vectors failed', embedErrorForLog(error)))
     .finally(() => sweeping.delete(language));
   deps.onBackgroundTask?.(task, 'search');
 }

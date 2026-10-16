@@ -4,12 +4,15 @@
  * `node dist/embedderServe.js` once built. No database and no routes — the
  * local embedder `EMBEDDER_*` configures (`embedder.ts`), lazy and unloaded
  * when idle as in an API process, served on `EMBEDDER_PORT`. Its weights are
- * fetched here (`embedder:fetch`), not on the instances.
+ * fetched here (`embedder:fetch`), not on the instances. `METRICS_PORT` and
+ * `METRICS_HOST` serve its metrics as an API's (`metrics.ts`): the embedder's
+ * and the process defaults.
  */
 import { createLocalEmbedder } from './embedder.js';
 import { embedderListenConfig, serveEmbedder } from './embedderRemote.js';
-import { loadRootEnv } from './env.js';
+import { loadRootEnv, readInteger } from './env.js';
 import { installJsonConsole } from './log.js';
+import { startEmbedderMetricsServer } from './metrics.js';
 
 loadRootEnv();
 if (process.env['LOG_FORMAT']?.trim() === 'json') installJsonConsole();
@@ -29,11 +32,17 @@ if (!embedder) {
   process.exit(1);
 }
 const listener = serveEmbedder(embedder, listen);
+const metricsPort = readInteger(process.env, 'METRICS_PORT', 1, 65535);
+const metricsServer =
+  metricsPort === undefined
+    ? undefined
+    : startEmbedderMetricsServer(embedder, { port: metricsPort, host: process.env['METRICS_HOST']?.trim() || '127.0.0.1' });
 
 let stopping = false;
 function shutdown(code: number): void {
   if (stopping) return;
   stopping = true;
+  metricsServer?.close();
   // The thread last: onnxruntime does not survive an exit around it.
   void listener
     .close()

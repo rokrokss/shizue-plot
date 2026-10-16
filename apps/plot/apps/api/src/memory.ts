@@ -77,7 +77,7 @@ import { getAdapter, listEnabledModels, type ChatRequest, type LLMAdapter } from
 import { and, asc, eq, inArray, notExists, sql } from 'drizzle-orm';
 import type { AppDeps, Tx } from './deps.js';
 import { BACKGROUND_LEASE_MS, withLease } from './leases.js';
-import type { Embedding } from './embedder.js';
+import { embedErrorForLog, type Embedding } from './embedder.js';
 import { noteCachedTokens } from './cacheHealth.js';
 import { embedPendingFacts, extractFacts, keepEndedFacts, selectFacts } from './facts.js';
 import { loadMembers } from './hub.js';
@@ -300,7 +300,7 @@ export async function buildMemoryInput(
         ...(speakerId !== undefined ? { speakerId } : {}),
       });
     } catch (error) {
-      console.warn('[memory] the facts were left out: the queries could not be embedded', error);
+      console.warn('[memory] the facts were left out: the queries could not be embedded', embedErrorForLog(error));
     }
   }
   // What changes only when a summary lands stays in the system string, the cached
@@ -733,7 +733,7 @@ export async function embedPendingSummaries(deps: AppDeps, chatId: string): Prom
     try {
       embedded = await embedder.embed(chunks, { plotLanguage: chat.plotLanguage, kind: 'document' });
     } catch (error) {
-      console.warn('[memory] embedding summaries failed; they are searched once it works', error);
+      console.warn('[memory] embedding summaries failed; they are searched once it works', embedErrorForLog(error));
       return;
     }
     await deps.db.transaction(async (tx) => {

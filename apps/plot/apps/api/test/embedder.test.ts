@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createLocalEmbedder,
   embedderConfig,
+  EmbedderUnavailable,
   weightsPath,
   type EmbedderWorker,
   type EmbeddingModelId,
@@ -272,6 +273,7 @@ describe('the thread', () => {
     })!;
     await expect(failing.embed(['one'], { plotLanguage: 'en' })).rejects.toThrow('no such file');
     await expect(failing.embed(['two'], { plotLanguage: 'en' })).rejects.toThrow(/could not load bge-m3/);
+    await expect(failing.embed(['two'], { plotLanguage: 'en' })).rejects.toBeInstanceOf(EmbedderUnavailable);
     // Only the first reached the thread; the model of the other language is untouched.
     expect(threads.at(-1)!.batches.map(({ texts }) => texts)).toEqual([['one']]);
     expect(failing.modelFor('ko')).toBe('KURE-v1');

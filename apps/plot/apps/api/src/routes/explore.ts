@@ -4,6 +4,7 @@ import { and, eq, ilike, inArray, notInArray, or, sql, type SQL } from 'drizzle-
 import type { PgColumn } from 'drizzle-orm/pg-core';
 import { Hono } from 'hono';
 import type { AppDeps, AppEnv } from '../deps.js';
+import { embedErrorForLog } from '../embedder.js';
 import { badRequest, notFound } from '../errors.js';
 import { RATE_LIMITS, rateLimit } from '../rateLimit.js';
 import { pageSnapshotFeed } from '../feedCursor.js';
@@ -187,7 +188,7 @@ async function pageByMeaning(
     if (embedded.model !== model) return null;
     vector = embedded.vectors[0]!;
   } catch (error) {
-    console.warn('[explore] the query could not be embedded; searching the text', error);
+    console.warn('[explore] the query could not be embedded; searching the text', embedErrorForLog(error));
     return null;
   }
   scheduleSearchSweep(deps, input.language, model);

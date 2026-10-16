@@ -7,7 +7,7 @@ import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import type { ContentLanguage } from '@shizue/db';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { EmbedOptions, Embedder, Embedding } from '../src/embedder.js';
+import { EmbedderUnavailable, type EmbedOptions, type Embedder, type Embedding } from '../src/embedder.js';
 import {
   createRemoteEmbedder,
   embedderListenConfig,
@@ -146,6 +146,7 @@ describe('the client', () => {
     // Back, but not asked yet: every call throws without a connection until the wait is over.
     await serve(undefined, port);
     await expect(embedder.embed(['b'], { plotLanguage: 'ko' })).rejects.toThrow(/unreachable/);
+    await expect(embedder.embed(['b'], { plotLanguage: 'ko' })).rejects.toBeInstanceOf(EmbedderUnavailable);
     expect(fake.calls).toHaveLength(1);
     await new Promise((resolve) => setTimeout(resolve, 350));
     await expect(embedder.embed(['b'], { plotLanguage: 'ko' })).resolves.toEqual({ model: 'multiMiniLM', vectors: [[1, 0]] });
@@ -161,6 +162,20 @@ describe('the client', () => {
     fake.held = false;
     fake.release();
     await expect(embedder.embed(['b'], { plotLanguage: 'ko', kind: 'query' })).resolves.toEqual({ model: 'multiMiniLM', vectors: [[1, 1]] });
+  });
+
+  it('passes on an embedder that is unavailable behind the listener as unavailable, and any other failure as it is', async () => {
+    const { url } = await serve();
+    const embedder = client(url);
+    vi.spyOn(fake, 'embed')
+      .mockRejectedValueOnce(new EmbedderUnavailable('embedder could not load multiMiniLM: no such file'))
+      .mockRejectedValueOnce(new Error('the thread broke'));
+    const unavailable = embedder.embed(['a'], { plotLanguage: 'ko' });
+    await expect(unavailable).rejects.toBeInstanceOf(EmbedderUnavailable);
+    await expect(unavailable).rejects.toThrow(/answered 503: embedder could not load/);
+    const broken = embedder.embed(['b'], { plotLanguage: 'ko' });
+    await expect(broken).rejects.toThrow(/answered 500: the thread broke/);
+    await expect(broken).rejects.not.toBeInstanceOf(EmbedderUnavailable);
   });
 });
 

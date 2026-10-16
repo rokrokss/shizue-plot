@@ -10,7 +10,7 @@ import { healthRoutes } from '../src/health.js';
 import { createBackgroundTasks, onUnhandledRejection } from '../src/lifecycle.js';
 import { installJsonConsole, requestLog } from '../src/log.js';
 import { originGuard } from '../src/originGuard.js';
-import { startMetricsServer } from '../src/metrics.js';
+import { startEmbedderMetricsServer, startMetricsServer } from '../src/metrics.js';
 
 /** A database whose `select 1` does what `execute` says; anything else it is asked fails the test. */
 const fakeDb = (execute: () => Promise<unknown>): Db =>
@@ -218,8 +218,36 @@ describe('the metrics', () => {
       const text = await res.text();
       expect(text).toContain('http_requests_total{method="GET",route="/api/*",status="404"}');
       expect(text).toContain('generation_streams_active 0');
+      expect(text).toContain('embedder_models_loaded 0');
       expect(text).toContain('process_resident_memory_bytes');
       expect((await fetch(`http://127.0.0.1:${port}/api/metrics`)).status).toBe(404);
+    } finally {
+      server.close();
+      info.mockRestore();
+    }
+  });
+
+  it("of embedder:serve are the embedder's and the process defaults, none of the API's", async () => {
+    const info = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const embedder = {
+      modelFor: () => 'multiMiniLM',
+      embed: async () => ({ model: 'multiMiniLM', vectors: [] }),
+      warm: () => {},
+      close: async () => {},
+      loadedModels: () => 1,
+    };
+    const server = startEmbedderMetricsServer(embedder, { port: 0, host: '127.0.0.1' });
+    try {
+      await once(server, 'listening');
+      const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/metrics`);
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      expect(text).toContain('embedder_models_loaded 1');
+      expect(text).toContain('# TYPE embedder_embed_duration_seconds histogram');
+      expect(text).toContain('process_resident_memory_bytes');
+      expect(text).not.toContain('http_requests_total');
+      expect(text).not.toContain('generation_streams_active');
+      expect(text).not.toContain('lua_sandbox_enabled');
     } finally {
       server.close();
       info.mockRestore();

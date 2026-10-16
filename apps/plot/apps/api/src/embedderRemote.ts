@@ -24,13 +24,16 @@
  *   fall back alike. A connection that cannot be made — refused, or not made
  *   within `CONNECT_TIMEOUT_MS` — also stops it asking for `UNREACHABLE_RETRY_MS`:
  *   every call meanwhile throws at once, so an embedder that is gone costs a
- *   turn nothing rather than its query's whole deadline.
+ *   turn nothing rather than its query's whole deadline. Those throws, and the
+ *   listener's 503 for an embedder of its own that is unavailable, are
+ *   `EmbedderUnavailable`, which the callers log as one short line.
  */
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { createServer, request, type ClientRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { ContentLanguage } from '@shizue/db';
 import {
   DEFAULT_TIMEOUT_MS,
+  EmbedderUnavailable,
   embedderConfig,
   routeOf,
   type EmbedOptions,
@@ -122,7 +125,7 @@ class Pieces {
   constructor(private readonly embedder: Embedder) {}
 
   embed(texts: string[], options: Job['options'], signal: AbortSignal): Promise<Embedding> {
-    if (this.closed) return Promise.reject(new Error('the embedder is shutting down'));
+    if (this.closed) return Promise.reject(new EmbedderUnavailable('the embedder is shutting down'));
     if (texts.length === 0) return this.embedder.embed([], options);
     return new Promise((resolve, reject) => {
       const pieces = options.kind === 'query' ? [texts] : piecesOf(texts);
@@ -138,7 +141,7 @@ class Pieces {
   async close(): Promise<void> {
     this.closed = true;
     for (const job of [...this.queries.splice(0), ...this.documents.splice(0)]) {
-      job.reject(new Error('the embedder is shutting down'));
+      job.reject(new EmbedderUnavailable('the embedder is shutting down'));
     }
     await this.idle;
   }
@@ -268,7 +271,7 @@ export function serveEmbedder(embedder: Embedder, { port, host, token }: ListenC
     try {
       send(res, 200, await pieces.embed(body.texts, { plotLanguage: body.plotLanguage, kind: body.kind }, gone.signal));
     } catch (error) {
-      send(res, 500, { error: error instanceof Error ? error.message : String(error) });
+      send(res, error instanceof EmbedderUnavailable ? 503 : 500, { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -295,7 +298,7 @@ export function serveEmbedder(embedder: Embedder, { port, host, token }: ListenC
 /* ------------------------------------------------------------------ client */
 
 /** The embedder could not be reached: refused, unknown, or no connection in time. */
-class Unreachable extends Error {}
+class Unreachable extends EmbedderUnavailable {}
 /** Connected, and no answer before the deadline. */
 class Late extends Error {}
 
@@ -368,7 +371,7 @@ class RemoteEmbedder implements Embedder {
       took();
       return { model, vectors: answer.vectors };
     } catch (error) {
-      embedFailures.inc({ model, reason: error instanceof Unreachable ? 'unavailable' : error instanceof Late ? 'timeout' : 'error' });
+      embedFailures.inc({ model, reason: error instanceof EmbedderUnavailable ? 'unavailable' : error instanceof Late ? 'timeout' : 'error' });
       throw error;
     }
   }
@@ -472,7 +475,8 @@ class RemoteEmbedder implements Embedder {
           }
           if (res.statusCode === 200 || res.statusCode === 204) return finish(null, parsed);
           const said = (parsed as { error?: unknown } | null)?.error;
-          finish(new Error(`the embedder at ${this.url.origin} answered ${res.statusCode}${typeof said === 'string' ? `: ${said}` : ''}`));
+          const message = `the embedder at ${this.url.origin} answered ${res.statusCode}${typeof said === 'string' ? `: ${said}` : ''}`;
+          finish(res.statusCode === 503 ? new EmbedderUnavailable(message) : new Error(message));
         });
       });
       req.on('error', (error) => finish(error));

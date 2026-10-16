@@ -46,7 +46,7 @@ import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { createHash } from 'node:crypto';
 import type { AppDeps, BackgroundTaskKind } from './deps.js';
 import { BACKGROUND_LEASE_MS, withLease } from './leases.js';
-import type { Embedder, Embedding } from './embedder.js';
+import { embedErrorForLog, type Embedder, type Embedding } from './embedder.js';
 import { aliasPlotLore, loreAliasesEnabled, loreAliasesFor } from './loreAliases.js';
 import { noteLexicalSearch } from './lexicalHealth.js';
 import { LANGUAGE_TURNS, type AuxiliaryOwner } from './memory.js';
@@ -136,7 +136,7 @@ async function embedDocuments(
       model = embedded.model;
       vectors.push(...embedded.vectors);
     } catch (error) {
-      console.warn('[vectors] embedding failed; it is tried again on the next pass', error);
+      console.warn('[vectors] embedding failed; it is tried again on the next pass', embedErrorForLog(error));
       return null;
     }
   }
@@ -333,7 +333,7 @@ export async function searchByMeaning(
     if (embedded.model !== model || !embedded.vectors[0]) return none;
     vector = embedded.vectors[0];
   } catch (error) {
-    console.warn('[vectors] the search could not embed its query; no retrieval', error);
+    console.warn('[vectors] the search could not embed its query; no retrieval', embedErrorForLog(error));
     return none;
   }
 
