@@ -293,6 +293,21 @@ describe('assemblePrompt - a group turn', () => {
     expect(conversation(second).slice(0, conversation(first).length)).not.toEqual(conversation(first));
   });
 
+  it("sends a member's keyword lore after the round's newest reply, ahead of what closes the speaker's turn", () => {
+    // 세이야's book says what his 검 is; the reply the round already has names it.
+    const round: HistoryMessage[] = [...groupHistory, { role: 'assistant', content: '*검을 내려놓는다*', speakerId: 'seiya-id' }];
+    const asKai = group({ speaker: 1, history: round, directions: '판정.', report: true });
+    expect(asKai.system).not.toContain('검은 은빛');
+    // The work's always-on lore stays where it was.
+    expect(asKai.system).toContain('여관은 백 년이 되었다.');
+    expect(asKai.sources!.map((source) => source.kind).slice(-5)).toEqual(['history', 'moved_lore', 'directions', 'post_history', 'trailing']);
+    // Read as its own book's, under its member's nickname, whoever speaks.
+    expect(texts(asKai).slice(-5, -2)).toEqual(['세이야: *검을 내려놓는다*', '세이의 검은 은빛이다.', '[게임 판정]\n판정.']);
+    expect(texts(group({ speaker: 0, history: round })).at(-3)).toBe('세이의 검은 은빛이다.');
+    // The round's next speaker's system string is the one the turn before had, the lore notwithstanding.
+    expect(asKai.system).toBe(group({ speaker: 1 }).system);
+  });
+
   it("stops on every other on-stage member's name and nickname", () => {
     expect(group({ speaker: 1 }).stopSequences).toEqual(['\n세이야:', '\n세이:']);
     // The absent member is not on the stage, and the speaker is not among their own stops.

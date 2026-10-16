@@ -38,18 +38,44 @@ describe('parseDecorators', () => {
     });
     expect(parseDecorators('@@position before_desc\n본문').decorators).toEqual({
       position: 'before_char',
+      positioned: true,
     });
     expect(parseDecorators('@@position after_desc\n본문').decorators).toEqual({
       position: 'after_char',
+      positioned: true,
     });
   });
 
   it('strips unknown decorators, fallbacks, and malformed arguments without effect', () => {
     expect(
       parseDecorators(
-        '@@ignore_on_max_context\n@@@depth 2\n@@depth abc\n@@role narrator\n@@position personality\n@@scan_depth many\n@@exclude_keys  , \n@@additional_keys ,\n@@probability often\n본문',
+        '@@ignore_on_max_context\n@@@depth 2\n@@depth abc\n@@role narrator\n@@position\n@@scan_depth many\n@@exclude_keys  , \n@@additional_keys ,\n@@probability often\n본문',
       ),
     ).toEqual({ decorators: {}, body: '본문' });
+  });
+
+  it('marks any @@position as the author’s placement, a slot it cannot place included', () => {
+    // A prompt template's slot, or one RisuAI reads and we do not, leaves the
+    // entry where it would be — but its author placed it, so it stays put.
+    expect(parseDecorators('@@position pt_PI\n본문').decorators).toEqual({ positioned: true });
+    expect(parseDecorators('@@position personality\n본문').decorators).toEqual({ positioned: true });
+    const { card } = parseCard({
+      ...v3Card,
+      data: {
+        ...v3Card.data,
+        character_book: {
+          extensions: {},
+          entries: [
+            { ...v3Card.data.character_book.entries[0]!, content: '@@position pt_PI\n본문' },
+            { ...v3Card.data.character_book.entries[0]!, content: '본문' },
+          ],
+        },
+      },
+    });
+    expect(card.lorebook.map((entry) => [entry.position, entry.positioned ?? null])).toEqual([
+      ['before_char', true],
+      ['before_char', null],
+    ]);
   });
 
   it('reads the activation decorators onto their SillyTavern-shaped fields', () => {
@@ -854,7 +880,8 @@ describe('exportCardV3', () => {
     );
 
     const reparsed = parseCard(exported).card;
-    expect(reparsed.lorebook).toEqual(card.lorebook);
+    // `@@position` goes out as V3's own position, which reads back without the author's mark.
+    expect(reparsed.lorebook).toEqual(card.lorebook.map(({ positioned: _placed, ...entry }) => entry));
     expect(reparsed.loreSettings).toEqual(card.loreSettings);
   });
 
@@ -1795,7 +1822,7 @@ describe('SillyTavern cards', () => {
 
   it('writes a switched-off entry back out as @@dont_activate, the off switch RisuAI reads', () => {
     const { card } = parseCard(v3Card);
-    const off: LoreEntry = { ...card.lorebook[1]!, enabled: false };
+    const { positioned: _placed, ...off }: LoreEntry = { ...card.lorebook[1]!, enabled: false };
     const exported = exportCardV3({ ...card, lorebook: [off] });
     expect(exported.data.character_book!.entries[0]!.content).toBe('@@dont_activate\n주막은 국경 검문소 옆이다.');
     expect(normalizeCard(exported).lorebook).toEqual([off]);
@@ -1975,11 +2002,12 @@ describe('normalizeCard - a RisuAI book', () => {
         ],
       }),
     );
-    const { system } = assemblePrompt({
+    const { messages } = assemblePrompt({
       plot: { name: '이야기', description: '', lorebook: [] },
       characters: [{ name: card.name, card }],
       history: [{ role: 'user', content: '마왕성으로 간다' }],
     });
-    expect(system).toContain('마왕성은 북쪽 끝에 있다.');
+    // A keyword entry goes right after the newest turn (the moved lore).
+    expect(messages[1]).toEqual({ role: 'system', content: '마왕성은 북쪽 끝에 있다.' });
   });
 });

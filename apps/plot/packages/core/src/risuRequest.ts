@@ -119,6 +119,9 @@ export const RISU_REQUEST_ITEMS: Record<PromptBlockKind, RisuItemRule> = {
   // RisuAI splices its depth lore in after it marked the chat removable.
   depth_lore: {},
   author_note: {},
+  // The lore keywords brought in, which RisuAI sends in its system lore and we
+  // after the newest turn: a system turn with no memo, never removable.
+  moved_lore: {},
   // The summaries HypaV3's similar and random shares picked (RisuAI sends them
   // with the rest, in `supaMemory`), the facts, SillyTavern's retrieved messages
   // and the relationship, which RisuAI has no turn for: after the newest turn,

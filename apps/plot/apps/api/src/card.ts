@@ -164,6 +164,8 @@ function coerceLoreEntry(value: unknown): LoreEntry {
     position,
     // The name only means something on an outlet.
     ...(position === 'outlet' && outletName ? { outletName } : {}),
+    // The card's own `@@position`, which keeps a keyword entry in the system string (`LoreEntry.positioned`).
+    ...(raw['positioned'] === true ? { positioned: true as const } : {}),
     // role only means something on a depth-injected entry.
     ...(depth >= 0
       ? {

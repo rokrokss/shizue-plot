@@ -11,6 +11,7 @@ import {
   DEFAULT_LORE_SETTINGS,
   IMAGE_TOKEN_ESTIMATE,
   type AssembledPrompt,
+  type LoreEntry,
   type PromptCharacter,
   type RisuRequestItem,
 } from '@shizue/core';
@@ -45,6 +46,19 @@ const aria: PromptCharacter = {
     extensions: {},
     raw: null,
   },
+};
+/** A lore entry its keyword brings in, at the system string's default place. */
+const keyed: LoreEntry = {
+  keys: ['등대'],
+  secondaryKeys: [],
+  selective: false,
+  content: '',
+  enabled: true,
+  constant: false,
+  insertionOrder: 0,
+  caseSensitive: false,
+  useRegex: false,
+  position: 'before_char',
 };
 const gif = 'data:image/gif;base64,R0lGODlhAQ==';
 const png = 'data:image/png;base64,iVBORw0K';
@@ -219,6 +233,36 @@ describe('the request the editors read, and what goes back', () => {
       { type: 'image', base64: 'image:1' },
     ]);
     expect(sent.messages.at(-1)).toEqual({ role: 'user', content: [{ type: 'text', text: '둘째만' }, { type: 'image', url: png }] });
+  });
+
+  it('hands the editors the keyword lore as a system item of its own, right after the reader’s turn', async () => {
+    const lore = { ...aria, card: { ...aria.card, lorebook: [{ ...keyed, content: '등대는 북쪽 끝에 있다.' }] } };
+    const prompt = assemblePrompt({
+      plot: { name: '골짜기', description: '여관.', lorebook: [] },
+      characters: [lore],
+      history: [
+        { role: 'assistant', content: '어서 와.', id: 'greeting' },
+        { role: 'user', content: '등대로 가자', id: 'm-1' },
+      ],
+      userName: '민준',
+      branch: { length: 2, greeting: { text: '어서 와.', index: -1 } },
+    });
+    const { seen, sent } = await edited(prompt, (items) =>
+      items.map((item, at) =>
+        item.content === '등대는 북쪽 끝에 있다.' ? { ...item, content: `${item.content} (앞: ${items[at - 1]!.memo})` } : item,
+      ),
+    );
+    const at = seen.findIndex((item) => item.content === '등대는 북쪽 끝에 있다.');
+    // Not in the system string: a turn as RisuAI's own system turns are, no memo, never removable.
+    expect(seen[0]!.content).not.toContain('등대는');
+    expect(seen[at]).toEqual({ role: 'system', content: '등대는 북쪽 끝에 있다.' });
+    expect(seen[at - 1]).toMatchObject({ role: 'user', memo: 'm-1' });
+    expect(seen[at + 1]!.role).toBe('system');
+    // What the editor made of it goes out in its place.
+    expect(sent.messages[sent.messages.findIndex((message) => message.content === '등대로 가자') + 1]).toEqual({
+      role: 'system',
+      content: '등대는 북쪽 끝에 있다. (앞: m-1)',
+    });
   });
 
   it('reports the edited request by what each turn stands for', async () => {

@@ -1143,6 +1143,7 @@
         "history": "History",
         "depth_lore": "Depth lore",
         "author_note": "Author's note",
+        "moved_lore": "Lorebook (keyword-activated)",
         "recall": "Recalled for this turn",
         "post_history": "Post-history instructions",
         "trailing": "Closing instruction",

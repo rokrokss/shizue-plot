@@ -26,6 +26,8 @@ export interface LoreDecorators {
   depth?: number;
   role?: LoreRole;
   position?: LorePosition;
+  /** Any `@@position`, the slots `position` cannot name (`pt_…`) included (`LoreEntry.positioned`). */
+  positioned?: true;
   /** `@@activate_only_after N`. */
   delay?: number;
   /** `@@scan_depth N`. */
@@ -99,6 +101,7 @@ export function parseDecorators(content: string): { decorators: LoreDecorators; 
         if (arg === 'user' || arg === 'assistant' || arg === 'system') decorators.role = arg;
         break;
       case 'position':
+        if (arg) decorators.positioned = true;
         if (arg === 'before_desc') decorators.position = 'before_char';
         else if (arg === 'after_desc') decorators.position = 'after_char';
         break;
@@ -546,6 +549,7 @@ function assemble(
     position,
     // The outlet's name only means something while the entry is an outlet.
     ...(position === 'outlet' && outletName ? { outletName } : {}),
+    ...(decorators.positioned ? { positioned: true as const } : {}),
     ...(depth === undefined ? {} : { depth }),
     ...(depth !== undefined && role ? { role } : {}),
     ...stRest,

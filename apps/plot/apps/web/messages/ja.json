@@ -1143,6 +1143,7 @@
         "history": "履歴",
         "depth_lore": "深さロア",
         "author_note": "ユーザーノート",
+        "moved_lore": "ロアブック（キーワードで有効）",
         "recall": "このターンに呼び戻した記憶",
         "post_history": "履歴後の指示",
         "trailing": "最後の指示",

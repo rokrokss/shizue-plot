@@ -373,6 +373,14 @@ function makeApp(overrides: Partial<AppDeps> = {}): Hono<AppEnv> {
   return createApp(makeDeps(overrides));
 }
 
+/**
+ * A captured request's words: the system string and every turn after it. The
+ * always-on lore is in the system string and the keyword lore right after the
+ * newest turn (core `moved_lore`), so a test of which lore fired reads both.
+ */
+const sentText = (prompt: { system: string; messages: ChatRequest['messages'] }): string =>
+  [prompt.system, ...prompt.messages.map((message) => contentText(message.content))].join('\n\n');
+
 /** Adapter that records every chat-model request and replies through echo. */
 function capturingApp(overrides: Partial<AppDeps> = {}): {
   app: Hono<AppEnv>;
@@ -3703,12 +3711,14 @@ describe('chats', () => {
       (await db.select().from(messages).where(eq(messages.id, id)))[0]!.loreTriggers;
     const turn = async (path: string, body?: unknown) => {
       const events = await readSse(await json(cookie, `/api/chats/${chatId}/${path}`, 'POST', body, capturing));
-      return { id: events.at(-1)!.data.messageId as string, system: prompts.at(-1)!.system };
+      return { id: events.at(-1)!.data.messageId as string, system: sentText(prompts.at(-1)!) };
     };
 
     // Index 2: the keyword is in the scanned message, so the entry triggers fresh.
     const first = await turn('messages', { content: '용이 나타났다' });
     expect(first.system).toContain('DRAGON LORE');
+    // A keyword entry, so not in the system string: right after the reader's turn.
+    expect(prompts.at(-1)!.system).not.toContain('DRAGON LORE');
     expect(await triggersOf(first.id)).toEqual([key]);
     // A continue is the same turn: it writes no record of its own.
     await turn('continue');
@@ -3752,8 +3762,8 @@ describe('chats', () => {
 
     await readSse(await json(cookie, `/api/chats/${fresh}/messages`, 'POST', { content: '둘러본다' }, capturing));
     expect(prompts[1]!.messages[0]).toEqual({ role: 'assistant', content: '문 앞.' });
-    expect(prompts[1]!.system).toContain('PALACE LORE');
-    expect(prompts[1]!.system).not.toContain('NATIVE LORE');
+    expect(sentText(prompts[1]!)).toContain('PALACE LORE');
+    expect(sentText(prompts[1]!)).not.toContain('NATIVE LORE');
   });
 
   it('keeps the advanced lore fields a client sends, clamped, and invents none', async () => {
@@ -3916,7 +3926,8 @@ describe('chats', () => {
     const owner = await signUp('inspect-owner@example.com');
     const reader = await signUp('inspect-reader@example.com');
     const plot = await publishablePlot(owner, {
-      lorebook: [{ content: 'ALWAYS ON', constant: true }],
+      // An always-on entry, and one the reader's turn brings in by its keyword.
+      lorebook: [{ content: 'ALWAYS ON', constant: true }, { keys: ['안녕'], content: 'KEYED ON' }],
     });
     await publishPlot(owner, plot.id);
     const own = await startChat(owner, plot.id);
@@ -3941,7 +3952,19 @@ describe('chats', () => {
       responseReserve: DEFAULT_MAX_RESPONSE_TOKENS,
     });
     expect(report.totals.used).toBeGreaterThan(0);
-    expect(report.lore).toEqual([expect.objectContaining({ source: 'plot', via: 'constant', preview: 'ALWAYS ON' })]);
+    expect(report.lore).toEqual([
+      expect.objectContaining({ source: 'plot', via: 'constant', preview: 'ALWAYS ON' }),
+      expect.objectContaining({ source: 'plot', via: 'keyword', preview: 'KEYED ON', placement: 'before_char' }),
+    ]);
+    // The keyword entry is not in the system string's lore but its own block, right after the newest turn.
+    expect(report.blocks.find((block: { kind: string }) => block.kind === 'lore_before').text).toBe('ALWAYS ON');
+    const sentKinds = report.blocks.map((block: { kind: string }) => block.kind);
+    expect(sentKinds.slice(sentKinds.lastIndexOf('history'), sentKinds.lastIndexOf('history') + 3)).toEqual([
+      'history',
+      'moved_lore',
+      'post_history',
+    ]);
+    expect(report.blocks[sentKinds.indexOf('moved_lore')].text).toBe('KEYED ON');
     expect(await count()).toBe(before);
     expect(await claimOf(own.chat.id)).toBeNull();
 
@@ -3953,8 +3976,8 @@ describe('chats', () => {
       .where(eq(chats.id, own.chat.id));
     const recalled = await readJson(await request(owner, `/api/chats/${own.chat.id}/inspect`));
     const kinds = recalled.blocks.map((block: { kind: string }) => block.kind);
-    expect(kinds.slice(kinds.indexOf('recall') - 1, kinds.indexOf('recall') + 2)).toEqual(['history', 'recall', 'post_history']);
-    expect(kinds.lastIndexOf('history')).toBe(kinds.indexOf('recall') - 1);
+    expect(kinds.slice(kinds.indexOf('recall') - 2, kinds.indexOf('recall') + 2)).toEqual(['history', 'moved_lore', 'recall', 'post_history']);
+    expect(kinds.lastIndexOf('history')).toBe(kinds.indexOf('recall') - 2);
     expect(recalled.blocks[kinds.indexOf('recall')].text).toMatch(/^\[현재 관계 상태\]\n/);
 
     // The reader's own chat on someone else's plot, and the creator on a chat
@@ -7765,7 +7788,7 @@ describe('hiding a message from the AI', () => {
     });
     const { app: capturing, prompts } = capturingApp();
     await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '용이 나타났다' }, capturing));
-    expect(prompts[0]!.system).toContain('DRAGON LORE');
+    expect(sentText(prompts[0]!)).toContain('DRAGON LORE');
 
     // The reader's turn and the reply that echoed it.
     const before = await readJson(await request(cookie, `/api/chats/${chatId}`));
@@ -7780,13 +7803,13 @@ describe('hiding a message from the AI', () => {
 
     await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '다음' }, capturing));
     expect(sentTexts(prompts[1]!).some((text) => text.includes('용이 나타났다'))).toBe(false);
-    expect(prompts[1]!.system).not.toContain('DRAGON LORE');
+    expect(sentText(prompts[1]!)).not.toContain('DRAGON LORE');
 
     // Shown again, the turn is read — and scanned — as before.
     expect((await hide(cookie, chatId, turn.id, false)).status).toBe(200);
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
     expect(sentTexts(prompts[2]!)).toContain('용이 나타났다');
-    expect(prompts[2]!.system).toContain('DRAGON LORE');
+    expect(sentText(prompts[2]!)).toContain('DRAGON LORE');
   });
 
   it('takes a boolean, on a message of the reader’s own chat', async () => {
@@ -11548,9 +11571,8 @@ describe('plot hub', () => {
     expect(system).toContain('[등장인물: 리안]');
     // The work frames the people in it, so it comes first.
     expect(system.indexOf('[작품: 아르카디아]')).toBeLessThan(system.indexOf('[등장인물: 리안]'));
-    // Both lorebooks activate, ordered by insertionOrder across the merge.
-    expect(system).toContain('길드는 다섯 개다.');
-    expect(system.indexOf('사서는 야근을 한다.')).toBeLessThan(system.indexOf('길드는 다섯 개다.'));
+    // Both lorebooks activate, ordered by insertionOrder across the merge — keyword lore, right after the reader's turn.
+    expect(prompts.at(-1)!.messages).toContainEqual({ role: 'system', content: '사서는 야근을 한다.\n\n길드는 다섯 개다.' });
   });
 
   it('shares one lore budget between the plot and its members', async () => {
@@ -11577,9 +11599,9 @@ describe('plot hub', () => {
       await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '길드 이야기' }, capturing),
     );
 
-    const system = prompts.at(-1)!.system;
-    expect(system).toContain(plotEntry);
-    expect(system).not.toContain(memberEntry);
+    const sent = sentText(prompts.at(-1)!);
+    expect(sent).toContain(plotEntry);
+    expect(sent).not.toContain(memberEntry);
   });
 
   it('writes every member into the prompt, in the creator’s order', async () => {
@@ -14641,6 +14663,9 @@ describe('prompt scripts and SillyTavern lore', () => {
           { keys: [], content: 'EX-LORE', constant: true, position: 'after_examples' },
           { keys: [], content: 'SWORD', constant: true, position: 'outlet', outletName: ' 무기 ' },
           { keys: [], content: 'NOWHERE', constant: true, position: 'nowhere', outletName: '무기' },
+          // RisuAI's `@@position`, which keeps a keyword entry where it is; without it the entry goes after the newest turn.
+          { keys: ['안녕'], content: 'PLACED-KEY', positioned: true },
+          { keys: ['안녕'], content: 'FREE-KEY', positioned: 'yes' },
         ],
         loreSettings: { scanDepth: 2, budgetPercent: 40, recursiveScanning: true, maxRecursionSteps: 3 },
       },
@@ -14651,7 +14676,10 @@ describe('prompt scripts and SillyTavern lore', () => {
       ['outlet', '무기'],
       // An unknown position is the default, and an outlet's name leaves with it.
       ['before_char', undefined],
+      ['before_char', undefined],
+      ['before_char', undefined],
     ]);
+    expect(member.card.lorebook.map((entry: any) => entry.positioned ?? null)).toEqual([null, null, null, null, true, null]);
     expect(member.card.loreSettings).toEqual({
       scanDepth: 2,
       budgetPercent: 40,
@@ -14665,10 +14693,13 @@ describe('prompt scripts and SillyTavern lore', () => {
     expect(systems.at(-1)).toContain('[SWORD]');
     expect(systems.at(-1)).not.toContain('AN-LORE');
     expect(systems.at(-1)).not.toContain('EX-LORE');
+    expect(systems.at(-1)).toContain('PLACED-KEY');
+    expect(systems.at(-1)).not.toContain('FREE-KEY');
     const texts = turns.at(-1)!.map((turn) => turn.text);
     // The chat has no author's note of its own: the entry takes its place.
     expect(texts).toContain('AN-LORE');
     expect(texts).toContain('[예시 대화: 아리아]\nEX-LORE');
+    expect(texts[texts.indexOf('FREE-KEY') - 1]).toBe('안녕');
   });
 
   it("keeps SillyTavern's entry and book settings through a save, and runs the book as ST's", async () => {
@@ -14734,7 +14765,7 @@ describe('prompt scripts and SillyTavern lore', () => {
     });
 
     const created = await startChat(cookie, plot.id);
-    const { app, systems } = sentApp('대답');
+    const { app, systems, turns } = sentApp('대답');
     await readSse(await json(cookie, `/api/chats/${created.chat.id}/messages`, 'POST', { content: '{{user}} 왔어' }, app));
     const system = systems.at(-1)!;
     expect(system).toContain('FOR-ARIA');
@@ -14743,7 +14774,8 @@ describe('prompt scripts and SillyTavern lore', () => {
     expect(system).not.toContain('ON-CONTINUE');
     // ST expands a key's macros before it matches, and the turn's own as it
     // stores it (`sendMessageAsUser`): both read the reader's name, so they meet.
-    expect(system).toContain('USER-KEY');
+    // A keyword entry, it goes right after the reader's turn.
+    expect(turns.at(-1)!.map((turn) => turn.text)).toContain('USER-KEY');
     // The card's ST variable macros ran in its description, the global one among
     // them — ST's chat holds the greeting at 0, so the reader's turn is 1.
     const globals = await json(cookie, `/api/chats/${created.chat.id}/global-variables`, 'GET');
@@ -15384,6 +15416,31 @@ describe('editRequest listeners', () => {
     ]);
     const stored = await db.select().from(messages).where(eq(messages.chatId, chatId)).orderBy(asc(messages.createdAt));
     expect(stored.filter((message) => message.role === 'user').map((message) => message.content)).toEqual(['안녕', '또 왔어']);
+  });
+
+  it('hands the listener the keyword lore as an item of its own, right after the reader’s turn', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const cookie = await signUp('lua-moved-lore@example.com');
+    const plot = await createPlot(cookie, {
+      name: '루아 작품',
+      description: '설명',
+      intros: ['문 앞이다.'],
+      lorebook: [{ keys: ['등대'], content: '등대는 북쪽 끝에 있다.' }],
+    });
+    const script = listening(`
+      for i, turn in ipairs(req) do
+        if turn.content == '등대는 북쪽 끝에 있다.' then
+          turn.content = turn.content .. ' (' .. req[i - 1].role .. ': ' .. req[i - 1].content .. ')'
+        end
+      end
+      return req`);
+    await addCharacter(cookie, plot.id, { name: '아리아', card: { description: '설명', extensions: { risuai: { triggerscript: [lua(script)] } } } });
+    const chatId = (await startChat(cookie, plot.id)).chat.id;
+    expect((await send(cookie, chatId, capturing, '등대로 가자')).at(-1)!.event).toBe('done');
+    const sent = prompts.at(-1)!;
+    expect(sent.system).not.toContain('등대는');
+    const reader = sent.messages.findIndex((message) => message.content === '등대로 가자');
+    expect(sent.messages[reader + 1]).toEqual({ role: 'system', content: '등대는 북쪽 끝에 있다. (user: 등대로 가자)' });
   });
 
   it('hands the listener the persona’s picture as the browser’s sandbox does, and nothing without one', async () => {
@@ -19505,15 +19562,15 @@ describe('vector storage (SillyTavern)', () => {
     // Something to bring back, so the turn asks for its query.
     await summarizeFirst(cookie, chatId, harness, 3);
     const prompt = await send(cookie, chatId, '등대 근처에서 map을 꺼냈다', harness);
-    expect(prompt.system).toContain(MAP);
-    expect(prompt.system).not.toContain(TOWER);
+    expect(sentText(prompt)).toContain(MAP);
+    expect(sentText(prompt)).not.toContain(TOWER);
     expect(recallOf(prompt)).not.toContain('Past events');
 
     // No embedder at all: the same, and nothing is asked of one.
     const bare = vectorApp();
     const again = await send(cookie, chatId, '등대 근처에서 map을 꺼냈다', bare);
-    expect(again.system).toContain(MAP);
-    expect(again.system).not.toContain(TOWER);
+    expect(sentText(again)).toContain(MAP);
+    expect(sentText(again)).not.toContain(TOWER);
   });
 
   it("brings back copies of earlier messages the summaries cover, by meaning, in ST's Past events just before the turn", async () => {
@@ -19749,17 +19806,17 @@ describe('vector storage (SillyTavern)', () => {
       const { chatId } = await englishWork(cookie, harness, [tower, map, rule]);
 
       let prompt = await sendAs(cookie, chatId, '등대에 가 보자', 'ko', harness);
-      expect(prompt.system).toContain(TOWER);
-      expect(prompt.system).not.toContain(MAP);
+      expect(sentText(prompt)).toContain(TOWER);
+      expect(sentText(prompt)).not.toContain(MAP);
       expect(prompt.system).toContain(RULE);
       // Read in English, the turns go by the keys as written.
       prompt = await sendAs(cookie, chatId, '등대에 가 보자', 'en', harness);
-      expect(prompt.system).not.toContain(TOWER);
+      expect(sentText(prompt)).not.toContain(TOWER);
       // Translated, the turns stand in the work's language: no aliases there either.
       const patched = await json(cookie, `/api/chats/${chatId}`, 'PATCH', { translation: { mode: 'translate' } }, harness.app);
       expect(patched.status).toBe(200);
       prompt = await sendAs(cookie, chatId, '등대에 가 보자', 'ko', harness);
-      expect(prompt.system).not.toContain(TOWER);
+      expect(sentText(prompt)).not.toContain(TOWER);
     });
 
     it("starts the pass from a Korean reader's chat on a work without aliases, and from a turn that finds them gone", async () => {
@@ -19778,13 +19835,13 @@ describe('vector storage (SillyTavern)', () => {
       expect(harness.asked).toHaveLength(1);
       expect(await storedAliases(plot.id)).toHaveLength(2);
       const chatId = (await readJson(started)).chat.id;
-      expect((await sendAs(reader, chatId, '옛 지도를 펼쳤다', 'ko', harness)).system).toContain(MAP);
+      expect(sentText(await sendAs(reader, chatId, '옛 지도를 펼쳤다', 'ko', harness))).toContain(MAP);
 
       // Gone: that turn goes by the keys alone, and asks for them again.
       await db.delete(loreEntryAliases).where(eq(loreEntryAliases.plotId, plot.id));
-      expect((await sendAs(reader, chatId, '옛 지도를 펼쳤다', 'ko', harness)).system).not.toContain(MAP);
+      expect(sentText(await sendAs(reader, chatId, '옛 지도를 펼쳤다', 'ko', harness))).not.toContain(MAP);
       expect(harness.asked).toHaveLength(2);
-      expect((await sendAs(reader, chatId, '옛 지도를 펼쳤다', 'ko', harness)).system).toContain(MAP);
+      expect(sentText(await sendAs(reader, chatId, '옛 지도를 펼쳤다', 'ko', harness))).toContain(MAP);
     });
 
     it("aliases a selective entry's secondary keys in the same call, and a Korean turn meets them under its logic", async () => {
@@ -19798,8 +19855,8 @@ describe('vector storage (SillyTavern)', () => {
       expect(await storedAliases(plotId)).toEqual([{ keys: ['옛 지도', '지도'], secondary: [['등대']] }]);
 
       // `and_any`: the map's alias alone is not enough; the lighthouse's alias is its secondary key.
-      expect((await sendAs(cookie, chatId, '지도를 펼쳤다', 'ko', harness)).system).not.toContain(COVE);
-      expect((await sendAs(cookie, chatId, '등대 아래에서 지도를 펼쳤다', 'ko', harness)).system).toContain(COVE);
+      expect(sentText(await sendAs(cookie, chatId, '지도를 펼쳤다', 'ko', harness))).not.toContain(COVE);
+      expect(sentText(await sendAs(cookie, chatId, '등대 아래에서 지도를 펼쳤다', 'ko', harness))).toContain(COVE);
     });
 
     it("activates an entry SillyTavern marked vectorized by its keys alone, never by meaning, on either engine", async () => {
@@ -19817,12 +19874,12 @@ describe('vector storage (SillyTavern)', () => {
         expect((await readPlot(cookie, plotId)).lorebook.map((entry: any) => entry.vectorized ?? false)).toEqual([true, true, false]);
         // Close in meaning to the lighthouse and the cove, by none of their keys.
         let prompt = await sendAs(cookie, chatId, '등대 옆 숨은 만까지 걸어가 보자', 'ko', harness);
-        expect(prompt.system).not.toContain(TOWER);
-        expect(prompt.system).not.toContain(COVE);
+        expect(sentText(prompt)).not.toContain(TOWER);
+        expect(sentText(prompt)).not.toContain(COVE);
         prompt = await sendAs(cookie, chatId, 'the lighthouse and the map', 'ko', harness);
-        expect(prompt.system).toContain(TOWER);
-        expect(prompt.system).toContain(MAP);
-        expect(prompt.system).not.toContain(COVE);
+        expect(sentText(prompt)).toContain(TOWER);
+        expect(sentText(prompt)).toContain(MAP);
+        expect(sentText(prompt)).not.toContain(COVE);
       }
       // Nothing was embedded, and no query either: the retrieval is off.
       expect(embedder.calls).toEqual([]);

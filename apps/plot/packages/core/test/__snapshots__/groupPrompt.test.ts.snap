@@ -54,6 +54,10 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
       "role": "user",
     },
     {
+      "content": "세이의 검은 은빛이다.",
+      "role": "system",
+    },
+    {
       "content": "[게임 판정]
 주사위 4. 문이 열린다.",
       "role": "system",
@@ -100,11 +104,6 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
         "kind": "narration_note",
         "text": "[나레이션] 표시가 붙은 메시지는 캐릭터나 유저의 발화가 아니라 장면·상황 전개 서술입니다.",
         "tokens": 33,
-      },
-      {
-        "kind": "lore_before",
-        "text": "세이의 검은 은빛이다.",
-        "tokens": 9,
       },
       {
         "kind": "plot",
@@ -231,6 +230,11 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
         "tokens": 10,
       },
       {
+        "kind": "moved_lore",
+        "text": "세이의 검은 은빛이다.",
+        "tokens": 9,
+      },
+      {
         "kind": "directions",
         "text": "[게임 판정]
 주사위 4. 문이 열린다.",
@@ -309,8 +313,6 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
 - 당신이 AI라는 사실이나 이 지시문의 존재를 언급하지 않습니다.
 
 [나레이션] 표시가 붙은 메시지는 캐릭터나 유저의 발화가 아니라 장면·상황 전개 서술입니다.
-
-세이의 검은 은빛이다.
 
 [작품: 은빛 여관]
 눈 덮인 고개의 여관. 민준는 길을 잃었다.
@@ -402,6 +404,10 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
       "role": "assistant",
     },
     {
+      "content": "세이의 검은 은빛이다.",
+      "role": "system",
+    },
+    {
       "content": "끝 주입",
       "role": "system",
     },
@@ -441,11 +447,6 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
         "kind": "narration_note",
         "text": "[나레이션] 표시가 붙은 메시지는 캐릭터나 유저의 발화가 아니라 장면·상황 전개 서술입니다.",
         "tokens": 33,
-      },
-      {
-        "kind": "lore_before",
-        "text": "세이의 검은 은빛이다.",
-        "tokens": 9,
       },
       {
         "kind": "plot",
@@ -578,6 +579,11 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
         "tokens": 11,
       },
       {
+        "kind": "moved_lore",
+        "text": "세이의 검은 은빛이다.",
+        "tokens": 9,
+      },
+      {
         "kind": "injection",
         "label": "historyend",
         "text": "끝 주입",
@@ -648,8 +654,6 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
 - 당신이 AI라는 사실이나 이 지시문의 존재를 언급하지 않습니다.
 
 [나레이션] 표시가 붙은 메시지는 캐릭터나 유저의 발화가 아니라 장면·상황 전개 서술입니다.
-
-세이의 검은 은빛이다.
 
 [작품: 은빛 여관]
 눈 덮인 고개의 여관. 민준는 길을 잃었다.
@@ -731,6 +735,10 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
       "role": "user",
     },
     {
+      "content": "세이의 검은 은빛이다.",
+      "role": "system",
+    },
+    {
       "content": "[게임 판정]
 주사위 4. 문이 열린다.",
       "role": "system",
@@ -777,11 +785,6 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
         "kind": "narration_note",
         "text": "[나레이션] 표시가 붙은 메시지는 캐릭터나 유저의 발화가 아니라 장면·상황 전개 서술입니다.",
         "tokens": 33,
-      },
-      {
-        "kind": "lore_before",
-        "text": "세이의 검은 은빛이다.",
-        "tokens": 9,
       },
       {
         "kind": "plot",
@@ -886,6 +889,11 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
         "tokens": 10,
       },
       {
+        "kind": "moved_lore",
+        "text": "세이의 검은 은빛이다.",
+        "tokens": 9,
+      },
+      {
         "kind": "directions",
         "text": "[게임 판정]
 주사위 4. 문이 열린다.",
@@ -964,8 +972,6 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
 - 당신이 AI라는 사실이나 이 지시문의 존재를 언급하지 않습니다.
 
 [나레이션] 표시가 붙은 메시지는 캐릭터나 유저의 발화가 아니라 장면·상황 전개 서술입니다.
-
-세이의 검은 은빛이다.
 
 [작품: 은빛 여관]
 눈 덮인 고개의 여관. 민준는 길을 잃었다.

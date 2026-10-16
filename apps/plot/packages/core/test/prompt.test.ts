@@ -671,6 +671,12 @@ const loreEntry = (overrides: Partial<LoreEntry> & { content: string }): LoreEnt
   ...overrides,
 });
 
+/** What the moved lore says — the keyword lore, after the newest turn — or '' when there is none. */
+const movedLoreOf = (prompt: ReturnType<typeof assemblePrompt>): string => {
+  const at = prompt.sources?.findIndex((source) => source.kind === 'moved_lore') ?? -1;
+  return at < 0 ? '' : promptText(prompt.messages[at]!.content);
+};
+
 // Without example dialogue the messages array is just history + depth lore.
 const bareCard: NormalizedCard = { ...card, mesExample: '' };
 const bareAria: PromptCharacter = { name: '아리아', card: bareCard };
@@ -813,6 +819,198 @@ describe('assemblePrompt - merged lorebook', () => {
       ...history.map((turn) => turn.content),
       'POST',
     ]);
+  });
+});
+
+describe('assemblePrompt - the moved lore', () => {
+  // Every turn of `history` says 유저 발화 or 캐릭터 발화.
+  const keyed = (content: string, overrides: Partial<LoreEntry> = {}): LoreEntry =>
+    loreEntry({ content, constant: false, keys: ['유저 발화'], ...overrides });
+  const turns = history.map((turn, at) => ({ ...turn, id: `m${at}` }));
+  const assembleLore = (lorebook: LoreEntry[], input: Partial<Parameters<typeof assemblePrompt>[0]> = {}) =>
+    assemblePrompt({
+      plot,
+      characters: [{ name: '아리아', card: { ...bareCard, lorebook } }],
+      history: turns,
+      preset,
+      userName: '민준',
+      contextBudget: 100_000,
+      maxResponseTokens: 0,
+      report: true,
+      ...input,
+    });
+  const texts = (prompt: ReturnType<typeof assemblePrompt>): string[] =>
+    prompt.messages.map((message) => promptText(message.content));
+  const section = (prompt: ReturnType<typeof assemblePrompt>, kind: string): string | undefined =>
+    prompt.systemSections!.find((part) => part.kind === kind)?.text;
+
+  it('takes the keyword lore at the default places out of the system string, and leaves every other entry where it was', () => {
+    const prompt = assembleLore(
+      [
+        loreEntry({ content: 'ALWAYS BEFORE', insertionOrder: 1 }),
+        loreEntry({ content: 'ALWAYS AFTER', position: 'after_char', insertionOrder: 2 }),
+        keyed('KEY BEFORE', { insertionOrder: 3 }),
+        keyed('KEY AFTER', { position: 'after_char', insertionOrder: 4 }),
+        // The card's own `@@position` placed it: it stays.
+        keyed('KEY PLACED', { positioned: true, insertionOrder: 5 }),
+        keyed('KEY DEEP', { depth: 1, insertionOrder: 6 }),
+        keyed('KEY NOTE', { position: 'after_author_note', insertionOrder: 7 }),
+        keyed('KEY EXAMPLE', { position: 'before_examples', insertionOrder: 8 }),
+        keyed('KEY OUTLET', { position: 'outlet', outletName: 'o', insertionOrder: 9 }),
+        // SillyTavern's ↑Char and ↓Char are its default places too.
+        keyed('ST BEFORE', { sillyTavern: true, insertionOrder: 10 }),
+        keyed('ST AFTER', { sillyTavern: true, position: 'after_char', insertionOrder: 11 }),
+      ],
+      { plot: { ...plot, description: `${plot.description} {{outlet::o}}` }, authorNote: '유저노트.' },
+    );
+    expect(section(prompt, 'lore_before')).toBe('ALWAYS BEFORE\n\nKEY PLACED');
+    expect(section(prompt, 'lore_after')).toBe('ALWAYS AFTER');
+    expect(prompt.system).toContain(`${plot.description} KEY OUTLET`);
+    for (const moved of ['KEY BEFORE', 'KEY AFTER', 'ST BEFORE', 'ST AFTER']) expect(prompt.system).not.toContain(moved);
+    expect(movedLoreOf(prompt)).toBe('KEY BEFORE\n\nST BEFORE\n\nKEY AFTER\n\nST AFTER');
+    const sent = texts(prompt);
+    expect(sent).toContain('KEY DEEP');
+    expect(sent).toContain('유저노트.\nKEY NOTE');
+    expect(sent.some((text) => text.endsWith('KEY EXAMPLE'))).toBe(true);
+    // Each entry says where its creator put it; the block it went into says where it was sent.
+    expect(prompt.report!.lore.find((entry) => entry.preview === 'KEY BEFORE')).toMatchObject({ placement: 'before_char', via: 'keyword' });
+  });
+
+  it('moves what a recursive scan or a sticky window brought in, but never an always-on entry', () => {
+    const held = keyed('HELD', { keys: ['없는 말'], sticky: 5, insertionOrder: 3 });
+    // An always-on entry with a window of its own is still always on.
+    const alwaysHeld = loreEntry({ content: 'ALWAYS HELD', sticky: 5, insertionOrder: 4 });
+    const lorebook = [
+      loreEntry({ content: 'ALWAYS: 등대', insertionOrder: 1 }),
+      keyed('RECURSED', { keys: ['등대'], insertionOrder: 2 }),
+      held,
+      alwaysHeld,
+    ];
+    const prompt = assembleLore([], {
+      characters: [
+        { name: '아리아', card: { ...bareCard, lorebook, loreSettings: { ...DEFAULT_LORE_SETTINGS, recursiveScanning: true } } },
+      ],
+      loreState: { chatLength: 4, lastTriggered: { [loreEntryKey(held)]: 2, [loreEntryKey(alwaysHeld)]: 2 } },
+    });
+    expect(prompt.report!.lore.map((entry) => entry.via)).toEqual(['constant', 'recursion', 'sticky', expect.any(String)]);
+    expect(section(prompt, 'lore_before')).toBe('ALWAYS: 등대\n\nALWAYS HELD');
+    expect(movedLoreOf(prompt)).toBe('RECURSED\n\nHELD');
+    // With no turn to follow, it stands where the turns would end, as the recall turn does.
+    const bare = assembleLore([], {
+      characters: [
+        { name: '아리아', card: { ...bareCard, lorebook, loreSettings: { ...DEFAULT_LORE_SETTINGS, recursiveScanning: true } } },
+      ],
+      history: [],
+    });
+    expect(texts(bare)).toEqual(['RECURSED', 'POST']);
+  });
+
+  it('sends the moved entries as the system string would have, macros and order and all', () => {
+    const book = [
+      keyed('B2 {{char}}', { insertionOrder: 5 }),
+      keyed('A1', { position: 'after_char', insertionOrder: 1 }),
+      keyed('B1 {{user}}', { insertionOrder: 2 }),
+      keyed('A2', { position: 'after_char', insertionOrder: 9 }),
+      keyed('{{#if {{getvar::flag}}}}EMPTY{{/if}}', { insertionOrder: 3 }),
+    ];
+    const moved = assembleLore(book, { variables: { flag: '0' } });
+    // The same entries always on: where today's system string held them.
+    const kept = assembleLore(
+      book.map((entry) => ({ ...entry, constant: true })),
+      { variables: { flag: '0' } },
+    );
+    expect(movedLoreOf(moved)).toBe(`${section(kept, 'lore_before')}\n\n${section(kept, 'lore_after')}`);
+    expect(movedLoreOf(moved)).toBe('B1 민준\n\nB2 아리아\n\nA1\n\nA2');
+    // What stays is the system string of a work with no such lore.
+    expect(moved.system).toBe(assembleLore([]).system);
+    expect(moved.systemSections).toEqual(assembleLore([]).systemSections);
+    // Only after the cast, or only before it: no blank line left over.
+    expect(movedLoreOf(assembleLore(book.filter((entry) => entry.position === 'after_char')))).toBe('A1\n\nA2');
+    // Nothing keyed at all: no turn.
+    expect(assembleLore([loreEntry({ content: 'ALWAYS' })]).sources!.some((source) => source.kind === 'moved_lore')).toBe(false);
+  });
+
+  it('goes first after the newest turn: ahead of the directions, the recall turn, the depth-0 lore and the rest', () => {
+    const prompt = assembleLore([keyed('KEY'), loreEntry({ content: 'DEPTH ZERO', depth: 0 }), keyed('KEY DEEP', { depth: 1 })], {
+      directions: '판정.',
+      factsText: '[기억]\n- 사실.',
+      injections: { start: '시작 주입.', historyend: '끝 주입.', promptend: '맨끝 주입.' },
+    });
+    expect(texts(prompt).slice(-10)).toEqual([
+      'KEY DEEP',
+      '시작 주입.',
+      history[3]!.content,
+      'KEY',
+      '[게임 판정]\n판정.',
+      '[기억]\n- 사실.',
+      'DEPTH ZERO',
+      '끝 주입.',
+      'POST',
+      '맨끝 주입.',
+    ]);
+    const kinds = prompt.sources!.map((source) => source.kind);
+    expect(kinds.slice(-8)).toEqual(['history', 'moved_lore', 'directions', 'recall', 'depth_lore', 'injection', 'post_history', 'injection']);
+    // The inspector shows it where it is sent, as its own block.
+    const blocks = prompt.report!.blocks;
+    const at = blocks.findIndex((block) => block.kind === 'moved_lore');
+    expect(blocks.slice(at - 1, at + 2).map((block) => block.kind)).toEqual(['history', 'moved_lore', 'directions']);
+    expect(blocks[at]).toEqual({ kind: 'moved_lore', tokens: countTokens('KEY'), text: 'KEY' });
+    // A reply already in the round, or a turn hidden from the AI: it follows the newest turn sent.
+    const round = [...turns, { role: 'assistant' as const, content: '다섯 번째 캐릭터 발화.', id: 'm4' }];
+    expect(texts(assembleLore([keyed('KEY')], { history: round })).slice(-3)).toEqual(['다섯 번째 캐릭터 발화.', 'KEY', 'POST']);
+    const hidden = round.map((turn) => (turn.id === 'm4' ? { ...turn, hidden: true } : turn));
+    expect(texts(assembleLore([keyed('KEY')], { history: hidden })).slice(-3)).toEqual([history[3]!.content, 'KEY', 'POST']);
+  });
+
+  it('lets the next turn repeat this request up to the system turns that close it, though the keyword lore changed', () => {
+    const lore = [keyed('등대 이야기', { keys: ['등대'] }), keyed('여관 이야기', { keys: ['여관'] })];
+    const scanning = { ...bareCard, lorebook: lore, loreSettings: { ...DEFAULT_LORE_SETTINGS, scanDepth: 1 } };
+    const at = (sent: HistoryMessage[]) => assembleLore([], { characters: [{ name: '아리아', card: scanning }], history: sent });
+    const first = at([...turns.slice(0, 3), { role: 'user', content: '등대로 간다.', id: 'm3' }]);
+    const second = at([
+      ...turns.slice(0, 3),
+      { role: 'user', content: '등대로 간다.', id: 'm3' },
+      { role: 'assistant', content: '바다가 보인다.', id: 'm4' },
+      { role: 'user', content: '이제 그곳으로 돌아간다.', id: 'm5' },
+    ]);
+    expect(movedLoreOf(first)).toBe('등대 이야기');
+    expect(movedLoreOf(second)).toBe('');
+    const third = at([...turns.slice(0, 3), { role: 'user', content: '여관에 묵는다.', id: 'm3' }]);
+    expect(movedLoreOf(third)).toBe('여관 이야기');
+    // The system string does not move with it, and the next request begins with all of this one but its closing turns.
+    expect(second.system).toBe(first.system);
+    expect(third.system).toBe(first.system);
+    const conversation = (prompt: ReturnType<typeof assemblePrompt>) =>
+      prompt.messages.slice(0, prompt.messages.findLastIndex((message) => message.role !== 'system') + 1);
+    expect(conversation(second).slice(0, conversation(first).length)).toEqual(conversation(first));
+  });
+
+  it('is charged up front like the depth lore, never evicted, and counts in the fixed tokens', () => {
+    const long = keyed(`KEY ${'설정 '.repeat(60)}`.trim());
+    const bare = assembleLore([]);
+    const prompt = assembleLore([long]);
+    const moved = movedLoreOf(prompt);
+    expect(prompt.fixedTokens! - bare.fixedTokens!).toBe(countTokens(moved));
+    expect(prompt.report!.totals.used - bare.report!.totals.used).toBe(countTokens(moved));
+    // A budget that holds nothing but the newest turn still holds it.
+    const card = { ...bareCard, lorebook: [long], loreSettings: { ...DEFAULT_LORE_SETTINGS, tokenBudget: 10_000 } };
+    const tight = assembleLore([], {
+      characters: [{ name: '아리아', card }],
+      contextBudget: countTokens(bare.system) + countTokens('POST') + countTokens(moved) + countTokens(history[3]!.content),
+    });
+    expect(texts(tight)).toEqual([history[3]!.content, moved, 'POST']);
+    // The lore budget still decides which entries get in, as it did: the higher insertionOrder first.
+    const first = keyed('FIRST', { insertionOrder: 2 });
+    const second = keyed('SECOND', { insertionOrder: 1 });
+    const budgeted = { ...bareCard, lorebook: [second, first], loreSettings: { ...DEFAULT_LORE_SETTINGS, tokenBudget: countTokens('FIRST') } };
+    expect(movedLoreOf(assembleLore([], { characters: [{ name: '아리아', card: budgeted }] }))).toBe('FIRST');
+  });
+
+  it('carries a SillyTavern entry marked for its WORLD_INFO scripts, which rewrite it where it went', async () => {
+    const prompt = assembleLore([keyed('st key {{user}}', { sillyTavern: true })], { markTavernLore: true });
+    expect(prompt.tavernLore).toEqual([{}]);
+    const rewritten = await rewriteTavernLore(prompt, (segments) => Promise.resolve(segments.map((segment) => segment.text.toUpperCase())));
+    expect(movedLoreOf(rewritten)).toBe('ST KEY 민준');
   });
 });
 
@@ -1216,11 +1414,9 @@ describe('assemblePrompt - old status windows and choices', () => {
   });
 
   it('still scans the stripped state for lore', () => {
-    const { system, messages } = assembleStated([
-      loreEntry({ content: '왕궁의 비밀', constant: false, keys: ['왕궁'] }),
-    ]);
-    expect(system).toContain('왕궁의 비밀');
-    expect(promptText(messages[0]!.content)).toBe('첫 장면.');
+    const prompt = assembleStated([loreEntry({ content: '왕궁의 비밀', constant: false, keys: ['왕궁'] })]);
+    expect(movedLoreOf(prompt)).toBe('왕궁의 비밀');
+    expect(promptText(prompt.messages[0]!.content)).toBe('첫 장면.');
   });
 
   it('keeps a turn whole when its state is all it says', () => {
@@ -1266,7 +1462,9 @@ describe('assemblePrompt - clock, seed and lore records', () => {
       userName: '민준',
       loreState: { chatLength: 6, lastTriggered: { [loreEntryKey(sticky)]: 4 } },
     });
-    expect(result.system).toContain('STICKY');
+    // Held by its window, a keyword entry is still keyword lore: after the newest turn.
+    expect(movedLoreOf(result)).toBe('STICKY');
+    expect(result.system).toContain('FRESH');
     expect(result.loreTriggers).toEqual([loreEntryKey(fresh)]);
   });
 });
@@ -2263,7 +2461,7 @@ describe("assemblePrompt - SillyTavern's lore positions", () => {
 
 describe('assemblePrompt - what the prompt scripts made of the history', () => {
   it('sends the rewritten turn, while the lore still scans the stored one', () => {
-    const { system, messages } = assemblePrompt({
+    const { messages } = assemblePrompt({
       plot,
       characters: [
         {
@@ -2278,8 +2476,7 @@ describe('assemblePrompt - what the prompt scripts made of the history', () => {
       preset,
       userName: '민준',
     });
-    expect(system).toContain('KEY-LORE');
-    expect(messages.map((message) => promptText(message.content))).toEqual(['[가려짐]', '좋아', 'POST']);
+    expect(messages.map((message) => promptText(message.content))).toEqual(['[가려짐]', '좋아', 'KEY-LORE', 'POST']);
   });
 
   it('reads each turn as its own message, as RisuAI does: {{chat_index}} is its index', () => {
@@ -2329,13 +2526,15 @@ describe('assemblePrompt - messages hidden from the AI', () => {
   it('scans no hidden turn for lore keywords', () => {
     const lorebook = [loreEntry({ content: 'KEY-LORE', constant: false, keys: ['열쇠'] })];
     const scanned = (turnsSent: HistoryMessage[]): string =>
-      assemblePrompt({
-        plot,
-        characters: [{ name: '아리아', card: { ...bareCard, lorebook } }],
-        history: turnsSent,
-        preset,
-        userName: '민준',
-      }).system;
+      movedLoreOf(
+        assemblePrompt({
+          plot,
+          characters: [{ name: '아리아', card: { ...bareCard, lorebook } }],
+          history: turnsSent,
+          preset,
+          userName: '민준',
+        }),
+      );
     expect(scanned(turns)).not.toContain('KEY-LORE');
     expect(scanned(turns.map(({ hidden: _hidden, ...turn }) => turn))).toContain('KEY-LORE');
   });
@@ -2365,20 +2564,22 @@ describe('assemblePrompt - the greeting in the lore scan', () => {
     lore: { plot?: LoreEntry[]; member?: LoreEntry[] },
     extra: { sillyTavern?: boolean; branch?: typeof opened; history?: HistoryMessage[] } = {},
   ): boolean =>
-    assemblePrompt({
-      plot: { ...plot, lorebook: lore.plot ?? [] },
-      characters: [
-        {
-          name: '아리아',
-          card: { ...bareCard, lorebook: lore.member ?? [] },
-          ...(extra.sillyTavern ? { sillyTavern: true } : {}),
-        },
-      ],
-      history: extra.history ?? history,
-      preset,
-      userName: '민준',
-      branch: extra.branch ?? opened,
-    }).system.includes('GREETING-LORE');
+    movedLoreOf(
+      assemblePrompt({
+        plot: { ...plot, lorebook: lore.plot ?? [] },
+        characters: [
+          {
+            name: '아리아',
+            card: { ...bareCard, lorebook: lore.member ?? [] },
+            ...(extra.sillyTavern ? { sillyTavern: true } : {}),
+          },
+        ],
+        history: extra.history ?? history,
+        preset,
+        userName: '민준',
+        branch: extra.branch ?? opened,
+      }),
+    ).includes('GREETING-LORE');
 
   it("leaves the greeting out of the scan, as RisuAI's chat never holds it", () => {
     expect(scanned({ member: [greeting] })).toBe(false);

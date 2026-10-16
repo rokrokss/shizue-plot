@@ -60,6 +60,7 @@ describe('the request as RisuAI’s items', () => {
       history: { memo: 'chatId', removable: true, chat: true },
       depth_lore: {},
       author_note: {},
+      moved_lore: {},
       recall: {},
       post_history: {},
       injection: {},

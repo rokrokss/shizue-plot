@@ -57,6 +57,14 @@ export interface LoreEntry {
    */
   outletName?: string;
   /**
+   * The card wrote RisuAI's `@@position` on the entry, whatever slot it named —
+   * `before_desc`, `after_desc`, or a prompt template's `pt_` slot, which reads
+   * as `before_char` here. Its author placed it, so it stays in the system
+   * string where keyword lore otherwise goes after the newest turn (the
+   * assembler's moved lore).
+   */
+  positioned?: true;
+  /**
    * V3 `@@depth N`: inject the entry into the history, N messages from the end,
    * instead of into the system block. Undefined for system-block entries.
    */

@@ -43,8 +43,11 @@ export type CacheSite = 'chat' | 'side';
  *   dropped a summary (the history starts earlier), or a turn before it differs.
  * - `summary_landed` — a summary landed: the history starts later and the
  *   summary block changed.
- * - `system_changed:lore` — the lore in the system string differs (a keyword
- *   entry came or went).
+ * - `system_changed:lore` — the lore the system string keeps differs: an
+ *   always-on entry's macros read differently, a keyword entry the card's own
+ *   `@@position` placed came or went, or a keyword entry took budget an
+ *   always-on one had. Keyword lore otherwise goes after the newest turn
+ *   (`moved_lore`), outside what the next request repeats.
  * - `system_changed:clock` — the summary block differs with the memory's clock
  *   (`MemoryInput.clock`) and nothing landed.
  * - `system_changed:other` — anything else in the system string: the summary

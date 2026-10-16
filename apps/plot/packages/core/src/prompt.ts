@@ -480,19 +480,20 @@ export interface AssembledPrompt {
   /**
    * What the budget charged before any history, the summaries aside: the rest
    * of the system string, the post-history block, the directions, the notes,
-   * the injections, the recall turn but its summaries (the facts, the messages
-   * brought back, the relationship) and the trailing blocks — everything never
-   * dropped. The memory's summarizer (API §7.3) counts the history it lets
-   * stand against what is left beside it and the summaries' share. Always there
-   * from the assembler.
+   * the depth lore and the moved lore, the injections, the recall turn but its
+   * summaries (the facts, the messages brought back, the relationship) and the
+   * trailing blocks — everything never dropped. The memory's summarizer (API
+   * §7.3) counts the history it lets stand against what is left beside it and
+   * the summaries' share. Always there from the assembler.
    */
   fixedTokens?: number;
   /**
    * The sections `system` is joined from, in order, each as sent and with what
-   * it is — the main prompt, the lore before and after the cast, the memory
-   * block and the rest. The API's prompt-cache log tells by them which part of
-   * the system string changed (`cacheHealth.ts`). Always there from the
-   * assembler; gone once the request was edited, like `sources`.
+   * it is — the main prompt, the lore that stays before and after the cast
+   * (the moved lore is a turn), the memory block and the rest. The API's
+   * prompt-cache log tells by them which part of the system string changed
+   * (`cacheHealth.ts`). Always there from the assembler; gone once the request
+   * was edited, like `sources`.
    */
   systemSections?: { kind: PromptBlockKind; text: string }[];
   /**
@@ -522,6 +523,13 @@ export type PromptBlockKind =
   | 'history'
   | 'depth_lore'
   | 'author_note'
+  /**
+   * The lore keywords brought in — a match, a recursive scan or a sticky window,
+   * never an always-on entry — at the system string's default places (before
+   * and after the cast), as one system turn right after the newest turn: the
+   * same entries and text, sent where they no longer change the system string.
+   */
+  | 'moved_lore'
   /**
    * What this turn recalls — the summaries HypaV3's similar and random shares
    * picked, the facts, the messages a search brought back, the relationship — as
@@ -1318,7 +1326,23 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     }
     return marked;
   };
-  const loreText = (position: LorePosition): string => loreAt(position).map(placeLore).join('\n\n');
+  /**
+   * Whether an active entry leaves the system string for the moved lore (7e):
+   * one a keyword, a recursive scan or its sticky window brought in — never an
+   * always-on one — at the system string's default places, where RisuAI's
+   * lorebook slot and SillyTavern's ↑Char/↓Char put it, unless the card's own
+   * `@@position` put it there. Which entries those are changes nearly every
+   * turn, and the system string is the start of every request the provider
+   * might serve from its cache (ARCHITECTURE §6 로어북).
+   */
+  const movesAfterTurn = (entry: LoreEntry): boolean =>
+    !entry.constant && !entry.positioned && (entry.position === 'before_char' || entry.position === 'after_char');
+  /** A system position's entries, those that stay there or (`moved`) those the moved lore carries, as they are joined. */
+  const loreText = (position: LorePosition, moved = false): string =>
+    loreAt(position)
+      .filter((entry) => movesAfterTurn(entry) === moved)
+      .map(placeLore)
+      .join('\n\n');
 
   // 2b. outlets — SillyTavern's World Info position 7. An outlet entry goes
   // nowhere by itself: what its outlet's entries say, one per line as ST joins
@@ -1537,9 +1561,26 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     ? { kind: 'recall', message: { role: 'system', content: recallText } }
     : null;
 
-  // Everything that is never evicted is charged up front. Depth lore is charged
-  // here too — it is counted against the lorebook budget by activateLore, but it
-  // still occupies context that history would otherwise use.
+  // 7e. the moved lore: the entries keywords brought in at the system string's
+  // default places (`movesAfterTurn`), as one system turn right after the newest
+  // turn (below), ahead of the directions and the recall turn — the entries
+  // before the cast, then those after it, each run joined and sent as its
+  // section would have been. The same entries and text as RisuAI and
+  // SillyTavern send, only elsewhere: which of them a turn's words bring in
+  // changes nearly every turn, and in the system string each change kept the
+  // whole history after it out of the provider's cache (ARCHITECTURE §6 로어북).
+  // Charged up front like the depth lore, and never evicted.
+  const movedLore = [send(loreText('before_char', true)), send(loreText('after_char', true))]
+    .filter((text) => text.length > 0)
+    .join('\n\n');
+  const movedLoreSlot: MessageSlot | null = movedLore
+    ? { kind: 'moved_lore', message: { role: 'system', content: movedLore } }
+    : null;
+
+  // Everything that is never evicted is charged up front. Depth lore and the
+  // moved lore are charged here too — they are counted against the lorebook
+  // budget by activateLore, but they still occupy context that history would
+  // otherwise use.
   let available =
     contextBudget -
     maxResponseTokens -
@@ -1548,6 +1589,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     countTokens(directionsBlock) -
     countTokens(authorNoteBlock) -
     countTokens(recallText) -
+    countTokens(movedLore) -
     injectedTokens -
     (speakerSlot ? countTokens(promptText(speakerSlot.message.content)) : 0) -
     (emotionSlot ? countTokens(promptText(emotionSlot.message.content)) : 0) -
@@ -1720,13 +1762,14 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
       ...historySources[i]!,
     });
   }
-  // Everything of this turn's own follows the newest turn sent: the directions
-  // (5d) and the recall turn (7d) first, then the depth-0 lore and note and
-  // whatever closes the request. The provider serves a request from an earlier
-  // one only when it repeats that whole request but its last message
-  // (ARCHITECTURE §7.3 프롬프트 캐시 측정): the next turn's request repeats the
-  // history up to here, and the ChatGPT adapter sends the system turns after the
-  // newest turn as its one last message (`responseBody`).
+  // Everything of this turn's own follows the newest turn sent: the moved lore
+  // (7e), the directions (5d) and the recall turn (7d) first, then the depth-0
+  // lore and note and whatever closes the request. The provider serves a
+  // request from an earlier one only when it repeats that whole request but its
+  // last message (ARCHITECTURE §7.3 프롬프트 캐시 측정): the next turn's request
+  // repeats the history up to here, and the ChatGPT adapter sends the system
+  // turns after the newest turn as its one last message (`responseBody`).
+  if (movedLoreSlot) historyBlock.push(movedLoreSlot);
   if (directionsBlock) historyBlock.push({ kind: 'directions', message: { role: 'system', content: directionsBlock } });
   if (recallSlot) historyBlock.push(recallSlot);
   historyBlock.push(...depthAt(historyMessages.length));
