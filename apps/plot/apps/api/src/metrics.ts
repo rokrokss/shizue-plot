@@ -12,7 +12,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { jobs } from '@shizue/db';
 import { inArray, sql } from 'drizzle-orm';
-import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from 'prom-client';
+import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from '@prometheus-io/client';
 import type { AppDeps } from './deps.js';
 import type { BackgroundTasks } from './lifecycle.js';
 
