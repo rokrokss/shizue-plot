@@ -123,6 +123,7 @@ import {
   renewChatSlot,
   requestTriggerInput,
   scheduleBackgroundUpdates,
+  stopChatGeneration,
   withGenerationSlot,
   type GenerationPlan,
   type ScriptView,
@@ -274,6 +275,12 @@ export const toChatJson = (chat: Chat, noteIds: string[]) => ({
    * no other write until the import completes — it can only be read or deleted.
    */
   importing: chat.importing,
+  /**
+   * True while the chat's slot is held — a reply, or a drawn scene, on its way.
+   * A reply goes on after its page has gone (§7.2), so a page that comes back to
+   * find this waits for it rather than asking for another.
+   */
+  generating: isGenerating(chat),
   /** The chat file a conversation brought over from another app came from; null for one started here. */
   importedFrom: chat.importedFrom,
   createdAt: chat.createdAt.toISOString(),
@@ -3377,6 +3384,21 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> =>
       regeneratePlan(c, deps, await loadWritableChat(deps, id, userId), focusIds, scripts, group),
     );
+  });
+
+  /** How long a stop waits for the stopped reply to be stored — one write, well under a second. */
+  const STOP_GRACE_MS = 5_000;
+
+  /**
+   * The stop button. Closing the stream no longer stops a reply (§7.2), so the
+   * page says it here: what arrived is stored as a stopped reply, and this answers
+   * once it is, so the page's next read finds it. 204 whether or not a reply was
+   * running.
+   */
+  app.post('/:id/stop', async (c) => {
+    const chat = await loadWritableChat(deps, requireUuidParam(c), c.get('userId'));
+    await stopChatGeneration(deps, chat.id, STOP_GRACE_MS);
+    return c.body(null, 204);
   });
 
   /**

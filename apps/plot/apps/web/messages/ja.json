@@ -1062,7 +1062,7 @@
     "copyCode": "コードをコピー",
     "copied": "コピーしました",
     "streamError": "応答が途中で途切れました。再生成で続けられます。",
-    "copyMessage": "メッセージをコピー",
+    "serverGenerating": "返信をサーバーで生成し続けています。終わるとここに表示されます。",    "copyMessage": "メッセージをコピー",
     "editMessage": "メッセージを編集",
     "deleteMessage": "削除",
     "hideFromAi": "AIから隠す",

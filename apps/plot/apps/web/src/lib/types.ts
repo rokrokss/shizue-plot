@@ -760,6 +760,12 @@ export interface Chat {
    * state built by hand needs no flag.
    */
   importing?: boolean;
+  /**
+   * True while the server holds the chat's slot — a reply, or a drawn scene, on
+   * its way, possibly one a page that has since gone asked for. Optional so a
+   * state built by hand needs no flag.
+   */
+  generating?: boolean;
   createdAt: string;
   updatedAt: string;
 }

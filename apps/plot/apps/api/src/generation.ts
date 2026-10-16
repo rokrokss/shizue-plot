@@ -1191,11 +1191,26 @@ async function runGeneration(
   return streamSSE(c, async (stream) => {
     const controller = new AbortController();
     const abort = (): void => controller.abort();
-    stream.onAbort(abort);
-    c.req.raw.signal?.addEventListener('abort', abort);
-    // Shutdown stops it the way a disconnect does (`stopGenerations`).
+    // The browser going away does not stop the reply: a phone that locks or
+    // changes networks mid-reply would lose it, and the reader's quota with it.
+    // The model goes on and the reply is stored whole for the page to read when
+    // it is back; only the reader's stop and shutdown end it early (`open.stop`).
+    let gone = false;
+    const leave = (): void => {
+      gone = true;
+    };
+    stream.onAbort(leave);
+    c.req.raw.signal?.addEventListener('abort', leave);
+    /** An event for a browser still listening; one that left is sent nothing. */
+    const send = async (message: { event: string; data: string }): Promise<void> => {
+      if (!gone) await stream.writeSSE(message);
+    };
     let settle!: () => void;
-    const open: OpenGeneration = { stop: abort, settled: new Promise<void>((resolve) => (settle = resolve)) };
+    const open: OpenGeneration = {
+      chatId: plan.chatId,
+      stop: abort,
+      settled: new Promise<void>((resolve) => (settle = resolve)),
+    };
     deps.generationStreams.add(open);
 
     // A stream that says nothing while the model thinks is a stream an idle proxy
@@ -1205,7 +1220,7 @@ async function runGeneration(
     // browser reader is tested on it. The same tick renews the generation claim,
     // which is what keeps a reply slower than CLAIM_STALE_MS from being taken over.
     const heartbeat = setInterval(() => {
-      void stream.writeSSE({ event: 'ping', data: '' });
+      void send({ event: 'ping', data: '' });
       void renewChatSlot(deps, plan.chatId);
     }, HEARTBEAT_MS);
 
@@ -1240,18 +1255,18 @@ async function runGeneration(
         let next = await generator.next();
         while (!next.done) {
           text += next.value.text;
-          await stream.writeSSE({ event: 'delta', data: JSON.stringify({ text: next.value.text }) });
+          await send({ event: 'delta', data: JSON.stringify({ text: next.value.text }) });
           next = await generator.next();
         }
         usage = next.value.usage;
         noteCachedTokens('chat', next.value.usage, plan.chatId);
       } catch (error) {
-        // A disconnect surfaces as an abort error, and a stream the upstream let go
-        // quiet as `chatgpt_timeout`; both keep what arrived. Anything else is a
-        // real failure and must not persist a message.
+        // A stop surfaces as an abort error, and a stream the upstream let go quiet
+        // as `chatgpt_timeout`; both keep what arrived. Anything else is a real
+        // failure and must not persist a message.
         timeout = error instanceof ChatGPTError && error.code === 'chatgpt_timeout' ? error : null;
         if (!controller.signal.aborted && !timeout) {
-          await stream.writeSSE({
+          await send({
             event: 'error',
             data: JSON.stringify({ message: error instanceof Error ? error.message : 'Generation failed', ...(error instanceof ChatGPTError ? { code: error.code } : {}) }),
           });
@@ -1263,22 +1278,22 @@ async function runGeneration(
       const kept = narrationKept(plan, text);
       const reply = kept ?? text;
 
-      // Client gone, or the upstream quiet: keep whatever was received so far. Only
-      // the timeout says so — the page refetches on the error and finds the reply
-      // under it; a client gone is sent nothing.
+      // Stopped, or the upstream quiet: keep whatever was received so far. Only the
+      // timeout says so — the page refetches on the error and finds the reply under
+      // it; a stopped stream is sent nothing, its page reads it after the stop.
       if (controller.signal.aborted || timeout) {
         if (reply) {
           // Stored pending all the same, if the browser meant to post-process
           // it: the next time it opens the chat it finds the mark and finishes.
           const stored = await persist(deps, plan, reply, usage, request, { stopped: true });
           await keepGlobalWrites(deps, plan, request);
-          // The turn is on the branch whether or not anyone was listening, so what
-          // it opened is opened; there is simply no event to say so on.
+          // The turn is on the branch, so what it opened is opened; there is
+          // simply no event to say so on.
           await openUnlocks(deps, plan.chatId, stored.content);
           if (!plan.postProcess) scheduleBackgroundUpdates(deps, plan.chatId);
         }
         if (timeout && !controller.signal.aborted) {
-          await stream.writeSSE({ event: 'error', data: JSON.stringify({ message: timeout.message, code: timeout.code }) });
+          await send({ event: 'error', data: JSON.stringify({ message: timeout.message, code: timeout.code }) });
         }
         return;
       }
@@ -1286,7 +1301,7 @@ async function runGeneration(
       // Nothing of the scene was left: it fails as a provider failure does —
       // nothing stored, and the turn it would have followed is still the head.
       if (kept === '') {
-        await stream.writeSSE({
+        await send({
           event: 'error',
           data: JSON.stringify({ message: 'The narration held nothing but dialogue', code: 'narration_empty' }),
         });
@@ -1298,7 +1313,7 @@ async function runGeneration(
       // Evaluated on the raw text as well as at the commit: unlocks only ever
       // open, so the earlier answer costs nothing and saves the reader a wait.
       const unlockedAssetIds = await openUnlocks(deps, plan.chatId, stored.content);
-      await stream.writeSSE({
+      await send({
         event: 'done',
         data: JSON.stringify({
           messageId: stored.id,
@@ -1319,7 +1334,7 @@ async function runGeneration(
       if (!plan.postProcess) scheduleBackgroundUpdates(deps, plan.chatId, stored.id);
     } finally {
       clearInterval(heartbeat);
-      c.req.raw.signal?.removeEventListener('abort', abort);
+      c.req.raw.signal?.removeEventListener('abort', leave);
       try {
         await release();
       } finally {
@@ -1331,14 +1346,28 @@ async function runGeneration(
 }
 
 /**
- * Stops every generation this instance is streaming, as a disconnect stops one —
- * each keeps what it had as a stopped reply and gives its chat's slot back — and
- * waits up to `graceMs` for that storing, never for the replies themselves. For
- * shutdown: a stream the exit cut instead would store nothing and leave its chat
- * answering 429 until the claim went stale.
+ * Stops every generation this instance is streaming, as the reader's stop stops
+ * one — each keeps what it had as a stopped reply and gives its chat's slot back —
+ * and waits up to `graceMs` for that storing, never for the replies themselves.
+ * For shutdown: a stream the exit cut instead would store nothing and leave its
+ * chat answering 429 until the claim went stale.
  */
 export async function stopGenerations(deps: AppDeps, graceMs: number): Promise<void> {
-  const open = [...deps.generationStreams];
+  await stopAll([...deps.generationStreams], graceMs);
+}
+
+/**
+ * The reader's stop (`POST /api/chats/:id/stop`): the chat's generation keeps what
+ * it had as a stopped reply, and this answers once that is stored and the slot is
+ * free, so the page's next read finds it. A dropped connection no longer stops a
+ * reply, so this is the only way a reader does. Nothing running is nothing to do.
+ * Single instance (§12): a stream another instance holds is not seen here.
+ */
+export async function stopChatGeneration(deps: AppDeps, chatId: string, graceMs: number): Promise<void> {
+  await stopAll([...deps.generationStreams].filter((generation) => generation.chatId === chatId), graceMs);
+}
+
+async function stopAll(open: OpenGeneration[], graceMs: number): Promise<void> {
   if (open.length === 0) return;
   for (const generation of open) generation.stop();
   let timer: ReturnType<typeof setTimeout> | undefined;

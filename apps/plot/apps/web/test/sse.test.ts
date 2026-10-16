@@ -138,18 +138,20 @@ describe('streamGeneration', () => {
     });
   });
 
-  it('treats a truncated stream as an error rather than a success', async () => {
+  // A stream that ends without `done` or `error` is not a success: the server is
+  // still finishing the reply (or stopped it at shutdown), and the caller waits.
+  it('treats a truncated stream as dropped rather than a success', async () => {
     mockFetch(['event: delta\ndata: {"text":"잘린"}\n\n']);
 
     const { result } = await collect();
-    // Told in the reader's language, not the transport's.
-    expect(result).toMatchObject({ kind: 'error', code: 'stream_interrupted' });
+    expect(result).toEqual({ kind: 'dropped' });
   });
 
-  // The caller distinguishes the two failure modes by whether the promise
-  // rejects: a rejection means nothing was persisted, so the typed prompt has
-  // to go back into the composer and `regenerate` must not be offered.
-  it('resolves as an in-stream error when the transport drops mid-stream', async () => {
+  // The caller distinguishes the failure modes by whether the promise rejects:
+  // a rejection means nothing was persisted, so the typed prompt has to go back
+  // into the composer and `regenerate` must not be offered. A drop once the
+  // stream was open leaves the reply with the server.
+  it('resolves as dropped when the transport drops mid-stream', async () => {
     // The delta must be delivered before the failure, so the drop happens on a
     // later pull rather than in the same tick as the enqueue.
     let pulls = 0;
@@ -166,7 +168,7 @@ describe('streamGeneration', () => {
 
     const { result, text } = await collect();
     expect(text).toBe('부분');
-    expect(result).toEqual({ kind: 'error', code: 'stream_interrupted', message: 'network dropped' });
+    expect(result).toEqual({ kind: 'dropped' });
   });
 
   it('rejects when the request never opens a stream', async () => {

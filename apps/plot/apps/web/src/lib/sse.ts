@@ -16,11 +16,17 @@ type StreamResult =
       groupTurnId?: string;
     }
   /**
-   * The stream was open and then failed: either `event: error` or a transport
-   * drop. The server has already stored the user turn and moved the head onto
-   * it, so `regenerate` is the retry path.
+   * The stream was open and the server said it failed (`event: error`). It has
+   * already stored the user turn and moved the head onto it, so `regenerate` is
+   * the retry path.
    */
   | { kind: 'error'; message: string; code?: string; params?: Record<string, number> }
+  /**
+   * The stream was open and then ended without a word — the connection dropped,
+   * or the server stopped it at shutdown. The server goes on with the reply and
+   * stores it (§7.2), so the caller waits for the chat's slot to free and reads it.
+   */
+  | { kind: 'dropped' }
   | { kind: 'aborted' };
 
 interface SseEvent {
@@ -29,9 +35,10 @@ interface SseEvent {
 }
 
 /**
- * A stream that closed before the server said how it ended — a network drop, or
- * the API restarting mid-reply. The code is the page's, not the server's: it is
- * what the reader is told, in their language, instead of the transport's words.
+ * A response with no stream to read. The code is the page's, not the server's: it
+ * is what the reader is told, in their language, instead of the transport's
+ * words. A stream that closes before the server said how it ended is `dropped`:
+ * the server goes on with that reply.
  */
 const INTERRUPTED = 'stream_interrupted';
 
@@ -70,6 +77,8 @@ function readJson(data: string): Record<string, unknown> {
  *    user's input and must not retry through `regenerate`.
  *  - **Resolves `{kind: 'error'}`** once the stream was open. The user turn is
  *    stored and the head sits on it, so `regenerate` is the retry.
+ *  - **Resolves `{kind: 'dropped'}`** when an open stream ends with neither
+ *    `done` nor `error`. The reply is still the server's to finish and store.
  */
 export async function streamGeneration(
   path: string,
@@ -95,7 +104,7 @@ export async function streamGeneration(
 
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
   let buffer = '';
-  let result: StreamResult = { kind: 'error', code: INTERRUPTED, message: 'The stream ended unexpectedly' };
+  let result: StreamResult = { kind: 'dropped' };
 
   try {
     for (;;) {
@@ -143,13 +152,9 @@ export async function streamGeneration(
     }
   } catch (error) {
     // The stream was already open, so this is a transport drop, not a rejected
-    // request — the user turn is persisted either way.
+    // request — the user turn is persisted, and the server goes on with the reply.
     if (signal.aborted) return { kind: 'aborted' };
-    return {
-      kind: 'error',
-      code: INTERRUPTED,
-      message: error instanceof Error ? error.message : 'The stream was interrupted',
-    };
+    return { kind: 'dropped' };
   } finally {
     await reader.cancel().catch(() => undefined);
   }

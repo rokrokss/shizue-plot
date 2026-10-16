@@ -1062,7 +1062,7 @@
     "copyCode": "코드 복사",
     "copied": "복사됨",
     "streamError": "응답이 중간에 끊겼습니다. 이어서 다시 생성할 수 있습니다.",
-    "copyMessage": "메시지 복사",
+    "serverGenerating": "답장을 서버에서 마저 생성하고 있습니다. 끝나면 여기에 나타납니다.",    "copyMessage": "메시지 복사",
     "editMessage": "메시지 수정",
     "deleteMessage": "삭제",
     "hideFromAi": "AI에게 숨기기",

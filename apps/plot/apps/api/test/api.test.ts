@@ -4083,15 +4083,93 @@ describe('chats', () => {
     expect(deps.generationClaims.has(chatId)).toBe(false);
   });
 
-  it('releases the generation claim when the client walks away mid-stream', async () => {
+  /** An adapter that sends `first`, then holds until `open()` before it sends `rest` and finishes. */
+  const gatedAdapter = (first: string, rest: string) => {
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    const seen: { aborted: boolean } = { aborted: false };
+    const target = makeApp({
+      getAdapter: () => ({
+        providerModel: 'gated',
+        adapter: {
+          stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
+            req.abortSignal?.addEventListener('abort', () => (seen.aborted = true));
+            if (first) yield { type: 'text', text: first };
+            await gate;
+            yield { type: 'text', text: rest };
+            return { usage: { promptTokens: 11, completionTokens: 7 } };
+          },
+        },
+      }),
+    });
+    return { target, open, seen };
+  };
+
+  it('finishes and stores the whole reply when the client walks away mid-stream', async () => {
     const cookie = await signUp('abort-claim@example.com');
+    const { target, open, seen } = gatedAdapter('부분', ' 응답');
+    const { chatId } = await setupChat(cookie);
+
+    const client = new AbortController();
+    const res = await target.request(`/api/chats/${chatId}/messages`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ content: '안녕' }),
+      signal: client.signal,
+    });
+    // Wait for the first delta, then walk away — a phone locking mid-reply.
+    await res.body!.getReader().read();
+    client.abort();
+
+    // The reply goes on without anyone listening, and the chat says so.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(await claimOf(chatId)).not.toBeNull();
+    expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.generating).toBe(true);
+
+    open();
+    await until(async () => (await claimOf(chatId)) === null, 'the claim was never released');
+    // Stored whole, as a reply that was listened to is, with its usage.
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    expect(state.chat.generating).toBe(false);
+    expect(state.path.at(-1)).toMatchObject({ role: 'assistant', content: '부분 응답', promptTokens: 11, completionTokens: 7 });
+    expect(seen.aborted).toBe(false);
+    // And the chat generates again straight away, on an instance that never saw
+    // the abandoned request.
+    const next = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '다시' }, makeApp());
+    expect(next.status).toBe(200);
+    expect((await readSse(next)).at(-1)!.event).toBe('done');
+  });
+
+  it('finishes a reply whose client left before its first word', async () => {
+    const cookie = await signUp('abort-thinking@example.com');
+    const { target, open } = gatedAdapter('', '생각을 마친 답');
+    const { chatId } = await setupChat(cookie);
+
+    const client = new AbortController();
+    await target.request(`/api/chats/${chatId}/messages`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ content: '안녕' }),
+      signal: client.signal,
+    });
+    // Gone while the model is still thinking: nothing had arrived to keep.
+    client.abort();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    open();
+    await until(async () => (await claimOf(chatId)) === null, 'the claim was never released');
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    expect(state.path.at(-1)).toMatchObject({ role: 'assistant', content: '생각을 마친 답' });
+  });
+
+  it("stops a reply on the reader's stop: kept, and the chat freed before it answers", async () => {
+    const cookie = await signUp('stop-claim@example.com');
     const target = makeApp({
       getAdapter: () => ({
         providerModel: 'slow',
         adapter: {
           stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
             yield { type: 'text', text: '부분 응답' };
-            // Hangs until the client disconnects, like a provider mid-answer.
+            // Hangs until stopped, like a provider mid-answer.
             await new Promise<void>((_resolve, reject) => {
               const fail = (): void => reject(new Error('aborted'));
               if (req.abortSignal?.aborted) fail();
@@ -4103,31 +4181,25 @@ describe('chats', () => {
       }),
     });
     const { chatId } = await setupChat(cookie);
-
-    const client = new AbortController();
-    const res = await target.request(`/api/chats/${chatId}/messages`, {
-      method: 'POST',
-      headers: { cookie, 'content-type': 'application/json' },
-      body: JSON.stringify({ content: '안녕' }),
-      signal: client.signal,
-    });
-    expect(await claimOf(chatId)).not.toBeNull();
-    // Wait for the first delta, then walk away.
+    const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, target);
     await res.body!.getReader().read();
-    client.abort();
 
-    await until(async () => (await claimOf(chatId)) === null, 'the claim was never released');
-    // The partial text was kept: the claim is only released once it is stored.
+    // Another reader cannot stop it.
+    const stranger = await signUp('stop-stranger@example.com');
+    expect((await json(stranger, `/api/chats/${chatId}/stop`, 'POST', undefined, target)).status).toBe(404);
+    expect(await claimOf(chatId)).not.toBeNull();
+
+    const stopped = await json(cookie, `/api/chats/${chatId}/stop`, 'POST', undefined, target);
+    expect(stopped.status).toBe(204);
+    // Stored and freed by the time it answers: the page's next read finds it.
+    expect(await claimOf(chatId)).toBeNull();
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    expect(state.path.at(-1).content).toBe('부분 응답');
-    // And the chat generates again straight away, on an instance that never saw
-    // the abandoned request.
-    const next = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '다시' }, makeApp());
-    expect(next.status).toBe(200);
-    expect((await readSse(next)).at(-1)!.event).toBe('done');
+    expect(state.path.at(-1)).toMatchObject({ role: 'assistant', content: '부분 응답' });
+    // Nothing running is nothing to stop.
+    expect((await json(cookie, `/api/chats/${chatId}/stop`, 'POST', undefined, target)).status).toBe(204);
   });
 
-  it('stops a reply mid-stream on shutdown as a disconnect does: kept, and the chat freed before it returns', async () => {
+  it("stops a reply mid-stream on shutdown as the reader's stop does: kept, and the chat freed before it returns", async () => {
     const cookie = await signUp('shutdown-claim@example.com');
     const deps = makeDeps({
       getAdapter: () => ({
@@ -16954,16 +17026,14 @@ describe('group turns', () => {
         },
       }),
     });
-    const client = new AbortController();
     const res = await slow.request(`/api/chats/${chatId}/reply`, {
       method: 'POST',
       headers: { cookie, 'content-type': 'application/json' },
       body: JSON.stringify({ speakerId: kai, groupTurnId: a.groupTurnId }),
-      signal: client.signal,
     });
     await res.body!.getReader().read();
-    client.abort();
-    await until(async () => (await claimOf(chatId)) === null, 'the claim was never released');
+    expect((await json(cookie, `/api/chats/${chatId}/stop`, 'POST', undefined, slow)).status).toBe(204);
+    expect(await claimOf(chatId)).toBeNull();
     const kept = (await rowsOf(chatId)).at(-1)!;
     expect(kept).toMatchObject({ content: '반쯤', speakerMemberId: kai, groupTurnId: a.messageId, parentId: a.messageId });
   });
@@ -17584,7 +17654,7 @@ describe('emotion images', () => {
     await harness.settle();
     expect(await emotionOf(cookie, chatId, done.messageId, harness.app)).toEqual({ emotion: 'Angry' });
 
-    // A continue the reader walks away from keeps its text and the picture it had.
+    // A continue the reader stops keeps its text and the picture it had.
     const tasks: Promise<void>[] = [];
     const stopping = makeApp({
       getAdapter: () => ({
@@ -17603,15 +17673,12 @@ describe('emotion images', () => {
       }),
       onBackgroundTask: (task) => void tasks.push(task),
     });
-    const client = new AbortController();
     const res = await stopping.request(`/api/chats/${chatId}/continue`, {
       method: 'POST',
       headers: { cookie },
-      signal: client.signal,
     });
     await res.body!.getReader().read();
-    client.abort();
-    await until(async () => (await claimOf(chatId)) === null, 'the claim was never released');
+    expect((await json(cookie, `/api/chats/${chatId}/stop`, 'POST', undefined, stopping)).status).toBe(204);
     await Promise.all(tasks);
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
     expect(state.path.at(-1).content).toMatch(/ 그리고$/);

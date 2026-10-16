@@ -171,14 +171,15 @@ interface SendOptions {
 type QueuedTurn = { kind: 'next' } | ScriptTurn | { kind: 'own'; content: string; options?: SendOptions };
 
 /**
- * How hard to look for a stopped turn. The server writes the partial reply after
- * the socket is already gone, so the refetch that follows a stop routinely
- * arrives before it — and a refetch that misses it takes the text off the screen
- * for good. Four tries a quarter-second apart covers the write without leaving
- * the composer locked for long.
+ * How often to ask whether a reply the server is finishing on its own is done —
+ * one whose stream dropped, or one a page that has since gone asked for (§7.2).
  */
-const ABORT_POLL_TRIES = 4;
-const ABORT_POLL_MS = 250;
+const SERVER_POLL_MS = 2_000;
+/**
+ * How long a turn whose stream dropped holds the composer waiting for that reply.
+ * Past it the turn lets go and the page goes on waiting quietly (`chat.generating`).
+ */
+const SERVER_WAIT_MS = 10 * 60_000;
 
 /**
  * How close to the top of the list the reader has to come before the window
@@ -485,6 +486,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    * Nothing of that reply was stored, so what arrived exists only here.
    */
   const [held, setHeld] = useState<StreamMode | null>(null);
+  /** A turn whose stream dropped is waiting for the server to finish its reply (`awaitServerReply`). */
+  const [waitingOnServer, setWaitingOnServer] = useState(false);
   // Tokens arrive in whatever rhythm the model has; this is what turns that into
   // a steady line of prose, and it is the only thing that renders per frame.
   const { visibleText: streamText, append, finish, reset } = useSmoothStream();
@@ -525,6 +528,13 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   }, [id, statusCollapsed]);
 
   const abortRef = useRef<AbortController | null>(null);
+  /**
+   * The stop the reader asked the server for, which the turn's ending waits on:
+   * closing the stream no longer stops a reply (§7.2), and the server answers it
+   * once the stopped reply is stored. An earlier turn's is long settled, so
+   * waiting on it costs nothing.
+   */
+  const stopping = useRef<Promise<void> | null>(null);
   // The message list scrolls, not the document: the reader's own scroll is what
   // decides whether new text follows them down, and the library gives that up the
   // moment they move away from the bottom.
@@ -1902,6 +1912,25 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     }
   }
 
+  // A reply the server is finishing for a page that has gone — this tab before a
+  // reload, another device, a turn that stopped waiting (`awaitServerReply`) — is
+  // read when it lands: the page asks again until the chat's slot is free. A reply
+  // that lands owing its output scripts is finished by the effect below.
+  const serverGenerating = Boolean(state?.chat.generating);
+  useEffect(() => {
+    if (!serverGenerating || mode || drawing || mutating) return;
+    let cancelled = false;
+    const timer = setInterval(() => {
+      void refetch().then((answer) => {
+        if (!cancelled && answer.state) mergeState(answer.state);
+      });
+    }, SERVER_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [serverGenerating, mode, drawing, mutating, refetch, mergeState]);
+
   // A pending head that is not this tab's doing — a reload after the tab closed
   // mid-reply, a swipe onto a pending sibling — is finished as soon as it is seen.
   useEffect(() => {
@@ -2169,6 +2198,29 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   /** The background as the card's scripts draw it; their display scripts come after, in `ChatBackground`. */
   const shownBackground = scriptShown.get(BACKGROUND_ITEM) ?? backgroundHtml;
 
+  /**
+   * The reply a dropped stream left with the server, waited for: the server goes
+   * on with it and stores it (§7.2), so this reads the chat until its slot is free,
+   * or the reader's stop has been answered, and answers with that read. A phone
+   * that slept through it reads it on waking. Past SERVER_WAIT_MS it answers with
+   * the chat still generating, and the page waits on its own (`chat.generating`).
+   */
+  async function awaitServerReply(): Promise<{ state: ChatState | null; error: string }> {
+    setWaitingOnServer(true);
+    const deadline = Date.now() + SERVER_WAIT_MS;
+    let last = await refetch();
+    /** The newest read that answered: one lost to the network says nothing about the reply. */
+    let known = last;
+    while ((known.state === null || known.state.chat.generating) && Date.now() < deadline) {
+      await sleep(SERVER_POLL_MS);
+      if (stopping.current) await stopping.current;
+      last = await refetch();
+      if (last.state) known = last;
+    }
+    setWaitingOnServer(false);
+    return known.state ? known : last;
+  }
+
   async function run(
     next: StreamMode,
     content?: string,
@@ -2292,6 +2344,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     let rejection: unknown = null;
     let streamError: string | null = null;
     let aborted = false;
+    /** The stream ended without a word: the server is finishing the reply on its own. */
+    let dropped = false;
     /** How much of a reply arrived, which decides whether there is any to keep. */
     let received = 0;
     /** The round the reply was stored in, for the round to go on in. */
@@ -2345,6 +2399,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         );
         if (result.kind === 'error') streamError = result.code ? toMessage(new ApiError(0, result.code, result.message, result.params)) : result.message;
         aborted = result.kind === 'aborted';
+        dropped = result.kind === 'dropped';
         landed = result.kind === 'done';
         if (result.kind === 'done') groupTurnId = result.groupTurnId ?? null;
         // Its emotion picture, where its member shows one, comes after it (`awaitingEmotion`).
@@ -2383,19 +2438,21 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     // holding back before anything decides what the ending meant.
     finish();
 
+    // A stopped reply is stored by the time the server answers the stop, so the
+    // read below waits for that answer rather than racing the write.
+    if (aborted && stopping.current) await stopping.current;
     // Refresh before clearing the streamed text so the persisted message
-    // replaces it in a single render — no flash of a duplicated reply.
-    let refreshed = await refetch();
-    // A stopped turn is written after the socket closed, so the answer above may
-    // simply be too early. Keep asking — the optimistic row is still up, and it
-    // is the partial that the server is in the middle of storing.
-    if (aborted && received > 0) {
-      for (let attempt = 0; attempt < ABORT_POLL_TRIES; attempt += 1) {
-        if (refreshed.state && generationLanded(next, before, refreshed.state)) break;
-        await sleep(ABORT_POLL_MS);
-        const again = await refetch();
-        if (again.state) refreshed = again;
-      }
+    // replaces it in a single render — no flash of a duplicated reply. A dropped
+    // stream's reply is still the server's to finish, so that read waits for it.
+    const refreshed = dropped ? await awaitServerReply() : await refetch();
+    if (
+      dropped &&
+      refreshed.state &&
+      !refreshed.state.chat.generating &&
+      !generationLanded(next, before, refreshed.state)
+    ) {
+      // The server's attempt failed after the page lost it: nothing was stored.
+      streamError = toMessage(new ApiError(0, 'stream_interrupted', ''));
     }
     // Merged rather than assigned: the refetch answers with the newest window,
     // and on a long chat that is less than what the reader has paged in.
@@ -3073,7 +3130,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   /** RisuAI's input translation: the reader writes in their language, the turn goes out in the work's. */
   const translateInput = languageMode?.input === true;
   function submit(): void {
-    if (!input.trim() || mode || drawing || mutationRef.current || attaching || importing || scriptsPending || castPending || translatingInput) return;
+    if (!input.trim() || mode || drawing || serverGenerating || mutationRef.current || attaching || importing || scriptsPending || castPending || translatingInput) return;
     // The chip is a way of typing: what is stored is the plain convention, the
     // same one the reader could have written the marks of by hand — a member's
     // line included (`@이름: …`).
@@ -3760,6 +3817,13 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                 {scriptNotice}
               </p>
             ) : null}
+            {/* A reply the server is finishing without a stream to this page: the
+                connection dropped, or the page came back to one already going. */}
+            {waitingOnServer || (serverGenerating && !mode && !drawing) ? (
+              <p data-testid="server-generating" className="mx-auto max-w-3xl px-5 pt-2 text-xs text-muted" role="status">
+                {t('serverGenerating')}
+              </p>
+            ) : null}
             {/* Who the round in hand still has to ask, quietly: the row above the
                 composer already shows whom it is waiting on now. */}
             {upNext.length > 0 ? (
@@ -3933,6 +3997,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                     // A round's speakers still to come are not asked; what is stored stays.
                     roundStopped.current = true;
                     abortRef.current?.abort();
+                    // Closing the stream leaves the reply going on the server (§7.2),
+                    // so the stop is said there; the turn's ending waits on its answer.
+                    stopping.current = apiSend<void>('POST', `/api/chats/${id}/stop`).catch(() => undefined);
                   }}
                 >
                   <span aria-hidden="true" className="size-3 rounded-[3px] bg-current" />
@@ -3944,7 +4011,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                   aria-label={t('send')}
                   title={t('send')}
                   busy={translatingInput}
-                  disabled={!input.trim() || attaching || drawing || mutating || importing || scriptsPending || castPending || translatingInput}
+                  disabled={!input.trim() || attaching || drawing || serverGenerating || mutating || importing || scriptsPending || castPending || translatingInput}
                   onClick={submit}
                 >
                   <Icon name="arrow" className="size-5 -rotate-90" />
