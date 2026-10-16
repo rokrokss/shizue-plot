@@ -270,6 +270,29 @@ describe('assemblePrompt - a group turn', () => {
     expect(texts(group({ characters })).join('\n')).not.toContain('장부를 정리');
   });
 
+  it("lets a speaker's next round repeat their request up to the system turns that close it, as the provider's cache needs", () => {
+    /** The request up to its last turn of the conversation: the ChatGPT adapter sends the system turns after it as one. */
+    const conversation = (prompt: ReturnType<typeof assemblePrompt>) =>
+      prompt.messages.slice(0, prompt.messages.findLastIndex((message) => message.role !== 'system') + 1);
+    const next: HistoryMessage[] = [
+      ...groupHistory,
+      { role: 'assistant', content: '카이의 답.', speakerId: 'kai-id' },
+      { role: 'assistant', content: '세이야의 답.', speakerId: 'seiya-id' },
+      { role: 'user', content: '또 보자.' },
+    ];
+    for (const speaker of [0, 1]) {
+      const before = group({ speaker, factsText: '[기억]\n- 하나.' });
+      const after = group({ speaker, history: next, factsText: '[기억]\n- 둘.' });
+      expect(after.system).toBe(before.system);
+      expect(conversation(after).slice(0, conversation(before).length)).toEqual(conversation(before));
+    }
+    // Another speaker reads the history otherwise — their own replies plain, the rest
+    // under names — so the next speaker of a round does not repeat the one before.
+    const first = group({ speaker: 0 });
+    const second = group({ speaker: 1, history: [...groupHistory, { role: 'assistant', content: '세이야의 답.', speakerId: 'seiya-id' }] });
+    expect(conversation(second).slice(0, conversation(first).length)).not.toEqual(conversation(first));
+  });
+
   it("stops on every other on-stage member's name and nickname", () => {
     expect(group({ speaker: 1 }).stopSequences).toEqual(['\n세이야:', '\n세이:']);
     // The absent member is not on the stage, and the speaker is not among their own stops.

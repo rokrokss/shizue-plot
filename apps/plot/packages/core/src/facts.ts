@@ -16,7 +16,7 @@
 import type { MacroLocale } from './macro.js';
 import { countTokens } from './tokens.js';
 
-/** The facts block's head in the prompt; it opens the recall turn before the turn being answered. */
+/** The facts block's head in the prompt; it opens the recall turn right after the newest turn. */
 export const FACTS_HEADING = '[기억]';
 /** Facts one summary's extraction keeps at most. */
 export const MAX_FACTS_PER_SUMMARY = 8;

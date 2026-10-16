@@ -268,22 +268,23 @@ export interface AssemblePromptInput {
   /**
    * The summaries HypaV3's similar and random shares picked for this turn
    * (`recalledMemoryBlock`), already formatted. The first part of the recall turn
-   * (`recall`): they follow the latest turns, so in the system string, the
-   * cached prefix, they would keep the history behind them out of the cache.
+   * (`recall`), right after the newest turn: they follow the latest turns, so in
+   * the system string, the cached prefix, they would keep the history behind
+   * them out of the cache.
    */
   recalledMemoryText?: string;
   /**
    * The facts recalled for this turn (`[기억]`, `factsBlock`), already
    * formatted. In the recall turn after the recalled summaries: searched against
-   * the latest turns, they change nearly every turn, so they stand just before
-   * the turn being answered rather than in the system string, the cached prefix.
+   * the latest turns, they change nearly every turn, so they stand after the
+   * newest turn rather than in the system string, the cached prefix.
    */
   factsText?: string;
   /**
    * The earlier messages a search by meaning brought back (SillyTavern's chat
    * vectorization, `retrievalBlock`), already formatted. In the recall turn,
-   * after the facts — ST's "In-chat @ Depth" placement of its `3_vectors`
-   * rather than its default after the story string, which would be the cached
+   * after the facts — ST's "In-chat @ Depth" placement of its `3_vectors`, at
+   * depth 0 — rather than its default after the story string, which would be the cached
    * prefix here. The caller brings back only messages `history` does not
    * send, and leaves `history` as it is — ST takes them out of the chat it
    * sends, which would change the history, and the cached prefix, every turn.
@@ -296,14 +297,6 @@ export interface AssemblePromptInput {
    * turn of the history behind it out of the cached prefix.
    */
   relationshipText?: string;
-  /**
-   * The stored message the reply answers (`HistoryMessage.id`) where it is not
-   * the newest turn sent: in a group round already under way, the turn the
-   * round answers. The recall turn goes right before it, so every speaker of
-   * the round is sent the same prompt up to there. Absent, or not among the
-   * turns sent: the newest turn sent.
-   */
-  answered?: string;
   /**
    * Author's note. Injected `authorNoteSettings.depth` (default
    * `AUTHOR_NOTE_DEPTH`) messages from the end of the history and, like the
@@ -325,9 +318,9 @@ export interface AssemblePromptInput {
   /**
    * Stage directions carried by the *last* user message — what a game component
    * decided about the turn the user just took. Injected as a `[게임 판정]` system
-   * block ahead of the example dialogue, so it lands after the whole cached
-   * prefix (the merged system string) and never invalidates it. Earlier turns'
-   * directions are not injected: they already had their effect.
+   * turn right after the newest turn, ahead of the recall turn, so it never
+   * stands inside what the next turn's request repeats — the provider's cache.
+   * Earlier turns' directions are not injected: they already had their effect.
    */
   directions?: string;
   /**
@@ -522,7 +515,7 @@ export type PromptBlockKind =
   /**
    * What this turn recalls — the summaries HypaV3's similar and random shares
    * picked, the facts, the messages a search brought back, the relationship — as
-   * one system turn just before the turn being answered.
+   * one system turn right after the newest turn.
    */
   | 'recall'
   | 'post_history'
@@ -917,7 +910,6 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     factsText = '',
     retrievalText = '',
     relationshipText = '',
-    answered,
     authorNote = '',
     authorNoteSettings,
     userTurns,
@@ -1426,8 +1418,9 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const system = systemSections.map((section) => section.text).join('\n\n');
   const memorySection = systemSections.find((section) => section.kind === 'memory');
 
-  // 5d. stage directions of the turn being answered. Outside the system string on
-  // purpose: it changes every turn, and the system string is the cached prefix.
+  // 5d. stage directions of the turn being answered. After the newest turn (below):
+  // it changes every turn, so anywhere earlier it would keep what follows it out
+  // of the provider's cache.
   const directionsBlock = directions.trim() ? send(`${DIRECTIONS_HEADER}\n${expand(directions).trim()}`) : '';
 
   // 7c. author's note — spliced into the history at its depth, below — with the
@@ -1519,11 +1512,11 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // 7d. what this turn recalls: the summaries HypaV3's similar and random shares
   // picked, the facts closest to the latest turns, the earlier messages a search
   // by meaning found (ST's "Past events") and the relationship's state, as one
-  // system turn just before the turn being answered (placed with the history,
-  // below). Each is read again for every turn — the picks, the facts and the
-  // messages change nearly every time — so none of it stands in the system
-  // string, the provider's cached prefix: there it would keep every turn of the
-  // history behind it out of the cache. Never evicted.
+  // system turn right after the newest turn (below). Each is read again for
+  // every turn — the picks, the facts and the messages change nearly every time
+  // — so none of it stands in the system string or among the history: the
+  // provider serves a request from an earlier one only when it repeats that
+  // whole request but its last message. Never evicted.
   const recallPart = (text: string): string => (text.trim() ? send(expand(text).trim()) : '');
   const recalledMemoryPart = recallPart(recalledMemoryText);
   const factsPart = recallPart(factsText);
@@ -1701,18 +1694,11 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
       : []),
   ];
 
-  // The recall turn (7d) goes right before the turn being answered — the newest
-  // turn sent, or the one a group round under way answers (`answered`) — ahead
-  // of the depth lore, the note and the start injection that share its place.
-  const answeredAt = answered === undefined ? -1 : historySources.findIndex((source) => source.id === answered);
-  const recallAt = answeredAt >= 0 ? answeredAt : historyMessages.length - 1;
-
   // RisuAI's `start` goes right before the newest turn, behind whatever depth
   // lore is spliced in front of it; `historyend` after the whole history block.
   const historyBlock: MessageSlot[] = [];
   for (let i = 0; i < historyMessages.length; i += 1) {
     const message = historyMessages[i]!;
-    if (recallSlot && i === recallAt) historyBlock.push(recallSlot);
     historyBlock.push(...depthAt(i));
     if (startInjection && i === historyMessages.length - 1) historyBlock.push(startInjection);
     historyBlock.push({
@@ -1723,16 +1709,20 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
       ...historySources[i]!,
     });
   }
-  // Nothing of the history is sent: the recall turn still stands where the turns would end.
-  if (recallSlot && historyMessages.length === 0) historyBlock.push(recallSlot);
+  // Everything of this turn's own follows the newest turn sent: the directions
+  // (5d) and the recall turn (7d) first, then the depth-0 lore and note and
+  // whatever closes the request. The provider serves a request from an earlier
+  // one only when it repeats that whole request but its last message
+  // (ARCHITECTURE §7.3 프롬프트 캐시 측정): the next turn's request repeats the
+  // history up to here, and the ChatGPT adapter sends the system turns after the
+  // newest turn as its one last message (`responseBody`).
+  if (directionsBlock) historyBlock.push({ kind: 'directions', message: { role: 'system', content: directionsBlock } });
+  if (recallSlot) historyBlock.push(recallSlot);
   historyBlock.push(...depthAt(historyMessages.length));
   if (startInjection && historyMessages.length === 0) historyBlock.push(startInjection);
   if (historyEndInjection) historyBlock.push(historyEndInjection);
 
   const slots: MessageSlot[] = [
-    ...(directionsBlock
-      ? [{ kind: 'directions', message: { role: 'system', content: directionsBlock } } satisfies MessageSlot]
-      : []),
     ...exampleSlots,
     ...historyBlock,
     ...(postHistory

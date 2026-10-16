@@ -346,7 +346,7 @@ function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps {
 /**
  * A request's recall turn — the summaries the similar and random shares picked,
  * the facts, the messages a search brought back and the relationship, one
- * system turn before the turn being answered — or '' where the request recalls
+ * system turn right after the newest turn — or '' where the request recalls
  * nothing.
  */
 function recallOf(prompt: { messages: ChatRequest['messages'] }): string {
@@ -357,6 +357,15 @@ function recallOf(prompt: { messages: ChatRequest['messages'] }): string {
       (message.content.startsWith(RECALLED_MEMORY_HEADING) || /^(?:\[기억\]|Past events:|\[현재 관계 상태\])/.test(message.content)),
   );
   return typeof turn?.content === 'string' ? turn.content : '';
+}
+
+/** That a request's recall turn follows the reader's turn `said`, its newest turn. */
+function expectRecallAfter(prompt: { messages: ChatRequest['messages'] }, said: string): void {
+  const at = prompt.messages.findIndex((message) => message.content === recallOf(prompt));
+  expect(recallOf(prompt)).not.toBe('');
+  expect(prompt.messages[at]!.role).toBe('system');
+  expect(prompt.messages[at - 1]).toEqual({ role: 'user', content: said });
+  expect(at - 1).toBe(prompt.messages.findLastIndex((message) => message.role !== 'system'));
 }
 
 /** Empty env by default: only the always-on echo model is enabled. */
@@ -3883,7 +3892,7 @@ describe('chats', () => {
     expect(await count()).toBe(before);
     expect(await claimOf(own.chat.id)).toBeNull();
 
-    // What the turn recalls shows where it is sent: between the history turns, right before the one answered.
+    // What the turn recalls shows where it is sent: right after the newest turn, before the post-history.
     const axes = { affection: 70, obsession: 0, trust: 60, liking: 65, disgust: 0, fear: 5 };
     await db
       .update(chats)
@@ -3891,7 +3900,8 @@ describe('chats', () => {
       .where(eq(chats.id, own.chat.id));
     const recalled = await readJson(await request(owner, `/api/chats/${own.chat.id}/inspect`));
     const kinds = recalled.blocks.map((block: { kind: string }) => block.kind);
-    expect(kinds.slice(kinds.indexOf('recall') - 1, kinds.indexOf('recall') + 3)).toEqual(['history', 'recall', 'history', 'post_history']);
+    expect(kinds.slice(kinds.indexOf('recall') - 1, kinds.indexOf('recall') + 2)).toEqual(['history', 'recall', 'post_history']);
+    expect(kinds.lastIndexOf('history')).toBe(kinds.indexOf('recall') - 1);
     expect(recalled.blocks[kinds.indexOf('recall')].text).toMatch(/^\[현재 관계 상태\]\n/);
 
     // The reader's own chat on someone else's plot, and the creator on a chat
@@ -6714,7 +6724,7 @@ describe('the game layer', () => {
     expect(after.path[3].source).toBe('user');
   });
 
-  it('injects the last turn\'s ruling outside the cached prefix, and re-applies it on regenerate', async () => {
+  it('injects the last turn\'s ruling right after it, and re-applies it on regenerate', async () => {
     const cookie = await signUp('directions-prompt@example.com');
     const { chatId } = await setupChat(cookie);
     const { app: capturing, prompts } = capturingApp();
@@ -6730,9 +6740,11 @@ describe('the game layer', () => {
       ),
     );
     const first = prompts.at(-1)!;
-    // Ahead of everything the assembler puts in `messages`, and nowhere near the
-    // system string — that is the Anthropic cache prefix.
-    expect(first.messages[0]).toEqual({ role: 'system', content: '[게임 판정]\n주사위 3. 실패한다.' });
+    // Right after the turn it rules on — nothing the next turn's request repeats,
+    // the provider's cache — and nowhere near the system string.
+    const ruling = first.messages.findIndex((message) => contentText(message.content) === '[게임 판정]\n주사위 3. 실패한다.');
+    expect(first.messages[ruling]!.role).toBe('system');
+    expect(first.messages[ruling - 1]).toEqual({ role: 'user', content: '자물쇠를 딴다' });
     expect(first.system).not.toContain('게임 판정');
     // The ruling is not message text: the history carries the turn, not the ruling.
     expect(
@@ -6741,7 +6753,7 @@ describe('the game layer', () => {
 
     // Regenerate answers the same user turn, so it is judged the same way.
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
-    expect(prompts.at(-1)!.messages[0]).toEqual(first.messages[0]);
+    expect(prompts.at(-1)!.messages[ruling]).toEqual(first.messages[ruling]);
 
     // The next turn has no ruling of its own, and the previous one does not
     // come back with it.
@@ -8597,8 +8609,7 @@ describe('memory', () => {
       expect(undated(asked.system)).toContain(`${MEMORY_HEADING}\n등대 불빛이 꺼진 아침이었다.`);
       expect(asked.system).not.toContain('고양이가');
       expect(undated(recallOf(asked))).toBe(`${RECALLED_MEMORY_HEADING}\n고양이가 서점에 들어왔다.`);
-      const at = asked.messages.findIndex((message) => message.content === recallOf(asked));
-      expect(asked.messages[at + 1]).toEqual({ role: 'user', content: '고양이는 어디 갔지?' });
+      expectRecallAfter(asked, '고양이는 어디 갔지?');
 
       await harness.settle();
       const res = await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app);
@@ -8835,13 +8846,11 @@ describe('memory', () => {
       await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000, factCount: 1 } });
       const system = await ask(cookie, chatId, harness, '등대 열쇠는 어디 있지?');
       expect(factsBlockOf(system)).toBe(`${FACTS_HEADING}\n- ${FACTS[1]}`);
-      // Not in the system string, the cached prefix, but a system turn right before the turn it answers.
+      // Not in the system string, the cached prefix, but a system turn right after the turn it answers.
       const asked = harness.prompts.at(-1)!;
       expect(asked.system).toContain(MEMORY_HEADING);
       expect(asked.system).not.toContain(FACTS_HEADING);
-      const at = asked.messages.findIndex((message) => message.content === recallOf(asked));
-      expect(asked.messages[at]!.role).toBe('system');
-      expect(asked.messages[at + 1]).toEqual({ role: 'user', content: '등대 열쇠는 어디 있지?' });
+      expectRecallAfter(asked, '등대 열쇠는 어디 있지?');
 
       // Two, in the order their summaries stand on the branch, then extraction order.
       await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000, factCount: 2 } });
@@ -8947,9 +8956,8 @@ describe('memory', () => {
       expect(sent.system).not.toContain('Past events:');
       const recall = undated(recallOf(sent));
       expect(recall.startsWith(`${FACTS_HEADING}\n- ${FACTS[1]}\n\nPast events:\n`), recall).toBe(true);
-      // One turn, right before the turn it answers.
-      const at = sent.messages.findIndex((message) => message.content === recallOf(sent));
-      expect(sent.messages[at + 1]).toEqual({ role: 'user', content: '그 등대 기억나?' });
+      // One turn, right after the turn it answers.
+      expectRecallAfter(sent, '그 등대 기억나?');
       expect(sent.messages.filter((message) => typeof message.content === 'string' && message.content.includes('Past events:'))).toHaveLength(1);
     });
 
@@ -10305,7 +10313,7 @@ describe('relationship', () => {
     expect(updated.chat.relationship.updatedAt).toEqual(expect.any(String));
 
     // The next generation carries the block — not in the system text, the cached
-    // prefix, but last in the recall turn right before the turn it answers.
+    // prefix, but last in the recall turn right after the turn it answers.
     await turns(cookie, chatId, harness, 1);
     const sent = harness.prompts.at(-1)!;
     expect(sent.system).not.toContain('[현재 관계 상태]');
@@ -10317,8 +10325,8 @@ describe('relationship', () => {
     expect(recall).toContain('리안의 등장인물들이 유저에게 느끼는 마음의 온도');
     const at = sent.messages.findIndex((message) => message.content === recall);
     expect(sent.messages[at]!.role).toBe('system');
-    expect(sent.messages[at + 1]!.role).toBe('user');
-    expect(at + 1).toBe(sent.messages.findLastIndex((message) => message.role === 'user'));
+    expect(sent.messages[at - 1]!.role).toBe('user');
+    expect(at - 1).toBe(sent.messages.findLastIndex((message) => message.role === 'user'));
 
     // The next cycle is another five assistant turns past that depth.
     await turns(cookie, chatId, harness, TURNS_PER_UPDATE - 2);
@@ -16981,7 +16989,7 @@ describe('group turns', () => {
     ]);
   });
 
-  it('recalls before the turn a round answers, so each of its speakers is sent the same prompt up to there', async () => {
+  it('recalls right after the newest turn, and the round’s next speaker goes on from the first one’s request', async () => {
     const chat = await groupChat('group-recall@example.com');
     const { cookie, chatId, seiya, kai } = chat;
     const axes = { affection: 70, obsession: 0, trust: 60, liking: 65, disgust: 0, fear: 5 };
@@ -16995,20 +17003,34 @@ describe('group turns', () => {
     // The next speaker's continue, and a narration closing the round, answer the reader's turn too.
     await done(await post(cookie, chatId, 'continue', {}, target));
     await done(await post(cookie, chatId, 'narrate', {}, target));
-    const recalled = sent.map((req) => {
-      const texts = textsOf(req);
-      return texts.findIndex((text) => text.startsWith('[현재 관계 상태]'));
+    /** Where a request's recall turn is, and the turn of the conversation sent last before it. */
+    const recalledAt = (req: ChatRequest) => textsOf(req).findIndex((text) => text.startsWith('[현재 관계 상태]'));
+    const newestBefore = (req: ChatRequest, at: number) => req.messages.slice(0, at).findLastIndex((message) => message.role !== 'system');
+    // Each follows the newest turn sent: the reader's for the first speaker, the first reply for
+    // the next and for the narration, the reply before the one continued for the continue — whose
+    // partial alone comes after the system turns.
+    sent.forEach((req, index) => {
+      const at = recalledAt(req);
+      expect(at, `request ${index}`).toBeGreaterThan(0);
+      expect(newestBefore(req, at), `request ${index}`).toBe(at - 1);
+      expect(req.messages.slice(at).filter((message) => message.role !== 'system').map((message) => message.role), `request ${index}`).toEqual(
+        index === 2 ? ['assistant'] : [],
+      );
     });
-    expect(recalled.every((at) => at >= 0)).toBe(true);
-    sent.forEach((req, index) => expect(textsOf(req)[recalled[index]! + 1], `request ${index}`).toBe('안녕'));
-    // Up to and through the turn they answer, the round's two speakers are sent the same.
+    expect(textsOf(sent[0]!)[recalledAt(sent[0]!) - 1]).toBe('안녕');
+    expect(textsOf(sent[1]!)[recalledAt(sent[1]!) - 1]).toBe('세이야: 응.');
+    // The round's next speaker is sent the first one's request up to the system turns that close
+    // it, then the first reply under its speaker's name: what the provider's cache serves, the
+    // adapter sending those system turns as one (§7.3). The history before the round reads the same
+    // to both here; a speaker's own earlier replies would not.
     expect(sent[1]!.system).toBe(sent[0]!.system);
-    expect(sent[1]!.messages.slice(0, recalled[1]! + 2)).toEqual(sent[0]!.messages.slice(0, recalled[0]! + 2));
-    // A round of its own after the round answers what closed it: the recall goes right before the newest turn.
+    const conversation = recalledAt(sent[0]!);
+    expect(sent[1]!.messages.slice(0, conversation)).toEqual(sent[0]!.messages.slice(0, conversation));
+    // A round of its own after it: the same, after its newest turn.
     await done(await post(cookie, chatId, 'reply', { speakerId: seiya }, target));
-    const opened = sent.at(-1)!.messages;
-    const at = opened.findIndex((message) => contentText(message.content).startsWith('[현재 관계 상태]'));
-    expect(at + 1).toBe(opened.findLastIndex((message) => message.role !== 'system'));
+    const opened = sent.at(-1)!;
+    expect(newestBefore(opened, recalledAt(opened))).toBe(recalledAt(opened) - 1);
+    expect(opened.messages.slice(recalledAt(opened)).every((message) => message.role === 'system')).toBe(true);
   });
 
   it('holds /reply to a speaker on the stage and to the round the head is a reply of', async () => {
@@ -19412,9 +19434,7 @@ describe('vector storage (SillyTavern)', () => {
     expect(recallOf(prompt)).not.toContain('등대 불빛');
     // Not in the system text, the cached prefix: a system turn of its own, right before the turn.
     expect(prompt.system).not.toContain('Past events');
-    const at = prompt.messages.findIndex((message) => message.content === recallOf(prompt));
-    expect(prompt.messages[at]!.role).toBe('system');
-    expect(prompt.messages[at + 1]).toEqual({ role: 'user', content: '그 등대 기억나?' });
+    expectRecallAfter(prompt, '그 등대 기억나?');
     // Copied, not moved: the history is what it would be without the search.
     expect(prompt.messages.filter((message) => contentText(message.content) === DRAWING).map((message) => message.role)).toEqual([
       'user',

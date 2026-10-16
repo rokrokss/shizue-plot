@@ -3,7 +3,7 @@
  * the part the server runs with its embedder (the API's `vectors.ts`): **chat
  * vectorization.** The earlier messages of the branch most like the latest
  * turns — of those the history no longer sends, the ones the summaries cover —
- * are copied into one block just before the turn being answered, after the
+ * are copied into one block right after the newest turn, after the
  * facts (`retrievalBlock`), so the model reads them however long ago they were.
  * ST takes them out of the chat it sends instead; here the history stays as it
  * is, so the provider's prefix cache keeps it.

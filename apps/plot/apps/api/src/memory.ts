@@ -181,7 +181,7 @@ export interface MemoryInput {
  * Memory inputs for one generation: the block of the summaries HypaV3's
  * important and recent shares picked, injected after the persona; the block of
  * those its similar and random shares picked and the facts' (`[기억]`,
- * `facts.ts`), which open the recall turn before the turn being answered — each
+ * `facts.ts`), which open the recall turn right after the newest turn — each
  * summary and fact led by a coarse "N turns ago" in the conversation's language
  * — and the history the model still sees verbatim: `path` after the last
  * message an applying summary covers.

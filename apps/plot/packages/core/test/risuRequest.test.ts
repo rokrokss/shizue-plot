@@ -102,7 +102,6 @@ describe('the request as RisuAI’s items', () => {
     });
     expect(prompt.sources).toHaveLength(prompt.messages.length);
     expect(prompt.sources).toEqual([
-      { kind: 'directions' },
       { kind: 'examples', speakers: { user: '민준', char: ['아리아', '아리아'] } },
       { kind: 'author_note' },
       { kind: 'history', id: 'greeting', greeting: true },
@@ -110,6 +109,7 @@ describe('the request as RisuAI’s items', () => {
       { kind: 'history', id: 'm-2' },
       { kind: 'depth_lore' },
       { kind: 'history', id: 'm-3' },
+      { kind: 'directions' },
       { kind: 'post_history' },
     ]);
 
@@ -167,7 +167,6 @@ describe('the request as RisuAI’s items', () => {
     const separator = { role: 'system', content: RISU_NEW_CHAT, memo: 'NewChatExample', removable: true };
     expect(items).toEqual([
       { role: 'system', content: prompt.system },
-      { role: 'system', content: promptText(prompt.messages[0]!.content) },
       separator,
       { role: 'user', content: '예시 질문', name: 'example_user', removable: true },
       { role: 'assistant', content: '예시 답변', name: 'example_assistant', removable: true },
@@ -179,15 +178,16 @@ describe('the request as RisuAI’s items', () => {
       { role: 'assistant', content: '반가워', memo: 'm-2', removable: true, attr: [], thoughts: [] },
       // RisuAI's `lastChat`: the newest turn, sent without `removable`, its picture as its data URL.
       { role: 'user', content: '또 왔어', memo: 'm-3', attr: [], thoughts: [], multimodals: [{ type: 'image', base64: picture }] },
+      // Our directions, after the newest turn, then the post-history: each its own item.
+      { role: 'system', content: '[게임 판정]\n문이 열린다.' },
       { role: 'system', content: promptText(prompt.messages.at(-1)!.content) },
     ]);
     expect(origins).toEqual([
       { kind: 'system' },
-      { kind: 'message', at: 0 },
-      ...Array.from({ length: 3 }, () => ({ kind: 'example', at: 1 })),
-      ...Array.from({ length: 2 }, () => ({ kind: 'example', at: 2 })),
+      ...Array.from({ length: 3 }, () => ({ kind: 'example', at: 0 })),
+      ...Array.from({ length: 2 }, () => ({ kind: 'example', at: 1 })),
       { kind: 'newChat' },
-      ...[3, 4, 5, 6, 7].map((at) => ({ kind: 'message', at })),
+      ...[2, 3, 4, 5, 6, 7].map((at) => ({ kind: 'message', at })),
     ]);
   });
 
@@ -218,18 +218,18 @@ describe('the request as RisuAI’s items', () => {
     expect(assemblePrompt({ plot, characters: [aria], history: chat, userName: '민준', branch: opening }).risu).toEqual({ fromStart: true });
   });
 
-  it('keeps the supaMemory turn to the summaries, and hands the recall turn over among the chat as a plain system turn', () => {
+  it('keeps the supaMemory turn to the summaries, and hands the recall turn over after the newest turn as a plain system turn', () => {
     const memoryText = '[지난 이야기 요약]\n둘은 여관에서 만났다.';
     const factsText = '[기억]\n- 민준은 등대 열쇠를 갖고 있다.';
     const prompt = assemblePrompt({ plot, characters: [aria], history: chat.slice(2), userName: '민준', memoryText, factsText, branch: opening });
     expect(prompt.risu!.memory!.text).toBe(memoryText);
     const { items } = risuRequestView(prompt);
     const at = items.findIndex((item) => item.content === factsText);
-    // Nothing of RisuAI's: no memo, never removable — ahead of the card's depth
-    // lore, and the newest turn after them is still `lastChat`.
+    // Nothing of RisuAI's: no memo, never removable — after the newest turn, which
+    // is still `lastChat` behind the card's depth lore, and before the post-history.
     expect(items[at]).toEqual({ role: 'system', content: factsText });
-    expect(items[at + 1]).toEqual({ role: 'system', content: '깊은 곳의 이야기' });
-    expect(items[at + 2]).toEqual({
+    expect(items[at - 2]).toEqual({ role: 'system', content: '깊은 곳의 이야기' });
+    expect(items[at - 1]).toEqual({
       role: 'user',
       content: '또 왔어',
       memo: 'm-3',
@@ -237,6 +237,8 @@ describe('the request as RisuAI’s items', () => {
       thoughts: [],
       multimodals: [{ type: 'image', base64: picture }],
     });
+    expect(items[at + 1]).toEqual({ role: 'system', content: promptText(prompt.messages.at(-1)!.content) });
+    expect(at + 2).toBe(items.length);
   });
 });
 

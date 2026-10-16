@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { authorizationUrl, callbackResult, ChatGPTOAuth, createPendingSignIn, loopbackRedirectUri } from '../src/chatgptAuth.js';
-import { CHATGPT_IDLE_TIMEOUT_MS, ChatGPTError, createChatGPTAdapter, responseBody } from '../src/chatgptResponses.js';
+import { CHATGPT_IDLE_TIMEOUT_MS, ChatGPTError, createChatGPTAdapter, responseBody, withTrailingSystemJoined } from '../src/chatgptResponses.js';
 import type { ChatRequest } from '../src/types.js';
 
 const json = (value: unknown, status = 200): Response => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
@@ -222,6 +222,38 @@ describe('ChatGPT Responses adapter', () => {
       { role: 'user', content: [{ type: 'input_text', text: 'look' }, { type: 'input_image', image_url: 'data:image/png;base64,aA==' }] },
       { role: 'assistant', content: 'partial' }, { role: 'developer', content: 'post-history' },
     ] });
+  });
+  it('sends the system turns after the last turn of the conversation as one developer message, and joins nothing else', () => {
+    const body = responseBody({ ...request, messages: [
+      { role: 'system', content: 'directions of an old shape' }, { role: 'system', content: 'examples' },
+      { role: 'user', content: 'hi' }, { role: 'system', content: 'depth lore' }, { role: 'assistant', content: 'hello' },
+      { role: 'user', content: 'again' },
+      { role: 'system', content: 'recall' }, { role: 'system', content: 'post-history' }, { role: 'system', content: 'language' },
+    ] });
+    expect(body.input).toEqual([
+      { role: 'developer', content: 'directions of an old shape' }, { role: 'developer', content: 'examples' },
+      { role: 'user', content: 'hi' }, { role: 'developer', content: 'depth lore' }, { role: 'assistant', content: 'hello' },
+      { role: 'user', content: 'again' },
+      { role: 'developer', content: 'recall\n\npost-history\n\nlanguage' },
+    ]);
+    // A continue ends on its partial: the system turns before it stay apart.
+    const continued = [{ role: 'user', content: 'go' }, { role: 'system', content: 'a' }, { role: 'system', content: 'b' }, { role: 'assistant', content: 'part' }] as const;
+    expect(responseBody({ ...request, messages: [...continued] }).input).toEqual([
+      { role: 'user', content: 'go' }, { role: 'developer', content: 'a' }, { role: 'developer', content: 'b' }, { role: 'assistant', content: 'part' },
+    ]);
+    // Nothing but system turns: no conversation to close, left alone.
+    expect(responseBody({ ...request, messages: [{ role: 'system', content: 'a' }, { role: 'system', content: 'b' }] }).input).toHaveLength(2);
+  });
+  it('keeps a picture on a trailing system turn in place, the texts around it joined', () => {
+    expect(withTrailingSystemJoined([
+      { role: 'assistant', content: 'hello' },
+      { role: 'system', content: 'one' },
+      { role: 'system', content: [{ type: 'text', text: 'two' }, { type: 'image', url: 'data:image/png;base64,aA==' }] },
+      { role: 'system', content: 'three' },
+    ])).toEqual([
+      { role: 'assistant', content: 'hello' },
+      { role: 'system', content: [{ type: 'text', text: 'one\n\ntwo' }, { type: 'image', url: 'data:image/png;base64,aA==' }, { type: 'text', text: 'three' }] },
+    ]);
   });
   it('leaves the instructions out when there is no system text', () => {
     const body = responseBody({ ...request, system: '', messages: [{ role: 'user', content: 'hi' }] });

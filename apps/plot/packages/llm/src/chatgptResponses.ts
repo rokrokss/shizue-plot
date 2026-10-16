@@ -1,4 +1,4 @@
-import { LLMError, type ChatRequest, type LLMAdapter, type StreamDone } from './types.js';
+import { LLMError, type ChatMessage, type ChatRequest, type ContentPart, type LLMAdapter, type StreamDone } from './types.js';
 
 export const CHATGPT_RESOURCE = 'https://api.openai.com/v1';
 export class ChatGPTError extends LLMError {
@@ -27,7 +27,41 @@ export async function requireOK(response: Response): Promise<Response> {
   throw providerError(code, response.status);
 }
 
-/** System instructions stay in their original positions as developer messages. */
+/**
+ * `messages` with the run of system turns after the last user or assistant turn
+ * as one turn, their contents joined by a blank line, pictures kept in place —
+ * and nothing else joined: a system turn before or between the conversation's
+ * turns stays where it is, and a run after nothing but system turns is left
+ * alone. The provider keeps a request but its last message for the next request
+ * that begins with all of it (ARCHITECTURE §7.3 프롬프트 캐시 측정), and a chat
+ * reply's own instructions — the directions, the recall turn, the post-history,
+ * what goes after everything — follow its newest turn: as one last message,
+ * the next turn's request begins with all of what this one leaves. A request
+ * that ends on a turn of the conversation, a continue's partial, joins nothing.
+ */
+export function withTrailingSystemJoined(messages: ChatMessage[]): ChatMessage[] {
+  let start = messages.length;
+  while (start > 0 && messages[start - 1]!.role === 'system') start -= 1;
+  if (start === 0 || messages.length - start < 2) return messages;
+  const parts: ContentPart[] = [];
+  messages.slice(start).forEach((message, at) => {
+    const own: ContentPart[] = typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content;
+    own.forEach((part, index) => {
+      const last = parts.at(-1);
+      if (at > 0 && index === 0 && part.type === 'text' && last?.type === 'text') {
+        parts[parts.length - 1] = { type: 'text', text: `${last.text}\n\n${part.text}` };
+      } else parts.push(part);
+    });
+  });
+  const joined: ContentPart[] | string =
+    parts.length === 1 && parts[0]!.type === 'text' ? parts[0]!.text : parts;
+  return [...messages.slice(0, start), { role: 'system', content: joined }];
+}
+
+/**
+ * System instructions stay in their original positions as developer messages,
+ * those after the last user or assistant turn as one (`withTrailingSystemJoined`).
+ */
 export function responseBody(req: ChatRequest): Record<string, unknown> {
   return {
     model: req.model, store: false, stream: true,
@@ -38,7 +72,7 @@ export function responseBody(req: ChatRequest): Record<string, unknown> {
     ...(req.cacheKey ? { prompt_cache_key: req.cacheKey } : {}),
     // No system text is no instructions, rather than an empty one.
     ...(req.system ? { instructions: req.system } : {}),
-    input: req.messages.map((message) => ({
+    input: withTrailingSystemJoined(req.messages).map((message) => ({
       role: message.role === 'system' ? 'developer' : message.role,
       content: typeof message.content === 'string' ? message.content : message.content.map((part) =>
         part.type === 'image'
@@ -53,11 +87,14 @@ export function responseBody(req: ChatRequest): Record<string, unknown> {
  * headers. On a reader's ChatGPT sign-in (2026-10-16) the provider served nothing
  * from its prompt cache without them, the key or not — the same 24k-token request
  * twice, 3 s or 20 s apart, came back with no cached token — and with them the
- * second came back 24,576 of 24,805 tokens cached. A request that went on from the
- * one before it was served too (24,192 of 24,693), but one that parted from it a few
- * hundred tokens before its end was served nothing: the cache served whole earlier
- * requests, not the part two requests share (ARCHITECTURE §7.3 프롬프트 캐시 측정).
- * The endpoint refuses `prompt_cache_retention` (400).
+ * second came back 24,576 of 24,805 tokens cached. What it served was an earlier
+ * request but its last message, to a request that began with all of that: one that
+ * went on from the request before it (24,192 of 24,693), or a later turn of a chat
+ * whose turns put their own instructions in the last message
+ * (`withTrailingSystemJoined`, 24,192 of 25,113); a request
+ * that parted from the earlier one before its last message got nothing, however
+ * much they shared (ARCHITECTURE §7.3 프롬프트 캐시 측정). The endpoint refuses
+ * `prompt_cache_retention` (400).
  */
 export function cacheHeaders(req: Pick<ChatRequest, 'cacheKey'>): Record<string, string> {
   return req.cacheKey ? { session_id: req.cacheKey, conversation_id: req.cacheKey } : {};

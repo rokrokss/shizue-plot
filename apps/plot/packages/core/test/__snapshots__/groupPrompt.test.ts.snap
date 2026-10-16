@@ -8,11 +8,6 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
   ],
   "messages": [
     {
-      "content": "[게임 판정]
-주사위 4. 문이 열린다.",
-      "role": "system",
-    },
-    {
       "content": "[예시 대화: 세이야]
 민준: 누구야?
 세이: *검을 거둔다* 기사다.",
@@ -57,6 +52,11 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
     {
       "content": "은빛 여관의 밤은 길다.",
       "role": "user",
+    },
+    {
+      "content": "[게임 판정]
+주사위 4. 문이 열린다.",
+      "role": "system",
     },
     {
       "content": "끝 주입",
@@ -166,12 +166,6 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
         "tokens": 25,
       },
       {
-        "kind": "directions",
-        "text": "[게임 판정]
-주사위 4. 문이 열린다.",
-        "tokens": 16,
-      },
-      {
         "kind": "examples",
         "label": "세이야",
         "text": "[예시 대화: 세이야]
@@ -235,6 +229,12 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
         "label": "user",
         "text": "은빛 여관의 밤은 길다.",
         "tokens": 10,
+      },
+      {
+        "kind": "directions",
+        "text": "[게임 판정]
+주사위 4. 문이 열린다.",
+        "tokens": 16,
       },
       {
         "kind": "injection",
@@ -691,11 +691,6 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
   ],
   "messages": [
     {
-      "content": "[게임 판정]
-주사위 4. 문이 열린다.",
-      "role": "system",
-    },
-    {
       "content": "[예시 대화: 세이야]
 민준: 누구야?
 세이: *검을 거둔다* 기사다.",
@@ -734,6 +729,11 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
     {
       "content": "은빛 여관의 밤은 길다.",
       "role": "user",
+    },
+    {
+      "content": "[게임 판정]
+주사위 4. 문이 열린다.",
+      "role": "system",
     },
     {
       "content": "끝 주입",
@@ -829,12 +829,6 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
         "tokens": 25,
       },
       {
-        "kind": "directions",
-        "text": "[게임 판정]
-주사위 4. 문이 열린다.",
-        "tokens": 16,
-      },
-      {
         "kind": "examples",
         "label": "세이야",
         "text": "[예시 대화: 세이야]
@@ -890,6 +884,12 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
         "label": "user",
         "text": "은빛 여관의 밤은 길다.",
         "tokens": 10,
+      },
+      {
+        "kind": "directions",
+        "text": "[게임 판정]
+주사위 4. 문이 열린다.",
+        "tokens": 16,
       },
       {
         "kind": "injection",

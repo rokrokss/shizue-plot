@@ -111,7 +111,7 @@ export const RISU_REQUEST_ITEMS: Record<PromptBlockKind, RisuItemRule> = {
   // Its own turn, after the system string, and never removable: the summaries
   // HypaV3's important and recent shares picked.
   memory: { memo: 'supaMemory' },
-  // Ours alone, beside the system string: as RisuAI's system turns, nothing.
+  // Ours alone, after the newest turn: as RisuAI's system turns, nothing.
   directions: {},
   // The separator that opens each block; its lines are removable too, and named.
   examples: { memo: 'NewChatExample', removable: true },
@@ -121,8 +121,8 @@ export const RISU_REQUEST_ITEMS: Record<PromptBlockKind, RisuItemRule> = {
   author_note: {},
   // The summaries HypaV3's similar and random shares picked (RisuAI sends them
   // with the rest, in `supaMemory`), the facts, SillyTavern's retrieved messages
-  // and the relationship, which RisuAI has no turn for: spliced in among the chat
-  // like depth lore.
+  // and the relationship, which RisuAI has no turn for: after the newest turn,
+  // like depth-0 lore.
   recall: {},
   post_history: {},
   // The start triggers' `additonalSysPrompt` turns.
@@ -219,11 +219,12 @@ export interface RisuRequestView {
 /**
  * The prompt as the request editors read it: RisuAI's items, in the order
  * RisuAI's request has them as far as ours has them at all — the system string
- * (the memory apart), our directions, then RisuAI's `chats` (the memory, each
- * example block split, the `NewChat` separator while the history is sent from
- * the branch's start, the greeting and the messages, with the depth lore, the
- * author's note and the start triggers' turns where the assembler put them),
- * then what follows the history. A turn's pictures are its `multimodals`, each
+ * (the memory apart), then RisuAI's `chats` (the memory, each example block
+ * split, the `NewChat` separator while the history is sent from the branch's
+ * start, the greeting and the messages, with the depth lore, the author's note
+ * and the start triggers' turns where the assembler put them), then what
+ * follows the newest turn, each its own item: our directions and recall turn,
+ * the depth-0 lore, the post-history and what goes after everything. A turn's pictures are its `multimodals`, each
  * `base64` the picture's data URL. A prompt without `risu` or `sources` (one
  * not from the assembler) is its turns as they are.
  */
@@ -263,7 +264,6 @@ export function risuRequestView(prompt: Pick<AssembledPrompt, 'system' | 'messag
   if (system) push({ role: 'system', content: system }, { kind: 'system' });
   let at = 0;
   if (risu && sources) {
-    for (; at < messages.length && sources[at]?.kind === 'directions'; at += 1) whole(at);
     if (risu.memory) push({ role: 'system', content: risu.memory.text, ...risuRequestExtras({ kind: 'memory' }) }, { kind: 'memory' });
     for (; at < messages.length && sources[at]?.kind === 'examples'; at += 1) {
       const source = sources[at]!;

@@ -393,25 +393,31 @@ describe('assemblePrompt', () => {
     const turns = history.map((turn, at) => ({ ...turn, id: `m${at}` }));
     const recall = (input: Partial<Parameters<typeof assemblePrompt>[0]> = {}) =>
       assemblePrompt({ plot, characters: [aria], history: turns, preset, userName: '민준', report: true, ...recalled, ...input });
+    /** The request up to its last turn of the conversation: what the system turns after it close. */
+    const conversation = (prompt: ReturnType<typeof assemblePrompt>) =>
+      prompt.messages.slice(0, prompt.messages.findLastIndex((message) => message.role !== 'system') + 1);
 
-    it('sends the facts, the messages a search brought back and the relationship as one system turn before the newest turn', () => {
+    it('sends the facts, the messages a search brought back and the relationship as one system turn right after the newest turn', () => {
       const { system, messages, sources, report } = recall({ memoryText: '[지난 이야기 요약]\n요약.' });
-      // None of it is in the system string, the cached prefix: only the summaries are.
+      // None of it is in the system string: only the summaries are.
       expect(system).toBe(`${assemble(100_000).system}\n\n[지난 이야기 요약]\n요약.`);
-      const at = messages.findIndex((message) => message.content === RECALL);
-      expect(messages[at]!.role).toBe('system');
-      expect(messages[at + 1]!.content).toBe(history[3]!.content);
-      expect(messages[at - 1]!.content).toBe(history[2]!.content);
-      expect(sources![at]).toEqual({ kind: 'recall' });
+      // Everything up to the newest turn is what a turn recalling nothing sends.
+      const plain = assemblePrompt({ plot, characters: [aria], history: turns, preset, userName: '민준' });
+      expect(messages.slice(0, -2)).toEqual(plain.messages.slice(0, -1));
+      expect(messages.slice(-3)).toEqual([
+        { role: 'user', content: history[3]!.content },
+        { role: 'system', content: RECALL },
+        { role: 'system', content: 'POST' },
+      ]);
+      expect(sources!.at(-2)).toEqual({ kind: 'recall' });
       // The inspector shows it where it is sent.
-      const blocks = report!.blocks.map((block) => block.kind);
-      expect(blocks.slice(blocks.indexOf('recall') - 1, blocks.indexOf('recall') + 2)).toEqual(['history', 'recall', 'history']);
-      expect(report!.blocks.find((block) => block.kind === 'recall')!.text).toBe(RECALL);
+      expect(report!.blocks.slice(-3).map((block) => block.kind)).toEqual(['history', 'recall', 'post_history']);
+      expect(report!.blocks.at(-2)!.text).toBe(RECALL);
     });
 
     it('keeps the order facts, retrieval, relationship, and leaves out what is blank', () => {
       const only = (input: Partial<typeof recalled>) =>
-        recall({ factsText: '', retrievalText: '', relationshipText: '', ...input }).messages.at(-3)!.content;
+        recall({ factsText: '', retrievalText: '', relationshipText: '', ...input }).messages.at(-2)!.content;
       expect(only({ relationshipText: recalled.relationshipText })).toBe('[현재 관계 상태]\n애정 70');
       expect(only({ factsText: recalled.factsText, relationshipText: recalled.relationshipText })).toBe(
         '[기억]\n- (약 20턴 전) 민준는 등대 열쇠를 갖고 있다.\n\n[현재 관계 상태]\n애정 70',
@@ -425,7 +431,7 @@ describe('assemblePrompt', () => {
       const { system, messages } = recall({ memoryText: '[지난 이야기 요약]\n요약.', recalledMemoryText: picked });
       // The system string carries only the summaries that change when one lands.
       expect(system).toBe(`${assemble(100_000).system}\n\n[지난 이야기 요약]\n요약.`);
-      expect(messages.at(-3)).toEqual({
+      expect(messages.at(-2)).toEqual({
         role: 'system',
         content: `[지난 이야기 요약: 이번 턴에 떠올린 것]\n(약 40턴 전) 민준는 등대에 올랐다.\n\n${RECALL}`,
       });
@@ -434,51 +440,70 @@ describe('assemblePrompt', () => {
       // Only the blank line it is joined to the rest by is left in.
       const sent = '[지난 이야기 요약: 이번 턴에 떠올린 것]\n(약 40턴 전) 민준는 등대에 올랐다.';
       expect(withIt.fixedTokens! - without.fixedTokens!).toBe(countTokens(`${sent}\n\n${RECALL}`) - countTokens(RECALL) - countTokens(sent));
-      expect(recall({ factsText: '', retrievalText: '', relationshipText: '', recalledMemoryText: picked }).messages.at(-3)!.content).toBe(
+      expect(recall({ factsText: '', retrievalText: '', relationshipText: '', recalledMemoryText: picked }).messages.at(-2)!.content).toBe(
         '[지난 이야기 요약: 이번 턴에 떠올린 것]\n(약 40턴 전) 민준는 등대에 올랐다.',
       );
     });
 
-    it('stands before the turn a group round answers, and before the newest turn when that is not sent', () => {
-      const round = [...turns, { role: 'assistant' as const, content: '다섯 번째, 첫 화자의 답장.', id: 'm4' }];
-      const before = (answered: string) => {
-        const { messages } = recall({ history: round, answered });
-        return messages[messages.findIndex((message) => message.content === RECALL) + 1]!.content;
-      };
-      expect(before('m3')).toBe(history[3]!.content);
-      expect(before('gone')).toBe('다섯 번째, 첫 화자의 답장.');
-      // A turn hidden from the AI is not sent, so neither is it where the recall goes.
-      const hidden = round.map((turn) => (turn.id === 'm3' ? { ...turn, hidden: true } : turn));
-      const { messages } = recall({ history: hidden, answered: 'm3' });
-      expect(messages[messages.findIndex((message) => message.content === RECALL) + 1]!.content).toBe('다섯 번째, 첫 화자의 답장.');
+    it('lets the next turn repeat this request up to the system turns that close it', () => {
+      // The provider serves a request from an earlier one only when it repeats
+      // that whole request but its last message (ARCHITECTURE §7.3), and the
+      // ChatGPT adapter sends the system turns after the newest turn as one.
+      const next = [...turns, { role: 'assistant' as const, content: '다섯 번째 답장.', id: 'm4' }, { role: 'user' as const, content: '여섯 번째.', id: 'm5' }];
+      const first = recall({ directions: '판정 하나.' });
+      const second = recall({ history: next, factsText: '[기억]\n- 다른 사실.', relationshipText: '[현재 관계 상태]\n애정 71', directions: '판정 둘.' });
+      expect(second.system).toBe(first.system);
+      expect(conversation(second).slice(0, conversation(first).length)).toEqual(conversation(first));
+      expect(second.messages.slice(conversation(first).length).map((message) => message.content)).toEqual([
+        '다섯 번째 답장.',
+        '여섯 번째.',
+        '[게임 판정]\n판정 둘.',
+        '[기억]\n- 다른 사실.\n\nPast events:\n민준: 등대에 가자\n\n[현재 관계 상태]\n애정 71',
+        'POST',
+      ]);
     });
 
-    it('goes ahead of the depth lore, the note and the start injection placed before the same turn', () => {
-      const deep: LoreEntry = {
+    it('follows the newest turn sent: a reply a group round already has, or the turn before a hidden one', () => {
+      const round = [...turns, { role: 'assistant' as const, content: '다섯 번째, 첫 화자의 답장.', id: 'm4' }];
+      expect(recall({ history: round }).messages.slice(-3).map((message) => message.content)).toEqual([
+        '다섯 번째, 첫 화자의 답장.',
+        RECALL,
+        'POST',
+      ]);
+      // A turn hidden from the AI is not sent, so neither does the recall turn follow it.
+      const hidden = round.map((turn) => (turn.id === 'm4' ? { ...turn, hidden: true } : turn));
+      expect(recall({ history: hidden }).messages.slice(-3).map((message) => message.content)).toEqual([history[3]!.content, RECALL, 'POST']);
+    });
+
+    it('leaves the depth lore, the note and the start injection before the newest turn, and goes ahead of the depth-0 lore after it', () => {
+      const lore = (content: string, depth: number): LoreEntry => ({
         keys: [],
         secondaryKeys: [],
         selective: false,
-        content: '깊이 하나의 로어.',
+        content,
         enabled: true,
         constant: true,
-        insertionOrder: 0,
+        insertionOrder: depth,
         caseSensitive: false,
         useRegex: false,
         position: 'before_char',
-        depth: 1,
-      };
+        depth,
+      });
       const { messages } = recall({
-        plot: { ...plot, lorebook: [deep] },
+        plot: { ...plot, lorebook: [lore('깊이 하나의 로어.', 1), lore('깊이 영의 로어.', 0)] },
         authorNote: '유저노트.',
         authorNoteSettings: { depth: 1, frequency: 1, role: 'system' },
         injections: { start: '시작 주입.' },
+        directions: '판정.',
       });
-      expect(messages.slice(-6).map((message) => message.content)).toEqual([
-        RECALL,
+      expect(messages.slice(-8).map((message) => message.content)).toEqual([
         '깊이 하나의 로어.',
         '유저노트.',
         '시작 주입.',
         history[3]!.content,
+        '[게임 판정]\n판정.',
+        RECALL,
+        '깊이 영의 로어.',
         'POST',
       ]);
     });
@@ -490,7 +515,7 @@ describe('assemblePrompt', () => {
       expect(full.fixedTokens! - bare.fixedTokens!).toBe(countTokens(RECALL) - facts);
       // A budget that holds nothing but the newest turn still holds the recall turn.
       const tight = recall({ contextBudget: countTokens(bare.system) + countTokens('POST') + countTokens(RECALL) + countTokens(history[3]!.content), maxResponseTokens: 0 });
-      expect(tight.messages.map((message) => message.content)).toEqual([RECALL, history[3]!.content, 'POST']);
+      expect(tight.messages.map((message) => message.content)).toEqual([history[3]!.content, RECALL, 'POST']);
     });
 
     it('stands where the turns would end when none of the history is sent', () => {
@@ -1322,7 +1347,6 @@ describe('assemblePrompt - report', () => {
     // One block per message, in the same order and with the same text.
     expect(messageBlocks.map((block) => block.text)).toEqual(result.messages.map((m) => promptText(m.content)));
     expect(messageBlocks.map((block) => block.kind)).toEqual([
-      'directions',
       'examples',
       'examples',
       'author_note',
@@ -1331,10 +1355,11 @@ describe('assemblePrompt - report', () => {
       'history',
       'depth_lore',
       'history',
+      'directions',
       'post_history',
     ]);
-    expect(messageBlocks[1]!.label).toBe('아리아');
-    expect(messageBlocks[7]!.label).toBe('depth 1');
+    expect(messageBlocks[0]!.label).toBe('아리아');
+    expect(messageBlocks[6]!.label).toBe('depth 1');
 
     expect(report.history).toEqual({ included: 4, total: 4 });
     expect(report.examples).toEqual({ included: 2, total: 2 });
@@ -1520,7 +1545,7 @@ describe('assemblePrompt - the reply format hint', () => {
 describe('assemblePrompt - stage directions', () => {
   const directions = '주사위 3. {{user}}의 자물쇠 따기는 실패한다.';
 
-  it('injects the ruling ahead of the examples, leaving the cached prefix alone', () => {
+  it('injects the ruling right after the newest turn, leaving everything before it alone', () => {
     const plain = assemble(100_000);
     const { system, messages } = assemblePrompt({
       plot,
@@ -1532,20 +1557,21 @@ describe('assemblePrompt - stage directions', () => {
       maxResponseTokens: 0,
       directions,
     });
-    // The system string is the Anthropic cache prefix, so it must be byte for
-    // byte what a turn without directions would have sent.
+    // What the next turn's request repeats — the system string and every turn up
+    // to the newest — must be byte for byte what a turn without directions would
+    // have sent, so the provider's cache serves it either way.
     expect(system).toBe(plain.system);
-    expect(messages[0]).toEqual({
-      role: 'system',
-      content: '[게임 판정]\n주사위 3. 민준의 자물쇠 따기는 실패한다.',
-    });
-    // …and everything else is where it was: examples, then history, then post.
-    expect(messages.slice(1)).toEqual(plain.messages);
+    expect(messages.slice(0, -2)).toEqual(plain.messages.slice(0, -1));
+    expect(messages.slice(-3)).toEqual([
+      { role: 'user', content: history[3]!.content },
+      { role: 'system', content: '[게임 판정]\n주사위 3. 민준의 자물쇠 따기는 실패한다.' },
+      { role: 'system', content: 'POST' },
+    ]);
   });
 
   it('is absent when the turn carries none', () => {
     const plain = assemblePrompt({ plot, characters: [aria], history, preset, userName: '민준' });
-    expect(plain.messages[0]?.content).not.toContain('게임 판정');
+    expect(plain.messages.some((message) => promptText(message.content).includes('게임 판정'))).toBe(false);
     const blank = assemblePrompt({
       plot,
       characters: [aria],
@@ -1574,7 +1600,7 @@ describe('assemblePrompt - stage directions', () => {
       maxResponseTokens: 0,
       directions,
     });
-    expect(messages.map((m) => m.content)).toEqual([block, history[3]!.content, 'POST']);
+    expect(messages.map((m) => m.content)).toEqual([history[3]!.content, block, 'POST']);
   });
 });
 

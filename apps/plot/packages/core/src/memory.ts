@@ -125,7 +125,7 @@ export function memoryBlock(texts: readonly string[]): string {
 
 /**
  * The block of the summaries a selection's similar and random shares picked,
- * oldest first, for the recall turn before the turn being answered: they follow
+ * oldest first, for the recall turn right after the newest turn: they follow
  * the turn's query and draw, so in the system string — the cached prefix — they
  * would keep the history behind them out of the cache. '' for none.
  */
