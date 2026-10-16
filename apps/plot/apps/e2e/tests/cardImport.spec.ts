@@ -9,7 +9,8 @@ import { expect, test, type BrowserContext, type Page } from '@playwright/test';
  * publishing it waits for the owner's word → a second card comes in from a
  * RisuRealm page, which the browser downloads itself, and the now-public plot
  * asks for the word again first → a card whose upload a reload cut off goes on
- * from the parts already up when the same file is picked again.
+ * from the parts already up when the same file is picked again, and one the
+ * server was reading when the page reloaded is shown, not sent again.
  *
  * Realm's download endpoint is stubbed with `page.route`: the suite reaches no
  * one else's server. The steps build on each other, so the file runs serially;
@@ -189,6 +190,37 @@ test('a card picked again after a reload sends only the parts the first page did
   await expect(page).toHaveURL(new RegExp(`/ko/plots/${UUID_PATH}$`));
   await expect(members()).toHaveCount(1);
   expect(sent.sort()).toEqual(['2', '3']);
+  expect(await page.evaluate(() => localStorage.getItem('shizue.fileImport'))).toBeNull();
+
+  page.once('dialog', (dialog) => void dialog.accept());
+  await page.getByRole('button', { name: '플롯 삭제' }).click();
+  await expect(page).toHaveURL(/\/ko\/plots$/);
+});
+
+test('a card picked again after a reload while the server read it is not sent again', async () => {
+  const path = test.info().outputPath('read.json');
+  await writeFile(path, JSON.stringify(card(`읽던${run}`, 'CC BY 4.0')));
+  await page.goto('/ko/plots');
+
+  // The first page never hears how the import went: its polls are held until it goes away.
+  const POLL = new RegExp(`/api/file-imports/${UUID_PATH}$`);
+  await page.route(POLL, async (route) => {
+    if (route.request().method() !== 'GET') await route.continue();
+  });
+  const completed = page.waitForResponse((response) => response.url().endsWith('/complete'));
+  await page.getByTestId('plot-import-input').setInputFiles(path);
+  expect((await completed).status()).toBe(202);
+
+  await page.reload();
+  await page.unrouteAll({ behavior: 'ignoreErrors' });
+  const sent: string[] = [];
+  page.on('request', (request) => {
+    if (request.method() !== 'GET' && request.url().includes('/api/file-imports')) sent.push(new URL(request.url()).pathname);
+  });
+  await page.getByTestId('plot-import-input').setInputFiles(path);
+  await expect(page).toHaveURL(new RegExp(`/ko/plots/${UUID_PATH}$`));
+  await expect(members().first()).toContainText(`읽던${run}`);
+  expect(sent).toEqual([]);
   expect(await page.evaluate(() => localStorage.getItem('shizue.fileImport'))).toBeNull();
 
   page.once('dialog', (dialog) => void dialog.accept());

@@ -5,7 +5,8 @@
  * one started from nothing — and the work's one background ride the one Save, a
  * member's removal takes what came with it,
  * and a companion's import takes up what its card brought — saying which of its
- * default variables the work already had.
+ * default variables the work already had — once, even when the import is one
+ * that ended while the page reloaded.
  */
 import { NextIntlClientProvider } from 'next-intl';
 import { act, createElement, Suspense, type ReactNode } from 'react';
@@ -241,5 +242,23 @@ describe('the roster’s custom UI', () => {
       defaultVariables: { hp: '100', gold: '3' },
       backgroundHtml: '<div class="sky">밤</div>',
     });
+  });
+
+  it('takes nothing up twice from an import that ended while the page reloaded and is shown again', async () => {
+    // The work as the reloaded page read it: the companion and its script are in already.
+    plot = {
+      ...plot,
+      characters: [member('m1', '세이야'), member('m3', '미오')],
+      customUi: { displayScripts: [script('\\[all\\]'), script('\\[mio\\]', 'm3')], defaultVariables: { hp: '100' } },
+    };
+    await render();
+    upload.mockResolvedValue({ ...member('m3', '미오'), variableConflicts: [] });
+    const input = host.querySelector<HTMLInputElement>('[data-testid="member-import-input"]')!;
+    Object.defineProperty(input, 'files', { configurable: true, value: [new File(['{}'], 'mio.json')] });
+    await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })));
+    await act(async () => undefined);
+    expect(host.querySelectorAll('[data-testid="plot-member"]')).toHaveLength(2);
+    await click(button(host, messages.common.save));
+    expect(savedUi()['displayScripts']).toEqual([script('\\[all\\]'), script('\\[mio\\]', 'm3')]);
   });
 });

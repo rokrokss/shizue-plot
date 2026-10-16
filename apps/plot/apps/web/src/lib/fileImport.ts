@@ -15,13 +15,14 @@
  * sent again. An upload given up — failed for good, or aborted — is deleted on
  * the server, best-effort.
  *
- * A page that goes away while the parts go up — reloaded, its tab closed —
- * leaves its import on the server, and this browser remembers it
+ * A page that goes away before its import ends — reloaded, its tab closed —
+ * leaves the import on the server, and this browser remembers it
  * (`localStorage`): the reader who picks the same file again for the same place
- * goes on from the parts the store already has, and one who picks another file
- * gives the remembered upload up first, so the server does not refuse the new
- * one as busy. Another tab of this browser uploading right now holds the import
- * lock, and its upload is left alone.
+ * goes on from the parts the store already has, or, once the file is up, is
+ * shown where the server is with it and what it came to, with nothing sent
+ * again; one who picks another file gives the remembered upload up first, so
+ * the server does not refuse the new one as busy. Another tab of this browser
+ * importing right now holds the import lock, and its import is left alone.
  *
  * A failed import throws an `ApiError` with the code the old route answered
  * (`FileImportError`, which also names the import), so the `errors` catalogue
@@ -172,7 +173,7 @@ export const BROWSER_TRANSPORT: FileImportTransport = {
       : await navigator.locks.request(IMPORT_KEY, { ifAvailable: true }, (held) => work(held !== null)),
 };
 
-/** The upload this browser started and has not seen end, and the file and place it was for. */
+/** The import this browser started and has not seen end, and the file and place it was for. */
 interface Remembered {
   id: string;
   target: FileImportTarget;
@@ -420,6 +421,8 @@ async function settle<T>(ctx: Context, id: string): Promise<T> {
       if (misses > POLL_RETRIES) throw caught;
       continue;
     }
+    // Seen to its end: the next pick of the file is a new import.
+    if (state.status === 'done' || state.status === 'failed' || state.status === 'abandoned') forget(id);
     if (state.status === 'done') {
       if (state.result == null) throw new ApiError(404, 'not_found', 'What the import made is gone');
       return state.result as T;
@@ -445,31 +448,32 @@ interface Started {
 }
 
 /**
- * The upload this browser remembers, if it is of `file` for the same place and
- * still taking parts — a page that went away mid-upload. One of another file
- * is given up, so the server does not refuse the start that follows as busy.
+ * The import this browser remembers, if it is of `file` for the same place
+ * and there is still something to show for it — a page that went away before
+ * its import ended. One of another file is given up, so the server does not
+ * refuse the start that follows as busy.
  */
-async function resumable(ctx: Context, picked: Picked): Promise<Started | undefined> {
-  const remembered = recall();
-  if (!remembered) return undefined;
-  if (!(Object.keys(picked) as (keyof Picked)[]).every((key) => remembered[key] === picked[key])) {
-    await abandonImport(remembered.id, ctx.transport);
+async function remembered(ctx: Context, picked: Picked): Promise<(ImportState & Started) | undefined> {
+  const kept = recall();
+  if (!kept) return undefined;
+  if (!(Object.keys(picked) as (keyof Picked)[]).every((key) => kept[key] === picked[key])) {
+    await abandonImport(kept.id, ctx.transport);
     return undefined;
   }
   let state: ImportState & Started;
   try {
-    state = await call(ctx, 'GET', `/api/file-imports/${remembered.id}`);
+    state = await call(ctx, 'GET', `/api/file-imports/${kept.id}`);
   } catch (caught) {
     if (!(caught instanceof ApiError && caught.status === 404)) throw caught;
-    forget(remembered.id);
+    forget(kept.id);
     return undefined;
   }
-  // Finished, failed or given up since.
-  if (state.status !== 'uploading') {
-    forget(remembered.id);
+  // Given up since, or what it made is gone: imported again.
+  if (state.status === 'abandoned' || (state.status === 'done' && state.result == null)) {
+    forget(kept.id);
     return undefined;
   }
-  return { id: state.id, partSize: state.partSize, parts: state.parts };
+  return state;
 }
 
 /**
@@ -486,23 +490,21 @@ export async function importFile<T>(
 ): Promise<T> {
   const ctx = contextOf(options);
   return ctx.transport.lock(async (alone) => {
-    // Another tab uploading holds the lock: its upload is not this page's to resume or give up.
+    // Another tab importing holds the lock: its import is not this page's to take up or give up.
     const picked = pickedOf(target, file, fields);
-    const resumed = alone ? await resumable(ctx, picked) : undefined;
+    const kept = alone ? await remembered(ctx, picked) : undefined;
+    // Its file is up: the server is reading it, or has.
+    if (kept && kept.status !== 'uploading') return settle<T>(ctx, kept.id);
     const started =
-      resumed ??
-      (await call<Started>(ctx, 'POST', '/api/file-imports', { target, fileName: file.name, size: file.size, ...fields }));
-    if (alone && !resumed) remember({ id: started.id, ...picked });
+      kept ?? (await call<Started>(ctx, 'POST', '/api/file-imports', { target, fileName: file.name, size: file.size, ...fields }));
+    if (alone && !kept) remember({ id: started.id, ...picked });
     try {
       await upload(ctx, { id: started.id, file, partSize: started.partSize, parts: started.parts, sent: new Map(), shown: -1 });
-      // The file is up, and the import goes on without the page.
-      forget(started.id);
-      return await settle<T>(ctx, started.id);
     } catch (caught) {
-      // An import that failed has ended on the server already — and one waiting on the reader's yes keeps its file for it.
-      if (!(caught instanceof FileImportError)) await abandonImport(started.id, options.transport);
+      await abandonImport(started.id, options.transport);
       throw caught;
     }
+    return settle<T>(ctx, started.id);
   });
 }
 
@@ -520,14 +522,15 @@ export async function confirmImport<T>(id: string, options: FileImportOptions = 
 /**
  * Gives an import up — an upload in flight, or a failed one's kept file.
  * Best-effort: one being read is let finish. Forgotten once the server has
- * answered; one it could not be told of is given up again by the next import.
+ * given it up; one it could not be told of is given up again by the next
+ * import, and one being read is waited on by the next pick of its file.
  */
 export async function abandonImport(id: string, transport?: Partial<FileImportTransport>): Promise<void> {
   try {
     await call(contextOf({ ...(transport ? { transport } : {}) }), 'DELETE', `/api/file-imports/${id}`);
   } catch (caught) {
     // Otherwise left to the server's sweep.
-    if (!(caught instanceof ApiError)) return;
+    if (!(caught instanceof ApiError) || caught.status === 409) return;
   }
   forget(id);
 }

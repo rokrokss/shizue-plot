@@ -352,13 +352,19 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
         fields,
         { onProgress: setImportProgress },
       );
-      setMembers((current) => [...current, created]);
-      setSaved((current) => new Map(current).set(created.id, memberFields(created)));
+      // An import that ended while this page reloaded, shown again on the same pick
+      // (`lib/fileImport`): the work as this page loaded it holds the member and all
+      // its card brought already, so nothing below is taken up twice.
+      const loaded = members.some((member) => member.id === created.id);
+      if (!loaded) {
+        setMembers((current) => [...current, created]);
+        setSaved((current) => new Map(current).set(created.id, memberFields(created)));
+      }
       // The card brought its own custom UI to the work (its scripts, its stylesheet,
       // its default variables, and the background the work now keeps). The editor
       // takes that up beside whatever is being written here, or the next save would
       // put the old lists back over it. A failed read does not unmake the import.
-      await apiGet<PlotDetail>(`/api/plots/${id}`).then(
+      if (!loaded) await apiGet<PlotDetail>(`/api/plots/${id}`).then(
         (detail) => {
           const lifted = detail.customUi ?? {};
           const brought = (lifted.displayScripts ?? []).filter((script) => script.memberId === created.id);
@@ -397,7 +403,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
       // plot on the server. The editor takes them up after whatever is being
       // written here, or the next save would put the old list back over them.
       // A failed read does not unmake the import, which has landed.
-      if (members.length > 0 && created.card.groupOnlyGreetings?.length) {
+      if (!loaded && members.length > 0 && created.card.groupOnlyGreetings?.length) {
         await apiGet<PlotDetail>(`/api/plots/${id}`).then(
           (detail) => {
             const added = detail.intros.slice(plot?.intros.length ?? 0);

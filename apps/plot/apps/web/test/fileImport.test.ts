@@ -287,6 +287,12 @@ describe('importFile across reloads', () => {
     await vi.waitFor(() => expect(api.puts).toHaveLength(1));
   }
 
+  /** A page that goes away once the file is up and its first poll says the server is reading it. */
+  async function leaveWhileRead({ api, transport }: ReturnType<typeof setup>): Promise<void> {
+    void importFile('plot', file(), {}, { transport: { ...transport(), sleep: () => new Promise<void>(() => undefined) } });
+    await vi.waitFor(() => expect(api.imports.get('import-1')?.status).toBe('processing'));
+  }
+
   /** A pick of `picked` for `target`, run once the test has its transport. */
   const importFileAs =
     (target: 'plot' | 'member', picked: File, fields = {}) =>
@@ -339,7 +345,65 @@ describe('importFile across reloads', () => {
     expect(remembered()).toBeUndefined();
   });
 
-  it('remembers an upload while its parts go up, and forgets it once the file is up or given up', async () => {
+  it.each([
+    ['still reads', 2],
+    ['has finished reading', 1],
+  ])('shows an import the server %s when the same file is picked again, sending nothing', async (_, processingPolls) => {
+    const run = setup({ processingPolls });
+    const { api, jobs, transport, routes } = run;
+    await leaveWhileRead(run);
+    expect(remembered()).toMatchObject({ id: 'import-1' });
+
+    const before = routes().length;
+    const progress: ImportProgress[] = [];
+    await expect(
+      importFile('plot', file(), {}, { transport: transport(), onProgress: (each) => progress.push(each) }),
+    ).resolves.toEqual(made);
+    expect(routes().slice(before)).toEqual(['GET /api/file-imports/import-1', 'GET /api/file-imports/import-1']);
+    expect(api.puts).toHaveLength(3);
+    expect(jobs).toHaveLength(1);
+    expect(progress[0]).toEqual({ phase: 'processing', status: 'queued' });
+    expect(progress.some((each) => each.phase === 'uploading')).toBe(false);
+    expect(remembered()).toBeUndefined();
+  });
+
+  it('shows why an import failed while the page was away, and imports the file afresh on the pick after', async () => {
+    const run = setup({
+      processingPolls: 1,
+      job: () => ({ error: { status: 400, code: 'invalid_card', message: 'Unsupported card file' } }),
+    });
+    const { transport, routes } = run;
+    await leaveWhileRead(run);
+
+    const failure = await importFile('plot', file(), {}, { transport: transport() }).catch((caught: unknown) => caught);
+    expect(failure).toBeInstanceOf(FileImportError);
+    expect(failure).toMatchObject({ code: 'invalid_card', importId: 'import-1' });
+    expect(routes().filter((route) => route === 'POST /api/file-imports')).toHaveLength(1);
+    expect(remembered()).toBeUndefined();
+
+    await importFile('plot', file(), {}, { transport: transport() }).catch(() => undefined);
+    expect(routes().filter((route) => route === 'POST /api/file-imports')).toHaveLength(2);
+  });
+
+  it('waits on a remembered import the server is reading rather than giving it up for another file', async () => {
+    const run = setup({ processingPolls: 2 });
+    const { api, transport, routes } = run;
+    await leaveWhileRead(run);
+
+    const before = routes().length;
+    const refused = await importFile('plot', file('klmnopqrst', 'other.charx'), {}, { transport: transport() }).catch(
+      (caught: unknown) => caught,
+    );
+    // The server lets an import being read finish, and takes no other until it has.
+    expect(routes().slice(before)).toEqual(['DELETE /api/file-imports/import-1', 'POST /api/file-imports']);
+    expect(refused).toMatchObject({ status: 429, code: 'import_busy' });
+    expect(remembered()).toMatchObject({ id: 'import-1' });
+
+    await expect(importFile('plot', file(), {}, { transport: transport() })).resolves.toEqual(made);
+    expect(api.imports.size).toBe(1);
+  });
+
+  it('remembers an import until it ends, and forgets one given up', async () => {
     const { api, transport } = setup();
     const seen: unknown[] = [];
     const put: PartPut = async (url, body, options) => {
@@ -383,12 +447,18 @@ describe('importFile across reloads', () => {
     expect(api.imports.size).toBe(1);
   });
 
-  it('starts afresh when the remembered upload has ended on the server', async () => {
-    const run = setup();
-    const { api, transport, routes } = run;
-    await leaveMidUpload(run);
+  it.each([
     // Swept, or given up from another device.
-    api.imports.get('import-1')!.status = 'abandoned';
+    ['was given up', leaveMidUpload, { status: 'abandoned' }],
+    // The reader deleted the plot it made.
+    ['made what is gone now', leaveWhileRead, { status: 'done', result: null }],
+  ] as const)('starts afresh when the remembered import %s', async (_, leave, since) => {
+    const run = setup({ processingPolls: 1 });
+    const { api, transport, routes } = run;
+    await leave(run);
+    const row = api.imports.get('import-1')!;
+    delete row.outcome;
+    Object.assign(row, since);
 
     const before = routes().length;
     await expect(importFile('plot', file(), {}, { transport: transport() })).resolves.toEqual(made);
