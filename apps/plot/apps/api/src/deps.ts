@@ -27,6 +27,14 @@ export interface GenerationClaim {
   renewing: Promise<void> | null;
 }
 
+/** A generation stream this instance has open (`AppDeps.generationStreams`). */
+export interface OpenGeneration {
+  /** Stops it as a disconnect does: what arrived is kept as a stopped reply. */
+  stop: () => void;
+  /** Settles once its reply is stored and its chat's slot given back. */
+  settled: Promise<void>;
+}
+
 export interface AppDeps {
   db: Db;
   /** The web app's origin, which every write must come from; tests may mount without it. */
@@ -51,6 +59,8 @@ export interface AppDeps {
    * cannot write over, or clear, the new holder's.
    */
   generationClaims: Map<string, GenerationClaim>;
+  /** The generation streams this instance has open, for shutdown to stop (`stopGenerations`). */
+  generationStreams: Set<OpenGeneration>;
   /** Chat ids with a memory refresh in flight — one concurrent refresh per chat. */
   refreshingMemory: Set<string>;
   /** Chat ids with a relationship extraction in flight; separate from the memory guard. */

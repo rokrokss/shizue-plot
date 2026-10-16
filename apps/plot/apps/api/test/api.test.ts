@@ -93,6 +93,7 @@ import {
   type JobPayloadMap,
 } from '@shizue/db';
 import {
+  ChatGPTError,
   ChatGPTOAuth,
   contentText,
   createEchoAdapter,
@@ -126,7 +127,13 @@ import { createHostedAuth, createSessionStore } from '../src/hostedAuth.js';
 import type { AppDeps, AppEnv } from '../src/deps.js';
 import { loadRootEnv } from '../src/env.js';
 import { ApiError } from '../src/errors.js';
-import { acquireChatSlot, releaseChatSlot, renewChatSlot, TAVERN_BIAS_NUDGE } from '../src/generation.js';
+import {
+  acquireChatSlot,
+  releaseChatSlot,
+  renewChatSlot,
+  stopGenerations,
+  TAVERN_BIAS_NUDGE,
+} from '../src/generation.js';
 import {
   drainJobs,
   enqueueJob,
@@ -320,6 +327,7 @@ function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps {
     env: {},
     generating: new Set<string>(),
     generationClaims: new Map(),
+    generationStreams: new Set(),
     refreshingMemory: new Set<string>(),
     extractingRelationship: new Set<string>(),
     detectingEmotion: new Set<string>(),
@@ -4117,6 +4125,64 @@ describe('chats', () => {
     const next = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '다시' }, makeApp());
     expect(next.status).toBe(200);
     expect((await readSse(next)).at(-1)!.event).toBe('done');
+  });
+
+  it('stops a reply mid-stream on shutdown as a disconnect does: kept, and the chat freed before it returns', async () => {
+    const cookie = await signUp('shutdown-claim@example.com');
+    const deps = makeDeps({
+      getAdapter: () => ({
+        providerModel: 'slow',
+        adapter: {
+          stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
+            yield { type: 'text', text: '부분 응답' };
+            // Hangs until stopped, like a provider mid-answer.
+            await new Promise<void>((_resolve, reject) => {
+              const fail = (): void => reject(new Error('aborted'));
+              if (req.abortSignal?.aborted) fail();
+              else req.abortSignal?.addEventListener('abort', fail);
+            });
+            return { usage: { promptTokens: 0, completionTokens: 0 } };
+          },
+        },
+      }),
+    });
+    const { chatId } = await setupChat(cookie);
+    const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, createApp(deps));
+    // The first delta is out: the reply is mid-stream, and the reader still listening.
+    await res.body!.getReader().read();
+    expect(await claimOf(chatId)).not.toBeNull();
+
+    await stopGenerations(deps, 5_000);
+    // Stored and freed by the time it returns: an exit right after loses nothing.
+    expect(deps.generationStreams.size).toBe(0);
+    expect(await claimOf(chatId)).toBeNull();
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    expect(state.path.at(-1)).toMatchObject({ role: 'assistant', content: '부분 응답' });
+    // The next instance generates on it at once instead of answering 429.
+    const next = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '다시' }, makeApp());
+    expect(next.status).toBe(200);
+    expect((await readSse(next)).at(-1)!.event).toBe('done');
+  });
+
+  it('keeps what arrived when the upstream goes quiet, and tells the reader why', async () => {
+    const cookie = await signUp('timeout-partial@example.com');
+    const target = makeApp({
+      getAdapter: () => ({
+        providerModel: 'quiet',
+        adapter: {
+          stream: async function* (): AsyncGenerator<StreamDelta, StreamDone> {
+            yield { type: 'text', text: '부분 응답' };
+            throw new ChatGPTError('chatgpt_timeout', 'ChatGPT stopped responding. Try again.', 504);
+          },
+        },
+      }),
+    });
+    const { chatId } = await setupChat(cookie);
+    const events = await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, target));
+    expect(events.at(-1)).toMatchObject({ event: 'error', data: { code: 'chatgpt_timeout' } });
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    expect(state.path.at(-1)).toMatchObject({ role: 'assistant', content: '부분 응답' });
+    expect(await claimOf(chatId)).toBeNull();
   });
 
   it('rejects an unavailable model before persisting the user turn', async () => {
@@ -15041,14 +15107,20 @@ describe('editRequest listeners', () => {
     const before = prompts.length;
     const events = await send(stuck.cookie, stuck.chatId, capturing);
     expect(events.at(-1)!.event).toBe('error');
-    expect(events.at(-1)!.data).toMatchObject({ code: 'prompt_too_long' });
+    // With the numbers the reader's message names.
+    const refused = events.at(-1)!.data;
+    expect(refused).toMatchObject({ code: 'prompt_too_long', params: { tokens: expect.any(Number), limit: expect.any(Number) } });
+    expect(refused.params.tokens).toBeGreaterThan(refused.params.limit);
     expect(prompts.length).toBe(before);
     const stored = await db.select().from(messages).where(eq(messages.chatId, stuck.chatId));
     expect(stored.filter((message) => message.role === 'assistant').map((message) => message.content)).toEqual(['문 앞이다.']);
     // The slot is free again: the inspector answers, with the same refusal.
     const inspected = await json(stuck.cookie, `/api/chats/${stuck.chatId}/inspect`, 'GET', undefined, capturing);
     expect(inspected.status).toBe(400);
-    expect((await readJson(inspected)).code).toBe('prompt_too_long');
+    expect(await readJson(inspected)).toMatchObject({
+      code: 'prompt_too_long',
+      params: { tokens: expect.any(Number), limit: refused.params.limit },
+    });
   });
 
   it('runs nothing for a plot whose scripts have no editRequest listener', async () => {

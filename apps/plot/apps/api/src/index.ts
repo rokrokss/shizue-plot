@@ -8,6 +8,7 @@ import { createLocalEmbedder } from './embedder.js';
 import { createHostedAuth, createSessionStore } from './hostedAuth.js';
 import { loadRootEnv, readConfig } from './env.js';
 import { startJobWorker } from './jobs.js';
+import { stopGenerations } from './generation.js';
 import { createJobHandlers } from './notifications.js';
 import { createRemoteFetch } from './localizeAssets.js';
 import { probeRequestLua } from './requestLua.js';
@@ -48,6 +49,7 @@ const deps: AppDeps = {
   env: config.env,
   generating: new Set<string>(),
   generationClaims: new Map(),
+  generationStreams: new Set(),
   refreshingMemory: new Set<string>(),
   extractingRelationship: new Set<string>(),
   detectingEmotion: new Set<string>(),
@@ -62,7 +64,7 @@ const app = createApp(deps);
 // Whether this Node can sandbox a card's editRequest Lua, asked now so the log says so at startup.
 void probeRequestLua();
 
-serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
+const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
   console.log(`[api] listening on http://${config.host}:${info.port}`);
 });
 
@@ -76,8 +78,16 @@ const stopJobWorker = startJobWorker({ db, handlers: createJobHandlers(deps) });
 // instance to take over.
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, () => {
+    // No new connections; the open streams are stopped below.
+    server.close();
     stopJobWorker();
-    // The embedder's thread is ended first: onnxruntime does not survive an exit around it.
-    void (deps.embedder?.close() ?? Promise.resolve()).finally(() => process.exit(0));
+    // A reply mid-stream is stopped as a disconnect stops it — kept, and its chat
+    // freed — rather than cut by the exit. Five seconds is for that storing, which
+    // takes well under one, never for the replies, and leaves the rest of a host's
+    // grace (commonly 10–30s) to the embedder.
+    void stopGenerations(deps, 5_000)
+      // The embedder's thread is ended next: onnxruntime does not survive an exit around it.
+      .then(() => deps.embedder?.close())
+      .finally(() => process.exit(0));
   });
 }

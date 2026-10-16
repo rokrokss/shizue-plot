@@ -13,6 +13,7 @@ const MESSAGES: Record<string, string> = {
   subscription_sharing_usage_unavailable: 'ChatGPT usage is temporarily unavailable. Try again later.',
   subscription_sharing_user_not_eligible: 'This ChatGPT account is not eligible to share its plan.',
   subscription_sharing_invalid_user: 'Reconnect ChatGPT in AI settings.',
+  chatgpt_timeout: 'ChatGPT stopped responding. Try again.',
 };
 export function providerError(code: unknown, status = 502): ChatGPTError {
   // Provider bodies may contain credentials. Only known-safe code characters leave this module.
@@ -45,22 +46,27 @@ export function responseBody(req: ChatRequest): Record<string, unknown> {
   };
 }
 
+/**
+ * How long the stream may send nothing before the reply is given up on: Codex's
+ * own stream idle timeout for the same endpoint. No reasoning summary is asked
+ * for, so a reasoning model sends nothing while it thinks, and this is also the
+ * longest silent think a reply survives. A stream that keeps sending is never
+ * cut, however long it runs.
+ */
+export const CHATGPT_IDLE_TIMEOUT_MS = 300_000;
+
 /** Success requires response.completed, including when an error follows text deltas. */
 export function createChatGPTAdapter(access: () => Promise<string>, fetcher: typeof fetch = fetch): LLMAdapter {
   return {
     async *stream(req) {
-      const signal = req.abortSignal
-        ? AbortSignal.any([req.abortSignal, AbortSignal.timeout(180_000)])
-        : AbortSignal.timeout(180_000);
-      const response = await requireOK(await fetcher(`${CHATGPT_RESOURCE}/responses`, {
-        method: 'POST', signal,
-        headers: { Authorization: `Bearer ${await access()}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(responseBody(req)),
-      }));
-      if (!response.body) throw providerError('chatgpt_empty_stream');
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let pending = '';
+      const authorization = `Bearer ${await access()}`;
+      const idle = new AbortController();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      // Armed only while waiting on the upstream: a delta the caller is slow to
+      // take is not the stream going quiet.
+      const arm = (): void => { timer = setTimeout(() => idle.abort(), CHATGPT_IDLE_TIMEOUT_MS); };
+      const signal = req.abortSignal ? AbortSignal.any([req.abortSignal, idle.signal]) : idle.signal;
+      let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       // Do not send unsupported stop/max_output_tokens/temperature fields. Keep the
       // role-play stop boundary locally, but consume through the terminal event.
       let text = '';
@@ -68,8 +74,21 @@ export function createChatGPTAdapter(access: () => Promise<string>, fetcher: typ
       const stops = (req.stop ?? []).filter(Boolean);
       const tailSize = Math.max(0, ...stops.map((stop) => stop.length - 1));
       try {
+        arm();
+        const response = await requireOK(await fetcher(`${CHATGPT_RESOURCE}/responses`, {
+          method: 'POST', signal,
+          headers: { Authorization: authorization, 'Content-Type': 'application/json' },
+          body: JSON.stringify(responseBody(req)),
+        }));
+        clearTimeout(timer);
+        if (!response.body) throw providerError('chatgpt_empty_stream');
+        reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let pending = '';
         while (true) {
+          arm();
           const { done, value } = await reader.read();
+          clearTimeout(timer);
           pending += decoder.decode(value, { stream: !done });
           pending = pending.replace(/\r\n/g, '\n');
           let boundary: number;
@@ -118,7 +137,15 @@ export function createChatGPTAdapter(access: () => Promise<string>, fetcher: typ
           if (pending.length > 8 * 1024 * 1024) throw providerError('chatgpt_invalid_stream');
           if (done) throw providerError('chatgpt_stream_interrupted');
         }
-      } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+      } catch (error) {
+        // The caller's own abort goes out as it came, which is how it tells a
+        // disconnect from a failure; a stream gone quiet is a failure of its own.
+        if (idle.signal.aborted && !req.abortSignal?.aborted) throw providerError('chatgpt_timeout', 504);
+        throw error;
+      } finally {
+        clearTimeout(timer);
+        if (reader) { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+      }
     },
   };
 }

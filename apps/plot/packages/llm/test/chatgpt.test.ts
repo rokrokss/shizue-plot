@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { exportJWK, generateKeyPair, SignJWT } from 'jose';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { authorizationUrl, callbackResult, ChatGPTOAuth, createPendingSignIn, loopbackRedirectUri } from '../src/chatgptAuth.js';
-import { createChatGPTAdapter, responseBody } from '../src/chatgptResponses.js';
+import { CHATGPT_IDLE_TIMEOUT_MS, ChatGPTError, createChatGPTAdapter, responseBody } from '../src/chatgptResponses.js';
 import type { ChatRequest } from '../src/types.js';
 
 const json = (value: unknown, status = 200): Response => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
@@ -247,5 +247,59 @@ describe('ChatGPT Responses adapter', () => {
   it('preserves quota error codes without leaking provider bodies', async () => {
     const adapter = createChatGPTAdapter(async () => 'TOKEN', async () => json({ detail: 'subscription_sharing_usage_limit_exceeded', token: 'SECRET' }, 429));
     await expect(adapter.stream(request).next()).rejects.toMatchObject({ code: 'subscription_sharing_usage_limit_exceeded', status: 429 });
+  });
+});
+
+/** A response that stays open for the test to feed, and fails when aborted as fetch's own body does. */
+function liveFetch(): { fetcher: typeof fetch; send: (value: unknown) => void } {
+  let feed!: ReadableStreamDefaultController<Uint8Array>;
+  const body = new ReadableStream<Uint8Array>({ start(controller) { feed = controller; } });
+  return {
+    send: (value) => feed.enqueue(new TextEncoder().encode(event(value))),
+    fetcher: async (_input, init) => {
+      init?.signal?.addEventListener('abort', () => feed.error(init.signal!.reason));
+      return new Response(body);
+    },
+  };
+}
+describe('ChatGPT Responses idle timeout', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+  it('gives up on a stream that goes quiet, as a timeout of its own', async () => {
+    const live = liveFetch();
+    const stream = createChatGPTAdapter(async () => 'TOKEN', live.fetcher).stream(request);
+    live.send({ type: 'response.output_text.delta', delta: 'partial text' });
+    expect((await stream.next()).value).toMatchObject({ type: 'text' });
+    const rest = stream.next();
+    let settled = false;
+    rest.then(() => { settled = true; }, () => { settled = true; });
+    await vi.advanceTimersByTimeAsync(CHATGPT_IDLE_TIMEOUT_MS - 1);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(rest).rejects.toMatchObject({ code: 'chatgpt_timeout', status: 504 });
+  });
+  it('lets a stream that keeps sending run past the old three-minute cap and the idle window alike', async () => {
+    const live = liveFetch();
+    const stream = createChatGPTAdapter(async () => 'TOKEN', live.fetcher).stream(request);
+    const collected = (async () => {
+      let text = '';
+      while (true) { const value = await stream.next(); if (value.done) return text; text += value.value.text; }
+    })();
+    for (let minute = 0; minute < 7; minute += 1) {
+      live.send({ type: 'response.output_text.delta', delta: `${minute}분 ` });
+      await vi.advanceTimersByTimeAsync(60_000);
+    }
+    live.send({ type: 'response.completed', response: { usage: { input_tokens: 1, output_tokens: 7 } } });
+    expect(await collected).toBe('0분 1분 2분 3분 4분 5분 6분 ');
+  });
+  it("passes the caller's own abort through as an abort, not a timeout", async () => {
+    const live = liveFetch();
+    const caller = new AbortController();
+    const next = createChatGPTAdapter(async () => 'TOKEN', live.fetcher).stream({ ...request, abortSignal: caller.signal }).next();
+    await vi.advanceTimersByTimeAsync(0);
+    caller.abort();
+    const error = await next.catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(ChatGPTError);
   });
 });

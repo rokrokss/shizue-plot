@@ -1,4 +1,4 @@
-import { readerHeaders, toApiError } from './api';
+import { errorParams, readerHeaders, toApiError } from './api';
 import type { Usage } from './types';
 
 type StreamResult =
@@ -20,7 +20,7 @@ type StreamResult =
    * drop. The server has already stored the user turn and moved the head onto
    * it, so `regenerate` is the retry path.
    */
-  | { kind: 'error'; message: string; code?: string }
+  | { kind: 'error'; message: string; code?: string; params?: Record<string, number> }
   | { kind: 'aborted' };
 
 interface SseEvent {
@@ -124,9 +124,11 @@ export async function streamGeneration(
               : {}),
           };
         } else if (event.event === 'error') {
+          const params = errorParams(data['params']);
           result = {
             kind: 'error',
             ...(typeof data['code'] === 'string' ? { code: data['code'] } : {}),
+            ...(params ? { params } : {}),
             message: typeof data['message'] === 'string' ? data['message'] : 'Generation failed',
           };
         }

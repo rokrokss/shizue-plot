@@ -2343,7 +2343,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           },
           controller.signal,
         );
-        if (result.kind === 'error') streamError = result.code ? toMessage(new ApiError(0, result.code, result.message)) : result.message;
+        if (result.kind === 'error') streamError = result.code ? toMessage(new ApiError(0, result.code, result.message, result.params)) : result.message;
         aborted = result.kind === 'aborted';
         landed = result.kind === 'done';
         if (result.kind === 'done') groupTurnId = result.groupTurnId ?? null;

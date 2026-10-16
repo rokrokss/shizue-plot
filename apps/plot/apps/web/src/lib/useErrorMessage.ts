@@ -19,7 +19,7 @@ export function useErrorMessage(): (error: unknown) => string {
     const { t: translate, catalog } = latest.current;
     if (error instanceof ApiError) {
       // Own keys only: a code can come from the URL, and `constructor` is `in` every object.
-      if (Object.hasOwn(catalog, error.code)) return translate(error.code);
+      if (Object.hasOwn(catalog, error.code)) return translate(error.code, error.params);
       return error.message || translate('unknown');
     }
     if (error instanceof Error && error.message) return error.message;

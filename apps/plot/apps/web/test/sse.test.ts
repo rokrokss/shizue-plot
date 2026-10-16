@@ -124,6 +124,20 @@ describe('streamGeneration', () => {
     expect(result).toEqual({ kind: 'error', message: 'provider exploded' });
   });
 
+  it('carries the numbers an error’s message names, and only numbers', async () => {
+    mockFetch([
+      'event: error\ndata: {"message":"too long","code":"prompt_too_long","params":{"tokens":120500,"limit":"x","max":8000}}\n\n',
+    ]);
+
+    const { result } = await collect();
+    expect(result).toEqual({
+      kind: 'error',
+      code: 'prompt_too_long',
+      params: { tokens: 120500, max: 8000 },
+      message: 'too long',
+    });
+  });
+
   it('treats a truncated stream as an error rather than a success', async () => {
     mockFetch(['event: delta\ndata: {"text":"잘린"}\n\n']);
 

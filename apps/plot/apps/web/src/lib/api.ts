@@ -3,12 +3,14 @@
  * proxied by the Next `rewrites()` rule; the API owns the local ChatGPT session.
  */
 
-/** Mirrors the API error body `{error, code}`. */
+/** Mirrors the API error body `{error, code, params?}`. */
 export class ApiError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
     message: string,
+    /** Numbers the code's translation reads (`prompt_too_long`'s tokens and limit). */
+    readonly params?: Record<string, number>,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -18,17 +20,26 @@ export class ApiError extends Error {
 export async function toApiError(res: Response): Promise<ApiError> {
   let error = res.statusText || 'Request failed';
   let code = 'unknown';
+  let params: Record<string, number> | undefined;
   try {
     const body: unknown = await res.json();
     if (body && typeof body === 'object') {
       const fields = body as Record<string, unknown>;
       if (typeof fields['error'] === 'string') error = fields['error'];
       if (typeof fields['code'] === 'string') code = fields['code'];
+      params = errorParams(fields['params']);
     }
   } catch {
     // Non-JSON body (proxy failure, HTML error page): keep the generic code.
   }
-  return new ApiError(res.status, code, error);
+  return new ApiError(res.status, code, error, params);
+}
+
+/** An error payload's `params`, keeping only the numbers a translation can read. */
+export function errorParams(value: unknown): Record<string, number> | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const numbers = Object.entries(value).filter((entry): entry is [string, number] => typeof entry[1] === 'number');
+  return numbers.length > 0 ? Object.fromEntries(numbers) : undefined;
 }
 
 async function parse<T>(res: Response): Promise<T> {

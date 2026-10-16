@@ -74,7 +74,7 @@ import { randomUUID } from 'node:crypto';
 import { withImageNote } from './attachments.js';
 import { noteCachedTokens } from './cacheHealth.js';
 import { ApiError, badRequest, notFound } from './errors.js';
-import type { AppDeps, AppEnv, Tx } from './deps.js';
+import type { AppDeps, AppEnv, OpenGeneration, Tx } from './deps.js';
 import { invalidateMemoryForEdit, noteRequestOverhead, scheduleMemoryUpdate } from './memory.js';
 import { runPromptScriptJob } from './regexWorker.js';
 import { scheduleRelationshipUpdate } from './relationship.js';
@@ -1120,7 +1120,9 @@ export async function inspectGeneration(
     return report!;
   } catch (error) {
     // What a generation would fail on, the inspector is told as a refusal.
-    if (error instanceof RequestTooLongError) throw badRequest(error.code, error.message);
+    if (error instanceof RequestTooLongError) {
+      throw badRequest(error.code, error.message, { tokens: error.tokens, limit: error.limit });
+    }
     throw error;
   }
 }
@@ -1215,7 +1217,14 @@ async function runGeneration(
     if (error instanceof RequestTooLongError) {
       return streamSSE(c, async (stream) => {
         try {
-          await stream.writeSSE({ event: 'error', data: JSON.stringify({ message: error.message, code: error.code }) });
+          await stream.writeSSE({
+            event: 'error',
+            data: JSON.stringify({
+              message: error.message,
+              code: error.code,
+              params: { tokens: error.tokens, limit: error.limit },
+            }),
+          });
         } finally {
           await release();
         }
@@ -1231,6 +1240,10 @@ async function runGeneration(
     const abort = (): void => controller.abort();
     stream.onAbort(abort);
     c.req.raw.signal?.addEventListener('abort', abort);
+    // Shutdown stops it the way a disconnect does (`stopGenerations`).
+    let settle!: () => void;
+    const open: OpenGeneration = { stop: abort, settled: new Promise<void>((resolve) => (settle = resolve)) };
+    deps.generationStreams.add(open);
 
     // A stream that says nothing while the model thinks is a stream an idle proxy
     // drops, and time to first token is exactly when it says nothing. `ping` is a
@@ -1245,6 +1258,8 @@ async function runGeneration(
 
     let text = '';
     let usage: Usage = { promptTokens: 0, completionTokens: 0 };
+    /** The upstream went quiet (`chatgpt_timeout`): what it sent is kept as a stopped reply is. */
+    let timeout: ChatGPTError | null = null;
 
     try {
       try {
@@ -1278,9 +1293,11 @@ async function runGeneration(
         usage = next.value.usage;
         noteCachedTokens('chat', next.value.usage, plan.chatId);
       } catch (error) {
-        // A disconnect surfaces as an abort error; anything else is a real failure
-        // and must not persist a message.
-        if (!controller.signal.aborted) {
+        // A disconnect surfaces as an abort error, and a stream the upstream let go
+        // quiet as `chatgpt_timeout`; both keep what arrived. Anything else is a
+        // real failure and must not persist a message.
+        timeout = error instanceof ChatGPTError && error.code === 'chatgpt_timeout' ? error : null;
+        if (!controller.signal.aborted && !timeout) {
           await stream.writeSSE({
             event: 'error',
             data: JSON.stringify({ message: error instanceof Error ? error.message : 'Generation failed', ...(error instanceof ChatGPTError ? { code: error.code } : {}) }),
@@ -1293,8 +1310,10 @@ async function runGeneration(
       const kept = narrationKept(plan, text);
       const reply = kept ?? text;
 
-      // Client gone: keep whatever was received so far, but send nothing.
-      if (controller.signal.aborted) {
+      // Client gone, or the upstream quiet: keep whatever was received so far. Only
+      // the timeout says so — the page refetches on the error and finds the reply
+      // under it; a client gone is sent nothing.
+      if (controller.signal.aborted || timeout) {
         if (reply) {
           // Stored pending all the same, if the browser meant to post-process
           // it: the next time it opens the chat it finds the mark and finishes.
@@ -1304,6 +1323,9 @@ async function runGeneration(
           // it opened is opened; there is simply no event to say so on.
           await openUnlocks(deps, plan.chatId, stored.content);
           if (!plan.postProcess) scheduleBackgroundUpdates(deps, plan.chatId);
+        }
+        if (timeout && !controller.signal.aborted) {
+          await stream.writeSSE({ event: 'error', data: JSON.stringify({ message: timeout.message, code: timeout.code }) });
         }
         return;
       }
@@ -1345,9 +1367,33 @@ async function runGeneration(
     } finally {
       clearInterval(heartbeat);
       c.req.raw.signal?.removeEventListener('abort', abort);
-      await release();
+      try {
+        await release();
+      } finally {
+        deps.generationStreams.delete(open);
+        settle();
+      }
     }
   });
+}
+
+/**
+ * Stops every generation this instance is streaming, as a disconnect stops one —
+ * each keeps what it had as a stopped reply and gives its chat's slot back — and
+ * waits up to `graceMs` for that storing, never for the replies themselves. For
+ * shutdown: a stream the exit cut instead would store nothing and leave its chat
+ * answering 429 until the claim went stale.
+ */
+export async function stopGenerations(deps: AppDeps, graceMs: number): Promise<void> {
+  const open = [...deps.generationStreams];
+  if (open.length === 0) return;
+  for (const generation of open) generation.stop();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    Promise.all(open.map((generation) => generation.settled)),
+    new Promise<void>((resolve) => (timer = setTimeout(resolve, graceMs))),
+  ]);
+  clearTimeout(timer);
 }
 
 /**
