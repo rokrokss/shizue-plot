@@ -79,6 +79,8 @@ export async function withLease(db: Db, key: string, ttlMs: number, work: () => 
     return true;
   } finally {
     clearInterval(renewal);
+    // A renewal still in flight that lands after this updates no row — renewing
+    // never inserts — so it cannot bring the lease back for the next holder.
     await releaseLease(db, key, holder).catch((error: unknown) => console.warn(`[leases] giving back ${key} failed`, error));
   }
 }
