@@ -129,7 +129,7 @@ import {
   type ScriptView,
 } from '../generation.js';
 import { avatarUrl, coverUrl, loadMembers, loadVisiblePlot, visibleToViewer } from '../hub.js';
-import { emotionNamed, replyMemberOf } from '../emotion.js';
+import { emotionNamed, replyMemberOf, resumeEmotionDetection } from '../emotion.js';
 import { auxiliaryModelOf, buildMemoryInput, invalidateMemoryForEdit, memorySettingsOf, scheduleMemoryUpdate } from '../memory.js';
 import {
   attachedNoteIds,
@@ -2519,16 +2519,25 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * The emotion picture a reply left its member wearing (`messages.emotion`), by
    * name, or null while none is chosen. The choice is made after the turn is done
    * (`emotion.ts`), so the page asks here for the one reply it is waiting on
-   * rather than reading the whole chat again.
+   * rather than reading the whole chat again. A recent reply still without one
+   * has its choice started again, in case the instance that ran it died
+   * (`resumeEmotionDetection`).
    */
   app.get('/:id/messages/:messageId/emotion', async (c) => {
     const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
     const [message] = await deps.db
-      .select({ emotion: messages.emotion })
+      .select({
+        id: messages.id,
+        role: messages.role,
+        emotion: messages.emotion,
+        scriptState: messages.scriptState,
+        createdAt: messages.createdAt,
+      })
       .from(messages)
       .where(and(eq(messages.id, requireUuidParam(c, 'messageId')), eq(messages.chatId, chat.id)))
       .limit(1);
     if (!message) throw notFound('Message not found');
+    await resumeEmotionDetection(deps, chat.id, message);
     return c.json({ emotion: message.emotion });
   });
 

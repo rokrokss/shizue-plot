@@ -76,6 +76,7 @@ import {
 import { getAdapter, listEnabledModels, type ChatRequest, type LLMAdapter } from '@shizue/llm';
 import { and, asc, eq, inArray, notExists, sql } from 'drizzle-orm';
 import type { AppDeps, Tx } from './deps.js';
+import { BACKGROUND_LEASE_MS, withLease } from './leases.js';
 import type { Embedding } from './embedder.js';
 import { noteCachedTokens } from './cacheHealth.js';
 import { embedPendingFacts, extractFacts, keepEndedFacts, selectFacts } from './facts.js';
@@ -452,12 +453,14 @@ const landing = new Map<string, Set<string>>();
 export function scheduleMemoryUpdate(deps: AppDeps, chatId: string): void {
   // One refresh per chat at a time. While a refresh runs the branch stays over
   // what fits, so every following turn would otherwise start a duplicate; there
-  // is nothing to queue, the next completed turn reschedules.
+  // is nothing to queue, the next completed turn reschedules. The set is this
+  // instance's; the lease (`memoryLeaseKey`) is every instance's, and a refresh
+  // another one is running is the same nothing to queue.
   if (deps.refreshingMemory.has(chatId)) return;
   deps.refreshingMemory.add(chatId);
   landing.set(chatId, new Set());
 
-  const task = (async () => {
+  const task = withLease(deps.db, memoryLeaseKey(chatId), BACKGROUND_LEASE_MS, async () => {
     try {
       let continuing = false;
       for (let pass = 0; pass < REFRESH_BATCHES_PER_RUN; pass += 1) {
@@ -471,13 +474,20 @@ export function scheduleMemoryUpdate(deps: AppDeps, chatId: string): void {
     }
     await embedPendingSummaries(deps, chatId);
     await embedPendingFacts(deps, chatId);
-  })()
+  })
+    .then(() => undefined)
     .catch((error: unknown) => {
       console.error('[memory] update failed', error);
     })
-    .finally(() => deps.refreshingMemory.delete(chatId));
+    .finally(() => {
+      landing.delete(chatId);
+      deps.refreshingMemory.delete(chatId);
+    });
   deps.onBackgroundTask?.(task, 'memory');
 }
+
+/** The lease a chat's memory refresh and backfill take across instances (`withLease`). */
+const memoryLeaseKey = (chatId: string): string => `memory:${chatId}`;
 
 /** One summary's worth of work: what it did, and whether a later pass has more to do. */
 interface PassResult {
@@ -771,11 +781,18 @@ export async function memoryBackfill(
       return;
     }
     deps.refreshingMemory.add(chatId);
-    let result: PassResult;
+    let result: PassResult | undefined;
     try {
-      result = await updateMemory(deps, chatId, continuing);
+      // Another instance's refresh of the chat is stood back from as this one's is.
+      await withLease(deps.db, memoryLeaseKey(chatId), BACKGROUND_LEASE_MS, async () => {
+        result = await updateMemory(deps, chatId, continuing);
+      });
     } finally {
       deps.refreshingMemory.delete(chatId);
+    }
+    if (!result) {
+      await enqueueBackfill(deps, chatId, new Date(Date.now() + BACKFILL_RETRY_MS));
+      return;
     }
     continuing = result.continuing;
     if (!result.more) {

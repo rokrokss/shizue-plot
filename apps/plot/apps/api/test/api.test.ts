@@ -157,7 +157,7 @@ import { repairDisplayOrder } from '../src/maintenance/displayOrder.js';
 import { repairMemberScripts } from '../src/maintenance/memberScripts.js';
 import { IMPORT_MEMORY_PER_BYTE } from '../src/importAdmission.js';
 import { localizePlot, type RemoteFetch } from '../src/localizeAssets.js';
-import { acquireLease, releaseLease, renewLease as renewHeldLease } from '../src/leases.js';
+import { acquireLease, releaseLease, renewLease as renewHeldLease, withLease } from '../src/leases.js';
 import { NARRATION_NUDGE } from '../src/routes/chats.js';
 import { MAX_ASSET_NAME_LENGTH, MAX_CARD_IMPORT_BYTES } from '../src/routes/plots.js';
 import { hitRateLimit, RATE_LIMITS } from '../src/rateLimit.js';
@@ -10474,6 +10474,23 @@ describe('relationship', () => {
     expect(transcript).not.toContain('{{img');
   });
 
+  it("stands back while another instance holds the chat's lease, and the next turn after it extracts", async () => {
+    const cookie = await signUp('relationship-lease@example.com');
+    const { chatId } = await setupChat(cookie);
+    const harness = relationshipApp();
+    const key = `relationship:${chatId}`;
+    expect(await acquireLease(db, key, 'another-instance', 60_000)).toBe(true);
+
+    await turns(cookie, chatId, harness, SENDS_TO_FIRST);
+    expect(harness.extractions).toHaveLength(0);
+
+    await releaseLease(db, key, 'another-instance');
+    await turns(cookie, chatId, harness, 1);
+    expect(harness.extractions).toHaveLength(1);
+    // Given back once done, for the next instance to take.
+    expect(await acquireLease(db, key, 'another-instance', 60_000)).toBe(true);
+  });
+
   it('extracts once the branch holds five assistant turns, clamps the axes and injects the block', async () => {
     const cookie = await signUp('relationship-cycle@example.com');
     const { chatId, state } = await setupChat(cookie);
@@ -17945,6 +17962,47 @@ describe('emotion images', () => {
     ).toBe(404);
   });
 
+  it('starts a lost choice again when the page asks after a recent reply: not while one runs, and not on every ask', async () => {
+    const cookie = await signUp('emotion-resume@example.com');
+    const plot = await importCard(cookie, emotionCard({ viewScreen: 'emotion' }));
+    const harness = emotionApp('happy');
+    const chat = await startChat(cookie, plot.id);
+    const chatId = chat.chat.id;
+    const done = await send(cookie, chatId, { content: '반가워' }, harness.app);
+    await harness.settle();
+    expect(harness.asked).toHaveLength(1);
+    // Chosen, the choice's lease is given back.
+    expect(await db.select().from(leases).where(eq(leases.key, `emotion:${done.messageId}`))).toEqual([]);
+    const lose = () => sql`update messages set emotion = null where id = ${done.messageId}`;
+
+    // The choice is as good as lost — its instance died before it wrote one — and the page's asking makes it again.
+    await lose();
+    expect(await emotionOf(cookie, chatId, done.messageId, harness.app)).toEqual({ emotion: null });
+    await harness.settle();
+    expect(harness.asked).toHaveLength(2);
+    expect(await emotionOf(cookie, chatId, done.messageId, harness.app)).toEqual({ emotion: 'happy' });
+
+    // Not again on the next ask: once in ten seconds.
+    await lose();
+    await emotionOf(cookie, chatId, done.messageId, harness.app);
+    await harness.settle();
+    expect(harness.asked).toHaveLength(2);
+
+    // Nor while another instance is choosing it.
+    await sql`delete from leases where key = ${`emotion_resume:${done.messageId}`}`;
+    expect(await acquireLease(db, `emotion:${done.messageId}`, 'another-instance', 60_000)).toBe(true);
+    await emotionOf(cookie, chatId, done.messageId, harness.app);
+    await harness.settle();
+    expect(harness.asked).toHaveLength(2);
+
+    // A reply older than two minutes is left as it is.
+    await sql`delete from leases`;
+    await sql`update messages set created_at = now() - interval '3 minutes' where id = ${done.messageId}`;
+    await emotionOf(cookie, chatId, done.messageId, harness.app);
+    await harness.settle();
+    expect(harness.asked).toHaveLength(2);
+  });
+
   it('chooses by the embedder where the reader picks it, as RisuAI’s embedding processor does', async () => {
     const cookie = await signUp('emotion-embedding@example.com');
     const plot = await importCard(cookie, emotionCard({ viewScreen: 'emotion' }));
@@ -20323,6 +20381,29 @@ describe('leases', () => {
     const [row] = await db.select().from(leases);
     expect(row!.holder).toBe(`holder-${taken.indexOf(true)}`);
   });
+
+  it('runs background work under a lease: skipped while another holds it, given back after', async () => {
+    let runs = 0;
+    const work = async (): Promise<void> => {
+      runs += 1;
+      // Held while it runs: another instance's attempt stands back.
+      expect(await withLease(db, 'test:work', 60_000, async () => void (runs += 100))).toBe(false);
+    };
+    expect(await withLease(db, 'test:work', 60_000, work)).toBe(true);
+    expect(runs).toBe(1);
+    expect(await db.select().from(leases)).toEqual([]);
+
+    // A failure is thrown on, and the lease still given back.
+    await expect(withLease(db, 'test:work', 60_000, async () => Promise.reject(new Error('boom')))).rejects.toThrow('boom');
+    expect(await db.select().from(leases)).toEqual([]);
+
+    // An instance that died holding it is stood back from until its lease runs out.
+    expect(await acquireLease(db, 'test:work', 'dead-instance', 60_000)).toBe(true);
+    expect(await withLease(db, 'test:work', 60_000, work)).toBe(false);
+    await db.update(leases).set({ expiresAt: new Date(Date.now() - 1_000) });
+    expect(await withLease(db, 'test:work', 60_000, work)).toBe(true);
+    expect(runs).toBe(2);
+  });
 });
 
 describe('import admission', () => {
@@ -20383,8 +20464,8 @@ describe('import admission', () => {
     expect((await request(bob, '/api/plots/import', 'POST', cardForm(), other)).status).toBe(201);
     release();
     expect((await first).status).toBe(201);
-    // Given back once it ended.
-    expect(await db.select().from(leases)).toEqual([]);
+    // Given back once it ended (the import's own; a background task it started may hold its own lease meanwhile).
+    expect((await db.select().from(leases)).filter((row) => row.key.startsWith('import:'))).toEqual([]);
     expect((await request(alice, '/api/plots/import', 'POST', cardForm(), other)).status).toBe(201);
   });
 

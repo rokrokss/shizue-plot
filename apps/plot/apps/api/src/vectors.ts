@@ -45,6 +45,7 @@ import { chats, messageChunks, messages, plots, type ContentLanguage, type Messa
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { createHash } from 'node:crypto';
 import type { AppDeps, BackgroundTaskKind } from './deps.js';
+import { BACKGROUND_LEASE_MS, withLease } from './leases.js';
 import type { Embedder, Embedding } from './embedder.js';
 import { aliasPlotLore, loreAliasesEnabled, loreAliasesFor } from './loreAliases.js';
 import { noteLexicalSearch } from './lexicalHealth.js';
@@ -104,13 +105,16 @@ function runGuarded(deps: AppDeps, key: string, work: () => Promise<void>, kind:
     return;
   }
   deps.embeddingVectors.set(key, 'running');
-  const task = (async () => {
+  // Across instances, a pass another one is running stands for this one: what it
+  // left out, the next pass after the next turn embeds.
+  const task = withLease(deps.db, `vectors:${key}`, BACKGROUND_LEASE_MS, async () => {
     for (let pass = 0; pass < MAX_PASSES; pass += 1) {
       deps.embeddingVectors.set(key, 'running');
       await work();
       if (deps.embeddingVectors.get(key) !== 'again') break;
     }
-  })()
+  })
+    .then(() => undefined)
     .catch((error: unknown) => {
       console.error(`[${kind}] ${key} failed`, error);
     })

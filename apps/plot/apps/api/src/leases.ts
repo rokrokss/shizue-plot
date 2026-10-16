@@ -53,3 +53,32 @@ export async function renewLease(db: Db, key: string, holder: string, ttlMs: num
 export async function releaseLease(db: Db, key: string, holder: string): Promise<void> {
   await db.delete(leases).where(and(eq(leases.key, key), eq(leases.holder, holder)));
 }
+
+/**
+ * How long a background task's lease stands without a renewal (`withLease`): a
+ * summary run of many model calls renews it a third of this apart, and one whose
+ * instance died frees its chat this long after.
+ */
+export const BACKGROUND_LEASE_MS = 2 * 60_000;
+
+/**
+ * Runs `work` holding `key` across instances — renewed a third of `ttlMs` apart
+ * while it runs, given back once it settles — and answers whether it ran: false,
+ * without running it, while another holder has the key. `work`'s failure is
+ * thrown on.
+ */
+export async function withLease(db: Db, key: string, ttlMs: number, work: () => Promise<void>): Promise<boolean> {
+  const holder = newLeaseHolder();
+  if (!(await acquireLease(db, key, holder, ttlMs))) return false;
+  const renewal = setInterval(() => {
+    void renewLease(db, key, holder, ttlMs).catch((error: unknown) => console.warn(`[leases] renewing ${key} failed`, error));
+  }, ttlMs / 3);
+  renewal.unref();
+  try {
+    await work();
+    return true;
+  } finally {
+    clearInterval(renewal);
+    await releaseLease(db, key, holder).catch((error: unknown) => console.warn(`[leases] giving back ${key} failed`, error));
+  }
+}

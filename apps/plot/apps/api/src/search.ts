@@ -27,6 +27,7 @@ import { bm25TermScore, hasLexicalEvidence, lexicalStems, lexicalTerms, rareLimi
 import { plots, plotSearchVectors, type ContentLanguage, type Db, type Plot } from '@shizue/db';
 import { and, desc, eq, gt, inArray, isNotNull, isNull, ne, or, sql, type SQL } from 'drizzle-orm';
 import type { AppDeps, Tx } from './deps.js';
+import { BACKGROUND_LEASE_MS, withLease } from './leases.js';
 import { publicIntro, publiclyListed } from './hub.js';
 
 /** How much of the first opening the text carries: its start says what the work is. */
@@ -240,7 +241,9 @@ const sweptUntil = new Map<ContentLanguage, number>();
 export function scheduleSearchSweep(deps: AppDeps, language: ContentLanguage, model: string): void {
   if (sweeping.has(language) || Date.now() < (sweptUntil.get(language) ?? 0)) return;
   sweeping.add(language);
-  const task = (async () => {
+  // One sweep of a partition at a time across instances too: two would embed the
+  // same stale plots, each with the embedder's memory.
+  const task = withLease(deps.db, `search_sweep:${language}`, BACKGROUND_LEASE_MS, async () => {
     const stale = await deps.db
       .select({ id: plots.id })
       .from(plots)
@@ -267,7 +270,8 @@ export function scheduleSearchSweep(deps: AppDeps, language: ContentLanguage, mo
       deps,
       stale.map((row) => row.id),
     );
-  })()
+  })
+    .then(() => undefined)
     .catch((error: unknown) => console.error('[search] sweeping plot vectors failed', error))
     .finally(() => sweeping.delete(language));
   deps.onBackgroundTask?.(task, 'search');

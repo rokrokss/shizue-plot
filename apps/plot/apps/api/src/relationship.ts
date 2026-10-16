@@ -40,6 +40,7 @@ import {
 import type { ChatRequest } from '@shizue/llm';
 import { asc, eq } from 'drizzle-orm';
 import type { AppDeps } from './deps.js';
+import { BACKGROUND_LEASE_MS, withLease } from './leases.js';
 import { loadMembers } from './hub.js';
 import { collect, memoryChannel } from './memory.js';
 import { buildPath, roundCount, visibleToAi } from './tree.js';
@@ -134,11 +135,13 @@ export function scheduleRelationshipUpdate(deps: AppDeps, chatId: string): void 
   // and a relationship update are unrelated jobs and must not block each other.
   // The guard is a pure concurrency gate and carries no counting state: turns
   // that complete while an extraction runs are still on the branch, so the next
-  // completion sees them.
+  // completion sees them — and so does the next one after another instance's,
+  // which holds the chat's lease meanwhile.
   if (deps.extractingRelationship.has(chatId)) return;
   deps.extractingRelationship.add(chatId);
 
-  const task = updateRelationship(deps, chatId)
+  const task = withLease(deps.db, `relationship:${chatId}`, BACKGROUND_LEASE_MS, () => updateRelationship(deps, chatId))
+    .then(() => undefined)
     .catch((error: unknown) => {
       console.error('[relationship] update failed', error);
     })
