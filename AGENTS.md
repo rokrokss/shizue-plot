@@ -34,7 +34,7 @@ changing what it describes.
 
 ## Environment and commands
 
-Node 25+ and pnpm 10.28.2. `make dev` starts Docker's PostgreSQL (port 15433)
+Node 26+ (`.nvmrc`) and pnpm 10.28.2. `make dev` starts Docker's PostgreSQL (port 15433)
 and RustFS, an S3 stand-in (19000), builds the libraries, then serves the web
 app on 13000 and the API on 8787. `make stop` stops the app. Settings live in
 `apps/plot/.env`, copied from `.env.example`.

@@ -22,7 +22,7 @@ AI 롤플레이 플롯 서비스. 현재 구현된 시스템을 주제별로 기
 
 ## 2. 스택
 
-- pnpm 워크스페이스 모노레포, TypeScript strict, ESM only. Node ≥22(개발 25), pnpm 10.28.
+- pnpm 워크스페이스 모노레포, TypeScript strict, ESM only. Node ≥26(`.nvmrc` — 25는 2026-06-01에 지원이 끝났고 26은 2026-10-28부터 LTS다), pnpm 10.28.
 - `apps/web`: Next.js 15 (App Router) + Tailwind 4 — 프론트엔드 전용, 포트 13000.
 - `apps/api`: Hono + @hono/node-server — 모든 비즈니스 로직·인증·SSE, 포트 8787.
 - DB: PostgreSQL 17 (`pgvector/pgvector:pg17`, docker-compose, 15433). **pgvector는 실사용 중** — `memories.embedding vector(1536)`.
@@ -120,7 +120,7 @@ Next rewrite가 넘긴 요청은 `x-forwarded-host`가 웹 호스트일 때만 �
 `@shizue/core/lua`의 프로그램을 서버 변형으로 돈다(wasmoon의 JS 프록시 없음, `debug`·`io`·`os` 등을 지운 Lua — §7.2), Lua 상태당
 64MB(`LUA_SERVER_MEMORY` — 브라우저의 두 배, 요청에 실린 그림 때문이다). 부팅 뒤 `process`·`Buffer` 전역도 지운다.
 
-Node의 권한 모델은 **25부터** 네트워크를 막는다(그래서 `package.json`의 engines는 `>=25`다) — 그 전 버전에서는 `--permission` 아래서도
+Node의 권한 모델은 **25부터** 네트워크를 막는다(`package.json`의 engines는 지원이 끝난 25를 건너 LTS인 `>=26`이고, 26에서도 같은 프로브와 샌드박스 테스트가 통과한다) — 그 전 버전에서는 `--permission` 아래서도
 자식이 어디로든 연결한다. 그래서 API는 기동 때 같은 플래그로 자식을 하나 띄워(`requestLuaProbe.ts`) 이름 풀이와 소켓이
 `ERR_ACCESS_DENIED`로 거절되는지 확인하고(`probeRequestLua`, 프로세스당 한 번), 아니면 — 모르는 플래그, 띄우기 실패, 풀린
 이름, 10초 무응답 모두 — 이 기능을 끈다: 카드의 Lua를 돌리지 않고 요청을 고치지 않은 채 보내며 로그에 한 번 남긴다. 샌드박스

@@ -21,7 +21,7 @@ See [the architecture](apps/plot/docs/ARCHITECTURE.md) for chat behavior and
 
 ## Quickstart
 
-Node 25+ and pnpm 10.28.2 are required. Docker provides PostgreSQL 17 with
+Node 26+ (`.nvmrc`) and pnpm 10.28.2 are required. Docker provides PostgreSQL 17 with
 pgvector and RustFS (an S3-compatible store) for local development.
 
 ```sh
