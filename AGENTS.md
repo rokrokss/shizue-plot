@@ -13,6 +13,10 @@ changing what it describes.
   source of truth for how the product behaves. It is long and in Korean, so
   search it by section. When it doesn't cover a decision, ask the owner instead
   of making one up.
+- [apps/plot/docs/OVERVIEW.md](apps/plot/docs/OVERVIEW.md) is the owner's
+  plain-language Korean overview of that behavior, with our measured results.
+  ARCHITECTURE.md wins where they differ. Update the overview when a change
+  alters what it says.
 - [docs/PLATFORM.md](docs/PLATFORM.md) defines the exported chat format.
 - [docs/design/shizue-ui.md](docs/design/shizue-ui.md) sets the UI direction:
   the cream, mint and dark-green system adapted from the sibling repo
