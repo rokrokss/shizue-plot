@@ -229,7 +229,9 @@ export function useRowTranslation(
 /**
  * Whether an element has come near the screen (800px), watched only while `on`
  * — a part of a row that is not translated costs no observer — and settled
- * once it has.
+ * once it has. Near is measured in the list it scrolls in (`data-message-list`):
+ * against the viewport, the list clips a row before the margin applies, so a
+ * row the list has scrolled away from never came near.
  */
 function useNearScreen(on: boolean): { near: boolean; ref: (element: HTMLElement | null) => void } {
   const [near, setNear] = useState(false);
@@ -249,7 +251,7 @@ function useNearScreen(on: boolean): { near: boolean; ref: (element: HTMLElement
           observer.current?.disconnect();
         }
       },
-      { rootMargin: '800px 0px' },
+      { root: element.closest('[data-message-list]'), rootMargin: '800px 0px' },
     );
     observer.current.observe(element);
   }, [on]);

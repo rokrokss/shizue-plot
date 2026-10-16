@@ -3411,6 +3411,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               // Positioned only over a background, which it has to paint above —
               // and what stands on it with no bubble of its own gets a veil there.
               className={cx('min-h-0 flex-1 overflow-y-auto overscroll-contain', backgroundContext && 'chat-backdrop relative')}
+              // What a message measures "near the screen" against (`lib/translation`).
+              data-message-list=""
               // RisuAI's `HideIconStore`: a module or the card hides every sender's picture and name.
               {...(chatModules?.hideIcons ? { 'data-hide-icons': '' } : {})}
               // Reading upwards into a long chat: near the top, the window before this
