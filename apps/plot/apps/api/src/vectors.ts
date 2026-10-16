@@ -406,8 +406,9 @@ async function retrievedMessages(
   const names = new Map(input.characters.flatMap((member) => (member.id ? [[member.id, member.name] as const] : [])));
   // Each dated as the memory dates its summaries and facts (`buildMemoryInput`):
   // the turn the message closes on the branch (`roundsAlong`), counted back from
-  // the memory's own ten-turn clock (`clock`), in the language of the latest
-  // turns — so an old value brought back reads as older than a newer fact.
+  // the memory's own clock (`clock`, which moves when a summary lands), in the
+  // language of the latest turns — so an old value brought back reads as older
+  // than a newer fact.
   const rounds = roundsAlong(input.branch);
   const roundOf = new Map(input.branch.map((message, at) => [message.id, rounds[at]!]));
   const language = detectContentLanguage(

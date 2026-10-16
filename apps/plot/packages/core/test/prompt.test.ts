@@ -508,11 +508,11 @@ describe('assemblePrompt', () => {
       ]);
     });
 
-    it('is charged up front and never evicted, and only its facts are left out of the fixed tokens', () => {
+    it('is charged up front and never evicted, and counts in the fixed tokens facts and all', () => {
       const bare = assemblePrompt({ plot, characters: [aria], history: turns, preset, userName: '민준', contextBudget: 100_000, maxResponseTokens: 0 });
       const full = recall({ contextBudget: 100_000, maxResponseTokens: 0, report: false });
-      const facts = countTokens('[기억]\n- (약 20턴 전) 민준는 등대 열쇠를 갖고 있다.');
-      expect(full.fixedTokens! - bare.fixedTokens!).toBe(countTokens(RECALL) - facts);
+      // The facts come on top of the summaries' share, so the summarizer has to see them.
+      expect(full.fixedTokens! - bare.fixedTokens!).toBe(countTokens(RECALL));
       // A budget that holds nothing but the newest turn still holds the recall turn.
       const tight = recall({ contextBudget: countTokens(bare.system) + countTokens('POST') + countTokens(RECALL) + countTokens(history[3]!.content), maxResponseTokens: 0 });
       expect(tight.messages.map((message) => message.content)).toEqual([history[3]!.content, RECALL, 'POST']);

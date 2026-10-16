@@ -70,7 +70,7 @@ import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { randomUUID } from 'node:crypto';
 import { withImageNote } from './attachments.js';
-import { noteCachedTokens } from './cacheHealth.js';
+import { chatRequestSent } from './cacheHealth.js';
 import { ApiError, badRequest, notFound } from './errors.js';
 import type { AppDeps, AppEnv, OpenGeneration, Tx } from './deps.js';
 import { invalidateMemoryForEdit, noteRequestOverhead, scheduleMemoryUpdate } from './memory.js';
@@ -1009,6 +1009,7 @@ async function assembleRequest(
         : []),
     ],
     ...(prompt.risu ? { risu: prompt.risu } : {}),
+    ...(prompt.systemSections ? { systemSections: prompt.systemSections } : {}),
     ...(prompt.fixedTokens !== undefined ? { fixedTokens: prompt.fixedTokens } : {}),
     loreTriggers: prompt.loreTriggers,
     ...(prompt.variableWrites ? { variableWrites: prompt.variableWrites } : {}),
@@ -1215,6 +1216,11 @@ async function runGeneration(
 
     try {
       try {
+        // What this request is, for the cache log's comparison with the next (`cacheHealth.ts`).
+        const cached = chatRequestSent({ chatId: plan.chatId, speaker: plan.speaker }, request, {
+          clock: plan.memoryClock,
+          history: plan.history,
+        });
         const generator = resolved.adapter.stream({
           model: resolved.providerModel,
           system: request.system,
@@ -1247,7 +1253,7 @@ async function runGeneration(
           next = await generator.next();
         }
         usage = next.value.usage;
-        noteCachedTokens('chat', next.value.usage, plan.chatId);
+        cached(next.value.usage);
       } catch (error) {
         // A stop surfaces as an abort error, and a stream the upstream let go quiet
         // as `chatgpt_timeout`; both keep what arrived. Anything else is a real

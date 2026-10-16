@@ -59,6 +59,9 @@ function mapTexts(prompt: AssembledPrompt, map: (text: string) => string): Assem
           },
         }
       : {}),
+    ...(prompt.systemSections
+      ? { systemSections: prompt.systemSections.map((section) => ({ ...section, text: map(section.text) })) }
+      : {}),
     ...(prompt.report
       ? { report: { ...prompt.report, blocks: prompt.report.blocks.map((block) => ({ ...block, text: map(block.text) })) } }
       : {}),

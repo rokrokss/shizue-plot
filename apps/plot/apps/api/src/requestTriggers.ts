@@ -497,7 +497,7 @@ export async function withEditedRequest(
     };
   });
   if (refused > 0) console.warn(`[api] the request's scripts left ${refused} image(s) on an assistant turn; not sent:`, label);
-  const { sources: _stale, risu: _view, ...rest } = prompt;
+  const { sources: _stale, risu: _view, systemSections: _sections, ...rest } = prompt;
   return {
     ...rest,
     system: system ?? '',

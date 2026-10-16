@@ -110,11 +110,16 @@ export function responseBody(req: ChatRequest): Record<string, unknown> {
 }
 
 /**
- * What Codex sends beside `prompt_cache_key`: its conversation id as both session
- * headers. On a reader's ChatGPT sign-in (2026-10-16) the provider served nothing
- * from its prompt cache without them, the key or not — the same 24k-token request
- * twice, 3 s or 20 s apart, came back with no cached token — and with them the
- * second came back 24,576 of 24,805 tokens cached. What it served was an earlier
+ * What goes beside `prompt_cache_key`: the same id as the `session_id` header,
+ * which Codex sends its conversation id as. On a reader's ChatGPT sign-in
+ * (2026-10-16) the provider served nothing from its prompt cache without it, the
+ * key or not — the same 24k-token request twice, 3 s or 20 s apart, came back with
+ * no cached token — and with it (and `conversation_id`, then sent too) the second
+ * came back 24,576 of 24,805 tokens cached. `conversation_id` is no longer sent:
+ * Codex dropped it in 2026-01 as an exact copy of `session_id`, and `session_id`
+ * alone served a chat's next turn 200 s later 23,936 of 24,750 tokens, as both
+ * had. Codex's newer hyphenated `session-id`/`thread-id` are untested here. What
+ * it served was an earlier
  * request but its last message, to a request that began with all of that: one that
  * went on from the request before it (24,192 of 24,693), or a later turn of a chat
  * whose turns put their own instructions in the last message
@@ -124,7 +129,7 @@ export function responseBody(req: ChatRequest): Record<string, unknown> {
  * `prompt_cache_retention` (400).
  */
 export function cacheHeaders(req: Pick<ChatRequest, 'cacheKey'>): Record<string, string> {
-  return req.cacheKey ? { session_id: req.cacheKey, conversation_id: req.cacheKey } : {};
+  return req.cacheKey ? { session_id: req.cacheKey } : {};
 }
 
 /**

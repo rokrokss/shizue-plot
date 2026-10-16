@@ -49,7 +49,7 @@ export interface ChatRequest {
   reasoningEffort?: string;
   /**
    * The provider's prompt cache this request is served from and written to
-   * (`prompt_cache_key` and Codex's session headers, `cacheHeaders`): without one
+   * (`prompt_cache_key` and the `session_id` header, `cacheHeaders`): without one
    * nothing is served from the cache. A chat's replies use the chat's id; absent
    * sends none.
    */

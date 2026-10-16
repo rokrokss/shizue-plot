@@ -40,7 +40,6 @@ import {
   lexicalRanking,
   MEMORY_HEADING,
   memoryBlock,
-  memoryClock,
   memoryTokenBudget,
   nextSummaryBatch,
   rankBySimilarity,
@@ -91,8 +90,18 @@ import { buildPath, roundCount, roundsAlong, visibleToAi } from './tree.js';
 const SUMMARY_MAX_TOKENS = 1600;
 /** Deadline for one background summary call, so a hung provider frees its slot. */
 const MEMORY_TIMEOUT_MS = 60_000;
-/** Summaries one finished turn's refresh writes at most; the next turn takes up the rest. */
-export const REFRESH_BATCHES_PER_RUN = 3;
+/**
+ * Summaries one finished turn's refresh writes at most. One landing at the
+ * defaults (64k, `extraSummarizationRatio` 0.1) summarizes 6,400 tokens and the
+ * round that crossed: 8–10 batches of six at the 140 tokens a message of the
+ * memory-format chats, 5–6 at 250. Twelve holds chats down to about 100 tokens
+ * a message; one stopped short only lands again sooner, the next time the tail
+ * outgrows what fits. What it bounds is one run: a summary call and a facts call
+ * per batch on the owner's plan, and how long its summaries stay unseen
+ * (`landing`) — a gap an edit opened is summarized whatever the budget, at most
+ * this much a turn.
+ */
+export const REFRESH_BATCHES_PER_RUN = 12;
 /** Summaries one `memory_backfill` run writes before a successor job takes over. */
 export const BACKFILL_BATCHES_PER_RUN = 3;
 /** How long a backfill stands back from a refresh a finished turn is already running. */
@@ -178,6 +187,26 @@ export interface MemoryInput {
 }
 
 /**
+ * The turn the memory dates its summaries and facts from: the rounds of
+ * `answering` when the newest summary that applies landed — those of its
+ * messages made before that summary was — so every label moves on together and
+ * only when a summary lands, which changes the summary block and moves the
+ * history's start anyway: a turn the provider's prompt cache cannot serve
+ * (§7.3). In between the labels read young by the turns since, up to one
+ * landing's gap. A regenerate and the inspector, on the turn's branch with its
+ * summaries, read the turn's clock. With no summary nothing is dated by it, and
+ * it is the branch's own rounds.
+ */
+export function memoryClock(
+  answering: readonly Pick<Message, 'role' | 'groupTurnId' | 'createdAt'>[],
+  applicable: readonly Pick<ChatSummary, 'createdAt'>[],
+): number {
+  if (applicable.length === 0) return roundCount(answering);
+  const landed = Math.max(...applicable.map((summary) => summary.createdAt.getTime()));
+  return roundCount(answering.filter((message) => message.createdAt.getTime() <= landed));
+}
+
+/**
  * Memory inputs for one generation: the block of the summaries HypaV3's
  * important and recent shares picked, injected after the persona; the block of
  * those its similar and random shares picked and the facts' (`[기억]`,
@@ -206,11 +235,17 @@ export async function buildMemoryInput(
   answering: readonly Message[],
   speakerId?: string,
 ): Promise<MemoryInput> {
-  const { applicable, frontier } = applicableSummaries(await loadSummaries(deps.db, chat.id), path);
+  // What a refresh still running has written stays unseen until it ends (`landing`).
+  const unseen = landing.get(chat.id);
+  const stored = await loadSummaries(deps.db, chat.id);
+  const { applicable, frontier } = applicableSummaries(
+    unseen ? stored.filter((summary) => !unseen.has(summary.id)) : stored,
+    path,
+  );
   const history = path.slice(frontier + 1);
   // The turns of the branch the reply answers, not `path`'s: a regenerate's
   // `path` still holds the reply it replaces, which closed a round of its own.
-  const now = memoryClock(roundCount(answering));
+  const now = memoryClock(answering, applicable);
   if (applicable.length === 0) return { memoryText: '', recalledMemoryText: '', factsText: '', history, clock: now };
 
   const settings = memorySettingsOf(chat);
@@ -220,7 +255,7 @@ export async function buildMemoryInput(
 
   // Each summary, and each fact by its summary, dated by how many turns ago its
   // last message stands (`turnsAgoLabel`, bucketed) from the memory's clock
-  // (`memoryClock`, which moves every ten turns), in the language the
+  // (`memoryClock`, which moves when a summary lands), in the language the
   // conversation runs in — the label counts against the share like the words.
   const rounds = roundsAlong(path);
   const position = new Map(path.map((message, at) => [message.id, at]));
@@ -395,6 +430,21 @@ function standBack(chatId: string): void {
 }
 
 /**
+ * The summaries a refresh still running has written, by chat: the requests do
+ * not see them (`buildMemoryInput`) until the run ends, so a run's batches land
+ * together — one move of the history's start and the summary block, one turn
+ * the provider's prompt cache cannot serve — rather than one on each turn the
+ * reader sends while it runs. Until then the requests read the memory as it was,
+ * which the run began early enough to leave room beside (`planBatch`). Per
+ * process, like `refreshingMemory`: a request another instance serves sees each
+ * summary as it is written. A backfill's are seen as they are written, and so is
+ * a summary closing a gap an edit opened (`SummaryBatch.gap`), whose stretch is
+ * in neither the memory nor the history until then — the edit broke the cache
+ * anyway.
+ */
+const landing = new Map<string, Set<string>>();
+
+/**
  * Fire-and-forget memory refresh. Must only be called after the response is
  * done, or after a write that dropped summaries has committed: it reloads
  * everything itself and never propagates a failure.
@@ -405,13 +455,19 @@ export function scheduleMemoryUpdate(deps: AppDeps, chatId: string): void {
   // is nothing to queue, the next completed turn reschedules.
   if (deps.refreshingMemory.has(chatId)) return;
   deps.refreshingMemory.add(chatId);
+  landing.set(chatId, new Set());
 
   const task = (async () => {
-    let continuing = false;
-    for (let pass = 0; pass < REFRESH_BATCHES_PER_RUN; pass += 1) {
-      const result = await updateMemory(deps, chatId, continuing);
-      continuing = result.continuing;
-      if (!result.more) break;
+    try {
+      let continuing = false;
+      for (let pass = 0; pass < REFRESH_BATCHES_PER_RUN; pass += 1) {
+        const result = await updateMemory(deps, chatId, continuing);
+        continuing = result.continuing;
+        if (!result.more) break;
+      }
+    } finally {
+      // The run's summaries land, whatever stopped it.
+      landing.delete(chatId);
     }
     await embedPendingSummaries(deps, chatId);
     await embedPendingFacts(deps, chatId);
@@ -521,6 +577,8 @@ async function updateMemory(deps: AppDeps, chatId: string, continuing: boolean):
   // describes history that no longer holds. The backlog is still there for the
   // next pass to read afresh.
   if (!written) return { more: true, continuing };
+  // A gap's summary is seen at once: until it is, its stretch is in neither the memory nor the history.
+  if (!batch.gap) landing.get(chatId)?.add(written.id);
 
   // The facts of what it covers, from the same messages, by a call of their own
   // (`facts.ts`). Only where they can be searched: a plot whose model cannot run
@@ -591,7 +649,17 @@ function planBatch(
       tokens: countTokens(message.content),
       covered: covered.has(message.id),
     }));
-  const batch = nextSummaryBatch(plan, settings, budget, continuing);
+  // The newest round — the reader's turn and what answered it — counts as sent
+  // once more: the reader's next turn is about its size, and it has to fit
+  // beside the history before the summary that makes room lands, which is only
+  // after its reply. Without it the turn that crosses what fits would have the
+  // budget drop the oldest turn, moving the history's start a turn before the
+  // landing moves it again.
+  const newest = plan.findLastIndex((message) => message.role === 'user');
+  const round = plan
+    .slice(newest >= 0 ? newest : Math.max(0, plan.length - 1))
+    .reduce((sum, message) => sum + message.tokens, 0);
+  const batch = nextSummaryBatch(plan, settings, { ...budget, fixedTokens: budget.fixedTokens + round }, continuing);
   return batch ? { batch, plan } : null;
 }
 

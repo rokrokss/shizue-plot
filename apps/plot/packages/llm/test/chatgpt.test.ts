@@ -264,7 +264,7 @@ describe('ChatGPT Responses adapter', () => {
     expect(responseBody({ ...request, reasoningEffort: 'high' }).reasoning).toEqual({ effort: 'high' });
     expect(responseBody(request)).not.toHaveProperty('reasoning');
   });
-  it('names the prompt cache, in the body and the session headers, only when the caller gives a key', async () => {
+  it('names the prompt cache, in the body and the session header, only when the caller gives a key', async () => {
     expect(responseBody({ ...request, cacheKey: 'chat-1' }).prompt_cache_key).toBe('chat-1');
     expect(responseBody(request)).not.toHaveProperty('prompt_cache_key');
     const sent: Headers[] = [];
@@ -278,7 +278,7 @@ describe('ChatGPT Responses adapter', () => {
       const stream = adapter.stream(req);
       while (!(await stream.next()).done);
     }
-    expect([sent[0]!.get('session_id'), sent[0]!.get('conversation_id')]).toEqual(['chat-1', 'chat-1']);
+    expect([sent[0]!.get('session_id'), sent[0]!.has('conversation_id')]).toEqual(['chat-1', false]);
     expect([sent[1]!.has('session_id'), sent[1]!.has('conversation_id')]).toEqual([false, false]);
   });
   it('handles split UTF-8 / CRLF, local stop strings and terminal usage', async () => {

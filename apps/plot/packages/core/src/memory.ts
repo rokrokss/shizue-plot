@@ -37,10 +37,19 @@ export interface HypaV3Settings {
   summarizationPrompt: string;
 }
 
-/** RisuAI's `createHypaV3Preset` defaults. */
+/**
+ * RisuAI's `createHypaV3Preset` defaults, but for `extraSummarizationRatio`:
+ * RisuAI's own setting, at 0.1 rather than its 0 (2026-10-16). At 0 a full chat
+ * summarizes just enough to fit, so a summary lands every few turns, and each
+ * landing moves the history's start and the summary block — a turn the
+ * provider's prompt cache cannot serve. At 0.1 a run goes on to a tenth of the
+ * context under what fits, so summaries land in larger batches: 6,400 tokens of
+ * turns between landings at 64k, fifteen to twenty turns of 300–400 tokens
+ * (ARCHITECTURE §7.3 언제 요약하나).
+ */
 export const HYPA_V3_DEFAULTS: Readonly<HypaV3Settings> = {
   memoryTokensRatio: 0.2,
-  extraSummarizationRatio: 0,
+  extraSummarizationRatio: 0.1,
   maxChatsPerSummary: 6,
   recentMemoryRatio: 0.4,
   similarMemoryRatio: 0.4,
@@ -134,19 +143,6 @@ export function recalledMemoryBlock(texts: readonly string[]): string {
 }
 
 /* ------------------------------------------------------------ time labels */
-
-/** How often the memory's clock moves on, in turns (`memoryClock`). */
-export const MEMORY_CLOCK_STEP = 10;
-
-/**
- * The turn the memory dates its summaries and facts from: the branch's turns
- * (rounds) rounded down to a multiple of `MEMORY_CLOCK_STEP`. Every label is
- * reckoned from it, so the labels move on together once every ten turns rather
- * than one or another of them crossing into its next bucket on nearly every turn
- * — the block is in the system string, which a provider caches as a prefix.
- * The labels read up to nine turns young for it, well within their "about".
- */
-export const memoryClock = (turns: number): number => Math.floor(turns / MEMORY_CLOCK_STEP) * MEMORY_CLOCK_STEP;
 
 /**
  * How many turns ago a summary or a fact stands, as the memory block says it:

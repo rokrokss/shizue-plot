@@ -367,7 +367,7 @@ export function ChatPanel({
       else next.recentMemoryRatio = Math.round((1 - similar) * 100) / 100;
     }
     const memory = next.memoryTokensRatio ?? HYPA_V3_DEFAULTS.memoryTokensRatio;
-    if ((next.extraSummarizationRatio ?? 0) > 1 - memory) next.extraSummarizationRatio = 0;
+    if ((next.extraSummarizationRatio ?? HYPA_V3_DEFAULTS.extraSummarizationRatio) > 1 - memory) next.extraSummarizationRatio = 0;
     return onSaveMemorySettings(next);
   }
 

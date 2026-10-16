@@ -8107,7 +8107,8 @@ describe('memory', () => {
     options: Partial<AppDeps> & {
       /** The summarizer's answer, or what makes it from the call's index. */
       summaryText?: string | ((call: number) => string);
-      summaryGate?: Promise<void>;
+      /** What the summarizer waits on, or what makes it from the call's index (nothing: it answers at once). */
+      summaryGate?: Promise<void> | ((call: number) => Promise<void> | undefined);
       /** The answer to a fact extraction, or what makes it from the request. */
       factsText?: string | ((request: Captured) => string);
       factsGate?: Promise<void>;
@@ -8155,7 +8156,8 @@ describe('memory', () => {
             // Recorded before the gate, so a blocked refresh is still observable.
             summaries.push({ system: req.system, messages: req.messages });
             const call = summaries.length - 1;
-            if (summaryGate) await summaryGate;
+            const wait = typeof summaryGate === 'function' ? summaryGate(call) : summaryGate;
+            if (wait) await wait;
             yield { type: 'text', text: typeof summaryText === 'function' ? summaryText(call) : summaryText };
             return { usage: { promptTokens: 0, completionTokens: 0 } };
           },
@@ -8564,6 +8566,58 @@ describe('memory', () => {
     // Guard cleared: the next turn refreshes again.
     await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '다시' }, harness.app));
     expect(harness.tasks.length).toBeGreaterThan(scheduled);
+  });
+
+  it('lands a refresh’s summaries together: a turn sent while it still writes sees none of them', async () => {
+    const cookie = await signUp('memory-landing@example.com');
+    const { chatId } = await setupChat(cookie);
+    const blocked = gate();
+    // The run writes its first summary; its second waits.
+    const harness = memoryApp({ summaryText: (call) => `${call + 1}번째 요약.`, summaryGate: (call) => (call >= 1 ? blocked.wait : undefined) });
+    // Two messages a summary, and a run that goes on to half the context: one landing is several summaries.
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', {
+      memorySettings: { contextBudget: 8000, maxChatsPerSummary: 2, extraSummarizationRatio: 0.5 },
+    });
+    await fillUntilSummary(cookie, chatId, harness, 2);
+    expect(await summariesOf(cookie, chatId, harness.app)).toHaveLength(1);
+
+    // A turn meanwhile reads the memory as it was before the run: none.
+    const during = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '그 사이에.' }, harness.app);
+    expect((await readSse(during)).at(-1)!.event).toBe('done');
+    expect(harness.prompts.at(-1)!.system).not.toContain(MEMORY_HEADING);
+
+    // The run ends, and the next turn has all it wrote.
+    blocked.open();
+    await harness.settle();
+    const written = await summariesOf(cookie, chatId, harness.app);
+    expect(written.length).toBeGreaterThanOrEqual(2);
+    const after = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '그 다음.' }, harness.app);
+    expect((await readSse(after)).at(-1)!.event).toBe('done');
+    const system = undated(harness.prompts.at(-1)!.system);
+    for (const summary of written) expect(system).toContain(summary.text);
+    await harness.settle();
+  });
+
+  it('moves the history’s start only when summaries land: the budget drops no turn in between', async () => {
+    const cookie = await signUp('memory-start@example.com');
+    const { chatId } = await setupChat(cookie);
+    // Summaries that fill the memory's share, so it leaves the history nothing to spare.
+    const harness = memoryApp({ summaryText: (call) => `${call + 1}번째 요약. ${'지난 장면을 길게 적은 요약입니다. '.repeat(30)}` });
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000 } });
+    // Turns of every length, so one of them crosses what fits by more than the memory leaves spare.
+    const turnOf = (turn: number): string => `${turn}번째 이야기. ${'서가 사이에서 나눈 긴 대화입니다. '.repeat(10 + ((turn * 37) % 60))}`;
+    for (let turn = 1; turn <= 24; turn += 1) {
+      const { path } = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
+      const covered = new Set((await summariesOf(cookie, chatId, harness.app)).flatMap((summary: any) => summary.messageIds));
+      const start = path.find((message: any) => !covered.has(message.id));
+      const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: turnOf(turn) }, harness.app);
+      expect((await readSse(res)).at(-1)!.event).toBe('done');
+      await harness.settle();
+      // The first turn sent is the first one no summary covers.
+      const first = harness.prompts.at(-1)!.messages.find((message) => message.role !== 'system')!;
+      expect([turn, contentText(first.content)]).toEqual([turn, start.content]);
+    }
+    expect(harness.summaries.length).toBeGreaterThanOrEqual(3);
   });
 
   it('selects the pinned summaries first, within the memory budget', async () => {
@@ -9246,14 +9300,19 @@ describe('memory', () => {
       const summary = await seedSummary(chatId, ids.slice(0, 3), '첫 인사를 나눴다.');
       await insertFact(chatId, summary.id, FACTS[1]!, embedder);
 
-      // 26 rounds then: 24 ago, said as about 20.
+      // The summary landed on the 26th round: 24 ago, said as about 20.
       const system = await askRaw(cookie, chatId, harness, '등대 열쇠?');
       expect(system).toContain(`${MEMORY_HEADING}\n(약 20턴 전) 첫 인사를 나눴다.`);
       expect(system).toContain(`${FACTS_HEADING}\n- (약 20턴 전) ${FACTS[1]}`);
 
-      // Six turns in English later — 30 ago — it is said in English.
+      // Six turns in English later it is said in English — still about 20 ago: with no
+      // summary landing in between, the clock has not moved.
       let english = '';
       for (let turn = 0; turn < 6; turn += 1) english = await askRaw(cookie, chatId, harness, `Where is the lighthouse key, round ${turn}?`);
+      expect(english).toContain(`${MEMORY_HEADING}\n(~20 turns ago) 첫 인사를 나눴다.`);
+      // A summary landing on the 32nd round moves it: 30 ago.
+      await seedSummary(chatId, ids.slice(3, 5), '두 번째 장면.');
+      english = await askRaw(cookie, chatId, harness, 'And the lighthouse key now?');
       expect(english).toContain(`${MEMORY_HEADING}\n(~30 turns ago) 첫 인사를 나눴다.`);
       await harness.settle();
     });
@@ -9272,21 +9331,21 @@ describe('memory', () => {
       const summary = await seedSummary(chatId, ids.slice(0, 3), '첫 인사를 나눴다.');
       await insertFact(chatId, summary.id, FACTS[1]!, embedder);
 
-      // 26 rounds then, the clock at 20: the reader's turn stands 19 ago, said as about 20,
-      // the same label the fact of its summary carries.
+      // The summary landed on the 26th round, the clock: the reader's turn stands 25 ago,
+      // said as about 30, and the fact of its summary, which closes the second, 24 ago.
       await ask(cookie, chatId, harness, '그 등대 기억나?');
       const korean = recallOf(harness.prompts.at(-1)!);
       expect(korean).toContain(`${FACTS_HEADING}\n- (약 20턴 전) ${FACTS[1]}`);
-      expect(korean).toMatch(new RegExp(`\\n\\nPast events:\\n\\(약 20턴 전\\) [^\\n]+: ${KEEPER}$`));
+      expect(korean).toMatch(new RegExp(`\\n\\nPast events:\\n\\(약 30턴 전\\) [^\\n]+: ${KEEPER}$`));
 
-      // Four turns in English later, the clock at 30: it is said in English.
+      // Four turns in English later, the clock where it was: it is said in English.
       for (let turn = 0; turn < 4; turn += 1) await ask(cookie, chatId, harness, `Do you remember the 등대 keeper, round ${turn}?`);
       const english = recallOf(harness.prompts.at(-1)!);
       expect(english).toMatch(new RegExp(`\\n\\nPast events:\\n\\(~30 turns ago\\) [^\\n]+: ${KEEPER}$`));
       await harness.settle();
     });
 
-    it('dates a regenerate’s facts and retrieved messages from one clock, the turn’s own, when its reply closes the tenth round', async () => {
+    it('dates a regenerate’s summaries, facts and retrieved messages from the turn’s own clock', async () => {
       const cookie = await signUp('retrieval-dated-regenerate@example.com');
       const { chatId } = await setupChat(cookie);
       const embedder = keywordEmbedder();
@@ -9299,17 +9358,18 @@ describe('memory', () => {
       const summary = await seedSummary(chatId, ids.slice(0, 3), '첫 인사를 나눴다.');
       await insertFact(chatId, summary.id, FACTS[1]!, embedder);
 
-      // Asked on 29 rounds, the clock at 20; the reply closes the 30th.
+      // Asked on 29 rounds, where the summary landed: the clock; the reply closes the 30th.
       await ask(cookie, chatId, harness, '그 등대 기억나?');
       const asked = harness.prompts.at(-1)!;
-      // Its regenerate is asked on the same 29 rounds, not counting the reply it replaces:
-      // the summary, its fact and the message brought back all stand about 20 ago, as they did.
+      // Its regenerate reads the same clock, the reply it replaces made after the landing:
+      // the summary, its fact and the message brought back all stand about 30 ago, as they did.
       expect((await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app))).at(-1)!.event).toBe('done');
       const again = harness.prompts.at(-1)!;
       expect(again).not.toBe(asked);
-      expect(again.system).toContain(`${MEMORY_HEADING}\n(약 20턴 전) 첫 인사를 나눴다.`);
-      expect(recallOf(again)).toContain(`${FACTS_HEADING}\n- (약 20턴 전) ${FACTS[1]}`);
-      expect(recallOf(again)).toMatch(new RegExp(`\\n\\nPast events:\\n\\(약 20턴 전\\) [^\\n]+: ${KEEPER}$`));
+      expect(again.system).toBe(asked.system);
+      expect(again.system).toContain(`${MEMORY_HEADING}\n(약 30턴 전) 첫 인사를 나눴다.`);
+      expect(recallOf(again)).toContain(`${FACTS_HEADING}\n- (약 30턴 전) ${FACTS[1]}`);
+      expect(recallOf(again)).toMatch(new RegExp(`\\n\\nPast events:\\n\\(약 30턴 전\\) [^\\n]+: ${KEEPER}$`));
       expect(recallOf(again)).toBe(recallOf(asked));
       await harness.settle();
     });
@@ -9348,7 +9408,8 @@ describe('memory', () => {
         embedder: keywordEmbedder(),
         factsText: JSON.stringify({ facts: [{ fact: secret, public: false }, { fact: notice, public: true }] }),
       });
-      await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000 } });
+      // Room for a first batch of six — both speakers' — past the latest turns it leaves out.
+      await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 16000 } });
       // 세이야 and 카이 take the rounds; 미오 never speaks — the reader talks about her, which is no presence.
       for (let turn = 1; turn <= 40 && harness.summaries.length < 1; turn += 1) {
         await generated(cookie, chatId, harness, 'messages', { content: `미오 몰래. ${longTurn(turn)}`, speakerId: turn % 2 ? seiya : kai });

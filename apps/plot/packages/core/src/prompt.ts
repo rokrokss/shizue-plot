@@ -478,13 +478,23 @@ export interface AssembledPrompt {
    */
   risu?: RisuPromptParts;
   /**
-   * What the budget charged before any history, the memory section aside: the
-   * rest of the system string, the post-history block, the directions, the
-   * notes, the injections and the trailing blocks — everything never dropped.
-   * The memory's summarizer (API §7.3) counts the history it lets stand against
-   * what is left beside it. Always there from the assembler.
+   * What the budget charged before any history, the summaries aside: the rest
+   * of the system string, the post-history block, the directions, the notes,
+   * the injections, the recall turn but its summaries (the facts, the messages
+   * brought back, the relationship) and the trailing blocks — everything never
+   * dropped. The memory's summarizer (API §7.3) counts the history it lets
+   * stand against what is left beside it and the summaries' share. Always there
+   * from the assembler.
    */
   fixedTokens?: number;
+  /**
+   * The sections `system` is joined from, in order, each as sent and with what
+   * it is — the main prompt, the lore before and after the cast, the memory
+   * block and the rest. The API's prompt-cache log tells by them which part of
+   * the system string changed (`cacheHealth.ts`). Always there from the
+   * assembler; gone once the request was edited, like `sources`.
+   */
+  systemSections?: { kind: PromptBlockKind; text: string }[];
   /**
    * For a group turn (`AssemblePromptInput.speaker`): where the reply has strayed
    * into another member's line — `\n이름:` and `\n별명:` of every member on the
@@ -1542,17 +1552,18 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     (speakerSlot ? countTokens(promptText(speakerSlot.message.content)) : 0) -
     (emotionSlot ? countTokens(promptText(emotionSlot.message.content)) : 0) -
     depthLore.reduce((sum, entry) => sum + countTokens(entry.content), 0);
-  // The memory's own text — the summaries, in the system string and the recall
-  // turn, and the facts — is not fixed: the summarizer reckons with it apart
-  // (§7.3), as it always has.
+  // The summaries, in the system string and the recall turn, are not fixed: the
+  // summarizer reckons with them apart, as their share of the context (§7.3).
+  // The facts are — they come on top of that share, and a summarizer that left
+  // them out would let the history outgrow what is left beside them, so the
+  // budget would drop its oldest turn before the next summary lands.
   const fixedTokens = Math.max(
     0,
     contextBudget -
       maxResponseTokens -
       available -
       (memorySection ? countTokens(memorySection.text) : 0) -
-      countTokens(recalledMemoryPart) -
-      countTokens(factsPart),
+      countTokens(recalledMemoryPart),
   );
 
   // 7. history, newest first. The newest message is always kept so the request
@@ -1795,6 +1806,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     system,
     messages: slots.map((slot) => slot.message),
     fixedTokens,
+    systemSections: systemSections.map(({ kind, text }) => ({ kind, text })),
     sources: slots.map(({ kind, id, greeting, speakers }) => ({
       kind,
       ...(id !== undefined ? { id } : {}),

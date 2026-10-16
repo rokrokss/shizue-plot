@@ -13,7 +13,6 @@ import {
   similarityQueries,
   summarizationTurns,
   summaryChunks,
-  memoryClock,
   turnsAgoBucket,
   turnsAgoLabel,
   withTimeLabel,
@@ -31,10 +30,10 @@ const sequence = (values: number[]): (() => number) => {
 };
 
 describe('HypaV3 settings', () => {
-  it('keeps RisuAI’s defaults', () => {
+  it('keeps RisuAI’s defaults but summarizes a tenth of the context past what fits', () => {
     expect(HYPA_V3_DEFAULTS).toEqual({
       memoryTokensRatio: 0.2,
-      extraSummarizationRatio: 0,
+      extraSummarizationRatio: 0.1,
       maxChatsPerSummary: 6,
       recentMemoryRatio: 0.4,
       similarMemoryRatio: 0.4,
@@ -66,19 +65,6 @@ describe('time labels', () => {
       (bucket, turns, all) => turns > 0 && bucket !== all[turns - 1],
     );
     expect(changes.length).toBeLessThan(1000 / 10);
-  });
-
-  it('reckons from a clock that moves every ten turns, so the labels move together, once in ten turns', () => {
-    expect([0, 9, 10, 19, 20, 234].map(memoryClock)).toEqual([0, 0, 10, 10, 20, 230]);
-    // Fifty summaries three turns apart, then a hundred turns of chat.
-    const ends = Array.from({ length: 50 }, (_, index) => 3 * (index + 1));
-    const block = (now: number, clock: (turns: number) => number): string =>
-      ends.map((end) => turnsAgoLabel(clock(now) - end, 'ko')).join('|');
-    const changes = (clock: (turns: number) => number): number =>
-      Array.from({ length: 100 }, (_, step) => 151 + step).filter((now) => block(now, clock) !== block(now - 1, clock)).length;
-    expect(changes(memoryClock)).toBeLessThanOrEqual(10);
-    // Reckoned from the turn itself, one label or another crosses into its next bucket on most turns.
-    expect(changes((turns) => turns)).toBeGreaterThan(50);
   });
 
   it('says it in the conversation’s language, Korean when that is unknown, and leads the text with it', () => {
