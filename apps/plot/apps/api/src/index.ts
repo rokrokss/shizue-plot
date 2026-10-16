@@ -8,7 +8,7 @@ import { createLocalEmbedder } from './embedder.js';
 import { createHostedAuth, createSessionStore } from './hostedAuth.js';
 import { loadRootEnv, readConfig } from './env.js';
 import { startJobWorker } from './jobs.js';
-import { stopGenerations } from './generation.js';
+import { STOP_CHANNEL, stopGenerations, stopLocalGeneration } from './generation.js';
 import { createBackgroundTasks, onUnhandledRejection } from './lifecycle.js';
 import { installJsonConsole } from './log.js';
 import { luaSandboxEnabled, startMetricsServer } from './metrics.js';
@@ -24,7 +24,7 @@ const config = readConfig();
 // Before anything else is said: the embedder and the Lua probe speak at startup.
 if (config.logFormat === 'json') installJsonConsole();
 
-const { db } = createDb(config.databaseUrl);
+const { db, sql } = createDb(config.databaseUrl);
 const testing = config.env['NODE_ENV'] === 'test';
 const accounts = createChatGPTAccounts(db, {
   secret: config.authSecret,
@@ -64,7 +64,18 @@ const deps: AppDeps = {
   suggesting: new Set<string>(),
   drafting: new Set<string>(),
   onBackgroundTask: background.track,
+  // The reader's stop for a reply another instance is streaming (`stopChatGeneration`).
+  stopSignal: {
+    publish: async (chatId) => {
+      await sql.notify(STOP_CHANNEL, chatId);
+    },
+  },
 };
+// Every instance hears every stop and stops its own stream of that chat, if it has one.
+// postgres.js keeps this on a connection of its own and listens again after a reconnect.
+sql.listen(STOP_CHANNEL, (chatId) => stopLocalGeneration(deps, chatId)).catch((error: unknown) => {
+  console.error('[api] not listening for stops relayed from other instances', error);
+});
 // Lazy: the model loads on the first search, not here (`embedder.ts`).
 const embedder = createLocalEmbedder(config.env);
 if (embedder) deps.embedder = embedder;

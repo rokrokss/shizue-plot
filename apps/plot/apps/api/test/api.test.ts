@@ -132,7 +132,9 @@ import {
   acquireChatSlot,
   releaseChatSlot,
   renewChatSlot,
+  STOP_CHANNEL,
   stopGenerations,
+  stopLocalGeneration,
   TAVERN_BIAS_NUDGE,
 } from '../src/generation.js';
 import {
@@ -4310,6 +4312,45 @@ describe('chats', () => {
     expect(state.path.at(-1)).toMatchObject({ role: 'assistant', content: '부분 응답' });
     // Nothing running is nothing to stop.
     expect((await json(cookie, `/api/chats/${chatId}/stop`, 'POST', undefined, target)).status).toBe(204);
+  });
+
+  it("stops a reply another instance is streaming: the stop goes out on Postgres, and answers once that instance stored it and freed the chat", async () => {
+    const cookie = await signUp('stop-relayed@example.com');
+    const streaming = makeDeps({
+      getAdapter: () => ({
+        providerModel: 'slow',
+        adapter: {
+          stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
+            yield { type: 'text', text: '다른 인스턴스의 답' };
+            await new Promise<void>((_resolve, reject) => {
+              const fail = (): void => reject(new Error('aborted'));
+              if (req.abortSignal?.aborted) fail();
+              else req.abortSignal?.addEventListener('abort', fail);
+            });
+            return { usage: { promptTokens: 0, completionTokens: 0 } };
+          },
+        },
+      }),
+    });
+    // The instance the stop reaches has no stream of its own, only the channel.
+    const other = createApp(makeDeps({ stopSignal: { publish: async (id) => void (await sql.notify(STOP_CHANNEL, id)) } }));
+    const listening = await sql.listen(STOP_CHANNEL, (id) => stopLocalGeneration(streaming, id));
+    try {
+      const { chatId } = await setupChat(cookie);
+      const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, createApp(streaming));
+      await res.body!.getReader().read();
+      expect(await claimOf(chatId)).not.toBeNull();
+
+      expect((await json(cookie, `/api/chats/${chatId}/stop`, 'POST', undefined, other)).status).toBe(204);
+      expect(await claimOf(chatId)).toBeNull();
+      expect(streaming.generationStreams.size).toBe(0);
+      const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+      expect(state.path.at(-1)).toMatchObject({ role: 'assistant', content: '다른 인스턴스의 답' });
+      // Nothing held is nothing to relay.
+      expect((await json(cookie, `/api/chats/${chatId}/stop`, 'POST', undefined, other)).status).toBe(204);
+    } finally {
+      await listening.unlisten();
+    }
   });
 
   it("stops a reply mid-stream on shutdown as the reader's stop does: kept, and the chat freed before it returns", async () => {
