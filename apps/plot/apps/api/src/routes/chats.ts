@@ -429,6 +429,16 @@ async function windowVariableDefaults(
  * against every message in the chat, so a windowed read carries whole swipe
  * groups even where the sibling's parent fell outside the window.
  */
+/**
+ * The state a write that holds the chat's slot only for itself answers with —
+ * the settings, a deletion, a script commit. Its row still carries that claim,
+ * which ends with the request, so `generating` reads false: otherwise the page
+ * takes its own write for a reply the server is finishing (§7.2), shows that
+ * notice and holds the composer until a later read says the chat is free.
+ */
+const releasedState = (deps: AppDeps, chat: Chat): Promise<unknown> =>
+  chatState(deps, { ...chat, generatingAt: null });
+
 async function chatState(deps: AppDeps, chat: Chat, window?: PathWindow): Promise<unknown> {
   const all = await loadMessages(deps, chat.id);
   const full = buildPath(all, chat.headMessageId);
@@ -2248,7 +2258,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         reasoningEffort === undefined &&
         absentCharacterIds === undefined
       ) {
-        return c.json(await chatState(deps, chat));
+        return c.json(await releasedState(deps, chat));
       }
 
       const [updated] = await deps.db
@@ -2280,7 +2290,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         .returning();
       // Turned on: the branch so far is embedded now, not only after the next reply.
       if (retrievalEnabled(retrieval)) scheduleMessageEmbedding(deps, id);
-      return c.json(await chatState(deps, updated!));
+      return c.json(await releasedState(deps, updated!));
     } finally {
       await releaseChatSlot(deps, id);
     }
@@ -2469,7 +2479,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       for (const path of paths) if (!shared.has(path)) await deleteQuietly(deps.storage, path);
       // What the dropped summaries covered and is still on a branch is summarized again.
       if (dropped > 0) scheduleMemoryUpdate(deps, chat.id);
-      return c.json(await chatState(deps, updated));
+      return c.json(await releasedState(deps, updated));
     } finally {
       await releaseChatSlot(deps, chat.id);
     }
@@ -2915,7 +2925,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     // The turn is finished, so the work it held back can start.
     if (clearPending) scheduleBackgroundUpdates(deps, chat.id, messageId);
     else if (dropped > 0) scheduleMemoryUpdate(deps, chat.id);
-    const state = (await chatState(deps, committed.chat)) as Record<string, unknown>;
+    const state = (await releasedState(deps, committed.chat)) as Record<string, unknown>;
     return c.json({ ...state, ...(unlockedAssetIds.length > 0 ? { unlockedAssetIds } : {}) });
   });
 
