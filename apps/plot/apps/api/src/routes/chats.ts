@@ -54,7 +54,6 @@ import {
   type PlotStyle,
   type FoldItem,
   type FoldOptions,
-  type PromptBranch,
   type PromptCharacter,
   type PromptPlot,
   type ReaderAdditions,
@@ -189,7 +188,8 @@ import { isSillyTavernCard, toPromptCharacters, toPromptPlot } from '../plots.js
 import { editRequestTurns } from '../requestTriggers.js';
 import { createScriptFetch } from '../scriptFetch.js';
 import { readScriptLlmMessages, readScriptLlmModel, runScriptLlm } from '../scriptLlm.js';
-import { suggestReplies } from '../suggest.js';
+import { asSent, foldOptionsOf, promptBranch, toHistory } from '../sentHistory.js';
+import { RECENT_TURNS as SUGGEST_RECENT_TURNS, suggestReplies } from '../suggest.js';
 import { readerMembers } from '../transcript.js';
 import { buildPath, deepestLeaf, roundStart, siblingInfo, visibleToAi } from '../tree.js';
 import { assetLocks, openAssetNames, openModuleAssets } from '../unlocks.js';
@@ -413,17 +413,6 @@ async function windowVariableDefaults(
   const fold = foldOptionsOf(plot?.name ?? chat.title, await loadPersona(deps, chat));
   return computeVariables(earlier, await chatDefaultVariables(deps, chat, plot), fold);
 }
-
-/**
- * The names every fold of this chat answers `{{user}}` and `{{char}}` with
- * (`FoldOptions`): the persona's name, and the plot's — a message is the work's
- * text, where `{{char}}` is the work. The reader's screen has to fold with the
- * same two, or a value nesting either reads one way there and another here.
- */
-const foldOptionsOf = (plotName: string, persona: Persona | null): FoldOptions => ({
-  user: persona?.name ?? DEFAULT_USER_NAME,
-  char: plotName,
-});
 
 /**
  * `{ chat, path, siblings }` — the view of the currently selected branch. A
@@ -957,56 +946,6 @@ async function keepScriptChat(
 ): Promise<AppliedScriptChat> {
   if (!plan.changed) return { path: plan.path, all, turn: null, written: [] };
   return deps.db.transaction((tx) => applyScriptChat(tx, chat.id, plan, all));
-}
-
-/**
- * The branch as the assembler takes it: a group reply names its member
- * (`speakerId`), and an untagged character message a script wrote is said by
- * `speaker`.
- */
-const toHistory = (path: Message[], speaker: string | undefined): HistoryMessage[] =>
-  path.map((message) => ({
-    role: message.role,
-    content: message.content,
-    id: message.id,
-    createdAt: message.createdAt.getTime(),
-    ...(message.speakerMemberId !== null ? { speakerId: message.speakerMemberId } : {}),
-    ...(speaker !== undefined && message.role === 'assistant' && message.source === 'script' ? { speaker } : {}),
-    // Left in, so the chat functions read the stored chat; the assembler sends none of it.
-    ...(message.hiddenFromPrompt ? { hidden: true } : {}),
-  }));
-
-/**
- * Where a history sits on `branch`, the messages the turn is generated on: its
- * length, and the intro it opened on — a root the chat's openings were written
- * as, numbered by its place among them, the first being -1 as RisuAI numbers
- * them. Approximate where a reroll of the opening added a root of its own.
- *
- * On the first one, the greeting reads as `firstMessage` where the scripts
- * rewrote it (`setCharacterFirstMessage`): RisuAI sends its greeting from the
- * character while the chat is on the first (`fmIndex` -1), and only then.
- */
-function promptBranch(all: Message[], branch: Message[], firstMessage?: string): PromptBranch {
-  const root = branch[0];
-  const swipes = swipesOf(all, branch.at(-1));
-  if (!root || root.parentId !== null || root.role !== 'assistant') {
-    return { length: branch.length, ...(swipes ? { swipes } : {}) };
-  }
-  const openings = all.filter((message) => message.parentId === null && message.role === 'assistant');
-  const index = openings.indexOf(root) - 1;
-  const text = index === -1 && firstMessage !== undefined ? firstMessage : root.content;
-  return { length: branch.length, greeting: { text, index }, ...(swipes ? { swipes } : {}) };
-}
-
-/**
- * A reply's versions as SillyTavern's swipes (`PromptBranch.swipes`): the
- * replies beside it under the same parent, and which of them it is. The
- * reader's turns have none, as there.
- */
-function swipesOf(all: Message[], last: Message | undefined): PromptBranch['swipes'] {
-  if (!last || last.role !== 'assistant') return undefined;
-  const siblings = all.filter((message) => message.parentId === last.parentId && message.role === 'assistant');
-  return { count: siblings.length, current: Math.max(0, siblings.indexOf(last)) };
 }
 
 /** Header the web client names the reader's IANA time zone in. */
@@ -3856,11 +3795,27 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       // The same load a generation does, so a plot the creator has withdrawn
       // stops suggestions exactly where it stops turns.
       const context = await loadGenerationContext(deps, chat);
+      const path = buildPath(context.all, chat.headMessageId);
+      // The latest turns as the prompt sends them (`sentHistory.ts`), read with this context.
+      const recent = await asSent(
+        {
+          plot: context.plot,
+          characters: context.characters,
+          userName: context.userName,
+          personaText: context.personaText,
+          variables: pathVariables(context.defaults, path, context.fold),
+          globalVariables: context.globalVariables,
+          branch: promptBranch(context.all, path, context.firstMessage),
+          seed: chat.id,
+        },
+        path,
+        visibleToAi(path).slice(-SUGGEST_RECENT_TURNS),
+      );
       return c.json({
         suggestions: await suggestReplies(deps, {
           userId: chat.userId,
           subModel: chat.subModel,
-          recent: visibleToAi(buildPath(context.all, chat.headMessageId)),
+          recent,
           members: context.members,
           plotName: context.plot.name,
           userName: context.userName,

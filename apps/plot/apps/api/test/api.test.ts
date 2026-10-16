@@ -7941,7 +7941,8 @@ describe('memory', () => {
    */
   function memoryApp(
     options: Partial<AppDeps> & {
-      summaryText?: string;
+      /** The summarizer's answer, or what makes it from the call's index. */
+      summaryText?: string | ((call: number) => string);
       summaryGate?: Promise<void>;
       /** The answer to a fact extraction, or what makes it from the request. */
       factsText?: string | ((request: Captured) => string);
@@ -7989,8 +7990,9 @@ describe('memory', () => {
             }
             // Recorded before the gate, so a blocked refresh is still observable.
             summaries.push({ system: req.system, messages: req.messages });
+            const call = summaries.length - 1;
             if (summaryGate) await summaryGate;
-            yield { type: 'text', text: summaryText };
+            yield { type: 'text', text: typeof summaryText === 'function' ? summaryText(call) : summaryText };
             return { usage: { promptTokens: 0, completionTokens: 0 } };
           },
         },
@@ -8032,10 +8034,16 @@ describe('memory', () => {
    * turn's background work settled before the next. The echo model replies
    * with the user's own text, so a turn costs twice its content.
    */
-  async function fillUntilSummary(cookie: string, chatId: string, harness: Harness, target = 1): Promise<string[]> {
+  async function fillUntilSummary(
+    cookie: string,
+    chatId: string,
+    harness: Harness,
+    target = 1,
+    turnText: (turn: number) => string = longTurn,
+  ): Promise<string[]> {
     const sent: string[] = [];
     for (let turn = 1; turn <= 40 && harness.summaries.length < target; turn += 1) {
-      const content = longTurn(turn);
+      const content = turnText(turn);
       const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }, harness.app);
       expect((await readSse(res)).at(-1)!.event).toBe('done');
       sent.push(content);
@@ -8163,6 +8171,79 @@ describe('memory', () => {
 
     expect(transcriptOf(harness.summaries[0]!)).toContain('첫 장면입니다');
     expect(transcriptOf(harness.summaries[0]!)).not.toContain('{{img');
+  });
+
+  it('summarizes the turns as the prompt sends them: a card’s prompt-only status window stays out, its macros read', async () => {
+    const cookie = await signUp('memory-sent@example.com');
+    const plot = await createPlot(cookie, { name: '상태창 작품', description: '설명', intros: ['도서관 문 앞이다.'] });
+    // Parma Knights' script (a RisuAI Realm card): the panel goes to the prompt only near the chat's end.
+    const panel = {
+      comment: '패널 리퀘 제거',
+      type: 'editprocess',
+      in: '<panel>[\\s\\S]*?</panel>',
+      out: '{{#if {{greater_equal::{{chat_index}}::{{? {{lastmessageid}}-2}}}}}}$&{{/if}}',
+      ableFlag: false,
+      flag: '',
+    };
+    await addCharacter(cookie, plot.id, { name: '아리아', card: { description: '설명', extensions: { risuai: { customScripts: [panel] } } } });
+    const chatId = (await startChat(cookie, plot.id)).chat.id;
+    const harness = memoryApp();
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000 } });
+
+    const statusTurn = (turn: number): string =>
+      `{{user}}의 ${longTurn(turn)}\n<panel>${'HP 100 | MP 40 | 위치: 서가 | 소지품: 열쇠, 등불 '.repeat(20)}</panel>`;
+    await fillUntilSummary(cookie, chatId, harness, 1, statusTurn);
+    await harness.settle();
+
+    const transcript = transcriptOf(harness.summaries[0]!);
+    expect(transcript).toContain('1번째 이야기');
+    expect(transcript).not.toContain('<panel>');
+    expect(transcript).not.toContain('HP 100');
+    expect(transcript).not.toContain('{{user}}');
+    // The stored turns keep their panels; the newest still go to the model with theirs.
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
+    expect(state.path.at(-1).content).toContain('<panel>');
+    const next = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: statusTurn(99) }, harness.app);
+    expect((await readSse(next)).at(-1)!.event).toBe('done');
+    await harness.settle();
+    expect(contentText(harness.prompts.at(-1)!.messages.at(-2)!.content)).toContain('<panel>');
+  });
+
+  it('stores nothing the summarizer refused, leaves the stretch for later and stands back before asking again', async () => {
+    const cookie = await signUp('memory-refused@example.com');
+    const { chatId } = await setupChat(cookie);
+    const harness = memoryApp({
+      summaryText: (call) => (call === 0 ? "I'm sorry, but I can't help with that." : SUMMARY),
+    });
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000 } });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const realNow = Date.now.bind(Date);
+    let clock: { mockRestore: () => void } | undefined;
+    try {
+      await fillUntilSummary(cookie, chatId, harness);
+      await harness.settle();
+      expect(await summariesOf(cookie, chatId)).toEqual([]);
+      expect(warn.mock.calls.some((call) => String(call[0]).includes('the summarizer refused'))).toBe(true);
+
+      // The next turn is due the same stretch: within the backoff nobody asks.
+      const more = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: longTurn(50) }, harness.app);
+      expect((await readSse(more)).at(-1)!.event).toBe('done');
+      await harness.settle();
+      expect(harness.summaries).toHaveLength(1);
+
+      // Past it, the same stretch is asked again and kept.
+      clock = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 11 * 60_000);
+      const later = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: longTurn(51) }, harness.app);
+      expect((await readSse(later)).at(-1)!.event).toBe('done');
+      await harness.settle();
+      expect(harness.summaries.length).toBeGreaterThanOrEqual(2);
+      expect(transcriptOf(harness.summaries[1]!)).toBe(transcriptOf(harness.summaries[0]!));
+      const [summary] = await summariesOf(cookie, chatId);
+      expect(summary).toMatchObject({ text: SUMMARY });
+    } finally {
+      clock?.mockRestore();
+      warn.mockRestore();
+    }
   });
 
   it('leaves a message hidden from the AI out of the summary and its coverage', async () => {

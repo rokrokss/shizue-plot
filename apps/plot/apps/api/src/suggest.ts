@@ -19,7 +19,7 @@ import { collect, memoryChannel } from './memory.js';
 import { transcriptOf } from './transcript.js';
 
 /** How much of the branch tail the model reads. */
-const RECENT_TURNS = 10;
+export const RECENT_TURNS = 10;
 /** One suggestion is a line the reader could send as it stands, not a paragraph. */
 export const MAX_SUGGESTION_LENGTH = 200;
 const SUGGESTION_COUNT = 3;

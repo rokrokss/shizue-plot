@@ -1889,6 +1889,77 @@ export const tavernStoreData = (
   chat: () => cbsChat(history, branch),
 });
 
+/** What `sentHistoryTexts` reads. */
+export interface SentHistoryInput {
+  plot: Pick<PromptPlot, 'name' | 'char' | 'description'>;
+  characters: readonly PromptCharacter[];
+  /**
+   * The newest stretch of the branch `branch` describes, or all of it without
+   * one — each turn with its `promptContent` where the cards' prompt scripts
+   * rewrote it, as the caller ran them.
+   */
+  history: readonly HistoryMessage[];
+  branch?: PromptBranch;
+  userName: string;
+  personaText: string;
+  variables: Variables;
+  globalVariables?: Variables;
+  /** What `{{pick}}` draws from: the chat id, as the prompt's (`AssemblePromptInput.seed`). */
+  seed?: string;
+  /**
+   * Read only the first this many turns of `history`; the rest stand where they
+   * are for the chat functions and the positions. A caller after an early
+   * stretch of a long branch reads no more than it needs.
+   */
+  upTo?: number;
+}
+
+/**
+ * The words of each turn of `history` as the prompt sends them, for what reads
+ * the history outside the prompt — the sidecar models' transcript (API
+ * `sentHistory.ts`): what the cards' prompt scripts left of the turn, its
+ * inlays out and its macros read as the assembler reads a history turn's
+ * (`turnMacroOf` in `assemblePrompt`) — `{{char}}` the work, the reader's name,
+ * the chat's variables and the reader's globals, the draw, the stand-in's card
+ * and RisuAI's chat functions with the turn's own index — then RisuAI's display
+ * escapes undone, as `send` does. What only a request holds — the preset and
+ * the notes, the lore and its outlets, the model, the clock — is not there, so
+ * a macro reading it stays as written. Only the words: no speaker names,
+ * narration header or status tail, which the reader of the texts adds or
+ * leaves as its own format has it.
+ */
+export function sentHistoryTexts(input: SentHistoryInput): string[] {
+  const { plot, characters, history, branch, userName, personaText, variables, globalVariables, seed, upTo } = input;
+  const cast = characters.filter((member) => !member.absent);
+  const standIn = cast[0] ?? characters[0];
+  let chat: CbsChat | undefined;
+  const chatOf = (): CbsChat => (chat ??= cbsChat(history, branch));
+  const seedLength = branch ? cbsChat([], branch).length : undefined;
+  const historyStart = Math.max(branch?.length ?? history.length, history.length) - history.length;
+  return history.slice(0, upTo ?? history.length).map((turn, at) => {
+    const index = historyStart + at - (branch?.greeting ? 1 : 0);
+    const macro: MacroContext = {
+      char: plot.char ?? plot.name,
+      user: userName,
+      variables,
+      ...(globalVariables ? { globalVariables } : {}),
+      ...(seed !== undefined ? { seed } : {}),
+      ...(seed !== undefined && seedLength !== undefined ? { seedLength } : {}),
+      data: {
+        persona: personaText,
+        chat: () => ({ ...chatOf(), index }),
+        character: standIn ? cbsCharacter(standIn, plot) : { scenario: plot.description },
+        role: turn.role === 'user' ? 'user' : 'char',
+      },
+      tavern: {
+        ...(standIn ? { charPrompt: standIn.card.systemPrompt, charJailbreak: standIn.card.postHistoryInstructions } : {}),
+        group: cast.map((member) => member.name),
+      },
+    };
+    return unescapeCbs(applyMacros(stripInlayMacros(turn.promptContent ?? turn.content), macro), 'text');
+  });
+}
+
 /**
  * The branch as RisuAI's chat functions see it: the greeting apart, the
  * messages after it counted from 0, and the prompt belonging to none of them

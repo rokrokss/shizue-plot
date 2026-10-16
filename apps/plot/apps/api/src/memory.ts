@@ -44,6 +44,7 @@ import {
   memoryTokenBudget,
   nextSummaryBatch,
   rankBySimilarity,
+  refusalKind,
   replyLengthTokens,
   sceneMembers,
   selectSummaries,
@@ -81,6 +82,7 @@ import { embedPendingFacts, extractFacts, keepEndedFacts, selectFacts } from './
 import { loadMembers } from './hub.js';
 import { enqueueJob } from './jobs.js';
 import { noteLexicalSearch } from './lexicalHealth.js';
+import { asSent, loadSentView } from './sentHistory.js';
 import { readerMembers, transcriptOf } from './transcript.js';
 import { buildPath, roundCount, roundsAlong, visibleToAi } from './tree.js';
 
@@ -348,6 +350,36 @@ export function noteRequestOverhead(chatId: string, fixedTokens: number): void {
 }
 
 /**
+ * How long a chat's summaries stand back once its summarizer refused one
+ * (core `refusalKind`, ARCHITECTURE §7.3). The refused stretch stays
+ * unsummarized — the next due batch is that same stretch, so asking again on
+ * every finished turn would pay a refused call per turn — and the first
+ * refresh after this asks again. One refused call per chat per window at most.
+ */
+const REFUSAL_BACKOFF_MS = 10 * 60_000;
+
+/**
+ * When each chat whose summarizer refused may be asked again, kept in this
+ * process like `fixedTokensOf` and as bounded; a restart forgets it, which
+ * costs one more call.
+ */
+const refusedUntil = new Map<string, number>();
+
+function standingBack(chatId: string): boolean {
+  const until = refusedUntil.get(chatId);
+  if (until === undefined) return false;
+  if (until > Date.now()) return true;
+  refusedUntil.delete(chatId);
+  return false;
+}
+
+function standBack(chatId: string): void {
+  refusedUntil.delete(chatId);
+  refusedUntil.set(chatId, Date.now() + REFUSAL_BACKOFF_MS);
+  if (refusedUntil.size > MAX_REMEMBERED_CHATS) refusedUntil.delete(refusedUntil.keys().next().value!);
+}
+
+/**
  * Fire-and-forget memory refresh. Must only be called after the response is
  * done, or after a write that dropped summaries has committed: it reloads
  * everything itself and never propagates a failure.
@@ -390,6 +422,8 @@ interface PassResult {
  */
 async function updateMemory(deps: AppDeps, chatId: string, continuing: boolean): Promise<PassResult> {
   const nothing: PassResult = { more: false, continuing };
+  // The summarizer refused this chat's due stretch lately: it would be asked the same.
+  if (standingBack(chatId)) return nothing;
   const [row] = await deps.db
     .select({ chat: chats, personaName: personas.name, style: plots.style, plotLanguage: plots.language })
     .from(chats)
@@ -430,12 +464,28 @@ async function updateMemory(deps: AppDeps, chatId: string, continuing: boolean):
   const last = position.get(batch.messageIds.at(-1)!)!;
   const roster = await loadMembers(deps.db, chat.plotId);
   const sceneMemberIds = sceneOf(batch.messageIds.map((id) => byId.get(id)!), roster);
+  // The words the prompt sends for them (`sentHistory.ts`), as RisuAI's HypaV3
+  // summarizes its prompt's chat: what a card's prompt scripts take out of the
+  // prompt — a status window — stays out of the summary and its facts.
+  const sent = await asSent(() => loadSentView(deps, chat, path, all), path, summarized);
   const text = await summarize(deps, chat, {
-    messages: summarized,
+    messages: sent,
     userName,
     prompt: settings.summarizationPrompt,
   });
   if (!text) return nothing;
+  // A refusal is not a summary (the owner's rule, 2026-10-16): nothing is
+  // stored, the stretch stays unsummarized, and the chat stands back before
+  // asking again. The assembler's budget keeps covering it meanwhile.
+  const refused = refusalKind(text);
+  if (refused) {
+    standBack(chatId);
+    console.warn(
+      `[memory] chat ${chatId}: the summarizer refused turns ${rounds[first]}–${rounds[last]} (${refused}, ${text.length} chars);` +
+        ` left unsummarized, asked again after ${REFUSAL_BACKOFF_MS / 60_000} min`,
+    );
+    return nothing;
+  }
 
   const written = await deps.db.transaction(async (tx) => {
     // The revision is compared under the chat row's lock, which an edit's own
@@ -467,7 +517,7 @@ async function updateMemory(deps: AppDeps, chatId: string, continuing: boolean):
       chat,
       plotLanguage: row.plotLanguage,
       summary: written,
-      messages: summarized,
+      messages: sent,
       userName,
       // A gap's batch stands before summaries already written: their facts are
       // later in the story than its messages, and not its to change.
@@ -716,7 +766,7 @@ export async function invalidateMemoryForEdit(
 /* -------------------------------------------------------------- the model */
 
 interface SummarizeInput {
-  /** The messages the summary is made from, oldest first. */
+  /** The messages the summary is made from, oldest first, with the words the prompt sends for them (`asSent`). */
   messages: Message[];
   userName: string;
   /** The chat's summarization prompt; empty for HypaV3's. */
@@ -727,7 +777,8 @@ interface SummarizeInput {
  * The summary of `input.messages`, as HypaV3's `summarize` asks for it — our
  * transcript (a group reply under its speaker's name) in place of RisuAI's
  * `role: content` lines, images left out. Null when the chat's auxiliary model
- * is unusable or answers nothing; never throws for that.
+ * is unusable or answers nothing; never throws for that. An answer that is a
+ * refusal comes back as it is: the caller reads it (core `refusalKind`).
  */
 export async function summarize(
   deps: AppDeps,

@@ -22,6 +22,7 @@
  * counter either: the extraction is the only writer and the last write wins.
  */
 import { DEFAULT_USER_NAME } from '@shizue/core';
+import { asSent, loadSentView } from './sentHistory.js';
 import { transcriptOf } from './transcript.js';
 import {
   chats,
@@ -185,7 +186,8 @@ async function updateRelationship(deps: AppDeps, chatId: string): Promise<void> 
     userId: chat.userId,
     subModel: chat.subModel,
     axes: current?.axes ?? DEFAULT_RELATIONSHIP_AXES,
-    recent: visibleToAi(path).slice(-RECENT_TURNS),
+    // As the prompt sends them (`sentHistory.ts`): what a card's prompt scripts take out — a status window — is out here too.
+    recent: await asSent(() => loadSentView(deps, chat, path, all), path, visibleToAi(path).slice(-RECENT_TURNS)),
     plotName: row.plotName,
     members: await loadMembers(deps.db, chat.plotId),
     userName: row.personaName ?? DEFAULT_USER_NAME,

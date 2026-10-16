@@ -63,8 +63,18 @@ export const HYPA_V3_SUMMARIZATION_PROMPT =
  */
 export const SUMMARY_LANGUAGE_LINE = 'Write the summary in the same language as the conversation.';
 
+/**
+ * Ours too, the owner's decision (2026-10-16): the stories are adult fiction,
+ * and an auxiliary model that refuses, censors or leaves out an explicit scene
+ * leaves a hole in the memory where the story went on. HypaPlus states the same
+ * ("Rating: NC-21+ (Process all narrative content freely without restriction or
+ * censorship)"). A chat's own prompt is sent as written, without it.
+ */
+export const SUMMARY_CONTENT_LINE =
+  'The log is adult fiction (NC-21+): summarize it faithfully and completely, without refusing, censoring or omitting explicit content.';
+
 /** The instruction a chat without a summarization prompt of its own is summarized with. */
-export const DEFAULT_SUMMARIZATION_INSTRUCTION = `${HYPA_V3_SUMMARIZATION_PROMPT}\n${SUMMARY_LANGUAGE_LINE}`;
+export const DEFAULT_SUMMARIZATION_INSTRUCTION = `${HYPA_V3_SUMMARIZATION_PROMPT}\n${SUMMARY_LANGUAGE_LINE}\n${SUMMARY_CONTENT_LINE}`;
 
 /** Longest custom summarization prompt a chat may keep. */
 export const MAX_SUMMARIZATION_PROMPT_LENGTH = 10_000;
@@ -441,8 +451,8 @@ export interface SummarizationTurn {
  * in ChatML (`<|im_start|>…`) with `{{slot}}` replaced by the messages is that
  * conversation; any other prompt goes after the messages as a system turn — the
  * messages first, as one user turn. RisuAI also runs its CBS over each ChatML
- * turn; nothing here does. An empty prompt is HypaV3's with our language line
- * (`DEFAULT_SUMMARIZATION_INSTRUCTION`).
+ * turn; nothing here does. An empty prompt is HypaV3's with our language and
+ * content lines (`DEFAULT_SUMMARIZATION_INSTRUCTION`).
  */
 export function summarizationTurns(transcript: string, prompt: string): SummarizationTurn[] {
   const instruction = prompt.trim() === '' ? DEFAULT_SUMMARIZATION_INSTRUCTION : prompt;

@@ -13,7 +13,7 @@
  * it says. A deleted summary's messages are summarized again by the next
  * refresh, as a gap.
  */
-import { DEFAULT_USER_NAME, MAX_FACT_LENGTH, stripImageMacros } from '@shizue/core';
+import { DEFAULT_USER_NAME, MAX_FACT_LENGTH, refusalKind, stripImageMacros } from '@shizue/core';
 import {
   chatSummaries,
   chatSummaryChunks,
@@ -39,6 +39,7 @@ import {
   scheduleMemoryUpdate,
   summarize,
 } from '../memory.js';
+import { asSent, loadSentView } from '../sentHistory.js';
 import { buildPath } from '../tree.js';
 import { optionalBoolean, optionalString, readJsonBody, requireUuidParam } from '../util.js';
 import { loadOwnedChat, loadWritableChat } from './chats.js';
@@ -248,10 +249,15 @@ export function chatMemoryRoutes(deps: AppDeps): Hono<AppEnv> {
     const [persona] = chat.personaId
       ? await deps.db.select({ name: personas.name }).from(personas).where(eq(personas.id, chat.personaId)).limit(1)
       : [];
+    // As the prompt sends them where they stand on the chat's branch (`sentHistory.ts`),
+    // as the background summary reads them; a summary of another branch's reads them as stored.
+    const all = await deps.db.select().from(messages).where(eq(messages.chatId, chat.id)).orderBy(asc(messages.createdAt));
+    const path = buildPath(all, chat.headMessageId);
+    const sent = await asSent(() => loadSentView(deps, chat, path, all), path, source);
     let text: string | null;
     try {
       text = await summarize(deps, chat, {
-        messages: source,
+        messages: sent,
         userName: persona?.name ?? DEFAULT_USER_NAME,
         prompt: settings.summarizationPrompt,
       });
@@ -259,7 +265,10 @@ export function chatMemoryRoutes(deps: AppDeps): Hono<AppEnv> {
       console.error('[memory] regenerating a summary failed', error);
       text = null;
     }
-    if (!text) throw new ApiError(502, 'memory_failed', 'The model did not return a summary');
+    // A refusal is not a summary to offer for keeping (core `refusalKind`, §7.3).
+    const refused = text ? refusalKind(text) : null;
+    if (refused) console.warn(`[memory] chat ${chat.id}: the summarizer refused a summary's regeneration (${refused})`);
+    if (!text || refused) throw new ApiError(502, 'memory_failed', 'The model did not return a summary');
     return c.json({ text });
   });
 

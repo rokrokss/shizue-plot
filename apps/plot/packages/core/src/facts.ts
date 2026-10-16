@@ -67,9 +67,12 @@ const knownText = (fact: KnownFact): string => (typeof fact === 'string' ? fact 
  * closest to them, numbered, which the answer may update or end by number.
  * Only a change the messages show plainly counts: a fact not mentioned, or
  * mentioned vaguely, stays as it is. `{{language}}` is the language rule
- * (`factLanguageLine`). `scene` is a group work's (`sceneRules`).
+ * (`factLanguageLine`). `scene` is a group work's (`sceneRules`). The line
+ * after the first says the log is adult fiction, as the summarizer's default
+ * does (`SUMMARY_CONTENT_LINE`): an explicit scene is recorded, not refused.
  */
 const extractionPrompt = (scene: string, schema: string): string => `당신은 롤플레이 대화의 기록 담당자입니다. 아래 대화 구간에서, 이야기가 이어지는 동안 계속 참인 사실을 뽑습니다. 이미 기록된 사실 가운데 이 구간 때문에 더 이상 참이 아니게 된 것이 있으면 함께 고칩니다.
+이 대화는 성인용 픽션(NC-21+)입니다. 노골적인 내용이 있어도 거절하거나 검열하지 않으며, 아래 규칙에 맞는 사실이면 그 내용 때문에 빼지 않습니다.
 
 규칙:
 - 이름과 호칭, 약속과 목표, 취향과 습관, 인물 사이의 관계, 중요한 물건과 그 행방처럼 오래 유지되는 사실만 고릅니다. 장면에 한정된 일시적 상태(지금의 자세·표정·날씨 같은 것)는 넣지 않습니다.

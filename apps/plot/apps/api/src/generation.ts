@@ -44,8 +44,6 @@ import {
 } from '@shizue/core';
 import {
   AI_OUTPUT,
-  promptScriptJob,
-  promptScriptsOf,
   SLASH_COMMAND,
   WORLD_INFO,
   worldInfoScriptsOf,
@@ -77,6 +75,7 @@ import { ApiError, badRequest, notFound } from './errors.js';
 import type { AppDeps, AppEnv, OpenGeneration, Tx } from './deps.js';
 import { invalidateMemoryForEdit, noteRequestOverhead, scheduleMemoryUpdate } from './memory.js';
 import { runPromptScriptJob } from './regexWorker.js';
+import { withPromptScripts } from './sentHistory.js';
 import { scheduleRelationshipUpdate } from './relationship.js';
 import { regexStoredText } from './storedRegex.js';
 import { replyMemberOf, scheduleEmotionDetection } from './emotion.js';
@@ -526,52 +525,6 @@ async function withoutUnseeableImages(history: HistoryMessage[], model: string, 
         : {}),
     };
   });
-}
-
-/**
- * The history with what the cards' prompt scripts make of it: RisuAI's
- * `editprocess` and SillyTavern's prompt-only regex, read off every member's
- * card in roster order — a member sent off the stage too, since the history
- * they rewrite is still the work's. Each turn they change carries the result as
- * its `promptContent`; the stored turns, and what the lore scans, stay as they
- * are. The macros a script's pattern is matched with are expanded here, for the
- * card it is on; everything else of a script runs in the pool's threads, which
- * bound it (`regexWorker.ts`).
- */
-async function withPromptScripts(
-  history: HistoryMessage[],
-  plan: GenerationPlan,
-  branch: PromptBranch,
-): Promise<HistoryMessage[]> {
-  if (history.length === 0) return history;
-  // The chat's modules once, on the first member's list — RisuAI's `processScript`
-  // runs the character's `customscript` and the modules' regex as one list, which
-  // `<order N>` sorts together — read as the first member's, the work's stand-in.
-  const moduleRegex = (plan.plot.modules ?? []).flatMap((module) => (Array.isArray(module.regex) ? module.regex : []));
-  const cards = plan.characters.map((member) => member.card.extensions ?? {});
-  if (moduleRegex.length > 0) {
-    const first = cards[0] ?? {};
-    const risu = first['risuai'] !== null && typeof first['risuai'] === 'object' ? (first['risuai'] as Record<string, unknown>) : {};
-    const own = Array.isArray(risu['customScripts']) ? risu['customScripts'] : [];
-    cards[0] = { ...first, risuai: { ...risu, customScripts: [...own, ...moduleRegex] } };
-  }
-  const charOf = (index: number): string => {
-    const member = plan.characters[index] ?? plan.characters[0];
-    return member ? characterName(member) : plan.plot.name;
-  };
-  const scripts = promptScriptsOf(cards.map((extensions) => ({ extensions })), (text, index) =>
-    applyMacros(text, {
-      char: charOf(index),
-      user: plan.userName,
-      variables: plan.variables,
-      globalVariables: plan.globalVariables,
-    }),
-  );
-  if (scripts.length === 0) return history;
-  const texts = await runPromptScriptJob(promptScriptJob(history, scripts, branch));
-  return history.map((turn, index) =>
-    texts[index] === undefined || texts[index] === turn.content ? turn : { ...turn, promptContent: texts[index] },
-  );
 }
 
 /**

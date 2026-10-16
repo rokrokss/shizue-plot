@@ -46,6 +46,7 @@ import {
   MAX_KNOWN_FACTS,
   parseFactExtraction,
   rankBySimilarity,
+  refusalKind,
   sameFact,
   summaryChunks,
   type FactScene,
@@ -211,7 +212,15 @@ export async function extractFacts(deps: AppDeps, embedder: Embedder, input: Ext
       maxTokens: FACTS_MAX_TOKENS,
       abortSignal: AbortSignal.timeout(FACTS_TIMEOUT_MS),
     });
-    const parsed = parseFactExtraction(answer.replace(/<Thoughts>[\s\S]*?<\/Thoughts>/g, ''), shown);
+    const said = answer.replace(/<Thoughts>[\s\S]*?<\/Thoughts>/g, '');
+    // A refusal stores and changes nothing, and says so (core `refusalKind`, §7.3);
+    // the summary it was asked about is already kept.
+    const refused = refusalKind(said);
+    if (refused) {
+      console.warn(`[facts] chat ${input.chat.id}: the extraction refused (${refused}, ${said.trim().length} chars); nothing stored`);
+      return;
+    }
+    const parsed = parseFactExtraction(said, shown);
     const changed = new Set([...parsed.updated.map((update) => update.id), ...parsed.invalidated].map((id) => known[id - 1]!.id));
     // What a new fact must not repeat: what still holds once this answer's changes are made.
     const standing = holding.filter((fact) => !changed.has(fact.id));
