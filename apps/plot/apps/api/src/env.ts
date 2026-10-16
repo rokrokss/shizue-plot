@@ -95,7 +95,25 @@ interface ApiConfig {
    * companion extension rewrites that address to this app, one port per origin.
    */
   chatgptCallbackPort: number;
+  /** `text` keeps the console as it reads in a terminal; `json` makes every line one JSON object (`log.ts`). */
+  logFormat: LogFormat;
+  /** Prometheus text on a listener of its own (`metrics.ts`), never under `/api`; unset is off. */
+  metricsPort?: number;
+  metricsHost: string;
+  /** How long a shutdown waits for in-flight background tasks (`lifecycle.ts`). */
+  shutdownBackgroundMs: number;
   env: NodeJS.ProcessEnv;
+}
+
+type LogFormat = 'text' | 'json';
+
+/** A whole number from `min` to `max`, or the error naming `name`. */
+function readInteger(env: NodeJS.ProcessEnv, name: string, min: number, max: number): number | undefined {
+  const raw = env[name]?.trim();
+  if (!raw) return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < min || value > max) throw new Error(`${name} must be a whole number from ${min} to ${max}.`);
+  return value;
 }
 
 /** `true`/`1` and nothing else; an unset switch is off. */
@@ -152,6 +170,9 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     throw new Error('BETTER_AUTH_URL must be the web origin, e.g. https://plot.example.com');
   }
   const callbackPort = readCallbackPort(env, authUrl);
+  const logFormat = env['LOG_FORMAT']?.trim() || 'text';
+  if (logFormat !== 'text' && logFormat !== 'json') throw new Error(`LOG_FORMAT must be "text" or "json", got "${logFormat}"`);
+  const metricsPort = readInteger(env, 'METRICS_PORT', 1, 65535);
 
   return {
     port: Number(env['API_PORT'] ?? 8787),
@@ -163,6 +184,10 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     ...(env['API_ORIGIN'] ? { apiOrigin: new URL(env['API_ORIGIN']).origin } : {}),
     authExtraTrustedOrigins: [DEV_AUTH_URL],
     chatgptCallbackPort: callbackPort,
+    logFormat,
+    ...(metricsPort !== undefined ? { metricsPort } : {}),
+    metricsHost: env['METRICS_HOST']?.trim() || '127.0.0.1',
+    shutdownBackgroundMs: readInteger(env, 'SHUTDOWN_BACKGROUND_MS', 0, 600_000) ?? 20_000,
     env,
   };
 }

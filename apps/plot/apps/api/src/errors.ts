@@ -1,7 +1,9 @@
 import { ChatGPTError } from '@shizue/llm';
 import type { Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
+import { routePath } from 'hono/route';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
+import { requestContext } from './log.js';
 
 export interface ErrorBody {
   /** Developer-facing message (English). */
@@ -45,6 +47,7 @@ export function errorResponse(c: Context, error: unknown): Response {
     const code = error.status === 413 ? 'payload_too_large' : 'http_error';
     return c.json<ErrorBody>({ error: error.message, code }, error.status as ContentfulStatusCode);
   }
-  console.error('[api] unhandled error', error);
+  const requestId = requestContext.getStore()?.requestId ?? 'unknown';
+  console.error(`[api] unhandled error in ${c.req.method} ${routePath(c)} (request ${requestId})`, error);
   return c.json<ErrorBody>({ error: 'Internal server error', code: 'internal_error' }, 500);
 }

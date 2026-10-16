@@ -134,3 +134,21 @@ never reuses a server with a real account connection.
 `DATABASE_URL`. The character-chat schema starts from a single initial migration,
 including the pgvector extension. Existing databases must be reset before applying
 it; upgrades from the removed products are unsupported.
+
+## Operations
+
+In production set `LOG_FORMAT=json`: every API log line becomes one JSON object
+(`time`, `level`, `msg`, `component`, `requestId`, `err`), each request adds an
+access line with its route pattern, status and duration, and `x-request-id` ties
+them together. Error tracking is these logs; no external service is used. The
+default `text` keeps the terminal output developers read. Request bodies,
+cookies, auth headers, prompts and card text are never logged.
+
+`GET /api/health` answers while the process runs; `GET /api/ready` answers 503
+once a shutdown has begun or when the database does not answer within two
+seconds. Set `METRICS_PORT` to serve Prometheus metrics at `/metrics` on a
+separate listener (`METRICS_HOST`, loopback by default); nothing under `/api`
+exposes them. On SIGTERM the API stops taking connections, stores the replies in
+flight, waits up to `SHUTDOWN_BACKGROUND_MS` (20 s) for background work and then
+exits, so give the host a grace period above 25 seconds. Details are in
+ARCHITECTURE §12.

@@ -6,6 +6,8 @@ import { normalizeAuthResponse } from './auth.js';
 import { originGuard } from './originGuard.js';
 import type { AppDeps, AppEnv } from './deps.js';
 import { errorResponse, type ErrorBody } from './errors.js';
+import { healthRoutes } from './health.js';
+import { requestLog } from './log.js';
 import { chatMemoryRoutes } from './routes/chatMemory.js';
 import { chatTranslationRoutes } from './routes/chatTranslation.js';
 import { chatRoutes, messageRoutes } from './routes/chats.js';
@@ -29,8 +31,8 @@ const IMPORT_PATH = /^\/api\/(plots\/(import|[^/]+\/characters\/import|[^/]+\/mo
 const ATTACHMENT_PATH = /^\/api\/chats\/[^/]+\/(?:import\/)?attachments$/;
 
 /**
- * Route order matters: `/api/auth/*` and `/api/presets` are registered before
- * the session middleware, so they never resolve one.
+ * Route order matters: `/api/auth/*`, `/api/presets` and the probes are
+ * registered before the session middleware, so they never resolve one.
  *
  * Past that middleware the session is *resolved*, not *required*: the catalogue
  * and the pages it links to are readable without an account, so what a route
@@ -39,6 +41,8 @@ const ATTACHMENT_PATH = /^\/api\/chats\/[^/]+\/(?:import\/)?attachments$/;
 export function createApp(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
 
+  // First, so every line a request says carries its id, and refusals are logged and counted too (`log.ts`).
+  app.use('*', requestLog());
   if (deps.webOrigin) app.use('*', originGuard(deps.webOrigin));
 
   app.onError((error, c) => errorResponse(c, error));
@@ -65,6 +69,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   app.all('/api/auth/*', async (c) => normalizeAuthResponse(await deps.auth.handler(c.req.raw)));
   // A static catalog: nothing user-specific in it.
   app.route('/api/presets', presetRoutes());
+  // `/api/health` and `/api/ready`: a probe never resolves a session (`health.ts`).
+  app.route('/api', healthRoutes(deps));
   app.use('/api/*', async (c, next) => {
     const session = await deps.auth.api.getSession({ headers: c.req.raw.headers });
     c.set('viewerId', session?.user?.id ?? null);
