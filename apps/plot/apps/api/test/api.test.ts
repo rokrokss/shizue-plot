@@ -576,6 +576,8 @@ interface SseEvent {
 
 async function readSse(res: Response): Promise<SseEvent[]> {
   expect(res.headers.get('content-type')).toContain('text/event-stream');
+  // Without it the web's compressing `/api` rewrite holds the reply until it ends.
+  expect(res.headers.get('cache-control')).toContain('no-transform');
   const text = await res.text();
   return text
     .split('\n\n')

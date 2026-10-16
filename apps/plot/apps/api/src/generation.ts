@@ -67,7 +67,7 @@ import { chats, messages, type Chat, type Message } from '@shizue/db';
 import { ChatGPTError, getAdapter, getModel, supportsVision, type ChatGPTAccount, type LLMAdapter } from '@shizue/llm';
 import { and, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import type { Context } from 'hono';
-import { streamSSE } from 'hono/streaming';
+import { streamSSE, type SSEStreamingApi } from 'hono/streaming';
 import { randomUUID } from 'node:crypto';
 import { withImageNote } from './attachments.js';
 import { chatRequestSent } from './cacheHealth.js';
@@ -339,6 +339,19 @@ const CLAIM_STALE_MS = 2 * 60_000;
 
 /** How often an open stream says something, and renews its claim while at it. */
 export const HEARTBEAT_MS = 15_000;
+
+/**
+ * A reply's event stream, marked so nothing between here and the browser
+ * transforms it. The web's `/api` rewrite runs through Next's compression,
+ * which gzips an event stream the browser accepts gzip for and holds it until
+ * it ends — measured on 2026-10-17, a whole echo reply in one chunk after 3.4 s
+ * — unless the response says `no-transform`. streamSSE's own header is `no-cache`.
+ */
+function replyStream(c: Context<AppEnv>, write: (stream: SSEStreamingApi) => Promise<void>): Response {
+  const response = streamSSE(c, write);
+  response.headers.set('Cache-Control', 'no-cache, no-transform');
+  return response;
+}
 
 /**
  * Takes the chat's generation slot for the caller. A single guarded UPDATE decides
@@ -1155,7 +1168,7 @@ async function runGeneration(
     // nothing stored, the turn it would have answered still the head.
     if (error instanceof RequestTooLongError) {
       countGeneration('error', error.code);
-      return streamSSE(c, async (stream) => {
+      return replyStream(c, async (stream) => {
         try {
           await stream.writeSSE({
             event: 'error',
@@ -1176,7 +1189,7 @@ async function runGeneration(
     throw badRequest('model_unavailable', error instanceof Error ? error.message : 'Model unavailable');
   }
 
-  return streamSSE(c, async (stream) => {
+  return replyStream(c, async (stream) => {
     const controller = new AbortController();
     const abort = (): void => controller.abort();
     // The browser going away does not stop the reply: a phone that locks or

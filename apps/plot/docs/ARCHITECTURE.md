@@ -728,6 +728,8 @@ interface LLMAdapter { stream(req: ChatRequest): AsyncGenerator<StreamDelta, Str
 
 `generation.ts`가 messages / regenerate / continue / auto / narrate / reply 여섯 경로의 공통 몸통이다(`reply`는 그룹 턴 전용, 아래).
 
+답의 SSE는 `Cache-Control: no-cache, no-transform`이다(`replyStream`). 웹의 `/api` rewrite는 Next의 압축을 지나는데, 브라우저가 gzip을 받는다고 하면 이벤트 스트림도 압축하면서 답이 끝날 때까지 쥐고 있다가 한 번에 내보낸다 — 2026-10-17 측정에서 에코 답 하나가 3.4초 뒤 한 덩어리로 왔다. `no-transform`이 있으면 압축하지 않는다(PocketRisu도 같은 이유로 붙인다).
+
 1. `withGenerationSlot` — 유저당 동시 생성 1(in-memory Set). 이미 잡혀 있으면 **429 `generation_in_progress`**. 슬롯은 SSE 응답이 끝날 때까지 유지된다.
 2. 계획 수립: 경로 로드 → 플롯 + 로스터(`order_index` 순 — 챗의 `absent_character_ids`에 든 멤버는 absent로 표시, §6), persona, memory/relationship 블록, author's note(챗 노트 + 첨부 노트 병합), 마지막 유저 턴의 directions, 경로 파생 변수, 프리셋, 챗별 contextBudget. 내레이터는 `chats.narrator ?? plots.narrator`.
    - **독자의 시계**(`requestClock`): 시간대는 웹이 생성 POST 여섯 개와 `POST /api/chats`에 싣는 `x-shizue-tz` 헤더(IANA 이름)이고, `Intl.DateTimeFormat`이 거부하는 값이나 헤더 없음은 `UTC`다 — 시계 매크로가 턴을 실패시키는 일은 없다. locale은 플롯 `language`. idle은 브랜치의 마지막 유저 메시지와 그 앞 메시지의 `created_at` 차이라, 여섯 경로 모두 같은 값이고 재생성해도 그대로다. `{{pick}}`의 seed는 챗 id와 브랜치 길이다. 계획은 독자×플롯 전역 변수와 히스토리의 브랜치 위치(길이·도입부)도 싣는다.
