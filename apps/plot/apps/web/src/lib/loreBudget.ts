@@ -3,7 +3,7 @@
 import type { PlotMember } from './types';
 
 /** Mirrors DEFAULT_CONTEXT_BUDGET in @shizue/core — what a chat gets until its reader picks another. */
-export const DEFAULT_CONTEXT_BUDGET = 16000;
+export const DEFAULT_CONTEXT_BUDGET = 64000;
 /** Mirrors LORE_BUDGET_SHARE in @shizue/core: an automatic budget's share of the context. */
 export const LORE_BUDGET_SHARE = 0.25;
 

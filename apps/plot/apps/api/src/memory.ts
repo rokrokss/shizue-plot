@@ -44,6 +44,7 @@ import {
   memoryTokenBudget,
   nextSummaryBatch,
   rankBySimilarity,
+  recalledMemoryBlock,
   refusalKind,
   replyLengthTokens,
   sceneMembers,
@@ -164,8 +165,10 @@ export function loadSummaries(db: AppDeps['db'] | Tx, chatId: string): Promise<C
 
 /** What one generation's prompt is given of the memory (`buildMemoryInput`). */
 export interface MemoryInput {
-  /** The selected summaries' block, for the system string; '' for none. */
+  /** The block of the summaries the important and recent shares picked, for the system string; '' for none. */
   memoryText: string;
+  /** The block of those the similar and random shares picked, for the recall turn; '' for none. */
+  recalledMemoryText: string;
   /** The selected facts' block, for the recall turn; '' for none. */
   factsText: string;
   /** The branch after the last message an applying summary covers. */
@@ -175,18 +178,21 @@ export interface MemoryInput {
 }
 
 /**
- * Memory inputs for one generation: the summaries' block injected after the
- * persona, the facts' (`[기억]`, `facts.ts`) that open the recall turn before
- * the turn being answered — each summary and fact led by a coarse "N turns
- * ago" in the conversation's language — and the history the model still sees
- * verbatim: `path` after the last message an applying summary covers.
+ * Memory inputs for one generation: the block of the summaries HypaV3's
+ * important and recent shares picked, injected after the persona; the block of
+ * those its similar and random shares picked and the facts' (`[기억]`,
+ * `facts.ts`), which open the recall turn before the turn being answered — each
+ * summary and fact led by a coarse "N turns ago" in the conversation's language
+ * — and the history the model still sees verbatim: `path` after the last
+ * message an applying summary covers.
  *
  * `answering` is the branch the reply answers, as the model will read it: the
  * latest `queryChatCount` of its turns are the similarity search's queries
  * (HypaV3's `chats.slice(-queryChatCount)`), embedded once for the summaries and
- * the facts alike. The random picks are drawn from the chat and the branch's
- * length, as `{{pick}}` is — a regenerate and the prompt inspector see the same
- * selection the turn did.
+ * the facts alike. The random picks are drawn from the chat and the number of
+ * summaries that apply, so they change only when a summary lands rather than on
+ * every turn — and a regenerate and the prompt inspector see the same selection
+ * the turn did, unless one has landed since.
  *
  * `speakerId` is the member a group turn's reply is asked of: its facts are only
  * those it may know (`selectFacts`) — of a scene it was in, or known to all. The
@@ -205,7 +211,7 @@ export async function buildMemoryInput(
   // The turns of the branch the reply answers, not `path`'s: a regenerate's
   // `path` still holds the reply it replaces, which closed a round of its own.
   const now = memoryClock(roundCount(answering));
-  if (applicable.length === 0) return { memoryText: '', factsText: '', history, clock: now };
+  if (applicable.length === 0) return { memoryText: '', recalledMemoryText: '', factsText: '', history, clock: now };
 
   const settings = memorySettingsOf(chat);
   const available = memoryTokenBudget(settings.contextBudget, settings) - countTokens(`${MEMORY_HEADING}\n`);
@@ -242,7 +248,7 @@ export async function buildMemoryInput(
     available,
     settings,
     model ? (unused) => rankSimilar(deps, unused, queries, queryVectors) : null,
-    seededRandom(`${chat.id}\u0000${answering.length}`),
+    seededRandom(`${chat.id}\u0000summaries:${applicable.length}`),
   );
   let facts: string[] = [];
   if (model && queries.length > 0) {
@@ -261,7 +267,16 @@ export async function buildMemoryInput(
       console.warn('[memory] the facts were left out: the queries could not be embedded', error);
     }
   }
-  return { memoryText: memoryBlock(selection.selected.map(dated)), factsText: factsBlock(facts), history, clock: now };
+  // What changes only when a summary lands stays in the system string, the cached
+  // prefix; what follows the turn's query and draw goes to the recall turn.
+  const steady = new Set([...selection.important, ...selection.recent]);
+  return {
+    memoryText: memoryBlock(selection.selected.filter((summary) => steady.has(summary)).map(dated)),
+    recalledMemoryText: recalledMemoryBlock(selection.selected.filter((summary) => !steady.has(summary)).map(dated)),
+    factsText: factsBlock(facts),
+    history,
+    clock: now,
+  };
 }
 
 /** The plot's content language, which picks its embedding model; null for a plot that is gone. */

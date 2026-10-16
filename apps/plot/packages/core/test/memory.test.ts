@@ -5,6 +5,7 @@ import {
   SUMMARY_CONTENT_LINE,
   SUMMARY_LANGUAGE_LINE,
   memoryBlock,
+  recalledMemoryBlock,
   memoryTokenBudget,
   nextSummaryBatch,
   rankBySimilarity,
@@ -48,6 +49,8 @@ describe('HypaV3 settings', () => {
     expect(summaryChunks('  첫 문단.\n\n\n\n둘째 문단.\n셋째 줄.\n\n  ')).toEqual(['첫 문단.', '둘째 문단.\n셋째 줄.']);
     expect(memoryBlock([])).toBe('');
     expect(memoryBlock(['하나.', '둘.'])).toBe('[지난 이야기 요약]\n하나.\n\n둘.');
+    expect(recalledMemoryBlock([])).toBe('');
+    expect(recalledMemoryBlock(['셋.'])).toBe('[지난 이야기 요약: 이번 턴에 떠올린 것]\n셋.');
   });
 });
 

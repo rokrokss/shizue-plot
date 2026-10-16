@@ -72,8 +72,8 @@ export interface JobPayloadMap {
 }
 export type JobPayload = JobPayloadMap[JobKind];
 
-/** Context budgets a chat may pick from; the middle one is the default. */
-export const MEMORY_CONTEXT_BUDGETS = [8000, 16000, 32000] as const;
+/** Context budgets a chat may pick from; the largest is the default (`DEFAULT_CONTEXT_BUDGET` in @shizue/core). */
+export const MEMORY_CONTEXT_BUDGETS = [8000, 16000, 32000, 64000] as const;
 
 /**
  * Per-chat overrides for the memory layer: the context budget, and RisuAI

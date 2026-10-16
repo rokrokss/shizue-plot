@@ -34,6 +34,8 @@ export function responseBody(req: ChatRequest): Record<string, unknown> {
     // Only the effort is asked for: a reasoning summary is never requested,
     // because it can paraphrase the creator's hidden prompt back to the reader.
     ...(req.reasoningEffort ? { reasoning: { effort: req.reasoningEffort } } : {}),
+    // The prompt cache's key, as Codex sends its conversation id (`cacheHeaders`).
+    ...(req.cacheKey ? { prompt_cache_key: req.cacheKey } : {}),
     // No system text is no instructions, rather than an empty one.
     ...(req.system ? { instructions: req.system } : {}),
     input: req.messages.map((message) => ({
@@ -44,6 +46,21 @@ export function responseBody(req: ChatRequest): Record<string, unknown> {
           : { type: 'input_text', text: part.text }),
     })),
   };
+}
+
+/**
+ * What Codex sends beside `prompt_cache_key`: its conversation id as both session
+ * headers. On a reader's ChatGPT sign-in (2026-10-16) the provider served nothing
+ * from its prompt cache without them, the key or not — the same 24k-token request
+ * twice, 3 s or 20 s apart, came back with no cached token — and with them the
+ * second came back 24,576 of 24,805 tokens cached. A request that went on from the
+ * one before it was served too (24,192 of 24,693), but one that parted from it a few
+ * hundred tokens before its end was served nothing: the cache served whole earlier
+ * requests, not the part two requests share (ARCHITECTURE §7.3 프롬프트 캐시 측정).
+ * The endpoint refuses `prompt_cache_retention` (400).
+ */
+export function cacheHeaders(req: Pick<ChatRequest, 'cacheKey'>): Record<string, string> {
+  return req.cacheKey ? { session_id: req.cacheKey, conversation_id: req.cacheKey } : {};
 }
 
 /**
@@ -77,7 +94,7 @@ export function createChatGPTAdapter(access: () => Promise<string>, fetcher: typ
         arm();
         const response = await requireOK(await fetcher(`${CHATGPT_RESOURCE}/responses`, {
           method: 'POST', signal,
-          headers: { Authorization: authorization, 'Content-Type': 'application/json' },
+          headers: { Authorization: authorization, 'Content-Type': 'application/json', ...cacheHeaders(req) },
           body: JSON.stringify(responseBody(req)),
         }));
         clearTimeout(timer);

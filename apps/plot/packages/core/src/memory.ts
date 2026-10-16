@@ -109,9 +109,28 @@ export function summaryChunks(text: string): string[] {
     .map((chunk) => chunk.trim());
 }
 
-/** The memory block the prompt carries for the selected summaries, oldest first; '' for none. */
+/**
+ * The head of the summaries the recall turn carries (`recalledMemoryBlock`): those
+ * HypaV3's similar and random shares picked for this turn.
+ */
+export const RECALLED_MEMORY_HEADING = '[지난 이야기 요약: 이번 턴에 떠올린 것]';
+
+/**
+ * The memory block the system string carries — the important and the recent
+ * summaries a selection picked (`SummarySelection`) — oldest first; '' for none.
+ */
 export function memoryBlock(texts: readonly string[]): string {
   return texts.length > 0 ? `${MEMORY_HEADING}\n${texts.join(SUMMARY_SEPARATOR)}` : '';
+}
+
+/**
+ * The block of the summaries a selection's similar and random shares picked,
+ * oldest first, for the recall turn before the turn being answered: they follow
+ * the turn's query and draw, so in the system string — the cached prefix — they
+ * would keep the history behind them out of the cache. '' for none.
+ */
+export function recalledMemoryBlock(texts: readonly string[]): string {
+  return texts.length > 0 ? `${RECALLED_MEMORY_HEADING}\n${texts.join(SUMMARY_SEPARATOR)}` : '';
 }
 
 /* ------------------------------------------------------------ time labels */

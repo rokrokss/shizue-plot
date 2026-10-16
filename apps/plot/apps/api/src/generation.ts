@@ -145,9 +145,11 @@ export interface GenerationPlan {
    * the request goes out: not `history`, which the memory trims.
    */
   wholeBranch: Message[];
-  /** The memory block: the summaries selected for the turns no longer in `history`. */
+  /** The memory block: the summaries the important and recent shares selected for the turns no longer in `history`. */
   memoryText: string;
-  /** The facts block (`[기억]`) the recall turn opens with; empty when none was selected. */
+  /** The summaries the similar and random shares selected, which the recall turn opens with; empty when none was. */
+  recalledMemoryText: string;
+  /** The facts block (`[기억]`) the recall turn carries after those summaries; empty when none was selected. */
   factsText: string;
   /** The turn the time labels count back from (`MemoryInput.clock`): the facts' and summaries', and retrieval's. */
   memoryClock: number;
@@ -953,6 +955,7 @@ async function assembleRequest(
     personaText: plan.personaText,
     userName: plan.userName,
     memoryText: plan.memoryText,
+    recalledMemoryText: plan.recalledMemoryText,
     factsText: plan.factsText,
     ...(found.retrievalText ? { retrievalText: found.retrievalText } : {}),
     relationshipText: plan.relationshipText,
@@ -1249,6 +1252,10 @@ async function runGeneration(
             ]),
           ],
           ...(reasoningEffort ? { reasoningEffort } : {}),
+          // One cache per chat, whatever the branch: a regenerate or a swipe sends the
+          // request its turn sent, which the cache serves whole, and a key of the
+          // branch's own would look for it in another cache.
+          cacheKey: plan.chatId,
           abortSignal: controller.signal,
         });
 

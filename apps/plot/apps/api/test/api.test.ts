@@ -46,6 +46,7 @@ import {
   PRESET_IDS,
   READER_PRESET_NAME_MAX,
   READER_PRESET_TEXT_MAX,
+  RECALLED_MEMORY_HEADING,
   RETRIEVAL_DEFAULTS,
   readCharx,
   readPngTextChunks,
@@ -343,16 +344,17 @@ function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps {
 }
 
 /**
- * A request's recall turn — the facts, the messages a search brought back and
- * the relationship, one system turn before the turn being answered — or ''
- * where the request recalls nothing.
+ * A request's recall turn — the summaries the similar and random shares picked,
+ * the facts, the messages a search brought back and the relationship, one
+ * system turn before the turn being answered — or '' where the request recalls
+ * nothing.
  */
 function recallOf(prompt: { messages: ChatRequest['messages'] }): string {
   const turn = prompt.messages.find(
     (message) =>
       message.role === 'system' &&
       typeof message.content === 'string' &&
-      /^(?:\[기억\]|Past events:|\[현재 관계 상태\])/.test(message.content),
+      (message.content.startsWith(RECALLED_MEMORY_HEADING) || /^(?:\[기억\]|Past events:|\[현재 관계 상태\])/.test(message.content)),
   );
   return typeof turn?.content === 'string' ? turn.content : '';
 }
@@ -3350,6 +3352,31 @@ describe('chats', () => {
     await db.update(chats).set({ reasoningEffort: 'turbo' }).where(eq(chats.id, chatId));
     await send();
     expect(sent).toEqual([undefined, 'high', undefined]);
+  });
+
+  it("asks the provider's prompt cache by the chat, whatever the branch", async () => {
+    const cookie = await signUp('cache-key@example.com');
+    const { chatId } = await setupChat(cookie);
+    const other = await setupChat(cookie);
+    const keys: (string | undefined)[] = [];
+    const echo = createEchoAdapter();
+    const keyApp = makeApp({
+      getAdapter: () => ({
+        providerModel: 'echo',
+        adapter: {
+          stream: (req) => {
+            keys.push(req.cacheKey);
+            return echo.stream(req);
+          },
+        },
+      }),
+    });
+    const done = async (res: Response): Promise<void> => expect((await readSse(res)).at(-1)?.event).toBe('done');
+    await done(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, keyApp));
+    // A regenerate is a branch of its own, and shares the prompt up to the turn it answers.
+    await done(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, keyApp));
+    await done(await json(cookie, `/api/chats/${other.chatId}/messages`, 'POST', { content: '안녕' }, keyApp));
+    expect(keys).toEqual([chatId, chatId, other.chatId]);
   });
 
   it('stores the author note and injects it right before the history', async () => {
@@ -8516,10 +8543,12 @@ describe('memory', () => {
       return chatId;
     }
 
+    /** The prompt the turn sent, undated: the system string, then each turn — the recall turn among them. */
     const ask = async (cookie: string, chatId: string, harness: Harness, content: string): Promise<string> => {
       const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }, harness.app);
       expect((await readSse(res)).at(-1)!.event).toBe('done');
-      return undated(harness.prompts.at(-1)!.system);
+      const sent = harness.prompts.at(-1)!;
+      return undated([sent.system, ...sent.messages.map((message) => contentText(message.content))].join('\n\n'));
     };
 
     it('ranks the summaries by the server embedder against the latest turns', async () => {
@@ -8533,11 +8562,80 @@ describe('memory', () => {
       expect(stored).toHaveLength(TEXTS.length);
       expect(stored.every((chunk) => chunk.model === 'test-embedder' && chunk.embedding.length === 4)).toBe(true);
 
-      const system = await ask(cookie, chatId, harness, '고양이는 어디 갔지?');
-      expect(system).toContain(`${MEMORY_HEADING}\n고양이가 서점에 들어왔다.`);
-      for (const text of TEXTS.filter((text) => !text.includes('고양이'))) expect(system).not.toContain(text);
+      const sent = await ask(cookie, chatId, harness, '고양이는 어디 갔지?');
+      expect(sent).toContain(`${RECALLED_MEMORY_HEADING}\n고양이가 서점에 들어왔다.`);
+      for (const text of TEXTS.filter((text) => !text.includes('고양이'))) expect(sent).not.toContain(text);
+      // Picked by the turn's query, it opens the recall turn rather than standing in the system string.
+      const asked = harness.prompts.at(-1)!;
+      expect(asked.system).not.toContain('고양이');
+      expect(undated(recallOf(asked))).toBe(`${RECALLED_MEMORY_HEADING}\n고양이가 서점에 들어왔다.`);
       // The latest turns were the queries, as queries.
       expect(embedder.calls.at(-1)).toContain('고양이는 어디 갔지?');
+    });
+
+    it('keeps the recent summaries in the system string and sends the ones the query picked in the recall turn, a regenerate alike', async () => {
+      const cookie = await signUp('memory-split@example.com');
+      const harness = memoryApp({ embedder: keywordEmbedder() });
+      const { chatId } = await setupChat(cookie);
+      const ids = (await shortTurns(cookie, chatId, harness, 5)).map((message: any) => message.id);
+      for (const [index, text] of TEXTS.entries()) await seedSummary(chatId, ids.slice(index * 2, index * 2 + 2), text);
+      await embedPendingSummaries(harness.deps, chatId);
+      // Room for two: half for the newest, half for the one the query ranks first.
+      const one = Math.max(...TEXTS.map((text) => countTokens(`${recent(text)}\n\n`)));
+      await json(cookie, `/api/chats/${chatId}`, 'PATCH', {
+        memorySettings: {
+          contextBudget: 8000,
+          memoryTokensRatio: (countTokens(`${MEMORY_HEADING}\n`) + 2 * one + 1) / 8000,
+          recentMemoryRatio: 0.5,
+          similarMemoryRatio: 0.5,
+        },
+      });
+
+      await ask(cookie, chatId, harness, '고양이는 어디 갔지?');
+      const asked = harness.prompts.at(-1)!;
+      // What changes only when a summary lands stays in the cached prefix; the turn's pick goes beside the turn.
+      expect(undated(asked.system)).toContain(`${MEMORY_HEADING}\n등대 불빛이 꺼진 아침이었다.`);
+      expect(asked.system).not.toContain('고양이가');
+      expect(undated(recallOf(asked))).toBe(`${RECALLED_MEMORY_HEADING}\n고양이가 서점에 들어왔다.`);
+      const at = asked.messages.findIndex((message) => message.content === recallOf(asked));
+      expect(asked.messages[at + 1]).toEqual({ role: 'user', content: '고양이는 어디 갔지?' });
+
+      await harness.settle();
+      const res = await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app);
+      expect((await readSse(res)).at(-1)!.event).toBe('done');
+      const again = harness.prompts.at(-1)!;
+      expect(again.system).toBe(asked.system);
+      expect(recallOf(again)).toBe(recallOf(asked));
+    });
+
+    it('draws the random share again only when a summary lands, not on every turn', async () => {
+      const cookie = await signUp('memory-random-seed@example.com');
+      const harness = memoryApp();
+      const { chatId } = await setupChat(cookie);
+      const ids = (await shortTurns(cookie, chatId, harness, 8)).map((message: any) => message.id);
+      const texts = Array.from({ length: 6 }, (_, index) => `${index + 1}번째 요약입니다.`);
+      for (const [index, text] of texts.entries()) await seedSummary(chatId, ids.slice(index * 2, index * 2 + 2), text);
+      // All of it the random share, room for two of the six.
+      const one = Math.max(...texts.map((text) => countTokens(`${recent(text)}\n\n`)));
+      await json(cookie, `/api/chats/${chatId}`, 'PATCH', {
+        memorySettings: {
+          contextBudget: 8000,
+          memoryTokensRatio: (countTokens(`${MEMORY_HEADING}\n`) + 2 * one + 1) / 8000,
+          recentMemoryRatio: 0,
+          similarMemoryRatio: 0,
+        },
+      });
+
+      const picks: string[] = [];
+      for (const content of ['하나', '둘', '셋']) {
+        await ask(cookie, chatId, harness, content);
+        await harness.settle();
+        picks.push(undated(recallOf(harness.prompts.at(-1)!)));
+      }
+      expect(picks[0]!.startsWith(RECALLED_MEMORY_HEADING)).toBe(true);
+      expect(picks[0]!.split('\n\n')).toHaveLength(2);
+      // Seeded by the chat and the number of summaries that apply: the same until one lands.
+      expect(new Set(picks).size).toBe(1);
     });
 
     it('lifts the summary the newest turn names by a rare word over the one nearest by meaning', async () => {
@@ -8552,11 +8650,11 @@ describe('memory', () => {
       await embedPendingSummaries(harness.deps, chatId);
       // By meaning the turn is about the cat (the keyword embedder sees only 고양이);
       // by its words it names 한석, whom one summary alone holds — and RRF puts that first.
-      const system = await ask(cookie, chatId, harness, '새끼고양이랑 놀던 날, 한석이 뭐라고 했지?');
-      expect(system).toContain(`${MEMORY_HEADING}\n한석이 지도를 건넸다.`);
-      expect(system).not.toContain('고양이가 서점에 들어왔다.');
+      const sent = await ask(cookie, chatId, harness, '새끼고양이랑 놀던 날, 한석이 뭐라고 했지?');
+      expect(sent).toContain(`${RECALLED_MEMORY_HEADING}\n한석이 지도를 건넸다.`);
+      expect(sent).not.toContain('고양이가 서점에 들어왔다.');
       // Where the words and the meaning agree, the nearest stays first.
-      expect(await ask(cookie, chatId, harness, '고양이 얘기 해 줘')).toContain(`${MEMORY_HEADING}\n고양이가 서점에 들어왔다.`);
+      expect(await ask(cookie, chatId, harness, '고양이 얘기 해 줘')).toContain(`${RECALLED_MEMORY_HEADING}\n고양이가 서점에 들어왔다.`);
     });
 
     it('compares only vectors of the current model, and embeds the stale ones again', async () => {
@@ -8567,7 +8665,7 @@ describe('memory', () => {
 
       const harness = memoryApp({ embedder: keywordEmbedder('test-embedder-2') });
       // No vector of this model yet: nothing ranks, and the share goes unused.
-      expect(await ask(cookie, chatId, harness, '고양이?')).not.toContain(MEMORY_HEADING);
+      expect(await ask(cookie, chatId, harness, '고양이?')).not.toMatch(/\[지난 이야기 요약/);
       // That turn's refresh embedded them again, with this model.
       await harness.settle();
       const stored = await db.select().from(chatSummaryChunks);
@@ -8596,7 +8694,7 @@ describe('memory', () => {
       // are never compared with an 8-long query, which would have thrown and
       // handed the share to the most recent summary.
       await db.update(plots).set({ language: 'en' }).where(eq(plots.id, plotId!));
-      expect(await ask(cookie, chatId, harness, '고양이?')).not.toContain(MEMORY_HEADING);
+      expect(await ask(cookie, chatId, harness, '고양이?')).not.toMatch(/\[지난 이야기 요약/);
       expect(embedder.models.at(-1)).toBe('test-other');
       await harness.settle();
       stored = await db.select().from(chatSummaryChunks);
@@ -15241,7 +15339,7 @@ describe('editRequest listeners', () => {
       lua(
         listening(`
           for _, turn in ipairs(req) do
-            if turn.role == 'assistant' and turn.removable and turn.memo == nil then turn.content = string.rep('word ', 20000) end
+            if turn.role == 'assistant' and turn.removable and turn.memo == nil then turn.content = string.rep('word ', 80000) end
           end
           return req`),
       ),
@@ -15255,7 +15353,7 @@ describe('editRequest listeners', () => {
 
     // Grown where nothing may be dropped: not sent at all, and nothing but the reader's turn is stored.
     const stuck = await luaChat('lua-too-long@example.com', [
-      lua(listening(`req[1].content = req[1].content .. string.rep('word ', 20000) return req`)),
+      lua(listening(`req[1].content = req[1].content .. string.rep('word ', 80000) return req`)),
     ]);
     const before = prompts.length;
     const events = await send(stuck.cookie, stuck.chatId, capturing);

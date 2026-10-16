@@ -259,14 +259,22 @@ export interface AssemblePromptInput {
   personaText?: string;
   userName?: string;
   /**
-   * The summaries of the turns that no longer fit (HypaV3's, `memoryBlock`),
-   * already formatted. Injected right after the persona, in the system string,
-   * where RisuAI sends its memory.
+   * The summaries of the turns that no longer fit that HypaV3's important and
+   * recent shares picked (`memoryBlock`), already formatted. Injected right after
+   * the persona, in the system string, where RisuAI sends its memory: they change
+   * only when a summary lands.
    */
   memoryText?: string;
   /**
+   * The summaries HypaV3's similar and random shares picked for this turn
+   * (`recalledMemoryBlock`), already formatted. The first part of the recall turn
+   * (`recall`): they follow the latest turns, so in the system string, the
+   * cached prefix, they would keep the history behind them out of the cache.
+   */
+  recalledMemoryText?: string;
+  /**
    * The facts recalled for this turn (`[기억]`, `factsBlock`), already
-   * formatted. The first part of the recall turn (`recall`): searched against
+   * formatted. In the recall turn after the recalled summaries: searched against
    * the latest turns, they change nearly every turn, so they stand just before
    * the turn being answered rather than in the system string, the cached prefix.
    */
@@ -512,8 +520,9 @@ export type PromptBlockKind =
   | 'depth_lore'
   | 'author_note'
   /**
-   * What this turn recalls — the facts, the messages a search brought back, the
-   * relationship — as one system turn just before the turn being answered.
+   * What this turn recalls — the summaries HypaV3's similar and random shares
+   * picked, the facts, the messages a search brought back, the relationship — as
+   * one system turn just before the turn being answered.
    */
   | 'recall'
   | 'post_history'
@@ -612,7 +621,15 @@ const LORE_PREVIEW_LENGTH = 80;
  */
 export const AUTHOR_NOTE_DEPTH = AUTHOR_NOTE_DEFAULTS.depth;
 
-export const DEFAULT_CONTEXT_BUDGET = 16000;
+/**
+ * The context a chat gets until its reader picks another (`memorySettings.
+ * contextBudget`). At 64k a chat of about 290–350 messages goes verbatim, with
+ * no summary and no auxiliary call: on two such chats replies were as good as
+ * 16k's with its memory or slightly better, time to first token 3.7 s at 25k
+ * prompt tokens and 5.6 s at 61k (2026-10-16, ARCHITECTURE §7.3). The models
+ * readers use accept far more.
+ */
+export const DEFAULT_CONTEXT_BUDGET = 64000;
 /**
  * The lore budget of a book whose card names none (`LoreSettings.tokenBudget`):
  * this share of the context budget, so a chat given more room gives its lore
@@ -896,6 +913,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     history: given,
     personaText = '',
     memoryText = '',
+    recalledMemoryText = '',
     factsText = '',
     retrievalText = '',
     relationshipText = '',
@@ -1383,8 +1401,9 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const personaBlock =
     !utility && personaText.trim() ? `${expand('유저({{user}}) 정보: ')}${expand(personaText)}` : '';
 
-  // 5b. memory — the summaries of the evicted history, where RisuAI's HypaV3
-  // sends them. What this turn recalls besides goes beside the turn (7d).
+  // 5b. memory — the summaries of the evicted history HypaV3's important and
+  // recent shares picked, where RisuAI's HypaV3 sends them. What this turn's query
+  // and draw picked goes beside the turn (7d), with what it recalls besides.
   const memoryBlock = memoryText.trim() ? expand(memoryText).trim() : '';
 
   const sections: SystemSection[] = [
@@ -1497,16 +1516,18 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     ? { kind: 'trailing', label: 'emotion', message: { role: 'system', content: send(emotionText) } }
     : null;
 
-  // 7d. what this turn recalls: the facts closest to the latest turns, the
-  // earlier messages a search by meaning found (ST's "Past events") and the
-  // relationship's state, as one system turn just before the turn being
-  // answered (placed with the history, below). Each is read again for every
-  // turn — the facts and the messages change nearly every time — so none of it
-  // stands in the system string, the provider's cached prefix: there it would
-  // keep every turn of the history behind it out of the cache. Never evicted.
+  // 7d. what this turn recalls: the summaries HypaV3's similar and random shares
+  // picked, the facts closest to the latest turns, the earlier messages a search
+  // by meaning found (ST's "Past events") and the relationship's state, as one
+  // system turn just before the turn being answered (placed with the history,
+  // below). Each is read again for every turn — the picks, the facts and the
+  // messages change nearly every time — so none of it stands in the system
+  // string, the provider's cached prefix: there it would keep every turn of the
+  // history behind it out of the cache. Never evicted.
   const recallPart = (text: string): string => (text.trim() ? send(expand(text).trim()) : '');
+  const recalledMemoryPart = recallPart(recalledMemoryText);
   const factsPart = recallPart(factsText);
-  const recallText = [factsPart, recallPart(retrievalText), recallPart(relationshipText)]
+  const recallText = [recalledMemoryPart, factsPart, recallPart(retrievalText), recallPart(relationshipText)]
     .filter((part) => part.length > 0)
     .join('\n\n');
   const recallSlot: MessageSlot | null = recallText
@@ -1528,14 +1549,16 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     (speakerSlot ? countTokens(promptText(speakerSlot.message.content)) : 0) -
     (emotionSlot ? countTokens(promptText(emotionSlot.message.content)) : 0) -
     depthLore.reduce((sum, entry) => sum + countTokens(entry.content), 0);
-  // The memory's own text — the summaries and the facts — is not fixed: the
-  // summarizer reckons with it apart (§7.3), as it always has.
+  // The memory's own text — the summaries, in the system string and the recall
+  // turn, and the facts — is not fixed: the summarizer reckons with it apart
+  // (§7.3), as it always has.
   const fixedTokens = Math.max(
     0,
     contextBudget -
       maxResponseTokens -
       available -
       (memorySection ? countTokens(memorySection.text) : 0) -
+      countTokens(recalledMemoryPart) -
       countTokens(factsPart),
   );
 

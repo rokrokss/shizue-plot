@@ -108,7 +108,8 @@ export const RISU_REQUEST_ITEMS: Record<PromptBlockKind, RisuItemRule> = {
   style: {},
   lore_after: {},
   persona: {},
-  // Its own turn, after the system string, and never removable.
+  // Its own turn, after the system string, and never removable: the summaries
+  // HypaV3's important and recent shares picked.
   memory: { memo: 'supaMemory' },
   // Ours alone, beside the system string: as RisuAI's system turns, nothing.
   directions: {},
@@ -118,8 +119,10 @@ export const RISU_REQUEST_ITEMS: Record<PromptBlockKind, RisuItemRule> = {
   // RisuAI splices its depth lore in after it marked the chat removable.
   depth_lore: {},
   author_note: {},
-  // The facts, SillyTavern's retrieved messages and the relationship, which
-  // RisuAI has no turn for: spliced in among the chat like depth lore.
+  // The summaries HypaV3's similar and random shares picked (RisuAI sends them
+  // with the rest, in `supaMemory`), the facts, SillyTavern's retrieved messages
+  // and the relationship, which RisuAI has no turn for: spliced in among the chat
+  // like depth lore.
   recall: {},
   post_history: {},
   // The start triggers' `additonalSysPrompt` turns.

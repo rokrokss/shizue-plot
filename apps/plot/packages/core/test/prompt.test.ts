@@ -19,6 +19,7 @@ import {
   AUTHOR_NOTE_DEPTH,
   characterHeader,
   constantLoreTokens,
+  DEFAULT_CONTEXT_BUDGET,
   DEFAULT_USER_NAME,
   exampleHeader,
   IMAGE_TOKEN_ESTIMATE,
@@ -417,6 +418,25 @@ describe('assemblePrompt', () => {
       );
       const none = recall({ factsText: ' ', retrievalText: '', relationshipText: '  ' });
       expect(none.messages).toEqual(assemblePrompt({ plot, characters: [aria], history: turns, preset, userName: '민준' }).messages);
+    });
+
+    it('opens with the summaries the query and the draw picked, which are memory and not fixed tokens', () => {
+      const picked = '[지난 이야기 요약: 이번 턴에 떠올린 것]\n(약 40턴 전) {{user}}는 등대에 올랐다.';
+      const { system, messages } = recall({ memoryText: '[지난 이야기 요약]\n요약.', recalledMemoryText: picked });
+      // The system string carries only the summaries that change when one lands.
+      expect(system).toBe(`${assemble(100_000).system}\n\n[지난 이야기 요약]\n요약.`);
+      expect(messages.at(-3)).toEqual({
+        role: 'system',
+        content: `[지난 이야기 요약: 이번 턴에 떠올린 것]\n(약 40턴 전) 민준는 등대에 올랐다.\n\n${RECALL}`,
+      });
+      const without = recall({ contextBudget: 100_000, maxResponseTokens: 0, report: false });
+      const withIt = recall({ recalledMemoryText: picked, contextBudget: 100_000, maxResponseTokens: 0, report: false });
+      // Only the blank line it is joined to the rest by is left in.
+      const sent = '[지난 이야기 요약: 이번 턴에 떠올린 것]\n(약 40턴 전) 민준는 등대에 올랐다.';
+      expect(withIt.fixedTokens! - without.fixedTokens!).toBe(countTokens(`${sent}\n\n${RECALL}`) - countTokens(RECALL) - countTokens(sent));
+      expect(recall({ factsText: '', retrievalText: '', relationshipText: '', recalledMemoryText: picked }).messages.at(-3)!.content).toBe(
+        '[지난 이야기 요약: 이번 턴에 떠올린 것]\n(약 40턴 전) 민준는 등대에 올랐다.',
+      );
     });
 
     it('stands before the turn a group round answers, and before the newest turn when that is not sent', () => {
@@ -1319,7 +1339,7 @@ describe('assemblePrompt - report', () => {
     expect(report.history).toEqual({ included: 4, total: 4 });
     expect(report.examples).toEqual({ included: 2, total: 2 });
     expect(report.totals).toEqual({
-      contextBudget: 16000,
+      contextBudget: DEFAULT_CONTEXT_BUDGET,
       responseReserve: 1200,
       used:
         countTokens(result.system) +

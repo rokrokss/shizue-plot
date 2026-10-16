@@ -232,6 +232,23 @@ describe('ChatGPT Responses adapter', () => {
     expect(responseBody({ ...request, reasoningEffort: 'high' }).reasoning).toEqual({ effort: 'high' });
     expect(responseBody(request)).not.toHaveProperty('reasoning');
   });
+  it('names the prompt cache, in the body and the session headers, only when the caller gives a key', async () => {
+    expect(responseBody({ ...request, cacheKey: 'chat-1' }).prompt_cache_key).toBe('chat-1');
+    expect(responseBody(request)).not.toHaveProperty('prompt_cache_key');
+    const sent: Headers[] = [];
+    const done = event({ type: 'response.completed', response: { usage: { input_tokens: 1, output_tokens: 1 } } });
+    const fetcher: typeof fetch = async (input, init) => {
+      sent.push(new Headers(init!.headers));
+      return streamFetch(done)(input, init);
+    };
+    const adapter = createChatGPTAdapter(async () => 'TOKEN', fetcher);
+    for (const req of [{ ...request, cacheKey: 'chat-1' }, request]) {
+      const stream = adapter.stream(req);
+      while (!(await stream.next()).done);
+    }
+    expect([sent[0]!.get('session_id'), sent[0]!.get('conversation_id')]).toEqual(['chat-1', 'chat-1']);
+    expect([sent[1]!.has('session_id'), sent[1]!.has('conversation_id')]).toEqual([false, false]);
+  });
   it('handles split UTF-8 / CRLF, local stop strings and terminal usage', async () => {
     const result = await collect(event({ type: 'response.output_text.delta', delta: '안녕\nUs' }) + event({ type: 'response.output_text.delta', delta: 'er: hidden' }) + event({ type: 'response.completed', response: { usage: { input_tokens: 9, output_tokens: 7 } } }));
     expect(result).toEqual({ text: '안녕', usage: { promptTokens: 9, completionTokens: 7 } });

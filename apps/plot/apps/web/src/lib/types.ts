@@ -584,7 +584,7 @@ export interface ReaderPreset {
 }
 
 /** Mirrors the whitelist in packages/db — also the order the select uses. */
-export const MEMORY_CONTEXT_BUDGETS = [8000, 16000, 32000] as const;
+export const MEMORY_CONTEXT_BUDGETS = [8000, 16000, 32000, 64000] as const;
 
 /**
  * Per-chat memory tuning — the context budget and RisuAI HypaV3's settings; a
