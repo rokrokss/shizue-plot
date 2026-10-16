@@ -367,8 +367,9 @@ export interface PrepareOptions {
  * in the shape RisuAI's `loadLoreBookV3Prompt` lists them: what `/test_lorebook`
  * shows and Lua's `loadLoreBooks` reads. The prompt's own activation
  * (`@shizue/core/lorebook`), fetched on first use, with the book's settings — and
- * RisuAI's 800 tokens where it names no budget — over token counts estimated at
- * four characters each. RisuAI's match log is not kept.
+ * RisuAI's 8,000 tokens where it names no budget (its `loreBookToken`, 800 when
+ * unset but raised to 8,000 by its format migration, ARCHITECTURE §6) — over
+ * token counts estimated at four characters each. RisuAI's match log is not kept.
  */
 export async function activeLore(
   lorebook: readonly LoreEntry[],
@@ -382,7 +383,7 @@ export async function activeLore(
   const { entries: active } = activateLore(entries, {
     history,
     scanDepth: settings?.scanDepth ?? 5,
-    budgetTokens: settings?.tokenBudget ?? 800,
+    budgetTokens: settings?.tokenBudget ?? 8000,
     countTokens: tokens,
     recursiveScanning: settings?.recursiveScanning ?? true,
     ...(settings?.maxRecursionSteps !== undefined ? { maxRecursionSteps: settings.maxRecursionSteps } : {}),
