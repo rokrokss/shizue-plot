@@ -12,8 +12,16 @@
  * as they go (fetch reports none); one that fails is sent again a few times, an
  * address whose hour is up (S3's 403) is asked for again, and a part the store
  * did not keep (`upload_incomplete`) is found from what the API says it has and
- * sent again. An upload given up — failed for good, aborted, or its tab closed
- * — is deleted on the server, best-effort.
+ * sent again. An upload given up — failed for good, or aborted — is deleted on
+ * the server, best-effort.
+ *
+ * A page that goes away while the parts go up — reloaded, its tab closed —
+ * leaves its import on the server, and this browser remembers it
+ * (`localStorage`): the reader who picks the same file again for the same place
+ * goes on from the parts the store already has, and one who picks another file
+ * gives the remembered upload up first, so the server does not refuse the new
+ * one as busy. Another tab of this browser uploading right now holds the import
+ * lock, and its upload is left alone.
  *
  * A failed import throws an `ApiError` with the code the old route answered
  * (`FileImportError`, which also names the import), so the `errors` catalogue
@@ -70,6 +78,11 @@ export interface FileImportTransport {
   put: PartPut;
   /** The waits between polls and between a part's tries; rejects when the signal aborts. */
   sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /**
+   * Runs an import holding this browser's import lock, told whether it got it —
+   * not when another tab is uploading under it. The lock goes with the page.
+   */
+  lock: <T>(work: (held: boolean) => Promise<T>) => Promise<T>;
 }
 
 export interface FileImportOptions {
@@ -144,12 +157,67 @@ export const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
     signal?.addEventListener('abort', stop, { once: true });
   });
 
-/** The page's own: the window's fetch (called unbound, as it must be), XHR and timers. */
+/** The Web Locks name an import runs under, and the `localStorage` key of the upload this browser remembers. */
+const IMPORT_KEY = 'shizue.fileImport';
+
+/** The page's own: the window's fetch (called unbound, as it must be), XHR, timers and Web Locks. */
 export const BROWSER_TRANSPORT: FileImportTransport = {
   fetch: (input, init) => fetch(input, init),
   put: xhrPut,
   sleep,
+  // A browser without Web Locks (an http origin) runs every import as the only one.
+  lock: async (work) =>
+    typeof navigator === 'undefined' || !navigator.locks
+      ? work(true)
+      : await navigator.locks.request(IMPORT_KEY, { ifAvailable: true }, (held) => work(held !== null)),
 };
+
+/** The upload this browser started and has not seen end, and the file and place it was for. */
+interface Remembered {
+  id: string;
+  target: FileImportTarget;
+  plotId: string | null;
+  name: string;
+  size: number;
+  lastModified: number;
+}
+
+function recall(): Remembered | undefined {
+  try {
+    const stored = typeof window === 'undefined' ? null : window.localStorage.getItem(IMPORT_KEY);
+    return stored ? (JSON.parse(stored) as Remembered) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function remember(remembered: Remembered): void {
+  try {
+    if (typeof window !== 'undefined') window.localStorage.setItem(IMPORT_KEY, JSON.stringify(remembered));
+  } catch {
+    // Storage refused: this upload is not resumed after a reload, and the server's sweep has it.
+  }
+}
+
+/** Forgets the remembered upload, if it is `id`. */
+function forget(id: string): void {
+  try {
+    if (recall()?.id === id) window.localStorage.removeItem(IMPORT_KEY);
+  } catch {
+    // Storage refused: what it holds is checked against the server before use.
+  }
+}
+
+/** The file and place an import is for, which a remembered upload must match to be resumed. */
+type Picked = Omit<Remembered, 'id'>;
+
+const pickedOf = (target: FileImportTarget, file: File, fields: FileImportFields): Picked => ({
+  target,
+  plotId: fields.plotId ?? null,
+  name: file.name,
+  size: file.size,
+  lastModified: file.lastModified,
+});
 
 interface Context {
   transport: FileImportTransport;
@@ -195,12 +263,11 @@ const sizeOfPart = (up: Upload, part: number): number =>
   part < up.parts ? up.partSize : up.file.size - (up.parts - 1) * up.partSize;
 
 /**
- * Notes a part's bytes sent and says the total — only when its whole percent
- * moves, so the thousands of progress events of a large file do not redraw the
- * page that shows them thousands of times.
+ * Says the bytes sent — only when their whole percent moves, so the thousands
+ * of progress events of a large file do not redraw the page that shows them
+ * thousands of times.
  */
-function reportSent(ctx: Context, up: Upload, part: number, bytes: number): void {
-  up.sent.set(part, bytes);
+function showSent(ctx: Context, up: Upload): void {
   let loaded = 0;
   for (const value of up.sent.values()) loaded += value;
   loaded = Math.min(loaded, up.file.size);
@@ -208,6 +275,12 @@ function reportSent(ctx: Context, up: Upload, part: number, bytes: number): void
   if (percent === up.shown) return;
   up.shown = percent;
   ctx.onProgress?.({ phase: 'uploading', loaded, total: up.file.size });
+}
+
+/** Notes a part's bytes sent and says the total. */
+function reportSent(ctx: Context, up: Upload, part: number, bytes: number): void {
+  up.sent.set(part, bytes);
+  showSent(ctx, up);
 }
 
 interface PartAddresses {
@@ -282,12 +355,11 @@ async function inParallel<T>(items: T[], limit: number, stop: AbortController, w
 async function sendParts(ctx: Context, up: Upload, numbers: number[], stop: AbortController): Promise<void> {
   for (let at = 0; at < numbers.length; at += MAX_PARTS_PER_ASK) {
     const { urls, uploaded } = await askParts(ctx, up.id, numbers.slice(at, at + MAX_PARTS_PER_ASK));
+    // Every part the store has, not only these: an upload resumed after a reload starts from all of it.
+    for (const part of uploaded) up.sent.set(part, sizeOfPart(up, part));
+    showSent(ctx, up);
     const have = new Set(uploaded);
-    const todo: number[] = [];
-    for (const part of numbers.slice(at, at + MAX_PARTS_PER_ASK)) {
-      if (have.has(part)) reportSent(ctx, up, part, sizeOfPart(up, part));
-      else todo.push(part);
-    }
+    const todo = numbers.slice(at, at + MAX_PARTS_PER_ASK).filter((part) => !have.has(part));
     await inParallel(todo, PARALLEL_PARTS, stop, (part) => {
       const url = urls[part];
       if (!url) throw uploadFailed(0, `No address for part ${part}`);
@@ -306,7 +378,6 @@ async function upload(ctx: Context, up: Upload): Promise<void> {
   outer?.addEventListener('abort', forward, { once: true });
   const parts: Context = { ...ctx, signal: stop.signal };
   try {
-    reportSent(parts, up, 1, 0);
     const all = Array.from({ length: up.parts }, (_, index) => index + 1);
     for (let attempt = 1; ; attempt += 1) {
       await sendParts(parts, up, all, stop);
@@ -367,6 +438,40 @@ async function settle<T>(ctx: Context, id: string): Promise<T> {
   }
 }
 
+interface Started {
+  id: string;
+  partSize: number;
+  parts: number;
+}
+
+/**
+ * The upload this browser remembers, if it is of `file` for the same place and
+ * still taking parts — a page that went away mid-upload. One of another file
+ * is given up, so the server does not refuse the start that follows as busy.
+ */
+async function resumable(ctx: Context, picked: Picked): Promise<Started | undefined> {
+  const remembered = recall();
+  if (!remembered) return undefined;
+  if (!(Object.keys(picked) as (keyof Picked)[]).every((key) => remembered[key] === picked[key])) {
+    await abandonImport(remembered.id, ctx.transport);
+    return undefined;
+  }
+  let state: ImportState & Started;
+  try {
+    state = await call(ctx, 'GET', `/api/file-imports/${remembered.id}`);
+  } catch (caught) {
+    if (!(caught instanceof ApiError && caught.status === 404)) throw caught;
+    forget(remembered.id);
+    return undefined;
+  }
+  // Finished, failed or given up since.
+  if (state.status !== 'uploading') {
+    forget(remembered.id);
+    return undefined;
+  }
+  return { id: state.id, partSize: state.partSize, parts: state.parts };
+}
+
 /**
  * Imports `file` as `target` and answers what the import made — the body the
  * old route answered with 201. Throws `ApiError`: the start's refusal, an
@@ -380,35 +485,25 @@ export async function importFile<T>(
   options: FileImportOptions = {},
 ): Promise<T> {
   const ctx = contextOf(options);
-  const started = await call<{ id: string; partSize: number; parts: number }>(ctx, 'POST', '/api/file-imports', {
-    target,
-    fileName: file.name,
-    size: file.size,
-    ...fields,
-  });
-  try {
-    const { id, partSize, parts } = started;
-    // A tab closed while the parts go up gives the import up on its way out, so
-    // the reader's next one is not refused as busy until the server's sweep
-    // finds this one idle. Once the file is up the import goes on without the page.
-    const leave = (): void => {
-      void Promise.resolve(ctx.transport.fetch(`/api/file-imports/${id}`, { method: 'DELETE', keepalive: true })).catch(
-        () => undefined,
-      );
-    };
-    const page = typeof window === 'undefined' ? undefined : window;
-    page?.addEventListener('pagehide', leave);
+  return ctx.transport.lock(async (alone) => {
+    // Another tab uploading holds the lock: its upload is not this page's to resume or give up.
+    const picked = pickedOf(target, file, fields);
+    const resumed = alone ? await resumable(ctx, picked) : undefined;
+    const started =
+      resumed ??
+      (await call<Started>(ctx, 'POST', '/api/file-imports', { target, fileName: file.name, size: file.size, ...fields }));
+    if (alone && !resumed) remember({ id: started.id, ...picked });
     try {
-      await upload(ctx, { id, file, partSize, parts, sent: new Map(), shown: -1 });
-    } finally {
-      page?.removeEventListener('pagehide', leave);
+      await upload(ctx, { id: started.id, file, partSize: started.partSize, parts: started.parts, sent: new Map(), shown: -1 });
+      // The file is up, and the import goes on without the page.
+      forget(started.id);
+      return await settle<T>(ctx, started.id);
+    } catch (caught) {
+      // An import that failed has ended on the server already — and one waiting on the reader's yes keeps its file for it.
+      if (!(caught instanceof FileImportError)) await abandonImport(started.id, options.transport);
+      throw caught;
     }
-    return await settle<T>(ctx, started.id);
-  } catch (caught) {
-    // An import that failed has ended on the server already — and one waiting on the reader's yes keeps its file for it.
-    if (!(caught instanceof FileImportError)) await abandonImport(started.id, options.transport);
-    throw caught;
-  }
+  });
 }
 
 /**
@@ -422,11 +517,17 @@ export async function confirmImport<T>(id: string, options: FileImportOptions = 
   return settle<T>(ctx, id);
 }
 
-/** Gives an import up — an upload in flight, or a failed one's kept file. Best-effort: one being read is let finish. */
+/**
+ * Gives an import up — an upload in flight, or a failed one's kept file.
+ * Best-effort: one being read is let finish. Forgotten once the server has
+ * answered; one it could not be told of is given up again by the next import.
+ */
 export async function abandonImport(id: string, transport?: Partial<FileImportTransport>): Promise<void> {
   try {
     await call(contextOf({ ...(transport ? { transport } : {}) }), 'DELETE', `/api/file-imports/${id}`);
-  } catch {
-    // Left to the server's sweep.
+  } catch (caught) {
+    // Otherwise left to the server's sweep.
+    if (!(caught instanceof ApiError)) return;
   }
+  forget(id);
 }

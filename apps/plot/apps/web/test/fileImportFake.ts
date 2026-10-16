@@ -1,7 +1,9 @@
 /**
  * An in-memory stand-in for the API's file imports (`/api/file-imports`,
  * apps/api/src/fileImports.ts) and for the store its part addresses point at:
- * a start answers the part size, `…/parts` the addresses and what is stored,
+ * a start answers the part size — or 429 `import_busy` while another import
+ * has not ended, as the server counts one a reader — `…/parts` the addresses
+ * and what is stored,
  * a part's PUT is kept only at its exact size, `…/complete` refuses while a
  * part is missing and hands the joined file to `job`, and the polls answer
  * what the job made — after `processingPolls` polls that say it is still
@@ -92,6 +94,8 @@ export function fakeFileImports({ partSize = 4, addresses = 'api', job, processi
       const started = body();
       const size = started['size'] as number;
       if (size === 0) return refusal(400, 'invalid_card');
+      const unfinished: Status[] = ['uploading', 'queued', 'processing'];
+      if ([...imports.values()].some((each) => unfinished.includes(each.status))) return refusal(429, 'import_busy');
       const id = `import-${(next += 1)}`;
       const row: FakeImport = {
         id,

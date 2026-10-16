@@ -2,10 +2,11 @@
  * A file import over the wire (`lib/fileImport`), against the in-memory stand-in
  * for `/api/file-imports` and its store: what is sent where, what the screen is
  * told on the way, and what a dropped part, an expired address, a part the
- * store lost, a failed import, a module's low-level access and an abort each
- * come to. The browser's own part PUT is checked against a stand-in XHR.
+ * store lost, a failed import, a module's low-level access, an abort and a page
+ * reloaded mid-upload each come to. The browser's own part PUT is checked
+ * against a stand-in XHR.
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../src/lib/api';
 import {
   confirmImport,
@@ -30,16 +31,19 @@ function setup(options: Partial<FakeFileImportOptions> = {}) {
     ...options,
   });
   const sleep = vi.fn(async (_ms: number) => undefined);
-  const transport = (put: PartPut = api.put): Partial<FileImportTransport> => ({
+  const transport = (put: PartPut = api.put, held = true): Partial<FileImportTransport> => ({
     fetch: api.fetch as unknown as typeof fetch,
     put,
     sleep,
+    // The lock is the browser's: here every import has it, unless another tab is said to.
+    lock: (work) => work(held),
   });
   const routes = () => api.fetch.mock.calls.map(([input, init]) => `${init?.method ?? 'GET'} ${String(input)}`);
   return { api, jobs, sleep, transport, routes };
 }
 
-const file = (text = 'abcdefghij', name = 'sei.charx') => new File([text], name);
+// One modification time, so two picks of a name and text are the same file.
+const file = (text = 'abcdefghij', name = 'sei.charx') => new File([text], name, { lastModified: 1 });
 
 describe('importFile', () => {
   it('starts the import with what rides beside the file, sends each part as its slice, and answers what the import made', async () => {
@@ -246,39 +250,165 @@ describe('importFile', () => {
     expect(api.imports.get('import-1')!.status).toBe('abandoned');
   });
 
-  it('gives the upload up on the server when the tab closes while the parts go up, and not after', async () => {
-    const { api, transport, routes } = setup();
-    const page = new EventTarget();
-    vi.stubGlobal('window', page);
-    let closed = false;
-    const put: PartPut = async (url, body, options) => {
-      if (url.endsWith('/parts/2') && !closed) {
-        closed = true;
-        page.dispatchEvent(new Event('pagehide'));
-      }
-      return api.put(url, body, options);
-    };
-    await importFile('plot', file(), {}, { transport: transport(put) }).catch(() => undefined);
-    // The first, on the way out, outlives the page; the parts after it find the import given up.
-    const deletes = api.fetch.mock.calls.filter(([, init]) => init?.method === 'DELETE');
-    expect([String(deletes[0]![0]), deletes[0]![1]?.keepalive]).toEqual(['/api/file-imports/import-1', true]);
-    expect(api.imports.get('import-1')!.status).toBe('abandoned');
-    expect(routes()).not.toContain('POST /api/file-imports/import-1/complete');
-
-    // Once the file is up, closing the tab leaves the import to the server.
-    const second = setup();
-    vi.stubGlobal('window', page);
-    await importFile('plot', file(), {}, { transport: second.transport() });
-    page.dispatchEvent(new Event('pagehide'));
-    expect(second.routes().filter((route) => route.startsWith('DELETE'))).toEqual([]);
-    vi.unstubAllGlobals();
-  });
-
   it('throws the start’s own refusal, sending nothing', async () => {
     const { api, transport } = setup();
     const failure = await importFile('plot', file(''), {}, { transport: transport() }).catch((caught: unknown) => caught);
     expect(failure).toMatchObject({ status: 400, code: 'invalid_card' });
     expect(api.put).not.toHaveBeenCalled();
+  });
+});
+
+describe('importFile across reloads', () => {
+  const KEY = 'shizue.fileImport';
+  /** The browser's `localStorage`, which outlives the page. */
+  let stored: Map<string, string>;
+  const remembered = () => {
+    const value = stored.get(KEY);
+    return value === undefined ? undefined : (JSON.parse(value) as Record<string, unknown>);
+  };
+
+  beforeEach(() => {
+    stored = new Map();
+    vi.stubGlobal('window', {
+      localStorage: {
+        getItem: (key: string) => stored.get(key) ?? null,
+        setItem: (key: string, value: string) => void stored.set(key, value),
+        removeItem: (key: string) => void stored.delete(key),
+      },
+    });
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** A page that goes away once part 1 is up: parts 2 and 3 never answer, and nothing after them runs. */
+  async function leaveMidUpload({ api, transport }: ReturnType<typeof setup>): Promise<void> {
+    const put: PartPut = (url, body, options) =>
+      url.endsWith('/parts/1') ? api.put(url, body, options) : new Promise<number>(() => undefined);
+    void importFile('plot', file(), {}, { transport: transport(put) });
+    await vi.waitFor(() => expect(api.puts).toHaveLength(1));
+  }
+
+  /** A pick of `picked` for `target`, run once the test has its transport. */
+  const importFileAs =
+    (target: 'plot' | 'member', picked: File, fields = {}) =>
+    (transport: Partial<FileImportTransport>) =>
+      importFile(target, picked, fields, { transport });
+
+  it('goes on from the parts the store has when the same file is picked again', async () => {
+    const run = setup();
+    const { api, jobs, transport, routes } = run;
+    await leaveMidUpload(run);
+    expect(remembered()).toEqual({ id: 'import-1', target: 'plot', plotId: null, name: 'sei.charx', size: 10, lastModified: 1 });
+
+    const before = routes().length;
+    const progress: ImportProgress[] = [];
+    await expect(
+      importFile('plot', file(), {}, { transport: transport(), onProgress: (each) => progress.push(each) }),
+    ).resolves.toEqual(made);
+    expect(routes().slice(before)).toEqual([
+      'GET /api/file-imports/import-1',
+      'POST /api/file-imports/import-1/parts',
+      'POST /api/file-imports/import-1/complete',
+      'GET /api/file-imports/import-1',
+    ]);
+    expect(api.puts.slice(1).map((each) => each.part).sort()).toEqual([2, 3]);
+    expect(jobs.map((each) => each.text)).toEqual(['abcdefghij']);
+    // The screen starts from what is already up.
+    const uploading = progress.filter((each) => each.phase === 'uploading');
+    expect(uploading[0]).toEqual({ phase: 'uploading', loaded: 4, total: 10 });
+    expect(uploading.at(-1)).toEqual({ phase: 'uploading', loaded: 10, total: 10 });
+    expect(remembered()).toBeUndefined();
+  });
+
+  it.each([
+    ['another file', () => importFileAs('plot', file('klmnopqrst', 'other.charx'))],
+    ['the same file for another place', () => importFileAs('member', file(), { plotId: 'plot-1' })],
+  ])('gives the remembered upload up before starting %s', async (_, pick) => {
+    const run = setup();
+    const { api, transport, routes } = run;
+    await leaveMidUpload(run);
+
+    const before = routes().length;
+    await expect(pick()(transport())).resolves.toEqual(made);
+    // Without the DELETE the start would be refused as busy.
+    expect(routes().slice(before, before + 3)).toEqual([
+      'DELETE /api/file-imports/import-1',
+      'POST /api/file-imports',
+      'POST /api/file-imports/import-2/parts',
+    ]);
+    expect(api.imports.get('import-1')!.status).toBe('abandoned');
+    expect(remembered()).toBeUndefined();
+  });
+
+  it('remembers an upload while its parts go up, and forgets it once the file is up or given up', async () => {
+    const { api, transport } = setup();
+    const seen: unknown[] = [];
+    const put: PartPut = async (url, body, options) => {
+      seen.push(remembered()?.['id']);
+      return api.put(url, body, options);
+    };
+    await importFile('plot', file(), {}, { transport: transport(put) });
+    expect(seen).toEqual(['import-1', 'import-1', 'import-1']);
+    expect(remembered()).toBeUndefined();
+
+    const controller = new AbortController();
+    const aborting: PartPut = async (url, body, options) => {
+      if (url.endsWith('/parts/2')) controller.abort();
+      return api.put(url, body, options);
+    };
+    await expect(importFile('plot', file(), {}, { transport: transport(aborting), signal: controller.signal })).rejects.toThrow();
+    expect(api.imports.get('import-2')!.status).toBe('abandoned');
+    expect(remembered()).toBeUndefined();
+  });
+
+  it('keeps an upload the server could not be told to give up, and goes on with it later', async () => {
+    const { api, transport } = setup();
+    // The connection is gone: every part, and the DELETE after them, fails.
+    let offline = true;
+    const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (offline && init?.method === 'DELETE') throw new TypeError('Failed to fetch');
+      return api.fetch(input, init);
+    }) as typeof globalThis.fetch;
+    const put: PartPut = async (url, body, options) => {
+      if (offline && !url.endsWith('/parts/1')) throw new TypeError('Failed to fetch');
+      return api.put(url, body, options);
+    };
+    await expect(importFile('plot', file(), {}, { transport: { ...transport(put), fetch } })).rejects.toMatchObject({
+      code: 'upload_failed',
+    });
+    expect(remembered()).toMatchObject({ id: 'import-1' });
+
+    offline = false;
+    await expect(importFile('plot', file(), {}, { transport: transport() })).resolves.toEqual(made);
+    expect(api.puts.map((each) => each.part)).toEqual([1, 2, 3]);
+    expect(api.imports.size).toBe(1);
+  });
+
+  it('starts afresh when the remembered upload has ended on the server', async () => {
+    const run = setup();
+    const { api, transport, routes } = run;
+    await leaveMidUpload(run);
+    // Swept, or given up from another device.
+    api.imports.get('import-1')!.status = 'abandoned';
+
+    const before = routes().length;
+    await expect(importFile('plot', file(), {}, { transport: transport() })).resolves.toEqual(made);
+    expect(routes().slice(before, before + 2)).toEqual(['GET /api/file-imports/import-1', 'POST /api/file-imports']);
+    expect(api.puts.filter((each) => each.id === 'import-2').map((each) => each.part).sort()).toEqual([1, 2, 3]);
+    expect(remembered()).toBeUndefined();
+  });
+
+  it('leaves alone an upload another tab of this browser is running', async () => {
+    const run = setup();
+    const { transport, routes } = run;
+    await leaveMidUpload(run);
+
+    const before = routes().length;
+    const refused = await importFile('plot', file('klmnopqrst', 'other.charx'), {}, { transport: transport(undefined, false) }).catch(
+      (caught: unknown) => caught,
+    );
+    expect(refused).toMatchObject({ status: 429, code: 'import_busy' });
+    expect(routes().slice(before)).toEqual(['POST /api/file-imports']);
+    expect(remembered()).toMatchObject({ id: 'import-1' });
   });
 });
 

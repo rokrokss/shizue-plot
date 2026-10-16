@@ -1,3 +1,4 @@
+import { writeFile } from 'node:fs/promises';
 import { seedSession } from '../seedSession.js';
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 
@@ -7,7 +8,8 @@ import { expect, test, type BrowserContext, type Page } from '@playwright/test';
  * 파일 임포트 — under the local driver the parts go through the `/api` rewrite) → the studio says where it came from and under what license →
  * publishing it waits for the owner's word → a second card comes in from a
  * RisuRealm page, which the browser downloads itself, and the now-public plot
- * asks for the word again first.
+ * asks for the word again first → a card whose upload a reload cut off goes on
+ * from the parts already up when the same file is picked again.
  *
  * Realm's download endpoint is stubbed with `page.route`: the suite reaches no
  * one else's server. The steps build on each other, so the file runs serially;
@@ -157,6 +159,41 @@ test('a RisuRealm page adds a member to the public plot, once the owner vouches 
 
   await page.goto(`/ko/p/${plotId}`);
   await expect(page.getByTestId('plot-member')).toHaveCount(2);
+});
+
+test('a card picked again after a reload sends only the parts the first page did not', async () => {
+  // A file on disk, so both picks are the same file to the browser, its modification time included.
+  const path = test.info().outputPath('resumed.json');
+  await writeFile(path, JSON.stringify(card(`이어${run}`, 'CC BY 4.0')) + ' '.repeat(20 * 1024 * 1024));
+  await page.goto('/ko/plots');
+
+  // Three 8MB parts go up four at a time: the first page gets only part 1 through.
+  const PART = /\/api\/file-imports\/[^/]+\/parts\/(\d+)$/;
+  await page.route(PART, async (route) => {
+    if (route.request().url().endsWith('/parts/1')) await route.continue();
+    // Parts 2 and 3 are held until the page goes away.
+  });
+  const first = page.waitForResponse((response) => PART.test(response.url()) && response.url().endsWith('/parts/1'));
+  await page.getByTestId('plot-import-input').setInputFiles(path);
+  expect((await first).status()).toBe(204);
+  expect(await page.evaluate(() => localStorage.getItem('shizue.fileImport'))).toContain('"name":"resumed.json"');
+
+  await page.reload();
+  await page.unrouteAll({ behavior: 'ignoreErrors' });
+  const sent: string[] = [];
+  page.on('request', (request) => {
+    const part = PART.exec(request.url());
+    if (part && request.method() === 'PUT') sent.push(part[1]!);
+  });
+  await page.getByTestId('plot-import-input').setInputFiles(path);
+  await expect(page).toHaveURL(new RegExp(`/ko/plots/${UUID_PATH}$`));
+  await expect(members()).toHaveCount(1);
+  expect(sent.sort()).toEqual(['2', '3']);
+  expect(await page.evaluate(() => localStorage.getItem('shizue.fileImport'))).toBeNull();
+
+  page.once('dialog', (dialog) => void dialog.accept());
+  await page.getByRole('button', { name: '플롯 삭제' }).click();
+  await expect(page).toHaveURL(/\/ko\/plots$/);
 });
 
 test('deleting the plot cleans up after the run', async () => {
