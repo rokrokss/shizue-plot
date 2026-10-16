@@ -158,6 +158,32 @@ test('the translation mode translates every message and sends the reader turn in
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBe(0);
 });
 
+test('translates a reply that lands below what the list shows, once it is within 800px', async () => {
+  // The reader has scrolled up a little, so the list no longer follows the
+  // newest turn: the reply lands under what it shows, but close enough to be
+  // translated before the reader reaches it.
+  await page.setViewportSize({ width: 1024, height: 520 });
+  await page.goto(`/ko/chats/${chatId}`);
+  await expect(assistantMessages().last()).toContainText('들어가도 될까요?');
+  await assistantMessages().last().hover();
+  await page.mouse.wheel(0, -250);
+  await expect(page.getByRole('button', { name: '맨 아래로' })).toBeVisible();
+
+  await page.getByPlaceholder('English로 번역해 보내요…').fill(mine);
+  await page.getByRole('button', { name: '보내기', exact: true }).click();
+  await expect(page.getByRole('button', { name: '보내기' })).toBeVisible();
+  const reply = assistantMessages().last();
+  await expect(reply.getByTestId('message-translation')).toHaveText('번역됨 · 원문 보기');
+  await expect(reply).toContainText('들어가도 될까요?');
+  // Nothing scrolled it into view: it is still below the list's bottom edge.
+  const below = await reply.evaluate((element) => {
+    let list = element.parentElement;
+    while (list && !/auto|scroll/.test(getComputedStyle(list).overflowY)) list = list.parentElement;
+    return element.getBoundingClientRect().top - list!.getBoundingClientRect().bottom;
+  });
+  expect(below).toBeGreaterThan(0);
+});
+
 /** Resolves once the chat's settings write has been answered. */
 const settingsWrite = () =>
   page.waitForResponse((response) => response.request().method() === 'PATCH' && response.url().includes(`/api/chats/${chatId}`));
