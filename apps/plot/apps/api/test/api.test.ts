@@ -8884,6 +8884,34 @@ describe('memory', () => {
       await harness.settle();
     });
 
+    it('dates each message retrieval brings back as the facts are, in the conversation’s language', async () => {
+      const cookie = await signUp('retrieval-dated@example.com');
+      const { chatId } = await setupChat(cookie);
+      const embedder = keywordEmbedder();
+      const harness = memoryApp({ embedder });
+      await json(cookie, `/api/chats/${chatId}`, 'PATCH', { retrieval: { enabled: true } }, harness.app);
+      // The reader's first turn stands in the greeting's round, the first; its echo closes the second.
+      const KEEPER = '등대지기를 만났다';
+      await ask(cookie, chatId, harness, KEEPER);
+      // The greeting and 25 rounds; the summary covers the first exchange.
+      const ids = (await shortTurns(cookie, chatId, harness, 24)).map((message: any) => message.id);
+      const summary = await seedSummary(chatId, ids.slice(0, 3), '첫 인사를 나눴다.');
+      await insertFact(chatId, summary.id, FACTS[1]!, embedder);
+
+      // 26 rounds then, the clock at 20: the reader's turn stands 19 ago, said as about 20,
+      // the same label the fact of its summary carries.
+      await ask(cookie, chatId, harness, '그 등대 기억나?');
+      const korean = recallOf(harness.prompts.at(-1)!);
+      expect(korean).toContain(`${FACTS_HEADING}\n- (약 20턴 전) ${FACTS[1]}`);
+      expect(korean).toMatch(new RegExp(`\\n\\nPast events:\\n\\(약 20턴 전\\) [^\\n]+: ${KEEPER}$`));
+
+      // Four turns in English later, the clock at 30: it is said in English.
+      for (let turn = 0; turn < 4; turn += 1) await ask(cookie, chatId, harness, `Do you remember the 등대 keeper, round ${turn}?`);
+      const english = recallOf(harness.prompts.at(-1)!);
+      expect(english).toMatch(new RegExp(`\\n\\nPast events:\\n\\(~30 turns ago\\) [^\\n]+: ${KEEPER}$`));
+      await harness.settle();
+    });
+
     /** A turn's memory as sent (`memoryOf`), its time labels and all. */
     const askRaw = async (cookie: string, chatId: string, harness: Harness, content: string): Promise<string> => {
       const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }, harness.app);
@@ -19163,7 +19191,7 @@ describe('vector storage (SillyTavern)', () => {
     expect(await db.select().from(chatSummaries).where(eq(chatSummaries.chatId, chatId))).toEqual([]);
     await summarizeFirst(cookie, chatId, harness, 3, [turn.id]);
     const hidden = await send(cookie, chatId, '그 등대 기억나?', harness);
-    expect(recallOf(hidden)).toMatch(new RegExp(`^Past events:\\n${KEEPER}(\\n|$)`));
+    expect(recallOf(hidden)).toMatch(new RegExp(`^Past events:\\n\\(최근 10턴 이내\\) ${KEEPER}(\\n|$)`));
     expect(RETRIEVAL_DEFAULTS.template).toBe('Past events:\n{{text}}');
   });
 

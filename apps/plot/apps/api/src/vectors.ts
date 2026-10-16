@@ -35,19 +35,23 @@
  * Everything here swallows its own failures.
  */
 import {
+  detectContentLanguage,
   hybridRanking,
   isVectorLoreCandidate,
   lexicalRanking,
   loreChunks,
+  memoryClock,
   RETRIEVAL_DEFAULTS,
   retrievalBlock,
   retrievalChunks,
   retrievalEnabled,
   stripImageMacros,
   transcriptLine,
+  turnsAgoLabel,
   VECTOR_LORE,
   vectorLoreBar,
   vectorQueryText,
+  withTimeLabel,
   type LoreAliases,
   type LoreEntry,
   type LoreSettings,
@@ -74,10 +78,10 @@ import type { AppDeps, BackgroundTaskKind } from './deps.js';
 import type { Embedder, Embedding } from './embedder.js';
 import { aliasPlotLore, loreAliasesEnabled, loreAliasesFor } from './loreAliases.js';
 import { noteLexicalSearch } from './lexicalHealth.js';
-import type { AuxiliaryOwner } from './memory.js';
+import { LANGUAGE_TURNS, type AuxiliaryOwner } from './memory.js';
 import { readerModulesOnPlot } from './readerModules.js';
 import { loadReaderOverlay } from './scriptState.js';
-import { buildPath, visibleToAi } from './tree.js';
+import { buildPath, roundsAlong, visibleToAi } from './tree.js';
 
 /** How long a request waits to embed its query before it goes on without the search. */
 const QUERY_EMBED_TIMEOUT_MS = 3_000;
@@ -770,7 +774,8 @@ const RETRIEVAL_CANDIDATES = 20;
  * ARCHITECTURE §7.3 단어 검색) of ST's search, the chunks most like the query at
  * or above its threshold whose vectors are of the text they still hold, and
  * BM25 over the same chunks for the newest turn (`turn`), with evidence only.
- * Unlike ST, nothing leaves the history: the block is a copy.
+ * Unlike ST, nothing leaves the history: the block is a copy. Each line is led
+ * by the time label the memory dates its summaries and facts with.
  */
 async function retrievedMessages(
   deps: AppDeps,
@@ -778,7 +783,7 @@ async function retrievedMessages(
   eligible: readonly Message[],
   vector: number[],
   turn: string,
-  input: { characters: readonly PromptCharacter[]; userName: string },
+  input: { characters: readonly PromptCharacter[]; userName: string; branch: readonly Message[] },
 ): Promise<string> {
   const score = similarity(messageChunks.embedding, vector);
   // Every id and hash is a uuid or hex, so the array literals need no quoting.
@@ -819,12 +824,28 @@ async function retrievedMessages(
       : [],
   );
   const names = new Map(input.characters.flatMap((member) => (member.id ? [[member.id, member.name] as const] : [])));
+  // Each dated as the memory dates its summaries and facts (`buildMemoryInput`):
+  // the turn the message closes on the branch (`roundsAlong`), counted back from
+  // the memory's ten-turn clock (`memoryClock`), in the language of the latest
+  // turns — so an old value brought back reads as older than a newer fact.
+  const rounds = roundsAlong(input.branch);
+  const roundOf = new Map(input.branch.map((message, at) => [message.id, rounds[at]!]));
+  const now = memoryClock(rounds.at(-1) ?? 0);
+  const language = detectContentLanguage(
+    visibleToAi(input.branch)
+      .slice(-LANGUAGE_TURNS)
+      .map((message) => stripImageMacros(message.content))
+      .join('\n'),
+  );
   const lines = [...found].reverse().map((message) =>
-    transcriptLine(
-      message,
-      input.userName,
-      message.speakerMemberId !== null ? names.get(message.speakerMemberId) : undefined,
-      readers,
+    withTimeLabel(
+      transcriptLine(
+        message,
+        input.userName,
+        message.speakerMemberId !== null ? names.get(message.speakerMemberId) : undefined,
+        readers,
+      ).trim(),
+      turnsAgoLabel(now - roundOf.get(message.id)!, language),
     ),
   );
   return retrievalBlock(lines);

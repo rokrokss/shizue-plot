@@ -100,8 +100,8 @@ const QUERY_EMBED_TIMEOUT_MS = 3_000;
 const CHUNKS_PER_REFRESH = 64;
 /** Longest summary a reader may write. */
 export const MAX_SUMMARY_LENGTH = 20_000;
-/** The latest turns the conversation's language is read from, for the facts. */
-const LANGUAGE_TURNS = 6;
+/** The latest turns the conversation's language is read from, for the facts and the time labels (retrieval's too, `vectors.ts`). */
+export const LANGUAGE_TURNS = 6;
 
 /* --------------------------------------------------------------- settings */
 
