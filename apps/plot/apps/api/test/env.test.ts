@@ -32,6 +32,25 @@ describe('readConfig', () => {
       expect(() => readConfig({ NODE_ENV: 'development', DATABASE_URL, BETTER_AUTH_URL: url })).toThrow(/web origin/);
     }
   });
+  it('reads the remote origins a phone reaches the app at, each only an origin', () => {
+    expect(readConfig({ DATABASE_URL }).remoteOrigins).toEqual([]);
+    expect(readConfig({
+      DATABASE_URL, REMOTE_ORIGINS: ' https://mac.example.ts.net:8444 ,http://localhost:13000,, https://mac.example.ts.net:8444',
+    }).remoteOrigins).toEqual(['https://mac.example.ts.net:8444']);
+    for (const value of ['mac.example.ts.net', 'https://mac.example.ts.net/', 'ftp://mac.example.ts.net', 'https://a.example,nope']) {
+      expect(() => readConfig({ DATABASE_URL, REMOTE_ORIGINS: value })).toThrow(/REMOTE_ORIGINS/);
+    }
+  });
+  it('refuses remote origins anywhere but a shizue signing in on this machine', () => {
+    expect(readConfig({ DATABASE_URL, BETTER_AUTH_URL: 'http://127.0.0.1:13100', REMOTE_ORIGINS: 'https://mac.example.ts.net:8444' })
+      .remoteOrigins).toEqual(['https://mac.example.ts.net:8444']);
+    expect(() => readConfig({
+      NODE_ENV: 'production', DATABASE_URL, BETTER_AUTH_SECRET: 's', BETTER_AUTH_URL: 'https://plot.shizue.net', REMOTE_ORIGINS: 'https://mac.example.ts.net:8444',
+    })).toThrow(/only for a shizue running on this machine/);
+    // Empty is no list at all, wherever the app runs.
+    expect(readConfig({ NODE_ENV: 'production', DATABASE_URL, BETTER_AUTH_SECRET: 's', BETTER_AUTH_URL: 'https://plot.shizue.net', REMOTE_ORIGINS: '' })
+      .remoteOrigins).toEqual([]);
+  });
   it('reads the loopback port the companion extension catches', () => {
     expect(readConfig({ DATABASE_URL }).chatgptCallbackPort).toBe(47801);
     expect(readConfig({ DATABASE_URL, CHATGPT_CALLBACK_PORT: '47811' }).chatgptCallbackPort).toBe(47811);

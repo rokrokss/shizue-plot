@@ -4,8 +4,9 @@ import { useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { useLocale, useTranslations } from 'next-intl';
 import { apiGet, apiSend, ApiError } from '@/lib/api';
-import { refreshSession } from '@/lib/authClient';
+import { refreshSession, useSession } from '@/lib/authClient';
 import { EXTENSION_URL, detectExtension } from '@/lib/chatgptExtension';
+import { DEVICE_PAIRING } from '@/lib/devicePairing';
 import { useErrorMessage } from '@/lib/useErrorMessage';
 import { Button, ErrorText, cx } from './ui';
 
@@ -72,6 +73,7 @@ function SignIn({ next, errorCode }: { next: string; errorCode: string | undefin
       {missing ? (
         <div className="space-y-3 rounded-xl border border-line bg-raised/50 p-4 text-sm leading-relaxed break-words">
           <p>{t('extensionRequired')}</p>
+          {DEVICE_PAIRING ? <p>{t('pairHint')}</p> : null}
           <a href={EXTENSION_URL} target="_blank" rel="noreferrer" className="inline-block font-semibold text-link underline underline-offset-2">{t('extensionInstall')}</a>
           <Button size="sm" busy={rechecking} onClick={() => void recheck()}>{t('extensionRecheck')}</Button>
           <p role="status" className="text-muted">{extension === 'stillMissing' ? t('extensionStillMissing') : ''}</p>
@@ -84,6 +86,8 @@ function SignIn({ next, errorCode }: { next: string; errorCode: string | undefin
 function Account() {
   const t = useTranslations('chatgpt');
   const toMessage = useErrorMessage();
+  // A paired phone's sign-out ends that device's session alone (§4.1), so it says so.
+  const paired = useSession().data?.paired === true;
   const [status, setStatus] = useState<Status | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -112,7 +116,7 @@ function Account() {
             {status.email ?? t('connectedAccount')}
           </p>
         ) : null}
-        <Button className="w-full" busy={busy} onClick={() => void signOut()}>{t('disconnect')}</Button>
+        <Button className="w-full" busy={busy} onClick={() => void signOut()}>{t(paired ? 'disconnectDevice' : 'disconnect')}</Button>
       </div>
       <ErrorText>{error}</ErrorText>
       {notice ? <p role="status" className="text-sm text-muted">{notice}</p> : null}

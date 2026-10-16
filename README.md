@@ -83,6 +83,31 @@ Image attachments are sent only when the account's model catalog advertises imag
 input. Reply length is requested in the prompt; this route accepts no hard
 output-token limit.
 
+### On a phone, from your own machine
+
+This is for a shizue running on your own computer only; the hosted service has
+no phone pairing. Put a tunnel in front of the web app and list its origin in
+`REMOTE_ORIGINS` (`apps/plot/.env`), which `scripts/dev.sh` passes to `next dev`
+as well. The API refuses the setting unless `BETTER_AUTH_URL` is a loopback
+origin, and without it there is no pairing at all. Tailscale Serve keeps the
+tunnel inside your tailnet and needs the Tailscale app on the phone:
+
+```sh
+tailscale serve --https=8444 --bg http://127.0.0.1:13000
+# REMOTE_ORIGINS=https://<machine>.<tailnet>.ts.net:8444
+```
+
+Pick a port your other `tailscale serve` entries do not use (`tailscale serve
+status`). Plain LAN addresses (`http://192.168.x.x`) are not supported: without
+HTTPS the browser withholds `crypto.subtle`, `crypto.randomUUID` and the
+clipboard, which chats use.
+
+Phone browsers run no extension, so the phone never signs in with ChatGPT
+itself. Sign in on the computer, open **Settings → Connect a phone** and scan the
+QR code; the code works once, for five minutes, and the phone gets a session of
+its own. Signing out on the phone ends only that phone's session; signing out on
+the computer ends the phones' too.
+
 **Scope.** OpenAI's open-source flow is for open-source and locally hosted apps.
 Holding readers' tokens on a hosted server is the "remotely hosted" case, which
 needs OpenAI's [interest form](https://openai.com/form/sign-in-with-chatgpt-interest/).

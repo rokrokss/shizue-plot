@@ -40,7 +40,7 @@ console.log(`${apply ? 'Applying to' : 'Dry run against'} ${target.host}${target
 
 const { db, close } = createDb(config.databaseUrl);
 const storage = createStorage(config.storage);
-const remoteFetch = createRemoteFetch({ ownOrigins: [config.authUrl, ...(config.apiOrigin ? [config.apiOrigin] : [])] });
+const remoteFetch = createRemoteFetch({ ownOrigins: [config.authUrl, ...config.remoteOrigins, ...(config.apiOrigin ? [config.apiOrigin] : [])] });
 try {
   const rows = await db.select({ id: plots.id, name: plots.name }).from(plots).orderBy(asc(plots.createdAt));
   let touched = 0;

@@ -641,6 +641,35 @@ test('generates one more reply with the auto button', async () => {
   await expectComposerIdle();
 });
 
+test('keeps following the conversation when what stands under it shrinks back', async () => {
+  // Several lines grow the composer and shorten the list; the reader reads down
+  // to the newest turn, then clears them. The list grows back and the browser
+  // pulls its scroll up with it, which is not the reader leaving the bottom: the
+  // next reply is still followed.
+  const list = page.locator('[data-message-list]');
+  const composer = page.getByPlaceholder('메시지를 입력하세요');
+  await composer.fill(['하나', '둘', '셋', '넷', '다섯', '여섯'].join('\n'));
+  await assistantMessages().last().hover();
+  await page.mouse.wheel(0, 2000);
+  await expect.poll(() => list.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThan(2);
+  await composer.fill('');
+
+  const before = await assistantMessages().count();
+  await composer.fill('조금만 더');
+  await page.getByRole('button', { name: '보내기' }).click();
+  await expect(assistantMessages()).toHaveCount(before + 1);
+  await expect(userMessages().last()).toContainText('조금만 더');
+  await expectComposerIdle();
+  // Followed down to it: the reply ends on the list's screen, and no way down is offered.
+  await expect
+    .poll(async () => {
+      const [reply, shown] = await Promise.all([assistantMessages().last().boundingBox(), list.boundingBox()]);
+      return reply!.y + reply!.height - (shown!.y + shown!.height);
+    })
+    .toBeLessThanOrEqual(1);
+  await expect(page.getByRole('button', { name: '맨 아래로' })).toBeHidden();
+});
+
 test('switches the UI locale to Japanese', async () => {
   const chatPath = new URL(page.url()).pathname;
 

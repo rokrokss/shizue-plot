@@ -3,7 +3,7 @@ import { SIGN_IN_LOCALES, SignInFailure, type SignInLocale } from '../chatgptAcc
 import type { AppDeps, AppEnv } from '../deps.js';
 import { ApiError, badRequest } from '../errors.js';
 import { RATE_LIMITS, rateLimit } from '../rateLimit.js';
-import { cookie, readCookie } from '../hostedAuth.js';
+import { cookie, readCookie, signOut } from '../hostedAuth.js';
 import { requireUser } from '../session.js';
 import { optionalString, readJsonBody } from '../util.js';
 
@@ -69,7 +69,8 @@ export function chatGPTRoutes(deps: AppDeps): Hono<AppEnv> {
 
   app.post('/sign-out', requireUser, async (c) => {
     const { accounts, sessions } = service();
-    const result = await accounts.signOut(c.get('userId'));
+    const current = await sessions.resolve(c.req.raw.headers);
+    const result = current ? await signOut(sessions, accounts, current, c.req.raw.headers) : await accounts.signOut(c.get('userId'));
     c.header('Set-Cookie', sessions.clearCookie());
     return c.json(result);
   });

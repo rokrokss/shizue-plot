@@ -538,7 +538,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   // The message list scrolls, not the document: the reader's own scroll is what
   // decides whether new text follows them down, and the library gives that up the
   // moment they move away from the bottom.
-  const { scrollRef, contentRef, isAtBottom, scrollToBottom } = useStickToBottom({
+  const { scrollRef, contentRef, isAtBottom, scrollToBottom, state: stick } = useStickToBottom({
     initial: 'instant',
   });
   /** A component turn that was accepted and has not finished yet. */
@@ -1103,6 +1103,35 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [cardOverlays.open, closeCardOverlays]);
+
+  /**
+   * The list fills the stage, whose height moves with what stands under it — the
+   * composer growing with its text, the chips, a notice — while the library
+   * watches only the list's content. Grown, the list has the browser pull its
+   * scroll up, which the library takes for the reader leaving the bottom, so the
+   * next reply is no longer followed; shrunk, the newest line slips under the
+   * composer. A reader who was following keeps following: the scroll goes back to
+   * the bottom, marked as a resize the way the library marks its content's, so it
+   * is not read as theirs.
+   */
+  useEffect(() => {
+    if (!stageElement || typeof ResizeObserver !== 'function') return;
+    let height = stageElement.clientHeight;
+    const observer = new ResizeObserver(() => {
+      const difference = stageElement.clientHeight - height;
+      height = stageElement.clientHeight;
+      if (difference === 0 || !stick.isAtBottom) return;
+      stick.resizeDifference = difference;
+      requestAnimationFrame(() =>
+        setTimeout(() => {
+          if (stick.resizeDifference === difference) stick.resizeDifference = 0;
+        }, 1),
+      );
+      stick.scrollTop = stick.calculatedTargetScrollTop;
+    });
+    observer.observe(stageElement);
+    return () => observer.disconnect();
+  }, [stageElement, stick]);
 
   /**
    * RisuAI's emotion screen: the picture each panel member shows on the branch

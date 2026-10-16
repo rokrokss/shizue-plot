@@ -4,7 +4,8 @@ import { useEffect, useSyncExternalStore } from 'react';
 import { apiGet, apiSend } from './api';
 import { endReaderLuaSandbox } from './scripts/lua/readerSandbox';
 
-interface Session { user: { id: string; name: string; email: string; image: string | null } }
+/** `paired`: this browser joined by pairing from another device, and signing out here ends only its own session. */
+interface Session { user: { id: string; name: string; email: string; image: string | null }; paired?: boolean }
 interface State { data: Session | null; isPending: boolean }
 const initial: State = { data: null, isPending: true };
 let state = initial;

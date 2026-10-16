@@ -4,7 +4,8 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { ChatGPTAccounts } from './chatgptAccounts.js';
 
 export interface SessionUser { id: string; name: string; email: string; image?: string | null }
-export interface AppSession { user: SessionUser }
+/** `paired`: a session another of the reader's devices handed to this browser (`routes/devices.ts`). */
+export interface AppSession { user: SessionUser; paired?: boolean }
 /** What the app needs from authentication; better-auth's test fixture has the same shape. */
 export interface AppAuth {
   handler(request: Request): Response | Promise<Response>;
@@ -13,6 +14,12 @@ export interface AppAuth {
 
 export const SESSION_COOKIE = 'shizue_session';
 const SESSION_TTL_S = 30 * 24 * 60 * 60;
+/**
+ * The `session.id` of a paired device's session starts with this. Signing out
+ * there ends that session alone: the ChatGPT sign-in, and every other session,
+ * belong to the browser that signed in.
+ */
+const PAIRED_PREFIX = 'paired:';
 const digest = (token: string): string => createHash('sha256').update(token).digest('hex');
 
 export function readCookie(headers: Headers, name: string): string | undefined {
@@ -33,17 +40,19 @@ export function cookie(name: string, value: string, options: { path?: string; ma
  */
 export interface SessionStore {
   /** Returns the Set-Cookie value for the new session. */
-  create(userId: string, request: Request): Promise<string>;
+  create(userId: string, request: Request, options?: { paired?: boolean }): Promise<string>;
   resolve(headers: Headers): Promise<AppSession | null>;
+  /** Ends the session these headers carry, and only that one. */
+  end(headers: Headers): Promise<void>;
   clearCookie(): string;
 }
 
 export function createSessionStore(db: Db, options: { secure: boolean }): SessionStore {
   return {
-    async create(userId, request) {
+    async create(userId, request, { paired = false } = {}) {
       const token = randomBytes(32).toString('base64url');
       await db.insert(session).values({
-        id: randomUUID(), token: digest(token), userId,
+        id: `${paired ? PAIRED_PREFIX : ''}${randomUUID()}`, token: digest(token), userId,
         expiresAt: new Date(Date.now() + SESSION_TTL_S * 1000),
         userAgent: request.headers.get('user-agent')?.slice(0, 512) ?? null,
       });
@@ -52,13 +61,31 @@ export function createSessionStore(db: Db, options: { secure: boolean }): Sessio
     async resolve(headers) {
       const token = readCookie(headers, SESSION_COOKIE);
       if (!token) return null;
-      const [row] = await db.select({ id: user.id, name: user.name, email: user.email, image: user.image })
+      const [row] = await db.select({ id: user.id, name: user.name, email: user.email, image: user.image, sessionId: session.id })
         .from(session).innerJoin(user, eq(session.userId, user.id))
         .where(and(eq(session.token, digest(token)), gt(session.expiresAt, new Date()))).limit(1);
-      return row ? { user: row } : null;
+      if (!row) return null;
+      const { sessionId, ...owner } = row;
+      return sessionId.startsWith(PAIRED_PREFIX) ? { user: owner, paired: true } : { user: owner };
+    },
+    async end(headers) {
+      const token = readCookie(headers, SESSION_COOKIE);
+      if (token) await db.delete(session).where(eq(session.token, digest(token)));
     },
     clearCookie: () => cookie(SESSION_COOKIE, '', { maxAge: 0, secure: options.secure }),
   };
+}
+
+/**
+ * Signing out: a paired device leaves alone, and the browser that signed in
+ * ends the ChatGPT sign-in and every session with it, paired ones included.
+ */
+export async function signOut(
+  sessions: SessionStore, accounts: ChatGPTAccounts, current: AppSession, headers: Headers,
+): Promise<{ revocationPending: boolean }> {
+  if (!current.paired) return accounts.signOut(current.user.id);
+  await sessions.end(headers);
+  return { revocationPending: false };
 }
 
 const json = (body: unknown, init: ResponseInit = {}): Response =>
@@ -80,7 +107,7 @@ export function createHostedAuth(sessions: SessionStore, accounts: ChatGPTAccoun
       if (request.method === 'POST' && path === '/api/auth/sign-out') {
         const current = await sessions.resolve(request.headers);
         if (current) {
-          const result = await accounts.signOut(current.user.id);
+          const result = await signOut(sessions, accounts, current, request.headers);
           return json(result, { headers: { 'Set-Cookie': sessions.clearCookie() } });
         }
       }

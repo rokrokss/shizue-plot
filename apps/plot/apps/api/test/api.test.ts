@@ -88,8 +88,10 @@ import {
   rateLimits,
   readerModules,
   readerPresets,
+  session,
   user,
   userNotes,
+  verification,
   type ChatRelationship,
   type ContentLanguage,
   type Db,
@@ -839,10 +841,10 @@ function jar(...headers: string[]): string {
   return [...cookies.values()].join('; ');
 }
 
-function hostedApp(openai: ReturnType<typeof fakeOpenAI>, env: Record<string, string> = {}) {
+function hostedApp(openai: ReturnType<typeof fakeOpenAI>, env: Record<string, string> = {}, overrides: Partial<AppDeps> = {}) {
   const accounts = createChatGPTAccounts(db, { secret: 'test-secret-test-secret-test-secret', callbackPort: 47801, oauth: openai.oauth });
   const sessions = createSessionStore(db, { secure: false });
-  const target = makeApp({ auth: createHostedAuth(sessions, accounts), chatgpt: { accounts, sessions }, env });
+  const target = makeApp({ auth: createHostedAuth(sessions, accounts), chatgpt: { accounts, sessions }, env, ...overrides });
   /** The whole round trip as the browser makes it; returns the cookies it ends with. */
   async function signIn(subject: string, cookies = ''): Promise<{ callback: Response; cookie: string; authorization: URL }> {
     const start = await target.request('/api/chatgpt/sign-in', {
@@ -1018,6 +1020,110 @@ describe('Sign in with ChatGPT', () => {
     const second = await signIn('bob');
     expect(await readJson(await request(second.cookie, '/api/plots', 'GET', undefined, target))).toEqual([]);
     expect(await db.select().from(account).where(eq(account.providerId, 'local-workspace'))).toHaveLength(0);
+  });
+});
+
+describe('pairing a phone', () => {
+  /** A tunnel to a shizue running on the reader's own machine, the only place pairing exists. */
+  const TUNNEL = 'https://mac.example.ts.net:8444';
+  const localApp = (openai: ReturnType<typeof fakeOpenAI>) => hostedApp(openai, {}, { remoteOrigins: [TUNNEL] });
+  /** The phone's side, with whatever Origin its page sends. */
+  const claim = async (target: Hono<AppEnv>, code: unknown, origin?: string): Promise<Response> => target.request('/api/devices/claim', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...(origin ? { origin } : {}) },
+    body: JSON.stringify({ code }),
+  });
+
+  it('hands a phone a session of its own for a code the signed-in browser made, once', async () => {
+    const openai = fakeOpenAI();
+    const { target, signIn } = localApp(openai);
+    expect((await json(undefined, '/api/devices/pair', 'POST', undefined, target)).status).toBe(401);
+    const pc = (await signIn('alice')).cookie;
+
+    const made = await json(pc, '/api/devices/pair', 'POST', undefined, target);
+    expect(made.status).toBe(200);
+    expect(made.headers.get('cache-control')).toBe('no-store');
+    const { code, expiresAt, origins } = await readJson(made);
+    expect(origins).toEqual([TUNNEL]);
+    expect(code).toMatch(/^[\w-]{43}$/);
+    expect(new Date(expiresAt).getTime() - Date.now()).toBeGreaterThan(4 * 60_000);
+    // Only a digest is stored.
+    const [stored] = await db.select().from(verification);
+    expect(`${stored!.identifier}${stored!.value}`).not.toContain(code);
+
+    const joined = await claim(target, code);
+    expect(joined.status).toBe(204);
+    expect(joined.headers.getSetCookie().find((value) => value.startsWith('shizue_session='))).toMatch(/HttpOnly; SameSite=Lax/);
+    const phone = cookieOf(joined);
+    const seen = await readJson(await request(phone, '/api/auth/get-session', 'GET', undefined, target));
+    expect(seen).toMatchObject({ user: { email: 'alice@chatgpt.test' }, paired: true });
+    expect((await readJson(await request(pc, '/api/auth/get-session', 'GET', undefined, target))).paired).toBeUndefined();
+    expect((await request(phone, '/api/chats', 'GET', undefined, target)).status).toBe(200);
+
+    // Single use, and no code at all is no session either.
+    for (const again of [code, 'not-a-code', '']) {
+      const refused = await claim(target, again);
+      expect(refused.status).toBe(400);
+      expect(await readJson(refused)).toMatchObject({ code: 'pairing_invalid' });
+      expect(refused.headers.getSetCookie()).toEqual([]);
+    }
+    expect((await claim(target, 42)).status).toBe(400);
+  });
+
+  it('refuses a code past its five minutes', async () => {
+    const { target, signIn } = localApp(fakeOpenAI());
+    const pc = (await signIn('alice')).cookie;
+    const { code } = await readJson(await json(pc, '/api/devices/pair', 'POST', undefined, target));
+    await db.update(verification).set({ expiresAt: new Date(Date.now() - 1000) });
+    expect(await readJson(await claim(target, code))).toMatchObject({ code: 'pairing_invalid' });
+  });
+
+  it("signs a phone out alone, and the computer's sign-out takes the phones with it", async () => {
+    const openai = fakeOpenAI();
+    const { target, signIn } = localApp(openai);
+    const pc = (await signIn('alice')).cookie;
+    const pairPhone = async (): Promise<string> =>
+      cookieOf(await claim(target, (await readJson(await json(pc, '/api/devices/pair', 'POST', undefined, target))).code));
+    const phone = await pairPhone();
+    const tablet = await pairPhone();
+
+    // Either sign-out, from a phone, ends that phone's session and nothing else.
+    expect(await readJson(await json(phone, '/api/auth/sign-out', 'POST', {}, target))).toEqual({ revocationPending: false });
+    expect(await readJson(await json(tablet, '/api/chatgpt/sign-out', 'POST', undefined, target))).toEqual({ revocationPending: false });
+    expect(openai.state.revoked).toEqual([]);
+    expect((await request(phone, '/api/chats', 'GET', undefined, target)).status).toBe(401);
+    expect((await request(tablet, '/api/chats', 'GET', undefined, target)).status).toBe(401);
+    expect((await request(pc, '/api/chats', 'GET', undefined, target)).status).toBe(200);
+    expect(await readJson(await request(pc, '/api/chatgpt', 'GET', undefined, target))).toEqual({ connected: true, email: 'alice@chatgpt.test' });
+
+    const third = await pairPhone();
+    expect(await readJson(await json(pc, '/api/chatgpt/sign-out', 'POST', undefined, target))).toEqual({ revocationPending: false });
+    expect(openai.state.revoked).toEqual(['REFRESH-alice-0']);
+    expect((await request(third, '/api/chats', 'GET', undefined, target)).status).toBe(401);
+    expect(await db.select().from(session)).toHaveLength(0);
+  });
+
+  it('has no pairing without remote origins, as the hosted app, and takes a claim from the tunnel only', async () => {
+    const accounts = createChatGPTAccounts(db, { secret: 'test-secret-test-secret-test-secret', callbackPort: 47801, oauth: fakeOpenAI().oauth });
+    const sessions = createSessionStore(db, { secure: false });
+    const deps = { auth: createHostedAuth(sessions, accounts), chatgpt: { accounts, sessions }, webOrigin: 'http://localhost:13000' };
+    const hosted = makeApp({ ...deps, webOrigin: 'https://plot.example' });
+    const local = makeApp({ ...deps, remoteOrigins: [TUNNEL] });
+    const [owner] = await db.insert(user).values({ id: randomUUID(), name: 'alice', email: 'alice@chatgpt.test' }).returning();
+    const signedIn = (await sessions.create(owner!.id, new Request('http://localhost:13000/'))).split(';')[0]!;
+    const pair = async (target: Hono<AppEnv>, origin: string): Promise<Response> => target.request('/api/devices/pair', {
+      method: 'POST', headers: { cookie: signedIn, origin },
+    });
+
+    expect((await pair(hosted, 'https://plot.example')).status).toBe(404);
+    expect((await claim(hosted, 'x', 'https://plot.example')).status).toBe(404);
+    expect(await db.select().from(verification)).toHaveLength(0);
+
+    const { code } = await readJson(await pair(local, 'http://localhost:13000'));
+    for (const origin of [undefined, 'https://evil.example', 'https://mac.example.ts.net', 'http://mac.example.ts.net:8444']) {
+      expect((await claim(local, code, origin)).status).toBe(403);
+    }
+    expect((await claim(local, code, TUNNEL)).status).toBe(204);
   });
 });
 

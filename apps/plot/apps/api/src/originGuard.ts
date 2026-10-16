@@ -7,18 +7,21 @@ import type { AppEnv } from './deps.js';
  * Next rewrite forwarded must have reached the app under its own Host (DNS
  * rebinding). Top-level GET navigations carry no Origin, which is how the
  * ChatGPT sign-in callback arrives.
+ *
+ * The app may be reached at more than one origin — `remoteOrigins`, a tunnel to
+ * this machine for a phone — and each counts as the app's own.
  */
-export function originGuard(webOrigin: string): MiddlewareHandler<AppEnv> {
-  const origin = new URL(webOrigin).origin;
-  const webHost = new URL(webOrigin).host;
+export function originGuard(webOrigin: string, remoteOrigins: readonly string[] = []): MiddlewareHandler<AppEnv> {
+  const origins = new Set([webOrigin, ...remoteOrigins].map((value) => new URL(value).origin));
+  const hosts = new Set([...origins].map((value) => new URL(value).host));
   return async (c, next) => {
     const requestOrigin = c.req.header('origin');
     // Next rewrites the upstream Host and overwrites this header with the original
     // browser-facing Host. Check it before trusting anything about the request.
     const forwardedHost = c.req.header('x-forwarded-host');
     const unsafe = !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method);
-    if ((forwardedHost !== undefined && forwardedHost !== webHost) ||
-      (requestOrigin !== undefined && requestOrigin !== origin) || (unsafe && requestOrigin !== origin)) {
+    if ((forwardedHost !== undefined && !hosts.has(forwardedHost)) ||
+      (requestOrigin !== undefined && !origins.has(requestOrigin)) || (unsafe && requestOrigin === undefined)) {
       return c.json({ error: 'This API accepts requests only from its own web app.', code: 'foreign_origin' }, 403);
     }
     await next();

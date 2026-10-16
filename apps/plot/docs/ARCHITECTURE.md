@@ -81,6 +81,7 @@ S3_BUCKET / S3_REGION / S3_ENDPOINT                        # 미디어는 STORAG
 S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY                    # 둘 다 비면 SDK 자격증명 체인
 S3_FORCE_PATH_STYLE=true         # 로컬 RustFS 필수, AWS 는 false
 CHATGPT_CALLBACK_PORT=47801      # OpenAI 루프백 콜백 포트. 확장 규칙과 오리진마다 짝 — plot.shizue.net·localhost:13000은 생략하면 Shizue 포트 (§4.1)
+REMOTE_ORIGINS=                  # 로컬 실행 전용. 같은 웹 앱의 다른 오리진, 쉼표로 — 이 기기로 가는 터널(휴대폰용). 쓰기를 BETTER_AUTH_URL처럼 받되 로그인은 BETTER_AUTH_URL로만. BETTER_AUTH_URL이 루프백이 아니면 부팅 거절 (§4.1 기기 연결)
 EMBEDDER_ROUTING=single          # 플롯의 임베딩 모델을 고르는 법(§7.3): single(기본 — EMBEDDER_MODEL 하나, 기본 KURE-v1) | by-language(ko는 KURE-v1, 나머지는 bge-m3)
 EMBEDDER_MODEL=KURE-v1           # single일 때 모든 플롯의 모델 — `embedder.ts`의 `EMBEDDING_MODELS` 키. by-language에선 읽지 않는다
 EMBEDDER_CACHE_DIR=./data/embedder  # 그 가중치를 둘 곳(리포 루트 기준 resolve). `embedder:fetch`가 채우고, 서버는 여기서만 읽는다
@@ -110,6 +111,9 @@ LORE_ALIASES=off                 # 다른 언어 작품의 로어 한국어 별�
 웹과 API는 여러 사용자가 접속하는 서비스로 돈다. API는 `API_HOST`에 바인딩하고, `originGuard`가
 변경 요청의 Origin을 `BETTER_AUTH_URL`과 대조하며(CSRF), Origin이 실린 요청은 그 오리진만,
 Next rewrite가 넘긴 요청은 `x-forwarded-host`가 웹 호스트일 때만 받는다(DNS 리바인딩).
+`REMOTE_ORIGINS`에 적은 오리진(이 기기로 가는 터널 — 아래 기기 연결)도 같은 앱으로 쳐서 웹 오리진과 똑같이 받는다.
+목록은 오리진 그대로 대조하므로 같은 호스트라도 스킴이나 포트가 다르면 거절한다. 카드 스크립트의 `request`와
+임포트도 그 오리진들을 자기 오리진으로 보고 가지 않는다.
 
 서버는 카드 스크립트를 대신해서도 밖으로 나간다: Lua `request`를 `POST /api/chats/:id/script-fetch`가 GET하므로
 대상은 독자가 아니라 이 서버를 본다(RisuAI 웹이 자기 프록시로 보내는 것과 같다). 공개 주소에만 간다 — 이름은 서버가
@@ -180,7 +184,32 @@ ping을 보내 `features: ['plotSignIn']`이 담긴 답이 오면 로그인 버�
    다음 로그인이 같은 등록을 다시 쓴다(등록이 쌓이지 않게). 서버는 OpenAI에게 호스트 하나이며
    `ext_agent_host_id`는 비밀에서 파생한 `urn:uuid`다.
 5. 로그아웃(`POST /api/chatgpt/sign-out`, `/api/auth/sign-out`)은 refresh token 해제를 시도하고 토큰을 지우되
-   등록은 남기며, 그 사용자의 세션을 모두 끝낸다.
+   등록은 남기며, 그 사용자의 세션을 모두 끝낸다 — 연결한 기기의 세션도. 연결한 기기(아래)에서 누른 로그아웃은
+   두 라우트 모두 그 기기의 세션 하나만 끝내고 토큰과 다른 세션은 그대로 둔다(`revocationPending: false`).
+
+**기기 연결**(`routes/devices.ts`)은 **로컬 실행 전용**이다 — 독자가 자기 컴퓨터에 띄운 shizue를 터널로
+휴대폰에서 여는 경우이고, 서비스로 서버에 띄운 shizue(호스팅판)에는 없다(소유자 결정, 2026-10-17). 그래서
+`REMOTE_ORIGINS`가 있을 때만 존재한다: 없으면 `/api/devices/*`는 404이고 웹은 설정 카드·로그인 안내·`/pair`를
+그리지 않으며, `BETTER_AUTH_URL`이 루프백(`localhost`·`127.0.0.1`·`[::1]`) 오리진이 아니면 API가 `REMOTE_ORIGINS`를
+부팅 때 거절한다. 휴대폰은 ChatGPT 로그인을 끝내지 못한다 — 콜백은 브라우저가 도는 기기의 `127.0.0.1`이고,
+그것을 바꿔 주는 확장이 휴대폰 브라우저에는 없다. 그래서 로그인한 브라우저가 휴대폰에 세션을 하나 더 건넨다. 토큰은 서버를 떠나지 않고 `ext_agent_host_id`도 그대로다 — 브라우저가 하나 더 붙을 뿐 OpenAI가
+말하는 호스트(도구가 도는 환경)가 늘지 않으므로, 자격 증명을 옮기는 자체 호스팅 VM 절차와는 다르다.
+
+1. `POST /api/devices/pair`(로그인 필요) — 32바이트 일회용 코드를 만들어 그 SHA-256만 `verification` 행
+   (`device-pairing:<다이제스트>`, 값은 사용자 id)에 5분 보관하고, 코드와 만료 시각, 휴대폰이 열 오리진
+   (`REMOTE_ORIGINS`)을 준다. 만료된 연결 행은 이때 지운다.
+2. 설정 화면이 `<오리진>/<locale>/pair#<코드>`를 QR로 보인다. 코드는 프래그먼트라 서버·프록시 로그에 남지 않고,
+   `/pair` 페이지는 읽자마자 주소에서 지운다.
+3. 휴대폰의 `/pair`는 확인 버튼을 거쳐 `POST /api/devices/claim {code}`를 보낸다 — GET으로 세션을 주지 않는
+   이유는 링크만으로 남의 계정에 로그인되는 로그인 CSRF다. 서버는 코드 행을 **지우면서** 읽고(1회용, 틀리거나
+   만료되거나 이미 쓴 코드는 400 `pairing_invalid`), 그 사용자에게 세션을 하나 더 만들어 그 오리진에 쿠키를
+   심는다(204). 이 세션의 `session.id`는 `paired:`로 시작하고, `/api/auth/get-session`이 `paired: true`를 싣는다.
+
+터널은 코드가 띄우지 않는다. 소유자가 띄우고(예: `tailscale serve --https=<port> --bg http://127.0.0.1:13000`)
+그 주소를 `REMOTE_ORIGINS`에 적는다. `next.config.ts`가 같은 변수를 읽어 그 호스트를 `allowedDevOrigins`에 넣고
+(`next dev`는 `/_next/*`를 다른 호스트에서 받지 않는다) 웹의 `NEXT_PUBLIC_DEVICE_PAIRING`(`lib/devicePairing.ts`)을
+켜며, `scripts/dev.sh`가 `apps/plot/.env`의 그 줄을 Next에도 넘긴다(API는 `.env`를 직접 읽는다). 평문 LAN 주소는 권하지 않는다 — 보안 컨텍스트가 아니면 첨부의
+`crypto.randomUUID`, `crypto.subtle`, 클립보드가 없다.
 
 예전 로컬 설치의 내부 소유자(`account`의 `local-workspace/default`)는 첫 ChatGPT 로그인이 한 번 넘겨받는다 —
 작품과 대화가 그대로 이어진다. 그 뒤 바인딩 행은 사라진다.
@@ -1157,6 +1186,8 @@ API는 `@shizue/contracts`의 스키마를 사용한다.
                   /api/chats      /api/messages   /api/notifications
                   /api/imports
   가드 없이 viewerId로 답함: /api/chatgpt(로그인 시작·콜백·상태, 로그아웃만 가드)
+                  /api/devices(기기 연결, 로컬 실행에서 REMOTE_ORIGINS가 있을 때만 — 없으면 404.
+                               pair만 가드, claim은 로그인 전의 휴대폰이 부른다, §4.1)
                   /api/models(읽는 사람 계정의 모델, 비로그인은 [];
                               광고하는 모델만 reasoningEfforts·defaultReasoningEffort)
   라우트별로:     /api/plots(본체 + 댓글)
@@ -1434,7 +1465,9 @@ DELETE /api/chats/:id/memory/facts/:fid 사실 지우기 → 204
 | `/{locale}/explore` | `/{locale}`로 리다이렉트(구 탐색 경로 보존) |
 | `/{locale}/creators/:id` | 크리에이터 공개 플롯 그리드 |
 | `/{locale}/personas`, `/notes` | 페르소나 CRUD / 재사용 노트 |
-| `/{locale}/login`, `/signup` | 인증 |
+| `/{locale}/login`, `/signup` | 인증. 로컬 실행에서 기기 연결이 켜져 있으면 확장이 없을 때의 안내에 휴대폰은 컴퓨터에서 QR로 들어오라는 한 줄이 붙는다 |
+| `/{locale}/settings` | ChatGPT 계정 카드(연결한 기기에서는 로그아웃 버튼이 "이 기기 연결 끊기"). 로컬 실행에서 기기 연결이 켜져 있으면 **휴대폰 연결** 카드 — QR 코드 만들기, 터널 오리진마다 QR 하나, 남은 시간, 만료되면 새로 만들기(§4.1 기기 연결) |
+| `/{locale}/pair` | 기기 연결이 켜진 로컬 실행에만 있다(아니면 404). 휴대폰이 QR로 여는 확인 페이지 — `#코드`를 읽어 지우고, 연결하기를 누르면 claim 뒤 홈으로. 코드가 없으면 다시 찍으라는 안내 |
 
 `/characters*`·`/c/:id`·`/u/:id`는 **없다**. 리다이렉트도 두지 않았다 — 캐릭터 단위의 공개 주소가 가리킬 대상 자체가 사라졌기 때문이다.
 
