@@ -108,7 +108,7 @@ interface ApiConfig {
 type LogFormat = 'text' | 'json';
 
 /** A whole number from `min` to `max`, or the error naming `name`. */
-function readInteger(env: NodeJS.ProcessEnv, name: string, min: number, max: number): number | undefined {
+export function readInteger(env: NodeJS.ProcessEnv, name: string, min: number, max: number): number | undefined {
   const raw = env[name]?.trim();
   if (!raw) return undefined;
   const value = Number(raw);

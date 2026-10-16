@@ -43,6 +43,9 @@
  *   unloaded, and the last one to go ends the thread; the next request loads it
  *   again. Measured 2026-10-15 (ARCHITECTURE §12): KURE-v1 or bge-m3 loaded
  *   costs the process about 2 GB (macOS phys_footprint), both about 3.9 GB.
+ * - **Or another process's.** With `EMBEDDER_URL`, `deps.embedder` is the
+ *   client of one embedder that several instances share (`embedderRemote.ts`):
+ *   the same interface, and no model in this process.
  *
  * For tests and development, `EMBEDDER_ROUTING=single` with
  * `EMBEDDER_MODEL=multiMiniLM` runs a light model, and `EMBEDDER=off` none.
@@ -256,7 +259,7 @@ export interface Embedder {
 
 /** Texts per message to the thread: RisuAI embeds 50 at a time; less keeps one batch's padding short. */
 const BATCH = 32;
-const DEFAULT_TIMEOUT_MS = 30_000;
+export const DEFAULT_TIMEOUT_MS = 30_000;
 /** How long a model that failed to load is left before the next try. */
 const LOAD_RETRY_MS = 60_000;
 /** How long a model stays loaded without a request. */

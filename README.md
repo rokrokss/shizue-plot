@@ -41,7 +41,10 @@ downloads them itself, and a plot whose model is missing has its memory pick
 recent and random summaries instead of similar ones. Loaded, each model adds
 about 2 GB to the API's memory and is unloaded after ten idle minutes;
 `EMBEDDER_ROUTING=single EMBEDDER_MODEL=multiMiniLM` runs one light model
-(135 MB, about 750 MB loaded), and `EMBEDDER=off` none.
+(135 MB, about 750 MB loaded), and `EMBEDDER=off` none. Several API instances
+can share one model instead of loading it each: `embedder:serve` runs a process
+that only embeds, on `EMBEDDER_PORT`, and `EMBEDDER_URL` points the instances at
+it (ARCHITECTURE §7.3).
 
 Open http://localhost:13000 in Chrome with [Shizue](https://chromewebstore.google.com/detail/mpcbgfkoholfgapcgcmfjobnfcbnfanm) installed (below).
 Next.js forwards `/api/*` to Hono on port 8787. `make stop` stops the app

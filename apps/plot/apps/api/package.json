@@ -15,7 +15,8 @@
     "fix:localize-assets": "tsx src/maintenance/fixLocalizeAssets.ts",
     "fix:lore-aliases": "tsx src/maintenance/fixLoreAliases.ts",
     "embedder:fetch": "tsx src/maintenance/fetchEmbedder.ts",
-    "embedder:publish": "tsx src/maintenance/publishEmbedder.ts"
+    "embedder:publish": "tsx src/maintenance/publishEmbedder.ts",
+    "embedder:serve": "tsx src/embedderServe.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1105.0",

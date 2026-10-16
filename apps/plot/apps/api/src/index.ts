@@ -5,6 +5,7 @@ import { createAuth } from './auth.js';
 import { createChatGPTAccounts } from './chatgptAccounts.js';
 import type { AppDeps } from './deps.js';
 import { createLocalEmbedder } from './embedder.js';
+import { createRemoteEmbedder, embedderListenConfig, serveEmbedder } from './embedderRemote.js';
 import { createHostedAuth, createSessionStore } from './hostedAuth.js';
 import { loadRootEnv, readConfig } from './env.js';
 import { startJobWorker } from './jobs.js';
@@ -76,9 +77,15 @@ const deps: AppDeps = {
 sql.listen(STOP_CHANNEL, (chatId) => stopLocalGeneration(deps, chatId)).catch((error: unknown) => {
   console.error('[api] not listening for stops relayed from other instances', error);
 });
-// Lazy: the model loads on the first search, not here (`embedder.ts`).
-const embedder = createLocalEmbedder(config.env);
+// Lazy: the model loads on the first search, not here (`embedder.ts`). With
+// EMBEDDER_URL another process holds it, for every instance (`embedderRemote.ts`).
+const remoteEmbedder = Boolean(config.env['EMBEDDER_URL']?.trim());
+const embedder = remoteEmbedder ? createRemoteEmbedder(config.env) : createLocalEmbedder(config.env);
 if (embedder) deps.embedder = embedder;
+// EMBEDDER_PORT: this instance's own model, for the instances whose EMBEDDER_URL points here.
+const embedderListen = embedderListenConfig(config.env);
+if (embedderListen && remoteEmbedder) console.warn('[embedder] EMBEDDER_PORT is read without EMBEDDER_URL only; not serving');
+const embedderListener = embedder && embedderListen && !remoteEmbedder ? serveEmbedder(embedder, embedderListen) : undefined;
 const app = createApp(deps);
 // Whether this Node can sandbox a card's editRequest Lua, asked now so the log says so at startup.
 void probeRequestLua().then((enabled) => luaSandboxEnabled.set(enabled ? 1 : 0));
@@ -130,8 +137,9 @@ function shutdown(code: number): void {
       const kinds = [...background.inFlight()].map(([kind, count]) => `${kind} ${count}`).join(', ');
       console.warn(`[api] ${left} background tasks still running after ${config.shutdownBackgroundMs} ms (${kinds}); exiting without them`);
     }
-    // The embedder's thread last, after everything that may embed: onnxruntime
-    // does not survive an exit around it.
+    // The embedder's thread last, after everything that may embed — the other
+    // instances' requests too: onnxruntime does not survive an exit around it.
+    await embedderListener?.close();
     await deps.embedder?.close();
   })()
     .catch((error: unknown) => console.error('[api] shutdown failed', error))
