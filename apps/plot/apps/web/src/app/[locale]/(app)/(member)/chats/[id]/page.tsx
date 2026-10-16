@@ -3646,14 +3646,15 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                               )}
                             >
                               {last?.role === 'assistant' && info && info.total > 1 ? (
-                                <div className="mr-1 flex items-center gap-1 text-xs text-muted">
+                                // The arrows as large as the buttons beside them: a thumb's target.
+                                <div className="mr-1 flex items-center text-xs text-muted">
                                   <button
                                     type="button"
                                     disabled={!prevTarget}
                                     title={t('swipePrev')}
                                     aria-label={t('swipePrev')}
                                     onClick={() => prevTarget && void moveHead(prevTarget)}
-                                    className="px-1 hover:text-fg disabled:opacity-30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                                    className="inline-flex size-9 items-center justify-center rounded-full hover:text-fg disabled:opacity-30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
                                   >
                                     <span aria-hidden="true">◀</span>
                                   </button>
@@ -3666,7 +3667,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                                     title={t('swipeNext')}
                                     aria-label={t('swipeNext')}
                                     onClick={() => nextTarget && void moveHead(nextTarget)}
-                                    className="px-1 hover:text-fg disabled:opacity-30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                                    className="inline-flex size-9 items-center justify-center rounded-full hover:text-fg disabled:opacity-30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
                                   >
                                     <span aria-hidden="true">▶</span>
                                   </button>

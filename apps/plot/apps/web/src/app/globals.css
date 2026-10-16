@@ -214,13 +214,16 @@ a, button, input, select, textarea, summary { -webkit-tap-highlight-color: trans
 .shizue-msg .x-shizue-button-default:hover {
   background: var(--color-accent-hover);
 }
+/* Zeta's blank line between paragraphs: one chat line (2026-10-17 owner decision).
+   A bubble is a box of its own, so its paragraphs need the rule too, and so does
+   a narration's text. */
 .message-body > * + *,
-.intro-body > * + * {
-  margin-top: 0.85em;
-}
-/* A bubble is a box of its own, so its paragraphs need the rule too — and so
-   is HTML written into a message (HtmlBlock). A narration breathes wider. */
 .chat-bubble > * + *,
+.chat-narration-text > * + * {
+  margin-top: 1.2rem;
+}
+/* The plot's own page, and HTML written into a message (HtmlBlock). */
+.intro-body > * + *,
 .message-html > * + * {
   margin-top: 0.85em;
 }
@@ -237,9 +240,6 @@ a, button, input, select, textarea, summary { -webkit-tap-highlight-color: trans
   max-width: 100%;
   max-height: min(70dvh, 32rem);
   border-radius: 0.75rem;
-}
-.chat-narration-text > * + * {
-  margin-top: 1.1em;
 }
 .chat-narration-mark {
   opacity: 0.7;
@@ -407,6 +407,57 @@ a, button, input, select, textarea, summary { -webkit-tap-highlight-color: trans
 }
 .user-bubble :is(code, pre) {
   background-color: rgb(255 255 255 / 0.4);
+}
+
+/*
+ * Zeta's wait for a reply: three dots in a box one chat line high, each
+ * breathing between half and a fifth, one after another (MessageRow `WaitingDots`).
+ */
+.waiting-dots {
+  display: inline-flex;
+  height: 1.2rem;
+  align-items: center;
+  gap: 4px;
+  vertical-align: middle;
+}
+.waiting-dots > [aria-hidden] {
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background-color: currentColor;
+  opacity: 0.5;
+  animation: shizue-waiting-dot 1.5s linear infinite;
+}
+.waiting-dots > [aria-hidden]:nth-child(3) {
+  animation-delay: 0.25s;
+}
+.waiting-dots > [aria-hidden]:nth-child(4) {
+  animation-delay: 0.5s;
+}
+@keyframes shizue-waiting-dot {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  33.333%,
+  66.667% {
+    opacity: 0.2;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .waiting-dots > [aria-hidden] {
+    animation: none;
+  }
+}
+
+/* A finger held on a message opens its menu (MessageRow `useLongPress`), not the
+   browser's text selection or its own menu. */
+@media (hover: none) {
+  .message-press {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
 }
 
 /*
