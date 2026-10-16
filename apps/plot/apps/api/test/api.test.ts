@@ -4290,6 +4290,24 @@ describe('chats', () => {
     expect(state.path.at(-1)).toMatchObject({ role: 'assistant', content: '생각을 마친 답' });
   });
 
+  it('answers a write that holds the slot for itself as not generating', async () => {
+    const cookie = await signUp('own-claim@example.com');
+    const { chatId } = await setupChat(cookie);
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }));
+
+    // The settings, changed or not: the claim it took ends with it.
+    for (const body of [{ note: '메모' }, {}]) {
+      const patched = await json(cookie, `/api/chats/${chatId}`, 'PATCH', body);
+      expect(patched.status).toBe(200);
+      expect((await readJson(patched)).chat.generating).toBe(false);
+    }
+    const reply = (await readJson(await request(cookie, `/api/chats/${chatId}`))).path.at(-1);
+    const deleted = await request(cookie, `/api/chats/${chatId}/messages/${reply.id}`, 'DELETE');
+    expect(deleted.status).toBe(200);
+    expect((await readJson(deleted)).chat.generating).toBe(false);
+    expect(await claimOf(chatId)).toBeNull();
+  });
+
   it("stops a reply on the reader's stop: kept, and the chat freed before it answers", async () => {
     const cookie = await signUp('stop-claim@example.com');
     const target = makeApp({
@@ -13832,13 +13850,16 @@ describe('card scripts', () => {
       clearPending: true,
     });
     expect(res.status, await res.clone().text()).toBe(200);
-    expect((await readJson(res)).path.at(-1)).toMatchObject({
+    const committed = await readJson(res);
+    expect(committed.path.at(-1)).toMatchObject({
       id: reply.id,
       content: '정리된 대답',
       variableDelta: { mood: 'calm' },
       scriptState: null,
       scriptRev: 1,
     });
+    // The commit's own claim is over by the time the page reads its answer.
+    expect(committed.chat.generating).toBe(false);
 
     // A second tab finishing the same turn from the same revision is refused…
     const again = await commit({ scriptRev: 0, content: '또 정리', clearPending: true });

@@ -1203,7 +1203,7 @@ POST /api/chats/:id/messages/:mid/translation {language, texts: string[], regene
 PUT  /api/chats/:id/messages/:mid/translation {language, texts: {원문: 번역}}   {texts} — 독자가 고친 번역을 캐시에, 모델 없음 (원문·번역 각 100,000자, 빈 글은 400 invalid_request)
 POST /api/chats/:id/translate-input {text}   {text} — 독자의 글을 플롯 언어로, 저장 없음 (20,000자)
 POST /api/chats/:id/reply             그룹 턴의 다음 화자 (SSE, §7.2 그룹 턴)
-POST /api/chats/:id/stop              독자의 중단 — 열린 생성을 멈춰 받은 데까지 저장, 저장된 뒤 204 (§7.2). 챗 JSON의 `generating`은 슬롯이 잡혀 있는 동안 참
+POST /api/chats/:id/stop              독자의 중단 — 열린 생성을 멈춰 받은 데까지 저장, 저장된 뒤 204 (§7.2). 챗 JSON의 `generating`은 슬롯이 잡혀 있는 동안 참 — 다만 슬롯을 자기 쓰기에만 잡는 요청(챗 PATCH, 메시지 삭제, script-commit)의 답은 그 슬롯이 요청과 함께 풀리므로 거짓
 GET  /api/chats/:id/inspect           재생성이 지금 보낼 프롬프트의 리포트 — 작가 본인의 챗만 (아래)
 GET  /api/chats/:id/messages/:mid/emotion   {emotion: 이름 | null} — 답장의 표정 그림(§7.7), 챗 소유자만. 2분 안의 답장이 아직 null이면 잃은 고르기를 다시 건다(메시지마다 10초에 한 번, 고르는 중이면 하지 않는다)
 GET  /api/chats/:id/memory            {summaries, facts} — 기억의 요약 전부와 이 브랜치의 사실(아래 기억), 챗 소유자만
