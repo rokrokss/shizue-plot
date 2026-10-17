@@ -34,6 +34,7 @@ import {
   type Segment,
 } from '@/lib/displayScripts';
 import { separateActions, separateActionsLive } from '@/lib/actionBreaks';
+import { withoutOpenTag } from '@/lib/markdown/balance';
 import { splitBlocks } from '@/lib/markdown/blocks';
 import {
   markupChunks,
@@ -680,8 +681,14 @@ export const MessageBody = memo(function MessageBody({
       const aliases = speakerAliases(roster);
       const cut = segments.map((segment, index) => {
         if (segment.kind !== 'text') return null;
+        // Only the end of the message is still being written.
+        const end = streaming && index === segments.length - 1;
         // RisuAI's music and video become their players first, wherever they stand.
-        const own = renderMediaTokens(stripVariableMacros(segment.text), assets, resolveAsset);
+        const own = renderMediaTokens(
+          stripVariableMacros(end ? withoutOpenTag(segment.text) : segment.text),
+          assets,
+          resolveAsset,
+        );
         const chunks = markupChunks(buttons ? renderProseButtons(own, buttons) : own);
         return chunks.flatMap((chunk, nth): TextRun[] => {
           if (chunk.html) {
@@ -693,9 +700,7 @@ export const MessageBody = memo(function MessageBody({
             const name = face?.name ?? null;
             return [{ name, narration: false, html: false, blocks: splitBlocks(unescapeCbs(text, 'html')) }];
           }
-          // Only the end of the message is still being written.
-          const writing = streaming && index === segments.length - 1 && nth === chunks.length - 1;
-          return speechRuns(text, names, aliases, speaker ?? null, writing).map((run) => ({
+          return speechRuns(text, names, aliases, speaker ?? null, end && nth === chunks.length - 1).map((run) => ({
             name: run.name,
             narration: run.name === null,
             html: false,

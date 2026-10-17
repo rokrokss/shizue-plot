@@ -52,17 +52,33 @@ function truncateOpenLink(md: string): string {
 /**
  * `그는 <span sty` → `그는 `. A tag still being typed is text to markdown until
  * its `>` arrives, so without this every tag the model writes would flash past
- * as its own spelling first. Only the end of the last line is looked at, and
- * a `<` the writer meant as text comes back with the next newline.
+ * as its own spelling first; a bare `<` or `</` may be one, until the letter
+ * after it says. Only the end of the last line is looked at, and a `<` the
+ * writer meant as text comes back with the next newline.
  */
 function truncateOpenTag(md: string): string {
-  const match = /<\/?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>\n]*)?$/.exec(md);
+  const match = /<(?:\/?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>\n]*)?|\/)?$/.exec(md);
   return match ? md.slice(0, match.index) : md;
 }
 
-function toggle(stack: string[], marker: string): void {
-  if (stack[stack.length - 1] === marker) stack.pop();
-  else stack.push(marker);
+/**
+ * The end of a message still being written, without a tag it is still typing
+ * (`truncateOpenTag`) unless that is inside a fence, where a tag is text. Until
+ * its `>` lands the tag is no markup, so the block holding it would be drawn as
+ * prose — at a line's start, as the scene's — and as markup a moment later.
+ */
+export function withoutOpenTag(md: string): string {
+  return openFence(md) === null ? truncateOpenTag(md) : md;
+}
+
+/** Closes `marker` where it is the innermost open, and opens it otherwise; true when it opened. */
+function toggle(stack: string[], marker: string): boolean {
+  if (stack[stack.length - 1] === marker) {
+    stack.pop();
+    return false;
+  }
+  stack.push(marker);
+  return true;
 }
 
 /** Lines that are markers rather than text, and must not be counted as emphasis. */
@@ -77,7 +93,10 @@ const BULLET_RE = /^([ \t]*)([*+-])([ \t]+)/;
  *
  * A closer cannot stand after a space, so the closers go before the space the
  * writer has just typed: `*천천히 ` is `*천천히* `, not a `*` that closes nothing.
- * A lone `*` that ends the text while `**` is open is that closer half typed.
+ * A lone `*` that ends the text right after a word while `**` is open is that
+ * closer half typed. Stars that end the text and only open markers dress
+ * nothing yet and are left out until their words arrive: `그리고 *` is
+ * `그리고 `, not a literal `**`.
  */
 function balanceInline(md: string): string {
   const lines = md.split('\n');
@@ -89,6 +108,8 @@ function balanceInline(md: string): string {
   let fence: string | null = null;
   /** The text ends on the first `*` of the `**` that closes the innermost marker. */
   let halfClosed = false;
+  /** The length of the run of `*` that ends the text and only opened markers. */
+  let dangling = 0;
 
   for (const [nth, raw] of lines.entries()) {
     const fenceMatch = FENCE_RE.exec(raw);
@@ -124,18 +145,26 @@ function balanceInline(md: string): string {
         continue;
       }
       if (ch === '*') {
-        let run = runLength(raw, i);
-        i += run;
-        if (run === 1 && i === raw.length && nth === lines.length - 1 && open.at(-1) === '**') {
+        const length = runLength(raw, i);
+        const before = raw[i - 1];
+        i += length;
+        const ends = i === raw.length && nth === lines.length - 1;
+        // After a space a `*` cannot close, so there it opens.
+        if (length === 1 && ends && open.at(-1) === '**' && before !== undefined && !/\s/.test(before)) {
           open.pop();
           halfClosed = true;
           continue;
         }
-        while (run >= 2) {
-          toggle(open, '**');
-          run -= 2;
+        let opened = 0;
+        let closed = false;
+        for (let run = length; run > 0; run -= 2) {
+          if (toggle(open, run >= 2 ? '**' : '*')) opened += 1;
+          else closed = true;
         }
-        if (run === 1) toggle(open, '*');
+        if (ends && !closed) {
+          open.length -= opened;
+          dangling = length;
+        }
         continue;
       }
       if (ch === '~' && raw[i + 1] === '~') {
@@ -152,8 +181,9 @@ function balanceInline(md: string): string {
   // A code span swallows everything, so it is closed before the emphasis around it.
   if (code !== null) closers += code;
   else for (let n = open.length - 1; n >= 0; n -= 1) closers += open[n];
-  const end = md.trimEnd().length;
-  return md.slice(0, end) + closers + md.slice(end);
+  const text = md.slice(0, md.length - dangling);
+  const end = text.trimEnd().length;
+  return text.slice(0, end) + closers + text.slice(end);
 }
 
 /**

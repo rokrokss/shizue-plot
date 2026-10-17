@@ -242,7 +242,9 @@ describe('renderImageTokensAsHtml', () => {
 describe('balancePartial and a tag being typed', () => {
   it('hides the half-written tag at the end, and only that', () => {
     expect(balancePartial('그는 <span sty')).toBe('그는 ');
-    expect(balancePartial('그는 <')).toBe('그는 <');
+    // A bare `<` may be a tag's start until the next letter says; `<3` and `< ` are text.
+    expect(balancePartial('그는 <')).toBe('그는 ');
+    expect(balancePartial('그는 <3')).toBe('그는 <3');
     expect(balancePartial('a < b')).toBe('a < b');
     expect(balancePartial('<span>x</span> 끝')).toBe('<span>x</span> 끝');
     expect(balancePartial('```html\n<div cla')).toBe('```html\n<div cla\n```');

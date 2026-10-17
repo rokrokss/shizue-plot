@@ -443,11 +443,15 @@ describe('a scene title in a greeting', () => {
 });
 
 describe('a reply streamed a character at a time', () => {
-  /** What the row draws as emphasis, and how many of its stretches are the scene's. */
+  /**
+   * What the row draws as emphasis, how many of its stretches are the scene's,
+   * and whether a block of markup shows a `*` as text.
+   */
   const marks = () => ({
     em: host.querySelectorAll('em').length,
     strong: host.querySelectorAll('strong').length,
     narration: narrations().length,
+    stars: [...host.querySelectorAll('.message-html')].some((node) => node.textContent?.includes('*')),
   });
 
   /**
@@ -457,7 +461,7 @@ describe('a reply streamed a character at a time', () => {
    * counts only ever grow, and the last step is the reply as it is when settled.
    */
   function stream(content: string, extra: Record<string, unknown> = {}) {
-    const steps: { at: string; em: number; strong: number; narration: number }[] = [];
+    const steps: ({ at: string } & ReturnType<typeof marks>)[] = [];
     for (let end = 1; end <= content.length; end += 1) {
       render(row(content.slice(0, end), 'assistant', { ...extra, streaming: true }));
       steps.push({ at: content.slice(0, end), ...marks() });
@@ -484,6 +488,7 @@ describe('a reply streamed a character at a time', () => {
   ) {
     const { steps, streamed, settled } = stream(content, extra);
     for (const key of keys) expect(firstDrop(steps, key), key).toBeNull();
+    expect(steps.filter((step) => step.stars).map((step) => step.at)).toEqual([]);
     expect(streamed).toBe(settled);
     return steps.at(-1)!;
   }
@@ -510,13 +515,10 @@ describe('a reply streamed a character at a time', () => {
     expect(done).toMatchObject({ em: 3, narration: 1 });
   });
 
-  it('keeps the emphasis of a line of markup as it arrives, spaces and half closers included', () => {
-    // A tag still being typed is prose until its `>` lands, so the scene's count is not asked here.
+  it('keeps the emphasis of a line of markup as it arrives, with no star or tag half typed shown', () => {
     const done = expectSteady(
-      '아리아: 안녕.\n\n<span style="color:#c00">그는 *천천히 걸어간다* 그리고 **굵게** 말한다.</span>',
-      {},
-      ['em', 'strong'],
+      '아리아: 안녕.\n\n<span style="color:#c00">그는 *천천히 걸어간다* 그리고 **굵게 *기울여* 말한다**.</span>',
     );
-    expect(done).toMatchObject({ em: 1, strong: 1 });
+    expect(done).toMatchObject({ em: 2, strong: 1, narration: 0 });
   });
 });

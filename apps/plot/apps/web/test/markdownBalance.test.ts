@@ -95,3 +95,20 @@ describe('balancePartial at a space or a half closer', () => {
     expect(balancePartial('*기울여 **굵게*')).toBe('*기울여 **굵게***');
   });
 });
+
+describe('balancePartial at a marker or a tag just begun', () => {
+  it('hides a `*` or `**` that has nothing after it to dress yet', () => {
+    expect(balancePartial('그리고 *')).toBe('그리고 ');
+    expect(balancePartial('그리고 **')).toBe('그리고 ');
+    expect(balancePartial('*천천히* 그리고 *')).toBe('*천천히* 그리고 ');
+    expect(balancePartial('*기울여 **')).toBe('*기울여* ');
+  });
+
+  it('reads a `*` after a space as an opener, not as the half of a closer', () => {
+    expect(balancePartial('**굵게 *')).toBe('**굵게** ');
+  });
+
+  it('hides a `</` that may be the start of a closing tag', () => {
+    expect(balancePartial('그는 </')).toBe('그는 ');
+  });
+});
