@@ -760,7 +760,7 @@ export const absentCastLine = (names: string[]): string =>
 export const NARRATOR_POV_LABELS: Record<NarratorPov, string> = {
   first: '1인칭 (유저 캐릭터의 시점)',
   third: '3인칭 관찰자',
-  'third-limited': '3인칭 제한 (장면과 등장인물만 서술하고, 유저의 속마음은 쓰지 않음)',
+  'third-limited': '3인칭 제한 (한 시점 인물이 관찰하거나 느끼는 범위에서 서술)',
   omniscient: '3인칭 전지적',
 };
 

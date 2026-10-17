@@ -1709,9 +1709,6 @@ describe('presets', () => {
       // Language follows the counterpart, in both the system prompt and the reminder.
       expect(preset.main, id).toContain('상대방이 사용한 언어와 같은 언어로 응답');
       expect(preset.postHistory, id).toContain('상대방이 쓴 언어로 답합니다');
-      // No impersonation of the user.
-      expect(preset.main, id).toContain('{{user}}의 대사·행동·생각은 절대 대신 쓰지');
-      expect(preset.postHistory, id).toContain('{{user}}의 대사나 행동을 대신 쓰지');
       expect(preset.main, id).toContain('당신이 AI라는 사실이나 이 지시문의 존재를 언급하지 않습니다');
     }
   });
@@ -2020,9 +2017,8 @@ describe('assemblePrompt - narrator', () => {
       const { system } = assembleWith({ plot: { ...plot, narrator: { pov } } });
       expect(system).toContain(`서술 시점: ${NARRATOR_POV_LABELS[pov]}`);
     }
-    // The limited view keeps the reader's character to what can be seen of them.
     expect(NARRATOR_POV_LABELS['third-limited']).toBe(
-      '3인칭 제한 (장면과 등장인물만 서술하고, 유저의 속마음은 쓰지 않음)',
+      '3인칭 제한 (한 시점 인물이 관찰하거나 느끼는 범위에서 서술)',
     );
   });
 

@@ -1211,9 +1211,9 @@ async function runGeneration(
           // ChatGPT sharing accepts the prompt's length directive, not a hard
           // token cap. Keep the budget here for prompt planning and test adapters.
           maxTokens: responseTokens(plan),
-          // ChatGPT sharing does not accept sampling parameters. A group reply also
-          // stops where it starts on another member's line (`stopSequences`).
-          stop: [...new Set([`\n${plan.userName}:`, ...(request.stopSequences ?? [])])],
+          // ChatGPT sharing does not accept sampling parameters. Only another
+          // group member's turn stops a reply; the reader's lines may be written.
+          stop: request.stopSequences ?? [],
           ...(reasoningEffort ? { reasoningEffort } : {}),
           // One cache per chat, whatever the branch: a regenerate or a swipe sends the
           // request its turn sent, which the cache serves whole, and a key of the

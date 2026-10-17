@@ -8041,26 +8041,27 @@ describe('memory', () => {
     expect(ask.messages[1]).toEqual({ role: 'system', content: DEFAULT_SUMMARIZATION_INSTRUCTION });
     expect(DEFAULT_SUMMARIZATION_INSTRUCTION.startsWith(HYPA_V3_SUMMARIZATION_PROMPT)).toBe(true);
     expect(transcriptOf(ask)).toContain(sent[0]!);
-    expect(transcriptOf(ask)).not.toContain(sent[2]!);
+    expect(transcriptOf(ask)).not.toContain(sent[1]!);
 
-    // The always-on instructions make this fixture overflow at three exchanges:
-    // summarize the first four messages, leaving the latest three for queries.
+    // The full OAI2 instructions make this fixture overflow at two exchanges:
+    // summarize the greeting and first reader turn, leaving three for queries.
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
     expect('memory' in state.chat).toBe(false);
     const [summary, ...rest] = await summariesOf(cookie, chatId);
     expect(rest).toEqual([]);
     expect(summary).toMatchObject({ text: SUMMARY, important: false, applies: true });
-    expect(summary.messageIds).toEqual(state.path.slice(0, 4).map((m: any) => m.id));
-    expect(summary.messages.map((m: any) => m.position)).toEqual([0, 1, 2, 3]);
+    expect(summary.messageIds).toEqual(state.path.slice(0, 2).map((m: any) => m.id));
+    expect(summary.messages.map((m: any) => m.position)).toEqual([0, 1]);
 
     // The next turn carries the summary instead of the messages it stands for.
     const next = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '그 다음은?' }, harness.app);
     expect((await readSse(next)).at(-1)!.event).toBe('done');
     const prompt = harness.prompts.at(-1)!;
     expect(undated(prompt.system)).toContain(`${MEMORY_HEADING}\n${SUMMARY}`);
-    expect(prompt.messages.some((message) => contentText(message.content).includes(sent[0]!))).toBe(false);
-    // The second reader turn is covered; its assistant echo is still verbatim.
-    expect(prompt.messages.filter((message) => contentText(message.content).includes(sent[1]!))).toHaveLength(1);
+    expect(prompt.messages.some((message) => message.role === 'user' && contentText(message.content).includes(sent[0]!))).toBe(false);
+    // The first assistant echo and both messages of the second exchange stay verbatim.
+    expect(prompt.messages.filter((message) => contentText(message.content).includes(sent[0]!))).toHaveLength(1);
+    expect(prompt.messages.filter((message) => contentText(message.content).includes(sent[1]!))).toHaveLength(2);
     expect(contentText(prompt.messages.at(-3)!.content)).toBe('그 다음은?');
   });
 
@@ -8268,7 +8269,8 @@ describe('memory', () => {
     // A refresh reads the branch and then stalls in the model call.
     await fillUntilSummary(cookie, chatId, harness);
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    const reply = state.path[2];
+    // The greeting is in every first batch, regardless of the prompt overhead.
+    const reply = state.path[0];
     expect(reply.role).toBe('assistant');
     await json(cookie, `/api/messages/${reply.id}`, 'PATCH', { content: `고친 답변 ${reply.content}` });
 
@@ -8311,9 +8313,10 @@ describe('memory', () => {
     const blocked = gate();
     // The run writes its first summary; its second waits.
     const harness = memoryApp({ summaryText: (call) => `${call + 1}번째 요약.`, summaryGate: (call) => (call >= 1 ? blocked.wait : undefined) });
-    // Two messages a summary, and a run that goes on to half the context: one landing is several summaries.
+    // Leave enough history beyond the full OAI2 prompt for several two-message
+    // batches in a single run, which goes on to half the context.
     await json(cookie, `/api/chats/${chatId}`, 'PATCH', {
-      memorySettings: { contextBudget: 8000, maxChatsPerSummary: 2, extraSummarizationRatio: 0.5 },
+      memorySettings: { contextBudget: 16000, maxChatsPerSummary: 2, extraSummarizationRatio: 0.5 },
     });
     await fillUntilSummary(cookie, chatId, harness, 2);
     expect(await summariesOf(cookie, chatId, harness.app)).toHaveLength(1);
@@ -15369,7 +15372,8 @@ describe('editRequest listeners', () => {
     for (const [path, body] of [['messages', { content: '안녕' }], ['regenerate'], ['continue'], ['auto']] as const) {
       const events = await readSse(await json(cookie, `/api/chats/${chatId}/${path}`, 'POST', body, capturing));
       expect(events.at(-1)!.event, path).toBe('done');
-      expect(prompts.at(-1)!.system, path).toMatch(/^<SYSTEM_RULE>[\s\S]*<\/SYSTEM_RULE>\n\n루아 \d$/);
+      expect(prompts.at(-1)!.system.startsWith(`${ROLEPLAY_JAILBREAK_MAIN}\n\n`), path).toBe(true);
+      expect(prompts.at(-1)!.system.slice(ROLEPLAY_JAILBREAK_MAIN.length), path).toMatch(/^\n\n루아 \d$/);
       expect(prompts.at(-1)!.messages.filter((m) => m.content === ROLEPLAY_JAILBREAK_POST_HISTORY)).toHaveLength(1);
     }
     const report = await readJson(await request(cookie, `/api/chats/${chatId}/inspect`));
@@ -16893,7 +16897,7 @@ describe('group turns', () => {
     expect(second).toMatchObject({ parentId: first!.id, speakerMemberId: kai, groupTurnId: a.messageId, content: '어서 와!' });
 
     // Each request is the speaker's: its line closes the prompt, the others' names stop it.
-    expect(sent[0]!.stop).toEqual(['\n유저:', '\n카이:', '\n미오:']);
+    expect(sent[0]!.stop).toEqual(['\n카이:', '\n미오:']);
     const firstTexts = textsOf(sent[0]!);
     expect(firstTexts.at(-3)).toBe(groupSpeakerLine('세이야'));
     // Not the round's last: the status window is the last speaker's to write.
@@ -16901,7 +16905,7 @@ describe('group turns', () => {
     // The line the reader wrote as 카이 is sent as 카이's.
     expect(firstTexts).toContain('안녕.\n카이: 대신 인사할게.');
     const secondTexts = textsOf(sent[1]!);
-    expect(sent[1]!.stop).toEqual(['\n유저:', '\n세이야:', '\n세이:', '\n미오:']);
+    expect(sent[1]!.stop).toEqual(['\n세이야:', '\n세이:', '\n미오:']);
     expect(secondTexts.at(-2)).toBe(groupSpeakerLine('카이'));
     expect(secondTexts).toContain('세이야: *검을 거둔다* 왔군.\n세이야: 앉아.');
     expect(secondTexts.join('\n')).not.toContain('상태창과 선택지를 붙이지 않는다');
@@ -17094,7 +17098,7 @@ describe('group turns', () => {
     expect(texts.at(-1)).toBe('어서 와!');
     expect(texts.at(-3)).toBe(groupSpeakerLine('카이'));
     expect(texts.at(-2)).toBe(ROLEPLAY_JAILBREAK_POST_HISTORY);
-    expect(sent.at(-1)!.stop).toEqual(['\n유저:', '\n세이야:', '\n세이:', '\n미오:']);
+    expect(sent.at(-1)!.stop).toEqual(['\n세이야:', '\n세이:', '\n미오:']);
     expect((await rowsOf(chatId)).find((row) => row.id === b.messageId)!.content).toBe('어서 와!더 마셔.');
   });
 
@@ -17116,7 +17120,7 @@ describe('group turns', () => {
     await db.update(chats).set({ headMessageId: narration!.id }).where(eq(chats.id, chatId));
     const redone = await done(await post(cookie, chatId, 'regenerate', {}, target));
     expect(redone).not.toHaveProperty('speakerMemberId');
-    expect(sent.at(-1)!.stop).toEqual(['\n유저:']);
+    expect(sent.at(-1)!.stop).toEqual([]);
     expect((await rowsOf(chatId)).find((row) => row.id === redone.messageId)).toMatchObject({
       parentId: b.messageId,
       content: '둘 다 반가워.',
@@ -17129,7 +17133,8 @@ describe('group turns', () => {
     const cookie = await signUp('group-single@example.com');
     const { chatId } = await setupChat(cookie);
     const [member] = await db.select().from(characters);
-    const { target, sent } = replyingApp('리안: 어서 오세요.');
+    const reply = '리안: 어서 오세요.\n유저: *문을 열고 들어선다.*\n리안: 여기 앉아요.';
+    const { target, sent } = replyingApp(reply);
     const before = (await rowsOf(chatId)).length;
     await refused(await post(cookie, chatId, 'messages', { content: '안녕', speakerId: member!.id }, target));
     await refused(await post(cookie, chatId, 'messages', { content: '안녕', speakerId: member!.id, stopped: true }, target));
@@ -17138,8 +17143,8 @@ describe('group turns', () => {
     expect(await rowsOf(chatId)).toHaveLength(before);
     const plain = await done(await post(cookie, chatId, 'messages', { content: '안녕' }, target));
     expect(Object.keys(plain).sort()).toEqual(['messageId', 'usage']);
-    expect(sent.at(-1)!.stop).toEqual(['\n유저:']);
-    expect((await rowsOf(chatId)).at(-1)).toMatchObject({ content: '리안: 어서 오세요.', speakerMemberId: null, groupTurnId: null });
+    expect(sent.at(-1)!.stop).toEqual([]);
+    expect((await rowsOf(chatId)).at(-1)).toMatchObject({ role: 'assistant', content: reply, speakerMemberId: null, groupTurnId: null });
 
     // A work of several asked without a speaker answers as the scene, a tab from before group turns.
     const group = await groupChat('group-scene@example.com');
@@ -17147,7 +17152,7 @@ describe('group turns', () => {
     await firstRound(group, scenes.target);
     const scene = await done(await post(group.cookie, group.chatId, 'messages', { content: '둘 다 고마워' }, scenes.target));
     expect(scene).not.toHaveProperty('speakerMemberId');
-    expect(scenes.sent.at(-1)!.stop).toEqual(['\n유저:']);
+    expect(scenes.sent.at(-1)!.stop).toEqual([]);
     const texts = textsOf(scenes.sent.at(-1)!);
     expect(texts.some((text) => text.startsWith('[다음 응답의 화자'))).toBe(false);
     // The scene still reads each tagged reply under its member.
