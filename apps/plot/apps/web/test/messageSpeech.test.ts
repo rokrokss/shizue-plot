@@ -120,7 +120,7 @@ describe('a reply with several speakers in it', () => {
     render(row(content));
     const narration = narrations();
     expect(narration).toHaveLength(2);
-    expect(narration[0]!.className).toContain('italic');
+    expect(narration[0]!.className).not.toContain('italic');
     expect(narration[0]!.className).toContain('text-muted');
     expect(narration[0]!.textContent).toContain('비가 그치지 않았다.');
     expect(narration[1]!.textContent).toContain('문이 닫혔다.');
@@ -156,7 +156,7 @@ describe('a reply that is nothing but the scene', () => {
     expect(speakers()).toEqual([]);
     expect(host.querySelector('img')).toBeNull();
     expect(narrations()).toHaveLength(1);
-    expect(narrations()[0]!.className).toContain('italic');
+    expect(narrations()[0]!.className).toContain('text-muted');
   });
 });
 
@@ -268,10 +268,10 @@ describe('a turn the reader wrote partly as others', () => {
     const spoken = host.querySelector('[data-testid="speech-character"]')!;
     expect(spoken.textContent).toContain('반가워.');
     expect(spoken.textContent).toContain('오랜만이네.');
-    // Narration as a narration row has it: no label, the ≡ and italics, no bubble.
+    // Narration as a narration row has it: no label, the ≡ and the muted ink, no bubble.
     const narration = host.querySelector('[data-testid="reader-narration"]')!;
     expect(narration.textContent).toBe('바람이 분다.');
-    expect(narration.querySelector('.chat-narration.italic')).not.toBeNull();
+    expect(narration.querySelector('.chat-narration.text-muted')).not.toBeNull();
     expect(narration.querySelector('.user-bubble, .chat-bubble')).toBeNull();
     expect(host.textContent).not.toContain('@');
     // The reader's own stretches keep their bubble and their 상황묘사.
@@ -375,7 +375,7 @@ describe('a scene title in a greeting', () => {
     ]);
     expect([...host.querySelectorAll('img')].map((img) => img.getAttribute('src'))).toEqual(['/covers/plot.png']);
     // What hangs under the bubble stays in the bubble's column.
-    expect(host.querySelector('[data-testid="actions"]')!.parentElement!.className).toBe('pl-12.5');
+    expect(host.querySelector('[data-testid="actions"]')!.parentElement!.className).toBe('pl-9.5');
   });
 
   it('stays a bold line inside the bubble of a reply', () => {

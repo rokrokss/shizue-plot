@@ -15,8 +15,8 @@ const BUTTON_BASE =
   'focus-visible:outline-offset-2 focus-visible:outline-focus';
 
 const BUTTON_VARIANTS = {
-  primary: 'border-2 border-fg bg-accent text-accent-ink shadow-[2px_2px_0_var(--color-fg)] hover:bg-accent-hover active:shadow-none',
-  secondary: 'border border-line bg-surface text-fg hover:border-fg hover:bg-mint-soft/40',
+  primary: 'border border-transparent bg-accent text-accent-ink hover:bg-accent-hover disabled:bg-raised disabled:text-muted disabled:opacity-100',
+  secondary: 'border border-transparent bg-raised text-fg hover:bg-line',
   ghost: 'border border-transparent text-muted hover:bg-raised hover:text-fg',
   danger: 'border border-danger/40 text-danger hover:bg-danger/10',
 } as const;

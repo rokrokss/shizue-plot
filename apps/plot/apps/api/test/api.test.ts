@@ -6906,6 +6906,31 @@ describe('the game layer', () => {
     );
     expect(second.system).toBe(first.system);
   });
+
+  it('adds what the reader asked of a regenerate to that one reply only', async () => {
+    const cookie = await signUp('regenerate-request@example.com');
+    const { chatId } = await setupChat(cookie);
+    const { app: capturing, prompts } = capturingApp();
+    const ruled = (index: number): string[] =>
+      prompts[index]!.messages.map((message) => contentText(message.content)).filter((text) => text.startsWith('[게임 판정]'));
+
+    await readSse(
+      await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '자물쇠를 딴다', directions: '주사위 3.' }, capturing),
+    );
+    await readSse(
+      await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', { request: '속마음도 같이 써줘' }, capturing),
+    );
+    // After the turn's own ruling, in the same block.
+    expect(ruled(1)).toEqual(['[게임 판정]\n주사위 3.\n\n속마음도 같이 써줘']);
+    // Stored nowhere: the next regenerate is the turn as it was.
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
+    expect(ruled(2)).toEqual(['[게임 판정]\n주사위 3.']);
+    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    expect(JSON.stringify(state)).not.toContain('속마음도');
+
+    const long = await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', { request: 'a'.repeat(801) });
+    expect(long.status).toBe(400);
+  });
 });
 
 describe('chat attachments', () => {

@@ -24,11 +24,11 @@ export default function AppLayout({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-dvh flex-col">
       <a href="#main-content" className="skip-link">{t('skip')}</a>
-      {/* On a phone a conversation is a screen of its own, as in Zeta: its row
-          names the character and leads back, so the shell's bar steps aside too.
+      {/* A conversation is a screen of its own, as in Zeta, at every width: its
+          row names the character and leads back, so the shell's bar steps aside.
           `contents` keeps the header sticky to the page where it stands; the
           wrapper is always there so moving into a chat does not remount it. */}
-      <div className={conversation ? 'hidden lg:contents' : 'contents'}>
+      <div className={conversation ? 'hidden' : 'contents'}>
         <Header />
       </div>
       {/* The bar lies over the page, so the page ends above it — inside `main`,

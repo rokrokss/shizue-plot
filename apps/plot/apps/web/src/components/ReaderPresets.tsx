@@ -14,7 +14,6 @@ import { useId, useRef, useState } from 'react';
 import { apiSend } from '@/lib/api';
 import type { ReaderPreset } from '@/lib/types';
 import { useErrorMessage } from '@/lib/useErrorMessage';
-import { BottomSheet } from './BottomSheet';
 import { Button, ErrorText, Field, Select, TextArea, TextInput } from './ui';
 
 /** What the editor holds: a preset being written, new (`id` null) or one being changed. */
@@ -35,17 +34,13 @@ interface Draft {
 
 /**
  * "내 프리셋": the reader's own presets on top of the chat's (§11) — pick one for
- * this chat, and behind one quiet button, make, change, delete and import them.
- *
- * Stacked (the settings sheet), the picker and its manager stand in the column.
- * Compact (the wide header), there is room for one small button only, and it
- * opens the same stacked field in a sheet.
+ * this chat, and behind one quiet button, make, change, delete and import them,
+ * in the column of the chat's settings sheet.
  */
 export function ReaderPresetField({
   presets,
   selectedId,
   disabled,
-  stacked,
   onSelect,
   onPresetsChange,
 }: {
@@ -55,45 +50,13 @@ export function ReaderPresetField({
   selectedId: string | null;
   /** The chat's settings are locked (a reply streams, a save is in flight). */
   disabled: boolean;
-  stacked?: boolean;
   onSelect: (id: string | null) => void;
   onPresetsChange: (presets: ReaderPreset[]) => void;
 }) {
-  const t = useTranslations('chat.readerPresets');
-  const [sheetOpen, setSheetOpen] = useState(false);
-  const selected = presets.find((preset) => preset.id === selectedId);
-
-  if (!stacked) {
-    return (
-      <>
-        <Button
-          size="sm"
-          variant={selected ? 'secondary' : 'ghost'}
-          aria-haspopup="dialog"
-          className="max-w-48"
-          onClick={() => setSheetOpen(true)}
-        >
-          <span className="min-w-0 truncate">{selected ? t('activeNamed', { name: selected.name }) : t('label')}</span>
-        </Button>
-        {sheetOpen ? (
-          <BottomSheet title={t('label')} onClose={() => setSheetOpen(false)}>
-            <ReaderPresetField
-              stacked
-              presets={presets}
-              selectedId={selectedId}
-              disabled={disabled}
-              onSelect={onSelect}
-              onPresetsChange={onPresetsChange}
-            />
-          </BottomSheet>
-        ) : null}
-      </>
-    );
-  }
   return (
     <StackedField
       presets={presets}
-      selected={selected}
+      selected={presets.find((preset) => preset.id === selectedId)}
       disabled={disabled}
       onSelect={onSelect}
       onPresetsChange={onPresetsChange}

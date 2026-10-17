@@ -60,10 +60,10 @@ for (const viewport of VIEWPORTS) {
 }
 
 /**
- * The chat on a phone, where the header's settings are a sheet rather than a
- * row. Everything the screenshot contains is fixed on purpose — the plot's name
- * and its opening are the same every run, and the account is the only thing
- * carrying the run id, because it never appears on the page.
+ * The chat on a phone, and the settings sheet its ☰ opens. Everything the
+ * screenshot contains is fixed on purpose — the plot's name and its opening are
+ * the same every run, and the account is the only thing carrying the run id,
+ * because it never appears on the page.
  *
  * The steps build on each other, so this file's chat half runs serially.
  */

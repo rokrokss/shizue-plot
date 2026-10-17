@@ -11,9 +11,6 @@ import { withNarrationPrefix } from '@shizue/core/narration';
  */
 export type ComposerMode = 'dialogue' | 'description' | 'narration';
 
-/** In the order the chips stand, dialogue first because it is the default. */
-export const COMPOSER_MODES: readonly ComposerMode[] = ['dialogue', 'description', 'narration'];
-
 /**
  * A line already written as someone (`@이름: …`, `@내레이터: …`, `@: …`), which the
  * reader typed themselves: Zeta's marker, read by core `readerLine`.

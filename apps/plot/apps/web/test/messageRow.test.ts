@@ -87,11 +87,12 @@ describe('a narrating user turn', () => {
     expect(host.textContent).toContain('문이 열리고 바람이 들이쳤다');
     expect(host.textContent).not.toContain('@:');
     // No speaker, no label and none of the bubble the reader's own lines get:
-    // the ≡ at its start and italics mark it, as Zeta's does.
+    // the ≡ at its start and the muted ink mark it, as Zeta's does.
     expect(narration!.querySelectorAll('.chat-name')).toHaveLength(0);
     expect(host.textContent).not.toContain('나레이션');
     const block = narration!.querySelector('.chat-narration')!;
-    expect(block.classList.contains('italic')).toBe(true);
+    expect(block.classList.contains('text-muted')).toBe(true);
+    expect(block.classList.contains('italic')).toBe(false);
     expect(block.querySelector('svg')).not.toBeNull();
     expect(host.querySelector('.chat-bubble, .user-bubble')).toBeNull();
     expect(block.textContent).toContain('문이 열리고 바람이 들이쳤다');
@@ -152,63 +153,6 @@ describe('an ordinary turn', () => {
   });
 });
 
-describe('a forked turn', () => {
-  const nav = (extra: Record<string, unknown> = {}) => ({
-    index: 1,
-    total: 2,
-    onPrev: () => undefined,
-    onNext: () => undefined,
-    ...extra,
-  });
-
-  const arrow = (glyph: string): HTMLButtonElement =>
-    [...host.querySelectorAll('button')].find((node) => node.textContent === glyph)!;
-
-  it('carries its own way back to the other version', () => {
-    render(row('문을 열었다', 'assistant', { name: '아리아', branches: nav() }));
-
-    expect(host.textContent).toContain('2/2');
-    expect(arrow('◀')).toBeDefined();
-    expect(arrow('▶')).toBeDefined();
-    // The glyph is a picture of the direction, so the button says it in words.
-    expect(arrow('◀').getAttribute('aria-label')).toBe('이전 응답');
-    expect(arrow('▶').getAttribute('aria-label')).toBe('다음 응답');
-    expect(arrow('◀').querySelector('[aria-hidden="true"]')).not.toBeNull();
-  });
-
-  it('moves between siblings, and stops at either end', async () => {
-    const moved: string[] = [];
-    render(
-      row('문을 열었다', 'assistant', {
-        name: '아리아',
-        branches: nav({ index: 0, onPrev: null, onNext: () => moved.push('next') }),
-      }),
-    );
-
-    expect(host.textContent).toContain('1/2');
-    expect(arrow('◀').disabled).toBe(true);
-    await act(async () => {
-      arrow('▶').click();
-    });
-    expect(moved).toEqual(['next']);
-  });
-
-  it('offers the same way back on a narration, which has no speaker to sit beside', () => {
-    render(row('@: 눈이 그쳤다', 'assistant', { name: '아리아', branches: nav() }));
-
-    expect(host.querySelector('[data-testid="message-narration"]')).not.toBeNull();
-    expect(host.textContent).toContain('2/2');
-    // Hover-revealed, so a mid-path row stays quiet until it is asked for.
-    expect(arrow('◀').parentElement!.className).toContain('opacity-0');
-    expect(arrow('◀').parentElement!.className).toContain('group-hover:opacity-100');
-  });
-
-  it('is not drawn while the turn is still streaming', () => {
-    render(row('눈이 그친', 'assistant', { name: '아리아', branches: nav(), streaming: true }));
-    expect(host.textContent).not.toContain('2/2');
-  });
-});
-
 describe('a generated narration', () => {
   it('is drawn the same way a reader\'s is — the role does not decide', () => {
     render(row('@: 눈이 그쳤다', 'assistant', { name: '아리아', avatar: '/avatar.png' }));
@@ -222,7 +166,7 @@ describe('a generated narration', () => {
     expect(host.textContent).not.toContain('아리아');
     expect(host.querySelector('img')).toBeNull();
     expect(narration!.querySelector('.chat-name')).toBeNull();
-    expect(narration!.querySelector('.chat-narration.italic')).not.toBeNull();
+    expect(narration!.querySelector('.chat-narration.text-muted')).not.toBeNull();
   });
 });
 
@@ -368,7 +312,7 @@ describe('the furniture on a row', () => {
     expect(host.textContent).not.toContain('아리아');
     expect(host.querySelector('img')).toBeNull();
     // The avatar's space is kept, so the run stays in one column.
-    expect(host.querySelector('[data-testid="message-assistant"] > .w-10')).not.toBeNull();
+    expect(host.querySelector('[data-testid="message-assistant"] > .w-8')).not.toBeNull();
   });
 
   it('names the model that wrote a finished reply, outside its bubble, and nothing while it streams', () => {

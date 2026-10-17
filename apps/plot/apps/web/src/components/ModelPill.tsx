@@ -33,8 +33,8 @@ export function ModelPill({
     <span
       data-testid="model-pill"
       className={cx(
-        'relative inline-flex h-7 max-w-32 shrink-0 items-center gap-0.5 rounded-full border border-line bg-surface pr-1.5 pl-2.5 text-xs text-fg transition-colors',
-        'has-[select:enabled]:hover:border-fg has-[select:focus-visible]:outline-2 has-[select:focus-visible]:outline-offset-2 has-[select:focus-visible]:outline-focus',
+        'relative inline-flex h-7 max-w-32 shrink-0 items-center gap-0.5 rounded-xl bg-raised pr-2.5 pl-3 text-xs text-fg transition-colors',
+        'has-[select:enabled]:hover:bg-line has-[select:focus-visible]:outline-2 has-[select:focus-visible]:outline-offset-2 has-[select:focus-visible]:outline-focus',
         disabled && 'opacity-45',
         className,
       )}
@@ -43,7 +43,7 @@ export function ModelPill({
       <span aria-hidden="true" className="truncate">
         {label}
       </span>
-      <Icon name="chevron" className="size-3.5 shrink-0 text-muted" />
+      <Icon name="chevron" className="size-3 shrink-0 text-muted" />
       <select
         value={model}
         disabled={disabled}

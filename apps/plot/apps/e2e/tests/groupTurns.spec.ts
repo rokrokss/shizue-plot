@@ -5,9 +5,8 @@ import { expect, test, type BrowserContext, type Page, type Request, type Route 
  * Group turns end to end, with the echo model: a work of three members answers
  * a turn one reply per speaker, each its own bubble under its own face — set to
  * roster order in the studio, so every member speaks and the run is the same
- * every time. Then 재생성 redoes the whole round (the swipe moves between whole
- * rounds), 이어가기 opens one of its own, 나레이션 is the narrator's, a line
- * written as a member is that member's, and 중단 stops the round. A
+ * every time. Then 재생성 redoes the whole round, a line written as a member
+ * (picked in the settings sheet) is that member's, and 중단 stops the round. A
  * work of one member asks exactly as before, naming no speaker.
  *
  * The echo model streams the reader's own words back for every speaker, so the
@@ -72,6 +71,14 @@ async function storedSpeakers(count: number): Promise<(string | null)[]> {
 async function expectComposerIdle(): Promise<void> {
   await expect(page.getByRole('button', { name: '보내기' })).toBeVisible();
   await expect(page.getByPlaceholder('메시지를 입력하세요')).toBeEnabled();
+}
+
+/** The chat's settings sheet, which ☰ opens; whom the reader writes as is at its top. */
+async function openSettings() {
+  await page.getByRole('button', { name: '대화 설정' }).click();
+  const sheet = page.getByRole('dialog', { name: '대화 설정' });
+  await expect(sheet).toBeVisible();
+  return sheet;
 }
 
 async function send(text: string): Promise<void> {
@@ -149,20 +156,13 @@ test('a send is answered by each member in turn, each in a bubble under their ow
   ]);
 });
 
-test('재생성 redoes the whole round, and the swipe moves between whole rounds', async () => {
+test('재생성 redoes the whole round', async () => {
   generations.length = 0;
   await page.getByRole('button', { name: '재생성' }).click();
   await expectComposerIdle();
   await expect(assistantMessages()).toHaveCount(4);
   expect(generations.map((entry) => entry.path)).toEqual(['regenerate', 'reply', 'reply']);
-
-  const counter = assistantMessages().last().getByText(/^\d+\/\d+$/);
-  await expect(counter).toHaveText('2/2');
-  await assistantMessages().last().getByTitle('이전 응답').click();
-  await expect(counter).toHaveText('1/2');
-  await expect(assistantMessages()).toHaveCount(4);
-  await assistantMessages().last().getByTitle('다음 응답').click();
-  await expect(counter).toHaveText('2/2');
+  expect(await replySpeakers()).toEqual([null, ...cast]);
 });
 
 test('hiding one reply of a round hides that reply alone', async () => {
@@ -180,31 +180,14 @@ test('hiding one reply of a round hides that reply alone', async () => {
   await expectComposerIdle();
 });
 
-test('이어가기 opens a round of its own after the last reply', async () => {
-  generations.length = 0;
-  await page.getByRole('button', { name: '이어가기' }).click();
-  await expect(assistantMessages()).toHaveCount(7);
-  await expectComposerIdle();
-  // A round of its own: its first reply names no round, the rest join it.
-  expect(generations.map((entry) => [entry.path, Boolean(entry.body?.['groupTurnId'])])).toEqual([
-    ['reply', false],
-    ['reply', true],
-    ['reply', true],
-  ]);
-});
-
-test('나레이션 is the narrator’s, as its own row', async () => {
-  const narrations = await page.getByTestId('message-narration').count();
-  await page.getByRole('button', { name: '나레이션' }).click();
-  await expect(page.getByTestId('message-narration')).toHaveCount(narrations + 1);
-  await expectComposerIdle();
-});
-
 test('a line written as a member is drawn as theirs, and they sit the round out', async () => {
   generations.length = 0;
-  await page.getByTestId('write-as').click();
-  await page.getByRole('button', { name: `${cast[1]}의 말` }).click();
-  await expect(page.getByTestId('write-as')).toHaveText(`${cast[1]}의 말`);
+  let sheet = await openSettings();
+  await sheet.getByTestId('write-as').click();
+  await sheet.getByRole('button', { name: `${cast[1]}의 말` }).click();
+  await expect(sheet.getByTestId('write-as')).toHaveText(`${cast[1]}의 말`);
+  await page.keyboard.press('Escape');
+  await expect(sheet).toHaveCount(0);
   await send(`눈 치우는 건 내가 할게 ${run}`);
 
   await expect(userMessages()).toHaveCount(2);
@@ -219,8 +202,11 @@ test('a line written as a member is drawn as theirs, and they sit the round out'
   expect(generations).toHaveLength(2);
   expect(await storedSpeakers(2)).toEqual([cast[0], cast[2]]);
   // Back to the reader's own voice for what follows.
-  await page.getByTestId('write-as').click();
-  await page.getByRole('button', { name: '내 말' }).click();
+  sheet = await openSettings();
+  await sheet.getByTestId('write-as').click();
+  await sheet.getByRole('button', { name: '내 말' }).click();
+  await expect(sheet.getByTestId('write-as')).toHaveText('내 말');
+  await page.keyboard.press('Escape');
 });
 
 test('중단 stops the round between speakers: what is stored stays, and nobody after is asked', async () => {
@@ -256,8 +242,9 @@ test('a work of one member asks as it always has', async () => {
   const soloId = await createPlot(`혼자 플롯 ${run}`, [`리안${run}`]);
   await expect(page.getByTestId('group-order-natural')).toHaveCount(0);
   await startChat(soloId);
-  await expect(page.getByTestId('write-as')).toHaveCount(0);
-  await expect(page.getByTestId('focus-picker')).toHaveCount(0);
+  const sheet = await openSettings();
+  await expect(sheet.getByTestId('write-as')).toHaveCount(0);
+  await page.keyboard.press('Escape');
 
   generations.length = 0;
   await send(`안녕하세요 ${run}`);

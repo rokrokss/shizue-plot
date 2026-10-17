@@ -47,7 +47,8 @@ test('chat settings lock their snapshot without discarding the next message draf
   expect(chatResponse.ok()).toBe(true);
   const state = await chatResponse.json();
   await page.goto(`/ko/chats/${state.chat.id}`);
-  await page.getByRole('button', { name: '노트', exact: true }).click();
+  await page.getByRole('button', { name: '대화 설정' }).click();
+  await page.getByRole('dialog', { name: '대화 설정' }).getByRole('button', { name: '노트', exact: true }).click();
   const panel = page.getByTestId('chat-panel');
   const note = panel.locator('textarea').first();
   await note.fill('저장할 대화 설정');
@@ -60,7 +61,7 @@ test('chat settings lock their snapshot without discarding the next message draf
   const request = await submitted;
   try {
     await expect(note).toBeDisabled();
-    await expect(page.getByLabel('모델', { exact: true }).first()).toBeDisabled();
+    await expect(page.getByTestId('model-pill').getByRole('combobox')).toBeDisabled();
     await expect(page.getByRole('button', { name: '보내기', exact: true })).toBeDisabled();
     await expect(composer).toBeEnabled();
   } finally {

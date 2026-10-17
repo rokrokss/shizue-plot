@@ -66,6 +66,22 @@ test.afterAll(async () => {
 const assistantMessages = () => page.getByTestId('message-assistant');
 const userMessages = () => page.getByTestId('message-user');
 
+/** The chat's settings sheet, which ☰ opens at every width. */
+async function openSettings() {
+  await page.getByRole('button', { name: '대화 설정' }).click();
+  const sheet = page.getByRole('dialog', { name: '대화 설정' });
+  await expect(sheet).toBeVisible();
+  return sheet;
+}
+
+/** The reader's theme pick, read when a page loads: dark unless light is picked. */
+async function pickTheme(theme: 'light' | 'dark'): Promise<void> {
+  await page.evaluate((light) => {
+    if (light) localStorage.setItem('shizue-theme', 'light');
+    else localStorage.removeItem('shizue-theme');
+  }, theme === 'light');
+}
+
 test('an English work on the Korean page answers in Korean and translates only its opening', async () => {
   await seedSession(page, account);
   const post = (path: string, data: unknown) => page.request.post(`${base}${path}`, { headers: { origin: base }, data });
@@ -100,10 +116,12 @@ test('an English work on the Korean page answers in Korean and translates only i
   await expect(intro).toContainText('어서 와요, 여행자님');
 
   // The mode was decided for the reader, and the card's scripts recommend the other one.
-  const mode = page.getByLabel('언어 모드');
+  const sheet = await openSettings();
+  const mode = sheet.getByLabel('언어 모드');
   await expect(mode).toHaveValue('');
   await expect(mode.locator('option').first()).toHaveText('자동 (답장 언어 지시)');
-  await expect(mode).toHaveAttribute('title', '이 카드는 번역 모드를 권장해요');
+  await expect(sheet.getByTestId('translate-recommended')).toHaveText('이 카드는 번역 모드를 권장해요');
+  await page.keyboard.press('Escape');
 
   // A reply is written in Korean by the model, so nothing asks about it.
   const before = asked.length;
@@ -122,7 +140,8 @@ test('an English work on the Korean page answers in Korean and translates only i
 });
 
 test('the translation mode translates every message and sends the reader turn in English', async () => {
-  const mode = page.getByLabel('언어 모드');
+  const sheet = await openSettings();
+  const mode = sheet.getByLabel('언어 모드');
   await Promise.all([
     page.waitForResponse((response) => response.request().method() === 'PATCH' && response.url().includes(`/api/chats/${chatId}`)),
     mode.selectOption('translate'),
@@ -131,12 +150,13 @@ test('the translation mode translates every message and sends the reader turn in
   await expect(assistantMessages().last()).toContainText('안녕하세요!');
   await expect(userMessages().last().getByTestId('message-translation')).toBeVisible();
 
-  const input = page.getByLabel('내 메시지를 English로 번역해서 보내기');
+  const input = sheet.getByLabel('내 메시지를 English로 번역해서 보내기');
   await Promise.all([
     page.waitForResponse((response) => response.request().method() === 'PATCH' && response.url().includes(`/api/chats/${chatId}`)),
     input.click(),
   ]);
   await expect(input).toBeChecked();
+  await page.keyboard.press('Escape');
   await expect(page.getByPlaceholder('English로 번역해 보내요…')).toBeVisible();
 
   await page.getByPlaceholder('English로 번역해 보내요…').fill(mine);
@@ -149,12 +169,10 @@ test('the translation mode translates every message and sends the reader turn in
   await reply.getByTestId('message-translation').click();
   await expect(reply).toContainText('들어가도 될까요?');
 
-  // The desktop header with every control it can carry, the language ones too,
-  // at the narrowest width that keeps them out of the sheet: they wrap inside the
-  // row, so the last of them is still on the screen.
+  // The header row keeps its ☰ on the screen, the language ones and all being in its sheet.
   await page.setViewportSize({ width: 1024, height: 768 });
-  const notes = await page.getByRole('button', { name: '노트', exact: true }).boundingBox();
-  expect(notes!.x + notes!.width).toBeLessThanOrEqual(1024);
+  const menu = await page.getByRole('button', { name: '대화 설정' }).boundingBox();
+  expect(menu!.x + menu!.width).toBeLessThanOrEqual(1024);
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBe(0);
 });
 
@@ -191,7 +209,7 @@ const settingsWrite = () =>
 test('reads at a phone width, in both themes', async () => {
   await page.setViewportSize({ width: 375, height: 812 });
   for (const scheme of ['light', 'dark'] as const) {
-    await page.emulateMedia({ colorScheme: scheme });
+    await pickTheme(scheme);
     await page.goto(`/ko/chats/${chatId}`);
     const reply = assistantMessages().last();
     await expect(reply).toContainText('들어가도 될까요?');
@@ -199,8 +217,7 @@ test('reads at a phone width, in both themes', async () => {
     await page.screenshot({ path: `test-results/translation/reply-${scheme}.png` });
 
     // The settings sheet: the mode the reader picked, and the recommendation once it is automatic.
-    await page.getByRole('button', { name: '대화 설정' }).click();
-    const sheet = page.getByRole('dialog');
+    const sheet = await openSettings();
     const mode = sheet.getByLabel('언어 모드');
     await mode.scrollIntoViewIfNeeded();
     await expect(mode).toHaveValue('translate');
@@ -228,7 +245,7 @@ test('translates a reply’s status card and choices, again on request, and keep
   });
   expect(off.status()).toBe(200);
   await page.setViewportSize({ width: 375, height: 812 });
-  await page.emulateMedia({ colorScheme: 'light' });
+  await pickTheme('light');
   await page.goto(`/ko/chats/${chatId}`);
 
   const turn = ['The rainy inn is quiet.', '```status', 'Location: The rainy inn', 'Mood: calm', '```', '>> Order a drink', '>> Go upstairs'].join('\n');

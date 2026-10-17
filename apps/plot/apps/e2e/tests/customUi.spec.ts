@@ -37,10 +37,12 @@ test.afterAll(async () => {
 
 const assistantMessages = () => page.getByTestId('message-assistant');
 
-/** The notes panel, opened only when it is not already showing. */
+/** The notes panel, opened from the settings sheet ☰ opens when it is not already showing. */
 async function openPanel(): Promise<void> {
-  const toggle = page.getByRole('button', { name: '노트', exact: true });
-  if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
+  if (!(await page.getByTestId('chat-panel').isVisible())) {
+    await page.getByRole('button', { name: '대화 설정' }).click();
+    await page.getByRole('dialog', { name: '대화 설정' }).getByRole('button', { name: '노트', exact: true }).click();
+  }
   await expect(page.getByTestId('chat-panel')).toBeVisible();
 }
 
@@ -430,15 +432,18 @@ test('a fixed overlay covers the conversation, never the header or the composer,
   expect(Math.abs(covered.width - stage.width)).toBeLessThanOrEqual(1);
 
   // What a click lands on outside the conversation is still the app — the
-  // composer and the header — not the card's 9000px box.
+  // composer and the chat's header row — not the card's 9000px box.
   const hits = await page.evaluate(() => {
     const at = (target: Element | null): string => {
       const box = target!.getBoundingClientRect();
       const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
       return hit?.closest('.shizue-msg') ? 'card' : 'app';
     };
-    const notes = Array.from(document.querySelectorAll('button')).find((button) => button.textContent === '노트') ?? null;
-    return [at(document.querySelector('textarea[placeholder^="메시지를 입력하세요"]')), at(document.querySelector('header')), at(notes)];
+    return [
+      at(document.querySelector('textarea[placeholder^="메시지를 입력하세요"]')),
+      at(document.querySelector('a[aria-label="대화 목록으로"]')),
+      at(document.querySelector('button[aria-label="대화 설정"]')),
+    ];
   });
   expect(hits).toEqual(['app', 'app', 'app']);
 

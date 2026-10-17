@@ -55,7 +55,7 @@ vi.mock('@/components/MessageRow', async () => {
       content: string;
       speaker?: string;
       typing?: { name: string };
-      footer?: ReactNode;
+      footer?: ReactNode | ((edit: (() => void) | null) => ReactNode);
     }) =>
       h(
         'div',
@@ -65,7 +65,7 @@ vi.mock('@/components/MessageRow', async () => {
           ...(props.speaker !== undefined ? { 'data-speaker': props.speaker } : {}),
           ...(props.typing ? { 'data-typing': props.typing.name } : {}),
         },
-        [h('span', { key: 'text' }, props.content), h('div', { key: 'footer' }, props.footer)],
+        [h('span', { key: 'text' }, props.content), h('div', { key: 'footer' }, typeof props.footer === 'function' ? props.footer(null) : props.footer)],
       ),
   };
 });
@@ -225,13 +225,19 @@ async function render(): Promise<void> {
 }
 
 const button = (label: string): HTMLButtonElement | undefined =>
-  // By what it says, or — an icon button — by its name.
-  [...host.querySelectorAll('button')].find((node) => node.textContent === label || node.getAttribute('aria-label') === label);
+  // By what it says, or — an icon button — by its name; a sheet's are in its portal.
+  [...document.body.querySelectorAll('button')].find((node) => node.textContent === label || node.getAttribute('aria-label') === label);
 
 async function click(node: Element): Promise<void> {
   await act(async () => {
     node.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   });
+}
+
+/** The notes panel, which the sheet ☰ opens has the way into. */
+async function openNotes(): Promise<void> {
+  await click(button('대화 설정')!);
+  await click(button('노트')!);
 }
 
 /** Lets the round's chain of requests run on, as far as nothing holds it. */
@@ -300,24 +306,6 @@ describe('a round in a work of several members', () => {
     expect(speakers()).toEqual(['chr_lian', 'chr_yuna']);
   });
 
-  it('takes the 다음 차례 picks exactly — in roster order, past the cap — and clears them once the round’s first reply lands', async () => {
-    groupSettings = { order: 'natural', maxSpeakers: 1 };
-    await render();
-    await click(host.querySelector('[data-testid="focus-picker"]')!);
-    await click(button('민수')!);
-    await click(button('리안')!);
-    await sendText('안녕');
-    expect(speakers()).toEqual(['chr_lian', 'chr_minsu']);
-    expect(streamed[1]!.body).toMatchObject({ finalSpeaker: true });
-
-    // Rolled now, with the cap of one: nobody joins at this roll, so one is drawn.
-    vi.spyOn(Math, 'random').mockReturnValue(0.99);
-    await sendText('또 안녕');
-    expect(streamed.slice(2)).toEqual([
-      { path: '/api/chats/cht_1/messages', body: { content: '또 안녕', speakerId: 'chr_yuna', finalSpeaker: true } },
-    ]);
-  });
-
   it('shows whom it waits on and who is next, and a stop asks nobody after the one stopped', async () => {
     outcomes = ['done', 'hold'];
     await render();
@@ -351,18 +339,16 @@ describe('a round in a work of several members', () => {
   it('asks a send’s failed first speaker again, as an answer to the stored turn', async () => {
     outcomes = ['error'];
     await render();
-    await click(host.querySelector('[data-testid="focus-picker"]')!);
-    await click(button('리안')!);
     await sendText('안녕');
     await click(button('다시 시도')!);
     await settle();
     expect(streamed[1]).toEqual({
       path: '/api/chats/cht_1/regenerate',
-      body: { speakerId: 'chr_lian', finalSpeaker: true },
+      body: { speakerId: 'chr_lian', finalSpeaker: false },
     });
   });
 
-  it('redoes the whole round on 재생성, and opens a round of its own on 이어가기', async () => {
+  it('redoes the whole round on 재생성', async () => {
     chatState = stateWith(answered());
     await render();
     expect([...host.querySelectorAll('[data-testid="row"]')].map((row) => row.getAttribute('data-speaker'))).toEqual([
@@ -380,11 +366,6 @@ describe('a round in a work of several members', () => {
       { path: '/api/chats/cht_1/reply', body: { speakerId: 'chr_yuna', finalSpeaker: true, groupTurnId: 'msg_1' } },
     ]);
 
-    streamed = [];
-    await click(button('이어가기')!);
-    await settle();
-    expect(streamed[0]).toEqual({ path: '/api/chats/cht_1/reply', body: { speakerId: 'chr_lian', finalSpeaker: false } });
-    expect(streamed[1]!.body).toMatchObject({ speakerId: 'chr_minsu', groupTurnId: 'msg_1' });
   });
 
   it('gives a round the narration button opened back to the narrator', async () => {
@@ -401,18 +382,10 @@ describe('a round in a work of several members', () => {
     ]);
   });
 
-  it('swipes between whole rounds under the last reply', async () => {
-    chatState = stateWith(answered(), [], { r1: { index: 0, total: 2, ids: ['r1', 'r1b'] } });
-    await render();
-    expect(host.textContent).toContain('1/2');
-    await click(host.querySelector('button[aria-label="다음 응답"]')!);
-    expect(sent).toContainEqual({ method: 'POST', path: '/api/chats/cht_1/head', body: { messageId: 'r1b' } });
-  });
-
   it('lets a member speak now, a round of one', async () => {
     chatState = stateWith(answered());
     await render();
-    await click(button('노트')!);
+    await openNotes();
     const speakNow = panel!['onSpeakNow'] as (memberId: string) => void;
     await act(async () => speakNow('chr_yuna'));
     await settle();
@@ -421,10 +394,12 @@ describe('a round in a work of several members', () => {
 
   it('sends a line written as a member as that member’s, who then sits the round out', async () => {
     await render();
-    await click(host.querySelector('[data-testid="write-as"]')!);
+    // In the sheet ☰ opens.
+    await click(button('대화 설정')!);
+    await click(document.querySelector('[data-testid="write-as"]')!);
     // Its face's initial sits beside the name.
-    await click([...host.querySelectorAll('button')].find((node) => node.textContent?.endsWith('민수의 말'))!);
-    expect(host.querySelector('[data-testid="write-as"]')?.textContent).toBe('민수의 말');
+    await click([...document.body.querySelectorAll('button')].find((node) => node.textContent?.endsWith('민수의 말'))!);
+    expect(document.querySelector('[data-testid="write-as"]')?.textContent).toBe('민수의 말');
     await sendText('반가워');
     expect(streamed[0]!.body).toMatchObject({ content: '@민수: 반가워' });
     expect(speakers()).toEqual(['chr_lian', 'chr_yuna']);
@@ -436,8 +411,9 @@ describe('a work of one member', () => {
     roster = [member('chr_lian', '리안')];
     chatState = stateWith(answered().slice(0, 3));
     await render();
-    expect(host.querySelector('[data-testid="focus-picker"]')).toBeNull();
-    expect(host.querySelector('[data-testid="write-as"]')).toBeNull();
+    await click(button('대화 설정')!);
+    expect(document.querySelector('[data-testid="write-as"]')).toBeNull();
+    await click(button('닫기')!);
 
     await sendText('안녕');
     expect(streamed).toEqual([{ path: '/api/chats/cht_1/messages', body: { content: '안녕' } }]);
@@ -445,7 +421,7 @@ describe('a work of one member', () => {
     await settle();
     expect(streamed[1]).toEqual({ path: '/api/chats/cht_1/regenerate', body: undefined });
 
-    await click(button('노트')!);
+    await openNotes();
     expect(panel!['onSpeakNow']).toBeUndefined();
   });
 });
@@ -454,7 +430,7 @@ describe('the scene cast in the notes panel', () => {
   it('sends a member away without the ids no member has any more', async () => {
     chatState = stateWith([greeting], ['chr_gone', 'chr_yuna']);
     await render();
-    await click(button('노트')!);
+    await openNotes();
     const toggle = panel!['onToggleAbsent'] as (id: string, absent: boolean) => Promise<void>;
     await act(() => toggle('chr_minsu', true));
     await act(() => toggle('chr_yuna', false));
@@ -466,14 +442,14 @@ describe('the scene cast in the notes panel', () => {
 
   it("hands the inspector to the plot's creator only", async () => {
     await render();
-    await click(button('노트')!);
+    await openNotes();
     expect(panel!['inspectChatId']).toBeUndefined();
 
     act(() => root.unmount());
     root = createRoot(host);
     chatState = { ...stateWith([greeting]), isPlotOwner: true };
     await render();
-    await click(button('노트')!);
+    await openNotes();
     expect(panel!['inspectChatId']).toBe('cht_1');
   });
 });

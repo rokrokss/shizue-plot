@@ -313,21 +313,30 @@ function RunItems({
     if (box === 'narration') {
       // The mark once at the block's start, the paragraphs hung past it.
       return (
-        <div key={index} className="chat-narration flex w-full gap-2 italic text-muted">
+        <div key={index} className="chat-narration flex w-full gap-2 px-2 py-1 text-muted">
           <Icon name="menu" className="chat-narration-mark mt-0.5 size-4 shrink-0" />
           <div className="chat-narration-text min-w-0 flex-1">{blocks}</div>
         </div>
       );
     }
+    const labelled = end && trailer !== undefined;
+    // Zeta's width: at most 612px, and never into the 64px kept free opposite the
+    // face. Under a label the box that holds both keeps that room, since a share
+    // of a content-sized box would only shrink the bubble with it.
     const bubble = (
-      <div className="chat-bubble w-fit max-w-[min(100%,36rem)] min-w-0 rounded-2xl rounded-tl-md border border-line/70 bg-bubble px-3.5 py-2.5">
+      <div
+        className={cx(
+          'chat-bubble w-fit min-w-0 rounded-r-xl rounded-bl-xl bg-bubble px-3 py-2',
+          labelled ? 'max-w-full' : 'max-w-[min(100%_-_4rem,612px)]',
+        )}
+      >
         {blocks}
       </div>
     );
-    if (!end || !trailer) return <Fragment key={index}>{bubble}</Fragment>;
+    if (!labelled) return <Fragment key={index}>{bubble}</Fragment>;
     // Content-sized like the bubble, so the label sits at the bubble's own corner.
     return (
-      <div key={index} className="flex w-fit max-w-full min-w-0 flex-col items-start">
+      <div key={index} className="flex w-fit max-w-[min(100%_-_4rem,612px)] min-w-0 flex-col items-start">
         {bubble}
         <div className="mt-1 self-end">{trailer}</div>
       </div>
@@ -812,10 +821,10 @@ export const MessageBody = memo(function MessageBody({
       {...(held ? { style: { visibility: 'hidden' }, 'data-held': '' } : {})}
     >
       {lone ? (
-        <div data-testid="speech-character" data-speaker={voice} className="flex items-center gap-2.5">
-          <Avatar src={avatarOf(voice)} name={voice} className="chat-face size-10 text-sm" />
+        <div data-testid="speech-character" data-speaker={voice} className="flex items-center gap-1.5">
+          <Avatar src={avatarOf(voice)} name={voice} className="chat-face size-8 text-xs" />
           <div className="flex min-h-5 min-w-0 flex-1 items-center gap-2">
-            <span className="chat-name text-xs font-medium text-muted">{voice}</span>
+            <span className="chat-name text-xs text-fg/70">{voice}</span>
             {header}
           </div>
         </div>
@@ -847,7 +856,7 @@ export const MessageBody = memo(function MessageBody({
             />
           );
           return piece.scene ? (
-            <div key={index} data-testid="speech-narration" className="flex flex-col gap-3 italic text-muted">
+            <div key={index} data-testid="speech-narration" className="flex flex-col gap-3 text-muted">
               {drawn}
             </div>
           ) : (
@@ -860,16 +869,16 @@ export const MessageBody = memo(function MessageBody({
         const says = piece.name !== named;
         named = piece.name;
         return (
-          <div key={index} data-testid="speech-character" data-speaker={piece.name} className="flex gap-2.5">
+          <div key={index} data-testid="speech-character" data-speaker={piece.name} className="flex gap-1.5">
             {says ? (
-              <Avatar src={avatarOf(piece.name)} name={piece.name} className="chat-face size-10 text-sm" />
+              <Avatar src={avatarOf(piece.name)} name={piece.name} className="chat-face size-8 text-xs" />
             ) : (
-              <div aria-hidden="true" className="chat-face w-10 shrink-0" />
+              <div aria-hidden="true" className="chat-face w-8 shrink-0" />
             )}
             <div className="flex min-w-0 flex-1 flex-col items-start gap-3">
               {says ? (
                 <div className="-mb-2 flex min-h-5 items-center gap-2">
-                  <span className="chat-name text-xs font-medium text-muted">{piece.name}</span>
+                  <span className="chat-name text-xs text-fg/70">{piece.name}</span>
                   {index === 0 && headerInside ? header : null}
                 </div>
               ) : null}

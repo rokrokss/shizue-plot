@@ -25,8 +25,8 @@ export function AuthForm({ next, error }: { next?: string | string[]; error?: st
   }, [session, router, back]);
 
   return (
-    <div className="grid w-full max-w-5xl overflow-hidden rounded-3xl border-2 border-fg bg-surface shadow-[6px_6px_0_var(--color-fg)] lg:grid-cols-2">
-      <div className="brand-dots flex flex-col justify-between border-b-2 border-fg bg-mint-soft p-7 sm:p-10 lg:border-r-2 lg:border-b-0">
+    <div className="grid w-full max-w-5xl overflow-hidden rounded-3xl border border-line bg-surface lg:grid-cols-2">
+      <div className="brand-dots flex flex-col justify-between border-b border-line bg-mint-soft p-7 sm:p-10 lg:border-r lg:border-b-0">
         <div>
           <p className="text-xs font-semibold text-link">{rebrand('eyebrow')}</p>
           <h1 className="mt-4 whitespace-pre-line title24 sm:title32">{brand('catchphrase')}</h1>

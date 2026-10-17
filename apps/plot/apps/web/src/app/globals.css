@@ -3,73 +3,76 @@
 @import 'pretendard/dist/web/variable/pretendardvariable-dynamic-subset.css';
 @import 'pretendard-jp/dist/web/variable/pretendardvariable-jp-dynamic-subset.css';
 
-/* Shared with ../shizue/store/src/base.css; see docs/design/shizue-ui.md. */
+/*
+ * Zeta's quiet neutrals with shizue's mint where Zeta has its purple; see
+ * docs/design/shizue-ui.md. The values here are light's; dark, the default,
+ * overrides them below.
+ */
 @theme {
-  --color-canvas: #f6f3dc;
+  --color-canvas: #ffffff;
   --color-surface: #ffffff;
-  --color-raised: #efeacb;
-  --color-line: #c9d1bf;
-  --color-fg: #10302b;
-  --color-muted: #50645b;
+  --color-raised: #f1f2f3;
+  --color-line: #e3e5e7;
+  --color-fg: #151516;
+  --color-muted: #6b6f73;
   --color-accent: #32ccbc;
-  --color-accent-ink: #10302b;
-  --color-mint-soft: #cbfbf6;
-  --color-accent-hover: #cbfbf6;
-  --color-bubble: #ffffff;
-  --color-link: #126b61;
-  --color-focus: #126b61;
-  --color-danger: #b43e35;
-  --color-scrim: rgb(16 48 43 / 0.35);
+  --color-accent-ink: #0b2a26;
+  --color-mint-soft: #e2f8f5;
+  --color-accent-hover: #2bb8a9;
+  --color-bubble: #f1f2f3;
+  --color-bubble-user: #32ccbc;
+  --color-bubble-user-ink: #0b2a26;
+  --color-link: #0f766e;
+  --color-focus: #0f766e;
+  --color-danger: #c0392b;
+  --color-scrim: rgb(0 0 0 / 0.4);
   --font-sans: 'Pretendard Variable', 'Pretendard JP Variable', -apple-system, system-ui, Roboto, 'Helvetica Neue', 'Segoe UI', 'Apple SD Gothic Neo', 'Noto Sans KR', 'Malgun Gothic', 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', sans-serif;
-  --shadow-card: 3px 3px 0 var(--color-fg);
+  --shadow-card: 0 4px 16px rgb(0 0 0 / 0.12);
 }
 
 /*
- * Dark follows the OS unless the reader picked a side; the pick is
- * `data-theme` on <html>, set before first paint (lib/theme.ts). The palette
- * is the reference's dark store image: deep green surfaces, mint-2 for links
- * and focus. Mint stays mint, and the ink on it stays ink.
+ * Dark unless the reader picked light, the OS notwithstanding: the pick is
+ * `data-theme="light"` on <html>, set before first paint (lib/theme.ts).
+ * Zeta's near-black page (`#151516`) and its greys, mint-2 for links and focus;
+ * the reader's own bubble is a deep mint, as Zeta's is a deep purple.
  */
 @custom-variant dark {
-  &:where([data-theme='dark'], [data-theme='dark'] *) {
+  &:where(:not([data-theme='light'], [data-theme='light'] *)) {
     @slot;
-  }
-  @media (prefers-color-scheme: dark) {
-    &:where(:not([data-theme='light'], [data-theme='light'] *)) {
-      @slot;
-    }
   }
 }
 
 :root {
   color-scheme: light;
-  --reading: #fffef7;
-  --dots: #10302b16;
+  --reading: #ffffff;
+  --dots: transparent;
   /* The bunnies have dark versions of their own (docs/design/shizue-ui.md §자산). */
   --brand-mark: url('/brand/mark.svg');
   --brand-standing: url('/brand/standing.png');
   /* A select's ⌄, in the muted ink (below, `select`). */
-  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6' fill='none' stroke='%2350645b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1l4 4 4-4'/%3E%3C/svg%3E");
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6' fill='none' stroke='%236b6f73' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1l4 4 4-4'/%3E%3C/svg%3E");
   @variant dark {
     color-scheme: dark;
-    --color-canvas: #0f1a19;
-    --color-surface: #14211f;
-    --color-raised: #1b2c29;
-    --color-line: #2b423e;
-    --color-fg: #e9f6f3;
-    --color-muted: #a3bab6;
-    --color-mint-soft: #1a4540;
-    --color-accent-hover: #90f7ec;
-    --color-bubble: #1b2c29;
+    --color-canvas: #151516;
+    --color-surface: #1c1c1e;
+    --color-raised: #28282a;
+    --color-line: #2c2c2f;
+    --color-fg: #ffffff;
+    --color-muted: #a1a1a6;
+    --color-mint-soft: #173733;
+    --color-accent-hover: #5fdccf;
+    --color-bubble: #232325;
+    --color-bubble-user: #1d5a53;
+    --color-bubble-user-ink: #ffffff;
     --color-link: #90f7ec;
     --color-focus: #90f7ec;
     --color-danger: #f0877b;
     --color-scrim: rgb(0 0 0 / 0.6);
-    --reading: #111d1b;
-    --dots: #90f7ec14;
+    --shadow-card: 0 4px 16px rgb(0 0 0 / 0.5);
+    --reading: #151516;
     --brand-mark: url('/brand/mark-dark.svg');
     --brand-standing: url('/brand/standing-dark.png');
-    --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6' fill='none' stroke='%23a3bab6' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1l4 4 4-4'/%3E%3C/svg%3E");
+    --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6' fill='none' stroke='%23a1a1a6' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1l4 4 4-4'/%3E%3C/svg%3E");
   }
 }
 

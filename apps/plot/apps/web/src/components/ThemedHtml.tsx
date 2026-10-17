@@ -13,8 +13,8 @@ import { getTheme, subscribeTheme, THEME_SCRIPT } from '@/lib/theme';
  * a remount would have React create a script that never runs.
  */
 export function ThemedHtml({ lang, children }: { lang: string; children: ReactNode }) {
-  // The server cannot know the pick, so it renders `system` and the client corrects it.
-  const theme = useSyncExternalStore(subscribeTheme, getTheme, () => 'system');
+  // The server cannot know the pick, so it renders the default and the client corrects it.
+  const theme = useSyncExternalStore(subscribeTheme, getTheme, () => 'dark');
   const inserted = useRef(false);
   useServerInsertedHTML(() => {
     if (inserted.current) return null;
@@ -24,7 +24,7 @@ export function ThemedHtml({ lang, children }: { lang: string; children: ReactNo
 
   return (
     // The script set `data-theme` before hydration, where the server rendered none.
-    <html lang={lang} data-theme={theme === 'system' ? undefined : theme} suppressHydrationWarning>
+    <html lang={lang} data-theme={theme === 'light' ? 'light' : undefined} suppressHydrationWarning>
       {children}
     </html>
   );

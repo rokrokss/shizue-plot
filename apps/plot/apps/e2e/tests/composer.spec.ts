@@ -6,7 +6,8 @@ import { seedSession } from '../seedSession.js';
  * Shift+Enter breaks the line. A touch keyboard has no Shift+Enter, so there
  * Enter breaks the line and the round button sends (PocketRisu's
  * `sendKeyMobile`), or Ctrl/⌘+Enter from a keyboard paired to the tablet. The
- * field there is 16px, below which iOS zooms the page in on focus.
+ * field there is 16px, below which iOS zooms the page in on focus; at a desk it
+ * is Zeta's 15px. Both keep a 1.2rem line.
  */
 
 const origin = process.env['E2E_WEB_URL'] ?? 'http://localhost:13000';
@@ -45,6 +46,7 @@ test.describe('on a touch screen', () => {
     expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true);
     const composer = page.getByPlaceholder('메시지를 입력하세요…');
     await expect(composer).toHaveCSS('font-size', '16px');
+    await expect(composer).toHaveCSS('line-height', '19.2px');
     const writes = chatWrites(page, id);
 
     await composer.click();
@@ -66,10 +68,12 @@ test.describe('on a touch screen', () => {
   });
 });
 
-test('at a desk Enter sends and Shift+Enter breaks the line, in a 14px field', async ({ page }) => {
+test('at a desk Enter sends and Shift+Enter breaks the line, in a 15px field', async ({ page }) => {
   const id = await openChat(page, 'desk');
   const composer = page.getByPlaceholder('메시지를 입력하세요…');
-  await expect(composer).toHaveCSS('font-size', '14px');
+  // 0.938rem, Zeta's 15px.
+  await expect(composer).toHaveCSS('font-size', '15.008px');
+  await expect(composer).toHaveCSS('line-height', '19.2px');
   const writes = chatWrites(page, id);
 
   await composer.click();

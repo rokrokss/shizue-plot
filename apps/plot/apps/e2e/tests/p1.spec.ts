@@ -172,14 +172,18 @@ test('a reader follows the creator and starts a chat on a recommended profile', 
   await expect(readerPage).toHaveURL(new RegExp(`/ko/chats/${UUID_PATH}$`));
 
   // The pick was copied into the reader's own personas, and the chat points at
-  // the copy — a row they own and may edit like any other.
+  // the copy — a row they own and may edit like any other. The chat's settings
+  // are in the sheet ☰ opens.
+  await readerPage.getByRole('button', { name: '대화 설정' }).click();
   await expect
     .poll(() =>
       readerPage
+        .getByRole('dialog', { name: '대화 설정' })
         .getByLabel('페르소나')
         .evaluate((select) => (select as HTMLSelectElement).selectedOptions[0]?.textContent ?? ''),
     )
     .toBe(profiles[1]!.name);
+  await readerPage.keyboard.press('Escape');
 });
 
 test('the opening draws the plot’s image', async () => {

@@ -6,9 +6,9 @@ import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 
 /**
  * End-to-end smoke path: test session → plot → two members → openings → publish →
- * chat from the plot's own page → opening swipe → echo turn read back as the
- * speakers who wrote it → regenerate/swipe → edit → author note → locale switch
- * → logout.
+ * chat from the plot's own page → echo turn read back as the speakers who
+ * wrote it → regenerate, with a request too → edit → author note → locale
+ * switch → logout.
  *
  * Two members make it a work of group turns — one reply per speaker. The second
  * member is set to speak only when picked (대화량 0), so every round here is the
@@ -79,10 +79,19 @@ async function expectComposerIdle(): Promise<void> {
   await expect(page.getByRole('button', { name: '보내기' })).toBeVisible();
 }
 
-/** The notes panel, opened only when it is not already showing. */
+/** The chat's settings sheet, which ☰ opens at every width. */
+async function openSettings() {
+  await page.getByRole('button', { name: '대화 설정' }).click();
+  const sheet = page.getByRole('dialog', { name: '대화 설정' });
+  await expect(sheet).toBeVisible();
+  return sheet;
+}
+
+/** The notes panel, opened from the settings sheet when it is not already showing. */
 async function openPanel(): Promise<void> {
-  const toggle = page.getByRole('button', { name: '노트', exact: true });
-  if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
+  if (!(await page.getByTestId('chat-panel').isVisible())) {
+    await (await openSettings()).getByRole('button', { name: '노트', exact: true }).click();
+  }
   await expect(page.getByTestId('chat-panel')).toBeVisible();
 }
 
@@ -92,17 +101,16 @@ const chatWrite = (method: string, path = '/api/chats/') =>
     (response) => response.request().method() === method && response.url().includes(path),
   );
 
+/** The theme on screen now, as the reader's pick puts it on <html>: dark unless light is picked. */
+async function setTheme(theme: 'light' | 'dark'): Promise<void> {
+  await page.evaluate((light) => {
+    if (light) document.documentElement.dataset['theme'] = 'light';
+    else delete document.documentElement.dataset['theme'];
+  }, theme === 'light');
+}
+
 const assistantMessages = () => page.getByTestId('message-assistant');
 const userMessages = () => page.getByTestId('message-user');
-/** Swipe counter of the last assistant message, e.g. "2/2". */
-const swipeCounter = () => assistantMessages().last().getByText(/^\d+\/\d+$/);
-/**
- * Swipe arrows of the last assistant message. Scoped like the counter: once a
- * chat holds a swiped opening and a regenerated reply, both rows carry arrows
- * and a page-wide title lookup is ambiguous.
- */
-const swipePrev = () => assistantMessages().last().getByTitle('이전 응답');
-const swipeNext = () => assistantMessages().last().getByTitle('다음 응답');
 
 /** One member's card in the roster editor, opened so its fields are reachable. */
 async function openMember(index: number) {
@@ -200,26 +208,16 @@ test('the public plot page carries the cast and the openings', async () => {
   await expect(page.getByRole('link', { name: '편집' })).toBeVisible();
 });
 
-test('starts a chat that opens on the first opening and swipes the other', async () => {
+test('starts a chat that opens on the first opening', async () => {
   await page.getByRole('combobox', { name: '모델', exact: true }).selectOption('echo/echo');
   await page.getByRole('button', { name: '대화 시작' }).click();
 
   await expect(page).toHaveURL(new RegExp(`/ko/chats/${UUID_PATH}$`));
   await expect(assistantMessages()).toHaveCount(1);
   await expect(assistantMessages().first()).toContainText('늦었네, 기다렸어');
-  // Every opening is a root sibling, so it swipes the way a reply does.
-  await expect(swipeCounter()).toHaveText('1/2');
-
-  await swipeNext().click();
-  await expect(swipeCounter()).toHaveText('2/2');
-  await expect(assistantMessages().first()).toContainText('여기서 뭐 해?');
-
-  // Back to the first opening, which the rest of the suite builds on. The click
-  // has to land before the next one: the button reads the head from the last
-  // render, so a second click fired mid-flight would re-target the same sibling.
-  await swipePrev().click();
-  await expect(swipeCounter()).toHaveText('1/2');
-  await expect(assistantMessages().first()).toContainText('늦었네, 기다렸어');
+  // The conversation has the whole screen: the site's header steps aside.
+  await expect(page.getByRole('link', { name: '대화 목록으로' })).toBeVisible();
+  await expect(page.getByRole('navigation').getByRole('link', { name: messages('ko').nav.create, exact: true })).toBeHidden();
 });
 
 test('the opening is drawn as the narrator and the character who wrote it', async () => {
@@ -269,18 +267,26 @@ test('streams an echo reply and attributes its speakers', async () => {
   await expectComposerIdle();
 });
 
-test('regenerates and swipes between siblings', async () => {
+test('regenerates the last reply, and again with a request', async () => {
+  const regenerate = () =>
+    page.waitForRequest((request) => request.method() === 'POST' && request.url().endsWith('/regenerate'));
+  let sent = regenerate();
   await page.getByRole('button', { name: '재생성' }).click();
-
-  await expect(swipeCounter()).toHaveText('2/2');
+  expect((await sent).postDataJSON()?.request).toBeUndefined();
   await expectComposerIdle();
-
-  await swipePrev().click();
-  await expect(swipeCounter()).toHaveText('1/2');
+  await expect(assistantMessages()).toHaveCount(2);
   await expect(assistantMessages().last()).toContainText('안녕');
 
-  await swipeNext().click();
-  await expect(swipeCounter()).toHaveText('2/2');
+  // The request goes along with the regeneration, and the sheet steps aside.
+  await page.getByRole('button', { name: '요청해서 다시 쓰기' }).click();
+  const ask = page.getByRole('dialog', { name: '어떻게 고쳐드릴까요?' });
+  await ask.getByRole('textbox').fill(`더 짧게 ${run}`);
+  sent = regenerate();
+  await ask.getByRole('button', { name: '다시 쓰기', exact: true }).click();
+  expect((await sent).postDataJSON()).toMatchObject({ request: `더 짧게 ${run}` });
+  await expect(ask).toHaveCount(0);
+  await expectComposerIdle();
+  await expect(assistantMessages()).toHaveCount(2);
 });
 
 test('edits the user message and regenerates the reply', async () => {
@@ -369,28 +375,32 @@ test('places the user note by depth, frequency and role, which survive a reload'
 });
 
 test('picks a prompt preset that survives a reload', async () => {
-  await Promise.all([chatWrite('PATCH'), page.getByLabel('프리셋').selectOption('novel')]);
+  let sheet = await openSettings();
+  await Promise.all([chatWrite('PATCH'), sheet.getByLabel('프리셋', { exact: true }).selectOption('novel')]);
 
   await page.reload();
-  await expect(page.getByLabel('프리셋')).toHaveValue('novel');
+  sheet = await openSettings();
+  await expect(sheet.getByLabel('프리셋', { exact: true })).toHaveValue('novel');
+  await page.keyboard.press('Escape');
 });
 
 test('turns on recalling past messages, off until then, which survives a reload', async () => {
-  const recall = () => page.getByRole('checkbox', { name: '지난 대화 불러오기' });
+  let sheet = await openSettings();
+  const recall = () => sheet.getByRole('checkbox', { name: '지난 대화 불러오기' });
   await expect(recall()).not.toBeChecked();
   // Held by the chat's state, so it turns on once the write is answered.
   await Promise.all([chatWrite('PATCH'), recall().click()]);
   await expect(recall()).toBeChecked();
 
   await page.reload();
+  sheet = await openSettings();
   await expect(recall()).toBeChecked();
+  await page.keyboard.press('Escape');
 });
 
 test('adds my own preset on top of the chat preset, picked for the chat across a reload', async () => {
   const name = `내 문체 ${run}`;
-  // A wide screen has room for one quiet button; the field opens in a sheet.
-  await page.getByRole('button', { name: '내 프리셋', exact: true }).click();
-  const sheet = page.getByTestId('bottom-sheet');
+  let sheet = await openSettings();
   await sheet.getByRole('button', { name: '내 프리셋 관리' }).click();
   await sheet.getByRole('button', { name: '새 프리셋' }).click();
   await sheet.getByLabel('이름', { exact: true }).fill(name);
@@ -408,18 +418,19 @@ test('adds my own preset on top of the chat preset, picked for the chat across a
   await page.keyboard.press('Escape');
 
   await page.reload();
-  await expect(page.getByRole('button', { name: `내 프리셋 · ${name}` })).toBeVisible();
+  sheet = await openSettings();
+  await expect(sheet.getByRole('combobox', { name: '내 프리셋' }).locator('option:checked')).toHaveText(name);
   // The chat's own preset is untouched by it.
-  await expect(page.getByLabel('프리셋', { exact: true })).toHaveValue('novel');
+  await expect(sheet.getByLabel('프리셋', { exact: true })).toHaveValue('novel');
+  await page.keyboard.press('Escape');
 });
 
 test('imports a SillyTavern preset where ST sends its prompts, and says which field each went into', async () => {
   const wide = page.viewportSize();
   await page.setViewportSize({ width: 375, height: 812 });
-  await page.emulateMedia({ colorScheme: 'light' });
+  await setTheme('light');
   try {
-    await page.getByRole('button', { name: '대화 설정' }).click();
-    const sheet = page.getByRole('dialog');
+    const sheet = await openSettings();
     await sheet.getByRole('button', { name: '내 프리셋 관리' }).click();
     const preset = {
       chat_completion_source: 'openai',
@@ -568,11 +579,11 @@ test('says who knows each fact, folds the ones a later summary ended under their
     const knownTo = facts.getByTestId('memory-fact-known-to');
     await expect(knownTo).toHaveText(['아는 인물: 리안, 하준', '모두가 아는 사실']);
     for (const scheme of ['light', 'dark'] as const) {
-      await page.emulateMedia({ colorScheme: scheme });
+      await setTheme(scheme);
       await facts.getByTestId('memory-fact').first().scrollIntoViewIfNeeded();
       await facts.locator('ul').first().screenshot({ path: `test-results/memory/known-to-${scheme}.png` });
     }
-    await page.emulateMedia({ colorScheme: 'light' });
+    await setTheme('light');
     const folded = facts.getByTestId('memory-ended-facts');
     await folded.getByText('더 이상 맞지 않는 사실 2개').click();
     const endedCards = folded.getByTestId('memory-ended-fact');
@@ -581,12 +592,12 @@ test('says who knows each fact, folds the ones a later summary ended under their
     await expect(endedCards.first()).toContainText('42턴에서 끝남');
     await expect(endedCards.first().getByText(ended.content)).toHaveCSS('text-decoration-line', 'line-through');
     for (const scheme of ['light', 'dark'] as const) {
-      await page.emulateMedia({ colorScheme: scheme });
+      await setTheme(scheme);
       await endedCards.last().scrollIntoViewIfNeeded();
       await folded.screenshot({ path: `test-results/memory/ended-facts-${scheme}.png` });
       await page.screenshot({ path: `test-results/memory/ended-facts-viewport-${scheme}.png` });
     }
-    await page.emulateMedia({ colorScheme: 'light' });
+    await setTheme('light');
 
     // Restored, it stands with the facts that hold again.
     await endedCards.nth(1).getByRole('button', { name: '되살리기' }).click();
@@ -600,11 +611,10 @@ test('says who knows each fact, folds the ones a later summary ended under their
   }
 });
 
-test('the open notes panel scrolls inside itself, never the page under the sticky header', async () => {
+test('the open notes panel scrolls inside itself, never the page', async () => {
   await openPanel();
   // Nothing in the panel may reach past it and stretch the page: a page that
-  // scrolls slides the chat's header and the panel's top under the site's header.
-  // The 1px is the site header's border, which the chat's 100dvh - 3.5rem leaves out.
+  // scrolls slides the chat's header and the panel's top off the screen.
   const overflow = await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight);
   expect(overflow).toBeLessThanOrEqual(1);
 });
@@ -630,15 +640,16 @@ test('attaches a saved note to the chat', async () => {
   await expect(attached()).toBeChecked();
 });
 
-test('generates one more reply with the auto button', async () => {
+test('이어쓰기 by the composer goes on with the last reply rather than adding one', async () => {
   const before = await assistantMessages().count();
+  const continued = page.waitForRequest((request) => request.method() === 'POST' && request.url().endsWith('/continue'));
 
-  await page.getByRole('button', { name: '이어가기' }).click();
+  await page.getByRole('button', { name: '이어쓰기' }).click();
 
-  await expect(assistantMessages()).toHaveCount(before + 1);
-  // The echo model replies with the last user turn, unprompted this time.
-  await expect(assistantMessages().last()).toContainText(editedTurn);
+  await continued;
   await expectComposerIdle();
+  await expect(assistantMessages()).toHaveCount(before);
+  await expect(assistantMessages().last()).toContainText(editedTurn);
 });
 
 test('keeps following the conversation when what stands under it shrinks back', async () => {
@@ -671,11 +682,11 @@ test('keeps following the conversation when what stands under it shrinks back', 
 });
 
 test('switches the UI locale to Japanese', async () => {
-  const chatPath = new URL(page.url()).pathname;
-
+  // A conversation has the whole screen, so the switch is the site header's.
+  await page.goto('/ko/plots');
   await page.getByLabel('언어').selectOption('ja');
 
-  await expect(page).toHaveURL(`${chatPath.replace('/ko/', '/ja/')}`);
+  await expect(page).toHaveURL(/\/ja\/plots$/);
   await expect(
     page.getByRole('navigation').getByRole('link', { name: messages('ja').nav.create }),
   ).toBeVisible();

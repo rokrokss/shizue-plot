@@ -33,7 +33,7 @@ const preset = (id: string, name: string): ReaderPreset => ({
 
 function render(
   presets: ReaderPreset[],
-  options: { stacked?: boolean; selected?: string | null; patches?: unknown[]; lists?: ReaderPreset[][] } = {},
+  options: { selected?: string | null; patches?: unknown[]; lists?: ReaderPreset[][] } = {},
 ): void {
   act(() => {
     root.render(
@@ -53,7 +53,6 @@ function render(
           readerPresets: presets,
           onReaderPresetsChange: (next) => void options.lists?.push(next),
           disabled: false,
-          stacked: options.stacked ?? true,
           onChange: (patch) => void options.patches?.push(patch),
         }),
       }),
@@ -241,16 +240,5 @@ describe('the stacked field', () => {
     await click(button('내 프리셋 관리')!);
     await upload(new File([JSON.stringify({ spec: 'chara_card_v2', data: {} })], 'card.json'));
     expect(host.textContent).toContain('RisuAI나 SillyTavern의 프리셋 파일이 아닙니다.');
-  });
-});
-
-describe('the compact row', () => {
-  it('is one quiet button that opens the field in a sheet', async () => {
-    render([preset('a', '담백하게')], { stacked: false, selected: 'a' });
-    expect(host.querySelector('[data-testid="reader-presets"]')).toBeNull();
-    await click(button('내 프리셋 · 담백하게')!);
-    const sheet = document.querySelector('[data-testid="bottom-sheet"]')!;
-    expect(sheet.getAttribute('aria-label')).toBe('내 프리셋');
-    expect(sheet.querySelector<HTMLSelectElement>('[data-testid="reader-presets"] select')!.value).toBe('a');
   });
 });

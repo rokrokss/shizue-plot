@@ -91,7 +91,7 @@ export function ComponentFrame({
   const [granted] = useState(Boolean(onSendTurn));
 
   const [srcdoc, setSrcdoc] = useState('');
-  const scheme = useSyncExternalStore(subscribeTheme, getColorScheme, () => 'light');
+  const scheme = useSyncExternalStore(subscribeTheme, getColorScheme, () => 'dark');
   const [phase, setPhase] = useState<'loading' | 'connected' | 'lost' | 'timeout'>('loading');
   const [height, setHeight] = useState(MIN_FRAME_HEIGHT);
   /** Bumped by the retry button; a new number is a new frame and a new bridge. */

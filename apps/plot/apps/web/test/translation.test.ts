@@ -202,7 +202,6 @@ describe('the language mode settings', () => {
         presets: [],
         personas: [],
         disabled: false,
-        stacked: true,
         language: { settings: {}, plotLanguage: 'en', locale: 'ko', recommended: false, ...language } as never,
         onChange: (patch: unknown) => void patches.push(patch),
       }) as ReactElement,

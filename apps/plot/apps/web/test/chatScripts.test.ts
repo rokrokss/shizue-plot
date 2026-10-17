@@ -81,7 +81,7 @@ vi.mock('@/components/MessageRow', async () => {
       speaker?: string;
       member?: string;
       spoken?: boolean;
-      footer?: ReactNode;
+      footer?: ReactNode | ((edit: (() => void) | null) => ReactNode);
     }) =>
       h(
         'div',
@@ -96,7 +96,7 @@ vi.mock('@/components/MessageRow', async () => {
         [
         h('span', { key: 'text' }, props.shown ?? props.content),
         h('button', { key: 'btn', type: 'button', 'data-shizue-trigger': '공격', 'data-shizue-trigger-id': 'b1' }, '베기'),
-        h('div', { key: 'footer' }, props.footer),
+        h('div', { key: 'footer' }, typeof props.footer === 'function' ? props.footer(null) : props.footer),
         ],
       ),
   };

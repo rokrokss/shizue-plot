@@ -308,7 +308,7 @@ function Catalogue() {
 
   return (
     <div className="mx-auto w-full max-w-6xl px-5 py-10">
-      <section className="brand-dots relative grid overflow-hidden rounded-3xl border-2 border-fg bg-mint-soft shadow-card md:grid-cols-[1fr_280px]">
+      <section className="brand-dots relative grid overflow-hidden rounded-3xl border border-line bg-mint-soft md:grid-cols-[1fr_280px]">
         <div className="p-6 sm:p-8 lg:p-10">
           <span className="inline-flex items-center gap-2 rounded-full border border-fg bg-surface px-3 py-1.5 text-xs font-semibold">
             <span aria-hidden="true" className="size-2 bg-accent" />{rebrand('eyebrow')}

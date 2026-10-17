@@ -4,12 +4,12 @@ import { useTranslations } from 'next-intl';
 import { useSyncExternalStore } from 'react';
 import { getTheme, setTheme, subscribeTheme, themes, type Theme } from '@/lib/theme';
 
-/** System, light or dark, beside the language; the pick lives in this browser. */
+/** Dark or light, beside the language; the pick lives in this browser. */
 export function ThemeSwitcher() {
   const t = useTranslations('themes');
   const nav = useTranslations('nav');
-  // The server cannot know the pick, so it renders `system` and the client corrects it.
-  const theme = useSyncExternalStore(subscribeTheme, getTheme, () => 'system');
+  // The server cannot know the pick, so it renders the default and the client corrects it.
+  const theme = useSyncExternalStore(subscribeTheme, getTheme, () => 'dark');
 
   return (
     <select

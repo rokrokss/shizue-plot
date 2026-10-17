@@ -92,8 +92,8 @@ test('a reader takes a module that asks for low-level access on their yes, sendi
   expect(started.status()).toBe(201);
   const chatId = (await started.json()).chat.id;
   await page.goto(`/ko/chats/${chatId}`);
-  const toggle = page.getByRole('button', { name: '노트', exact: true });
-  if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
+  await page.getByRole('button', { name: '대화 설정' }).click();
+  await page.getByRole('dialog', { name: '대화 설정' }).getByRole('button', { name: '노트', exact: true }).click();
   const section = page.getByTestId('reader-modules');
   await expect(section).toBeVisible();
 

@@ -9,9 +9,9 @@ import { Button, cx } from './ui';
 /**
  * Whom the reader writes the turn as (Zeta's write-as): themselves, or a member
  * whose line they write for them — the composer then sends every line as
- * `@이름: …` (`composeTurn`). The narrator is the 내레이터 chip beside it. One
- * button in the composer row whose choices open above it, like the 다음 차례
- * picker; the choice stays until the reader changes it.
+ * `@이름: …` (`composeTurn`); the narrator is written `@: …`. One button at the
+ * top of the chat's settings sheet whose choices open under it; the choice stays
+ * until the reader changes it.
  */
 export function WriteAsPicker({
   members,
@@ -68,9 +68,8 @@ export function WriteAsPicker({
       >
         <span className="max-w-32 truncate">{chosen ? t('writeAsMember', { name: chosen.name }) : t('writeAsSelf')}</span>
       </Button>
-      {/* On a phone the button ends the chip row, so its choices open leftwards. */}
       {open ? (
-        <div className="absolute right-0 bottom-full z-20 mb-1 w-56 space-y-2 rounded-lg border border-line bg-raised p-2 shadow-lg sm:right-auto sm:left-0">
+        <div className="absolute top-full left-0 z-20 mt-1 w-56 space-y-2 rounded-lg border border-line bg-raised p-2 shadow-card">
           <div role="group" aria-label={t('writeAs')} className="space-y-0.5">
             <button type="button" aria-pressed={!chosen} onClick={() => pick(null)} className={option(!chosen)}>
               {t('writeAsSelf')}

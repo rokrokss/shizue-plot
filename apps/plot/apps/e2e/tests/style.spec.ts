@@ -83,10 +83,12 @@ async function expectComposerIdle(): Promise<void> {
   await expect(page.getByRole('button', { name: '보내기' })).toBeVisible();
 }
 
-/** The notes panel, opened only when it is not already showing. */
+/** The notes panel, opened from the settings sheet ☰ opens when it is not already showing. */
 async function openPanel(): Promise<void> {
-  const toggle = page.getByRole('button', { name: '노트', exact: true });
-  if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
+  if (!(await page.getByTestId('chat-panel').isVisible())) {
+    await page.getByRole('button', { name: '대화 설정' }).click();
+    await page.getByRole('dialog', { name: '대화 설정' }).getByRole('button', { name: '노트', exact: true }).click();
+  }
   await expect(page.getByTestId('chat-panel')).toBeVisible();
 }
 

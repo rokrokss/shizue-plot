@@ -2,6 +2,9 @@ import type { SVGProps } from 'react';
 
 const paths = {
   bell: 'M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4',
+  bolt: 'M13 2 4 14h7l-1 8 9-12h-7l1-8Z',
+  refresh: 'M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5',
+  wand: 'M15 4V2m0 14v-2M8 9h2m10 0h2m-4.2 2.8L19 13m-4-4L4 20m13.8-13.8L19 5M12.2 6.2 11 5',
   attach: 'm9 12 6-6a3 3 0 0 1 4 4L9 20a5 5 0 0 1-7-7L13 2m-7 12 8-8',
   explore: 'm12 3 3 6 6 3-6 3-3 6-3-6-6-3 6-3 3-6Z',
   chats: 'M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 3V6a2 2 0 0 1 2-2Zm2 5h10M7 13h6',

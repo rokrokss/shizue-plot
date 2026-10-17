@@ -1,12 +1,11 @@
 // @vitest-environment jsdom
 /**
- * The chat controls, in both layouts they are drawn in.
+ * The chat controls, in the settings sheet.
  *
- * The stacked layout is the one with a visible caption, and a caption that is
- * only a caption is a dead zone: it reads like a label, it is the width of the
- * row, and clicking it does nothing. So what is checked here is that it is a
- * real label — pointed at its control, and the control's only name — while the
- * compact row, which has no caption to point with, keeps its `aria-label`.
+ * Each has a visible caption, and a caption that is only a caption is a dead
+ * zone: it reads like a label, it is the width of the row, and clicking it does
+ * nothing. So what is checked here is that it is a real label — pointed at its
+ * control, and the control's only name.
  *
  * `createElement` rather than JSX, matching bottomSheet.test.ts.
  */
@@ -22,7 +21,7 @@ import { ChatSettings } from '../src/components/ChatSettings';
 let host: HTMLElement;
 let root: Root;
 
-function render(stacked: boolean): void {
+function render(): void {
   act(() => {
     root.render(
       createElement(NextIntlClientProvider, {
@@ -37,7 +36,6 @@ function render(stacked: boolean): void {
           presets: [],
           personas: [],
           disabled: false,
-          stacked,
           onChange: () => undefined,
         } as never) as ReactElement,
       }),
@@ -59,8 +57,8 @@ afterEach(() => {
   host.remove();
 });
 
-describe('the stacked layout', () => {
-  beforeEach(() => render(true));
+describe('the captions', () => {
+  beforeEach(() => render());
 
   it('points each caption at its own control', () => {
     const captions = labels();
@@ -97,7 +95,7 @@ describe('the reasoning effort', () => {
     });
 
     const effort = selects()[1]!;
-    expect(effort.getAttribute('aria-label')).toBe('추론 강도');
+    expect(effort.labels![0]!.textContent).toBe('추론 강도');
     // Known words are translated; a word the catalogues do not know is shown as sent.
     expect([...effort.options].map((option) => option.textContent)).toEqual(['기본 (보통)', '낮음', 'turbo']);
     expect(effort.value).toBe('low');
@@ -109,27 +107,12 @@ describe('the reasoning effort', () => {
   });
 });
 
-describe('the compact row', () => {
-  beforeEach(() => render(false));
-
-  it('has no caption to click, so the name stays on the control', () => {
-    expect(labels()).toHaveLength(0);
-    expect(selects().map((select) => select.getAttribute('aria-label'))).toEqual([
-      '모델',
-      '보조 모델',
-      '프리셋',
-      '페르소나',
-    ]);
-  });
-});
-
 describe('the auxiliary model', () => {
   const HINT = messages.chat.subModelHint;
 
   function renderSub(
     subModel: string | null,
     models: { id: string; label: string }[],
-    stacked: boolean,
     patches: unknown[] = [],
   ): HTMLSelectElement {
     act(() => {
@@ -147,7 +130,6 @@ describe('the auxiliary model', () => {
             presets: [],
             personas: [],
             disabled: false,
-            stacked,
             onChange: (patch) => void patches.push(patch),
           }),
         }),
@@ -165,27 +147,27 @@ describe('the auxiliary model', () => {
 
   it('defaults to the first model, by name, and offers every model the reader has', () => {
     const patches: unknown[] = [];
-    const select = renderSub(null, [{ id: 'm1', label: '모델 하나' }, { id: 'm2', label: '모델 둘' }], false, patches);
-    expect(select.getAttribute('aria-label')).toBe('보조 모델');
+    const select = renderSub(null, [{ id: 'm1', label: '모델 하나' }, { id: 'm2', label: '모델 둘' }], patches);
+    expect(select.labels![0]!.textContent).toBe('보조 모델');
     expect([...select.options].map((option) => option.textContent)).toEqual(['기본 (모델 하나)', '모델 하나', '모델 둘']);
     expect(select.value).toBe('');
-    // The compact row has no room for the hint, so it is the control's title.
+    // The hint stands under the control, and is its title as well.
     expect(select.title).toBe(HINT);
     pick(select, 'm2');
     expect(patches).toEqual([{ subModel: 'm2' }]);
   });
 
   it('says the default is the first model before the list is in', () => {
-    const select = renderSub(null, [], false);
+    const select = renderSub(null, []);
     expect([...select.options].map((option) => option.textContent)).toEqual(['기본 (첫 번째 모델)']);
   });
 
   it('keeps a pick the catalog dropped visible, and clears it back to the default with null', () => {
     const patches: unknown[] = [];
-    const select = renderSub('gone', [{ id: 'm1', label: '모델 하나' }], true, patches);
+    const select = renderSub('gone', [{ id: 'm1', label: '모델 하나' }], patches);
     expect([...select.options].map((option) => option.value)).toEqual(['', 'gone', 'm1']);
     expect(select.value).toBe('gone');
-    // Stacked, the hint stands under the control.
+    // The hint stands under the control.
     expect(select.parentElement!.querySelector('p')?.textContent).toBe(HINT);
     pick(select, '');
     expect(patches).toEqual([{ subModel: null }]);

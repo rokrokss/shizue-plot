@@ -3,8 +3,7 @@ import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 
 /**
  * Narrator feature walk: signup → plot with a narrator (voice + pov) → echo
- * chat → composer `*` direction toggle → the three composer modes → `@:`
- * narration message → narrate action → regenerate keeps the narration →
+ * chat → composer `*` direction toggle → a typed `@:` narration message →
  * chat-level override panel.
  *
  * Serial like the smoke suite: one context, fresh account, dev database.
@@ -36,7 +35,6 @@ test.afterAll(async () => {
 
 const composer = () => page.getByPlaceholder('메시지를 입력하세요');
 const assistantMessages = () => page.getByTestId('message-assistant');
-const userMessages = () => page.getByTestId('message-user');
 const narrationMessages = () => page.getByTestId('message-narration');
 
 async function expectComposerIdle(): Promise<void> {
@@ -44,9 +42,11 @@ async function expectComposerIdle(): Promise<void> {
   await expect(page.getByRole('button', { name: '보내기' })).toBeVisible();
 }
 
-/** Picks how the next turn is written: dialogue, 상황묘사, or the narrator's. */
-async function pickMode(label: '대사' | '묘사' | '내레이터'): Promise<void> {
-  await page.getByRole('button', { name: label, exact: true }).click();
+/** The notes panel, opened from the settings sheet ☰ opens. */
+async function openPanel(): Promise<void> {
+  await page.getByRole('button', { name: '대화 설정' }).click();
+  await page.getByRole('dialog', { name: '대화 설정' }).getByRole('button', { name: '노트', exact: true }).click();
+  await expect(page.getByTestId('chat-panel')).toBeVisible();
 }
 
 test('signs up and gives a plot a narrator voice and pov', async () => {
@@ -106,51 +106,19 @@ test('the composer * button wraps and unwraps a stage direction', async () => {
   await field.fill('');
 });
 
-test('the 묘사 mode marks the turn on its way out', async () => {
-  await pickMode('묘사');
-  await composer().fill(`문을 밀고 들어선다 ${run}`);
-  await page.getByRole('button', { name: '보내기' }).click();
-
-  // The mode is a way of typing, not a column: what is stored is the same `*…*`
-  // a reader could have typed, so the turn is drawn as their 상황묘사.
-  const sent = userMessages().last();
-  await expect(sent.locator('em')).toContainText('문을 밀고 들어선다');
-  await expectComposerIdle();
-  await pickMode('대사');
-});
-
-test('the 내레이터 mode renders as a speaker-less narration row', async () => {
-  await pickMode('내레이터');
-  await composer().fill(`문이 열리고 바람이 들이쳤다 ${run}`);
+test('a turn typed as `@: …` renders as a speaker-less narration row', async () => {
+  await composer().fill(`@: 문이 열리고 바람이 들이쳤다 ${run}`);
   await page.getByRole('button', { name: '보내기' }).click();
 
   await expect(narrationMessages().first()).toContainText('문이 열리고 바람이 들이쳤다');
   // The prefix is convention, not content: it never renders.
   await expect(narrationMessages().first()).not.toContainText('@:');
   await expectComposerIdle();
-  await pickMode('대사');
   await page.screenshot({ path: 'test-results/narrator-02-user-narration.png', fullPage: true });
 });
 
-test('the narrate action produces an assistant narration turn', async () => {
-  await page.getByRole('button', { name: '나레이션', exact: true }).click();
-
-  // The generated turn lands as a narration row, not an assistant bubble.
-  await expect(narrationMessages()).toHaveCount(2);
-  await expectComposerIdle();
-  await page.screenshot({ path: 'test-results/narrator-03-narrate-turn.png', fullPage: true });
-});
-
-test('regenerating the narration head stays a narration', async () => {
-  await page.getByRole('button', { name: '재생성' }).click();
-
-  await expect(narrationMessages()).toHaveCount(2);
-  await expect(narrationMessages().last().getByText(/^\d+\/\d+$/)).toHaveText('2/2');
-  await expectComposerIdle();
-});
-
 test('the chat panel saves a narrator override', async () => {
-  await page.getByRole('button', { name: '노트', exact: true }).click();
+  await openPanel();
   const section = page.getByTestId('chat-narrator');
   await expect(section).toBeVisible();
 
@@ -169,7 +137,7 @@ test('the chat panel saves a narrator override', async () => {
   await voiceWrite;
 
   await page.reload();
-  await page.getByRole('button', { name: '노트', exact: true }).click();
+  await openPanel();
   const reloaded = page.getByTestId('chat-narrator');
   await expect(reloaded.getByLabel('나레이터 문체')).toHaveValue(`이 대화만 시적으로 ${run}`);
   await expect(reloaded.getByLabel('나레이션 시점')).toHaveValue('third');

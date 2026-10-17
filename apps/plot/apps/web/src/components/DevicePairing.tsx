@@ -134,7 +134,7 @@ export function PairDevice() {
   }
 
   return (
-    <section className="w-full max-w-md space-y-5 rounded-3xl border-2 border-fg bg-surface p-7 shadow-[6px_6px_0_var(--color-fg)] sm:p-10">
+    <section className="w-full max-w-md space-y-5 rounded-3xl border border-line bg-surface p-7 sm:p-10">
       <h1 className="title2">{t('pairTitle')}</h1>
       {code === '' ? <p className="text-sm leading-relaxed">{t('pairMissing')}</p> : (
         <>

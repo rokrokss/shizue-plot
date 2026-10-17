@@ -47,19 +47,21 @@ describe('the theme', () => {
     expect(theme.getColorScheme()).toBe('light');
   });
 
-  it('goes back to the OS on system, and stays there after a reload', async () => {
+  it('is dark by default, whatever the OS says, and after a pick of dark', async () => {
+    stubMatchMedia(false);
+    expect((await load()).getTheme()).toBe('dark');
     const before = await load();
+    before.setTheme('light');
     before.setTheme('dark');
-    before.setTheme('system');
     expect(await reloaded()).toBeUndefined();
     const theme = await load();
-    expect(theme.getTheme()).toBe('system');
+    expect(theme.getTheme()).toBe('dark');
     expect(theme.getColorScheme()).toBe('dark');
   });
 
   it('ignores a stored value it does not know', async () => {
     store.set('shizue-theme', 'sepia');
     expect(await reloaded()).toBeUndefined();
-    expect((await load()).getTheme()).toBe('system');
+    expect((await load()).getTheme()).toBe('dark');
   });
 });

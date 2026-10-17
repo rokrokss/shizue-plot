@@ -96,12 +96,12 @@ const HIDDEN_DIM = 'opacity-[0.58]';
 const NO_ROSTER: readonly PublicMember[] = [];
 
 /**
- * The reader's bubble: solid mint with ink on it — the accent pair, which reads
- * in both themes and over a work's own background — content-sized, at most
- * the width a reply's bubble may take.
+ * The reader's bubble, a reply's mirrored: the square corner by their face,
+ * mint where Zeta's is purple (`bubble-user`, deep in dark and bright in light),
+ * content-sized, at most the width a reply's bubble may take.
  */
 const USER_BUBBLE =
-  'user-bubble w-fit max-w-[min(100%,36rem)] min-w-0 rounded-2xl rounded-tr-md bg-accent px-3.5 py-2.5 text-accent-ink';
+  'user-bubble w-fit max-w-[min(100%_-_4rem,612px)] min-w-0 rounded-l-xl rounded-br-xl bg-bubble-user px-3 py-2 text-bubble-user-ink';
 
 /**
  * The reply being waited for, drawn as Zeta draws it (2026-10-17 owner
@@ -135,17 +135,17 @@ function WaitingDots({
   );
   if (plain) return line;
   const bubble = (
-    <span className="chat-bubble w-fit rounded-2xl rounded-tl-md border border-line/70 bg-bubble px-3.5 py-2.5">{line}</span>
+    <span className="chat-bubble w-fit rounded-r-xl rounded-bl-xl bg-bubble px-3 py-2">{line}</span>
   );
   if (!face) return <span className="flex">{bubble}</span>;
   return (
     <span
       {...(typing ? { 'data-testid': 'typing', 'data-speaker': face.name } : {})}
-      className="flex items-start gap-2.5"
+      className="flex items-start gap-1.5"
     >
       {/* The line says the name; the face is the same name drawn. */}
       <span aria-hidden="true" className="chat-face">
-        <Avatar src={face.avatarUrl} name={face.name} className="size-10 text-sm" />
+        <Avatar src={face.avatarUrl} name={face.name} className="size-8 text-xs" />
       </span>
       {bubble}
     </span>
@@ -220,7 +220,7 @@ function readersOf(roster: readonly PublicMember[]): { id: string; names: string
 /**
  * Memoized on its props, which is what keeps a streaming turn from re-rendering
  * the whole branch behind it. The page hands every row a stable identity for the
- * duration of a generation — the handlers, the footer and the branch navigation
+ * duration of a generation — the handlers and the footer
  * are all withheld while `mode` is set — so a token that only moves the last row
  * only re-renders the last row.
  */
@@ -262,7 +262,6 @@ export const MessageRow = memo(function MessageRow({
   onDelete,
   hidden = false,
   onToggleHidden,
-  branches,
   footer,
   translator,
   translationId,
@@ -379,18 +378,10 @@ export const MessageRow = memo(function MessageRow({
   /** Hides the message from the AI, or shows it to the AI again; the page owns the request. */
   onToggleHidden?: () => void;
   /**
-   * Where this message sits among its siblings, when it has any. A fork can land
-   * anywhere on the branch — a scene edit makes one mid-path — so the way back to
-   * the other version is on the message itself, not only under the last one.
+   * What stands under the row (the last reply's bar). A function is handed the
+   * row's own way into its editor, or null where the row cannot be edited.
    */
-  branches?: {
-    index: number;
-    total: number;
-    /** null at either end of the sibling group. */
-    onPrev: (() => void) | null;
-    onNext: (() => void) | null;
-  };
-  footer?: ReactNode;
+  footer?: ReactNode | ((edit: (() => void) | null) => ReactNode);
   /**
    * The chat's translator (`lib/translation`), and the stored message it
    * translates — absent where this row is not translated: another language
@@ -596,35 +587,6 @@ export const MessageRow = memo(function MessageRow({
           {t('deleteMessage')}
         </button>
       ) : null}
-      {/* Quiet like the edit affordance: a branched turn says so on hover, and
-          to the keyboard as soon as one of its buttons takes focus. */}
-      {branches && showActions ? (
-        <div className="flex items-center gap-1 text-xs text-muted opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-          <button
-            type="button"
-            disabled={disabled || !branches.onPrev}
-            title={t('swipePrev')}
-            aria-label={t('swipePrev')}
-            onClick={() => branches.onPrev?.()}
-            className={cx('px-1 hover:text-fg focus-visible:text-fg disabled:opacity-30', FOCUS_RING)}
-          >
-            <span aria-hidden="true">◀</span>
-          </button>
-          <span className="tabular-nums">
-            {branches.index + 1}/{branches.total}
-          </span>
-          <button
-            type="button"
-            disabled={disabled || !branches.onNext}
-            title={t('swipeNext')}
-            aria-label={t('swipeNext')}
-            onClick={() => branches.onNext?.()}
-            className={cx('px-1 hover:text-fg focus-visible:text-fg disabled:opacity-30', FOCUS_RING)}
-          >
-            <span aria-hidden="true">▶</span>
-          </button>
-        </div>
-      ) : null}
       {/* The clock is context, not chrome: it is there when the row is asked
           about, and the full date is one hover further in. */}
       {createdAt ? (
@@ -675,29 +637,6 @@ export const MessageRow = memo(function MessageRow({
             {hidden ? t('showToAi') : t('hideFromAi')}
           </Button>
         ) : null}
-        {branches ? (
-          <div className="flex items-center justify-center gap-4 text-sm text-muted">
-            <Button
-              variant="ghost"
-              disabled={disabled || !branches.onPrev}
-              aria-label={t('swipePrev')}
-              onClick={act(() => branches.onPrev?.())}
-            >
-              <span aria-hidden="true">◀</span>
-            </Button>
-            <span className="tabular-nums">
-              {branches.index + 1}/{branches.total}
-            </span>
-            <Button
-              variant="ghost"
-              disabled={disabled || !branches.onNext}
-              aria-label={t('swipeNext')}
-              onClick={act(() => branches.onNext?.())}
-            >
-              <span aria-hidden="true">▶</span>
-            </Button>
-          </div>
-        ) : null}
         {onDelete ? (
           <Button variant="danger" disabled={disabled} onClick={act(onDelete)}>
             {t('deleteMessage')}
@@ -706,6 +645,9 @@ export const MessageRow = memo(function MessageRow({
       </div>
     </BottomSheet>
   ) : null;
+
+  const startEdit = onSave || onEditScene ? () => (onEditScene ? onEditScene() : setEditing(true)) : null;
+  const shownFooter = typeof footer === 'function' ? footer(startEdit) : footer;
 
   const editor =
     editing && onSave ? (
@@ -970,7 +912,7 @@ export const MessageRow = memo(function MessageRow({
         )}
         {/* The ≡ and the gap after it: in line with the narration's text. */}
         {offerAt('pl-6')}
-        {footer}
+        {shownFooter}
         <div className={cx(ACTIONS_ABOVE, 'left-0')}>{actions}</div>
         {menu}
       </div>
@@ -981,11 +923,11 @@ export const MessageRow = memo(function MessageRow({
   // and the bubble in mint under the name.
   if (isUser) {
     return (
-      <div data-testid="message-user" {...memberProps} {...press} className={cx('group flex flex-row-reverse gap-2.5', pressable)}>
+      <div data-testid="message-user" {...memberProps} {...press} className={cx('group flex flex-row-reverse gap-1.5', pressable)}>
         {grouped ? (
-          <div aria-hidden="true" className="chat-face w-10 shrink-0" />
+          <div aria-hidden="true" className="chat-face w-8 shrink-0" />
         ) : (
-          <Avatar src={userImage ?? null} name={name} className={cx('chat-face size-10 text-sm', dim)} />
+          <Avatar src={userImage ?? null} name={name} className={cx('chat-face size-8 text-xs', dim)} />
         )}
         <div className="relative flex min-w-0 flex-1 flex-col items-end">
           {/* A continued turn is the same reader moments later: the name was
@@ -995,7 +937,7 @@ export const MessageRow = memo(function MessageRow({
           ) : (
             <div className="flex min-h-5 items-center justify-end gap-2">
               {actions}
-              <span className={cx('chat-name text-xs font-medium text-link', dim)}>{name}</span>
+              <span className={cx('chat-name text-xs text-link/70', dim)}>{name}</span>
             </div>
           )}
           {editor ?? (
@@ -1057,7 +999,7 @@ export const MessageRow = memo(function MessageRow({
               {marks ? <div className="mt-1">{marks}</div> : null}
             </div>
           )}
-          {footer}
+          {shownFooter}
         </div>
         {menu}
       </div>
@@ -1072,7 +1014,7 @@ export const MessageRow = memo(function MessageRow({
     // A continue waits under the reply it goes on from, whose face is already there.
     const waiting = thinking ? (
       body.trim() ? (
-        <div className="mt-3 pl-12.5">
+        <div className="mt-3 pl-9.5">
           <WaitingDots />
         </div>
       ) : (
@@ -1083,7 +1025,7 @@ export const MessageRow = memo(function MessageRow({
       <div data-testid="message-assistant" {...memberProps} {...press} className={cx('group min-w-0', pressable)}>
         {editor ?? (
           <div className={dim}>
-            {reasoningBlock ? <div className="pl-12.5">{reasoningBlock}</div> : null}
+            {reasoningBlock ? <div className="pl-9.5">{reasoningBlock}</div> : null}
             <MessageBody
               {...bodyProps}
               content={body}
@@ -1095,13 +1037,13 @@ export const MessageRow = memo(function MessageRow({
               {...(hasActions ? { header: actions } : {})}
               {...(meta ? { trailer: meta } : {})}
             />
-            {attachedBlock ? <div className="pl-12.5">{attachedBlock}</div> : null}
+            {attachedBlock ? <div className="pl-9.5">{attachedBlock}</div> : null}
             {waiting}
             {statusCard ? <div className="mt-3">{statusCard}</div> : null}
           </div>
         )}
-        {offerAt('pl-12.5')}
-        {footer}
+        {offerAt('pl-9.5')}
+        {shownFooter}
         {menu}
       </div>
     );
@@ -1116,7 +1058,7 @@ export const MessageRow = memo(function MessageRow({
       <div data-testid="message-assistant" {...memberProps} {...press} className={cx('group min-w-0', pressable)}>
         {editor ?? (
           <div className={dim}>
-            {reasoningBlock ? <div className="pl-12.5">{reasoningBlock}</div> : null}
+            {reasoningBlock ? <div className="pl-9.5">{reasoningBlock}</div> : null}
             <MessageBody
               {...bodyProps}
               content={body}
@@ -1127,17 +1069,17 @@ export const MessageRow = memo(function MessageRow({
               {...(hasActions ? { header: actions } : {})}
               {...(meta ? { trailer: meta } : {})}
             />
-            {attachedBlock ? <div className="pl-12.5">{attachedBlock}</div> : null}
+            {attachedBlock ? <div className="pl-9.5">{attachedBlock}</div> : null}
             {thinking ? (
-              <div className={cx('pl-12.5', body.trim() && 'mt-3')}>
+              <div className={cx('pl-9.5', body.trim() && 'mt-3')}>
                 <WaitingDots />
               </div>
             ) : null}
-            {statusCard ? <div className="mt-3 pl-12.5">{statusCard}</div> : null}
+            {statusCard ? <div className="mt-3 pl-9.5">{statusCard}</div> : null}
           </div>
         )}
-        {offerAt('pl-12.5')}
-        {footer ? <div className="pl-12.5">{footer}</div> : null}
+        {offerAt('pl-9.5')}
+        {shownFooter ? <div className="pl-9.5">{shownFooter}</div> : null}
         {menu}
       </div>
     );
@@ -1146,12 +1088,12 @@ export const MessageRow = memo(function MessageRow({
   // Before the roster has arrived, or in a work with no members: the row is the
   // speaker, as it always was — the plot's face and name, then its bubble.
   return (
-    <div data-testid="message-assistant" {...memberProps} {...press} className={cx('group flex gap-2.5', pressable)}>
+    <div data-testid="message-assistant" {...memberProps} {...press} className={cx('group flex gap-1.5', pressable)}>
       {grouped ? (
         // The avatar's own width, so a continued turn stays in the column.
-        <div aria-hidden="true" className="chat-face w-10 shrink-0" />
+        <div aria-hidden="true" className="chat-face w-8 shrink-0" />
       ) : (
-        <Avatar src={avatar} name={name} className={cx('chat-face size-10 text-sm', dim)} />
+        <Avatar src={avatar} name={name} className={cx('chat-face size-8 text-xs', dim)} />
       )}
       <div className="relative min-w-0 flex-1">
         {grouped ? (
@@ -1159,7 +1101,7 @@ export const MessageRow = memo(function MessageRow({
         ) : (
           <div className="flex min-h-5 items-center gap-2">
             {/* The chat text's letter-spacing, which a character's name line drawn by the body takes from `.message-body`. */}
-            <span className={cx('chat-name text-xs font-medium tracking-[-0.01876rem] text-muted', dim)}>{name}</span>
+            <span className={cx('chat-name text-xs tracking-[-0.01876rem] text-fg/70', dim)}>{name}</span>
             {actions}
           </div>
         )}
@@ -1183,7 +1125,7 @@ export const MessageRow = memo(function MessageRow({
           </div>
         )}
         {offerAt()}
-        {footer}
+        {shownFooter}
       </div>
       {menu}
     </div>

@@ -15,8 +15,6 @@ import { useFormatter, useLocale, useTranslations } from 'next-intl';
 import { Fragment, use, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useStickToBottom } from 'use-stick-to-bottom';
 import { AiBadge, AiNotice } from '@/components/AiNotice';
-import { AttachmentChips } from '@/components/AttachmentChips';
-import { Avatar } from '@/components/Avatar';
 import { BgmMute } from '@/components/BgmMute';
 import { BottomSheet } from '@/components/BottomSheet';
 import { ChatBackground } from '@/components/ChatBackground';
@@ -25,35 +23,21 @@ import { ModuleToggles } from '@/components/ModuleToggles';
 import { ReaderModules } from '@/components/ReaderModules';
 import { ChatSettings } from '@/components/ChatSettings';
 import { EmotionScreen } from '@/components/EmotionScreen';
-import { FocusPicker } from '@/components/FocusPicker';
 import { MessageRow } from '@/components/MessageRow';
 import { ModelPill } from '@/components/ModelPill';
-import { MoreActions } from '@/components/MoreActions';
 import { ScriptDialog, type ScriptPrompt } from '@/components/ScriptDialog';
-import { SceneDraft } from '@/components/SceneDraft';
 import { SceneEditor, type SceneBlock } from '@/components/SceneEditor';
 import { ThemeSwitcher } from '@/components/ThemeSwitcher';
 import { Button, CenteredMessage, Spinner, TextArea, cx } from '@/components/ui';
 import { WriteAsPicker } from '@/components/WriteAsPicker';
 import { Link } from '@/i18n/navigation';
-import { apiDelete, apiGet, apiSend, apiUpload } from '@/lib/api';
+import { apiGet, apiSend } from '@/lib/api';
 import {
   assetSrc,
   isLocalizedAsset,
-  measureImage,
   type PlotAsset,
 } from '@/lib/assets';
 import { autoGrow } from '@/lib/autoGrow';
-import {
-  acceptFiles,
-  isUploading,
-  markFailed,
-  markRetrying,
-  markUploaded,
-  removeChip,
-  uploadedIds,
-  type AttachmentChip,
-} from '@/lib/attachments';
 import {
   foldBase,
   headAnchor,
@@ -63,7 +47,7 @@ import {
 } from '@/lib/chatHistory';
 import { finishMarked, markFinish, unmarkFinish } from '@/lib/scripts/finishMark';
 import { chatRowMeta, relativeDay } from '@/lib/chatRows';
-import { COMPOSER_MODES, composeTurn, type ComposerMode } from '@/lib/composerMode';
+import { composeTurn } from '@/lib/composerMode';
 import type { CbsContext } from '@/lib/cbs';
 import type { ComponentContext } from '@/lib/componentCalls';
 import { toggleDirectionMarkup } from '@/lib/directionMarkup';
@@ -84,7 +68,6 @@ import {
   pickSpeakers,
   redoOf,
   roundRequest,
-  roundStart,
   stepRound,
   type Round,
   type RoundCue,
@@ -167,6 +150,11 @@ interface SendOptions {
  * commands in it answered `false` (`own`).
  */
 type QueuedTurn = { kind: 'next' } | ScriptTurn | { kind: 'own'; content: string; options?: SendOptions };
+
+/** Zeta's round icon buttons under the last turn. */
+const REPLY_ACTION =
+  'inline-flex size-8 shrink-0 items-center justify-center rounded-full border border-fg/8 bg-canvas/30 text-muted ' +
+  'transition-colors hover:text-fg disabled:opacity-45 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
 
 /**
  * How often to ask whether a reply the server is finishing on its own is done —
@@ -460,15 +448,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const scriptOverlay = scriptBundle ? (scriptOverlays[scriptBundle.memberId] ?? null) : null;
 
   const [input, setInput] = useState('');
-  /** How the composer's text is meant: a line, a description, or the narrator's. */
-  const [composerMode, setComposerMode] = useState<ComposerMode>('dialogue');
   /** The member the reader writes the turn as (Zeta's `@이름:`); null is their own voice. */
   const [writeAs, setWriteAs] = useState<string | null>(null);
-  /**
-   * Who speaks in the next round of a work of several members (다음 차례), exactly
-   * and in roster order. One round's worth: cleared once its first reply lands.
-   */
-  const [focus, setFocus] = useState<string[]>([]);
   const [mode, setMode] = useState<StreamMode | null>(null);
   /**
    * The round in hand in a work of several members (`lib/groupRound`): who is
@@ -506,14 +487,18 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const [mutating, setMutating] = useState(false);
   const mutationRef = useRef(false);
   const [panelOpen, setPanelOpen] = useState(false);
-  /** The settings sheet, which is where the header's controls go below `lg`. */
+  /** The settings sheet, which is where the header's controls are. */
   const [sheetOpen, setSheetOpen] = useState(false);
+  /** Zeta's "어떻게 고쳐드릴까요?": the sheet a regenerate with a request is asked from. */
+  const [askOpen, setAskOpen] = useState(false);
+  const [ask, setAsk] = useState('');
+  /**
+   * What the reader asked of the regenerate being started, for its first request
+   * (`POST …/regenerate` `request`) — in a round, the round's first reply.
+   */
+  const regenerateAsk = useRef('');
   /** Message the scene editor was opened on; its whole scene is what it edits. */
   const [sceneEdit, setSceneEdit] = useState<string | null>(null);
-  /** A scene is being drawn. One round trip, so there is nothing to stream. */
-  const [drawing, setDrawing] = useState(false);
-  /** The last draw came back empty-handed, and its row is still offering a retry. */
-  const [drawFailed, setDrawFailed] = useState(false);
   /** Per-browser viewer protection; read after mount so SSR and client agree. */
   const [customUi, setCustomUi] = useState(true);
   useEffect(() => setCustomUi(readCustomUiEnabled()), []);
@@ -571,25 +556,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   /** Where the caret belongs once React has written the text the button produced. */
   const composerSelection = useRef<[number, number] | null>(null);
 
-  /** Images picked for the turn being written, each on its way to the server. */
-  const [chips, setChips] = useState<AttachmentChip[]>([]);
-  /** Why the last pick was not taken whole — a cap, or a file that was too big. */
-  const [attachError, setAttachError] = useState('');
-  /** A file is over the window; the overlay says so and the drop takes it. */
-  const [dropping, setDropping] = useState(false);
-  const filePicker = useRef<HTMLInputElement>(null);
-  /**
-   * Chips taken out while their upload was still in flight. The request cannot
-   * be recalled, so what lands is deleted instead — a removed thumbnail must not
-   * leave the reader's picture on the server.
-   */
-  const abandoned = useRef(new Set<string>());
-  /** Already stored, so the optimistic bubble can draw them while the reply streams. */
-  const pendingAttachments = useMemo(
-    () => chips.flatMap((chip) => (chip.attachment ? [chip.attachment] : [])),
-    [chips],
-  );
-
   /** Wraps the composer's selection in the `*지문*` marks, or unwraps it. */
   const toggleDirection = useCallback((): void => {
     const field = composerRef.current;
@@ -616,137 +582,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     const field = composerRef.current;
     if (field) autoGrow(field);
   }, [input]);
-
-  /**
-   * Sends one picked file. Measured first, in the browser, so the size and the
-   * blurred placeholder ride along with the bytes and the bubble can reserve the
-   * image's box before it has loaded — the same trip a character asset makes.
-   */
-  const uploadChip = useCallback(
-    async (chip: AttachmentChip): Promise<void> => {
-      /** Never told to the reader: the chip it belongs to is already gone. */
-      const discard = (attachmentId: string): void => {
-        abandoned.current.delete(chip.key);
-        void apiDelete(`/api/chats/${id}/attachments/${attachmentId}`).catch(() => undefined);
-      };
-      try {
-        const measured = await measureImage(chip.file);
-        const attachment = await apiUpload<ChatAttachment>(
-          `/api/chats/${id}/attachments`,
-          chip.file,
-          measured
-            ? {
-                width: String(measured.width),
-                height: String(measured.height),
-                thumbhash: measured.thumbhash,
-              }
-            : {},
-        );
-        if (abandoned.current.has(chip.key)) discard(attachment.id);
-        else setChips((current) => markUploaded(current, chip.key, attachment));
-      } catch {
-        // The chip stays, with the retry on it: the file is still in hand, and
-        // the reader decides whether to try again or drop it.
-        abandoned.current.delete(chip.key);
-        setChips((current) => markFailed(current, chip.key));
-      }
-    },
-    [id],
-  );
-
-  /** Files from the button, a paste or a drop — one door for all three. */
-  const addFiles = useCallback(
-    (files: File[]): void => {
-      if (files.length === 0 || mode) return;
-      const { chips: next, refusal } = acceptFiles(chips, files, () => crypto.randomUUID());
-      setAttachError(refusal ? t(refusal.key, { max: refusal.max }) : '');
-      setChips(next);
-      for (const chip of next.slice(chips.length)) void uploadChip(chip);
-    },
-    [chips, mode, t, uploadChip],
-  );
-
-  /** Taking one back out. A stored upload is deleted rather than left behind. */
-  const dropChip = useCallback(
-    (key: string): void => {
-      const chip = chips.find((entry) => entry.key === key);
-      if (!chip) return;
-      setChips(removeChip(chips, key));
-      URL.revokeObjectURL(chip.preview);
-      if (chip.status === 'uploading') abandoned.current.add(key);
-      if (chip.attachment) {
-        // Nothing to tell the reader if this fails: the chip is already gone, and
-        // an unclaimed upload is deleted with the chat in any case.
-        void apiDelete(`/api/chats/${id}/attachments/${chip.attachment.id}`).catch(() => undefined);
-      }
-    },
-    [chips, id],
-  );
-
-  const retryChip = useCallback(
-    (key: string): void => {
-      const chip = chips.find((entry) => entry.key === key);
-      if (!chip) return;
-      setChips(markRetrying(chips, key));
-      void uploadChip(chip);
-    },
-    [chips, uploadChip],
-  );
-
-  /** Sent, so the strip is empty again and the object URLs are given back. */
-  const clearChips = useCallback((): void => {
-    setChips((current) => {
-      for (const chip of current) URL.revokeObjectURL(chip.preview);
-      return [];
-    });
-    setAttachError('');
-  }, []);
-
-  /**
-   * A file dragged anywhere over the window, not only onto the composer: the drop
-   * target is the whole page, so the overlay is what says where it will land.
-   * `dragenter`/`dragleave` are counted rather than paired — they fire for every
-   * element the pointer crosses — so the overlay only closes when the drag has
-   * really left the window.
-   */
-  useEffect(() => {
-    let depth = 0;
-    const carriesFiles = (event: DragEvent): boolean =>
-      event.dataTransfer?.types.includes('Files') ?? false;
-
-    function onDragEnter(event: DragEvent): void {
-      if (!carriesFiles(event)) return;
-      depth += 1;
-      setDropping(true);
-    }
-    function onDragOver(event: DragEvent): void {
-      // Without this the browser navigates to the file instead of dropping it.
-      if (carriesFiles(event)) event.preventDefault();
-    }
-    function onDragLeave(event: DragEvent): void {
-      if (!carriesFiles(event)) return;
-      depth = Math.max(0, depth - 1);
-      if (depth === 0) setDropping(false);
-    }
-    function onDrop(event: DragEvent): void {
-      if (!carriesFiles(event)) return;
-      event.preventDefault();
-      depth = 0;
-      setDropping(false);
-      addFiles([...(event.dataTransfer?.files ?? [])]);
-    }
-
-    window.addEventListener('dragenter', onDragEnter);
-    window.addEventListener('dragover', onDragOver);
-    window.addEventListener('dragleave', onDragLeave);
-    window.addEventListener('drop', onDrop);
-    return () => {
-      window.removeEventListener('dragenter', onDragEnter);
-      window.removeEventListener('dragover', onDragOver);
-      window.removeEventListener('dragleave', onDragLeave);
-      window.removeEventListener('drop', onDrop);
-    };
-  }, [addFiles]);
 
   /** Refetches without touching the error state, so callers decide what it means. */
   const refetch = useCallback(async (): Promise<{ state: ChatState | null; error: string }> => {
@@ -1910,7 +1745,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   // that lands owing its output scripts is finished by the effect below.
   const serverGenerating = Boolean(state?.chat.generating);
   useEffect(() => {
-    if (!serverGenerating || mode || drawing || mutating) return;
+    if (!serverGenerating || mode || mutating) return;
     let cancelled = false;
     const timer = setInterval(() => {
       void refetch().then((answer) => {
@@ -1921,12 +1756,12 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       cancelled = true;
       clearInterval(timer);
     };
-  }, [serverGenerating, mode, drawing, mutating, refetch, mergeState]);
+  }, [serverGenerating, mode, mutating, refetch, mergeState]);
 
   // A pending head that is not this tab's doing — a reload after the tab closed
   // mid-reply, a swipe onto a pending sibling — is finished as soon as it is seen.
   useEffect(() => {
-    if (!state || mode || mutating || drawing || scriptsPending || state.chat.importing) return;
+    if (!state || mode || mutating || scriptsPending || state.chat.importing) return;
     const head = state.path[state.path.length - 1];
     if (!head || head.scriptState !== 'pending') return;
     if (finishTried.current.has(`${head.id}:${head.scriptRev ?? 0}`)) return;
@@ -1934,14 +1769,14 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     void settlePending(state).finally(endMutation);
     // `settlePending` and the mutation pair are this render's; the effect only
     // has to run again when one of these moves.
-  }, [state, mode, mutating, drawing, scriptsPending]);
+  }, [state, mode, mutating, scriptsPending]);
 
   // The queued turns, each once the turn before it has fully ended. A reply the
   // card takes for the reader — one a script asked for, `/multisend`'s — waits on
   // the same consent a component's turn does, and declining it drops the rest.
   useEffect(() => {
     const turn = queuedTurns[0];
-    if (!turn || takingTurn || mode || mutating || drawing || !state) return;
+    if (!turn || takingTurn || mode || mutating || !state) return;
     setQueuedTurns((turns) => turns.slice(1));
     setTakingTurn(true);
     void (async () => {
@@ -1984,7 +1819,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         setTakingTurn(false);
       }
     })();
-  }, [queuedTurns, takingTurn, mode, mutating, drawing, state]);
+  }, [queuedTurns, takingTurn, mode, mutating, state]);
 
   /**
    * A `risu-trigger` or `{{button}}` click: the manual triggers of that name of
@@ -2228,10 +2063,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     step?: GroupStep,
   ): Promise<RunOutcome> {
     const nothing: RunOutcome = { kind: 'over', groupTurnId: null, followUp: false, state: null };
-    // A drawn scene holds the same per-chat slot a generation does, so asking for
-    // one while the picture is on its way would only come back a 429. A round's
-    // later speakers are asked from the render that began it, before any `mode`.
-    if (mode || drawing || mutationRef.current || scriptsPending) return nothing;
+    // A round's later speakers are asked from the render that began it, before any `mode`.
+    if (mode || mutationRef.current || scriptsPending) return nothing;
     if (!scripted) followUpChain.current = 0;
     const start = step?.base ?? stateRef.current ?? state;
     const headBefore = start?.chat.headMessageId ?? null;
@@ -2376,12 +2209,15 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         });
         setScriptNotice(t('scriptStopped'));
       } else {
+        const asked = next === 'regenerate' ? regenerateAsk.current : '';
+        regenerateAsk.current = '';
+        const body = { ...speakerBody, ...scriptBody, ...(asked ? { request: asked } : {}) };
         const result = await streamGeneration(
           next === 'send' ? `/api/chats/${id}/messages` : `/api/chats/${id}/${next}`,
           next === 'send'
             ? { content, ...turnOptions, ...speakerBody, ...scriptBody }
-            : speakerBody || Object.keys(scriptBody).length > 0
-              ? { ...speakerBody, ...scriptBody }
+            : Object.keys(body).length > 0
+              ? body
               : undefined,
           (text) => {
             received += text.length;
@@ -2451,8 +2287,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     if (latest && scriptBundle !== undefined) latest = await settlePending(latest, step ? roundNote : undefined);
     if (latest && step) stateRef.current = latest;
 
-    /** Whether the turn was written — and so whether its images went with it. */
-    let delivered = next === 'send';
     /** Whether asking again may still answer it — the retry beside the banner. */
     let mayRetry = false;
     if (streamError !== null) {
@@ -2474,16 +2308,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           setInput((current) => (current.trim() ? `${typed ?? ''}\n${current}` : (typed ?? '')));
         }
         setAmbiguous(recovery.kind === 'unknown');
-        delivered = recovery.kind === 'delivered';
       }
     } else if (!refreshed.state) {
       setError(refreshed.error);
     }
     setRetryable(mayRetry);
-    // The images belong to the turn that carried them. A send that never landed
-    // leaves them in the composer with the text, still uploaded, ready to go
-    // again; one that did has handed them over to the message.
-    if (delivered) clearChips();
 
     // A failed stream is the one ending whose text the server did not store, so
     // the partial stays on screen — under the banner, with the retry beside it —
@@ -2569,13 +2398,12 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    */
   async function playRound(begin: RoundStart, scripted = false): Promise<void> {
     const current = stateRef.current ?? state;
-    if (!current || mode || drawing || mutationRef.current || scriptsPending) return;
+    if (!current || mode || mutationRef.current || scriptsPending) return;
     roundStopped.current = false;
     // A round that failed before is given up by starting another.
     setRound(null);
-    const picks = focus;
     const pick = (cue: RoundCue): string[] =>
-      pickSpeakers({ stage, picks, cue, settings: plot?.groupSettings, random: Math.random });
+      pickSpeakers({ stage, picks: [], cue, settings: plot?.groupSettings, random: Math.random });
 
     if (begin.opening === 'send') {
       const opened: { round: Round | null } = { round: null };
@@ -2588,7 +2416,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           return roundRequest(opened.round);
         },
       });
-      await carryRound(opened.round, outcome, picks);
+      await carryRound(opened.round, outcome);
       return;
     }
 
@@ -2608,7 +2436,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     }
     setRound(round);
     const request = roundRequest(round)!;
-    await carryRound(round, await run(request.mode, undefined, undefined, scripted, undefined, { base: current, request }), picks);
+    await carryRound(round, await run(request.mode, undefined, undefined, scripted, undefined, { base: current, request }));
   }
 
   /**
@@ -2617,15 +2445,13 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    * the round in `round` for the retry to ask that speaker again and go on. The
    * composer is held throughout and let go here.
    */
-  async function carryRound(begun: Round | null, outcome: RunOutcome, picks: readonly string[]): Promise<void> {
+  async function carryRound(begun: Round | null, outcome: RunOutcome): Promise<void> {
     let round = begun;
     let result = outcome;
     let latest = result.state;
     try {
       while (round) {
         if (result.kind === 'done') {
-          // The picks were for this round; any made while it ran are the next one's.
-          if (round.groupTurnId === null) setFocus((now) => (now === picks ? [] : now));
           // RisuAI's `sendAIprompt`: the same speaker again, a few times a round at most.
           const followUp =
             result.followUp && latest !== null && (await allowScriptTurns('scriptFollowUpConsent', latest));
@@ -2651,7 +2477,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
 
   /** The retry beside a failed round: the speaker it failed on, in the same round, and on from there. */
   async function retryRound(): Promise<void> {
-    if (!round?.failed || mode || drawing || mutationRef.current || scriptsPending) return;
+    if (!round?.failed || mode || mutationRef.current || scriptsPending) return;
     const again = stepRound(round, { type: 'retry' })!;
     roundStopped.current = false;
     setRound(again);
@@ -2660,7 +2486,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       base: stateRef.current ?? state,
       request,
     });
-    await carryRound(again, outcome, focus);
+    await carryRound(again, outcome);
   }
 
   /**
@@ -2674,7 +2500,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     const content = text.trim();
     // Gate three. `mode` covers the streaming half; the flag covers the consent
     // prompt, where nothing is streaming yet and a second call would sail past.
-    if (!content || mode || drawing || mutationRef.current || componentTurnRef.current) return;
+    if (!content || mode || mutationRef.current || componentTurnRef.current) return;
     componentTurnRef.current = true;
     try {
       // Gate two: granted once per chat, and taken back from the notes panel.
@@ -2708,7 +2534,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    * button rather than the banner a lost turn gets.
    */
   async function suggest(): Promise<void> {
-    if (mode || drawing || mutationRef.current || suggesting) return;
+    if (mode || mutationRef.current || suggesting) return;
     setSuggesting(true);
     setSuggestError('');
     try {
@@ -2797,42 +2623,10 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     }
   }
 
-  async function moveHead(messageId: string): Promise<void> {
-    if (!beginMutation()) return;
-    try {
-      applyState(await apiSend<ChatState>('POST', `/api/chats/${id}/head`, { messageId }));
-    } catch (caught) {
-      setError(toMessage(caught));
-    } finally {
-      endMutation();
-    }
-  }
-
-  /**
-   * Draws the scene as it stands. The server answers with the whole state — the
-   * narration turn and its picture already on the branch — so the placeholder row
-   * is replaced by the real one in a single render. A failure stored nothing, so
-   * the placeholder stays with the retry on it instead.
-   */
-  async function drawScene(): Promise<void> {
-    if (mode || drawing || mutationRef.current) return;
-    setDrawing(true);
-    setDrawFailed(false);
-    setError('');
-    try {
-      applyState(await apiSend<ChatState>('POST', `/api/chats/${id}/draw-scene`));
-    } catch (caught) {
-      setDrawFailed(true);
-      setError(toMessage(caught));
-    } finally {
-      setDrawing(false);
-    }
-  }
-
   // These endpoints return an entire chat state. Keep their writes exclusive so
   // a late response cannot replace a newer branch or unlock another request.
   function beginMutation(): boolean {
-    if (mutationRef.current || abortRef.current || mode || drawing) return false;
+    if (mutationRef.current || abortRef.current || mode) return false;
     mutationRef.current = true;
     setMutating(true);
     return true;
@@ -2939,35 +2733,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     }
   }
 
-  /** Adjacent sibling of the given message, or null at either end. */
-  function siblingTarget(message: ChatMessage, direction: -1 | 1): string | null {
-    const info = state?.siblings[message.id];
-    return info?.ids[info.index + direction] ?? null;
-  }
 
-  /**
-   * Branch navigation for a message that has more than one version. A scene edit
-   * forks mid-path, so this is what makes the version it replaced reachable; the
-   * head follows the sibling's deepest leaf, which brings its downstream back with
-   * it. Undefined for a message that was never forked.
-   */
-  function branchNav(message: ChatMessage): {
-    index: number;
-    total: number;
-    onPrev: (() => void) | null;
-    onNext: (() => void) | null;
-  } | undefined {
-    const info = state?.siblings[message.id];
-    if (!info || info.total < 2) return undefined;
-    const prev = siblingTarget(message, -1);
-    const next = siblingTarget(message, 1);
-    return {
-      index: info.index,
-      total: info.total,
-      onPrev: prev ? () => void moveHead(prev) : null,
-      onNext: next ? () => void moveHead(next) : null,
-    };
-  }
 
   if (missing) return <CenteredMessage>{t('notFound')}</CenteredMessage>;
   // The plot's display scripts come with its read, which can only start once the
@@ -3040,7 +2806,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       id: null,
       role: 'user',
       content: pendingUser,
-      attachments: pendingAttachments,
+      attachments: NO_ATTACHMENTS,
       createdAt: null,
       streaming: false,
       ...(group && firstMemberId ? { member: firstMemberId } : {}),
@@ -3090,12 +2856,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const sceneIds = new Set(scene.map((message) => message.id));
 
   /**
-   * The one send, whichever way it was asked for. An image still on its way up
-   * holds it: the turn names its uploads by id, so sending before they exist
-   * would send the turn without them.
-   */
-  const attaching = isUploading(chips);
-  /**
    * An import is still writing this chat's history, and until it finishes the API
    * refuses every other write (`chat_importing`). The chat reads as it stands so
    * far, and everything that would write is held — the composer included.
@@ -3114,22 +2874,19 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   /** RisuAI's input translation: the reader writes in their language, the turn goes out in the work's. */
   const translateInput = languageMode?.input === true;
   function submit(): void {
-    if (!input.trim() || mode || drawing || serverGenerating || mutationRef.current || attaching || importing || scriptsPending || castPending || translatingInput) return;
-    // The chip is a way of typing: what is stored is the plain convention, the
-    // same one the reader could have written the marks of by hand — a member's
-    // line included (`@이름: …`).
-    const content = composeTurn(input, composerMode, writer?.name ?? null);
-    const attachmentIds = uploadedIds(chips);
-    const options = attachmentIds.length > 0 ? { attachmentIds } : undefined;
+    if (!input.trim() || mode || serverGenerating || mutationRef.current || importing || scriptsPending || castPending || translatingInput) return;
+    // What is stored is the plain convention the reader could have typed by hand —
+    // a member's line included (`@이름: …`), and the narrator's (`@: …`).
+    const content = composeTurn(input, 'dialogue', writer?.name ?? null);
     // Slash commands only where RisuAI's scripts run; anywhere else `/…` is just text.
     if (runtime && input.startsWith('/')) {
       setInput('');
-      void runCommand(input, content, options);
+      void runCommand(input, content, undefined);
       return;
     }
     if (!translateInput) {
       setInput('');
-      void generate('send', content, options);
+      void generate('send', content);
       return;
     }
     // Translated first, as RisuAI's input box holds the translation before the
@@ -3141,7 +2898,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     void apiSend<{ text: string }>('POST', `/api/chats/${id}/translate-input`, { text: content })
       .then(({ text }) => {
         setInput('');
-        void generate('send', text, options);
+        void generate('send', text);
       }, (caught: unknown) => setError(toMessage(caught)))
       .finally(() => setTranslatingInput(false));
   }
@@ -3155,16 +2912,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         }
       : undefined;
 
-  /**
-   * The reply the footer's swipe moves: in a work of several members the first of
-   * the round the branch ends on, whose siblings are the round's other takes —
-   * moving to one brings its whole round back. The head itself otherwise.
-   */
-  const roundHead = group && last?.role === 'assistant' ? messages[roundStart(messages)] : last;
-  const info = roundHead ? state.siblings[roundHead.id] : undefined;
-  // A drawn scene takes the same per-chat slot a generation does, so while one is
-  // in flight the row of actions is withheld exactly as it is while text streams.
-  const showActions = !mode && !drawing && !mutating && !importing && !scriptsPending && !castPending && Boolean(last);
+  const showActions = !mode && !mutating && !importing && !scriptsPending && !castPending && Boolean(last);
   /**
    * The two features the plot turns on and the reader may turn back off. The
    * panel offers a toggle only where the plot asked for the feature at all — a
@@ -3175,9 +2923,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const plotStatusWindow = plot?.style?.statusWindow === true;
   const plotChoices = (plot?.style?.choices ?? 'off') !== 'off';
   const choicesOffered = state.chat.choicesEnabled;
-  const settingsLocked = Boolean(mode) || drawing || mutating || importing;
-  const prevTarget = roundHead && !mode ? siblingTarget(roundHead, -1) : null;
-  const nextTarget = roundHead && !mode ? siblingTarget(roundHead, 1) : null;
+  const settingsLocked = Boolean(mode) || mutating || importing;
   /** The speakers a running round has still to ask after the one it asks now. */
   const upNext =
     mode !== null && round
@@ -3185,43 +2931,33 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       : [];
 
   return (
-    // A column exactly as tall as what is left under the header (its 56px and
-    // border; on a phone the shell's header steps aside, so the whole screen),
-    // so the list below is the only thing that scrolls and the composer never moves.
-    <div className="chat-workspace flex h-dvh flex-col lg:h-[calc(100dvh-3.5rem-1px)]">
-      <div className="shrink-0 border-b border-line bg-surface">
-        {/* One row on a phone, Zeta's ‹ · name · "zeta ⌄" · settings, where the title
-            is what gives way — after everything that can step aside has: the face
-            for the way back, the music's mute into the settings sheet, the settings
-            into an icon, and the model pill gives its place to the card screen's way
-            out while that is open. The wide row wraps its controls. */}
-        <div className="mx-auto flex max-w-3xl items-center gap-2 px-5 py-1.5 lg:flex-wrap lg:gap-3 lg:py-2.5">
-          {/* The way out on a phone, where neither the shell's header nor its tab
-              bar stands; on a wide screen the header's own 대화 is right above. */}
+    // The whole screen — the shell's header steps aside in a conversation, as in
+    // Zeta — so the list below is the only thing that scrolls and the composer never moves.
+    <div className="chat-workspace flex h-dvh flex-col">
+      <div className="shrink-0 border-b border-line bg-canvas">
+        {/* Zeta's row at every width, 52px: ‹ · the title, which is what gives way ·
+            the model · ☰. What the row once held on a wide screen — the settings,
+            the notes, the music's mute — is in the sheet ☰ opens. */}
+        <div className="mx-auto flex h-13 max-w-[1120px] items-center gap-2 px-2.5">
           <Link
             href="/chats"
             aria-label={t('backToChats')}
             title={t('backToChats')}
-            className="-ml-2 inline-flex size-9 shrink-0 items-center justify-center rounded-full text-fg transition-colors hover:bg-raised/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus lg:hidden"
+            className="-ml-1 inline-flex size-8 shrink-0 items-center justify-center rounded-full text-fg transition-colors hover:bg-raised/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
           >
-            <Icon name="back" className="size-5" />
+            <Icon name="back" className="size-6" />
           </Link>
           <Link
             // The work's own page, which is the same one for creator and reader.
             href={`/p/${state.chat.plotId}`}
-            className="flex min-w-0 items-center gap-2.5"
+            className="flex h-full min-w-0 flex-1 items-center"
             title={t('backToPlot')}
           >
-            <Avatar src={plot?.coverUrl ?? null} name={characterName} className="size-8 shrink-0 text-sm max-lg:hidden" />
-            <span className="truncate text-sm font-medium">{characterName}</span>
+            <span className="truncate heading3">{characterName}</span>
           </Link>
           <AiBadge />
-          {/* While the page has music; on a phone, in the settings sheet. */}
-          <span className="hidden lg:contents">
-            <BgmMute />
-          </span>
-          {/* While a card's floating screen is open: the quiet way out of it. On a
-              phone the row has room for its mark alone, so the title still shows. */}
+          {/* While a card's floating screen is open: the quiet way out of it, in the
+              model's place (the sheet still has the model). */}
           {cardOverlays.open ? (
             <button
               type="button"
@@ -3229,71 +2965,37 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               aria-label={t('closeCardScreen')}
               title={t('closeCardScreen')}
               onClick={closeCardOverlays}
-              className="ml-auto inline-flex h-7 min-w-7 shrink-0 items-center justify-center gap-1 rounded-full border border-line px-2 text-xs text-muted transition-colors hover:border-muted/60 hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus sm:px-2.5"
+              className="inline-flex h-7 min-w-7 shrink-0 items-center justify-center gap-1 rounded-full border border-line px-2 text-xs text-muted transition-colors hover:border-muted/60 hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus sm:px-2.5"
             >
               <span aria-hidden="true">✕</span>
               <span aria-hidden="true" className="hidden sm:inline">
                 {t('closeCardScreen')}
               </span>
             </button>
-          ) : null}
-
-          {/* Wide enough for the controls, and they stand in the header. Narrower
-              than that, one button opens them in a sheet from the bottom edge. */}
-          <div className={cx('hidden items-center gap-2 lg:flex', !cardOverlays.open && 'ml-auto')}>
-            <ChatSettings
-              model={state.chat.model}
-              subModel={state.chat.subModel}
-              reasoningEffort={state.chat.reasoningEffort}
-              preset={state.chat.preset}
-              personaId={state.chat.personaId}
-              models={models}
-              presets={presets}
-              personas={personas}
-              readerPresetId={state.chat.readerPresetId}
-              readerPresets={readerPresets}
-              onReaderPresetsChange={changeReaderPresets}
-              disabled={settingsLocked}
-              retrieval={state.chat.retrieval?.enabled ?? false}
-              onChange={(patch) => void updateSettings(patch)}
-              {...(languageView ? { language: languageView } : {})}
-            />
-            <Button
-              size="sm"
-              variant={panelOpen ? 'secondary' : 'ghost'}
-              aria-expanded={panelOpen}
-              onClick={() => setPanelOpen((open) => !open)}
-            >
-              {t('notes')}
-            </Button>
-          </div>
-          {/* Zeta's "zeta ⌄": the main model, where the row has no room for the controls
-              above — and not while a card's screen is open, whose way out takes its
-              place; the sheet still has it. */}
-          {cardOverlays.open ? null : (
+          ) : (
+            // Zeta's "zeta ⌄": the main model.
             <ModelPill
               model={state.chat.model}
               models={models}
               disabled={settingsLocked}
-              className="ml-auto max-w-24! lg:hidden"
+              className="max-w-24!"
               onChange={(model) => void updateSettings({ model })}
             />
           )}
-          <Button
-            size="sm"
-            variant={sheetOpen ? 'secondary' : 'ghost'}
+          <button
+            type="button"
             aria-expanded={sheetOpen}
             aria-label={t('settings')}
             title={t('settings')}
-            className="shrink-0 rounded-full! px-2! lg:hidden"
+            className="-mr-1 inline-flex size-9 shrink-0 items-center justify-center rounded-full text-fg transition-colors hover:bg-raised/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
             onClick={() => setSheetOpen(true)}
           >
-            <Icon name="sliders" className="size-4" />
-          </Button>
+            <Icon name="menu" className="size-6" />
+          </button>
         </div>
 
         {settingsError ? (
-          <div className="mx-auto flex max-w-3xl items-center gap-3 px-5 pb-2.5">
+          <div className="mx-auto flex max-w-[1120px] items-center gap-3 px-2.5 pb-2.5">
             <p className="min-w-0 flex-1 text-xs text-danger">{settingsError}</p>
             <button
               type="button"
@@ -3311,7 +3013,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           should not push the conversation off the bottom of its own container. */}
       {panelOpen ? (
         <div className="max-h-[35dvh] shrink-0 overflow-y-auto border-b border-line">
-          <div className="mx-auto w-full max-w-3xl px-5 py-5">
+          <div className="mx-auto w-full max-w-[1120px] px-2.5 py-5">
             <ChatPanel
               chatId={id}
               headMessageId={state.chat.headMessageId}
@@ -3420,7 +3122,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                 ref={contentRef}
                 // The bottom padding is for the jump-to-latest pill, which floats over
                 // the last line of the conversation when it is showing.
-                className="mx-auto w-full max-w-3xl space-y-7 px-5 pt-7 pb-12"
+                className="mx-auto w-full max-w-[1120px] space-y-4 px-2 pt-4 pb-12"
                 // What a button in a message can do: run one of the card's manual
                 // triggers (`risu-trigger`, `{{button}}` naming one) or hand a Lua button
                 // its data (`risu-btn`), or put its text in the composer — sending that
@@ -3474,17 +3176,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                   const meta = rowMeta[index]!;
                   const source = message.id ? messageById.get(message.id) : undefined;
                   const isLast = index === view.length - 1;
-                  // Every forked message carries its own way back, except the last assistant
-                  // one — the footer's swipe already sits under that — and, in a work of
-                  // several members, the first reply of the last round, whose takes the
-                  // footer moves between.
-                  const branches =
-                    source &&
-                    !mode &&
-                    !(isLast && last?.role === 'assistant') &&
-                    !(group && last?.role === 'assistant' && source.id === roundHead?.id)
-                      ? branchNav(source)
-                      : undefined;
                   // Where the conversation crossed midnight. It belongs to the row it
                   // stands above, so the scene editor gets it as readily as a message.
                   const divider = meta.dayStart ? (
@@ -3588,127 +3279,44 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                         {...(source && !mode ? { onDelete: () => void deleteMessage(source.id) } : {})}
                         {...(message.hidden ? { hidden: true } : {})}
                         {...(source && !mode ? { onToggleHidden: () => void toggleHidden(source) } : {})}
-                        {...(branches ? { branches } : {})}
                         footer={
-                          isLast && showActions ? (
-                            <div
-                              className={cx(
-                                'chat-veil mt-2 flex w-fit items-center gap-1',
-                                message.role === 'user' && 'justify-end',
-                              )}
-                            >
-                              {last?.role === 'assistant' && info && info.total > 1 ? (
-                                // The arrows as large as the buttons beside them: a thumb's target.
-                                <div className="mr-1 flex items-center text-xs text-muted">
+                          isLast && showActions
+                            ? (edit: (() => void) | null) => (
+                                // Zeta's bar under the last turn: edit, regenerate with a
+                                // request, regenerate — round icons at the column's right.
+                                <div className="chat-veil mt-1 flex items-center justify-end gap-1.5">
+                                  {edit ? (
+                                    <button type="button" aria-label={t('edit')} title={t('edit')} onClick={edit} className={REPLY_ACTION}>
+                                      <Icon name="create" className="size-4" />
+                                    </button>
+                                  ) : null}
                                   <button
                                     type="button"
-                                    disabled={!prevTarget}
-                                    title={t('swipePrev')}
-                                    aria-label={t('swipePrev')}
-                                    onClick={() => prevTarget && void moveHead(prevTarget)}
-                                    className="inline-flex size-9 items-center justify-center rounded-full hover:text-fg disabled:opacity-30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                                    aria-label={t('regenerateWithRequest')}
+                                    title={t('regenerateWithRequest')}
+                                    onClick={() => setAskOpen(true)}
+                                    className={REPLY_ACTION}
                                   >
-                                    <span aria-hidden="true">◀</span>
+                                    <Icon name="wand" className="size-4" />
                                   </button>
-                                  <span className="tabular-nums">
-                                    {info.index + 1}/{info.total}
-                                  </span>
+                                  {/* In a work of several members: the whole round again. */}
                                   <button
                                     type="button"
-                                    disabled={!nextTarget}
-                                    title={t('swipeNext')}
-                                    aria-label={t('swipeNext')}
-                                    onClick={() => nextTarget && void moveHead(nextTarget)}
-                                    className="inline-flex size-9 items-center justify-center rounded-full hover:text-fg disabled:opacity-30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                                    aria-label={t('regenerate')}
+                                    title={group ? t('regenerateRoundHint') : t('regenerate')}
+                                    onClick={() => void generate('regenerate')}
+                                    className={REPLY_ACTION}
                                   >
-                                    <span aria-hidden="true">▶</span>
+                                    <Icon name="refresh" className="size-4" />
                                   </button>
                                 </div>
-                              ) : null}
-                              {/* In a work of several members: the whole round again, and
-                                  a round of its own after the last reply. */}
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                {...(group ? { title: t('regenerateRoundHint') } : {})}
-                                onClick={() => void generate('regenerate')}
-                              >
-                                {t('regenerate')}
-                              </Button>
-                              {/* A narration answers a user turn as readily as it follows a
-                                  reply, so unlike continue/auto it is offered under both. */}
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                title={t('narrateHint')}
-                                onClick={() => void generate('narrate')}
-                              >
-                                {t('narrate')}
-                              </Button>
-                              {last?.role === 'assistant' ? (
-                                <>
-                                  {/* Continue and auto are the two the row can do
-                                      without on a phone: the least reached for, and the
-                                      easiest to describe in a menu. */}
-                                  <div className="hidden items-center gap-1 sm:flex">
-                                    {/* A reply hidden from the AI is not continued: its
-                                        text would go out as the reply being resumed. */}
-                                    {!last.hiddenFromPrompt ? (
-                                      <Button size="sm" variant="ghost" onClick={() => void generate('continue')}>
-                                        {t('continue')}
-                                      </Button>
-                                    ) : null}
-                                    <Button
-                                      size="sm"
-                                      variant="ghost"
-                                      {...(group ? { title: t('autoRoundHint') } : {})}
-                                      onClick={() => void generate('auto')}
-                                    >
-                                      {t('auto')}
-                                    </Button>
-                                  </div>
-                                  <MoreActions
-                                    label={t('moreActions')}
-                                    className="sm:hidden"
-                                    actions={[
-                                      ...(!last.hiddenFromPrompt
-                                        ? [
-                                            {
-                                              key: 'continue',
-                                              label: t('continue'),
-                                              onSelect: () => void generate('continue'),
-                                            },
-                                          ]
-                                        : []),
-                                      { key: 'auto', label: t('auto'), onSelect: () => void generate('auto') },
-                                    ]}
-                                  />
-                                </>
-                              ) : null}
-                              {/* Only where the deployment has an image provider: the
-                                  server decides, and says so on every chat read. */}
-                              {state.capabilities?.drawScene ? (
-                                <Button size="sm" variant="ghost" onClick={() => void drawScene()}>
-                                  {t('drawScene')}
-                                </Button>
-                              ) : null}
-                            </div>
-                          ) : null
+                              )
+                            : null
                         }
                       />
                     </Fragment>
                   );
                 })}
-
-                {/* Where the drawn scene will land: a box of its own aspect while the
-                    provider works, and the same box with the retry in it if it never
-                    came. The message the refetch brings back replaces this outright. */}
-                {drawing || drawFailed ? (
-                  <SceneDraft
-                    status={drawing ? 'drawing' : 'failed'}
-                    onRetry={() => void drawScene()}
-                  />
-                ) : null}
 
                 {/* Directly under the row it belongs to, which is the streaming one when
                     a stream failed part-way: its text is still up there, unstored. */}
@@ -3738,13 +3346,13 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             </div>
           </div>
 
-          <div className="relative shrink-0 border-t border-line bg-surface">
+          <div className="relative shrink-0 border-t border-line/60 bg-canvas">
             {/* Only while the reader has scrolled away: new text never drags them
                 back down, so this is how they choose to follow it again. Round, at
                 the column's bottom-right, as Zeta has it. */}
             {isAtBottom ? null : (
-              <div className="pointer-events-none absolute inset-x-0 -top-14 px-5">
-                <div className="mx-auto flex max-w-3xl justify-end">
+              <div className="pointer-events-none absolute inset-x-0 -top-14 px-2">
+                <div className="mx-auto flex max-w-[1120px] justify-end">
                   <button
                     type="button"
                     aria-label={t('jumpToLatest')}
@@ -3761,7 +3369,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               <div
                 role="status"
                 data-testid="chat-importing"
-                className="mx-auto flex max-w-3xl items-center gap-3 px-5 pt-3"
+                className="mx-auto flex max-w-[1120px] items-center gap-3 px-2 pt-3"
               >
                 <p className="min-w-0 flex-1 rounded-xl border border-line bg-raised/60 px-4 py-2.5 text-xs text-muted">
                   {t('importing')}
@@ -3771,21 +3379,13 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                 </Button>
               </div>
             ) : null}
-            <div className="mx-auto w-full max-w-3xl">
-              <AttachmentChips chips={chips} onRemove={dropChip} onRetry={retryChip} />
-              {attachError ? (
-                <p className="px-5 pt-2 text-xs text-danger" role="status">
-                  {attachError}
-                </p>
-              ) : null}
-            </div>
             {/* What the reader could say next, for the turns where nothing comes to
                 mind. A chip fills the composer and stops there — sending stays the
                 reader's own act, exactly as it is for a display script's button. */}
             {suggestions.length > 0 ? (
               <ul
                 data-testid="reply-suggestions"
-                className="mx-auto flex max-w-3xl flex-wrap gap-2 px-5 pt-3"
+                className="mx-auto flex max-w-[1120px] flex-wrap gap-2 px-2 pt-3"
               >
                 {suggestions.map((suggestion, index) => (
                   <li key={index} className="min-w-0">
@@ -3806,26 +3406,26 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               </ul>
             ) : null}
             {suggestError ? (
-              <p className="mx-auto max-w-3xl px-5 pt-2 text-xs text-muted" role="status">
+              <p className="mx-auto max-w-[1120px] px-2 pt-2 text-xs text-muted" role="status">
                 {suggestError}
               </p>
             ) : null}
             {scriptNotice ? (
-              <p data-testid="script-notice" className="mx-auto max-w-3xl px-5 pt-2 text-xs text-muted" role="status">
+              <p data-testid="script-notice" className="mx-auto max-w-[1120px] px-2 pt-2 text-xs text-muted" role="status">
                 {scriptNotice}
               </p>
             ) : null}
             {/* A reply the server is finishing without a stream to this page: the
                 connection dropped, or the page came back to one already going. */}
-            {waitingOnServer || (serverGenerating && !mode && !drawing) ? (
-              <p data-testid="server-generating" className="mx-auto max-w-3xl px-5 pt-2 text-xs text-muted" role="status">
+            {waitingOnServer || (serverGenerating && !mode) ? (
+              <p data-testid="server-generating" className="mx-auto max-w-[1120px] px-2 pt-2 text-xs text-muted" role="status">
                 {t('serverGenerating')}
               </p>
             ) : null}
             {/* Who the round in hand still has to ask, quietly: the row above the
                 composer already shows whom it is waiting on now. */}
             {upNext.length > 0 ? (
-              <div className="mx-auto max-w-3xl px-5 pt-3" role="status">
+              <div className="mx-auto max-w-[1120px] px-2 pt-3" role="status">
                 <span
                   data-testid="round-next"
                   className="inline-flex max-w-full rounded-full border border-line px-3 py-1 text-xs text-muted"
@@ -3835,93 +3435,38 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               </div>
             ) : null}
 
-            {/* What the reader is about to write: their own line, their 상황묘사, or
-                the narrator's — and in a work of several members, whose line it is.
-                It marks the text on its way out and nothing more — the message is
-                stored in the same notation either way. */}
-            <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-2 px-5 pt-3">
-              <div
-                role="group"
-                aria-label={t('composerMode')}
-                className="flex gap-1 rounded-lg border border-line bg-surface/60 p-1"
-              >
-                {COMPOSER_MODES.map((value) => (
-                  <button
-                    key={value}
-                    type="button"
-                    aria-pressed={composerMode === value}
-                    title={t(`composerModes.${value}Hint`)}
-                    onClick={() => {
-                      setComposerMode(value);
-                      // The narrator is no member: a narration is nobody's line.
-                      if (value === 'narration') setWriteAs(null);
-                    }}
-                    className={cx(
-                      'rounded-md px-3 py-1 text-xs transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
-                      composerMode === value ? 'bg-mint-soft font-medium text-fg' : 'text-muted hover:text-fg',
-                    )}
-                  >
-                    {t(`composerModes.${value}`)}
-                  </button>
-                ))}
+            {/* 이어 쓰기 (RisuAI's continue) stands by the composer rather than under
+                the reply (2026-10-17 owner decision). A reply hidden from the AI is not
+                continued: its text would go out as the reply being resumed. */}
+            {showActions && last?.role === 'assistant' && !last.hiddenFromPrompt ? (
+              <div className="mx-auto flex max-w-[1120px] justify-end px-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => void generate('continue')}
+                  className="inline-flex h-7 items-center rounded-full bg-raised/80 px-3 text-xs text-muted transition-colors hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                >
+                  {t('continue')}
+                </button>
               </div>
-              {group && stage.length > 0 ? (
-                <WriteAsPicker
-                  members={stage}
-                  selected={writer?.id ?? null}
-                  onChange={(memberId) => {
-                    setWriteAs(memberId);
-                    if (memberId !== null && composerMode === 'narration') setComposerMode('dialogue');
-                  }}
-                />
-              ) : null}
-              {/* Beside the chips, because it is about the same thing they are: what
-                  the reader is about to write. Withheld while a reply streams — what
-                  it would suggest is an answer to a turn that has not arrived. */}
-              <Button
-                size="sm"
-                variant="ghost"
+            ) : null}
+            {/* Zeta's composer: 답변 추천 (⚡), the field with its `*` inside, and the
+                round send. */}
+            <div className="mx-auto flex max-w-[1120px] items-end gap-1.5 p-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))]">
+              {/* Withheld while a reply streams — what it would suggest is an answer to
+                  a turn that has not arrived. */}
+              <button
+                type="button"
                 data-testid="suggest-button"
+                aria-label={t('suggest')}
                 title={t('suggestHint')}
-                busy={suggesting}
-                disabled={Boolean(mode) || drawing || importing}
+                aria-busy={suggesting || undefined}
+                disabled={Boolean(mode) || importing || suggesting}
                 onClick={() => void suggest()}
+                className="my-0.5 flex size-8 shrink-0 items-center justify-center rounded-full bg-raised/80 text-muted transition-colors hover:text-fg disabled:opacity-45 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
               >
-                <span aria-hidden="true">✦</span>
-                {t('suggest')}
-              </Button>
-              {/* Only where there is a choice to make: a lone member on the stage is
-                  who every reply is about anyway. */}
-              {stage.length > 1 ? <FocusPicker members={stage} selected={focus} onChange={setFocus} /> : null}
-            </div>
-            {/* Zeta's composer: the picture button, the field with its `*` inside,
-                and the round send. */}
-            <div className="mx-auto flex max-w-3xl items-end gap-2 px-5 pt-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
-              {/* The picker is the button's doing; the input itself is never seen. */}
-              <input
-                ref={filePicker}
-                type="file"
-                accept="image/*"
-                multiple
-                hidden
-                onChange={(event) => {
-                  addFiles([...(event.target.files ?? [])]);
-                  // Cleared so picking the same file again still counts as a change.
-                  event.target.value = '';
-                }}
-              />
-              <Button
-                size="sm"
-                variant="ghost"
-                aria-label={t('attach')}
-                title={t('attach')}
-                disabled={Boolean(mode) || importing}
-                className="mb-1 shrink-0 rounded-full! px-2.5!"
-                onClick={() => filePicker.current?.click()}
-              >
-                <Icon name="attach" className="size-4" />
-              </Button>
-              <div className="relative min-w-0 flex-1">
+                <Icon name="bolt" className={cx('size-4', suggesting && 'animate-pulse')} />
+              </button>
+              <div className="flex min-w-0 flex-1 items-end rounded-[20px] bg-raised/80 pl-3 focus-within:ring-1 focus-within:ring-focus/40">
                 <TextArea
                   ref={composerRef}
                   rows={1}
@@ -3939,14 +3484,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                   // (`submit` checks `mode`). Locking the field would also throw the
                   // keyboard user's focus away mid-turn.
                   onChange={(event) => setInput(event.target.value)}
-                  // An image on the clipboard is an image to attach; text pastes into
-                  // the field as it always did, because nothing here touches it.
-                  onPaste={(event) => {
-                    const files = [...event.clipboardData.files];
-                    if (files.length === 0) return;
-                    event.preventDefault();
-                    addFiles(files);
-                  }}
                   onKeyDown={(event) => {
                     // Exactly Cmd/Ctrl+I: with shift or alt it is the browser's own
                     // shortcut (devtools), and taking that would be worse than useful.
@@ -3972,10 +3509,10 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                   }}
                   // Its height is written by `autoGrow`, so the drag handle would only
                   // be overruled on the next keystroke; past `max-h-48` it scrolls.
-                  // The right padding is the `*` button's, which sits inside the field.
-                  // 16px on a touch screen, below which iOS zooms the page in on focus;
-                  // the 24px line keeps one line as tall as the send button.
-                  className="block max-h-48 min-h-11 resize-none! overflow-y-auto rounded-3xl border-focus/50 bg-surface py-2.5 pr-11 pl-4 pointer-coarse:text-base/6"
+                  // 16px on a touch screen, below which iOS zooms the page in on focus.
+                  // The line is 1.2rem at either size and the pill has the side padding, over
+                  // TextArea's own `leading-relaxed` and `px-3.5` (`!`); the pill's ring is the focus mark.
+                  className="block max-h-48 min-h-0 flex-1 resize-none! overflow-y-auto rounded-none border-0 bg-transparent px-0! py-2 text-[0.938rem]/[1.2rem] leading-[1.2rem]! focus:outline-none! pointer-coarse:text-base/[1.2rem]"
                 />
                 <button
                   type="button"
@@ -3983,7 +3520,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                   title={t('directionHint')}
                   disabled={Boolean(mode) || importing}
                   onClick={toggleDirection}
-                  className="absolute right-1.5 bottom-1.5 flex size-8 items-center justify-center rounded-full text-muted transition-colors hover:bg-raised hover:text-fg disabled:opacity-45 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                  className="my-1 mr-1 flex size-7 shrink-0 items-center justify-center rounded-full text-muted transition-colors hover:text-fg disabled:opacity-45 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
                 >
                   {/* The asterisk sits high in its em box, so what is centred is the box
                       and not the glyph. The nudge centres the glyph. */}
@@ -3994,7 +3531,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                   Round, so the button's own radius and padding give way (`!`). */}
               {mode ? (
                 <Button
-                  className="size-11 shrink-0 rounded-full! px-0!"
+                  className="my-0.5 size-8! shrink-0 rounded-full! px-0!"
                   variant="secondary"
                   aria-label={t('stop')}
                   title={t('stop')}
@@ -4007,19 +3544,19 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                     stopping.current = apiSend<void>('POST', `/api/chats/${id}/stop`).catch(() => undefined);
                   }}
                 >
-                  <span aria-hidden="true" className="size-3 rounded-[3px] bg-current" />
+                  <span aria-hidden="true" className="size-2.5 rounded-[2px] bg-current" />
                 </Button>
               ) : (
                 <Button
-                  className="size-11 shrink-0 rounded-full! px-0!"
+                  className="my-0.5 size-8! shrink-0 rounded-full! px-0!"
                   variant="primary"
                   aria-label={t('send')}
                   title={t('send')}
                   busy={translatingInput}
-                  disabled={!input.trim() || attaching || drawing || serverGenerating || mutating || importing || scriptsPending || castPending || translatingInput}
+                  disabled={!input.trim() || serverGenerating || mutating || importing || scriptsPending || castPending || translatingInput}
                   onClick={submit}
                 >
-                  <Icon name="arrow" className="size-5 -rotate-90" />
+                  <Icon name="arrow" className="size-4 -rotate-90" />
                 </Button>
               )}
             </div>
@@ -4027,15 +3564,21 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         </div>
       </div>
 
-      {/* What the header holds on a wide screen, on a narrow one. The notes panel
-          has a whole section of the page to open into, so the sheet only opens it
-          and gets out of the way. */}
+      {/* Everything the header row has no room for, at every width. The notes
+          panel has a whole section of the page to open into, so the sheet only
+          opens it and gets out of the way. */}
       {sheetOpen ? (
         <BottomSheet title={t('settings')} onClose={() => setSheetOpen(false)}>
-          {/* The music's mute, which the phone's header has no room for. */}
+          {/* The music's mute, which the header has no room for. */}
           <BgmMute row className="mb-5" />
+          {/* In a work of several members, whose line the reader writes (Zeta's
+              write-as): it marks the text on its way out and nothing more. */}
+          {group && stage.length > 0 ? (
+            <div className="mb-5">
+              <WriteAsPicker members={stage} selected={writer?.id ?? null} onChange={setWriteAs} />
+            </div>
+          ) : null}
           <ChatSettings
-            stacked
             model={state.chat.model}
             subModel={state.chat.subModel}
             reasoningEffort={state.chat.reasoningEffort}
@@ -4074,22 +3617,48 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         </BottomSheet>
       ) : null}
 
+      {askOpen ? (
+        <BottomSheet title={t('askTitle')} onClose={() => setAskOpen(false)}>
+          <form
+            className="space-y-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const text = ask.trim();
+              if (!text) return;
+              setAskOpen(false);
+              setAsk('');
+              regenerateAsk.current = text;
+              void generate('regenerate').finally(() => {
+                regenerateAsk.current = '';
+              });
+            }}
+          >
+            <p className="text-sm text-muted">{t('askHint')}</p>
+            <TextArea
+              autoFocus
+              rows={3}
+              value={ask}
+              maxLength={800}
+              aria-label={t('askTitle')}
+              placeholder={t('askPlaceholder')}
+              onChange={(event) => setAsk(event.target.value)}
+            />
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="ghost" onClick={() => setAskOpen(false)}>
+                {common('cancel')}
+              </Button>
+              <Button type="submit" variant="primary" disabled={!ask.trim()}>
+                {t('askSubmit')}
+              </Button>
+            </div>
+          </form>
+        </BottomSheet>
+      ) : null}
+
       {scriptPrompt ? (
         <ScriptDialog prompt={scriptPrompt} onDone={() => setScriptPrompt(null)} />
       ) : null}
 
-      {/* The whole window is the drop target while a file is over it, so the
-          overlay is the only thing that has to say where it will land. */}
-      {dropping ? (
-        <div
-          data-testid="attachment-drop"
-          className="pointer-events-none fixed inset-0 z-40 flex items-center justify-center bg-canvas/70 backdrop-blur-sm"
-        >
-          <span className="rounded-xl border border-dashed border-muted px-6 py-4 text-sm text-fg">
-            {t('attach')}
-          </span>
-        </div>
-      ) : null}
     </div>
   );
 }

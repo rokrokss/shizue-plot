@@ -47,7 +47,7 @@ const asset = {
     'base64',
   ),
 };
-/** Two openings: one carrying the picture, one plain, so the roots swipe. */
+/** Two openings: one carrying the picture, one plain. */
 const intros = [
   `비가 내린다 ${run} {{img::${asset.slug}}}\n${member.name}: 들어와.`,
   `해가 들었다 ${run}\n${member.name}: 오늘은 조용하네.`,
@@ -194,9 +194,7 @@ test('user B starts a chat with the public plot and echoes a turn', async () => 
   await expect(readerPage).toHaveURL(new RegExp(`/ko/chats/${UUID_PATH}$`));
   const assistant = readerPage.getByTestId('message-assistant');
   await expect(assistant.first()).toContainText('비가 내린다');
-  // Both openings came across as root siblings.
-  await expect(assistant.last().getByText(/^\d+\/\d+$/)).toHaveText('1/2');
-  // …and the creator's roster names the line that carries a prefix, for a
+  // The creator's roster names the line that carries a prefix, for a
   // non-owner too: the public view is where the reader's page reads it from.
   await expect(assistant.first().getByTestId('speech-character')).toHaveAttribute(
     'data-speaker',

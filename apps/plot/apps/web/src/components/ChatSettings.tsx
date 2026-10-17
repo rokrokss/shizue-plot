@@ -35,17 +35,13 @@ const KNOWN_EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh']);
 /**
  * The choices a chat is run with: model, reasoning effort where the model offers
  * one, auxiliary model, preset, the reader's own preset on top of it, and
- * persona. The same controls stand in the
- * header on a wide screen and in the settings sheet on a narrow one, so they
- * live here rather than being written twice — `stacked` is the whole
- * difference: labelled rows at full width, or one compact row.
+ * persona — labelled rows at full width, in the chat's settings sheet.
  *
- * The stacked caption is a `<label htmlFor>`: pointed at the control by id
- * rather than wrapping it, because wrapping would put every option's text into
- * the control's accessible name. Naming it that way makes the caption clickable,
+ * The caption is a `<label htmlFor>`: pointed at the control by id rather than
+ * wrapping it, because wrapping would put every option's text into the
+ * control's accessible name. Naming it that way makes the caption clickable,
  * which is the whole reason it is there — and it makes `aria-label` a second,
- * competing name, so the stacked layout does without one. The compact row has no
- * visible caption at all, so there the `aria-label` is the only name and stays.
+ * competing name, so the controls do without one.
  */
 export function ChatSettings({
   model,
@@ -60,7 +56,6 @@ export function ChatSettings({
   readerPresets,
   onReaderPresetsChange,
   disabled,
-  stacked,
   language,
   retrieval,
   onChange,
@@ -80,7 +75,6 @@ export function ChatSettings({
   readerPresets?: ReaderPreset[];
   onReaderPresetsChange?: (presets: ReaderPreset[]) => void;
   disabled: boolean;
-  stacked?: boolean;
   /** The language mode's controls; none until the plot read says what language the work is in. */
   language?: LanguageSettingsView;
   /** Whether the chat brings back its earlier messages by meaning; without it, no control. */
@@ -99,7 +93,6 @@ export function ChatSettings({
   const t = useTranslations('chat');
   const locales = useTranslations('locales');
   const locked = disabled ? t('lockedWhileGenerating') : undefined;
-  const selectClass = stacked ? undefined : 'h-8 w-auto py-0 text-xs';
   const id = useId();
   // Only a model that advertises efforts gets the control; the server clears a
   // chosen effort when the model is switched to one that does not offer it.
@@ -111,29 +104,25 @@ export function ChatSettings({
   // the catalog lists. Named once the list is in, so the reader sees what it is.
   const firstModel = models[0];
 
-  /** Where a select's accessible name comes from in each layout. */
-  const nameOf = (key: string, label: string) =>
-    stacked ? { id: `${id}-${key}` } : { 'aria-label': label };
+  /** The select's id, which its caption names it by. */
+  const nameOf = (key: string) => ({ id: `${id}-${key}` });
 
-  /** A hint shows under the control where there is room for it, and only there. */
-  const field = (key: string, label: string, control: ReactNode, hint?: string): ReactNode =>
-    stacked ? (
-      <div className="space-y-1.5">
-        <label
-          htmlFor={`${id}-${key}`}
-          className="block text-xs font-medium text-muted"
-        >
-          {label}
-        </label>
-        {control}
-        {hint ? <p className="text-xs text-muted">{hint}</p> : null}
-      </div>
-    ) : (
-      control
-    );
+  /** A captioned control, with its hint under it. */
+  const field = (key: string, label: string, control: ReactNode, hint?: string): ReactNode => (
+    <div className="space-y-1.5">
+      <label
+        htmlFor={`${id}-${key}`}
+        className="block text-xs font-medium text-muted"
+      >
+        {label}
+      </label>
+      {control}
+      {hint ? <p className="text-xs text-muted">{hint}</p> : null}
+    </div>
+  );
 
   return (
-    <div className={stacked ? 'space-y-4' : 'flex flex-wrap items-center gap-2'}>
+    <div className="space-y-4">
       {field(
         'model',
         t('model'),
@@ -141,8 +130,7 @@ export function ChatSettings({
           value={model}
           disabled={disabled}
           {...(locked ? { title: locked } : {})}
-          {...nameOf('model', t('model'))}
-          className={selectClass}
+          {...nameOf('model')}
           onChange={(event) => onChange({ model: event.target.value })}
         >
           <ModelOptions model={model} models={models} />
@@ -156,8 +144,7 @@ export function ChatSettings({
               value={reasoningEffort ?? ''}
               disabled={disabled}
               {...(locked ? { title: locked } : {})}
-              {...nameOf('effort', t('reasoningEffort'))}
-              className={selectClass}
+              {...nameOf('effort')}
               onChange={(event) => onChange({ reasoningEffort: event.target.value || null })}
             >
               <option value="">
@@ -177,9 +164,7 @@ export function ChatSettings({
             </Select>,
           )
         : null}
-      {/* Next to the model it spares: the side work runs here instead. The compact
-          row has no room for the hint, so there it is the control's title, as the
-          preset's is. */}
+      {/* Next to the model it spares: the side work runs here instead. */}
       {field(
         'subModel',
         t('subModel'),
@@ -187,8 +172,7 @@ export function ChatSettings({
           value={subModel ?? ''}
           disabled={disabled}
           title={locked ?? t('subModelHint')}
-          {...nameOf('subModel', t('subModel'))}
-          className={selectClass}
+          {...nameOf('subModel')}
           onChange={(event) => onChange({ subModel: event.target.value || null })}
         >
           <option value="">
@@ -214,8 +198,7 @@ export function ChatSettings({
           value={preset}
           disabled={disabled}
           title={locked ?? t(`presetHints.${preset}`)}
-          {...nameOf('preset', t('preset'))}
-          className={selectClass}
+          {...nameOf('preset')}
           onChange={(event) => onChange({ preset: event.target.value })}
         >
           {/* Keeps the current preset selected while the catalogue is loading. */}
@@ -232,7 +215,6 @@ export function ChatSettings({
       {/* The reader's own additions on top of the preset just above. */}
       {readerPresets && onReaderPresetsChange ? (
         <ReaderPresetField
-          stacked={stacked}
           presets={readerPresets}
           selectedId={readerPresetId}
           disabled={disabled}
@@ -243,13 +225,12 @@ export function ChatSettings({
       {field(
         'persona',
         t('persona'),
-        <PersonaFace persona={personas.find((persona) => persona.id === personaId)} compact={!stacked}>
+        <PersonaFace persona={personas.find((persona) => persona.id === personaId)}>
           <Select
             value={personaId ?? ''}
             disabled={disabled}
             {...(locked ? { title: locked } : {})}
-            {...nameOf('persona', t('persona'))}
-            className={selectClass}
+            {...nameOf('persona')}
             onChange={(event) => onChange({ personaId: event.target.value || null })}
           >
             <option value="">{t('noPersona')}</option>
@@ -262,17 +243,16 @@ export function ChatSettings({
         </PersonaFace>,
       )}
       {language ? languageFields(language) : null}
-      {/* SillyTavern's chat vectorization, off as there. The compact row has no
-          room for the hint, so there it is the control's title. */}
+      {/* SillyTavern's chat vectorization, off as there. */}
       {retrieval !== undefined ? (
-        <div className={stacked ? 'space-y-1.5' : 'shrink-0 whitespace-nowrap'} title={stacked ? undefined : (locked ?? t('retrievalHint'))}>
+        <div className="space-y-1.5">
           <Checkbox
             label={t('retrieval')}
             checked={retrieval}
             disabled={disabled}
             onChange={(enabled) => onChange({ retrieval: { enabled } })}
           />
-          {stacked ? <p className="text-xs text-muted">{t('retrievalHint')}</p> : null}
+          <p className="text-xs text-muted">{t('retrievalHint')}</p>
         </div>
       ) : null}
     </div>
@@ -314,8 +294,7 @@ export function ChatSettings({
             disabled={disabled}
             title={locked ?? (recommend ? t('translateRecommended') : hint)}
             data-recommended={recommend || undefined}
-            {...nameOf('languageMode', t('languageMode'))}
-            className={selectClass}
+            {...nameOf('languageMode')}
             onChange={(event) => save({ mode: (event.target.value || undefined) as TranslationMode | undefined })}
           >
             <option value="">{t('languageModeAuto', { mode: modeName(defaultTranslationMode(plotLanguage, reader)) })}</option>
@@ -327,7 +306,7 @@ export function ChatSettings({
           </Select>,
           hint,
         )}
-        {stacked && recommend ? (
+        {recommend ? (
           <p data-testid="translate-recommended" className="-mt-2 text-xs text-link">
             {t('translateRecommended')}
           </p>
@@ -339,8 +318,7 @@ export function ChatSettings({
             value={settings.language ?? ''}
             disabled={disabled}
             {...(locked ? { title: locked } : {})}
-            {...nameOf('readerLanguage', t('readerLanguage'))}
-            className={selectClass}
+            {...nameOf('readerLanguage')}
             onChange={(event) =>
               save({ language: (event.target.value || undefined) as TranslationLanguage | undefined })
             }
@@ -354,14 +332,14 @@ export function ChatSettings({
           </Select>,
         )}
         {resolved.mode === 'translate' ? (
-          <div className={stacked ? 'space-y-1.5' : undefined}>
+          <div className="space-y-1.5">
             <Checkbox
               label={t('translateInput', { work: locales(plotLanguage) })}
               checked={settings.input === true}
               disabled={disabled}
               onChange={(input) => save({ input: input || undefined })}
             />
-            {stacked ? <p className="text-xs text-muted">{t('translateInputHint')}</p> : null}
+            <p className="text-xs text-muted">{t('translateInputHint')}</p>
           </div>
         ) : null}
       </>

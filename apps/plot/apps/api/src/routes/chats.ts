@@ -1434,6 +1434,21 @@ function optionalDirections(body: Record<string, unknown>): string | undefined {
 }
 
 /**
+ * What the reader asked of a regenerate (Zeta's "어떻게 고쳐드릴까요?"): a ruling
+ * for that one reply, added to the directions it is generated under and stored
+ * nowhere, so the next regenerate goes back to the turn as it was. As
+ * user-trust-level as the turn's own directions, so only the length is checked.
+ */
+function optionalRegenerateRequest(body: Record<string, unknown>): string | undefined {
+  const value = optionalString(body, 'request')?.trim();
+  if (!value) return undefined;
+  if (value.length > MAX_DIRECTIONS_LENGTH) {
+    throw badRequest('invalid_request', `request may be at most ${MAX_DIRECTIONS_LENGTH} characters`);
+  }
+  return value;
+}
+
+/**
  * Uploads a send is claiming for its turn. Whether they are this chat's own, and
  * still unclaimed, is settled by the write itself (`bindAttachments`); this is
  * the shape and the count.
@@ -1684,6 +1699,7 @@ async function regeneratePlan(
   focusIds: string[] = [],
   scripts: GenerationScripts = NO_SCRIPTS,
   group?: { speakerId: string; notLast: boolean },
+  request?: string,
 ): Promise<GenerationPlan> {
   await requireEnabledModel(deps, chat.userId, chat.model);
   const context = await loadGenerationContext(deps, chat, scripts);
@@ -1729,6 +1745,10 @@ async function regeneratePlan(
   // reader's turn, with its ruling — or a reply, the scene going on without the
   // reader (이어가기), which is told so again rather than handed an older turn's ruling.
   const answersReader = !voice?.member || kept.at(-1)?.role === 'user';
+  // The user turn being answered is still on the branch, so its ruling comes back
+  // with it — a regenerate is the same turn, judged the same way — and then what
+  // the reader asked of this regenerate (`optionalRegenerateRequest`).
+  const directions = [answersReader ? lastUserDirections(kept) : '', request ?? ''].filter(Boolean).join('\n\n');
 
   return {
     chatId: chat.id,
@@ -1753,9 +1773,7 @@ async function regeneratePlan(
     authorNote: context.authorNote,
     ...readerPromptSettings(c, chat, context.row),
     ...(context.narrator ? { narrator: context.narrator } : {}),
-    // The user turn being answered is still on the branch, so its ruling comes
-    // back with it — a regenerate is the same turn, judged the same way.
-    ...(answersReader ? { directions: lastUserDirections(kept) } : {}),
+    ...(directions ? { directions } : {}),
     preset: getPreset(chat.preset),
     readerAdditions: context.readerAdditions,
     // The kept branch only: the head being replaced takes its delta with it, so
@@ -3378,9 +3396,10 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const speakerId = optionalSpeakerId(body);
     const group =
       speakerId === undefined ? undefined : { speakerId, notLast: optionalBoolean(body, 'finalSpeaker') === false };
+    const request = optionalRegenerateRequest(body);
 
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> =>
-      regeneratePlan(c, deps, await loadWritableChat(deps, id, userId), focusIds, scripts, group),
+      regeneratePlan(c, deps, await loadWritableChat(deps, id, userId), focusIds, scripts, group, request),
     );
   });
 
