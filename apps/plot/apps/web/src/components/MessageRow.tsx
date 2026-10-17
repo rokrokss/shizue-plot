@@ -7,7 +7,7 @@ import { extractStatusBlock } from '@shizue/core/status-block';
 import { applyTranslationScripts } from '@shizue/core/translation';
 import type { TranslationScript } from '@shizue/core/triggers';
 import { useFormatter, useTranslations } from 'next-intl';
-import { memo, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type HTMLAttributes, type ReactNode } from 'react';
 import type { AssetResolver } from '@/lib/assets';
 import { renderProse } from '@/lib/cbs';
 import type { ComponentContext } from '@/lib/componentCalls';
@@ -22,6 +22,7 @@ import {
 import type { ChatAttachment, MessageRole, PublicMember } from '@/lib/types';
 import { useErrorMessage } from '@/lib/useErrorMessage';
 import { Avatar } from './Avatar';
+import { BottomSheet } from './BottomSheet';
 import { Icon } from './Icon';
 import { MessageAttachments } from './MessageAttachments';
 import { MessageBody } from './MessageBody';
@@ -103,17 +104,18 @@ const USER_BUBBLE =
   'user-bubble w-fit max-w-[min(100%,36rem)] min-w-0 rounded-2xl rounded-tr-md bg-accent px-3.5 py-2.5 text-accent-ink';
 
 /**
- * How long the reply has been waited for, counted from when the row began to
- * wait. The time is all there is to show: a reasoning model's thoughts can
- * paraphrase the creator's hidden prompt, so they are never asked for. Its own
- * component, so the tick re-renders this line and not the row around it.
+ * The reply being waited for, drawn as Zeta draws it (2026-10-17 owner
+ * decision): three dots breathing in turn, one chat line high, and words only
+ * for a screen reader. A reasoning model's thoughts can paraphrase the
+ * creator's hidden prompt, so they are never asked for — there is nothing
+ * else to show.
  *
  * Drawn where the reply will be — in a bubble, and beside the face the reply
  * will carry where the row knows it (`face`): the one member of a work of one,
- * or, in a round of a work of several, the member it waits on (`typing`), which
- * it then says by name. A narration has no bubble to wait in (`plain`).
+ * or, in a round of a work of several, the member it waits on (`typing`), whose
+ * name the words then say. A narration has no bubble to wait in (`plain`).
  */
-function ThinkingClock({
+function WaitingDots({
   face,
   typing = false,
   plain = false,
@@ -123,15 +125,12 @@ function ThinkingClock({
   plain?: boolean;
 }) {
   const t = useTranslations('chat');
-  const [start] = useState(() => Date.now());
-  const [seconds, setSeconds] = useState(0);
-  useEffect(() => {
-    const timer = setInterval(() => setSeconds(Math.floor((Date.now() - start) / 1000)), 1000);
-    return () => clearInterval(timer);
-  }, [start]);
   const line = (
-    <span className="text-sm text-muted tabular-nums">
-      {typing && face ? t('typing', { name: face.name, seconds }) : t('thinking', { seconds })}
+    <span className="waiting-dots text-muted">
+      <span className="sr-only">{typing && face ? t('typing', { name: face.name }) : t('thinking')}</span>
+      <span aria-hidden="true" />
+      <span aria-hidden="true" />
+      <span aria-hidden="true" />
     </span>
   );
   if (plain) return line;
@@ -151,6 +150,63 @@ function ThinkingClock({
       {bubble}
     </span>
   );
+}
+
+/** How long a finger holds a row before its menu opens. */
+const LONG_PRESS_MS = 500;
+/** A finger that moves this far is scrolling, not pressing. */
+const PRESS_SLOP_PX = 10;
+/** What takes a press of its own, which a long press on it is left to. */
+const OWN_PRESS = 'a, button, input, textarea, select, summary, label, [contenteditable]';
+
+/**
+ * A finger held on a row opens its menu, as Zeta's long press does (2026-10-17
+ * owner decision): a touch screen has no hover for the row's quiet actions to
+ * come out on. A mouse and a pen are left to those, and a finger that moves —
+ * a scroll — or that holds something with a press of its own is left alone.
+ * The click a long press ends with is swallowed, so it does not also press
+ * what was under the finger, and so is the browser's own menu. Null leaves
+ * the row as it is.
+ */
+function useLongPress(onLongPress: (() => void) | null): HTMLAttributes<HTMLDivElement> {
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const start = useRef<{ x: number; y: number } | null>(null);
+  const fired = useRef(false);
+  const cancel = (): void => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
+    start.current = null;
+  };
+  useEffect(() => cancel, []);
+  if (!onLongPress) return {};
+  return {
+    onPointerDown: (event) => {
+      fired.current = false;
+      if (event.pointerType !== 'touch' || (event.target as Element).closest(OWN_PRESS)) return;
+      start.current = { x: event.clientX, y: event.clientY };
+      timer.current = setTimeout(() => {
+        timer.current = null;
+        fired.current = true;
+        onLongPress();
+      }, LONG_PRESS_MS);
+    },
+    onPointerMove: (event) => {
+      if (start.current && Math.hypot(event.clientX - start.current.x, event.clientY - start.current.y) > PRESS_SLOP_PX) {
+        cancel();
+      }
+    },
+    onPointerUp: cancel,
+    onPointerCancel: cancel,
+    onContextMenu: (event) => {
+      if (fired.current || timer.current) event.preventDefault();
+    },
+    onClickCapture: (event) => {
+      if (!fired.current) return;
+      fired.current = false;
+      event.preventDefault();
+      event.stopPropagation();
+    },
+  };
 }
 
 /** The roster as a reader's `@이름:` lines are read against: every name a member goes by. */
@@ -274,7 +330,7 @@ export const MessageRow = memo(function MessageRow({
   spoken?: boolean;
   /**
    * Whom the row is waiting on while `thinking`, in a round of several members:
-   * drawn as their face and "{이름} 입력 중…".
+   * drawn as their face beside the dots, and "{이름} 입력 중…" to a screen reader.
    */
   typing?: { name: string; avatarUrl: string | null };
   /** Raw text of the previous message with the same role, for `repeat_back`. */
@@ -584,6 +640,73 @@ export const MessageRow = memo(function MessageRow({
   );
   const hasActions = showActions || Boolean(createdAt);
 
+  /**
+   * The same actions for a finger (`useLongPress`): a sheet of them, each one a
+   * full-width button, the time it was said at the top.
+   */
+  const [menuOpen, setMenuOpen] = useState(false);
+  const press = useLongPress(showActions ? () => setMenuOpen(true) : null);
+  const pressable = showActions && 'message-press';
+  const act = (action: () => void) => () => {
+    setMenuOpen(false);
+    action();
+  };
+  const menu = menuOpen ? (
+    <BottomSheet title={t('messageMenu')} onClose={() => setMenuOpen(false)}>
+      {createdAt ? (
+        <p className="-mt-2 pb-3 text-xs text-muted">
+          {format.dateTime(new Date(createdAt), { dateStyle: 'long', timeStyle: 'short' })}
+        </p>
+      ) : null}
+      <div className="flex flex-col gap-2">
+        {onSave || onEditScene ? (
+          <Button disabled={disabled} onClick={act(() => (onEditScene ? onEditScene() : setEditing(true)))}>
+            {t('edit')}
+          </Button>
+        ) : null}
+        <Button
+          // Says so a moment before it closes: the row's own label is not on a phone's screen.
+          onClick={() => void copy().then(() => setTimeout(() => setMenuOpen(false), 700))}
+        >
+          {copied ? t('copied') : t('copyMessage')}
+        </Button>
+        {onToggleHidden ? (
+          <Button disabled={disabled} onClick={act(onToggleHidden)}>
+            {hidden ? t('showToAi') : t('hideFromAi')}
+          </Button>
+        ) : null}
+        {branches ? (
+          <div className="flex items-center justify-center gap-4 text-sm text-muted">
+            <Button
+              variant="ghost"
+              disabled={disabled || !branches.onPrev}
+              aria-label={t('swipePrev')}
+              onClick={act(() => branches.onPrev?.())}
+            >
+              <span aria-hidden="true">◀</span>
+            </Button>
+            <span className="tabular-nums">
+              {branches.index + 1}/{branches.total}
+            </span>
+            <Button
+              variant="ghost"
+              disabled={disabled || !branches.onNext}
+              aria-label={t('swipeNext')}
+              onClick={act(() => branches.onNext?.())}
+            >
+              <span aria-hidden="true">▶</span>
+            </Button>
+          </div>
+        ) : null}
+        {onDelete ? (
+          <Button variant="danger" disabled={disabled} onClick={act(onDelete)}>
+            {t('deleteMessage')}
+          </Button>
+        ) : null}
+      </div>
+    </BottomSheet>
+  ) : null;
+
   const editor =
     editing && onSave ? (
       <fieldset disabled={busy || disabled} aria-busy={busy || undefined} className="mt-1.5 w-full min-w-0 space-y-2">
@@ -829,7 +952,7 @@ export const MessageRow = memo(function MessageRow({
   // it, as Zeta marks its narrator and RisuAI draws its *scene text*.
   if (narration) {
     return (
-      <div data-testid="message-narration" {...memberProps} className="group relative min-w-0">
+      <div data-testid="message-narration" {...memberProps} {...press} className={cx('group relative min-w-0', pressable)}>
         {editor ?? (
           <div className={dim}>
             {reasoningBlock}
@@ -841,7 +964,7 @@ export const MessageRow = memo(function MessageRow({
               {...(marks ? { trailer: marks } : {})}
             />
             {attachedBlock ? <div className="pl-6">{attachedBlock}</div> : null}
-            {thinking ? <ThinkingClock plain /> : null}
+            {thinking ? <WaitingDots plain /> : null}
             {statusCard}
           </div>
         )}
@@ -849,6 +972,7 @@ export const MessageRow = memo(function MessageRow({
         {offerAt('pl-6')}
         {footer}
         <div className={cx(ACTIONS_ABOVE, 'left-0')}>{actions}</div>
+        {menu}
       </div>
     );
   }
@@ -857,7 +981,7 @@ export const MessageRow = memo(function MessageRow({
   // and the bubble in mint under the name.
   if (isUser) {
     return (
-      <div data-testid="message-user" {...memberProps} className="group flex flex-row-reverse gap-2.5">
+      <div data-testid="message-user" {...memberProps} {...press} className={cx('group flex flex-row-reverse gap-2.5', pressable)}>
         {grouped ? (
           <div aria-hidden="true" className="chat-face w-10 shrink-0" />
         ) : (
@@ -935,6 +1059,7 @@ export const MessageRow = memo(function MessageRow({
           )}
           {footer}
         </div>
+        {menu}
       </div>
     );
   }
@@ -945,17 +1070,17 @@ export const MessageRow = memo(function MessageRow({
     const ownMember = owner ? roster.find((entry) => entry.name === owner) : undefined;
     const waitingOn = typing ?? (owner ? { name: owner, avatarUrl: ownMember?.avatarUrl ?? null } : undefined);
     // A continue waits under the reply it goes on from, whose face is already there.
-    const clock = thinking ? (
+    const waiting = thinking ? (
       body.trim() ? (
         <div className="mt-3 pl-12.5">
-          <ThinkingClock />
+          <WaitingDots />
         </div>
       ) : (
-        <ThinkingClock face={waitingOn} typing={typing !== undefined} />
+        <WaitingDots face={waitingOn} typing={typing !== undefined} />
       )
     ) : null;
     return (
-      <div data-testid="message-assistant" {...memberProps} className="group min-w-0">
+      <div data-testid="message-assistant" {...memberProps} {...press} className={cx('group min-w-0', pressable)}>
         {editor ?? (
           <div className={dim}>
             {reasoningBlock ? <div className="pl-12.5">{reasoningBlock}</div> : null}
@@ -971,12 +1096,13 @@ export const MessageRow = memo(function MessageRow({
               {...(meta ? { trailer: meta } : {})}
             />
             {attachedBlock ? <div className="pl-12.5">{attachedBlock}</div> : null}
-            {clock}
+            {waiting}
             {statusCard ? <div className="mt-3">{statusCard}</div> : null}
           </div>
         )}
         {offerAt('pl-12.5')}
         {footer}
+        {menu}
       </div>
     );
   }
@@ -987,7 +1113,7 @@ export const MessageRow = memo(function MessageRow({
   // under the bubble keeps the bubble's column.
   if (intro) {
     return (
-      <div data-testid="message-assistant" {...memberProps} className="group min-w-0">
+      <div data-testid="message-assistant" {...memberProps} {...press} className={cx('group min-w-0', pressable)}>
         {editor ?? (
           <div className={dim}>
             {reasoningBlock ? <div className="pl-12.5">{reasoningBlock}</div> : null}
@@ -1004,7 +1130,7 @@ export const MessageRow = memo(function MessageRow({
             {attachedBlock ? <div className="pl-12.5">{attachedBlock}</div> : null}
             {thinking ? (
               <div className={cx('pl-12.5', body.trim() && 'mt-3')}>
-                <ThinkingClock />
+                <WaitingDots />
               </div>
             ) : null}
             {statusCard ? <div className="mt-3 pl-12.5">{statusCard}</div> : null}
@@ -1012,6 +1138,7 @@ export const MessageRow = memo(function MessageRow({
         )}
         {offerAt('pl-12.5')}
         {footer ? <div className="pl-12.5">{footer}</div> : null}
+        {menu}
       </div>
     );
   }
@@ -1019,7 +1146,7 @@ export const MessageRow = memo(function MessageRow({
   // Before the roster has arrived, or in a work with no members: the row is the
   // speaker, as it always was — the plot's face and name, then its bubble.
   return (
-    <div data-testid="message-assistant" {...memberProps} className="group flex gap-2.5">
+    <div data-testid="message-assistant" {...memberProps} {...press} className={cx('group flex gap-2.5', pressable)}>
       {grouped ? (
         // The avatar's own width, so a continued turn stays in the column.
         <div aria-hidden="true" className="chat-face w-10 shrink-0" />
@@ -1049,7 +1176,7 @@ export const MessageRow = memo(function MessageRow({
             {attachedBlock}
             {thinking ? (
               <div className={body.trim() ? 'mt-3' : undefined}>
-                <ThinkingClock />
+                <WaitingDots />
               </div>
             ) : null}
             {statusCard ? <div className="mt-3">{statusCard}</div> : null}
@@ -1058,6 +1185,7 @@ export const MessageRow = memo(function MessageRow({
         {offerAt()}
         {footer}
       </div>
+      {menu}
     </div>
   );
 });

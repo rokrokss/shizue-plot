@@ -35,8 +35,8 @@ const messages = {
     copied: '복사됨',
     editMessage: '메시지 수정',
     deleteMessage: '삭제',
-    thinking: '생각 중… {seconds}초',
-    typing: '{name} 입력 중… {seconds}초',
+    thinking: '생각 중…',
+    typing: '{name} 입력 중…',
   },
   common: { cancel: '취소', save: '저장', saving: '저장 중…' },
 };
@@ -305,7 +305,9 @@ describe('a reply a round is waiting on', () => {
 
     const typing = host.querySelector('[data-testid="typing"]')!;
     expect(typing.getAttribute('data-speaker')).toBe('아리아');
-    expect(typing.textContent).toBe('아리아 입력 중… 0초');
+    // The face says it to the eye, the words to a screen reader.
+    expect(typing.textContent).toBe('아리아 입력 중…');
+    expect(typing.querySelector('.waiting-dots')).not.toBeNull();
     expect(typing.querySelector('img')?.getAttribute('src')).toBe('/avatars/aria.png');
   });
 
@@ -322,11 +324,11 @@ describe('a reply a round is waiting on', () => {
   it('waits under the reply a continue goes on from, with no second face', () => {
     render(row('*책을 덮는다.* 그래서', 'assistant', { roster: [ROSTER[0]!], streaming: true, thinking: true }));
 
-    // The reply's own face once, and the clock after its bubble — the reply
+    // The reply's own face once, and the dots after its bubble — the reply
     // still being written, so as written.
     expect(host.querySelectorAll('img')).toHaveLength(1);
     const bubbles = [...host.querySelectorAll('.chat-bubble')];
-    expect(bubbles.map((node) => node.textContent)).toEqual(['*책을 덮는다.* 그래서', '생각 중… 0초']);
+    expect(bubbles.map((node) => node.textContent)).toEqual(['*책을 덮는다.* 그래서', '생각 중…']);
   });
 
 });

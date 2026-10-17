@@ -18,12 +18,19 @@ export default function AppLayout({ children }: { children: ReactNode }) {
   const t = useTranslations('rebrand');
   // The tab bar is the phone's navigation, except in a conversation, where the
   // composer already owns the bottom edge.
-  const tabBar = !pathname.startsWith('/chats/');
+  const conversation = pathname.startsWith('/chats/');
+  const tabBar = !conversation;
 
   return (
     <div className="flex min-h-dvh flex-col">
       <a href="#main-content" className="skip-link">{t('skip')}</a>
-      <Header />
+      {/* On a phone a conversation is a screen of its own, as in Zeta: its row
+          names the character and leads back, so the shell's bar steps aside too.
+          `contents` keeps the header sticky to the page where it stands; the
+          wrapper is always there so moving into a chat does not remount it. */}
+      <div className={conversation ? 'hidden lg:contents' : 'contents'}>
+        <Header />
+      </div>
       {/* The bar lies over the page, so the page ends above it — inside `main`,
           so the column stays exactly as tall as the viewport. */}
       <main

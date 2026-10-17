@@ -27,7 +27,8 @@ const messages = {
   chat: {
     edit: '수정',
     editUserHint: '힌트',
-    thinking: '생각 중… {seconds}초',
+    thinking: '생각 중…',
+    messageMenu: '메시지 메뉴',
     sceneHint: '장면 힌트',
     swipePrev: '이전 응답',
     swipeNext: '다음 응답',
@@ -40,7 +41,7 @@ const messages = {
     showToAi: 'AI에게 다시 보이기',
     hiddenFromAi: 'AI에게 숨김',
   },
-  common: { cancel: '취소', save: '저장', saving: '저장 중…' },
+  common: { cancel: '취소', save: '저장', saving: '저장 중…', close: '닫기' },
 };
 
 /** Fixed, so a formatted time means the same thing wherever the suite runs. */
@@ -332,18 +333,14 @@ describe('the furniture on a row', () => {
     expect(button('삭제')).toBeUndefined();
   });
 
-  it('counts the seconds a reply is waited for, and only until it starts', () => {
-    vi.useFakeTimers();
-    try {
-      render(row('', 'assistant', { name: '아리아', streaming: true, thinking: true }));
-      expect(host.textContent).toContain('생각 중… 0초');
-      act(() => vi.advanceTimersByTime(3000));
-      expect(host.textContent).toContain('생각 중… 3초');
-      render(row('눈이', 'assistant', { name: '아리아', streaming: true, thinking: false }));
-      expect(host.textContent).not.toContain('생각 중');
-    } finally {
-      vi.useRealTimers();
-    }
+  it('waits for a reply with three dots, and only until it starts', () => {
+    render(row('', 'assistant', { name: '아리아', streaming: true, thinking: true }));
+    const dots = host.querySelector('.waiting-dots')!;
+    expect(dots.querySelectorAll('[aria-hidden="true"]')).toHaveLength(3);
+    // No count of seconds: the words are a screen reader's alone.
+    expect(dots.querySelector('.sr-only')?.textContent).toBe('생각 중…');
+    render(row('눈이', 'assistant', { name: '아리아', streaming: true, thinking: false }));
+    expect(host.querySelector('.waiting-dots')).toBeNull();
   });
 
   it('carries the time it was stored, revealed on hover', () => {
@@ -456,5 +453,65 @@ describe('a message hidden from the AI', () => {
     render(row('문을 열었다', 'user', { hidden: true, onToggleHidden: () => toggled.push('show') }));
     await act(async () => button('AI에게 다시 보이기')!.click());
     expect(toggled).toEqual(['hide', 'show']);
+  });
+});
+
+describe('a long press on a touch screen', () => {
+  const press = (target: Element, type: string, init: PointerEventInit = {}) =>
+    act(() => {
+      target.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerType: 'touch', clientX: 20, clientY: 20, ...init }));
+    });
+  const sheet = () => document.querySelector('[data-testid="bottom-sheet"]');
+  const sheetButton = (label: string) =>
+    [...(sheet()?.querySelectorAll('button') ?? [])].find((node) => node.textContent === label);
+  const createdAt = new Date(2026, 7, 11, 9, 5).toISOString();
+
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("opens the row's menu after half a second, and swallows the click it ends with", () => {
+    const deleted: string[] = [];
+    render(row('문을 열었다', 'user', { onSave: async () => undefined, onDelete: () => deleted.push('x'), onToggleHidden: () => undefined, createdAt }));
+    const bubble = host.querySelector('.user-bubble')!;
+    press(bubble, 'pointerdown');
+    act(() => vi.advanceTimersByTime(499));
+    expect(sheet()).toBeNull();
+    act(() => vi.advanceTimersByTime(1));
+    expect(sheet()?.getAttribute('aria-label')).toBe('메시지 메뉴');
+    expect([...sheet()!.querySelectorAll('button')].map((node) => node.textContent)).toEqual(['✕', '수정', '메시지 복사', 'AI에게 숨기기', '삭제']);
+    expect(sheet()!.textContent).toContain('2026년 8월 11일');
+    press(bubble, 'pointerup');
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+    act(() => void bubble.dispatchEvent(click));
+    expect(click.defaultPrevented).toBe(true);
+
+    act(() => sheetButton('삭제')!.click());
+    expect(deleted).toEqual(['x']);
+    expect(sheet()).toBeNull();
+  });
+
+  it('leaves a mouse, a finger that scrolls, and a finger on a button alone', () => {
+    render(row('문을 열었다', 'user', { onDelete: () => undefined, createdAt }));
+    const bubble = host.querySelector('.user-bubble')!;
+    press(bubble, 'pointerdown', { pointerType: 'mouse' });
+    act(() => vi.advanceTimersByTime(600));
+    expect(sheet()).toBeNull();
+
+    press(bubble, 'pointerdown');
+    press(bubble, 'pointermove', { clientY: 40 });
+    act(() => vi.advanceTimersByTime(600));
+    expect(sheet()).toBeNull();
+
+    press(host.querySelector('button')!, 'pointerdown');
+    act(() => vi.advanceTimersByTime(600));
+    expect(sheet()).toBeNull();
+  });
+
+  it('is not there while the turn is written', () => {
+    render(row('문을 여', 'assistant', { name: '아리아', streaming: true, onDelete: () => undefined }));
+    press(host.querySelector('.message-body')!, 'pointerdown');
+    act(() => vi.advanceTimersByTime(600));
+    expect(sheet()).toBeNull();
+    expect(host.querySelector('.message-press')).toBeNull();
   });
 });
