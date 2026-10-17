@@ -9,12 +9,18 @@ import type { AppEnv } from './deps.js';
  * ChatGPT sign-in callback arrives.
  *
  * The app may be reached at more than one origin — `remoteOrigins`, a tunnel to
- * this machine for a phone — and each counts as the app's own.
+ * this machine for a phone — and each counts as the app's own. They are read on
+ * every request, since the settings page opens and closes the tunnel while the
+ * API runs (`tunnel.ts`).
  */
-export function originGuard(webOrigin: string, remoteOrigins: readonly string[] = []): MiddlewareHandler<AppEnv> {
-  const origins = new Set([webOrigin, ...remoteOrigins].map((value) => new URL(value).origin));
-  const hosts = new Set([...origins].map((value) => new URL(value).host));
+export function originGuard(
+  webOrigin: string,
+  remoteOrigins: readonly string[] | (() => readonly string[]) = [],
+): MiddlewareHandler<AppEnv> {
+  const others = typeof remoteOrigins === 'function' ? remoteOrigins : () => remoteOrigins;
   return async (c, next) => {
+    const origins = new Set([webOrigin, ...others()].map((value) => new URL(value).origin));
+    const hosts = new Set([...origins].map((value) => new URL(value).host));
     const requestOrigin = c.req.header('origin');
     // Next rewrites the upstream Host and overwrites this header with the original
     // browser-facing Host. Check it before trusting anything about the request.

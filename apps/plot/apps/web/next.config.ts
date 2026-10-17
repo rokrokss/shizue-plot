@@ -5,17 +5,24 @@ import { securityHeaders } from './securityHeaders';
 
 const withNextIntl = createNextIntlPlugin('./src/i18n/request.ts');
 const apiOrigin = process.env['API_ORIGIN'] ?? 'http://localhost:8787';
-// The API's `REMOTE_ORIGINS` — a tunnel to a shizue running on this machine, for a
-// phone. `next dev` refuses `/_next/*` (the HMR socket among them) from any other
-// host, and phone pairing is shown only where they are set, never in the hosted app.
+// A shizue running on this machine signs in on loopback; the hosted app never does.
+// Only there is a phone let in, through a tunnel the settings page opens (the API's
+// `tunnel.ts`) or one the reader lists in `REMOTE_ORIGINS`. Unset is not local: a
+// build that forgot the variable shows none of it (`scripts/dev.sh` always sets it).
+const authUrl = process.env['BETTER_AUTH_URL'];
+const local = authUrl !== undefined && ['localhost', '127.0.0.1', '[::1]'].includes(new URL(authUrl).hostname);
 const remoteHosts = (process.env['REMOTE_ORIGINS'] ?? '').split(',').map((value) => value.trim()).filter(Boolean)
   .map((value) => new URL(value).hostname);
+// `next dev` refuses `/_next/*` (the HMR socket among them) from any other host:
+// Tailscale Serve's `<machine>.<tailnet>.ts.net` and a Quick Tunnel's
+// `<words>.trycloudflare.com` are not known until the tunnel opens.
+const tunnelHosts = local ? ['**.ts.net', '*.trycloudflare.com', ...remoteHosts] : [];
 
 const nextConfig: NextConfig = {
   devIndicators: false,
   agentRules: false,
-  allowedDevOrigins: remoteHosts,
-  env: { NEXT_PUBLIC_DEVICE_PAIRING: remoteHosts.length > 0 ? '1' : '' },
+  allowedDevOrigins: tunnelHosts,
+  env: { NEXT_PUBLIC_DEVICE_PAIRING: local ? '1' : '' },
   turbopack: {
     root: fileURLToPath(new URL('../../../../', import.meta.url)),
     rules: {

@@ -1299,7 +1299,10 @@
     "migration_unconfirmed": "Agree to every confirmation before moving a character over.",
     "memory_unavailable": "No model is available to summarize with.",
     "memory_failed": "The summary couldn't be written. Try again.",
-    "pairing_invalid": "This pairing code has expired or was already used. Make a new QR code on your computer."
+    "pairing_invalid": "This pairing code has expired or was already used. Make a new QR code on your computer.",
+    "tunnel_unavailable": "There is nothing to open a tunnel with. Install Tailscale or cloudflared.",
+    "tunnel_failed": "The tunnel did not open. Try again shortly, or from another network.",
+    "no_tunnel": "Open phone access first."
   },
   "rebrand": {
     "eyebrow": "A place for plots to grow",
@@ -1334,7 +1337,7 @@
   },
   "devices": {
     "title": "Connect a phone",
-    "description": "Phone browsers can't sign in with ChatGPT. Make a QR code and scan it with your phone's camera to connect the phone to this account. A code works once, for 5 minutes.",
+    "description": "Opens this computer's shizue in your phone's browser. The button opens a tunnel and shows a QR code; scan it with your phone's camera to open the address and join this account (phones cannot sign in with ChatGPT). The code works once, for 5 minutes.",
     "start": "Make a QR code",
     "again": "Make a new QR code",
     "qrLabel": "QR code to scan with your phone",
@@ -1344,7 +1347,14 @@
     "pairTitle": "Connect this device",
     "pairDescription": "Connects this browser to the account that made the QR code. Don't continue unless you made the code yourself.",
     "pairConfirm": "Connect",
-    "pairMissing": "There's no pairing code here. Scan the QR code in your computer's settings again."
+    "pairMissing": "There's no pairing code here. Scan the QR code in your computer's settings again.",
+    "open": "Open phone access",
+    "close": "Close access",
+    "viaTailscale": "Opens through Tailscale. Only devices signed in to the same Tailscale account can reach it, and the phone needs the Tailscale app. The address stays the same each time.",
+    "viaCloudflare": "Opens through a Cloudflare Quick Tunnel. The phone needs no app, but anyone with the address can see this shizue's public pages, and the address changes every time. With Tailscale installed it opens at a fixed address only your devices reach.",
+    "noTool": "There is nothing to open a tunnel with. Install Tailscale (recommended, tailscale.com) or cloudflared, then reload this page.",
+    "openTailscale": "Open through Tailscale:",
+    "openCloudflare": "Open through a Cloudflare Quick Tunnel:"
   },
   "migrate": {
     "title": "Move from another platform",

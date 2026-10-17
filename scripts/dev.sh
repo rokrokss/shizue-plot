@@ -16,7 +16,8 @@ export S3_ACCESS_KEY_ID="${S3_ACCESS_KEY_ID:-shizue}"
 export S3_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY:-shizue-secret}"
 export S3_FORCE_PATH_STYLE="${S3_FORCE_PATH_STYLE:-true}"
 # The API reads apps/plot/.env itself; `next dev` does not, and refuses a tunnel's
-# host unless next.config.ts sees it in REMOTE_ORIGINS.
+# host unless next.config.ts allows it: the settings page's own tunnels always, a
+# tunnel the reader runs once it is in REMOTE_ORIGINS.
 if [ -z "${REMOTE_ORIGINS:-}" ] && [ -f "$PLOT_DIR/.env" ]; then
   export REMOTE_ORIGINS="$(sed -n 's/^REMOTE_ORIGINS=//p' "$PLOT_DIR/.env" | tail -n 1)"
 fi

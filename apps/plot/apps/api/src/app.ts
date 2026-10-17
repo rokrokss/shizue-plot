@@ -4,6 +4,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { MAX_ATTACHMENT_BYTES } from './attachments.js';
 import { normalizeAuthResponse } from './auth.js';
 import { originGuard } from './originGuard.js';
+import { remoteOriginsOf } from './routes/devices.js';
 import type { AppDeps, AppEnv } from './deps.js';
 import { errorResponse, type ErrorBody } from './errors.js';
 import { healthRoutes } from './health.js';
@@ -49,7 +50,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   // First, so every line a request says carries its id, and refusals are logged and counted too (`log.ts`).
   app.use('*', requestLog());
   app.use('*', securityHeaders(deps.webOrigin));
-  if (deps.webOrigin) app.use('*', originGuard(deps.webOrigin, deps.remoteOrigins));
+  if (deps.webOrigin) app.use('*', originGuard(deps.webOrigin, () => remoteOriginsOf(deps)));
 
   app.onError((error, c) => errorResponse(c, error));
   app.notFound((c) => c.json<ErrorBody>({ error: 'Not found', code: 'not_found' }, 404));
@@ -92,7 +93,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   // someone without a ChatGPT connection is empty.
   app.route('/api/chatgpt', chatGPTRoutes(deps));
   // A phone joins the reader signed in on this machine here, so its claim answers
-  // signed-out browsers too. Only with REMOTE_ORIGINS: the hosted app has none of it.
+  // signed-out browsers too. Only on this machine: the hosted app has none of it.
   app.route('/api/devices', deviceRoutes(deps));
   app.route('/api/models', modelRoutes(deps));
 

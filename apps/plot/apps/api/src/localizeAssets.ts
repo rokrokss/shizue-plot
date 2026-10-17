@@ -195,9 +195,11 @@ const localizeAgent = (): PinnedAgent =>
  * Over kept-open connections (`pooledTransport`) unless a transport is given.
  */
 export function createRemoteFetch(
-  options: { ownOrigins?: readonly string[] } & Pick<GuardOptions, 'resolve' | 'transport'> = {},
+  options: { ownOrigins?: readonly string[] | (() => readonly string[]) } & Pick<GuardOptions, 'resolve' | 'transport'> = {},
 ): RemoteFetch {
-  const own = new Set((options.ownOrigins ?? []).map((origin) => new URL(origin).hostname.replace(/\.$/, '')));
+  // Read each time: a phone's tunnel to this machine comes and goes (`tunnel.ts`).
+  const ownOrigins = typeof options.ownOrigins === 'function' ? options.ownOrigins : () => options.ownOrigins as readonly string[] | undefined ?? [];
+  const own = { has: (host: string): boolean => ownOrigins().some((origin) => new URL(origin).hostname.replace(/\.$/, '') === host) };
   const transport = options.transport ?? pooledTransport(localizeAgent());
   return async (url, kind, signal) => {
     const response = await guardedFetch(url, {

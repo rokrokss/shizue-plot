@@ -7,7 +7,8 @@ import type { AppDeps } from './deps.js';
 import { createLocalEmbedder } from './embedder.js';
 import { createRemoteEmbedder, embedderListenConfig, serveEmbedder } from './embedderRemote.js';
 import { createHostedAuth, createSessionStore } from './hostedAuth.js';
-import { loadRootEnv, readConfig } from './env.js';
+import { isLoopback, loadRootEnv, readConfig } from './env.js';
+import { createPhoneAccess } from './tunnel.js';
 import { startJobWorker } from './jobs.js';
 import { STOP_CHANNEL, stopGenerations, stopLocalGeneration } from './generation.js';
 import { createBackgroundTasks, onUnhandledRejection } from './lifecycle.js';
@@ -42,8 +43,17 @@ const fixture = testing ? createAuth(db, {
 
 // The background tasks the turns start, kept until they settle so a shutdown can wait for them.
 const background = createBackgroundTasks();
+// A phone's tunnel to this machine, opened from the settings page — never in the hosted app.
+const phoneAccess = isLoopback(config.authUrl) ? createPhoneAccess({ webUrl: config.authUrl }) : undefined;
+// Tailscale Serve outlives the API: an address opened before a restart is trusted again from the start.
+void phoneAccess?.status().catch(() => undefined);
 // This app at every origin it answers: card scripts' requests and an import's fetches never go there.
-const ownOrigins = [config.authUrl, ...config.remoteOrigins, ...(config.apiOrigin ? [config.apiOrigin] : [])];
+const ownOrigins = (): string[] => [
+  config.authUrl,
+  ...config.remoteOrigins,
+  ...(phoneAccess?.origin() ? [phoneAccess.origin()!] : []),
+  ...(config.apiOrigin ? [config.apiOrigin] : []),
+];
 
 // One set for the routes and the job worker: the memory backfill shares the
 // per-chat refresh guard with the turns the reader is sending meanwhile.
@@ -53,6 +63,7 @@ const deps: AppDeps = {
   chatgpt: { accounts, sessions },
   webOrigin: config.authUrl,
   remoteOrigins: config.remoteOrigins,
+  ...(phoneAccess ? { phoneAccess } : {}),
   storage: createStorage(config.storage),
   // One for the process: card scripts' requests, their in-flight cap, and the per-reader rate limit in `rate_limits`.
   scriptFetch: createScriptFetch({ db, ownOrigins }),
@@ -134,6 +145,8 @@ function shutdown(code: number): void {
     deps.draining = true;
     // No new connections; the open streams are stopped below.
     server.close();
+    // A Cloudflare tunnel ends with the process; a Tailscale one is Tailscale's to keep.
+    phoneAccess?.shutdown();
     metricsServer?.close();
     // Only the claiming is stopped: a job still running is left where it is, and
     // its lease expires two minutes later for the next instance to take over.

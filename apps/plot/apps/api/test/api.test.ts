@@ -134,6 +134,7 @@ import { MAX_IMAGE_BYTES } from '../src/avatar.js';
 import { createChatGPTAccounts } from '../src/chatgptAccounts.js';
 import { createHostedAuth, createSessionStore } from '../src/hostedAuth.js';
 import type { AppDeps, AppEnv } from '../src/deps.js';
+import { createPhoneAccess, type TunnelTools } from '../src/tunnel.js';
 import { loadRootEnv } from '../src/env.js';
 import {
   acquireChatSlot,
@@ -1228,7 +1229,35 @@ describe('Sign in with ChatGPT', () => {
 describe('pairing a phone', () => {
   /** A tunnel to a shizue running on the reader's own machine, the only place pairing exists. */
   const TUNNEL = 'https://mac.example.ts.net:8444';
-  const localApp = (openai: ReturnType<typeof fakeOpenAI>) => hostedApp(openai, {}, { remoteOrigins: [TUNNEL] });
+  /**
+   * Tailscale on a machine that is on a tailnet, as `tunnel.ts` asks it — serving
+   * another service on 443 already — and no cloudflared.
+   */
+  const fakeTailscale = (): TunnelTools & { served: Map<number, string> } => {
+    const served = new Map<number, string>([[443, 'http://127.0.0.1:18788']]);
+    return {
+      served,
+      run: async (command, args) => {
+        if (command !== 'tailscale') throw new Error(`command not found: ${command}`);
+        if (args[0] === 'status') return JSON.stringify({ BackendState: 'Running', Self: { DNSName: 'mac.example.ts.net.' } });
+        if (args[1] === 'status') {
+          return JSON.stringify({
+            TCP: Object.fromEntries([...served.keys()].map((port) => [port, { HTTPS: true }])),
+            Web: Object.fromEntries([...served].map(([port, target]) => [`mac.example.ts.net:${port}`, { Handlers: { '/': { Proxy: target } } }])),
+          });
+        }
+        if (args[1] === '--bg') served.set(Number(args[2]!.split('=')[1]), args[3]!);
+        else if (args[2] === 'off') served.delete(Number(args[1]!.split('=')[1]));
+        return '';
+      },
+      start: () => {
+        throw new Error('no cloudflared here');
+      },
+    };
+  };
+  const phoneAccess = (tools: TunnelTools = fakeTailscale()) => createPhoneAccess({ webUrl: 'http://localhost:13000', tools });
+  // A tunnel the reader runs and lists in REMOTE_ORIGINS, on a machine whose settings page could open one too.
+  const localApp = (openai: ReturnType<typeof fakeOpenAI>) => hostedApp(openai, {}, { remoteOrigins: [TUNNEL], phoneAccess: phoneAccess() });
   /** The phone's side, with whatever Origin its page sends. */
   const claim = async (target: Hono<AppEnv>, code: unknown, origin?: string): Promise<Response> => target.request('/api/devices/claim', {
     method: 'POST',
@@ -1305,19 +1334,28 @@ describe('pairing a phone', () => {
     expect(await db.select().from(session)).toHaveLength(0);
   });
 
-  it('has no pairing without remote origins, as the hosted app, and takes a claim from the tunnel only', async () => {
+  /** The API as it runs on this machine or hosted, with the origin guard on, and a reader signed in there. */
+  const guarded = async () => {
     const accounts = createChatGPTAccounts(db, { secret: 'test-secret-test-secret-test-secret', callbackPort: 47801, oauth: fakeOpenAI().oauth });
     const sessions = createSessionStore(db, { secure: false });
     const deps = { auth: createHostedAuth(sessions, accounts), chatgpt: { accounts, sessions }, webOrigin: 'http://localhost:13000' };
-    const hosted = makeApp({ ...deps, webOrigin: 'https://plot.example' });
-    const local = makeApp({ ...deps, remoteOrigins: [TUNNEL] });
     const [owner] = await db.insert(user).values({ id: randomUUID(), name: 'alice', email: 'alice@chatgpt.test' }).returning();
     const signedIn = (await sessions.create(owner!.id, new Request('http://localhost:13000/'))).split(';')[0]!;
-    const pair = async (target: Hono<AppEnv>, origin: string): Promise<Response> => target.request('/api/devices/pair', {
-      method: 'POST', headers: { cookie: signedIn, origin },
-    });
+    const call = (target: Hono<AppEnv>, method: string, path: string, origin = 'http://localhost:13000'): Promise<Response> =>
+      Promise.resolve(target.request(path, { method, headers: { cookie: signedIn, origin } }));
+    return { deps, call };
+  };
 
-    expect((await pair(hosted, 'https://plot.example')).status).toBe(404);
+  it('has no pairing off this machine, as the hosted app, and takes a claim from the tunnel only', async () => {
+    const { deps, call } = await guarded();
+    // The hosted app is never handed a tunnel (`index.ts`), whatever its env says.
+    const hosted = makeApp({ ...deps, webOrigin: 'https://plot.example' });
+    const local = makeApp({ ...deps, remoteOrigins: [TUNNEL], phoneAccess: phoneAccess() });
+    const pair = (target: Hono<AppEnv>, origin: string): Promise<Response> => call(target, 'POST', '/api/devices/pair', origin);
+
+    for (const [method, path] of [['GET', '/api/devices'], ['POST', '/api/devices/tunnel'], ['DELETE', '/api/devices/tunnel'], ['POST', '/api/devices/pair']] as const) {
+      expect((await call(hosted, method, path, 'https://plot.example')).status).toBe(404);
+    }
     expect((await claim(hosted, 'x', 'https://plot.example')).status).toBe(404);
     expect(await db.select().from(verification)).toHaveLength(0);
 
@@ -1326,6 +1364,51 @@ describe('pairing a phone', () => {
       expect((await claim(local, code, origin)).status).toBe(403);
     }
     expect((await claim(local, code, TUNNEL)).status).toBe(204);
+  });
+
+  it('opens a tunnel from the settings page, takes the phone at its address while it is open, and closes its own port only', async () => {
+    const { deps, call } = await guarded();
+    const tools = fakeTailscale();
+    const local = makeApp({ ...deps, phoneAccess: phoneAccess(tools) });
+    const opened = 'https://mac.example.ts.net:8444';
+
+    expect((await call(local, 'GET', '/api/devices', opened)).status).toBe(403);
+    expect(await readJson(await call(local, 'GET', '/api/devices'))).toEqual({
+      tunnel: null,
+      available: { tailscale: true, cloudflare: false },
+      origins: [],
+    });
+    // Nowhere for a phone to open a code yet.
+    const early = await call(local, 'POST', '/api/devices/pair');
+    expect(early.status).toBe(409);
+    expect(await readJson(early)).toMatchObject({ code: 'no_tunnel' });
+
+    expect(await readJson(await call(local, 'POST', '/api/devices/tunnel'))).toEqual({
+      tunnel: { kind: 'tailscale', origin: opened },
+      available: { tailscale: true, cloudflare: false },
+      origins: [opened],
+    });
+    expect(tools.served.get(8444)).toBe('http://127.0.0.1:13000');
+    const { code, origins } = await readJson(await call(local, 'POST', '/api/devices/pair'));
+    expect(origins).toEqual([opened]);
+    expect((await claim(local, code, opened)).status).toBe(204);
+    expect((await call(local, 'GET', '/api/devices', opened)).status).toBe(200);
+
+    // A restarted API finds the address Tailscale kept, and trusts it again.
+    const restarted = makeApp({ ...deps, phoneAccess: phoneAccess(tools) });
+    expect((await readJson(await call(restarted, 'GET', '/api/devices'))).tunnel).toEqual({ kind: 'tailscale', origin: opened });
+
+    expect(await readJson(await call(local, 'DELETE', '/api/devices/tunnel'))).toMatchObject({ tunnel: null, origins: [] });
+    expect([...tools.served.keys()]).toEqual([443]);
+    expect((await call(local, 'GET', '/api/devices', opened)).status).toBe(403);
+  });
+
+  it('says why the tunnel would not open', async () => {
+    const { deps, call } = await guarded();
+    const none = makeApp({ ...deps, phoneAccess: phoneAccess({ run: async () => { throw new Error('not found'); }, start: () => { throw new Error('not found'); } }) });
+    const refused = await call(none, 'POST', '/api/devices/tunnel');
+    expect(refused.status).toBe(409);
+    expect(await readJson(refused)).toMatchObject({ code: 'tunnel_unavailable' });
   });
 });
 

@@ -49,3 +49,21 @@ describe('origin guard with remote origins', () => {
     }
   });
 });
+
+describe('origin guard following a tunnel the settings page opens', () => {
+  let tunnel: string | null = null;
+  const app = new Hono<AppEnv>();
+  app.use('*', originGuard('http://localhost:13000', () => (tunnel ? [tunnel] : [])));
+  app.all('*', (c) => c.text('ok'));
+  const post = (origin: string): Promise<Response> =>
+    Promise.resolve(app.request('http://127.0.0.1:8787/api/devices/claim', { method: 'POST', headers: { origin } }));
+
+  it('takes the tunnel only while it is open', async () => {
+    expect((await post('https://words.trycloudflare.com')).status).toBe(403);
+    tunnel = 'https://words.trycloudflare.com';
+    expect((await post('https://words.trycloudflare.com')).status).toBe(200);
+    tunnel = null;
+    expect((await post('https://words.trycloudflare.com')).status).toBe(403);
+    expect((await post('http://localhost:13000')).status).toBe(200);
+  });
+});

@@ -102,22 +102,19 @@ this route accepts no hard output-token limit.
 
 ### On a phone, from your own machine
 
-This is for a shizue running on your own computer only; the hosted service has
-no phone pairing. Put a tunnel in front of the web app and list its origin in
-`REMOTE_ORIGINS` (`apps/plot/.env`), which `scripts/dev.sh` passes to `next dev`
-as well. The API refuses the setting unless `BETTER_AUTH_URL` is a loopback
-origin, and without it there is no pairing at all. Tailscale Serve keeps the
-tunnel inside your tailnet and needs the Tailscale app on the phone:
-
-```sh
-tailscale serve --https=8444 --bg http://127.0.0.1:13000
-# REMOTE_ORIGINS=https://<machine>.<tailnet>.ts.net:8444
-```
-
-Pick a port your other `tailscale serve` entries do not use (`tailscale serve
-status`). Plain LAN addresses (`http://192.168.x.x`) are not supported: without
-HTTPS the browser withholds `crypto.subtle`, `crypto.randomUUID` and the
-clipboard, which chats use.
+This is for a shizue running on your own computer only (`BETTER_AUTH_URL` on
+loopback); the hosted service has none of it. Open **Settings → Connect a phone**
+and press **Open phone access**: the API opens a tunnel to the web app itself and
+shows a QR code, as PocketRisu's remote access does. It uses Tailscale Serve when
+this computer is signed in to a tailnet — a fixed address only your devices
+reach, with the Tailscale app on the phone, on a port your other `tailscale
+serve` entries do not use — and otherwise a Cloudflare Quick Tunnel when
+`cloudflared` is installed: no app on the phone, but a public address that
+changes each time. Install one of them first (`brew install tailscale` or
+`brew install cloudflared`); **Close access** turns it off. A tunnel you run
+yourself can be listed in `REMOTE_ORIGINS` (`apps/plot/.env`) instead. Plain LAN
+addresses (`http://192.168.x.x`) are not supported: without HTTPS the browser
+withholds `crypto.subtle`, `crypto.randomUUID` and the clipboard, which chats use.
 
 Phone browsers run no extension, so the phone never signs in with ChatGPT
 itself. Sign in on the computer, open **Settings → Connect a phone** and scan the

@@ -432,7 +432,7 @@ export interface ScriptFetchOptions extends Omit<GuardOptions, 'refuse' | 'signa
   /** Where the readers' windows are counted (`rate_limits`), shared by every instance. */
   db: Db;
   /** This app's own origins — the web app, and the API's when it has one of its own — refused as RisuAI refuses its. */
-  ownOrigins?: readonly string[];
+  ownOrigins?: readonly string[] | (() => readonly string[]);
   /** The windows' clock; the tests drive it. */
   now?: () => number;
   maxInFlight?: number;
@@ -444,8 +444,10 @@ const sameHost = (hostname: string): string => hostname.replace(/\.$/, '');
 export function createScriptFetch(options: ScriptFetchOptions): ScriptFetch {
   const now = options.now ?? Date.now;
   const maxInFlight = options.maxInFlight ?? SCRIPT_FETCH_MAX_IN_FLIGHT;
-  const ownHosts = new Set((options.ownOrigins ?? []).map((origin) => sameHost(new URL(origin).hostname)));
-  const ours = (url: URL): boolean => ownHosts.has(sameHost(url.hostname));
+  // Read each time: a phone's tunnel to this machine comes and goes (`tunnel.ts`).
+  const ownOrigins = typeof options.ownOrigins === 'function' ? options.ownOrigins : () => options.ownOrigins as readonly string[] | undefined ?? [];
+  const ours = (url: URL): boolean =>
+    ownOrigins().some((origin) => sameHost(new URL(origin).hostname) === sameHost(url.hostname));
   /** A redirect may not go where the first address could not. */
   const refuse = (url: URL): boolean => BANNED_PREFIXES.some((prefix) => url.href.startsWith(prefix)) || ours(url);
   /** Requests this process has open: a resource guard of its own, not part of RisuAI's limit. */

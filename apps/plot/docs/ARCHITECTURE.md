@@ -81,7 +81,7 @@ S3_BUCKET / S3_REGION / S3_ENDPOINT                        # 미디어는 STORAG
 S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY                    # 둘 다 비면 SDK 자격증명 체인
 S3_FORCE_PATH_STYLE=true         # 로컬 RustFS 필수, AWS 는 false
 CHATGPT_CALLBACK_PORT=47801      # OpenAI 루프백 콜백 포트. 확장 규칙과 오리진마다 짝 — plot.shizue.net·localhost:13000은 생략하면 Shizue 포트 (§4.1)
-REMOTE_ORIGINS=                  # 로컬 실행 전용. 같은 웹 앱의 다른 오리진, 쉼표로 — 이 기기로 가는 터널(휴대폰용). 쓰기를 BETTER_AUTH_URL처럼 받되 로그인은 BETTER_AUTH_URL로만. BETTER_AUTH_URL이 루프백이 아니면 부팅 거절 (§4.1 기기 연결)
+REMOTE_ORIGINS=                  # 로컬 실행 전용. 독자가 손으로 띄운 터널의 오리진, 쉼표로 — 설정 화면의 버튼이 여는 터널은 적지 않아도 된다. 쓰기를 BETTER_AUTH_URL처럼 받되 로그인은 BETTER_AUTH_URL로만. BETTER_AUTH_URL이 루프백이 아니면 부팅 거절 (§4.1 기기 연결)
 EMBEDDER_ROUTING=single          # 플롯의 임베딩 모델을 고르는 법(§7.3): single(기본 — EMBEDDER_MODEL 하나, 기본 KURE-v1) | by-language(ko는 KURE-v1, 나머지는 bge-m3)
 EMBEDDER_MODEL=KURE-v1           # single일 때 모든 플롯의 모델 — `embedder.ts`의 `EMBEDDING_MODELS` 키. by-language에선 읽지 않는다
 EMBEDDER_CACHE_DIR=./data/embedder  # 그 가중치를 둘 곳(리포 루트 기준 resolve). `embedder:fetch`가 채우고, 서버는 여기서만 읽는다
@@ -112,7 +112,7 @@ LORE_ALIASES=off                 # 다른 언어 작품의 로어 한국어 별�
 웹과 API는 여러 사용자가 접속하는 서비스로 돈다. API는 `API_HOST`에 바인딩하고, `originGuard`가
 변경 요청의 Origin을 `BETTER_AUTH_URL`과 대조하며(CSRF), Origin이 실린 요청은 그 오리진만,
 Next rewrite가 넘긴 요청은 `x-forwarded-host`가 웹 호스트일 때만 받는다(DNS 리바인딩).
-`REMOTE_ORIGINS`에 적은 오리진(이 기기로 가는 터널 — 아래 기기 연결)도 같은 앱으로 쳐서 웹 오리진과 똑같이 받는다.
+이 기기로 가는 터널(아래 기기 연결) — 설정 화면이 연 것과 `REMOTE_ORIGINS`에 적은 것 — 의 오리진도 같은 앱으로 쳐서 웹 오리진과 똑같이 받는다. 터널은 API가 도는 중에 열리고 닫히므로 요청마다 다시 읽는다.
 목록은 오리진 그대로 대조하므로 같은 호스트라도 스킴이나 포트가 다르면 거절한다. 카드 스크립트의 `request`와
 임포트도 그 오리진들을 자기 오리진으로 보고 가지 않는다.
 
@@ -188,11 +188,37 @@ ping을 보내 `features: ['plotSignIn']`이 담긴 답이 오면 로그인 버�
    등록은 남기며, 그 사용자의 세션을 모두 끝낸다 — 연결한 기기의 세션도. 연결한 기기(아래)에서 누른 로그아웃은
    두 라우트 모두 그 기기의 세션 하나만 끝내고 토큰과 다른 세션은 그대로 둔다(`revocationPending: false`).
 
-**기기 연결**(`routes/devices.ts`)은 **로컬 실행 전용**이다 — 독자가 자기 컴퓨터에 띄운 shizue를 터널로
+**기기 연결**(`routes/devices.ts`, `tunnel.ts`)은 **로컬 실행 전용**이다 — 독자가 자기 컴퓨터에 띄운 shizue를 터널로
 휴대폰에서 여는 경우이고, 서비스로 서버에 띄운 shizue(호스팅판)에는 없다(소유자 결정, 2026-10-17). 그래서
-`REMOTE_ORIGINS`가 있을 때만 존재한다: 없으면 `/api/devices/*`는 404이고 웹은 설정 카드·로그인 안내·`/pair`를
-그리지 않으며, `BETTER_AUTH_URL`이 루프백(`localhost`·`127.0.0.1`·`[::1]`) 오리진이 아니면 API가 `REMOTE_ORIGINS`를
-부팅 때 거절한다. 휴대폰은 ChatGPT 로그인을 끝내지 못한다 — 콜백은 브라우저가 도는 기기의 `127.0.0.1`이고,
+`BETTER_AUTH_URL`이 루프백(`localhost`·`127.0.0.1`·`[::1]`) 오리진일 때만 존재한다 — 두 겹으로: API는 그때만 터널
+관리자(`createPhoneAccess`, 루프백이 아니면 만들기를 거절하고 열 때 다시 확인한다)를 만들고 없으면
+`/api/devices/*`가 404이며, 웹은 빌드 때 같은 변수로 정해(`next.config.ts`의 `NEXT_PUBLIC_DEVICE_PAIRING` — 변수가 없으면 로컬이 아니다. `scripts/dev.sh`는
+늘 넣고, 브라우저 스위트의 웹은 넣지 않아 호스팅판 화면을 본다) 아니면 설정 카드·로그인 안내·`/pair`를 그리지 않는다. `BETTER_AUTH_URL`이 루프백이 아니면 API가 `REMOTE_ORIGINS`도
+부팅 때 거절한다.
+
+**터널은 설정 화면이 연다**(2026-10-17, PocketRisu의 "원격 접속 열기"처럼). 카드의 "휴대폰 연결 열기"가
+`POST /api/devices/tunnel`로 터널을 열고 곧바로 연결 코드를 만들어 QR로 보인다 — 휴대폰은 그 QR 하나로 주소를
+열고 이 계정에 붙는다. `GET /api/devices`는 `{tunnel: {kind, origin} | null, available: {tailscale, cloudflare},
+origins}`(열린 터널, 버튼이 열 터널, 휴대폰이 쓸 수 있는 주소 전부)이고, `DELETE /api/devices/tunnel`이 닫는다.
+고르는 순서(소유자 결정):
+- **Tailscale Serve** — 이 기기가 tailnet에 로그인해 있으면(`tailscale status --json`의 `BackendState`가
+  `Running`). 고정 주소(`https://<기기>.<tailnet>.ts.net:<포트>`)이고 같은 tailnet의 기기만 들어오며, 휴대폰에도
+  Tailscale 앱이 있어야 한다. 포트는 `TAILSCALE_PORTS`(8444부터) 가운데 `tailscale serve status --json`의 `TCP`에
+  없는 첫 것이라 독자의 다른 서비스(흔히 443·8443)를 건드리지 않고, `tailscale serve --bg --https=<포트>
+  http://127.0.0.1:<웹 포트>` 뒤 상태 JSON으로 실제로 걸렸는지 확인한다. 닫기는 그 포트만 `off`다(`reset`이 아니다).
+  Serve는 API보다 오래 남으므로, 웹 포트로 가는 항목이 이미 있으면 그 포트가 이 앱의 터널이다 — API를 다시 띄워도
+  부팅 때 찾아 같은 주소를 다시 믿는다. 2026-10-17 이 Mac에서 관리자 암호 없이 8444에 열렸고, SSE가 이벤트마다
+  버퍼 없이 지나갔다.
+- **Cloudflare Quick Tunnel** — Tailscale이 없고 `cloudflared`가 있으면. API가 `cloudflared tunnel --no-autoupdate
+  --url http://127.0.0.1:<웹 포트>`를 띄우고 출력에서 `https://<단어>.trycloudflare.com`을 30초 안에 찾는다
+  (`api.trycloudflare.com`은 주소가 아니라 실패 메시지 속의 API다). 휴대폰에 앱이 필요 없지만 주소는 공개이고 열 때마다
+  바뀌며, API가 끝나면 함께 닫는다. 2026-10-17 이 Mac의 망은 `api.trycloudflare.com`과의 연결을 끊어 터널 생성
+  자체가 막혔으므로 이 길은 단위 테스트로만 확인했다.
+- 둘 다 없으면 카드가 Tailscale(권장)이나 cloudflared를 설치하라고 말하고 버튼을 잠근다. 설치는 해 주지 않는다.
+보호 장치는 PocketRisu의 비밀번호가 아니라 연결 코드다 — 휴대폰은 5분짜리 일회용 코드로만 세션을 얻으므로, 공개
+주소로도 남이 볼 수 있는 것은 로그인 없이 보이는 페이지뿐이다. `next dev`가 다른 호스트의 `/_next/*`를 받도록
+루프백일 때 `allowedDevOrigins`에 `**.ts.net`·`*.trycloudflare.com`을 넣는다. 열린 터널의 오리진은
+`originGuard`와 카드 스크립트·임포트의 자기 오리진 목록이 요청마다 읽는다(`remoteOriginsOf`). 휴대폰은 ChatGPT 로그인을 끝내지 못한다 — 콜백은 브라우저가 도는 기기의 `127.0.0.1`이고,
 그것을 바꿔 주는 확장이 휴대폰 브라우저에는 없다. 그래서 로그인한 브라우저가 휴대폰에 세션을 하나 더 건넨다. 토큰은 서버를 떠나지 않고 `ext_agent_host_id`도 그대로다 — 브라우저가 하나 더 붙을 뿐 OpenAI가
 말하는 호스트(도구가 도는 환경)가 늘지 않으므로, 자격 증명을 옮기는 자체 호스팅 VM 절차와는 다르다.
 
@@ -206,10 +232,8 @@ ping을 보내 `features: ['plotSignIn']`이 담긴 답이 오면 로그인 버�
    만료되거나 이미 쓴 코드는 400 `pairing_invalid`), 그 사용자에게 세션을 하나 더 만들어 그 오리진에 쿠키를
    심는다(204). 이 세션의 `session.id`는 `paired:`로 시작하고, `/api/auth/get-session`이 `paired: true`를 싣는다.
 
-터널은 코드가 띄우지 않는다. 소유자가 띄우고(예: `tailscale serve --https=<port> --bg http://127.0.0.1:13000`)
-그 주소를 `REMOTE_ORIGINS`에 적는다. `next.config.ts`가 같은 변수를 읽어 그 호스트를 `allowedDevOrigins`에 넣고
-(`next dev`는 `/_next/*`를 다른 호스트에서 받지 않는다) 웹의 `NEXT_PUBLIC_DEVICE_PAIRING`(`lib/devicePairing.ts`)을
-켜며, `scripts/dev.sh`가 `apps/plot/.env`의 그 줄을 Next에도 넘긴다(API는 `.env`를 직접 읽는다). 평문 LAN 주소는 권하지 않는다 — 보안 컨텍스트가 아니면 첨부의
+다른 터널을 손으로 띄웠다면 그 주소를 `REMOTE_ORIGINS`에 적는다 — 연결 코드의 주소 목록에 함께 실리고, `next.config.ts`가
+그 호스트를 `allowedDevOrigins`에 더하며, `scripts/dev.sh`가 `apps/plot/.env`의 그 줄을 Next에도 넘긴다(API는 `.env`를 직접 읽는다). 평문 LAN 주소는 권하지 않는다 — 보안 컨텍스트가 아니면 첨부의
 `crypto.randomUUID`, `crypto.subtle`, 클립보드가 없다.
 
 예전 로컬 설치의 내부 소유자(`account`의 `local-workspace/default`)는 첫 ChatGPT 로그인이 한 번 넘겨받는다 —

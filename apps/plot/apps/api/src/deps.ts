@@ -1,3 +1,4 @@
+import type { PhoneAccess } from './tunnel.js';
 import type { Db } from '@shizue/db';
 import type { getAdapter } from '@shizue/llm';
 import type { ChatGPTAccounts } from './chatgptAccounts.js';
@@ -42,6 +43,12 @@ export interface AppDeps {
   webOrigin?: string;
   /** Other origins the web app is reached at (`REMOTE_ORIGINS`), trusted as `webOrigin` is. */
   remoteOrigins?: string[];
+  /**
+   * The tunnel a phone opens this machine's shizue through, from the settings
+   * page (`tunnel.ts`). Only when the API signs in on loopback: the hosted app
+   * has none, and `/api/devices` answers 404 there.
+   */
+  phoneAccess?: PhoneAccess;
   auth: AppAuth;
   /** Sign in with ChatGPT and the sessions it opens; absent in tests that do not sign in. */
   chatgpt?: { accounts: ChatGPTAccounts; sessions: SessionStore };

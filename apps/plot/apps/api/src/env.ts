@@ -74,7 +74,7 @@ function readCallbackPort(env: NodeJS.ProcessEnv, authUrl: string): number {
 }
 
 /** Whether a web origin is this machine's own — a shizue the reader runs, not a deployment. */
-const isLoopback = (origin: string): boolean => ['localhost', '127.0.0.1', '[::1]'].includes(new URL(origin).hostname);
+export const isLoopback = (origin: string): boolean => ['localhost', '127.0.0.1', '[::1]'].includes(new URL(origin).hostname);
 
 /** Whether `value` is an http(s) origin and nothing more — no path, no user. */
 function isWebOrigin(value: string): boolean {

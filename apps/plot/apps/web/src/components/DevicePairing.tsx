@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useLocale, useTranslations } from 'next-intl';
 import { encode } from 'uqr';
 import { useRouter } from '@/i18n/navigation';
-import { apiSend } from '@/lib/api';
+import { apiGet, apiSend } from '@/lib/api';
 import { refreshSession, useSession } from '@/lib/authClient';
 import { DEVICE_PAIRING } from '@/lib/devicePairing';
 import { useDocumentTitle } from '@/lib/useDocumentTitle';
@@ -13,6 +13,13 @@ import { Button, ErrorText } from './ui';
 
 /** `POST /api/devices/pair`: a one-time code and the origins a phone can open it at. */
 interface Pairing { code: string; expiresAt: string; origins: string[] }
+
+/** `GET /api/devices`: the open tunnel, which one the button would open, and every address a phone can use. */
+interface PhoneAccess {
+  tunnel: { kind: 'tailscale' | 'cloudflare'; origin: string } | null;
+  available: { tailscale: boolean; cloudflare: boolean };
+  origins: string[];
+}
 
 /** Where a phone lands with the code. It rides in the fragment, which never reaches a server or a proxy's log. */
 const pairUrl = (origin: string, locale: string, code: string): string => `${origin}/${locale}/pair#${code}`;
@@ -24,10 +31,12 @@ const remaining = (at: number, now: number): string => {
 };
 
 /**
- * The settings card that connects a phone to a shizue running on this machine,
- * through a tunnel (`DEVICE_PAIRING`). Phones cannot finish Sign in with ChatGPT
- * (no extension runs there), so this browser asks for a one-time code and shows
- * it as a QR code; the phone opens it and joins this account.
+ * The settings card that opens a shizue running on this machine on a phone
+ * (`DEVICE_PAIRING`), as PocketRisu's remote access does: one button opens the
+ * tunnel (Tailscale Serve, else a Cloudflare Quick Tunnel — the API's `tunnel.ts`)
+ * and shows a QR code. Phones cannot finish Sign in with ChatGPT (no extension runs
+ * there), so the code also carries a one-time pairing code; the phone opens the
+ * address and joins this account.
  */
 export function DevicePairing() {
   return DEVICE_PAIRING ? <PairingCard /> : null;
@@ -38,6 +47,7 @@ function PairingCard() {
   const locale = useLocale();
   const toMessage = useErrorMessage();
   const { data: session } = useSession();
+  const [access, setAccess] = useState<PhoneAccess | null>(null);
   const [pairing, setPairing] = useState<Pairing | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [busy, setBusy] = useState(false);
@@ -51,11 +61,33 @@ function PairingCard() {
     return () => clearInterval(timer);
   }, [pairing]);
 
+  useEffect(() => {
+    apiGet<PhoneAccess>('/api/devices').then(setAccess, (e: unknown) => setError(toMessage(e)));
+  }, [toMessage]);
+
+  const reachable = (access?.origins.length ?? 0) > 0;
+  const tool = access?.available.tailscale ? 'tailscale' : access?.available.cloudflare ? 'cloudflare' : null;
+
+  async function pair(): Promise<void> {
+    setPairing(await apiSend<Pairing>('POST', '/api/devices/pair', undefined, AbortSignal.timeout(10_000)));
+    setNow(Date.now());
+  }
+
+  /** Opens the tunnel when none is open — Cloudflare takes up to half a minute — then makes the code. */
   async function start(): Promise<void> {
     setBusy(true); setError('');
     try {
-      setPairing(await apiSend<Pairing>('POST', '/api/devices/pair', undefined, AbortSignal.timeout(10_000)));
-      setNow(Date.now());
+      if (!reachable) setAccess(await apiSend<PhoneAccess>('POST', '/api/devices/tunnel', undefined, AbortSignal.timeout(45_000)));
+      await pair();
+    } catch (e) { setError(toMessage(e)); }
+    finally { setBusy(false); }
+  }
+
+  async function close(): Promise<void> {
+    setBusy(true); setError('');
+    try {
+      setAccess(await apiSend<PhoneAccess>('DELETE', '/api/devices/tunnel', undefined, AbortSignal.timeout(20_000)));
+      setPairing(null);
     } catch (e) { setError(toMessage(e)); }
     finally { setBusy(false); }
   }
@@ -65,6 +97,14 @@ function PairingCard() {
       <h2 className="title2">{t('title')}</h2>
       <p className="text-sm leading-relaxed text-muted">{t('description')}</p>
       {session?.paired ? <p className="rounded-xl border border-line bg-mint-soft/40 px-3 py-3 text-sm">{t('pairedHere')}</p> : null}
+      {access?.tunnel ? (
+        <p className="text-sm">
+          {t(access.tunnel.kind === 'tailscale' ? 'openTailscale' : 'openCloudflare')}{' '}
+          <span className="break-all text-muted">{access.tunnel.origin}</span>
+        </p>
+      ) : access && !reachable ? (
+        <p className="text-sm leading-relaxed text-muted">{t(tool === 'tailscale' ? 'viaTailscale' : tool === 'cloudflare' ? 'viaCloudflare' : 'noTool')}</p>
+      ) : null}
       {live ? (
         <div className="space-y-4">
           {pairing.origins.map((origin) => (
@@ -76,7 +116,12 @@ function PairingCard() {
           <p role="status" className="text-sm text-muted">{t('expiresIn', { time: remaining(expiresAt, now) })}</p>
         </div>
       ) : pairing ? <p role="status" className="text-sm text-muted">{t('expired')}</p> : null}
-      <Button className="w-full max-w-sm" busy={busy} onClick={() => void start()}>{t(pairing ? 'again' : 'start')}</Button>
+      <div className="flex flex-wrap gap-2">
+        <Button className="w-full max-w-sm" busy={busy} disabled={!access || (!reachable && tool === null)} onClick={() => void start()}>
+          {t(!reachable ? 'open' : pairing ? 'again' : 'start')}
+        </Button>
+        {access?.tunnel ? <Button variant="secondary" busy={busy} onClick={() => void close()}>{t('close')}</Button> : null}
+      </div>
       <ErrorText>{error}</ErrorText>
     </section>
   );
