@@ -521,9 +521,13 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const stopping = useRef<Promise<void> | null>(null);
   // The message list scrolls, not the document: the reader's own scroll is what
   // decides whether new text follows them down, and the library gives that up the
-  // moment they move away from the bottom.
+  // moment they move away from the bottom. Only a reply being written glides down
+  // after its text; anything else that grows the list — a picture loading late, a
+  // card's panel opening — keeps the bottom where it was in the same frame, as
+  // RisuAI's bottom-anchored list does, instead of sliding the page up under it.
   const { scrollRef, contentRef, isAtBottom, scrollToBottom, state: stick } = useStickToBottom({
     initial: 'instant',
+    ...(mode === null ? { resize: 'instant' as const } : {}),
   });
   /** A component turn that was accepted and has not finished yet. */
   const componentTurnRef = useRef(false);
