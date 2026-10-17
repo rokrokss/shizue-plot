@@ -75,6 +75,23 @@ export function separateActions(text: string): string {
   return out.join('\n');
 }
 
+/** An asterisk that opens an action still being written: nothing yet after it, or a word and no `*` to close it. */
+const OPEN_ACTION = /(?<![*\\])\*(?:[^\s*][^*]*)?$/;
+
+/**
+ * `separateActions` for a stretch still being written (2026-10-18 owner
+ * decision): the same paragraphs, and an action whose closing `*` has not come
+ * yet already stands on its own, so the words before it do not jump down a
+ * paragraph when it closes. An action cannot run past its line, so only the
+ * last line can hold one.
+ */
+export function separateActionsLive(text: string): string {
+  const lastLine = text.slice(text.lastIndexOf('\n') + 1);
+  if (!OPEN_ACTION.test(lastLine.replace(ACTION, ''))) return separateActions(text);
+  // Closed for the moment, after a letter so a bare `*` closes too, and opened again.
+  return separateActions(`${text.trimEnd()}x*`).slice(0, -2);
+}
+
 /** One action and nothing else; not global, so it keeps no place between calls as `ACTION` would. */
 const WHOLE_ACTION = new RegExp(`^${ACTION.source}$`);
 

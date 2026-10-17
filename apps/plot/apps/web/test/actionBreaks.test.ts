@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { separateActions } from '../src/lib/actionBreaks';
+import { separateActions, separateActionsLive } from '../src/lib/actionBreaks';
 
 describe('separateActions', () => {
   it('parts an action from the words on its line, as Zeta draws a reply', () => {
@@ -38,5 +38,30 @@ describe('separateActions', () => {
     ]) {
       expect(separateActions(text), text).toBe(text);
     }
+  });
+});
+
+describe('separateActionsLive', () => {
+  it('parts actions and words while the reply is written, as it will once done', () => {
+    const done = '*컨트롤러를 고쳐 쥔다.* 좋아. 네가 먼저 골랐으니까. *화면을 살핀다.* 난 이거.';
+    // Every prefix the stream passes through ends up where the finished text puts it.
+    for (let end = 1; end <= done.length; end += 1) {
+      const live = separateActionsLive(done.slice(0, end));
+      expect(separateActions(done).startsWith(live.trimEnd()), done.slice(0, end)).toBe(true);
+    }
+  });
+
+  it('stands an action on its own from its first word, before its `*` closes', () => {
+    expect(separateActionsLive('좋아. 네가 먼저 골랐으니까. *화면을 살')).toBe('좋아. 네가 먼저 골랐으니까.\n\n*화면을 살');
+    expect(separateActionsLive('*컨트롤러를 고쳐 쥔다.* 좋')).toBe('*컨트롤러를 고쳐 쥔다.*\n\n좋');
+    expect(separateActionsLive('좋아. *')).toBe('좋아.\n\n*');
+    // A second `*` makes it bold, and a space after it a letter: back on the line.
+    expect(separateActionsLive('좋아. **굵')).toBe('좋아. **굵');
+    expect(separateActionsLive('5 * 3')).toBe('5 * 3');
+  });
+
+  it('leaves an asterisk a finished line never closed as a letter', () => {
+    expect(separateActionsLive('안 닫힌 *별표\n')).toBe('안 닫힌 *별표\n');
+    expect(separateActionsLive('리안: *웃으며 안')).toBe('리안: *웃으며 안');
   });
 });

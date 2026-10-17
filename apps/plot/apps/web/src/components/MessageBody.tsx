@@ -33,7 +33,7 @@ import {
   type DisplayPlan,
   type Segment,
 } from '@/lib/displayScripts';
-import { separateActions } from '@/lib/actionBreaks';
+import { separateActions, separateActionsLive } from '@/lib/actionBreaks';
 import { splitBlocks } from '@/lib/markdown/blocks';
 import {
   markupChunks,
@@ -146,8 +146,10 @@ const components: Components = {
  *
  * `live` is a block of the stretch still being written, drawn as Zeta draws it
  * (2026-10-17 owner decision): the text as written, its `*` and all, until the
- * stretch is done and is drawn as markdown at once. One paragraph per block, so
- * the spacing stays where it is when that happens. The `<` and `>` the CBS
+ * stretch is done and is drawn as markdown at once. One paragraph per block, a
+ * blank line in it (a bubble's action parted from its words) one chat line high
+ * as the gap between paragraphs is, so the spacing stays where it is when that
+ * happens. The `<` and `>` the CBS
  * unescape leaves as entities for the markdown are read back here.
  */
 const MarkdownBlock = memo(function MarkdownBlock({
@@ -301,10 +303,10 @@ function RunItems({
         />
       ) : (
         // A character's actions and words stand as paragraphs of their own, as Zeta's
-        // do, once the stretch is drawn as markdown; while it is written, as written.
+        // do, while the stretch is written as well as once it is drawn as markdown.
         <MarkdownBlock
           key={nth}
-          content={box === 'bubble' && !item.live ? separateActions(item.text) : item.text}
+          content={box === 'bubble' ? (item.live ? separateActionsLive : separateActions)(item.text) : item.text}
           live={item.live}
         />
       ),
