@@ -71,6 +71,7 @@ import type { AppDeps, AppEnv, OpenGeneration, Tx } from './deps.js';
 import { invalidateMemoryForEdit, noteRequestOverhead, scheduleMemoryUpdate } from './memory.js';
 import { countGeneration, type GenerationResult } from './metrics.js';
 import { runPromptScriptJob } from './regexWorker.js';
+import { ROLEPLAY_JAILBREAK_TOKENS, withRoleplayJailbreak } from './roleplayJailbreak.js';
 import { withPromptScripts } from './sentHistory.js';
 import { scheduleRelationshipUpdate } from './relationship.js';
 import { regexStoredText } from './storedRegex.js';
@@ -535,7 +536,8 @@ async function withoutUnseeableImages(history: HistoryMessage[], model: string, 
  * (`listenerEdits`). The listeners' state's globals are put back from the
  * reader's last generation with that card's Lua, in whichever of their chats
  * and works, and a generation keeps them for the next (`LuaStateStore`,
- * `luaStateKey`); the inspector reads them and keeps nothing.
+ * `luaStateKey`); the inspector reads them and keeps nothing. Both paths add
+ * the service's always-on roleplay instructions after every card-owned edit.
  */
 async function buildRequestMessages(
   plan: GenerationPlan,
@@ -544,10 +546,29 @@ async function buildRequestMessages(
   account?: ChatGPTAccount,
   report = false,
 ): Promise<BuiltRequest> {
+  // Always-on service instructions live outside the card's editable request.
+  // Reserve their space before assembly and Lua's refit, then add them once
+  // after both request editors, even for a utility bot or a replaced system.
+  const prompt = await buildEditableRequest(plan, deps, reader, account, report);
+  const request = withRoleplayJailbreak(
+    prompt,
+    plan.contextBudget,
+    plan.target.kind === 'continue' || Boolean(tavernBiasOf(plan).trim()),
+  );
+  // How much history fits beside the rest is what memory summarizes against;
+  // include the always-on instructions. An inspector's look changes nothing.
+  if (!report && request.fixedTokens !== undefined) noteRequestOverhead(plan.chatId, request.fixedTokens);
+  return request;
+}
+
+async function buildEditableRequest(
+  plan: GenerationPlan,
+  deps: AppDeps,
+  reader: string,
+  account?: ChatGPTAccount,
+  report = false,
+): Promise<BuiltRequest> {
   const prompt = await assembleRequest(plan, deps, account, report);
-  // How much history fits beside the rest of this request is what the memory
-  // summarizes against (§7.3); the inspector's look changes nothing.
-  if (!report && prompt.fixedTokens !== undefined) noteRequestOverhead(plan.chatId, prompt.fixedTokens);
   const lua = requestLuaInput(plan);
   const triggers = requestTriggerInput(plan);
   if (!lua && !triggers) return prompt;
@@ -574,7 +595,7 @@ async function buildRequestMessages(
         // RisuAI fits the request to the context again once its listeners left
         // it, before the request triggers see it (`refitRequest`) — after the
         // state is kept, as RisuAI's outlives a request it then refuses.
-        request = result.turns && refitRequest(result.turns, plan.contextBudget);
+        request = result.turns && refitRequest(result.turns, plan.contextBudget - ROLEPLAY_JAILBREAK_TOKENS);
       }
       if (triggers) {
         const input = { ...triggers, variables: applyVariableDelta(triggers.variables, listened.writes) };
@@ -965,9 +986,9 @@ async function assembleRequest(
     // its text rides along uncounted.
     trailingTurns: partial ? 1 : 0,
     ...(plan.speaker !== undefined ? { speaker: plan.speaker } : {}),
-    // The trailing instruction bypasses the assembler too, so its tokens are
-    // subtracted here; it is not a turn, so it does not shift depth lore.
-    contextBudget: plan.contextBudget - countTokens(partial) - countTokens(trailingSystem) - countTokens(languageLine),
+    // The trailing and always-on instructions bypass the assembler too, so
+    // reserve them here without shifting the history's depth-lore slots.
+    contextBudget: plan.contextBudget - countTokens(partial) - countTokens(trailingSystem) - countTokens(languageLine) - ROLEPLAY_JAILBREAK_TOKENS,
     report,
     ...(marksLore ? { markTavernLore: true } : {}),
   });

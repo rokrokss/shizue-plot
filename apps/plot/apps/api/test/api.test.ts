@@ -167,6 +167,7 @@ import { acquireLease, releaseLease, renewLease as renewHeldLease, withLease } f
 import { MAX_ASSET_NAME_LENGTH, MAX_CARD_IMPORT_BYTES } from '../src/routes/plots.js';
 import { hitRateLimit, RATE_LIMITS } from '../src/rateLimit.js';
 import { runRequestLua } from '../src/requestLua.js';
+import { ROLEPLAY_JAILBREAK_MAIN, ROLEPLAY_JAILBREAK_POST_HISTORY, ROLEPLAY_JAILBREAK_TOKENS } from '../src/roleplayJailbreak.js';
 import { runRequestTriggers } from '../src/requestTriggers.js';
 import { createScriptFetch, type HopResponse, type Transport } from '../src/scriptFetch.js';
 import { MAX_GLOBAL_VARIABLE_KEYS } from '../src/scriptState.js';
@@ -3854,6 +3855,7 @@ describe('chats', () => {
       '아직 안 가셨군요, 유저.',
       '안녕하세요',
       expect.any(String), // post-history
+      ROLEPLAY_JAILBREAK_POST_HISTORY,
     ]);
     expect(prompts.at(-1)![0]!.role).toBe('system');
 
@@ -4010,6 +4012,7 @@ describe('chats', () => {
       'DEPTH LORE',
       '이어서',
       expect.any(String), // post-history
+      ROLEPLAY_JAILBREAK_POST_HISTORY,
     ]);
 
     const before = await readJson(await request(cookie, `/api/chats/${chatId}`));
@@ -4020,8 +4023,9 @@ describe('chats', () => {
     // history's end.
     const continued = prompts.at(-1)!;
     expect(continued.at(-1)).toEqual({ role: 'assistant', content: before.path[2].content });
-    expect(continued.at(-3)).toEqual({ role: 'system', content: 'DEPTH LORE' });
-    expect(continued.at(-4)).toEqual({ role: 'user', content: '이어서' });
+    expect(continued.at(-2)).toEqual({ role: 'system', content: ROLEPLAY_JAILBREAK_POST_HISTORY });
+    expect(continued.at(-4)).toEqual({ role: 'system', content: 'DEPTH LORE' });
+    expect(continued.at(-5)).toEqual({ role: 'user', content: '이어서' });
   });
 
   /** A generation POST carrying the reader's time zone, the way the web client sends it. */
@@ -5135,11 +5139,10 @@ describe('chats', () => {
     const first = await readSse(await json(cookie, `/api/chats/${chatId}/auto`, 'POST', undefined, capturing));
     expect(first.at(-1)!.event).toBe('done');
 
-    const nudge = prompts.at(-1)!.messages.at(-1)!;
+    const nudge = prompts.at(-1)!.messages.at(-2)!;
     expect(nudge.role).toBe('system');
     expect(nudge.content).toContain('유저 개입 없이');
-    // {{user}} is expanded like anywhere else, and the instruction is the last thing
-    // the model reads.
+    // {{user}} is expanded like anywhere else, before the service's closing note.
     expect(nudge.content).toContain('유저의 반응이');
 
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
@@ -6161,7 +6164,7 @@ describe('custom UI', () => {
     expect(first.system).toContain('[현재 HP 40]');
     // The macro itself reaches the model untouched: it is the protocol the model
     // has to keep emitting.
-    expect(first.messages.at(-2)!.content).toBe('{{setvar::hp::40}} 다쳤다');
+    expect(first.messages.at(-3)!.content).toBe('{{setvar::hp::40}} 다쳤다');
     // getvar is a macro like any other, so it is expanded in the history too.
     expect(first.messages.some((message) => message.content === 'HP는 40')).toBe(true);
 
@@ -6991,7 +6994,7 @@ describe('chat attachments', () => {
 
     // The turn is split into parts, and the bytes travel inline: the serving
     // route is behind this reader's session, so a URL would be no use upstream.
-    const sent = prompts.at(-1)!.messages.at(-2)!;
+    const sent = prompts.at(-1)!.messages.at(-3)!;
     expect(sent.content).toEqual([
       { type: 'text', text: '이건 뭐야?' },
       { type: 'image', url: `data:image/gif;base64,${Buffer.from(gifOf(1)).toString('base64')}` },
@@ -6999,7 +7002,7 @@ describe('chat attachments', () => {
 
     // Regenerating the same turn shows the model the same thing.
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, seeing));
-    expect(prompts.at(-1)!.messages.at(-2)).toEqual(sent);
+    expect(prompts.at(-1)!.messages.at(-3)).toEqual(sent);
 
     // The next turn carries no image, and the previous turn's does not come
     // back with it — one turn's images are answered once.
@@ -7031,13 +7034,13 @@ describe('chat attachments', () => {
     const chatId = created.chat.id;
     await answerWithImages(cookie, chatId, '이건 뭐야?', [gifOf(1)], blind);
 
-    const sent = prompts.at(-1)!.messages.at(-2)!;
+    const sent = prompts.at(-1)!.messages.at(-3)!;
     expect(sent.content).toBe(`이건 뭐야?\n${IMAGE_ATTACHED_PLACEHOLDER}`);
     expect(reads).toBe(0);
 
     // And the same for the regenerate of a reply to it.
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, blind));
-    expect(prompts.at(-1)!.messages.at(-2)!.content).toBe(
+    expect(prompts.at(-1)!.messages.at(-3)!.content).toBe(
       `이건 뭐야?\n${IMAGE_ATTACHED_PLACEHOLDER}`,
     );
     expect(reads).toBe(0);
@@ -7571,6 +7574,40 @@ describe('hiding a message from the AI', () => {
 });
 
 describe('presets', () => {
+  it.each(PRESET_IDS)('keeps roleplay instructions on with %s even when the card replaces both preset slots', async (preset) => {
+    const cookie = await signUp(`jailbreak-${preset}@example.com`);
+    const plot = await createPlot(cookie, { intros: ['문 앞이다.'] });
+    await addCharacter(cookie, plot.id, {
+      card: { systemPrompt: '카드 전용 시스템', postHistoryInstructions: '카드 전용 마무리' },
+    });
+    const chatId = (await startChat(cookie, plot.id)).chat.id;
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { preset });
+    const { app: capturing, prompts } = capturingApp();
+    expect((await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing))).at(-1)!.event).toBe('done');
+    expect(prompts.at(-1)!.system).toContain(`${ROLEPLAY_JAILBREAK_MAIN}\n\n카드 전용 시스템`);
+    expect(prompts.at(-1)!.messages.slice(-2)).toEqual([
+      { role: 'system', content: expect.stringContaining('카드 전용 마무리') },
+      { role: 'system', content: ROLEPLAY_JAILBREAK_POST_HISTORY },
+    ]);
+  });
+
+  it('keeps roleplay instructions on for a utility bot and shows them once in the inspector', async () => {
+    const cookie = await signUp('jailbreak-utility@example.com');
+    const plot = await createPlot(cookie, { intros: ['문 앞이다.'] });
+    await addCharacter(cookie, plot.id, {
+      card: { description: 'UTILITY DESCRIPTION', extensions: { risuai: { utilityBot: true } } },
+    });
+    const chatId = (await startChat(cookie, plot.id)).chat.id;
+    const { app: capturing, prompts } = capturingApp();
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing));
+    expect(prompts.at(-1)!.system).toContain(ROLEPLAY_JAILBREAK_MAIN);
+    expect(prompts.at(-1)!.messages.at(-1)!.content).toBe(ROLEPLAY_JAILBREAK_POST_HISTORY);
+    const report = await readJson(await request(cookie, `/api/chats/${chatId}/inspect`));
+    expect(report.blocks.filter((b: { text: string }) => b.text === ROLEPLAY_JAILBREAK_MAIN)).toHaveLength(1);
+    expect(report.blocks.filter((b: { text: string }) => b.text === ROLEPLAY_JAILBREAK_POST_HISTORY)).toHaveLength(1);
+    expect(report.totals.contextBudget).toBe(DEFAULT_CONTEXT_BUDGET);
+  });
+
   it('lists the catalogue without a session', async () => {
     const res = await request(undefined, '/api/presets');
     expect(res.status).toBe(200);
@@ -7587,7 +7624,7 @@ describe('presets', () => {
     expect(state.chat.preset).toBe('standard');
     await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing));
     expect(prompts.at(-1)!.system).toContain('등장인물 전원을 연기하는 작가');
-    expect(prompts.at(-1)!.messages.at(-1)!.content).toContain('등장인물을 연기합니다');
+    expect(prompts.at(-1)!.messages.at(-2)!.content).toContain('등장인물을 연기합니다');
 
     const patched = await readJson(
       await json(cookie, `/api/chats/${chatId}`, 'PATCH', { preset: 'screenplay' }),
@@ -7600,7 +7637,7 @@ describe('presets', () => {
     expect(screenplay.system).toContain('각본가');
     expect(screenplay.system).not.toContain('등장인물 전원을 연기하는 작가');
     // The post-history reminder switches with it.
-    expect(screenplay.messages.at(-1)!.content).toContain('대사 2~5줄');
+    expect(screenplay.messages.at(-2)!.content).toContain('대사 2~5줄');
   });
 
   it('rejects an unknown preset without touching the chat', async () => {
@@ -7683,7 +7720,7 @@ describe('reader presets', () => {
     await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing));
     const sent = prompts.at(-1)!;
     expect(sent.system).toMatch(/등장인물 전원을 연기하는 작가[\s\S]*\n\n독자의 메인 추가/);
-    expect(contentText(sent.messages.at(-1)!.content)).toMatch(/등장인물을 연기합니다[\s\S]*\]\n\n독자의 글로벌 노트$/);
+    expect(contentText(sent.messages.at(-2)!.content)).toMatch(/등장인물을 연기합니다[\s\S]*\]\n\n독자의 글로벌 노트$/);
 
     // A pointer at someone else's row — which the API never writes — adds nothing.
     await db.update(chats).set({ readerPresetId: theirs.id }).where(eq(chats.id, chatId));
@@ -7741,7 +7778,7 @@ describe('reader presets', () => {
     const sent = prompts.at(-1)!;
     expect(sent.system).toContain('CREATOR-SYS');
     expect(sent.system).not.toContain('READER-MAIN');
-    expect(contentText(sent.messages.at(-1)!.content)).toContain('CREATOR-PH');
+    expect(contentText(sent.messages.at(-2)!.content)).toContain('CREATOR-PH');
     expect(JSON.stringify(sent.messages)).not.toContain('READER-NOTE');
 
     // Nothing the reader can read through presets carries the creator's text,
@@ -8004,26 +8041,27 @@ describe('memory', () => {
     expect(ask.messages[1]).toEqual({ role: 'system', content: DEFAULT_SUMMARIZATION_INSTRUCTION });
     expect(DEFAULT_SUMMARIZATION_INSTRUCTION.startsWith(HYPA_V3_SUMMARIZATION_PROMPT)).toBe(true);
     expect(transcriptOf(ask)).toContain(sent[0]!);
-    expect(transcriptOf(ask)).not.toContain(sent[3]!);
+    expect(transcriptOf(ask)).not.toContain(sent[2]!);
 
-    // One summary, of the oldest maxChatsPerSummary messages — the greeting first.
+    // The always-on instructions make this fixture overflow at three exchanges:
+    // summarize the first four messages, leaving the latest three for queries.
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
     expect('memory' in state.chat).toBe(false);
     const [summary, ...rest] = await summariesOf(cookie, chatId);
     expect(rest).toEqual([]);
     expect(summary).toMatchObject({ text: SUMMARY, important: false, applies: true });
-    expect(summary.messageIds).toEqual(state.path.slice(0, HYPA_V3_DEFAULTS.maxChatsPerSummary).map((m: any) => m.id));
-    expect(summary.messages.map((m: any) => m.position)).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(summary.messageIds).toEqual(state.path.slice(0, 4).map((m: any) => m.id));
+    expect(summary.messages.map((m: any) => m.position)).toEqual([0, 1, 2, 3]);
 
     // The next turn carries the summary instead of the messages it stands for.
     const next = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '그 다음은?' }, harness.app);
     expect((await readSse(next)).at(-1)!.event).toBe('done');
     const prompt = harness.prompts.at(-1)!;
     expect(undated(prompt.system)).toContain(`${MEMORY_HEADING}\n${SUMMARY}`);
-    for (const covered of sent.slice(0, 2)) {
-      expect(prompt.messages.some((message) => contentText(message.content).includes(covered))).toBe(false);
-    }
-    expect(contentText(prompt.messages.at(-2)!.content)).toBe('그 다음은?');
+    expect(prompt.messages.some((message) => contentText(message.content).includes(sent[0]!))).toBe(false);
+    // The second reader turn is covered; its assistant echo is still verbatim.
+    expect(prompt.messages.filter((message) => contentText(message.content).includes(sent[1]!))).toHaveLength(1);
+    expect(contentText(prompt.messages.at(-3)!.content)).toBe('그 다음은?');
   });
 
   it('strips image references from the summarization transcript', async () => {
@@ -8074,7 +8112,7 @@ describe('memory', () => {
     const next = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: statusTurn(99) }, harness.app);
     expect((await readSse(next)).at(-1)!.event).toBe('done');
     await harness.settle();
-    expect(contentText(harness.prompts.at(-1)!.messages.at(-2)!.content)).toContain('<panel>');
+    expect(contentText(harness.prompts.at(-1)!.messages.at(-3)!.content)).toContain('<panel>');
   });
 
   it('stores nothing the summarizer refused, leaves the stretch for later and stands back before asking again', async () => {
@@ -8083,7 +8121,7 @@ describe('memory', () => {
     const harness = memoryApp({
       summaryText: (call) => (call === 0 ? "I'm sorry, but I can't help with that." : SUMMARY),
     });
-    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000 } });
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { contextBudget: 8000, maxChatsPerSummary: 2 } });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const realNow = Date.now.bind(Date);
     let clock: { mockRestore: () => void } | undefined;
@@ -8232,7 +8270,7 @@ describe('memory', () => {
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
     const reply = state.path[2];
     expect(reply.role).toBe('assistant');
-    await json(cookie, `/api/messages/${reply.id}`, 'PATCH', { content: '고친 답변' });
+    await json(cookie, `/api/messages/${reply.id}`, 'PATCH', { content: `고친 답변 ${reply.content}` });
 
     blocked.open();
     await harness.settle();
@@ -14144,7 +14182,8 @@ describe('prompt host data', () => {
     const newest = texts.indexOf('들어간다');
     expect(texts[newest - 1]).toBe('S-INJ');
     expect(texts[newest + 1]).toBe('E-INJ');
-    expect(sent.at(-1)).toEqual({ role: 'system', text: 'P-INJ' });
+    expect(sent.at(-2)).toEqual({ role: 'system', text: 'P-INJ' });
+    expect(sent.at(-1)).toEqual({ role: 'system', text: ROLEPLAY_JAILBREAK_POST_HISTORY });
 
     // Never stored: the next request without any is a prompt without them.
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, app));
@@ -14691,7 +14730,7 @@ describe('SillyTavern regex on the stored text and on World Info', () => {
     const [, user, reply] = state.path;
     expect([user.content, user.bias, user.hiddenFromPrompt]).toEqual(['안녕 유저', ' 그녀는 웃으며', false]);
     // After everything else, the post-history block included: ST adds it last.
-    expect(turns[0]!.slice(-2)).toEqual([TAVERN_BIAS_NUDGE, '그녀는 웃으며']);
+    expect(turns[0]!.slice(-3)).toEqual([TAVERN_BIAS_NUDGE, ROLEPLAY_JAILBREAK_POST_HISTORY, '그녀는 웃으며']);
     expect(turns[0]).toContain('안녕 유저');
     // The model said the bias again: it comes off, as ST's reply never holds it.
     expect(reply.content).toBe(' 고개를 끄덕였다.');
@@ -14850,7 +14889,8 @@ describe('request triggers', () => {
     const plain = (await send(cookie, chatId, capturing)).at(-1)!;
     expect(plain.event).toBe('done');
     const sent = prompts.at(-1)!;
-    expect(sent.system).toBe('새 시스템 유저 안녕');
+    expect(sent.system).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\n새 시스템 유저 안녕`);
+    expect(sent.messages.at(-1)!.content).toBe(ROLEPLAY_JAILBREAK_POST_HISTORY);
     expect(sent.messages.filter((message) => message.role === 'user').map((message) => message.content)).toEqual([
       '바뀐 인사',
     ]);
@@ -14878,14 +14918,14 @@ describe('request triggers', () => {
     ]);
     const system = kept.system;
 
-    // A system string turned into a user turn leaves the system empty and opens the turns.
+    // The edited system becomes a user turn; the always-on prefix is added afterward.
     const opened = await requestChat('request-role-first@example.com', [
       { ...setRole('user'), index: '0', indexType: 'value', indent: 0 },
     ]);
     await send(opened.cookie, opened.chatId, capturing);
     const first = prompts.at(-1)!;
-    expect(first.system).toBe('');
-    expect(first.messages[0]).toEqual({ role: 'user', content: system });
+    expect(first.system).toBe(ROLEPLAY_JAILBREAK_MAIN);
+    expect(first.messages[0]).toEqual({ role: 'user', content: system.slice(`${ROLEPLAY_JAILBREAK_MAIN}\n\n`.length) });
     expect(first.messages[2]).toEqual({ role: 'assistant', content: '문 앞이다.' });
   });
 
@@ -14920,7 +14960,7 @@ describe('request triggers', () => {
     // The thread it took is replaced: the next card's edit goes through.
     const after = await requestChat('request-after@example.com', [setSystem('다음 시스템')]);
     await send(after.cookie, after.chatId, capturing);
-    expect(prompts.at(-1)!.system).toBe('다음 시스템');
+    expect(prompts.at(-1)!.system).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\n다음 시스템`);
   });
 
   it('keeps the images on the turn that names them — the reader’s, or a system turn it became', async () => {
@@ -14975,7 +15015,7 @@ describe('request triggers', () => {
     const scripted = await requestChat('request-some@example.com', [setSystem('바뀜')]);
     await send(scripted.cookie, scripted.chatId, counted);
     expect(runs).toBe(1);
-    expect(prompts.at(-1)!.system).toBe('바뀜');
+    expect(prompts.at(-1)!.system).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\n바뀜`);
   });
 
   it('reads the chat each mode generates on: a continue’s head is in it, a regenerate’s replaced reply is not', async () => {
@@ -14988,10 +15028,10 @@ describe('request triggers', () => {
       return prompts.at(-1)!.system;
     };
     // After the greeting: the user turn, then its reply.
-    expect(await last('messages')).toBe('0');
-    expect(await last('continue')).toBe('1');
-    expect(await last('regenerate')).toBe('0');
-    expect(await last('auto')).toBe('1');
+    expect(await last('messages')).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\n0`);
+    expect(await last('continue')).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\n1`);
+    expect(await last('regenerate')).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\n0`);
+    expect(await last('auto')).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\n1`);
   });
 
   it('runs over the turns a script sends the model as well, its first turn first', async () => {
@@ -15027,13 +15067,14 @@ describe('request triggers', () => {
     const report = await readJson(await request(cookie, `/api/chats/${chatId}/inspect`));
     const kinds = report.blocks.map((block: { kind: string }) => block.kind);
     // The rewritten system string stands in for every section it was made of.
-    expect(report.blocks[0]).toMatchObject({ kind: 'request', label: 'system', text: '새 시스템' });
-    expect(kinds).not.toContain('main');
+    expect(report.blocks[1]).toMatchObject({ kind: 'request', label: 'system', text: '새 시스템' });
+    expect(report.blocks[0]).toMatchObject({ kind: 'main', text: ROLEPLAY_JAILBREAK_MAIN });
+    expect(report.blocks.at(-1)).toMatchObject({ kind: 'post_history', text: ROLEPLAY_JAILBREAK_POST_HISTORY });
     // RisuAI's separator before the chat stands for nothing of ours; the greeting the triggers left alone
     // keeps its block; the user turn went as a system turn.
-    expect(report.blocks[1]).toMatchObject({ kind: 'request', label: 'system', text: '[Start a new chat]' });
-    expect(report.blocks[2]).toMatchObject({ kind: 'history', label: 'assistant', text: '문 앞이다.' });
-    expect(report.blocks[3]).toMatchObject({ kind: 'request', label: 'system', text: '안녕' });
+    expect(report.blocks[2]).toMatchObject({ kind: 'request', label: 'system', text: '[Start a new chat]' });
+    expect(report.blocks[3]).toMatchObject({ kind: 'history', label: 'assistant', text: '문 앞이다.' });
+    expect(report.blocks[4]).toMatchObject({ kind: 'request', label: 'system', text: '안녕' });
     expect(kinds).toContain('post_history');
   });
 });
@@ -15181,7 +15222,7 @@ describe('editRequest listeners', () => {
     // The child it took is gone; the next card's listener runs in a fresh one.
     const after = await luaChat('lua-after@example.com', [lua(listening(`req[1].content = '다음 시스템' return req`))]);
     await send(after.cookie, after.chatId, capturing);
-    expect(prompts.at(-1)!.system).toBe('다음 시스템');
+    expect(prompts.at(-1)!.system).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\n다음 시스템`);
   });
 
   it('fits a request the listener grew past the context again, as RisuAI’s token recheck does, and refuses one it cannot', async () => {
@@ -15213,6 +15254,7 @@ describe('editRequest listeners', () => {
     // With the numbers the reader's message names.
     const refused = events.at(-1)!.data;
     expect(refused).toMatchObject({ code: 'prompt_too_long', params: { tokens: expect.any(Number), limit: expect.any(Number) } });
+    expect(refused.params.limit).toBe(DEFAULT_CONTEXT_BUDGET - ROLEPLAY_JAILBREAK_TOKENS);
     expect(refused.params.tokens).toBeGreaterThan(refused.params.limit);
     expect(prompts.length).toBe(before);
     const stored = await db.select().from(messages).where(eq(messages.chatId, stuck.chatId));
@@ -15239,7 +15281,7 @@ describe('editRequest listeners', () => {
     const scripted = await luaChat('lua-some@example.com', [lua(listening(`req[1].content = '바뀜' return req`))]);
     await send(scripted.cookie, scripted.chatId, countedApp);
     expect(counted.runs()).toBe(1);
-    expect(prompts.at(-1)!.system).toBe('바뀜');
+    expect(prompts.at(-1)!.system).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\n바뀜`);
   });
 
   it('runs no Lua and sends the request unedited where the server cannot sandbox it', async () => {
@@ -15254,7 +15296,7 @@ describe('editRequest listeners', () => {
     // The same chat, where the sandbox holds.
     const { app: capturing, prompts } = capturingApp();
     await send(cookie, chatId, capturing, '다시');
-    expect(prompts.at(-1)!.system).toBe('바뀜');
+    expect(prompts.at(-1)!.system).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\n바뀜`);
   });
 
   it('gives a listener no model call and no request, as RisuAI gives it none', async () => {
@@ -15293,7 +15335,7 @@ describe('editRequest listeners', () => {
     });
     const chatId = (await startChat(cookie, plot.id)).chat.id;
     expect((await send(cookie, chatId, capturing)).at(-1)!.event).toBe('done');
-    expect(prompts.at(-1)!.system).toBe('false / expected argument of type string, got nil / nil');
+    expect(prompts.at(-1)!.system).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\nfalse / expected argument of type string, got nil / nil`);
     expect(models).toBe(1);
     expect(fetches).toBe(0);
   });
@@ -15316,7 +15358,7 @@ describe('editRequest listeners', () => {
       lua(listening(`setChatVar(id, 'lua', '루아가 씀') req[1].content = '루아' return req`)),
     ]);
     await send(cookie, chatId, capturing);
-    expect(prompts.at(-1)!.system).toBe('루아를 읽은 트리거 루아가 씀');
+    expect(prompts.at(-1)!.system).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\n루아를 읽은 트리거 루아가 씀`);
   });
 
   it('edits the request every generation sends, and the one the creator inspects, without keeping the inspector’s writes', async () => {
@@ -15327,11 +15369,13 @@ describe('editRequest listeners', () => {
     for (const [path, body] of [['messages', { content: '안녕' }], ['regenerate'], ['continue'], ['auto']] as const) {
       const events = await readSse(await json(cookie, `/api/chats/${chatId}/${path}`, 'POST', body, capturing));
       expect(events.at(-1)!.event, path).toBe('done');
-      expect(prompts.at(-1)!.system, path).toMatch(/^루아 \d$/);
+      expect(prompts.at(-1)!.system, path).toMatch(/^<SYSTEM_RULE>[\s\S]*<\/SYSTEM_RULE>\n\n루아 \d$/);
+      expect(prompts.at(-1)!.messages.filter((m) => m.content === ROLEPLAY_JAILBREAK_POST_HISTORY)).toHaveLength(1);
     }
     const report = await readJson(await request(cookie, `/api/chats/${chatId}/inspect`));
-    expect(report.blocks[0]).toMatchObject({ kind: 'request', label: 'system' });
-    const shown = report.blocks[0].text;
+    expect(report.blocks[0]).toMatchObject({ kind: 'main', text: ROLEPLAY_JAILBREAK_MAIN });
+    expect(report.blocks[1]).toMatchObject({ kind: 'request', label: 'system' });
+    const shown = `${ROLEPLAY_JAILBREAK_MAIN}\n\n${report.blocks[1].text}`;
     // The preview wrote nothing: what the next generation reads is what the last one left.
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
     expect(prompts.at(-1)!.system).toBe(shown);
@@ -15450,6 +15494,7 @@ describe('editRequest listeners', () => {
       'assistant|nil|true|nil|nil|example_assistant|nil|nil|예시 답변',
     ];
     expect(prompts.at(-1)!.system.split('\n')).toEqual([
+      ...ROLEPLAY_JAILBREAK_MAIN.split('\n'), '',
       'system|nil|nil|nil|nil|nil|nil|nil|',
       ...examples,
       // Between the examples and the chat, while the chat is sent from its start.
@@ -15471,6 +15516,7 @@ describe('editRequest listeners', () => {
     await send(cookie, chatId, capturing, '또 왔어');
     const second = (await stored()).filter((message) => message.role === 'user').at(-1)!;
     expect(prompts.at(-1)!.system.split('\n')).toEqual([
+      ...ROLEPLAY_JAILBREAK_MAIN.split('\n'), '',
       'system|nil|nil|nil|nil|nil|nil|nil|',
       'system|supaMemory|nil|nil|nil|nil|nil|nil|[지난 이야기 요약]/(최근 10턴 이내) 둘은 문 앞에서 만났다.//(최근 10턴 이내) 유저가 먼저 인사했다.',
       ...examples,
@@ -15547,7 +15593,7 @@ describe('editRequest listeners', () => {
       { role: 'system', content: '[Start a new chat]' },
       { role: 'assistant', content: '문 앞이다.' },
     ]);
-    expect(contentText(sent.messages.at(-1)!.content)).toMatch(/ \(끝\)$/);
+    expect(contentText(sent.messages.at(-2)!.content)).toMatch(/ \(끝\)$/);
   });
 
   it('sends the pictures a listener leaves on the reader’s turn — after it drops other turns too — and none it removed', async () => {
@@ -15588,7 +15634,7 @@ describe('editRequest listeners', () => {
 
     // The listener sees the picture as RisuAI's item holds one: its data URL.
     await sendWithImage('보여 줘');
-    expect(prompts.at(-1)!.system).toBe(`image/${image.url}/1`);
+    expect(prompts.at(-1)!.system).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\nimage/${image.url}/1`);
     expect(lastTurn()).toEqual({ role: 'user', content: [{ type: 'text', text: '보여 줘' }, image] });
 
     // The request is three turns shorter, and the picture still goes with the turn that holds it.
@@ -15618,10 +15664,10 @@ describe('editRequest listeners', () => {
     const otherChat = (await startChat(cookie, plot.id)).chat.id;
     await send(cookie, chatId, capturing);
     await send(cookie, chatId, capturing, '또');
-    expect(prompts.at(-1)!.system).toBe('n=2');
+    expect(prompts.at(-1)!.system).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\nn=2`);
     // The reader's other chat with the member goes on from there, as RisuAI's one state does across its chats.
     await send(cookie, otherChat, capturing);
-    expect(prompts.at(-1)!.system).toBe('n=3');
+    expect(prompts.at(-1)!.system).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\nn=3`);
     // So does the same card in another of their works: RisuAI's state holds while the code is the same.
     const otherPlot = await createPlot(cookie, { name: '다른 작품', description: '설명', intros: ['문 앞이다.'] });
     await addCharacter(cookie, otherPlot.id, {
@@ -15630,34 +15676,34 @@ describe('editRequest listeners', () => {
     });
     const otherWork = (await startChat(cookie, otherPlot.id)).chat.id;
     await send(cookie, otherWork, capturing);
-    expect(prompts.at(-1)!.system).toBe('n=4');
+    expect(prompts.at(-1)!.system).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\nn=4`);
 
     // Another reader on the same work, the same member and the same code, has their own…
     await publishPlot(cookie, plot.id);
     const stranger = await signUp('lua-state-stranger@example.com');
     const theirs = (await startChat(stranger, plot.id)).chat.id;
     await send(stranger, theirs, capturing);
-    expect(prompts.at(-1)!.system).toBe('n=1');
+    expect(prompts.at(-1)!.system).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\nn=1`);
     // …and leaves this reader's where it was.
     await send(cookie, chatId, capturing, '셋');
-    expect(prompts.at(-1)!.system).toBe('n=5');
+    expect(prompts.at(-1)!.system).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\nn=5`);
 
     // The creator's inspector reads the state and keeps nothing of its run.
     const report = await readJson(await request(cookie, `/api/chats/${chatId}/inspect`));
-    expect(report.blocks[0].text).toBe('n=6');
+    expect(report.blocks[1].text).toBe('n=6');
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
-    expect(prompts.at(-1)!.system).toBe('n=6');
+    expect(prompts.at(-1)!.system).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\nn=6`);
 
     // New code is a new state, as RisuAI rebuilds one when the code differs.
     await patchCharacter(cookie, plot.id, member.id, {
       card: { ...member.card, extensions: { risuai: { triggerscript: [lua(`counter = 10\n${counting}`)] } } },
     });
     await send(cookie, chatId, capturing, '바뀐 코드');
-    expect(prompts.at(-1)!.system).toBe('n=11');
+    expect(prompts.at(-1)!.system).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\nn=11`);
     // The other work's card, still the old code, keeps its own: each code keeps a state, where RisuAI's
     // one state would have started afresh once the other code ran (a group's speakers, turn by turn).
     await send(cookie, otherWork, capturing, '다시');
-    expect(prompts.at(-1)!.system).toBe('n=7');
+    expect(prompts.at(-1)!.system).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\nn=7`);
 
     // A card with two scripts alternates RisuAI's one state between them: nothing carries over.
     await patchCharacter(cookie, plot.id, member.id, {
@@ -15665,7 +15711,7 @@ describe('editRequest listeners', () => {
     });
     await send(cookie, chatId, capturing, '하나');
     await send(cookie, chatId, capturing, '둘');
-    expect(prompts.at(-1)!.system).toBe('n=1');
+    expect(prompts.at(-1)!.system).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\nn=1`);
   });
 
   it('drops only the rewrite that would take the reader’s overlay past its size, and keeps the reply and the rest', async () => {
@@ -15722,7 +15768,7 @@ describe('editRequest listeners', () => {
     ]);
     await send(cookie, chatId, capturing);
     await send(cookie, chatId, capturing, '또');
-    expect(prompts.map((prompt) => prompt.system)).toEqual(['fresh', 'fresh']);
+    expect(prompts.map((prompt) => prompt.system)).toEqual(Array(2).fill(`${ROLEPLAY_JAILBREAK_MAIN}\n\nfresh`));
   });
 });
 
@@ -16834,6 +16880,10 @@ describe('group turns', () => {
     expect(a.groupTurnId).toBe(a.messageId);
     const b = await done(await post(cookie, chatId, 'reply', { speakerId: kai, groupTurnId: a.groupTurnId }, target));
     expect(b).toMatchObject({ speakerMemberId: kai, groupTurnId: a.messageId });
+    for (const request of sent) {
+      expect(request.system.startsWith(`${ROLEPLAY_JAILBREAK_MAIN}\n\n`)).toBe(true);
+      expect(request.messages.at(-1)!.content).toBe(ROLEPLAY_JAILBREAK_POST_HISTORY);
+    }
 
     const [greeting, user, first, second] = await rowsOf(chatId);
     expect(user).toMatchObject({ parentId: greeting!.id, role: 'user', speakerMemberId: null, groupTurnId: null });
@@ -16845,14 +16895,14 @@ describe('group turns', () => {
     // Each request is the speaker's: its line closes the prompt, the others' names stop it.
     expect(sent[0]!.stop).toEqual(['\n유저:', '\n카이:', '\n미오:']);
     const firstTexts = textsOf(sent[0]!);
-    expect(firstTexts.at(-2)).toBe(groupSpeakerLine('세이야'));
+    expect(firstTexts.at(-3)).toBe(groupSpeakerLine('세이야'));
     // Not the round's last: the status window is the last speaker's to write.
-    expect(firstTexts.at(-1)).toContain('상태창과 선택지를 붙이지 않는다');
+    expect(firstTexts.at(-2)).toContain('상태창과 선택지를 붙이지 않는다');
     // The line the reader wrote as 카이 is sent as 카이's.
     expect(firstTexts).toContain('안녕.\n카이: 대신 인사할게.');
     const secondTexts = textsOf(sent[1]!);
     expect(sent[1]!.stop).toEqual(['\n유저:', '\n세이야:', '\n세이:', '\n미오:']);
-    expect(secondTexts.at(-1)).toBe(groupSpeakerLine('카이'));
+    expect(secondTexts.at(-2)).toBe(groupSpeakerLine('카이'));
     expect(secondTexts).toContain('세이야: *검을 거둔다* 왔군.\n세이야: 앉아.');
     expect(secondTexts.join('\n')).not.toContain('상태창과 선택지를 붙이지 않는다');
 
@@ -17042,7 +17092,8 @@ describe('group turns', () => {
     expect(more).toMatchObject({ messageId: b.messageId, speakerMemberId: kai, groupTurnId: b.groupTurnId });
     const texts = textsOf(sent.at(-1)!);
     expect(texts.at(-1)).toBe('어서 와!');
-    expect(texts.at(-2)).toBe(groupSpeakerLine('카이'));
+    expect(texts.at(-3)).toBe(groupSpeakerLine('카이'));
+    expect(texts.at(-2)).toBe(ROLEPLAY_JAILBREAK_POST_HISTORY);
     expect(sent.at(-1)!.stop).toEqual(['\n유저:', '\n세이야:', '\n세이:', '\n미오:']);
     expect((await rowsOf(chatId)).find((row) => row.id === b.messageId)!.content).toBe('어서 와!더 마셔.');
   });
@@ -17125,7 +17176,7 @@ describe('group turns', () => {
     expect(prompts.at(-1)!.system).not.toContain('세이야의 요청');
     const last = (await rowsOf(chatId)).at(-1)!;
     await done(await post(cookie, chatId, 'reply', { speakerId: seiya, groupTurnId: last.groupTurnId }, capturing));
-    expect(prompts.at(-1)!.system).toBe('세이야의 요청');
+    expect(prompts.at(-1)!.system).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\n세이야의 요청`);
     // 미오 carries no scripts: nothing runs for its reply.
     const next = (await rowsOf(chatId)).at(-1)!;
     await done(await post(cookie, chatId, 'reply', { speakerId: mio, groupTurnId: next.groupTurnId }, capturing));
@@ -17133,7 +17184,7 @@ describe('group turns', () => {
     expect(prompts.at(-1)!.system).not.toContain('루아:');
     // The scene is the lead's — the first member with scripts.
     await done(await post(cookie, chatId, 'messages', { content: '또' }, capturing));
-    expect(prompts.at(-1)!.system).toBe('세이야의 요청');
+    expect(prompts.at(-1)!.system).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\n세이야의 요청`);
   });
 
   it("holds a script's model call and request to the calling member's card", async () => {
@@ -17723,8 +17774,8 @@ describe('emotion images', () => {
 
     const done = await send(cookie, chatId, { content: '그래. <Emotion="happy">' }, harness.app);
     const prompt = harness.prompts.at(-1)!;
-    // RisuAI's default instructions with the list, at the very end.
-    const last = prompt.messages.at(-1)!;
+    // RisuAI's instructions close the card prompt, before the service's final note.
+    const last = prompt.messages.at(-2)!;
     expect(last.role).toBe('system');
     expect(contentText(last.content)).toBe(
       "You must always output the character's emotional image as a command at the end of a conversation. The command must be selected from a given list, and it's better to have variety than to repeat images used in previous chats. Use one image, depending on the character's emotion. See the list below. Form: <Emotion=\"<image command>\"> Example: <Emotion=\"Agree\"> List of commands: neutral, happy, Angry",
@@ -17747,7 +17798,7 @@ describe('emotion images', () => {
     );
     const ownChat = await startChat(cookie, own.id);
     await send(cookie, ownChat.chat.id, { content: '좋아' }, harness.app);
-    expect(contentText(harness.prompts.at(-1)!.messages.at(-1)!.content)).toBe('표정: neutral, happy, Angry');
+    expect(contentText(harness.prompts.at(-1)!.messages.at(-2)!.content)).toBe('표정: neutral, happy, Angry');
   });
 
   it("keeps the picture a card's @@emo named at the commit, and chooses none over it", async () => {
@@ -18471,7 +18522,7 @@ async function englishChat(cookie: string): Promise<{ plotId: string; chatId: st
 }
 
 describe('language modes', () => {
-  it('asks for the reply in the reader language last, after the card post-history, where the work is in another one', async () => {
+  it('asks for the reader language after the card post-history and before the always-on note', async () => {
     const cookie = await signUp('language-instruct@example.com');
     const { chatId } = await englishChat(cookie);
     const { app: capturing, prompts } = capturingApp();
@@ -18480,7 +18531,8 @@ describe('language modes', () => {
     // One call for the turn: the reply is not translated afterwards.
     expect(prompts).toHaveLength(1);
     const sent = prompts[0]!.messages.map((message) => [message.role, contentText(message.content)]);
-    expect(sent.at(-1)).toEqual(['system', replyLanguageInstruction('ko')]);
+    expect(sent.at(-2)).toEqual(['system', replyLanguageInstruction('ko')]);
+    expect(sent.at(-1)).toEqual(['system', ROLEPLAY_JAILBREAK_POST_HISTORY]);
     const post = sent.findIndex(([, text]) => text.includes('CARD-POST-HISTORY'));
     expect(post).toBeGreaterThan(-1);
     expect(post).toBeLessThan(sent.length - 1);
@@ -18489,19 +18541,19 @@ describe('language modes', () => {
     await readSse(await withLocale(cookie, `/api/chats/${chatId}/regenerate`, 'ko', undefined, capturing));
     expect(prompts).toHaveLength(2);
     for (const prompt of prompts.slice(1)) {
-      expect(contentText(prompt.messages.at(-1)!.content)).toBe(replyLanguageInstruction('ko'));
+      expect(contentText(prompt.messages.at(-2)!.content)).toBe(replyLanguageInstruction('ko'));
     }
 
     // The prompt inspector shows it as the trailing block it is.
     const report = await readJson(await withLocale(cookie, `/api/chats/${chatId}/inspect`, 'ko', undefined, app, 'GET'));
-    expect(report.blocks.at(-1)).toMatchObject({ kind: 'trailing', label: 'language', text: replyLanguageInstruction('ko') });
+    expect(report.blocks.at(-2)).toMatchObject({ kind: 'trailing', label: 'language', text: replyLanguageInstruction('ko') });
   });
 
   it('says nothing where the reader reads the work language, where the request names none, or where the reader picked another mode', async () => {
     const cookie = await signUp('language-off@example.com');
     const { chatId } = await englishChat(cookie);
     const { app: capturing, prompts } = capturingApp();
-    const last = () => contentText(prompts.at(-1)!.messages.at(-1)!.content);
+    const last = () => contentText(prompts.at(-1)!.messages.at(-2)!.content);
 
     await readSse(await withLocale(cookie, `/api/chats/${chatId}/messages`, 'en', { content: 'hi' }, capturing));
     expect(last()).not.toContain('[Reply language]');
