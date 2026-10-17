@@ -521,13 +521,13 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const stopping = useRef<Promise<void> | null>(null);
   // The message list scrolls, not the document: the reader's own scroll is what
   // decides whether new text follows them down, and the library gives that up the
-  // moment they move away from the bottom. Only a reply being written glides down
-  // after its text; anything else that grows the list — a picture loading late, a
-  // card's panel opening — keeps the bottom where it was in the same frame, as
-  // RisuAI's bottom-anchored list does, instead of sliding the page up under it.
+  // moment they move away from the bottom. Whatever grows the list — a reply being
+  // written, a picture loading late, a card's panel opening — keeps the bottom where
+  // it was in the same frame, as Zeta's and RisuAI's bottom-anchored lists do,
+  // instead of gliding after it (the stage observer below pins it before paint).
   const { scrollRef, contentRef, isAtBottom, scrollToBottom, state: stick } = useStickToBottom({
     initial: 'instant',
-    ...(mode === null ? { resize: 'instant' as const } : {}),
+    resize: 'instant',
   });
   /** A component turn that was accepted and has not finished yet. */
   const componentTurnRef = useRef(false);
@@ -915,14 +915,30 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    * composer. A reader who was following keeps following: the scroll goes back to
    * the bottom, marked as a resize the way the library marks its content's, so it
    * is not read as theirs.
+   *
+   * The content growing is pinned here too, before the frame is painted: the
+   * library scrolls a frame later (`requestAnimationFrame`), so every new line of
+   * a reply used to stand under the edge for a frame or two. Zeta lays its list
+   * out from the bottom and never shows that; the library's own observer has
+   * already marked the resize, so this scroll is not read as the reader's either.
    */
   useEffect(() => {
-    if (!stageElement || typeof ResizeObserver !== 'function') return;
+    const content = contentRef.current;
+    if (!stageElement || !content || typeof ResizeObserver !== 'function') return;
     let height = stageElement.clientHeight;
+    let grown = content.offsetHeight;
     const observer = new ResizeObserver(() => {
       const difference = stageElement.clientHeight - height;
       height = stageElement.clientHeight;
-      if (difference === 0 || !stick.isAtBottom) return;
+      const growth = content.offsetHeight - grown;
+      grown = content.offsetHeight;
+      if (!stick.isAtBottom) return;
+      if (difference === 0) {
+        // `targetScrollTop`, read fresh: the calculated one is cached for the frame,
+        // which is still the height from before this growth.
+        if (growth > 0) stick.scrollTop = stick.targetScrollTop;
+        return;
+      }
       stick.resizeDifference = difference;
       requestAnimationFrame(() =>
         setTimeout(() => {
@@ -932,8 +948,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       stick.scrollTop = stick.calculatedTargetScrollTop;
     });
     observer.observe(stageElement);
+    observer.observe(content);
     return () => observer.disconnect();
-  }, [stageElement, stick]);
+  }, [stageElement, contentRef, stick]);
 
   /**
    * RisuAI's emotion screen: the picture each panel member shows on the branch
