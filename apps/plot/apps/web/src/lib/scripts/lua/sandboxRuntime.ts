@@ -16,9 +16,10 @@
  *   snapshot of what the script may read, serves the few things that need the
  *   reader or the server — a dialog, a model call, a request — and takes back
  *   what the script wrote, all of it validated as a stranger's data.
- * - **The frame** (`luaFrameRuntime`) is a `srcdoc` iframe with
- *   `sandbox="allow-scripts"` and nothing else: an opaque origin, so no cookies,
- *   no storage, nothing addressed to our API is ours. Its CSP is
+ * - **The frame** (`luaFrameRuntime`) is a document of ours (`/sandbox/lua.html`,
+ *   not a `srcdoc`, which would take the page's policy on top of its own) in an
+ *   iframe with `sandbox="allow-scripts"` and nothing else: an opaque origin, so
+ *   no cookies, no storage, nothing addressed to our API is ours. Its CSP is
  *   `default-src 'none'` with `connect-src 'none'`: no fetch, no XHR, no
  *   WebSocket, no EventSource, to anywhere — and the worker it starts from a
  *   blob inherits that policy. It runs only our code: it relays messages and it
@@ -384,11 +385,12 @@ function luaFrameBootstrap(frameRuntime: Any, limits: Any): void {
 /* -------------------------------------------------------------- assembly */
 
 /**
- * The frame's policy. Nothing loads and nothing connects: no `connect-src`
- * means no fetch, XHR, WebSocket or EventSource from the frame or from the
- * worker, which inherits it; `'wasm-unsafe-eval'` compiles wasmoon and is not
- * `'unsafe-eval'`, so `Function` stays closed to a script that climbs out of
- * Lua into JavaScript.
+ * The frame's policy, sent with its document (`app/sandbox/lua.html`). Nothing
+ * loads and nothing connects: no `connect-src` means no fetch, XHR, WebSocket or
+ * EventSource from the frame or from the worker, which inherits it;
+ * `'wasm-unsafe-eval'` compiles wasmoon and is not `'unsafe-eval'`, so `Function`
+ * stays closed to a script that climbs out of Lua into JavaScript. Only our own
+ * pages may frame it.
  */
 export function luaFrameCsp(): string {
   return [
@@ -399,6 +401,7 @@ export function luaFrameCsp(): string {
     "form-action 'none'",
     "frame-src 'none'",
     "base-uri 'none'",
+    "frame-ancestors 'self'",
   ].join('; ');
 }
 
@@ -419,14 +422,13 @@ export function luaWorkerSource(wasmoonSource: string, scope = 'self'): string {
 /** The frame runtime as a value, for the tests to drive with a stand-in `env`. */
 export const runLuaFrame = luaFrameRuntime as (env: unknown, limits: LuaLimits) => (data: unknown) => void;
 
-/** The frame document. It carries no script and no wasmoon — both arrive over the port. */
-export function luaFrameSrcdoc(): string {
+/** The frame document. It carries no card script and no wasmoon — both arrive over the port. */
+export function luaFrameDocument(): string {
   const frame = selfContained(luaFrameRuntime.toString(), 'luaFrameRuntime');
   const bootstrap = selfContained(luaFrameBootstrap.toString(), 'luaFrameBootstrap');
   const script = `(${bootstrap})(${frame}, ${JSON.stringify(LUA_LIMITS)});`.replace(/<\/(script)/gi, '<\\/$1');
   return [
     '<!doctype html><html><head><meta charset="utf-8">',
-    `<meta http-equiv="Content-Security-Policy" content="${luaFrameCsp()}">`,
     '</head><body>',
     `<script>${script}</script>`,
     '</body></html>',

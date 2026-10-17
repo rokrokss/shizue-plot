@@ -40,11 +40,14 @@
  * gets silence, which is what stops it and the chat from taking turns forever
  * without a reader.
  *
- * The frame itself is still delivered by `srcdoc` with `sandbox="allow-scripts"`
- * and nothing else — no `allow-same-origin` — so it has an opaque origin: no
- * cookies, no storage, no access to our API or to the embedder's DOM. The CSP
- * closes the rest: no network, no forms, no nested frames, images only from our
- * origin and `data:`, workers only from `blob:`.
+ * The frame is a document of ours (`/sandbox/component.html`) loaded with
+ * `sandbox="allow-scripts"` and nothing else — no `allow-same-origin` — so it has
+ * an opaque origin: no cookies, no storage, no access to our API or to the
+ * embedder's DOM. Its CSP, sent with it, closes the rest: no network, no forms,
+ * no nested frames, images only from our origin and `data:`, workers only from
+ * `blob:`, and only our pages may frame it. It is not a `srcdoc`, because a
+ * `srcdoc` takes the page's policy on top of its own, and the page's has no
+ * `'unsafe-eval'` for a component to compile with.
  *
  * ## The bridge
  *
@@ -55,7 +58,7 @@
  *
  * ## Why the runtimes are functions that get stringified
  *
- * Both are inlined — the frame into the srcdoc, the worker into a blob the frame
+ * Both are inlined — the frame into its document, the worker into a blob the frame
  * builds — via `Function.prototype.toString`, so each must be **completely
  * self-contained**: no imports, no references to anything outside its own body, and
  * no syntax the bundler would rewrite into a call to an external helper (so: no
@@ -1728,16 +1731,15 @@ img { max-width: 100%; }
 :root[data-theme='dark'] .shizue-fallback pre { color: #a3bab6; }
 `;
 
-/** Origins we are willing to name in a CSP. Anything else gets no image source at all. */
-const ORIGIN_RE = /^https?:\/\/[A-Za-z0-9.[\]-]+(?::\d+)?$/;
-
 /**
- * The frame's policy. `default-src 'none'` means the document may do nothing at
- * all except what is listed: run its own inline script, apply its own inline
- * style, load images from us, and start a worker from a blob it built itself. No
- * `connect-src`, so there is no network — in the frame or in the worker, which
- * inherits this policy; no `frame-src`, so it cannot nest another frame; no
- * `form-action`, so it cannot post anywhere.
+ * The frame's policy, sent with its document (`app/sandbox/component.html`).
+ * `default-src 'none'` means the document may do nothing at all except what is
+ * listed: run its own inline script, apply its own inline style, load images from
+ * us, and start a worker from a blob it built itself. No `connect-src`, so there
+ * is no network — in the frame or in the worker, which inherits this policy; no
+ * `frame-src`, so it cannot nest another frame; no `form-action`, so it cannot
+ * post anywhere; and only our own pages may frame it. `'self'` is our origin,
+ * the address the document came from, though the sandbox gives it an opaque one.
  *
  * `'unsafe-eval'` is here because compiling the creator's JSX *inside* the sandbox
  * is the requirement this whole design turns on, and the compiled module can only
@@ -1746,17 +1748,17 @@ const ORIGIN_RE = /^https?:\/\/[A-Za-z0-9.[\]-]+(?::\d+)?$/;
  * nothing: creator JavaScript is the point, and it now runs in a worker with no
  * DOM, no navigable location, no WebRTC and no network.
  */
-export function componentFrameCsp(origin: string): string {
-  const images = ORIGIN_RE.test(origin) ? `${origin} data:` : 'data:';
+export function componentFrameCsp(): string {
   return [
     "default-src 'none'",
     "script-src 'unsafe-inline' 'unsafe-eval'",
     "style-src 'unsafe-inline'",
-    `img-src ${images}`,
+    "img-src 'self' data:",
     "connect-src 'none'",
     "form-action 'none'",
     "frame-src 'none'",
     'worker-src blob:',
+    "frame-ancestors 'self'",
   ].join('; ');
 }
 
@@ -1793,13 +1795,15 @@ export function componentWorkerSource(scope = 'self'): string {
 }
 
 /**
- * The frame runtime as the srcdoc receives it, with the worker inlined in it. Both
- * realms get the same caps, interpolated from `@shizue/core` — the worker's are
- * already in the source the frame is handed.
+ * The frame runtime as its document carries it, with the worker inlined in it.
+ * Both realms get the same caps, interpolated from `@shizue/core` — the worker's
+ * are already in the source the frame is handed. The parent's origin is the
+ * frame's own address, `location.origin` — only our pages may frame it — unless
+ * a test names one.
  */
-export function componentRuntimeSource(origin: string): string {
+export function componentRuntimeSource(origin?: string): string {
   const runtime = selfContained(componentFrameRuntime.toString(), 'componentFrameRuntime');
-  return `(${runtime})(${JSON.stringify(origin)},${JSON.stringify(
+  return `(${runtime})(${origin === undefined ? 'location.origin' : JSON.stringify(origin)},${JSON.stringify(
     componentWorkerSource(),
   )},${JSON.stringify(LIMITS)});`;
 }
@@ -1807,14 +1811,13 @@ export function componentRuntimeSource(origin: string): string {
 /**
  * The whole frame document. It carries no creator code — the code, the props and
  * the platform state arrive over the bridge — so one document per scheme serves
- * every component on the page and the browser can reuse the parse. `scheme` is
- * only where the frame starts; later changes arrive as a `scheme` message.
+ * every component on the page. `scheme` is only where the frame starts; later
+ * changes arrive as a `scheme` message.
  */
-export function componentFrameSrcdoc(origin: string, scheme: 'light' | 'dark' = 'light'): string {
-  const script = componentRuntimeSource(origin).replace(/<\/(script)/gi, '<\\/$1');
+export function componentFrameDocument(scheme: 'light' | 'dark' = 'light'): string {
+  const script = componentRuntimeSource().replace(/<\/(script)/gi, '<\\/$1');
   return [
     `<!doctype html><html data-theme="${scheme}"><head><meta charset="utf-8">`,
-    `<meta http-equiv="Content-Security-Policy" content="${componentFrameCsp(origin)}">`,
     `<style>${FRAME_STYLE}</style></head>`,
     '<body><div id="shizue-root"></div>',
     `<script>${script}</script>`,

@@ -20,7 +20,7 @@ import { MAX_COMPONENT_TURN_LENGTH, MAX_DIRECTIONS_LENGTH } from '@shizue/core/c
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   componentFrameCsp,
-  componentFrameSrcdoc,
+  componentFrameDocument,
   componentRuntimeSource,
   componentWorkerSource,
 } from '../src/lib/componentRuntime';
@@ -571,26 +571,27 @@ const init = (frame: Frame, code: string, name: string, props: Record<string, un
 
 describe('the frame document', () => {
   it('states the policy the isolation depends on', () => {
-    const csp = componentFrameCsp(ORIGIN);
-    expect(csp).toBe(
+    expect(componentFrameCsp()).toBe(
       "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; " +
-        `img-src ${ORIGIN} data:; connect-src 'none'; form-action 'none'; frame-src 'none'; worker-src blob:`,
+        "img-src 'self' data:; connect-src 'none'; form-action 'none'; frame-src 'none'; worker-src blob:; " +
+        "frame-ancestors 'self'",
     );
-    // An origin we cannot vouch for gets no image source rather than a wildcard.
-    expect(componentFrameCsp('javascript:alert(1)')).toContain('img-src data:;');
   });
 
-  it('carries the policy, the runtime and the worker, and nothing that closes the script early', () => {
-    const srcdoc = componentFrameSrcdoc(ORIGIN);
-    expect(srcdoc).toContain(`content="${componentFrameCsp(ORIGIN)}"`);
-    expect(srcdoc).toContain('<div id="shizue-root"></div>');
+  it('carries the runtime and the worker, and nothing that closes the script early', () => {
+    const page = componentFrameDocument('dark');
+    expect(page).toContain('<html data-theme="dark">');
+    expect(page).toContain('<div id="shizue-root"></div>');
+    // The policy is the route's header, not a tag a srcdoc would need.
+    expect(page).not.toContain('Content-Security-Policy');
     // The creator's code is not in the document: it arrives over the bridge.
-    expect(srcdoc.match(/<script>/g)).toHaveLength(1);
-    expect(srcdoc.slice(srcdoc.indexOf('<script>') + 8, srcdoc.lastIndexOf('</script>'))).not.toMatch(
-      /<\/script/i,
-    );
+    expect(page.match(/<script>/g)).toHaveLength(1);
+    const script = page.slice(page.indexOf('<script>') + 8, page.lastIndexOf('</script>'));
+    expect(script).not.toMatch(/<\/script/i);
+    // The parent is whoever may frame it — our own pages — so the frame names its own origin.
+    expect(script).toMatch(/\}\)\(location\.origin,/);
     // …and the worker rides inside it as a string, to be blob'd at runtime.
-    expect(srcdoc).toContain('__shizueComponentWorker');
+    expect(page).toContain('__shizueComponentWorker');
   });
 
   it('carries the caps from @shizue/core rather than a copy in each realm', () => {

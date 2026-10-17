@@ -32,12 +32,24 @@ describe('page security headers', () => {
       .toBe('https://media.s3.ap-northeast-2.amazonaws.com');
   });
 
-  it('send HSTS only where the app is served over https, and leave /api to the API', () => {
-    const names = (env: Record<string, string>): string[] =>
-      securityHeaders(env).flatMap((rule) => rule.headers.map((header) => header.key));
-    expect(names({ BETTER_AUTH_URL: 'https://plot.example' })).toContain('Strict-Transport-Security');
-    expect(names({ BETTER_AUTH_URL: 'http://localhost:13000' })).not.toContain('Strict-Transport-Security');
-    expect(names({})).toEqual(expect.arrayContaining(['X-Frame-Options', 'X-Content-Type-Options', 'Content-Security-Policy']));
-    for (const rule of securityHeaders({})) expect(rule.source).toContain('(?!api/');
+  it('open no script to eval outside next dev', () => {
+    expect(directive(contentSecurityPolicy({ NODE_ENV: 'production' }), 'script-src')).toEqual(["'self'", "'unsafe-inline'"]);
+    expect(directive(contentSecurityPolicy({ NODE_ENV: 'development' }), 'script-src')).toContain("'unsafe-eval'");
+  });
+
+  it('send HSTS only over https, keep the page policy off the sandbox documents, and leave /api to the API', () => {
+    /** The headers a path gets: Next reads each `source` as `/` and the pattern after `:path`. */
+    const on = (path: string, env: Record<string, string> = {}): string[] =>
+      securityHeaders(env)
+        .filter((rule) => new RegExp(`^${rule.source.replace('/:path', '/')}$`).test(path))
+        .flatMap((rule) => rule.headers.map((header) => header.key));
+    expect(on('/ko/chats/1')).toEqual(['X-Content-Type-Options', 'Referrer-Policy', 'X-Frame-Options', 'Content-Security-Policy']);
+    // Framed by our pages, and carrying only their own policy.
+    expect(on('/sandbox/component.html')).toEqual(['X-Content-Type-Options', 'Referrer-Policy']);
+    // A worker script takes its own response's policy.
+    expect(on('/_next/static/chunks/a.js')).not.toContain('Content-Security-Policy');
+    expect(on('/api/chats')).toEqual([]);
+    expect(on('/ko', { BETTER_AUTH_URL: 'https://plot.example' })).toContain('Strict-Transport-Security');
+    expect(on('/ko', { BETTER_AUTH_URL: 'http://localhost:13000' })).not.toContain('Strict-Transport-Security');
   });
 });

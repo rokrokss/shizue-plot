@@ -270,7 +270,7 @@ export function checkLoreSearch(
 
 /* ---------------------------------------------------------------- the frame */
 
-/** How long a fresh frame gets to say `ready`. It loads nothing, so this is generous. */
+/** How long a fresh frame gets to say `ready`. It loads its one document and nothing else, so this is generous. */
 const HANDSHAKE_MS = 10_000;
 
 /**
@@ -278,8 +278,7 @@ const HANDSHAKE_MS = 10_000;
  * its one-shot handshake — the same handshake and the same second-`load` rule
  * as Layer 2's frames (`componentBridge.ts` says why the window is not a channel).
  */
-export const openLuaFrame: OpenLuaChannel = async (events) => {
-  const { luaFrameSrcdoc } = await import('./sandboxRuntime');
+export const openLuaFrame: OpenLuaChannel = (events) => {
   return new Promise<LuaChannel>((resolve, reject) => {
     const frame = document.createElement('iframe');
     // The whole security model, as for components. Nothing may be added to it.
@@ -288,7 +287,9 @@ export const openLuaFrame: OpenLuaChannel = async (events) => {
     frame.tabIndex = -1;
     frame.hidden = true;
     frame.title = 'lua';
-    frame.srcdoc = luaFrameSrcdoc();
+    // Our document with its own policy (`app/sandbox/lua.html`); from the root,
+    // whatever locale the page is under.
+    frame.src = '/sandbox/lua.html';
     let port: MessagePort | null = null;
     let loads = 0;
     let open = true;

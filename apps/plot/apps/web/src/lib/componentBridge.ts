@@ -137,7 +137,7 @@ export function createFrameBridge(handlers: FrameBridgeHandlers): FrameBridge {
     onLoad() {
       loads += 1;
       if (loads < 2 || lost) return;
-      // The frame left our srcdoc. There is no legitimate second load, so the
+      // The frame left our document. There is no legitimate second load, so the
       // question of where it went does not arise.
       lost = true;
       port?.close();

@@ -233,8 +233,8 @@ test('a component can fill the composer and nothing else', async () => {
 });
 
 test('the frame cannot reach the app, the network or storage', async () => {
-  const frame = page.frames().find((candidate) => candidate.url() === 'about:srcdoc');
-  expect(frame, 'the component frame is a srcdoc document').toBeTruthy();
+  const frame = page.frames().find((candidate) => new URL(candidate.url()).pathname === '/sandbox/component.html');
+  expect(frame, 'the component frame is our sandbox document').toBeTruthy();
 
   const reach = await frame!.evaluate(async () => {
     const attempt = async (run: () => unknown): Promise<string> => {

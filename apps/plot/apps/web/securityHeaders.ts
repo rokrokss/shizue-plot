@@ -37,18 +37,18 @@ export function storeOrigin(env: Env): string | null {
  * Realm and the upload store the only others, and no `<object>`, `<base>` or form
  * that leaves.
  *
- * Scripts stay open to inline code and `eval`. Next writes its inline scripts
- * per page and would need a nonce, which needs every page rendered per request.
- * And the component and Lua sandboxes are `srcdoc` frames, which take this policy
- * on top of their own (`componentFrameCsp`, `luaFrameCsp`): their inline
- * runtime has to pass it, and a component's compiled JSX comes to life with
- * `new Function`, so `'unsafe-eval'` must stay here for it to stay there.
+ * Nothing on the page evaluates strings: a component's compiled JSX and a card's
+ * Lua run in sandbox frames that are documents of their own, each with its own
+ * policy (`app/sandbox/*.html`), so `'unsafe-eval'` is only here under
+ * `next dev`, where React rebuilds the server's error stacks with it. Inline
+ * scripts stay open: Next writes its own per page and would need a nonce.
  */
 export function contentSecurityPolicy(env: Env): string {
   const connect = ["'self'", REALM_ORIGIN, storeOrigin(env)].filter(Boolean);
+  const evaluate = env['NODE_ENV'] === 'development' ? " 'unsafe-eval'" : '';
   return [
     "default-src 'self'",
-    "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+    `script-src 'self' 'unsafe-inline'${evaluate}`,
     "style-src 'self' 'unsafe-inline'",
     // `blob:` is a picture the reader picked, shown before it is uploaded.
     "img-src 'self' data: blob:",
@@ -61,7 +61,8 @@ export function contentSecurityPolicy(env: Env): string {
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
-    "frame-ancestors 'none'",  ].join('; ');
+    "frame-ancestors 'none'",
+  ].join('; ');
 }
 
 interface HeaderRule {
@@ -77,15 +78,20 @@ export function securityHeaders(env: Env): HeaderRule[] {
       source: '/:path((?!api/).*)',
       headers: [
         { key: 'X-Content-Type-Options', value: 'nosniff' },
-        { key: 'X-Frame-Options', value: 'DENY' },
         { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
         ...(https ? [{ key: 'Strict-Transport-Security', value: 'max-age=31536000; includeSubDomains' }] : []),
       ],
     },
     {
+      // Not the sandbox documents, which our own pages frame: their policy says so.
+      source: '/:path((?!api/|sandbox/).*)',
+      headers: [{ key: 'X-Frame-Options', value: 'DENY' }],
+    },
+    {
       // Pages, not `/_next`: a worker script takes the policy its own response
       // carries, and the embedding worker fetches its model from Hugging Face.
-      source: '/:path((?!api/|_next/).*)',
+      // Nor the sandbox documents, which carry only their own.
+      source: '/:path((?!api/|_next/|sandbox/).*)',
       headers: [{ key: 'Content-Security-Policy', value: contentSecurityPolicy(env) }],
     },
   ];

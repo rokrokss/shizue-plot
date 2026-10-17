@@ -2,23 +2,14 @@
 
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createFrameBridge, MIN_FRAME_HEIGHT, type FrameBridge } from '@/lib/componentBridge';
-import { componentFrameSrcdoc, type PlatformContext } from '@/lib/componentRuntime';
-import { getColorScheme, subscribeTheme, type ColorScheme } from '@/lib/theme';
+import type { PlatformContext } from '@/lib/componentRuntime';
+import { getColorScheme, subscribeTheme } from '@/lib/theme';
 
 /**
- * One frame document per scheme serves every component on the page, so each is
- * built once and the browser reuses the parse. It carries no creator code — that
- * arrives over the bridge — which is the reason it can be shared at all.
- */
-const cachedSrcdoc: Partial<Record<ColorScheme, string>> = {};
-function srcdocFor(origin: string, scheme: ColorScheme): string {
-  return (cachedSrcdoc[scheme] ??= componentFrameSrcdoc(origin, scheme));
-}
-
-/**
- * How long the frame gets to say `ready`. It is a srcdoc with no network to
- * wait on, so the handshake is a few milliseconds' work; this is long enough
- * that a busy tab is never mistaken for a broken one, and short enough that a
+ * How long the frame gets to say `ready`. Its document is one small request —
+ * usually a revalidation, since every component on the page shares it — and the
+ * handshake a few milliseconds' work; this is long enough that a busy tab or a
+ * slow connection is never mistaken for a broken frame, and short enough that a
  * reader is not left watching an empty box for the rest of the conversation.
  */
 const HANDSHAKE_TIMEOUT_MS = 10_000;
@@ -90,7 +81,7 @@ export function ComponentFrame({
   // cannot gain the capability by the prop appearing later.
   const [granted] = useState(Boolean(onSendTurn));
 
-  const [srcdoc, setSrcdoc] = useState('');
+  const [src, setSrc] = useState('');
   const scheme = useSyncExternalStore(subscribeTheme, getColorScheme, () => 'dark');
   const [phase, setPhase] = useState<'loading' | 'connected' | 'lost' | 'timeout'>('loading');
   const [height, setHeight] = useState(MIN_FRAME_HEIGHT);
@@ -118,11 +109,12 @@ export function ComponentFrame({
   }
   const bridge = bridgeRef.current.bridge;
 
-  // The origin is only knowable in the browser, and the frame is only useful there.
-  // The document is picked once: a new srcdoc would reload the frame, and the
+  // The scheme is only knowable in the browser, and the frame is only useful there.
+  // The document is picked once: a new address would reload the frame, and the
   // bridge reads a second load as the component navigating away. A later scheme
-  // goes over the port instead.
-  useEffect(() => setSrcdoc(srcdocFor(window.location.origin, getColorScheme())), []);
+  // goes over the port instead. One document per scheme serves every component on
+  // the page: it carries no creator code — that arrives over the bridge.
+  useEffect(() => setSrc(`/sandbox/component.html?scheme=${getColorScheme()}`), []);
 
   // One listener for the life of the component, dispatching to whichever bridge
   // is current when a message lands. Keyed on `bridge` instead, a retry would
@@ -142,10 +134,10 @@ export function ComponentFrame({
   // A handshake that never lands leaves an empty box that never fills, and the
   // reader has no way to tell that from a component that draws nothing.
   useEffect(() => {
-    if (!srcdoc || phase !== 'loading') return;
+    if (!src || phase !== 'loading') return;
     const timer = setTimeout(() => setPhase('timeout'), HANDSHAKE_TIMEOUT_MS);
     return () => clearTimeout(timer);
-  }, [srcdoc, phase, attempt]);
+  }, [src, phase, attempt]);
 
   // Serialized, so a re-render with equal values does not re-init the component
   // and throw away its state — the chat re-derives `platform` on every token.
@@ -168,7 +160,7 @@ export function ComponentFrame({
     bridge.post({ type: 'scheme', scheme });
   }, [scheme, phase, bridge]);
 
-  if (!srcdoc) return <div style={{ height: MIN_FRAME_HEIGHT }} />;
+  if (!src) return <div style={{ height: MIN_FRAME_HEIGHT }} />;
 
   // The frame navigated itself elsewhere: it comes out of the document, and
   // whatever it went to is never shown.
@@ -188,7 +180,7 @@ export function ComponentFrame({
   }
 
   // The frame never said `ready`, so nothing was ever going to be drawn in it.
-  // Same card, and a way to ask for a fresh frame — a retry costs one srcdoc.
+  // Same card, and a way to ask for a fresh frame — a retry costs one document load.
   if (phase === 'timeout') {
     return (
       <div
@@ -223,7 +215,7 @@ export function ComponentFrame({
       title={name}
       // The whole security model. Nothing may be added to this list.
       sandbox="allow-scripts"
-      srcDoc={srcdoc}
+      src={src}
       onLoad={() => bridge.onLoad()}
       scrolling="no"
       style={{ height }}

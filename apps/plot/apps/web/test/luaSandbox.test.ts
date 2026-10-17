@@ -35,7 +35,7 @@ import { endReaderLuaSandbox, readerLuaSandbox } from '../src/lib/scripts/lua/re
 import {
   LUA_LIMITS,
   luaFrameCsp,
-  luaFrameSrcdoc,
+  luaFrameDocument,
   luaWorkerSource,
   runLuaFrame,
   type LuaEntry,
@@ -606,7 +606,9 @@ describe('the Lua sandbox', () => {
     expect(csp).toContain("default-src 'none'");
     expect(csp).toContain("'wasm-unsafe-eval'");
     expect(csp).not.toMatch(/'unsafe-eval'/);
-    expect(luaFrameSrcdoc()).toContain(`content="${csp}"`);
+    // Sent with the document by its route; only our pages may frame it.
+    expect(csp).toContain("frame-ancestors 'self'");
+    expect(luaFrameDocument()).not.toContain('Content-Security-Policy');
   });
 
   it('hashes across the padding boundaries as Node does', async () => {
