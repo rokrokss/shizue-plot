@@ -102,6 +102,15 @@
     line-height: var(--text-sm--line-height);
   }
 }
+/*
+ * On a touch screen a control is 16px whatever size its caller wrote, because iOS
+ * zooms the page in when a field under 16px gets focus. Outside the layers, so it
+ * beats a caller's `text-xs`; the line height stays the caller's, and the ratios
+ * scale with it.
+ */
+@media (pointer: coarse) {
+  .control-box { font-size: var(--text-base); }
+}
 
 html { scrollbar-gutter: stable; }
 /*

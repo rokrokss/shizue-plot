@@ -57,7 +57,7 @@ UI 작업 전에 읽는다. 제품 이름은 소문자 `shizue`, 저장소 이�
 | 브랜드 화면 큰 제목 | `title24 sm:title32` |
 | 섹션 제목 · 카드 섹션 · 작은 페이지 제목 | `heading1` · `heading3` · `heading2` |
 | 카드 작품 이름 | `body1 font-semibold` |
-| 본문 · 입력 | `text-sm` (= zeta body2, 14/20) |
+| 본문 · 입력 | `text-sm` (= zeta body2, 14/20). 터치 화면(`(pointer: coarse)`)의 입력 칸(`control-box`)은 호출한 쪽이 쓴 크기와 상관없이 16px이다 — 그보다 작은 글자 입력란에 포커스가 가면 iOS가 화면을 확대한다 |
 | 메타 · 라벨 · 태그 | `text-xs` (= zeta caption1, 12/16), 라벨은 `font-medium`. 대문자 변환·넓은 자간은 쓰지 않는다 |
 | 아주 작은 배지 · 숫자 | `caption2` |
 | 버튼 | `body14 font-medium` |
