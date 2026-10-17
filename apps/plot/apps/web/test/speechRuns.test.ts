@@ -26,6 +26,12 @@ describe('a reply with more than one voice in it', () => {
     expect(runs).toEqual([{ name: '아리아', text: '*문틈으로 밖을 살피며* 아직도 안 그쳤네.' }]);
   });
 
+  it('keeps **bold** and ***both*** in a spoken line as written, and only a single-star span as its description', () => {
+    expect(speechRuns('아리아: 비가 **많이** 오네.', ROSTER)).toEqual([{ name: '아리아', text: '비가 **많이** 오네.' }]);
+    expect(speechRuns('아리아: ***확실히*** 그래.', ROSTER)).toEqual([{ name: '아리아', text: '***확실히*** 그래.' }]);
+    expect(speechRuns('아리아: *웃는다* 그리고 **정말**', ROSTER)).toEqual([{ name: '아리아', text: '*웃는다* 그리고 **정말**' }]);
+  });
+
   it('keeps the narrator\'s own line breaks, and its paragraphs apart', () => {
     expect(speechRuns('비가 그쳤다.\n문이 열렸다.', ROSTER)).toEqual([{ name: null, text: '비가 그쳤다.\n문이 열렸다.' }]);
     expect(speechRuns('비가 그쳤다.\n\n문이 열렸다.', ROSTER)).toEqual([{ name: null, text: '비가 그쳤다.\n\n문이 열렸다.' }]);

@@ -136,6 +136,28 @@ describe('a reply with several speakers in it', () => {
     expect(block.querySelector('em')?.textContent).toBe('문틈으로 밖을 살피며');
     expect(block.textContent).toContain('아직도 안 그쳤네.');
   });
+
+  it('draws **bold** in a character\'s line as bold, as RisuAI does, not as 상황묘사 and stray stars', () => {
+    render(row('아리아: *웃는다* 그건 **정말** 싫어.'));
+    let block = host.querySelector('[data-testid="speech-character"]')!;
+    expect(block.querySelector('em')?.textContent).toBe('웃는다');
+    expect(block.querySelector('strong')?.textContent).toBe('정말');
+    expect(block.querySelector('ul')).toBeNull();
+    expect(block.textContent).not.toContain('*');
+
+    render(row('아리아: 비가 **많이** 오네.'));
+    block = host.querySelector('[data-testid="speech-character"]')!;
+    expect(block.querySelector('strong')?.textContent).toBe('많이');
+    expect(block.querySelector('em')).toBeNull();
+    expect(block.querySelector('ul')).toBeNull();
+    expect(block.textContent).not.toContain('*');
+
+    render(row('아리아: ***확실히*** 그래.'));
+    block = host.querySelector('[data-testid="speech-character"]')!;
+    expect(block.querySelector('strong')?.textContent).toBe('확실히');
+    expect(block.querySelector('ul')).toBeNull();
+    expect(block.textContent).not.toContain('*');
+  });
 });
 
 describe('a member the card gives a nickname', () => {

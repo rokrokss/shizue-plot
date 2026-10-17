@@ -73,8 +73,11 @@ const SPEAKER_RE = /^([^:\n]{1,40}):\s?(.*)$/;
  * A 상황묘사 span inside a spoken line. It never crosses a line break: the spans
  * are per line, and a pattern that spanned them would pair a stray `*` on one
  * line with a stray `*` on another. An unpaired `*` is therefore literal text.
+ *
+ * Only a single-star span is one: a star that is part of a `**` or `***` run is
+ * markdown bold, as RisuAI draws it, and stays in the dialogue as written.
  */
-const DESCRIPTION_RE = /\*([^*\n]+)\*/g;
+const DESCRIPTION_RE = /(?<!\*)\*([^*\n]+)\*(?!\*)/g;
 
 function sameSpeaker(a: SpeechSpeaker, b: SpeechSpeaker): boolean {
   if (a.kind !== b.kind) return false;

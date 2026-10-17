@@ -114,6 +114,18 @@ describe('parseAssistantSpeech', () => {
       'character(아리아) → dialogue:하나 *둘\n셋* 넷',
     ]);
   });
+
+  it('reads only a single-star span as 상황묘사, never the stars of **bold** or ***both***', () => {
+    expect(shape(parseAssistantSpeech('아리아: 비가 **많이** 오네.', roster))).toEqual([
+      'character(아리아) → dialogue:비가 **많이** 오네.',
+    ]);
+    expect(shape(parseAssistantSpeech('아리아: ***확실히*** 그래.', roster))).toEqual([
+      'character(아리아) → dialogue:***확실히*** 그래.',
+    ]);
+    expect(shape(parseAssistantSpeech('아리아: *웃는다* 그리고 **정말**', roster))).toEqual([
+      'character(아리아) → description:웃는다 | dialogue:그리고 **정말**',
+    ]);
+  });
 });
 
 describe('parseUserSpeech', () => {
