@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { exportJWK, generateKeyPair, SignJWT } from 'jose';
+import { format } from 'node:util';
+import { errors, exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { authorizationUrl, callbackResult, ChatGPTOAuth, createPendingSignIn, loopbackRedirectUri } from '../src/chatgptAuth.js';
 import { CHATGPT_IDLE_TIMEOUT_MS, ChatGPTError, createChatGPTAdapter, responseBody, withTrailingSystemJoined } from '../src/chatgptResponses.js';
@@ -16,6 +17,8 @@ async function fixture() {
   let subject = 'user-1';
   let revokeStatus = 200;
   let kid = 'key-1';
+  let audience: string | null = null;
+  let expiry: string | number = '1h';
   /** `keysAfterGrant`: the JWKS goes down the moment a token request succeeds. */
   const outage = { discovery: false, jwks: false, keysAfterGrant: false };
   const fetcher: typeof fetch = async (input, init) => {
@@ -41,7 +44,7 @@ async function fixture() {
       if (outage.keysAfterGrant) outage.jwks = true;
       const refresh = body.get('grant_type') === 'refresh_token';
       const id_token = await new SignJWT({ sub: subject, email: 'me@example.com', name: 'Me', ...(refresh ? {} : { nonce }) })
-        .setProtectedHeader({ alg: 'RS256', kid }).setIssuer('https://auth.openai.com').setAudience(body.get('client_id')!).setExpirationTime('1h').sign(keys.privateKey);
+        .setProtectedHeader({ alg: 'RS256', kid }).setIssuer('https://auth.openai.com').setAudience(audience ?? body.get('client_id')!).setExpirationTime(expiry).sign(keys.privateKey);
       return json({ access_token: refresh ? 'NEW_ACCESS' : 'ACCESS', refresh_token: refresh ? 'NEW_REFRESH' : 'REFRESH', id_token, expires_in: 3600, scope: tokenScope });
     }
     throw new Error(`Unexpected test endpoint: ${url}`);
@@ -54,6 +57,9 @@ async function fixture() {
     failRevoke: () => { revokeStatus = 503; },
     /** Signs ID tokens with a key ID the published set may lack, as after a rotation. */
     signWith: (value: string) => { kid = value; },
+    /** ID tokens for another client, or past their expiry: what the claim checks refuse. */
+    setAudience: (value: string) => { audience = value; },
+    setExpiry: (value: string | number) => { expiry = value; },
   };
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -149,6 +155,24 @@ describe('ChatGPT OAuth', () => {
     f.outage.keysAfterGrant = true;
     await expect(spend.exchange(f)).rejects.toMatchObject({ code: 'chatgpt_unavailable', status: 503 });
   });
+  it('lets no ID token claims ride on a refused token into a log', async () => {
+    const expired = Math.floor(Date.now() / 1000) - 3600;
+    for (const [claim, kind, refuse] of [
+      ['aud', errors.JWTClaimValidationFailed, (f: Fixture) => f.setAudience('someone_else')],
+      ['exp', errors.JWTExpired, (f: Fixture) => f.setExpiry(expired)],
+    ] as const) {
+      for (const run of [spend.exchange, spend.refresh]) {
+        const f = await fixture();
+        refuse(f);
+        const error = await run(f).then(() => null, (thrown: unknown) => thrown);
+        expect(error).toBeInstanceOf(kind);
+        expect(error).toMatchObject({ claim, reason: 'check_failed', payload: {} });
+        // What the text log format prints of an error handed to it whole: own fields and cause too.
+        expect(format(error)).not.toContain('me@example.com');
+      }
+    }
+  });
+
   it('reports unconfirmed revocation without throwing and filters the model catalog', async () => {
     const f = await fixture();
     expect(await f.oauth.revoke('oaiapp_test', 'REFRESH')).toBe(true);

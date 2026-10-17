@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { createRemoteJWKSet, customFetch, decodeJwt, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from 'jose';
+import { createRemoteJWKSet, customFetch, decodeJwt, errors, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from 'jose';
 import { CHATGPT_RESOURCE, providerError, requireOK } from './chatgptResponses.js';
 
 // Sign in with ChatGPT (OpenAI's open-source flow), stateless: the caller keeps the
@@ -10,6 +10,21 @@ const SCOPE = 'openid profile email offline_access resource.invoke chatgpt.token
 const random = (): string => randomBytes(32).toString('base64url');
 const directScope = (scope: string): boolean => scope.split(/\s+/).includes('chatgpt.tokens.use.direct');
 interface Discovery { issuer: string; jwks_uri: string; revocation_endpoint: string }
+
+/**
+ * A jose claim error with the ID token it checked left behind. `JWTClaimValidationFailed`
+ * and `JWTExpired` hold the decoded token — the reader's email among it — as `payload`
+ * and again in `cause`, so whatever logs a failed sign-in or refresh whole, in the
+ * text log format, would print it. The same kind of error goes on instead, with its
+ * claim, reason, code and stack, and an empty payload.
+ */
+function withoutClaims(error: unknown): unknown {
+  if (!(error instanceof errors.JWTClaimValidationFailed || error instanceof errors.JWTExpired)) return error;
+  const Kind = error.constructor as typeof errors.JWTClaimValidationFailed;
+  const plain = new Kind(error.message, {}, error.claim, error.reason);
+  plain.stack = error.stack;
+  return plain;
+}
 interface TokenResponse { access_token: string; refresh_token?: string; id_token?: string; scope?: string; expires_in: number }
 
 export interface ChatGPTTokens { accessToken: string; refreshToken: string; idToken?: string; scope: string; expiresAt: number }
@@ -143,14 +158,17 @@ export class ChatGPTOAuth {
       const key: JWTVerifyGetKey = async (header, token) => {
         try { return await this.keys!(header, token); } catch (error) { keyFailed = true; throw error; }
       };
+      const verified = async (idToken: string, keys: JWTVerifyGetKey): Promise<JWTPayload> => {
+        try { return (await this.verify(idToken, keys, options)).payload; } catch (error) { throw withoutClaims(error); }
+      };
       try {
-        identity = (await this.verify(result.id_token, key, options)).payload;
+        identity = await verified(result.id_token, key);
       } catch (error) {
         if (!keyFailed) throw error;
         // The signing key was missing or unreachable: a rotation inside jose's refetch
         // cooldown, or auth.openai.com failing after it answered. Fetch the keys again.
         if (await this.keys!.reload().then(() => true, () => false)) {
-          identity = (await this.verify(result.id_token, this.keys!, options)).payload;
+          identity = await verified(result.id_token, this.keys!);
         } else if (subject) {
           // Unreachable keys are not a mismatch, and the refresh already rotated the
           // token. The response came straight from the token endpoint over TLS, which
