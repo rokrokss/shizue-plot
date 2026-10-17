@@ -1,4 +1,14 @@
+import type { Viewport } from 'next';
 import type { ReactNode } from 'react';
+
+/**
+ * The page reaches under the home indicator and, on a phone on its side, the
+ * notch, so that `env(safe-area-inset-*)` reads the real insets and whatever
+ * stands at an edge keeps its content out of them. Without it iOS reports 0, and
+ * a site added to the Home Screen, which iOS opens as a web app, has its tab bar
+ * and composer on the indicator.
+ */
+export const viewport: Viewport = { viewportFit: 'cover' };
 
 /**
  * A pass-through, and only because `not-found.tsx` sits beside it. That page is

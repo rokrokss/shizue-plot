@@ -73,7 +73,7 @@ export function Lightbox({
       aria-label={current.alt}
       data-testid="lightbox"
       tabIndex={-1}
-      className="fixed inset-0 z-50 flex flex-col overscroll-contain bg-canvas/95 focus:outline-none"
+      className="fixed inset-0 z-50 flex flex-col overscroll-contain bg-canvas/95 pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)] focus:outline-none"
       // The backdrop is everything the panel is not; a click inside it closes.
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();

@@ -104,7 +104,14 @@
 }
 
 html { scrollbar-gutter: stable; }
+/*
+ * The viewport covers the notch (`viewportFit` in the root layout), so a phone on
+ * its side would put the page's edges under it: the side insets keep what is in
+ * the page's flow out, as Safari's own bars did. Fixed bars keep their own.
+ */
 body {
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
   font-family: var(--font-sans);
   background-color: var(--color-canvas);
   color: var(--color-fg);

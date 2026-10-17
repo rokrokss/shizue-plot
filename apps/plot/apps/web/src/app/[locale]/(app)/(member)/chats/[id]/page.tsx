@@ -3994,6 +3994,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                       return;
                     }
                     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                      // A touch keyboard has no Shift+Enter to break a line, so there
+                      // Enter breaks it and the round button sends (PocketRisu's
+                      // `sendKeyMobile`); a keyboard paired to the tablet sends with
+                      // Ctrl/⌘+Enter.
+                      if (!event.metaKey && !event.ctrlKey && window.matchMedia('(pointer: coarse)').matches) return;
                       event.preventDefault();
                       submit();
                     }
@@ -4001,7 +4006,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                   // Its height is written by `autoGrow`, so the drag handle would only
                   // be overruled on the next keystroke; past `max-h-48` it scrolls.
                   // The right padding is the `*` button's, which sits inside the field.
-                  className="block max-h-48 min-h-11 resize-none! overflow-y-auto rounded-3xl border-focus/50 bg-surface py-2.5 pr-11 pl-4"
+                  // 16px on a touch screen, below which iOS zooms the page in on focus;
+                  // the 24px line keeps one line as tall as the send button.
+                  className="block max-h-48 min-h-11 resize-none! overflow-y-auto rounded-3xl border-focus/50 bg-surface py-2.5 pr-11 pl-4 pointer-coarse:text-base/6"
                 />
                 <button
                   type="button"

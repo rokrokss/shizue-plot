@@ -44,7 +44,7 @@ export function BottomSheet({
         aria-label={title}
         data-testid="bottom-sheet"
         tabIndex={-1}
-        className="max-h-[80dvh] overflow-y-auto overscroll-contain rounded-t-2xl border-t border-line bg-raised px-5 pt-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] focus:outline-none lg:mx-auto lg:w-full lg:max-w-3xl"
+        className="max-h-[80dvh] overflow-y-auto overscroll-contain rounded-t-2xl border-t border-line bg-raised pt-4 pr-[calc(1.25rem+env(safe-area-inset-right))] pb-[calc(1.25rem+env(safe-area-inset-bottom))] pl-[calc(1.25rem+env(safe-area-inset-left))] focus:outline-none lg:mx-auto lg:w-full lg:max-w-3xl"
       >
         <div className="flex items-center justify-between gap-3 pb-4">
           <h2 className="text-sm font-medium text-fg">{title}</h2>
