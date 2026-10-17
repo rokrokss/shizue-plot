@@ -539,6 +539,8 @@ export const MessageBody = memo(function MessageBody({
   componentNames,
   roster = NO_ROSTER,
   speaker,
+  soleMember,
+  namesExpected = false,
   face,
   previousSameRole = '',
   chatIndex,
@@ -590,6 +592,22 @@ export const MessageBody = memo(function MessageBody({
    * owner (`speechRuns`): they are drawn in that member's block, not as the scene.
    */
   speaker?: string;
+  /**
+   * The one member of a one-member work, who says the lines that name no one
+   * only in a message that names no one at all (2026-10-18 owner decision, as
+   * Zeta parts them): once the message names a speaker — `나카노 니노: …` — the
+   * lines around it are the scene's and are drawn as narration.
+   */
+  soleMember?: string;
+  /**
+   * While a new reply of `soleMember`'s is written, whether it is expected to
+   * name its speaker, as the reply before it did: its lines that name no one are
+   * then the scene's from the first word, so a reply that opens on its scene
+   * does not jump out of a bubble when the first name lands. Otherwise they are
+   * the member's until a name lands. Either way a reply moves between bubble and
+   * narration only where it breaks its chat's habit.
+   */
+  namesExpected?: boolean;
   /**
    * Who a reply with no roster to name its speakers is drawn under — the work's
    * own face and name, before the roster has arrived or in a work with no
@@ -656,11 +674,11 @@ export const MessageBody = memo(function MessageBody({
    * A display script's island is not touched here: its template had the same pass
    * before its sanitizer (`renderTemplate`).
    */
-  const runs = useMemo<(TextRun[] | null)[]>(
+  const { runs, soleOwns } = useMemo<{ runs: (TextRun[] | null)[]; soleOwns: boolean }>(
     () => {
       const names = roster.map((member) => member.name);
       const aliases = speakerAliases(roster);
-      return segments.map((segment) => {
+      const cut = segments.map((segment) => {
         if (segment.kind !== 'text') return null;
         // RisuAI's music and video become their players first, wherever they stand.
         const own = renderMediaTokens(stripVariableMacros(segment.text), assets, resolveAsset);
@@ -682,8 +700,19 @@ export const MessageBody = memo(function MessageBody({
           }));
         });
       });
+      const sole =
+        speaker === undefined &&
+        soleMember !== undefined &&
+        !(streaming && namesExpected) &&
+        !cut.some((segment) => segment?.some((run) => run.name !== null));
+      if (!sole) return { runs: cut, soleOwns: false };
+      const owned = cut.map(
+        (segment) =>
+          segment?.map((run) => (run.narration ? { ...run, name: soleMember, narration: false } : run)) ?? null,
+      );
+      return { runs: owned, soleOwns: true };
     },
-    [segments, assets, resolveAsset, roster, speaker, face?.name, userImage, buttons],
+    [segments, assets, resolveAsset, roster, speaker, soleMember, namesExpected, streaming, face?.name, userImage, buttons],
   );
   // RisuAI translates here: after the display scripts and the speaker split, before the markdown.
   const shown = useBodyTranslation(segments, runs, translation, streaming);
@@ -709,7 +738,7 @@ export const MessageBody = memo(function MessageBody({
    * reader's turn, a scene with several speakers and no owner — it is drawn as
    * it always was.
    */
-  const voice = speaker ?? face?.name;
+  const voice = speaker ?? (soleOwns ? soleMember : undefined) ?? face?.name;
   /** A speaker's face: their member picture, or the work's own for the work's own name. */
   const avatarOf = (name: string): string | null =>
     roster.find((member) => member.name === name)?.avatarUrl ?? (name === face?.name ? face.avatarUrl : null);

@@ -66,9 +66,10 @@ export function speakerAliases(
  * `speaker` says the lines that name no one in a reply that has one owner: a
  * message a card's script wrote as its character (`source` `script`), which
  * RisuAI draws as that character's own; a group reply, stored under its
- * speaker; any reply of a one-member plot. Those lines are the owner's own 지문
- * and speech, and go in the owner's run exactly as written — a line that names
- * someone is still theirs. Without it they are the scene's (a message with
+ * speaker; a one-member plot's message that names no one at all, which
+ * `MessageBody` (`soleMember`) decides over the whole message. Those lines are
+ * the owner's own 지문 and speech, and go in the owner's run exactly as written —
+ * a line that names someone is still theirs. Without it they are the scene's (a message with
  * several speakers and no owner).
  */
 export function speechRuns(

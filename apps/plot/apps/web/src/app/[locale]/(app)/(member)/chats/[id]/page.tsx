@@ -52,6 +52,7 @@ import type { CbsContext } from '@/lib/cbs';
 import type { ComponentContext } from '@/lib/componentCalls';
 import { toggleDirectionMarkup } from '@/lib/directionMarkup';
 import { separateActions } from '@/lib/actionBreaks';
+import { speakerAliases, speechRuns } from '@/lib/speechRuns';
 import { turnBlocks, turnText, type SceneBlock, type TurnNames } from '@/lib/turnText';
 import { awaitingEmotion, emotionResolver, emotionSlots, withEmotions } from '@/lib/emotion';
 import {
@@ -301,6 +302,8 @@ interface ViewMessage {
    * otherwise the lead's (`runtimeOf`).
    */
   spoken?: boolean;
+  /** The reply being written is expected to name its speaker (`MessageBody` `namesExpected`). */
+  namesExpected?: boolean;
   /** The chat's opening, whose `#` lines are scene titles. */
   intro?: boolean;
   /** Hidden from the AI: drawn dimmed, and numbered no depth for the display scripts. */
@@ -2846,6 +2849,12 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   // bubble and streams below it. A round's next speaker streams below the last
   // reply the same way, under their own face from the first moment.
   if (active === 'send' || active === 'regenerate' || active === 'auto' || active === 'reply') {
+    // In a one-member work, a new reply is expected to name its speaker when the
+    // reply before it did, and is drawn so while it is written (2026-10-18).
+    const before = members.length === 1 ? view.findLast((row) => row.role === 'assistant') : undefined;
+    const namesExpected =
+      before !== undefined &&
+      speechRuns(before.content, [members[0]!.name], speakerAliases(members)).some((run) => run.name !== null);
     view.push({
       key: 'streaming',
       id: null,
@@ -2855,6 +2864,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       createdAt: null,
       streaming: mode !== null,
       ...(streamMember ? { speaker: streamMember.name } : {}),
+      ...(namesExpected ? { namesExpected: true } : {}),
       // Dressed as its speaker's from the first token, as it will be once stored.
       ...(group && streamMember ? { member: streamMember.id, spoken: true } : {}),
     });
@@ -3265,6 +3275,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                         userImage={personaAvatarUrl}
                         roster={members}
                         {...(message.speaker ? { speaker: message.speaker } : {})}
+                        {...(message.namesExpected ? { namesExpected: true } : {})}
                         {...(message.member ? { member: message.member, ...(message.spoken ? { spoken: true } : {}) } : {})}
                         assets={assetUrls}
                         resolveAsset={

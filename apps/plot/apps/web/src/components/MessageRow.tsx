@@ -242,6 +242,7 @@ export const MessageRow = memo(function MessageRow({
   componentNames,
   roster = NO_ROSTER,
   speaker,
+  namesExpected,
   member,
   spoken = false,
   typing,
@@ -315,6 +316,8 @@ export const MessageRow = memo(function MessageRow({
    * (`speakerMemberId`) — the reply is that member's whole.
    */
   speaker?: string;
+  /** While a new reply of a one-member work is written, whether it is expected to name its speaker (`MessageBody`). */
+  namesExpected?: boolean;
   /**
    * In a work of several members, whose message this is for its custom UI: that
    * member's stylesheet dresses it (`data-shizue-member`, `sanitizeCustomHtml`).
@@ -446,13 +449,13 @@ export const MessageRow = memo(function MessageRow({
    */
   const attributed = !isUser && !narration && roster.length > 0;
   /**
-   * Who owns the lines that name no one. A reply with one owner is that
-   * character's whole, so its unprefixed lines are the character's own 지문 and
-   * are drawn inside its block, not as a narrator: the member the page names, or
-   * the one member of a one-member plot — its greeting included, as a card's
-   * first message is the character's own. A message with several speakers and
-   * no owner (a scene written before group turns) keeps those lines the
-   * scene's. The narrator is the narration rows alone.
+   * Who replies, and who owns the lines that name no one. A reply the page names
+   * a member for (a group reply, a card script's) is that character's whole, so
+   * its unprefixed lines are the character's own 지문 and are drawn inside its
+   * block. The one member of a one-member plot owns them only in a message that
+   * names no one (`soleMember`, 2026-10-18 owner decision): once the reply or
+   * greeting names its speaker, the lines around it are the scene's narration, as
+   * in a message with several speakers.
    */
   const owner = speaker ?? (roster.length === 1 ? roster[0]!.name : undefined);
   /**
@@ -954,7 +957,7 @@ export const MessageRow = memo(function MessageRow({
               {...bodyProps}
               content={body}
               roster={roster}
-              {...(owner ? { speaker: owner } : {})}
+              {...(speaker ? { speaker } : owner ? { soleMember: owner, namesExpected: namesExpected ?? false } : {})}
               mode="reply"
               sceneHeadings={intro}
               continued={grouped ?? false}

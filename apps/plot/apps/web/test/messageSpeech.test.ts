@@ -173,23 +173,51 @@ describe('a message a card’s script wrote as its character', () => {
 
 describe('a reply in a work of one member', () => {
   const SOLE: PublicMember[] = [ROSTER[0]!];
+  const NAMED = '창밖은 아직 어둡다.\n아리아: 안녕 *웃으며* 반가워\n\n난로의 불이 낮게 탄다.';
 
-  it('is that character\'s whole: its unprefixed lines are their 지문, inside their block', () => {
-    render(row('창밖은 아직 어둡다.\n아리아: 안녕 *웃으며* 반가워\n\n난로의 불이 낮게 탄다.', 'assistant', { roster: SOLE }));
+  it('draws its unprefixed lines as the scene\'s narration once it names its speaker, as Zeta does', () => {
+    render(row(NAMED, 'assistant', { roster: SOLE }));
 
     expect(speakers()).toEqual(['아리아']);
-    expect(narrations()).toHaveLength(0);
     const block = host.querySelector('[data-testid="speech-character"]')!;
-    expect(block.textContent).toContain('창밖은 아직 어둡다.');
-    expect(block.textContent).toContain('난로의 불이 낮게 탄다.');
+    expect(block.textContent).not.toContain('창밖은');
+    expect(block.textContent).not.toContain('난로의');
     // The *지문* inside a spoken line is still dimmed where it was written.
     expect(block.querySelector('em')?.textContent).toBe('웃으며');
-    // One face, the member's — the row no longer speaks for the reply.
+    expect(narrations().map((node) => node.textContent?.trim())).toEqual(['창밖은 아직 어둡다.', '난로의 불이 낮게 탄다.']);
+    // One face, the member's — the narration has none.
     expect([...host.querySelectorAll('img')].map((node) => node.getAttribute('src'))).toEqual(['/avatars/aria.png']);
   });
 
-  it('is theirs from its first unprefixed word while it streams, not the scene\'s', () => {
+  it('is that character\'s whole when it names no one: its lines are their 지문, inside their block', () => {
+    render(row('*창밖을 본다.* 아직 어둡네.\n\n난로의 불이 낮게 탄다.', 'assistant', { roster: SOLE }));
+
+    expect(speakers()).toEqual(['아리아']);
+    expect(narrations()).toHaveLength(0);
+    expect(host.querySelector('[data-testid="speech-character"]')!.textContent).toContain('난로의 불이 낮게 탄다.');
+  });
+
+  it('is theirs while it streams until a name lands, when its chat\'s replies name no one', () => {
     render(row('창밖은', 'assistant', { roster: SOLE, streaming: true }));
+    expect(speakers()).toEqual(['아리아']);
+    expect(narrations()).toHaveLength(0);
+
+    render(row('창밖은 아직 어둡다.\n아리아: 안', 'assistant', { roster: SOLE, streaming: true }));
+    expect(speakers()).toEqual(['아리아']);
+    expect(narrations()).toHaveLength(1);
+  });
+
+  it('opens on the scene while it streams when its chat\'s replies name their speaker, and stays there', () => {
+    render(row('창밖은', 'assistant', { roster: SOLE, streaming: true, namesExpected: true }));
+    expect(speakers()).toEqual([]);
+    expect(narrations()).toHaveLength(1);
+
+    render(row('창밖은 아직 어둡다.\n아리아: 안', 'assistant', { roster: SOLE, streaming: true, namesExpected: true }));
+    expect(speakers()).toEqual(['아리아']);
+    expect(narrations()[0]!.textContent?.trim()).toBe('창밖은 아직 어둡다.');
+
+    // Done naming no one after all: the member's whole, as any such reply.
+    render(row('창밖은 아직 어둡다.', 'assistant', { roster: SOLE, namesExpected: true }));
     expect(speakers()).toEqual(['아리아']);
     expect(narrations()).toHaveLength(0);
   });
