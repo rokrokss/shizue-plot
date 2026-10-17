@@ -274,9 +274,13 @@ describe('a turn the reader wrote partly as others', () => {
     expect(narration.querySelector('.chat-narration.text-muted')).not.toBeNull();
     expect(narration.querySelector('.user-bubble, .chat-bubble')).toBeNull();
     expect(host.textContent).not.toContain('@');
-    // The reader's own stretches keep their bubble and their 상황묘사.
+    // The reader's own stretches keep their bubble and their 상황묘사, parted from
+    // their words as a character's are.
     const bubbles = [...host.querySelectorAll('[data-testid="reader-runs"] .user-bubble')];
-    expect(bubbles.map((node) => node.textContent)).toEqual(['안녕 손을 흔든다', '다시 나.']);
+    expect(bubbles.map((node) => [...node.querySelectorAll('p')].map((p) => p.innerHTML))).toEqual([
+      ['안녕', '<em>손을 흔든다</em>'],
+      ['다시 나.'],
+    ]);
   });
 
   it('reads a member by its nickname and a bare `@:` line as narration, and a name nobody has as the reader’s', () => {

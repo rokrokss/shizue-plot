@@ -846,10 +846,12 @@ export const MessageBody = memo(function MessageBody({
           return <SceneHeading key={index} text={piece.item.text} />;
         }
         if (piece.kind === 'plain') {
+          // The reader's own character parts their actions from their words as the
+          // work's characters do (2026-10-17 owner decision).
           return (
             <Fragment key={index}>
               {piece.blocks.map((block, nth) => (
-                <MarkdownBlock key={nth} content={block} live={piece.live} />
+                <MarkdownBlock key={nth} content={piece.live ? block : separateActions(block)} live={piece.live} />
               ))}
             </Fragment>
           );

@@ -50,6 +50,7 @@ import { applyMention, matchMentions, mentionAt, narratorOption, type MentionOpt
 import type { CbsContext } from '@/lib/cbs';
 import type { ComponentContext } from '@/lib/componentCalls';
 import { toggleDirectionMarkup } from '@/lib/directionMarkup';
+import { separateActions } from '@/lib/actionBreaks';
 import { turnBlocks, turnText, type SceneBlock, type TurnNames } from '@/lib/turnText';
 import { awaitingEmotion, emotionResolver, emotionSlots, withEmotions } from '@/lib/emotion';
 import {
@@ -3488,7 +3489,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             {editScene.length > 0 || editTurn ? (
               <TurnEditor
                 key={editing}
-                initial={editScene.length > 0 ? turnText(editScene, turnNames) : editTurn!.content}
+                initial={editScene.length > 0 ? turnText(editScene, turnNames) : separateActions(editTurn!.content)}
                 label={t('editMessage')}
                 disabled={settingsLocked}
                 onCancel={() => setEditing(null)}

@@ -1,7 +1,7 @@
 /**
  * A character's `*지문*` and their words as paragraphs of their own, as Zeta draws
- * a reply (2026-10-17 owner decision): wherever the model ran an action and a
- * line together — `*카타나를 쥐며* 합동 훈련 따위 필요 없어.` — the action stands
+ * a reply (2026-10-17 owner decision), the reader's own character's as well:
+ * wherever an action and a line ran together — `*카타나를 쥐며* 합동 훈련 따위 필요 없어.` — the action stands
  * on its own and the words follow after a paragraph's gap. Only how the text is
  * drawn and edited: the model's output and the stored message are not touched
  * until the reader saves an edit, which starts from this same text.
