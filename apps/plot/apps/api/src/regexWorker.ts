@@ -17,8 +17,9 @@
  * that would hang costs at most that, once. The thread marks the script it is
  * on before each one, so the pool knows which one it had to stop: that script
  * is skipped from then on, in this process, for every chat (it is logged once),
- * and the job is tried again without it. After `MAX_TRIES` the history goes out
- * as stored. Whatever happens the prompt is built — a script is a rewrite of
+ * and the job is tried again without it. After `MAX_TRIES`, or when no thread
+ * comes free in `PROMPT_SCRIPT_QUEUE_MS`, the history goes out as stored.
+ * Whatever happens the prompt is built — a script is a rewrite of
  * the turns, never a condition of sending them.
  *
  * The assembler stays pure and synchronous: the caller hands it what this
@@ -38,6 +39,14 @@ const POOL_SIZE = 2;
 
 /** Tries a job gets, each without the script the last one was stopped in. */
 const MAX_TRIES = 3;
+
+/**
+ * How long a try waits for a thread when both are busy: one job's worst case.
+ * Cards whose scripts run out the clock would otherwise hold both threads and
+ * queue every other reader's prompt behind them, however long the line grew. A
+ * job that waits it out goes as stored, as one that runs out of tries does.
+ */
+export const PROMPT_SCRIPT_QUEUE_MS = PROMPT_SCRIPT_DEADLINE_MS * MAX_TRIES;
 
 /**
  * A ceiling on the heap of a script thread: a template that multiplies its match
@@ -85,8 +94,11 @@ interface Thread {
   busy: boolean;
 }
 
-/** How a try ended: the texts, or the index of the script it was stopped in (-1: none had started). */
-type TryResult = { texts: string[] } | { stoppedAt: number };
+/**
+ * How a try ended: the texts, the index of the script it was stopped in (-1:
+ * none had started), or no thread in time.
+ */
+type TryResult = { texts: string[] } | { stoppedAt: number } | { queued: true };
 
 let threads: Thread[] = [];
 const waiting: ((thread: Thread) => void)[] = [];
@@ -119,14 +131,27 @@ function retire(thread: Thread): void {
   }
 }
 
-function acquire(): Promise<Thread> {
+/** A thread for a try; null when none came free within `waitMs`. */
+function acquire(waitMs: number): Promise<Thread | null> {
   const idle = threads.find((thread) => !thread.busy);
   const thread = idle ?? (threads.length < POOL_SIZE ? spawn() : undefined);
   if (thread) {
     thread.busy = true;
     return Promise.resolve(thread);
   }
-  return new Promise((resolve) => waiting.push(resolve));
+  return new Promise((resolve) => {
+    const take = (thread: Thread): void => {
+      clearTimeout(timer);
+      resolve(thread);
+    };
+    // Out of the line, so the thread that frees up next goes to someone still waiting.
+    const timer = setTimeout(() => {
+      const at = waiting.indexOf(take);
+      if (at !== -1) waiting.splice(at, 1);
+      resolve(null);
+    }, waitMs);
+    waiting.push(take);
+  });
 }
 
 function release(thread: Thread): void {
@@ -135,10 +160,10 @@ function release(thread: Thread): void {
   else thread.busy = false;
 }
 
-function tryOnce(job: PromptScriptJob, deadlineMs: number): Promise<TryResult> {
-  return acquire().then(
+function tryOnce(job: PromptScriptJob, deadlineMs: number, queueMs: number): Promise<TryResult> {
+  return acquire(queueMs).then(
     (thread) =>
-      new Promise<TryResult>((resolve) => {
+      thread === null ? { queued: true } : new Promise<TryResult>((resolve) => {
         const id = (nextId += 1);
         Atomics.store(thread.progress, 0, -1);
         let settled = false;
@@ -179,17 +204,21 @@ function tryOnce(job: PromptScriptJob, deadlineMs: number): Promise<TryResult> {
  * The texts the job's turns are sent as, in its order. Scripts that ran out the
  * clock before are left out; one that runs out now is left out from now on and
  * the job tried again without it. Turns come back as stored when no script is
- * left to run, or when `MAX_TRIES` were not enough.
+ * left to run, when `MAX_TRIES` were not enough, or when no thread came free.
  */
 export async function runPromptScriptJob(
   job: PromptScriptJob,
-  { deadlineMs = PROMPT_SCRIPT_DEADLINE_MS }: { deadlineMs?: number } = {},
+  { deadlineMs = PROMPT_SCRIPT_DEADLINE_MS, queueMs = PROMPT_SCRIPT_QUEUE_MS }: { deadlineMs?: number; queueMs?: number } = {},
 ): Promise<string[]> {
   const stored = job.messages.map((message) => message.text);
   let scripts = job.scripts.filter((script) => !quarantined.has(identityOf(script)));
   for (let tries = 0; tries < MAX_TRIES && scripts.length > 0 && job.messages.length > 0; tries += 1) {
-    const result = await tryOnce({ ...job, scripts }, deadlineMs);
+    const result = await tryOnce({ ...job, scripts }, deadlineMs, queueMs);
     if ('texts' in result) return result.texts;
+    if ('queued' in result) {
+      console.warn(`[api] prompt scripts were not run: no script thread came free in ${queueMs} ms`);
+      break;
+    }
     const culprit = scripts[result.stoppedAt];
     // Stopped before any script started: nothing to blame, so nothing to retry without.
     if (!culprit) break;

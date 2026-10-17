@@ -215,7 +215,11 @@ export function createChatGPTAccounts(db: Db, options: { secret: string; callbac
         catalogs.clear();
         return { userId: await persist(identity, clientId, tokens), clientId, target: saved.target };
       } catch (error) {
-        if (!(error instanceof ChatGPTError)) console.error('[chatgpt] sign-in failed', error);
+        // Name and message only: an Error printed whole shows its own fields, and
+        // jose's claim errors carry the ID token's decoded payload — the reader's email.
+        if (!(error instanceof ChatGPTError)) {
+          console.error(`[chatgpt] sign-in failed: ${error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error'}`);
+        }
         throw new SignInFailure(error instanceof ChatGPTError ? error.code : 'chatgpt_login_failed', saved.target);
       }
     },

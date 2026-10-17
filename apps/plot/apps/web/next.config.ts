@@ -1,6 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import type { NextConfig } from 'next';
 import createNextIntlPlugin from 'next-intl/plugin';
+import { securityHeaders } from './securityHeaders';
 
 const withNextIntl = createNextIntlPlugin('./src/i18n/request.ts');
 const apiOrigin = process.env['API_ORIGIN'] ?? 'http://localhost:8787';
@@ -39,6 +40,9 @@ const nextConfig: NextConfig = {
     // reader's model (`POST /api/plots/draft`), which can be quiet longer than
     // that. (Card imports were one of them until they became a job.)
     proxyTimeout: 180_000,
+  },
+  async headers() {
+    return securityHeaders(process.env);
   },
   async rewrites() {
     return [{ source: '/api/:path*', destination: `${apiOrigin}/api/:path*` }];

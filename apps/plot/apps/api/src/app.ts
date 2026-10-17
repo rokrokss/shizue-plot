@@ -24,6 +24,7 @@ import { presetRoutes } from './routes/presets.js';
 import { readerPresetRoutes } from './routes/readerPresets.js';
 import { readerModuleRoutes } from './routes/readerModules.js';
 import { plotRoutes } from './routes/plots.js';
+import { securityHeaders } from './securityHeaders.js';
 import { requireUser } from './session.js';
 
 const MB = 1024 * 1024;
@@ -47,6 +48,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
 
   // First, so every line a request says carries its id, and refusals are logged and counted too (`log.ts`).
   app.use('*', requestLog());
+  app.use('*', securityHeaders(deps.webOrigin));
   if (deps.webOrigin) app.use('*', originGuard(deps.webOrigin, deps.remoteOrigins));
 
   app.onError((error, c) => errorResponse(c, error));

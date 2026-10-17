@@ -464,6 +464,17 @@ describe('what a listener cannot reach from Lua', () => {
     }
     expect(await reach(`'다음'`)).toBe('true:다음');
   });
+
+  it('sends the request unedited when no child comes free in time, and serves on after', async () => {
+    // Both children held by listeners that never return.
+    const held = [0, 1].map(() => runRequestLua({ scripts: [listener('while true do end')], request, snapshot }, { deadlineMs: 1_500 }));
+    const started = Date.now();
+    const queued = await runRequestLua({ scripts: [listener('return req')], request, snapshot }, { queueMs: 200 });
+    expect(queued).toEqual({ ok: false, reason: 'no Lua process came free in 200 ms' });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(await Promise.all(held)).toEqual([0, 1].map(() => ({ ok: false, reason: 'no answer in 1500 ms' })));
+    expect(await reach(`'다음'`)).toBe('true:다음');
+  });
 });
 
 describe('the parent’s side of the protocol', () => {

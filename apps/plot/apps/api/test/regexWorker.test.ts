@@ -66,6 +66,19 @@ describe('runPromptScriptJob', () => {
     expect(again.ms).toBeLessThan(PROMPT_SCRIPT_DEADLINE_MS);
   });
 
+  it('sends the turns as stored when no thread comes free in time, and the pool serves on after', async () => {
+    const hung = promptScriptJob([{ role: 'user', content: `${'g'.repeat(40)}h` }], scriptsOf(editprocess('^(g+)+$', 'X')));
+    const job = promptScriptJob([{ role: 'user', content: 'queued turn' }], scriptsOf(editprocess('queued', 'served')));
+    // Both threads held by a pattern that never returns.
+    const held = [0, 1].map(() => runPromptScriptJob(hung, { deadlineMs: 1_000 }));
+    const started = Date.now();
+    expect(await runPromptScriptJob(job, { queueMs: 100 })).toEqual(['queued turn']);
+    expect(Date.now() - started).toBeLessThan(800);
+    await Promise.all(held);
+    // The waiter that gave up left the line: the threads that came free went to no one.
+    expect(await runPromptScriptJob(job)).toEqual(['served turn']);
+  });
+
   it('sends the turns as stored when every script runs out of time', async () => {
     const turn = `${'c'.repeat(60)}d`;
     const texts = await runPromptScriptJob(

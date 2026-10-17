@@ -107,11 +107,20 @@ import { REQUEST_IMAGE_BUDGET, turnsOf, type EditedTurn } from './requestTrigger
 export const REQUEST_LUA_DEADLINE_MS = 3_000;
 
 /**
+ * How long a run waits for a child when both are busy: one run's deadline. A
+ * card whose listener runs it out on every reply would otherwise hold both and
+ * queue every other reader's reply behind it, however long the line grew. A run
+ * that waits it out sends the request unedited, as a run that fails does.
+ */
+export const REQUEST_LUA_QUEUE_MS = REQUEST_LUA_DEADLINE_MS;
+
+/**
  * Children kept, booted or running: two, as the request triggers have two
  * threads. A run takes milliseconds and a reply tens of seconds, so two serve
  * many generations at once, and a card that hangs holds one for the deadline
  * at most. Each idles at about 70 MB of memory and is held to `HEAP_MB` of heap
- * and `LUA_SERVER_MEMORY` (64 MB) a Lua state; a third run waits for one to finish.
+ * and `LUA_SERVER_MEMORY` (64 MB) a Lua state; a third run waits for one to finish,
+ * for `REQUEST_LUA_QUEUE_MS` at most.
  */
 const POOL_SIZE = 2;
 
@@ -393,11 +402,24 @@ function fresh(): LuaChild {
   return child;
 }
 
-function acquire(): Promise<LuaChild> {
+/** A child for a run; null when none came free within `waitMs`. */
+function acquire(waitMs: number): Promise<LuaChild | null> {
   const ready = idle.shift();
   if (ready) return Promise.resolve(ready);
   if (live < POOL_SIZE) return Promise.resolve(fresh());
-  return new Promise((resolve) => waiting.push(resolve));
+  return new Promise((resolve) => {
+    const take = (child: LuaChild): void => {
+      clearTimeout(timer);
+      resolve(child);
+    };
+    // Out of the line, so the child that frees up next goes to someone still waiting.
+    const timer = setTimeout(() => {
+      const at = waiting.indexOf(take);
+      if (at !== -1) waiting.splice(at, 1);
+      resolve(null);
+    }, waitMs);
+    waiting.push(take);
+  });
 }
 
 /** Ends a child after its run, whatever happened, and fills its place: whoever waits, or the warm pool. */
@@ -421,12 +443,14 @@ export async function runRequestLua(
   input: RequestLuaInput,
   {
     deadlineMs = REQUEST_LUA_DEADLINE_MS,
+    queueMs = REQUEST_LUA_QUEUE_MS,
     probe = probeRequestLua,
-  }: { deadlineMs?: number; probe?: () => Promise<boolean> } = {},
+  }: { deadlineMs?: number; queueMs?: number; probe?: () => Promise<boolean> } = {},
 ): Promise<RequestLuaOutcome> {
   // The probe said so once, at startup.
   if (!(await probe())) return { ok: false, reason: 'the server cannot sandbox Lua', quiet: true };
-  const child = await acquire();
+  const child = await acquire(queueMs);
+  if (!child) return { ok: false, reason: `no Lua process came free in ${queueMs} ms` };
   try {
     return await runIn(child, input, deadlineMs);
   } finally {

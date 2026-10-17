@@ -114,6 +114,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { format } from 'node:util';
 import type { Hono } from 'hono';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { stCard, v3Card } from '../../../packages/core/test/fixtures/cards.js';
@@ -1074,6 +1075,26 @@ describe('Sign in with ChatGPT', () => {
     const declined = await request(cookieOf(again), `/api/chatgpt/callback?error=access_denied&state=${retry}`, 'GET', undefined, target);
     expect(declined.headers.get('location')).toBe('/ja/login?error=chatgpt_login_declined&next=%2F');
     expect(await db.select().from(user)).toHaveLength(0);
+  });
+
+  it('logs a failed sign-in without the ID token claims an error carries', async () => {
+    const openai = fakeOpenAI();
+    // jose's JWTClaimValidationFailed, which holds the decoded payload it checked.
+    const claimError = Object.assign(new Error('unexpected "aud" claim value'), {
+      name: 'JWTClaimValidationFailed', claim: 'aud', reason: 'check_failed',
+      payload: { sub: 'alice', email: 'alice@chatgpt.test', aud: 'someone_else' },
+    });
+    vi.spyOn(openai.oauth, 'exchange').mockRejectedValue(claimError);
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { callback } = await hostedApp(openai).signIn('alice');
+      expect(callback.headers.get('location')).toBe('/ko/login?error=chatgpt_login_failed&next=%2Fsettings');
+      const line = logged.mock.calls.map((args) => format(...args)).join('\n');
+      expect(line).toContain('[chatgpt] sign-in failed: JWTClaimValidationFailed: unexpected "aud" claim value');
+      expect(line).not.toContain('alice@chatgpt.test');
+    } finally {
+      logged.mockRestore();
+    }
   });
 
   it('answers each reader from their own account and signs one out without touching another', async () => {
