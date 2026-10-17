@@ -404,25 +404,10 @@ test('the chats come over with their swipes, speakers and persona', async () => 
   expect(state.path[5]!.attachments?.map((one) => one.mime)).toEqual(['image/png']);
   const menu = await page.request.get(`${origin}${state.path[4]!.attachments![0]!.url}`);
   expect(await menu.text()).toBe('홍차, 녹차');
-  // The branch parts after the first reply: its turn is the narration's sibling, one swipe away.
+  // The branch parts after the first reply: its turn is the narration's sibling, kept in the tree.
   const fork = state.siblings[state.path[2]!.id]!;
   expect(fork.total).toBe(2);
   const other = fork.ids.find((id) => id !== state.path[2]!.id)!;
-  const headers = { origin };
-  const swiped = await page.request.post(`${origin}/api/chats/${solo.id}/head`, { headers, data: { messageId: other } });
-  expect(swiped.ok()).toBe(true);
-  expect(((await swiped.json()) as ChatState).path.map((message) => message.content)).toEqual([
-    '안녕하세요',
-    `${alice}: 첫 번째 대답`,
-    '산책할래요?',
-    `${alice}: 그래요.`,
-  ]);
-  // Back to where the chat was.
-  const back = await page.request.post(`${origin}/api/chats/${solo.id}/head`, {
-    headers,
-    data: { messageId: state.path[2]!.id },
-  });
-  expect(back.ok()).toBe(true);
 
   // A one-member chat keeps its prefixes and names nobody by id.
   expect(state.path.every((message) => !message.speakerMemberId)).toBe(true);

@@ -5,7 +5,6 @@ import {
   type GroupMember,
   type GroupSettings,
 } from '@shizue/core/group';
-import { isNarration } from '@shizue/core/narration';
 import type { ChatMessage, PublicMember } from './types';
 
 /**
@@ -76,28 +75,20 @@ export function cueOf(message: ChatMessage | undefined): RoundCue {
   };
 }
 
-/**
- * Who speaks in a round. The reader's 다음 차례 picks are exactly that — the ones
- * still on the stage, in roster order, past 대화량 and the cap. Without picks,
- * `groupOrder` reads the cue with the work's order and cap.
- */
+/** Who speaks in a round: `groupOrder` reads the cue with the work's order and cap. */
 export function pickSpeakers({
   stage,
-  picks,
   cue,
   settings,
   random,
 }: {
   /** The members on the stage, in roster order. */
   stage: readonly PublicMember[];
-  picks: readonly string[];
   cue: RoundCue;
   settings: GroupSettings | null | undefined;
   random: () => number;
 }): string[] {
   const members = groupMembers(stage);
-  const picked = members.filter((member) => picks.includes(member.id)).map((member) => member.id);
-  if (picked.length > 0) return picked;
   const { order, maxSpeakers } = coerceGroupSettings(settings);
   return groupOrder({ members, text: cue.text, lastSpeakerId: cue.lastSpeakerId, order, max: maxSpeakers, random });
 }
@@ -108,20 +99,13 @@ export interface Redo {
   replaces: number;
   /** What the new round answers: whatever the replaced one did. */
   cue: RoundCue;
-  /**
-   * The round is a narration the narration button opened, which the narrator
-   * redoes — it never joins a round on its own, so no member is rolled for it.
-   */
-  narrator: boolean;
 }
 
 export function redoOf(path: readonly ChatMessage[]): Redo {
   const start = roundStart(path);
-  const first = path[start];
   return {
     replaces: path.length - start,
     cue: cueOf(path[start - 1]),
-    narrator: first !== undefined && !first.speakerMemberId && isNarration(first.content),
   };
 }
 

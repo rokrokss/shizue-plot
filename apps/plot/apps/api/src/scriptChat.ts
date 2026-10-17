@@ -32,7 +32,6 @@ import type { ScriptChat, ScriptChatItem } from '@shizue/core/triggers';
 import { chatAttachments, chats, messages, type Message, type MessageRole, type MessageSource, type NewMessage } from '@shizue/db';
 import { eq, inArray, sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
-import { bindAttachments } from './attachments.js';
 import type { Tx } from './deps.js';
 import { badRequest } from './errors.js';
 import { invalidateMemoryForEdit } from './memory.js';
@@ -43,7 +42,6 @@ export interface ScriptTurn {
   content: string;
   source: MessageSource;
   directions?: string;
-  attachmentIds: string[];
   /** SillyTavern's `{{bias}}` read off the turn (`messages.bias`). */
   bias?: string;
   /** Hidden from the AI: a turn that was only its bias, ST's system message. */
@@ -341,9 +339,6 @@ export async function applyScriptChat(
           .insert(chatAttachments)
           .values(images.map(({ id: _id, messageId, ...image }) => ({ ...image, messageId: copies.get(messageId!)! })));
       }
-    }
-    if (turnId && plan.turn!.attachmentIds.length > 0) {
-      await bindAttachments(tx, chatId, turnId, plan.turn!.attachmentIds);
     }
     // From the first original the branch leaves behind: the summary must stop
     // standing for text the reader's branch no longer has.

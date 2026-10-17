@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { NARRATOR_SPEAKER } from '../src/group.js';
 import {
   GROUP_SPEECH_PROTOCOL,
   GROUP_SPEECH_PROTOCOL_REMINDER,
@@ -219,7 +218,7 @@ describe('assemblePrompt - a group turn', () => {
   });
 
   it("sends the speaker's own replies plain and everyone else's under their name", () => {
-    const turns = (speaker?: number | typeof NARRATOR_SPEAKER): string[] =>
+    const turns = (speaker?: number): string[] =>
       // The turns alone: examples, labels and the closing blocks all open on `[`.
       texts(group(speaker === undefined ? {} : { speaker })).filter(
         (text) => !text.startsWith('[') && !text.includes('은빛 여관'),
@@ -234,10 +233,8 @@ describe('assemblePrompt - a group turn', () => {
     expect(turns(1).slice(2, 4)).toEqual(['세이야: *고개를 끄덕인다* 왔군.', '어서 와!\n\n*잔을 내민다*']);
     // A narration keeps its header whoever it is stored under.
     expect(texts(group({ speaker: 1 }))).toContain(`${NARRATION_HEADER} 바람이 분다.`);
-    // The narrator and a scene call read every tagged reply under its member.
-    for (const view of [turns(NARRATOR_SPEAKER), turns()]) {
-      expect(view.slice(2, 4)).toEqual(['세이야: *고개를 끄덕인다* 왔군.', '카이: 어서 와!\n\n카이: *잔을 내민다*']);
-    }
+    // A scene call reads every tagged reply under its member.
+    expect(turns().slice(2, 4)).toEqual(['세이야: *고개를 끄덕인다* 왔군.', '카이: 어서 와!\n\n카이: *잔을 내민다*']);
   });
 
   it('closes on the speaker line, after everything else, charged to the budget', () => {
@@ -312,16 +309,7 @@ describe('assemblePrompt - a group turn', () => {
     expect(group({ speaker: 1 }).stopSequences).toEqual(['\n세이야:', '\n세이:']);
     // The absent member is not on the stage, and the speaker is not among their own stops.
     expect(group({ speaker: 0 }).stopSequences).toEqual(['\n카이:']);
-    expect(group({ speaker: NARRATOR_SPEAKER }).stopSequences).toEqual(['\n세이야:', '\n세이:', '\n카이:']);
     expect(group().stopSequences).toBeUndefined();
-  });
-
-  it("asks the narrator on the scene prompt, the caller's nudge still to come", () => {
-    const { stopSequences, ...narration } = group({ speaker: NARRATOR_SPEAKER, report: true });
-    expect(stopSequences).toBeDefined();
-    expect(narration).toEqual(group({ report: true }));
-    expect(narration.system).toContain(SPEECH_PROTOCOL);
-    expect(narration.system.startsWith('세이야 카드의 지시.')).toBe(true);
   });
 
   it('refuses a speaker who is not on the roster', () => {

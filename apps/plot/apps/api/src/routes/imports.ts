@@ -593,10 +593,10 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
   /**
    * A picture or a file a SillyTavern message carried (`ImportedAttachments`), onto
    * the row it came in as (`messageId`, one of the ids a batch answered): a
-   * picture (`kind` `image`) as the composer's uploads are kept — the bytes
-   * sniffed, never believed — and a file (`kind` `file`) as UTF-8 text under its
-   * `name`, which the prompt folds into the turn as ST does (`withFileTexts`).
-   * Each under the cap of an upload, and at most `MAX_ATTACHMENTS_PER_MESSAGE` on
+   * picture (`kind` `image`) with the bytes sniffed, never believed — and a
+   * file (`kind` `file`) as UTF-8 text under its `name`, which the prompt folds
+   * into the turn as ST does (`withFileTexts`). Each under
+   * `MAX_ATTACHMENT_BYTES`, and at most `MAX_ATTACHMENTS_PER_MESSAGE` on
    * a message. The chat must be one a batch may still write: the caller's, still
    * importing — or finished, where a branch of a later run is hung on it.
    */

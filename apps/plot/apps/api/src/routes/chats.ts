@@ -34,8 +34,6 @@ import {
   isSceneMessage,
   MAX_COMPONENT_TURN_LENGTH,
   MAX_DIRECTIONS_LENGTH,
-  NARRATION_PREFIX,
-  NARRATOR_SPEAKER,
   readVariable,
   stripImageMacros,
   stripVariableMacros,
@@ -49,7 +47,6 @@ import {
   type MacroTavernData,
   type NormalizedCard,
   type NarratorConfig,
-  type NarratorSpeaker,
   type PlotModule,
   type PlotStyle,
   type FoldItem,
@@ -92,20 +89,14 @@ import {
   type CardScripts,
   type ScriptOverlay,
 } from '@shizue/core/triggers';
-import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { randomUUID } from 'node:crypto';
-import { assetUrl, coerceAssetPreview } from '../assets.js';
+import { assetUrl } from '../assets.js';
 import {
   attachmentsByMessage,
   attachmentUrl,
-  countUnboundAttachments,
   isTextAttachment,
-  MAX_ATTACHMENT_BYTES,
-  MAX_ATTACHMENTS_PER_MESSAGE,
-  MAX_UNBOUND_ATTACHMENTS,
-  saveAttachment,
-  sweepStaleAttachments,
   toAttachmentJson,
   withFileTexts,
   withTurnImages,
@@ -150,7 +141,6 @@ import {
 import { readerModuleAssetsJson, toReaderModuleJson } from './readerModules.js';
 import { RATE_LIMITS, rateLimit } from '../rateLimit.js';
 import { buildRelationshipText } from '../relationship.js';
-import { drawSceneEnabled, generateSceneImage, sceneImagePrompt } from '../sceneImage.js';
 import {
   headMoved,
   loadChatGlobalVariables,
@@ -276,7 +266,7 @@ export const toChatJson = (chat: Chat, noteIds: string[]) => ({
    */
   importing: chat.importing,
   /**
-   * True while the chat's slot is held — a reply, or a drawn scene, on its way.
+   * True while the chat's slot is held — a reply on its way.
    * A reply goes on after its page has gone (§7.2), so a page that comes back to
    * find this waits for it rather than asking for another.
    */
@@ -459,12 +449,6 @@ async function chatState(deps: AppDeps, chat: Chat, window?: PathWindow): Promis
      * it and not by branch — what the card's scripts read as `getglobalvar`.
      */
     globalVariables: await loadChatGlobalVariables(deps, chat),
-    /**
-     * What this deployment can do beyond the base chat. An env-gated action
-     * answers here rather than 404ing a button the reader can already see —
-     * without a fal credential `drawScene` is off and the action is not offered.
-     */
-    capabilities: { drawScene: drawSceneEnabled(deps) },
     /**
      * Whether the reader is also the plot's creator — the one person the
      * chat's assembled prompt may be shown to (`GET /:id/inspect`).
@@ -1055,7 +1039,7 @@ function loreStateOf(branch: Message[]): LoreTimedState {
  * it carries ahead of its words (`withFileTexts`, a SillyTavern chat's), plus the
  * images the turn being answered carries — or, for a model without vision, the
  * note that says it carried them. Every mode goes through here, `send` included: it appends the
- * turn it has just stored to the history and lets this find its uploads.
+ * turn it has just stored to the history.
  */
 const promptHistory = async (
   deps: AppDeps,
@@ -1448,33 +1432,6 @@ function optionalRegenerateRequest(body: Record<string, unknown>): string | unde
   return value;
 }
 
-/**
- * Uploads a send is claiming for its turn. Whether they are this chat's own, and
- * still unclaimed, is settled by the write itself (`bindAttachments`); this is
- * the shape and the count.
- */
-function optionalAttachmentIds(body: Record<string, unknown>): string[] {
-  const value = body['attachmentIds'];
-  if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) throw badRequest('invalid_request', 'attachmentIds must be an array');
-  const ids = value.map((id) => {
-    if (typeof id !== 'string' || !isUuid(id)) {
-      throw badRequest('invalid_request', 'attachmentIds must be attachment ids');
-    }
-    return id;
-  });
-  if (new Set(ids).size !== ids.length) {
-    throw badRequest('invalid_request', 'attachmentIds must not repeat an id');
-  }
-  if (ids.length > MAX_ATTACHMENTS_PER_MESSAGE) {
-    throw badRequest(
-      'attachment_limit',
-      `A message carries at most ${MAX_ATTACHMENTS_PER_MESSAGE} images`,
-    );
-  }
-  return ids;
-}
-
 /** A list of member ids in a body, shape only and without repeats; absent is empty. */
 function optionalMemberIds(body: Record<string, unknown>, key: string): string[] | null | undefined {
   const value = body[key];
@@ -1505,53 +1462,31 @@ async function patchedAbsentIds(
   return ids;
 }
 
-/**
- * The names of the members a turn asked to center on, in roster order. Only a
- * member on the stage can be asked for: one the reader sent away is not in the
- * scene to speak, and the prompt already says so.
- */
-function focusNamesOf(onStage: Character[], ids: string[]): string[] {
-  if (ids.some((id) => !onStage.some((member) => member.id === id))) {
-    throw badRequest('invalid_request', 'focusCharacterIds must name members who are in the scene');
-  }
-  return onStage.filter((member) => ids.includes(member.id)).map((member) => member.name);
-}
-
-/** `body.speakerId`, shape only: a member id, or the narrator's marker. */
+/** `body.speakerId`, shape only: a member id. */
 function optionalSpeakerId(body: Record<string, unknown>): string | undefined {
   const value = body['speakerId'];
   if (value === undefined || value === null) return undefined;
-  if (typeof value !== 'string' || (value !== NARRATOR_SPEAKER && !isUuid(value))) {
-    throw badRequest('invalid_request', `speakerId must be a member id or "${NARRATOR_SPEAKER}"`);
+  if (typeof value !== 'string' || !isUuid(value)) {
+    throw badRequest('invalid_request', 'speakerId must be a member id');
   }
   return value;
 }
 
-/** Who a group turn's reply is asked of: `GenerationPlan.speaker`, and the member, or null for the narrator. */
+/** Who a group turn's reply is asked of: `GenerationPlan.speaker`, and the member. */
 interface GroupVoice {
-  speaker: number | NarratorSpeaker;
-  member: Character | null;
+  speaker: number;
+  member: Character;
 }
 
 /**
  * The speaker a group-turn request names, held to the work. Group turns are a
  * work of two or more members' (the whole roster counted, on the stage or not)
  * — a work of one answers as it always has, so a `speakerId` there is a client
- * bug. A member must be on the stage. The narrator speaks only on the narration
- * button (`/narrate`), so it is named only where a round that button opened is
- * redone (`narrator`).
+ * bug. A member must be on the stage.
  */
-function groupVoiceOf(
-  context: { members: Character[]; onStage: Character[] },
-  speakerId: string,
-  { narrator }: { narrator: boolean },
-): GroupVoice {
+function groupVoiceOf(context: { members: Character[]; onStage: Character[] }, speakerId: string): GroupVoice {
   if (context.members.length < 2) {
     throw badRequest('invalid_request', 'speakerId is only for a work of two or more members');
-  }
-  if (speakerId === NARRATOR_SPEAKER) {
-    if (!narrator) throw badRequest('invalid_request', 'The narrator speaks only on the narration button');
-    return { speaker: NARRATOR_SPEAKER, member: null };
   }
   const index = context.members.findIndex((member) => member.id === speakerId);
   if (index < 0 || !context.onStage.some((member) => member.id === speakerId)) {
@@ -1568,14 +1503,13 @@ const speakerNamesOf = (member: Character): string[] => {
 
 /**
  * What a group voice adds to a plan: the speaker, the names its own prefixes
- * come off by, where the reply is stored (`round`, null opening a new one), the
- * Lua view of whoever's scripts run for it, and — for the narrator — the
- * narration it writes. `notLast` is the round's speakers before the last
- * (`finalSpeaker: false`): the status window and the choices are the last one's.
+ * come off by, where the reply is stored (`round`, null opening a new one) and
+ * the Lua view of whoever's scripts run for it. `notLast` is the round's
+ * speakers before the last (`finalSpeaker: false`): the status window and the
+ * choices are the last one's.
  */
 function voicePlan(
   context: {
-    scriptView: ScriptView | undefined;
     scriptViewFor: (member: Character) => ScriptView;
     plot: PromptPlot;
     userName: string;
@@ -1584,18 +1518,17 @@ function voicePlan(
   groupTurnId: string | null,
   notLast: boolean,
   trailing: string[] = [],
-): Pick<GenerationPlan, 'speaker' | 'speakerNames' | 'round' | 'scriptView' | 'narration' | 'trailingSystem'> {
+): Pick<GenerationPlan, 'speaker' | 'speakerNames' | 'round' | 'scriptView' | 'trailingSystem'> {
   const macro = { char: context.plot.char ?? context.plot.name, user: context.userName };
   const lines = [
-    ...(voice.member ? trailing : [NARRATION_NUDGE]),
+    ...trailing,
     ...(notLast && closesWithState(context.plot.style) ? [NOT_LAST_SPEAKER_NUDGE] : []),
   ].map((line) => applyMacros(line, macro));
   return {
     speaker: voice.speaker,
-    ...(voice.member ? { speakerNames: speakerNamesOf(voice.member) } : {}),
-    round: { speakerMemberId: voice.member?.id ?? null, groupTurnId },
-    scriptView: voice.member ? context.scriptViewFor(voice.member) : context.scriptView,
-    ...(voice.member ? {} : { narration: true }),
+    speakerNames: speakerNamesOf(voice.member),
+    round: { speakerMemberId: voice.member.id, groupTurnId },
+    scriptView: context.scriptViewFor(voice.member),
     ...(lines.length > 0 ? { trailingSystem: lines.join('\n') } : {}),
   };
 }
@@ -1696,16 +1629,13 @@ async function regeneratePlan(
   c: Context<AppEnv>,
   deps: AppDeps,
   chat: Chat,
-  focusIds: string[] = [],
   scripts: GenerationScripts = NO_SCRIPTS,
   group?: { speakerId: string; notLast: boolean },
   request?: string,
 ): Promise<GenerationPlan> {
   await requireEnabledModel(deps, chat.userId, chat.model);
   const context = await loadGenerationContext(deps, chat, scripts);
-  const focusNames = focusNamesOf(context.onStage, focusIds);
-  // A round the narration button opened is redone by the narrator.
-  const voice = group ? groupVoiceOf(context, group.speakerId, { narrator: true }) : null;
+  const voice = group ? groupVoiceOf(context, group.speakerId) : null;
   const scriptMember = scriptMemberOf(scripts.memberId, context.members);
   const path = buildPath(context.all, chat.headMessageId);
   const head = path[path.length - 1];
@@ -1716,10 +1646,6 @@ async function regeneratePlan(
   // its round; a user head (edit fork, or a failed generation) gets a fresh
   // assistant child instead.
   const isAssistantHead = head.role === 'assistant';
-  // Regenerating a narration asks for a narration again. Without this the
-  // replacement would come back as ordinary dialogue and the swipe would move
-  // between two different kinds of turn. A group speaker says what it is.
-  const narration = !voice && isAssistantHead && isNarration(head.content);
   // The head is about to be replaced, so whatever it set is not part of the
   // state the replacement is generated from — and the start triggers ran on the
   // branch without it, so what they did to the chat is said against that. Its
@@ -1744,7 +1670,7 @@ async function regeneratePlan(
   // A member's round answers what stands before it, as `/reply` asked it: the
   // reader's turn, with its ruling — or a reply, the scene going on without the
   // reader (이어가기), which is told so again rather than handed an older turn's ruling.
-  const answersReader = !voice?.member || kept.at(-1)?.role === 'user';
+  const answersReader = !voice || kept.at(-1)?.role === 'user';
   // The user turn being answered is still on the branch, so its ruling comes back
   // with it — a regenerate is the same turn, judged the same way — and then what
   // the reader asked of this regenerate (`optionalRegenerateRequest`).
@@ -1795,16 +1721,6 @@ async function regeneratePlan(
     localLore: context.localLore,
     auxiliaryModel: context.auxiliaryModel,
     contextBudget: memorySettingsOf(chat).contextBudget,
-    focusNames,
-    ...(narration
-      ? {
-          trailingSystem: applyMacros(NARRATION_NUDGE, {
-            char: context.plot.char ?? context.plot.name,
-            user: context.userName,
-          }),
-          narration: true,
-        }
-      : {}),
     ...(voice ? voicePlan(context, voice, null, group!.notLast, answersReader ? [] : [AUTO_CONTINUE_NUDGE]) : {}),
     // The head's parent or the head — the round's first reply's parent for a
     // round — or where the scripts left the branch.
@@ -2351,24 +2267,6 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       .delete(chatNoteLinks)
       .where(and(eq(chatNoteLinks.chatId, chat.id), eq(chatNoteLinks.noteId, note.id)));
     return c.json(await chatState(deps, chat));
-  });
-
-  // Branch switch: head moves to the deepest (newest) leaf under the given message.
-  app.post('/:id/head', async (c) => {
-    const chat = await loadWritableChat(deps, requireUuidParam(c), c.get('userId'));
-    const body = await readJsonBody(c);
-    const messageId = requireString(body, 'messageId');
-    if (!isUuid(messageId)) throw notFound('Message not found');
-
-    const all = await loadMessages(deps, chat.id);
-    if (!all.some((message) => message.id === messageId)) throw notFound('Message not found');
-
-    const [updated] = await deps.db
-      .update(chats)
-      .set({ headMessageId: deepestLeaf(all, messageId), updatedAt: new Date() })
-      .where(eq(chats.id, chat.id))
-      .returning();
-    return c.json(await chatState(deps, updated!));
   });
 
   /**
@@ -3082,86 +2980,6 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   });
 
   /**
-   * An image for a turn that has not been written yet. The upload comes first
-   * because the composer shows a thumbnail before the reader has finished typing;
-   * the row it creates carries no message id until a send claims it.
-   *
-   * The bytes are sniffed rather than believed — the declared type is not read at
-   * all — and the 8MB cap is enforced here as well as by the body limit in front
-   * of the route, which bounds the multipart parse.
-   */
-  app.post('/:id/attachments', rateLimit(deps, RATE_LIMITS.upload), async (c) => {
-    const chat = await loadWritableChat(deps, requireUuidParam(c), c.get('userId'));
-
-    let form: FormData;
-    try {
-      form = await c.req.formData();
-    } catch {
-      throw badRequest('invalid_request', 'Expected multipart/form-data with a file field');
-    }
-    const file = form.get('file');
-    if (!(file instanceof File)) throw badRequest('invalid_request', 'file field is required');
-    if (file.size > MAX_ATTACHMENT_BYTES) {
-      throw badRequest(
-        'attachment_too_large',
-        `An image may be at most ${MAX_ATTACHMENT_BYTES} bytes`,
-      );
-    }
-    // The same measurement a plot asset carries, validated the same way.
-    const preview = coerceAssetPreview(form.get('width'), form.get('height'), form.get('thumbhash'));
-
-    const attachmentId = randomUUID();
-    const stored = await saveAttachment(
-      deps.storage,
-      attachmentId,
-      new Uint8Array(await file.arrayBuffer()),
-    );
-    if (!stored) throw badRequest('invalid_attachment', 'Unsupported image file');
-
-    // Drafts nobody sent are cleaned up by the next upload, and what is left
-    // after that is capped: an upload is the one way to put bytes in this chat's
-    // store without ever writing a message. Sweep, count and insert hold the
-    // chat's row lock as one decision — two uploads racing below the cap would
-    // otherwise both count room and both land past it.
-    let row: ChatAttachment;
-    let swept: string[];
-    try {
-      ({ row, swept } = await deps.db.transaction(async (tx) => {
-        await tx.select({ id: chats.id }).from(chats).where(eq(chats.id, chat.id)).for('update');
-        const sweptPaths = await sweepStaleAttachments(tx, chat.id);
-        if ((await countUnboundAttachments(tx, chat.id)) >= MAX_UNBOUND_ATTACHMENTS) {
-          throw badRequest(
-            'attachment_limit',
-            `A chat may hold at most ${MAX_UNBOUND_ATTACHMENTS} unsent images`,
-          );
-        }
-        const [inserted] = await tx
-          .insert(chatAttachments)
-          .values({
-            id: attachmentId,
-            chatId: chat.id,
-            path: stored.key,
-            mime: stored.mime,
-            width: preview?.width ?? null,
-            height: preview?.height ?? null,
-            thumbhash: preview?.thumbhash ?? null,
-          })
-          .returning();
-        return { row: inserted!, swept: sweptPaths };
-      }));
-    } catch (error) {
-      // The bytes are already in the store and no row will ever point at them;
-      // nothing else would ever come back for them either.
-      await deleteQuietly(deps.storage, stored.key);
-      throw error;
-    }
-    // Outside the transaction, as everywhere: an object only becomes garbage
-    // once the row that pointed at it is really gone.
-    for (const path of swept) await deleteQuietly(deps.storage, path);
-    return c.json(toAttachmentJson(row), 201);
-  });
-
-  /**
    * The bytes, streamed through the API like a plot asset — but for one
    * reader only. An attachment is the reader's own picture in their own chat, so
    * ownership of the chat is the whole rule, and unlike an asset there is no
@@ -3194,28 +3012,6 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     });
   });
 
-  /**
-   * Taking a thumbnail out of the composer again. Only an upload no turn has
-   * claimed can go this way: once a message carries it, the message is what
-   * deletes it.
-   */
-  app.delete('/:id/attachments/:attachmentId', async (c) => {
-    const chat = await loadWritableChat(deps, requireUuidParam(c), c.get('userId'));
-    const [deleted] = await deps.db
-      .delete(chatAttachments)
-      .where(
-        and(
-          eq(chatAttachments.id, requireUuidParam(c, 'attachmentId')),
-          eq(chatAttachments.chatId, chat.id),
-          isNull(chatAttachments.messageId),
-        ),
-      )
-      .returning();
-    if (!deleted) throw notFound('Attachment not found');
-    await deleteQuietly(deps.storage, deleted.path);
-    return c.body(null, 204);
-  });
-
   app.post('/:id/messages', rateLimit(deps, RATE_LIMITS.generation), async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
@@ -3227,8 +3023,6 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const source = optionalSource(body) ?? 'user';
     if (source === 'component') requireComponentTurnLength(content);
     const directions = optionalDirections(body);
-    const attachmentIds = optionalAttachmentIds(body);
-    const focusIds = optionalMemberIds(body, 'focusCharacterIds') ?? [];
     // What the card's input and start triggers left, over the state this turn's
     // own macros fold to — stored on the turn, which is the message they ran for.
     // Where they edited the chat around it, it is the message the chat ends on.
@@ -3250,8 +3044,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const context = await loadGenerationContext(deps, chat, scripts);
       // Still before any write, and it needs the card the context just loaded.
       if (source === 'component') requireComponentTurnAllowed(chat, context.row);
-      const focusNames = focusNamesOf(context.onStage, focusIds);
-      const voice = speakerId === undefined ? null : groupVoiceOf(context, speakerId, { narrator: false });
+      const voice = speakerId === undefined ? null : groupVoiceOf(context, speakerId);
       const scriptMember = scriptMemberOf(scripts.memberId, context.members);
       const path = buildPath(context.all, chat.headMessageId);
       await settleHead(deps, chat, path.at(-1), scripts, true);
@@ -3291,19 +3084,15 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           content: sent,
           source,
           ...(directions ? { directions } : {}),
-          attachmentIds,
           ...(bias ? { bias, ...(sent ? {} : { hidden: true }) } : {}),
         },
         ...(scriptMember ? { memberId: scriptMember.id } : {}),
       });
       await keepScriptWrites(deps, chat, context, scripts);
 
-      // One transaction, because the uploads are part of the turn: an id that is
-      // not this chat's own — or that another turn already claimed — must leave
-      // no message behind for the client to find on its retry.
       const edited = await keepScriptChat(deps, chat, edit, context.all);
       await keepStoredGlobalWrites(deps, chat, stored);
-      return { context, focusNames, edited, voice };
+      return { context, edited, voice };
     };
 
     /**
@@ -3330,7 +3119,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       // Fail before any write: a 400 here must leave the chat untouched, otherwise
       // the client resends a turn that was already persisted.
       await requireEnabledModel(deps, userId, chat.model);
-      const { context, focusNames, edited, voice } = await storeTurn(chat);
+      const { context, edited, voice } = await storeTurn(chat);
       const branch = edited.path;
 
       const memory = await buildMemoryInput(deps, chat, branch.slice(0, -1), branch, voice?.member?.id);
@@ -3377,7 +3166,6 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         localLore: context.localLore,
         auxiliaryModel: context.auxiliaryModel,
         contextBudget: memorySettingsOf(chat).contextBudget,
-        focusNames,
         // The round's first reply, which is the round's id.
         ...(voice ? voicePlan(context, voice, null, notLast) : {}),
         target: { kind: 'new', parentId: branch.at(-1)?.id ?? null },
@@ -3391,7 +3179,6 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const body = await optionalJsonBody(c);
-    const focusIds = optionalMemberIds(body, 'focusCharacterIds') ?? [];
     const scripts = readGenerationScripts(body, { startDelta: true });
     const speakerId = optionalSpeakerId(body);
     const group =
@@ -3399,7 +3186,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const request = optionalRegenerateRequest(body);
 
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> =>
-      regeneratePlan(c, deps, await loadWritableChat(deps, id, userId), focusIds, scripts, group, request),
+      regeneratePlan(c, deps, await loadWritableChat(deps, id, userId), scripts, group, request),
     );
   });
 
@@ -3424,7 +3211,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * head must be — the next speaker of a round a send or a regenerate opened.
    * Without it, it opens a round of its own: after a reply, the scene goes on
    * without the reader (an "auto" round), and under the reader's turn it answers
-   * it. The narrator is not asked here; it has the narration button.
+   * it.
    *
    * It takes what the other generations take of the card's scripts, and checks
    * the head as they do — a head the browser still owes its output scripts is a
@@ -3449,7 +3236,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const chat = await loadWritableChat(deps, id, userId);
       await requireEnabledModel(deps, userId, chat.model);
       const context = await loadGenerationContext(deps, chat, scripts);
-      const voice = groupVoiceOf(context, speakerId, { narrator: false });
+      const voice = groupVoiceOf(context, speakerId);
       const scriptMember = scriptMemberOf(scripts.memberId, context.members);
       const before = buildPath(context.all, chat.headMessageId);
       const head = before.at(-1);
@@ -3474,7 +3261,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const edited = edit ? await keepScriptChat(deps, chat, edit, context.all) : null;
       const path = edited ? edited.path : before;
       const end = path.at(-1);
-      const memory = await buildMemoryInput(deps, chat, path, path, voice.member?.id);
+      const memory = await buildMemoryInput(deps, chat, path, path, voice.member.id);
       // The turn being answered must be in the prompt, so the end is re-attached
       // when the summary swallowed it.
       const history = memory.history.length > 0 || !end ? memory.history : [end];
@@ -3537,14 +3324,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const body = await optionalJsonBody(c);
-    const focusIds = optionalMemberIds(body, 'focusCharacterIds') ?? [];
     const scripts = readGenerationScripts(body, { startDelta: true });
 
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
       const chat = await loadWritableChat(deps, id, userId);
       await requireEnabledModel(deps, userId, chat.model);
       const context = await loadGenerationContext(deps, chat, scripts);
-      const focusNames = focusNamesOf(context.onStage, focusIds);
       const before = buildPath(context.all, chat.headMessageId);
       if (before.at(-1)?.role !== 'assistant') {
         throw badRequest('invalid_state', 'The current head is not an assistant message');
@@ -3574,18 +3359,13 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const path = edited ? edited.path : before;
       const head = path[path.length - 1]!;
       // A group reply is continued by whoever said it, while they are on the
-      // stage — a round's narration by the narrator; anything else as the scene.
+      // stage; anything else as the scene.
       const group = context.members.length >= 2;
       const speaker = group ? context.onStage.find((member) => member.id === head.speakerMemberId) : undefined;
       const memory = await buildMemoryInput(deps, chat, path, path, speaker?.id);
       // The partial assistant turn must stay last for the model to resume it, so it
       // is re-attached when the summary swallowed it.
       const history = memory.history.length > 0 ? memory.history : [head];
-      const voice = speaker
-        ? context.members.indexOf(speaker)
-        : group && head.groupTurnId !== null && isNarration(head.content)
-          ? NARRATOR_SPEAKER
-          : undefined;
 
       return {
         chatId: chat.id,
@@ -3629,11 +3409,15 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         localLore: context.localLore,
         auxiliaryModel: context.auxiliaryModel,
         contextBudget: memorySettingsOf(chat).contextBudget,
-        focusNames,
         // The message keeps its own speaker and round; only the names its own
         // prefixes come off by, and whose scripts run, travel.
-        ...(voice !== undefined ? { speaker: voice } : {}),
-        ...(speaker ? { speakerNames: speakerNamesOf(speaker), scriptView: context.scriptViewFor(speaker) } : {}),
+        ...(speaker
+          ? {
+              speaker: context.members.indexOf(speaker),
+              speakerNames: speakerNamesOf(speaker),
+              scriptView: context.scriptViewFor(speaker),
+            }
+          : {}),
         target: { kind: 'continue', message: head },
       };
     });
@@ -3646,14 +3430,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const body = await optionalJsonBody(c);
-    const focusIds = optionalMemberIds(body, 'focusCharacterIds') ?? [];
     const scripts = readGenerationScripts(body, { startDelta: true });
 
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
       const chat = await loadWritableChat(deps, id, userId);
       await requireEnabledModel(deps, userId, chat.model);
       const context = await loadGenerationContext(deps, chat, scripts);
-      const focusNames = focusNamesOf(context.onStage, focusIds);
       const before = buildPath(context.all, chat.headMessageId);
       if (before.at(-1)?.role !== 'assistant') {
         throw badRequest('invalid_state', 'The current head is not an assistant message');
@@ -3707,105 +3489,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         localLore: context.localLore,
         auxiliaryModel: context.auxiliaryModel,
         contextBudget: memorySettingsOf(chat).contextBudget,
-        focusNames,
         trailingSystem: applyMacros(AUTO_CONTINUE_NUDGE, {
           char: context.plot.char ?? context.plot.name,
           user: context.userName,
         }),
         // A child of the assistant head: two assistant turns in a row, which the
         // adapters merge for providers that require alternating roles.
-        target: { kind: 'new', parentId: head?.id ?? null },
-      };
-    });
-  });
-
-  // A narration turn: the scene moves, and nobody speaks. Unlike auto-continue it
-  // is allowed under a user head too — answering a turn with the scene rather than
-  // with the plot's characters is the ordinary way to use it. The stored turn carries the
-  // narration prefix, which is what makes it one; the nudge that asked for it is
-  // appended to the prompt and never stored.
-  app.post('/:id/narrate', rateLimit(deps, RATE_LIMITS.generation), async (c) => {
-    const id = requireUuidParam(c);
-    const userId = c.get('userId');
-    const body = await optionalJsonBody(c);
-    const focusIds = optionalMemberIds(body, 'focusCharacterIds') ?? [];
-    const scripts = readGenerationScripts(body, { startDelta: true });
-
-    return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
-      const chat = await loadWritableChat(deps, id, userId);
-      await requireEnabledModel(deps, userId, chat.model);
-      const context = await loadGenerationContext(deps, chat, scripts);
-      const focusNames = focusNamesOf(context.onStage, focusIds);
-      const before = buildPath(context.all, chat.headMessageId);
-      if (!before.at(-1)) throw badRequest('invalid_state', 'The chat has no messages to narrate from');
-      await settleHead(deps, chat, before.at(-1), scripts, true);
-      // The narration follows whatever the start triggers left last.
-      const scriptMember = scriptMemberOf(scripts.memberId, context.members);
-      const edit = scripts.chat
-        ? planScriptChat(before, scripts.chat, {
-            inPlace: rewritableHead(context.all, before.at(-1)),
-            ...(scriptMember ? { memberId: scriptMember.id } : {}),
-          })
-        : null;
-      await keepScriptWrites(deps, chat, context, scripts);
-      const edited = edit ? await keepScriptChat(deps, chat, edit, context.all) : null;
-      const path = edited ? edited.path : before;
-      const head = path.at(-1);
-      const memory = await buildMemoryInput(deps, chat, path, path);
-      // The scene to narrate must be in the prompt, so the head is re-attached
-      // when the summary swallowed it.
-      const history = memory.history.length > 0 || !head ? memory.history : [head];
-
-      return {
-        chatId: chat.id,
-        model: chat.model,
-        plot: context.plot,
-        characters: context.characters,
-        personaText: context.personaText,
-        userName: context.userName,
-        history: await promptHistory(deps, c.get('userId'), chat.model, history, context.scriptSpeaker),
-        wholeBranch: path,
-        memoryText: memory.memoryText,
-        recalledMemoryText: memory.recalledMemoryText,
-        factsText: memory.factsText,
-        memoryClock: memory.clock,
-        relationshipText: buildRelationshipText(chat),
-        authorNote: context.authorNote,
-        ...readerPromptSettings(c, chat, context.row),
-        ...(context.narrator ? { narrator: context.narrator } : {}),
-        preset: getPreset(chat.preset),
-        readerAdditions: context.readerAdditions,
-        ...startedFrom(pathVariables(context.defaults, path, context.fold), scripts),
-        fold: context.fold,
-        globalVariables: context.globalVariables,
-        clock: requestClock(c, context.row, path),
-        seed: chat.id,
-        branch: promptBranch(edited?.all ?? context.all, path, context.firstMessage),
-        loreState: loreStateOf(path),
-        assetNames: context.assetNames,
-        scriptView: context.scriptView,
-        localLore: context.localLore,
-        auxiliaryModel: context.auxiliaryModel,
-        contextBudget: memorySettingsOf(chat).contextBudget,
-        focusNames,
-        trailingSystem: applyMacros(NARRATION_NUDGE, {
-          char: context.plot.char ?? context.plot.name,
-          user: context.userName,
-        }),
-        narration: true,
-        // In a work of several members the narration is the narrator's turn: it
-        // ends the round the head is a reply of, joining it, or opens one of its
-        // own — under the reader's turn, or a reply in no round. Its prompt is the
-        // scene's, stopped where it starts on a member's line.
-        ...(context.members.length >= 2
-          ? {
-              speaker: NARRATOR_SPEAKER,
-              round: {
-                speakerMemberId: null,
-                groupTurnId: head?.role === 'assistant' ? head.groupTurnId : null,
-              },
-            }
-          : {}),
         target: { kind: 'new', parentId: head?.id ?? null },
       };
     });
@@ -3870,124 +3559,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     }
   });
 
-  /**
-   * Draws the scene as it currently stands, and hangs the picture on the branch.
-   *
-   * Mounted only where the deployment has an image provider, so a request for a
-   * capability that is off is a 404 rather than a 501 — and `capabilities` on
-   * every chat read is what keeps the client from offering the action at all.
-   *
-   * The result is a narration turn carrying the image as its attachment: the same
-   * rows, the same grid, the same branching, export and deletion the reader's own
-   * pictures already get. Nothing about it is a plot asset — a drawn scene
-   * belongs to this conversation, not to the work.
-   *
-   * The generation slot is taken for the whole call, so drawing and generating
-   * cannot both run on one chat; every failure releases it.
-   */
-  if (drawSceneEnabled(deps)) {
-    app.post('/:id/draw-scene', async (c) => {
-      const id = requireUuidParam(c);
-      const userId = c.get('userId');
-      if (!(await acquireChatSlot(deps, id, userId))) await rejectBusyChat(deps, id, userId);
-
-      // The provider call, the download it may require and the storage write can
-      // together outlive the claim's staleness window; renewing on the stream's
-      // own heartbeat keeps another instance from reclaiming the chat while this
-      // scene is still on its way in.
-      const keepAlive = setInterval(() => void renewChatSlot(deps, id), HEARTBEAT_MS);
-      try {
-        const chat = await loadWritableChat(deps, id, userId);
-        const context = await loadGenerationContext(deps, chat);
-        const path = buildPath(context.all, chat.headMessageId);
-        const head = path[path.length - 1];
-        if (!head) throw badRequest('invalid_state', 'The chat has no scene to draw yet');
-
-        const image = await (deps.generateSceneImage ?? generateSceneImage)(
-          deps,
-          // Only who is on the stage: a member sent off it is not in the picture.
-          sceneImagePrompt(
-            context.plot,
-            context.characters.filter((member) => !member.absent),
-            visibleToAi(path),
-          ),
-        );
-        const attachmentId = randomUUID();
-        const stored = await saveAttachment(deps.storage, attachmentId, image.bytes);
-        if (!stored) throw new ApiError(502, 'image_failed', 'The image provider returned no image');
-
-        // One transaction: a turn whose picture did not land would render as an
-        // empty narration, and an attachment with no turn is unreachable.
-        const created = await deps.db.transaction(async (tx) => {
-          const [message] = await tx
-            .insert(messages)
-            .values({
-              chatId: chat.id,
-              parentId: head.id,
-              role: 'assistant',
-              // The scene moved and nobody spoke, and the picture is the whole of
-              // what it says — so the narration carries the prefix and no words.
-              content: NARRATION_PREFIX,
-            })
-            .returning();
-          await tx.insert(chatAttachments).values({
-            id: attachmentId,
-            chatId: chat.id,
-            messageId: message!.id,
-            path: stored.key,
-            mime: stored.mime,
-            // What the provider reported, when it reported anything. No thumbhash:
-            // it is measured in a browser, and nothing here decodes an image.
-            width: image.width,
-            height: image.height,
-            thumbhash: null,
-          });
-          await tx
-            .update(chats)
-            .set({ headMessageId: message!.id, updatedAt: new Date() })
-            .where(eq(chats.id, chat.id));
-          return message!;
-        });
-
-        return c.json(await chatState(deps, { ...chat, headMessageId: created.id }));
-      } finally {
-        // The interval first, so no renewal starts after this point; release then
-        // waits out one still in flight before it clears the claim.
-        clearInterval(keepAlive);
-        await releaseChatSlot(deps, id);
-      }
-    });
-  }
-
   return app;
 }
 
 /** Asks for the next beat of the scene; appended to the prompt, never persisted. */
 const AUTO_CONTINUE_NUDGE =
   '(유저 개입 없이 현재 장면을 자연스럽게 이어간다. 장면 전환이나 시간 경과가 필요하면 대사 없이 서술 위주로 이어가도 된다. {{user}}의 반응이 필요한 지점에서 멈춘다)';
-
-/**
- * Asks for the scene alone. The prefix that marks the answer as narration is the
- * server's to write, so the model is only told what to produce — a model that
- * writes the prefix as well is deduplicated on the way in, and one that slips
- * into a member's line is cut there (`narrationKept` in generation.ts).
- *
- * The rules are the ones the services before us learned the hard way: a
- * narrator that may say anything about the scene says things about the reader
- * too — decides what they do, restates what they wrote, overrules it — and is
- * read as the system's own voice when it does. So the reader's half is kept
- * theirs, said as what to do with it where that can be said. The length is
- * shorter than a reply's, whatever the plot's length setting says (its cap is
- * `NARRATION_MAX_TOKENS`), and one register runs through the whole of it.
- * The same particle rule as the presets: nothing allomorphic after a macro.
- */
-export const NARRATION_NUDGE = `(다음 응답은 {{char}}의 등장인물이 말하거나 움직이는 장면이 아니라 나레이터의 장면 서술만 출력한다. 접두사 없는 줄로만 쓰고, 서술 문체·서술 시점 설정이 있으면 따른다.
-- 직전 메시지를 지금 이 순간으로 삼아, 거기서 이어지는 장면과 세계의 변화, 다른 인물들이 겉으로 보이는 움직임, 공기와 분위기를 쓴다. 이미 묘사한 날씨나 분위기를 되풀이하지 말고 새로 달라진 것을 보여 준다.
-- {{user}}의 말과 행동은 이미 일어난 일로 두고, 그 결과로 달라진 주변과 인물들의 반응을 쓴다. {{user}}의 행동·감정·생각·다음 움직임은 서술하지도 정하지도 않고 {{user}}의 몫으로 남겨 둔다.
-- {{user}}의 글을 다시 옮겨 적거나 인용하지 않고, 그 내용을 부정하거나 뒤집지 않는다. 인물들과 {{user}}에 대해 평가나 판정을 내리지 않는다.
-- 유저나 등장인물의 대사를 만들지 않는다.
-- 응답 길이 설정과 상관없이 1~2문단, 모두 여섯 문장 안쪽으로 짧게 쓴다.
-- 종결어미는 처음부터 끝까지 한 가지로 맞춘다. 서술 문체가 정한 어미가 있으면 그것을, 없으면 이 대화의 지난 서술이 쓴 어미를 따르고, 반말과 존댓말을 섞지 않는다.)`;
 
 /**
  * For a group round's speakers before the last: the round ends on the last
@@ -4042,7 +3619,7 @@ interface StoredEdit {
  * Edits as SillyTavern stores them (`updateMessage`), for one chat's messages:
  * its `runOnEdit` scripts first (`getRegexedString` with `isEdit`), on the
  * placement of the message edited — the reader's turn, a reply, or a narration
- * (a narration turn of the button's or one the reader wrote wholly as the
+ * (one generated before 2026-10-17 or one the reader wrote wholly as the
  * narrator), which is ST's narrator's — with the macros of a pattern read for
  * the plot's roster and the chat's persona; then, in a work ST wrote
  * (`tavernStoreMacro`), the text's own macros as `substituteParams` leaves them,

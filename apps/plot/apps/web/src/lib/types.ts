@@ -762,7 +762,7 @@ export interface ChatListItem extends Chat {
  * a work of several members' alone: the next speaker of a round, or a round of
  * its own.
  */
-export type StreamMode = 'send' | 'regenerate' | 'continue' | 'auto' | 'narrate' | 'reply';
+export type StreamMode = 'send' | 'regenerate' | 'continue' | 'auto' | 'reply';
 
 export type MessageRole = 'user' | 'assistant';
 
@@ -849,12 +849,6 @@ export interface SiblingInfo {
   ids: string[];
 }
 
-/** What the deployment can do beyond the base chat. Decided by the server's env. */
-export interface ChatCapabilities {
-  /** Drawing a scene; off wherever no image provider is configured. */
-  drawScene: boolean;
-}
-
 export interface ChatState {
   chat: Chat;
   path: ChatMessage[];
@@ -877,8 +871,6 @@ export interface ChatState {
    * not by branch. Optional for the same reason as the flags below.
    */
   globalVariables?: Variables;
-  /** Optional so a state built by hand — a test's, a fixture's — needs no flags. */
-  capabilities?: ChatCapabilities;
   /**
    * Whether the reader is the plot's creator, the one person the assembled
    * prompt may be shown to. Optional for the same reason; absent reads as no.

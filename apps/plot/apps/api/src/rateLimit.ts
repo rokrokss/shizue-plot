@@ -54,13 +54,13 @@ export interface RateBucket extends RateWindow {
 export const RATE_LIMITS = {
   /** `POST /api/chatgpt/sign-in`: unauthenticated, and it writes a verification row. */
   signIn: { name: 'sign_in', by: 'ip', limit: 30, windowMs: 10 * MINUTE },
-  /** The six SSE generation starts (`messages`, `regenerate`, `continue`, `auto`, `narrate`, `reply`). */
+  /** The five SSE generation starts (`messages`, `regenerate`, `continue`, `auto`, `reply`). */
   generation: { name: 'generation', by: 'user', limit: 300, windowMs: 10 * MINUTE },
   /** Starting a card or module file import (`POST /api/file-imports`). */
   import: { name: 'import', by: 'user', limit: 600, windowMs: 10 * MINUTE },
   /** A chat brought over from another app: `POST /api/chats/import`, not its batches or attachments. */
   chatImport: { name: 'chat_import', by: 'user', limit: 600, windowMs: 10 * MINUTE },
-  /** Avatars, covers, plot assets, persona pictures and the composer's attachments. */
+  /** Avatars, covers, plot assets and persona pictures. */
   upload: { name: 'upload', by: 'user', limit: 300, windowMs: 10 * MINUTE },
   comment: { name: 'comment', by: 'user', limit: 60, windowMs: 10 * MINUTE },
   /** Likes and follows, given and taken back. */

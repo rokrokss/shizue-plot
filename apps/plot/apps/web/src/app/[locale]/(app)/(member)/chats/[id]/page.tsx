@@ -4,9 +4,8 @@ import { Icon } from '@/components/Icon';
 import { assetResolver, type CbsMessage } from '@shizue/core/cbs';
 import { componentNames } from '@shizue/core/component';
 import { displayScriptsFor, orderedWithModules } from '@shizue/core/display-script';
-import { NARRATOR_SPEAKER } from '@shizue/core/group';
 import { fnv1a } from '@shizue/core/macro';
-import { isNarration, NARRATION_PREFIX } from '@shizue/core/narration';
+import { isNarration } from '@shizue/core/narration';
 import { isNarrationTurn } from '@shizue/core/speech';
 import { isSceneMessage, sceneSpanAt } from '@shizue/core/scene';
 import { manualTriggerNames, type MemberOverlay, type TranslationScript } from '@shizue/core/triggers';
@@ -15,6 +14,7 @@ import { useFormatter, useLocale, useTranslations } from 'next-intl';
 import { Fragment, use, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useStickToBottom } from 'use-stick-to-bottom';
 import { AiBadge, AiNotice } from '@/components/AiNotice';
+import { Avatar } from '@/components/Avatar';
 import { BgmMute } from '@/components/BgmMute';
 import { BottomSheet } from '@/components/BottomSheet';
 import { ChatBackground } from '@/components/ChatBackground';
@@ -29,7 +29,6 @@ import { ScriptDialog, type ScriptPrompt } from '@/components/ScriptDialog';
 import { SceneEditor, type SceneBlock } from '@/components/SceneEditor';
 import { ThemeSwitcher } from '@/components/ThemeSwitcher';
 import { Button, CenteredMessage, Spinner, TextArea, cx } from '@/components/ui';
-import { WriteAsPicker } from '@/components/WriteAsPicker';
 import { Link } from '@/i18n/navigation';
 import { apiGet, apiSend } from '@/lib/api';
 import {
@@ -47,12 +46,11 @@ import {
 } from '@/lib/chatHistory';
 import { finishMarked, markFinish, unmarkFinish } from '@/lib/scripts/finishMark';
 import { chatRowMeta, relativeDay } from '@/lib/chatRows';
-import { composeTurn } from '@/lib/composerMode';
+import { applyMention, matchMentions, mentionAt, narratorOption, type MentionOption } from '@/lib/mention';
 import type { CbsContext } from '@/lib/cbs';
 import type { ComponentContext } from '@/lib/componentCalls';
 import { toggleDirectionMarkup } from '@/lib/directionMarkup';
 import { awaitingEmotion, emotionResolver, emotionSlots, withEmotions } from '@/lib/emotion';
-import { streamsNarration } from '@/lib/narrator';
 import {
   displayContextAt,
   readCustomUiEnabled,
@@ -139,8 +137,6 @@ import { useSmoothStream } from '@/lib/useSmoothStream';
 interface SendOptions {
   source?: MessageSource;
   directions?: string;
-  /** Uploads to bind to the turn; the server checks they are this chat's own. */
-  attachmentIds?: string[];
 }
 
 /**
@@ -448,8 +444,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const scriptOverlay = scriptBundle ? (scriptOverlays[scriptBundle.memberId] ?? null) : null;
 
   const [input, setInput] = useState('');
-  /** The member the reader writes the turn as (Zeta's `@이름:`); null is their own voice. */
-  const [writeAs, setWriteAs] = useState<string | null>(null);
+  /** Where the composer's caret is, for the `@이름` being typed there (`lib/mention`). */
+  const [caret, setCaret] = useState(0);
+  /** The highlighted name in the `@` list, and whether Escape put the list away. */
+  const [mentionPick, setMentionPick] = useState(0);
+  const [mentionClosed, setMentionClosed] = useState(false);
   const [mode, setMode] = useState<StreamMode | null>(null);
   /**
    * The round in hand in a work of several members (`lib/groupRound`): who is
@@ -2403,7 +2402,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     // A round that failed before is given up by starting another.
     setRound(null);
     const pick = (cue: RoundCue): string[] =>
-      pickSpeakers({ stage, picks: [], cue, settings: plot?.groupSettings, random: Math.random });
+      pickSpeakers({ stage, cue, settings: plot?.groupSettings, random: Math.random });
 
     if (begin.opening === 'send') {
       const opened: { round: Round | null } = { round: null };
@@ -2423,10 +2422,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     let round: Round | null;
     if (begin.opening === 'regenerate') {
       // The whole round again, rolled afresh — a reroll, and whoever spoke before
-      // may since have left the stage. A round the narration button opened is
-      // the narrator's to redo; a narration that only ended a round is not redone.
+      // may since have left the stage.
       const redo = redoOf(current.path);
-      round = openRound('regenerate', redo.narrator ? [NARRATOR_SPEAKER] : pick(redo.cue), redo.replaces);
+      round = openRound('regenerate', pick(redo.cue), redo.replaces);
     } else {
       round = openRound('reply', begin.speakers ?? pick(cueOf(current.path.at(-1))));
     }
@@ -2813,19 +2811,14 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     });
   }
   // Auto-continue appends a new reply, so unlike regenerate it keeps the head
-  // bubble and streams below it. When what is being generated is a narration, the
-  // prefix the server will store goes on the optimistic text — which is all
-  // MessageRow needs to draw it as one while it streams, rather than flipping it
-  // when the turn lands.
-  // A round's next speaker streams below the last reply the same way, under
-  // their own face from the first moment.
-  if (active === 'send' || active === 'regenerate' || active === 'auto' || active === 'narrate' || active === 'reply') {
-    const narrates = roundSpeaker !== undefined ? roundSpeaker === NARRATOR_SPEAKER : streamsNarration(active, last);
+  // bubble and streams below it. A round's next speaker streams below the last
+  // reply the same way, under their own face from the first moment.
+  if (active === 'send' || active === 'regenerate' || active === 'auto' || active === 'reply') {
     view.push({
       key: 'streaming',
       id: null,
       role: 'assistant',
-      content: narrates ? `${NARRATION_PREFIX} ${streamText}` : streamText,
+      content: streamText,
       attachments: NO_ATTACHMENTS,
       createdAt: null,
       streaming: mode !== null,
@@ -2862,10 +2855,33 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    */
   const importing = state.chat.importing === true;
   /**
-   * The member the composer writes as, while still on the stage — or null for
-   * the reader's own voice. Only in a work of several members.
+   * Zeta's write-as, typed: while the reader writes the name after a line's `@`,
+   * the members on the stage and the narrator it would be read as (`readerLine`).
    */
-  const writer = group && writeAs ? (stage.find((member) => member.id === writeAs) ?? null) : null;
+  const mention = mentionClosed ? null : mentionAt(input, caret);
+  const mentionOptions: MentionOption[] = mention
+    ? matchMentions(
+        [
+          ...stage.map((member) => ({
+            key: member.id,
+            label: member.name,
+            name: member.name,
+            names: [member.name, ...(member.nickname ? [member.nickname] : []), ...(member.aliases ?? [])],
+            avatarUrl: member.avatarUrl,
+          })),
+          narratorOption(t('narrator')),
+        ],
+        mention.query,
+      )
+    : [];
+  const mentionActive = Math.min(mentionPick, mentionOptions.length - 1);
+  function pickMention(option: MentionOption): void {
+    if (!mention) return;
+    const next = applyMention(input, mention, caret, option);
+    composerSelection.current = [next.caret, next.caret];
+    setCaret(next.caret);
+    setInput(next.value);
+  }
   /**
    * Whether a send would know how the work answers. A work's cast comes with the
    * plot's read, and a send before it would answer a work of several as one.
@@ -2875,9 +2891,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const translateInput = languageMode?.input === true;
   function submit(): void {
     if (!input.trim() || mode || serverGenerating || mutationRef.current || importing || scriptsPending || castPending || translatingInput) return;
-    // What is stored is the plain convention the reader could have typed by hand —
-    // a member's line included (`@이름: …`), and the narrator's (`@: …`).
-    const content = composeTurn(input, 'dialogue', writer?.name ?? null);
+    // Stored as written: a line written as a member (`@이름: …`) or as the narrator
+    // (`@: …`) is read as theirs by the same convention everywhere.
+    const content = input;
     // Slash commands only where RisuAI's scripts run; anywhere else `/…` is just text.
     if (runtime && input.startsWith('/')) {
       setInput('');
@@ -3449,6 +3465,46 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                 </button>
               </div>
             ) : null}
+            {/* The names a line's `@` can be followed by, closest to the field. A press
+                keeps the field's focus (`preventDefault` on the mouse down). */}
+            {mentionOptions.length > 0 ? (
+              <div className="mx-auto max-w-[1120px] px-2 pt-2">
+                <ul
+                  id="mention-list"
+                  role="listbox"
+                  aria-label={t('mentionLabel')}
+                  data-testid="mention-list"
+                  className="max-h-48 overflow-y-auto rounded-xl bg-raised p-1 shadow-card"
+                >
+                  {mentionOptions.map((option, index) => (
+                    <li key={option.key} id={`mention-${option.key}`} role="option" aria-selected={index === mentionActive}>
+                      <button
+                        type="button"
+                        tabIndex={-1}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => pickMention(option)}
+                        className={cx(
+                          'flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
+                          index === mentionActive ? 'bg-line text-fg' : 'text-muted hover:text-fg',
+                        )}
+                      >
+                        {option.name ? (
+                          <span aria-hidden="true">
+                            <Avatar src={option.avatarUrl ?? null} name={option.label} className="size-6 text-[10px]" />
+                          </span>
+                        ) : (
+                          <Icon name="menu" className="size-4 shrink-0 text-muted" />
+                        )}
+                        <span className="truncate">{option.label}</span>
+                        <span aria-hidden="true" className="ml-auto text-xs text-muted">
+                          @{option.name}:
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
             {/* Zeta's composer: 답변 추천 (⚡), the field with its `*` inside, and the
                 round send. */}
             <div className="mx-auto flex max-w-[1120px] items-end gap-1.5 p-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))]">
@@ -3483,8 +3539,39 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                   // Typing goes on while the reply streams — only sending waits for it
                   // (`submit` checks `mode`). Locking the field would also throw the
                   // keyboard user's focus away mid-turn.
-                  onChange={(event) => setInput(event.target.value)}
+                  onChange={(event) => {
+                    setInput(event.target.value);
+                    setCaret(event.target.selectionStart);
+                    setMentionClosed(false);
+                    setMentionPick(0);
+                  }}
+                  onSelect={(event) => setCaret(event.currentTarget.selectionStart)}
+                  aria-autocomplete="list"
+                  aria-controls={mentionOptions.length > 0 ? 'mention-list' : undefined}
+                  aria-activedescendant={
+                    mentionOptions.length > 0 ? `mention-${mentionOptions[mentionActive]!.key}` : undefined
+                  }
                   onKeyDown={(event) => {
+                    // The `@` list takes the arrows, Enter and Tab while it is open,
+                    // and Escape puts it away until the next keystroke.
+                    if (mentionOptions.length > 0 && !event.nativeEvent.isComposing) {
+                      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                        event.preventDefault();
+                        const step = event.key === 'ArrowDown' ? 1 : -1;
+                        setMentionPick((mentionActive + step + mentionOptions.length) % mentionOptions.length);
+                        return;
+                      }
+                      if (event.key === 'Enter' || event.key === 'Tab') {
+                        event.preventDefault();
+                        pickMention(mentionOptions[mentionActive]!);
+                        return;
+                      }
+                      if (event.key === 'Escape') {
+                        event.preventDefault();
+                        setMentionClosed(true);
+                        return;
+                      }
+                    }
                     // Exactly Cmd/Ctrl+I: with shift or alt it is the browser's own
                     // shortcut (devtools), and taking that would be worse than useful.
                     if (
@@ -3571,13 +3658,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         <BottomSheet title={t('settings')} onClose={() => setSheetOpen(false)}>
           {/* The music's mute, which the header has no room for. */}
           <BgmMute row className="mb-5" />
-          {/* In a work of several members, whose line the reader writes (Zeta's
-              write-as): it marks the text on its way out and nothing more. */}
-          {group && stage.length > 0 ? (
-            <div className="mb-5">
-              <WriteAsPicker members={stage} selected={writer?.id ?? null} onChange={setWriteAs} />
-            </div>
-          ) : null}
           <ChatSettings
             model={state.chat.model}
             subModel={state.chat.subModel}

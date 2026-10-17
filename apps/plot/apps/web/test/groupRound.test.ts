@@ -66,26 +66,14 @@ describe('which works answer in rounds', () => {
 });
 
 describe('picking a round', () => {
-  it('takes the reader’s picks exactly — in roster order, past 대화량 and the cap, on the stage only', () => {
-    const speakers = pickSpeakers({
-      stage: STAGE,
-      picks: ['mio', 'seiya', 'gone'],
-      cue: { text: '카이야', lastSpeakerId: null },
-      settings: { order: 'natural', maxSpeakers: 1 },
-      random: always,
-    });
-    expect(speakers).toEqual(['seiya', 'mio']);
-  });
-
-  it('rolls with the work’s order and cap where nobody was picked', () => {
+  it('rolls with the work’s order and cap', () => {
     const settings = { order: 'list' as const, maxSpeakers: 3 };
-    // 미오 speaks only when picked.
-    expect(pickSpeakers({ stage: STAGE, picks: [], cue: { text: '안녕', lastSpeakerId: null }, settings, random: always })).toEqual([
+    expect(pickSpeakers({ stage: STAGE, cue: { text: '안녕', lastSpeakerId: null }, settings, random: always })).toEqual([
       'seiya',
       'kai',
     ]);
     expect(
-      pickSpeakers({ stage: STAGE, picks: [], cue: { text: '안녕', lastSpeakerId: null }, settings: { ...settings, maxSpeakers: 1 }, random: always }),
+      pickSpeakers({ stage: STAGE, cue: { text: '안녕', lastSpeakerId: null }, settings: { ...settings, maxSpeakers: 1 }, random: always }),
     ).toEqual(['seiya']);
   });
 
@@ -93,7 +81,7 @@ describe('picking a round', () => {
     // Natural: the one named comes first, and whoever just spoke sits it out.
     const speakers = pickSpeakers({
       stage: STAGE,
-      picks: [],
+     
       cue: { text: '세이 어디 갔어?', lastSpeakerId: 'kai' },
       settings: null,
       random: always,
@@ -104,7 +92,7 @@ describe('picking a round', () => {
   it('leaves out a member the reader wrote a line as', () => {
     const speakers = pickSpeakers({
       stage: STAGE,
-      picks: [],
+     
       cue: { text: '@카이: 내가 대신 말할게', lastSpeakerId: null },
       settings: { order: 'list', maxSpeakers: 3 },
       random: always,
@@ -138,20 +126,12 @@ describe('reading the branch', () => {
   });
 
   it('redoes the whole round, answering what it answered', () => {
-    expect(redoOf([user, first, second])).toEqual({ replaces: 2, cue: { text: '안녕', lastSpeakerId: null }, narrator: false });
+    expect(redoOf([user, first, second])).toEqual({ replaces: 2, cue: { text: '안녕', lastSpeakerId: null } });
     // Under the reader's own turn there is nothing to replace: the turn is answered.
-    expect(redoOf([first, user])).toEqual({ replaces: 0, cue: { text: '안녕', lastSpeakerId: null }, narrator: false });
+    expect(redoOf([first, user])).toEqual({ replaces: 0, cue: { text: '안녕', lastSpeakerId: null } });
     // A round after a reply: whoever just spoke is the last speaker.
     const auto = message('r3', 'assistant', '미오의 말', { speakerMemberId: 'mio', groupTurnId: 'r3' });
     expect(redoOf([user, first, second, auto]).cue).toEqual({ text: '카이의 말', lastSpeakerId: 'kai' });
-  });
-
-  it('gives a round the narration button opened back to the narrator', () => {
-    const narration = message('n1', 'assistant', '@: 바람이 분다.', { speakerMemberId: null, groupTurnId: 'n1' });
-    expect(redoOf([user, narration]).narrator).toBe(true);
-    // A narration that only ended a members' round is not what the round is.
-    const ended = message('n2', 'assistant', '@: 바람이 분다.', { speakerMemberId: null, groupTurnId: 'r1' });
-    expect(redoOf([user, first, ended])).toMatchObject({ replaces: 2, narrator: false });
   });
 });
 

@@ -775,10 +775,6 @@
     "stop": "중단",
     "direction": "지문",
     "directionHint": "행동·상황 묘사를 *지문*으로 감쌉니다.",
-    "writeAs": "누구의 말",
-    "writeAsSelf": "내 말",
-    "writeAsMember": "{name}의 말",
-    "writeAsHint": "고른 인물의 대사를 내가 직접 씁니다. 보낼 때 줄마다 @이름: 을 붙이고, 그 인물은 이번 차례에 따로 답하지 않습니다.",
     "regenerate": "재생성",
     "regenerateRoundHint": "이번 차례의 답장을 처음부터 다시 받습니다. 말할 인물도 다시 고릅니다.",
     "continue": "이어쓰기",
@@ -1052,8 +1048,6 @@
     "yesterday": "어제",
     "imagePrev": "이전 이미지",
     "imageNext": "다음 이미지",
-    "attachLimit": "이미지는 한 번에 {max}장까지 첨부할 수 있습니다",
-    "attachTooLarge": "{max}MB 이하 이미지만 첨부할 수 있습니다",
     "openAttachedFile": "첨부 파일 {name} 열기",
     "viewImage": "이미지 크게 보기",
     "loadingEarlier": "이전 대화를 불러오는 중…",
@@ -1175,7 +1169,8 @@
     "askTitle": "어떻게 고쳐드릴까요?",
     "askHint": "어떤 점이 달라지면 좋을지 알려 주세요. 이번 답장에만 쓰여요.",
     "askPlaceholder": "예) 속마음도 같이 써 줘",
-    "askSubmit": "다시 쓰기"
+    "askSubmit": "다시 쓰기",
+    "mentionLabel": "이름 고르기"
   },
   "personas": {
     "title": "페르소나",
@@ -1235,7 +1230,6 @@
     "not_publishable": "제목과 함께 세계관이나 등장인물 설정을 채워야 공개할 수 있습니다.",
     "model_unavailable": "이 모델은 현재 계정에서 사용할 수 없습니다. AI 연결을 확인하고 대화 설정에서 모델을 바꿔 주세요.",
     "generation_in_progress": "이미 응답을 생성하고 있습니다. 잠시 후 다시 시도하세요.",
-    "narration_empty": "나레이션이 장면 없이 등장인물의 대사로만 나왔습니다. 다시 시도해 주세요.",
     "prompt_too_long": "카드의 스크립트가 요청을 {tokens, number}토큰으로 늘려 이 대화의 컨텍스트({limit, number}토큰)를 넘었기 때문에 보낼 수 없었습니다. 대화 설정에서 컨텍스트를 늘리거나 다시 시도해 주세요.",
     "payload_too_large": "파일이 너무 큽니다.",
     "internal_error": "서버 오류가 발생했습니다.",

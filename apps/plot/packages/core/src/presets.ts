@@ -10,9 +10,8 @@ export interface Preset {
 //
 // {{char}} is the plot here, not one character: a chat holds the whole roster,
 // so the writer these presets frame is the work's, not a member's. The narrator
-// is not among the roles: it speaks only when the reader presses the narration
-// button, and that request carries its own instruction. A reply's unprefixed
-// lines are the reply's own 지문, written with the lines around them.
+// is not among the roles. A reply's unprefixed lines are the reply's own 지문,
+// written with the lines around them.
 
 /**
  * The script protocol every preset teaches, written once. `speech.ts` parses
@@ -20,8 +19,7 @@ export interface Preset {
  * chat to drift out of step with what the model was told to write.
  *
  * The unprefixed lines are the reply's 지문, not a narrator's: a narrator that
- * every reply could hand a line to is a narrator the model decides to bring in,
- * which is what the narration button exists to replace.
+ * every reply could hand a line to is a narrator the model decides to bring in.
  */
 export const SPEECH_PROTOCOL = `발화 규칙:
 - 등장인물의 말과 행동은 \`이름: \`으로 시작하는 줄에 씁니다. 이름은 등장인물 목록에 있는 이름을 그대로 적습니다.
@@ -54,8 +52,7 @@ export const GROUP_SPEECH_PROTOCOL = `발화 규칙:
  * only what is marked (`*…*`) inside a bubble, as RisuAI greys its italics.
  * Conditional and a preference only — a reply may be dialogue only, 지문 only,
  * or both, and the hint asks for no order and no length. `assemblePrompt` sends
- * it only beside one of these presets, never beside a card's own instructions,
- * and never on a narration.
+ * it only beside one of these presets, never beside a card's own instructions.
  */
 export const REPLY_FORMAT_HINT =
   '응답 형식(권장): 대사가 아닌 부분(행동·표정·묘사)은 *…*로 감싸고, 대사는 그대로 씁니다. 둘 중 하나만 있어도 됩니다.';

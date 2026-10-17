@@ -95,11 +95,10 @@ reader's sessions. A former local installation's owner, with its plots and
 chats, is taken over by the first account that signs in.
 
 ChatGPT plan sharing supports the Responses route, not image generation or
-embeddings: the scene-generation button is disabled, and the memory's embeddings
-come from the model the API runs itself (above).
-Image attachments are sent only when the account's model catalog advertises image
-input. Reply length is requested in the prompt; this route accepts no hard
-output-token limit.
+embeddings: the memory's embeddings come from the model the API runs itself
+(above). The images an imported chat carries are sent only when the account's
+model catalog advertises image input. Reply length is requested in the prompt;
+this route accepts no hard output-token limit.
 
 ### On a phone, from your own machine
 

@@ -1755,11 +1755,8 @@ describe('assemblePrompt - the reply format hint', () => {
     ).not.toContain(REPLY_FORMAT_HINT);
   });
 
-  it('is absent on a narration, and on the narrator’s turn in a round', () => {
-    expect(hinted({ narration: true }).system).not.toContain(REPLY_FORMAT_HINT);
+  it("is on a member's own turn in a round, a reply like any other", () => {
     const kai: PromptCharacter = { name: '카이', card: { ...card, name: '카이' } };
-    expect(hinted({ characters: [aria, kai], speaker: 'narrator' }).system).not.toContain(REPLY_FORMAT_HINT);
-    // A member's own turn in the round is a reply like any other.
     expect(hinted({ characters: [aria, kai], speaker: 1 }).system).toContain(REPLY_FORMAT_HINT);
   });
 

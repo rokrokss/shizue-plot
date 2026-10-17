@@ -13,7 +13,7 @@
  *   what the triggers left as the turn's `variableDelta`, the prompt text the start
  *   triggers asked for (`injections`) and anything they rewrote of the work.
  * - **Any other generation** (`prepare('regenerate' | 'continue' | 'auto' |
- *   'narrate' | 'reply')`): the start triggers alone, on the branch the generation
+ *   'reply')`): the start triggers alone, on the branch the generation
  *   reads; what they left goes as `startDelta`.
  * - **The reply** (`finish`): when the plot has output scripts the POST says
  *   `postProcess`, the server stores the reply `pending`, and once it lands the

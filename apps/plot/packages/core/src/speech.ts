@@ -304,21 +304,6 @@ export function lineSpeaker(line: string, roster: readonly SpeechRosterMember[])
 }
 
 /**
- * A generated narration as it is kept: its text up to the first line the parser
- * reads as someone on `roster` speaking, trimmed. The narrator speaks for nobody,
- * and a prompt alone does not hold that — a model asked for the scene still slips
- * into a member's line now and then — so the narration ends where the slip
- * begins, judged by the same parser the renderer reads it with. Empty when the
- * very first line is one; the stop sequences cannot catch that line, since no
- * line break comes before it.
- */
-export function narrationUntilSpeech(text: string, roster: readonly SpeechRosterMember[]): string {
-  const lines = text.split(/\r?\n/);
-  const at = lines.findIndex((line) => lineSpeaker(line, roster) !== undefined);
-  return (at < 0 ? lines : lines.slice(0, at)).join('\n').trim();
-}
-
-/**
  * Text written into the protocol as `name`'s: every line with text gets the
  * `name: ` prefix, except a line the parser already reads as someone on
  * `roster` (by default `name` alone). Blank lines stay, as spacing. The

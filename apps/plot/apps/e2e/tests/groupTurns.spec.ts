@@ -73,14 +73,6 @@ async function expectComposerIdle(): Promise<void> {
   await expect(page.getByPlaceholder('메시지를 입력하세요')).toBeEnabled();
 }
 
-/** The chat's settings sheet, which ☰ opens; whom the reader writes as is at its top. */
-async function openSettings() {
-  await page.getByRole('button', { name: '대화 설정' }).click();
-  const sheet = page.getByRole('dialog', { name: '대화 설정' });
-  await expect(sheet).toBeVisible();
-  return sheet;
-}
-
 async function send(text: string): Promise<void> {
   await page.getByPlaceholder('메시지를 입력하세요').fill(text);
   await page.getByRole('button', { name: '보내기' }).click();
@@ -182,13 +174,18 @@ test('hiding one reply of a round hides that reply alone', async () => {
 
 test('a line written as a member is drawn as theirs, and they sit the round out', async () => {
   generations.length = 0;
-  let sheet = await openSettings();
-  await sheet.getByTestId('write-as').click();
-  await sheet.getByRole('button', { name: `${cast[1]}의 말` }).click();
-  await expect(sheet.getByTestId('write-as')).toHaveText(`${cast[1]}의 말`);
-  await page.keyboard.press('Escape');
-  await expect(sheet).toHaveCount(0);
-  await send(`눈 치우는 건 내가 할게 ${run}`);
+  // Zeta's `@이름:`, typed: the `@` offers the stage and the narrator, and taking a
+  // name writes the whole marker.
+  const composer = page.getByPlaceholder('메시지를 입력하세요');
+  await composer.fill('');
+  await composer.pressSequentially('@');
+  const list = page.getByTestId('mention-list');
+  await expect(list.getByRole('option')).toHaveCount(cast.length + 1);
+  await list.getByRole('option', { name: new RegExp(cast[1]!) }).click();
+  await expect(composer).toHaveValue(`@${cast[1]}: `);
+  await expect(list).toHaveCount(0);
+  await composer.pressSequentially(`눈 치우는 건 내가 할게 ${run}`);
+  await page.getByRole('button', { name: '보내기', exact: true }).click();
 
   await expect(userMessages()).toHaveCount(2);
   const turn = userMessages().last();
@@ -201,12 +198,6 @@ test('a line written as a member is drawn as theirs, and they sit the round out'
   expect(generations[0]!.body?.['content']).toBe(`@${cast[1]}: 눈 치우는 건 내가 할게 ${run}`);
   expect(generations).toHaveLength(2);
   expect(await storedSpeakers(2)).toEqual([cast[0], cast[2]]);
-  // Back to the reader's own voice for what follows.
-  sheet = await openSettings();
-  await sheet.getByTestId('write-as').click();
-  await sheet.getByRole('button', { name: '내 말' }).click();
-  await expect(sheet.getByTestId('write-as')).toHaveText('내 말');
-  await page.keyboard.press('Escape');
 });
 
 test('중단 stops the round between speakers: what is stored stays, and nobody after is asked', async () => {
@@ -242,9 +233,6 @@ test('a work of one member asks as it always has', async () => {
   const soloId = await createPlot(`혼자 플롯 ${run}`, [`리안${run}`]);
   await expect(page.getByTestId('group-order-natural')).toHaveCount(0);
   await startChat(soloId);
-  const sheet = await openSettings();
-  await expect(sheet.getByTestId('write-as')).toHaveCount(0);
-  await page.keyboard.press('Escape');
 
   generations.length = 0;
   await send(`안녕하세요 ${run}`);

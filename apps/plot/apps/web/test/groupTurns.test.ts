@@ -2,8 +2,8 @@
 /**
  * Group turns on the chat page: in a work of two or more members a turn is
  * answered one reply per speaker, each its own request — the first with the
- * turn, the rest joining its round — and the reader's 다음 차례 picks, stop,
- * retry, 재생성, 이어가기, 지금 말하기 and write-as all act on rounds. A work of
+ * turn, the rest joining its round — and stop, retry, 재생성, 지금 말하기 and
+ * a line typed as a member (`@이름:`) all act on rounds. A work of
  * one answers as it always has and never names a speaker.
  *
  * The chat page is mounted with its heavy children stubbed, as in
@@ -368,20 +368,6 @@ describe('a round in a work of several members', () => {
 
   });
 
-  it('gives a round the narration button opened back to the narrator', async () => {
-    chatState = stateWith([
-      greeting,
-      message('u1', 'msg_g', 'user', '안녕'),
-      message('n1', 'u1', 'assistant', '@: 바람이 분다.', { speakerMemberId: null, groupTurnId: 'n1' }),
-    ]);
-    await render();
-    await click(button('재생성')!);
-    await settle();
-    expect(streamed).toEqual([
-      { path: '/api/chats/cht_1/regenerate', body: { speakerId: 'narrator', finalSpeaker: true } },
-    ]);
-  });
-
   it('lets a member speak now, a round of one', async () => {
     chatState = stateWith(answered());
     await render();
@@ -394,13 +380,17 @@ describe('a round in a work of several members', () => {
 
   it('sends a line written as a member as that member’s, who then sits the round out', async () => {
     await render();
-    // In the sheet ☰ opens.
-    await click(button('대화 설정')!);
-    await click(document.querySelector('[data-testid="write-as"]')!);
-    // Its face's initial sits beside the name.
-    await click([...document.body.querySelectorAll('button')].find((node) => node.textContent?.endsWith('민수의 말'))!);
-    expect(document.querySelector('[data-testid="write-as"]')?.textContent).toBe('민수의 말');
-    await sendText('반가워');
+    // Typing the line's `@` offers the stage and the narrator; the name typed narrows it.
+    await type('@');
+    const list = (): string[] =>
+      [...host.querySelectorAll('[data-testid="mention-list"] [role="option"] .truncate')].map((node) => node.textContent ?? '');
+    expect(list()).toEqual(['리안', '민수', '유나', '내레이터']);
+    await type('@민');
+    expect(list()).toHaveLength(1);
+    await click(host.querySelector('[data-testid="mention-list"] button')!);
+    expect(host.querySelector('textarea')!.value).toBe('@민수: ');
+    expect(host.querySelector('[data-testid="mention-list"]')).toBeNull();
+    await sendText('@민수: 반가워');
     expect(streamed[0]!.body).toMatchObject({ content: '@민수: 반가워' });
     expect(speakers()).toEqual(['chr_lian', 'chr_yuna']);
   });
@@ -411,9 +401,6 @@ describe('a work of one member', () => {
     roster = [member('chr_lian', '리안')];
     chatState = stateWith(answered().slice(0, 3));
     await render();
-    await click(button('대화 설정')!);
-    expect(document.querySelector('[data-testid="write-as"]')).toBeNull();
-    await click(button('닫기')!);
 
     await sendText('안녕');
     expect(streamed).toEqual([{ path: '/api/chats/cht_1/messages', body: { content: '안녕' } }]);

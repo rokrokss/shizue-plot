@@ -303,7 +303,7 @@ function breaker(previous: Fingerprint, current: Fingerprint, history: ReadonlyS
  * summaries' frontier.
  */
 export function chatRequestSent(
-  lane: { chatId: string; speaker?: string | number },
+  lane: { chatId: string; speaker?: number },
   request: AssembledPrompt,
   memory: { clock: number; history: readonly { id?: string }[] },
   now = Date.now(),

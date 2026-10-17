@@ -775,10 +775,6 @@
     "stop": "Stop",
     "direction": "Stage direction",
     "directionHint": "Wraps action and scene description in *stage direction* marks.",
-    "writeAs": "Write as",
-    "writeAsSelf": "As me",
-    "writeAsMember": "As {name}",
-    "writeAsHint": "Write the picked character's lines yourself. Each line is sent with @Name:, and that character does not answer separately this round.",
     "regenerate": "Regenerate",
     "regenerateRoundHint": "Redoes this round's replies from the start, with its speakers picked again.",
     "continue": "Continue",
@@ -1052,8 +1048,6 @@
     "yesterday": "Yesterday",
     "imagePrev": "Previous image",
     "imageNext": "Next image",
-    "attachLimit": "Up to {max} images per message",
-    "attachTooLarge": "Images must be {max}MB or smaller",
     "openAttachedFile": "Open attached file {name}",
     "viewImage": "View image",
     "loadingEarlier": "Loading earlier messages…",
@@ -1175,7 +1169,8 @@
     "askTitle": "How should it change?",
     "askHint": "Say what you would like done differently. It applies to this reply only.",
     "askPlaceholder": "e.g. Show what they are really thinking, too",
-    "askSubmit": "Rewrite"
+    "askSubmit": "Rewrite",
+    "mentionLabel": "Pick a name"
   },
   "personas": {
     "title": "Personas",
@@ -1235,7 +1230,6 @@
     "not_publishable": "Fill in the title and either the world setting or a character's description before publishing.",
     "model_unavailable": "This model is unavailable for your account. Check the AI connection and choose a model in chat settings.",
     "generation_in_progress": "A reply is already being generated. Try again in a moment.",
-    "narration_empty": "The narration came back as a character's lines with no scene. Try again.",
     "prompt_too_long": "The card’s scripts grew the request to {tokens, number} tokens, past this chat’s context of {limit, number}, so it couldn’t be sent. Raise the context in the chat settings, or try again.",
     "payload_too_large": "That file is too large.",
     "internal_error": "The server ran into an error.",

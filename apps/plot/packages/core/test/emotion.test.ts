@@ -74,9 +74,8 @@ describe('inlay emotion screen', () => {
     expect(assemblePrompt({ plot, characters: [inlay, plain], history, speaker: 1 }).messages.some((message) =>
       String(message.content).includes('List of commands'),
     )).toBe(false);
-    // A scene reply in a work of several is no one member's, and a narration is the narrator's.
+    // A scene reply in a work of several is no one member's.
     expect(String(last({ plot, characters: [inlay, plain], history }).content)).not.toContain('List of commands');
-    expect(String(last({ plot, characters: [inlay], history, narration: true }).content)).not.toContain('List of commands');
   });
 
   it("turns the model's tags into the picture, each on a line of its own", () => {

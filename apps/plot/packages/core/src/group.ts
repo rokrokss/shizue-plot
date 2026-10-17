@@ -11,8 +11,8 @@
  * Nothing the reader types forces a speaker. A `@이름: …` line is the reader
  * writing that member's line themselves, as Zeta reads it (`readerRuns`), so the
  * member has just spoken and sits the round out like the last speaker does. The
- * narrator never takes a turn on its own: it speaks when the reader presses the
- * narration button, and only then.
+ * narrator never takes a turn: its lines are only the ones the reader writes
+ * (`@내레이터: …`, `@: …`).
  */
 
 import { isNarration } from './narration.js';
@@ -44,11 +44,10 @@ export const DEFAULT_GROUP_SETTINGS: GroupSettings = { order: 'natural', maxSpea
 export const DEFAULT_TALKATIVENESS = 50;
 
 /**
- * The narrator as a speaker: what `assemblePrompt` is asked for on the narration
- * button, and how a round names the narrator's turn. No member id (a uuid) can be this.
+ * The narrator as `writtenAs` names it, for the lines a reader writes as the
+ * narrator. No member id (a uuid) can be this.
  */
 export const NARRATOR_SPEAKER = 'narrator';
-export type NarratorSpeaker = typeof NARRATOR_SPEAKER;
 
 /**
  * The round settings a value describes. An unknown order is the default one, a
@@ -127,7 +126,7 @@ export function writtenAs(
 
 /**
  * Who answers the turn: member ids, in the order they speak. The narrator is
- * never among them — it speaks on the narration button alone.
+ * never among them.
  *
  * A member the text writes a line as (`writtenAs`) has just spoken, as the last
  * speaker has; neither is among the eligible below. Natural order:

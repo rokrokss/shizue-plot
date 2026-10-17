@@ -123,9 +123,9 @@ import { buildRisum } from '../../../packages/core/test/helpers/risum.js';
 import { createApp as createAppFrom } from '../src/app.js';
 import { MAX_ASSETS_PER_PLOT } from '../src/assets.js';
 import {
-  MAX_ATTACHMENT_BYTES,
   MAX_INLINE_IMAGE_BYTES,
-  MAX_UNBOUND_ATTACHMENTS,
+  saveAttachment,
+  toAttachmentJson,
   withTurnImages,
 } from '../src/attachments.js';
 import { createAuth } from '../src/auth.js';
@@ -134,7 +134,6 @@ import { createChatGPTAccounts } from '../src/chatgptAccounts.js';
 import { createHostedAuth, createSessionStore } from '../src/hostedAuth.js';
 import type { AppDeps, AppEnv } from '../src/deps.js';
 import { loadRootEnv } from '../src/env.js';
-import { ApiError } from '../src/errors.js';
 import {
   acquireChatSlot,
   releaseChatSlot,
@@ -163,7 +162,6 @@ import { repairMemberScripts } from '../src/maintenance/memberScripts.js';
 import { FILE_IMPORT_PART_BYTES, MAX_WORLD_INFO_BYTES, runFileImport, sweepFileImports } from '../src/fileImports.js';
 import { localizePlot, type RemoteFetch } from '../src/localizeAssets.js';
 import { acquireLease, releaseLease, renewLease as renewHeldLease, withLease } from '../src/leases.js';
-import { NARRATION_NUDGE } from '../src/routes/chats.js';
 import { MAX_ASSET_NAME_LENGTH, MAX_CARD_IMPORT_BYTES } from '../src/routes/plots.js';
 import { hitRateLimit, RATE_LIMITS } from '../src/rateLimit.js';
 import { runRequestLua } from '../src/requestLua.js';
@@ -171,7 +169,7 @@ import { runRequestTriggers } from '../src/requestTriggers.js';
 import { createScriptFetch, type HopResponse, type Transport } from '../src/scriptFetch.js';
 import { MAX_GLOBAL_VARIABLE_KEYS } from '../src/scriptState.js';
 import { createLocalStorage, importFileKey, PartSizeMismatch, partOf, readAll, type ObjectStorage } from '../src/storage.js';
-import { roundCount, roundStart } from '../src/tree.js';
+import { deepestLeaf, roundCount, roundStart } from '../src/tree.js';
 import { connectS3Server } from './s3Server.js';
 
 loadRootEnv();
@@ -851,6 +849,68 @@ async function setupChat(cookie: string): Promise<{ plotId: string; chatId: stri
   const plot = await importCard(cookie, cardFile());
   const state = await startChat(cookie, plot.id);
   return { plotId: plot.id, chatId: state.chat.id, state };
+}
+
+/**
+ * Moves a chat's head to the newest leaf under `messageId`, as a switch between
+ * branches did before its route went (2026-10-17), and reads the chat back.
+ */
+async function switchHead(
+  cookie: string,
+  chatId: string,
+  messageId: string,
+  target: Hono<AppEnv> = app,
+): Promise<Response> {
+  const all = await db.select().from(messages).where(eq(messages.chatId, chatId));
+  await db.update(chats).set({ headMessageId: deepestLeaf(all, messageId) }).where(eq(chats.id, chatId));
+  return request(cookie, `/api/chats/${chatId}`, 'GET', undefined, target);
+}
+
+/** Minimal bytes that sniff as a GIF; an attachment is never looked at. */
+const gifOf = (marker: number): Uint8Array => Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, marker]);
+
+/**
+ * Hangs a picture on a stored message, as a SillyTavern chat import brings one:
+ * since the composer's upload went (2026-10-17) only an imported turn carries
+ * one. The attachment as the chat's JSON shows it.
+ */
+async function attachImage(chatId: string, messageId: string, bytes: Uint8Array = gifOf(1)): Promise<any> {
+  const id = randomUUID();
+  const stored = (await saveAttachment(storage, id, bytes))!;
+  const [row] = await db
+    .insert(chatAttachments)
+    .values({
+      id,
+      chatId,
+      messageId,
+      path: stored.key,
+      mime: stored.mime,
+      width: 800,
+      height: 600,
+      thumbhash: 'HBkSHYSIeHiPiHh8eJd4h4eAeIhw==',
+    })
+    .returning();
+  return toAttachmentJson(row!);
+}
+
+/**
+ * The reader's turn with pictures on it, answered: stored without a reply (a
+ * stopped send), the pictures hung on it, then a regenerate — the reply to a
+ * turn that carries images, now that only an imported one does. The
+ * regenerate's events.
+ */
+async function answerWithImages(
+  cookie: string,
+  chatId: string,
+  content: string,
+  images: Uint8Array[],
+  target: Hono<AppEnv> = app,
+): Promise<SseEvent[]> {
+  const stored = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content, stopped: true }, target);
+  expect(stored.status, await stored.clone().text()).toBe(200);
+  const turn = (await readJson(stored)).path.at(-1);
+  for (const bytes of images) await attachImage(chatId, turn.id, bytes);
+  return readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, target));
 }
 
 /* ------------------------------------------------------------------ tests */
@@ -3080,14 +3140,12 @@ describe('chats', () => {
     const info = state.siblings[state.path[0].id];
     expect(info).toEqual({ index: 0, total: 3, ids: [expect.any(String), expect.any(String), expect.any(String)] });
 
-    // Swiping is the ordinary head move, and the order is the creator's.
+    // The order is the creator's.
     for (const [index, content] of [
       [1, '두 번째 인사'],
       [2, '세 번째 인사'],
     ] as const) {
-      const swiped = await readJson(
-        await json(cookie, `/api/chats/${chatId}/head`, 'POST', { messageId: info.ids[index] }),
-      );
+      const swiped = await readJson(await switchHead(cookie, chatId, info.ids[index]));
       expect(swiped.path).toHaveLength(1);
       expect(swiped.path[0].content).toBe(content);
       expect(swiped.siblings[swiped.path[0].id].index).toBe(index);
@@ -3124,9 +3182,7 @@ describe('chats', () => {
     const info = state.siblings[state.path[0].id];
     expect(info.total).toBe(10);
 
-    const last = await readJson(
-      await json(cookie, `/api/chats/${state.chat.id}/head`, 'POST', { messageId: info.ids[9] }),
-    );
+    const last = await readJson(await switchHead(cookie, state.chat.id, info.ids[9]));
     expect(last.path[0].content).toBe('도입부 9');
 
     // An intro past the cap is not stored, so a chat cannot start on it either.
@@ -3176,7 +3232,7 @@ describe('chats', () => {
     expect(state.chat.headMessageId).toBe(done.data.messageId);
   });
 
-  it('regenerates a sibling, moves the head, and switches back with POST /head', async () => {
+  it('regenerates a sibling and moves the head onto it', async () => {
     const cookie = await signUp('regen@example.com');
     const { chatId } = await setupChat(cookie);
     await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '첫 질문' }));
@@ -3196,17 +3252,6 @@ describe('chats', () => {
     expect(after.chat.headMessageId).toBe(regenerated.data.messageId);
     expect(after.siblings[after.path[2].id]).toEqual({
       index: 1,
-      total: 2,
-      ids: [firstReply.id, regenerated.data.messageId],
-    });
-
-    const switched = await readJson(await json(cookie, `/api/chats/${chatId}/head`, 'POST', {
-      messageId: firstReply.id,
-    }));
-    expect(switched.chat.headMessageId).toBe(firstReply.id);
-    expect(switched.path[2].id).toBe(firstReply.id);
-    expect(switched.siblings[firstReply.id]).toEqual({
-      index: 0,
       total: 2,
       ids: [firstReply.id, regenerated.data.messageId],
     });
@@ -3242,13 +3287,11 @@ describe('chats', () => {
       await json(cookie, `/api/messages/${assistantId}`, 'PATCH', { content: '고친 답변' }),
     );
     expect(edited.messageId).toBe(assistantId);
-    const switched = await readJson(await json(cookie, `/api/chats/${chatId}/head`, 'POST', {
-      messageId: assistantId,
-    }));
+    const switched = await readJson(await switchHead(cookie, chatId, assistantId));
     expect(switched.path.at(-1).content).toBe('고친 답변');
   });
 
-  it('exposes sibling ids that drive swiping in both directions', async () => {
+  it('exposes the sibling ids of every version on the branch', async () => {
     const cookie = await signUp('swipe@example.com');
     const { chatId } = await setupChat(cookie);
     await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '첫 질문' }));
@@ -3257,7 +3300,7 @@ describe('chats', () => {
     const firstReply = before.path[2];
     const regenerated = (await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST'))).at(-1)!;
 
-    // Fresh read, as after a page reload: ids alone must be enough to swipe.
+    // Fresh read, as after a page reload.
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
     const info = state.siblings[state.path[2].id];
     expect(info).toEqual({
@@ -3267,19 +3310,6 @@ describe('chats', () => {
     });
     expect(info.ids).toHaveLength(info.total);
     expect(info.ids[info.index]).toBe(state.path[2].id);
-
-    const back = await readJson(await json(cookie, `/api/chats/${chatId}/head`, 'POST', {
-      messageId: info.ids[info.index - 1],
-    }));
-    expect(back.chat.headMessageId).toBe(firstReply.id);
-    const backInfo = back.siblings[firstReply.id];
-    expect(backInfo.index).toBe(0);
-    expect(backInfo.ids).toEqual(info.ids);
-
-    const forward = await readJson(await json(cookie, `/api/chats/${chatId}/head`, 'POST', {
-      messageId: backInfo.ids[backInfo.index + 1],
-    }));
-    expect(forward.chat.headMessageId).toBe(regenerated.data.messageId);
   });
 
   it('deletes a message with everything grown from it and ends the branch at its parent', async () => {
@@ -3329,12 +3359,10 @@ describe('chats', () => {
     ]);
     expect(after.siblings[secondReply]).toEqual({ index: 0, total: 1, ids: [secondReply] });
 
-    // The intro roots are untouched by a delete further down, and still swipeable.
+    // The intro roots are untouched by a delete further down.
     const roots = after.siblings[before.path[0].id];
     expect(roots.total).toBe(2);
-    const swiped = await readJson(
-      await json(cookie, `/api/chats/${chatId}/head`, 'POST', { messageId: roots.ids[1] }),
-    );
+    const swiped = await readJson(await switchHead(cookie, chatId, roots.ids[1]));
     expect(swiped.path).toHaveLength(1);
     expect(swiped.path[0].content).toBe('불이 꺼진 열람실에서 마주쳤다.');
   });
@@ -4102,52 +4130,6 @@ describe('chats', () => {
     expect((await request(cookie, `/api/plots/${plotId}/characters/${minsu.id}`, 'DELETE')).status).toBe(204);
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
     expect(prompts[2]!.system).not.toContain('현재 장면에 없는 인물');
-  });
-
-  it('centers one reply on the members the reader picked, and stores none of it', async () => {
-    const cookie = await signUp('scene-focus@example.com');
-    const { plotId, chatId } = await setupChat(cookie);
-    const lian = await firstMember(cookie, plotId);
-    const minsu = await addCharacter(cookie, plotId, { name: '민수' });
-    const { app: capturing, prompts } = capturingApp();
-    const focus = '이번 응답은 리안, 민수의 대사와 행동을 중심으로 씁니다.';
-    const post = (path: string, body?: unknown) =>
-      json(cookie, `/api/chats/${chatId}/${path}`, 'POST', body, capturing);
-    const lastSent = () => prompts.at(-1)!.messages.at(-1)!;
-
-    // Roster order, whatever order the ids came in.
-    await readSse(await post('messages', { content: '안녕', focusCharacterIds: [minsu.id, lian.id] }));
-    expect(lastSent()).toEqual({ role: 'system', content: focus });
-    const stored = await db.select().from(messages).where(eq(messages.chatId, chatId));
-    expect(stored.map((message) => message.content).join('\n')).not.toContain('중심으로');
-
-    // The next turn is back to the scene deciding.
-    await readSse(await post('regenerate'));
-    expect(contentText(lastSent().content)).not.toContain('중심으로');
-
-    // A continue carries the request just before its partial, which stays the
-    // last turn the model resumes; a narration's nudge and the request are one
-    // closing instruction.
-    await readSse(await post('continue', { focusCharacterIds: [lian.id] }));
-    expect(prompts.at(-1)!.messages.at(-2)).toEqual({ role: 'system', content: '이번 응답은 리안의 대사와 행동을 중심으로 씁니다.' });
-    expect(lastSent().role).toBe('assistant');
-    await readSse(await post('narrate', { focusCharacterIds: [minsu.id] }));
-    expect(contentText(lastSent().content)).toMatch(/나레이터의 장면 서술만.*\n이번 응답은 민수의 대사와/s);
-
-    // Only someone on the stage can be asked for, and a refused send writes nothing.
-    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { absentCharacterIds: [minsu.id] });
-    const before = (await db.select().from(messages).where(eq(messages.chatId, chatId))).length;
-    for (const [path, body] of [
-      ['messages', { content: '또', focusCharacterIds: [minsu.id] }],
-      ['auto', { focusCharacterIds: [randomUUID()] }],
-      ['regenerate', { focusCharacterIds: 'x' }],
-    ] as const) {
-      const res = await post(path, body);
-      expect(res.status, path).toBe(400);
-      expect((await readJson(res)).code).toBe('invalid_request');
-    }
-    expect((await db.select().from(messages).where(eq(messages.chatId, chatId))).length).toBe(before);
-    expect(await claimOf(chatId)).toBeNull();
   });
 
   it("shows the plot's creator what a regenerate would send, and nobody else", async () => {
@@ -5092,87 +5074,48 @@ describe('chats', () => {
 });
 
 describe('narration turns', () => {
-  /** Leaves the head on a user message, which is where auto-continue refuses to go. */
-  async function userHead(cookie: string, chatId: string, target: Hono<AppEnv>): Promise<void> {
+  /**
+   * An assistant narration as the narration button stored one until it went
+   * (2026-10-17): under the reader's turn, the head. Chats keep them.
+   */
+  async function oldNarration(cookie: string, chatId: string, target: Hono<AppEnv>): Promise<any> {
     await readSse(
       await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '문을 열었다' }, target),
     );
     const before = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    // An edit forks a user sibling and moves the head onto it.
-    await json(cookie, `/api/messages/${before.path[1].id}`, 'PATCH', { content: '문을 열었다' });
+    const [narration] = await db
+      .insert(messages)
+      .values({ chatId, parentId: before.path[1].id, role: 'assistant', content: '@: 바람이 분다.' })
+      .returning();
+    await db.update(chats).set({ headMessageId: narration!.id }).where(eq(chats.id, chatId));
+    return narration!;
   }
 
-  it('narrates from a user head and stores the scene under the prefix', async () => {
-    const cookie = await signUp('narrate@example.com');
-    const other = await signUp('narrate-other@example.com');
+  it('has no narration turn of its own to ask for any more', async () => {
+    const cookie = await signUp('narrate-gone@example.com');
     const { chatId } = await setupChat(cookie);
-    const { app: capturing, prompts } = capturingApp();
-    await userHead(cookie, chatId, capturing);
-
-    const events = await readSse(
-      await json(cookie, `/api/chats/${chatId}/narrate`, 'POST', undefined, capturing),
-    );
-    expect(events.at(-1)!.event).toBe('done');
-
-    // The nudge is the last thing the model reads, with {{char}} expanded.
-    const nudge = prompts.at(-1)!.messages.at(-1)!;
-    expect(nudge.role).toBe('system');
-    expect(nudge.content).toContain('나레이터의 장면 서술만');
-    // `{{char}}` is the work now, so the nudge names the plot and asks for the
-    // scene rather than any one member's lines.
-    expect(nudge.content).toContain('리안의 등장인물');
-    // The reader's half stays theirs, and the narration is shorter than a reply.
-    expect(nudge.content).toContain('유저의 행동·감정·생각·다음 움직임은 서술하지도 정하지도 않고');
-    expect(nudge.content).toContain('1~2문단');
-
-    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    const head = state.path.at(-1);
-    expect(head.role).toBe('assistant');
-    // The model was asked for the scene alone; the prefix is the server's.
-    expect(head.content).toBe('@: 문을 열었다');
-    expect(state.chat.headMessageId).toBe(head.id);
-    expect(head.parentId).toBe(state.path.at(-2).id);
-    // The nudge lives in the prompt only.
-    expect(state.path.some((message: any) => message.content.includes('나레이터의 장면'))).toBe(false);
-
-    expect((await json(other, `/api/chats/${chatId}/narrate`, 'POST')).status).toBe(404);
+    expect((await json(cookie, `/api/chats/${chatId}/narrate`, 'POST')).status).toBe(404);
   });
 
-  it('regenerates a narration as a narration, and leaves an ordinary reply alone', async () => {
+  it('regenerates an old narration as an ordinary reply', async () => {
     const cookie = await signUp('narrate-regen@example.com');
     const { chatId } = await setupChat(cookie);
     const { app: capturing, prompts } = capturingApp();
-    await userHead(cookie, chatId, capturing);
+    const narration = await oldNarration(cookie, chatId, capturing);
 
-    await readSse(await json(cookie, `/api/chats/${chatId}/narrate`, 'POST', undefined, capturing));
-    const narrated = await readJson(await request(cookie, `/api/chats/${chatId}`));
-
-    // Swiping a narration must not land on a line of dialogue: the head says what
-    // kind of turn it is, and the regenerate re-applies it.
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
-    expect(prompts.at(-1)!.messages.at(-1)!.content).toContain('나레이터의 장면 서술만');
-
+    expect(contentText(prompts.at(-1)!.messages.at(-1)!.content)).not.toContain('나레이터의 장면 서술만');
     const after = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    expect(after.path.at(-1).content).toBe('@: 문을 열었다');
-    expect(after.path.at(-1).id).not.toBe(narrated.path.at(-1).id);
-    expect(after.path.at(-1).parentId).toBe(narrated.path.at(-1).parentId);
-
-    // …and an ordinary reply regenerates without ever seeing the nudge.
-    await readSse(
-      await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '누구세요?' }, capturing),
-    );
-    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
-    expect(prompts.at(-1)!.messages.at(-1)!.content).not.toContain('나레이터의 장면 서술만');
-    const ordinary = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    expect(ordinary.path.at(-1).content).toBe('누구세요?');
+    // A sibling of the narration, answering the reader's turn as any reply does.
+    expect(after.path.at(-1).parentId).toBe(narration.parentId);
+    expect(after.path.at(-1).content).toBe('문을 열었다');
   });
 
-  it('reads a generated narration back as narration everywhere it is read', async () => {
+  it('reads an old narration back as narration everywhere it is read', async () => {
     const cookie = await signUp('narrate-history@example.com');
     const { chatId } = await setupChat(cookie);
     const { app: capturing, prompts } = capturingApp();
-    await userHead(cookie, chatId, capturing);
-    await readSse(await json(cookie, `/api/chats/${chatId}/narrate`, 'POST', undefined, capturing));
+    await oldNarration(cookie, chatId, capturing);
 
     // The next turn carries it labelled rather than as the character speaking, and
     // the prefix itself never reaches the model.
@@ -5180,7 +5123,7 @@ describe('narration turns', () => {
       await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '누구세요?' }, capturing),
     );
     const contents = prompts.at(-1)!.messages.map((message) => contentText(message.content));
-    expect(contents).toContain('[나레이션] 문을 열었다');
+    expect(contents).toContain('[나레이션] 바람이 분다.');
     expect(contents.some((content) => content.includes('@:'))).toBe(false);
 
     // And the export carries it verbatim: the convention is the consumer's to read.
@@ -5188,80 +5131,9 @@ describe('narration turns', () => {
     expect(ChatExportSchema.safeParse(exported).success).toBe(true);
     expect(
       exported.messages.some(
-        (message: any) => message.role === 'assistant' && message.text === '@: 문을 열었다',
+        (message: any) => message.role === 'assistant' && message.text === '@: 바람이 분다.',
       ),
     ).toBe(true);
-  });
-
-  /** An app answering every request with `reply`, keeping what each one asked for. */
-  function answering(reply: string): { app: Hono<AppEnv>; sent: ChatRequest[] } {
-    const sent: ChatRequest[] = [];
-    const app = makeApp({
-      getAdapter: () => ({
-        providerModel: 'answering',
-        adapter: {
-          stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
-            sent.push(req);
-            yield { type: 'text', text: reply };
-            return { usage: { promptTokens: 1, completionTokens: 1 } };
-          },
-        },
-      }),
-    });
-    return { app, sent };
-  }
-
-  it('stops a narration on the member, caps it short, and keeps it up to where the member speaks', async () => {
-    const cookie = await signUp('narrate-guard@example.com');
-    const { chatId } = await setupChat(cookie);
-    const { app: guarded, sent } = answering('바람이 서가 사이를 지나간다.\n리안: 누구세요?\n발소리가 멎는다.');
-    await userHead(cookie, chatId, guarded);
-    // An ordinary reply is as it was: the reader's name stops it, at the reply cap.
-    expect(sent[0]!.stop).toEqual(['\n유저:']);
-    expect(sent[0]!.maxTokens).toBe(DEFAULT_MAX_RESPONSE_TOKENS);
-
-    expect((await readSse(await json(cookie, `/api/chats/${chatId}/narrate`, 'POST', undefined, guarded))).at(-1)!.event).toBe('done');
-    // A work of one member gets the member's stop too, not only a group's narrator.
-    expect(sent.at(-1)!.stop).toEqual(['\n유저:', '\n리안:']);
-    expect(sent.at(-1)!.maxTokens).toBe(600);
-    const narrated = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    expect(narrated.path.at(-1).content).toBe('@: 바람이 서가 사이를 지나간다.');
-
-    // Redoing it is the same request, guarded the same way.
-    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, guarded));
-    expect(sent.at(-1)!.stop).toEqual(['\n유저:', '\n리안:']);
-    const redone = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    expect(redone.path.at(-1).content).toBe('@: 바람이 서가 사이를 지나간다.');
-    expect(redone.path.at(-1).id).not.toBe(narrated.path.at(-1).id);
-  });
-
-  it('fails a narration that is a member speaking from its first line, and stores nothing', async () => {
-    const cookie = await signUp('narrate-empty@example.com');
-    const { chatId } = await setupChat(cookie);
-    const before = await readJson(await request(cookie, `/api/chats/${chatId}`));
-
-    const events = await readSse(
-      await json(cookie, `/api/chats/${chatId}/narrate`, 'POST', undefined, answering('리안: 누구세요?').app),
-    );
-    expect(events.at(-1)).toMatchObject({ event: 'error', data: { code: 'narration_empty' } });
-    const after = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    expect(after.chat.headMessageId).toBe(before.chat.headMessageId);
-    expect(after.path).toHaveLength(before.path.length);
-
-    // The slot is free again, so the reader can simply ask once more.
-    const retry = await readSse(
-      await json(cookie, `/api/chats/${chatId}/narrate`, 'POST', undefined, answering('바람이 분다.').app),
-    );
-    expect(retry.at(-1)!.event).toBe('done');
-  });
-
-  it('writes the narration nudge with no allomorphic particle after a macro', () => {
-    // The presets' rule (prompt.test.ts): the name a macro becomes is unknown here.
-    const allowed = /^(?:$|[\s.,!?):\]'"]|의|에게|에서|에|도|만|까지|부터|처럼|보다|한테)/;
-    for (const match of NARRATION_NUDGE.matchAll(/\{\{(?:char|user)\}\}/g)) {
-      const tail = NARRATION_NUDGE.slice(match.index + match[0].length);
-      expect(allowed.test(tail), `"${match[0]}${tail.slice(0, 12)}"`).toBe(true);
-    }
   });
 
   it('takes a narrator on the plot and puts it in the cached prefix', async () => {
@@ -5626,9 +5498,7 @@ describe('scene editing', () => {
       total: 2,
       ids: [scene[1], after.path[3].id],
     });
-    const back = await readJson(
-      await json(cookie, `/api/chats/${chatId}/head`, 'POST', { messageId: scene[1] }),
-    );
+    const back = await readJson(await switchHead(cookie, chatId, scene[1]));
     expect(back.path.map((message: any) => message.id)).toEqual([
       back.path[0].id,
       back.path[1].id,
@@ -5734,9 +5604,7 @@ describe('scene editing', () => {
     expect(after.siblings[copy.id]).toEqual({ index: 1, total: 2, ids: [scene[2], copy.id] });
 
     // …so a swipe back is the scene exactly as it read before the addition.
-    const back = await readJson(
-      await json(cookie, `/api/chats/${chatId}/head`, 'POST', { messageId: scene[2] }),
-    );
+    const back = await readJson(await switchHead(cookie, chatId, scene[2]));
     expect(back.chat.headMessageId).toBe(scene[2]);
     expect(back.path.map((message: any) => message.id).slice(-3)).toEqual(scene);
   });
@@ -5763,9 +5631,7 @@ describe('scene editing', () => {
 
     // The dropped turns are one swipe away — the head lands on the deepest leaf
     // under the original, which is the tail, whole.
-    const back = await readJson(
-      await json(cookie, `/api/chats/${chatId}/head`, 'POST', { messageId: scene[0] }),
-    );
+    const back = await readJson(await switchHead(cookie, chatId, scene[0]));
     expect(back.chat.headMessageId).toBe(scene[2]);
     expect(back.path.map((message: any) => message.id).slice(-3)).toEqual(scene);
   });
@@ -6934,104 +6800,42 @@ describe('the game layer', () => {
 });
 
 describe('chat attachments', () => {
-  /** Minimal bytes that sniff as a GIF; an attachment is never looked at. */
-  const gif = (marker: number): Uint8Array =>
-    Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, marker]);
-
-  /** What the composer measures off the image before it sends the bytes. */
-  const measured = { width: '800', height: '600', thumbhash: 'HBkSHYSIeHiPiHh8eJd4h4eAeIhw==' };
-
-  function upload(
-    cookie: string | undefined,
-    chatId: string,
-    bytes: Uint8Array,
-    fields: Record<string, string> = measured,
-    target: Hono<AppEnv> = app,
-  ): Promise<Response> {
-    const form = new FormData();
-    form.append('file', new File([bytes], 'shot.gif'));
-    for (const [key, value] of Object.entries(fields)) form.append(key, value);
-    return request(cookie, `/api/chats/${chatId}/attachments`, 'POST', form, target);
-  }
-
-  const attach = async (cookie: string, chatId: string, marker = 1): Promise<any> => {
-    const res = await upload(cookie, chatId, gif(marker));
-    expect(res.status, await res.clone().text()).toBe(201);
-    return readJson(res);
-  };
-
   const storedPath = async (id: string): Promise<string> => {
     const [row] = await db.select().from(chatAttachments).where(eq(chatAttachments.id, id));
     return row!.path;
   };
 
-  it('uploads an image for a turn that has not been sent yet, and serves it back', async () => {
-    const cookie = await signUp('attach-upload@example.com');
-    const { chatId } = await setupChat(cookie);
+  /** The reader's turn, stored with no reply, and the chat as it then reads. */
+  const storedTurn = async (cookie: string, chatId: string, content: string): Promise<any> => {
+    const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content, stopped: true });
+    expect(res.status, await res.clone().text()).toBe(200);
+    return (await readJson(res)).path.at(-1);
+  };
 
-    const created = await attach(cookie, chatId);
-    expect(created).toEqual({
-      id: expect.any(String),
-      url: `/api/chats/${chatId}/attachments/${created.id}`,
-      mime: 'image/gif',
-      width: 800,
-      height: 600,
-      thumbhash: measured.thumbhash,
-      name: null,
-    });
+  it('takes no image from the composer any more', async () => {
+    const cookie = await signUp('attach-gone@example.com');
+    const { chatId } = await setupChat(cookie);
+    const form = new FormData();
+    form.append('file', new File([gifOf(1)], 'shot.gif'));
+    expect((await request(cookie, `/api/chats/${chatId}/attachments`, 'POST', form)).status).toBe(404);
+  });
+
+  it('serves the image a message carries back, to the chat owner alone', async () => {
+    const cookie = await signUp('attach-serve@example.com');
+    const other = await signUp('attach-intruder@example.com');
+    const { chatId } = await setupChat(cookie);
+    const turn = await storedTurn(cookie, chatId, '이 사진 봐');
+    const created = await attachImage(chatId, turn.id);
     // Its own namespace in the store, and a key nothing user-supplied reaches.
     expect(await storedPath(created.id)).toBe(`attachments/${created.id}.gif`);
 
     const served = await request(cookie, created.url);
     expect(served.status).toBe(200);
     expect(served.headers.get('content-type')).toBe('image/gif');
-    expect(new Uint8Array(await served.arrayBuffer())).toEqual(gif(1));
+    expect(new Uint8Array(await served.arrayBuffer())).toEqual(gifOf(1));
 
-    // Nothing has claimed it, so the composer may take it back out again.
-    expect((await request(cookie, created.url, 'DELETE')).status).toBe(204);
-    expect((await request(cookie, created.url)).status).toBe(404);
-    expect(await storage.get(`attachments/${created.id}.gif`)).toBeNull();
-  });
-
-  it('refuses a file that is not an image, an oversized one, and half a measurement', async () => {
-    const cookie = await signUp('attach-refuse@example.com');
-    const { chatId } = await setupChat(cookie);
-
-    const notAnImage = await upload(cookie, chatId, Uint8Array.from([1, 2, 3, 4]));
-    expect(notAnImage.status).toBe(400);
-    expect((await readJson(notAnImage)).code).toBe('invalid_attachment');
-
-    const oversized = await upload(cookie, chatId, new Uint8Array(MAX_ATTACHMENT_BYTES + 1).fill(0x47));
-    expect(oversized.status).toBe(400);
-    expect((await readJson(oversized)).code).toBe('attachment_too_large');
-
-    const halfMeasured = await upload(cookie, chatId, gif(1), { width: '800' });
-    expect(halfMeasured.status).toBe(400);
-    expect((await readJson(halfMeasured)).code).toBe('invalid_asset');
-
-    const fileless = await request(cookie, `/api/chats/${chatId}/attachments`, 'POST', new FormData());
-    expect(fileless.status).toBe(400);
-    expect((await readJson(fileless)).code).toBe('invalid_request');
-
-    // An image the browser could not decode still uploads, just without a box.
-    const unmeasured = await readJson(await upload(cookie, chatId, gif(2), {}));
-    expect(unmeasured).toMatchObject({ width: null, height: null, thumbhash: null });
-
-    expect(await db.select().from(chatAttachments)).toHaveLength(1);
-  });
-
-  it('is the chat owner’s alone, to upload and to read', async () => {
-    const cookie = await signUp('attach-owner@example.com');
-    const other = await signUp('attach-intruder@example.com');
-    const { chatId } = await setupChat(cookie);
-    const created = await attach(cookie, chatId);
-
-    expect((await upload(other, chatId, gif(2))).status).toBe(404);
-    expect((await upload(undefined, chatId, gif(2))).status).toBe(401);
     expect((await request(other, created.url)).status).toBe(404);
     expect((await request(undefined, created.url)).status).toBe(401);
-    expect((await request(other, created.url, 'DELETE')).status).toBe(404);
-
     // The chat is the boundary: the same id under another of one's own chats is
     // not found either.
     const second = await setupChat(cookie);
@@ -7040,18 +6844,13 @@ describe('chat attachments', () => {
     ).toBe(404);
   });
 
-  it('binds the uploads a send names to the turn, and carries them on the branch', async () => {
-    const cookie = await signUp('attach-send@example.com');
+  it('carries a turn’s images on the branch', async () => {
+    const cookie = await signUp('attach-branch@example.com');
     const { chatId } = await setupChat(cookie);
-    const first = await attach(cookie, chatId, 1);
-    const second = await attach(cookie, chatId, 2);
-
-    await readSse(
-      await json(cookie, `/api/chats/${chatId}/messages`, 'POST', {
-        content: '이 사진 봐',
-        attachmentIds: [first.id, second.id],
-      }),
-    );
+    const turn = await storedTurn(cookie, chatId, '이 사진 봐');
+    const first = await attachImage(chatId, turn.id, gifOf(1));
+    const second = await attachImage(chatId, turn.id, gifOf(2));
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST'));
 
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
     const userTurn = state.path.at(-2);
@@ -7059,49 +6858,9 @@ describe('chat attachments', () => {
     expect(userTurn.attachments).toEqual([first, second]);
     // Every other turn carries the field, empty.
     expect(state.path.at(-1).attachments).toEqual([]);
-
-    // Claimed: the same upload cannot be hung on a second turn.
-    const again = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', {
-      content: '다시',
-      attachmentIds: [first.id],
-    });
-    expect(again.status).toBe(400);
-    expect((await readJson(again)).code).toBe('invalid_attachment');
-    // And the refused send left no message behind.
-    const after = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    expect(after.path.map((message: any) => message.id)).toEqual(
-      state.path.map((message: any) => message.id),
-    );
   });
 
-  it('refuses more than four, and ids that are not this chat’s own', async () => {
-    const cookie = await signUp('attach-cap@example.com');
-    const { chatId } = await setupChat(cookie);
-    const mine = await attach(cookie, chatId);
-    const elsewhere = await setupChat(cookie);
-    const theirs = await attach(cookie, elsewhere.chatId);
-
-    const tooMany = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', {
-      content: '다섯 장',
-      attachmentIds: [randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID()],
-    });
-    expect(tooMany.status).toBe(400);
-    expect((await readJson(tooMany)).code).toBe('attachment_limit');
-
-    const foreign = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', {
-      content: '남의 것',
-      attachmentIds: [mine.id, theirs.id],
-    });
-    expect(foreign.status).toBe(400);
-    expect((await readJson(foreign)).code).toBe('invalid_attachment');
-
-    // Neither the message nor the binding survived the refusal.
-    expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).path).toHaveLength(1);
-    const [row] = await db.select().from(chatAttachments).where(eq(chatAttachments.id, mine.id));
-    expect(row!.messageId).toBeNull();
-  });
-
-  it('puts the turn’s images to a model with eyes, and the note to one without', async () => {
+  it('puts the turn’s images to a model with eyes', async () => {
     const cookie = await signUp('attach-prompt@example.com');
     const { app: seeing, prompts } = capturingApp({ env: { SHIZUE_TEST_MODELS: '1' } });
     const plot = await importCard(cookie, cardFile());
@@ -7112,21 +6871,14 @@ describe('chat attachments', () => {
       }, seeing),
     );
     const chatId = created.chat.id;
-    const image = await attach(cookie, chatId);
-
-    await readSse(
-      await json(cookie, `/api/chats/${chatId}/messages`, 'POST', {
-        content: '이건 뭐야?',
-        attachmentIds: [image.id],
-      }, seeing),
-    );
+    await answerWithImages(cookie, chatId, '이건 뭐야?', [gifOf(1)], seeing);
 
     // The turn is split into parts, and the bytes travel inline: the serving
     // route is behind this reader's session, so a URL would be no use upstream.
     const sent = prompts.at(-1)!.messages.at(-2)!;
     expect(sent.content).toEqual([
       { type: 'text', text: '이건 뭐야?' },
-      { type: 'image', url: `data:image/gif;base64,${Buffer.from(gif(1)).toString('base64')}` },
+      { type: 'image', url: `data:image/gif;base64,${Buffer.from(gifOf(1)).toString('base64')}` },
     ]);
 
     // Regenerating the same turn shows the model the same thing.
@@ -7161,20 +6913,13 @@ describe('chat attachments', () => {
       await json(cookie, '/api/chats', 'POST', { plotId: plot.id, model: 'echo/echo' }, blind),
     );
     const chatId = created.chat.id;
-    const image = await attach(cookie, chatId);
-
-    await readSse(
-      await json(cookie, `/api/chats/${chatId}/messages`, 'POST', {
-        content: '이건 뭐야?',
-        attachmentIds: [image.id],
-      }, blind),
-    );
+    await answerWithImages(cookie, chatId, '이건 뭐야?', [gifOf(1)], blind);
 
     const sent = prompts.at(-1)!.messages.at(-2)!;
     expect(sent.content).toBe(`이건 뭐야?\n${IMAGE_ATTACHED_PLACEHOLDER}`);
     expect(reads).toBe(0);
 
-    // And the same for a turn already on the branch, which regenerate reads back.
+    // And the same for the regenerate of a reply to it.
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, blind));
     expect(prompts.at(-1)!.messages.at(-2)!.content).toBe(
       `이건 뭐야?\n${IMAGE_ATTACHED_PLACEHOLDER}`,
@@ -7185,13 +6930,8 @@ describe('chat attachments', () => {
   it('exports the images the branch carries, alongside the character’s own', async () => {
     const cookie = await signUp('attach-export@example.com');
     const { chatId } = await setupChat(cookie);
-    const image = await attach(cookie, chatId);
-    await readSse(
-      await json(cookie, `/api/chats/${chatId}/messages`, 'POST', {
-        content: '이 사진 봐',
-        attachmentIds: [image.id],
-      }),
-    );
+    const turn = await storedTurn(cookie, chatId, '이 사진 봐');
+    const image = await attachImage(chatId, turn.id);
 
     const payload = await readJson(await request(cookie, `/api/chats/${chatId}/export`));
     expect(ChatExportSchema.safeParse(payload).success).toBe(true);
@@ -7203,155 +6943,13 @@ describe('chat attachments', () => {
     expect(payload.messages.filter((message: any) => 'attachments' in message)).toHaveLength(1);
   });
 
-  /**
-   * Every object under the attachments namespace — the store has no listing. The
-   * directory outlives each test, unlike the tables, so what is asserted on is
-   * always the difference a test made.
-   */
-  const attachmentObjects = async (): Promise<string[]> => {
-    try {
-      return (await readdir(join(storageDir, 'attachments'))).sort();
-    } catch {
-      return [];
-    }
-  };
-
-  // Uploading is the one way to put bytes in a chat's store without ever writing
-  // a message, so it is the one place a cap and a sweep can live.
-  it('caps the uploads a chat holds for turns that were never sent', async () => {
-    const cookie = await signUp('attach-unbound-cap@example.com');
-    const { chatId } = await setupChat(cookie);
-    const before = await attachmentObjects();
-    for (let marker = 0; marker < MAX_UNBOUND_ATTACHMENTS; marker += 1) {
-      await attach(cookie, chatId, marker);
-    }
-
-    const refused = await upload(cookie, chatId, gif(99));
-    expect(refused.status).toBe(400);
-    expect((await readJson(refused)).code).toBe('attachment_limit');
-    // Nothing of the refused upload landed — neither a row nor its bytes.
-    expect(await db.select().from(chatAttachments)).toHaveLength(MAX_UNBOUND_ATTACHMENTS);
-    expect((await attachmentObjects()).length - before.length).toBe(MAX_UNBOUND_ATTACHMENTS);
-
-    // Only the outstanding ones count: a send hands its uploads to a turn, and
-    // the composer has room again.
-    const claimed = (await db.select().from(chatAttachments)).slice(0, 4).map((row) => row.id);
-    await readSse(
-      await json(cookie, `/api/chats/${chatId}/messages`, 'POST', {
-        content: '네 장',
-        attachmentIds: claimed,
-      }),
-    );
-    expect((await upload(cookie, chatId, gif(98))).status).toBe(201);
-  });
-
-  it('holds the unsent-upload cap against a burst of parallel uploads', async () => {
-    const cookie = await signUp('attach-burst@example.com');
-    const { chatId } = await setupChat(cookie);
-    const gif = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 2, 3]);
-
-    // Twenty at once. The sweep, the count and the insert hold the chat's row
-    // lock as one decision, so exactly sixteen can land no matter the schedule.
-    const results = await Promise.all(
-      Array.from({ length: 20 }, (_, i) =>
-        uploadFile(cookie, `/api/chats/${chatId}/attachments`, gif, `burst-${i}.gif`),
-      ),
-    );
-    expect(results.filter((res) => res.status === 201)).toHaveLength(16);
-    expect(results.filter((res) => res.status === 400)).toHaveLength(4);
-
-    const rows = await db
-      .select({ id: chatAttachments.id })
-      .from(chatAttachments)
-      .where(eq(chatAttachments.chatId, chatId));
-    expect(rows).toHaveLength(16);
-  });
-
-  it('sweeps an upload no turn ever claimed once it is a day old', async () => {
-    const cookie = await signUp('attach-sweep@example.com');
-    const { chatId } = await setupChat(cookie);
-    const stale = await attach(cookie, chatId, 1);
-    const recent = await attach(cookie, chatId, 2);
-    const sent = await attach(cookie, chatId, 3);
-    await readSse(
-      await json(cookie, `/api/chats/${chatId}/messages`, 'POST', {
-        content: '보낸 사진',
-        attachmentIds: [sent.id],
-      }),
-    );
-    const stalePath = await storedPath(stale.id);
-    // A day and an hour back: whatever composer made it is long gone. The turn's
-    // own image is aged with it, and must survive — it belongs to a message now.
-    const longAgo = new Date(Date.now() - 25 * 60 * 60 * 1000);
-    await db
-      .update(chatAttachments)
-      .set({ createdAt: longAgo })
-      .where(inArray(chatAttachments.id, [stale.id, sent.id]));
-
-    const next = await attach(cookie, chatId, 4);
-    const rows = await db.select().from(chatAttachments).where(eq(chatAttachments.chatId, chatId));
-    expect(rows.map((row) => row.id).sort()).toEqual([recent.id, sent.id, next.id].sort());
-    expect(await storage.get(stalePath)).toBeNull();
-  });
-
-  it('takes the stored bytes back when the row cannot be written', async () => {
-    const cookie = await signUp('attach-insert-fails@example.com');
-    const { chatId } = await setupChat(cookie);
-    // The upload's row now lands inside its cap transaction, so the failure has
-    // to be injected on the tx the transaction callback is handed, not on `db`.
-    const broken = new Proxy(db, {
-      get(target, property, receiver) {
-        if (property === 'transaction') {
-          return (run: (tx: unknown) => Promise<unknown>) =>
-            target.transaction((tx) =>
-              run(
-                new Proxy(tx, {
-                  get(txTarget, txProperty, txReceiver) {
-                    if (txProperty === 'insert') {
-                      return (table: unknown) => {
-                        if (table !== chatAttachments) return txTarget.insert(table as never);
-                        return {
-                          values: () => ({
-                            returning: () => Promise.reject(new Error('insert failed')),
-                          }),
-                        };
-                      };
-                    }
-                    const value = Reflect.get(txTarget, txProperty, txReceiver);
-                    return typeof value === 'function' ? value.bind(txTarget) : value;
-                  },
-                }) as never,
-              ),
-            );
-        }
-        const value = Reflect.get(target, property, receiver);
-        return typeof value === 'function' ? value.bind(target) : value;
-      },
-    }) as Db;
-
-    const before = await attachmentObjects();
-    const res = await upload(cookie, chatId, gif(5), measured, makeApp({ db: broken }));
-    expect(res.status).toBe(500);
-    // No row points at them, and nothing would ever come back for them.
-    expect(await db.select().from(chatAttachments)).toHaveLength(0);
-    expect(await attachmentObjects()).toEqual(before);
-  });
-
   it('stops inlining a turn’s images at the byte cap, and says the rest were there', async () => {
     const cookie = await signUp('attach-inline-cap@example.com');
     const { chatId } = await setupChat(cookie);
-    const first = await attach(cookie, chatId, 1);
-    const second = await attach(cookie, chatId, 2);
-    await readSse(
-      await json(cookie, `/api/chats/${chatId}/messages`, 'POST', {
-        content: '두 장',
-        attachmentIds: [first.id, second.id],
-      }),
-    );
-    const [turn] = await db
-      .select()
-      .from(messages)
-      .where(and(eq(messages.chatId, chatId), eq(messages.content, '두 장')));
+    const stored = await storedTurn(cookie, chatId, '두 장');
+    await attachImage(chatId, stored.id, gifOf(1));
+    await attachImage(chatId, stored.id, gifOf(2));
+    const [turn] = await db.select().from(messages).where(eq(messages.id, stored.id));
 
     // A store whose objects each take half the inline budget: the first image
     // fits beside nothing else, so the second cannot travel with it.
@@ -7385,147 +6983,23 @@ describe('chat attachments', () => {
   it('sweeps up the images of a deleted turn, and of a deleted chat', async () => {
     const cookie = await signUp('attach-prune@example.com');
     const { chatId } = await setupChat(cookie);
-    const image = await attach(cookie, chatId, 3);
-    await readSse(
-      await json(cookie, `/api/chats/${chatId}/messages`, 'POST', {
-        content: '이 사진 봐',
-        attachmentIds: [image.id],
-      }),
-    );
+    const turn = await storedTurn(cookie, chatId, '이 사진 봐');
+    const image = await attachImage(chatId, turn.id, gifOf(3));
     const path = await storedPath(image.id);
 
-    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    const userTurn = state.path.at(-2);
     // The subtree goes, and the images hanging off it go with it — rows first,
     // then the objects they pointed at.
-    await request(cookie, `/api/chats/${chatId}/messages/${userTurn.id}`, 'DELETE');
+    await request(cookie, `/api/chats/${chatId}/messages/${turn.id}`, 'DELETE');
     expect(await db.select().from(chatAttachments)).toHaveLength(0);
     expect(await storage.get(path)).toBeNull();
 
-    // And an unclaimed upload is cleaned up with the chat it was made in.
-    const orphan = await attach(cookie, chatId, 4);
-    const orphanPath = await storedPath(orphan.id);
+    // And a turn's image goes with the chat it was made in.
+    const next = await storedTurn(cookie, chatId, '또 한 장');
+    const kept = await attachImage(chatId, next.id, gifOf(4));
+    const keptPath = await storedPath(kept.id);
     expect((await request(cookie, `/api/chats/${chatId}`, 'DELETE')).status).toBe(204);
     expect(await db.select().from(chatAttachments)).toHaveLength(0);
-    expect(await storage.get(orphanPath)).toBeNull();
-  });
-});
-
-describe('drawing a scene', () => {
-  /** Minimal bytes that sniff as a GIF; nothing here looks at a pixel. */
-  const gif = Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x07]);
-
-  /**
-   * The provider seam, stubbed. A live fal call spends real money, so the suite
-   * never has one — what is under test is the route around it.
-   */
-  const drawnBy = (
-    generateSceneImage: AppDeps['generateSceneImage'],
-    overrides: Partial<AppDeps> = {},
-  ): Hono<AppEnv> =>
-    makeApp({ env: { FAL_KEY: 'test-key' }, ...overrides, generateSceneImage });
-
-  const drawingApp = (overrides: Partial<AppDeps> = {}): Hono<AppEnv> =>
-    drawnBy(async () => ({ bytes: gif, width: 1024, height: 768 }), overrides);
-
-  const draw = (cookie: string | undefined, chatId: string, target: Hono<AppEnv>): Promise<Response> =>
-    json(cookie, `/api/chats/${chatId}/draw-scene`, 'POST', undefined, target);
-
-  it('is neither routed nor advertised without an image provider', async () => {
-    const cookie = await signUp('draw-off@example.com');
-    const { chatId, state } = await setupChat(cookie);
-
-    // The chat read is where the client learns the action exists at all.
-    expect(state.capabilities).toEqual({ drawScene: false });
-    expect((await draw(cookie, chatId, app)).status).toBe(404);
-
-    const configured = drawingApp();
-    const seen = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, configured));
-    expect(seen.capabilities).toEqual({ drawScene: true });
-  });
-
-  it('hangs the drawn scene on the branch as a narration turn', async () => {
-    const cookie = await signUp('draw-turn@example.com');
-    const prompts: string[] = [];
-    const target = drawnBy(async (_deps, prompt) => {
-      prompts.push(prompt);
-      return { bytes: gif, width: 1024, height: 768 };
-    });
-    const { chatId, state: before } = await setupChat(cookie);
-
-    const res = await draw(cookie, chatId, target);
-    expect(res.status, await res.clone().text()).toBe(200);
-    const state = await readJson(res);
-
-    // A narration with no words: the picture is the whole of what the turn says.
-    const drawn = state.path.at(-1);
-    expect(drawn.role).toBe('assistant');
-    expect(drawn.content).toBe('@:');
-    expect(drawn.parentId).toBe(before.path.at(-1).id);
-    // …and the head moved onto it, so the next turn answers the scene.
-    expect(state.chat.headMessageId).toBe(drawn.id);
-
-    expect(drawn.attachments).toEqual([
-      {
-        id: expect.any(String),
-        url: `/api/chats/${chatId}/attachments/${drawn.attachments[0].id}`,
-        mime: 'image/gif',
-        // What the provider reported. The thumbhash is a browser's to measure.
-        width: 1024,
-        height: 768,
-        thumbhash: null,
-        name: null,
-      },
-    ]);
-    const served = await request(cookie, drawn.attachments[0].url, 'GET', undefined, target);
-    expect(new Uint8Array(await served.arrayBuffer())).toEqual(gif);
-
-    // The prompt is the card plus the scene so far, and nothing else.
-    expect(prompts).toHaveLength(1);
-    expect(prompts[0]).toContain('리안');
-    expect(prompts[0]).toContain('왕립 도서관의 사서.');
-    expect(prompts[0]).toContain('아직 안 가셨군요');
-  });
-
-  it('is the chat owner’s alone to ask for', async () => {
-    const cookie = await signUp('draw-owner@example.com');
-    const other = await signUp('draw-intruder@example.com');
-    const target = drawingApp();
-    const { chatId } = await setupChat(cookie);
-
-    expect((await draw(other, chatId, target)).status).toBe(404);
-    expect((await draw(undefined, chatId, target)).status).toBe(401);
-    expect(await db.select().from(chatAttachments)).toHaveLength(0);
-    // A refused request never took the slot it would have had to release.
-    expect(await claimOf(chatId)).toBeNull();
-  });
-
-  it('refuses to draw on a chat that is already generating', async () => {
-    const cookie = await signUp('draw-busy@example.com');
-    const target = drawingApp();
-    const { chatId } = await setupChat(cookie);
-
-    // The claim as a running generation leaves it, inside the staleness window.
-    await db.update(chats).set({ generatingAt: new Date() }).where(eq(chats.id, chatId));
-    const busy = await draw(cookie, chatId, target);
-    expect(busy.status).toBe(429);
-    expect((await readJson(busy)).code).toBe('generation_in_progress');
-    expect(await db.select().from(chatAttachments)).toHaveLength(0);
-  });
-
-  it('writes nothing when the provider fails', async () => {
-    const cookie = await signUp('draw-failure@example.com');
-    const { chatId } = await setupChat(cookie);
-
-    const broken = drawnBy(async () => {
-      throw new ApiError(502, 'image_failed', 'The image provider did not answer');
-    });
-    const failed = await draw(cookie, chatId, broken);
-    expect(failed.status).toBe(502);
-    expect((await readJson(failed)).code).toBe('image_failed');
-    // Nothing written, and the slot handed straight back.
-    expect(await db.select().from(chatAttachments)).toHaveLength(0);
-    expect(await claimOf(chatId)).toBeNull();
+    expect(await storage.get(keptPath)).toBeNull();
   });
 });
 
@@ -8575,7 +8049,7 @@ describe('memory', () => {
     expect((await summariesOf(cookie, chatId))[0]).toMatchObject({ applies: false });
 
     // Kept, not deleted: back on its branch it applies again.
-    await json(cookie, `/api/chats/${chatId}/head`, 'POST', { messageId: turn.id }, harness.app);
+    await switchHead(cookie, chatId, turn.id, harness.app);
     expect((await summariesOf(cookie, chatId))[0]).toMatchObject({ applies: true });
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app));
     expect(harness.prompts.at(-1)!.system).toContain(SUMMARY);
@@ -9554,9 +9028,8 @@ describe('memory', () => {
         expect(block, route).toContain(notice);
         expect(block, route).not.toContain(secret);
       }
-      // 카이 was there; the narrator and a scene reply are told everything.
+      // 카이 was there; a scene reply is told everything.
       expect(factsBlockOf(await generated(cookie, chatId, harness, 'messages', { content: question, speakerId: kai }))).toContain(secret);
-      expect(factsBlockOf(await generated(cookie, chatId, harness, 'narrate', {}))).toContain(secret);
       expect(factsBlockOf(await generated(cookie, chatId, harness, 'messages', { content: question }))).toContain(secret);
     });
 
@@ -9850,7 +9323,7 @@ describe('chat import', () => {
     expect((await complete(cookie, chatId)).status).toBe(200);
     const swipe = async (text: string): Promise<string[]> =>
       (
-        await readJson(await json(cookie, `/api/chats/${chatId}/head`, 'POST', { messageId: byText.get(text)!.id }))
+        await readJson(await switchHead(cookie, chatId, byText.get(text)!.id))
       ).path.map((m: any) => m.content);
     expect(await swipe('답 2')).toEqual(['인사 B', '안녕', '답 2']);
     expect(await swipe('답 1')).toEqual(['인사 B', '안녕', '답 1', '다음', '끝']);
@@ -9899,7 +9372,6 @@ describe('chat import', () => {
     await refused(await json(cookie, `/api/chats/${id}/messages`, 'POST', { content: '끼어들기' }));
     await refused(await json(cookie, `/api/chats/${id}/regenerate`, 'POST'));
     await refused(await json(cookie, `/api/chats/${id}`, 'PATCH', { note: '메모' }));
-    await refused(await json(cookie, `/api/chats/${id}/head`, 'POST', { messageId: userTurn.id }));
     await refused(await json(cookie, `/api/chats/${id}/memory/${randomUUID()}`, 'PATCH', { important: true }));
     await refused(await request(cookie, `/api/chats/${id}/memory/${randomUUID()}`, 'DELETE'));
     await refused(await request(cookie, `/api/chats/${id}/messages/${userTurn.id}`, 'DELETE'));
@@ -10304,7 +9776,7 @@ describe('chat import', () => {
     expect(byText.get('이어서')!.parentId).toBe(byText.get('갈래 대답')!.id);
     expect(byText.get('갈래 대답')!.createdAt.getTime()).toBeLessThan(byText.get('다른 대답')!.createdAt.getTime());
     // Swiped to, the branch goes on to its own end.
-    const swiped = await readJson(await json(cookie, `/api/chats/${chatId}/head`, 'POST', { messageId: byText.get('갈래 대답')!.id }));
+    const swiped = await readJson(await switchHead(cookie, chatId, byText.get('갈래 대답')!.id));
     expect(swiped.path.map((m: any) => m.content)).toEqual(['인사', '질문', '갈래 대답', '이어서']);
 
     // A second run finds both files as this chat.
@@ -13840,7 +13312,7 @@ describe('card scripts', () => {
 
     // Nothing builds on a reply its scripts never ran over, and the refusal
     // writes nothing.
-    for (const mode of ['messages', 'continue', 'auto', 'narrate']) {
+    for (const mode of ['messages', 'continue', 'auto']) {
       const body = mode === 'messages' ? { content: '또' } : {};
       const res = await json(cookie, `/api/chats/${chatId}/${mode}`, 'POST', body, replying);
       expect(res.status, mode).toBe(409);
@@ -14242,7 +13714,7 @@ describe('card scripts', () => {
       expect(after!.memoryRevision).toBe(revision + 1);
 
       // A swipe back lands where the old branch ended.
-      const back = await readJson(await json(cookie, `/api/chats/${chatId}/head`, 'POST', { messageId: u1.id }));
+      const back = await readJson(await switchHead(cookie, chatId, u1.id));
       expect(back.path.map((m: any) => m.id)).toEqual(path.map((m) => m.id));
     });
 
@@ -14250,20 +13722,18 @@ describe('card scripts', () => {
       const { cookie, chatId } = await variableChat('script-chat-payload@example.com');
       const harness = countingApp();
       await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '하나' }, harness.app));
-      const form = new FormData();
-      form.append('file', new File([Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 9])], 'shot.gif'));
-      const upload = await readJson(await request(cookie, `/api/chats/${chatId}/attachments`, 'POST', form));
       await readSse(
         await json(
           cookie,
           `/api/chats/${chatId}/messages`,
           'POST',
-          { content: '둘', attachmentIds: [upload.id], directions: '판정: 성공', variableDelta: { door: 'open' } },
+          { content: '둘', directions: '판정: 성공', variableDelta: { door: 'open' } },
           harness.app,
         ),
       );
       const path: any[] = (await stateOf(cookie, chatId)).path;
       const [, u1, a1, u2, a2] = path;
+      await attachImage(chatId, u2.id, gifOf(9));
       await db.update(messages).set({ loreTriggers: ['문'] }).where(eq(messages.id, a2.id));
 
       // `modifychat 1`: the first reply.
@@ -14465,7 +13935,7 @@ describe('card scripts', () => {
       }
       const generated = await json(
         cookie,
-        `/api/chats/${chatId}/narrate`,
+        `/api/chats/${chatId}/auto`,
         'POST',
         { chat: { keep: 0, messages: [{ id: a1.id }, { id: u1.id }] } },
         harness.app,
@@ -15344,17 +14814,7 @@ describe('request triggers', () => {
     const gif = Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1]);
     const image = { type: 'image', url: `data:image/gif;base64,${Buffer.from(gif).toString('base64')}` };
     const sendWithImage = async (cookie: string, chatId: string): Promise<void> => {
-      const form = new FormData();
-      form.append('file', new File([gif], 'shot.gif'));
-      form.append('width', '800');
-      form.append('height', '600');
-      form.append('thumbhash', 'HBkSHYSIeHiPiHh8eJd4h4eAeIhw==');
-      const upload = await request(cookie, `/api/chats/${chatId}/attachments`, 'POST', form);
-      expect(upload.status, await upload.clone().text()).toBe(201);
-      const { id } = await readJson(upload);
-      const events = await readSse(
-        await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '이건 뭐야?', attachmentIds: [id] }, seeing),
-      );
+      const events = await answerWithImages(cookie, chatId, '이건 뭐야?', [gif], seeing);
       expect(events.at(-1)!.event).toBe('done');
     };
     const userTurn = () => prompts.at(-1)!.messages.find((message) => contentText(message.content).includes('질문') || contentText(message.content).includes('뭐야'));
@@ -15418,7 +14878,6 @@ describe('request triggers', () => {
     expect(await last('continue')).toBe('1');
     expect(await last('regenerate')).toBe('0');
     expect(await last('auto')).toBe('1');
-    expect(await last('narrate')).toBe('2');
   });
 
   it('runs over the turns a script sends the model as well, its first turn first', async () => {
@@ -15751,7 +15210,7 @@ describe('editRequest listeners', () => {
     const { cookie, chatId } = await luaChat('lua-modes@example.com', [
       lua(listening(`setChatVar(id, 'n', tostring((tonumber(getChatVar(id, 'n')) or 0) + 1)) req[1].content = '루아 ' .. getChatVar(id, 'n') return req`)),
     ]);
-    for (const [path, body] of [['messages', { content: '안녕' }], ['regenerate'], ['continue'], ['auto'], ['narrate']] as const) {
+    for (const [path, body] of [['messages', { content: '안녕' }], ['regenerate'], ['continue'], ['auto']] as const) {
       const events = await readSse(await json(cookie, `/api/chats/${chatId}/${path}`, 'POST', body, capturing));
       expect(events.at(-1)!.event, path).toBe('done');
       expect(prompts.at(-1)!.system, path).toMatch(/^루아 \d$/);
@@ -16008,15 +15467,7 @@ describe('editRequest listeners', () => {
     });
     const chatId = (await json(cookie, '/api/chats', 'POST', { plotId: plot.id, model: 'test/vision' }, seeing).then(readJson)).chat.id;
     const sendWithImage = async (content: string): Promise<void> => {
-      const form = new FormData();
-      form.append('file', new File([gif], 'shot.gif'));
-      form.append('width', '800');
-      form.append('height', '600');
-      form.append('thumbhash', 'HBkSHYSIeHiPiHh8eJd4h4eAeIhw==');
-      const upload = await request(cookie, `/api/chats/${chatId}/attachments`, 'POST', form);
-      expect(upload.status, await upload.clone().text()).toBe(201);
-      const { id } = await readJson(upload);
-      const events = await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content, attachmentIds: [id] }, seeing));
+      const events = await answerWithImages(cookie, chatId, content, [gif], seeing);
       expect(events.at(-1)!.event).toBe('done');
     };
     const lastTurn = () => prompts.at(-1)!.messages.findLast((message) => message.role === 'user');
@@ -16343,9 +15794,6 @@ describe('the browser script runtime', () => {
     const chatId = chat.chat.id;
     const greeting = chat.path.at(-1);
     const { app: replying, systems } = promptApp('대답');
-    const form = new FormData();
-    form.append('file', new File([Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1])], 'shot.gif'));
-    const image = await readJson(await request(reader, `/api/chats/${chatId}/attachments`, 'POST', form, replying));
 
     const res = await json(
       reader,
@@ -16355,7 +15803,6 @@ describe('the browser script runtime', () => {
         content: '/상태',
         stopped: true,
         baseHeadId: greeting.id,
-        attachmentIds: [image.id],
         directions: '조용히',
         variableDelta: { held: '1' },
         overlay: { members: { [memberId]: { description: '멈춘 뒤' } } },
@@ -16376,7 +15823,6 @@ describe('the browser script runtime', () => {
       source: 'user',
       directions: '조용히',
       variableDelta: { held: '1' },
-      attachments: [expect.objectContaining({ id: image.id })],
     });
     expect(state.chat.headMessageId).toBe(turn.id);
     expect(state.chat.note).toBe('멈췄다');
@@ -17291,15 +16737,14 @@ describe('group turns', () => {
     const { target, sent } = replyingApp('응.');
     const a = await done(await post(cookie, chatId, 'messages', { content: '안녕', speakerId: seiya }, target));
     await done(await post(cookie, chatId, 'reply', { speakerId: kai, groupTurnId: a.groupTurnId }, target));
-    // The next speaker's continue, and a narration closing the round, answer the reader's turn too.
+    // The next speaker's continue answers the reader's turn too.
     await done(await post(cookie, chatId, 'continue', {}, target));
-    await done(await post(cookie, chatId, 'narrate', {}, target));
     /** Where a request's recall turn is, and the turn of the conversation sent last before it. */
     const recalledAt = (req: ChatRequest) => textsOf(req).findIndex((text) => text.startsWith('[현재 관계 상태]'));
     const newestBefore = (req: ChatRequest, at: number) => req.messages.slice(0, at).findLastIndex((message) => message.role !== 'system');
     // Each follows the newest turn sent: the reader's for the first speaker, the first reply for
-    // the next and for the narration, the reply before the one continued for the continue — whose
-    // partial alone comes after the system turns.
+    // the next, the reply before the one continued for the continue — whose partial alone comes
+    // after the system turns.
     sent.forEach((req, index) => {
       const at = recalledAt(req);
       expect(at, `request ${index}`).toBeGreaterThan(0);
@@ -17463,31 +16908,31 @@ describe('group turns', () => {
     expect((await rowsOf(chatId)).find((row) => row.id === b.messageId)!.content).toBe('어서 와!더 마셔.');
   });
 
-  it("narrates as the narrator's turn: ending the round it follows, or opening one", async () => {
+  it('takes no narrator as a speaker, and redoes an old narration of a round as the scene', async () => {
     const chat = await groupChat('group-narrate@example.com');
     const { cookie, chatId } = chat;
-    const { target, sent } = replyingApp('세이야의 말.', '카이의 말.', '바람이 분다.');
-    const { a } = await firstRound(chat, target);
-    const ended = await done(await post(cookie, chatId, 'narrate', {}, target));
-    expect(ended).toMatchObject({ speakerMemberId: null, groupTurnId: a.messageId });
-    expect(sent.at(-1)!.stop).toEqual(['\n유저:', '\n세이야:', '\n세이:', '\n카이:', '\n미오:']);
-    expect((await rowsOf(chatId)).at(-1)!.content).toBe('@: 바람이 분다.');
-
-    // Under the reader's turn it opens a round of its own, which the narrator redoes.
-    const stopped = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '잠깐', stopped: true });
-    expect(stopped.status).toBe(200);
-    const opened = await done(await post(cookie, chatId, 'narrate', {}, target));
-    expect(opened.groupTurnId).toBe(opened.messageId);
-    const again = await done(await post(cookie, chatId, 'regenerate', { speakerId: NARRATOR_SPEAKER }, target));
-    expect(again.groupTurnId).toBe(again.messageId);
-    const rows = await rowsOf(chatId);
-    expect(rows.find((row) => row.id === again.messageId)).toMatchObject({
-      parentId: rows.find((row) => row.id === opened.messageId)!.parentId,
-      content: '@: 바람이 분다.',
+    const { target, sent } = replyingApp('세이야의 말.', '카이의 말.', '둘 다 반가워.');
+    const { a, b } = await firstRound(chat, target);
+    const stored = (await rowsOf(chatId)).length;
+    for (const path of ['messages', 'regenerate', 'reply'] as const) {
+      await refused(await post(cookie, chatId, path, { content: '안녕', speakerId: NARRATOR_SPEAKER }, target));
+    }
+    expect(await rowsOf(chatId)).toHaveLength(stored);
+    // A narration the button once stored to end a round, the head.
+    const [narration] = await db
+      .insert(messages)
+      .values({ chatId, parentId: b.messageId, role: 'assistant', content: '@: 바람이 분다.', groupTurnId: a.messageId })
+      .returning();
+    await db.update(chats).set({ headMessageId: narration!.id }).where(eq(chats.id, chatId));
+    const redone = await done(await post(cookie, chatId, 'regenerate', {}, target));
+    expect(redone).not.toHaveProperty('speakerMemberId');
+    expect(sent.at(-1)!.stop).toEqual(['\n유저:']);
+    expect((await rowsOf(chatId)).find((row) => row.id === redone.messageId)).toMatchObject({
+      parentId: b.messageId,
+      content: '둘 다 반가워.',
       speakerMemberId: null,
+      groupTurnId: null,
     });
-    // The narrator is asked for on the narration button only.
-    await refused(await post(cookie, chatId, 'messages', { content: '안녕', speakerId: NARRATOR_SPEAKER }, target));
   });
 
   it('leaves a work of one member exactly as it was, and a group work without a speaker on the scene', async () => {
@@ -17547,10 +16992,8 @@ describe('group turns', () => {
     await done(await post(cookie, chatId, 'reply', { speakerId: mio, groupTurnId: next.groupTurnId }, capturing));
     expect(prompts.at(-1)!.system).not.toContain('세이야의 요청');
     expect(prompts.at(-1)!.system).not.toContain('루아:');
-    // The scene and the narrator are the lead's — the first member with scripts.
+    // The scene is the lead's — the first member with scripts.
     await done(await post(cookie, chatId, 'messages', { content: '또' }, capturing));
-    expect(prompts.at(-1)!.system).toBe('세이야의 요청');
-    await done(await post(cookie, chatId, 'narrate', {}, capturing));
     expect(prompts.at(-1)!.system).toBe('세이야의 요청');
   });
 
@@ -18903,10 +18346,9 @@ describe('language modes', () => {
     expect(post).toBeGreaterThan(-1);
     expect(post).toBeLessThan(sent.length - 1);
 
-    // A narration is read by the reader too, and a regenerate is the same turn.
+    // A regenerate is the same turn.
     await readSse(await withLocale(cookie, `/api/chats/${chatId}/regenerate`, 'ko', undefined, capturing));
-    await readSse(await withLocale(cookie, `/api/chats/${chatId}/narrate`, 'ko', undefined, capturing));
-    expect(prompts).toHaveLength(3);
+    expect(prompts).toHaveLength(2);
     for (const prompt of prompts.slice(1)) {
       expect(contentText(prompt.messages.at(-1)!.content)).toBe(replyLanguageInstruction('ko'));
     }
@@ -20330,7 +19772,7 @@ describe('rate limits', () => {
     expect((await start(named, { 'cf-connecting-ip': '192.0.2.1', 'x-forwarded-for': '203.0.113.7' })).status).toBe(200);
   });
 
-  it('refuses a generation start past the reader’s window, on all six routes, before anything is stored', async () => {
+  it('refuses a generation start past the reader’s window, on all five routes, before anything is stored', async () => {
     const cookie = await signUp('gen-limit@example.com');
     const { chatId } = await setupChat(cookie);
     const userId = (await readJson(await request(cookie, '/api/auth/get-session'))).user.id;
@@ -20342,7 +19784,7 @@ describe('rate limits', () => {
 
     await db.update(rateLimits).set({ hits: RATE_LIMITS.generation.limit }).where(eq(rateLimits.key, key));
     const before = await db.select({ id: messages.id }).from(messages).where(eq(messages.chatId, chatId));
-    for (const route of ['messages', 'regenerate', 'continue', 'auto', 'narrate', 'reply']) {
+    for (const route of ['messages', 'regenerate', 'continue', 'auto', 'reply']) {
       const res = await json(cookie, `/api/chats/${chatId}/${route}`, 'POST', { content: '또', speakerId: randomUUID() });
       expect(res.status, route).toBe(429);
       expect((await readJson(res)).code).toBe('rate_limited');

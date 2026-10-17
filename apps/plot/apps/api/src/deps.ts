@@ -4,7 +4,6 @@ import type { ChatGPTAccounts } from './chatgptAccounts.js';
 import type { Embedder } from './embedder.js';
 import type { AppAuth, SessionStore } from './hostedAuth.js';
 import type { RemoteFetch } from './localizeAssets.js';
-import type { SceneImageGenerator } from './sceneImage.js';
 import type { LuaStateStore, RequestLuaRunner } from './requestLua.js';
 import type { RequestTriggerRunner } from './requestTriggers.js';
 import type { ScriptFetch } from './scriptFetch.js';
@@ -134,10 +133,6 @@ export interface AppDeps {
   luaStates?: LuaStateStore;
   /** Adapter factory; defaults to the model registry. Overridden in tests. */
   getAdapter?: (...args: Parameters<typeof getAdapter>) => ReturnType<typeof getAdapter> | Awaited<ReturnType<typeof getAdapter>>;
-  /**
-   * Test seam for historical scene-image persistence. No production image provider.
-   */
-  generateSceneImage?: SceneImageGenerator;
   /**
    * Sink for fire-and-forget work started after a response is finished. The tasks
    * already swallow their errors; tests use this to await them, and the kind tells

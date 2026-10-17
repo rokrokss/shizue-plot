@@ -775,10 +775,6 @@
     "stop": "停止",
     "direction": "ト書き",
     "directionHint": "行動や状況の描写を *ト書き* で囲みます。",
-    "writeAs": "誰として書くか",
-    "writeAsSelf": "自分として",
-    "writeAsMember": "{name}として",
-    "writeAsHint": "選んだ人物のセリフを自分で書きます。送信時に各行へ @名前: を付け、その人物はこの順番では別に答えません。",
     "regenerate": "再生成",
     "regenerateRoundHint": "この順番の応答を最初からやり直します。話す人物も選び直します。",
     "continue": "続きを書く",
@@ -1052,8 +1048,6 @@
     "yesterday": "昨日",
     "imagePrev": "前の画像",
     "imageNext": "次の画像",
-    "attachLimit": "画像は1回に{max}枚まで添付できます",
-    "attachTooLarge": "{max}MB以下の画像のみ添付できます",
     "openAttachedFile": "添付ファイル {name} を開く",
     "viewImage": "画像を大きく表示",
     "loadingEarlier": "以前の会話を読み込んでいます…",
@@ -1175,7 +1169,8 @@
     "askTitle": "どう直しましょうか？",
     "askHint": "変えてほしいところを教えてください。この返信にだけ使われます。",
     "askPlaceholder": "例）心の声も一緒に書いて",
-    "askSubmit": "書き直す"
+    "askSubmit": "書き直す",
+    "mentionLabel": "名前を選ぶ"
   },
   "personas": {
     "title": "ペルソナ",
@@ -1235,7 +1230,6 @@
     "not_publishable": "タイトルと、世界観設定または登場人物の設定を入力すると公開できます。",
     "model_unavailable": "このモデルは現在のアカウントでは利用できません。AI 接続を確認し、チャット設定でモデルを変更してください。",
     "generation_in_progress": "すでに応答を生成中です。少し待ってから再試行してください。",
-    "narration_empty": "ナレーションが場面描写のない登場人物のセリフだけになりました。もう一度お試しください。",
     "prompt_too_long": "カードのスクリプトがリクエストを {tokens, number} トークンに増やし、この会話のコンテキスト（{limit, number} トークン）を超えたため、送れませんでした。会話設定でコンテキストを増やすか、もう一度お試しください。",
     "payload_too_large": "ファイルが大きすぎます。",
     "internal_error": "サーバーエラーが発生しました。",

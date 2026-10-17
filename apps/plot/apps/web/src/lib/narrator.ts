@@ -1,6 +1,4 @@
-import { isNarration } from '@shizue/core/narration';
 import type { NarratorConfig } from '@shizue/core';
-import type { ChatMessage, StreamMode } from './types';
 
 /**
  * The narrator with one field replaced, or null once it says nothing at all.
@@ -24,19 +22,4 @@ export function withNarratorField(
   if (!next.voice) delete next.voice;
   if (!next.pov) delete next.pov;
   return Object.keys(next).length > 0 ? next : null;
-}
-
-/**
- * Whether the turn now streaming will be stored as a narration, and so has to be
- * drawn as one while it streams rather than flipping when it lands.
- *
- * Two modes produce one. `narrate` asks for a narration outright; regenerating a
- * narration head answers with another, because the server reads the head the same
- * way and re-applies the nudge — so a swipe never moves between a narration and a
- * line of dialogue. Regenerating under a *user* head is an ordinary reply, and so
- * is every other mode.
- */
-export function streamsNarration(mode: StreamMode | null, head: ChatMessage | undefined): boolean {
-  if (mode === 'narrate') return true;
-  return mode === 'regenerate' && head?.role === 'assistant' && isNarration(head.content);
 }

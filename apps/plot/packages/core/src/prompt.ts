@@ -17,7 +17,6 @@ import type { LoreAliases } from './loreAliases.js';
 import { isNarration, narrationBody } from './narration.js';
 import type { ReaderAdditions } from './readerPreset.js';
 import { readerLine, spokenBy, type ReaderMember } from './speech.js';
-import type { NarratorSpeaker } from './group.js';
 import {
   DEFAULT_PRESET,
   GROUP_SPEECH_PROTOCOL,
@@ -398,29 +397,17 @@ export interface AssemblePromptInput {
    */
   markTavernLore?: boolean;
   /**
-   * Who a group turn asks the reply of (`group.ts`): an index into `characters`,
-   * or `NARRATOR_SPEAKER`. Without it the prompt is the scene's, as it has always
-   * been.
+   * Who a group turn asks the reply of (`group.ts`): an index into `characters`.
+   * Without it the prompt is the scene's, as it has always been.
    *
    * A member: their card's system and post-history overrides stand in for the
    * first member's (read with `{{char}}` as them), the preset teaches
    * `GROUP_SPEECH_PROTOCOL` in place of the speech protocol (`groupPreset`), their
    * own past replies go plain while everyone else's go under their names, and the
    * prompt closes on `groupSpeakerLine`. The member is expected to be on the stage.
-   *
-   * The narrator: the scene prompt as a narration has always been built on — the
-   * caller still closes it with the narration nudge — with every member's reply
-   * under its name.
-   *
-   * Either way the result carries `stopSequences`.
+   * The result carries `stopSequences`.
    */
-  speaker?: number | NarratorSpeaker;
-  /**
-   * The reply is a narration (the narration button): the scene told, with no
-   * one's lines in it, so the reply format hint (`REPLY_FORMAT_HINT`) is left out.
-   * The narrator's group turn (`speaker`) is one without being told.
-   */
-  narration?: boolean;
+  speaker?: number;
   /**
    * What kind of generation this is, in SillyTavern's terms, for the lore
    * entries that name the kinds they fire on (`LoreEntry.triggers`). Absent:
@@ -769,13 +756,6 @@ export const exampleHeader = (name: string): string => `[예시 대화: ${name}]
 export const absentCastLine = (names: string[]): string =>
   `현재 장면에 없는 인물: ${names.join(', ')} — 이 인물들은 이번 장면에서 대사나 행동으로 등장하지 않습니다.`;
 
-/**
- * Who the reader wants the next reply to be about. One turn's request, so the
- * caller appends it after everything else and stores it nowhere.
- */
-export const sceneFocusDirective = (names: string[]): string =>
-  `이번 응답은 ${names.join(', ')}의 대사와 행동을 중심으로 씁니다.`;
-
 /** How each point of view is put to the model. No macro, so no particle to agree with. */
 export const NARRATOR_POV_LABELS: Record<NarratorPov, string> = {
   first: '1인칭 (유저 캐릭터의 시점)',
@@ -960,7 +940,6 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     preset: scenePreset = DEFAULT_PRESET,
     readerAdditions,
     speaker,
-    narration = false,
     generationType,
   } = input;
   const history = withBranchGreeting(given, branch);
@@ -1147,11 +1126,9 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // the least of what the system string says: right behind the preset whose
   // protocol it refines, so everything the work itself says comes after it.
   // Only beside one of our presets — a card that writes its own instructions
-  // has its own form — and never on a narration, which is not a reply's lines.
+  // has its own form.
   const formatHint =
     !utility &&
-    !narration &&
-    typeof speaker !== 'string' &&
     preset.main.includes(protocol) &&
     !voice?.card.systemPrompt.trim() &&
     !voice?.card.postHistoryInstructions.trim()
@@ -1545,10 +1522,9 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // RisuAI's system turn after everything, which tells the model to close its
   // reply with one of the card's pictures. The member is the group turn's
   // speaker, or the one member of a work of one — a scene reply in a work of
-  // several and a narration are no one member's, and RisuAI asks it of the
-  // character replying. Never evicted.
-  const emotionMember =
-    narration || typeof speaker === 'string' ? undefined : (speakerMember ?? (characters.length === 1 ? first : undefined));
+  // several is no one member's, and RisuAI asks it of the character replying.
+  // Never evicted.
+  const emotionMember = speakerMember ?? (characters.length === 1 ? first : undefined);
   const emotionText = emotionMember ? emotionInstructionsOf(emotionMember.card) : '';
   const emotionSlot: MessageSlot | null = emotionText
     ? { kind: 'trailing', label: 'emotion', message: { role: 'system', content: send(emotionText) } }

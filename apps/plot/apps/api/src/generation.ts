@@ -9,17 +9,13 @@ import {
   emotionScreenOf,
   inlayEmotionTags,
   isNarration,
-  narrationBody,
-  narrationUntilSpeech,
   replyLanguageInstruction,
   replyLengthTokens,
   rewriteTavernLore,
-  sceneFocusDirective,
   spokenBy,
   stripInlayMacros,
   stripSpeakerPrefix,
   withBranchGreeting,
-  withNarrationPrefix,
   withoutTavernBias,
   type AssembledPrompt,
   type AuthorNoteSettings,
@@ -32,7 +28,6 @@ import {
   type LoreTrigger,
   type MacroClock,
   type NarratorConfig,
-  type NarratorSpeaker,
   type Preset,
   type PromptBranch,
   type PromptCharacter,
@@ -204,7 +199,7 @@ export interface GenerationPlan {
   branch: PromptBranch;
   /**
    * What the card's start triggers changed, in the reader's browser, before this
-   * generation — a regenerate, a continue, an auto turn or a narration. A send
+   * generation — a regenerate, a continue or an auto turn. A send
    * has none: the triggers ran for the user turn, and their writes are on it.
    */
   startDelta?: VariableDelta;
@@ -230,8 +225,8 @@ export interface GenerationPlan {
   loreState: LoreTimedState;
   /**
    * SillyTavern's name for this kind of generation, for the lore entries that
-   * fire on some kinds only (`LoreEntry.triggers`): a send, an auto turn and a
-   * narration are `normal`, a continue `continue`, a regenerate — a new version
+   * fire on some kinds only (`LoreEntry.triggers`): a send and an auto turn are
+   * `normal`, a continue `continue`, a regenerate — a new version
    * beside the one it replaces — `swipe`. Absent: `normal`.
    */
   generationType?: LoreTrigger;
@@ -272,24 +267,11 @@ export interface GenerationPlan {
    */
   trailingSystem?: string;
   /**
-   * Members the reader asked this one reply to center on, by name. Like the
-   * trailing instruction it rides at the very end of the prompt and is stored
-   * nowhere — the next turn is back to the scene deciding who speaks.
-   */
-  focusNames?: string[];
-  /**
-   * This turn is the narrator's, not a character's: the text is stored under the
-   * narration prefix so every reader of the branch — the renderer, the prompt, the
-   * sidecar models — reads it back as the scene moving. Only a new message can be
-   * one; continuing a narration appends to text that already carries the prefix.
-   */
-  narration?: boolean;
-  /**
    * Who a group turn's reply is asked of (@shizue/core `group.ts`): an index into
-   * `characters`, or the narrator. Absent is the scene, as every reply was before
-   * group turns — and every reply of a work of one member still is.
+   * `characters`. Absent is the scene, as every reply was before group turns —
+   * and every reply of a work of one member still is.
    */
-  speaker?: number | NarratorSpeaker;
+  speaker?: number;
   /**
    * The names a member speaker's own `이름: ` prefixes go by — its name in this
    * chat, then its nickname — taken off what it writes before it is stored
@@ -297,11 +279,11 @@ export interface GenerationPlan {
    */
   speakerNames?: string[];
   /**
-   * Where a new group reply is stored: its speaker (null for the narrator) and
-   * its round — null opens a new one under the reply's own id. Absent for a
-   * scene reply, and for a continue, whose message keeps its own.
+   * Where a new group reply is stored: its speaker and its round — null opens a
+   * new one under the reply's own id. Absent for a scene reply, and for a
+   * continue, whose message keeps its own.
    */
-  round?: { speakerMemberId: string | null; groupTurnId: string | null };
+  round?: { speakerMemberId: string; groupTurnId: string | null };
   target: GenerationTarget;
 }
 
@@ -614,7 +596,7 @@ async function buildRequestMessages(
  * The member whose card the request's scripts are of: a group turn's member
  * speaker — whose scripts alone run, as RisuAI runs the character it asks
  * (`sendChat(index)`), so nothing runs for one that carries none — and for
- * everything else, the narrator's turn included, the scripted member
+ * everything else the scripted member
  * (`scriptedMember`). Null when that member carries no scripts.
  */
 export function requestScriptsOf(
@@ -855,10 +837,10 @@ export const TAVERN_BIAS_NUDGE =
  * `{{bias}}` kept on the latest reader's turn on the branch — ST looks back past
  * the replies since, a group's round of them, to the first reader's turn (or
  * narration) and takes its bias, if it has one. A continue has none, nor has a
- * narration, nor a work ST did not write. '' for none.
+ * work ST did not write. '' for none.
  */
-export function tavernBiasOf(plan: Pick<GenerationPlan, 'target' | 'narration' | 'characters' | 'wholeBranch'>): string {
-  if (plan.target.kind === 'continue' || plan.narration || !plan.characters[0]?.sillyTavern) return '';
+export function tavernBiasOf(plan: Pick<GenerationPlan, 'target' | 'characters' | 'wholeBranch'>): string {
+  if (plan.target.kind === 'continue' || !plan.characters[0]?.sillyTavern) return '';
   const latest = plan.wholeBranch.findLast((message) => message.role === 'user' || isNarration(message.content));
   return latest?.bias?.trim() ? latest.bias : '';
 }
@@ -927,19 +909,17 @@ async function assembleRequest(
     deps,
     account,
   );
-  // The mode's own nudge first, then who the reader wants the reply to be about:
-  // one closing instruction rather than two system turns in a row.
+  // The mode's own nudge first, then the bias's: one closing instruction rather
+  // than two system turns in a row.
   const trailingSystem = [
     plan.trailingSystem?.trim() ?? '',
-    plan.focusNames?.length ? sceneFocusDirective(plan.focusNames) : '',
     bias.trim() ? TAVERN_BIAS_NUDGE : '',
   ]
     .filter((line) => line.length > 0)
     .join('\n');
   // The `instruct` language mode's line: a turn of its own after everything the
   // assembler and the mode put there, so neither a card's post-history
-  // instructions nor its system prompt stand after it (a narration is read by
-  // the reader too, so it is asked in their language as well).
+  // instructions nor its system prompt stand after it.
   const languageLine = plan.replyLanguage ? replyLanguageInstruction(plan.replyLanguage) : '';
   // SillyTavern's `WORLD_INFO` regex runs over the lore the assembler marks for
   // it, after the assembly — only where a card carries such a script.
@@ -985,8 +965,6 @@ async function assembleRequest(
     // its text rides along uncounted.
     trailingTurns: partial ? 1 : 0,
     ...(plan.speaker !== undefined ? { speaker: plan.speaker } : {}),
-    // A narration is not a reply's lines, so it is not told how a reply marks its 지문.
-    ...(plan.narration ? { narration: true } : {}),
     // The trailing instruction bypasses the assembler too, so its tokens are
     // subtracted here; it is not a turn, so it does not shift depth lore.
     contextBudget: plan.contextBudget - countTokens(partial) - countTokens(trailingSystem) - countTokens(languageLine),
@@ -997,7 +975,7 @@ async function assembleRequest(
   if (!partial && !trailingSystem && !languageLine) return prompt;
 
   // The partial is the turn the model resumes, so it stays last: a closing
-  // instruction on a continue (a speaker focus, the reply language) goes before it.
+  // instruction on a continue (the bias's, the reply language) goes before it.
   return {
     system: prompt.system,
     messages: [
@@ -1106,43 +1084,8 @@ async function chosenReasoningEffort(
   }
 }
 
-/**
- * The cap a narration is asked under: the `short` reply's, which pairs with the
- * 1~2문단 the narration nudge asks for, as each reply length pairs a directive
- * with a cap. ChatGPT sharing takes no hard cap, so there it is the response
- * reserve the prompt is planned with and the directive does the holding.
- */
-const NARRATION_MAX_TOKENS = replyLengthTokens('short');
-
 /** What the stream may spend, which the prompt's budget reserves too: one number for both. */
-const responseTokens = (plan: GenerationPlan): number =>
-  plan.narration ? NARRATION_MAX_TOKENS : replyLengthTokens(plan.plot.style?.replyLength);
-
-/** `\n이름:` and `\n별명:` of every member, on the stage or off it. */
-const memberStops = (characters: PromptCharacter[]): string[] =>
-  characters.flatMap((member) =>
-    [member.name, member.card.nickname?.trim() ?? ''].filter((name) => name.length > 0).map((name) => `\n${name}:`),
-  );
-
-/**
- * What a new narration keeps of the text the model wrote: the scene up to the
- * first line the parser reads as a member — or the reader — speaking. The stop
- * sequences end the stream on such a line, but not on the first one, which no
- * line break comes before, nor on one the parser reads more loosely than the
- * stop matches. Empty when nothing of the scene is left; null when the turn is
- * not a new narration and keeps what it was given.
- */
-function narrationKept(plan: GenerationPlan, text: string): string | null {
-  if (!plan.narration || plan.target.kind !== 'new') return null;
-  const roster = [
-    ...plan.characters.map((member) => {
-      const nickname = member.card.nickname?.trim();
-      return { name: member.name, aliases: nickname ? [nickname] : [] };
-    }),
-    plan.userName,
-  ];
-  return narrationUntilSpeech(narrationBody(text), roster);
-}
+const responseTokens = (plan: GenerationPlan): number => replyLengthTokens(plan.plot.style?.replyLength);
 
 async function runGeneration(
   c: Context<AppEnv>,
@@ -1246,15 +1189,8 @@ async function runGeneration(
           // token cap. Keep the budget here for prompt planning and test adapters.
           maxTokens: responseTokens(plan),
           // ChatGPT sharing does not accept sampling parameters. A group reply also
-          // stops where it starts on another member's line (`stopSequences`), and
-          // so does a narration, on every member's.
-          stop: [
-            ...new Set([
-              `\n${plan.userName}:`,
-              ...(request.stopSequences ?? []),
-              ...(plan.narration ? memberStops(plan.characters) : []),
-            ]),
-          ],
+          // stops where it starts on another member's line (`stopSequences`).
+          stop: [...new Set([`\n${plan.userName}:`, ...(request.stopSequences ?? [])])],
           ...(reasoningEffort ? { reasoningEffort } : {}),
           // One cache per chat, whatever the branch: a regenerate or a swipe sends the
           // request its turn sent, which the cache serves whole, and a key of the
@@ -1286,18 +1222,14 @@ async function runGeneration(
         }
       }
 
-      // A narration keeps the scene and nothing a member says (`narrationKept`).
-      const kept = narrationKept(plan, text);
-      const reply = kept ?? text;
-
       // Stopped, or the upstream quiet: keep whatever was received so far. Only the
       // timeout says so — the page refetches on the error and finds the reply under
       // it; a stopped stream is sent nothing, its page reads it after the stop.
       if (controller.signal.aborted || timeout) {
-        if (reply) {
+        if (text) {
           // Stored pending all the same, if the browser meant to post-process
           // it: the next time it opens the chat it finds the mark and finishes.
-          await persist(deps, plan, reply, usage, request, { stopped: true });
+          await persist(deps, plan, text, usage, request, { stopped: true });
           await keepGlobalWrites(deps, plan, request);
           if (!plan.postProcess) scheduleBackgroundUpdates(deps, plan.chatId);
         }
@@ -1308,18 +1240,7 @@ async function runGeneration(
         return;
       }
 
-      // Nothing of the scene was left: it fails as a provider failure does —
-      // nothing stored, and the turn it would have followed is still the head.
-      if (kept === '') {
-        outcome = ['error', 'narration_empty'];
-        await send({
-          event: 'error',
-          data: JSON.stringify({ message: 'The narration held nothing but dialogue', code: 'narration_empty' }),
-        });
-        return;
-      }
-
-      const stored = await persist(deps, plan, reply, usage, request);
+      const stored = await persist(deps, plan, text, usage, request);
       outcome = ['done'];
       await keepGlobalWrites(deps, plan, request);
       await send({
@@ -1625,17 +1546,9 @@ async function keepGlobalWrites(
   }
 }
 
-/**
- * A new reply's text as it is stored, before any stored-text script. The
- * narration prefix is the server's to write: the model was asked for the scene
- * alone, and the convention is what makes the stored turn a narration.
- */
+/** A new reply's text as it is stored, before any stored-text script. */
 function newReplyText(plan: GenerationPlan, text: string): string {
-  const said = plan.narration
-    ? withNarrationPrefix(text)
-    : plan.speakerNames
-      ? stripSpeakerPrefix(text, plan.speakerNames)
-      : text;
+  const said = plan.speakerNames ? stripSpeakerPrefix(text, plan.speakerNames) : text;
   return withInlayEmotions(plan, said, plan.round?.speakerMemberId ?? null, said);
 }
 
@@ -1665,7 +1578,7 @@ async function regexedReply(plan: GenerationPlan, text: string): Promise<{ conte
     return { content, appended: content.startsWith(head.content) ? content.slice(head.content.length) : appended };
   }
   const stored = newReplyText(plan, text);
-  const content = await regexStoredText(stored, plan.narration ? SLASH_COMMAND : AI_OUTPUT, input);
+  const content = await regexStoredText(stored, AI_OUTPUT, input);
   return content === stored ? null : { content };
 }
 

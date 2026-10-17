@@ -31,8 +31,8 @@ const MB = 1024 * 1024;
 const FILE_IMPORT_PATH = /^\/api\/file-imports$/;
 /** A part of a file being imported, sent to this API where the store takes none itself (the local driver). */
 const FILE_IMPORT_PART_PATH = /^\/api\/file-imports\/[^/]+\/parts\/\d+$/;
-/** `POST /api/chats/:id/attachments` and a chat import's (`…/import/attachments`) — an upload, not the 5MB of JSON. */
-const ATTACHMENT_PATH = /^\/api\/chats\/[^/]+\/(?:import\/)?attachments$/;
+/** A chat import's attachment (`…/import/attachments`) — an upload, not the 5MB of JSON. */
+const ATTACHMENT_PATH = /^\/api\/chats\/[^/]+\/import\/attachments$/;
 
 /**
  * Route order matters: `/api/auth/*`, `/api/presets` and the probes are

@@ -248,7 +248,7 @@ describe('prepare: the other generations', () => {
 
   it('sends only the head check when nothing runs before a generation', async () => {
     const runtime = createScriptRuntime({ chatId: 'c1', api: fakeApi().api, ui: silentUi, bundle: bundle() });
-    expect((await runtime.prepare('narrate', view([greeting]))).body).toEqual({ baseHeadId: 'm0' });
+    expect((await runtime.prepare('auto', view([greeting]))).body).toEqual({ baseHeadId: 'm0' });
   });
 });
 
