@@ -256,9 +256,10 @@ describe('a group reply stored under its speaker', () => {
 });
 
 describe('a reply being written', () => {
-  it('reads a half-written name as the scene, and as the speaker once it lands', () => {
+  it('holds a half-written name back, and reads it as the speaker once it lands', () => {
     render(row('아리', 'assistant', { streaming: true }));
     expect(speakers()).toEqual([]);
+    expect(narrations()).toHaveLength(0);
 
     render(row('아리아: 아직', 'assistant', { streaming: true }));
     expect(speakers()).toEqual(['아리아']);
@@ -438,5 +439,84 @@ describe('a scene title in a greeting', () => {
 
     expect(host.querySelector('[data-testid="scene-heading"]')).toBeNull();
     expect(host.querySelector('.chat-bubble h1')?.textContent).toBe('아스텔리아 아카데미');
+  });
+});
+
+describe('a reply streamed a character at a time', () => {
+  /** What the row draws as emphasis, and how many of its stretches are the scene's. */
+  const marks = () => ({
+    em: host.querySelectorAll('em').length,
+    strong: host.querySelectorAll('strong').length,
+    narration: narrations().length,
+  });
+
+  /**
+   * Draws every prefix of `content` while it streams, then the reply once it is
+   * done, and returns what each step drew. Only the stretch still being written
+   * is drawn as written, `*` and all, so a mark once drawn stays drawn: the
+   * counts only ever grow, and the last step is the reply as it is when settled.
+   */
+  function stream(content: string, extra: Record<string, unknown> = {}) {
+    const steps: { at: string; em: number; strong: number; narration: number }[] = [];
+    for (let end = 1; end <= content.length; end += 1) {
+      render(row(content.slice(0, end), 'assistant', { ...extra, streaming: true }));
+      steps.push({ at: content.slice(0, end), ...marks() });
+    }
+    render(row(content, 'assistant', { ...extra, streaming: false }));
+    steps.push({ at: content, ...marks() });
+    const streamed = host.innerHTML;
+    act(() => root.unmount());
+    root = createRoot(host);
+    render(row(content, 'assistant', { ...extra, streaming: false }));
+    return { steps, streamed, settled: host.innerHTML };
+  }
+
+  /** The first step whose count of `key` fell below the step before it. */
+  const firstDrop = (steps: ReturnType<typeof stream>['steps'], key: 'em' | 'strong' | 'narration') => {
+    const at = steps.findIndex((step, index) => index > 0 && step[key] < steps[index - 1]![key]);
+    return at < 0 ? null : { before: steps[at - 1], after: steps[at] };
+  };
+
+  function expectSteady(
+    content: string,
+    extra: Record<string, unknown> = {},
+    keys: readonly ('em' | 'strong' | 'narration')[] = ['em', 'strong', 'narration'],
+  ) {
+    const { steps, streamed, settled } = stream(content, extra);
+    for (const key of keys) expect(firstDrop(steps, key), key).toBeNull();
+    expect(streamed).toBe(settled);
+    return steps.at(-1)!;
+  }
+
+  it('keeps a speaker’s earlier lines drawn while they open the next with their name', () => {
+    const done = expectSteady(
+      '비가 *조용히* 내린다.\n아리아: *문을 열며* 왔어?\n아리아: 오늘은 *창밖을 보며* 비가 오네.\n아리아: *웃으며* 들어와.',
+    );
+    expect(done).toMatchObject({ em: 4, narration: 1 });
+  });
+
+  it('does the same across a blank line, and draws no scene for the half of another’s name', () => {
+    const done = expectSteady(
+      '아리아: *문을 열며* 왔어?\n\n아리아: *웃으며* 들어와.\n카이: *고개를 끄덕이며* 응.\n\n카이: *자리에 앉는다.*',
+    );
+    expect(done).toMatchObject({ em: 4, narration: 0 });
+  });
+
+  it('does the same in a work of one member whose replies name their speaker', () => {
+    const done = expectSteady(
+      '창밖은 *아직* 어둡다.\n아리아: *웃으며* 안녕.\n아리아: *창밖을 보며* 비가 오네.',
+      { roster: [ROSTER[0]!], namesExpected: true },
+    );
+    expect(done).toMatchObject({ em: 3, narration: 1 });
+  });
+
+  it('keeps the emphasis of a line of markup as it arrives, spaces and half closers included', () => {
+    // A tag still being typed is prose until its `>` lands, so the scene's count is not asked here.
+    const done = expectSteady(
+      '아리아: 안녕.\n\n<span style="color:#c00">그는 *천천히 걸어간다* 그리고 **굵게** 말한다.</span>',
+      {},
+      ['em', 'strong'],
+    );
+    expect(done).toMatchObject({ em: 1, strong: 1 });
   });
 });

@@ -82,3 +82,16 @@ describe('balancePartial', () => {
     expect(balancePartial('**첫 줄\n둘째 줄')).toBe('**첫 줄\n둘째 줄**');
   });
 });
+
+describe('balancePartial at a space or a half closer', () => {
+  it('closes before the space a writer has just typed, where a closer can stand', () => {
+    expect(balancePartial('그는 *천천히 ')).toBe('그는 *천천히* ');
+    expect(balancePartial('**굵게 *기울여 ')).toBe('**굵게 *기울여*** ');
+    expect(balancePartial('~~취소된 말 ')).toBe('~~취소된 말~~ ');
+  });
+
+  it('reads a lone `*` after an open `**` as its closer, half typed', () => {
+    expect(balancePartial('그는 **굵게*')).toBe('그는 **굵게**');
+    expect(balancePartial('*기울여 **굵게*')).toBe('*기울여 **굵게***');
+  });
+});

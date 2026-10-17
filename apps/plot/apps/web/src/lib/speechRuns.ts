@@ -56,8 +56,29 @@ export function speakerAliases(
 }
 
 /**
+ * The last line of a reply still being written, while it may yet be a speaker's
+ * name with its colon to come (`아리` of `아리아: …`, by roster name or alias),
+ * is held back, `content` without it. Read now, it would be a scene's line of
+ * its own and cut the run before it short, which would be drawn as settled
+ * markdown until the colon lands and joins the line to it again (or to its new
+ * speaker's run). Its newline, or a letter no name goes on with, lets it go.
+ */
+function withoutNameInProgress(content: string, named: readonly string[]): string {
+  const line = content.slice(content.lastIndexOf('\n') + 1);
+  const start = line.trimStart();
+  const name = start.trimEnd();
+  if (!name || name.includes(':')) return content;
+  // The parser trims the name, so a whole one may be followed by spaces.
+  const pending = named.some((other) => other.startsWith(start) || other === name);
+  return pending ? content.slice(0, content.length - line.length) : content;
+}
+
+/**
  * Pure and cheap, so a streaming reply can be re-cut on every render: a half
- * written last line is one run now and another once the rest of it lands.
+ * written last line is one run now and another once the rest of it lands. With
+ * `streaming`, `content` is the end of a reply still being written, and a last
+ * line that may yet be a name is not drawn until it is one or is not
+ * (`withoutNameInProgress`).
  *
  * `aliases` (`speakerAliases`) are read as the members they belong to: a line
  * under a nickname is attributed to the member's own name, and runs of one
@@ -77,13 +98,14 @@ export function speechRuns(
   roster: readonly string[],
   aliases: ReadonlyMap<string, string> = NO_ALIASES,
   speaker: string | null = null,
+  streaming = false,
 ): SpeechRun[] {
   const named = aliases.size > 0 ? [...roster, ...aliases.keys()] : roster;
   const runs: SpeechRun[] = [];
   // Paragraph by paragraph: the parser reads a blank line as spacing and drops
   // it, and a run that goes on past one is still a paragraph apart — a reply
   // that writes a `*지문*` and its line as two paragraphs keeps them two.
-  for (const paragraph of splitBlocks(content)) {
+  for (const paragraph of splitBlocks(streaming ? withoutNameInProgress(content, named) : content)) {
     let fresh = true;
     for (const block of parseAssistantSpeech(paragraph, named)) {
       const run: SpeechRun =

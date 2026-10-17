@@ -74,6 +74,10 @@ const BULLET_RE = /^([ \t]*)([*+-])([ \t]+)/;
  * Closes unbalanced inline markers. Emphasis is tracked as a stack so the
  * closers come out in the order that nests: `**굵게 *기울여` closes the italic
  * first.
+ *
+ * A closer cannot stand after a space, so the closers go before the space the
+ * writer has just typed: `*천천히 ` is `*천천히* `, not a `*` that closes nothing.
+ * A lone `*` that ends the text while `**` is open is that closer half typed.
  */
 function balanceInline(md: string): string {
   const lines = md.split('\n');
@@ -83,8 +87,10 @@ function balanceInline(md: string): string {
   let code: string | null = null;
   /** The fence marker while inside a fenced block — no inline markup in there. */
   let fence: string | null = null;
+  /** The text ends on the first `*` of the `**` that closes the innermost marker. */
+  let halfClosed = false;
 
-  for (const raw of lines) {
+  for (const [nth, raw] of lines.entries()) {
     const fenceMatch = FENCE_RE.exec(raw);
     if (fenceMatch) {
       const marker = fenceMatch[1]!;
@@ -120,6 +126,11 @@ function balanceInline(md: string): string {
       if (ch === '*') {
         let run = runLength(raw, i);
         i += run;
+        if (run === 1 && i === raw.length && nth === lines.length - 1 && open.at(-1) === '**') {
+          open.pop();
+          halfClosed = true;
+          continue;
+        }
         while (run >= 2) {
           toggle(open, '**');
           run -= 2;
@@ -137,11 +148,12 @@ function balanceInline(md: string): string {
     }
   }
 
-  let out = md;
+  let closers = halfClosed ? '*' : '';
   // A code span swallows everything, so it is closed before the emphasis around it.
-  if (code !== null) out += code;
-  else for (let n = open.length - 1; n >= 0; n -= 1) out += open[n];
-  return out;
+  if (code !== null) closers += code;
+  else for (let n = open.length - 1; n >= 0; n -= 1) closers += open[n];
+  const end = md.trimEnd().length;
+  return md.slice(0, end) + closers + md.slice(end);
 }
 
 /**

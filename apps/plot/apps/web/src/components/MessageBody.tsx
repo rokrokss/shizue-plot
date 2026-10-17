@@ -678,11 +678,12 @@ export const MessageBody = memo(function MessageBody({
     () => {
       const names = roster.map((member) => member.name);
       const aliases = speakerAliases(roster);
-      const cut = segments.map((segment) => {
+      const cut = segments.map((segment, index) => {
         if (segment.kind !== 'text') return null;
         // RisuAI's music and video become their players first, wherever they stand.
         const own = renderMediaTokens(stripVariableMacros(segment.text), assets, resolveAsset);
-        return markupChunks(buttons ? renderProseButtons(own, buttons) : own).flatMap((chunk): TextRun[] => {
+        const chunks = markupChunks(buttons ? renderProseButtons(own, buttons) : own);
+        return chunks.flatMap((chunk, nth): TextRun[] => {
           if (chunk.html) {
             const markup = unescapeCbs(renderImageTokensAsHtml(chunk.text, assets, resolveAsset, userImage), 'html');
             return [{ name: null, narration: false, html: true, blocks: [markup] }];
@@ -692,7 +693,9 @@ export const MessageBody = memo(function MessageBody({
             const name = face?.name ?? null;
             return [{ name, narration: false, html: false, blocks: splitBlocks(unescapeCbs(text, 'html')) }];
           }
-          return speechRuns(text, names, aliases, speaker ?? null).map((run) => ({
+          // Only the end of the message is still being written.
+          const writing = streaming && index === segments.length - 1 && nth === chunks.length - 1;
+          return speechRuns(text, names, aliases, speaker ?? null, writing).map((run) => ({
             name: run.name,
             narration: run.name === null,
             html: false,

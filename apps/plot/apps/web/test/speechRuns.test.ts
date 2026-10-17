@@ -54,6 +54,35 @@ describe('a reply with more than one voice in it', () => {
     expect(speechRuns('아리', ROSTER)).toEqual([{ name: null, text: '아리' }]);
     expect(speechRuns('아리아: 아직', ROSTER)).toEqual([{ name: '아리아', text: '아직' }]);
   });
+
+  it('holds back a last line still being written while it may be a name, until it is one or is not', () => {
+    const streamed = (content: string, aliases?: ReadonlyMap<string, string>) =>
+      speechRuns(content, ROSTER, aliases, null, true);
+    expect(streamed('아리아: 왔어?\n아리')).toEqual([{ name: '아리아', text: '왔어?' }]);
+    expect(streamed('아리아: 왔어?\n\n카이 ')).toEqual([{ name: '아리아', text: '왔어?' }]);
+    expect(streamed('아리아: 왔어?\n카이: 응')).toEqual([
+      { name: '아리아', text: '왔어?' },
+      { name: '카이', text: '응' },
+    ]);
+    // A letter no name goes on with, or the newline, and it is the scene's line it was.
+    expect(streamed('아리아: 왔어?\n아리아는')).toEqual([
+      { name: '아리아', text: '왔어?' },
+      { name: null, text: '아리아는' },
+    ]);
+    expect(streamed('아리아: 왔어?\n아리\n')).toEqual([
+      { name: '아리아', text: '왔어?' },
+      { name: null, text: '아리' },
+    ]);
+    // A nickname with a space in it is still a name at its space.
+    expect(streamed('카이: 응.\n아리 ', speakerAliases([{ name: '아리아', nickname: '아리 씨' }]))).toEqual([
+      { name: '카이', text: '응.' },
+    ]);
+    // A message no longer being written draws it as written.
+    expect(speechRuns('아리아: 왔어?\n아리', ROSTER)).toEqual([
+      { name: '아리아', text: '왔어?' },
+      { name: null, text: '아리' },
+    ]);
+  });
 });
 
 describe('a member who goes by a nickname', () => {
