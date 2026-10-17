@@ -23,7 +23,8 @@ export function LocaleSwitcher() {
         const next = event.target.value as Locale;
         startTransition(() => router.replace(pathname, { locale: next }));
       }}
-      className="cursor-pointer rounded-lg border border-line bg-surface px-2 py-1.5 text-xs text-muted transition-colors hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+      // 8px each side of the text, the ⌄ as far in (the global `select` rule).
+      className="cursor-pointer rounded-lg border border-line bg-surface py-1.5 text-xs [--select-inset:0.5rem] text-muted transition-colors hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
     >
       {locales.map((value) => (
         <option key={value} value={value}>

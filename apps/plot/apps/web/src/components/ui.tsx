@@ -75,9 +75,10 @@ export function Button({
   );
 }
 
-const CONTROL =
-  'control-box rounded-xl border bg-surface px-3.5 text-fg placeholder:text-muted ' +
+const CONTROL_BOX =
+  'control-box rounded-xl border bg-surface text-fg placeholder:text-muted ' +
   'transition-colors focus:border-focus focus:outline-2 focus:outline-offset-1 focus:outline-focus/25 disabled:opacity-60';
+const CONTROL = cx(CONTROL_BOX, 'px-3.5');
 
 export function TextInput({ className, ...props }: InputHTMLAttributes<HTMLInputElement>) {
   return <input {...props} className={cx(CONTROL, className)} />;
@@ -88,8 +89,9 @@ export function TextArea({ className, ...props }: ComponentPropsWithRef<'textare
   return <textarea {...props} className={cx(CONTROL, 'resize-y leading-relaxed', className)} />;
 }
 
+/* Its side padding is the global `select` rule's: 14px of it, as the other controls have, and room for the ⌄. */
 export function Select({ className, ...props }: SelectHTMLAttributes<HTMLSelectElement>) {
-  return <select {...props} className={cx(CONTROL, 'cursor-pointer', className)} />;
+  return <select {...props} className={cx(CONTROL_BOX, 'cursor-pointer', className)} />;
 }
 
 /*

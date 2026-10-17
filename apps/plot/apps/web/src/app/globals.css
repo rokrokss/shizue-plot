@@ -48,6 +48,8 @@
   /* The bunnies have dark versions of their own (docs/design/shizue-ui.md §자산). */
   --brand-mark: url('/brand/mark.svg');
   --brand-standing: url('/brand/standing.png');
+  /* A select's ⌄, in the muted ink (below, `select`). */
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6' fill='none' stroke='%2350645b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1l4 4 4-4'/%3E%3C/svg%3E");
   @variant dark {
     color-scheme: dark;
     --color-canvas: #0f1a19;
@@ -67,6 +69,7 @@
     --dots: #90f7ec14;
     --brand-mark: url('/brand/mark-dark.svg');
     --brand-standing: url('/brand/standing-dark.png');
+    --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6' fill='none' stroke='%23a3bab6' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1l4 4 4-4'/%3E%3C/svg%3E");
   }
 }
 
@@ -100,6 +103,25 @@
     border-color: var(--color-line);
     font-size: var(--text-sm);
     line-height: var(--text-sm--line-height);
+  }
+  /*
+   * Every select of the app's own draws its own ⌄. The browser's sits where the
+   * browser puts it, a few px off the right border whatever the padding, while
+   * the text keeps the padding, so the two ends of a select never matched. This
+   * one stands as far from the right border as the text from the left — the
+   * select's `--select-inset`, which is its left padding; the picture is the
+   * arrow's own 10×6 box, so its drawn tip is what the inset measures — and the
+   * right padding leaves room for it and an 8px gap. A select in a card's own
+   * markup is the creator's, and keeps the browser's.
+   */
+  :where(select):not(:where(.shizue-msg *)) {
+    --select-inset: 0.875rem;
+    appearance: none;
+    padding-inline: var(--select-inset) calc(var(--select-inset) + 1.125rem);
+    background-image: var(--select-chevron);
+    background-repeat: no-repeat;
+    background-position: right var(--select-inset) center;
+    background-size: 0.625rem 0.375rem;
   }
 }
 
