@@ -53,6 +53,7 @@ vi.mock('@/i18n/navigation', async () => {
   return {
     Link: ({ href, children, ...rest }: { href: string; children?: ReactNode }) =>
       h('a', { ...rest, href }, children),
+    useRouter: () => ({ back: () => {}, push: () => {}, replace: () => {} }),
   };
 });
 

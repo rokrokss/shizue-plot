@@ -287,7 +287,8 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
     setMutating(true);
     try {
       await apiDelete(`/api/plots/${id}`);
-      router.push('/plots');
+      // In its place, so back does not open the work that is gone.
+      router.replace('/plots');
     } catch (caught) {
       setError(toMessage(caught));
       setMutating(false);

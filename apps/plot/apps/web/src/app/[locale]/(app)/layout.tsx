@@ -1,11 +1,12 @@
 'use client';
 
 import { useTranslations } from 'next-intl';
-import type { ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { Header } from '@/components/Header';
 import { MobileTabBar } from '@/components/MobileTabBar';
 import { cx } from '@/components/ui';
 import { usePathname } from '@/i18n/navigation';
+import { noteMove } from '@/lib/nav';
 
 /**
  * The shell every page stands in, session or not: a reader who has not signed in
@@ -20,6 +21,11 @@ export default function AppLayout({ children }: { children: ReactNode }) {
   // composer already owns the bottom edge.
   const conversation = pathname.startsWith('/chats/');
   const tabBar = !conversation;
+  // The page the tab opened on is not a move; every path after it is.
+  const opened = useRef(pathname);
+  useEffect(() => {
+    if (pathname !== opened.current) noteMove();
+  }, [pathname]);
 
   return (
     <div className="flex min-h-dvh flex-col">

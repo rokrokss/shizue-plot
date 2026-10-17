@@ -16,6 +16,23 @@ export interface NavCluster {
   member: boolean;
 }
 
+/**
+ * Whether this tab has moved from one of our pages to another since it loaded.
+ * A page opened straight — a new tab, a link from elsewhere, a reload — has none
+ * of ours behind it, so a back control there must not step off the site.
+ */
+let movedInApp = false;
+
+/** The shell notes each move to a new path (`(app)/layout.tsx`). */
+export function noteMove(): void {
+  movedInApp = true;
+}
+
+/** Whether the browser's previous entry is one of our pages. */
+export function cameInApp(): boolean {
+  return movedInApp;
+}
+
 /** Whether the path is one of these, or something below one of them. */
 function under(pathname: string, ...roots: string[]): boolean {
   return roots.some((root) => pathname === root || pathname.startsWith(`${root}/`));

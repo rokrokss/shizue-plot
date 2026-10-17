@@ -28,8 +28,9 @@ import { ModelPill } from '@/components/ModelPill';
 import { ScriptDialog, type ScriptPrompt } from '@/components/ScriptDialog';
 import { TurnEditor } from '@/components/TurnEditor';
 import { ThemeSwitcher } from '@/components/ThemeSwitcher';
-import { Button, CenteredMessage, Spinner, TextArea, cx } from '@/components/ui';
-import { Link } from '@/i18n/navigation';
+import { Button, CenteredMessage, Spinner, TextArea, buttonClass, cx } from '@/components/ui';
+import { Link, useRouter } from '@/i18n/navigation';
+import { cameInApp } from '@/lib/nav';
 import { apiGet, apiSend } from '@/lib/api';
 import {
   assetSrc,
@@ -519,6 +520,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    * waiting on it costs nothing.
    */
   const stopping = useRef<Promise<void> | null>(null);
+  const router = useRouter();
   // The message list scrolls, not the document: the reader's own scroll is what
   // decides whether new text follows them down, and the library gives that up the
   // moment they move away from the bottom. Whatever grows the list — a reply being
@@ -2756,7 +2758,19 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
 
 
 
-  if (missing) return <CenteredMessage>{t('notFound')}</CenteredMessage>;
+  // The shell's bars step aside in a conversation, so the way out is here.
+  if (missing) {
+    return (
+      <CenteredMessage>
+        <span className="flex flex-col items-center gap-4">
+          {t('notFound')}
+          <Link href="/chats" className={buttonClass('secondary', 'sm')}>
+            {t('backToChats')}
+          </Link>
+        </span>
+      </CenteredMessage>
+    );
+  }
   // The plot's display scripts come with its read, which can only start once the
   // chat's has said which plot it is. Drawn before them, every status block shows
   // as the text it was written as and then rearranges, so a chat that may draw
@@ -2980,9 +2994,21 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             the notes, the music's mute — is in the sheet ☰ opens. */}
         <div className="mx-auto flex h-13 max-w-[1120px] items-center gap-2 px-2.5">
           <Link
+            // Zeta's ‹ goes back to wherever the reader came from — the chat list,
+            // the work's page, a notification — and a chat opened straight, with
+            // nothing of ours behind it, steps to the chat list in its place. A
+            // link that always opened the list left the chat behind it, so the
+            // browser's or the phone's back went into the conversation again.
             href="/chats"
-            aria-label={t('backToChats')}
-            title={t('backToChats')}
+            replace
+            onClick={(event) => {
+              if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+              if (!cameInApp()) return;
+              event.preventDefault();
+              router.back();
+            }}
+            aria-label={t('goBack')}
+            title={t('goBack')}
             className="-ml-1 inline-flex size-8 shrink-0 items-center justify-center rounded-full text-fg transition-colors hover:bg-raised/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
           >
             <Icon name="back" className="size-6" />

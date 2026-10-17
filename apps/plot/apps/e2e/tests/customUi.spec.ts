@@ -441,7 +441,7 @@ test('a fixed overlay covers the conversation, never the header or the composer,
     };
     return [
       at(document.querySelector('textarea[placeholder^="메시지를 입력하세요"]')),
-      at(document.querySelector('a[aria-label="대화 목록으로"]')),
+      at(document.querySelector('a[aria-label="뒤로"]')),
       at(document.querySelector('button[aria-label="대화 설정"]')),
     ];
   });

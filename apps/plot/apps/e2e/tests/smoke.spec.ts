@@ -216,7 +216,7 @@ test('starts a chat that opens on the first opening', async () => {
   await expect(assistantMessages()).toHaveCount(1);
   await expect(assistantMessages().first()).toContainText('늦었네, 기다렸어');
   // The conversation has the whole screen: the site's header steps aside.
-  await expect(page.getByRole('link', { name: '대화 목록으로' })).toBeVisible();
+  await expect(page.getByRole('link', { name: '뒤로', exact: true })).toBeVisible();
   await expect(page.getByRole('navigation').getByRole('link', { name: messages('ko').nav.create, exact: true })).toBeHidden();
 });
 

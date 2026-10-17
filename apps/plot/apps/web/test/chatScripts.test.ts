@@ -65,6 +65,7 @@ vi.mock('@/i18n/navigation', async () => {
   const { createElement: h } = await import('react');
   return {
     Link: ({ href, children }: { href: string; children?: ReactNode }) => h('a', { href }, children),
+    useRouter: () => ({ back: () => {}, push: () => {}, replace: () => {} }),
   };
 });
 // Each row draws a button carrying the attribute the sanitizer leaves on one, and

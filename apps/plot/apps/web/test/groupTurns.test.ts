@@ -43,6 +43,7 @@ vi.mock('@/i18n/navigation', async () => {
   const { createElement: h } = await import('react');
   return {
     Link: ({ href, children }: { href: string; children?: ReactNode }) => h('a', { href }, children),
+    useRouter: () => ({ back: () => {}, push: () => {}, replace: () => {} }),
   };
 });
 // Each row says whose it is drawn as and whom it is waiting on, with the page's
