@@ -39,7 +39,6 @@ function render(props: Record<string, unknown>): void {
         children: createElement(MessageBody, {
           assets: new Map([
             ['kiss', OPEN],
-            ['secret', '#shizue-lock:keyword'],
           ]),
           ...props,
         } as never) as ReactNode,
@@ -111,12 +110,11 @@ describe('HTML in a message', () => {
     expect(host.querySelector('.x-shizue-box')?.textContent).toBe('상자');
   });
 
-  it("draws the plot's own pictures inside markup, and leaves a locked one out", () => {
-    render({ content: '<div class="frame">{{img::kiss}}{{img::secret}}</div>' });
+  it("draws the plot's own pictures inside markup", () => {
+    render({ content: '<div class="frame">{{img::kiss}}</div>' });
 
     const images = [...host.querySelectorAll('img')];
     expect(images.map((image) => image.getAttribute('src'))).toEqual([OPEN]);
-    expect(host.innerHTML).not.toContain('shizue-lock');
   });
 
   it("plays the plot's music and video written in plain text, as RisuAI's parseAdditionalAssets does", () => {
@@ -124,11 +122,10 @@ describe('HTML in a message', () => {
     // `<video controls autoplay loop>`, `{{audio::…}}` `<audio controls autoplay
     // loop>`, `{{asset::…}}` naming a video a muted looping one, wherever they stand.
     render({
-      content: '*문이 열린다.*\n\n{{video::clip}}\n\n{{audio::theme}} 노래가 흐른다.\n\n{{asset::clip}}{{video::secret}}{{video::없음}}',
+      content: '*문이 열린다.*\n\n{{video::clip}}\n\n{{audio::theme}} 노래가 흐른다.\n\n{{asset::clip}}{{video::없음}}',
       assets: new Map([
         ['clip', '/api/plots/sty_1/assets/clip#shizue-video'],
         ['theme', '/api/plots/sty_1/assets/theme'],
-        ['secret', '#shizue-lock:keyword'],
       ]),
     });
 
@@ -140,7 +137,6 @@ describe('HTML in a message', () => {
     expect(host.querySelector('audio')?.getAttribute('src')).toBe('/api/plots/sty_1/assets/theme');
     expect(host.textContent).toContain('노래가 흐른다.');
     expect(host.textContent).not.toContain('{{');
-    expect(host.innerHTML).not.toContain('shizue-lock');
     // The prose around them is still the prose path's.
     expect(host.querySelector('.message-body > p > em')?.textContent).toBe('문이 열린다.');
   });

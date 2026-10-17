@@ -100,7 +100,6 @@ import {
   storableDelta,
   type PromptInjections,
 } from './scriptState.js';
-import { unlockAssets } from './unlocks.js';
 import { scheduleMessageEmbedding, searchByMeaning, type VectorPlan } from './vectors.js';
 
 /**
@@ -236,7 +235,7 @@ export interface GenerationPlan {
    * beside the one it replaces — `swipe`. Absent: `normal`.
    */
   generationType?: LoreTrigger;
-  /** The names this chat's open images go by, for `{{assetlist}}` (see `openAssetNames`). */
+  /** The names the plot's images go by, for `{{assetlist}}` (see `plotAssetNames`). */
   assetNames: string[];
   /** The chat's auxiliary model, for `{{axmodel}}` (see `auxiliaryModelOf`). */
   auxiliaryModel: string;
@@ -1298,11 +1297,8 @@ async function runGeneration(
         if (reply) {
           // Stored pending all the same, if the browser meant to post-process
           // it: the next time it opens the chat it finds the mark and finishes.
-          const stored = await persist(deps, plan, reply, usage, request, { stopped: true });
+          await persist(deps, plan, reply, usage, request, { stopped: true });
           await keepGlobalWrites(deps, plan, request);
-          // The turn is on the branch, so what it opened is opened; there is
-          // simply no event to say so on.
-          await openUnlocks(deps, plan.chatId, stored.content);
           if (!plan.postProcess) scheduleBackgroundUpdates(deps, plan.chatId);
         }
         outcome = [timeout && !controller.signal.aborted ? 'timeout' : 'stopped'];
@@ -1326,17 +1322,11 @@ async function runGeneration(
       const stored = await persist(deps, plan, reply, usage, request);
       outcome = ['done'];
       await keepGlobalWrites(deps, plan, request);
-      // Evaluated on the raw text as well as at the commit: unlocks only ever
-      // open, so the earlier answer costs nothing and saves the reader a wait.
-      const unlockedAssetIds = await openUnlocks(deps, plan.chatId, stored.content);
       await send({
         event: 'done',
         data: JSON.stringify({
           messageId: stored.id,
           usage,
-          // Only when something really opened: the client celebrates on the field
-          // being there, and every other turn's payload stays what it was.
-          ...(unlockedAssetIds.length > 0 ? { unlockedAssetIds } : {}),
           // Only for a turn the browser said it would finish: the revision its
           // commit has to name, read from the row rather than assumed.
           ...(plan.postProcess ? { postProcess: true, scriptRev: stored.scriptRev } : {}),
@@ -1422,27 +1412,6 @@ async function stopAll(open: OpenGeneration[], graceMs: number): Promise<void> {
     new Promise<void>((resolve) => (timer = setTimeout(resolve, graceMs))),
   ]);
   clearTimeout(timer);
-}
-
-/**
- * Evaluates the plot's unlockable assets against the turn that has just been
- * persisted, and answers with what it opened.
- *
- * The chat row is re-read rather than taken from the plan: the head has just
- * moved, and a turn-count condition is asked about the branch as it now stands.
- * Failures are logged like any other post-persistence work — an unlock that did
- * not land is opened by the next turn, and must never tear down a stream whose
- * text is already stored. A script commit that rewrites a turn asks again of
- * the text it leaves.
- */
-export async function openUnlocks(deps: AppDeps, chatId: string, content: string): Promise<string[]> {
-  try {
-    const [chat] = await deps.db.select().from(chats).where(eq(chats.id, chatId)).limit(1);
-    return chat ? await unlockAssets(deps, chat, content) : [];
-  } catch (error) {
-    console.error('[api] asset unlock evaluation failed', error);
-    return [];
-  }
 }
 
 /** The stored turn: its id, the text the branch now holds for it, its script revision, and its group-turn tags. */

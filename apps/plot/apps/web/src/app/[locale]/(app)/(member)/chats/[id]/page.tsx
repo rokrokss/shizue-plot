@@ -39,11 +39,8 @@ import { Link } from '@/i18n/navigation';
 import { apiDelete, apiGet, apiSend, apiUpload } from '@/lib/api';
 import {
   assetSrc,
-  illustrations,
   isLocalizedAsset,
-  lockedSrc,
   measureImage,
-  openAssetLocks,
   type PlotAsset,
 } from '@/lib/assets';
 import { autoGrow } from '@/lib/autoGrow';
@@ -871,49 +868,16 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     apiGet<PlotAsset[]>(`/api/plots/${plotId}/assets`).then(setAssets, () => undefined);
   }, [plotId]);
 
-  /** What this chat may show of the plot's images; empty until the read lands. */
-  const locks = state?.assetLocks;
-  /** The ones it may not, with the kind of condition each is waiting on. */
-  const lockedKinds = useMemo(
-    () =>
-      new Map(
-        (locks ?? [])
-          .filter((lock) => lock.locked && lock.kind !== null)
-          .map((lock) => [lock.slug, lock.kind!]),
-      ),
-    [locks],
-  );
-
   // assetSrc carries the measured size and placeholder in the URL fragment, so
   // the chat's images can reserve their boxes; every other consumer of the map
   // still sees a plain usable URL.
-  //
-  // A locked slug is simply not in it: a display script or a component naming
-  // one gets what an unknown slug gets, which is nothing.
   const assetUrls = useMemo(
-    () =>
-      new Map(
-        [...assets, ...readerAssets]
-          .filter((asset) => !lockedKinds.has(asset.slug))
-          .map((asset) => [asset.slug, assetSrc(asset)]),
-      ),
-    [assets, readerAssets, lockedKinds],
+    () => new Map([...assets, ...readerAssets].map((asset) => [asset.slug, assetSrc(asset)])),
+    [assets, readerAssets],
   );
 
   /**
-   * The same map for the message bodies, where a locked reference is worth more
-   * than nothing: it resolves to the marker `MessageBody` draws the locked card
-   * from, so the reader can see there is something to reach for.
-   */
-  const messageAssets = useMemo(() => {
-    if (lockedKinds.size === 0) return assetUrls;
-    const map = new Map(assetUrls);
-    for (const [slug, kind] of lockedKinds) map.set(slug, lockedSrc(kind));
-    return map;
-  }, [assetUrls, lockedKinds]);
-
-  /**
-   * What a reference names, for both maps: a slug, or the name an imported card
+   * What a reference names: a slug, or the name an imported card
    * wrote it under (`{{img::profile.png}}`), which no slug can stand in for.
    */
   const resolveAsset = useMemo(() => assetResolver([...assets, ...readerAssets]), [assets, readerAssets]);
@@ -922,9 +886,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     () => [...assets, ...readerAssets].map((asset) => ({ slug: asset.slug, name: asset.name })),
     [assets, readerAssets],
   );
-
-  /** The gallery's rows: every image of the work, open or not. */
-  const gallery = useMemo(() => illustrations(assets, locks ?? []), [assets, locks]);
 
   const messages = state?.path ?? [];
   const last = messages[messages.length - 1];
@@ -1205,19 +1166,19 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const indexBase = !state?.hasMore && messages[0] && isGreeting(messages[0]) ? -1 : 0;
   const lastMessageId = indexBase + messages.length - 1;
   /**
-   * The names a card asks for its images by — its own where it had them — open
-   * ones only, and none the import fetched from another host for its markup.
+   * The names a card asks for its images by — its own where it had them — and
+   * none the import fetched from another host for its markup.
    */
   const assetNames = useMemo(
     () =>
       assets
-        .filter((asset) => !lockedKinds.has(asset.slug) && !isLocalizedAsset(asset))
+        .filter((asset) => !isLocalizedAsset(asset))
         .map((asset) => asset.name ?? asset.slug),
-    [assets, lockedKinds],
+    [assets],
   );
   /**
    * The work's modules for `{{moduleenabled}}` and `{{moduleassetlist}}`, naming
-   * the open pictures only, as `assetNames` does. Unset until the plot is read.
+   * the pictures `assetNames` names. Unset until the plot is read.
    */
   const cbsModules = useMemo(() => {
     if (!plot) return undefined;
@@ -2438,14 +2399,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           const reply = result.messageId;
           setFreshReplies((current) => new Set(current).add(reply));
         }
-        // What the turn opened, celebrated on the spot: the refetch below carries
-        // the same answer, and a reveal that waits for it arrives a beat late.
-        if (result.kind === 'done' && result.unlockedAssetIds.length > 0) {
-          const opened = result.unlockedAssetIds;
-          setState((current) =>
-            current ? { ...current, assetLocks: openAssetLocks(current.assetLocks, opened) } : current,
-          );
-        }
       }
     } catch (caught) {
       rejection = caught;
@@ -3376,7 +3329,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               onSaveEmotionProcessor={(emotionProcessor) => updateSettings({ emotionProcessor })}
               narrator={state.chat.narrator}
               onSaveNarrator={(narrator) => updateSettings({ narrator })}
-              illustrations={gallery}
               disabled={settingsLocked}
               onSaveNote={(note) => updateSettings({ note })}
               onToggleNote={toggleNote}
@@ -3575,7 +3527,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                         roster={members}
                         {...(message.speaker ? { speaker: message.speaker } : {})}
                         {...(message.member ? { member: message.member, ...(message.spoken ? { spoken: true } : {}) } : {})}
-                        assets={messageAssets}
+                        assets={assetUrls}
                         resolveAsset={
                           emotionResolvers.get(
                             (message.spoken ? message.member : members.length === 1 ? members[0]!.id : undefined) ?? '',

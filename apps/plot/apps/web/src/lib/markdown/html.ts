@@ -24,7 +24,7 @@ import { replaceAssetMacros } from '@shizue/core/cbs';
 import Markdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
-import { isVideoSrc, lookupAsset, readLockKind, type AssetResolver } from '../assets';
+import { isVideoSrc, lookupAsset, type AssetResolver } from '../assets';
 import { mediaMarkup } from '../cbs';
 import { keepsElement, sanitizeCustomHtml } from '../sanitizeHtml';
 import { splitBlocks } from './blocks';
@@ -278,7 +278,7 @@ export function renderImageTokensAsHtml(
     }
     if (macro.kind === 'drop' || macro.ref === null) return '';
     const found = lookupAsset(macro.ref, assets, resolve, macro.name);
-    if (!found || readLockKind(found.src)) return '';
+    if (!found) return '';
     if (isAddressPosition(content, macro.start)) return found.src;
     if (macro.kind === 'audio' || macro.kind === 'bgm' || macro.kind === 'video' || macro.kind === 'videoimg') {
       return mediaMarkup(macro.kind, found.src);
@@ -310,7 +310,7 @@ export function renderMediaTokens(
     const media = macro.kind === 'audio' || macro.kind === 'bgm' || macro.kind === 'video' || macro.kind === 'videoimg';
     if ((!media && macro.name !== 'asset') || macro.ref === null || isAddressPosition(content, macro.start)) return kept;
     const found = lookupAsset(macro.ref, assets, resolve, macro.name);
-    if (!found || readLockKind(found.src)) return media ? '' : kept;
+    if (!found) return media ? '' : kept;
     if (media) return mediaMarkup(macro.kind as 'audio' | 'bgm' | 'video' | 'videoimg', found.src);
     return isVideoSrc(found.src) ? mediaMarkup('videoimg', found.src) : kept;
   });

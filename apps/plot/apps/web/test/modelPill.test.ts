@@ -101,7 +101,6 @@ const state = (model: string): ChatState =>
       },
     ],
     siblings: { msg_1: { index: 0, total: 1, ids: ['msg_1'] } },
-    assetLocks: [],
   }) as unknown as ChatState;
 
 let host: HTMLElement;

@@ -529,49 +529,6 @@ export const MAX_TAG_LENGTH = 20;
  */
 export const MAX_CARD_IMPORT_BYTES = 1024 * 1024 * 1024;
 
-/**
- * The relationship axes an unlock may be keyed on. Mirrors `RELATIONSHIP_AXES`
- * in `@shizue/db`, which cannot be imported here — that package depends on this one.
- */
-export const UNLOCK_AXES = [
-  'affection',
-  'obsession',
-  'trust',
-  'liking',
-  'disgust',
-  'fear',
-] as const;
-
-export type UnlockAxis = (typeof UNLOCK_AXES)[number];
-
-/** What kind of condition an asset's reveal waits on. */
-export type AssetUnlockKind = 'keyword' | 'turns' | 'relationship';
-
-/**
- * What a plot asset waits for before a chat may see it. A null column means the
- * image is simply visible, which is what every asset was before this existed.
- *
- * This is a reward layer rather than access control: the bytes stay served by the
- * plot-scoped route to everyone who may read the work, and what is locked is the
- * reveal inside one conversation.
- */
-export type AssetUnlock =
-  /** Any of the keywords appearing in an assistant turn, case-insensitively. */
-  | { kind: 'keyword'; keywords: string[] }
-  /** Assistant turns on the current branch. */
-  | { kind: 'turns'; count: number }
-  /** A relationship axis reaching `min` (skipped while the chat has no axes). */
-  | { kind: 'relationship'; axis: UnlockAxis; min: number };
-
-/** Keywords one unlock may listen for. */
-export const MAX_UNLOCK_KEYWORDS = 5;
-/** One keyword's length — a word or a phrase, not a paragraph. */
-export const MAX_UNLOCK_KEYWORD_LENGTH = 30;
-/** The deepest turn count an unlock may wait for. */
-export const MAX_UNLOCK_TURNS = 500;
-/** Axis values run 0-100, and an unlock waiting for 0 would never be one. */
-export const MAX_UNLOCK_RELATIONSHIP = 100;
-
 /** One of a card's emotion pictures (`NormalizedCard.emotionImages`). */
 export interface EmotionImage {
   /** The card's name for it — what the model is asked to choose, and what a message stores. */

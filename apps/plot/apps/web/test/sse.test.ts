@@ -49,22 +49,6 @@ describe('streamGeneration', () => {
       kind: 'done',
       messageId: 'm1',
       usage: { promptTokens: 10, completionTokens: 2 },
-      unlockedAssetIds: [],
-    });
-  });
-
-  it('carries what the turn unlocked, where the turn unlocked anything', async () => {
-    mockFetch([
-      'event: delta\ndata: {"text":"입맞춤"}\n\n',
-      'event: done\ndata: {"messageId":"m2","usage":{"promptTokens":1,"completionTokens":1},"unlockedAssetIds":["ast_1","ast_2"]}\n\n',
-    ]);
-
-    const { result } = await collect();
-    expect(result).toEqual({
-      kind: 'done',
-      messageId: 'm2',
-      usage: { promptTokens: 1, completionTokens: 1 },
-      unlockedAssetIds: ['ast_1', 'ast_2'],
     });
   });
 
@@ -109,7 +93,6 @@ describe('streamGeneration', () => {
       kind: 'done',
       messageId: 'm3',
       usage: { promptTokens: 3, completionTokens: 2 },
-      unlockedAssetIds: [],
     });
   });
 

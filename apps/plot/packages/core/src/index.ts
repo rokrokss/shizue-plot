@@ -14,7 +14,6 @@ export * from './statusBlock.js';
 export * from './choices.js';
 export * from './style.js';
 export * from './profiles.js';
-export * from './unlock.js';
 export * from './emotion.js';
 export * from './scene.js';
 export * from './tokens.js';

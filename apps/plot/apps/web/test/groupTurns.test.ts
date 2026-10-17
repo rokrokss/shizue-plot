@@ -109,7 +109,6 @@ vi.mock('@/lib/sse', () => ({
       kind: 'done',
       messageId,
       usage: {},
-      unlockedAssetIds: [],
       ...(typeof speakerId === 'string'
         ? {
             speakerMemberId: speakerId === 'narrator' ? null : speakerId,

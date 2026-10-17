@@ -3,7 +3,6 @@ import {
   backgroundWithoutStyles,
   cardLicense,
   characterName,
-  coerceAssetUnlock,
   coerceGroupSettings,
   coerceNarrator,
   coercePlotProfiles,
@@ -494,13 +493,8 @@ export const toMemberJson = (plot: Plot, member: Character) => ({
 
 /**
  * An asset is addressed by its slug, never by its row id or stored path.
- *
- * The unlock condition is the creator's alone: its keywords are the spoiler the
- * reveal is worth having, so only the owner's reads carry it. What a reader is
- * told is the chat's `assetLocks` — whether it is open, and which kind of
- * condition it waits on.
  */
-const toAssetJson = (asset: PlotAsset, owner = false) => ({
+const toAssetJson = (asset: PlotAsset) => ({
   slug: asset.slug,
   // The source's own name for the image — an imported card's, or the one an
   // upload sent — which its references are written in.
@@ -512,7 +506,6 @@ const toAssetJson = (asset: PlotAsset, owner = false) => ({
   width: asset.width,
   height: asset.height,
   thumbhash: asset.thumbhash,
-  ...(owner ? { unlock: asset.unlock } : {}),
   createdAt: asset.createdAt.toISOString(),
 });
 
@@ -2062,9 +2055,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
    * picture the PNG is written on, in whatever format it is. Every plot asset
    * goes into every member's archive: assets are the plot's, and so are the
    * openings, the lorebook and the custom UI that every member's card carries
-   * out — any of them may name any image. An unlock condition keeps nothing
-   * out, being a reveal inside one chat, and this is the owner's copy. The
-   * images are read whole and zipped in memory, so an export holds about twice
+   * out — any of them may name any image. The images are read whole and zipped in memory, so an export holds about twice
    * what the plot's images weigh.
    */
   app.get('/:id/characters/:characterId/export', requireUser, async (c) => {
@@ -2168,7 +2159,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       .where(eq(plotAssets.plotId, plot.id))
       // Upload order; the slug breaks the tie a bulk charx import leaves behind.
       .orderBy(asc(plotAssets.createdAt), asc(plotAssets.slug));
-    return c.json(rows.map((asset) => toAssetJson(asset, plot.ownerId === viewerId)));
+    return c.json(rows.map((asset) => toAssetJson(asset)));
   });
 
   app.post('/:id/assets', requireUser, rateLimit(deps, RATE_LIMITS.upload), async (c) => {
@@ -2246,36 +2237,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     // Outside the transaction: the replaced object only becomes garbage once the
     // row that pointed at it is really gone.
     if (replaced) await deleteQuietly(deps.storage, replaced);
-    return c.json(toAssetJson(asset, true), 201);
-  });
-
-  /**
-   * The asset's unlock condition, which is the only thing about an asset that is
-   * edited without re-uploading its bytes — a PATCH rather than a field on the
-   * multipart upload, so the editor can set it on an image that is already there
-   * and a re-upload of the same slug never has to restate it.
-   *
-   * `unlock: null` clears it, and so does a condition this build cannot evaluate
-   * (`coerceAssetUnlock`): an unlock nothing can open would leave the image locked
-   * forever.
-   */
-  app.patch('/:id/assets/:slug', requireUser, async (c) => {
-    const id = requireUuidParam(c);
-    await loadOwnedPlot(deps, id, c.get('userId'));
-    const body = await readJsonBody(c);
-    const value = body['unlock'];
-    if (value === undefined) throw badRequest('invalid_request', 'unlock is required');
-    if (value !== null && (typeof value !== 'object' || Array.isArray(value))) {
-      throw badRequest('invalid_request', 'unlock must be an object or null');
-    }
-
-    const [updated] = await deps.db
-      .update(plotAssets)
-      .set({ unlock: coerceAssetUnlock(value) })
-      .where(and(eq(plotAssets.plotId, id), eq(plotAssets.slug, c.req.param('slug')!)))
-      .returning();
-    if (!updated) throw notFound('Asset not found');
-    return c.json(toAssetJson(updated, true));
+    return c.json(toAssetJson(asset), 201);
   });
 
   /**

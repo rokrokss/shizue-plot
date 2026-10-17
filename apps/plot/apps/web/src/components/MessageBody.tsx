@@ -18,7 +18,7 @@ import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
 import { unescapeCbs } from '@shizue/core/cbs';
 import { stripVariableMacros } from '@shizue/core/variables';
-import { readLockKind, renderImageTokens, type AssetResolver } from '@/lib/assets';
+import { renderImageTokens, type AssetResolver } from '@/lib/assets';
 import {
   escapeComponentCalls,
   splitComponentCalls,
@@ -51,7 +51,6 @@ import { ChatImage } from './ChatImage';
 import { ComponentFrame } from './ComponentFrame';
 import { HtmlBlock } from './HtmlBlock';
 import { Icon } from './Icon';
-import { LockedImage } from './LockedImage';
 import { cx } from './ui';
 
 const remarkPlugins = [remarkGfm, remarkBreaks, remarkNoIndentedCode];
@@ -117,11 +116,6 @@ const components: Components = {
   // away rather than carried into a component that has no use for it.
   img: ({ node: _node, alt, src }) => {
     const url = typeof src === 'string' ? src : undefined;
-    // A locked asset resolves to a marker rather than to bytes (`lib/assets`),
-    // so the reference still becomes something — the card that says what it is
-    // waiting for — and no request is made for a picture nobody may see yet.
-    const locked = url ? readLockKind(url) : null;
-    if (locked) return <LockedImage kind={locked} />;
     // Markdown lets a model (or a card's lore) write any address as an image, and
     // a foreign one is a beacon to whoever wrote it — the same rule the display
     // scripts' HTML is held to. The plot's own images are always same-origin.

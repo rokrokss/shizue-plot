@@ -2,16 +2,11 @@ import { seedSession } from '../seedSession.js';
 import { expect, test, type BrowserContext, type Locator, type Page } from '@playwright/test';
 
 /**
- * The five P1 surfaces, along the path a reader actually walks them: A writes a
- * plot with two 추천 프로필 and an image nobody may see yet → publishes it → B
+ * The P1 surfaces, along the path a reader actually walks them: A writes a plot
+ * with two 추천 프로필 and an image its opening pulls in → publishes it → B
  * follows A from the plot page, picks one of the profiles and starts a chat on
- * it → the opening's picture stands as a locked card until a turn says the word
- * the creator chose, and then it is simply there, in the message and in the
- * panel's gallery → the 주간 인기 tab carries the work → A publishes a second
- * plot and B's bell says so.
- *
- * The echo model is what makes the unlock deterministic: the reply is the turn
- * the reader just sent, so a keyword condition is met by writing the keyword.
+ * it → the opening draws the picture → the 주간 인기 tab carries the work → A
+ * publishes a second plot and B's bell says so.
  *
  * **AI 초안 and 답장 추천 are deliberately not here.** Both are a real model
  * call the echo adapter cannot stand in for — a draft is strict JSON from the
@@ -30,7 +25,7 @@ const password = 'e2e-password-1234';
 const creator = { email: `p1-a-${run}@example.test`, password, name: `제작자 ${run}` };
 const reader = { email: `p1-b-${run}@example.test`, password, name: `독자 ${run}` };
 
-/** A 1x1 PNG — the image the opening pulls in, and the one that is locked. */
+/** A 1x1 PNG — the image the opening pulls in. */
 const asset = {
   slug: `p1-${run}`,
   bytes: Buffer.from(
@@ -38,10 +33,8 @@ const asset = {
     'base64',
   ),
 };
-/** The word the creator chose. A spoiler, so it never leaves the studio. */
-const keyword = '황금열쇠';
 const plot = {
-  name: `해금 플롯 ${run}`,
+  name: `항구 플롯 ${run}`,
   description: `열쇠 하나가 도는 항구 도시 ${run}`,
   intro: `창고 문이 열렸다 ${run} {{img::${asset.slug}}}`,
 };
@@ -56,8 +49,6 @@ const followUp = {
   description: `같은 도시의 다른 골목 ${run}`,
   intro: `골목 끝에서 불이 켜졌다 ${run}`,
 };
-const quietTurn = `주위를 둘러봤다 ${run}`;
-const keyTurn = `상자 바닥에서 ${keyword}를 꺼냈다 ${run}`;
 
 const UUID_PATH = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 
@@ -103,25 +94,8 @@ const profileRows = () => creatorPage.getByTestId('plot-profile');
 const profileField = (row: Locator, label: string) =>
   row.getByRole('textbox', { name: new RegExp(`^${label}`) });
 const assistantMessages = () => readerPage.getByTestId('message-assistant');
-const lockedCards = () => readerPage.getByTestId('locked-image');
-/** The opening's picture, once this chat may see it (ChatImage is a button). */
+/** The opening's picture (ChatImage is a button). */
 const openedImage = () => assistantMessages().first().getByRole('button', { name: asset.slug });
-
-/** The notes panel, opened only when it is not already showing. */
-async function openPanel(): Promise<void> {
-  const toggle = readerPage.getByRole('button', { name: '노트', exact: true });
-  if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
-  await expect(readerPage.getByTestId('chat-panel')).toBeVisible();
-}
-
-/** Sends a turn and waits for the echo to land as a new reply. */
-async function sendTurn(text: string): Promise<void> {
-  const before = await assistantMessages().count();
-  await readerPage.getByPlaceholder('메시지를 입력하세요').fill(text);
-  await readerPage.getByRole('button', { name: '보내기' }).click();
-  await expect(assistantMessages()).toHaveCount(before + 1);
-  await expect(readerPage.getByPlaceholder('메시지를 입력하세요')).toBeEnabled();
-}
 
 test('the creator writes two recommended profiles and they survive a reload', async () => {
   await signUp(creatorPage, creator);
@@ -153,7 +127,7 @@ test('the creator writes two recommended profiles and they survive a reload', as
   }
 });
 
-test('an uploaded image is given a keyword condition and the plot goes public', async () => {
+test('an uploaded image joins the plot and the plot goes public', async () => {
   // Three hidden file inputs live on this page (cover, avatar and asset); target
   // the asset one. Its slug is proposed from the file name.
   await creatorPage.getByTestId('asset-file-input').setInputFiles({
@@ -164,21 +138,6 @@ test('an uploaded image is given a keyword condition and the plot goes public', 
   await expect(creatorPage.getByLabel('슬러그')).toHaveValue(asset.slug);
   await creatorPage.getByRole('button', { name: '업로드' }).click();
   await expect(creatorPage.getByTestId('plot-asset')).toHaveCount(1);
-  // An image with no condition is what every asset has always been.
-  await expect(creatorPage.getByTestId('asset-unlock-open')).toHaveText('없음');
-
-  // The condition saves on its own request, not on the plot's Save.
-  await creatorPage.getByTestId('asset-unlock-open').click();
-  const editor = creatorPage.getByTestId('asset-unlock-editor');
-  await expect(editor).toBeVisible();
-  await editor.getByTestId('asset-unlock-kind').selectOption('keyword');
-  await editor.getByTestId('asset-unlock-keywords').fill(keyword);
-  await editor.getByRole('button', { name: '저장', exact: true }).click();
-  await expect(editor).toHaveCount(0);
-  await expect(creatorPage.getByTestId('asset-unlock-open')).toContainText('키워드');
-
-  await creatorPage.reload();
-  await expect(creatorPage.getByTestId('asset-unlock-open')).toContainText('키워드');
 
   await creatorPage.getByRole('button', { name: '공개하기' }).click();
   await expect(creatorPage.getByRole('button', { name: '비공개로 전환' })).toBeVisible();
@@ -223,48 +182,17 @@ test('a reader follows the creator and starts a chat on a recommended profile', 
     .toBe(profiles[1]!.name);
 });
 
-test('the locked illustration keeps its place until a turn says the word', async () => {
+test('the opening draws the plot’s image', async () => {
   const opening = assistantMessages().first();
   await expect(opening).toContainText('창고 문이 열렸다');
-  // Where the picture would be: the card says which *kind* of condition it
-  // waits on and never the condition, because the keyword is the spoiler.
-  await expect(opening.getByTestId('locked-image')).toBeVisible();
-  await expect(opening.getByTestId('locked-image')).toContainText('대화로 해금');
-  await expect(openedImage()).toHaveCount(0);
-  // …and nothing asked for the bytes: the reference resolved to the card.
-  await expect(opening.getByText('{{img::')).toHaveCount(0);
-
-  // The gallery is the same answer, in the panel: a silhouette with the hint.
-  await openPanel();
-  const gallery = readerPage.getByTestId('chat-illustrations');
-  await expect(gallery).toBeVisible();
-  await expect(gallery.getByTestId('illustration-locked')).toHaveCount(1);
-  await expect(gallery.getByTestId('illustration-open')).toHaveCount(0);
-
-  // A turn that says nothing the creator asked for opens nothing.
-  await sendTurn(quietTurn);
-  await expect(lockedCards()).toHaveCount(1);
-
-  // …and one that does opens it on the spot, off the stream's own `done`.
-  await sendTurn(keyTurn);
-  await expect(lockedCards()).toHaveCount(0);
   await expect(openedImage()).toHaveAttribute(
     'src',
     new RegExp(`^/api/plots/${plotId}/assets/${asset.slug}(#|$)`),
   );
-  // The bytes really came back: an unlock is a reveal, not an access rule.
   await expect
     .poll(() => openedImage().evaluate((element) => (element as HTMLImageElement).naturalWidth))
     .toBeGreaterThan(0);
-
-  await openPanel();
-  await expect(gallery.getByTestId('illustration-open')).toHaveCount(1);
-  await expect(gallery.getByTestId('illustration-locked')).toHaveCount(0);
-
-  // The reveal is the chat's, not the browser's.
-  await readerPage.reload();
-  await expect(lockedCards()).toHaveCount(0);
-  await expect(openedImage()).toBeVisible();
+  await expect(opening.getByText('{{img::')).toHaveCount(0);
 });
 
 test('the weekly tab carries the plot', async () => {

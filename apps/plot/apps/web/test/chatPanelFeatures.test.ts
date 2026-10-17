@@ -57,7 +57,6 @@ function render(features: {
           relationship: null,
           relationshipEnabled: true,
           narrator: null,
-          illustrations: [],
           customUi: true,
           allowComponentTurns: false,
           statusWindow: features.statusWindow,

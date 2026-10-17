@@ -1,6 +1,4 @@
 import type {
-  AssetUnlock,
-  AssetUnlockKind,
   AuthorNoteSettings,
   ChatTranslationSettings,
   ChoicesMode,
@@ -30,14 +28,11 @@ import type {
   PromptBlockKind,
   PromptReport,
   StorytellingStyle,
-  UnlockAxis,
   VariableDelta,
   Variables,
 } from '@shizue/core';
 
 export type {
-  AssetUnlock,
-  AssetUnlockKind,
   ChoicesMode,
   ComponentCapability,
   DisplayScript,
@@ -64,7 +59,6 @@ export type {
   PromptBlockKind,
   PromptReport,
   StorytellingStyle,
-  UnlockAxis,
   Variables,
 };
 
@@ -114,19 +108,6 @@ export const STORYTELLING_STYLES = [
   'dread',
 ] as const satisfies readonly StorytellingStyle[];
 export const CHOICES_MODES = ['off', 'keywords', 'sentences'] as const satisfies readonly ChoicesMode[];
-export const UNLOCK_AXES = [
-  'affection',
-  'obsession',
-  'trust',
-  'liking',
-  'disgust',
-  'fear',
-] as const satisfies readonly UnlockAxis[];
-export const ASSET_UNLOCK_KINDS = [
-  'keyword',
-  'turns',
-  'relationship',
-] as const satisfies readonly AssetUnlockKind[];
 export const LORE_SELECTIVE_LOGICS = [
   'and_any',
   'and_all',
@@ -141,12 +122,6 @@ export const MAX_PLOT_MOODS = 2;
 export const MAX_PLOT_PROFILES = 5;
 export const MAX_PLOT_PROFILE_NAME_LENGTH = 30;
 export const MAX_PLOT_PROFILE_DESCRIPTION_LENGTH = 1000;
-
-/** The same, for an asset's unlock condition. */
-export const MAX_UNLOCK_KEYWORDS = 5;
-export const MAX_UNLOCK_KEYWORD_LENGTH = 30;
-export const MAX_UNLOCK_TURNS = 500;
-export const MAX_UNLOCK_RELATIONSHIP = 100;
 
 export type ContentLanguage = 'ko' | 'en' | 'ja';
 
@@ -874,18 +849,6 @@ export interface SiblingInfo {
   ids: string[];
 }
 
-/**
- * What this chat may show of one of its plot's images: whether it is open here
- * and — while it is not — which kind of condition it waits on. The condition
- * itself never travels; the kind is the whole hint a reader gets.
- */
-export interface AssetLock {
-  assetId: string;
-  slug: string;
-  locked: boolean;
-  kind: AssetUnlockKind | null;
-}
-
 /** What the deployment can do beyond the base chat. Decided by the server's env. */
 export interface ChatCapabilities {
   /** Drawing a scene; off wherever no image provider is configured. */
@@ -916,8 +879,6 @@ export interface ChatState {
   globalVariables?: Variables;
   /** Optional so a state built by hand — a test's, a fixture's — needs no flags. */
   capabilities?: ChatCapabilities;
-  /** Every asset of the plot, locked or open. Optional for the same reason. */
-  assetLocks?: AssetLock[];
   /**
    * Whether the reader is the plot's creator, the one person the assembled
    * prompt may be shown to. Optional for the same reason; absent reads as no.

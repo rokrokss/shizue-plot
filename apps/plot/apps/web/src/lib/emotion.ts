@@ -39,8 +39,7 @@ function ownerOf(message: ChatMessage, roster: readonly PublicMember[]): string 
 }
 
 /**
- * What each panel member shows on this branch. `assets` is the chat's open
- * images by slug — a picture the chat has not unlocked shows nothing.
+ * What each panel member shows on this branch. `assets` is the chat's images by slug.
  */
 export function emotionSlots(
   path: readonly ChatMessage[],

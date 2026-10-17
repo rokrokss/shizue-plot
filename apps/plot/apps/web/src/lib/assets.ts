@@ -2,7 +2,7 @@
 
 import { replaceAssetMacros } from '@shizue/core/cbs';
 import { rgbaToThumbHash } from 'thumbhash';
-import type { AssetLock, AssetUnlock, AssetUnlockKind, ChatAttachment } from './types';
+import type { ChatAttachment } from './types';
 
 /** Mirrors MAX_ASSETS_PER_PLOT in apps/api/src/assets.ts. */
 export const MAX_ASSETS = 1000;
@@ -24,12 +24,6 @@ export interface PlotAsset {
   width: number | null;
   height: number | null;
   thumbhash: string | null;
-  /**
-   * What a chat has to reach before this image is revealed in it; null means it
-   * always is. Only the owner's own reads carry it — the condition is the
-   * creator's, and its keywords are the spoiler the reveal is worth having.
-   */
-  unlock?: AssetUnlock | null;
   createdAt: string;
 }
 
@@ -111,37 +105,6 @@ export function renderImageTokens(
 /** Drops every reference, for surfaces that show plain text rather than markdown. */
 export const stripImageTokens = (content: string): string => replaceAssetMacros(content, () => '');
 
-/**
- * What a locked asset resolves to instead of its URL.
- *
- * A reference to an image this chat has not opened yet still has to become
- * something — a card saying what it waits on, not a hole and not the picture —
- * and the one place it can carry that is the src the map answers with. A
- * fragment is what markdown lets through untouched (`defaultUrlTransform` keeps
- * anything whose colon comes after a `#`), and the message body reads the kind
- * back off it before ever asking for bytes.
- */
-const LOCK_SRC_PREFIX = '#shizue-lock:';
-
-export const lockedSrc = (kind: AssetUnlockKind): string => `${LOCK_SRC_PREFIX}${kind}`;
-
-/** The kind `lockedSrc` wrote, or null for an ordinary image. */
-export function readLockKind(src: string): AssetUnlockKind | null {
-  if (!src.startsWith(LOCK_SRC_PREFIX)) return null;
-  const kind = src.slice(LOCK_SRC_PREFIX.length);
-  return kind === 'keyword' || kind === 'turns' || kind === 'relationship' ? kind : null;
-}
-
-/** One of the plot's images, as the chat's gallery draws it. */
-export interface Illustration {
-  slug: string;
-  /** The image itself; null while this chat has not opened it. */
-  src: string | null;
-  /** Which kind of condition it waits on — the hint, never the condition. */
-  kind: AssetUnlockKind | null;
-  locked: boolean;
-}
-
 /** Whether an asset is a picture — the rest is a card's music or a web font, which no gallery draws. */
 export const isImageAsset = (asset: Pick<PlotAsset, 'mime'>): boolean => asset.mime.startsWith('image/');
 
@@ -151,46 +114,11 @@ export const isFontAsset = (asset: Pick<PlotAsset, 'mime'>): boolean => asset.mi
 /**
  * Whether an asset is one the import fetched from another host for the card's
  * markup (named by its address, `https://…`). The markup points at it; it is
- * not one of the card's own pictures, so neither the gallery nor
- * `{{assetlist}}` names it — as RisuAI, which loads it from there, does not.
+ * not one of the card's own pictures, so `{{assetlist}}` does not name it — as
+ * RisuAI, which loads it from there, does not.
  */
 export const isLocalizedAsset = (asset: Pick<PlotAsset, 'name'>): boolean =>
   typeof asset.name === 'string' && asset.name.startsWith('https://');
-
-/**
- * The plot's images as one conversation sees them: open ones with their bytes,
- * locked ones with nothing but the kind of condition they wait on. An asset the
- * lock list says nothing about is one the server did not answer for (an older
- * state, a read that has not landed) and is simply shown. A card's music is not
- * among them.
- */
-export function illustrations(
-  assets: readonly PlotAsset[],
-  locks: readonly AssetLock[],
-): Illustration[] {
-  const bySlug = new Map(locks.map((lock) => [lock.slug, lock]));
-  return assets.filter((asset) => isImageAsset(asset) && !isLocalizedAsset(asset)).map((asset) => {
-    const lock = bySlug.get(asset.slug);
-    const locked = lock?.locked ?? false;
-    return {
-      slug: asset.slug,
-      src: locked ? null : assetSrc(asset),
-      kind: lock?.kind ?? null,
-      locked,
-    };
-  });
-}
-
-/** The same list with the named assets opened — what a `done` event reports. */
-export function openAssetLocks(
-  locks: readonly AssetLock[] | undefined,
-  assetIds: readonly string[],
-): AssetLock[] {
-  const opened = new Set(assetIds);
-  return (locks ?? []).map((lock) =>
-    opened.has(lock.assetId) ? { ...lock, locked: false } : lock,
-  );
-}
 
 /**
  * The measurement, carried in the URL fragment.

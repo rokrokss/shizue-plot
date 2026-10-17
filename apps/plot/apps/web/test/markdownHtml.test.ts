@@ -209,7 +209,6 @@ describe('renderMarkup', () => {
 describe('renderImageTokensAsHtml', () => {
   const assets = new Map([
     ['kiss', '/api/plots/p1/assets/kiss'],
-    ['secret', '#shizue-lock:keyword'],
   ]);
 
   it('writes a reference as a picture, or as its address inside a tag or a stylesheet', () => {
@@ -224,9 +223,9 @@ describe('renderImageTokensAsHtml', () => {
     );
   });
 
-  it('leaves out a picture this chat has not opened, and one the plot has not got', () => {
-    expect(renderImageTokensAsHtml('<div>{{img::secret}}{{img::nobody}}</div>', assets)).toBe('<div></div>');
-    expect(renderImageTokensAsHtml('<img src="{{img::secret}}">', assets)).toBe('<img src="">');
+  it('leaves out a picture the plot has not got', () => {
+    expect(renderImageTokensAsHtml('<div>{{img::nobody}}</div>', assets)).toBe('<div></div>');
+    expect(renderImageTokensAsHtml('<img src="{{img::nobody}}">', assets)).toBe('<img src="">');
   });
 
   it('gives RisuAI’s {{source::user}} the persona’s picture where an address goes, and nothing else', () => {

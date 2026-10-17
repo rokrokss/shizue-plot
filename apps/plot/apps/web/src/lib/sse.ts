@@ -6,8 +6,6 @@ type StreamResult =
       kind: 'done';
       messageId: string;
       usage: Usage;
-      /** Plot assets this turn opened; empty on every turn that opened none. */
-      unlockedAssetIds: string[];
       /**
        * A reply of a work of several members: its speaker (null for the narrator's)
        * and its round. Absent on every other reply.
@@ -123,15 +121,11 @@ export async function streamGeneration(
         if (event.event === 'delta') {
           if (typeof data['text'] === 'string') onDelta(data['text']);
         } else if (event.event === 'done') {
-          const unlocked = data['unlockedAssetIds'];
           result = {
             kind: 'done',
             messageId: typeof data['messageId'] === 'string' ? data['messageId'] : '',
             usage: (data['usage'] as Usage | undefined) ?? { promptTokens: 0, completionTokens: 0 },
-            // Only sent by a turn that opened something, so its absence is the
-            // ordinary case rather than a payload to complain about.
-            unlockedAssetIds: Array.isArray(unlocked) ? (unlocked as string[]) : [],
-            // Only on a group reply, the same way.
+            // Only on a group reply, so its absence is the ordinary case.
             ...(typeof data['groupTurnId'] === 'string'
               ? {
                   groupTurnId: data['groupTurnId'],

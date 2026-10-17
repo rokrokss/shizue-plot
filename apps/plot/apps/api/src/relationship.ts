@@ -44,7 +44,6 @@ import { BACKGROUND_LEASE_MS, withLease } from './leases.js';
 import { loadMembers } from './hub.js';
 import { collect, memoryChannel } from './memory.js';
 import { buildPath, roundCount, visibleToAi } from './tree.js';
-import { unlockByRelationship } from './unlocks.js';
 
 /** Rounds the branch must gain before the next extraction attempt (`roundCount`). */
 const TURNS_PER_UPDATE = 5;
@@ -210,26 +209,6 @@ async function updateRelationship(deps: AppDeps, chatId: string): Promise<void> 
         }
       : rebased(current, depth),
   );
-  if (extracted) await revealByRelationship(deps, chat, extracted.axes);
-}
-
-/**
- * Assets waiting on one of these axes, opened now that the numbers moved.
- *
- * The turn's own evaluation ran before this job did (`unlockAssets`, after the
- * `done` event), so it read the axes as they stood *before* the extraction — the
- * turn that crosses a threshold would otherwise never open what waits on it. The
- * reveal lands on the chat's next state read; there is no stream left to say it on.
- *
- * Its failures stay its own: the numbers are already written, and an unlock that
- * did not land is asked again after the next extraction.
- */
-async function revealByRelationship(deps: AppDeps, chat: Chat, axes: RelationshipAxes): Promise<void> {
-  try {
-    await unlockByRelationship(deps, chat, axes);
-  } catch (error) {
-    console.error('[relationship] asset unlock evaluation failed', error);
-  }
 }
 
 /**

@@ -15,7 +15,6 @@ import {
 } from '@shizue/core';
 import { useFormatter, useTranslations } from 'next-intl';
 import { useEffect, useId, useState, type ReactNode } from 'react';
-import { assetHref, type Illustration } from '@/lib/assets';
 import { EMBEDDING_MODELS, embeddingModels, readEmbeddingModel, writeEmbeddingModel } from '@/lib/scripts/embeddingModels';
 import { withNarratorField } from '@/lib/narrator';
 import { relationshipRows } from '@/lib/relationship';
@@ -29,7 +28,6 @@ import {
   type UserNote,
 } from '@/lib/types';
 import { Avatar } from './Avatar';
-import { Lightbox } from './Lightbox';
 import { MemorySummaries } from './MemorySummaries';
 import { PromptInspector } from './PromptInspector';
 import { Button, Checkbox, Field, Select, TextArea, cx } from './ui';
@@ -59,74 +57,6 @@ const withValue = (steps: readonly number[], value: number): number[] =>
 
 /** A share as the selects show it. Rounded: 1 - 0.4 - 0.4 is not 0.2 in floating point. */
 const percent = (share: number): string => String(Math.round(share * 100));
-
-/**
- * What this conversation has opened of the plot's images, and what it has not.
- *
- * The open ones are the reward, so they are shown the way the chat shows any
- * image: a thumb that opens into the same lightbox a message's does. The locked
- * ones are shown too — a silhouette is what makes them worth reaching — with the
- * one thing a reader may be told, which kind of condition each is waiting on.
- */
-function IllustrationGallery({ illustrations }: { illustrations: readonly Illustration[] }) {
-  const t = useTranslations('chat');
-  const [opened, setOpened] = useState<number | null>(null);
-
-  // Nothing here is a reward on a plot whose pictures are simply drawn where
-  // the message asks for them, so the section is not there at all.
-  if (!illustrations.some((illustration) => illustration.kind !== null)) return null;
-  const open = illustrations.filter((illustration) => illustration.src !== null);
-  const images = open.map((illustration) => ({ src: illustration.src!, alt: illustration.slug }));
-
-  return (
-    <section data-testid="chat-illustrations" className="space-y-3 border-b border-line pb-5">
-      <h2 className="text-xs font-medium text-muted">
-        {t('illustrations')}
-      </h2>
-      <ul className="grid grid-cols-3 gap-2 sm:grid-cols-4">
-        {illustrations.map((illustration) => (
-          <li key={illustration.slug}>
-            {illustration.src === null ? (
-              <span
-                data-testid="illustration-locked"
-                className="flex aspect-[2/3] w-full flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-line bg-raised/40 px-1 text-center"
-              >
-                <span aria-hidden="true" className="text-sm leading-none">
-                  🔒
-                </span>
-                {illustration.kind ? (
-                  <span className="caption2 text-muted">
-                    {t(`lockedHints.${illustration.kind}`)}
-                  </span>
-                ) : null}
-              </span>
-            ) : (
-              <button
-                type="button"
-                data-testid="illustration-open"
-                aria-label={illustration.slug}
-                onClick={() => setOpened(open.indexOf(illustration))}
-                className="block w-full cursor-zoom-in overflow-hidden rounded-lg border border-line focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-              >
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={assetHref(illustration.src)}
-                  alt=""
-                  loading="lazy"
-                  className="aspect-[2/3] w-full object-cover"
-                />
-              </button>
-            )}
-          </li>
-        ))}
-      </ul>
-      <p className="text-xs text-muted">{t('illustrationsHint')}</p>
-      {opened !== null ? (
-        <Lightbox images={images} index={opened} onClose={() => setOpened(null)} />
-      ) : null}
-    </section>
-  );
-}
 
 /** The panel's fields that are edited as a draft and saved on a button. */
 type Saveable = 'note' | 'prompt' | 'narrator';
@@ -190,7 +120,6 @@ export function ChatPanel({
   relationshipEnabled,
   emotionProcessor = 'submodel',
   narrator,
-  illustrations,
   customUi,
   allowComponentTurns,
   statusWindow,
@@ -236,12 +165,6 @@ export function ChatPanel({
   emotionProcessor?: EmotionProcessor;
   /** This chat's narrator; null means the character's own is in force. */
   narrator: NarratorConfig | null;
-  /**
-   * The plot's images as this chat sees them. The section only appears where at
-   * least one of them is unlockable — for a work whose pictures are simply shown,
-   * a gallery of them is not a reward, it is the message list again.
-   */
-  illustrations: readonly Illustration[];
   /** Viewer protection, stored per browser rather than on the chat. */
   customUi: boolean;
   /** Consent for components to send turns, granted from the chat and revoked here. */
@@ -458,8 +381,6 @@ export function ChatPanel({
           {onToggleAbsent ? <p className="text-xs text-muted">{t('sceneCastHint')}</p> : null}
         </section>
       ) : null}
-
-      <IllustrationGallery illustrations={illustrations} />
 
       <section data-testid="author-note" className="space-y-3">
         <Field label={t('authorNote')} hint={t('authorNoteHint')}>

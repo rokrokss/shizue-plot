@@ -119,7 +119,7 @@ vi.mock('@/lib/sse', () => ({
     streamed.push({ path, body });
     if (afterTurn) chatState = afterTurn;
     afterTurn = null;
-    return { kind: 'done', messageId: 'm3', usage: {}, unlockedAssetIds: [] };
+    return { kind: 'done', messageId: 'm3', usage: {} };
   },
 }));
 // The member layout's session, by which the page leases the reader's Lua sandbox.

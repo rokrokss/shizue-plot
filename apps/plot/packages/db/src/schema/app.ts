@@ -1,5 +1,4 @@
 import type {
-  AssetUnlock,
   AuthorNoteSettings,
   ChatRetrievalSettings,
   ChatTranslationSettings,
@@ -302,31 +301,9 @@ export const plotAssets = pgTable(
     width: integer('width'),
     height: integer('height'),
     thumbhash: text('thumbhash'),
-    // What a chat has to do before this image is revealed in it. Null — every
-    // asset until a creator sets one — means it is simply visible. A reward layer
-    // rather than access control: the bytes are served to everyone who may read
-    // the plot either way, and `chat_asset_unlocks` records the reveals.
-    unlock: jsonb('unlock').$type<AssetUnlock>(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [unique('plot_assets_plot_id_slug_key').on(t.plotId, t.slug)],
-);
-
-// One chat's reveal of one unlockable asset. Written the moment the condition is
-// first met and never taken back — an unlock is a thing that happened in that
-// conversation, so the pair is the key and a second write is a no-op.
-export const chatAssetUnlocks = pgTable(
-  'chat_asset_unlocks',
-  {
-    chatId: uuid('chat_id')
-      .notNull()
-      .references(() => chats.id, { onDelete: 'cascade' }),
-    assetId: uuid('asset_id')
-      .notNull()
-      .references(() => plotAssets.id, { onDelete: 'cascade' }),
-    unlockedAt: timestamp('unlocked_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [primaryKey({ columns: [t.chatId, t.assetId] })],
 );
 
 // Comments on a plot's public page, one reply level deep. Deletion is soft:
@@ -1209,7 +1186,6 @@ export type PlotAsset = typeof plotAssets.$inferSelect;
 export type NewPlotAsset = typeof plotAssets.$inferInsert;
 export type Comment = typeof comments.$inferSelect;
 export type NewComment = typeof comments.$inferInsert;
-export type ChatAssetUnlock = typeof chatAssetUnlocks.$inferSelect;
 export type Follow = typeof follows.$inferSelect;
 export type Notification = typeof notifications.$inferSelect;
 export type NewNotification = typeof notifications.$inferInsert;

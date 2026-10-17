@@ -66,7 +66,6 @@ import { ChatExportSchema } from '@shizue/contracts';
 import {
   account,
   characters,
-  chatAssetUnlocks,
   chatAttachments,
   chats,
   chatNoteLinks,
@@ -319,7 +318,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await sql`TRUNCATE TABLE memories, chat_asset_unlocks, chat_attachments, messages, chat_note_links, user_notes, plot_reader_variables, plot_reader_overlays, chats, personas, comments, plot_likes, plot_assets, characters, notifications, follows, plots, feed_cursors, jobs, rate_limits, leases, "session", account, verification, "user" RESTART IDENTITY CASCADE`;
+  await sql`TRUNCATE TABLE memories, chat_attachments, messages, chat_note_links, user_notes, plot_reader_variables, plot_reader_overlays, chats, personas, comments, plot_likes, plot_assets, characters, notifications, follows, plots, feed_cursors, jobs, rate_limits, leases, "session", account, verification, "user" RESTART IDENTITY CASCADE`;
   auth = createAuth(db, {
     secret: 'test-secret-test-secret-test-secret',
     baseUrl: 'http://localhost:13000',
@@ -5531,227 +5530,6 @@ describe('recommended profiles', () => {
   });
 });
 
-describe('unlockable assets', () => {
-  const KEYWORD = { kind: 'keyword', keywords: ['고백'] };
-
-  /** An asset row without the bytes: what is under test is the reveal, not the image. */
-  async function seedAsset(plotId: string, slug: string, unlock: unknown = null): Promise<string> {
-    const [row] = await db
-      .insert(plotAssets)
-      .values({ plotId, slug, path: `assets/${slug}.gif`, mime: 'image/gif', unlock: unlock as never })
-      .returning({ id: plotAssets.id });
-    return row!.id;
-  }
-
-  /** The chat's locks, in slug order — the rows are written in one breath. */
-  const locksOf = async (cookie: string, chatId: string): Promise<any[]> => {
-    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    return [...state.assetLocks].sort((a, b) => a.slug.localeCompare(b.slug));
-  };
-
-  /** One turn, answered with the `done` payload the client celebrates on. */
-  async function sendTurn(cookie: string, chatId: string, content: string): Promise<any> {
-    const events = await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }));
-    const done = events.at(-1)!;
-    expect(done.event).toBe('done');
-    return done.data;
-  }
-
-  /** A published plot with one locked asset and one that was never locked. */
-  async function lockedPlot(cookie: string, unlock: unknown): Promise<any> {
-    const plot = await publishablePlot(cookie, { name: '해금 작품' });
-    const plain = await seedAsset(plot.id, 'plain');
-    const secret = await seedAsset(plot.id, 'secret', unlock);
-    await publishPlot(cookie, plot.id);
-    return { id: plot.id, plain, secret };
-  }
-
-  it('stores an unlock through the coercion and keeps its condition from readers', async () => {
-    const cookie = await signUp('unlock-owner@example.com');
-    const plot = await publishablePlot(cookie, { name: '조건 작품' });
-    await seedAsset(plot.id, 'secret');
-    const patch = (unlock: unknown): Promise<Response> =>
-      json(cookie, `/api/plots/${plot.id}/assets/secret`, 'PATCH', { unlock });
-
-    const set = await patch({ kind: 'keyword', keywords: [' 고백 ', '고백', ''] });
-    expect(set.status).toBe(200);
-    expect((await readJson(set)).unlock).toEqual(KEYWORD);
-
-    // A condition this build could not evaluate would leave the image shut
-    // forever, so it is cleared rather than stored.
-    expect((await readJson(await patch({ kind: 'mood', mood: 'romance' }))).unlock).toBeNull();
-    expect((await readJson(await patch(KEYWORD))).unlock).toEqual(KEYWORD);
-    expect((await readJson(await patch(null))).unlock).toBeNull();
-    await patch(KEYWORD);
-
-    // Re-uploading the bytes does not restate the condition.
-    const form = new FormData();
-    form.append('file', new File([Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01])], 'x.gif'));
-    form.append('slug', 'secret');
-    const reuploaded = await request(cookie, `/api/plots/${plot.id}/assets`, 'POST', form);
-    expect(reuploaded.status).toBe(201);
-    expect((await readJson(reuploaded)).unlock).toEqual(KEYWORD);
-
-    const missing = await json(cookie, `/api/plots/${plot.id}/assets/secret`, 'PATCH', {});
-    expect(missing.status).toBe(400);
-    expect((await patch({ kind: 'turns', count: 1 })).status).toBe(200);
-    expect((await json(cookie, `/api/plots/${plot.id}/assets/gone`, 'PATCH', { unlock: null })).status).toBe(404);
-
-    // The keywords are the spoiler the reveal is worth having: only the owner's
-    // reads carry the condition.
-    await publishPlot(cookie, plot.id);
-    const reader = await signUp('unlock-reader@example.com');
-    const [asOwner] = await readJson(await request(cookie, `/api/plots/${plot.id}/assets`));
-    const [asReader] = await readJson(await request(reader, `/api/plots/${plot.id}/assets`));
-    expect(asOwner.unlock).toEqual({ kind: 'turns', count: 1 });
-    expect(asReader).not.toHaveProperty('unlock');
-    expect((await json(reader, `/api/plots/${plot.id}/assets/secret`, 'PATCH', { unlock: null })).status).toBe(404);
-  });
-
-  it("names only this chat's open images to the model through {{assetlist}}", async () => {
-    const alice = await signUp('assetlist-creator@example.com');
-    const plot = await publishablePlot(alice, { name: '목록 작품', description: '그림: {{assetlist}}' });
-    await seedAsset(plot.id, 'plain');
-    await seedAsset(plot.id, 'secret', KEYWORD);
-    await publishPlot(alice, plot.id);
-    const bob = await signUp('assetlist-reader@example.com');
-    const { app: capturing, prompts } = capturingApp();
-
-    // A reader's model is not told of the image still shut in their chat; the
-    // creator's own chat has nothing shut.
-    for (const [cookie, names] of [
-      [bob, '["plain"]'],
-      [alice, '["plain","secret"]'],
-    ] as const) {
-      const chatId = (await startChat(cookie, plot.id)).chat.id;
-      await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing));
-      expect(prompts.at(-1)!.system).toContain(`그림: ${names}`);
-    }
-  });
-
-  it("answers {{axmodel}} with the chat's auxiliary model, the default until the reader picks one", async () => {
-    const alice = await signUp('axmodel-creator@example.com');
-    const plot = await publishablePlot(alice, { name: '보조 작품', description: '보조: {{axmodel}}' });
-    await publishPlot(alice, plot.id);
-    const { app: capturing, prompts } = capturingApp();
-    const chatId = (await startChat(alice, plot.id)).chat.id;
-    const axmodel = async (): Promise<string> => {
-      await readSse(await json(alice, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing));
-      return /보조: (\S*)/.exec(prompts.at(-1)!.system)![1]!;
-    };
-
-    expect(await axmodel()).toBe('test/memory');
-    await db.update(chats).set({ subModel: 'echo/echo' }).where(eq(chats.id, chatId));
-    expect(await axmodel()).toBe('echo/echo');
-    // A pick the catalog no longer offers names the model the side work actually runs on.
-    await db.update(chats).set({ subModel: 'gone/model' }).where(eq(chats.id, chatId));
-    expect(await axmodel()).toBe('test/memory');
-  });
-
-  it('leaves an image out of the export until this chat has unlocked it', async () => {
-    const alice = await signUp('unlock-export-creator@example.com');
-    const plot = await lockedPlot(alice, KEYWORD);
-    const bob = await signUp('unlock-export-reader@example.com');
-    const chatId = (await startChat(bob, plot.id)).chat.id;
-    const exportedSlugs = async (): Promise<string[]> =>
-      (await readJson(await request(bob, `/api/chats/${chatId}/export`))).assets.map((asset: any) => asset.slug);
-
-    await sendTurn(bob, chatId, '{{img::plain}} {{img::secret}}');
-    expect(await exportedSlugs()).toEqual(['plain']);
-
-    await sendTurn(bob, chatId, '고백');
-    expect(await exportedSlugs()).toEqual(['plain', 'secret']);
-  });
-
-  it('opens a keyword unlock on the turn that says it', async () => {
-    const alice = await signUp('unlock-keyword-creator@example.com');
-    const plot = await lockedPlot(alice, KEYWORD);
-    const bob = await signUp('unlock-keyword-reader@example.com');
-    const chatId = (await startChat(bob, plot.id)).chat.id;
-
-    expect(await locksOf(bob, chatId)).toEqual([
-      { assetId: plot.plain, slug: 'plain', locked: false, kind: null },
-      { assetId: plot.secret, slug: 'secret', locked: true, kind: 'keyword' },
-    ]);
-
-    // The echo model mirrors the turn, so the assistant text is what was sent.
-    const quiet = await sendTurn(bob, chatId, '안녕');
-    expect(quiet).not.toHaveProperty('unlockedAssetIds');
-    expect((await locksOf(bob, chatId))[1].locked).toBe(true);
-
-    const opened = await sendTurn(bob, chatId, '이제 고백할게');
-    expect(opened.unlockedAssetIds).toEqual([plot.secret]);
-    expect(await locksOf(bob, chatId)).toEqual([
-      { assetId: plot.plain, slug: 'plain', locked: false, kind: null },
-      { assetId: plot.secret, slug: 'secret', locked: false, kind: 'keyword' },
-    ]);
-
-    // Already open: the row is written once and only the turn that opened it says so.
-    const again = await sendTurn(bob, chatId, '다시 고백할게');
-    expect(again).not.toHaveProperty('unlockedAssetIds');
-    expect(await db.select().from(chatAssetUnlocks).where(eq(chatAssetUnlocks.chatId, chatId))).toHaveLength(1);
-
-    // Another reader's chat starts locked: an unlock belongs to one conversation.
-    const carol = await signUp('unlock-keyword-other@example.com');
-    const fresh = (await startChat(carol, plot.id)).chat.id;
-    expect((await locksOf(carol, fresh))[1].locked).toBe(true);
-  });
-
-  it('opens a turn unlock at depth and a relationship unlock when the axis reaches it', async () => {
-    const alice = await signUp('unlock-depth-creator@example.com');
-    const plot = await publishablePlot(alice, { name: '깊이 작품' });
-    const deep = await seedAsset(plot.id, 'deep', { kind: 'turns', count: 3 });
-    const close = await seedAsset(plot.id, 'close', { kind: 'relationship', axis: 'trust', min: 60 });
-    await publishPlot(alice, plot.id);
-
-    const bob = await signUp('unlock-depth-reader@example.com');
-    // The opening is already an assistant turn, so the branch starts at depth 1.
-    const chatId = (await startChat(bob, plot.id)).chat.id;
-
-    // Depth 2: neither condition is met, and axes that were never extracted
-    // simply never satisfy a relationship unlock.
-    expect(await sendTurn(bob, chatId, '한 번')).not.toHaveProperty('unlockedAssetIds');
-
-    // Depth 3.
-    expect((await sendTurn(bob, chatId, '두 번')).unlockedAssetIds).toEqual([deep]);
-
-    const relationship: ChatRelationship = {
-      axes: { affection: 50, obsession: 0, trust: 61, liking: 50, disgust: 0, fear: 0 },
-      note: '조금씩 믿기 시작했다.',
-      updatedAt: new Date().toISOString(),
-      lastExtractedAssistantDepth: 3,
-    };
-    await db.update(chats).set({ relationship }).where(eq(chats.id, chatId));
-    expect((await sendTurn(bob, chatId, '세 번')).unlockedAssetIds).toEqual([close]);
-    expect(await locksOf(bob, chatId)).toEqual([
-      { assetId: close, slug: 'close', locked: false, kind: 'relationship' },
-      { assetId: deep, slug: 'deep', locked: false, kind: 'turns' },
-    ]);
-  });
-
-  it('shows the creator their own work whole', async () => {
-    const alice = await signUp('unlock-creator-view@example.com');
-    const plot = await lockedPlot(alice, KEYWORD);
-    const chatId = (await startChat(alice, plot.id)).chat.id;
-
-    // Locked for nobody in the creator's own chat — the hint still says what the
-    // condition is, because that is the editor's own answer.
-    expect(await locksOf(alice, chatId)).toEqual([
-      { assetId: plot.plain, slug: 'plain', locked: false, kind: null },
-      { assetId: plot.secret, slug: 'secret', locked: false, kind: 'keyword' },
-    ]);
-    // And nothing to open: there is no reveal to celebrate for the author.
-    expect(await sendTurn(alice, chatId, '고백할게')).not.toHaveProperty('unlockedAssetIds');
-    expect(await db.select().from(chatAssetUnlocks).where(eq(chatAssetUnlocks.chatId, chatId))).toHaveLength(0);
-  });
-
-  it('says nothing about a plot with no assets', async () => {
-    const cookie = await signUp('unlock-none@example.com');
-    const { chatId } = await setupChat(cookie);
-    expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).assetLocks).toEqual([]);
-  });
-});
-
 describe('scene editing', () => {
   /** Writes a branch straight into the table, so the scene under test is exact. */
   async function seedScene(
@@ -10780,50 +10558,6 @@ describe('relationship', () => {
     );
   });
 
-  it('opens a relationship-gated asset with the axes it just wrote', async () => {
-    const alice = await signUp('relationship-unlock-creator@example.com');
-    const plot = await publishablePlot(alice, { name: '관계 해금 작품' });
-    // `trust` lands on 62 (CLAMPED), so this extraction is what crosses it.
-    const [asset] = await db
-      .insert(plotAssets)
-      .values({
-        plotId: plot.id,
-        slug: 'close',
-        path: 'assets/close.gif',
-        mime: 'image/gif',
-        unlock: { kind: 'relationship', axis: 'trust', min: 60 },
-      })
-      .returning({ id: plotAssets.id });
-    await publishPlot(alice, plot.id);
-
-    const bob = await signUp('relationship-unlock-reader@example.com');
-    const harness = relationshipApp();
-    const chatId = (await startChat(bob, plot.id)).chat.id;
-    const unlocks = (): Promise<unknown[]> =>
-      db.select().from(chatAssetUnlocks).where(eq(chatAssetUnlocks.chatId, chatId));
-
-    // Nothing has been extracted yet, so nothing satisfies the condition.
-    await turns(bob, chatId, harness, SENDS_TO_FIRST - 1);
-    expect(harness.extractions).toHaveLength(0);
-    expect(await unlocks()).toHaveLength(0);
-
-    // The turn's own evaluation ran before the extraction did, with the axes as
-    // they stood: null. The extraction's second pass is what opens the asset —
-    // without it the reader would have to send one more turn to see it, and would
-    // never see it at all if they stopped here.
-    await turns(bob, chatId, harness, 1);
-    expect(harness.extractions).toHaveLength(1);
-    expect((await chatOf(bob, chatId, harness)).chat.relationship.axes.trust).toBe(CLAMPED.trust);
-    expect(await unlocks()).toEqual([
-      { chatId, assetId: asset!.id, unlockedAt: expect.any(Date) },
-    ]);
-
-    // No further generation: the reveal is simply there on the next state read.
-    expect((await chatOf(bob, chatId, harness)).assetLocks).toEqual([
-      { assetId: asset!.id, slug: 'close', locked: false, kind: 'relationship' },
-    ]);
-  });
-
   it('counts branch depth, so regenerate and continue are not new turns', async () => {
     const cookie = await signUp('relationship-depth@example.com');
     const { chatId } = await setupChat(cookie);
@@ -12955,8 +12689,6 @@ describe('plot assets', () => {
       width: null,
       height: null,
       thumbhash: null,
-      // The owner's own read of the reveal condition; nothing is set here.
-      unlock: null,
       createdAt: expect.any(String),
     });
     expect(await listAssets(cookie, plot.id)).toEqual([created]);
@@ -13118,11 +12850,7 @@ describe('plot assets', () => {
 
     await publishPlot(alice, plot.id);
 
-    // Everything the owner's own listing carries but the reveal condition, which
-    // is the creator's alone.
-    const { unlock, ...visible } = created;
-    expect(unlock).toBeNull();
-    expect(await listAssets(bob, plot.id)).toEqual([visible]);
+    expect(await listAssets(bob, plot.id)).toEqual([created]);
     const served = await request(bob, created.url);
     expect(served.status).toBe(200);
     expect(new Uint8Array(await served.arrayBuffer())).toEqual(gif(1));
@@ -17971,7 +17699,7 @@ describe('group turns', () => {
     expect(exported.messages.at(-1)).not.toHaveProperty('speaker');
   });
 
-  it('counts a round once toward the turn unlocks and the relationship cadence', async () => {
+  it('counts a round once toward the relationship cadence', async () => {
     expect(roundCount([])).toBe(0);
     const row = (role: 'user' | 'assistant', groupTurnId: string | null = null) => ({ role, groupTurnId });
     const branch = [row('assistant'), row('user'), row('assistant', 'r1'), row('assistant', 'r1'), row('user'), row('assistant', 'r2'), row('assistant')];
@@ -17979,24 +17707,6 @@ describe('group turns', () => {
     expect(roundStart(branch)).toBe(6);
     expect(roundStart(branch.slice(0, 4))).toBe(2);
     expect(roundStart(branch.slice(0, 5))).toBe(5);
-
-    const owner = await signUp('group-unlock-owner@example.com');
-    const plot = await createPlot(owner, { name: '해금 여관', description: '설명', intros: ['문이 열린다.'] });
-    const seiya = await addCharacter(owner, plot.id, { name: '세이야' });
-    const kai = await addCharacter(owner, plot.id, { name: '카이' });
-    // The greeting is a round, and so is each turn's answer: three rounds is two turns in.
-    await db.insert(plotAssets).values({ plotId: plot.id, slug: 'deep', path: 'assets/deep.gif', mime: 'image/gif', unlock: { kind: 'turns', count: 3 } });
-    await publishPlot(owner, plot.id);
-    const reader = await signUp('group-unlock-reader@example.com');
-    const chatId = (await startChat(reader, plot.id)).chat.id;
-    const { target } = replyingApp('응.');
-    const first = await done(await post(reader, chatId, 'messages', { content: '하나', speakerId: seiya.id }, target));
-    expect(first).not.toHaveProperty('unlockedAssetIds');
-    // Counted by message, the greeting and two replies would have opened it here.
-    const second = await done(await post(reader, chatId, 'reply', { speakerId: kai.id, groupTurnId: first.groupTurnId }, target));
-    expect(second).not.toHaveProperty('unlockedAssetIds');
-    const third = await done(await post(reader, chatId, 'messages', { content: '둘', speakerId: kai.id }, target));
-    expect(third.unlockedAssetIds).toHaveLength(1);
   });
 
   it("reads a round's replies and the reader's written lines under their speakers in the side transcripts", async () => {

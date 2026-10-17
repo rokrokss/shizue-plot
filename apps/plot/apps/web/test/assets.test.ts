@@ -4,18 +4,13 @@ import {
   assetHref,
   assetSrc,
   foldSlug,
-  illustrations,
-  lockedSrc,
   normalizeSlug,
-  openAssetLocks,
   readAssetMeta,
-  readLockKind,
   renderImageTokens,
   slugFromFileName,
   stripImageTokens,
   type PlotAsset,
 } from '../src/lib/assets';
-import type { AssetLock } from '../src/lib/types';
 
 describe('slug helpers', () => {
   it('folds without eating the dash being typed', () => {
@@ -130,59 +125,5 @@ describe('stripImageTokens', () => {
     expect(stripImageTokens('앞 {{img::smile}} 뒤 {{img::없음}}')).toBe('앞  뒤 ');
     expect(stripImageTokens('{{char}}는 그대로')).toBe('{{char}}는 그대로');
     expect(stripImageTokens('앞{{image::a}}{{raw::b}}{{img::{{getvar::c}}}}뒤')).toBe('앞뒤');
-  });
-});
-
-describe('the lock a chat reads an image through', () => {
-  const asset = (slug: string): PlotAsset => ({
-    slug,
-    name: null,
-    url: `/api/plots/c1/assets/${slug}`,
-    mime: 'image/png',
-    width: null,
-    height: null,
-    thumbhash: null,
-    createdAt: '2026-08-16T00:00:00.000Z',
-  });
-  const locks: AssetLock[] = [
-    { assetId: 'ast_1', slug: 'smile', locked: false, kind: null },
-    { assetId: 'ast_2', slug: 'kiss', locked: true, kind: 'keyword' },
-  ];
-
-  it('marks a locked reference rather than resolving it', () => {
-    expect(readLockKind(lockedSrc('relationship'))).toBe('relationship');
-    // The marker survives the markdown pass, which is the whole point of it
-    // being a fragment: a colon after a `#` is left alone.
-    expect(renderImageTokens('{{img::kiss}}', new Map([['kiss', lockedSrc('turns')]]))).toBe(
-      '![kiss](#shizue-lock:turns)',
-    );
-    expect(readLockKind('/api/plots/c1/assets/smile')).toBeNull();
-  });
-
-  it('gives the gallery every image, and the bytes of only the open ones', () => {
-    expect(illustrations([asset('smile'), asset('kiss')], locks)).toEqual([
-      { slug: 'smile', src: '/api/plots/c1/assets/smile', kind: null, locked: false },
-      { slug: 'kiss', src: null, kind: 'keyword', locked: true },
-    ]);
-  });
-
-  it("leaves a card's music out of the gallery", () => {
-    expect(illustrations([asset('smile'), { ...asset('bgm'), mime: 'audio/mpeg' }], locks)).toEqual([
-      { slug: 'smile', src: '/api/plots/c1/assets/smile', kind: null, locked: false },
-    ]);
-  });
-
-  it('shows an asset no lock row speaks for', () => {
-    expect(illustrations([asset('new')], locks)).toEqual([
-      { slug: 'new', src: '/api/plots/c1/assets/new', kind: null, locked: false },
-    ]);
-  });
-
-  it('opens the ones a turn earned, and leaves the rest as they were', () => {
-    expect(openAssetLocks(locks, ['ast_2'])).toEqual([
-      { assetId: 'ast_1', slug: 'smile', locked: false, kind: null },
-      { assetId: 'ast_2', slug: 'kiss', locked: false, kind: 'keyword' },
-    ]);
-    expect(openAssetLocks(undefined, ['ast_2'])).toEqual([]);
   });
 });

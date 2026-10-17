@@ -115,7 +115,6 @@ const state = (path: ReturnType<typeof message>[], generating: boolean): ChatSta
     },
     path,
     siblings: Object.fromEntries(path.map((entry) => [entry.id, { index: 0, total: 1, ids: [entry.id] }])),
-    assetLocks: [],
   }) as unknown as ChatState;
 
 let host: HTMLElement;

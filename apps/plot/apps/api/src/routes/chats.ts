@@ -117,7 +117,6 @@ import {
   HEARTBEAT_MS,
   inspectGeneration,
   isGenerating,
-  openUnlocks,
   rejectBusyChat,
   releaseChatSlot,
   renewChatSlot,
@@ -194,7 +193,7 @@ import { asSent, foldOptionsOf, promptBranch, toHistory } from '../sentHistory.j
 import { RECENT_TURNS as SUGGEST_RECENT_TURNS, suggestReplies } from '../suggest.js';
 import { readerMembers } from '../transcript.js';
 import { buildPath, deepestLeaf, roundStart, siblingInfo, visibleToAi } from '../tree.js';
-import { assetLocks, openAssetNames, openModuleAssets } from '../unlocks.js';
+import { plotAssetNames, plotModuleAssets } from '../assetNames.js';
 import {
   isUuid,
   optionalBoolean,
@@ -451,13 +450,6 @@ async function chatState(deps: AppDeps, chat: Chat, window?: PathWindow): Promis
     chat: toChatJson(chat, await attachedNoteIds(deps, chat.id)),
     path: path.map((message) => toMessageJson(message, attachments.get(message.id) ?? [])),
     siblings: siblingInfo(all, path),
-    /**
-     * What this chat may show of the plot's images: every asset, whether it is
-     * open here, and — for the ones that are not — which kind of condition it
-     * waits on. The condition itself never travels; the creator's own chats see
-     * everything open.
-     */
-    assetLocks: await assetLocks(deps, chat),
     ...(windowed ? { hasMore: windowed.earlier.length > 0 } : {}),
     ...(windowed && windowed.earlier.length > 0
       ? { variableDefaults: await windowVariableDefaults(deps, chat, windowed.earlier) }
@@ -898,7 +890,7 @@ async function loadGenerationContext(
       ...toPromptPlot(row, chat, modules),
       ...(plotChar !== undefined ? { char: plotChar } : {}),
       // `{{moduleenabled}}`/`{{moduleassetlist}}`, naming the pictures `{{assetlist}}` names.
-      cbsModules: [...(await openModuleAssets(deps, chat, row.customUi?.modules)), ...readerCbsModules(reader)],
+      cbsModules: [...(await plotModuleAssets(deps, chat.plotId, row.customUi?.modules)), ...readerCbsModules(reader)],
     },
     characters: toPromptCharacters(rewritten, absent),
     onStage: rewritten.filter((member) => !absent.has(member.id)),
@@ -915,7 +907,7 @@ async function loadGenerationContext(
     authorNote: await loadAuthorNote(deps, scripts.note === undefined ? chat : { ...chat, note: scripts.note }),
     readerAdditions: await loadReaderAdditions(deps, chat),
     defaults: await chatDefaultVariables(deps, chat, row),
-    assetNames: await openAssetNames(deps, chat),
+    assetNames: await plotAssetNames(deps, chat.plotId),
     auxiliaryModel: await auxiliaryModelOf(deps, chat),
     fold: foldOptionsOf(row.name, persona),
     globalVariables: await loadChatGlobalVariables(deps, chat),
@@ -1357,13 +1349,10 @@ async function lastMessages(deps: AppDeps, rows: Chat[]): Promise<Map<string, st
  * The plot's assets the branch actually shows, in the order the asset list uses.
  * A reference is resolved the way the chat resolves it — by slug, or by the name
  * an imported card gave the image — and one naming an asset that has since been
- * deleted exports nothing, the same thing the chat renders for it. So does one
- * this chat has not unlocked yet: the chat draws a locked card in its place, and
- * the reveal is not the reader's to take away before it happens.
+ * deleted exports nothing, the same thing the chat renders for it.
  */
 async function referencedAssets(
   deps: AppDeps,
-  chat: Chat,
   plotId: string,
   path: Message[],
 ): Promise<ChatExport['assets']> {
@@ -1376,11 +1365,8 @@ async function referencedAssets(
     .orderBy(asc(plotAssets.createdAt), asc(plotAssets.slug));
   const slugOf = assetResolver(rows);
   const referenced = new Set(refs.map(slugOf));
-  const locked = new Set(
-    (await assetLocks(deps, chat)).filter((lock) => lock.locked).map((lock) => lock.assetId),
-  );
   return rows
-    .filter((asset) => referenced.has(asset.slug) && !locked.has(asset.id))
+    .filter((asset) => referenced.has(asset.slug))
     .map((asset) => ({ slug: asset.slug, url: assetUrl(plotId, asset.slug), mime: asset.mime }));
 }
 
@@ -2169,7 +2155,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       // All three are the creator's to give, so all three go away with the plot.
       // The urls would 404 for this reader anyway — the asset, avatar and cover
       // routes apply the same rule.
-      assets: plot ? await referencedAssets(deps, chat, plot.id, path) : [],
+      assets: plot ? await referencedAssets(deps, plot.id, path) : [],
       // The roster, in the creator's order: the names are the speaker prefixes the
       // transcript carries, so an importer can tell whose lines are whose.
       characters: members.map((member) => ({
@@ -2840,7 +2826,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const memberIds = overlay ? new Set(roster.map((member) => member.id)) : null;
     scriptMemberOf(memberId, roster);
     if (!(await acquireChatSlot(deps, chat.id, userId))) await rejectBusyChat(deps, chat.id, userId);
-    let committed: { chat: Chat; message: Message; written: Message[] };
+    let committed: { chat: Chat };
     let dropped = 0;
     try {
       committed = await deps.db.transaction(async (tx) => {
@@ -2885,7 +2871,6 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         }
         // Checked against the branch as it stands under the lock; a refusal
         // rolls the rest of the commit back with it.
-        let written: Message[] = [];
         if (edits) {
           const all = await tx.select().from(messages).where(eq(messages.chatId, chat.id));
           const plan = planScriptChat(buildPath(all, messageId), edits, {
@@ -2893,7 +2878,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
             ...(variableDelta !== undefined ? { lastDelta: variableDelta } : {}),
             ...(memberId !== undefined ? { memberId } : {}),
           });
-          if (plan.changed) written = (await applyScriptChat(tx, chat.id, plan, all)).written;
+          if (plan.changed) await applyScriptChat(tx, chat.id, plan, all);
         }
         const [row] = await tx
           .update(chats)
@@ -2908,25 +2893,16 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         // writer takes them — so a commit here and a write from another of the
         // reader's chats on the plot each land on the other's.
         if (overlay && memberIds) await mergeReaderOverlay(tx, chat.userId, chat.plotId, overlay, memberIds);
-        return { chat: row!, message: message!, written };
+        return { chat: row! };
       });
     } finally {
       await releaseChatSlot(deps, chat.id);
     }
 
-    // The text the reader will keep is the one the unlocks are asked about too —
-    // and the replies the scripts wrote or rewrote; they only ever open, so asking
-    // again after the raw text cost nothing.
-    const unlockText = [
-      ...(content !== undefined ? [committed.message.content] : []),
-      ...committed.written.filter((message) => message.role === 'assistant').map((message) => message.content),
-    ];
-    const unlockedAssetIds = unlockText.length > 0 ? await openUnlocks(deps, chat.id, unlockText.join('\n')) : [];
     // The turn is finished, so the work it held back can start.
     if (clearPending) scheduleBackgroundUpdates(deps, chat.id, messageId);
     else if (dropped > 0) scheduleMemoryUpdate(deps, chat.id);
-    const state = (await releasedState(deps, committed.chat)) as Record<string, unknown>;
-    return c.json({ ...state, ...(unlockedAssetIds.length > 0 ? { unlockedAssetIds } : {}) });
+    return c.json(await releasedState(deps, committed.chat));
   });
 
   /**

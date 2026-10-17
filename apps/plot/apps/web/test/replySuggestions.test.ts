@@ -47,11 +47,6 @@ let suggested: () => Promise<{ suggestions: string[] }>;
 let hold = false;
 /** How that test lets it finish. */
 let release: (() => void) | null = null;
-/** The maps the message rows were drawn with, newest last. */
-let drawnAssets: [string, string][][] = [];
-/** Chat reads so far, and whether every one after the first is left in flight. */
-let chatReads = 0;
-let holdRefetch = false;
 
 vi.mock('@/i18n/navigation', async () => {
   const { createElement: h } = await import('react');
@@ -62,16 +57,9 @@ vi.mock('@/i18n/navigation', async () => {
 });
 
 // The list, the notes panel and the settings row are all somebody else's test.
-// The row keeps one thing: the asset map it was given, which is where a locked
-// image is either a marker or a URL.
 vi.mock('@/components/MessageRow', async () => {
   const { createElement: h } = await import('react');
-  return {
-    MessageRow: ({ assets }: { assets: ReadonlyMap<string, string> }) => {
-      drawnAssets.push([...assets]);
-      return h('div', { 'data-testid': 'message-row' });
-    },
-  };
+  return { MessageRow: () => h('div', { 'data-testid': 'message-row' }) };
 });
 vi.mock('@/components/ChatPanel', () => ({ ChatPanel: () => null }));
 vi.mock('@/components/ChatSettings', () => ({ ChatSettings: () => null }));
@@ -96,7 +84,7 @@ vi.mock('@/lib/sse', () => ({
   ): Promise<unknown> => {
     onDelta('그렇군요.');
     if (hold) await new Promise<void>((resolve) => (release = resolve));
-    return { kind: 'done', messageId: 'msg_2', usage: {}, unlockedAssetIds: ['ast_1'] };
+    return { kind: 'done', messageId: 'msg_2', usage: {} };
   },
 }));
 
@@ -108,10 +96,6 @@ vi.mock('@/lib/api', async (importOriginal) => {
     ...original,
     apiGet: (url: string) => {
       if (url.startsWith('/api/chats/')) {
-        chatReads += 1;
-        // Held open by the unlock test, so what is on screen can only have come
-        // from the `done` event rather than from the read that follows it.
-        if (holdRefetch && chatReads > 1) return new Promise(() => undefined);
         return Promise.resolve(chatState);
       }
       if (url.endsWith('/public')) {
@@ -142,7 +126,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
 
 const { default: ChatPage } = await import('../src/app/[locale]/(app)/(member)/chats/[id]/page');
 
-const state = (locked: boolean): ChatState => ({
+const state = (): ChatState => ({
   chat: {
     id: 'cht_1',
     plotId: 'sty_1',
@@ -184,7 +168,6 @@ const state = (locked: boolean): ChatState => ({
     },
   ],
   siblings: { msg_1: { index: 0, total: 1, ids: ['msg_1'] } },
-  assetLocks: [{ assetId: 'ast_1', slug: 'kiss', locked, kind: 'keyword' }],
 });
 
 let host: HTMLElement;
@@ -228,13 +211,10 @@ async function type(node: HTMLTextAreaElement, value: string): Promise<void> {
 }
 
 beforeEach(() => {
-  chatState = state(true);
+  chatState = state();
   sent = [];
-  drawnAssets = [];
   hold = false;
   release = null;
-  chatReads = 0;
-  holdRefetch = false;
   suggested = () => Promise.resolve({ suggestions: ['괜찮아요?', '*문을 닫는다*', '누구세요?'] });
   host = document.createElement('div');
   document.body.appendChild(host);
@@ -304,21 +284,5 @@ describe('the reply suggestions', () => {
     expect(host.textContent).toContain(messages.errors.suggestions_unavailable);
     // Not the banner a lost turn gets: nothing was stored and nothing was lost.
     expect(host.querySelector('[role="alert"]')).toBeNull();
-  });
-});
-
-describe('an image the turn unlocked', () => {
-  it('is a marker until the chat opens it, and the picture the moment it does', async () => {
-    await render();
-    expect(drawnAssets.at(-1)).toEqual([['kiss', '#shizue-lock:keyword']]);
-
-    // The turn that earns the unlock. The read that follows it is held open and
-    // the server's answer still says locked, so what is on screen afterwards is
-    // the `done` event's doing and nothing else's.
-    holdRefetch = true;
-    await type(composer(), '입맞춤');
-    await click(send());
-
-    expect(drawnAssets.at(-1)).toEqual([['kiss', '/api/plots/sty_1/assets/kiss']]);
   });
 });
