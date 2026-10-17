@@ -132,12 +132,12 @@ describe('styleDirectives', () => {
 
   it('names the moods it was given, one bullet for both', () => {
     expect(bullets({ moods: ['romance'] })).toEqual([
-      `장면의 분위기는 ${PLOT_MOOD_LABELS.romance} 쪽을 지향합니다.`,
+      `Aim the mood of the scene toward ${PLOT_MOOD_LABELS.romance}.`,
     ]);
     expect(bullets({ moods: ['horror', 'angst'] })).toEqual([
-      `장면의 분위기는 ${PLOT_MOOD_LABELS.horror}, ${PLOT_MOOD_LABELS.angst} 쪽을 지향합니다.`,
+      `Aim the mood of the scene toward ${PLOT_MOOD_LABELS.horror}, ${PLOT_MOOD_LABELS.angst}.`,
     ]);
-    // Every mood is nameable: a label the compiler had no Korean for would print
+    // Every mood is nameable: a label the compiler had no words for would print
     // `undefined` into the prompt.
     for (const mood of PLOT_MOODS) {
       expect(bullets({ moods: [mood] })[0], mood).toContain(PLOT_MOOD_LABELS[mood]);
@@ -149,8 +149,8 @@ describe('styleDirectives', () => {
     const keywords = bullets({ choices: 'keywords' })[0]!;
     const sentences = bullets({ choices: 'sentences' })[0]!;
     for (const line of [keywords, sentences]) expect(line).toContain('`>> `');
-    expect(keywords).toContain('키워드형');
-    expect(sentences).toContain('완결된 한 문장');
+    expect(keywords).toContain('keyword phrase');
+    expect(sentences).toContain('one complete sentence');
   });
 
   it('keeps the options in a fixed order, whatever order the object has', () => {

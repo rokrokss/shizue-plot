@@ -20,7 +20,7 @@
  *   language the similar share goes to random ones.
  * - **Facts ride along** (`facts.ts`): each summary written has its facts
  *   extracted right after it, and each request adds the relevant ones as a
- *   `[기억]` block after the summaries, searched with the same query vectors.
+ *   `[Memory]` block after the summaries, searched with the same query vectors.
  *   In a group work a summary keeps the members who spoke in its batch, its
  *   facts carry them on, and a member's turn is told only what it may know.
  *
@@ -120,7 +120,7 @@ export const LANGUAGE_TURNS = 6;
 
 export interface MemorySettings extends HypaV3Settings {
   contextBudget: number;
-  /** Facts a request carries (`[기억]`); 0 turns the facts off, extraction included. */
+  /** Facts a request carries (`[Memory]`); 0 turns the facts off, extraction included. */
   factCount: number;
 }
 
@@ -210,7 +210,7 @@ export function memoryClock(
 /**
  * Memory inputs for one generation: the block of the summaries HypaV3's
  * important and recent shares picked, injected after the persona; the block of
- * those its similar and random shares picked and the facts' (`[기억]`,
+ * those its similar and random shares picked and the facts' (`[Memory]`,
  * `facts.ts`), which open the recall turn right after the newest turn — each
  * summary and fact led by a coarse "N turns ago" in the conversation's language
  * — and the history the model still sees verbatim: `path` after the last

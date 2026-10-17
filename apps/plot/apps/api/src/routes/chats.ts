@@ -3603,7 +3603,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
 
 /** Asks for the next beat of the scene; appended to the prompt, never persisted. */
 const AUTO_CONTINUE_NUDGE =
-  '(유저 개입 없이 현재 장면을 자연스럽게 이어간다. 장면 전환이나 시간 경과가 필요하면 대사 없이 서술 위주로 이어가도 된다. {{user}}의 반응이 필요한 지점에서 멈춘다)';
+  "(Continue the current scene naturally without the user stepping in. If a scene change or a passage of time is needed, it is fine to go on mostly in narration without dialogue. Stop at the point where {{user}}'s response is needed.)";
 
 /**
  * For a group round's speakers before the last: the round ends on the last
@@ -3611,7 +3611,7 @@ const AUTO_CONTINUE_NUDGE =
  * to the prompt, never persisted — and only where the chat has either.
  */
 const NOT_LAST_SPEAKER_NUDGE =
-  '(이 응답 뒤에 다른 인물이 이어서 답한다. 이번 응답에는 상태창과 선택지를 붙이지 않는다)';
+  '(Another character answers after this reply. Do not add the status window or the choices to this reply.)';
 
 /** Intro roots a chat may hold — a plot offering more is truncated here too. */
 const MAX_INTRO_ROOTS = 10;

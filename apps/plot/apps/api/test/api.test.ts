@@ -17,6 +17,7 @@ import {
   countTokens,
   DEFAULT_CONTEXT_BUDGET,
   DEFAULT_MAX_RESPONSE_TOKENS,
+  DEFAULT_USER_NAME,
   groupSpeakerLine,
   HYPA_V3_DEFAULTS,
   HYPA_V3_SUMMARIZATION_PROMPT,
@@ -166,7 +167,7 @@ import { acquireLease, releaseLease, renewLease as renewHeldLease, withLease } f
 import { MAX_ASSET_NAME_LENGTH, MAX_CARD_IMPORT_BYTES } from '../src/routes/plots.js';
 import { hitRateLimit, RATE_LIMITS } from '../src/rateLimit.js';
 import { runRequestLua } from '../src/requestLua.js';
-import { ROLEPLAY_JAILBREAK_MAIN, ROLEPLAY_JAILBREAK_POST_HISTORY, ROLEPLAY_JAILBREAK_TOKENS } from '../src/roleplayJailbreak.js';
+import { ROLEPLAY_JAILBREAK_POST_HISTORY, roleplayJailbreakMain, roleplayJailbreakTokens } from '../src/roleplayJailbreak.js';
 import { runRequestTriggers } from '../src/requestTriggers.js';
 import { createScriptFetch, type HopResponse, type Transport } from '../src/scriptFetch.js';
 import { MAX_GLOBAL_VARIABLE_KEYS } from '../src/scriptState.js';
@@ -244,6 +245,9 @@ async function assertDisposableTarget(): Promise<void> {
 }
 
 const databaseUrl = resolveTestDatabaseUrl();
+// The always-on instructions as a chat without a persona sends them.
+const ROLEPLAY_JAILBREAK_MAIN = roleplayJailbreakMain(DEFAULT_USER_NAME);
+const ROLEPLAY_JAILBREAK_TOKENS = roleplayJailbreakTokens(DEFAULT_USER_NAME);
 
 /**
  * The S3 driver's target: the compose RustFS when it answers, null otherwise. Resolved
@@ -364,7 +368,7 @@ function recallOf(prompt: { messages: ChatRequest['messages'] }): string {
     (message) =>
       message.role === 'system' &&
       typeof message.content === 'string' &&
-      (message.content.startsWith(RECALLED_MEMORY_HEADING) || /^(?:\[기억\]|Past events:)/.test(message.content)),
+      (message.content.startsWith(RECALLED_MEMORY_HEADING) || /^(?:\[Memory\]|Past events:)/.test(message.content)),
   );
   return typeof turn?.content === 'string' ? turn.content : '';
 }
@@ -1633,7 +1637,7 @@ describe('plots', () => {
     });
     // The narrator is cut down to its option: `pov` is a badge, `voice` is prompt.
     expect(view.narrator).toEqual({ pov: 'third' });
-    expect(JSON.stringify(view)).not.toContain('연출 지시');
+    expect(JSON.stringify(view)).not.toContain('Style directions');
     expect(JSON.stringify(view)).not.toContain('건조한 관찰자');
   });
 
@@ -4220,9 +4224,9 @@ describe('chats', () => {
     expect(away.status).toBe(200);
     expect((await readJson(away)).chat.absentCharacterIds).toEqual([minsu.id]);
     await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '들어간다' }, capturing));
-    expect(sent(0)).not.toMatch(/\[등장인물: 민수\]|MINSU EXAMPLE|MINSU LORE/);
-    expect(prompts[0]!.system).toContain('[등장인물: 리안]');
-    expect(prompts[0]!.system).toContain('현재 장면에 없는 인물: 민수 — ');
+    expect(sent(0)).not.toMatch(/\[Character: 민수\]|MINSU EXAMPLE|MINSU LORE/);
+    expect(prompts[0]!.system).toContain('[Character: 리안]');
+    expect(prompts[0]!.system).toContain('Characters not in the current scene: 민수 — ');
 
     // Only the plot's own members can be sent away.
     const stranger = (await addCharacter(cookie, (await createPlot(cookie)).id)).id;
@@ -4238,13 +4242,13 @@ describe('chats', () => {
     expect(row!.absentCharacterIds).toBeNull();
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
     expect(sent(1)).toContain('MINSU EXAMPLE');
-    expect(prompts[1]!.system).not.toContain('현재 장면에 없는 인물');
+    expect(prompts[1]!.system).not.toContain('Characters not in the current scene');
 
     // A member deleted while away leaves an id that matches nobody.
     await patch({ absentCharacterIds: [minsu.id] });
     expect((await request(cookie, `/api/plots/${plotId}/characters/${minsu.id}`, 'DELETE')).status).toBe(204);
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
-    expect(prompts[2]!.system).not.toContain('현재 장면에 없는 인물');
+    expect(prompts[2]!.system).not.toContain('Characters not in the current scene');
   });
 
   it("shows the plot's creator what a regenerate would send, and nobody else", async () => {
@@ -5126,16 +5130,16 @@ describe('chats', () => {
 
     const nudge = prompts.at(-1)!.messages.at(-2)!;
     expect(nudge.role).toBe('system');
-    expect(nudge.content).toContain('유저 개입 없이');
+    expect(nudge.content).toContain('without the user stepping in');
     // {{user}} is expanded like anywhere else, before the service's closing note.
-    expect(nudge.content).toContain('유저의 반응이');
+    expect(nudge.content).toContain("Stop at the point where 유저's response is needed.");
 
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
     expect(state.path).toHaveLength(2);
     expect(state.path.map((message: any) => message.role)).toEqual(['assistant', 'assistant']);
     expect(state.path[1].parentId).toBe(state.path[0].id);
     // The nudge lives in the prompt only.
-    expect(state.path.some((message: any) => message.content.includes('유저 개입 없이'))).toBe(false);
+    expect(state.path.some((message: any) => message.content.includes('without the user stepping in'))).toBe(false);
 
     // And it still works right after a normal turn.
     await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '무슨 일이야?' }, capturing));
@@ -5225,7 +5229,7 @@ describe('narration turns', () => {
       await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '누구세요?' }, capturing),
     );
     const contents = prompts.at(-1)!.messages.map((message) => contentText(message.content));
-    expect(contents).toContain('[나레이션] 바람이 분다.');
+    expect(contents).toContain('[Narration] 바람이 분다.');
     expect(contents.some((content) => content.includes('@:'))).toBe(false);
 
     // And the export carries it verbatim: the convention is the consumer's to read.
@@ -5252,8 +5256,8 @@ describe('narration turns', () => {
     await readSse(
       await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing),
     );
-    expect(prompts.at(-1)!.system).toContain('서술 문체: 건조하고 짧게 끊어 쓴다.');
-    expect(prompts.at(-1)!.system).not.toContain('서술 시점');
+    expect(prompts.at(-1)!.system).toContain('Narrative style: 건조하고 짧게 끊어 쓴다.');
+    expect(prompts.at(-1)!.system).not.toContain('Point of view');
   });
 
   it('lets a chat override the plot narrator, and clears it with null', async () => {
@@ -5274,8 +5278,8 @@ describe('narration turns', () => {
       await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing),
     );
     // The override stands in for the plot's whole narrator, not field by field.
-    expect(prompts.at(-1)!.system).toContain('서술 문체: 대화의 문체.');
-    expect(prompts.at(-1)!.system).toContain('서술 시점: 3인칭 전지적');
+    expect(prompts.at(-1)!.system).toContain('Narrative style: 대화의 문체.');
+    expect(prompts.at(-1)!.system).toContain('Point of view: third-person omniscient');
     expect(prompts.at(-1)!.system).not.toContain('작품의 문체.');
 
     // An object that says nothing clears the column, and so does null.
@@ -5293,8 +5297,8 @@ describe('narration turns', () => {
     await readSse(
       await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '또 안녕' }, capturing),
     );
-    expect(prompts.at(-1)!.system).toContain('서술 문체: 작품의 문체.');
-    expect(prompts.at(-1)!.system).toContain('서술 시점: 3인칭 관찰자');
+    expect(prompts.at(-1)!.system).toContain('Narrative style: 작품의 문체.');
+    expect(prompts.at(-1)!.system).toContain('Point of view: third-person observer');
 
     expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { narrator: 'nope' })).status).toBe(400);
   });
@@ -5303,7 +5307,7 @@ describe('narration turns', () => {
 describe('plot style', () => {
   /** What the two derived features look like in the compiled block. */
   const STATUS_DIRECTIVE = '```status';
-  const CHOICES_DIRECTIVE = '`>> `로 시작하는';
+  const CHOICES_DIRECTIVE = 'each line starting with `>> `';
 
   /** One turn on the capturing app, so the request it produced can be read. */
   const sendTurn = (cookie: string, chatId: string, target: Hono<AppEnv>, content: string): Promise<SseEvent[]> =>
@@ -5317,7 +5321,7 @@ describe('plot style', () => {
     // A plot that set no style says nothing about one, and generates under the
     // cap every plot has always generated under.
     await sendTurn(cookie, chatId, capturing, '안녕');
-    expect(prompts.at(-1)!.system).not.toContain('연출 지시:');
+    expect(prompts.at(-1)!.system).not.toContain('Style directions:');
     expect(prompts.at(-1)!.maxTokens).toBe(DEFAULT_MAX_RESPONSE_TOKENS);
 
     await patchPlot(cookie, plotId, {
@@ -5333,12 +5337,12 @@ describe('plot style', () => {
     });
     await sendTurn(cookie, chatId, capturing, '짧게');
     const styled = prompts.at(-1)!;
-    expect(styled.system).toContain('연출 지시:');
-    expect(styled.system).toContain('군더더기 없이 짧게');
-    expect(styled.system).toContain('적대적으로 굽니다');
-    expect(styled.system).toContain('장면의 분위기는 호러');
-    expect(styled.system).not.toContain('전개를');
-    expect(styled.system).not.toContain('비중을');
+    expect(styled.system).toContain('Style directions:');
+    expect(styled.system).toContain('Answer briefly with no padding');
+    expect(styled.system).toContain('are hostile toward');
+    expect(styled.system).toContain('Aim the mood of the scene toward horror');
+    expect(styled.system).not.toContain('Keep the story moving');
+    expect(styled.system).not.toContain('Lean a little more');
     // The directive is only half of the length setting; this is the half that holds.
     expect(styled.maxTokens).toBe(600);
 
@@ -5349,7 +5353,7 @@ describe('plot style', () => {
     // `auto` asks for nothing and caps at the default, exactly as no style does.
     await patchPlot(cookie, plotId, { style: { replyLength: 'auto' } });
     await sendTurn(cookie, chatId, capturing, '알아서');
-    expect(prompts.at(-1)!.system).not.toContain('연출 지시:');
+    expect(prompts.at(-1)!.system).not.toContain('Style directions:');
     expect(prompts.at(-1)!.maxTokens).toBe(DEFAULT_MAX_RESPONSE_TOKENS);
   });
 
@@ -5365,7 +5369,7 @@ describe('plot style', () => {
     await sendTurn(cookie, chatId, capturing, '안녕');
     expect(prompts.at(-1)!.system).toContain(STATUS_DIRECTIVE);
     expect(prompts.at(-1)!.system).toContain(CHOICES_DIRECTIVE);
-    expect(prompts.at(-1)!.system).toContain('키워드형');
+    expect(prompts.at(-1)!.system).toContain('keyword phrase');
 
     const patched = await readJson(
       await json(cookie, `/api/chats/${chatId}`, 'PATCH', {
@@ -5386,7 +5390,7 @@ describe('plot style', () => {
       choicesEnabled: true,
     });
     await sendTurn(cookie, chatId, capturing, '다시');
-    expect(prompts.at(-1)!.system).toContain('전개를 빠르게');
+    expect(prompts.at(-1)!.system).toContain('Keep the story moving quickly');
     expect(prompts.at(-1)!.system).not.toContain(STATUS_DIRECTIVE);
     expect(prompts.at(-1)!.system).not.toContain(CHOICES_DIRECTIVE);
   });
@@ -6852,10 +6856,10 @@ describe('the game layer', () => {
     const first = prompts.at(-1)!;
     // Right after the turn it rules on — nothing the next turn's request repeats,
     // the provider's cache — and nowhere near the system string.
-    const ruling = first.messages.findIndex((message) => contentText(message.content) === '[게임 판정]\n주사위 3. 실패한다.');
+    const ruling = first.messages.findIndex((message) => contentText(message.content) === '[Game ruling]\n주사위 3. 실패한다.');
     expect(first.messages[ruling]!.role).toBe('system');
     expect(first.messages[ruling - 1]).toEqual({ role: 'user', content: '자물쇠를 딴다' });
-    expect(first.system).not.toContain('게임 판정');
+    expect(first.system).not.toContain('Game ruling');
     // The ruling is not message text: the history carries the turn, not the ruling.
     expect(
       first.messages.filter((message) => contentText(message.content).includes('주사위 3')),
@@ -6871,7 +6875,7 @@ describe('the game layer', () => {
       await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '문을 연다' }, capturing),
     );
     const second = prompts.at(-1)!;
-    expect(second.messages.some((message) => contentText(message.content).includes('게임 판정'))).toBe(
+    expect(second.messages.some((message) => contentText(message.content).includes('Game ruling'))).toBe(
       false,
     );
     expect(second.system).toBe(first.system);
@@ -6882,7 +6886,7 @@ describe('the game layer', () => {
     const { chatId } = await setupChat(cookie);
     const { app: capturing, prompts } = capturingApp();
     const ruled = (index: number): string[] =>
-      prompts[index]!.messages.map((message) => contentText(message.content)).filter((text) => text.startsWith('[게임 판정]'));
+      prompts[index]!.messages.map((message) => contentText(message.content)).filter((text) => text.startsWith('[Game ruling]'));
 
     await readSse(
       await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '자물쇠를 딴다', directions: '주사위 3.' }, capturing),
@@ -6891,10 +6895,10 @@ describe('the game layer', () => {
       await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', { request: '속마음도 같이 써줘' }, capturing),
     );
     // After the turn's own ruling, in the same block.
-    expect(ruled(1)).toEqual(['[게임 판정]\n주사위 3.\n\n속마음도 같이 써줘']);
+    expect(ruled(1)).toEqual(['[Game ruling]\n주사위 3.\n\n속마음도 같이 써줘']);
     // Stored nowhere: the next regenerate is the turn as it was.
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
-    expect(ruled(2)).toEqual(['[게임 판정]\n주사위 3.']);
+    expect(ruled(2)).toEqual(['[Game ruling]\n주사위 3.']);
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
     expect(JSON.stringify(state)).not.toContain('속마음도');
 
@@ -7608,8 +7612,8 @@ describe('presets', () => {
     const { state } = await setupChat(cookie);
     expect(state.chat.preset).toBe('standard');
     await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing));
-    expect(prompts.at(-1)!.system).toContain('등장인물 전원을 연기하는 작가');
-    expect(prompts.at(-1)!.messages.at(-2)!.content).toContain('등장인물을 연기합니다');
+    expect(prompts.at(-1)!.system).toContain('You are the writer who plays every character');
+    expect(prompts.at(-1)!.messages.at(-2)!.content).toContain('You now play the characters of');
 
     const patched = await readJson(
       await json(cookie, `/api/chats/${chatId}`, 'PATCH', { preset: 'screenplay' }),
@@ -7619,10 +7623,10 @@ describe('presets', () => {
 
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
     const screenplay = prompts.at(-1)!;
-    expect(screenplay.system).toContain('각본가');
-    expect(screenplay.system).not.toContain('등장인물 전원을 연기하는 작가');
+    expect(screenplay.system).toContain('screenwriter');
+    expect(screenplay.system).not.toContain('You are the writer who plays every character');
     // The post-history reminder switches with it.
-    expect(screenplay.messages.at(-2)!.content).toContain('대사 2~5줄');
+    expect(screenplay.messages.at(-2)!.content).toContain('2–5 lines of dialogue');
   });
 
   it('rejects an unknown preset without touching the chat', async () => {
@@ -7704,8 +7708,8 @@ describe('reader presets', () => {
     const { app: capturing, prompts } = capturingApp();
     await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing));
     const sent = prompts.at(-1)!;
-    expect(sent.system).toMatch(/등장인물 전원을 연기하는 작가[\s\S]*\n\n독자의 메인 추가/);
-    expect(contentText(sent.messages.at(-2)!.content)).toMatch(/등장인물을 연기합니다[\s\S]*\]\n\n독자의 글로벌 노트$/);
+    expect(sent.system).toMatch(/You are the writer who plays every character[\s\S]*\n\n독자의 메인 추가/);
+    expect(contentText(sent.messages.at(-2)!.content)).toMatch(/You now play the characters of[\s\S]*\]\n\n독자의 글로벌 노트$/);
 
     // A pointer at someone else's row — which the API never writes — adds nothing.
     await db.update(chats).set({ readerPresetId: theirs.id }).where(eq(chats.id, chatId));
@@ -8020,27 +8024,26 @@ describe('memory', () => {
     expect(ask.messages[1]).toEqual({ role: 'system', content: DEFAULT_SUMMARIZATION_INSTRUCTION });
     expect(DEFAULT_SUMMARIZATION_INSTRUCTION.startsWith(HYPA_V3_SUMMARIZATION_PROMPT)).toBe(true);
     expect(transcriptOf(ask)).toContain(sent[0]!);
-    expect(transcriptOf(ask)).not.toContain(sent[1]!);
+    expect(transcriptOf(ask)).not.toContain(sent[2]!);
 
-    // The full OAI2 instructions make this fixture overflow at two exchanges:
-    // summarize the greeting and first reader turn, leaving three for queries.
+    // The always-on instructions make this fixture overflow at three exchanges:
+    // summarize the first four messages, leaving the latest three for queries.
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
     expect('memory' in state.chat).toBe(false);
     const [summary, ...rest] = await summariesOf(cookie, chatId);
     expect(rest).toEqual([]);
     expect(summary).toMatchObject({ text: SUMMARY, important: false, applies: true });
-    expect(summary.messageIds).toEqual(state.path.slice(0, 2).map((m: any) => m.id));
-    expect(summary.messages.map((m: any) => m.position)).toEqual([0, 1]);
+    expect(summary.messageIds).toEqual(state.path.slice(0, 4).map((m: any) => m.id));
+    expect(summary.messages.map((m: any) => m.position)).toEqual([0, 1, 2, 3]);
 
     // The next turn carries the summary instead of the messages it stands for.
     const next = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '그 다음은?' }, harness.app);
     expect((await readSse(next)).at(-1)!.event).toBe('done');
     const prompt = harness.prompts.at(-1)!;
     expect(undated(prompt.system)).toContain(`${MEMORY_HEADING}\n${SUMMARY}`);
-    expect(prompt.messages.some((message) => message.role === 'user' && contentText(message.content).includes(sent[0]!))).toBe(false);
-    // The first assistant echo and both messages of the second exchange stay verbatim.
-    expect(prompt.messages.filter((message) => contentText(message.content).includes(sent[0]!))).toHaveLength(1);
-    expect(prompt.messages.filter((message) => contentText(message.content).includes(sent[1]!))).toHaveLength(2);
+    expect(prompt.messages.some((message) => contentText(message.content).includes(sent[0]!))).toBe(false);
+    // The second reader turn is covered; its assistant echo is still verbatim.
+    expect(prompt.messages.filter((message) => contentText(message.content).includes(sent[1]!))).toHaveLength(1);
     expect(contentText(prompt.messages.at(-3)!.content)).toBe('그 다음은?');
   });
 
@@ -8502,7 +8505,7 @@ describe('memory', () => {
 
       const harness = memoryApp({ embedder: keywordEmbedder('test-embedder-2') });
       // No vector of this model yet: nothing ranks, and the share goes unused.
-      expect(await ask(cookie, chatId, harness, '고양이?')).not.toMatch(/\[지난 이야기 요약/);
+      expect(await ask(cookie, chatId, harness, '고양이?')).not.toMatch(/\[Summary of the story so far/);
       // That turn's refresh embedded them again, with this model.
       await harness.settle();
       const stored = await db.select().from(chatSummaryChunks);
@@ -8531,7 +8534,7 @@ describe('memory', () => {
       // are never compared with an 8-long query, which would have thrown and
       // handed the share to the most recent summary.
       await db.update(plots).set({ language: 'en' }).where(eq(plots.id, plotId!));
-      expect(await ask(cookie, chatId, harness, '고양이?')).not.toMatch(/\[지난 이야기 요약/);
+      expect(await ask(cookie, chatId, harness, '고양이?')).not.toMatch(/\[Summary of the story so far/);
       expect(embedder.models.at(-1)).toBe('test-other');
       await harness.settle();
       stored = await db.select().from(chatSummaryChunks);
@@ -8747,7 +8750,7 @@ describe('memory', () => {
       await harness.settle();
       // The summary is asked for in the conversation's language, the facts in Korean — the turns', not the plot's.
       expect(harness.summaries[0]!.messages.at(-1)).toEqual({ role: 'system', content: DEFAULT_SUMMARIZATION_INSTRUCTION });
-      expect(harness.facts[0]!.system).toContain('대화가 한국어로 이어지고 있으므로 사실은 한국어로 씁니다.');
+      expect(harness.facts[0]!.system).toContain('The conversation is going on in Korean, so write the facts in Korean.');
 
       // A chat's own summarization prompt goes as the reader wrote it.
       const other = await setupChat(cookie);
@@ -8930,7 +8933,7 @@ describe('memory', () => {
       }
       // Shown the branch's facts from before it, numbered, ahead of the transcript.
       expect(transcriptOf(harness.facts.at(-1)!)).toMatch(
-        new RegExp(`^\\[기록된 사실\\]\\n1\\. ${FACTS[0]}\\n2\\. ${FACTS[1]}\\n3\\. ${FACTS[2]}\\n\\n\\[대화\\]\\n`),
+        new RegExp(`^\\[Recorded facts\\]\\n1\\. ${FACTS[0]}\\n2\\. ${FACTS[1]}\\n3\\. ${FACTS[2]}\\n\\n\\[Conversation\\]\\n`),
       );
 
       // Nothing deleted: the updated one and the ended one stay, marked, the update's words a fact of the new summary.
@@ -8995,7 +8998,7 @@ describe('memory', () => {
       expect(gap).toMatchObject({ messageIds: ids.slice(0, 3), turnFrom: 1, turnTo: 2 });
 
       // Its extraction stood before the back summary: it was shown nothing to change.
-      expect(transcriptOf(harness.facts.at(-1)!)).not.toContain('[기록된 사실]');
+      expect(transcriptOf(harness.facts.at(-1)!)).not.toContain('[Recorded facts]');
       const stored = await factsOf(chatId);
       expect(stored.map((row) => [row.content, row.summaryId, row.invalidatedBySummaryId])).toEqual([
         [FACTS[1], back.id, back.id],
@@ -9136,7 +9139,7 @@ describe('memory', () => {
       const [summary] = await db.select().from(chatSummaries).where(eq(chatSummaries.chatId, chatId)).orderBy(asc(chatSummaries.createdAt));
       expect(summary!.sceneMemberIds).toEqual([seiya, kai]);
       // The extraction is told who was there and marks what everyone knows; each fact keeps both.
-      expect(harness.facts[0]!.system).toContain('이 구간의 장면에 있던 등장인물은 세이야, 카이입니다.');
+      expect(harness.facts[0]!.system).toContain('The characters in the scene of this stretch are 세이야, 카이.');
       expect((await factsOf(chatId)).map((row) => [row.content, row.sceneMemberIds, row.knownToAll])).toEqual([
         [secret, [seiya, kai], false],
         [notice, [seiya, kai], true],
@@ -9189,7 +9192,7 @@ describe('memory', () => {
         conversationLanguage: 'ko',
       });
       // Shown with who knew it, the private one is 카이 and 미오's to learn; the one from before scenes stands for everyone.
-      expect(transcriptOf(harness.facts.at(-1)!)).toContain(`1. ${cat}\n2. ${key} [아는 인물: 세이야]\n`);
+      expect(transcriptOf(harness.facts.at(-1)!)).toContain(`1. ${cat}\n2. ${key} [Known to: 세이야]\n`);
       expect((await factsOf(chatId)).map((row) => [row.content, row.summaryId, row.sceneMemberIds])).toEqual([
         [cat, front.id, null],
         [key, front.id, [seiya]],
@@ -10868,10 +10871,10 @@ describe('plot hub', () => {
     );
 
     const system = prompts.at(-1)!.system;
-    expect(system).toContain('[작품: 아르카디아]\n마법이 흔한 도시국가다.');
-    expect(system).toContain('[등장인물: 리안]');
+    expect(system).toContain('[Story: 아르카디아]\n마법이 흔한 도시국가다.');
+    expect(system).toContain('[Character: 리안]');
     // The work frames the people in it, so it comes first.
-    expect(system.indexOf('[작품: 아르카디아]')).toBeLessThan(system.indexOf('[등장인물: 리안]'));
+    expect(system.indexOf('[Story: 아르카디아]')).toBeLessThan(system.indexOf('[Character: 리안]'));
     // Both lorebooks activate, ordered by insertionOrder across the merge — keyword lore, right after the reader's turn.
     expect(prompts.at(-1)!.messages).toContainEqual({ role: 'system', content: '사서는 야근을 한다.\n\n길드는 다섯 개다.' });
   });
@@ -10926,10 +10929,10 @@ describe('plot hub', () => {
     await readSse(await json(cookie, `/api/chats/${chat.id}/messages`, 'POST', { content: '안녕' }, capturing));
 
     const system = prompts.at(-1)!.system;
-    expect(system).toContain('[등장인물: 리안]\n왕립 도서관의 사서.');
-    expect(system).toContain('리안의 성격: 조용하다.');
-    expect(system).toContain('[등장인물: 세라]\n기사단장.');
-    expect(system.indexOf('[등장인물: 리안]')).toBeLessThan(system.indexOf('[등장인물: 세라]'));
+    expect(system).toContain('[Character: 리안]\n왕립 도서관의 사서.');
+    expect(system).toContain('Description of 리안: 조용하다.');
+    expect(system).toContain('[Character: 세라]\n기사단장.');
+    expect(system.indexOf('[Character: 리안]')).toBeLessThan(system.indexOf('[Character: 세라]'));
 
     // Reordering the roster reorders the blocks.
     await json(cookie, `/api/plots/${plot.id}/characters/reorder`, 'POST', {
@@ -10937,7 +10940,7 @@ describe('plot hub', () => {
     });
     await readSse(await json(cookie, `/api/chats/${chat.id}/messages`, 'POST', { content: '또' }, capturing));
     const after = prompts.at(-1)!.system;
-    expect(after.indexOf('[등장인물: 세라]')).toBeLessThan(after.indexOf('[등장인물: 리안]'));
+    expect(after.indexOf('[Character: 세라]')).toBeLessThan(after.indexOf('[Character: 리안]'));
   });
 
   it('carries a reader-facing intro and a cover beside the setting', async () => {
@@ -13778,7 +13781,7 @@ describe('prompt host data', () => {
     const chat = await startChat(reader, plot.id);
     await readSse(await json(reader, `/api/chats/${chat.chat.id}/messages`, 'POST', { content: '안녕' }, app));
     // The roster name heads the block; the card's own text reads the nickname.
-    expect(systems.at(-1)).toContain('[등장인물: 아리아 블랑]\n아리는 마녀');
+    expect(systems.at(-1)).toContain('[Character: 아리아 블랑]\n아리는 마녀');
   });
 
   it("places the start triggers' injections where RisuAI does, for the one request", async () => {
@@ -14037,7 +14040,7 @@ describe('prompt scripts and SillyTavern lore', () => {
     const texts = turns.at(-1)!.map((turn) => turn.text);
     // The chat has no author's note of its own: the entry takes its place.
     expect(texts).toContain('AN-LORE');
-    expect(texts).toContain('[예시 대화: 아리아]\nEX-LORE');
+    expect(texts).toContain('[Example dialogue: 아리아]\nEX-LORE');
     expect(texts[texts.indexOf('FREE-KEY') - 1]).toBe('안녕');
   });
 
@@ -15135,7 +15138,7 @@ describe('editRequest listeners', () => {
     expect(prompts.at(-1)!.system.split('\n')).toEqual([
       ...ROLEPLAY_JAILBREAK_MAIN.split('\n'), '',
       'system|nil|nil|nil|nil|nil|nil|nil|',
-      'system|supaMemory|nil|nil|nil|nil|nil|nil|[지난 이야기 요약]/(최근 10턴 이내) 둘은 문 앞에서 만났다.//(최근 10턴 이내) 유저가 먼저 인사했다.',
+      'system|supaMemory|nil|nil|nil|nil|nil|nil|[Summary of the story so far]/(최근 10턴 이내) 둘은 문 앞에서 만났다.//(최근 10턴 이내) 유저가 먼저 인사했다.',
       ...examples,
       `assistant|${reply.id}|true|0|0|nil|nil|nil|`,
       `user|${second.id}|nil|0|0|nil|nil|nil|`,
@@ -15144,7 +15147,7 @@ describe('editRequest listeners', () => {
     // The listener changed the request, so it went in that shape: the summary a system turn of its own.
     expect(prompts.at(-1)!.messages[0]).toEqual({
       role: 'system',
-      content: '[지난 이야기 요약]\n(최근 10턴 이내) 둘은 문 앞에서 만났다.\n\n(최근 10턴 이내) 유저가 먼저 인사했다.',
+      content: '[Summary of the story so far]\n(최근 10턴 이내) 둘은 문 앞에서 만났다.\n\n(최근 10턴 이내) 유저가 먼저 인사했다.',
     });
   });
 
@@ -15196,7 +15199,7 @@ describe('editRequest listeners', () => {
     const unedited = prompts.at(-1)!;
     const texts = unedited.messages.map((message) => contentText(message.content));
     // The assembler's own: one system turn for the example block, under its header, and no separator.
-    expect(texts.filter((text) => text.startsWith('[예시 대화: 아리아]\n'))).toHaveLength(1);
+    expect(texts.filter((text) => text.startsWith('[Example dialogue: 아리아]\n'))).toHaveLength(1);
     expect(texts).not.toContain('[Start a new chat]');
 
     await send(cookie, chatId, capturing, '바꿔');
@@ -16514,14 +16517,14 @@ describe('group turns', () => {
     const firstTexts = textsOf(sent[0]!);
     expect(firstTexts.at(-3)).toBe(groupSpeakerLine('세이야'));
     // Not the round's last: the status window is the last speaker's to write.
-    expect(firstTexts.at(-2)).toContain('상태창과 선택지를 붙이지 않는다');
+    expect(firstTexts.at(-2)).toContain('Do not add the status window or the choices to this reply.');
     // The line the reader wrote as 카이 is sent as 카이's.
     expect(firstTexts).toContain('안녕.\n카이: 대신 인사할게.');
     const secondTexts = textsOf(sent[1]!);
     expect(sent[1]!.stop).toEqual(['\n세이야:', '\n세이:', '\n미오:']);
     expect(secondTexts.at(-2)).toBe(groupSpeakerLine('카이'));
     expect(secondTexts).toContain('세이야: *검을 거둔다* 왔군.\n세이야: 앉아.');
-    expect(secondTexts.join('\n')).not.toContain('상태창과 선택지를 붙이지 않는다');
+    expect(secondTexts.join('\n')).not.toContain('Do not add the status window or the choices to this reply.');
 
     // The chat reads both tags back.
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
@@ -16590,7 +16593,7 @@ describe('group turns', () => {
     // Without a round it opens one of its own: after a reply, the scene goes on without the reader.
     const auto = await done(await post(cookie, chatId, 'reply', { speakerId: kai }, target));
     expect(auto.groupTurnId).toBe(auto.messageId);
-    expect(textsOf(sent.at(-1)!).join('\n')).toContain('유저 개입 없이');
+    expect(textsOf(sent.at(-1)!).join('\n')).toContain('without the user stepping in');
     // …and its next speaker joins it.
     const joined = await done(await post(cookie, chatId, 'reply', { speakerId: seiya, groupTurnId: auto.groupTurnId }, target));
     expect(joined.groupTurnId).toBe(auto.messageId);
@@ -16602,22 +16605,22 @@ describe('group turns', () => {
     const { target, sent } = replyingApp('응.');
     const told = (req: ChatRequest): string => textsOf(req).join('\n');
     await done(await post(cookie, chatId, 'messages', { content: '자물쇠를 딴다', directions: '주사위 6. 성공한다.', speakerId: seiya }, target));
-    expect(told(sent.at(-1)!)).toContain('게임 판정');
+    expect(told(sent.at(-1)!)).toContain('Game ruling');
     // 이어가기: a round of its own after the reply, the scene going on without the reader.
     await done(await post(cookie, chatId, 'reply', { speakerId: kai }, target));
-    expect(told(sent.at(-1)!)).toContain('유저 개입 없이');
-    expect(told(sent.at(-1)!)).not.toContain('게임 판정');
+    expect(told(sent.at(-1)!)).toContain('without the user stepping in');
+    expect(told(sent.at(-1)!)).not.toContain('Game ruling');
     // Redone, it is the same carry-on: told so again, and not handed the reader's older ruling.
     await done(await post(cookie, chatId, 'regenerate', { speakerId: mio }, target));
-    expect(told(sent.at(-1)!)).toContain('유저 개입 없이');
-    expect(told(sent.at(-1)!)).not.toContain('게임 판정');
+    expect(told(sent.at(-1)!)).toContain('without the user stepping in');
+    expect(told(sent.at(-1)!)).not.toContain('Game ruling');
 
     // A round that answered the reader is redone answering them, ruling and all.
     const other = await groupChat('group-reroll-answer@example.com');
     await done(await post(other.cookie, other.chatId, 'messages', { content: '자물쇠를 딴다', directions: '주사위 6. 성공한다.', speakerId: other.seiya }, target));
     await done(await post(other.cookie, other.chatId, 'regenerate', { speakerId: other.kai }, target));
-    expect(told(sent.at(-1)!)).toContain('게임 판정');
-    expect(told(sent.at(-1)!)).not.toContain('유저 개입 없이');
+    expect(told(sent.at(-1)!)).toContain('Game ruling');
+    expect(told(sent.at(-1)!)).not.toContain('without the user stepping in');
   });
 
   it('redoes the whole round from its first speaker, as a sibling of its first reply', async () => {
@@ -16764,7 +16767,7 @@ describe('group turns', () => {
     expect(scene).not.toHaveProperty('speakerMemberId');
     expect(scenes.sent.at(-1)!.stop).toEqual([]);
     const texts = textsOf(scenes.sent.at(-1)!);
-    expect(texts.some((text) => text.startsWith('[다음 응답의 화자'))).toBe(false);
+    expect(texts.some((text) => text.startsWith('[Next speaker'))).toBe(false);
     // The scene still reads each tagged reply under its member.
     expect(texts).toContain('세이야: 세이야의 말.');
     expect(texts).toContain('카이: 카이의 말.');

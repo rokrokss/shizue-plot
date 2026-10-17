@@ -567,7 +567,7 @@ export const MEMORY_CONTEXT_BUDGETS = [8000, 16000, 32000, 64000] as const;
  */
 export interface ChatMemorySettings extends Partial<HypaV3Settings> {
   contextBudget?: number;
-  /** Facts a request carries (`[기억]`), 0–10; absent, 5. */
+  /** Facts a request carries (`[Memory]`), 0–10; absent, 5. */
   factCount?: number;
 }
 

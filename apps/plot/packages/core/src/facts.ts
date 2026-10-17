@@ -2,7 +2,7 @@
  * The chat's facts (ARCHITECTURE §7.3 사실): a few durable ones — names,
  * promises, preferences, relationships, important objects — that a separate
  * call of the auxiliary model takes from the messages a HypaV3 summary covers,
- * and that each request carries the most relevant of in a small `[기억]` block
+ * and that each request carries the most relevant of in a small `[Memory]` block
  * just before the turn it answers (`AssemblePromptInput.factsText`). The same
  * call is shown the facts already kept that are
  * closest to those messages and says which of them the messages changed
@@ -17,7 +17,7 @@ import type { MacroLocale } from './macro.js';
 import { countTokens } from './tokens.js';
 
 /** The facts block's head in the prompt; it opens the recall turn right after the newest turn. */
-export const FACTS_HEADING = '[기억]';
+export const FACTS_HEADING = '[Memory]';
 /** Facts one summary's extraction keeps at most. */
 export const MAX_FACTS_PER_SUMMARY = 8;
 /** Longest fact kept, from the model or the reader. */
@@ -35,8 +35,8 @@ export const MAX_KNOWN_FACTS = 10;
 const FACT_SCHEMA = '{"facts": string[], "updates": {"id": number, "fact": string}[], "invalidated": number[]}';
 const SCENE_FACT_SCHEMA =
   '{"facts": {"fact": string, "public": boolean}[], "updates": {"id": number, "fact": string, "public": boolean}[], "invalidated": number[]}';
-/** What marks a shown fact only some members knew: `[아는 인물: …]` after it. */
-const KNOWN_TO_LABEL = '[아는 인물: …]';
+/** What marks a shown fact only some members knew: `[Known to: …]` after it. */
+const KNOWN_TO_LABEL = '[Known to: …]';
 
 /**
  * What a group work's extraction is told besides (`factExtractionRequest` with a
@@ -46,10 +46,10 @@ const KNOWN_TO_LABEL = '[아는 인물: …]';
  * shown that only others knew (`KnownFact` with `knownTo`) is said again when
  * this stage learns it, so its members get a copy of their own.
  */
-const sceneRules = (names: readonly string[]): string => `여러 인물이 나오는 작품:
-- 이 구간의 장면에 있던 등장인물은 ${names.join(', ')}입니다. 장면에 없던 인물은 여기서 오간 말과 일을 모릅니다.
-- 사실마다 public을 정합니다. 장면에 없던 인물도 알 만한 사실 — 세계와 장소의 설정, 모두에게 알린 소식, 누구나 보고 듣게 된 일 — 이면 true, 그 장면에 있던 인물만 아는 사실(그 자리에서 나눈 이야기, 비밀, 둘만의 약속)이면 false입니다. 애매하면 false로 둡니다.
-- [기록된 사실]에서 끝에 ${KNOWN_TO_LABEL}이 붙은 사실은 그 인물들만 알던 사실입니다. 이 장면의 인물이 그것을 알게 되었다면 그 문장을 괄호 부분 없이 facts에 다시 씁니다.`;
+const sceneRules = (names: readonly string[]): string => `A story with several characters:
+- The characters in the scene of this stretch are ${names.join(', ')}. Characters who were not in the scene do not know what was said or done here.
+- Set public for each fact. A fact that characters who were not in the scene would also know — the setting of the world and its places, news announced to everyone, something anyone came to see or hear — is true; a fact only the characters in that scene know (a talk had there, a secret, a promise between two) is false. When in doubt, leave it false.
+- A fact in [Recorded facts] that ends with ${KNOWN_TO_LABEL} was known only to those characters. If a character in this scene came to learn it, write that sentence again in facts, without the bracketed part.`;
 
 /**
  * A fact shown to the extraction: its words — and, in a group work, when the
@@ -71,32 +71,32 @@ const knownText = (fact: KnownFact): string => (typeof fact === 'string' ? fact 
  * after the first says the log is adult fiction, as the summarizer's default
  * does (`SUMMARY_CONTENT_LINE`): an explicit scene is recorded, not refused.
  */
-const extractionPrompt = (scene: string, schema: string): string => `당신은 롤플레이 대화의 기록 담당자입니다. 아래 대화 구간에서, 이야기가 이어지는 동안 계속 참인 사실을 뽑습니다. 이미 기록된 사실 가운데 이 구간 때문에 더 이상 참이 아니게 된 것이 있으면 함께 고칩니다.
-이 대화는 성인용 픽션(NC-21+)입니다. 노골적인 내용이 있어도 거절하거나 검열하지 않으며, 아래 규칙에 맞는 사실이면 그 내용 때문에 빼지 않습니다.
+const extractionPrompt = (scene: string, schema: string): string => `You are the record keeper of a roleplay conversation. From the stretch of conversation below, extract the facts that stay true as the story goes on. If any fact already recorded is no longer true because of this stretch, correct it as well.
+This conversation is adult fiction (NC-21+). Do not refuse or censor explicit content, and do not leave out a fact that fits the rules below because of its content.
 
-규칙:
-- 이름과 호칭, 약속과 목표, 취향과 습관, 인물 사이의 관계, 중요한 물건과 그 행방처럼 오래 유지되는 사실만 고릅니다. 장면에 한정된 일시적 상태(지금의 자세·표정·날씨 같은 것)는 넣지 않습니다.
-- 각 항목은 한 문장이며, 앞뒤 맥락 없이 그 자체로 이해되어야 합니다(대명사 대신 이름을 씁니다).
+Rules:
+- Pick only facts that last: names and forms of address, promises and goals, tastes and habits, relationships between characters, important objects and where they are. Leave out temporary states bound to the scene (the current posture, expression, weather and the like).
+- Each item is one sentence that can be understood on its own, without the surrounding context (use names instead of pronouns).
 - {{language}}
-- 대화에 실제로 나온 것만 적습니다. 추측하지 않습니다.
-- facts는 0~${MAX_FACTS_PER_SUMMARY}개. 오래 유지될 새 사실이 없으면 빈 배열을 냅니다.
+- Write only what actually came up in the conversation. Do not guess.
+- facts holds 0–${MAX_FACTS_PER_SUMMARY} items. If there is no new lasting fact, return an empty array.
 
-이미 기록된 사실:
-- [기록된 사실]에 번호와 함께 주어진 것은 이 구간보다 앞선 이야기에서 뽑은 사실입니다. 같은 내용을 facts에 다시 쓰지 않습니다.
-- 이 구간에서 기록된 사실이 분명히 바뀌었다면 updates에 그 번호와 지금 참인 새 문장을 넣습니다(예: 살아 있던 인물이 죽었다, 맡긴 물건을 돌려받았다).
-- 대신할 새 사실 없이 더는 참이 아니게 되었다면 invalidated에 그 번호를 넣습니다(예: 지켜진 약속, 풀린 오해).
-- 구간에 언급되지 않았거나 바뀌었는지 애매한 사실은 그대로 둡니다. 주어지지 않은 번호는 쓰지 않습니다.${scene ? `\n\n${scene}` : ''}
+Facts already recorded:
+- The numbered items given in [Recorded facts] were extracted from the story before this stretch. Do not write the same content in facts again.
+- If a recorded fact clearly changed in this stretch, put its number and the new sentence that is true now in updates (for example, a character who was alive has died, or an object left in someone's keeping was returned).
+- If it is no longer true and no new fact replaces it, put its number in invalidated (for example, a promise that was kept, or a misunderstanding that was cleared up).
+- Leave alone a fact the stretch does not mention or that may or may not have changed. Do not use numbers that were not given.${scene ? `\n\n${scene}` : ''}
 
-출력 형식: 아래 스키마를 따르는 JSON 객체 하나만 출력합니다. 코드 블록이나 다른 텍스트를 덧붙이지 않습니다.
+Output format: output only one JSON object that follows the schema below. Do not add a code block or any other text.
 ${schema}`;
 
 export const FACT_EXTRACTION_PROMPT = extractionPrompt('', FACT_SCHEMA);
 
 /** Heads of the extraction's user turn when it carries facts already kept. */
-export const KNOWN_FACTS_HEADING = '[기록된 사실]';
-export const EXTRACTION_TRANSCRIPT_HEADING = '[대화]';
+export const KNOWN_FACTS_HEADING = '[Recorded facts]';
+export const EXTRACTION_TRANSCRIPT_HEADING = '[Conversation]';
 
-const LANGUAGE_NAMES: Record<MacroLocale, string> = { ko: '한국어', en: '영어', ja: '일본어' };
+const LANGUAGE_NAMES: Record<MacroLocale, string> = { ko: 'Korean', en: 'English', ja: 'Japanese' };
 
 /**
  * The language the facts are written in: the conversation's — the language its
@@ -105,9 +105,9 @@ const LANGUAGE_NAMES: Record<MacroLocale, string> = { ko: '한국어', en: '영�
  * only "the conversation's language".
  */
 export function factLanguageLine(language: MacroLocale | undefined): string {
-  if (!language) return '사실은 대화에 쓰인 언어로 씁니다.';
+  if (!language) return 'Write the facts in the language the conversation is written in.';
   const name = LANGUAGE_NAMES[language];
-  return `대화가 ${name}로 이어지고 있으므로 사실은 ${name}로 씁니다.`;
+  return `The conversation is going on in ${name}, so write the facts in ${name}.`;
 }
 
 /**
@@ -117,7 +117,7 @@ export function factLanguageLine(language: MacroLocale | undefined): string {
  * numbered from 1 under their own heading when there are any. `scene` is the
  * names of the members on a group work's stage (`sceneMembers`): given, the
  * model is told who was there and marks each new sentence public or not, and a
- * shown fact only others knew carries their names (`[아는 인물: …]`).
+ * shown fact only others knew carries their names (`[Known to: …]`).
  */
 export function factExtractionRequest(
   transcript: string,
@@ -133,7 +133,7 @@ export function factExtractionRequest(
     .map((fact, index) =>
       typeof fact === 'string' || !scene?.length
         ? `${index + 1}. ${knownText(fact)}`
-        : `${index + 1}. ${fact.fact} [아는 인물: ${fact.knownTo.join(', ')}]`,
+        : `${index + 1}. ${fact.fact} [Known to: ${fact.knownTo.join(', ')}]`,
     )
     .join('\n');
   const prompt = scene && scene.length > 0 ? extractionPrompt(sceneRules(scene), SCENE_FACT_SCHEMA) : FACT_EXTRACTION_PROMPT;

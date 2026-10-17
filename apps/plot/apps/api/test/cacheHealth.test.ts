@@ -6,7 +6,7 @@ import { chatRequestSent } from '../src/cacheHealth.js';
 function request(
   parts: { sections?: [PromptBlockKind, string][]; turns: [MessageSource['kind'], PromptMessage['role'], string, string?][] },
 ): AssembledPrompt {
-  const sections = parts.sections ?? [['main', '메인 지시.'], ['memory', '[지난 이야기 요약]\n(약 20턴 전) 요약.']];
+  const sections = parts.sections ?? [['main', '메인 지시.'], ['memory', '[Summary of the story so far]\n(약 20턴 전) 요약.']];
   return {
     system: sections.map(([, text]) => text).join('\n\n'),
     systemSections: sections.map(([kind, text]) => ({ kind, text })),
@@ -22,7 +22,7 @@ const turn = (id: string, role: 'user' | 'assistant', text: string): [MessageSou
   text,
   id,
 ];
-const recall: [MessageSource['kind'], PromptMessage['role'], string] = ['recall', 'system', '[기억]\n- 사실.'];
+const recall: [MessageSource['kind'], PromptMessage['role'], string] = ['recall', 'system', '[Memory]\n- 사실.'];
 const history = (...ids: string[]) => ids.map((id) => ({ id }));
 const usage = (cached: number, promptTokens = 30_000) => ({ promptTokens, cachedPromptTokens: cached });
 
@@ -56,7 +56,7 @@ describe('the prompt cache log', () => {
 
   it('names a summary landing over the clock and the summary block it moved', () => {
     send(request({ turns: [...turns(0, 2), recall] }), 10, ['m0', 'm1', 'm2'], 0, 0);
-    const landed = request({ sections: [['main', '메인 지시.'], ['memory', '[지난 이야기 요약]\n(약 10턴 전) 요약.\n\n(약 10턴 전) 새 요약.']], turns: [...turns(1, 3), recall] });
+    const landed = request({ sections: [['main', '메인 지시.'], ['memory', '[Summary of the story so far]\n(약 10턴 전) 요약.\n\n(약 10턴 전) 새 요약.']], turns: [...turns(1, 3), recall] });
     send(landed, 12, ['m2', 'm3', 'm4'], 0, 30_000);
     expect(line()).toMatch(/30 s after the chat's request before, ~\d+ expected; miss: summary_landed$/);
   });
@@ -127,7 +127,7 @@ describe('the prompt cache log', () => {
     expect(line()).toMatch(/miss: first$/);
     // A regenerate repeats the turn up to the reader's: it is served, and nothing is missed.
     send(request({ turns: [...turns(0, 2), recall] }), 10, ids, 0, 2_000);
-    send(request({ turns: [...turns(0, 2), ['recall', 'system', '[기억]\n- 다른 사실.']] }), 10, ids, 28_000, 3_000);
+    send(request({ turns: [...turns(0, 2), ['recall', 'system', '[Memory]\n- 다른 사실.']] }), 10, ids, 28_000, 3_000);
     expect(line()).not.toContain('miss');
   });
 });

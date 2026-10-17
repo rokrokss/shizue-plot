@@ -2,7 +2,7 @@
  * The chat's facts (ARCHITECTURE §7.3 사실), beside HypaV3's summaries: a few
  * durable ones a separate auxiliary-model call takes from the messages a
  * summary covers, right after the summary is written, and the most relevant of
- * which a request carries in a small `[기억]` block after the summaries. The
+ * which a request carries in a small `[Memory]` block after the summaries. The
  * pure half — the call, its answer, the block — is @shizue/core `facts.ts`.
  *
  * - **A fact belongs to its summary** (`memories.summary_id`, cascade), so it

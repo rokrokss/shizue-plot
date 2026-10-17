@@ -2,20 +2,22 @@ import { assemblePrompt, countTokens, parseCard } from '@shizue/core';
 import { describe, expect, it } from 'vitest';
 import { v1Card } from '../../../packages/core/test/fixtures/cards.js';
 import {
-  ROLEPLAY_JAILBREAK_MAIN,
   ROLEPLAY_JAILBREAK_POST_HISTORY,
-  ROLEPLAY_JAILBREAK_TOKENS,
+  roleplayJailbreakMain,
+  roleplayJailbreakTokens,
   withRoleplayJailbreak,
 } from '../src/roleplayJailbreak.js';
 import { withEditedRequest } from '../src/requestTriggers.js';
 
 const budget = 4096;
+const ROLEPLAY_JAILBREAK_MAIN = roleplayJailbreakMain('유저');
+const ROLEPLAY_JAILBREAK_TOKENS = roleplayJailbreakTokens('유저');
 const makePrompt = () => assemblePrompt({
   plot: { name: '골짜기', description: '눈 내리는 밤.', lorebook: [] },
   characters: [{ name: '아리아', card: parseCard(v1Card).card }],
   history: [{ id: 'u1', role: 'user', content: '안녕' }],
   userName: '유저',
-  memoryText: '[지난 이야기 요약]\n둘은 만났다.',
+  memoryText: '[Summary of the story so far]\n둘은 만났다.',
   contextBudget: budget - ROLEPLAY_JAILBREAK_TOKENS,
   report: true,
 });
@@ -24,7 +26,7 @@ describe('always-on roleplay instructions', () => {
   it('charges the final request and keeps its inspector, cache sections and memory view aligned', () => {
     const prompt = makePrompt();
     const before = structuredClone(prompt);
-    const sent = withRoleplayJailbreak(prompt, budget, false);
+    const sent = withRoleplayJailbreak(prompt, budget, false, '유저');
     const added = countTokens(sent.system) - countTokens(prompt.system) + countTokens(ROLEPLAY_JAILBREAK_POST_HISTORY);
     expect(sent.system).toBe(`${ROLEPLAY_JAILBREAK_MAIN}\n\n${prompt.system}`);
     expect(sent.messages.at(-1)).toEqual({ role: 'system', content: ROLEPLAY_JAILBREAK_POST_HISTORY });
@@ -46,20 +48,26 @@ describe('always-on roleplay instructions', () => {
     prompt.messages.push({ role: 'assistant', content: partial });
     prompt.sources!.push({ kind: 'history', id: 'partial' });
     prompt.report!.blocks.push({ kind: 'history', label: 'assistant', text: partial, tokens: countTokens(partial) });
-    const sent = withRoleplayJailbreak(prompt, budget, true);
+    const sent = withRoleplayJailbreak(prompt, budget, true, '유저');
     expect(sent.messages.slice(-2)).toEqual([
       { role: 'system', content: ROLEPLAY_JAILBREAK_POST_HISTORY }, { role: 'assistant', content: partial },
     ]);
     expect(sent.sources!.slice(-2)).toEqual([{ kind: 'post_history' }, { kind: 'history', id: 'partial' }]);
     expect(sent.report!.blocks.slice(-2).map((b) => b.text)).toEqual([ROLEPLAY_JAILBREAK_POST_HISTORY, partial]);
     // An ordinary assistant history turn is not a prefill.
-    expect(withRoleplayJailbreak(prompt, budget, false).messages.at(-1)!.content).toBe(ROLEPLAY_JAILBREAK_POST_HISTORY);
+    expect(withRoleplayJailbreak(prompt, budget, false, '유저').messages.at(-1)!.content).toBe(ROLEPLAY_JAILBREAK_POST_HISTORY);
+  });
+
+  it("reads PocketRisu's {{user}} as the reader's name, written as it is", () => {
+    expect(ROLEPLAY_JAILBREAK_MAIN).toContain('[유저 Integration]');
+    expect(ROLEPLAY_JAILBREAK_MAIN).not.toContain('{{user}}');
+    expect(roleplayJailbreakMain('$& 리안')).toContain("independence from $& 리안's participation");
   });
 
   it('survives an editor replacing the entire request and dropping its system', async () => {
     const edited = await withEditedRequest(makePrompt(), async () => [{ role: 'user', content: '새 질문' }], 'test');
     expect(edited.system).toBe('');
-    const sent = withRoleplayJailbreak(edited, budget, false);
+    const sent = withRoleplayJailbreak(edited, budget, false, '유저');
     expect(sent.system).toBe(ROLEPLAY_JAILBREAK_MAIN);
     expect(sent.messages).toEqual([
       { role: 'user', content: '새 질문' }, { role: 'system', content: ROLEPLAY_JAILBREAK_POST_HISTORY },

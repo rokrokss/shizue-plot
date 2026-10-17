@@ -114,7 +114,7 @@ const base = (overrides: Partial<AssemblePromptInput> = {}): AssemblePromptInput
   history,
   personaText: '{{user}}는 길 잃은 여행자.',
   userName: '민준',
-  memoryText: '[지난 이야기 요약]\n민준은 고개를 넘다 길을 잃고 여관에 들었다.',
+  memoryText: '[Summary of the story so far]\n민준은 고개를 넘다 길을 잃고 여관에 들었다.',
   authorNote: '긴장을 유지한다.',
   directions: '주사위 4. 문이 열린다.',
   injections: { start: '시작 주입', historyend: '끝 주입', promptend: '맨끝 주입' },
@@ -204,7 +204,7 @@ describe('assemblePrompt - a group turn', () => {
 
     const asSeiya = group({ speaker: 0 });
     // {{original}} brings the group preset back; {{char}} in the card's text is the speaker's nickname.
-    expect(asSeiya.system.startsWith('세이야 카드의 지시. 당신은 은빛 여관의')).toBe(true);
+    expect(asSeiya.system.startsWith('세이야 카드의 지시. You are the writer who plays every character of 은빛 여관.')).toBe(true);
     expect(asSeiya.system).toContain(GROUP_SPEECH_PROTOCOL);
     expect(asSeiya.system).not.toContain(SPEECH_PROTOCOL);
     expect(texts(asSeiya).at(-2)).toBe(`[세이의 말투를 지킨다.]\n\n${GROUP_SPEECH_PROTOCOL_REMINDER}`);
@@ -242,7 +242,7 @@ describe('assemblePrompt - a group turn', () => {
     const { messages, report } = prompt;
     expect(messages.at(-1)).toEqual({ role: 'system', content: groupSpeakerLine('카이') });
     expect(messages.at(-2)).toEqual({ role: 'system', content: '맨끝' });
-    expect(groupSpeakerLine('카이')).toBe('[다음 응답의 화자: 카이. 이 인물의 말과 행동만 씁니다.]');
+    expect(groupSpeakerLine('카이')).toBe("[Next speaker: 카이. Write only this character's words and actions.]");
     expect(report!.blocks.at(-1)).toMatchObject({ kind: 'trailing', label: '카이', text: groupSpeakerLine('카이') });
     expect(report!.totals.used).toBe(
       countTokens(prompt.system) + texts(prompt).reduce((sum, text) => sum + countTokens(text), 0),
@@ -278,8 +278,8 @@ describe('assemblePrompt - a group turn', () => {
       { role: 'user', content: '또 보자.' },
     ];
     for (const speaker of [0, 1]) {
-      const before = group({ speaker, factsText: '[기억]\n- 하나.' });
-      const after = group({ speaker, history: next, factsText: '[기억]\n- 둘.' });
+      const before = group({ speaker, factsText: '[Memory]\n- 하나.' });
+      const after = group({ speaker, history: next, factsText: '[Memory]\n- 둘.' });
       expect(after.system).toBe(before.system);
       expect(conversation(after).slice(0, conversation(before).length)).toEqual(conversation(before));
     }
@@ -299,7 +299,7 @@ describe('assemblePrompt - a group turn', () => {
     expect(asKai.system).toContain('여관은 백 년이 되었다.');
     expect(asKai.sources!.map((source) => source.kind).slice(-5)).toEqual(['history', 'moved_lore', 'directions', 'post_history', 'trailing']);
     // Read as its own book's, under its member's nickname, whoever speaks.
-    expect(texts(asKai).slice(-5, -2)).toEqual(['세이야: *검을 내려놓는다*', '세이의 검은 은빛이다.', '[게임 판정]\n판정.']);
+    expect(texts(asKai).slice(-5, -2)).toEqual(['세이야: *검을 내려놓는다*', '세이의 검은 은빛이다.', '[Game ruling]\n판정.']);
     expect(texts(group({ speaker: 0, history: round })).at(-3)).toBe('세이의 검은 은빛이다.');
     // The round's next speaker's system string is the one the turn before had, the lore notwithstanding.
     expect(asKai.system).toBe(group({ speaker: 1 }).system);

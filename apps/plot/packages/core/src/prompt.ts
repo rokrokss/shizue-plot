@@ -196,7 +196,7 @@ export interface PromptPlot {
   /**
    * `{{char}}` in the work's own text, where it is not the plot's name: a plot of
    * one member whose scripts renamed it (`MemberOverlay.name`) is that character,
-   * and RisuAI's `{{char}}` follows the rename. The `[작품: …]` header keeps `name`.
+   * and RisuAI's `{{char}}` follows the rename. The `[Story: …]` header keeps `name`.
    */
   char?: string;
   description: string;
@@ -273,7 +273,7 @@ export interface AssemblePromptInput {
    */
   recalledMemoryText?: string;
   /**
-   * The facts recalled for this turn (`[기억]`, `factsBlock`), already
+   * The facts recalled for this turn (`[Memory]`, `factsBlock`), already
    * formatted. In the recall turn after the recalled summaries: searched against
    * the latest turns, they change nearly every turn, so they stand after the
    * newest turn rather than in the system string, the cached prefix.
@@ -309,7 +309,7 @@ export interface AssemblePromptInput {
   userTurns?: number;
   /**
    * Stage directions carried by the *last* user message — what a game component
-   * decided about the turn the user just took. Injected as a `[게임 판정]` system
+   * decided about the turn the user just took. Injected as a `[Game ruling]` system
    * turn right after the newest turn, ahead of the recall turn, so it never
    * stands inside what the next turn's request repeats — the provider's cache.
    * Earlier turns' directions are not injected: they already had their effect.
@@ -662,10 +662,10 @@ export function replyLengthTokens(length?: ReplyLength): number {
 }
 
 /** Wrapper the model reads stage directions under; they are a ruling, not dialogue. */
-export const DIRECTIONS_HEADER = '[게임 판정]';
+export const DIRECTIONS_HEADER = '[Game ruling]';
 
 /** Wrapper a narrating turn is carried under; it moves the scene, not whoever sent it. */
-export const NARRATION_HEADER = '[나레이션]';
+export const NARRATION_HEADER = '[Narration]';
 
 /**
  * What the header means, said once. It sits in the system string rather than
@@ -673,7 +673,7 @@ export const NARRATION_HEADER = '[나레이션]';
  * the cached prefix — a per-turn copy would pay for the same sentence every turn.
  */
 export const NARRATION_NOTE =
-  '[나레이션] 표시가 붙은 메시지는 캐릭터나 유저의 발화가 아니라 장면·상황 전개 서술입니다.';
+  "A message marked [Narration] is not a character's or the user's speech but narration that moves the scene and situation forward.";
 
 /**
  * A reader's turn as the model reads it: a `@이름: …` line the reader wrote as a
@@ -696,19 +696,16 @@ export function readerTurnText(content: string, members: readonly ReaderMember[]
   return changed ? lines.join('\n') : content;
 }
 
-/**
- * What closes a group turn's prompt: who speaks next. The name stands bare,
- * before a full stop, so no particle has to agree with it.
- */
+/** What closes a group turn's prompt: who speaks next. */
 export const groupSpeakerLine = (name: string): string =>
-  `[다음 응답의 화자: ${name}. 이 인물의 말과 행동만 씁니다.]`;
+  `[Next speaker: ${name}. Write only this character's words and actions.]`;
 
 /**
  * RisuAI's `"Circumstances and context of the dialogue: " + scenario`, which its
  * `sendChat` adds to the description of the character it asks — in a group,
  * the turn's speaker.
  */
-export const scenarioLine = (scenario: string): string => `대화의 상황과 맥락: ${scenario}`;
+export const scenarioLine = (scenario: string): string => `Circumstances and context of the dialogue: ${scenario}`;
 
 /**
  * A group speaker's own scenario, where it has one the work does not already
@@ -728,10 +725,10 @@ export const ownScenario = (
 };
 
 /** Wrapper the work's own setting is read under. */
-export const plotHeader = (name: string): string => `[작품: ${name}]`;
+export const plotHeader = (name: string): string => `[Story: ${name}]`;
 
 /** Wrapper each roster member's profile is read under. */
-export const characterHeader = (name: string): string => `[등장인물: ${name}]`;
+export const characterHeader = (name: string): string => `[Character: ${name}]`;
 
 /**
  * Wrapper an example-dialogue block is read under. Every block carries it rather
@@ -739,7 +736,7 @@ export const characterHeader = (name: string): string => `[등장인물: ${name}
  * from whatever budget the history leaves, and a lone introduction would survive
  * every example it was meant to introduce.
  */
-export const exampleHeader = (name: string): string => `[예시 대화: ${name}]`;
+export const exampleHeader = (name: string): string => `[Example dialogue: ${name}]`;
 
 /**
  * What a member sent off the stage leaves behind: one line, right after the
@@ -747,29 +744,29 @@ export const exampleHeader = (name: string): string => `[예시 대화: ${name}]
  * over the history, and without this the model would carry on writing them in.
  */
 export const absentCastLine = (names: string[]): string =>
-  `현재 장면에 없는 인물: ${names.join(', ')} — 이 인물들은 이번 장면에서 대사나 행동으로 등장하지 않습니다.`;
+  `Characters not in the current scene: ${names.join(', ')} — they do not appear in this scene through dialogue or action.`;
 
-/** How each point of view is put to the model. No macro, so no particle to agree with. */
+/** How each point of view is put to the model. */
 export const NARRATOR_POV_LABELS: Record<NarratorPov, string> = {
-  first: '1인칭 (유저 캐릭터의 시점)',
-  third: '3인칭 관찰자',
-  'third-limited': '3인칭 제한 (한 시점 인물이 관찰하거나 느끼는 범위에서 서술)',
-  omniscient: '3인칭 전지적',
+  first: "first person (from the user character's point of view)",
+  third: 'third-person observer',
+  'third-limited': 'third-person limited (narrated within what one point-of-view character observes or feels)',
+  omniscient: 'third-person omniscient',
 };
 
 /** Header the compiled style directives are read under. */
-export const STYLE_DIRECTIVES_HEADER = '연출 지시:';
+export const STYLE_DIRECTIVES_HEADER = 'Style directions:';
 
 /** How each mood is named to the model. */
 export const PLOT_MOOD_LABELS: Record<PlotMood, string> = {
-  romance: '로맨스',
-  healing: '힐링',
-  angst: '앙스트',
-  yandere: '얀데레',
-  fantasy: '판타지',
-  action: '액션',
-  mystery: '미스터리',
-  horror: '호러',
+  romance: 'romance',
+  healing: 'healing',
+  angst: 'angst',
+  yandere: 'yandere',
+  fantasy: 'fantasy',
+  action: 'action',
+  mystery: 'mystery',
+  horror: 'horror',
 };
 
 // The directive tables. Every option whose value is the plot's default — the
@@ -777,61 +774,57 @@ export const PLOT_MOOD_LABELS: Record<PlotMood, string> = {
 // `off` — is absent on purpose: the default is what the prompt says nothing
 // about, and a line saying "keep it balanced" would spend the model's attention
 // on the setting the creator left alone.
-//
-// The same particle rule as the presets applies (see presets.ts): no allomorphic
-// particle may attach to a {{char}}/{{user}} substitution, since the name is
-// unknown here. A test in prompt.test.ts holds every line below to it.
 
 const TENSE_DIRECTIVES: Record<PlotTense, string> = {
-  past: '사건을 과거 시제로 서술합니다.',
-  present: '사건을 현재 시제로 서술합니다.',
+  past: 'Narrate events in the past tense.',
+  present: 'Narrate events in the present tense.',
 };
 
 const REPLY_LENGTH_DIRECTIVES: Partial<Record<ReplyLength, string>> = {
-  short: '군더더기 없이 짧게, 1~2문단으로 답합니다.',
-  medium: '읽기 편한 호흡의 2~3문단으로 답합니다.',
-  long: '묘사를 아끼지 말고 3~5문단의 몰입감 있는 장문으로 답합니다.',
+  short: 'Answer briefly with no padding, in 1–2 paragraphs.',
+  medium: 'Answer in 2–3 paragraphs at an easy reading pace.',
+  long: 'Spare no description: answer at length, in 3–5 immersive paragraphs.',
 };
 
 const DELIVERY_DIRECTIVES: Partial<Record<NarrativeDelivery, string>> = {
-  dialogue: '대사의 비중을 조금 더 두어, 주고받는 말로 장면을 굴립니다.',
-  action: '행동과 지문의 비중을 조금 더 두어, 움직이는 장면으로 씁니다.',
+  dialogue: 'Lean a little more on dialogue, moving the scene through the words exchanged.',
+  action: 'Lean a little more on action and narration, writing a scene in motion.',
 };
 
 const PACING_DIRECTIVES: Partial<Record<PlotPacing, string>> = {
-  fast: '전개를 빠르게 가져가고, 장면을 지체 없이 다음으로 밀어붙입니다.',
-  slow: '전개를 서두르지 않고, 한 장면을 천천히 뜸들이며 이어 갑니다.',
+  fast: 'Keep the story moving quickly, pushing the scene on without delay.',
+  slow: 'Do not rush the story; let a single scene simmer slowly as you continue it.',
 };
 
 const DIFFICULTY_DIRECTIVES: Partial<Record<PlotDifficulty, string>> = {
-  easy: '등장인물은 {{user}}의 주도를 대체로 순순히 따릅니다.',
-  hard: '등장인물은 쉽게 협조하지 않고, 장면에는 늘 긴장이 흐릅니다.',
-  nightmare: '등장인물은 뚜렷한 자기 의지로 움직이며 {{user}}에게 적대적으로 굽니다.',
+  easy: "The characters mostly go along with {{user}}'s lead.",
+  hard: 'The characters do not cooperate easily, and tension always runs through the scene.',
+  nightmare: 'The characters act on clear wills of their own and are hostile toward {{user}}.',
 };
 
 const STORYTELLING_DIRECTIVES: Record<StorytellingStyle, string> = {
-  highSociety: '격조 있는 위트와 절제된 감정으로 문장을 씁니다.',
-  noir: '건조하고 날카로운 문장으로 서늘한 서스펜스를 깔아 둡니다.',
-  afterDark: '감각적이고 거리낌 없는 욕망의 문체로 씁니다.',
-  nostalgia: '따뜻하고 아련한 회고조로 씁니다.',
-  blockbuster: '폭발적이고 영화적인 전개로 장면을 몰아칩니다.',
-  arcane: '신비와 경이가 배어나는 묘사로 씁니다.',
-  manga: '빠른 템포와 과장된 개성이 드러나는 만화적 문체로 씁니다.',
-  dread: '평범한 일상 속으로 불길함이 스며들게 씁니다.',
+  highSociety: 'Write with refined wit and restrained emotion.',
+  noir: 'Lay down chilling suspense in dry, sharp sentences.',
+  afterDark: 'Write in a sensual, uninhibited style of desire.',
+  nostalgia: 'Write in a warm, wistful, reminiscent tone.',
+  blockbuster: 'Drive the scene with explosive, cinematic developments.',
+  arcane: 'Write with descriptions steeped in mystery and wonder.',
+  manga: 'Write in a manga-like style with a fast tempo and exaggerated personalities.',
+  dread: 'Let something ominous seep into ordinary everyday life.',
 };
 
 /** The status-window convention, taught where the plot asks for it (statusBlock.ts). */
 const STATUS_WINDOW_DIRECTIVE =
-  '매 응답의 끝에 ```status 코드 블록을 붙여 현재 상태를 갱신합니다. ' +
-  '배경(위치·시간·날씨 등)과 인물(상태·감정·목표 등) 가운데 장면에 맞는 항목만 골라 `키: 값` 한 줄씩 적습니다.';
+  'At the end of every reply, append a ```status code block that updates the current state. ' +
+  'Of the setting (location, time, weather and so on) and the characters (condition, emotion, goal and so on), pick only the items that fit the scene and write each on its own `key: value` line.';
 
 /** The choice-line convention (choices.ts); the two modes differ only in shape. */
 const CHOICES_DIRECTIVE =
-  '응답의 맨 끝에(상태창 블록이 있다면 그 뒤에) {{user}}의 다음 행동 선택지를 2~3개, `>> `로 시작하는 줄로 하나씩 붙입니다.';
+  "At the very end of the reply (after the status block, if there is one), add 2–3 choices for {{user}}'s next action, one per line, each line starting with `>> `.";
 
 const CHOICES_SHAPE_DIRECTIVES: Partial<Record<ChoicesMode, string>> = {
-  keywords: '선택지는 5어절 이내의 짧은 키워드형 구로 씁니다.',
-  sentences: '선택지는 완결된 한 문장으로 씁니다.',
+  keywords: 'Write each choice as a short keyword phrase of five words or fewer.',
+  sentences: 'Write each choice as one complete sentence.',
 };
 
 /**
@@ -851,7 +844,7 @@ export function styleDirectives(style: PlotStyle): string {
     style.pacing ? PACING_DIRECTIVES[style.pacing] : '',
     style.difficulty ? DIFFICULTY_DIRECTIVES[style.difficulty] : '',
     style.moods?.length
-      ? `장면의 분위기는 ${style.moods.map((mood) => PLOT_MOOD_LABELS[mood]).join(', ')} 쪽을 지향합니다.`
+      ? `Aim the mood of the scene toward ${style.moods.map((mood) => PLOT_MOOD_LABELS[mood]).join(', ')}.`
       : '',
     style.storytelling ? STORYTELLING_DIRECTIVES[style.storytelling] : '',
     style.statusWindow ? STATUS_WINDOW_DIRECTIVE : '',
@@ -1377,7 +1370,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
       .filter((line) => line.length > 0)
       .join('\n');
     const text = card.personality.trim()
-      ? `${lines}\n\n${applyMacros('{{char}}의 성격: ', macro)}${applyMacros(card.personality, macro).trim()}`
+      ? `${lines}\n\n${applyMacros('Description of {{char}}: ', macro)}${applyMacros(card.personality, macro).trim()}`
       : lines;
     return { kind: 'character', label: name, text };
   });
@@ -1391,8 +1384,8 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // unprefixed lines as well as a narration — and a model writing an ordinary
   // reply would find nothing in it that a "narrator" label could be about.
   const narratorBlock = [
-    narrator?.voice?.trim() ? `서술 문체: ${expand(narrator.voice).trim()}` : '',
-    narrator?.pov ? `서술 시점: ${NARRATOR_POV_LABELS[narrator.pov]}` : '',
+    narrator?.voice?.trim() ? `Narrative style: ${expand(narrator.voice).trim()}` : '',
+    narrator?.pov ? `Point of view: ${NARRATOR_POV_LABELS[narrator.pov]}` : '',
   ]
     .filter((line) => line.length > 0)
     .join('\n');
@@ -1405,7 +1398,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
 
   // 5. persona
   const personaBlock =
-    !utility && personaText.trim() ? `${expand('유저({{user}}) 정보: ')}${expand(personaText)}` : '';
+    !utility && personaText.trim() ? `${expand('User ({{user}}) profile: ')}${expand(personaText)}` : '';
 
   // 5b. memory — the summaries of the evicted history HypaV3's important and
   // recent shares picked, where RisuAI's HypaV3 sends them. What this turn's query

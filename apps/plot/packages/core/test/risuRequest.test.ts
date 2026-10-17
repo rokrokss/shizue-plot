@@ -180,7 +180,7 @@ describe('the request as RisuAI’s items', () => {
       // RisuAI's `lastChat`: the newest turn, sent without `removable`, its picture as its data URL.
       { role: 'user', content: '또 왔어', memo: 'm-3', attr: [], thoughts: [], multimodals: [{ type: 'image', base64: picture }] },
       // Our directions, after the newest turn, then the post-history: each its own item.
-      { role: 'system', content: '[게임 판정]\n문이 열린다.' },
+      { role: 'system', content: '[Game ruling]\n문이 열린다.' },
       { role: 'system', content: promptText(prompt.messages.at(-1)!.content) },
     ]);
     expect(origins).toEqual([
@@ -193,7 +193,7 @@ describe('the request as RisuAI’s items', () => {
   });
 
   it('sends the memory as its own supaMemory turn, and no NewChat once the chat’s front is gone', () => {
-    const memoryText = '[지난 이야기 요약]\n둘은 여관에서 만났다.';
+    const memoryText = '[Summary of the story so far]\n둘은 여관에서 만났다.';
     // The memory evicted the front: the history the assembler gets starts past the greeting.
     const remembered = assemblePrompt({ plot, characters: [aria], history: chat.slice(2), userName: '민준', memoryText, branch: opening });
     expect(remembered.system).toContain('둘은 여관에서 만났다.');
@@ -220,8 +220,8 @@ describe('the request as RisuAI’s items', () => {
   });
 
   it('keeps the supaMemory turn to the summaries, and hands the recall turn over after the newest turn as a plain system turn', () => {
-    const memoryText = '[지난 이야기 요약]\n둘은 여관에서 만났다.';
-    const factsText = '[기억]\n- 민준은 등대 열쇠를 갖고 있다.';
+    const memoryText = '[Summary of the story so far]\n둘은 여관에서 만났다.';
+    const factsText = '[Memory]\n- 민준은 등대 열쇠를 갖고 있다.';
     const prompt = assemblePrompt({ plot, characters: [aria], history: chat.slice(2), userName: '민준', memoryText, factsText, branch: opening });
     expect(prompt.risu!.memory!.text).toBe(memoryText);
     const { items } = risuRequestView(prompt);

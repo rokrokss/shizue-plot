@@ -93,7 +93,7 @@ export const MAX_CHATS_PER_SUMMARY = 50;
 export const MAX_QUERY_CHAT_COUNT = 20;
 
 /** The memory block's head in the prompt; the summaries follow it. */
-export const MEMORY_HEADING = '[지난 이야기 요약]';
+export const MEMORY_HEADING = '[Summary of the story so far]';
 /** Between two summaries in the memory block, and what each is counted with (HypaV3's `summarySeparator`). */
 export const SUMMARY_SEPARATOR = '\n\n';
 
@@ -122,7 +122,7 @@ export function summaryChunks(text: string): string[] {
  * The head of the summaries the recall turn carries (`recalledMemoryBlock`): those
  * HypaV3's similar and random shares picked for this turn.
  */
-export const RECALLED_MEMORY_HEADING = '[지난 이야기 요약: 이번 턴에 떠올린 것]';
+export const RECALLED_MEMORY_HEADING = '[Summary of the story so far: recalled this turn]';
 
 /**
  * The memory block the system string carries — the important and the recent

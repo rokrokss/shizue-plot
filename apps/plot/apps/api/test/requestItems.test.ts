@@ -73,7 +73,7 @@ const promptWith = (images: string[], report = false): AssembledPrompt =>
       { role: 'user', content: '이거 봐', id: 'm-1', images },
     ],
     userName: '민준',
-    memoryText: '[지난 이야기 요약]\n둘은 만났다.',
+    memoryText: '[Summary of the story so far]\n둘은 만났다.',
     branch: { length: 2, greeting: { text: '어서 와.', index: -1 } },
     report,
   });
@@ -123,7 +123,7 @@ describe('the request the editors read, and what goes back', () => {
     expect(sent.system).toBe(seen[0]!.content);
     expect(sent.system).not.toContain('둘은 만났다.');
     expect(sent.messages).toEqual([
-      { role: 'system', content: '[지난 이야기 요약]\n둘은 만났다.' },
+      { role: 'system', content: '[Summary of the story so far]\n둘은 만났다.' },
       { role: 'system', content: '[Start a new chat]' },
       { role: 'user', content: '예시 질문' },
       { role: 'assistant', content: '예시 답변' },
@@ -189,7 +189,7 @@ describe('the request the editors read, and what goes back', () => {
     expect(memory.sent.messages[0]).toEqual({
       role: 'system',
       content: [
-        { type: 'text', text: '[지난 이야기 요약]\n둘은 만났다.' },
+        { type: 'text', text: '[Summary of the story so far]\n둘은 만났다.' },
         { type: 'image', url: gif },
         { type: 'image', url: png },
       ],
@@ -273,7 +273,7 @@ describe('the request the editors read, and what goes back', () => {
         .slice(0, prompt.report!.blocks.length - prompt.messages.length)
         .filter((block) => block.kind !== 'memory')
         .map((block) => [block.kind, block.label ?? null, block.text]),
-      ['memory', null, '[지난 이야기 요약]\n둘은 만났다.'],
+      ['memory', null, '[Summary of the story so far]\n둘은 만났다.'],
       ['examples', '아리아', '[Start a new chat]'],
       ['examples', '아리아', '예시 질문'],
       ['examples', '아리아', '예시 답변'],

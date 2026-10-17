@@ -29,17 +29,17 @@ const SUGGEST_MAX_TOKENS = 600;
 /** Parse failures tolerated before the button reports back empty-handed. */
 const SUGGEST_ATTEMPTS = 2;
 
-const SUGGEST_RULES = `당신은 롤플레이 대화에서 독자가 다음에 보낼 만한 답장을 제안합니다.
+const SUGGEST_RULES = `You suggest replies the user might send next in a roleplay conversation.
 
-규칙:
-- 독자 본인의 답장만 씁니다. 등장인물의 대사나 반응을 대신 쓰지 않습니다.
-- 서로 다른 방향으로 3개를 제안합니다. 같은 말을 바꿔 쓴 것은 제안이 아닙니다.
-- 각 제안은 200자를 넘지 않으며, 그대로 보낼 수 있는 완성된 한 턴이어야 합니다.
-- 대사는 그냥 쓰고, 행동이나 상황은 \`*…*\` 안에 씁니다. 두 가지를 섞어 써도 됩니다.
-- 마지막 장면에 직접 이어지도록 씁니다. 아직 일어나지 않은 사건을 단정하지 않습니다.
-- 대화에서 쓰인 언어와 같은 언어로 씁니다.
+Rules:
+- Write only the user's own replies. Do not write the characters' lines or reactions for them.
+- Suggest 3 replies that go in different directions. Rewording the same thing is not a new suggestion.
+- Each suggestion is no longer than 200 characters and must be one complete turn that can be sent as it is.
+- Write dialogue as it is, and actions or situations inside \`*…*\`. Mixing the two is fine.
+- Follow directly on from the last scene. Do not assert events that have not happened yet.
+- Write in the same language as the conversation.
 
-출력 형식: 아래 스키마를 따르는 JSON 객체 하나만 출력합니다. 코드 블록이나 다른 텍스트를 덧붙이지 않습니다.
+Output format: output only one JSON object that follows the schema below. Do not add a code block or any other text.
 {
   "suggestions": [string, string, string]
 }`;
@@ -80,11 +80,11 @@ export async function suggestReplies(deps: AppDeps, input: SuggestInput): Promis
       {
         role: 'user',
         content: [
-          `[작품] ${input.plotName}`,
-          `[독자] ${input.userName}`,
-          ...(input.personaText.trim() ? [`[독자 설정] ${input.personaText.trim()}`] : []),
+          `[Story] ${input.plotName}`,
+          `[User] ${input.userName}`,
+          ...(input.personaText.trim() ? [`[User profile] ${input.personaText.trim()}`] : []),
           '',
-          '[최근 대화]',
+          '[Recent conversation]',
           transcript,
         ].join('\n'),
       },

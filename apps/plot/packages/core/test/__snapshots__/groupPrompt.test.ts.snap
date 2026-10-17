@@ -8,13 +8,13 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
   ],
   "messages": [
     {
-      "content": "[예시 대화: 세이야]
+      "content": "[Example dialogue: 세이야]
 민준: 누구야?
 세이: *검을 거둔다* 기사다.",
       "role": "system",
     },
     {
-      "content": "[예시 대화: 카이]
+      "content": "[Example dialogue: 카이]
 민준: 방 있어?
 카이: 있지, 있고말고!",
       "role": "system",
@@ -26,7 +26,7 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
       "role": "assistant",
     },
     {
-      "content": "[나레이션] 바람이 문을 흔든다.",
+      "content": "[Narration] 바람이 문을 흔든다.",
       "role": "user",
     },
     {
@@ -58,7 +58,7 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
       "role": "system",
     },
     {
-      "content": "[게임 판정]
+      "content": "[Game ruling]
 주사위 4. 문이 열린다.",
       "role": "system",
     },
@@ -69,7 +69,7 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
     {
       "content": "[세이의 말투를 지킨다.]
 
-인물의 말과 행동은 \`이름: \` 줄로, 그 줄 안의 행동은 *별표*로, 장면 서술은 이 응답의 지문으로 접두사 없는 줄에 씁니다.",
+Write a character's words and actions on \`Name: \` lines, the actions within those lines in *asterisks*, and the scene as this reply's own narration on lines with no prefix.",
       "role": "system",
     },
     {
@@ -81,71 +81,71 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
     "blocks": [
       {
         "kind": "main",
-        "text": "세이야 카드의 지시. 당신은 은빛 여관의 장면을 이어 쓰는 소설가입니다. 아래 설정을 바탕으로 각 인물의 성격과 말투를 일관되게 유지하며, 읽는 사람이 장면 안에 들어와 있다고 느끼도록 씁니다.
+        "text": "세이야 카드의 지시. You are a novelist continuing the scenes of 은빛 여관. Based on the settings below, keep each character's personality and way of speaking consistent, and write so that the reader feels present inside the scene.
 
-발화 규칙:
-- 등장인물의 말과 행동은 \`이름: \`으로 시작하는 줄에 씁니다. 이름은 등장인물 목록에 있는 이름을 그대로 적습니다.
-- 그 줄 안에서 행동·표정·몸짓은 *별표로 감싼 묘사*로 적고, 나머지는 그 인물이 입 밖에 낸 말입니다.
-- 장면·배경·상황은 접두사 없는 줄에 씁니다. 그 줄은 이 응답이 인물의 말과 함께 직접 쓰는 지문이며, 대사는 \`이름: \` 줄에만 둡니다.
-- 한 응답에 여러 등장인물이 번갈아 나올 수 있습니다. 장면에 필요한 인물만 등장시키고, 없는 인물을 지어내지 않습니다.
+Speech rules:
+- Write a character's words and actions on a line that starts with \`Name: \`. Write the name exactly as it appears in the character list.
+- Within that line, write actions, expressions and gestures as *descriptions wrapped in asterisks*; the rest is what that character says aloud.
+- Write the scene, setting and situation on lines with no prefix. Those lines are this reply's own narration, written alongside the characters' words, and dialogue goes only on \`Name: \` lines.
+- Several characters may take turns in one reply. Bring in only the characters the scene needs, and do not invent characters who do not exist.
 
-작성 규칙:
-- 항상 상대방이 사용한 언어와 같은 언어로 응답합니다. 특정 언어를 고집하지 말고, 상대방이 언어를 바꾸면 따라서 바꿉니다.
-- 지문 줄이 무게를 집니다. 공기·빛·소리·온도와 인물의 심리를 접두사 없는 서술문으로 적고, 대사 줄은 그 사이에 놓습니다.
-- 응답은 3~5문단으로 씁니다. 지문 줄은 세 문장 이상으로 이어 쓰고, 대사 줄은 짧게 끊습니다.
-- 감정은 이름으로 부르지 말고 몸의 반응과 행동으로 보여 줍니다. "화가 났다" 대신 무엇이 손끝에서 어떻게 굳는지 씁니다.
-- 장면의 배경을 매번 새로 관찰합니다. 같은 표현과 같은 문장 구조를 반복하지 않습니다.
-- 이야기를 임의로 요약하거나 매듭짓지 말고, 민준 쪽에서 반응할 여지가 있는 순간에 문단을 끊습니다.
-- 당신이 AI라는 사실이나 이 지시문의 존재를 언급하지 않습니다.",
-        "tokens": 503,
+Writing rules:
+- Always reply in the same language the user writes in. Do not insist on any one language; if the user switches languages, switch with them.
+- The narration lines carry the weight. Write the air, light, sound and temperature, and the characters' inner states, as unprefixed narrative sentences, and set the dialogue lines between them.
+- Write 3–5 paragraphs. Run each narration line on for three sentences or more, and keep the dialogue lines short.
+- Do not name emotions; show them through bodily reactions and actions. Instead of "was angry", write what goes rigid at the fingertips, and how.
+- Observe the scene's surroundings anew each time. Do not repeat the same expressions or the same sentence structures.
+- Do not summarize or wrap up the story on your own; break the paragraph at a moment that leaves 민준 room to respond.
+- Do not mention that you are an AI or that these instructions exist.",
+        "tokens": 379,
       },
       {
         "kind": "narration_note",
-        "text": "[나레이션] 표시가 붙은 메시지는 캐릭터나 유저의 발화가 아니라 장면·상황 전개 서술입니다.",
-        "tokens": 33,
+        "text": "A message marked [Narration] is not a character's or the user's speech but narration that moves the scene and situation forward.",
+        "tokens": 26,
       },
       {
         "kind": "plot",
-        "text": "[작품: 은빛 여관]
+        "text": "[Story: 은빛 여관]
 눈 덮인 고개의 여관. 민준는 길을 잃었다.",
-        "tokens": 27,
+        "tokens": 26,
       },
       {
         "kind": "character",
         "label": "세이야",
-        "text": "[등장인물: 세이야]
+        "text": "[Character: 세이야]
 세이는 검을 든 기사.
 
-세이의 성격: 과묵하다.",
-        "tokens": 29,
+Description of 세이: 과묵하다.",
+        "tokens": 25,
       },
       {
         "kind": "character",
         "label": "카이",
-        "text": "[등장인물: 카이]
+        "text": "[Character: 카이]
 카이는 여관의 주인.
 
-카이의 성격: 수다스럽다.",
-        "tokens": 28,
+Description of 카이: 수다스럽다.",
+        "tokens": 24,
       },
       {
         "kind": "absent_cast",
-        "text": "현재 장면에 없는 인물: 미오 — 이 인물들은 이번 장면에서 대사나 행동으로 등장하지 않습니다.",
-        "tokens": 28,
+        "text": "Characters not in the current scene: 미오 — they do not appear in this scene through dialogue or action.",
+        "tokens": 22,
       },
       {
         "kind": "narrator",
-        "text": "서술 문체: 건조하게 끊어 쓴다.
-서술 시점: 3인칭 관찰자",
-        "tokens": 27,
+        "text": "Narrative style: 건조하게 끊어 쓴다.
+Point of view: third-person observer",
+        "tokens": 21,
       },
       {
         "kind": "style",
-        "text": "연출 지시:
-- 군더더기 없이 짧게, 1~2문단으로 답합니다.
-- 매 응답의 끝에 \`\`\`status 코드 블록을 붙여 현재 상태를 갱신합니다. 배경(위치·시간·날씨 등)과 인물(상태·감정·목표 등) 가운데 장면에 맞는 항목만 골라 \`키: 값\` 한 줄씩 적습니다.
-- 응답의 맨 끝에(상태창 블록이 있다면 그 뒤에) 민준의 다음 행동 선택지를 2~3개, \`>> \`로 시작하는 줄로 하나씩 붙입니다. 선택지는 5어절 이내의 짧은 키워드형 구로 씁니다.",
-        "tokens": 165,
+        "text": "Style directions:
+- Answer briefly with no padding, in 1–2 paragraphs.
+- At the end of every reply, append a \`\`\`status code block that updates the current state. Of the setting (location, time, weather and so on) and the characters (condition, emotion, goal and so on), pick only the items that fit the scene and write each on its own \`key: value\` line.
+- At the very end of the reply (after the status block, if there is one), add 2–3 choices for 민준's next action, one per line, each line starting with \`>> \`. Write each choice as a short keyword phrase of five words or fewer.",
+        "tokens": 141,
       },
       {
         "kind": "lore_after",
@@ -154,30 +154,30 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
       },
       {
         "kind": "persona",
-        "text": "유저(민준) 정보: 민준는 길 잃은 여행자.",
-        "tokens": 18,
+        "text": "User (민준) profile: 민준는 길 잃은 여행자.",
+        "tokens": 17,
       },
       {
         "kind": "memory",
-        "text": "[지난 이야기 요약]
+        "text": "[Summary of the story so far]
 민준은 고개를 넘다 길을 잃고 여관에 들었다.",
-        "tokens": 25,
+        "tokens": 27,
       },
       {
         "kind": "examples",
         "label": "세이야",
-        "text": "[예시 대화: 세이야]
+        "text": "[Example dialogue: 세이야]
 민준: 누구야?
 세이: *검을 거둔다* 기사다.",
-        "tokens": 29,
+        "tokens": 27,
       },
       {
         "kind": "examples",
         "label": "카이",
-        "text": "[예시 대화: 카이]
+        "text": "[Example dialogue: 카이]
 민준: 방 있어?
 카이: 있지, 있고말고!",
-        "tokens": 25,
+        "tokens": 23,
       },
       {
         "kind": "history",
@@ -190,8 +190,8 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
       {
         "kind": "history",
         "label": "user",
-        "text": "[나레이션] 바람이 문을 흔든다.",
-        "tokens": 14,
+        "text": "[Narration] 바람이 문을 흔든다.",
+        "tokens": 13,
       },
       {
         "kind": "author_note",
@@ -235,9 +235,9 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
       },
       {
         "kind": "directions",
-        "text": "[게임 판정]
+        "text": "[Game ruling]
 주사위 4. 문이 열린다.",
-        "tokens": 16,
+        "tokens": 15,
       },
       {
         "kind": "injection",
@@ -249,8 +249,8 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
         "kind": "post_history",
         "text": "[세이의 말투를 지킨다.]
 
-인물의 말과 행동은 \`이름: \` 줄로, 그 줄 안의 행동은 *별표*로, 장면 서술은 이 응답의 지문으로 접두사 없는 줄에 씁니다.",
-        "tokens": 60,
+Write a character's words and actions on \`Name: \` lines, the actions within those lines in *asterisks*, and the scene as this reply's own narration on lines with no prefix.",
+        "tokens": 51,
       },
       {
         "kind": "injection",
@@ -290,56 +290,56 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
     "totals": {
       "contextBudget": 100000,
       "responseReserve": 1200,
-      "used": 1134,
+      "used": 944,
     },
   },
-  "system": "세이야 카드의 지시. 당신은 은빛 여관의 장면을 이어 쓰는 소설가입니다. 아래 설정을 바탕으로 각 인물의 성격과 말투를 일관되게 유지하며, 읽는 사람이 장면 안에 들어와 있다고 느끼도록 씁니다.
+  "system": "세이야 카드의 지시. You are a novelist continuing the scenes of 은빛 여관. Based on the settings below, keep each character's personality and way of speaking consistent, and write so that the reader feels present inside the scene.
 
-발화 규칙:
-- 등장인물의 말과 행동은 \`이름: \`으로 시작하는 줄에 씁니다. 이름은 등장인물 목록에 있는 이름을 그대로 적습니다.
-- 그 줄 안에서 행동·표정·몸짓은 *별표로 감싼 묘사*로 적고, 나머지는 그 인물이 입 밖에 낸 말입니다.
-- 장면·배경·상황은 접두사 없는 줄에 씁니다. 그 줄은 이 응답이 인물의 말과 함께 직접 쓰는 지문이며, 대사는 \`이름: \` 줄에만 둡니다.
-- 한 응답에 여러 등장인물이 번갈아 나올 수 있습니다. 장면에 필요한 인물만 등장시키고, 없는 인물을 지어내지 않습니다.
+Speech rules:
+- Write a character's words and actions on a line that starts with \`Name: \`. Write the name exactly as it appears in the character list.
+- Within that line, write actions, expressions and gestures as *descriptions wrapped in asterisks*; the rest is what that character says aloud.
+- Write the scene, setting and situation on lines with no prefix. Those lines are this reply's own narration, written alongside the characters' words, and dialogue goes only on \`Name: \` lines.
+- Several characters may take turns in one reply. Bring in only the characters the scene needs, and do not invent characters who do not exist.
 
-작성 규칙:
-- 항상 상대방이 사용한 언어와 같은 언어로 응답합니다. 특정 언어를 고집하지 말고, 상대방이 언어를 바꾸면 따라서 바꿉니다.
-- 지문 줄이 무게를 집니다. 공기·빛·소리·온도와 인물의 심리를 접두사 없는 서술문으로 적고, 대사 줄은 그 사이에 놓습니다.
-- 응답은 3~5문단으로 씁니다. 지문 줄은 세 문장 이상으로 이어 쓰고, 대사 줄은 짧게 끊습니다.
-- 감정은 이름으로 부르지 말고 몸의 반응과 행동으로 보여 줍니다. "화가 났다" 대신 무엇이 손끝에서 어떻게 굳는지 씁니다.
-- 장면의 배경을 매번 새로 관찰합니다. 같은 표현과 같은 문장 구조를 반복하지 않습니다.
-- 이야기를 임의로 요약하거나 매듭짓지 말고, 민준 쪽에서 반응할 여지가 있는 순간에 문단을 끊습니다.
-- 당신이 AI라는 사실이나 이 지시문의 존재를 언급하지 않습니다.
+Writing rules:
+- Always reply in the same language the user writes in. Do not insist on any one language; if the user switches languages, switch with them.
+- The narration lines carry the weight. Write the air, light, sound and temperature, and the characters' inner states, as unprefixed narrative sentences, and set the dialogue lines between them.
+- Write 3–5 paragraphs. Run each narration line on for three sentences or more, and keep the dialogue lines short.
+- Do not name emotions; show them through bodily reactions and actions. Instead of "was angry", write what goes rigid at the fingertips, and how.
+- Observe the scene's surroundings anew each time. Do not repeat the same expressions or the same sentence structures.
+- Do not summarize or wrap up the story on your own; break the paragraph at a moment that leaves 민준 room to respond.
+- Do not mention that you are an AI or that these instructions exist.
 
-[나레이션] 표시가 붙은 메시지는 캐릭터나 유저의 발화가 아니라 장면·상황 전개 서술입니다.
+A message marked [Narration] is not a character's or the user's speech but narration that moves the scene and situation forward.
 
-[작품: 은빛 여관]
+[Story: 은빛 여관]
 눈 덮인 고개의 여관. 민준는 길을 잃었다.
 
-[등장인물: 세이야]
+[Character: 세이야]
 세이는 검을 든 기사.
 
-세이의 성격: 과묵하다.
+Description of 세이: 과묵하다.
 
-[등장인물: 카이]
+[Character: 카이]
 카이는 여관의 주인.
 
-카이의 성격: 수다스럽다.
+Description of 카이: 수다스럽다.
 
-현재 장면에 없는 인물: 미오 — 이 인물들은 이번 장면에서 대사나 행동으로 등장하지 않습니다.
+Characters not in the current scene: 미오 — they do not appear in this scene through dialogue or action.
 
-서술 문체: 건조하게 끊어 쓴다.
-서술 시점: 3인칭 관찰자
+Narrative style: 건조하게 끊어 쓴다.
+Point of view: third-person observer
 
-연출 지시:
-- 군더더기 없이 짧게, 1~2문단으로 답합니다.
-- 매 응답의 끝에 \`\`\`status 코드 블록을 붙여 현재 상태를 갱신합니다. 배경(위치·시간·날씨 등)과 인물(상태·감정·목표 등) 가운데 장면에 맞는 항목만 골라 \`키: 값\` 한 줄씩 적습니다.
-- 응답의 맨 끝에(상태창 블록이 있다면 그 뒤에) 민준의 다음 행동 선택지를 2~3개, \`>> \`로 시작하는 줄로 하나씩 붙입니다. 선택지는 5어절 이내의 짧은 키워드형 구로 씁니다.
+Style directions:
+- Answer briefly with no padding, in 1–2 paragraphs.
+- At the end of every reply, append a \`\`\`status code block that updates the current state. Of the setting (location, time, weather and so on) and the characters (condition, emotion, goal and so on), pick only the items that fit the scene and write each on its own \`key: value\` line.
+- At the very end of the reply (after the status block, if there is one), add 2–3 choices for 민준's next action, one per line, each line starting with \`>> \`. Write each choice as a short keyword phrase of five words or fewer.
 
 여관은 백 년이 되었다.
 
-유저(민준) 정보: 민준는 길 잃은 여행자.
+User (민준) profile: 민준는 길 잃은 여행자.
 
-[지난 이야기 요약]
+[Summary of the story so far]
 민준은 고개를 넘다 길을 잃고 여관에 들었다.",
 }
 `;
@@ -352,13 +352,13 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
   ],
   "messages": [
     {
-      "content": "[예시 대화: 세이야]
+      "content": "[Example dialogue: 세이야]
 민준: 누구야?
 세이: *검을 거둔다* 기사다.",
       "role": "system",
     },
     {
-      "content": "[예시 대화: 카이]
+      "content": "[Example dialogue: 카이]
 민준: 방 있어?
 카이: 있지, 있고말고!",
       "role": "system",
@@ -370,7 +370,7 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
       "role": "assistant",
     },
     {
-      "content": "[나레이션] 바람이 문을 흔든다.",
+      "content": "[Narration] 바람이 문을 흔든다.",
       "role": "user",
     },
     {
@@ -398,7 +398,7 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
       "role": "system",
     },
     {
-      "content": "[나레이션] 눈이 그쳤다.",
+      "content": "[Narration] 눈이 그쳤다.",
       "role": "assistant",
     },
     {
@@ -412,7 +412,7 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
     {
       "content": "[세이의 말투를 지킨다.]
 
-인물의 말과 행동은 \`이름: \` 줄로, 그 줄 안의 행동은 *별표*로, 장면 서술은 이 응답의 지문으로 접두사 없는 줄에 씁니다.",
+Write a character's words and actions on \`Name: \` lines, the actions within those lines in *asterisks*, and the scene as this reply's own narration on lines with no prefix.",
       "role": "system",
     },
     {
@@ -424,69 +424,69 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
     "blocks": [
       {
         "kind": "main",
-        "text": "세이야 카드의 지시. 당신은 은빛 여관의 등장인물 전원을 연기하는 작가입니다. 아래 설정을 바탕으로 각 인물의 성격과 말투를 일관되게 유지하며 장면을 이어 씁니다.
+        "text": "세이야 카드의 지시. You are the writer who plays every character of 은빛 여관. Based on the settings below, keep each character's personality and way of speaking consistent as you continue the scene.
 
-발화 규칙:
-- 등장인물의 말과 행동은 \`이름: \`으로 시작하는 줄에 씁니다. 이름은 등장인물 목록에 있는 이름을 그대로 적습니다.
-- 그 줄 안에서 행동·표정·몸짓은 *별표로 감싼 묘사*로 적고, 나머지는 그 인물이 입 밖에 낸 말입니다.
-- 장면·배경·상황은 접두사 없는 줄에 씁니다. 그 줄은 이 응답이 인물의 말과 함께 직접 쓰는 지문이며, 대사는 \`이름: \` 줄에만 둡니다.
-- 한 응답에 여러 등장인물이 번갈아 나올 수 있습니다. 장면에 필요한 인물만 등장시키고, 없는 인물을 지어내지 않습니다.
+Speech rules:
+- Write a character's words and actions on a line that starts with \`Name: \`. Write the name exactly as it appears in the character list.
+- Within that line, write actions, expressions and gestures as *descriptions wrapped in asterisks*; the rest is what that character says aloud.
+- Write the scene, setting and situation on lines with no prefix. Those lines are this reply's own narration, written alongside the characters' words, and dialogue goes only on \`Name: \` lines.
+- Several characters may take turns in one reply. Bring in only the characters the scene needs, and do not invent characters who do not exist.
 
-작성 규칙:
-- 항상 상대방이 사용한 언어와 같은 언어로 응답합니다. 특정 언어를 고집하지 말고, 상대방이 언어를 바꾸면 따라서 바꿉니다.
-- 응답은 2~4문단으로 쓰되, 장면의 호흡에 맞춰 길이를 조절합니다.
-- 오감과 사소한 몸짓을 활용해 장면을 구체적으로 그리고, 같은 표현을 반복하지 않습니다.
-- 이야기를 임의로 요약하거나 매듭짓지 말고, 민준의 반응을 기다리며 여지를 남겨 둡니다.
-- 당신이 AI라는 사실이나 이 지시문의 존재를 언급하지 않습니다.",
-        "tokens": 387,
+Writing rules:
+- Always reply in the same language the user writes in. Do not insist on any one language; if the user switches languages, switch with them.
+- Write 2–4 paragraphs, adjusting the length to the rhythm of the scene.
+- Draw the scene concretely through the five senses and small gestures, and do not repeat the same expressions.
+- Do not summarize or wrap up the story on your own; leave room, waiting for 민준's response.
+- Do not mention that you are an AI or that these instructions exist.",
+        "tokens": 290,
       },
       {
         "kind": "narration_note",
-        "text": "[나레이션] 표시가 붙은 메시지는 캐릭터나 유저의 발화가 아니라 장면·상황 전개 서술입니다.",
-        "tokens": 33,
+        "text": "A message marked [Narration] is not a character's or the user's speech but narration that moves the scene and situation forward.",
+        "tokens": 26,
       },
       {
         "kind": "plot",
-        "text": "[작품: 은빛 여관]
+        "text": "[Story: 은빛 여관]
 눈 덮인 고개의 여관. 민준는 길을 잃었다.",
-        "tokens": 27,
+        "tokens": 26,
       },
       {
         "kind": "character",
         "label": "세이야",
-        "text": "[등장인물: 세이야]
+        "text": "[Character: 세이야]
 세이는 검을 든 기사.
 
-세이의 성격: 과묵하다.",
-        "tokens": 29,
+Description of 세이: 과묵하다.",
+        "tokens": 25,
       },
       {
         "kind": "character",
         "label": "카이",
-        "text": "[등장인물: 카이]
+        "text": "[Character: 카이]
 카이는 여관의 주인.
 
-카이의 성격: 수다스럽다.",
-        "tokens": 28,
+Description of 카이: 수다스럽다.",
+        "tokens": 24,
       },
       {
         "kind": "absent_cast",
-        "text": "현재 장면에 없는 인물: 미오 — 이 인물들은 이번 장면에서 대사나 행동으로 등장하지 않습니다.",
-        "tokens": 28,
+        "text": "Characters not in the current scene: 미오 — they do not appear in this scene through dialogue or action.",
+        "tokens": 22,
       },
       {
         "kind": "narrator",
-        "text": "서술 문체: 건조하게 끊어 쓴다.
-서술 시점: 3인칭 관찰자",
-        "tokens": 27,
+        "text": "Narrative style: 건조하게 끊어 쓴다.
+Point of view: third-person observer",
+        "tokens": 21,
       },
       {
         "kind": "style",
-        "text": "연출 지시:
-- 군더더기 없이 짧게, 1~2문단으로 답합니다.
-- 매 응답의 끝에 \`\`\`status 코드 블록을 붙여 현재 상태를 갱신합니다. 배경(위치·시간·날씨 등)과 인물(상태·감정·목표 등) 가운데 장면에 맞는 항목만 골라 \`키: 값\` 한 줄씩 적습니다.
-- 응답의 맨 끝에(상태창 블록이 있다면 그 뒤에) 민준의 다음 행동 선택지를 2~3개, \`>> \`로 시작하는 줄로 하나씩 붙입니다. 선택지는 5어절 이내의 짧은 키워드형 구로 씁니다.",
-        "tokens": 165,
+        "text": "Style directions:
+- Answer briefly with no padding, in 1–2 paragraphs.
+- At the end of every reply, append a \`\`\`status code block that updates the current state. Of the setting (location, time, weather and so on) and the characters (condition, emotion, goal and so on), pick only the items that fit the scene and write each on its own \`key: value\` line.
+- At the very end of the reply (after the status block, if there is one), add 2–3 choices for 민준's next action, one per line, each line starting with \`>> \`. Write each choice as a short keyword phrase of five words or fewer.",
+        "tokens": 141,
       },
       {
         "kind": "lore_after",
@@ -495,30 +495,30 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
       },
       {
         "kind": "persona",
-        "text": "유저(민준) 정보: 민준는 길 잃은 여행자.",
-        "tokens": 18,
+        "text": "User (민준) profile: 민준는 길 잃은 여행자.",
+        "tokens": 17,
       },
       {
         "kind": "memory",
-        "text": "[지난 이야기 요약]
+        "text": "[Summary of the story so far]
 민준은 고개를 넘다 길을 잃고 여관에 들었다.",
-        "tokens": 25,
+        "tokens": 27,
       },
       {
         "kind": "examples",
         "label": "세이야",
-        "text": "[예시 대화: 세이야]
+        "text": "[Example dialogue: 세이야]
 민준: 누구야?
 세이: *검을 거둔다* 기사다.",
-        "tokens": 29,
+        "tokens": 27,
       },
       {
         "kind": "examples",
         "label": "카이",
-        "text": "[예시 대화: 카이]
+        "text": "[Example dialogue: 카이]
 민준: 방 있어?
 카이: 있지, 있고말고!",
-        "tokens": 25,
+        "tokens": 23,
       },
       {
         "kind": "history",
@@ -531,8 +531,8 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
       {
         "kind": "history",
         "label": "user",
-        "text": "[나레이션] 바람이 문을 흔든다.",
-        "tokens": 14,
+        "text": "[Narration] 바람이 문을 흔든다.",
+        "tokens": 13,
       },
       {
         "kind": "history",
@@ -572,8 +572,8 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
       {
         "kind": "history",
         "label": "assistant",
-        "text": "[나레이션] 눈이 그쳤다.",
-        "tokens": 11,
+        "text": "[Narration] 눈이 그쳤다.",
+        "tokens": 10,
       },
       {
         "kind": "moved_lore",
@@ -590,8 +590,8 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
         "kind": "post_history",
         "text": "[세이의 말투를 지킨다.]
 
-인물의 말과 행동은 \`이름: \` 줄로, 그 줄 안의 행동은 *별표*로, 장면 서술은 이 응답의 지문으로 접두사 없는 줄에 씁니다.",
-        "tokens": 60,
+Write a character's words and actions on \`Name: \` lines, the actions within those lines in *asterisks*, and the scene as this reply's own narration on lines with no prefix.",
+        "tokens": 51,
       },
       {
         "kind": "injection",
@@ -631,54 +631,54 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
     "totals": {
       "contextBudget": 100000,
       "responseReserve": 1200,
-      "used": 1013,
+      "used": 850,
     },
   },
-  "system": "세이야 카드의 지시. 당신은 은빛 여관의 등장인물 전원을 연기하는 작가입니다. 아래 설정을 바탕으로 각 인물의 성격과 말투를 일관되게 유지하며 장면을 이어 씁니다.
+  "system": "세이야 카드의 지시. You are the writer who plays every character of 은빛 여관. Based on the settings below, keep each character's personality and way of speaking consistent as you continue the scene.
 
-발화 규칙:
-- 등장인물의 말과 행동은 \`이름: \`으로 시작하는 줄에 씁니다. 이름은 등장인물 목록에 있는 이름을 그대로 적습니다.
-- 그 줄 안에서 행동·표정·몸짓은 *별표로 감싼 묘사*로 적고, 나머지는 그 인물이 입 밖에 낸 말입니다.
-- 장면·배경·상황은 접두사 없는 줄에 씁니다. 그 줄은 이 응답이 인물의 말과 함께 직접 쓰는 지문이며, 대사는 \`이름: \` 줄에만 둡니다.
-- 한 응답에 여러 등장인물이 번갈아 나올 수 있습니다. 장면에 필요한 인물만 등장시키고, 없는 인물을 지어내지 않습니다.
+Speech rules:
+- Write a character's words and actions on a line that starts with \`Name: \`. Write the name exactly as it appears in the character list.
+- Within that line, write actions, expressions and gestures as *descriptions wrapped in asterisks*; the rest is what that character says aloud.
+- Write the scene, setting and situation on lines with no prefix. Those lines are this reply's own narration, written alongside the characters' words, and dialogue goes only on \`Name: \` lines.
+- Several characters may take turns in one reply. Bring in only the characters the scene needs, and do not invent characters who do not exist.
 
-작성 규칙:
-- 항상 상대방이 사용한 언어와 같은 언어로 응답합니다. 특정 언어를 고집하지 말고, 상대방이 언어를 바꾸면 따라서 바꿉니다.
-- 응답은 2~4문단으로 쓰되, 장면의 호흡에 맞춰 길이를 조절합니다.
-- 오감과 사소한 몸짓을 활용해 장면을 구체적으로 그리고, 같은 표현을 반복하지 않습니다.
-- 이야기를 임의로 요약하거나 매듭짓지 말고, 민준의 반응을 기다리며 여지를 남겨 둡니다.
-- 당신이 AI라는 사실이나 이 지시문의 존재를 언급하지 않습니다.
+Writing rules:
+- Always reply in the same language the user writes in. Do not insist on any one language; if the user switches languages, switch with them.
+- Write 2–4 paragraphs, adjusting the length to the rhythm of the scene.
+- Draw the scene concretely through the five senses and small gestures, and do not repeat the same expressions.
+- Do not summarize or wrap up the story on your own; leave room, waiting for 민준's response.
+- Do not mention that you are an AI or that these instructions exist.
 
-[나레이션] 표시가 붙은 메시지는 캐릭터나 유저의 발화가 아니라 장면·상황 전개 서술입니다.
+A message marked [Narration] is not a character's or the user's speech but narration that moves the scene and situation forward.
 
-[작품: 은빛 여관]
+[Story: 은빛 여관]
 눈 덮인 고개의 여관. 민준는 길을 잃었다.
 
-[등장인물: 세이야]
+[Character: 세이야]
 세이는 검을 든 기사.
 
-세이의 성격: 과묵하다.
+Description of 세이: 과묵하다.
 
-[등장인물: 카이]
+[Character: 카이]
 카이는 여관의 주인.
 
-카이의 성격: 수다스럽다.
+Description of 카이: 수다스럽다.
 
-현재 장면에 없는 인물: 미오 — 이 인물들은 이번 장면에서 대사나 행동으로 등장하지 않습니다.
+Characters not in the current scene: 미오 — they do not appear in this scene through dialogue or action.
 
-서술 문체: 건조하게 끊어 쓴다.
-서술 시점: 3인칭 관찰자
+Narrative style: 건조하게 끊어 쓴다.
+Point of view: third-person observer
 
-연출 지시:
-- 군더더기 없이 짧게, 1~2문단으로 답합니다.
-- 매 응답의 끝에 \`\`\`status 코드 블록을 붙여 현재 상태를 갱신합니다. 배경(위치·시간·날씨 등)과 인물(상태·감정·목표 등) 가운데 장면에 맞는 항목만 골라 \`키: 값\` 한 줄씩 적습니다.
-- 응답의 맨 끝에(상태창 블록이 있다면 그 뒤에) 민준의 다음 행동 선택지를 2~3개, \`>> \`로 시작하는 줄로 하나씩 붙입니다. 선택지는 5어절 이내의 짧은 키워드형 구로 씁니다.
+Style directions:
+- Answer briefly with no padding, in 1–2 paragraphs.
+- At the end of every reply, append a \`\`\`status code block that updates the current state. Of the setting (location, time, weather and so on) and the characters (condition, emotion, goal and so on), pick only the items that fit the scene and write each on its own \`key: value\` line.
+- At the very end of the reply (after the status block, if there is one), add 2–3 choices for 민준's next action, one per line, each line starting with \`>> \`. Write each choice as a short keyword phrase of five words or fewer.
 
 여관은 백 년이 되었다.
 
-유저(민준) 정보: 민준는 길 잃은 여행자.
+User (민준) profile: 민준는 길 잃은 여행자.
 
-[지난 이야기 요약]
+[Summary of the story so far]
 민준은 고개를 넘다 길을 잃고 여관에 들었다.",
 }
 `;
@@ -691,7 +691,7 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
   ],
   "messages": [
     {
-      "content": "[예시 대화: 세이야]
+      "content": "[Example dialogue: 세이야]
 민준: 누구야?
 세이: *검을 거둔다* 기사다.",
       "role": "system",
@@ -703,7 +703,7 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
       "role": "assistant",
     },
     {
-      "content": "[나레이션] 바람이 문을 흔든다.",
+      "content": "[Narration] 바람이 문을 흔든다.",
       "role": "user",
     },
     {
@@ -735,7 +735,7 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
       "role": "system",
     },
     {
-      "content": "[게임 판정]
+      "content": "[Game ruling]
 주사위 4. 문이 열린다.",
       "role": "system",
     },
@@ -746,7 +746,7 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
     {
       "content": "[세이의 말투를 지킨다.]
 
-인물의 말과 행동은 \`이름: \` 줄로, 그 줄 안의 행동은 *별표*로, 장면 서술은 이 응답의 지문으로 접두사 없는 줄에 씁니다.",
+Write a character's words and actions on \`Name: \` lines, the actions within those lines in *asterisks*, and the scene as this reply's own narration on lines with no prefix.",
       "role": "system",
     },
     {
@@ -758,57 +758,57 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
     "blocks": [
       {
         "kind": "main",
-        "text": "세이야 카드의 지시. 당신은 은빛 여관의 장면을 이어 쓰는 소설가입니다. 아래 설정을 바탕으로 각 인물의 성격과 말투를 일관되게 유지하며, 읽는 사람이 장면 안에 들어와 있다고 느끼도록 씁니다.
+        "text": "세이야 카드의 지시. You are a novelist continuing the scenes of 은빛 여관. Based on the settings below, keep each character's personality and way of speaking consistent, and write so that the reader feels present inside the scene.
 
-발화 규칙:
-- 등장인물의 말과 행동은 \`이름: \`으로 시작하는 줄에 씁니다. 이름은 등장인물 목록에 있는 이름을 그대로 적습니다.
-- 그 줄 안에서 행동·표정·몸짓은 *별표로 감싼 묘사*로 적고, 나머지는 그 인물이 입 밖에 낸 말입니다.
-- 장면·배경·상황은 접두사 없는 줄에 씁니다. 그 줄은 이 응답이 인물의 말과 함께 직접 쓰는 지문이며, 대사는 \`이름: \` 줄에만 둡니다.
-- 한 응답에 여러 등장인물이 번갈아 나올 수 있습니다. 장면에 필요한 인물만 등장시키고, 없는 인물을 지어내지 않습니다.
+Speech rules:
+- Write a character's words and actions on a line that starts with \`Name: \`. Write the name exactly as it appears in the character list.
+- Within that line, write actions, expressions and gestures as *descriptions wrapped in asterisks*; the rest is what that character says aloud.
+- Write the scene, setting and situation on lines with no prefix. Those lines are this reply's own narration, written alongside the characters' words, and dialogue goes only on \`Name: \` lines.
+- Several characters may take turns in one reply. Bring in only the characters the scene needs, and do not invent characters who do not exist.
 
-작성 규칙:
-- 항상 상대방이 사용한 언어와 같은 언어로 응답합니다. 특정 언어를 고집하지 말고, 상대방이 언어를 바꾸면 따라서 바꿉니다.
-- 지문 줄이 무게를 집니다. 공기·빛·소리·온도와 인물의 심리를 접두사 없는 서술문으로 적고, 대사 줄은 그 사이에 놓습니다.
-- 응답은 3~5문단으로 씁니다. 지문 줄은 세 문장 이상으로 이어 쓰고, 대사 줄은 짧게 끊습니다.
-- 감정은 이름으로 부르지 말고 몸의 반응과 행동으로 보여 줍니다. "화가 났다" 대신 무엇이 손끝에서 어떻게 굳는지 씁니다.
-- 장면의 배경을 매번 새로 관찰합니다. 같은 표현과 같은 문장 구조를 반복하지 않습니다.
-- 이야기를 임의로 요약하거나 매듭짓지 말고, 민준 쪽에서 반응할 여지가 있는 순간에 문단을 끊습니다.
-- 당신이 AI라는 사실이나 이 지시문의 존재를 언급하지 않습니다.",
-        "tokens": 503,
+Writing rules:
+- Always reply in the same language the user writes in. Do not insist on any one language; if the user switches languages, switch with them.
+- The narration lines carry the weight. Write the air, light, sound and temperature, and the characters' inner states, as unprefixed narrative sentences, and set the dialogue lines between them.
+- Write 3–5 paragraphs. Run each narration line on for three sentences or more, and keep the dialogue lines short.
+- Do not name emotions; show them through bodily reactions and actions. Instead of "was angry", write what goes rigid at the fingertips, and how.
+- Observe the scene's surroundings anew each time. Do not repeat the same expressions or the same sentence structures.
+- Do not summarize or wrap up the story on your own; break the paragraph at a moment that leaves 민준 room to respond.
+- Do not mention that you are an AI or that these instructions exist.",
+        "tokens": 379,
       },
       {
         "kind": "narration_note",
-        "text": "[나레이션] 표시가 붙은 메시지는 캐릭터나 유저의 발화가 아니라 장면·상황 전개 서술입니다.",
-        "tokens": 33,
+        "text": "A message marked [Narration] is not a character's or the user's speech but narration that moves the scene and situation forward.",
+        "tokens": 26,
       },
       {
         "kind": "plot",
-        "text": "[작품: 은빛 여관]
+        "text": "[Story: 은빛 여관]
 눈 덮인 고개의 여관. 민준는 길을 잃었다.",
-        "tokens": 27,
+        "tokens": 26,
       },
       {
         "kind": "character",
         "label": "세이야",
-        "text": "[등장인물: 세이야]
+        "text": "[Character: 세이야]
 세이는 검을 든 기사.
 
-세이의 성격: 과묵하다.",
-        "tokens": 29,
+Description of 세이: 과묵하다.",
+        "tokens": 25,
       },
       {
         "kind": "narrator",
-        "text": "서술 문체: 건조하게 끊어 쓴다.
-서술 시점: 3인칭 관찰자",
-        "tokens": 27,
+        "text": "Narrative style: 건조하게 끊어 쓴다.
+Point of view: third-person observer",
+        "tokens": 21,
       },
       {
         "kind": "style",
-        "text": "연출 지시:
-- 군더더기 없이 짧게, 1~2문단으로 답합니다.
-- 매 응답의 끝에 \`\`\`status 코드 블록을 붙여 현재 상태를 갱신합니다. 배경(위치·시간·날씨 등)과 인물(상태·감정·목표 등) 가운데 장면에 맞는 항목만 골라 \`키: 값\` 한 줄씩 적습니다.
-- 응답의 맨 끝에(상태창 블록이 있다면 그 뒤에) 민준의 다음 행동 선택지를 2~3개, \`>> \`로 시작하는 줄로 하나씩 붙입니다. 선택지는 5어절 이내의 짧은 키워드형 구로 씁니다.",
-        "tokens": 165,
+        "text": "Style directions:
+- Answer briefly with no padding, in 1–2 paragraphs.
+- At the end of every reply, append a \`\`\`status code block that updates the current state. Of the setting (location, time, weather and so on) and the characters (condition, emotion, goal and so on), pick only the items that fit the scene and write each on its own \`key: value\` line.
+- At the very end of the reply (after the status block, if there is one), add 2–3 choices for 민준's next action, one per line, each line starting with \`>> \`. Write each choice as a short keyword phrase of five words or fewer.",
+        "tokens": 141,
       },
       {
         "kind": "lore_after",
@@ -817,22 +817,22 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
       },
       {
         "kind": "persona",
-        "text": "유저(민준) 정보: 민준는 길 잃은 여행자.",
-        "tokens": 18,
+        "text": "User (민준) profile: 민준는 길 잃은 여행자.",
+        "tokens": 17,
       },
       {
         "kind": "memory",
-        "text": "[지난 이야기 요약]
+        "text": "[Summary of the story so far]
 민준은 고개를 넘다 길을 잃고 여관에 들었다.",
-        "tokens": 25,
+        "tokens": 27,
       },
       {
         "kind": "examples",
         "label": "세이야",
-        "text": "[예시 대화: 세이야]
+        "text": "[Example dialogue: 세이야]
 민준: 누구야?
 세이: *검을 거둔다* 기사다.",
-        "tokens": 29,
+        "tokens": 27,
       },
       {
         "kind": "history",
@@ -845,8 +845,8 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
       {
         "kind": "history",
         "label": "user",
-        "text": "[나레이션] 바람이 문을 흔든다.",
-        "tokens": 14,
+        "text": "[Narration] 바람이 문을 흔든다.",
+        "tokens": 13,
       },
       {
         "kind": "author_note",
@@ -890,9 +890,9 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
       },
       {
         "kind": "directions",
-        "text": "[게임 판정]
+        "text": "[Game ruling]
 주사위 4. 문이 열린다.",
-        "tokens": 16,
+        "tokens": 15,
       },
       {
         "kind": "injection",
@@ -904,8 +904,8 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
         "kind": "post_history",
         "text": "[세이의 말투를 지킨다.]
 
-인물의 말과 행동은 \`이름: \` 줄로, 그 줄 안의 행동은 *별표*로, 장면 서술은 이 응답의 지문으로 접두사 없는 줄에 씁니다.",
-        "tokens": 60,
+Write a character's words and actions on \`Name: \` lines, the actions within those lines in *asterisks*, and the scene as this reply's own narration on lines with no prefix.",
+        "tokens": 51,
       },
       {
         "kind": "injection",
@@ -945,49 +945,49 @@ exports[`assemblePrompt - without a speaker, as before group turns > assembles a
     "totals": {
       "contextBudget": 100000,
       "responseReserve": 1200,
-      "used": 1053,
+      "used": 875,
     },
   },
-  "system": "세이야 카드의 지시. 당신은 은빛 여관의 장면을 이어 쓰는 소설가입니다. 아래 설정을 바탕으로 각 인물의 성격과 말투를 일관되게 유지하며, 읽는 사람이 장면 안에 들어와 있다고 느끼도록 씁니다.
+  "system": "세이야 카드의 지시. You are a novelist continuing the scenes of 은빛 여관. Based on the settings below, keep each character's personality and way of speaking consistent, and write so that the reader feels present inside the scene.
 
-발화 규칙:
-- 등장인물의 말과 행동은 \`이름: \`으로 시작하는 줄에 씁니다. 이름은 등장인물 목록에 있는 이름을 그대로 적습니다.
-- 그 줄 안에서 행동·표정·몸짓은 *별표로 감싼 묘사*로 적고, 나머지는 그 인물이 입 밖에 낸 말입니다.
-- 장면·배경·상황은 접두사 없는 줄에 씁니다. 그 줄은 이 응답이 인물의 말과 함께 직접 쓰는 지문이며, 대사는 \`이름: \` 줄에만 둡니다.
-- 한 응답에 여러 등장인물이 번갈아 나올 수 있습니다. 장면에 필요한 인물만 등장시키고, 없는 인물을 지어내지 않습니다.
+Speech rules:
+- Write a character's words and actions on a line that starts with \`Name: \`. Write the name exactly as it appears in the character list.
+- Within that line, write actions, expressions and gestures as *descriptions wrapped in asterisks*; the rest is what that character says aloud.
+- Write the scene, setting and situation on lines with no prefix. Those lines are this reply's own narration, written alongside the characters' words, and dialogue goes only on \`Name: \` lines.
+- Several characters may take turns in one reply. Bring in only the characters the scene needs, and do not invent characters who do not exist.
 
-작성 규칙:
-- 항상 상대방이 사용한 언어와 같은 언어로 응답합니다. 특정 언어를 고집하지 말고, 상대방이 언어를 바꾸면 따라서 바꿉니다.
-- 지문 줄이 무게를 집니다. 공기·빛·소리·온도와 인물의 심리를 접두사 없는 서술문으로 적고, 대사 줄은 그 사이에 놓습니다.
-- 응답은 3~5문단으로 씁니다. 지문 줄은 세 문장 이상으로 이어 쓰고, 대사 줄은 짧게 끊습니다.
-- 감정은 이름으로 부르지 말고 몸의 반응과 행동으로 보여 줍니다. "화가 났다" 대신 무엇이 손끝에서 어떻게 굳는지 씁니다.
-- 장면의 배경을 매번 새로 관찰합니다. 같은 표현과 같은 문장 구조를 반복하지 않습니다.
-- 이야기를 임의로 요약하거나 매듭짓지 말고, 민준 쪽에서 반응할 여지가 있는 순간에 문단을 끊습니다.
-- 당신이 AI라는 사실이나 이 지시문의 존재를 언급하지 않습니다.
+Writing rules:
+- Always reply in the same language the user writes in. Do not insist on any one language; if the user switches languages, switch with them.
+- The narration lines carry the weight. Write the air, light, sound and temperature, and the characters' inner states, as unprefixed narrative sentences, and set the dialogue lines between them.
+- Write 3–5 paragraphs. Run each narration line on for three sentences or more, and keep the dialogue lines short.
+- Do not name emotions; show them through bodily reactions and actions. Instead of "was angry", write what goes rigid at the fingertips, and how.
+- Observe the scene's surroundings anew each time. Do not repeat the same expressions or the same sentence structures.
+- Do not summarize or wrap up the story on your own; break the paragraph at a moment that leaves 민준 room to respond.
+- Do not mention that you are an AI or that these instructions exist.
 
-[나레이션] 표시가 붙은 메시지는 캐릭터나 유저의 발화가 아니라 장면·상황 전개 서술입니다.
+A message marked [Narration] is not a character's or the user's speech but narration that moves the scene and situation forward.
 
-[작품: 은빛 여관]
+[Story: 은빛 여관]
 눈 덮인 고개의 여관. 민준는 길을 잃었다.
 
-[등장인물: 세이야]
+[Character: 세이야]
 세이는 검을 든 기사.
 
-세이의 성격: 과묵하다.
+Description of 세이: 과묵하다.
 
-서술 문체: 건조하게 끊어 쓴다.
-서술 시점: 3인칭 관찰자
+Narrative style: 건조하게 끊어 쓴다.
+Point of view: third-person observer
 
-연출 지시:
-- 군더더기 없이 짧게, 1~2문단으로 답합니다.
-- 매 응답의 끝에 \`\`\`status 코드 블록을 붙여 현재 상태를 갱신합니다. 배경(위치·시간·날씨 등)과 인물(상태·감정·목표 등) 가운데 장면에 맞는 항목만 골라 \`키: 값\` 한 줄씩 적습니다.
-- 응답의 맨 끝에(상태창 블록이 있다면 그 뒤에) 민준의 다음 행동 선택지를 2~3개, \`>> \`로 시작하는 줄로 하나씩 붙입니다. 선택지는 5어절 이내의 짧은 키워드형 구로 씁니다.
+Style directions:
+- Answer briefly with no padding, in 1–2 paragraphs.
+- At the end of every reply, append a \`\`\`status code block that updates the current state. Of the setting (location, time, weather and so on) and the characters (condition, emotion, goal and so on), pick only the items that fit the scene and write each on its own \`key: value\` line.
+- At the very end of the reply (after the status block, if there is one), add 2–3 choices for 민준's next action, one per line, each line starting with \`>> \`. Write each choice as a short keyword phrase of five words or fewer.
 
 여관은 백 년이 되었다.
 
-유저(민준) 정보: 민준는 길 잃은 여행자.
+User (민준) profile: 민준는 길 잃은 여행자.
 
-[지난 이야기 요약]
+[Summary of the story so far]
 민준은 고개를 넘다 길을 잃고 여관에 들었다.",
 }
 `;

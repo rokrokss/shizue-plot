@@ -40,18 +40,18 @@ const DRAFT_MAX_TOKENS = 4000;
 /** Parse failures tolerated before the draft is given up on. */
 const DRAFT_ATTEMPTS = 2;
 
-const DRAFT_RULES = `당신은 롤플레이 작품의 초안 작가입니다. 창작자가 건넨 한 문단짜리 premise를 읽고 대화형 작품의 초안을 씁니다.
+const DRAFT_RULES = `You are the draft writer of a roleplay story. Read the one-paragraph premise the creator hands you and write a draft of an interactive story.
 
-규칙:
-- premise가 쓰인 언어로 모든 필드를 씁니다.
-- name은 작품 제목, intro는 독자에게 건네는 한 줄 소개, description은 모델이 읽는 세계관 설정입니다.
-- characters는 1~3명이며, description에는 정체와 배경을, personality에는 성격과 말투를 씁니다.
-- intros는 1~2개의 도입부입니다. 등장인물의 대사는 \`이름: 대사\` 줄로 쓰고, 접두사 없는 줄은 상황묘사이며, 상황묘사는 \`*…*\` 없이 그대로 씁니다.
-- 도입부는 독자가 곧바로 답할 수 있는 장면에서 끝냅니다. 독자의 말과 행동은 대신 쓰지 않습니다.
-- tags는 5개 이하의 짧은 분류어입니다.
-- 실존 인물이나 저작권 있는 작품의 설정을 그대로 옮기지 않습니다.
+Rules:
+- Write every field in the language the premise is written in.
+- name is the story's title, intro is a one-line introduction for readers, and description is the world setting the model reads.
+- characters holds 1–3 characters; write their identity and background in description, and their personality and way of speaking in personality.
+- intros holds 1–2 openings. Write a character's lines as \`Name: line\` lines; a line with no prefix describes the situation, written as it is, without \`*…*\`.
+- End an opening on a scene the reader can answer right away. Do not write the reader's words or actions for them.
+- tags holds at most 5 short category words.
+- Do not copy the settings of real people or of copyrighted works as they are.
 
-출력 형식: 아래 스키마를 따르는 JSON 객체 하나만 출력합니다. 코드 블록이나 다른 텍스트를 덧붙이지 않습니다.
+Output format: output only one JSON object that follows the schema below. Do not add a code block or any other text.
 {
   "name": string,
   "intro": string,

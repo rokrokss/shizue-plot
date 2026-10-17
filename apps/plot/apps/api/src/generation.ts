@@ -71,7 +71,7 @@ import type { AppDeps, AppEnv, OpenGeneration, Tx } from './deps.js';
 import { invalidateMemoryForEdit, noteRequestOverhead, scheduleMemoryUpdate } from './memory.js';
 import { countGeneration, type GenerationResult } from './metrics.js';
 import { runPromptScriptJob } from './regexWorker.js';
-import { ROLEPLAY_JAILBREAK_TOKENS, withRoleplayJailbreak } from './roleplayJailbreak.js';
+import { roleplayJailbreakTokens, withRoleplayJailbreak } from './roleplayJailbreak.js';
 import { withPromptScripts } from './sentHistory.js';
 import { regexStoredText } from './storedRegex.js';
 import { replyMemberOf, scheduleEmotionDetection } from './emotion.js';
@@ -143,7 +143,7 @@ export interface GenerationPlan {
   memoryText: string;
   /** The summaries the similar and random shares selected, which the recall turn opens with; empty when none was. */
   recalledMemoryText: string;
-  /** The facts block (`[기억]`) the recall turn carries after those summaries; empty when none was selected. */
+  /** The facts block (`[Memory]`) the recall turn carries after those summaries; empty when none was selected. */
   factsText: string;
   /** The turn the time labels count back from (`MemoryInput.clock`): the facts' and summaries', and retrieval's. */
   memoryClock: number;
@@ -550,6 +550,7 @@ async function buildRequestMessages(
     prompt,
     plan.contextBudget,
     plan.target.kind === 'continue' || Boolean(tavernBiasOf(plan).trim()),
+    plan.userName,
   );
   // How much history fits beside the rest is what memory summarizes against;
   // include the always-on instructions. An inspector's look changes nothing.
@@ -591,7 +592,7 @@ async function buildEditableRequest(
         // RisuAI fits the request to the context again once its listeners left
         // it, before the request triggers see it (`refitRequest`) — after the
         // state is kept, as RisuAI's outlives a request it then refuses.
-        request = result.turns && refitRequest(result.turns, plan.contextBudget - ROLEPLAY_JAILBREAK_TOKENS);
+        request = result.turns && refitRequest(result.turns, plan.contextBudget - roleplayJailbreakTokens(plan.userName));
       }
       if (triggers) {
         const input = { ...triggers, variables: applyVariableDelta(triggers.variables, listened.writes) };
@@ -847,7 +848,7 @@ const TAVERN_REASONING_SUFFIX = '</think>\n';
  * turn is the start of this one, to go on from and not to say again.
  */
 export const TAVERN_BIAS_NUDGE =
-  '(바로 뒤의 assistant 메시지는 이번 응답의 첫머리다. 그 글을 되풀이하지 말고, 그 글에서 바로 이어지는 나머지만 쓴다.)';
+  '(The assistant message right after this is the opening of this reply. Do not repeat it; write only the rest that continues straight on from it.)';
 
 /**
  * SillyTavern's bias for this reply (`getBiasStrings` in `script.js`): the
@@ -983,7 +984,7 @@ async function assembleRequest(
     ...(plan.speaker !== undefined ? { speaker: plan.speaker } : {}),
     // The trailing and always-on instructions bypass the assembler too, so
     // reserve them here without shifting the history's depth-lore slots.
-    contextBudget: plan.contextBudget - countTokens(partial) - countTokens(trailingSystem) - countTokens(languageLine) - ROLEPLAY_JAILBREAK_TOKENS,
+    contextBudget: plan.contextBudget - countTokens(partial) - countTokens(trailingSystem) - countTokens(languageLine) - roleplayJailbreakTokens(plan.userName),
     report,
     ...(marksLore ? { markTavernLore: true } : {}),
   });

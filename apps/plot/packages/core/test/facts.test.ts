@@ -28,12 +28,12 @@ describe('facts', () => {
     const request = factExtractionRequest('유저: 안녕\n리안: 반가워', 'ko');
     expect(request.system).toBe(FACT_EXTRACTION_PROMPT.replace('{{language}}', factLanguageLine('ko')));
     expect(request.system).toContain('{"facts": string[], "updates": {"id": number, "fact": string}[], "invalidated": number[]}');
-    expect(request.system).toContain('사실은 한국어로 씁니다.');
+    expect(request.system).toContain('so write the facts in Korean.');
     // Nothing kept yet: the transcript alone.
     expect(request.messages).toEqual([{ role: 'user', content: '유저: 안녕\n리안: 반가워' }]);
-    expect(factExtractionRequest('A: hi', 'en').system).toContain('사실은 영어로 씁니다.');
-    expect(factExtractionRequest('A: hi', 'ja').system).toContain('사실은 일본어로 씁니다.');
-    expect(factExtractionRequest('…', undefined).system).toContain('- 사실은 대화에 쓰인 언어로 씁니다.');
+    expect(factExtractionRequest('A: hi', 'en').system).toContain('so write the facts in English.');
+    expect(factExtractionRequest('A: hi', 'ja').system).toContain('so write the facts in Japanese.');
+    expect(factExtractionRequest('…', undefined).system).toContain('- Write the facts in the language the conversation is written in.');
   });
 
   it('shows the facts already kept, numbered, before the transcript — at most ten', () => {
@@ -110,12 +110,12 @@ describe('facts', () => {
 
   it("tells a group work's extraction who was on the stage, and reads which new facts everyone knows", () => {
     const request = factExtractionRequest('세이야: 비밀이야.', 'ko', [], ['세이야', '카이']);
-    expect(request.system).toContain('이 구간의 장면에 있던 등장인물은 세이야, 카이입니다.');
-    expect(request.system).toContain('애매하면 false로 둡니다.');
+    expect(request.system).toContain('The characters in the scene of this stretch are 세이야, 카이.');
+    expect(request.system).toContain('When in doubt, leave it false.');
     expect(request.system.endsWith(
       '{"facts": {"fact": string, "public": boolean}[], "updates": {"id": number, "fact": string, "public": boolean}[], "invalidated": number[]}',
     )).toBe(true);
-    expect(request.system).toContain('사실은 한국어로 씁니다.');
+    expect(request.system).toContain('so write the facts in Korean.');
     // No stage, or a work of one: the instruction as it always was.
     expect(factExtractionRequest('…', 'ko', [], []).system).toBe(factExtractionRequest('…', 'ko').system);
 
@@ -135,9 +135,9 @@ describe('facts', () => {
     // A shown fact only others knew says who did; said again, it is this stage's to learn — unless the answer changed it.
     const shown = ['리안은 살아 있다.', { fact: '세이야는 왕의 서자다.', knownTo: ['세이야'] }];
     expect(factExtractionRequest('카이: 들었어.', 'ko', shown, ['카이', '미오']).messages[0]!.content).toContain(
-      `${KNOWN_FACTS_HEADING}\n1. 리안은 살아 있다.\n2. 세이야는 왕의 서자다. [아는 인물: 세이야]\n\n`,
+      `${KNOWN_FACTS_HEADING}\n1. 리안은 살아 있다.\n2. 세이야는 왕의 서자다. [Known to: 세이야]\n\n`,
     );
-    expect(factExtractionRequest('…', 'ko', shown, ['카이']).system).toContain('끝에 [아는 인물: …]이 붙은 사실은 그 인물들만 알던 사실');
+    expect(factExtractionRequest('…', 'ko', shown, ['카이']).system).toContain('ends with [Known to: …] was known only to those characters');
     expect(factExtractionRequest('…', 'ko', shown).messages[0]!.content).toContain('2. 세이야는 왕의 서자다.\n');
     expect(parseFactExtraction(JSON.stringify({ facts: ['세이야는 왕의 서자다.', '리안은 살아 있다.'] }), shown).added).toEqual(['세이야는 왕의 서자다.']);
     expect(parseFactExtraction(JSON.stringify({ facts: ['세이야는 왕의 서자다.'], invalidated: [2] }), shown).added).toEqual([]);
