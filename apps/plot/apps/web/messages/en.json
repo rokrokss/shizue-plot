@@ -1002,6 +1002,7 @@
     "modelPill": "Change model",
     "sendMaybeDelivered": "This message may already have been sent. Reload to check before sending it again.",
     "backToPlot": "Back to the plot",
+    "backToChats": "Back to chats",
     "you": "You",
     "aiNotice": "This is a fictional conversation with an AI, not a real person.",
     "aiBadge": "AI",

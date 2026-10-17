@@ -73,7 +73,8 @@ export function Header() {
             <>
               <Link href="/settings" className={buttonClass('secondary', 'sm')} aria-label={t('aiSettings')}>AI</Link>
               {/* The bell stays at every width: what it carries arrives while
-                  the reader is elsewhere, and a phone is where they are. */}
+                  the reader is elsewhere, and a phone is where they are. Only a
+                  conversation on a phone hides the whole bar (the layout). */}
               <NotificationBell />
               <div className="hidden items-center gap-2 lg:flex">
                 <LocaleSwitcher />

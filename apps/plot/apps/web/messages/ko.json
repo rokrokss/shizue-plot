@@ -1002,6 +1002,7 @@
     "modelPill": "모델 바꾸기",
     "sendMaybeDelivered": "메시지가 이미 전송되었을 수도 있습니다. 다시 보내기 전에 새로고침해 확인하세요.",
     "backToPlot": "플롯으로",
+    "backToChats": "대화 목록으로",
     "you": "나",
     "aiNotice": "이 대화는 AI와의 가상 대화입니다. 실제 인물이 아닙니다.",
     "aiBadge": "AI",

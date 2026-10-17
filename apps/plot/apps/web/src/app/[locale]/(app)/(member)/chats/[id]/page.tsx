@@ -32,6 +32,7 @@ import { MoreActions } from '@/components/MoreActions';
 import { ScriptDialog, type ScriptPrompt } from '@/components/ScriptDialog';
 import { SceneDraft } from '@/components/SceneDraft';
 import { SceneEditor, type SceneBlock } from '@/components/SceneEditor';
+import { ThemeSwitcher } from '@/components/ThemeSwitcher';
 import { Button, CenteredMessage, Spinner, TextArea, cx } from '@/components/ui';
 import { WriteAsPicker } from '@/components/WriteAsPicker';
 import { Link } from '@/i18n/navigation';
@@ -365,6 +366,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const t = useTranslations('chat');
   const common = useTranslations('common');
   const localeNames = useTranslations('locales');
+  const nav = useTranslations('nav');
   const format = useFormatter();
   const toMessage = useErrorMessage();
 
@@ -3230,22 +3232,34 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       : [];
 
   return (
-    // A column exactly as tall as what is left under the header, so the list
-    // below is the only thing that scrolls and the composer never moves.
-    <div className="chat-workspace flex h-[calc(100dvh-3.5rem)] flex-col">
+    // A column exactly as tall as what is left under the header (its 56px and
+    // border; on a phone the shell's header steps aside, so the whole screen),
+    // so the list below is the only thing that scrolls and the composer never moves.
+    <div className="chat-workspace flex h-dvh flex-col lg:h-[calc(100dvh-3.5rem-1px)]">
       <div className="shrink-0 border-b border-line bg-surface">
-        {/* One row on a phone, where the title is what gives way — after everything
-            that can step aside has: the music's mute goes into the settings sheet,
-            the settings into an icon, and the model pill gives its place to the
-            card screen's way out while that is open. The wide row wraps its controls. */}
-        <div className="mx-auto flex max-w-3xl items-center gap-2 px-5 py-2.5 lg:flex-wrap lg:gap-3">
+        {/* One row on a phone, Zeta's ‹ · name · "zeta ⌄" · settings, where the title
+            is what gives way — after everything that can step aside has: the face
+            for the way back, the music's mute into the settings sheet, the settings
+            into an icon, and the model pill gives its place to the card screen's way
+            out while that is open. The wide row wraps its controls. */}
+        <div className="mx-auto flex max-w-3xl items-center gap-2 px-5 py-1.5 lg:flex-wrap lg:gap-3 lg:py-2.5">
+          {/* The way out on a phone, where neither the shell's header nor its tab
+              bar stands; on a wide screen the header's own 대화 is right above. */}
+          <Link
+            href="/chats"
+            aria-label={t('backToChats')}
+            title={t('backToChats')}
+            className="-ml-2 inline-flex size-9 shrink-0 items-center justify-center rounded-full text-fg transition-colors hover:bg-raised/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus lg:hidden"
+          >
+            <Icon name="back" className="size-5" />
+          </Link>
           <Link
             // The work's own page, which is the same one for creator and reader.
             href={`/p/${state.chat.plotId}`}
             className="flex min-w-0 items-center gap-2.5"
             title={t('backToPlot')}
           >
-            <Avatar src={plot?.coverUrl ?? null} name={characterName} className="size-8 shrink-0 text-sm" />
+            <Avatar src={plot?.coverUrl ?? null} name={characterName} className="size-8 shrink-0 text-sm max-lg:hidden" />
             <span className="truncate text-sm font-medium">{characterName}</span>
           </Link>
           <AiBadge />
@@ -4089,6 +4103,14 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           >
             {t('notes')}
           </Button>
+          {/* The look, which a phone otherwise reaches only from the tab bar's menu —
+              and a conversation has no tab bar. */}
+          <div className="mt-5 flex items-center justify-between gap-3 border-t border-line pt-4">
+            <span aria-hidden="true" className="text-sm">
+              {nav('theme')}
+            </span>
+            <ThemeSwitcher />
+          </div>
         </BottomSheet>
       ) : null}
 
