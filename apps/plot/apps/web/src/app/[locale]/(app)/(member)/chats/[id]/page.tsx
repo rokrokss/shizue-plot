@@ -1459,10 +1459,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    * the effect again — takes the same set back instead of starting another.
    */
   const [runtimes, setRuntimes] = useState<ScriptRuntimes | null>(null);
-  /** The page's consent check as of its last render (`allowLowLevelAccess`), for runtimes built before it. */
-  const lowLevelConsent = useRef<() => Promise<boolean>>(async () => false);
-  /** Whether the reader said no to the work's low-level access while this page has been open. */
-  const lowLevelDeclined = useRef(false);
   const lingering = useRef<{ made: ScriptRuntimes; from: readonly unknown[]; timer: ReturnType<typeof setTimeout> } | null>(
     null,
   );
@@ -1507,11 +1503,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         setScriptNotice((current) => (current === notice ? '' : current));
       }
     };
-    // A script's model call or request waits on the reader's consent to the work's
-    // low-level access (`allowLowLevelAccess`), and fails as a refused call does without it.
-    const allowLowLevel = async (): Promise<void> => {
-      if (!(await lowLevelConsent.current())) throw new Error(t('lowLevelAccessDeclined'));
-    };
     // A plot that carries Lua leases the reader's sandbox; wasmoon is fetched on its
     // first call, never before. Given back with the runtimes rather than by each engine.
     const sandbox = scriptBundles.some((bundle) => luaScriptsOf(bundle.triggers).length > 0)
@@ -1536,17 +1527,13 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                 sandbox: { call: (...args) => sandbox.call(...args), dispose: () => undefined },
                 ui: scriptUi,
                 // Each names the trigger whose code asked: the server holds the call to that trigger's access.
-                llm: async (messages, model, trigger) => {
-                  await allowLowLevel();
-                  return (await apiSend<{ result: string }>('POST', `/api/chats/${id}/script-llm`, { messages, model, trigger, ...tag }))
-                    .result;
-                },
+                llm: async (messages, model, trigger) =>
+                  (await apiSend<{ result: string }>('POST', `/api/chats/${id}/script-llm`, { messages, model, trigger, ...tag }))
+                    .result,
                 similarity,
                 // Our server makes the GET, under RisuAI's limits, and answers as RisuAI does.
-                request: async (url, trigger) => {
-                  await allowLowLevel();
-                  return apiSend<LuaRequestAnswer>('POST', `/api/chats/${id}/script-fetch`, { url, trigger, ...tag });
-                },
+                request: (url, trigger) =>
+                  apiSend<LuaRequestAnswer>('POST', `/api/chats/${id}/script-fetch`, { url, trigger, ...tag }),
                 // `loadLoreBooks`: activated as `/test_lorebook` is, against RisuAI's
                 // `maxContext`, which is the chat's context budget here.
                 lore: async (history, lorebook) => ({
@@ -1571,7 +1558,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           ui: scriptUi,
           engines,
           similarity,
-          allowLowLevel,
           log,
           onGlobalVariables: (globals) =>
             setState((current) => (current ? { ...current, globalVariables: globals } : current)),
@@ -2402,32 +2388,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   }
 
   /**
-   * The reader's one-off consent, for this chat, to the work's low-level access
-   * (`allowLowLevelAccess`): its scripts' model calls on their ChatGPT plan and
-   * their requests out of our server. A work of their own needs none. A no
-   * stands while the page is open, so a script that calls again is not asked
-   * again; false too when the consent could not be stored.
-   */
-  async function allowLowLevelAccess(): Promise<boolean> {
-    const current = stateRef.current;
-    if (!current) return false;
-    if (current.isPlotOwner || current.chat.allowLowLevelAccess) return true;
-    if (lowLevelDeclined.current) return false;
-    if (!window.confirm(t('lowLevelAccessConsent', { name: characterName }))) {
-      lowLevelDeclined.current = true;
-      return false;
-    }
-    try {
-      applyState(await apiSend<ChatState>('PATCH', `/api/chats/${id}`, { allowLowLevelAccess: true }));
-      return true;
-    } catch (caught) {
-      setSettingsError(toMessage(caught));
-      return false;
-    }
-  }
-  lowLevelConsent.current = allowLowLevelAccess;
-
-  /**
    * A round in a work of several members: one reply per speaker, each its own
    * message. The speakers are picked here (`lib/groupRound`) — on a send once the
    * input scripts have left the turn's text — and asked one at a time, each after
@@ -2692,7 +2652,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     emotionProcessor?: EmotionProcessor;
     memorySettings?: ChatMemorySettings;
     allowComponentTurns?: boolean;
-    allowLowLevelAccess?: boolean;
     /** The reader's half of the plot's two style features. */
     statusWindowEnabled?: boolean;
     choicesEnabled?: boolean;
@@ -3095,10 +3054,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               onToggleRelationship={(relationshipEnabled) => updateSettings({ relationshipEnabled })}
               allowComponentTurns={state.chat.allowComponentTurns}
               onToggleComponentTurns={(allowComponentTurns) => updateSettings({ allowComponentTurns })}
-              allowLowLevelAccess={state.chat.allowLowLevelAccess}
-              {...(scriptBundle?.lowLevelAccess && !state.isPlotOwner
-                ? { onToggleLowLevelAccess: (allowLowLevelAccess: boolean) => updateSettings({ allowLowLevelAccess }) }
-                : {})}
               statusWindow={plotStatusWindow}
               statusWindowEnabled={state.chat.statusWindowEnabled}
               onToggleStatusWindow={(statusWindowEnabled) => updateSettings({ statusWindowEnabled })}

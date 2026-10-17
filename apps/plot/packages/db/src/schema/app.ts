@@ -517,10 +517,6 @@ export const chats = pgTable(
     // Consent for the sendTurn capability, given once per chat and revocable in
     // the chat panel. A plot declaring the capability is not enough on its own.
     allowComponentTurns: boolean('allow_component_turns').notNull().default(false),
-    // Consent for a work's scripts to use low-level access on this reader's
-    // behalf — model calls on their account and requests out of this server —
-    // given once per chat and revocable in the chat panel. A work's owner needs none.
-    allowLowLevelAccess: boolean('allow_low_level_access').notNull().default(false),
     // The reader's half of the two style features: on by default, and meaningful
     // only while the plot enables the feature at all — a chat on a plot with no
     // status window carries a true nobody ever sees.

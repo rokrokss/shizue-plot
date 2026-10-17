@@ -115,7 +115,7 @@ const stateWith = (path: ChatMessage[]): ChatState => ({
     relationship: null,
     relationshipEnabled: true,
     narrator: null,
-    allowComponentTurns: false, allowLowLevelAccess: false,
+    allowComponentTurns: false,
     statusWindowEnabled: false,
     choicesEnabled: false,
     reasoningEffort: null,

@@ -25,11 +25,10 @@
  * - the prompt is size-checked here as it is in the sandbox.
  *
  * The calls spend the reader's own account, as a RisuAI script spends its user's
- * API key — but here the work may be a stranger's, so on one the reader does not
- * own they need the reader's consent for the chat, and a window caps how many a
- * reader makes (the route's `requireLowLevelConsent` and `RATE_LIMITS.scriptLlm`).
- * Nothing is stored. The answer is the model's text; RisuAI's `{success, result}`
- * wrapping is the sandbox's.
+ * API key — but here the work may be a stranger's, so a window caps how many a
+ * reader makes (the route's `RATE_LIMITS.scriptLlm`). Nothing is stored. The
+ * answer is the model's text; RisuAI's `{success, result}` wrapping is the
+ * sandbox's.
  */
 import { ChatGPTError, getAdapter, type ChatMessage, type ChatRequest } from '@shizue/llm';
 import type { AppDeps } from './deps.js';

@@ -90,7 +90,7 @@ const state = (model: string): ChatState =>
     chat: {
       id: 'cht_1', plotId: 'sty_1', personaId: null, title: '비 오는 밤의 서점', model, subModel: null, note: '',
       preset: 'default', headMessageId: 'msg_1', memoryRevision: 0, memorySettings: null, relationship: null,
-      relationshipEnabled: true, narrator: null, allowComponentTurns: false, allowLowLevelAccess: false, statusWindowEnabled: false,
+      relationshipEnabled: true, narrator: null, allowComponentTurns: false, statusWindowEnabled: false,
       choicesEnabled: false, reasoningEffort: null, absentCharacterIds: [], noteIds: [],
       createdAt: '2026-08-16T00:00:00.000Z', updatedAt: '2026-08-16T00:00:00.000Z',
     },

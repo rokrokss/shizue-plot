@@ -122,7 +122,6 @@ export function ChatPanel({
   narrator,
   customUi,
   allowComponentTurns,
-  allowLowLevelAccess = false,
   statusWindow,
   statusWindowEnabled,
   choices,
@@ -137,7 +136,6 @@ export function ChatPanel({
   onSaveNarrator,
   onToggleCustomUi,
   onToggleComponentTurns,
-  onToggleLowLevelAccess,
   onToggleStatusWindow,
   onToggleChoices,
   absentCharacterIds = [],
@@ -171,8 +169,6 @@ export function ChatPanel({
   customUi: boolean;
   /** Consent for components to send turns, granted from the chat and revoked here. */
   allowComponentTurns: boolean;
-  /** Consent for the work's scripts' low-level access, granted from the chat and revoked here. */
-  allowLowLevelAccess?: boolean;
   /**
    * Whether the plot asks for each of its two derived features. A reader's
    * toggle for a feature the plot never turned on would be a switch with nothing
@@ -197,8 +193,6 @@ export function ChatPanel({
   onSaveNarrator: (narrator: NarratorConfig | null) => Promise<void>;
   onToggleCustomUi: (enabled: boolean) => void;
   onToggleComponentTurns: (allowed: boolean) => Promise<void>;
-  /** Saves the low-level consent; offered only where the work's scripts hold low-level access and the work is not the reader's. */
-  onToggleLowLevelAccess?: (allowed: boolean) => Promise<void>;
   onToggleStatusWindow: (enabled: boolean) => Promise<void>;
   onToggleChoices: (enabled: boolean) => Promise<void>;
   /** Members the reader sent off the stage. */
@@ -643,21 +637,6 @@ export function ChatPanel({
           />
         </div>
         <p className="text-xs text-muted">{t('componentTurnsHint')}</p>
-
-        {onToggleLowLevelAccess ? (
-          <>
-            <div className="flex items-center justify-between gap-3">
-              <h2 className="text-xs font-medium text-muted">{t('lowLevelAccess')}</h2>
-              <Checkbox
-                label={t('lowLevelAccessAllowed')}
-                checked={allowLowLevelAccess}
-                disabled={busy}
-                onChange={(allowed) => void onToggleLowLevelAccess(allowed)}
-              />
-            </div>
-            <p className="text-xs text-muted">{t('lowLevelAccessHint')}</p>
-          </>
-        ) : null}
       </section>
 
       {modules}

@@ -61,7 +61,7 @@ const state = (ids: string[], hasMore?: boolean): ChatState => ({
     relationship: null,
     relationshipEnabled: true,
     narrator: null,
-    allowComponentTurns: false, allowLowLevelAccess: false,
+    allowComponentTurns: false,
     statusWindowEnabled: true,
     choicesEnabled: true,
     reasoningEffort: null,

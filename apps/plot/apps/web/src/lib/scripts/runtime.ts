@@ -191,12 +191,6 @@ export interface ScriptRuntimeOptions {
    */
   similarity?: SimilaritySearch;
   /**
-   * The reader's consent to the work's low-level access, asked before a
-   * `runLLM`/`v2RunLLM` calls the model on their account; it throws when they
-   * declined, and the effect fails as a refused call does.
-   */
-  allowLowLevel?: () => Promise<void>;
-  /**
    * Where the `editinput`/`editoutput` regex scripts run: the page's worker
    * (`editScriptRunner.ts`), or this thread where there are no workers.
    */
@@ -733,7 +727,6 @@ export function createScriptRuntime(options: ScriptRuntimeOptions): ScriptRuntim
     // failing) comes back as the failure the effect writes.
     llm: async (request) => {
       try {
-        await options.allowLowLevel?.();
         const answer = await api.send<{ result: string }>('POST', `/api/chats/${chatId}/script-llm`, {
           messages: request.messages,
           model: request.model === 'submodel' ? 'sub' : 'main',
