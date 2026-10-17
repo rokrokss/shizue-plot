@@ -34,8 +34,6 @@ const state = (head: string | null, path: ChatMessage[]): ChatState => ({
     headMessageId: head,
     memoryRevision: 0,
     memorySettings: null,
-    relationship: null,
-    relationshipEnabled: true,
     narrator: null,
     allowComponentTurns: false,
     statusWindowEnabled: true,

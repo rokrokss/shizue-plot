@@ -4,7 +4,7 @@ import { NARRATION_HEADER } from './prompt.js';
 import { readerRuns, spokenBy, type ReaderMember } from './speech.js';
 
 /**
- * One transcript line for the sidecar models (memory, relationship, suggestions).
+ * One transcript line for the sidecar models (memory, suggestions).
  * A narrating turn moves the scene rather than speaking — whoever sent it — so
  * attributing it to the reader or to a character would write false memories
  * either way, and it goes out speaker-less under the same header the main prompt

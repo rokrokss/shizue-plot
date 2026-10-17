@@ -123,9 +123,9 @@ export const RISU_REQUEST_ITEMS: Record<PromptBlockKind, RisuItemRule> = {
   // after the newest turn: a system turn with no memo, never removable.
   moved_lore: {},
   // The summaries HypaV3's similar and random shares picked (RisuAI sends them
-  // with the rest, in `supaMemory`), the facts, SillyTavern's retrieved messages
-  // and the relationship, which RisuAI has no turn for: after the newest turn,
-  // like depth-0 lore.
+  // with the rest, in `supaMemory`), the facts and SillyTavern's retrieved
+  // messages, which RisuAI has no turn for: after the newest turn, like depth-0
+  // lore.
   recall: {},
   post_history: {},
   // The start triggers' `additonalSysPrompt` turns.

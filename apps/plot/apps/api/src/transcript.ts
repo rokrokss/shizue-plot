@@ -9,7 +9,7 @@ export const readerMembers = (members: readonly Pick<Character, 'id' | 'name' | 
   }));
 
 /**
- * A stretch of the branch as the sidecar models read it (memory, relationship,
+ * A stretch of the branch as the sidecar models read it (memory,
  * suggestions), one `transcriptLine` (@shizue/core) per message: a group turn's
  * reply under its speaker's name, and the lines the reader wrote as a member or
  * as the narrator under them. `members` is the roster, by whose ids the replies

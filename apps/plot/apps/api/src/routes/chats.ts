@@ -140,7 +140,6 @@ import {
 } from '../readerModules.js';
 import { readerModuleAssetsJson, toReaderModuleJson } from './readerModules.js';
 import { RATE_LIMITS, rateLimit } from '../rateLimit.js';
-import { buildRelationshipText } from '../relationship.js';
 import {
   headMoved,
   loadChatGlobalVariables,
@@ -224,8 +223,6 @@ export const toChatJson = (chat: Chat, noteIds: string[]) => ({
   memorySettings: chat.memorySettings,
   /** Moves with every edit, hide and delete of a message: the memory's summaries may have changed with it. */
   memoryRevision: chat.memoryRevision,
-  relationship: chat.relationship,
-  relationshipEnabled: chat.relationshipEnabled,
   /** How a reply's emotion picture is chosen (§7.7): the auxiliary model unless the reader picked the embedder. */
   emotionProcessor: chat.emotionProcessor ?? 'submodel',
   /** This chat's narrator override; null leaves the plot's own in force. */
@@ -1715,7 +1712,6 @@ async function regeneratePlan(
     recalledMemoryText: memory.recalledMemoryText,
     factsText: memory.factsText,
     memoryClock: memory.clock,
-    relationshipText: buildRelationshipText(chat),
     authorNote: context.authorNote,
     ...readerPromptSettings(c, chat, context.row),
     ...(context.narrator ? { narrator: context.narrator } : {}),
@@ -2161,7 +2157,6 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const preset = optionalPreset(body);
       const readerPresetId =
         'readerPresetId' in body ? await resolveReaderPresetId(deps, userId, body['readerPresetId']) : undefined;
-      const relationshipEnabled = optionalBoolean(body, 'relationshipEnabled');
       const emotionProcessor = optionalEmotionProcessor(body);
       const memorySettings = optionalMemorySettings(body);
       const allowComponentTurns = optionalBoolean(body, 'allowComponentTurns');
@@ -2188,7 +2183,6 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         note === undefined &&
         preset === undefined &&
         readerPresetId === undefined &&
-        relationshipEnabled === undefined &&
         emotionProcessor === undefined &&
         memorySettings === undefined &&
         allowComponentTurns === undefined &&
@@ -2210,7 +2204,6 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           ...(note !== undefined ? { note } : {}),
           ...(preset !== undefined ? { preset } : {}),
           ...(readerPresetId !== undefined ? { readerPresetId } : {}),
-          ...(relationshipEnabled !== undefined ? { relationshipEnabled } : {}),
           ...(emotionProcessor !== undefined ? { emotionProcessor } : {}),
           ...(memorySettings !== undefined ? { memorySettings } : {}),
           ...(allowComponentTurns !== undefined ? { allowComponentTurns } : {}),
@@ -3196,8 +3189,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         recalledMemoryText: memory.recalledMemoryText,
         factsText: memory.factsText,
         memoryClock: memory.clock,
-        relationshipText: buildRelationshipText(chat),
-        authorNote: context.authorNote,
+            authorNote: context.authorNote,
         ...readerPromptSettings(c, chat, context.row),
         ...(context.narrator ? { narrator: context.narrator } : {}),
         ...(directions && edited.turn ? { directions } : {}),
@@ -3329,8 +3321,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         recalledMemoryText: memory.recalledMemoryText,
         factsText: memory.factsText,
         memoryClock: memory.clock,
-        relationshipText: buildRelationshipText(chat),
-        authorNote: context.authorNote,
+            authorNote: context.authorNote,
         ...readerPromptSettings(c, chat, context.row),
         ...(context.narrator ? { narrator: context.narrator } : {}),
         ...(answersReader ? { directions: lastUserDirections(path) } : {}),
@@ -3431,8 +3422,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         recalledMemoryText: memory.recalledMemoryText,
         factsText: memory.factsText,
         memoryClock: memory.clock,
-        relationshipText: buildRelationshipText(chat),
-        authorNote: context.authorNote,
+            authorNote: context.authorNote,
         ...readerPromptSettings(c, chat, context.row),
         ...(context.narrator ? { narrator: context.narrator } : {}),
         // Continue finishes the reply to the last user turn, so that turn's ruling
@@ -3521,8 +3511,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         recalledMemoryText: memory.recalledMemoryText,
         factsText: memory.factsText,
         memoryClock: memory.clock,
-        relationshipText: buildRelationshipText(chat),
-        authorNote: context.authorNote,
+            authorNote: context.authorNote,
         ...readerPromptSettings(c, chat, context.row),
         ...(context.narrator ? { narrator: context.narrator } : {}),
         preset: getPreset(chat.preset),

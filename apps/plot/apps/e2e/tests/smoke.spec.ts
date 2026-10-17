@@ -495,25 +495,6 @@ test('imports a SillyTavern preset where ST sends its prompts, and says which fi
   }
 });
 
-test('shows the relationship section with its toggle', async () => {
-  await openPanel();
-  const section = page.getByTestId('chat-relationship');
-
-  // The echo model never triggers an extraction, so there is nothing to show yet.
-  await expect(section.getByText('아직 관계가 형성되지 않았습니다')).toBeVisible();
-
-  const toggle = section.getByLabel('관계 추적');
-  await expect(toggle).toBeChecked();
-  // click(), not uncheck(): the box is controlled by the server round-trip, so it
-  // stays checked until the PATCH answers.
-  await Promise.all([chatWrite('PATCH'), toggle.click()]);
-  await expect(toggle).not.toBeChecked();
-
-  await page.reload();
-  await openPanel();
-  await expect(page.getByTestId('chat-relationship').getByLabel('관계 추적')).not.toBeChecked();
-});
-
 test('tunes the memory settings, which survive a reload', async () => {
   await openPanel();
   await Promise.all([

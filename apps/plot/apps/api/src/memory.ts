@@ -938,7 +938,7 @@ export async function auxiliaryModelOf(deps: Pick<AppDeps, 'env' | 'chatgpt'>, o
 }
 
 /**
- * Summaries, suggestions and relationships run on the chat's auxiliary model
+ * Summaries and suggestions run on the chat's auxiliary model
  * (`auxiliaryModelOf`). A signed-out owner disables background work.
  */
 export async function memoryChannel(

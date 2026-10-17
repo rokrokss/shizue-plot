@@ -33,7 +33,6 @@ const context = (scripts: DisplayScript[], overrides: Partial<DisplayContext> = 
   scripts,
   variables: { gold: '12' },
   assets: new Map(),
-  relationship: null,
   turn: 1,
   char: '아리아',
   user: '민준',

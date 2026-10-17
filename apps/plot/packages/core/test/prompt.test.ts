@@ -387,9 +387,8 @@ describe('assemblePrompt', () => {
     const recalled = {
       factsText: '[기억]\n- (약 20턴 전) {{user}}는 등대 열쇠를 갖고 있다.',
       retrievalText: 'Past events:\n{{user}}: 등대에 가자',
-      relationshipText: '[현재 관계 상태]\n애정 70',
     };
-    const RECALL = '[기억]\n- (약 20턴 전) 민준는 등대 열쇠를 갖고 있다.\n\nPast events:\n민준: 등대에 가자\n\n[현재 관계 상태]\n애정 70';
+    const RECALL = '[기억]\n- (약 20턴 전) 민준는 등대 열쇠를 갖고 있다.\n\nPast events:\n민준: 등대에 가자';
     const turns = history.map((turn, at) => ({ ...turn, id: `m${at}` }));
     const recall = (input: Partial<Parameters<typeof assemblePrompt>[0]> = {}) =>
       assemblePrompt({ plot, characters: [aria], history: turns, preset, userName: '민준', report: true, ...recalled, ...input });
@@ -397,7 +396,7 @@ describe('assemblePrompt', () => {
     const conversation = (prompt: ReturnType<typeof assemblePrompt>) =>
       prompt.messages.slice(0, prompt.messages.findLastIndex((message) => message.role !== 'system') + 1);
 
-    it('sends the facts, the messages a search brought back and the relationship as one system turn right after the newest turn', () => {
+    it('sends the facts and the messages a search brought back as one system turn right after the newest turn', () => {
       const { system, messages, sources, report } = recall({ memoryText: '[지난 이야기 요약]\n요약.' });
       // None of it is in the system string: only the summaries are.
       expect(system).toBe(`${assemble(100_000).system}\n\n[지난 이야기 요약]\n요약.`);
@@ -415,14 +414,12 @@ describe('assemblePrompt', () => {
       expect(report!.blocks.at(-2)!.text).toBe(RECALL);
     });
 
-    it('keeps the order facts, retrieval, relationship, and leaves out what is blank', () => {
+    it('keeps the order facts, retrieval, and leaves out what is blank', () => {
       const only = (input: Partial<typeof recalled>) =>
-        recall({ factsText: '', retrievalText: '', relationshipText: '', ...input }).messages.at(-2)!.content;
-      expect(only({ relationshipText: recalled.relationshipText })).toBe('[현재 관계 상태]\n애정 70');
-      expect(only({ factsText: recalled.factsText, relationshipText: recalled.relationshipText })).toBe(
-        '[기억]\n- (약 20턴 전) 민준는 등대 열쇠를 갖고 있다.\n\n[현재 관계 상태]\n애정 70',
-      );
-      const none = recall({ factsText: ' ', retrievalText: '', relationshipText: '  ' });
+        recall({ factsText: '', retrievalText: '', ...input }).messages.at(-2)!.content;
+      expect(only({ retrievalText: recalled.retrievalText })).toBe('Past events:\n민준: 등대에 가자');
+      expect(only({ factsText: recalled.factsText })).toBe('[기억]\n- (약 20턴 전) 민준는 등대 열쇠를 갖고 있다.');
+      const none = recall({ factsText: ' ', retrievalText: '  ' });
       expect(none.messages).toEqual(assemblePrompt({ plot, characters: [aria], history: turns, preset, userName: '민준' }).messages);
     });
 
@@ -440,7 +437,7 @@ describe('assemblePrompt', () => {
       // Only the blank line it is joined to the rest by is left in.
       const sent = '[지난 이야기 요약: 이번 턴에 떠올린 것]\n(약 40턴 전) 민준는 등대에 올랐다.';
       expect(withIt.fixedTokens! - without.fixedTokens!).toBe(countTokens(`${sent}\n\n${RECALL}`) - countTokens(RECALL) - countTokens(sent));
-      expect(recall({ factsText: '', retrievalText: '', relationshipText: '', recalledMemoryText: picked }).messages.at(-2)!.content).toBe(
+      expect(recall({ factsText: '', retrievalText: '', recalledMemoryText: picked }).messages.at(-2)!.content).toBe(
         '[지난 이야기 요약: 이번 턴에 떠올린 것]\n(약 40턴 전) 민준는 등대에 올랐다.',
       );
     });
@@ -451,14 +448,14 @@ describe('assemblePrompt', () => {
       // ChatGPT adapter sends the system turns after the newest turn as one.
       const next = [...turns, { role: 'assistant' as const, content: '다섯 번째 답장.', id: 'm4' }, { role: 'user' as const, content: '여섯 번째.', id: 'm5' }];
       const first = recall({ directions: '판정 하나.' });
-      const second = recall({ history: next, factsText: '[기억]\n- 다른 사실.', relationshipText: '[현재 관계 상태]\n애정 71', directions: '판정 둘.' });
+      const second = recall({ history: next, factsText: '[기억]\n- 다른 사실.', directions: '판정 둘.' });
       expect(second.system).toBe(first.system);
       expect(conversation(second).slice(0, conversation(first).length)).toEqual(conversation(first));
       expect(second.messages.slice(conversation(first).length).map((message) => message.content)).toEqual([
         '다섯 번째 답장.',
         '여섯 번째.',
         '[게임 판정]\n판정 둘.',
-        '[기억]\n- 다른 사실.\n\nPast events:\n민준: 등대에 가자\n\n[현재 관계 상태]\n애정 71',
+        '[기억]\n- 다른 사실.\n\nPast events:\n민준: 등대에 가자',
         'POST',
       ]);
     });

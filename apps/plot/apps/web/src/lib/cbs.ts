@@ -40,9 +40,6 @@ import { isVideoSrc, lookupAsset, type AssetResolver } from './assets';
 import { MAX_BACKGROUND_RENDER_CHARS } from './types';
 import { isTainted, stripTaint, taint } from './taint';
 
-/** The relationship axes `{{rel::axis}}` exposes; mirrors RELATIONSHIP_AXES. */
-const REL_AXES = ['affection', 'obsession', 'trust', 'liking', 'disgust', 'fear'] as const;
-
 export interface CbsContext {
   /** Path-derived chat variables, for `{{getvar::k}}`, `$k` and bare identifiers. */
   variables: Record<string, string>;
@@ -61,8 +58,6 @@ export interface CbsContext {
    * there is no window to ask — the display worker. Read live where there is one.
    */
   screen?: { width: number; height: number };
-  /** Relationship axes 0-100, or null while the chat has none. */
-  relationship: Record<string, number> | null;
   /** User turns taken on this branch, for `{{turn}}`. */
   turn: number;
   char: string;
@@ -487,11 +482,6 @@ function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>, prose =
         case 'lastmessageid':
         case 'lastmessageindex':
           return ctx.lastMessageId === undefined ? undefined : { text: String(ctx.lastMessageId) };
-        case 'rel': {
-          const axis = call.args.rest(1)?.value().text.trim().toLowerCase() ?? '';
-          if (!(REL_AXES as readonly string[]).includes(axis)) return undefined;
-          return { text: String(ctx.relationship?.[axis] ?? 0) };
-        }
         case 'button': {
           if (prose) return AS_WRITTEN;
           const label = call.args.at(1)?.value();

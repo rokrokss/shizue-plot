@@ -632,28 +632,6 @@ export interface UserNote {
   updatedAt: string;
 }
 
-/** Mirrors RELATIONSHIP_AXES in packages/db — also the order the gauges use. */
-export const RELATIONSHIP_AXES = [
-  'affection',
-  'obsession',
-  'trust',
-  'liking',
-  'disgust',
-  'fear',
-] as const;
-
-export type RelationshipAxis = (typeof RELATIONSHIP_AXES)[number];
-
-/** How the plot's characters currently feel about the user; each axis is 0-100. */
-export interface ChatRelationship {
-  /** Null until the first extraction succeeds. */
-  axes: Record<RelationshipAxis, number> | null;
-  note: string;
-  updatedAt: string;
-  /** Assistant messages the branch held at the last extraction attempt. */
-  lastExtractedAssistantDepth: number;
-}
-
 export interface Chat {
   id: string;
   plotId: string;
@@ -662,7 +640,7 @@ export interface Chat {
   model: string;
   /**
    * The auxiliary model for scripts' auxiliary calls and the background work
-   * (summaries, relationship, suggestions); null leaves it to the first model in
+   * (summaries, suggestions); null leaves it to the first model in
    * the reader's catalog.
    */
   subModel: string | null;
@@ -694,8 +672,6 @@ export interface Chat {
   memoryRevision: number;
   /** Null while the chat runs on every pipeline default. */
   memorySettings: ChatMemorySettings | null;
-  relationship: ChatRelationship | null;
-  relationshipEnabled: boolean;
   /** How a reply's emotion picture is chosen; optional for a state built by hand, absent is `submodel`. */
   emotionProcessor?: EmotionProcessor;
   /** This chat's narrator; null leaves the plot's own in force. */

@@ -218,6 +218,13 @@
       "when": 1792208780304,
       "tag": "0030_drop_low_level_consent",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1792273969191,
+      "tag": "0031_drop_relationship_stats",
+      "breakpoints": true
     }
   ]
 }

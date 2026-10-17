@@ -90,37 +90,6 @@ export interface ChatMemorySettings extends Partial<HypaV3Settings> {
   factCount?: number;
 }
 
-/** The six relationship axes (WHIF benchmark), in display order. */
-export const RELATIONSHIP_AXES = [
-  'affection',
-  'obsession',
-  'trust',
-  'liking',
-  'disgust',
-  'fear',
-] as const;
-
-export type RelationshipAxis = (typeof RELATIONSHIP_AXES)[number];
-/** Each axis is an integer 0-100. */
-export type RelationshipAxes = Record<RelationshipAxis, number>;
-
-/** How the character currently feels about the user, extracted every few turns. */
-export interface ChatRelationship {
-  /** Null until the first extraction succeeds — the state exists before it does. */
-  axes: RelationshipAxes | null;
-  /** One-line summary of the relationship, in the language of the chat. */
-  note: string;
-  updatedAt: string;
-  /**
-   * Rounds the branch held when the last extraction was attempted — assistant
-   * messages, a group turn's replies counted once together (the API's `roundCount`).
-   * The trigger compares it against the current branch rather than counting
-   * generation events, so regenerate/continue do not inflate it and a turn that
-   * lands while an extraction runs is not lost.
-   */
-  lastExtractedAssistantDepth: number;
-}
-
 /**
  * Where a turn stands with the card's own scripts. `pending` is an assistant turn
  * the reader's browser has not yet run its output scripts over (editoutput, output
@@ -473,7 +442,7 @@ export const chats = pgTable(
     model: text('model').notNull(),
     // The auxiliary model (RisuAI's sub model) the reader picked for this chat's
     // side work: card scripts' auxiliary calls and the background jobs — memory
-    // summaries, relationship, reply suggestions. Null leaves it to the memory
+    // summaries, reply suggestions. Null leaves it to the memory
     // channel's default, the first model in the owner's ChatGPT catalog.
     subModel: text('sub_model'),
     // Author's note: per-chat instruction injected into the history, by default
@@ -504,10 +473,6 @@ export const chats = pgTable(
     // hide or a delete of a message). A background summary is written only if
     // it still matches.
     memoryRevision: integer('memory_revision').notNull().default(0),
-    // Relationship stats. No user-edit path, so no revision counter: the background
-    // extraction is the only writer and last write wins.
-    relationship: jsonb('relationship').$type<ChatRelationship>(),
-    relationshipEnabled: boolean('relationship_enabled').notNull().default(true),
     // How a reply's emotion picture is chosen (`EmotionProcessor`, RisuAI's
     // `emotionProcesser`): null is the default, the auxiliary model.
     emotionProcessor: text('emotion_processor').$type<EmotionProcessor>(),

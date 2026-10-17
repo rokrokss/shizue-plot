@@ -16,7 +16,7 @@
  * `event.source === iframe.contentWindow` still holds for the attacker's
  * document, and a window-addressed `postMessage` from us (necessarily
  * `targetOrigin: '*'`, since our own frame's origin is opaque) would be delivered
- * straight to it. That is chat state — variables, relationship, persona name,
+ * straight to it. That is chat state — variables, persona name,
  * asset urls — handed to a third party, once per turn.
  *
  * A `MessagePort` is not addressable that way. It is transferred once, to the

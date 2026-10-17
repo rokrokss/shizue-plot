@@ -6,7 +6,6 @@ import { TAINT, stripTaint } from '../src/lib/taint';
 const ctx = (overrides: Partial<CbsContext> = {}): CbsContext => ({
   variables: { hp: '40', max: '100', mood: 'angry', party: '아리아, 세이, 루미' },
   assets: new Map([['smile', '/api/plots/c1/assets/smile']]),
-  relationship: { affection: 62, trust: 11 },
   turn: 7,
   char: '아리아',
   user: '민준',
@@ -54,11 +53,6 @@ describe('simple macros', () => {
   it('resolves an asset reference to its url and an unknown slug to nothing', () => {
     expect(render('<img src="{{img::smile}}">')).toBe('<img src="/api/plots/c1/assets/smile">');
     expect(render('<img src="{{img::none}}">')).toBe('<img src="">');
-  });
-
-  it('reads relationship axes and rejects an axis that does not exist', () => {
-    expect(render('{{rel::affection}} {{rel::fear}}')).toBe('62 0');
-    expect(render('{{rel::mood}}')).toBe('{{rel::mood}}');
   });
 
   it('renders an unknown macro as visible text rather than swallowing it', () => {
@@ -515,10 +509,10 @@ describe('taint marking', () => {
     // getvar and calc read chat variables, and chat variables are model output.
     expect(marked('{{getvar::hp}}')).toBe('#40#');
     expect(marked('{{calc::hp + 1}}')).toBe('#41#');
-    // char, user, turn, rel and an image's address are ours, so a link built
-    // from them stands.
-    expect(marked('{{char}} {{user}} {{turn}} {{rel::affection}} {{raw::smile}}')).toBe(
-      '아리아 민준 7 62 /api/plots/c1/assets/smile',
+    // char, user, turn and an image's address are ours, so a link built from
+    // them stands.
+    expect(marked('{{char}} {{user}} {{turn}} {{raw::smile}}')).toBe(
+      '아리아 민준 7 /api/plots/c1/assets/smile',
     );
   });
 

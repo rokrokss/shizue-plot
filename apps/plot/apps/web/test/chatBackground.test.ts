@@ -38,7 +38,6 @@ vi.mock('@/lib/displayPlanner', () => ({
 const ctx: CbsContext = {
   variables: { time: '밤' },
   assets: new Map([['night', '/api/plots/p1/assets/night']]),
-  relationship: null,
   turn: 2,
   char: '리안',
   user: '아린',
@@ -84,7 +83,6 @@ const SCRIPTS: DisplayScript[] = [
 const context: CbsContext = {
   variables: { hp: '42' },
   assets: new Map(),
-  relationship: null,
   turn: 1,
   char: '리안',
   user: '나',

@@ -1,7 +1,7 @@
 /**
  * The branch's turns as the main prompt sends their words, for the sidecar
  * models that read the conversation — the memory's summarizer and its fact
- * extraction, the relationship reading, the reply suggestions (ARCHITECTURE
+ * extraction, the reply suggestions (ARCHITECTURE
  * §7.3). It is what RisuAI's HypaV3 summarizes: the chat its prompt is built
  * from, each message through `risuChatParser` and the `editprocess` scripts
  * (`processScriptFull`). So a status window or anything else a card's prompt

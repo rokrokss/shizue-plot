@@ -36,10 +36,9 @@ import { memoryChannel, summaryDue } from '../memory.js';
 import { attachedNoteIds } from '../notes.js';
 import { loadMembers } from '../hub.js';
 import { loadOwnedPlot } from '../plots.js';
-import { rebased } from '../relationship.js';
 import { deleteQuietly } from '../storage.js';
 import { optionalVariableDelta, storableDelta } from '../scriptState.js';
-import { buildPath, roundCount } from '../tree.js';
+import { buildPath } from '../tree.js';
 import { isUuid, optionalBoolean, optionalString, readJsonBody, requireString, requireUuidParam } from '../util.js';
 import { optionalSettings, resolvePersona, toChatJson } from './chats.js';
 
@@ -728,10 +727,7 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
   /**
    * The import is done: the chat becomes an ordinary one.
    *
-   * The relationship extractor counts assistant turns past its last attempt, and
-   * an imported history would read as hundreds of turns overdue — so its cursor is
-   * set to where the history ends, and the stats start moving with the reader's
-   * own turns. The history itself is only summarized when the reader asks for it
+   * The history is only summarized when the reader asks for it
    * (`backfillMemory`) and it is long enough to need it: the `memory_backfill` job
    * is queued in this transaction and summarizes it a batch at a time on the
    * owner's account. Too long with no memory channel to summarize it with,
@@ -782,7 +778,6 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
         .where(eq(messages.chatId, id))
         .orderBy(asc(messages.createdAt));
       const path = buildPath(all, locked.headMessageId);
-      const depth = roundCount(path);
       // An importing chat has no summaries yet: nothing generates on it.
       const due = async (): Promise<boolean> => {
         const [plot] = await tx.select({ style: plots.style }).from(plots).where(eq(plots.id, locked.plotId)).limit(1);
@@ -795,7 +790,6 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
         .update(chats)
         .set({
           importing: false,
-          relationship: rebased(locked.relationship, depth),
           ...(note !== undefined ? { note } : {}),
           ...(noteSettings !== undefined ? { noteSettings } : {}),
           updatedAt: new Date(),

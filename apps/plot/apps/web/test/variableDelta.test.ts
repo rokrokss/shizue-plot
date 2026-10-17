@@ -113,8 +113,6 @@ const stateWith = (path: ChatMessage[]): ChatState => ({
     headMessageId: path.at(-1)!.id,
     memoryRevision: 0,
     memorySettings: null,
-    relationship: null,
-    relationshipEnabled: true,
     narrator: null,
     allowComponentTurns: false,
     statusWindowEnabled: false,

@@ -73,7 +73,6 @@ import { countGeneration, type GenerationResult } from './metrics.js';
 import { runPromptScriptJob } from './regexWorker.js';
 import { ROLEPLAY_JAILBREAK_TOKENS, withRoleplayJailbreak } from './roleplayJailbreak.js';
 import { withPromptScripts } from './sentHistory.js';
-import { scheduleRelationshipUpdate } from './relationship.js';
 import { regexStoredText } from './storedRegex.js';
 import { replyMemberOf, scheduleEmotionDetection } from './emotion.js';
 import {
@@ -109,7 +108,6 @@ import { scheduleMessageEmbedding, searchByMeaning, type VectorPlan } from './ve
  */
 export function scheduleBackgroundUpdates(deps: AppDeps, chatId: string, reply?: string): void {
   scheduleMemoryUpdate(deps, chatId);
-  scheduleRelationshipUpdate(deps, chatId);
   // The chat's retrieval searches the branch with the reply in it from the next turn on.
   scheduleMessageEmbedding(deps, chatId);
   // The emotion picture `reply` leaves its member wearing — only for a reply that
@@ -149,8 +147,6 @@ export interface GenerationPlan {
   factsText: string;
   /** The turn the time labels count back from (`MemoryInput.clock`): the facts' and summaries', and retrieval's. */
   memoryClock: number;
-  /** Relationship state block, empty when the chat has none or turned it off. */
-  relationshipText: string;
   /** The chat's author note, injected at its depth (`AUTHOR_NOTE_DEPTH` unless the chat sets one). */
   authorNote: string;
   /** The chat's author's-note settings — depth, frequency, role; absent, the defaults. */
@@ -954,7 +950,6 @@ async function assembleRequest(
     recalledMemoryText: plan.recalledMemoryText,
     factsText: plan.factsText,
     ...(found.retrievalText ? { retrievalText: found.retrievalText } : {}),
-    relationshipText: plan.relationshipText,
     authorNote: plan.authorNote,
     ...(plan.authorNoteSettings ? { authorNoteSettings: plan.authorNoteSettings } : {}),
     // SillyTavern counts the reader's messages over the whole chat, not the

@@ -1016,7 +1016,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const youLabel = t('you');
   /** User turns taken on this branch, for `{{turn}}`. */
   const turn = messages.filter((message) => message.role === 'user').length + (mode === 'send' ? 1 : 0);
-  const axes = state?.chat.relationship?.axes ?? null;
 
   /**
    * Where RisuAI would number the branch from. Its greeting sits outside the
@@ -1157,7 +1156,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       assets: assetUrls,
       resolveAsset,
       namedAssets,
-      relationship: axes,
       turn,
       char: charMacro,
       user: personaName ?? youLabel,
@@ -1181,7 +1179,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     assetUrls,
     resolveAsset,
     namedAssets,
-    axes,
     turn,
     charMacro,
     personaName,
@@ -1348,7 +1345,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       // deltas and read them back off `platform` (ours).
       platform: {
         variables,
-        relationship: axes,
         turn,
         char: charMacro,
         user: personaName ?? youLabel,
@@ -1362,7 +1358,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     componentCode,
     declaredComponents,
     variables,
-    axes,
     turn,
     charMacro,
     personaName,
@@ -1395,7 +1390,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             assets: assetUrls,
             resolveAsset,
             namedAssets,
-            relationship: axes,
             turn,
             char: charMacro,
             user: personaName ?? youLabel,
@@ -1418,7 +1412,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       assetUrls,
       resolveAsset,
       namedAssets,
-      axes,
       turn,
       charMacro,
       personaName,
@@ -2675,7 +2668,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     preset?: string;
     /** The reader's own preset on top of `preset`; null picks none. */
     readerPresetId?: string | null;
-    relationshipEnabled?: boolean;
     /** How a reply's emotion picture is chosen. */
     emotionProcessor?: EmotionProcessor;
     memorySettings?: ChatMemorySettings;
@@ -3101,8 +3093,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               notes={notes}
               noteIds={state.chat.noteIds}
               memorySettings={state.chat.memorySettings}
-              relationship={state.chat.relationship}
-              relationshipEnabled={state.chat.relationshipEnabled}
               emotionProcessor={state.chat.emotionProcessor ?? 'submodel'}
               onSaveEmotionProcessor={(emotionProcessor) => updateSettings({ emotionProcessor })}
               narrator={state.chat.narrator}
@@ -3111,7 +3101,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               onSaveNote={(note) => updateSettings({ note })}
               onToggleNote={toggleNote}
               onSaveMemorySettings={(memorySettings) => updateSettings({ memorySettings })}
-              onToggleRelationship={(relationshipEnabled) => updateSettings({ relationshipEnabled })}
               allowComponentTurns={state.chat.allowComponentTurns}
               onToggleComponentTurns={(allowComponentTurns) => updateSettings({ allowComponentTurns })}
               statusWindow={plotStatusWindow}

@@ -93,8 +93,6 @@ const LIMITS: RuntimeLimits = {
 export interface PlatformContext {
   /** Path-derived chat variables — the Layer 1 fold. */
   variables: Record<string, string>;
-  /** Relationship axes 0-100, or null while the chat has none. */
-  relationship: Record<string, number> | null;
   /** User turns taken on this branch. */
   turn: number;
   char: string;
@@ -937,7 +935,6 @@ function componentWorkerRuntime(scope: Any, limits: RuntimeLimits): void {
     const value = source && typeof source === 'object' ? source : {};
     return {
       variables: value.variables || {},
-      relationship: value.relationship || null,
       turn: typeof value.turn === 'number' ? value.turn : 0,
       char: typeof value.char === 'string' ? value.char : '',
       user: typeof value.user === 'string' ? value.user : '',

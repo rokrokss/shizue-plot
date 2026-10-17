@@ -43,7 +43,7 @@ export function buildPath(all: Message[], headId: string | null): Message[] {
 /**
  * The messages a model may read: the path without the ones the reader hid from
  * the AI (`hidden_from_prompt`) — what SillyTavern's `coreChat` leaves out. For the
- * side calls that read the branch as text (memory, relationships, suggestions, a
+ * side calls that read the branch as text (memory, suggestions, a
  * scene picture); the prompt keeps hidden turns in its history and skips them there.
  */
 export function visibleToAi<T extends Pick<Message, 'hiddenFromPrompt'>>(path: readonly T[]): T[] {

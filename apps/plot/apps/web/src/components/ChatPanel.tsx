@@ -17,11 +17,9 @@ import { useFormatter, useTranslations } from 'next-intl';
 import { useEffect, useId, useState, type ReactNode } from 'react';
 import { EMBEDDING_MODELS, embeddingModels, readEmbeddingModel, writeEmbeddingModel } from '@/lib/scripts/embeddingModels';
 import { withNarratorField } from '@/lib/narrator';
-import { relationshipRows } from '@/lib/relationship';
 import {
   MEMORY_CONTEXT_BUDGETS,
   type ChatMemorySettings,
-  type ChatRelationship,
   type NarratorConfig,
   type NarratorPov,
   type PublicMember,
@@ -101,10 +99,9 @@ function EmbeddingModelSetting() {
 
 /**
  * Chat-scoped notes: the author's note that goes into every prompt, the reusable
- * notes attached to this chat, the memory's summaries and its settings, and the
- * relationship the background job extracts. Saving is the page's job — it owns
- * the chat state the endpoints answer with — but for the summaries, which are
- * a list of their own (`MemorySummaries`).
+ * notes attached to this chat, and the memory's summaries and its settings.
+ * Saving is the page's job — it owns the chat state the endpoints answer with —
+ * but for the summaries, which are a list of their own (`MemorySummaries`).
  */
 export function ChatPanel({
   chatId,
@@ -116,8 +113,6 @@ export function ChatPanel({
   notes,
   noteIds,
   memorySettings,
-  relationship,
-  relationshipEnabled,
   emotionProcessor = 'submodel',
   narrator,
   customUi,
@@ -131,7 +126,6 @@ export function ChatPanel({
   onSaveNoteSettings,
   onToggleNote,
   onSaveMemorySettings,
-  onToggleRelationship,
   onSaveEmotionProcessor,
   onSaveNarrator,
   onToggleCustomUi,
@@ -159,8 +153,6 @@ export function ChatPanel({
   /** Ids of the notes attached to this chat. */
   noteIds: string[];
   memorySettings: ChatMemorySettings | null;
-  relationship: ChatRelationship | null;
-  relationshipEnabled: boolean;
   /** How a reply's emotion picture is chosen; offered only where a member shows its pictures beside the chat. */
   emotionProcessor?: EmotionProcessor;
   /** This chat's narrator; null means the character's own is in force. */
@@ -186,7 +178,6 @@ export function ChatPanel({
   onSaveNoteSettings?: (settings: Required<AuthorNoteSettings>) => Promise<void>;
   onToggleNote: (noteId: string, attached: boolean) => Promise<void>;
   onSaveMemorySettings: (settings: ChatMemorySettings) => Promise<void>;
-  onToggleRelationship: (enabled: boolean) => Promise<void>;
   /** Saves the emotion processor; without it the choice is not offered. */
   onSaveEmotionProcessor?: (processor: EmotionProcessor) => Promise<void>;
   /** null clears the override, which is how the character's narrator comes back. */
@@ -267,7 +258,6 @@ export function ChatPanel({
 
   const busy = disabled || saving !== null;
   const placement = { ...AUTHOR_NOTE_DEFAULTS, ...noteSettings };
-  const rows = relationshipRows(relationship);
   // The selects always show a concrete value: what the chat set, or the default
   // the server would apply for a key it has not set.
   const settings = { contextBudget: DEFAULT_CONTEXT_BUDGET, ...HYPA_V3_DEFAULTS, factCount: DEFAULT_FACT_COUNT, ...memorySettings };
@@ -642,43 +632,6 @@ export function ChatPanel({
       {modules}
 
       {scriptSimilarity ? <EmbeddingModelSetting /> : null}
-
-      <section data-testid="chat-relationship" className="space-y-3 border-t border-line pt-5">
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="text-xs font-medium text-muted">{t('relationship')}</h2>
-          <Checkbox
-            label={t('relationshipEnabled')}
-            checked={relationshipEnabled}
-            disabled={busy}
-            onChange={(enabled) => void onToggleRelationship(enabled)}
-          />
-        </div>
-
-        {rows.length > 0 ? (
-          <>
-            <ul className="space-y-2">
-              {rows.map((row) => (
-                <li key={row.axis} className="flex items-center gap-3">
-                  <span className="w-14 shrink-0 text-xs text-muted">{t(`axes.${row.axis}`)}</span>
-                  <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-raised">
-                    <span
-                      className="block h-full rounded-full bg-accent"
-                      style={{ width: `${row.value}%` }}
-                    />
-                  </span>
-                  <span className="w-8 shrink-0 text-right text-xs tabular-nums text-muted">
-                    {row.value}
-                  </span>
-                </li>
-              ))}
-            </ul>
-            {relationship?.note ? <p className="text-sm text-fg">{relationship.note}</p> : null}
-            <p className="text-xs text-muted">{t('relationshipHint')}</p>
-          </>
-        ) : (
-          <p className="text-sm text-muted">{t('relationshipEmpty')}</p>
-        )}
-      </section>
 
       {inspectChatId ? <PromptInspector chatId={inspectChatId} /> : null}
     </div>

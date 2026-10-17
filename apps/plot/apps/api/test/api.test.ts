@@ -95,7 +95,6 @@ import {
   user,
   userNotes,
   verification,
-  type ChatRelationship,
   type ContentLanguage,
   type Db,
   type JobPayloadMap,
@@ -343,7 +342,6 @@ function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps {
     generationClaims: new Map(),
     generationStreams: new Set(),
     refreshingMemory: new Set<string>(),
-    extractingRelationship: new Set<string>(),
     detectingEmotion: new Set<string>(),
     embeddingVectors: new Map(),
     suggesting: new Set<string>(),
@@ -358,16 +356,15 @@ function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps {
 
 /**
  * A request's recall turn — the summaries the similar and random shares picked,
- * the facts, the messages a search brought back and the relationship, one
- * system turn right after the newest turn — or '' where the request recalls
- * nothing.
+ * the facts and the messages a search brought back, one system turn right
+ * after the newest turn — or '' where the request recalls nothing.
  */
 function recallOf(prompt: { messages: ChatRequest['messages'] }): string {
   const turn = prompt.messages.find(
     (message) =>
       message.role === 'system' &&
       typeof message.content === 'string' &&
-      (message.content.startsWith(RECALLED_MEMORY_HEADING) || /^(?:\[기억\]|Past events:|\[현재 관계 상태\])/.test(message.content)),
+      (message.content.startsWith(RECALLED_MEMORY_HEADING) || /^(?:\[기억\]|Past events:)/.test(message.content)),
   );
   return typeof turn?.content === 'string' ? turn.content : '';
 }
@@ -4296,18 +4293,6 @@ describe('chats', () => {
     expect(await count()).toBe(before);
     expect(await claimOf(own.chat.id)).toBeNull();
 
-    // What the turn recalls shows where it is sent: right after the newest turn, before the post-history.
-    const axes = { affection: 70, obsession: 0, trust: 60, liking: 65, disgust: 0, fear: 5 };
-    await db
-      .update(chats)
-      .set({ relationship: { axes, note: '', updatedAt: new Date().toISOString(), lastExtractedAssistantDepth: 0 } })
-      .where(eq(chats.id, own.chat.id));
-    const recalled = await readJson(await request(owner, `/api/chats/${own.chat.id}/inspect`));
-    const kinds = recalled.blocks.map((block: { kind: string }) => block.kind);
-    expect(kinds.slice(kinds.indexOf('recall') - 2, kinds.indexOf('recall') + 2)).toEqual(['history', 'moved_lore', 'recall', 'post_history']);
-    expect(kinds.lastIndexOf('history')).toBe(kinds.indexOf('recall') - 2);
-    expect(recalled.blocks[kinds.indexOf('recall')].text).toMatch(/^\[현재 관계 상태\]\n/);
-
     // The reader's own chat on someone else's plot, and the creator on a chat
     // that is not theirs, both read as no such chat.
     expect((await request(reader, `/api/chats/${theirs.chat.id}/inspect`)).status).toBe(404);
@@ -7877,12 +7862,6 @@ describe('memory', () => {
         providerModel: 'memory-stub',
         adapter: {
           stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
-            // The relationship job shares the memory channel; these tests run long
-            // enough to trigger it, and its calls are not summaries. An empty answer
-            // is dropped silently, which is what this harness wants.
-            if (req.system.includes('관계 분석가')) {
-              return { usage: { promptTokens: 0, completionTokens: 0 } };
-            }
             // The extraction's answer shape, a group work's included.
             if (req.system.includes('"invalidated": number[]}')) {
               const captured = { system: req.system, messages: req.messages };
@@ -7908,8 +7887,8 @@ describe('memory', () => {
       getAdapter,
       onBackgroundTask: (task, kind) => {
         pending.push(task);
-        // `tasks` counts refreshes only, so the relationship job running alongside
-        // does not look like a duplicate refresh.
+        // `tasks` counts refreshes only, so another job running alongside does
+        // not look like a duplicate refresh.
         if (kind === 'memory') tasks.push(task);
       },
       ...overrides,
@@ -9695,7 +9674,7 @@ describe('chat import', () => {
     expect(await rowsOf(chat.id)).toHaveLength(20_000);
   });
 
-  it('sets the relationship cursor where the history ends, and queues a backfill only when it is needed', async () => {
+  it('finishes an import, and queues a backfill only when it is needed', async () => {
     const cookie = await signUp('chat-import-complete@example.com');
     const plot = await createPlot(cookie);
     const short = await importChat(cookie, plot.id, [
@@ -9705,10 +9684,7 @@ describe('chat import', () => {
     ]);
     const finished = await readJson(await complete(cookie, short.chat.id, true));
     expect(finished.memoryBackfill).toBe('not_needed');
-    expect(finished.chat).toMatchObject({
-      importing: false,
-      relationship: { axes: null, note: '', lastExtractedAssistantDepth: 2 },
-    });
+    expect(finished.chat).toMatchObject({ importing: false });
     expect(await db.select().from(jobs)).toEqual([]);
 
     // More than fits the default budget beside the memory and the reply.
@@ -9718,7 +9694,6 @@ describe('chat import', () => {
     const long = Array.from({ length }, (_, index) =>
       turn(index % 2 === 0 ? 'assistant' : 'user', [longText(index)]),
     );
-    const assistantTurns = long.filter((message) => message.role === 'assistant').length;
 
     // Not asked for, nothing is queued however long the history is.
     const unasked = await importChat(cookie, plot.id, long, { sha256: hashOf('unasked') });
@@ -9730,7 +9705,6 @@ describe('chat import', () => {
     const asked = await importChat(cookie, plot.id, long, { sha256: hashOf('asked') }, withChannel);
     const queued = await readJson(await complete(cookie, asked.chat.id, true, withChannel));
     expect(queued.memoryBackfill).toBe('queued');
-    expect(queued.chat.relationship.lastExtractedAssistantDepth).toBe(assistantTurns);
     expect(await db.select({ kind: jobs.kind, payload: jobs.payload }).from(jobs)).toEqual([
       { kind: 'memory_backfill', payload: { chatId: asked.chat.id } },
     ]);
@@ -10003,367 +9977,6 @@ describe('chat import', () => {
     expect((await request(cookie, `/api/chats/${own}/import/tree`)).status).toBe(404);
   });
 
-});
-
-describe('relationship', () => {
-  /** Assistant turns between two extraction attempts — docs/ARCHITECTURE.md Chunk 9. */
-  const TURNS_PER_UPDATE = 5;
-  const NOTE = '조심스럽게 서로를 믿기 시작한 사이.';
-  /** Out-of-range and fractional on purpose: the server clamps and rounds. */
-  const RAW_AXES = { affection: 140, obsession: -20, trust: 61.6, liking: 70, disgust: 0, fear: 3 };
-  const CLAMPED = { affection: 100, obsession: 0, trust: 62, liking: 70, disgust: 0, fear: 3 };
-
-  interface Captured {
-    system: string;
-    messages: ChatRequest['messages'];
-  }
-
-  interface Harness {
-    app: Hono<AppEnv>;
-    /** Chat-model requests, in order. */
-    prompts: Captured[];
-    /** Memory-channel requests the relationship job made, in order. */
-    extractions: Captured[];
-    /** Turns sent so far, so every turn carries a distinct text. */
-    sent: number;
-    settle: () => Promise<void>;
-  }
-
-  const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
-  function gate(): { wait: Promise<void>; open: () => void } {
-    let open!: () => void;
-    const wait = new Promise<void>((resolve) => {
-      open = resolve;
-    });
-    return { wait, open };
-  }
-
-  /**
-   * Chat model = echo (captured on the way in); memory channel = a stub answering
-   * with `answer`. The turns stay short, so the rolling summary never triggers and
-   * every memory-channel call belongs to the relationship job.
-   */
-  function relationshipApp(
-    options: { answer?: string; extractionGate?: Promise<void> } & Partial<AppDeps> = {},
-  ): Harness {
-    const { answer = JSON.stringify({ axes: RAW_AXES, note: NOTE }), extractionGate, ...overrides } = options;
-    const prompts: Captured[] = [];
-    const extractions: Captured[] = [];
-    const tasks: Promise<void>[] = [];
-    const echo = createEchoAdapter();
-
-    const getAdapter: AppDeps['getAdapter'] = (modelId) => {
-      if (modelId === 'echo/echo') {
-        return {
-          providerModel: 'echo',
-          adapter: {
-            stream: (req) => {
-              prompts.push({ system: req.system, messages: req.messages });
-              return echo.stream(req);
-            },
-          },
-        };
-      }
-      return {
-        providerModel: 'relationship-stub',
-        adapter: {
-          stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
-            // Recorded before the gate, so a blocked extraction is still observable.
-            extractions.push({ system: req.system, messages: req.messages });
-            if (extractionGate) await extractionGate;
-            yield { type: 'text', text: answer };
-            return { usage: { promptTokens: 0, completionTokens: 0 } };
-          },
-        },
-      };
-    };
-
-    return {
-      app: makeApp({ getAdapter, onBackgroundTask: (task) => void tasks.push(task), ...overrides }),
-      prompts,
-      extractions,
-      sent: 0,
-      settle: async () => {
-        await Promise.all(tasks);
-      },
-    };
-  }
-
-  const turnText = (harness: Harness): string => `${(harness.sent += 1)}번째 턴`;
-
-  /** Sends `count` turns, letting the background work of each one finish. */
-  async function turns(cookie: string, chatId: string, harness: Harness, count: number): Promise<void> {
-    for (let turn = 0; turn < count; turn += 1) {
-      const content = turnText(harness);
-      const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }, harness.app);
-      expect((await readSse(res)).at(-1)!.event).toBe('done');
-      await harness.settle();
-    }
-  }
-
-  const chatOf = async (cookie: string, chatId: string, harness: Harness): Promise<any> =>
-    readJson(await request(cookie, `/api/chats/${chatId}`, 'GET', undefined, harness.app));
-
-  /**
-   * The greeting is already an assistant message on the path, so a fresh chat sits
-   * at depth 1 and the first extraction lands one send earlier than the cycle.
-   */
-  const SENDS_TO_FIRST = TURNS_PER_UPDATE - 1;
-
-  it('strips image references from the extraction transcript', async () => {
-    const cookie = await signUp('relationship-image@example.com');
-    const { chatId } = await setupChat(cookie);
-    const harness = relationshipApp();
-
-    // The greeting is the first assistant turn, so four more reach the trigger.
-    await turns(cookie, chatId, harness, 1);
-    const res = await json(
-      cookie,
-      `/api/chats/${chatId}/messages`,
-      'POST',
-      { content: '웃어줘 {{img::smile}}' },
-      harness.app,
-    );
-    expect((await readSse(res)).at(-1)!.event).toBe('done');
-    await harness.settle();
-    await turns(cookie, chatId, harness, 2);
-
-    const transcript = harness.extractions.at(-1)!.messages[0]!.content;
-    expect(transcript).toContain('웃어줘');
-    expect(transcript).not.toContain('{{img');
-  });
-
-  it("stands back while another instance holds the chat's lease, and the next turn after it extracts", async () => {
-    const cookie = await signUp('relationship-lease@example.com');
-    const { chatId } = await setupChat(cookie);
-    const harness = relationshipApp();
-    const key = `relationship:${chatId}`;
-    expect(await acquireLease(db, key, 'another-instance', 60_000)).toBe(true);
-
-    await turns(cookie, chatId, harness, SENDS_TO_FIRST);
-    expect(harness.extractions).toHaveLength(0);
-
-    await releaseLease(db, key, 'another-instance');
-    await turns(cookie, chatId, harness, 1);
-    expect(harness.extractions).toHaveLength(1);
-    // Given back once done, for the next instance to take.
-    expect(await acquireLease(db, key, 'another-instance', 60_000)).toBe(true);
-  });
-
-  it('extracts once the branch holds five assistant turns, clamps the axes and injects the block', async () => {
-    const cookie = await signUp('relationship-cycle@example.com');
-    const { chatId, state } = await setupChat(cookie);
-    expect(state.chat.relationship).toBeNull();
-    expect(state.chat.relationshipEnabled).toBe(true);
-    const harness = relationshipApp();
-
-    // Below the threshold nothing is written at all — the count lives on the branch.
-    await turns(cookie, chatId, harness, SENDS_TO_FIRST - 1);
-    expect(harness.extractions).toHaveLength(0);
-    expect((await chatOf(cookie, chatId, harness)).chat.relationship).toBeNull();
-    expect(recallOf(harness.prompts.at(-1)!)).not.toContain('[현재 관계 상태]');
-
-    await turns(cookie, chatId, harness, 1);
-    expect(harness.extractions).toHaveLength(1);
-    // The model sees the defaults it starts from and the recent turns.
-    const ask = harness.extractions[0]!.messages[0]!.content;
-    expect(ask).toContain('[현재 수치]');
-    expect(ask).toContain('affection: 50');
-    expect(ask).toContain('obsession: 0');
-    expect(ask).toContain(`${SENDS_TO_FIRST}번째 턴`);
-    expect(harness.extractions[0]!.system).toContain('"axes"');
-
-    const updated = await chatOf(cookie, chatId, harness);
-    expect(updated.chat.relationship.axes).toEqual(CLAMPED);
-    expect(updated.chat.relationship.note).toBe(NOTE);
-    // Recorded at the depth the extraction read, not back at zero.
-    expect(updated.chat.relationship.lastExtractedAssistantDepth).toBe(TURNS_PER_UPDATE);
-    expect(updated.chat.relationship.updatedAt).toEqual(expect.any(String));
-
-    // The next generation carries the block — not in the system text, the cached
-    // prefix, but last in the recall turn right after the turn it answers.
-    await turns(cookie, chatId, harness, 1);
-    const sent = harness.prompts.at(-1)!;
-    expect(sent.system).not.toContain('[현재 관계 상태]');
-    const recall = recallOf(sent);
-    expect(recall.startsWith('[현재 관계 상태]')).toBe(true);
-    expect(recall).toContain('애정 100 / 집착 0 / 신뢰 62 / 호감 70 / 혐오 0 / 두려움 3');
-    expect(recall).toContain(NOTE);
-    // Macros in the block are expanded like the rest of the prompt.
-    expect(recall).toContain('리안의 등장인물들이 유저에게 느끼는 마음의 온도');
-    const at = sent.messages.findIndex((message) => message.content === recall);
-    expect(sent.messages[at]!.role).toBe('system');
-    expect(sent.messages[at - 1]!.role).toBe('user');
-    expect(at - 1).toBe(sent.messages.findLastIndex((message) => message.role === 'user'));
-
-    // The next cycle is another five assistant turns past that depth.
-    await turns(cookie, chatId, harness, TURNS_PER_UPDATE - 2);
-    expect(harness.extractions).toHaveLength(1);
-    await turns(cookie, chatId, harness, 1);
-    expect(harness.extractions).toHaveLength(2);
-    // The second call starts from the stored numbers, not the defaults.
-    expect(harness.extractions[1]!.messages[0]!.content).toContain('affection: 100');
-    expect((await chatOf(cookie, chatId, harness)).chat.relationship.lastExtractedAssistantDepth).toBe(
-      TURNS_PER_UPDATE * 2,
-    );
-  });
-
-  it('counts branch depth, so regenerate and continue are not new turns', async () => {
-    const cookie = await signUp('relationship-depth@example.com');
-    const { chatId } = await setupChat(cookie);
-    const harness = relationshipApp();
-
-    // One send short of the threshold.
-    await turns(cookie, chatId, harness, SENDS_TO_FIRST - 1);
-    expect(harness.extractions).toHaveLength(0);
-
-    // A regenerate swaps the last reply for a sibling: same branch length.
-    for (let i = 0; i < 5; i += 1) {
-      await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app));
-      await harness.settle();
-    }
-    // A continue extends the last reply in place: same branch length again.
-    for (let i = 0; i < 2; i += 1) {
-      await readSse(await json(cookie, `/api/chats/${chatId}/continue`, 'POST', undefined, harness.app));
-      await harness.settle();
-    }
-    expect(harness.extractions).toHaveLength(0);
-    expect((await chatOf(cookie, chatId, harness)).chat.relationship).toBeNull();
-
-    // Only a real turn moves the count.
-    await turns(cookie, chatId, harness, 1);
-    expect(harness.extractions).toHaveLength(1);
-  });
-
-  it('stops extracting and injecting once the chat turns it off', async () => {
-    const cookie = await signUp('relationship-toggle@example.com');
-    const { chatId } = await setupChat(cookie);
-    const harness = relationshipApp();
-    const relationship: ChatRelationship = {
-      axes: CLAMPED,
-      note: NOTE,
-      updatedAt: new Date().toISOString(),
-      lastExtractedAssistantDepth: 0,
-    };
-    await db.update(chats).set({ relationship }).where(eq(chats.id, chatId));
-
-    const off = await readJson(
-      await json(cookie, `/api/chats/${chatId}`, 'PATCH', { relationshipEnabled: false }, harness.app),
-    );
-    expect(off.chat.relationshipEnabled).toBe(false);
-    // The numbers are kept, so turning it back on restores them.
-    expect(off.chat.relationship.axes).toEqual(CLAMPED);
-
-    await turns(cookie, chatId, harness, TURNS_PER_UPDATE);
-    expect(recallOf(harness.prompts.at(-1)!)).not.toContain('[현재 관계 상태]');
-    // Disabled means no model call and no bookkeeping either.
-    expect(harness.extractions).toHaveLength(0);
-    expect(
-      (await chatOf(cookie, chatId, harness)).chat.relationship.lastExtractedAssistantDepth,
-    ).toBe(0);
-
-    const on = await readJson(
-      await json(cookie, `/api/chats/${chatId}`, 'PATCH', { relationshipEnabled: true }, harness.app),
-    );
-    expect(on.chat.relationshipEnabled).toBe(true);
-    await turns(cookie, chatId, harness, 1);
-    expect(recallOf(harness.prompts.at(-1)!)).toContain('[현재 관계 상태]');
-
-    const bad = await json(cookie, `/api/chats/${chatId}`, 'PATCH', { relationshipEnabled: 'yes' });
-    expect(bad.status).toBe(400);
-    expect((await readJson(bad)).code).toBe('invalid_request');
-    expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.relationshipEnabled).toBe(true);
-  });
-
-  it('ignores an answer it cannot use and retries on the next cycle', async () => {
-    const cookie = await signUp('relationship-parse@example.com');
-    const { chatId } = await setupChat(cookie);
-    // Valid JSON, but one axis short: a partial answer would silently keep numbers
-    // the model never looked at.
-    const harness = relationshipApp({ answer: '```json\n{"axes": {"affection": 60}, "note": "반쪽"}\n```' });
-
-    await turns(cookie, chatId, harness, SENDS_TO_FIRST);
-    expect(harness.extractions).toHaveLength(1);
-    const after = await chatOf(cookie, chatId, harness);
-    // Silently dropped, but the attempt is recorded so the retry waits a cycle.
-    expect(after.chat.relationship).toMatchObject({
-      axes: null,
-      note: '',
-      lastExtractedAssistantDepth: TURNS_PER_UPDATE,
-    });
-    expect(recallOf(harness.prompts.at(-1)!)).not.toContain('[현재 관계 상태]');
-
-    await turns(cookie, chatId, harness, TURNS_PER_UPDATE - 1);
-    expect(harness.extractions).toHaveLength(1);
-    await turns(cookie, chatId, harness, 1);
-    expect(harness.extractions).toHaveLength(2);
-  });
-
-  it('runs one extraction per chat at a time and loses no turn to the in-flight window', async () => {
-    const cookie = await signUp('relationship-inflight@example.com');
-    const { chatId } = await setupChat(cookie);
-    const blocked = gate();
-    const harness = relationshipApp({ extractionGate: blocked.wait });
-
-    // Cannot settle() here: the extraction this crosses into is stuck in the call.
-    for (let turn = 0; turn < SENDS_TO_FIRST; turn += 1) {
-      const content = turnText(harness);
-      const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }, harness.app);
-      expect((await readSse(res)).at(-1)!.event).toBe('done');
-    }
-    for (let i = 0; i < 50 && harness.extractions.length === 0; i += 1) await delay(10);
-    expect(harness.extractions).toHaveLength(1);
-
-    // Further turns must not start a second extraction while that one is in flight.
-    for (const content of ['그 다음은?', '또 그 다음은?']) {
-      await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content }, harness.app));
-    }
-    await delay(50);
-    expect(harness.extractions).toHaveLength(1);
-
-    blocked.open();
-    await harness.settle();
-    const stored = await chatOf(cookie, chatId, harness);
-    expect(stored.chat.relationship.axes).toEqual(CLAMPED);
-    // The depth the extraction read, so the two turns it ran through still count.
-    expect(stored.chat.relationship.lastExtractedAssistantDepth).toBe(TURNS_PER_UPDATE);
-
-    // Branch is at depth 7: three more turns reach the next threshold, not five.
-    await turns(cookie, chatId, harness, 2);
-    expect(harness.extractions).toHaveLength(1);
-    await turns(cookie, chatId, harness, 1);
-    expect(harness.extractions).toHaveLength(2);
-  });
-
-  it('rebases onto a shorter branch instead of blocking every later update', async () => {
-    const cookie = await signUp('relationship-branch@example.com');
-    const { chatId } = await setupChat(cookie);
-    const harness = relationshipApp();
-
-    await turns(cookie, chatId, harness, SENDS_TO_FIRST);
-    expect(harness.extractions).toHaveLength(1);
-    const path = (await chatOf(cookie, chatId, harness)).path;
-
-    // Another version of the first user message is a branch that starts over at the greeting.
-    await forkUserTurn(chatId, path[1].id, '다른 첫 질문');
-    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app));
-    await harness.settle();
-
-    const rebased = await chatOf(cookie, chatId, harness);
-    expect(rebased.path.filter((m: any) => m.role === 'assistant')).toHaveLength(2);
-    // No extraction on a branch that is shorter than the last one read...
-    expect(harness.extractions).toHaveLength(1);
-    // ...and the depth follows this branch, keeping the numbers it already has.
-    expect(rebased.chat.relationship.lastExtractedAssistantDepth).toBe(2);
-    expect(rebased.chat.relationship.axes).toEqual(CLAMPED);
-
-    // From the rebased depth the cycle works again.
-    await turns(cookie, chatId, harness, TURNS_PER_UPDATE - 1);
-    expect(harness.extractions).toHaveLength(1);
-    await turns(cookie, chatId, harness, 1);
-    expect(harness.extractions).toHaveLength(2);
-  });
 });
 
 describe('plot hub', () => {
@@ -16919,21 +16532,18 @@ describe('group turns', () => {
     ]);
   });
 
-  it('recalls right after the newest turn, and the round’s next speaker goes on from the first one’s request', async () => {
-    const chat = await groupChat('group-recall@example.com');
+  it('sends this turn’s lore right after the newest turn, and the round’s next speaker goes on from the first one’s request', async () => {
+    // The keyword lore stands where the recall turn does (§6): the reader's turn
+    // brings it in, and the replies keep it in.
+    const chat = await groupChat('group-recall@example.com', { lorebook: [{ keys: ['안녕', '응'], content: 'KEYED ON' }] });
     const { cookie, chatId, seiya, kai } = chat;
-    const axes = { affection: 70, obsession: 0, trust: 60, liking: 65, disgust: 0, fear: 5 };
-    await db
-      .update(chats)
-      .set({ relationship: { axes, note: '', updatedAt: new Date().toISOString(), lastExtractedAssistantDepth: 0 } })
-      .where(eq(chats.id, chatId));
     const { target, sent } = replyingApp('응.');
     const a = await done(await post(cookie, chatId, 'messages', { content: '안녕', speakerId: seiya }, target));
     await done(await post(cookie, chatId, 'reply', { speakerId: kai, groupTurnId: a.groupTurnId }, target));
     // The next speaker's continue answers the reader's turn too.
     await done(await post(cookie, chatId, 'continue', {}, target));
-    /** Where a request's recall turn is, and the turn of the conversation sent last before it. */
-    const recalledAt = (req: ChatRequest) => textsOf(req).findIndex((text) => text.startsWith('[현재 관계 상태]'));
+    /** Where a request's keyword lore is, and the turn of the conversation sent last before it. */
+    const recalledAt = (req: ChatRequest) => textsOf(req).findIndex((text) => text === 'KEYED ON');
     const newestBefore = (req: ChatRequest, at: number) => req.messages.slice(0, at).findLastIndex((message) => message.role !== 'system');
     // Each follows the newest turn sent: the reader's for the first speaker, the first reply for
     // the next, the reply before the one continued for the continue — whose partial alone comes
@@ -17362,7 +16972,7 @@ describe('group turns', () => {
     expect(exported.messages.at(-1)).not.toHaveProperty('speaker');
   });
 
-  it('counts a round once toward the relationship cadence', async () => {
+  it('counts a round once', async () => {
     expect(roundCount([])).toBe(0);
     const row = (role: 'user' | 'assistant', groupTurnId: string | null = null) => ({ role, groupTurnId });
     const branch = [row('assistant'), row('user'), row('assistant', 'r1'), row('assistant', 'r1'), row('user'), row('assistant', 'r2'), row('assistant')];
@@ -19248,7 +18858,7 @@ describe('vector storage (SillyTavern)', () => {
               },
             }
           : {
-              // The side channels (relationship, memory) answer nothing.
+              // The side channel (memory) answers nothing.
               providerModel: 'side-stub',
               adapter: {
                 stream: async function* (): AsyncGenerator<StreamDelta, StreamDone> {

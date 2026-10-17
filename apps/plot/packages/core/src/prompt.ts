@@ -290,13 +290,6 @@ export interface AssemblePromptInput {
    */
   retrievalText?: string;
   /**
-   * Relationship state block (the six axes plus a one-line summary), already
-   * formatted. Last in the recall turn: it changes whenever the relationship is
-   * read again (every few turns), which in the system string would leave every
-   * turn of the history behind it out of the cached prefix.
-   */
-  relationshipText?: string;
-  /**
    * Author's note. Injected `authorNoteSettings.depth` (default
    * `AUTHOR_NOTE_DEPTH`) messages from the end of the history and, like the
    * post-history block, never evicted.
@@ -468,7 +461,7 @@ export interface AssembledPrompt {
    * What the budget charged before any history, the summaries aside: the rest
    * of the system string, the post-history block, the directions, the notes,
    * the depth lore and the moved lore, the injections, the recall turn but its
-   * summaries (the facts, the messages brought back, the relationship) and the
+   * summaries (the facts and the messages brought back) and the
    * trailing blocks — everything never dropped. The memory's summarizer (API
    * §7.3) counts the history it lets stand against what is left beside it and
    * the summaries' share. Always there from the assembler.
@@ -519,8 +512,8 @@ export type PromptBlockKind =
   | 'moved_lore'
   /**
    * What this turn recalls — the summaries HypaV3's similar and random shares
-   * picked, the facts, the messages a search brought back, the relationship — as
-   * one system turn right after the newest turn.
+   * picked, the facts, the messages a search brought back — as one system turn
+   * right after the newest turn.
    */
   | 'recall'
   | 'post_history'
@@ -917,7 +910,6 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     recalledMemoryText = '',
     factsText = '',
     retrievalText = '',
-    relationshipText = '',
     authorNote = '',
     authorNoteSettings,
     userTurns,
@@ -1091,7 +1083,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   // author's note, nor the start triggers' `start` and `historyend` turns
   // (RisuAI's template has no place for its `lastChat`, which holds them).
   // What RisuAI has no counterpart of stays: the work and its members, the
-  // narrator, the style, the memory, the relationship, the directions.
+  // narrator, the style, the memory, the directions.
   const utility = isUtilityBot(voice?.card.extensions);
 
   // 0b. the reader's own additions to the preset — RisuAI's `mainPrompt` and
@@ -1532,8 +1524,8 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
 
   // 7d. what this turn recalls: the summaries HypaV3's similar and random shares
   // picked, the facts closest to the latest turns, the earlier messages a search
-  // by meaning found (ST's "Past events") and the relationship's state, as one
-  // system turn right after the newest turn (below). Each is read again for
+  // by meaning found (ST's "Past events"), as one system turn right after the
+  // newest turn (below). Each is read again for
   // every turn — the picks, the facts and the messages change nearly every time
   // — so none of it stands in the system string or among the history: the
   // provider serves a request from an earlier one only when it repeats that
@@ -1541,7 +1533,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const recallPart = (text: string): string => (text.trim() ? send(expand(text).trim()) : '');
   const recalledMemoryPart = recallPart(recalledMemoryText);
   const factsPart = recallPart(factsText);
-  const recallText = [recalledMemoryPart, factsPart, recallPart(retrievalText), recallPart(relationshipText)]
+  const recallText = [recalledMemoryPart, factsPart, recallPart(retrievalText)]
     .filter((part) => part.length > 0)
     .join('\n\n');
   const recallSlot: MessageSlot | null = recallText

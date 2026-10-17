@@ -141,8 +141,6 @@ const state = (): ChatState => ({
     headMessageId: 'msg_1',
     memoryRevision: 0,
     memorySettings: null,
-    relationship: null,
-    relationshipEnabled: true,
     narrator: null,
     allowComponentTurns: false,
     statusWindowEnabled: false,

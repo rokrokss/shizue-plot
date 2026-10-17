@@ -14,7 +14,7 @@ import type { ObjectStorage } from './storage.js';
 export type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 
 /** The fire-and-forget jobs a finished turn — or a plot's write, or a search — can start. */
-export type BackgroundTaskKind = 'memory' | 'relationship' | 'emotion' | 'vectors' | 'aliases' | 'search';
+export type BackgroundTaskKind = 'memory' | 'emotion' | 'vectors' | 'aliases' | 'search';
 
 /**
  * A generation claim this instance holds: the exact `chats.generating_at` it
@@ -80,8 +80,6 @@ export interface AppDeps {
   stopSignal?: { publish(chatId: string): Promise<void> };
   /** Chat ids with a memory refresh in flight — one concurrent refresh per chat. */
   refreshingMemory: Set<string>;
-  /** Chat ids with a relationship extraction in flight; separate from the memory guard. */
-  extractingRelationship: Set<string>;
   /**
    * Message ids whose emotion picture is being chosen (`emotion.ts`) — per
    * message rather than per chat, since a round's replies each want one.

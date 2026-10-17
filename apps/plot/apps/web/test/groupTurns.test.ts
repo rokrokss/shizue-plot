@@ -184,8 +184,6 @@ function stateWith(path: ChatMessage[], absentCharacterIds: string[] = [], sibli
       headMessageId: path.at(-1)?.id ?? null,
       memoryRevision: 0,
       memorySettings: null,
-      relationship: null,
-      relationshipEnabled: true,
       narrator: null,
       allowComponentTurns: false,
       statusWindowEnabled: false,

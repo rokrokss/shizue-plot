@@ -50,7 +50,6 @@ export function ComponentCodeEditor({
   const platform = useMemo<PlatformContext>(
     () => ({
       variables: defaultVariables,
-      relationship: null,
       turn: 1,
       char: plotName,
       user: t('componentPreviewUser'),

@@ -105,7 +105,7 @@ export const cachedPromptTokens = new Counter({
 
 export const backgroundStarted = new Counter({
   name: 'background_tasks_started_total',
-  help: 'Fire-and-forget tasks started after a response (memory, relationship, emotion, vectors, aliases, search).',
+  help: 'Fire-and-forget tasks started after a response (memory, emotion, vectors, aliases, search).',
   labelNames: ['kind'] as const,
   registers: [registry],
 });

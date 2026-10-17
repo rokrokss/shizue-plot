@@ -29,7 +29,6 @@ const ORIGIN = 'https://plot.example';
 
 const PLATFORM = {
   variables: { gold: '7' },
-  relationship: { affection: 55 },
   turn: 3,
   char: '루미',
   user: '나',
@@ -43,7 +42,7 @@ function StatusWindow({ hp = 0, name = '이름 없음', platform }) {
   return (
     <div id="panel" style={{ padding: 8, color: '#eee' }}>
       <b>{name}</b>
-      <span> HP {hp} · 절반 {half} · 금화 {platform.variables.gold} · 호감 {platform.relationship.affection}</span>
+      <span> HP {hp} · 절반 {half} · 금화 {platform.variables.gold} · 상대 {platform.user}</span>
       {hp < 60 && <em> 위험</em>}
       <button onClick={() => setOpen(!open)}>토글</button>
       {open ? <div id="detail">턴 {platform.turn}</div> : null}
@@ -177,7 +176,7 @@ describe('the worker realm', () => {
     expect(textOf(panel)).toContain('절반 25');
     // Platform state the call code never mentioned.
     expect(textOf(panel)).toContain('금화 7');
-    expect(textOf(panel)).toContain('호감 55');
+    expect(textOf(panel)).toContain('상대 나');
     expect(textOf(panel)).toContain('위험');
   });
 

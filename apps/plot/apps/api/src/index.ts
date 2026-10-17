@@ -74,7 +74,6 @@ const deps: AppDeps = {
   generationClaims: new Map(),
   generationStreams: new Set(),
   refreshingMemory: new Set<string>(),
-  extractingRelationship: new Set<string>(),
   detectingEmotion: new Set<string>(),
   embeddingVectors: new Map(),
   suggesting: new Set<string>(),
@@ -155,7 +154,7 @@ function shutdown(code: number): void {
     // chat freed — rather than cut by the exit. Five seconds is for that storing,
     // which takes well under one, never for the replies.
     await stopGenerations(deps, 5_000);
-    // What the turns started — a summary, a relationship, vectors, and those the
+    // What the turns started — a summary, vectors, and those the
     // stopped replies just started — is let finish rather than cut, up to its own
     // deadline (`SHUTDOWN_BACKGROUND_MS`).
     const left = await background.drain(config.shutdownBackgroundMs);
