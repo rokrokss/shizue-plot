@@ -88,7 +88,7 @@ export function TurnEditor({
   return (
     <div
       data-testid="turn-editor"
-      className="mx-auto max-w-[1120px] px-2 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))]"
+      className="mx-auto max-w-[768px] px-2 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))]"
     >
       <fieldset disabled={busy} aria-busy={busy || undefined} className="min-w-0">
         <div aria-hidden="true" className="mx-auto mb-2 h-1 w-9 rounded-full bg-line" />

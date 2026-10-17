@@ -2992,7 +2992,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         {/* Zeta's row at every width, 52px: ‹ · the title, which is what gives way ·
             the model · ☰. What the row once held on a wide screen — the settings,
             the notes, the music's mute — is in the sheet ☰ opens. */}
-        <div className="mx-auto flex h-13 max-w-[1120px] items-center gap-2 px-2.5">
+        <div className="mx-auto flex h-13 max-w-[768px] items-center gap-2 px-2.5">
           <Link
             // Zeta's ‹ goes back to wherever the reader came from — the chat list,
             // the work's page, a notification — and a chat opened straight, with
@@ -3061,7 +3061,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         </div>
 
         {settingsError ? (
-          <div className="mx-auto flex max-w-[1120px] items-center gap-3 px-2.5 pb-2.5">
+          <div className="mx-auto flex max-w-[768px] items-center gap-3 px-2.5 pb-2.5">
             <p className="min-w-0 flex-1 text-xs text-danger">{settingsError}</p>
             <button
               type="button"
@@ -3079,7 +3079,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           should not push the conversation off the bottom of its own container. */}
       {panelOpen ? (
         <div className="max-h-[35dvh] shrink-0 overflow-y-auto border-b border-line">
-          <div className="mx-auto w-full max-w-[1120px] px-2.5 py-5">
+          <div className="mx-auto w-full max-w-[768px] px-2.5 py-5">
             <ChatPanel
               chatId={id}
               headMessageId={state.chat.headMessageId}
@@ -3188,7 +3188,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                 ref={contentRef}
                 // The bottom padding is for the jump-to-latest pill, which floats over
                 // the last line of the conversation when it is showing.
-                className="mx-auto w-full max-w-[1120px] space-y-4 px-2 pt-4 pb-12"
+                className="mx-auto w-full max-w-[768px] space-y-4 px-2 pt-4 pb-12"
                 // What a button in a message can do: run one of the card's manual
                 // triggers (`risu-trigger`, `{{button}}` naming one) or hand a Lua button
                 // its data (`risu-btn`), or put its text in the composer — sending that
@@ -3395,7 +3395,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                 the column's bottom-right, as Zeta has it. */}
             {isAtBottom ? null : (
               <div className="pointer-events-none absolute inset-x-0 -top-14 px-2">
-                <div className="mx-auto flex max-w-[1120px] justify-end">
+                <div className="mx-auto flex max-w-[768px] justify-end">
                   <button
                     type="button"
                     aria-label={t('jumpToLatest')}
@@ -3412,7 +3412,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               <div
                 role="status"
                 data-testid="chat-importing"
-                className="mx-auto flex max-w-[1120px] items-center gap-3 px-2 pt-3"
+                className="mx-auto flex max-w-[768px] items-center gap-3 px-2 pt-3"
               >
                 <p className="min-w-0 flex-1 rounded-xl border border-line bg-raised/60 px-4 py-2.5 text-xs text-muted">
                   {t('importing')}
@@ -3428,7 +3428,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             {suggestions.length > 0 ? (
               <ul
                 data-testid="reply-suggestions"
-                className="mx-auto flex max-w-[1120px] flex-wrap gap-2 px-2 pt-3"
+                className="mx-auto flex max-w-[768px] flex-wrap gap-2 px-2 pt-3"
               >
                 {suggestions.map((suggestion, index) => (
                   <li key={index} className="min-w-0">
@@ -3449,26 +3449,26 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               </ul>
             ) : null}
             {suggestError ? (
-              <p className="mx-auto max-w-[1120px] px-2 pt-2 text-xs text-muted" role="status">
+              <p className="mx-auto max-w-[768px] px-2 pt-2 text-xs text-muted" role="status">
                 {suggestError}
               </p>
             ) : null}
             {scriptNotice ? (
-              <p data-testid="script-notice" className="mx-auto max-w-[1120px] px-2 pt-2 text-xs text-muted" role="status">
+              <p data-testid="script-notice" className="mx-auto max-w-[768px] px-2 pt-2 text-xs text-muted" role="status">
                 {scriptNotice}
               </p>
             ) : null}
             {/* A reply the server is finishing without a stream to this page: the
                 connection dropped, or the page came back to one already going. */}
             {waitingOnServer || (serverGenerating && !mode) ? (
-              <p data-testid="server-generating" className="mx-auto max-w-[1120px] px-2 pt-2 text-xs text-muted" role="status">
+              <p data-testid="server-generating" className="mx-auto max-w-[768px] px-2 pt-2 text-xs text-muted" role="status">
                 {t('serverGenerating')}
               </p>
             ) : null}
             {/* Who the round in hand still has to ask, quietly: the row above the
                 composer already shows whom it is waiting on now. */}
             {upNext.length > 0 ? (
-              <div className="mx-auto max-w-[1120px] px-2 pt-3" role="status">
+              <div className="mx-auto max-w-[768px] px-2 pt-3" role="status">
                 <span
                   data-testid="round-next"
                   className="inline-flex max-w-full rounded-full border border-line px-3 py-1 text-xs text-muted"
@@ -3482,7 +3482,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                 the reply (2026-10-17 owner decision). A reply hidden from the AI is not
                 continued: its text would go out as the reply being resumed. */}
             {showActions && !editing && last?.role === 'assistant' && !last.hiddenFromPrompt ? (
-              <div className="mx-auto flex max-w-[1120px] justify-end px-2 pt-2">
+              <div className="mx-auto flex max-w-[768px] justify-end px-2 pt-2">
                 <button
                   type="button"
                   onClick={() => void generate('continue')}
@@ -3495,7 +3495,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             {/* The names a line's `@` can be followed by, closest to the field. A press
                 keeps the field's focus (`preventDefault` on the mouse down). */}
             {mentionOptions.length > 0 && !editing ? (
-              <div className="mx-auto max-w-[1120px] px-2 pt-2">
+              <div className="mx-auto max-w-[768px] px-2 pt-2">
                 <ul
                   id="mention-list"
                   role="listbox"
@@ -3549,7 +3549,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             ) : (
             /* Zeta's composer: 답변 추천 (⚡), the field with its `*` inside, and the
                 round send. */
-            <div className="mx-auto flex max-w-[1120px] items-end gap-1.5 p-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))]">
+            <div className="mx-auto flex max-w-[768px] items-end gap-1.5 p-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))]">
               {/* Withheld while a reply streams — what it would suggest is an answer to
                   a turn that has not arrived. */}
               <button
