@@ -289,13 +289,14 @@ describe('a turn the reader wrote partly as others', () => {
     expect(host.textContent).toContain('@유령: 누구?');
   });
 
-  it('edits the turn as it was typed, markers and all', async () => {
-    render(row('@카이: 반가워.', 'user', { onSave: async () => undefined }));
+  it('hands its edit to the page, which opens it as it was typed', async () => {
+    const opened: string[] = [];
+    render(row('@카이: 반가워.', 'user', { onEdit: () => opened.push('edit') }));
     const edit = [...host.querySelectorAll('button')].find((node) => node.textContent === '수정')!;
     await act(async () => {
       edit.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
-    expect(host.querySelector('textarea')?.value).toBe('@카이: 반가워.');
+    expect(opened).toEqual(['edit']);
   });
 });
 

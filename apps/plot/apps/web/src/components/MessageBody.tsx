@@ -33,6 +33,7 @@ import {
   type DisplayPlan,
   type Segment,
 } from '@/lib/displayScripts';
+import { separateActions } from '@/lib/actionBreaks';
 import { splitBlocks } from '@/lib/markdown/blocks';
 import {
   markupChunks,
@@ -299,7 +300,13 @@ function RunItems({
           dangerouslySetInnerHTML={{ __html: item.text }}
         />
       ) : (
-        <MarkdownBlock key={nth} content={item.text} live={item.live} />
+        // A character's actions and words stand as paragraphs of their own, as Zeta's
+        // do, once the stretch is drawn as markdown; while it is written, as written.
+        <MarkdownBlock
+          key={nth}
+          content={box === 'bubble' && !item.live ? separateActions(item.text) : item.text}
+          live={item.live}
+        />
       ),
     );
     if (group.kind === 'figure') {

@@ -99,7 +99,7 @@ describe('a narrating user turn', () => {
   });
 
   it('keeps its actions out of the flow, and its offer in line with its text', () => {
-    render(row('@: 문이 열렸다\n\n>> 들어간다\n>> 돌아선다', 'assistant', { onSave: async () => undefined, onChoice: () => undefined }));
+    render(row('@: 문이 열렸다\n\n>> 들어간다\n>> 돌아선다', 'assistant', { onEdit: () => undefined, onChoice: () => undefined }));
 
     const narration = host.querySelector('[data-testid="message-narration"]')!;
     // Over the gap above the row: nothing takes room until it is shown.
@@ -126,15 +126,18 @@ describe('a narrating user turn', () => {
     expect(host.querySelector('em')?.textContent).toBe('문이 열렸다');
   });
 
-  it('opens the editor on the raw text, prefix included', async () => {
-    render(row('@: 문이 열렸다', 'user', { onSave: async () => undefined }));
+  it('hands its edit to the page, which opens the panel in the composer’s place', async () => {
+    const opened: string[] = [];
+    render(row('@: 문이 열렸다', 'user', { onEdit: () => opened.push('edit') }));
 
     const edit = [...host.querySelectorAll('button')].find((node) => node.textContent === '수정');
     expect(edit).toBeDefined();
     await act(async () => {
       edit!.click();
     });
-    expect(host.querySelector('textarea')?.value).toBe('@: 문이 열렸다');
+    expect(opened).toEqual(['edit']);
+    // Nothing is edited in the row itself.
+    expect(host.querySelector('textarea')).toBeNull();
   });
 });
 
@@ -170,57 +173,6 @@ describe('a generated narration', () => {
   });
 });
 
-describe('the inline editor', () => {
-  const open = async (onSave: (content: string) => Promise<void>): Promise<HTMLTextAreaElement> => {
-    render(row('문을 열었다', 'user', { onSave }));
-    const edit = [...host.querySelectorAll('button')].find((node) => node.textContent === '수정')!;
-    await act(async () => {
-      edit.click();
-    });
-    return host.querySelector('textarea')!;
-  };
-
-  const press = async (node: HTMLElement, init: KeyboardEventInit): Promise<void> => {
-    await act(async () => {
-      node.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, ...init }));
-    });
-  };
-
-  it('says what the field is for, which the placeholder-less box cannot', async () => {
-    const area = await open(async () => undefined);
-    expect(area.getAttribute('aria-label')).toBe('메시지 수정');
-    // The edit is the reader's to type into the moment they ask for it.
-    expect(document.activeElement).toBe(area);
-  });
-
-  it('saves on Cmd+Enter, because Enter belongs to the text', async () => {
-    const saved: string[] = [];
-    const area = await open(async (content) => void saved.push(content));
-
-    await press(area, { key: 'Enter' });
-    expect(saved).toEqual([]);
-
-    await press(area, { key: 'Enter', metaKey: true });
-    expect(saved).toEqual(['문을 열었다']);
-    // Saved and closed: the row is back to showing what it says.
-    expect(host.querySelector('textarea')).toBeNull();
-  });
-
-  it('leaves the message as it was on Escape', async () => {
-    const saved: string[] = [];
-    const area = await open(async (content) => void saved.push(content));
-
-    await press(area, { key: 'Escape' });
-    expect(host.querySelector('textarea')).toBeNull();
-    expect(saved).toEqual([]);
-  });
-
-  it('stays put while an IME is mid-composition, whose Escape is not ours', async () => {
-    const area = await open(async () => undefined);
-    await press(area, { key: 'Escape', isComposing: true });
-    expect(host.querySelector('textarea')).not.toBeNull();
-  });
-});
 
 describe('the furniture on a row', () => {
   const button = (label: string): HTMLButtonElement | undefined =>
@@ -316,21 +268,6 @@ describe('the furniture on a row', () => {
   });
 });
 
-it('locks editing and cancellation until save settles, preserving a rejected draft', async () => {
-  let fail!: (error: Error) => void;
-  let calls = 0;
-  render(row('보존할 메시지', 'user', { onSave: () => { calls++; return new Promise((_resolve, reject) => { fail = reject; }); } }));
-  const button = (text: string) => [...host.querySelectorAll('button')].find((node) => node.textContent === text)!;
-  await act(async () => button('수정').click());
-  await act(async () => button('저장').click());
-  expect(host.querySelector('textarea')!.matches(':disabled')).toBe(true);
-  expect(button('취소').matches(':disabled')).toBe(true);
-  await act(async () => button('저장').click());
-  expect(calls).toBe(1);
-  await act(async () => fail(new Error('save failed')));
-  expect(host.querySelector('textarea')!.value).toBe('보존할 메시지');
-  expect(host.querySelector('textarea')!.matches(':disabled')).toBe(false);
-});
 
 describe('a message hidden from the AI', () => {
   const button = (label: string): HTMLButtonElement | undefined =>
@@ -402,7 +339,7 @@ describe('a long press on a touch screen', () => {
 
   it("opens the row's menu after half a second, and swallows the click it ends with", () => {
     const deleted: string[] = [];
-    render(row('문을 열었다', 'user', { onSave: async () => undefined, onDelete: () => deleted.push('x'), onToggleHidden: () => undefined, createdAt }));
+    render(row('문을 열었다', 'user', { onEdit: () => undefined, onDelete: () => deleted.push('x'), onToggleHidden: () => undefined, createdAt }));
     const bubble = host.querySelector('.user-bubble')!;
     press(bubble, 'pointerdown');
     act(() => vi.advanceTimersByTime(499));

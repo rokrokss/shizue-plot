@@ -428,6 +428,26 @@ async function windowVariableDefaults(
 const releasedState = (deps: AppDeps, chat: Chat): Promise<unknown> =>
   chatState(deps, { ...chat, generatingAt: null });
 
+/**
+ * Deletes the stored files behind attachment rows that went with their messages,
+ * once no row points at them — every row: a script's copy of a turn on another
+ * branch names the same image (`scriptChat.ts`). Called after the rows are really
+ * gone, outside their transaction.
+ */
+async function sweepAttachments(deps: AppDeps, chatId: string, orphaned: readonly string[]): Promise<void> {
+  const paths = [...new Set(orphaned)];
+  if (paths.length === 0) return;
+  const shared = new Set(
+    (
+      await deps.db
+        .select({ path: chatAttachments.path })
+        .from(chatAttachments)
+        .where(and(eq(chatAttachments.chatId, chatId), inArray(chatAttachments.path, paths)))
+    ).map((attachment) => attachment.path),
+  );
+  for (const path of paths) if (!shared.has(path)) await deleteQuietly(deps.storage, path);
+}
+
 async function chatState(deps: AppDeps, chat: Chat, window?: PathWindow): Promise<unknown> {
   const all = await loadMessages(deps, chat.id);
   const full = buildPath(all, chat.headMessageId);
@@ -2363,22 +2383,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           .returning();
         return row!;
       });
-      // Outside the transaction: an object only becomes garbage once the row that
-      // pointed at it is really gone — every row: a script's copy of a turn on
-      // another branch names the same image (`scriptChat.ts`).
-      const paths = [...new Set(orphaned.map((attachment) => attachment.path))];
-      const shared =
-        paths.length > 0
-          ? new Set(
-              (
-                await deps.db
-                  .select({ path: chatAttachments.path })
-                  .from(chatAttachments)
-                  .where(and(eq(chatAttachments.chatId, chat.id), inArray(chatAttachments.path, paths)))
-              ).map((attachment) => attachment.path),
-            )
-          : new Set<string>();
-      for (const path of paths) if (!shared.has(path)) await deleteQuietly(deps.storage, path);
+      await sweepAttachments(deps, chat.id, orphaned.map((attachment) => attachment.path));
       // What the dropped summaries covered and is still on a branch is summarized again.
       if (dropped > 0) scheduleMemoryUpdate(deps, chat.id);
       return c.json(await releasedState(deps, updated));
@@ -2455,17 +2460,17 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
 
   /**
    * Rewriting a whole scene — the run of narration and replies the reader reads as
-   * one — in a single edit.
+   * one — in a single edit, in place (2026-10-17 owner decision, after Zeta): any
+   * scene of the branch, the last or one far back, and whatever followed it stays
+   * where it was.
    *
-   * It forks rather than overwrites: the run is re-inserted from the first block
-   * that stopped matching — and never later than the scene's last message, so a
-   * rewrite that only added to the end or cut it short forks as well — leaving
-   * what the scene used to say in the tree as a sibling branch a swipe can go back
-   * to, and whatever followed the scene on the old path behind it exactly as
-   * editing a user message leaves it. Each
-   * rebuilt block keeps the turn its original was — a narration the reader wrote is
-   * still theirs — while the text is now human-authored, so no rebuilt row carries
-   * a model or a token count.
+   * A block that came from a message rewrites that message's row, which keeps its
+   * id, turn, speaker, round and everything its scripts left; a message no block
+   * came from is taken out; a block the reader added is a new row in its place.
+   * The scene's rows are then chained again in the blocks' order, and what hung
+   * under its last message — the rest of the conversation, and any other version
+   * of what came next — hangs under the new last one. A turn some other version
+   * hung under, taken out, hands that version to the turn before it.
    */
   app.post('/:id/edit-scene', async (c) => {
     const id = requireUuidParam(c);
@@ -2475,147 +2480,190 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const blocks = requireSceneBlocks(body);
 
     const chat = await loadWritableChat(deps, id, userId);
-    const path = buildPath(await loadMessages(deps, chat.id), chat.headMessageId);
+    // The edit moves and takes away rows, so it holds the chat's claim as a delete
+    // does: a reply streaming in meanwhile would hang under a row this is removing.
+    if (!(await acquireChatSlot(deps, chat.id, userId))) await rejectBusyChat(deps, chat.id, userId);
+    try {
+      const path = buildPath(await loadMessages(deps, chat.id), chat.headMessageId);
 
-    // The scene has to be a run of the branch as it stands right now, and every
-    // message on it one a scene is made of. Maximality is the editor's business: a
-    // sub-run of a scene is still a scene to rewrite.
-    const start = path.findIndex((message) => message.id === messageIds[0]);
-    const scene = start < 0 ? [] : path.slice(start, start + messageIds.length);
-    if (scene.length !== messageIds.length || scene.some((m, i) => m.id !== messageIds[i])) {
-      throw badRequest('invalid_request', 'messageIds must be a contiguous run of the current branch');
-    }
-    if (!scene.every((message) => isSceneMessage(message))) {
-      throw badRequest('invalid_request', 'Only narration and character turns make up a scene');
-    }
-
-    const originIndex = new Map(messageIds.map((messageId, index) => [messageId, index]));
-    let previous = -1;
-    for (const block of blocks) {
-      if (block.originId === undefined) continue;
-      const index = originIndex.get(block.originId);
-      // Each original at most once and in the order it stands on the branch: a
-      // scene may lose or gain messages, but its own are not shuffled.
-      if (index === undefined || index <= previous) {
-        throw badRequest('invalid_request', 'originId must name a scene message once, in order');
+      // The scene has to be a run of the branch as it stands right now, and every
+      // message on it one a scene is made of. Maximality is the editor's business: a
+      // sub-run of a scene is still a scene to rewrite.
+      const start = path.findIndex((message) => message.id === messageIds[0]);
+      const scene = start < 0 ? [] : path.slice(start, start + messageIds.length);
+      if (scene.length !== messageIds.length || scene.some((m, i) => m.id !== messageIds[i])) {
+        throw badRequest('invalid_request', 'messageIds must be a contiguous run of the current branch');
       }
-      previous = index;
-      if ((block.kind === 'narration') !== isNarration(scene[index]!.content)) {
-        throw badRequest('invalid_request', 'A block cannot change the kind of the message it came from');
+      if (!scene.every((message) => isSceneMessage(message))) {
+        throw badRequest('invalid_request', 'Only narration and character turns make up a scene');
       }
-    }
 
-    const written = blocks.map((block) =>
-      block.kind === 'narration' ? withNarrationPrefix(block.content) : block.content.trim(),
-    );
-    // A block the rewrite changed, or added, is stored as an edit of its message
-    // is (`editStorer`): its `runOnEdit` scripts and, in a work SillyTavern wrote,
-    // its macros as ST's `updateMessage` leaves them, one message at a time. A
-    // block left as it was keeps the text it was stored with.
-    const store = await editStorer(deps, c, chat);
-    const edits: (StoredEdit | null)[] = [];
-    for (const [index, block] of blocks.entries()) {
-      const original = block.originId === undefined ? undefined : scene[originIndex.get(block.originId)!]!;
-      const text = written[index]!;
-      if (original?.content === text) {
-        edits.push(null);
-        continue;
+      const originIndex = new Map(messageIds.map((messageId, index) => [messageId, index]));
+      let previous = -1;
+      for (const block of blocks) {
+        if (block.originId === undefined) continue;
+        const index = originIndex.get(block.originId);
+        // Each original at most once and in the order it stands on the branch: a
+        // scene may lose or gain messages, but its own are not shuffled.
+        if (index === undefined || index <= previous) {
+          throw badRequest('invalid_request', 'originId must name a scene message once, in order');
+        }
+        previous = index;
+        if ((block.kind === 'narration') !== isNarration(scene[index]!.content)) {
+          throw badRequest('invalid_request', 'A block cannot change the kind of the message it came from');
+        }
       }
-      const role: MessageRole = original?.role ?? (block.kind === 'narration' ? 'user' : 'assistant');
-      edits.push(await store({ role, content: original?.content ?? text }, text));
+
+      const written = blocks.map((block) =>
+        block.kind === 'narration' ? withNarrationPrefix(block.content) : block.content.trim(),
+      );
+      // A block the rewrite changed, or added, is stored as an edit of its message
+      // is (`editStorer`): its `runOnEdit` scripts and, in a work SillyTavern wrote,
+      // its macros as ST's `updateMessage` leaves them, one message at a time. A
+      // block left as it was keeps the text it was stored with.
+      const store = await editStorer(deps, c, chat);
+      const edits: (StoredEdit | null)[] = [];
+      for (const [index, block] of blocks.entries()) {
+        const original = block.originId === undefined ? undefined : scene[originIndex.get(block.originId)!]!;
+        const text = written[index]!;
+        if (original?.content === text) {
+          edits.push(null);
+          continue;
+        }
+        const role: MessageRole = original?.role ?? (block.kind === 'narration' ? 'user' : 'assistant');
+        edits.push(await store({ role, content: original?.content ?? text }, text));
+      }
+      const contents = written.map((text, index) => edits[index]?.text ?? text);
+
+      // Nothing moved — the branch is already what the editor is asking for.
+      const unchanged =
+        blocks.length === scene.length &&
+        blocks.every((block, index) => block.originId === messageIds[index] && edits[index] === null);
+      if (unchanged) return c.json(await releasedState(deps, chat));
+
+      const stamp = Date.now();
+      const chain = blocks.map((block, index) => {
+        const original = block.originId === undefined ? undefined : scene[originIndex.get(block.originId)!]!;
+        return { block, index, original, id: original?.id ?? randomUUID() };
+      });
+      const kept = new Set(chain.flatMap((link) => (link.original ? [link.original.id] : [])));
+      const dropped = scene.filter((message) => !kept.has(message.id));
+      const inScene = new Set(messageIds);
+      const last = chain[chain.length - 1]!.id;
+      const tailId = messageIds[messageIds.length - 1]!;
+
+      // Read while the rows are still there: deleting a message cascades its
+      // attachment rows away, and the files behind them are ours to sweep up.
+      const orphaned =
+        dropped.length > 0
+          ? (
+              await deps.db
+                .select({ path: chatAttachments.path })
+                .from(chatAttachments)
+                .where(inArray(chatAttachments.messageId, dropped.map((message) => message.id)))
+            ).map((attachment) => attachment.path)
+          : [];
+
+      let forgotten = 0;
+      const updated = await deps.db.transaction(async (tx) => {
+        // What followed the scene, read before the scene's rows move: a row the
+        // rewrite chains under the old last message is the scene's, not a follower.
+        const followers = (
+          await tx
+            .select({ id: messages.id })
+            .from(messages)
+            .where(and(eq(messages.parentId, tailId), eq(messages.chatId, chat.id)))
+        )
+          .map((row) => row.id)
+          .filter((id) => !inScene.has(id));
+        for (const [position, link] of chain.entries()) {
+          const parentId = position === 0 ? scene[0]!.parentId : chain[position - 1]!.id;
+          const content = contents[link.index]!;
+          const edit = edits[link.index] ?? null;
+          if (link.original) {
+            if (edit === null && link.original.parentId === parentId) continue;
+            await tx
+              .update(messages)
+              .set({
+                parentId,
+                ...(edit !== null
+                  ? {
+                      content,
+                      // What was shown in its place and the bias written on it go with
+                      // the old words, as the in-place edit of a reply does.
+                      displayText: null,
+                      bias: null,
+                      scriptRev: sql`${messages.scriptRev} + 1`,
+                      ...variableDeltaOf(link.original.variableDelta ?? null, edit.stored?.variableWrites ?? null),
+                    }
+                  : {}),
+              })
+              .where(eq(messages.id, link.original.id));
+            continue;
+          }
+          const role: MessageRole = link.block.kind === 'narration' ? 'user' : 'assistant';
+          await tx.insert(messages).values({
+            id: link.id,
+            chatId: chat.id,
+            parentId,
+            role,
+            content,
+            ...variableDeltaOf(null, edit?.stored?.variableWrites ?? null),
+            // Distinct stamps: siblings order by creation, and one insert's rows
+            // would otherwise share the transaction's `now()`.
+            createdAt: new Date(stamp + position),
+          });
+        }
+
+        // What followed the scene hangs under its new last message.
+        if (tailId !== last && followers.length > 0) {
+          await tx.update(messages).set({ parentId: last }).where(inArray(messages.id, followers));
+        }
+        // Another version hung under a turn that is taken out goes to the turn before it.
+        for (const message of dropped) {
+          if (message.id === tailId) continue;
+          const at = messageIds.indexOf(message.id);
+          const before = [...scene.slice(0, at)].reverse().find((earlier) => kept.has(earlier.id));
+          const others = await tx
+            .select({ id: messages.id })
+            .from(messages)
+            .where(and(eq(messages.parentId, message.id), eq(messages.chatId, chat.id)));
+          const strays = others.map((row) => row.id).filter((id) => !inScene.has(id));
+          if (strays.length > 0) {
+            await tx
+              .update(messages)
+              .set({ parentId: before ? before.id : scene[0]!.parentId })
+              .where(inArray(messages.id, strays));
+          }
+        }
+        if (dropped.length > 0) {
+          await tx.delete(messages).where(inArray(messages.id, dropped.map((message) => message.id)));
+        }
+
+        // The summaries that covered what changed or went are gone; the rest stand.
+        forgotten = await invalidateMemoryForEdit(tx, chat.id, [
+          ...chain.flatMap((link) => (link.original && edits[link.index] !== null ? [link.original.id] : [])),
+          ...dropped.map((message) => message.id),
+        ]);
+        // A scene the branch ended on ends it still, at its new last message.
+        const head =
+          chat.headMessageId === tailId || dropped.some((message) => message.id === chat.headMessageId)
+            ? last
+            : chat.headMessageId;
+        const [row] = await tx
+          .update(chats)
+          .set({ headMessageId: head, updatedAt: new Date() })
+          .where(eq(chats.id, chat.id))
+          .returning();
+        return row!;
+      });
+      if (forgotten > 0) scheduleMemoryUpdate(deps, chat.id);
+      for (const edit of edits) await keepStoredGlobalWrites(deps, chat, edit?.stored ?? null);
+      await sweepAttachments(deps, chat.id, orphaned);
+      return c.json(await releasedState(deps, updated));
+    } finally {
+      await releaseChatSlot(deps, chat.id);
     }
-    const contents = written.map((text, index) => edits[index]?.text ?? text);
-
-    // How much of the scene the rewrite left standing, in stored form: the fork
-    // point, so an edit of the last line forks at the last line.
-    let kept = 0;
-    while (
-      kept < blocks.length &&
-      kept < scene.length &&
-      blocks[kept]!.originId === messageIds[kept] &&
-      contents[kept] === scene[kept]!.content
-    ) {
-      kept += 1;
-    }
-    // Nothing moved — the branch is already what the editor is asking for.
-    if (kept === blocks.length && kept === scene.length) return c.json(await chatState(deps, chat));
-
-    // Every save has to leave the old scene one swipe away, so the run always
-    // starts a sibling of a message that is on the branch. Only a rewrite that
-    // merely added to the end of the scene, or dropped the end of it, can reach
-    // past that bound: a real divergence is already inside it. The last matching
-    // block is re-inserted as a copy of itself, which is what the fork costs.
-    kept = Math.min(kept, blocks.length - 1, messageIds.length - 1);
-
-    const stamp = Date.now();
-    let parentId = kept > 0 ? messageIds[kept - 1]! : scene[0]!.parentId;
-    const rebuilt = blocks.slice(kept).map((block, position) => {
-      const original =
-        block.originId === undefined ? undefined : scene[originIndex.get(block.originId)!]!;
-      const role: MessageRole = original?.role ?? (block.kind === 'narration' ? 'user' : 'assistant');
-      const row = {
-        // Minted here so the run can be chained before any of it is written.
-        id: randomUUID(),
-        chatId: chat.id,
-        parentId,
-        role,
-        content: contents[kept + position]!,
-        ...(original ? { source: original.source } : {}),
-        ...(original?.directions ? { directions: original.directions } : {}),
-        // The copy is the same turn, so it keeps the lore it triggered: timed
-        // effects read the branch's records, and a typo fix must not end them.
-        ...(original?.loreTriggers ? { loreTriggers: original.loreTriggers } : {}),
-        // …and what its scripts left: they ran once, for the turn the copy still
-        // is, and nothing runs them again for a rewording — under what the
-        // rewording's own macros wrote now, in a work SillyTavern wrote.
-        ...variableDeltaOf(original?.variableDelta ?? null, edits[kept + position]?.stored?.variableWrites ?? null),
-        // …and who said it in which round: a reworded group reply is still theirs.
-        ...(original ? { speakerMemberId: original.speakerMemberId, groupTurnId: original.groupTurnId } : {}),
-        // …and whether the AI reads it.
-        ...(original?.hiddenFromPrompt ? { hiddenFromPrompt: true } : {}),
-        // …and the face its member wore after it, which a rewording does not change.
-        ...(original?.role === 'assistant' && role === 'assistant' && original.emotion
-          ? { emotion: original.emotion }
-          : {}),
-        // …and what SillyTavern kept beside it: the reasoning behind it, and — only
-        // while the words are the same, as an edit drops them — what was shown in
-        // their place and the bias written on it.
-        ...(original?.reasoning ? { reasoning: original.reasoning } : {}),
-        ...(original && original.content === contents[kept + position]
-          ? {
-              ...(original.displayText !== null ? { displayText: original.displayText } : {}),
-              ...(original.bias !== null ? { bias: original.bias } : {}),
-            }
-          : {}),
-        // Distinct stamps, like the greeting roots: siblings order by creation, and
-        // one insert's rows would otherwise share the transaction's `now()`.
-        createdAt: new Date(stamp + position),
-      };
-      parentId = row.id;
-      return row;
-    });
-
-    // The run always has a last message: the bound above leaves at least one block
-    // to write, whatever the rewrite did.
-    const head = rebuilt[rebuilt.length - 1]!.id;
-
-    // One transaction, like the in-place edit: the rewrite and the memory
-    // invalidation it forces must not be observable apart. The edit is felt from
-    // the first original turn the branch now leaves behind.
-    let dropped = 0;
-    const updated = await deps.db.transaction(async (tx) => {
-      await tx.insert(messages).values(rebuilt);
-      dropped = await invalidateMemoryForEdit(tx, chat.id, scene[kept]!.id);
-      const [row] = await tx
-        .update(chats)
-        .set({ headMessageId: head, updatedAt: new Date() })
-        .where(eq(chats.id, chat.id))
-        .returning();
-      return row!;
-    });
-    if (dropped > 0) scheduleMemoryUpdate(deps, chat.id);
-    for (const edit of edits.slice(kept)) await keepStoredGlobalWrites(deps, chat, edit?.stored ?? null);
-    return c.json(await chatState(deps, updated));
   });
 
   /**
@@ -3682,7 +3730,10 @@ const storedEdit = async (
   content: string,
 ): Promise<StoredEdit> => (await editStorer(deps, c, chat))(message, content);
 
-/** PATCH /api/messages/:id — edit a message; user edits fork a new branch. */
+/**
+ * PATCH /api/messages/:id — edit a message in place, the reader's own as a reply is
+ * (2026-10-17 owner decision): what followed it stays on the branch.
+ */
 export function messageRoutes(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
 
@@ -3707,57 +3758,32 @@ export function messageRoutes(deps: AppDeps): Hono<AppEnv> {
       ? { ...(row.message.variableDelta ?? {}), ...stored.variableWrites }
       : row.message.variableDelta;
 
-    if (row.message.role === 'assistant') {
-      // One transaction: the edit and the memory invalidation it forces must not be
-      // observable apart, or a refresh could snapshot the old text and still win.
-      const dropped = await deps.db.transaction(async (tx) => {
-        await tx
-          .update(messages)
-          // The delta stays: it holds the values the scripts set, not a reading of
-          // the text. The revision moves, so a script commit computed on the old
-          // text cannot land on top of the reader's own words. What SillyTavern
-          // showed in its place goes with the old text, as ST's translation does
-          // (`translateMessageEdit`), and so does a bias, which ST clears on a
-          // reply's edit; its reasoning stays.
-          .set({
-            content: edited,
-            displayText: null,
-            bias: null,
-            scriptRev: sql`${messages.scriptRev} + 1`,
-            ...(stored?.variableWrites ? { variableDelta: storableDelta(delta) } : {}),
-          })
-          .where(eq(messages.id, id));
-        return invalidateMemoryForEdit(tx, row.chat.id, id);
-      });
-      await keepStoredGlobalWrites(deps, row.chat, stored);
-      // The summary that covered the old words is gone; the new ones are summarized again.
-      if (dropped > 0) scheduleMemoryUpdate(deps, row.chat.id);
-      return c.json({ messageId: id });
-    }
-
-    // User message: fork a sibling branch and drop the history that followed.
-    const [sibling] = await deps.db
-      .insert(messages)
-      .values({
-        chatId: row.chat.id,
-        parentId: row.message.parentId,
-        role: 'user',
-        content: edited,
-        // The scripts that ran for the turn are not run again for an edit of it —
-        // RisuAI never re-runs a trigger on one either — so what they left stays.
-        ...(delta ? { variableDelta: storableDelta(delta) } : {}),
-        // A new version of the same turn: still hidden from the AI if it was.
-        ...(row.message.hiddenFromPrompt ? { hiddenFromPrompt: true } : {}),
-        // In a work ST wrote, the bias it says now (`updateMessage`).
-        ...(bias ? { bias } : {}),
-      })
-      .returning();
-    await deps.db
-      .update(chats)
-      .set({ headMessageId: sibling!.id, updatedAt: new Date() })
-      .where(eq(chats.id, row.chat.id));
+    // One transaction: the edit and the memory invalidation it forces must not be
+    // observable apart, or a refresh could snapshot the old text and still win.
+    const dropped = await deps.db.transaction(async (tx) => {
+      await tx
+        .update(messages)
+        // The delta stays: it holds the values the scripts set, not a reading of
+        // the text — RisuAI never re-runs a trigger on an edit either. The
+        // revision moves, so a script commit computed on the old text cannot land
+        // on top of the reader's own words. What SillyTavern showed in its place
+        // goes with the old text, as ST's translation does (`translateMessageEdit`);
+        // a reply's bias goes too, as ST clears it on a reply's edit, and the
+        // reader's turn keeps the bias it says now (`updateMessage`). Reasoning stays.
+        .set({
+          content: edited,
+          displayText: null,
+          bias: row.message.role === 'user' ? (bias ?? null) : null,
+          scriptRev: sql`${messages.scriptRev} + 1`,
+          ...(stored?.variableWrites ? { variableDelta: storableDelta(delta) } : {}),
+        })
+        .where(eq(messages.id, id));
+      return invalidateMemoryForEdit(tx, row.chat.id, id);
+    });
     await keepStoredGlobalWrites(deps, row.chat, stored);
-    return c.json({ messageId: sibling!.id });
+    // The summary that covered the old words is gone; the new ones are summarized again.
+    if (dropped > 0) scheduleMemoryUpdate(deps, row.chat.id);
+    return c.json({ messageId: id });
   });
 
   return app;

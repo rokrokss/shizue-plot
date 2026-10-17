@@ -289,17 +289,40 @@ test('regenerates the last reply, and again with a request', async () => {
   await expect(assistantMessages()).toHaveCount(2);
 });
 
+test('edits the last turn in the composer’s place, its action parted from its words', async () => {
+  const reply = assistantMessages().last();
+  // Drawn as Zeta draws a reply: the action a paragraph of its own between the words.
+  await expect(reply.locator('p').filter({ has: page.locator('em') })).toHaveText('웃으며');
+
+  await page.locator('.chat-veil').getByRole('button', { name: '수정' }).click();
+  const editor = page.getByTestId('turn-editor');
+  const field = editor.getByRole('textbox', { name: '메시지 수정' });
+  // The composer gives way to the panel, which holds the turn as it is drawn.
+  await expect(page.getByPlaceholder('메시지를 입력하세요')).toHaveCount(0);
+  await expect(field).toHaveValue(/안녕\n\n\*웃으며\*\n\n반가워/);
+
+  const saved = page.waitForResponse((response) => response.url().endsWith('/edit-scene'));
+  await field.fill((await field.inputValue()).replace('반가워', `반가웠어 ${run}`));
+  await editor.getByRole('button', { name: '저장', exact: true }).click();
+  expect((await saved).ok()).toBe(true);
+  await expect(editor).toHaveCount(0);
+  await expect(assistantMessages()).toHaveCount(2);
+  await expect(assistantMessages().last()).toContainText(`반가웠어 ${run}`);
+  await expectComposerIdle();
+});
+
 test('edits the user message and regenerates the reply', async () => {
   const row = userMessages().last();
   await row.hover();
   await row.getByRole('button', { name: '수정' }).click();
-  await row.getByRole('textbox').fill(editedTurn);
-  await row.getByRole('button', { name: '저장', exact: true }).click();
+  const editor = page.getByTestId('turn-editor');
+  await editor.getByRole('textbox', { name: '메시지 수정' }).fill(editedTurn);
+  await editor.getByRole('button', { name: '저장', exact: true }).click();
 
-  // Editing forks the branch: the head is now the user message, so the reply
-  // is regenerated explicitly (the UI does not generate on save).
+  // The edit is in place: the reply under it stays, and answering the new
+  // words again is the reader's own choice (the UI does not generate on save).
   await expect(userMessages().last()).toContainText(editedTurn);
-  await expect(assistantMessages()).toHaveCount(1);
+  await expect(assistantMessages()).toHaveCount(2);
 
   await page.getByRole('button', { name: '재생성' }).click();
 

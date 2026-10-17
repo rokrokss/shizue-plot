@@ -867,6 +867,21 @@ async function switchHead(
   return request(cookie, `/api/chats/${chatId}`, 'GET', undefined, target);
 }
 
+/**
+ * Another version of a reader's turn beside it, with the head on it — a branch as
+ * an imported chat or an edit before 2026-10-17 left one. Edits are in place now,
+ * so a test that needs a fork writes one. Answers in the PATCH's old shape.
+ */
+async function forkUserTurn(chatId: string, turnId: string, content: string): Promise<{ messageId: string }> {
+  const [turn] = await db.select().from(messages).where(eq(messages.id, turnId));
+  const [sibling] = await db
+    .insert(messages)
+    .values({ chatId, parentId: turn!.parentId, role: 'user', content, variableDelta: turn!.variableDelta })
+    .returning();
+  await db.update(chats).set({ headMessageId: sibling!.id }).where(eq(chats.id, chatId));
+  return { messageId: sibling!.id };
+}
+
 /** Minimal bytes that sniff as a GIF; an attachment is never looked at. */
 const gifOf = (marker: number): Uint8Array => Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, marker]);
 
@@ -3278,7 +3293,7 @@ describe('chats', () => {
     });
   });
 
-  it('forks a branch when a user message is edited', async () => {
+  it('edits a user message in place, the reply after it kept', async () => {
     const cookie = await signUp('edit@example.com');
     const { chatId } = await setupChat(cookie);
     await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '첫 질문' }));
@@ -3289,18 +3304,14 @@ describe('chats', () => {
     const patched = await readJson(
       await json(cookie, `/api/messages/${userMessage.id}`, 'PATCH', { content: '다른 질문' }),
     );
-    expect(patched.messageId).not.toBe(userMessage.id);
+    expect(patched.messageId).toBe(userMessage.id);
 
     const after = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    // The new branch drops the reply that followed the original message.
-    expect(after.path.map((message: any) => message.id)).toEqual([before.path[0].id, patched.messageId]);
+    // The same branch, the reply that followed still on it (2026-10-17 owner decision).
+    expect(after.path.map((message: any) => message.id)).toEqual(before.path.map((message: any) => message.id));
     expect(after.path[1].content).toBe('다른 질문');
-    expect(after.siblings[patched.messageId]).toEqual({
-      index: 1,
-      total: 2,
-      ids: [userMessage.id, patched.messageId],
-    });
-    expect(after.chat.headMessageId).toBe(patched.messageId);
+    expect(after.siblings[userMessage.id]).toEqual({ index: 0, total: 1, ids: [userMessage.id] });
+    expect(after.chat.headMessageId).toBe(before.chat.headMessageId);
 
     // Assistant edits stay in place.
     const assistantId = before.path[2].id;
@@ -3805,15 +3816,13 @@ describe('chats', () => {
     expect(state.chat.personaId).toBeNull();
   });
 
-  it('regenerates under a user head after an edit fork', async () => {
+  it('regenerates under a user head on a branch of its own', async () => {
     const cookie = await signUp('fork-regen@example.com');
     const { chatId } = await setupChat(cookie);
     await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '첫 질문' }));
 
     const before = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    const patched = await readJson(
-      await json(cookie, `/api/messages/${before.path[1].id}`, 'PATCH', { content: '다른 질문' }),
-    );
+    const patched = await forkUserTurn(chatId, before.path[1].id, '다른 질문');
 
     const events = await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST'));
     const done = events.at(-1)!;
@@ -5072,10 +5081,10 @@ describe('chats', () => {
     const other = await signUp('auto-other@example.com');
     const { chatId } = await setupChat(cookie);
 
-    // Editing a user message leaves the head on that message.
+    // A branch that ends on a reader's turn.
     await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '첫 질문' }));
     const before = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    await json(cookie, `/api/messages/${before.path[1].id}`, 'PATCH', { content: '다른 질문' });
+    await forkUserTurn(chatId, before.path[1].id, '다른 질문');
 
     const res = await json(cookie, `/api/chats/${chatId}/auto`, 'POST');
     expect(res.status).toBe(400);
@@ -5487,9 +5496,10 @@ describe('scene editing', () => {
   const editScene = (cookie: string, chatId: string, body: unknown): Promise<Response> =>
     json(cookie, `/api/chats/${chatId}/edit-scene`, 'POST', body);
 
-  it('forks at the first changed block and leaves the old run in the tree', async () => {
+  it('rewrites a changed block in the row it came from, and leaves the others alone', async () => {
     const cookie = await signUp('scene-edit@example.com');
     const { chatId, scene } = await sceneChat(cookie);
+    const rows = await messageCount(chatId);
 
     const res = await editScene(cookie, chatId, {
       messageIds: scene,
@@ -5502,35 +5512,17 @@ describe('scene editing', () => {
     expect(res.status, await res.clone().text()).toBe(200);
     const after = await readJson(res);
 
-    // The unchanged first block is the fork point: it stays, and everything from
-    // the changed one on is a new run under it.
-    expect(after.path).toHaveLength(5);
-    expect(after.path[2].id).toBe(scene[0]);
-    expect(after.path[3].id).not.toBe(scene[1]);
+    // In place: the same rows on the same branch, one of them saying something new.
+    expect(await messageCount(chatId)).toBe(rows);
+    expect(after.path.slice(2).map((message: any) => message.id)).toEqual(scene);
     expect(after.path[3].content).toBe('거기 누구야?');
     expect(after.path[4].content).toBe('@: 바람이 분다');
-    expect(after.path[4].id).not.toBe(scene[2]);
-    expect(after.chat.headMessageId).toBe(after.path[4].id);
-    // The rewrite is the reader's words, not a model's.
-    expect(after.path[3].model).toBeNull();
-
-    // The old run is still there as a sibling, and a swipe goes back to it whole.
-    expect(after.siblings[after.path[3].id]).toEqual({
-      index: 1,
-      total: 2,
-      ids: [scene[1], after.path[3].id],
-    });
-    const back = await readJson(await switchHead(cookie, chatId, scene[1]));
-    expect(back.path.map((message: any) => message.id)).toEqual([
-      back.path[0].id,
-      back.path[1].id,
-      scene[0],
-      scene[1],
-      scene[2],
-    ]);
+    expect(after.chat.headMessageId).toBe(scene[2]);
+    // No other version of it is left beside it.
+    expect(after.siblings[scene[1]!]).toEqual({ index: 0, total: 1, ids: [scene[1]] });
   });
 
-  it('keeps the turn each rebuilt block came from', async () => {
+  it('keeps everything a turn was, its words aside', async () => {
     const cookie = await signUp('scene-role@example.com');
     const { chatId, state } = await setupChat(cookie);
     const [narration, reply] = await seedScene(
@@ -5553,20 +5545,57 @@ describe('scene editing', () => {
       }),
     );
 
-    // Rebuilt from the first block, so both rows are new — and both are still the
-    // turn they were.
-    const [rewritten, rebuiltReply] = after.path.slice(1);
-    expect(rewritten.id).not.toBe(narration);
+    const [rewritten, untouched] = after.path.slice(1);
+    expect(rewritten.id).toBe(narration);
     expect(rewritten.role).toBe('user');
     expect(rewritten.source).toBe('component');
     expect(rewritten.directions).toBe('판정: 성공');
     expect(rewritten.content).toBe('@: 문이 조용히 열린다');
-    expect(rebuiltReply.id).not.toBe(reply);
-    expect(rebuiltReply.role).toBe('assistant');
+    expect(untouched.id).toBe(reply);
     // The lore it triggered stays on the turn, or a typo fix would end a sticky
     // entry's window.
-    const [stored] = await db.select().from(messages).where(eq(messages.id, rebuiltReply.id));
+    const [stored] = await db.select().from(messages).where(eq(messages.id, reply));
     expect(stored!.loreTriggers).toEqual(['0badc0de']);
+  });
+
+  it('keeps what followed an earlier scene: the later turns hang under it as they did', async () => {
+    const cookie = await signUp('scene-earlier@example.com');
+    const { chatId, scene } = await sceneChat(cookie);
+    const later = await seedScene(
+      chatId,
+      [
+        { role: 'user', content: '다시 왔어' },
+        { role: 'assistant', content: '어서 와' },
+      ],
+      scene[2]!,
+    );
+
+    const after = await readJson(
+      await editScene(cookie, chatId, {
+        messageIds: scene,
+        blocks: [
+          { originId: scene[0], kind: 'narration', content: '문이 활짝 열린다' },
+          // 누구세요? is taken out, and a line is added after the wind.
+          { originId: scene[2], kind: 'narration', content: '바람이 분다' },
+          { kind: 'dialogue', content: '아무도 없나요?' },
+        ],
+      }),
+    );
+
+    // The rest of the conversation is still the branch, under the scene's new end.
+    const ids = after.path.map((message: any) => message.id);
+    expect(ids.slice(-2)).toEqual(later);
+    expect(after.chat.headMessageId).toBe(later[1]);
+    const added = after.path[after.path.length - 3];
+    expect(added.content).toBe('아무도 없나요?');
+    expect(added.role).toBe('assistant');
+    expect(added.parentId).toBe(scene[2]);
+    expect(after.path[after.path.length - 2].parentId).toBe(added.id);
+    expect(after.path[2].content).toBe('@: 문이 활짝 열린다');
+    expect(after.path[3].id).toBe(scene[2]);
+    expect(after.path[3].parentId).toBe(scene[0]);
+    // The turn taken out is gone, not left in the tree.
+    expect(await db.select().from(messages).where(eq(messages.id, scene[1]!))).toEqual([]);
   });
 
   it('gives a new narration block to the reader and a new dialogue block to the character', async () => {
@@ -5584,54 +5613,23 @@ describe('scene editing', () => {
       }),
     );
 
-    // Adding to the end still forks, so the block that matched comes back as a copy
-    // of itself and the new turns hang off that.
-    const [copy, addedNarration, addedDialogue] = after.path.slice(-3);
-    expect(copy.id).not.toBe(scene[0]);
-    expect(after.siblings[copy.id].ids).toEqual([scene[0], copy.id]);
+    // The new turns stand right after the one they follow, and the rest of the
+    // scene — which this edit did not hold — after them.
+    const [kept, addedNarration, addedDialogue, ...rest] = after.path.slice(2);
+    expect(kept.id).toBe(scene[0]);
     expect(addedNarration.role).toBe('user');
     // The prefix is the server's to write, here as much as on a generated turn.
     expect(addedNarration.content).toBe('@: 복도에 불이 들어온다');
-    expect(addedNarration.parentId).toBe(copy.id);
+    expect(addedNarration.parentId).toBe(scene[0]);
     expect(addedDialogue.role).toBe('assistant');
     expect(addedDialogue.content).toBe('누구세요?');
     expect(addedDialogue.parentId).toBe(addedNarration.id);
-    expect(after.chat.headMessageId).toBe(addedDialogue.id);
+    expect(rest.map((message: any) => message.id)).toEqual([scene[1], scene[2]]);
+    expect(rest[0].parentId).toBe(addedDialogue.id);
+    expect(after.chat.headMessageId).toBe(scene[2]);
   });
 
-  it('forks at the tail when the rewrite only adds to the end of the scene', async () => {
-    const cookie = await signUp('scene-append@example.com');
-    const { chatId, scene } = await sceneChat(cookie);
-
-    const after = await readJson(
-      await editScene(cookie, chatId, {
-        messageIds: scene,
-        blocks: [
-          { originId: scene[0], kind: 'narration', content: '문이 열린다' },
-          { originId: scene[1], kind: 'dialogue', content: '누구세요?' },
-          { originId: scene[2], kind: 'narration', content: '바람이 분다' },
-          { kind: 'dialogue', content: '아무도 없나요?' },
-        ],
-      }),
-    );
-
-    // The scene's last turn is re-inserted beside itself, so the addition hangs off
-    // a sibling rather than off the branch the reader was on.
-    const [copy, added] = after.path.slice(-2);
-    expect(copy.id).not.toBe(scene[2]);
-    expect(copy.content).toBe('@: 바람이 분다');
-    expect(copy.parentId).toBe(scene[1]);
-    expect(added.content).toBe('아무도 없나요?');
-    expect(after.chat.headMessageId).toBe(added.id);
-    expect(after.siblings[copy.id]).toEqual({ index: 1, total: 2, ids: [scene[2], copy.id] });
-
-    // …so a swipe back is the scene exactly as it read before the addition.
-    const back = await readJson(await switchHead(cookie, chatId, scene[2]));
-    expect(back.chat.headMessageId).toBe(scene[2]);
-    expect(back.path.map((message: any) => message.id).slice(-3)).toEqual(scene);
-  });
-
-  it('forks at the tail when the rewrite drops the end of the scene', async () => {
+  it('ends the scene where the reader ended it when the edit drops its end', async () => {
     const cookie = await signUp('scene-drop@example.com');
     const { chatId, scene } = await sceneChat(cookie);
 
@@ -5642,20 +5640,33 @@ describe('scene editing', () => {
       }),
     );
 
-    // The one block that stayed comes back as a copy of itself: the scene now ends
-    // where the reader ended it, and nothing was written over to do it.
-    const head = after.path[after.path.length - 1];
     expect(after.path).toHaveLength(3);
-    expect(head.id).not.toBe(scene[0]);
-    expect(head.content).toBe('@: 문이 열린다');
-    expect(after.chat.headMessageId).toBe(head.id);
-    expect(after.siblings[head.id]).toEqual({ index: 1, total: 2, ids: [scene[0], head.id] });
+    expect(after.path[2].id).toBe(scene[0]);
+    expect(after.chat.headMessageId).toBe(scene[0]);
+    expect(await db.select().from(messages).where(inArray(messages.id, [scene[1]!, scene[2]!]))).toEqual([]);
+  });
 
-    // The dropped turns are one swipe away — the head lands on the deepest leaf
-    // under the original, which is the tail, whole.
-    const back = await readJson(await switchHead(cookie, chatId, scene[0]));
-    expect(back.chat.headMessageId).toBe(scene[2]);
-    expect(back.path.map((message: any) => message.id).slice(-3)).toEqual(scene);
+  it('waits for a running reply instead of moving rows out from under it', async () => {
+    const cookie = await signUp('scene-busy@example.com');
+    const { chatId, scene } = await sceneChat(cookie);
+    const edit = () =>
+      editScene(cookie, chatId, {
+        messageIds: scene,
+        blocks: [{ originId: scene[0], kind: 'narration', content: '문이 열린다' }],
+      });
+
+    // A generation holds the slot; the edit would take away the row it hangs a reply under.
+    await db.update(chats).set({ generatingAt: new Date() }).where(eq(chats.id, chatId));
+    const busy = await edit();
+    expect(busy.status).toBe(429);
+    expect((await readJson(busy)).code).toBe('generation_in_progress');
+    expect(await db.select().from(messages).where(inArray(messages.id, scene))).toHaveLength(3);
+    await db.update(chats).set({ generatingAt: null }).where(eq(chats.id, chatId));
+
+    const after = await readJson(await edit());
+    expect(after.chat.headMessageId).toBe(scene[0]);
+    // The edit gave the slot back.
+    expect((await db.select().from(chats).where(eq(chats.id, chatId)))[0]!.generatingAt).toBeNull();
   });
 
   it('does nothing at all when the scene comes back unchanged', async () => {
@@ -8058,11 +8069,8 @@ describe('memory', () => {
     expect(harness.prompts.at(-1)!.system).toContain(SUMMARY);
     expect(harness.prompts.at(-1)!.messages.some((m) => contentText(m.content) === '첫 질문')).toBe(false);
 
-    // Editing the user turn forks a branch without it.
-    const patched = await readJson(
-      await json(cookie, `/api/messages/${turn.id}`, 'PATCH', { content: '다른 질문' }, harness.app),
-    );
-    expect(patched.messageId).not.toBe(turn.id);
+    // Another version of the user turn is a branch without it.
+    await forkUserTurn(chatId, turn.id, '다른 질문');
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app));
     const forked = harness.prompts.at(-1)!;
     expect(forked.system).not.toContain(SUMMARY);
@@ -10213,8 +10221,8 @@ describe('relationship', () => {
     expect(harness.extractions).toHaveLength(1);
     const path = (await chatOf(cookie, chatId, harness)).path;
 
-    // Editing the first user message forks a branch that starts over at the greeting.
-    await json(cookie, `/api/messages/${path[1].id}`, 'PATCH', { content: '다른 첫 질문' }, harness.app);
+    // Another version of the first user message is a branch that starts over at the greeting.
+    await forkUserTurn(chatId, path[1].id, '다른 첫 질문');
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app));
     await harness.settle();
 
@@ -13483,7 +13491,7 @@ describe('card scripts', () => {
     expect(systems.at(-1)).toContain('[hp=100 door=open mood=null]');
   });
 
-  it("moves a turn's revision on a hand edit, and carries its delta onto an edit's fork", async () => {
+  it("moves a turn's revision on a hand edit, and keeps its delta through an edit of the reader's turn", async () => {
     const { cookie, chatId } = await variableChat('script-edits@example.com');
     await readSse(
       await json(
@@ -13509,11 +13517,12 @@ describe('card scripts', () => {
     expect(stale.status).toBe(409);
     expect((await readJson(stale)).code).toBe('script_rev_moved');
 
-    // An edited user turn forks, and the fork keeps what the scripts left on it.
-    const forked = await readJson(await json(cookie, `/api/messages/${user.id}`, 'PATCH', { content: '고쳐 들어간다' }));
+    // An edited user turn is edited in place, and keeps what the scripts left on it.
+    const edited = await readJson(await json(cookie, `/api/messages/${user.id}`, 'PATCH', { content: '고쳐 들어간다' }));
+    expect(edited.messageId).toBe(user.id);
     state = await stateOf(cookie, chatId);
-    expect(state.path.at(-1)).toMatchObject({
-      id: forked.messageId,
+    expect(state.path.at(-2)).toMatchObject({
+      id: user.id,
       content: '고쳐 들어간다',
       variableDelta: { door: 'open' },
     });
@@ -19284,10 +19293,9 @@ describe('vector storage (SillyTavern)', () => {
     const path = await summarizeFirst(cookie, chatId, harness, 3);
     expect(recallOf(await send(cookie, chatId, '그 등대 기억나?', harness))).toContain(`Past events:`);
 
-    // Editing the first turn forks a branch without it, whose messages are embedded as it is read.
+    // Another version of the first turn is a branch without it, whose messages are embedded as it is read.
     const turn = path.find((message: any) => message.content === KEEPER);
-    const forked = await json(cookie, `/api/messages/${turn.id}`, 'PATCH', { content: '다른 이야기' }, harness.app);
-    expect(forked.status).toBe(200);
+    await forkUserTurn(chatId, turn.id, '다른 이야기');
     expect((await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, harness.app))).at(-1)!.event).toBe('done');
     await harness.settle();
     for (const content of ['날씨 이야기', '빵 이야기', '책 이야기']) await send(cookie, chatId, content, harness);

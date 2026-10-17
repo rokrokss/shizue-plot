@@ -7,7 +7,7 @@ import { displayScriptsFor, orderedWithModules } from '@shizue/core/display-scri
 import { fnv1a } from '@shizue/core/macro';
 import { isNarration } from '@shizue/core/narration';
 import { isNarrationTurn } from '@shizue/core/speech';
-import { isSceneMessage, sceneSpanAt } from '@shizue/core/scene';
+import { sceneSpanAt } from '@shizue/core/scene';
 import { manualTriggerNames, type MemberOverlay, type TranslationScript } from '@shizue/core/triggers';
 import { computeVariables, DEFAULT_USER_NAME, type FoldOptions, type Variables } from '@shizue/core/variables';
 import { useFormatter, useLocale, useTranslations } from 'next-intl';
@@ -26,7 +26,7 @@ import { EmotionScreen } from '@/components/EmotionScreen';
 import { MessageRow } from '@/components/MessageRow';
 import { ModelPill } from '@/components/ModelPill';
 import { ScriptDialog, type ScriptPrompt } from '@/components/ScriptDialog';
-import { SceneEditor, type SceneBlock } from '@/components/SceneEditor';
+import { TurnEditor } from '@/components/TurnEditor';
 import { ThemeSwitcher } from '@/components/ThemeSwitcher';
 import { Button, CenteredMessage, Spinner, TextArea, cx } from '@/components/ui';
 import { Link } from '@/i18n/navigation';
@@ -50,6 +50,7 @@ import { applyMention, matchMentions, mentionAt, narratorOption, type MentionOpt
 import type { CbsContext } from '@/lib/cbs';
 import type { ComponentContext } from '@/lib/componentCalls';
 import { toggleDirectionMarkup } from '@/lib/directionMarkup';
+import { turnBlocks, turnText, type SceneBlock, type TurnNames } from '@/lib/turnText';
 import { awaitingEmotion, emotionResolver, emotionSlots, withEmotions } from '@/lib/emotion';
 import {
   displayContextAt,
@@ -495,7 +496,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    */
   const regenerateAsk = useRef('');
   /** Message the scene editor was opened on; its whole scene is what it edits. */
-  const [sceneEdit, setSceneEdit] = useState<string | null>(null);
+  /** The message whose edit is open in the composer's place (`TurnEditor`): its scene, or the reader's own turn. */
+  const [editing, setEditing] = useState<string | null>(null);
   /** Per-browser viewer protection; read after mount so SSR and client agree. */
   const [customUi, setCustomUi] = useState(true);
   useEffect(() => setCustomUi(readCustomUiEnabled()), []);
@@ -2549,6 +2551,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     if (!beginMutation()) return;
     try {
       await apiSend<{ messageId: string }>('PATCH', `/api/messages/${message.id}`, { content });
+      setEditing(null);
       await reload();
     } catch (caught) {
       setError(toMessage(caught));
@@ -2609,7 +2612,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     if (!beginMutation()) return;
     try {
       await apiSend<ChatState>('POST', `/api/chats/${id}/edit-scene`, { messageIds, blocks });
-      setSceneEdit(null);
+      setEditing(null);
       await reload();
     } catch (caught) {
       setError(toMessage(caught));
@@ -2836,10 +2839,16 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
 
   // The scene being edited, if any. It is grouped from the branch as it stands, so
   // a message that is no longer on it simply leaves nothing to draw.
-  const sceneIndex = sceneEdit ? messages.findIndex((message) => message.id === sceneEdit) : -1;
-  const sceneSpan = sceneIndex < 0 ? null : sceneSpanAt(messages, sceneIndex);
-  const scene = sceneSpan ? messages.slice(sceneSpan.start, sceneSpan.end) : [];
-  const sceneIds = new Set(scene.map((message) => message.id));
+  // The edit open in the composer's place: the whole scene a turn of it was
+  // picked from, or the reader's own turn alone.
+  const editIndex = editing ? messages.findIndex((message) => message.id === editing) : -1;
+  const editSpan = editIndex < 0 ? null : sceneSpanAt(messages, editIndex);
+  const editScene = editSpan ? messages.slice(editSpan.start, editSpan.end) : [];
+  const editTurn = editIndex >= 0 && !editSpan ? messages[editIndex]! : null;
+  const turnNames: TurnNames = {
+    member: (memberId) => members.find((member) => member.id === memberId)?.name,
+    own: characterName,
+  };
 
   /**
    * An import is still writing this chat's history, and until it finishes the API
@@ -3194,24 +3203,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                       <span className="h-px flex-1 bg-line" />
                     </div>
                   ) : null;
-                  // The scene's rows give way to one editor, drawn where the first of them was.
-                  if (message.id && sceneIds.has(message.id)) {
-                    return (
-                      <Fragment key={message.key}>
-                        {divider}
-                        {message.id === scene[0]?.id ? (
-                          <SceneEditor
-                            scene={scene}
-                            characterName={characterName}
-                            youName={t('you')}
-                            disabled={settingsLocked}
-                            onCancel={() => setSceneEdit(null)}
-                            onSave={(blocks) => saveScene(scene.map((item) => item.id), blocks)}
-                          />
-                        ) : null}
-                      </Fragment>
-                    );
-                  }
                   return (
                     <Fragment key={message.key}>
                       {divider}
@@ -3277,13 +3268,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                         {...(isLast && showActions && message.role === 'assistant' && choicesOffered
                           ? { onChoice: suggestInput }
                           : {})}
-                        {...(source && !mode && !isSceneMessage(source)
-                          ? { onSave: (content: string) => editMessage(source, content) }
-                          : {})}
-                        // A turn the scene is made of is edited with the whole scene.
-                        {...(source && !mode && isSceneMessage(source)
-                          ? { onEditScene: () => setSceneEdit(source.id) }
-                          : {})}
+                        // The panel in the composer's place: a turn a scene is made of opens
+                        // with the whole scene, the reader's own turn on its own.
+                        {...(source && !mode ? { onEdit: () => setEditing(source.id) } : {})}
                         {...(source && !mode ? { onDelete: () => void deleteMessage(source.id) } : {})}
                         {...(message.hidden ? { hidden: true } : {})}
                         {...(source && !mode ? { onToggleHidden: () => void toggleHidden(source) } : {})}
@@ -3446,7 +3433,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             {/* 이어 쓰기 (RisuAI's continue) stands by the composer rather than under
                 the reply (2026-10-17 owner decision). A reply hidden from the AI is not
                 continued: its text would go out as the reply being resumed. */}
-            {showActions && last?.role === 'assistant' && !last.hiddenFromPrompt ? (
+            {showActions && !editing && last?.role === 'assistant' && !last.hiddenFromPrompt ? (
               <div className="mx-auto flex max-w-[1120px] justify-end px-2 pt-2">
                 <button
                   type="button"
@@ -3459,7 +3446,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             ) : null}
             {/* The names a line's `@` can be followed by, closest to the field. A press
                 keeps the field's focus (`preventDefault` on the mouse down). */}
-            {mentionOptions.length > 0 ? (
+            {mentionOptions.length > 0 && !editing ? (
               <div className="mx-auto max-w-[1120px] px-2 pt-2">
                 <ul
                   id="mention-list"
@@ -3497,8 +3484,23 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                 </ul>
               </div>
             ) : null}
-            {/* Zeta's composer: 답변 추천 (⚡), the field with its `*` inside, and the
-                round send. */}
+            {/* While an edit is open, Zeta's editor stands where the composer was. */}
+            {editScene.length > 0 || editTurn ? (
+              <TurnEditor
+                key={editing}
+                initial={editScene.length > 0 ? turnText(editScene, turnNames) : editTurn!.content}
+                label={t('editMessage')}
+                disabled={settingsLocked}
+                onCancel={() => setEditing(null)}
+                onSave={(text) =>
+                  editScene.length > 0
+                    ? saveScene(editScene.map((message) => message.id), turnBlocks(text, editScene, turnNames))
+                    : editMessage(editTurn!, text)
+                }
+              />
+            ) : (
+            /* Zeta's composer: 답변 추천 (⚡), the field with its `*` inside, and the
+                round send. */
             <div className="mx-auto flex max-w-[1120px] items-end gap-1.5 p-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))]">
               {/* Withheld while a reply streams — what it would suggest is an answer to
                   a turn that has not arrived. */}
@@ -3639,6 +3641,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                 </Button>
               )}
             </div>
+            )}
           </div>
         </div>
       </div>

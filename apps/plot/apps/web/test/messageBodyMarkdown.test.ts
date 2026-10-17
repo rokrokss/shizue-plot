@@ -71,6 +71,14 @@ describe('a settled message', () => {
     expect(host.querySelector('q[data-dialogue]')?.textContent).toBe('「돌아가라.」');
   });
 
+  it("parts a character's action from their words in a reply, and leaves the reader's turn as written", () => {
+    const paragraphs = () => [...host.querySelectorAll('.message-body p')].map((p) => p.innerHTML);
+    render({ content: '*카타나를 쥐며* 합동 훈련 따위 필요 없어.', mode: 'reply' });
+    expect(paragraphs()).toEqual(['<em>카타나를 쥐며</em>', '합동 훈련 따위 필요 없어.']);
+    render({ content: '*카타나를 쥐며* 합동 훈련 따위 필요 없어.' });
+    expect(paragraphs()).toEqual(['<em>카타나를 쥐며</em> 합동 훈련 따위 필요 없어.']);
+  });
+
   it('gives a fenced block its language and a copy button', () => {
     render({ content: '```ts\nconst a = 1;\n```' });
     expect(host.querySelector('.code-block-lang')?.textContent).toBe('ts');

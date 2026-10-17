@@ -256,8 +256,7 @@ export const MessageRow = memo(function MessageRow({
   statusCollapsed,
   onToggleStatus,
   onChoice,
-  onSave,
-  onEditScene,
+  onEdit,
   onDelete,
   hidden = false,
   onToggleHidden,
@@ -358,13 +357,12 @@ export const MessageRow = memo(function MessageRow({
    * content, and an old one is not there to be taken.
    */
   onChoice?: (choice: string) => void;
-  /** Omitted for messages that are not persisted yet. */
-  onSave?: (content: string) => Promise<void>;
   /**
-   * Hands the edit to the page instead of the inline editor: a turn that is part
-   * of a scene is edited with the whole scene, not on its own.
+   * Opens the page's editor for this message — the panel in the composer's place,
+   * holding the whole scene for a turn that is part of one. Omitted for messages
+   * that are not persisted yet.
    */
-  onEditScene?: () => void;
+  onEdit?: () => void;
   /** Deletes this turn and everything under it; the page owns the confirmation. */
   onDelete?: () => void;
   /**
@@ -396,9 +394,6 @@ export const MessageRow = memo(function MessageRow({
   const t = useTranslations('chat');
   const common = useTranslations('common');
   const format = useFormatter();
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(content);
-  const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   /** The translation through the card's edittrans scripts, a `cbs` pattern read with the message's own values. */
   const editTranslation = useMemo(
@@ -418,10 +413,6 @@ export const MessageRow = memo(function MessageRow({
   const [correctBusy, setCorrectBusy] = useState(false);
   const [correctError, setCorrectError] = useState('');
   const toMessage = useErrorMessage();
-
-  useEffect(() => {
-    if (!editing) setDraft(content);
-  }, [content, editing]);
 
   // Says so for a moment and then goes quiet again.
   useEffect(() => {
@@ -486,23 +477,6 @@ export const MessageRow = memo(function MessageRow({
     }
   }
 
-  /**
-   * The edit, from either the button or the keyboard. It closes on success and
-   * stays open on failure — the page says what went wrong, and the text the
-   * reader typed is still here to try again with.
-   */
-  async function saveEdit(): Promise<void> {
-    if (!onSave || busy || disabled) return;
-    setBusy(true);
-    try {
-      await onSave(draft);
-      setEditing(false);
-    } catch {
-      // The page presents the error; keep this draft available for another try.
-    } finally {
-      setBusy(false);
-    }
-  }
 
   /** Keeps what the reader rewrote; a field left as it was, or emptied, keeps what it had. */
   async function saveCorrection(): Promise<void> {
@@ -528,7 +502,7 @@ export const MessageRow = memo(function MessageRow({
     }
   }
 
-  const showActions = !streaming && !editing && !correcting;
+  const showActions = !streaming && !correcting;
 
   /**
    * The row's quiet actions. Beside the name where the row says one — the
@@ -537,12 +511,12 @@ export const MessageRow = memo(function MessageRow({
    */
   const actions = (
     <>
-      {(onSave || onEditScene) && showActions ? (
+      {onEdit && showActions ? (
         <button
           type="button"
           disabled={disabled}
-          onClick={() => (onEditScene ? onEditScene() : setEditing(true))}
-          title={onEditScene ? t('sceneHint') : isUser ? t('editUserHint') : undefined}
+          onClick={onEdit}
+          title={t('editHint')}
           className={cx(QUIET_ACTION, FOCUS_RING, 'hover:text-link')}
         >
           {t('edit')}
@@ -618,8 +592,8 @@ export const MessageRow = memo(function MessageRow({
         </p>
       ) : null}
       <div className="flex flex-col gap-2">
-        {onSave || onEditScene ? (
-          <Button disabled={disabled} onClick={act(() => (onEditScene ? onEditScene() : setEditing(true)))}>
+        {onEdit ? (
+          <Button disabled={disabled} onClick={act(onEdit)}>
             {t('edit')}
           </Button>
         ) : null}
@@ -643,45 +617,11 @@ export const MessageRow = memo(function MessageRow({
     </BottomSheet>
   ) : null;
 
-  const startEdit = onSave || onEditScene ? () => (onEditScene ? onEditScene() : setEditing(true)) : null;
+  const startEdit = onEdit ?? null;
   const shownFooter = typeof footer === 'function' ? footer(startEdit) : footer;
 
-  const editor =
-    editing && onSave ? (
-      <fieldset disabled={busy || disabled} aria-busy={busy || undefined} className="mt-1.5 w-full min-w-0 space-y-2">
-        <TextArea
-          autoFocus
-          aria-label={t('editMessage')}
-          rows={Math.min(16, Math.max(3, draft.split('\n').length + 1))}
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          // Enter belongs to the text being written, so the two ways out are
-          // the ones a field like this always has: Escape leaves it as it was,
-          // Cmd/Ctrl+Enter saves. Never mid-composition — that Escape is the
-          // IME's, and taking it would drop the reader out of the editor.
-          onKeyDown={(event) => {
-            if (busy || disabled || event.nativeEvent.isComposing) return;
-            if (event.key === 'Escape') {
-              event.preventDefault();
-              setEditing(false);
-              return;
-            }
-            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-              event.preventDefault();
-              void saveEdit();
-            }
-          }}
-        />
-        <div className="flex justify-end gap-2">
-          <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
-            {common('cancel')}
-          </Button>
-          <Button size="sm" variant="primary" busy={busy} onClick={() => void saveEdit()}>
-            {common('save')}
-          </Button>
-        </div>
-      </fieldset>
-    ) : correcting ? (
+  /** The translation being corrected, drawn in place of the body. */
+  const editor = correcting ? (
       // RisuAI's 번역 수정 puts the translation in a field in place of the body.
       // The translation here is kept text by text, so each text the row shows is
       // a field of its own under its original — and the markup around them stays
@@ -802,7 +742,7 @@ export const MessageRow = memo(function MessageRow({
           {translation.original ? t('showTranslation') : t('showOriginal')}
         </button>
         {/* RisuAI's two, there while the translation is what is shown. */}
-        {!translation.original && !editing && !correcting ? (
+        {!translation.original && !correcting ? (
           <>
             <button
               type="button"
@@ -837,14 +777,14 @@ export const MessageRow = memo(function MessageRow({
     ) : (hiddenMark ?? translationMark);
   /** The meta line under a reply's last bubble: the marks a row says of itself. */
   const meta = marks;
-  /** What a hidden message's own content is drawn with; nothing while it is edited. */
-  const dim = hidden && !editing ? HIDDEN_DIM : undefined;
+  /** What a hidden message's own content is drawn with; nothing while its translation is corrected. */
+  const dim = hidden && !editor ? HIDDEN_DIM : undefined;
 
   const memberProps = member ? { 'data-shizue-member': member, ...(spoken ? { 'data-shizue-spoken': '' } : {}) } : {};
 
   /** The reasoning, folded, where the reply's text starts. */
   const reasoningBlock =
-    reasoning && !editing ? (
+    reasoning && !editor ? (
       <details
         data-testid="message-reasoning"
         className="mb-2 max-w-[min(100%,36rem)] rounded-xl border border-line bg-raised"
@@ -861,14 +801,14 @@ export const MessageRow = memo(function MessageRow({
    * message's media and files under its text.
    */
   const attachedBlock =
-    attachments?.length && !editing ? (
+    attachments?.length && !editor ? (
       <div className="mt-2 max-w-[min(100%,36rem)]">
         <MessageAttachments attachments={attachments} />
       </div>
     ) : null;
   /** The bias, quietly under the reader's bubble. */
   const biasLine =
-    bias && !editing ? (
+    bias && !editor ? (
       <p data-testid="message-bias" className="mt-1 max-w-[min(100%,36rem)] whitespace-pre-wrap text-right text-xs text-muted italic">
         {bias}
       </p>
