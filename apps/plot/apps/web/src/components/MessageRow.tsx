@@ -253,7 +253,6 @@ export const MessageRow = memo(function MessageRow({
   createdAt,
   grouped,
   intro = false,
-  model,
   statusCollapsed,
   onToggleStatus,
   onChoice,
@@ -349,8 +348,6 @@ export const MessageRow = memo(function MessageRow({
   grouped?: boolean;
   /** A chat's opening: its `#`/`##` lines are scene titles, as a narration's are. */
   intro?: boolean;
-  /** The name of the model that wrote this reply, shown small by it once it is finished. */
-  model?: string;
   /** Whether this chat's status cards are folded away; one answer for all of them. */
   statusCollapsed?: boolean | undefined;
   onToggleStatus?: (() => void) | undefined;
@@ -371,8 +368,8 @@ export const MessageRow = memo(function MessageRow({
   /** Deletes this turn and everything under it; the page owns the confirmation. */
   onDelete?: () => void;
   /**
-   * Hidden from the AI (SillyTavern's hide): drawn dimmed, and said so beside the
-   * model's name — still on screen, never in what a model reads.
+   * Hidden from the AI (SillyTavern's hide): drawn dimmed, and said so in its
+   * meta line — still on screen, never in what a model reads.
    */
   hidden?: boolean;
   /** Hides the message from the AI, or shows it to the AI again; the page owns the request. */
@@ -765,15 +762,7 @@ export const MessageRow = memo(function MessageRow({
       <StatusCard status={status} collapsed={statusCollapsed} onToggle={onToggleStatus} translation={translation.body} />
     ) : null;
 
-  /** The model that wrote a finished reply: faint, outside its last bubble, at the corner. */
-  const modelLabel =
-    model && !streaming && !thinking ? (
-      <span data-testid="message-model" className="chat-meta caption2 text-muted/80">
-        {model}
-      </span>
-    ) : undefined;
-
-  /** Says the message is hidden from the AI, in the meta line by the model's name. */
+  /** Says the message is hidden from the AI, in the meta line. */
   const hiddenMark = hidden ? (
     <span data-testid="message-hidden" className="chat-meta caption2 inline-flex items-center gap-1 text-muted">
       <Icon name="eyeOff" className="size-3" />
@@ -846,13 +835,8 @@ export const MessageRow = memo(function MessageRow({
         {hiddenMark}
       </span>
     ) : (hiddenMark ?? translationMark);
-  /** The meta line under a reply's last bubble: the marks, then the model. */
-  const meta = marks ? (
-    <span className="inline-flex items-center gap-2">
-      {marks}
-      {modelLabel}
-    </span>
-  ) : modelLabel;
+  /** The meta line under a reply's last bubble: the marks a row says of itself. */
+  const meta = marks;
   /** What a hidden message's own content is drawn with; nothing while it is edited. */
   const dim = hidden && !editing ? HIDDEN_DIM : undefined;
 

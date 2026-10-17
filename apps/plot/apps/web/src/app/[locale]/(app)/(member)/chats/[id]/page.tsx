@@ -300,8 +300,6 @@ interface ViewMessage {
   spoken?: boolean;
   /** The chat's opening, whose `#` lines are scene titles. */
   intro?: boolean;
-  /** The model a stored reply was written with, by name — the chat's where the reply names none. */
-  model?: string;
   /** Hidden from the AI: drawn dimmed, and numbered no depth for the display scripts. */
   hidden?: boolean;
 }
@@ -2748,14 +2746,10 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
 
   /** A member by id, for the replies that name their speaker by it. */
   const memberById = new Map(members.map((member) => [member.id, member]));
-  /** A model as the settings name it; an id the catalog no longer lists, as it is. */
-  const modelName = (id: string): string => models.find((entry) => entry.id === id)?.label ?? id;
   const view: ViewMessage[] = messages.map((message) => {
     const continued = active === 'continue' && message.id === last?.id;
     const tagged = message.role === 'assistant' && message.speakerMemberId ? memberById.get(message.speakerMemberId) : undefined;
     const opening = isGreeting(message);
-    // A reply the model wrote — not the opening, nor a turn a card's script wrote.
-    const written = message.role === 'assistant' && !opening && message.source !== 'script';
     return {
       key: message.id,
       id: message.id,
@@ -2786,7 +2780,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       ...(group && (tagged?.id ?? firstMemberId) ? { member: tagged?.id ?? firstMemberId! } : {}),
       ...(group && tagged ? { spoken: true } : {}),
       ...(opening ? { intro: true } : {}),
-      ...(written ? { model: modelName(message.model ?? state.chat.model) } : {}),
       ...(message.hiddenFromPrompt ? { hidden: true } : {}),
     };
   });
@@ -3277,7 +3270,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                               translationScripts: translationScripts.get(message.member ?? members[0]?.id ?? ''),
                             }
                           : {})}
-                        {...(message.model ? { model: message.model } : {})}
                         statusCollapsed={statusCollapsed}
                         onToggleStatus={toggleStatus}
                         // The offer stands under the newest reply and nowhere else, and

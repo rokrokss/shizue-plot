@@ -314,18 +314,6 @@ describe('the furniture on a row', () => {
     // The avatar's space is kept, so the run stays in one column.
     expect(host.querySelector('[data-testid="message-assistant"] > .w-8')).not.toBeNull();
   });
-
-  it('names the model that wrote a finished reply, outside its bubble, and nothing while it streams', () => {
-    render(row('눈이 그쳤다', 'assistant', { name: '아리아', model: 'GPT-5' }));
-    const label = host.querySelector('[data-testid="message-model"]')!;
-    expect(label.textContent).toBe('GPT-5');
-    expect(label.closest('.chat-bubble')).toBeNull();
-    // At the bubble's own corner: in the box the bubble sizes, after it.
-    expect(label.parentElement!.previousElementSibling?.classList.contains('chat-bubble')).toBe(true);
-
-    render(row('눈이 그', 'assistant', { name: '아리아', model: 'GPT-5', streaming: true }));
-    expect(host.querySelector('[data-testid="message-model"]')).toBeNull();
-  });
 });
 
 it('locks editing and cancellation until save settles, preserving a rejected draft', async () => {
@@ -359,10 +347,10 @@ describe('a message hidden from the AI', () => {
 
   it('is dimmed and says so, as a reply, the reader’s turn, a narration and a member’s round reply', () => {
     const kinds: [string, MessageRole, Record<string, unknown>][] = [
-      ['눈이 그쳤다', 'assistant', { name: '아리아', model: 'GPT-5' }],
+      ['눈이 그쳤다', 'assistant', { name: '아리아' }],
       ['문을 열었다', 'user', {}],
       ['@: 바람이 분다', 'assistant', {}],
-      ['*잔을 든다* 건배.', 'assistant', { roster: ROSTER, speaker: '카이', model: 'GPT-5' }],
+      ['*잔을 든다* 건배.', 'assistant', { roster: ROSTER, speaker: '카이' }],
     ];
     for (const [content, role, extra] of kinds) {
       render(row(content, role, extra));
@@ -372,11 +360,10 @@ describe('a message hidden from the AI', () => {
     }
   });
 
-  it('says so beside the model that wrote the reply, under its bubble', () => {
-    render(row('눈이 그쳤다', 'assistant', { roster: ROSTER, speaker: '아리아', model: 'GPT-5', hidden: true }));
+  it('says so under the reply, outside its bubble', () => {
+    render(row('눈이 그쳤다', 'assistant', { roster: ROSTER, speaker: '아리아', hidden: true }));
     const mark = host.querySelector('[data-testid="message-hidden"]')!;
     expect(mark.closest('.chat-bubble')).toBeNull();
-    expect(mark.nextElementSibling?.getAttribute('data-testid')).toBe('message-model');
   });
 
   it('dims none of the controls under the last row', () => {
