@@ -9,6 +9,8 @@ import { describe, expect, it } from 'vitest';
 import { readConfig } from '../src/env.js';
 
 const DATABASE_URL = 'postgres://plot:plot@localhost:5433/plot';
+/** A secret a deployment takes: 32 characters. */
+const SECRET = 'a'.repeat(32);
 /** The same root `readConfig` resolves against: three levels up from `src/`. */
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 
@@ -21,11 +23,23 @@ describe('readConfig', () => {
 
   it('refuses to seal tokens with the dev secret in production', () => {
     expect(() => readConfig({ NODE_ENV: 'production', DATABASE_URL })).toThrow(/BETTER_AUTH_SECRET/);
-    expect(readConfig({ NODE_ENV: 'production', DATABASE_URL, BETTER_AUTH_SECRET: 's' }).authSecret).toBe('s');
+    expect(readConfig({ NODE_ENV: 'production', DATABASE_URL, BETTER_AUTH_SECRET: SECRET }).authSecret).toBe(SECRET);
+  });
+
+  it('refuses the dev secret, or a short one, wherever the web origin is not this machine, whatever NODE_ENV says', () => {
+    const hosted = { DATABASE_URL, BETTER_AUTH_URL: 'https://plot.shizue.net' };
+    // `node dist/index.js` sets no NODE_ENV.
+    expect(() => readConfig(hosted)).toThrow(/BETTER_AUTH_SECRET/);
+    expect(() => readConfig({ ...hosted, NODE_ENV: 'development' })).toThrow(/BETTER_AUTH_SECRET/);
+    expect(() => readConfig({ ...hosted, BETTER_AUTH_SECRET: 'a'.repeat(31) })).toThrow(/at least 32/);
+    expect(() => readConfig({ NODE_ENV: 'production', DATABASE_URL, BETTER_AUTH_SECRET: 'short' })).toThrow(/at least 32/);
+    expect(readConfig({ ...hosted, BETTER_AUTH_SECRET: SECRET }).authSecret).toBe(SECRET);
+    // This machine's own shizue, a maintenance script run here among them, keeps the dev default.
+    expect(readConfig({ DATABASE_URL, BETTER_AUTH_URL: 'http://127.0.0.1:13100' }).authSecret).toBe('dev-secret-change-me');
   });
   it('takes a hosted web origin, but only an origin', () => {
     expect(readConfig({
-      NODE_ENV: 'production', DATABASE_URL, BETTER_AUTH_SECRET: 's',
+      NODE_ENV: 'production', DATABASE_URL, BETTER_AUTH_SECRET: SECRET,
       BETTER_AUTH_URL: 'https://plot.example.com', CHATGPT_CALLBACK_PORT: '47821',
     }).authUrl).toBe('https://plot.example.com');
     for (const url of ['https://plot.example.com/', 'https://plot.example.com/app', 'ftp://plot.example.com', 'http://user@localhost']) {
@@ -45,10 +59,10 @@ describe('readConfig', () => {
     expect(readConfig({ DATABASE_URL, BETTER_AUTH_URL: 'http://127.0.0.1:13100', REMOTE_ORIGINS: 'https://mac.example.ts.net:8444' })
       .remoteOrigins).toEqual(['https://mac.example.ts.net:8444']);
     expect(() => readConfig({
-      NODE_ENV: 'production', DATABASE_URL, BETTER_AUTH_SECRET: 's', BETTER_AUTH_URL: 'https://plot.shizue.net', REMOTE_ORIGINS: 'https://mac.example.ts.net:8444',
+      NODE_ENV: 'production', DATABASE_URL, BETTER_AUTH_SECRET: SECRET, BETTER_AUTH_URL: 'https://plot.shizue.net', REMOTE_ORIGINS: 'https://mac.example.ts.net:8444',
     })).toThrow(/only for a shizue running on this machine/);
     // Empty is no list at all, wherever the app runs.
-    expect(readConfig({ NODE_ENV: 'production', DATABASE_URL, BETTER_AUTH_SECRET: 's', BETTER_AUTH_URL: 'https://plot.shizue.net', REMOTE_ORIGINS: '' })
+    expect(readConfig({ NODE_ENV: 'production', DATABASE_URL, BETTER_AUTH_SECRET: SECRET, BETTER_AUTH_URL: 'https://plot.shizue.net', REMOTE_ORIGINS: '' })
       .remoteOrigins).toEqual([]);
   });
   it('reads the loopback port the companion extension catches', () => {
@@ -58,7 +72,7 @@ describe('readConfig', () => {
   });
 
   describe('against the ports Shizue sends to each origin', () => {
-    const production = { NODE_ENV: 'production', DATABASE_URL, BETTER_AUTH_SECRET: 's' };
+    const production = { NODE_ENV: 'production', DATABASE_URL, BETTER_AUTH_SECRET: SECRET };
 
     it('needs no setting for plot.shizue.net, and takes 47811 from Shizue', () => {
       // The deployment that forgets the variable: before this, it asked OpenAI for
@@ -88,7 +102,7 @@ describe('readConfig', () => {
         .toBe(47801);
       expect(readConfig({ NODE_ENV: 'test', DATABASE_URL, BETTER_AUTH_URL: 'http://localhost:13100', CHATGPT_CALLBACK_PORT: '47811' })
         .chatgptCallbackPort).toBe(47811);
-      expect(readConfig({ NODE_ENV: 'development', DATABASE_URL, BETTER_AUTH_URL: 'https://plot.shizue.net' }).chatgptCallbackPort)
+      expect(readConfig({ NODE_ENV: 'development', DATABASE_URL, BETTER_AUTH_SECRET: SECRET, BETTER_AUTH_URL: 'https://plot.shizue.net' }).chatgptCallbackPort)
         .toBe(47811);
     });
   });

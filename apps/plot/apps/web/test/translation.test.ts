@@ -162,6 +162,44 @@ describe('a translated message body', () => {
       'Draws the sword.',
     ]);
   });
+
+  it('puts what arrives in an island as words, and drops an edittrans script that would add markup to it', async () => {
+    const scripts: DisplayScript[] = [{ in: '\\[status\\] hp=(\\d+)', out: '<div class="hp">체력 $1</div>', order: 0, enabled: true }];
+    const display: DisplayContext = {
+      scripts,
+      variables: {},
+      assets: new Map(),
+      relationship: null,
+      turn: 1,
+      char: '아리아',
+      user: '민준',
+    };
+    const content = '[status] hp=50';
+    const plan = transformDisplay({ content, scripts, previousSameRole: '' }, display, PLAN_LIMITS, Date.now);
+    const draw = async (body: BodyTranslation, key: string): Promise<HTMLElement> => {
+      render(createElement(MessageBody, { key, content, display, translation: body }));
+      await act(async () => {
+        answers.shift()?.(plan);
+        await Promise.resolve();
+      });
+      return host.querySelector<HTMLElement>('.shizue-msg')!;
+    };
+
+    const hostile = translation({ '체력 50': '<img src=x onerror="alert(1)">HP 50' });
+    const written = await draw(hostile.body, 'translator');
+    expect(written.querySelector('img')).toBeNull();
+    expect(written.textContent).toBe('<img src=x onerror="alert(1)">HP 50');
+
+    const injecting = translation({ '체력 50': 'HP 50' });
+    injecting.body.edit = (text) => text.replace(/^/, '<img src=x onerror="alert(1)">');
+    const edited = await draw(injecting.body, 'edittrans');
+    expect(edited.querySelector('img')).toBeNull();
+    expect(edited.textContent).toBe('HP 50');
+
+    const renaming = translation({ '체력 50': 'HP 50' });
+    renaming.body.edit = (text) => text.replace('HP', 'Health');
+    expect((await draw(renaming.body, 'words')).textContent).toBe('Health 50');
+  });
 });
 
 describe('the chat translator', () => {

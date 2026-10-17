@@ -58,7 +58,7 @@ function render(features: {
           relationshipEnabled: true,
           narrator: null,
           customUi: true,
-          allowComponentTurns: false,
+          allowComponentTurns: false, allowLowLevelAccess: false,
           statusWindow: features.statusWindow,
           statusWindowEnabled: true,
           choices: features.choices,

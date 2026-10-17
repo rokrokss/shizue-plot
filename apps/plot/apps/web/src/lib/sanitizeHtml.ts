@@ -208,6 +208,12 @@ export function isSameOriginUrl(raw: string): boolean {
 
 /** Anything that could terminate a selector and start something else. */
 const SELECTOR_FORBIDDEN = /[{}<;@]/;
+/**
+ * A selector that starts with a combinator. A browser drops it at the top of a
+ * sheet, so no card relies on it; put under the scope it would become
+ * `.shizue-msg ~ div` and reach the app's own markup beside the message.
+ */
+const SELECTOR_LEADING_COMBINATOR = /^[>+~]/;
 /** A class token in a selector. Escapes are folded away rather than interpreted. */
 const SELECTOR_CLASS = /\.([^\s.#[\]:,>+~()]+)/g;
 /** An id token in a selector, folded the same way. A quote ends it, for `[href="#x"]`. */
@@ -225,8 +231,8 @@ const SELECTOR_ID = /#([^\s.#[\]:,>+~()"']+)/g;
  * checked below instead, where it costs nothing.
  */
 const URL_FUNCTION = /url\(([^()]*)\)/gi;
-/** Any function call in a value: the name immediately before an opening paren. */
-const CSS_FUNCTION = /(?:^|[^\w-])(-?[a-z_][\w-]*)\s*\(/g;
+/** Any function call in a value: the name immediately before an opening paren, in any case, as the browser reads it. */
+const CSS_FUNCTION = /(?:^|[^\w-])(-?[a-z_][\w-]*)\s*\(/gi;
 /** `\41`, `\000041 `, `\;` — a CSS escape, which the browser reads and a filter must too. */
 const CSS_ESCAPE = /\\(?:([0-9a-fA-F]{1,6})[ \t\n\r\f]?|([^\n\r\f]))/g;
 const CSS_COMMENT = /\/\*[\s\S]*?\*\//g;
@@ -404,7 +410,7 @@ interface Scope {
  */
 function scopeSelector(selector: string, scope: Scope): string | null {
   const trimmed = selector.trim();
-  if (!trimmed || SELECTOR_FORBIDDEN.test(trimmed)) return null;
+  if (!trimmed || SELECTOR_FORBIDDEN.test(trimmed) || SELECTOR_LEADING_COMBINATOR.test(trimmed)) return null;
   const renamed = trimmed
     .replace(SELECTOR_CLASS, (_match, name: string) => `.${foldClass(name)}`)
     .replace(SELECTOR_ID, (_match, name: string) => `#${foldClass(name)}`);

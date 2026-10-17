@@ -306,6 +306,26 @@ export function useLinesTranslation(
 const translated = (parts: readonly TextPart[], map: ReadonlyMap<string, string>, edit: ((text: string) => string) | undefined): string =>
   edit ? edit(applyParts(parts, map)) : applyParts(parts, map);
 
+/** Everything of a piece of markup but its translatable text: its tags, comments and shielded text, in order. */
+const markupFrame = (parts: readonly TextPart[]): string =>
+  parts.filter((part) => !part.translate).map((part) => part.text).join('');
+
+/**
+ * A display-script island put back together with what arrived. The island is
+ * already sanitized and is drawn as it is — sanitizing it again would scope its
+ * sheets and fold its classes twice — so what comes back may change its words
+ * and nothing else: a translator's `<` is text, as RisuAI's `translateHTML`
+ * writes it into a text node, and an edittrans script that changed a tag is
+ * not applied to it.
+ */
+function translatedIsland(parts: readonly TextPart[], map: ReadonlyMap<string, string>, edit: ((text: string) => string) | undefined): string {
+  const words = new Map([...map].map(([text, into]) => [text, into.replaceAll('<', '&lt;').replaceAll('>', '&gt;')]));
+  const plain = applyParts(parts, words);
+  if (!edit) return plain;
+  const edited = edit(plain);
+  return markupFrame(markupParts(edited)) === markupFrame(parts) ? edited : plain;
+}
+
 /** A run of a message body as the translation reads it: markup whole, or prose by block. */
 interface RunLike {
   html: boolean;
@@ -358,7 +378,7 @@ export function useBodyTranslation<S extends { kind: string }, R extends RunLike
     return {
       segments: segments.map((segment, index) => {
         const own = parts.segments[index];
-        return own ? ({ ...segment, html: translated(own, map, edit) } as S) : segment;
+        return own ? ({ ...segment, html: translatedIsland(own, map, edit) } as S) : segment;
       }),
       runs: runs.map((own, index) =>
         own

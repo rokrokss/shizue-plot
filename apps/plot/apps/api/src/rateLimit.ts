@@ -54,8 +54,12 @@ export interface RateBucket extends RateWindow {
 export const RATE_LIMITS = {
   /** `POST /api/chatgpt/sign-in`: unauthenticated, and it writes a verification row. */
   signIn: { name: 'sign_in', by: 'ip', limit: 30, windowMs: 10 * MINUTE },
+  /** A catalogue search (`GET /api/explore?q=`): anyone may ask, and the server embeds every query. */
+  search: { name: 'search', by: 'ip', limit: 300, windowMs: 10 * MINUTE },
   /** The five SSE generation starts (`messages`, `regenerate`, `continue`, `auto`, `reply`). */
   generation: { name: 'generation', by: 'user', limit: 300, windowMs: 10 * MINUTE },
+  /** A card script's model call (`POST /api/chats/:id/script-llm`): a loop in a script must not spend a plan without end. */
+  scriptLlm: { name: 'script_llm', by: 'user', limit: 300, windowMs: 10 * MINUTE },
   /** Starting a card or module file import (`POST /api/file-imports`). */
   import: { name: 'import', by: 'user', limit: 600, windowMs: 10 * MINUTE },
   /** A chat brought over from another app: `POST /api/chats/import`, not its batches or attachments. */

@@ -380,6 +380,15 @@ describe('manual', () => {
     };
     await createScriptRuntime({ chatId: 'c1', api: refusing, ui: silentUi, bundle: forecast }).manual('예보', null, view(done));
     expect(refused.calls[0]!.body).toMatchObject({ variableDelta: { weather: 'Error: script_llm_forbidden' } });
+
+    // A reader who did not allow the work low-level access: the model is never asked.
+    const declined = fakeApi();
+    const allowLowLevel = async (): Promise<void> => {
+      throw new Error('not allowed');
+    };
+    await createScriptRuntime({ chatId: 'c1', api: declined.api, ui: silentUi, bundle: forecast, allowLowLevel }).manual('예보', null, view(done));
+    expect(declined.calls.map((call) => call.path)).toEqual(['/api/chats/c1/script-commit']);
+    expect(declined.calls[0]!.body).toMatchObject({ variableDelta: { weather: 'Error: not allowed' } });
   });
 
   it("asks for the chat's auxiliary model where a v2RunLLM names RisuAI's sub model, and the main one otherwise", async () => {

@@ -1128,7 +1128,9 @@ async function runGeneration(
     await release();
     countGeneration('error', error instanceof ChatGPTError ? error.code : 'model_unavailable');
     if (error instanceof ChatGPTError) throw error;
-    throw badRequest('model_unavailable', error instanceof Error ? error.message : 'Model unavailable');
+    // What went wrong is the log's; the reader's page is told only that it did.
+    console.error('[generation] building the request failed', error);
+    throw badRequest('model_unavailable', 'Model unavailable');
   }
 
   return replyStream(c, async (stream) => {
@@ -1214,9 +1216,16 @@ async function runGeneration(
         timeout = error instanceof ChatGPTError && error.code === 'chatgpt_timeout' ? error : null;
         if (!controller.signal.aborted && !timeout) {
           outcome = ['error', error instanceof ChatGPTError ? error.code : 'stream_failed'];
+          // A provider's failure has its code and a message made to be shown; any
+          // other is the log's, and the reader is told only that the reply failed.
+          if (!(error instanceof ChatGPTError)) console.error('[generation] stream failed', error);
           await send({
             event: 'error',
-            data: JSON.stringify({ message: error instanceof Error ? error.message : 'Generation failed', ...(error instanceof ChatGPTError ? { code: error.code } : {}) }),
+            data: JSON.stringify(
+              error instanceof ChatGPTError
+                ? { message: error.message, code: error.code }
+                : { message: 'Generation failed', code: 'generation_failed' },
+            ),
           });
           return;
         }

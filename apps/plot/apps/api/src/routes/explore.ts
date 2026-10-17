@@ -6,7 +6,7 @@ import { Hono } from 'hono';
 import type { AppDeps, AppEnv } from '../deps.js';
 import { embedErrorForLog } from '../embedder.js';
 import { badRequest, notFound } from '../errors.js';
-import { RATE_LIMITS, rateLimit } from '../rateLimit.js';
+import { limitCaller, RATE_LIMITS, rateLimit } from '../rateLimit.js';
 import { pageSnapshotFeed } from '../feedCursor.js';
 import { publiclyListed, publicPlotList, publicPlotQuery, type PublicPlotRow } from '../hub.js';
 import { noteLexicalSearch } from '../lexicalHealth.js';
@@ -38,6 +38,8 @@ export const MEANING_MIN_SIMILARITY = 0.45;
 const MEANING_RESULTS = 96;
 /** How long a search waits to embed its query before it searches the text instead. */
 const MEANING_EMBED_TIMEOUT_MS = 3_000;
+/** The longest query searched; past it the words are cut, since anyone may ask and each one is embedded. */
+const MAX_QUERY_CHARS = 100;
 
 /** How far back 주간 인기 counts a like. */
 const WEEKLY_WINDOW = sql`interval '7 days'`;
@@ -249,10 +251,14 @@ export function exploreRoutes(deps: AppDeps): Hono<AppEnv> {
     const language = requireLanguage(c.req.query('language'));
     const sort = coerceSort(c.req.query('sort'));
     const limit = coerceLimit(c.req.query('limit'));
-    const q = c.req.query('q')?.trim();
+    const q = c.req.query('q')?.trim().slice(0, MAX_QUERY_CHARS).trim();
     const tag = c.req.query('tag')?.trim();
     const rawCursor = c.req.query('cursor');
     const viewerId = c.get('viewerId');
+    if (q) {
+      const refused = await limitCaller(c, deps, RATE_LIMITS.search);
+      if (refused) return refused;
+    }
 
     /** Everything the catalogue shows this reader, whatever the sort or the search. */
     const filters = (): SQL[] => [

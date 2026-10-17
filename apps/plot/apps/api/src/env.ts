@@ -14,6 +14,8 @@ export function loadRootEnv(): void {
 
 /** Development defaults. A production launch must set its own secret (readConfig). */
 const DEV_AUTH_SECRET = 'dev-secret-change-me';
+/** The shortest secret a deployment takes: 32 characters, what `openssl rand -base64 32` prints is 44. */
+const MIN_AUTH_SECRET_CHARS = 32;
 const DEV_AUTH_URL = 'http://localhost:13000';
 /** The loopback port Shizue's development rule catches, for an origin it does not know. */
 const DEV_CALLBACK_PORT = 47801;
@@ -71,6 +73,9 @@ function readCallbackPort(env: NodeJS.ProcessEnv, authUrl: string): number {
   return port;
 }
 
+/** Whether a web origin is this machine's own — a shizue the reader runs, not a deployment. */
+const isLoopback = (origin: string): boolean => ['localhost', '127.0.0.1', '[::1]'].includes(new URL(origin).hostname);
+
 /** Whether `value` is an http(s) origin and nothing more — no path, no user. */
 function isWebOrigin(value: string): boolean {
   try {
@@ -93,7 +98,7 @@ function readRemoteOrigins(env: NodeJS.ProcessEnv, authUrl: string): string[] {
   if (wrong !== undefined) {
     throw new Error(`REMOTE_ORIGINS must list web origins, e.g. https://my-mac.example.ts.net:8443 — got "${wrong}".`);
   }
-  if (listed.length > 0 && !['localhost', '127.0.0.1', '[::1]'].includes(new URL(authUrl).hostname)) {
+  if (listed.length > 0 && !isLoopback(authUrl)) {
     throw new Error(`REMOTE_ORIGINS is only for a shizue running on this machine, whose BETTER_AUTH_URL is a loopback origin such as http://localhost:13000 — not ${authUrl}.`);
   }
   return [...new Set(listed)].filter((value) => value !== authUrl);
@@ -205,11 +210,16 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
   if (!databaseUrl) throw new Error('DATABASE_URL is not set');
 
   const authSecret = env['BETTER_AUTH_SECRET'];
-  // Everyone's ChatGPT tokens are sealed with it, so a deployment never runs on the default.
-  if (!authSecret && env['NODE_ENV'] === 'production') throw new Error('BETTER_AUTH_SECRET must be set in production.');
   const authUrl = env['BETTER_AUTH_URL'] ?? DEV_AUTH_URL;
   if (!/^https?:$/.test(new URL(authUrl).protocol) || new URL(authUrl).origin !== authUrl) {
     throw new Error('BETTER_AUTH_URL must be the web origin, e.g. https://plot.example.com');
+  }
+  // Everyone's ChatGPT tokens are sealed with it, so a deployment never runs on
+  // the default or a guessable one. A deployment is a production run, or any run
+  // whose web origin is not this machine's — `node dist/index.js` sets no NODE_ENV.
+  const deployed = env['NODE_ENV'] === 'production' || !isLoopback(authUrl);
+  if (deployed && (authSecret ?? '').length < MIN_AUTH_SECRET_CHARS) {
+    throw new Error(`BETTER_AUTH_SECRET must be set, at least ${MIN_AUTH_SECRET_CHARS} characters, to serve ${authUrl} (e.g. openssl rand -base64 32).`);
   }
   const callbackPort = readCallbackPort(env, authUrl);
   const logFormat = env['LOG_FORMAT']?.trim() || 'text';

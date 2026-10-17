@@ -702,6 +702,8 @@ export interface Chat {
   narrator: NarratorConfig | null;
   /** Consent for the sendTurn capability, given once per chat and revocable. */
   allowComponentTurns: boolean;
+  /** Consent for the work's scripts' low-level access (model calls, requests), given once per chat and revocable. */
+  allowLowLevelAccess: boolean;
   /**
    * The reader's half of the plot's two style features. Both mean something only
    * while the plot asks for the feature at all, which is why the panel offers

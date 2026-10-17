@@ -179,6 +179,14 @@ describe('css', () => {
     expect(output).not.toMatch(/(^|\n)(body|html|:root)/);
   });
 
+  it('drops a selector that starts with a combinator, which would reach past the message', () => {
+    for (const selector of ['~ div button', '+ div', '> p', '/* x */ ~ div']) {
+      const output = sanitizeCustomHtml(`<style>${selector} { opacity: 0 } .ok { color: red }</style>`);
+      expect(output).toContain('.shizue-msg .x-shizue-ok');
+      expect(output).not.toContain('opacity');
+    }
+  });
+
   it('rejects a selector that tries to close its own rule', () => {
     expectClean('<style>.a { color: red } </style><img src=x onerror=alert(1)>', 'onerror', 'alert');
     expect(sanitizeCustomHtml('<style>.a\\{x\\} { color: red }</style>')).not.toContain('color: red');
@@ -274,6 +282,10 @@ describe('css property and function allowlists', () => {
     for (const value of [
       'image-set("https://evil.test/x" 1x)',
       '-webkit-image-set(url(https://evil.test/x) 1x)',
+      // A function's name is read in any case.
+      'Image-set("https://evil.test/x" 1x)',
+      '-Webkit-Image-Set("https://evil.test/x" 1x)',
+      '\\49 mage-set("https://evil.test/x" 1x)',
       'cross-fade(url(/a.png), url(https://evil.test/x), 50%)',
       'element(#hero)',
       '-moz-element(#hero)',

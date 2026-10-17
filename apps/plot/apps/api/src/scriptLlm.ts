@@ -24,9 +24,12 @@
  *   generation never run at once on one chat;
  * - the prompt is size-checked here as it is in the sandbox.
  *
- * There is no count limit: the calls spend the reader's own account, as a
- * RisuAI script spends its user's API key. Nothing is stored. The answer is
- * the model's text; RisuAI's `{success, result}` wrapping is the sandbox's.
+ * The calls spend the reader's own account, as a RisuAI script spends its user's
+ * API key — but here the work may be a stranger's, so on one the reader does not
+ * own they need the reader's consent for the chat, and a window caps how many a
+ * reader makes (the route's `requireLowLevelConsent` and `RATE_LIMITS.scriptLlm`).
+ * Nothing is stored. The answer is the model's text; RisuAI's `{success, result}`
+ * wrapping is the sandbox's.
  */
 import { ChatGPTError, getAdapter, type ChatMessage, type ChatRequest } from '@shizue/llm';
 import type { AppDeps } from './deps.js';
@@ -108,6 +111,8 @@ export async function runScriptLlm(
     return await collect(resolved.adapter, request);
   } catch (error) {
     if (error instanceof ApiError || error instanceof ChatGPTError) throw error;
-    throw new ApiError(502, 'script_llm_failed', error instanceof Error ? error.message : 'The model did not answer');
+    // The card's script is told the call failed; what failed is the log's.
+    console.error('[script-llm] call failed', error);
+    throw new ApiError(502, 'script_llm_failed', 'The model did not answer');
   }
 }

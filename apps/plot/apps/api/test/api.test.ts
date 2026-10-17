@@ -531,6 +531,11 @@ async function signUp(email: string): Promise<string> {
   return cookieOf(res);
 }
 
+/** The reader's consent, for one chat, to the work's low-level access. */
+async function allowLowLevel(cookie: string, chatId: string): Promise<void> {
+  expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { allowLowLevelAccess: true })).status).toBe(200);
+}
+
 async function request(
   cookie: string | undefined,
   path: string,
@@ -3824,7 +3829,8 @@ describe('chats', () => {
     expect(events.filter((event) => event.event === 'delta').length).toBeGreaterThan(0);
     expect(events.some((event) => event.event === 'done')).toBe(false);
     expect(events.at(-1)!.event).toBe('error');
-    expect(events.at(-1)!.data.message).toContain('provider exploded');
+    // What broke is the server log's, never the reader's page.
+    expect(events.at(-1)!.data).toEqual({ message: 'Generation failed', code: 'generation_failed' });
 
     // The user message survives; nothing of the failed reply is stored.
     const failed = await readJson(await request(cookie, `/api/chats/${chatId}`));
@@ -16244,7 +16250,12 @@ describe('script model calls', () => {
   const lua = [{ comment: '', type: 'start', conditions: [], effect: [{ type: 'triggerlua', code: 'function onStart(id) end' }] }];
 
   /** A published plot whose member carries Lua, with or without low-level access, and a reader's chat on it. */
-  async function luaChat(owner: string, lowLevelAccess: boolean): Promise<{ reader: string; chatId: string }> {
+  /** A published plot's chat by another reader, who has allowed the work low-level access unless `consent` is false. */
+  async function luaChat(
+    owner: string,
+    lowLevelAccess: boolean,
+    consent = true,
+  ): Promise<{ owner: string; plotId: string; reader: string; chatId: string }> {
     const cookie = await signUp(owner);
     const plot = await createPlot(cookie, { name: '루아 작품', description: '설명', intros: ['문 앞이다'] });
     await addCharacter(cookie, plot.id, {
@@ -16254,7 +16265,8 @@ describe('script model calls', () => {
     await publishPlot(cookie, plot.id);
     const reader = await signUp(`reader-${owner}`);
     const chat = await startChat(reader, plot.id);
-    return { reader, chatId: chat.chat.id };
+    if (consent) await allowLowLevel(reader, chat.chat.id);
+    return { owner: cookie, plotId: plot.id, reader, chatId: chat.chat.id };
   }
 
   const prompt = [
@@ -16298,6 +16310,39 @@ describe('script model calls', () => {
     // The slot was given back: a turn can be taken right after.
     const [row] = await db.select({ generatingAt: chats.generatingAt }).from(chats).where(eq(chats.id, chatId));
     expect(row!.generatingAt).toBeNull();
+  });
+
+  it("asks the reader's consent on a work they do not own, never its owner's, and asks no model without it", async () => {
+    let asked = 0;
+    const answering = makeApp({
+      getAdapter: () => ({
+        providerModel: 'fixed',
+        adapter: {
+          stream: async function* (): AsyncGenerator<StreamDelta, StreamDone> {
+            asked += 1;
+            yield { type: 'text', text: '대답' };
+            return { usage: { promptTokens: 1, completionTokens: 1 } };
+          },
+        },
+      }),
+    });
+    const { owner, plotId, reader, chatId } = await luaChat('script-llm-consent@example.com', true, false);
+    const refused = await json(reader, `/api/chats/${chatId}/script-llm`, 'POST', { messages: prompt }, answering);
+    expect(refused.status).toBe(403);
+    expect((await readJson(refused)).code).toBe('low_level_access_not_allowed');
+    expect(asked).toBe(0);
+    expect((await readJson(await request(reader, `/api/chats/${chatId}`))).chat.allowLowLevelAccess).toBe(false);
+
+    // The work's owner needs none in a chat of their own.
+    const own = (await startChat(owner, plotId)).chat.id;
+    expect((await json(owner, `/api/chats/${own}/script-llm`, 'POST', { messages: prompt }, answering)).status).toBe(200);
+
+    // Given, it holds; taken back, the next call is refused again.
+    await allowLowLevel(reader, chatId);
+    expect((await json(reader, `/api/chats/${chatId}/script-llm`, 'POST', { messages: prompt }, answering)).status).toBe(200);
+    expect((await json(reader, `/api/chats/${chatId}`, 'PATCH', { allowLowLevelAccess: false })).status).toBe(200);
+    expect((await json(reader, `/api/chats/${chatId}/script-llm`, 'POST', { messages: prompt }, answering)).status).toBe(403);
+    expect(asked).toBe(2);
   });
 
   it("refuses a plot whose card does not grant low-level access, and anyone's chat but the caller's", async () => {
@@ -16389,7 +16434,7 @@ describe('script model calls', () => {
     const broken = makeApp({ getAdapter: failingGetAdapter });
     const res = await json(reader, `/api/chats/${chatId}/script-llm`, 'POST', { messages: prompt }, broken);
     expect(res.status).toBe(502);
-    expect((await readJson(res)).code).toBe('script_llm_failed');
+    expect(await readJson(res)).toEqual({ error: 'The model did not answer', code: 'script_llm_failed' });
     const [row] = await db.select({ generatingAt: chats.generatingAt }).from(chats).where(eq(chats.id, chatId));
     expect(row!.generatingAt).toBeNull();
   });
@@ -16400,9 +16445,10 @@ describe('script requests', () => {
 
   /**
    * A published plot whose member carries Lua, with or without low-level access,
-   * a reader's chat on it, and that reader's `request` through `target`.
+   * a reader's chat on it — the work allowed low-level access unless `consent` is
+   * false — and that reader's `request` through `target`.
    */
-  async function luaChat(owner: string, lowLevelAccess: boolean, target: Hono<AppEnv>) {
+  async function luaChat(owner: string, lowLevelAccess: boolean, target: Hono<AppEnv>, consent = true) {
     const cookie = await signUp(owner);
     const plot = await createPlot(cookie, { name: '루아 작품', description: '설명', intros: ['문 앞이다'] });
     await addCharacter(cookie, plot.id, {
@@ -16412,6 +16458,7 @@ describe('script requests', () => {
     await publishPlot(cookie, plot.id);
     const reader = await signUp(`reader-${owner}`);
     const chat = await startChat(reader, plot.id);
+    if (consent) await allowLowLevel(reader, chat.chat.id);
     const sendOn = async (chatId: string, url: unknown) => {
       const res = await json(reader, `/api/chats/${chatId}/script-fetch`, 'POST', { url }, target);
       // RisuAI's answers, its refusals among them, are each the body of a 200.
@@ -16459,6 +16506,12 @@ describe('script requests', () => {
     expect(closed.status).toBe(403);
     expect((await readJson(closed)).code).toBe('script_fetch_forbidden');
 
+    // A work the reader does not own also needs their consent for the chat.
+    const unasked = await luaChat('fetch-unasked@example.com', true, target, false);
+    const unconsented = await json(unasked.reader, `/api/chats/${unasked.chatId}/script-fetch`, 'POST', { url: 'https://site.test/' }, target);
+    expect(unconsented.status).toBe(403);
+    expect((await readJson(unconsented)).code).toBe('low_level_access_not_allowed');
+
     const { chatId: open } = await luaChat('fetch-open@example.com', true, target);
     const stranger = await signUp('fetch-stranger@example.com');
     expect((await json(stranger, `/api/chats/${open}/script-fetch`, 'POST', { url: 'https://site.test/' }, target)).status).toBe(404);
@@ -16485,6 +16538,7 @@ describe('script requests', () => {
 
     // The window is the reader's, across their chats; another reader has their own.
     const again = await startChat(reader, plotId);
+    await allowLowLevel(reader, again.chat.id);
     expect(await sendOn(again.chat.id, 'https://site.test/5')).toEqual(tooMany);
     const other = await luaChat('fetch-limit-other@example.com', true, target);
     expect(await other.send('https://site.test/6')).toEqual({ status: 200, data: '본문' });
@@ -19770,6 +19824,20 @@ describe('rate limits', () => {
     const named = hostedApp(fakeOpenAI(), { CLIENT_IP_HEADER: 'cf-connecting-ip' }).target;
     expect((await start(named, { 'cf-connecting-ip': '203.0.113.7', 'x-forwarded-for': '192.0.2.1' })).status).toBe(429);
     expect((await start(named, { 'cf-connecting-ip': '192.0.2.1', 'x-forwarded-for': '203.0.113.7' })).status).toBe(200);
+  });
+
+  it('throttles the catalogue’s text search by client address, and leaves browsing alone', async () => {
+    const key = 'search:ip:unknown';
+    // A query past the cap is cut rather than refused.
+    expect((await request(undefined, `/api/explore?language=ko&q=${'가'.repeat(5_000)}`)).status).toBe(200);
+    const [counted] = await db.select().from(rateLimits).where(eq(rateLimits.key, key));
+    expect(counted!.hits).toBe(1);
+
+    await db.update(rateLimits).set({ hits: RATE_LIMITS.search.limit }).where(eq(rateLimits.key, key));
+    const refused = await request(undefined, '/api/explore?language=ko&q=검');
+    expect(refused.status).toBe(429);
+    expect((await readJson(refused)).code).toBe('rate_limited');
+    expect((await request(undefined, '/api/explore?language=ko')).status).toBe(200);
   });
 
   it('refuses a generation start past the reader’s window, on all five routes, before anything is stored', async () => {

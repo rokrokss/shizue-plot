@@ -232,6 +232,8 @@ export const toChatJson = (chat: Chat, noteIds: string[]) => ({
   narrator: chat.narrator,
   /** Whether this chat's components may send turns; the reader grants it once. */
   allowComponentTurns: chat.allowComponentTurns,
+  /** Whether the work's scripts may use low-level access for this reader; granted once, as the turns are. */
+  allowLowLevelAccess: chat.allowLowLevelAccess,
   /**
    * The reader's half of the plot's two style features. Both stand on their own
    * only while the plot asks for the feature at all — a chat on a plot with no
@@ -1390,6 +1392,18 @@ function requireComponentTurnAllowed(chat: Chat, plot: Plot): void {
   }
 }
 
+/**
+ * A work's low-level access is the reader's to allow. RisuAI's reader turns it on
+ * for a card they brought in themselves; here a stranger may have published the
+ * work, and the access spends the reader's ChatGPT plan and sends requests from
+ * this server with what the script read of the chat. So a work the reader does
+ * not own needs their consent for the chat, read from its row on every call.
+ */
+function requireLowLevelConsent(chat: Chat, plot: Plot): void {
+  if (plot.ownerId === chat.userId || chat.allowLowLevelAccess) return;
+  throw forbidden('low_level_access_not_allowed', 'This chat has not allowed the work low-level access');
+}
+
 /** Who is sending a turn. Anything but the two known values is a client bug. */
 function optionalSource(body: Record<string, unknown>): MessageSource | undefined {
   const value = body['source'];
@@ -2145,6 +2159,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const emotionProcessor = optionalEmotionProcessor(body);
       const memorySettings = optionalMemorySettings(body);
       const allowComponentTurns = optionalBoolean(body, 'allowComponentTurns');
+      const allowLowLevelAccess = optionalBoolean(body, 'allowLowLevelAccess');
       const statusWindowEnabled = optionalBoolean(body, 'statusWindowEnabled');
       const choicesEnabled = optionalBoolean(body, 'choicesEnabled');
       const narrator = optionalNarrator(body);
@@ -2172,6 +2187,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         emotionProcessor === undefined &&
         memorySettings === undefined &&
         allowComponentTurns === undefined &&
+        allowLowLevelAccess === undefined &&
         statusWindowEnabled === undefined &&
         choicesEnabled === undefined &&
         narrator === undefined &&
@@ -2194,6 +2210,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           ...(emotionProcessor !== undefined ? { emotionProcessor } : {}),
           ...(memorySettings !== undefined ? { memorySettings } : {}),
           ...(allowComponentTurns !== undefined ? { allowComponentTurns } : {}),
+          ...(allowLowLevelAccess !== undefined ? { allowLowLevelAccess } : {}),
           ...(statusWindowEnabled !== undefined ? { statusWindowEnabled } : {}),
           ...(choicesEnabled !== undefined ? { choicesEnabled } : {}),
           ...(narrator !== undefined ? { narrator } : {}),
@@ -2910,9 +2927,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * that member's request triggers are the ones that run over the call. Held as a turn is:
    * the reader's writable chat on a plot still visible to them, and the
    * generation slot for the length of the call (429 `generation_in_progress`),
-   * renewed as a stream renews it. No count limit — the reader's account pays.
+   * renewed as a stream renews it. On a work the reader does not own, only with
+   * their consent for the chat (`requireLowLevelConsent`; 403
+   * `low_level_access_not_allowed`), and at most `RATE_LIMITS.scriptLlm` calls a
+   * window — the reader's account pays.
    */
-  app.post('/:id/script-llm', async (c) => {
+  app.post('/:id/script-llm', rateLimit(deps, RATE_LIMITS.scriptLlm), async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const body = await readJsonBody(c);
@@ -2927,6 +2947,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     if (!scripted || !triggerLowLevelAccess(scripted.scripts, trigger)) {
       throw forbidden('script_llm_forbidden', "This plot's scripts may not call the model");
     }
+    requireLowLevelConsent(chat, plot);
     if (!(await acquireChatSlot(deps, chat.id, userId))) await rejectBusyChat(deps, chat.id, userId);
     const keepAlive = setInterval(() => void renewChatSlot(deps, chat.id), HEARTBEAT_MS);
     try {
@@ -2975,6 +2996,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     if (!scripted || !triggerLowLevelAccess(scripted.scripts, trigger)) {
       throw forbidden('script_fetch_forbidden', "This plot's scripts may not make requests");
     }
+    requireLowLevelConsent(chat, plot);
     // The URL is not checked here: what RisuAI answers for one that is not text is part of its answer.
     return c.json(await scriptFetch.request(userId, body['url'], c.req.raw.signal));
   });
