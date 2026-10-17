@@ -1,13 +1,19 @@
 /**
- * The headers the web app answers with (`next.config.ts`). Next computes them
- * when the app is built, so the environment that matters is the build's:
- * `BETTER_AUTH_URL` and the storage settings the API reads too.
+ * The headers the web app answers with. The page's policy carries a nonce, so
+ * `proxy.ts` writes it for each request from the environment the app runs in;
+ * the rest Next computes when the app is built (`next.config.ts`), from
+ * `BETTER_AUTH_URL` in the build's environment.
  *
  * `/api/*` is left to the API, which sets its own (apps/api/src/securityHeaders.ts)
  * and the rewrite passes them through.
  */
+import { createHash } from 'node:crypto';
+import { THEME_SCRIPT } from './src/lib/theme';
 
 type Env = Record<string, string | undefined>;
+
+/** The one inline script that is ours, written into the server HTML only (`ThemedHtml`): allowed by what it says. */
+const THEME_SCRIPT_HASH = `'sha256-${createHash('sha256').update(THEME_SCRIPT).digest('base64')}'`;
 
 /** Where the studio downloads a RisuRealm card from, in the browser (`lib/realm.ts`). */
 const REALM_ORIGIN = 'https://realm.risuai.net';
@@ -37,18 +43,22 @@ export function storeOrigin(env: Env): string | null {
  * Realm and the upload store the only others, and no `<object>`, `<base>` or form
  * that leaves.
  *
- * Nothing on the page evaluates strings: a component's compiled JSX and a card's
- * Lua run in sandbox frames that are documents of their own, each with its own
- * policy (`app/sandbox/*.html`), so `'unsafe-eval'` is only here under
- * `next dev`, where React rebuilds the server's error stacks with it. Inline
- * scripts stay open: Next writes its own per page and would need a nonce.
+ * Scripts run only from us: our files, the inline scripts Next writes into the
+ * page, which carry this request's `nonce` (Next reads it off the request's
+ * policy), and the theme script by its hash. So markup that gets past the
+ * sanitizer can run nothing — no `on*` handler, no `javascript:`, no `<script>`
+ * in a frame of its own making. Nothing on the page evaluates strings either: a
+ * component's compiled JSX and a card's Lua run in sandbox frames that are
+ * documents of their own, each with its own policy (`app/sandbox/*.html`), so
+ * `'unsafe-eval'` is only here under `next dev`, where React rebuilds the
+ * server's error stacks with it.
  */
-export function contentSecurityPolicy(env: Env): string {
+export function contentSecurityPolicy(env: Env, nonce: string): string {
   const connect = ["'self'", REALM_ORIGIN, storeOrigin(env)].filter(Boolean);
   const evaluate = env['NODE_ENV'] === 'development' ? " 'unsafe-eval'" : '';
   return [
     "default-src 'self'",
-    `script-src 'self' 'unsafe-inline'${evaluate}`,
+    `script-src 'self' 'nonce-${nonce}' ${THEME_SCRIPT_HASH}${evaluate}`,
     "style-src 'self' 'unsafe-inline'",
     // `blob:` is a picture the reader picked, shown before it is uploaded.
     "img-src 'self' data: blob:",
@@ -86,13 +96,6 @@ export function securityHeaders(env: Env): HeaderRule[] {
       // Not the sandbox documents, which our own pages frame: their policy says so.
       source: '/:path((?!api/|sandbox/).*)',
       headers: [{ key: 'X-Frame-Options', value: 'DENY' }],
-    },
-    {
-      // Pages, not `/_next`: a worker script takes the policy its own response
-      // carries, and the embedding worker fetches its model from Hugging Face.
-      // Nor the sandbox documents, which carry only their own.
-      source: '/:path((?!api/|_next/|sandbox/).*)',
-      headers: [{ key: 'Content-Security-Policy', value: contentSecurityPolicy(env) }],
     },
   ];
 }
