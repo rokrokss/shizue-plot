@@ -4,10 +4,16 @@
 # both loopbacks. It keeps the database (PGlite) and the files in the app's
 # folder: SHIZUE_DATA_DIR, by default apps/plot/data/app. Nothing else runs: no
 # containers. The process reads apps/plot/.env itself, REMOTE_ORIGINS included.
+# The embedder's weights stay in the checkout's cache, apps/plot/data/embedder,
+# rather than in the app's folder, unless the shell or apps/plot/.env names
+# another EMBEDDER_CACHE_DIR; the app downloads there what is missing.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PLOT_DIR="$ROOT_DIR/apps/plot"
 export SHIZUE_PORT="${SHIZUE_PORT:-13000}"
+if [ -z "${EMBEDDER_CACHE_DIR:-}" ] && ! grep -qs '^EMBEDDER_CACHE_DIR=' "$PLOT_DIR/.env"; then
+  export EMBEDDER_CACHE_DIR="$PLOT_DIR/data/embedder"
+fi
 
 "$ROOT_DIR/scripts/dev-stop.sh"
 pnpm --dir "$ROOT_DIR" --filter @shizue/contracts --filter './apps/plot/packages/*' build

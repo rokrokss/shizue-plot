@@ -8,6 +8,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DownloadMismatch } from '../src/hubDownload.js';
 import {
   createLocalEmbedder,
   embedderConfig,
@@ -102,6 +103,11 @@ describe('routing', () => {
     });
   });
 
+  it('keeps the weights in the app’s folder unless EMBEDDER_CACHE_DIR names another', () => {
+    expect(embedderConfig({ SHIZUE_DATA_DIR: '/tmp/shizue-data' })).toMatchObject({ cacheDir: '/tmp/shizue-data/models' });
+    expect(embedderConfig({ SHIZUE_DATA_DIR: '/tmp/shizue-data', EMBEDDER_CACHE_DIR: cacheDir })).toMatchObject({ cacheDir });
+  });
+
   it('routes by language with EMBEDDER_ROUTING=by-language: KURE-v1 for Korean, bge-m3 for the rest', async () => {
     fetched('KURE-v1', 'bge-m3');
     const embedder = createLocalEmbedder(envWith(), { spawn })!;
@@ -149,13 +155,15 @@ describe('routing', () => {
     expect(createLocalEmbedder(envWith({ EMBEDDER: 'off' }), { spawn })).toBeUndefined();
   });
 
-  it('puts no other model in place of one never fetched: its plots get none, and an embed throws', async () => {
+  it('puts no other model in place of one whose weights are not here: its plots get none, and an embed throws', async () => {
     fetched('bge-m3');
     const embedder = createLocalEmbedder(envWith(), { spawn })!;
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('no weights for KURE-v1'));
     expect(embedder.modelFor('ko')).toBeNull();
+    expect(embedder.weightsFor('ko')).toBe('missing');
     expect(embedder.modelFor('en')).toBe('bge-m3');
-    await expect(embedder.embed(['고양이'], { plotLanguage: 'ko' })).rejects.toThrow(/KURE-v1 was never fetched/);
+    expect(embedder.weightsFor('en')).toBe('ready');
+    await expect(embedder.embed(['고양이'], { plotLanguage: 'ko' })).rejects.toThrow(/KURE-v1 has no weights here yet/);
     expect(threads).toEqual([]);
     await embedder.close();
   });
@@ -171,9 +179,106 @@ describe('routing', () => {
     await free.close();
   });
 
-  it('is off when no model it routes to was fetched', () => {
+  it('runs with no model at all until a download brings one', () => {
     fetched('multiMiniLM');
-    expect(createLocalEmbedder(envWith(), { spawn })).toBeUndefined();
+    const embedder = createLocalEmbedder(envWith(), { spawn })!;
+    expect([embedder.modelFor('ko'), embedder.modelFor('en')]).toEqual([null, null]);
+    expect([embedder.weightsFor('ko'), embedder.weightsFor('en')]).toEqual(['missing', 'missing']);
+  });
+});
+
+describe('the download in the background', () => {
+  /** A download each test settles by hand, and the signals it was given. */
+  function downloads() {
+    const calls: { model: EmbeddingModelId; signal: AbortSignal; settle: (error?: Error) => void }[] = [];
+    const download = (model: EmbeddingModelId, signal: AbortSignal): Promise<number> =>
+      new Promise((resolve, reject) => {
+        calls.push({
+          model,
+          signal,
+          settle: (error) => {
+            if (error) reject(error);
+            else {
+              fetched(model);
+              resolve(1_000_000);
+            }
+          },
+        });
+      });
+    return { calls, download };
+  }
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+  it('downloads what the routes lack, one model after another, and uses each from the moment it is whole', async () => {
+    const { calls, download } = downloads();
+    const embedder = createLocalEmbedder(envWith(), { spawn, download, retryMs: 1 })!;
+    expect(embedder.weightsFor('ko')).toBe('missing');
+    embedder.downloadMissing();
+    embedder.downloadMissing();
+    expect(calls.map((call) => call.model)).toEqual(['KURE-v1']);
+    expect([embedder.weightsFor('ko'), embedder.weightsFor('en')]).toEqual(['downloading', 'downloading']);
+    expect(embedder.modelFor('ko')).toBeNull();
+
+    calls[0]!.settle();
+    await tick();
+    expect(embedder.modelFor('ko')).toBe('KURE-v1');
+    expect(embedder.weightsFor('ko')).toBe('ready');
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('KURE-v1 is ready'));
+    expect((await embedder.embed(['고양이'], { plotLanguage: 'ko' })).model).toBe('KURE-v1');
+    // bge-m3 only now, and its plots wait for it meanwhile.
+    expect(calls.map((call) => call.model)).toEqual(['KURE-v1', 'bge-m3']);
+    expect(embedder.weightsFor('en')).toBe('downloading');
+    calls[1]!.settle();
+    await tick();
+    expect(embedder.modelFor('en')).toBe('bge-m3');
+    await embedder.close();
+  });
+
+  it('tries a failure that may pass again, but not a file unlike its pin, nor past the last try', async () => {
+    const { calls, download } = downloads();
+    const single = createLocalEmbedder(envWith({ EMBEDDER_ROUTING: 'single' }), { spawn, download, retryMs: 1 })!;
+    single.downloadMissing();
+    calls[0]!.settle(new Error('fetch failed'));
+    while (calls.length < 2) await tick();
+    expect(single.weightsFor('ko')).toBe('downloading');
+    calls[1]!.settle();
+    await tick();
+    expect(single.modelFor('ko')).toBe('KURE-v1');
+    await single.close();
+
+    rmSync(weightsPath(cacheDir, 'KURE-v1'));
+    const mismatched = downloads();
+    const pinned = createLocalEmbedder(envWith({ EMBEDDER_ROUTING: 'single' }), { spawn, download: mismatched.download, retryMs: 1 })!;
+    pinned.downloadMissing();
+    mismatched.calls[0]!.settle(new DownloadMismatch('onnx/model_quantized.onnx is not the file pinned for it'));
+    await tick();
+    expect(mismatched.calls).toHaveLength(1);
+    expect(pinned.weightsFor('ko')).toBe('missing');
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('KURE-v1 was not downloaded'));
+
+    const flaky = downloads();
+    const failing = createLocalEmbedder(envWith({ EMBEDDER_ROUTING: 'single' }), { spawn, download: flaky.download, retryMs: 1 })!;
+    failing.downloadMissing();
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      while (flaky.calls.length < attempt) await tick();
+      flaky.calls[attempt - 1]!.settle(new Error('fetch failed'));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(flaky.calls).toHaveLength(5);
+    expect(failing.weightsFor('ko')).toBe('missing');
+  });
+
+  it('stops the download on close, and leaves the model without weights', async () => {
+    const { calls, download } = downloads();
+    const embedder = createLocalEmbedder(envWith({ EMBEDDER_ROUTING: 'single' }), { spawn, download })!;
+    embedder.downloadMissing();
+    const closing = embedder.close();
+    expect(calls[0]!.signal.aborted).toBe(true);
+    calls[0]!.settle(new Error('aborted'));
+    await closing;
+    expect(embedder.modelFor('ko')).toBeNull();
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("KURE-v1's download stopped with the app"));
+    expect(console.error).not.toHaveBeenCalled();
   });
 });
 

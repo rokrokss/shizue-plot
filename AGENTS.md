@@ -44,7 +44,11 @@ libraries, then starts the app's one process (`apps/api/src/index.ts` under
 `tsx watch`) on 13000: the API at `/api/*` and the web app under `next dev` for
 the rest, at both loopbacks. It migrates its database at every start. `make
 stop` stops it. Settings live in `apps/plot/.env`, copied from `.env.example`.
-Users run the published package instead, `npx shizue-plot` (README). The dev script's
+Users run the published package instead, `npx shizue-plot` (README). Once the
+process serves, it downloads the memory model's weights it lacks (KURE-v1,
+738 MB) from Hugging Face in the background, into `EMBEDDER_CACHE_DIR` or else
+the data folder's `models/`; `make dev` points it at the checkout's
+`apps/plot/data/embedder`, which main already holds. The dev script's
 `tsx watch` leaves out `../web/.next/**`: the process loads Next's server chunks,
 which Next rewrites as it starts, and tsx's own ignore of dot folders reaches
 only inside `apps/api` — without it the process restarts over and over.
@@ -99,7 +103,9 @@ run `make stop` first. Outside main, set `E2E_WEB_URL` (e.g.
 There is no login: a browser on this computer is the owner (ARCHITECTURE §4.1),
 so any screen opens as it is. To look at one with data of your own, run the app
 (`pnpm --filter @shizue/api exec tsx src/index.ts`) with `NODE_ENV=test`, a free
-`SHIZUE_PORT` and a fresh `SHIZUE_DATA_DIR`; test mode allows the `echo/echo`
+`SHIZUE_PORT`, a fresh `SHIZUE_DATA_DIR` and `EMBEDDER=off` — without it the app
+downloads the 738 MB memory model into that folder (or point
+`EMBEDDER_CACHE_DIR` at a cache that has it); test mode allows the `echo/echo`
 model, and the web app still runs as `next dev`. Connecting ChatGPT needs the Shizue browser
 extension.
 

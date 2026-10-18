@@ -774,6 +774,8 @@
     "untitledNote": "Untitled note",
     "memory": "Memory",
     "memoryHint": "Older parts of a long chat are remembered as a set of summaries. Each reply sends the important ones first, then recent, similar and random ones, up to the memory share.",
+    "memoryModelDownloading": "The memory model is still downloading. Until it is here, memory sends recent and random summaries instead of similar ones, and no facts are noted.",
+    "memoryModelMissing": "The memory model could not be downloaded; the app tries again the next time it starts. Until then, memory sends recent and random summaries instead of similar ones, and no facts are noted.",
     "memoryEmpty": "No summary yet.",
     "memorySettings": "Memory settings",
     "memoryCount": "{count} on this branch",

@@ -12,6 +12,8 @@
 이 디렉터리의 `.env`를 읽는다. 쓰는 사람은 `npx shizue-plot`으로 설치판을 띄운다.
 데이터는 앱 폴더 하나에 있다 — PGlite 데이터베이스(`db/`)와 파일(`files/`) —
 개발에서는 `data/app`이고 `SHIZUE_DATA_DIR`가 다른 폴더를 가리킨다. 앱이 시작할 때마다 마이그레이션한다.
+기억 모델(KURE-v1)의 가중치는 앱이 처음 시작할 때 Hugging Face에서 배경으로 받는다 — 설치판은 앱 폴더의
+`models/`에, `make dev`는 체크아웃의 `data/embedder`에 둔다.
 
 루트에서 `pnpm build`, `pnpm typecheck`, `pnpm test`, `pnpm test:e2e`를 실행한다.
 API 테스트는 제 메모리 PGlite에서, 브라우저 테스트는 실행마다 새로 만드는 임시 앱 폴더에서

@@ -27,6 +27,13 @@ refused rather than shared: stop that program, or pick another port. Node 26 is
 needed because cards' Lua scripts run in a sandbox built on Node's permission
 model.
 
+On its first start the app also downloads its memory model, KURE-v1 (about
+740 MB), from Hugging Face into the data folder's `models/`. That happens in the
+background while the app already serves, and the log shows how far it is; a
+download cut short resumes on the next start. Until the model is there, a
+chat's memory picks recent and random summaries instead of similar ones and
+notes no facts, and the chat's memory panel says so.
+
 ### The data folder
 
 Everything the app has is in one folder: the database (`db/`, PGlite —
@@ -70,7 +77,6 @@ Node 26+ (`.nvmrc`) and pnpm 10.28.2 are required, and nothing else.
 ```sh
 pnpm install
 cp apps/plot/.env.example apps/plot/.env
-pnpm --filter @shizue/api embedder:fetch
 make dev
 ```
 
@@ -82,37 +88,39 @@ says otherwise, and it reads `apps/plot/.env`. Editing the API restarts the
 process; editing the web app reloads the page. `make stop` stops it.
 `SHIZUE_PORT` moves it to another port, for a second checkout beside main.
 
-`embedder:fetch` puts the weights of the embedding models the API runs for the
-chat memory into `apps/plot/data/embedder` and checks they load offline:
-bge-m3 from Hugging Face (587 MB) and, for Korean plots, KURE-v1 (738 MB) from
-the S3 bucket `S3_*` names — the compose RustFS in development, where
-`embedder:publish` has to have put our ONNX conversion first (ARCHITECTURE
-§7.3). Run it once per checkout: the server never downloads them itself, and a
-plot whose model is missing has its memory pick recent and random summaries
-instead of similar ones. Loaded, each model adds about 2 GB to the process's
-memory and is unloaded after ten idle minutes;
+The embedding models the API runs for the chat memory download themselves, as
+in the installed app: once the process serves, it fetches the weights it lacks
+from Hugging Face in the background — KURE-v1 (738 MB), our int8 conversion at
+a pinned commit of `rokrokss/KURE-v1-onnx`, each large file checked against its
+SHA-256, and with `EMBEDDER_ROUTING=by-language` also bge-m3 (587 MB) for plots
+in other languages (ARCHITECTURE §7.3). `make dev` keeps them in the checkout's
+`apps/plot/data/embedder` rather than the data folder, unless `.env` sets
+`EMBEDDER_CACHE_DIR`. `pnpm --filter @shizue/api embedder:fetch` downloads them
+ahead of time into `EMBEDDER_CACHE_DIR` (else the data folder's `models/`) and
+checks they load offline. Until a plot's model is there, its memory picks
+recent and random summaries instead of similar ones. Loaded, each model adds
+about 2 GB to the process's memory and is unloaded after ten idle minutes;
 `EMBEDDER_ROUTING=single EMBEDDER_MODEL=multiMiniLM` runs one light model
-(135 MB, about 750 MB loaded), and `EMBEDDER=off` none.
-
-The installed app cannot fetch KURE-v1 yet: our conversion lives in that private
-bucket, and the public one on Hugging Face (`YoungFullmoon/KURE-v1-onnx`)
-measured below ours (ARCHITECTURE §7.3). Until ours is published, the installed
-app runs without its embedder and says so in its log.
+(135 MB, about 750 MB loaded), and `EMBEDDER=off` none — which a process started
+by hand on a fresh `SHIZUE_DATA_DIR` wants, or it downloads the 738 MB into it.
 
 ### Moving from the Postgres setup
 
 A checkout from before 2026-10-18 kept its data in Docker's PostgreSQL, with its
-files in `UPLOAD_DIR` or the RustFS bucket. With the database container still
-running, copy everything into an empty app folder once:
+files in `UPLOAD_DIR` or the RustFS bucket. With the old database container
+running again (`docker start shizue-postgres`; the repository no longer has a
+`docker-compose.yml`), copy everything into an empty app folder once:
 
 ```sh
 pnpm --filter @shizue/api import:postgres -- \
   --from postgres://plot:plot@localhost:15433/plot --uploads ./data/uploads
 ```
 
-Files that were in the bucket come along with `--s3` and the bucket's `S3_*`
-variables. It keeps the old `BETTER_AUTH_SECRET` as the folder's secret, so the
-ChatGPT connection still opens, and only reads the source.
+It keeps the old `BETTER_AUTH_SECRET` as the folder's secret, so the ChatGPT
+connection still opens, and only reads the source. Files that were in an S3
+bucket are no longer read: move such an install with `901599a` or an earlier
+build, whose `import:postgres --s3` copies the bucket too, and whose
+`docker-compose.yml` still runs the old PostgreSQL and RustFS.
 
 ### The package
 
@@ -120,6 +128,7 @@ ChatGPT connection still opens, and only reads the source.
 the libraries, the web app's production build, and the app's process bundled
 with esbuild together with the workspace packages and the threads and children
 it starts. Next, React, PGlite, wasmoon and transformers.js stay dependencies.
+The memory model is not in the package: the installed app downloads it (above).
 `npm publish` is the owner's to run.
 
 ### Card and module imports

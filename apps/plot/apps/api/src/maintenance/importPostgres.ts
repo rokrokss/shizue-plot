@@ -1,28 +1,25 @@
 /**
- * Moves a shizue that ran on Postgres and S3 (before 2026-10-18) into the app's
- * own folder: every row of every table, the files of the old local driver's
- * folder and of the S3 bucket, and the old secret, so that the ChatGPT connection
- * sealed with it still opens and OpenAI sees the same host. Once, into a folder
- * that has no database yet; the source is only read.
+ * Moves a shizue that ran on Postgres (before 2026-10-18) into the app's own
+ * folder: every row of every table, the files of the old local driver's folder,
+ * and the old secret, so that the ChatGPT connection sealed with it still opens
+ * and OpenAI sees the same host. Once, into a folder that has no database yet;
+ * the source is only read.
  *
- *   pnpm --filter @shizue/api import:postgres -- --from <postgres url> [--to <dir>] [--uploads <dir>] [--s3]
+ *   pnpm --filter @shizue/api import:postgres -- --from <postgres url> [--to <dir>] [--uploads <dir>]
  *
- * `--to` defaults to the app's folder (SHIZUE_DATA_DIR), `--uploads` to the old
- * `UPLOAD_DIR`, and `--s3` reads the bucket the `S3_*` variables name (the old
- * dev.sh's defaults: shizue-media on RustFS at localhost:19000). The old secret is
- * `BETTER_AUTH_SECRET`, or the old default when it was never set. Postgres must be
- * at the same migration as this build: migrate it with the old checkout first.
+ * `--to` defaults to the app's folder (SHIZUE_DATA_DIR) and `--uploads` to the
+ * old `UPLOAD_DIR`. Files an old install kept in an S3 bucket are not read here
+ * any more: move such an install with an earlier build (901599a or before),
+ * whose `--s3` copies the bucket too. The old secret is `BETTER_AUTH_SECRET`, or
+ * the old default when it was never set. Postgres must be at the same migration
+ * as this build: migrate it with the old checkout first.
  */
-import { GetObjectCommand, ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
 import { cp, mkdir, stat, writeFile } from 'node:fs/promises';
 import { existsSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
-import { createWriteStream } from 'node:fs';
 import postgres from 'postgres';
 import { openAppDb } from '../appDb.js';
-import { dataDirOf, filesDirOf, loadRootEnv, readS3Config } from '../env.js';
+import { dataDirOf, filesDirOf, loadRootEnv } from '../env.js';
 
 loadRootEnv();
 
@@ -30,8 +27,6 @@ loadRootEnv();
 const OLD_DEFAULT_SECRET = 'dev-secret-change-me';
 /** Rows sent to PGlite in one statement. */
 const BATCH = 500;
-/** What the bucket held that is not the app's files: the embedder's weights, and imports half staged. */
-const NOT_FILES = ['models/', 'imports/'];
 
 const args = process.argv.slice(2).filter((arg) => arg !== '--');
 const valueOf = (flag: string): string | undefined => {
@@ -41,9 +36,8 @@ const valueOf = (flag: string): string | undefined => {
 const from = valueOf('--from') ?? process.env['DATABASE_URL'];
 const to = resolve(valueOf('--to') ?? dataDirOf(process.env));
 const uploadsArg = valueOf('--uploads') ?? process.env['UPLOAD_DIR'];
-const withS3 = args.includes('--s3');
 if (!from) {
-  console.error('usage: import:postgres --from <postgres url> [--to <dir>] [--uploads <dir>] [--s3]');
+  console.error('usage: import:postgres --from <postgres url> [--to <dir>] [--uploads <dir>]');
   process.exit(2);
 }
 
@@ -114,34 +108,6 @@ try {
     } else {
       console.log(`[import] no folder at ${uploads}; skipped`);
     }
-  }
-  if (withS3) {
-    const config = readS3Config(process.env);
-    const s3 = new S3Client({
-      region: config.region,
-      ...(config.endpoint ? { endpoint: config.endpoint } : {}),
-      forcePathStyle: config.forcePathStyle,
-      ...(config.accessKeyId && config.secretAccessKey
-        ? { credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey } }
-        : {}),
-    });
-    let token: string | undefined;
-    let count = 0;
-    do {
-      const page = await s3.send(new ListObjectsV2Command({ Bucket: config.bucket, ContinuationToken: token }));
-      for (const object of page.Contents ?? []) {
-        const key = object.Key;
-        if (!key || NOT_FILES.some((prefix) => key.startsWith(prefix))) continue;
-        const path = join(files, key);
-        // The bucket is the newer copy of a key both places held.
-        await mkdir(dirname(path), { recursive: true });
-        const body = (await s3.send(new GetObjectCommand({ Bucket: config.bucket, Key: key }))).Body as Readable;
-        await pipeline(body, createWriteStream(path));
-        count += 1;
-      }
-      token = page.IsTruncated ? page.NextContinuationToken : undefined;
-    } while (token);
-    console.log(`[import] ${count} files from s3://${config.bucket}`);
   }
   console.log(`[import] done: ${to}`);
 } finally {

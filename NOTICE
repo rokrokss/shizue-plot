@@ -29,3 +29,11 @@ software under the GNU General Public License, version 3:
 Comments in the sources name the RisuAI or PocketRisu behaviour each part
 follows. The published package also bundles third-party libraries and fonts,
 each under its own license.
+
+The app downloads the model its chat memory searches with on its first start,
+from Hugging Face; it is not part of this program's code:
+
+  KURE-v1, by the NLP & AI Lab at Korea University (nlpai-lab), under the MIT License
+  https://huggingface.co/nlpai-lab/KURE-v1
+    Downloaded as our int8 ONNX conversion of its weights,
+    https://huggingface.co/rokrokss/KURE-v1-onnx, which keeps that license.

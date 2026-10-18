@@ -36,6 +36,7 @@ import {
   MAX_SUMMARY_LENGTH,
   memoryChannel,
   memorySettingsOf,
+  plotLanguageOf,
   scheduleMemoryUpdate,
   summarize,
 } from '../memory.js';
@@ -119,7 +120,13 @@ export function chatMemoryRoutes(deps: AppDeps): Hono<AppEnv> {
 
   app.get('/:id/memory', async (c) => {
     const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
-    return c.json(await listMemory(deps, chat));
+    const language = deps.embedder ? await plotLanguageOf(deps, chat.plotId) : null;
+    return c.json({
+      ...(await listMemory(deps, chat)),
+      // Where the plot's embedding model stands (`embedder.ts`): the panel says so
+      // while it downloads or is missing, when memory cannot search by meaning.
+      memoryModel: deps.embedder && language ? deps.embedder.weightsFor(language) : 'off',
+    });
   });
 
   // `{content?, invalidated?}`: the reader's rewrite of a fact — its vector goes

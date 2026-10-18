@@ -3,7 +3,6 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { config } from 'dotenv';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { S3Config } from './s3.js';
 import type { StorageConfig } from './storage.js';
 
 /** Repo root, three levels up from both `src/` and the built `dist/`. */
@@ -155,30 +154,6 @@ export function readInteger(env: NodeJS.ProcessEnv, name: string, min: number, m
   const value = Number(raw);
   if (!Number.isInteger(value) || value < min || value > max) throw new Error(`${name} must be a whole number from ${min} to ${max}.`);
   return value;
-}
-
-/** `true`/`1` and nothing else; an unset switch is off. */
-const readBoolean = (value: string | undefined): boolean => value === 'true' || value === '1';
-
-/**
- * The S3 store `S3_*` names, where the embedder's own weights are kept
- * (`embedder:fetch`, `embedder:publish`). The app's files are never there: they
- * are in the app's folder.
- */
-export function readS3Config(env: NodeJS.ProcessEnv): S3Config {
-  const bucket = env['S3_BUCKET'];
-  if (!bucket) throw new Error('S3_BUCKET is not set');
-  return {
-    bucket,
-    // Every S3-compatible store wants a region in the signature; a local one ignores
-    // which one, so the AWS default is as good a name as any.
-    region: env['S3_REGION'] ?? 'us-east-1',
-    ...(env['S3_ENDPOINT'] ? { endpoint: env['S3_ENDPOINT'] } : {}),
-    ...(env['S3_PUBLIC_ENDPOINT'] ? { publicEndpoint: env['S3_PUBLIC_ENDPOINT'] } : {}),
-    ...(env['S3_ACCESS_KEY_ID'] ? { accessKeyId: env['S3_ACCESS_KEY_ID'] } : {}),
-    ...(env['S3_SECRET_ACCESS_KEY'] ? { secretAccessKey: env['S3_SECRET_ACCESS_KEY'] } : {}),
-    forcePathStyle: readBoolean(env['S3_FORCE_PATH_STYLE']),
-  };
 }
 
 export function readConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {

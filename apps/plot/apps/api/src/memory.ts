@@ -316,7 +316,7 @@ export async function buildMemoryInput(
 }
 
 /** The plot's content language, which picks its embedding model; null for a plot that is gone. */
-async function plotLanguageOf(deps: AppDeps, plotId: string): Promise<ContentLanguage | null> {
+export async function plotLanguageOf(deps: AppDeps, plotId: string): Promise<ContentLanguage | null> {
   const [plot] = await deps.db.select({ language: plots.language }).from(plots).where(eq(plots.id, plotId)).limit(1);
   return plot?.language ?? null;
 }

@@ -115,6 +115,9 @@ try {
   portInUse();
 }
 console.log(`[shizue] running at ${config.authUrl} — Ctrl-C to stop`);
+// The memory model's weights, when they are not here yet: downloaded now, in the
+// background, while the app serves (`embedder.ts`). The shutdown stops it.
+embedder?.downloadMissing();
 if (config.port !== APP_PORT && config.chatgptCallbackPort === SHIZUE_CALLBACK_PORT) {
   console.warn(
     `[shizue] The Shizue extension brings ChatGPT's sign-in back to http://localhost:${APP_PORT}, so on port ${config.port} ` +

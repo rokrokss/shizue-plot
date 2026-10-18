@@ -67,8 +67,9 @@ export function attentionBatches(lengths: readonly number[], budget = ATTENTION_
 const { cacheDir, threads } = (workerData ?? {}) as { cacheDir: string; threads?: number };
 
 if (parentPort) {
-  // The weights are fetched on setup (`embedder:fetch`), into the directory the
-  // cache reads as well — so a missing file is an error, not a download.
+  // The weights are downloaded before a model is asked for (`downloadMissing` in
+  // embedder.ts, or `embedder:fetch`), into the directory the cache reads as
+  // well — so a missing file is an error, not a download.
   env.allowRemoteModels = false;
   env.allowLocalModels = true;
   env.localModelPath = cacheDir;

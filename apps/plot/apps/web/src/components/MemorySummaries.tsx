@@ -13,6 +13,12 @@ const PAGE = 20;
 /** When the list is read again after a change, for the summary the background writes after a turn. */
 const BACKGROUND_DELAY_MS = 6000;
 
+/**
+ * Where the plot's embedding model stands on the server: until it is ready,
+ * memory picks no summary by meaning and takes no facts.
+ */
+type MemoryModelState = 'ready' | 'downloading' | 'missing' | 'off';
+
 const ACTION =
   'rounded-md px-1.5 py-0.5 text-xs transition-colors disabled:opacity-50 focus-visible:outline-2 ' +
   'focus-visible:outline-offset-2 focus-visible:outline-focus';
@@ -49,18 +55,20 @@ export function MemorySummaries({
   const toMessage = useErrorMessage();
   const [summaries, setSummaries] = useState<MemorySummary[] | null>(null);
   const [facts, setFacts] = useState<MemoryFact[]>([]);
+  const [memoryModel, setMemoryModel] = useState<MemoryModelState>('ready');
   const [shown, setShown] = useState(PAGE);
   const [error, setError] = useState('');
 
   const load = useCallback(
     async (signal?: AbortSignal): Promise<void> => {
       try {
-        const answer = await apiGet<{ summaries: MemorySummary[]; facts: MemoryFact[] }>(
+        const answer = await apiGet<{ summaries: MemorySummary[]; facts: MemoryFact[]; memoryModel?: MemoryModelState }>(
           `/api/chats/${chatId}/memory`,
           signal,
         );
         setSummaries(answer.summaries);
         setFacts(answer.facts);
+        setMemoryModel(answer.memoryModel ?? 'ready');
         setError('');
       } catch (caught) {
         if (signal?.aborted) return;
@@ -119,6 +127,11 @@ export function MemorySummaries({
       {summaries === null && !error ? <Spinner label={t('memoryLoading')} /> : null}
       {summaries !== null && applied.length === 0 ? <p className="text-sm text-muted">{t('memoryEmpty')}</p> : null}
       <p className="text-xs text-muted">{t('memoryHint')}</p>
+      {memoryModel === 'downloading' || memoryModel === 'missing' ? (
+        <p data-testid="memory-model" className="text-xs text-muted">
+          {t(memoryModel === 'downloading' ? 'memoryModelDownloading' : 'memoryModelMissing')}
+        </p>
+      ) : null}
       <ErrorText>{error}</ErrorText>
 
       {applied.length > 0 ? <ol className="space-y-3">{applied.slice(0, shown).map(card)}</ol> : null}

@@ -1,7 +1,8 @@
 """KURE-v1 (nlpai-lab/KURE-v1) to the ONNX the server embedder runs (embedder.ts).
 
-KURE-v1 ships only safetensors for PyTorch. This makes the directory
-`embedder:publish` uploads to the object store: optimum's feature-extraction
+KURE-v1 ships only safetensors for PyTorch. This makes the directory the owner
+uploaded to Hugging Face as rokrokss/KURE-v1-onnx, which the app downloads at a
+pinned commit (embedder.ts `EMBEDDING_MODELS`): optimum's feature-extraction
 export (the transformer's `last_hidden_state`, for transformers.js to pool),
 ONNX Runtime's dynamic int8 quantization to `onnx/model_quantized.onnx`, the
 tokenizer and config files beside it. Then it checks the int8 model against

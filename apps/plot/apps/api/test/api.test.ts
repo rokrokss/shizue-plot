@@ -7333,6 +7333,7 @@ describe('memory', () => {
       calls,
       models,
       modelFor,
+      weightsFor: () => 'ready',
       async embed(texts, { plotLanguage }) {
         const model = modelFor(plotLanguage);
         calls.push([...texts]);
@@ -14697,6 +14698,7 @@ describe('emotion images', () => {
     const calls: { texts: string[]; kind: string | undefined }[] = [];
     const embedder: Embedder = {
       modelFor: () => 'test-emotion',
+      weightsFor: () => 'ready',
       async embed(texts, { kind }) {
         calls.push({ texts: [...texts], kind });
         const count = (text: string, word: string): number => text.split(word).length - 1;
@@ -16218,6 +16220,7 @@ describe('vector storage (SillyTavern)', () => {
     return {
       calls,
       modelFor: () => model,
+      weightsFor: () => 'ready',
       async embed(texts, { kind = 'document' }) {
         calls.push({ texts: [...texts], kind });
         if (fails(kind)) throw new Error('embedder down');
