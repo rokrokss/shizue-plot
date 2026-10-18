@@ -182,14 +182,16 @@ describe('ChatGPT OAuth', () => {
     expect(await f.oauth.models('ACCESS')).toEqual([{ id: 'gpt-test', label: 'GPT test', vision: true }, { id: 'next-model', label: 'next-model', vision: false }]);
   });
   it('reads the reasoning efforts a model advertises, and only plain words', async () => {
-    // Shaped like the Codex `/models` entries these field names were taken from
-    // (from the Codex client, unverified against a live account): a list of
-    // `{effort, description}` and the default's name.
+    // Shaped like the `/models` entries the owner's account returned on 2026-10-18:
+    // a list of `{effort, description}` and the default's name. `max` and `ultra`
+    // are withheld.
     const oauth = new ChatGPTOAuth({ fetch: async () => json({ models: [
       { slug: 'gpt-reasoning', visibility: 'list', default_reasoning_level: 'medium', supported_reasoning_levels: [
         { effort: 'low', description: 'Fast responses with lighter reasoning' },
         { effort: 'medium', description: 'Balances speed and reasoning depth' },
         { effort: 'high', description: 'Greater reasoning depth for complex problems' },
+        { effort: 'max', description: 'Maximum reasoning depth for the hardest problems' },
+        { effort: 'ultra', description: 'Maximum reasoning with automatic task delegation' },
       ] },
       { slug: 'bare-strings', visibility: 'list', supported_reasoning_levels: ['minimal', 'xhigh', 'xhigh'] },
       { slug: 'odd-values', visibility: 'list', default_reasoning_level: 'High!', supported_reasoning_levels: [{ effort: 'Turbo' }, { effort: 7 }, null, 'a'.repeat(21), { description: 'no effort' }] },

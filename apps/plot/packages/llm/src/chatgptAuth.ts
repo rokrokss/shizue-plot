@@ -92,14 +92,20 @@ const endpoint = (url: string): URL => {
  */
 const effortWord = (value: unknown): value is string => typeof value === 'string' && /^[a-z]{1,20}$/.test(value);
 /**
+ * Efforts the catalog offers that a chat is never run at, as the owner decided on
+ * 2026-10-18. `ultra` is described there as reasoning "with automatic task delegation".
+ */
+const WITHHELD_EFFORTS = new Set(['max', 'ultra']);
+/**
  * `supported_reasoning_levels` as the Codex catalog writes it — `{effort, description}`
  * objects — or as bare strings. The field names come from the Codex client, not a
- * published contract, which is why both shapes are taken and anything else dropped.
+ * published contract, which is why both shapes are taken and anything else dropped;
+ * the owner's account returned the object shape on 2026-10-18.
  */
 function reasoningEfforts(levels: unknown): string[] {
   if (!Array.isArray(levels)) return [];
   const words = levels.map((level: unknown) => typeof level === 'string' ? level : (level as { effort?: unknown } | null)?.effort);
-  return [...new Set(words.filter(effortWord))];
+  return [...new Set(words.filter(effortWord).filter((word) => !WITHHELD_EFFORTS.has(word)))];
 }
 
 export class ChatGPTOAuth {
