@@ -172,7 +172,7 @@ import { isSillyTavernCard, loadOwnedPlot, toPromptCharacters, toPromptPlot } fr
 import { editRequestTurns } from '../requestTriggers.js';
 import { createScriptFetch } from '../scriptFetch.js';
 import { readScriptLlmMessages, readScriptLlmModel, runScriptLlm } from '../scriptLlm.js';
-import { bindingJson, mergeBinding, readBindingPatch, resolveModel, resolvePreset } from '../models.js';
+import { bindingJson, contextBudgetFor, mergeBinding, readBindingPatch, resolveModel, resolvePreset } from '../models.js';
 import { asSent, foldOptionsOf, promptBranch, toHistory } from '../sentHistory.js';
 import { RECENT_TURNS as SUGGEST_RECENT_TURNS, suggestReplies } from '../suggest.js';
 import { readerMembers } from '../transcript.js';
@@ -1653,7 +1653,7 @@ async function regeneratePlan(
     scriptView: context.scriptView,
     localLore: context.localLore,
     auxiliaryModel: context.auxiliaryModel,
-    contextBudget: memorySettingsOf(chat).contextBudget,
+    contextBudget: contextBudgetFor(memorySettingsOf(chat).contextBudget, main.contextWindow),
     ...(voice ? voicePlan(context, voice, null, group!.notLast, answersReader ? [] : [AUTO_CONTINUE_NUDGE]) : {}),
     // The head's parent or the head — the round's first reply's parent for a
     // round — or where the scripts left the branch.
@@ -3056,7 +3056,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         scriptView: context.scriptView,
         localLore: context.localLore,
         auxiliaryModel: context.auxiliaryModel,
-        contextBudget: memorySettingsOf(chat).contextBudget,
+        contextBudget: contextBudgetFor(memorySettingsOf(chat).contextBudget, main.contextWindow),
         // The round's first reply, which is the round's id.
         ...(voice ? voicePlan(context, voice, null, notLast) : {}),
         target: { kind: 'new', parentId: branch.at(-1)?.id ?? null },
@@ -3187,7 +3187,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         scriptView: context.scriptView,
         localLore: context.localLore,
         auxiliaryModel: context.auxiliaryModel,
-        contextBudget: memorySettingsOf(chat).contextBudget,
+        contextBudget: contextBudgetFor(memorySettingsOf(chat).contextBudget, main.contextWindow),
         ...voicePlan(context, voice, round, notLast, answersReader ? [] : [AUTO_CONTINUE_NUDGE]),
         target: { kind: 'new', parentId: end?.id ?? null },
       };
@@ -3294,7 +3294,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         scriptView: context.scriptView,
         localLore: context.localLore,
         auxiliaryModel: context.auxiliaryModel,
-        contextBudget: memorySettingsOf(chat).contextBudget,
+        contextBudget: contextBudgetFor(memorySettingsOf(chat).contextBudget, main.contextWindow),
         // The message keeps its own speaker and round; only the names its own
         // prefixes come off by, and whose scripts run, travel.
         ...(speaker
@@ -3373,7 +3373,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         scriptView: context.scriptView,
         localLore: context.localLore,
         auxiliaryModel: context.auxiliaryModel,
-        contextBudget: memorySettingsOf(chat).contextBudget,
+        contextBudget: contextBudgetFor(memorySettingsOf(chat).contextBudget, main.contextWindow),
         trailingSystem: applyMacros(AUTO_CONTINUE_NUDGE, {
           char: context.plot.char ?? context.plot.name,
           user: context.userName,

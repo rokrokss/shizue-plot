@@ -143,6 +143,23 @@ with no sub model the main one does the side work. On a limit or connection
 error the app reports it and does not switch to another preset (ARCHITECTURE
 §7.1).
 
+**Add preset** opens PocketRisu's model registry: a curated profile per model,
+grouped by provider and searchable, for Google AI Studio, Anthropic, OpenAI,
+OpenRouter, DeepSeek, DeepInfra, NanoGPT and Ollama Cloud keys. A profile says
+which values the model takes, their ranges and defaults, its reply cap (thinking
+included: 8,192 tokens for Gemini 3.8 Flash, 32,768 for Gemini 4 Argon), its
+context window and its status; older and retired models are hidden until you
+ask for them. A preset on a profile sends only the profile's fields, as
+PocketRisu does, retries a request that fails before the reply begins twice,
+and shows **Update available** when the registry revises its profile. The app
+carries a copy of the registry and refreshes it from PocketRisu's own
+(`MODEL_REGISTRY_URL` in `.env.example` names another or turns it off); what it
+fetches is checked before it is kept, and a key still goes only to its own
+address, whatever a profile names. The **Custom** tab is the preset editor for
+everything else — your ChatGPT plan, local servers, Bedrock, Vertex AI, Mistral,
+Cohere, NovelAI, NovelList, AI Horde, and models the registry does not list —
+where you pick a format and type or load the model ID.
+
 Every request format RisuAI has is here but WebLLM and Plugin, which run inside
 RisuAI's own page, and its Echo:
 
@@ -177,9 +194,11 @@ phone only lists them. The API seals each key in the app's folder (the install's
 `secret` derives the key), never returns it — the page shows a masked hint — and
 sends it only to the address it was entered for: the provider's own, or the one
 you typed for a custom server. **Check** asks the provider whether the key
-works. Saving a key while you have no model preset makes one on a chat model
-the provider lists (a mini or Sonnet-class one where it has one, never an
-embedding or completions-only model) and makes it the default. A preset picks
+works. Saving a key while you have no model preset makes one and makes it the
+default: on the provider's first current registry profile where the registry
+has the provider, otherwise on a chat model the provider lists (a mini or
+Sonnet-class one where it has one, never an embedding or completions-only
+model). A preset picks
 the key, and **Load the model list** fetches the provider's models for it. A
 server that needs no key gets its address in the preset instead, and no key is
 ever sent there. AWS keys go only to their region's Bedrock, and a service

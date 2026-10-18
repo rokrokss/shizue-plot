@@ -1,9 +1,10 @@
 import { errorMessageOf, joinUrl, providerFailure, providerFetch, providerHttpError, redact } from '../http.js';
 import { applyParameters, withPresetParams, type ParameterPlaces } from '../params.js';
+import { addCallerStops, profileBody, wireModelId } from '../registry/request.js';
 import { eventJson, IdleWatch, readSse, StopFilter } from '../stream.js';
 import type { ChatMessage, ChatRequest, LLMAdapter, StreamDelta, StreamDone } from '../types.js';
 import { dataUrlParts } from './anthropic.js';
-import { CATALOG_TIMEOUT_MS, type AdapterConfig, type CatalogConfig, type ModelFormat, type ModelListing } from './format.js';
+import { CATALOG_TIMEOUT_MS, type AdapterConfig, type CatalogConfig, type ModelFormat, type ModelListing, type ProfileConfig } from './format.js';
 import { postJson, watched } from './send.js';
 
 /** RisuAI's Gemini parameters and their places in `generationConfig`. */
@@ -179,17 +180,48 @@ export async function* readGeminiStream(response: Response, watch: IdleWatch, st
 }
 
 /**
+ * A profile preset's `generateContent` request, PocketRisu's `prepareGeminiBody`
+ * (`src/ts/preset/adapter/googleGemini.ts`): the profile's body (its defaults
+ * and fields — no safety settings and no thinking unless the preset sets them),
+ * the caller's stop strings in its stop field, no `model` (the URL names it),
+ * then the turns and `systemInstruction` as this format writes them, and no
+ * tools. The model is the preset's (`wireModelId`), never a body field's.
+ */
+export function profileGenerateContent(config: Pick<AdapterConfig, 'baseUrl' | 'params'> & { profile: ProfileConfig }, req: ChatRequest): { url: string; body: Record<string, unknown> } {
+  const { snapshot, values } = config.profile;
+  const body = profileBody(snapshot, values, config.params.extraBody);
+  addCallerStops(body, snapshot, values, req.stop, 5);
+  const model = wireModelId(snapshot, values);
+  delete body['model'];
+  const { system, contents } = geminiContents(req);
+  body['contents'] = contents;
+  if (system) body['systemInstruction'] = { parts: [{ text: system }] };
+  else delete body['systemInstruction'];
+  delete body['tools'];
+  delete body['toolConfig'];
+  return { url: joinUrl(config.baseUrl, `/models/${modelPath(model)}:streamGenerateContent?alt=sse`), body };
+}
+
+/**
  * Google AI Studio's Gemini: `:streamGenerateContent?alt=sse` with the key in
  * `x-goog-api-key` (not the URL, where it would sit in every log), read by
- * `readGeminiStream`.
+ * `readGeminiStream`. A profile preset's request is the profile's
+ * (`profileGenerateContent`), with its additional headers and the SSE `Accept`.
  */
 function createAdapter(config: AdapterConfig): LLMAdapter {
   return {
     stream(request) {
-      const req = withPresetParams(request, config.params);
+      const profile = config.profile;
+      const req = profile ? request : withPresetParams(request, config.params);
       return watched(req, async function* (watch) {
-        const url = joinUrl(config.baseUrl, `/models/${modelPath(req.model)}:streamGenerateContent?alt=sse`);
         const auth: Record<string, string> = config.access.kind === 'key' ? { 'x-goog-api-key': config.access.apiKey } : {};
+        if (profile) {
+          const { url, body } = profileGenerateContent({ ...config, profile }, req);
+          const headers = { ...config.headers, ...config.params.extraHeaders, Accept: 'text/event-stream' };
+          const response = await postJson({ ...config, params: {} }, url, body, headers, auth, watch);
+          return yield* readGeminiStream(response, watch, new StopFilter(req.stop));
+        }
+        const url = joinUrl(config.baseUrl, `/models/${modelPath(req.model)}:streamGenerateContent?alt=sse`);
         const response = await postJson(config, url, generateContentBody(req), { ...config.headers }, auth, watch);
         return yield* readGeminiStream(response, watch, new StopFilter(req.stop));
       });

@@ -41,6 +41,12 @@ export type MessageContent = string | ContentPart[];
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
   content: MessageContent;
+  /**
+   * RisuAI's `cachePoint`: the prompt up to this turn is cached. Only an
+   * Anthropic profile preset reads it, as PocketRisu's adapter does
+   * (`cache_control` on the turn's last block).
+   */
+  cachePoint?: boolean;
 }
 
 /** The words of a turn, whatever shape it arrived in. Images contribute nothing. */

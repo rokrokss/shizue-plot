@@ -1204,7 +1204,8 @@
     "template_failed": "모델 프리셋의 인스트럭트 템플릿을 이 채팅에 적용하지 못했습니다. 다른 템플릿을 골라 보세요.",
     "credential_unreadable": "이 키를 더 이상 읽을 수 없습니다. 키를 다시 넣어 주세요.",
     "credentials_unavailable": "키를 저장할 수 없는 설정입니다.",
-    "credential_kind_unsupported": "이 종류의 자격 증명은 아직 쓸 수 없습니다."
+    "credential_kind_unsupported": "이 종류의 자격 증명은 아직 쓸 수 없습니다.",
+    "profile_unavailable": "이 모델 프로필이 레지스트리에 없습니다. 다른 프로필을 골라 주세요."
   },
   "rebrand": {
     "eyebrow": "이야기가 자라는 곳",
@@ -1587,6 +1588,56 @@
     "sameAsMain": "메인 모델과 같게",
     "builtIn": "테스트",
     "keyless": "키 없음",
-    "noKeyYet": "키를 골라 주세요"
+    "noKeyYet": "키를 골라 주세요",
+    "browserTitle": "모델 고르기",
+    "browserReplaceTitle": "대신 쓸 프로필 고르기",
+    "browserClose": "닫기",
+    "browserTabOfficial": "레지스트리",
+    "browserTabCustom": "커스텀",
+    "browserSearch": "모델·ID·제공자 검색",
+    "browserVisibility": "보여 줄 모델",
+    "visibility": {
+      "currentOnly": "현재 모델만",
+      "hideDeprecated": "구형 모델까지",
+      "all": "지원이 끝난 모델까지 모두"
+    },
+    "browserEmpty": "맞는 모델이 없습니다.",
+    "profileStatus": {
+      "current": "현재",
+      "outdated": "구형",
+      "deprecated": "지원 종료"
+    },
+    "profileUpdatedOn": "프로필 갱신 {date}",
+    "customModelTitle": "커스텀 모델",
+    "customModelDescription": "요청 형식을 고르고 모델 ID를 직접 적습니다. ChatGPT 요금제, 이 컴퓨터의 로컬 서버, Bedrock, Vertex AI, Mistral, Cohere, NovelAI, NovelList, AI Horde, 그리고 레지스트리에 없는 모델에 씁니다. 제공자의 모델 목록이 ID를 권합니다.",
+    "customModelStart": "커스텀 모델 만들기",
+    "registryRefresh": "모델 목록 새로 받기",
+    "registrySourceBundled": "모델 목록: 이 버전에 든 PocketRisu 레지스트리 사본",
+    "registrySourceRemote": "모델 목록: PocketRisu 레지스트리, {date}에 새로 받음",
+    "registryUpdated": "레지스트리의 새 모델 목록을 받았습니다.",
+    "registryUpToDate": "모델 목록이 이미 레지스트리의 최신입니다.",
+    "registryFailed": "모델 목록을 새로 받지 못했습니다: {reason}",
+    "profileUpdateAvailable": "업데이트 있음",
+    "profileUpdateConfirm": "이 프로필의 새 버전을 받을까요? 새 버전에 칸이 없는 값은 지워집니다.",
+    "profileMissing": "레지스트리에서 빠짐",
+    "profileReplace": "프로필 바꾸기",
+    "profileReplaceConfirm": "이 프로필로 바꿀까요? 새 프로필에 칸이 없는 값은 지워집니다.",
+    "profileModel": "모델 {model}",
+    "profileContext": "컨텍스트 {tokens, number}토큰",
+    "profileTaken": "{date} 프로필",
+    "capabilityNames": {
+      "streaming": "스트리밍",
+      "vision": "그림",
+      "tools": "도구",
+      "json": "JSON",
+      "reasoning": "추론",
+      "cache": "프롬프트 캐시"
+    },
+    "profileFieldsHint": "프로필이 정한 칸입니다. 비운 칸은 보내지 않고, 흐리게 보이는 기본값은 보냅니다.",
+    "fieldDefaultIs": "기본 ({value})",
+    "fieldRange": "{min}–{max}",
+    "invalidNumber": "{field}에는 받을 수 있는 숫자를 적어 주세요.",
+    "profileReadsPictures": "이 모델은 그림을 읽습니다. 턴의 그림이 함께 갑니다.",
+    "profileSendPictures": "그림 보내기 (프로필에는 이 모델이 그림을 읽는다고 적혀 있지 않습니다)"
   }
 }

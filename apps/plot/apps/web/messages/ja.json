@@ -1204,7 +1204,8 @@
     "template_failed": "モデルプリセットのインストラクトテンプレートをこのチャットに使えませんでした。別のテンプレートを選んでください。",
     "credential_unreadable": "このキーはもう読み取れません。キーを入れ直してください。",
     "credentials_unavailable": "この構成ではキーを保存できません。",
-    "credential_kind_unsupported": "この種類の資格情報はまだ使えません。"
+    "credential_kind_unsupported": "この種類の資格情報はまだ使えません。",
+    "profile_unavailable": "このモデルプロファイルはレジストリにありません。別のものを選んでください。"
   },
   "rebrand": {
     "eyebrow": "物語が育つ場所",
@@ -1587,6 +1588,56 @@
     "sameAsMain": "メインモデルと同じ",
     "builtIn": "テスト",
     "keyless": "キーなし",
-    "noKeyYet": "キーを選んでください"
+    "noKeyYet": "キーを選んでください",
+    "browserTitle": "モデルを選ぶ",
+    "browserReplaceTitle": "代わりのプロファイルを選ぶ",
+    "browserClose": "閉じる",
+    "browserTabOfficial": "レジストリ",
+    "browserTabCustom": "カスタム",
+    "browserSearch": "モデル・ID・プロバイダーを検索",
+    "browserVisibility": "表示するモデル",
+    "visibility": {
+      "currentOnly": "現行モデルのみ",
+      "hideDeprecated": "旧型モデルも",
+      "all": "提供終了のモデルもすべて"
+    },
+    "browserEmpty": "一致するモデルはありません。",
+    "profileStatus": {
+      "current": "現行",
+      "outdated": "旧型",
+      "deprecated": "提供終了"
+    },
+    "profileUpdatedOn": "プロファイル更新 {date}",
+    "customModelTitle": "カスタムモデル",
+    "customModelDescription": "リクエスト形式を選び、モデル ID を自分で書きます。ChatGPT プラン、このコンピューターのローカルサーバー、Bedrock、Vertex AI、Mistral、Cohere、NovelAI、AIのべりすと、AI Horde、そしてレジストリにないモデル向けです。プロバイダーのモデル一覧が ID を提案します。",
+    "customModelStart": "カスタムモデルを作る",
+    "registryRefresh": "モデル一覧を更新",
+    "registrySourceBundled": "モデル一覧: このバージョンに含まれる PocketRisu レジストリの写し",
+    "registrySourceRemote": "モデル一覧: PocketRisu レジストリ、{date} に更新",
+    "registryUpdated": "レジストリの新しいモデル一覧を取り込みました。",
+    "registryUpToDate": "モデル一覧はすでにレジストリの最新です。",
+    "registryFailed": "モデル一覧を更新できませんでした: {reason}",
+    "profileUpdateAvailable": "更新あり",
+    "profileUpdateConfirm": "このプロファイルの新しい版を取り込みますか？新しい版に欄のない値は消えます。",
+    "profileMissing": "レジストリから外れました",
+    "profileReplace": "プロファイルを変更",
+    "profileReplaceConfirm": "このプロファイルに置き換えますか？新しいプロファイルに欄のない値は消えます。",
+    "profileModel": "モデル {model}",
+    "profileContext": "コンテキスト {tokens, number} トークン",
+    "profileTaken": "{date} のプロファイル",
+    "capabilityNames": {
+      "streaming": "ストリーミング",
+      "vision": "画像",
+      "tools": "ツール",
+      "json": "JSON",
+      "reasoning": "推論",
+      "cache": "プロンプトキャッシュ"
+    },
+    "profileFieldsHint": "プロファイルが定める欄です。空欄は送らず、薄く見える既定値は送ります。",
+    "fieldDefaultIs": "デフォルト（{value}）",
+    "fieldRange": "{min}〜{max}",
+    "invalidNumber": "{field}には受け付けられる数値を書いてください。",
+    "profileReadsPictures": "このモデルは画像を読みます。ターンの画像も一緒に送ります。",
+    "profileSendPictures": "画像を送る（プロファイルにはこのモデルが画像を読むとは書かれていません）"
   }
 }

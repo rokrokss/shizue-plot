@@ -76,7 +76,7 @@ import {
 import type { ChatRequest, LLMAdapter } from '@shizue/llm';
 import { and, asc, eq, inArray, notExists, sql } from 'drizzle-orm';
 import type { AppDeps, Tx } from './deps.js';
-import { resolveModel, resolvePreset, type BindingOwner, type ModelDeps } from './models.js';
+import { contextBudgetFor, contextWindowOf, replyReserveOf, resolveModel, resolvePreset, type BindingOwner, type ModelDeps } from './models.js';
 import { embedErrorForLog, type Embedding } from './embedder.js';
 import { noteCachedTokens } from './cacheHealth.js';
 import { embedPendingFacts, extractFacts, keepEndedFacts, selectFacts } from './facts.js';
@@ -518,9 +518,14 @@ async function updateMemory(deps: AppDeps, chatId: string, continuing: boolean):
     .orderBy(asc(messages.createdAt));
   const path = buildPath(all, chat.headMessageId);
   const settings = memorySettingsOf(chat);
+  // The turn's prompt reserves the main model's reply cap out of a budget its
+  // context window caps (`replyReserveOf`, `contextBudgetFor`): the batches are
+  // planned against the same numbers, or a long-capped model would lose history
+  // the memory never summarized.
+  const main = await resolvePreset(deps, { userId: chat.userId, modelBinding: chat.modelBinding }, 'main').catch(() => null);
   const budget = {
-    contextBudget: settings.contextBudget,
-    responseReserve: replyLengthTokens(row.style?.replyLength),
+    contextBudget: contextBudgetFor(settings.contextBudget, contextWindowOf(main)),
+    responseReserve: replyReserveOf(main, replyLengthTokens(row.style?.replyLength)),
     fixedTokens: fixedTokensOf.get(chatId) ?? 0,
   };
   const summaries = await loadSummaries(deps.db, chatId);

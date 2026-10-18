@@ -1,8 +1,9 @@
 import { errorMessageOf, joinUrl, providerFailure, providerFetch, providerHttpError, redact } from '../http.js';
 import { applyParameters, reformat, withPresetParams, type ParameterPlaces } from '../params.js';
+import { addCallerStops, profileBody, wireModelId } from '../registry/request.js';
 import { eventJson, IdleWatch, readSse, StopFilter, Strip } from '../stream.js';
 import type { ChatMessage, ChatRequest, LLMAdapter, StreamDelta, StreamDone } from '../types.js';
-import { CATALOG_TIMEOUT_MS, type AdapterConfig, type CatalogConfig, type ModelFormat, type ModelListing } from './format.js';
+import { CATALOG_TIMEOUT_MS, type AdapterConfig, type CatalogConfig, type ModelFormat, type ModelListing, type ProfileConfig } from './format.js';
 import { postJson, watched } from './send.js';
 
 /**
@@ -68,6 +69,33 @@ export function chatCompletionsBody(req: ChatRequest, config: Pick<AdapterConfig
     ...(stop.length ? { stop } : {}),
   };
   return applyParameters(body, req, PLACES);
+}
+
+/**
+ * A profile preset's Chat Completions body, PocketRisu's `prepareOpenAiBody`
+ * (`src/ts/preset/adapter/openaiCompatible.ts`): the profile's body (its
+ * defaults and fields — `max_tokens` or `max_completion_tokens`, the effort
+ * where the profile has one), the caller's stop strings in its stop field, the
+ * turns as this format writes them (the preset's flags arranging them), the
+ * preset's model, `stream`, `stream_options.include_usage` where the host is
+ * known to take it (PocketRisu's opt-in, on for these), and no tool fields.
+ */
+export function profileChatCompletionsBody(
+  config: Pick<AdapterConfig, 'baseUrl' | 'capabilities' | 'params'> & { profile: ProfileConfig },
+  req: ChatRequest,
+): Record<string, unknown> {
+  const { snapshot, values } = config.profile;
+  const body = profileBody(snapshot, values, config.params.extraBody);
+  addCallerStops(body, snapshot, values, req.stop, 4);
+  const messages = reformat([...(req.system ? [{ role: 'system' as const, content: req.system }] : []), ...req.messages], config.capabilities);
+  body['messages'] = messages.map(wireMessage);
+  body['model'] = wireModelId(snapshot, values);
+  body['stream'] = true;
+  if (USAGE_HOSTS.has(hostOf(config.baseUrl))) body['stream_options'] = { include_usage: true };
+  delete body['tools'];
+  delete body['parallel_tool_calls'];
+  delete body['tool_choice'];
+  return body;
 }
 
 /** A content part of Mistral's reasoning models, whose `delta.content` is a list. */
@@ -158,9 +186,13 @@ export async function* readChatCompletionsStream(
 function createAdapter(config: AdapterConfig): LLMAdapter {
   return {
     stream(request) {
-      const req = withPresetParams(request, config.params);
+      const profile = config.profile;
+      const req = profile ? request : withPresetParams(request, config.params);
       return watched(req, async function* (watch) {
-        const response = await postJson(config, joinUrl(config.baseUrl, '/chat/completions'), chatCompletionsBody(req, config), { ...config.headers }, bearer(config), watch);
+        const url = joinUrl(config.baseUrl, '/chat/completions');
+        const response = profile
+          ? await postJson({ ...config, params: {} }, url, profileChatCompletionsBody({ ...config, profile }, req), { ...config.headers, ...config.params.extraHeaders, Accept: 'text/event-stream' }, bearer(config), watch)
+          : await postJson(config, url, chatCompletionsBody(req, config), { ...config.headers }, bearer(config), watch);
         return yield* readChatCompletionsStream(response, watch, new StopFilter(req.stop));
       });
     },

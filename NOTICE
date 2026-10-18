@@ -24,7 +24,19 @@ software under the GNU General Public License, version 3:
   https://github.com/PocketRisu/PocketRisu
     Model presets bound to each chat as a main and a sub model, the provider
     request adapters, the prompt templates written in their original words,
-    and remote access from a phone through a tunnel.
+    and remote access from a phone through a tunnel. The model registry's
+    code — its types, snapshot resolution, catalog sync, profile updates and
+    the request builder and adapters a preset on a profile runs through — is
+    ported from PocketRisu's src/ts/preset (commit f71e1cc), and the tests hold
+    the requests to a transcription of its adapters.
+
+The model registry's data — the base providers and model profiles in
+apps/plot/packages/llm/src/registry/bundled.json, taken from PocketRisu's
+bundled copy at f71e1cc, and the catalog the app refreshes from — is the
+PocketRisu Model Registry, dedicated to the public domain under CC0-1.0:
+
+  PocketRisu Model Registry, by PocketRisu's contributors
+  https://github.com/PocketRisu/pocketrisu-model-registry
 
 Comments in the sources name the RisuAI or PocketRisu behaviour each part
 follows. The published package also bundles third-party libraries and fonts,

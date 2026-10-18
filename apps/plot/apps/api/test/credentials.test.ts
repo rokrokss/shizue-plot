@@ -4,6 +4,7 @@
  * removed one leaves its presets waiting for another.
  */
 import { credentials, modelPresets } from '@shizue/db';
+import { bundledCatalog } from '@shizue/llm';
 import { generateKeyPairSync } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
@@ -137,25 +138,48 @@ describe('the first model preset', () => {
   /** An OpenAI-compatible server's model list. */
   const listing = (ids: string[]) => () => Response.json({ object: 'list', data: ids.map((id) => ({ id, object: 'model' })) });
 
-  it("makes an owner's first key bring a preset on the provider's chat model, and the default main", async () => {
+  it("makes an owner's first key bring a preset on the provider's first current registry profile, and the default main", async () => {
     const app = h.app();
-    h.provider(listing(['deepseek-reasoner', 'deepseek-chat']));
     const key = await readJson(await h.call(app, 'POST', '/api/credentials', { provider: 'deepseek', apiKey: KEY }));
-    expect(h.sent).toMatchObject([{ url: 'https://api.deepseek.com/models', headers: { authorization: `Bearer ${KEY}` } }]);
+    // The registry names the model: nothing is listed.
+    expect(h.sent).toEqual([]);
     const presets = await h.db.select().from(modelPresets);
-    expect(presets).toMatchObject([{ name: 'deepseek-chat', format: 'openai-chat', model: 'deepseek-chat', credentialId: key.id, endpoint: null }]);
+    const profile = bundledCatalog().profiles['deepseek:v41-flash-thinking']!;
+    expect(profile.profileStatus).toBe('current');
+    expect(presets).toMatchObject([{ kind: 'profile', name: profile.displayName, format: 'openai-chat', model: 'deepseek-flash', credentialId: key.id, endpoint: null }]);
+    expect(presets[0]!.sourceProfile).toMatchObject({ registryId: 'bundled', profileId: 'deepseek:v41-flash-thinking', profileUpdatedAt: profile.updatedAt });
     expect(await readJson(await h.call(app, 'GET', '/api/model-binding'))).toEqual({ main: presets[0]!.id, sub: null });
 
     // A second key finds a preset there, and neither lists nor makes another.
     await h.call(app, 'POST', '/api/credentials', { provider: 'mistral', apiKey: KEY });
-    expect(h.sent).toHaveLength(1);
+    expect(h.sent).toHaveLength(0);
     expect(await h.db.select().from(modelPresets)).toHaveLength(1);
+  });
+
+  it('starts Google on a current profile, never one the registry hides (Google lists 2.5 to new users who cannot call it)', async () => {
+    const app = h.app();
+    await h.call(app, 'POST', '/api/credentials', { provider: 'google', apiKey: KEY });
+    const [preset] = await h.db.select().from(modelPresets);
+    expect(preset).toMatchObject({ kind: 'profile', format: 'google', model: 'gemini-4-argon' });
+    expect(preset!.sourceProfile?.profileId).toBe('google:gemini-4-argon');
+    // Its replies run under the profile's own cap; the thoughts are asked for.
+    expect(preset!.userValues).toMatchObject({ maxOutputTokens: 32768, includeThoughts: true });
+  });
+
+  it("gives a catch-all profile the key's listed chat model", async () => {
+    const app = h.app();
+    h.provider(listing(['BAAI/bge-m3', 'meta-llama/Llama-3.3-70B-Instruct']));
+    await h.call(app, 'POST', '/api/credentials', { provider: 'deepinfra', apiKey: KEY });
+    expect(h.sent).toMatchObject([{ url: 'https://api.deepinfra.com/v1/openai/models' }]);
+    expect(await h.db.select().from(modelPresets)).toMatchObject([
+      { kind: 'profile', format: 'openai-chat', model: 'meta-llama/Llama-3.3-70B-Instruct', userValues: { modelId: 'meta-llama/Llama-3.3-70B-Instruct' } },
+    ]);
   });
 
   it('makes none when the listing fails, keeps the key, and leaves a default main that is set', async () => {
     const app = h.app();
     h.provider(() => new Response('upstream down', { status: 503 }));
-    const kept = await h.call(app, 'POST', '/api/credentials', { provider: 'deepseek', apiKey: KEY });
+    const kept = await h.call(app, 'POST', '/api/credentials', { provider: 'mistral', apiKey: KEY });
     expect(kept.status).toBe(201);
     expect(await h.db.select().from(credentials)).toHaveLength(1);
     expect(await h.db.select().from(modelPresets)).toEqual([]);
@@ -163,8 +187,8 @@ describe('the first model preset', () => {
     await h.call(app, 'PUT', '/api/model-binding', { main: 'echo/echo' });
     h.provider(listing(['mistral-large-latest']));
     await h.call(app, 'POST', '/api/credentials', { provider: 'mistral', apiKey: KEY });
-    // Mistral's own format first, as RisuAI sends Mistral.
-    expect(await h.db.select().from(modelPresets)).toMatchObject([{ model: 'mistral-large-latest', format: 'mistral' }]);
+    // Mistral's own format first, as RisuAI sends Mistral: the registry has no profile of it.
+    expect(await h.db.select().from(modelPresets)).toMatchObject([{ kind: 'custom', model: 'mistral-large-latest', format: 'mistral' }]);
     expect(await readJson(await h.call(app, 'GET', '/api/model-binding'))).toEqual({ main: 'echo/echo', sub: null });
   });
 });
@@ -261,11 +285,12 @@ describe("a new key's first model", () => {
   const listing = (ids: string[]) => () => Response.json({ object: 'list', data: ids.map((id) => ({ id, object: 'model' })) });
   const listed = (ids: string[]) => ids.map((id) => ({ id, label: id }));
 
-  it('is a chat model for an OpenAI key, whose list opens on a completions-only one', async () => {
+  it("is the registry's first current OpenAI profile for an OpenAI key, whatever its list opens on", async () => {
     const app = h.app();
     h.provider(listing(OPENAI));
     await h.call(app, 'POST', '/api/credentials', { provider: 'openai', apiKey: KEY });
-    expect(await h.db.select().from(modelPresets)).toMatchObject([{ format: 'openai-responses', model: 'gpt-5-mini' }]);
+    expect(h.sent).toEqual([]);
+    expect(await h.db.select().from(modelPresets)).toMatchObject([{ kind: 'profile', format: 'openai-chat', model: 'gpt-6.1-sol' }]);
   });
 
   it("follows each provider's preference, then the first model a chat runs on", () => {

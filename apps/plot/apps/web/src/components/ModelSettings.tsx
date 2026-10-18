@@ -4,15 +4,20 @@ import { useTranslations } from 'next-intl';
 import { useCallback, useEffect, useState } from 'react';
 import { ApiError, apiDelete, apiGet, apiSend } from '@/lib/api';
 import { OPEN_BINDING } from '@/lib/modelBinding';
-import type { Credential, ModelBinding, ModelFormats, ModelPreset } from '@/lib/types';
+import type { Credential, ModelBinding, ModelFormats, ModelPreset, ModelRegistry, RegistryProfile } from '@/lib/types';
 import { useErrorMessage } from '@/lib/useErrorMessage';
 import { ChatGPTConnection } from './ChatGPTConnection';
 import { ModelOptions } from './ModelOptions';
+import { ModelProfileBrowser } from './ModelProfileBrowser';
 import { ModelPresetEditor } from './ModelPresetEditor';
-import { Button, ErrorText, Field, Select, TextArea, TextInput } from './ui';
+import { ProfilePresetEditor } from './ProfilePresetEditor';
+import { Badge, Button, ErrorText, Field, Select, TextArea, TextInput } from './ui';
 
 /** `GET /api/chatgpt`'s answer, read here only for whether this browser is the computer's. */
 interface ChatGPTStatus { local: boolean }
+
+/** What a registry refresh says (`POST /api/model-presets/registry/refresh`). */
+interface RegistryRefresh { ok: boolean; changed: boolean; downloaded: boolean; error?: string }
 
 /**
  * Settings › Models (ARCHITECTURE §11): PocketRisu's model presets — the owner's
@@ -27,23 +32,31 @@ export function ModelSettings({ chatgptError }: { chatgptError?: string }) {
   const [presets, setPresets] = useState<ModelPreset[]>([]);
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [defaults, setDefaults] = useState<ModelBinding>(OPEN_BINDING);
+  const [registry, setRegistry] = useState<ModelRegistry | null>(null);
   const [local, setLocal] = useState(false);
-  /** The preset in the editor: an existing one's id, `new`, or none. */
+  /** The preset in the editor: an existing one's id, `new` (a custom one), or none. */
   const [editing, setEditing] = useState<string | null>(null);
+  /** The profile browser: making a preset, or putting another profile in a preset's place. */
+  const [browser, setBrowser] = useState<{ mode: 'create' } | { mode: 'replace'; presetId: string } | null>(null);
+  const [browsing, setBrowsing] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshNote, setRefreshNote] = useState('');
   const [error, setError] = useState('');
 
   const load = useCallback(async () => {
     try {
-      const [formatList, presetList, credentialList, binding] = await Promise.all([
+      const [formatList, presetList, credentialList, binding, catalog] = await Promise.all([
         apiGet<ModelFormats>('/api/model-presets/formats'),
         apiGet<ModelPreset[]>('/api/model-presets'),
         apiGet<Credential[]>('/api/credentials'),
         apiGet<ModelBinding>('/api/model-binding'),
+        apiGet<ModelRegistry>('/api/model-presets/registry'),
       ]);
       setFormats(formatList);
       setPresets(presetList);
       setCredentials(credentialList);
       setDefaults(binding);
+      setRegistry(catalog);
     } catch (caught) {
       setError(toMessage(caught));
     }
@@ -52,7 +65,51 @@ export function ModelSettings({ chatgptError }: { chatgptError?: string }) {
   useEffect(() => {
     void load();
     apiGet<ChatGPTStatus>('/api/chatgpt').then((status) => setLocal(status.local), () => undefined);
+    // PocketRisu syncs the registry when its model menu opens: a newer catalog is taken quietly, the bundled one stands otherwise.
+    apiSend<RegistryRefresh>('POST', '/api/model-presets/registry/refresh', {}).then((result) => {
+      if (result.changed) void load();
+    }, () => undefined);
   }, [load]);
+
+  /** The refresh button: PocketRisu's forced sync, and what it said. */
+  async function refresh(): Promise<void> {
+    setRefreshing(true);
+    setRefreshNote('');
+    try {
+      const result = await apiSend<RegistryRefresh>('POST', '/api/model-presets/registry/refresh', { force: true }, AbortSignal.timeout(90_000));
+      setRefreshNote(!result.ok ? t('registryFailed', { reason: result.error ?? '' }) : result.changed ? t('registryUpdated') : t('registryUpToDate'));
+      await load();
+    } catch (caught) {
+      setRefreshNote(t('registryFailed', { reason: toMessage(caught) }));
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  /** A profile picked in the browser: a new preset on it, on the provider's first key, or the replaced preset's new profile. */
+  async function pick(profile: RegistryProfile): Promise<void> {
+    if (!browser) return;
+    setError('');
+    if (browser.mode === 'replace' && !window.confirm(t('profileReplaceConfirm'))) return;
+    setBrowsing(true);
+    try {
+      const preset = browser.mode === 'create'
+        ? await apiSend<ModelPreset>('POST', '/api/model-presets', {
+            profileId: profile.id,
+            credentialId: credentials.find((credential) => credential.kind === 'api_key' && credential.provider === profile.provider)?.id ?? null,
+          })
+        : await apiSend<ModelPreset>('PATCH', `/api/model-presets/${browser.presetId}`, { profileId: profile.id });
+      setBrowser(null);
+      await load();
+      setEditing(preset.id);
+      // The first preset made is the one chats start on, until the owner picks another.
+      if (browser.mode === 'create' && !defaults.main) await saveDefaults({ main: preset.id });
+    } catch (caught) {
+      setError(toMessage(caught));
+    } finally {
+      setBrowsing(false);
+    }
+  }
 
   async function saveDefaults(change: Partial<ModelBinding>): Promise<void> {
     setError('');
@@ -84,9 +141,18 @@ export function ModelSettings({ chatgptError }: { chatgptError?: string }) {
   const keyOf = (preset: ModelPreset): string => {
     const credential = credentials.find((entry) => entry.id === preset.credentialId);
     if (credential) return credential.kind === 'chatgpt' ? t('chatgptCredential') : credential.label;
+    if (preset.kind === 'profile') return t('noKeyYet');
     return preset.endpoint ?? t('keyless');
   };
+  /** What a preset's row says under its name: a profile preset's provider and model, a custom one's format. */
+  const detailOf = (preset: ModelPreset): string =>
+    preset.builtIn
+      ? t('builtIn')
+      : preset.kind === 'profile'
+        ? [preset.profile?.baseLabel ?? preset.profileSnapshot?.providerBaseId, preset.model, keyOf(preset)].filter(Boolean).join(' · ')
+        : `${t('customModelTitle')} · ${formatLabel(preset.format)} · ${preset.model} · ${keyOf(preset)}`;
   const owned = presets.filter((preset) => !preset.builtIn);
+  const editorOpen = editing !== null || browser !== null;
 
   return (
     <>
@@ -112,30 +178,64 @@ export function ModelSettings({ chatgptError }: { chatgptError?: string }) {
         <div className="space-y-3">
           <div className="flex items-center justify-between gap-3">
             <h3 className="text-sm font-semibold">{t('presetsTitle')}</h3>
-            {formats && editing !== 'new' ? <Button size="sm" onClick={() => setEditing('new')}>{t('addPreset')}</Button> : null}
+            {formats && !editorOpen ? <Button size="sm" onClick={() => setBrowser({ mode: 'create' })}>{t('addPreset')}</Button> : null}
           </div>
+          {browser ? (
+            <ModelProfileBrowser
+              registry={registry}
+              mode={browser.mode}
+              busy={browsing}
+              refreshing={refreshing}
+              refreshNote={refreshNote}
+              onPick={(profile) => void pick(profile)}
+              onCustom={() => {
+                setBrowser(null);
+                setEditing('new');
+              }}
+              onRefresh={() => void refresh()}
+              onClose={() => setBrowser(null)}
+            />
+          ) : null}
           {editing === 'new' && formats ? (
             <ModelPresetEditor formats={formats} credentials={credentials} onSaved={(preset) => void saved(preset)} onCancel={() => setEditing(null)} />
           ) : null}
-          {owned.length === 0 && editing !== 'new' ? <p className="text-sm text-muted">{t('presetsEmpty')}</p> : null}
+          {owned.length === 0 && !editorOpen ? <p className="text-sm text-muted">{t('presetsEmpty')}</p> : null}
           <ul className="space-y-2">
             {presets.map((preset) =>
-              editing === preset.id && formats ? (
+              editing === preset.id && formats && !browser ? (
                 <li key={preset.id}>
-                  <ModelPresetEditor preset={preset} formats={formats} credentials={credentials} onSaved={(updated) => void saved(updated)} onCancel={() => setEditing(null)} />
+                  {preset.kind === 'profile' && preset.profileSnapshot ? (
+                    <ProfilePresetEditor
+                      // A taken update brings another snapshot: the editor starts over on it.
+                      key={`${preset.sourceProfile?.profileId}:${preset.sourceProfile?.fetchedAt}`}
+                      preset={preset}
+                      credentials={credentials}
+                      onSaved={(updated, close) => void (close ? saved(updated) : load())}
+                      onCancel={() => setEditing(null)}
+                      onReplace={() => setBrowser({ mode: 'replace', presetId: preset.id })}
+                    />
+                  ) : (
+                    <ModelPresetEditor preset={preset} formats={formats} credentials={credentials} onSaved={(updated) => void saved(updated)} onCancel={() => setEditing(null)} />
+                  )}
                 </li>
               ) : (
                 <li key={preset.id} data-testid="model-preset" className="flex items-center gap-3 rounded-xl border border-line px-3 py-2.5">
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium">{preset.name}</p>
-                    <p className="truncate text-xs text-muted">
-                      {preset.builtIn ? t('builtIn') : `${formatLabel(preset.format)} · ${preset.model} · ${keyOf(preset)}`}
+                    <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                      <span className="truncate">{preset.name}</span>
+                      {preset.profile && preset.profile.status !== 'current' ? <Badge>{t(`profileStatus.${preset.profile.status}`)}</Badge> : null}
+                      {preset.profileUpdate === 'updatable' ? <Badge>{t('profileUpdateAvailable')}</Badge> : null}
+                      {preset.profileUpdate === 'missing' ? <Badge>{t('profileMissing')}</Badge> : null}
                     </p>
+                    <p className="truncate text-xs text-muted">{detailOf(preset)}</p>
+                    {preset.profile?.statusReason && preset.profile.status !== 'current' ? (
+                      <p className="text-xs text-muted">{preset.profile.statusReason}</p>
+                    ) : null}
                   </div>
                   {preset.builtIn ? null : (
                     <>
-                      <Button size="sm" variant="ghost" onClick={() => setEditing(preset.id)}>{t('editPreset')}</Button>
-                      <Button size="sm" variant="ghost" onClick={() => void removePreset(preset)}>{t('removePreset')}</Button>
+                      <Button size="sm" variant="ghost" disabled={editorOpen} onClick={() => setEditing(preset.id)}>{t('editPreset')}</Button>
+                      <Button size="sm" variant="ghost" disabled={editorOpen} onClick={() => void removePreset(preset)}>{t('removePreset')}</Button>
                     </>
                   )}
                 </li>

@@ -1204,7 +1204,8 @@
     "template_failed": "The model preset's instruct template could not be used for this chat. Try another template.",
     "credential_unreadable": "This key can no longer be read. Enter it again.",
     "credentials_unavailable": "Keys cannot be stored with this setup.",
-    "credential_kind_unsupported": "This kind of credential is not supported yet."
+    "credential_kind_unsupported": "This kind of credential is not supported yet.",
+    "profile_unavailable": "This model profile is not in the registry. Pick another."
   },
   "rebrand": {
     "eyebrow": "A place for plots to grow",
@@ -1587,6 +1588,56 @@
     "sameAsMain": "Same as the main model",
     "builtIn": "test",
     "keyless": "no key",
-    "noKeyYet": "pick a key"
+    "noKeyYet": "pick a key",
+    "browserTitle": "Pick a model",
+    "browserReplaceTitle": "Pick the profile to put in its place",
+    "browserClose": "Close",
+    "browserTabOfficial": "Registry",
+    "browserTabCustom": "Custom",
+    "browserSearch": "Search models, IDs or providers",
+    "browserVisibility": "Which models to show",
+    "visibility": {
+      "currentOnly": "Current models only",
+      "hideDeprecated": "Older ones too",
+      "all": "All, retired ones too"
+    },
+    "browserEmpty": "No model matches.",
+    "profileStatus": {
+      "current": "Current",
+      "outdated": "Older",
+      "deprecated": "Retired"
+    },
+    "profileUpdatedOn": "Profile updated {date}",
+    "customModelTitle": "Custom model",
+    "customModelDescription": "Pick a request format and type a model ID yourself: for the ChatGPT plan, local servers, Bedrock, Vertex AI, Mistral, Cohere, NovelAI, NovelList, AI Horde, and models the registry does not list. The provider's own list suggests IDs.",
+    "customModelStart": "Set up a custom model",
+    "registryRefresh": "Refresh the model list",
+    "registrySourceBundled": "Model list: the copy of PocketRisu's registry this version carries.",
+    "registrySourceRemote": "Model list: PocketRisu's registry, refreshed {date}.",
+    "registryUpdated": "Took the registry's newer model list.",
+    "registryUpToDate": "The model list is already the registry's newest.",
+    "registryFailed": "Could not refresh the model list: {reason}",
+    "profileUpdateAvailable": "Update available",
+    "profileUpdateConfirm": "Take this profile's newer version? Values the new version has no field for are dropped.",
+    "profileMissing": "No longer in the registry",
+    "profileReplace": "Change profile",
+    "profileReplaceConfirm": "Put this profile in the preset's place? Values the new profile has no field for are dropped.",
+    "profileModel": "model {model}",
+    "profileContext": "{tokens, number} tokens of context",
+    "profileTaken": "profile of {date}",
+    "capabilityNames": {
+      "streaming": "streaming",
+      "vision": "pictures",
+      "tools": "tools",
+      "json": "JSON",
+      "reasoning": "reasoning",
+      "cache": "prompt cache"
+    },
+    "profileFieldsHint": "The profile's own fields. An empty one is not sent; a default in grey is.",
+    "fieldDefaultIs": "Default ({value})",
+    "fieldRange": "{min} to {max}",
+    "invalidNumber": "Write a number {field} takes.",
+    "profileReadsPictures": "This model reads pictures; a turn's pictures go with it.",
+    "profileSendPictures": "Send pictures (the profile does not say the model reads them)"
   }
 }

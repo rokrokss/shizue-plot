@@ -55,7 +55,7 @@ export function modelsHarness() {
     await opened.close();
   });
   beforeEach(async () => {
-    await opened.client.exec('TRUNCATE TABLE "user", verification, jobs RESTART IDENTITY CASCADE');
+    await opened.client.exec('TRUNCATE TABLE "user", verification, jobs, model_registry RESTART IDENTITY CASCADE');
     sent.length = 0;
     respond = () => {
       throw new Error('no provider call expected');

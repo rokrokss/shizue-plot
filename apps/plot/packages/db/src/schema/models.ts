@@ -1,4 +1,4 @@
-import type { ModelCapabilities, ModelParams } from '@shizue/llm';
+import type { ModelCapabilities, ModelParams, ModelPresetSourceProfile, RegistryCatalog, ResolvedModelProfileSnapshot } from '@shizue/llm';
 import { sql } from 'drizzle-orm';
 import { index, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 import { user } from './auth.js';
@@ -61,12 +61,24 @@ export const credentials = pgTable(
   ],
 );
 
+/**
+ * What a model preset is: made from a registry profile (`profile` — its
+ * snapshot and values decide the request), a custom one on this app's own
+ * formats (`custom` — the format, model and `params`), or one from before the
+ * registry that the app's start has not yet looked at (`legacy`, turned into
+ * one of the others by `convertLegacyPresets`).
+ */
+export type ModelPresetKind = 'profile' | 'custom' | 'legacy';
+
 // A model preset, PocketRisu's: a request format (`@shizue/llm` `FORMATS`, RisuAI's
 // `LLMFormat` by string ids), the model it names, the credential it authenticates
 // with (null: a keyless server at `endpoint`), and the values every request on it
 // carries. Separate from the prompt presets; a chat binds one as its main model
 // and one as its sub (`chats.model_binding`), the owner's default binding
-// (`user.model_binding`) standing in for a slot a chat leaves open.
+// (`user.model_binding`) standing in for a slot a chat leaves open. A preset made
+// from a registry profile (`kind = 'profile'`) also holds the profile's snapshot,
+// where it came from, and its values for the snapshot's fields; its `format` and
+// `model` follow them, and its `params` keep only the additional headers and body.
 export const modelPresets = pgTable(
   'model_presets',
   {
@@ -83,11 +95,29 @@ export const modelPresets = pgTable(
     credentialId: uuid('credential_id').references(() => credentials.id, { onDelete: 'set null' }),
     params: jsonb('params').$type<ModelParams>().notNull().default({}),
     capabilities: jsonb('capabilities').$type<ModelCapabilities>().notNull().default({}),
+    kind: text('kind').$type<ModelPresetKind>().notNull().default('custom'),
+    // The registry profile it was made from and the revision it took; null for a custom preset.
+    sourceProfile: jsonb('source_profile').$type<ModelPresetSourceProfile>(),
+    // The profile merged over its base provider, as it was taken (`resolveSnapshot`).
+    profileSnapshot: jsonb('profile_snapshot').$type<ResolvedModelProfileSnapshot>(),
+    // The preset's values for the snapshot's fields (PocketRisu's `userValues`).
+    userValues: jsonb('user_values').$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('model_presets_user_id_idx').on(t.userId, t.createdAt)],
 );
+
+// The registry catalog last refreshed from its address (one row, `official`):
+// where it came from, its content hash, and the checked catalog. Without one the
+// app reads the catalog it carries (`bundledCatalog`).
+export const modelRegistry = pgTable('model_registry', {
+  id: text('id').primaryKey(),
+  source: text('source').notNull(),
+  contentHash: text('content_hash').notNull(),
+  catalog: jsonb('catalog').$type<RegistryCatalog>().notNull(),
+  fetchedAt: timestamp('fetched_at', { withTimezone: true }).notNull().defaultNow(),
+});
 
 export type Credential = typeof credentials.$inferSelect;
 export type ModelPreset = typeof modelPresets.$inferSelect;

@@ -4,6 +4,7 @@ import { drizzle, type PgliteDatabase } from 'drizzle-orm/pglite';
 import { migrate } from 'drizzle-orm/pglite/migrator';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { convertLegacyPresets } from './presetProfiles.js';
 import * as schema from './schema/index.js';
 
 export type Db = PgliteDatabase<typeof schema>;
@@ -33,7 +34,16 @@ export async function openDb(dataDir?: string): Promise<OpenedDb> {
   return { db, client, close: () => client.close() };
 }
 
-/** Brings the database to the newest migration in `drizzle/`, as the app does at every start. */
+/**
+ * Brings the database to the newest migration in `drizzle/`, as the app does at
+ * every start, then turns the presets from before the registry into what they
+ * are now (`convertLegacyPresets` — none once that has run).
+ */
 export async function migrateDb(db: Db): Promise<void> {
   await migrate(db, { migrationsFolder: MIGRATIONS_DIR });
+  const converted = await convertLegacyPresets(db);
+  if (converted.profile + converted.custom > 0) {
+    console.log(`[db] model presets: ${converted.profile} on a registry profile, ${converted.custom} custom`);
+    for (const dropped of converted.dropped) console.log(`[db] a value the profile has no field for was left out (${dropped})`);
+  }
 }

@@ -119,6 +119,11 @@ export interface AppDeps {
    */
   getAdapter?: (modelId: string, env: NodeJS.ProcessEnv) => ResolvedAdapter | Promise<ResolvedAdapter>;
   /**
+   * What a registry refresh fetches the catalog with (`registry.ts`); the
+   * network by default. Tests hand in a stand-in for the registry's address.
+   */
+  registryFetch?: typeof fetch;
+  /**
    * Seals and opens the credentials' secrets with the install's secret
    * (`tokenCipher`); without it, no credential can be stored or used.
    */

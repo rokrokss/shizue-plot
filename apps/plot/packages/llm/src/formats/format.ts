@@ -1,5 +1,6 @@
 import type { ChatGPTModel } from '../chatgptAuth.js';
 import type { ModelCapabilities, ModelParameter, ModelParams, ParameterPlaces } from '../params.js';
+import type { ResolvedModelProfileSnapshot } from '../registry/types.js';
 import type { LLMAdapter } from '../types.js';
 
 export type LLMEnv = Record<string, string | undefined>;
@@ -17,14 +18,26 @@ export type ModelAccess =
   /** A Google Cloud service account, which mints the bearer token the requests carry (`vertex.ts`). */
   | { kind: 'gcp'; clientEmail: string; privateKey: string; projectId: string; region: string };
 
+/**
+ * A registry profile preset's request: the snapshot it was made from and its
+ * values for the snapshot's fields. A format that takes one writes the
+ * profile's body (`profileBody`) in place of its own values (§7.1).
+ */
+export interface ProfileConfig {
+  snapshot: ResolvedModelProfileSnapshot;
+  values: Record<string, unknown>;
+}
+
 /** What a format's adapter is made from: a model preset with its credential opened. */
 export interface AdapterConfig {
   /** Where requests go: the credential's base URL, its provider's, the preset's endpoint, or the format's own. */
   baseUrl: string;
   access: ModelAccess;
-  /** The preset's values, laid over every request on it (`withPresetParams`). */
+  /** The preset's values, laid over every request on it (`withPresetParams`); a profile preset's additional headers and body only. */
   params: ModelParams;
   capabilities: ModelCapabilities;
+  /** A profile preset's snapshot and values; absent for a custom preset. */
+  profile?: ProfileConfig;
   /** Headers the provider asks for (OpenRouter's `HTTP-Referer` and `X-Title`). */
   headers?: Record<string, string>;
   fetch?: typeof fetch;

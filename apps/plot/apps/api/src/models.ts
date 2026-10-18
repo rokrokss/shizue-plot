@@ -1,9 +1,30 @@
 import { chats, modelPresets, user, type Credential, type Db, type ModelPreset } from '@shizue/db';
-import { adapterFor, listModels, providerOf, type LLMAdapter, type ModelBinding, type ModelCapabilities, type ModelListing, type ModelParams } from '@shizue/llm';
+import {
+  adapterFor,
+  firstProfileOf,
+  listModels,
+  newPresetValues,
+  offeredSnapshot,
+  OFFICIAL_REGISTRY_ID,
+  profileOutputTokens,
+  providerOf,
+  retryingAdapter,
+  wireModelId,
+  type RegistryCatalog,
+  type LLMAdapter,
+  type ModelBinding,
+  type ModelCapabilities,
+  type ModelListing,
+  type ModelParams,
+  type ModelPresetSourceProfile,
+  type ProfileConfig,
+  type ResolvedModelProfileSnapshot,
+} from '@shizue/llm';
 import { and, eq, sql } from 'drizzle-orm';
 import { loadCredential, openCredential } from './credentials.js';
 import type { AppDeps, Tx } from './deps.js';
 import { ApiError, badRequest } from './errors.js';
+import { registryCatalog } from './registry.js';
 import { isUuid } from './util.js';
 
 /**
@@ -30,6 +51,12 @@ export interface PresetView {
   credentialId: string | null;
   params: ModelParams;
   capabilities: ModelCapabilities;
+  /** Made from a registry profile, or a custom one (§7.1). */
+  kind: 'profile' | 'custom';
+  /** A profile preset's source, snapshot and values; null and empty for a custom one. */
+  sourceProfile: ModelPresetSourceProfile | null;
+  profileSnapshot: ResolvedModelProfileSnapshot | null;
+  userValues: Record<string, unknown>;
   /** The test runner's own, not a row (`testPresets`). */
   builtIn?: true;
 }
@@ -42,9 +69,43 @@ export interface ResolvedModel {
   providerModel: string;
   /** Whether a turn's pictures go to it. */
   vision: boolean;
-  /** The preset's cap on a reply, which a turn's prompt reserves in place of the plot's. */
+  /**
+   * The preset's cap on a reply, which a turn's prompt reserves in place of the
+   * plot's: a custom preset's `maxTokens`, a profile preset's output field
+   * (`profileOutputTokens` — what its every request sends).
+   */
   maxTokens?: number;
+  /** A profile's context window, which the chat's context budget never passes (`contextBudgetFor`). */
+  contextWindow?: number;
 }
+
+/** A profile preset's snapshot and values, where the preset is one. */
+export const profileOf = (preset: Pick<PresetView, 'kind' | 'profileSnapshot' | 'userValues'>): ProfileConfig | undefined =>
+  preset.kind === 'profile' && preset.profileSnapshot ? { snapshot: preset.profileSnapshot, values: preset.userValues } : undefined;
+
+/**
+ * What a reply on `preset` may spend, which its prompt reserves too: a profile
+ * preset's output field, a custom preset's `maxTokens`, else the plot's reply
+ * length (`replyLength`, already in tokens). The memory plans its batches
+ * against the same number as the turn's prompt (§7.2, §7.3).
+ */
+export function replyReserveOf(preset: PresetView | null, replyLength: number): number {
+  const profile = preset ? profileOf(preset) : undefined;
+  if (profile) return profileOutputTokens(profile.snapshot, profile.values) ?? replyLength;
+  return preset?.params.maxTokens ?? replyLength;
+}
+
+/**
+ * The context budget a chat runs with on a model: its own (`memorySettings`),
+ * never past the profile's context window, as PocketRisu caps a preset's
+ * budget (`resolveModelPresetContextBudget`).
+ */
+export const contextBudgetFor = (budget: number, contextWindow: number | undefined): number =>
+  contextWindow && contextWindow < budget ? contextWindow : budget;
+
+/** A preset's context window, where its profile says one. */
+export const contextWindowOf = (preset: PresetView | null): number | undefined =>
+  preset ? profileOf(preset)?.snapshot.limits?.contextWindowTokens : undefined;
 
 /** Whose binding a call resolves: a chat, or the owner alone (a draft, a lore alias pass). */
 export interface BindingOwner {
@@ -55,7 +116,8 @@ export interface BindingOwner {
 const testing = (env: NodeJS.ProcessEnv): boolean => (env['NODE_ENV'] ?? process.env['NODE_ENV']) === 'test';
 
 const builtIn = (id: string, name: string, capabilities: ModelCapabilities = {}): PresetView => ({
-  id, name, format: 'echo', endpoint: null, model: id, credentialId: null, params: {}, capabilities, builtIn: true,
+  id, name, format: 'echo', endpoint: null, model: id, credentialId: null, params: {}, capabilities,
+  kind: 'custom', sourceProfile: null, profileSnapshot: null, userValues: {}, builtIn: true,
 });
 
 /**
@@ -74,18 +136,26 @@ export function testPresets(env: NodeJS.ProcessEnv): PresetView[] {
   ];
 }
 
-export const presetJson = (row: ModelPreset): PresetView & { createdAt: Date; updatedAt: Date } => ({
-  id: row.id,
-  name: row.name,
-  format: row.format,
-  endpoint: row.endpoint,
-  model: row.model,
-  credentialId: row.credentialId,
-  params: row.params,
-  capabilities: row.capabilities,
-  createdAt: row.createdAt,
-  updatedAt: row.updatedAt,
-});
+export const presetJson = (row: ModelPreset): PresetView & { createdAt: Date; updatedAt: Date } => {
+  // `legacy` only between migration 0001 and the start's look at it (`convertLegacyPresets`): custom until then.
+  const profile = row.kind === 'profile' && row.profileSnapshot !== null;
+  return {
+    id: row.id,
+    name: row.name,
+    format: row.format,
+    endpoint: row.endpoint,
+    model: row.model,
+    credentialId: row.credentialId,
+    params: row.params,
+    capabilities: row.capabilities,
+    kind: profile ? 'profile' : 'custom',
+    sourceProfile: profile ? row.sourceProfile : null,
+    profileSnapshot: profile ? row.profileSnapshot : null,
+    userValues: profile ? row.userValues : {},
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+};
 
 /**
  * The owner's default binding as stored. Under `NODE_ENV=test`, an owner who
@@ -153,6 +223,8 @@ const warnedFallbacks = new Set<string>();
  * the preset says, and an effort the model does not advertise is not sent.
  */
 export async function modelOf(deps: ModelDeps, userId: string, preset: PresetView): Promise<ResolvedModel> {
+  const profile = profileOf(preset);
+  if (profile) return profileModelOf(deps, userId, preset, profile);
   const cap = preset.params.maxTokens !== undefined ? { maxTokens: preset.params.maxTokens } : {};
   if (deps.getAdapter) {
     const { adapter, providerModel } = await deps.getAdapter(preset.model, deps.env);
@@ -180,6 +252,36 @@ export async function modelOf(deps: ModelDeps, userId: string, preset: PresetVie
     deps.env,
   );
   return { preset, adapter, providerModel: preset.model, vision, ...cap };
+}
+
+/**
+ * A profile preset's model, as PocketRisu's request path runs it: the
+ * profile's request (`adapterFor` with the snapshot), its pictures where the
+ * profile reads them or the preset turns them on, its output field as every
+ * call's cap, its context window, and PocketRisu's two retries
+ * (`retryingAdapter`).
+ */
+async function profileModelOf(deps: ModelDeps, userId: string, preset: PresetView, profile: ProfileConfig): Promise<ResolvedModel> {
+  const maxTokens = profileOutputTokens(profile.snapshot, profile.values);
+  const contextWindow = profile.snapshot.limits?.contextWindowTokens;
+  const known = {
+    vision: (profile.snapshot.capabilities ?? []).includes('vision') || preset.capabilities.vision === true,
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
+    ...(contextWindow !== undefined ? { contextWindow } : {}),
+  };
+  const providerModel = wireModelId(profile.snapshot, profile.values);
+  if (deps.getAdapter) {
+    const { adapter } = await deps.getAdapter(providerModel, deps.env);
+    return { preset, adapter: retryingAdapter(adapter), providerModel, ...known };
+  }
+  const row = preset.credentialId ? await loadCredential(deps, userId, preset.credentialId) : undefined;
+  const credential = row ? openCredential(deps, row) : undefined;
+  const adapter = adapterFor(
+    { format: preset.format, endpoint: null, model: providerModel, params: preset.params, capabilities: preset.capabilities, profile },
+    credential,
+    deps.env,
+  );
+  return { preset, adapter: retryingAdapter(adapter), providerModel, ...known };
 }
 
 /**
@@ -309,12 +411,59 @@ export function preferredModel(provider: string, models: readonly ModelListing[]
   return usable[0];
 }
 
+/** The columns of a new preset on a registry profile, or null where the catalog does not offer it. */
+export function profilePresetColumns(catalog: RegistryCatalog, profileId: string, now = Date.now()) {
+  const offered = offeredSnapshot(catalog, profileId);
+  if (!offered) return null;
+  const { snapshot, profile, base } = offered;
+  const values = newPresetValues(snapshot);
+  return {
+    name: profile.displayName.slice(0, 100),
+    kind: 'profile' as const,
+    format: base.format,
+    endpoint: null,
+    model: wireModelId(snapshot, values),
+    params: {},
+    capabilities: {},
+    sourceProfile: {
+      registryId: OFFICIAL_REGISTRY_ID,
+      profileId: profile.id,
+      profileVersion: snapshot.profileVersion,
+      providerBaseVersion: snapshot.providerBaseVersion,
+      fetchedAt: now,
+      ...(profile.updatedAt !== undefined ? { profileUpdatedAt: profile.updatedAt } : {}),
+    },
+    profileSnapshot: snapshot,
+    userValues: values,
+  };
+}
+
+/**
+ * A new key's first preset where the registry has profiles for its provider:
+ * the provider's first current profile (`firstProfileOf`), PocketRisu's default
+ * view — never an outdated or deprecated one. A catch-all profile, the only
+ * kind some providers have, takes the model `preferredModel` picks from the
+ * key's listing. Null where the registry has none for the provider.
+ */
+async function firstProfilePreset(deps: ModelDeps, provider: string, credential: ReturnType<typeof openCredential>) {
+  const catalog = await registryCatalog(deps);
+  const entry = firstProfileOf(catalog, provider);
+  const columns = entry ? profilePresetColumns(catalog, entry.id) : null;
+  if (!columns) return null;
+  if (columns.model) return columns;
+  const listed = preferredModel(provider, await listModels(columns.format, null, credential, deps.env));
+  if (!listed) return null;
+  return { ...columns, model: listed.id, userValues: { ...columns.userValues, modelId: listed.id } };
+}
+
 /**
  * A first model for an owner who has none, so a new install can chat without
  * building a preset first: connecting ChatGPT or saving an API key while no
  * model preset exists makes one on that credential — the account's first
- * catalog model, or the model the key's provider lists that `preferredModel`
- * picks — and makes it the default main where none is set. Best effort: a
+ * catalog model; for a key, the provider's first current registry profile
+ * (`firstProfilePreset`), or where the registry has none for the provider the
+ * model its listing gives that `preferredModel` picks — and makes it the
+ * default main where none is set. Best effort: a
  * listing that fails or has nothing to chat on makes none, and the connection
  * or the key stays saved.
  */
@@ -324,17 +473,22 @@ export async function ensureFirstPreset(deps: ModelDeps, row: Credential): Promi
   try {
     if (await hasPreset(deps.db)) return;
     const credential = openCredential(deps, row);
+    const values = credential.kind === 'chatgpt' ? null : await firstProfilePreset(deps, row.provider, credential);
     const format = credential.kind === 'chatgpt' ? 'openai-responses' : providerOf(row.provider)?.formats[0];
-    if (!format) return;
-    const first = credential.kind === 'chatgpt'
-      ? (await credential.account.models())[0]
-      : preferredModel(row.provider, await listModels(format, null, credential, deps.env));
-    if (!first) return;
+    if (!values && !format) return;
+    const first = values
+      ? null
+      : credential.kind === 'chatgpt'
+        ? (await credential.account.models())[0]
+        : preferredModel(row.provider, await listModels(format!, null, credential, deps.env));
+    if (!values && !first) return;
     await deps.db.transaction(async (tx) => {
       if (await hasPreset(tx)) return;
       const [preset] = await tx
         .insert(modelPresets)
-        .values({ userId: row.userId, name: (first.label || first.id).slice(0, 100), format, model: first.id, credentialId: row.id })
+        .values(values
+          ? { userId: row.userId, credentialId: row.id, ...values }
+          : { userId: row.userId, name: (first!.label || first!.id).slice(0, 100), format: format!, model: first!.id, credentialId: row.id })
         .returning({ id: modelPresets.id });
       await tx
         .update(user)

@@ -3,13 +3,14 @@ import { CHATGPT_RESOURCE } from '../chatgptResponses.js';
 import { joinUrl, providerFailure, providerFetch, providerHttpError } from '../http.js';
 import type { ModelCapabilities, ModelParams } from '../params.js';
 import { providerOf } from '../providers.js';
+import { registryBaseOf, type RegistryBase } from '../registry/index.js';
 import type { LLMAdapter } from '../types.js';
 import { anthropic } from './anthropic.js';
 import { anthropicLegacy } from './anthropicLegacy.js';
 import { bedrock } from './bedrock.js';
 import { cohere } from './cohere.js';
 import { echoFormat } from './echo.js';
-import { CATALOG_TIMEOUT_MS, type AdapterConfig, type LLMEnv, type ModelAccess, type ModelFormat, type ModelListing } from './format.js';
+import { CATALOG_TIMEOUT_MS, type AdapterConfig, type LLMEnv, type ModelAccess, type ModelFormat, type ModelListing, type ProfileConfig } from './format.js';
 import { google } from './google.js';
 import { horde } from './horde.js';
 import { kobold } from './kobold.js';
@@ -57,6 +58,8 @@ export interface PresetConfig {
   model: string;
   params: ModelParams;
   capabilities: ModelCapabilities;
+  /** A registry profile preset's snapshot and values (`profileConnection`); absent for a custom one. */
+  profile?: ProfileConfig;
 }
 
 /** A credential with its secret opened (`credentials`). */
@@ -115,8 +118,44 @@ export function connectionOf(
   return { baseUrl, access: { kind: 'none' } };
 }
 
+/**
+ * Where a registry profile preset's requests go: its base must be one this app
+ * offers (`registryBaseOf`) and the credential a key of that base's provider —
+ * the base URL it was entered with, or the provider's, with the base's prefix.
+ * Nothing of the profile's own `endpoint` or `auth` is read (§7.1).
+ */
+export function profileConnection(
+  profile: ProfileConfig,
+  credential: ModelCredential | undefined,
+): Pick<AdapterConfig, 'baseUrl' | 'access' | 'headers'> & { format: RegistryBase['format'] } {
+  const base = registryBaseOf(profile.snapshot);
+  if (!base) throw providerFailure('format_unavailable', 400);
+  if (!credential) throw providerFailure('credential_required', 400);
+  if (credential.kind !== 'api_key' || credential.provider !== base.provider) throw providerFailure('credential_format_mismatch', 400);
+  const provider = providerOf(base.provider)!;
+  const root = credential.baseUrl ?? provider.baseUrl!;
+  return {
+    format: base.format,
+    baseUrl: `${root.replace(/\/+$/, '')}${base.prefix}`,
+    access: credential.apiKey ? { kind: 'key', apiKey: credential.apiKey } : { kind: 'none' },
+    ...(provider.headers ? { headers: provider.headers } : {}),
+  };
+}
+
 /** The adapter a model preset runs on — RisuAI's `requestChatDataMain` choosing by format. */
 export function adapterFor(preset: PresetConfig, credential: ModelCredential | undefined, env: LLMEnv, fetcher?: typeof fetch): LLMAdapter {
+  if (preset.profile) {
+    const { format: formatId, ...connection } = profileConnection(preset.profile, credential);
+    const format = formatOf(formatId, env)!;
+    return format.createAdapter({
+      ...connection,
+      params: { ...(preset.params.extraHeaders ? { extraHeaders: preset.params.extraHeaders } : {}), ...(preset.params.extraBody ? { extraBody: preset.params.extraBody } : {}) },
+      capabilities: preset.capabilities,
+      profile: preset.profile,
+      env,
+      ...(fetcher ? { fetch: fetcher } : {}),
+    });
+  }
   const format = formatOf(preset.format, env);
   if (!format) throw providerFailure('format_unavailable', 400);
   return format.createAdapter({
@@ -171,5 +210,5 @@ export async function validateCredential(credential: ModelCredential, env: LLMEn
   else await format.listModels(catalog);
 }
 
-export type { AdapterConfig, CatalogConfig, LLMEnv, ModelAccess, ModelFormat, ModelListing } from './format.js';
+export type { AdapterConfig, CatalogConfig, LLMEnv, ModelAccess, ModelFormat, ModelListing, ProfileConfig } from './format.js';
 export { readServiceAccount } from './vertex.js';

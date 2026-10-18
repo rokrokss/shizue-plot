@@ -74,9 +74,15 @@ export interface ModelBinding {
 /** Where each sampling value goes in a format's body: RisuAI's `applyParameters` list and rename map in one. */
 export type ParameterPlaces = Partial<Record<ModelParameter, string>>;
 
-/** `body` with `value` at the dotted `path`, making the objects on the way (RisuAI's `setObjectValue`). */
+/**
+ * `body` with `value` at the dotted `path`, making the objects on the way
+ * (RisuAI's `setObjectValue`). A path through `__proto__`, `constructor` or
+ * `prototype` sets nothing: a preset's additional fields and a registry's
+ * mappings name it, and it would reach the objects every request shares.
+ */
 export function setPath(body: Record<string, unknown>, path: string, value: unknown): void {
   const keys = path.split('.');
+  if (keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype')) return;
   let at = body;
   for (const key of keys.slice(0, -1)) {
     const next = at[key];

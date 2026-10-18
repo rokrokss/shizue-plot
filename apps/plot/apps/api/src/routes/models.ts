@@ -1,23 +1,34 @@
 import { credentials, modelPresets, user, type Credential } from '@shizue/db';
 import {
   availableFormats,
+  compareProfiles,
   credentialFits,
   formatOf,
   INSTRUCT_TEMPLATE_NAMES,
   LLMError,
   listModels,
   LOCAL_ENDPOINTS,
+  migrateValues,
   MODEL_PARAMETERS,
   parseCapabilities,
   parseModelParams,
+  parseProfileValues,
+  profileEntries,
+  profileUpdateStatus,
   PROVIDERS,
   readServiceAccount,
   REASONING_EFFORTS,
+  registryBaseOf,
   validateCredential,
   VERBOSITIES,
+  wireModelId,
+  type ModelCapabilities,
   type ModelCredential,
   type ModelFormat,
+  type ModelParams,
   type ProviderSpec,
+  type RegistryCatalog,
+  type ResolvedModelProfileSnapshot,
 } from '@shizue/llm';
 import { and, asc, eq } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
@@ -35,7 +46,19 @@ import {
 import type { AppDeps, AppEnv } from '../deps.js';
 import { ApiError, badRequest, notFound } from '../errors.js';
 import { collect } from '../memory.js';
-import { bindingJson, ensureFirstPreset, mergeBinding, modelOf, presetJson, readBindingPatch, releasePreset, testPresets, type PresetView } from '../models.js';
+import {
+  bindingJson,
+  ensureFirstPreset,
+  mergeBinding,
+  modelOf,
+  presetJson,
+  profilePresetColumns,
+  readBindingPatch,
+  releasePreset,
+  testPresets,
+  type PresetView,
+} from '../models.js';
+import { refreshRegistry, registryCatalog, registrySource, registryState } from '../registry.js';
 import { requireLocal } from '../session.js';
 import { isUuid, readJsonBody, requireUuidParam } from '../util.js';
 
@@ -44,6 +67,7 @@ const MAX_NAME_LENGTH = 100;
 const MAX_MODEL_LENGTH = 200;
 /** What a preset's test asks for, and how long it may take. */
 const TEST_PROMPT = 'Reply with the single word OK.';
+const TEST_TOKENS = 64;
 const TEST_TIMEOUT_MS = 60_000;
 
 /** A provider's refusal, as a key check or a test answers it: not an error of the route's own. */
@@ -285,6 +309,112 @@ async function presetFields(deps: AppDeps, userId: string, body: Record<string, 
   };
 }
 
+/** A key a profile preset may go with: an API key of the provider its base is (`REGISTRY_BASES`). */
+async function profileCredential(deps: AppDeps, userId: string, snapshot: ResolvedModelProfileSnapshot, value: unknown): Promise<string | null> {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'string' || !isUuid(value)) throw badRequest('invalid_request', 'credentialId must be a credential id or null');
+  const credential = await loadCredential(deps, userId, value);
+  if (!credential) throw notFound('Credential not found');
+  if (credential.kind !== 'api_key' || credential.provider !== registryBaseOf(snapshot)?.provider) {
+    throw badRequest('credential_format_mismatch', "This credential is not a key of the profile's provider");
+  }
+  return credential.id;
+}
+
+/**
+ * A profile preset's fields as an update takes them: its name and key, its
+ * values (`userValues`, held to the snapshot's schema), the additional headers
+ * and body (`params`, those two only), the picture and turn flags; and with
+ * `profileId`, the profile itself taken again from the catalog — the same one
+ * is PocketRisu's "update available", another its "replace profile" — with the
+ * values carried over where the new snapshot has the field (`migrateValues`).
+ * The format and model follow the snapshot and values.
+ */
+async function profileFields(deps: AppDeps, userId: string, body: Record<string, unknown>, current: PresetView) {
+  let snapshot = current.profileSnapshot!;
+  let sourceProfile = current.sourceProfile;
+  let values = current.userValues;
+  if (body['profileId'] !== undefined) {
+    if (typeof body['profileId'] !== 'string') throw badRequest('invalid_request', 'profileId must be a profile id');
+    const columns = profilePresetColumns(await registryCatalog(deps), body['profileId']);
+    if (!columns) throw badRequest('profile_unavailable', 'This profile is not in the model registry');
+    // Another profile's model is its own: PocketRisu carries `modelId` over like any value, and the
+    // preset would go on asking for the old model under the new profile's name.
+    const replaced = body['profileId'] !== current.sourceProfile?.profileId;
+    const { modelId: _carried, ...kept } = values;
+    snapshot = columns.profileSnapshot;
+    sourceProfile = columns.sourceProfile;
+    values = migrateValues(replaced ? kept : values, snapshot.schema).values;
+  }
+  const nameValue = body['name'] ?? current.name;
+  if (typeof nameValue !== 'string' || !nameValue.trim()) throw badRequest('invalid_request', 'name must not be empty');
+  let params: ModelParams;
+  let capabilities: ModelCapabilities;
+  try {
+    if ('userValues' in body) values = parseProfileValues(body['userValues'], snapshot.schema);
+    const parsed = 'params' in body ? parseModelParams(body['params']) : current.params;
+    params = {
+      ...(parsed.extraHeaders ? { extraHeaders: parsed.extraHeaders } : {}),
+      ...(parsed.extraBody ? { extraBody: parsed.extraBody } : {}),
+    };
+    capabilities = 'capabilities' in body ? parseCapabilities(body['capabilities']) : current.capabilities;
+  } catch (error) {
+    if (error instanceof TypeError) throw badRequest('invalid_request', error.message);
+    throw error;
+  }
+  const model = wireModelId(snapshot, values);
+  if (!model || model.length > MAX_MODEL_LENGTH) throw badRequest('invalid_request', `model must be 1 to ${MAX_MODEL_LENGTH} characters`);
+  // A replaced profile keeps the key where it is one of the new provider's, and waits for one otherwise.
+  const credentialId = 'credentialId' in body
+    ? await profileCredential(deps, userId, snapshot, body['credentialId'])
+    : body['profileId'] !== undefined
+      ? await profileCredential(deps, userId, snapshot, current.credentialId).catch(() => null)
+      : current.credentialId;
+  return {
+    name: nameValue.trim().slice(0, MAX_NAME_LENGTH),
+    kind: 'profile' as const,
+    format: registryBaseOf(snapshot)?.format ?? current.format,
+    endpoint: null,
+    model,
+    credentialId,
+    params,
+    capabilities,
+    sourceProfile,
+    profileSnapshot: snapshot,
+    userValues: values,
+  };
+}
+
+/**
+ * What the presets' list says of a profile preset beside the preset itself:
+ * the profile's name and status in the catalog read now, and whether it has a
+ * newer revision (`profileUpdateStatus` — PocketRisu's update dot) or is gone.
+ */
+function profileNotes(catalog: RegistryCatalog, preset: PresetView) {
+  if (preset.kind !== 'profile' || !preset.sourceProfile) return {};
+  const profile = catalog.profiles[preset.sourceProfile.profileId];
+  const provider = preset.profileSnapshot ? registryBaseOf(preset.profileSnapshot)?.provider : undefined;
+  return {
+    profileUpdate: profileUpdateStatus(catalog, preset.sourceProfile.profileId, preset.sourceProfile.profileUpdatedAt),
+    // Whose key it takes (`REGISTRY_BASES`), for the editor's key picker.
+    ...(provider ? { profileProvider: provider } : {}),
+    ...(profile
+      ? {
+          profile: {
+            displayName: profile.displayName,
+            ...(profile.displayNameI18n ? { displayNameI18n: profile.displayNameI18n } : {}),
+            ...(profile.description ? { description: profile.description } : {}),
+            ...(profile.descriptionI18n ? { descriptionI18n: profile.descriptionI18n } : {}),
+            status: profile.profileStatus,
+            ...(profile.statusReason ? { statusReason: profile.statusReason } : {}),
+            ...(profile.updatedAt !== undefined ? { updatedAt: profile.updatedAt } : {}),
+            baseLabel: catalog.baseProviders[profile.providerBaseId]?.displayName ?? profile.providerBaseId,
+          },
+        }
+      : {}),
+  };
+}
+
 /** The credential a listing or a test goes with, opened. */
 async function credentialFor(deps: AppDeps, userId: string, id: string | null | undefined): Promise<ModelCredential | undefined> {
   if (!id) return undefined;
@@ -334,15 +464,59 @@ export function modelPresetRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.json(await listModels(format.id, endpoint, credential, deps.env));
   });
 
-  app.get('/', async (c) => {
-    const rows = await deps.db.select().from(modelPresets).where(eq(modelPresets.userId, c.get('userId'))).orderBy(asc(modelPresets.createdAt));
-    return c.json([...testPresets(deps.env), ...rows.map(presetJson)]);
+  /**
+   * The model registry's profiles this app offers (`profileEntries` — every
+   * status: the browser hides outdated and deprecated ones until asked) and
+   * where the catalog came from.
+   */
+  app.get('/registry', async (c) => {
+    const state = await registryState(deps);
+    return c.json({
+      origin: state.origin,
+      source: state.source,
+      hash: state.hash,
+      fetchedAt: state.fetchedAt,
+      refreshable: registrySource(deps.env) !== null,
+      profiles: profileEntries(state.catalog).sort(compareProfiles),
+    });
   });
 
+  /** PocketRisu's registry sync (`refreshRegistry`); `{force: true}` downloads whatever the index says. */
+  app.post('/registry/refresh', async (c) => {
+    const body = await readJsonBody(c).catch(() => ({}) as Record<string, unknown>);
+    return c.json(await refreshRegistry(deps, body['force'] === true));
+  });
+
+  app.get('/', async (c) => {
+    const rows = await deps.db.select().from(modelPresets).where(eq(modelPresets.userId, c.get('userId'))).orderBy(asc(modelPresets.createdAt));
+    const catalog = await registryCatalog(deps);
+    return c.json([...testPresets(deps.env), ...rows.map((row) => {
+      const preset = presetJson(row);
+      return { ...preset, ...profileNotes(catalog, preset) };
+    })]);
+  });
+
+  /**
+   * A new preset: on a registry profile (`{profileId, credentialId?, name?}` —
+   * PocketRisu's "create from profile", its defaults seeded) or a custom one
+   * on a format (`presetFields`).
+   */
   app.post('/', async (c) => {
     const userId = c.get('userId');
-    const fields = await presetFields(deps, userId, await readJsonBody(c));
-    const [row] = await deps.db.insert(modelPresets).values({ userId, ...fields }).returning();
+    const body = await readJsonBody(c);
+    if (body['profileId'] !== undefined) {
+      if (typeof body['profileId'] !== 'string') throw badRequest('invalid_request', 'profileId must be a profile id');
+      const catalog = await registryCatalog(deps);
+      const columns = profilePresetColumns(catalog, body['profileId']);
+      if (!columns) throw badRequest('profile_unavailable', 'This profile is not in the model registry');
+      const credentialId = await profileCredential(deps, userId, columns.profileSnapshot, body['credentialId']);
+      const name = typeof body['name'] === 'string' && body['name'].trim() ? body['name'].trim().slice(0, MAX_NAME_LENGTH) : columns.name;
+      const [row] = await deps.db.insert(modelPresets).values({ userId, ...columns, name, credentialId }).returning();
+      const preset = presetJson(row!);
+      return c.json({ ...preset, ...profileNotes(catalog, preset) }, 201);
+    }
+    const fields = await presetFields(deps, userId, body);
+    const [row] = await deps.db.insert(modelPresets).values({ userId, ...fields, kind: 'custom' }).returning();
     return c.json(presetJson(row!), 201);
   });
 
@@ -355,9 +529,14 @@ export function modelPresetRoutes(deps: AppDeps): Hono<AppEnv> {
 
   app.patch('/:id', async (c) => {
     const row = await owned(c);
-    const fields = await presetFields(deps, c.get('userId'), await readJsonBody(c), presetJson(row));
+    const current = presetJson(row);
+    const body = await readJsonBody(c);
+    const fields = current.kind === 'profile'
+      ? await profileFields(deps, c.get('userId'), body, current)
+      : await presetFields(deps, c.get('userId'), body, current);
     const [updated] = await deps.db.update(modelPresets).set({ ...fields, updatedAt: new Date() }).where(eq(modelPresets.id, row.id)).returning();
-    return c.json(presetJson(updated!));
+    const preset = presetJson(updated!);
+    return c.json({ ...preset, ...profileNotes(await registryCatalog(deps), preset) });
   });
 
   // The chats on it, and the default if it was, fall back to what their open slot follows.
@@ -375,7 +554,11 @@ export function modelPresetRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.json(await listModels(row.format, row.endpoint, await credentialFor(deps, row.userId, row.credentialId), deps.env));
   });
 
-  /** One tiny request on the preset: its words back, or the provider's refusal as the answer. */
+  /**
+   * One tiny request on the preset: its words back, or the provider's refusal
+   * as the answer. A profile preset's goes with the profile's own output cap,
+   * as its every request does — a thinking model given 64 tokens answers nothing.
+   */
   app.post('/:id/test', async (c) => {
     const row = await owned(c);
     const started = Date.now();
@@ -385,7 +568,7 @@ export function modelPresetRoutes(deps: AppDeps): Hono<AppEnv> {
         model: resolved.providerModel,
         system: '',
         messages: [{ role: 'user', content: TEST_PROMPT }],
-        maxTokens: 64,
+        maxTokens: resolved.preset.kind === 'profile' ? resolved.maxTokens ?? TEST_TOKENS : TEST_TOKENS,
         abortSignal: AbortSignal.timeout(TEST_TIMEOUT_MS),
       });
       return c.json({ ok: true, text: text.slice(0, 500), ms: Date.now() - started });

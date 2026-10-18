@@ -1,8 +1,9 @@
 import { joinUrl, providerFailure, providerFetch, providerHttpError, redact } from '../http.js';
 import { applyParameters, withPresetParams, type ParameterPlaces } from '../params.js';
+import { addCallerStops, profileBody, wireModelId } from '../registry/request.js';
 import { eventJson, IdleWatch, readSse, StopFilter } from '../stream.js';
 import type { ChatMessage, ChatRequest, LLMAdapter, StreamDelta, StreamDone } from '../types.js';
-import { CATALOG_TIMEOUT_MS, type AdapterConfig, type CatalogConfig, type ModelFormat, type ModelListing } from './format.js';
+import { CATALOG_TIMEOUT_MS, type AdapterConfig, type CatalogConfig, type ModelFormat, type ModelListing, type ProfileConfig } from './format.js';
 import { postJson, watched } from './send.js';
 
 export const ANTHROPIC_VERSION = '2023-06-01';
@@ -16,9 +17,10 @@ const PLACES: ParameterPlaces = {
   reasoningEffort: 'output_config.effort',
 };
 
-type Block =
+type Block = (
   | { type: 'text'; text: string }
-  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } | { type: 'url'; url: string } };
+  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } | { type: 'url'; url: string } }
+) & { cache_control?: { type: 'ephemeral' } };
 interface Turn {
   role: 'user' | 'assistant';
   content: Block[];
@@ -52,9 +54,26 @@ const blocksOf = (content: ChatMessage['content'], prefix = ''): Block[] => {
  * trailing spaces, both of which the API refuses.
  */
 export function anthropicTurns(req: Pick<ChatRequest, 'system' | 'messages'>): { system: string; messages: Turn[] } {
+  const { system, messages } = cachedTurns(req);
+  return { system, messages };
+}
+
+/**
+ * `anthropicTurns` with where the prompt cache's marks fell: which turns hold
+ * a message marked `cachePoint` (a turn made of several, if any of them is),
+ * and whether a system turn that went into `system` was.
+ */
+function cachedTurns(req: Pick<ChatRequest, 'system' | 'messages'>): {
+  system: string;
+  messages: Turn[];
+  cached: boolean[];
+  systemCached: boolean;
+} {
   const system: string[] = req.system ? [req.system] : [];
   const turns: Turn[] = [];
-  const add = (role: Turn['role'], blocks: Block[]): void => {
+  const cached: boolean[] = [];
+  let systemCached = false;
+  const add = (role: Turn['role'], blocks: Block[], cachePoint: boolean): void => {
     const kept = blocks.filter((block) => block.type !== 'text' || block.text.length > 0);
     if (kept.length === 0) return;
     const last = turns.at(-1);
@@ -65,15 +84,25 @@ export function anthropicTurns(req: Pick<ChatRequest, 'system' | 'messages'>): {
         last.content[last.content.length - 1] = { type: 'text', text: `${tail.text}\n\n${head!.text}` };
         last.content.push(...rest);
       } else last.content.push(...kept);
-    } else turns.push({ role, content: kept });
+      if (cachePoint) cached[cached.length - 1] = true;
+    } else {
+      turns.push({ role, content: kept });
+      cached.push(cachePoint);
+    }
   };
   for (const message of req.messages) {
+    const cachePoint = message.cachePoint === true;
     if (message.role === 'system') {
-      if (turns.length === 0) system.push(typeof message.content === 'string' ? message.content : blocksOf(message.content).flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('\n'));
-      else add('user', blocksOf(message.content, 'System: '));
-    } else add(message.role, blocksOf(message.content));
+      if (turns.length === 0) {
+        system.push(typeof message.content === 'string' ? message.content : blocksOf(message.content).flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('\n'));
+        systemCached ||= cachePoint;
+      } else add('user', blocksOf(message.content, 'System: '), cachePoint);
+    } else add(message.role, blocksOf(message.content), cachePoint);
   }
-  if (turns[0]?.role !== 'user') turns.unshift({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
+  if (turns[0]?.role !== 'user') {
+    turns.unshift({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
+    cached.unshift(false);
+  }
   const last = turns.at(-1)!;
   if (last.role === 'assistant') {
     const tail = last.content.at(-1);
@@ -81,11 +110,57 @@ export function anthropicTurns(req: Pick<ChatRequest, 'system' | 'messages'>): {
       const trimmed = tail.text.trimEnd();
       if (trimmed) last.content[last.content.length - 1] = { type: 'text', text: trimmed };
       else last.content.pop();
-      if (last.content.length === 0) turns.pop();
+      if (last.content.length === 0) {
+        turns.pop();
+        cached.pop();
+      }
     }
   }
-  return { system: system.join('\n\n').trim(), messages: turns };
+  return { system: system.join('\n\n').trim(), messages: turns, cached, systemCached };
 }
+
+/** The most prompt-cache breakpoints a request may carry. */
+const MAX_CACHE_BREAKPOINTS = 4;
+
+/**
+ * A profile preset's Messages request, PocketRisu's `prepareAnthropicBody`
+ * (`src/ts/preset/adapter/anthropicMessages.ts`): the profile's body (its
+ * defaults and fields, thinking and effort among them), the caller's stop
+ * strings in its stop field, then the turns as this format writes them with
+ * `cache_control: {type: 'ephemeral'}` on the last block of each turn marked
+ * `cachePoint` — the last ones, four at most counting a marked system, which
+ * goes as a block to carry its own — then `system`, no tools, the preset's
+ * model, PocketRisu's 4096 where the profile sets no `max_tokens`, and
+ * `stream`.
+ */
+export function profileMessagesBody(config: Pick<AdapterConfig, 'params'> & { profile: ProfileConfig }, req: ChatRequest): Record<string, unknown> {
+  const { snapshot, values } = config.profile;
+  const body = profileBody(snapshot, values, config.params.extraBody);
+  addCallerStops(body, snapshot, values, req.stop, Number.POSITIVE_INFINITY);
+  const model = wireModelId(snapshot, values);
+  const { system, messages, cached, systemCached } = cachedTurns(req);
+  const cacheSystem = system.length > 0 && systemCached;
+  const budget = MAX_CACHE_BREAKPOINTS - (cacheSystem ? 1 : 0);
+  const flagged = cached.flatMap((flag, index) => (flag ? [index] : []));
+  const marked = new Set(budget > 0 ? flagged.slice(-budget) : []);
+  body['messages'] = messages.map((turn, index) => {
+    if (!marked.has(index)) return turn;
+    const content = turn.content.slice();
+    content[content.length - 1] = { ...content[content.length - 1]!, cache_control: { type: 'ephemeral' } };
+    return { ...turn, content };
+  });
+  if (system) body['system'] = cacheSystem ? [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }] : system;
+  else delete body['system'];
+  delete body['tools'];
+  delete body['tool_choice'];
+  body['model'] = model;
+  if (body['max_tokens'] === undefined) body['max_tokens'] = PROFILE_FALLBACK_MAX_TOKENS;
+  body['stream'] = true;
+  return body;
+}
+
+/** PocketRisu's `ANTHROPIC_FALLBACK_MAX_TOKENS`: the cap a profile that names none is sent. */
+const PROFILE_FALLBACK_MAX_TOKENS = 4096;
 
 /**
  * The Messages API body. A thinking budget turns thinking on (`type: enabled`)
@@ -196,14 +271,20 @@ async function* sseEvents(body: ReadableStream<Uint8Array>, watch: IdleWatch): A
 
 /**
  * Anthropic's Messages API: `x-api-key` and `anthropic-version`, the system
- * text at the top level, and the stream's events (`readAnthropicEvents`).
+ * text at the top level, and the stream's events (`readAnthropicEvents`). A
+ * profile preset's body is the profile's (`profileMessagesBody`), with its
+ * additional headers and the SSE `Accept`.
  */
 function createAdapter(config: AdapterConfig): LLMAdapter {
   return {
     stream(request) {
-      const req = withPresetParams(request, config.params);
+      const profile = config.profile;
+      const req = profile ? request : withPresetParams(request, config.params);
       return watched(req, async function* (watch) {
-        const response = await postJson(config, joinUrl(config.baseUrl, '/messages'), messagesBody(req), { ...config.headers }, anthropicHeaders(config), watch);
+        const url = joinUrl(config.baseUrl, '/messages');
+        const response = profile
+          ? await postJson({ ...config, params: {} }, url, profileMessagesBody({ ...config, profile }, req), { ...config.headers, ...config.params.extraHeaders, Accept: 'text/event-stream' }, anthropicHeaders(config), watch)
+          : await postJson(config, url, messagesBody(req), { ...config.headers }, anthropicHeaders(config), watch);
         if (!response.body) throw providerFailure('provider_stream_interrupted', 502);
         return yield* readAnthropicEvents(sseEvents(response.body, watch), new StopFilter(req.stop));
       });

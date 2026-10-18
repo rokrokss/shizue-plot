@@ -408,8 +408,112 @@ export interface ModelPreset {
   credentialId: string | null;
   params: ModelParams;
   capabilities: ModelCapabilities;
+  /** Made from a registry profile (its snapshot and values decide the request), or a custom one (absent: custom). */
+  kind?: 'profile' | 'custom';
+  sourceProfile?: ProfileSource | null;
+  profileSnapshot?: ProfileSnapshot | null;
+  /** A profile preset's values for its snapshot's fields. */
+  userValues?: Record<string, unknown>;
+  /** A profile preset's profile has a newer revision, or is gone from the registry. */
+  profileUpdate?: 'none' | 'updatable' | 'missing';
+  /** The provider whose key a profile preset takes. */
+  profileProvider?: string;
+  /** A profile preset's profile as the registry has it now. */
+  profile?: {
+    displayName: string;
+    displayNameI18n?: Record<string, string>;
+    description?: string;
+    descriptionI18n?: Record<string, string>;
+    status: ProfileStatus;
+    statusReason?: string;
+    updatedAt?: number;
+    baseLabel: string;
+  };
   /** The test runner's catalog entry, not one of the owner's. */
   builtIn?: true;
+}
+
+export type ProfileStatus = 'current' | 'outdated' | 'deprecated';
+
+/** Which registry profile a preset was made from, and the revision it took. */
+export interface ProfileSource {
+  registryId: string;
+  profileId: string;
+  profileVersion: number;
+  providerBaseVersion?: number;
+  fetchedAt: number;
+  profileUpdatedAt?: number;
+}
+
+/** A registry profile's request field (PocketRisu's `RegistryFieldSchema`). */
+export interface ProfileField {
+  key: string;
+  type: 'string' | 'number' | 'integer' | 'boolean' | 'json' | 'stringArray' | 'keyValue';
+  label: string;
+  description?: string;
+  descriptionI18n?: Record<string, string>;
+  default?: unknown;
+  enum?: { value: string | number | boolean; label: string }[];
+  min?: number;
+  max?: number;
+  step?: number;
+  secret?: boolean;
+  mapsTo?: { target: string; path: string };
+}
+
+/** How a profile's editor draws a field (PocketRisu's `RegistryUiField`). */
+export interface ProfileUiField {
+  key: string;
+  widget: string;
+  visibility: 'basic' | 'advanced' | 'hidden';
+  group?: string;
+  order?: number;
+  placeholder?: string;
+  help?: string;
+  showIf?: { key: string; equals?: unknown; notEquals?: unknown };
+}
+
+/** A profile merged over its base provider, as a preset keeps it. */
+export interface ProfileSnapshot {
+  profileId: string;
+  providerBaseId: string;
+  modelId: string;
+  schema: ProfileField[];
+  uiSchema: { groups: { id: string; label: string; labelI18n?: Record<string, string>; order?: number }[]; fields: ProfileUiField[] };
+  capabilities?: string[];
+  limits?: { contextWindowTokens?: number; maxOutputTokens?: number };
+}
+
+/** A registry profile this app offers (`GET /api/model-presets/registry`). */
+export interface RegistryProfile {
+  id: string;
+  displayName: string;
+  displayNameI18n?: Record<string, string>;
+  description?: string;
+  descriptionI18n?: Record<string, string>;
+  status: ProfileStatus;
+  statusReason?: string;
+  sortOrder?: number;
+  updatedAt?: number;
+  modelId: string;
+  baseId: string;
+  baseLabel: string;
+  /** The provider whose key a preset on it takes. */
+  provider: string;
+  format: string;
+  capabilities: string[];
+  contextWindowTokens?: number;
+  maxOutputTokens?: number;
+}
+
+/** The registry the app reads, and where it came from. */
+export interface ModelRegistry {
+  origin: 'bundled' | 'remote';
+  source: string | null;
+  hash: string | null;
+  fetchedAt: string | null;
+  refreshable: boolean;
+  profiles: RegistryProfile[];
 }
 
 /** Which presets a chat runs on, or the owner's default (`/api/model-binding`); null follows the default. */
