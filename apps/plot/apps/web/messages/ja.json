@@ -1492,7 +1492,7 @@
       "openai-chat": "OpenAI 互換（Chat Completions）",
       "openai-responses": "OpenAI Responses",
       "anthropic": "Anthropic Messages",
-      "google": "Google Gemini",
+      "google": "Google AI Studio (Gemini)",
       "vertex": "Google Vertex AI (Gemini)",
       "bedrock": "AWS Bedrock (Claude)",
       "mistral": "Mistral",

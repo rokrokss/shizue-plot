@@ -151,7 +151,7 @@ RisuAI's own page, and its Echo:
 | OpenAI-compatible (Chat Completions) | OpenAI, OpenRouter, DeepSeek, DeepInfra, Mistral and NanoGPT keys, any compatible server, and keyless local servers such as LM Studio, Ollama's `/v1`, llama.cpp or vLLM |
 | OpenAI Responses | OpenAI and NanoGPT keys, and your ChatGPT plan |
 | Anthropic Messages | Anthropic and NanoGPT keys |
-| Google Gemini | Google AI Studio keys |
+| Google AI Studio (Gemini) | Google AI Studio keys |
 | Google Vertex AI (Gemini) | A Google Cloud service account's JSON key, and its region |
 | AWS Bedrock (Claude) | AWS access keys (a session token too, for temporary ones), and their region |
 | Mistral | Mistral keys, with RisuAI's turn rules for Mistral |
