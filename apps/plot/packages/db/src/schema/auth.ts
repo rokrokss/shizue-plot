@@ -1,7 +1,9 @@
 import { boolean, pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
 
-// better-auth core tables (email+password). Property keys must stay camelCase —
-// the drizzle adapter resolves better-auth fields by object key, not column name.
+// The tables of the better-auth library shizue once signed readers in with, kept
+// in its shape: `user` holds the one owner (every `user_id` column points at it),
+// `session` paired phones' sessions, `account` the ChatGPT connection, and
+// `verification` connection attempts and pairing codes (ARCHITECTURE §4.1, §5).
 
 export const user = pgTable('user', {
   id: text('id').primaryKey(),

@@ -30,7 +30,6 @@
     "@shizue/core": "workspace:*",
     "@shizue/db": "workspace:*",
     "@shizue/llm": "workspace:*",
-    "better-auth": "^1.6.26",
     "dotenv": "^17.2.4",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.13.13",

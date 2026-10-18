@@ -2,19 +2,13 @@ import { seedSession } from '../seedSession.js';
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 
 /**
- * Visual baselines for the onboarding surfaces (docs/design/shizue-ui.md)
- * and for the chat as a phone gets it.
+ * Visual baselines for the chat as a phone gets it (docs/design/shizue-ui.md).
  *
  * The baseline is the human-approved rendering of the design, not the AI
  * reference mockup — regenerate with `--update-snapshots` only after a design
  * change has been approved. Snapshots are platform-suffixed, so they pin the
  * environment they were created on.
  */
-
-const VIEWPORTS = [
-  { label: 'desktop', width: 1440, height: 1024 },
-  { label: 'mobile', width: 390, height: 844 },
-] as const;
 
 /**
  * Takes out what is not part of the design: the dev-mode Next.js indicator, and
@@ -35,44 +29,17 @@ async function hideUndesigned(page: Page): Promise<void> {
   expect(await page.evaluate(() => window.innerWidth - document.documentElement.clientWidth)).toBe(0);
 }
 
-for (const viewport of VIEWPORTS) {
-  test.describe(`auth pages — ${viewport.label}`, () => {
-    test.use({ viewport: { width: viewport.width, height: viewport.height } });
-
-    test.beforeEach(async ({ page }) => {
-      await page.route('**/api/auth/get-session', (route) => route.fulfill({ json: null }));
-      await page.route('**/api/chatgpt', (route) => route.fulfill({
-        json: { connected: false, email: null, pending: false, errorCode: null },
-      }));
-    });
-
-    test('login matches the approved design', async ({ page }) => {
-      await page.goto('/ko/login');
-      await expect(page.getByRole('heading', { name: /한 줄의 시작/ })).toBeVisible();
-      await hideUndesigned(page);
-
-      await expect(page).toHaveScreenshot(`login-${viewport.label}.png`, {
-        animations: 'disabled',
-        maxDiffPixelRatio: 0.01,
-      });
-    });
-  });
-}
-
 /**
  * The chat on a phone, and the settings sheet its ☰ opens. Everything the
  * screenshot contains is fixed on purpose — the plot's name and its opening are
- * the same every run, and the account is the only thing carrying the run id,
- * because it never appears on the page.
+ * the same every run, and the owner's presets are answered as none.
  *
- * The steps build on each other, so this file's chat half runs serially.
+ * The steps build on each other, so this file runs serially.
  */
 test.describe('chat — mobile', () => {
   test.describe.configure({ mode: 'serial' });
   test.use({ viewport: { width: 390, height: 844 } });
 
-  const run = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-  const account = { email: `e2e-vis-${run}@example.test`, password: 'e2e-password-1234', name: 'E2E' };
   const plot = {
     name: '스냅샷 호스트',
     description: '낯선 방 하나뿐인 무대.',
@@ -86,6 +53,9 @@ test.describe('chat — mobile', () => {
   test.beforeAll(async ({ browser }) => {
     context = await browser.newContext();
     page = await context.newPage();
+    // The run's one owner holds the other specs' presets too; the sheet is drawn
+    // as for an owner with none of their own.
+    await page.route('**/api/reader-presets', (route) => route.fulfill({ json: [] }));
   });
 
   test.afterAll(async () => {
@@ -93,7 +63,7 @@ test.describe('chat — mobile', () => {
   });
 
   test('a chat is opened on a phone-sized screen', async () => {
-    await seedSession(page, account);
+    await seedSession(page);
     await expect(page).toHaveURL(/\/ko$/);
 
     await page.goto('/ko/plots');

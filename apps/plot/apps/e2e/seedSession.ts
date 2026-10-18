@@ -1,9 +1,11 @@
-import { expect, type Page } from '@playwright/test';
+import type { Page } from '@playwright/test';
 
-/** Legacy multi-user fixtures exist only on the NODE_ENV=test API, never in product UI. */
-export async function seedSession(page: Page, account: { email: string; password: string; name: string }): Promise<void> {
-  const base = process.env['E2E_WEB_URL'] ?? 'http://localhost:13000';
-  const response = await page.request.post(`${base}/api/auth/sign-up/email`, { data: account, headers: { origin: base } });
-  expect(response.ok()).toBe(true);
+/**
+ * Opens the app as its owner. There is no sign-in: a browser on this computer is
+ * the owner (the API's `ownerGate`), so this only loads the front page. The
+ * account a spec passes is from when each spec signed up an account of its own;
+ * every spec of a run now shares the one owner of the run's app folder.
+ */
+export async function seedSession(page: Page, _account?: { email: string; password: string; name: string }): Promise<void> {
   await page.goto('/ko');
 }

@@ -4,8 +4,8 @@ import { isLoopback } from './env.js';
 /**
  * The tunnel that lets a phone open a shizue running on the reader's own machine,
  * opened from the settings page as PocketRisu opens its remote access (owner
- * decision, 2026-10-17). Never the hosted app: the API builds this only when it
- * signs in on loopback, and refuses again here.
+ * decision, 2026-10-17). Only for a web origin on loopback: the API builds this
+ * only then (`index.ts`), and refuses again here.
  *
  * Tailscale Serve first, when the machine is on a tailnet: a fixed address only
  * the reader's own devices reach, the phone with the Tailscale app. Otherwise a

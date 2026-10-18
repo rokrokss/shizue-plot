@@ -1,8 +1,7 @@
 // @vitest-environment jsdom
 /**
- * The header, whose shape depends on who is reading. Signed in it carries the
- * three clusters, AI settings and the way out; signed out it carries the one
- * cluster that leads anywhere and the way in. Which of them is visible at a
+ * The header: the three clusters, AI settings, the bell and the pickers — the
+ * same for everyone, since there is no sign-in. Which of them is visible at a
  * given width is a media query and so not testable here — what is testable is
  * that the wide-screen bar holds them and the narrow one hands them over.
  *
@@ -16,7 +15,6 @@ import { stubMatchMedia } from './matchMedia';
 
 const apiGet = vi.fn<() => Promise<unknown>>();
 let pathname = '/chats';
-let session: { data: unknown; isPending: boolean } = { data: { user: {} }, isPending: false };
 
 vi.mock('@/i18n/navigation', async () => {
   const { createElement: h } = await import('react');
@@ -49,11 +47,6 @@ vi.mock('@/i18n/navigation', async () => {
   };
 });
 
-vi.mock('@/lib/authClient', () => ({
-  signOut: vi.fn(async () => undefined),
-  useSession: () => session,
-}));
-
 vi.mock('@/lib/api', () => ({ apiGet: () => apiGet() }));
 
 const { Header } = await import('../src/components/Header');
@@ -61,8 +54,6 @@ const { Header } = await import('../src/components/Header');
 (globalThis as Record<string, unknown>)['IS_REACT_ACT_ENVIRONMENT'] = true;
 
 const MESSAGES = {
-  chatgpt: { signIn: 'ChatGPT로 로그인' },
-  auth: { signIn: '입장하기', signUp: '계정 만들기' },
   brand: { name: 'shizue' },
   common: { close: '닫기' },
   locales: { ko: '한국어', en: 'English', ja: '日本語' },
@@ -70,7 +61,6 @@ const MESSAGES = {
     explore: '탐색',
     chats: '대화',
     create: '만들기',
-    signOut: '로그아웃',
     language: '언어',
     menu: '메뉴',
   },
@@ -102,7 +92,6 @@ const linkTo = (href: string): HTMLAnchorElement | undefined =>
 
 beforeEach(() => {
   pathname = '/chats';
-  session = { data: { user: {} }, isPending: false };
   apiGet.mockReset().mockResolvedValue({ items: [], nextCursor: null });
   stubMatchMedia();
   host = document.createElement('div');
@@ -137,47 +126,11 @@ describe('Header', () => {
     expect(here.getAttribute('aria-current')).toBe('page');
   });
 
-  it('offers AI settings, locale and sign-out', async () => {
+  it('offers AI settings and the locale, and no way in or out', async () => {
     await render();
 
     expect(linkTo('/settings')?.textContent).toBe('AI');
     expect(bar().querySelector('select[aria-label="언어"]')).not.toBeNull();
-    expect([...bar().querySelectorAll('button')].some((node) => node.textContent === '로그아웃')).toBe(
-      true,
-    );
-  });
-
-  describe('signed out', () => {
-    beforeEach(() => {
-      session = { data: null, isPending: false };
-      pathname = '/';
-    });
-
-    it('keeps the one cluster that leads anywhere, and offers the way in', async () => {
-      await render();
-
-      expect(labels(barNav())).toEqual(['탐색']);
-      expect(linkTo('/login')!.textContent).toBe('ChatGPT로 로그인');
-      expect(linkTo('/signup')).toBeUndefined();
-      // Nothing here belongs to an account that does not exist yet.
-      expect([...bar().querySelectorAll('button')].some((node) => node.textContent === '로그아웃')).toBe(
-        false,
-      );
-      // The locale is the one control both readers get.
-      expect(bar().querySelector('select[aria-label="언어"]')).not.toBeNull();
-    });
-  });
-
-  /**
-   * Which controls belong on the right is not known until the session read
-   * lands, and a guess that changes a moment later moves the bar under the
-   * reader's finger. So it stays empty rather than filling with a placeholder.
-   */
-  it('leaves the auth side empty while the session read is in flight', async () => {
-    session = { data: null, isPending: true };
-    await render();
-
     expect(linkTo('/login')).toBeUndefined();
-    expect(bar().querySelector('select[aria-label="언어"]')).toBeNull();
   });
 });

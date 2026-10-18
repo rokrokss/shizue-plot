@@ -1,15 +1,16 @@
-import { account, session, user, verification, type Db } from '@shizue/db';
+import { account, user, verification, type Db } from '@shizue/db';
 import {
   authorizationUrl, callbackResult, ChatGPTError, ChatGPTOAuth, createPendingSignIn, loopbackRedirectUri, providerError, withAccessToken,
   type ChatGPTAccount, type ChatGPTIdentity, type ChatGPTModel, type ChatGPTTokens, type PendingSignIn,
 } from '@shizue/llm';
-import { and, eq, gt, like, lt, sql } from 'drizzle-orm';
+import { and, eq, gt, like, lt, ne } from 'drizzle-orm';
 import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, randomBytes, randomUUID } from 'node:crypto';
 import type { Tx } from './deps.js';
 
 /**
- * Sign in with ChatGPT for many readers on one server. Each reader's tokens live
- * on their `account` row, sealed with a key derived from the app secret; model
+ * The owner's ChatGPT connection: Sign in with ChatGPT as the way to their own
+ * plan, not a login. The tokens live on the owner's one `account` row
+ * (`chatgpt/<sub>`), sealed with a key derived from the install's secret; model
  * calls read them through `forUser`. The browser never sees a token: OpenAI's
  * loopback callback reaches `/api/chatgpt/callback` through the Shizue
  * extension's redirect rule, and the server finishes the exchange there.
@@ -26,7 +27,7 @@ export type SignInLocale = (typeof SIGN_IN_LOCALES)[number];
 export interface SignInTarget { next: string; locale: SignInLocale }
 const DEFAULT_TARGET: SignInTarget = { next: '/', locale: 'ko' };
 
-/** A failed callback, with where the reader should land to try again. */
+/** A failed callback, with the locale the owner should land in to try again. */
 export class SignInFailure extends Error {
   constructor(readonly code: string, readonly target: SignInTarget) { super(code); }
 }
@@ -54,8 +55,8 @@ export function tokenCipher(secret: string): { seal(value: string): string; open
 }
 
 /**
- * This server is one host to OpenAI. Derived from the secret so it is chosen
- * before the first sign-in and survives restarts without a table of its own.
+ * This install is one host to OpenAI. Derived from the secret so it is chosen
+ * before the first connection and survives restarts without a table of its own.
  */
 export function hostIdFor(secret: string): string {
   const hex = createHmac('sha256', secret).update('chatgpt-host-id').digest('hex').slice(0, 32).split('');
@@ -70,10 +71,10 @@ export interface ChatGPTAccounts {
   status(userId: string): Promise<{ connected: boolean; email: string | null }>;
   /** `binding` goes into an HttpOnly cookie; the callback must present it. */
   startSignIn(input: { clientHint?: string; target: SignInTarget }): Promise<{ authorizationUrl: string; binding: string }>;
-  /** Throws `SignInFailure`. */
-  finishSignIn(params: URLSearchParams, binding: string | undefined): Promise<{ userId: string; clientId: string; target: SignInTarget }>;
-  /** Revokes and forgets the tokens, keeps the registration, ends every session. */
-  signOut(userId: string): Promise<{ revocationPending: boolean }>;
+  /** Stores the tokens as `owner`'s one connection. Throws `SignInFailure`. */
+  finishSignIn(params: URLSearchParams, binding: string | undefined, owner: string): Promise<{ clientId: string; target: SignInTarget }>;
+  /** Revokes and forgets the tokens and keeps the registration; nothing else ends with them. */
+  disconnect(userId: string): Promise<{ revocationPending: boolean }>;
 }
 
 export function createChatGPTAccounts(db: Db, options: { secret: string; callbackPort: number; oauth?: ChatGPTOAuth }): ChatGPTAccounts {
@@ -92,7 +93,7 @@ export function createChatGPTAccounts(db: Db, options: { secret: string; callbac
     updatedAt: new Date(),
   });
   type Row = typeof account.$inferSelect;
-  /** Null when signed out — or when the secret changed and the seal no longer opens. */
+  /** Null when disconnected — or when the secret changed and the seal no longer opens. */
   const opened = (row: Row | undefined): ChatGPTTokens | null => {
     if (!row?.accessToken || !row.refreshToken || !row.accessTokenExpiresAt) return null;
     try {
@@ -140,22 +141,26 @@ export function createChatGPTAccounts(db: Db, options: { secret: string; callbac
     return outcome.token;
   }
 
-  async function persist(identity: ChatGPTIdentity, clientId: string, tokens: ChatGPTTokens): Promise<string> {
-    return db.transaction(async (tx) => {
-      // One sign-in persists at a time: two first sign-ins of one account, and the
-      // one that adopts the local workspace owner below, must not interleave.
-      await tx.execute(sql`select pg_advisory_xact_lock(73124018)`);
-      const values = { ...sealed(tokens), clientId };
-      const [existing] = await tx.select().from(account)
-        .where(and(eq(account.providerId, PROVIDER), eq(account.accountId, identity.subject))).limit(1);
-      if (existing) {
-        await tx.update(account).set(values).where(eq(account.id, existing.id));
-        return existing.userId;
-      }
-      const owner = await adoptLocalOwner(tx, identity) ?? await createUser(tx, identity);
-      await tx.insert(account).values({ id: randomUUID(), providerId: PROVIDER, accountId: identity.subject, userId: owner, ...values });
-      return owner;
+  /**
+   * One connection at a time: the owner's row for another ChatGPT account goes,
+   * and this account's row, made or kept, is the owner's. A replaced account
+   * whose tokens no disconnect let go has its grant revoked as a disconnect does.
+   */
+  async function persist(owner: string, identity: ChatGPTIdentity, clientId: string, tokens: ChatGPTTokens): Promise<void> {
+    const replaced = await db.transaction(async (tx) => {
+      const values = { ...sealed(tokens), clientId, userId: owner };
+      const gone = await tx.delete(account)
+        .where(and(eq(account.providerId, PROVIDER), eq(account.userId, owner), ne(account.accountId, identity.subject)))
+        .returning();
+      await tx.insert(account).values({ id: randomUUID(), providerId: PROVIDER, accountId: identity.subject, ...values })
+        .onConflictDoUpdate({ target: [account.providerId, account.accountId], set: values });
+      await nameOwner(tx, owner, identity);
+      return gone;
     });
+    for (const row of replaced) {
+      const held = opened(row);
+      if (row.clientId && held) await oauth.revoke(row.clientId, held.refreshToken);
+    }
   }
 
   return {
@@ -197,7 +202,7 @@ export function createChatGPTAccounts(db: Db, options: { secret: string; callbac
       return { authorizationUrl: authorizationUrl(pending, hostId), binding };
     },
 
-    async finishSignIn(params, binding) {
+    async finishSignIn(params, binding, owner) {
       const state = params.get('state');
       // Single use: the attempt is gone whether or not it succeeds.
       const [row] = state
@@ -213,10 +218,11 @@ export function createChatGPTAccounts(db: Db, options: { secret: string; callbac
         const { code, clientId } = callbackResult(params, saved);
         const { tokens, identity } = await oauth.exchange(saved, code, clientId);
         catalogs.clear();
-        return { userId: await persist(identity, clientId, tokens), clientId, target: saved.target };
+        await persist(owner, identity, clientId, tokens);
+        return { clientId, target: saved.target };
       } catch (error) {
         // Name and message only: an Error printed whole shows its own fields, and
-        // jose's claim errors carry the ID token's decoded payload — the reader's email.
+        // jose's claim errors carry the ID token's decoded payload — the owner's email.
         if (!(error instanceof ChatGPTError)) {
           console.error(`[chatgpt] sign-in failed: ${error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error'}`);
         }
@@ -224,7 +230,7 @@ export function createChatGPTAccounts(db: Db, options: { secret: string; callbac
       }
     },
 
-    async signOut(userId) {
+    async disconnect(userId) {
       // Under the row lock, so a refresh in flight finishes first and its rotated
       // token is the one revoked.
       const held = await db.transaction(async (tx) => {
@@ -235,7 +241,6 @@ export function createChatGPTAccounts(db: Db, options: { secret: string; callbac
         return { clientId: row.clientId, tokens: opened(row) };
       });
       catalogs.delete(userId);
-      await db.delete(session).where(eq(session.userId, userId));
       const revoked = held?.clientId && held.tokens ? await oauth.revoke(held.clientId, held.tokens.refreshToken) : true;
       return { revocationPending: !revoked };
     },
@@ -243,29 +248,17 @@ export function createChatGPTAccounts(db: Db, options: { secret: string; callbac
 }
 
 /**
- * The single owner a former local installation created keeps its plots and
- * chats: the first ChatGPT account to sign in takes it over, once.
+ * The owner takes the connected account's name and address, which the settings
+ * card shows. `user.email` is unique; an address another row holds is not
+ * taken over, and the owner keeps the one it has.
  */
-async function adoptLocalOwner(tx: Tx, identity: ChatGPTIdentity): Promise<string | null> {
-  const [binding] = await tx.delete(account)
-    .where(and(eq(account.providerId, 'local-workspace'), eq(account.accountId, 'default'))).returning();
-  if (!binding) return null;
-  await tx.update(user).set({ ...await profile(tx, identity), updatedAt: new Date() }).where(eq(user.id, binding.userId));
-  return binding.userId;
-}
-
-async function createUser(tx: Tx, identity: ChatGPTIdentity): Promise<string> {
-  const [created] = await tx.insert(user).values({ id: randomUUID(), ...await profile(tx, identity) }).returning({ id: user.id });
-  return created!.id;
-}
-
-/** `user.email` is unique and required; an address another user holds is not taken over. */
-async function profile(tx: Tx, identity: ChatGPTIdentity): Promise<{ name: string; email: string }> {
+async function nameOwner(tx: Tx, owner: string, identity: ChatGPTIdentity): Promise<void> {
   const taken = identity.email
-    ? (await tx.select({ id: user.id }).from(user).where(eq(user.email, identity.email)).limit(1)).length > 0
+    ? (await tx.select({ id: user.id }).from(user).where(and(eq(user.email, identity.email), ne(user.id, owner))).limit(1)).length > 0
     : true;
-  return {
+  await tx.update(user).set({
     name: identity.name ?? identity.email?.split('@')[0] ?? 'ChatGPT',
-    email: taken ? `${randomUUID()}@users.shizue.invalid` : identity.email!,
-  };
+    ...(taken ? {} : { email: identity.email! }),
+    updatedAt: new Date(),
+  }).where(eq(user.id, owner));
 }

@@ -1,7 +1,6 @@
 import { expect, test, type Route } from '@playwright/test';
 
 test('AI draft locks its premise and other creation doors, preserving input after failure', async ({ page }) => {
-  await page.route('**/api/auth/get-session', (route) => route.fulfill({ json: { user: { id: 'pending-reader', name: 'Reader' } } }));
   await page.route('**/api/plots', (route) => route.fulfill({ json: [] }));
   let release!: (route: Route) => void;
   const submitted = new Promise<Route>((resolve) => { release = resolve; });

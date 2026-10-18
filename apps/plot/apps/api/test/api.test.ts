@@ -133,10 +133,9 @@ import {
   toAttachmentJson,
   withTurnImages,
 } from '../src/attachments.js';
-import { createAuth } from '../src/auth.js';
 import { MAX_IMAGE_BYTES } from '../src/avatar.js';
 import { createChatGPTAccounts } from '../src/chatgptAccounts.js';
-import { createHostedAuth, createSessionStore } from '../src/hostedAuth.js';
+import { createSessionStore, ensureOwner } from '../src/session.js';
 import type { AppDeps, AppEnv } from '../src/deps.js';
 import { createPhoneAccess, type TunnelTools } from '../src/tunnel.js';
 import { loadRootEnv } from '../src/env.js';
@@ -242,7 +241,6 @@ async function sql<Rows extends readonly object[] = Record<string, unknown>[]>(
 }
 let storageDir: string;
 let storage: ObjectStorage;
-let auth: ReturnType<typeof createAuth>;
 let app: Hono<AppEnv>;
 /** The handler registry the API runs its queue with, on the default deps. */
 let jobHandlers: JobHandlers;
@@ -260,10 +258,6 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await client.exec(`TRUNCATE TABLE memories, chat_attachments, messages, chat_note_links, user_notes, plot_reader_variables, plot_reader_overlays, chats, personas, comments, plot_likes, plot_assets, characters, notifications, follows, plots, feed_cursors, jobs, rate_limits, leases, "session", account, verification, "user" RESTART IDENTITY CASCADE`);
-  auth = createAuth(db, {
-    secret: 'test-secret-test-secret-test-secret',
-    baseUrl: 'http://localhost:13000',
-  });
   app = makeApp();
   jobHandlers = createJobHandlers(makeDeps());
 });
@@ -276,7 +270,6 @@ beforeEach(async () => {
 function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps {
   return {
     db,
-    auth,
     storage,
     env: {},
     generating: new Set<string>(),
@@ -474,15 +467,19 @@ function cookieOf(res: Response): string {
     .join('; ');
 }
 
-async function signUp(email: string): Promise<string> {
-  const res = await app.request('/api/auth/sign-up/email', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ email, password: 'password1234', name: email.split('@')[0] }),
-  });
-  expect(res.status, await res.clone().text()).toBe(200);
-  return cookieOf(res);
+/**
+ * The owner, as every test's requests are: `app.request` has no socket, so a
+ * request with no tunnel's marks on it is this computer's (`ownerGate`). There
+ * is one owner, whatever the address — once there were accounts, and the tests
+ * still name the reader they play. No cookie is needed.
+ */
+async function signUp(_email: string): Promise<string> {
+  await ensureOwner(db);
+  return '';
 }
+
+/** The owner's id, which every `user_id` column holds. */
+const ownerId = (): Promise<string> => ensureOwner(db);
 
 async function request(
   cookie: string | undefined,
@@ -867,40 +864,175 @@ async function answerWithImages(
 
 /* ------------------------------------------------------------------ tests */
 
-describe('auth', () => {
-  it('signs up, signs in and returns the session', async () => {
-    const cookie = await signUp('alice@example.com');
+/**
+ * A request as it reaches the API's socket from `remoteAddress` — none at all is
+ * `app.request` in-process, as every other test's is — carrying `headers`.
+ */
+function ask(
+  target: Hono<AppEnv>,
+  path: string,
+  headers: Record<string, string> = {},
+  remoteAddress?: string,
+  method = 'GET',
+): Promise<Response> {
+  const env = remoteAddress === undefined ? undefined : { incoming: { socket: { remoteAddress } } };
+  return Promise.resolve(target.request(path, { method, headers }, env));
+}
 
-    const session = await readJson(await request(cookie, '/api/auth/get-session'));
-    expect(session.user.email).toBe('alice@example.com');
+/** What the Next rewrite sends on for this computer's browser at `http://localhost:13000`. */
+const FROM_NEXT = {
+  host: 'localhost:8787',
+  'x-forwarded-host': 'localhost:13000',
+  'x-forwarded-proto': 'http',
+  'x-forwarded-port': '13000',
+  'x-forwarded-for': '127.0.0.1',
+};
+/** What Tailscale Serve and then the Next rewrite send on for a phone on the tailnet. */
+const FROM_TUNNEL = {
+  host: 'localhost:8787',
+  'x-forwarded-host': 'mac.example.ts.net:8444',
+  'x-forwarded-proto': 'https',
+  'x-forwarded-for': '100.101.102.103',
+  'tailscale-user-login': 'owner@example.com',
+  'tailscale-user-name': 'Owner',
+};
 
-    const signIn = await json(undefined, '/api/auth/sign-in/email', 'POST', {
-      email: 'alice@example.com',
-      password: 'password1234',
-    });
-    expect(signIn.status).toBe(200);
-    const reSession = await readJson(await request(cookieOf(signIn), '/api/auth/get-session'));
-    expect(reSession.user.id).toBe(session.user.id);
+describe('the local owner gate', () => {
+  it('runs a request from this computer as its one owner, made on the first one', async () => {
+    expect(await db.select().from(user)).toHaveLength(0);
+    for (const remoteAddress of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) {
+      for (const host of ['localhost:8787', '127.0.0.1:8787', '[::1]:8787', 'LOCALHOST']) {
+        expect((await ask(app, '/api/plots', { host }, remoteAddress)).status, `${remoteAddress} ${host}`).toBe(200);
+      }
+    }
+    const created = await createPlot('');
+    const owners = await db.select().from(user);
+    expect(owners).toHaveLength(1);
+    const [row] = await db.select().from(plots).where(eq(plots.id, created.id));
+    expect(row!.ownerId).toBe(owners[0]!.id);
   });
 
-  it('normalizes better-auth failures to the API error shape', async () => {
-    await signUp('shape@example.com');
-    const res = await json(undefined, '/api/auth/sign-in/email', 'POST', {
-      email: 'shape@example.com',
-      password: 'wrong-password',
-    });
-
-    expect(res.status).toBe(401);
-    const body = await readJson(res);
-    expect(Object.keys(body).sort()).toEqual(['code', 'error']);
-    expect(body.error).toEqual(expect.any(String));
-    expect(body.code).toBe('invalid_email_or_password');
+  it("takes this computer's browser through the Next rewrite", async () => {
+    expect((await ask(app, '/api/plots', FROM_NEXT, '127.0.0.1')).status).toBe(200);
+    expect((await ask(app, '/api/plots', { ...FROM_NEXT, 'x-forwarded-for': '::1' }, '::1')).status).toBe(200);
+    expect((await ask(app, '/api/plots', { ...FROM_NEXT, 'x-forwarded-for': '127.0.0.1, ::ffff:127.0.0.1' }, '127.0.0.1')).status).toBe(200);
+    // Next leaves the header out when the browser sent none and nothing in front added one.
+    const { 'x-forwarded-for': _, ...bare } = FROM_NEXT;
+    expect((await ask(app, '/api/plots', bare, '127.0.0.1')).status).toBe(200);
   });
 
-  it('rejects unauthenticated access', async () => {
-    const res = await request(undefined, '/api/plots');
-    expect(res.status).toBe(401);
-    expect(await readJson(res)).toEqual({ error: expect.any(String), code: 'unauthorized' });
+  it("refuses a tunnel's request that carries no paired phone's session", async () => {
+    for (const headers of <Record<string, string>[]>[
+      FROM_TUNNEL,
+      // The tunnel's host alone is enough, whatever else is missing.
+      { host: 'localhost:8787', 'x-forwarded-host': 'mac.example.ts.net:8444' },
+      { host: 'localhost:8787', 'x-forwarded-host': 'quiet-words.trycloudflare.com', 'cf-connecting-ip': '203.0.113.7' },
+    ]) {
+      const refused = await ask(app, '/api/plots', headers, '127.0.0.1');
+      expect(refused.status).toBe(401);
+      expect(await readJson(refused)).toEqual({ error: expect.any(String), code: 'unauthorized' });
+    }
+    // Everything else under /api, the static catalogue and the model list among it.
+    for (const path of ['/api/presets', '/api/models', '/api/chatgpt', '/api/explore', '/api/chats']) {
+      expect((await ask(app, path, FROM_TUNNEL, '127.0.0.1')).status, path).toBe(401);
+    }
+  });
+
+  it('refuses an x-forwarded-for that names anything but this computer', async () => {
+    for (const forwardedFor of ['203.0.113.9', '127.0.0.1, 203.0.113.9', '10.0.0.2', '', 'unknown']) {
+      const headers = { ...FROM_NEXT, 'x-forwarded-for': forwardedFor };
+      expect((await ask(app, '/api/plots', headers, '127.0.0.1')).status, forwardedFor).toBe(401);
+    }
+  });
+
+  it("refuses what a tunnel or a proxy leaves on a request, on this computer's own host too", async () => {
+    for (const [name, value] of [
+      ['cf-connecting-ip', '203.0.113.7'],
+      ['tailscale-user-login', 'owner@example.com'],
+      ['tailscale-user-name', 'Owner'],
+      ['forwarded', 'for=203.0.113.7;proto=https'],
+    ] as const) {
+      expect((await ask(app, '/api/plots', { ...FROM_NEXT, [name]: value }, '127.0.0.1')).status, name).toBe(401);
+    }
+  });
+
+  it("refuses a host that is not this computer's, and a connection from elsewhere", async () => {
+    for (const headers of [
+      // DNS rebinding: a page on another site whose name resolves to this machine.
+      { host: 'evil.example:8787' },
+      { ...FROM_NEXT, 'x-forwarded-host': 'evil.example:13000' },
+      { host: 'localhost.evil.example' },
+      { host: 'evil.example@localhost' },
+      { host: 'localhost:8787/evil' },
+      { ...FROM_NEXT, 'x-forwarded-host': 'localhost:13000, evil.example' },
+      { ...FROM_NEXT, 'x-forwarded-host': '' },
+    ]) {
+      expect((await ask(app, '/api/plots', headers, '127.0.0.1')).status, JSON.stringify(headers)).toBe(401);
+    }
+    // The API on a LAN address, reached from another machine.
+    expect((await ask(app, '/api/plots', { host: 'localhost:8787' }, '192.168.0.20')).status).toBe(401);
+    expect((await ask(app, '/api/plots', FROM_NEXT, '203.0.113.5')).status).toBe(401);
+    // A request line that names its own host is held to it too.
+    expect((await ask(app, 'http://evil.example/api/plots', {}, '127.0.0.1')).status).toBe(401);
+  });
+
+  it("takes a paired phone's session from the tunnel, and only a paired one that has not run out", async () => {
+    const owner = await ownerId();
+    const sessions = createSessionStore(db, { secure: false });
+    const phone = (await sessions.create(owner, new Request('https://mac.example.ts.net:8444/'))).split(';')[0]!;
+    const fromPhone = { ...FROM_TUNNEL, cookie: phone };
+    expect((await ask(app, '/api/plots', fromPhone, '127.0.0.1')).status).toBe(200);
+    expect((await ask(app, '/api/chats', fromPhone, '127.0.0.1')).status).toBe(200);
+    // A session of before, when a browser signed in with ChatGPT, opens nothing now.
+    await db.insert(session).values({
+      id: randomUUID(), token: createHash('sha256').update('signed-in').digest('hex'), userId: owner,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    expect((await ask(app, '/api/plots', { ...FROM_TUNNEL, cookie: 'shizue_session=signed-in' }, '127.0.0.1')).status).toBe(401);
+    expect((await ask(app, '/api/plots', { ...FROM_TUNNEL, cookie: 'shizue_session=made-up' }, '127.0.0.1')).status).toBe(401);
+    await db.update(session).set({ expiresAt: new Date(Date.now() - 1000) });
+    expect((await ask(app, '/api/plots', fromPhone, '127.0.0.1')).status).toBe(401);
+  });
+
+  it('keeps connecting ChatGPT to this computer', async () => {
+    const sessions = createSessionStore(db, { secure: false });
+    const phone = (await sessions.create(await ownerId(), new Request('https://mac.example.ts.net:8444/'))).split(';')[0]!;
+    const fromPhone = { ...FROM_TUNNEL, cookie: phone, 'content-type': 'application/json' };
+    for (const [method, path] of [['POST', '/api/chatgpt/sign-in'], ['GET', '/api/chatgpt/callback?code=c&state=s'], ['POST', '/api/chatgpt/disconnect']] as const) {
+      const refused = await ask(app, path, fromPhone, '127.0.0.1', method);
+      expect(refused.status, path).toBe(403);
+      expect(await readJson(refused)).toMatchObject({ code: 'local_only' });
+    }
+    // What is connected, a phone may read.
+    expect(await readJson(await ask(app, '/api/chatgpt', fromPhone, '127.0.0.1'))).toEqual({ connected: false, email: null, local: false });
+    expect(await readJson(await request(undefined, '/api/chatgpt'))).toEqual({ connected: false, email: null, local: true });
+  });
+
+  it('answers the probes before anyone is known', async () => {
+    expect((await ask(app, '/api/health', FROM_TUNNEL, '203.0.113.5')).status).toBe(200);
+    expect((await ask(app, '/api/ready', FROM_TUNNEL, '203.0.113.5')).status).toBe(200);
+    expect(await db.select().from(user)).toHaveLength(0);
+  });
+
+  it('makes one owner however many first requests arrive at once, and keeps the oldest row', async () => {
+    const ids = await Promise.all([1, 2, 3, 4].map(() => ensureOwner(db)));
+    expect(new Set(ids).size).toBe(1);
+    expect(await db.select().from(user)).toHaveLength(1);
+    // An install from before keeps the account it signed in with, the oldest row.
+    await client.exec('TRUNCATE TABLE "user" CASCADE');
+    await db.insert(user).values([
+      { id: 'newer', name: 'b', email: 'b@example.test', createdAt: new Date('2026-10-12T00:00:00Z') },
+      { id: 'older', name: 'a', email: 'a@example.test', createdAt: new Date('2026-10-10T00:00:00Z') },
+    ]);
+    expect(await ensureOwner(db)).toBe('older');
+    expect(await db.select().from(user)).toHaveLength(2);
+  });
+
+  it('has no sign-up, sign-in or session routes', async () => {
+    for (const path of ['/api/auth/sign-up/email', '/api/auth/sign-in/email', '/api/auth/sign-out']) {
+      expect((await json(undefined, path, 'POST', { email: 'x@example.test', password: 'password1234', name: 'x' })).status).toBe(404);
+    }
+    expect((await request(undefined, '/api/auth/get-session')).status).toBe(404);
   });
 });
 
@@ -959,12 +1091,12 @@ function jar(...headers: string[]): string {
   return [...cookies.values()].join('; ');
 }
 
-function hostedApp(openai: ReturnType<typeof fakeOpenAI>, env: Record<string, string> = {}, overrides: Partial<AppDeps> = {}) {
+/** The app with the owner's ChatGPT connection on `openai`, and the browser's round trip through it. */
+function connectApp(openai: ReturnType<typeof fakeOpenAI>, env: Record<string, string> = {}, overrides: Partial<AppDeps> = {}) {
   const accounts = createChatGPTAccounts(db, { secret: 'test-secret-test-secret-test-secret', callbackPort: 47801, oauth: openai.oauth });
-  const sessions = createSessionStore(db, { secure: false });
-  const target = makeApp({ auth: createHostedAuth(sessions, accounts), chatgpt: { accounts, sessions }, env, ...overrides });
-  /** The whole round trip as the browser makes it; returns the cookies it ends with. */
-  async function signIn(subject: string, cookies = ''): Promise<{ callback: Response; cookie: string; authorization: URL }> {
+  const target = makeApp({ chatgpt: { accounts }, env, ...overrides });
+  /** The whole round trip as this computer's browser makes it; returns the cookies it ends with. */
+  async function connect(subject: string, cookies = ''): Promise<{ callback: Response; cookie: string; authorization: URL }> {
     const start = await target.request('/api/chatgpt/sign-in', {
       method: 'POST', headers: { 'content-type': 'application/json', cookie: cookies }, body: JSON.stringify({ next: '/settings', locale: 'ko' }),
     });
@@ -977,32 +1109,29 @@ function hostedApp(openai: ReturnType<typeof fakeOpenAI>, env: Record<string, st
     );
     return { callback, cookie: jar(cookies, cookieOf(callback)), authorization };
   }
-  return { accounts, target, signIn };
+  return { accounts, target, connect };
 }
 
-describe('Sign in with ChatGPT', () => {
-  it('signs a reader in at the callback and never hands a token to the browser', async () => {
+describe('the ChatGPT connection', () => {
+  it("connects the owner's ChatGPT at the callback, and hands the browser neither a token nor a session", async () => {
     const openai = fakeOpenAI();
-    const { target, signIn } = hostedApp(openai);
-    expect(await readJson(await request(undefined, '/api/auth/get-session', 'GET', undefined, target))).toBeNull();
-    expect((await request(undefined, '/api/chats', 'GET', undefined, target)).status).toBe(401);
-    for (const path of ['sign-up/email', 'sign-in/email']) {
-      expect((await json(undefined, `/api/auth/${path}`, 'POST', { email: 'x@example.test', password: 'password' }, target)).status).toBe(404);
-    }
+    const { target, connect } = connectApp(openai);
+    expect(await readJson(await request(undefined, '/api/chatgpt', 'GET', undefined, target))).toEqual({ connected: false, email: null, local: true });
 
-    const { callback, cookie, authorization } = await signIn('alice');
+    const { callback, authorization } = await connect('alice');
     expect(authorization.searchParams.get('client_id')).toBe('dynamic_agent_client');
     expect(authorization.searchParams.get('redirect_uri')).toBe('http://127.0.0.1:47801/auth/callback');
     expect(callback.status).toBe(302);
     expect(callback.headers.get('location')).toBe('/ko/settings');
     expect(callback.headers.get('cache-control')).toBe('no-store');
-    expect(callback.headers.getSetCookie().find((value) => value.startsWith('shizue_session='))).toMatch(/HttpOnly; SameSite=Lax/);
+    expect(callback.headers.getSetCookie().some((value) => value.startsWith('shizue_session='))).toBe(false);
+    expect(await db.select().from(session)).toHaveLength(0);
 
-    const session = await readJson(await request(cookie, '/api/auth/get-session', 'GET', undefined, target));
-    expect(session.user.email).toBe('alice@chatgpt.test');
-    expect((await request(cookie, '/api/chats', 'GET', undefined, target)).status).toBe(200);
-    expect(await readJson(await request(cookie, '/api/chatgpt', 'GET', undefined, target))).toEqual({ connected: true, email: 'alice@chatgpt.test' });
-    const [row] = await db.select().from(account).where(eq(account.userId, session.user.id));
+    expect(await readJson(await request(undefined, '/api/chatgpt', 'GET', undefined, target))).toEqual({ connected: true, email: 'alice@chatgpt.test', local: true });
+    // The owner's, and no account of its own.
+    const owner = await ownerId();
+    expect(await db.select().from(user)).toHaveLength(1);
+    const [row] = await db.select().from(account).where(eq(account.userId, owner));
     expect(row).toMatchObject({ providerId: 'chatgpt', accountId: 'alice', clientId: 'app_alice' });
     // Sealed at rest.
     expect(`${row!.accessToken}${row!.refreshToken}${row!.idToken}`).not.toMatch(/ACCESS|REFRESH|alice/);
@@ -1010,25 +1139,36 @@ describe('Sign in with ChatGPT', () => {
 
   it('refuses a callback from another browser, a replayed attempt and a declined consent', async () => {
     const openai = fakeOpenAI();
-    const { target } = hostedApp(openai);
+    const { target } = connectApp(openai);
     const start = await json(undefined, '/api/chatgpt/sign-in', 'POST', { next: '/settings', locale: 'en' }, target);
     const state = new URL((await readJson(start)).authorizationUrl).searchParams.get('state');
     // The attacker's own code and state, opened in someone else's browser.
     const foreign = await request(undefined, `/api/chatgpt/callback?code=c&state=${state}&client_id=app_x`, 'GET', undefined, target);
-    expect(foreign.headers.get('location')).toBe('/en/login?error=chatgpt_invalid_state&next=%2Fsettings');
-    expect(foreign.headers.getSetCookie().some((value) => value.startsWith('shizue_session='))).toBe(false);
+    expect(foreign.headers.get('location')).toBe('/en/settings?error=chatgpt_invalid_state');
     // Single use, even from the right browser.
     const replay = await request(cookieOf(start), `/api/chatgpt/callback?code=c&state=${state}&client_id=app_x`, 'GET', undefined, target);
-    expect(replay.headers.get('location')).toBe('/ko/login?error=chatgpt_invalid_state&next=%2F');
+    expect(replay.headers.get('location')).toBe('/ko/settings?error=chatgpt_invalid_state');
 
     const again = await json(undefined, '/api/chatgpt/sign-in', 'POST', { next: '//evil.example', locale: 'ja' }, target);
     const retry = new URL((await readJson(again)).authorizationUrl).searchParams.get('state');
     const declined = await request(cookieOf(again), `/api/chatgpt/callback?error=access_denied&state=${retry}`, 'GET', undefined, target);
-    expect(declined.headers.get('location')).toBe('/ja/login?error=chatgpt_login_declined&next=%2F');
-    expect(await db.select().from(user)).toHaveLength(0);
+    expect(declined.headers.get('location')).toBe('/ja/settings?error=chatgpt_login_declined');
+    expect(await db.select().from(account)).toHaveLength(0);
   });
 
-  it('logs a failed sign-in without the ID token claims an error carries', async () => {
+  it('lands a connection that started on another page back there, and never on another site', async () => {
+    const openai = fakeOpenAI();
+    const { target } = connectApp(openai);
+    for (const [next, landing] of [['/chats', '/en/chats'], ['//evil.example', '/en/'], ['/\\evil.example', '/en/']] as const) {
+      const start = await json(undefined, '/api/chatgpt/sign-in', 'POST', { next, locale: 'en' }, target);
+      const authorization = new URL((await readJson(start)).authorizationUrl);
+      Object.assign(openai.state, { subject: 'alice', email: 'alice@chatgpt.test', nonce: authorization.searchParams.get('nonce') });
+      const callback = await request(cookieOf(start), `/api/chatgpt/callback?code=c&state=${authorization.searchParams.get('state')}&client_id=app_alice`, 'GET', undefined, target);
+      expect(callback.headers.get('location')).toBe(landing);
+    }
+  });
+
+  it('logs a failed connection without the ID token claims an error carries', async () => {
     const openai = fakeOpenAI();
     // jose's JWTClaimValidationFailed, which holds the decoded payload it checked.
     const claimError = Object.assign(new Error('unexpected "aud" claim value'), {
@@ -1038,8 +1178,8 @@ describe('Sign in with ChatGPT', () => {
     vi.spyOn(openai.oauth, 'exchange').mockRejectedValue(claimError);
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
-      const { callback } = await hostedApp(openai).signIn('alice');
-      expect(callback.headers.get('location')).toBe('/ko/login?error=chatgpt_login_failed&next=%2Fsettings');
+      const { callback } = await connectApp(openai).connect('alice');
+      expect(callback.headers.get('location')).toBe('/ko/settings?error=chatgpt_login_failed');
       const line = logged.mock.calls.map((args) => format(...args)).join('\n');
       expect(line).toContain('[chatgpt] sign-in failed: JWTClaimValidationFailed: unexpected "aud" claim value');
       expect(line).not.toContain('alice@chatgpt.test');
@@ -1048,70 +1188,81 @@ describe('Sign in with ChatGPT', () => {
     }
   });
 
-  it('answers each reader from their own account and signs one out without touching another', async () => {
+  it('disconnects, keeps the registration for the next connection, and takes another account in its place', async () => {
     const openai = fakeOpenAI();
-    const { target, signIn } = hostedApp(openai, { NODE_ENV: 'development' });
-    const alice = (await signIn('alice')).cookie;
-    const bob = await signIn('bob');
-    expect(await readJson(await request(alice, '/api/models', 'GET', undefined, target))).toEqual([{ id: 'gpt-for-alice', label: 'gpt-for-alice' }]);
-    expect(await readJson(await request(bob.cookie, '/api/models', 'GET', undefined, target))).toEqual([{ id: 'gpt-for-bob', label: 'gpt-for-bob' }]);
+    const { target, connect } = connectApp(openai, { NODE_ENV: 'development' });
+    const alice = await connect('alice');
+    expect(await readJson(await request(undefined, '/api/models', 'GET', undefined, target))).toEqual([{ id: 'gpt-for-alice', label: 'gpt-for-alice' }]);
+
+    expect(await readJson(await json(undefined, '/api/chatgpt/disconnect', 'POST', undefined, target))).toEqual({ revocationPending: false });
+    expect(openai.state.revoked).toEqual(['REFRESH-alice-0']);
+    expect(await readJson(await request(undefined, '/api/chatgpt', 'GET', undefined, target))).toEqual({ connected: false, email: null, local: true });
     expect(await readJson(await request(undefined, '/api/models', 'GET', undefined, target))).toEqual([]);
+    const [kept] = await db.select().from(account).where(eq(account.accountId, 'alice'));
+    expect(kept).toMatchObject({ clientId: 'app_alice', accessToken: null, refreshToken: null });
+    // Nothing else ends with it: the app has no session of its own to end.
+    expect((await request(undefined, '/api/chats', 'GET', undefined, target)).status).toBe(200);
 
-    expect(await readJson(await json(bob.cookie, '/api/chatgpt/sign-out', 'POST', undefined, target))).toEqual({ revocationPending: false });
-    expect(openai.state.revoked).toEqual(['REFRESH-bob-0']);
-    expect((await request(bob.cookie, '/api/chats', 'GET', undefined, target)).status).toBe(401);
-    expect((await request(alice, '/api/chats', 'GET', undefined, target)).status).toBe(200);
-    const [bobRow] = await db.select().from(account).where(eq(account.accountId, 'bob'));
-    expect(bobRow).toMatchObject({ clientId: 'app_bob', accessToken: null, refreshToken: null });
-
-    // The browser remembers bob's registration, so signing back in does not register again.
-    const back = await signIn('bob', bob.cookie);
-    expect(back.authorization.searchParams.get('client_id')).toBe('app_bob');
+    // The browser remembers the registration, so connecting again does not register again.
+    const back = await connect('alice', alice.cookie);
+    expect(back.authorization.searchParams.get('client_id')).toBe('app_alice');
     expect(back.authorization.searchParams.has('agent_name_hint')).toBe(false);
-    expect((await request(back.cookie, '/api/chats', 'GET', undefined, target)).status).toBe(200);
-    expect(await db.select().from(user)).toHaveLength(2);
+    expect(await readJson(await request(undefined, '/api/models', 'GET', undefined, target))).toEqual([{ id: 'gpt-for-alice', label: 'gpt-for-alice' }]);
+
+    // Another account takes the one connection's place.
+    await json(undefined, '/api/chatgpt/disconnect', 'POST', undefined, target);
+    await connect('bob');
+    expect(await readJson(await request(undefined, '/api/models', 'GET', undefined, target))).toEqual([{ id: 'gpt-for-bob', label: 'gpt-for-bob' }]);
+    expect(await readJson(await request(undefined, '/api/chatgpt', 'GET', undefined, target))).toEqual({ connected: true, email: 'bob@chatgpt.test', local: true });
+    expect((await db.select().from(account)).map((row) => row.accountId)).toEqual(['bob']);
+    expect(await db.select().from(user)).toHaveLength(1);
+
+    // Connected over without a disconnect, the account replaced lets its grant go as a disconnect does.
+    await connect('carol');
+    expect(openai.state.revoked).toEqual(['REFRESH-alice-0', 'REFRESH-alice-0', 'REFRESH-bob-0']);
+    expect((await db.select().from(account)).map((row) => row.accountId)).toEqual(['carol']);
   });
 
   it('rotates an expiring token once however many requests need it', async () => {
     const openai = fakeOpenAI();
-    const { accounts, signIn, target } = hostedApp(openai);
-    const { cookie } = await signIn('alice');
-    const { user: me } = await readJson(await request(cookie, '/api/auth/get-session', 'GET', undefined, target));
-    await db.update(account).set({ accessTokenExpiresAt: new Date(0) }).where(eq(account.userId, me.id));
-    const tokens = await Promise.all([1, 2, 3].map(() => accounts.forUser(me.id).accessToken()));
+    const { accounts, connect } = connectApp(openai);
+    await connect('alice');
+    const me = await ownerId();
+    await db.update(account).set({ accessTokenExpiresAt: new Date(0) }).where(eq(account.userId, me));
+    const tokens = await Promise.all([1, 2, 3].map(() => accounts.forUser(me).accessToken()));
     expect(tokens).toEqual(['ACCESS-alice-1', 'ACCESS-alice-1', 'ACCESS-alice-1']);
     expect(openai.state.refreshes).toBe(1);
   });
 
-  it('keeps the sign-in when OpenAI discovery fails before a refresh', async () => {
-    const { signIn, target } = hostedApp(fakeOpenAI());
-    const { cookie } = await signIn('alice');
-    const { user: me } = await readJson(await request(cookie, '/api/auth/get-session', 'GET', undefined, target));
-    await db.update(account).set({ accessTokenExpiresAt: new Date(0) }).where(eq(account.userId, me.id));
+  it('keeps the connection when OpenAI discovery fails before a refresh', async () => {
+    const { connect } = connectApp(fakeOpenAI());
+    await connect('alice');
+    const me = await ownerId();
+    await db.update(account).set({ accessTokenExpiresAt: new Date(0) }).where(eq(account.userId, me));
     // A process that has not loaded discovery yet, while auth.openai.com answers 502.
     const restarted = fakeOpenAI();
     restarted.state.discoveryDown = true;
-    const { accounts } = hostedApp(restarted);
-    await expect(accounts.forUser(me.id).accessToken()).rejects.toMatchObject({ code: 'chatgpt_unavailable', status: 503 });
+    const { accounts } = connectApp(restarted);
+    await expect(accounts.forUser(me).accessToken()).rejects.toMatchObject({ code: 'chatgpt_unavailable', status: 503 });
     expect(restarted.state.refreshes).toBe(0);
-    const [kept] = await db.select().from(account).where(eq(account.userId, me.id));
+    const [kept] = await db.select().from(account).where(eq(account.userId, me));
     expect(kept).toMatchObject({ accessToken: expect.any(String), refreshToken: expect.any(String) });
     // Once discovery answers, the stored refresh token still works.
     restarted.state.discoveryDown = false;
-    expect(await accounts.forUser(me.id).accessToken()).toBe('ACCESS-alice-1');
+    expect(await accounts.forUser(me).accessToken()).toBe('ACCESS-alice-1');
   });
 
-  /** Alice signed in, her stored token `ACCESS-alice-0` fresh by its recorded expiry. */
-  async function signedInAlice() {
+  /** Alice's ChatGPT connected, her stored token `ACCESS-alice-0` fresh by its recorded expiry. */
+  async function connectedAlice() {
     const openai = fakeOpenAI();
-    const { accounts, signIn, target } = hostedApp(openai);
-    const { cookie } = await signIn('alice');
-    const { user: me } = await readJson(await request(cookie, '/api/auth/get-session', 'GET', undefined, target));
-    return { openai, accounts, me: me as { id: string }, alice: accounts.forUser(me.id) };
+    const { accounts, connect } = connectApp(openai);
+    await connect('alice');
+    const me = { id: await ownerId() };
+    return { openai, accounts, me, alice: accounts.forUser(me.id) };
   }
 
   it('refreshes a token the provider calls expired before its recorded expiry, and asks again with the new one', async () => {
-    const { openai, alice } = await signedInAlice();
+    const { openai, alice } = await connectedAlice();
     openai.state.expired.add('ACCESS-alice-0');
     expect(await alice.models()).toEqual([{ id: 'gpt-for-alice', label: 'gpt-for-alice', vision: false }]);
     expect(openai.state.refreshes).toBe(1);
@@ -1119,14 +1270,14 @@ describe('Sign in with ChatGPT', () => {
   });
 
   it('lets a second refusal through after one refresh rather than refreshing again', async () => {
-    const { openai, alice } = await signedInAlice();
+    const { openai, alice } = await connectedAlice();
     openai.state.expired.add('ACCESS-alice-0').add('ACCESS-alice-1');
     await expect(alice.models()).rejects.toMatchObject({ code: 'token_expired', status: 401 });
     expect(openai.state.refreshes).toBe(1);
   });
 
   it('takes a token another request already rotated instead of refreshing it again', async () => {
-    const { openai, alice } = await signedInAlice();
+    const { openai, alice } = await connectedAlice();
     // Three requests turned down with the same token at once: one refresh among them.
     const tokens = await Promise.all([1, 2, 3].map(() => alice.accessToken('ACCESS-alice-0')));
     expect(tokens).toEqual(['ACCESS-alice-1', 'ACCESS-alice-1', 'ACCESS-alice-1']);
@@ -1135,8 +1286,8 @@ describe('Sign in with ChatGPT', () => {
     expect(openai.state.refreshes).toBe(1);
   });
 
-  it('clears the sign-in when the refresh a refused token forced finds the grant gone', async () => {
-    const { openai, accounts, me, alice } = await signedInAlice();
+  it('clears the connection when the refresh a refused token forced finds the grant gone', async () => {
+    const { openai, accounts, me, alice } = await connectedAlice();
     openai.state.expired.add('ACCESS-alice-0');
     openai.state.grantRevoked = true;
     await expect(alice.models()).rejects.toMatchObject({ code: 'invalid_grant' });
@@ -1144,25 +1295,10 @@ describe('Sign in with ChatGPT', () => {
     expect(row).toMatchObject({ clientId: 'app_alice', accessToken: null, refreshToken: null });
     expect(await accounts.status(me.id)).toEqual({ connected: false, email: null });
   });
-
-  it("gives a former local installation's owner, and its plots, to the first account that signs in", async () => {
-    const cookie = await signUp('existing-local@example.test');
-    const plot = await createPlot(cookie, { name: 'Existing plot' });
-    const [owner] = await db.select().from(user);
-    await db.insert(account).values({ id: randomUUID(), providerId: 'local-workspace', accountId: 'default', userId: owner!.id });
-
-    const { target, signIn } = hostedApp(fakeOpenAI());
-    const first = await signIn('alice');
-    const owned = await readJson(await request(first.cookie, '/api/plots', 'GET', undefined, target));
-    expect(owned.map((entry: { id: string }) => entry.id)).toContain(plot.id);
-    const second = await signIn('bob');
-    expect(await readJson(await request(second.cookie, '/api/plots', 'GET', undefined, target))).toEqual([]);
-    expect(await db.select().from(account).where(eq(account.providerId, 'local-workspace'))).toHaveLength(0);
-  });
 });
 
 describe('pairing a phone', () => {
-  /** A tunnel to a shizue running on the reader's own machine, the only place pairing exists. */
+  /** A tunnel to the shizue running on this computer, the only place pairing exists. */
   const TUNNEL = 'https://mac.example.ts.net:8444';
   /**
    * Tailscale on a machine that is on a tailnet, as `tunnel.ts` asks it — serving
@@ -1191,22 +1327,24 @@ describe('pairing a phone', () => {
     };
   };
   const phoneAccess = (tools: TunnelTools = fakeTailscale()) => createPhoneAccess({ webUrl: 'http://localhost:13000', tools });
-  // A tunnel the reader runs and lists in REMOTE_ORIGINS, on a machine whose settings page could open one too.
-  const localApp = (openai: ReturnType<typeof fakeOpenAI>) => hostedApp(openai, {}, { remoteOrigins: [TUNNEL], phoneAccess: phoneAccess() });
-  /** The phone's side, with whatever Origin its page sends. */
+  // A tunnel the owner runs and lists in REMOTE_ORIGINS, on a machine whose settings page could open one too.
+  const localApp = (overrides: Partial<AppDeps> = {}) => makeApp({ remoteOrigins: [TUNNEL], phoneAccess: phoneAccess(), ...overrides });
+  /** The phone's side, through the tunnel, with whatever Origin its page sends. */
   const claim = async (target: Hono<AppEnv>, code: unknown, origin?: string): Promise<Response> => target.request('/api/devices/claim', {
     method: 'POST',
-    headers: { 'content-type': 'application/json', ...(origin ? { origin } : {}) },
+    headers: { ...FROM_TUNNEL, 'content-type': 'application/json', ...(origin ? { origin } : {}) },
     body: JSON.stringify({ code }),
-  });
+  }, { incoming: { socket: { remoteAddress: '127.0.0.1' } } });
+  /** A request from the phone with `cookie`, through the tunnel. */
+  const fromPhone = (target: Hono<AppEnv>, path: string, cookie: string, method = 'GET'): Promise<Response> =>
+    ask(target, path, { ...FROM_TUNNEL, cookie }, '127.0.0.1', method);
 
-  it('hands a phone a session of its own for a code the signed-in browser made, once', async () => {
-    const openai = fakeOpenAI();
-    const { target, signIn } = localApp(openai);
-    expect((await json(undefined, '/api/devices/pair', 'POST', undefined, target)).status).toBe(401);
-    const pc = (await signIn('alice')).cookie;
+  it('hands a phone a session of its own for a code this computer made, once', async () => {
+    const target = localApp();
+    // Nobody but this computer makes a code.
+    expect((await fromPhone(target, '/api/devices/pair', '', 'POST')).status).toBe(401);
 
-    const made = await json(pc, '/api/devices/pair', 'POST', undefined, target);
+    const made = await json(undefined, '/api/devices/pair', 'POST', undefined, target);
     expect(made.status).toBe(200);
     expect(made.headers.get('cache-control')).toBe('no-store');
     const { code, expiresAt, origins } = await readJson(made);
@@ -1221,10 +1359,12 @@ describe('pairing a phone', () => {
     expect(joined.status).toBe(204);
     expect(joined.headers.getSetCookie().find((value) => value.startsWith('shizue_session='))).toMatch(/HttpOnly; SameSite=Lax/);
     const phone = cookieOf(joined);
-    const seen = await readJson(await request(phone, '/api/auth/get-session', 'GET', undefined, target));
-    expect(seen).toMatchObject({ user: { email: 'alice@chatgpt.test' }, paired: true });
-    expect((await readJson(await request(pc, '/api/auth/get-session', 'GET', undefined, target))).paired).toBeUndefined();
-    expect((await request(phone, '/api/chats', 'GET', undefined, target)).status).toBe(200);
+    expect((await fromPhone(target, '/api/chats', phone)).status).toBe(200);
+    expect((await readJson(await fromPhone(target, '/api/devices', phone))).local).toBe(false);
+    expect((await readJson(await request(undefined, '/api/devices', 'GET', undefined, target))).local).toBe(true);
+    const [row] = await db.select().from(session);
+    expect(row!.id).toMatch(/^paired:/);
+    expect(row!.userId).toBe(await ownerId());
 
     // Single use, and no code at all is no session either.
     for (const again of [code, 'not-a-code', '']) {
@@ -1237,61 +1377,66 @@ describe('pairing a phone', () => {
   });
 
   it('refuses a code past its five minutes', async () => {
-    const { target, signIn } = localApp(fakeOpenAI());
-    const pc = (await signIn('alice')).cookie;
-    const { code } = await readJson(await json(pc, '/api/devices/pair', 'POST', undefined, target));
+    const target = localApp();
+    const { code } = await readJson(await json(undefined, '/api/devices/pair', 'POST', undefined, target));
     await db.update(verification).set({ expiresAt: new Date(Date.now() - 1000) });
     expect(await readJson(await claim(target, code))).toMatchObject({ code: 'pairing_invalid' });
   });
 
-  it("signs a phone out alone, and the computer's sign-out takes the phones with it", async () => {
+  it('lets a phone leave alone, keeps it from letting anyone else in, and keeps it paired through a ChatGPT disconnect', async () => {
     const openai = fakeOpenAI();
-    const { target, signIn } = localApp(openai);
-    const pc = (await signIn('alice')).cookie;
+    const accounts = createChatGPTAccounts(db, { secret: 'test-secret-test-secret-test-secret', callbackPort: 47801, oauth: openai.oauth });
+    const target = localApp({ chatgpt: { accounts } });
     const pairPhone = async (): Promise<string> =>
-      cookieOf(await claim(target, (await readJson(await json(pc, '/api/devices/pair', 'POST', undefined, target))).code));
+      cookieOf(await claim(target, (await readJson(await json(undefined, '/api/devices/pair', 'POST', undefined, target))).code));
     const phone = await pairPhone();
     const tablet = await pairPhone();
 
-    // Either sign-out, from a phone, ends that phone's session and nothing else.
-    expect(await readJson(await json(phone, '/api/auth/sign-out', 'POST', {}, target))).toEqual({ revocationPending: false });
-    expect(await readJson(await json(tablet, '/api/chatgpt/sign-out', 'POST', undefined, target))).toEqual({ revocationPending: false });
-    expect(openai.state.revoked).toEqual([]);
-    expect((await request(phone, '/api/chats', 'GET', undefined, target)).status).toBe(401);
-    expect((await request(tablet, '/api/chats', 'GET', undefined, target)).status).toBe(401);
-    expect((await request(pc, '/api/chats', 'GET', undefined, target)).status).toBe(200);
-    expect(await readJson(await request(pc, '/api/chatgpt', 'GET', undefined, target))).toEqual({ connected: true, email: 'alice@chatgpt.test' });
+    // A phone opens no tunnel, closes none, and makes no code.
+    for (const [method, path] of [['POST', '/api/devices/pair'], ['POST', '/api/devices/tunnel'], ['DELETE', '/api/devices/tunnel']] as const) {
+      const refused = await fromPhone(target, path, phone, method);
+      expect(refused.status, path).toBe(403);
+      expect(await readJson(refused)).toMatchObject({ code: 'local_only' });
+    }
 
-    const third = await pairPhone();
-    expect(await readJson(await json(pc, '/api/chatgpt/sign-out', 'POST', undefined, target))).toEqual({ revocationPending: false });
+    // Leaving ends that phone's session and nothing else.
+    const left = await fromPhone(target, '/api/devices/session', phone, 'DELETE');
+    expect(left.status).toBe(204);
+    expect(left.headers.getSetCookie()[0]).toMatch(/^shizue_session=; Path=\/; Max-Age=0/);
+    expect((await fromPhone(target, '/api/chats', phone)).status).toBe(401);
+    expect((await fromPhone(target, '/api/chats', tablet)).status).toBe(200);
+
+    // A ChatGPT disconnect on this computer leaves the phones paired.
+    const start = await json(undefined, '/api/chatgpt/sign-in', 'POST', { next: '/settings', locale: 'ko' }, target);
+    const authorization = new URL((await readJson(start)).authorizationUrl);
+    Object.assign(openai.state, { subject: 'alice', email: 'alice@chatgpt.test', nonce: authorization.searchParams.get('nonce') });
+    await request(cookieOf(start), `/api/chatgpt/callback?code=c&state=${authorization.searchParams.get('state')}&client_id=app_alice`, 'GET', undefined, target);
+    expect(await readJson(await fromPhone(target, '/api/chatgpt', tablet))).toEqual({ connected: true, email: 'alice@chatgpt.test', local: false });
+    expect(await readJson(await json(undefined, '/api/chatgpt/disconnect', 'POST', undefined, target))).toEqual({ revocationPending: false });
     expect(openai.state.revoked).toEqual(['REFRESH-alice-0']);
-    expect((await request(third, '/api/chats', 'GET', undefined, target)).status).toBe(401);
-    expect(await db.select().from(session)).toHaveLength(0);
+    expect((await fromPhone(target, '/api/chats', tablet)).status).toBe(200);
+    expect(await db.select().from(session)).toHaveLength(1);
   });
 
-  /** The API as it runs on this machine or hosted, with the origin guard on, and a reader signed in there. */
-  const guarded = async () => {
-    const accounts = createChatGPTAccounts(db, { secret: 'test-secret-test-secret-test-secret', callbackPort: 47801, oauth: fakeOpenAI().oauth });
-    const sessions = createSessionStore(db, { secure: false });
-    const deps = { auth: createHostedAuth(sessions, accounts), chatgpt: { accounts, sessions }, webOrigin: 'http://localhost:13000' };
-    const [owner] = await db.insert(user).values({ id: randomUUID(), name: 'alice', email: 'alice@chatgpt.test' }).returning();
-    const signedIn = (await sessions.create(owner!.id, new Request('http://localhost:13000/'))).split(';')[0]!;
+  /** The API with the origin guard on, as it runs on this computer. */
+  const guarded = () => {
+    const deps = { webOrigin: 'http://localhost:13000' };
     const call = (target: Hono<AppEnv>, method: string, path: string, origin = 'http://localhost:13000'): Promise<Response> =>
-      Promise.resolve(target.request(path, { method, headers: { cookie: signedIn, origin } }));
+      Promise.resolve(target.request(path, { method, headers: { origin } }));
     return { deps, call };
   };
 
-  it('has no pairing off this machine, as the hosted app, and takes a claim from the tunnel only', async () => {
-    const { deps, call } = await guarded();
-    // The hosted app is never handed a tunnel (`index.ts`), whatever its env says.
-    const hosted = makeApp({ ...deps, webOrigin: 'https://plot.example' });
+  it('has no pairing without a tunnel manager, and takes a claim from the tunnel only', async () => {
+    const { deps, call } = guarded();
+    // A web origin off this machine is never handed a tunnel (`index.ts`).
+    const without = makeApp({ ...deps, webOrigin: 'https://plot.example' });
     const local = makeApp({ ...deps, remoteOrigins: [TUNNEL], phoneAccess: phoneAccess() });
     const pair = (target: Hono<AppEnv>, origin: string): Promise<Response> => call(target, 'POST', '/api/devices/pair', origin);
 
     for (const [method, path] of [['GET', '/api/devices'], ['POST', '/api/devices/tunnel'], ['DELETE', '/api/devices/tunnel'], ['POST', '/api/devices/pair']] as const) {
-      expect((await call(hosted, method, path, 'https://plot.example')).status).toBe(404);
+      expect((await call(without, method, path, 'https://plot.example')).status).toBe(404);
     }
-    expect((await claim(hosted, 'x', 'https://plot.example')).status).toBe(404);
+    expect((await without.request('/api/devices/claim', { method: 'POST', headers: { origin: 'https://plot.example', 'content-type': 'application/json' }, body: '{"code":"x"}' })).status).toBe(404);
     expect(await db.select().from(verification)).toHaveLength(0);
 
     const { code } = await readJson(await pair(local, 'http://localhost:13000'));
@@ -1302,7 +1447,7 @@ describe('pairing a phone', () => {
   });
 
   it('opens a tunnel from the settings page, takes the phone at its address while it is open, and closes its own port only', async () => {
-    const { deps, call } = await guarded();
+    const { deps, call } = guarded();
     const tools = fakeTailscale();
     const local = makeApp({ ...deps, phoneAccess: phoneAccess(tools) });
     const opened = 'https://mac.example.ts.net:8444';
@@ -1312,6 +1457,7 @@ describe('pairing a phone', () => {
       tunnel: null,
       available: { tailscale: true, cloudflare: false },
       origins: [],
+      local: true,
     });
     // Nowhere for a phone to open a code yet.
     const early = await call(local, 'POST', '/api/devices/pair');
@@ -1322,12 +1468,19 @@ describe('pairing a phone', () => {
       tunnel: { kind: 'tailscale', origin: opened },
       available: { tailscale: true, cloudflare: false },
       origins: [opened],
+      local: true,
     });
     expect(tools.served.get(8444)).toBe('http://127.0.0.1:13000');
     const { code, origins } = await readJson(await call(local, 'POST', '/api/devices/pair'));
     expect(origins).toEqual([opened]);
-    expect((await claim(local, code, opened)).status).toBe(204);
-    expect((await call(local, 'GET', '/api/devices', opened)).status).toBe(200);
+    const joined = await claim(local, code, opened);
+    expect(joined.status).toBe(204);
+    // The phone at the tunnel's address, with the session it was handed.
+    const phone = await local.request('/api/devices', {
+      headers: { ...FROM_TUNNEL, origin: opened, cookie: cookieOf(joined) },
+    }, { incoming: { socket: { remoteAddress: '127.0.0.1' } } });
+    expect(phone.status).toBe(200);
+    expect((await readJson(phone)).local).toBe(false);
 
     // A restarted API finds the address Tailscale kept, and trusts it again.
     const restarted = makeApp({ ...deps, phoneAccess: phoneAccess(tools) });
@@ -1339,7 +1492,7 @@ describe('pairing a phone', () => {
   });
 
   it('says why the tunnel would not open', async () => {
-    const { deps, call } = await guarded();
+    const { deps, call } = guarded();
     const none = makeApp({ ...deps, phoneAccess: phoneAccess({ run: async () => { throw new Error('not found'); }, start: () => { throw new Error('not found'); } }) });
     const refused = await call(none, 'POST', '/api/devices/tunnel');
     expect(refused.status).toBe(409);
@@ -1421,20 +1574,6 @@ describe('plots', () => {
 
     expect((await request(cookie, `/api/plots/${created.id}`, 'DELETE')).status).toBe(204);
     expect((await request(cookie, `/api/plots/${created.id}`)).status).toBe(404);
-  });
-
-  it('isolates plots between users', async () => {
-    const alice = await signUp('a@example.com');
-    const bob = await signUp('b@example.com');
-    const plot = await createPlot(alice, { name: '앨리스 작품' });
-
-    expect((await request(bob, `/api/plots/${plot.id}`)).status).toBe(404);
-    expect(((await readJson(await request(bob, `/api/plots/${plot.id}`))) as any).code).toBe('not_found');
-    expect((await json(bob, `/api/plots/${plot.id}`, 'PATCH', { name: 'x' })).status).toBe(404);
-    expect((await request(bob, `/api/plots/${plot.id}`, 'DELETE')).status).toBe(404);
-    expect((await json(bob, `/api/plots/${plot.id}/characters`, 'POST', { name: 'x' })).status).toBe(404);
-    expect((await request(bob, `/api/plots/${plot.id}/characters`)).status).toBe(404);
-    expect(await readJson(await request(bob, '/api/plots'))).toEqual([]);
   });
 
   it('stores the openings a chat starts from, capped in count and in length', async () => {
@@ -1871,7 +2010,6 @@ describe('plots', () => {
 
   it('publishes, gates on the basics and unpublishes', async () => {
     const alice = await signUp('publish@example.com');
-    const bob = await signUp('publish-reader@example.com');
     const bare = await createPlot(alice, { name: '빈 작품' });
 
     // Neither a setting nor anyone described: nothing for the model to play.
@@ -1900,8 +2038,6 @@ describe('plots', () => {
     // required rather than defaulted.
     expect((await json(alice, `/api/plots/${bare.id}/publish`, 'POST', { publish: false })).status).toBe(200);
     expect((await json(alice, `/api/plots/${bare.id}/publish`, 'POST', {})).status).toBe(400);
-    // Publishing stays owner-only.
-    expect((await json(bob, `/api/plots/${bare.id}/publish`, 'POST', { publish: true })).status).toBe(404);
   });
 });
 
@@ -2094,7 +2230,6 @@ describe('plot characters', () => {
 
   it('takes an avatar upload directly and gives it back', async () => {
     const alice = await signUp('avatar-upload@example.com');
-    const bob = await signUp('avatar-upload-other@example.com');
     const plot = await createPlot(alice);
     const member = await addCharacter(alice, plot.id, { name: '리안' });
     const url = `/api/plots/${plot.id}/characters/${member.id}/avatar`;
@@ -2116,12 +2251,10 @@ describe('plot characters', () => {
     expect((await request(alice, url)).headers.get('content-type')).toBe('image/gif');
     await expect(readFile(join(storageDir, 'avatars', `${member.id}.png`))).rejects.toThrow();
 
-    // Bytes that are not an image, and someone else's plot.
+    // Bytes that are not an image.
     const junk = await uploadFile(alice, url, new Uint8Array([1, 2, 3, 4]), 'x.bin');
     expect(junk.status).toBe(400);
     expect((await readJson(junk)).code).toBe('invalid_asset');
-    expect((await uploadFile(bob, url, gif, 'a.gif')).status).toBe(404);
-    expect((await request(bob, url, 'DELETE')).status).toBe(404);
 
     const cleared = await readJson(await request(alice, url, 'DELETE'));
     expect(cleared.avatarUrl).toBeNull();
@@ -2370,32 +2503,6 @@ describe('import provenance and publishing rights', () => {
     expect(Date.parse(after.rightsConfirmedAt)).toBeGreaterThanOrEqual(before - 1000);
   });
 
-  it('never shows anyone but the owner where a member came from', async () => {
-    const alice = await signUp('rights-owner@example.com');
-    const bob = await signUp('rights-reader@example.com');
-    const file = new File([JSON.stringify(realmCard('CC BY 4.0'))], 'lian-original.json');
-    const plot = await readJson(
-      await importWith(alice, '/api/plots/import', file, { sourceUrl: realmUrl }),
-    );
-    await publishPlot(alice, plot.id, { rightsConfirmed: true });
-
-    const view = await readPublicPlot(bob, plot.id);
-    expect(view.characters).toHaveLength(1);
-    expect(view.characters[0].importedFrom).toBeUndefined();
-    expect(view.rightsConfirmedAt).toBeUndefined();
-    const explore = await readJson(await request(bob, '/api/explore?language=ko'));
-    // The reader's own transcript names the cast, by name and face only.
-    const state = await startChat(bob, plot.id);
-    const exported = await readJson(await request(bob, `/api/chats/${state.chat.id}/export`));
-    for (const payload of [view, explore, exported]) {
-      expect(JSON.stringify(payload)).not.toContain(realmId);
-      expect(JSON.stringify(payload)).not.toContain('lian-original.json');
-    }
-    for (const path of [`/api/plots/${plot.id}`, `/api/plots/${plot.id}/characters`]) {
-      expect((await request(bob, path)).status).toBe(404);
-    }
-  });
-
   it(`takes a card the size Realm serves, and refuses one over ${MAX_CARD_IMPORT_BYTES} bytes`, async () => {
     const cookie = await signUp('import-size@example.com');
     // JSON takes whitespace anywhere, so this is one ordinary card in a 30MB file.
@@ -2525,9 +2632,8 @@ describe('paste migration', () => {
     expect(bare.characters[0].importedFrom.sourceUrl).toBeUndefined();
   });
 
-  it('finds a migrated draft by the fingerprint the browser computes, for its owner only', async () => {
+  it('finds a migrated draft by the fingerprint the browser computes', async () => {
     const alice = await signUp('migrate-lookup@example.com');
-    const bob = await signUp('migrate-lookup-other@example.com');
     const draft = zetaDraft();
     const plot = await readJson(await migrate(alice, { draft }));
     const sha256 = fingerprintHash(draft);
@@ -2537,10 +2643,6 @@ describe('paste migration', () => {
     expect(found.characters).toEqual(
       plot.characters.map((member: any) => ({ sha256, plotId: plot.id, characterId: member.id })),
     );
-    expect(await readJson(await json(bob, '/api/imports/lookup', 'POST', { sha256: [sha256] }))).toEqual({
-      characters: [],
-      chats: [],
-    });
     // A different draft is a different fingerprint.
     const other = fingerprintHash(zetaDraft({ name: '다른 서점' }));
     expect((await readJson(await json(alice, '/api/imports/lookup', 'POST', { sha256: [other] }))).characters).toEqual([]);
@@ -2594,7 +2696,6 @@ describe('paste migration', () => {
     ]) {
       expect(await refused(cookie, { sourceUrl })).toBe('invalid_request');
     }
-    expect((await json(undefined, '/api/plots/migrate', 'POST', {})).status).toBe(401);
     expect(await readJson(await request(cookie, '/api/plots'))).toEqual([]);
   });
 
@@ -2636,9 +2737,8 @@ describe('card export', () => {
   const exportPath = (plotId: string, memberId: string, format: string) =>
     `/api/plots/${plotId}/characters/${memberId}/export?format=${format}`;
 
-  it('hands a member back as a V3 card with the plot written over it, to the owner only', async () => {
+  it('hands a member back as a V3 card with the plot written over it', async () => {
     const alice = await signUp('card-export@example.com');
-    const bob = await signUp('card-export-other@example.com');
     // Imported, so the stored card holds everything the ST card carried —
     // including the lorebook settings the editor's save may not keep.
     const plot = await importCard(alice, stCardFile());
@@ -2685,8 +2785,6 @@ describe('card export', () => {
     ]);
     expect(card.lorebook.filter((entry) => entry.content.includes('숲을 떠나지'))).toHaveLength(1);
 
-    expect((await request(bob, exportPath(plot.id, member.id, 'json'))).status).toBe(404);
-    expect((await request(undefined, exportPath(plot.id, member.id, 'json'))).status).toBe(401);
     expect((await request(alice, exportPath(plot.id, randomUUID(), 'json'))).status).toBe(404);
     expect((await request(alice, exportPath(plot.id, member.id, 'xml'))).status).toBe(400);
   });
@@ -2726,9 +2824,8 @@ describe('card export', () => {
     expect(stripPngTextChunks(await exportPng())).toEqual(placeholderPng());
   });
 
-  it('writes a charx carrying the icon and every plot image, to the owner only', async () => {
+  it('writes a charx carrying the icon and every plot image', async () => {
     const alice = await signUp('card-export-charx@example.com');
-    const bob = await signUp('card-export-charx-other@example.com');
     const gif = (marker: number): Uint8Array =>
       Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, marker]);
     const icon = buildPngWithTextChunks({ Title: 'icon' });
@@ -2796,9 +2893,6 @@ describe('card export', () => {
         ['castle', gif(3)],
       ]),
     );
-
-    expect((await request(bob, exportPath(plot.id, member.id, 'charx'))).status).toBe(404);
-    expect((await request(undefined, exportPath(plot.id, member.id, 'charx'))).status).toBe(401);
   });
 
   it("makes a joining card's group-only greetings openings of the cast, under the cap", async () => {
@@ -2867,9 +2961,8 @@ describe('personas', () => {
     expect(await readJson(await request(cookie, '/api/personas'))).toEqual([]);
   });
 
-  it('takes a picture, serves it to its owner alone, and lets it go', async () => {
+  it('takes a picture, serves it, and lets it go', async () => {
     const alice = await signUp('persona-avatar@example.com');
-    const bob = await signUp('persona-avatar-other@example.com');
     const persona = await readJson(await json(alice, '/api/personas', 'POST', { name: '여행자' }));
     const url = `/api/personas/${persona.id}/avatar`;
     expect(persona.avatarUrl).toBeNull();
@@ -2890,14 +2983,8 @@ describe('personas', () => {
     expect(new Uint8Array(await served.arrayBuffer())).toEqual(stripPngTextChunks(png));
     await readFile(join(storageDir, 'personas', `${persona.id}.png`));
 
-    // Nobody else reaches it, signed in or not, to read, replace or remove.
-    const gif = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 2, 3]);
-    expect((await request(bob, url)).status).toBe(404);
-    expect((await uploadFile(bob, url, gif, 'a.gif')).status).toBe(404);
-    expect((await request(bob, url, 'DELETE')).status).toBe(404);
-    expect((await request(undefined, url)).status).toBe(401);
-
     // Re-uploading in another format leaves no orphan behind under the old key.
+    const gif = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 2, 3]);
     await uploadFile(alice, url, gif, 'a.gif');
     expect((await request(alice, url)).headers.get('content-type')).toBe('image/gif');
     await expect(readFile(join(storageDir, 'personas', `${persona.id}.png`))).rejects.toThrow();
@@ -2966,16 +3053,6 @@ describe('notes', () => {
     expect(await readJson(await request(cookie, '/api/notes'))).toHaveLength(1);
   });
 
-  it('isolates notes between users', async () => {
-    const alice = await signUp('note-a@example.com');
-    const bob = await signUp('note-b@example.com');
-    const note = await createNote(alice, { content: '앨리스의 노트' });
-
-    expect(await readJson(await request(bob, '/api/notes'))).toEqual([]);
-    expect((await json(bob, `/api/notes/${note.id}`, 'PUT', { content: '남의 것' })).status).toBe(404);
-    expect((await request(bob, `/api/notes/${note.id}`, 'DELETE')).status).toBe(404);
-  });
-
   it('caps the note length and the number of notes per account', async () => {
     const cookie = await signUp('note-cap@example.com');
     const tooLong = await json(cookie, '/api/notes', 'POST', { content: 'ㄱ'.repeat(MAX_LENGTH + 1) });
@@ -2985,7 +3062,7 @@ describe('notes', () => {
     await createNote(cookie, { content: 'ㄱ'.repeat(MAX_LENGTH) });
 
     // Fill the account up directly; the endpoint only has to reject the next one.
-    const session = await readJson(await request(cookie, '/api/auth/get-session'));
+    const session = { user: { id: await ownerId() } };
     await db.insert(userNotes).values(
       Array.from({ length: MAX_NOTES - 1 }, (_, index) => ({
         userId: session.user.id as string,
@@ -3003,7 +3080,7 @@ describe('notes', () => {
 
   it('holds the account cap against a concurrent create', async () => {
     const cookie = await signUp('note-race@example.com');
-    const session = await readJson(await request(cookie, '/api/auth/get-session'));
+    const session = { user: { id: await ownerId() } };
     const userId = session.user.id as string;
     // 99 rows straight into the table — the route only counts them.
     await db.insert(userNotes).values(
@@ -3133,15 +3210,10 @@ describe('notes', () => {
     expect((await json(cookie, `/api/chats/${chatId}/notes/${ids.at(-1)}`, 'POST')).status).toBe(200);
   });
 
-  it('refuses to attach a note or a chat that belongs to someone else', async () => {
+  it('refuses to attach a note that is not there', async () => {
     const alice = await signUp('note-attach-a@example.com');
-    const bob = await signUp('note-attach-b@example.com');
     const { chatId } = await setupChat(alice);
-    const bobNote = await createNote(bob, { content: '밥의 노트' });
-    const aliceNote = await createNote(alice, { content: '앨리스의 노트' });
 
-    expect((await json(alice, `/api/chats/${chatId}/notes/${bobNote.id}`, 'POST')).status).toBe(404);
-    expect((await json(bob, `/api/chats/${chatId}/notes/${aliceNote.id}`, 'POST')).status).toBe(404);
     expect((await json(alice, `/api/chats/${chatId}/notes/${randomUUID()}`, 'POST')).status).toBe(404);
     expect((await readJson(await request(alice, `/api/chats/${chatId}`))).chat.noteIds).toEqual([]);
   });
@@ -3454,15 +3526,9 @@ describe('chats', () => {
     expect(reread.path.map((message: any) => message.id)).toEqual([state.path[0].id]);
   });
 
-  it('deletes a message only for the owner of the chat it is in', async () => {
+  it('deletes a message only from the chat it is in', async () => {
     const cookie = await signUp('delete-owner@example.com');
-    const other = await signUp('delete-intruder@example.com');
     const { chatId } = await setupChat(cookie);
-    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    const messageId = state.path[0].id;
-
-    expect((await request(undefined, `/api/chats/${chatId}/messages/${messageId}`, 'DELETE')).status).toBe(401);
-    expect((await request(other, `/api/chats/${chatId}/messages/${messageId}`, 'DELETE')).status).toBe(404);
 
     // One's own message, but not in this chat: the chat is the boundary.
     const second = await setupChat(cookie);
@@ -3760,7 +3826,6 @@ describe('chats', () => {
 
   it("stores the author note and sends it at the preset's author-note slot, ahead of the chat", async () => {
     const cookie = await signUp('note@example.com');
-    const other = await signUp('note-other@example.com');
     const { chatId } = await setupChat(cookie);
     const note = '지금은 비 오는 밤이다. 리안은 말수를 줄인다.';
 
@@ -3796,12 +3861,10 @@ describe('chats', () => {
     const bad = await json(cookie, `/api/chats/${chatId}`, 'PATCH', { note: 42 });
     expect(bad.status).toBe(400);
     expect((await readJson(bad)).code).toBe('invalid_request');
-    expect((await json(other, `/api/chats/${chatId}`, 'PATCH', { note: '남의 것' })).status).toBe(404);
   });
 
   it('rejects invalid chat settings', async () => {
     const cookie = await signUp('settings-bad@example.com');
-    const other = await signUp('settings-other@example.com');
     const { chatId } = await setupChat(cookie);
 
     const unknown = await json(cookie, `/api/chats/${chatId}`, 'PATCH', { model: 'nope/nope' });
@@ -3815,12 +3878,9 @@ describe('chats', () => {
     expect(gated.status).toBe(400);
     expect((await readJson(gated)).code).toBe('model_unavailable');
 
-    const otherPersona = await readJson(await json(other, '/api/personas', 'POST', { name: '남의 것' }));
-    const stolen = await json(cookie, `/api/chats/${chatId}`, 'PATCH', { personaId: otherPersona.id });
-    expect(stolen.status).toBe(404);
-    expect((await readJson(stolen)).code).toBe('not_found');
-
-    expect((await json(other, `/api/chats/${chatId}`, 'PATCH', { model: 'echo/echo' })).status).toBe(404);
+    const missing = await json(cookie, `/api/chats/${chatId}`, 'PATCH', { personaId: randomUUID() });
+    expect(missing.status).toBe(404);
+    expect((await readJson(missing)).code).toBe('not_found');
 
     // The chat is untouched by all of the above.
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
@@ -4188,18 +4248,15 @@ describe('chats', () => {
     expect(prompts[2]!.system).toContain('[Roleplay Setting]\n왕립 도서관의 사서.');
   });
 
-  it("shows the plot's creator what a regenerate would send, and nobody else", async () => {
+  it("shows the plot's creator what a regenerate would send", async () => {
     const owner = await signUp('inspect-owner@example.com');
-    const reader = await signUp('inspect-reader@example.com');
     const plot = await publishablePlot(owner, {
       // An always-on entry, and one the reader's turn brings in by its keyword.
       lorebook: [{ content: 'ALWAYS ON', constant: true }, { keys: ['안녕'], content: 'KEYED ON' }],
     });
     await publishPlot(owner, plot.id);
     const own = await startChat(owner, plot.id);
-    const theirs = await startChat(reader, plot.id);
     expect(own.isPlotOwner).toBe(true);
-    expect(theirs.isPlotOwner).toBe(false);
     await readSse(await json(owner, `/api/chats/${own.chat.id}/messages`, 'POST', { content: '안녕' }));
     const count = async () => (await db.select().from(messages).where(eq(messages.chatId, own.chat.id))).length;
     const before = await count();
@@ -4242,11 +4299,6 @@ describe('chats', () => {
     expect(report.blocks.at(-1)).toMatchObject({ kind: 'preset', text: OAI_JAILBREAK });
     expect(await count()).toBe(before);
     expect(await claimOf(own.chat.id)).toBeNull();
-
-    // The reader's own chat on someone else's plot, and the creator on a chat
-    // that is not theirs, both read as no such chat.
-    expect((await request(reader, `/api/chats/${theirs.chat.id}/inspect`)).status).toBe(404);
-    expect((await request(owner, `/api/chats/${theirs.chat.id}/inspect`)).status).toBe(404);
   });
 
   it('returns 429 while another generation is in flight', async () => {
@@ -4581,9 +4633,6 @@ describe('chats', () => {
     const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, target);
     await res.body!.getReader().read();
 
-    // Another reader cannot stop it.
-    const stranger = await signUp('stop-stranger@example.com');
-    expect((await json(stranger, `/api/chats/${chatId}/stop`, 'POST', undefined, target)).status).toBe(404);
     expect(await claimOf(chatId)).not.toBeNull();
 
     const stopped = await json(cookie, `/api/chats/${chatId}/stop`, 'POST', undefined, target);
@@ -4736,23 +4785,6 @@ describe('chats', () => {
     expect(send.status).toBe(200);
     expect((await readSse(send)).at(-1)!.event).toBe('done');
     expect(generating.size).toBe(0);
-  });
-
-  // A chat another user owns must not be told apart from one that does not exist,
-  // and taking the slot is the first thing a generation does — so the claim is
-  // guarded by owner, and a miss is re-checked before it is reported as busy.
-  it('keeps another user out of the slot on a chat that is not theirs', async () => {
-    const cookie = await signUp('slot-owner@example.com');
-    const intruder = await signUp('slot-intruder@example.com');
-    const { chatId } = await setupChat(cookie);
-
-    expect((await json(intruder, `/api/chats/${chatId}/messages`, 'POST', { content: '남의 채팅' })).status).toBe(404);
-    expect((await json(intruder, `/api/chats/${chatId}`, 'PATCH', { note: '메모' })).status).toBe(404);
-    // The failed attempts left no claim behind for the owner to trip over.
-    expect(await claimOf(chatId)).toBeNull();
-    const send = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '내 채팅' });
-    expect(send.status).toBe(200);
-    await readSse(send);
   });
 
   /** A chain of `count` turns under `parentId`, alternating roles, and the new head. */
@@ -4913,7 +4945,6 @@ describe('chats', () => {
 
   it('stores the memory settings in their ranges and rejects everything else', async () => {
     const cookie = await signUp('memory-settings@example.com');
-    const other = await signUp('memory-settings-other@example.com');
     const { chatId } = await setupChat(cookie);
 
     const settings = {
@@ -4973,11 +5004,6 @@ describe('chats', () => {
       await json(cookie, `/api/chats/${chatId}`, 'PATCH', { memorySettings: null }),
     );
     expect(reset.chat.memorySettings).toBeNull();
-
-    expect(
-      (await json(other, `/api/chats/${chatId}`, 'PATCH', { memorySettings: { queryChatCount: 1 } }))
-        .status,
-    ).toBe(404);
   });
 
   it('caps the prompt history at the chat context budget', async () => {
@@ -5065,7 +5091,6 @@ describe('chats', () => {
 
   it('refuses to auto-continue from a user head', async () => {
     const cookie = await signUp('auto-state@example.com');
-    const other = await signUp('auto-other@example.com');
     const { chatId } = await setupChat(cookie);
 
     // A branch that ends on a reader's turn.
@@ -5076,18 +5101,6 @@ describe('chats', () => {
     const res = await json(cookie, `/api/chats/${chatId}/auto`, 'POST');
     expect(res.status).toBe(400);
     expect((await readJson(res)).code).toBe('invalid_state');
-
-    expect((await json(other, `/api/chats/${chatId}/auto`, 'POST')).status).toBe(404);
-  });
-
-  it('isolates chats between users', async () => {
-    const alice = await signUp('chat-a@example.com');
-    const bob = await signUp('chat-b@example.com');
-    const { chatId } = await setupChat(alice);
-
-    expect((await request(bob, `/api/chats/${chatId}`)).status).toBe(404);
-    expect((await json(bob, `/api/chats/${chatId}/messages`, 'POST', { content: 'x' })).status).toBe(404);
-    expect(await readJson(await request(bob, '/api/chats'))).toEqual([]);
   });
 });
 
@@ -5686,9 +5699,8 @@ describe('scene editing', () => {
     );
   });
 
-  it('refuses a scene that is not a run of the branch, and an edit of someone else\'s chat', async () => {
+  it('refuses a scene that is not a run of the branch', async () => {
     const cookie = await signUp('scene-bad@example.com');
-    const other = await signUp('scene-bad-other@example.com');
     const { chatId, dialogue, scene } = await sceneChat(cookie);
     const block = (originId: string, kind: string, content: string) => ({ originId, kind, content });
 
@@ -5726,15 +5738,6 @@ describe('scene editing', () => {
     // Nothing was written by any of that.
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
     expect(state.path.map((message: any) => message.id).slice(-3)).toEqual(scene);
-
-    expect(
-      (
-        await editScene(other, chatId, {
-          messageIds: [scene[0]],
-          blocks: [block(scene[0]!, 'narration', '다른 사람의 장면')],
-        })
-      ).status,
-    ).toBe(404);
   });
 });
 
@@ -6845,9 +6848,8 @@ describe('chat attachments', () => {
     expect((await request(cookie, `/api/chats/${chatId}/attachments`, 'POST', form)).status).toBe(404);
   });
 
-  it('serves the image a message carries back, to the chat owner alone', async () => {
+  it('serves the image a message carries back, under its own chat only', async () => {
     const cookie = await signUp('attach-serve@example.com');
-    const other = await signUp('attach-intruder@example.com');
     const { chatId } = await setupChat(cookie);
     const turn = await storedTurn(cookie, chatId, '이 사진 봐');
     const created = await attachImage(chatId, turn.id);
@@ -6859,8 +6861,6 @@ describe('chat attachments', () => {
     expect(served.headers.get('content-type')).toBe('image/gif');
     expect(new Uint8Array(await served.arrayBuffer())).toEqual(gifOf(1));
 
-    expect((await request(other, created.url)).status).toBe(404);
-    expect((await request(undefined, created.url)).status).toBe(401);
     // The chat is the boundary: the same id under another of one's own chats is
     // not found either.
     const second = await setupChat(cookie);
@@ -7101,98 +7101,12 @@ describe('chat export', () => {
     expect(payload.variableTimeline).toEqual([]);
   });
 
-  it('is not readable through anyone else, or through an id that is not a chat', async () => {
+  it('is not readable through an id that is not a chat', async () => {
     const alice = await signUp('export-mine@example.com');
-    const bob = await signUp('export-theirs@example.com');
-    const { chatId } = await setupChat(alice);
+    await setupChat(alice);
 
-    expect((await request(bob, `/api/chats/${chatId}/export`)).status).toBe(404);
     expect((await request(alice, `/api/chats/${randomUUID()}/export`)).status).toBe(404);
     expect((await request(alice, '/api/chats/not-a-uuid/export')).status).toBe(404);
-    expect((await request(undefined, `/api/chats/${chatId}/export`)).status).toBe(401);
-  });
-
-  it("keeps exporting the reader's own conversation after the creator withdraws the plot", async () => {
-    const alice = await signUp('export-creator@example.com');
-    const bob = await signUp('export-reader@example.com');
-    const plot = await publishablePlot(
-      alice,
-      {
-        name: '사라진 작품',
-        description: 'SECRET-DESCRIPTION',
-        intros: ['문 앞이다'],
-        customUi: { defaultVariables: { hp: '100' } },
-      },
-      {
-        name: '사라진 캐릭터',
-        card: {
-          description: 'SECRET-DESCRIPTION',
-          systemPrompt: 'SECRET-SYSTEM-PROMPT',
-          lorebook: [{ keys: ['문'], content: 'SECRET-LORE' }],
-        },
-      },
-    );
-    const member = plot.characters[0];
-    await publishPlot(alice, plot.id);
-    // A cover, an avatar and an asset, so their going away is observable.
-    await db.update(plots).set({ coverPath: 'covers/gone.png' }).where(eq(plots.id, plot.id));
-    await db.update(characters).set({ avatarPath: 'avatars/gone.png' }).where(eq(characters.id, member.id));
-    await db.insert(plotAssets).values({
-      plotId: plot.id,
-      slug: 'smile',
-      path: 'assets/smile.gif',
-      mime: 'image/gif',
-    });
-
-    const created = await startChat(bob, plot.id);
-    const chatId = created.chat.id;
-    const ids = await seedPath(chatId, [
-      { role: 'assistant', content: '문 앞이다 {{img::smile}}' },
-      { role: 'user', content: '{{addvar::hp::-30}} 들어간다' },
-      { role: 'assistant', content: '문이 닫힌다' },
-    ]);
-
-    // While the plot is public it contributes everything it has.
-    const before = await exportOf(bob, chatId);
-    expect(before.chat.plotName).toBe('사라진 작품');
-    expect(before.coverUrl).toBe(`/api/plots/${plot.id}/cover`);
-    expect(before.characters).toEqual([
-      {
-        id: member.id,
-        name: '사라진 캐릭터',
-        avatarUrl: `/api/plots/${plot.id}/characters/${member.id}/avatar`,
-      },
-    ]);
-    expect(before.assets).toEqual([
-      { slug: 'smile', url: `/api/plots/${plot.id}/assets/smile`, mime: 'image/gif' },
-    ]);
-    expect(before.variableTimeline).toEqual([{ messageId: ids[2], variables: { hp: '70' } }]);
-
-    // The creator takes the plot back. The conversation is bob's own record — the
-    // chat itself stays readable, so the export of it does too.
-    await json(alice, `/api/plots/${plot.id}/publish`, 'POST', { publish: false });
-    expect((await request(bob, `/api/chats/${chatId}`)).status).toBe(200);
-
-    const after = await exportOf(bob, chatId);
-    expect(() => ChatExportSchema.parse(after)).not.toThrow();
-    expect(after.messages).toEqual(before.messages);
-    expect(after.chat.plotId).toBe(plot.id);
-    // The chat's own title stands in, so the withdrawn plot is never read for it.
-    expect(after.chat.plotName).toBe('사라진 작품');
-    // What the creator withdrew is what leaves: the roster, the images, the cover.
-    expect(after.characters).toEqual([]);
-    expect(after.assets).toEqual([]);
-    expect(after.coverUrl).toBeNull();
-    // Folded from an empty base rather than the plot's defaults, so the timeline
-    // holds only what the conversation itself set.
-    expect(after.variableTimeline).toEqual([{ messageId: ids[2], variables: { hp: '-30' } }]);
-
-    const serialized = JSON.stringify(after);
-    for (const secret of ['SECRET-DESCRIPTION', 'SECRET-SYSTEM-PROMPT', 'SECRET-LORE']) {
-      expect(serialized, secret).not.toContain(secret);
-    }
-    // And it is still only bob's to export.
-    expect((await request(alice, `/api/chats/${chatId}/export`)).status).toBe(404);
   });
 
   it('exports the plot assets the branch references, and only those', async () => {
@@ -7400,16 +7314,13 @@ describe('hiding a message from the AI', () => {
     expect(sentText(prompts[2]!)).toContain('DRAGON LORE');
   });
 
-  it('takes a boolean, on a message of the reader’s own chat', async () => {
+  it('takes a boolean, on a message of this chat', async () => {
     const cookie = await signUp('hide-checks@example.com');
     const { chatId, state } = await setupChat(cookie);
     const greeting = state.path[0].id;
     const bad = await hide(cookie, chatId, greeting, 'yes');
     expect(bad.status).toBe(400);
     expect((await hide(cookie, chatId, randomUUID(), true)).status).toBe(404);
-    const stranger = await signUp('hide-stranger@example.com');
-    expect((await hide(stranger, chatId, greeting, true)).status).toBe(404);
-    expect((await hide(undefined, chatId, greeting, true)).status).toBe(401);
     // A message of another chat is not this chat's to hide.
     const other = await setupChat(cookie);
     expect((await hide(cookie, chatId, other.state.path[0].id, true)).status).toBe(404);
@@ -7551,7 +7462,6 @@ describe('presets', () => {
 
   it('rejects an unknown preset without touching the chat', async () => {
     const cookie = await signUp('preset-bad@example.com');
-    const other = await signUp('preset-other@example.com');
     const { chatId } = await setupChat(cookie);
     expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { preset: 'default' })).status).toBe(200);
 
@@ -7563,7 +7473,6 @@ describe('presets', () => {
       expect(res.status, JSON.stringify(preset)).toBe(400);
       expect((await readJson(res)).code).toBe('invalid_request');
     }
-    expect((await json(other, `/api/chats/${chatId}`, 'PATCH', { preset: 'default' })).status).toBe(404);
 
     expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.preset).toBe('default');
   });
@@ -7572,16 +7481,14 @@ describe('presets', () => {
 describe('reader presets', () => {
   const create = (cookie: string, body: Record<string, unknown>) => json(cookie, '/api/reader-presets', 'POST', body);
 
-  it('keeps each reader’s own presets, capped, and nobody else’s', async () => {
+  it('keeps the reader’s own presets, capped', async () => {
     const cookie = await signUp('reader-preset@example.com');
-    const other = await signUp('reader-preset-other@example.com');
 
     const res = await create(cookie, { name: '  내 문체  ', main: '메인 추가', globalNote: '노트' });
     expect(res.status).toBe(201);
     const made = await readJson(res);
     expect(made).toMatchObject({ name: '내 문체', main: '메인 추가', globalNote: '노트' });
     expect((await readJson(await request(cookie, '/api/reader-presets'))).map((p: { id: string }) => p.id)).toEqual([made.id]);
-    expect(await readJson(await request(other, '/api/reader-presets'))).toEqual([]);
 
     const edited = await readJson(await json(cookie, `/api/reader-presets/${made.id}`, 'PUT', { globalNote: '바뀐 노트' }));
     expect(edited).toMatchObject({ name: '내 문체', main: '메인 추가', globalNote: '바뀐 노트' });
@@ -7596,9 +7503,6 @@ describe('reader presets', () => {
     ]) {
       expect((await create(cookie, body)).status, JSON.stringify(body).slice(0, 40)).toBe(400);
     }
-    // Someone else's preset is no preset at all.
-    expect((await json(other, `/api/reader-presets/${made.id}`, 'PUT', { name: '탈취' })).status).toBe(404);
-    expect((await json(other, `/api/reader-presets/${made.id}`, 'DELETE')).status).toBe(404);
 
     const userId = (await db.select({ id: readerPresets.userId }).from(readerPresets))[0]!.id;
     await db.insert(readerPresets).values(
@@ -7609,17 +7513,15 @@ describe('reader presets', () => {
     expect((await readJson(full)).code).toBe('reader_preset_limit');
   });
 
-  it('is picked per chat, only from the reader’s own, and lets go when deleted', async () => {
+  it('is picked per chat, and lets go when deleted', async () => {
     const cookie = await signUp('reader-preset-chat@example.com');
-    const other = await signUp('reader-preset-chat-other@example.com');
     const { chatId } = await setupChat(cookie);
     const mine = await readJson(await create(cookie, { name: '내 것', main: '독자의 메인 추가', globalNote: '독자의 글로벌 노트' }));
-    const theirs = await readJson(await create(other, { name: '남의 것' }));
 
     const picked = await readJson(await json(cookie, `/api/chats/${chatId}`, 'PATCH', { readerPresetId: mine.id }));
     expect(picked.chat.readerPresetId).toBe(mine.id);
 
-    for (const readerPresetId of [theirs.id, randomUUID(), 'nope']) {
+    for (const readerPresetId of [randomUUID(), 'nope']) {
       expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { readerPresetId })).status).toBe(404);
     }
     expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { readerPresetId: 42 })).status).toBe(400);
@@ -7641,14 +7543,6 @@ describe('reader presets', () => {
       { role: 'system', content: SPEECH_PROTOCOL_REMINDER },
     ]);
 
-    // A pointer at someone else's row — which the API never writes — is no preset: the built-in one goes.
-    await db.update(chats).set({ readerPresetId: theirs.id }).where(eq(chats.id, chatId));
-    await json(other, `/api/reader-presets/${theirs.id}`, 'PUT', { main: 'OTHER-READER' });
-    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
-    expect(prompts.at(-1)!.system).not.toContain('OTHER-READER');
-    expect(prompts.at(-1)!.system.startsWith(OAI2_MAIN_SENT)).toBe(true);
-
-    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { readerPresetId: mine.id });
     expect((await json(cookie, `/api/reader-presets/${mine.id}`, 'DELETE')).status).toBe(204);
     expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.readerPresetId).toBeNull();
     const cleared = await readJson(await json(cookie, `/api/chats/${chatId}`, 'PATCH', { readerPresetId: null }));
@@ -7675,9 +7569,10 @@ describe('reader presets', () => {
     expect(JSON.stringify(prompts.at(-1)!.messages)).toContain('[null] [3]');
   });
 
-  it('gives way to the creator’s own instructions, and shows a reader none of them', async () => {
+  it('gives way to the card’s own instructions', async () => {
     const creator = await signUp('reader-preset-creator@example.com');
-    const reader = await signUp('reader-preset-reader@example.com');
+    // The owner playing their own work, with a preset of theirs on it.
+    const reader = creator;
     const plot = await publishablePlot(
       creator,
       { description: 'CREATOR-WORLD' },
@@ -7689,7 +7584,7 @@ describe('reader presets', () => {
     const preset = await readJson(
       await create(reader, { name: '탐색', main: 'READER-MAIN {{charPrompt}} {{description}}', globalNote: 'READER-NOTE {{charJailbreak}}' }),
     );
-    const state = await readJson(await json(reader, `/api/chats/${chatId}`, 'PATCH', { readerPresetId: preset.id }));
+    await json(reader, `/api/chats/${chatId}`, 'PATCH', { readerPresetId: preset.id });
 
     // The card's own system prompt and post-history instructions replace the
     // reader's additions as they replace our preset: no {{original}}, no reader text.
@@ -7700,18 +7595,6 @@ describe('reader presets', () => {
     expect(sent.system).not.toContain('READER-MAIN');
     expect(contentText(sent.messages.at(-2)!.content)).toContain('CREATOR-PH');
     expect(JSON.stringify(sent.messages)).not.toContain('READER-NOTE');
-
-    // Nothing the reader can read through presets carries the creator's text,
-    // and the prompt inspector stays the creator's own.
-    for (const body of [
-      await readJson(await request(reader, '/api/reader-presets')),
-      await readJson(await request(reader, '/api/chats')),
-      state,
-      await readJson(await request(reader, `/api/chats/${chatId}`)),
-    ]) {
-      expect(JSON.stringify(body)).not.toMatch(/CREATOR-(SYS|PH|DESC)/);
-    }
-    expect((await request(reader, `/api/chats/${chatId}/inspect`)).status).toBe(404);
   });
 });
 
@@ -7890,6 +7773,9 @@ describe('memory', () => {
   /** Stores a summary directly, as a finished refresh would. */
   async function seedSummary(chatId: string, messageIds: string[], text = SUMMARY, important = false) {
     const [row] = await db.insert(chatSummaries).values({ chatId, text, messageIds, important }).returning();
+    // PGlite's clock counts milliseconds, and summaries are taken in the order they
+    // were written: the next one is written a tick later.
+    while (Date.now() <= row!.createdAt.getTime()) await new Promise((resolve) => setTimeout(resolve, 1));
     return row!;
   }
 
@@ -8778,9 +8664,8 @@ describe('memory', () => {
       expect(unrouted.facts).toEqual([]);
     });
 
-    it('lists, rewrites and deletes a fact for its owner, embeds the rewrite again, and checks factCount', async () => {
+    it('lists, rewrites and deletes a fact, embeds the rewrite again, and checks factCount', async () => {
       const cookie = await signUp('facts-routes@example.com');
-      const other = await signUp('facts-routes-other@example.com');
       const { chatId } = await setupChat(cookie);
       const embedder = keywordEmbedder();
       const harness = memoryApp({ embedder });
@@ -8800,11 +8685,6 @@ describe('memory', () => {
       expect(rewritten!.embedding).toHaveLength(4);
       expect((await json(cookie, `${base}/${kept.id}`, 'PATCH', { content: ' ' })).status).toBe(400);
       expect((await json(cookie, `${base}/${kept.id}`, 'PATCH', { content: 'ㄱ'.repeat(301) })).status).toBe(400);
-
-      // Nobody else's to read, change or delete.
-      expect((await request(other, `/api/chats/${chatId}/memory`)).status).toBe(404);
-      expect((await json(other, `${base}/${kept.id}`, 'PATCH', { content: '남의 것' })).status).toBe(404);
-      expect((await request(other, `${base}/${gone.id}`, 'DELETE')).status).toBe(404);
 
       expect((await request(cookie, `${base}/${gone.id}`, 'DELETE')).status).toBe(204);
       expect((await request(cookie, `${base}/${gone.id}`, 'DELETE')).status).toBe(404);
@@ -9141,9 +9021,8 @@ describe('memory', () => {
     });
   });
 
-  it('lists, pins, rewrites, regenerates and deletes a summary, for its owner only', async () => {
+  it('lists, pins, rewrites, regenerates and deletes a summary', async () => {
     const cookie = await signUp('memory-routes@example.com');
-    const other = await signUp('memory-routes-other@example.com');
     const { chatId } = await setupChat(cookie);
     const harness = memoryApp({ summaryText: '새로 쓴 요약.' });
     const ids = (await shortTurns(cookie, chatId, harness, 2)).map((message: any) => message.id);
@@ -9181,15 +9060,7 @@ describe('memory', () => {
       const bad = await json(cookie, base, 'PATCH', body);
       expect(bad.status, JSON.stringify(body)).toBe(400);
     }
-    for (const res of [
-      await request(other, `/api/chats/${chatId}/memory`),
-      await json(other, base, 'PATCH', { important: false }),
-      await json(other, `${base}/regenerate`, 'POST'),
-      await request(other, base, 'DELETE'),
-      await json(cookie, `/api/chats/${chatId}/memory/${randomUUID()}`, 'PATCH', { important: false }),
-    ]) {
-      expect(res.status).toBe(404);
-    }
+    expect((await json(cookie, `/api/chats/${chatId}/memory/${randomUUID()}`, 'PATCH', { important: false })).status).toBe(404);
 
     expect((await request(cookie, base, 'DELETE')).status).toBe(204);
     expect(await summariesOf(cookie, chatId)).toEqual([]);
@@ -9418,13 +9289,6 @@ describe('chat import', () => {
       code: 'already_imported',
       chatId: restarted.chat.id,
     });
-
-    // The same file is another reader's own business.
-    const bob = await signUp('chat-import-again-bob@example.com');
-    await importChat(bob, (await createPlot(bob)).id, [turn('assistant', ['밥의 대화'])]);
-    expect((await readJson(await request(alice, '/api/chats'))).map((chat: any) => chat.id)).toEqual([
-      restarted.chat.id,
-    ]);
   });
 
   it('takes no other write while it is importing, and no batch once it is done', async () => {
@@ -9568,7 +9432,7 @@ describe('chat import', () => {
     expect(await storage.get(leftRow!.path)).toBeNull();
   });
 
-  it('checks a batch whole, and whose plot, persona and chat it is, before writing', async () => {
+  it('checks a batch whole, and that its plot and persona are there, before writing', async () => {
     const alice = await signUp('chat-import-check@example.com');
     const plot = await createPlot(alice);
     for (const batch of [
@@ -9591,15 +9455,11 @@ describe('chat import', () => {
     }
     expect(await readJson(await request(alice, '/api/chats'))).toEqual([]);
 
-    const bob = await signUp('chat-import-check-bob@example.com');
-    expect((await startImport(alice, (await createPlot(bob)).id, [])).status).toBe(404);
-    const bobPersona = await readJson(await json(bob, '/api/personas', 'POST', { name: '밥' }));
-    expect((await startImport(alice, plot.id, [], { personaId: bobPersona.id })).status).toBe(404);
+    expect((await startImport(alice, randomUUID(), [])).status).toBe(404);
+    expect((await startImport(alice, plot.id, [], { personaId: randomUUID() })).status).toBe(404);
     const persona = await readJson(await json(alice, '/api/personas', 'POST', { name: '앨리스' }));
     const { chat } = await importChat(alice, plot.id, [], { personaId: persona.id, title: '  옛 대화  ' });
     expect(chat).toMatchObject({ personaId: persona.id, title: '옛 대화', headMessageId: null });
-    expect((await json(bob, `/api/chats/${chat.id}/import`, 'POST', { messages: [] })).status).toBe(404);
-    expect((await complete(bob, chat.id)).status).toBe(404);
 
     // The cap counts every version, and a batch that would pass it writes nothing.
     const wide = Array.from({ length: 500 }, () => turn('assistant', Array(20).fill('갈래')));
@@ -9720,13 +9580,11 @@ describe('chat import', () => {
     expect((await rowsOf(plain.chat.id))[0]!.variableDelta).toBeNull();
   });
 
-  it('tells which of a backup’s files are already here, among the caller’s own', async () => {
+  it('tells which of a backup’s files are already here', async () => {
     const alice = await signUp('lookup-alice@example.com');
-    const bob = await signUp('lookup-bob@example.com');
     const cardText = JSON.stringify(v2Card);
     const cardHash = hashOf(cardText);
     const plot = await importCard(alice, new File([cardText], 'lian.json'));
-    const bobPlot = await importCard(bob, new File([cardText], 'lian.json'));
     const { chat } = await importChat(alice, plot.id, [turn('assistant', ['인사'])]);
 
     const lookup = (cookie: string | undefined, sha256: unknown) =>
@@ -9735,18 +9593,12 @@ describe('chat import', () => {
       characters: [{ sha256: cardHash, plotId: plot.id, characterId: plot.characters[0].id }],
       chats: [{ sha256: FILE, chatId: chat.id, importing: true }],
     });
-    // Bob holds the same card, and none of Alice's chats.
-    expect(await readJson(await lookup(bob, [cardHash, FILE]))).toEqual({
-      characters: [{ sha256: cardHash, plotId: bobPlot.id, characterId: bobPlot.characters[0].id }],
-      chats: [],
-    });
     expect(await readJson(await lookup(alice, []))).toEqual({ characters: [], chats: [] });
     for (const bad of [cardHash, [cardHash.toUpperCase()], ['x'], [1], Array(1001).fill(cardHash)]) {
       const res = await lookup(alice, bad);
       expect(res.status).toBe(400);
       expect((await readJson(res)).code).toBe('invalid_request');
     }
-    expect((await lookup(undefined, [cardHash])).status).toBe(401);
   });
   it("keeps what SillyTavern kept beside each version — shown text, reasoning, bias — through the chat, its export and an edit", async () => {
     // script.js draws `extra.display_text || mes`, keeps `extra.reasoning` folded
@@ -9870,8 +9722,6 @@ describe('chat import', () => {
       await json(cookie, '/api/imports/lookup', 'POST', { sha256: [], chatFiles: ['chat.jsonl', 'nothing.jsonl'] }),
     );
     expect(named.named).toEqual([{ fileName: 'chat.jsonl', chatId, plotId: plot.id, importing: false }]);
-    const stranger = await signUp('chat-import-branch-later-stranger@example.com');
-    expect((await readJson(await json(stranger, '/api/imports/lookup', 'POST', { sha256: [], chatFiles: ['chat.jsonl'] }))).named).toEqual([]);
     expect((await json(cookie, '/api/imports/lookup', 'POST', { sha256: [], chatFiles: [1] })).status).toBe(400);
 
     // The tree as it stands: each row's place, speaker and the SHA-256 of its text, never the text.
@@ -9881,7 +9731,6 @@ describe('chat import', () => {
       { id: greeting, parentId: null, role: 'assistant', speakerId: null, sha256: digest('인사') },
       { id: question, parentId: greeting, role: 'user', speakerId: null, sha256: digest('질문') },
     ]);
-    expect((await request(stranger, `/api/chats/${chatId}/import/tree`)).status).toBe(404);
 
     // A branch batch goes onto the finished chat, under the slot, and leaves the head; a plain batch does not.
     const branchSha = hashOf('later - Branch #1.jsonl');
@@ -9917,11 +9766,6 @@ describe('chat import', () => {
 });
 
 describe('plot hub', () => {
-  /** Session user id — the creator page is keyed on it. */
-  async function userIdOf(cookie: string): Promise<string> {
-    return (await readJson(await request(cookie, '/api/auth/get-session'))).user.id;
-  }
-
   interface Spec {
     name: string;
     language?: string;
@@ -10014,30 +9858,6 @@ describe('plot hub', () => {
     ['E', 20],
     ['F', 10],
   ] as const;
-
-  it('publishes, filters on its tags and unpublishes', async () => {
-    const alice = await signUp('publish@example.com');
-    const bob = await signUp('publish-reader@example.com');
-    const created = await seedPlot(alice, { name: '발행 작품', tags: ['판타지'] });
-    expect(created.visibility).toBe('private');
-
-    const published = await publish(alice, created.id);
-    expect(published.visibility).toBe('public');
-
-    const view = await readPublicPlot(bob, created.id);
-    expect(view.tags).toEqual(['판타지']);
-    expect(await exploreNames(bob, 'language=ko')).toEqual(['발행 작품']);
-
-    // The filter column is the plot's own now, so an edit moves the catalogue.
-    await patchPlot(alice, created.id, { tags: ['로맨스'] });
-    expect(await exploreNames(bob, 'language=ko&tag=로맨스')).toEqual(['발행 작품']);
-    expect(await exploreNames(bob, 'language=ko&tag=판타지')).toEqual([]);
-
-    const unpublished = await publish(alice, created.id, false);
-    expect(unpublished.visibility).toBe('private');
-    expect(await exploreNames(bob, 'language=ko')).toEqual([]);
-    expect((await request(bob, `/api/plots/${created.id}/public`)).status).toBe(404);
-  });
 
   it('explores only public plots of the requested language', async () => {
     const alice = await signUp('explore-owner@example.com');
@@ -10291,182 +10111,6 @@ describe('plot hub', () => {
     expect((await readJson(stale)).code).toBe('invalid_request');
   });
 
-  /**
-   * A like row of a chosen age. The weekly sort ranks on these rather than on
-   * `like_count`, so the tests write them directly — the API only ever likes now.
-   */
-  async function likeAt(plotId: string, userId: string, daysAgo: number): Promise<void> {
-    await sql`
-      insert into plot_likes (user_id, plot_id, created_at)
-      values (${userId}, ${plotId}::uuid, now() - (${daysAgo}::int * interval '1 day'))`;
-  }
-
-  it('ranks the weekly sort on the trailing week and breaks ties on the total', async () => {
-    const alice = await signUp('weekly-owner@example.com');
-    const bob = await signUp('weekly-reader@example.com');
-    const one = await userIdOf(await signUp('weekly-liker-1@example.com'));
-    const two = await userIdOf(await signUp('weekly-liker-2@example.com'));
-
-    // A is the most liked work there is, and none of it happened this week.
-    const a = await seedPublic(alice, { name: 'A', likeCount: 50 });
-    const b = await seedPublic(alice, { name: 'B', likeCount: 5 });
-    const c = await seedPublic(alice, { name: 'C', likeCount: 30 });
-    const d = await seedPublic(alice, { name: 'D', likeCount: 40 });
-    await likeAt(a, one, 30);
-    await likeAt(a, two, 20);
-    await likeAt(b, one, 0);
-    await likeAt(b, two, 1);
-    await likeAt(c, one, 2);
-    await likeAt(d, one, 6);
-    // Just outside the window: it counts for the total and not for the week.
-    await likeAt(d, two, 8);
-
-    // B(2) first, then the two plots tied at one like this week — the total
-    // decides between them — and A last, whichever way its counter reads.
-    expect(await exploreNames(bob, 'language=ko&sort=weekly')).toEqual(['B', 'D', 'C', 'A']);
-    // The all-time sort is untouched and reads the other way round.
-    expect(await exploreNames(bob, 'language=ko&sort=likes')).toEqual(['A', 'D', 'C', 'B']);
-
-    // The partition holds for this sort like any other: another language's rows
-    // are not in it, and neither are private ones.
-    const other = await seedPublic(alice, { name: '영어', language: 'en' });
-    const secret = await seedPlot(alice, { name: '비공개' });
-    await likeAt(other, one, 0);
-    await likeAt(secret.id, one, 0);
-    expect(await exploreNames(bob, 'language=ko&sort=weekly')).toEqual(['B', 'D', 'C', 'A']);
-    expect(await exploreNames(bob, 'language=en&sort=weekly')).toEqual(['영어']);
-  });
-
-  it('walks the weekly sort exactly once per plot while the week moves', async () => {
-    const alice = await signUp('weekly-walk@example.com');
-    const bob = await signUp('weekly-walk-reader@example.com');
-    const one = await userIdOf(await signUp('weekly-walk-1@example.com'));
-    const two = await userIdOf(await signUp('weekly-walk-2@example.com'));
-    const three = await userIdOf(await signUp('weekly-walk-3@example.com'));
-
-    const ids = new Map<string, string>();
-    for (const [name, likeCount] of RANKED) {
-      const id = await seedPublic(alice, { name, likeCount });
-      ids.set(name, id);
-      // One like each this week, so the week ties everywhere and the totals
-      // decide — a starting order the counters can then be moved out of.
-      await likeAt(id, one, 1);
-    }
-
-    const walked = await walkExplore(bob, 'language=ko&sort=weekly', async () => {
-      // B was on page 1 and falls out of the week entirely; E was still unseen
-      // and takes the top of it. A cursor keyed on either would hand B back and
-      // never reach E.
-      await sql`delete from plot_likes where plot_id = ${ids.get('B')!}::uuid`;
-      await likeAt(ids.get('E')!, two, 0);
-      await likeAt(ids.get('E')!, three, 0);
-    });
-
-    expect(walked.slice(0, 2)).toEqual(['A', 'B']);
-    expect([...walked].sort()).toEqual(['A', 'B', 'C', 'D', 'E', 'F']);
-  });
-
-  it('gives everyone the public page and the owner the whole plot', async () => {
-    const alice = await signUp('view-owner@example.com');
-    const bob = await signUp('view-reader@example.com');
-    const longIntro = '가'.repeat(250);
-    const created = await createPlot(alice, {
-      name: '공개 작품',
-      intro: '독자에게 건네는 한 줄.',
-      description: 'SECRET-SETTING',
-      intros: [longIntro],
-      tags: ['판타지'],
-      lorebook: [{ keys: ['문'], content: 'SECRET-LORE' }],
-    });
-    const member = await addCharacter(alice, created.id, {
-      name: '공개 멤버',
-      card: { intro: '멤버를 소개하는 한 줄.', description: 'SECRET-MEMBER' },
-    });
-    await publish(alice, created.id);
-    const secret = await seedPlot(alice, { name: '비공개 작품' });
-
-    const view = await readPublicPlot(bob, created.id);
-    expect(view).toEqual({
-      public: true,
-      id: created.id,
-      name: '공개 작품',
-      coverUrl: null,
-      creatorId: await userIdOf(alice),
-      creatorName: 'view-owner',
-      language: 'ko',
-      tags: ['판타지'],
-      likeCount: 0,
-      chatCount: 0,
-      // Written for readers rather than for the model, so it may leave.
-      intro: '독자에게 건네는 한 줄.',
-      introPreview: '가'.repeat(200),
-      // The detail read carries the prologue whole; only the listings cut it.
-      intros: [longIntro],
-      introPreviews: ['가'.repeat(200)],
-      // Options rather than prompt text, so the badge row travels; null until the
-      // creator sets one. The narrator is cut down to its option — `voice` is
-      // prompt text and must not appear here.
-      style: null,
-      narrator: null,
-      // How the reader's browser picks a round's speakers: options too, the default filled in.
-      groupSettings: { order: 'natural', maxSpeakers: 3 },
-      // The follow edge to the creator — nobody follows anyone in this fixture.
-      creatorFollow: { followerCount: 0, followedByMe: false },
-      // Written for readers too, and empty until the creator recommends one.
-      profiles: [],
-      publishedAt: expect.any(String),
-      likedByMe: false,
-      // The roster is public by name, face and reader-facing line, and by nothing
-      // else — the card behind each member stays with the owner.
-      characters: [
-        {
-          id: member.id,
-          name: '공개 멤버',
-          // The name a card's `{{char}}` reads as, which the model writes lines under too.
-          nickname: null,
-          avatarUrl: null,
-          intro: '멤버를 소개하는 한 줄.',
-          // 대화량, which the reader's browser rolls a round by.
-          talkativeness: 50,
-          // How its emotion pictures are shown; a card without the screen shows none.
-          emotion: null,
-        },
-      ],
-      // Presentation, so it travels even though the definition does not.
-      displayScripts: [],
-      css: '',
-      memberCss: {},
-      backgroundHtml: '',
-      defaultVariables: {},
-      componentCode: '',
-      componentCapabilities: [],
-      // What `{{moduleenabled}}` reads: no module, so RisuAI's `0`.
-      modules: [],
-      // Only this read carries them; the card grids do not count comments.
-      commentsEnabled: true,
-      commentCount: 0,
-    });
-    // Nothing the model is told ever leaves.
-    expect(JSON.stringify(view)).not.toContain('SECRET-');
-
-    const owned = await readPlot(alice, created.id);
-    expect(owned.public).toBeUndefined();
-    expect(owned.description).toBe('SECRET-SETTING');
-    expect(owned.visibility).toBe('public');
-    expect(owned.characters[0].card.description).toBe('SECRET-MEMBER');
-    // The counters the owner's own public page renders.
-    expect(owned).toMatchObject({ likeCount: 0, chatCount: 0, publishedAt: expect.any(String) });
-    expect((await readPlot(alice, secret.id)).publishedAt).toBeNull();
-
-    expect((await request(bob, `/api/plots/${secret.id}/public`)).status).toBe(404);
-    // Editing stays owner-only even for a public plot.
-    expect((await json(bob, `/api/plots/${created.id}`, 'PATCH', { name: 'x' })).status).toBe(404);
-    expect((await json(bob, `/api/plots/${created.id}/publish`, 'POST', { publish: false })).status).toBe(404);
-    expect((await request(bob, `/api/plots/${created.id}`, 'DELETE')).status).toBe(404);
-    // The owner's own list is unaffected by anyone else's public plots.
-    expect(await readJson(await request(bob, '/api/plots'))).toEqual([]);
-  });
-
   it('carries the member faces on every listing card', async () => {
     const alice = await signUp('stack-owner@example.com');
     const bob = await signUp('stack-reader@example.com');
@@ -10499,146 +10143,6 @@ describe('plot hub', () => {
     expect(card.lorebook).toBeUndefined();
   });
 
-  it('opens the catalogue and a public page to a reader without an account', async () => {
-    const alice = await signUp('anon-owner@example.com');
-    const longIntro = '가'.repeat(250);
-    const created = await seedPlot(alice, { name: '익명 열람 작품', intros: [longIntro] });
-    await publish(alice, created.id);
-    const secret = await seedPlot(alice, { name: '비공개 작품' });
-
-    // The catalogue and the creator page both read without a cookie.
-    expect(await exploreNames(undefined, 'language=ko')).toEqual(['익명 열람 작품']);
-    const creator = await request(undefined, `/api/creators/${await userIdOf(alice)}`);
-    expect(creator.status).toBe(200);
-    expect((await readJson(creator)).publicPlots).toHaveLength(1);
-
-    const seen = await readPublicPlot(undefined, created.id);
-    expect(seen).toMatchObject({ public: true, name: '익명 열람 작품' });
-    // The prologue whole on the detail read; the listing keeps its cut.
-    expect(seen.intros).toEqual([longIntro]);
-    expect(seen.introPreview).toBe('가'.repeat(200));
-    // Nobody is signed in, so nothing is liked by them.
-    expect(seen.likedByMe).toBe(false);
-    expect((await readJson(await request(undefined, '/api/explore?language=ko'))).items[0].likedByMe).toBe(
-      false,
-    );
-
-    // What is not published is not there at all.
-    expect((await request(undefined, `/api/plots/${secret.id}/public`)).status).toBe(404);
-
-    // Reading is where it stops: everything owned, and every write, still needs a session.
-    for (const [path, method] of [
-      ['/api/plots', 'GET'],
-      [`/api/plots/${created.id}`, 'GET'],
-      [`/api/plots/${created.id}/characters`, 'GET'],
-      ['/api/personas', 'GET'],
-      [`/api/personas/${randomUUID()}/avatar`, 'GET'],
-      ['/api/notes', 'GET'],
-      ['/api/chats', 'GET'],
-      [`/api/plots/${created.id}/like`, 'POST'],
-    ] as const) {
-      const res = await request(undefined, path, method);
-      expect(res.status, `${method} ${path}`).toBe(401);
-      expect((await readJson(res)).code).toBe('unauthorized');
-    }
-    const startingChat = await json(undefined, '/api/chats', 'POST', {
-      plotId: created.id,
-      model: 'echo/echo',
-    });
-    expect(startingChat.status).toBe(401);
-  });
-
-  it('likes and unlikes idempotently', async () => {
-    const alice = await signUp('like-owner@example.com');
-    const bob = await signUp('like-reader@example.com');
-    const id = await seedPublic(alice, { name: '좋아요 작품' });
-    const secret = await seedPlot(alice, { name: '비공개' });
-
-    expect(await readJson(await json(bob, `/api/plots/${id}/like`, 'POST'))).toEqual({
-      liked: true,
-      likeCount: 1,
-    });
-    // Repeating the like is a no-op, counter included.
-    expect(await readJson(await json(bob, `/api/plots/${id}/like`, 'POST'))).toEqual({
-      liked: true,
-      likeCount: 1,
-    });
-    const seen = await readPublicPlot(bob, id);
-    expect(seen.likedByMe).toBe(true);
-    expect(seen.likeCount).toBe(1);
-    // Likes are per user: alice has not liked her own plot.
-    expect((await readJson(await request(alice, `/api/explore?language=ko`))).items[0]).toMatchObject({
-      likeCount: 1,
-      likedByMe: false,
-    });
-
-    expect(await readJson(await request(bob, `/api/plots/${id}/like`, 'DELETE'))).toEqual({
-      liked: false,
-      likeCount: 0,
-    });
-    expect(await readJson(await request(bob, `/api/plots/${id}/like`, 'DELETE'))).toEqual({
-      liked: false,
-      likeCount: 0,
-    });
-    expect((await readPublicPlot(bob, id)).likedByMe).toBe(false);
-
-    // A plot bob cannot see cannot be liked either.
-    expect((await json(bob, `/api/plots/${secret.id}/like`, 'POST')).status).toBe(404);
-    expect((await request(bob, `/api/plots/${secret.id}/like`, 'DELETE')).status).toBe(404);
-  });
-
-  it('lets other users chat with a public plot and counts those chats', async () => {
-    const alice = await signUp('chat-owner@example.com');
-    const bob = await signUp('chat-reader@example.com');
-    const id = await seedPublic(alice, { name: '대화 작품' });
-    const secret = await seedPlot(alice, { name: '비공개' });
-
-    const state = await startChat(bob, id);
-    expect(state.path[0].content).toBe('대화 작품의 도입부');
-    expect((await readPublicPlot(bob, id)).chatCount).toBe(1);
-
-    // The owner's own chats do not inflate the counter.
-    await startChat(alice, id);
-    expect((await readPublicPlot(bob, id)).chatCount).toBe(1);
-
-    // Bob's chat runs against the creator's row, so an edit reaches it.
-    expect((await json(bob, '/api/chats', 'POST', { plotId: secret.id, model: 'echo/echo' })).status).toBe(404);
-    const events = await readSse(
-      await json(bob, `/api/chats/${state.chat.id}/messages`, 'POST', { content: '안녕' }),
-    );
-    expect(events.at(-1)!.event).toBe('done');
-  });
-
-  it('serves the covers and member avatars of public plots to non-owners', async () => {
-    const alice = await signUp('avatar-owner@example.com');
-    const bob = await signUp('avatar-reader@example.com');
-    const png = buildPngWithTextChunks({
-      chara: Buffer.from(JSON.stringify(v2Card), 'utf-8').toString('base64'),
-    });
-    const plot = await importCard(alice, new File([png], 'lian.png', { type: 'image/png' }));
-    await patchPlot(alice, plot.id, { description: '설명' });
-    await uploadFile(alice, `/api/plots/${plot.id}/cover`, png, 'c.png');
-    const member = plot.characters[0];
-    const avatarUrl = `/api/plots/${plot.id}/characters/${member.id}/avatar`;
-
-    expect((await request(bob, avatarUrl)).status).toBe(404);
-    expect((await request(bob, `/api/plots/${plot.id}/cover`)).status).toBe(404);
-
-    // An imported card, so the owner vouches for it.
-    await publish(alice, plot.id, true, { rightsConfirmed: true });
-    const avatar = await request(bob, avatarUrl);
-    expect(avatar.status).toBe(200);
-    expect(new Uint8Array(await avatar.arrayBuffer())).toEqual(stripPngTextChunks(png));
-    // A cover is a card PNG's text chunks away from being the definition itself.
-    const cover = await request(bob, `/api/plots/${plot.id}/cover`);
-    expect(cover.status).toBe(200);
-    expect(readPngTextChunks(new Uint8Array(await cover.arrayBuffer())).size).toBe(0);
-    // The public view carries the same urls.
-    const view = await readPublicPlot(bob, plot.id);
-    expect(view.coverUrl).toBe(`/api/plots/${plot.id}/cover`);
-    expect(view.characters[0].avatarUrl).toBe(avatarUrl);
-  });
-
   it('never serves an embedded card with a public avatar', async () => {
     const alice = await signUp('avatar-card@example.com');
     const bob = await signUp('avatar-card-reader@example.com');
@@ -10666,63 +10170,6 @@ describe('plot hub', () => {
     const resanitized = new Uint8Array(await (await request(bob, url)).arrayBuffer());
     expect(readPngTextChunks(resanitized).size).toBe(0);
     expect(resanitized).toEqual(buildPngWithTextChunks({}));
-  });
-
-  it('stops other users generations once the plot is unpublished', async () => {
-    const alice = await signUp('revoke-owner@example.com');
-    const bob = await signUp('revoke-reader@example.com');
-    const id = await seedPublic(alice, { name: '회수 작품' });
-    const state = await startChat(bob, id);
-    const chatId = state.chat.id;
-    const first = await readSse(
-      await json(bob, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }),
-    );
-    expect(first.at(-1)!.event).toBe('done');
-    const before = await readJson(await request(bob, `/api/chats/${chatId}`));
-
-    await publish(alice, id, false);
-
-    const blocked = await json(bob, `/api/chats/${chatId}/messages`, 'POST', { content: '계속 대화' });
-    expect(blocked.status).toBe(404);
-    expect((await readJson(blocked)).code).toBe('not_found');
-    expect((await json(bob, `/api/chats/${chatId}/regenerate`, 'POST')).status).toBe(404);
-    expect((await json(bob, `/api/chats/${chatId}/continue`, 'POST')).status).toBe(404);
-    // The refused turn left no trace.
-    expect(await readJson(await request(bob, `/api/chats/${chatId}`))).toEqual(before);
-
-    // The creator's own chats are unaffected by the plot being private.
-    const own = await startChat(alice, id);
-    const ownReply = await readSse(
-      await json(alice, `/api/chats/${own.chat.id}/messages`, 'POST', { content: '주인장' }),
-    );
-    expect(ownReply.at(-1)!.event).toBe('done');
-
-    // Publishing again restores the other user's chat.
-    await publish(alice, id);
-    const resumed = await readSse(
-      await json(bob, `/api/chats/${chatId}/messages`, 'POST', { content: '다시 안녕' }),
-    );
-    expect(resumed.at(-1)!.event).toBe('done');
-  });
-
-  it('lists a creator public plots', async () => {
-    const alice = await signUp('creator@example.com');
-    const bob = await signUp('creator-reader@example.com');
-    const aliceId = await userIdOf(alice);
-    await seedPublic(alice, { name: '공개 1', publishedAt: new Date(Date.UTC(2026, 0, 1)) });
-    await seedPublic(alice, { name: '공개 2', language: 'en', publishedAt: new Date(Date.UTC(2026, 0, 2)) });
-    await seedPlot(alice, { name: '비공개' });
-
-    const page = await readJson(await request(bob, `/api/creators/${aliceId}`));
-    expect(page.id).toBe(aliceId);
-    expect(page.name).toBe('creator');
-    // Newest first, across languages; private plots never appear.
-    expect(page.publicPlots.map((item: any) => item.name)).toEqual(['공개 2', '공개 1']);
-    expect(page.publicPlots[0].description).toBeUndefined();
-    expect(page.publicPlots[0].creatorName).toBe('creator');
-
-    expect((await request(bob, `/api/creators/${await userIdOf(bob)}`)).status).toBe(200);
-    expect((await request(bob, '/api/creators/nobody')).status).toBe(404);
   });
 
   it("puts the work's setting after the card, in RisuAI's description, and merges the lorebooks", async () => {
@@ -10821,58 +10268,6 @@ describe('plot hub', () => {
     expect(after.indexOf('[리안]')).toBeLessThan(after.indexOf(setting));
   });
 
-  it('carries a reader-facing intro and a cover beside the setting', async () => {
-    const alice = await signUp('plot-intro@example.com');
-    const bob = await signUp('plot-intro-reader@example.com');
-    const plot = await seedPlot(alice, {
-      name: '아르카디아',
-      intro: '  다섯 길드가 나눠 다스리는 도시.  ',
-    });
-    expect(plot).toMatchObject({ intro: '다섯 길드가 나눠 다스리는 도시.', coverUrl: null });
-
-    // A card PNG uploaded as a cover: the definition lives in its text chunks, and
-    // a cover is served to every reader, so the chunks go — exactly as on an avatar.
-    const png = buildPngWithTextChunks({
-      chara: Buffer.from(JSON.stringify(v2Card), 'utf-8').toString('base64'),
-    });
-    const covered = await readJson(await uploadFile(alice, `/api/plots/${plot.id}/cover`, png, 'c.png'));
-    expect(covered.coverUrl).toBe(`/api/plots/${plot.id}/cover`);
-    await publish(alice, plot.id);
-
-    const served = await request(bob, covered.coverUrl);
-    expect(served.status).toBe(200);
-    expect(served.headers.get('content-type')).toBe('image/png');
-    const bytes = new Uint8Array(await served.arrayBuffer());
-    expect(readPngTextChunks(bytes).size).toBe(0);
-    expect(bytes).toEqual(stripPngTextChunks(png));
-
-    expect(await readPublicPlot(bob, plot.id)).toMatchObject({
-      intro: '다섯 길드가 나눠 다스리는 도시.',
-      coverUrl: `/api/plots/${plot.id}/cover`,
-    });
-    expect((await readJson(await request(bob, '/api/explore?language=ko'))).items[0]).toMatchObject({
-      intro: '다섯 길드가 나눠 다스리는 도시.',
-      coverUrl: `/api/plots/${plot.id}/cover`,
-    });
-
-    // Re-uploading in another format leaves no orphan behind under the old key.
-    const gif = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 2, 3]);
-    await uploadFile(alice, `/api/plots/${plot.id}/cover`, gif, 'c.gif');
-    await expect(readFile(join(storageDir, 'covers', `${plot.id}.png`))).rejects.toThrow();
-
-    // Bytes that are not an image, and someone else's plot.
-    const junk = await uploadFile(alice, `/api/plots/${plot.id}/cover`, new Uint8Array([1, 2, 3, 4]), 'x.bin');
-    expect(junk.status).toBe(400);
-    expect((await readJson(junk)).code).toBe('invalid_asset');
-    expect((await uploadFile(bob, `/api/plots/${plot.id}/cover`, gif, 'c.gif')).status).toBe(404);
-    expect((await request(bob, `/api/plots/${plot.id}/cover`, 'DELETE')).status).toBe(404);
-
-    const cleared = await readJson(await request(alice, `/api/plots/${plot.id}/cover`, 'DELETE'));
-    expect(cleared.coverUrl).toBeNull();
-    expect((await request(bob, `/api/plots/${plot.id}/cover`)).status).toBe(404);
-    await expect(readFile(join(storageDir, 'covers', `${plot.id}.gif`))).rejects.toThrow();
-  });
-
   it('takes the cover away with the plot it belonged to', async () => {
     const alice = await signUp('plot-cover-delete@example.com');
     const plot = await createPlot(alice, { name: '아르카디아' });
@@ -10881,169 +10276,6 @@ describe('plot hub', () => {
 
     expect((await request(alice, `/api/plots/${plot.id}`, 'DELETE')).status).toBe(204);
     await expect(readFile(join(storageDir, 'covers', `${plot.id}.png`))).rejects.toThrow();
-  });
-});
-
-describe('follows', () => {
-  /** Session user id — the creator page and its follow edge are keyed on it. */
-  async function userIdOf(cookie: string): Promise<string> {
-    return (await readJson(await request(cookie, '/api/auth/get-session'))).user.id;
-  }
-
-  const follow = (cookie: string | undefined, creatorId: string, method = 'POST'): Promise<Response> =>
-    request(cookie, `/api/creators/${creatorId}/follow`, method);
-
-  it('follows and unfollows idempotently and counts the followers', async () => {
-    const alice = await signUp('follow-creator@example.com');
-    const bob = await signUp('follow-reader@example.com');
-    const carol = await signUp('follow-reader-2@example.com');
-    const aliceId = await userIdOf(alice);
-
-    const page = async (cookie: string | undefined): Promise<any> =>
-      readJson(await request(cookie, `/api/creators/${aliceId}`));
-    expect(await page(bob)).toMatchObject({ followerCount: 0, followedByMe: false });
-
-    expect(await readJson(await follow(bob, aliceId))).toEqual({ followerCount: 1, followedByMe: true });
-    // Following twice is the same row, so the second call answers the same thing.
-    expect(await readJson(await follow(bob, aliceId))).toEqual({ followerCount: 1, followedByMe: true });
-    await follow(carol, aliceId);
-
-    // The count is everyone's; the edge is the reader's own.
-    expect(await page(bob)).toMatchObject({ followerCount: 2, followedByMe: true });
-    expect(await page(alice)).toMatchObject({ followerCount: 2, followedByMe: false });
-    // Nobody signed in follows nobody, and still sees the count.
-    expect(await page(undefined)).toMatchObject({ followerCount: 2, followedByMe: false });
-
-    expect(await readJson(await follow(bob, aliceId, 'DELETE'))).toEqual({
-      followerCount: 1,
-      followedByMe: false,
-    });
-    expect(await readJson(await follow(bob, aliceId, 'DELETE'))).toEqual({
-      followerCount: 1,
-      followedByMe: false,
-    });
-    expect(await page(bob)).toMatchObject({ followerCount: 1, followedByMe: false });
-  });
-
-  it('refuses a self-follow, an unknown creator and a reader without an account', async () => {
-    const alice = await signUp('self-follow@example.com');
-    const aliceId = await userIdOf(alice);
-
-    const self = await follow(alice, aliceId);
-    expect(self.status).toBe(400);
-    expect((await readJson(self)).code).toBe('invalid_request');
-    // And nothing was written by the refusal.
-    expect((await readJson(await request(alice, `/api/creators/${aliceId}`))).followerCount).toBe(0);
-
-    expect((await follow(alice, 'nobody')).status).toBe(404);
-    expect((await follow(undefined, aliceId)).status).toBe(401);
-    expect((await follow(undefined, aliceId, 'DELETE')).status).toBe(401);
-  });
-});
-
-describe('notifications', () => {
-  async function userIdOf(cookie: string): Promise<string> {
-    return (await readJson(await request(cookie, '/api/auth/get-session'))).user.id;
-  }
-
-  const follow = (cookie: string, creatorId: string): Promise<Response> =>
-    request(cookie, `/api/creators/${creatorId}/follow`, 'POST');
-
-  const listNotifications = async (cookie: string, query = ''): Promise<any> =>
-    readJson(await request(cookie, `/api/notifications${query}`));
-
-  it('notifies every follower the first time a plot goes public', async () => {
-    const alice = await signUp('notify-creator@example.com');
-    const bob = await signUp('notify-follower@example.com');
-    const carol = await signUp('notify-stranger@example.com');
-    const aliceId = await userIdOf(alice);
-    await follow(bob, aliceId);
-
-    const plot = await publishablePlot(alice, { name: '알림 작품' });
-    // A plot sitting private announces nothing.
-    expect(await listNotifications(bob)).toEqual({ items: [], nextCursor: null, unreadCount: 0 });
-
-    await publishPlot(alice, plot.id);
-    const list = await listNotifications(bob);
-    expect(list.unreadCount).toBe(1);
-    expect(list.items).toEqual([
-      {
-        id: expect.any(String),
-        kind: 'plot_published',
-        actorId: aliceId,
-        actorName: 'notify-creator',
-        plotId: plot.id,
-        plotName: '알림 작품',
-        read: false,
-        createdAt: expect.any(String),
-      },
-    ]);
-    // Only followers hear about it, and nobody hears about their own publish.
-    expect((await listNotifications(carol)).items).toEqual([]);
-    expect((await listNotifications(alice)).items).toEqual([]);
-
-    // Republishing announces nothing: the row is minted when a work first goes
-    // public, and an unpublish does not take that back.
-    await publishPlot(alice, plot.id);
-    await json(alice, `/api/plots/${plot.id}/publish`, 'POST', { publish: false });
-    await publishPlot(alice, plot.id);
-    expect((await listNotifications(bob)).items).toHaveLength(1);
-
-    // Following afterwards is not a subscription to the past.
-    await follow(carol, aliceId);
-    expect((await listNotifications(carol)).items).toEqual([]);
-
-    // A second work does announce itself, to both of them now.
-    const second = await publishablePlot(alice, { name: '두 번째 작품' });
-    await publishPlot(alice, second.id);
-    expect((await listNotifications(bob)).items.map((item: any) => item.plotName)).toEqual([
-      '두 번째 작품',
-      '알림 작품',
-    ]);
-    expect((await listNotifications(carol)).items).toHaveLength(1);
-  });
-
-  it('walks the list through the cursor and marks everything read at once', async () => {
-    const alice = await signUp('notify-walk-creator@example.com');
-    const bob = await signUp('notify-walk-follower@example.com');
-    await follow(bob, await userIdOf(alice));
-
-    const names: string[] = [];
-    for (let i = 0; i < 5; i += 1) {
-      const plot = await publishablePlot(alice, { name: `작품 ${i}` });
-      await publishPlot(alice, plot.id);
-      names.push(`작품 ${i}`);
-    }
-
-    const first = await listNotifications(bob, '?limit=2');
-    expect(first.unreadCount).toBe(5);
-    const walked: string[] = first.items.map((item: any) => item.plotName);
-    let cursor: string | null = first.nextCursor;
-    for (let page = 0; page < 5 && cursor; page += 1) {
-      const body: any = await listNotifications(bob, `?limit=2&cursor=${encodeURIComponent(cursor)}`);
-      // The badge is answered when the list is opened, not on every page of it.
-      expect(body.unreadCount).toBeUndefined();
-      walked.push(...body.items.map((item: any) => item.plotName));
-      cursor = body.nextCursor;
-    }
-    expect(cursor).toBeNull();
-    // Newest first, every notification exactly once.
-    expect(walked).toEqual([...names].reverse());
-
-    const malformed = encodeCursor({ createdAt: new Date().toISOString(), id: 'not-a-uuid' });
-    const bad = await request(bob, `/api/notifications?cursor=${encodeURIComponent(malformed)}`);
-    expect(bad.status).toBe(400);
-    expect((await readJson(bad)).code).toBe('invalid_request');
-    expect((await request(bob, '/api/notifications?limit=51')).status).toBe(400);
-    expect((await request(undefined, '/api/notifications')).status).toBe(401);
-
-    expect(await readJson(await json(bob, '/api/notifications/read', 'POST'))).toEqual({ unreadCount: 0 });
-    const read = await listNotifications(bob);
-    expect(read.unreadCount).toBe(0);
-    expect(read.items.every((item: any) => item.read)).toBe(true);
-    // Reading is a no-op the second time, and it is the reader's own list only.
-    expect(await readJson(await json(bob, '/api/notifications/read', 'POST'))).toEqual({ unreadCount: 0 });
-    expect((await json(undefined, '/api/notifications/read', 'POST')).status).toBe(401);
   });
 });
 
@@ -11284,8 +10516,8 @@ describe('job queue', () => {
 });
 
 describe('publish fan-out', () => {
-  async function userIdOf(cookie: string): Promise<string> {
-    return (await readJson(await request(cookie, '/api/auth/get-session'))).user.id;
+  async function userIdOf(_cookie: string): Promise<string> {
+    return (await ownerId());
   }
 
   /**
@@ -11431,23 +10663,6 @@ describe('publish fan-out', () => {
     expect(await notifiedBy(plot.id)).toEqual([...followers].sort());
   });
 
-  it('reaches past the follower count the inline fan-out used to give up at', async () => {
-    const alice = await signUp('fanout-crowd-creator@example.com');
-    const aliceId = await userIdOf(alice);
-    // One over the 5,000 the publish transaction used to skip everything past.
-    await sql`insert into "user" (id, name, email)
-      select 'crowd-' || g, 'crowd', 'crowd-' || g || '@example.com' from generate_series(1, 5001) g`;
-    await sql`insert into follows (follower_id, creator_id)
-      select 'crowd-' || g, ${aliceId} from generate_series(1, 5001) g`;
-
-    const plot = await publishablePlot(alice, { name: '많은 팔로워' });
-    await publishOnly(alice, plot.id);
-    expect(await drainJobs(db, jobHandlers)).toBe(1);
-
-    expect(await notifiedBy(plot.id)).toHaveLength(5001);
-    expect(await readJson(await request(alice, '/api/notifications'))).toMatchObject({ unreadCount: 0 });
-  });
-
   it('queues nothing for a publish that announces nothing', async () => {
     const alice = await signUp('fanout-quiet-creator@example.com');
     const aliceId = await userIdOf(alice);
@@ -11528,7 +10743,7 @@ describe('plot draft', () => {
     expect(await readJson(await request(cookie, '/api/plots'))).toEqual([]);
   });
 
-  it('checks the premise and the session before it calls anything', async () => {
+  it('checks the premise before it calls anything', async () => {
     const cookie = await signUp('draft-guard@example.com');
     const { getAdapter, calls } = scriptedGetAdapter(DRAFT);
     const drafting = makeApp({ getAdapter });
@@ -11539,7 +10754,6 @@ describe('plot draft', () => {
       expect((await readJson(res)).code).toBe('invalid_request');
     }
     expect((await json(cookie, '/api/plots/draft', 'POST', {}, drafting)).status).toBe(400);
-    expect((await json(undefined, '/api/plots/draft', 'POST', { premise: '밤' }, drafting)).status).toBe(401);
     expect(calls()).toBe(0);
   });
 
@@ -11729,21 +10943,6 @@ describe('reply suggestions', () => {
     expect(
       (await json(cookie, `/api/chats/${chatId}/suggest`, 'POST', undefined, suggesting)).status,
     ).toBe(200);
-  });
-
-  it('belongs to the chat owner alone', async () => {
-    const cookie = await signUp('suggest-owner@example.com');
-    const stranger = await signUp('suggest-stranger@example.com');
-    const chatId = await chatWithTurn(cookie);
-    const { getAdapter } = scriptedGetAdapter(SUGGESTIONS);
-    const suggesting = makeApp({ getAdapter });
-
-    expect(
-      (await json(stranger, `/api/chats/${chatId}/suggest`, 'POST', undefined, suggesting)).status,
-    ).toBe(404);
-    expect(
-      (await json(undefined, `/api/chats/${chatId}/suggest`, 'POST', undefined, suggesting)).status,
-    ).toBe(401);
   });
 });
 
@@ -11945,31 +11144,6 @@ describe('plot assets', () => {
     // A slug that already exists is not a new asset, so the cap does not block it.
     expect((await upload(cookie, plot.id, 'a0', gif(99))).status).toBe(201);
     expect(await listAssets(cookie, plot.id)).toHaveLength(MAX_ASSETS_PER_PLOT);
-  });
-
-  it('serves assets to anyone who may read the plot, but only the owner writes', async () => {
-    const alice = await signUp('asset-visible@example.com');
-    const bob = await signUp('asset-reader@example.com');
-    const plot = await newPlot(alice, '공개 에셋 작품');
-    const created = await readJson(await upload(alice, plot.id, 'smile', gif(1)));
-
-    // Private: not even the existence of the plot is visible.
-    expect((await request(bob, `/api/plots/${plot.id}/assets`)).status).toBe(404);
-    expect((await request(bob, created.url)).status).toBe(404);
-
-    await publishPlot(alice, plot.id);
-
-    expect(await listAssets(bob, plot.id)).toEqual([created]);
-    const served = await request(bob, created.url);
-    expect(served.status).toBe(200);
-    expect(new Uint8Array(await served.arrayBuffer())).toEqual(gif(1));
-
-    // Writing stays with the owner — for everyone else the plot is not theirs.
-    expect((await upload(bob, plot.id, 'other', gif(2))).status).toBe(404);
-    expect((await request(bob, created.url, 'DELETE')).status).toBe(404);
-    // The images of a public plot are as public as the page they are on.
-    expect((await request(undefined, created.url)).status).toBe(200);
-    expect((await request(undefined, `/api/plots/${plot.id}/assets`)).status).toBe(200);
   });
 
   it('stores the embedded images of a charx import, deduping the slugs', async () => {
@@ -12240,48 +11414,6 @@ describe('safety level', () => {
     expect(await readPlot(cookie, created.id)).toMatchObject({ visibility: 'private', safetyLevel: 'all' });
     expect((await publishPlot(cookie, created.id, { safetyLevel: 'all' })).safetyLevel).toBe('all');
   });
-
-  /** Rows saved as `adult` before the level was refused keep it, and stay unlisted. */
-  it('hides a plot stored as adult from every public surface of another user', async () => {
-    const alice = await signUp('safety-owner@example.com');
-    const bob = await signUp('safety-viewer@example.com');
-    const aliceId = (await readJson(await request(alice, '/api/auth/get-session'))).user.id;
-
-    const adult = await publishablePlot(
-      alice,
-      { name: '성인 작품', description: '성인 작품 설명', intros: ['성인 작품의 도입부'], tags: ['성인태그'] },
-      { name: '성인 작품 멤버' },
-    );
-    await publishPlot(alice, adult.id);
-    await db.update(plots).set({ safetyLevel: 'adult' }).where(eq(plots.id, adult.id));
-    // A published, all-ages sibling proves the filter is about the level only.
-    const safe = await publishablePlot(alice, { name: '전체 작품' });
-    await publishPlot(alice, safe.id);
-
-    const names = async (path: string, key = 'items'): Promise<string[]> => {
-      const res = await request(bob, path);
-      expect(res.status, await res.clone().text()).toBe(200);
-      return (await readJson(res))[key].map((item: any) => item.name);
-    };
-
-    expect(await names('/api/explore?language=ko')).toEqual(['전체 작품']);
-    expect(await names('/api/explore?language=ko&tag=성인태그')).toEqual([]);
-    expect(await names(`/api/creators/${aliceId}`, 'publicPlots')).toEqual(['전체 작품']);
-
-    // Direct reads are 404, not a redacted view.
-    const member = (await readPlot(alice, adult.id)).characters[0];
-    expect((await request(bob, `/api/plots/${adult.id}/public`)).status).toBe(404);
-    expect((await request(bob, `/api/plots/${adult.id}/cover`)).status).toBe(404);
-    expect((await request(bob, `/api/plots/${adult.id}/characters/${member.id}/avatar`)).status).toBe(404);
-    expect((await request(bob, `/api/plots/${adult.id}/assets`)).status).toBe(404);
-    expect((await request(bob, `/api/plots/${adult.id}/assets/smile`)).status).toBe(404);
-    expect((await request(bob, `/api/plots/${adult.id}/comments`)).status).toBe(404);
-    expect((await json(bob, `/api/plots/${adult.id}/like`, 'POST')).status).toBe(404);
-
-    const chat = await json(bob, '/api/chats', 'POST', { plotId: adult.id, model: 'echo/echo' });
-    expect(chat.status).toBe(404);
-    expect((await readJson(chat)).code).toBe('not_found');
-  });
 });
 
 describe('plot comments', () => {
@@ -12312,76 +11444,6 @@ describe('plot comments', () => {
 
   const countOf = async (cookie: string, plotId: string): Promise<number> =>
     (await readPublicPlot(cookie, plotId)).commentCount;
-
-  it('lets a reader comment on a published plot and the creator reply', async () => {
-    const alice = await signUp('comment-owner@example.com');
-    const bob = await signUp('comment-reader@example.com');
-    const plotId = await publicPlot(alice);
-
-    const first = await comment(bob, plotId, { content: '  재밌어요  ' });
-    expect(first.content).toBe('재밌어요');
-    expect(first.authorName).toBe('comment-reader');
-    expect(first.parentId).toBeNull();
-    expect(first.spoiler).toBe(false);
-    expect(first.deleted).toBe(false);
-    expect(first.canDelete).toBe(true);
-
-    await comment(bob, plotId, { content: '결말이 반전입니다', spoiler: true });
-    await comment(alice, plotId, { content: '고마워요', parentId: first.id });
-    await comment(bob, plotId, { content: '저도 그렇게 봤어요', parentId: first.id });
-
-    // Top-level newest first; the replies under one, in the order they were written.
-    const page = await list(bob, plotId);
-    expect(contentsOf(page)).toEqual(['결말이 반전입니다', '재밌어요']);
-    expect(page.items[0].spoiler).toBe(true);
-    expect(page.items[0].replies).toEqual([]);
-    expect(page.items[1].replies.map((reply: any) => reply.content)).toEqual([
-      '고마워요',
-      '저도 그렇게 봤어요',
-    ]);
-    expect(page.items[1].replies[0].authorName).toBe('comment-owner');
-    expect(page.nextCursor).toBeNull();
-    expect(await countOf(bob, plotId)).toBe(4);
-
-    // The creator may moderate every comment on their own page.
-    const asOwner = await list(alice, plotId);
-    expect(asOwner.items.every((item: any) => item.canDelete)).toBe(true);
-  });
-
-  it('shows the section to a reader without an account, and takes nothing from one', async () => {
-    const alice = await signUp('comment-anon-owner@example.com');
-    const bob = await signUp('comment-anon-reader@example.com');
-    const plotId = await publicPlot(alice, '익명 댓글 작품');
-    await comment(bob, plotId, { content: '먼저 남긴 댓글' });
-
-    const page = await list(undefined, plotId);
-    expect(contentsOf(page)).toEqual(['먼저 남긴 댓글']);
-    // Moderation belongs to somebody; a reader without an account is nobody.
-    expect(page.items[0].canDelete).toBe(false);
-    expect(page.items[0].authorName).toBe('comment-anon-reader');
-
-    const write = await json(undefined, `/api/plots/${plotId}/comments`, 'POST', {
-      content: '나도 한마디',
-    });
-    expect(write.status).toBe(401);
-    expect((await readJson(write)).code).toBe('unauthorized');
-    expect(contentsOf(await list(alice, plotId))).toEqual(['먼저 남긴 댓글']);
-  });
-
-  it('hides the comment section of a plot the reader cannot see', async () => {
-    const alice = await signUp('comment-private@example.com');
-    const bob = await signUp('comment-outsider@example.com');
-    const created = await createPlot(alice, { name: '비공개 작품' });
-
-    expect((await request(bob, `/api/plots/${created.id}/comments`)).status).toBe(404);
-    const write = await json(bob, `/api/plots/${created.id}/comments`, 'POST', { content: '안녕' });
-    expect(write.status).toBe(404);
-    expect((await readJson(write)).code).toBe('not_found');
-
-    // The owner sees their own plot, so they may comment on it.
-    await comment(alice, created.id, { content: '혼잣말' });
-    expect(contentsOf(await list(alice, created.id))).toEqual(['혼잣말']);
-  });
 
   it('rejects a second reply level and a parent from another plot', async () => {
     const alice = await signUp('comment-parent@example.com');
@@ -12431,26 +11493,6 @@ describe('plot comments', () => {
 
     // The cap itself still fits.
     expect((await comment(cookie, plotId, { content: 'ㄱ'.repeat(500) })).content).toHaveLength(500);
-  });
-
-  it('lets the author and the plot owner delete, and nobody else', async () => {
-    const alice = await signUp('comment-mod-owner@example.com');
-    const bob = await signUp('comment-mod-author@example.com');
-    const carol = await signUp('comment-mod-stranger@example.com');
-    const plotId = await publicPlot(alice);
-
-    const mine = await comment(bob, plotId, { content: '밥의 댓글' });
-    // A third party cannot delete it and is not told it is there to delete.
-    expect((await request(carol, `/api/comments/${mine.id}`, 'DELETE')).status).toBe(404);
-    expect((await list(carol, plotId)).items[0].canDelete).toBe(false);
-
-    expect((await request(bob, `/api/comments/${mine.id}`, 'DELETE')).status).toBe(204);
-    // Deleting it twice finds nothing the second time.
-    expect((await request(bob, `/api/comments/${mine.id}`, 'DELETE')).status).toBe(404);
-
-    const moderated = await comment(bob, plotId, { content: '또 다른 댓글' });
-    expect((await request(alice, `/api/comments/${moderated.id}`, 'DELETE')).status).toBe(204);
-    expect((await list(bob, plotId)).items).toEqual([]);
   });
 
   it('keeps a deleted comment only while it anchors a reply, and keeps nothing of it', async () => {
@@ -13011,7 +12053,7 @@ describe('card scripts', () => {
     expect(state.path.at(-1)).toMatchObject({ role: 'assistant', scriptState: null });
   });
 
-  it('commits only onto the head, for the owner, within the caps', async () => {
+  it('commits only onto the head, within the caps', async () => {
     const { cookie, chatId, rootId } = await variableChat('script-commit@example.com');
     await readSse(
       await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '들어간다' }, replyingApp('대답').app),
@@ -13029,9 +12071,6 @@ describe('card scripts', () => {
     const off = await commit({ messageId: rootId, scriptRev: 0, variableDelta: { door: 'open' } });
     expect(off.status).toBe(409);
     expect((await readJson(off)).code).toBe('head_moved');
-
-    const stranger = await signUp('script-commit-stranger@example.com');
-    expect((await commit({ variableDelta: { door: 'open' } }, stranger)).status).toBe(404);
 
     for (const body of [
       { scriptRev: undefined, variableDelta: { door: 'open' } },
@@ -13156,9 +12195,6 @@ describe('card scripts', () => {
     // Not by another plot's chat.
     const other = await variableChat('script-globals-other@example.com');
     expect((await stateOf(other.cookie, other.chatId)).globalVariables).toEqual({});
-    // And not by anyone else: the chat is not theirs to read through.
-    expect((await request(other.cookie, path)).status).toBe(404);
-    expect((await json(other.cookie, path, 'PATCH', { variables: { a: '9' } })).status).toBe(404);
 
     // The cap holds on the merged map, and a refused write leaves it as it was.
     const room = MAX_GLOBAL_VARIABLE_KEYS - Object.keys(expected).length;
@@ -15170,13 +14206,7 @@ describe('editRequest listeners', () => {
     await send(cookie, otherWork, capturing);
     expect(prompts.at(-1)!.system).toBe(`n=4`);
 
-    // Another reader on the same work, the same member and the same code, has their own…
-    await publishPlot(cookie, plot.id);
-    const stranger = await signUp('lua-state-stranger@example.com');
-    const theirs = (await startChat(stranger, plot.id)).chat.id;
-    await send(stranger, theirs, capturing);
-    expect(prompts.at(-1)!.system).toBe(`n=1`);
-    // …and leaves this reader's where it was.
+    // And back in the first chat, it goes on again.
     await send(cookie, chatId, capturing, '셋');
     expect(prompts.at(-1)!.system).toBe(`n=5`);
 
@@ -15358,9 +14388,6 @@ describe('the browser script runtime', () => {
       overlay: { member: null, persona: null },
     });
     expect(JSON.stringify(answer)).not.toContain('스크립트 없는 멤버');
-    // Someone else's chat is not found.
-    const stranger = await signUp('scripts-stranger@example.com');
-    expect((await request(stranger, `/api/chats/${chat.chat.id}/scripts`)).status).toBe(404);
   });
 
   it("lays a generation's overlay over the prompt it starts, and keeps it", async () => {
@@ -15794,7 +14821,7 @@ describe('the browser script runtime', () => {
     expect((await readPublicPlot(undefined, plotId)).backgroundHtml).toBe('');
   });
 
-  it("keeps a rewrite for the reader on the plot — every chat of theirs reads it, no other reader does — and the chat's own lore and note for the chat", async () => {
+  it("keeps a rewrite for the reader on the plot — every chat of theirs reads it — and the chat's own lore and note for the chat", async () => {
     const { plotId, memberId } = await scriptedPlot('scripts-reader-overlay@example.com');
     const reader = await signUp('scripts-reader-overlay-reader@example.com');
     const first = await startChat(reader, plotId);
@@ -15833,14 +14860,6 @@ describe('the browser script runtime', () => {
       localLore: [],
     });
     expect((await scriptsOf(reader, first.chat.id)).scripts.localLore).toEqual([expect.objectContaining({ content: '이 챗만의 등불.' })]);
-
-    // Another reader of the same plot plays the work as the creator wrote it.
-    const other = await signUp('scripts-reader-overlay-other@example.com');
-    const theirs = await startChat(other, plotId);
-    expect((await scriptsOf(other, theirs.chat.id)).scripts.overlay).toEqual({ member: null, persona: null });
-    await readSse(await json(other, `/api/chats/${theirs.chat.id}/messages`, 'POST', { content: '안녕' }, replying));
-    expect(systems.at(-1)).toContain('원래 설명');
-    expect(systems.at(-1)).not.toContain('바뀐 설명');
   });
 
   it("merges two of the reader's chats writing at once field by field, and holds the merged overlay to its size", async () => {
@@ -15956,16 +14975,11 @@ describe('script model calls', () => {
     expect(row!.generatingAt).toBeNull();
   });
 
-  it("refuses a plot whose card does not grant low-level access, and anyone's chat but the caller's", async () => {
+  it('refuses a plot whose card does not grant low-level access', async () => {
     const { reader, chatId } = await luaChat('script-llm-closed@example.com', false);
     const closed = await json(reader, `/api/chats/${chatId}/script-llm`, 'POST', { messages: prompt });
     expect(closed.status).toBe(403);
     expect((await readJson(closed)).code).toBe('script_llm_forbidden');
-
-    const { chatId: open } = await luaChat('script-llm-open@example.com', true);
-    const stranger = await signUp('script-llm-stranger@example.com');
-    expect((await json(stranger, `/api/chats/${open}/script-llm`, 'POST', { messages: prompt })).status).toBe(404);
-    expect((await json(undefined, `/api/chats/${open}/script-llm`, 'POST', { messages: prompt })).status).toBe(401);
   });
 
   it('holds the prompt to its shape and size', async () => {
@@ -16066,7 +15080,7 @@ describe('script model calls', () => {
     });
     const { reader, chatId } = await luaChat('script-llm-window@example.com', true);
     expect((await json(reader, `/api/chats/${chatId}/script-llm`, 'POST', { messages: prompt }, answering)).status).toBe(200);
-    const userId = (await readJson(await request(reader, '/api/auth/get-session'))).user.id;
+    const userId = (await ownerId());
     const key = `script_llm:user:${userId}`;
     await db.update(rateLimits).set({ hits: RATE_LIMITS.scriptLlm.limit }).where(eq(rateLimits.key, key));
     const refused = await json(reader, `/api/chats/${chatId}/script-llm`, 'POST', { messages: prompt }, answering);
@@ -16133,21 +15147,16 @@ describe('script requests', () => {
     return { target: makeApp({ scriptFetch }), clock, connected };
   }
 
-  it('holds RisuAI’s gate: the card’s low-level access, on the reader’s own chat', async () => {
+  it('holds RisuAI’s gate: the card’s low-level access', async () => {
     const { target, connected } = fetchingApp(async () => ok(200, 'x'));
     const { reader, chatId } = await luaChat('fetch-closed@example.com', false, target);
     const closed = await json(reader, `/api/chats/${chatId}/script-fetch`, 'POST', { url: 'https://site.test/' }, target);
     expect(closed.status).toBe(403);
     expect((await readJson(closed)).code).toBe('script_fetch_forbidden');
-
-    const { chatId: open } = await luaChat('fetch-open@example.com', true, target);
-    const stranger = await signUp('fetch-stranger@example.com');
-    expect((await json(stranger, `/api/chats/${open}/script-fetch`, 'POST', { url: 'https://site.test/' }, target)).status).toBe(404);
-    expect((await json(undefined, `/api/chats/${open}/script-fetch`, 'POST', { url: 'https://site.test/' }, target)).status).toBe(401);
     expect(connected).toEqual([]);
   });
 
-  it('lets six through in RisuAI’s minute and refuses the seventh, refused addresses counted too, per reader', async () => {
+  it('lets six through in RisuAI’s minute and refuses the seventh, refused addresses counted too', async () => {
     const { target, clock, connected } = fetchingApp(async () => ok(200, '본문'));
     const { reader, plotId, send, sendOn } = await luaChat('fetch-limit@example.com', true, target);
     const tooMany = { status: 429, data: 'Too many requests. you can request 5 times per minute' };
@@ -16164,18 +15173,16 @@ describe('script requests', () => {
     expect(await send('https://site.test/4')).toEqual(tooMany);
     expect(connected.map((hop) => hop.url)).toEqual(['https://site.test/1', 'https://site.test/2']);
 
-    // The window is the reader's, across their chats; another reader has their own.
+    // The window is the reader's, across their chats.
     const again = await startChat(reader, plotId);
     expect(await sendOn(again.chat.id, 'https://site.test/5')).toEqual(tooMany);
-    const other = await luaChat('fetch-limit-other@example.com', true, target);
-    expect(await other.send('https://site.test/6')).toEqual({ status: 200, data: '본문' });
 
     // It starts again only once more than a minute has passed since it started: at a minute exactly it holds.
     clock.now += 30_000;
     expect(await send('https://site.test/7')).toEqual(tooMany);
     clock.now += 1;
     expect(await send('https://site.test/8')).toEqual({ status: 200, data: '본문' });
-    expect(connected.map((hop) => hop.url)).toEqual(['https://site.test/1', 'https://site.test/2', 'https://site.test/6', 'https://site.test/8']);
+    expect(connected.map((hop) => hop.url)).toEqual(['https://site.test/1', 'https://site.test/2', 'https://site.test/8']);
   });
 
   it('keeps one window per reader across API instances', async () => {
@@ -17096,12 +16103,6 @@ describe('emotion images', () => {
     await harness.settle();
     expect(await emotionOf(cookie, chatId, fallback.messageId, harness.app)).toEqual({ emotion: 'neutral' });
     expect(await emotionOf(cookie, chatId, contained.messageId, harness.app)).toEqual({ emotion: 'Angry' });
-
-    // Someone else's chat is not there to ask about.
-    const other = await signUp('emotion-detect-other@example.com');
-    expect(
-      (await request(other, `/api/chats/${chatId}/messages/${done.messageId}/emotion`, 'GET', undefined, harness.app)).status,
-    ).toBe(404);
   });
 
   it('starts a lost choice again when the page asks after a recent reply: not while one runs, and not on every ask', async () => {
@@ -17524,7 +16525,7 @@ describe('RisuAI modules', () => {
     expect((await request(cookie, `/api/plots/${plot.id}/modules/${owner.modules[0].id}`, 'DELETE')).status).toBe(404);
   });
 
-  it('takes RisuAI’s module JSON, refuses what is not a module, and answers only the owner', async () => {
+  it('takes RisuAI’s module JSON, and refuses what is not a module', async () => {
     const cookie = await signUp('module-json@example.com');
     const plot = await createPlot(cookie);
     const json = new File([JSON.stringify({ ...weather, type: 'risuModule' })], 'weather.json');
@@ -17537,10 +16538,6 @@ describe('RisuAI modules', () => {
     expect((await readJson(bad)).code).toBe('invalid_module');
     const nameless = await importModule(cookie, plot.id, new File([JSON.stringify({ ...weather, type: 'risuModule', name: '' })], 'x.json'));
     expect(nameless.status).toBe(400);
-
-    const stranger = await signUp('module-stranger@example.com');
-    expect((await importModule(stranger, plot.id, risum())).status).toBe(404);
-    expect((await request(stranger, `/api/plots/${plot.id}/modules/${owner.modules[0].id}`, 'DELETE')).status).toBe(404);
   });
 
   it('takes RisuAI’s .module.charx: the module made a character, made a module again with its pictures', async () => {
@@ -17712,17 +16709,12 @@ describe('reader modules', () => {
     expect(bad.status).toBe(400);
     expect((await readJson(bad)).code).toBe('invalid_module');
 
-    // Its picture is its owner's alone.
+    // Its picture is served on the module's own route.
     const [row] = await db.select().from(readerModules).where(eq(readerModules.id, created.id));
     const assetPath = `/api/reader-modules/${created.id}/assets/${row!.assets[0]!.id}`;
     const picture = await request(cookie, assetPath);
     expect(picture.status).toBe(200);
     expect(picture.headers.get('content-type')).toBe('image/gif');
-    const stranger = await signUp('reader-module-stranger@example.com');
-    expect((await request(stranger, assetPath)).status).toBe(404);
-    expect((await json(stranger, `/api/reader-modules/${created.id}`, 'PATCH', { enabledGlobally: true })).status).toBe(404);
-    expect((await request(stranger, `/api/reader-modules/${created.id}`, 'DELETE')).status).toBe(404);
-    expect(await readJson(await request(stranger, '/api/reader-modules'))).toEqual([]);
 
     const on = await json(cookie, `/api/reader-modules/${created.id}`, 'PATCH', { enabledGlobally: true });
     expect((await readJson(on)).enabledGlobally).toBe(true);
@@ -17739,10 +16731,8 @@ describe('reader modules', () => {
     const before = await readJson(await request(cookie, `/api/chats/${chatId}/scripts`));
     expect(before.scripts.triggers.map((trigger: any) => trigger.comment)).toEqual(['카드', '작품 모듈']);
 
-    // Another reader's module id is not kept on the list.
-    const stranger = await signUp('reader-module-chat-stranger@example.com');
-    const theirs = await readJson(await upload(stranger, new File([JSON.stringify({ ...rain, lowLevelAccess: false, type: 'risuModule' })], 'x.json')));
-    const patched = await readJson(await json(cookie, `/api/chats/${chatId}`, 'PATCH', { modules: [created.id, theirs.id, created.id] }));
+    // An id that names no module of the reader's is not kept on the list, nor one twice.
+    const patched = await readJson(await json(cookie, `/api/chats/${chatId}`, 'PATCH', { modules: [created.id, randomUUID(), created.id] }));
     expect(patched.chat.modules).toEqual([created.id]);
 
     const view = await readJson(await request(cookie, `/api/chats/${chatId}/modules`));
@@ -17856,7 +16846,8 @@ describe('reader modules', () => {
     expect(await libraryOf(chatId)).toMatchObject({ listedHere: false, onThisWork: true, onHere: true });
     // Another work of the reader's is not this one.
     const elsewhere = await workWithModule('reader-module-lists-elsewhere@example.com');
-    expect(await readJson(await request(elsewhere.cookie, `/api/chats/${elsewhere.chatId}/modules`))).toMatchObject({ library: [] });
+    expect(await triggersOf(elsewhere.chatId)).toEqual(['카드', '작품 모듈']);
+    expect(await libraryOf(elsewhere.chatId)).toMatchObject({ listedHere: false, onThisWork: false, onHere: false });
     expect((await json(cookie, `/api/reader-modules/${created.id}`, 'PATCH', { plotId: 'nope', onPlot: true })).status).toBe(400);
     expect((await json(cookie, `/api/reader-modules/${created.id}`, 'PATCH', { plotId })).status).toBe(400);
     expect((await json(cookie, `/api/reader-modules/${created.id}`, 'PATCH', {})).status).toBe(400);
@@ -18150,7 +17141,6 @@ describe('translation', () => {
 
   it('translates again past the cache when asked, and keeps the reader’s own wording', async () => {
     const cookie = await signUp('translate-again@example.com');
-    const other = await signUp('translate-again-other@example.com');
     const { chatId, state } = await englishChat(cookie);
     const path = `/api/chats/${chatId}/messages/${state.path[0].id}/translation`;
     const scripted = scriptedGetAdapter('하나.\n■\n둘.', '새 하나.\n■\n새 둘.');
@@ -18178,16 +17168,13 @@ describe('translation', () => {
     expect((await json(cookie, path, 'PUT', { language: 'ko', texts: { 'One.': '  ' } })).status).toBe(400);
     expect((await json(cookie, path, 'PUT', { language: 'ko', texts: ['One.'] })).status).toBe(400);
     expect((await json(cookie, path, 'PUT', { language: 'zh', texts: { 'One.': '하나' } })).status).toBe(400);
-    expect((await json(other, path, 'PUT', { language: 'ko', texts: { 'One.': '남의 것' } })).status).toBe(404);
   });
 
-  it('refuses another reader, a message of another chat and a language it does not know', async () => {
+  it('refuses a message of another chat and a language it does not know', async () => {
     const cookie = await signUp('translate-owner@example.com');
-    const other = await signUp('translate-other@example.com');
     const { chatId, state } = await englishChat(cookie);
     const second = await englishChat(cookie);
     const path = `/api/chats/${chatId}/messages/${state.path[0].id}/translation`;
-    expect((await json(other, path, 'POST', { language: 'ko', texts: ['x'] })).status).toBe(404);
     expect((await json(cookie, `/api/chats/${chatId}/messages/${second.state.path[0].id}/translation`, 'POST', { language: 'ko', texts: ['x'] })).status).toBe(404);
     expect((await json(cookie, path, 'POST', { language: 'zh', texts: ['x'] })).status).toBe(400);
     expect((await json(cookie, path, 'POST', { language: 'ko', texts: [''] })).status).toBe(400);
@@ -18407,9 +17394,6 @@ describe('what a card loads from other hosts, brought in at import', () => {
     expect(happy.headers.get('content-type')).toBe('image/gif');
     expect(new Uint8Array(await happy.arrayBuffer())).toEqual(gif(3));
     expect((await request(cookie, `${base}/by-name/cdn.test/face/Bored.png`, 'GET', undefined, target)).status).toBe(404);
-    // Someone else's private plot is not reached by name either.
-    const stranger = await signUp('localize-stranger@example.com');
-    expect((await request(stranger, `${base}/by-name/cdn.test/face/Happy.png`, 'GET', undefined, target)).status).toBe(404);
   });
 
   it('brings in a web font the lore imports, into the stylesheet, and leaves the lore as it was', async () => {
@@ -18633,7 +17617,6 @@ describe('what a card loads from other hosts, brought in at import', () => {
     const { remoteFetch, asked } = remote();
     const target = makeApp({ remoteFetch });
     const cookie = await signUp('reader-module-web@example.com');
-    const other = await signUp('reader-module-web-other@example.com');
     const module = {
       name: '글꼴 모듈',
       description: '',
@@ -18674,13 +17657,12 @@ describe('what a card loads from other hosts, brought in at import', () => {
     const at = (name: string): string => `/api/reader-modules/${made.id}/assets/${named.get(name)!.id}`;
     expect(row!.module.css).toContain(`url(${at('https://fonts.test/nanum.woff2')})`);
     expect(row!.module.backgroundHtml).toBe(`<img src="${at('https://cdn.test/bg.png')}"><img src="https://cdn.test/gone.png">`);
-    // A template's values by name, on the module's own route, to its owner alone.
+    // A template's values by name, on the module's own route.
     expect(row!.module.displayScripts?.[0]?.out).toBe(`<img src='/api/reader-modules/${made.id}/assets/by-name/cdn.test/face/$1.png'>`);
     const served = await request(cookie, `/api/reader-modules/${made.id}/assets/by-name/cdn.test/face/Happy.png`, 'GET', undefined, target);
     expect(served.status).toBe(200);
     expect(new Uint8Array(await served.arrayBuffer())).toEqual(gif(3));
     expect((await request(cookie, `/api/reader-modules/${made.id}/assets/by-name/cdn.test/face/Angry.png`, 'GET', undefined, target)).status).toBe(404);
-    expect((await request(other, `/api/reader-modules/${made.id}/assets/by-name/cdn.test/face/Happy.png`, 'GET', undefined, target)).status).toBe(404);
 
     // Taking it out of the library takes what it fetched.
     expect((await request(cookie, `/api/reader-modules/${made.id}`, 'DELETE', undefined, target)).status).toBe(204);
@@ -19442,31 +18424,25 @@ describe('rate limits', () => {
     expect((await left()).sort()).toEqual(['test:new', 'test:newer', 'test:recent']);
   });
 
-  it('throttles sign-in starts by client address, the proxy’s header first when one is named', async () => {
-    const openai = fakeOpenAI();
-    const { target } = hostedApp(openai);
-    const start = (on: Hono<AppEnv>, headers: Record<string, string>) =>
-      on.request('/api/chatgpt/sign-in', {
+  it('throttles connection starts by the address they come from', async () => {
+    const { target } = connectApp(fakeOpenAI());
+    const start = (headers: Record<string, string>) =>
+      target.request('/api/chatgpt/sign-in', {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...headers },
         body: JSON.stringify({ next: '/', locale: 'ko' }),
       });
-    // The rightmost forwarded entry is the one counted: what came before it is the client's own word.
+    // Only this computer starts one (`requireLocal`), so the address is one of its own.
     for (let i = 0; i < RATE_LIMITS.signIn.limit; i += 1) {
-      expect((await start(target, { 'x-forwarded-for': `198.51.100.${i}, 203.0.113.7` })).status).toBe(200);
+      expect((await start({ 'x-forwarded-for': '127.0.0.1' })).status).toBe(200);
     }
-    const refused = await start(target, { 'x-forwarded-for': '203.0.113.7' });
+    const refused = await start({ 'x-forwarded-for': '127.0.0.1' });
     expect(refused.status).toBe(429);
     expect(await readJson(refused)).toEqual({ error: expect.any(String), code: 'rate_limited' });
     expect(Number(refused.headers.get('retry-after'))).toBeGreaterThan(500);
-    expect((await start(target, { 'x-forwarded-for': '203.0.113.8' })).status).toBe(200);
+    expect((await start({})).status).toBe(200);
     const rows = await db.select({ key: rateLimits.key }).from(rateLimits);
-    expect(rows.map((row) => row.key).sort()).toEqual(['sign_in:ip:203.0.113.7', 'sign_in:ip:203.0.113.8']);
-
-    // Behind a proxy that names the client in a header of its own, the header decides.
-    const named = hostedApp(fakeOpenAI(), { CLIENT_IP_HEADER: 'cf-connecting-ip' }).target;
-    expect((await start(named, { 'cf-connecting-ip': '203.0.113.7', 'x-forwarded-for': '192.0.2.1' })).status).toBe(429);
-    expect((await start(named, { 'cf-connecting-ip': '192.0.2.1', 'x-forwarded-for': '203.0.113.7' })).status).toBe(200);
+    expect(rows.map((row) => row.key).sort()).toEqual(['sign_in:ip:127.0.0.1', 'sign_in:ip:unknown']);
   });
 
   it('throttles the catalogue’s text search by client address, and leaves browsing alone', async () => {
@@ -19486,7 +18462,7 @@ describe('rate limits', () => {
   it('refuses a generation start past the reader’s window, on all five routes, before anything is stored', async () => {
     const cookie = await signUp('gen-limit@example.com');
     const { chatId } = await setupChat(cookie);
-    const userId = (await readJson(await request(cookie, '/api/auth/get-session'))).user.id;
+    const userId = (await ownerId());
     const key = `generation:user:${userId}`;
     // A start goes through and is counted.
     expect((await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }))).at(-1)!.event).toBe('done');
@@ -19503,10 +18479,7 @@ describe('rate limits', () => {
     }
     expect(await db.select({ id: messages.id }).from(messages).where(eq(messages.chatId, chatId))).toHaveLength(before.length);
 
-    // Another reader has a window of their own; this one's opens again once it runs out.
-    const other = await signUp('gen-limit-other@example.com');
-    const theirs = await setupChat(other);
-    expect((await readSse(await json(other, `/api/chats/${theirs.chatId}/messages`, 'POST', { content: '안녕' }))).at(-1)!.event).toBe('done');
+    // The window opens again once it runs out.
     await db
       .update(rateLimits)
       .set({ windowStart: new Date(Date.now() - RATE_LIMITS.generation.windowMs - 1_000) })
@@ -19648,10 +18621,6 @@ describe('file imports', () => {
     expect((await request(cookie, `/api/file-imports/${id}/parts/1`, 'PUT', file.subarray(1))).status).toBe(400);
     expect((await request(cookie, `/api/file-imports/${id}/parts/2`, 'PUT', file)).status).toBe(404);
     expect((await json(cookie, `/api/file-imports/${id}/parts`, 'POST', { numbers: [2] })).status).toBe(400);
-    // Someone else's import is not there at all.
-    const stranger = await signUp('bad-parts-stranger@example.com');
-    expect((await request(stranger, `/api/file-imports/${id}/parts/1`, 'PUT', file)).status).toBe(404);
-    expect((await json(stranger, `/api/file-imports/${id}`)).status).toBe(404);
 
     expect((await request(cookie, `/api/file-imports/${id}/parts/1`, 'PUT', file)).status).toBe(204);
     expect((await json(cookie, `/api/file-imports/${id}/complete`, 'POST', {})).status).toBe(202);
@@ -19679,10 +18648,9 @@ describe('file imports', () => {
     expect(await db.select().from(fileImports)).toEqual([]);
   });
 
-  it('lets a reader import one file at a time, across instances, while another reader’s goes on', async () => {
+  it('lets a reader import one file at a time, across instances', async () => {
     const other = makeApp();
     const alice = await signUp('one-at-a-time@example.com');
-    const bob = await signUp('meanwhile@example.com');
     const size = (await pngCard().arrayBuffer()).byteLength;
     const first = await start(alice, { target: 'plot', fileName: 'lian.png', size });
     expect(first.status).toBe(201);
@@ -19690,7 +18658,6 @@ describe('file imports', () => {
     const second = await start(alice, { target: 'plot', fileName: 'lian.png', size }, other);
     expect(second.status).toBe(429);
     expect(await readJson(second)).toEqual({ error: expect.any(String), code: 'import_busy' });
-    expect((await fileImport(bob, '/api/plots/import', cardForm(), other)).status).toBe(201);
 
     // An upload left untouched gives way to the reader's next: a closed tab does not hold the slot.
     const { id } = await readJson(first);

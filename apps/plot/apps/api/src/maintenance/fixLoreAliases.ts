@@ -4,14 +4,14 @@
  * (next to) no Korean keys and which has a keyed entry without its row — on its
  * creator's auxiliary model, as the API does after an edit. Against the app's
  * folder (SHIZUE_DATA_DIR) — never while the app runs — with its secret, which
- * opens the ChatGPT sign-ins.
+ * opens the ChatGPT connection.
  *
  *   pnpm --filter @shizue/api fix:lore-aliases                 dry run: lists the plots and the calls each needs
  *   pnpm --filter @shizue/api fix:lore-aliases --apply         writes them, one plot at a time
  *   pnpm --filter @shizue/api fix:lore-aliases --plot <id> …   one plot only
  *
  * Run again, it asks for nothing it already has. A plot whose creator has no
- * auxiliary model (signed out of ChatGPT) is listed and skipped: its first
+ * auxiliary model (ChatGPT disconnected) is listed and skipped: its first
  * Korean reader's chat starts the pass on theirs.
  *
  * Rows are found by what they were made from (`aliasSourceText`), so a selective
@@ -25,7 +25,6 @@ import { and, asc, eq, ne } from 'drizzle-orm';
 import { createChatGPTAccounts } from '../chatgptAccounts.js';
 import { openAppDb } from '../appDb.js';
 import { loadRootEnv, readConfig, readOrCreateSecret } from '../env.js';
-import { createSessionStore } from '../hostedAuth.js';
 import { aliasableEntries, aliasHash, aliasPlotLore, loadWorkLore, loreAliasesEnabled } from '../loreAliases.js';
 
 loadRootEnv();
@@ -57,7 +56,7 @@ const accounts = createChatGPTAccounts(db, {
 const deps = {
   db,
   env: config.env,
-  chatgpt: { accounts, sessions: createSessionStore(db, { secure: new URL(config.authUrl).protocol === 'https:' }) },
+  chatgpt: { accounts },
 };
 try {
   const rows = await db

@@ -28,10 +28,6 @@ vi.mock('@/i18n/navigation', async () => {
   };
 });
 
-vi.mock('@/lib/authClient', () => ({
-  useSession: () => ({ data: { user: { id: 'usr_2', name: '독자' } }, isPending: false }),
-}));
-
 vi.mock('@/lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/lib/api')>()),
   apiGet: (url: string) => Promise.resolve(url === '/api/models' ? catalog : []),

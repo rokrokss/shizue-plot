@@ -328,6 +328,8 @@ test('the wizard reads the backup and lists what it holds', async () => {
 });
 
 test('the run brings over every chosen item', async () => {
+  // The owner holds the other specs' works too: the run's are the ones it adds.
+  const before = new Set((await api<PlotRow[]>('/api/plots')).map((plot) => plot.id));
   await page.getByTestId('st-start').click();
   const runPanel = page.getByTestId('st-run');
   // The way out stands only once the run has finished.
@@ -339,7 +341,7 @@ test('the run brings over every chosen item', async () => {
   await expect(runPanel.getByRole('link', { name: '대화 열기' })).toHaveCount(3);
   await expect(runPanel).toContainText('대화의 가지로 들어갔습니다');
 
-  plots = await api<PlotRow[]>('/api/plots');
+  plots = (await api<PlotRow[]>('/api/plots')).filter((plot) => !before.has(plot.id));
   expect(plots.map((plot) => plot.name).sort()).toEqual([alice, bob, group].sort());
   expect(plots.every((plot) => plot.visibility === 'private')).toBe(true);
 });

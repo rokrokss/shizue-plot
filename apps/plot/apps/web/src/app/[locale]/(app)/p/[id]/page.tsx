@@ -8,22 +8,17 @@ import { FollowButton } from '@/components/FollowButton';
 import { PlotIntro } from '@/components/PlotIntro';
 import { StartChatPanel } from '@/components/StartChatPanel';
 import { PlotStyleBadges } from '@/components/PlotStyleBadges';
-import { Button, CenteredMessage, cx, ErrorText, Section, Spinner } from '@/components/ui';
-import { Link, useRouter } from '@/i18n/navigation';
-import { apiGet, apiSend } from '@/lib/api';
-import { useSession } from '@/lib/authClient';
+import { CenteredMessage, cx, Section, Spinner } from '@/components/ui';
+import { Link } from '@/i18n/navigation';
+import { apiGet } from '@/lib/api';
 import { fillPreview } from '@/lib/hub';
-import { signInHref } from '@/lib/nav';
-import type { LikeState, PublicPlotDetail } from '@/lib/types';
+import type { PublicPlotDetail } from '@/lib/types';
 import { useDocumentTitle } from '@/lib/useDocumentTitle';
-import { useErrorMessage } from '@/lib/useErrorMessage';
 
 /**
- * The public page of a plot, open to anyone: the API answers this read without
- * a session, and it is the same answer for every reader — the creator's own view
- * of it differs only in what they may do with it. What a reader with no account
- * cannot do is act: liking, commenting and starting a chat lead to the way in
- * instead.
+ * A plot's own page, where a chat starts. Every work here is the owner's —
+ * there are no other readers (ARCHITECTURE §4.1) — so beside the title stands
+ * the way into the editor.
  */
 export default function PublicPlotPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -31,16 +26,11 @@ export default function PublicPlotPage({ params }: { params: Promise<{ id: strin
   const explore = useTranslations('explore');
   const common = useTranslations('common');
   const format = useFormatter();
-  const toMessage = useErrorMessage();
-  const router = useRouter();
-  const { data: session } = useSession();
 
   const [plot, setPlot] = useState<PublicPlotDetail | null>(null);
   const [missing, setMissing] = useState(false);
   /** Which opening the reader is looking at, and the one a chat would start on. */
   const [introIndex, setIntroIndex] = useState(0);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
   useDocumentTitle(plot?.name);
 
   useEffect(() => {
@@ -56,36 +46,8 @@ export default function PublicPlotPage({ params }: { params: Promise<{ id: strin
     );
   }
 
-  const owner = session?.user.id === plot.creatorId;
   const userMacro = explore('userMacro');
   const intro = plot.intros[introIndex] ?? '';
-
-  async function toggleLike(): Promise<void> {
-    // The button is never disabled up front for a reader with no account: the
-    // press is the invitation, and it leads to the way in and back here.
-    if (!session) {
-      router.push(signInHref(`/p/${id}`));
-      return;
-    }
-    if (busy || !plot) return;
-    const liked = !plot.likedByMe;
-    setBusy(true);
-    setError('');
-    // Optimistic: the counter moves now and is reconciled with (or reverted to)
-    // whatever the server reports.
-    setPlot({ ...plot, likedByMe: liked, likeCount: plot.likeCount + (liked ? 1 : -1) });
-    try {
-      const state = await apiSend<LikeState>(liked ? 'POST' : 'DELETE', `/api/plots/${id}/like`);
-      setPlot((current) =>
-        current ? { ...current, likedByMe: state.liked, likeCount: state.likeCount } : current,
-      );
-    } catch (caught) {
-      setPlot(plot);
-      setError(toMessage(caught));
-    } finally {
-      setBusy(false);
-    }
-  }
 
   return (
     <div className="mx-auto w-full max-w-6xl px-5 py-10">
@@ -115,32 +77,15 @@ export default function PublicPlotPage({ params }: { params: Promise<{ id: strin
                     >
                       {explore('by', { name: plot.creatorName })}
                     </Link>
-                    {/* Beside the name it belongs to: the work is how a reader finds
-                        a creator, so this is where following one is worth offering. */}
-                    <FollowButton creatorId={plot.creatorId} initial={plot.creatorFollow} />
+                    <FollowButton initial={plot.creatorFollow} />
                   </div>
                 </div>
-                {owner ? (
-                  <Link
-                    href={`/plots/${plot.id}`}
-                    className="inline-flex h-10 shrink-0 items-center rounded-lg bg-accent px-4 text-sm font-medium text-accent-ink transition-colors hover:bg-accent/90"
-                  >
-                    {t('edit')}
-                  </Link>
-                ) : (
-                  <Button
-                    data-testid="like-button"
-                    variant={plot.likedByMe ? 'primary' : 'secondary'}
-                    aria-pressed={plot.likedByMe}
-                    onClick={() => void toggleLike()}
-                  >
-                    {/* The count is part of the name rather than hidden behind an
-                        aria-label that contradicts it (WCAG 2.5.3 label in name). */}
-                    <span aria-hidden>{plot.likedByMe ? '♥' : '♡'}</span>
-                    {plot.likeCount}
-                    <span className="sr-only">{plot.likedByMe ? t('unlike') : t('like')}</span>
-                  </Button>
-                )}
+                <Link
+                  href={`/plots/${plot.id}`}
+                  className="inline-flex h-10 shrink-0 items-center rounded-lg bg-accent px-4 text-sm font-medium text-accent-ink transition-colors hover:bg-accent/90"
+                >
+                  {t('edit')}
+                </Link>
               </div>
 
               <p className="text-sm text-muted">
@@ -168,8 +113,6 @@ export default function PublicPlotPage({ params }: { params: Promise<{ id: strin
               <PlotStyleBadges style={plot.style} pov={plot.narrator?.pov} />
             </div>
           </div>
-
-          <ErrorText>{error}</ErrorText>
 
           {/* The creator's line to readers, above everything the work itself says. */}
           {plot.intro ? <PlotIntro text={fillPreview(plot.intro, plot.name, userMacro)} /> : null}

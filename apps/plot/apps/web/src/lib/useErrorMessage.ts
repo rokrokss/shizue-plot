@@ -26,10 +26,3 @@ export function useErrorMessage(): (error: unknown) => string {
     return translate('unknown');
   }, []);
 }
-
-/** better-auth returns `{error, code}` objects rather than throwing. */
-export function authError(error: { code?: string; message?: string } | null | undefined): ApiError {
-  const raw = error as (Record<string, unknown> & { code?: string; message?: string }) | null;
-  const detail = typeof raw?.['error'] === 'string' ? (raw['error'] as string) : (raw?.message ?? '');
-  return new ApiError(0, raw?.code ?? 'auth_error', detail);
-}

@@ -6,7 +6,7 @@ import type { AppEnv } from './deps.js';
  * any request that does carry an Origin must carry that one, and a request the
  * Next rewrite forwarded must have reached the app under its own Host (DNS
  * rebinding). Top-level GET navigations carry no Origin, which is how the
- * ChatGPT sign-in callback arrives.
+ * ChatGPT connection's callback arrives.
  *
  * The app may be reached at more than one origin — `remoteOrigins`, a tunnel to
  * this machine for a phone — and each counts as the app's own. They are read on

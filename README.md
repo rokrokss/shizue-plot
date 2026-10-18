@@ -1,14 +1,15 @@
 # shizue-plot
 
 Character chat with plot creation, character cards, persistent conversations,
-branching replies, memory and personas. AI runs through Sign in with ChatGPT. The app supports Korean,
-English and Japanese.
+branching replies, memory and personas, as an app one person runs on their own
+computer. There are no accounts; AI runs on your ChatGPT plan, connected through
+Sign in with ChatGPT. The app supports Korean, English and Japanese.
 
 ## Layout
 
 | Path | Purpose |
 |---|---|
-| `apps/plot/apps/api` | Hono API, authentication, chat generation and media storage |
+| `apps/plot/apps/api` | Hono API, the local-owner request gate, chat generation and media storage |
 | `apps/plot/apps/web` | Next.js character-chat app |
 | `apps/plot/apps/e2e` | Playwright browser tests |
 | `apps/plot/packages/core` | Character cards, prompts and chat presentation |
@@ -67,7 +68,7 @@ S3_BUCKET=shizue-media S3_ENDPOINT=http://localhost:19000 S3_ACCESS_KEY_ID=shizu
 ```
 
 It keeps the old `BETTER_AUTH_SECRET` as the folder's secret, so the ChatGPT
-sign-in still opens, and only reads the source.
+connection still opens, and only reads the source.
 
 ### Card and module imports
 
@@ -76,30 +77,36 @@ which streams each to disk, and a job in the API reads it back and imports it
 (ARCHITECTURE §10 파일 임포트). `IMPORT_WORKERS` (default 2) is how many imports
 the API reads at once.
 
-## Sign in with ChatGPT
+## The owner, and connecting ChatGPT
 
-Sign in with ChatGPT is the only login, and each reader's own ChatGPT plan runs
-their chats. No provider API key or usage billing is involved; on a limit or
-connection error the app reports it and does not switch providers.
+shizue runs for one person on their own computer, so there is nothing to sign in
+to: a browser on this computer is the app's owner, and so is a phone paired from
+the settings page (below). Anything else that reaches the API — a phone through a
+tunnel that was never paired, another site's page whose name resolves to this
+machine — is answered 401 (ARCHITECTURE §4.1).
 
-OpenAI's open-source flow only returns to `http://127.0.0.1:<port>/auth/callback`,
-which a hosted site cannot receive. **Shizue**, the Chrome Web Store extension
-(0.3.6 or later), rewrites that navigation to the app's `/api/chatgpt/callback`
-before any connection is made: `https://plot.shizue.net` on loopback port 47811
-and `http://localhost:13000` on 47801, which the API picks from `BETTER_AUTH_URL`.
-It is needed only while signing in; afterwards the API calls OpenAI directly.
+Chats run on your own ChatGPT plan, which you connect in **Settings → AI
+connection**. Connecting is not a login: it only gives the app your plan. No
+provider API key or usage billing is involved; on a limit or connection error the
+app reports it and does not switch providers.
+
+OpenAI's open-source flow only returns to `http://127.0.0.1:<port>/auth/callback`.
+**Shizue**, the Chrome Web Store extension (0.3.6 or later), rewrites that
+navigation to `http://localhost:13000/api/chatgpt/callback` before any connection
+is made, on loopback port 47801 (`CHATGPT_CALLBACK_PORT` changes it, for an offset
+dev server). It is needed only while connecting; afterwards the API calls OpenAI
+directly.
 
 1. Install [Shizue from the Chrome Web Store](https://chromewebstore.google.com/detail/mpcbgfkoholfgapcgcmfjobnfcbnfanm).
-2. Choose **Sign in with ChatGPT** and approve in the same tab. The app returns to
-   the page you started from.
+2. In **Settings → AI connection**, choose **Continue with ChatGPT** and approve in
+   the same tab. The app returns to the settings page.
 3. Pick one of your account's models when you start a chat.
 
-The API exchanges the code, keeps the tokens sealed in the database
-(`BETTER_AUTH_SECRET` derives the key; set it in production) and answers each
-reader from their own account. Sign-out revokes the refresh token when reachable,
-deletes the tokens, keeps the app registration for the next sign-in and ends the
-reader's sessions. A former local installation's owner, with its plots and
-chats, is taken over by the first account that signs in.
+The API exchanges the code and keeps the tokens sealed in the app's folder (the
+install's `secret` derives the key). **Disconnect ChatGPT** revokes the refresh
+token when reachable, deletes the tokens and keeps the app registration for the
+next connection; connecting another account replaces the one before. Only this
+computer connects or disconnects ChatGPT.
 
 ChatGPT plan sharing supports the Responses route, not image generation or
 embeddings: the memory's embeddings come from the model the API runs itself
@@ -109,8 +116,7 @@ this route accepts no hard output-token limit.
 
 ### On a phone, from your own machine
 
-This is for a shizue running on your own computer only (`BETTER_AUTH_URL` on
-loopback); the hosted service has none of it. Open **Settings → Connect a phone**
+This needs `BETTER_AUTH_URL` on loopback, as it is by default. Open **Settings → Connect a phone**
 and press **Open phone access**: the API opens a tunnel to the web app itself and
 shows a QR code, as PocketRisu's remote access does. It uses Tailscale Serve when
 this computer is signed in to a tailnet — a fixed address only your devices
@@ -123,27 +129,26 @@ yourself can be listed in `REMOTE_ORIGINS` (`apps/plot/.env`) instead. Plain LAN
 addresses (`http://192.168.x.x`) are not supported: without HTTPS the browser
 withholds `crypto.subtle`, `crypto.randomUUID` and the clipboard, which chats use.
 
-Phone browsers run no extension, so the phone never signs in with ChatGPT
-itself. Sign in on the computer, open **Settings → Connect a phone** and scan the
-QR code; the code works once, for five minutes, and the phone gets a session of
-its own. Signing out on the phone ends only that phone's session; signing out on
-the computer ends the phones' too.
+Phone browsers run no extension, so a phone never connects ChatGPT itself: it
+uses the connection the computer made. Open **Settings → Connect a phone** on the
+computer and scan the QR code; the code works once, for five minutes, and the
+phone gets a device session of its own for 30 days. **Disconnect this phone** in
+the phone's settings ends that session alone; disconnecting ChatGPT leaves the
+phones paired, and closing access keeps them out.
 
-**Scope.** OpenAI's open-source flow is for open-source and locally hosted apps.
-Holding readers' tokens on a hosted server is the "remotely hosted" case, which
-needs OpenAI's [interest form](https://openai.com/form/sign-in-with-chatgpt-interest/).
-Until that is approved, test only with your own account.
+**Scope.** OpenAI's open-source flow is for open-source and locally hosted apps,
+which is what shizue is.
 
 Implementation follows the [official open-source integration guide](https://developers.openai.com/siwc/token-sharing-open-source).
-OAuth and provider tests use local stand-ins; a real account must approve sign-in
-to verify eligibility and actual plan inference.
+OAuth and provider tests use local stand-ins; a real account must approve the
+connection to verify eligibility and actual plan inference.
 
 ## Testing
 
 For a focused change, run the related tests rather than every suite:
 
 ```sh
-pnpm --filter @shizue/plot exec vitest run apps/web/test/authForm.test.ts
+pnpm --filter @shizue/plot exec vitest run apps/web/test/header.test.ts
 pnpm --filter @shizue/e2e exec playwright test tests/chatgpt.spec.ts
 ```
 
@@ -159,11 +164,13 @@ pnpm test:e2e
 The API unit suite runs on an in-memory PGlite of its own and needs no setup.
 Browser tests serve the API and web app with the test-only echo model
 (`NODE_ENV=test` on the API); they do not contact an AI provider. Their API runs
-on a new empty app folder in the system's temp directory, never on yours. Legacy email/password sessions exist only in this test mode to isolate
-test fixtures; the normal app does not serve those endpoints. The ChatGPT login
-spec mocks OAuth to exercise the single-button entrance and automatic redirect.
-Stop any normal instance on the test ports before running browser tests; the suite
-never reuses a server with a real account connection.
+on a new empty app folder in the system's temp directory, never on yours. Every
+spec is that folder's one owner, as any browser on this computer is, and tells
+its own works apart by the run's unique names. The ChatGPT specs connect through
+the settings card: one mocks the API and OpenAI, the other runs the real callback
+through a stand-in for Shizue. Stop any normal instance on the test ports before
+running browser tests; the suite never reuses a server with a real ChatGPT
+connection.
 
 ## Migrations
 

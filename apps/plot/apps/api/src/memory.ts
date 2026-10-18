@@ -911,7 +911,7 @@ export type AuxiliaryOwner = Pick<Chat, 'userId' | 'subModel'>;
  * The model a chat's side work runs on — RisuAI's auxiliary (sub) model: the
  * one the reader picked for the chat (`chats.sub_model`) while the owner's
  * ChatGPT catalog still lists it, and otherwise the first model that catalog
- * lists. '' when there is none, which is what a signed-out owner has.
+ * lists. '' when there is none, which is what an owner without ChatGPT connected has.
  *
  * A pick the catalog has since dropped is not an error: the chat falls back to
  * the default, as it would had the reader never picked, and the server says so
@@ -939,7 +939,7 @@ export async function auxiliaryModelOf(deps: Pick<AppDeps, 'env' | 'chatgpt'>, o
 
 /**
  * Summaries and suggestions run on the chat's auxiliary model
- * (`auxiliaryModelOf`). A signed-out owner disables background work.
+ * (`auxiliaryModelOf`). An owner without ChatGPT connected has no background work.
  */
 export async function memoryChannel(
   deps: Pick<AppDeps, 'env' | 'chatgpt' | 'getAdapter'>,

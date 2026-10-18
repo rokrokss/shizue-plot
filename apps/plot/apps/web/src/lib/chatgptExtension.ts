@@ -1,8 +1,8 @@
 /**
  * Shizue, the Chrome Web Store extension (0.3.6 and later), sends OpenAI's
- * loopback callback (`http://127.0.0.1:<port>/auth/callback`) on to this site,
- * which a hosted page cannot otherwise receive. Its rules cover plot.shizue.net
- * and localhost:13000 (rokrokss/shizue, `src/public/plot-signin-rules.json`).
+ * loopback callback (`http://127.0.0.1:<port>/auth/callback`) on to this app: its
+ * rule sends port 47801 to localhost:13000 (rokrokss/shizue,
+ * `src/public/plot-signin-rules.json`). Connecting ChatGPT needs it.
  */
 
 /** Shizue on the Chrome Web Store. */

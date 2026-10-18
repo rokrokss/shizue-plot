@@ -9,10 +9,9 @@ import { usePathname } from '@/i18n/navigation';
 import { noteMove } from '@/lib/nav';
 
 /**
- * The shell every page stands in, session or not: a reader who has not signed in
- * still gets the catalogue, a character page and a creator's shelf. What needs a
- * session sits one level down, under `(member)`, and that layout is what sends
- * an anonymous reader to the login page.
+ * The shell every page stands in. There is no sign-in: this computer's browser is
+ * the owner, and so is a paired phone (the API's `ownerGate`); a phone that is
+ * not paired is answered 401 by the API, which the pages say in words.
  */
 export default function AppLayout({ children }: { children: ReactNode }) {
   const pathname = usePathname();

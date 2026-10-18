@@ -41,10 +41,7 @@ export default function CreatorPage({ params }: { params: Promise<{ id: string }
             {t('plotCount', { count: creator.publicPlots.length })}
           </p>
         </div>
-        <FollowButton
-          creatorId={creator.id}
-          initial={{ followerCount: creator.followerCount, followedByMe: creator.followedByMe }}
-        />
+        <FollowButton initial={{ followerCount: creator.followerCount, followedByMe: creator.followedByMe }} />
       </div>
 
       <div className="mt-6">

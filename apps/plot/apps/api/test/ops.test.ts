@@ -21,12 +21,15 @@ const fakeDb = (execute: () => Promise<unknown>): Db =>
     },
   }) as unknown as Db;
 
-/** Just enough of the deps for `createApp`: a session lookup that must never run for a probe. */
+/**
+ * Just enough of the deps for `createApp`. The gate in front of everything but
+ * the probes reads the database for the owner and a phone's session (`ownerGate`),
+ * and `fakeDb` fails the test if a probe gets that far.
+ */
 const fakeDeps = (db: Db, extra: Partial<AppDeps> = {}): AppDeps =>
   ({
     db,
     webOrigin: 'https://plot.example',
-    auth: { handler: () => new Response(null, { status: 404 }), api: { getSession: vi.fn(async () => null) } },
     env: {},
     generationStreams: new Set(),
     ...extra,
@@ -44,7 +47,6 @@ describe('the probes', () => {
     const proxied = await app.request('http://127.0.0.1:8787/api/health', { headers: { 'x-forwarded-host': 'plot.example' } });
     expect(proxied.status).toBe(200);
     expect((await app.request('http://127.0.0.1:8787/api/ready', { headers: { 'x-forwarded-host': 'plot.example' } })).status).toBe(503);
-    expect(deps.auth.api.getSession).not.toHaveBeenCalled();
     expect(deps.db.execute).toHaveBeenCalledTimes(1);
   });
 
@@ -61,7 +63,6 @@ describe('the probes', () => {
     const down = createApp(fakeDeps(fakeDb(() => Promise.reject(new Error('connection refused')))));
     const failed = await down.request('http://10.0.0.5:8787/api/ready');
     expect([failed.status, await failed.json()]).toEqual([503, { status: 'db_unavailable' }]);
-    expect(deps.auth.api.getSession).not.toHaveBeenCalled();
   });
 
   it('answer not ready when the database leaves select 1 hanging past two seconds', async () => {
@@ -112,7 +113,7 @@ describe('the json log', () => {
       console.log('[plots] saved', c.req.param('id'));
       return c.json({ ok: true });
     });
-    // A handler's own Response, as a stream or the auth handler gives one.
+    // A handler's own Response, as a stream gives one.
     app.get('/api/raw', () => new Response('raw'));
     app.get('/api/health', (c) => c.json({ status: 'ok' }));
     app.get('/api/boom', () => {
@@ -210,13 +211,14 @@ describe('the metrics', () => {
     try {
       await once(server, 'listening');
       const { port } = server.address() as AddressInfo;
-      // A request through the app first, so its counter has a series to show.
-      expect((await createApp(deps).request('http://10.0.0.5:8787/api/metrics')).status).toBe(404);
+      // A request through the app first, so its counter has a series to show: from
+      // off this computer, so the gate answers it before anything reads the database.
+      expect((await createApp(deps).request('http://10.0.0.5:8787/api/metrics')).status).toBe(401);
       const res = await fetch(`http://127.0.0.1:${port}/metrics`);
       expect(res.status).toBe(200);
       expect(res.headers.get('content-type')).toContain('text/plain');
       const text = await res.text();
-      expect(text).toContain('http_requests_total{method="GET",route="/api/*",status="404"}');
+      expect(text).toContain('http_requests_total{method="GET",route="/api/*",status="401"}');
       expect(text).toContain('generation_streams_active 0');
       expect(text).toContain('embedder_models_loaded 0');
       expect(text).toContain('process_resident_memory_bytes');

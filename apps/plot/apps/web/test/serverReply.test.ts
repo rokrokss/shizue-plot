@@ -47,7 +47,6 @@ vi.mock('@/i18n/navigation', async () => {
 vi.mock('@/components/MessageRow', () => ({ MessageRow: () => null }));
 vi.mock('@/components/ChatPanel', () => ({ ChatPanel: () => null }));
 vi.mock('@/components/ChatSettings', () => ({ ChatSettings: () => null }));
-vi.mock('@/lib/authClient', () => ({ useSession: () => ({ data: { user: { id: 'reader' } }, isPending: false }) }));
 vi.mock('use-stick-to-bottom', async () => {
   const { createRef } = await import('react');
   return {

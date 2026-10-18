@@ -5,9 +5,9 @@ import { securityHeaders } from './securityHeaders';
 
 const withNextIntl = createNextIntlPlugin('./src/i18n/request.ts');
 const apiOrigin = process.env['API_ORIGIN'] ?? 'http://localhost:8787';
-// A shizue running on this machine signs in on loopback; the hosted app never does.
-// Only there is a phone let in, through a tunnel the settings page opens (the API's
-// `tunnel.ts`) or one the reader lists in `REMOTE_ORIGINS`. Unset is not local: a
+// A shizue whose web origin is this machine's (loopback) lets a phone in, through
+// a tunnel the settings page opens (the API's `tunnel.ts`) or one the owner lists
+// in `REMOTE_ORIGINS`. Unset is not local: a
 // build that forgot the variable shows none of it (`scripts/dev.sh` always sets it).
 const authUrl = process.env['BETTER_AUTH_URL'];
 const local = authUrl !== undefined && ['localhost', '127.0.0.1', '[::1]'].includes(new URL(authUrl).hostname);

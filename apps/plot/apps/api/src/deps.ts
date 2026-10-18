@@ -3,7 +3,6 @@ import type { Db } from '@shizue/db';
 import type { getAdapter } from '@shizue/llm';
 import type { ChatGPTAccounts } from './chatgptAccounts.js';
 import type { Embedder } from './embedder.js';
-import type { AppAuth, SessionStore } from './hostedAuth.js';
 import type { RemoteFetch } from './localizeAssets.js';
 import type { LuaStateStore, RequestLuaRunner } from './requestLua.js';
 import type { RequestTriggerRunner } from './requestTriggers.js';
@@ -45,13 +44,12 @@ export interface AppDeps {
   remoteOrigins?: string[];
   /**
    * The tunnel a phone opens this machine's shizue through, from the settings
-   * page (`tunnel.ts`). Only when the API signs in on loopback: the hosted app
-   * has none, and `/api/devices` answers 404 there.
+   * page (`tunnel.ts`). Only when the web origin is a loopback one (`index.ts`);
+   * without it `/api/devices` answers 404.
    */
   phoneAccess?: PhoneAccess;
-  auth: AppAuth;
-  /** Sign in with ChatGPT and the sessions it opens; absent in tests that do not sign in. */
-  chatgpt?: { accounts: ChatGPTAccounts; sessions: SessionStore };
+  /** The owner's ChatGPT connection (§4.1); absent in tests that do not connect one. */
+  chatgpt?: { accounts: ChatGPTAccounts };
   /** Avatars, plot assets and chat attachments; the local driver by default. */
   storage: ObjectStorage;
   /** Environment used for LLM provider gating. */
@@ -144,17 +142,14 @@ export interface AppDeps {
 export interface AppEnv {
   Variables: {
     /**
-     * Who is reading, or null when nobody is signed in. Every public surface
-     * branches on this one; the session resolver sets it on every `/api/*`
-     * request.
+     * Who is reading: the owner, on every request past `ownerGate`
+     * (`session.ts`). Typed as it was while readers without an account read
+     * the public surfaces, which still branch on it.
      */
     viewerId: string | null;
-    /**
-     * The signed-in user. Set only when a session resolved, so it is typed as a
-     * plain string and may only be read **behind `requireUser`** — which is what
-     * makes that true. Anything a reader without an account may reach reads
-     * `viewerId` instead.
-     */
+    /** The owner, whose id every `user_id` column holds; set by `ownerGate` on every request past it. */
     userId: string;
+    /** Whether the request came from this computer rather than a paired phone (`requireLocal`). */
+    local: boolean;
   };
 }

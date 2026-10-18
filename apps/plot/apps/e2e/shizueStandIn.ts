@@ -2,15 +2,15 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 /**
- * A stand-in for Shizue, the Chrome Web Store extension readers sign in through:
+ * A stand-in for Shizue, the Chrome Web Store extension ChatGPT is connected through:
  * its loopback callback rule and its presence answer (rokrokss/shizue,
  * `src/public/plot-signin-rules.json` and `src/lib/plotSignIn.ts`), for the one
  * origin and port a browser test runs on. The store build cannot be loaded here,
  * and its rules point at the production and development origins, not at a test's.
  *
  * The key pins the unpacked extension's ID, and the test web server is told that
- * ID (`NEXT_PUBLIC_CHATGPT_EXTENSION_ID`, playwright.config.ts) so the login page
- * asks it alongside Shizue's own.
+ * ID (`NEXT_PUBLIC_CHATGPT_EXTENSION_ID`, playwright.config.ts) so the settings
+ * card asks it alongside Shizue's own.
  */
 export const STAND_IN_KEY =
   'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxKkRdhhHeJ7Kbb6/IlIvDD3+KvLFV4vOgMcCnVrfhlN5aFvBOCCOw4W3K9MgaZ7euwz7xOczgNQ3CEHMuRevFAtpjxrfW50AIM01K2fLFVsBBLMTRPVdzwucfiiTUS6QpaUiJwTaB9HJ2jmzvmI/8TfAAliHj5iiwhJopCn0Snso4vWW4sxGmDqaa/5c62uxiWf2+/2kA7VtpNVIASTO+qTGQdrFuSdaHIWsr7odq2mxFGBRK2JMLcVEbrW/0jK1GVj3tjUKO3i6x8f7aW2nF0G2L53wOSm7QRXssi8fpteNaZbcEW2nAgAh/HDtEf9hWD5JL5DE4OkrxaR+mWZnkQIDAQAB';

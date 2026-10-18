@@ -2,13 +2,11 @@
   "brand": {
     "name": "shizue",
     "full": "shizue",
-    "tagline": "Your own plot, from a little spark of imagination.",
-    "catchphrase": "A little spark.\nA plot of your own."
+    "tagline": "Your own plot, from a little spark of imagination."
   },
   "nav": {
     "explore": "Explore",
     "create": "Create",
-    "signOut": "Sign out",
     "language": "Language",
     "theme": "Theme",
     "chats": "Chats",
@@ -37,20 +35,6 @@
     "confirmDelete": "Delete this? This can't be undone.",
     "audiencePublic": "Shown to readers",
     "audienceAi": "Model only"
-  },
-  "auth": {
-    "signInTitle": "Sign in",
-    "signInSubtitle": "Meet the people inside a plot, and carry it forward with conversation and choice.",
-    "signUpTitle": "Create an account",
-    "signUpSubtitle": "Come meet someone from a plot.",
-    "email": "Email",
-    "password": "Password",
-    "name": "Name",
-    "signIn": "Enter",
-    "signUp": "Create account",
-    "noAccount": "No account yet?",
-    "haveAccount": "Already have an account?",
-    "passwordHint": "At least 8 characters."
   },
   "plots": {
     "title": "My plots",
@@ -362,7 +346,6 @@
     "profileDescriptionPlaceholder": "Say who the reader is while reading as this profile.",
     "profilePicked": "A recommended profile is used instead of a persona.",
     "startChat": "Start chat",
-    "signInToChat": "Enter and you can start this plot right away.",
     "model": "Model",
     "persona": "Persona",
     "noPersona": "No persona",
@@ -731,8 +714,6 @@
   "public": {
     "notFound": "This plot isn't available.",
     "edit": "Edit",
-    "like": "Like",
-    "unlike": "Remove like",
     "cast": "Cast",
     "intros": "Openings",
     "introLabel": "Opening {index}",
@@ -750,15 +731,12 @@
     "reply": "Reply",
     "deleted": "This comment was deleted",
     "empty": "No comments yet.",
-    "more": "Load more",
-    "signInHint": "Comments can be written once you enter."
+    "more": "Load more"
   },
   "creators": {
     "notFound": "Creator not found.",
     "plotCount": "{count, plural, one {# public plot} other {# public plots}}",
     "empty": "Nothing published yet.",
-    "follow": "Follow",
-    "following": "Following",
     "followerCount": "{count, plural, one {# follower} other {# followers}}"
   },
   "notifications": {
@@ -1222,7 +1200,7 @@
   },
   "errors": {
     "unknown": "Something went wrong.",
-    "unauthorized": "Please sign in.",
+    "unauthorized": "This device isn't connected. Scan the QR code under Settings → Connect a phone on your computer.",
     "not_found": "Not found.",
     "invalid_request": "That request wasn't valid.",
     "invalid_card": "This character card couldn't be read.",
@@ -1237,14 +1215,6 @@
     "payload_too_large": "That file is too large.",
     "internal_error": "The server ran into an error.",
     "http_error": "The request couldn't be processed.",
-    "auth_error": "Authentication failed.",
-    "invalid_email_or_password": "Incorrect email or password.",
-    "user_already_exists": "That email is already registered.",
-    "invalid_email": "That email address isn't valid.",
-    "password_too_short": "That password is too short.",
-    "password_too_long": "That password is too long.",
-    "user_not_found": "We couldn't find that account.",
-    "failed_to_create_user": "The account couldn't be created.",
     "character_limit": "A plot holds at most 10 characters.",
     "intro_limit": "Up to 10 openings, each at most 16,000 characters.",
     "asset_limit": "A plot can hold at most 100 images.",
@@ -1310,7 +1280,8 @@
     "pairing_invalid": "This pairing code has expired or was already used. Make a new QR code on your computer.",
     "tunnel_unavailable": "There is nothing to open a tunnel with. Install Tailscale or cloudflared.",
     "tunnel_failed": "The tunnel did not open. Try again shortly, or from another network.",
-    "no_tunnel": "Open phone access first."
+    "no_tunnel": "Open phone access first.",
+    "local_only": "Only the computer shizue runs on can do this."
   },
   "rebrand": {
     "eyebrow": "A place for plots to grow",
@@ -1318,10 +1289,6 @@
     "create": "Create your plot",
     "journeyTitle": "The next scene is yours.",
     "journeySubtitle": "Find a world you love and open a new chapter through conversation.",
-    "stepExplore": "Find a world that feels like you",
-    "stepMeet": "Meet the characters within",
-    "stepWrite": "Let your choices shape the plot",
-    "authNote": "A little imagination. A plot that is yours.",
     "chatSubtitle": "Pick up the plot right where you left it.",
     "emptyAction": "Find your first plot",
     "resetFilters": "Clear search and filters",
@@ -1329,31 +1296,30 @@
   },
   "chatgpt": {
     "title": "AI connection",
-    "description": "Start with ChatGPT. No separate account needed. AI chat, summaries and reply suggestions share your ChatGPT allowance.",
-    "disconnect": "Sign out",
+    "description": "Connect your ChatGPT account and your chats run on its plan. AI chat, summaries and reply suggestions share your ChatGPT allowance.",
+    "disconnect": "Disconnect ChatGPT",
     "failed": "Could not connect ChatGPT. Please try again.",
     "connectedAccount": "Connected ChatGPT account",
-    "revocationPending": "Signed out. ChatGPT could not confirm the revocation; check your connected apps in ChatGPT settings.",
-    "welcome": "Your plot starts here.",
-    "signIn": "Sign in with ChatGPT",
-    "extensionRequired": "Signing in requires the Shizue extension (0.3.6 or later) in desktop Chrome. If you already have it, update it to the latest version.",
+    "revocationPending": "Disconnected. ChatGPT could not confirm the revocation; check your connected apps in ChatGPT settings.",
+    "extensionRequired": "Connecting ChatGPT requires the Shizue extension (0.3.6 or later) in desktop Chrome. If you already have it, update it to the latest version.",
     "extensionInstall": "Get Shizue from the Chrome Web Store",
     "extensionRecheck": "Check again",
     "extensionStillMissing": "The extension wasn't found yet. If you just installed it, reload this page.",
-    "disconnectDevice": "Disconnect this device",
-    "pairHint": "Phones can't run the extension. Sign in on a computer, then scan the QR code under Settings → Connect a phone."
+    "connect": "Continue with ChatGPT",
+    "usingPlan": "Using your ChatGPT plan.",
+    "onComputer": "ChatGPT is connected on the computer shizue runs on. Once it is, this phone uses the same connection."
   },
   "devices": {
     "title": "Connect a phone",
-    "description": "Opens this computer's shizue in your phone's browser. The button opens a tunnel and shows a QR code; scan it with your phone's camera to open the address and join this account (phones cannot sign in with ChatGPT). The code works once, for 5 minutes.",
+    "description": "Opens this computer's shizue in your phone's browser. The button opens a tunnel and shows a QR code; scan it with your phone's camera to open the address and connect to this computer's shizue, which uses the ChatGPT this computer connected. The code works once, for 5 minutes.",
     "start": "Make a QR code",
     "again": "Make a new QR code",
     "qrLabel": "QR code to scan with your phone",
     "expiresIn": "Expires in {time}.",
     "expired": "This code has expired. Make a new QR code.",
-    "pairedHere": "This device was connected from another one. Signing out here disconnects only this device.",
+    "pairedHere": "This phone is connected to the computer's shizue. Disconnecting it disconnects only this phone; to come back, scan the QR code in the computer's settings.",
     "pairTitle": "Connect this device",
-    "pairDescription": "Connects this browser to the account that made the QR code. Don't continue unless you made the code yourself.",
+    "pairDescription": "Connects this browser to the shizue on the computer that made the QR code. Don't continue unless you made the code yourself.",
     "pairConfirm": "Connect",
     "pairMissing": "There's no pairing code here. Scan the QR code in your computer's settings again.",
     "open": "Open phone access",
@@ -1362,7 +1328,8 @@
     "viaCloudflare": "Opens through a Cloudflare Quick Tunnel. The phone needs no app, but anyone with the address can see this shizue's public pages, and the address changes every time. With Tailscale installed it opens at a fixed address only your devices reach.",
     "noTool": "There is nothing to open a tunnel with. Install Tailscale (recommended, tailscale.com) or cloudflared, then reload this page.",
     "openTailscale": "Open through Tailscale:",
-    "openCloudflare": "Open through a Cloudflare Quick Tunnel:"
+    "openCloudflare": "Open through a Cloudflare Quick Tunnel:",
+    "leave": "Disconnect this phone"
   },
   "migrate": {
     "title": "Move from another platform",

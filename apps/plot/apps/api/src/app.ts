@@ -2,9 +2,8 @@ import { chatGPTRoutes } from './routes/chatgpt.js';
 import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { MAX_ATTACHMENT_BYTES } from './attachments.js';
-import { normalizeAuthResponse } from './auth.js';
 import { originGuard } from './originGuard.js';
-import { remoteOriginsOf } from './routes/devices.js';
+import { deviceClaimRoutes, remoteOriginsOf } from './routes/devices.js';
 import type { AppDeps, AppEnv } from './deps.js';
 import { errorResponse, type ErrorBody } from './errors.js';
 import { healthRoutes } from './health.js';
@@ -26,7 +25,7 @@ import { readerPresetRoutes } from './routes/readerPresets.js';
 import { readerModuleRoutes } from './routes/readerModules.js';
 import { plotRoutes } from './routes/plots.js';
 import { securityHeaders } from './securityHeaders.js';
-import { requireUser } from './session.js';
+import { createSessionStore, ownerGate } from './session.js';
 
 const MB = 1024 * 1024;
 /** Starting a file import, whose body carries the World Info file beside a card (`fileImports.ts`). */
@@ -37,15 +36,15 @@ const FILE_IMPORT_PART_PATH = /^\/api\/file-imports\/[^/]+\/parts\/\d+$/;
 const ATTACHMENT_PATH = /^\/api\/chats\/[^/]+\/import\/attachments$/;
 
 /**
- * Route order matters: `/api/auth/*`, `/api/presets` and the probes are
- * registered before the session middleware, so they never resolve one.
- *
- * Past that middleware the session is *resolved*, not *required*: the catalogue
- * and the pages it links to are readable without an account, so what a route
- * needs is stated by mounting `requireUser` in front of it (session.ts).
+ * Route order matters: the probes and a phone's claim of its pairing code are
+ * registered before `ownerGate`, so they answer before anyone is known. Past it
+ * every request is the owner's — from this computer, or from a paired phone —
+ * and anything else has been answered 401 (session.ts).
  */
 export function createApp(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
+  // Paired phones' sessions: the gate reads them, the pairing routes make and end them.
+  const sessions = createSessionStore(deps.db, { secure: new URL(deps.webOrigin ?? 'http://localhost').protocol === 'https:' });
 
   // First, so every line a request says carries its id, and refusals are logged and counted too (`log.ts`).
   app.use('*', requestLog());
@@ -77,52 +76,19 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     return (FILE_IMPORT_PATH.test(path) ? fileImportLimit : jsonLimit)(c, next);
   });
 
-  app.all('/api/auth/*', async (c) => normalizeAuthResponse(await deps.auth.handler(c.req.raw)));
-  // A static catalog: nothing user-specific in it.
-  app.route('/api/presets', presetRoutes());
   // `/api/health` and `/api/ready`: a probe never resolves a session (`health.ts`).
   app.route('/api', healthRoutes(deps));
-  app.use('/api/*', async (c, next) => {
-    const session = await deps.auth.api.getSession({ headers: c.req.raw.headers });
-    c.set('viewerId', session?.user?.id ?? null);
-    if (session?.user) c.set('userId', session.user.id);
-    await next();
-  });
+  // A phone trades its pairing code for a session here, so it has none yet.
+  app.route('/api/devices', deviceClaimRoutes(deps, sessions));
+  app.use('/api/*', ownerGate(deps.db, sessions));
 
-  // Both answer signed-out readers too: sign-in starts here, and the model list of
-  // someone without a ChatGPT connection is empty.
+  // A static catalog: nothing user-specific in it.
+  app.route('/api/presets', presetRoutes());
+  // The owner's ChatGPT connection; connecting it is this computer's alone.
   app.route('/api/chatgpt', chatGPTRoutes(deps));
-  // A phone joins the reader signed in on this machine here, so its claim answers
-  // signed-out browsers too. Only on this machine: the hosted app has none of it.
-  app.route('/api/devices', deviceRoutes(deps));
+  // A phone opens this computer's shizue through a tunnel, paired from here.
+  app.route('/api/devices', deviceRoutes(deps, sessions));
   app.route('/api/models', modelRoutes(deps));
-
-  /**
-   * Routers that are gated whole. `path` and `path/*` both, because the first
-   * pattern does not match the second's sub-paths and the second does not match
-   * the collection itself.
-   */
-  const gated = (path: string): void => {
-    app.use(path, requireUser);
-    app.use(`${path}/*`, requireUser);
-  };
-  // The mixed routers are missing from this list on purpose: /api/plots,
-  // which carries public reads beside writes
-  // that belong to somebody, so they gate themselves route by route.
-  for (const path of [
-    '/api/comments',
-    '/api/personas',
-    '/api/notes',
-    '/api/reader-presets',
-    '/api/reader-modules',
-    '/api/notifications',
-    '/api/chats',
-    '/api/messages',
-    '/api/imports',
-    '/api/file-imports',
-  ]) {
-    gated(path);
-  }
 
   app.route('/api/comments', commentRoutes(deps));
   app.route('/api/plots', plotRoutes(deps));

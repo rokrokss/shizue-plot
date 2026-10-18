@@ -1,12 +1,9 @@
 import { expect, test } from '@playwright/test';
 
-const signIn = { ko: 'ChatGPT로 로그인', en: 'Sign in with ChatGPT', ja: 'ChatGPTでログイン' };
-
 test.beforeEach(async ({ page }) => {
   // Layout checks must not depend on the developer's local ChatGPT connection.
-  await page.route('**/api/auth/get-session', (route) => route.fulfill({ json: null }));
   await page.route('**/api/chatgpt', (route) => route.fulfill({
-    json: { connected: false, email: null, pending: false, errorCode: null },
+    json: { connected: false, email: null, local: true },
   }));
 });
 
@@ -19,21 +16,18 @@ const screens = [
 ] as const;
 
 for (const { locale, width } of screens) {
-  test(`${locale} discovery and login fit a ${width}px screen`, async ({ page }) => {
+  test(`${locale} discovery and settings fit a ${width}px screen`, async ({ page }) => {
     await page.setViewportSize({ width, height: 844 });
-    const paths = [`/${locale}`, `/${locale}/login`];
-    // The legacy signup URL serves the same ChatGPT entrance.
-    if (locale === 'ko' && width === 320) paths.push('/ko/signup');
-    for (const path of paths) {
+    // The catalogue has its title; the settings page, the cards that connect ChatGPT and a phone.
+    for (const [path, level] of [[`/${locale}`, 1], [`/${locale}/settings`, 2]] as const) {
       await page.goto(path);
-      await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+      await expect(page.getByRole('heading', { level }).first()).toBeVisible();
       await expect(page).toHaveTitle(/shizue$/);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     }
-    await expect(page.locator('input, form')).toHaveCount(0);
+    // There is no way in to offer: the browser on this computer is the owner.
     await expect(page.getByRole('link', { name: /Sign up|회원가입|新規登録/ })).toHaveCount(0);
-    // The invitation must not push the actual login action below the fold.
-    await expect(page.getByRole('button', { name: signIn[locale] })).toBeInViewport();
+    await expect(page.locator('a[href*="/login"]')).toHaveCount(0);
   });
 }
 

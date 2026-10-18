@@ -2,9 +2,7 @@
 /**
  * The phone's tab bar. The width it appears at is a media query and so not
  * testable here; what is testable is what it carries — three clusters and a
- * menu, the rest of the shell inside the sheet that menu opens, and, for a
- * reader who is not signed in, tabs that lead to the way in with where they
- * were headed in hand.
+ * menu, and the rest of the shell inside the sheet that menu opens.
  *
  * `createElement` rather than JSX, matching header.test.ts.
  */
@@ -15,7 +13,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { stubMatchMedia } from './matchMedia';
 
 let pathname = '/';
-let session: { data: unknown; isPending: boolean } = { data: { user: {} }, isPending: false };
 
 vi.mock('@/i18n/navigation', async () => {
   const { createElement: h } = await import('react');
@@ -47,25 +44,17 @@ vi.mock('@/i18n/navigation', async () => {
   };
 });
 
-vi.mock('@/lib/authClient', () => ({
-  signOut: vi.fn(async () => undefined),
-  useSession: () => session,
-}));
-
 const { MobileTabBar } = await import('../src/components/MobileTabBar');
 
 (globalThis as Record<string, unknown>)['IS_REACT_ACT_ENVIRONMENT'] = true;
 
 const MESSAGES = {
-  chatgpt: { signIn: 'ChatGPT로 로그인' },
-  auth: { signIn: '입장하기', signUp: '계정 만들기' },
   common: { close: '닫기' },
   locales: { ko: '한국어', en: 'English', ja: '日本語' },
   nav: { aiSettings: 'AI 연결',
     explore: '탐색',
     chats: '대화',
     create: '만들기',
-    signOut: '로그아웃',
     language: '언어',
     menu: '메뉴',
   },
@@ -103,7 +92,6 @@ function click(node: Element): void {
 
 beforeEach(() => {
   pathname = '/';
-  session = { data: { user: {} }, isPending: false };
   stubMatchMedia();
   host = document.createElement('div');
   document.body.appendChild(host);
@@ -133,16 +121,15 @@ describe('MobileTabBar', () => {
     expect(sheet()).toBeNull();
   });
 
-  it('opens the rest of the shell in a sheet, with the locale and the way out', async () => {
+  it('opens the rest of the shell in a sheet: AI settings and the locale, and no way in or out', async () => {
     await render();
     click(menuButton());
 
     expect(menuButton().getAttribute('aria-expanded')).toBe('true');
     expect(sheet()!.getAttribute('aria-label')).toBe('메뉴');
+    expect(named(sheet()!, 'AI 연결').getAttribute('href')).toBe('/settings');
     expect(sheet()!.querySelector('select[aria-label="언어"]')).not.toBeNull();
-    expect(
-      [...sheet()!.querySelectorAll('button')].some((node) => node.textContent === '로그아웃'),
-    ).toBe(true);
+    expect(sheet()!.querySelector('a[href="/login"]')).toBeNull();
   });
 
   it('closes on Escape and on choosing something', async () => {
@@ -158,33 +145,5 @@ describe('MobileTabBar', () => {
     click(menuButton());
     click(sheet()!.querySelector('button[aria-label="닫기"]')!);
     expect(sheet()).toBeNull();
-  });
-
-  describe('signed out', () => {
-    beforeEach(() => {
-      session = { data: null, isPending: false };
-    });
-
-    /** The attempt is the invitation: the tab still goes, by way of the door. */
-    it('sends the tabs that need an account to the way in, holding the destination', async () => {
-      await render();
-
-      expect(tabs().map((node) => node.getAttribute('href'))).toEqual([
-        '/',
-        '/login?next=%2Fchats',
-        '/login?next=%2Fplots',
-      ]);
-    });
-
-    it('offers only ChatGPT sign-in in the sheet', async () => {
-      await render();
-      click(menuButton());
-
-      expect(named(sheet()!, 'ChatGPT로 로그인').getAttribute('href')).toBe('/login');
-      expect(sheet()!.querySelector('a[href="/signup"]')).toBeNull();
-      expect(
-        [...sheet()!.querySelectorAll('button')].some((node) => node.textContent === '로그아웃'),
-      ).toBe(false);
-    });
   });
 });

@@ -15,7 +15,7 @@ API 테스트에는 운영 DB와 다른 `_test` 데이터베이스가 필요하�
 
 ## 구조
 
-- `apps/api`: Hono API, better-auth 인증, 생성·기억·관계 처리, 이미지 스토리지.
+- `apps/api`: Hono API, 로컬 소유자 요청 게이트와 ChatGPT 연결, 생성·기억·관계 처리, 이미지 스토리지.
 - `apps/web`: Next.js 앱과 next-intl 로케일, 캐릭터·플롯 편집과 챗 화면.
 - `apps/e2e`: Playwright 브라우저 테스트.
 - `packages/core`: 캐릭터 카드, 프롬프트, 발화와 표시 규약.

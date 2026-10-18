@@ -5,16 +5,15 @@ import { fileURLToPath } from 'node:url';
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 
 /**
- * Plot hub path across two accounts: A uploads an image asset and publishes a
- * plot whose opening references it → B discovers it in the feed at `/`, likes
- * it, chats with it and sees the image → B switches locale and the ko plot is
- * gone from the ja catalogue (hard partition) → A unpublishes and it leaves B's
+ * Plot hub path for the owner: they upload an image asset and publish a plot
+ * whose opening references it → find it in the feed at `/` from a second
+ * window, chat with it and see the image → switch locale and the ko plot is gone
+ * from the ja catalogue (hard partition) → unpublish it and it leaves the
  * catalogue entirely.
  *
- * A and B live in separate browser contexts (separate session cookies) and the
- * steps build on each other, so the file runs serially. Every run uses fresh
- * accounts and its own plot; nothing is deleted, because this hits the dev
- * database.
+ * The two windows are two browser contexts, both this computer's and so both the
+ * owner's, and the steps build on each other, so the file runs serially. Every
+ * run uses its own plot.
  */
 test.describe.configure({ mode: 'serial' });
 
@@ -87,7 +86,7 @@ async function search(page: Page, locale: 'ko' | 'ja'): Promise<void> {
   await page.getByPlaceholder(messages(locale).explore.searchPlaceholder).fill(plot.name);
 }
 
-test('user A publishes a plot with a tag, an image asset and two openings', async () => {
+test('the owner publishes a plot with a tag, an image asset and two openings', async () => {
   await signUp(creatorPage, creator);
 
   // Signup lands on the feed; making things lives under the creator area.
@@ -155,16 +154,15 @@ test('the owner sees the public page with an edit link', async () => {
   await expect(creatorPage.getByRole('link', { name: '편집' })).toBeVisible();
 });
 
-test('user B finds the plot in the feed', async () => {
+test('the plot is found in the feed', async () => {
   await signUp(readerPage, reader);
 
-  // Scoped and exact: the dev catalogue carries other cards named "허브 …".
+  // Scoped and exact: the catalogue carries other cards named "허브 …".
   await readerPage.getByRole('navigation').getByRole('link', { name: '탐색', exact: true }).click();
   await expect(readerPage).toHaveURL(/\/ko$/);
 
   await readerPage.getByPlaceholder(messages('ko').explore.searchPlaceholder).fill(plot.name);
   await expect(cardOf(readerPage)).toHaveCount(1);
-  await expect(cardOf(readerPage)).toContainText(creator.name);
   await expect(cardOf(readerPage)).toContainText(plot.tag);
   await expect(cardOf(readerPage)).toContainText(`${plot.name}의 문이 열린다`);
   // The roster is what a card is read by, beside the cover it does not have.
@@ -176,32 +174,21 @@ test('user B finds the plot in the feed', async () => {
   await expect(readerPage.getByTestId('plot-member')).toContainText(member.name);
 });
 
-test('user B likes the plot and the count sticks', async () => {
-  const like = readerPage.getByTestId('like-button');
-  await expect(like).toHaveText(/♡\s*0/);
-
-  await like.click();
-  await expect(like).toHaveText(/♥\s*1/);
-
-  await readerPage.reload();
-  await expect(readerPage.getByTestId('like-button')).toHaveText(/♥\s*1/);
-});
-
-test('user B starts a chat with the public plot and echoes a turn', async () => {
+test('a chat on the published plot echoes a turn', async () => {
   await readerPage.getByRole('combobox', { name: '모델', exact: true }).selectOption('echo/echo');
   await readerPage.getByRole('button', { name: '대화 시작' }).click();
 
   await expect(readerPage).toHaveURL(new RegExp(`/ko/chats/${UUID_PATH}$`));
   const assistant = readerPage.getByTestId('message-assistant');
   await expect(assistant.first()).toContainText('비가 내린다');
-  // The creator's roster names the line that carries a prefix, for a
-  // non-owner too: the public view is where the reader's page reads it from.
+  // The roster names the line that carries a prefix: the plot's page is where
+  // the chat's page reads it from.
   await expect(assistant.first().getByTestId('speech-character')).toHaveAttribute(
     'data-speaker',
     member.name,
   );
 
-  // The opening's reference renders as the creator's image, for a non-owner too.
+  // The opening's reference renders as the plot's image.
   // The src may carry the measured-size fragment (#shizue=…) behind the path.
   // ChatImage exposes the picture as a button since the subcomponent audit —
   // opening it is the action, and the alt is its name.
@@ -210,7 +197,7 @@ test('user B starts a chat with the public plot and echoes a turn', async () => 
     'src',
     new RegExp(`^/api/plots/${plotId}/assets/${asset.slug}(#|$)`),
   );
-  // …and the bytes really came back: assets follow the plot's visibility.
+  // …and the bytes really came back.
   await expect
     .poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth))
     .toBeGreaterThan(0);
@@ -243,11 +230,7 @@ test('unpublishing takes the plot out of the catalogue', async () => {
   await expect(readerPage.getByText(messages('ko').explore.emptyFiltered)).toBeVisible();
   await expect(cardOf(readerPage)).toHaveCount(0);
 
-  // …and its page is gone with it, for everyone but its owner.
-  await readerPage.goto(`/ko/p/${plotId}`);
-  await expect(readerPage.getByText('플롯을 찾을 수 없거나 공개되지 않았습니다.')).toBeVisible();
-
-  // The owner still reaches it, and still gets the edit link rather than a like.
+  // The owner still reaches its page, and still gets the edit link rather than a like.
   await creatorPage.goto(`/ko/p/${plotId}`);
   await expect(creatorPage.getByRole('heading', { name: plot.name })).toBeVisible();
   await expect(creatorPage.getByRole('link', { name: '편집' })).toBeVisible();

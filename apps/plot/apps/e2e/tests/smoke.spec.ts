@@ -684,14 +684,3 @@ test('switches the UI locale to Japanese', async () => {
     page.getByRole('navigation').getByRole('link', { name: messages('ja').nav.create }),
   ).toBeVisible();
 });
-
-test('logout sends protected routes back to the login page', async () => {
-  await page.goto('/ko');
-  await page.getByRole('button', { name: '로그아웃' }).click();
-
-  await expect(page).toHaveURL(/\/ko\/login$/);
-
-  // The gate carries where the reader was headed, so signing in lands there.
-  await page.goto('/ko/personas');
-  await expect(page).toHaveURL(/\/ko\/login\?next=%2Fpersonas$/);
-});

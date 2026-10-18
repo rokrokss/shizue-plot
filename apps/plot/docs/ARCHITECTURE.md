@@ -27,7 +27,7 @@ AI 롤플레이 플롯 서비스. 현재 구현된 시스템을 주제별로 기
 - `apps/api`: Hono + @hono/node-server — 모든 비즈니스 로직·인증·SSE, 포트 8787.
 - DB: **PGlite**(`@electric-sql/pglite` 0.5.8 — WebAssembly로 돈 PostgreSQL 17, 2026-10-18부터) + pgvector(`@electric-sql/pglite-pgvector` 0.0.9). 앱 폴더의 `db/`에 있고(§4 `SHIZUE_DATA_DIR`), 테스트는 메모리에서 돈다. 연결이 하나라 모든 쿼리가 차례로 돌고, 한 폴더는 한 프로세스만 연다(`appDb.ts`의 `app.lock`) — 트랜잭션 안의 코드는 `db`가 아니라 그 트랜잭션을 써야 한다(아니면 자기를 기다린다). 세션 시간대는 UTC로 고정하고(PGlite는 호스트 시간대를 따른다), 시계는 밀리초 단위다(Postgres의 마이크로초가 아니다 — 같은 밀리초의 두 행은 `created_at`이 같다). 그 전에는 도커의 PostgreSQL 17이었다(데이터는 `import:postgres`로 옮긴다, §12). **pgvector는 실사용 중** — `memories.embedding vector(1536)`.
 - ORM: Drizzle(`drizzle-orm/pglite`) + drizzle-kit `generate`. 마이그레이션은 앱이 시작할 때마다 스스로 적용한다(`migrateDb`) — drizzle-kit `migrate`·`studio`는 없다(PGlite는 한 폴더에 한 프로세스).
-- 인증: Sign in with ChatGPT가 유일한 로그인이다(§4.1). 세션은 서버 측 `session` 행과 HttpOnly 쿠키이고(`hostedAuth.ts`), 별도 회원가입·비밀번호는 없다. better-auth는 `NODE_ENV=test`의 다중 사용자 테스트 픽스처에만 쓰인다.
+- 인증: 없다 — 한 사람의 앱이라 계정·로그인이 없고, 이 컴퓨터에서 온 요청은 소유자이며 터널로 온 휴대폰은 페어링이 건넨 기기 세션(서버 측 `session` 행과 HttpOnly 쿠키)으로 소유자가 된다(§4.1 요청 게이트, `session.ts`). Sign in with ChatGPT는 로그인이 아니라 소유자의 요금제를 쓰는 모델 연결이다(Shizue 확장 경유). better-auth는 2026-10-18에 없앴다.
 - 테스트: vitest (루트 `pnpm test`가 전체 실행), E2E는 Playwright(`apps/e2e`).
 - 웹→API: Next `rewrites` 프록시 (same-origin, CORS 불필요). 프록시에는 자기 바디 상한이 있다(§10 바디 상한). 카드·모듈 파일은 파트로 나눠 API에 올린다(§10 파일 임포트).
 
@@ -62,8 +62,8 @@ plot/
 
 ```
 SHIZUE_DATA_DIR=./data/app       # 앱 폴더(apps/plot 기준 resolve, 기본 apps/plot/data/app): db/(PGlite)·files/(파일)·secret(설치의 비밀)·app.lock. 한 프로세스만 연다
-BETTER_AUTH_URL=http://localhost:13000                     # 웹 오리진(경로 없음). 쓰기의 Origin과 로그인 복귀 주소
-BETTER_AUTH_SECRET                                          # ChatGPT 토큰 봉인 키·호스트 ID의 원천. 비우면 설치마다 처음 시작할 때 만든 앱 폴더의 `secret`(0600)을 쓴다. 여기 적은 것은 production이거나 BETTER_AUTH_URL이 루프백이 아니면 32자 이상이어야 한다
+BETTER_AUTH_URL=http://localhost:13000                     # 웹 오리진(경로 없음). 쓰기의 Origin과 ChatGPT 연결이 돌아오는 주소. 이름은 예전 인증 라이브러리의 것
+BETTER_AUTH_SECRET                                          # ChatGPT 토큰 봉인 키·호스트 ID의 원천. 비우면 설치마다 처음 시작할 때 만든 앱 폴더의 `secret`(0600)을 쓴다(보통은 비운다). 여기 적은 것은 production이거나 BETTER_AUTH_URL이 루프백이 아니면 32자 이상이어야 한다
 API_PORT=8787
 API_HOST=127.0.0.1               # API를 별도 서버에 둘 때 0.0.0.0 (웹의 API_ORIGIN을 그리로)
 LOG_FORMAT=text                  # text(기본 — 터미널이 보여 주는 콘솔 그대로) | json(운영 — 모든 줄이 JSON 한 줄, 요청마다 접근 로그 한 줄, §12)
@@ -73,8 +73,8 @@ SHUTDOWN_BACKGROUND_MS=20000     # 종료가 턴들이 시작한 배경 작업�
 S3_BUCKET / S3_REGION / S3_ENDPOINT                        # embedder:fetch·publish만 읽는다(KURE-v1 가중치, models/, §7.3). 앱의 파일은 S3에 두지 않는다
 S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY                    # 둘 다 비면 SDK 자격증명 체인
 S3_FORCE_PATH_STYLE=true         # 로컬 RustFS 필수, AWS 는 false
-CHATGPT_CALLBACK_PORT=47801      # OpenAI 루프백 콜백 포트. 확장 규칙과 오리진마다 짝 — plot.shizue.net·localhost:13000은 생략하면 Shizue 포트 (§4.1)
-REMOTE_ORIGINS=                  # 로컬 실행 전용. 독자가 손으로 띄운 터널의 오리진, 쉼표로 — 설정 화면의 버튼이 여는 터널은 적지 않아도 된다. 쓰기를 BETTER_AUTH_URL처럼 받되 로그인은 BETTER_AUTH_URL로만. BETTER_AUTH_URL이 루프백이 아니면 부팅 거절 (§4.1 기기 연결)
+CHATGPT_CALLBACK_PORT=47801      # OpenAI 루프백 콜백 포트. Shizue 확장의 규칙과 같아야 한다 — 비우면 47801(localhost:13000으로 가는 규칙). 다른 포트는 오프셋 개발 서버·브라우저 테스트의 대역용 (§4.1)
+REMOTE_ORIGINS=                  # 소유자가 손으로 띄운 터널의 오리진, 쉼표로 — 설정 화면의 버튼이 여는 터널은 적지 않아도 된다. 쓰기를 BETTER_AUTH_URL처럼 받되 ChatGPT 연결은 BETTER_AUTH_URL로만, 그 주소의 요청은 기기 세션이 있어야 한다. BETTER_AUTH_URL이 루프백이 아니면 부팅 거절 (§4.1 기기 연결)
 EMBEDDER_ROUTING=single          # 플롯의 임베딩 모델을 고르는 법(§7.3): single(기본 — EMBEDDER_MODEL 하나, 기본 KURE-v1) | by-language(ko는 KURE-v1, 나머지는 bge-m3)
 EMBEDDER_MODEL=KURE-v1           # single일 때 모든 플롯의 모델 — `embedder.ts`의 `EMBEDDING_MODELS` 키. by-language에선 읽지 않는다
 EMBEDDER_CACHE_DIR=./data/embedder  # 그 가중치를 둘 곳(리포 루트 기준 resolve). `embedder:fetch`가 채우고, 서버는 여기서만 읽는다
@@ -92,16 +92,39 @@ LORE_ALIASES=off                 # 다른 언어 작품의 로어 한국어 별�
 | 변수 | 소비자 | 의미 |
 |---|---|---|
 | `API_ORIGIN` | `apps/web/next.config.ts`, `apps/api/src/env.ts` | `/api/*` rewrite 타깃, 기본 `http://localhost:8787`. API의 환경에도 있으면 카드 스크립트의 `request`가 그 호스트를 웹 오리진처럼 거절한다(§10 `script-fetch`) |
-| `NODE_ENV` | `apps/api/src/index.ts` | `test`에서만 better-auth 픽스처와 Echo 모델을 허용. 정상 실행은 ChatGPT 로그인만 사용 |
+| `NODE_ENV` | `apps/api/src/index.ts` | `test`에서만 Echo 모델(과 `CHATGPT_FAKE_OPENAI`)을 허용. 정상 실행은 ChatGPT 연결의 모델만 쓴다 |
 | `CHATGPT_FAKE_OPENAI` | `apps/api/src/index.ts` | `NODE_ENV=test`에서 `1`이면 OpenAI 로그인 엔드포인트를 프로세스 안에서 흉내 낸다(`testOpenAI.ts`, 브라우저 스위트 전용) |
 | `CLIENT_IP_HEADER` | `apps/api/src/rateLimit.ts` | 주소로 세는 요청 한도가 클라이언트 주소를 읽을 헤더 — 앞단 프록시가 쓰는 것(Cloudflare 뒤면 `cf-connecting-ip`). 없으면 `x-forwarded-for`의 맨 오른쪽(§10 요청 한도) |
 | `IMPORT_WORKERS` | `apps/api/src/env.ts`, `index.ts` | 이 프로세스가 한꺼번에 읽는 파일 임포트 수, 기본 2(1–16) — 임포트만 집는 잡 루프의 수이고, 임포트의 메모리는 이것으로 묶인다(§10 파일 임포트, §12) |
 | `NEXT_PUBLIC_CHATGPT_EXTENSION_ID` / `_URL` | `apps/web/src/lib/chatgptExtension.ts` | Shizue 앞에 하나 더 물어볼 확장 ID(압축 해제한 Shizue 빌드, e2e의 Shizue 대역)와 설치 링크(기본은 Shizue의 웹 스토어 페이지) |
 
 
-### 4.1 호스팅 경계와 로그인 (`readConfig`, `originGuard`, `chatgptAccounts`)
+### 4.1 로컬 소유자·요청 게이트·ChatGPT 연결 (`session.ts`, `originGuard`, `chatgptAccounts`)
 
-웹과 API는 여러 사용자가 접속하는 서비스로 돈다. API는 `API_HOST`에 바인딩하고, `originGuard`가
+shizue는 한 사람이 자기 컴퓨터에서 쓰는 앱이다(2026-10-18 소유자 결정). 계정이 없고, 로그인·가입·로그아웃도 없다.
+안에서는 `user` 행 하나가 소유자다(`ensureOwner` — 가장 오래된 `user` 행이고, 없으면 새 설치의 첫 요청이
+`owner@local.shizue.invalid` 주소로 하나 만든다. 주소가 고정이라 동시에 온 첫 요청들도 행을 하나만 만든다). 작품·챗·페르소나·프리셋·모듈·노트의
+`user_id`는 모두 그 행을 가리킨다 — 컬럼은 그대로 두었다. 2026-10-18 전의 설치는 ChatGPT로 로그인했던 계정이 그대로
+소유자가 된다. `user` 행이 여럿이면 가장 오래된 것이 소유자이고, 나머지 행의 작품은 보이지 않는다.
+
+**요청 게이트**(`ownerGate`)는 `/api/health`·`/api/ready`와 휴대폰의 `POST /api/devices/claim` 뒤, 다른 모든 `/api/*` 앞에
+선다(`app.ts`). 요청은 다음을 모두 만족할 때 이 컴퓨터의 것이다(`isLocalRequest`):
+- 소켓의 상대 주소가 루프백(`127.0.0.1`·`::1`·`::ffff:127.0.0.1`)이다. 소켓이 없으면(테스트의 `app.request`) 루프백으로 친다.
+- 요청이 말하는 호스트가 모두 이 컴퓨터의 이름(`localhost`·`127.0.0.1`·`[::1]`, 포트는 무엇이든)이다 — Next rewrite가
+  브라우저의 Host로 덮어쓰는 `x-forwarded-host`, `Host`, 그리고 요청 줄의 주소. 쉼표·`@`·`/`가 든 값은 이름이 아니다.
+- 터널이나 프록시의 흔적이 없다: `cf-connecting-ip`·`tailscale-user-login`·`tailscale-user-name`·`forwarded` 헤더가 없고,
+  `x-forwarded-for`가 있으면 그 주소가 모두 루프백이다.
+
+이 컴퓨터의 요청은 소유자로 돈다. 그 밖의 요청(터널로 온 휴대폰)은 페어링이 건넨 기기 세션 쿠키(`shizue_session` —
+`session.id`가 `paired:`로 시작하고 만료 전인 행)가 있어야 소유자로 돌고, 없으면 401 `unauthorized`다. 게이트 뒤에서
+`userId`·`viewerId`는 소유자이고 `local`은 둘 중 어느 쪽인지 말한다. 라우트에 남은 `requireUser`는 이제 거절할 요청이
+없다. 이 컴퓨터만 할 수 있는 일은 `requireLocal`이 지킨다(휴대폰이면 403 `local_only`): ChatGPT 연결 시작·콜백·연결 끊기,
+터널 열기·닫기, 연결 코드 만들기. DNS 리바인딩(남의 사이트가 이 컴퓨터로 풀리는 이름)은 그 이름을 Host로 싣고 오므로
+게이트가 거절하고, `originGuard`도 따로 거절한다. Tailscale Serve는 Host를 그대로 넘기면서 `X-Forwarded-For`(tailnet 주소)와
+`Tailscale-User-*`를 붙이고, Cloudflare 터널은 `Cf-Connecting-Ip`를 붙인다 — 어느 하나만으로도 이 컴퓨터의 요청이 아니다.
+아무 흔적도 남기지 않는 원시 TCP 포워딩(`ssh -R` 같은 것)은 이 컴퓨터와 구별되지 않으므로 쓰지 않는다. 같은 이유로 웹 서버는 API를 스스로 부르지 않는다 — Next가 서버에서 API를 부르면, 휴대폰이 시킨 일이어도 그 요청은 이 컴퓨터의 것으로 보인다.
+
+API는 `API_HOST`(기본 루프백)에 바인딩하고, `originGuard`가
 변경 요청의 Origin을 `BETTER_AUTH_URL`과 대조하며(CSRF), Origin이 실린 요청은 그 오리진만,
 Next rewrite가 넘긴 요청은 `x-forwarded-host`가 웹 호스트일 때만 받는다(DNS 리바인딩).
 이 기기로 가는 터널(아래 기기 연결) — 설정 화면이 연 것과 `REMOTE_ORIGINS`에 적은 것 — 의 오리진도 같은 앱으로 쳐서 웹 오리진과 똑같이 받는다. 터널은 API가 도는 중에 열리고 닫히므로 요청마다 다시 읽는다.
@@ -135,63 +158,60 @@ Node의 권한 모델은 **25부터** 네트워크를 막는다(`package.json`�
 V8 힙 밖의 메모리(ArrayBuffer). 둘 다 자식의 JS에 닿아야 쓸 수 있고, Lua에서 JS로 가는 길(프록시·문자열 코드·`process` 전역)을
 막아 둔 것이 그 앞의 방어다. 힙 밖 메모리의 마지막 선은 상주 메모리 한도다: Linux에서는 실행 중인 자식의 `/proc/<pid>/status` VmRSS를 100ms마다 읽어 512MB를 넘으면 죽인다(`RSS_LIMIT_MB` — 유휴 약 70MB·힙 128MB·Lua 상태 위로 넉넉하게, 폭주만 멈춘다. 그림 4MB가 실린 요청의 리스너가 약 210–240MB였다). `/proc`이 없는 개발 기기에서는 힙과 Lua 한도만 선다. 배포가 컨테이너 메모리 한도도 두면 그 바깥 선이 하나 더 생긴다.
 
-로그인은 OpenAI의 오픈소스 Sign in with ChatGPT 흐름이다. 그 흐름은 `http://127.0.0.1:<port>/auth/callback`
-으로만 돌아오고 이 주소는 사용자 기기를 가리키므로, 크롬 확장의 정적 declarativeNetRequest 규칙이 그 이동을
-연결 전에 `<웹 오리진>/api/chatgpt/callback`으로 바꾼다(쿼리 유지). 포트는 오리진마다 하나이고 API의
-`CHATGPT_CALLBACK_PORT`와 확장 규칙이 같아야 한다.
+**ChatGPT 연결**은 로그인이 아니라 모델 연결이다 — 소유자의 ChatGPT 요금제로 대화하기 위한 OpenAI의 오픈소스 Sign in
+with ChatGPT 흐름이다. 그 흐름은 `http://127.0.0.1:<port>/auth/callback`으로만 돌아오므로, 크롬 확장의 정적
+declarativeNetRequest 규칙이 그 이동을 연결 전에 `<웹 오리진>/api/chatgpt/callback`으로 바꾼다(쿼리 유지). 확장 없이 서버가
+그 포트에서 콜백을 직접 받는 길은 두지 않는다(소유자 결정, 2026-10-18). 포트는 API의 `CHATGPT_CALLBACK_PORT`(`env.ts`)이고
+확장 규칙과 같아야 한다 — 비우면 47801, Shizue가 `http://localhost:13000`으로 보내는 포트다. 다른 포트는 오프셋 개발 서버와
+브라우저 테스트의 Shizue 대역에만 쓴다.
 
-그 규칙을 싣는 확장은 Chrome 웹 스토어의 **Shizue**(0.3.6 이상, ID `mpcbgfkoholfgapcgcmfjobnfcbnfanm`)다. 규칙은
-`https://plot.shizue.net` ← 47811, `http://localhost:13000` ← 47801 두 개이고, 개발도 같은 Shizue로 한다. 웹은 Shizue에
-ping을 보내 `features: ['plotSignIn']`이 담긴 답이 오면 로그인 버튼을 연다(`lib/chatgptExtension.ts`). 0.3.5 이하는 아예
-답하지 않는다. `NEXT_PUBLIC_CHATGPT_EXTENSION_ID`는 함께 물어볼 ID 하나를 더한다 — 압축 해제한 Shizue 빌드, 그리고
-브라우저 테스트가 쓰는 Shizue 대역(`apps/e2e/shizueStandIn.ts`, 테스트 오리진·포트용 규칙과 같은 ping 답).
+그 규칙을 싣는 확장은 Chrome 웹 스토어의 **Shizue**(0.3.6 이상, ID `mpcbgfkoholfgapcgcmfjobnfcbnfanm`)다. 쓰는 규칙은
+`http://localhost:13000` ← 47801 하나다(Shizue에 남은 옛 호스팅판의 `https://plot.shizue.net` ← 47811 규칙은 쓰지 않는다 —
+`rokrokss/shizue`의 `src/public/plot-signin-rules.json`). 웹은 Shizue에 ping을 보내 `features: ['plotSignIn']`이 담긴 답이 오면
+설정의 연결 버튼("ChatGPT로 계속하기")을 연다(`lib/chatgptExtension.ts`). 0.3.5 이하는 아예 답하지 않는다.
+`NEXT_PUBLIC_CHATGPT_EXTENSION_ID`는 함께 물어볼 ID 하나를 더한다 — 압축 해제한 Shizue 빌드, 그리고 브라우저 테스트가 쓰는
+Shizue 대역(`apps/e2e/shizueStandIn.ts`, 테스트 오리진·포트용 규칙과 같은 ping 답). 확장이 없으면 설정 카드가 Shizue의 웹
+스토어 링크와 다시 확인 버튼을 보여 준다.
 
-포트는 API가 `BETTER_AUTH_URL`로 정한다(`env.ts`의 `SHIZUE_CALLBACK_PORTS`): 위 두 오리진은 설정 없이 Shizue의
-포트를 쓰고, 운영(`NODE_ENV=production`)에서는 Shizue와 어긋나는 설정을 **부팅 때 거절한다** — 아는 오리진에 다른
-포트, 다른 오리진에 Shizue가 다른 곳으로 보내는 포트(47801·47811), 다른 오리진에 포트 없음. 변수를 빠뜨린 운영
-배포가 47801을 요청하면 Shizue가 독자를 그 사람 컴퓨터의 `localhost:13000`으로 보내기 때문이다. 개발은 오프셋 서버와
-브라우저 테스트를 위해 어떤 포트든 받는다. 다른 오리진은 Shizue가 실어 나르지 않으므로 그 오리진의 규칙을 실은 확장이
-따로 있어야 로그인할 수 있다. 오리진을 바꾸면 Shizue를 다시 릴리즈하고 `SHIZUE_CALLBACK_PORTS`도 고쳐야 한다(규칙은
-`rokrokss/shizue`의 `src/public/plot-signin-rules.json`). 로그인 화면은 확장이 없을 때 Shizue의 웹 스토어 링크와
-다시 확인 버튼을 보여 준다.
-
-1. `POST /api/chatgpt/sign-in {next, locale}` — PKCE·state·nonce를 만들어 `verification` 행에 10분 보관하고,
+1. `POST /api/chatgpt/sign-in {next, locale}`(이 컴퓨터만) — PKCE·state·nonce를 만들어 `verification` 행에 10분 보관하고,
    시도를 그 브라우저에 묶는 HttpOnly 쿠키를 심은 뒤 `authorizationUrl`을 준다. 브라우저는 같은 탭으로 이동한다.
-2. `GET /api/chatgpt/callback` — 시도 행을 **지우면서** 읽고(1회용), 쿠키 다이제스트가 맞을 때만 코드를 교환한다
-   (로그인 CSRF). ID 토큰의 `sub`가 계정의 키다(`account`의 `chatgpt/<sub>`). 성공하면 세션 쿠키를 주고
-   `/{locale}{next}`로, 실패하면 `/{locale}/login?error=<code>&next=…`로 보낸다. 리디렉트된 콜백에는 Origin도
-   Referer도 없으므로 인증 근거는 state와 쿠키뿐이다.
-3. 토큰은 `account` 행에 AES-256-GCM으로 봉인한다(키는 `BETTER_AUTH_SECRET`에서 HKDF). 비밀을 바꾸면 봉인이
-   열리지 않아 전원이 다시 로그인한다. 갱신은 그 행의 `for update` 락 아래에서 한 번만 하고, 다시 읽어 이미
+2. `GET /api/chatgpt/callback`(이 컴퓨터만) — 시도 행을 **지우면서** 읽고(1회용), 쿠키 다이제스트가 맞을 때만 코드를 교환한다
+   (로그인 CSRF). 토큰은 소유자의 `account` 행 하나(`chatgpt/<sub>`, ID 토큰의 `sub`)에 둔다 — 연결은 하나뿐이라 다른 ChatGPT
+   계정을 연결하면 앞 계정의 행은 지워지고, 소유자의 이름과 주소는 연결한 계정의 것을 따른다(다른 `user` 행이 가진 주소는
+   가져오지 않는다). 세션은 만들지도 요구하지도 않는다. 성공하면 `/{locale}{next}`로, 실패하면
+   `/{locale}/settings?error=<code>`로 보낸다. 리디렉트된 콜백에는 Origin도 Referer도 없으므로 근거는 state와 쿠키, 그리고
+   이 컴퓨터의 요청이라는 것이다.
+3. 토큰은 `account` 행에 AES-256-GCM으로 봉인한다(키는 설치의 비밀 — `BETTER_AUTH_SECRET` 또는 앱 폴더의 `secret` — 에서
+   HKDF). 비밀을 바꾸면 봉인이 열리지 않아 ChatGPT를 다시 연결해야 한다. 갱신은 그 행의 `for update` 락 아래에서 한 번만 하고, 다시 읽어 이미
    회전됐으면 그 값을 쓴다. `invalid_grant` 등 권한이 사라진 응답이면 토큰을 지운다. 기록된 만료 시각으로는
    아직 유효한 access token을 제공자가 401 `token_expired`로 거절하기도 한다(2026-10-16, 모델 카탈로그와 답장
    모두). 그러면 그 호출은 거절된 토큰을 넘겨 갱신을 강제하고 한 번만 다시 보낸다(`withAccessToken`) — 락
    아래에서 저장된 토큰이 이미 다른 것이면 다른 요청이 회전한 것이니 그 값을 쓰고, 같으면 만료 시각과 상관없이
    갱신한다. 다시 거절되면 그 오류를 그대로 낸다. 강제 갱신도 이 항목의 규칙을 그대로 따른다. 코드 교환과 갱신은
    OIDC discovery 문서와 JWKS를 먼저 받아 둔 뒤에 토큰을 요청한다 — 토큰 요청이 성공한 뒤에 그 둘이 실패하면
-   회전된 refresh token을 잃고, 다음 갱신이 `invalid_grant`를 받아 로그인을 지우기 때문이다. 받지 못하면 코드도
+   회전된 refresh token을 잃고, 다음 갱신이 `invalid_grant`를 받아 연결을 지우기 때문이다. 받지 못하면 코드도
    토큰도 쓰지 않은 채 일시 오류(`chatgpt_unavailable`, 503)로 끝난다. 갱신 응답의 ID 토큰은 서명 키를 다시
    받으려 해도 받지 못하면, 토큰 엔드포인트에서 TLS로 직접 받은 응답이므로 서명 대신 `sub`만 대조하고 회전된
    토큰을 저장한다. 키를 받았는데도 맞는 키가 없거나 `sub`가 다르면 저장하지 않는다.
 4. OpenAI가 계정마다 발급한 `client_id`는 `account.client_id`에 남고, 브라우저의 HttpOnly 쿠키가 그것을 기억해
-   다음 로그인이 같은 등록을 다시 쓴다(등록이 쌓이지 않게). 서버는 OpenAI에게 호스트 하나이며
+   다음 연결이 같은 등록을 다시 쓴다(등록이 쌓이지 않게). 이 설치는 OpenAI에게 호스트 하나이며
    `ext_agent_host_id`는 비밀에서 파생한 `urn:uuid`다.
-5. 로그아웃(`POST /api/chatgpt/sign-out`, `/api/auth/sign-out`)은 refresh token 해제를 시도하고 토큰을 지우되
-   등록은 남기며, 그 사용자의 세션을 모두 끝낸다 — 연결한 기기의 세션도. 연결한 기기(아래)에서 누른 로그아웃은
-   두 라우트 모두 그 기기의 세션 하나만 끝내고 토큰과 다른 세션은 그대로 둔다(`revocationPending: false`).
+5. 연결 끊기(`POST /api/chatgpt/disconnect`, 이 컴퓨터만)는 refresh token 해제를 시도하고 토큰을 지우되 등록은 남긴다.
+   연결한 휴대폰은 그대로 연결되어 있고, 다음에 연결하는 ChatGPT를 쓴다. `GET /api/chatgpt`는 `{connected, email, local}` —
+   휴대폰의 설정 카드는 `local: false`를 보고 연결 버튼 대신 "컴퓨터에서 연결한다"는 안내를, 연결되어 있으면 계정과
+   요금제 표시만 보인다.
 
-**기기 연결**(`routes/devices.ts`, `tunnel.ts`)은 **로컬 실행 전용**이다 — 독자가 자기 컴퓨터에 띄운 shizue를 터널로
-휴대폰에서 여는 경우이고, 서비스로 서버에 띄운 shizue(호스팅판)에는 없다(소유자 결정, 2026-10-17). 그래서
-`BETTER_AUTH_URL`이 루프백(`localhost`·`127.0.0.1`·`[::1]`) 오리진일 때만 존재한다 — 두 겹으로: API는 그때만 터널
-관리자(`createPhoneAccess`, 루프백이 아니면 만들기를 거절하고 열 때 다시 확인한다)를 만들고 없으면
-`/api/devices/*`가 404이며, 웹은 빌드 때 같은 변수로 정해(`next.config.ts`의 `NEXT_PUBLIC_DEVICE_PAIRING` — 변수가 없으면 로컬이 아니다. `scripts/dev.sh`는
-늘 넣고, 브라우저 스위트의 웹은 넣지 않아 호스팅판 화면을 본다) 아니면 설정 카드·로그인 안내·`/pair`를 그리지 않는다. `BETTER_AUTH_URL`이 루프백이 아니면 API가 `REMOTE_ORIGINS`도
-부팅 때 거절한다.
+**기기 연결**(`routes/devices.ts`, `tunnel.ts`)은 자기 컴퓨터에 띄운 shizue를 터널로 휴대폰에서 여는 경우다. `BETTER_AUTH_URL`이
+루프백(`localhost`·`127.0.0.1`·`[::1]`) 오리진일 때만 존재한다 — 두 겹으로: API는 그때만 터널 관리자(`createPhoneAccess`,
+루프백이 아니면 만들기를 거절하고 열 때 다시 확인한다)를 만들고 없으면 `/api/devices/*`가 404이며, 웹은 빌드 때 같은 변수로
+정해(`next.config.ts`의 `NEXT_PUBLIC_DEVICE_PAIRING` — 변수가 없으면 로컬이 아니다. `scripts/dev.sh`는 늘 넣고, 브라우저
+스위트의 웹은 넣지 않아 휴대폰 카드를 그리지 않는다) 아니면 설정 카드와 `/pair`를 그리지 않는다. `BETTER_AUTH_URL`이
+루프백이 아니면 API가 `REMOTE_ORIGINS`도 부팅 때 거절한다.
 
 **터널은 설정 화면이 연다**(2026-10-17, PocketRisu의 "원격 접속 열기"처럼). 카드의 "휴대폰 연결 열기"가
 `POST /api/devices/tunnel`로 터널을 열고 곧바로 연결 코드를 만들어 QR로 보인다 — 휴대폰은 그 QR 하나로 주소를
-열고 이 계정에 붙는다. `GET /api/devices`는 `{tunnel: {kind, origin} | null, available: {tailscale, cloudflare},
-origins}`(열린 터널, 버튼이 열 터널, 휴대폰이 쓸 수 있는 주소 전부)이고, `DELETE /api/devices/tunnel`이 닫는다.
+열고 이 컴퓨터의 shizue에 붙는다. `GET /api/devices`는 `{tunnel: {kind, origin} | null, available: {tailscale, cloudflare},
+origins, local}`(열린 터널, 버튼이 열 터널, 휴대폰이 쓸 수 있는 주소 전부, 이 컴퓨터의 요청인지)이고, `DELETE /api/devices/tunnel`이 닫는다.
 고르는 순서(소유자 결정):
 - **Tailscale Serve** — 이 기기가 tailnet에 로그인해 있으면(`tailscale status --json`의 `BackendState`가
   `Running`). 고정 주소(`https://<기기>.<tailnet>.ts.net:<포트>`)이고 같은 tailnet의 기기만 들어오며, 휴대폰에도
@@ -207,37 +227,36 @@ origins}`(열린 터널, 버튼이 열 터널, 휴대폰이 쓸 수 있는 주�
   바뀌며, API가 끝나면 함께 닫는다. 2026-10-17 이 Mac의 망은 `api.trycloudflare.com`과의 연결을 끊어 터널 생성
   자체가 막혔으므로 이 길은 단위 테스트로만 확인했다.
 - 둘 다 없으면 카드가 Tailscale(권장)이나 cloudflared를 설치하라고 말하고 버튼을 잠근다. 설치는 해 주지 않는다.
-보호 장치는 PocketRisu의 비밀번호가 아니라 연결 코드다 — 휴대폰은 5분짜리 일회용 코드로만 세션을 얻으므로, 공개
-주소로도 남이 볼 수 있는 것은 로그인 없이 보이는 페이지뿐이다. `next dev`가 다른 호스트의 `/_next/*`를 받도록
+보호 장치는 PocketRisu의 비밀번호가 아니라 연결 코드다 — 휴대폰은 5분짜리 일회용 코드로만 기기 세션을 얻으므로, 공개
+주소로 남이 볼 수 있는 것은 Next가 그리는 빈 화면과 `/pair`뿐이고 API는 모두 401로 답한다. `next dev`가 다른 호스트의 `/_next/*`를 받도록
 루프백일 때 `allowedDevOrigins`에 `**.ts.net`·`*.trycloudflare.com`을 넣는다. 열린 터널의 오리진은
-`originGuard`와 카드 스크립트·임포트의 자기 오리진 목록이 요청마다 읽는다(`remoteOriginsOf`). 휴대폰은 ChatGPT 로그인을 끝내지 못한다 — 콜백은 브라우저가 도는 기기의 `127.0.0.1`이고,
-그것을 바꿔 주는 확장이 휴대폰 브라우저에는 없다. 그래서 로그인한 브라우저가 휴대폰에 세션을 하나 더 건넨다. 토큰은 서버를 떠나지 않고 `ext_agent_host_id`도 그대로다 — 브라우저가 하나 더 붙을 뿐 OpenAI가
+`originGuard`와 카드 스크립트·임포트의 자기 오리진 목록이 요청마다 읽는다(`remoteOriginsOf`). 휴대폰은 ChatGPT를 연결하지 못한다 — 콜백은 브라우저가 도는 기기의 `127.0.0.1`이고,
+그것을 바꿔 주는 확장이 휴대폰 브라우저에는 없다. 그래서 휴대폰은 페어링으로 들어와 이 컴퓨터가 연결한 ChatGPT를 쓴다. 토큰은 서버를 떠나지 않고 `ext_agent_host_id`도 그대로다 — 브라우저가 하나 더 붙을 뿐 OpenAI가
 말하는 호스트(도구가 도는 환경)가 늘지 않으므로, 자격 증명을 옮기는 자체 호스팅 VM 절차와는 다르다.
 
-1. `POST /api/devices/pair`(로그인 필요) — 32바이트 일회용 코드를 만들어 그 SHA-256만 `verification` 행
-   (`device-pairing:<다이제스트>`, 값은 사용자 id)에 5분 보관하고, 코드와 만료 시각, 휴대폰이 열 오리진
-   (`REMOTE_ORIGINS`)을 준다. 만료된 연결 행은 이때 지운다.
+1. `POST /api/devices/pair`(이 컴퓨터만) — 32바이트 일회용 코드를 만들어 그 SHA-256만 `verification` 행
+   (`device-pairing:<다이제스트>`, 값은 소유자 id)에 5분 보관하고, 코드와 만료 시각, 휴대폰이 열 오리진
+   (`REMOTE_ORIGINS`와 열린 터널)을 준다. 만료된 연결 행은 이때 지운다.
 2. 설정 화면이 `<오리진>/<locale>/pair#<코드>`를 QR로 보인다. 코드는 프래그먼트라 서버·프록시 로그에 남지 않고,
    `/pair` 페이지는 읽자마자 주소에서 지운다.
-3. 휴대폰의 `/pair`는 확인 버튼을 거쳐 `POST /api/devices/claim {code}`를 보낸다 — GET으로 세션을 주지 않는
-   이유는 링크만으로 남의 계정에 로그인되는 로그인 CSRF다. 서버는 코드 행을 **지우면서** 읽고(1회용, 틀리거나
-   만료되거나 이미 쓴 코드는 400 `pairing_invalid`), 그 사용자에게 세션을 하나 더 만들어 그 오리진에 쿠키를
-   심는다(204). 이 세션의 `session.id`는 `paired:`로 시작하고, `/api/auth/get-session`이 `paired: true`를 싣는다.
+3. 휴대폰의 `/pair`는 확인 버튼을 거쳐 `POST /api/devices/claim {code}`를 보낸다 — 게이트 앞에 있다(휴대폰은 아직 세션이
+   없다). GET으로 세션을 주지 않는 이유는 링크만으로 남의 shizue에 들어가게 되는 로그인 CSRF다. 서버는 코드 행을 **지우면서** 읽고(1회용, 틀리거나
+   만료되거나 이미 쓴 코드는 400 `pairing_invalid`), 소유자에게 기기 세션을 하나 만들어 그 오리진에 쿠키를
+   심는다(204). 이 세션의 `session.id`는 `paired:`로 시작하고 30일 뒤 끝난다. 2026-10-18 전의 브라우저 로그인 세션(접두사 없음)은 게이트가 받지 않는다.
+4. 휴대폰의 설정 카드는 `local: false`를 보고 "이 휴대폰 연결 끊기"만 보인다 — `DELETE /api/devices/session`이 그 기기의
+   세션 하나만 끝내고, 휴대폰은 `/pair`의 안내로 간다. 컴퓨터 쪽에서 연결한 휴대폰을 끊는 길은 아직 없다 — 터널을 닫으면 들어오지 못하고,
+   ChatGPT 연결 끊기는 기기 세션을 건드리지 않는다.
 
 다른 터널을 손으로 띄웠다면 그 주소를 `REMOTE_ORIGINS`에 적는다 — 연결 코드의 주소 목록에 함께 실리고, `next.config.ts`가
 그 호스트를 `allowedDevOrigins`에 더하며, `scripts/dev.sh`가 `apps/plot/.env`의 그 줄을 Next에도 넘긴다(API는 `.env`를 직접 읽는다). 평문 LAN 주소는 권하지 않는다 — 보안 컨텍스트가 아니면 첨부의
 `crypto.randomUUID`, `crypto.subtle`, 클립보드가 없다.
 
-예전 로컬 설치의 내부 소유자(`account`의 `local-workspace/default`)는 첫 ChatGPT 로그인이 한 번 넘겨받는다 —
-작품과 대화가 그대로 이어진다. 그 뒤 바인딩 행은 사라진다.
-
-OpenAI의 오픈소스 흐름은 오픈소스·로컬 호스팅 앱이 대상이다. 원격 호스팅 서비스가 사용자 토큰을 서버에
-보관하는 것은 별도 신청이 필요하므로, 승인 전에는 운영자 본인 계정으로만 테스트한다.
+OpenAI의 오픈소스 흐름은 오픈소스·로컬 호스팅 앱이 대상이고, 한 사람이 자기 컴퓨터에서 쓰는 지금의 shizue가 그 경우다.
 
 
 ## 5. 도메인 모델
 
-**스키마의 권위는 `packages/db/src/schema/app.ts`다.** 컬럼 목록을 여기 복제하지 않는다 — 아래는 테이블이 무엇을 위해 있고 어떤 규약을 지는지만 기술한다. better-auth 테이블(`user`, `session`, `account`, `verification`)은 `schema/auth.ts`에 better-auth CLI 스키마 그대로 있다.
+**스키마의 권위는 `packages/db/src/schema/app.ts`다.** 컬럼 목록을 여기 복제하지 않는다 — 아래는 테이블이 무엇을 위해 있고 어떤 규약을 지는지만 기술한다. 예전 인증 테이블(`user`, `session`, `account`, `verification`)은 `schema/auth.ts`에 better-auth CLI 스키마 그대로 있고, 지금은 이렇게 쓴다: `user`는 소유자 한 행(§4.1 — 가장 오래된 행, 모든 `user_id`가 가리킨다), `session`은 페어링한 휴대폰의 기기 세션(`paired:` id, 쿠키 값의 SHA-256만), `account`는 소유자의 ChatGPT 연결(`chatgpt/<sub>`, 봉인된 토큰과 `client_id`), `verification`은 ChatGPT 연결 시도(10분)와 휴대폰 연결 코드(5분).
 
 ### 플롯·등장인물
 
@@ -1050,7 +1069,7 @@ event: error   data: {"message":"...","code":"...","params":{...}}
 - **비용**(실험의 영어판 책, 이 배칭으로): Greek Myth(키 있는 18) 1회 약 3.6k 입력·0.3k 출력, Hogwarts(33) 2회 약 5.3k·0.8k, Ilvermorny(45) 2회 약 7.6k·1.2k, 당나라 무협(210) 7회 약 37k·2.7k 토큰. 보통의 책은 1~2회, 1만 토큰 아래다(추론 모델의 생각 토큰은 따로). 한 번 만든 별칭은 엔트리를 고치기 전까지 다시 묻지 않는다.
 - **읽기**(`loreAliasesFor`, `searchByMeaning` 안에서 임베더와 상관없이): 답장 언어 지시 모드이고 독자의 언어가 한국어이고 작품 언어가 한국어가 아니고 책에 한국어 키가 없을 때만, 플롯의 `ko` 행을 해시로 찾아 조립기의 `loreAliases`로 넘긴다. 번역 모드(턴이 이미 작품 언어)와 원문 그대로 모드는 별칭을 쓰지 않는다. 엔트리의 키와 내용의 해시로 찾으므로 Lua가 그대로 둔 엔트리나 챗 로어에 같은 엔트리가 있으면 그것도 찾힌다.
 - **끄기**: `LORE_ALIASES=off`(§4)는 패스도 매칭도 끈다 — 그런 책은 제 키로 돌아간다. 행은 남아 있다가 다시 켜면 쓰인다.
-- **그 전의 작품**: `pnpm --filter @shizue/api fix:lore-aliases`(`maintenance/fixLoreAliases.ts`, 앱 폴더(`SHIZUE_DATA_DIR`)와 그 비밀 대상, 앱이 돌지 않을 때만 — ChatGPT 로그인을 연다)가 대상 작품마다 별칭이 없는 엔트리를 크리에이터의 보조 모델로 채운다. dry run이 기본이라 플롯마다 별칭 없는 엔트리 수와 호출 수를 적고, `--apply`여야 묻고 쓴다(플롯 하나씩 차례로). `--plot <id>`로 하나만. 다시 돌리면 물을 것이 없다. 보조 모델이 없는 크리에이터의 작품은 적고 건너뛴다 — 그 작품의 첫 한국어 독자가 챗을 시작하면 그 독자의 모델로 만든다. **보조 키가 들어온 뒤**: 보조 키를 묻는 엔트리(선택 엔트리이고 칠 수 있는 보조 키가 있는 것)는 해시가 바뀌어 옛 행이 맞지 않으므로 별칭 없는 엔트리로 세어지고, `--apply`가 그것만 키·보조 키를 한 호출에 다시 묻고 옛 행을 지운다. 보조 키가 없는 엔트리는 해시가 그대로라 다시 묻지 않는다. 백필을 돌리지 않아도 같은 일이 그 작품의 다음 로어 쓰기나 한국어 독자의 다음 턴(행 없는 엔트리를 만나 패스를 건다)에 일어나고, 그때까지 그 엔트리들은 영어 키로만 걸린다.
+- **그 전의 작품**: `pnpm --filter @shizue/api fix:lore-aliases`(`maintenance/fixLoreAliases.ts`, 앱 폴더(`SHIZUE_DATA_DIR`)와 그 비밀 대상, 앱이 돌지 않을 때만 — ChatGPT 연결을 연다)가 대상 작품마다 별칭이 없는 엔트리를 크리에이터의 보조 모델로 채운다. dry run이 기본이라 플롯마다 별칭 없는 엔트리 수와 호출 수를 적고, `--apply`여야 묻고 쓴다(플롯 하나씩 차례로). `--plot <id>`로 하나만. 다시 돌리면 물을 것이 없다. 보조 모델이 없는 크리에이터의 작품은 적고 건너뛴다 — 그 작품의 첫 한국어 독자가 챗을 시작하면 그 독자의 모델로 만든다. **보조 키가 들어온 뒤**: 보조 키를 묻는 엔트리(선택 엔트리이고 칠 수 있는 보조 키가 있는 것)는 해시가 바뀌어 옛 행이 맞지 않으므로 별칭 없는 엔트리로 세어지고, `--apply`가 그것만 키·보조 키를 한 호출에 다시 묻고 옛 행을 지운다. 보조 키가 없는 엔트리는 해시가 그대로라 다시 묻지 않는다. 백필을 돌리지 않아도 같은 일이 그 작품의 다음 로어 쓰기나 한국어 독자의 다음 턴(행 없는 엔트리를 만나 패스를 건다)에 일어나고, 그때까지 그 엔트리들은 영어 키로만 걸린다.
 - **한계**: 보조 키 별칭은 실험에 없었다(실험의 네 책에는 보조 키를 가진 선택 엔트리가 하나도 없었다) — 측정한 것은 1차 키의 별칭뿐이다. 독자의 모듈 로어와 Lua가 고쳐 쓴 엔트리는 별칭이 없다(해시가 작품의 엔트리와 같을 때만 찾힌다) — 그것들은 제 키로만 걸린다. 실험의 별칭은 제품의 보조 모델이 아니라 실험자가 같은 프롬프트로 만든 것이라, 각자의 ChatGPT 보조 모델이 쓰는 별칭의 품질은 실제 작품에서 따로 봐야 한다. 잘 안 되는 표현은 별칭으로 닿지 않는다("그 사람" → You-Know-Who, "유령 교수" → Binns) — 그런 간접 지시는 크리에이터가 그 말을 키로 달아야 걸린다.
 
 ## 8. 커스텀 UI와 게임 레이어
@@ -1167,26 +1186,24 @@ API는 `@shizue/contracts`의 스키마를 사용한다.
 마운트와 인증 경계:
 
 ```
-세션 미들웨어 앞:
-  /api/auth/*            세션 조회·로그아웃 (test에서만 better-auth 픽스처)
-  /api/presets           프리셋 id 목록          (유저별 정보 없음)
+게이트 앞:
   /api/health            200 {status:'ok'} — 프로세스가 답하는지만. DB도 세션도 보지 않는다
   /api/ready             200 {status:'ready'} | 503 {status:'draining'} (종료가 시작됨)
                          | 503 {status:'db_unavailable'} (`select 1`이 실패하거나 2초 안에 답하지 않음)
-── 세션 미들웨어: 세션을 **요구하지 않고 해석**한다 ──
-   있으면 c.viewerId = c.userId = 유저 id, 없으면 c.viewerId = null로 통과
-── requireUser 가드(`apps/api/src/session.ts`)를 건 곳만 401 ──
-  라우터 통째로:  /api/comments   /api/personas   /api/notes   /api/reader-presets
-                  /api/chats      /api/messages   /api/notifications
-                  /api/imports
-  가드 없이 viewerId로 답함: /api/chatgpt(로그인 시작·콜백·상태, 로그아웃만 가드)
-                  /api/devices(기기 연결, 로컬 실행에서 REMOTE_ORIGINS가 있을 때만 — 없으면 404.
-                               pair만 가드, claim은 로그인 전의 휴대폰이 부른다, §4.1)
-                  /api/models(읽는 사람 계정의 모델, 비로그인은 [];
-                              광고하는 모델만 reasoningEfforts·defaultReasoningEffort)
-  라우트별로:     /api/plots(본체 + 댓글)
-                  /api/creators(팔로우 두 라우트만)
-  가드 없음:      /api/explore
+  POST /api/devices/claim  휴대폰이 연결 코드를 기기 세션으로 바꾼다(아직 세션이 없다, §4.1). 터널 관리자가 없으면 404
+── 요청 게이트(`ownerGate`, `apps/api/src/session.ts`, §4.1) ──
+   이 컴퓨터의 요청이거나 페어링한 휴대폰의 기기 세션이 있으면 소유자로 통과:
+   c.userId = c.viewerId = 소유자 id, c.local = 이 컴퓨터인지. 그 밖은 전부 401 `unauthorized`
+── requireLocal(이 컴퓨터만, 휴대폰은 403 `local_only`) ──
+  /api/chatgpt/sign-in · /callback · /disconnect
+  /api/devices/tunnel(POST·DELETE) · /pair
+그 밖의 라우트:
+  /api/presets           프리셋 id 목록          (유저별 정보 없음)
+  /api/chatgpt           GET {connected, email, local} — 소유자의 ChatGPT 연결
+  /api/devices           GET 터널 상태 + local · DELETE /session(그 휴대폰의 기기 세션만 끝낸다).
+                         로컬 실행에서만 — 터널 관리자가 없으면 404
+  /api/models            소유자의 ChatGPT 계정의 모델(연결 전에는 []; 광고하는 모델만 reasoningEfforts·defaultReasoningEffort)
+  그 밖의 /api/*         전부. 라우트에 남은 `requireUser`는 거절할 요청이 없다
 ```
 
 모든 요청의 맨 앞 미들웨어(`log.ts`의 `requestLog`, `originGuard`보다 앞)가 요청 id를 정한다 — 들어온 `x-request-id`가 짧고 안전한 형태(`[A-Za-z0-9_.:-]{1,64}`)면 그것, 아니면 새 UUID — 그리고 응답의 `x-request-id`로 돌려준다. 프로브 둘은 `originGuard`를 그대로 지난다: API에 바로 오는 프로브는 Origin도 `x-forwarded-host`도 없는 GET이고, Next 프록시를 거친 것은 웹 호스트의 `x-forwarded-host`를 단다.
@@ -1250,11 +1267,11 @@ PATCH  /api/chats/:id/memory/facts/:fid {content?, invalidated?: false} — 사�
 DELETE /api/chats/:id/memory/facts/:fid 사실 지우기 → 204
 ```
 
-익명으로 200인 GET은 **공개 콘텐츠뿐**이다: `/api/explore`, `/api/creators/:id`, `/api/plots/:id/public`·`/cover`·`/assets*`·`/characters/:cid/avatar`·`/comments`. 나머지는 전부 401이다 — 모든 mutation(좋아요·댓글 작성·챗·업로드·CRUD), `/api/plots` 목록(내 것)과 소유자 뷰, 페르소나·노트.
+익명 요청은 없다 — 게이트를 지난 요청은 모두 소유자이고, 지나지 못한 것은 프로브와 연결 코드 교환 말고는 전부 401이다. 공개 표면(`/api/explore`, `/api/creators/:id`, `/api/plots/:id/public`, 좋아요·댓글)은 아직 남아 소유자의 눈으로 답한다.
 
 등장인물 아바타가 **플롯 아래 주소**인 것은 우연이 아니다. 등장인물은 자기 노출 축이 없으므로, 그 이미지를 누가 볼 수 있는지 답하는 유일한 행이 플롯이고 URL이 그 사실을 그대로 말한다.
 
-익명 뷰어 규칙은 두 줄로 끝난다: `visibleToViewer(null)`은 `publiclyListed()`와 같고, 좋아요 조인은 `on false`가 되어 `likedByMe`가 항상 false다. `c.userId`는 **가드 뒤에서만** 읽는다 — 그래서 그 변수의 타입이 `string`이고, 공개 표면은 `c.viewerId`(`string | null`)를 읽는다.
+`c.viewerId`의 타입은 아직 `string | null`이고 공개 표면이 그것을 읽지만, 게이트 뒤에서는 늘 소유자다. `visibleToViewer(null)`(= `publiclyListed()`)로 가는 요청은 이제 없다.
 
 바디 상한: 기본 5MB JSON(스튜디오의 저장은 편집하는 필드만 보내 그 안에 든다 — 아래 멤버 카드 저장), `POST /api/file-imports`는 World Info 파일 32MB(`MAX_WORLD_INFO_BYTES`)의 두 배에 1MB를 더한 65MB(파일이 JSON 문자열로 실려 따옴표·역슬래시·줄바꿈의 이스케이프가 많아야 두 배로 만든다), 로컬 드라이버의 파트 `PUT /api/file-imports/:id/parts/:n`은 8MB(`FILE_IMPORT_PART_BYTES`), `POST /api/chats/:id/import/attachments`는 첨부 하나(8MB)의 상한. **카드·모듈 파일은 어느 바디로도 오지 않는다** — 브라우저가 스토리지로 파트를 올리고 잡이 읽는다(아래 파일 임포트). 파일 상한 1GB(`MAX_CARD_IMPORT_BYTES`, `@shizue/core`)는 시작 요청의 `size`로 413 `payload_too_large`이고, 임포트 폼은 올리기 전에 거절한다(`card_too_large`). RisuRealm의 PNG 카드는 그림을 품어 30MB 안팎이고 charx는 Realm 업로드 상한인 150MB까지 간다. **웹의 `/api` rewrite 프록시에도 따로 상한이 있다** — Next 16의 `experimental.proxyClientMaxBodySize`(기본 10MB)이고, 넘으면 413으로 거절하지 않고 서버 로그에 경고만 남긴 채 **바디를 그 크기에서 잘라 넘긴다**. 그 크기까지 웹 프로세스 안에 사본도 쌓는다(Next의 `getCloneableBody`). 2026-10-17까지는 카드 파일이 이 rewrite를 지나 `next.config.ts`가 1025MB였고, 1GB 카드 하나가 웹 프로세스에도 1GB를 얹었다. 지금 rewrite를 지나는 가장 큰 바디는 World Info를 실은 임포트 시작이라 65MB다(로컬 드라이버의 8MB 파트도 그 안에 든다). 프록시의 `proxyTimeout`(30초)은 총 소요가 아니라 소켓 유휴 시간이다.
 
@@ -1264,7 +1281,7 @@ DELETE /api/chats/:id/memory/facts/:fid 사실 지우기 → 204
 
 | 버킷 | 라우트 | 무엇으로 세나 | 창당 |
 |---|---|---|---|
-| `sign_in` | `POST /api/chatgpt/sign-in` — 로그인 전이고 부를 때마다 verification 행을 쓴다 | 주소 | 30 |
+| `sign_in` | `POST /api/chatgpt/sign-in` — 부를 때마다 verification 행을 쓴다(이 컴퓨터만 부른다) | 주소 | 30 |
 | `search` | `GET /api/explore?q=` — 검색어가 있을 때만. 누구나 부를 수 있고 서버가 질의마다 임베더를 돌린다. 검색어는 100자에서 자른다 | 주소 | 300 |
 | `generation` | SSE 생성 다섯(`messages`·`regenerate`·`continue`·`auto`·`reply`) | 유저 | 300 |
 | `script_llm` | `POST /api/chats/:id/script-llm` — 카드 스크립트의 모델 호출. 루프 하나가 독자의 요금제를 끝없이 쓰지 못하게 | 유저 | 300 |
@@ -1275,7 +1292,7 @@ DELETE /api/chats/:id/memory/facts/:fid 사실 지우기 → 204
 | `social` | 좋아요와 팔로우의 POST·DELETE | 유저 | 300 |
 | `plots` | `POST /api/plots`·`/api/plots/migrate`·`/api/plots/:id/publish` | 유저 | 120 |
 
-크기는 가장 빠른 정상 클라이언트를 읽고 정했다. 로그인 시작은 로그인 한 번에 한두 번이지만 한 주소를 집이나 사무실이 나눠 쓴다. 생성은 스트리밍에 몇 초가 걸리고 그룹 차례는 전송 하나에 많아야 10명(`MAX_GROUP_SPEAKERS`)을 묻는다. SillyTavern 이사 마법사(`lib/sillytavern/import.ts`)는 요청을 하나씩 차례로 보내고 파일 임포트는 독자당 하나씩만 돌므로(아래) 초당 하나를 넘지 않는다. 챗 임포트는 시작 뒤에 배치와 완료가 적어도 하나씩 따르므로 시작만 센다 — 배치(500개·4MB)와 첨부(메시지당 4개)는 챗 하나의 상한(20,000행)이 묶는다. 붙여넣기 이주는 많아야 110장(아바타 10·에셋 100)을 차례로 올린다. API 스위트를 돌려 재면 한도를 시험하는 테스트 말고는 한 테스트가 한 창에 쓰는 것이 생성 33·업로드 20·플롯 18·챗 임포트 15·카드 임포트 6이 가장 많고, e2e는 스펙마다 새 계정이며 로그인 시작은 `page.route`가 대신한다.
+크기는 가장 빠른 정상 클라이언트를 읽고 정했다. ChatGPT 연결 시작은 연결 한 번에 한두 번이다. 생성은 스트리밍에 몇 초가 걸리고 그룹 차례는 전송 하나에 많아야 10명(`MAX_GROUP_SPEAKERS`)을 묻는다. SillyTavern 이사 마법사(`lib/sillytavern/import.ts`)는 요청을 하나씩 차례로 보내고 파일 임포트는 독자당 하나씩만 돌므로(아래) 초당 하나를 넘지 않는다. 챗 임포트는 시작 뒤에 배치와 완료가 적어도 하나씩 따르므로 시작만 센다 — 배치(500개·4MB)와 첨부(메시지당 4개)는 챗 하나의 상한(20,000행)이 묶는다. 붙여넣기 이주는 많아야 110장(아바타 10·에셋 100)을 차례로 올린다. API 스위트를 돌려 재면 한도를 시험하는 테스트 말고는 한 테스트가 한 창에 쓰는 것이 생성 33·업로드 20·플롯 18·챗 임포트 15·카드 임포트 6이 가장 많고, e2e는 모든 스펙이 실행의 소유자 하나를 나눠 쓰며 연결 시작은 `page.route`가 대신한다.
 
 카드 스크립트의 Lua `request`(`script-fetch`, `scriptFetch.ts`)도 같은 테이블에 독자의 창을 둔다(`script_fetch:user:<유저 id>`). RisuAI의 규칙 그대로다 — 1분 창(그 창이 시작되고 1분이 넘은 첫 요청이 새 창을 연다)에 여섯이 지나가고 일곱째부터 RisuAI의 429 본문(`Too many requests. you can request 5 times per minute`, 200 응답의 바디), 주소를 보기 전에 세므로 거절된 주소도 한 번이다. 달라진 것은 창이 프로세스마다가 아니라 하나라는 것뿐이다. 시계는 요청기의 것(`now`, 테스트가 움직인다)이고, 프로세스가 한꺼번에 여는 요청 32개 상한은 그 프로세스의 자원을 지키는 것이라 프로세스마다 그대로다.
 
@@ -1465,14 +1482,13 @@ DELETE /api/chats/:id/memory/facts/:fid 사실 지우기 → 204
 | `/{locale}/plots/import/paste` | **붙여넣기 이주 사이트 고르기** — 다섯 사이트 카드(열린 것만 시작, 나머지 "준비 중"), 사이트별 저장본 표시·지우기(아래) |
 | `/{locale}/plots/import/paste/:platform` | **붙여넣기 이주 마법사** — 확인 → 붙여넣기 → 이미지 → 미리보기 → 만들기(아래). 열리지 않은 사이트는 404 |
 | `/{locale}/plots/:id` | **플롯 스튜디오** — 한 작품의 전부(아래) |
-| `/{locale}/p/:id` | 플롯 공개 페이지 — 커버·소개(마크다운 + HTML — HTML 블록은 메시지 본문과 같은 새니타이즈를 거쳐 하이드레이션 뒤에 그리고, 그림은 같은-오리진만, 길면 접힘 — `components/PlotIntro.tsx`)·태그·스타일 배지·등장인물 스트립·도입부 피커와 전문·좋아요·댓글·대화 시작 패널 |
+| `/{locale}/p/:id` | 플롯 페이지 — 커버·소개(마크다운 + HTML — HTML 블록은 메시지 본문과 같은 새니타이즈를 거쳐 하이드레이션 뒤에 그리고, 그림은 같은-오리진만, 길면 접힘 — `components/PlotIntro.tsx`)·태그·스타일 배지·등장인물 스트립·도입부 피커와 전문·좋아요 수·댓글·대화 시작 패널, 제목 옆의 편집 링크. 작품은 모두 소유자의 것이라 좋아요·팔로우 버튼은 없다(팔로워 수만) |
 | `/{locale}/chats/:id` | 챗 화면 |
 | `/{locale}/explore` | `/{locale}`로 리다이렉트(구 탐색 경로 보존) |
 | `/{locale}/creators/:id` | 크리에이터 공개 플롯 그리드 |
 | `/{locale}/personas`, `/notes` | 페르소나 CRUD / 재사용 노트 |
-| `/{locale}/login`, `/signup` | 인증. 로컬 실행에서 기기 연결이 켜져 있으면 확장이 없을 때의 안내에 휴대폰은 컴퓨터에서 QR로 들어오라는 한 줄이 붙는다 |
-| `/{locale}/settings` | ChatGPT 계정 카드(연결한 기기에서는 로그아웃 버튼이 "이 기기 연결 끊기"). 로컬 실행에서 기기 연결이 켜져 있으면 **휴대폰 연결** 카드 — QR 코드 만들기, 터널 오리진마다 QR 하나, 남은 시간, 만료되면 새로 만들기(§4.1 기기 연결) |
-| `/{locale}/pair` | 기기 연결이 켜진 로컬 실행에만 있다(아니면 404). 휴대폰이 QR로 여는 확인 페이지 — `#코드`를 읽어 지우고, 연결하기를 누르면 claim 뒤 홈으로. 코드가 없으면 다시 찍으라는 안내 |
+| `/{locale}/settings` | **AI 연결**(ChatGPT) 카드 — 이 컴퓨터에서는 연결 전에 "ChatGPT로 계속하기"(Shizue 확장이 답할 때만 열리고, 없으면 웹 스토어 링크와 다시 확인), 연결 뒤에 계정 주소·"ChatGPT 요금제를 사용하고 있습니다"·"ChatGPT 연결 끊기". 휴대폰(`local: false`)에서는 연결 버튼 대신 컴퓨터에서 연결한다는 안내, 연결되어 있으면 계정과 요금제 표시만. 실패한 연결은 `?error=<code>`로 돌아와 카드가 말한다. 로컬 실행에서 기기 연결이 켜져 있으면 **휴대폰 연결** 카드 — 이 컴퓨터에서는 QR 코드 만들기, 터널 오리진마다 QR 하나, 남은 시간, 만료되면 새로 만들기, 휴대폰에서는 연결되어 있다는 안내와 "이 휴대폰 연결 끊기"(§4.1 기기 연결) |
+| `/{locale}/pair` | 기기 연결이 켜진 로컬 실행에만 있다(아니면 404). 휴대폰이 QR로 여는 확인 페이지 — `#코드`를 읽어 지우고, 연결하기를 누르면 claim 뒤 홈으로. 코드가 없으면 다시 찍으라는 안내(연결을 끊은 휴대폰도 여기로 온다) |
 
 `/characters*`·`/c/:id`·`/u/:id`는 **없다**. 리다이렉트도 두지 않았다 — 캐릭터 단위의 공개 주소가 가리킬 대상 자체가 사라졌기 때문이다.
 
@@ -1481,7 +1497,7 @@ DELETE /api/chats/:id/memory/facts/:fid 사실 지우기 → 204
   - 등장인물 카드의 **표정 그림**은 카드가 표정 그림을 가져온 멤버(`card.emotionImages`)에만 서는 조용한 셀렉트 하나다: 끄기 · 대화 옆 화면 · 메시지 안. 고르면 다른 카드 필드처럼 저장 버튼으로 커밋된다(`memberFields`가 모드를 본다) — 멤버 저장에 `emotionMode` 값으로 실려 서버가 카드의 RisuAI 확장(`viewScreen`/`inlayViewScreen`, `extensionsWithEmotionMode`)을 고친다. 그림 목록 자체는 고치지 않는다.
   - **여럿이 나누는 대화**(`GroupTurnsEditor`)는 로스터가 둘 이상일 때만 선다 — 멤버가 하나인 작품은 그룹 턴 전과 똑같으므로 고를 것이 없다. 분류(이야기/캐릭터 대화 같은) 문구는 없다. 순서 칩 둘(자연스럽게 `natural` / 로스터 순서 `list`, 고른 것의 한 줄 가이드), 한 차례 최대 인원 select(1–10, 기본 3), 그리고 비용 한 줄 — 화자마다 따로 생성하므로 독자의 ChatGPT 사용량이 그만큼 든다. 그 아래 멤버마다 **대화량**(en Talkativeness, ja 会話量): 일곱 칸 막대 0·17·33·50·67·83·100(RisuAI 컨트롤의 6분의 1 간격을 우리 0..100에 얹은 것 — 저장된 값은 가장 가까운 칸, 동률이면 낮은 칸으로 그린다)과 읽기 표시(0은 "지목할 때만", 나머지는 `n%`). 0은 독자가 다음 차례로 고르거나 지금 말하기를 누를 때만 말한다는 뜻이다(§6 `groupOrder` — 대화량 0은 언급에도 끼어들지 않는다). 순서·인원은 플롯 PATCH의 `groupSettings`, 대화량은 그 멤버 PATCH의 `talkativeness`로 저장 버튼 하나에 함께 간다 — 대화량은 멤버 카드와 같은 지문(`memberFields`)으로 바뀐 멤버만 보낸다.
   - 저장 버튼 하나가 플롯 필드와 로스터의 카드를 **함께** 커밋한다(멤버 PATCH들 먼저, 그다음 플롯 PATCH, 응답을 에디터 상태로 채택). 반면 사진 업로드·로스터의 추가/삭제/순서·발행 토글은 **자기 요청이 곧 결과인 것들**이라 각각 즉시 서버에 간다 — 크리에이터가 결과를 봐야 하는 동작이고, 옆에서 쓰던 카드를 서버 사본으로 덮어쓰지 않는다.
-- `(app)` 레이아웃은 세션과 무관하게 헤더·본문·모바일 탭바를 렌더한다(공개: `/`, `/p/:id`, `/creators/:id`, `/explore`). 대화(`/chats/:id`)에서는 탭바를 그리지 않고(컴포저가 하단을 차지한다), 모든 폭에서 헤더도 숨긴다 — 제타처럼 대화의 한 줄이 위쪽 막대 전부다(아래 대화 헤더). 헤더는 늘 같은 래퍼(`contents`, 대화에서는 `hidden`) 안에 있어 대화로 들고 날 때 다시 마운트되지 않는다. 세션 필수 페이지는 하위 `(app)/(member)` 그룹이고, 그 레이아웃이 없으면 `/login?next=<경로>`로 보낸다. `(auth)` 레이아웃은 로케일 스위처만 단다. 문서의 뷰포트는 `viewport-fit=cover`(루트 레이아웃의 `viewport`)라 `env(safe-area-inset-*)`가 iOS에서도 실제 값을 읽는다 — 홈 화면에 추가해 웹 앱으로 연 사이트는 그것 없이 아래 여백이 0이어서 탭바와 컴포저가 홈 인디케이터 위에 앉는다. 아래 여백은 컴포저·탭바·바텀 시트가, 가로로 누운 폰의 노치 쪽 좌우 여백은 흐름 안의 것은 `body`가, 고정된 것은 탭바·바텀 시트·라이트박스가 각자 띄운다. 터치 화면(`(pointer: coarse)`)에서는 입력 칸(`control-box`)이 호출한 쪽의 `text-xs`와 상관없이 16px이다 — 그보다 작은 글자 입력란에 포커스가 가면 iOS가 화면을 확대한다(iOS 26.5의 선택 칸은 14px에서도 확대하지 않는다).
+- `(app)` 레이아웃이 헤더·본문·모바일 탭바를 렌더한다. 로그인이 없어 헤더와 탭바는 늘 같다 — 세 묶음(탐색·대화·만들기), AI 연결, 알림, 로케일·테마(좁은 폭에서는 탭바의 메뉴 시트). 대화(`/chats/:id`)에서는 탭바를 그리지 않고(컴포저가 하단을 차지한다), 모든 폭에서 헤더도 숨긴다 — 제타처럼 대화의 한 줄이 위쪽 막대 전부다(아래 대화 헤더). 헤더는 늘 같은 래퍼(`contents`, 대화에서는 `hidden`) 안에 있어 대화로 들고 날 때 다시 마운트되지 않는다. 하위 `(app)/(member)` 그룹은 이름만 남았다(레이아웃이 없다). 연결하지 않은 휴대폰이 터널로 열면 페이지는 그려지지만 API가 모두 401이고, 화면은 `errors.unauthorized`("이 기기는 연결되어 있지 않습니다…")로 QR을 다시 찍으라고 말한다. `(auth)` 레이아웃은 `/pair`만 싣고, 로케일 스위처만 단다. 문서의 뷰포트는 `viewport-fit=cover`(루트 레이아웃의 `viewport`)라 `env(safe-area-inset-*)`가 iOS에서도 실제 값을 읽는다 — 홈 화면에 추가해 웹 앱으로 연 사이트는 그것 없이 아래 여백이 0이어서 탭바와 컴포저가 홈 인디케이터 위에 앉는다. 아래 여백은 컴포저·탭바·바텀 시트가, 가로로 누운 폰의 노치 쪽 좌우 여백은 흐름 안의 것은 `body`가, 고정된 것은 탭바·바텀 시트·라이트박스가 각자 띄운다. 터치 화면(`(pointer: coarse)`)에서는 입력 칸(`control-box`)이 호출한 쪽의 `text-xs`와 상관없이 16px이다 — 그보다 작은 글자 입력란에 포커스가 가면 iOS가 화면을 확대한다(iOS 26.5의 선택 칸은 14px에서도 확대하지 않는다).
 - **카드 스크립트 런타임**(`lib/scripts/*`, 해석기는 `@shizue/core/triggers`): 전송(입력 트리거→editinput→시작 트리거), 다른 생성(시작 트리거), pending 답장 마무리(editoutput→출력 트리거→script-commit; 턴 직후·로드·스와이프·다음 생성 전), 버튼(수동 트리거), 입력창의 슬래시 명령(`command`), 표시 트리거(`shown`). 런타임은 스크립트가 있는 멤버마다 하나다(`/scripts`의 `members`, 로스터 순 — 첫 것이 **리드**, 멤버가 하나인 작품의 그것). 런타임 묶음은 두 읽기(스크립트, 그리고 작품의 멤버 수를 정하는 플롯 공개 뷰)가 모두 끝난 뒤 이펙트에서 한 번 만든다 — 첫 로드 중에 만들었다가 플롯이 도착해 다시 만들면 진행 중인 Lua `editDisplay`를 놓아준다. 렌더 중에 만들지 않으므로 버리는 묶음이 늘 쓰인 그 묶음이고, 이펙트가 정리된 뒤 한 틱 늦게 돌려주므로 같은 입력으로 다시 마운트되면(React strict mode는 이펙트를 정리했다가 다시 돌린다) 새로 만들지 않고 그 묶음을 되찾는다. 스크립트의 일(`scriptsPending`)은 묶음이 선 뒤에 시작한다. 어느 순간이 누구의 것인지는 `lib/scripts/group.ts`가 정한다: 전송의 입력 트리거와 editinput은 **무대 위의 스크립트 멤버 전원**이 로스터 순으로, 앞 멤버가 남긴 글·변수·챗 위에서 돌고(`beginSend` → 멤버마다 `input`, 한 세션), 그다음 **화자**의 시작 트리거(`startSend`)가 돈다 — 차례의 화자는 그 사이, 입력 패스가 남긴 턴으로 고른다. 그 밖의 생성(재생성·`/reply`)의 시작 트리거, 출력 트리거와 editoutput(`finishPending`은 head의 화자로)은 화자의 것, 표시 트리거·Lua `editDisplay`·메시지의 버튼(`risu-trigger`·`risu-btn`·`{{button}}`)은 그 메시지를 말한 멤버의 것(행의 `data-shizue-member`와 `data-shizue-spoken`), 슬래시 명령·`/trigger`·`/multisend`는 리드의 것이다. 화자가 없는 것(나레이션·장면·내레이터 차례)과 화자가 없는 메시지는 작품의 것이라 리드의 스크립트가 돈다(`runtimeOf`) — 그런 행의 `data-shizue-member`는 표시 스크립트와 스타일시트를 위한 첫 멤버다(§8.1). 멤버는 첫 멤버도 다르지 않게 자기 스크립트만 쓴다 — 스크립트가 없는 화자의 답장에는 시작도 출력 패스도 없고(입력 패스가 남긴 것은 리드의 런타임이 시작 없이 재어 싣는다, `postProcess` 없음), 그 메시지에는 표시 트리거·`editDisplay`가 돌지 않고 버튼도 아무것도 부르지 않는다(태그 없는 표시 스크립트는 그대로 그린다). RisuAI가 시작·출력·요청 트리거를 말하는 캐릭터(`currentChar`)의 것으로 돌리고, 서버의 요청 트리거도 화자 카드의 것만 돌리는 것(§7.2)과 같다. 변수는 작품 하나의 이름공간이고, 페르소나 재작성과 챗의 로어는 한 챗의 런타임들이 나눠 든다(`shared`). 오버레이 패치는 멤버마다 그 멤버의 것이고(한 세션에 여럿이 쓰면 함께 실린다), 화면의 멤버 이름은 각 멤버의 `setName`을 따른다(도입부의 `firstMessage`와 배경은 리드의 것). 멤버가 둘 이상인 작품에서는 런타임이 하는 요청 — 생성 바디·`script-commit`·`script-llm`·`script-fetch` — 이 그 멤버의 `memberId`를 싣는다(서버가 그 멤버의 카드로 게이트하고, 그 스크립트가 덧붙인 캐릭터 메시지를 그 멤버의 것으로 적는다). 멤버가 하나인 작품은 `memberId`를 싣지 않고, 런타임 하나가 예전과 한 바이트도 다르지 않은 요청을 보낸다. 지원 범위는 코드의 `TRIGGER_CLASSIFICATION` 표가 정한다(브라우저 실행·서버 협력·기록만 남는 no-op·불가능 — 이미지 생성은 불가능하고, 요청 모드는 서버가 모델 호출 직전에 돌린다(§7.2 요청 트리거). `/scripts`가 주는 트리거에 요청 트리거도 있지만 브라우저는 돌리지 않는다). editinput/editoutput 정규식은 페이지가 끝낼 수 있는 워커에서 돈다(`editScriptRunner.ts`·`editScriptWorker.ts`·`editScriptJob.ts` — API의 프롬프트 스크립트 풀 `regexWorker.ts`를 브라우저로 옮긴 것). 치환 템플릿은 변수를 읽기만 하므로(RisuAI도 `runVar`를 끈 채 읽는다) 챗 변수·독자 전역 변수·호스트 데이터의 스냅숏을 들고 워커에서 읽힌다. 패스 한 번에 **1초** 기한이고, 워커가 떴다고 알린 뒤부터 잰다 — 느린 폰이 번들을 읽는 시간을 걸린 패턴으로 읽지 않게. 넘기면 워커를 끝내고 다음 시도는 새 워커에서 돈다. 워커는 스크립트마다 시작을 알리므로(`at` — 교차 출처 격리가 없는 페이지에는 SharedArrayBuffer가 없고, 멈추기 전에 보낸 메시지는 그래도 닿는다) 부모는 멈춘 스크립트를 안다. 그 스크립트는 로그를 한 번 남기고 이 페이지가 살아 있는 동안 빠지며(최대 1,000개), 패스는 그것 없이 다시 돈다(최대 3회). 그래도 끝나지 않거나 워커가 뜨지 않으면 글은 받은 그대로 간다 — 서버가 히스토리를 저장된 그대로 보내듯 — 고 로그를 남긴다. editoutput이면 답장이 모델이 쓴 그대로(Lua 리스너가 고친 것은 그대로) 커밋된다. 워커는 페이지에 하나다(패스는 챗의 잠금 뒤에서 하나씩 온다 — 서버 풀은 둘). 1초인 이유: 서버의 200ms는 아는 기계의 데워진 스레드 몫이고, 독자의 폰은 몇 배 느리며 여기서 멈춘 스크립트는 늦는 게 아니라 빠진 채 저장된다. 표시 스크립트 계획기와 같은 1초는 실제 카드의 패스(노트북에서 몇 ms)의 수백 배이고, 걸린 패턴은 답장을 한 번 1초쯤 늦출 뿐이며 페이지는 그동안 응답한다(헤드리스 측정: `(a+)+$`에 a 40개와 b — 커밋까지 약 1.2초, 메인 스레드 최대 공백 26ms). 컴파일한 패턴은 코어가 256개까지 다시 쓴다(`editScripts.ts`, 꺼낼 때마다 `lastIndex`를 0으로 — 새 패턴과 같게). RisuAI는 패스의 결과를 글로 캐시하지만(`processScriptCache`, 1,000개) 편집 스크립트는 같은 글을 두 번 만나지 않고 템플릿이 변수를 읽으므로 결과 캐시는 두지 않는다. 워커가 없는 곳(단위 테스트)에서는 이 스레드에서 돈다. 출력 트리거의 정규식 효과(`v2RegexTest`·`v2ExtractRegex` 등)는 여전히 메인 스레드라, 마무리 시도를 세션 저장소에 표시해 탭이 멈춘 뒤 다시 열면 그 답장을 원문 그대로 커밋한다(`finishMark` — 마지막 방어선). 스크립트의 질문은 `ScriptDialog` 시트로 묻는다. 고르기는 RisuAI의 `alertSelect`처럼 고른 버튼의 번호(0부터, 글)로 답하고(트리거의 `showAlert` select·`v2GetAlertSelect`, Lua `alertSelect`, `/buttons` 모두 그 값을 그대로 받는다), 버튼은 RisuAI처럼 보기와 머리글을 `||`로 이었다가 다시 나눈 것이다(core `risuSelect`). RisuAI의 고르기는 닫을 수 없지만 시트는 닫히고, 그때는 빈 글이다. Lua(`lib/scripts/lua/*`)는 RisuAI처럼 독자 브라우저에서 wasmoon 1.16.0으로 돈다 — `editRequest` 리스너만은 요청이 서버에서 만들어지므로 API의 자식 프로세스에서 돈다(§7.2 4단계, §4.1). 워커 프로그램과 RisuAI의 래퍼(`json.lua` 포함)는 `@shizue/core/lua`에 있어 브라우저와 서버가 같은 글을 돌린다 — 서버는 그 서버 변형(JS 프록시 없음, `LUA_LOCK`)이고, 프레임·CSP·감시자는 브라우저 쪽(`sandboxRuntime.ts`)에 남는다. 격리는 컴포넌트와 같은 모델이다 — 우리 문서 `/sandbox/lua.html`을 띄운 `sandbox="allow-scripts"` iframe(불투명 오리진, 라우트가 헤더로 주는 CSP `default-src 'none'`·`connect-src 'none'`·`'wasm-unsafe-eval'`·`frame-ancestors 'self'`, `'unsafe-eval'` 없음 — `srcdoc`이면 페이지 정책을 물려받는다) 안의 blob 워커이고, 워커는 부팅 뒤 네트워크 전역을 지운다. 프레임이 감시자다: 2.5초 무응답 핑, 활성 시간(대화창·모델 호출·유사도 검색·요청 대기 제외) 120초, CPU 시간(활성−sleep) 15초를 넘으면 워커를 끝내고 다음 호출이 새 워커를 띄운다. Lua 상태당 메모리 32MB·최대 12개 — 넘으면 가장 오래 쓰지 않은 것을 닫는다. 샌드박스는 독자의 것이다(`lua/readerSandbox.ts`, 모듈에 하나): 챗 페이지는 그것을 빌렸다가 돌려주므로 그 독자의 챗들이 탭 안에서 함께 쓰고, 상태는 `${카드 코드 키}:${모드}`로 따로다(호출의 `stateKey` — 엔진이 그 카드의 Lua 스크립트 전부를 해시한 `luaCodeKey`로 늘 단다). 그래서 챗을 옮겨도, 같은 카드를 들인 다른 작품으로 가도 그 코드의 상태는 코드가 같은 동안 남는다 — RisuAI의 상태가 모드마다 앱 전체에 하나라 코드가 같은 동안 챗을 넘어 남는 것과 같다. 일부러 다른 것 하나: RisuAI의 하나뿐인 상태는 그 사이에 다른 코드가 돌면 새로 만들어지므로 그룹에서는 화자가 바뀔 때마다 카드의 전역이 지워진다 — 여기서는 코드마다 상태를 따로 두어(12개 LRU 안에서) 그룹 멤버의 상태가 서로를 지우지 않는다. 해시가 겹친 두 코드는 한 상태를 나눠 쓰다 번갈아 새로 만들어지는데, 그것이 RisuAI 자신의 규칙이다. 다른 독자로 세션이 바뀌거나 로그아웃하면 끝낸다(`authClient.ts`). 빌린 것을 돌려줄 때는 끝내지 않는다 — 같은 샌드박스에 다른 임대가 돌고 있을 수 있다: 모듈·프리셋을 바꾸면 페이지가 새 런타임 묶음을 자기 임대로 먼저 만들고 바꿀 묶음은 한 틱 뒤에 돌려주며, 다음 챗의 페이지가 이미 빌렸을 수도 있다. 대신 돌려준 임대의 도는 호출을 놓아준다: 그 호출은 사라진 스크립트에게 곧바로 `killed`(`disposed`)로 답하고, 그것이 기다리거나 아직 페이지에 묻는 것 — 답할 사람이 없는 대화창, 모델 호출 — 은 실패하므로 워커 안에서 스스로 끝나 그 상태의 줄이 움직인다. 그래서 낡은 임대가 새 묶음의 호출을 끊지 못하고, 상태도 남는다(아무것도 묻지 않고 도는 호출은 늘 그렇듯 감시자의 몫이다). 새로고침하면 사라진다(RisuAI의 상태도 메모리에 있다). 각 엔진은 자기 멤버의 카드 문맥 — 이름·아바타·로어(`loadLoreBooks`는 그 카드의 로어 설정으로)·오버레이 조각 — 을 읽는다. wasmoon과 런타임은 Lua가 있는 플롯의 첫 호출 때만 받는다. triggerlua(onStart/onInput/onOutput/수동 이름), editInput/editOutput(변수 쓰기는 턴 델타, 챗 쓰기는 아래 스크립트의 챗 편집), editDisplay(비동기, 화면 전용 — 카드 배경도 §8.1 — 쓰기는 버린다), onButtonClick(head에 커밋), alertConfirm은 ScriptDialog 예/아니요. 지원 범위는 `LUA_CLASSIFICATION` 표가 정한다(이미지는 불가능, `listen:editRequest`는 서버). Lua `request`는 RisuAI 웹처럼 서버가 대신 GET한다(`script-fetch`, §10) — 호출은 `LLM`처럼 샌드박스→프레임→페이지로 중계되고, 워커(RisuAI처럼 low-level 키)와 페이지 모두 lowLevelAccess를 확인한다. 페이지는 URL을 미리 거르지 않고(서버가 RisuAI처럼 세어야 하므로) 문자열이 아니면 `null`로 보낸다. 스크립트는 RisuAI처럼 `{status, data}`의 JSON 문자열을 받는다(래퍼가 감싸지 않으므로 `json.decode`는 스크립트가 한다). 페이지가 답을 못 받으면 `{400, 'internal error'}`다. 캐릭터를 고쳐 쓰는 Lua — `setName`·`setCharacterFirstMessage`·`setBackgroundEmbedding` — 는 RisuAI처럼 안전 키 뒤에서 독자의 오버레이(§5 `plot_reader_overlays`)로 가고, `upsertLocalLoreBook`은 RisuAI처럼 캐릭터가 아니라 챗의 로어(§5 `local_lore`)로 간다 — 그 목록 안에서만 같은 이름을 바꾸고, `getLoreBooks`는 챗의 로어를 먼저 찾는다. `getName`은 RisuAI처럼 `char.name`(오버레이가 바꾼 이름, 카드에 닉네임이 있어도 이름)이고 `cbs()`의 `{{char}}`는 닉네임이 먼저다. `cbs()`·`getPersonaDescription`·`getLoreBooks`·`loadLoreBooks`가 글을 읽는 것은 RisuAI의 `risuChatParser(text, {chara})` — 트리거 글을 읽는 것과 같은 코어 평가기(`evaluateScriptCbs`)를 그 호출의 상태 위에서(`@shizue/core`의 `lua/cbsEngine.ts`): 변수는 스크립트가 지금까지 남긴 대로, 챗은 스크립트가 가진 대로 인덱스 -1에서, 시계·`{{pick}}` 시드·그림 목록은 런의 `data`에서, `{{trigger_id}}`는 수동 런의 `risu-id`(그 밖에서는 `null`)다. RisuAI의 `cbs`는 곧바로 답하고 카드는 그것을 `async` 코루틴 밖의 평범한 함수에서 부르므로(Magical Girl Life의 `tostring(cbs('{{trigger_id}}') or '')`) 페이지로 물으러 갈 수 없다 — 평가기가 워커 안에 있다: 코어 빌드가 esbuild로 그것을 식 하나로 묶어(`scripts/build-lua-cbs.mjs`, `@shizue/core/lua-cbs`, 압축 약 43KB) `luaWorkerSource`가 런타임 앞에 넣는다. 우리 코드이고 문자열에서 코드를 만들지 않으므로 프레임의 CSP와 서버의 `--disallow-code-generation-from-strings`가 그대로 선다. 한 번의 평가가 1,000,000자를 넘으면 글을 그대로 돌려주고 기록한다. 이름은 한 줄 1–100자로 다듬어 두고, 아니면 기록하고 버린다. `setCharacterFirstMessage`·`setBackgroundEmbedding`은 문자열이 아니면 `false`, 아니면 `true`. `getCharacterFirstMessage`(와 `getCharacterLastMessage`의 대체값)는 스크립트가 둔 첫 메시지, 없으면 브랜치가 열린 인사다(RisuAI는 늘 카드의 첫 메시지). `getBackgroundEmbedding`은 오버레이의 것, 없으면 카드의 `backgroundHTML` 통째다. `loadLoreBooks`·`loadLoreBooksMain(id, reserve)`는 RisuAI처럼 low-level 키 뒤에서 페이지가 `/test_lorebook`처럼 활성화한다(`activeLore`) — 스크립트 멤버의 로어북 뒤에 챗의 로어(이 호출의 `upsertLocalLoreBook`을 얹은 것)를 두고 — RisuAI의 `loadLoreBookV3Prompt`가 `globalLore.concat(localLore)`이다 — 스크립트가 가진 챗을 훑는다. 나머지는 RisuAI 그대로 워커에서: 항목마다 `cbs()`로 읽고 다듬어 빈 것은 건너뛰고, 네 글자 한 토큰으로 세어 RisuAI의 `maxContext`(여기서는 챗의 컨텍스트 예산) 빼기 `reserve`를 넘으면 멈추고, 음수면 `[]`, 래퍼처럼 `reserve`가 없으면 자르지 않는다. 답은 `{data, role}`(`assistant`는 `char`). 플롯 로어와 다른 멤버의 로어는 들어가지 않는다. `getCharacterImage`는 RisuAI의 인레이 토큰이 그려지는 마크업 그대로 `<div class="risu-inlay-image"><img src="멤버 아바타"></div>`를 준다 — 메시지나 표시에 쓰면 같은 오리진 그림이라 새니타이저를 지나 그려지고, 모델에게는 글로 간다(RisuAI는 인레이를 프롬프트에서 뺀다). 아바타가 없으면 ''. `getPersonaImage`도 같은 마크업으로 챗 페르소나의 그림(`/api/personas/:id/avatar`)을 주고, 그림이 없으면 ''(RisuAI가 그림 없는 페르소나에 답하는 값)이다. 멤버와 달리 페르소나는 챗 도중에 바뀔 수 있어 엔진은 그 주소를 호출이 시작될 때 페이지에 묻는다(`personaAvatarUrl`). 서버의 `editRequest`는 `ScriptView.personaAvatarUrl`에서 같은 마크업을 만든다. `LLM()`을 끝없이 부르는 스크립트는 횟수 제한이 없어 다시 불러올 때까지 챗을 붙잡는다. 트리거의 `runLLM`·`v2RunLLM`도 같은 `script-llm`을 부른다 — RisuAI처럼 lowLevelAccess가 있어야 하고, 글이 ChatML(`<|im_start|>…`)이면 턴으로 나눠 보내며 아니면 유저 턴 하나다. 실패는 RisuAI처럼 `runLLM`이면 `Error: 이유`, `v2RunLLM`이면 `null`이다. `v2RunLLM`이 서브 모델(`submodel`)을 고르면 챗의 보조 모델로 가고, Lua `axLLM`은 모든 모드가 보조 모델로, `LLM`·`simpleLLM`·`runLLM`은 챗의 모델로 간다(`script-llm`의 `model`, §10). 표시 트리거는 기다릴 수 없으므로 모델을 부르지 않고 실패로 친다. `runAxLLM`은 RisuAI에서도 아무것도 하지 않는다. 트리거의 `checkSimilarity`·`v2CheckSimilarity`와 Lua `similarity`는 RisuAI의 로컬 임베더처럼 독자 브라우저에서 돈다(셋 다 lowLevelAccess, Lua는 RisuAI처럼 low-level 키). 모델은 RisuAI의 `hypaModel` 설정처럼 독자가 고른다(`lib/scripts/embeddingModels.ts`). RisuAI `localModels` 가운데 wasm으로 도는 여섯을 RisuAI 이름 그대로 둔다 — `multiMiniLM`(`Xenova/paraphrase-multilingual-MiniLM-L12-v2`, 토크나이저까지 약 135MB), `MiniLM`(`Xenova/all-MiniLM-L6-v2`, 약 24MB), `bgeSmallEn`(`Xenova/bge-small-en-v1.5`, 약 35MB), `nomic`(`nomic-ai/nomic-embed-text-v1.5`, 약 138MB, 768차원), 그리고 **무거운** 둘 `bgem3`(`Xenova/bge-m3`)·`bgeM3Ko`(`HyperBlaze/BGE-m3-ko`, 각 약 587MB, 1024차원, 올리면 탭 메모리 1GB 넘게) — 선택지에 「무거움」이 붙고 설명이 내려받는 양과 메모리를 말한다. 워커는 RisuAI처럼 모든 모델을 mean pooling으로 돌린다: bge-m3 계열의 본래 dense 벡터는 [CLS]의 것이지만(서버 임베더는 그렇게 돈다, §7.3) 여기선 RisuAI와 같은 벡터가 RisuAI와 같은 순위를 낸다. 기본값은 RisuAI의 `MiniLM`이 아니라 `multiMiniLM`이다 — `MiniLM`은 한글을 자모와 `[UNK]`로, 한자 상당수를 `[UNK]`로 쪼개 정답을 1위에 둔 것이 한국어 시험 6건 중 2건·일본어 6건 중 1건이었고, `multiMiniLM`은 각각 5건이었다. API 키가 필요한 모델(OpenAI·Voyage·사용자 URL)은 독자가 키를 둘 곳이 없어서, `…GPU` 변형은 같은 가중치를 WebGPU로 돌리는데 워커는 wasm만 써서 뺐다. 선택은 테마·커스텀 UI 표시처럼 이 브라우저의 localStorage(`shizue.embeddingModel`)에 둔다 — RisuAI도 설치마다 두고, 고르는 대상인 가중치(Cache Storage)와 벡터(IndexedDB)도 이 브라우저의 것이며, 서버에는 독자 설정을 둘 곳이 없다. 값이 없거나 읽을 수 없거나 더는 제공하지 않는 이름이면 기본값이다. 설정은 챗 설정 패널의 한 구획이고, 플롯의 스크립트가 lowLevelAccess일 때만 보인다(그렇지 않으면 검색할 스크립트가 없다). 모델마다 내려받기 크기와 한 줄 설명을 함께 보이며, 이 브라우저의 모든 챗에 적용된다. 검색은 시작할 때의 선택으로 끝까지 돌고, 다음 검색부터 새 선택을 쓴다 — 새로고침은 필요 없다. 고른 모델을 transformers.js 3.8.1(RisuAI와 같은 버전)로 `dtype: 'q8'`·`wasm`·평균 풀링·정규화로 돌리고, Lua 샌드박스 밖에서 페이지가 띄우는 전용 워커(`lib/scripts/embeddingWorker.ts`)가 실행한다 — Lua의 호출은 `LLM`처럼 샌드박스→프레임→페이지로 중계된다. 배치마다 모델을 지정하고, 워커는 한 번에 한 모델만 들고 있어 다른 모델이 오면 RisuAI처럼 이전 파이프라인을 `dispose`하고 새로 만든다. 배치는 차례로 처리하므로 전환이 진행 중인 배치를 끊지 않는다. 워커와 라이브러리는 첫 검색 때 동적 import로만 받고(별도 청크), 모델은 Hugging Face 허브에서 받아 브라우저 Cache Storage에 둔다. onnxruntime은 우리 빌드의 것이다 — transformers.js 기본값은 그 글루 코드를 jsDelivr에서 import하는데, 이 워커는 같은 오리진이라 CDN 코드가 독자로서 API를 부를 수 있게 된다. 그래서 `wasmPaths`를 비워 청크에 묶인 글루와 빌드가 함께 싣는 wasm을 쓴다. 순서는 RisuAI `HypaProcesser`를 그대로 옮겼다(`lib/scripts/similarity.ts`): `§`로 나눈 글 중 캐시에 있는 것은 나온 횟수만큼 캐시에서 꺼내고, 나머지는 중복까지 50개씩 묶어 임베딩해 앞에 두며, 질의는 따로 임베딩해 내적으로 점수를 매기고 RisuAI의 비교 함수(`a > b ? -1 : 0`)를 그대로 네이티브 정렬에 넘긴다. 트리거는 결과를 `§`로 이어 쓰고(v1은 `inputVar` 이름 그대로, v2는 `outputVar`를 CBS로 푼 이름에), Lua는 배열을 받는다(RisuAI와 같은 wasmoon 프록시라 1부터 인덱싱). 벡터 캐시는 RisuAI처럼 독자 브라우저의 IndexedDB(`shizue-similarity`)에 영구히 둔다. 키는 RisuAI의 키 `텍스트|모델`(모델은 고른 모델의 RisuAI 이름, 예: `multiMiniLM`)의 SHA-256 16진수(`crypto.subtle`)라 저장된 키로 챗 글을 읽을 수 없고, 모델이 키에 들어 있어 다른 임베딩 모델의 벡터와 섞이지 않는다. 값은 Float32Array다. 읽고 쓰는 시점도 RisuAI `addText`와 같다 — 무엇이든 임베딩하기 전에 모든 텍스트를 찾아보고, 새 벡터는 모든 배치가 끝난 뒤 질의를 임베딩하기 전에 쓴다(중복이면 마지막 것). 그래서 다시 불러온 뒤에도 RisuAI가 캐시에서 꺼내는 텍스트를 똑같이 꺼내고, 배치와 순서가 RisuAI와 같다. 페이지는 모델마다 따로, 읽거나 쓴 벡터를 메모리에도 두고 저장소에는 나머지만 묻는다. RisuAI처럼 지우지 않는다(텍스트당 약 1.5KB, `nomic`은 약 3KB) — 지운 벡터는 다른 배치에서 다시 임베딩되어 순서를 바꿀 수 있다. IndexedDB를 쓸 수 없거나(사생활 보호 모드·저장소 차단·`crypto.subtle`이 없는 비보안 오리진) 읽기·쓰기가 실패하면 조용히 메모리만으로, 페이지가 살아 있는 동안만 캐시한다. 임베더가 실패하면 RisuAI처럼 트리거 런은 그 효과에서 멈추고(던짐), Lua에는 오류로 올라가 `pcall`로 잡힌다. 기다릴 수 없는 런이나 답할 곳이 없는 런도 실패다. Lua 검색은 텍스트 10,000개·100만 자 상한. 모델의 첫 검색은 수십~백수십 MB를 받으므로, 이 페이지에서 고른 모델이 아직 답한 적이 없으면(처음이거나 다른 모델로 바꾼 뒤) 그동안 입력창 위 상태 줄에 준비 중 안내(`scriptSimilarityPreparing`)를 띄운다.
   - **스크립트의 챗 편집**: 시작·입력·출력·수동 런과 버튼이 챗에 한 일(트리거의 `impersonate`·`cutchat`·`modifychat`, Lua의 `addChat`·`insertChat`·`removeChat`·`cutChat`·`setChat`·`setChatRole`·`setFullChat`, 어느 메시지든)은 RisuAI처럼 남는다. 런의 최종 챗을 받은 챗과 대어 `scriptChatOf`(core)가 `ScriptChat`으로 만들고, 생성 POST나 script-commit의 `chat`으로 실린다(§10). 저장된 메시지는 id를 지니고 다니고, 브랜치 순서를 거스른 것은 새 메시지로 간다. 서버 상한을 넘는 편집은 기록하고 버린다(챗은 그대로 간다). head의 글만 바뀐 것은 예전처럼 `content`다. 전송은 입력 런의 챗 뒤에 유저 턴(`NEW_TURN`)을 넣고 시작 런을 돌린다 — 그 자리가 `{turn: true}`이고, 시작 런이 턴을 잘라 내면 턴 없이 생성하며 그 턴의 매크로는 런이 남긴 값에서 뺀다. 델타는 서버가 쥘 브랜치에 대해 잰다(`resultFold`): 전송·커밋은 챗이 끝나는 메시지의 것, 다른 생성의 `startDelta`는 편집 뒤 브랜치 끝에 대한 것. 생성 전에 head를 미리 커밋하던 것은 없어졌다 — 편집은 생성 요청과 함께 간다. **`stop`으로 멈춘 시작 런**은 생성만 멈춘다 — RisuAI의 `sendChat`은 시작 트리거가 남긴 챗(변수까지)을 저장한 뒤에 stop을 읽는다. 전송이면 턴이 저장된다: RisuAI의 `sendMain`이 턴을 챗에 넣고 입력창을 비운 뒤 `sendChat`이 돌므로, 턴은 답 없이 head로 남는다. 페이지는 전송과 같은 바디(턴의 자리·델타·첨부·`source`·directions·overlay·노트)에 `stopped: true`를 붙여 `POST /messages`로 보내고(§7.2 7단계 멈춘 전송), 입력창은 비며, 상태 줄이 답장이 멈췄다고 말한다(`scriptStopped`). 저장이 거절되면 다른 전송처럼 head로 판정해 글을 입력창에 돌려준다. 독자는 다른 유저 head처럼 재생성으로 답을 청한다(이어쓰기는 유저 head에 나오지 않는다). 시작 런이 턴을 잘라 냈으면 턴 없이 런이 남긴 챗만 저장된다. 다른 생성의 멈춘 런은 head에 커밋된다 — 챗을 바꿨든 변수·overlay·노트만 썼든(RisuAI가 그 챗을 저장하듯). 아무것도 쓰지 않은 런은 아무것도 남기지 않는다. 멈춘 재생성은 교체하려던 답장을 뺀 챗을 커밋한다 — RisuAI의 리롤은 `sendChat` 전에 답장을 챗에서 빼므로, 멈추면 챗은 그 답장이 답하던 턴에서 끝난다(답장은 트리에 남는다). 이 둘의 상태 줄도 같은 안내다. 입력 트리거의 stop은 RisuAI처럼 전송을 막지 않는다(`sendMain`은 입력 런의 stop을 읽지 않는다). 출력 트리거가 유저 메시지를 붙이고 `sendAIprompt`로 다음 답을 청하면 그 턴에 대한 답(재생성 경로)을 받는다 — RisuAI가 챗이 끝나는 곳에서 생성하듯. 스크립트가 붙인 assistant 메시지는 글 그대로 저장한다(화자 접두사 없이 — 스크립트가 다시 읽는 글이 쓴 그대로여야 하고 HTML 블록이 줄마다 접두사로 깨지면 안 된다). 대신 서버가 그 행을 `source='script'`로 적고(§5), 화면과 프롬프트는 그 메시지의 이름 없는 줄을 내레이터가 아니라 스크립트 멤버의 것으로 읽는다(§6 발화 프로토콜) — RisuAI가 그것을 캐릭터의 말풍선으로 그리듯. 붙인 유저 메시지는 `source='user'`다. Lua 편집 리스너가 챗에 한 일은 RisuAI가 남기는 만큼 남는다. RisuAI의 리스너는 저장된 챗을 고친다(`runLuaEditTrigger`는 글만 돌려주고, 챗은 `getCurrentChat()`이다). editOutput 리스너가 한 일은 그대로 남는다 — 답장의 자리(인덱스)가 리스너 뒤에 다듬어진 글로 덮이고(`message[msgIndex].data`, 리스너가 그 자리에 무엇을 했든), 출력 트리거가 그 챗을 읽고, 런의 결과와 함께 커밋의 `chat`으로 간다(답장이 이미 챗에 있는 RisuAI 스트리밍 경로의 순서. RisuAI는 스트리밍 중 조각마다 리스너를 다시 돌리지만 여기서는 한 번이다). editInput 리스너가 한 일은 사라진다 — RisuAI의 `sendMain`이 입력 런의 사본(트리거가 하나라도 있는 카드면 늘 돌아온다)에 턴을 붙여 저장된 챗 자리에 넣기 때문이다. 입력 런이 일찍 끝나 아무것도 돌려주지 않았을 때만 턴이 저장된 챗에 붙으므로 리스너가 한 일이 남는다(RisuAI에서는 그때도 `cutChat`·`setFullChat`처럼 배열을 갈아 끼운 것은 사라지지만 여기서는 모두 남는다). editDisplay 리스너는 여전히 아무것도 쓰지 않는다. editRequest 리스너가 한 일은 서버가 답장과 함께 남기고(§7.2 4단계), 그런 리스너가 있는 카드면 페이지가 생성 뒤 `/scripts`를 다시 읽어 독자의 오버레이와 챗의 로어를 런타임에 넘긴다(`runtime.adopt`) — 출력 런과 화면이 리스너가 바꾼 이름·배경을 읽도록.
   - **슬래시 명령**(`command`·`v2Command` 효과, core `triggers/command.ts`): RisuAI의 `processMultiCommand`를 그대로 옮겼다 — 따옴표 밖의 `|`로 나누고(따옴표는 글에 남는다), 낱말은 공백 하나로 나누며 `=`가 든 낱말은 첫 두 조각의 이름 인자, `{{pipe}}`·`{{slot}}`은 `String.replace`로 한 번씩(`$` 패턴도 그대로), 빈 인자는 앞 결과, 인자와 이름 인자에 CBS, 모르는 명령과 `/setinput`은 `false`로 줄을 끝낸다. `/echo`는 앞 결과를 그대로 넘기고, `/cut N`은 `splice`가 돌려준 것, 곧 자른 한 메시지만 남기며, `/del N`은 마지막 N개를 남기고, `/getvar`는 없는 변수에서 던진다(RisuAI 코드가 도움말과 다르면 코드를 따른다). 명령은 RisuAI처럼 **저장된 챗**에 한다 — 트리거 런은 자기 사본으로 돌고 끝에 그것을 써 넣으므로(`setCurrentChat(triggerResult.chat)`) 시작·출력·수동 런에서는 명령의 챗 편집과 `/setvar`·`/addvar`가 사라진다. 입력 런은 사본의 메시지만 되돌려 쓰고 변수는 스스로 바꾼 것이 있을 때만 써서(`varChanged`), 스스로 변수를 바꾸지 않은 입력 런에서는 명령이 쓴 변수가 남는다. 일찍 끝난 런(던짐·return)은 아무것도 써 넣지 않아 저장된 챗이 통째로 남는다. 런이 변수를 바꾸면 RisuAI의 `setVar`가 저장된 챗에 런의 `scriptstate`를 넘겨 그 전에 명령이 쓴 값은 사라지고, 그사이 트리거의 CBS는 명령이 쓴 값을 읽는다(인터프리터의 `Stored`). 트리거 CBS의 챗 함수도 RisuAI처럼 런의 사본이 아니라 저장된 챗을 읽는다(`getCurrentChat()`) — `{{lastmessage}}`·`{{lastmessageid}}`·`{{previouscharchat}}`·`{{previoususerchat}}`·`{{previouschatlog}}`·`{{history}}`·`{{userhistory}}`·`{{charhistory}}`·`{{messageunixtimearray}}`는 런이 `impersonate`·`cutchat`으로 사본을 바꿔도 런 전의 챗(명령이 한 일은 들어간)을 답한다. 트리거의 글은 어느 메시지의 것도 아니어서 `{{chat_index}}`는 -1, `{{messagetime}}`·`{{messagedate}}`·`{{messageidleduration}}`는 `[Cannot get time]`, `{{previoususerchat}}`은 빈 글이다(RisuAI의 `chatID` -1). `/trigger 이름`은 저장된 챗의 사본으로 수동 트리거를 돌리고 그 결과가 저장된 챗이 된다. `/input`·`/echo`·`/popup`·`/buttons`(고른 라벨의 번호, 0부터)·`/test_lorebook`·`/?`(카탈로그의 명령 목록)는 `ScriptDialog`다. `/speak`는 아무것도 하지 않는다 — RisuAI는 임포트한 카드의 TTS 모드를 `normal`(목소리 모델이 있으면 `vits`)로 두어 webspeech가 될 수 없다. `/test_lorebook`은 저장된 챗에 프롬프트와 같은 활성화(`@shizue/core/lorebook`, 처음 쓸 때 받는다)를 카드의 로어북 설정으로 돌린다 — 예산이 없으면 RisuAI의 실제 기본 8000토큰(§6 파싱·정규화), 토큰은 네 글자 추정, 매치 로그는 빈 배열. `/multisend`는 런 안에서 생성하지 않는다(시작·출력 런에서는 RisuAI의 `sendChat`도 `doingChat`에 막히고, 입력·수동 런의 생성은 런의 사본에 덮인다). 변수의 기본값은 폴드에 들어 있어 아직 쓴 적 없는 기본값 변수를 `/getvar`·`/addvar`가 읽는다(RisuAI는 던지거나 `NaN`).
@@ -1585,7 +1601,7 @@ DELETE /api/chats/:id/memory/facts/:fid 사실 지우기 → 204
 - **미구현으로 알려진 것**: 탐색 숨김 태그의 서버 저장(현재 localStorage).
 - 배경 작업(요약·요약 임베딩)은 전부 응답 경로 밖이고 자기 실패를 삼킨다. 대화 응답 지연에 영향을 주면 안 된다. 소유자에게 쓸 모델이 없으면(ChatGPT 연결 없음) 조용히 전부 꺼진다.
 - **로그**(`log.ts`): 오류 추적은 **구조화 로그뿐이다** — Sentry 같은 외부 서비스는 쓰지 않는다(소유자 결정 2026-10-16). `LOG_FORMAT=text`(기본)는 콘솔을 지금까지 그대로 둔다 — 개발 터미널에서 `[cache]` 줄을 읽는 그 모양이고, 접근 로그는 없다. `json`(운영)은 기동 때 한 번 콘솔을 감싸, 코드와 라이브러리의 `console.log/info/warn/error/debug` 호출 하나하나를 JSON 한 줄로 낸다: `{time, level, msg, component?, requestId?, err?}`. `msg`는 콘솔이 찍었을 인자 그대로(`util.format`)에서 첫 Error를 뺀 것, 앞의 `[태그]`는 `component`, 그 Error는 `err: {name, message, stack, code?}`. `log`는 `info`이고, 레벨마다 원래 스트림(stdout/stderr)으로 간다. `requestId`는 그 줄이 나온 요청의 id(§10)로, AsyncLocalStorage가 요청의 await를 따라 — 그 턴이 시작한 배경 작업까지 — 나른다. json은 요청이 끝날 때마다 접근 로그 한 줄도 낸다: `component: 'http'`, method, **라우트 패턴**(Hono `routePath` — `/api/chats/:id`, 아무 라우트도 답하지 않았으면 `/api/*`; id가 든 실제 경로나 쿼리는 쓰지 않는다), status, durationMs, requestId, 로그인했으면 userId. 스트림은 응답이 시작될 때 끝난 것으로 치므로 그 시간은 첫 바이트까지다. `/api/health`·`/api/ready`는 적지 않는다. 잡히지 않은 라우트 오류(`errors.ts`)는 메서드·라우트 패턴·요청 id를 달고 남는다. 임베더를 한동안 쓸 수 없으면(`EmbedderUnavailable` — 로드가 1분 안에 실패한 모델, 닿지 않는 공유 임베더, 그 리스너의 503, §7.3) 폴백하는 쪽(기억·사실·벡터·탐색·검색 벡터·표정)은 자기 말 뒤에 그 까닭만 붙인 한 줄을 남기고 스택은 남기지 않는다(`embedErrorForLog`) — 그동안은 턴마다, 한 턴에도 여러 번 같은 것을 만나고, 원인은 임베더가 그렇게 될 때 한 번 말했기 때문이다. 다른 실패는 Error째(json이면 `err`에 스택까지) 남는다. **요청·응답 바디, 쿠키, 인증 헤더, 프롬프트, 카드 글은 어떤 줄에도 적지 않는다.** 독자의 ID 토큰도 그렇다: jose가 토큰의 클레임을 거절하며 던지는 오류(`JWTClaimValidationFailed`·`JWTExpired`)는 디코드한 토큰 — 독자의 이메일까지 — 을 `payload`와 `cause`에 들고 있어, text 형식이 오류를 통째로 찍으면 그것이 줄에 오른다. 그래서 검증하는 자리(`@shizue/llm` `chatgptAuth.ts`, 로그인과 토큰 갱신 둘 다)가 같은 종류·클레임·이유·코드·스택의 오류를 빈 `payload`로 다시 만들어 넘긴다 — 그 실패를 라우트 오류(`errors.ts`)로 적든 배경 작업이 적든 토큰은 없다. 로그인 콜백의 실패 줄은 거기에 더해 오류의 이름과 메시지만 적는다(`chatgptAccounts.ts`).
-- **헬스**(`health.ts`, §10): `/api/health`는 프로세스가 답하는지만, `/api/ready`는 이 인스턴스로 독자를 보내도 되는지 — 종료가 시작됐으면(`deps.draining`) 503 `draining`, `select 1`이 실패하거나 2초 안에 답하지 않으면 503 `db_unavailable`. 둘 다 세션 미들웨어 앞이라 세션 행을 읽지도 쓰지도 않는다.
+- **헬스**(`health.ts`, §10): `/api/health`는 프로세스가 답하는지만, `/api/ready`는 이 인스턴스로 독자를 보내도 되는지 — 종료가 시작됐으면(`deps.draining`) 503 `draining`, `select 1`이 실패하거나 2초 안에 답하지 않으면 503 `db_unavailable`. 둘 다 요청 게이트 앞이라 소유자 행도 세션 행도 읽지 않는다.
 - **메트릭**(`metrics.ts`, `@prometheus-io/client` — 사용 중단된 `prom-client`의 후속): `METRICS_PORT`를 줄 때만 `METRICS_HOST`(기본 127.0.0.1)에 **따로 듣는 리스너**가 `GET /metrics`로 Prometheus 텍스트를 낸다. `/api` 아래에는 두지 않는다 — Next rewrite가 `/api/*`를 공개하기 때문이다. 비우면 아무것도 듣지 않아서, 자기 API를 띄우는 워크트리와 브라우저 스위트가 포트를 다투지 않는다. 라벨은 전부 낮은 카디널리티다(라우트 패턴, 종류, 상태, 코드, 모델 — id는 없다): 프로세스 기본값(이벤트 루프 지연·힙·RSS·GC, 리스너가 뜰 때만 모은다), `http_requests_total{method,route,status}`·`http_request_duration_seconds{method,route}`(프로브 빼고), `generation_streams_active`, `generation_outcomes_total{result,code}`(result는 done·stopped·timeout·error, code는 오류의 코드 — 공급자 코드는 공급자 것이라 프로세스가 본 서로 다른 코드 32개를 넘으면 `other`), `prompt_input_tokens_total{site}`·`prompt_cached_input_tokens_total{site}`(`cacheHealth.ts`가 받는 usage, 대화·보조 호출), `background_tasks_started_total{kind}`·`background_tasks_finished_total{kind,outcome}`·`background_tasks_in_flight{kind}`(작업은 자기 실패를 로그로 남기고 삼킨 뒤 넘어오므로 그 실패는 `ok`로 끝난다 — 실패는 json 로그의 `component`별 error 줄로 센다), `jobs_queue{kind,status}`(스크레이프마다 묶은 count 한 번; `done`은 지우지 않고 쌓여 세면 테이블을 훑으므로 pending·failed만), `embedder_models_loaded`·`embedder_embed_duration_seconds{model}`·`embedder_embed_failures_total{model,reason}`(timeout·unavailable·error — unavailable은 `EmbedderUnavailable`(위 로그); `EMBEDDER_URL`이면 클라이언트가 왕복과 줄서기째 재고, 모델은 다른 프로세스에 있으니 `embedder_models_loaded`는 0), `lua_sandbox_enabled`(기동 프로브가 Lua 자식을 네트워크에서 떼어 냈으면 1). `embedder:serve`도 같은 `METRICS_PORT`·`METRICS_HOST`로 자기 리스너를 연다(`startEmbedderMetricsServer`) — 거기서는 따로 둔 레지스트리에서 임베더의 셋과 프로세스 기본값만 낸다. API의 것은 라우트도 DB도 없는 프로세스에서 0일 뿐이고, `lua_sandbox_enabled 0`은 사실이 아니기 때문이다. 그 프로세스의 `embedder_models_loaded`는 자기가 쥔 모델 수, `embedder_embed_duration_seconds`는 리스너가 스레드에 넘긴 조각 하나(질의는 통째로)의 시간이다. API와 한 호스트에 두면 포트를 따로 준다.
 - **종료 순서**(`index.ts`의 `shutdown(code)`, 한 번만 돈다 — 나중 요청은 종료 코드만 올린다): ① `deps.draining` → `/api/ready` 503 ② `server.close()`(메트릭 리스너도) ③ 잡 워커의 클레임 중지 ④ 열린 생성 스트림을 멈춘 답장으로 저장(`stopGenerations`, 최대 5초, §7.2) ⑤ 배경 작업(`deps.onBackgroundTask` — 기억·표정·벡터·별칭·검색, 방금 멈춘 답장이 시작한 것까지) 대기, 최대 `SHUTDOWN_BACKGROUND_MS`(기본 20초) — 기한에 아직 돌던 수를 종류별로 로그에 남기고 두고 간다 ⑥ 임베더 닫기(임베딩할 수 있는 모든 일 뒤 — `EMBEDDER_PORT`로 다른 인스턴스에 내주던 리스너를 먼저 닫고, 넘겨 둔 조각이 끝나기를 기다린다) ⑦ 종료. 호스트의 유예는 5초 + `SHUTDOWN_BACKGROUND_MS`보다 길어야 한다. 503으로 돌린 바로 뒤에 연결을 닫으므로, 밸런서가 그것을 알아챌 틈이 필요하면 그 지연은 배포 쪽(preStop 등)에 둔다. SIGINT/SIGTERM은 0으로, **잡히지 않은 예외**(`uncaughtException`)는 로그를 남기고 같은 종료를 밟아 1로 끝난다. 신호는 `once`라 두 번째 Ctrl-C는 Node 기본대로 바로 끝낸다.
 - **`unhandledRejection` 방침**(`lifecycle.ts`): 로그를 남기고 **프로세스는 계속 돈다** — Node 기본(종료)에서 일부러 벗어난 것이다. 이 프로세스가 연 독자들의 스트림이 전부 여기 있고, 어느 배경 경로에서 아무도 기다리지 않은 promise 하나가 그것을 전부 끊어서는 안 된다. 잡히지 않은 예외는 상태를 알 수 없으므로 위 종료를 밟는다.
@@ -1594,12 +1610,12 @@ DELETE /api/chats/:id/memory/facts/:fid 사실 지우기 → 204
 
 - `pnpm test`(루트 vitest)가 전 패키지를 돈다. **`apps/api/test/api.test.ts`는 앱의 데이터베이스(PGlite)를 메모리에 띄워 쓴다** — 파일마다 하나를 만들어 한 번 마이그레이션하고 매 테스트 전에 전 테이블을 TRUNCATE한다. 디스크의 데이터베이스는 건드리지 않으므로 도커도, 스크래치 DB도, 지켜야 할 이름도 없다(2026-10-18 — 그 전에는 실제 Postgres의 `_test` 스크래치 DB를 요구하는 관문들이 있었다). 원시 SQL은 postgres.js의 태그 템플릿을 흉내 낸 `sql`(값마다 `$n`, 행을 돌려준다)로 쓴다. 두 연결 사이의 경쟁을 보던 테스트는 PGlite에 둘째 연결이 없어 없앴다. PGlite의 시계는 밀리초 단위라 같은 밀리초에 쓴 두 행은 `created_at`이 같다 — 순서를 보는 테스트는 그 사이에 시계가 넘어가게 한다(`insertFact`). `appDb.test.ts`가 한 폴더 한 프로세스(둘째로 여는 쪽은 `DataDirBusy`, 죽은 프로세스의 잠금은 넘겨받음)를 본다.
 - 스토리지: `storage.test.ts`가 로컬 드라이버의 왕복, 덮어쓰기, 삭제 멱등성과 네임스페이스 분리를 확인한다. `api.test.ts`는 아바타·에셋·페르소나 그림 업로드→서빙→삭제를 확인한다(페르소나 그림은 소유자 전용·`private` 캐시·형식 바꿈과 페르소나 삭제의 객체 정리까지).
-- 요청 한도·리스: `api.test.ts`가 창(한도와 `Retry-After`, 창 길이 정각과 그 뒤, 동시에 온 스무 번)과 하루 지난 창의 수거, 주소별 로그인 시작(`x-forwarded-for`의 맨 오른쪽, `CLIENT_IP_HEADER`), 생성 다섯의 한도, 두 인스턴스가 나누는 Lua `request`의 창, 리스(holder 울타리, 만료 뒤 넘겨받기, 동시 획득은 하나만)를 보고, `rateLimit.test.ts`가 주소를 읽는 규칙(IPv6 /64 포함)을 본다.
+- 요청 한도·리스: `api.test.ts`가 창(한도와 `Retry-After`, 창 길이 정각과 그 뒤, 동시에 온 스무 번)과 하루 지난 창의 수거, 주소별 ChatGPT 연결 시작, 생성 다섯의 한도, 두 인스턴스가 나누는 Lua `request`의 창, 리스(holder 울타리, 만료 뒤 넘겨받기, 동시 획득은 하나만)를 보고, `rateLimit.test.ts`가 주소를 읽는 규칙(IPv6 /64 포함)을 본다.
 - 파일 임포트: `api.test.ts`의 `file imports`가 파트(로컬 드라이버의 API 주소, 순서 없이, 끊긴 뒤 이미 올라간 것, 모자란 완료의 409 `upload_incomplete`, 다른 크기·범위 밖·완료 뒤의 파트), 시작에서의 거절(크기·빈 파일·대상·`sourceUrl`·World Info의 400과 413·남의 플롯), 독자당 하나(인스턴스를 가로질러, 15분 버려진 업로드는 비킨다), 읽을 수 없는 파일의 `failed`와 남지 않는 파일, 두 번째 에셋에서 스토리지가 죽은 임포트의 되돌리기(플롯·그림·파일), 쓰는 도중 죽은 워커의 되돌리기, 저수준 확인을 같은 파일로, 그만두기, 정리를 본다. 그 밖의 임포트 테스트 50여 곳은 도우미 `fileImport`가 브라우저처럼 시작·파트·완료·잡·상태를 거쳐 옛 라우트의 응답(201과 바디, 또는 오류)을 돌려주므로 그대로 돈다. `storage.test.ts`가 드라이버의 `putStream`(파트 경계 넘기, 던지는 스트림은 아무것도 남기지 않음)과 업로드(순서 없는 파트의 합치기, 그만두기, 다른 크기의 파트)를 본다. 코어의 `card.test.ts`가 소스에서 읽을 때 에셋은 열기 전까지 읽지 않는 것과 저장소 실패가 모듈의 실패로 삼켜지지 않는 것, 스트림으로 텍스트 청크를 벗기는 것(조각 크기와 상관없이 같은 바이트, 걸을 수 없으면 오류)을 본다.
 - core: 카드 V1/V2/V3 픽스처 매핑, PNG/charx는 테스트에서 프로그래밍으로 생성해 왕복 검증, 로어북(constant/selective/regex/예산/재귀), 데코레이터(RisuAI 키 데코레이터·확률·켜고 끄기 포함), RisuAI `/패턴/플래그` 키, 매크로, 변수, 표시 스크립트, 컴포넌트 서브셋, 프롬프트 조립(탈락 순서·depth 위치·author's note 잔존).
 - llm: OAuth·토큰 회전·권한 해제, Responses 종료/오류·SSE 파서, ChatGPT 전용 registry, echo 취소. 기억(HypaV3)은 core `memory.test.ts`가 고르기의 순서·예산·폴백과 묶음을, API 테스트가 배경 요약·브랜치 판정·지우기와 틈 메우기·리비전 CAS·임베더(키워드 임베더 주입)의 순위·낡은 모델·폴백·라우트·0011 변환·백필을 확인한다. 사실은 core `facts.test.ts`(답 읽기·보인 번호만 고치기·같은 말·상한)와 `memory.test.ts`(시간 표기의 버킷·시계·언어), API 테스트(뽑기·저장·브랜치·지우기·요약이 지워진 뒤의 쓰기·요약과 겹치는 것과 서로 겹치는 것 빼기·개수·폴백·라우트·갱신과 끝냄과 되살리기·다시 요약된 틈이 끝난 사실을 되살리지 않음·시간 표기), 탐색의 뜻 검색은 API 테스트(파티션 안의 순위·이름 일치·태그·오프셋 커서·비공개/adult/다른 언어가 새지 않음·모델에게만 가는 글이 들지 않음·폴백·게으른 재임베딩), 표정의 임베딩은 core `emotion.test.ts`(벌점 값)와 API 테스트가 확인한다.
 - web: RisuRealm 주소 파서·다운로드 폴백·라이선스 판정(`realm.test.ts`), **SillyTavern 이사**(`sillytavernImport.test.ts` — API를 흉내 낸 주입 `fetch`로 실행 순서·두 번째 실행의 중복 없음·단독/그룹 플롯 구분·그룹의 차례 설정과 멤버마다의 대화량 PATCH(새 플롯에만·들어온 멤버에만·실패는 경고)와 실제 변환기로 그룹 챗 답장의 `speakerId`·멤버가 하나인 챗의 접두사·배치(개수·UTF-8 바이트)·버전과 행 상한·페르소나 매핑·페르소나 그림 업로드와 그 실패의 경고·실패 후 계속·멈춤과 다시 시도·응답 유실 후 재시도·`invalid_lorebook` 폴백·`model_unavailable` 중단·챗 변수와 작가 노트·그 설정이 완료 요청에 실림(간격 0은 빈도 0으로·스토리 문자열 앞뒤 자리만 안내)·챗 로어북을 플롯·추가 로어북·멤버 카드와 겹치지 않게 한 번만 붙임·생성 실패 뒤 재시도에도 두 번 붙지 않음·PATCH 실패는 경고·secrets.json 차단), **붙여넣기 이주**(`pasteMigration.test.ts` — 스키마로 읽고 쓰는 폼 값과 행 min/max·이동에 따른 화자 옵션 번호, 확인 문항, 에셋 slug 충돌·`asset-N`, 자동 저장 왕복과 저장소가 거절·고장 날 때, 주입 `fetch`로 생성 → 아바타 → 에셋 순서·실패한 업로드만 같은 플롯에 다시 시도·생성 실패 뒤 재시도, 지문 해시와 lookup; `pasteMigrationWizard.test.ts` — 실제 제타 스키마·변환으로 마법사를 jsdom에 그려 확인 게이트·저장본 복원·화자 미리보기·미리본 초안 그대로 생성(최상위 `sourceUrl`, lookup 해시 일치)·생성 뒤 저장본 삭제; `messages.test.ts` — 확인 id·경고 코드·사이트·공개 범위·화자 모드마다 세 언어 문구가 있고 경고의 모든 detail로 포맷된다), **그룹 턴**(`groupRound.test.ts` — 다음 차례 고르기(로스터 순·상한과 대화량 무시·무대 밖 제외)·기본 설정·대신 쓴 멤버 제외·`roundStart`·재생성의 교체 범위와 내레이터 차례·차례 요청(여는 경로·`groupTurnId`·`finalSpeaker`)·`sendAIprompt` 상한·실패와 다시 시도·중단; `groupScripts.test.ts` — 멤버별 런타임(입력 패스 연쇄·화자의 시작만·무대 밖 제외·스크립트 없는 화자·멤버별 오버레이 패치·출력 커밋과 모델 호출의 `memberId`·표시와 버튼 라우팅·멤버 하나면 `memberId` 없음); `chatScripts.test.ts`의 멤버 둘 작품(전송 바디·화자의 마무리·말풍선별 표시 트리거와 `data-shizue-member`·버튼); `studioCustomUi.test.ts` — 적용 대상·멤버 시트·작품 배경 저장·멤버 삭제·동반 멤버 임포트의 상태 갱신과 변수 충돌 알림; 새니타이저의 멤버 스코프와 Lua 상태의 멤버 키; `groupTurns.test.ts` — 챗 페이지를 띄워 한 차례의 요청 순서·무대·입력 중 행과 다음 칩·중단·실패한 화자 다시 묻기·차례 재생성·지금 말하기·`@` 목록으로 대신 쓰기, 멤버가 하나인 작품은 `speakerId` 없이; `groupTurnsEditor.test.ts` — 스튜디오의 순서·인원·대화량이 저장 하나로 가고 멤버 하나에선 안 보임; `mention.test.ts`의 `@` 목록 — 연 줄의 `@`만, 이름·닉네임·내레이터 이름으로 좁히기, 고르면 `@이름: `; `messageSpeech.test.ts`의 독자 턴 `readerRuns` 렌더와 입력 중 행), 새니타이저 회귀(XSS 벡터), **새니타이저 호환 게이트**(실제 유통 형태 카드 12종의 출력 고정 — 규칙을 조여 크리에이터 자산을 깨뜨리는 변경을 잡는 반대쪽 절반), 표시 스크립트, **표시 스크립트 플래너**(stub 워커로 종료 경로, Node 워커 스레드로 실제 종료), 컴포넌트 호출 파서·브리지·워커 런타임, SSE 파서, 허브 유틸.
-- e2e(`apps/e2e`, Playwright, echo 모델 고정): 스모크(테스트 세션 생성→플롯 생성→등장인물 2명→도입부→발행→공개 페이지에서 챗 시작→발화 구분 렌더→재생성과 요청해서 다시 쓰기→이어쓰기→수정→☰ 시트의 노트→로케일 전환), 플롯 로스터(발행 게이트·순서 변경·삭제), 카드 임포트(`cardImport.spec.ts` — rewrite 프록시의 기본 10MB를 넘는 카드 파일 → 출처·라이선스 표시 → 권리 확인 후 발행 → Realm 다운로드를 `page.route`로 대신한 RisuRealm 추가), **SillyTavern 이사**(`sillytavernImport.spec.ts` — 스펙이 직접 만든 백업 zip(캐릭터 둘·연결 월드·추가 로어북·스와이프와 내레이터·숨김 줄이 있는 챗·list 순서에 멤버 하나를 꺼 둔 그룹과 그룹 챗·카드의 talkativeness·그림이 있는 페르소나·프록시 비밀번호가 든 settings.json·secrets.json) → 마법사(꺼 둔 멤버 안내) → 플롯·멤버·로어북·그룹 플롯의 차례 설정과 대화량·챗(스와이프 형제·단독 챗의 화자 접두사·그룹 챗 답장의 `speakerMemberId`와 그 얼굴)·페르소나와 텍스트 청크를 뗀 그 그림 확인 → 요청 바디에 settings.json·secrets.json의 내용이 없음 → 같은 zip을 다시 고르면 전부 이미 가져옴), **붙여넣기 이주**(`pasteMigration.spec.ts` — 사이트 고르기(준비 중 셋) → 확인과 출처 주소 검사 → 제타 폼에 합성 입력(인물 둘·대화 프로필·`@이름:` 인트로·설정집·스타일 선택, Ctrl+Enter 행 추가) → 새로고침 뒤 복원 → 이미지 하나 → 화자가 갈린 미리보기 → 만들기와 보존 원문 내려받기 → API로 비공개·멤버 출처·도입부 화자 접두사·로어북과 이미지 목록·스타일·에셋 이름 확인 → 발행이 권리 확인을 기다림), 허브, 댓글, 태그, 세이프티, 내레이터, 커스텀 UI, 비주얼 베이스라인, **그룹 턴**(`groupTurns.spec.ts` — 멤버 셋을 스튜디오에서 로스터 순서로 → 전송 하나에 얼굴 달린 답장 셋(요청 순서와 `finalSpeaker`) → 차례 재생성 → ☰ 시트에서 멤버로 대신 쓰기(그 멤버의 말로 그려지고 차례에서 빠짐, 화자는 API로 확인 — echo가 독자의 `이름:` 줄을 그대로 돌려주므로) → `page.route`로 둘째 화자를 붙잡고 중단(셋째는 묻지 않음) → 멤버 하나인 작품은 `speakerId` 없이). 스모크의 멤버 둘 작품도 그룹 턴이라 둘째 멤버의 대화량을 0으로 두어 차례마다 첫 멤버만 말하게 한다. **멤버별 카드 스크립트**(`groupScripts.spec.ts` — RisuAI 카드 둘(같은 이름의 수동 트리거, 시작·출력 카운터, 상태창 표시 스크립트, `<style>`과 배경이 든 backgroundHTML)을 새 플롯과 멤버 추가로 → 변수 충돌 응답 → 한 차례에 시작·출력이 각자 자기 답장에서 한 번씩 → 상태창은 자기 말풍선에만, 한 이름공간을 읽음 → 동반 멤버 시트는 자기 말풍선에만 → 버튼은 그것을 담은 말풍선의 멤버 트리거 → 배경은 첫 카드의 것 → 스튜디오의 적용 대상과 작품 배경), **P1**(`p1.spec.ts` — 추천 프로필 작성→에셋 업로드→픽커로 챗 시작→도입부 그림·팔로우 토글·주간 인기 탭·두 계정 알림 플로우). **AI 초안과 답장 추천은 e2e에 없다** — 둘 다 echo가 대신할 수 없는 실제 모델 호출(초안은 기본 채팅 모델의 엄격 JSON, 추천은 메모리 채널)이라 계약은 `apps/api/test`가 본다. 매 실행이 새 계정을 쓰므로 반복 실행 가능하다. API는 실행마다 새로 만든 빈 앱 폴더(`E2E_DATA_DIR`, 임시 디렉터리 — `playwright.config.ts`가 만들고 워커가 물려받는다) 위에서 돌고, 시작할 때 그 데이터베이스를 스스로 마이그레이션한다. 소유자의 작품(`apps/plot/data/app`)은 건드리지 않고, 단위 스위트와 겹칠 것도 없다. 타입체크는 이 패키지의 자체 tsconfig가 한다(`tsc -p apps/e2e/tsconfig.json` — 스펙의 절반이 브라우저에서 도는 코드라 DOM lib를 함께 켠다).
+- e2e(`apps/e2e`, Playwright, echo 모델 고정): 스모크(앱 열기→플롯 생성→등장인물 2명→도입부→발행→공개 페이지에서 챗 시작→발화 구분 렌더→재생성과 요청해서 다시 쓰기→이어쓰기→수정→☰ 시트의 노트→로케일 전환), 플롯 로스터(발행 게이트·순서 변경·삭제), 카드 임포트(`cardImport.spec.ts` — rewrite 프록시의 기본 10MB를 넘는 카드 파일 → 출처·라이선스 표시 → 권리 확인 후 발행 → Realm 다운로드를 `page.route`로 대신한 RisuRealm 추가), **SillyTavern 이사**(`sillytavernImport.spec.ts` — 스펙이 직접 만든 백업 zip(캐릭터 둘·연결 월드·추가 로어북·스와이프와 내레이터·숨김 줄이 있는 챗·list 순서에 멤버 하나를 꺼 둔 그룹과 그룹 챗·카드의 talkativeness·그림이 있는 페르소나·프록시 비밀번호가 든 settings.json·secrets.json) → 마법사(꺼 둔 멤버 안내) → 플롯·멤버·로어북·그룹 플롯의 차례 설정과 대화량·챗(스와이프 형제·단독 챗의 화자 접두사·그룹 챗 답장의 `speakerMemberId`와 그 얼굴)·페르소나와 텍스트 청크를 뗀 그 그림 확인 → 요청 바디에 settings.json·secrets.json의 내용이 없음 → 같은 zip을 다시 고르면 전부 이미 가져옴), **붙여넣기 이주**(`pasteMigration.spec.ts` — 사이트 고르기(준비 중 셋) → 확인과 출처 주소 검사 → 제타 폼에 합성 입력(인물 둘·대화 프로필·`@이름:` 인트로·설정집·스타일 선택, Ctrl+Enter 행 추가) → 새로고침 뒤 복원 → 이미지 하나 → 화자가 갈린 미리보기 → 만들기와 보존 원문 내려받기 → API로 비공개·멤버 출처·도입부 화자 접두사·로어북과 이미지 목록·스타일·에셋 이름 확인 → 발행이 권리 확인을 기다림), 허브, 태그, 세이프티, 내레이터, 커스텀 UI, 비주얼 베이스라인, **그룹 턴**(`groupTurns.spec.ts` — 멤버 셋을 스튜디오에서 로스터 순서로 → 전송 하나에 얼굴 달린 답장 셋(요청 순서와 `finalSpeaker`) → 차례 재생성 → ☰ 시트에서 멤버로 대신 쓰기(그 멤버의 말로 그려지고 차례에서 빠짐, 화자는 API로 확인 — echo가 독자의 `이름:` 줄을 그대로 돌려주므로) → `page.route`로 둘째 화자를 붙잡고 중단(셋째는 묻지 않음) → 멤버 하나인 작품은 `speakerId` 없이). 스모크의 멤버 둘 작품도 그룹 턴이라 둘째 멤버의 대화량을 0으로 두어 차례마다 첫 멤버만 말하게 한다. **멤버별 카드 스크립트**(`groupScripts.spec.ts` — RisuAI 카드 둘(같은 이름의 수동 트리거, 시작·출력 카운터, 상태창 표시 스크립트, `<style>`과 배경이 든 backgroundHTML)을 새 플롯과 멤버 추가로 → 변수 충돌 응답 → 한 차례에 시작·출력이 각자 자기 답장에서 한 번씩 → 상태창은 자기 말풍선에만, 한 이름공간을 읽음 → 동반 멤버 시트는 자기 말풍선에만 → 버튼은 그것을 담은 말풍선의 멤버 트리거 → 배경은 첫 카드의 것 → 스튜디오의 적용 대상과 작품 배경), **P1**(`p1.spec.ts` — 추천 프로필 작성→에셋 업로드→픽커로 챗 시작→도입부 그림·주간 인기 탭). **AI 초안과 답장 추천은 e2e에 없다** — 둘 다 echo가 대신할 수 없는 실제 모델 호출(초안은 기본 채팅 모델의 엄격 JSON, 추천은 메모리 채널)이라 계약은 `apps/api/test`가 본다. 로그인이 없으므로 모든 스펙이 실행의 소유자 하나를 나눠 쓰고(이 컴퓨터의 브라우저가 소유자다), 스펙은 실행마다 고유한 이름으로 자기 작품을 가린다. ChatGPT 연결은 설정 카드에서 확인한다 — `chatgpt.spec.ts`가 API와 OpenAI를 흉내 내고, `extension.spec.ts`가 Shizue 대역과 실제 콜백(`CHATGPT_FAKE_OPENAI`)으로 끝까지 간다. API는 실행마다 새로 만든 빈 앱 폴더(`E2E_DATA_DIR`, 임시 디렉터리 — `playwright.config.ts`가 만들고 워커가 물려받는다) 위에서 돌고, 시작할 때 그 데이터베이스를 스스로 마이그레이션한다. 소유자의 작품(`apps/plot/data/app`)은 건드리지 않고, 단위 스위트와 겹칠 것도 없다. 타입체크는 이 패키지의 자체 tsconfig가 한다(`tsc -p apps/e2e/tsconfig.json` — 스펙의 절반이 브라우저에서 도는 코드라 DOM lib를 함께 켠다).
 
 ## 13. 컨벤션
 

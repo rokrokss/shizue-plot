@@ -4,8 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useLocale, useTranslations } from 'next-intl';
 import { encode } from 'uqr';
 import { useRouter } from '@/i18n/navigation';
-import { apiGet, apiSend } from '@/lib/api';
-import { refreshSession, useSession } from '@/lib/authClient';
+import { apiDelete, apiGet, apiSend } from '@/lib/api';
 import { DEVICE_PAIRING } from '@/lib/devicePairing';
 import { useDocumentTitle } from '@/lib/useDocumentTitle';
 import { useErrorMessage } from '@/lib/useErrorMessage';
@@ -14,11 +13,16 @@ import { Button, ErrorText } from './ui';
 /** `POST /api/devices/pair`: a one-time code and the origins a phone can open it at. */
 interface Pairing { code: string; expiresAt: string; origins: string[] }
 
-/** `GET /api/devices`: the open tunnel, which one the button would open, and every address a phone can use. */
+/**
+ * `GET /api/devices`: the open tunnel, which one the button would open, every
+ * address a phone can use, and whether this browser is the computer's (`local`)
+ * or a paired phone's.
+ */
 interface PhoneAccess {
   tunnel: { kind: 'tailscale' | 'cloudflare'; origin: string } | null;
   available: { tailscale: boolean; cloudflare: boolean };
   origins: string[];
+  local: boolean;
 }
 
 /** Where a phone lands with the code. It rides in the fragment, which never reaches a server or a proxy's log. */
@@ -34,9 +38,10 @@ const remaining = (at: number, now: number): string => {
  * The settings card that opens a shizue running on this machine on a phone
  * (`DEVICE_PAIRING`), as PocketRisu's remote access does: one button opens the
  * tunnel (Tailscale Serve, else a Cloudflare Quick Tunnel — the API's `tunnel.ts`)
- * and shows a QR code. Phones cannot finish Sign in with ChatGPT (no extension runs
- * there), so the code also carries a one-time pairing code; the phone opens the
- * address and joins this account.
+ * and shows a QR code carrying a one-time pairing code; the phone opens the
+ * address and is let in as this computer's owner, using the ChatGPT this computer
+ * connected (no extension runs on a phone). On a paired phone the card only says
+ * so, and lets the phone leave.
  */
 export function DevicePairing() {
   return DEVICE_PAIRING ? <PairingCard /> : null;
@@ -46,7 +51,7 @@ function PairingCard() {
   const t = useTranslations('devices');
   const locale = useLocale();
   const toMessage = useErrorMessage();
-  const { data: session } = useSession();
+  const router = useRouter();
   const [access, setAccess] = useState<PhoneAccess | null>(null);
   const [pairing, setPairing] = useState<Pairing | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -83,6 +88,15 @@ function PairingCard() {
     finally { setBusy(false); }
   }
 
+  /** This phone leaves: its session ends, and the pairing page says how to come back. */
+  async function leave(): Promise<void> {
+    setBusy(true); setError('');
+    try {
+      await apiDelete('/api/devices/session');
+      router.replace('/pair');
+    } catch (e) { setError(toMessage(e)); setBusy(false); }
+  }
+
   async function close(): Promise<void> {
     setBusy(true); setError('');
     try {
@@ -96,32 +110,40 @@ function PairingCard() {
     <section className="min-w-0 space-y-5 rounded-2xl border border-line bg-surface p-6 shadow-card">
       <h2 className="title2">{t('title')}</h2>
       <p className="text-sm leading-relaxed text-muted">{t('description')}</p>
-      {session?.paired ? <p className="rounded-xl border border-line bg-mint-soft/40 px-3 py-3 text-sm">{t('pairedHere')}</p> : null}
-      {access?.tunnel ? (
-        <p className="text-sm">
-          {t(access.tunnel.kind === 'tailscale' ? 'openTailscale' : 'openCloudflare')}{' '}
-          <span className="break-all text-muted">{access.tunnel.origin}</span>
-        </p>
-      ) : access && !reachable ? (
-        <p className="text-sm leading-relaxed text-muted">{t(tool === 'tailscale' ? 'viaTailscale' : tool === 'cloudflare' ? 'viaCloudflare' : 'noTool')}</p>
-      ) : null}
-      {live ? (
-        <div className="space-y-4">
-          {pairing.origins.map((origin) => (
-            <figure key={origin} className="space-y-2">
-              <QrCode value={pairUrl(origin, locale, pairing.code)} label={t('qrLabel')} />
-              <figcaption className="text-xs break-all text-muted">{origin}</figcaption>
-            </figure>
-          ))}
-          <p role="status" className="text-sm text-muted">{t('expiresIn', { time: remaining(expiresAt, now) })}</p>
-        </div>
-      ) : pairing ? <p role="status" className="text-sm text-muted">{t('expired')}</p> : null}
-      <div className="flex flex-wrap gap-2">
-        <Button className="w-full max-w-sm" busy={busy} disabled={!access || (!reachable && tool === null)} onClick={() => void start()}>
-          {t(!reachable ? 'open' : pairing ? 'again' : 'start')}
-        </Button>
-        {access?.tunnel ? <Button variant="secondary" busy={busy} onClick={() => void close()}>{t('close')}</Button> : null}
-      </div>
+      {access?.local === false ? (
+        <>
+          <p className="rounded-xl border border-line bg-mint-soft/40 px-3 py-3 text-sm">{t('pairedHere')}</p>
+          <Button className="w-full max-w-sm" busy={busy} onClick={() => void leave()}>{t('leave')}</Button>
+        </>
+      ) : (
+        <>
+          {access?.tunnel ? (
+            <p className="text-sm">
+              {t(access.tunnel.kind === 'tailscale' ? 'openTailscale' : 'openCloudflare')}{' '}
+              <span className="break-all text-muted">{access.tunnel.origin}</span>
+            </p>
+          ) : access && !reachable ? (
+            <p className="text-sm leading-relaxed text-muted">{t(tool === 'tailscale' ? 'viaTailscale' : tool === 'cloudflare' ? 'viaCloudflare' : 'noTool')}</p>
+          ) : null}
+          {live ? (
+            <div className="space-y-4">
+              {pairing.origins.map((origin) => (
+                <figure key={origin} className="space-y-2">
+                  <QrCode value={pairUrl(origin, locale, pairing.code)} label={t('qrLabel')} />
+                  <figcaption className="text-xs break-all text-muted">{origin}</figcaption>
+                </figure>
+              ))}
+              <p role="status" className="text-sm text-muted">{t('expiresIn', { time: remaining(expiresAt, now) })}</p>
+            </div>
+          ) : pairing ? <p role="status" className="text-sm text-muted">{t('expired')}</p> : null}
+          <div className="flex flex-wrap gap-2">
+            <Button className="w-full max-w-sm" busy={busy} disabled={!access || (!reachable && tool === null)} onClick={() => void start()}>
+              {t(!reachable ? 'open' : pairing ? 'again' : 'start')}
+            </Button>
+            {access?.tunnel ? <Button variant="secondary" busy={busy} onClick={() => void close()}>{t('close')}</Button> : null}
+          </div>
+        </>
+      )}
       <ErrorText>{error}</ErrorText>
     </section>
   );
@@ -147,7 +169,7 @@ function QrCode({ value, label }: { value: string; label: string }) {
 
 /**
  * The phone's side, opened from the QR code. It asks before it connects: a link
- * alone must not sign a browser into someone else's account.
+ * alone must not let a browser into someone else's shizue.
  */
 export function PairDevice() {
   const t = useTranslations('devices');
@@ -173,7 +195,6 @@ export function PairDevice() {
     setBusy(true); setError('');
     try {
       await apiSend<void>('POST', '/api/devices/claim', { code }, AbortSignal.timeout(15_000));
-      await refreshSession();
       router.replace('/');
     } catch (e) { setError(toMessage(e)); setBusy(false); }
   }

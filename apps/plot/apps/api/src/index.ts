@@ -1,12 +1,10 @@
 import { serve } from '@hono/node-server';
 import { createApp } from './app.js';
 import { DataDirBusy, openAppDb } from './appDb.js';
-import { createAuth } from './auth.js';
 import { createChatGPTAccounts } from './chatgptAccounts.js';
 import type { AppDeps } from './deps.js';
 import { createLocalEmbedder } from './embedder.js';
 import { createRemoteEmbedder, embedderListenConfig, serveEmbedder } from './embedderRemote.js';
-import { createHostedAuth, createSessionStore } from './hostedAuth.js';
 import { isLoopback, loadRootEnv, readConfig, readOrCreateSecret } from './env.js';
 import { createPhoneAccess } from './tunnel.js';
 import { startJobWorker } from './jobs.js';
@@ -40,17 +38,10 @@ const accounts = createChatGPTAccounts(db, {
   callbackPort: config.chatgptCallbackPort,
   ...(testing && config.env['CHATGPT_FAKE_OPENAI'] === '1' ? { oauth: fakeChatGPTOAuth() } : {}),
 });
-const sessions = createSessionStore(db, { secure: new URL(config.authUrl).protocol === 'https:' });
-// The email/password fixture makes many test users; it never exists outside NODE_ENV=test.
-const fixture = testing ? createAuth(db, {
-  secret,
-  baseUrl: config.authUrl,
-  extraTrustedOrigins: config.authExtraTrustedOrigins,
-}) : undefined;
 
 // The background tasks the turns start, kept until they settle so a shutdown can wait for them.
 const background = createBackgroundTasks();
-// A phone's tunnel to this machine, opened from the settings page — never in the hosted app.
+// A phone's tunnel to this machine, opened from the settings page, for a web origin on loopback.
 const phoneAccess = isLoopback(config.authUrl) ? createPhoneAccess({ webUrl: config.authUrl }) : undefined;
 // Tailscale Serve outlives the API: an address opened before a restart is trusted again from the start.
 void phoneAccess?.status().catch(() => undefined);
@@ -66,8 +57,7 @@ const ownOrigins = (): string[] => [
 // per-chat refresh guard with the turns the reader is sending meanwhile.
 const deps: AppDeps = {
   db,
-  auth: createHostedAuth(sessions, accounts, fixture),
-  chatgpt: { accounts, sessions },
+  chatgpt: { accounts },
   webOrigin: config.authUrl,
   remoteOrigins: config.remoteOrigins,
   ...(phoneAccess ? { phoneAccess } : {}),

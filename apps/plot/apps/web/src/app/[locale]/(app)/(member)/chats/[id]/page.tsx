@@ -83,7 +83,6 @@ import { readEmbeddingModel } from '@/lib/scripts/embeddingModels';
 import { createLuaEngine, luaFunctionNames, luaScriptsOf } from '@/lib/scripts/lua/engine';
 import { createLuaSandbox, type LuaRequestAnswer } from '@/lib/scripts/lua/sandbox';
 import { readerLuaSandbox } from '@/lib/scripts/lua/readerSandbox';
-import { useSession } from '@/lib/authClient';
 import { groupDisplayEdits, prepareGroupSend, runtimeOf, type ScriptCast } from '@/lib/scripts/group';
 import {
   activeLore,
@@ -1456,8 +1455,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     }),
     [],
   );
-  /** Whose Lua sandbox the scripts run in: the reader's, kept across their chats (`readerLuaSandbox`). */
-  const reader = useSession().data?.user.id ?? '';
+  /** Whose Lua sandbox the scripts run in: the owner's, the one reader, kept across their chats (`readerLuaSandbox`). */
+  const reader = 'owner';
   /**
    * One runtime per member that carries scripts (`lib/scripts`), the lead's
    * first. They share the reader's Lua sandbox — each member's Lua in states of

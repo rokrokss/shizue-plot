@@ -9,13 +9,13 @@ const CALLBACK_PORT = Number(process.env['E2E_CALLBACK_PORT'] ?? 47801);
 
 /**
  * Shizue's rule and presence answer (as a stand-in for this test's origin), the
- * real login page, the Next rewrite and the API's callback: only OpenAI is stood
- * in for. auth.openai.com is routed here to send the browser to the loopback
+ * real settings card, the Next rewrite and the API's callback: only OpenAI is
+ * stood in for. auth.openai.com is routed here to send the browser to the loopback
  * address, exactly where the real consent screen would; the API exchanges the
  * code with its NODE_ENV=test stand-in (CHATGPT_FAKE_OPENAI), which reads the
  * identity this test packed into it.
  */
-test('Sign in with ChatGPT through Shizue', async () => {
+test('Connecting ChatGPT through Shizue', async () => {
   const root = await mkdtemp(join(tmpdir(), 'shizue-extension-'));
   const extension = join(root, 'extension');
   await writeShizueStandIn(extension, WEB_URL, CALLBACK_PORT);
@@ -38,10 +38,11 @@ test('Sign in with ChatGPT through Shizue', async () => {
     });
 
     const page = await context.newPage();
-    await page.goto(`${WEB_URL}/ko/login?next=%2Fsettings`);
-    await page.getByRole('button', { name: 'ChatGPT로 로그인' }).click();
+    await page.goto(`${WEB_URL}/ko/settings`);
+    await page.getByRole('button', { name: 'ChatGPT로 계속하기' }).click();
     await expect(page).toHaveURL(`${WEB_URL}/ko/settings`);
     await expect(page.getByTitle(email)).toBeVisible();
+    await expect(page.getByText('ChatGPT 요금제를 사용하고 있습니다.')).toBeVisible();
   } finally {
     await context.close();
     await rm(root, { recursive: true, force: true });

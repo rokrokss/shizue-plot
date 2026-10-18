@@ -31,7 +31,6 @@ vi.mock('@/lib/api', async (original) => ({
   apiSend: (method: string, path: string, body?: unknown) => send(method, path, body),
   apiDelete: () => Promise.resolve(),
 }));
-vi.mock('@/lib/authClient', () => ({ useSession: () => ({ data: { user: { id: 'test' } }, isPending: false }) }));
 vi.mock('@/i18n/navigation', () => ({
   Link: ({ href, children }: { href: string; children: ReactNode }) => createElement('a', { href }, children),
   usePathname: () => '/personas',

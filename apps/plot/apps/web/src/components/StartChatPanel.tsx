@@ -4,8 +4,6 @@ import { useTranslations } from 'next-intl';
 import { useEffect, useState } from 'react';
 import { Link, useRouter } from '@/i18n/navigation';
 import { apiGet, apiSend, readerHeaders } from '@/lib/api';
-import { useSession } from '@/lib/authClient';
-import { signInHref } from '@/lib/nav';
 import type { ChatState, ModelInfo, Persona, PlotProfile } from '@/lib/types';
 import { useErrorMessage } from '@/lib/useErrorMessage';
 import { PersonaFace } from './Avatar';
@@ -19,9 +17,6 @@ const NO_PROFILES: PlotProfile[] = [];
  * Which opening the chat starts on is decided on the page around this panel, in
  * the picker beside the openings themselves; every one of them becomes a
  * swipeable root either way.
- *
- * A reader with no account gets the way in where the form would be — and the
- * form's two reads, which are the account's own, are never issued.
  */
 export function StartChatPanel({
   plotId,
@@ -43,8 +38,6 @@ export function StartChatPanel({
   const chatgpt = useTranslations('chatgpt');
   const toMessage = useErrorMessage();
   const router = useRouter();
-  const { data: session, isPending } = useSession();
-  const signedIn = Boolean(session);
 
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [personas, setPersonas] = useState<Persona[]>([]);
@@ -57,16 +50,13 @@ export function StartChatPanel({
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
-  // Both of these are session-only reads: asking for them anonymously would buy
-  // a pair of 401s and nothing else.
   useEffect(() => {
-    if (!signedIn) return;
     apiGet<ModelInfo[]>('/api/models').then((list) => {
       setModels(list);
       setModel((current) => current || (list[0]?.id ?? ''));
     }, (caught) => setError(toMessage(caught)));
     apiGet<Persona[]>('/api/personas').then(setPersonas, () => undefined);
-  }, [signedIn, toMessage]);
+  }, [toMessage]);
 
   async function start(): Promise<void> {
     if (busy || !model) return;
@@ -95,11 +85,6 @@ export function StartChatPanel({
       setBusy(false);
     }
   }
-
-  // Which panel this is depends on the session read, and a form that turns into
-  // an invitation a moment later is worse than an empty frame for that moment.
-  if (isPending) return null;
-  if (!signedIn) return <SignInPanel plotId={plotId} />;
 
   return (
     <Section title={t('startChat')} busy={busy}>
@@ -189,7 +174,7 @@ export function StartChatPanel({
       </Field>
 
       <ErrorText>{error || (models.length === 0 ? t('noModels') : '')}</ErrorText>
-      {models.length === 0 ? <Link href="/settings" className={buttonClass('secondary', 'sm', 'w-full')}>{chatgpt('signIn')}</Link> : null}
+      {models.length === 0 ? <Link href="/settings" className={buttonClass('secondary', 'sm', 'w-full')}>{chatgpt('connect')}</Link> : null}
 
       <Button
         variant="primary"
@@ -200,29 +185,6 @@ export function StartChatPanel({
       >
         {t('startChat')}
       </Button>
-    </Section>
-  );
-}
-
-/**
- * The same slot invites a reader to connect ChatGPT. It carries this page back
- * so completing sign-in returns to the plot.
- */
-function SignInPanel({ plotId }: { plotId: string }) {
-  const t = useTranslations('plot');
-  const chatgpt = useTranslations('chatgpt');
-  const back = `/p/${plotId}`;
-
-  return (
-    <Section title={t('startChat')}>
-      <p className="text-sm leading-relaxed text-muted">{t('signInToChat')}</p>
-      <Link
-        href={signInHref(back)}
-        data-testid="start-chat-sign-in"
-        className={buttonClass('primary', 'md', 'w-full')}
-      >
-        {chatgpt('signIn')}
-      </Link>
     </Section>
   );
 }

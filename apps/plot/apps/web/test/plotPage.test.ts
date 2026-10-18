@@ -1,11 +1,8 @@
 // @vitest-environment jsdom
 /**
- * The plot page as a reader with no account gets it. Everything is there to
- * read — the openings whole, the cast, the thread, the counters — and every act
- * on it leads to the way in and back to this page rather than to a 401. What the
- * page must also not do is ask for anything that needs an account: the chat
- * form's models and personas are the account's own, so anonymously they are
- * never fetched at all.
+ * The plot page as the owner gets it — and there is no one else: the openings
+ * whole, the cast, the thread, the chat form, and the way into the editor beside
+ * the title.
  *
  * `createElement` rather than JSX, matching the other component tests.
  */
@@ -19,8 +16,6 @@ import type { CommentPage, PublicPlotDetail } from '../src/lib/types';
 
 (globalThis as Record<string, unknown>)['IS_REACT_ACT_ENVIRONMENT'] = true;
 
-/** Who is reading. Null is the whole point of this file; one test signs in. */
-let session: { user: { id: string; name: string } } | null = null;
 /** Every path the page has asked the API for, and every push the router took. */
 let asked: string[] = [];
 const push = vi.fn<(href: string) => void>();
@@ -35,26 +30,17 @@ vi.mock('@/i18n/navigation', async () => {
   };
 });
 
-vi.mock('@/lib/authClient', () => ({
-  useSession: () => ({ data: session, isPending: false }),
-}));
-
 vi.mock('@/lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/lib/api')>()),
   apiGet: (url: string) => {
     asked.push(url);
     if (url.startsWith('/api/plots/sty_1/comments')) return Promise.resolve(commentPage);
     if (url === '/api/plots/sty_1/public') return Promise.resolve(plotResponse);
-    // The follow button beside the creator's name asks for their page, which is
-    // public: anonymously it is the count and `followedByMe: false`.
-    if (url === '/api/creators/usr_1') {
-      return Promise.resolve({ id: 'usr_1', name: '록', followerCount: 2, followedByMe: false, publicPlots: [] });
-    }
     if (url === '/api/models') return Promise.resolve([{ id: 'm1', label: '모델 하나' }]);
     if (url === '/api/personas') return Promise.resolve([]);
     return Promise.reject(new Error(`unexpected read: ${url}`));
   },
-  apiSend: () => Promise.reject(new Error('an anonymous reader writes nothing')),
+  apiSend: () => Promise.reject(new Error('reading the page writes nothing')),
 }));
 
 const { default: PublicPlotPage } = await import('../src/app/[locale]/(app)/p/[id]/page');
@@ -138,7 +124,6 @@ async function click(node: Element): Promise<void> {
 }
 
 beforeEach(() => {
-  session = null;
   asked = [];
   push.mockClear();
   host = document.createElement('div');
@@ -151,7 +136,7 @@ afterEach(() => {
   host.remove();
 });
 
-describe('the plot page, read without an account', () => {
+describe('the plot page', () => {
   it('shows the chosen opening whole, not the listings’ cut', async () => {
     await render();
     expect(find('[data-testid="intro-text"]')?.textContent).toBe(intro);
@@ -176,57 +161,16 @@ describe('the plot page, read without an account', () => {
     expect(picks[1]!.getAttribute('aria-pressed')).toBe('true');
   });
 
-  it('offers the way in where the chat form would be, and asks for nothing behind it', async () => {
+  it('offers the chat form, the comment box and the editor', async () => {
     await render();
 
-    const enter = find('[data-testid="start-chat-sign-in"]');
-    expect(enter?.getAttribute('href')).toBe('/login?next=%2Fp%2Fsty_1');
-    expect(enter?.textContent).toBe('ChatGPT로 로그인');
-    // The other door, carrying the same page back.
-    expect(find('a[href="/signup?next=%2Fp%2Fsty_1"]')).toBeNull();
-    expect(find('select')).toBeNull();
-
-    expect(asked).not.toContain('/api/models');
-    expect(asked).not.toContain('/api/personas');
-  });
-
-  it('shows the thread but not the write box', async () => {
-    await render();
-
-    expect(host.textContent).toContain('좋았어요');
-    expect(find('[data-testid="comment-form"]')).toBeNull();
-    expect(find('[data-testid="comment-sign-in"]')?.textContent).toContain(
-      '댓글은 입장 후 작성할 수 있어요.',
-    );
-    // No reply button either: there is no form behind it.
-    expect(host.textContent).not.toContain('답글');
-  });
-
-  it('leaves the like button pressable, and the press is the invitation', async () => {
-    await render();
-
-    const like = find('[data-testid="like-button"]')!;
-    expect(like.hasAttribute('disabled')).toBe(false);
-
-    await click(like);
-    expect(push).toHaveBeenCalledWith('/login?next=%2Fp%2Fsty_1');
-  });
-
-  it('hands the form back the moment there is a session', async () => {
-    session = { user: { id: 'usr_2', name: '독자' } };
-    await render();
-
-    expect(find('[data-testid="start-chat-sign-in"]')).toBeNull();
-    expect(find('[data-testid="comment-form"]')).not.toBeNull();
+    expect(find('select')).not.toBeNull();
     expect(asked).toContain('/api/models');
     expect(asked).toContain('/api/personas');
-  });
-
-  it('offers the creator the editor in place of the like', async () => {
-    session = { user: { id: 'usr_1', name: '록' } };
-    await render();
-
-    expect(find('[data-testid="like-button"]')).toBeNull();
+    expect(host.textContent).toContain('좋았어요');
+    expect(find('[data-testid="comment-form"]')).not.toBeNull();
     expect(find('a[href="/plots/sty_1"]')?.textContent).toBe('편집');
+    expect(find('[data-testid="like-button"]')).toBeNull();
+    expect(find('a[href^="/login"]')).toBeNull();
   });
 });

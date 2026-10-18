@@ -25,8 +25,9 @@ const DATA_DIR = process.env['E2E_DATA_DIR'];
  * catalog edit does not need a rebuild before the locale assertions see it.
  * First-hit route compilation is slow, hence the generous timeouts below.
  *
- * The API migrates the run's fresh folder and runs on it. The suite writes there
- * with a unique account per run and never truncates anything itself.
+ * The API migrates the run's fresh folder and runs on it. Every spec is its one
+ * owner — a browser on this computer is (the API's `ownerGate`) — so specs tell
+ * their own works apart by the run's unique names; nothing is truncated.
  */
 export default defineConfig({
   testDir: './tests',
@@ -65,10 +66,10 @@ export default defineConfig({
     },
     {
       command: `pnpm --filter @shizue/web exec next dev --hostname 127.0.0.1 --port ${new URL(WEB_URL).port}`,
-      // extension.spec.ts loads a Shizue stand-in for this origin; the login page asks it too.
+      // extension.spec.ts loads a Shizue stand-in for this origin; the settings card asks it too.
       env: { API_ORIGIN: API_URL, NEXT_PUBLIC_CHATGPT_EXTENSION_ID: STAND_IN_ID },
-      // Warm the single ChatGPT entrance before the browser suite begins.
-      url: `${WEB_URL}/ko/login`,
+      // Warm the settings page, where ChatGPT is connected, before the browser suite begins.
+      url: `${WEB_URL}/ko/settings`,
       reuseExistingServer: false,
       timeout: 240_000,
     },

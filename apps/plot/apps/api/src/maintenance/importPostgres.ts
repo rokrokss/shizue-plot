@@ -1,8 +1,8 @@
 /**
  * Moves a shizue that ran on Postgres and S3 (before 2026-10-18) into the app's
  * own folder: every row of every table, the files of the old local driver's
- * folder and of the S3 bucket, and the old secret, so that the ChatGPT sign-ins
- * sealed with it still open and OpenAI sees the same host. Once, into a folder
+ * folder and of the S3 bucket, and the old secret, so that the ChatGPT connection
+ * sealed with it still opens and OpenAI sees the same host. Once, into a folder
  * that has no database yet; the source is only read.
  *
  *   pnpm --filter @shizue/api import:postgres -- --from <postgres url> [--to <dir>] [--uploads <dir>] [--s3]
@@ -58,7 +58,7 @@ await mkdir(to, { recursive: true });
 const secret = process.env['BETTER_AUTH_SECRET']?.trim() || OLD_DEFAULT_SECRET;
 await writeFile(join(to, 'secret'), `${secret}\n`, { mode: 0o600, flag: 'wx' }).catch((error: NodeJS.ErrnoException) => {
   if (error.code !== 'EEXIST') throw error;
-  console.warn(`[import] ${join(to, 'secret')} exists and is kept: sign-ins sealed with another secret will not open.`);
+  console.warn(`[import] ${join(to, 'secret')} exists and is kept: a ChatGPT connection sealed with another secret will not open.`);
 });
 
 const source = postgres(from, { max: 1, onnotice: () => undefined });

@@ -27,10 +27,6 @@ vi.mock('@/i18n/navigation', async () => {
   };
 });
 
-vi.mock('@/lib/authClient', () => ({
-  useSession: () => ({ data: { user: { id: 'usr_2', name: '독자' } }, isPending: false }),
-}));
-
 const personas: Persona[] = [
   { id: 'per_1', name: '내 페르소나', description: '', avatarUrl: null, createdAt: '2026-08-16T00:00:00.000Z' },
 ];

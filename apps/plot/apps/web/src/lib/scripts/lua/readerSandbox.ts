@@ -10,8 +10,8 @@
  * with the same card — keeps what the card's scripts left, as long as their code
  * is the same. A group's members, whose code differs, keep theirs apart, where
  * RisuAI's one state would start afresh at every speaker change. Never across
- * readers — a different reader's lease ends it, and so does signing out
- * (`authClient.ts`). A reload ends it too, as RisuAI's states are in memory.
+ * readers — a different reader's lease ends it. A reload ends it too, as
+ * RisuAI's states are in memory.
  *
  * Giving a lease back never ends the sandbox: another lease may be running in it
  * — the set a page builds when the reader switches a module or a preset takes
@@ -22,9 +22,6 @@
  * — a dialog nobody will answer now, a model call — fails, so the call ends in
  * the worker on its own and the state's queue moves on. A call spinning without
  * asking anything is the watchdog's, as ever.
- *
- * Imports no more than types, so the session code that ends it carries none of
- * the sandbox.
  */
 import type { LuaHost, LuaOutcome, LuaSandbox } from './sandbox';
 
@@ -90,7 +87,7 @@ function untilGone(host: LuaHost, gone: Promise<void>, given: () => boolean): Lu
   };
 }
 
-/** Ends the reader's sandbox, and every state in it: on signing out, or another reader. */
+/** Ends the reader's sandbox, and every state in it: for another reader. */
 export function endReaderLuaSandbox(): void {
   const was = held;
   held = null;

@@ -50,58 +50,24 @@ export function loadRootEnv(): void {
 /** The shortest secret a deployment takes: 32 characters, what `openssl rand -base64 32` prints is 44. */
 const MIN_AUTH_SECRET_CHARS = 32;
 const DEV_AUTH_URL = 'http://localhost:13000';
-/** The loopback port Shizue's development rule catches, for an origin it does not know. */
-const DEV_CALLBACK_PORT = 47801;
+/**
+ * The loopback port OpenAI's callback comes back on: the one Shizue, the Chrome
+ * Web Store extension, sends on to `http://localhost:13000` on this computer
+ * (`src/public/plot-signin-rules.json` in rokrokss/shizue).
+ */
+const SHIZUE_CALLBACK_PORT = 47801;
 
 /**
- * The loopback port each web origin's sign-in comes back on in Shizue, the Chrome
- * Web Store extension readers install (`src/public/plot-signin-rules.json` in
- * rokrokss/shizue). Shizue sends each port to one origin and nowhere else, so an
- * origin asking OpenAI for another port has its readers sent to the wrong place —
- * 47801 is the development rule, and lands on `http://localhost:13000` on the
- * reader's own machine. Changing an entry here means releasing Shizue too.
+ * The loopback port to ask OpenAI for: Shizue's unless `CHATGPT_CALLBACK_PORT`
+ * names another, for offset dev servers and the browser tests' stand-in for
+ * Shizue (apps/e2e/shizueStandIn.ts), whose rules send it to their own origin.
  */
-const SHIZUE_CALLBACK_PORTS: Readonly<Record<string, number>> = {
-  'https://plot.shizue.net': 47811,
-  'http://localhost:13000': 47801,
-};
-
-/**
- * The loopback port to ask OpenAI for. A known origin needs no setting: its port
- * is Shizue's. In production a setting that disagrees with Shizue is refused at
- * boot rather than discovered at the first reader's sign-in — a known origin on
- * another port, another origin on a port Shizue sends elsewhere, or another
- * origin with no port at all. Development takes any port, for offset dev servers
- * and the browser tests' stand-in for Shizue (apps/e2e/shizueStandIn.ts).
- */
-function readCallbackPort(env: NodeJS.ProcessEnv, authUrl: string): number {
-  const shizuePort = SHIZUE_CALLBACK_PORTS[authUrl];
-  const production = env['NODE_ENV'] === 'production';
+function readCallbackPort(env: NodeJS.ProcessEnv): number {
   const raw = env['CHATGPT_CALLBACK_PORT']?.trim();
-  if (!raw) {
-    if (shizuePort !== undefined) return shizuePort;
-    if (production) {
-      throw new Error(
-        `CHATGPT_CALLBACK_PORT must be set for ${authUrl}: Shizue carries the sign-in only for ${Object.keys(SHIZUE_CALLBACK_PORTS).join(' and ')}, so another origin needs an extension of its own and the port it catches.`,
-      );
-    }
-    return DEV_CALLBACK_PORT;
-  }
-
+  if (!raw) return SHIZUE_CALLBACK_PORT;
   const port = Number(raw);
   if (!Number.isInteger(port) || port < 1024 || port > 65535) {
     throw new Error('CHATGPT_CALLBACK_PORT must be a port number from 1024 to 65535.');
-  }
-  if (production && shizuePort !== undefined && port !== shizuePort) {
-    throw new Error(
-      `CHATGPT_CALLBACK_PORT=${port} would send ${authUrl}'s sign-in elsewhere: Shizue brings it back on ${shizuePort}.`,
-    );
-  }
-  const owner = Object.entries(SHIZUE_CALLBACK_PORTS).find(([origin, shizue]) => shizue === port && origin !== authUrl);
-  if (production && owner) {
-    throw new Error(
-      `CHATGPT_CALLBACK_PORT=${port} is Shizue's port for ${owner[0]}: readers with Shizue would be sent there instead of ${authUrl}.`,
-    );
   }
   return port;
 }
@@ -121,9 +87,9 @@ function isWebOrigin(value: string): boolean {
 
 /**
  * `REMOTE_ORIGINS`: comma-separated origins, each as `BETTER_AUTH_URL` is written.
- * The sign-in origin itself is dropped, so the list is only the others. It is
- * for a shizue running on the reader's own machine — signing in on loopback —
- * and is refused anywhere else: the hosted app has no phone pairing.
+ * The web origin itself is dropped, so the list is only the others. It is for
+ * a shizue whose web origin is this machine's — a loopback one — and is refused
+ * anywhere else.
  */
 function readRemoteOrigins(env: NodeJS.ProcessEnv, authUrl: string): string[] {
   const listed = (env['REMOTE_ORIGINS'] ?? '').split(',').map((value) => value.trim()).filter(Boolean);
@@ -151,13 +117,13 @@ interface ApiConfig {
    * which the entry point reads so that reading the config writes nothing.
    */
   authSecret?: string;
-  /** The web app's origin: writes must come from it, and sign-in returns to it. */
+  /** The web app's origin: writes must come from it, and the ChatGPT connection returns to it. */
   authUrl: string;
   /**
    * Other origins the same web app is reached at — a tunnel to this machine, for
    * a phone (`REMOTE_ORIGINS`), and only on this machine. Writes may come from them
-   * too, but sign-in still returns to `authUrl`: a phone joins by pairing
-   * (`routes/devices.ts`), which exists only while this list does.
+   * too, but the ChatGPT connection still returns to `authUrl`: a phone joins by
+   * pairing (`routes/devices.ts`).
    */
   remoteOrigins: string[];
   /**
@@ -166,11 +132,9 @@ interface ApiConfig {
    * requests are refused there, as at the web origin.
    */
   apiOrigin?: string;
-  /** Additional origins for the NODE_ENV=test email/password fixture. */
-  authExtraTrustedOrigins: string[];
   /**
    * The port of OpenAI's `http://127.0.0.1:<port>/auth/callback` redirect. The
-   * companion extension rewrites that address to this app, one port per origin.
+   * Shizue extension rewrites that address to this app.
    */
   chatgptCallbackPort: number;
   /** `text` keeps the console as it reads in a terminal; `json` makes every line one JSON object (`log.ts`). */
@@ -239,7 +203,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
   if (deployed && authSecret !== undefined && authSecret.length < MIN_AUTH_SECRET_CHARS) {
     throw new Error(`BETTER_AUTH_SECRET must be at least ${MIN_AUTH_SECRET_CHARS} characters to serve ${authUrl} (e.g. openssl rand -base64 32), or unset for this install's own.`);
   }
-  const callbackPort = readCallbackPort(env, authUrl);
+  const callbackPort = readCallbackPort(env);
   const logFormat = env['LOG_FORMAT']?.trim() || 'text';
   if (logFormat !== 'text' && logFormat !== 'json') throw new Error(`LOG_FORMAT must be "text" or "json", got "${logFormat}"`);
   const metricsPort = readInteger(env, 'METRICS_PORT', 1, 65535);
@@ -254,7 +218,6 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     authUrl,
     remoteOrigins,
     ...(env['API_ORIGIN'] ? { apiOrigin: new URL(env['API_ORIGIN']).origin } : {}),
-    authExtraTrustedOrigins: [DEV_AUTH_URL],
     chatgptCallbackPort: callbackPort,
     logFormat,
     ...(metricsPort !== undefined ? { metricsPort } : {}),

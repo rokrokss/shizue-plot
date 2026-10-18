@@ -39,20 +39,19 @@ export interface RateWindow {
 export interface RateBucket extends RateWindow {
   /** The key's first part: which limit this is. */
   name: string;
-  /** Whom a window counts: the signed-in user (behind `requireUser`), or the client's address. */
+  /** Whom a window counts: the owner (`userId`, set by `ownerGate`), or the client's address. */
   by: 'user' | 'ip';
 }
 
 /**
- * The buckets, ten minutes each. What sized them (§10 요청 한도): sign-in starts
- * are a click or two per sign-in, from addresses a household or an office may
- * share; a generation takes seconds to stream and a group round asks for at
+ * The buckets, ten minutes each. What sized them (§10 요청 한도): ChatGPT
+ * connection starts are a click or two per connection; a generation takes seconds to stream and a group round asks for at
  * most ten; the wizard imports one card at a time and a chat import's start is
  * followed by at least a batch and a completion, so neither goes faster than
  * one a second; the paste migration uploads at most 110 pictures in a row.
  */
 export const RATE_LIMITS = {
-  /** `POST /api/chatgpt/sign-in`: unauthenticated, and it writes a verification row. */
+  /** `POST /api/chatgpt/sign-in`: it writes a verification row every time. */
   signIn: { name: 'sign_in', by: 'ip', limit: 30, windowMs: 10 * MINUTE },
   /** A catalogue search (`GET /api/explore?q=`): anyone may ask, and the server embeds every query. */
   search: { name: 'search', by: 'ip', limit: 300, windowMs: 10 * MINUTE },
@@ -193,7 +192,7 @@ export async function limitCaller(c: Context<AppEnv>, deps: AppDeps, bucket: Rat
   return hit.allowed ? null : rateLimited(c, hit.retryAfterSeconds);
 }
 
-/** `bucket` in front of a route; a user bucket goes after `requireUser`. */
+/** `bucket` in front of a route; a user bucket counts the owner `ownerGate` set. */
 export function rateLimit(deps: AppDeps, bucket: RateBucket): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     const refused = await limitCaller(c, deps, bucket);

@@ -2,11 +2,10 @@ import { seedSession } from '../seedSession.js';
 import { expect, test, type BrowserContext, type Locator, type Page } from '@playwright/test';
 
 /**
- * The P1 surfaces, along the path a reader actually walks them: A writes a plot
- * with two 추천 프로필 and an image its opening pulls in → publishes it → B
- * follows A from the plot page, picks one of the profiles and starts a chat on
- * it → the opening draws the picture → the 주간 인기 tab carries the work → A
- * publishes a second plot and B's bell says so.
+ * The P1 surfaces, along the path the owner walks them: they write a plot with
+ * two 추천 프로필 and an image its opening pulls in → publish it → pick one of
+ * the profiles on the plot page and start a chat on it, in a second window →
+ * the opening draws the picture → the 주간 인기 tab carries the work.
  *
  * **AI 초안 and 답장 추천 are deliberately not here.** Both are a real model
  * call the echo adapter cannot stand in for — a draft is strict JSON from the
@@ -14,9 +13,9 @@ import { expect, test, type BrowserContext, type Locator, type Page } from '@pla
  * off entirely without its key. Their contracts (in-flight guards, parse
  * retries, the 502/503 they answer with) are covered in `apps/api/test`.
  *
- * A and B live in separate browser contexts and the steps build on each other,
- * so the file runs serially. Every run uses fresh accounts and its own plots;
- * nothing is deleted, because this hits the dev database.
+ * The two windows are two browser contexts, both this computer's and so both the
+ * owner's, and the steps build on each other, so the file runs serially. Every
+ * run uses its own plot.
  */
 test.describe.configure({ mode: 'serial' });
 
@@ -43,13 +42,6 @@ const profiles = [
   { name: `신입 기자 ${run}`, description: `무엇이든 묻는 것이 일인 사람 ${run}` },
   { name: `옛 동료 ${run}`, description: `이 도시를 떠났다가 돌아온 사람 ${run}` },
 ];
-/** The second work: published after B follows, so it is what the bell is about. */
-const followUp = {
-  name: `두 번째 플롯 ${run}`,
-  description: `같은 도시의 다른 골목 ${run}`,
-  intro: `골목 끝에서 불이 켜졌다 ${run}`,
-};
-
 const UUID_PATH = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 
 let creatorContext: BrowserContext;
@@ -143,18 +135,9 @@ test('an uploaded image joins the plot and the plot goes public', async () => {
   await expect(creatorPage.getByRole('button', { name: '비공개로 전환' })).toBeVisible();
 });
 
-test('a reader follows the creator and starts a chat on a recommended profile', async () => {
+test('the plot page starts a chat on a recommended profile', async () => {
   await signUp(readerPage, reader);
   await readerPage.goto(`/ko/p/${plotId}`);
-
-  // Beside the creator's name, where a reader meets them.
-  const follow = readerPage.getByTestId('follow-button');
-  await expect(follow).toHaveText(/팔로우\s*0/);
-  await follow.click();
-  await expect(follow).toHaveText(/팔로잉\s*1/);
-
-  await readerPage.reload();
-  await expect(readerPage.getByTestId('follow-button')).toHaveText(/팔로잉\s*1/);
 
   // The work's own suggestions, offered above the reader's saved personas.
   const picks = readerPage.getByTestId('profile-pick');
@@ -211,44 +194,4 @@ test('the weekly tab carries the plot', async () => {
   await readerPage.getByPlaceholder('플롯 이름이나 보고 싶은 이야기로 검색').fill(plot.name);
   const card = readerPage.getByTestId('plot-card').filter({ hasText: plot.name });
   await expect(card).toHaveCount(1);
-  await expect(card).toContainText(creator.name);
-});
-
-test('a followed creator publishing a plot rings the reader’s bell', async () => {
-  // The bell is quiet until then: B followed A after the first plot went out,
-  // and a publish only ever notifies the followers it had at that moment.
-  await readerPage.goto('/ko');
-  await expect(readerPage.getByTestId('notification-bell')).toBeVisible();
-  await expect(readerPage.getByTestId('notification-badge')).toHaveCount(0);
-
-  const secondId = await createPlot(creatorPage, followUp.name);
-  await creatorPage.getByLabel('세계관 설정').fill(followUp.description);
-  await creatorPage.getByRole('button', { name: '도입부 추가' }).click();
-  await creatorPage.getByTestId('plot-intro').fill(followUp.intro);
-  await creatorPage.getByRole('button', { name: '저장', exact: true }).click();
-  await expect(creatorPage.getByText('저장했습니다')).toBeVisible();
-  await creatorPage.getByRole('button', { name: '공개하기' }).click();
-  await expect(creatorPage.getByRole('button', { name: '비공개로 전환' })).toBeVisible();
-
-  // The fan-out rides the job queue now, so the row lands a beat after the
-  // publish returns — and the bell only reads on mount. Reload until the walk
-  // catches up rather than staring at one mount that predates it.
-  await expect(async () => {
-    await readerPage.reload();
-    await expect(readerPage.getByTestId('notification-badge')).toHaveText('1', { timeout: 2_000 });
-  }).toPass({ timeout: 20_000 });
-
-  await readerPage.getByTestId('notification-bell').click();
-  const item = readerPage.getByTestId('notification-item');
-  await expect(item).toHaveCount(1);
-  await expect(item).toContainText(followUp.name);
-  await expect(item).toContainText(creator.name);
-  await expect(item).toHaveAttribute('href', `/ko/p/${secondId}`);
-
-  // There is no per-row read, so the panel marks them the way the API does.
-  await readerPage.getByTestId('notification-read-all').click();
-  await expect(readerPage.getByTestId('notification-badge')).toHaveCount(0);
-
-  await readerPage.reload();
-  await expect(readerPage.getByTestId('notification-badge')).toHaveCount(0);
 });

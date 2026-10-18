@@ -2,13 +2,11 @@
 
 import { useTranslations } from 'next-intl';
 import { Link, usePathname } from '@/i18n/navigation';
-import { useSession } from '@/lib/authClient';
 import { navClusters } from '@/lib/nav';
 import { Brand } from './Brand';
 import { Icon } from './Icon';
 import { LocaleSwitcher } from './LocaleSwitcher';
 import { NotificationBell } from './NotificationBell';
-import { SignOutButton } from './SignOutButton';
 import { ThemeSwitcher } from './ThemeSwitcher';
 import { buttonClass, cx } from './ui';
 
@@ -31,15 +29,8 @@ function NavLink({ href, label, active, icon }: { href: string; label: string; a
 
 export function Header() {
   const t = useTranslations('nav');
-  const chatgpt = useTranslations('chatgpt');
   const pathname = usePathname();
-  const { data, isPending } = useSession();
-
-  // Three clusters for a reader who is signed in. For one who is not, the only
-  // tab that leads anywhere is 탐색 — everything else is behind the way in, and
-  // the way in is what the right of the bar offers instead.
-  const clusters = navClusters(pathname);
-  const links = data ? clusters : clusters.slice(0, 1);
+  const links = navClusters(pathname);
 
   return (
     <header className="sticky top-0 z-20 border-b border-line bg-surface/95 backdrop-blur">
@@ -64,35 +55,16 @@ export function Header() {
           ))}
         </nav>
 
-        {/* Which controls belong here is not known until the session read lands,
-            and a guess that changes a moment later moves the bar under the
-            reader's finger. So it stays empty until then rather than filling
-            with a placeholder that has to be taken back. */}
         <div className="ml-auto flex items-center gap-2">
-          {isPending ? null : data ? (
-            <>
-              <Link href="/settings" className={buttonClass('secondary', 'sm')} aria-label={t('aiSettings')}>AI</Link>
-              {/* The bell stays at every width: what it carries arrives while
-                  the reader is elsewhere, and a phone is where they are. Only a
-                  conversation on a phone hides the whole bar (the layout). */}
-              <NotificationBell />
-              <div className="hidden items-center gap-2 lg:flex">
-                <LocaleSwitcher />
-                <ThemeSwitcher />
-                <SignOutButton />
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="hidden items-center gap-2 lg:flex">
-                <LocaleSwitcher />
-                <ThemeSwitcher />
-              </div>
-              <Link href="/login" aria-label={chatgpt('signIn')} className={buttonClass('secondary', 'sm')}>
-                <span className="text-xs sm:text-sm">{chatgpt('signIn')}</span>
-              </Link>
-            </>
-          )}
+          <Link href="/settings" className={buttonClass('secondary', 'sm')} aria-label={t('aiSettings')}>AI</Link>
+          {/* The bell stays at every width: what it carries arrives while
+              the reader is elsewhere, and a phone is where they are. Only a
+              conversation on a phone hides the whole bar (the layout). */}
+          <NotificationBell />
+          <div className="hidden items-center gap-2 lg:flex">
+            <LocaleSwitcher />
+            <ThemeSwitcher />
+          </div>
         </div>
       </div>
     </header>

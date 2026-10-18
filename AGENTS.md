@@ -1,7 +1,8 @@
 # shizue-plot
 
-shizue (always lowercase) is a hosted character-chat service. Readers sign in
-with ChatGPT, the only login, and their own ChatGPT plan pays for replies. It
+shizue (always lowercase) is a character-chat app one person runs on their own
+computer, as RisuAI and PocketRisu are: there are no accounts, and the owner's
+ChatGPT plan, connected through the Shizue extension, pays for replies. It
 imports RisuAI and SillyTavern cards and plays them as those apps do. The UI is
 in Korean, English and Japanese.
 
@@ -83,13 +84,15 @@ The suites share nothing, so they may run side by side:
   share their `created_at`. A test that checks order lets the clock tick first.
 
 The browser suite starts its own API and web app on main's dev ports (8787 and
-13000) and the sign-in callback port (47801). It refuses to reuse a running
+13000) and the ChatGPT callback port (47801). It refuses to reuse a running
 server. In main, run `make stop` first. Outside main, set `E2E_API_URL`,
 `E2E_WEB_URL` and `E2E_CALLBACK_PORT` to free ports.
 
-Sign-in needs the Shizue browser extension. To look at a logged-in screen, run
-the API with `NODE_ENV=test` on offset ports with a fresh `SHIZUE_DATA_DIR`. Test
-mode allows `POST /api/auth/sign-up/email` and the `echo/echo` model.
+There is no login: a browser on this computer is the owner (ARCHITECTURE §4.1),
+so any screen opens as it is. To look at one with data of your own, run the API
+with `NODE_ENV=test` on offset ports with a fresh `SHIZUE_DATA_DIR`; test mode
+allows the `echo/echo` model. Connecting ChatGPT needs the Shizue browser
+extension.
 
 Visual baselines in `apps/plot/apps/e2e/tests/visual.spec.ts-snapshots/` come
 in darwin and linux sets. Generate the linux set by running Playwright inside

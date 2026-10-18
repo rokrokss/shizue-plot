@@ -2,13 +2,11 @@
   "brand": {
     "name": "shizue",
     "full": "shizue",
-    "tagline": "小さな想像から始まる、あなただけの物語。",
-    "catchphrase": "小さなひらめきから、\nあなただけの物語へ。"
+    "tagline": "小さな想像から始まる、あなただけの物語。"
   },
   "nav": {
     "explore": "探索",
     "create": "制作",
-    "signOut": "ログアウト",
     "language": "言語",
     "theme": "テーマ",
     "chats": "チャット",
@@ -37,20 +35,6 @@
     "confirmDelete": "本当に削除しますか？元に戻せません。",
     "audiencePublic": "ユーザーに公開",
     "audienceAi": "AI専用"
-  },
-  "auth": {
-    "signInTitle": "ログイン",
-    "signInSubtitle": "物語の中の人物に出会い、対話と選択でその先へ。",
-    "signUpTitle": "新規登録",
-    "signUpSubtitle": "物語の中の誰かに会ってみましょう。",
-    "email": "メールアドレス",
-    "password": "パスワード",
-    "name": "名前",
-    "signIn": "入場する",
-    "signUp": "アカウントを作成",
-    "noAccount": "アカウントをお持ちではありませんか？",
-    "haveAccount": "すでにアカウントをお持ちですか？",
-    "passwordHint": "8文字以上で入力してください。"
   },
   "plots": {
     "title": "マイプロット",
@@ -362,7 +346,6 @@
     "profileDescriptionPlaceholder": "このプロフィールで読む読者が誰なのかを書いてください。",
     "profilePicked": "おすすめプロフィールを選ぶと、ペルソナの代わりに使われます。",
     "startChat": "チャットを始める",
-    "signInToChat": "入場すると、このプロットをすぐに始められます。",
     "model": "モデル",
     "persona": "ペルソナ",
     "noPersona": "ペルソナなし",
@@ -731,8 +714,6 @@
   "public": {
     "notFound": "プロットが見つからないか、公開されていません。",
     "edit": "編集",
-    "like": "いいね",
-    "unlike": "いいねを取り消す",
     "cast": "登場人物",
     "intros": "導入",
     "introLabel": "導入 {index}",
@@ -750,15 +731,12 @@
     "reply": "返信",
     "deleted": "削除されたコメントです",
     "empty": "まだコメントがありません。",
-    "more": "もっと見る",
-    "signInHint": "コメントは入場してから書けます。"
+    "more": "もっと見る"
   },
   "creators": {
     "notFound": "クリエイターが見つかりません。",
     "plotCount": "公開プロット {count}件",
     "empty": "まだ公開したプロットはありません。",
-    "follow": "フォロー",
-    "following": "フォロー中",
     "followerCount": "フォロワー {count}人"
   },
   "notifications": {
@@ -1222,7 +1200,7 @@
   },
   "errors": {
     "unknown": "不明なエラーが発生しました。",
-    "unauthorized": "ログインが必要です。",
+    "unauthorized": "この端末は接続されていません。コンピューターの設定 →「スマートフォンを接続」で QR コードを読み取って接続してください。",
     "not_found": "見つかりません。",
     "invalid_request": "リクエストが正しくありません。",
     "invalid_card": "キャラクターカードを読み取れませんでした。",
@@ -1237,14 +1215,6 @@
     "payload_too_large": "ファイルが大きすぎます。",
     "internal_error": "サーバーエラーが発生しました。",
     "http_error": "リクエストを処理できませんでした。",
-    "auth_error": "認証に失敗しました。",
-    "invalid_email_or_password": "メールアドレスまたはパスワードが正しくありません。",
-    "user_already_exists": "このメールアドレスは登録済みです。",
-    "invalid_email": "メールアドレスの形式が正しくありません。",
-    "password_too_short": "パスワードが短すぎます。",
-    "password_too_long": "パスワードが長すぎます。",
-    "user_not_found": "アカウントが見つかりません。",
-    "failed_to_create_user": "アカウントを作成できませんでした。",
     "character_limit": "登場人物はプロットごとに10人までです。",
     "intro_limit": "導入は10個まで、1つあたり16,000文字までです。",
     "asset_limit": "画像はプロットごとに100個までです。",
@@ -1310,7 +1280,8 @@
     "pairing_invalid": "接続コードの期限が切れたか、すでに使用されています。コンピューターで新しい QR コードを作成してください。",
     "tunnel_unavailable": "トンネルを開くツールがありません。Tailscale または cloudflared をインストールしてください。",
     "tunnel_failed": "トンネルを開けませんでした。少し待ってから、または別のネットワークで試してください。",
-    "no_tunnel": "先にスマートフォン接続を開いてください。"
+    "no_tunnel": "先にスマートフォン接続を開いてください。",
+    "local_only": "これは shizue を動かしているコンピューターでしかできません。"
   },
   "rebrand": {
     "eyebrow": "物語が育つ場所",
@@ -1318,10 +1289,6 @@
     "create": "自分の物語をつくる",
     "journeyTitle": "次のシーンは、あなたの番。",
     "journeySubtitle": "お気に入りの世界を見つけて、会話で新しいシーンを紡ぎましょう。",
-    "stepExplore": "心惹かれる世界を選んで",
-    "stepMeet": "物語の中の誰かと出会い",
-    "stepWrite": "あなたの選択で続きを紡ぐ",
-    "authNote": "想像は気軽に。物語はあなたらしく。",
     "chatSubtitle": "ひと休みしたシーンから、また続きを。",
     "emptyAction": "最初の物語を探しましょう",
     "resetFilters": "検索とフィルターをクリア",
@@ -1329,31 +1296,30 @@
   },
   "chatgpt": {
     "title": "AI 接続",
-    "description": "別のアカウントは不要です。ChatGPT で始めましょう。AI チャット・要約・返信候補は ChatGPT の利用枠を共有します。",
-    "disconnect": "ログアウト",
+    "description": "ChatGPT アカウントを接続すると、そのプランで会話します。AI チャット・要約・返信候補は ChatGPT の利用枠を共有します。",
+    "disconnect": "ChatGPT の接続を解除",
     "failed": "ChatGPT に接続できませんでした。再試行してください。",
     "connectedAccount": "接続済み ChatGPT アカウント",
-    "revocationPending": "ログアウトしました。ChatGPT での接続解除を確認できませんでした。ChatGPT 設定でアプリの接続を確認してください。",
-    "welcome": "物語を始めましょう。",
-    "signIn": "ChatGPTでログイン",
-    "extensionRequired": "ログインするには、デスクトップ版 Chrome に Shizue 拡張機能（0.3.6 以降）が必要です。インストール済みの場合は最新版に更新してください。",
+    "revocationPending": "接続を解除しました。ChatGPT での接続解除を確認できませんでした。ChatGPT 設定でアプリの接続を確認してください。",
+    "extensionRequired": "ChatGPT を接続するには、デスクトップ版 Chrome に Shizue 拡張機能（0.3.6 以降）が必要です。インストール済みの場合は最新版に更新してください。",
     "extensionInstall": "Chrome ウェブストアで Shizue を入手",
     "extensionRecheck": "再確認",
     "extensionStillMissing": "拡張機能がまだ見つかりません。インストール済みの場合は、このページを再読み込みしてください。",
-    "disconnectDevice": "この端末の接続を解除",
-    "pairHint": "スマートフォンでは拡張機能を使えません。コンピューターでログインしてから、設定の「スマートフォンを接続」で QR コードを読み取ってください。"
+    "connect": "ChatGPTで続ける",
+    "usingPlan": "ChatGPT のプランを使っています。",
+    "onComputer": "ChatGPT は shizue を動かしているコンピューターで接続します。接続すると、このスマートフォンも同じ接続を使います。"
   },
   "devices": {
     "title": "スマートフォンを接続",
-    "description": "スマートフォンのブラウザでこのコンピューターの shizue を開きます。ボタンを押すとトンネルを開いて QR コードを表示します。スマートフォンのカメラで読み取るとそのアドレスが開き、このアカウントに接続されます(スマートフォンでは ChatGPT でログインできないためです)。コードは 5 分間、1 回だけ使えます。",
+    "description": "スマートフォンのブラウザでこのコンピューターの shizue を開きます。ボタンを押すとトンネルを開いて QR コードを表示します。スマートフォンのカメラで読み取るとそのアドレスが開き、このコンピューターの shizue に接続されて、このコンピューターが接続した ChatGPT を一緒に使います。コードは 5 分間、1 回だけ使えます。",
     "start": "QR コードを作成",
     "again": "新しい QR コードを作成",
     "qrLabel": "スマートフォンで読み取る接続用 QR コード",
     "expiresIn": "あと {time} で期限切れになります。",
     "expired": "コードの期限が切れました。新しい QR コードを作成してください。",
-    "pairedHere": "この端末は別の端末から接続されました。ここでログアウトすると、この端末だけ接続が解除されます。",
+    "pairedHere": "このスマートフォンはコンピューターの shizue に接続されています。接続を解除するとこのスマートフォンだけが解除され、戻るにはコンピューターの設定で QR コードを読み取ります。",
     "pairTitle": "この端末を接続",
-    "pairDescription": "QR コードを作成したアカウントにこのブラウザを接続します。自分で作成したコードでなければ接続しないでください。",
+    "pairDescription": "QR コードを作成したコンピューターの shizue にこのブラウザを接続します。自分で作成したコードでなければ接続しないでください。",
     "pairConfirm": "接続する",
     "pairMissing": "接続コードがありません。コンピューターの設定から QR コードをもう一度読み取ってください。",
     "open": "スマートフォン接続を開く",
@@ -1362,7 +1328,8 @@
     "viaCloudflare": "Cloudflare クイックトンネルで開きます。スマートフォンにアプリは不要ですが、アドレスを知っている人は誰でもこの shizue の公開ページを見られ、開くたびにアドレスが変わります。Tailscale を入れると自分の端末だけが入れる固定アドレスで開きます。",
     "noTool": "トンネルを開くツールがありません。Tailscale(推奨、tailscale.com)または cloudflared をインストールしてから、このページを再読み込みしてください。",
     "openTailscale": "Tailscale で開いています:",
-    "openCloudflare": "Cloudflare クイックトンネルで開いています:"
+    "openCloudflare": "Cloudflare クイックトンネルで開いています:",
+    "leave": "このスマートフォンの接続を解除"
   },
   "migrate": {
     "title": "他のプラットフォームから移す",

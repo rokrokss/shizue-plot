@@ -3,11 +3,8 @@
 import { useFormatter, useTranslations } from 'next-intl';
 import { useCallback, useEffect, useState } from 'react';
 import { Button, Checkbox, ErrorText, Section, Spinner, TextArea } from '@/components/ui';
-import { Link } from '@/i18n/navigation';
 import { apiDelete, apiGet, apiSend } from '@/lib/api';
-import { useSession } from '@/lib/authClient';
 import { addComment, removeComment } from '@/lib/comments';
-import { signInHref } from '@/lib/nav';
 import { MAX_COMMENT_LENGTH, type Comment, type CommentPage } from '@/lib/types';
 import { useErrorMessage } from '@/lib/useErrorMessage';
 
@@ -15,9 +12,6 @@ import { useErrorMessage } from '@/lib/useErrorMessage';
  * The comment section under a public plot page. The count comes from the plot
  * read and then follows what happens here — every write moves it by one,
  * deleted comments included, exactly as the server counts them.
- *
- * The thread itself is a public read, so a reader with no account sees all of
- * it; only the writing is behind the gate, and there the way in stands instead.
  */
 export function CommentsSection({
   plotId,
@@ -29,8 +23,6 @@ export function CommentsSection({
   const t = useTranslations('comments');
   const common = useTranslations('common');
   const toMessage = useErrorMessage();
-  const { data: session, isPending } = useSession();
-  const signedIn = Boolean(session);
 
   const [items, setItems] = useState<Comment[] | null>(null);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -90,14 +82,7 @@ export function CommentsSection({
 
   return (
     <Section title={t('title', { count })}>
-      {/* Empty while the session read is in flight, for the same reason the
-          header's controls are: a box that turns into an invitation moves the
-          thread under the reader. */}
-      {isPending ? null : signedIn ? (
-        <CommentForm plotId={plotId} onCreated={created} />
-      ) : (
-        <SignInNote plotId={plotId} />
-      )}
+      <CommentForm plotId={plotId} onCreated={created} />
       <ErrorText>{error}</ErrorText>
       {items === null ? (
         <div className="flex justify-center py-6">
@@ -113,7 +98,6 @@ export function CommentsSection({
                 <CommentRow
                   comment={item}
                   plotId={plotId}
-                  canReply={signedIn}
                   onCreated={created}
                   onDelete={remove}
                 />
@@ -124,7 +108,6 @@ export function CommentsSection({
                         <CommentRow
                           comment={reply}
                           plotId={plotId}
-                          canReply={signedIn}
                           onCreated={created}
                           onDelete={remove}
                         />
@@ -156,14 +139,11 @@ export function CommentsSection({
 function CommentRow({
   comment,
   plotId,
-  canReply,
   onCreated,
   onDelete,
 }: {
   comment: Comment;
   plotId: string;
-  /** False for a reader with no account: there is no form behind the button. */
-  canReply: boolean;
   onCreated: (comment: Comment) => void;
   onDelete: (id: string) => Promise<void>;
 }) {
@@ -184,7 +164,7 @@ function CommentRow({
           {format.dateTime(new Date(comment.createdAt), { dateStyle: 'short', timeStyle: 'short' })}
         </span>
         <span className="ml-auto flex items-center gap-1">
-          {canReply && comment.parentId === null && !comment.deleted ? (
+          {comment.parentId === null && !comment.deleted ? (
             <Button variant="ghost" size="sm" disabled={replyBusy || deleting} onClick={() => setReplying((current) => !current)}>
               {replying ? common('cancel') : t('reply')}
             </Button>
@@ -244,24 +224,6 @@ function CommentRow({
         </div>
       ) : null}
     </div>
-  );
-}
-
-/** What stands where the write box would be, for a reader with no account. */
-function SignInNote({ plotId }: { plotId: string }) {
-  const t = useTranslations('comments');
-  const auth = useTranslations('auth');
-
-  return (
-    <p className="text-sm text-muted" data-testid="comment-sign-in">
-      {t('signInHint')}{' '}
-      <Link
-        href={signInHref(`/p/${plotId}`)}
-        className="text-fg underline-offset-4 hover:underline"
-      >
-        {auth('signIn')}
-      </Link>
-    </p>
   );
 }
 
