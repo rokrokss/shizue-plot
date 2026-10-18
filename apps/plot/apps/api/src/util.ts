@@ -46,3 +46,15 @@ export function optionalBoolean(body: Record<string, unknown>, key: string): boo
   if (typeof value !== 'boolean') throw badRequest('invalid_request', `${key} must be a boolean`);
   return value;
 }
+
+/**
+ * `Content-Disposition` for a download of `file`: the name in RFC 5987 form,
+ * and an ASCII stand-in for clients that predate it. `encodeURIComponent` leaves
+ * `'()*` alone, which RFC 5987 does not allow.
+ */
+export function attachmentDisposition(file: string): string {
+  const name = file.replace(/[\u0000-\u001f\u007f/\\]/g, '').trim() || 'download';
+  const ascii = name.replace(/[^\x20-\x7e]|["\\]/g, '_');
+  const encoded = encodeURIComponent(name).replace(/['()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}

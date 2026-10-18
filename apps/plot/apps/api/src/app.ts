@@ -13,6 +13,8 @@ import { chatRoutes, messageRoutes } from './routes/chats.js';
 import { deviceRoutes } from './routes/devices.js';
 import { FILE_IMPORT_PART_BYTES, fileImportRoutes, MAX_WORLD_INFO_BYTES } from './fileImports.js';
 import { chatImportRoutes, importRoutes } from './routes/imports.js';
+import { risuChatRoutes } from './routes/risuChats.js';
+import { backupRoutes } from './backup.js';
 import { credentialRoutes, modelBindingRoutes, modelPresetRoutes } from './routes/models.js';
 import { noteRoutes } from './routes/notes.js';
 import { personaRoutes } from './routes/personas.js';
@@ -30,6 +32,8 @@ const FILE_IMPORT_PATH = /^\/api\/file-imports$/;
 const FILE_IMPORT_PART_PATH = /^\/api\/file-imports\/[^/]+\/parts\/\d+$/;
 /** A chat import's attachment (`…/import/attachments`) — an upload, not the 5MB of JSON. */
 const ATTACHMENT_PATH = /^\/api\/chats\/[^/]+\/import\/attachments$/;
+/** A backup being restored: the whole app folder in one body, read as it streams (`backup.ts`). */
+const RESTORE_PATH = /^\/api\/backup\/restore$/;
 
 /**
  * Route order matters: the probe and a phone's claim of its pairing code are
@@ -65,6 +69,9 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
 
   app.use('/api/*', (c, next) => {
     const path = c.req.path;
+    // No cap: a backup is as large as the folder it was made of, and it is
+    // read into a new folder as it arrives, never held.
+    if (RESTORE_PATH.test(path) && c.req.method === 'PUT') return next();
     if (ATTACHMENT_PATH.test(path)) return attachmentLimit(c, next);
     if (FILE_IMPORT_PART_PATH.test(path)) return partLimit(c, next);
     return (FILE_IMPORT_PATH.test(path) ? fileImportLimit : jsonLimit)(c, next);
@@ -94,6 +101,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   app.route('/api/reader-presets', readerPresetRoutes(deps));
   // The reader's own RisuAI modules, laid over their chats (`chats.modules`).
   app.route('/api/reader-modules', readerModuleRoutes(deps));
+  // A work's chats as RisuAI writes them out (`GET /api/chats/:id/export/risu`).
+  app.route('/api/chats', risuChatRoutes(deps));
   app.route('/api/chats', chatRoutes(deps));
   // A chat brought over from another app, written in batches (`POST /api/chats/import`).
   app.route('/api/chats', chatImportRoutes(deps));
@@ -105,6 +114,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   app.route('/api/imports', importRoutes(deps));
   // Card and module files: uploaded in parts, read by a job, polled for (`fileImports.ts`).
   app.route('/api/file-imports', fileImportRoutes(deps));
+  // The whole app folder as one file, and its restore beside it for the next start (`backup.ts`).
+  app.route('/api/backup', backupRoutes(deps));
 
   return app;
 }

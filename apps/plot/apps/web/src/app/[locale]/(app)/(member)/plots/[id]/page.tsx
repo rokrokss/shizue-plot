@@ -33,6 +33,7 @@ import {
 import { Link, useRouter } from '@/i18n/navigation';
 import { locales } from '@/i18n/routing';
 import { apiDelete, apiGet, apiSend, apiUpload } from '@/lib/api';
+import { CHAT_FILE_ACCEPT, ChatFileError, importChatFile, prepareChatFile } from '@/lib/chatFiles';
 import { importFile, type FileImportFields, type ImportProgress } from '@/lib/fileImport';
 import { readImportWarnings, takeImportWarnings, type ImportWarning } from '@/lib/importWarnings';
 import { loreBudget } from '@/lib/loreBudget';
@@ -733,7 +734,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
           <Link href={`/p/${plot.id}`} className={buttonClass('primary', 'md', 'w-full')}>
             {t('viewWork')}
           </Link>
-          <ChatList plotId={id} />
+          <ChatList plotId={id} members={plot.characters} />
           <Button variant="danger" className="w-full" onClick={() => void remove()}>
             {t('deletePlot')}
           </Button>
@@ -1357,8 +1358,19 @@ function CoverPicker({
   );
 }
 
-/** The reader's own conversations with this work. */
-function ChatList({ plotId }: { plotId: string }) {
+/** The formats a chat is written out in, as RisuAI's chat export offers them. */
+const CHAT_EXPORT_FORMATS = [
+  ['json', 'chatExportJson'],
+  ['txt', 'chatExportTxt'],
+  ['html', 'chatExportHtml'],
+] as const;
+
+/**
+ * The reader's own conversations with this work — and, as at the foot of
+ * RisuAI's chat list, the way to bring a chat file in and to write them out:
+ * each chat as JSON, text or HTML, and every one of them at once.
+ */
+function ChatList({ plotId, members }: { plotId: string; members: PlotMember[] }) {
   const t = useTranslations('plot');
   const common = useTranslations('common');
   const format = useFormatter();
@@ -1366,12 +1378,49 @@ function ChatList({ plotId }: { plotId: string }) {
 
   const [chats, setChats] = useState<Chat[] | null>(null);
   const [error, setError] = useState('');
+  /** The chat whose export formats are showing. */
+  const [exporting, setExporting] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  /** What the last import brought in and left out, a line each. */
+  const [report, setReport] = useState<string[]>([]);
+  const picker = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
+  const load = useCallback(() => {
     apiGet<Chat[]>(`/api/chats?plotId=${plotId}`).then(setChats, (caught: unknown) =>
       setError(toMessage(caught)),
     );
   }, [plotId, toMessage]);
+  useEffect(load, [load]);
+
+  async function importChats(file: File): Promise<void> {
+    setImporting(true);
+    setError('');
+    setReport([]);
+    try {
+      const prepared = await prepareChatFile(file.name, await file.text(), {
+        members: members.map((member) => ({ id: member.id, name: member.name })),
+      });
+      const results = await importChatFile(plotId, file.name, prepared);
+      const done = results.flatMap((result) => (result.status === 'done' ? [result] : []));
+      const already = results.filter((result) => result.status === 'already_imported').length;
+      const failed = results.flatMap((result) => (result.status === 'failed' ? [result] : []));
+      const sum = (key: 'bookmarks' | 'swipes' | 'unknownSpeaker'): number =>
+        done.reduce((total, result) => total + result.dropped[key], 0);
+      setReport([
+        ...(done.length > 0 ? [t('chatImportDone', { count: done.length })] : []),
+        ...(already > 0 ? [t('chatImportAlready', { count: already })] : []),
+        ...(failed.length > 0 ? [t('chatImportFailed', { count: failed.length, reason: toMessage(failed[0]!.error) })] : []),
+        ...(sum('bookmarks') > 0 ? [t('chatImportBookmarks', { count: sum('bookmarks') })] : []),
+        ...(sum('unknownSpeaker') > 0 ? [t('chatImportUnknownSpeaker', { count: sum('unknownSpeaker') })] : []),
+        ...(sum('swipes') > 0 ? [t('chatImportSwipes', { count: sum('swipes') })] : []),
+      ]);
+      load();
+    } catch (caught) {
+      setError(caught instanceof ChatFileError ? t('chatImportNoData') : toMessage(caught));
+    } finally {
+      setImporting(false);
+    }
+  }
 
   async function remove(id: string): Promise<void> {
     if (!window.confirm(common('confirmDelete'))) return;
@@ -1391,29 +1440,86 @@ function ChatList({ plotId }: { plotId: string }) {
       ) : (
         <ul className="space-y-1">
           {chats.map((chat) => (
-            <li key={chat.id} className="group flex items-center gap-2">
-              <Link
-                href={`/chats/${chat.id}`}
-                className="min-w-0 flex-1 rounded-lg px-2 py-1.5 text-sm transition-colors hover:bg-raised"
-              >
-                <span className="block truncate">{chat.title || chat.id}</span>
-                <span className="block text-xs text-muted">
-                  {format.dateTime(new Date(chat.updatedAt), { dateStyle: 'short', timeStyle: 'short' })}
-                </span>
-              </Link>
-              <Button
-                variant="ghost"
-                size="sm"
-                aria-label={common('delete')}
-                className="opacity-0 transition-opacity group-hover:opacity-100"
-                onClick={() => void remove(chat.id)}
-              >
-                ✕
-              </Button>
+            <li key={chat.id} data-testid="work-chat" className="group">
+              <div className="flex items-center gap-2">
+                <Link
+                  href={`/chats/${chat.id}`}
+                  className="min-w-0 flex-1 rounded-lg px-2 py-1.5 text-sm transition-colors hover:bg-raised"
+                >
+                  <span className="block truncate">{chat.title || chat.id}</span>
+                  <span className="block text-xs text-muted">
+                    {format.dateTime(new Date(chat.updatedAt), { dateStyle: 'short', timeStyle: 'short' })}
+                  </span>
+                </Link>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-expanded={exporting === chat.id}
+                  onClick={() => setExporting((current) => (current === chat.id ? null : chat.id))}
+                >
+                  {t('chatExport')}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-label={common('delete')}
+                  className="opacity-0 transition-opacity group-hover:opacity-100"
+                  onClick={() => void remove(chat.id)}
+                >
+                  ✕
+                </Button>
+              </div>
+              {exporting === chat.id ? (
+                <div className="flex flex-wrap gap-2 px-2 pb-1.5">
+                  {CHAT_EXPORT_FORMATS.map(([kind, label]) => (
+                    <a
+                      key={kind}
+                      href={`/api/chats/${chat.id}/export/risu?format=${kind}`}
+                      download
+                      aria-label={t('chatExportAs', { title: chat.title || chat.id, format: t(label) })}
+                      className={buttonClass('secondary', 'sm')}
+                    >
+                      {t(label)}
+                    </a>
+                  ))}
+                </div>
+              ) : null}
             </li>
           ))}
         </ul>
       )}
+      <div className="space-y-2 border-t border-line pt-3">
+        <p className="text-xs text-muted">{t('chatImportHint')}</p>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="secondary" size="sm" busy={importing} onClick={() => picker.current?.click()}>
+            {importing ? t('chatImporting') : t('chatImport')}
+          </Button>
+          {chats && chats.length > 0 ? (
+            <a href={`/api/chats/export/risu?plotId=${plotId}`} download className={buttonClass('secondary', 'sm')}>
+              {t('chatsExportAll')}
+            </a>
+          ) : null}
+        </div>
+        <input
+          ref={picker}
+          type="file"
+          accept={CHAT_FILE_ACCEPT}
+          className="hidden"
+          data-testid="chat-file-input"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            event.target.value = '';
+            if (file) void importChats(file);
+          }}
+        />
+        {report.length > 0 ? (
+          <div role="status" className="space-y-1 text-xs text-muted">
+            {report.map((line) => (
+              <p key={line}>{line}</p>
+            ))}
+          </div>
+        ) : null}
+      </div>
     </Section>
   );
 }

@@ -72,6 +72,7 @@ import {
   type Chat,
   type ChatAttachment,
   type ChatMemorySettings,
+  type Db,
   type Message,
   type MessageRole,
   type MessageSource,
@@ -102,7 +103,7 @@ import {
   withFileTexts,
   withTurnImages,
 } from '../attachments.js';
-import type { AppDeps, AppEnv } from '../deps.js';
+import type { AppDeps, AppEnv, Tx } from '../deps.js';
 import { ApiError, badRequest, forbidden, notFound } from '../errors.js';
 import {
   acquireChatSlot,
@@ -344,7 +345,7 @@ export async function loadWritableChat(deps: AppDeps, id: string, userId: string
   return chat;
 }
 
-async function loadMessages(deps: AppDeps, chatId: string): Promise<Message[]> {
+export async function loadMessages(deps: AppDeps, chatId: string): Promise<Message[]> {
   return deps.db
     .select()
     .from(messages)
@@ -703,7 +704,7 @@ async function startPersona(
   return created!;
 }
 
-async function loadPersona(deps: AppDeps, chat: Chat): Promise<Persona | null> {
+export async function loadPersona(deps: AppDeps, chat: Chat): Promise<Persona | null> {
   if (!chat.personaId) return null;
   const [persona] = await deps.db
     .select()
@@ -1114,7 +1115,7 @@ const withMacroWrites = (writes: VariableDelta | null, delta: VariableDelta | nu
  * globals — as ST writes them when it stores the text. Past the globals' caps
  * the text stands and the writes do not, as a prompt's do.
  */
-async function keepStoredGlobalWrites(deps: AppDeps, chat: Pick<Chat, 'id' | 'plotId'>, stored: TavernStored | null): Promise<void> {
+export async function keepStoredGlobalWrites(deps: AppDeps, chat: Pick<Chat, 'id' | 'plotId'>, stored: TavernStored | null): Promise<void> {
   if (!stored?.globalVariableWrites) return;
   try {
     await mergeGlobalVariables(deps, chat.plotId, stored.globalVariableWrites);
@@ -1844,24 +1845,10 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     if (!model) throw badRequest('model_unavailable', 'No model preset is set; add one in Settings › Models');
     const persona = await startPersona(deps, userId, plot, body);
 
-    // SillyTavern's stored-text scripts rewrite the greetings a chat opens on, as
-    // written (`getFirstMessage`); only an ST card carries any (`storedRegex.ts`).
-    const greetings = await regexGreetings(deps, plot, persona?.name ?? DEFAULT_USER_NAME);
-    const clock = requestClock(c, plot);
     // Minted here, so a SillyTavern greeting's `{{pick}}` can draw from it.
     const chatId = randomUUID();
-    // In a work SillyTavern wrote, each greeting as ST shows it the first time
-    // (`tavernGreetingMacro`): its macros expanded and what they wrote kept on
-    // its root. Otherwise `{{char}}` is RisuAI's: a work of one member is that
-    // member, under its nickname, else its name — so renaming the work changes
-    // no greeting — and a work of several is the work; the clock is the reader's
-    // at the moment the chat opens, and there is no seed — an intro is expanded once.
-    const tavern = await tavernGreetingMacro(deps, plot, persona, clock, chatId);
-    const expanded = tavern ? greetings.slice(0, MAX_INTRO_ROOTS).map((greeting) => expandTavernStored(greeting, tavern)) : null;
-    const intros = expanded
-      ? expanded.map((greeting) => greeting.text.trim())
-      : introTexts(greetings, { char: await introChar(deps, plot), user: persona?.name ?? DEFAULT_USER_NAME, clock });
-    const chosen = pickIntroIndex(intros.length, body['introIndex']);
+    const openings = await openingsOf(deps, c, plot, persona, chatId);
+    const chosen = pickIntroIndex(openings.intros.length, body['introIndex']);
 
     const [created] = await deps.db
       .insert(chats)
@@ -1877,32 +1864,10 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     let chat = created!;
 
     // An empty chosen intro simply means the chat starts without a root message.
-    if (intros[chosen]) {
-      // Every intro becomes a root sibling so the chat opens on the chosen one
-      // and the existing swipe mechanism moves between them.
-      const stored = intros
-        .map((content, index) => ({ content, index }))
-        .filter((entry) => entry.content.length > 0);
-      const stamp = Date.now();
-      const values = stored.map((entry, position) => ({
-        // Ids are minted here so the head does not depend on the order RETURNING
-        // happens to use.
-        id: randomUUID(),
-        chatId: chat.id,
-        parentId: null,
-        role: 'assistant' as const,
-        content: entry.content,
-        model,
-        ...variableDeltaOf(null, expanded?.[entry.index]?.variableWrites ?? null),
-        // Distinct timestamps: siblings are ordered by creation, and one bulk
-        // insert would otherwise share a timestamp and fall back to ordering by id.
-        createdAt: new Date(stamp + position),
-      }));
-      await deps.db.insert(messages).values(values);
+    const head = await writeOpenings(deps.db, chat.id, openings, chosen, model);
+    if (head) {
       // What the greeting the chat opens on wrote to the work's globals.
-      await keepStoredGlobalWrites(deps, chat, expanded?.[chosen] ?? null);
-
-      const head = values[stored.findIndex((entry) => entry.index === chosen)]!;
+      await keepStoredGlobalWrites(deps, chat, openings.expanded?.[chosen] ?? null);
       const [updated] = await deps.db
         .update(chats)
         .set({ headMessageId: head.id })
@@ -3507,6 +3472,74 @@ async function regexGreetings(deps: AppDeps, plot: Plot, userName: string): Prom
   if (intros.length === 0) return intros;
   const members = await loadMembers(deps.db, plot.id);
   return Promise.all(intros.map((intro) => regexStoredText(intro, AI_OUTPUT, { characters: members, userName })));
+}
+
+/**
+ * The openings a new chat of `plot` starts on (`POST /api/chats`, and a chat
+ * import that opens on the work's own, `openingIndex`), each as the chat stores
+ * it. SillyTavern's stored-text scripts rewrite the greetings first, as written
+ * (`getFirstMessage`); only an ST card carries any (`storedRegex.ts`). In a work
+ * SillyTavern wrote, each greeting is then as ST shows it the first time
+ * (`tavernGreetingMacro`): its macros expanded and what they wrote kept on its
+ * root (`expanded`, by index). Otherwise `{{char}}` is RisuAI's: a work of one
+ * member is that member, under its nickname, else its name — so renaming the
+ * work changes no greeting — and a work of several is the work; the clock is
+ * the reader's at the moment the chat opens, and there is no seed — an intro is
+ * expanded once.
+ */
+export async function openingsOf(
+  deps: AppDeps,
+  c: Context<AppEnv>,
+  plot: Plot,
+  persona: Persona | null,
+  chatId: string,
+): Promise<{ intros: string[]; expanded: TavernStored[] | null }> {
+  const greetings = await regexGreetings(deps, plot, persona?.name ?? DEFAULT_USER_NAME);
+  const clock = requestClock(c, plot);
+  const tavern = await tavernGreetingMacro(deps, plot, persona, clock, chatId);
+  const expanded = tavern ? greetings.slice(0, MAX_INTRO_ROOTS).map((greeting) => expandTavernStored(greeting, tavern)) : null;
+  const intros = expanded
+    ? expanded.map((greeting) => greeting.text.trim())
+    : introTexts(greetings, { char: await introChar(deps, plot), user: persona?.name ?? DEFAULT_USER_NAME, clock });
+  return { intros, expanded };
+}
+
+/**
+ * Writes a chat's openings (`openingsOf`) as its parent-null sibling roots, so
+ * the chat opens on the `chosen` one and the swipe moves between them, and
+ * answers that one's row — or null, writing nothing, when the chosen opening is
+ * empty: the chat then starts without a root. Each is stamped a millisecond
+ * after the one before from `stamp`, in the openings' order: siblings are
+ * ordered by creation, and one bulk insert would otherwise share a time and fall
+ * back to ordering by id.
+ */
+export async function writeOpenings(
+  db: Db | Tx,
+  chatId: string,
+  openings: { intros: string[]; expanded: TavernStored[] | null },
+  chosen: number,
+  model: string,
+  stamp = Date.now(),
+): Promise<{ id: string; createdAt: Date } | null> {
+  if (!openings.intros[chosen]) return null;
+  const stored = openings.intros
+    .map((content, index) => ({ content, index }))
+    .filter((entry) => entry.content.length > 0);
+  const values = stored.map((entry, position) => ({
+    // Ids are minted here so the head does not depend on the order RETURNING
+    // happens to use.
+    id: randomUUID(),
+    chatId,
+    parentId: null,
+    role: 'assistant' as const,
+    content: entry.content,
+    model,
+    ...variableDeltaOf(null, openings.expanded?.[entry.index]?.variableWrites ?? null),
+    createdAt: new Date(stamp + position),
+  }));
+  await db.insert(messages).values(values);
+  const head = values[stored.findIndex((entry) => entry.index === chosen)]!;
+  return { id: head.id, createdAt: head.createdAt };
 }
 
 /** Which opening the chat starts on; the first one when the reader did not say. */

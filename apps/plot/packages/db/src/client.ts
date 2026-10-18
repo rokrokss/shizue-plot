@@ -1,6 +1,7 @@
 import { PGlite } from '@electric-sql/pglite';
 import { vector } from '@electric-sql/pglite-pgvector';
 import { drizzle, type PgliteDatabase } from 'drizzle-orm/pglite';
+import { readMigrationFiles } from 'drizzle-orm/migrator';
 import { migrate } from 'drizzle-orm/pglite/migrator';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,13 +27,29 @@ export interface OpenedDb {
  * second handle on the same directory would corrupt it, and code inside a
  * transaction must use the transaction, never `db`, or it waits on itself.
  */
-export async function openDb(dataDir?: string): Promise<OpenedDb> {
-  const client = await PGlite.create(dataDir ?? 'memory://', { extensions: { vector } });
+export async function openDb(dataDir?: string, options: { loadDataDir?: Blob } = {}): Promise<OpenedDb> {
+  // `loadDataDir`: a dump of another database (`dumpDataDir`), unpacked into an
+  // empty `dataDir` first — a restore of a backup (apps/api backup.ts).
+  const client = await PGlite.create(dataDir ?? 'memory://', {
+    extensions: { vector },
+    ...(options.loadDataDir ? { loadDataDir: options.loadDataDir } : {}),
+  });
   // PGlite takes the host's zone; the app's SQL has always run in UTC, as its server did.
   await client.exec(`set time zone 'UTC'`);
   const db = drizzle(client, { schema });
   return { db, client, close: () => client.close() };
 }
+
+/**
+ * The migrations this build has, as drizzle records one it applied
+ * (`drizzle.__drizzle_migrations`): the SQL's hash and the journal's time. A
+ * restore takes a backup only when every migration it records is one of these.
+ */
+export const knownMigrations = (): { hash: string; createdAt: number }[] =>
+  readMigrationFiles({ migrationsFolder: MIGRATIONS_DIR }).map((migration) => ({
+    hash: migration.hash,
+    createdAt: migration.folderMillis,
+  }));
 
 /**
  * Brings the database to the newest migration in `drizzle/`, as the app does at

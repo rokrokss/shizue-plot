@@ -1,4 +1,5 @@
 import { ModelSettings } from '@/components/ModelSettings';
+import { BackupSettings } from '@/components/BackupSettings';
 import { DevicePairing } from '@/components/DevicePairing';
 
 /** `error` is the code a ChatGPT connection that failed came back with (the API's callback). */
@@ -13,6 +14,7 @@ export default async function SettingsPage({
       {/* Settings › Models: the model presets, the keys, and the ChatGPT connection among them. */}
       <ModelSettings chatgptError={typeof error === 'string' ? error : undefined} />
       <DevicePairing />
+      <BackupSettings />
     </div>
   );
 }

@@ -36,10 +36,10 @@ import { attachedNoteIds } from '../notes.js';
 import { loadMembers } from '../hub.js';
 import { loadOwnedPlot } from '../plots.js';
 import { deleteQuietly } from '../storage.js';
-import { optionalVariableDelta, storableDelta } from '../scriptState.js';
+import { optionalVariableDelta, readLocalLore, storableDelta } from '../scriptState.js';
 import { buildPath } from '../tree.js';
 import { isUuid, optionalBoolean, optionalString, readJsonBody, requireString, requireUuidParam } from '../util.js';
-import { optionalSettings, resolvePersona, toChatJson } from './chats.js';
+import { keepStoredGlobalWrites, openingsOf, optionalSettings, resolvePersona, toChatJson, writeOpenings } from './chats.js';
 
 /** Hashes one lookup may ask about — a whole backup's cards and chats in a request or two. */
 const MAX_LOOKUP_HASHES = 1000;
@@ -367,12 +367,27 @@ async function lockImportingChat(tx: Tx, id: string, userId: string, { finished 
 
 /**
  * An imported chat starts on the default binding, as a chat started here with
- * no pick does — the file names no model we have — so there must be one.
+ * no pick does — the file names no model we have — so there must be one. Its
+ * model is what the work's openings are written by, where the chat opens on them.
  */
-async function requireDefaultModel(deps: AppDeps, userId: string): Promise<void> {
-  if (!(await resolvePreset(deps, { userId, modelBinding: null }, 'main'))) {
-    throw badRequest('model_unavailable', 'No model preset is set; add one in Settings › Models');
+async function requireDefaultModel(deps: AppDeps, userId: string): Promise<string> {
+  const preset = await resolvePreset(deps, { userId, modelBinding: null }, 'main');
+  if (!preset) throw badRequest('model_unavailable', 'No model preset is set; add one in Settings › Models');
+  return preset.model;
+}
+
+/**
+ * `openingIndex` on `POST /api/chats/import`: which of the work's openings the
+ * chat opens on, for a file whose conversation does not bring its own greeting
+ * (RisuAI's, whose `fmIndex` names one of the character's). Absent: none.
+ */
+function optionalOpeningIndex(body: Record<string, unknown>): number | undefined {
+  const value = body['openingIndex'];
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw badRequest('invalid_request', 'openingIndex must be a non-negative integer');
   }
+  return value;
 }
 
 /** `POST /api/imports/lookup` — which of a backup's files are already here. */
@@ -475,6 +490,13 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
    * The file's hash is what a second run recognizes it by. A finished chat from
    * the same file is a 409 that names it; an unfinished one is what an import
    * that died part-way left behind, so it is deleted and this run starts over.
+   *
+   * With `openingIndex` the chat opens on the work's own openings, written as a
+   * chat started here writes them (`openingsOf`), on that one, and the batch
+   * follows it — for a RisuAI chat, whose greeting is the character's rather
+   * than one of its messages. The openings are stamped just before the first
+   * message's time, so the conversation keeps its own. An index past the
+   * openings, or an empty one, opens on none, as RisuAI shows no greeting there.
    */
   app.post('/import', async (c) => {
     const userId = c.get('userId');
@@ -486,12 +508,16 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
     if (!isSha256(sha256)) throw badRequest('invalid_request', 'sha256 must be a lowercase hex SHA-256 digest');
     const title = optionalString(body, 'title')?.trim().slice(0, MAX_IMPORT_TITLE_LENGTH);
     const batch = requireImportedMessages(body);
+    const openingIndex = optionalOpeningIndex(body);
     requireRoom(0, batch);
 
     if (!isUuid(plotId)) throw notFound('Plot not found');
     const plot = await loadOwnedPlot(deps, plotId, userId);
     const persona = await resolvePersona(deps, userId, body['personaId']);
-    await requireDefaultModel(deps, userId);
+    const model = await requireDefaultModel(deps, userId);
+    const chatId = randomUUID();
+    // Before the transaction: the openings read the work's members, outside it.
+    const openings = openingIndex === undefined ? null : await openingsOf(deps, c, plot, persona, chatId);
 
     const result = await deps.db.transaction(async (tx) => {
       // Two runs of the same file at once would each find nothing to replace and
@@ -518,21 +544,33 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
       const [created] = await tx
         .insert(chats)
         .values({
+          id: chatId,
           userId,
           plotId,
           personaId: persona?.id ?? null,
           title: title || plot.name,
           importing: true,
-          importedFrom: { fileName, sha256, importedAt: new Date().toISOString() },
+          importedFrom: {
+            fileName,
+            sha256,
+            importedAt: new Date().toISOString(),
+            ...(openings && openingIndex !== undefined && !openings.intros[openingIndex] ? { withoutOpening: true as const } : {}),
+          },
         })
         .returning();
-      const { head, ids } = await appendImported(tx, created!.id, null, null, batch);
+      let opening: { id: string; latest: Date } | null = null;
+      if (openings && openingIndex !== undefined) {
+        const stamp = (batch[0]?.at ?? Date.now()) - openings.intros.length - 1;
+        const root = await writeOpenings(tx, chatId, openings, openingIndex, model, stamp);
+        if (root) opening = { id: root.id, latest: new Date(stamp + openings.intros.length - 1) };
+      }
+      const { head, ids } = await appendImported(tx, created!.id, opening?.id ?? null, opening?.latest ?? null, batch);
       const [chat] = await tx
         .update(chats)
         .set({ headMessageId: head })
         .where(eq(chats.id, created!.id))
         .returning();
-      return { chat: chat!, ids, leftover };
+      return { chat: chat!, ids, leftover, opened: opening !== null };
     });
 
     if ('conflict' in result) {
@@ -540,6 +578,10 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
         { error: 'This chat file has already been imported', code: 'already_imported', chatId: result.conflict },
         409,
       );
+    }
+    // What the opening the chat opens on wrote to the work's globals, as a chat started here keeps it.
+    if (result.opened && openingIndex !== undefined) {
+      await keepStoredGlobalWrites(deps, result.chat, openings?.expanded?.[openingIndex] ?? null);
     }
     for (const path of result.leftover) await deleteQuietly(deps.storage, path);
     // Nothing can have attached a note to a chat that did not exist a moment ago.
@@ -743,6 +785,8 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
    *   frequency and role, `AuthorNoteSettings`), become the chat's own, read as
    *   the settings PATCH reads them: anything but an object (or null) is refused,
    *   the rest coerced into range by `coerceAuthorNoteSettings`.
+   * - `localLore`, the chat's own lore (RisuAI's chat `localLore`), becomes the
+   *   chat's, held to what a script's write of it is held to (`readLocalLore`).
    */
   app.post('/:id/import/complete', async (c) => {
     const id = requireUuidParam(c);
@@ -750,6 +794,7 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
     const body = await readJsonBody(c);
     const backfill = optionalBoolean(body, 'backfillMemory') === true;
     const variables = optionalVariableDelta(body, 'variables');
+    const localLore = readLocalLore(body['localLore']);
     const note = optionalString(body, 'note');
     // U+0000 is refused for the reason a delta refuses it: Postgres cannot store it.
     if (note !== undefined && (note.length > MAX_IMPORT_NOTE_LENGTH || note.includes('\u0000'))) {
@@ -790,6 +835,7 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
           importing: false,
           ...(note !== undefined ? { note } : {}),
           ...(noteSettings !== undefined ? { noteSettings } : {}),
+          ...(localLore !== undefined ? { localLore: localLore.length > 0 ? localLore : null } : {}),
           updatedAt: new Date(),
         })
         .where(eq(chats.id, id))

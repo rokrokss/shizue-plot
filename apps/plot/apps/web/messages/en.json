@@ -344,7 +344,23 @@
       "inlay": "In the message"
     },
     "viewWork": "Start a chat",
-    "openModelSettings": "Open model settings"
+    "openModelSettings": "Open model settings",
+    "chatExport": "Export",
+    "chatExportJson": "JSON",
+    "chatExportTxt": "Text",
+    "chatExportHtml": "HTML",
+    "chatExportAs": "Export {title} as {format}",
+    "chatsExportAll": "Export all chats",
+    "chatImport": "Import a chat",
+    "chatImportHint": "Brings a RisuAI chat file (.json, .html) or a SillyTavern chat (.jsonl) in as a chat of this work.",
+    "chatImporting": "Importing chats…",
+    "chatImportDone": "{count, plural, one {Imported # chat.} other {Imported # chats.}}",
+    "chatImportAlready": "{count, plural, one {# was already imported and was skipped.} other {# were already imported and were skipped.}}",
+    "chatImportFailed": "{count, plural, one {# could not be imported: {reason}} other {# could not be imported: {reason}}}",
+    "chatImportNoData": "This file has no chat to import.",
+    "chatImportBookmarks": "{count, plural, one {# bookmark was not brought over — shizue has no bookmarks.} other {# bookmarks were not brought over — shizue has no bookmarks.}}",
+    "chatImportUnknownSpeaker": "{count, plural, one {# reply whose member could not be told came in as the scene’s text.} other {# replies whose member could not be told came in as the scene’s text.}}",
+    "chatImportSwipes": "{count, plural, one {# alternative version past the limit was left out.} other {# alternative versions past the limit were left out.}}"
   },
   "cardImport": {
     "realmOpen": "Import from RisuRealm",
@@ -1213,7 +1229,10 @@
     "credential_unreadable": "This key can no longer be read. Enter it again.",
     "credentials_unavailable": "Keys cannot be stored with this setup.",
     "credential_kind_unsupported": "This kind of credential is not supported yet.",
-    "profile_unavailable": "This model profile is not in the registry. Pick another."
+    "profile_unavailable": "This model profile is not in the registry. Pick another.",
+    "invalid_backup": "This is not a shizue backup, or it is damaged. Nothing was changed.",
+    "backup_incompatible": "This version of shizue cannot open this backup. Restore it with the version that made it, or a newer one.",
+    "backup_busy": "A backup or a restore is already running. Try again once it is done."
   },
   "rebrand": {
     "eyebrow": "A place for plots to grow",
@@ -1275,6 +1294,20 @@
     "revoke": "Disconnect",
     "revokeAll": "Disconnect every phone",
     "unknownDevice": "Unknown device"
+  },
+  "backup": {
+    "title": "Backup and restore",
+    "description": "Downloads everything in the app folder as one file — works and chats, personas, presets, modules and pictures. It can be made while shizue runs.",
+    "secretNote": "The backup leaves out this install’s secret, which locks your API keys and ChatGPT connection. Restored on this computer they open as before; restored on another computer, enter the API keys and connect ChatGPT again.",
+    "download": "Download a backup",
+    "restoreTitle": "Restore from a backup",
+    "restoreDescription": "Checks the backup file, unpacks it into a new folder beside the current one, and switches to it the next time shizue starts. The current folder is kept beside it, not deleted.",
+    "restoreChoose": "Choose a backup file",
+    "restoring": "Checking and unpacking the backup…",
+    "pending": "The backup made {date} is waiting to be restored. Quit shizue and start it again to switch — anything changed before then stays only in the current folder.",
+    "cancel": "Cancel the restore",
+    "restored": "Restored from the backup made {date}. The folder from before is kept at {path}; delete it once you no longer need it.",
+    "localOnly": "A restore can only be done on the computer shizue runs on."
   },
   "migrate": {
     "title": "Move from another platform",

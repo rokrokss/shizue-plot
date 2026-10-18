@@ -803,6 +803,12 @@ export interface ImportProvenance {
    * from) — what a second run recognizes them by.
    */
   branches?: { fileName: string; sha256: string }[];
+  /**
+   * A chat brought in to open on the work's openings (RisuAI's, `openingIndex`)
+   * where the work had none at that index: its first message is the file's own,
+   * not a greeting, so an export keeps it among the messages.
+   */
+  withoutOpening?: true;
 }
 
 /**

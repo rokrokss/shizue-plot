@@ -1,6 +1,7 @@
 import { migrateDb, openDb, type OpenedDb } from '@shizue/db';
 import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
+import { rollBackRestore, swapInPendingRestore, type SwappedRestore } from './backup.js';
 import { dbDirOf } from './env.js';
 
 /** Another process holds the app's folder: the app is already running, or a command is. */
@@ -12,12 +13,30 @@ export class DataDirBusy extends Error {}
  * start, a maintenance command while the app runs — would corrupt it. The folder's
  * `app.lock` holds the pid of the process that has it; a lock whose process is gone
  * is taken over. Closing gives the folder back.
+ *
+ * A restore waiting for this start (`backup.ts`) is swapped in first, with the
+ * folder locked and nothing in it open; should the restored database not open,
+ * the folder from before is put back and opened instead.
  */
 export async function openAppDb(dataDir: string): Promise<OpenedDb> {
-  const release = lockDataDir(dataDir);
+  let release = lockDataDir(dataDir);
+  let swapped: SwappedRestore | null = null;
+  try {
+    swapped = swapInPendingRestore(dataDir);
+  } catch (error) {
+    release();
+    throw error;
+  }
+  // The lock went with the folder from before; this one is the restored folder's.
+  if (swapped) release = lockDataDir(dataDir);
   try {
     const opened = await openDb(dbDirOf(dataDir));
-    await migrateDb(opened.db);
+    try {
+      await migrateDb(opened.db);
+    } catch (error) {
+      await opened.close();
+      throw error;
+    }
     return {
       ...opened,
       close: async () => {
@@ -30,7 +49,10 @@ export async function openAppDb(dataDir: string): Promise<OpenedDb> {
     };
   } catch (error) {
     release();
-    throw error;
+    if (!swapped) throw error;
+    console.error('[shizue] the restored database did not open', error);
+    rollBackRestore(dataDir, swapped);
+    return openAppDb(dataDir);
   }
 }
 

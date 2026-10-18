@@ -1,3 +1,4 @@
+import type { AppFolder } from './backup.js';
 import type { PhoneAccess } from './tunnel.js';
 import type { Db } from '@shizue/db';
 import type { LLMAdapter } from '@shizue/llm';
@@ -47,6 +48,12 @@ export interface AppDeps {
   chatgpt?: { accounts: ChatGPTAccounts };
   /** Avatars, plot assets and chat attachments; the local driver by default. */
   storage: ObjectStorage;
+  /**
+   * The app's folder and its database, for a backup of the whole and a restore
+   * beside it (`backup.ts`); absent in tests that do not back up, and
+   * `/api/backup` then answers 404.
+   */
+  appFolder?: AppFolder;
   /** Environment used for LLM provider gating. */
   env: NodeJS.ProcessEnv;
   /**

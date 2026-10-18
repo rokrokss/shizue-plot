@@ -43,7 +43,7 @@ if (await portTaken(config.port)) portInUse();
 
 // The one handle on the app's database (PGlite in the app's folder, locked to this
 // process), brought to the newest migration before anything reads it.
-const { db, close: closeDb } = await openAppDb(config.dataDir).catch((error: unknown) => {
+const { db, client, close: closeDb } = await openAppDb(config.dataDir).catch((error: unknown) => {
   if (!(error instanceof DataDirBusy)) throw error;
   console.error(`[api] ${error.message}`);
   process.exit(1);
@@ -80,6 +80,8 @@ const deps: AppDeps = {
   remoteOrigins: config.remoteOrigins,
   ...(phoneAccess ? { phoneAccess } : {}),
   storage: createStorage(config.storage),
+  // The folder a backup is made of and a restore is put beside (`backup.ts`).
+  appFolder: { dataDir: config.dataDir, filesDir: config.storage.dir, client },
   // One for the process: card scripts' requests, their in-flight cap and RisuAI's rate limit.
   scriptFetch: createScriptFetch({ ownOrigins }),
   // What an import fetches of a card's pictures and fonts on other hosts, never this app's own.

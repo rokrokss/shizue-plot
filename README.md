@@ -57,8 +57,40 @@ app's data:
 
 `SHIZUE_DATA_DIR` names another. The app migrates the database at every start,
 and only one process opens a folder at a time (`app.lock`): a second start while
-the app runs is refused. Back the folder up by copying it while the app is
-stopped.
+the app runs is refused.
+
+### Backup and restore
+
+Settings › Backup and restore downloads the whole folder as one `.tar` file,
+made while the app runs: the database (PGlite's own dump, taken in one
+transaction), every file in `files/`, and a manifest with each table's row
+count and the hashes a restore checks. It leaves out the install's `secret`, so
+the file alone opens none of your API keys or ChatGPT tokens, and `models/`,
+which downloads again.
+
+A restore, from the computer the app runs on only, checks the file and unpacks
+it into a new folder beside the current one (`<folder>.restore-…`); anything
+that is not a whole shizue backup this version can open is refused and the new
+folder deleted. The database is opened there, its row counts checked, and
+migrated to this version. This install's `secret` is copied in, so a backup
+made on this computer opens its keys and ChatGPT connection as before; restored
+on another computer, enter the API keys and connect ChatGPT again. The switch
+happens at the next start: quit the app and start it again. The folder from
+before is kept beside the new one (`<folder>.before-restore-…`) until you delete
+it, and if the restored database does not open, the app goes back to it.
+
+RisuAI's `.bin` backups are not read: bring RisuAI characters over as card
+files, presets and modules as their files, and chats as below.
+
+### Chat files
+
+A work's chat list (in its studio page) imports a RisuAI chat — its JSON
+export of one chat or of all a character's chats, older `risuChat` and
+`risuAllChats` files, or its HTML export — or a SillyTavern `.jsonl` chat, and
+exports each chat as RisuAI does: JSON that RisuAI and shizue read back, text,
+or HTML, and every chat of the work as one JSON file. A RisuAI chat opens on the
+work's own greeting that its `fmIndex` names, as it does in RisuAI. The app's
+own export format (`docs/PLATFORM.md`) is unchanged.
 
 ## Layout
 

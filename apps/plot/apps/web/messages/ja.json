@@ -344,7 +344,23 @@
       "inlay": "メッセージ内"
     },
     "viewWork": "会話を始める",
-    "openModelSettings": "モデル設定を開く"
+    "openModelSettings": "モデル設定を開く",
+    "chatExport": "エクスポート",
+    "chatExportJson": "JSON",
+    "chatExportTxt": "テキスト",
+    "chatExportHtml": "HTML",
+    "chatExportAs": "{title}を{format}でエクスポート",
+    "chatsExportAll": "すべての会話をエクスポート",
+    "chatImport": "会話をインポート",
+    "chatImportHint": "RisuAIの会話ファイル（.json、.html）やSillyTavernの会話（.jsonl）を、この作品の会話として取り込みます。",
+    "chatImporting": "会話をインポートしています…",
+    "chatImportDone": "会話を{count}件インポートしました。",
+    "chatImportAlready": "{count}件はインポート済みのためスキップしました。",
+    "chatImportFailed": "{count}件はインポートできませんでした：{reason}",
+    "chatImportNoData": "インポートできる会話がないファイルです。",
+    "chatImportBookmarks": "ブックマーク{count}件は取り込みませんでした — shizueにはブックマークがありません。",
+    "chatImportUnknownSpeaker": "どのメンバーの発言か分からない返答{count}件は、場面の文として取り込みました。",
+    "chatImportSwipes": "上限を超える別バージョン{count}件は除きました。"
   },
   "cardImport": {
     "realmOpen": "RisuRealmから読み込む",
@@ -1213,7 +1229,10 @@
     "credential_unreadable": "このキーはもう読み取れません。キーを入れ直してください。",
     "credentials_unavailable": "この構成ではキーを保存できません。",
     "credential_kind_unsupported": "この種類の資格情報はまだ使えません。",
-    "profile_unavailable": "このモデルプロファイルはレジストリにありません。別のものを選んでください。"
+    "profile_unavailable": "このモデルプロファイルはレジストリにありません。別のものを選んでください。",
+    "invalid_backup": "shizueのバックアップファイルではないか、破損しています。何も変更していません。",
+    "backup_incompatible": "このバージョンのshizueでは開けないバックアップです。作成したバージョンかそれより新しいバージョンで復元してください。",
+    "backup_busy": "バックアップまたは復元がすでに進行中です。終わってからもう一度お試しください。"
   },
   "rebrand": {
     "eyebrow": "物語が育つ場所",
@@ -1275,6 +1294,20 @@
     "revoke": "接続を解除",
     "revokeAll": "すべてのスマートフォンの接続を解除",
     "unknownDevice": "不明な端末"
+  },
+  "backup": {
+    "title": "バックアップと復元",
+    "description": "作品と会話、ペルソナ、プリセット、モジュール、画像まで、アプリフォルダのすべてを一つのファイルとしてダウンロードします。shizueを動かしたまま作れます。",
+    "secretNote": "APIキーとChatGPT接続を封じるこのインストールの秘密鍵はバックアップに含めません。このコンピューターで復元すればキーと接続はそのまま開き、別のコンピューターで復元した場合はAPIキーを入れ直し、ChatGPTを接続し直してください。",
+    "download": "バックアップをダウンロード",
+    "restoreTitle": "バックアップから復元",
+    "restoreDescription": "バックアップファイルを確認して今のフォルダの隣の新しいフォルダに展開し、次にshizueを起動したときにそのフォルダへ切り替えます。今のフォルダは消さずに隣に残します。",
+    "restoreChoose": "バックアップファイルを選ぶ",
+    "restoring": "バックアップを確認して展開しています…",
+    "pending": "{date}に作ったバックアップが復元を待っています。shizueを終了して起動し直すと切り替わります — それまでに変えたものは今のフォルダにだけ残ります。",
+    "cancel": "復元を取り消す",
+    "restored": "{date}に作ったバックアップから復元しました。復元前のフォルダは{path}に残っているので、不要なら削除してかまいません。",
+    "localOnly": "復元はshizueが動いているコンピューターでしかできません。"
   },
   "migrate": {
     "title": "他のプラットフォームから移す",
