@@ -8,6 +8,7 @@ export * from './chatgptAuth.js';
 export * from './chatgptResponses.js';
 export * from './providers.js';
 export * from './formats/index.js';
+export { GEMINI_SAFETY } from './geminiSafety.js';
 export * from './registry/index.js';
 export { legacyProfile, type LegacyPreset, type LegacyProfile } from './registry/legacy.js';
 export { fetchRegistry, type RegistryFetch } from './registry/remote.js';

@@ -176,5 +176,5 @@ export function profileUpdateStatus(catalog: RegistryCatalog, profileId: string,
 
 export { resolveSnapshot, snapshotOf } from './snapshot.js';
 export { validateCatalog, isMappingPath } from './validate.js';
-export { editable, effectiveValue, migrateValues, newPresetValues, parseProfileValues, profileBody, profileOutputTokens, seedValues, wireModelId } from './request.js';
+export { editable, effectiveValue, migrateValues, newPresetValues, parseProfileValues, profileBody, profileOutputTokens, seedValues, wireModelId, withSafetyDefault } from './request.js';
 export type * from './types.js';
