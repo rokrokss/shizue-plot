@@ -43,16 +43,6 @@ export const ELYN_SCHEMA: SiteSchema = {
         { id: 'name', label: '이름', kind: 'line', visibility: 'public' },
         { id: 'intro', label: '캐릭터 소개말', kind: 'text', visibility: 'public', sourceLimit: { chars: 9000 } },
         { id: 'tags', label: '태그', kind: 'keywords', visibility: 'public' },
-        {
-          id: 'rating',
-          label: '이용 등급',
-          kind: 'choice',
-          visibility: 'meta',
-          options: [
-            { value: 'all', label: '전체' },
-            { value: 'adult', label: '성인 전용' },
-          ],
-        },
       ],
     },
     {
@@ -207,7 +197,6 @@ const IMAGE_MACRO = /\{\{\s*img\s*::/i;
 export function elynToDraft(c: Conversion, input: SiteInput): MigrationDraft {
   const name = line(input['name']);
   if (!name) warn(c, 'nameMissing', 'profile.name');
-  if (input['rating'] === 'adult') warn(c, 'adultOnly', 'profile.rating');
 
   // 소개말 → the plot's intro and the character's, both in our 500 (D15).
   const introSource = prose(c, 'profile.intro', input['intro']);

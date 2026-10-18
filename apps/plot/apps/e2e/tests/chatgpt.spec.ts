@@ -60,7 +60,7 @@ test('connecting ChatGPT through Shizue, a callback error, and disconnecting', a
   // A failed callback comes back with its code; the next attempt goes out in this tab and lands back here.
   await page.addInitScript(installShizue);
   await page.goto('/ko/settings?error=chatgpt_login_declined');
-  await expect(page.getByText('ChatGPT 로그인을 허용하지 않았습니다.')).toBeVisible();
+  await expect(page.getByText('ChatGPT 연결을 허용하지 않았습니다.')).toBeVisible();
   await page.getByRole('button', CONNECT).click();
   await expect(page).toHaveURL(/\/ko\/settings$/);
   expect(signIn).toEqual({ next: '/settings', locale: 'ko' });

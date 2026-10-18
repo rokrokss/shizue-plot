@@ -365,9 +365,6 @@ function Wizard({ platform, schema }: { platform: MigrationPlatform; schema: Sit
           {step === 'preview' && !canCreate ? (
             <p className="mr-auto text-xs text-danger">{t('preview.cannotCreate')}</p>
           ) : null}
-          {step === 'preview' && canCreate ? (
-            <p className="mr-auto text-xs text-muted">{t('preview.createHint')}</p>
-          ) : null}
           {previous ? (
             <Button data-testid="migrate-previous" onClick={() => setStep(previous)}>
               {t('previous')}

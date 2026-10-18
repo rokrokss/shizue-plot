@@ -70,7 +70,6 @@ describe('emptyInput', () => {
       name: '',
       intro: '',
       tags: '',
-      rating: '',
       prompt: '',
       firstMessages: [{ text: '' }],
       lore: [],
@@ -473,7 +472,6 @@ describe('Elyn', () => {
         name: '하루',
         intro,
         tags: '일상, 학원',
-        rating: 'adult',
         prompt: '{{char}}는 반장이다.',
         firstMessages: [{ text: '*손을 흔든다*\n"안녕!"' }, { text: '' }, { text: '비가 온다.' }],
         lore: [
@@ -542,7 +540,6 @@ describe('Elyn', () => {
       members: [{ name: '하루', intro: cut, description: '' }],
     });
     expect(result.warnings).toEqual([
-      { code: 'adultOnly', field: 'profile.rating' },
       { code: 'truncated', field: 'profile.intro', detail: { limit: MAX_INTRO_LENGTH, length: intro.length } },
       { code: 'loreGroupApprox', field: 'lore[0].group' },
       { code: 'loreInverted', field: 'lore[1].onMatch' },

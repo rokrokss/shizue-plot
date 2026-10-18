@@ -27,6 +27,12 @@ refused rather than shared: stop that program, or pick another port. Node 26 is
 needed because cards' Lua scripts run in a sandbox built on Node's permission
 model.
 
+npm 11.20 and newer may warn that 3 packages have install scripts not yet
+covered by `allowScripts` (`onnxruntime-node`, `sharp` and `protobufjs`) and
+suggest `npm install-scripts approve`. The warning is expected and nothing needs
+approving: the app needs none of those scripts — onnxruntime's native bindings
+ship inside its package, and its script only fetches CUDA files for Linux x64.
+
 On its first start the app also downloads its memory model, KURE-v1 (about
 740 MB), from Hugging Face into the data folder's `models/`. That happens in the
 background while the app already serves, and the log shows how far it is; a

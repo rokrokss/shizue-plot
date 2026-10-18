@@ -161,7 +161,6 @@ export interface MigrationDraft {
  * - `loreDependencyDropped`: Elyn dependencies have no counterpart.
  * - `componentSubset` {violation}: a `componentSubsetViolations` code.
  * - `componentTooLong` {limit, length}: the joined components exceed our cap; left out, preserved.
- * - `adultOnly`: an adult-only source comes in private only.
  * - `splitNoSections`: splitting was asked for and no `## 이름` block was found.
  * - `platformUnsupported`: no mapper for this platform yet.
  * - `imageInstructionsFound`: Elyn text tells the model to output `{{img::…}}`; the image
@@ -181,7 +180,6 @@ export const MIGRATION_WARNING_CODES = [
   'loreDependencyDropped',
   'componentSubset',
   'componentTooLong',
-  'adultOnly',
   'splitNoSections',
   'platformUnsupported',
   'imageInstructionsFound',

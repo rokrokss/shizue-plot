@@ -506,7 +506,7 @@ interface SseEvent {
 
 async function readSse(res: Response): Promise<SseEvent[]> {
   expect(res.headers.get('content-type')).toContain('text/event-stream');
-  // Without it the web's compressing `/api` rewrite holds the reply until it ends.
+  // Without it a compressing proxy in front, a phone's tunnel among them, may hold the reply until it ends.
   expect(res.headers.get('cache-control')).toContain('no-transform');
   const text = await res.text();
   return text
@@ -822,7 +822,11 @@ function ask(
   return Promise.resolve(target.request(path, { method, headers }, env));
 }
 
-/** What the Next rewrite sends on for this computer's browser at `http://localhost:13000`. */
+/**
+ * Forwarded headers that name only this computer, as a proxy on it writes them
+ * for its browser — the Next rewrite in front of the API did until 2026-10-18,
+ * hence the name.
+ */
 const FROM_NEXT = {
   host: 'localhost:8787',
   'x-forwarded-host': 'localhost:13000',
@@ -830,7 +834,7 @@ const FROM_NEXT = {
   'x-forwarded-port': '13000',
   'x-forwarded-for': '127.0.0.1',
 };
-/** What Tailscale Serve and then the Next rewrite send on for a phone on the tailnet. */
+/** What Tailscale Serve sends on for a phone on the tailnet. */
 const FROM_TUNNEL = {
   host: 'localhost:8787',
   'x-forwarded-host': 'mac.example.ts.net:8444',
@@ -855,7 +859,7 @@ describe('the local owner gate', () => {
     expect(row!.ownerId).toBe(owners[0]!.id);
   });
 
-  it("takes this computer's browser through the Next rewrite", async () => {
+  it("takes this computer's browser through a proxy on this computer", async () => {
     expect((await ask(app, '/api/plots', FROM_NEXT, '127.0.0.1')).status).toBe(200);
     expect((await ask(app, '/api/plots', { ...FROM_NEXT, 'x-forwarded-for': '::1' }, '::1')).status).toBe(200);
     expect((await ask(app, '/api/plots', { ...FROM_NEXT, 'x-forwarded-for': '127.0.0.1, ::ffff:127.0.0.1' }, '127.0.0.1')).status).toBe(200);

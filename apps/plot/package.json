@@ -12,7 +12,7 @@
     "dev": "pnpm --filter @shizue/api dev",
     "test": "vitest run",
     "test:e2e": "pnpm --filter @shizue/e2e test",
-    "typecheck": "tsc -p tsconfig.json && pnpm --filter @shizue/web typecheck",
+    "typecheck": "tsc -p tsconfig.json && tsc -p apps/e2e/tsconfig.json && pnpm --filter @shizue/web typecheck",
     "db:generate": "pnpm --filter @shizue/db db:generate"
   },
   "devDependencies": {

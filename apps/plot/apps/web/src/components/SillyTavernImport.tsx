@@ -509,7 +509,6 @@ export function ReviewPanel({
             onChange={(globalRegex) => set({ globalRegex })}
           />
         ) : null}
-        <p className="text-xs text-muted">{t('privateNotice')}</p>
       </section>
 
       <details className={cx(PANEL, 'text-sm')} data-testid="st-not-imported">

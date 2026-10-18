@@ -778,22 +778,23 @@ export function RunStep({
 
       {created && !running ? (
         <>
-          <section className={cx(PANEL, 'space-y-2')} data-testid="migrate-result">
-            <p className="text-sm text-fg">{t('privateNotice')}</p>
-            {savedLeft ? null : <p className="text-xs text-muted">{t('savedCleared')}</p>}
-            {result.warnings.length > 0 ? (
-              <details className="text-sm">
-                <summary className="cursor-pointer text-fg">
-                  {t('warningsSummary', { count: result.warnings.length })}
-                </summary>
-                <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-muted">
-                  {result.warnings.map((warning, index) => (
-                    <li key={index}>{labelled(warning)}</li>
-                  ))}
-                </ul>
-              </details>
-            ) : null}
-          </section>
+          {!savedLeft || result.warnings.length > 0 ? (
+            <section className={cx(PANEL, 'space-y-2')} data-testid="migrate-result">
+              {savedLeft ? null : <p className="text-xs text-muted">{t('savedCleared')}</p>}
+              {result.warnings.length > 0 ? (
+                <details className="text-sm">
+                  <summary className="cursor-pointer text-fg">
+                    {t('warningsSummary', { count: result.warnings.length })}
+                  </summary>
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-muted">
+                    {result.warnings.map((warning, index) => (
+                      <li key={index}>{labelled(warning)}</li>
+                    ))}
+                  </ul>
+                </details>
+              ) : null}
+            </section>
+          ) : null}
 
           <section className={cx(PANEL, 'space-y-2')} data-testid="migrate-preserved">
             <h2 className="heading3 text-fg">{t('preserved')}</h2>
