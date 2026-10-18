@@ -394,11 +394,16 @@ export function createLocalEmbedder(
     console.warn('[embedder] EMBEDDER_MODEL is read with EMBEDDER_ROUTING=single only; routing by language');
   }
   const available = new Set<EmbeddingModelId>();
+  // The published app has no `embedder:fetch`, and no public copy of KURE-v1's
+  // weights to fetch yet (ARCHITECTURE §7.3).
+  const fetchThem = env['SHIZUE_PACKAGED'] === '1'
+    ? 'this release cannot download them yet'
+    : 'run `pnpm --filter @shizue/api embedder:fetch`';
   for (const model of routedModels(config.routes)) {
     if (existsSync(weightsPath(config.cacheDir, model))) available.add(model);
     else {
       console.warn(
-        `[embedder] no weights for ${model} under ${config.cacheDir}; run \`pnpm --filter @shizue/api embedder:fetch\`. ` +
+        `[embedder] no weights for ${model} under ${config.cacheDir}; ${fetchThem}. ` +
           'Until then the plots it is for search nothing by meaning: memory falls back to recent and random summaries.',
       );
     }

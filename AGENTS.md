@@ -31,7 +31,8 @@ changing what it describes.
 |---|---|---|
 | `packages/contracts` | `@shizue/contracts` | zod schemas and types for chat export |
 | `apps/plot` | `@shizue/plot` | Script aggregator and the unit suite's vitest config |
-| `apps/plot/apps/{api,web,e2e}` | `@shizue/api`, `@shizue/web`, `@shizue/e2e` | Hono API, Next app, Playwright tests |
+| `apps/plot/apps/{api,web,e2e}` | `@shizue/api`, `@shizue/web`, `@shizue/e2e` | Hono API and the app's one process, Next app, Playwright tests |
+| `apps/plot/apps/cli` | `shizue-plot` | The `npx shizue-plot` package: its command and the build that bundles the app into it |
 | `apps/plot/packages/{core,db,llm}` | `@shizue/core`, `@shizue/db`, `@shizue/llm` | Cards, prompts and scripts; Drizzle schema and migrations; model adapters |
 
 ## Environment and commands
@@ -39,9 +40,14 @@ changing what it describes.
 Node 26+ (`.nvmrc`) and pnpm 10.28.2. Nothing else: no Docker. The database is
 PGlite (Postgres in WebAssembly) and the files are plain files, both in the
 app's folder, `SHIZUE_DATA_DIR` (default `apps/plot/data/app`). `make dev` builds the
-libraries, then serves the web app on 13000 and the API on 8787; the API
-migrates its database at every start. `make stop` stops the app. Settings live
-in `apps/plot/.env`, copied from `.env.example`.
+libraries, then starts the app's one process (`apps/api/src/index.ts` under
+`tsx watch`) on 13000: the API at `/api/*` and the web app under `next dev` for
+the rest, at both loopbacks. It migrates its database at every start. `make
+stop` stops it. Settings live in `apps/plot/.env`, copied from `.env.example`.
+Users run the published package instead, `npx shizue-plot` (README). The dev script's
+`tsx watch` leaves out `../web/.next/**`: the process loads Next's server chunks,
+which Next rewrites as it starts, and tsx's own ignore of dot folders reaches
+only inside `apps/api` — without it the process restarts over and over.
 
 ```sh
 pnpm install
@@ -57,7 +63,8 @@ The second line builds the libraries. Their exports point at `dist/`, which a
 fresh checkout lacks. Without it the typecheck fails with TS2307 errors that
 look like broken imports. The next two lines run one unit file and one browser
 spec. `pnpm test` runs every unit suite. `make e2e` builds the libraries and runs
-the whole browser suite.
+the whole browser suite. `npm pack` in `apps/plot/apps/cli` builds the package
+and packs it; never run `npm publish`, which is the owner's.
 
 ## Testing
 
@@ -84,21 +91,22 @@ The suites share nothing, so they may run side by side:
 - PGlite's clock counts milliseconds: two rows written in the same millisecond
   share their `created_at`. A test that checks order lets the clock tick first.
 
-The browser suite starts its own API and web app on main's dev ports (8787 and
-13000) and the ChatGPT callback port (47801). It refuses to reuse a running
-server. In main, run `make stop` first. Outside main, set `E2E_API_URL`,
-`E2E_WEB_URL` and `E2E_CALLBACK_PORT` to free ports.
+The browser suite starts its own app process on main's dev port (13000) and the
+ChatGPT callback port (47801). It refuses to reuse a running server. In main,
+run `make stop` first. Outside main, set `E2E_WEB_URL` (e.g.
+`http://localhost:13470`) and `E2E_CALLBACK_PORT` to free ports.
 
 There is no login: a browser on this computer is the owner (ARCHITECTURE §4.1),
-so any screen opens as it is. To look at one with data of your own, run the API
-with `NODE_ENV=test` on offset ports with a fresh `SHIZUE_DATA_DIR`; test mode
-allows the `echo/echo` model. Connecting ChatGPT needs the Shizue browser
+so any screen opens as it is. To look at one with data of your own, run the app
+(`pnpm --filter @shizue/api exec tsx src/index.ts`) with `NODE_ENV=test`, a free
+`SHIZUE_PORT` and a fresh `SHIZUE_DATA_DIR`; test mode allows the `echo/echo`
+model, and the web app still runs as `next dev`. Connecting ChatGPT needs the Shizue browser
 extension.
 
 Visual baselines in `apps/plot/apps/e2e/tests/visual.spec.ts-snapshots/` come
 in darwin and linux sets. Generate the linux set by running Playwright inside
 the `mcr.microsoft.com/playwright` image whose version matches
-`@playwright/test`, against an API and web app started on the host.
+`@playwright/test`, against the app process started on the host.
 
 ## Migrations
 
@@ -137,8 +145,8 @@ the next time main's app starts, so restart it after landing one.
 - To set up a worktree, copy `apps/plot/.env` from the main checkout, run
   `pnpm install` and build the libraries.
 - Do live checks in main after landing. A dev server in a worktree collides
-  with main's ports. If you need one, set `API_PORT`, `SHIZUE_WEB_PORT` and a
-  matching `BETTER_AUTH_URL` for `scripts/dev.sh`.
+  with main's port. If you need one, set `SHIZUE_PORT` for `scripts/dev.sh`
+  (and `BETTER_AUTH_URL` to the same origin, if your `.env` sets one).
 - To land, fast-forward `main` to the worktree branch and push. This repo is a
   solo trunk with no pull requests and no CI.
 - A commit message is one plain paragraph saying what changed and why, in the
@@ -148,5 +156,5 @@ the next time main's app starts, so restart it after landing one.
   `pgrep -f <pattern>` also matches other shells waiting on the same pattern,
   so two such loops can wait on each other indefinitely.
 - The dev machine has 24 GB shared with other sessions. Run vitest
-  with `--maxWorkers=2` and Playwright with `--workers=1`, keep at most one Next
-  dev server per agent, and stop servers once the check is done.
+  with `--maxWorkers=2` and Playwright with `--workers=1`, keep at most one app
+  process (it runs `next dev`) per agent, and stop servers once the check is done.

@@ -7,12 +7,53 @@ PocketRisu: your ChatGPT plan connected through Sign in with ChatGPT, your own
 provider API keys, or a model server on this computer. The app supports Korean,
 English and Japanese.
 
+shizue-plot is free software under the GNU General Public License, version 3
+(`LICENSE`). It plays cards as RisuAI and PocketRisu do, and ports much of their
+behaviour and code; `NOTICE` credits them.
+
+## Install
+
+Node.js 26 or newer is all it needs — no Docker, no database to set up:
+
+```sh
+npx shizue-plot
+```
+
+The app starts on http://localhost:13000 and opens it in your browser. Ctrl-C
+stops it. `--no-open` leaves the browser alone, and `--port <n>` answers on
+another port; but ChatGPT sign-in comes back to port 13000 only (below), so on
+another port connect models with API keys. A port another program holds is
+refused rather than shared: stop that program, or pick another port. Node 26 is
+needed because cards' Lua scripts run in a sandbox built on Node's permission
+model.
+
+### The data folder
+
+Everything the app has is in one folder: the database (`db/`, PGlite —
+PostgreSQL 17 compiled to WebAssembly, with pgvector), the files (`files/`:
+avatars, card assets, attachments, covers, imports), the install's `secret`
+(0600: it seals your ChatGPT tokens and API keys), and `models/` for the
+embedding model's weights. The installed app keeps it where the system keeps an
+app's data:
+
+| System | Folder |
+|---|---|
+| macOS | `~/Library/Application Support/shizue-plot` |
+| Windows | `%APPDATA%\shizue-plot` |
+| Linux | `$XDG_DATA_HOME/shizue-plot`, or `~/.local/share/shizue-plot` |
+
+`SHIZUE_DATA_DIR` names another. The app migrates the database at every start,
+and only one process opens a folder at a time (`app.lock`): a second start while
+the app runs is refused. Back the folder up by copying it while the app is
+stopped.
+
 ## Layout
 
 | Path | Purpose |
 |---|---|
-| `apps/plot/apps/api` | Hono API, the local-owner request gate, chat generation and media storage |
-| `apps/plot/apps/web` | Next.js character-chat app |
+| `apps/plot/apps/api` | Hono API, the local-owner request gate, chat generation and media storage, and the app's one process (`src/index.ts`, `src/server.ts`) |
+| `apps/plot/apps/web` | Next.js character-chat app, served by that process |
+| `apps/plot/apps/cli` | The `shizue-plot` package: its command and the build that bundles the app into it |
 | `apps/plot/apps/e2e` | Playwright browser tests |
 | `apps/plot/packages/core` | Character cards, prompts and chat presentation |
 | `apps/plot/packages/db` | Drizzle schema and PostgreSQL migrations |
@@ -22,12 +63,9 @@ English and Japanese.
 See [the architecture](apps/plot/docs/ARCHITECTURE.md) for chat behavior and
 [the repository guide](AGENTS.md) for conventions.
 
-## Quickstart
+## Development
 
-Node 26+ (`.nvmrc`) and pnpm 10.28.2 are required, and nothing else: the
-database is PGlite (PostgreSQL 17 compiled to WebAssembly, with pgvector) and
-the files are plain files, both in the app's folder — `SHIZUE_DATA_DIR`,
-`apps/plot/data/app` by default. The API migrates the database at every start.
+Node 26+ (`.nvmrc`) and pnpm 10.28.2 are required, and nothing else.
 
 ```sh
 pnpm install
@@ -36,38 +74,53 @@ pnpm --filter @shizue/api embedder:fetch
 make dev
 ```
 
+`make dev` builds the libraries and starts the app's one process on
+http://localhost:13000: the API answers `/api/*` and the web app, under
+`next dev`, everything else, on both loopbacks (`127.0.0.1` is sent on to
+`localhost`). Its data folder is `apps/plot/data/app` unless `SHIZUE_DATA_DIR`
+says otherwise, and it reads `apps/plot/.env`. Editing the API restarts the
+process; editing the web app reloads the page. `make stop` stops it.
+`SHIZUE_PORT` moves it to another port, for a second checkout beside main.
+
 `embedder:fetch` puts the weights of the embedding models the API runs for the
 chat memory into `apps/plot/data/embedder` and checks they load offline:
 bge-m3 from Hugging Face (587 MB) and, for Korean plots, KURE-v1 (738 MB) from
 the S3 bucket `S3_*` names — the compose RustFS in development, where
 `embedder:publish` has to have put our ONNX conversion first (ARCHITECTURE
-§7.3). Run it once per checkout: the server never
-downloads them itself, and a plot whose model is missing has its memory pick
-recent and random summaries instead of similar ones. Loaded, each model adds
-about 2 GB to the API's memory and is unloaded after ten idle minutes;
+§7.3). Run it once per checkout: the server never downloads them itself, and a
+plot whose model is missing has its memory pick recent and random summaries
+instead of similar ones. Loaded, each model adds about 2 GB to the process's
+memory and is unloaded after ten idle minutes;
 `EMBEDDER_ROUTING=single EMBEDDER_MODEL=multiMiniLM` runs one light model
 (135 MB, about 750 MB loaded), and `EMBEDDER=off` none.
 
-Open http://localhost:13000 in Chrome with [Shizue](https://chromewebstore.google.com/detail/mpcbgfkoholfgapcgcmfjobnfcbnfanm) installed (below).
-Next.js forwards `/api/*` to Hono on port 8787. `make stop` stops the app
-processes. The app's folder persists across restarts; one process at a time may
-open it (`app.lock`), so stop the app before running a maintenance command on it.
+The installed app cannot fetch KURE-v1 yet: our conversion lives in that private
+bucket, and the public one on Hugging Face (`YoungFullmoon/KURE-v1-onnx`)
+measured below ours (ARCHITECTURE §7.3). Until ours is published, the installed
+app runs without its embedder and says so in its log.
 
 ### Moving from the Postgres setup
 
-A checkout from before 2026-10-18 kept its data in Docker's PostgreSQL and the
-RustFS bucket. With those containers still running, copy everything into an
-empty app folder once:
+A checkout from before 2026-10-18 kept its data in Docker's PostgreSQL, with its
+files in `UPLOAD_DIR` or the RustFS bucket. With the database container still
+running, copy everything into an empty app folder once:
 
 ```sh
-S3_BUCKET=shizue-media S3_ENDPOINT=http://localhost:19000 S3_ACCESS_KEY_ID=shizue \
-  S3_SECRET_ACCESS_KEY=shizue-secret S3_FORCE_PATH_STYLE=true \
-  pnpm --filter @shizue/api import:postgres -- \
-  --from postgres://plot:plot@localhost:15433/plot --uploads ./data/uploads --s3
+pnpm --filter @shizue/api import:postgres -- \
+  --from postgres://plot:plot@localhost:15433/plot --uploads ./data/uploads
 ```
 
-It keeps the old `BETTER_AUTH_SECRET` as the folder's secret, so the ChatGPT
-connection still opens, and only reads the source.
+Files that were in the bucket come along with `--s3` and the bucket's `S3_*`
+variables. It keeps the old `BETTER_AUTH_SECRET` as the folder's secret, so the
+ChatGPT connection still opens, and only reads the source.
+
+### The package
+
+`npm pack` in `apps/plot/apps/cli` builds the package first (`scripts/build.mjs`):
+the libraries, the web app's production build, and the app's process bundled
+with esbuild together with the workspace packages and the threads and children
+it starts. Next, React, PGlite, wasmoon and transformers.js stay dependencies.
+`npm publish` is the owner's to run.
 
 ### Card and module imports
 
@@ -122,7 +175,8 @@ OpenAI's open-source flow only returns to `http://127.0.0.1:<port>/auth/callback
 navigation to `http://localhost:13000/api/chatgpt/callback` before any connection
 is made, on loopback port 47801 (`CHATGPT_CALLBACK_PORT` changes it, for an offset
 dev server). It is needed only while connecting; afterwards the API calls OpenAI
-directly.
+directly. That is why the app answers on port 13000, and why ChatGPT is
+connected from Chrome (or another Chromium) with the extension installed.
 
 1. Install [Shizue from the Chrome Web Store](https://chromewebstore.google.com/detail/mpcbgfkoholfgapcgcmfjobnfcbnfanm).
 2. In **Settings → ChatGPT connection**, choose **Continue with ChatGPT** and
@@ -148,18 +202,18 @@ this route accepts no hard output-token limit.
 
 ### On a phone, from your own machine
 
-This needs `BETTER_AUTH_URL` on loopback, as it is by default. Open **Settings → Connect a phone**
-and press **Open phone access**: the API opens a tunnel to the web app itself and
-shows a QR code, as PocketRisu's remote access does. It uses Tailscale Serve when
-this computer is signed in to a tailnet — a fixed address only your devices
-reach, with the Tailscale app on the phone, on a port your other `tailscale
-serve` entries do not use — and otherwise a Cloudflare Quick Tunnel when
-`cloudflared` is installed: no app on the phone, but a public address that
-changes each time. Install one of them first (`brew install tailscale` or
-`brew install cloudflared`); **Close access** turns it off. A tunnel you run
-yourself can be listed in `REMOTE_ORIGINS` (`apps/plot/.env`) instead. Plain LAN
-addresses (`http://192.168.x.x`) are not supported: without HTTPS the browser
-withholds `crypto.subtle`, `crypto.randomUUID` and the clipboard, which chats use.
+Open **Settings → Connect a phone** and press **Open phone access**: the app
+opens a tunnel to itself and shows a QR code, as PocketRisu's remote access
+does. It uses Tailscale Serve when this computer is signed in to a tailnet — a
+fixed address only your devices reach, with the Tailscale app on the phone, on a
+port your other `tailscale serve` entries do not use — and otherwise a
+Cloudflare Quick Tunnel when `cloudflared` is installed: no app on the phone,
+but a public address that changes each time. Install one of them first
+(`brew install tailscale` or `brew install cloudflared`); **Close access** turns
+it off. A tunnel you run yourself can be listed in `REMOTE_ORIGINS` instead.
+Plain LAN addresses (`http://192.168.x.x`) are not supported: without HTTPS the
+browser withholds `crypto.subtle`, `crypto.randomUUID` and the clipboard, which
+chats use.
 
 Phone browsers run no extension, so a phone never connects ChatGPT or adds keys
 itself: it uses the connection and keys the computer made. Open **Settings → Connect a phone** on the
@@ -196,32 +250,33 @@ pnpm test:e2e
 ```
 
 The API unit suite runs on an in-memory PGlite of its own and needs no setup.
-Browser tests serve the API and web app with the test-only echo model
-(`NODE_ENV=test` on the API); they do not contact an AI provider. Their API runs
-on a new empty app folder in the system's temp directory, never on yours. Every
-spec is that folder's one owner, as any browser on this computer is, and tells
-its own works apart by the run's unique names. The ChatGPT specs connect through
-the settings card: one mocks the API and OpenAI, the other runs the real callback
-through a stand-in for Shizue. Stop any normal instance on the test ports before
-running browser tests; the suite never reuses a server with a real ChatGPT
-connection.
+Browser tests start the app's one process with the test-only echo model
+(`NODE_ENV=test`, which the API reads; the web app still runs as `next dev`);
+they do not contact an AI provider. It runs on a new empty app folder in the
+system's temp directory, never on yours. Every spec is that folder's one owner,
+as any browser on this computer is, and tells its own works apart by the run's
+unique names. The ChatGPT specs connect through the settings card: one mocks the
+API and OpenAI, the other runs the real callback through a stand-in for Shizue.
+Stop any normal instance on the test port before running browser tests, or point
+`E2E_WEB_URL` and `E2E_CALLBACK_PORT` at free ports; the suite never reuses a
+server with a real ChatGPT connection.
 
 ## Migrations
 
-`pnpm db:generate` creates migrations. Nothing applies them by hand: the API
-migrates the app's folder at every start. The character-chat schema starts from
+`pnpm db:generate` creates migrations. Nothing applies them by hand: the app
+migrates its folder at every start. The character-chat schema starts from
 a single initial migration, including the pgvector extension; upgrades from the
 removed products are unsupported.
 
 ## Operations
 
-The API logs to its console. Error tracking is these logs; no external service
+The app logs to its console. Error tracking is these logs; no external service
 is used. Request bodies, cookies, auth headers, prompts and card text are never
 logged.
 
-`GET /api/health` answers while the process runs. On SIGTERM the API stops
-taking connections, stores the replies in flight, waits up to
-`SHUTDOWN_BACKGROUND_MS` (20 s) for background work, closes the database and
-exits, so let a shutdown take over 25 seconds. A chat's generation is held in
-memory, so no chat is left generating after a restart. Details are in
-ARCHITECTURE §12.
+`GET /api/health` answers while the process runs. On Ctrl-C or SIGTERM the app
+stops taking connections, stores the replies in flight, waits up to
+`SHUTDOWN_BACKGROUND_MS` (20 s) for background work, closes the web app and the
+database, gives the folder back and exits, so let a shutdown take over 25
+seconds. A chat's generation is held in memory, so no chat is left generating
+after a restart. Details are in ARCHITECTURE §12.

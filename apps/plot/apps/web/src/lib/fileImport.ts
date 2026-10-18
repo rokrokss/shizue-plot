@@ -5,8 +5,7 @@
  * on an address the API signs, or to the API itself under the local driver —
  * `…/complete` queues it, and a job on the server reads it while this polls
  * `GET …/:id` for where it is and, at the end, the answer the old single-request
- * route gave. Nothing of the file passes through the web's `/api` rewrite but
- * the local driver's parts.
+ * route gave.
  *
  * The parts go four at a time through XMLHttpRequest, which reports bytes sent
  * as they go (fetch reports none); one that fails is sent again a few times, an

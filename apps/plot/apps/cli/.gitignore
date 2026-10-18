@@ -1,0 +1,8 @@
+# What scripts/build.mjs makes for the package, from the checkout.
+/dist/
+/drizzle/
+/web/
+/LICENSE
+/NOTICE
+/README.md
+*.tgz

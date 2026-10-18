@@ -1,6 +1,6 @@
 /**
- * Thin fetch wrapper for the Hono API. Requests go to the same origin and are
- * proxied by the Next `rewrites()` rule; the API owns the local ChatGPT session.
+ * Thin fetch wrapper for the Hono API. Requests go to the same origin, where the
+ * app's one process hands `/api/*` to the API; the API owns the local ChatGPT session.
  */
 
 /** Mirrors the API error body `{error, code, params?}`. */

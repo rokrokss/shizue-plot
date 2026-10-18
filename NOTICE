@@ -1,0 +1,30 @@
+shizue-plot
+Copyright (C) 2026 rokrokss
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, version 3 of the License only (GPL-3.0-only). It is distributed in
+the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the
+implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
+the GNU General Public License in LICENSE for more details.
+
+shizue-plot plays character cards as RisuAI and PocketRisu play them, and much
+of what it does is ported from their behaviour and their code. Both are free
+software under the GNU General Public License, version 3:
+
+  RisuAI, by kwaroran and its contributors
+  https://github.com/kwaroran/RisuAI
+    The character card formats it reads (V1 to V3, charx, RisuRealm), the CBS
+    macro language, lorebook activation, regex scripts, triggers and the Lua
+    runtime with its API, HypaV3 memory, prompt presets and their parameters,
+    and the request formats a model is called in (LLMFormat).
+
+  PocketRisu, by its contributors
+  https://github.com/PocketRisu/PocketRisu
+    Model presets bound to each chat as a main and a sub model, the provider
+    request adapters, the prompt templates written in their original words,
+    and remote access from a phone through a tunnel.
+
+Comments in the sources name the RisuAI or PocketRisu behaviour each part
+follows. The published package also bundles third-party libraries and fonts,
+each under its own license.

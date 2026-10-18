@@ -12,8 +12,8 @@ export interface FileImportRequest {
 /**
  * Imports a card or module file as the web app does, for a spec that sets one
  * up without the forms (ARCHITECTURE §10 파일 임포트): the import started, the
- * file sent in parts where the API says — to itself under the local driver,
- * through the web's rewrite — and the import polled until it ends. Answers the
+ * file sent in parts where the API says — to itself under the local driver —
+ * and the import polled until it ends. Answers the
  * finished import's status and body: 201 and what the import made, or the
  * failure's status and `{ code }`.
  */

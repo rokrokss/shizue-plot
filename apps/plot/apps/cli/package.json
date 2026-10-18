@@ -1,0 +1,39 @@
+{
+  "name": "shizue-plot",
+  "version": "0.1.0",
+  "description": "A character-chat app you run on your own computer: RisuAI and SillyTavern cards, played on your ChatGPT plan or your own API keys.",
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "bin": {
+    "shizue-plot": "bin/shizue-plot.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "drizzle",
+    "web",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=26"
+  },
+  "//scripts": "`bundle` builds the package from the checkout (libraries, the web app's production build, the server bundle); `npm pack` runs it first. No `build` script on purpose: the workspace's `pnpm -r build` already runs `next build`.",
+  "scripts": {
+    "bundle": "node scripts/build.mjs",
+    "prepack": "node scripts/build.mjs"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.5.8",
+    "@electric-sql/pglite-pgvector": "0.0.9",
+    "@huggingface/transformers": "3.8.1",
+    "next": "16.4.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "wasmoon": "1.16.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12"
+  }
+}

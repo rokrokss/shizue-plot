@@ -25,10 +25,20 @@ describe('readConfig', () => {
     expect(readConfig({ NODE_ENV: 'production', BETTER_AUTH_SECRET: 'set-by-hand' }).authSecret).toBe('set-by-hand');
   });
   it('takes a web origin, but only an origin', () => {
-    expect(readConfig({ BETTER_AUTH_URL: 'http://127.0.0.1:13100' }).authUrl).toBe('http://127.0.0.1:13100');
+    expect(readConfig({ SHIZUE_PORT: '13100', BETTER_AUTH_URL: 'http://127.0.0.1:13100' }).authUrl).toBe('http://127.0.0.1:13100');
     for (const url of ['http://localhost:13000/', 'http://localhost:13000/app', 'ftp://localhost', 'http://user@localhost']) {
       expect(() => readConfig({ NODE_ENV: 'development', BETTER_AUTH_URL: url })).toThrow(/web origin/);
     }
+  });
+  it("answers on 13000, Shizue's sign-in port, unless SHIZUE_PORT says, and is its own web origin there", () => {
+    expect(readConfig({}).port).toBe(13000);
+    const offset = readConfig({ SHIZUE_PORT: '13470' });
+    expect(offset.port).toBe(13470);
+    expect(offset.authUrl).toBe('http://localhost:13470');
+    for (const value of ['0', '65536', 'http', '13000.5']) expect(() => readConfig({ SHIZUE_PORT: value })).toThrow(/SHIZUE_PORT/);
+    // One process answers both, so a loopback web origin on another port is a mistake.
+    expect(() => readConfig({ SHIZUE_PORT: '13470', BETTER_AUTH_URL: 'http://localhost:13000' })).toThrow(/SHIZUE_PORT/);
+    expect(() => readConfig({ BETTER_AUTH_URL: 'http://localhost' })).toThrow(/SHIZUE_PORT/);
   });
   it('reads the remote origins a phone reaches the app at, each only an origin', () => {
     expect(readConfig({}).remoteOrigins).toEqual([]);
@@ -40,7 +50,7 @@ describe('readConfig', () => {
     }
   });
   it('refuses remote origins anywhere but a shizue signing in on this machine', () => {
-    expect(readConfig({ BETTER_AUTH_URL: 'http://127.0.0.1:13100', REMOTE_ORIGINS: 'https://mac.example.ts.net:8444' })
+    expect(readConfig({ SHIZUE_PORT: '13100', BETTER_AUTH_URL: 'http://127.0.0.1:13100', REMOTE_ORIGINS: 'https://mac.example.ts.net:8444' })
       .remoteOrigins).toEqual(['https://mac.example.ts.net:8444']);
     expect(() => readConfig({
       BETTER_AUTH_URL: 'https://plot.example.com', REMOTE_ORIGINS: 'https://mac.example.ts.net:8444',

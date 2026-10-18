@@ -5,7 +5,7 @@ import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 /**
  * Card import along the owner's path, through the web origin: a card file of
  * more than one upload part arrives whole and becomes a plot (ARCHITECTURE §10
- * 파일 임포트 — under the local driver the parts go through the `/api` rewrite) → the studio says where it came from → a second card comes in from a
+ * 파일 임포트 — under the local driver the parts go to the API on the same port) → the studio says where it came from → a second card comes in from a
  * RisuRealm page, which the browser downloads itself → a card whose upload a reload cut off goes on
  * from the parts already up when the same file is picked again, and one the
  * server was reading when the page reloaded is shown, not sent again.

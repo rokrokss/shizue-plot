@@ -160,14 +160,15 @@ function isLoopbackHost(value: string): boolean {
 /**
  * Whether a request comes from this computer and nothing stands between: the
  * connection is a loopback one (none at all is `app.request` in the tests),
- * every host it names is this computer's — the `x-forwarded-host` the Next
- * rewrite writes, the `Host`, and the address itself — and no tunnel or proxy
+ * every host it names is this computer's — the `x-forwarded-host` a proxy in
+ * front writes, the `Host`, and the address itself — and no tunnel or proxy
  * left its mark, `x-forwarded-for` naming loopback addresses only. Anything else
  * is somewhere else, a phone through a tunnel among them, and a page on another
  * site that resolves to this machine (DNS rebinding) names its own host.
  *
  * Whatever serves this app must hand it the Node request (`c.env.incoming`, as
- * `@hono/node-server` does): called without one, every request looks local.
+ * `@hono/node-server` does in `server.ts`): called without one, every request
+ * looks local.
  */
 export function isLocalRequest(c: Context): boolean {
   const incoming = (c.env as { incoming?: IncomingMessage } | undefined)?.incoming;

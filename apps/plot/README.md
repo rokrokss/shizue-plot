@@ -8,7 +8,8 @@
 
 설치, 인프라, 개발 서버와 테스트 명령은 리포지터리 루트
 [README.md](../../README.md)를 따른다. 설정 예시는 `.env.example`에 있다.
-API는 이 디렉터리의 `.env`를 읽는다.
+앱은 한 프로세스다: `make dev`가 API(`/api/*`)와 웹(`next dev`)을 포트 13000 하나로 띄우고,
+이 디렉터리의 `.env`를 읽는다. 쓰는 사람은 `npx shizue-plot`으로 설치판을 띄운다.
 
 루트에서 `pnpm build`, `pnpm typecheck`, `pnpm test`, `pnpm test:e2e`를 실행한다.
 API 테스트에는 운영 DB와 다른 `_test` 데이터베이스가 필요하다.
@@ -17,6 +18,7 @@ API 테스트에는 운영 DB와 다른 `_test` 데이터베이스가 필요하�
 
 - `apps/api`: Hono API, 로컬 소유자 요청 게이트와 ChatGPT 연결, 생성·기억·관계 처리, 이미지 스토리지.
 - `apps/web`: Next.js 앱과 next-intl 로케일, 캐릭터·플롯 편집과 챗 화면.
+- `apps/cli`: `npx shizue-plot` 패키지 — 명령과, 앱을 묶어 넣는 빌드.
 - `apps/e2e`: Playwright 브라우저 테스트.
 - `packages/core`: 캐릭터 카드, 프롬프트, 발화와 표시 규약.
 - `packages/db`: PostgreSQL + pgvector 스키마와 마이그레이션.

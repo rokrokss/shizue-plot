@@ -316,10 +316,11 @@ export const HEARTBEAT_MS = 15_000;
 
 /**
  * A reply's event stream, marked so nothing between here and the browser
- * transforms it. The web's `/api` rewrite runs through Next's compression,
- * which gzips an event stream the browser accepts gzip for and holds it until
- * it ends — measured on 2026-10-17, a whole echo reply in one chunk after 3.4 s
- * — unless the response says `no-transform`. streamSSE's own header is `no-cache`.
+ * transforms it — a proxy in front of a phone's tunnel, say, as Next's
+ * compression did while the web app proxied `/api`: it gzipped an event stream
+ * the browser accepts gzip for and held it until it ended (measured on
+ * 2026-10-17, a whole echo reply in one chunk after 3.4 s) unless the response
+ * said `no-transform`. streamSSE's own header is `no-cache`.
  */
 function replyStream(c: Context<AppEnv>, write: (stream: SSEStreamingApi) => Promise<void>): Response {
   const response = streamSSE(c, write);

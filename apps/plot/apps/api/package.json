@@ -5,10 +5,10 @@
   "type": "module",
   "main": "./dist/index.js",
   "scripts": {
-    "dev": "NODE_ENV=development tsx watch src/index.ts",
+    "dev": "NODE_ENV=development tsx watch --exclude '../web/.next/**' src/index.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "start": "node dist/index.js",
+    "start": "NODE_ENV=production node dist/index.js",
     "test": "vitest run",
     "fix:display-order": "tsx src/maintenance/fixDisplayOrder.ts",
     "fix:member-scripts": "tsx src/maintenance/fixMemberScripts.ts",

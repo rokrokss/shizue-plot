@@ -3,8 +3,7 @@ import type { AppEnv } from './deps.js';
 
 /**
  * What every answer of the API carries, refusals and errors included. The web
- * app reaches it through the `/api` rewrite, which passes these through, and
- * sets the page's own (apps/web/securityHeaders.ts).
+ * app's pages, which the same process serves, carry their own (apps/web/securityHeaders.ts).
  *
  * Nothing here is a page: the answers are JSON, a stream, or a stored file — a
  * card's picture, music or text attachment. So the policy grants nothing, and

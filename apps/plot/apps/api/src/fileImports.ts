@@ -74,9 +74,8 @@ import { deleteQuietly, importFileKey, PartSizeMismatch, readAll, type UploadedP
 import { isUuid, readJsonBody, requireString, requireUuidParam } from './util.js';
 
 /**
- * The parts a file is uploaded in: under the web's own 10MB cap on what its
- * `/api` rewrite passes on (the local driver's parts go through it), over S3's
- * 5MB floor for every part but the last. A 1GB card is 128 of them.
+ * The parts a file is uploaded in, over S3's 5MB floor for every part but the
+ * last, as when parts went to a bucket. A 1GB card is 128 of them.
  */
 export const FILE_IMPORT_PART_BYTES = 8 * 1024 * 1024;
 /** S3's most parts an upload may have, which a file past 80GB would need a larger part for. */
@@ -85,7 +84,7 @@ const MAX_PARTS = 10_000;
  * A World Info file beside a card, which rides in the request that starts the
  * import (`worldInfo`) to be read before the card is uploaded — so a file the
  * import cannot read is refused while the card is still on the reader's machine.
- * The owner set it on 2026-10-17; the web's rewrite passes this much on.
+ * The owner set it on 2026-10-17.
  */
 export const MAX_WORLD_INFO_BYTES = 32 * 1024 * 1024;
 /** Part addresses asked for at once: a few parts' worth of time ahead of the upload, inside their hour. */

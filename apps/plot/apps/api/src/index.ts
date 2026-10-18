@@ -1,10 +1,11 @@
-import { serve } from '@hono/node-server';
+import { createServer } from 'node:http';
 import { createApp } from './app.js';
 import { DataDirBusy, openAppDb } from './appDb.js';
 import { createChatGPTAccounts, tokenCipher } from './chatgptAccounts.js';
 import type { AppDeps } from './deps.js';
 import { createLocalEmbedder } from './embedder.js';
-import { isLoopback, loadRootEnv, readConfig, readOrCreateSecret } from './env.js';
+import { APP_PORT, isLoopback, loadRootEnv, readConfig, readOrCreateSecret, SHIZUE_CALLBACK_PORT } from './env.js';
+import { appRequestListener, listenOnLoopback, loadWebApp, PortTaken, portTaken } from './server.js';
 import { createPhoneAccess } from './tunnel.js';
 import { startJobWorker } from './jobs.js';
 import { stopGenerations } from './generation.js';
@@ -17,7 +18,28 @@ import { createStorage } from './storage.js';
 import { fakeChatGPTOAuth } from './testOpenAI.js';
 
 loadRootEnv();
-const config = readConfig();
+// The API's own copy of the environment, taken before Next is loaded. Next runs
+// `next dev` as `development` only (under `test` it keeps stale page paths and
+// writes its route types elsewhere), so a test run — `NODE_ENV=test`, which gives
+// the API the echo model and the stand-in OpenAI (§4) — tells Next `development`
+// while the API reads `test` from this copy.
+const apiEnv = { ...process.env };
+if (process.env['NODE_ENV'] === 'test') process.env['NODE_ENV'] = 'development';
+const config = readConfig(apiEnv);
+// The web origin next.config.ts reads, which lets a phone in only from a loopback
+// one, when it is the default `readConfig` made rather than one set.
+process.env['BETTER_AUTH_URL'] ??= config.authUrl;
+
+function portInUse(): never {
+  console.error(
+    `[shizue] Port ${config.port} is already in use on this computer. Is shizue already running? ` +
+      `Stop what holds it, or start shizue on another port (\`shizue-plot --port <n>\`, or SHIZUE_PORT) — ` +
+      `though ChatGPT sign-in comes back to port ${APP_PORT} only.`,
+  );
+  process.exit(1);
+}
+// Asked first, before the folder is opened and the web app compiled for nothing.
+if (await portTaken(config.port)) portInUse();
 
 // The one handle on the app's database (PGlite in the app's folder, locked to this
 // process), brought to the newest migration before anything reads it.
@@ -45,7 +67,6 @@ const ownOrigins = (): string[] => [
   config.authUrl,
   ...config.remoteOrigins,
   ...(phoneAccess?.origin() ? [phoneAccess.origin()!] : []),
-  ...(config.apiOrigin ? [config.apiOrigin] : []),
 ];
 
 // One set for the routes and the job worker: the memory backfill shares the
@@ -79,9 +100,27 @@ const app = createApp(deps);
 // Whether this Node can sandbox a card's editRequest Lua, asked now so the log says so at startup.
 void probeRequestLua();
 
-const server = serve({ fetch: app.fetch, port: config.port, hostname: '127.0.0.1' }, (info) => {
-  console.log(`[api] listening on http://127.0.0.1:${info.port}`);
-});
+// One process, one port: the API at /api/*, and the web app for everything else —
+// Next in this process, `next dev` on its sources or, in production, its build (`server.ts`).
+const server = createServer();
+const web = await loadWebApp({ dir: config.webDir, dev: config.env['NODE_ENV'] !== 'production', port: config.port, server });
+server.on('request', appRequestListener(app.fetch, web));
+let closeServer = (): void => undefined;
+try {
+  closeServer = await listenOnLoopback(server, config.port);
+} catch (error) {
+  if (!(error instanceof PortTaken)) throw error;
+  await web.close();
+  await closeDb();
+  portInUse();
+}
+console.log(`[shizue] running at ${config.authUrl} — Ctrl-C to stop`);
+if (config.port !== APP_PORT && config.chatgptCallbackPort === SHIZUE_CALLBACK_PORT) {
+  console.warn(
+    `[shizue] The Shizue extension brings ChatGPT's sign-in back to http://localhost:${APP_PORT}, so on port ${config.port} ` +
+      'connecting ChatGPT will not come back; models on an API key work as ever.',
+  );
+}
 
 // File imports run for minutes, so they have a loop of their own — one import
 // read at a time — and the main loop (a chat import's memory backfill) leaves
@@ -109,7 +148,7 @@ function shutdown(code: number): void {
   stopping = true;
   void (async () => {
     // No new connections; the open streams are stopped below.
-    server.close();
+    closeServer();
     // A Cloudflare tunnel ends with the process; a Tailscale one is Tailscale's to keep.
     phoneAccess?.shutdown();
     // Only the claiming is stopped: a job still running is left where it is, and
@@ -127,6 +166,8 @@ function shutdown(code: number): void {
       const kinds = [...background.inFlight()].map(([kind, count]) => `${kind} ${count}`).join(', ');
       console.warn(`[api] ${left} background tasks still running after ${config.shutdownBackgroundMs} ms (${kinds}); exiting without them`);
     }
+    // The web app's compiler and watchers, under `next dev`.
+    await web.close();
     // The embedder's thread last, after everything that may embed: onnxruntime
     // does not survive an exit around it.
     await deps.embedder?.close();

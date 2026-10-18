@@ -21,7 +21,10 @@ const intl = createMiddleware(routing);
  * request (`app/layout.tsx`).
  */
 export default function proxy(request: NextRequest) {
-  const policy = contentSecurityPolicy(process.env, randomBytes(16).toString('base64'));
+  // How Next compiled this file — `next dev` or a build — rather than the
+  // process's environment, which is the API's too since the two run as one
+  // process, and `test` under the browser suite.
+  const policy = contentSecurityPolicy({ NODE_ENV: process.env.NODE_ENV }, randomBytes(16).toString('base64'));
   request.headers.set('content-security-policy', policy);
   const response = intl(request);
   response.headers.set('content-security-policy', policy);

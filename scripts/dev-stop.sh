@@ -21,9 +21,9 @@ while read -r pid; do
   [ -n "$pid" ] && in_checkout "$pid" || continue
   echo "[dev-stop] stopping app watcher (pid $pid)"
   stop_tree "$pid"
-done < <(pgrep -f 'tsx.* watch src/index[.]ts|next dev' 2>/dev/null)
+done < <(pgrep -f 'tsx.* watch .*src/index[.]ts|next dev' 2>/dev/null)
 
-for port in "${API_PORT:-8787}" "${SHIZUE_WEB_PORT:-13000}"; do
+for port in "${SHIZUE_PORT:-13000}"; do
   while read -r pid; do
     [ -n "$pid" ] && in_checkout "$pid" || continue
     echo "[dev-stop] stopping listener on $port (pid $pid)"

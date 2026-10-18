@@ -1,5 +1,5 @@
 {
-  "name": "shizue-plot",
+  "name": "shizue-plot-workspace",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -19,5 +19,6 @@
     "@types/node": "^24.10.1",
     "typescript": "^5.9.3",
     "vite": "^7.3.7"
-  }
+  },
+  "license": "GPL-3.0-only"
 }

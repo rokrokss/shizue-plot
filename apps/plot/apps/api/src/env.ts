@@ -42,18 +42,28 @@ export function readOrCreateSecret(dataDir: string): string {
   return secret;
 }
 
-/** Loads the repo-root .env into process.env (existing vars win). */
+/**
+ * Loads the repo-root .env into process.env (existing vars win) — in a checkout
+ * only: the published app (`shizue-plot`, whose command sets `SHIZUE_PACKAGED`)
+ * takes its settings from its command line and the environment, never from a
+ * file beside wherever npm put it.
+ */
 export function loadRootEnv(): void {
+  if (process.env['SHIZUE_PACKAGED'] === '1') return;
   config({ path: resolve(REPO_ROOT, '.env'), quiet: true });
 }
 
-const DEV_AUTH_URL = 'http://localhost:13000';
+/**
+ * The port the app answers on, the API and the web app both: the one the
+ * Shizue extension sends ChatGPT's sign-in back to (`http://localhost:13000`).
+ */
+export const APP_PORT = 13000;
 /**
  * The loopback port OpenAI's callback comes back on: the one Shizue, the Chrome
  * Web Store extension, sends on to `http://localhost:13000` on this computer
  * (`src/public/plot-signin-rules.json` in rokrokss/shizue).
  */
-const SHIZUE_CALLBACK_PORT = 47801;
+export const SHIZUE_CALLBACK_PORT = 47801;
 
 /**
  * The loopback port to ask OpenAI for: Shizue's unless `CHATGPT_CALLBACK_PORT`
@@ -102,7 +112,13 @@ function readRemoteOrigins(env: NodeJS.ProcessEnv, authUrl: string): string[] {
 }
 
 interface ApiConfig {
+  /** `SHIZUE_PORT`, `APP_PORT` unless set: where the one process answers, on both loopbacks (`server.ts`). */
   port: number;
+  /**
+   * The web app the process serves beside the API (`SHIZUE_WEB_DIR`): its sources
+   * under `next dev`, its production build in the published package.
+   */
+  webDir: string;
   /** The app's own folder (`dataDirOf`): the database, the files and the secret. */
   dataDir: string;
   /** Where the files are kept: the local directory in the app's folder. */
@@ -122,12 +138,6 @@ interface ApiConfig {
    * pairing (`routes/devices.ts`).
    */
   remoteOrigins: string[];
-  /**
-   * The API's own origin when it is served apart from the web app — the web's
-   * `API_ORIGIN`, read here when the two share an environment. Card scripts'
-   * requests are refused there, as at the web origin.
-   */
-  apiOrigin?: string;
   /**
    * The port of OpenAI's `http://127.0.0.1:<port>/auth/callback` redirect. The
    * Shizue extension rewrites that address to this app.
@@ -174,21 +184,27 @@ export function readS3Config(env: NodeJS.ProcessEnv): S3Config {
 export function readConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
   const dataDir = dataDirOf(env);
   const authSecret = env['BETTER_AUTH_SECRET'];
-  const authUrl = env['BETTER_AUTH_URL'] ?? DEV_AUTH_URL;
+  const port = readInteger(env, 'SHIZUE_PORT', 1, 65_535) ?? APP_PORT;
+  const authUrl = env['BETTER_AUTH_URL'] ?? `http://localhost:${port}`;
   if (!/^https?:$/.test(new URL(authUrl).protocol) || new URL(authUrl).origin !== authUrl) {
     throw new Error('BETTER_AUTH_URL must be the web origin, e.g. http://localhost:13000');
+  }
+  // On this computer the web origin is the app's own port, which one process answers.
+  const web = new URL(authUrl);
+  if (isLoopback(authUrl) && Number(web.port || (web.protocol === 'https:' ? 443 : 80)) !== port) {
+    throw new Error(`BETTER_AUTH_URL is ${authUrl}, but the app answers on port ${port} (SHIZUE_PORT): leave it unset, or give the two the same port.`);
   }
   const callbackPort = readCallbackPort(env);
   const remoteOrigins = readRemoteOrigins(env, authUrl);
 
   return {
-    port: Number(env['API_PORT'] ?? 8787),
+    port,
+    webDir: resolve(REPO_ROOT, env['SHIZUE_WEB_DIR']?.trim() || './apps/web'),
     dataDir,
     storage: { driver: 'local', dir: filesDirOf(dataDir) },
     ...(authSecret ? { authSecret } : {}),
     authUrl,
     remoteOrigins,
-    ...(env['API_ORIGIN'] ? { apiOrigin: new URL(env['API_ORIGIN']).origin } : {}),
     chatgptCallbackPort: callbackPort,
     shutdownBackgroundMs: readInteger(env, 'SHUTDOWN_BACKGROUND_MS', 0, 600_000) ?? 20_000,
     env,

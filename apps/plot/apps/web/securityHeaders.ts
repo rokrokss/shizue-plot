@@ -3,8 +3,8 @@
  * `proxy.ts` writes it for each request from the environment the app runs in;
  * the rest Next computes when the app is built (`next.config.ts`).
  *
- * `/api/*` is left to the API, which sets its own (apps/api/src/securityHeaders.ts)
- * and the rewrite passes them through.
+ * `/api/*` is the API's, which answers it before Next in the same process and
+ * sets its own (apps/api/src/securityHeaders.ts).
  */
 import { createHash } from 'node:crypto';
 import { THEME_SCRIPT } from './src/lib/theme';

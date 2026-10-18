@@ -39,7 +39,7 @@ console.log(`${apply ? 'Applying to' : 'Dry run against'} ${config.dataDir}`);
 // Its lock refuses a second process: never while the app runs.
 const { db, close } = await openAppDb(config.dataDir);
 const storage = createStorage(config.storage);
-const remoteFetch = createRemoteFetch({ ownOrigins: [config.authUrl, ...config.remoteOrigins, ...(config.apiOrigin ? [config.apiOrigin] : [])] });
+const remoteFetch = createRemoteFetch({ ownOrigins: [config.authUrl, ...config.remoteOrigins] });
 try {
   const rows = await db.select({ id: plots.id, name: plots.name }).from(plots).orderBy(asc(plots.createdAt));
   let touched = 0;
