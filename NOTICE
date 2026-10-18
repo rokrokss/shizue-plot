@@ -24,7 +24,8 @@ software under the GNU General Public License, version 3:
   https://github.com/PocketRisu/PocketRisu
     Model presets bound to each chat as a main and a sub model, the provider
     request adapters, the prompt templates written in their original words,
-    and remote access from a phone through a tunnel. The model registry's
+    and remote access from a phone through a tunnel, downloading cloudflared
+    for it. The model registry's
     code — its types, snapshot resolution, catalog sync, profile updates and
     the request builder and adapters a preset on a profile runs through — is
     ported from PocketRisu's src/ts/preset (commit f71e1cc), and the tests hold
@@ -49,3 +50,10 @@ from Hugging Face; it is not part of this program's code:
   https://huggingface.co/nlpai-lab/KURE-v1
     Downloaded as our int8 ONNX conversion of its weights,
     https://huggingface.co/rokrokss/KURE-v1-onnx, which keeps that license.
+
+On a computer with neither Tailscale nor cloudflared, opening phone access
+downloads Cloudflare's cloudflared, one pinned release from its GitHub
+releases; it is not part of this program's code either:
+
+  cloudflared, by Cloudflare, under the Apache License 2.0
+  https://github.com/cloudflare/cloudflared

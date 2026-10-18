@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useFormatter, useLocale, useTranslations } from 'next-intl';
 import { encode } from 'uqr';
 import { useRouter } from '@/i18n/navigation';
-import { apiDelete, apiGet, apiSend } from '@/lib/api';
+import { ApiError, apiDelete, apiGet, apiSend } from '@/lib/api';
 import { DEVICE_PAIRING, phoneName, type PairedPhone } from '@/lib/devicePairing';
 import { useDocumentTitle } from '@/lib/useDocumentTitle';
 import { useErrorMessage } from '@/lib/useErrorMessage';
@@ -21,12 +21,19 @@ interface Pairing { code: string; expiresAt: string; origins: string[] }
 interface PhoneAccess {
   tunnel: { kind: 'tailscale' | 'cloudflare'; origin: string } | null;
   available: { tailscale: boolean; cloudflare: boolean };
+  /** The cloudflared the app downloads for itself, when there is nothing else to open with (the API's `cloudflared.ts`). */
+  download?: { version: string; bytes: number; state: 'idle' | 'downloading' | 'failed'; received: number };
   origins: string[];
   local: boolean;
 }
 
 /** Where a phone lands with the code. It rides in the fragment, which never reaches a server or a proxy's log. */
 const pairUrl = (origin: string, locale: string, code: string): string => `${origin}/${locale}/pair#${code}`;
+
+/** How long the card waits for cloudflared to download before it gives up saying so. */
+const DOWNLOAD_WAIT_MS = 15 * 60_000;
+
+const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** m:ss until `at`, never below zero. */
 const remaining = (at: number, now: number): string => {
@@ -37,8 +44,9 @@ const remaining = (at: number, now: number): string => {
 /**
  * The settings card that opens a shizue running on this machine on a phone
  * (`DEVICE_PAIRING`), as PocketRisu's remote access does: one button opens the
- * tunnel (Tailscale Serve, else a Cloudflare Quick Tunnel — the API's `tunnel.ts`)
- * and shows a QR code carrying a one-time pairing code; the phone opens the
+ * tunnel (Tailscale Serve, else a Cloudflare Quick Tunnel — the API's `tunnel.ts`,
+ * downloading cloudflared first, as PocketRisu's button does, when this machine
+ * has neither) and shows a QR code carrying a one-time pairing code; the phone opens the
  * address and is let in as this computer's owner, using the ChatGPT this computer
  * connected (no extension runs on a phone). The computer lists the phones it let
  * in and can put any of them out. On a paired phone the card only says so, and
@@ -93,6 +101,31 @@ function PairingCard() {
 
   const reachable = (access?.origins.length ?? 0) > 0;
   const tool = access?.available.tailscale ? 'tailscale' : access?.available.cloudflare ? 'cloudflare' : null;
+  /** cloudflared to download before the tunnel can open. */
+  const download = tool === null ? access?.download : undefined;
+  const downloading = access?.download?.state === 'downloading';
+
+  // A download this page did not start (a reload mid-way) still says how far it has come.
+  useEffect(() => {
+    if (!downloading || busy) return;
+    const timer = setInterval(() => {
+      apiGet<PhoneAccess>('/api/devices').then(setAccess, () => undefined);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [downloading, busy]);
+
+  /** Downloads cloudflared on the server, saying how far it has come, until it is in place or has failed. */
+  async function downloadCloudflared(): Promise<void> {
+    let state = await apiSend<PhoneAccess>('POST', '/api/devices/cloudflared', undefined, AbortSignal.timeout(10_000));
+    setAccess(state);
+    const deadline = Date.now() + DOWNLOAD_WAIT_MS;
+    while (state.download?.state === 'downloading' && Date.now() < deadline) {
+      await wait(1000);
+      state = await apiGet<PhoneAccess>('/api/devices', AbortSignal.timeout(10_000));
+      setAccess(state);
+    }
+    if (!state.available.cloudflare) throw new Error(t('downloadFailed'));
+  }
 
   async function pair(): Promise<void> {
     setPairing(await apiSend<Pairing>('POST', '/api/devices/pair', undefined, AbortSignal.timeout(10_000)));
@@ -103,7 +136,18 @@ function PairingCard() {
   async function start(): Promise<void> {
     setBusy(true); setError('');
     try {
-      if (!reachable) setAccess(await apiSend<PhoneAccess>('POST', '/api/devices/tunnel', undefined, AbortSignal.timeout(45_000)));
+      if (!reachable) {
+        if (download) await downloadCloudflared();
+        const openTunnel = () => apiSend<PhoneAccess>('POST', '/api/devices/tunnel', undefined, AbortSignal.timeout(45_000));
+        try {
+          setAccess(await openTunnel());
+        } catch (e) {
+          // The app's copy was not the pinned one (a newer pin, a damaged file): it is gone, so it comes again.
+          if (!(e instanceof ApiError && e.code === 'cloudflared_unavailable')) throw e;
+          await downloadCloudflared();
+          setAccess(await openTunnel());
+        }
+      }
       await pair();
     } catch (e) { setError(toMessage(e)); }
     finally { setBusy(false); }
@@ -144,7 +188,13 @@ function PairingCard() {
               <span className="break-all text-muted">{access.tunnel.origin}</span>
             </p>
           ) : access && !reachable ? (
-            <p className="text-sm leading-relaxed text-muted">{t(tool === 'tailscale' ? 'viaTailscale' : tool === 'cloudflare' ? 'viaCloudflare' : 'noTool')}</p>
+            <p className="text-sm leading-relaxed text-muted">
+              {download?.state === 'downloading'
+                ? t('downloading', { version: download.version, percent: Math.min(100, Math.floor((download.received / download.bytes) * 100)) })
+                : download
+                  ? t('viaDownload', { version: download.version, size: Math.round(download.bytes / 1e6) })
+                  : t(tool === 'tailscale' ? 'viaTailscale' : tool === 'cloudflare' ? 'viaCloudflare' : 'noTool')}
+            </p>
           ) : null}
           {live ? (
             <div className="space-y-4">
@@ -158,8 +208,8 @@ function PairingCard() {
             </div>
           ) : pairing ? <p role="status" className="text-sm text-muted">{t('expired')}</p> : null}
           <div className="flex flex-wrap gap-2">
-            <Button className="w-full max-w-sm" busy={busy} disabled={!access || (!reachable && tool === null)} onClick={() => void start()}>
-              {t(!reachable ? 'open' : pairing ? 'again' : 'start')}
+            <Button className="w-full max-w-sm" busy={busy || downloading} disabled={!access || (!reachable && tool === null && !download)} onClick={() => void start()}>
+              {t(!reachable ? (download ? 'openDownload' : 'open') : pairing ? 'again' : 'start')}
             </Button>
             {access?.tunnel ? <Button variant="secondary" busy={busy} onClick={() => void close()}>{t('close')}</Button> : null}
           </div>

@@ -66,7 +66,7 @@ plot/
 `.env.example`가 기준이며, API는 리포 루트 `.env`를 dotenv로 읽는다(`apps/api/src/env.ts`).
 
 ```
-SHIZUE_DATA_DIR=./data/app       # 앱 폴더(apps/plot 기준 resolve, 기본 apps/plot/data/app): db/(PGlite)·files/(파일)·secret(설치의 비밀)·app.lock, 그리고 EMBEDDER_CACHE_DIR가 없으면 models/(임베더 가중치). 한 프로세스만 연다. 배포 패키지의 기본은 OS의 앱 데이터 폴더 — macOS ~/Library/Application Support/shizue-plot, Windows %APPDATA%\shizue-plot, Linux $XDG_DATA_HOME/shizue-plot(없으면 ~/.local/share/shizue-plot) — 이고, 명령이 받은 상대 경로는 그 자리 기준이다. 백업은 이 폴더를 파일 하나로 받고, 복원은 그 옆에 `<폴더>.restore-…`를 만들어 다음 시작이 그것으로 바꾸며 바꾸기 전의 폴더는 `<폴더>.before-restore-…`로 남긴다(§10 백업·복원)
+SHIZUE_DATA_DIR=./data/app       # 앱 폴더(apps/plot 기준 resolve, 기본 apps/plot/data/app): db/(PGlite)·files/(파일)·secret(설치의 비밀)·app.lock, 그리고 EMBEDDER_CACHE_DIR가 없으면 models/(임베더 가중치), 휴대폰 터널이 내려받은 bin/cloudflared(§4.1). 한 프로세스만 연다. 배포 패키지의 기본은 OS의 앱 데이터 폴더 — macOS ~/Library/Application Support/shizue-plot, Windows %APPDATA%\shizue-plot, Linux $XDG_DATA_HOME/shizue-plot(없으면 ~/.local/share/shizue-plot) — 이고, 명령이 받은 상대 경로는 그 자리 기준이다. 백업은 이 폴더를 파일 하나로 받고, 복원은 그 옆에 `<폴더>.restore-…`를 만들어 다음 시작이 그것으로 바꾸며 바꾸기 전의 폴더는 `<폴더>.before-restore-…`로 남긴다(§10 백업·복원)
 SHIZUE_PORT=13000                # 앱의 한 프로세스가 답하는 포트 — API와 웹 둘 다, 127.0.0.1과 ::1에서(§2). 기본 13000은 Shizue 확장이 ChatGPT 로그인을 돌려보내는 포트라 다른 포트에서는 ChatGPT를 연결하지 못한다(메인 옆의 둘째 체크아웃용). 배포 패키지는 `--port`
 BETTER_AUTH_URL=http://localhost:13000                     # 웹 오리진(경로 없음). 쓰기의 Origin과 ChatGPT 연결이 돌아오는 주소. 비우면 http://localhost:<SHIZUE_PORT>이고, 루프백 오리진을 적으면 그 포트여야 한다(아니면 부팅 거절). 이름은 예전 인증 라이브러리의 것
 BETTER_AUTH_SECRET                                          # 자격 증명(ChatGPT 토큰과 API 키) 봉인 키·호스트 ID의 원천. 비우면 설치마다 처음 시작할 때 만든 앱 폴더의 `secret`(0600)을 쓴다(보통은 비운다). 여기 적는 것은 길고 무작위여야 한다(openssl rand -base64 32 — 길이를 검사하지는 않는다). 바꾸면 ChatGPT 연결이 끊기고 그 전에 저장한 API 키는 다시 넣어야 한다(`credential_unreadable`)
@@ -205,8 +205,8 @@ Shizue 대역(`apps/e2e/shizueStandIn.ts`, 테스트 오리진·포트용 규칙
 
 **터널은 설정 화면이 연다**(2026-10-17, PocketRisu의 "원격 접속 열기"처럼). 카드의 "휴대폰 연결 열기"가
 `POST /api/devices/tunnel`로 터널을 열고 곧바로 연결 코드를 만들어 QR로 보인다 — 휴대폰은 그 QR 하나로 주소를
-열고 이 컴퓨터의 shizue에 붙는다. `GET /api/devices`는 `{tunnel: {kind, origin} | null, available: {tailscale, cloudflare},
-origins, local}`(열린 터널, 버튼이 열 터널, 휴대폰이 쓸 수 있는 주소 전부, 이 컴퓨터의 요청인지)이고, `DELETE /api/devices/tunnel`이 닫는다.
+열고 이 컴퓨터의 shizue에 붙는다. `GET /api/devices`는 `{tunnel: {kind, origin} | null, available: {tailscale, cloudflare}, download?,
+origins, local}`(열린 터널, 버튼이 열 터널, 앱이 내려받을 cloudflared — 아래, 휴대폰이 쓸 수 있는 주소 전부, 이 컴퓨터의 요청인지)이고, `DELETE /api/devices/tunnel`이 닫는다.
 고르는 순서(소유자 결정):
 - **Tailscale Serve** — 이 기기가 tailnet에 로그인해 있으면(`tailscale status --json`의 `BackendState`가
   `Running`). 고정 주소(`https://<기기>.<tailnet>.ts.net:<포트>`)이고 같은 tailnet의 기기만 들어오며, 휴대폰에도
@@ -216,12 +216,29 @@ origins, local}`(열린 터널, 버튼이 열 터널, 휴대폰이 쓸 수 있�
   Serve는 API보다 오래 남으므로, 웹 포트로 가는 항목이 이미 있으면 그 포트가 이 앱의 터널이다 — API를 다시 띄워도
   부팅 때 찾아 같은 주소를 다시 믿는다. 2026-10-17 이 Mac에서 관리자 암호 없이 8444에 열렸고, SSE가 이벤트마다
   버퍼 없이 지나갔다.
-- **Cloudflare Quick Tunnel** — Tailscale이 없고 `cloudflared`가 있으면. API가 `cloudflared tunnel --no-autoupdate
-  --url http://127.0.0.1:<웹 포트>`를 띄우고 출력에서 `https://<단어>.trycloudflare.com`을 30초 안에 찾는다
+- **Cloudflare Quick Tunnel** — Tailscale이 없고 `cloudflared`가 있으면: PATH의 것, 없으면 앱이 내려받아 둔 것(아래).
+  API가 `<cloudflared> tunnel --no-autoupdate --url http://127.0.0.1:<웹 포트>`를 띄우고 출력에서 `https://<단어>.trycloudflare.com`을 30초 안에 찾는다
   (`api.trycloudflare.com`은 주소가 아니라 실패 메시지 속의 API다). 휴대폰에 앱이 필요 없지만 주소는 공개이고 열 때마다
   바뀌며, API가 끝나면 함께 닫는다. 2026-10-17 이 Mac의 망은 `api.trycloudflare.com`과의 연결을 끊어 터널 생성
   자체가 막혔으므로 이 길은 단위 테스트로만 확인했다.
-- 둘 다 없으면 카드가 Tailscale(권장)이나 cloudflared를 설치하라고 말하고 버튼을 잠근다. 설치는 해 주지 않는다.
+- **둘 다 없으면 cloudflared를 앱이 내려받는다**(2026-10-19, PocketRisu의 빠른 터널 버튼이 내려받듯 — `cloudflared.ts`).
+  `GET /api/devices`가 `download: {version, bytes, state: idle|downloading|failed, received}`를 함께 주고, 카드는
+  버전과 크기를 말한 뒤 "cloudflared 받고 열기" 한 번에 `POST /api/devices/cloudflared`(이 컴퓨터만 — 곧바로 답하고
+  받기는 뒤에서 이어진다)로 받기를 시작해 1초마다 진행률을 읽다가, 다 받으면 그대로 터널을 연다. 받는 중에 연 다른
+  화면도 진행률을 읽는다. PocketRisu는 `releases/latest`를 확인 없이 받지만 여기는 **고정한 릴리스**다: cloudflare/cloudflared
+  2026.10.1의 GitHub 릴리스에서 이 OS·아키텍처의 파일(macOS arm64·x64 `.tgz`, Linux amd64·arm64, Windows amd64
+  `.exe` — PocketRisu의 표에서 Termux만 뺐다)을, 플랫폼마다 적어 둔 SHA-256(GitHub의 자산 digest)으로 확인한다.
+  받기는 임베더 가중치의 다운로더(`hubDownload.ts` `downloadPinned` — `.part`에 받아 다 오고 해시가 맞을 때만
+  이름을 바꾸고, 범위 요청으로 이어 받고, 리다이렉트를 따르고, 1분 동안 아무것도 오지 않으면 그만둔다)이고, 해시가
+  다르면 지우고 거절한다(`DownloadMismatch`). macOS의 `.tgz`는 맞으면 `tar`로 `cloudflared`만 꺼내, 릴리스 노트가
+  적은 그 바이너리의 SHA-256으로 한 번 더 확인한 뒤에야 자리에 둔다 — 아카이브는 어느 쪽이든 지운다. 자리는
+  `<앱 폴더>/bin/cloudflared`(Windows는 `.exe`)이고 실행 권한을 준다. **띄울 때마다 해시를 다시 확인해** 고정한
+  바이너리가 아니면 지우고 띄우지 않는다 — 열기는 409 `cloudflared_unavailable`로 답하고, 카드는 같은 클릭에서 다시
+  받아 연다. 그래서 고정한 버전을 올리면 옛 바이너리는 해시가 맞지 않아 다음에 열 때 새로 받는다(버전과 해시는 함께
+  올린다). 2026-10-19 이 Mac에서 darwin-arm64를 실제로
+  받아 두 해시가 맞고 꺼낸 바이너리가 `--version`에 `2026.10.1`로 답하는 것을 확인했다. 터널 자체는 위처럼 이 망에서
+  열리지 않는다.
+- 받을 것도 없는 플랫폼(위 다섯 밖)이면 카드가 Tailscale(권장)이나 cloudflared를 설치하라고 말하고 버튼을 잠근다.
 보호 장치는 PocketRisu의 비밀번호가 아니라 연결 코드다 — 휴대폰은 5분짜리 일회용 코드로만 기기 세션을 얻으므로, 공개
 주소로 남이 볼 수 있는 것은 Next가 그리는 빈 화면과 `/pair`뿐이고 API는 모두 401로 답한다. `next dev`가 다른 호스트의 `/_next/*`를 받도록
 루프백일 때 `allowedDevOrigins`에 `**.ts.net`·`*.trycloudflare.com`을 넣는다. 열린 터널의 오리진은
@@ -1276,12 +1293,12 @@ RisuAI의 형식으로도 내보낸다(§10 RisuAI 챗 파일, `routes/risuChats
 ── requireLocal(이 컴퓨터만, 휴대폰은 403 `local_only`) ──
   /api/chatgpt/sign-in · /callback · /disconnect
   /api/credentials(POST) · /:id(PATCH·DELETE) · /:id/test — 키는 이 컴퓨터에서만 넣는다(아래 모델 프리셋과 키)
-  /api/devices/tunnel(POST·DELETE) · /pair
+  /api/devices/tunnel(POST·DELETE) · /cloudflared(POST — 앱이 cloudflared를 내려받기 시작, §4.1) · /pair
   /api/devices/phones     GET 연결한 휴대폰 [{id, pairedAt, lastSeenAt, userAgent}] · DELETE(전부) · DELETE /:id(하나, 없으면 404) — §4.1 기기 연결
 그 밖의 라우트:
   /api/presets           프리셋 id 목록
   /api/chatgpt           GET {connected, email, local} — 소유자의 ChatGPT 연결
-  /api/devices           GET 터널 상태 + local · DELETE /session(그 휴대폰의 기기 세션만 끝낸다).
+  /api/devices           GET 터널 상태(받을 cloudflared와 그 진행률 포함) + local · DELETE /session(그 휴대폰의 기기 세션만 끝낸다).
                          로컬 실행에서만 — 터널 관리자가 없으면 404
   /api/credentials       GET 키와 ChatGPT 연결 — 비밀은 없이 가린 hint만
   /api/model-presets     모델 프리셋 CRUD · /formats · /registry · /registry/refresh · /catalog · /:id/models · /:id/test
@@ -1467,7 +1484,7 @@ DELETE /api/chats/:id/memory/facts/:fid 사실 지우기 → 204
 
 **백업·복원**(`backup.ts`, `tar.ts`) — 앱 폴더(§4, §12) 전체를 파일 하나로 받고, 그 파일로 되돌린다. RisuAI·PocketRisu의 백업 페이지 자리다.
 - **백업** `GET /api/backup` → `application/x-tar`, `shizue-backup-YYYY-MM-DD-HHMMSS.tar`(이 컴퓨터의 시각). 앱이 도는 채로 만든다. tar는 스트림으로 쓰고(ustar, 100바이트를 넘는 경로와 8GB를 넘는 크기는 pax 헤더) 차례는: ① `shizue-backup.json` — `{format: 'shizue-backup', version: 1, createdAt, migrations(데이터베이스의 `drizzle.__drizzle_migrations` — 해시와 시각), tables(public 스키마의 모든 테이블의 행 수), db: {size, sha256}, secret: 'not_included'}` ② `db.tar.gz` — PGlite 0.5.8의 `dumpDataDir('gzip')`(데이터 디렉터리의 tar) ③ `files/…` — `files/`의 모든 파일(업로드 중인 파트 `.uploads/`와 쓰는 중인 `*.tmp`는 빼고, 이름 순) ④ `shizue-backup-end.json` — `{files, bytes, sha256}`(파일마다 경로 한 줄과 바이트를 차례로 먹인 SHA-256). **일관성**: 덤프 전에 `CHECKPOINT`, 그리고 행 수·마이그레이션·덤프를 PGlite 트랜잭션 하나 안에서 한다 — PGlite의 `query`·`exec`는 트랜잭션 뮤텍스를 기다리므로 그동안 다른 쓰기가 끼지 못하고(덤프 몇 초 동안 앱의 다른 쿼리는 기다린다), 덤프의 파일 걷기는 동기라 한 순간의 스냅숏이다. 파일은 그 뒤에 읽는다 — 하나씩 연 뒤 헤더를 쓰므로 그 사이 지워진 파일(덤프 뒤에 작품을 지웠다)은 건너뛴다. 응답이 시작되기 전에 덤프를 마치므로 덤프 실패는 오류 응답이지 잘린 내려받기가 아니다. 데이터베이스 덤프는 메모리에 한 번 들고(PGlite의 API가 그렇다), 파일은 1MB씩 흘린다. 한 번에 하나(409 `backup_busy`). 휴대폰도 받을 수 있다.
-- **빠지는 것**: 설치의 `secret`(API 키와 ChatGPT 토큰의 봉인 키, §7.1 — 백업 파일만으로는 아무 키도 열리지 않는다), `models/`(임베더 가중치, 다시 받는다), `app.lock`. 비밀 키를 암호로 잠가 싣는 길은 두지 않았다 — 키는 다시 넣으면 되고, 파일을 가진 사람의 암호 추측을 막을 것이 하나 더 생긴다. 대신 **복원이 이 설치의 `secret`을 새 폴더로 복사한다**: 같은 컴퓨터(같은 설치)의 백업이면 키와 ChatGPT 연결이 그대로 열리고, 다른 컴퓨터의 백업이면 API 키를 다시 넣고 ChatGPT를 다시 연결한다(`credential_unreadable`, §4 `BETTER_AUTH_SECRET`). `BETTER_AUTH_SECRET`을 쓰는 설치는 그 값이 같으면 열린다.
+- **빠지는 것**: 설치의 `secret`(API 키와 ChatGPT 토큰의 봉인 키, §7.1 — 백업 파일만으로는 아무 키도 열리지 않는다), `models/`(임베더 가중치, 다시 받는다), `bin/`(휴대폰 터널의 cloudflared, 다시 받는다 — §4.1), `app.lock`. 비밀 키를 암호로 잠가 싣는 길은 두지 않았다 — 키는 다시 넣으면 되고, 파일을 가진 사람의 암호 추측을 막을 것이 하나 더 생긴다. 대신 **복원이 이 설치의 `secret`을 새 폴더로 복사한다**: 같은 컴퓨터(같은 설치)의 백업이면 키와 ChatGPT 연결이 그대로 열리고, 다른 컴퓨터의 백업이면 API 키를 다시 넣고 ChatGPT를 다시 연결한다(`credential_unreadable`, §4 `BETTER_AUTH_SECRET`). `BETTER_AUTH_SECRET`을 쓰는 설치는 그 값이 같으면 열린다.
 - **복원** `PUT /api/backup/restore`(`requireLocal` — 휴대폰은 403 `local_only`), 바디가 백업 파일 그대로다(`application/x-tar`, 본문 상한 없음 — 도착하는 대로 읽어 쓰고 쥐지 않는다). 지금 폴더에는 손대지 않는다: 그 **옆에 새 폴더**(`<폴더>.restore-<시각>-<임의>`)를 만들어 거기에 푼다. 거절하는 것 — 그때 새 폴더를 지우고 다른 것은 아무것도 바뀌지 않는다: tar 헤더의 체크섬·종류(파일과 폴더 말고는 거절)·잘림, 첫 엔트리가 매니페스트가 아님, `format`·`version`·필드가 맞지 않음(400 `invalid_backup`), 매니페스트가 이 빌드의 `drizzle/`에 없는 마이그레이션을 말함(400 `backup_incompatible` — 새 버전의 백업, 그리고 2026-10-19 마이그레이션을 하나로 합치기 전의 폴더), 덤프의 크기·SHA-256이 매니페스트와 다름, `files/` 밖이거나 `..`·빈 조각·백슬래시·콜론이 든 경로, 끝 엔트리의 수·바이트·해시가 다름, 끝 엔트리 뒤의 엔트리. 그다음 덤프를 PGlite에 주기 **전에** 직접 gunzip하고 tar로 걸어 `PG_VERSION`·`base/`·`global/`을 확인한다 — PGlite 0.5.8은 읽지 못하는 gzip을 받으면 `create`를 거절하면서도 잡히지 않은 스트림 오류를 하나 더 던진다(2026-10-19 확인). 그러고서 새 폴더의 `db/`에 `loadDataDir`로 데이터베이스를 열어 모든 테이블의 행 수가 매니페스트와 같은지 보고, 시작처럼 마이그레이션한다 — **옛 백업은 여기서 이 빌드의 스키마로 올라간다**(아는 마이그레이션만 담았으므로 빠진 것만 더한다). 끝으로 이 설치의 `secret`을 복사하고, 새 폴더에 `restore.json`(완료 표시)을, 지금 폴더에 `restore-pending.json`(새 폴더 이름·시각·백업의 시각, 임시 파일로 쓰고 옮긴다)을 쓴다 → `{pending: {stagedAt, backupCreatedAt}}`. 먼저 기다리던 복원이 있었으면 그 폴더는 지운다(새 것이 대신한다). 복원과 백업은 각각 한 번에 하나(409 `backup_busy`).
 - **다음 시작**(`appDb.ts` `openAppDb`): 폴더를 잠근 뒤, 아무것도 열기 전에 `swapInPendingRestore` — 표시가 가리키는 폴더가 있고 완료 표시가 있으면 지금 폴더를 `<폴더>.before-restore-<시각>`으로, 새 폴더를 제자리로 옮긴다(둘째 옮기기가 실패하면 첫째를 되돌린다). 임베더 가중치(`models/`)는 옛 폴더에서 옮겨 온다. 옛 폴더의 표시와 잠금을 지우고 새 폴더를 잠근 뒤 연다. 새 폴더에는 `restored.json`(언제, 어느 백업, 옛 폴더 이름)을 남긴다. 새 데이터베이스가 열리지 않거나 마이그레이션에 실패하면 새 폴더를 `<폴더>.restore-failed-<시각>`으로 비키고 옛 폴더를 되돌려 그것으로 연다. 표시가 가리키는 폴더가 없거나 완료되지 않았으면 표시만 지우고 지금 폴더로 연다. **옛 폴더는 지우지 않는다** — 복원이 성공해도 소유자가 지울 때까지 옆에 남고, 설정 카드가 그 자리를 말한다. 앱이 스스로 다시 시작하지는 않는다(배포 패키지는 한 프로세스이고 감독하는 프로세스가 없다) — 독자가 끄고 다시 켠다. 기다리는 동안 바꾼 것은 지금 폴더(곧 옛 폴더)에만 남는다.
 - `GET /api/backup/restore` → `{local, pending: {stagedAt, backupCreatedAt} | null, restored: {restoredAt, backupCreatedAt, previous(옛 폴더의 절대 경로)} | null}` — `restored`는 옛 폴더가 아직 있을 때만. `DELETE /api/backup/restore`(`requireLocal`) → 204, 표시와 그 폴더를 지운다. `deps.appFolder`(`{dataDir, filesDir, client}`, `index.ts`가 넣는다)가 없으면(그것을 넣지 않는 테스트) 네 라우트 모두 404.
@@ -1599,7 +1616,7 @@ DELETE /api/chats/:id/memory/facts/:fid 사실 지우기 → 204
 
 ## 12. 운영 envelope
 
-- **앱 폴더**(2026-10-18): 앱이 가진 모든 것은 앱 폴더(`SHIZUE_DATA_DIR`, §4)에 있다 — `db/`(PGlite), `files/`, `secret`(0600, 처음 시작할 때 만든다), `app.lock`(연 프로세스의 pid — 살아 있는 프로세스의 것이면 둘째 시작이 `DataDirBusy`로 거절되고, 죽은 프로세스의 것은 넘겨받는다), 그리고 `EMBEDDER_CACHE_DIR`가 다른 곳을 가리키지 않으면 `models/`(임베더 가중치, 처음 시작할 때 받는다, §7.3). 데이터베이스는 시작할 때마다 최신 마이그레이션으로 올리고, 종료의 마지막 단계에서 닫는다(PGlite가 파일을 내려쓴다). 설정의 백업이 이것을 tar 하나로 받고(`secret`·`models/`·`app.lock`은 빼고), 복원은 옆에 `<폴더>.restore-…`를 만들어 다음 시작이 바꿔 넣는다 — 바꾸기 전 폴더는 `<폴더>.before-restore-…`로, 열리지 않은 복원은 `<폴더>.restore-failed-…`로 옆에 남는다(§10 백업·복원).
+- **앱 폴더**(2026-10-18): 앱이 가진 모든 것은 앱 폴더(`SHIZUE_DATA_DIR`, §4)에 있다 — `db/`(PGlite), `files/`, `secret`(0600, 처음 시작할 때 만든다), `app.lock`(연 프로세스의 pid — 살아 있는 프로세스의 것이면 둘째 시작이 `DataDirBusy`로 거절되고, 죽은 프로세스의 것은 넘겨받는다), 그리고 `EMBEDDER_CACHE_DIR`가 다른 곳을 가리키지 않으면 `models/`(임베더 가중치, 처음 시작할 때 받는다, §7.3), 그리고 휴대폰 터널이 받은 `bin/cloudflared`(§4.1). 데이터베이스는 시작할 때마다 최신 마이그레이션으로 올리고, 종료의 마지막 단계에서 닫는다(PGlite가 파일을 내려쓴다). 설정의 백업이 이것을 tar 하나로 받고(`secret`·`models/`·`app.lock`은 빼고), 복원은 옆에 `<폴더>.restore-…`를 만들어 다음 시작이 바꿔 넣는다 — 바꾸기 전 폴더는 `<폴더>.before-restore-…`로, 열리지 않은 복원은 `<폴더>.restore-failed-…`로 옆에 남는다(§10 백업·복원).
 - **한 프로세스**(2026-10-18): 앱은 한 프로세스다(§2 DB — PGlite는 한 폴더에 한 프로세스). 웹 앱도 그 안에서 같은 포트로 돈다(§2 — 포트를 다른 프로그램이 쥐고 있으면 앱 폴더를 열기 전에 끝난다). 그래서 나눌 상태가 없다 — 챗의 생성 슬롯(`deps.generating`, §7.2), 독자의 중단, 잡 큐의 루프 둘(§5 `jobs`), 배경 작업의 가드(`refreshingMemory`·`detectingEmotion`·`embeddingVectors`·`suggesting` — 챗·메시지·플롯마다 하나, 도는 사이 또 불리면 건너뛰거나 끝난 뒤 한 번 더), 카드 스크립트 `request`의 창(§10)이 모두 메모리에 있다. 다시 띄운 뒤에 이어지지 않는 것은 생성 중이던 답장(종료가 멈춘 답장으로 저장한다, §7.2)과 고르던 표정(화면의 물음이 다시 건다, §7.7)이고, 요약·벡터·별칭은 다음 턴이 남은 일을 다시 잡는다. 메모리에만 있어 재시작에 비는 것(모델 카탈로그 캐시 30초, `landing`, `fixedTokensOf`, editRequest Lua 상태, `cacheHealth`의 지문, 표정 이름 벡터·로어 별칭의 물러섬·정규식 워커의 건너뛰기 목록)은 모두 캐시이거나 진단이다.
 - **프로세스의 자원을 지키는 상한**: 카드 스크립트 `request`의 동시 32개, `editRequest`의 Lua 자식 2개와 프롬프트 스크립트 스레드 2개(§7.2) — 둘 다 자리를 기다리는 것은 작업 하나의 기한까지만이고, 넘으면 고치지 않은 요청·저장된 글로 간다.
 - **보안 헤더**(2026-10-17): API는 모든 응답 — 거절·오류·저장 파일까지 — 에 `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; sandbox`를 단다(`securityHeaders.ts`, 맨 앞 미들웨어). 응답은 JSON·스트림·저장 파일뿐이라 정책은 아무것도 허락하지 않고, `sandbox`는 따로 열린 파일이 우리 오리진에서 무엇도 돌리지 못하게 한다. HSTS(`Strict-Transport-Security`)는 두지 않는다 — 웹 오리진은 이 컴퓨터의 http이고, 터널은 자기 TLS를 갖는다. 웹은 `/api` 밖의 모든 응답에 nosniff·Referrer-Policy를, 그중 샌드박스 문서(`/sandbox/*`, 우리 페이지가 띄운다 — 자기 CSP의 `frame-ancestors 'self'`가 그것을 정한다)를 뺀 응답에 `X-Frame-Options: DENY`를 준다(`apps/web/securityHeaders.ts`, `next.config.ts`의 `headers()` — Next가 **빌드 때** 계산한다). 페이지 CSP는 `proxy.ts`가 페이지 요청마다 nonce를 새로 만들어 쓴다. `/api`는 같은 프로세스의 Hono가 답하므로 API의 헤더 그대로다. proxy가 닿지 않는 `/_next`·점이 든 경로(정적 파일)·`/sandbox/*.html`에는 페이지 CSP가 없다 — 워커 스크립트는 자기 응답의 정책을 받고(임베딩 워커는 모델을 Hugging Face에서 받는다, §11), 샌드박스 문서는 자기 정책만 갖는다.
@@ -1625,6 +1642,7 @@ DELETE /api/chats/:id/memory/facts/:fid 사실 지우기 → 204
 - 메모리의 상태: `api.test.ts`가 Lua `request`의 1분 창(여섯 뒤 RisuAI의 429, 창이 지난 뒤), 챗의 생성 슬롯(429와 409, 반납), 다시 띄운 앱에서 어느 챗도 생성 중이 아닌 것(`leaves no chat generating after a restart`)을 본다.
 - 파일 임포트: `api.test.ts`의 `file imports`가 파트(로컬 드라이버의 API 주소, 순서 없이, 끊긴 뒤 이미 올라간 것, 모자란 완료의 409 `upload_incomplete`, 다른 크기·범위 밖·완료 뒤의 파트), 시작에서의 거절(크기·빈 파일·대상·`sourceUrl`·World Info의 400과 413·없는 플롯), 15분 버려진 업로드를 새 임포트가 버리는 것, 읽을 수 없는 파일의 `failed`와 남지 않는 파일, 두 번째 에셋에서 스토리지가 죽은 임포트의 되돌리기(플롯·그림·파일), 쓰는 도중 죽은 워커의 되돌리기, 저수준 확인을 같은 파일로, 그만두기, 정리를 본다. 그 밖의 임포트 테스트 50여 곳은 도우미 `fileImport`가 브라우저처럼 시작·파트·완료·잡·상태를 거쳐 옛 라우트의 응답(201과 바디, 또는 오류)을 돌려주므로 그대로 돈다. `storage.test.ts`가 드라이버의 `putStream`(파트 경계 넘기, 던지는 스트림은 아무것도 남기지 않음)과 업로드(순서 없는 파트의 합치기, 그만두기, 다른 크기의 파트)를 본다. 코어의 `card.test.ts`가 소스에서 읽을 때 에셋은 열기 전까지 읽지 않는 것과 저장소 실패가 모듈의 실패로 삼켜지지 않는 것, 스트림으로 텍스트 청크를 벗기는 것(조각 크기와 상관없이 같은 바이트, 걸을 수 없으면 오류)을 본다.
 - 한 프로세스: `server.test.ts`가 실제 소켓으로 본다 — `/api`가 Node 요청과 함께 API로 가서 게이트가 연결을 읽는 것(이 컴퓨터, DNS 리바인딩, 터널), 나머지가 웹으로 가는 것(`/apiary`는 웹의 것), `127.0.0.1`·`[::1]`의 307(터널·프록시의 흔적이 있으면 보내지 않고, `no-store`), 이벤트 스트림이 압축 없이 쓰이는 대로 나가는 것, 본문 없는 DELETE와 길이 없이(chunked) 온 본문이 body limit을 지나는 것, 두 루프백, 다른 프로그램이 쥔 포트(루프백 둘과 와일드카드 둘)의 `PortTaken`. `env.test.ts`가 포트와 웹 오리진의 짝을 본다. 배포 패키지는 `npm pack` → 빈 폴더에 설치 → 빈 HOME으로 첫 시작·임포트·종료를 손으로 리허설한다(§3).
+- 휴대폰 터널: `tunnel.test.ts`가 명령을 흉내 내 Tailscale·Cloudflare와 앱이 받는 cloudflared(받기 전·받는 중·실패와 다시·받은 뒤 그 경로로 띄우기·고정한 것이 아니면 띄우지 않기·종료가 받기를 멈춤)를, `cloudflared.test.ts`가 GitHub 릴리스 대역(리다이렉트하는 루프백 서버)으로 플랫폼마다의 파일·Linux 바이너리와 macOS 아카이브의 두 해시·맞지 않으면 지우고 거절·`.part` 이어 받기·자리의 바이너리 다시 확인을 본다.
 - core: 카드 V1/V2/V3 픽스처 매핑, PNG/charx는 테스트에서 프로그래밍으로 생성해 왕복 검증, 로어북(constant/selective/regex/예산/재귀), 데코레이터(RisuAI 키 데코레이터·확률·켜고 끄기 포함), RisuAI `/패턴/플래그` 키, 매크로, 변수, 표시 스크립트, 컴포넌트 서브셋, 프롬프트 조립(탈락 순서·depth 위치·author's note 잔존).
 - llm: OAuth·토큰 회전·권한 해제, 형식 레지스트리와 형식마다의 계약(요청 본문·헤더·스트림·오류·모델 목록·키 확인), stringlize·SigV4·이벤트 스트림, SSE 파서, echo 취소. 기억(HypaV3)은 core `memory.test.ts`가 고르기의 순서·예산·폴백과 묶음을, API 테스트가 배경 요약·브랜치 판정·지우기와 틈 메우기·리비전 CAS·임베더(키워드 임베더 주입)의 순위·낡은 모델·폴백·라우트·0011 변환·백필을 확인한다. 사실은 core `facts.test.ts`(답 읽기·보인 번호만 고치기·같은 말·상한)와 `memory.test.ts`(시간 표기의 버킷·시계·언어), API 테스트(뽑기·저장·브랜치·지우기·요약이 지워진 뒤의 쓰기·요약과 겹치는 것과 서로 겹치는 것 빼기·개수·폴백·라우트·갱신과 끝냄과 되살리기·다시 요약된 틈이 끝난 사실을 되살리지 않음·시간 표기), 표정의 임베딩은 core `emotion.test.ts`(벌점 값)와 API 테스트가 확인한다.
 - web: RisuRealm 주소 파서·다운로드 폴백(`realm.test.ts`), **SillyTavern 이사**(`sillytavernImport.test.ts` — API를 흉내 낸 주입 `fetch`로 실행 순서·두 번째 실행의 중복 없음·단독/그룹 플롯 구분·그룹의 차례 설정과 멤버마다의 대화량 PATCH(새 플롯에만·들어온 멤버에만·실패는 경고)와 실제 변환기로 그룹 챗 답장의 `speakerId`·멤버가 하나인 챗의 접두사·배치(개수·UTF-8 바이트)·버전과 행 상한·페르소나 매핑·페르소나 그림 업로드와 그 실패의 경고·실패 후 계속·멈춤과 다시 시도·응답 유실 후 재시도·`invalid_lorebook` 폴백·`model_unavailable` 중단·챗 변수와 작가 노트·그 설정이 완료 요청에 실림(간격 0은 빈도 0으로·스토리 문자열 앞뒤 자리만 안내)·챗 로어북을 플롯·추가 로어북·멤버 카드와 겹치지 않게 한 번만 붙임·생성 실패 뒤 재시도에도 두 번 붙지 않음·PATCH 실패는 경고·secrets.json 차단), **붙여넣기 이주**(`pasteMigration.test.ts` — 스키마로 읽고 쓰는 폼 값과 행 min/max·이동에 따른 화자 옵션 번호, 확인 문항, 에셋 slug 충돌·`asset-N`, 자동 저장 왕복과 저장소가 거절·고장 날 때, 주입 `fetch`로 생성 → 아바타 → 에셋 순서·실패한 업로드만 같은 플롯에 다시 시도·생성 실패 뒤 재시도, 지문 해시와 lookup; `pasteMigrationWizard.test.ts` — 실제 제타 스키마·변환으로 마법사를 jsdom에 그려 확인 게이트·저장본 복원·화자 미리보기·미리본 초안 그대로 생성(최상위 `sourceUrl`, lookup 해시 일치)·생성 뒤 저장본 삭제; `messages.test.ts` — 확인 id·경고 코드·사이트·공개 범위·화자 모드마다 세 언어 문구가 있고 경고의 모든 detail로 포맷된다), **그룹 턴**(`groupRound.test.ts` — 다음 차례 고르기(로스터 순·상한과 대화량 무시·무대 밖 제외)·기본 설정·대신 쓴 멤버 제외·`roundStart`·재생성의 교체 범위와 내레이터 차례·차례 요청(여는 경로·`groupTurnId`·`finalSpeaker`)·`sendAIprompt` 상한·실패와 다시 시도·중단; `groupScripts.test.ts` — 멤버별 런타임(입력 패스 연쇄·화자의 시작만·무대 밖 제외·스크립트 없는 화자·멤버별 재작성 패치·출력 커밋과 모델 호출의 `memberId`·표시와 버튼 라우팅·멤버 하나면 `memberId` 없음); `chatScripts.test.ts`의 멤버 둘 작품(전송 바디·화자의 마무리·말풍선별 표시 트리거와 `data-shizue-member`·버튼); `studioCustomUi.test.ts` — 적용 대상·멤버 시트·작품 배경 저장·멤버 삭제·동반 멤버 임포트의 상태 갱신과 변수 충돌 알림; 새니타이저의 멤버 스코프와 Lua 상태의 멤버 키; `groupTurns.test.ts` — 챗 페이지를 띄워 한 차례의 요청 순서·무대·입력 중 행과 다음 칩·중단·실패한 화자 다시 묻기·차례 재생성·지금 말하기·`@` 목록으로 대신 쓰기, 멤버가 하나인 작품은 `speakerId` 없이; `groupTurnsEditor.test.ts` — 스튜디오의 순서·인원·대화량이 저장 하나로 가고 멤버 하나에선 안 보임; `mention.test.ts`의 `@` 목록 — 연 줄의 `@`만, 이름·닉네임·내레이터 이름으로 좁히기, 고르면 `@이름: `; `messageSpeech.test.ts`의 독자 턴 `readerRuns` 렌더와 입력 중 행), 새니타이저 회귀(XSS 벡터), **새니타이저 호환 게이트**(실제 유통 형태 카드 12종의 출력 고정 — 규칙을 조여 크리에이터 자산을 깨뜨리는 변경을 잡는 반대쪽 절반), 표시 스크립트, **표시 스크립트 플래너**(stub 워커로 종료 경로, Node 워커 스레드로 실제 종료), 컴포넌트 호출 파서·브리지·워커 런타임, SSE 파서.

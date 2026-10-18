@@ -1232,7 +1232,8 @@
     "profile_unavailable": "このモデルプロファイルはレジストリにありません。別のものを選んでください。",
     "invalid_backup": "shizueのバックアップファイルではないか、破損しています。何も変更していません。",
     "backup_incompatible": "このバージョンのshizueでは開けないバックアップです。作成したバージョンかそれより新しいバージョンで復元してください。",
-    "backup_busy": "バックアップまたは復元がすでに進行中です。終わってからもう一度お試しください。"
+    "backup_busy": "バックアップまたは復元がすでに進行中です。終わってからもう一度お試しください。",
+    "cloudflared_unavailable": "cloudflared がまだダウンロードされていません。スマートフォン接続のカードからもう一度開いてください。"
   },
   "rebrand": {
     "eyebrow": "物語が育つ場所",
@@ -1293,7 +1294,11 @@
     "lastSeen": "最終アクセス {time}",
     "revoke": "接続を解除",
     "revokeAll": "すべてのスマートフォンの接続を解除",
-    "unknownDevice": "不明な端末"
+    "unknownDevice": "不明な端末",
+    "viaDownload": "このパソコンには Tailscale も cloudflared もありません。開くと Cloudflare が GitHub で公開している cloudflared {version}(約 {size}MB)を shizue のフォルダにダウンロードし、shizue に記された SHA-256 と一致するか確かめてから Cloudflare クイックトンネルで開きます。スマートフォンにアプリは不要ですが、アドレスはインターネットに開かれ、開くたびに変わります。接続していない端末には何も見えません。Tailscale を入れると自分の端末だけが入れる固定アドレスで開きます。",
+    "downloading": "cloudflared {version} をダウンロード中… {percent}%",
+    "downloadFailed": "cloudflared をダウンロードできませんでした。ネットワークを確認して、もう一度開いてください。",
+    "openDownload": "cloudflared を入れて開く"
   },
   "backup": {
     "title": "バックアップと復元",

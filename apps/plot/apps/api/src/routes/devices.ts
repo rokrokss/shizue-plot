@@ -70,7 +70,7 @@ export function deviceRoutes(deps: AppDeps, sessions: SessionStore): Hono<AppEnv
       return await call();
     } catch (error) {
       if (error instanceof TunnelError) {
-        throw new ApiError(error.code === 'tunnel_unavailable' ? 409 : 502, error.code, error.message);
+        throw new ApiError(error.code === 'tunnel_failed' ? 502 : 409, error.code, error.message);
       }
       throw error;
     }
@@ -87,6 +87,16 @@ export function deviceRoutes(deps: AppDeps, sessions: SessionStore): Hono<AppEnv
   /** Opens the tunnel — Tailscale Serve when this machine is on a tailnet, else a Cloudflare Quick Tunnel. */
   app.post('/tunnel', requireLocal, async (c) => {
     await tunnelCall(() => phoneAccess!.open());
+    return c.json(await state(true));
+  });
+
+  /**
+   * Downloads cloudflared into the app's folder (`cloudflared.ts`), when the
+   * status offers it: answered at once, the download going on behind it, and
+   * `GET /` says how far it has come.
+   */
+  app.post('/cloudflared', requireLocal, async (c) => {
+    phoneAccess!.download();
     return c.json(await state(true));
   });
 

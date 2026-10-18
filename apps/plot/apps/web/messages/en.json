@@ -1232,7 +1232,8 @@
     "profile_unavailable": "This model profile is not in the registry. Pick another.",
     "invalid_backup": "This is not a shizue backup, or it is damaged. Nothing was changed.",
     "backup_incompatible": "This version of shizue cannot open this backup. Restore it with the version that made it, or a newer one.",
-    "backup_busy": "A backup or a restore is already running. Try again once it is done."
+    "backup_busy": "A backup or a restore is already running. Try again once it is done.",
+    "cloudflared_unavailable": "cloudflared is not downloaded yet. Open phone access again from its card."
   },
   "rebrand": {
     "eyebrow": "A place for plots to grow",
@@ -1293,7 +1294,11 @@
     "lastSeen": "Last seen {time}",
     "revoke": "Disconnect",
     "revokeAll": "Disconnect every phone",
-    "unknownDevice": "Unknown device"
+    "unknownDevice": "Unknown device",
+    "viaDownload": "This computer has neither Tailscale nor cloudflared. Opening downloads cloudflared {version} (about {size} MB) as Cloudflare publishes it on GitHub into shizue's folder, checks it against the SHA-256 shizue carries, and opens a Cloudflare Quick Tunnel. The phone needs no app, but the address is open on the internet and changes every time; a device that isn't paired sees nothing. With Tailscale installed it opens at a fixed address only your devices reach.",
+    "downloading": "Downloading cloudflared {version}… {percent}%",
+    "downloadFailed": "cloudflared did not download. Check the network and open it again.",
+    "openDownload": "Download cloudflared and open"
   },
   "backup": {
     "title": "Backup and restore",

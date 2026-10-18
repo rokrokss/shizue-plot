@@ -1,5 +1,7 @@
 import { createServer } from 'node:http';
+import { join } from 'node:path';
 import { createApp } from './app.js';
+import { cloudflaredInstall } from './cloudflared.js';
 import { DataDirBusy, openAppDb } from './appDb.js';
 import { createChatGPTAccounts, tokenCipher } from './chatgptAccounts.js';
 import type { AppDeps } from './deps.js';
@@ -58,8 +60,11 @@ const accounts = createChatGPTAccounts(db, {
 
 // The background tasks the turns start, kept until they settle so a shutdown can wait for them.
 const background = createBackgroundTasks();
-// A phone's tunnel to this machine, opened from the settings page, for a web origin on loopback.
-const phoneAccess = isLoopback(config.authUrl) ? createPhoneAccess({ webUrl: config.authUrl }) : undefined;
+// A phone's tunnel to this machine, opened from the settings page, for a web origin on loopback —
+// with the cloudflared the app downloads into its folder when the machine has no tunnel tool.
+const phoneAccess = isLoopback(config.authUrl)
+  ? createPhoneAccess({ webUrl: config.authUrl, cloudflared: cloudflaredInstall({ dir: join(config.dataDir, 'bin') }) })
+  : undefined;
 // Tailscale Serve outlives the API: an address opened before a restart is trusted again from the start.
 void phoneAccess?.status().catch(() => undefined);
 // This app at every origin it answers: card scripts' requests and an import's fetches never go there.

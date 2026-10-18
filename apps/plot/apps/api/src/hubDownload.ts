@@ -1,7 +1,9 @@
 /**
  * Files of a Hugging Face repo, downloaded into a folder on this computer: the
  * server embedder's weights (`embedder.ts`), which the app downloads by itself
- * in the background once it serves, and `embedder:fetch` ahead of time.
+ * in the background once it serves, and `embedder:fetch` ahead of time. One
+ * pinned file from elsewhere goes the same way (`downloadPinned`): cloudflared
+ * for the phone's tunnel (`cloudflared.ts`).
  *
  * - **A file in place is whole.** Each goes to `<file>.part` first and is
  *   renamed into place only once all its bytes are there — as many as the
@@ -28,7 +30,7 @@ import { createReadStream, createWriteStream, existsSync } from 'node:fs';
 import { mkdir, rename, rm, stat } from 'node:fs/promises';
 import { get as httpGet, type IncomingMessage } from 'node:http';
 import { get as httpsGet } from 'node:https';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
@@ -64,6 +66,8 @@ export interface DownloadOptions {
   /** The server, Hugging Face's unless a test stands one in. */
   hub?: string;
   idleMs?: number;
+  /** How many bytes of the file are in its part so far, and of how many when the server said. */
+  onProgress?: (received: number, total: number | undefined) => void;
 }
 
 /** A file whose bytes are not the ones pinned for it; its part is deleted. */
@@ -91,7 +95,17 @@ export async function downloadFromHub(download: HubDownload, options: DownloadOp
   return fetched;
 }
 
-async function sha256Of(path: string): Promise<string> {
+/**
+ * One pinned file from any address into `target`, under the same rules as a
+ * repo's files — the part and its rename, the pin, resuming, the redirects and
+ * the idle watch: cloudflared's release asset (`cloudflared.ts`). Answers the
+ * bytes it fetched.
+ */
+export function downloadPinned(url: string, target: string, sha256: string, options: DownloadOptions = {}): Promise<number> {
+  return downloadFile(url, target, { path: basename(target), sha256 }, { ...options, log: options.log ?? (() => undefined) });
+}
+
+export async function sha256Of(path: string): Promise<string> {
   const hash = createHash('sha256');
   for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
   return hash.digest('hex');
@@ -181,6 +195,7 @@ async function downloadFile(
       transform(chunk: Buffer, _, done) {
         hash.update(chunk);
         received += chunk.length;
+        options.onProgress?.(received, total);
         if (reported && Math.floor((received / total) * 10) > tenths && received < total) {
           tenths = Math.floor((received / total) * 10);
           log(`${file.path} ${tenths * 10}% of ${megabytes(total)}`);

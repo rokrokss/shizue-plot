@@ -45,8 +45,9 @@ notes no facts, and the chat's memory panel says so.
 Everything the app has is in one folder: the database (`db/`, PGlite —
 PostgreSQL 17 compiled to WebAssembly, with pgvector), the files (`files/`:
 avatars, card assets, attachments, covers, imports), the install's `secret`
-(0600: it seals your ChatGPT tokens and API keys), and `models/` for the
-embedding model's weights. The installed app keeps it where the system keeps an
+(0600: it seals your ChatGPT tokens and API keys), `models/` for the
+embedding model's weights, and `bin/` for the cloudflared the phone's tunnel
+downloads when it needs one. The installed app keeps it where the system keeps an
 app's data:
 
 | System | Folder |
@@ -65,8 +66,8 @@ Settings › Backup and restore downloads the whole folder as one `.tar` file,
 made while the app runs: the database (PGlite's own dump, taken in one
 transaction), every file in `files/`, and a manifest with each table's row
 count and the hashes a restore checks. It leaves out the install's `secret`, so
-the file alone opens none of your API keys or ChatGPT tokens, and `models/`,
-which downloads again.
+the file alone opens none of your API keys or ChatGPT tokens, and `models/`
+and `bin/`, which download again.
 
 A restore, from the computer the app runs on only, checks the file and unpacks
 it into a new folder beside the current one (`<folder>.restore-…`); anything
@@ -278,9 +279,14 @@ opens a tunnel to itself and shows a QR code, as PocketRisu's remote access
 does. It uses Tailscale Serve when this computer is signed in to a tailnet — a
 fixed address only your devices reach, with the Tailscale app on the phone, on a
 port your other `tailscale serve` entries do not use — and otherwise a
-Cloudflare Quick Tunnel when `cloudflared` is installed: no app on the phone,
-but a public address that changes each time. Install one of them first
-(`brew install tailscale` or `brew install cloudflared`); **Close access** turns
+Cloudflare Quick Tunnel through `cloudflared`: no app on the phone, but a
+public address that changes each time. With neither installed, the button
+downloads cloudflared itself, as PocketRisu's does: Cloudflare's official
+GitHub release for this computer (macOS arm64 or x64, Linux amd64 or arm64,
+Windows amd64), pinned to one version and its SHA-256, into `bin/` in the app's
+folder, and checked again before every start: a file there that does not match
+is deleted, never run. Elsewhere, install one of them first
+(`brew install tailscale` or `brew install cloudflared`). **Close access** turns
 it off. A tunnel you run yourself can be listed in `REMOTE_ORIGINS` instead.
 Plain LAN addresses (`http://192.168.x.x`) are not supported: without HTTPS the
 browser withholds `crypto.subtle`, `crypto.randomUUID` and the clipboard, which
