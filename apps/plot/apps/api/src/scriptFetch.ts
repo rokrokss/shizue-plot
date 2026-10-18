@@ -15,8 +15,7 @@
  *   for check and answer for answer: the rate limit, the 120-character cap,
  *   https only, its banned addresses — and this app's own — then a GET, and
  *   `{status, data}`, with `internal error` for anything that threw. RisuAI
- *   keeps one counter per app session; here it is one per reader, in the
- *   `rate_limits` table every API instance counts against (`rateLimit.ts`).
+ *   keeps one counter per app session, and so does this process.
  * - `guardedGet` is what a server inside someone's network must add: the GET
  *   never reaches an address that is not public. It resolves the name itself,
  *   refuses the lot when any answer is private, and connects only to the
@@ -28,12 +27,10 @@
  * DNS and the connection are both injectable (`resolve`, `transport`), so the
  * tests never touch the network.
  */
-import type { Db } from '@shizue/db';
 import { ADDRCONFIG, promises as dns, type LookupAddress } from 'node:dns';
 import type { IncomingHttpHeaders } from 'node:http';
 import { Agent, request as httpsRequest, type RequestOptions } from 'node:https';
 import { isIP, type LookupFunction } from 'node:net';
-import { hitRateLimit } from './rateLimit.js';
 
 /** What a script gets back, before RisuAI's `JSON.stringify`. */
 export interface ScriptFetchAnswer {
@@ -48,10 +45,8 @@ const INTERNAL_ERROR: ScriptFetchAnswer = { status: 400, data: 'internal error' 
  * RisuAI's rate limit: a window that starts again on the first request more
  * than a minute after it last started, and a refusal once *more than five*
  * came in it. The check comes before the count, so six get through and the
- * seventh is refused — whatever its message says. The shared limiter counts
- * first and lets through up to its limit, so the limit is six; it also counts
- * the refused ones, which RisuAI does not, but a refused reader stays refused
- * until the window runs out either way.
+ * seventh is refused — whatever its message says — and a refused one is not
+ * counted.
  */
 const SCRIPT_FETCH_WINDOW = { limit: 6, windowMs: 60_000 };
 const MAX_URL_LENGTH = 120;
@@ -429,8 +424,6 @@ export interface ScriptFetch {
 }
 
 export interface ScriptFetchOptions extends Omit<GuardOptions, 'refuse' | 'signal'> {
-  /** Where the readers' windows are counted (`rate_limits`), shared by every instance. */
-  db: Db;
   /** This app's own origins — the web app, and the API's when it has one of its own — refused as RisuAI refuses its. */
   ownOrigins?: readonly string[] | (() => readonly string[]);
   /** The windows' clock; the tests drive it. */
@@ -452,13 +445,21 @@ export function createScriptFetch(options: ScriptFetchOptions): ScriptFetch {
   const refuse = (url: URL): boolean => BANNED_PREFIXES.some((prefix) => url.href.startsWith(prefix)) || ours(url);
   /** Requests this process has open: a resource guard of its own, not part of RisuAI's limit. */
   let inFlight = 0;
+  /** RisuAI's `lastRequestResetTime` and `lastRequestsCount`, by reader. */
+  const windows = new Map<string, { startedAt: number; count: number }>();
 
   return {
     async request(readerId, url, signal) {
-      // RisuAI's `lastRequestResetTime` and `lastRequestsCount`, per reader, counted
-      // before the address is looked at: a refused one spends a request too, as in RisuAI.
-      const { allowed } = await hitRateLimit(options.db, `script_fetch:user:${readerId}`, SCRIPT_FETCH_WINDOW, new Date(now()));
-      if (!allowed) return { status: 429, data: 'Too many requests. you can request 5 times per minute' };
+      // Counted before the address is looked at: one RisuAI refuses for its address
+      // spends a request too.
+      const at = now();
+      let window = windows.get(readerId);
+      if (!window || window.startedAt + SCRIPT_FETCH_WINDOW.windowMs < at) {
+        window = { startedAt: at, count: 0 };
+        windows.set(readerId, window);
+      }
+      if (window.count >= SCRIPT_FETCH_WINDOW.limit) return { status: 429, data: 'Too many requests. you can request 5 times per minute' };
+      window.count += 1;
 
       // RisuAI reads `url.length` and `url.startsWith` inside its `try`: anything but text ends in its catch.
       if (typeof url !== 'string') return INTERNAL_ERROR;

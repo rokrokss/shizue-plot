@@ -6,7 +6,7 @@ export function modelRoutes(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
   app.get('/', async (c) => {
     // An owner without a ChatGPT connection has no models.
-    const viewer = c.get('viewerId');
+    const viewer = c.get('userId');
     return c.json(await listEnabledModels(deps.env, viewer ? deps.chatgpt?.accounts.forUser(viewer) : undefined));
   });
   return app;

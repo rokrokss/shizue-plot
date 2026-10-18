@@ -249,7 +249,6 @@ const scripted = (extra: Partial<ScriptBundle>): ScriptBundle => ({
   editScripts: [],
   lowLevelAccess: false,
   character: { description: '', personality: '', scenario: '', exampleDialogue: '', lorebook: [], postHistoryInstructions: '' },
-  overlay: { member: null, persona: null },
   ...extra,
 });
 
@@ -627,13 +626,36 @@ describe('what the scripts rewrote of their character', () => {
   const rows = (): HTMLElement[] => [...host.querySelectorAll<HTMLElement>('[data-testid="row"]')];
   const texts = (): string[] => rows().map((row) => row.querySelector('span')!.textContent ?? '');
 
-  it('draws the member under the name its scripts gave it, its lines under the old one still its own', async () => {
-    bundle = scripted({ memberId: 'chr_1', overlay: { member: { name: '세라' }, persona: null } });
+  /**
+   * A card whose Lua listens to the request rewrites its character on the server
+   * as the reply is made (`rewritesOnServer`); the page reads the bundle again
+   * after the turn and draws the member as the server left it.
+   */
+  const listening = (extra: Partial<ScriptBundle> = {}): ScriptBundle =>
+    scripted({
+      memberId: 'chr_1',
+      triggers: [
+        {
+          comment: 'lua',
+          type: 'manual',
+          conditions: [],
+          effect: [{ type: 'triggerlua', code: 'listenEdit("editRequest", function(id, data) return data end)', indent: 0 }],
+        },
+      ],
+      ...extra,
+    });
+
+  it('draws the member under the name the server’s run gave it, its lines under the old one still its own', async () => {
+    bundle = listening({ character: { ...listening().character, name: '리안' } });
+    chatState = stateWith([greeting]);
+    afterTurn = stateWith([greeting, message('u1', 'm0', 'user', '안녕'), message('m3', 'u1', 'assistant', '응.')]);
     await render();
+    // The work as the server keeps it after the turn: the card renamed.
+    bundle = listening({ character: { ...listening().character, name: '세라' } });
+    await sendText('안녕');
     // A plot of one member is that character: the chat is with the new name.
     expect(rows().map((row) => row.dataset['name'])).toEqual(['세라', '나', '세라']);
     expect(rows()[0]!.dataset['roster']).toBe(JSON.stringify([['세라', ['리안']]]));
-    expect(host.textContent).toContain('세라');
   });
 
   it('keeps the plot’s name over a cast of several, where only the member is renamed', async () => {
@@ -643,29 +665,17 @@ describe('what the scripts rewrote of their character', () => {
         { id: 'chr_2', name: '카이', avatarUrl: null, intro: '' },
       ],
     };
-    bundle = scripted({ memberId: 'chr_1', overlay: { member: { name: '세라' }, persona: null } });
+    bundle = listening({ character: { ...listening().character, name: '리안' } });
+    chatState = stateWith([greeting]);
+    afterTurn = stateWith([greeting, message('u1', 'm0', 'user', '안녕'), message('m3', 'u1', 'assistant', '응.')]);
     await render();
+    bundle = listening({ character: { ...listening().character, name: '세라' } });
+    await sendText('안녕');
     expect(rows()[0]!.dataset['name']).toBe('여관');
     expect(rows()[0]!.dataset['roster']).toBe(JSON.stringify([['세라', ['리안']], ['카이', []]]));
   });
 
-  it('shows the first message its scripts set where the branch opens on the first opening, and only there', async () => {
-    bundle = scripted({ overlay: { member: { firstMessage: '{{char}}의 문이 다시 열린다.' }, persona: null } });
-    await render();
-    expect(texts()[0]).toBe('여관의 문이 다시 열린다.');
-
-    // The branch opens on the second opening: RisuAI draws that one, as stored.
-    root.unmount();
-    root = createRoot(host);
-    chatState = {
-      ...chatState,
-      siblings: { ...chatState.siblings, m0: { index: 1, total: 2, ids: ['m9', 'm0'] } },
-    };
-    await render();
-    expect(texts()[0]).toBe('어서 와.');
-  });
-
-  it('draws the card’s background behind the conversation, or the one its scripts set, as custom UI', async () => {
+  it('draws the work’s background behind the conversation, as custom UI', async () => {
     publicPlot = { backgroundHtml: '<div class="bg">hp {{getvar::hp}}</div><script>alert(1)</script>' };
     await render();
     const background = host.querySelector('[data-testid="chat-background"]')!;
@@ -673,17 +683,11 @@ describe('what the scripts rewrote of their character', () => {
     // Read as CBS against the chat, and held to the display sanitizer inside the message scope.
     expect(background.querySelector('.shizue-msg')!.innerHTML).toBe('<div class="x-shizue-bg">hp 100</div>');
 
-    root.unmount();
-    root = createRoot(host);
-    bundle = scripted({ overlay: { member: { backgroundHtml: '<p>밤</p>' }, persona: null } });
-    await render();
-    expect(host.querySelector('[data-testid="chat-background"] .shizue-msg')!.innerHTML).toBe('<p>밤</p>');
-
     // RisuAI's display pass over the background runs the display triggers too.
     root.unmount();
     root = createRoot(host);
+    publicPlot = { backgroundHtml: '<p>밤</p>' };
     bundle = scripted({
-      overlay: { member: { backgroundHtml: '<p>밤</p>' }, persona: null },
       triggers: [
         {
           comment: '',
@@ -712,10 +716,10 @@ describe('what the scripts rewrote of their character', () => {
     publicPlot = {
       characters: [
         { id: 'chr_1', name: '리안', avatarUrl: null, intro: '' },
-        { id: 'chr_2', name: '카이', avatarUrl: null, intro: '' },
+        { id: 'chr_2', name: '카이로', avatarUrl: null, intro: '' },
       ],
     };
-    bundle = scripted({ memberId: 'chr_2', overlay: { member: { name: '카이로' }, persona: null } });
+    bundle = scripted({ memberId: 'chr_2' });
     chatState = stateWith([...chatState.path, message('m3', 'm2', 'assistant', '굴림: 7', { source: 'script' })]);
     await render();
     // The model's reply names its own speakers; the one the script wrote is its member's.

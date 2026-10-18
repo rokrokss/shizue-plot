@@ -2,12 +2,12 @@
 
 import { useTranslations } from 'next-intl';
 import { useState } from 'react';
-import { addTag, MAX_TAGS, RESERVED_TAGS } from '@/lib/hub';
+import { addTag, MAX_TAGS, RESERVED_TAGS } from '@/lib/tags';
 import { TextInput } from './ui';
 
 /**
  * Chip editor for `card.tags`. Enter or a comma commits the draft; the caps
- * mirror the server so what you see is what the explore filter stores. The genre
+ * mirror the server so what you see is what the plot stores. The genre
  * suggestions below are ordinary tags — picking one is the same as typing it.
  */
 export function TagInput({

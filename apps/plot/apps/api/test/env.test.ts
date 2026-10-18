@@ -10,8 +10,6 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { dataDirOf, dbDirOf, filesDirOf, readConfig, readOrCreateSecret } from '../src/env.js';
 
-/** A secret a deployment takes: 32 characters. */
-const SECRET = 'a'.repeat(32);
 /** The same root `readConfig` resolves against: three levels up from `src/`. */
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 
@@ -22,23 +20,13 @@ describe('readConfig', () => {
     expect(config.authUrl).toBe('http://localhost:13000');
   });
 
-  it('takes a secret set by hand, and refuses a short one for a deployment', () => {
+  it('takes a secret set by hand, else leaves it to the install', () => {
     expect(readConfig({ NODE_ENV: 'production' }).authSecret).toBeUndefined();
-    expect(readConfig({ NODE_ENV: 'production', BETTER_AUTH_SECRET: SECRET }).authSecret).toBe(SECRET);
-    expect(() => readConfig({ NODE_ENV: 'production', BETTER_AUTH_SECRET: 'short' })).toThrow(/at least 32/);
-    const hosted = { BETTER_AUTH_URL: 'https://plot.shizue.net' };
-    // `node dist/index.js` sets no NODE_ENV.
-    expect(() => readConfig({ ...hosted, BETTER_AUTH_SECRET: 'a'.repeat(31) })).toThrow(/at least 32/);
-    expect(readConfig({ ...hosted, BETTER_AUTH_SECRET: SECRET }).authSecret).toBe(SECRET);
-    // This machine's own shizue takes a short one: nothing is served past it.
-    expect(readConfig({ BETTER_AUTH_URL: 'http://127.0.0.1:13100', BETTER_AUTH_SECRET: 'short' }).authSecret).toBe('short');
+    expect(readConfig({ NODE_ENV: 'production', BETTER_AUTH_SECRET: 'set-by-hand' }).authSecret).toBe('set-by-hand');
   });
-  it('takes a hosted web origin, but only an origin', () => {
-    expect(readConfig({
-      NODE_ENV: 'production', BETTER_AUTH_SECRET: SECRET,
-      BETTER_AUTH_URL: 'https://plot.example.com', CHATGPT_CALLBACK_PORT: '47821',
-    }).authUrl).toBe('https://plot.example.com');
-    for (const url of ['https://plot.example.com/', 'https://plot.example.com/app', 'ftp://plot.example.com', 'http://user@localhost']) {
+  it('takes a web origin, but only an origin', () => {
+    expect(readConfig({ BETTER_AUTH_URL: 'http://127.0.0.1:13100' }).authUrl).toBe('http://127.0.0.1:13100');
+    for (const url of ['http://localhost:13000/', 'http://localhost:13000/app', 'ftp://localhost', 'http://user@localhost']) {
       expect(() => readConfig({ NODE_ENV: 'development', BETTER_AUTH_URL: url })).toThrow(/web origin/);
     }
   });
@@ -55,11 +43,10 @@ describe('readConfig', () => {
     expect(readConfig({ BETTER_AUTH_URL: 'http://127.0.0.1:13100', REMOTE_ORIGINS: 'https://mac.example.ts.net:8444' })
       .remoteOrigins).toEqual(['https://mac.example.ts.net:8444']);
     expect(() => readConfig({
-      NODE_ENV: 'production', BETTER_AUTH_SECRET: SECRET, BETTER_AUTH_URL: 'https://plot.shizue.net', REMOTE_ORIGINS: 'https://mac.example.ts.net:8444',
+      BETTER_AUTH_URL: 'https://plot.example.com', REMOTE_ORIGINS: 'https://mac.example.ts.net:8444',
     })).toThrow(/only for a shizue running on this machine/);
     // Empty is no list at all, wherever the app runs.
-    expect(readConfig({ NODE_ENV: 'production', BETTER_AUTH_SECRET: SECRET, BETTER_AUTH_URL: 'https://plot.shizue.net', REMOTE_ORIGINS: '' })
-      .remoteOrigins).toEqual([]);
+    expect(readConfig({ BETTER_AUTH_URL: 'https://plot.example.com', REMOTE_ORIGINS: '' }).remoteOrigins).toEqual([]);
   });
   it('reads the loopback port the companion extension catches', () => {
     expect(readConfig({}).chatgptCallbackPort).toBe(47801);

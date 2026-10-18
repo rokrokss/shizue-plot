@@ -8,7 +8,7 @@
  *   relays the call to.
  * - `server`: done in the sandbox, and what it changed is carried to the API
  *   the way a trigger's writes are — a chat variable on the turn, the chat the
- *   run left, a rewrite of the work in the reader's overlay — or, for a model
+ *   run left, a rewrite of the work written into it — or, for a model
  *   call, answered by the API on the reader's own account, and for a request,
  *   made by the API, as RisuAI's proxy makes it. `editRequest` alone runs on
  *   the API itself, in a child process (`apps/api/src/requestLua.ts`).
@@ -97,26 +97,26 @@ export const LUA_CLASSIFICATION: Readonly<Record<string, LuaSupport>> = {
   // The character, the persona, the note
   getName: host(
     'browser',
-    'RisuAI’s `char.name`: the member’s name as the reader’s overlay has it (`{{char}}` is the nickname, where the card sets one)',
+    'RisuAI’s `char.name`: the member’s name (`{{char}}` is the nickname, where the card sets one)',
   ),
   setName: host(
     'server',
-    'reader overlay: the member’s name in every chat this reader has on the plot — its speaker name (its lines under the old one stay its), the name the prompt gives it, `{{char}}` where the card has no nickname, and the plot’s `{{char}}` in a plot of one member; one line of at most 100 characters, else dropped and noted',
+    'the member’s name, written into its card and the roster for every chat of the work — its speaker name (on this page its lines under the old one stay its), the name the prompt gives it, `{{char}}` where the card has no nickname, and the plot’s `{{char}}` in a plot of one member; one line of at most 100 characters, else dropped and noted',
   ),
-  getDescription: host('browser', 'the description as the reader’s overlay has it'),
-  setDescription: host('server', 'reader overlay: every chat this reader has on the plot'),
+  getDescription: host('browser', 'the card’s description'),
+  setDescription: host('server', 'written into the card, for every chat of the work'),
   getCharacterFirstMessage: host('browser', 'what setCharacterFirstMessage left, else the greeting the branch opened on'),
   setCharacterFirstMessage: host(
     'server',
-    'reader overlay: what the plot’s first opening reads as, on screen and in the prompt, while the branch opens on it (RisuAI’s `fmIndex` -1); the stored greeting stays; answers true',
+    'written into the card, the work’s first opening and the first greeting of every chat of the work (RisuAI’s `fmIndex` -1, drawn from the character); answers true',
   ),
   getPersonaName: host('browser'),
   getPersonaDescription: host('browser', 'read as cbs() reads it'),
   getAuthorsNote: host('browser', 'the chat note'),
-  getBackgroundEmbedding: host('browser', 'the overlay’s, else the card’s `backgroundHTML`, whole'),
+  getBackgroundEmbedding: host('browser', 'the card’s `backgroundHTML`, whole'),
   setBackgroundEmbedding: host(
     'server',
-    'reader overlay: drawn behind the conversation as CBS through the display sanitizer, scoped to it, in place of the card’s; answers true',
+    'written into the card and what the work draws behind its chats, as CBS through the display sanitizer, scoped to it; answers true',
   ),
   getLoreBooks: wrapper('browser', 'by name, in RisuAI’s shape, the chat’s lore before the member’s book; content as cbs() answers it'),
   getLoreBooksMain: host('browser', 'as getLoreBooks'),
@@ -178,7 +178,7 @@ export const LUA_CLASSIFICATION: Readonly<Record<string, LuaSupport>> = {
     'server',
     'the request as RisuAI’s items in the shape its sendChat makes (the memory as a supaMemory turn, examples split into NewChatExample and example_user/example_assistant turns, the NewChat separator; memo, removable, attr, thoughts; pictures as data URLs in multimodals, named stand-ins past a 4 MB request), run by the API in a child process (no network, no files) before the request triggers, ' +
       'without low-level access as in RisuAI; dialogs answer as they do in a display pass; its chat variable writes land on the reply’s ' +
-      'delta, its chat edits make the branch the reply is stored under, its character rewrites go to the reader’s overlay and its lore ' +
+      'delta, its chat edits make the branch the reply is stored under, its character rewrites go into the card and its lore ' +
       'upserts to the chat’s lore, all with the reply; its own Lua state, apart from the other hooks’ as RisuAI keeps one per mode, ' +
       'whose plain-data globals carry to the reader’s next generation with the same card code, in any of their chats and works',
   ),

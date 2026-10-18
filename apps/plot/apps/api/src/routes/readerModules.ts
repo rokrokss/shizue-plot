@@ -1,6 +1,6 @@
 import { plotModuleOf, type ParsedRisuModule, type PlotModule, type ReaderModuleAsset } from '@shizue/core';
 import { cardScripts } from '@shizue/core/triggers';
-import { chats, readerModules, user, type FileImportResult, type ReaderModule } from '@shizue/db';
+import { chats, readerModules, type FileImportResult, type ReaderModule } from '@shizue/db';
 import { and, eq, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { randomUUID } from 'node:crypto';
@@ -11,7 +11,6 @@ import { ApiError, badRequest, notFound } from '../errors.js';
 import type { ImportHooks } from '../fileImports.js';
 import {
   deleteReaderModuleAssets,
-  MAX_READER_MODULES,
   readerLibrary,
   readerModuleAssetUrl,
   storeReaderModuleAssets,
@@ -66,19 +65,6 @@ async function loadOwnedReaderModule(deps: AppDeps, id: string, userId: string):
   return row;
 }
 
-/** A reader's library holds at most `MAX_READER_MODULES`: refused with this, before anything is stored. */
-export const readerLibraryFull = (): ApiError =>
-  badRequest('reader_module_limit', `A library holds at most ${MAX_READER_MODULES} modules`);
-
-/** How many modules a reader's library holds now. */
-export async function countReaderModules(deps: AppDeps, userId: string): Promise<number> {
-  const [counted] = await deps.db
-    .select({ value: sql<number>`count(*)::int` })
-    .from(readerModules)
-    .where(eq(readerModules.userId, userId));
-  return counted?.value ?? 0;
-}
-
 /**
  * A module file into the reader's library, the end of RisuAI's `importModule`
  * — run by the import job (`fileImports.ts`) once the file is read
@@ -106,7 +92,6 @@ export async function importReaderModule(
   if (parsed.lowLevelAccess && !confirmLowLevelAccess) {
     throw new ApiError(409, 'low_level_access_unconfirmed', 'This module asks for low-level access; confirm to import it');
   }
-  if ((await countReaderModules(deps, userId)) >= MAX_READER_MODULES) throw readerLibraryFull();
 
   const assets = await storeReaderModuleAssets(deps, parsed.assets, hooks);
   const id = randomUUID();
@@ -135,16 +120,7 @@ export async function importReaderModule(
   }
   await hooks.wrote({ readerModuleId: id, keys: localized.assets.map((asset) => asset.path) });
   try {
-    // The cap is a count: queue on the account row, as the reader's presets do.
-    await deps.db.transaction(async (tx) => {
-      await tx.select({ id: user.id }).from(user).where(eq(user.id, userId)).for('update');
-      const [again] = await tx
-        .select({ value: sql<number>`count(*)::int` })
-        .from(readerModules)
-        .where(eq(readerModules.userId, userId));
-      if ((again?.value ?? 0) >= MAX_READER_MODULES) throw readerLibraryFull();
-      await tx.insert(readerModules).values({ id, userId, module: localized.module, assets: localized.assets });
-    });
+    await deps.db.insert(readerModules).values({ id, userId, module: localized.module, assets: localized.assets });
   } catch (error) {
     await deleteReaderModuleAssets(deps, localized.assets);
     throw error;

@@ -157,10 +157,7 @@ test('the creator sets the plot style and it survives a reload', async () => {
   await page.screenshot({ path: 'test-results/style-01-editor.png', fullPage: true });
 });
 
-test('the published plot page wears the style as badges', async () => {
-  await page.getByRole('button', { name: '공개하기' }).click();
-  await expect(page.getByRole('button', { name: '비공개로 전환' })).toBeVisible();
-
+test('the plot page wears the style as badges', async () => {
   await page.goto(`/ko/p/${plotId}`);
   const badges = page.getByTestId('plot-style-badges').getByRole('listitem');
   // The moods, then the two options that are not at their default, then the pov.

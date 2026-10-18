@@ -13,7 +13,6 @@ import { computeVariables, DEFAULT_USER_NAME, type FoldOptions, type Variables }
 import { useFormatter, useLocale, useTranslations } from 'next-intl';
 import { Fragment, use, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useStickToBottom } from 'use-stick-to-bottom';
-import { AiBadge, AiNotice } from '@/components/AiNotice';
 import { Avatar } from '@/components/Avatar';
 import { BgmMute } from '@/components/BgmMute';
 import { BottomSheet } from '@/components/BottomSheet';
@@ -427,20 +426,14 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   }, [id, scriptsVersion]);
   const scriptBundle = scriptBundles === undefined ? undefined : (scriptBundles?.[0] ?? null);
   /**
-   * What the cards' scripts rewrote of their members for this reader on the plot —
-   * in this chat or another of theirs (`MemberOverlay`), by member id:
-   * the bundles' on load, then the runtimes' each time the server took a run's
-   * rewrite. The screen draws a member's name from it, and the first greeting and
-   * the background from the lead's, as RisuAI draws them from its character.
+   * What the cards' scripts rewrote of their members since this page read the
+   * work (`MemberOverlay`), by member id: the runtimes' each time the server
+   * took a run's rewrite — which it wrote into the work itself, as RisuAI's
+   * scripts rewrite the character, so a later read of the work carries it. The
+   * screen draws a member's name from it over the work as the page read it, and
+   * the first greeting and the background from the lead's.
    */
   const [scriptOverlays, setScriptOverlays] = useState<Readonly<Record<string, MemberOverlay>>>({});
-  useEffect(
-    () =>
-      setScriptOverlays(
-        Object.fromEntries((scriptBundles ?? []).flatMap((bundle) => (bundle.overlay.member ? [[bundle.memberId, bundle.overlay.member]] : []))),
-      ),
-    [scriptBundles],
-  );
   /** The lead's: the scripted member a work of one has. */
   const scriptOverlay = scriptBundle ? (scriptOverlays[scriptBundle.memberId] ?? null) : null;
 
@@ -875,12 +868,12 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     () => (members.find((member) => member.id === scriptedId) ?? (members.length === 1 ? members[0] : undefined))?.name,
     [members, scriptedId],
   );
-  // A plot of one member is that character: renamed by its scripts, the chat is with
-  // the new name, and `{{char}}` in the work's text is it too (the prompt's `PromptPlot.char`).
-  const soleRenamed = renamed !== undefined && cast.length === 1 && cast[0]!.id === scriptedId ? cast[0]! : null;
+  // A plot of one member is that character: renamed by its scripts, the work takes the
+  // new name, and `{{char}}` in the work's text is it too (the prompt's `PromptPlot.char`).
+  const soleRenamed = renamed !== undefined && cast.length === 1 && cast[0]!.id === scriptedId;
   const characterName = soleRenamed ? renamed! : (plot?.name ?? state?.chat.title ?? '');
-  /** `{{char}}` in the work's own text on screen: the plot's name, or the renamed character's, nickname first. */
-  const charMacro = soleRenamed ? soleRenamed.nickname?.trim() || renamed! : characterName;
+  /** `{{char}}` in the work's own text on screen: the work's name, as the rename left it. */
+  const charMacro = characterName;
   // Who the conversation is with, once either read has said so.
   useDocumentTitle(characterName);
   // A card's `{{bgm::…}}`, wherever on the page its markup drew it.
@@ -1577,7 +1570,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           log,
           onGlobalVariables: (globals) =>
             setState((current) => (current ? { ...current, globalVariables: globals } : current)),
-          onOverlay: (member, memberId) => setScriptOverlays((current) => ({ ...current, [memberId]: member })),
+          onOverlay: (member, memberId) =>
+            setScriptOverlays((current) => ({ ...current, [memberId]: { ...current[memberId], ...member } })),
           shared,
           ...(group ? { group: true } : {}),
         });
@@ -3011,14 +3005,13 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             <Icon name="back" className="size-6" />
           </Link>
           <Link
-            // The work's own page, which is the same one for creator and reader.
+            // The work's own page.
             href={`/p/${state.chat.plotId}`}
             className="flex h-full min-w-0 flex-1 items-center"
             title={t('backToPlot')}
           >
             <span className="truncate heading3">{characterName}</span>
           </Link>
-          <AiBadge />
           {/* While a card's floating screen is open: the quiet way out of it, in the
               model's place (the sheet still has the model). */}
           {cardOverlays.open ? (
@@ -3109,7 +3102,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               {...(group
                 ? { onSpeakNow: (memberId: string) => void playRound({ opening: 'reply', speakers: [memberId] }) }
                 : {})}
-              {...(state.isPlotOwner ? { inspectChatId: state.chat.id } : {})}
+              inspectChatId={state.chat.id}
               customUi={customUi}
               onToggleCustomUi={(enabled) => {
                 writeCustomUiEnabled(enabled);
@@ -3204,8 +3197,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                   if (button) setInput(button.getAttribute('data-shizue-fill') ?? '');
                 }}
               >
-                <AiNotice />
-
                 {creatorSheet ? (
                   <div
                     hidden

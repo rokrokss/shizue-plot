@@ -19,16 +19,14 @@
  * - the plot's scripted member must grant low-level access, as RisuAI keeps
  *   these functions behind it — the browser checks the same, and this is the
  *   check that does not depend on the browser;
- * - the chat must be the caller's and writable, its plot still visible to them,
- *   and the call takes the chat's generation slot, so a script's call and a
- *   generation never run at once on one chat;
+ * - the chat must be the caller's and writable, and the call takes the chat's
+ *   generation slot, so a script's call and a generation never run at once on
+ *   one chat;
  * - the prompt is size-checked here as it is in the sandbox.
  *
  * The calls spend the reader's own account, as a RisuAI script spends its user's
- * API key — but here the work may be a stranger's, so a window caps how many a
- * reader makes (the route's `RATE_LIMITS.scriptLlm`). Nothing is stored. The
- * answer is the model's text; RisuAI's `{success, result}` wrapping is the
- * sandbox's.
+ * API key. Nothing is stored. The answer is the model's text; RisuAI's
+ * `{success, result}` wrapping is the sandbox's.
  */
 import { ChatGPTError, getAdapter, type ChatMessage, type ChatRequest } from '@shizue/llm';
 import type { AppDeps } from './deps.js';

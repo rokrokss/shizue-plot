@@ -10,7 +10,6 @@ import {
   assetResolver,
   authorNoteSettingsOf,
   backgroundHtmlOf,
-  characterName,
   coerceAuthorNoteSettings,
   coerceNarrator,
   coerceTranslationSettings,
@@ -105,12 +104,10 @@ import type { AppDeps, AppEnv } from '../deps.js';
 import { ApiError, badRequest, forbidden, notFound } from '../errors.js';
 import {
   acquireChatSlot,
-  HEARTBEAT_MS,
   inspectGeneration,
   isGenerating,
   rejectBusyChat,
   releaseChatSlot,
-  renewChatSlot,
   requestTriggerInput,
   scheduleBackgroundUpdates,
   stopChatGeneration,
@@ -118,7 +115,7 @@ import {
   type GenerationPlan,
   type ScriptView,
 } from '../generation.js';
-import { avatarUrl, coverUrl, loadMembers, loadVisiblePlot, visibleToViewer } from '../hub.js';
+import { avatarUrl, coverUrl, loadMembers } from '../hub.js';
 import { emotionNamed, replyMemberOf, resumeEmotionDetection } from '../emotion.js';
 import { auxiliaryModelOf, buildMemoryInput, invalidateMemoryForEdit, memorySettingsOf, scheduleMemoryUpdate } from '../memory.js';
 import {
@@ -126,7 +123,6 @@ import {
   attachedNoteIdsByChat,
   loadAuthorNote,
   loadOwnedNote,
-  MAX_CHAT_NOTES,
 } from '../notes.js';
 import { chatDefaultVariables, loadReaderPreset, resolveReaderPresetId } from '../readerPresets.js';
 import {
@@ -139,19 +135,16 @@ import {
   readerLibrary,
 } from '../readerModules.js';
 import { readerModuleAssetsJson, toReaderModuleJson } from './readerModules.js';
-import { RATE_LIMITS, rateLimit } from '../rateLimit.js';
 import {
+  checkScriptRewrite,
   headMoved,
   loadChatGlobalVariables,
-  loadReaderOverlay,
   localLoreOf,
   mergeGlobalVariables,
-  mergeReaderOverlay,
   NO_SCRIPTS,
   optionalMemberId,
   optionalScriptNote,
   optionalVariableDelta,
-  overlaidWith,
   readGenerationScripts,
   readLocalLore,
   readOverlay,
@@ -163,6 +156,7 @@ import {
   storableDelta,
   withLocalGlobals,
   writeChatToggles,
+  writeScriptRewrite,
   type GenerationScripts,
 } from '../scriptState.js';
 import {
@@ -174,7 +168,7 @@ import {
 } from '../scriptChat.js';
 import { deleteQuietly } from '../storage.js';
 import { regexStoredText } from '../storedRegex.js';
-import { isSillyTavernCard, toPromptCharacters, toPromptPlot } from '../plots.js';
+import { isSillyTavernCard, loadOwnedPlot, toPromptCharacters, toPromptPlot } from '../plots.js';
 import { editRequestTurns } from '../requestTriggers.js';
 import { createScriptFetch } from '../scriptFetch.js';
 import { readScriptLlmMessages, readScriptLlmModel, runScriptLlm } from '../scriptLlm.js';
@@ -194,7 +188,7 @@ import {
 import { scheduleLoreAliases, scheduleMessageEmbedding } from '../vectors.js';
 import { personaAvatarUrl } from './personas.js';
 
-export const toChatJson = (chat: Chat, noteIds: string[]) => ({
+export const toChatJson = (chat: Chat, noteIds: string[], generating = false) => ({
   id: chat.id,
   plotId: chat.plotId,
   personaId: chat.personaId,
@@ -267,7 +261,7 @@ export const toChatJson = (chat: Chat, noteIds: string[]) => ({
    * A reply goes on after its page has gone (§7.2), so a page that comes back to
    * find this waits for it rather than asking for another.
    */
-  generating: isGenerating(chat),
+  generating,
   /** The chat file a conversation brought over from another app came from; null for one started here. */
   importedFrom: chat.importedFrom,
   createdAt: chat.createdAt.toISOString(),
@@ -417,13 +411,12 @@ async function windowVariableDefaults(
  */
 /**
  * The state a write that holds the chat's slot only for itself answers with —
- * the settings, a deletion, a script commit. Its row still carries that claim,
- * which ends with the request, so `generating` reads false: otherwise the page
- * takes its own write for a reply the server is finishing (§7.2), shows that
- * notice and holds the composer until a later read says the chat is free.
+ * the settings, a deletion, a script commit. The slot is still its own, until
+ * the request ends, so `generating` reads false: otherwise the page takes its
+ * own write for a reply the server is finishing (§7.2), shows that notice and
+ * holds the composer until a later read says the chat is free.
  */
-const releasedState = (deps: AppDeps, chat: Chat): Promise<unknown> =>
-  chatState(deps, { ...chat, generatingAt: null });
+const releasedState = (deps: AppDeps, chat: Chat): Promise<unknown> => chatState(deps, chat, undefined, true);
 
 /**
  * Deletes the stored files behind attachment rows that went with their messages,
@@ -445,7 +438,7 @@ async function sweepAttachments(deps: AppDeps, chatId: string, orphaned: readonl
   for (const path of paths) if (!shared.has(path)) await deleteQuietly(deps.storage, path);
 }
 
-async function chatState(deps: AppDeps, chat: Chat, window?: PathWindow): Promise<unknown> {
+async function chatState(deps: AppDeps, chat: Chat, window?: PathWindow, released = false): Promise<unknown> {
   const all = await loadMessages(deps, chat.id);
   const full = buildPath(all, chat.headMessageId);
   const windowed = window ? windowPath(full, window) : null;
@@ -454,7 +447,7 @@ async function chatState(deps: AppDeps, chat: Chat, window?: PathWindow): Promis
   // scene the reader had drawn, so both are asked about.
   const attachments = await attachmentsByMessage(deps, path.map((message) => message.id));
   return {
-    chat: toChatJson(chat, await attachedNoteIds(deps, chat.id)),
+    chat: toChatJson(chat, await attachedNoteIds(deps, chat.id), !released && isGenerating(deps, chat.id)),
     path: path.map((message) => toMessageJson(message, attachments.get(message.id) ?? [])),
     siblings: siblingInfo(all, path),
     ...(windowed ? { hasMore: windowed.earlier.length > 0 } : {}),
@@ -462,26 +455,11 @@ async function chatState(deps: AppDeps, chat: Chat, window?: PathWindow): Promis
       ? { variableDefaults: await windowVariableDefaults(deps, chat, windowed.earlier) }
       : {}),
     /**
-     * The reader's global variables on this plot, shared by all their chats on
-     * it and not by branch — what the card's scripts read as `getglobalvar`.
+     * The work's global variables, shared by all its chats and not by branch —
+     * what the card's scripts read as `getglobalvar`.
      */
     globalVariables: await loadChatGlobalVariables(deps, chat),
-    /**
-     * Whether the reader is also the plot's creator — the one person the
-     * chat's assembled prompt may be shown to (`GET /:id/inspect`).
-     */
-    isPlotOwner: await ownsPlot(deps, chat.plotId, chat.userId),
   };
-}
-
-/** Whether the user is the plot's creator, whatever its visibility. */
-async function ownsPlot(deps: AppDeps, plotId: string, userId: string): Promise<boolean> {
-  const [plot] = await deps.db
-    .select({ ownerId: plots.ownerId })
-    .from(plots)
-    .where(eq(plots.id, plotId))
-    .limit(1);
-  return plot?.ownerId === userId;
 }
 
 /** Reads the `before`/`limit` query pair a branch read may narrow itself with. */
@@ -783,11 +761,11 @@ async function loadPersona(deps: AppDeps, chat: Chat): Promise<Persona | null> {
  */
 function scriptViewOf(
   member: Character,
-  overlay: ScriptOverlay | null,
+  rewrite: ScriptOverlay | null,
   note: string,
   persona: Persona | null,
 ): ScriptView {
-  const own = overlay?.members?.[member.id];
+  const own = rewrite?.members?.[member.id];
   return {
     memberId: member.id,
     note,
@@ -801,20 +779,17 @@ function scriptViewOf(
 /**
  * Plot, roster, persona and branch history — what every generation mode needs.
  *
- * The reader's script overlay on the plot is laid over the work here
- * (`plot_reader_overlays`, `ScriptOverlay` in @shizue/core): what the card's
- * scripts rewrote of a member's card or of the reader's persona — in this chat
- * or any other of theirs on the plot, as RisuAI's rewrite of the character
- * reaches every chat with it — is what this chat's prompt reads, while the plot
- * and the persona rows stay as they are. A renamed member goes by its new name
- * everywhere the prompt names it — and a plot of that one member is that
- * character, so its `{{char}}` follows too (`PromptPlot.char`). The scripted
- * member's first message is what the first opening is sent as (`promptBranch`),
- * and the chat's own lore (`chats.local_lore`) is activated after its book. A
- * generation whose own scripts just rewrote something brings it as `scripts`
- * and reads it already — RisuAI's input and start triggers run before its
- * prompt is built — and the route keeps it once the request has passed its
- * checks (`keepScriptWrites`).
+ * What a card's scripts rewrote of the work — a member's card, its name, the
+ * persona — is in the rows themselves (`writeScriptRewrite`), as RisuAI's
+ * scripts rewrite the character object. A generation whose own scripts just
+ * rewrote something brings it as `scripts` and reads it already, laid over the
+ * rows — RisuAI's input and start triggers run before its prompt is built — and
+ * the route writes it once the request has passed its checks
+ * (`keepScriptWrites`). A renamed member goes by its new name everywhere the
+ * prompt names it — and a plot of that one member is that character, so its
+ * `{{char}}` follows too (`PromptPlot.char`). A first message the scripts just
+ * set is what the first opening is sent as (`promptBranch`), and the chat's own
+ * lore (`chats.local_lore`) is activated after its book.
  */
 async function loadGenerationContext(
   deps: AppDeps,
@@ -826,7 +801,7 @@ async function loadGenerationContext(
   characters: PromptCharacter[];
   /** The members still on the stage — the ones a reply may be asked to center on, or of. */
   onStage: Character[];
-  /** The whole roster as this chat reads it — renamed and rewritten by the reader's overlay — parallel to `characters`. */
+  /** The whole roster as this chat reads it — with this request's rewrites — parallel to `characters`. */
   members: Character[];
   /** The row itself, for the settings that are the plot's rather than the prompt's. */
   row: Plot;
@@ -844,15 +819,13 @@ async function loadGenerationContext(
   auxiliaryModel: string;
   /** What every fold of the chat answers `{{user}}` and `{{char}}` with. */
   fold: FoldOptions;
-  /** The reader's global variables on this plot. */
+  /** The work's global variables. */
   globalVariables: Variables;
-  /** The reader's script overlay on the plot with this request's rewrites laid over it. */
+  /** What this request's scripts rewrote of the work, held to its members. */
   overlay: ScriptOverlay | null;
-  /** The plot's members, which an overlay may name. */
-  memberIds: ReadonlySet<string>;
   /** The chat's own lore (RisuAI's `localLore`), as this request's scripts left it. */
   localLore: LoreEntry[];
-  /** The plot's first opening as the reader's scripts rewrote it (`setCharacterFirstMessage`). */
+  /** The plot's first opening as this request's scripts rewrote it (`setCharacterFirstMessage`). */
   firstMessage: string | undefined;
   /** What the scripted member's Lua reads beyond the prompt (`GenerationPlan.scriptView`). */
   scriptView: ScriptView | undefined;
@@ -862,23 +835,21 @@ async function loadGenerationContext(
   scriptSpeaker: string | undefined;
   all: Message[];
 }> {
-  // Re-checked on every generation, not just at chat creation: unpublishing a
-  // plot has to stop other users' chats with it from generating further.
-  const row = await loadVisiblePlot(deps.db, chat.plotId, chat.userId);
+  const row = await loadOwnedPlot(deps, chat.plotId, chat.userId);
   // In the creator's order, which is the order the prompt blocks are written in.
   const members = await loadMembers(deps.db, row.id);
   const absent = new Set(chat.absentCharacterIds ?? []);
-  const memberIds = new Set(members.map((member) => member.id));
-  const overlay = overlaidWith(await loadReaderOverlay(deps.db, chat.userId, chat.plotId), scripts.overlay, memberIds);
+  const overlay = checkScriptRewrite(scripts.overlay, new Set(members.map((member) => member.id)));
   const rewritten = overlay?.members
     ? members.map((member) => {
         const own = overlay.members?.[member.id];
         return { ...member, name: own?.name ?? member.name, card: overlaidCard(member.card, own) };
       })
     : members;
-  // A plot of one member is that character: RisuAI's `{{char}}` follows its rename.
+  // A plot of one member is that character: renamed, the work takes the new name
+  // (`writeScriptRewrite`), and its `{{char}}` reads it from this request on.
   const only = rewritten.length === 1 ? rewritten[0]! : undefined;
-  const plotChar = only && overlay?.members?.[only.id]?.name !== undefined ? characterName(only) : undefined;
+  const plotChar = only && overlay?.members?.[only.id]?.name !== undefined ? only.name : undefined;
   // The work's modules and the reader's own that are on in this chat, in RisuAI's order.
   const { modules, reader } = await chatModulesOf(deps, chat, row);
   const scripted = scriptedMember(members, modules)?.member;
@@ -913,7 +884,6 @@ async function loadGenerationContext(
     fold: foldOptionsOf(row.name, persona),
     globalVariables: await loadChatGlobalVariables(deps, chat),
     overlay,
-    memberIds,
     localLore: scripts.localLore ?? localLoreOf(chat),
     firstMessage: scripted ? overlay?.members?.[scripted.id]?.firstMessage : undefined,
     scriptView: scripted ? scriptViewOf(scripted, overlay, scripts.note ?? chat.note, persona) : undefined,
@@ -926,19 +896,19 @@ async function loadGenerationContext(
 }
 
 /**
- * Keeps what a generation's scripts rewrote — the overlay they sent, merged into
- * the reader's under its lock, the note and the chat's lore — once the request
- * has passed the head checks. Before any other write of the turn, so a turn that
- * fails part-way still leaves the work as its scripts left it, as RisuAI's
- * rewrite of the card would stand.
+ * Keeps what a generation's scripts rewrote — the work's rewrites, written into
+ * it, the note and the chat's lore — once the request has passed the head
+ * checks. Before any other write of the turn, so a turn that fails part-way
+ * still leaves the work as its scripts left it, as RisuAI's rewrite of the card
+ * would stand.
  */
 async function keepScriptWrites(
   deps: AppDeps,
   chat: Chat,
-  context: { memberIds: ReadonlySet<string> },
-  scripts: Pick<GenerationScripts, 'overlay' | 'note' | 'localLore'>,
+  context: { overlay: ScriptOverlay | null; scriptView: ScriptView | undefined },
+  scripts: Pick<GenerationScripts, 'note' | 'localLore'>,
 ): Promise<void> {
-  await saveScriptWrites(deps, chat, scripts, context.memberIds);
+  await saveScriptWrites(deps, chat, { ...scripts, overlay: context.overlay }, context.scriptView?.memberId);
 }
 
 /**
@@ -1151,7 +1121,6 @@ async function tavernGreetingMacro(
   deps: AppDeps,
   plot: Plot,
   persona: Persona | null,
-  userId: string,
   clock: MacroClock,
   seed: string,
 ): Promise<MacroContext | null> {
@@ -1164,7 +1133,7 @@ async function tavernGreetingMacro(
     char: one ? lead.name : plot.name,
     user: persona?.name ?? DEFAULT_USER_NAME,
     variables: applyVariableDelta(plot.customUi?.defaultVariables ?? {}, null),
-    globalVariables: await loadGlobalVariables(deps, userId, plot.id),
+    globalVariables: await loadGlobalVariables(deps, plot.id),
     clock,
     seed,
     tavern: tavernCardFields(lead.card, members.map((member) => member.name)),
@@ -1183,14 +1152,14 @@ const withMacroWrites = (writes: VariableDelta | null, delta: VariableDelta | nu
   writes ? { ...writes, ...(delta ?? {}) } : (delta ?? null);
 
 /**
- * What a stored text's `{{setglobalvar}}` and the like wrote, into the reader's
- * globals on the work — as ST writes them when it stores the text. Past the
- * globals' caps the text stands and the writes do not, as a prompt's do.
+ * What a stored text's `{{setglobalvar}}` and the like wrote, into the work's
+ * globals — as ST writes them when it stores the text. Past the globals' caps
+ * the text stands and the writes do not, as a prompt's do.
  */
-async function keepStoredGlobalWrites(deps: AppDeps, chat: Pick<Chat, 'id' | 'userId' | 'plotId'>, stored: TavernStored | null): Promise<void> {
+async function keepStoredGlobalWrites(deps: AppDeps, chat: Pick<Chat, 'id' | 'plotId'>, stored: TavernStored | null): Promise<void> {
   if (!stored?.globalVariableWrites) return;
   try {
-    await mergeGlobalVariables(deps, chat.userId, chat.plotId, stored.globalVariableWrites);
+    await mergeGlobalVariables(deps, chat.plotId, stored.globalVariableWrites);
   } catch (error) {
     console.warn(`chat ${chat.id}: global variable writes of a stored text not kept`, error);
   }
@@ -1289,17 +1258,15 @@ function variableTimeline(
 const WITHDRAWN_PLOT_NAME = '알 수 없는 작품';
 
 /**
- * The chat's plot if the caller may still read it, and null once they may not —
- * unpublished, safety-gated, or gone. Unlike `loadVisiblePlot` this does not
- * throw: a chat stays the user's own record whatever the creator later does with
- * the work, so the caller degrades what the plot contributes rather than
- * refusing the whole request.
+ * The chat's plot, or null where it is gone. Unlike `loadOwnedPlot` this does
+ * not throw: the caller degrades what the plot contributes rather than refusing
+ * the whole request.
  */
 async function loadChatPlot(deps: AppDeps, chat: Chat, userId: string): Promise<Plot | null> {
   const [plot] = await deps.db
     .select()
     .from(plots)
-    .where(and(eq(plots.id, chat.plotId), visibleToViewer(userId)))
+    .where(and(eq(plots.id, chat.plotId), eq(plots.ownerId, userId)))
     .limit(1);
   return plot ?? null;
 }
@@ -1307,11 +1274,7 @@ async function loadChatPlot(deps: AppDeps, chat: Chat, userId: string): Promise<
 /** How much of the last message the chat list carries. */
 const LAST_MESSAGE_PREVIEW_LENGTH = 200;
 
-/**
- * Covers of the chats' plots, by plot id. A work the caller may no longer read
- * contributes nothing — the same rule the export applies, for the same reason:
- * the picture is the creator's to withdraw, the conversation is not.
- */
+/** Covers of the chats' plots, by plot id. */
 async function chatCovers(
   deps: AppDeps,
   rows: Chat[],
@@ -1322,7 +1285,7 @@ async function chatCovers(
   const found = await deps.db
     .select({ id: plots.id, coverPath: plots.coverPath })
     .from(plots)
-    .where(and(inArray(plots.id, ids), visibleToViewer(userId)));
+    .where(and(inArray(plots.id, ids), eq(plots.ownerId, userId)));
   return new Map(found.map((plot) => [plot.id, coverUrl(plot)]));
 }
 
@@ -1461,8 +1424,7 @@ function optionalMemberIds(body: Record<string, unknown>, key: string): string[]
 
 /**
  * The members a PATCH sends off the stage. Every id must be one of the plot's
- * members as the roster stands — read whatever became of the plot's visibility,
- * since the setting is the reader's own — and an empty list is stored as null:
+ * members as the roster stands — and an empty list is stored as null:
  * the whole roster on, the same as a chat that never touched it.
  */
 async function patchedAbsentIds(
@@ -1834,29 +1796,17 @@ function callingScripts(
 
 /**
  * One member's scripts as the reader's browser runs them (`GET /:id/scripts`):
- * its triggers and `editinput`/`editoutput` regex, the parts of its card the
- * scripts may read, and what the reader's scripts rewrote of it on this plot
- * (its slice of the overlay, and the persona's), with the chat's own lore.
+ * its triggers and `editinput`/`editoutput` regex and the parts of its card
+ * the scripts may read — as the scripts rewrote them, which is the card itself
+ * (`writeScriptRewrite`) — with the chat's own lore.
  */
-function scriptBundleOf(
-  member: Character,
-  scripts: CardScripts,
-  overlay: ScriptOverlay | null,
-  chat: Chat,
-  modules: readonly PlotModule[] = [],
-  disclosed = true,
-) {
+function scriptBundleOf(member: Character, scripts: CardScripts, chat: Chat, modules: readonly PlotModule[] = []) {
   const card = member.card;
-  const own = overlay?.members?.[member.id] ?? null;
   const nickname = card.nickname?.trim() ?? '';
-  // A member only the reader's own modules make scripted: its card's text stays the creator's.
-  const text = (value: string): string => (disclosed ? value : '');
   return {
-    ...(disclosed ? {} : { concealed: true }),
     memberId: member.id,
-    // `{{char}}` in a card's own text: its nickname where it sets one, else its
-    // name as the reader's scripts left it.
-    name: nickname || own?.name || member.name,
+    // `{{char}}` in a card's own text: its nickname where it sets one, else its name.
+    name: nickname || member.name,
     triggers: scripts.triggers,
     editScripts: scripts.editScripts,
     lowLevelAccess: scripts.lowLevelAccess,
@@ -1864,22 +1814,18 @@ function scriptBundleOf(
       // RisuAI's `char.name` (Lua's `getName`), and the nickname `{{char}}` stays.
       name: member.name,
       nickname,
-      description: text(card.description),
-      personality: text(card.personality),
-      scenario: text(card.scenario),
-      exampleDialogue: text(card.mesExample),
-      lorebook: disclosed ? card.lorebook : [],
-      postHistoryInstructions: text(card.postHistoryInstructions),
+      description: card.description,
+      personality: card.personality,
+      scenario: card.scenario,
+      exampleDialogue: card.mesExample,
+      lorebook: card.lorebook,
+      postHistoryInstructions: card.postHistoryInstructions,
       // What `/test_lorebook` and Lua's `loadLoreBooks` activate the book by, as the prompt does.
       loreSettings: card.loreSettings,
       // RisuAI's `backgroundHTML` whole, styles and all, as Lua's `getBackgroundEmbedding` reads it.
-      backgroundHtml: text(backgroundHtmlOf(card.extensions) ?? ''),
+      backgroundHtml: backgroundHtmlOf(card.extensions) ?? '',
       // RisuAI's `char.image`, for Lua's `getCharacterImage`: a same-origin address, or null.
       avatarUrl: avatarUrl(member),
-    },
-    overlay: {
-      member: own,
-      persona: overlay?.persona ?? null,
     },
     localLore: localLoreOf(chat),
     // The modules' lore on the chat, which RisuAI's `{{lorebook}}`, `/test_lorebook`
@@ -1892,9 +1838,9 @@ function scriptBundleOf(
 
 export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
-  const scriptFetch = deps.scriptFetch ?? createScriptFetch({ db: deps.db, ownOrigins: deps.webOrigin ? [deps.webOrigin] : [] });
+  const scriptFetch = deps.scriptFetch ?? createScriptFetch({ ownOrigins: deps.webOrigin ? [deps.webOrigin] : [] });
 
-  // The reader's own chats, newest activity first. Each row carries what a list
+  // The owner's chats, newest activity first. Each row carries what a list
   // of conversations is read by — the plot's cover and how the chat currently
   // ends — beside the chat itself.
   app.get('/', async (c) => {
@@ -1915,7 +1861,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const previews = await lastMessages(deps, rows);
     return c.json(
       rows.map((chat) => ({
-        ...toChatJson(chat, noteIds.get(chat.id) ?? []),
+        ...toChatJson(chat, noteIds.get(chat.id) ?? [], isGenerating(deps, chat.id)),
         coverUrl: covers.get(chat.plotId) ?? null,
         /** null for a chat that has no message on its branch yet. */
         lastMessage: previews.get(chat.id) ?? null,
@@ -1929,9 +1875,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
 
     const plotId = requireString(body, 'plotId');
     if (!isUuid(plotId)) throw notFound('Plot not found');
-    // Public plots are referenced in place: the chat points at the creator's
-    // row, so later edits reach it.
-    const plot = await loadVisiblePlot(deps.db, plotId, userId);
+    // The chat points at the work's row, so later edits reach it.
+    const plot = await loadOwnedPlot(deps, plotId, userId);
 
     const model = await requireEnabledModel(deps, c.get('userId'), requireString(body, 'model'));
     // Checked before the persona: a profile pick copies a row, and a refused
@@ -1950,7 +1895,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     // its root. Otherwise `{{char}}` in a plot's own writing is the work, not one
     // of its members; the clock is the reader's at the moment the chat opens, and
     // there is no seed — an intro is expanded once.
-    const tavern = await tavernGreetingMacro(deps, plot, persona, userId, clock, chatId);
+    const tavern = await tavernGreetingMacro(deps, plot, persona, clock, chatId);
     const expanded = tavern ? greetings.slice(0, MAX_INTRO_ROOTS).map((greeting) => expandTavernStored(greeting, tavern)) : null;
     const intros = expanded
       ? expanded.map((greeting) => greeting.text.trim())
@@ -1970,14 +1915,6 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       })
       .returning();
     let chat = created!;
-
-    // Popularity counts other people's chats only.
-    if (plot.ownerId !== userId) {
-      await deps.db
-        .update(plots)
-        .set({ chatCount: sql`${plots.chatCount} + 1` })
-        .where(eq(plots.id, plotId));
-    }
 
     // An empty chosen intro simply means the chat starts without a root message.
     if (intros[chosen]) {
@@ -2002,7 +1939,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         createdAt: new Date(stamp + position),
       }));
       await deps.db.insert(messages).values(values);
-      // What the greeting the chat opens on wrote to the reader's globals.
+      // What the greeting the chat opens on wrote to the work's globals.
       await keepStoredGlobalWrites(deps, chat, expanded?.[chosen] ?? null);
 
       const head = values[stored.findIndex((entry) => entry.index === chosen)]!;
@@ -2137,7 +2074,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const userId = c.get('userId');
     // Hold the slot for the whole update: merely checking it would let a
     // generation start on the old settings while this handler awaits.
-    if (!(await acquireChatSlot(deps, id, userId))) {
+    if (!(await acquireChatSlot(deps, id))) {
       // Same busy chat as a generation would report, told as a conflict: this
       // request is not one the caller retries by waiting for a stream.
       await loadOwnedChat(deps, id, userId);
@@ -2250,23 +2187,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const chat = await loadWritableChat(deps, requireUuidParam(c), userId);
     const note = await loadOwnedNote(deps, requireUuidParam(c, 'noteId'), userId);
 
-    // The cap is a count, and a count only means something while nothing else can
-    // insert: the chat row is locked for the whole check-then-write, so two
-    // attaches racing at the cap cannot both see room. Overshooting it would grow
-    // the author's-note slot, which is never evicted from the prompt.
-    await deps.db.transaction(async (tx) => {
-      await tx.select({ id: chats.id }).from(chats).where(eq(chats.id, chat.id)).for('update');
-
-      const links = await tx
-        .select({ noteId: chatNoteLinks.noteId })
-        .from(chatNoteLinks)
-        .where(eq(chatNoteLinks.chatId, chat.id));
-      if (links.some((link) => link.noteId === note.id)) return;
-      if (links.length >= MAX_CHAT_NOTES) {
-        throw badRequest('note_limit', `A chat may have at most ${MAX_CHAT_NOTES} notes attached`);
-      }
-      await tx.insert(chatNoteLinks).values({ chatId: chat.id, noteId: note.id });
-    });
+    await deps.db.insert(chatNoteLinks).values({ chatId: chat.id, noteId: note.id }).onConflictDoNothing();
     return c.json(await chatState(deps, chat));
   });
 
@@ -2306,8 +2227,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     // taking away. Holding the chat's claim serializes the delete with
     // generation and with every other claim-holding mutation; the snapshot
     // below is only read once the claim is ours.
-    if (!(await acquireChatSlot(deps, chat.id, userId))) {
-      await rejectBusyChat(deps, chat.id, userId);
+    if (!(await acquireChatSlot(deps, chat.id))) {
+      rejectBusyChat();
     }
     try {
       const all = await loadMessages(deps, chat.id);
@@ -2474,7 +2395,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const chat = await loadWritableChat(deps, id, userId);
     // The edit moves and takes away rows, so it holds the chat's claim as a delete
     // does: a reply streaming in meanwhile would hang under a row this is removing.
-    if (!(await acquireChatSlot(deps, chat.id, userId))) await rejectBusyChat(deps, chat.id, userId);
+    if (!(await acquireChatSlot(deps, chat.id))) rejectBusyChat();
     try {
       const path = buildPath(await loadMessages(deps, chat.id), chat.headMessageId);
 
@@ -2664,20 +2585,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * `editoutput` regex scripts and the parts of its card the scripts may read —
    * its name and nickname, its description and the rest of its character text,
    * its lorebook and the book's settings, its post-history instructions, its
-   * background HTML and its avatar — with what the reader's scripts rewrote of it
-   * on this plot beside it (its slice of the overlay every chat of theirs on it
-   * reads, and the persona's), and the chat's own lore (`localLore`, what Lua's
-   * `upsertLocalLoreBook` wrote in this chat) — `scriptBundleOf`. `name` is
-   * `{{char}}` as it stands for the reader: the nickname, else the name the
-   * scripts left. `scripts` is the first of them, the scripted member
-   * (`scriptedMember`), which is all a page from before group turns reads.
-   *
-   * This is the one place a reader receives a member's card internals, and only
-   * for a plot that carries scripts: RisuAI's scripts read the card they belong
-   * to, so a card that plays in RisuAI has to be able to read it here too. The
-   * creator is told so when they publish such a plot. Everything else a reader
-   * gets of the work stays as it was — `{ scripts: null, members: [] }` for a
-   * plot without.
+   * background HTML and its avatar, as the scripts rewrote them — and the chat's
+   * own lore (`localLore`, what Lua's `upsertLocalLoreBook` wrote in this chat)
+   * — `scriptBundleOf`. `name` is `{{char}}`: the nickname, else the name.
+   * `scripts` is the first of them, the scripted member (`scriptedMember`),
+   * which is all a page from before group turns reads; `{ scripts: null,
+   * members: [] }` for a plot without.
    *
    * `translation` rides beside them: each member's `edittrans` regex scripts
    * (`translationScriptsOf`), which RisuAI runs over a message's translation
@@ -2686,8 +2599,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    */
   app.get('/:id/scripts', async (c) => {
     const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
-    // The same gate as generating: a plot withdrawn from the reader runs nothing.
-    const plot = await loadVisiblePlot(deps.db, chat.plotId, chat.userId);
+    const plot = await loadOwnedPlot(deps, chat.plotId, chat.userId);
     // The chat's modules — the work's, then the reader's own that are on here —
     // ride in every member's scripts, after the card's own: in a group RisuAI
     // runs them for whichever character it asks.
@@ -2697,20 +2609,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const scripts = translationScriptsOf(member.card, modules);
       return scripts.length > 0 ? [{ memberId: member.id, scripts }] : [];
     });
-    // The card's internals go only where the work itself carries scripts for the
-    // member — what its creator is told at publish. A reader's own module makes a
-    // member scripted for them too, and runs, but discloses nothing of the card.
-    const workModules = plot.customUi?.modules ?? [];
-    const readerModules = modules.slice(workModules.length);
     const scripted = roster.flatMap((member) => {
       const scripts = cardScripts(member.card, modules);
-      return scripts ? [{ member, scripts, disclosed: cardScripts(member.card, workModules) !== null }] : [];
+      return scripts ? [{ member, scripts }] : [];
     });
     if (scripted.length === 0) return c.json({ scripts: null, members: [], translation });
-    const overlay = await loadReaderOverlay(deps.db, chat.userId, chat.plotId);
-    const members = scripted.map(({ member, scripts, disclosed }) =>
-      scriptBundleOf(member, scripts, overlay, chat, disclosed ? modules : readerModules, disclosed),
-    );
+    const members = scripted.map(({ member, scripts }) => scriptBundleOf(member, scripts, chat, modules));
     return c.json({ scripts: members[0]!, members, translation });
   });
 
@@ -2720,10 +2624,10 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * output scripts turned the reply into (`content`, in place — a script's edit is
    * not the reader's and forks nothing), and `clearPending`, which says the turn
    * the browser owed its output scripts is now finished. What they rewrote of the
-   * work rides along too — `overlay`, merged into the reader's on the plot
-   * (`ScriptOverlay`) — and what they rewrote of the chat — `note`, the chat
-   * note, and `localLore`, the chat's own lore — in the same transaction as the
-   * turn.
+   * work rides along too — `overlay` (`ScriptOverlay`), written into the work
+   * (`writeScriptRewrite`) — and what they rewrote of the chat — `note`, the
+   * chat note, and `localLore`, the chat's own lore — in the same transaction
+   * as the turn.
    *
    * Only the head: a button the reader clicked acts on the chat as it stands, and
    * the reply the output scripts run over is the one that was just generated. A
@@ -2779,9 +2683,13 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const chat = await loadWritableChat(deps, id, userId);
     const roster =
       overlay || memberId !== undefined || emotion !== undefined ? await loadMembers(deps.db, chat.plotId) : [];
-    const memberIds = overlay ? new Set(roster.map((member) => member.id)) : null;
+    const rewrite = checkScriptRewrite(overlay, new Set(roster.map((member) => member.id)));
     scriptMemberOf(memberId, roster);
-    if (!(await acquireChatSlot(deps, chat.id, userId))) await rejectBusyChat(deps, chat.id, userId);
+    // Whose background and first message are the work's: the scripted member, as the page reads them.
+    const lead = rewrite
+      ? scriptedMember(roster, (await chatModulesOf(deps, chat, await loadOwnedPlot(deps, chat.plotId, userId))).modules)?.member.id
+      : undefined;
+    if (!(await acquireChatSlot(deps, chat.id))) rejectBusyChat();
     let committed: { chat: Chat };
     let dropped = 0;
     try {
@@ -2845,10 +2753,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           })
           .where(eq(chats.id, chat.id))
           .returning();
-        // Merged under the overlay row's own lock — after the chat's, as every
-        // writer takes them — so a commit here and a write from another of the
-        // reader's chats on the plot each land on the other's.
-        if (overlay && memberIds) await mergeReaderOverlay(tx, chat.userId, chat.plotId, overlay, memberIds);
+        // Under the work's rows' own locks, after the chat's, as every writer takes them.
+        if (rewrite) await writeScriptRewrite(tx, chat, rewrite, lead);
         return { chat: row! };
       });
     } finally {
@@ -2879,7 +2785,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    */
   app.get('/:id/modules', async (c) => {
     const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
-    const plot = await loadVisiblePlot(deps.db, chat.plotId, chat.userId);
+    const plot = await loadOwnedPlot(deps, chat.plotId, chat.userId);
     const listed = new Set(chatModuleIds(chat));
     const [library, { modules, reader }, members] = await Promise.all([
       readerLibrary(deps, chat.userId),
@@ -2910,7 +2816,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     });
   });
 
-  /** The reader's global variables on this chat's plot (see `plotReaderVariables`). */
+  /** The work's global variables (see `plotReaderVariables`). */
   app.get('/:id/global-variables', async (c) => {
     const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
     return c.json({ variables: await loadChatGlobalVariables(deps, chat) });
@@ -2918,8 +2824,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
 
   /**
    * Merges into them: `{ variables: { name: value | null } }`, null unsetting, and
-   * answers with the whole map. They are the reader's own on the plot rather than
-   * the chat's, so a chat an import is still filling may write them too.
+   * answers with the whole map. They are the work's rather than the chat's, so a
+   * chat an import is still filling may write them too.
    */
   app.patch('/:id/global-variables', async (c) => {
     const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
@@ -2930,7 +2836,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         body['toggles'] === true
           ? await writeChatToggles(deps, chat, body['variables'])
           : withLocalGlobals(
-              await mergeGlobalVariables(deps, chat.userId, chat.plotId, body['variables']),
+              await mergeGlobalVariables(deps, chat.plotId, body['variables']),
               chat.localGlobalVariables,
             ),
     });
@@ -2948,13 +2854,11 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * roster member; the plot's scripted member without one) must hold low-level
    * access (`triggerLowLevelAccess`; 403 `script_llm_forbidden` otherwise), and
    * that member's request triggers are the ones that run over the call. Held as a turn is:
-   * the reader's writable chat on a plot still visible to them, and the
-   * generation slot for the length of the call (429 `generation_in_progress`),
-   * renewed as a stream renews it. The reader's account pays, at most
-   * `RATE_LIMITS.scriptLlm` calls a window, so a script that loops cannot spend
-   * a reader's plan without end.
+   * the reader's writable chat, and the generation slot for the length of the
+   * call (429 `generation_in_progress`). The reader's model pays, as RisuAI's
+   * does, with no count of its own.
    */
-  app.post('/:id/script-llm', rateLimit(deps, RATE_LIMITS.scriptLlm), async (c) => {
+  app.post('/:id/script-llm', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const body = await readJsonBody(c);
@@ -2963,14 +2867,13 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const memberId = optionalMemberId(body);
     const trigger = optionalTriggerIndex(body);
     const chat = await loadWritableChat(deps, id, userId);
-    const plot = await loadVisiblePlot(deps.db, chat.plotId, chat.userId);
+    const plot = await loadOwnedPlot(deps, chat.plotId, chat.userId);
     const { modules } = await chatModulesOf(deps, chat, plot);
     const scripted = callingScripts(await loadMembers(deps.db, plot.id), memberId, modules);
     if (!scripted || !triggerLowLevelAccess(scripted.scripts, trigger)) {
       throw forbidden('script_llm_forbidden', "This plot's scripts may not call the model");
     }
-    if (!(await acquireChatSlot(deps, chat.id, userId))) await rejectBusyChat(deps, chat.id, userId);
-    const keepAlive = setInterval(() => void renewChatSlot(deps, chat.id), HEARTBEAT_MS);
+    if (!(await acquireChatSlot(deps, chat.id))) rejectBusyChat();
     try {
       // An owner with no catalog resolves to '', and the adapter then says why,
       // as it does for the chat's own model.
@@ -2983,7 +2886,6 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         result: await runScriptLlm(deps, { userId, model, messages: sent, signal: c.req.raw.signal }),
       });
     } finally {
-      clearInterval(keepAlive);
       await releaseChatSlot(deps, chat.id);
     }
   });
@@ -3011,7 +2913,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const memberId = optionalMemberId(body);
     const trigger = optionalTriggerIndex(body);
     const chat = await loadWritableChat(deps, id, userId);
-    const plot = await loadVisiblePlot(deps.db, chat.plotId, chat.userId);
+    const plot = await loadOwnedPlot(deps, chat.plotId, chat.userId);
     const { modules } = await chatModulesOf(deps, chat, plot);
     const scripted = callingScripts(await loadMembers(deps.db, plot.id), memberId, modules);
     if (!scripted || !triggerLowLevelAccess(scripted.scripts, trigger)) {
@@ -3024,8 +2926,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   /**
    * The bytes, streamed through the API like a plot asset — but for one
    * reader only. An attachment is the reader's own picture in their own chat, so
-   * ownership of the chat is the whole rule, and unlike an asset there is no
-   * public visibility that could ever widen it.
+   * ownership of the chat is the whole rule.
    */
   app.get('/:id/attachments/:attachmentId', async (c) => {
     const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
@@ -3054,14 +2955,14 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     });
   });
 
-  app.post('/:id/messages', rateLimit(deps, RATE_LIMITS.generation), async (c) => {
+  app.post('/:id/messages', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const body = await readJsonBody(c);
     const content = requireString(body, 'content');
     if (!content.trim()) throw badRequest('invalid_request', 'content must not be empty');
     // A component turn is still the reader's turn — it is only labelled as one,
-    // so the chat can show where it came from and the rate limit can find it.
+    // so the chat can show where it came from.
     const source = optionalSource(body) ?? 'user';
     if (source === 'component') requireComponentTurnLength(content);
     const directions = optionalDirections(body);
@@ -3147,7 +3048,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
      * anything, so the chat's model is not checked either.
      */
     if (stopped) {
-      if (!(await acquireChatSlot(deps, id, userId))) await rejectBusyChat(deps, id, userId);
+      if (!(await acquireChatSlot(deps, id))) rejectBusyChat();
       try {
         await storeTurn(await loadWritableChat(deps, id, userId));
       } finally {
@@ -3215,7 +3116,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
 
   // In a work of several members, with `speakerId`: the whole round again, from
   // its first speaker (`regeneratePlan`). Without it, the head as it always was.
-  app.post('/:id/regenerate', rateLimit(deps, RATE_LIMITS.generation), async (c) => {
+  app.post('/:id/regenerate', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const body = await optionalJsonBody(c);
@@ -3258,7 +3159,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * 409 `post_processing_pending`, so the next speaker's start triggers never run
    * before the last reply is finished.
    */
-  app.post('/:id/reply', rateLimit(deps, RATE_LIMITS.generation), async (c) => {
+  app.post('/:id/reply', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const body = await readJsonBody(c);
@@ -3343,22 +3244,19 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   });
 
   /**
-   * The prompt a regenerate would send right now, block by block — the creator's
-   * debugging view of their own work. Only for a chat that is the caller's own on
-   * a plot that is the caller's own: anywhere else the prompt is someone else's
-   * writing or someone else's conversation, so the chat is simply not found.
+   * The prompt a regenerate would send right now, block by block — RisuAI's
+   * prompt preview, for any chat.
    *
    * It builds the plan and stops: no slot, no model, no write.
    */
   app.get('/:id/inspect', async (c) => {
     const userId = c.get('userId');
     const chat = await loadOwnedChat(deps, requireUuidParam(c), userId);
-    if (!(await ownsPlot(deps, chat.plotId, userId))) throw notFound('Chat not found');
     const plan = await regeneratePlan(c, deps, chat);
     return c.json(await inspectGeneration(deps, plan, userId, deps.chatgpt?.accounts.forUser(userId)));
   });
 
-  app.post('/:id/continue', rateLimit(deps, RATE_LIMITS.generation), async (c) => {
+  app.post('/:id/continue', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const body = await optionalJsonBody(c);
@@ -3462,7 +3360,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   // Auto-continue: one more assistant turn with no user message in between. The
   // nudge that asks for it is appended to the prompt and never stored, so the
   // branch holds nothing but the two assistant messages.
-  app.post('/:id/auto', rateLimit(deps, RATE_LIMITS.generation), async (c) => {
+  app.post('/:id/auto', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const body = await optionalJsonBody(c);
@@ -3548,7 +3446,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const chat = await loadOwnedChat(deps, id, userId);
-    if (isGenerating(chat)) {
+    if (isGenerating(deps, chat.id)) {
       throw new ApiError(429, 'generation_in_progress', 'A generation is running for this chat');
     }
     // One in flight per chat, in its own guard: a reader leaning on the button

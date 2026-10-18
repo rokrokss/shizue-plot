@@ -1,7 +1,6 @@
 import {
   backgroundHtmlOf,
   backgroundWithoutStyles,
-  cardLicense,
   characterName,
   coerceGroupSettings,
   coerceNarrator,
@@ -61,15 +60,13 @@ import {
   characters,
   plots,
   plotAssets,
-  plotLikes,
   type Character,
   type ContentLanguage,
   type NewPlotAsset,
-  type SafetyLevel,
   type Plot,
   type PlotAsset,
 } from '@shizue/db';
-import { and, asc, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -83,13 +80,7 @@ import {
   saveAssetStream,
   uniqueSlug,
 } from '../assets.js';
-import {
-  MAX_IMAGE_BYTES,
-  mimeForPath,
-  sanitizeStoredAvatar,
-  saveAvatar,
-  storableImage,
-} from '../avatar.js';
+import { MAX_IMAGE_BYTES, mimeForPath, saveAvatar, storableImage } from '../avatar.js';
 import {
   coerceCard,
   coerceCustomUi,
@@ -104,42 +95,20 @@ import {
   withoutMember,
   withStoredModules,
 } from '../card.js';
-import type { AppDeps, AppEnv, Tx } from '../deps.js';
+import type { AppDeps, AppEnv } from '../deps.js';
 import type { FileImportResult } from '@shizue/db';
 import { draftPlot, MAX_PREMISE_LENGTH } from '../draft.js';
-import { ApiError, badRequest, notFound } from '../errors.js';
+import { badRequest, notFound } from '../errors.js';
 import type { ImportHooks } from '../fileImports.js';
-import {
-  avatarUrl,
-  coverUrl,
-  loadMembers,
-  loadVisiblePlot,
-  normalizeTags,
-  publicIntro,
-  publicPlotQuery,
-  toPublicMemberJson,
-  toPublicPlotJson,
-  visibleToViewer,
-} from '../hub.js';
-import { scheduleSearchVector } from '../search.js';
-import { enqueueJob } from '../jobs.js';
+import { avatarUrl, coverUrl, introPreview, loadMembers, normalizeTags, toPlayMemberJson } from '../hub.js';
 import { createRemoteFetch, localizePlot, type LocalizeScope } from '../localizeAssets.js';
-import { requireUser } from '../session.js';
 import { cbsModulesOf, loadOwnedPlot } from '../plots.js';
-import { RATE_LIMITS, rateLimit } from '../rateLimit.js';
 import { realmCardId, realmCharacterUrl } from '../realm.js';
 import { avatarKey, coverKey, deleteQuietly, readAll } from '../storage.js';
 import { isUuid, optionalBoolean, optionalString, readJsonBody, requireString, requireUuidParam } from '../util.js';
-import { scheduleLoreAliases, scheduleLoreUpdate } from '../vectors.js';
-import { countComments } from './comments.js';
-import { followState } from './explore.js';
+import { scheduleLoreUpdate } from '../vectors.js';
 
 const LANGUAGES: ContentLanguage[] = ['ko', 'en', 'ja'];
-/**
- * The levels a create, edit or publish may declare. `adult` is left out until age
- * verification exists: rows saved with it earlier keep it, but none gain it now.
- */
-const SAFETY_LEVELS: SafetyLevel[] = ['all'];
 
 /**
  * One card file (`@shizue/core`): what a file import takes (`fileImports.ts`),
@@ -153,43 +122,12 @@ export const MAX_ASSET_NAME_LENGTH = 100;
 /** A module's name as the studio lists it — a label, as a member's roster name is. */
 export const MAX_MODULE_NAME_LENGTH = 100;
 
-/**
- * What an import that would show someone else's characters to readers is
- * refused with until the owner vouches for them: a publish with imported
- * members, and an import into a plot that is already public.
- */
-export const rightsUnconfirmed = (): ApiError =>
-  new ApiError(
-    409,
-    'rights_unconfirmed',
-    'Imported characters are published only once the owner confirms the rights to them (rightsConfirmed)',
-  );
-
 export function coerceLanguage(value: string | undefined): ContentLanguage | undefined {
   if (value === undefined) return undefined;
   if (!LANGUAGES.includes(value as ContentLanguage)) {
     throw badRequest('invalid_request', `language must be one of ${LANGUAGES.join(', ')}`);
   }
   return value as ContentLanguage;
-}
-
-/** Explore partitions on the content language, so there it is mandatory. */
-export function requireLanguage(value: string | undefined): ContentLanguage {
-  const language = coerceLanguage(value);
-  if (!language) throw badRequest('invalid_request', 'language is required');
-  return language;
-}
-
-/**
- * The audience a publish declares. Absent leaves the stored level alone, so a
- * re-publish never silently reclassifies a plot.
- */
-function coerceSafetyLevel(value: string | undefined): SafetyLevel | undefined {
-  if (value === undefined) return undefined;
-  if (!SAFETY_LEVELS.includes(value as SafetyLevel)) {
-    throw badRequest('invalid_request', `safetyLevel must be one of ${SAFETY_LEVELS.join(', ')}`);
-  }
-  return value as SafetyLevel;
 }
 
 /**
@@ -330,7 +268,7 @@ function optionalCustomUi(body: Record<string, unknown>): PlotCustomUi | null | 
   return Object.keys(customUi).length > 0 ? customUi : null;
 }
 
-/** The explore filter column, written directly rather than derived from a card. */
+/** The plot's tags, written directly rather than derived from a card. */
 function coerceTags(body: Record<string, unknown>): string[] | undefined {
   const value = body['tags'];
   if (value === undefined) return undefined;
@@ -341,26 +279,6 @@ function coerceTags(body: Record<string, unknown>): string[] | undefined {
   return normalizeTags(value as string[]);
 }
 
-/**
- * A plot may only be published once it has enough substance to be worth finding:
- * a name, and something for the model to play — its own setting, or a member's
- * description. An imported card keeps its character there and seldom has a
- * scenario to lend the plot, and RisuAI lets a card open on the reader's first
- * message, so neither a setting nor an opening is asked for on its own.
- */
-function requirePublishable(plot: Plot, members: Character[]): void {
-  const missing = [
-    ...(plot.name.trim() ? [] : ['name']),
-    ...(plot.description.trim() || members.some((member) => member.card.description.trim())
-      ? []
-      : ['description']),
-  ];
-  if (missing.length > 0) {
-    throw badRequest('not_publishable', `Cannot publish: ${missing.join(', ')} must not be empty`);
-  }
-}
-
-/** The whole plot as its owner edits it. Nothing here is public but by choice. */
 /** A module as the studio lists it: what it is and what it brought, not its scripts. */
 const toModuleJson = (module: PlotModule) => ({
   id: module.id,
@@ -377,11 +295,12 @@ const toModuleJson = (module: PlotModule) => ({
   hideIcon: module.hideIcon === true,
   /** What it would connect to or run that is never done here (`PlotModule.inert`). */
   ...(module.inert ? { inert: module.inert } : {}),
-  /** Whether it brings anything the reader's browser runs — what a publish tells the owner readers receive. */
+  /** Whether it brings anything the reader's browser runs. */
   scripts: cardScripts({ extensions: {} }, [module]) !== null,
   importedFrom: module.importedFrom,
 });
 
+/** The whole plot as its owner edits it. */
 const toPlotJson = (plot: Plot) => ({
   id: plot.id,
   name: plot.name,
@@ -401,15 +320,7 @@ const toPlotJson = (plot: Plot) => ({
   /** How a work of several members picks a round's speakers, the default filled in. */
   groupSettings: coerceGroupSettings(plot.groupSettings),
   language: plot.language,
-  visibility: plot.visibility,
-  safetyLevel: plot.safetyLevel,
-  commentsEnabled: plot.commentsEnabled,
   tags: plot.tags,
-  likeCount: plot.likeCount,
-  chatCount: plot.chatCount,
-  publishedAt: plot.publishedAt?.toISOString() ?? null,
-  // The last time the owner vouched for the imported members; null until then.
-  rightsConfirmedAt: plot.rightsConfirmedAt?.toISOString() ?? null,
   createdAt: plot.createdAt.toISOString(),
   updatedAt: plot.updatedAt.toISOString(),
 });
@@ -429,7 +340,7 @@ const firstPromptMacro = (plot: Plot, char: string): MacroContext => ({
  * What a plot draws behind its chats: the work's own background
  * (`PlotCustomUi.backgroundHtml`) — one for the whole work, as a RisuAI group
  * has — or, on a plot from before the field, `cardBackgroundOf` its roster.
- * Presentation, like the stylesheet, so it travels with the public view; ''
+ * Presentation, like the stylesheet, so it travels with the play view; ''
  * when nothing is left to draw.
  */
 const backgroundOf = (plot: Plot, members: Character[]): string =>
@@ -467,17 +378,14 @@ function exportedBackground(plot: Plot, members: Character[], memberId: string):
 }
 
 /**
- * A member as its own creator sees it: the whole card, since they wrote it — or
- * imported it, in which case where it came from and the license its card
- * declares travel too, being what the owner weighs before publishing it. Both
- * are the owner's alone: no public shape carries them. So is what the card's
- * always-on lore costs once expanded (`constantLoreTokens`), which the studio
- * sets against the lore budget.
+ * A member as the studio edits it: the whole card — and, for an imported one,
+ * where it came from. And what the card's always-on lore costs once expanded
+ * (`constantLoreTokens`), which the studio sets against the lore budget.
  */
 export const toMemberJson = (plot: Plot, member: Character) => ({
   id: member.id,
   name: member.name,
-  // The same field every public member carries, so a screen reads one shape.
+  // The same field the play view's members carry, so a screen reads one shape.
   nickname: member.card.nickname?.trim() || null,
   card: member.card,
   avatarUrl: avatarUrl(member),
@@ -485,7 +393,6 @@ export const toMemberJson = (plot: Plot, member: Character) => ({
   /** 대화량, 0..100, the default (50) filled in. */
   talkativeness: coerceTalkativeness(member.talkativeness),
   importedFrom: member.importedFrom,
-  license: cardLicense(member.card.extensions) ?? null,
   loreConstantTokens: constantLoreTokens(member.card.lorebook, firstPromptMacro(plot, characterName(member))),
   createdAt: member.createdAt.toISOString(),
   updatedAt: member.updatedAt.toISOString(),
@@ -529,19 +436,12 @@ async function loadOwnedMember(
 /** What a card upload says about itself beside the card. */
 export interface CardImport {
   importedFrom: ImportProvenance;
-  /** The owner's word that they may publish the card, for a plot that is already public. */
-  rightsConfirmed: boolean;
 }
 
 /**
  * Inserts a member under the roster cap. The cap is a count, and a count only
  * means something while nothing else can insert: the plot row is locked for the
  * whole check-then-write, so two creates racing at nine cannot both see room.
- *
- * An imported member joining a plot that is already public is published by the
- * insert itself, so it needs the owner's word exactly as a publish does. The
- * visibility is read under the same lock a publish takes, so an import and a
- * publish cannot pass each other with neither one asking.
  */
 async function insertMember(
   deps: AppDeps,
@@ -553,13 +453,7 @@ async function insertMember(
   id?: string,
 ): Promise<Character> {
   return deps.db.transaction(async (tx) => {
-    const [plot] = await tx
-      .select({ visibility: plots.visibility })
-      .from(plots)
-      .where(eq(plots.id, plotId))
-      .for('update');
-    const vouching = imported !== undefined && plot?.visibility === 'public';
-    if (vouching && !imported.rightsConfirmed) throw rightsUnconfirmed();
+    await tx.select({ id: plots.id }).from(plots).where(eq(plots.id, plotId)).for('update');
     const [counted] = await tx
       .select({ value: sql<number>`count(*)::int`, next: sql<number>`coalesce(max(${characters.orderIndex}), -1) + 1` })
       .from(characters)
@@ -581,9 +475,6 @@ async function insertMember(
         ...(imported ? { importedFrom: imported.importedFrom } : {}),
       })
       .returning();
-    if (vouching) {
-      await tx.update(plots).set({ rightsConfirmedAt: new Date() }).where(eq(plots.id, plotId));
-    }
     return created!;
   });
 }
@@ -1017,7 +908,6 @@ export interface ModuleUpload {
   fileName: string;
   /** Of the bytes as uploaded. */
   sha256: string;
-  rightsConfirmed: boolean;
 }
 
 /** The provenance a card import records: the file's name and hash, and the page the importer says it came from. */
@@ -1047,23 +937,6 @@ function attachment(name: string, extension: string): string {
 
 /** A storage key's extension — the image type it was sniffed as when it was stored (`assetKey` and the like). */
 const extensionOf = (key: string): string => key.slice(key.lastIndexOf('.') + 1);
-
-/** Applies a like delta (0 when the like row did not change) and returns the count. */
-async function bumpLikeCount(tx: Tx, plotId: string, delta: number): Promise<number> {
-  if (delta === 0) {
-    const [row] = await tx
-      .select({ likeCount: plots.likeCount })
-      .from(plots)
-      .where(eq(plots.id, plotId));
-    return row!.likeCount;
-  }
-  const [row] = await tx
-    .update(plots)
-    .set({ likeCount: sql`${plots.likeCount} + ${delta}` })
-    .where(eq(plots.id, plotId))
-    .returning({ likeCount: plots.likeCount });
-  return row!.likeCount;
-}
 
 /**
  * Importing a card creates the work it was always describing: the card becomes
@@ -1106,7 +979,7 @@ export async function importCardAsPlot(
       ownerId: userId,
       name,
       // Only the plot borrows the creator notes: the member keeps its card's own
-      // intro, or the public page would say the same thing twice.
+      // intro, or the work page would say the same thing twice.
       intro: card.intro ?? introFromCreatorNotes(card.creatorNotes, language) ?? '',
       description,
       intros,
@@ -1118,8 +991,6 @@ export async function importCardAsPlot(
     .returning();
   let plot = created!;
 
-  // A new plot is private, so this records where the card came from and asks
-  // for nothing yet: the owner vouches for it when they publish.
   let member = await insertMember(deps, plot.id, name, card, imported, memberId);
   if (parsed.iconBuffer) {
     member = await writeMemberAvatar(deps, member, parsed.iconBuffer);
@@ -1154,8 +1025,7 @@ export async function importCardAsPlot(
  * openings stay its own. What the card dresses its own messages in comes along
  * as its own (`liftCustomUi`), and so do its images, as the plot's, because
  * `{{img::slug}}` resolves there, and its group-only greetings once there is a
- * cast for them to greet (`addGroupGreetings`). Into a public plot it needs
- * `rightsConfirmed` (`insertMember`).
+ * cast for them to greet (`addGroupGreetings`).
  */
 export async function importCardAsMember(
   deps: AppDeps,
@@ -1216,14 +1086,10 @@ export async function importPlotModule(
   deps: AppDeps,
   userId: string,
   plotId: string,
-  { parsed, fileName, sha256, rightsConfirmed }: ModuleUpload,
+  { parsed, fileName, sha256 }: ModuleUpload,
   hooks: ImportHooks,
 ): Promise<FileImportResult> {
-  const owned = await loadOwnedPlot(deps, plotId, userId);
-  // Someone else's work shown to readers the moment it lands, as an imported
-  // member is: a public plot takes it only on the owner's word. Asked before
-  // anything is stored, and again under the lock the write takes.
-  if (owned.visibility === 'public' && !rightsConfirmed) throw rightsUnconfirmed();
+  await loadOwnedPlot(deps, plotId, userId);
 
   // A module names no emotion pictures: its assets are only `additionalAssets`.
   const stored = await storeImportedAssets(deps, plotId, parsed.assets, { hooks });
@@ -1245,20 +1111,16 @@ export async function importPlotModule(
   try {
     await deps.db.transaction(async (tx) => {
       const [locked] = await tx
-        .select({ customUi: plots.customUi, visibility: plots.visibility })
+        .select({ customUi: plots.customUi })
         .from(plots)
         .where(eq(plots.id, plotId))
         .for('update');
-      // The same lock a publish takes, so the two cannot pass each other unasked.
-      const vouching = locked?.visibility === 'public';
-      if (vouching && !rightsConfirmed) throw rightsUnconfirmed();
       const customUi = locked?.customUi ?? {};
       await tx
         .update(plots)
         .set({
           customUi: { ...customUi, modules: [...(customUi.modules ?? []), module] },
           updatedAt: new Date(),
-          ...(vouching ? { rightsConfirmedAt: new Date() } : {}),
         })
         .where(eq(plots.id, plotId));
     });
@@ -1352,16 +1214,13 @@ async function deletePlotWithObjects(deps: AppDeps, plotId: string): Promise<voi
 }
 
 /**
- * The plot and everything that hangs off it — its roster, its assets, its cover,
- * its public page. Public reads and owner-only writes in one router, so the
- * session guard is per route rather than at the mount (app.ts). What a reader
- * without an account may take: the public view of a published plot, its cover,
- * its members' avatars and its assets. Everything else carries `requireUser`.
+ * The plot and everything that hangs off it — its roster, its assets, its
+ * cover, the view a chat plays it by — all the owner's (`ownerGate`).
  */
 export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
 
-  app.get('/', requireUser, async (c) => {
+  app.get('/', async (c) => {
     const rows = await deps.db
       .select()
       .from(plots)
@@ -1370,7 +1229,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.json(rows.map(toPlotJson));
   });
 
-  app.post('/', requireUser, rateLimit(deps, RATE_LIMITS.plots), async (c) => {
+  app.post('/', async (c) => {
     const body = await readJsonBody(c);
     const name = requireString(body, 'name').trim();
     if (!name) throw badRequest('invalid_request', 'name must not be empty');
@@ -1383,8 +1242,6 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     const style = optionalStyle(body);
     const profiles = optionalProfiles(body);
     const customUi = optionalCustomUi(body);
-    const safetyLevel = coerceSafetyLevel(optionalString(body, 'safetyLevel'));
-    const commentsEnabled = optionalBoolean(body, 'commentsEnabled');
 
     const [created] = await deps.db
       .insert(plots)
@@ -1400,8 +1257,6 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
         ...(style ? { style } : {}),
         ...(profiles ? { profiles } : {}),
         ...(customUi ? { customUi } : {}),
-        ...(safetyLevel !== undefined ? { safetyLevel } : {}),
-        ...(commentsEnabled !== undefined ? { commentsEnabled } : {}),
         ...(language ? { language } : {}),
       })
       .returning();
@@ -1418,12 +1273,11 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
    * The draft passes the coercers the create and the studio's member create use,
    * so a pasted plot holds nothing a written one could not. The creator's word
    * that the work is theirs and not held exclusively elsewhere comes first
-   * (`migration_unconfirmed`). Every member is stamped `imported_from`, so the
-   * publish asks for `rightsConfirmed` exactly as it does after a card import;
-   * the plot is private whatever the source rated it. The images follow through
-   * the ordinary avatar and asset uploads, against the ids the answer carries.
+   * (`migration_unconfirmed`). Every member is stamped `imported_from`, as a
+   * card import's is. The images follow through the ordinary avatar and asset
+   * uploads, against the ids the answer carries.
    */
-  app.post('/migrate', requireUser, rateLimit(deps, RATE_LIMITS.plots), async (c) => {
+  app.post('/migrate', async (c) => {
     const body = await readJsonBody(c);
     const confirmations = body['confirmations'];
     if (!isObject(confirmations) || confirmations['ownWork'] !== true || confirmations['notExclusive'] !== true) {
@@ -1478,8 +1332,8 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       method: 'paste',
     };
 
-    // A new plot is private and nobody else knows its id, so the roster goes in
-    // whole: none of `insertMember`'s locking has anything to guard yet.
+    // Nobody else knows the new plot's id yet, so the roster goes in whole:
+    // none of `insertMember`'s locking has anything to guard yet.
     const plot = await deps.db.transaction(async (tx) => {
       const [created] = await tx.insert(plots).values(values).returning();
       await tx.insert(characters).values(
@@ -1506,8 +1360,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
    * Registered before `/:id`, which has no POST of its own but would take the
    * path if it ever grew one.
    */
-  app.post('/draft', requireUser, async (c) => {
-    const userId = c.get('userId');
+  app.post('/draft', async (c) => {
     const body = await readJsonBody(c);
     const premise = requireString(body, 'premise').trim();
     if (!premise) throw badRequest('invalid_request', 'premise must not be empty');
@@ -1521,27 +1374,17 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       throw badRequest('invalid_request', 'model must be a string or null');
     }
 
-    // One draft per creator at a time. The call is a minute long at worst, and a
-    // creator hammering the button would otherwise pay for every one of them.
-    if (deps.drafting.has(userId)) {
-      throw new ApiError(429, 'draft_in_progress', 'A draft is already being written for this user');
-    }
-    deps.drafting.add(userId);
-    try {
-      return c.json(await draftPlot(deps, userId, premise, model ?? undefined));
-    } finally {
-      deps.drafting.delete(userId);
-    }
+    return c.json(await draftPlot(deps, c.get('userId'), premise, model ?? undefined));
   });
 
   // The owner's view: the plot plus everything currently set in it.
-  app.get('/:id', requireUser, async (c) => {
+  app.get('/:id', async (c) => {
     const userId = c.get('userId');
     const plot = await loadOwnedPlot(deps, requireUuidParam(c), userId);
     return c.json(await ownerView(deps, plot));
   });
 
-  app.patch('/:id', requireUser, async (c) => {
+  app.patch('/:id', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     await loadOwnedPlot(deps, id, userId);
@@ -1564,8 +1407,6 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       ? customUiOfRoster(sent, new Set((await loadMembers(deps.db, id)).map((member) => member.id)))
       : sent;
     const groupSettings = optionalGroupSettings(body);
-    const safetyLevel = coerceSafetyLevel(optionalString(body, 'safetyLevel'));
-    const commentsEnabled = optionalBoolean(body, 'commentsEnabled');
 
     const lorebook = body['lorebook'] === undefined ? undefined : coerceLorebook(body['lorebook']);
     const updated = await deps.db.transaction(async (tx) => {
@@ -1592,8 +1433,6 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
           ...(profiles !== undefined ? { profiles } : {}),
           ...(kept !== undefined ? { customUi: kept && Object.keys(kept).length > 0 ? kept : null } : {}),
           ...(groupSettings !== undefined ? { groupSettings } : {}),
-          ...(safetyLevel !== undefined ? { safetyLevel } : {}),
-          ...(commentsEnabled !== undefined ? { commentsEnabled } : {}),
           ...(language ? { language } : {}),
           updatedAt: new Date(),
         })
@@ -1603,15 +1442,13 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     });
     // The book, or the language that picks the model its vectors are of.
     scheduleLoreUpdate(deps, id, c.get('userId'));
-    // Its searchable text may have changed (`search.ts`); a private plot has no vector to change.
-    if (updated.visibility === 'public') scheduleSearchVector(deps, id);
     return c.json(await ownerView(deps, updated));
   });
 
   // Everything hanging off the plot goes with it — the roster, the assets, the
-  // likes, the comments, the chats. The files those rows named do not: nothing is
-  // left to point at them, so they are ours to clean up.
-  app.delete('/:id', requireUser, async (c) => {
+  // chats. The files those rows named do not: nothing is left to point at them,
+  // so they are ours to clean up.
+  app.delete('/:id', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const plot = await loadOwnedPlot(deps, id, userId);
@@ -1631,117 +1468,15 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
   });
 
   /**
-   * Publishing is owner-only, and only for a plot that carries the basics. A
-   * plot with imported members also needs `rightsConfirmed: true` — the owner's
-   * word that they made those characters or may publish them, which nothing
-   * here can check — and the publish stamps when it was given. Unpublishing
-   * asks for nothing.
-   */
-  app.post('/:id/publish', requireUser, rateLimit(deps, RATE_LIMITS.plots), async (c) => {
-    const id = requireUuidParam(c);
-    const userId = c.get('userId');
-    const plot = await loadOwnedPlot(deps, id, userId);
-    const body = await readJsonBody(c);
-    const publish = body['publish'];
-    if (typeof publish !== 'boolean') throw badRequest('invalid_request', 'publish must be a boolean');
-    const safetyLevel = coerceSafetyLevel(optionalString(body, 'safetyLevel'));
-    const rightsConfirmed = optionalBoolean(body, 'rightsConfirmed') === true;
-    // Avatars imported before the card stripping existed are cleaned up here, so
-    // going public never exposes an embedded card.
-    if (publish) {
-      const members = await loadMembers(deps.db, id);
-      requirePublishable(plot, members);
-      for (const member of members) {
-        if (member.avatarPath) await sanitizeStoredAvatar(deps.storage, member.avatarPath);
-      }
-    }
-
-    const updated = await deps.db.transaction(async (tx) => {
-      // Whether this is the first publish is a check-then-write, and it only
-      // means something while nothing else can publish: two clicks racing on one
-      // plot would otherwise both read an unstamped row and notify twice.
-      const [locked] = await tx
-        .select({ publishedAt: plots.publishedAt })
-        .from(plots)
-        .where(eq(plots.id, id))
-        .for('update');
-      // Under the lock an import takes too (`insertMember`), so a member that
-      // lands while this publish waits is one it vouches for.
-      const [imported] = publish
-        ? await tx
-            .select({ id: characters.id })
-            .from(characters)
-            .where(and(eq(characters.plotId, id), isNotNull(characters.importedFrom)))
-            .limit(1)
-        : [];
-      if (imported && !rightsConfirmed) throw rightsUnconfirmed();
-      const [row] = await tx
-        .update(plots)
-        .set({
-          visibility: publish ? 'public' : 'private',
-          // The audience is declared with the publish, but stored either way: an
-          // unpublish must not quietly reset a plot to 'all'.
-          ...(safetyLevel !== undefined ? { safetyLevel } : {}),
-          // Kept on unpublish: it only ever matters while the row is public.
-          ...(publish ? { publishedAt: new Date() } : {}),
-          ...(imported ? { rightsConfirmedAt: new Date() } : {}),
-          updatedAt: new Date(),
-        })
-        .where(and(eq(plots.id, id), eq(plots.ownerId, userId)))
-        .returning();
-
-      // Followers hear about a work once, when it first goes public — the moment
-      // `publishedAt` is stamped, which only ever happens once because an
-      // unpublish keeps it. So re-publishing, and toggling the visibility back
-      // and forth, mint nothing. An adult plot is published in name only until
-      // age verification exists (`publiclyListed`), so notifying about one would
-      // hand every follower a link they cannot open; it is left unannounced
-      // rather than announced late.
-      //
-      // The fan-out itself is queued rather than done here: it is the publish that
-      // decides whether followers are told, and the queue that tells them. The
-      // enqueue is inside this transaction, so a publish that rolls back leaves no
-      // announcement of a plot that never went public.
-      if (publish && locked?.publishedAt === null && row!.safetyLevel === 'all') {
-        await enqueueJob(tx, 'notification_fanout', {
-          kind: 'plot_published',
-          plotId: row!.id,
-          actorId: row!.ownerId,
-          // The stamp this publish just wrote, which is the fan-out's cutoff: it is
-          // whose followers were told, not when the telling happened.
-          publishedAt: row!.publishedAt!.toISOString(),
-        });
-      }
-      return row!;
-    });
-    // Listed now, or not any more: its vector is written, or deleted (`search.ts`).
-    scheduleSearchVector(deps, id);
-    // Going public, its Korean readers' aliases are made now if they were not yet.
-    if (publish) scheduleLoreAliases(deps, id, { userId, subModel: null });
-    return c.json(await ownerView(deps, updated));
-  });
-
-  /**
-   * The public face of a plot: what it is called, what it is about, who is in it
-   * and how it opens. The lorebook, the description the model is told and every
-   * member's card stay on the server — prompts are assembled here, so nothing a
-   * reader receives is a definition.
-   *
-   * The custom UI travels because it is presentation rather than definition:
-   * without it the creator's status window would only render for the creator.
+   * The plot as it is played: what the work page and the chat draw — its name,
+   * cover, cast and openings, its style and custom UI — rather than the whole
+   * of it, which the editor reads (`GET /:id`). The prompt is assembled on the
+   * server, so none of its definitions — the lorebook, the description, the
+   * members' cards — ride here.
    */
   app.get('/:id/public', async (c) => {
-    const viewerId = c.get('viewerId');
-    const [row] = await publicPlotQuery(deps.db, viewerId)
-      .where(and(eq(plots.id, requireUuidParam(c)), visibleToViewer(viewerId)))
-      .limit(1);
-    if (!row) throw notFound('Plot not found');
-    const plot = row.plot;
+    const plot = await loadOwnedPlot(deps, requireUuidParam(c), c.get('userId'));
     const members = await loadMembers(deps.db, plot.id);
-    const commentCount = await countComments(deps.db, plot);
-    // The follow edge to the creator rides along so the page's follow button
-    // does not have to fetch the creator's whole public listing for two numbers.
-    const creatorFollow = await followState(deps.db, plot.ownerId, viewerId);
     // What the chat draws: the work's and, after it, its modules' (`readerCustomUi`).
     const drawn = readerCustomUi(plot.customUi, backgroundOf(plot, members));
     // `{{moduleenabled}}`/`{{moduleassetlist}}` on the reader's screen: the
@@ -1756,13 +1491,16 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       : [];
 
     return c.json({
-      public: true,
-      creatorFollow,
-      ...toPublicPlotJson(row, members),
-      // The one card field written for readers rather than for the model, so it is
-      // the one that may leave with the public view.
+      id: plot.id,
+      name: plot.name,
+      coverUrl: coverUrl(plot),
+      language: plot.language,
+      tags: plot.tags,
+      // The one field written for the reader rather than for the model.
+      intro: plot.intro,
+      // The one card field written for the reader rather than for the model.
       characters: members.map((member) => ({
-        ...toPublicMemberJson(member),
+        ...toPlayMemberJson(member),
         intro: member.card.intro ?? '',
         // What the reader's browser rolls a round's speakers by (`groupOrder`).
         talkativeness: coerceTalkativeness(member.talkativeness),
@@ -1770,10 +1508,9 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
         // names are already every reader's through the plot's images.
         emotion: emotionScreenOf(member.card),
       })),
-      // The openings, uncut — this is the page a reader decides on, and the
-      // listings' `introPreview` is the only place the 200-character cut belongs.
-      intros: plot.intros.map(publicIntro),
-      introPreviews: plot.intros.map((intro) => publicIntro(intro).slice(0, 200)),
+      // The openings, uncut — a prologue is meant to be read — and the picker's cut of each.
+      intros: plot.intros.map(introPreview),
+      introPreviews: plot.intros.map((intro) => introPreview(intro).slice(0, 200)),
       // The style travels because it is options rather than prompt text: it is the
       // badge row a reader decides on, and the chat page reads the two derived
       // features off it to know which of its own toggles are worth offering.
@@ -1797,52 +1534,18 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       componentCode: plot.customUi?.componentCode ?? '',
       componentCapabilities: plot.customUi?.componentCapabilities ?? [],
       modules: cbsModulesOf(modules, new Map(moduleAssetRows.map((asset) => [asset.id, asset.name ?? asset.slug]))),
-      commentsEnabled: plot.commentsEnabled,
-      commentCount,
     });
-  });
-
-  // Idempotent: the counter moves only when a like row actually appears/disappears.
-  app.post('/:id/like', requireUser, rateLimit(deps, RATE_LIMITS.social), async (c) => {
-    const id = requireUuidParam(c);
-    const userId = c.get('userId');
-    await loadVisiblePlot(deps.db, id, userId);
-
-    const likeCount = await deps.db.transaction(async (tx) => {
-      const inserted = await tx
-        .insert(plotLikes)
-        .values({ userId, plotId: id })
-        .onConflictDoNothing()
-        .returning();
-      return bumpLikeCount(tx, id, inserted.length > 0 ? 1 : 0);
-    });
-    return c.json({ liked: true, likeCount });
-  });
-
-  app.delete('/:id/like', requireUser, rateLimit(deps, RATE_LIMITS.social), async (c) => {
-    const id = requireUuidParam(c);
-    const userId = c.get('userId');
-    await loadVisiblePlot(deps.db, id, userId);
-
-    const likeCount = await deps.db.transaction(async (tx) => {
-      const deleted = await tx
-        .delete(plotLikes)
-        .where(and(eq(plotLikes.userId, userId), eq(plotLikes.plotId, id)))
-        .returning();
-      return bumpLikeCount(tx, id, deleted.length > 0 ? -1 : 0);
-    });
-    return c.json({ liked: false, likeCount });
   });
 
   /* ------------------------------------------------------------- the roster */
 
-  app.get('/:id/characters', requireUser, async (c) => {
+  app.get('/:id/characters', async (c) => {
     const plot = await loadOwnedPlot(deps, requireUuidParam(c), c.get('userId'));
     const members = await loadMembers(deps.db, plot.id);
     return c.json(members.map((member) => toMemberJson(plot, member)));
   });
 
-  app.post('/:id/characters', requireUser, async (c) => {
+  app.post('/:id/characters', async (c) => {
     const id = requireUuidParam(c);
     const plot = await loadOwnedPlot(deps, id, c.get('userId'));
     const body = await readJsonBody(c);
@@ -1859,7 +1562,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
    * roster, in the order they should stand. A partial list would leave the
    * unnamed members at indexes the request never decided.
    */
-  app.post('/:id/characters/reorder', requireUser, async (c) => {
+  app.post('/:id/characters/reorder', async (c) => {
     const id = requireUuidParam(c);
     const plot = await loadOwnedPlot(deps, id, c.get('userId'));
     const body = await readJsonBody(c);
@@ -1903,7 +1606,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
    * RisuAI settings come as values (`emotionMode`, `utilityBot`) rather than as
    * the extension that holds them.
    */
-  app.patch('/:id/characters/:characterId', requireUser, async (c) => {
+  app.patch('/:id/characters/:characterId', async (c) => {
     const id = requireUuidParam(c);
     const characterId = requireUuidParam(c, 'characterId');
     const plot = await loadOwnedPlot(deps, id, c.get('userId'));
@@ -1942,7 +1645,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.json(toMemberJson(plot, updated));
   });
 
-  app.delete('/:id/characters/:characterId', requireUser, async (c) => {
+  app.delete('/:id/characters/:characterId', async (c) => {
     const id = requireUuidParam(c);
     const characterId = requireUuidParam(c, 'characterId');
     const { member } = await loadOwnedMember(deps, id, characterId, c.get('userId'));
@@ -1965,12 +1668,11 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
   });
 
   /**
-   * A member's picture. Readable by anyone who may read the plot, and streamed
-   * through the API under every driver for the same reason an asset is: it is an
-   * `<img>` on our origin, and the chat export names it as one.
+   * A member's picture, streamed through the API for the same reason an asset
+   * is: it is an `<img>` on our origin, and the chat export names it as one.
    */
   app.get('/:id/characters/:characterId/avatar', async (c) => {
-    const plot = await loadVisiblePlot(deps.db, requireUuidParam(c), c.get('viewerId'));
+    const plot = await loadOwnedPlot(deps, requireUuidParam(c), c.get('userId'));
     const [member] = await deps.db
       .select()
       .from(characters)
@@ -1994,9 +1696,9 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
   /**
    * Setting an avatar without going through a card import. `saveAvatar` is the
    * same call the import path makes, so a PNG carrying a card is stripped here
-   * too — the bytes are served to everyone who can see the plot.
+   * too.
    */
-  app.post('/:id/characters/:characterId/avatar', requireUser, rateLimit(deps, RATE_LIMITS.upload), async (c) => {
+  app.post('/:id/characters/:characterId/avatar', async (c) => {
     const id = requireUuidParam(c);
     const characterId = requireUuidParam(c, 'characterId');
     const { plot, member } = await loadOwnedMember(deps, id, characterId, c.get('userId'));
@@ -2021,7 +1723,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.json(toMemberJson(plot, updated));
   });
 
-  app.delete('/:id/characters/:characterId/avatar', requireUser, async (c) => {
+  app.delete('/:id/characters/:characterId/avatar', async (c) => {
     const id = requireUuidParam(c);
     const characterId = requireUuidParam(c, 'characterId');
     const { plot, member } = await loadOwnedMember(deps, id, characterId, c.get('userId'));
@@ -2039,8 +1741,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
    * A member as a card file again — for SillyTavern, RisuAI, or an import here.
    * The stored card goes out with what the plot holds for the work written over
    * it: the narrator, the custom UI, the openings and the plot lorebook (see
-   * `CardPlotOverlay`). The owner's alone, like every whole card: a published
-   * plot shows readers its cast, never their definitions.
+   * `CardPlotOverlay`).
    *
    * The PNG is the member's avatar (else the plot cover) with its text chunks
    * stripped and the card written in; one that is not a PNG gives way to a plain
@@ -2058,7 +1759,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
    * out — any of them may name any image. The images are read whole and zipped in memory, so an export holds about twice
    * what the plot's images weigh.
    */
-  app.get('/:id/characters/:characterId/export', requireUser, async (c) => {
+  app.get('/:id/characters/:characterId/export', async (c) => {
     const plot = await loadOwnedPlot(deps, requireUuidParam(c), c.get('userId'));
     const [member] = await deps.db
       .select()
@@ -2148,11 +1849,8 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
 
   /* ------------------------------------------------------------- the assets */
 
-  // Assets follow the cover's visibility rules: anyone who may read the plot may
-  // read its images, but only the owner may change them.
   app.get('/:id/assets', async (c) => {
-    const viewerId = c.get('viewerId');
-    const plot = await loadVisiblePlot(deps.db, requireUuidParam(c), viewerId);
+    const plot = await loadOwnedPlot(deps, requireUuidParam(c), c.get('userId'));
     const rows = await deps.db
       .select()
       .from(plotAssets)
@@ -2162,7 +1860,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.json(rows.map((asset) => toAssetJson(asset)));
   });
 
-  app.post('/:id/assets', requireUser, rateLimit(deps, RATE_LIMITS.upload), async (c) => {
+  app.post('/:id/assets', async (c) => {
     const id = requireUuidParam(c);
     await loadOwnedPlot(deps, id, c.get('userId'));
 
@@ -2257,7 +1955,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
    * origin. Streamed as the slug route streams.
    */
   app.get('/:id/assets/by-name/*', async (c) => {
-    const plot = await loadVisiblePlot(deps.db, requireUuidParam(c), c.get('viewerId'));
+    const plot = await loadOwnedPlot(deps, requireUuidParam(c), c.get('userId'));
     // A host the renderer wrote from a variable (`{{getvar::cdn}}/…`) comes with its scheme.
     const name = byNameOf(c.req.path);
     const [asset] = await deps.db
@@ -2271,7 +1969,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
   });
 
   app.get('/:id/assets/:slug', async (c) => {
-    const plot = await loadVisiblePlot(deps.db, requireUuidParam(c), c.get('viewerId'));
+    const plot = await loadOwnedPlot(deps, requireUuidParam(c), c.get('userId'));
     const [asset] = await deps.db
       .select()
       .from(plotAssets)
@@ -2281,7 +1979,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     return assetResponse(deps.storage, c, asset);
   });
 
-  app.delete('/:id/assets/:slug', requireUser, async (c) => {
+  app.delete('/:id/assets/:slug', async (c) => {
     const id = requireUuidParam(c);
     await loadOwnedPlot(deps, id, c.get('userId'));
     const [deleted] = await deps.db
@@ -2296,7 +1994,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
   /* ------------------------------------------------------------ the modules */
 
   /** Takes a module out of the work: its record, and the pictures it brought that are still there. */
-  app.delete('/:id/modules/:moduleId', requireUser, async (c) => {
+  app.delete('/:id/modules/:moduleId', async (c) => {
     const id = requireUuidParam(c);
     await loadOwnedPlot(deps, id, c.get('userId'));
     const moduleId = c.req.param('moduleId');
@@ -2324,12 +2022,10 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
   /* -------------------------------------------------------------- the cover */
 
   /**
-   * The cover image, owner-only to change and readable by anyone who can read the
-   * plot's public face. Streamed through the API under every driver, exactly as
-   * an avatar is: it is an `<img>` on our origin, and a presigned redirect would
-   * fail the sanitizer's same-origin rule.
+   * The cover image, streamed through the API exactly as an avatar is: it is an
+   * `<img>` on our origin.
    */
-  app.post('/:id/cover', requireUser, rateLimit(deps, RATE_LIMITS.upload), async (c) => {
+  app.post('/:id/cover', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const plot = await loadOwnedPlot(deps, id, userId);
@@ -2346,9 +2042,9 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
       throw badRequest('payload_too_large', `A cover image is at most ${MAX_IMAGE_BYTES} bytes`);
     }
 
-    // Through `storableImage` rather than straight to the store: a cover is
-    // served to every reader of the work, and a card PNG uploaded as one would
-    // otherwise hand out the character definition in its text chunks.
+    // Through `storableImage` rather than straight to the store: a card PNG
+    // uploaded as a cover would otherwise carry the character definition in its
+    // text chunks wherever the picture goes.
     const image = storableImage(new Uint8Array(await file.arrayBuffer()));
     if (!image) throw badRequest('invalid_asset', 'Unsupported image file');
 
@@ -2367,7 +2063,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.json(await ownerView(deps, updated!));
   });
 
-  app.delete('/:id/cover', requireUser, async (c) => {
+  app.delete('/:id/cover', async (c) => {
     const id = requireUuidParam(c);
     const userId = c.get('userId');
     const plot = await loadOwnedPlot(deps, id, userId);
@@ -2382,7 +2078,7 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
   });
 
   app.get('/:id/cover', async (c) => {
-    const plot = await loadVisiblePlot(deps.db, requireUuidParam(c), c.get('viewerId'));
+    const plot = await loadOwnedPlot(deps, requireUuidParam(c), c.get('userId'));
     if (!plot.coverPath) throw notFound('Plot has no cover');
     const object = await deps.storage.get(plot.coverPath);
     if (!object) throw notFound('Cover file is missing');
@@ -2399,9 +2095,9 @@ export function plotRoutes(deps: AppDeps): Hono<AppEnv> {
 }
 
 /**
- * The plot with its roster and its comment count — every owner-side answer.
- * Beside the plot's own book rides what its always-on lore costs, as each
- * member's does (`toMemberJson`).
+ * The plot with its roster — every owner-side answer. Beside the plot's own
+ * book rides what its always-on lore costs, as each member's does
+ * (`toMemberJson`).
  */
 export async function ownerView(deps: AppDeps, plot: Plot): Promise<unknown> {
   const members = await loadMembers(deps.db, plot.id);
@@ -2412,23 +2108,19 @@ export async function ownerView(deps: AppDeps, plot: Plot): Promise<unknown> {
     // What the chat draws behind the work now — its own, or its card's on a plot
     // from before it — for the studio's field to start from.
     backgroundHtml: backgroundOf(plot, members),
-    // Only the owner view carries the comment count: the listings are card grids,
-    // and a count per card would cost a query per card.
-    commentCount: await countComments(deps.db, plot),
   };
 }
 
 /**
  * The card's picture as the new plot's cover, through `storableImage` like an
- * uploaded cover — the copy every reader is served carries none of the card's
- * text chunks. Best effort: the plot is already written, and an import does not
- * fail over its cover; the plot simply has none.
+ * uploaded cover — the copy carries none of the card's text chunks. Best
+ * effort: the plot is already written, and an import does not fail over its
+ * cover; the plot simply has none.
  */
 async function writeImportedCover(deps: AppDeps, plot: Plot, bytes: Uint8Array): Promise<Plot> {
   const image = storableImage(bytes);
   // The cover upload's own cap, measured once the card's text chunks are gone: a
-  // cover is fetched by every explore card, and a picture past it stays the
-  // character's avatar only.
+  // picture past it stays the character's avatar only.
   if (!image || image.bytes.length > MAX_IMAGE_BYTES) return plot;
   const key = coverKey(plot.id, image.ext);
   try {

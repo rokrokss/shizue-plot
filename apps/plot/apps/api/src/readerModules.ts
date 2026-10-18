@@ -37,8 +37,6 @@ import type { ImportHooks } from './fileImports.js';
 import { deleteQuietly, readerModuleAssetKey } from './storage.js';
 import { isUuid } from './util.js';
 
-/** Modules one reader's library holds at most. */
-export const MAX_READER_MODULES = 100;
 /** Pictures one library module keeps at most — a work's cap (`MAX_ASSETS_PER_PLOT`). */
 export const MAX_READER_MODULE_ASSETS = 1000;
 

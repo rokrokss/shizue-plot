@@ -20,9 +20,9 @@
  * (`localStorage`): the reader who picks the same file again for the same place
  * goes on from the parts the store already has, or, once the file is up, is
  * shown where the server is with it and what it came to, with nothing sent
- * again; one who picks another file gives the remembered upload up first, so
- * the server does not refuse the new one as busy. Another tab of this browser
- * importing right now holds the import lock, and its import is left alone.
+ * again; one who picks another file gives the remembered upload up first.
+ * Another tab of this browser importing right now holds the import lock, and
+ * its import is left alone.
  *
  * A failed import throws an `ApiError` with the code the old route answered
  * (`FileImportError`, which also names the import), so the `errors` catalogue
@@ -43,8 +43,6 @@ export interface FileImportFields {
   plotId?: string;
   /** plot, member: the RisuRealm page the card came from. */
   sourceUrl?: string;
-  /** member, plot_module: the owner's word for a work that is public. */
-  rightsConfirmed?: boolean;
   /** reader_module: the reader's yes to a module's low-level access, given up front. */
   confirmLowLevelAccess?: boolean;
   /** plot, member: a SillyTavern World Info file as text, read before the card is uploaded. */
@@ -450,8 +448,7 @@ interface Started {
 /**
  * The import this browser remembers, if it is of `file` for the same place
  * and there is still something to show for it — a page that went away before
- * its import ended. One of another file is given up, so the server does not
- * refuse the start that follows as busy.
+ * its import ended. One of another file is given up.
  */
 async function remembered(ctx: Context, picked: Picked): Promise<(ImportState & Started) | undefined> {
   const kept = recall();

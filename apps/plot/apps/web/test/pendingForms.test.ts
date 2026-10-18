@@ -11,15 +11,14 @@ const send = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 const remove = vi.fn<(...args: unknown[]) => Promise<void>>();
 const plot = {
   id: 'plot-1', name: '원래 제목', intro: '', description: '세계관', language: 'ko',
-  tags: [], commentsEnabled: true, intros: [], narrator: null, style: null,
+  tags: [], intros: [], narrator: null, style: null,
   profiles: [], lorebook: [], customUi: null, characters: [], coverUrl: null,
-  visibility: 'private', safetyLevel: 'all', plotLoreConstantTokens: 0,
+  plotLoreConstantTokens: 0,
 };
 vi.mock('@/lib/api', async (original) => ({
   ...(await original<typeof import('../src/lib/api')>()),
   apiGet: (path: string) => Promise.resolve(
     path === '/api/plots/plot-1' ? plot
-      : path.endsWith('/comments') ? { items: [], nextCursor: null }
       : path === '/api/models' ? [{ id: 'echo/echo', label: 'Echo' }]
       : path === '/api/notes' || path === '/api/personas' ? records : [],
   ),
@@ -35,7 +34,6 @@ vi.mock('@/i18n/navigation', () => ({
 const { default: Notes } = await import('../src/app/[locale]/(app)/(member)/notes/page');
 const { default: Personas } = await import('../src/app/[locale]/(app)/(member)/personas/page');
 const { default: Studio } = await import('../src/app/[locale]/(app)/(member)/plots/[id]/page');
-const { CommentsSection } = await import('../src/components/CommentsSection');
 const { StartChatPanel } = await import('../src/components/StartChatPanel');
 
 let host: HTMLElement;
@@ -105,20 +103,6 @@ for (const [name, Component, label] of [
     expect(remove).not.toHaveBeenCalled();
   });
 }
-
-it('locks comment text and spoiler together, recovering without erasing either', async () => {
-  const pending = deferred<unknown>(); send.mockReturnValue(pending.promise);
-  await render(createElement(CommentsSection, { plotId: 'plot-1', count: 0 }));
-  const form = host.querySelector('[data-testid="comment-form"]')!;
-  const text = form.querySelector('textarea')!;
-  const spoiler = form.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
-  await type(text, '보존할 댓글'); await click(spoiler);
-  await click(button(form, messages.comments.submit));
-  expect(isLocked(form)).toBe(true);
-  await act(async () => pending.reject(new Error('comment failed')));
-  expect(text.value).toBe('보존할 댓글'); expect(spoiler.checked).toBe(true);
-  expect(text.matches(':disabled')).toBe(false);
-});
 
 it('locks the model and identity selection while opening a chat', async () => {
   const pending = deferred<unknown>(); send.mockReturnValue(pending.promise);

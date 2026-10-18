@@ -1,11 +1,10 @@
 /**
  * The shell's three clusters, described once for the header's bar and the phone's
  * tab bar both. A cluster is one destination plus every path that counts as
- * standing inside it — a creator's page belongs to 탐색 though nothing in 탐색
- * links straight to it, and 페르소나 and 노트 belong to 만들기 though they live
- * behind its sub-tabs.
+ * standing inside it — a work's page belongs to the library, and 페르소나 and
+ * 노트 belong to 만들기 though they live behind its sub-tabs.
  */
-export type NavKey = 'explore' | 'chats' | 'create';
+export type NavKey = 'library' | 'chats' | 'create';
 
 export interface NavCluster {
   key: NavKey;
@@ -38,13 +37,7 @@ function under(pathname: string, ...roots: string[]): boolean {
 
 export function navClusters(pathname: string): NavCluster[] {
   return [
-    {
-      key: 'explore',
-      href: '/',
-      active:
-        pathname === '/' ||
-        under(pathname, '/p', '/creators', '/explore'),
-    },
+    { key: 'library', href: '/', active: pathname === '/' || under(pathname, '/p') },
     { key: 'chats', href: '/chats', active: under(pathname, '/chats') },
     {
       key: 'create',

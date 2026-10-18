@@ -7,8 +7,8 @@
  * by reason, as `lexicalHealth.ts` reports its searches. A provider path that
  * reports nothing — the echo model, a test stub — counts as unreported, so the
  * log says there is nothing to learn rather than showing 0%. Per process, and
- * forgotten once said. Logging, and the token counts of the metrics
- * (`metrics.ts`): nothing reads it back, and nothing is written to the database.
+ * forgotten once said. Logging only: nothing reads it back, and nothing is
+ * written to the database.
  *
  * What a chat request could have been served (ARCHITECTURE §7.3 프롬프트 캐시
  * 측정): this backend keeps a request up to the end of its newest user message
@@ -29,7 +29,6 @@ import {
   type PromptBlockKind,
   type PromptMessage,
 } from '@shizue/core';
-import { cachedPromptTokens, promptTokens } from './metrics.js';
 
 export type CacheSite = 'chat' | 'side';
 
@@ -116,9 +115,7 @@ function tally(site: CacheSite, usage: { promptTokens: number; cachedPromptToken
   const t = tallies.get(site) ?? { requests: 0, reported: 0, prompt: 0, cached: 0, hits: 0, misses: new Map() };
   t.requests += 1;
   const cached = usage.cachedPromptTokens;
-  promptTokens.inc({ site }, usage.promptTokens);
   if (cached !== undefined) {
-    cachedPromptTokens.inc({ site }, cached);
     t.reported += 1;
     t.prompt += usage.promptTokens;
     t.cached += cached;

@@ -48,7 +48,7 @@ const file = (text = 'abcdefghij', name = 'sei.charx') => new File([text], name,
 describe('importFile', () => {
   it('starts the import with what rides beside the file, sends each part as its slice, and answers what the import made', async () => {
     const { api, jobs, transport, routes } = setup();
-    const result = await importFile('member', file(), { plotId: 'plot-1', rightsConfirmed: true, sourceUrl: 'https://realm.risuai.net/character/x' }, {
+    const result = await importFile('member', file(), { plotId: 'plot-1', sourceUrl: 'https://realm.risuai.net/character/x' }, {
       transport: transport(),
     });
 
@@ -60,7 +60,6 @@ describe('importFile', () => {
           fileName: 'sei.charx',
           size: 10,
           plotId: 'plot-1',
-          rightsConfirmed: true,
           sourceUrl: 'https://realm.risuai.net/character/x',
         },
         text: 'abcdefghij',

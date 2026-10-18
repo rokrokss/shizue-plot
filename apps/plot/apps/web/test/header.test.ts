@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
- * The header: the three clusters, AI settings, the bell and the pickers — the
- * same for everyone, since there is no sign-in. Which of them is visible at a
+ * The header: the three clusters, AI settings and the pickers — the same for
+ * everyone, since there is no sign-in. Which of them is visible at a
  * given width is a media query and so not testable here — what is testable is
  * that the wide-screen bar holds them and the narrow one hands them over.
  *
@@ -13,7 +13,6 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { stubMatchMedia } from './matchMedia';
 
-const apiGet = vi.fn<() => Promise<unknown>>();
 let pathname = '/chats';
 
 vi.mock('@/i18n/navigation', async () => {
@@ -47,8 +46,6 @@ vi.mock('@/i18n/navigation', async () => {
   };
 });
 
-vi.mock('@/lib/api', () => ({ apiGet: () => apiGet() }));
-
 const { Header } = await import('../src/components/Header');
 
 (globalThis as Record<string, unknown>)['IS_REACT_ACT_ENVIRONMENT'] = true;
@@ -58,7 +55,7 @@ const MESSAGES = {
   common: { close: '닫기' },
   locales: { ko: '한국어', en: 'English', ja: '日本語' },
   nav: { aiSettings: 'AI 연결',
-    explore: '탐색',
+    library: '라이브러리',
     chats: '대화',
     create: '만들기',
     language: '언어',
@@ -66,7 +63,7 @@ const MESSAGES = {
   },
 };
 
-const CLUSTERS = ['탐색', '대화', '만들기'];
+const CLUSTERS = ['라이브러리', '대화', '만들기'];
 
 let host: HTMLElement;
 let root: Root;
@@ -92,7 +89,6 @@ const linkTo = (href: string): HTMLAnchorElement | undefined =>
 
 beforeEach(() => {
   pathname = '/chats';
-  apiGet.mockReset().mockResolvedValue({ items: [], nextCursor: null });
   stubMatchMedia();
   host = document.createElement('div');
   document.body.appendChild(host);

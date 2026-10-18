@@ -8,8 +8,8 @@ import { expect, test, type BrowserContext, type Page } from '@playwright/test';
  * confirmations and a source page → the form, filled the way a creator pastes it
  * (two characters, a conversation profile, an intro in Zeta's `@이름:` turns, a
  * lorebook entry, a style pick), kept across a reload → one image under its
- * source name → the preview, drawn with the speakers it will have → the private
- * plot it makes, read back, and the publish asking for the owner's word.
+ * source name → the preview, drawn with the speakers it will have → the plot it
+ * makes, read back.
  *
  * The form is found by the field paths the schema gives it
  * (`migrate-field-<section>.<field>` / `<section>[i].<field>`), so the ids below
@@ -64,7 +64,6 @@ interface Member {
 interface PlotRead {
   id: string;
   name: string;
-  visibility: string;
   intros: string[];
   lorebook: { keys: string[]; content: string; constant: boolean }[];
   style: { storytelling?: string } | null;
@@ -210,10 +209,9 @@ test('creating makes the plot, uploads the image and offers the text that did no
   expect(await page.evaluate(() => window.localStorage.getItem('shizue.migrate.zeta'))).toBeNull();
 });
 
-test('the plot is private and holds what was pasted, in our protocol', async () => {
+test('the plot holds what was pasted, in our protocol', async () => {
   const plot = await api<PlotRead>(`/api/plots/${plotId}`);
   expect(plot.name).toBe(title);
-  expect(plot.visibility).toBe('private');
   expect(plot.characters.map((member) => member.name)).toEqual([alice, bob]);
   for (const member of plot.characters) {
     expect(member.importedFrom).toMatchObject({
@@ -234,16 +232,6 @@ test('the plot is private and holds what was pasted, in our protocol', async () 
 
   const assets = await api<{ slug: string; name: string | null }[]>(`/api/plots/${plotId}/assets`);
   expect(assets.map(({ slug, name }) => ({ slug, name }))).toEqual([{ slug: 'smile', name: 'smile' }]);
-});
-
-test('publishing it asks for the owner’s word first', async () => {
-  await page.goto(`/ko/plots/${plotId}`);
-  const publish = page.getByRole('button', { name: '공개하기' });
-  await expect(publish).toBeDisabled();
-  await page
-    .getByLabel('가져온 등장인물을 직접 만들었거나, 원작자에게 공개해도 좋다는 허락을 받았습니다.')
-    .check();
-  await expect(publish).toBeEnabled();
 });
 
 test('deleting the plot cleans up after the run', async () => {

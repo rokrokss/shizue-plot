@@ -116,8 +116,8 @@ export interface ObjectStorage {
   get(key: string, range?: ByteRange): Promise<StoredObject | null>;
   /**
    * Removes an object. A key that is already gone is not an error; anything else
-   * throws, so a caller that must fail closed (`sanitizeStoredAvatar`) can, and
-   * one that must not takes `deleteQuietly`.
+   * throws, so a caller that must fail closed can, and one that must not takes
+   * `deleteQuietly`.
    */
   delete(key: string): Promise<void>;
   uploads: StagedUploads;

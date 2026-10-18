@@ -1,8 +1,7 @@
 /**
  * The headers the web app answers with. The page's policy carries a nonce, so
  * `proxy.ts` writes it for each request from the environment the app runs in;
- * the rest Next computes when the app is built (`next.config.ts`), from
- * `BETTER_AUTH_URL` in the build's environment.
+ * the rest Next computes when the app is built (`next.config.ts`).
  *
  * `/api/*` is left to the API, which sets its own (apps/api/src/securityHeaders.ts)
  * and the rewrite passes them through.
@@ -63,8 +62,7 @@ interface HeaderRule {
   headers: { key: string; value: string }[];
 }
 
-export function securityHeaders(env: Env): HeaderRule[] {
-  const https = (env['BETTER_AUTH_URL'] ?? '').startsWith('https://');
+export function securityHeaders(): HeaderRule[] {
   return [
     {
       // Everything but `/api`, whose answers are the API's.
@@ -72,7 +70,6 @@ export function securityHeaders(env: Env): HeaderRule[] {
       headers: [
         { key: 'X-Content-Type-Options', value: 'nosniff' },
         { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
-        ...(https ? [{ key: 'Strict-Transport-Security', value: 'max-age=31536000; includeSubDomains' }] : []),
       ],
     },
     {

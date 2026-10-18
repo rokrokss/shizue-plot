@@ -66,7 +66,6 @@ function bundle(extra: Partial<ScriptBundle> = {}): ScriptBundle {
       lorebook: [],
       postHistoryInstructions: '',
     },
-    overlay: { member: null, persona: null },
     ...extra,
   };
 }
@@ -730,7 +729,8 @@ describe('an engine outside a trigger run', () => {
     expect(runtime.rewritesOnServer).toBe(true);
     await runtime.button('a', view([greeting]));
     runtime.adopt({
-      overlay: { member: { description: '서버가 바꾼 설명', name: '세라' }, persona: null },
+      name: '세라',
+      character: { ...bundle().character, description: '서버가 바꾼 설명', name: '세라' },
       localLore: [
         {
           name: '등불',
@@ -1298,23 +1298,22 @@ describe('the name, the first message and the background', () => {
     ]);
   });
 
-  it('keep `{{char}}` the nickname through a rename, and let the triggers read the first message the overlay holds', async () => {
+  it('keep `{{char}}` the nickname for a card its scripts renamed, and read the first message as the greeting stands', async () => {
     const { api } = fakeApi();
     const runtime = createScriptRuntime({
       chatId: 'c1',
       api,
       ui: silentUi,
+      // A card the scripts renamed and gave a first message: the server wrote both
+      // into the work, the name on the card, the first message into the greeting.
       bundle: bundle({
         name: '리리',
         triggers: [trigger('start', [{ type: 'v2GetFirstMessage', outputVar: 'fm', indent: 0 }, setvar('who', '{{char}}')])],
-        character: { ...bundle().character, name: '리안', nickname: '리리' },
-        overlay: { member: { name: '세라', firstMessage: '새 인사' }, persona: null },
+        character: { ...bundle().character, name: '세라', nickname: '리리' },
       }),
     });
-    const onFirst = await runtime.prepare('auto', view([greeting], { firstGreeting: true }));
+    const onFirst = await runtime.prepare('auto', view([{ ...greeting, content: '새 인사' }], { firstGreeting: true }));
     expect(onFirst.body['startDelta']).toEqual({ fm: '새 인사', who: '리리' });
-    const onAnother = await runtime.prepare('auto', view([greeting], { firstGreeting: false }));
-    expect(onAnother.body['startDelta']).toEqual({ fm: '어서 와.', who: '리리' });
   });
 });
 

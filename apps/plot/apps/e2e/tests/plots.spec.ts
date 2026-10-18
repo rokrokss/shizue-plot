@@ -2,11 +2,10 @@ import { seedSession } from '../seedSession.js';
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 
 /**
- * The roster layer of a plot, along the owner's own path: a plot refuses to be
- * published until it says something → three characters join it → the order the
- * creator arranges them in is the order that is stored → one of them leaves →
- * the published plot page shows what is left, in that order → deleting the
- * plot takes the whole work with it.
+ * The roster layer of a plot, along the owner's own path: a plot is made → three
+ * characters join it → the order the creator arranges them in is the order that
+ * is stored → one of them leaves → the plot page shows what is left, in that
+ * order → deleting the plot takes the whole work with it.
  *
  * The steps build on each other, so the file runs serially. Every run uses a
  * fresh account and its own plot; only that plot is deleted, because this hits
@@ -64,7 +63,7 @@ async function expectOrder(names: string[]): Promise<void> {
   }
 }
 
-test('a plot refuses to be published until it says something', async () => {
+test('a plot is made from the creator area', async () => {
   await seedSession(page, owner);
   await expect(page).toHaveURL(/\/ko$/);
 
@@ -74,12 +73,6 @@ test('a plot refuses to be published until it says something', async () => {
   await page.getByRole('button', { name: '만들기', exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/ko/plots/${UUID_PATH}$`));
   plotId = new URL(page.url()).pathname.split('/').pop() ?? '';
-
-  // A name alone is not a work: the publish is refused by the server, and the
-  // panel says what it is missing.
-  await page.getByRole('button', { name: '공개하기' }).click();
-  await expect(page.getByText('제목과 함께 세계관이나 등장인물 설정을 채워야 공개할 수 있습니다.')).toBeVisible();
-  await expect(page.getByRole('button', { name: '공개하기' })).toBeVisible();
 });
 
 test('three characters join the plot', async () => {
@@ -127,10 +120,7 @@ test('a character leaves the plot', async () => {
   await expectOrder([cast[0]!, cast[1]!]);
 });
 
-test('the published plot page carries what is left, in that order', async () => {
-  await page.getByRole('button', { name: '공개하기' }).click();
-  await expect(page.getByRole('button', { name: '비공개로 전환' })).toBeVisible();
-
+test('the plot page carries what is left, in that order', async () => {
   await page.goto(`/ko/p/${plotId}`);
   await expect(page.getByRole('heading', { name: plot.name })).toBeVisible();
   await expect(members()).toHaveCount(2);
@@ -148,7 +138,7 @@ test('deleting the plot takes the whole work with it', async () => {
   await expect(page).toHaveURL(/\/ko\/plots$/);
   await expect(page.getByTestId('plot-row').filter({ hasText: plot.name })).toHaveCount(0);
 
-  // …and its public page is gone with it, for its own owner too.
+  // …and its page is gone with it.
   await page.goto(`/ko/p/${plotId}`);
-  await expect(page.getByText('플롯을 찾을 수 없거나 공개되지 않았습니다.')).toBeVisible();
+  await expect(page.getByText('플롯을 찾을 수 없습니다.')).toBeVisible();
 });

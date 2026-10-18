@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 
 /**
- * End-to-end smoke path: test session → plot → two members → openings → publish →
+ * End-to-end smoke path: test session → plot → two members → openings →
  * chat from the plot's own page → echo turn read back as the speakers who
  * wrote it → regenerate, with a request too → edit → author note → locale
  * switch → logout.
@@ -119,14 +119,14 @@ async function openMember(index: number) {
   return member;
 }
 
-test('a test session opens the feed, and 만들기 opens my plots', async () => {
+test('a test session opens the library, and 만들기 opens my plots', async () => {
   await seedSession(page, account);
 
   await expect(page).toHaveURL(/\/ko$/);
 
   // The shelf is where the creator area opens now: a plot is the unit, and the
-  // characters live inside one. Scoped to the nav and exact: feed cards carry
-  // "{name} 제작" in their names.
+  // characters live inside one. Scoped to the nav and exact: the library has a
+  // way to make one of its own.
   await page
     .getByRole('navigation')
     .getByRole('link', { name: messages('ko').nav.create, exact: true })
@@ -176,21 +176,17 @@ test('puts two characters in the plot', async () => {
   await expect(page.getByText('저장했습니다')).toBeVisible();
 });
 
-test('writes two openings and publishes the plot', async () => {
+test('writes two openings', async () => {
   for (const [index, text] of intros.entries()) {
     await page.getByRole('button', { name: '도입부 추가' }).click();
     await page.getByTestId('plot-intro').nth(index).fill(text);
   }
   await page.getByRole('button', { name: '저장', exact: true }).click();
   await expect(page.getByText('저장했습니다')).toBeVisible();
-
-  // Publishing reads the stored plot, so it only happens after the save.
-  await page.getByRole('button', { name: '공개하기' }).click();
-  await expect(page.getByRole('button', { name: '비공개로 전환' })).toBeVisible();
 });
 
-test('the public plot page carries the cast and the openings', async () => {
-  await page.getByRole('link', { name: '플롯 페이지 보기' }).click();
+test('the plot page carries the cast and the openings', async () => {
+  await page.getByRole('link', { name: '대화 시작하기' }).click();
   await expect(page).toHaveURL(new RegExp(`/ko/p/${plotId}$`));
 
   await expect(page.getByRole('heading', { name: plot.name })).toBeVisible();
@@ -203,8 +199,6 @@ test('the public plot page carries the cast and the openings', async () => {
   await expect(page.getByTestId('intro-pick')).toHaveCount(2);
   await expect(page.getByTestId('intro-text')).toContainText('비가 그치지 않는 밤이었다');
 
-  // Liking your own plot is pointless: the edit link takes that slot.
-  await expect(page.getByTestId('like-button')).toHaveCount(0);
   await expect(page.getByRole('link', { name: '편집' })).toBeVisible();
 });
 

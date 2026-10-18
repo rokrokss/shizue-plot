@@ -86,3 +86,18 @@ export function greetingText(content: string, id: string, ctx: GreetingContext):
   });
   return shown.length > MAX_GREETING_CHARS ? content : shown;
 }
+
+const CHAR_OR_USER = /\{\{\s*(char|user)\s*\}\}/gi;
+
+/**
+ * Openings are stored raw — macros are only expanded when the server assembles a
+ * prompt — so a page that shows one outside a chat (the work page) has to fill
+ * them in for display. Only {{char}} and {{user}} have a sensible answer
+ * outside a chat, and outside one {{char}} is the work rather than any of its
+ * members.
+ */
+export function fillPreview(text: string, char: string, user: string): string {
+  return text.replace(CHAR_OR_USER, (_match, name: string) =>
+    name.toLowerCase() === 'char' ? char : user,
+  );
+}

@@ -1,11 +1,11 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
-import { useLocale, useTranslations } from 'next-intl';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useFormatter, useLocale, useTranslations } from 'next-intl';
 import { encode } from 'uqr';
 import { useRouter } from '@/i18n/navigation';
 import { apiDelete, apiGet, apiSend } from '@/lib/api';
-import { DEVICE_PAIRING } from '@/lib/devicePairing';
+import { DEVICE_PAIRING, phoneName, type PairedPhone } from '@/lib/devicePairing';
 import { useDocumentTitle } from '@/lib/useDocumentTitle';
 import { useErrorMessage } from '@/lib/useErrorMessage';
 import { Button, ErrorText } from './ui';
@@ -40,8 +40,9 @@ const remaining = (at: number, now: number): string => {
  * tunnel (Tailscale Serve, else a Cloudflare Quick Tunnel — the API's `tunnel.ts`)
  * and shows a QR code carrying a one-time pairing code; the phone opens the
  * address and is let in as this computer's owner, using the ChatGPT this computer
- * connected (no extension runs on a phone). On a paired phone the card only says
- * so, and lets the phone leave.
+ * connected (no extension runs on a phone). The computer lists the phones it let
+ * in and can put any of them out. On a paired phone the card only says so, and
+ * lets the phone leave.
  */
 export function DevicePairing() {
   return DEVICE_PAIRING ? <PairingCard /> : null;
@@ -69,6 +70,26 @@ function PairingCard() {
   useEffect(() => {
     apiGet<PhoneAccess>('/api/devices').then(setAccess, (e: unknown) => setError(toMessage(e)));
   }, [toMessage]);
+
+  /** The phones this computer let in; only the computer may ask. */
+  const [phones, setPhones] = useState<PairedPhone[] | null>(null);
+  const loadPhones = useCallback(() => {
+    apiGet<PairedPhone[]>('/api/devices/phones').then(setPhones, (e: unknown) => setError(toMessage(e)));
+  }, [toMessage]);
+  const local = access?.local === true;
+  useEffect(() => {
+    if (local) loadPhones();
+  }, [local, loadPhones]);
+
+  /** Puts one phone out, or all of them: their next request is refused until they pair again. */
+  async function revoke(id?: string): Promise<void> {
+    setBusy(true); setError('');
+    try {
+      await apiDelete(id ? `/api/devices/phones/${id}` : '/api/devices/phones');
+      loadPhones();
+    } catch (e) { setError(toMessage(e)); }
+    finally { setBusy(false); }
+  }
 
   const reachable = (access?.origins.length ?? 0) > 0;
   const tool = access?.available.tailscale ? 'tailscale' : access?.available.cloudflare ? 'cloudflare' : null;
@@ -142,10 +163,55 @@ function PairingCard() {
             </Button>
             {access?.tunnel ? <Button variant="secondary" busy={busy} onClick={() => void close()}>{t('close')}</Button> : null}
           </div>
+          {phones ? <PairedPhones phones={phones} busy={busy} onRevoke={(id) => void revoke(id)} /> : null}
         </>
       )}
       <ErrorText>{error}</ErrorText>
     </section>
+  );
+}
+
+/** The phones paired with this computer, each with the way to put it out — and all of them at once. */
+function PairedPhones({
+  phones,
+  busy,
+  onRevoke,
+}: {
+  phones: readonly PairedPhone[];
+  busy: boolean;
+  /** One phone by id, or every phone without one. */
+  onRevoke: (id?: string) => void;
+}) {
+  const t = useTranslations('devices');
+  const format = useFormatter();
+  const [now] = useState(() => new Date());
+  return (
+    <div data-testid="paired-phones" className="space-y-3 border-t border-line pt-5">
+      <h3 className="heading3">{t('phonesTitle')}</h3>
+      {phones.length === 0 ? (
+        <p className="text-sm text-muted">{t('phonesEmpty')}</p>
+      ) : (
+        <>
+          <ul className="space-y-2">
+            {phones.map((phone) => (
+              <li key={phone.id} data-testid="paired-phone" className="flex items-center gap-3 rounded-xl border border-line px-3 py-2.5">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium">{phoneName(phone.userAgent) ?? t('unknownDevice')}</p>
+                  <p className="text-xs text-muted">
+                    {t('pairedAt', { date: format.dateTime(new Date(phone.pairedAt), { dateStyle: 'medium' }) })} ·{' '}
+                    {t('lastSeen', { time: format.relativeTime(new Date(phone.lastSeenAt), now) })}
+                  </p>
+                </div>
+                <Button size="sm" variant="secondary" busy={busy} onClick={() => onRevoke(phone.id)}>{t('revoke')}</Button>
+              </li>
+            ))}
+          </ul>
+          {phones.length > 1 ? (
+            <Button size="sm" variant="secondary" busy={busy} onClick={() => onRevoke()}>{t('revokeAll')}</Button>
+          ) : null}
+        </>
+      )}
+    </div>
   );
 }
 

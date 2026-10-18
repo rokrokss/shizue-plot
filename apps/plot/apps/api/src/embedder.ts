@@ -45,9 +45,6 @@
  *   unloaded, and the last one to go ends the thread; the next request loads it
  *   again. Measured 2026-10-15 (ARCHITECTURE §12): KURE-v1 or bge-m3 loaded
  *   costs the process about 2 GB (macOS phys_footprint), both about 3.9 GB.
- * - **Or another process's.** With `EMBEDDER_URL`, `deps.embedder` is the
- *   client of one embedder that several instances share (`embedderRemote.ts`):
- *   the same interface, and no model in this process.
  *
  * For tests and development, `EMBEDDER_ROUTING=single` with
  * `EMBEDDER_MODEL=multiMiniLM` runs a light model, and `EMBEDDER=off` none.
@@ -58,7 +55,6 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import type { ContentLanguage } from '@shizue/db';
-import { embedDuration, embedFailures } from './metrics.js';
 
 export interface EmbeddingModelSpec {
   /**
@@ -248,9 +244,8 @@ export interface Embedding {
 
 /**
  * What `embed` throws while the embedder cannot be had for a while — a model
- * whose load failed within the last minute, or a shared embedder that cannot be
- * reached or is shutting down (`embedderRemote.ts`). Its message is all there
- * is to it, and the embedder logged the cause once as it began.
+ * whose load failed within the last minute. Its message is all there is to it,
+ * and the embedder logged the cause once as it began.
  */
 export class EmbedderUnavailable extends Error {}
 
@@ -272,8 +267,6 @@ export interface Embedder {
   warm(plotLanguage: ContentLanguage): void;
   /** Ends every thread and its model; the next call starts them again. */
   close(): Promise<void>;
-  /** How many models the thread holds or is loading, for the metrics (`metrics.ts`); a test's embedder may leave it out. */
-  loadedModels?(): number;
 }
 
 /** Texts per message to the thread: RisuAI embeds 50 at a time; less keeps one batch's padding short. */
@@ -471,10 +464,7 @@ class ServerEmbedder implements Embedder {
     if (!model) throw new Error(`no embedding model for ${plotLanguage}: ${routeOf(this.config.routes, plotLanguage)} was never fetched`);
     if (texts.length === 0) return { model, vectors: [] };
     const state = this.state(model);
-    if (Date.now() < state.failedUntil) {
-      embedFailures.inc({ model, reason: 'unavailable' });
-      throw state.lastError ?? new EmbedderUnavailable('embedder unavailable');
-    }
+    if (Date.now() < state.failedUntil) throw state.lastError ?? new EmbedderUnavailable('embedder unavailable');
     const spec: EmbeddingModelSpec = EMBEDDING_MODELS[model];
     const prefix = kind === 'query' ? spec.queryPrefix : spec.documentPrefix;
     const prefixed = texts.map((text) => prefix + text);
@@ -482,29 +472,16 @@ class ServerEmbedder implements Embedder {
     for (let at = 0; at < prefixed.length; at += BATCH) batches.push(prefixed.slice(at, at + BATCH));
 
     let timer: NodeJS.Timeout | undefined;
-    let late = false;
     const deadline = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        late = true;
-        reject(new Error(`embedding took longer than ${timeoutMs} ms`));
-      }, timeoutMs);
+      timer = setTimeout(() => reject(new Error(`embedding took longer than ${timeoutMs} ms`)), timeoutMs);
       timer.unref();
     });
-    const took = embedDuration.startTimer({ model });
     try {
       const results = await Promise.race([Promise.all(batches.map((batch) => this.request(model, batch))), deadline]);
-      took();
       return { model, vectors: results.flat() };
-    } catch (error) {
-      embedFailures.inc({ model, reason: late ? 'timeout' : 'error' });
-      throw error;
     } finally {
       clearTimeout(timer);
     }
-  }
-
-  loadedModels(): number {
-    return [...this.states.values()].filter((state) => state.loaded).length;
   }
 
   warm(plotLanguage: ContentLanguage): void {

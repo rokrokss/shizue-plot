@@ -11,12 +11,8 @@ import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { AppDeps } from './deps.js';
 import { notFound } from './errors.js';
 
-/** Notes one account may keep. */
-export const MAX_USER_NOTES = 100;
 /** Characters one note may hold. */
 export const MAX_NOTE_LENGTH = 2000;
-/** Notes one chat may have attached. */
-export const MAX_CHAT_NOTES = 10;
 
 /**
  * The notes attached to a chat, oldest note first — the order the prompt uses.

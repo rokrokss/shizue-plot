@@ -12,21 +12,10 @@ import type { ObjectStorage } from './storage.js';
 /** The db handle inside a transaction — same query surface as `Db`. */
 export type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 
-/** The fire-and-forget jobs a finished turn — or a plot's write, or a search — can start. */
-export type BackgroundTaskKind = 'memory' | 'emotion' | 'vectors' | 'aliases' | 'search';
+/** The fire-and-forget jobs a finished turn — or a plot's write — can start. */
+export type BackgroundTaskKind = 'memory' | 'emotion' | 'vectors' | 'aliases';
 
-/**
- * A generation claim this instance holds: the exact `chats.generating_at` it
- * wrote (the identity every renewal and release compares against) and the one
- * renewal allowed in flight at a time, so overlapping heartbeats join rather
- * than race each other.
- */
-export interface GenerationClaim {
-  at: Date;
-  renewing: Promise<void> | null;
-}
-
-/** A generation stream this instance has open (`AppDeps.generationStreams`). */
+/** A generation stream this process has open (`AppDeps.generationStreams`). */
 export interface OpenGeneration {
   /** The chat it answers, which the reader's stop names (`stopChatGeneration`). */
   chatId: string;
@@ -55,19 +44,11 @@ export interface AppDeps {
   /** Environment used for LLM provider gating. */
   env: NodeJS.ProcessEnv;
   /**
-   * Chat ids this instance holds the generation slot for — one concurrent
-   * generation per chat. Only a fast path in front of the claim on `chats`, which
-   * is the authority and the part that holds across API instances.
+   * Chat ids a generation is running on — one at a time per chat. In memory
+   * only: the app is one process, so a restart frees every chat.
    */
   generating: Set<string>;
-  /**
-   * The exact `chats.generating_at` this instance wrote, by chat id — the identity
-   * of the claim it holds. Renewal and release compare against it before they
-   * touch the column, so an instance whose stale claim was taken over by another
-   * cannot write over, or clear, the new holder's.
-   */
-  generationClaims: Map<string, GenerationClaim>;
-  /** The generation streams this instance has open, for the reader's stop and shutdown (`stopChatGeneration`, `stopGenerations`). */
+  /** The generation streams this process has open, for the reader's stop and shutdown (`stopChatGeneration`, `stopGenerations`). */
   generationStreams: Set<OpenGeneration>;
   /** Chat ids with a memory refresh in flight — one concurrent refresh per chat. */
   refreshingMemory: Set<string>;
@@ -89,8 +70,6 @@ export interface AppDeps {
    * stop the reader from sending the turn they were composing.
    */
   suggesting: Set<string>;
-  /** User ids with a plot draft in flight — one draft at a time per creator. */
-  drafting: Set<string>;
   /**
    * The server's text embedder (`embedder.ts`), for the memory's similar
    * summaries and whatever else searches by meaning; absent when it is off or
@@ -100,9 +79,9 @@ export interface AppDeps {
   embedder?: Embedder;
   /**
    * Lua `request`, made by this server for a card script (`scriptFetch.ts`): its
-   * in-flight cap lives here, one per process, and its rate limit in
-   * `rate_limits`, shared by every instance. Defaults to the real network with
-   * the web origin refused; tests hand it a stub DNS and connection.
+   * in-flight cap and RisuAI's rate limit live here, one per process. Defaults
+   * to the real network with the web origin refused; tests hand it a stub DNS
+   * and connection.
    */
   scriptFetch?: ScriptFetch;
   /**
@@ -135,18 +114,10 @@ export interface AppDeps {
    * the two independent jobs apart.
    */
   onBackgroundTask?: (task: Promise<void>, kind: BackgroundTaskKind) => void;
-  /** Set once a shutdown begins: `GET /api/ready` answers 503 from then on (`health.ts`, `index.ts`). */
-  draining?: boolean;
 }
 
 export interface AppEnv {
   Variables: {
-    /**
-     * Who is reading: the owner, on every request past `ownerGate`
-     * (`session.ts`). Typed as it was while readers without an account read
-     * the public surfaces, which still branch on it.
-     */
-    viewerId: string | null;
     /** The owner, whose id every `user_id` column holds; set by `ownerGate` on every request past it. */
     userId: string;
     /** Whether the request came from this computer rather than a paired phone (`requireLocal`). */

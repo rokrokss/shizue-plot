@@ -16,8 +16,7 @@
     "fix:lore-aliases": "tsx src/maintenance/fixLoreAliases.ts",
     "import:postgres": "tsx src/maintenance/importPostgres.ts",
     "embedder:fetch": "tsx src/maintenance/fetchEmbedder.ts",
-    "embedder:publish": "tsx src/maintenance/publishEmbedder.ts",
-    "embedder:serve": "tsx src/embedderServe.ts"
+    "embedder:publish": "tsx src/maintenance/publishEmbedder.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1105.0",
@@ -25,7 +24,6 @@
     "@aws-sdk/s3-request-presigner": "3.1106.0",
     "@hono/node-server": "^2.1.0",
     "@huggingface/transformers": "3.8.1",
-    "@prometheus-io/client": "^0.16.1",
     "@shizue/contracts": "workspace:*",
     "@shizue/core": "workspace:*",
     "@shizue/db": "workspace:*",

@@ -32,7 +32,6 @@ import {
   MAX_INTRO_LENGTH,
   MAX_INTRO_TEXT_LENGTH,
   MAX_INTROS_PER_PLOT,
-  MAX_READER_PRESETS,
   MAX_VARIABLE_VALUE_LENGTH,
   FACT_EXTRACTION_PROMPT,
   FACTS_HEADING,
@@ -72,33 +71,24 @@ import {
   characters,
   chatAttachments,
   chats,
-  chatNoteLinks,
   chatSummaries,
   chatSummaryChunks,
-  comments,
   migrateDb,
   openDb,
   type OpenedDb,
   fileImportKeys,
   fileImports,
-  follows,
   jobs,
-  leases,
   loreEntryAliases,
   messageChunks,
   memories,
   messages,
   messageTranslations,
-  notifications,
   plots,
   plotAssets,
-  plotSearchVectors,
-  rateLimits,
   readerModules,
-  readerPresets,
   session,
   user,
-  userNotes,
   verification,
   type ContentLanguage,
   type Db,
@@ -113,9 +103,9 @@ import {
   type StreamDelta,
   type StreamDone,
 } from '@shizue/llm';
-import { and, asc, desc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull } from 'drizzle-orm';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { format } from 'node:util';
@@ -139,13 +129,7 @@ import { createSessionStore, ensureOwner } from '../src/session.js';
 import type { AppDeps, AppEnv } from '../src/deps.js';
 import { createPhoneAccess, type TunnelTools } from '../src/tunnel.js';
 import { loadRootEnv } from '../src/env.js';
-import {
-  acquireChatSlot,
-  releaseChatSlot,
-  renewChatSlot,
-  stopGenerations,
-  TAVERN_BIAS_NUDGE,
-} from '../src/generation.js';
+import { stopGenerations, TAVERN_BIAS_NUDGE } from '../src/generation.js';
 import {
   drainJobs,
   enqueueJob,
@@ -158,15 +142,12 @@ import {
 import type { Embedder } from '../src/embedder.js';
 import { extractFacts } from '../src/facts.js';
 import { BACKFILL_BATCHES_PER_RUN, embedPendingSummaries } from '../src/memory.js';
-import { refreshSearchVectors, resetSearchSweeps } from '../src/search.js';
-import { createJobHandlers, notificationFanout } from '../src/notifications.js';
+import { createJobHandlers } from '../src/jobHandlers.js';
 import { repairDisplayOrder } from '../src/maintenance/displayOrder.js';
 import { repairMemberScripts } from '../src/maintenance/memberScripts.js';
 import { FILE_IMPORT_PART_BYTES, MAX_WORLD_INFO_BYTES, runFileImport, sweepFileImports } from '../src/fileImports.js';
 import { localizePlot, type RemoteFetch } from '../src/localizeAssets.js';
-import { acquireLease, releaseLease, renewLease as renewHeldLease, withLease } from '../src/leases.js';
 import { MAX_ASSET_NAME_LENGTH, MAX_CARD_IMPORT_BYTES } from '../src/routes/plots.js';
-import { hitRateLimit, RATE_LIMITS } from '../src/rateLimit.js';
 import { runRequestLua } from '../src/requestLua.js';
 import { runRequestTriggers } from '../src/requestTriggers.js';
 import { createScriptFetch, type HopResponse, type Transport } from '../src/scriptFetch.js';
@@ -257,15 +238,15 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await client.exec(`TRUNCATE TABLE memories, chat_attachments, messages, chat_note_links, user_notes, plot_reader_variables, plot_reader_overlays, chats, personas, comments, plot_likes, plot_assets, characters, notifications, follows, plots, feed_cursors, jobs, rate_limits, leases, "session", account, verification, "user" RESTART IDENTITY CASCADE`);
+  await client.exec(`TRUNCATE TABLE memories, chat_attachments, messages, chat_note_links, user_notes, plot_reader_variables, chats, personas, plot_assets, characters, plots, jobs, "session", account, verification, "user" RESTART IDENTITY CASCADE`);
   app = makeApp();
   jobHandlers = createJobHandlers(makeDeps());
 });
 
 /**
- * One API instance's dependencies. Two of these are two instances: they share the
- * database and the store, and nothing else — which is what the generation claim
- * has to hold across.
+ * The app's dependencies. Two of these are two starts of the app on the same
+ * folder: they share the database and the store, and nothing in memory — which
+ * is what a restart leaves.
  */
 function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps {
   return {
@@ -273,13 +254,11 @@ function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps {
     storage,
     env: {},
     generating: new Set<string>(),
-    generationClaims: new Map(),
     generationStreams: new Set(),
     refreshingMemory: new Set<string>(),
     detectingEmotion: new Set<string>(),
     embeddingVectors: new Map(),
     suggesting: new Set<string>(),
-    drafting: new Set<string>(),
     // No test reaches another host: what a card loads from one is simply not brought in.
     remoteFetch: async () => {
       throw new Error('no network in the API tests');
@@ -326,6 +305,9 @@ function expectRecallAfter(prompt: { messages: ChatRequest['messages'] }, said: 
 
 /** The dependencies each app a test made runs on, for the import jobs it starts (`fileImport`). */
 const depsOfApp = new WeakMap<Hono<AppEnv>, AppDeps>();
+
+/** Whether a generation holds the chat's slot on `target`'s deps — the only place the slot is kept. */
+const generatingOn = (chatId: string, target: Hono<AppEnv> = app): boolean => depsOfApp.get(target)!.generating.has(chatId);
 
 /** An app on `deps`, remembered so a file import through it runs its job on the same ones. */
 function createApp(deps: AppDeps): Hono<AppEnv> {
@@ -539,17 +521,6 @@ async function readSse(res: Response): Promise<SseEvent[]> {
     });
 }
 
-/** Hand-built pagination cursor — the encoding every opaque cursor shares. */
-const encodeCursor = (payload: unknown): string =>
-  Buffer.from(JSON.stringify(payload), 'utf-8').toString('base64url');
-
-/**
- * Stamps a timestamp column with microsecond precision. Postgres stores it, but
- * a JS Date cannot hold it, so this is the state a cursor round trip has to
- * survive without the driver ever handing the value back intact.
- */
-const microsecond = (fraction: string): string => `2027-01-01 00:00:00.${fraction}+00`;
-
 /** Polls until `check` holds; the fire-and-forget work a request starts has no handle. */
 async function until(check: () => Promise<boolean>, what: string): Promise<void> {
   for (let i = 0; i < 200; i += 1) {
@@ -557,15 +528,6 @@ async function until(check: () => Promise<boolean>, what: string): Promise<void>
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(what);
-}
-
-/**
- * The chat's generation claim as the row holds it. This is the guard's authority —
- * the in-process set is only a fast path — so it is what the tests read.
- */
-async function claimOf(chatId: string): Promise<Date | null> {
-  const [row] = await db.select({ at: chats.generatingAt }).from(chats).where(eq(chats.id, chatId));
-  return row?.at ?? null;
 }
 
 /** Imports a card file as the plot that wraps it; the owner view comes back. */
@@ -584,8 +546,7 @@ async function importCard(cookie: string, file: File): Promise<any> {
  * read — answered as the import's route answered when the file came in its
  * body: 201 and the same body, or the error the import ended with. `path` is
  * that route, which says what the file is imported as; the form is what it
- * took (`file`, `sourceUrl`, `rightsConfirmed`, `worldInfo`,
- * `confirmLowLevelAccess`).
+ * took (`file`, `sourceUrl`, `worldInfo`, `confirmLowLevelAccess`).
  */
 async function fileImport(
   cookie: string | undefined,
@@ -621,7 +582,6 @@ async function fileImport(
       ...kind,
       ...(file instanceof File ? { fileName: file.name, size: bytes!.length } : {}),
       ...(form.has('sourceUrl') ? { sourceUrl: field('sourceUrl') ?? null } : {}),
-      ...(field('rightsConfirmed') === 'true' ? { rightsConfirmed: true } : {}),
       ...(field('confirmLowLevelAccess') === 'true' ? { confirmLowLevelAccess: true } : {}),
       ...(world !== null ? { worldInfo: typeof world === 'string' ? world : await world.text() } : {}),
     },
@@ -731,16 +691,12 @@ const firstMember = async (cookie: string, plotId: string): Promise<any> =>
 const readPlot = async (cookie: string, id: string): Promise<any> =>
   readJson(await request(cookie, `/api/plots/${id}`));
 
-/** The public page of a plot, as any reader gets it. */
+/** The plot as it is played: the work page's and the chat's view (`/public`). */
 const readPublicPlot = async (cookie: string | undefined, id: string): Promise<any> =>
   readJson(await request(cookie, `/api/plots/${id}/public`));
 
-/**
- * A plot carrying everything a publish needs, with one member on it. The two
- * defaults are what `requirePublishable` asks for: a setting for the model and
- * at least one opening for the reader.
- */
-async function publishablePlot(
+/** A plot with one member on it, a setting for the model and an opening for the reader. */
+async function playablePlot(
   cookie: string,
   plot: Record<string, unknown> = {},
   character: Record<string, unknown> = {},
@@ -748,23 +704,6 @@ async function publishablePlot(
   const created = await createPlot(cookie, { description: '설명', intros: ['안녕'], ...plot });
   await addCharacter(cookie, created.id, character);
   return readPlot(cookie, created.id);
-}
-
-/**
- * Publishes a plot, which is what puts it in front of anyone else — and runs the
- * queue afterwards, since the follower fan-out a publish enqueues is what the
- * notification tests are looking at. A publish with nothing to announce drains
- * nothing.
- */
-async function publishPlot(
-  cookie: string,
-  id: string,
-  body: Record<string, unknown> = {},
-): Promise<any> {
-  const res = await json(cookie, `/api/plots/${id}/publish`, 'POST', { publish: true, ...body });
-  expect(res.status, await res.clone().text()).toBe(200);
-  await drainJobs(db, jobHandlers);
-  return readJson(res);
 }
 
 /** Starts a chat on a plot; the initial state comes back. */
@@ -1008,9 +947,8 @@ describe('the local owner gate', () => {
     expect(await readJson(await request(undefined, '/api/chatgpt'))).toEqual({ connected: false, email: null, local: true });
   });
 
-  it('answers the probes before anyone is known', async () => {
+  it('answers the probe before anyone is known', async () => {
     expect((await ask(app, '/api/health', FROM_TUNNEL, '203.0.113.5')).status).toBe(200);
-    expect((await ask(app, '/api/ready', FROM_TUNNEL, '203.0.113.5')).status).toBe(200);
     expect(await db.select().from(user)).toHaveLength(0);
   });
 
@@ -1418,6 +1356,59 @@ describe('pairing a phone', () => {
     expect(await db.select().from(session)).toHaveLength(1);
   });
 
+  it('lists the paired phones to this computer, and a phone it lets go is answered 401', async () => {
+    const target = localApp();
+    const pairPhone = async (userAgent: string): Promise<string> => {
+      const { code } = await readJson(await json(undefined, '/api/devices/pair', 'POST', undefined, target));
+      const joined = await target.request('/api/devices/claim', {
+        method: 'POST',
+        headers: { ...FROM_TUNNEL, 'content-type': 'application/json', 'user-agent': userAgent },
+        body: JSON.stringify({ code }),
+      }, { incoming: { socket: { remoteAddress: '127.0.0.1' } } });
+      expect(joined.status).toBe(204);
+      return cookieOf(joined);
+    };
+    const IPHONE = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)';
+    const PIXEL = 'Mozilla/5.0 (Linux; Android 15; Pixel 9)';
+    const phone = await pairPhone(IPHONE);
+    const tablet = await pairPhone(PIXEL);
+    const phones = async (): Promise<any[]> => readJson(await request(undefined, '/api/devices/phones', 'GET', undefined, target));
+
+    const listed = await phones();
+    expect(listed.map((one) => one.userAgent).sort()).toEqual([PIXEL, IPHONE].sort());
+    for (const one of listed) {
+      // The session's id without its mark; the cookie's digest stays in the table.
+      expect(one.id).not.toMatch(/^paired:/);
+      expect(Object.keys(one).sort()).toEqual(['id', 'lastSeenAt', 'pairedAt', 'userAgent']);
+    }
+    // Only this computer lists them, or lets them go.
+    for (const [method, path] of [['GET', '/api/devices/phones'], ['DELETE', '/api/devices/phones'], ['DELETE', `/api/devices/phones/${listed[0].id}`]] as const) {
+      const refused = await fromPhone(target, path, phone, method);
+      expect(refused.status, `${method} ${path}`).toBe(403);
+      expect(await readJson(refused)).toMatchObject({ code: 'local_only' });
+    }
+    expect(await db.select().from(session)).toHaveLength(2);
+
+    // A phone's request notes it as seen — once a minute at most.
+    await db.update(session).set({ updatedAt: new Date(Date.now() - 5 * 60_000) });
+    expect((await fromPhone(target, '/api/chats', tablet)).status).toBe(200);
+    const seen = new Map((await phones()).map((one) => [one.userAgent, Date.now() - Date.parse(one.lastSeenAt)]));
+    expect(seen.get(PIXEL)!).toBeLessThan(60_000);
+    expect(seen.get(IPHONE)!).toBeGreaterThan(4 * 60_000);
+
+    // One let go: its next request is a stranger's, and the other stays in.
+    const phoneId = listed.find((one) => one.userAgent === IPHONE).id;
+    expect((await request(undefined, `/api/devices/phones/${phoneId}`, 'DELETE', undefined, target)).status).toBe(204);
+    expect((await fromPhone(target, '/api/chats', phone)).status).toBe(401);
+    expect((await fromPhone(target, '/api/chats', tablet)).status).toBe(200);
+    expect((await request(undefined, `/api/devices/phones/${phoneId}`, 'DELETE', undefined, target)).status).toBe(404);
+
+    // Every phone let go at once.
+    expect((await request(undefined, '/api/devices/phones', 'DELETE', undefined, target)).status).toBe(204);
+    expect((await fromPhone(target, '/api/chats', tablet)).status).toBe(401);
+    expect(await phones()).toEqual([]);
+  });
+
   /** The API with the origin guard on, as it runs on this computer. */
   const guarded = () => {
     const deps = { webOrigin: 'http://localhost:13000' };
@@ -1524,17 +1515,11 @@ describe('plots', () => {
       intro: '다섯 길드가 나눠 다스리는 도시.',
       description: '마법이 흔한 도시국가.',
       language: 'ja',
-      visibility: 'private',
-      safetyLevel: 'all',
-      commentsEnabled: true,
       intros: [],
       tags: [],
       narrator: null,
       customUi: null,
       coverUrl: null,
-      likeCount: 0,
-      chatCount: 0,
-      publishedAt: null,
     });
 
     expect((await readJson(await request(cookie, '/api/plots'))).map((row: any) => row.id)).toEqual([
@@ -1544,18 +1529,15 @@ describe('plots', () => {
       id: created.id,
       name: '아르카디아',
       characters: [],
-      commentCount: 0,
     });
 
     const updated = await patchPlot(cookie, created.id, {
       name: '새 이름',
       description: '고친 설명',
-      commentsEnabled: false,
     });
     expect(updated).toMatchObject({
       name: '새 이름',
       description: '고친 설명',
-      commentsEnabled: false,
       // Untouched fields stay put.
       intro: '다섯 길드가 나눠 다스리는 도시.',
     });
@@ -1690,13 +1672,12 @@ describe('plots', () => {
     expect((await json(cookie, `/api/plots/${created.id}`, 'PATCH', { style: [] })).status).toBe(400);
   });
 
-  it('shows the style on the public page, options and nothing else', async () => {
+  it('shows the style on the work page, options and nothing else', async () => {
     const cookie = await signUp('plot-style-public@example.com');
-    const plot = await publishablePlot(cookie, {
+    const plot = await playablePlot(cookie, {
       style: { difficulty: 'hard', moods: ['horror'], statusWindow: true, choices: 'sentences' },
       narrator: { voice: '건조한 관찰자의 목소리', pov: 'third' },
     });
-    await publishPlot(cookie, plot.id);
 
     // The badge data a reader decides on, plus what the chat page needs to know
     // which of its own toggles are worth offering. Never the compiled directives.
@@ -2008,37 +1989,6 @@ describe('plots', () => {
     expect((await readJson(res)).loreConstantTokens).toBe(countTokens('리안의 서고.'));
   });
 
-  it('publishes, gates on the basics and unpublishes', async () => {
-    const alice = await signUp('publish@example.com');
-    const bare = await createPlot(alice, { name: '빈 작품' });
-
-    // Neither a setting nor anyone described: nothing for the model to play.
-    const refused = await json(alice, `/api/plots/${bare.id}/publish`, 'POST', { publish: true });
-    expect(refused.status).toBe(400);
-    expect((await readJson(refused)).code).toBe('not_publishable');
-    expect((await readPlot(alice, bare.id)).visibility).toBe('private');
-
-    // An opening is no substance on its own, and a description of whitespace is none.
-    await patchPlot(alice, bare.id, { intros: ['안녕'] });
-    await addCharacter(alice, bare.id, { name: '리안', card: { description: '   ' } });
-    expect((await json(alice, `/api/plots/${bare.id}/publish`, 'POST', { publish: true })).status).toBe(400);
-
-    // The setting alone is enough — a chat may open on the reader's own message.
-    const setting = await createPlot(alice, { name: '세계관만', description: '설명만 있음' });
-    expect((await publishPlot(alice, setting.id)).visibility).toBe('public');
-
-    // So is a member's description, which is where an imported card keeps its
-    // character when it has no scenario to lend the plot.
-    await addCharacter(alice, bare.id, { name: '세라', card: { description: '기사단장.' } });
-    const published = await publishPlot(alice, bare.id);
-    expect(published.visibility).toBe('public');
-    expect(published.publishedAt).toEqual(expect.any(String));
-
-    // Unpublishing an unpublishable plot is always allowed, and `publish` is
-    // required rather than defaulted.
-    expect((await json(alice, `/api/plots/${bare.id}/publish`, 'POST', { publish: false })).status).toBe(200);
-    expect((await json(alice, `/api/plots/${bare.id}/publish`, 'POST', {})).status).toBe(400);
-  });
 });
 
 describe('plot characters', () => {
@@ -2281,7 +2231,7 @@ describe('plot characters', () => {
   });
 });
 
-describe('import provenance and publishing rights', () => {
+describe('import provenance', () => {
   /** A V2 card as RisuRealm serves one, with its creator and license on it. */
   const realmCard = (license: string) => ({
     ...v2Card,
@@ -2322,10 +2272,7 @@ describe('import provenance and publishing rights', () => {
       importedAt: expect.any(String),
     });
     expect(Date.parse(member.importedFrom.importedAt)).toBeGreaterThanOrEqual(before - 1000);
-    expect(member.license).toBe('CC BY-NC-ND 4.0');
     expect(member.card.creator).toBe('원작자');
-    // A new plot is private, and nobody has vouched for anything yet.
-    expect(plot).toMatchObject({ visibility: 'private', rightsConfirmedAt: null });
 
     // A bare id is a page too; a file with no page says nothing about one.
     const path = `/api/plots/${plot.id}/characters/import`;
@@ -2334,12 +2281,8 @@ describe('import provenance and publishing rights', () => {
     const bare = await readJson(await importWith(cookie, path, cardFile()));
     expect(bare.importedFrom).toMatchObject({ fileName: 'lian.json', sha256: expect.any(String) });
     expect(bare.importedFrom.sourceUrl).toBeUndefined();
-    expect(bare.license).toBeNull();
-    // A member the studio made has no record and no license.
-    expect(await addCharacter(cookie, plot.id, { name: '세라' })).toMatchObject({
-      importedFrom: null,
-      license: null,
-    });
+    // A member the studio made has no record.
+    expect(await addCharacter(cookie, plot.id, { name: '세라' })).toMatchObject({ importedFrom: null });
 
     const roster = await readJson(await request(cookie, `/api/plots/${plot.id}/characters`));
     expect(roster.map((one: any) => one.importedFrom?.sourceUrl ?? null)).toEqual([
@@ -2434,74 +2377,6 @@ describe('import provenance and publishing rights', () => {
     expect(await readJson(await request(cookie, '/api/plots'))).toHaveLength(2);
   });
 
-  it('publishes imported characters only on the owner’s word, and stamps when it was given', async () => {
-    const cookie = await signUp('rights-publish@example.com');
-    const plot = await importCard(cookie, cardFile());
-    const path = `/api/plots/${plot.id}/publish`;
-
-    for (const body of [{ publish: true }, { publish: true, rightsConfirmed: false }]) {
-      const refused = await json(cookie, path, 'POST', body);
-      expect(refused.status).toBe(409);
-      expect((await readJson(refused)).code).toBe('rights_unconfirmed');
-    }
-    expect((await json(cookie, path, 'POST', { publish: true, rightsConfirmed: 'yes' })).status).toBe(400);
-    expect(await readPlot(cookie, plot.id)).toMatchObject({
-      visibility: 'private',
-      publishedAt: null,
-      rightsConfirmedAt: null,
-    });
-
-    const before = Date.now();
-    const published = await publishPlot(cookie, plot.id, { rightsConfirmed: true });
-    expect(published.visibility).toBe('public');
-    expect(Date.parse(published.rightsConfirmedAt)).toBeGreaterThanOrEqual(before - 1000);
-
-    // Taking it down asks for nothing, and keeps the record of the word given.
-    const hidden = await readJson(await json(cookie, path, 'POST', { publish: false }));
-    expect(hidden).toMatchObject({
-      visibility: 'private',
-      rightsConfirmedAt: published.rightsConfirmedAt,
-    });
-  });
-
-  it('leaves a plot of studio-made members publishing as it always has', async () => {
-    const cookie = await signUp('rights-studio@example.com');
-    const plot = await publishablePlot(cookie);
-    expect(await publishPlot(cookie, plot.id)).toMatchObject({
-      visibility: 'public',
-      rightsConfirmedAt: null,
-    });
-
-    // The question follows the roster: with its imported member gone, a plot is
-    // made of the owner's own characters again.
-    const imported = await importCard(cookie, cardFile());
-    await addCharacter(cookie, imported.id, { name: '세라' });
-    const memberPath = `/api/plots/${imported.id}/characters/${imported.characters[0].id}`;
-    expect((await request(cookie, memberPath, 'DELETE')).status).toBe(204);
-    expect((await publishPlot(cookie, imported.id)).visibility).toBe('public');
-  });
-
-  it('asks the same of an import into a plot that is already public', async () => {
-    const cookie = await signUp('rights-import@example.com');
-    const plot = await publishablePlot(cookie);
-    await publishPlot(cookie, plot.id);
-    const path = `/api/plots/${plot.id}/characters/import`;
-
-    for (const fields of [{}, { rightsConfirmed: 'false' }] as Record<string, string>[]) {
-      const refused = await importWith(cookie, path, cardFile(), fields);
-      expect(refused.status).toBe(409);
-      expect((await readJson(refused)).code).toBe('rights_unconfirmed');
-    }
-    expect(await readPlot(cookie, plot.id)).toMatchObject({ rightsConfirmedAt: null });
-    expect((await readPlot(cookie, plot.id)).characters).toHaveLength(1);
-
-    const before = Date.now();
-    const joined = await importWith(cookie, path, cardFile(), { rightsConfirmed: 'true' });
-    expect(joined.status, await joined.clone().text()).toBe(201);
-    const after = await readPlot(cookie, plot.id);
-    expect(after.characters).toHaveLength(2);
-    expect(Date.parse(after.rightsConfirmedAt)).toBeGreaterThanOrEqual(before - 1000);
-  });
 
   it(`takes a card the size Realm serves, and refuses one over ${MAX_CARD_IMPORT_BYTES} bytes`, async () => {
     const cookie = await signUp('import-size@example.com');
@@ -2572,7 +2447,7 @@ describe('paste migration', () => {
     return (await readJson(res)).code;
   }
 
-  it('creates a private plot with its roster in order, every member recording the paste', async () => {
+  it('creates a plot with its roster in order, every member recording the paste', async () => {
     const cookie = await signUp('migrate@example.com');
     const draft = zetaDraft();
     const before = Date.now();
@@ -2580,7 +2455,7 @@ describe('paste migration', () => {
     expect(res.status, await res.clone().text()).toBe(201);
     const plot = await readJson(res);
 
-    // The owner view a create answers, made private whatever the source rated it.
+    // The owner view a create answers.
     expect(plot).toMatchObject({
       name: '비 오는 서점',
       intro: '비가 그치지 않는 서점의 이야기.',
@@ -2589,10 +2464,6 @@ describe('paste migration', () => {
       intros: ['세라: "어서 오세요."\n종이 울린다.'],
       narrator: { pov: 'third' },
       style: { tense: 'past' },
-      visibility: 'private',
-      safetyLevel: 'all',
-      publishedAt: null,
-      rightsConfirmedAt: null,
     });
     expect(plot.lorebook).toMatchObject([{ keys: ['자정'], content: '자정이 지나면 책이 말을 한다.', enabled: true }]);
     expect(plot.profiles).toMatchObject([{ id: expect.any(String), name: '단골', description: '매주 오는 손님' }]);
@@ -2648,20 +2519,6 @@ describe('paste migration', () => {
     expect((await readJson(await json(alice, '/api/imports/lookup', 'POST', { sha256: [other] }))).characters).toEqual([]);
   });
 
-  it('publishes a migrated plot only on the owner’s word, as an imported card', async () => {
-    const cookie = await signUp('migrate-rights@example.com');
-    const plot = await readJson(await migrate(cookie, {}));
-    const path = `/api/plots/${plot.id}/publish`;
-
-    const refused = await json(cookie, path, 'POST', { publish: true });
-    expect(refused.status).toBe(409);
-    expect((await readJson(refused)).code).toBe('rights_unconfirmed');
-    expect((await readPlot(cookie, plot.id)).visibility).toBe('private');
-
-    const published = await publishPlot(cookie, plot.id, { rightsConfirmed: true });
-    expect(published.visibility).toBe('public');
-    expect(published.rightsConfirmedAt).not.toBeNull();
-  });
 
   it('asks the creator’s word before anything else, and refuses a platform it does not take', async () => {
     const cookie = await signUp('migrate-refusals@example.com');
@@ -3019,14 +2876,16 @@ describe('personas', () => {
 
 describe('notes', () => {
   /** Caps from docs/ARCHITECTURE.md Chunk 11 — enforced by the API. */
-  const MAX_NOTES = 100;
   const MAX_LENGTH = 2000;
-  const MAX_PER_CHAT = 10;
 
   const createNote = async (cookie: string, body: Record<string, unknown>): Promise<any> => {
     const res = await json(cookie, '/api/notes', 'POST', body);
     expect(res.status, await res.clone().text()).toBe(201);
-    return readJson(res);
+    const note = await readJson(res);
+    // PGlite's clock counts milliseconds, and notes are listed in the order they
+    // were made: the next one is made a tick later.
+    while (Date.now() <= Date.parse(note.createdAt)) await new Promise((resolve) => setTimeout(resolve, 1));
+    return note;
   };
 
   it('supports CRUD and filters by group', async () => {
@@ -3053,100 +2912,15 @@ describe('notes', () => {
     expect(await readJson(await request(cookie, '/api/notes'))).toHaveLength(1);
   });
 
-  it('caps the note length and the number of notes per account', async () => {
+  it('caps the note length, and nothing else', async () => {
     const cookie = await signUp('note-cap@example.com');
     const tooLong = await json(cookie, '/api/notes', 'POST', { content: 'ㄱ'.repeat(MAX_LENGTH + 1) });
     expect(tooLong.status).toBe(400);
     expect((await readJson(tooLong)).code).toBe('note_limit');
-    // Exactly at the cap is fine.
+    // Exactly at the cap is fine, and there is no count to fill: one person's notes are theirs.
     await createNote(cookie, { content: 'ㄱ'.repeat(MAX_LENGTH) });
-
-    // Fill the account up directly; the endpoint only has to reject the next one.
-    const session = { user: { id: await ownerId() } };
-    await db.insert(userNotes).values(
-      Array.from({ length: MAX_NOTES - 1 }, (_, index) => ({
-        userId: session.user.id as string,
-        content: `채우기 ${index}`,
-      })),
-    );
-    const overflow = await json(cookie, '/api/notes', 'POST', { content: '한 개 더' });
-    expect(overflow.status).toBe(400);
-    expect((await readJson(overflow)).code).toBe('note_limit');
-
-    // An existing note can still be edited past the cap.
-    const [existing] = await db.select().from(userNotes).where(eq(userNotes.userId, session.user.id));
-    expect((await json(cookie, `/api/notes/${existing!.id}`, 'PUT', { content: '수정' })).status).toBe(200);
-  });
-
-  it('holds the account cap against a concurrent create', async () => {
-    const cookie = await signUp('note-race@example.com');
-    const session = { user: { id: await ownerId() } };
-    const userId = session.user.id as string;
-    // 99 rows straight into the table — the route only counts them.
-    await db.insert(userNotes).values(
-      Array.from({ length: MAX_NOTES - 1 }, (_, index) => ({ userId, content: `채우기 ${index}` })),
-    );
-
-    // A competing transaction takes the account lock, inserts the 100th note and
-    // holds it. The create has to queue behind it and then see a full account;
-    // without the lock it would count 99 (the row is still uncommitted) and store
-    // a 101st note.
-    let open!: () => void;
-    const held = new Promise<void>((resolve) => {
-      open = resolve;
-    });
-    const holder = db.transaction(async (tx) => {
-      await tx.select({ id: user.id }).from(user).where(eq(user.id, userId)).for('update');
-      await tx.insert(userNotes).values({ userId, content: '경쟁 노트' });
-      await held;
-    });
-
-    const inFlight = json(cookie, '/api/notes', 'POST', { content: '한 개 더' });
-    // Long enough that an unlocked create would have finished by now.
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    open();
-    await holder;
-
-    const res = await inFlight;
-    expect(res.status, await res.clone().text()).toBe(400);
-    expect((await readJson(res)).code).toBe('note_limit');
-    expect(await readJson(await request(cookie, '/api/notes'))).toHaveLength(MAX_NOTES);
-  });
-
-  it('holds the per-chat cap against a concurrent attach', async () => {
-    const cookie = await signUp('note-attach-race@example.com');
-    const { chatId } = await setupChat(cookie);
-    const ids: string[] = [];
-    for (let index = 0; index < MAX_PER_CHAT + 1; index += 1) {
-      ids.push((await createNote(cookie, { content: `노트 ${index}` })).id);
-    }
-    await db
-      .insert(chatNoteLinks)
-      .values(ids.slice(0, MAX_PER_CHAT - 1).map((noteId) => ({ chatId, noteId })));
-
-    // Same race as the account cap, on the chat row: the tenth link is inserted
-    // and held, so the attach must queue and then find the chat full.
-    let open!: () => void;
-    const held = new Promise<void>((resolve) => {
-      open = resolve;
-    });
-    const holder = db.transaction(async (tx) => {
-      await tx.select({ id: chats.id }).from(chats).where(eq(chats.id, chatId)).for('update');
-      await tx.insert(chatNoteLinks).values({ chatId, noteId: ids[MAX_PER_CHAT - 1]! });
-      await held;
-    });
-
-    const inFlight = json(cookie, `/api/chats/${chatId}/notes/${ids.at(-1)}`, 'POST');
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    open();
-    await holder;
-
-    const res = await inFlight;
-    expect(res.status, await res.clone().text()).toBe(400);
-    expect((await readJson(res)).code).toBe('note_limit');
-    expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.noteIds).toHaveLength(
-      MAX_PER_CHAT,
-    );
+    for (let index = 0; index < 101; index += 1) await createNote(cookie, { content: `노트 ${index}` });
+    expect(await readJson(await request(cookie, '/api/notes'))).toHaveLength(102);
   });
 
   it('attaches notes to a chat and injects them after the chat note', async () => {
@@ -3190,25 +2964,6 @@ describe('notes', () => {
     expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.noteIds).toEqual([]);
   });
 
-  it('caps the notes attached to one chat', async () => {
-    const cookie = await signUp('note-chat-cap@example.com');
-    const { chatId } = await setupChat(cookie);
-
-    const ids: string[] = [];
-    for (let index = 0; index < MAX_PER_CHAT + 1; index += 1) {
-      ids.push((await createNote(cookie, { content: `노트 ${index}` })).id);
-    }
-    for (const id of ids.slice(0, MAX_PER_CHAT)) {
-      expect((await json(cookie, `/api/chats/${chatId}/notes/${id}`, 'POST')).status).toBe(200);
-    }
-
-    const overflow = await json(cookie, `/api/chats/${chatId}/notes/${ids.at(-1)}`, 'POST');
-    expect(overflow.status).toBe(400);
-    expect((await readJson(overflow)).code).toBe('note_limit');
-    // Detaching one makes room again.
-    await request(cookie, `/api/chats/${chatId}/notes/${ids[0]}`, 'DELETE');
-    expect((await json(cookie, `/api/chats/${chatId}/notes/${ids.at(-1)}`, 'POST')).status).toBe(200);
-  });
 
   it('refuses to attach a note that is not there', async () => {
     const alice = await signUp('note-attach-a@example.com');
@@ -3545,32 +3300,28 @@ describe('chats', () => {
     expect((await readJson(await request(cookie, `/api/chats/${second.chatId}`))).path).toHaveLength(1);
   });
 
-  it('refuses to prune while the chat is generating, and prunes once the claim is gone', async () => {
+  it('refuses to prune while the chat is generating, and prunes once it is done', async () => {
     const cookie = await signUp('delete-vs-generation@example.com');
     const { chatId } = await setupChat(cookie);
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
     const messageId = state.path[0].id;
 
-    // A live claim: the delete would race the rows the stream is adding.
-    await db.update(chats).set({ generatingAt: new Date() }).where(eq(chats.id, chatId));
+    // A generation running: the delete would race the rows the stream is adding.
+    depsOfApp.get(app)!.generating.add(chatId);
     const busy = await request(cookie, `/api/chats/${chatId}/messages/${messageId}`, 'DELETE');
     expect(busy.status).toBe(429);
     expect((await readJson(busy)).code).toBe('generation_in_progress');
-    // …and the refusal did not eat the claim it bounced off.
-    expect(await claimOf(chatId)).not.toBeNull();
+    // …and the refusal did not take the slot it bounced off.
+    expect(generatingOn(chatId)).toBe(true);
 
-    // A stale claim is a crashed instance's, not a stream's: reclaimed and pruned.
-    await db
-      .update(chats)
-      .set({ generatingAt: new Date(Date.now() - 3 * 60 * 1000) })
-      .where(eq(chats.id, chatId));
+    depsOfApp.get(app)!.generating.delete(chatId);
     const gone = await request(cookie, `/api/chats/${chatId}/messages/${messageId}`, 'DELETE');
     expect(gone.status).toBe(200);
     // The chat opens on another intro, and the slot the delete took on its
     // way through is released again.
     const after = await readJson(gone);
     expect(after.path.some((message: any) => message.id === messageId)).toBe(false);
-    expect(await claimOf(chatId)).toBeNull();
+    expect(generatingOn(chatId)).toBe(false);
   });
 
   it('lists the chats newest first, with the plot cover and how each one reads', async () => {
@@ -3674,11 +3425,11 @@ describe('chats', () => {
     });
 
     // A generation running holds the slot, and the setting waits for it like any other.
-    await db.update(chats).set({ generatingAt: new Date() }).where(eq(chats.id, chatId));
+    depsOfApp.get(withKey)!.generating.add(chatId);
     const busy = await patch({ subModel: null });
     expect(busy.status).toBe(409);
     expect((await readJson(busy)).code).toBe('generation_in_progress');
-    await db.update(chats).set({ generatingAt: null }).where(eq(chats.id, chatId));
+    depsOfApp.get(withKey)!.generating.delete(chatId);
 
     expect((await readJson(await patch({ subModel: null }))).chat.subModel).toBeNull();
     expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.subModel).toBeNull();
@@ -3686,7 +3437,7 @@ describe('chats', () => {
 
   it('opens a chat with an auxiliary model held to the same rules as the PATCH', async () => {
     const cookie = await signUp('sub-model-start@example.com');
-    const plot = await publishablePlot(cookie, { profiles: [{ name: '기사', description: '왕국의 기사.' }] });
+    const plot = await playablePlot(cookie, { profiles: [{ name: '기사', description: '왕국의 기사.' }] });
     const [profile] = plot.profiles;
     const withKey = makeApp({ env: { SHIZUE_TEST_MODELS: '1' } });
     const start =(body: Record<string, unknown>, target: Hono<AppEnv> = withKey) =>
@@ -4248,15 +3999,13 @@ describe('chats', () => {
     expect(prompts[2]!.system).toContain('[Roleplay Setting]\n왕립 도서관의 사서.');
   });
 
-  it("shows the plot's creator what a regenerate would send", async () => {
+  it('shows what a regenerate would send, always', async () => {
     const owner = await signUp('inspect-owner@example.com');
-    const plot = await publishablePlot(owner, {
+    const plot = await playablePlot(owner, {
       // An always-on entry, and one the reader's turn brings in by its keyword.
       lorebook: [{ content: 'ALWAYS ON', constant: true }, { keys: ['안녕'], content: 'KEYED ON' }],
     });
-    await publishPlot(owner, plot.id);
     const own = await startChat(owner, plot.id);
-    expect(own.isPlotOwner).toBe(true);
     await readSse(await json(owner, `/api/chats/${own.chat.id}/messages`, 'POST', { content: '안녕' }));
     const count = async () => (await db.select().from(messages).where(eq(messages.chatId, own.chat.id))).length;
     const before = await count();
@@ -4298,7 +4047,7 @@ describe('chats', () => {
     expect(report.blocks[sentKinds.indexOf('moved_lore')].text).toBe('KEYED ON');
     expect(report.blocks.at(-1)).toMatchObject({ kind: 'preset', text: OAI_JAILBREAK });
     expect(await count()).toBe(before);
-    expect(await claimOf(own.chat.id)).toBeNull();
+    expect(generatingOn(own.chat.id)).toBe(false);
   });
 
   it('returns 429 while another generation is in flight', async () => {
@@ -4315,18 +4064,6 @@ describe('chats', () => {
     expect(second.status).toBe(429);
     expect((await readJson(second)).code).toBe('generation_in_progress');
 
-    // A second API instance shares nothing but the database, so the claim on the
-    // chat row is the only thing that can stop it — and it must, the same way.
-    const elsewhere = await json(
-      cookie,
-      `/api/chats/${chatId}/messages`,
-      'POST',
-      { content: '다른 인스턴스' },
-      makeApp(),
-    );
-    expect(elsewhere.status).toBe(429);
-    expect((await readJson(elsewhere)).code).toBe('generation_in_progress');
-
     // Settings must not change mid-generation either — the author note included:
     // the endpoint holds the slot whatever the body carries.
     const settings = await json(cookie, `/api/chats/${chatId}`, 'PATCH', { model: 'echo/echo' });
@@ -4336,182 +4073,10 @@ describe('chats', () => {
 
     // Drain the first stream so the slot is released again.
     await readSse(first);
-    expect(await claimOf(chatId)).toBeNull();
+    expect(generatingOn(chatId)).toBe(false);
     const third = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '이제 가능' });
     expect(third.status).toBe(200);
     await readSse(third);
-  });
-
-  it('reclaims a chat whose generation claim went stale', async () => {
-    const cookie = await signUp('stale-claim@example.com');
-    const { chatId } = await setupChat(cookie);
-    const claimedAgo = (ms: number): Promise<unknown> =>
-      db
-        .update(chats)
-        .set({ generatingAt: new Date(Date.now() - ms) })
-        .where(eq(chats.id, chatId));
-
-    // Inside the staleness window the claim belongs to a generation that is still
-    // running somewhere — no instance may take it, however little it knows.
-    await claimedAgo(60_000);
-    const blocked = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '점유 중' });
-    expect(blocked.status).toBe(429);
-    expect((await readJson(blocked)).code).toBe('generation_in_progress');
-
-    // Past two minutes with nobody renewing it, the instance that wrote it is
-    // gone: the chat is taken over rather than left wedged forever.
-    await claimedAgo(3 * 60_000);
-    const reclaimed = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '이제 가능' });
-    expect(reclaimed.status).toBe(200);
-    expect((await readSse(reclaimed)).at(-1)!.event).toBe('done');
-    expect(await claimOf(chatId)).toBeNull();
-  });
-
-  /** The account a chat belongs to — what the claim is guarded by. */
-  async function ownerOf(chatId: string): Promise<string> {
-    const [row] = await db.select({ userId: chats.userId }).from(chats).where(eq(chats.id, chatId));
-    return row!.userId;
-  }
-
-  // The claim is a lease, and a lease has a holder. Without that identity the
-  // instance whose claim went stale would keep writing to a column that is now
-  // somebody else's — renewing it back to itself, or clearing it outright and
-  // letting a third request in beside a generation that is still running.
-  it('keeps a taken-over claim out of the hands of the instance that lost it', async () => {
-    const cookie = await signUp('claim-identity@example.com');
-    const { chatId } = await setupChat(cookie);
-    const userId = await ownerOf(chatId);
-    const lost = makeDeps();
-    const holder = makeDeps();
-
-    expect(await acquireChatSlot(lost, chatId, userId)).toBe(true);
-    // A claim is known by its time, which counts milliseconds: the takeover is a tick later.
-    const first = (await claimOf(chatId))!;
-    while (Date.now() <= first.getTime()) await new Promise((resolve) => setTimeout(resolve, 1));
-    // Two minutes on, with nothing renewing it, another instance declares the
-    // first one dead and takes the chat over.
-    await db
-      .update(chats)
-      .set({ generatingAt: new Date(Date.now() - 3 * 60_000) })
-      .where(eq(chats.id, chatId));
-    expect(await acquireChatSlot(holder, chatId, userId)).toBe(true);
-    const taken = await claimOf(chatId);
-
-    // The first instance is still alive and still on its heartbeat: it may not
-    // pull the claim back, and when its stream finally ends it may not clear one
-    // that is no longer its own.
-    await renewChatSlot(lost, chatId);
-    expect(await claimOf(chatId)).toEqual(taken);
-    await releaseChatSlot(lost, chatId);
-    expect(await claimOf(chatId)).toEqual(taken);
-    expect(lost.generating.has(chatId)).toBe(false);
-
-    // The instance that does hold it renews and releases exactly as before — and
-    // the release only works because the renewal wrote the new value back, which
-    // is what it compares against.
-    await renewChatSlot(holder, chatId);
-    const renewed = await claimOf(chatId);
-    expect(renewed!.getTime()).toBeGreaterThanOrEqual(taken!.getTime());
-    await releaseChatSlot(holder, chatId);
-    expect(await claimOf(chatId)).toBeNull();
-    expect(holder.generating.has(chatId)).toBe(false);
-  });
-
-  it('does not wedge the chat when taking the claim fails', async () => {
-    const cookie = await signUp('claim-throws@example.com');
-    const { chatId } = await setupChat(cookie);
-    const userId = await ownerOf(chatId);
-
-    // A database that drops the very next guarded UPDATE, and is itself again
-    // afterwards — the fast-path set is taken before that statement runs.
-    let broken = true;
-    const flaky = new Proxy(db, {
-      get(target, property, receiver) {
-        const value = Reflect.get(target, property, receiver);
-        if (property !== 'update') return value;
-        return (table: unknown) => {
-          if (!broken) return (value as typeof db.update).call(target, table as never);
-          broken = false;
-          return {
-            set: () => ({ where: () => ({ returning: () => Promise.reject(new Error('db down')) }) }),
-          };
-        };
-      },
-    }) as Db;
-
-    const deps = makeDeps({ db: flaky });
-    await expect(acquireChatSlot(deps, chatId, userId)).rejects.toThrow('db down');
-    // The chat is not this instance's for the rest of its life.
-    expect(deps.generating.has(chatId)).toBe(false);
-    expect(await acquireChatSlot(deps, chatId, userId)).toBe(true);
-    await releaseChatSlot(deps, chatId);
-    expect(await claimOf(chatId)).toBeNull();
-  });
-
-  it('joins overlapping renewals instead of reading its own race as a takeover', async () => {
-    const cookie = await signUp('claim-overlap@example.com');
-    const { chatId } = await setupChat(cookie);
-    const userId = await ownerOf(chatId);
-    const deps = makeDeps();
-    expect(await acquireChatSlot(deps, chatId, userId)).toBe(true);
-
-    // Two heartbeats landing together: without the guard, one CAS advances the
-    // row and the other reads its own miss as a takeover and kills the renewal.
-    const first = renewChatSlot(deps, chatId);
-    const second = renewChatSlot(deps, chatId);
-    expect(second).toBe(first);
-    await first;
-
-    // The claim survived its own heartbeat, and later renewals still carry it.
-    expect(deps.generationClaims.has(chatId)).toBe(true);
-    await renewChatSlot(deps, chatId);
-    expect(await claimOf(chatId)).not.toBeNull();
-    await releaseChatSlot(deps, chatId);
-    expect(await claimOf(chatId)).toBeNull();
-  });
-
-  it('waits out a renewal in flight before it releases the claim', async () => {
-    const cookie = await signUp('claim-release-race@example.com');
-    const { chatId } = await setupChat(cookie);
-    const userId = await ownerOf(chatId);
-
-    // A database whose next UPDATE is slow but real: the renewal it carries is
-    // advancing the row's timestamp while the release comes through.
-    let slow = false;
-    const delayed = new Proxy(db, {
-      get(target, property, receiver) {
-        const value = Reflect.get(target, property, receiver);
-        if (property !== 'update') return value;
-        return (table: unknown) => {
-          const real = (value as typeof db.update).call(target, table as never);
-          if (!slow) return real;
-          slow = false;
-          return {
-            set: (values: never) => ({
-              where: (where: never) => ({
-                returning: (shape: never) =>
-                  new Promise((resolve) => setTimeout(resolve, 150)).then(() =>
-                    real.set(values).where(where).returning(shape),
-                  ),
-              }),
-            }),
-          };
-        };
-      },
-    }) as Db;
-
-    const deps = makeDeps({ db: delayed });
-    expect(await acquireChatSlot(deps, chatId, userId)).toBe(true);
-    slow = true;
-    const renewal = renewChatSlot(deps, chatId);
-    // Release lands while the renewal is mid-flight. It has to wait it out and
-    // clear with the identity the row holds *afterwards* — clearing with the one
-    // it replaced would miss, and the finished chat would stay claimed until the
-    // staleness window let it go.
-    await releaseChatSlot(deps, chatId);
-    await renewal;
-    expect(await claimOf(chatId)).toBeNull();
-    expect(deps.generationClaims.has(chatId)).toBe(false);
   });
 
   /** An adapter that sends `first`, then holds until `open()` before it sends `rest` and finishes. */
@@ -4536,6 +4101,28 @@ describe('chats', () => {
     return { target, open, seen };
   };
 
+  it('leaves no chat generating after a restart', async () => {
+    const cookie = await signUp('restart@example.com');
+    const { target, open } = gatedAdapter('부분', ' 응답');
+    const { chatId } = await setupChat(cookie);
+    const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, target);
+    const reader = res.body!.getReader();
+    await reader.read();
+    expect((await readJson(await json(cookie, `/api/chats/${chatId}`, 'GET', undefined, target))).chat.generating).toBe(true);
+
+    // The app starts again on the same folder: nothing it held in memory is left,
+    // the slot least of all, and the chat is free to generate at once.
+    const restarted = makeApp();
+    expect((await readJson(await json(cookie, `/api/chats/${chatId}`, 'GET', undefined, restarted))).chat.generating).toBe(false);
+    const next = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '다시' }, restarted);
+    expect(next.status).toBe(200);
+    expect((await readSse(next)).at(-1)!.event).toBe('done');
+    // The old process's stream, read to its end, is all that was left of it.
+    open();
+    while (!(await reader.read()).done);
+    await until(async () => !generatingOn(chatId, target), 'the old stream never ended');
+  });
+
   it('finishes and stores the whole reply when the client walks away mid-stream', async () => {
     const cookie = await signUp('abort-claim@example.com');
     const { target, open, seen } = gatedAdapter('부분', ' 응답');
@@ -4554,19 +4141,18 @@ describe('chats', () => {
 
     // The reply goes on without anyone listening, and the chat says so.
     await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(await claimOf(chatId)).not.toBeNull();
-    expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.generating).toBe(true);
+    expect(generatingOn(chatId, target)).toBe(true);
+    expect((await readJson(await json(cookie, `/api/chats/${chatId}`, 'GET', undefined, target))).chat.generating).toBe(true);
 
     open();
-    await until(async () => (await claimOf(chatId)) === null, 'the claim was never released');
+    await until(async () => !generatingOn(chatId, target), 'the slot was never released');
     // Stored whole, as a reply that was listened to is, with its usage.
-    const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    const state = await readJson(await json(cookie, `/api/chats/${chatId}`, 'GET', undefined, target));
     expect(state.chat.generating).toBe(false);
     expect(state.path.at(-1)).toMatchObject({ role: 'assistant', content: '부분 응답', promptTokens: 11, completionTokens: 7 });
     expect(seen.aborted).toBe(false);
-    // And the chat generates again straight away, on an instance that never saw
-    // the abandoned request.
-    const next = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '다시' }, makeApp());
+    // And the chat generates again straight away.
+    const next = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '다시' }, target);
     expect(next.status).toBe(200);
     expect((await readSse(next)).at(-1)!.event).toBe('done');
   });
@@ -4587,7 +4173,7 @@ describe('chats', () => {
     client.abort();
     await new Promise((resolve) => setTimeout(resolve, 50));
     open();
-    await until(async () => (await claimOf(chatId)) === null, 'the claim was never released');
+    await until(async () => !generatingOn(chatId, target), 'the slot was never released');
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
     expect(state.path.at(-1)).toMatchObject({ role: 'assistant', content: '생각을 마친 답' });
   });
@@ -4597,7 +4183,7 @@ describe('chats', () => {
     const { chatId } = await setupChat(cookie);
     await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }));
 
-    // The settings, changed or not: the claim it took ends with it.
+    // The settings, changed or not: the slot it took ends with it.
     for (const body of [{ note: '메모' }, {}]) {
       const patched = await json(cookie, `/api/chats/${chatId}`, 'PATCH', body);
       expect(patched.status).toBe(200);
@@ -4607,7 +4193,7 @@ describe('chats', () => {
     const deleted = await request(cookie, `/api/chats/${chatId}/messages/${reply.id}`, 'DELETE');
     expect(deleted.status).toBe(200);
     expect((await readJson(deleted)).chat.generating).toBe(false);
-    expect(await claimOf(chatId)).toBeNull();
+    expect(generatingOn(chatId)).toBe(false);
   });
 
   it("stops a reply on the reader's stop: kept, and the chat freed before it answers", async () => {
@@ -4633,12 +4219,12 @@ describe('chats', () => {
     const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, target);
     await res.body!.getReader().read();
 
-    expect(await claimOf(chatId)).not.toBeNull();
+    expect(generatingOn(chatId, target)).toBe(true);
 
     const stopped = await json(cookie, `/api/chats/${chatId}/stop`, 'POST', undefined, target);
     expect(stopped.status).toBe(204);
     // Stored and freed by the time it answers: the page's next read finds it.
-    expect(await claimOf(chatId)).toBeNull();
+    expect(generatingOn(chatId, target)).toBe(false);
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
     expect(state.path.at(-1)).toMatchObject({ role: 'assistant', content: '부분 응답' });
     // Nothing running is nothing to stop.
@@ -4668,15 +4254,15 @@ describe('chats', () => {
     const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, createApp(deps));
     // The first delta is out: the reply is mid-stream, and the reader still listening.
     await res.body!.getReader().read();
-    expect(await claimOf(chatId)).not.toBeNull();
+    expect(deps.generating.has(chatId)).toBe(true);
 
     await stopGenerations(deps, 5_000);
     // Stored and freed by the time it returns: an exit right after loses nothing.
     expect(deps.generationStreams.size).toBe(0);
-    expect(await claimOf(chatId)).toBeNull();
+    expect(deps.generating.has(chatId)).toBe(false);
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
     expect(state.path.at(-1)).toMatchObject({ role: 'assistant', content: '부분 응답' });
-    // The next instance generates on it at once instead of answering 429.
+    // The next start generates on it at once instead of answering 429.
     const next = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '다시' }, makeApp());
     expect(next.status).toBe(200);
     expect((await readSse(next)).at(-1)!.event).toBe('done');
@@ -4700,7 +4286,7 @@ describe('chats', () => {
     expect(events.at(-1)).toMatchObject({ event: 'error', data: { code: 'chatgpt_timeout' } });
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
     expect(state.path.at(-1)).toMatchObject({ role: 'assistant', content: '부분 응답' });
-    expect(await claimOf(chatId)).toBeNull();
+    expect(generatingOn(chatId, target)).toBe(false);
   });
 
   it('rejects an unavailable model before persisting the user turn', async () => {
@@ -4764,13 +4350,11 @@ describe('chats', () => {
     expect(blockedSend.status).toBe(429);
     generating.delete(chatId);
 
-    // A rejected patch takes the slot too, and must not leak it — neither the fast
-    // path nor the claim the row carries.
+    // A rejected patch takes the slot too, and must not leak it.
     generating.acquired.length = 0;
     expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { model: 'nope/nope' }, shared)).status).toBe(400);
     expect(generating.acquired).toEqual([chatId]);
     expect(generating.size).toBe(0);
-    expect(await claimOf(chatId)).toBeNull();
 
     // A successful patch holds the slot for its whole duration, then releases it.
     generating.acquired.length = 0;
@@ -4778,7 +4362,6 @@ describe('chats', () => {
     expect(patched.status).toBe(200);
     expect(generating.acquired).toEqual([chatId]);
     expect(generating.size).toBe(0);
-    expect(await claimOf(chatId)).toBeNull();
 
     // Slot released: generation works right after.
     const send = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '패치 후' }, shared);
@@ -5353,7 +4936,7 @@ describe('recommended profiles', () => {
 
   it('stores what the coercion keeps and shows it to readers', async () => {
     const cookie = await signUp('profiles-owner@example.com');
-    const plot = await publishablePlot(cookie, {
+    const plot = await playablePlot(cookie, {
       profiles: [
         KNIGHT,
         // Junk rows are dropped rather than refused, the way an unknown style
@@ -5380,7 +4963,6 @@ describe('recommended profiles', () => {
     expect(edited.profiles[1]).toEqual({ id: expect.any(String), ...THIEF });
 
     // Reader-facing by design: the start panel is where one is picked.
-    await publishPlot(cookie, plot.id);
     const reader = await signUp('profiles-reader@example.com');
     expect((await readPublicPlot(reader, plot.id)).profiles).toEqual(edited.profiles);
 
@@ -5394,8 +4976,7 @@ describe('recommended profiles', () => {
 
   it('starts a chat on a copy of the profile the reader picked', async () => {
     const alice = await signUp('profiles-creator@example.com');
-    const plot = await publishablePlot(alice, { profiles: [KNIGHT] });
-    await publishPlot(alice, plot.id);
+    const plot = await playablePlot(alice, { profiles: [KNIGHT] });
     const [profile] = (await readPlot(alice, plot.id)).profiles;
 
     const bob = await signUp('profiles-picker@example.com');
@@ -5426,7 +5007,7 @@ describe('recommended profiles', () => {
     expect((await readJson(both)).code).toBe('invalid_request');
 
     // A profile of some other plot is not this plot's to start on.
-    const other = await publishablePlot(alice, { profiles: [THIEF] });
+    const other = await playablePlot(alice, { profiles: [THIEF] });
     const foreign = (await readPlot(alice, other.id)).profiles[0].id;
     const missing = await json(bob, '/api/chats', 'POST', {
       plotId: plot.id,
@@ -5662,17 +5243,17 @@ describe('scene editing', () => {
       });
 
     // A generation holds the slot; the edit would take away the row it hangs a reply under.
-    await db.update(chats).set({ generatingAt: new Date() }).where(eq(chats.id, chatId));
+    depsOfApp.get(app)!.generating.add(chatId);
     const busy = await edit();
     expect(busy.status).toBe(429);
     expect((await readJson(busy)).code).toBe('generation_in_progress');
     expect(await db.select().from(messages).where(inArray(messages.id, scene))).toHaveLength(3);
-    await db.update(chats).set({ generatingAt: null }).where(eq(chats.id, chatId));
+    depsOfApp.get(app)!.generating.delete(chatId);
 
     const after = await readJson(await edit());
     expect(after.chat.headMessageId).toBe(scene[0]);
     // The edit gave the slot back.
-    expect((await db.select().from(chats).where(eq(chats.id, chatId)))[0]!.generatingAt).toBeNull();
+    expect(generatingOn(chatId)).toBe(false);
   });
 
   it('does nothing at all when the scene comes back unchanged', async () => {
@@ -5917,7 +5498,7 @@ describe('custom UI', () => {
     const reader = await signUp('component-reader@example.com');
     const code = 'function StatusWindow({ hp = 0 }) {\n  return <div>HP {hp}</div>;\n}';
 
-    const plot = await publishablePlot(owner, {
+    const plot = await playablePlot(owner, {
       name: '컴포넌트 작품',
       intros: ['<StatusWindow hp={100} />'],
       customUi: { componentCode: code },
@@ -5939,9 +5520,7 @@ describe('custom UI', () => {
     expect((await readJson(tooLong)).code).toBe('invalid_request');
 
     // Presentation travels with the public view, like the display scripts.
-    await publishPlot(owner, plot.id);
     const view = await readPublicPlot(reader, plot.id);
-    expect(view.public).toBe(true);
     expect(view.customUi).toBeUndefined();
     expect(view.componentCode).toBe(edited);
 
@@ -5998,8 +5577,7 @@ describe('custom UI', () => {
     expect((await readJson(tooLong)).code).toBe('invalid_request');
 
     // Presentation, so it travels with the public view like the display scripts.
-    const plot = await publishablePlot(owner, { name: '스타일 작품', customUi: { css: edited } });
-    await publishPlot(owner, plot.id);
+    const plot = await playablePlot(owner, { name: '스타일 작품', customUi: { css: edited } });
     expect((await readPublicPlot(reader, plot.id)).css).toBe(edited);
   });
 
@@ -6023,7 +5601,7 @@ describe('custom UI', () => {
     expect(plot.characters[0].card.name).toBe('루미');
   });
 
-  it('ships display scripts with the public view, which has no card', async () => {
+  it('ships display scripts with the play view, which has no card', async () => {
     const owner = await signUp('risu-owner@example.com');
     const reader = await signUp('risu-reader@example.com');
     const plot = await importCard(
@@ -6032,10 +5610,8 @@ describe('custom UI', () => {
     );
     // The card has no scenario, so the import left the setting for the owner to write.
     await patchPlot(owner, plot.id, { description: '루미의 마을.' });
-    await publishPlot(owner, plot.id, { rightsConfirmed: true });
 
     const view = await readPublicPlot(reader, plot.id);
-    expect(view.public).toBe(true);
     expect(view.characters[0].card).toBeUndefined();
     expect(view.displayScripts).toHaveLength(1);
     expect(view.defaultVariables).toEqual({ hp: '100' });
@@ -6140,16 +5716,14 @@ describe('custom UI', () => {
   it('keeps the variable macros out of an intro preview', async () => {
     const owner = await signUp('preview-owner@example.com');
     const reader = await signUp('preview-reader@example.com');
-    const plot = await publishablePlot(owner, {
+    const plot = await playablePlot(owner, {
       name: '미리보기',
       intros: ['{{setvar::hp::100}}안녕하세요', '{{img::door}}문 앞이다'],
     });
-    await publishPlot(owner, plot.id);
 
     const view = await readPublicPlot(reader, plot.id);
-    // The listings' cut, and the whole text beside it — both stripped of the
+    // The picker's cut, and the whole text beside it — both stripped of the
     // markup a reader has no way to resolve.
-    expect(view.introPreview).toBe('안녕하세요');
     expect(view.intros).toEqual(['안녕하세요', '문 앞이다']);
     expect(view.introPreviews).toEqual(['안녕하세요', '문 앞이다']);
   });
@@ -6246,7 +5820,6 @@ describe('custom UI in a work of several members', () => {
     expect(after.customUi.css).toBeUndefined();
 
     await patchPlot(owner, plot.id, { description: '마을.' });
-    await publishPlot(owner, plot.id, { rightsConfirmed: true });
     const view = await readPublicPlot(reader, plot.id);
     expect(view.memberCss).toEqual({ [nox]: '.nox { color: blue; }' });
     expect(view.backgroundHtml).toBe('<div class="sky">밤</div>');
@@ -6516,7 +6089,7 @@ describe('the game layer', () => {
     const owner = await signUp('capability-owner@example.com');
     const reader = await signUp('capability-reader@example.com');
 
-    const plot = await publishablePlot(owner, {
+    const plot = await playablePlot(owner, {
       name: '게임 작품',
       intros: ['문 앞이다'],
       customUi: { componentCapabilities: ['sendTurn'] },
@@ -6531,13 +6104,11 @@ describe('the game layer', () => {
     expect(unknown.status).toBe(400);
     expect((await readJson(unknown)).code).toBe('invalid_request');
 
-    await publishPlot(owner, plot.id);
     expect((await readPublicPlot(reader, plot.id)).componentCapabilities).toEqual(['sendTurn']);
 
     // A plot that never asked carries no column, and its public view grants nothing.
-    const plain = await publishablePlot(owner, { name: '평범', intros: ['문 앞이다'] });
+    const plain = await playablePlot(owner, { name: '평범', intros: ['문 앞이다'] });
     expect(plain.customUi).toBeNull();
-    await publishPlot(owner, plain.id);
     expect((await readPublicPlot(reader, plain.id)).componentCapabilities).toEqual([]);
   });
 
@@ -6573,7 +6144,7 @@ describe('the game layer', () => {
     options: { capability?: boolean; consent?: boolean } = {},
   ): Promise<{ cookie: string; plotId: string; chatId: string }> {
     const cookie = await signUp(email);
-    const plot = await publishablePlot(
+    const plot = await playablePlot(
       cookie,
       {
         name: '게임 작품',
@@ -7198,7 +6769,7 @@ describe('chat export', () => {
 
   it('carries a component turn as one, and nothing the plot holds', async () => {
     const cookie = await signUp('export-card@example.com');
-    const plot = await publishablePlot(
+    const plot = await playablePlot(
       cookie,
       {
         name: '게임 작품',
@@ -7503,14 +7074,6 @@ describe('reader presets', () => {
     ]) {
       expect((await create(cookie, body)).status, JSON.stringify(body).slice(0, 40)).toBe(400);
     }
-
-    const userId = (await db.select({ id: readerPresets.userId }).from(readerPresets))[0]!.id;
-    await db.insert(readerPresets).values(
-      Array.from({ length: MAX_READER_PRESETS - 1 }, (_, i) => ({ userId, name: `p${i}` })),
-    );
-    const full = await create(cookie, { name: '하나 더' });
-    expect(full.status).toBe(400);
-    expect((await readJson(full)).code).toBe('reader_preset_limit');
   });
 
   it('is picked per chat, and lets go when deleted', async () => {
@@ -7573,12 +7136,11 @@ describe('reader presets', () => {
     const creator = await signUp('reader-preset-creator@example.com');
     // The owner playing their own work, with a preset of theirs on it.
     const reader = creator;
-    const plot = await publishablePlot(
+    const plot = await playablePlot(
       creator,
       { description: 'CREATOR-WORLD' },
       { card: { description: 'CREATOR-DESC', systemPrompt: 'CREATOR-SYS', postHistoryInstructions: 'CREATOR-PH' } },
     );
-    await publishPlot(creator, plot.id);
     const started = await startChat(reader, plot.id);
     const chatId = started.chat.id;
     const preset = await readJson(
@@ -9743,19 +9305,19 @@ describe('chat import', () => {
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
     expect(state.path.map((m: any) => m.content)).toEqual(['인사', '질문']);
     expect(state.chat.importing).toBe(false);
-    const [row] = await db.select({ importedFrom: chats.importedFrom, generatingAt: chats.generatingAt }).from(chats).where(eq(chats.id, chatId));
+    const [row] = await db.select({ importedFrom: chats.importedFrom }).from(chats).where(eq(chats.id, chatId));
     expect(row!.importedFrom!.branches).toEqual([{ fileName: 'later - Branch #1.jsonl', sha256: branchSha }]);
-    expect(row!.generatingAt).toBeNull();
+    expect(generatingOn(chatId)).toBe(false);
     // By the branch file's name too, for a branch of it.
     expect((await readJson(await json(cookie, '/api/imports/lookup', 'POST', { sha256: [], chatFiles: ['later - Branch #1.jsonl'] }))).named).toEqual([
       { fileName: 'later - Branch #1.jsonl', chatId, plotId: plot.id, importing: false },
     ]);
 
     // While a turn is being generated on the chat, a branch waits for it.
-    await db.update(chats).set({ generatingAt: new Date() }).where(eq(chats.id, chatId));
+    depsOfApp.get(app)!.generating.add(chatId);
     const busy = await json(cookie, `/api/chats/${chatId}/import`, 'POST', { messages: [], branch: { parentId: question } });
     expect(busy.status).toBe(429);
-    await db.update(chats).set({ generatingAt: null }).where(eq(chats.id, chatId));
+    depsOfApp.get(app)!.generating.delete(chatId);
 
     // A chat the reader started here takes no branch.
     const own = (await startChat(cookie, plot.id)).chat.id;
@@ -9765,544 +9327,24 @@ describe('chat import', () => {
 
 });
 
-describe('plot hub', () => {
-  interface Spec {
-    name: string;
-    language?: string;
-    tags?: string[];
-    intro?: string;
-    intros?: string[];
-    likeCount?: number;
-    chatCount?: number;
-    publishedAt?: Date;
-  }
-
-  /** A plot with enough substance to publish, and one member on its roster. */
-  async function seedPlot(cookie: string, spec: Spec): Promise<any> {
-    const plot = await createPlot(cookie, {
-      name: spec.name,
-      description: `${spec.name} 설명`,
-      intros: spec.intros ?? [`${spec.name}의 도입부`],
-      ...(spec.intro !== undefined ? { intro: spec.intro } : {}),
-      ...(spec.tags ? { tags: spec.tags } : {}),
-      ...(spec.language ? { language: spec.language } : {}),
-    });
-    await addCharacter(cookie, plot.id, { name: `${spec.name} 멤버` });
-    return plot;
-  }
-
-  async function publish(
-    cookie: string,
-    id: string,
-    value = true,
-    body: Record<string, unknown> = {},
-  ): Promise<any> {
-    const res = await json(cookie, `/api/plots/${id}/publish`, 'POST', { publish: value, ...body });
-    expect(res.status, await res.clone().text()).toBe(200);
-    return readJson(res);
-  }
-
-  /** Publishes a plot and stamps the counters the sort tests need. */
-  async function seedPublic(cookie: string, spec: Spec): Promise<string> {
-    const created = await seedPlot(cookie, spec);
-    await publish(cookie, created.id);
-    if (spec.likeCount !== undefined || spec.chatCount !== undefined || spec.publishedAt !== undefined) {
-      await db
-        .update(plots)
-        .set({
-          ...(spec.likeCount !== undefined ? { likeCount: spec.likeCount } : {}),
-          ...(spec.chatCount !== undefined ? { chatCount: spec.chatCount } : {}),
-          ...(spec.publishedAt !== undefined ? { publishedAt: spec.publishedAt } : {}),
-        })
-        .where(eq(plots.id, created.id));
-    }
-    return created.id;
-  }
-
-  const exploreNames = async (cookie: string | undefined, query: string): Promise<string[]> => {
-    const res = await request(cookie, `/api/explore?${query}`);
-    expect(res.status, await res.clone().text()).toBe(200);
-    return (await readJson(res)).items.map((item: any) => item.name);
-  };
-
-  /** Pages the catalogue two at a time, running `mutate` once the first page is out. */
-  async function walkExplore(
-    cookie: string,
-    query: string,
-    mutate: () => Promise<void>,
-  ): Promise<string[]> {
-    const walked: string[] = [];
-    let cursor: string | null = null;
-    for (let page = 0; page < 20; page += 1) {
-      const res: Response = await request(
-        cookie,
-        `/api/explore?${query}&limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`,
-      );
-      expect(res.status, await res.clone().text()).toBe(200);
-      const body: any = await readJson(res);
-      walked.push(...body.items.map((item: any) => item.name));
-      cursor = body.nextCursor;
-      if (page === 0) await mutate();
-      if (!cursor) break;
-    }
-    expect(cursor).toBeNull();
-    return walked;
-  }
-
-  /** Counters the moving-boundary walks start from; the names are their order. */
-  const RANKED = [
-    ['A', 60],
-    ['B', 50],
-    ['C', 40],
-    ['D', 30],
-    ['E', 20],
-    ['F', 10],
-  ] as const;
-
-  it('explores only public plots of the requested language', async () => {
-    const alice = await signUp('explore-owner@example.com');
-    const bob = await signUp('explore-reader@example.com');
-    await seedPublic(alice, { name: '한국어 공개' });
-    await seedPublic(alice, { name: '영어 공개', language: 'en' });
-    await seedPlot(alice, { name: '비공개' });
-
-    expect(await exploreNames(bob, 'language=ko')).toEqual(['한국어 공개']);
-    expect(await exploreNames(bob, 'language=en')).toEqual(['영어 공개']);
-    // The owner sees the same partition — no private rows leak into explore.
-    expect(await exploreNames(alice, 'language=ko')).toEqual(['한국어 공개']);
-    expect(await exploreNames(bob, 'language=ja')).toEqual([]);
-
-    expect((await request(bob, '/api/explore')).status).toBe(400);
-    expect((await request(bob, '/api/explore?language=de')).status).toBe(400);
-    expect((await request(bob, '/api/explore?language=ko&sort=oldest')).status).toBe(400);
-    expect((await request(bob, '/api/explore?language=ko&limit=49')).status).toBe(400);
-    expect((await request(bob, '/api/explore?language=ko&cursor=not-a-cursor')).status).toBe(400);
-    // Explore *is* plots now: the separate rail above it is gone.
-    expect((await request(bob, '/api/explore/plots?language=ko')).status).toBe(404);
-    // A cursor id is compared against a uuid column: a malformed one is refused
-    // here rather than blowing up in Postgres.
-    const malformed = encodeCursor({ value: new Date().toISOString(), id: 'not-a-uuid' });
-    const res = await request(bob, `/api/explore?language=ko&cursor=${encodeURIComponent(malformed)}`);
-    expect(res.status).toBe(400);
-    expect((await readJson(res)).code).toBe('invalid_request');
-  });
-
-  it('does not skip plots that share a publish millisecond across a page boundary', async () => {
-    const alice = await signUp('explore-microsecond@example.com');
-    const bob = await signUp('explore-microsecond-reader@example.com');
-    const older = await seedPublic(alice, { name: '같은 밀리초 A' });
-    const newer = await seedPublic(alice, { name: '같은 밀리초 B' });
-    // The same millisecond, microseconds apart: the serialized cursor cannot tell
-    // them apart, so the boundary has to be read back from the row itself.
-    await sql`update plots set published_at = ${microsecond('000200')}::timestamptz where id = ${older}::uuid`;
-    await sql`update plots set published_at = ${microsecond('000700')}::timestamptz where id = ${newer}::uuid`;
-
-    const first = await readJson(await request(bob, '/api/explore?language=ko&sort=recent&limit=1'));
-    expect(first.items.map((item: any) => item.name)).toEqual(['같은 밀리초 B']);
-
-    const second = await readJson(
-      await request(
-        bob,
-        `/api/explore?language=ko&sort=recent&limit=1&cursor=${encodeURIComponent(first.nextCursor)}`,
-      ),
-    );
-    expect(second.items.map((item: any) => item.name)).toEqual(['같은 밀리초 A']);
-    expect(second.nextCursor).toBeNull();
-  });
-
-  it('sorts by recency, chats and likes', async () => {
-    const alice = await signUp('sort-owner@example.com');
-    const bob = await signUp('sort-reader@example.com');
-    const at = (day: number): Date => new Date(Date.UTC(2026, 0, day));
-    await seedPublic(alice, { name: 'A', publishedAt: at(1), likeCount: 5, chatCount: 1 });
-    await seedPublic(alice, { name: 'B', publishedAt: at(3), likeCount: 1, chatCount: 9 });
-    await seedPublic(alice, { name: 'C', publishedAt: at(2), likeCount: 9, chatCount: 5 });
-
-    expect(await exploreNames(bob, 'language=ko&sort=recent')).toEqual(['B', 'C', 'A']);
-    expect(await exploreNames(bob, 'language=ko')).toEqual(['B', 'C', 'A']);
-    expect(await exploreNames(bob, 'language=ko&sort=likes')).toEqual(['C', 'A', 'B']);
-    expect(await exploreNames(bob, 'language=ko&sort=chats')).toEqual(['B', 'C', 'A']);
-  });
-
-  it('filters by name and tag', async () => {
-    const alice = await signUp('filter-owner@example.com');
-    const bob = await signUp('filter-reader@example.com');
-    await seedPublic(alice, { name: '도서관 사서', tags: ['판타지', '차분'] });
-    await seedPublic(alice, { name: '도서관 손님', tags: ['일상'] });
-    await seedPublic(alice, { name: '기사단장', tags: ['판타지'] });
-    await seedPublic(alice, { name: '100% 순도', tags: [] });
-
-    expect((await exploreNames(bob, 'language=ko&q=도서관')).sort()).toEqual(['도서관 사서', '도서관 손님']);
-    expect(await exploreNames(bob, 'language=ko&q=단장')).toEqual(['기사단장']);
-    expect((await exploreNames(bob, 'language=ko&tag=판타지')).sort()).toEqual(['기사단장', '도서관 사서']);
-    expect(await exploreNames(bob, 'language=ko&q=도서관&tag=판타지')).toEqual(['도서관 사서']);
-    expect(await exploreNames(bob, 'language=ko&tag=없는태그')).toEqual([]);
-    // LIKE wildcards from the user are literal text.
-    expect(await exploreNames(bob, `language=ko&q=${encodeURIComponent('100%')}`)).toEqual(['100% 순도']);
-    expect(await exploreNames(bob, `language=ko&q=${encodeURIComponent('%')}`)).toEqual(['100% 순도']);
-  });
-
-  it('walks the whole catalogue through the cursor', async () => {
-    const alice = await signUp('cursor-owner@example.com');
-    const bob = await signUp('cursor-reader@example.com');
-    // Identical like counts: the id tiebreak is the only thing keeping the order total.
-    for (let i = 0; i < 7; i += 1) {
-      await seedPublic(alice, { name: `작품 ${i}`, likeCount: i < 4 ? 2 : 0, publishedAt: new Date(2026, 0, 1 + i) });
-    }
-
-    for (const sort of ['recent', 'likes', 'chats']) {
-      const expected = await exploreNames(bob, `language=ko&sort=${sort}&limit=48`);
-      expect(expected).toHaveLength(7);
-
-      const walked: string[] = [];
-      let cursor: string | null = null;
-      for (let page = 0; page < 10; page += 1) {
-        const res: Response = await request(
-          bob,
-          `/api/explore?language=ko&sort=${sort}&limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`,
-        );
-        expect(res.status, await res.clone().text()).toBe(200);
-        const body: any = await readJson(res);
-        walked.push(...body.items.map((item: any) => item.name));
-        cursor = body.nextCursor;
-        if (!cursor) break;
-      }
-      expect(cursor).toBeNull();
-      expect(walked).toEqual(expected);
-      expect(new Set(walked).size).toBe(7);
-    }
-  });
-
-  it('walks the likes sort exactly once per plot while the counts move', async () => {
-    const alice = await signUp('explore-moving-likes@example.com');
-    const bob = await signUp('explore-moving-likes-reader@example.com');
-    const ids = new Map<string, string>();
-    for (const [name, likeCount] of RANKED) {
-      ids.set(name, await seedPublic(alice, { name, likeCount }));
-    }
-
-    const walked = await walkExplore(bob, 'language=ko&sort=likes', async () => {
-      // B was on page 1 and drops to the bottom; E was still unseen and jumps to
-      // the top. A cursor keyed on B's old count would hand B back a second time
-      // and never reach E at all.
-      await db.update(plots).set({ likeCount: 5 }).where(eq(plots.id, ids.get('B')!));
-      await db.update(plots).set({ likeCount: 100 }).where(eq(plots.id, ids.get('E')!));
-    });
-
-    expect(walked.slice(0, 2)).toEqual(['A', 'B']);
-    expect([...walked].sort()).toEqual(['A', 'B', 'C', 'D', 'E', 'F']);
-  });
-
-  it('walks the chats sort exactly once per plot while the counts move', async () => {
-    const alice = await signUp('explore-moving-chats@example.com');
-    const bob = await signUp('explore-moving-chats-reader@example.com');
-    const ids = new Map<string, string>();
-    for (const [name, chatCount] of RANKED) {
-      ids.set(name, await seedPublic(alice, { name, chatCount }));
-    }
-
-    const walked = await walkExplore(bob, 'language=ko&sort=chats', async () => {
-      await db.update(plots).set({ chatCount: 5 }).where(eq(plots.id, ids.get('B')!));
-      await db.update(plots).set({ chatCount: 100 }).where(eq(plots.id, ids.get('E')!));
-    });
-
-    expect(walked.slice(0, 2)).toEqual(['A', 'B']);
-    expect([...walked].sort()).toEqual(['A', 'B', 'C', 'D', 'E', 'F']);
-  });
-
-  const walkRows = async (): Promise<number> =>
-    Number((await sql`select count(*)::int as n from feed_cursors`)[0]!['n']);
-
-  it('serves the first counter-sorted page without opening a walk', async () => {
-    const alice = await signUp('explore-page-one@example.com');
-    const bob = await signUp('explore-page-one-reader@example.com');
-    for (const [name, likeCount] of RANKED) await seedPublic(alice, { name, likeCount });
-
-    // The common case by far: a reader looks at the feed and never pages. That
-    // must cost no write at all, even though a next page exists.
-    const first = await readJson(await request(bob, '/api/explore?language=ko&sort=likes&limit=2'));
-    expect(first.items.map((item: any) => item.name)).toEqual(['A', 'B']);
-    expect(first.nextCursor).toEqual(expect.any(String));
-    expect(await walkRows()).toBe(0);
-
-    // The snapshot appears only when that cursor is actually consumed.
-    const second = await readJson(
-      await request(
-        bob,
-        `/api/explore?language=ko&sort=likes&limit=2&cursor=${encodeURIComponent(first.nextCursor)}`,
-      ),
-    );
-    expect(second.items.map((item: any) => item.name)).toEqual(['C', 'D']);
-    expect(await walkRows()).toBe(1);
-
-    // A feed that ends on its first page has no cursor and still writes nothing.
-    const whole = await request(bob, '/api/explore?language=ko&sort=likes&limit=48');
-    expect((await readJson(whole)).nextCursor).toBeNull();
-    expect(await walkRows()).toBe(1);
-  });
-
-  it('collects abandoned walks a capped batch at a time', async () => {
-    const alice = await signUp('explore-sweep@example.com');
-    const bob = await signUp('explore-sweep-reader@example.com');
-    for (const [name, likeCount] of RANKED) await seedPublic(alice, { name, likeCount });
-
-    // A quiet hour's worth of abandoned walks. The request that comes next must
-    // not pay for the whole backlog — arrays and all — before it can answer.
-    await sql`
-      insert into feed_cursors (seen, updated_at)
-      select '{}'::uuid[], now() - interval '2 hours' from generate_series(1, 60)`;
-    expect(await walkRows()).toBe(60);
-
-    const first = await readJson(await request(bob, '/api/explore?language=ko&sort=likes&limit=2'));
-    await request(
-      bob,
-      `/api/explore?language=ko&sort=likes&limit=2&cursor=${encodeURIComponent(first.nextCursor)}`,
-    );
-    // 50 swept, 10 stale left for the next opener, plus the walk just opened.
-    expect(await walkRows()).toBe(11);
-  });
-
-  it('answers a retried counter-sort page with the same plots', async () => {
-    const alice = await signUp('explore-retry@example.com');
-    const bob = await signUp('explore-retry-reader@example.com');
-    for (const [name, likeCount] of RANKED) await seedPublic(alice, { name, likeCount });
-
-    const page = async (cursor: string): Promise<any> =>
-      readJson(
-        await request(bob, `/api/explore?language=ko&sort=likes&limit=2&cursor=${encodeURIComponent(cursor)}`),
-      );
-    const names = (body: any): string[] => body.items.map((item: any) => item.name);
-
-    const first = await readJson(await request(bob, '/api/explore?language=ko&sort=likes&limit=2'));
-    // The first cursor carries page one rather than naming a walk, so consuming it
-    // twice opens two walks. Each is a consistent walk of its own; what matters is
-    // that both readers are handed the same page.
-    const second = await page(first.nextCursor);
-    const secondAgain = await page(first.nextCursor);
-    expect(names(second)).toEqual(['C', 'D']);
-    expect(names(secondAgain)).toEqual(['C', 'D']);
-    expect(secondAgain.nextCursor).not.toEqual(second.nextCursor);
-    expect(await walkRows()).toBe(2);
-
-    // Once a walk is open its cursor is a position in it, so a retry replays it
-    // byte for byte instead of selecting again.
-    const third = await page(second.nextCursor);
-    expect(names(third)).toEqual(['E', 'F']);
-    expect(await page(second.nextCursor)).toEqual(third);
-
-    // Still true once the counters have moved enough to change what a fresh
-    // selection would pick: the snapshot pins which rows the page holds and where
-    // the walk resumes. Their contents are read live, so a replay shows the
-    // current like count rather than a stale one.
-    await db.update(plots).set({ likeCount: 500 }).where(eq(plots.name, 'F'));
-    const replayed = await page(second.nextCursor);
-    expect(names(replayed)).toEqual(['E', 'F']);
-    expect(replayed.nextCursor).toEqual(third.nextCursor);
-    expect(replayed.items[1].likeCount).toBe(500);
-
-    // A cursor pointing at a walk that no longer exists is refused, not silently
-    // restarted at the top of the feed.
-    await sql`truncate table feed_cursors`;
-    const stale = await request(
-      bob,
-      `/api/explore?language=ko&sort=likes&limit=2&cursor=${encodeURIComponent(second.nextCursor)}`,
-    );
-    expect(stale.status).toBe(400);
-    expect((await readJson(stale)).code).toBe('invalid_request');
-  });
-
-  it('carries the member faces on every listing card', async () => {
-    const alice = await signUp('stack-owner@example.com');
-    const bob = await signUp('stack-reader@example.com');
-    const plot = await createPlot(alice, {
-      name: '얼굴 있는 작품',
-      description: '설명',
-      intros: ['도입부'],
-    });
-    const gif = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 2, 3]);
-    const first = await addCharacter(alice, plot.id, { name: '첫 멤버' });
-    const second = await addCharacter(alice, plot.id, { name: '둘째 멤버' });
-    await uploadFile(alice, `/api/plots/${plot.id}/characters/${first.id}/avatar`, gif, 'a.gif');
-    await publish(alice, plot.id);
-
-    const [card] = (await readJson(await request(bob, '/api/explore?language=ko'))).items;
-    // In the creator's order, and a member with no picture leaves a null behind
-    // rather than dropping out of the stack.
-    expect(card.characters).toEqual([
-      {
-        id: first.id,
-        name: '첫 멤버',
-        nickname: null,
-        avatarUrl: `/api/plots/${plot.id}/characters/${first.id}/avatar`,
-      },
-      { id: second.id, name: '둘째 멤버', nickname: null, avatarUrl: null },
-    ]);
-    // The card grid never counts comments, and never carries a definition.
-    expect(card.commentCount).toBeUndefined();
-    expect(card.description).toBeUndefined();
-    expect(card.lorebook).toBeUndefined();
-  });
-
-  it('never serves an embedded card with a public avatar', async () => {
-    const alice = await signUp('avatar-card@example.com');
-    const bob = await signUp('avatar-card-reader@example.com');
-    const png = buildPngWithTextChunks({
-      chara: Buffer.from(JSON.stringify(v2Card), 'utf-8').toString('base64'),
-    });
-    const plot = await importCard(alice, new File([png], 'lian.png', { type: 'image/png' }));
-    const member = plot.characters[0];
-    const url = `/api/plots/${plot.id}/characters/${member.id}/avatar`;
-    // The import itself still reads the card out of the same bytes.
-    expect(member.card.description).toBe('왕립 도서관의 사서.');
-    await publish(alice, plot.id, true, { rightsConfirmed: true });
-
-    const served = new Uint8Array(await (await request(bob, url)).arrayBuffer());
-    expect(readPngTextChunks(served).size).toBe(0);
-    // Image data survives: what is left is byte-identical to the same PNG built
-    // without any text chunk.
-    expect(served).toEqual(buildPngWithTextChunks({}));
-
-    // An avatar that reached the store without passing the stripping is cleaned
-    // up by publishing.
-    await writeFile(join(storageDir, 'avatars', `${member.id}.png`), png);
-    expect(readPngTextChunks(new Uint8Array(await (await request(bob, url)).arrayBuffer())).size).toBe(1);
-    await publish(alice, plot.id, true, { rightsConfirmed: true });
-    const resanitized = new Uint8Array(await (await request(bob, url)).arrayBuffer());
-    expect(readPngTextChunks(resanitized).size).toBe(0);
-    expect(resanitized).toEqual(buildPngWithTextChunks({}));
-  });
-
-  it("puts the work's setting after the card, in RisuAI's description, and merges the lorebooks", async () => {
-    const cookie = await signUp('plot-prompt@example.com');
-    const { plotId, chatId } = await setupChat(cookie);
-    const member = await firstMember(cookie, plotId);
-
-    await patchPlot(cookie, plotId, {
-      name: '아르카디아',
-      description: '마법이 흔한 도시국가다.',
-      lorebook: [{ keys: ['길드'], content: '길드는 다섯 개다.', insertionOrder: 10 }],
-    });
-    await patchCharacter(cookie, plotId, member.id, {
-      card: { ...member.card, lorebook: [{ keys: ['길드'], content: '사서는 야근을 한다.', insertionOrder: 5 }] },
-    });
-
-    const { app: capturing, prompts } = capturingApp();
-    await readSse(
-      await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '길드 이야기를 해줘' }, capturing),
-    );
-
-    // RisuAI's description of the one member: the card, its personality, then the
-    // circumstances — here the work's setting, which took the card's scenario's place.
-    expect(prompts.at(-1)!.system).toContain(
-      `[Roleplay Setting]\n왕립 도서관의 사서.\n\nDescription of 리안: 조용하고 꼼꼼하다.\n\n${scenarioLine('마법이 흔한 도시국가다.')}\n`,
-    );
-    // Both lorebooks activate, ordered by insertionOrder across the merge — keyword lore, after the reader's turn.
-    expectAfterNewestTurn(prompts.at(-1)!, '길드 이야기를 해줘', '사서는 야근을 한다.\n\n길드는 다섯 개다.');
-  });
-
-  it('shares one lore budget between the plot and its members', async () => {
-    const cookie = await signUp('plot-budget@example.com');
-    const { plotId, chatId } = await setupChat(cookie);
-    const member = await firstMember(cookie, plotId);
-    const plotEntry = '작품 로어: 길드는 다섯 개다.';
-    const memberEntry = '등장인물 로어: 사서는 야근을 한다.';
-
-    await patchPlot(cookie, plotId, {
-      lorebook: [{ keys: ['길드'], content: plotEntry, insertionOrder: 0 }],
-    });
-    await patchCharacter(cookie, plotId, member.id, {
-      card: {
-        ...member.card,
-        lorebook: [{ keys: ['길드'], content: memberEntry, insertionOrder: 1 }],
-        // Room for exactly one of the two: the budget is one budget.
-        loreSettings: { ...member.card.loreSettings, tokenBudget: countTokens(plotEntry) },
-      },
-    });
-
-    const { app: capturing, prompts } = capturingApp();
-    await readSse(
-      await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '길드 이야기' }, capturing),
-    );
-
-    const sent = sentText(prompts.at(-1)!);
-    expect(sent).toContain(plotEntry);
-    expect(sent).not.toContain(memberEntry);
-  });
-
-  it('writes every member into the prompt, in the creator’s order', async () => {
-    const cookie = await signUp('plot-roster-prompt@example.com');
-    const plot = await createPlot(cookie, {
-      name: '아르카디아',
-      description: '마법이 흔한 도시국가다.',
-      intros: ['문 앞이다'],
-    });
-    const first = await addCharacter(cookie, plot.id, {
-      name: '리안',
-      card: { description: '왕립 도서관의 사서.', personality: '조용하다.' },
-    });
-    const second = await addCharacter(cookie, plot.id, {
-      name: '세라',
-      card: { description: '기사단장.' },
-    });
-    const { chat } = await startChat(cookie, plot.id);
-
-    const { app: capturing, prompts } = capturingApp();
-    await readSse(await json(cookie, `/api/chats/${chat.id}/messages`, 'POST', { content: '안녕' }, capturing));
-
-    // A scene of several: every member described under their name, and the work's setting once after them.
-    const system = prompts.at(-1)!.system;
-    expect(system).toContain('[Roleplay Setting]\n[리안]\n\n왕립 도서관의 사서.\n\nDescription of 리안: 조용하다.\n');
-    expect(system).toContain('[Roleplay Setting]\n[세라]\n\n기사단장.\n');
-    const setting = `[Roleplay Setting]\n${scenarioLine('마법이 흔한 도시국가다.')}\n`;
-    expect(system).toContain(setting);
-    expect(system.indexOf('[리안]')).toBeLessThan(system.indexOf('[세라]'));
-    expect(system.indexOf('[세라]')).toBeLessThan(system.indexOf(setting));
-
-    // Reordering the roster reorders the blocks.
-    await json(cookie, `/api/plots/${plot.id}/characters/reorder`, 'POST', {
-      ids: [second.id, first.id],
-    });
-    await readSse(await json(cookie, `/api/chats/${chat.id}/messages`, 'POST', { content: '또' }, capturing));
-    const after = prompts.at(-1)!.system;
-    expect(after.indexOf('[세라]')).toBeLessThan(after.indexOf('[리안]'));
-    expect(after.indexOf('[리안]')).toBeLessThan(after.indexOf(setting));
-  });
-
-  it('takes the cover away with the plot it belonged to', async () => {
-    const alice = await signUp('plot-cover-delete@example.com');
-    const plot = await createPlot(alice, { name: '아르카디아' });
-    await uploadFile(alice, `/api/plots/${plot.id}/cover`, buildPngWithTextChunks({}), 'c.png');
-    await readFile(join(storageDir, 'covers', `${plot.id}.png`));
-
-    expect((await request(alice, `/api/plots/${plot.id}`, 'DELETE')).status).toBe(204);
-    await expect(readFile(join(storageDir, 'covers', `${plot.id}.png`))).rejects.toThrow();
-  });
-});
-
 describe('job queue', () => {
-  /** A payload of the one kind there is; the queue does not read into it. */
-  const payload = (plotId = randomUUID(), actorId = 'author') => ({
-    kind: 'plot_published' as const,
-    plotId,
-    actorId,
-    publishedAt: new Date().toISOString(),
-  });
+  /** A payload of one kind; the queue does not read into it. */
+  const payload = (chatId = randomUUID()) => ({ chatId });
 
   /** Enqueues the way a route does: inside a transaction of its own. */
   const enqueue = (body = payload(), opts?: { runAt?: Date }): Promise<void> =>
-    db.transaction((tx) => enqueueJob(tx, 'notification_fanout', body, opts));
+    db.transaction((tx) => enqueueJob(tx, 'memory_backfill', body, opts));
 
   const readJob = async (): Promise<any> => (await db.select().from(jobs))[0];
 
-  /** The real registry with the fan-out lane replaced; this suite is about the queue, not the handlers. */
-  const handlersOf = (handler: JobHandlers['notification_fanout']): JobHandlers => ({
+  /** The real registry with the backfill lane replaced; this suite is about the queue, not the handlers. */
+  const handlersOf = (handler: JobHandlers['memory_backfill']): JobHandlers => ({
     ...jobHandlers,
-    notification_fanout: handler,
+    memory_backfill: handler,
   });
 
-  /** What a fan-out payload is about. These tests only ever enqueue the plot kind. */
-  const subjectOf = (body: JobPayloadMap['notification_fanout']): string =>
-    body.plotId;
+  /** What a payload is about. */
+  const subjectOf = (body: JobPayloadMap['memory_backfill']): string => body.chatId;
 
   it('runs a queued job once, with the payload it was given', async () => {
     const seen: unknown[] = [];
@@ -10377,7 +9419,7 @@ describe('job queue', () => {
     const [first, second] = await Promise.all([drainJobs(db, handlers), drainJobs(db, handlers)]);
     expect(first + second).toBe(4);
     // Every job ran, and none of them ran twice.
-    expect([...seen].sort()).toEqual(bodies.map((body) => body.plotId).sort());
+    expect([...seen].sort()).toEqual(bodies.map((body) => body.chatId).sort());
     const rows = await db.select().from(jobs);
     expect(rows.map((row) => [row.status, row.attempts])).toEqual([
       ['done', 1],
@@ -10502,7 +9544,7 @@ describe('job queue', () => {
         timeout: 2_000,
         interval: 10,
       });
-      expect(seen).toEqual([body.plotId]);
+      expect(seen).toEqual([body.chatId]);
     } finally {
       stopWorker();
     }
@@ -10511,186 +9553,7 @@ describe('job queue', () => {
     await enqueue();
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(await db.select().from(jobs).where(eq(jobs.status, 'pending'))).toHaveLength(1);
-    expect(seen).toEqual([body.plotId]);
-  });
-});
-
-describe('publish fan-out', () => {
-  async function userIdOf(_cookie: string): Promise<string> {
-    return (await ownerId());
-  }
-
-  /**
-   * Followers straight into the tables. The fan-out reads rows and not sessions,
-   * and a few thousand sign-ups would be a password hash each.
-   */
-  async function seedFollowers(
-    creatorId: string,
-    count: number,
-    prefix: string,
-    createdAt?: Date,
-  ): Promise<string[]> {
-    const ids = Array.from({ length: count }, (_, i) => `${prefix}-${i}`);
-    await db.insert(user).values(ids.map((id) => ({ id, name: id, email: `${id}@example.com` })));
-    // One statement, so every row carries the same `created_at` — which is the tie
-    // the keyset walk has to break on the follower id. `createdAt` states it outright
-    // where a test has to be sure which side of the publish a follow fell on.
-    await db
-      .insert(follows)
-      .values(ids.map((id) => ({ followerId: id, creatorId, ...(createdAt ? { createdAt } : {}) })));
-    return ids;
-  }
-
-  /** The publish stamp the enqueue sends along as the fan-out's cutoff. */
-  const publishedAtOf = async (plotId: string): Promise<Date> =>
-    (await db.select({ at: plots.publishedAt }).from(plots).where(eq(plots.id, plotId)))[0]!.at!;
-
-  /** The payload the queue would have carried, for a handler a test runs by hand. */
-  const fanoutPayload = async (plotId: string, actorId: string) => ({
-    kind: 'plot_published' as const,
-    plotId,
-    actorId,
-    publishedAt: (await publishedAtOf(plotId)).toISOString(),
-  });
-
-  const notifiedBy = async (plotId: string): Promise<string[]> =>
-    (await db.select({ userId: notifications.userId }).from(notifications).where(eq(notifications.plotId, plotId)))
-      .map((row) => row.userId)
-      .sort();
-
-  /**
-   * The db a handler sees, with a seam right after its first insert lands: the walk
-   * has read one batch and taken its boundary from it, and this is where something
-   * happens to the world before the next batch is read. It stands in for exactly the
-   * two calls the fan-out makes of its handle, so a fan-out that starts using a
-   * third breaks here rather than quietly skipping the seam.
-   */
-  function dbWithSeamAfterFirstInsert(between: () => Promise<void>): Db {
-    let fired = false;
-    return {
-      select: db.select.bind(db),
-      insert: (table: any) => ({
-        values: (rows: any) => ({
-          onConflictDoNothing: async () => {
-            await db.insert(table).values(rows).onConflictDoNothing();
-            if (fired) return;
-            fired = true;
-            await between();
-          },
-        }),
-      }),
-    } as unknown as Db;
-  }
-
-  /** Publishes without draining: these tests run the fan-out themselves. */
-  const publishOnly = async (cookie: string, id: string): Promise<any> => {
-    const res = await json(cookie, `/api/plots/${id}/publish`, 'POST', { publish: true });
-    expect(res.status, await res.clone().text()).toBe(200);
-    return readJson(res);
-  };
-
-  it('notifies every follower across batches, and announces nothing twice', async () => {
-    const alice = await signUp('fanout-creator@example.com');
-    const aliceId = await userIdOf(alice);
-    const followers = await seedFollowers(aliceId, 25, 'fanout-follower');
-    const plot = await publishablePlot(alice, { name: '팬아웃 작품' });
-
-    await publishOnly(alice, plot.id);
-    // One job, and no rows until it runs: the publish hands the work over rather
-    // than doing it.
-    expect(await db.select().from(jobs)).toHaveLength(1);
-    expect(await notifiedBy(plot.id)).toEqual([]);
-
-    // Five to a batch, so the walk has to come back six times for twenty-five
-    // followers — including the last, empty read.
-    const batched: JobHandlers = {
-      ...jobHandlers,
-      notification_fanout: (handlerDb, body) => notificationFanout(handlerDb, body, 5),
-    };
-    expect(await drainJobs(db, batched)).toBe(1);
-    expect(await notifiedBy(plot.id)).toEqual([...followers].sort());
-    // The creator follows nobody, least of all themselves.
-    expect((await notifiedBy(plot.id)).includes(aliceId)).toBe(false);
-
-    // Running the fan-out again is a re-delivery of nothing: the rows an earlier
-    // attempt wrote conflict instead of arriving a second time.
-    await notificationFanout(db, await fanoutPayload(plot.id, aliceId), 5);
-    expect(await notifiedBy(plot.id)).toEqual([...followers].sort());
-  });
-
-  it('does not notify a reader who followed after the publish', async () => {
-    const alice = await signUp('fanout-late-creator@example.com');
-    const aliceId = await userIdOf(alice);
-    const [early] = await seedFollowers(aliceId, 1, 'fanout-early-follower');
-    const plot = await publishablePlot(alice, { name: '늦은 팔로우' });
-    await publishOnly(alice, plot.id);
-
-    // The job sits in the queue while somebody new follows. What the fan-out is
-    // about is the moment of the publish, not the moment a worker got to it —
-    // following is not a subscription to the past, however late the work is done.
-    const publishedAt = await publishedAtOf(plot.id);
-    await seedFollowers(aliceId, 1, 'fanout-late-follower', new Date(publishedAt.getTime() + 1_000));
-
-    expect(await drainJobs(db, jobHandlers)).toBe(1);
-    expect(await notifiedBy(plot.id)).toEqual([early]);
-  });
-
-  it('finishes the walk when the follow it took its boundary from is gone', async () => {
-    const alice = await signUp('fanout-boundary-creator@example.com');
-    const aliceId = await userIdOf(alice);
-    const followers = await seedFollowers(aliceId, 12, 'fanout-boundary-follower');
-    const plot = await publishablePlot(alice, { name: '경계 팔로우' });
-    await publishOnly(alice, plot.id);
-
-    // Five to a batch, so the fifth row of the walk is the boundary the second batch
-    // starts from.
-    const walk = await db
-      .select({ id: follows.followerId })
-      .from(follows)
-      .where(eq(follows.creatorId, aliceId))
-      .orderBy(desc(follows.createdAt), desc(follows.followerId));
-    const boundary = walk[4]!.id;
-
-    // That reader unfollows between the first batch and the second — which is
-    // allowed, and must not end the walk. Everyone after them in the order has not
-    // been told yet.
-    const unfollowing = dbWithSeamAfterFirstInsert(async () => {
-      await db.delete(follows).where(and(eq(follows.creatorId, aliceId), eq(follows.followerId, boundary)));
-    });
-    await notificationFanout(unfollowing, await fanoutPayload(plot.id, aliceId), 5);
-
-    // All twelve: the one who left was in the batch that had already landed.
-    expect(await notifiedBy(plot.id)).toEqual([...followers].sort());
-  });
-
-  it('queues nothing for a publish that announces nothing', async () => {
-    const alice = await signUp('fanout-quiet-creator@example.com');
-    const aliceId = await userIdOf(alice);
-    await seedFollowers(aliceId, 3, 'fanout-quiet-follower');
-
-    // Only the first publish announces anything; an unpublish keeps `published_at`,
-    // so the second one has nothing to say either.
-    const plain = await publishablePlot(alice, { name: '일반 작품' });
-    await publishOnly(alice, plain.id);
-    expect(await db.select().from(jobs)).toHaveLength(1);
-    await json(alice, `/api/plots/${plain.id}/publish`, 'POST', { publish: false });
-    await publishOnly(alice, plain.id);
-    expect(await db.select().from(jobs)).toHaveLength(1);
-  });
-
-  it('leaves nothing to announce when the plot is gone before the job runs', async () => {
-    const alice = await signUp('fanout-deleted-creator@example.com');
-    const aliceId = await userIdOf(alice);
-    await seedFollowers(aliceId, 3, 'fanout-deleted-follower');
-    const plot = await publishablePlot(alice, { name: '지워질 작품' });
-    await publishOnly(alice, plot.id);
-    expect((await request(alice, `/api/plots/${plot.id}`, 'DELETE')).status).toBe(204);
-
-    // The job still runs, finds nothing to announce and finishes — rather than
-    // failing its foreign key on every attempt until it gives up.
-    expect(await drainJobs(db, jobHandlers)).toBe(1);
-    expect(await db.select().from(notifications)).toHaveLength(0);
-    expect((await db.select().from(jobs))[0]).toMatchObject({ status: 'done', attempts: 1 });
+    expect(seen).toEqual([body.chatId]);
   });
 });
 
@@ -10800,26 +9663,6 @@ describe('plot draft', () => {
     expect(used.at(-1)).toBe('test/reasoning');
   });
 
-  it('writes one draft at a time per creator', async () => {
-    const cookie = await signUp('draft-busy@example.com');
-    const other = await signUp('draft-busy-2@example.com');
-    const { getAdapter, started, release } = gatedGetAdapter(DRAFT);
-    const drafting = makeApp({ getAdapter });
-
-    const first = json(cookie, '/api/plots/draft', 'POST', { premise: '밤의 도서관' }, drafting);
-    await started;
-    const second = await json(cookie, '/api/plots/draft', 'POST', { premise: '또 하나' }, drafting);
-    expect(second.status).toBe(429);
-    expect((await readJson(second)).code).toBe('draft_in_progress');
-    // Per creator, not per instance: someone else's draft is not held up by it.
-    const theirs = json(other, '/api/plots/draft', 'POST', { premise: '다른 사람' }, drafting);
-
-    release();
-    expect((await first).status).toBe(200);
-    expect((await theirs).status).toBe(200);
-    // And the slot is given back once the call is over.
-    expect((await json(cookie, '/api/plots/draft', 'POST', { premise: '다시' }, drafting)).status).toBe(200);
-  });
 });
 
 describe('reply suggestions', () => {
@@ -10918,18 +9761,12 @@ describe('reply suggestions', () => {
     const { getAdapter, started, release } = gatedGetAdapter(SUGGESTIONS);
     const suggesting = makeApp({ getAdapter });
 
-    // A claim on the chat row is what a running stream leaves behind.
-    await db.update(chats).set({ generatingAt: new Date() }).where(eq(chats.id, chatId));
+    // A running stream holds the chat's slot.
+    depsOfApp.get(suggesting)!.generating.add(chatId);
     const busy = await json(cookie, `/api/chats/${chatId}/suggest`, 'POST', undefined, suggesting);
     expect(busy.status).toBe(429);
     expect((await readJson(busy)).code).toBe('generation_in_progress');
-
-    // A claim nobody renewed belongs to an instance that died, and must not
-    // leave the chat without suggestions forever.
-    await db
-      .update(chats)
-      .set({ generatingAt: new Date(Date.now() - 5 * 60_000) })
-      .where(eq(chats.id, chatId));
+    depsOfApp.get(suggesting)!.generating.delete(chatId);
 
     const first = json(cookie, `/api/chats/${chatId}/suggest`, 'POST', undefined, suggesting);
     await started;
@@ -10955,9 +9792,9 @@ describe('plot assets', () => {
   const gif = (marker: number): Uint8Array =>
     Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, marker]);
 
-  /** A plot with enough substance to publish, so the visibility rules bite. */
+  /** A plot with a member, a setting and an opening. */
   async function newPlot(cookie: string, name = '에셋 작품'): Promise<any> {
-    return publishablePlot(cookie, { name, description: `${name} 설명`, intros: [`${name}의 도입부`] });
+    return playablePlot(cookie, { name, description: `${name} 설명`, intros: [`${name}의 도입부`] });
   }
 
   function upload(
@@ -11384,269 +10221,6 @@ describe('plot assets', () => {
     expect((await request(cookie, `/api/plots/${plot.id}`, 'DELETE')).status).toBe(204);
     expect((await request(cookie, created.url)).status).toBe(404);
     await expect(readFile(join(storageDir, path))).rejects.toThrow();
-  });
-});
-
-describe('safety level', () => {
-  it('refuses the adult level until age verification exists', async () => {
-    const cookie = await signUp('safety-adult@example.com');
-    const created = await publishablePlot(cookie, { name: '검증' });
-    expect(created.safetyLevel).toBe('all');
-
-    // Every write that may declare a level refuses `adult`, as it does a level
-    // that never existed.
-    for (const safetyLevel of ['adult', 'teen']) {
-      const published = await json(cookie, `/api/plots/${created.id}/publish`, 'POST', {
-        publish: true,
-        safetyLevel,
-      });
-      expect(published.status, safetyLevel).toBe(400);
-      expect((await readJson(published)).code).toBe('invalid_request');
-      const patched = await json(cookie, `/api/plots/${created.id}`, 'PATCH', { safetyLevel });
-      expect(patched.status, safetyLevel).toBe(400);
-      expect((await readJson(patched)).code).toBe('invalid_request');
-      const fresh = await json(cookie, '/api/plots', 'POST', { name: '새 작품', safetyLevel });
-      expect(fresh.status, safetyLevel).toBe(400);
-      expect((await readJson(fresh)).code).toBe('invalid_request');
-    }
-
-    // Refused before anything was written.
-    expect(await readPlot(cookie, created.id)).toMatchObject({ visibility: 'private', safetyLevel: 'all' });
-    expect((await publishPlot(cookie, created.id, { safetyLevel: 'all' })).safetyLevel).toBe('all');
-  });
-});
-
-describe('plot comments', () => {
-  /** A published plot, ready to be commented on. */
-  async function publicPlot(cookie: string, name = '댓글 작품'): Promise<string> {
-    const created = await publishablePlot(cookie, {
-      name,
-      description: `${name} 설명`,
-      intros: [`${name}의 도입부`],
-    });
-    await publishPlot(cookie, created.id);
-    return created.id;
-  }
-
-  async function comment(cookie: string, plotId: string, body: unknown): Promise<any> {
-    const res = await json(cookie, `/api/plots/${plotId}/comments`, 'POST', body);
-    expect(res.status, await res.clone().text()).toBe(201);
-    return readJson(res);
-  }
-
-  async function list(cookie: string | undefined, plotId: string, query = ''): Promise<any> {
-    const res = await request(cookie, `/api/plots/${plotId}/comments${query}`);
-    expect(res.status, await res.clone().text()).toBe(200);
-    return readJson(res);
-  }
-
-  const contentsOf = (page: any): string[] => page.items.map((item: any) => item.content);
-
-  const countOf = async (cookie: string, plotId: string): Promise<number> =>
-    (await readPublicPlot(cookie, plotId)).commentCount;
-
-  it('rejects a second reply level and a parent from another plot', async () => {
-    const alice = await signUp('comment-parent@example.com');
-    const one = await publicPlot(alice, '첫 작품');
-    const two = await publicPlot(alice, '둘째 작품');
-    const top = await comment(alice, one, { content: '최상위 댓글' });
-    const reply = await comment(alice, one, { content: '대댓글', parentId: top.id });
-
-    const nested = await json(alice, `/api/plots/${one}/comments`, 'POST', {
-      content: '대대댓글',
-      parentId: reply.id,
-    });
-    expect(nested.status).toBe(400);
-    expect((await readJson(nested)).code).toBe('invalid_request');
-
-    // A comment of another plot is no parent, and no comment either.
-    const foreign = await json(alice, `/api/plots/${two}/comments`, 'POST', {
-      content: '남의 글에 붙이기',
-      parentId: top.id,
-    });
-    expect(foreign.status).toBe(404);
-
-    for (const parentId of [randomUUID(), 'not-a-uuid']) {
-      const res = await json(alice, `/api/plots/${one}/comments`, 'POST', {
-        content: '없는 부모',
-        parentId,
-      });
-      expect(res.status).toBe(404);
-    }
-  });
-
-  it('rejects blank and over-long content', async () => {
-    const cookie = await signUp('comment-validation@example.com');
-    const plotId = await publicPlot(cookie);
-
-    const blank = await json(cookie, `/api/plots/${plotId}/comments`, 'POST', {
-      content: '   \n  ',
-    });
-    expect(blank.status).toBe(400);
-    expect((await readJson(blank)).code).toBe('invalid_request');
-
-    const long = await json(cookie, `/api/plots/${plotId}/comments`, 'POST', {
-      content: 'ㄱ'.repeat(501),
-    });
-    expect(long.status).toBe(400);
-    expect((await readJson(long)).code).toBe('comment_limit');
-
-    // The cap itself still fits.
-    expect((await comment(cookie, plotId, { content: 'ㄱ'.repeat(500) })).content).toHaveLength(500);
-  });
-
-  it('keeps a deleted comment only while it anchors a reply, and keeps nothing of it', async () => {
-    const alice = await signUp('comment-delete-owner@example.com');
-    const bob = await signUp('comment-delete-reader@example.com');
-    const plotId = await publicPlot(alice);
-
-    const anchored = await comment(bob, plotId, { content: '지워질 댓글', spoiler: true });
-    const reply = await comment(alice, plotId, { content: '남는 대댓글', parentId: anchored.id });
-    const lonely = await comment(bob, plotId, { content: '혼자 지워질 댓글' });
-
-    expect((await request(alice, `/api/comments/${anchored.id}`, 'DELETE')).status).toBe(204);
-    expect((await request(bob, `/api/comments/${lonely.id}`, 'DELETE')).status).toBe(204);
-
-    // The one with a reply stays as a placeholder; the one without is simply gone.
-    const page = await list(bob, plotId);
-    expect(page.items).toHaveLength(1);
-    expect(page.items[0].id).toBe(anchored.id);
-    expect(page.items[0].deleted).toBe(true);
-    expect(page.items[0].content).toBe('');
-    expect(page.items[0].authorName).toBeNull();
-    expect(page.items[0].spoiler).toBe(false);
-    expect(page.items[0].canDelete).toBe(false);
-    expect(page.items[0].replies.map((item: any) => item.content)).toEqual(['남는 대댓글']);
-    expect(await countOf(bob, plotId)).toBe(1);
-
-    // The words are gone from the database, not just from the response.
-    const stored = await db.select().from(comments).where(eq(comments.id, anchored.id));
-    expect(stored[0]!.content).toBe('');
-    expect(stored[0]!.spoiler).toBe(false);
-    expect(stored[0]!.deletedAt).not.toBeNull();
-
-    // A placeholder is not a comment: nothing new attaches to it.
-    const late = await json(bob, `/api/plots/${plotId}/comments`, 'POST', {
-      content: '늦은 대댓글',
-      parentId: anchored.id,
-    });
-    expect(late.status).toBe(404);
-
-    // Once the last live reply goes, the placeholder has nothing left to anchor.
-    expect((await request(alice, `/api/comments/${reply.id}`, 'DELETE')).status).toBe(204);
-    expect((await list(bob, plotId)).items).toEqual([]);
-    expect(await countOf(bob, plotId)).toBe(0);
-  });
-
-  it('closes the section when the creator turns comments off', async () => {
-    const alice = await signUp('comment-switch-owner@example.com');
-    const bob = await signUp('comment-switch-reader@example.com');
-    const plotId = await publicPlot(alice);
-    await comment(bob, plotId, { content: '이미 있는 댓글' });
-
-    const closed = await patchPlot(alice, plotId, { commentsEnabled: false });
-    expect(closed.commentsEnabled).toBe(false);
-
-    const write = await json(bob, `/api/plots/${plotId}/comments`, 'POST', { content: '새 댓글' });
-    expect(write.status).toBe(403);
-    expect((await readJson(write)).code).toBe('comments_disabled');
-    // Not even the creator writes past their own switch.
-    expect(
-      (await json(alice, `/api/plots/${plotId}/comments`, 'POST', { content: '나도' })).status,
-    ).toBe(403);
-
-    expect((await list(bob, plotId)).items).toEqual([]);
-    const detail = await readPublicPlot(bob, plotId);
-    expect(detail.commentsEnabled).toBe(false);
-    expect(detail.commentCount).toBe(0);
-
-    // Turning it back on brings the existing comments back untouched.
-    await patchPlot(alice, plotId, { commentsEnabled: true });
-    expect(contentsOf(await list(bob, plotId))).toEqual(['이미 있는 댓글']);
-    expect(await countOf(bob, plotId)).toBe(1);
-  });
-
-  it('walks the top-level comments with the cursor', async () => {
-    const cookie = await signUp('comment-cursor@example.com');
-    const plotId = await publicPlot(cookie);
-    const created: any[] = [];
-    for (let i = 0; i < 5; i += 1) {
-      created.push(await comment(cookie, plotId, { content: `댓글 ${i}` }));
-    }
-    // Replies ride along with their parent and never take a slot in the page.
-    await comment(cookie, plotId, { content: '대댓글', parentId: created[4].id });
-
-    const first = await list(cookie, plotId, '?limit=2');
-    expect(contentsOf(first)).toEqual(['댓글 4', '댓글 3']);
-    expect(first.items[0].replies).toHaveLength(1);
-
-    const second = await list(cookie, plotId, `?limit=2&cursor=${encodeURIComponent(first.nextCursor)}`);
-    expect(contentsOf(second)).toEqual(['댓글 2', '댓글 1']);
-
-    const third = await list(cookie, plotId, `?limit=2&cursor=${encodeURIComponent(second.nextCursor)}`);
-    expect(contentsOf(third)).toEqual(['댓글 0']);
-    expect(third.nextCursor).toBeNull();
-
-    // The cursor is opaque, so anything unreadable is a bad request.
-    const bad = await request(cookie, `/api/plots/${plotId}/comments?cursor=not-a-cursor`);
-    expect(bad.status).toBe(400);
-    expect((await readJson(bad)).code).toBe('invalid_request');
-
-    // A cursor id is compared against a uuid column: a malformed one is refused
-    // here rather than blowing up in Postgres.
-    const malformed = encodeCursor({ createdAt: new Date().toISOString(), id: 'not-a-uuid' });
-    const res = await request(
-      cookie,
-      `/api/plots/${plotId}/comments?cursor=${encodeURIComponent(malformed)}`,
-    );
-    expect(res.status).toBe(400);
-    expect((await readJson(res)).code).toBe('invalid_request');
-  });
-
-  it('does not skip comments that share a millisecond across a page boundary', async () => {
-    const cookie = await signUp('comment-microsecond@example.com');
-    const plotId = await publicPlot(cookie);
-    const older = await comment(cookie, plotId, { content: '같은 밀리초 1' });
-    const newer = await comment(cookie, plotId, { content: '같은 밀리초 2' });
-    // The same millisecond, microseconds apart: the serialized cursor cannot tell
-    // them apart, so the boundary has to be read back from the row itself.
-    await sql`update comments set created_at = ${microsecond('000200')}::timestamptz where id = ${older.id}::uuid`;
-    await sql`update comments set created_at = ${microsecond('000700')}::timestamptz where id = ${newer.id}::uuid`;
-
-    const first = await list(cookie, plotId, '?limit=1');
-    expect(contentsOf(first)).toEqual(['같은 밀리초 2']);
-
-    const second = await list(
-      cookie,
-      plotId,
-      `?limit=1&cursor=${encodeURIComponent(first.nextCursor)}`,
-    );
-    expect(contentsOf(second)).toEqual(['같은 밀리초 1']);
-    expect(second.nextCursor).toBeNull();
-  });
-
-  it('still walks to the end when the row the cursor names is gone', async () => {
-    const cookie = await signUp('comment-cursor-gone@example.com');
-    const plotId = await publicPlot(cookie);
-    const older = await comment(cookie, plotId, { content: '남는 댓글' });
-    const newer = await comment(cookie, plotId, { content: '사라질 댓글' });
-    // A millisecond apart, which is all the fallback has to work with.
-    await sql`update comments set created_at = ${microsecond('001000')}::timestamptz where id = ${older.id}::uuid`;
-    await sql`update comments set created_at = ${microsecond('002000')}::timestamptz where id = ${newer.id}::uuid`;
-
-    const first = await list(cookie, plotId, '?limit=1');
-    expect(contentsOf(first)).toEqual(['사라질 댓글']);
-
-    // Nothing in the API erases a comment row, but the plot it hangs off can
-    // take it with it — the cursor then falls back to the timestamp it carries.
-    await sql`delete from comments where id = ${newer.id}::uuid`;
-    const second = await list(
-      cookie,
-      plotId,
-      `?limit=1&cursor=${encodeURIComponent(first.nextCursor)}`,
-    );
-    expect(contentsOf(second)).toEqual(['남는 댓글']);
-    expect(second.nextCursor).toBeNull();
   });
 });
 
@@ -12643,13 +11217,10 @@ describe('prompt host data', () => {
   it('carries the nickname on every member a screen reads, and reads {{char}} as it', async () => {
     const owner = await signUp('nickname-owner@example.com');
     const reader = await signUp('nickname-reader@example.com');
-    const plot = await publishablePlot(owner, {}, { name: '아리아 블랑', card: { nickname: '아리', description: '{{char}}는 마녀' } });
+    const plot = await playablePlot(owner, {}, { name: '아리아 블랑', card: { nickname: '아리', description: '{{char}}는 마녀' } });
     const member = plot.characters[0];
     expect(member.nickname).toBe('아리');
-    await publishPlot(owner, plot.id);
     expect((await readPublicPlot(reader, plot.id)).characters[0]).toMatchObject({ name: '아리아 블랑', nickname: '아리' });
-    const [card] = (await readJson(await request(reader, '/api/explore?language=ko'))).items;
-    expect(card.characters[0]).toMatchObject({ name: '아리아 블랑', nickname: '아리' });
 
     const { app, systems } = capturingApp('대답');
     const chat = await startChat(reader, plot.id);
@@ -13934,7 +12505,8 @@ describe('editRequest listeners', () => {
     expect(prompts.at(-1)!.system).toContain('설명');
     expect(prompts.at(-1)!.system).not.toContain('루아가 바꾼 설명');
     const scripts = (await readJson(await request(cookie, `/api/chats/${chatId}/scripts`))).scripts;
-    expect(scripts.overlay.member).toEqual({ name: '세라', description: '루아가 바꾼 설명' });
+    // Written into the character itself, as RisuAI's listener writes `DBState.db.characters`.
+    expect(scripts.character).toMatchObject({ name: '세라', description: '루아가 바꾼 설명' });
     expect(scripts.localLore).toEqual([expect.objectContaining({ name: '등불', content: '이 챗의 등불', constant: true })]);
 
     await send(cookie, chatId, capturing, '다시');
@@ -14236,11 +12808,11 @@ describe('editRequest listeners', () => {
     expect(prompts.at(-1)!.system).toBe(`n=1`);
   });
 
-  it('drops only the rewrite that would take the reader’s overlay past its size, and keeps the reply and the rest', async () => {
+  it('drops only the rewrite past its size, and keeps the reply and the rest — the first message the work’s', async () => {
     const { app: capturing } = capturingApp();
     const cookie = await signUp('lua-overlay-cap@example.com');
-    const plot = await createPlot(cookie, { name: '루아 작품', description: '설명', intros: ['문 앞이다.'] });
-    const member = await addCharacter(cookie, plot.id, {
+    const plot = await createPlot(cookie, { name: '루아 작품', description: '설명', intros: ['문 앞이다.', '다른 문이다.'] });
+    await addCharacter(cookie, plot.id, {
       name: '아리아',
       card: {
         description: '설명',
@@ -14249,9 +12821,8 @@ describe('editRequest listeners', () => {
             triggerscript: [
               lua(
                 listening(`
-                  setDescription(id, string.rep('x', 200000))
-                  setCharacterFirstMessage(id, string.rep('y', 200000))
-                  setBackgroundEmbedding(id, string.rep('z', 200000))
+                  setDescription(id, string.rep('너무 긴 설명 ', 30000))
+                  setCharacterFirstMessage(id, '다시 문 앞이다.')
                   upsertLocalLoreBook(id, '등불', '남는 등불', {})
                   return req`),
               ),
@@ -14261,25 +12832,27 @@ describe('editRequest listeners', () => {
       },
     });
     const chat = await startChat(cookie, plot.id);
-    const head = chat.path.at(-1);
-    // Most of the overlay's room already taken, by another write of the reader's.
-    const lore = Array.from({ length: 2_000 }, (_, index) => ({ keys: [`k${index}`], content: 'y'.repeat(600) }));
-    const filled = await json(cookie, `/api/chats/${chat.chat.id}/script-commit`, 'POST', {
-      messageId: head.id,
-      scriptRev: head.scriptRev,
-      overlay: { members: { [member.id]: { lorebook: lore } } },
-    });
-    expect(filled.status, await filled.clone().text()).toBe(200);
+    const other = await startChat(cookie, plot.id, { introIndex: 1 });
 
     const events = await send(cookie, chat.chat.id, capturing);
     expect(events.at(-1)!.event).toBe('done');
     const state = await readJson(await request(cookie, `/api/chats/${chat.chat.id}`));
     expect(state.path.at(-1).id).toBe(events.at(-1)!.data.messageId);
+    // The description past what a rewrite holds is gone whole; the rest of the run stands.
+    const work = await readPlot(cookie, plot.id);
+    expect(work.characters[0].card.description).toBe('설명');
+    expect(work.characters[0].card.firstMes).toBe('다시 문 앞이다.');
+    // The scripted member's first message is the work's first opening, and every chat's first greeting.
+    expect(work.intros).toEqual(['다시 문 앞이다.', '다른 문이다.']);
+    expect(state.path[0].content).toBe('다시 문 앞이다.');
+    const [first] = await db
+      .select({ content: messages.content })
+      .from(messages)
+      .where(and(eq(messages.chatId, other.chat.id), isNull(messages.parentId)))
+      .orderBy(asc(messages.createdAt));
+    expect(first!.content).toBe('다시 문 앞이다.');
+    expect((await readJson(await request(cookie, `/api/chats/${other.chat.id}`))).path[0].content).toBe('다른 문이다.');
     const scripts = (await readJson(await request(cookie, `/api/chats/${chat.chat.id}/scripts`))).scripts;
-    // The rewrite that did not fit is gone whole; the overlay is as it was, and the lore went to the chat.
-    expect(scripts.overlay.member.description).toBeUndefined();
-    expect(scripts.overlay.member.firstMessage).toBeUndefined();
-    expect(scripts.overlay.member.lorebook).toHaveLength(2_000);
     expect(scripts.localLore).toEqual([expect.objectContaining({ name: '등불', content: '남는 등불' })]);
   });
 
@@ -14322,7 +12895,7 @@ describe('the browser script runtime', () => {
     { type: 'editdisplay', in: 'x', out: 'y' },
   ];
 
-  /** A published plot whose second member carries RisuAI scripts, and a chat on it. */
+  /** A plot whose second member carries RisuAI scripts. */
   async function scriptedPlot(owner: string): Promise<{ cookie: string; plotId: string; memberId: string }> {
     const cookie = await signUp(owner);
     const plot = await createPlot(cookie, { name: '스크립트 작품', description: '설명', intros: ['문 앞이다'] });
@@ -14335,12 +12908,22 @@ describe('the browser script runtime', () => {
         extensions: { risuai: { triggerscript, customScripts, lowLevelAccess: true } },
       },
     });
-    await publishPlot(cookie, plot.id);
     return { cookie, plotId: plot.id, memberId: member.id };
   }
 
   const scriptsOf = async (cookie: string, chatId: string): Promise<any> =>
     readJson(await request(cookie, `/api/chats/${chatId}/scripts`));
+
+  /** A member of the work as it stands now — what its scripts rewrote of it included. */
+  const memberOf = async (cookie: string, plotId: string, memberId: string): Promise<any> =>
+    (await readPlot(cookie, plotId)).characters.find((member: any) => member.id === memberId);
+
+  /** A persona of the owner's, which a chat can be started on. */
+  const newPersona = async (cookie: string, description = '원래 페르소나'): Promise<any> =>
+    readJson(await json(cookie, '/api/personas', 'POST', { name: '나', description }));
+
+  const personaText = async (cookie: string, id: string): Promise<string> =>
+    (await readJson(await request(cookie, '/api/personas'))).find((persona: any) => persona.id === id).description;
 
   it('ships nothing for a plot without scripts', async () => {
     const cookie = await signUp('scripts-none@example.com');
@@ -14385,15 +12968,16 @@ describe('the browser script runtime', () => {
         // What `/test_lorebook` activates the book by.
         loreSettings: expect.objectContaining({ scanDepth: expect.any(Number) }),
       },
-      overlay: { member: null, persona: null },
     });
+    expect(answer.scripts.overlay).toBeUndefined();
     expect(JSON.stringify(answer)).not.toContain('스크립트 없는 멤버');
   });
 
-  it("lays a generation's overlay over the prompt it starts, and keeps it", async () => {
+  it("lays a generation's rewrite over the prompt it starts, and writes it into the work as RisuAI writes the character", async () => {
     const { cookie: owner, plotId, memberId } = await scriptedPlot('scripts-overlay@example.com');
     const reader = await signUp('scripts-overlay-reader@example.com');
-    const chat = await startChat(reader, plotId);
+    const persona = await newPersona(reader);
+    const chat = await startChat(reader, plotId, { personaId: persona.id });
     const { app: replying, systems } = promptApp('대답');
     const events = await readSse(
       await json(
@@ -14413,19 +12997,28 @@ describe('the browser script runtime', () => {
     expect(systems.at(-1)).not.toContain('원래 설명');
     expect(systems.at(-1)).toContain('스크립트 페르소나');
     expect((await readJson(await request(reader, `/api/chats/${chat.chat.id}`))).chat.note).toBe('비가 온다');
-    expect((await scriptsOf(reader, chat.chat.id)).scripts.overlay).toEqual({
-      member: { description: '바뀐 설명' },
-      persona: '스크립트 페르소나',
-    });
+    // The card and the chat's persona are what the scripts left: the studio and the bundle read them.
+    expect((await memberOf(owner, plotId, memberId)).card.description).toBe('바뀐 설명');
+    expect((await scriptsOf(reader, chat.chat.id)).scripts.character.description).toBe('바뀐 설명');
+    expect(await personaText(reader, persona.id)).toBe('스크립트 페르소나');
 
-    // The next generation reads it without being told again; the plot never changed.
+    // The next generation reads them without being told again.
     await readSse(await json(reader, `/api/chats/${chat.chat.id}/regenerate`, 'POST', {}, replying));
     expect(systems.at(-1)).toContain('바뀐 설명');
-    const work = await readPlot(owner, plotId);
-    expect(work.characters.find((member: any) => member.id === memberId).card.description).toBe('원래 설명');
+    expect(systems.at(-1)).toContain('스크립트 페르소나');
+
+    // A chat on no persona has nowhere to keep one: its own request reads it, and that is all.
+    const bare = await startChat(reader, plotId);
+    await readSse(
+      await json(reader, `/api/chats/${bare.chat.id}/messages`, 'POST', { content: '안녕', overlay: { persona: '잠깐의 페르소나' } }, replying),
+    );
+    expect(systems.at(-1)).toContain('잠깐의 페르소나');
+    await readSse(await json(reader, `/api/chats/${bare.chat.id}/regenerate`, 'POST', {}, replying));
+    expect(systems.at(-1)).not.toContain('잠깐의 페르소나');
+    expect(await personaText(reader, persona.id)).toBe('스크립트 페르소나');
   });
 
-  it("sends a character message the scripts wrote as their member's line, under the name it has in this chat", async () => {
+  it("sends a character message the scripts wrote as their member's line, under the name its scripts gave it", async () => {
     const { plotId, memberId } = await scriptedPlot('scripts-speaker@example.com');
     const reader = await signUp('scripts-speaker-reader@example.com');
     const chat = await startChat(reader, plotId);
@@ -14505,7 +13098,7 @@ describe('the browser script runtime', () => {
     });
     expect(state.chat.headMessageId).toBe(turn.id);
     expect(state.chat.note).toBe('멈췄다');
-    expect((await scriptsOf(reader, chatId)).scripts.overlay.member).toEqual({ description: '멈춘 뒤' });
+    expect((await memberOf(reader, plotId, memberId)).card.description).toBe('멈춘 뒤');
 
     // A user head, answered as any is: the regenerate builds on the stored turn.
     const events = await readSse(await json(reader, `/api/chats/${chatId}/regenerate`, 'POST', { baseHeadId: turn.id }, replying));
@@ -14592,7 +13185,7 @@ describe('the browser script runtime', () => {
       overlay: { members: { [memberId]: { description: '버려질 설명' } } },
     });
     expect(moved.status).toBe(409);
-    expect((await scriptsOf(reader, chat.chat.id)).scripts.overlay.member).toBeNull();
+    expect((await memberOf(reader, plotId, memberId)).card.description).toBe('원래 설명');
 
     const foreign = await json(reader, `/api/chats/${chat.chat.id}/messages`, 'POST', {
       content: '안녕',
@@ -14606,10 +13199,11 @@ describe('the browser script runtime', () => {
     expect(notMap.status).toBe(400);
   });
 
-  it('commits an overlay and a note with a script commit, merged field by field under the lock', async () => {
+  it('commits a rewrite and a note with a script commit, each field written into the work whole', async () => {
     const { plotId, memberId } = await scriptedPlot('scripts-commit@example.com');
     const reader = await signUp('scripts-commit-reader@example.com');
-    const chat = await startChat(reader, plotId);
+    const persona = await newPersona(reader);
+    const chat = await startChat(reader, plotId, { personaId: persona.id });
     const head = chat.path.at(-1);
     const first = await json(reader, `/api/chats/${chat.chat.id}/script-commit`, 'POST', {
       messageId: head.id,
@@ -14626,11 +13220,12 @@ describe('the browser script runtime', () => {
     });
     expect(second.status).toBe(200);
     expect((await readJson(second)).chat.note).toBe('버튼이 남긴 노트');
-    const overlay = (await scriptsOf(reader, chat.chat.id)).scripts.overlay.member;
-    expect(overlay.description).toBe('두 번째');
-    expect(overlay.lorebook.map((entry: any) => entry.content)).toEqual(['높은 탑.']);
+    const card = (await memberOf(reader, plotId, memberId)).card;
+    expect(card.description).toBe('두 번째');
+    // The lore is RisuAI's `globalLore`, written whole: the card's own entry gave way to the scripts'.
+    expect(card.lorebook.map((entry: any) => entry.content)).toEqual(['높은 탑.']);
 
-    // An overlay alone is something to commit.
+    // A rewrite alone is something to commit.
     const alone = await json(reader, `/api/chats/${chat.chat.id}/script-commit`, 'POST', {
       messageId: head.id,
       scriptRev: head.scriptRev + 2,
@@ -14644,7 +13239,7 @@ describe('the browser script runtime', () => {
       overlay: { persona: 'q' },
     });
     expect(stale.status).toBe(409);
-    expect((await scriptsOf(reader, chat.chat.id)).scripts.overlay.persona).toBe('p');
+    expect(await personaText(reader, persona.id)).toBe('p');
   });
 
   /** An app that answers every generation with `reply` and records what it was sent: the system and the turns. */
@@ -14667,7 +13262,7 @@ describe('the browser script runtime', () => {
     return { app, systems, turns };
   }
 
-  it('keeps the name, first message and background a script set, and refuses ones it would not keep', async () => {
+  it('writes the name, first message and background a script set into the work, and refuses ones it would not keep', async () => {
     const { plotId, memberId } = await scriptedPlot('scripts-rename@example.com');
     const reader = await signUp('scripts-rename-reader@example.com');
     const chat = await startChat(reader, plotId);
@@ -14684,6 +13279,7 @@ describe('the browser script runtime', () => {
       { name: 'x'.repeat(101) },
       { name: '세\n라' },
       { name: 3 },
+      { description: 'x'.repeat(200_001) },
       { firstMessage: 'x'.repeat(200_001) },
       { backgroundHtml: 'x'.repeat(200_001) },
     ]) {
@@ -14691,51 +13287,29 @@ describe('the browser script runtime', () => {
       expect(refused.status, JSON.stringify(bad).slice(0, 40)).toBe(400);
       expect((await readJson(refused)).code).toBe('invalid_request');
     }
-    expect((await scriptsOf(reader, chat.chat.id)).scripts.overlay.member).toBeNull();
+    expect(await memberOf(reader, plotId, memberId)).toMatchObject({ name: '리안', card: { description: '원래 설명' } });
 
     const kept = await commit(
       { name: '  세라  ', firstMessage: '{{char}}가 다시 문을 연다.', backgroundHtml: '<div>밤</div>' },
       head.scriptRev,
     );
     expect(kept.status, await kept.clone().text()).toBe(200);
-    const scripts = (await scriptsOf(reader, chat.chat.id)).scripts;
-    // `{{char}}` as it stands in this chat, beside the card's own name and nickname.
-    expect(scripts).toMatchObject({
+    // The character as its scripts left it, RisuAI's `char.name` and `backgroundHTML` included.
+    expect((await scriptsOf(reader, chat.chat.id)).scripts).toMatchObject({
       name: '세라',
-      character: { name: '리안', nickname: '', backgroundHtml: '', avatarUrl: null },
-      overlay: { member: { name: '세라', firstMessage: '{{char}}가 다시 문을 연다.', backgroundHtml: '<div>밤</div>' } },
+      character: { name: '세라', nickname: '', backgroundHtml: '<div>밤</div>', avatarUrl: null },
     });
-
-    // The overlay is held to its size as a whole, the new fields counted in it.
-    const big = 'x'.repeat(200_000);
-    let rev = head.scriptRev + 1;
-    for (const field of ['description', 'postHistoryInstructions', 'firstMessage', 'backgroundHtml'] as const) {
-      expect((await commit({ [field]: big }, rev)).status).toBe(200);
-      rev += 1;
-    }
-    const over = await json(reader, `/api/chats/${chat.chat.id}/script-commit`, 'POST', {
-      messageId: head.id,
-      scriptRev: rev,
-      overlay: {
-        members: { [memberId]: { name: '세라' } },
-        persona: big,
-      },
-      note: 'x',
-    });
-    expect(over.status).toBe(200);
-    const past = await json(reader, `/api/chats/${chat.chat.id}/script-commit`, 'POST', {
-      messageId: head.id,
-      scriptRev: rev + 1,
-      overlay: {
-        members: {
-          [memberId]: {
-            lorebook: Array.from({ length: 2_000 }, (_, index) => ({ keys: [`k${index}`], content: 'y'.repeat(600) })),
-          },
-        },
-      },
-    });
-    expect(past.status).toBe(400);
-    expect((await readJson(past)).code).toBe('script_overlay_limit');
+    const member = await memberOf(reader, plotId, memberId);
+    expect(member).toMatchObject({ name: '세라', card: { name: '세라', firstMes: '{{char}}가 다시 문을 연다.' } });
+    expect(member.card.extensions.risuai.backgroundHTML).toBe('<div>밤</div>');
+    // The scripted member is the work's lead: its background and first message are the work's too.
+    const work = await readPlot(reader, plotId);
+    expect(work.name).toBe('스크립트 작품');
+    expect(work.customUi.backgroundHtml).toBe('<div>밤</div>');
+    expect(work.intros).toEqual(['{{char}}가 다시 문을 연다.']);
+    // The greeting this chat opened on is the new first message, its revision moved past the old one's.
+    const greeting = (await readJson(await request(reader, `/api/chats/${chat.chat.id}`))).path[0];
+    expect(greeting).toMatchObject({ id: head.id, content: '{{char}}가 다시 문을 연다.', scriptRev: head.scriptRev + 2 });
   });
 
   it('prompts with the name and the first message the scripts left, where RisuAI would', async () => {
@@ -14757,7 +13331,6 @@ describe('the browser script runtime', () => {
         },
       },
     });
-    await publishPlot(owner, plot.id);
     // Presentation: what the card draws behind the chat, past the stylesheet the plot already has.
     expect((await readPublicPlot(undefined, plot.id)).backgroundHtml).toBe('<div class="bg">{{getvar::time}}</div>');
     expect((await scriptsOf(owner, (await startChat(owner, plot.id)).chat.id)).scripts.character.backgroundHtml).toBe(
@@ -14767,6 +13340,7 @@ describe('the browser script runtime', () => {
     const reader = await signUp('scripts-greeting-reader@example.com');
     const onFirst = await startChat(reader, plot.id);
     const onSecond = await startChat(reader, plot.id, { introIndex: 1 });
+    // The two chats on the work are read again below, after the rewrite.
     const overlay = { members: { [member.id]: { name: '세라', firstMessage: '{{char}}가 다시 문을 연다.' } } };
     const { app, systems, turns } = turnsApp('대답');
     await readSse(await json(reader, `/api/chats/${onFirst.chat.id}/messages`, 'POST', { content: '안녕', overlay }, app));
@@ -14775,25 +13349,36 @@ describe('the browser script runtime', () => {
     expect(systems.at(-1)).toContain(`[Roleplay Setting]\n세라는 사서다.\n\n${scenarioLine('세라의 겨울.')}\n`);
     expect(systems.at(-1)).toContain(speechProtocol(['세라']));
     expect(systems.at(-1)).not.toContain('리안');
-    // The first opening is sent as the scripts rewrote it; the stored greeting is unchanged.
+    // The first opening is sent as the scripts rewrote it, and stored so: RisuAI draws a
+    // chat's first greeting from its character.
     expect(turns.at(-1)).toContain('세라가 다시 문을 연다.');
     expect(turns.at(-1)).not.toContain('첫 인사다.');
     const stored = await readJson(await request(reader, `/api/chats/${onFirst.chat.id}`));
-    expect(stored.path[0].content).toBe('첫 인사다.');
+    expect(stored.path[0].content).toBe('{{char}}가 다시 문을 연다.');
+    // The work is that character: it takes the new name, and its first opening is the new first message.
+    expect(await readPlot(owner, plot.id)).toMatchObject({
+      name: '세라',
+      intros: ['{{char}}가 다시 문을 연다.', '둘째 인사다.'],
+      characters: [{ id: member.id, name: '세라' }],
+    });
+    // A chat started now opens on it, under the new name.
+    expect((await startChat(reader, plot.id)).path[0].content).toBe('세라가 다시 문을 연다.');
 
     // On the second opening RisuAI sends that one, as stored.
     await readSse(await json(reader, `/api/chats/${onSecond.chat.id}/messages`, 'POST', { content: '안녕', overlay }, app));
     expect(turns.at(-1)).toContain('둘째 인사다.');
     expect(turns.at(-1)).not.toContain('세라가 다시 문을 연다.');
 
-    // A card with a nickname keeps it as `{{char}}` through a rename.
-    await patchCharacter(owner, plot.id, member.id, { card: { ...member.card, nickname: '리리' } });
+    // A card with a nickname keeps it as `{{char}}` in its own text through a rename; the
+    // work's text reads the work's name, which the rename gave it.
+    const renamed = (await readPlot(owner, plot.id)).characters[0];
+    await patchCharacter(owner, plot.id, member.id, { card: { ...renamed.card, nickname: '리리' } });
     expect((await scriptsOf(reader, onFirst.chat.id)).scripts).toMatchObject({
       name: '리리',
-      character: { name: '리안', nickname: '리리' },
+      character: { name: '세라', nickname: '리리' },
     });
     await readSse(await json(reader, `/api/chats/${onFirst.chat.id}/regenerate`, 'POST', {}, app));
-    expect(systems.at(-1)).toContain(`[Roleplay Setting]\n리리는 사서다.\n\n${scenarioLine('리리의 겨울.')}\n`);
+    expect(systems.at(-1)).toContain(`[Roleplay Setting]\n리리는 사서다.\n\n${scenarioLine('세라의 겨울.')}\n`);
     expect(systems.at(-1)).toContain(speechProtocol(['세라']));
   });
 
@@ -14817,15 +13402,19 @@ describe('the browser script runtime', () => {
     expect(systems.at(-1)).toContain('[Roleplay Setting]\n[평범]\n\n스크립트 없는 멤버');
     expect(systems.at(-1)).not.toContain('[리안]');
     expect(systems.at(-1)).toContain(`[Roleplay Setting]\n${scenarioLine('스크립트 작품의 무대.')}\n`);
+    // Written into the member alone: a work of several keeps its own name.
+    expect(await readPlot(cookie, plotId)).toMatchObject({ name: '스크립트 작품' });
+    expect((await memberOf(cookie, plotId, memberId)).name).toBe('세라');
     // A style-only background leaves nothing to draw; a plot without scripts has none either.
     expect((await readPublicPlot(undefined, plotId)).backgroundHtml).toBe('');
   });
 
-  it("keeps a rewrite for the reader on the plot — every chat of theirs reads it — and the chat's own lore and note for the chat", async () => {
+  it("writes a rewrite into the work — every chat on it reads it — and keeps the chat's own lore and note on the chat", async () => {
     const { plotId, memberId } = await scriptedPlot('scripts-reader-overlay@example.com');
     const reader = await signUp('scripts-reader-overlay-reader@example.com');
-    const first = await startChat(reader, plotId);
-    const second = await startChat(reader, plotId);
+    const persona = await newPersona(reader);
+    const first = await startChat(reader, plotId, { personaId: persona.id });
+    const second = await startChat(reader, plotId, { personaId: persona.id });
     const { app: replying, systems } = promptApp('대답');
     const lamp = { keys: ['등불'], content: '이 챗만의 등불.', name: '등불', constant: true };
     const sent = await readSse(
@@ -14845,7 +13434,8 @@ describe('the browser script runtime', () => {
     expect(sent.at(-1)!.event).toBe('done');
     expect(systems.at(-1)).toContain('이 챗만의 등불.');
 
-    // The reader's other chat on the plot reads the rewrite without being told — RisuAI's character is one object.
+    // The other chat on the work reads the rewrite without being told — RisuAI's character is one object,
+    // and so is its persona.
     await readSse(await json(reader, `/api/chats/${second.chat.id}/messages`, 'POST', { content: '안녕' }, replying));
     expect(systems.at(-1)).toContain('[Roleplay Setting]\n[세라]\n\n바뀐 설명');
     expect(systems.at(-1)).not.toContain('원래 설명');
@@ -14856,13 +13446,13 @@ describe('the browser script runtime', () => {
     const secondScripts = (await scriptsOf(reader, second.chat.id)).scripts;
     expect(secondScripts).toMatchObject({
       name: '세라',
-      overlay: { member: { description: '바뀐 설명', name: '세라' }, persona: '스크립트 페르소나' },
+      character: { name: '세라', description: '바뀐 설명' },
       localLore: [],
     });
     expect((await scriptsOf(reader, first.chat.id)).scripts.localLore).toEqual([expect.objectContaining({ content: '이 챗만의 등불.' })]);
   });
 
-  it("merges two of the reader's chats writing at once field by field, and holds the merged overlay to its size", async () => {
+  it('writes two chats’ rewrites at once field by field, the later write of a field standing whole', async () => {
     const { plotId, memberId } = await scriptedPlot('scripts-overlay-race@example.com');
     const reader = await signUp('scripts-overlay-race-reader@example.com');
     const one = await startChat(reader, plotId);
@@ -14884,13 +13474,12 @@ describe('the browser script runtime', () => {
     // Different fields at once: both land.
     const [a, b] = await Promise.all([
       commit(one, { members: { [memberId]: { description: '첫 챗이 쓴 설명' } } }),
-      commit(two, { members: { [memberId]: { lorebook: [{ keys: ['탑'], content: '둘째 챗이 쓴 탑.' }] } }, persona: '둘째 페르소나' }),
+      commit(two, { members: { [memberId]: { lorebook: [{ keys: ['탑'], content: '둘째 챗이 쓴 탑.' }] } } }),
     ]);
     expect([a.status, b.status]).toEqual([200, 200]);
-    const merged = (await scriptsOf(reader, one.chat.id)).scripts.overlay;
-    expect(merged.member.description).toBe('첫 챗이 쓴 설명');
-    expect(merged.member.lorebook.map((entry: any) => entry.content)).toEqual(['둘째 챗이 쓴 탑.']);
-    expect(merged.persona).toBe('둘째 페르소나');
+    const card = (await memberOf(reader, plotId, memberId)).card;
+    expect(card.description).toBe('첫 챗이 쓴 설명');
+    expect(card.lorebook.map((entry: any) => entry.content)).toEqual(['둘째 챗이 쓴 탑.']);
 
     // The same field at once: neither fails, and one of the two stands whole.
     const [c, d] = await Promise.all([
@@ -14898,20 +13487,7 @@ describe('the browser script runtime', () => {
       commit(two, { members: { [memberId]: { description: '둘' } } }),
     ]);
     expect([c.status, d.status]).toEqual([200, 200]);
-    expect(['하나', '둘']).toContain((await scriptsOf(reader, two.chat.id)).scripts.overlay.member.description);
-
-    // The cap is the merged overlay's: what one chat wrote counts against what the other may add.
-    const lore = Array.from({ length: 2_000 }, (_, index) => ({ keys: [`k${index}`], content: 'y'.repeat(600) }));
-    expect((await commit(one, { members: { [memberId]: { lorebook: lore } } })).status).toBe(200);
-    const big = 'x'.repeat(200_000);
-    const past = await commit(two, {
-      members: { [memberId]: { description: big, postHistoryInstructions: big, firstMessage: big } },
-      persona: big,
-    });
-    expect(past.status).toBe(400);
-    expect((await readJson(past)).code).toBe('script_overlay_limit');
-    // Refused whole: the commit's other writes did not land either.
-    expect((await scriptsOf(reader, two.chat.id)).scripts.overlay.member.firstMessage).toBeUndefined();
+    expect(['하나', '둘']).toContain((await scriptsOf(reader, two.chat.id)).scripts.character.description);
   });
 });
 
@@ -14926,7 +13502,6 @@ describe('script model calls', () => {
       name: '리안',
       card: { description: '사서', extensions: { risuai: { triggerscript: lua, lowLevelAccess } } },
     });
-    await publishPlot(cookie, plot.id);
     const reader = await signUp(`reader-${owner}`);
     const chat = await startChat(reader, plot.id);
     return { reader, chatId: chat.chat.id };
@@ -14971,8 +13546,7 @@ describe('script model calls', () => {
     ]);
     expect((await db.select().from(messages).where(eq(messages.chatId, chatId))).length).toBe(before);
     // The slot was given back: a turn can be taken right after.
-    const [row] = await db.select({ generatingAt: chats.generatingAt }).from(chats).where(eq(chats.id, chatId));
-    expect(row!.generatingAt).toBeNull();
+    expect(generatingOn(chatId, answering)).toBe(false);
   });
 
   it('refuses a plot whose card does not grant low-level access', async () => {
@@ -15004,7 +13578,7 @@ describe('script model calls', () => {
     const second = await json(reader, `/api/chats/${chatId}/script-llm`, 'POST', { messages: prompt }, gated);
     expect(second.status).toBe(429);
     expect((await readJson(second)).code).toBe('generation_in_progress');
-    expect((await json(reader, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' })).status).toBe(429);
+    expect((await json(reader, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, gated)).status).toBe(429);
     release();
     expect((await first).status).toBe(200);
     for (let call = 0; call < 5; call += 1) {
@@ -15060,33 +13634,7 @@ describe('script model calls', () => {
     const res = await json(reader, `/api/chats/${chatId}/script-llm`, 'POST', { messages: prompt }, broken);
     expect(res.status).toBe(502);
     expect(await readJson(res)).toEqual({ error: 'The model did not answer', code: 'script_llm_failed' });
-    const [row] = await db.select({ generatingAt: chats.generatingAt }).from(chats).where(eq(chats.id, chatId));
-    expect(row!.generatingAt).toBeNull();
-  });
-
-  it("holds a reader's script calls to a window, so a script that loops cannot spend their plan without end", async () => {
-    let asked = 0;
-    const answering = makeApp({
-      getAdapter: () => ({
-        providerModel: 'fixed',
-        adapter: {
-          stream: async function* (): AsyncGenerator<StreamDelta, StreamDone> {
-            asked += 1;
-            yield { type: 'text', text: '대답' };
-            return { usage: { promptTokens: 1, completionTokens: 1 } };
-          },
-        },
-      }),
-    });
-    const { reader, chatId } = await luaChat('script-llm-window@example.com', true);
-    expect((await json(reader, `/api/chats/${chatId}/script-llm`, 'POST', { messages: prompt }, answering)).status).toBe(200);
-    const userId = (await ownerId());
-    const key = `script_llm:user:${userId}`;
-    await db.update(rateLimits).set({ hits: RATE_LIMITS.scriptLlm.limit }).where(eq(rateLimits.key, key));
-    const refused = await json(reader, `/api/chats/${chatId}/script-llm`, 'POST', { messages: prompt }, answering);
-    expect(refused.status).toBe(429);
-    expect((await readJson(refused)).code).toBe('rate_limited');
-    expect(asked).toBe(1);
+    expect(generatingOn(chatId, broken)).toBe(false);
   });
 });
 
@@ -15104,7 +13652,6 @@ describe('script requests', () => {
       name: '리안',
       card: { description: '사서', extensions: { risuai: { triggerscript: lua, lowLevelAccess } } },
     });
-    await publishPlot(cookie, plot.id);
     const reader = await signUp(`reader-${owner}`);
     const chat = await startChat(reader, plot.id);
     const sendOn = async (chatId: string, url: unknown) => {
@@ -15134,7 +13681,6 @@ describe('script requests', () => {
     const clock = { now: Date.now() };
     const connected: { url: string; addresses: unknown }[] = [];
     const scriptFetch = createScriptFetch({
-      db,
       ownOrigins: ['https://plot.example', 'https://api.plot.example'],
       resolve: async (hostname) => [{ address: hostname === 'inside.test' ? '10.0.0.7' : '93.184.215.14', family: 4 }],
       transport: async (request) => {
@@ -15185,23 +13731,6 @@ describe('script requests', () => {
     expect(connected.map((hop) => hop.url)).toEqual(['https://site.test/1', 'https://site.test/2', 'https://site.test/8']);
   });
 
-  it('keeps one window per reader across API instances', async () => {
-    // Two instances: their own requesters, the one table.
-    const first = fetchingApp(async () => ok(200, '본문'));
-    const second = fetchingApp(async () => ok(200, '본문'));
-    second.clock.now = first.clock.now;
-    const { reader, chatId } = await luaChat('fetch-instances@example.com', true, first.target);
-    const sendTo = async (target: Hono<AppEnv>, url: string) =>
-      readJson(await json(reader, `/api/chats/${chatId}/script-fetch`, 'POST', { url }, target));
-    for (let i = 0; i < 3; i += 1) {
-      expect((await sendTo(first.target, `https://site.test/a${i}`)).status).toBe(200);
-      expect((await sendTo(second.target, `https://site.test/b${i}`)).status).toBe(200);
-    }
-    expect(await sendTo(first.target, 'https://site.test/a3')).toEqual({ status: 429, data: 'Too many requests. you can request 5 times per minute' });
-    expect(await sendTo(second.target, 'https://site.test/b3')).toEqual({ status: 429, data: 'Too many requests. you can request 5 times per minute' });
-    expect(first.connected).toHaveLength(3);
-    expect(second.connected).toHaveLength(3);
-  });
 
   it('checks the address in RisuAI’s order, with its messages, and refuses this app’s own hosts as it refuses RisuAI’s', async () => {
     const { target, clock, connected } = fetchingApp(async () => ok(200, 'x'));
@@ -15288,7 +13817,6 @@ describe('script requests', () => {
   it('does not take the generation slot: a request answers while a model call holds it', async () => {
     const { getAdapter, started, release } = gatedGetAdapter('대답');
     const scriptFetch = createScriptFetch({
-      db,
       resolve: async () => [{ address: '93.184.215.14', family: 4 }],
       transport: async () => ok(200, '본문'),
     });
@@ -15583,7 +14111,7 @@ describe('group turns', () => {
     });
     await res.body!.getReader().read();
     expect((await json(cookie, `/api/chats/${chatId}/stop`, 'POST', undefined, slow)).status).toBe(204);
-    expect(await claimOf(chatId)).toBeNull();
+    expect(generatingOn(chatId, slow)).toBe(false);
     const kept = (await rowsOf(chatId)).at(-1)!;
     expect(kept).toMatchObject({ content: '반쯤', speakerMemberId: kai, groupTurnId: a.messageId, parentId: a.messageId });
   });
@@ -15721,7 +14249,7 @@ describe('group turns', () => {
     expect(fetched).toEqual(['https://site.test/']);
   });
 
-  it("ships every scripted member's bundle with its own slice of the overlay", async () => {
+  it("ships every scripted member's bundle with its own card, as its scripts left it", async () => {
     const triggerscript = [{ comment: '', type: 'manual', conditions: [], effect: [] }];
     const chat = await groupChat('group-scripts@example.com', {}, {
       세이야: { extensions: { risuai: { triggerscript } } },
@@ -15742,8 +14270,8 @@ describe('group turns', () => {
     ]);
     // The page from before group turns reads the lead alone, as it always has.
     expect(answer.scripts).toEqual(answer.members[0]);
-    expect(answer.members[0].overlay.member).toBeNull();
-    expect(answer.members[1].overlay.member).toEqual({ description: '바뀐 악사' });
+    expect(answer.members[0].character.description).not.toBe('바뀐 악사');
+    expect(answer.members[1].character.description).toBe('바뀐 악사');
   });
 
   it("tags what a member's scripts write as that member's, and carries both tags on every copy", async () => {
@@ -15920,7 +14448,6 @@ describe('group turns', () => {
       await refused(await json(cookie, `/api/plots/${plot.id}/characters/${member.id}`, 'PATCH', { talkativeness }));
     }
     await patchPlot(cookie, plot.id, { groupSettings: { order: 'list', maxSpeakers: 2 } });
-    await publishPlot(cookie, plot.id);
     const view = await readPublicPlot(undefined, plot.id);
     expect(view.groupSettings).toEqual({ order: 'list', maxSpeakers: 2 });
     expect(view.characters[0].talkativeness).toBe(0);
@@ -16105,7 +14632,7 @@ describe('emotion images', () => {
     expect(await emotionOf(cookie, chatId, contained.messageId, harness.app)).toEqual({ emotion: 'Angry' });
   });
 
-  it('starts a lost choice again when the page asks after a recent reply: not while one runs, and not on every ask', async () => {
+  it('starts a lost choice again when the page asks after a recent reply, and not on every ask', async () => {
     const cookie = await signUp('emotion-resume@example.com');
     const plot = await importCard(cookie, emotionCard({ viewScreen: 'emotion' }));
     const harness = emotionApp('happy');
@@ -16114,11 +14641,9 @@ describe('emotion images', () => {
     const done = await send(cookie, chatId, { content: '반가워' }, harness.app);
     await harness.settle();
     expect(harness.asked).toHaveLength(1);
-    // Chosen, the choice's lease is given back.
-    expect(await db.select().from(leases).where(eq(leases.key, `emotion:${done.messageId}`))).toEqual([]);
     const lose = () => sql`update messages set emotion = null where id = ${done.messageId}`;
 
-    // The choice is as good as lost — its instance died before it wrote one — and the page's asking makes it again.
+    // The choice is as good as lost — the app stopped before it wrote one — and the page's asking makes it again.
     await lose();
     expect(await emotionOf(cookie, chatId, done.messageId, harness.app)).toEqual({ emotion: null });
     await harness.settle();
@@ -16131,19 +14656,14 @@ describe('emotion images', () => {
     await harness.settle();
     expect(harness.asked).toHaveLength(2);
 
-    // Nor while another instance is choosing it.
-    await sql`delete from leases where key = ${`emotion_resume:${done.messageId}`}`;
-    expect(await acquireLease(db, `emotion:${done.messageId}`, 'another-instance', 60_000)).toBe(true);
-    await emotionOf(cookie, chatId, done.messageId, harness.app);
-    await harness.settle();
-    expect(harness.asked).toHaveLength(2);
-
     // A reply older than two minutes is left as it is.
-    await sql`delete from leases`;
-    await sql`update messages set created_at = now() - interval '3 minutes' where id = ${done.messageId}`;
-    await emotionOf(cookie, chatId, done.messageId, harness.app);
+    const old = await send(cookie, chatId, { content: '오래전' }, harness.app);
     await harness.settle();
-    expect(harness.asked).toHaveLength(2);
+    expect(harness.asked).toHaveLength(3);
+    await sql`update messages set emotion = null, created_at = now() - interval '3 minutes' where id = ${old.messageId}`;
+    await emotionOf(cookie, chatId, old.messageId, harness.app);
+    await harness.settle();
+    expect(harness.asked).toHaveLength(3);
   });
 
   it('chooses by the embedder where the reader picks it, as RisuAI’s embedding processor does', async () => {
@@ -16795,39 +15315,28 @@ describe('reader modules', () => {
     ]);
   });
 
-  it('runs a reader’s module on a work without scripts, but discloses none of the card to them', async () => {
+  it('runs a reader’s module on a work without scripts, with the card as RisuAI’s modules read the character', async () => {
     const owner = await signUp('reader-module-conceal-owner@example.com');
     const plot = await createPlot(owner, { name: '비밀 작품', description: '설명', intros: ['문 앞이다'] });
     await addCharacter(owner, plot.id, {
       name: '리안',
       card: { description: '비밀 설정', personality: '비밀 성격', lorebook: [{ keys: ['열쇠'], content: '비밀 로어' }] },
     });
-    await publishPlot(owner, plot.id);
     const reader = await signUp('reader-module-conceal-reader@example.com');
     const chatId = (await startChat(reader, plot.id)).chat.id;
-    // A work without scripts gives a reader nothing of its cards.
+    // A work without scripts ships no bundle.
     expect(await readJson(await request(reader, `/api/chats/${chatId}/scripts`))).toMatchObject({ scripts: null, members: [] });
 
     const mine = { ...rain, lowLevelAccess: false, type: 'risuModule' };
     const created = await readJson(await upload(reader, new File([JSON.stringify(mine)], 'mine.json')));
     await json(reader, `/api/chats/${chatId}`, 'PATCH', { modules: [created.id] });
     const scripts = await readJson(await request(reader, `/api/chats/${chatId}/scripts`));
-    // The reader's module runs for the member — with the card's text left blank.
+    // The module runs for the member, and reads the card's own text.
     expect(scripts.scripts.triggers.map((trigger: any) => trigger.comment)).toEqual(['독자 모듈']);
-    expect(scripts.scripts.concealed).toBe(true);
-    expect(scripts.scripts.character).toMatchObject({ name: '리안', description: '', personality: '', lorebook: [], postHistoryInstructions: '' });
+    expect(scripts.scripts.concealed).toBeUndefined();
+    expect(scripts.scripts.character).toMatchObject({ name: '리안', description: '비밀 설정', personality: '비밀 성격' });
+    expect(scripts.scripts.character.lorebook.map((entry: any) => entry.content)).toEqual(['비밀 로어']);
     expect(scripts.scripts.moduleLore.map((entry: any) => entry.content)).toEqual(['창밖에 빗소리가 들린다.']);
-    expect(JSON.stringify(scripts)).not.toContain('비밀');
-
-    // The creator's own scripts disclose the card as before.
-    const ownerChat = (await startChat(owner, plot.id)).chat.id;
-    const member = (await readPlot(owner, plot.id)).characters[0];
-    await json(owner, `/api/plots/${plot.id}/characters/${member.id}`, 'PATCH', {
-      card: { extensions: { risuai: { triggerscript: [lua('카드')] } } },
-    });
-    const disclosed = await readJson(await request(owner, `/api/chats/${ownerChat}/scripts`));
-    expect(disclosed.scripts.concealed).toBeUndefined();
-    expect(disclosed.scripts.character.description).toBe('비밀 설정');
   });
 
   it('turns a module on for every chat of a work, as RisuAI’s character list does, and by the reader preset’s module integration', async () => {
@@ -17002,7 +15511,7 @@ const withLocale = (
 
 /** An English work whose one member carries post-history instructions of its own. */
 async function englishChat(cookie: string): Promise<{ plotId: string; chatId: string; state: any }> {
-  const plot = await publishablePlot(
+  const plot = await playablePlot(
     cookie,
     { language: 'en', intros: ['Hello there.'] },
     { name: 'Rian', card: { description: 'A ranger.', postHistoryInstructions: 'CARD-POST-HISTORY' } },
@@ -17567,12 +16076,11 @@ describe('what a card loads from other hosts, brought in at import', () => {
     expect(asked).toHaveLength(3);
   });
 
-  it('asks a public plot’s owner before a module joins it, and keeps what the module fetched as its own', async () => {
+  it('keeps what a module fetched as its own, on the work it joins', async () => {
     const { remoteFetch } = remote();
     const target = makeApp({ remoteFetch });
     const cookie = await signUp('module-rights@example.com');
-    const plot = await publishablePlot(cookie);
-    await publishPlot(cookie, plot.id);
+    const plot = await playablePlot(cookie);
     const module = {
       name: '글꼴 모듈',
       description: '',
@@ -17590,17 +16098,9 @@ describe('what a card loads from other hosts, brought in at import', () => {
       for (const [key, value] of Object.entries(fields)) form.append(key, value);
       return fileImport(cookie, `/api/plots/${plot.id}/modules`, form, target);
     };
-    for (const fields of [{}, { rightsConfirmed: 'false' }] as Record<string, string>[]) {
-      const refused = await upload(fields);
-      expect(refused.status).toBe(409);
-      expect((await readJson(refused)).code).toBe('rights_unconfirmed');
-    }
-    expect(await readPlot(cookie, plot.id)).toMatchObject({ rightsConfirmedAt: null, modules: [] });
-
-    const res = await upload({ rightsConfirmed: 'true' });
+    const res = await upload({});
     expect(res.status, await res.clone().text()).toBe(201);
     const owner = await readJson(res);
-    expect(owner.rightsConfirmedAt).toEqual(expect.any(String));
     expect(owner.importWarnings).toEqual([]);
     expect(owner.modules[0].assetCount).toBe(2);
     const shown = await readPublicPlot(cookie, plot.id);
@@ -18004,7 +16504,7 @@ describe('vector storage (SillyTavern)', () => {
 
     /** An English work holding `book`, saved through `harness`, and a Korean reader's chat on it. */
     async function englishWork(cookie: string, harness: AliasHarness, book: unknown[]): Promise<{ plotId: string; chatId: string }> {
-      const plot = await publishablePlot(cookie, { language: 'en', intros: ['Hello there.'] });
+      const plot = await playablePlot(cookie, { language: 'en', intros: ['Hello there.'] });
       await setLore(cookie, plot.id, book, harness);
       const started = await withLocale(cookie, '/api/chats', 'ko', { plotId: plot.id, model: 'echo/echo' }, harness.app);
       expect(started.status, await started.clone().text()).toBe(201);
@@ -18022,7 +16522,7 @@ describe('vector storage (SillyTavern)', () => {
     it("writes a work's aliases after an edit, apart from its book, and asks again only for what changed", async () => {
       const cookie = await signUp('aliases-pass@example.com');
       const harness = aliasApp();
-      const plot = await publishablePlot(cookie, { language: 'en' });
+      const plot = await playablePlot(cookie, { language: 'en' });
       await setLore(cookie, plot.id, [tower, map, rule], harness);
       expect(harness.asked).toHaveLength(1);
       expect(harness.asked[0]).toMatch(/^\[1\] keys: \["lighthouse"\]/);
@@ -18052,12 +16552,12 @@ describe('vector storage (SillyTavern)', () => {
     it('makes none for a Korean work, a book with Korean keys, or with LORE_ALIASES=off', async () => {
       const cookie = await signUp('aliases-none@example.com');
       const harness = aliasApp();
-      const korean = await publishablePlot(cookie, {});
+      const korean = await playablePlot(cookie, {});
       await setLore(cookie, korean.id, [tower, map], harness);
-      const keyed = await publishablePlot(cookie, { language: 'en' });
+      const keyed = await playablePlot(cookie, { language: 'en' });
       await setLore(cookie, keyed.id, [{ ...tower, keys: ['lighthouse', '등대'] }, map], harness);
       const off = aliasApp({ env: { LORE_ALIASES: 'off' } });
-      const english = await publishablePlot(cookie, { language: 'en' });
+      const english = await playablePlot(cookie, { language: 'en' });
       await setLore(cookie, english.id, [tower, map], off);
       expect(harness.asked).toEqual([]);
       expect(off.asked).toEqual([]);
@@ -18087,11 +16587,11 @@ describe('vector storage (SillyTavern)', () => {
       const owner = await signUp('aliases-owner@example.com');
       const reader = await signUp('aliases-reader@example.com');
       const harness = aliasApp();
-      const plot = await publishablePlot(owner, { language: 'en', intros: ['Hello there.'] });
-      // A public work saved before the pass existed.
+      const plot = await playablePlot(owner, { language: 'en', intros: ['Hello there.'] });
+      // A work saved before the pass existed.
       await db
         .update(plots)
-        .set({ lorebook: [tower, map] as never, visibility: 'public', publishedAt: new Date() })
+        .set({ lorebook: [tower, map] as never })
         .where(eq(plots.id, plot.id));
       const started = await withLocale(reader, '/api/chats', 'ko', { plotId: plot.id, model: 'echo/echo' }, harness.app);
       expect(started.status, await started.clone().text()).toBe(201);
@@ -18148,397 +16648,6 @@ describe('vector storage (SillyTavern)', () => {
       // Nothing was embedded, and no query either: the retrieval is off.
       expect(embedder.calls).toEqual([]);
     });
-  });
-});
-
-describe('explore search by meaning', () => {
-  /**
-   * An embedder of a few keywords, as the memory's: a text's vector has a slot
-   * per keyword it holds. `model` is every language's, or each one's.
-   */
-  function searchEmbedder(
-    model: string | ((language: ContentLanguage) => string | null) = 'test-search',
-    fail = false,
-  ): Embedder & { calls: { texts: string[]; kind: string | undefined }[] } {
-    const keys = ['고양이', '등대', '지도', '재벌'];
-    const calls: { texts: string[]; kind: string | undefined }[] = [];
-    const modelFor = typeof model === 'string' ? () => model : model;
-    return {
-      calls,
-      modelFor,
-      async embed(texts, { plotLanguage, kind }) {
-        calls.push({ texts: [...texts], kind });
-        const id = modelFor(plotLanguage);
-        if (fail || !id) throw new Error('embedder down');
-        const vectors = texts.map((text) => {
-          const vector = [0.1, ...keys.map((key) => (text.includes(key) ? 1 : 0))];
-          const norm = Math.hypot(...vector);
-          return vector.map((value) => value / norm);
-        });
-        return { model: id, vectors };
-      },
-      warm() {},
-      async close() {},
-    };
-  }
-
-  function searchApp(embedder?: Embedder) {
-    const tasks: Promise<void>[] = [];
-    return {
-      app: makeApp({ ...(embedder ? { embedder } : {}), onBackgroundTask: (task) => void tasks.push(task) }),
-      settle: async () => {
-        while (tasks.length > 0) await Promise.all(tasks.splice(0));
-      },
-    };
-  }
-
-  /** A published plot through `harness`, its vector written by the publish's refresh. */
-  async function published(cookie: string, harness: ReturnType<typeof searchApp>, plot: Record<string, unknown>): Promise<any> {
-    const created = await publishablePlot(cookie, plot);
-    const res = await json(cookie, `/api/plots/${created.id}/publish`, 'POST', { publish: true }, harness.app);
-    expect(res.status, await res.clone().text()).toBe(200);
-    await harness.settle();
-    return created;
-  }
-
-  const search = async (harness: ReturnType<typeof searchApp>, query: string, extra = ''): Promise<any> => {
-    const res = await request(undefined, `/api/explore?language=ko&q=${encodeURIComponent(query)}${extra}`, 'GET', undefined, harness.app);
-    expect(res.status).toBe(200);
-    return readJson(res);
-  };
-
-  it('ranks a partition’s public plots by their public text’s nearness to a sentence', async () => {
-    resetSearchSweeps();
-    const cookie = await signUp('search-rank@example.com');
-    const embedder = searchEmbedder();
-    const harness = searchApp(embedder);
-    const cat = await published(cookie, harness, { name: '서점의 오후', intro: '고양이가 사는 서점 이야기', tags: ['일상'] });
-    const both = await published(cookie, harness, { name: '바닷가 서점', intro: '등대 옆 서점에 고양이가 산다' });
-    const lighthouse = await published(cookie, harness, { name: '빛의 섬', intro: '등대지기의 하루' });
-    // What only the model is told is not what a plot is found by.
-    const hidden = await published(cookie, harness, { name: '조용한 방', intro: '지도를 그리는 방', description: '재벌 재벌 재벌' });
-
-    // Each embedded once with its own text, as a document.
-    const stored = await db.select().from(plotSearchVectors);
-    expect(stored.map((row) => row.plotId).sort()).toEqual([cat.id, both.id, lighthouse.id, hidden.id].sort());
-    expect(stored.every((row) => row.model === 'test-search' && row.embedding.length === 5)).toBe(true);
-    const documents = embedder.calls.filter((call) => call.kind === 'document').flatMap((call) => call.texts);
-    expect(documents).toContain('서점의 오후\n일상\n고양이가 사는 서점 이야기\n안녕');
-    expect(documents.join('\n')).not.toContain('재벌');
-
-    const found = await search(harness, '고양이 나오는 이야기 추천해줘');
-    expect(found.search).toBe('meaning');
-    expect(found.items.map((plot: any) => plot.id)).toEqual([cat.id, both.id]);
-    expect(embedder.calls.at(-1)).toEqual({ texts: ['고양이 나오는 이야기 추천해줘'], kind: 'query' });
-    expect((await search(harness, '재벌')).items).toEqual([]);
-
-    // A name containing the query is found, near or not; the rest by nearness.
-    const named = await search(harness, '빛의 섬');
-    expect(named.items.map((plot: any) => plot.id)).toEqual([lighthouse.id]);
-    expect((await search(harness, '등대')).items.map((plot: any) => plot.id)).toEqual([lighthouse.id, both.id]);
-
-    // The tag filter holds; the sort does not reorder by nearness; pages go by offset.
-    expect((await search(harness, '고양이', '&tag=일상')).items.map((plot: any) => plot.id)).toEqual([cat.id]);
-    expect((await search(harness, '고양이', '&sort=likes')).items.map((plot: any) => plot.id)).toEqual([cat.id, both.id]);
-    const first = await search(harness, '고양이', '&limit=1');
-    expect(first.items.map((plot: any) => plot.id)).toEqual([cat.id]);
-    const second = await search(harness, '고양이', `&limit=1&cursor=${first.nextCursor}`);
-    expect(second.items.map((plot: any) => plot.id)).toEqual([both.id]);
-    expect(second.nextCursor).toBeNull();
-    await harness.settle();
-  });
-
-  it('finds by its words a plot whose public text names what nearness misses', async () => {
-    resetSearchSweeps();
-    const cookie = await signUp('search-words@example.com');
-    const embedder = searchEmbedder();
-    const harness = searchApp(embedder);
-    const cat = await published(cookie, harness, { name: '서점의 오후', intro: '고양이가 사는 서점 이야기' });
-    const selene = await published(cookie, harness, { name: '검은 숲', intro: '등대지기 셀레네의 제자가 되는 이야기' });
-    await published(cookie, harness, { name: '빛의 섬', intro: '등대 아래 고양이 이야기' });
-    // Its words are stored beside its vector.
-    const [row] = await db.select().from(plotSearchVectors).where(eq(plotSearchVectors.plotId, selene.id));
-    expect(row!.terms).toContain("'셀레':");
-    expect(row!.termCount).toBeGreaterThan(0);
-
-    // The keyword embedder sees nothing near in 셀레네; the words find her.
-    expect((await search(harness, '셀레네 나오는 거')).items.map((plot: any) => plot.id)).toEqual([selene.id]);
-    // Words every plot holds, or everyday ones, are no evidence: nothing is added.
-    expect((await search(harness, '이야기 뭐 있어')).items).toEqual([]);
-    // Where both agree, the plot near by meaning and named by words leads.
-    expect((await search(harness, '고양이 서점')).items.map((plot: any) => plot.id)[0]).toBe(cat.id);
-
-    // A row from before the words: a search's sweep writes them, embedding nothing again.
-    await db.update(plotSearchVectors).set({ terms: null, termCount: null }).where(eq(plotSearchVectors.plotId, selene.id));
-    const documents = embedder.calls.filter((call) => call.kind === 'document').length;
-    resetSearchSweeps();
-    await search(harness, '아무거나');
-    await harness.settle();
-    const [filled] = await db.select().from(plotSearchVectors).where(eq(plotSearchVectors.plotId, selene.id));
-    expect(filled!.terms).toBe(row!.terms);
-    expect(embedder.calls.filter((call) => call.kind === 'document')).toHaveLength(documents);
-    expect((await search(harness, '셀레네')).items.map((plot: any) => plot.id)).toEqual([selene.id]);
-    await harness.settle();
-  });
-
-  it('never ranks a private, adult or other-language plot, however near', async () => {
-    resetSearchSweeps();
-    const cookie = await signUp('search-gate@example.com');
-    const harness = searchApp(searchEmbedder());
-    const listed = await published(cookie, harness, { name: '공개', intro: '고양이' });
-    const unpublished = await published(cookie, harness, { name: '비공개', intro: '고양이 고양이' });
-    const adult = await published(cookie, harness, { name: '성인', intro: '고양이' });
-    const english = await published(cookie, harness, { name: 'Cats', intro: '고양이', language: 'en' });
-    const draft = await publishablePlot(cookie, { name: '초안', intro: '고양이' });
-    const res = await json(cookie, `/api/plots/${unpublished.id}/publish`, 'POST', { publish: false }, harness.app);
-    expect(res.status).toBe(200);
-    await harness.settle();
-    // Unpublishing deleted its vector.
-    expect(await db.select().from(plotSearchVectors).where(eq(plotSearchVectors.plotId, unpublished.id))).toEqual([]);
-    await db.update(plots).set({ safetyLevel: 'adult' }).where(eq(plots.id, adult.id));
-    // Vectors as near as the listed one's, written past the background as if left over.
-    const near = [0.1, 1, 0, 0, 0].map((value) => value / Math.hypot(0.1, 1));
-    for (const id of [unpublished.id, adult.id, draft.id]) {
-      await db
-        .insert(plotSearchVectors)
-        .values({ plotId: id, model: 'test-search', embedding: near, textHash: 'x' })
-        .onConflictDoUpdate({ target: plotSearchVectors.plotId, set: { embedding: near } });
-    }
-
-    const found = await search(harness, '고양이');
-    expect(found.search).toBe('meaning');
-    expect(found.items.map((plot: any) => plot.id)).toEqual([listed.id]);
-    // The English plot is in its own partition.
-    const en = await readJson(await request(undefined, '/api/explore?language=en&q=%EA%B3%A0%EC%96%91%EC%9D%B4', 'GET', undefined, harness.app));
-    expect(en.items.map((plot: any) => plot.id)).toEqual([english.id]);
-    // A refresh deletes what is not listed, with or without an embedder.
-    await refreshSearchVectors(makeDeps(), [unpublished.id, adult.id, draft.id]);
-    expect((await db.select().from(plotSearchVectors)).map((row) => row.plotId).sort()).toEqual([listed.id, english.id].sort());
-    await harness.settle();
-  });
-
-  it('searches the name as text when the embedder is off, down or has no model for the partition', async () => {
-    resetSearchSweeps();
-    const cookie = await signUp('search-fallback@example.com');
-    const harness = searchApp(searchEmbedder());
-    const cat = await published(cookie, harness, { name: '서점의 오후', intro: '고양이가 사는 서점 이야기' });
-
-    for (const fallback of [searchApp(), searchApp(searchEmbedder('test-search', true)), searchApp(searchEmbedder(() => null))]) {
-      const byText = await search(fallback, '서점');
-      expect(byText).toMatchObject({ search: 'text' });
-      expect(byText.items.map((plot: any) => plot.id)).toEqual([cat.id]);
-      expect((await search(fallback, '고양이 이야기')).items).toEqual([]);
-    }
-    // A text search's own cursor goes on as one, whatever answers next.
-    await published(cookie, harness, { name: '서점의 밤', intro: '등대' });
-    const page = await search(searchApp(), '서점', '&limit=1');
-    expect(page.search).toBe('text');
-    const next = await search(harness, '서점', `&limit=1&cursor=${page.nextCursor}`);
-    expect(next.search).toBe('text');
-    expect(next.items).toHaveLength(1);
-    // No query, no search.
-    const plain = await readJson(await request(undefined, '/api/explore?language=ko', 'GET', undefined, harness.app));
-    expect(plain.search).toBeUndefined();
-    await harness.settle();
-  });
-
-  it('embeds again, lazily, a plot whose vector is of another model or older than its last change', async () => {
-    resetSearchSweeps();
-    const cookie = await signUp('search-stale@example.com');
-    const old = searchApp(searchEmbedder('test-old'));
-    const cat = await published(cookie, old, { name: '서점의 오후', intro: '고양이가 사는 서점 이야기' });
-    // Published before search existed: no vector at all.
-    const before = await publishablePlot(cookie, { name: '오래된 등대', intro: '고양이와 등대' });
-    await publishPlot(cookie, before.id);
-    await db.delete(plotSearchVectors).where(eq(plotSearchVectors.plotId, before.id));
-
-    const embedder = searchEmbedder('test-new');
-    const harness = searchApp(embedder);
-    // Nothing of this model yet: the first search finds no plot by nearness — only
-    // by its words, which no model made (the one without a row, not even so) — and sweeps.
-    expect((await search(harness, '고양이')).items.map((plot: any) => plot.id)).toEqual([cat.id]);
-    await harness.settle();
-    const swept = await db.select().from(plotSearchVectors);
-    expect(swept.map((row) => [row.plotId, row.model]).sort()).toEqual(
-      [
-        [cat.id, 'test-new'],
-        [before.id, 'test-new'],
-      ].sort(),
-    );
-    expect((await search(harness, '고양이')).items.map((plot: any) => plot.id).sort()).toEqual([cat.id, before.id].sort());
-
-    // An edit through a path that does not refresh it still bumps the plot, and the next sweep re-reads it.
-    await db.update(plots).set({ intro: '지도만 남았다', updatedAt: new Date() }).where(eq(plots.id, before.id));
-    resetSearchSweeps();
-    await search(harness, '지도');
-    await harness.settle();
-    expect((await search(harness, '지도')).items.map((plot: any) => plot.id)).toEqual([before.id]);
-
-    // An edit through the editor refreshes it straight away.
-    const patched = await json(cookie, `/api/plots/${cat.id}`, 'PATCH', { intro: '재벌가의 고양이' }, harness.app);
-    expect(patched.status).toBe(200);
-    await harness.settle();
-    expect((await search(harness, '재벌')).items.map((plot: any) => plot.id)).toEqual([cat.id]);
-    await harness.settle();
-  });
-});
-
-describe('rate limits', () => {
-  const window = { limit: 3, windowMs: 60_000 };
-
-  it('counts a fixed window in one statement: the limit goes through, the next waits for the window, which starts again once it has run out', async () => {
-    const start = new Date('2030-01-01T00:00:00Z');
-    const at = (ms: number) => new Date(start.getTime() + ms);
-    const hits = [];
-    for (const ms of [0, 10_000, 20_000, 30_000]) hits.push(await hitRateLimit(db, 'test:a', window, at(ms)));
-    expect(hits.map((hit) => [hit.hits, hit.allowed])).toEqual([[1, true], [2, true], [3, true], [4, false]]);
-    // Refused at 30s into a minute: thirty seconds to wait, the window's start unmoved.
-    expect(hits[3]).toMatchObject({ retryAfterSeconds: 30, windowStart: start });
-    // At the window's length exactly it still holds; a moment past it, it starts again.
-    expect(await hitRateLimit(db, 'test:a', window, at(60_000))).toMatchObject({ hits: 5, allowed: false, retryAfterSeconds: 1 });
-    expect(await hitRateLimit(db, 'test:a', window, at(60_001))).toMatchObject({ hits: 1, allowed: true, windowStart: at(60_001) });
-    // Another key has a window of its own.
-    expect(await hitRateLimit(db, 'test:b', window, at(60_001))).toMatchObject({ hits: 1, allowed: true });
-  });
-
-  it('counts hits that arrive together exactly once each', async () => {
-    const at = new Date();
-    const hits = await Promise.all(Array.from({ length: 20 }, () => hitRateLimit(db, 'test:burst', { limit: 10, windowMs: 60_000 }, at)));
-    expect(hits.map((hit) => hit.hits).sort((a, b) => a - b)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1));
-    expect(hits.filter((hit) => hit.allowed)).toHaveLength(10);
-  });
-
-  it('collects windows that ended a day ago when one opens, a batch at a time, and leaves the rest', async () => {
-    const now = Date.now();
-    await db.insert(rateLimits).values([
-      ...Array.from({ length: 60 }, (_, i) => ({ key: `test:dead${i}`, windowStart: new Date(now - 25 * 3_600_000), hits: 9 })),
-      { key: 'test:recent', windowStart: new Date(now - 3_600_000), hits: 9 },
-    ]);
-    const left = async () => (await db.select({ key: rateLimits.key }).from(rateLimits)).map((row) => row.key);
-    // A hit inside an open window collects nothing.
-    await hitRateLimit(db, 'test:recent', { limit: 3, windowMs: 2 * 3_600_000 });
-    expect(await left()).toHaveLength(61);
-    await hitRateLimit(db, 'test:new', window);
-    expect(await left()).toHaveLength(62 - 50);
-    await hitRateLimit(db, 'test:newer', window);
-    expect((await left()).sort()).toEqual(['test:new', 'test:newer', 'test:recent']);
-  });
-
-  it('throttles connection starts by the address they come from', async () => {
-    const { target } = connectApp(fakeOpenAI());
-    const start = (headers: Record<string, string>) =>
-      target.request('/api/chatgpt/sign-in', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', ...headers },
-        body: JSON.stringify({ next: '/', locale: 'ko' }),
-      });
-    // Only this computer starts one (`requireLocal`), so the address is one of its own.
-    for (let i = 0; i < RATE_LIMITS.signIn.limit; i += 1) {
-      expect((await start({ 'x-forwarded-for': '127.0.0.1' })).status).toBe(200);
-    }
-    const refused = await start({ 'x-forwarded-for': '127.0.0.1' });
-    expect(refused.status).toBe(429);
-    expect(await readJson(refused)).toEqual({ error: expect.any(String), code: 'rate_limited' });
-    expect(Number(refused.headers.get('retry-after'))).toBeGreaterThan(500);
-    expect((await start({})).status).toBe(200);
-    const rows = await db.select({ key: rateLimits.key }).from(rateLimits);
-    expect(rows.map((row) => row.key).sort()).toEqual(['sign_in:ip:127.0.0.1', 'sign_in:ip:unknown']);
-  });
-
-  it('throttles the catalogue’s text search by client address, and leaves browsing alone', async () => {
-    const key = 'search:ip:unknown';
-    // A query past the cap is cut rather than refused.
-    expect((await request(undefined, `/api/explore?language=ko&q=${'가'.repeat(5_000)}`)).status).toBe(200);
-    const [counted] = await db.select().from(rateLimits).where(eq(rateLimits.key, key));
-    expect(counted!.hits).toBe(1);
-
-    await db.update(rateLimits).set({ hits: RATE_LIMITS.search.limit }).where(eq(rateLimits.key, key));
-    const refused = await request(undefined, '/api/explore?language=ko&q=검');
-    expect(refused.status).toBe(429);
-    expect((await readJson(refused)).code).toBe('rate_limited');
-    expect((await request(undefined, '/api/explore?language=ko')).status).toBe(200);
-  });
-
-  it('refuses a generation start past the reader’s window, on all five routes, before anything is stored', async () => {
-    const cookie = await signUp('gen-limit@example.com');
-    const { chatId } = await setupChat(cookie);
-    const userId = (await ownerId());
-    const key = `generation:user:${userId}`;
-    // A start goes through and is counted.
-    expect((await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }))).at(-1)!.event).toBe('done');
-    const [counted] = await db.select().from(rateLimits).where(eq(rateLimits.key, key));
-    expect(counted!.hits).toBe(1);
-
-    await db.update(rateLimits).set({ hits: RATE_LIMITS.generation.limit }).where(eq(rateLimits.key, key));
-    const before = await db.select({ id: messages.id }).from(messages).where(eq(messages.chatId, chatId));
-    for (const route of ['messages', 'regenerate', 'continue', 'auto', 'reply']) {
-      const res = await json(cookie, `/api/chats/${chatId}/${route}`, 'POST', { content: '또', speakerId: randomUUID() });
-      expect(res.status, route).toBe(429);
-      expect((await readJson(res)).code).toBe('rate_limited');
-      expect(Number(res.headers.get('retry-after'))).toBeGreaterThan(0);
-    }
-    expect(await db.select({ id: messages.id }).from(messages).where(eq(messages.chatId, chatId))).toHaveLength(before.length);
-
-    // The window opens again once it runs out.
-    await db
-      .update(rateLimits)
-      .set({ windowStart: new Date(Date.now() - RATE_LIMITS.generation.windowMs - 1_000) })
-      .where(eq(rateLimits.key, key));
-    expect((await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST'))).at(-1)!.event).toBe('done');
-  });
-});
-
-describe('leases', () => {
-  it('holds one holder at a time: taken from nobody or an expired holder, renewed and released only by its own', async () => {
-    const ttl = 60_000;
-    expect(await acquireLease(db, 'test:lease', 'a', ttl)).toBe(true);
-    // Live: nobody else takes it, renews it or frees it — and its own holder does not take it twice.
-    expect(await acquireLease(db, 'test:lease', 'b', ttl)).toBe(false);
-    expect(await acquireLease(db, 'test:lease', 'a', ttl)).toBe(false);
-    expect(await renewHeldLease(db, 'test:lease', 'b', ttl)).toBe(false);
-    await releaseLease(db, 'test:lease', 'b');
-    expect(await db.select().from(leases)).toMatchObject([{ key: 'test:lease', holder: 'a' }]);
-    expect(await renewHeldLease(db, 'test:lease', 'a', ttl)).toBe(true);
-
-    // Expired: taken over, and the late holder can neither renew nor free the new one's.
-    await db.update(leases).set({ expiresAt: new Date(Date.now() - 1_000) });
-    expect(await acquireLease(db, 'test:lease', 'b', ttl)).toBe(true);
-    expect(await renewHeldLease(db, 'test:lease', 'a', ttl)).toBe(false);
-    await releaseLease(db, 'test:lease', 'a');
-    expect(await db.select().from(leases)).toMatchObject([{ key: 'test:lease', holder: 'b' }]);
-    await releaseLease(db, 'test:lease', 'b');
-    expect(await db.select().from(leases)).toEqual([]);
-    expect(await acquireLease(db, 'test:lease', 'a', ttl)).toBe(true);
-  });
-
-  it('gives a lease asked for by many at once to exactly one of them', async () => {
-    const taken = await Promise.all(Array.from({ length: 10 }, (_, i) => acquireLease(db, 'test:race', `holder-${i}`, 60_000)));
-    expect(taken.filter(Boolean)).toHaveLength(1);
-    const [row] = await db.select().from(leases);
-    expect(row!.holder).toBe(`holder-${taken.indexOf(true)}`);
-  });
-
-  it('runs background work under a lease: skipped while another holds it, given back after', async () => {
-    let runs = 0;
-    const work = async (): Promise<void> => {
-      runs += 1;
-      // Held while it runs: another instance's attempt stands back.
-      expect(await withLease(db, 'test:work', 60_000, async () => void (runs += 100))).toBe(false);
-    };
-    expect(await withLease(db, 'test:work', 60_000, work)).toBe(true);
-    expect(runs).toBe(1);
-    expect(await db.select().from(leases)).toEqual([]);
-
-    // A failure is thrown on, and the lease still given back.
-    await expect(withLease(db, 'test:work', 60_000, async () => Promise.reject(new Error('boom')))).rejects.toThrow('boom');
-    expect(await db.select().from(leases)).toEqual([]);
-
-    // An instance that died holding it is stood back from until its lease runs out.
-    expect(await acquireLease(db, 'test:work', 'dead-instance', 60_000)).toBe(true);
-    expect(await withLease(db, 'test:work', 60_000, work)).toBe(false);
-    await db.update(leases).set({ expiresAt: new Date(Date.now() - 1_000) });
-    expect(await withLease(db, 'test:work', 60_000, work)).toBe(true);
-    expect(runs).toBe(2);
   });
 });
 
@@ -18648,27 +16757,22 @@ describe('file imports', () => {
     expect(await db.select().from(fileImports)).toEqual([]);
   });
 
-  it('lets a reader import one file at a time, across instances', async () => {
-    const other = makeApp();
+  it('takes a second import while the first is unfinished, and gives up an upload left untouched', async () => {
     const alice = await signUp('one-at-a-time@example.com');
     const size = (await pngCard().arrayBuffer()).byteLength;
     const first = await start(alice, { target: 'plot', fileName: 'lian.png', size });
     expect(first.status).toBe(201);
-    // The same reader on another instance: refused while the first is unfinished.
-    const second = await start(alice, { target: 'plot', fileName: 'lian.png', size }, other);
-    expect(second.status).toBe(429);
-    expect(await readJson(second)).toEqual({ error: expect.any(String), code: 'import_busy' });
+    // One person's imports: the second waits on nothing (they are read one at a time).
+    expect((await start(alice, { target: 'plot', fileName: 'lian.png', size })).status).toBe(201);
 
-    // An upload left untouched gives way to the reader's next: a closed tab does not hold the slot.
+    // An upload left untouched is given up by the next import: a closed tab leaves nothing behind.
     const { id } = await readJson(first);
     const [{ uploadId }] = await db.select({ uploadId: fileImports.uploadId }).from(fileImports).where(eq(fileImports.id, id));
     expect(await readdir(join(storageDir, '.uploads'))).toContain(uploadId);
     await db.update(fileImports).set({ updatedAt: new Date(Date.now() - 16 * 60_000) }).where(eq(fileImports.id, id));
-    expect((await fileImport(alice, '/api/plots/import', cardForm(), other)).status).toBe(201);
+    expect((await fileImport(alice, '/api/plots/import', cardForm())).status).toBe(201);
     expect((await statusOf(alice, id)).status).toBe('abandoned');
     expect(await readdir(join(storageDir, '.uploads'))).not.toContain(uploadId);
-    // A finished import holds nothing.
-    expect((await fileImport(alice, '/api/plots/import', cardForm(), other)).status).toBe(201);
   });
 
   it('ends an unreadable file as failed with the code the import gave, and keeps nothing of it', async () => {

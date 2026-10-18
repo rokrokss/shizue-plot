@@ -16,9 +16,9 @@ const screens = [
 ] as const;
 
 for (const { locale, width } of screens) {
-  test(`${locale} discovery and settings fit a ${width}px screen`, async ({ page }) => {
+  test(`${locale} library and settings fit a ${width}px screen`, async ({ page }) => {
     await page.setViewportSize({ width, height: 844 });
-    // The catalogue has its title; the settings page, the cards that connect ChatGPT and a phone.
+    // The library has its title; the settings page, the cards that connect ChatGPT and a phone.
     for (const [path, level] of [[`/${locale}`, 1], [`/${locale}/settings`, 2]] as const) {
       await page.goto(path);
       await expect(page.getByRole('heading', { level }).first()).toBeVisible();
@@ -30,11 +30,3 @@ for (const { locale, width } of screens) {
     await expect(page.locator('a[href*="/login"]')).toHaveCount(0);
   });
 }
-
-test('an empty search offers a working route back to the catalogue', async ({ page }) => {
-  await page.goto('/ko?q=shizue-no-matching-plot-941827');
-  await page.getByRole('button', { name: '검색과 필터 초기화' }).click();
-  await expect(page.getByRole('searchbox')).toHaveValue('');
-  await expect(page).toHaveURL(/\/ko$/);
-  await expect(page.getByRole('button', { name: '검색과 필터 초기화' })).toHaveCount(0);
-});

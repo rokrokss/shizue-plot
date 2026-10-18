@@ -3,11 +3,10 @@
  * (`index.ts`, ARCHITECTURE §12 운영).
  */
 import type { BackgroundTaskKind } from './deps.js';
-import { backgroundFinished, backgroundStarted } from './metrics.js';
 
 /** The fire-and-forget tasks this process has running (`deps.onBackgroundTask`). */
 export interface BackgroundTasks {
-  /** `deps.onBackgroundTask`: counts the task and keeps it until it settles. */
+  /** `deps.onBackgroundTask`: keeps the task until it settles. */
   track(task: Promise<void>, kind: BackgroundTaskKind): void;
   /** How many are running now, by kind. */
   inFlight(): Map<BackgroundTaskKind, number>;
@@ -20,14 +19,12 @@ export function createBackgroundTasks(): BackgroundTasks {
   const running = new Map<Promise<void>, BackgroundTaskKind>();
   return {
     track(task, kind) {
-      backgroundStarted.inc({ kind });
       // The tasks swallow and log their own failures before they get here
-      // (`memory.ts` and the rest), so `error` is one that broke that rule.
+      // (`memory.ts` and the rest), so a rejection is one that broke that rule.
       const settled: Promise<void> = task
-        .then(() => 'ok', () => 'error')
-        .then((outcome) => {
+        .catch(() => undefined)
+        .then(() => {
           running.delete(settled);
-          backgroundFinished.inc({ kind, outcome });
         });
       running.set(settled, kind);
     },

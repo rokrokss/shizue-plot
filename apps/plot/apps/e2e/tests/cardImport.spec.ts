@@ -5,10 +5,8 @@ import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 /**
  * Card import along the owner's path, through the web origin: a card file of
  * more than one upload part arrives whole and becomes a plot (ARCHITECTURE §10
- * 파일 임포트 — under the local driver the parts go through the `/api` rewrite) → the studio says where it came from and under what license →
- * publishing it waits for the owner's word → a second card comes in from a
- * RisuRealm page, which the browser downloads itself, and the now-public plot
- * asks for the word again first → a card whose upload a reload cut off goes on
+ * 파일 임포트 — under the local driver the parts go through the `/api` rewrite) → the studio says where it came from → a second card comes in from a
+ * RisuRealm page, which the browser downloads itself → a card whose upload a reload cut off goes on
  * from the parts already up when the same file is picked again, and one the
  * server was reading when the page reloaded is shown, not sent again.
  *
@@ -38,8 +36,7 @@ const card = (name: string, license: string) => ({
     name,
     description: `서가를 정리하는 사서 ${run}.`,
     personality: '',
-    // The world a card's scenario carries is what becomes the plot's setting, and
-    // a plot needs one to be published.
+    // The world a card's scenario carries is what becomes the plot's setting.
     scenario: `폐관 시간이 지난 도서관 ${run}.`,
     first_mes: `${name}: 아직 안 가셨군요.`,
     mes_example: '',
@@ -90,32 +87,16 @@ test('a card of more than one upload part arrives whole', async () => {
   await expect(page.getByTestId('import-warnings')).toContainText('도입부 한도(10개)를 넘은 첫 메시지 1개');
 });
 
-test('the studio says where the card came from and under what license', async () => {
+test('the studio says where the card came from', async () => {
   const member = members().first();
   await expect(member).toContainText('가져옴');
   await member.locator('summary').click();
   const provenance = member.getByTestId('member-provenance');
   await expect(provenance).toContainText('파일 first.json');
   await expect(provenance).toContainText(`원작자${run}`);
-  await expect(member.getByTestId('member-license')).toHaveText(
-    'CC BY-NC-ND 4.0 · 저작자표시 · 비영리 · 변경금지',
-  );
 });
 
-test('publishing waits for the owner’s word, warned harder for a no-derivatives card', async () => {
-  const publish = page.getByRole('button', { name: '공개하기' });
-  await expect(publish).toBeDisabled();
-  await expect(page.getByTestId('rights-restricted')).toContainText(first);
-
-  await page
-    .getByLabel('가져온 등장인물을 직접 만들었거나, 원작자에게 공개해도 좋다는 허락을 받았습니다.')
-    .check();
-  await publish.click();
-  await expect(page.getByRole('button', { name: '비공개로 전환' })).toBeVisible();
-  await expect(page.getByText(/^권리 확인 /)).toBeVisible();
-});
-
-test('a RisuRealm page adds a member to the public plot, once the owner vouches for it', async () => {
+test('a RisuRealm page adds a member to the plot', async () => {
   const asked: string[] = [];
   await page.route('https://realm.risuai.net/api/v1/download/**', async (route) => {
     asked.push(route.request().url());
@@ -137,26 +118,16 @@ test('a RisuRealm page adds a member to the public plot, once the owner vouches 
   await page.getByTestId('member-realm-open').click();
   const form = page.getByTestId('realm-import');
   await form.getByTestId('realm-import-url').fill(`https://risuai.xyz/?realm=${realmId}`);
-  const submit = form.getByRole('button', { name: '가져오기' });
-  // The plot is public, so the import itself would publish the card.
-  await expect(submit).toBeDisabled();
-  const confirm = page.getByLabel(
-    '추가할 등장인물을 직접 만들었거나, 원작자에게 공개해도 좋다는 허락을 받았습니다.',
-  );
-  await confirm.check();
-  await submit.click();
+  await form.getByRole('button', { name: '가져오기' }).click();
 
   await expect(members()).toHaveCount(2);
   expect(asked.map((url) => new URL(url).pathname.split('/')[4])).toEqual(['charx-v3', 'png-v3']);
-  // Asked again for the next card.
-  await expect(confirm).not.toBeChecked();
   const added = members().nth(1);
   await added.locator('summary').click();
   await expect(added.getByTestId('member-provenance').getByRole('link')).toHaveAttribute(
     'href',
     `https://realm.risuai.net/character/${realmId}`,
   );
-  await expect(added.getByTestId('member-license')).toHaveText('CC BY 4.0 · 저작자표시');
 
   await page.goto(`/ko/p/${plotId}`);
   await expect(page.getByTestId('plot-member')).toHaveCount(2);

@@ -39,15 +39,12 @@ chat memory into `apps/plot/data/embedder` and checks they load offline:
 bge-m3 from Hugging Face (587 MB) and, for Korean plots, KURE-v1 (738 MB) from
 the S3 bucket `S3_*` names — the compose RustFS in development, where
 `embedder:publish` has to have put our ONNX conversion first (ARCHITECTURE
-§7.3). Run it once per checkout and on every deploy: the server never
+§7.3). Run it once per checkout: the server never
 downloads them itself, and a plot whose model is missing has its memory pick
 recent and random summaries instead of similar ones. Loaded, each model adds
 about 2 GB to the API's memory and is unloaded after ten idle minutes;
 `EMBEDDER_ROUTING=single EMBEDDER_MODEL=multiMiniLM` runs one light model
-(135 MB, about 750 MB loaded), and `EMBEDDER=off` none. Several API instances
-can share one model instead of loading it each: `embedder:serve` runs a process
-that only embeds, on `EMBEDDER_PORT`, and `EMBEDDER_URL` points the instances at
-it (ARCHITECTURE §7.3).
+(135 MB, about 750 MB loaded), and `EMBEDDER=off` none.
 
 Open http://localhost:13000 in Chrome with [Shizue](https://chromewebstore.google.com/detail/mpcbgfkoholfgapcgcmfjobnfcbnfanm) installed (below).
 Next.js forwards `/api/*` to Hono on port 8787. `make stop` stops the app
@@ -74,8 +71,7 @@ connection still opens, and only reads the source.
 
 A reader's browser uploads a card or module file in 8 MB parts to the API,
 which streams each to disk, and a job in the API reads it back and imports it
-(ARCHITECTURE §10 파일 임포트). `IMPORT_WORKERS` (default 2) is how many imports
-the API reads at once.
+(ARCHITECTURE §10 파일 임포트). The API reads one import at a time.
 
 ## The owner, and connecting ChatGPT
 
@@ -133,8 +129,10 @@ Phone browsers run no extension, so a phone never connects ChatGPT itself: it
 uses the connection the computer made. Open **Settings → Connect a phone** on the
 computer and scan the QR code; the code works once, for five minutes, and the
 phone gets a device session of its own for 30 days. **Disconnect this phone** in
-the phone's settings ends that session alone; disconnecting ChatGPT leaves the
-phones paired, and closing access keeps them out.
+the phone's settings ends that session alone. The computer's settings list the
+paired phones, with when each was paired and last seen, and disconnect one or all
+of them. Disconnecting ChatGPT leaves the phones paired, and closing access keeps
+them out.
 
 **Scope.** OpenAI's open-source flow is for open-source and locally hosted apps,
 which is what shizue is.
@@ -181,19 +179,13 @@ removed products are unsupported.
 
 ## Operations
 
-In production set `LOG_FORMAT=json`: every API log line becomes one JSON object
-(`time`, `level`, `msg`, `component`, `requestId`, `err`), each request adds an
-access line with its route pattern, status and duration, and `x-request-id` ties
-them together. Error tracking is these logs; no external service is used. The
-default `text` keeps the terminal output developers read. Request bodies,
-cookies, auth headers, prompts and card text are never logged.
+The API logs to its console. Error tracking is these logs; no external service
+is used. Request bodies, cookies, auth headers, prompts and card text are never
+logged.
 
-`GET /api/health` answers while the process runs; `GET /api/ready` answers 503
-once a shutdown has begun or when the database does not answer within two
-seconds. Set `METRICS_PORT` to serve Prometheus metrics at `/metrics` on a
-separate listener (`METRICS_HOST`, loopback by default); nothing under `/api`
-exposes them. `embedder:serve` reads the same two and serves its embedder's
-metrics and the process defaults. On SIGTERM the API stops taking connections, stores the replies in
-flight, waits up to `SHUTDOWN_BACKGROUND_MS` (20 s) for background work and then
-exits, so give the host a grace period above 25 seconds. Details are in
+`GET /api/health` answers while the process runs. On SIGTERM the API stops
+taking connections, stores the replies in flight, waits up to
+`SHUTDOWN_BACKGROUND_MS` (20 s) for background work, closes the database and
+exits, so let a shutdown take over 25 seconds. A chat's generation is held in
+memory, so no chat is left generating after a restart. Details are in
 ARCHITECTURE §12.

@@ -173,12 +173,12 @@ describe('the AI draft', () => {
     await click(opener());
     await type(premise(), '한 줄.');
     drafted = () =>
-      Promise.reject(new ApiError(429, 'draft_in_progress', 'A draft is already being written'));
+      Promise.reject(new ApiError(503, 'draft_unavailable', 'No model can write a draft'));
     await click(write());
 
     expect(sent).toHaveLength(1);
     expect(push).not.toHaveBeenCalled();
-    expect(host.textContent).toContain(messages.errors.draft_in_progress);
+    expect(host.textContent).toContain(messages.errors.draft_unavailable);
     // Still there, with the premise in it, ready to be tried again.
     expect(premise().value).toBe('한 줄.');
   });

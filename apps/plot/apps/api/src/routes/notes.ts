@@ -1,9 +1,9 @@
-import { user, userNotes, type UserNote } from '@shizue/db';
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { userNotes, type UserNote } from '@shizue/db';
+import { and, asc, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import type { AppDeps, AppEnv } from '../deps.js';
 import { badRequest } from '../errors.js';
-import { loadOwnedNote, MAX_NOTE_LENGTH, MAX_USER_NOTES } from '../notes.js';
+import { loadOwnedNote, MAX_NOTE_LENGTH } from '../notes.js';
 import { optionalString, readJsonBody, requireUuidParam } from '../util.js';
 
 const toNoteJson = (note: UserNote) => ({
@@ -46,32 +46,16 @@ export function noteRoutes(deps: AppDeps): Hono<AppEnv> {
     const body = await readJsonBody(c);
     const content = noteContent(body) ?? '';
 
-    // The cap is a count, and a count only means something while nothing else can
-    // insert. The account row is the stable thing every create for this user can
-    // queue on, so two requests racing at 99 cannot both see room.
-    const created = await deps.db.transaction(async (tx) => {
-      await tx.select({ id: user.id }).from(user).where(eq(user.id, userId)).for('update');
-
-      const [counted] = await tx
-        .select({ value: sql<number>`count(*)::int` })
-        .from(userNotes)
-        .where(eq(userNotes.userId, userId));
-      if ((counted?.value ?? 0) >= MAX_USER_NOTES) {
-        throw badRequest('note_limit', `A user may keep at most ${MAX_USER_NOTES} notes`);
-      }
-
-      const [row] = await tx
-        .insert(userNotes)
-        .values({
-          userId,
-          title: optionalString(body, 'title') ?? '',
-          content,
-          groupName: optionalString(body, 'groupName') ?? '',
-        })
-        .returning();
-      return row!;
-    });
-    return c.json(toNoteJson(created), 201);
+    const [created] = await deps.db
+      .insert(userNotes)
+      .values({
+        userId,
+        title: optionalString(body, 'title') ?? '',
+        content,
+        groupName: optionalString(body, 'groupName') ?? '',
+      })
+      .returning();
+    return c.json(toNoteJson(created!), 201);
   });
 
   app.put('/:id', async (c) => {

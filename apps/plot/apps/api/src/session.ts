@@ -1,5 +1,5 @@
 import { session, user, type Db } from '@shizue/db';
-import { and, asc, eq, gt, like } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, like, lt } from 'drizzle-orm';
 import type { Context, MiddlewareHandler } from 'hono';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
@@ -20,6 +20,8 @@ const SESSION_TTL_S = 30 * 24 * 60 * 60;
  * anything. Rows without it are the browser sign-ins of before 2026-10-18.
  */
 const PAIRED_PREFIX = 'paired:';
+/** How stale a phone's last-seen time may get before a request of its own moves it: one write a minute at most. */
+const SEEN_EVERY_MS = 60_000;
 const digest = (token: string): string => createHash('sha256').update(token).digest('hex');
 
 export function readCookie(headers: Headers, name: string): string | undefined {
@@ -34,6 +36,17 @@ export function cookie(name: string, value: string, options: { path?: string; ma
   return `${name}=${encodeURIComponent(value)}; Path=${options.path ?? '/'}; Max-Age=${options.maxAge}; HttpOnly; SameSite=Lax${options.secure ? '; Secure' : ''}`;
 }
 
+/** A paired phone, as the computer's settings list it. */
+export interface PairedPhone {
+  /** The session's own id, without its `paired:` mark. */
+  id: string;
+  pairedAt: Date;
+  /** Its latest request, to the minute (`SEEN_EVERY_MS`). */
+  lastSeenAt: Date;
+  /** The browser it paired from, as it said. */
+  userAgent: string | null;
+}
+
 /**
  * Paired phones' sessions behind an HttpOnly cookie. The table keeps only a
  * digest of the cookie value, so a read of the database is not a way in.
@@ -41,10 +54,16 @@ export function cookie(name: string, value: string, options: { path?: string; ma
 export interface SessionStore {
   /** A session for a phone that claimed a pairing code; returns its Set-Cookie value. */
   create(userId: string, request: Request): Promise<string>;
-  /** Whether these headers carry a paired phone's session that has not run out. */
+  /** Whether these headers carry a paired phone's session that has not run out; notes the phone as seen. */
   resolve(headers: Headers): Promise<boolean>;
   /** Ends the session these headers carry, and only that one. */
   end(headers: Headers): Promise<void>;
+  /** The phones paired now, the latest first; sessions that ran out are let go. */
+  list(): Promise<PairedPhone[]>;
+  /** Ends one phone's session, from the computer; whether there was one. */
+  revoke(id: string): Promise<boolean>;
+  /** Ends every phone's session, from the computer. */
+  revokeAll(): Promise<void>;
   clearCookie(): string;
 }
 
@@ -62,14 +81,36 @@ export function createSessionStore(db: Db, options: { secure: boolean }): Sessio
     async resolve(headers) {
       const token = readCookie(headers, SESSION_COOKIE);
       if (!token) return false;
-      const [row] = await db.select({ id: session.id }).from(session)
+      const [row] = await db.select({ id: session.id, seenAt: session.updatedAt }).from(session)
         .where(and(eq(session.token, digest(token)), gt(session.expiresAt, new Date()), like(session.id, `${PAIRED_PREFIX}%`)))
         .limit(1);
-      return row !== undefined;
+      if (!row) return false;
+      if (Date.now() - row.seenAt.getTime() >= SEEN_EVERY_MS) {
+        await db.update(session).set({ updatedAt: new Date() }).where(eq(session.id, row.id));
+      }
+      return true;
     },
     async end(headers) {
       const token = readCookie(headers, SESSION_COOKIE);
       if (token) await db.delete(session).where(eq(session.token, digest(token)));
+    },
+    async list() {
+      const paired = like(session.id, `${PAIRED_PREFIX}%`);
+      await db.delete(session).where(and(paired, lt(session.expiresAt, new Date())));
+      const rows = await db.select().from(session).where(paired).orderBy(desc(session.createdAt));
+      return rows.map((row) => ({
+        id: row.id.slice(PAIRED_PREFIX.length),
+        pairedAt: row.createdAt,
+        lastSeenAt: row.updatedAt,
+        userAgent: row.userAgent,
+      }));
+    },
+    async revoke(id) {
+      const gone = await db.delete(session).where(eq(session.id, `${PAIRED_PREFIX}${id}`)).returning({ id: session.id });
+      return gone.length > 0;
+    },
+    async revokeAll() {
+      await db.delete(session).where(like(session.id, `${PAIRED_PREFIX}%`));
     },
     clearCookie: () => cookie(SESSION_COOKIE, '', { maxAge: 0, secure: options.secure }),
   };
@@ -139,10 +180,10 @@ export function isLocalRequest(c: Context): boolean {
 }
 
 /**
- * In front of every `/api/*` route but the probes and a phone's claim of its
+ * In front of every `/api/*` route but the probe and a phone's claim of its
  * pairing code (app.ts): a request from this computer, or one carrying a paired
- * phone's session, runs as the owner; anything else is 401. Past it `userId` and
- * `viewerId` are the owner's, and `local` says which of the two it was.
+ * phone's session, runs as the owner; anything else is 401. Past it `userId`
+ * is the owner's, and `local` says which of the two it was.
  */
 export function ownerGate(db: Db, sessions: SessionStore): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
@@ -150,7 +191,6 @@ export function ownerGate(db: Db, sessions: SessionStore): MiddlewareHandler<App
     if (!local && !(await sessions.resolve(c.req.raw.headers))) throw unauthorized();
     const owner = await ensureOwner(db);
     c.set('local', local);
-    c.set('viewerId', owner);
     c.set('userId', owner);
     await next();
   };
@@ -159,19 +199,9 @@ export function ownerGate(db: Db, sessions: SessionStore): MiddlewareHandler<App
 /**
  * In front of what only this computer may do: connecting ChatGPT, whose
  * callback only this computer's Shizue extension brings back, and letting a
- * phone in. A paired phone is refused with 403 `local_only`.
+ * phone in or putting one out. A paired phone is refused with 403 `local_only`.
  */
 export const requireLocal: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (!c.get('local')) throw forbidden('local_only', 'Only the computer shizue runs on can do this');
-  await next();
-};
-
-/**
- * The guard the routes carried while shizue had accounts. Every request past
- * `ownerGate` has its owner, so it never refuses one now; it stays in front of
- * the routes until those that served other readers go.
- */
-export const requireUser: MiddlewareHandler<AppEnv> = async (c, next) => {
-  if (c.get('viewerId') === null) throw unauthorized();
   await next();
 };

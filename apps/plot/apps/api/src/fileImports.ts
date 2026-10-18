@@ -15,14 +15,13 @@
  * same answer the import gave when it was one request.
  *
  * So an import's memory is a few parts and what a card is made of
- * (`MAX_READ_WHOLE_BYTES`), whatever the file's size, and how many run at once
- * is the import workers' count (`IMPORT_WORKERS`). One import a reader at a time.
+ * (`MAX_READ_WHOLE_BYTES`), whatever the file's size, and they are read one at
+ * a time, on a job loop of their own (`index.ts`).
  *
  * Nothing an import leaves is kept: the uploaded file goes when the job is done
  * with it; what a failed import wrote is taken back (`FileImportWritten`); an
  * upload nobody finished is abandoned and dropped by the sweep the next import
- * runs (`sweepFileImports`), and a store's lifecycle rule on `imports/` backs
- * that up.
+ * runs (`sweepFileImports`).
  */
 import {
   ByteSourceError,
@@ -44,7 +43,6 @@ import {
   jobs,
   plots,
   readerModules,
-  user,
   type FileImport,
   type FileImportError,
   type FileImportResult,
@@ -58,7 +56,6 @@ import type { AppDeps, AppEnv } from './deps.js';
 import { ApiError, badRequest, notFound } from './errors.js';
 import { enqueueJob } from './jobs.js';
 import { loadOwnedPlot } from './plots.js';
-import { RATE_LIMITS, rateLimit } from './rateLimit.js';
 import {
   coerceSourceUrl,
   importCardAsMember,
@@ -68,18 +65,11 @@ import {
   MAX_IMPORT_FILE_NAME_LENGTH,
   ownerView,
   readWorldInfo,
-  rightsUnconfirmed,
   toMemberJson,
   undoImportWrites,
   type CardUpload,
 } from './routes/plots.js';
-import {
-  countReaderModules,
-  importReaderModule,
-  readerLibraryFull,
-  toReaderModuleJson,
-} from './routes/readerModules.js';
-import { MAX_READER_MODULES } from './readerModules.js';
+import { importReaderModule, toReaderModuleJson } from './routes/readerModules.js';
 import { deleteQuietly, importFileKey, PartSizeMismatch, readAll, type UploadedPart } from './storage.js';
 import { isUuid, readJsonBody, requireString, requireUuidParam } from './util.js';
 
@@ -120,7 +110,6 @@ const SWEEP_BATCH = 20;
 const PROGRESS_MS = 1_000;
 
 const TARGETS: readonly FileImportTarget[] = ['plot', 'member', 'plot_module', 'reader_module'];
-const UNFINISHED = ['uploading', 'queued', 'processing'] as const;
 
 /** Where a running import is, for the page: reading the file, storing its pictures, fetching what it loads from other hosts. */
 export type ImportStage = 'reading' | 'assets' | 'localizing';
@@ -290,7 +279,7 @@ async function importFile(deps: AppDeps, row: FileImport, hooks: ImportHooks): P
     }
     const upload = { parsed, fileName: row.fileName, sha256: await source.sha256() };
     return row.target === 'plot_module'
-      ? importPlotModule(deps, row.userId, plotOf(row), { ...upload, rightsConfirmed: row.options.rightsConfirmed === true }, hooks)
+      ? importPlotModule(deps, row.userId, plotOf(row), upload, hooks)
       : importReaderModule(deps, row.userId, { ...upload, confirmLowLevelAccess: row.options.confirmLowLevelAccess === true }, hooks);
   }
 
@@ -312,10 +301,7 @@ async function importFile(deps: AppDeps, row: FileImport, hooks: ImportHooks): P
   const upload: CardUpload = {
     parsed: lorebook ? { ...parsed, card: { ...parsed.card, lorebook } } : parsed,
     fileName: row.fileName,
-    imported: {
-      importedFrom: importProvenance(row.fileName, sha256, row.options.sourceUrl),
-      rightsConfirmed: row.options.rightsConfirmed === true,
-    },
+    imported: { importedFrom: importProvenance(row.fileName, sha256, row.options.sourceUrl) },
   };
   return row.target === 'plot'
     ? importCardAsPlot(deps, row.userId, upload, hooks)
@@ -413,8 +399,7 @@ async function jobPending(deps: AppDeps, importId: string): Promise<boolean> {
 
 /**
  * Collects what imports left behind, a batch at a time — run by each import
- * that starts, as the rate limits' windows are collected by the hits that open
- * new ones; there is no loop of its own. Uploads not finished in a day are
+ * that starts; there is no loop of its own. Uploads not finished in a day are
  * abandoned, and their parts and files dropped; imports whose worker died with
  * no job left to finish them are failed and their writes taken back; a module
  * the reader never said yes to gives up its file after an hour; and finished
@@ -526,7 +511,7 @@ async function statusOf(deps: AppDeps, row: FileImport): Promise<Record<string, 
 const partSizeFor = (size: number): number => Math.max(FILE_IMPORT_PART_BYTES, Math.ceil(size / MAX_PARTS));
 
 /**
- * `POST /api/file-imports` and what hangs off it (behind `requireUser`, app.ts).
+ * `POST /api/file-imports` and what hangs off it (behind `ownerGate`, app.ts).
  * The refusals an import's own route gave before it read the file are given
  * here, before the file is uploaded; the ones that need the file come back
  * through `GET …/:id` as a failed import with the same code.
@@ -534,7 +519,7 @@ const partSizeFor = (size: number): number => Math.max(FILE_IMPORT_PART_BYTES, M
 export function fileImportRoutes(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
 
-  app.post('/', rateLimit(deps, RATE_LIMITS.import), async (c) => {
+  app.post('/', async (c) => {
     const userId = c.get('userId');
     const body = await readJsonBody(c);
     const target = body['target'] as FileImportTarget;
@@ -553,7 +538,6 @@ export function fileImportRoutes(deps: AppDeps): Hono<AppEnv> {
         ? badRequest('invalid_module', 'Not a RisuAI module: neither a charx, a .risum file nor JSON')
         : badRequest('invalid_card', 'Unsupported card file: not PNG, charx, or JSON');
     }
-    const rightsConfirmed = body['rightsConfirmed'] === true;
     const confirmLowLevelAccess = body['confirmLowLevelAccess'] === true;
 
     let sourceUrl: string | undefined;
@@ -577,8 +561,6 @@ export function fileImportRoutes(deps: AppDeps): Hono<AppEnv> {
       if (typeof value !== 'string' || !isUuid(value)) throw notFound('Plot not found');
       const plot = await loadOwnedPlot(deps, value, userId);
       plotId = plot.id;
-      // Someone else's work shown to readers the moment it lands: the owner's word first.
-      if (plot.visibility === 'public' && !rightsConfirmed) throw rightsUnconfirmed();
       if (target === 'member') {
         const [counted] = await deps.db
           .select({ value: sql<number>`count(*)::int` })
@@ -589,10 +571,6 @@ export function fileImportRoutes(deps: AppDeps): Hono<AppEnv> {
         }
       }
     }
-    if (target === 'reader_module' && (await countReaderModules(deps, userId)) >= MAX_READER_MODULES) {
-      throw readerLibraryFull();
-    }
-
     // The reader's own upload left untouched is given up for this one.
     const superseded = await deps.db
       .update(fileImports)
@@ -609,30 +587,19 @@ export function fileImportRoutes(deps: AppDeps): Hono<AppEnv> {
 
     const id = randomUUID();
     const partSize = partSizeFor(size);
-    await deps.db.transaction(async (tx) => {
-      // One import a reader at a time, across instances: the count queues on the account row.
-      await tx.select({ id: user.id }).from(user).where(eq(user.id, userId)).for('update');
-      const [busy] = await tx
-        .select({ id: fileImports.id })
-        .from(fileImports)
-        .where(and(eq(fileImports.userId, userId), inArray(fileImports.status, [...UNFINISHED])))
-        .limit(1);
-      if (busy) throw new ApiError(429, 'import_busy', 'Another import of yours is still running');
-      await tx.insert(fileImports).values({
-        id,
-        userId,
-        target,
-        plotId,
-        fileName,
-        size,
-        partSize,
-        options: {
-          ...(sourceUrl ? { sourceUrl } : {}),
-          ...(rightsConfirmed ? { rightsConfirmed } : {}),
-          ...(confirmLowLevelAccess ? { confirmLowLevelAccess } : {}),
-          ...(worldInfo ? { worldInfo: true } : {}),
-        },
-      });
+    await deps.db.insert(fileImports).values({
+      id,
+      userId,
+      target,
+      plotId,
+      fileName,
+      size,
+      partSize,
+      options: {
+        ...(sourceUrl ? { sourceUrl } : {}),
+        ...(confirmLowLevelAccess ? { confirmLowLevelAccess } : {}),
+        ...(worldInfo ? { worldInfo: true } : {}),
+      },
     });
     try {
       const uploadId = await deps.storage.uploads.create(importFileKey(id, 'file'), 'application/octet-stream');

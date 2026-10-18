@@ -56,9 +56,9 @@ export function deviceClaimRoutes(deps: AppDeps, sessions: SessionStore): Hono<A
  * through a tunnel — opened from the settings page (`tunnel.ts`), or one the
  * owner runs and lists in `REMOTE_ORIGINS`. Pairing is how a phone gets in: this
  * computer shows a one-time code as a QR code, and the phone trades it for a
- * session of its own (`deviceClaimRoutes`). Everything that lets a phone in is
- * this computer's alone (`requireLocal`); a paired phone may only read where it
- * stands and leave.
+ * session of its own (`deviceClaimRoutes`). Everything that lets a phone in, or
+ * puts one out, is this computer's alone (`requireLocal`); a paired phone may
+ * only read where it stands and leave.
  */
 export function deviceRoutes(deps: AppDeps, sessions: SessionStore): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
@@ -113,6 +113,30 @@ export function deviceRoutes(deps: AppDeps, sessions: SessionStore): Hono<AppEnv
   app.delete('/session', async (c) => {
     await sessions.end(c.req.raw.headers);
     c.header('Set-Cookie', sessions.clearCookie());
+    return c.body(null, 204);
+  });
+
+  /** The phones paired with this computer: when each paired, when it was last seen, and the browser it said it was. */
+  app.get('/phones', requireLocal, async (c) =>
+    c.json(
+      (await sessions.list()).map((phone) => ({
+        id: phone.id,
+        pairedAt: phone.pairedAt.toISOString(),
+        lastSeenAt: phone.lastSeenAt.toISOString(),
+        userAgent: phone.userAgent,
+      })),
+    ),
+  );
+
+  /** Puts one phone out: its next request, and every one after it, is 401 until it pairs again. */
+  app.delete('/phones/:id', requireLocal, async (c) => {
+    if (!(await sessions.revoke(c.req.param('id')))) throw notFound('Phone not found');
+    return c.body(null, 204);
+  });
+
+  /** Puts every phone out. */
+  app.delete('/phones', requireLocal, async (c) => {
+    await sessions.revokeAll();
     return c.body(null, 204);
   });
 

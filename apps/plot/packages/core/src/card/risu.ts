@@ -269,18 +269,6 @@ export function splitBackground(html: string | undefined, scripts?: readonly Dis
 }
 
 /**
- * The license a RisuAI card declares in `extensions.risuai.license` — `CC BY-NC 4.0`,
- * `private` and the like, as RisuRealm writes them. Undefined when the card says
- * nothing, which Realm stores as an empty string.
- */
-export function cardLicense(extensions: Record<string, unknown>): string | undefined {
-  const risu = extensions['risuai'];
-  if (risu === null || typeof risu !== 'object') return undefined;
-  const license = (risu as Record<string, unknown>)['license'];
-  return typeof license === 'string' && license.trim() ? license.trim() : undefined;
-}
-
-/**
  * Whether a RisuAI card is a utility bot (`extensions.risuai.utilityBot`, the
  * character setting RisuAI's help calls "a bot made for utility, not for
  * roleplay"). RisuAI's `sendChat` then builds the request from a fixed template

@@ -45,9 +45,8 @@
  * as data, read by the keeper the state made before the card's code ran.
  *
  * **What a listener has.** What the browser hands its worker: the chat (the
- * whole branch), its variables, the reader's global variables, the character
- * as the reader's overlay has it, the chat's own lore, the persona and the
- * chat's note — and the request as the request triggers read it: RisuAI's
+ * whole branch), its variables, the work's global variables, the character
+ * as it stands, the chat's own lore, the persona and the chat's note — and the request as the request triggers read it: RisuAI's
  * `OpenAIChat` items in the shape RisuAI's request has, `memo` and the rest
  * beside `role` and `content`, the pictures as their data URLs — stand-ins past
  * a request's budget (`requestTriggers.ts`). RisuAI's
@@ -65,8 +64,8 @@
  * from them. What it did to the chat, the character and the chat's lore comes
  * back too (`ListenerEdits`), read as the browser's sandbox reads a call's, and
  * each script reads what the ones before it did; the reply keeps it — the chat
- * as the branch it hangs under, the character in the reader's overlay, the lore
- * in the chat's own (`generation.ts`).
+ * as the branch it hangs under, the character in the work itself, the lore in
+ * the chat's own (`generation.ts`).
  *
  * **Failure.** One hard clock for the whole run (`REQUEST_LUA_DEADLINE_MS`).
  * A child that runs it out, exits, writes a line that is not one of the
@@ -804,8 +803,8 @@ export const luaStateKey = (reader: string, scripts: readonly string[]): string 
  * The states this process keeps: the most recently used first to stay, up to
  * `entries` of them and `chars` characters in all — each one is at most
  * `LUA_STATE_LIMIT` bytes. In memory, as RisuAI's states live in the reader's
- * tab and go with it: a restart, or another instance of the API, starts the
- * next run without them, which is RisuAI's after a reload.
+ * tab and go with it: a restart starts the next run without them, which is
+ * RisuAI's after a reload.
  */
 export function createLuaStateStore({ entries = 1_000, chars = 32_000_000 }: { entries?: number; chars?: number } = {}): LuaStateStore {
   const kept = new Map<string, KeptLuaState>();

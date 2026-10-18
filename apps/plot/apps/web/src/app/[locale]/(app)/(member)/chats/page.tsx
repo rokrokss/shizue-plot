@@ -1,13 +1,12 @@
 'use client';
 
-import { useFormatter, useTranslations } from 'next-intl';
+import { useTranslations } from 'next-intl';
 import { useEffect, useState } from 'react';
+import { ChatRows } from '@/components/ChatRows';
 import { Icon } from '@/components/Icon';
-import { Avatar } from '@/components/Avatar';
 import { buttonClass, ErrorText, Spinner } from '@/components/ui';
 import { Link } from '@/i18n/navigation';
 import { apiGet } from '@/lib/api';
-import { messageSnippet } from '@/lib/chatSnippet';
 import type { ChatListItem } from '@/lib/types';
 import { useDocumentTitle } from '@/lib/useDocumentTitle';
 import { useErrorMessage } from '@/lib/useErrorMessage';
@@ -21,7 +20,6 @@ export default function ChatsPage() {
   const t = useTranslations('chat');
   const rebrand = useTranslations('rebrand');
   const common = useTranslations('common');
-  const format = useFormatter();
   const toMessage = useErrorMessage();
   useDocumentTitle(t('listTitle'));
 
@@ -59,32 +57,9 @@ export default function ChatsPage() {
           <Link href="/" className={buttonClass('primary', 'md', 'mt-5')}>{rebrand('emptyAction')}</Link>
         </div>
       ) : (
-        <ul className="mt-6 space-y-3">
-          {chats.map((chat) => (
-            <li key={chat.id}>
-              <Link
-                href={`/chats/${chat.id}`}
-                className="flex items-center gap-4 rounded-2xl border border-line bg-surface p-4 transition-colors hover:border-fg hover:bg-mint-soft/30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-              >
-                <Avatar src={chat.coverUrl} name={chat.title} className="size-11 text-base" />
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-baseline gap-2">
-                    <span className="min-w-0 flex-1 truncate text-sm font-medium">{chat.title}</span>
-                    <time
-                      dateTime={chat.updatedAt}
-                      className="shrink-0 text-xs text-muted tabular-nums"
-                    >
-                      {format.relativeTime(new Date(chat.updatedAt), now)}
-                    </time>
-                  </div>
-                  <p className="truncate text-xs text-muted">
-                    {chat.lastMessage ? messageSnippet(chat.lastMessage) : ''}
-                  </p>
-                </div>
-              </Link>
-            </li>
-          ))}
-        </ul>
+        <div className="mt-6">
+          <ChatRows chats={chats} now={now} />
+        </div>
       )}
     </div>
   );

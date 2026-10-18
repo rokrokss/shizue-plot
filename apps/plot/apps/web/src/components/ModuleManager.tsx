@@ -9,7 +9,7 @@ import { readImportWarnings, type ImportWarning } from '@/lib/importWarnings';
 import { checkCardSize } from '@/lib/realm';
 import type { PlotDetail, PlotModuleSummary } from '@/lib/types';
 import { useErrorMessage } from '@/lib/useErrorMessage';
-import { ImportProgressLine, ImportWarnings, RightsConfirmation } from './CardImport';
+import { ImportProgressLine, ImportWarnings } from './CardImport';
 import { ModuleInertNotice } from './ReaderModules';
 import { Badge, Button, ErrorText } from './ui';
 
@@ -18,31 +18,25 @@ import { Badge, Button, ErrorText } from './ui';
  * list. A module is the work's, every member's, and runs after the cards' own;
  * the server keeps it apart from the custom UI the editors here save, so an
  * import or a removal lands at once, outside the Save, and answers with the
- * plot's owner view (`onChange`). Into a published work a module is someone
- * else's work shown to readers the moment it lands, so it asks the owner's
- * word as an imported member does (`rightsConfirmed`), and what the import left
- * behind is said as a card import's is.
+ * plot's owner view (`onChange`). What the import left behind is said as a
+ * card import's is.
  */
 export function ModuleManager({
   plotId,
   modules,
-  published = false,
   disabled = false,
   onChange,
 }: {
   plotId: string;
   modules: readonly PlotModuleSummary[];
-  published?: boolean;
   disabled?: boolean;
   onChange: (detail: PlotDetail) => void;
 }) {
   const t = useTranslations('plot');
-  const rights = useTranslations('rights');
   const toMessage = useErrorMessage();
   const fileInput = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState<'import' | string | null>(null);
   const [error, setError] = useState('');
-  const [importRights, setImportRights] = useState(false);
   const [warnings, setWarnings] = useState<ImportWarning[]>([]);
   const [progress, setProgress] = useState<ImportProgress | null>(null);
 
@@ -55,11 +49,10 @@ export function ModuleManager({
       const detail = await importUpload<PlotDetail & { importWarnings?: unknown }>(
         'plot_module',
         checkCardSize(file),
-        { plotId, ...(published && importRights ? { rightsConfirmed: true } : {}) },
+        { plotId },
         { onProgress: setProgress },
       );
       setWarnings(readImportWarnings(detail.importWarnings));
-      setImportRights(false);
       onChange(detail);
     } catch (caught) {
       setError(toMessage(caught));
@@ -143,19 +136,11 @@ export function ModuleManager({
           if (file) void importFile(file);
         }}
       />
-      {published ? (
-        <RightsConfirmation
-          notice={rights('moduleImportPublicNotice')}
-          label={rights('confirmModuleImport')}
-          checked={importRights}
-          onChange={setImportRights}
-        />
-      ) : null}
       <div className="space-y-1">
         <Button
           size="sm"
           busy={busy === 'import'}
-          disabled={disabled || busy !== null || (published && !importRights)}
+          disabled={disabled || busy !== null}
           onClick={() => fileInput.current?.click()}
         >
           {t('moduleImport')}

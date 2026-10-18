@@ -2,19 +2,11 @@
 
 import { emotionModeOf, extensionsWithEmotionMode } from '@shizue/core/emotion';
 import { coerceGroupSettings, DEFAULT_GROUP_SETTINGS, type GroupSettings } from '@shizue/core/group';
-import { carriesScripts } from '@shizue/core/triggers';
 import { useFormatter, useTranslations } from 'next-intl';
 import { use, useCallback, useEffect, useRef, useState } from 'react';
 import { AssetManager } from '@/components/AssetManager';
-import { AiBadge, PublicBadge } from '@/components/AudienceBadge';
 import { Avatar } from '@/components/Avatar';
-import {
-  ImportedCardDetails,
-  ImportProgressLine,
-  ImportWarnings,
-  RealmImportForm,
-  RightsConfirmation,
-} from '@/components/CardImport';
+import { ImportedCardDetails, ImportProgressLine, ImportWarnings, RealmImportForm } from '@/components/CardImport';
 import { ComponentCodeEditor } from '@/components/ComponentCodeEditor';
 import { GroupTurnsEditor } from '@/components/GroupTurnsEditor';
 import { DefaultVariablesEditor, DisplayScriptEditor } from '@/components/DisplayScriptEditor';
@@ -44,7 +36,7 @@ import { apiDelete, apiGet, apiSend, apiUpload } from '@/lib/api';
 import { importFile, type FileImportFields, type ImportProgress } from '@/lib/fileImport';
 import { readImportWarnings, takeImportWarnings, type ImportWarning } from '@/lib/importWarnings';
 import { loreBudget } from '@/lib/loreBudget';
-import { checkCardSize, downloadRealmCard, isRestrictiveLicense } from '@/lib/realm';
+import { checkCardSize, downloadRealmCard } from '@/lib/realm';
 import {
   MAX_CHARACTERS_PER_PLOT,
   MAX_INTRO_LENGTH,
@@ -60,7 +52,6 @@ import {
   type LoreEntry,
   type NarratorConfig,
   type NormalizedCard,
-  type SafetyLevel,
   type PlotDetail,
   type PlotMember,
   type PlotProfile,
@@ -125,8 +116,8 @@ const EXPORT_FORMATS = [
 /**
  * The plot studio: one work, everything in it. The plot's own fields and its
  * members' cards are edited here and committed together by the one Save; the
- * pictures, the roster's shape and the publish switch answer for themselves,
- * because each of those is a request whose result the creator has to see.
+ * pictures and the roster's shape answer for themselves, because each of those
+ * is a request whose result the creator has to see.
  */
 export default function PlotStudioPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -142,7 +133,6 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
   const [description, setDescription] = useState('');
   const [language, setLanguage] = useState<ContentLanguage>('ko');
   const [tags, setTags] = useState<string[]>([]);
-  const [commentsEnabled, setCommentsEnabled] = useState(true);
   const [intros, setIntros] = useState<string[]>([]);
   const [narrator, setNarrator] = useState<NarratorConfig | null>(null);
   const [style, setStyle] = useState<PlotStyle | null>(null);
@@ -198,7 +188,6 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
     setDescription(detail.description);
     setLanguage(detail.language);
     setTags(detail.tags);
-    setCommentsEnabled(detail.commentsEnabled);
     setIntros(detail.intros);
     setNarrator(detail.narrator);
     setStyle(detail.style);
@@ -216,7 +205,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
     setSaved(new Map(detail.characters.map((member) => [member.id, memberFields(member)])));
   }, []);
 
-  /** The plot row alone — a cover upload or a publish leaves the editor alone. */
+  /** The plot row alone — a cover upload leaves the editor alone. */
   const adoptPlot = useCallback((detail: PlotDetail) => {
     setPlot(detail);
   }, []);
@@ -253,7 +242,6 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
           description,
           language,
           tags,
-          commentsEnabled,
           intros,
           narrator,
           style,
@@ -328,11 +316,9 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
 
   /**
    * A card as one more member — a picked file, or a RisuRealm page this browser
-   * downloads first (`downloadRealmCard`). Into a public plot the import itself
-   * publishes the member, so the owner's word rides along and the server stamps
-   * it; the panel's date follows without a re-read.
+   * downloads first (`downloadRealmCard`).
    */
-  async function importMember(source: File | string, rightsConfirmed: boolean): Promise<boolean> {
+  async function importMember(source: File | string): Promise<boolean> {
     if (locked) return false;
     setMutating(true);
     setError('');
@@ -346,7 +332,6 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
       } else {
         file = checkCardSize(source);
       }
-      if (rightsConfirmed) fields.rightsConfirmed = true;
       const created = await importFile<PlotMember & { variableConflicts?: string[]; importWarnings?: unknown }>(
         'member',
         file,
@@ -397,9 +382,6 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
           ? t('memberImportVariableConflicts', { name: created.name, names: created.variableConflicts.join(', ') })
           : '',
       );
-      if (rightsConfirmed) {
-        setPlot((current) => current && { ...current, rightsConfirmedAt: new Date().toISOString() });
-      }
       // Joining a cast, the card's group-only greetings became openings of the
       // plot on the server. The editor takes them up after whatever is being
       // written here, or the next save would put the old list back over them.
@@ -488,7 +470,6 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
               onChange={(event) => setName(event.target.value)}
               className="min-w-0 flex-1 truncate border-none bg-transparent title2 sm:title1 text-fg focus:outline-none"
             />
-            <PublicBadge />
           </div>
           <p className="text-xs text-muted">{plot.id}</p>
         </div>
@@ -514,8 +495,8 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
       <div className="mt-6 grid gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">
           <Section title={t('profile')}>
-            {/* First, because it is the first thing a reader sees of the work. */}
-            <Field label={t('intro')} hint={t('introHint')} badge={<PublicBadge />}>
+            {/* First, because it is the first thing the work page shows of the work. */}
+            <Field label={t('intro')} hint={t('introHint')}>
               <TextArea
                 rows={3}
                 value={intro}
@@ -525,7 +506,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
               />
             </Field>
             <CoverPicker plot={plot} onChange={adoptPlot} onBusyChange={setMutating} />
-            <Field label={t('tags')} hint={t('tagsHint')} badge={<PublicBadge />}>
+            <Field label={t('tags')} hint={t('tagsHint')}>
               <TagInput value={tags} placeholder={t('tagPlaceholder')} onChange={setTags} />
             </Field>
             <Field label={t('language')} hint={t('languageHint')}>
@@ -540,16 +521,10 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
                 ))}
               </Select>
             </Field>
-            <Checkbox
-              label={t('commentsEnabled')}
-              checked={commentsEnabled}
-              onChange={setCommentsEnabled}
-            />
-            <p className="text-xs text-muted">{t('commentsEnabledHint')}</p>
           </Section>
 
-          <Section title={t('world')} action={<AiBadge />}>
-            <Field label={t('description')} hint={t('descriptionHint')} badge={<AiBadge />}>
+          <Section title={t('world')}>
+            <Field label={t('description')} hint={t('descriptionHint')}>
               <TextArea
                 rows={8}
                 value={description}
@@ -561,7 +536,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
 
           {/* How it is written, as opposed to what it is about — the narrator
               included, which is why it is no longer beside the world. */}
-          <Section title={t('style')} action={<AiBadge />}>
+          <Section title={t('style')}>
             <p className="text-xs text-muted">{t('styleHint')}</p>
             <PlotStyleEditor
               style={style}
@@ -573,7 +548,6 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
 
           <MembersSection
             plotId={id}
-            published={plot.visibility === 'public'}
             plotLoreConstantTokens={plot.plotLoreConstantTokens}
             onBusyChange={setMutating}
             members={members}
@@ -639,7 +613,7 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
 
           <ProfilesSection profiles={profiles} onChange={setProfiles} />
 
-          <Section title={t('lorebook')} action={<AiBadge />}>
+          <Section title={t('lorebook')}>
             <p className="text-xs text-muted">{t('lorebookHint')}</p>
             <LoreBudgetNote plotTokens={plot.plotLoreConstantTokens} members={members} />
             <p className="text-xs text-muted">{t('loreBudgetHint')}</p>
@@ -664,17 +638,9 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
             <ModuleManager
               plotId={id}
               modules={plot.modules ?? []}
-              published={plot.visibility === 'public'}
               disabled={locked}
               onChange={(detail) => {
-                setPlot(
-                  (current) =>
-                    current && {
-                      ...current,
-                      modules: detail.modules,
-                      ...(detail.rightsConfirmedAt ? { rightsConfirmedAt: detail.rightsConfirmedAt } : {}),
-                    },
-                );
+                setPlot((current) => current && { ...current, modules: detail.modules });
                 setAssetRevision((current) => current + 1);
               }}
             />
@@ -764,12 +730,9 @@ export default function PlotStudioPage({ params }: { params: Promise<{ id: strin
         </div>
 
         <div className="space-y-6">
-          <VisibilitySection
-            plot={plot}
-            members={members}
-            onChange={adoptPlot}
-            onBusyChange={setMutating}
-          />
+          <Link href={`/p/${plot.id}`} className={buttonClass('primary', 'md', 'w-full')}>
+            {t('viewWork')}
+          </Link>
           <ChatList plotId={id} />
           <Button variant="danger" className="w-full" onClick={() => void remove()}>
             {t('deletePlot')}
@@ -823,7 +786,7 @@ function ProfilesSection({
         >
           <div className="flex items-start gap-2">
             <div className="min-w-0 flex-1">
-              <Field label={t('profileName')} badge={<PublicBadge />}>
+              <Field label={t('profileName')}>
                 <TextInput
                   value={profile.name}
                   maxLength={MAX_PLOT_PROFILE_NAME_LENGTH}
@@ -842,7 +805,7 @@ function ProfilesSection({
               ✕
             </Button>
           </div>
-          <Field label={t('profileDescription')} badge={<PublicBadge />}>
+          <Field label={t('profileDescription')}>
             <TextArea
               rows={3}
               value={profile.description}
@@ -864,14 +827,9 @@ function ProfilesSection({
   );
 }
 
-/**
- * The roster: who is in the work, in the order the prompt names them. A card
- * imported into a plot that is already public reaches readers at once, so there
- * the imports wait for the owner's word — asked again for every card.
- */
+/** The roster: who is in the work, in the order the prompt names them. */
 function MembersSection({
   plotId,
-  published,
   plotLoreConstantTokens,
   members,
   onPatch,
@@ -885,14 +843,13 @@ function MembersSection({
 }: {
   onBusyChange: (busy: boolean) => void;
   plotId: string;
-  published: boolean;
   /** The plot lorebook's share of the budget the card lorebooks are counted against. */
   plotLoreConstantTokens: number;
   members: PlotMember[];
   onPatch: (id: string, patch: Partial<NormalizedCard>, name?: string) => void;
   onAdd: () => void;
   /** A file or a RisuRealm page; resolves true once the member is in. */
-  onImport: (source: File | string, rightsConfirmed: boolean) => Promise<boolean>;
+  onImport: (source: File | string) => Promise<boolean>;
   /** Where that import is, while it runs. */
   importProgress: ImportProgress | null;
   onRemove: (id: string) => void;
@@ -906,14 +863,6 @@ function MembersSection({
   const fileInput = useRef<HTMLInputElement>(null);
   const full = members.length >= MAX_CHARACTERS_PER_PLOT;
   const [realmOpen, setRealmOpen] = useState(false);
-  const [importRights, setImportRights] = useState(false);
-  const importBlocked = full || (published && !importRights);
-
-  async function importCard(source: File | string): Promise<boolean> {
-    const done = await onImport(source, published && importRights);
-    if (done) setImportRights(false);
-    return done;
-  }
 
   return (
     <Section
@@ -976,13 +925,13 @@ function MembersSection({
 
             <ImportedCardDetails member={member} />
 
-            <Field label={t('memberName')} badge={<PublicBadge />}>
+            <Field label={t('memberName')}>
               <TextInput
                 value={member.name}
                 onChange={(event) => onPatch(member.id, {}, event.target.value)}
               />
             </Field>
-            <Field label={t('memberIntro')} hint={t('memberIntroHint')} badge={<PublicBadge />}>
+            <Field label={t('memberIntro')} hint={t('memberIntroHint')}>
               <TextArea
                 rows={2}
                 value={member.card.intro ?? ''}
@@ -990,21 +939,21 @@ function MembersSection({
                 onChange={(event) => onPatch(member.id, { intro: event.target.value })}
               />
             </Field>
-            <Field label={t('memberDescription')} hint={t('memberDescriptionHint')} badge={<AiBadge />}>
+            <Field label={t('memberDescription')} hint={t('memberDescriptionHint')}>
               <TextArea
                 rows={6}
                 value={member.card.description}
                 onChange={(event) => onPatch(member.id, { description: event.target.value })}
               />
             </Field>
-            <Field label={t('memberPersonality')} badge={<AiBadge />}>
+            <Field label={t('memberPersonality')}>
               <TextArea
                 rows={3}
                 value={member.card.personality}
                 onChange={(event) => onPatch(member.id, { personality: event.target.value })}
               />
             </Field>
-            <Field label={t('memberMesExample')} hint={t('memberMesExampleHint')} badge={<AiBadge />}>
+            <Field label={t('memberMesExample')} hint={t('memberMesExampleHint')}>
               <TextArea
                 rows={5}
                 value={member.card.mesExample}
@@ -1015,7 +964,7 @@ function MembersSection({
             {/* The two overrides are read from the first member alone, so on any
                 other row a written one is said to be idle rather than left to
                 look as though it were in every prompt. */}
-            <Field label={t('memberSystemPrompt')} hint={t('memberSystemPromptHint')} badge={<AiBadge />}>
+            <Field label={t('memberSystemPrompt')} hint={t('memberSystemPromptHint')}>
               <TextArea
                 rows={4}
                 value={member.card.systemPrompt}
@@ -1025,7 +974,7 @@ function MembersSection({
             {index > 0 && member.card.systemPrompt.trim() ? (
               <p className="text-xs text-link">{t('memberFirstOnlyIdle', { first: members[0]!.name })}</p>
             ) : null}
-            <Field label={t('memberPostHistory')} hint={t('memberPostHistoryHint')} badge={<AiBadge />}>
+            <Field label={t('memberPostHistory')} hint={t('memberPostHistoryHint')}>
               <TextArea
                 rows={4}
                 value={member.card.postHistoryInstructions}
@@ -1040,10 +989,7 @@ function MembersSection({
             {/* Beside a heading rather than inside a Field, like the plot's own
                 lorebook: the editor's buttons and checkboxes are its own. */}
             <div className="space-y-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <h3 className="text-xs font-medium text-muted">{t('memberLorebook')}</h3>
-                <AiBadge />
-              </div>
+              <h3 className="text-xs font-medium text-muted">{t('memberLorebook')}</h3>
               <p className="text-xs text-muted">{t('memberLorebookHint')}</p>
               <LoreBudgetNote plotTokens={plotLoreConstantTokens} members={members} />
               <LorebookFileActions
@@ -1113,14 +1059,6 @@ function MembersSection({
         </details>
       ))}
 
-      {published ? (
-        <RightsConfirmation
-          notice={rights('importPublicNotice')}
-          label={rights('confirmImport')}
-          checked={importRights}
-          onChange={setImportRights}
-        />
-      ) : null}
       <div className="flex flex-wrap items-center gap-2">
         <input
           ref={fileInput}
@@ -1131,13 +1069,13 @@ function MembersSection({
           onChange={(event) => {
             const file = event.target.files?.[0];
             event.target.value = '';
-            if (file) void importCard(file);
+            if (file) void onImport(file);
           }}
         />
         <Button disabled={full} onClick={onAdd}>
           {t('memberAdd')}
         </Button>
-        <Button disabled={importBlocked} title={t('memberImportHint')} onClick={() => fileInput.current?.click()}>
+        <Button disabled={full} title={t('memberImportHint')} onClick={() => fileInput.current?.click()}>
           {t('memberImport')}
         </Button>
         <Button
@@ -1149,7 +1087,7 @@ function MembersSection({
           {cardImport('realmAdd')}
         </Button>
       </div>
-      {realmOpen ? <RealmImportForm disabled={importBlocked} onSubmit={importCard} /> : null}
+      {realmOpen ? <RealmImportForm disabled={full} onSubmit={onImport} /> : null}
       <ImportProgressLine progress={importProgress} />
     </Section>
   );
@@ -1373,10 +1311,7 @@ function CoverPicker({
 
   return (
     <div className="space-y-1.5">
-      <span className="flex flex-wrap items-center gap-2">
-        <span className="text-xs font-medium text-muted">{t('cover')}</span>
-        <PublicBadge />
-      </span>
+      <span className="text-xs font-medium text-muted">{t('cover')}</span>
       {plot.coverUrl ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
@@ -1419,133 +1354,6 @@ function CoverPicker({
       <span className="block text-xs text-muted">{t('coverHint')}</span>
       <ErrorText>{error}</ErrorText>
     </div>
-  );
-}
-
-/**
- * Publish toggle and the audience that goes with it. Publishing validates the
- * *stored* plot, so the panel says so rather than silently saving first — and
- * only the plot row is refreshed, which leaves unsaved edits alone.
- */
-function VisibilitySection({
-  plot,
-  members,
-  onChange,
-  onBusyChange,
-}: {
-  onBusyChange: (busy: boolean) => void;
-  plot: PlotDetail;
-  /** The roster as the page holds it, which a member imported a moment ago is already in. */
-  members: PlotMember[];
-  onChange: (plot: PlotDetail) => void;
-}) {
-  const t = useTranslations('plot');
-  const rights = useTranslations('rights');
-  const format = useFormatter();
-  const toMessage = useErrorMessage();
-
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  // All-ages is the only level a publish may declare until age verification
-  // exists, even for a plot stored as adult before that.
-  const [safetyLevel, setSafetyLevel] = useState<SafetyLevel>('all');
-  const published = plot.visibility === 'public';
-  // A plot stored as adult is published but not listed anywhere, so say so
-  // wherever the owner can see it.
-  const gated = published && plot.safetyLevel === 'adult';
-  // Imported characters are somebody's work until the owner says otherwise, and
-  // nothing here can tell whose: publishing them waits for the owner's word,
-  // asked again for every publish.
-  const imported = members.filter((member) => member.importedFrom);
-  const restricted = imported
-    .filter((member) => isRestrictiveLicense(member.license))
-    .map((member) => member.name);
-  const needsRights = !published && imported.length > 0;
-  const [rightsConfirmed, setRightsConfirmed] = useState(false);
-  // A RisuAI card's triggers and regex scripts run in the reader's browser, so
-  // readers receive them — and the card text they read — once the plot is public.
-  // A work's modules run theirs in every member's place.
-  const scripted = members.some((member) => carriesScripts(member.card)) || (plot.modules ?? []).some((module) => module.scripts);
-
-  async function toggle(): Promise<void> {
-    if (busy) return;
-    setBusy(true);
-    onBusyChange(true);
-    setError('');
-    try {
-      onChange(
-        await apiSend<PlotDetail>('POST', `/api/plots/${plot.id}/publish`, {
-          publish: !published,
-          safetyLevel,
-          ...(needsRights ? { rightsConfirmed } : {}),
-        }),
-      );
-      setRightsConfirmed(false);
-    } catch (caught) {
-      setError(toMessage(caught));
-    } finally {
-      setBusy(false);
-      onBusyChange(false);
-    }
-  }
-
-  return (
-    <Section title={t('visibility')}>
-      <p className="text-sm text-muted">{published ? t('visibilityPublic') : t('visibilityPrivate')}</p>
-      <Field label={t('safetyLevel')} hint={t('safetyLevelHint')}>
-        <Select
-          disabled={busy}
-          data-testid="safety-select"
-          value={safetyLevel}
-          onChange={(event) => setSafetyLevel(event.target.value as SafetyLevel)}
-        >
-          <option value="all">{t('safetyAll')}</option>
-        </Select>
-      </Field>
-      {gated ? (
-        <p data-testid="adult-gate-notice" className="text-xs text-link">
-          {t('safetyAdultPending')}
-        </p>
-      ) : null}
-      {scripted ? (
-        <p data-testid="scripts-publish-notice" className="text-xs text-muted">
-          {t('scriptsPublishNotice')}
-        </p>
-      ) : null}
-      {needsRights ? (
-        <RightsConfirmation
-          notice={rights('publishNotice', { count: imported.length })}
-          label={rights('confirmPublish')}
-          restricted={restricted}
-          checked={rightsConfirmed}
-          onChange={setRightsConfirmed}
-        />
-      ) : null}
-      <ErrorText>{error}</ErrorText>
-      <Button
-        variant={published ? 'secondary' : 'primary'}
-        className="w-full"
-        busy={busy}
-        disabled={needsRights && !rightsConfirmed}
-        onClick={() => void toggle()}
-      >
-        {published ? t('unpublish') : t('publish')}
-      </Button>
-      {published ? null : <p className="text-xs text-muted">{t('publishHint')}</p>}
-      {published && imported.length > 0 && plot.rightsConfirmedAt ? (
-        <p className="text-xs text-muted">
-          {rights('confirmedAt', {
-            date: format.dateTime(new Date(plot.rightsConfirmedAt), { dateStyle: 'medium' }),
-          })}
-        </p>
-      ) : null}
-      <Link
-        href={`/p/${plot.id}`}
-        className="block text-center text-xs text-muted transition-colors hover:text-fg"
-      >
-        {t('viewPublic')}
-      </Link>
-    </Section>
   );
 }
 

@@ -57,18 +57,17 @@ import {
   type TriggerMessage,
   type TriggerRunInput,
 } from '@shizue/core/triggers';
-import { chats, messages, type Chat, type Message } from '@shizue/db';
+import { chats, messages, type Message } from '@shizue/db';
 import { ChatGPTError, getAdapter, getModel, supportsVision, type ChatGPTAccount, type LLMAdapter } from '@shizue/llm';
-import { and, eq, isNull, lt, or, sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { streamSSE, type SSEStreamingApi } from 'hono/streaming';
 import { randomUUID } from 'node:crypto';
 import { withImageNote } from './attachments.js';
 import { chatRequestSent } from './cacheHealth.js';
-import { ApiError, badRequest, notFound } from './errors.js';
+import { ApiError, badRequest } from './errors.js';
 import type { AppDeps, AppEnv, OpenGeneration, Tx } from './deps.js';
 import { invalidateMemoryForEdit, noteRequestOverhead, scheduleMemoryUpdate } from './memory.js';
-import { countGeneration, type GenerationResult } from './metrics.js';
 import { runPromptScriptJob } from './regexWorker.js';
 import { withPromptScripts } from './sentHistory.js';
 import { regexStoredText } from './storedRegex.js';
@@ -88,9 +87,9 @@ import { applyScriptChat, planScriptChat, rewritableHead } from './scriptChat.js
 import {
   MAX_OVERLAY_TEXT_LENGTH,
   mergeGlobalVariables,
-  mergeReaderOverlay,
   readLocalLore,
   storableDelta,
+  writeScriptRewrite,
   type PromptInjections,
 } from './scriptState.js';
 import { scheduleMessageEmbedding, searchByMeaning, type VectorPlan } from './vectors.js';
@@ -288,7 +287,7 @@ export interface ScriptView {
   note: string;
   /** The first message this chat's scripts set (`setCharacterFirstMessage`). */
   firstMessage?: string;
-  /** The background as the overlay has it, else the card's `backgroundHTML`, whole. */
+  /** The background as this request's scripts left it, else the card's `backgroundHTML`, whole. */
   backgroundHtml: string;
   /** The member's avatar, a same-origin address, or null. */
   avatarUrl: string | null;
@@ -304,14 +303,7 @@ interface Usage {
 /** A request as it is sent, with what the `editRequest` listeners did besides it, for the reply to keep. */
 type BuiltRequest = AssembledPrompt & { listenerEdits?: ListenerEdits };
 
-/**
- * How long a claim stands on its own. The running stream renews it on every
- * heartbeat, so only an instance that died mid-generation leaves one behind — and
- * that one is taken over two minutes later instead of wedging the chat forever.
- */
-const CLAIM_STALE_MS = 2 * 60_000;
-
-/** How often an open stream says something, and renews its claim while at it. */
+/** How often an open stream says something, so nothing between drops it as idle. */
 export const HEARTBEAT_MS = 15_000;
 
 /**
@@ -328,144 +320,31 @@ function replyStream(c: Context<AppEnv>, write: (stream: SSEStreamingApi) => Pro
 }
 
 /**
- * Takes the chat's generation slot for the caller. A single guarded UPDATE decides
- * it, so two API instances racing on the same chat cannot both win; the in-process
- * set in front of it is only a fast path for the same instance's double-clicks.
- *
- * False means the slot is held — including by a request that is only *about* to
- * find out the chat is not the caller's, which is why callers check ownership
- * before they report a busy chat.
+ * Takes the chat's generation slot: one generation at a time per chat. The slot
+ * is this process's memory (`deps.generating`) and nothing else — the app is
+ * one process, so a restart, or a crash, frees every chat. False while it is held.
  */
-export async function acquireChatSlot(deps: AppDeps, chatId: string, userId: string): Promise<boolean> {
+export async function acquireChatSlot(deps: AppDeps, chatId: string): Promise<boolean> {
   if (deps.generating.has(chatId)) return false;
   deps.generating.add(chatId);
-  try {
-    const claimed = await deps.db
-      .update(chats)
-      .set({ generatingAt: new Date() })
-      .where(
-        and(
-          eq(chats.id, chatId),
-          eq(chats.userId, userId),
-          or(isNull(chats.generatingAt), lt(chats.generatingAt, new Date(Date.now() - CLAIM_STALE_MS))),
-        ),
-      )
-      .returning({ at: chats.generatingAt });
-    if (!claimed[0]?.at) {
-      deps.generating.delete(chatId);
-      return false;
-    }
-    // What the row actually holds, not what we sent: it is the identity renewal
-    // and release compare against, so it has to be the stored value.
-    deps.generationClaims.set(chatId, { at: claimed[0].at, renewing: null });
-    return true;
-  } catch (error) {
-    // The fast path was taken before the UPDATE was tried, so a failure here would
-    // otherwise leave this instance answering 429 for a chat nothing is generating
-    // on — for as long as the process lives.
-    deps.generating.delete(chatId);
-    throw error;
-  }
+  return true;
 }
 
 /**
- * Whether a generation is running on this chat right now, read off the claim
+ * Whether a generation is running on this chat right now, read off the slot
  * rather than taken. For callers that write nothing and only have to stand back
  * while a stream runs — taking the slot would make them block the reader's next
- * turn instead. A claim older than the staleness window belongs to an instance
- * that died, and reading it as busy would wedge the chat.
+ * turn instead.
  */
-export const isGenerating = (chat: Chat): boolean =>
-  chat.generatingAt !== null && chat.generatingAt.getTime() > Date.now() - CLAIM_STALE_MS;
+export const isGenerating = (deps: AppDeps, chatId: string): boolean => deps.generating.has(chatId);
 
-/**
- * Gives the slot back. Idempotent: releasing a chat that holds none is a no-op —
- * and so is releasing one whose claim was taken over meanwhile, because the
- * column is only cleared where it still carries the claim this instance wrote.
- *
- * A renewal still in flight is waited out first: it may be advancing the row's
- * timestamp this very moment, and clearing with the identity it replaces would
- * miss — leaving a finished chat claimed until the staleness window let it go.
- */
+/** Gives the slot back. Idempotent: releasing a chat that holds none is a no-op. */
 export async function releaseChatSlot(deps: AppDeps, chatId: string): Promise<void> {
-  const handle = deps.generationClaims.get(chatId);
-  // Locally it is over whatever the row says, so the fast path never outlives the
-  // request that took it.
   deps.generating.delete(chatId);
-  if (!handle) return;
-  if (handle.renewing) {
-    try {
-      await handle.renewing;
-    } catch {
-      // The renewal's own failure was already logged; the release still runs.
-    }
-  }
-  deps.generationClaims.delete(chatId);
-  await deps.db
-    .update(chats)
-    .set({ generatingAt: null })
-    .where(and(eq(chats.id, chatId), eq(chats.generatingAt, handle.at)));
 }
 
-/**
- * Renews the claim so a generation slower than the staleness window keeps it.
- *
- * Compare-and-set on the claim this instance wrote: a stream that ran long enough
- * for another instance to declare it dead and take the chat over must not steal it
- * back mid-answer. Losing the race is said once and stops the renewals, so the
- * heartbeat goes quiet instead of arguing with the new holder every fifteen
- * seconds.
- *
- * One renewal in flight at a time: a second heartbeat landing while the first is
- * still talking to the database joins it instead of racing it — two CAS's off the
- * same remembered timestamp would have one advance the row and the other read its
- * own miss as a takeover and stop the heartbeat on a live stream.
- */
-export function renewChatSlot(deps: AppDeps, chatId: string): Promise<void> {
-  const handle = deps.generationClaims.get(chatId);
-  if (!handle) return Promise.resolve();
-  if (handle.renewing) return handle.renewing;
-  const work = (async (): Promise<void> => {
-    try {
-      const [renewed] = await deps.db
-        .update(chats)
-        .set({ generatingAt: new Date() })
-        .where(and(eq(chats.id, chatId), eq(chats.generatingAt, handle.at)))
-        .returning({ at: chats.generatingAt });
-      // Only this claim's own handle is ever written to: if the slot was released
-      // (or released and re-acquired) while the renewal was in flight, the map
-      // entry is no longer ours to touch.
-      if (deps.generationClaims.get(chatId) !== handle) return;
-      if (!renewed?.at) {
-        deps.generationClaims.delete(chatId);
-        console.warn('[api] generation claim was taken over; stopping renewal', chatId);
-        return;
-      }
-      handle.at = renewed.at;
-    } catch (error) {
-      // A failed renewal only risks the claim being taken over later; it must never
-      // tear down the stream that is already producing text.
-      console.error('[api] generation claim renewal failed', error);
-    } finally {
-      handle.renewing = null;
-    }
-  })();
-  handle.renewing = work;
-  return work;
-}
-
-/**
- * The 429 a caller gets for a chat that is already generating. Ownership is
- * re-checked first so another user's chat stays a 404 rather than leaking that it
- * exists and is busy.
- */
-export async function rejectBusyChat(deps: AppDeps, chatId: string, userId: string): Promise<never> {
-  const [owned] = await deps.db
-    .select({ id: chats.id })
-    .from(chats)
-    .where(and(eq(chats.id, chatId), eq(chats.userId, userId)))
-    .limit(1);
-  if (!owned) throw notFound('Chat not found');
+/** The 429 a caller gets for a chat that is already generating. */
+export function rejectBusyChat(): never {
   throw new ApiError(429, 'generation_in_progress', 'A generation is already running for this chat');
 }
 
@@ -479,8 +358,7 @@ export async function withGenerationSlot(
   chatId: string,
   build: () => Promise<GenerationPlan>,
 ): Promise<Response> {
-  const userId = c.get('userId');
-  if (!(await acquireChatSlot(deps, chatId, userId))) await rejectBusyChat(deps, chatId, userId);
+  if (!(await acquireChatSlot(deps, chatId))) rejectBusyChat();
 
   let plan: GenerationPlan;
   try {
@@ -699,8 +577,8 @@ export function requestLuaInput(
  * What the card's request triggers run with, or null for a plot whose scripted
  * member — or a group turn's speaker (`requestScriptsOf`) — has none, which
  * costs it nothing. The member, its card and its name
- * are the ones the browser's runs read (`GET /:id/scripts`), with the reader's
- * overlay already on them; the chat is the whole branch, and the reader's side
+ * are the ones the browser's runs read (`GET /:id/scripts`), with this request's
+ * rewrites already on them; the chat is the whole branch, and the reader's side
  * of things (`data`) is what the browser hands its runs, from the plan — or
  * from what `script-llm` reads of the chat, in the plan's shape.
  */
@@ -907,7 +785,7 @@ async function assembleRequest(
     clock: plan.memoryClock,
   });
   // The scripts read the turns as stored, before an image note is added to them —
-  // the greeting as the reader's overlay has it, which is what the assembler sends.
+  // the greeting as this request's scripts left it, which is what the assembler sends.
   const history = await withoutUnseeableImages(
     await withPromptScripts(withBranchGreeting(isContinue ? plan.history.slice(0, -1) : plan.history, branch), plan, branch),
     plan.model,
@@ -1112,7 +990,6 @@ async function runGeneration(
     // as RisuAI's `toomuchtoken` does, as a provider failure does here —
     // nothing stored, the turn it would have answered still the head.
     if (error instanceof RequestTooLongError) {
-      countGeneration('error', error.code);
       return replyStream(c, async (stream) => {
         try {
           await stream.writeSSE({
@@ -1129,7 +1006,6 @@ async function runGeneration(
       });
     }
     await release();
-    countGeneration('error', error instanceof ChatGPTError ? error.code : 'model_unavailable');
     if (error instanceof ChatGPTError) throw error;
     // What went wrong is the log's; the reader's page is told only that it did.
     console.error('[generation] building the request failed', error);
@@ -1162,22 +1038,16 @@ async function runGeneration(
     deps.generationStreams.add(open);
 
     // A stream that says nothing while the model thinks is a stream an idle proxy
-    // drops, and time to first token is exactly when it says nothing. `ping` is a
-    // named event rather than a bare `:` comment because that is what streamSSE
-    // writes cleanly; every client ignores an event it has no branch for, and the
-    // browser reader is tested on it. The same tick renews the generation claim,
-    // which is what keeps a reply slower than CLAIM_STALE_MS from being taken over.
-    const heartbeat = setInterval(() => {
-      void send({ event: 'ping', data: '' });
-      void renewChatSlot(deps, plan.chatId);
-    }, HEARTBEAT_MS);
+    // — a phone's tunnel — drops, and time to first token is exactly when it says
+    // nothing. `ping` is a named event rather than a bare `:` comment because
+    // that is what streamSSE writes cleanly; every client ignores an event it has
+    // no branch for, and the browser reader is tested on it.
+    const heartbeat = setInterval(() => void send({ event: 'ping', data: '' }), HEARTBEAT_MS);
 
     let text = '';
     let usage: Usage = { promptTokens: 0, completionTokens: 0 };
     /** The upstream went quiet (`chatgpt_timeout`): what it sent is kept as a stopped reply is. */
     let timeout: ChatGPTError | null = null;
-    /** How the stream ended, for the metrics; a throw before any end below leaves `internal`. */
-    let outcome: [GenerationResult, string?] = ['error', 'internal'];
 
     try {
       try {
@@ -1218,7 +1088,6 @@ async function runGeneration(
         // failure and must not persist a message.
         timeout = error instanceof ChatGPTError && error.code === 'chatgpt_timeout' ? error : null;
         if (!controller.signal.aborted && !timeout) {
-          outcome = ['error', error instanceof ChatGPTError ? error.code : 'stream_failed'];
           // A provider's failure has its code and a message made to be shown; any
           // other is the log's, and the reader is told only that the reply failed.
           if (!(error instanceof ChatGPTError)) console.error('[generation] stream failed', error);
@@ -1245,7 +1114,6 @@ async function runGeneration(
           await keepGlobalWrites(deps, plan, request);
           if (!plan.postProcess) scheduleBackgroundUpdates(deps, plan.chatId);
         }
-        outcome = [timeout && !controller.signal.aborted ? 'timeout' : 'stopped'];
         if (timeout && !controller.signal.aborted) {
           await send({ event: 'error', data: JSON.stringify({ message: timeout.message, code: timeout.code }) });
         }
@@ -1253,7 +1121,6 @@ async function runGeneration(
       }
 
       const stored = await persist(deps, plan, text, usage, request);
-      outcome = ['done'];
       await keepGlobalWrites(deps, plan, request);
       await send({
         event: 'done',
@@ -1272,7 +1139,6 @@ async function runGeneration(
       // Strictly after `done`: background work must not add latency to the turn.
       if (!plan.postProcess) scheduleBackgroundUpdates(deps, plan.chatId, stored.id);
     } finally {
-      countGeneration(...outcome);
       clearInterval(heartbeat);
       c.req.raw.signal?.removeEventListener('abort', leave);
       try {
@@ -1286,11 +1152,10 @@ async function runGeneration(
 }
 
 /**
- * Stops every generation this instance is streaming, as the reader's stop stops
+ * Stops every generation this process is streaming, as the reader's stop stops
  * one — each keeps what it had as a stopped reply and gives its chat's slot back —
  * and waits up to `graceMs` for that storing, never for the replies themselves.
- * For shutdown: a stream the exit cut instead would store nothing and leave its
- * chat answering 429 until the claim went stale.
+ * For shutdown: a stream the exit cut instead would store nothing of what it had.
  */
 export async function stopGenerations(deps: AppDeps, graceMs: number): Promise<void> {
   await stopAll([...deps.generationStreams], graceMs);
@@ -1372,10 +1237,10 @@ function generatedDelta(
 }
 
 /**
- * What the `editRequest` listeners rewrote of the scripted member, as the
- * reader's overlay keeps it — held to the limits a rewrite from the browser is
- * held to (`readOverlay`). A field past them is dropped and logged: the reply is
- * on its way by now, and the browser drops what it cannot send the same way.
+ * What the `editRequest` listeners rewrote of the scripted member, held to the
+ * limits a rewrite from the browser is held to (`readOverlay`). A field past
+ * them is dropped and logged: the reply is on its way by now, and the browser
+ * drops what it cannot send the same way.
  */
 function listenerOverlay(rewrite: LuaCharacterRewrite, label: string): MemberOverlay | null {
   const patch: MemberOverlay = {};
@@ -1409,7 +1274,7 @@ function listenerOverlay(rewrite: LuaCharacterRewrite, label: string): MemberOve
  *   message it ends on, as RisuAI's continues whatever ends its chat — copied
  *   first if another branch reads it — and a chat they left ending on anything
  *   but a reply has nothing to continue: those edits are dropped and logged;
- * - what they rewrote of the scripted member, merged into the reader's overlay;
+ * - what they rewrote of the scripted member, written into it (`writeScriptRewrite`);
  * - the lore they upserted, into the chat's own.
  *
  * Each is held to the limits the browser's writes are held to; one past them
@@ -1423,9 +1288,9 @@ async function keepListenerEdits(
   edits: ListenerEdits,
 ): Promise<{ parentId: string | null; continued?: Message } | null> {
   const label = plan.chatId;
-  // The chat's row first, as every writer of the reader's overlay takes the two.
+  // The chat's row first, then the work's: every writer of a script's rewrite takes them so.
   const [chat] = await tx
-    .select({ userId: chats.userId, plotId: chats.plotId, localLore: chats.localLore })
+    .select({ plotId: chats.plotId, personaId: chats.personaId, localLore: chats.localLore })
     .from(chats)
     .where(eq(chats.id, plan.chatId))
     .for('update');
@@ -1471,11 +1336,11 @@ async function keepListenerEdits(
   const memberId = plan.scriptView?.memberId;
   const patch = memberId ? listenerOverlay(edits.character, label) : null;
   if (memberId && patch) {
+    // A group turn's listeners are its speaker's; the work's background and first message are the lead's.
+    const lead = scriptedMember(plan.characters, plan.plot.modules)?.member.id;
     try {
-      // A savepoint: a refusal (the overlay past its size) takes back this write alone.
-      await tx.transaction((inner) =>
-        mergeReaderOverlay(inner, chat.userId, chat.plotId, { members: { [memberId]: patch } }, new Set([memberId])),
-      );
+      // A savepoint: a failure takes back this write alone.
+      await tx.transaction((inner) => writeScriptRewrite(inner, chat, { members: { [memberId]: patch } }, lead));
     } catch (error) {
       console.warn('[api] editRequest\'s character rewrites are not kept:', label, error instanceof Error ? error.message : error);
     }
@@ -1525,7 +1390,7 @@ async function keepGlobalWrites(
     .limit(1);
   if (!chat) return;
   try {
-    await mergeGlobalVariables(deps, chat.userId, chat.plotId, globalVariableWrites);
+    await mergeGlobalVariables(deps, chat.plotId, globalVariableWrites);
   } catch (error) {
     // Past the globals' caps: the turn stands, the writes do not.
     console.warn(`chat ${plan.chatId}: global variable writes not kept`, error);

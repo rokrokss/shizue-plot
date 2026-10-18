@@ -26,7 +26,6 @@ import {
   type PlotTense,
   type StorytellingStyle,
 } from '@/lib/types';
-import { AiBadge } from './AudienceBadge';
 import { Checkbox, Field, Select, TextArea, cx } from './ui';
 
 /** The option a row shows for "the model decides", which is no option at all. */
@@ -166,7 +165,7 @@ export function PlotStyleEditor({
   return (
     <div data-testid="plot-style" className="space-y-5">
       <Group title={t('groupProse')}>
-        <Field label={plot('narratorVoice')} hint={plot('narratorVoiceHint')} badge={<AiBadge />}>
+        <Field label={plot('narratorVoice')} hint={plot('narratorVoiceHint')}>
           <TextArea
             rows={3}
             value={narrator?.voice ?? ''}
@@ -175,7 +174,7 @@ export function PlotStyleEditor({
             }
           />
         </Field>
-        <Field label={plot('narratorPov')} hint={plot('narratorPovHint')} badge={<AiBadge />}>
+        <Field label={plot('narratorPov')} hint={plot('narratorPovHint')}>
           <Select
             value={narrator?.pov ?? ''}
             onChange={(event) =>

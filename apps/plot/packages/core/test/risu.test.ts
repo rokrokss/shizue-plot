@@ -4,7 +4,6 @@ import { normalizeCard } from '../src/card/normalize.js';
 import {
   backgroundHtmlOf,
   backgroundWithoutStyles,
-  cardLicense,
   creatorCssFromExtensions,
   MAX_BACKGROUND_HTML_LENGTH,
   MAX_CREATOR_CSS_LENGTH,
@@ -359,27 +358,6 @@ describe('RisuAI script order', () => {
     const reimported = normalizeCard(exportCardV3(card));
     expect(reimported.displayScripts).toEqual(card.displayScripts);
     expect(normalizeCard(exportCardV3(reimported)).displayScripts).toEqual(card.displayScripts);
-  });
-});
-
-describe('card license', () => {
-  const licensed = (license: unknown) => {
-    const card = risuCard([]);
-    (card.data.extensions.risuai as Record<string, unknown>)['license'] = license;
-    return normalizeCard(card);
-  };
-
-  it('reads the license RisuRealm writes, through normalization', () => {
-    expect(cardLicense(licensed('CC BY-NC-ND 4.0').extensions)).toBe('CC BY-NC-ND 4.0');
-    expect(cardLicense(licensed(' private ').extensions)).toBe('private');
-  });
-
-  it('says nothing for an empty license, a missing one, or a card without a risuai block', () => {
-    expect(cardLicense(licensed('').extensions)).toBeUndefined();
-    expect(cardLicense(licensed(3).extensions)).toBeUndefined();
-    expect(cardLicense(normalizeCard(risuCard([])).extensions)).toBeUndefined();
-    expect(cardLicense({})).toBeUndefined();
-    expect(cardLicense({ risuai: null })).toBeUndefined();
   });
 });
 

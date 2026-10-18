@@ -3,9 +3,9 @@ import { expect, test, type BrowserContext, type Locator, type Page } from '@pla
 
 /**
  * The P1 surfaces, along the path the owner walks them: they write a plot with
- * two 추천 프로필 and an image its opening pulls in → publish it → pick one of
- * the profiles on the plot page and start a chat on it, in a second window →
- * the opening draws the picture → the 주간 인기 tab carries the work.
+ * two 추천 프로필 and an image its opening pulls in → pick one of the profiles
+ * on the plot page and start a chat on it, in a second window → the opening
+ * draws the picture → the library carries the work.
  *
  * **AI 초안 and 답장 추천 are deliberately not here.** Both are a real model
  * call the echo adapter cannot stand in for — a draft is strict JSON from the
@@ -97,8 +97,7 @@ test('the creator writes two recommended profiles and they survive a reload', as
   await creatorPage.getByRole('button', { name: '도입부 추가' }).click();
   await creatorPage.getByTestId('plot-intro').fill(plot.intro);
 
-  // Reader-facing text, both of them: the picker on the public page is where
-  // they are read, so they carry the audience badge the 소개 fields carry.
+  // Both of them: the picker on the plot page is where they are read.
   for (const [index, profile] of profiles.entries()) {
     await creatorPage.getByRole('button', { name: '프로필 추가' }).click();
     const row = profileRows().nth(index);
@@ -119,7 +118,7 @@ test('the creator writes two recommended profiles and they survive a reload', as
   }
 });
 
-test('an uploaded image joins the plot and the plot goes public', async () => {
+test('an uploaded image joins the plot', async () => {
   // Three hidden file inputs live on this page (cover, avatar and asset); target
   // the asset one. Its slug is proposed from the file name.
   await creatorPage.getByTestId('asset-file-input').setInputFiles({
@@ -130,9 +129,6 @@ test('an uploaded image joins the plot and the plot goes public', async () => {
   await expect(creatorPage.getByLabel('슬러그')).toHaveValue(asset.slug);
   await creatorPage.getByRole('button', { name: '업로드' }).click();
   await expect(creatorPage.getByTestId('plot-asset')).toHaveCount(1);
-
-  await creatorPage.getByRole('button', { name: '공개하기' }).click();
-  await expect(creatorPage.getByRole('button', { name: '비공개로 전환' })).toBeVisible();
 });
 
 test('the plot page starts a chat on a recommended profile', async () => {
@@ -182,16 +178,11 @@ test('the opening draws the plot’s image', async () => {
   await expect(opening.getByText('{{img::')).toHaveCount(0);
 });
 
-test('the weekly tab carries the plot', async () => {
+test('the library carries the work and the chat just started', async () => {
   await readerPage.goto('/ko');
-  const weekly = readerPage.getByRole('button', { name: '주간 인기', exact: true });
-  await weekly.click();
-  await expect(weekly).toHaveAttribute('aria-pressed', 'true');
-  await expect(readerPage).toHaveURL(/sort=weekly/);
-
-  // Scoped by name: the catalogue is shared, and what is asserted here is that
-  // the ranking is a listing of the same public plots, not a different set.
-  await readerPage.getByPlaceholder('플롯 이름이나 보고 싶은 이야기로 검색').fill(plot.name);
-  const card = readerPage.getByTestId('plot-card').filter({ hasText: plot.name });
-  await expect(card).toHaveCount(1);
+  // The work opens its own page, where a chat starts.
+  const work = readerPage.getByTestId('library-works').getByTestId('plot-row').filter({ hasText: plot.name });
+  await expect(work).toHaveCount(1);
+  await expect(work).toHaveAttribute('href', `/ko/p/${plotId}`);
+  await expect(readerPage.getByTestId('library-chats')).toContainText(plot.name);
 });

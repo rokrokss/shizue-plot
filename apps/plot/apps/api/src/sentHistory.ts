@@ -184,9 +184,8 @@ export interface SentView extends ScriptedWork {
  * What a background reader of a chat — no request, no generation — reads its
  * turns' sent words with: the work with the chat's modules, the roster with the
  * members sent off the stage marked, the persona, the chat's variables at the
- * end of `path` and the reader's globals. The reader's script overlay is not
- * read: a card's Lua renaming its one member is the only thing it would change
- * here (`{{char}}`), and only in a turn that writes the macro.
+ * end of `path` and the work's globals — the roster as the card's scripts left
+ * it, which is the roster itself.
  */
 export async function loadSentView(
   deps: AppDeps,

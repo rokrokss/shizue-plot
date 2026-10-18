@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { greetingText, isGreeting, MAX_GREETING_CHARS } from '@/lib/greeting';
+import { fillPreview, greetingText, isGreeting, MAX_GREETING_CHARS } from '@/lib/greeting';
 
 const ctx = (variables: Record<string, string>) => ({
   variables,
@@ -51,5 +51,15 @@ describe('greeting', () => {
     expect(isGreeting({ parentId: null, role: 'assistant' })).toBe(true);
     expect(isGreeting({ parentId: null, role: 'user' })).toBe(false);
     expect(isGreeting({ parentId: 'm0', role: 'assistant' })).toBe(false);
+  });
+});
+
+describe('fillPreview', () => {
+  it('substitutes char and user regardless of case or spacing', () => {
+    expect(fillPreview('{{char}}가 {{ USER }}를 본다', '사서', '당신')).toBe('사서가 당신를 본다');
+  });
+
+  it('leaves other macros alone', () => {
+    expect(fillPreview('{{roll:d6}} {{char}}', '사서', '당신')).toBe('{{roll:d6}} 사서');
   });
 });

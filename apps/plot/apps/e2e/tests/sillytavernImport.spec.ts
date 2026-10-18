@@ -235,7 +235,6 @@ const backup = storedZip({
 interface PlotRow {
   id: string;
   name: string;
-  visibility: string;
 }
 interface Member {
   id: string;
@@ -343,7 +342,6 @@ test('the run brings over every chosen item', async () => {
 
   plots = (await api<PlotRow[]>('/api/plots')).filter((plot) => !before.has(plot.id));
   expect(plots.map((plot) => plot.name).sort()).toEqual([alice, bob, group].sort());
-  expect(plots.every((plot) => plot.visibility === 'private')).toBe(true);
 });
 
 test('the plots carry their cards, the linked world and the extra lorebook', async () => {

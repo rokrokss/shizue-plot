@@ -2,15 +2,14 @@
 
 import { useTranslations } from 'next-intl';
 import { Link, usePathname } from '@/i18n/navigation';
-import { navClusters } from '@/lib/nav';
+import { navClusters, type NavKey } from '@/lib/nav';
 import { Brand } from './Brand';
 import { Icon } from './Icon';
 import { LocaleSwitcher } from './LocaleSwitcher';
-import { NotificationBell } from './NotificationBell';
 import { ThemeSwitcher } from './ThemeSwitcher';
 import { buttonClass, cx } from './ui';
 
-function NavLink({ href, label, active, icon }: { href: string; label: string; active: boolean; icon: 'explore' | 'chats' | 'create' }) {
+function NavLink({ href, label, active, icon }: { href: string; label: string; active: boolean; icon: NavKey }) {
   return (
     <Link
       href={href}
@@ -57,10 +56,6 @@ export function Header() {
 
         <div className="ml-auto flex items-center gap-2">
           <Link href="/settings" className={buttonClass('secondary', 'sm')} aria-label={t('aiSettings')}>AI</Link>
-          {/* The bell stays at every width: what it carries arrives while
-              the reader is elsewhere, and a phone is where they are. Only a
-              conversation on a phone hides the whole bar (the layout). */}
-          <NotificationBell />
           <div className="hidden items-center gap-2 lg:flex">
             <LocaleSwitcher />
             <ThemeSwitcher />

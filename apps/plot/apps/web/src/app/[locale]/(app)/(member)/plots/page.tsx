@@ -1,10 +1,11 @@
 'use client';
 
-import { useFormatter, useTranslations } from 'next-intl';
+import { useTranslations } from 'next-intl';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ImportProgressLine, RealmImportForm } from '@/components/CardImport';
 import { CreatorTabs } from '@/components/CreatorTabs';
 import { DraftGuide } from '@/components/DraftGuide';
+import { PlotShelf } from '@/components/PlotShelf';
 import { Button, buttonClass, ErrorText, Field, Select, Spinner, TextArea, TextInput } from '@/components/ui';
 import { Link, useRouter } from '@/i18n/navigation';
 import { apiGet, apiSend } from '@/lib/api';
@@ -32,7 +33,6 @@ export default function PlotsPage() {
   const t = useTranslations('plots');
   const cardImport = useTranslations('cardImport');
   const common = useTranslations('common');
-  const format = useFormatter();
   const toMessage = useErrorMessage();
   const router = useRouter();
   const fileInput = useRef<HTMLInputElement>(null);
@@ -148,7 +148,7 @@ export default function PlotsPage() {
   /**
    * The same import, from a RisuRealm page: this browser downloads the card
    * (`downloadRealmCard`) and uploads it like a picked file, naming the page it
-   * came from. The new plot is private, so nothing is asked of the owner yet.
+   * came from.
    */
   async function importFromRealm(url: string): Promise<boolean> {
     if (busy) return false;
@@ -347,47 +347,9 @@ export default function PlotsPage() {
           <p className="mt-1 text-sm text-muted">{t('emptyHint')}</p>
         </div>
       ) : (
-        <ul className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 md:grid-cols-4 lg:grid-cols-5">
-          {plots.map((plot) => (
-            <li key={plot.id}>
-              <Link
-                href={`/plots/${plot.id}`}
-                data-testid="plot-row"
-                className="flex h-full flex-col overflow-hidden rounded-2xl border border-line bg-surface transition-shadow hover:border-fg hover:shadow-card"
-              >
-                {plot.coverUrl ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={plot.coverUrl}
-                    alt=""
-                    loading="lazy"
-                    className="aspect-[2/3] w-full bg-raised/60 object-cover"
-                  />
-                ) : (
-                  <div className="brand-dots flex aspect-[2/3] w-full items-center justify-center bg-mint-soft/60"><span className="line-clamp-3 px-4 text-center heading1">{plot.name}</span></div>
-                )}
-                <div className="flex min-w-0 flex-1 flex-col gap-2 p-3 sm:p-4">
-                  <div className="flex items-center gap-2">
-                    <p className="min-w-0 flex-1 truncate text-sm font-medium text-fg">
-                      {plot.name}
-                    </p>
-                    <span className="shrink-0 text-xs text-muted">
-                      {plot.visibility === 'public' ? t('public') : t('private')}
-                    </span>
-                  </div>
-                  <p className="line-clamp-2 text-xs leading-relaxed text-muted">
-                    {plot.intro || plot.description || t('noDescription')}
-                  </p>
-                  <p className="mt-auto pt-1 text-xs text-muted">
-                    {t('updatedAt', {
-                      date: format.dateTime(new Date(plot.updatedAt), { dateStyle: 'medium' }),
-                    })}
-                  </p>
-                </div>
-              </Link>
-            </li>
-          ))}
-        </ul>
+        <div className="mt-6">
+          <PlotShelf plots={plots} href={(plot) => `/plots/${plot.id}`} />
+        </div>
       )}
     </div>
   );

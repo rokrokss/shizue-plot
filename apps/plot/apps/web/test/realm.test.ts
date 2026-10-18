@@ -9,8 +9,6 @@ import { ApiError } from '../src/lib/api';
 import {
   checkCardSize,
   downloadRealmCard,
-  isRestrictiveLicense,
-  licenseTerms,
   realmCardId,
 } from '../src/lib/realm';
 import { MAX_CARD_IMPORT_BYTES } from '../src/lib/types';
@@ -142,22 +140,5 @@ describe('checkCardSize', () => {
     const sized = (size: number) => ({ size }) as File;
     expect(checkCardSize(sized(MAX_CARD_IMPORT_BYTES))).toEqual(sized(MAX_CARD_IMPORT_BYTES));
     expect(() => checkCardSize(sized(MAX_CARD_IMPORT_BYTES + 1))).toThrow(ApiError);
-  });
-});
-
-describe('license terms', () => {
-  it('reads the Creative Commons conditions, and nothing out of anything else', () => {
-    expect(licenseTerms('CC BY-NC-SA 4.0')).toEqual(['by', 'nc', 'sa']);
-    expect(licenseTerms('CC BY 4.0')).toEqual(['by']);
-    for (const license of [null, '', 'CC0', 'private', 'MIT']) expect(licenseTerms(license)).toEqual([]);
-  });
-
-  it('warns harder for no-derivatives and private licenses only', () => {
-    expect(isRestrictiveLicense('CC BY-ND 4.0')).toBe(true);
-    expect(isRestrictiveLicense('CC BY-NC-ND 4.0')).toBe(true);
-    expect(isRestrictiveLicense('private')).toBe(true);
-    for (const license of [null, 'CC BY-NC 4.0', 'CC BY-SA 4.0', 'CC0']) {
-      expect(isRestrictiveLicense(license), String(license)).toBe(false);
-    }
   });
 });

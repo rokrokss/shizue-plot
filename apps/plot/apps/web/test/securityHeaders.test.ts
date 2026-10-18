@@ -27,17 +27,15 @@ describe('page security headers', () => {
     expect(directive(contentSecurityPolicy({ NODE_ENV: 'development' }, 'n0nce'), 'script-src')).toContain("'unsafe-eval'");
   });
 
-  it('send HSTS only over https, let our pages frame the sandbox documents, and leave /api to the API', () => {
+  it('let our pages frame the sandbox documents, and leave /api to the API', () => {
     /** The headers a path gets: Next reads each `source` as `/` and the pattern after `:path`. */
-    const on = (path: string, env: Record<string, string> = {}): string[] =>
-      securityHeaders(env)
+    const on = (path: string): string[] =>
+      securityHeaders()
         .filter((rule) => new RegExp(`^${rule.source.replace('/:path', '/')}$`).test(path))
         .flatMap((rule) => rule.headers.map((header) => header.key));
     expect(on('/ko/chats/1')).toEqual(['X-Content-Type-Options', 'Referrer-Policy', 'X-Frame-Options']);
     // Framed by our pages, which their own policy allows.
     expect(on('/sandbox/component.html')).toEqual(['X-Content-Type-Options', 'Referrer-Policy']);
     expect(on('/api/chats')).toEqual([]);
-    expect(on('/ko', { BETTER_AUTH_URL: 'https://plot.example' })).toContain('Strict-Transport-Security');
-    expect(on('/ko', { BETTER_AUTH_URL: 'http://localhost:13000' })).not.toContain('Strict-Transport-Security');
   });
 });

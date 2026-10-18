@@ -76,7 +76,6 @@ import {
 import { getAdapter, listEnabledModels, type ChatRequest, type LLMAdapter } from '@shizue/llm';
 import { and, asc, eq, inArray, notExists, sql } from 'drizzle-orm';
 import type { AppDeps, Tx } from './deps.js';
-import { BACKGROUND_LEASE_MS, withLease } from './leases.js';
 import { embedErrorForLog, type Embedding } from './embedder.js';
 import { noteCachedTokens } from './cacheHealth.js';
 import { embedPendingFacts, extractFacts, keepEndedFacts, selectFacts } from './facts.js';
@@ -437,8 +436,7 @@ function standBack(chatId: string): void {
  * the provider's prompt cache cannot serve — rather than one on each turn the
  * reader sends while it runs. Until then the requests read the memory as it was,
  * which the run began early enough to leave room beside (`planBatch`). Per
- * process, like `refreshingMemory`: a request another instance serves sees each
- * summary as it is written. A backfill's are seen as they are written, and so is
+ * process, like `refreshingMemory`. A backfill's are seen as they are written, and so is
  * a summary closing a gap an edit opened (`SummaryBatch.gap`), whose stretch is
  * in neither the memory nor the history until then — the edit broke the cache
  * anyway.
@@ -453,14 +451,12 @@ const landing = new Map<string, Set<string>>();
 export function scheduleMemoryUpdate(deps: AppDeps, chatId: string): void {
   // One refresh per chat at a time. While a refresh runs the branch stays over
   // what fits, so every following turn would otherwise start a duplicate; there
-  // is nothing to queue, the next completed turn reschedules. The set is this
-  // instance's; the lease (`memoryLeaseKey`) is every instance's, and a refresh
-  // another one is running is the same nothing to queue.
+  // is nothing to queue, the next completed turn reschedules.
   if (deps.refreshingMemory.has(chatId)) return;
   deps.refreshingMemory.add(chatId);
   landing.set(chatId, new Set());
 
-  const task = withLease(deps.db, memoryLeaseKey(chatId), BACKGROUND_LEASE_MS, async () => {
+  const task = (async () => {
     try {
       let continuing = false;
       for (let pass = 0; pass < REFRESH_BATCHES_PER_RUN; pass += 1) {
@@ -474,8 +470,7 @@ export function scheduleMemoryUpdate(deps: AppDeps, chatId: string): void {
     }
     await embedPendingSummaries(deps, chatId);
     await embedPendingFacts(deps, chatId);
-  })
-    .then(() => undefined)
+  })()
     .catch((error: unknown) => {
       console.error('[memory] update failed', error);
     })
@@ -485,9 +480,6 @@ export function scheduleMemoryUpdate(deps: AppDeps, chatId: string): void {
     });
   deps.onBackgroundTask?.(task, 'memory');
 }
-
-/** The lease a chat's memory refresh and backfill take across instances (`withLease`). */
-const memoryLeaseKey = (chatId: string): string => `memory:${chatId}`;
 
 /** One summary's worth of work: what it did, and whether a later pass has more to do. */
 interface PassResult {
@@ -761,8 +753,8 @@ export async function embedPendingSummaries(deps: AppDeps, chatId: string): Prom
  * The `memory_backfill` job (§7.3): summarizes an imported chat's history, a
  * batch per summary call, a few calls per run.
  *
- * A run is bounded so one long import does not hold this instance's worker — the
- * queue runs one job at a time — for an hour; what is left goes to a successor
+ * A run is bounded so one long import does not hold the worker — the queue
+ * runs one job at a time — for an hour; what is left goes to a successor
  * job, behind whatever else is due. It takes the same per-chat guard a finished
  * turn's refresh takes and stands back when one is running, and every summary
  * still goes through the revision CAS, so a reader who starts chatting meanwhile
@@ -781,18 +773,11 @@ export async function memoryBackfill(
       return;
     }
     deps.refreshingMemory.add(chatId);
-    let result: PassResult | undefined;
+    let result: PassResult;
     try {
-      // Another instance's refresh of the chat is stood back from as this one's is.
-      await withLease(deps.db, memoryLeaseKey(chatId), BACKGROUND_LEASE_MS, async () => {
-        result = await updateMemory(deps, chatId, continuing);
-      });
+      result = await updateMemory(deps, chatId, continuing);
     } finally {
       deps.refreshingMemory.delete(chatId);
-    }
-    if (!result) {
-      await enqueueBackfill(deps, chatId, new Date(Date.now() + BACKFILL_RETRY_MS));
-      return;
     }
     continuing = result.continuing;
     if (!result.more) {

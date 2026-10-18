@@ -1,5 +1,5 @@
-import { isPng, sniffMedia, stripPngTextChunks } from '@shizue/core';
-import { avatarKey, readAll, type ObjectStorage } from './storage.js';
+import { sniffMedia, stripPngTextChunks } from '@shizue/core';
+import { avatarKey, type ObjectStorage } from './storage.js';
 
 /**
  * Cap on an image a creator uploads directly — an avatar or a plot cover. Not a
@@ -93,26 +93,4 @@ export async function saveAvatar(
   const key = avatarKey(characterId, image.ext);
   await storage.put(key, image.bytes, image.mime);
   return key;
-}
-
-/**
- * Re-strips an avatar stored before (or despite) `saveAvatar`'s stripping, so no
- * public avatar can carry a card. Idempotent, and cheap enough to run on every
- * publish; an avatar that cannot be sanitized is dropped instead (the GET already
- * answers 404 for a missing object).
- */
-export async function sanitizeStoredAvatar(storage: ObjectStorage, key: string): Promise<void> {
-  const object = await storage.get(key);
-  if (!object) return;
-  const bytes = await readAll(object.body);
-  if (!isPng(bytes)) return;
-  const stripped = stripPngTextChunks(bytes);
-  if (!stripped) {
-    // Fail closed: if the unwalkable object cannot be removed, the error
-    // propagates and the publish aborts — the raw bytes must never become public.
-    await storage.delete(key);
-    return;
-  }
-  // Equal length means nothing was removed — leave the object alone.
-  if (stripped.length !== bytes.length) await storage.put(key, stripped, mimeForPath(key));
 }

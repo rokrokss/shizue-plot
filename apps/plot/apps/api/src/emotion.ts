@@ -30,7 +30,6 @@ import { and, asc, eq, isNull } from 'drizzle-orm';
 import type { AppDeps } from './deps.js';
 import { embedErrorForLog, type Embedder } from './embedder.js';
 import { loadMembers } from './hub.js';
-import { acquireLease, newLeaseHolder, withLease } from './leases.js';
 import { collect, memoryChannel } from './memory.js';
 import { buildPath } from './tree.js';
 
@@ -59,28 +58,22 @@ export function replyMemberOf<M extends { id?: string | undefined }>(
 export const emotionNamed = (images: readonly EmotionImage[], name: string): EmotionImage | undefined =>
   images.find((image) => image.name === name);
 
-/**
- * A message's choice lease across instances, renewed a third of it apart while
- * the choice runs: short, so one an instance died holding is free again within
- * the page's asking (`resumeEmotionDetection`).
- */
-const EMOTION_LEASE_MS = 6_000;
 /** The page's asking starts a reply's choice again at most this often (`resumeEmotionDetection`). */
 const EMOTION_RESUME_EVERY_MS = 10_000;
 /** How old a reply may be for the page's asking to start its choice again. */
 const EMOTION_RESUME_WINDOW_MS = 2 * 60_000;
+/** When the page's asking last started each reply's choice again, by message id; forgotten past the window. */
+const resumedAt = new Map<string, number>();
 
 /**
  * Fire-and-forget choice for one reply. Must only be called once the reply is
  * stored and finished; it reloads everything itself and never propagates a
- * failure. One at a time per message — a round's replies each get their own —
- * on this instance by its set and on every one by the message's lease.
+ * failure. One at a time per message — a round's replies each get their own.
  */
 export function scheduleEmotionDetection(deps: AppDeps, chatId: string, messageId: string): void {
   if (deps.detectingEmotion.has(messageId)) return;
   deps.detectingEmotion.add(messageId);
-  const task = withLease(deps.db, `emotion:${messageId}`, EMOTION_LEASE_MS, () => detectEmotion(deps, chatId, messageId))
-    .then(() => undefined)
+  const task = detectEmotion(deps, chatId, messageId)
     .catch((error: unknown) => {
       console.error('[emotion] detection failed', error);
     })
@@ -90,12 +83,12 @@ export function scheduleEmotionDetection(deps: AppDeps, chatId: string, messageI
 
 /**
  * The page's asking after a reply's picture (`GET …/messages/:id/emotion`) starts
- * its choice again when none came: the one the turn started may have died with
- * its instance — the only background work a later turn does not take up again.
+ * its choice again when none came: the one the turn started may have stopped
+ * with the app — the only background work a later turn does not take up again.
  * Only for a reply of the last `EMOTION_RESUME_WINDOW_MS` that its scripts are
- * done with, and at most once each `EMOTION_RESUME_EVERY_MS` (a lease of its own,
- * left to run out), so a choice that keeps failing is not asked again on every
- * poll; one still running holds the message's lease and is not started twice.
+ * done with, and at most once each `EMOTION_RESUME_EVERY_MS`, so a choice that
+ * keeps failing is not asked again on every poll; one still running is not
+ * started twice.
  * The page asks only after replies it saw finish — RisuAI chooses none for one
  * the reader stopped.
  */
@@ -107,7 +100,10 @@ export async function resumeEmotionDetection(
   if (message.role !== 'assistant' || message.emotion !== null || message.scriptState === 'pending') return;
   if (Date.now() - message.createdAt.getTime() > EMOTION_RESUME_WINDOW_MS) return;
   if (deps.detectingEmotion.has(message.id)) return;
-  if (!(await acquireLease(deps.db, `emotion_resume:${message.id}`, newLeaseHolder(), EMOTION_RESUME_EVERY_MS))) return;
+  const now = Date.now();
+  if ((resumedAt.get(message.id) ?? 0) > now - EMOTION_RESUME_EVERY_MS) return;
+  for (const [id, at] of resumedAt) if (at <= now - EMOTION_RESUME_WINDOW_MS) resumedAt.delete(id);
+  resumedAt.set(message.id, now);
   scheduleEmotionDetection(deps, chatId, message.id);
 }
 

@@ -15,8 +15,8 @@ import { Hono } from 'hono';
 import { createHash } from 'node:crypto';
 import type { AppDeps, AppEnv } from '../deps.js';
 import { badRequest, notFound } from '../errors.js';
-import { loadVisiblePlot } from '../hub.js';
-import { translateTexts, withTranslationSlot } from '../translate.js';
+import { loadOwnedPlot } from '../plots.js';
+import { translateTexts } from '../translate.js';
 import { optionalBoolean, readJsonBody, requireString, requireUuidParam } from '../util.js';
 import { loadOwnedChat } from './chats.js';
 
@@ -90,7 +90,7 @@ export function chatTranslationRoutes(deps: AppDeps): Hono<AppEnv> {
       return c.json({ texts: Object.fromEntries(asked.map((text) => [text, cached[text]!])) });
     }
 
-    const made = await withTranslationSlot(userId, () => translateTexts(deps, chat, missing, language));
+    const made = await translateTexts(deps, chat, missing, language);
     const result: Record<string, string> = {};
     for (const text of asked) {
       const translated = regenerate ? (made.get(text) ?? cached[text]) : (cached[text] ?? made.get(text));
@@ -175,9 +175,9 @@ export function chatTranslationRoutes(deps: AppDeps): Hono<AppEnv> {
     if (text.length > MAX_INPUT_TRANSLATION_CHARS) {
       throw badRequest('translation_too_long', 'Too much text to translate at once');
     }
-    const plot = await loadVisiblePlot(deps.db, chat.plotId, chat.userId);
+    const plot = await loadOwnedPlot(deps, chat.plotId, chat.userId);
     const parts = inputParts(text);
-    const made = await withTranslationSlot(userId, () => translateTexts(deps, chat, partTexts(parts), plot.language));
+    const made = await translateTexts(deps, chat, partTexts(parts), plot.language);
     return c.json({ text: applyParts(parts, made) });
   });
 

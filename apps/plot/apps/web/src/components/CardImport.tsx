@@ -2,12 +2,12 @@
 
 import { useTranslations } from 'next-intl';
 import { useState } from 'react';
-import { isRestrictiveLicense, licenseTerms, REALM_ORIGIN } from '@/lib/realm';
+import { REALM_ORIGIN } from '@/lib/realm';
 import type { ImportProgress } from '@/lib/fileImport';
 import { MIGRATION_PLATFORMS } from '@/lib/migrate/wizard';
 import type { PlotMember } from '@/lib/types';
 import type { ImportWarning } from '@/lib/importWarnings';
-import { Button, Checkbox, Field, TextInput } from './ui';
+import { Button, Field, TextInput } from './ui';
 
 /**
  * A RisuRealm page address and the button that imports it. The download itself
@@ -77,18 +77,6 @@ export function RealmImportForm({
 }
 
 /**
- * A card's license in words: the code as the card wrote it, then what its
- * conditions mean. A card that names none says so — that is not a permission.
- */
-export function LicenseText({ license }: { license: string | null }) {
-  const t = useTranslations('rights');
-  if (!license) return <>{t('licenseNone')}</>;
-  if (license.toLowerCase() === 'private') return <>{t('licensePrivate')}</>;
-  const terms = licenseTerms(license);
-  return <>{[license, ...terms.map((term) => t(`terms.${term}`))].join(' · ')}</>;
-}
-
-/**
  * Whether an imported member's file looks like a RisuAI module rather than a
  * character: RisuAI's module export names it `name.module.charx`, and marks a
  * module with no icon of its own `extensions.moduleNoneImage`. It came in as a
@@ -103,9 +91,8 @@ export function looksLikeRisuModule(member: Pick<PlotMember, 'card' | 'importedF
 }
 
 /**
- * Where an imported member came from, who the card says made it and under what
- * license — what the owner weighs before publishing it. Nothing here is checked:
- * the creator and license are the card's own claims, the source the importer's.
+ * Where an imported member came from and who the card says made it. Nothing
+ * here is checked: the creator is the card's own claim, the source the importer's.
  */
 export function ImportedCardDetails({ member }: { member: PlotMember }) {
   const t = useTranslations('rights');
@@ -145,54 +132,12 @@ export function ImportedCardDetails({ member }: { member: PlotMember }) {
         </dd>
         <dt>{t('creator')}</dt>
         <dd className="text-fg">{member.card.creator.trim() || t('creatorUnknown')}</dd>
-        <dt>{t('license')}</dt>
-        <dd className="text-fg" data-testid="member-license">
-          <LicenseText license={member.license} />
-        </dd>
       </dl>
-      {isRestrictiveLicense(member.license) ? (
-        <p className="text-danger">{t('restrictedNotice')}</p>
-      ) : null}
       {looksLikeRisuModule(member) ? (
         <p data-testid="member-module-like" className="text-muted">
           {t('moduleLike')}
         </p>
       ) : null}
-    </div>
-  );
-}
-
-/**
- * The owner's word, asked for wherever imported characters are about to reach
- * readers: a publish of a plot that has them, and an import into a plot that is
- * already public. `restricted` names the members whose license asks for more
- * than a word — the warning is stronger, the box is the same.
- */
-export function RightsConfirmation({
-  notice,
-  label,
-  restricted = [],
-  checked,
-  onChange,
-}: {
-  notice: string;
-  /** The words the owner checks, which say what is about to be published. */
-  label: string;
-  restricted?: string[];
-  checked: boolean;
-  onChange: (checked: boolean) => void;
-}) {
-  const t = useTranslations('rights');
-
-  return (
-    <div data-testid="rights-confirmation" className="space-y-2 rounded-lg border border-line bg-canvas/40 p-3">
-      <p className="text-xs text-muted">{notice}</p>
-      {restricted.length > 0 ? (
-        <p data-testid="rights-restricted" className="text-xs text-danger">
-          {t('restrictedPublish', { names: restricted.join(', ') })}
-        </p>
-      ) : null}
-      <Checkbox label={label} checked={checked} onChange={onChange} />
     </div>
   );
 }

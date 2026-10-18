@@ -52,7 +52,7 @@ const MESSAGES = {
   common: { close: '닫기' },
   locales: { ko: '한국어', en: 'English', ja: '日本語' },
   nav: { aiSettings: 'AI 연결',
-    explore: '탐색',
+    library: '라이브러리',
     chats: '대화',
     create: '만들기',
     language: '언어',
@@ -108,14 +108,14 @@ describe('MobileTabBar', () => {
     pathname = '/p/abc';
     await render();
 
-    expect(tabs().map((node) => node.textContent)).toEqual(['탐색', '대화', '만들기']);
+    expect(tabs().map((node) => node.textContent)).toEqual(['라이브러리', '대화', '만들기']);
     expect(tabs().map((node) => node.getAttribute('href'))).toEqual([
       '/',
       '/chats',
       '/plots',
     ]);
-    // A plot page is somewhere inside 탐색, and the tab says so.
-    expect(named(bar(), '탐색').getAttribute('aria-current')).toBe('page');
+    // A work's page is somewhere inside the library, and the tab says so.
+    expect(named(bar(), '라이브러리').getAttribute('aria-current')).toBe('page');
     expect(menuButton().textContent).toBe('메뉴');
     expect(menuButton().getAttribute('aria-expanded')).toBe('false');
     expect(sheet()).toBeNull();

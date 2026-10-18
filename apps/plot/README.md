@@ -1,8 +1,8 @@
 # shizue
 
-플롯과 캐릭터를 만들고 지속적인 대화를 이어가는 캐릭터챗 제품이다.
-카드 가져오기, 대화 분기·재생성·편집, 기억과 관계, 페르소나와 노트,
-플롯 탐색·팔로우·알림을 제공한다. UI는 한국어·영어·일본어를 지원한다.
+플롯과 캐릭터를 만들고 지속적인 대화를 이어가는 캐릭터챗 앱이다. RisuAI처럼
+한 사람이 자기 컴퓨터에서 쓴다. 카드 가져오기, 대화 분기·재생성·편집, 기억,
+페르소나와 노트, 휴대폰 연결을 제공한다. UI는 한국어·영어·일본어를 지원한다.
 
 ## 실행과 검증
 
@@ -22,6 +22,6 @@ API 테스트에는 운영 DB와 다른 `_test` 데이터베이스가 필요하�
 - `packages/db`: PostgreSQL + pgvector 스키마와 마이그레이션.
 - `packages/llm`: 모델 레지스트리와 OpenAI 호환 어댑터, 개발용 echo 모델.
 
-제품 내부 동작은 [ARCHITECTURE.md](docs/ARCHITECTURE.md), 창작자 안내는
-[CREATOR-GUIDE.md](docs/CREATOR-GUIDE.md)를 참조한다.
+제품 내부 동작은 [ARCHITECTURE.md](docs/ARCHITECTURE.md), 쉬운 말의 안내는
+[OVERVIEW.md](docs/OVERVIEW.md)를 참조한다.
 챗 내보내기 형식은 루트 [PLATFORM.md](../../docs/PLATFORM.md)가 소유한다.

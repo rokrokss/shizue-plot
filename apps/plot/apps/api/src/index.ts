@@ -4,15 +4,12 @@ import { DataDirBusy, openAppDb } from './appDb.js';
 import { createChatGPTAccounts } from './chatgptAccounts.js';
 import type { AppDeps } from './deps.js';
 import { createLocalEmbedder } from './embedder.js';
-import { createRemoteEmbedder, embedderListenConfig, serveEmbedder } from './embedderRemote.js';
 import { isLoopback, loadRootEnv, readConfig, readOrCreateSecret } from './env.js';
 import { createPhoneAccess } from './tunnel.js';
 import { startJobWorker } from './jobs.js';
 import { stopGenerations } from './generation.js';
+import { createJobHandlers } from './jobHandlers.js';
 import { createBackgroundTasks, onUnhandledRejection } from './lifecycle.js';
-import { installJsonConsole } from './log.js';
-import { luaSandboxEnabled, startMetricsServer } from './metrics.js';
-import { createJobHandlers } from './notifications.js';
 import { createRemoteFetch } from './localizeAssets.js';
 import { probeRequestLua } from './requestLua.js';
 import { createScriptFetch } from './scriptFetch.js';
@@ -21,8 +18,6 @@ import { fakeChatGPTOAuth } from './testOpenAI.js';
 
 loadRootEnv();
 const config = readConfig();
-// Before anything else is said: the embedder and the Lua probe speak at startup.
-if (config.logFormat === 'json') installJsonConsole();
 
 // The one handle on the app's database (PGlite in the app's folder, locked to this
 // process), brought to the newest migration before anything reads it.
@@ -62,56 +57,41 @@ const deps: AppDeps = {
   remoteOrigins: config.remoteOrigins,
   ...(phoneAccess ? { phoneAccess } : {}),
   storage: createStorage(config.storage),
-  // One for the process: card scripts' requests, their in-flight cap, and the per-reader rate limit in `rate_limits`.
-  scriptFetch: createScriptFetch({ db, ownOrigins }),
+  // One for the process: card scripts' requests, their in-flight cap and RisuAI's rate limit.
+  scriptFetch: createScriptFetch({ ownOrigins }),
   // What an import fetches of a card's pictures and fonts on other hosts, never this app's own.
   remoteFetch: createRemoteFetch({ ownOrigins }),
   env: config.env,
   generating: new Set<string>(),
-  generationClaims: new Map(),
   generationStreams: new Set(),
   refreshingMemory: new Set<string>(),
   detectingEmotion: new Set<string>(),
   embeddingVectors: new Map(),
   suggesting: new Set<string>(),
-  drafting: new Set<string>(),
   onBackgroundTask: background.track,
 };
-// Lazy: the model loads on the first search, not here (`embedder.ts`). With
-// EMBEDDER_URL another process holds it, for every instance (`embedderRemote.ts`).
-const remoteEmbedder = Boolean(config.env['EMBEDDER_URL']?.trim());
-const embedder = remoteEmbedder ? createRemoteEmbedder(config.env) : createLocalEmbedder(config.env);
+// Lazy: the model loads on the first search, not here (`embedder.ts`).
+const embedder = createLocalEmbedder(config.env);
 if (embedder) deps.embedder = embedder;
-// EMBEDDER_PORT: this instance's own model, for the instances whose EMBEDDER_URL points here.
-const embedderListen = embedderListenConfig(config.env);
-if (embedderListen && remoteEmbedder) console.warn('[embedder] EMBEDDER_PORT is read without EMBEDDER_URL only; not serving');
-const embedderListener = embedder && embedderListen && !remoteEmbedder ? serveEmbedder(embedder, embedderListen) : undefined;
 const app = createApp(deps);
 // Whether this Node can sandbox a card's editRequest Lua, asked now so the log says so at startup.
-void probeRequestLua().then((enabled) => luaSandboxEnabled.set(enabled ? 1 : 0));
+void probeRequestLua();
 
-const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
-  console.log(`[api] listening on http://${config.host}:${info.port}`);
+const server = serve({ fetch: app.fetch, port: config.port, hostname: '127.0.0.1' }, (info) => {
+  console.log(`[api] listening on http://127.0.0.1:${info.port}`);
 });
 
-// Every instance polls the same queue; `for update skip locked` is what keeps them
-// off each other's rows. File imports run for minutes, so they have loops of their
-// own — `IMPORT_WORKERS` of them, what bounds the imports this process reads at once
-// — and the main loop leaves them alone.
+// File imports run for minutes, so they have a loop of their own — one import
+// read at a time — and the main loop (a chat import's memory backfill) leaves
+// them alone.
 const handlers = createJobHandlers(deps);
 const jobWorkers = [
   startJobWorker({ db, handlers, kinds: { except: ['file_import'] } }),
-  ...Array.from({ length: config.importWorkers }, () => startJobWorker({ db, handlers, kinds: { only: ['file_import'] } })),
+  startJobWorker({ db, handlers, kinds: { only: ['file_import'] } }),
 ];
 const stopJobWorker = (): void => {
   for (const stop of jobWorkers) stop();
 };
-
-// Off unless METRICS_PORT is set, and never on the API's own port (`metrics.ts`).
-const metricsServer =
-  config.metricsPort === undefined
-    ? undefined
-    : startMetricsServer(deps, background, { port: config.metricsPort, host: config.metricsHost });
 
 let exitCode = 0;
 let stopping = false;
@@ -126,15 +106,12 @@ function shutdown(code: number): void {
   if (stopping) return;
   stopping = true;
   void (async () => {
-    // `/api/ready` answers 503 from here on, for a balancer to stop sending readers.
-    deps.draining = true;
     // No new connections; the open streams are stopped below.
     server.close();
     // A Cloudflare tunnel ends with the process; a Tailscale one is Tailscale's to keep.
     phoneAccess?.shutdown();
-    metricsServer?.close();
     // Only the claiming is stopped: a job still running is left where it is, and
-    // its lease expires two minutes later for the next instance to take over.
+    // its lease expires two minutes after for the next start to take over.
     stopJobWorker();
     // A reply mid-stream is stopped as the reader's stop stops it — kept, and its
     // chat freed — rather than cut by the exit. Five seconds is for that storing,
@@ -148,9 +125,8 @@ function shutdown(code: number): void {
       const kinds = [...background.inFlight()].map(([kind, count]) => `${kind} ${count}`).join(', ');
       console.warn(`[api] ${left} background tasks still running after ${config.shutdownBackgroundMs} ms (${kinds}); exiting without them`);
     }
-    // The embedder's thread last, after everything that may embed — the other
-    // instances' requests too: onnxruntime does not survive an exit around it.
-    await embedderListener?.close();
+    // The embedder's thread last, after everything that may embed: onnxruntime
+    // does not survive an exit around it.
     await deps.embedder?.close();
     // The database last of all, once nothing writes: PGlite flushes its files on close.
     await closeDb();

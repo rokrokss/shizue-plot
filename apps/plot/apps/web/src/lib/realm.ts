@@ -1,5 +1,5 @@
 /**
- * Cards from RisuRealm (realm.risuai.net), and what their licenses say.
+ * Cards from RisuRealm (realm.risuai.net).
  *
  * Realm documents its API for client-side use only (realm.risuai.net/help/api),
  * so the download runs here, in the reader's browser, through the one documented
@@ -75,26 +75,4 @@ export async function downloadRealmCard(input: string): Promise<{ file: File; so
   }
   const file = checkCardSize(new File([blob], `${id}.${extension}`, { type: blob.type }));
   return { file, sourceUrl: realmCharacterUrl(id) };
-}
-
-/** The Creative Commons conditions a license code carries. */
-export type LicenseTerm = 'by' | 'nc' | 'nd' | 'sa';
-
-/**
- * The conditions in a Creative Commons code as Realm writes it (`CC BY-NC-SA
- * 4.0`), in the order it names them; empty for anything that is not one.
- */
-export function licenseTerms(license: string | null): LicenseTerm[] {
-  const code = /^CC[ -]?(BY(?:-(?:NC|ND|SA))*)\b/i.exec(license?.trim() ?? '')?.[1];
-  return code ? (code.toLowerCase().split('-') as LicenseTerm[]) : [];
-}
-
-/**
- * A license under which the author has kept the character from being reworked
- * into someone else's piece (no derivatives) or from going public at all. The
- * studio warns harder for these rather than refusing: the owner may hold the
- * author's permission, which nothing here can see.
- */
-export function isRestrictiveLicense(license: string | null): boolean {
-  return license?.trim().toLowerCase() === 'private' || licenseTerms(license).includes('nd');
 }

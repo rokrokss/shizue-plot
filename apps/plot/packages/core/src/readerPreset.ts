@@ -36,8 +36,6 @@ import {
 } from './presets.js';
 import { parseDefaultVariables, type Variables } from './variables.js';
 
-/** Presets one account may keep. */
-export const MAX_READER_PRESETS = 50;
 /** Characters a preset's name may hold. */
 export const READER_PRESET_NAME_MAX = 60;
 /**

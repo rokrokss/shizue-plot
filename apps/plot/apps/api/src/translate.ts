@@ -28,27 +28,6 @@ const TRANSLATE_TIMEOUT_MS = 60_000;
  * batch can need more than that, and the ChatGPT path sends no ceiling at all.
  */
 const TRANSLATE_MAX_TOKENS = 4000;
-/** Requests one reader may have open at once — the page keeps two; this is the backstop. */
-const MAX_IN_FLIGHT_PER_USER = 4;
-
-const inFlight = new Map<string, number>();
-
-/** Holds one of the reader's translation slots for `run`; 429 when they are all taken. */
-export async function withTranslationSlot<T>(userId: string, run: () => Promise<T>): Promise<T> {
-  const held = inFlight.get(userId) ?? 0;
-  if (held >= MAX_IN_FLIGHT_PER_USER) {
-    throw new ApiError(429, 'translation_busy', 'Too many translations are running');
-  }
-  inFlight.set(userId, held + 1);
-  try {
-    return await run();
-  } finally {
-    const left = (inFlight.get(userId) ?? 1) - 1;
-    if (left > 0) inFlight.set(userId, left);
-    else inFlight.delete(userId);
-  }
-}
-
 async function translateBatch(
   adapter: LLMAdapter,
   model: string,

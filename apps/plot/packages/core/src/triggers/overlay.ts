@@ -1,5 +1,5 @@
 /**
- * What a card's scripts rewrote of the work, kept for one reader on one plot.
+ * What a card's scripts rewrote of the work, as a run reports it.
  *
  * RisuAI lets a trigger rewrite the character it belongs to — its description
  * (`v2SetCharacterDesc`), its lorebook (`v2CreateLorebook` and the by-index
@@ -7,26 +7,18 @@
  * (`v2SetReplaceGlobalNote`) — and Lua its description (`setDescription`), its
  * name (`setName`), its first message (`setCharacterFirstMessage`) and the HTML
  * behind the chat (`setBackgroundEmbedding`), and a trigger the reader's persona
- * (`v2SetPersonaDesc`). There the character and the persona are the reader's own
- * objects, so the rewrite simply sticks, in every chat with them at once. Here
- * the work is the creator's and many readers play it, so a rewrite stays with
- * the reader and the plot (`plot_reader_overlays`) — every chat that reader has
- * on it reads it, no other reader does — and is laid over the work wherever one
- * of those chats' prompts is assembled. The plot and the persona rows never
- * change: a persona is the reader's across every work, and a rewrite one work's
- * script made of it must not follow them into another.
+ * (`v2SetPersonaDesc`). The character and the persona are the reader's own
+ * objects there, so the rewrite simply sticks, in every chat with them at once,
+ * and so it does here: the browser reports what its runs rewrote (a
+ * `ScriptOverlay`), and the API writes it into the work's rows and the chat's
+ * persona (apps/api `writeScriptRewrite`), which every chat reads from then on.
  *
  * What RisuAI keeps on the chat stays on the chat: the author's note
  * (`v2SetAuthorNote`, `chats.note`) and the entries Lua's `upsertLocalLoreBook`
  * writes to the chat's `localLore` (`chats.local_lore`, `upsertLocalLore`).
  *
  * Each field is a whole value, not a list of edits: the browser sends what the
- * scripts left, the server keeps the latest of each, and a field nobody touched
- * is absent and reads through to the work. The cost of whole values is that a
- * field once rewritten no longer follows the creator's later edits of the same
- * field for this reader — which is what RisuAI's own copy would do too. Two of
- * the reader's chats open at once each send only the fields their runs touched,
- * so both land; where both touched one, the later write stands, as in RisuAI.
+ * scripts left, the latest of each stands, and a field nobody touched is absent.
  */
 
 import type { LoreEntry, NormalizedCard } from '../types.js';
@@ -38,16 +30,16 @@ export interface MemberOverlay {
   /** RisuAI's `replaceGlobalNote`, which is the card's post-history instructions. */
   postHistoryInstructions?: string;
   /**
-   * RisuAI's `char.name` (`setName`): the member's name for this reader — the name
-   * the prompt gives it and its lines go under, and `{{char}}` in its own text
-   * where its card sets no nickname. Trimmed (`overlayName`).
+   * RisuAI's `char.name` (`setName`): the member's name — the name the prompt
+   * gives it and its lines go under, and `{{char}}` in its own text where its
+   * card sets no nickname. Trimmed (`overlayName`).
    */
   name?: string;
   /**
-   * RisuAI's `char.firstMessage` (`setCharacterFirstMessage`): what the plot's
-   * first opening reads as for this reader, on a branch that opens on it — RisuAI
-   * draws and sends its greeting from the character while the chat is on the
-   * first one (`fmIndex` -1). The stored greeting is not rewritten.
+   * RisuAI's `char.firstMessage` (`setCharacterFirstMessage`): the work's first
+   * opening, and the first greeting of every chat of it — RisuAI draws and sends
+   * its greeting from the character while the chat is on the first one
+   * (`fmIndex` -1).
    */
   firstMessage?: string;
   /** RisuAI's `char.backgroundHTML` (`setBackgroundEmbedding`): the HTML drawn behind the chat, in place of the card's. */
@@ -57,7 +49,7 @@ export interface MemberOverlay {
 export interface ScriptOverlay {
   /** By member id: whose scripts ran is whose card they rewrote. */
   members?: Record<string, MemberOverlay>;
-  /** The reader's persona description, as the scripts left it on this plot. */
+  /** The reader's persona description, as the scripts left it. */
   persona?: string;
 }
 
@@ -105,7 +97,7 @@ export function mergeScriptOverlay(
   return Object.keys(result).length > 0 ? result : null;
 }
 
-/** A member's card with what the scripts rewrote of it for this reader. */
+/** A member's card with what the scripts rewrote of it. */
 export function overlaidCard<T extends Pick<NormalizedCard, 'description' | 'lorebook' | 'postHistoryInstructions'>>(
   card: T,
   overlay: MemberOverlay | undefined,

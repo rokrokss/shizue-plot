@@ -1,6 +1,5 @@
 import {
   groupOtherBotRoleOf,
-  MAX_READER_PRESETS,
   normalizeFormatingOrder,
   normalizePromptTemplate,
   READER_PRESET_INTEGRATION_MAX,
@@ -11,8 +10,8 @@ import {
   type GroupOtherBotRole,
   type PromptTemplateItem,
 } from '@shizue/core';
-import { readerPresets, user, type ReaderPreset } from '@shizue/db';
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { readerPresets, type ReaderPreset } from '@shizue/db';
+import { and, asc, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import type { AppDeps, AppEnv } from '../deps.js';
 import { badRequest } from '../errors.js';
@@ -160,37 +159,24 @@ export function readerPresetRoutes(deps: AppDeps): Hono<AppEnv> {
     const fields = presetFields(await readJsonBody(c));
     if (fields.name === undefined) throw badRequest('invalid_request', 'name must be a string');
 
-    // The cap is a count: queue on the account row, as the notes do, so two
-    // requests racing at the last slot cannot both see room.
-    const created = await deps.db.transaction(async (tx) => {
-      await tx.select({ id: user.id }).from(user).where(eq(user.id, userId)).for('update');
-      const [counted] = await tx
-        .select({ value: sql<number>`count(*)::int` })
-        .from(readerPresets)
-        .where(eq(readerPresets.userId, userId));
-      if ((counted?.value ?? 0) >= MAX_READER_PRESETS) {
-        throw badRequest('reader_preset_limit', `A user may keep at most ${MAX_READER_PRESETS} reader presets`);
-      }
-      const [row] = await tx
-        .insert(readerPresets)
-        .values({
-          userId,
-          name: fields.name!,
-          main: fields.main ?? '',
-          globalNote: fields.globalNote ?? '',
-          jailbreak: fields.jailbreak ?? '',
-          formatingOrder: fields.formatingOrder ?? null,
-          promptTemplate: fields.promptTemplate ?? null,
-          groupTemplate: fields.groupTemplate ?? '',
-          groupOtherBotRole: fields.groupOtherBotRole ?? 'user',
-          toggles: fields.toggles ?? '',
-          moduleIntegration: fields.moduleIntegration ?? '',
-          defaultVariables: fields.defaultVariables ?? '',
-        })
-        .returning();
-      return row!;
-    });
-    return c.json(toReaderPresetJson(created), 201);
+    const [created] = await deps.db
+      .insert(readerPresets)
+      .values({
+        userId,
+        name: fields.name!,
+        main: fields.main ?? '',
+        globalNote: fields.globalNote ?? '',
+        jailbreak: fields.jailbreak ?? '',
+        formatingOrder: fields.formatingOrder ?? null,
+        promptTemplate: fields.promptTemplate ?? null,
+        groupTemplate: fields.groupTemplate ?? '',
+        groupOtherBotRole: fields.groupOtherBotRole ?? 'user',
+        toggles: fields.toggles ?? '',
+        moduleIntegration: fields.moduleIntegration ?? '',
+        defaultVariables: fields.defaultVariables ?? '',
+      })
+      .returning();
+    return c.json(toReaderPresetJson(created!), 201);
   });
 
   app.put('/:id', async (c) => {

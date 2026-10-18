@@ -1,8 +1,7 @@
 // @vitest-environment jsdom
 /**
- * The plot page as the owner gets it — and there is no one else: the openings
- * whole, the cast, the thread, the chat form, and the way into the editor beside
- * the title.
+ * The work page: the openings whole, the cast, the chat form, and the way into
+ * the editor beside the title.
  *
  * `createElement` rather than JSX, matching the other component tests.
  */
@@ -11,8 +10,10 @@ import { act, createElement, Suspense, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import messages from '../messages/ko.json';
-import { INTRO_PREVIEW_LENGTH } from '../src/lib/hub';
-import type { CommentPage, PublicPlotDetail } from '../src/lib/types';
+import type { PublicPlotDetail } from '../src/lib/types';
+
+/** The picker's cut of an opening, as the API makes it. */
+const INTRO_PREVIEW_LENGTH = 200;
 
 (globalThis as Record<string, unknown>)['IS_REACT_ACT_ENVIRONMENT'] = true;
 
@@ -34,7 +35,6 @@ vi.mock('@/lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/lib/api')>()),
   apiGet: (url: string) => {
     asked.push(url);
-    if (url.startsWith('/api/plots/sty_1/comments')) return Promise.resolve(commentPage);
     if (url === '/api/plots/sty_1/public') return Promise.resolve(plotResponse);
     if (url === '/api/models') return Promise.resolve([{ id: 'm1', label: '모델 하나' }]);
     if (url === '/api/personas') return Promise.resolve([]);
@@ -43,32 +43,21 @@ vi.mock('@/lib/api', async (importOriginal) => ({
   apiSend: () => Promise.reject(new Error('reading the page writes nothing')),
 }));
 
-const { default: PublicPlotPage } = await import('../src/app/[locale]/(app)/p/[id]/page');
+const { default: WorkPage } = await import('../src/app/[locale]/(app)/p/[id]/page');
 
 /** Longer than the listings' cut, so a preview would be visibly short of it. */
 const intro = `문을 열자 ${'긴 도입부입니다. '.repeat(30)}끝.`;
 
 const plotResponse: PublicPlotDetail = {
-  public: true,
   id: 'sty_1',
   name: '비 오는 밤의 서점',
   coverUrl: null,
-  creatorId: 'usr_1',
-  creatorName: '록',
   language: 'ko',
   tags: [],
-  likeCount: 12,
-  chatCount: 3,
   intro: '',
-  introPreview: intro.slice(0, INTRO_PREVIEW_LENGTH),
-  publishedAt: null,
-  likedByMe: false,
-  creatorFollow: { followerCount: 2, followedByMe: false },
   characters: [{ id: 'chr_1', name: '세라', avatarUrl: null, intro: '서점의 야간 점원.' }],
   intros: [intro, '두 번째 도입부입니다.'],
   introPreviews: [intro.slice(0, INTRO_PREVIEW_LENGTH), '두 번째 도입부입니다.'],
-  commentsEnabled: true,
-  commentCount: 1,
   style: null,
   profiles: [],
   displayScripts: [],
@@ -76,23 +65,6 @@ const plotResponse: PublicPlotDetail = {
   defaultVariables: {},
   componentCode: '',
   componentCapabilities: [],
-};
-
-const commentPage: CommentPage = {
-  items: [
-    {
-      id: 'cmt_1',
-      parentId: null,
-      content: '좋았어요',
-      spoiler: false,
-      deleted: false,
-      authorName: '독자',
-      createdAt: '2026-08-06T12:30:00.000Z',
-      canDelete: false,
-      replies: [],
-    },
-  ],
-  nextCursor: null,
 };
 
 let host: HTMLElement;
@@ -107,7 +79,7 @@ async function render(): Promise<void> {
         children: createElement(
           Suspense,
           { fallback: null },
-          createElement(PublicPlotPage, { params: Promise.resolve({ id: 'sty_1' }) }),
+          createElement(WorkPage, { params: Promise.resolve({ id: 'sty_1' }) }),
         ),
       }),
     );
@@ -137,13 +109,13 @@ afterEach(() => {
 });
 
 describe('the plot page', () => {
-  it('shows the chosen opening whole, not the listings’ cut', async () => {
+  it('shows the chosen opening whole, not the picker’s cut', async () => {
     await render();
     expect(find('[data-testid="intro-text"]')?.textContent).toBe(intro);
     expect(intro.length).toBeGreaterThan(INTRO_PREVIEW_LENGTH);
   });
 
-  it('names the cast, each with the line written for readers', async () => {
+  it('names the cast, each with the line written about them', async () => {
     await render();
     const member = find('[data-testid="plot-member"]');
     expect(member?.textContent).toContain('세라');
@@ -161,16 +133,12 @@ describe('the plot page', () => {
     expect(picks[1]!.getAttribute('aria-pressed')).toBe('true');
   });
 
-  it('offers the chat form, the comment box and the editor', async () => {
+  it('offers the chat form and the editor', async () => {
     await render();
 
     expect(find('select')).not.toBeNull();
     expect(asked).toContain('/api/models');
     expect(asked).toContain('/api/personas');
-    expect(host.textContent).toContain('좋았어요');
-    expect(find('[data-testid="comment-form"]')).not.toBeNull();
     expect(find('a[href="/plots/sty_1"]')?.textContent).toBe('편집');
-    expect(find('[data-testid="like-button"]')).toBeNull();
-    expect(find('a[href^="/login"]')).toBeNull();
   });
 });

@@ -126,20 +126,16 @@ export function Badge({
 export function Field({
   label,
   hint,
-  badge,
   children,
 }: {
   label: string;
   hint?: string;
-  /** Sits beside the label; the audience badges are what it carries. */
-  badge?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <label className="block space-y-1.5">
       <span className="flex flex-wrap items-center gap-2">
         <span className="text-xs font-semibold text-muted">{label}</span>
-        {badge}
       </span>
       {children}
       {hint ? <span className="block text-xs text-muted">{hint}</span> : null}

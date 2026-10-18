@@ -7,17 +7,13 @@ import { deviceClaimRoutes, remoteOriginsOf } from './routes/devices.js';
 import type { AppDeps, AppEnv } from './deps.js';
 import { errorResponse, type ErrorBody } from './errors.js';
 import { healthRoutes } from './health.js';
-import { requestLog } from './log.js';
 import { chatMemoryRoutes } from './routes/chatMemory.js';
 import { chatTranslationRoutes } from './routes/chatTranslation.js';
 import { chatRoutes, messageRoutes } from './routes/chats.js';
-import { commentRoutes, plotCommentRoutes } from './routes/comments.js';
 import { deviceRoutes } from './routes/devices.js';
 import { FILE_IMPORT_PART_BYTES, fileImportRoutes, MAX_WORLD_INFO_BYTES } from './fileImports.js';
-import { creatorRoutes, exploreRoutes } from './routes/explore.js';
 import { chatImportRoutes, importRoutes } from './routes/imports.js';
 import { modelRoutes } from './routes/models.js';
-import { notificationRoutes } from './routes/notifications.js';
 import { noteRoutes } from './routes/notes.js';
 import { personaRoutes } from './routes/personas.js';
 import { presetRoutes } from './routes/presets.js';
@@ -36,7 +32,7 @@ const FILE_IMPORT_PART_PATH = /^\/api\/file-imports\/[^/]+\/parts\/\d+$/;
 const ATTACHMENT_PATH = /^\/api\/chats\/[^/]+\/import\/attachments$/;
 
 /**
- * Route order matters: the probes and a phone's claim of its pairing code are
+ * Route order matters: the probe and a phone's claim of its pairing code are
  * registered before `ownerGate`, so they answer before anyone is known. Past it
  * every request is the owner's — from this computer, or from a paired phone —
  * and anything else has been answered 401 (session.ts).
@@ -46,9 +42,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   // Paired phones' sessions: the gate reads them, the pairing routes make and end them.
   const sessions = createSessionStore(deps.db, { secure: new URL(deps.webOrigin ?? 'http://localhost').protocol === 'https:' });
 
-  // First, so every line a request says carries its id, and refusals are logged and counted too (`log.ts`).
-  app.use('*', requestLog());
-  app.use('*', securityHeaders(deps.webOrigin));
+  app.use('*', securityHeaders());
   if (deps.webOrigin) app.use('*', originGuard(deps.webOrigin, () => remoteOriginsOf(deps)));
 
   app.onError((error, c) => errorResponse(c, error));
@@ -76,8 +70,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     return (FILE_IMPORT_PATH.test(path) ? fileImportLimit : jsonLimit)(c, next);
   });
 
-  // `/api/health` and `/api/ready`: a probe never resolves a session (`health.ts`).
-  app.route('/api', healthRoutes(deps));
+  // `/api/health`: the probe never resolves a session (`health.ts`).
+  app.route('/api', healthRoutes());
   // A phone trades its pairing code for a session here, so it has none yet.
   app.route('/api/devices', deviceClaimRoutes(deps, sessions));
   app.use('/api/*', ownerGate(deps.db, sessions));
@@ -90,19 +84,13 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   app.route('/api/devices', deviceRoutes(deps, sessions));
   app.route('/api/models', modelRoutes(deps));
 
-  app.route('/api/comments', commentRoutes(deps));
   app.route('/api/plots', plotRoutes(deps));
-  // The comment section of a plot page, kept in its own module.
-  app.route('/api/plots', plotCommentRoutes(deps));
-  app.route('/api/explore', exploreRoutes(deps));
-  app.route('/api/creators', creatorRoutes(deps));
   app.route('/api/personas', personaRoutes(deps));
   app.route('/api/notes', noteRoutes(deps));
   // The reader's own presets on top of the catalog's (`chats.reader_preset_id`).
   app.route('/api/reader-presets', readerPresetRoutes(deps));
   // The reader's own RisuAI modules, laid over their chats (`chats.modules`).
   app.route('/api/reader-modules', readerModuleRoutes(deps));
-  app.route('/api/notifications', notificationRoutes(deps));
   app.route('/api/chats', chatRoutes(deps));
   // A chat brought over from another app, written in batches (`POST /api/chats/import`).
   app.route('/api/chats', chatImportRoutes(deps));

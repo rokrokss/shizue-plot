@@ -174,8 +174,9 @@ test('each card’s scripts run for its own reply and draw on its own bubble, ov
 test('a scripts read the page has moved past never rebuilds its runtimes', async () => {
   // The development build runs the page's effects twice on load, so the chat's
   // scripts are read twice. The first answer is held until the second has landed
-  // and then renames both members: a page that took it would build its runtimes
-  // again from it, ending the Lua calls the first set had started.
+  // and then gives every member a display trigger that writes over the screen: a
+  // page that took it would build its runtimes again from it, ending the Lua
+  // calls the first set had started — and show what its trigger writes.
   const stale = `낡은 답 ${run}`;
   let reads = 0;
   let secondLanded!: () => void;
@@ -191,10 +192,19 @@ test('a scripts read the page has moved past never rebuilds its runtimes', async
       secondLanded();
       return;
     }
-    const answer = (await response.json()) as { members: { overlay: { member: object | null } }[] };
+    const answer = (await response.json()) as { members: { triggers: unknown[] }[] };
     // Bounded, so a page that reads once fails on the count below rather than hanging.
     await Promise.race([second, new Promise((resolve) => setTimeout(resolve, 15_000))]);
-    for (const member of answer.members) member.overlay.member = { ...member.overlay.member, name: stale };
+    for (const member of answer.members) {
+      member.triggers = [
+        {
+          comment: '',
+          type: 'display',
+          conditions: [],
+          effect: [{ type: 'v2SetDisplayState', value: stale, valueType: 'value', indent: 0 }],
+        },
+      ];
+    }
     await route.fulfill({ response, json: answer });
     staleSent();
   });

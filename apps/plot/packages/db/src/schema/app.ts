@@ -37,7 +37,6 @@ import {
 } from 'drizzle-orm/pg-core';
 import { user } from './auth.js';
 
-export type Visibility = 'private' | 'public';
 export type MessageRole = 'user' | 'assistant';
 /**
  * Where a turn's text came from. A user turn: the reader, or a card component
@@ -47,24 +46,11 @@ export type MessageRole = 'user' | 'assistant';
 export type MessageSource = 'user' | 'component' | 'script';
 /** Content language of a plot, independent of the UI locale. */
 export type ContentLanguage = 'ko' | 'en' | 'ja';
-/**
- * Audience a plot is meant for. Without age verification the API no longer
- * accepts `adult`; it stays in the type for rows saved before that, which every
- * public surface still filters out (see `publiclyListed` in the API).
- */
-export type SafetyLevel = 'all' | 'adult';
-export type NotificationKind = 'plot_published';
-export type JobKind = 'notification_fanout' | 'memory_backfill' | 'file_import';
+export type JobKind = 'memory_backfill' | 'file_import';
 export type JobStatus = 'pending' | 'done' | 'failed';
 
-/** The publication event and the follower cutoff captured in its transaction. */
+/** What each kind of job is handed. */
 export interface JobPayloadMap {
-  notification_fanout: {
-    kind: 'plot_published';
-    plotId: string;
-    actorId: string;
-    publishedAt: string;
-  };
   /** Summarizes an imported chat's history into its memory, a batch per call. */
   memory_backfill: {
     chatId: string;
@@ -98,23 +84,10 @@ export interface ChatMemorySettings extends Partial<HypaV3Settings> {
  */
 export type MessageScriptState = 'pending';
 
-/**
- * What a card's scripts rewrote of the work itself — a member's description, a
- * lorebook entry, its name — for one reader on one plot (`plot_reader_overlays`),
- * as RisuAI rewrites the character for every chat with it at once. Its shape is
- * `ScriptOverlay` in @shizue/core/triggers (`{members: {[id]: {description?,
- * lorebook?, postHistoryInstructions?, name?, firstMessage?, backgroundHtml?}},
- * persona?}`), validated and merged by apps/api/src/scriptState.ts; the API lays
- * it over the cards when it builds a prompt. Typed loosely here so the schema
- * does not depend on the script runtime.
- */
-export type ChatScriptOverlay = Record<string, unknown>;
-
-// The first-class unit. A plot is what is created, published, explored, liked,
-// commented on and chatted with; its characters are structured sub-entities of it
-// and have no exposure of their own. Every axis that decides who may see anything
-// lives here: `visibility`, `language` (content language, a hard partition) and
-// `safety_level`.
+// The first-class unit. A plot is what is created and chatted with — RisuAI's
+// character, or its group; its characters are structured sub-entities of it.
+// A card's scripts rewrite these rows themselves (apps/api/src/scriptState.ts),
+// as RisuAI's rewrite the character object.
 export const plots = pgTable(
   'plots',
   {
@@ -156,42 +129,18 @@ export const plots = pgTable(
     // three a round; the coercion decides what a stored value may say.
     groupSettings: jsonb('group_settings').$type<GroupSettings>(),
     language: text('language').$type<ContentLanguage>().notNull().default('ko'),
-    visibility: text('visibility').$type<Visibility>().notNull().default('private'),
-    // Chosen on publish. Not part of the explore indexes: 'all' is the default and
-    // by far the common case, so the filter costs a recheck rather than a scan.
-    safetyLevel: text('safety_level').$type<SafetyLevel>().notNull().default('all'),
-    publishedAt: timestamp('published_at', { withTimezone: true }),
-    // Denormalized counters, kept in the same transaction as the rows they count.
-    likeCount: integer('like_count').notNull().default(0),
-    // Chats other users started with this plot; the owner's own are not counted.
-    chatCount: integer('chat_count').notNull().default(0),
-    // The explore filter column, synced on publish and on edits (max 10, 20 chars).
+    // The card's tags, as an import brings them and an export carries them (max 10, 20 chars).
     tags: text('tags').array().notNull().default([]),
-    // The creator may close the comment section; existing comments then stay hidden.
-    commentsEnabled: boolean('comments_enabled').notNull().default(true),
-    // When the owner last declared they hold the rights to the imported characters
-    // the plot shows. Stamped by every publish, and every import into a public
-    // plot, that had imported members to vouch for; null until the first.
-    rightsConfirmedAt: timestamp('rights_confirmed_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [
-    // One index per explore sort; the hard partition (visibility, language) leads.
-    // The trailing id matches the cursor's tiebreak, so a later page seeks into a
-    // tie group instead of sorting it.
-    index('plots_explore_recent_idx').on(t.visibility, t.language, t.publishedAt.desc(), t.id.desc()),
-    index('plots_explore_likes_idx').on(t.visibility, t.language, t.likeCount.desc(), t.id.desc()),
-    index('plots_explore_chats_idx').on(t.visibility, t.language, t.chatCount.desc(), t.id.desc()),
-    index('plots_tags_idx').using('gin', t.tags),
-  ],
 );
 
-// A member of a plot's roster, and nothing on its own: it has no owner, no
-// visibility and no counters, because every one of those questions is the plot's
-// to answer and authorization always joins through it. `card` is the import
-// container the whole NormalizedCard round-trips through; the editor writes only
-// the subset (name/intro/description/personality/mesExample) it exposes.
+// A member of a plot's roster, and nothing on its own: it has no owner, because
+// that question is the plot's to answer and every read joins through it. `card`
+// is the import container the whole NormalizedCard round-trips through; the
+// editor writes only the subset (name/intro/description/personality/mesExample)
+// it exposes, and a card's scripts the fields they rewrite (`scriptState.ts`).
 // The cap (10 per plot) is enforced by the API.
 export const characters = pgTable(
   'characters',
@@ -226,25 +175,6 @@ export const characters = pgTable(
   (t) => [index('characters_plot_id_idx').on(t.plotId, t.orderIndex)],
 );
 
-export const plotLikes = pgTable(
-  'plot_likes',
-  {
-    userId: text('user_id')
-      .notNull()
-      .references(() => user.id, { onDelete: 'cascade' }),
-    plotId: uuid('plot_id')
-      .notNull()
-      .references(() => plots.id, { onDelete: 'cascade' }),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [
-    primaryKey({ columns: [t.userId, t.plotId] }),
-    // The weekly ranking counts a plot's likes inside a time window; without a
-    // plot-led index that correlated count rescans the table per ranked row.
-    index('plot_likes_plot_id_idx').on(t.plotId, t.createdAt),
-  ],
-);
-
 // Images a plot can show inside a message through `{{img::slug}}`. The slug is
 // the only handle the text has, so it is unique per plot; the cap (100) is
 // enforced by the API.
@@ -275,88 +205,6 @@ export const plotAssets = pgTable(
   (t) => [unique('plot_assets_plot_id_slug_key').on(t.plotId, t.slug)],
 );
 
-// Comments on a plot's public page, one reply level deep. Deletion is soft:
-// `deleted_at` is stamped and `content` is blanked in the same write, so nothing
-// deleted is kept around — the row only survives to anchor its replies.
-export const comments = pgTable(
-  'comments',
-  {
-    id: uuid('id').primaryKey().defaultRandom(),
-    plotId: uuid('plot_id')
-      .notNull()
-      .references(() => plots.id, { onDelete: 'cascade' }),
-    userId: text('user_id')
-      .notNull()
-      .references(() => user.id, { onDelete: 'cascade' }),
-    // Null = top-level. A reply always points at a top-level comment of the same
-    // plot; the API is what enforces it, so no self-FK is declared.
-    parentId: uuid('parent_id'),
-    content: text('content').notNull(),
-    spoiler: boolean('spoiler').notNull().default(false),
-    deletedAt: timestamp('deleted_at', { withTimezone: true }),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [
-    // The listing walks (created_at desc, id desc) within one plot; the trailing
-    // id matches the cursor's tiebreak.
-    index('comments_plot_id_idx').on(t.plotId, t.createdAt.desc(), t.id.desc()),
-    // Replies are loaded per parent, and the placeholder rule asks a parent
-    // whether it still has any.
-    index('comments_parent_id_idx').on(t.parentId),
-  ],
-);
-
-// One reader following one creator. The pair is the key, so following twice is
-// the same row and the API answers idempotently; self-follows are refused there
-// rather than by a constraint, because the answer is a 400 and not a crash.
-export const follows = pgTable(
-  'follows',
-  {
-    followerId: text('follower_id')
-      .notNull()
-      .references(() => user.id, { onDelete: 'cascade' }),
-    creatorId: text('creator_id')
-      .notNull()
-      .references(() => user.id, { onDelete: 'cascade' }),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [
-    primaryKey({ columns: [t.followerId, t.creatorId] }),
-    // The other direction of the same edge: a creator's follower count and the
-    // fan-out that walks it.
-    index('follows_creator_id_idx').on(t.creatorId, t.createdAt.desc()),
-  ],
-);
-
-// A followed creator published a plot. The notification follows that plot's lifetime.
-export const notifications = pgTable(
-  'notifications',
-  {
-    id: uuid('id').primaryKey().defaultRandom(),
-    userId: text('user_id')
-      .notNull()
-      .references(() => user.id, { onDelete: 'cascade' }),
-    kind: text('kind').$type<NotificationKind>().notNull(),
-    actorId: text('actor_id').references(() => user.id, { onDelete: 'set null' }),
-    plotId: uuid('plot_id').references(() => plots.id, { onDelete: 'cascade' }),
-    // Null until the reader marks everything read; there is no per-row read.
-    readAt: timestamp('read_at', { withTimezone: true }),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [
-    // The list walks (created_at desc, id desc) within one recipient; the trailing
-    // id matches the cursor's tiebreak.
-    index('notifications_user_id_idx').on(t.userId, t.createdAt.desc(), t.id.desc()),
-    // One row per recipient per subject per kind, which is what lets the fan-out be
-    // re-run: a job whose second batch failed is retried from the first, and the
-    // batches it already wrote conflict instead of notifying anyone twice. Rows
-    // with no plot are outside the constraint — nulls are distinct — and that is
-    // right, since a kind that is not about a plot has no such rule.
-    unique('notifications_user_id_plot_id_kind_key').on(t.userId, t.plotId, t.kind),
-
-  ],
-);
-
 export const personas = pgTable('personas', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: text('user_id')
@@ -372,7 +220,7 @@ export const personas = pgTable('personas', {
 // A reader's own prompt preset, which replaces the built-in one on a chat that
 // picks it: RisuAI's `botPreset`, the fields that make the prompt (@shizue/core
 // `PromptPreset`, `readerPromptPreset`). Account-level, picked per chat
-// (`chats.reader_preset_id`). Count and lengths capped by the API.
+// (`chats.reader_preset_id`). Lengths capped by the API.
 export const readerPresets = pgTable(
   'reader_presets',
   {
@@ -416,7 +264,7 @@ export const readerPresets = pgTable(
 // its namespace (RisuAI's `moduleIntergration`). A module on a chat runs after
 // the work's own modules, the library's in the order it was filled (`created_at`)
 // — RisuAI orders the modules on a chat by its library, never by the list that
-// turned one on. Never written into the work. Count and sizes capped by the API.
+// turned one on. Never written into the work. Sizes capped by the API.
 export const readerModules = pgTable(
   'reader_modules',
   {
@@ -504,11 +352,6 @@ export const chats = pgTable(
     // Reasoning effort the reader asked for. Null sends none and leaves the model
     // at its default; a value is only sent where the model advertises it.
     reasoningEffort: text('reasoning_effort'),
-    // The generation claim: when a turn is being generated on this chat, and null
-    // when none is. It lives in the row rather than in a process so several API
-    // instances see the same answer; the stream renews it while it runs, and a
-    // claim nobody has renewed for two minutes is taken over rather than trusted.
-    generatingAt: timestamp('generating_at', { withTimezone: true }),
     // Set when the conversation came from another app's chat file (SillyTavern's
     // JSONL), null when it was started here. The hash is what a second run of the
     // same import recognizes it by.
@@ -659,15 +502,6 @@ const anyVector = customType<{ data: number[]; driverData: string }>({
   dataType: () => 'vector',
   toDriver: (value) => JSON.stringify(value),
   fromDriver: (value) => JSON.parse(value) as number[],
-});
-
-/**
- * A Postgres `tsvector`, written in its literal form (`'리안':1,3 '안의':2`) so
- * no text-search parser — whose idea of a letter is the locale's — touches the
- * terms the app cut.
- */
-const tsvector = customType<{ data: string; driverData: string }>({
-  dataType: () => 'tsvector',
 });
 
 // The chat's memory, as RisuAI HypaV3's summaries: each a summary of a batch of
@@ -849,35 +683,8 @@ export const memories = pgTable(
   ],
 );
 
-// A public plot's searchable text — its name, tags, reader-facing intro and the
-// start of its first opening, never what only the model is told — embedded by
-// the server's embedder with the plot's model for explore's search by meaning
-// (§10). `text_hash` is that text's when it was embedded; a row whose hash or
-// model is not the plot's current one is stale and embedded again. Written for
-// publicly listed plots only, and deleted when one stops being listed; the
-// search still filters by the listing rule itself.
-// `terms` is the same text's words (@shizue/core `lexicalTerms`, positions
-// counted from 1) for the search by words beside it, BM25 over the GIN index,
-// and `term_count` how many it holds; null on a row from before them, which the
-// next refresh fills without embedding again.
-export const plotSearchVectors = pgTable(
-  'plot_search_vectors',
-  {
-    plotId: uuid('plot_id')
-      .primaryKey()
-      .references(() => plots.id, { onDelete: 'cascade' }),
-    model: text('model').notNull(),
-    embedding: anyVector('embedding').notNull(),
-    textHash: text('text_hash').notNull(),
-    embeddedAt: timestamp('embedded_at', { withTimezone: true }).notNull().defaultNow(),
-    terms: tsvector('terms'),
-    termCount: integer('term_count'),
-  },
-  (t) => [index('plot_search_vectors_terms_idx').using('gin', t.terms)],
-);
-
-// Reusable author's notes, owned by the account rather than by one chat. The caps
-// (100 per account, 2,000 characters) are enforced by the API.
+// Reusable author's notes, owned by the account rather than by one chat. The
+// length cap (2,000 characters) is enforced by the API.
 export const userNotes = pgTable(
   'user_notes',
   {
@@ -895,8 +702,7 @@ export const userNotes = pgTable(
   (t) => [index('user_notes_user_id_idx').on(t.userId)],
 );
 
-// Notes attached to a chat, injected into the author's note slot. Capped at 10 per
-// chat by the API.
+// Notes attached to a chat, injected into the author's note slot.
 export const chatNoteLinks = pgTable(
   'chat_note_links',
   {
@@ -910,76 +716,26 @@ export const chatNoteLinks = pgTable(
   (t) => [primaryKey({ columns: [t.chatId, t.noteId] })],
 );
 
-// Global variables: one reader's values for one plot, shared by every chat they
-// have on it and by no one else — RisuAI's `getglobalvar`, SillyTavern's
-// `{{getglobalvar}}`. Not branch-scoped, unlike chat variables: a swipe does not
-// take one back. Capped in keys and size by the API (see `scriptState.ts`).
-export const plotReaderVariables = pgTable(
-  'plot_reader_variables',
-  {
-    userId: text('user_id')
-      .notNull()
-      .references(() => user.id, { onDelete: 'cascade' }),
-    plotId: uuid('plot_id')
-      .notNull()
-      .references(() => plots.id, { onDelete: 'cascade' }),
-    variables: jsonb('variables').$type<Variables>().notNull().default({}),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [primaryKey({ columns: [t.userId, t.plotId] })],
-);
-
-// What a card's scripts rewrote of the work — a member's description, lore,
-// global note, name, first message and background, and the reader's persona
-// (`ChatScriptOverlay`) — for one reader on one plot. RisuAI's scripts rewrite
-// the character object itself, so a rewrite carries to every chat with it; here
-// the work is the creator's and many readers play it, so the rewrite stays with
-// the reader and the plot, like their global variables, and is laid over the
-// work wherever one of their chats on it is assembled. Not branch-scoped: a
-// swipe does not take one back. Merged field by field under this row's lock and
-// capped by the API (see `scriptState.ts`).
-export const plotReaderOverlays = pgTable(
-  'plot_reader_overlays',
-  {
-    userId: text('user_id')
-      .notNull()
-      .references(() => user.id, { onDelete: 'cascade' }),
-    plotId: uuid('plot_id')
-      .notNull()
-      .references(() => plots.id, { onDelete: 'cascade' }),
-    overlay: jsonb('overlay').$type<ChatScriptOverlay>().notNull().default({}),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [primaryKey({ columns: [t.userId, t.plotId] })],
-);
-
-/**
- * One reader's walk through a feed sorted by a counter that moves underneath it
- * (explore `likes`/`chats`). `seen` is every row id the walk has
- * handed out, in the order it handed them out, and the cursor is an offset into
- * it: the snapshot is what makes the walk see each row exactly once even as the
- * counters move. Written only once a reader pages past the first page, and
- * collected by TTL — there is no background job, so the next walk to start does
- * the sweep.
- */
-export const feedCursors = pgTable(
-  'feed_cursors',
-  {
-    id: uuid('id').primaryKey().defaultRandom(),
-    seen: uuid('seen').array().notNull().default([]),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [index('feed_cursors_updated_at_idx').on(t.updatedAt)],
-);
+// Global variables: the work's own values, shared by every chat on it — RisuAI's
+// `getglobalvar`, SillyTavern's `{{getglobalvar}}`. Not branch-scoped, unlike
+// chat variables: a swipe does not take one back. Capped in keys and size by the
+// API (see `scriptState.ts`).
+export const plotReaderVariables = pgTable('plot_reader_variables', {
+  plotId: uuid('plot_id')
+    .primaryKey()
+    .references(() => plots.id, { onDelete: 'cascade' }),
+  variables: jsonb('variables').$type<Variables>().notNull().default({}),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
 
 /**
  * Work a request handed off rather than did. A row is written inside the caller's
  * own transaction — that is the whole point of the queue living in Postgres: the
  * enqueue commits with the write that caused it, or neither of them happens.
  *
- * `locked_at` is a lease and not a lock. A worker that dies mid-job leaves one
- * standing, and the claim takes over anything older than two minutes; the same
- * convention `chats.generating_at` uses, for the same reason.
+ * `locked_at` is a lease and not a lock. A worker that dies mid-job — the app
+ * stopped under it — leaves one standing, and the claim takes over anything
+ * older than two minutes.
  */
 export const jobs = pgTable(
   'jobs',
@@ -1019,8 +775,6 @@ export type FileImportStatus = 'uploading' | 'queued' | 'processing' | 'done' | 
 export interface FileImportOptions {
   /** The RisuRealm page the card came from, in its one spelling. */
   sourceUrl?: string;
-  /** The owner's word that they may publish it, for a plot that is already public. */
-  rightsConfirmed?: boolean;
   /** The reader's yes to a module that asks for low-level access. */
   confirmLowLevelAccess?: boolean;
   /** A World Info file came with the card, kept beside it in the store (`imports/<id>/world-info`). */
@@ -1121,50 +875,13 @@ export const fileImportKeys = pgTable(
   (t) => [primaryKey({ columns: [t.importId, t.key] })],
 );
 
-/**
- * The request rate limits' fixed windows (`rateLimit.ts`), one row per bucket
- * and caller (`<bucket>:<user id or client address>`). Postgres rather than a
- * process's memory so every API instance counts against the same window, and
- * rather than Redis because the owner keeps one store (2026-10-16). A hit is one
- * upsert; rows long past their window are collected by the hits that open a
- * new one, a capped batch at a time — there is no background loop.
- */
-export const rateLimits = pgTable(
-  'rate_limits',
-  {
-    key: text('key').primaryKey(),
-    windowStart: timestamp('window_start', { withTimezone: true }).notNull(),
-    hits: integer('hits').notNull(),
-  },
-  (t) => [index('rate_limits_window_start_idx').on(t.windowStart)],
-);
-
-/**
- * Short exclusivity across API instances (`leases.ts`): whoever holds `key`
- * until `expires_at`. Taken in one statement, and only from nobody or from an
- * expired holder; renewed and released only by the holder that took it, so a
- * late release cannot free someone else's. An instance that dies leaves its
- * lease to expire.
- */
-export const leases = pgTable('leases', {
-  key: text('key').primaryKey(),
-  holder: text('holder').notNull(),
-  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
-});
-
 export type FileImport = typeof fileImports.$inferSelect;
 export type Plot = typeof plots.$inferSelect;
 export type NewPlot = typeof plots.$inferInsert;
 export type Character = typeof characters.$inferSelect;
 export type NewCharacter = typeof characters.$inferInsert;
-export type PlotLike = typeof plotLikes.$inferSelect;
 export type PlotAsset = typeof plotAssets.$inferSelect;
 export type NewPlotAsset = typeof plotAssets.$inferInsert;
-export type Comment = typeof comments.$inferSelect;
-export type NewComment = typeof comments.$inferInsert;
-export type Follow = typeof follows.$inferSelect;
-export type Notification = typeof notifications.$inferSelect;
-export type NewNotification = typeof notifications.$inferInsert;
 export type Persona = typeof personas.$inferSelect;
 export type ReaderPreset = typeof readerPresets.$inferSelect;
 export type NewPersona = typeof personas.$inferInsert;
@@ -1179,13 +896,10 @@ export type ChatSummaryChunk = typeof chatSummaryChunks.$inferSelect;
 export type MessageTranslation = typeof messageTranslations.$inferSelect;
 export type Memory = typeof memories.$inferSelect;
 export type NewMemory = typeof memories.$inferInsert;
-export type PlotSearchVector = typeof plotSearchVectors.$inferSelect;
 export type UserNote = typeof userNotes.$inferSelect;
 export type NewUserNote = typeof userNotes.$inferInsert;
 export type ChatNoteLink = typeof chatNoteLinks.$inferSelect;
 export type PlotReaderVariables = typeof plotReaderVariables.$inferSelect;
-export type PlotReaderOverlay = typeof plotReaderOverlays.$inferSelect;
 export type ReaderModule = typeof readerModules.$inferSelect;
-export type FeedCursor = typeof feedCursors.$inferSelect;
 export type Job = typeof jobs.$inferSelect;
 export type NewJob = typeof jobs.$inferInsert;

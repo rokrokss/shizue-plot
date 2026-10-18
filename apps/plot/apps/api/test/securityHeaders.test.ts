@@ -6,7 +6,7 @@ import { securityHeaders } from '../src/securityHeaders.js';
 
 function appFor(webOrigin: string): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
-  app.use('*', securityHeaders(webOrigin));
+  app.use('*', securityHeaders());
   app.use('*', originGuard(webOrigin));
   app.onError((_error, c) => c.json({ error: 'Internal error', code: 'internal' }, 500));
   app.get('/api/json', (c) => c.json({ ok: true }));
@@ -34,13 +34,6 @@ describe('security headers', () => {
       expect(res.headers.get('x-frame-options')).toBe('DENY');
       expect(res.headers.get('referrer-policy')).toBe('strict-origin-when-cross-origin');
       expect(res.headers.get('content-security-policy')).toBe("default-src 'none'; frame-ancestors 'none'; sandbox");
-      expect(res.headers.get('strict-transport-security')).toBe('max-age=31536000; includeSubDomains');
     }
-  });
-
-  it('send no HSTS where the app is served over plain http', async () => {
-    const res = await appFor('http://localhost:13000').request('http://127.0.0.1:8787/api/json');
-    expect(res.headers.get('x-frame-options')).toBe('DENY');
-    expect(res.headers.get('strict-transport-security')).toBeNull();
   });
 });

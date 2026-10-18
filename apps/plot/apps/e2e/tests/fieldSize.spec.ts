@@ -28,9 +28,10 @@ test.describe('on a touch screen', () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
   test('every field is 16px', async ({ page }) => {
-    await page.goto('/ko');
+    await page.goto('/ko/plots');
     expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true);
-    await expect(page.getByRole('searchbox')).toHaveCSS('font-size', '16px');
+    await page.getByRole('button', { name: '새 플롯' }).click();
+    await expect(page.getByPlaceholder('플롯 이름')).toHaveCSS('font-size', '16px');
 
     await openChat(page, 'touch-fields');
     await page.getByRole('button', { name: '대화 설정' }).click();
@@ -43,8 +44,9 @@ test.describe('on a touch screen', () => {
 });
 
 test('at a desk the fields keep their sizes', async ({ page }) => {
-  await page.goto('/ko');
-  await expect(page.getByRole('searchbox')).toHaveCSS('font-size', '14px');
+  await page.goto('/ko/plots');
+  await page.getByRole('button', { name: '새 플롯' }).click();
+  await expect(page.getByPlaceholder('플롯 이름')).toHaveCSS('font-size', '14px');
 
   await page.setViewportSize({ width: 390, height: 844 });
   await openChat(page, 'desk-fields');

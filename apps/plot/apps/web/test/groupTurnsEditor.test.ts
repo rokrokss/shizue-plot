@@ -44,8 +44,8 @@ let root: Root;
 beforeEach(() => {
   plot = {
     id: 'plot-1', name: '여관', intro: '', description: '', language: 'ko', tags: [],
-    commentsEnabled: true, intros: [], narrator: null, style: null, profiles: [], lorebook: [],
-    customUi: null, coverUrl: null, visibility: 'private', safetyLevel: 'all',
+    intros: [], narrator: null, style: null, profiles: [], lorebook: [],
+    customUi: null, coverUrl: null,
     plotLoreConstantTokens: 0, groupSettings: { order: 'natural', maxSpeakers: 3 },
     characters: [member('m1', '세이야', 50), member('m2', '카이', 83)],
   };

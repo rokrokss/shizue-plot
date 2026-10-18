@@ -117,8 +117,8 @@ the next time main's app starts, so restart it after landing one.
   checkout's gitignored `apps/plot/data/evals/`. When a simpler mechanism
   covers the same ground, remove the complex one. Parity already brings enough
   complexity.
-- Model calls run on the server, so assembled prompts never reach a reader's
-  browser.
+- Model calls run on the server. The browser sees an assembled prompt only in
+  the prompt inspector, which is always open, as RisuAI's is.
 - UI copy goes through the ko/en/ja catalogs in `apps/plot/apps/web/messages/`.
   The only exception is the product name `shizue`.
 - Import chat-export schemas from `@shizue/contracts` rather than redefining

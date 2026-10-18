@@ -5,7 +5,6 @@ export interface FileImportRequest {
   target: 'plot' | 'member' | 'plot_module' | 'reader_module';
   plotId?: string;
   sourceUrl?: string;
-  rightsConfirmed?: boolean;
   confirmLowLevelAccess?: boolean;
   worldInfo?: string;
 }

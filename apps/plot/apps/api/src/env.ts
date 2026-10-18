@@ -47,8 +47,6 @@ export function loadRootEnv(): void {
   config({ path: resolve(REPO_ROOT, '.env'), quiet: true });
 }
 
-/** The shortest secret a deployment takes: 32 characters, what `openssl rand -base64 32` prints is 44. */
-const MIN_AUTH_SECRET_CHARS = 32;
 const DEV_AUTH_URL = 'http://localhost:13000';
 /**
  * The loopback port OpenAI's callback comes back on: the one Shizue, the Chrome
@@ -72,7 +70,7 @@ function readCallbackPort(env: NodeJS.ProcessEnv): number {
   return port;
 }
 
-/** Whether a web origin is this machine's own — a shizue the reader runs, not a deployment. */
+/** Whether a web origin is this machine's own — a loopback one. */
 export const isLoopback = (origin: string): boolean => ['localhost', '127.0.0.1', '[::1]'].includes(new URL(origin).hostname);
 
 /** Whether `value` is an http(s) origin and nothing more — no path, no user. */
@@ -105,8 +103,6 @@ function readRemoteOrigins(env: NodeJS.ProcessEnv, authUrl: string): string[] {
 
 interface ApiConfig {
   port: number;
-  /** Where the API listens. Loopback beside the web app; `0.0.0.0` on a server of its own. */
-  host: string;
   /** The app's own folder (`dataDirOf`): the database, the files and the secret. */
   dataDir: string;
   /** Where the files are kept: the local directory in the app's folder. */
@@ -137,23 +133,10 @@ interface ApiConfig {
    * Shizue extension rewrites that address to this app.
    */
   chatgptCallbackPort: number;
-  /** `text` keeps the console as it reads in a terminal; `json` makes every line one JSON object (`log.ts`). */
-  logFormat: LogFormat;
-  /** Prometheus text on a listener of its own (`metrics.ts`), never under `/api`; unset is off. */
-  metricsPort?: number;
-  metricsHost: string;
   /** How long a shutdown waits for in-flight background tasks (`lifecycle.ts`). */
   shutdownBackgroundMs: number;
-  /**
-   * File imports this process reads at once (`fileImports.ts`), each on a job
-   * loop of its own: what bounds the memory imports take, at a few parts and a
-   * card's text each.
-   */
-  importWorkers: number;
   env: NodeJS.ProcessEnv;
 }
-
-type LogFormat = 'text' | 'json';
 
 /** A whole number from `min` to `max`, or the error naming `name`. */
 export function readInteger(env: NodeJS.ProcessEnv, name: string, min: number, max: number): number | undefined {
@@ -193,25 +176,13 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
   const authSecret = env['BETTER_AUTH_SECRET'];
   const authUrl = env['BETTER_AUTH_URL'] ?? DEV_AUTH_URL;
   if (!/^https?:$/.test(new URL(authUrl).protocol) || new URL(authUrl).origin !== authUrl) {
-    throw new Error('BETTER_AUTH_URL must be the web origin, e.g. https://plot.example.com');
-  }
-  // The ChatGPT tokens are sealed with it, so a deployment never runs on a
-  // guessable one. Unset, every install has its own (`readOrCreateSecret`); only a
-  // short one set by hand is refused. A deployment is a production run, or any run
-  // whose web origin is not this machine's — `node dist/index.js` sets no NODE_ENV.
-  const deployed = env['NODE_ENV'] === 'production' || !isLoopback(authUrl);
-  if (deployed && authSecret !== undefined && authSecret.length < MIN_AUTH_SECRET_CHARS) {
-    throw new Error(`BETTER_AUTH_SECRET must be at least ${MIN_AUTH_SECRET_CHARS} characters to serve ${authUrl} (e.g. openssl rand -base64 32), or unset for this install's own.`);
+    throw new Error('BETTER_AUTH_URL must be the web origin, e.g. http://localhost:13000');
   }
   const callbackPort = readCallbackPort(env);
-  const logFormat = env['LOG_FORMAT']?.trim() || 'text';
-  if (logFormat !== 'text' && logFormat !== 'json') throw new Error(`LOG_FORMAT must be "text" or "json", got "${logFormat}"`);
-  const metricsPort = readInteger(env, 'METRICS_PORT', 1, 65535);
   const remoteOrigins = readRemoteOrigins(env, authUrl);
 
   return {
     port: Number(env['API_PORT'] ?? 8787),
-    host: env['API_HOST'] ?? '127.0.0.1',
     dataDir,
     storage: { driver: 'local', dir: filesDirOf(dataDir) },
     ...(authSecret ? { authSecret } : {}),
@@ -219,11 +190,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     remoteOrigins,
     ...(env['API_ORIGIN'] ? { apiOrigin: new URL(env['API_ORIGIN']).origin } : {}),
     chatgptCallbackPort: callbackPort,
-    logFormat,
-    ...(metricsPort !== undefined ? { metricsPort } : {}),
-    metricsHost: env['METRICS_HOST']?.trim() || '127.0.0.1',
     shutdownBackgroundMs: readInteger(env, 'SHUTDOWN_BACKGROUND_MS', 0, 600_000) ?? 20_000,
-    importWorkers: readInteger(env, 'IMPORT_WORKERS', 1, 16) ?? 2,
     env,
   };
 }

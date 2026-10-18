@@ -10,7 +10,7 @@ import {
   readReaderPresetFile,
   ReaderPresetImportError,
 } from '../src/readerPreset.js';
-import { DEFAULT_LORE_SETTINGS, type LoreEntry, type NormalizedCard } from '../src/types.js';
+import { DEFAULT_LORE_SETTINGS, type NormalizedCard } from '../src/types.js';
 
 const json = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
 const fixture = (name: string): Uint8Array => new Uint8Array(readFileSync(new URL(`./fixtures/${name}`, import.meta.url)));
@@ -426,44 +426,28 @@ describe('assemblePrompt — a reader preset', () => {
     expect(assemble([member(), member({}, '벨')]).system).toContain(speechProtocol(['아리아', '벨']));
   });
 
-  it('cannot pull the creator’s text into the prompt through a macro', () => {
-    const outlet: LoreEntry = {
-      keys: [],
-      secondaryKeys: [],
-      selective: false,
-      enabled: true,
-      constant: true,
-      insertionOrder: 0,
-      caseSensitive: false,
-      useRegex: false,
-      position: 'outlet',
-      outletName: 'secret',
-      content: 'CREATOR-LORE',
-    };
+  it('reads the card, the chat and the preset’s own texts through its macros, as RisuAI’s preset does', () => {
     const creator = member({
       description: 'CREATOR-DESC',
       systemPrompt: 'CREATOR-SYS [{{original}}]',
       postHistoryInstructions: 'CREATOR-PH [{{original}}]',
-      lorebook: [outlet],
     });
-    const probe =
-      '{{char}}/{{user}} {{original}} {{charPrompt}} {{charJailbreak}} {{description}} {{mainprompt}} {{globalnote}} {{lorebook}} {{outlet::secret}}';
-    const prompt = assemble([creator], { preset: readerPromptPreset({ ...stored, main: probe, globalNote: probe }) });
-    const sent = sentOf(prompt);
-
-    // Read as the reader wrote it: the two names, and every other macro a word.
-    const literal =
-      '서리 골짜기/민준 {{original}} {{charPrompt}} {{charJailbreak}} {{description}} {{mainprompt}} {{globalnote}} {{lorebook}} {{outlet::secret}}';
-    expect(blockOf(prompt, 'main')).toBe(`CREATOR-SYS [${literal}]`);
-    expect(blockOf(prompt, 'global_note')).toBe(`CREATOR-PH [${literal}]`);
-    // The creator's text stands where the creator put it, once, and the outlet nobody else names is not sent.
-    expect(sent.split('CREATOR-SYS')).toHaveLength(2);
-    expect(sent.split('CREATOR-PH')).toHaveLength(2);
-    expect(sent.split('CREATOR-DESC')).toHaveLength(2);
-    expect(sent).not.toContain('CREATOR-LORE');
+    const prompt = assemble([creator], {
+      preset: readerPromptPreset({
+        ...stored,
+        main: '{{char}}/{{user}} [{{description}}] [{{globalnote}}] [{{getvar::hp}}]',
+        globalNote: 'GN {{user}}',
+      }),
+      variables: { hp: '10' },
+    });
+    // The card's own text, the preset's other texts and the chat's variables, read
+    // where the preset asks for them — and the card's `{{original}}` is the preset's text, once.
+    expect(blockOf(prompt, 'main')).toBe('CREATOR-SYS [서리 골짜기/민준 [CREATOR-DESC] [GN 민준] [10]]');
+    expect(blockOf(prompt, 'global_note')).toBe('CREATOR-PH [GN 민준]');
+    expect(sentOf(prompt).split('CREATOR-SYS')).toHaveLength(2);
   });
 
-  it('reads the toggles its preset defines from the reader’s globals, and writes none', () => {
+  it('reads the toggles its preset defines from the globals and the chat’s variables, and writes none', () => {
     const text =
       '{{#when::toggle::rain}}비가 온다{{:else}}맑다{{/when}} {{getglobalvar::toggle_mood}} {{setglobalvar::x::1}} {{getvar::hp}}';
     const prompt = assemble([member()], {
@@ -471,8 +455,8 @@ describe('assemblePrompt — a reader preset', () => {
       globalVariables: { toggle_rain: '1', toggle_mood: '어둡게' },
       variables: { hp: '10' },
     });
-    // Chat variables stay out of the reader's text; a write is a word.
-    expect(blockOf(prompt, 'main')).toBe('비가 온다 어둡게 {{setglobalvar::x::1}} {{getvar::hp}}');
+    // A write is a word outside SillyTavern's text, as in any prompt text of RisuAI's.
+    expect(blockOf(prompt, 'main')).toBe('비가 온다 어둡게 {{setglobalvar::x::1}} 10');
     expect(prompt.globalVariableWrites).toBeUndefined();
   });
 

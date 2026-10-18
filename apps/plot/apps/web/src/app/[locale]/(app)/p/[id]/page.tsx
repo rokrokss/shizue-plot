@@ -1,31 +1,26 @@
 'use client';
 
-import { useFormatter, useTranslations } from 'next-intl';
+import { useTranslations } from 'next-intl';
 import { use, useEffect, useState } from 'react';
 import { Avatar } from '@/components/Avatar';
-import { CommentsSection } from '@/components/CommentsSection';
-import { FollowButton } from '@/components/FollowButton';
 import { PlotIntro } from '@/components/PlotIntro';
 import { StartChatPanel } from '@/components/StartChatPanel';
 import { PlotStyleBadges } from '@/components/PlotStyleBadges';
 import { CenteredMessage, cx, Section, Spinner } from '@/components/ui';
 import { Link } from '@/i18n/navigation';
 import { apiGet } from '@/lib/api';
-import { fillPreview } from '@/lib/hub';
+import { fillPreview } from '@/lib/greeting';
 import type { PublicPlotDetail } from '@/lib/types';
 import { useDocumentTitle } from '@/lib/useDocumentTitle';
 
 /**
- * A plot's own page, where a chat starts. Every work here is the owner's —
- * there are no other readers (ARCHITECTURE §4.1) — so beside the title stands
- * the way into the editor.
+ * A work's own page, where a chat starts: its cover, its cast and its openings,
+ * and beside the title the way into the editor.
  */
-export default function PublicPlotPage({ params }: { params: Promise<{ id: string }> }) {
+export default function WorkPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const t = useTranslations('public');
-  const explore = useTranslations('explore');
   const common = useTranslations('common');
-  const format = useFormatter();
 
   const [plot, setPlot] = useState<PublicPlotDetail | null>(null);
   const [missing, setMissing] = useState(false);
@@ -46,7 +41,7 @@ export default function PublicPlotPage({ params }: { params: Promise<{ id: strin
     );
   }
 
-  const userMacro = explore('userMacro');
+  const userMacro = t('userMacro');
   const intro = plot.intros[introIndex] ?? '';
 
   return (
@@ -70,15 +65,6 @@ export default function PublicPlotPage({ params }: { params: Promise<{ id: strin
                 {/* The basis lets the button drop under a title the poster leaves narrow. */}
                 <div className="min-w-0 flex-1 basis-48">
                   <h1 className="title2 sm:title1">{plot.name}</h1>
-                  <div className="mt-1 flex flex-wrap items-center gap-3">
-                    <Link
-                      href={`/creators/${plot.creatorId}`}
-                      className="text-sm text-muted transition-colors hover:text-fg"
-                    >
-                      {explore('by', { name: plot.creatorName })}
-                    </Link>
-                    <FollowButton initial={plot.creatorFollow} />
-                  </div>
                 </div>
                 <Link
                   href={`/plots/${plot.id}`}
@@ -87,16 +73,6 @@ export default function PublicPlotPage({ params }: { params: Promise<{ id: strin
                   {t('edit')}
                 </Link>
               </div>
-
-              <p className="text-sm text-muted">
-                {explore('likeCount', { count: plot.likeCount })} ·{' '}
-                {explore('chatCount', { count: plot.chatCount })}
-                {plot.publishedAt
-                  ? ` · ${t('publishedAt', {
-                      date: format.dateTime(new Date(plot.publishedAt), { dateStyle: 'medium' }),
-                    })}`
-                  : ''}
-              </p>
 
               {plot.tags.length > 0 ? (
                 <ul className="flex flex-wrap gap-1.5">
@@ -114,7 +90,7 @@ export default function PublicPlotPage({ params }: { params: Promise<{ id: strin
             </div>
           </div>
 
-          {/* The creator's line to readers, above everything the work itself says. */}
+          {/* The creator's line about the work, above everything the work itself says. */}
           {plot.intro ? <PlotIntro text={fillPreview(plot.intro, plot.name, userMacro)} /> : null}
 
           {plot.characters.length > 0 ? (
@@ -181,10 +157,6 @@ export default function PublicPlotPage({ params }: { params: Promise<{ id: strin
                 {fillPreview(intro, plot.name, userMacro)}
               </p>
             </Section>
-          ) : null}
-
-          {plot.commentsEnabled ? (
-            <CommentsSection plotId={plot.id} count={plot.commentCount} />
           ) : null}
         </div>
 

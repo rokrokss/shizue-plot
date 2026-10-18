@@ -425,14 +425,7 @@ describe('the scene cast in the notes panel', () => {
     ]);
   });
 
-  it("hands the inspector to the plot's creator only", async () => {
-    await render();
-    await openNotes();
-    expect(panel!['inspectChatId']).toBeUndefined();
-
-    act(() => root.unmount());
-    root = createRoot(host);
-    chatState = { ...stateWith([greeting]), isPlotOwner: true };
+  it('hands the inspector to every chat, as RisuAI previews any prompt', async () => {
     await render();
     await openNotes();
     expect(panel!['inspectChatId']).toBe('cht_1');

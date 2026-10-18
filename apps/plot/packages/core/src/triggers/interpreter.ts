@@ -31,7 +31,7 @@
  *   prompt text a start trigger asked for, the chat as it left it, the
  *   character's fields it rewrote, the request a request trigger edited — and
  *   the caller decides where each goes (`messages.variable_delta`, the
- *   generation request, `plot_reader_overlays`, `chats.local_lore`).
+ *   generation request, the work's own rows, `chats.local_lore`).
  * - Effects this product cannot carry out — image generation — are logged and
  *   leave what RisuAI leaves on failure (`TRIGGER_CLASSIFICATION`).
  * - RisuAI's slash commands (`command`, `v2Command`, `command.ts`) act on the
@@ -94,9 +94,9 @@ export interface TriggerCharacter {
   memberName?: string;
   /** The card's nickname, which `{{char}}` stays while `setName` rewrites the name under it. */
   nickname?: string;
-  /** RisuAI's `char.firstMessage` as the reader's overlay has it (`setCharacterFirstMessage`); absent while untouched. */
+  /** RisuAI's `char.firstMessage` as this page's runs set it (`setCharacterFirstMessage`); absent while untouched. */
   firstMessage?: string;
-  /** RisuAI's `char.backgroundHTML`: the card's, or the overlay's (`setBackgroundEmbedding`). */
+  /** RisuAI's `char.backgroundHTML`: the card's, as the runs left it (`setBackgroundEmbedding`). */
   backgroundHtml?: string;
   description: string;
   personality?: string;
@@ -322,7 +322,7 @@ export interface CodeScope {
   setLocalLore(entries: LoreEntry[]): void;
   /** The modules' lore on the chat (`TriggerRunInput.moduleLore`): read, never written. */
   readonly moduleLore?: readonly LoreEntry[];
-  /** Lua's `setName`, `setCharacterFirstMessage` and `setBackgroundEmbedding`: the reader's overlay. */
+  /** Lua's `setName`, `setCharacterFirstMessage` and `setBackgroundEmbedding`: rewrites of the work. */
   setName(name: string): void;
   setFirstMessage(text: string): void;
   setBackgroundHtml(html: string): void;

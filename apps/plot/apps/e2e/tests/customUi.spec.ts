@@ -58,7 +58,7 @@ test('authors a display script and a default variable', async () => {
   await seedSession(page, account);
   await expect(page).toHaveURL(/\/ko$/);
 
-  // Signup lands on the feed; making things lives under the creator area.
+  // The app opens on the library; making things lives under the creator area.
   await page.goto('/ko/plots');
   await page.getByRole('button', { name: '새 플롯' }).click();
   await page.getByPlaceholder('플롯 이름').fill(plot.name);

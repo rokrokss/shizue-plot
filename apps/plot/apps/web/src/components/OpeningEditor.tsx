@@ -3,7 +3,6 @@
 import { useTranslations } from 'next-intl';
 import { useLayoutEffect, useRef } from 'react';
 import { insertSceneHeading } from '@/lib/sceneHeading';
-import { PublicBadge } from './AudienceBadge';
 import { Icon } from './Icon';
 import { Button, Field, TextArea } from './ui';
 
@@ -57,7 +56,7 @@ export function OpeningEditor({
 
   return (
     <div className="space-y-1">
-      <Field label={t('introLabel', { index: index + 1 })} badge={<PublicBadge />}>
+      <Field label={t('introLabel', { index: index + 1 })}>
         <div className="flex gap-2">
           <TextArea
             ref={area}

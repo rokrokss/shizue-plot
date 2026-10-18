@@ -517,7 +517,7 @@ export const MAX_INTROS_PER_PLOT = 10;
  * could send back — so the openings' sum is the creator's to keep under it.
  */
 export const MAX_INTRO_TEXT_LENGTH = 400_000;
-/** Tags on a plot's explore filter column. */
+/** Tags on a plot. */
 export const MAX_TAGS = 10;
 /** One tag — a word or two, not a phrase. */
 export const MAX_TAG_LENGTH = 20;
@@ -543,8 +543,8 @@ export interface NormalizedCard {
   name: string;
   nickname?: string;
   /**
-   * What the creator tells *readers* about the character — the line the explore
-   * card and the public page lead with. Our own extension, and the one card field
+   * What the creator tells *readers* about the character — the line the work
+   * page leads with. Our own extension, and the one card field
    * that never reaches the prompt: `description` is what the model is told, this
    * is what a person is told, and folding the two together loses the distinction.
    * Absent when the creator wrote none.

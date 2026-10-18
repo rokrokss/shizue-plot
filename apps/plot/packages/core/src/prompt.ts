@@ -148,8 +148,8 @@ export interface PromptBranch {
   /**
    * The intro the branch opened on, when it opened on one: its text, and which
    * intro it is — -1 the first, k the k-th after it (`{{firstmsgindex}}`). The
-   * text is what the greeting turn is sent as: the stored one, or the chat's
-   * overlay of the first opening (`MemberOverlay.firstMessage`).
+   * text is what the greeting turn is sent as: the stored one, or the first
+   * opening this request's scripts just rewrote (`MemberOverlay.firstMessage`).
    */
   greeting?: { text: string; index: number };
   /**
@@ -971,15 +971,16 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
       .map(risuLoreEntry);
   const shared: MacroHostData = {
     persona: personaText,
-    // RisuAI's `{{mainprompt}}`, `{{globalnote}}` and `{{jailbreak}}` read its
-    // preset's three texts. Here a preset is the reader's text, which no card
-    // text or script reads, and the built-in default keeps its text in a
-    // template, which those fields are not.
+    // RisuAI's `{{mainprompt}}`, `{{globalnote}}` and `{{jailbreak}}`: the
+    // chat's preset's three texts, wherever they are asked for — a card's text
+    // too. The built-in default keeps its text in a template, as RisuAI's
+    // templates do, so there they are empty. The jailbreak is always on: RisuAI's
+    // toggle is a setting of its install, and a preset here sends its jailbreak.
     prompts: {
-      main: '',
-      postHistory: '',
+      main: preset.mainPrompt,
+      postHistory: preset.globalNote,
       authorNote,
-      jailbreak: { text: '', enabled: false },
+      jailbreak: { text: preset.jailbreak, enabled: true },
     },
     chat: chatOf,
     ...(model ? { model } : {}),
@@ -1089,29 +1090,18 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     ? { items: [...UTILITY_TEMPLATE], legacy: false }
     : templateOf(preset);
 
-  // 0b. the preset's own text — the reader's, or the built-in default's — read
-  // as its writer's text and nothing more: no card, lore, chat variables or
-  // prompts behind the macros, so `{{description}}`, `{{charPrompt}}` or
-  // `{{lorebook}}` stay words, and escaped once read, so no later pass — a
-  // card's `{{original}}`, an outlet — reads them as macros. The reader's own
-  // global variables are read, and only read: they hold the toggles the
-  // reader's preset defines (`customPromptTemplateToggle`), which its text asks
-  // with `{{#when::toggle::x}}` or `{{getglobalvar::toggle_x}}`, as a RisuAI
-  // preset's does — and they are on the reader's screen anyway. The model is
-  // read too, for `{{prefill_supported}}`, which RisuAI's own templates ask.
-  const readerMacro: MacroContext = {
-    char: plotMacro.char,
-    user: userName,
-    ...(globalVariables ? { globalVariables } : {}),
-    ...(clock ? { clock } : {}),
-    ...(seed !== undefined ? { seed } : {}),
-    ...(seed !== undefined && seedLength !== undefined ? { seedLength } : {}),
-    data: { model: model ?? { id: '', prefill: false } },
+  // 0b. the preset's own text — the chat's preset, or the built-in default —
+  // read as RisuAI reads it: the whole of what the work's own text reads behind
+  // the macros — the card, the lore, the chat and its variables, the globals
+  // with the toggles the preset defines (`customPromptTemplateToggle`), the
+  // model for `{{prefill_supported}}` — in the role of the item. Escaped once
+  // read, so no later pass — a card's `{{original}}`, an outlet — reads it again.
+  const presetMacro = (role: PromptRole = 'system'): MacroContext => {
+    const macro = macroOf(undefined, role === 'assistant' ? 'char' : role);
+    return model ? macro : { ...macro, data: { ...macro.data, model: { id: '', prefill: false } } };
   };
   const presetText = (text: string, role: PromptRole = 'system'): string =>
-    text.trim()
-      ? risuEscape(applyMacros(text, { ...readerMacro, data: { ...readerMacro.data, role: role === 'assistant' ? 'char' : role } }))
-      : '';
+    text.trim() ? risuEscape(applyMacros(text, presetMacro(role))) : '';
 
   // 1. the speech protocol: what lets the chat draw a reply of one asked voice —
   // a work of one member, or a scene — as bubbles and narration (Zeta's way).
@@ -1565,7 +1555,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const narrationNote = utility ? '' : NARRATION_NOTE;
 
   /** A preset's `innerFormat` around a block: its `{{slot}}` is the block, as RisuAI's first `replace` fills it. */
-  const presetRaw = (text: string): string => (text ? send(risuEscape(applyMacros(text, readerMacro))) : '');
+  const presetRaw = (text: string): string => (text ? send(risuEscape(applyMacros(text, presetMacro()))) : '');
   const wrap = (format: string | undefined, content: string): string => {
     if (!format) return content;
     const at = format.indexOf('{{slot}}');
@@ -1579,7 +1569,7 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   /** Another member's message in a group turn: the preset's `groupTemplate`, its `{{char}}` that member. */
   const groupTemplate = preset.groupTemplate.trim() ? preset.groupTemplate : DEFAULT_GROUP_TEMPLATE;
   const groupWrap = (name: string, content: string): string => {
-    const macro: MacroContext = { ...readerMacro, char: name };
+    const macro: MacroContext = { ...presetMacro(), char: name };
     const part = (text: string): string => (text ? send(risuEscape(applyMacros(text, macro))) : '');
     const at = groupTemplate.indexOf('{{slot}}');
     if (at < 0) return part(groupTemplate);
@@ -2048,9 +2038,9 @@ const OUTLET_MACRO = /\{\{outlet::([^}]*)\}\}/gi;
 
 /**
  * `history` with its greeting turn — where it still starts with the greeting —
- * reading as `branch.greeting.text` says: the reader's overlay may have rewritten
- * the first opening (`MemberOverlay.firstMessage`), which RisuAI sends from the
- * character rather than from the chat. A prompt script's rewrite of the stored
+ * reading as `branch.greeting.text` says: this request's scripts may have just
+ * rewritten the first opening (`MemberOverlay.firstMessage`), which RisuAI sends
+ * from the character rather than from the chat. A prompt script's rewrite of the stored
  * text no longer applies; the caller runs them over the result instead.
  */
 export function withBranchGreeting(history: HistoryMessage[], branch: PromptBranch | undefined): HistoryMessage[] {

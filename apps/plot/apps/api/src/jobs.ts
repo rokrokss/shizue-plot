@@ -57,7 +57,7 @@ const kindFilter = (kinds: JobKinds | undefined): SQL | undefined => {
 /**
  * Puts a job on the queue inside the caller's transaction. Nothing is started
  * here: the worker finds the row once it is committed, which is exactly the point
- * — a rolled-back publish leaves no fan-out behind.
+ * — a rolled-back import leaves no job behind.
  *
  * `maxAttempts` overrides the column default for a kind that should give up
  * sooner: waiting for a recorder to close a file is worth three tries, where a

@@ -56,7 +56,7 @@ export default defineConfig({
         // extension.spec.ts: the Shizue stand-in's loopback port, and OpenAI stood in for.
         CHATGPT_CALLBACK_PORT: process.env['E2E_CALLBACK_PORT'] ?? '47801', CHATGPT_FAKE_OPENAI: '1',
         // The same suite wherever it runs: no 2 GB model loaded when the weights
-        // happen to be on disk, and explore's search is the text one it asserts.
+        // happen to be on disk.
         EMBEDDER: 'off',
       },
       // Public route, so a plain 200 means the API is really serving.

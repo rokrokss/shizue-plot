@@ -88,7 +88,6 @@ function bundle(memberId: string, name: string, extra: Partial<ScriptBundle> = {
       lorebook: [],
       postHistoryInstructions: '',
     },
-    overlay: { member: null, persona: null },
     ...extra,
   };
 }

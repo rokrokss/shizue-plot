@@ -1,5 +1,5 @@
 /**
- * What a card's scripts hand the server, and the reader's global variables.
+ * What a card's scripts hand the server, and the work's global variables.
  *
  * RisuAI cards carry scripts — triggers, Lua, editinput and editoutput regex —
  * that run in the reader's browser, not here. What they decide reaches the server
@@ -19,26 +19,33 @@
  * - the chat as the scripts left it (`chat`) — messages appended, cut, rewritten
  *   — which is kept as the reader's branch (`scriptChat.ts`);
  * - what the scripts rewrote of the work itself — a member's description, lore,
- *   global note, name, first message and background HTML, the reader's persona
- *   (`overlay`) — kept for the reader and the plot (`plot_reader_overlays`), as
- *   RisuAI's rewrite of the character reaches every chat with it, and laid over
- *   the work wherever one of that reader's chats on it is assembled; and what
- *   RisuAI keeps on the chat — the chat note (`note`) and the lore Lua's
- *   `upsertLocalLoreBook` wrote (`localLore`, RisuAI's chat `localLore`) — kept
- *   on the chat (`chats.note`, `chats.local_lore`). The plot never changes.
+ *   global note, name, first message and background HTML, the persona
+ *   (`overlay`) — written into the work's own rows, as RisuAI's scripts rewrite
+ *   the character object, so every chat with it reads it from then on
+ *   (`writeScriptRewrite`); and what RisuAI keeps on the chat — the chat note
+ *   (`note`) and the lore Lua's `upsertLocalLoreBook` wrote (`localLore`,
+ *   RisuAI's chat `localLore`) — kept on the chat (`chats.note`,
+ *   `chats.local_lore`).
  */
-import { applyVariableDelta, checkVariableDelta, type LoreEntry, type VariableDelta, type Variables } from '@shizue/core';
+import {
+  applyVariableDelta,
+  checkVariableDelta,
+  type LoreEntry,
+  type NormalizedCard,
+  type VariableDelta,
+  type Variables,
+} from '@shizue/core';
 import {
   checkScriptChat,
   MAX_OVERLAY_NAME_LENGTH,
-  mergeScriptOverlay,
+  overlaidCard,
   overlayName,
   type MemberOverlay,
   type ScriptChat,
   type ScriptOverlay,
 } from '@shizue/core/triggers';
-import { chats, plotReaderOverlays, plotReaderVariables, type Chat, type ChatScriptOverlay } from '@shizue/db';
-import { and, eq } from 'drizzle-orm';
+import { characters, chats, personas, plotReaderVariables, plots, type Chat } from '@shizue/db';
+import { and, eq, sql } from 'drizzle-orm';
 import { coerceLorebook } from './card.js';
 import type { AppDeps, Tx } from './deps.js';
 import { ApiError, badRequest } from './errors.js';
@@ -92,8 +99,8 @@ export interface GenerationScripts {
   /** Generate on over a head still pending, giving up its output scripts. */
   abandonPending: boolean;
   /**
-   * What the scripts that ran for this generation rewrote of the work, laid over
-   * the reader's overlay before the prompt is assembled and merged into it.
+   * What the scripts that ran for this generation rewrote of the work: laid over
+   * it before the prompt is assembled, and written into it (`writeScriptRewrite`).
    */
   overlay: ScriptOverlay | null;
   /** The chat note as the scripts left it (`v2SetAuthorNote`); undefined when untouched. */
@@ -214,17 +221,17 @@ export function scriptMemberOf<T extends { id: string }>(memberId: string | unde
   return member;
 }
 
-/* ---------------------------------------------------------- the overlay */
+/* -------------------------------------------------- the work's rewrites */
 
 /**
- * The longest text field an overlay may carry — a description, a global note, a
- * first message, a background, a persona — and the most lore entries. A card's own description is not capped
- * at import, but one a script built a step at a time is bounded the way a
- * variable is: by what the reader's tab could make of it.
+ * The longest text field a rewrite may carry — a description, a global note, a
+ * first message, a background, a persona — and the most lore entries. A card's
+ * own description is not capped at import, but one a script built a step at a
+ * time is bounded the way a variable is: by what the reader's tab could make of it.
  */
 export const MAX_OVERLAY_TEXT_LENGTH = 200_000;
 export const MAX_OVERLAY_LORE_ENTRIES = 2_000;
-/** The whole overlay, serialized. It is read back on every generation of the chat. */
+/** The chat's own lore, serialized. It is read back on every generation of the chat. */
 export const MAX_OVERLAY_CHARS = 2_000_000;
 
 const overlayText = (value: unknown, path: string): string | undefined => {
@@ -342,90 +349,140 @@ function optionalLocalLore(body: Record<string, unknown>): LoreEntry[] | undefin
 /** The chat's own lore, as core reads it: empty until a script wrote some. */
 export const localLoreOf = (chat: Pick<Chat, 'localLore'>): LoreEntry[] => chat.localLore ?? [];
 
-/** A stored overlay as core reads it; the column's type is the database's loose one, and `{}` is none. */
-const overlayFrom = (value: ChatScriptOverlay | null | undefined): ScriptOverlay | null =>
-  mergeScriptOverlay(null, (value ?? null) as ScriptOverlay | null);
-
-const readerOverlayRow = (userId: string, plotId: string) =>
-  and(eq(plotReaderOverlays.userId, userId), eq(plotReaderOverlays.plotId, plotId));
-
-/** What the reader's scripts rewrote of the plot (`plot_reader_overlays`); null until one did. */
-export async function loadReaderOverlay(db: AppDeps['db'] | Tx, userId: string, plotId: string): Promise<ScriptOverlay | null> {
-  const [row] = await db
-    .select({ overlay: plotReaderOverlays.overlay })
-    .from(plotReaderOverlays)
-    .where(readerOverlayRow(userId, plotId))
-    .limit(1);
-  return overlayFrom(row?.overlay);
-}
-
 /**
- * `stored` with `patch` laid over it, checked against the members the plot
- * really has — an id from another plot, or of a member since deleted, is a stale
- * client rather than something to keep — and against the size the row may grow
- * to. What a prompt reads before the write lands, and what the write keeps.
+ * A request's rewrite of the work, held to the members the plot really has — an
+ * id from another plot, or of a member since deleted, is a stale client rather
+ * than something to write. What the prompt reads before the write lands.
  */
-export function overlaidWith(
-  stored: ScriptOverlay | null,
-  patch: ScriptOverlay | null,
-  memberIds: ReadonlySet<string>,
-): ScriptOverlay | null {
-  if (!patch) return stored;
+export function checkScriptRewrite(patch: ScriptOverlay | null, memberIds: ReadonlySet<string>): ScriptOverlay | null {
+  if (!patch) return null;
   for (const id of Object.keys(patch.members ?? {})) {
     if (!memberIds.has(id)) throw badRequest('invalid_request', 'overlay names a member this plot does not have');
   }
-  const merged = mergeScriptOverlay(stored, patch);
-  if (merged && JSON.stringify(merged).length > MAX_OVERLAY_CHARS) {
-    throw badRequest(
-      'script_overlay_limit',
-      `What a reader's scripts rewrote of a plot may hold at most ${MAX_OVERLAY_CHARS} characters`,
-    );
-  }
-  return merged;
+  return patch;
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
 /**
- * Merges `patch` into the reader's overlay on the plot, in the caller's
- * transaction, and answers with the whole of it. The row is created on the
- * first write and locked for the read-merge-write — the way global variables
- * are — so two of the reader's chats writing at once each land on top of the
- * other: field by field, the later write standing where both touched one, as
- * the last script to rewrite a RisuAI character wins. The cap is a property of
- * the merged overlay, checked under that lock; a refusal rolls the caller's
- * transaction back. Taken after any chat row the transaction locks, as every
- * caller does, so no two of them wait on each other in turn.
+ * A member's card as a rewrite leaves it: RisuAI's `char.desc`, `globalLore`,
+ * `replaceGlobalNote`, `name`, `firstMessage` and `backgroundHTML`, each
+ * the card's own field.
  */
-export async function mergeReaderOverlay(
-  tx: Tx,
-  userId: string,
-  plotId: string,
-  patch: ScriptOverlay | null,
-  memberIds: ReadonlySet<string>,
-): Promise<ScriptOverlay | null> {
-  if (!patch) return loadReaderOverlay(tx, userId, plotId);
-  await tx.insert(plotReaderOverlays).values({ userId, plotId }).onConflictDoNothing();
-  const where = readerOverlayRow(userId, plotId);
-  const [row] = await tx.select({ overlay: plotReaderOverlays.overlay }).from(plotReaderOverlays).where(where).for('update');
-  const merged = overlaidWith(overlayFrom(row?.overlay), patch, memberIds);
-  await tx
-    .update(plotReaderOverlays)
-    .set({ overlay: (merged ?? {}) as ChatScriptOverlay, updatedAt: new Date() })
-    .where(where);
-  return merged;
+export function rewrittenCard(card: NormalizedCard, fields: MemberOverlay): NormalizedCard {
+  const next = overlaidCard(card, fields);
+  const risu = isRecord(next.extensions['risuai']) ? next.extensions['risuai'] : {};
+  return {
+    ...next,
+    ...(fields.name !== undefined ? { name: fields.name } : {}),
+    ...(fields.firstMessage !== undefined ? { firstMes: fields.firstMessage } : {}),
+    ...(fields.backgroundHtml !== undefined
+      ? { extensions: { ...next.extensions, risuai: { ...risu, backgroundHTML: fields.backgroundHtml } } }
+      : {}),
+  };
 }
 
 /**
- * Keeps what the scripts of a generation rewrote: the overlay they sent merged
- * into the reader's (the patch, not the overlay the prompt was built from — the
- * reader's other chats may have written since), the note and the chat's lore,
- * in one transaction. Called inside the generation slot once the request has
- * passed every check, so a refused generation writes none of it.
+ * Writes what a card's scripts rewrote into the work itself, in the caller's
+ * transaction, as RisuAI's scripts rewrite the character object — so every
+ * chat with the work reads it from then on, and the studio shows it:
+ *
+ * - a member's description, lore, post-history instructions, name, first
+ *   message and background go to its card, its name to the roster too — and
+ *   to the work's, in a work of one member, which is that character;
+ * - the lead's — the scripted member's (`scriptedMember`), RisuAI's one
+ *   character — background is also what the work draws behind its chats
+ *   (`customUi.backgroundHtml`), and its first message the work's first
+ *   opening — what a new chat starts on — and the first greeting of every chat
+ *   of the work, as RisuAI draws a chat's first greeting from its character.
+ *   Another member's stay on its own card, as the page reads them only for
+ *   the lead;
+ * - the persona goes to the chat's persona, RisuAI's being the reader's own for
+ *   every character — and nowhere for a chat without one.
+ *
+ * Each field is a whole value: the latest write of it stands. Members are held
+ * to the plot (`checkScriptRewrite`) by the caller.
+ */
+export async function writeScriptRewrite(
+  tx: Tx,
+  chat: Pick<Chat, 'plotId' | 'personaId'>,
+  patch: ScriptOverlay,
+  /** The scripted member, whose background and first message are the work's; undefined when none is. */
+  lead: string | undefined,
+): Promise<void> {
+  const rewrites = Object.entries(patch.members ?? {});
+  for (const [id, fields] of rewrites) {
+    const [member] = await tx
+      .select({ name: characters.name, card: characters.card })
+      .from(characters)
+      .where(and(eq(characters.id, id), eq(characters.plotId, chat.plotId)))
+      .for('update');
+    if (!member) continue;
+    await tx
+      .update(characters)
+      .set({
+        ...(fields.name !== undefined ? { name: fields.name } : {}),
+        card: rewrittenCard(member.card, fields),
+        updatedAt: new Date(),
+      })
+      .where(eq(characters.id, id));
+  }
+  const leading = lead === undefined ? undefined : patch.members?.[lead];
+  const background = leading?.backgroundHtml;
+  const firstMessage = leading?.firstMessage;
+  const renamed = rewrites.findLast(([, fields]) => fields.name !== undefined)?.[1].name;
+  if (background !== undefined || firstMessage !== undefined || renamed !== undefined) {
+    const [plot] = await tx
+      .select({ customUi: plots.customUi, intros: plots.intros })
+      .from(plots)
+      .where(eq(plots.id, chat.plotId))
+      .for('update');
+    const [roster] =
+      renamed === undefined
+        ? []
+        : await tx.select({ count: sql<number>`count(*)::int` }).from(characters).where(eq(characters.plotId, chat.plotId));
+    if (plot) {
+      await tx
+        .update(plots)
+        .set({
+          ...(background !== undefined ? { customUi: { ...(plot.customUi ?? {}), backgroundHtml: background } } : {}),
+          ...(firstMessage !== undefined ? { intros: [firstMessage, ...plot.intros.slice(1)] } : {}),
+          ...(renamed !== undefined && roster?.count === 1 ? { name: renamed } : {}),
+          updatedAt: new Date(),
+        })
+        .where(eq(plots.id, chat.plotId));
+    }
+  }
+  if (firstMessage !== undefined) {
+    // Each chat's oldest root, where it is a greeting: the first opening it has.
+    // Its revision moves, as a script commit's does, so a commit made over the old
+    // text is refused rather than written over the new one.
+    await tx.execute(sql`
+      update messages set content = ${firstMessage}, script_rev = script_rev + 1
+      where role = 'assistant' and id in (
+        select distinct on (m.chat_id) m.id from messages m join chats c on c.id = m.chat_id
+        where c.plot_id = ${chat.plotId} and m.parent_id is null
+        order by m.chat_id, m.created_at, m.id
+      )`);
+  }
+  if (patch.persona !== undefined && chat.personaId) {
+    await tx.update(personas).set({ description: patch.persona }).where(eq(personas.id, chat.personaId));
+  }
+}
+
+/**
+ * Keeps what the scripts of a generation rewrote: the work's rewrites written
+ * into it, the note and the chat's lore, in one transaction. Called inside the
+ * generation slot once the request has passed every check, so a refused
+ * generation writes none of it.
  */
 export async function saveScriptWrites(
   deps: AppDeps,
-  chat: Pick<Chat, 'id' | 'userId' | 'plotId'>,
+  chat: Pick<Chat, 'id' | 'plotId' | 'personaId'>,
   scripts: Pick<GenerationScripts, 'overlay' | 'note' | 'localLore'>,
-  memberIds: ReadonlySet<string>,
+  /** The scripted member (`writeScriptRewrite`). */
+  lead: string | undefined,
 ): Promise<void> {
   const { overlay, note, localLore } = scripts;
   if (!overlay && note === undefined && localLore === undefined) return;
@@ -439,7 +496,7 @@ export async function saveScriptWrites(
         })
         .where(eq(chats.id, chat.id));
     }
-    if (overlay) await mergeReaderOverlay(tx, chat.userId, chat.plotId, overlay, memberIds);
+    if (overlay) await writeScriptRewrite(tx, chat, overlay, lead);
   });
 }
 
@@ -454,9 +511,9 @@ export const scriptRevMoved = (): ApiError =>
 /* ------------------------------------------------------ global variables */
 
 /**
- * One reader's global variables on one plot: how many names, and how many
- * characters in all. Smaller than a message's delta — the whole map rides on
- * every chat state, and none of it is ever evicted.
+ * A work's global variables: how many names, and how many characters in all.
+ * Smaller than a message's delta — the whole map rides on every chat state,
+ * and none of it is ever evicted.
  */
 export const MAX_GLOBAL_VARIABLE_KEYS = 256;
 export const MAX_GLOBAL_VARIABLE_CHARS = 256_000;
@@ -470,12 +527,12 @@ const globalVariablesLimit = (): ApiError =>
     `Global variables may hold at most ${MAX_GLOBAL_VARIABLE_KEYS} names and ${MAX_GLOBAL_VARIABLE_CHARS} characters`,
   );
 
-/** The reader's global variables for the plot; empty until something set one. */
-export async function loadGlobalVariables(deps: AppDeps, userId: string, plotId: string): Promise<Variables> {
+/** The work's global variables; empty until something set one. */
+export async function loadGlobalVariables(deps: AppDeps, plotId: string): Promise<Variables> {
   const [row] = await deps.db
     .select({ variables: plotReaderVariables.variables })
     .from(plotReaderVariables)
-    .where(and(eq(plotReaderVariables.userId, userId), eq(plotReaderVariables.plotId, plotId)))
+    .where(eq(plotReaderVariables.plotId, plotId))
     .limit(1);
   return applyVariableDelta(row?.variables ?? {}, null);
 }
@@ -484,8 +541,8 @@ export async function loadGlobalVariables(deps: AppDeps, userId: string, plotId:
  * The global variables as a chat reads them — RisuAI's `getGlobalChatVar`: the
  * chat's own value of a name (its "Local Toggles" values,
  * `chats.local_global_variables`) wherever it is set and neither blank nor
- * `'null'`, else the reader's on the work. Read so whether the chat's switch is
- * on or off, as RisuAI reads `GLGlobalVariables` either way.
+ * `'null'`, else the work's. Read so whether the chat's switch is on or off, as
+ * RisuAI reads `GLGlobalVariables` either way.
  */
 export function withLocalGlobals(globals: Variables, local: Variables | null | undefined): Variables {
   if (!local) return globals;
@@ -497,24 +554,24 @@ export function withLocalGlobals(globals: Variables, local: Variables | null | u
   return applyVariableDelta(globals, kept);
 }
 
-/** The reader's global variables as one chat of theirs reads them (`withLocalGlobals`). */
+/** The work's global variables as one chat on it reads them (`withLocalGlobals`). */
 export async function loadChatGlobalVariables(
   deps: AppDeps,
-  chat: Pick<Chat, 'userId' | 'plotId' | 'localGlobalVariables'>,
+  chat: Pick<Chat, 'plotId' | 'localGlobalVariables'>,
 ): Promise<Variables> {
-  return withLocalGlobals(await loadGlobalVariables(deps, chat.userId, chat.plotId), chat.localGlobalVariables);
+  return withLocalGlobals(await loadGlobalVariables(deps, chat.plotId), chat.localGlobalVariables);
 }
 
 /**
  * A write of the chat's toggles — RisuAI's `setGlobalChatVar`, which only its
  * toggles sidebar calls: with the chat's "Local Toggles" on, into the chat's own
- * values; off, into the reader's globals on the work, the chat's own value of
- * each name written taken away first so the global one shows. Answers the
- * globals as the chat now reads them.
+ * values; off, into the work's globals, the chat's own value of each name
+ * written taken away first so the global one shows. Answers the globals as the
+ * chat now reads them.
  */
 export async function writeChatToggles(
   deps: AppDeps,
-  chat: Pick<Chat, 'id' | 'userId' | 'plotId'>,
+  chat: Pick<Chat, 'id' | 'plotId'>,
   patch: unknown,
 ): Promise<Variables> {
   const check = checkVariableDelta(patch, GLOBAL_LIMITS);
@@ -543,32 +600,27 @@ export async function writeChatToggles(
   });
   const globals =
     delta && !localToggles
-      ? await mergeGlobalVariables(deps, chat.userId, chat.plotId, delta)
-      : await loadGlobalVariables(deps, chat.userId, chat.plotId);
+      ? await mergeGlobalVariables(deps, chat.plotId, delta)
+      : await loadGlobalVariables(deps, chat.plotId);
   return withLocalGlobals(globals, local);
 }
 
 /**
- * Merges `patch` into the reader's global variables — a string sets, `null`
+ * Merges `patch` into the work's global variables — a string sets, `null`
  * unsets — and answers with the whole map. The row is created on the first
  * write and locked for the read-merge-write, so two writes at once each land on
  * top of the other rather than one undoing it; the cap is a property of the
  * merged map, checked under that lock.
  */
-export async function mergeGlobalVariables(
-  deps: AppDeps,
-  userId: string,
-  plotId: string,
-  patch: unknown,
-): Promise<Variables> {
+export async function mergeGlobalVariables(deps: AppDeps, plotId: string, patch: unknown): Promise<Variables> {
   const check = checkVariableDelta(patch, GLOBAL_LIMITS);
   if (!check.ok) throw badRequest('invalid_request', `variables ${check.error}`);
   const delta = check.delta;
-  if (!delta) return loadGlobalVariables(deps, userId, plotId);
+  if (!delta) return loadGlobalVariables(deps, plotId);
 
   return deps.db.transaction(async (tx) => {
-    await tx.insert(plotReaderVariables).values({ userId, plotId }).onConflictDoNothing();
-    const where = and(eq(plotReaderVariables.userId, userId), eq(plotReaderVariables.plotId, plotId));
+    await tx.insert(plotReaderVariables).values({ plotId }).onConflictDoNothing();
+    const where = eq(plotReaderVariables.plotId, plotId);
     const [row] = await tx
       .select({ variables: plotReaderVariables.variables })
       .from(plotReaderVariables)

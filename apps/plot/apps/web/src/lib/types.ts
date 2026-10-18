@@ -128,9 +128,6 @@ export const MAX_PLOT_PROFILE_DESCRIPTION_LENGTH = 1000;
 
 export type ContentLanguage = 'ko' | 'en' | 'ja';
 
-/** Audience a plot declares on publish; mirrors packages/db. */
-export type SafetyLevel = 'all' | 'adult';
-
 /** Roster size and openings a plot may hold; mirrors the caps in apps/api. */
 export const MAX_CHARACTERS_PER_PLOT = 10;
 export const MAX_INTROS_PER_PLOT = 10;
@@ -152,10 +149,7 @@ export const MAX_BACKGROUND_RENDER_CHARS = 2 * MAX_BACKGROUND_HTML_LENGTH;
 /** One card file an import takes; mirrors `MAX_CARD_IMPORT_BYTES` in @shizue/core. */
 export const MAX_CARD_IMPORT_BYTES = 1024 * 1024 * 1024;
 
-/**
- * A plot as its owner edits it. The first-class row: everything a work is
- * published, explored, liked, commented and chatted with by.
- */
+/** A plot as the studio edits it: the first-class row, everything a work is chatted with by. */
 export interface Plot {
   id: string;
   name: string;
@@ -179,22 +173,12 @@ export interface Plot {
   /** The RisuAI modules brought into the work, which the server keeps apart from `customUi`. */
   modules: PlotModuleSummary[];
   language: ContentLanguage;
-  visibility: string;
-  /** 'adult' only on rows saved before the level was disabled; those stay unlisted. */
-  safetyLevel: SafetyLevel;
-  /** The creator's comment switch; a closed section hides what is already there. */
-  commentsEnabled: boolean;
   /**
    * How a round of a work of two or more members is picked: the order and the
    * cap. The API fills the defaults in, so it is always whole.
    */
   groupSettings: GroupSettings;
   tags: string[];
-  likeCount: number;
-  chatCount: number;
-  publishedAt: string | null;
-  /** When the owner last vouched for the imported members; null until then. */
-  rightsConfirmedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -209,8 +193,6 @@ export interface PlotMember {
   orderIndex: number;
   /** Where an imported card came from; null for a member the studio made. */
   importedFrom: ImportProvenance | null;
-  /** The license the card declares (`extensions.risuai.license`); null when it says none. */
-  license: string | null;
   /** Tokens the card lorebook's always-on entries take, counted by the server from the saved card. */
   loreConstantTokens: number;
   /** 대화량, 0..100: how readily the member joins a round unprompted. 0 is only when picked. */
@@ -263,12 +245,11 @@ export interface PlotDetail extends Plot {
    * studio's background field starts from.
    */
   backgroundHtml?: string;
-  commentCount: number;
   /** Tokens the plot lorebook's always-on entries take, counted from the saved plot. */
   plotLoreConstantTokens: number;
 }
 
-/** A member as every public surface names one: a face and a name. */
+/** A member as the work page and the chat name one: a face and a name. */
 export interface PublicMember {
   id: string;
   name: string;
@@ -286,7 +267,7 @@ export interface PublicMember {
   aliases?: readonly string[];
   /**
    * 대화량, 0..100, which the reader's browser picks a round's speakers by. The
-   * public view fills the default in; optional for a member built by hand.
+   * play view fills the default in; optional for a member built by hand.
    */
   talkativeness?: number;
   /**
@@ -297,60 +278,34 @@ export interface PublicMember {
   emotion?: { mode: EmotionMode; images: EmotionImage[] } | null;
 }
 
-/** The only shape a non-owner ever sees of a plot: no definitions. */
-export interface PublicPlot {
+/**
+ * GET /api/plots/:id/public — the plot as it is played: what the work page and
+ * the chat draw, and none of the definitions the prompt is made of. Every
+ * opening is whole, because a prologue is meant to be read.
+ */
+export interface PublicPlotDetail {
   id: string;
   name: string;
   coverUrl: string | null;
-  creatorId: string;
-  creatorName: string;
   language: ContentLanguage;
   tags: string[];
-  likeCount: number;
-  chatCount: number;
-  /** The creator's line to readers; '' when they wrote none. Never sent to the model. */
+  /** The creator's line about the work; '' when they wrote none. Never sent to the model. */
   intro: string;
-  /** First opening, cut by the API. Macros are already stripped. */
-  introPreview: string;
-  publishedAt: string | null;
-  likedByMe: boolean;
-  /** The face stack a plot card is read by. */
-  characters: PublicMember[];
-}
-
-/**
- * GET /api/plots/:id/public — the same plot as the detail read carries it.
- * The listings live on `introPreview`; the page a reader decides on gets every
- * opening whole, because a prologue is meant to be read.
- */
-export interface PublicPlotDetail extends PublicPlot {
-  public: true;
-  /** The follow edge to the creator, so the page's button needs no second read. */
-  creatorFollow: FollowState;
-  /** The roster, each with the one card field written for readers. */
+  /** The roster, each with the one card field written for the reader. */
   characters: (PublicMember & { intro: string })[];
   /** Every opening, uncut. Macros are already stripped. */
   intros: string[];
   /** The same openings, cut to 200 characters for the picker. */
   introPreviews: string[];
-  commentsEnabled: boolean;
-  commentCount: number;
   /**
-   * The style, as enum values only: it is the badge row a reader decides on, and
+   * The style, as enum values only: it is the badge row the work page shows, and
    * the chat reads the two derived features off it to know which of its own
    * toggles are worth offering. Null while the creator set nothing.
    */
   style: PlotStyle | null;
-  /**
-   * The profiles the work recommends its readers. Reader-facing by design — the
-   * start panel is where one is picked — and never prompt text of its own.
-   */
+  /** The profiles the work recommends; the start panel is where one is picked. */
   profiles: PlotProfile[];
-  /**
-   * The narrator, for the point of view the badge row names. Optional because the
-   * public read carries it only where the API sends it — the rest of the narrator
-   * is prompt text and never leaves the owner's view.
-   */
+  /** The narrator, for the point of view the badge row names. */
   narrator?: NarratorConfig | null;
   /** Presentation, so it travels even though the definitions do not. */
   displayScripts: DisplayScript[];
@@ -385,81 +340,6 @@ export interface PublicPlotDetail extends PublicPlot {
    * for a detail built by hand.
    */
   modules?: { namespace: string; assets: string[] }[];
-}
-
-/** Characters one comment may hold; mirrors MAX_COMMENT_LENGTH in the API. */
-export const MAX_COMMENT_LENGTH = 500;
-
-/** A comment on a plot page; `replies` is empty on a reply itself. */
-export interface Comment {
-  id: string;
-  /** Null on a top-level comment; replies never nest further. */
-  parentId: string | null;
-  /** Empty on a deleted comment — the server keeps nothing of it. */
-  content: string;
-  spoiler: boolean;
-  deleted: boolean;
-  /** Null on a deleted comment. */
-  authorName: string | null;
-  createdAt: string;
-  /** The viewer wrote it, or owns the plot. */
-  canDelete: boolean;
-  replies: Comment[];
-}
-
-export interface CommentPage {
-  items: Comment[];
-  /** Opaque keyset cursor, or null on the last page. */
-  nextCursor: string | null;
-}
-
-export interface ExploreResult {
-  items: PublicPlot[];
-  /** Opaque keyset cursor, or null on the last page. */
-  nextCursor: string | null;
-  /** With a query: whether it was searched by meaning (ranked by nearness) or as text. */
-  search?: 'meaning' | 'text';
-}
-
-/** How many follow a creator, and whether the reader is one of them. */
-export interface FollowState {
-  followerCount: number;
-  followedByMe: boolean;
-}
-
-export interface Creator extends FollowState {
-  id: string;
-  name: string;
-  publicPlots: PublicPlot[];
-}
-
-export interface LikeState {
-  liked: boolean;
-  likeCount: number;
-}
-
-/** What a notification is about; mirrors the kinds in packages/db. */
-export type NotificationKind = 'plot_published';
-
-/** A plot publication notification, named by the API. */
-export interface AppNotification {
-  id: string;
-  kind: NotificationKind;
-  /** Who did it; null once that account is gone, and the name with it. */
-  actorId: string | null;
-  actorName: string | null;
-  plotId: string | null;
-  plotName: string | null;
-  read: boolean;
-  createdAt: string;
-}
-
-export interface NotificationPage {
-  items: AppNotification[];
-  /** Opaque keyset cursor, or null on the last page. */
-  nextCursor: string | null;
-  /** Only the first page carries it — it is what the badge is read from. */
-  unreadCount?: number;
 }
 
 export interface Persona {
@@ -851,15 +731,10 @@ export interface ChatState {
    */
   variableDefaults?: Variables;
   /**
-   * The reader's global variables on the plot — shared by their chats on it, and
-   * not by branch. Optional for the same reason as the flags below.
+   * The work's global variables — shared by its chats, and not by branch.
+   * Optional for a state built by hand.
    */
   globalVariables?: Variables;
-  /**
-   * Whether the reader is the plot's creator, the one person the assembled
-   * prompt may be shown to. Optional for the same reason; absent reads as no.
-   */
-  isPlotOwner?: boolean;
 }
 
 export interface Usage {

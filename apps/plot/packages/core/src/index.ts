@@ -48,7 +48,6 @@ export * from './card/externalAssets.js';
 export {
   backgroundHtmlOf,
   backgroundWithoutStyles,
-  cardLicense,
   creatorCssFromExtensions,
   creatorCssOverCap,
   displayScriptsFromExtensions,

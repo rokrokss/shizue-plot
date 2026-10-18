@@ -2140,7 +2140,7 @@ describe('assemblePrompt - RisuAI host data', () => {
     expect(system).toContain('[{{setvar::x::1}}또 왔어|]');
   });
 
-  it("reads the card's own fields and the persona as CBS, and the reader's preset as nothing", () => {
+  it("reads the card's own fields, the persona and the preset's main prompt as CBS", () => {
     const { system } = assemblePrompt({
       plot: { ...plot, description: '눈 내리는 {{char}}' },
       characters: [
@@ -2159,8 +2159,8 @@ describe('assemblePrompt - RisuAI host data', () => {
       personaText: '{{user}}는 여행자',
     });
     // `{{scenario}}` is the plot's setting, read where it is asked for: in the member's text.
-    // `{{mainprompt}}` is empty: the preset is the reader's text, which no card text reads.
-    expect(system).toContain('[아리아는 차갑다|눈 내리는 아리아|민준는 여행자|]');
+    // `{{mainprompt}}` is the chat's preset's main prompt, as RisuAI's is.
+    expect(system).toContain('[아리아는 차갑다|눈 내리는 아리아|민준는 여행자|MAIN 민준]');
   });
 
   it('answers ST field macros, the group and the role of the text', () => {

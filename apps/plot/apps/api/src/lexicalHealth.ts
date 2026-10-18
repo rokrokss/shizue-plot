@@ -5,7 +5,7 @@
  * longer cuts Korean, a column left empty — and then shows only as this share
  * falling to nothing. Per process, and forgotten once said.
  */
-export type LexicalSite = 'memory' | 'facts' | 'messages' | 'explore';
+export type LexicalSite = 'memory' | 'facts' | 'messages';
 
 const EVERY = 200;
 const counts = new Map<LexicalSite, { searches: number; found: number }>();

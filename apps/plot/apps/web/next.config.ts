@@ -49,7 +49,7 @@ const nextConfig: NextConfig = {
     proxyTimeout: 180_000,
   },
   async headers() {
-    return securityHeaders(process.env);
+    return securityHeaders();
   },
   async rewrites() {
     return [{ source: '/api/:path*', destination: `${apiOrigin}/api/:path*` }];

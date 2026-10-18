@@ -43,7 +43,7 @@ export interface ScriptChat {
 
 /** Messages after the kept ones one result may list — the branch a run can rebuild in one go. */
 export const MAX_SCRIPT_CHAT_MESSAGES = 2_000;
-/** The longest text one message may be given, as long as an overlay's text. */
+/** The longest text one message may be given, as long as a rewrite's text. */
 export const MAX_SCRIPT_CHAT_TEXT = 200_000;
 /** All the text one result may carry. */
 export const MAX_SCRIPT_CHAT_CHARS = 2_000_000;
