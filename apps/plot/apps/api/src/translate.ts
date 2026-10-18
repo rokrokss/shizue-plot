@@ -19,7 +19,7 @@ import {
 import type { LLMAdapter } from '@shizue/llm';
 import type { AppDeps } from './deps.js';
 import { ApiError } from './errors.js';
-import { collect, memoryChannel } from './memory.js';
+import { collect, memoryChannel, type AuxiliaryOwner } from './memory.js';
 
 /** One request's deadline. A reader is waiting on the original meanwhile, not on a blank. */
 const TRANSLATE_TIMEOUT_MS = 60_000;
@@ -58,7 +58,7 @@ async function translateBatch(
  */
 export async function translateTexts(
   deps: AppDeps,
-  owner: { userId: string; subModel: string | null },
+  owner: AuxiliaryOwner,
   texts: readonly string[],
   language: TranslationLanguage,
 ): Promise<Map<string, string>> {

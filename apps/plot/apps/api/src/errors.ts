@@ -1,4 +1,4 @@
-import { ChatGPTError } from '@shizue/llm';
+import { LLMError } from '@shizue/llm';
 import type { Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { routePath } from 'hono/route';
@@ -32,7 +32,9 @@ export const forbidden = (code: string, message: string): ApiError => new ApiErr
 export const notFound = (message = 'Not found'): ApiError => new ApiError(404, 'not_found', message);
 
 export function errorResponse(c: Context, error: unknown): Response {
-  if (error instanceof ChatGPTError) {
+  // A model provider's refusal (the ChatGPT connection's among them): its code and status, never its words.
+  if (error instanceof LLMError) {
+    if (error.detail) console.warn(`[api] ${error.code} (${error.status}): ${error.detail}`);
     const status = error.status >= 400 && error.status <= 599 ? error.status as ContentfulStatusCode : 502;
     return c.json<ErrorBody>({ error: error.message, code: error.code }, status);
   }

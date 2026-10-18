@@ -4,9 +4,11 @@ import { useTranslations } from 'next-intl';
 import { useEffect, useState } from 'react';
 import { Link, useRouter } from '@/i18n/navigation';
 import { apiGet, apiSend, readerHeaders } from '@/lib/api';
-import type { ChatState, ModelInfo, Persona, PlotProfile } from '@/lib/types';
+import { effectivePreset, OPEN_BINDING } from '@/lib/modelBinding';
+import type { ChatState, ModelBinding, ModelPreset, Persona, PlotProfile } from '@/lib/types';
 import { useErrorMessage } from '@/lib/useErrorMessage';
 import { PersonaFace } from './Avatar';
+import { ModelOptions } from './ModelOptions';
 import { Button, buttonClass, cx, ErrorText, Field, Section, Select } from './ui';
 
 /** Held so a plot with no recommendations gives the panel a stable prop. */
@@ -35,14 +37,15 @@ export function StartChatPanel({
 }) {
   const t = useTranslations('plot');
   const chat = useTranslations('chat');
-  const chatgpt = useTranslations('chatgpt');
   const toMessage = useErrorMessage();
   const router = useRouter();
 
-  const [models, setModels] = useState<ModelInfo[]>([]);
+  /** The owner's model presets; null until they are read. */
+  const [presets, setPresets] = useState<ModelPreset[] | null>(null);
+  const [defaults, setDefaults] = useState<ModelBinding>(OPEN_BINDING);
   const [personas, setPersonas] = useState<Persona[]>([]);
+  /** The main and sub presets picked here; empty follows the default binding. */
   const [model, setModel] = useState('');
-  /** The auxiliary model; empty is no pick, and the side work runs on the first model. */
   const [subModel, setSubModel] = useState('');
   const [personaId, setPersonaId] = useState('');
   /** The recommended profile the reader picked; exclusive with the persona. */
@@ -51,15 +54,27 @@ export function StartChatPanel({
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    apiGet<ModelInfo[]>('/api/models').then((list) => {
-      setModels(list);
-      setModel((current) => current || (list[0]?.id ?? ''));
+    Promise.all([
+      apiGet<ModelPreset[]>('/api/model-presets'),
+      apiGet<ModelBinding>('/api/model-binding').catch(() => OPEN_BINDING),
+    ]).then(([list, binding]) => {
+      setPresets(list);
+      setDefaults(binding);
+      // With no default to follow, the first preset, as the first model of the catalog once was.
+      if (!binding.main) setModel((current) => current || (list[0]?.id ?? ''));
     }, (caught) => setError(toMessage(caught)));
     apiGet<Persona[]>('/api/personas').then(setPersonas, () => undefined);
   }, [toMessage]);
 
+  const picked: ModelBinding = { main: model || null, sub: subModel || null };
+  // What the chat would open on — the picks, else the default's — named in the
+  // "기본 (…)" options. With none at all there is nothing to start it on.
+  const defaultMain = effectivePreset(presets ?? [], { ...picked, main: null }, defaults, 'main');
+  const defaultSub = effectivePreset(presets ?? [], { ...picked, sub: null }, defaults, 'sub');
+  const runnable = Boolean(model || defaultMain);
+
   async function start(): Promise<void> {
-    if (busy || !model) return;
+    if (busy || !runnable) return;
     setBusy(true);
     setError('');
     try {
@@ -68,8 +83,7 @@ export function StartChatPanel({
         '/api/chats',
         {
           plotId,
-          model,
-          ...(subModel ? { subModel } : {}),
+          ...(model || subModel ? { modelBinding: { ...(model ? { main: model } : {}), ...(subModel ? { sub: subModel } : {}) } } : {}),
           ...(introIndex !== undefined ? { introIndex } : {}),
           // The server refuses both at once, and the picker above never sets both:
           // a profile wins, and choosing a persona is what gives it up.
@@ -90,25 +104,22 @@ export function StartChatPanel({
     <Section title={t('startChat')} busy={busy}>
       <Field label={t('model')}>
         <Select value={model} onChange={(event) => setModel(event.target.value)}>
-          {models.map((entry) => (
-            <option key={entry.id} value={entry.id}>
-              {entry.label}
-            </option>
-          ))}
+          <ModelOptions
+            presets={presets ?? []}
+            value={model || null}
+            defaultLabel={defaultMain ? chat('modelDefaultIs', { model: defaultMain.name }) : chat('modelDefault')}
+          />
         </Select>
       </Field>
       {/* The chat settings' own control, so the copy is theirs too: next to the
-          model it spares, defaulting to the first model by name. */}
+          model it spares, defaulting to what the open sub runs on, by name. */}
       <Field label={chat('subModel')} hint={chat('subModelHint')}>
         <Select value={subModel} onChange={(event) => setSubModel(event.target.value)}>
-          <option value="">
-            {models[0] ? chat('subModelDefaultIs', { model: models[0].label }) : chat('subModelDefault')}
-          </option>
-          {models.map((entry) => (
-            <option key={entry.id} value={entry.id}>
-              {entry.label}
-            </option>
-          ))}
+          <ModelOptions
+            presets={presets ?? []}
+            value={subModel || null}
+            defaultLabel={defaultSub ? chat('subModelDefaultIs', { model: defaultSub.name }) : chat('subModelDefault')}
+          />
         </Select>
       </Field>
       {/* Who the reader is in this plot. The work's own suggestions come first —
@@ -173,14 +184,14 @@ export function StartChatPanel({
         </PersonaFace>
       </Field>
 
-      <ErrorText>{error || (models.length === 0 ? t('noModels') : '')}</ErrorText>
-      {models.length === 0 ? <Link href="/settings" className={buttonClass('secondary', 'sm', 'w-full')}>{chatgpt('connect')}</Link> : null}
+      <ErrorText>{error || (presets !== null && !runnable ? t('noModels') : '')}</ErrorText>
+      {presets !== null && !runnable ? <Link href="/settings" className={buttonClass('secondary', 'sm', 'w-full')}>{t('openModelSettings')}</Link> : null}
 
       <Button
         variant="primary"
         className="w-full"
         busy={busy}
-        disabled={!model}
+        disabled={!runnable}
         onClick={() => void start()}
       >
         {t('startChat')}

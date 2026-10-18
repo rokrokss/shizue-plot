@@ -255,7 +255,7 @@ test('the frame cannot reach the app, the network or storage', async () => {
       removed: ['fetch', 'XMLHttpRequest', 'WebSocket', 'RTCPeerConnection', 'localStorage'].every(
         (name) => (window as unknown as Record<string, unknown>)[name] === undefined,
       ),
-      fetch: await attempt(() => (proto['fetch'] as typeof globalThis.fetch).call(window, '/api/models')),
+      fetch: await attempt(() => (proto['fetch'] as typeof globalThis.fetch).call(window, '/api/model-presets')),
       cookie: await attempt(() => document.cookie),
       parentDom: await attempt(() => window.parent.document.title),
       topLocation: await attempt(() => window.top!.location.href),

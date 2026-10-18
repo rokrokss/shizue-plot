@@ -13,7 +13,7 @@ import { chatRoutes, messageRoutes } from './routes/chats.js';
 import { deviceRoutes } from './routes/devices.js';
 import { FILE_IMPORT_PART_BYTES, fileImportRoutes, MAX_WORLD_INFO_BYTES } from './fileImports.js';
 import { chatImportRoutes, importRoutes } from './routes/imports.js';
-import { modelRoutes } from './routes/models.js';
+import { credentialRoutes, modelBindingRoutes, modelPresetRoutes } from './routes/models.js';
 import { noteRoutes } from './routes/notes.js';
 import { personaRoutes } from './routes/personas.js';
 import { presetRoutes } from './routes/presets.js';
@@ -82,7 +82,10 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   app.route('/api/chatgpt', chatGPTRoutes(deps));
   // A phone opens this computer's shizue through a tunnel, paired from here.
   app.route('/api/devices', deviceRoutes(deps, sessions));
-  app.route('/api/models', modelRoutes(deps));
+  // The model layer (§7.1): keys and the ChatGPT connection, model presets, the default binding.
+  app.route('/api/credentials', credentialRoutes(deps));
+  app.route('/api/model-presets', modelPresetRoutes(deps));
+  app.route('/api/model-binding', modelBindingRoutes(deps));
 
   app.route('/api/plots', plotRoutes(deps));
   app.route('/api/personas', personaRoutes(deps));

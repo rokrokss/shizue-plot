@@ -1,4 +1,4 @@
-import { ChatGPTConnection } from '@/components/ChatGPTConnection';
+import { ModelSettings } from '@/components/ModelSettings';
 import { DevicePairing } from '@/components/DevicePairing';
 
 /** `error` is the code a ChatGPT connection that failed came back with (the API's callback). */
@@ -10,7 +10,8 @@ export default async function SettingsPage({
   const { error } = await searchParams;
   return (
     <div className="mx-auto w-full max-w-xl space-y-6 px-4 py-8">
-      <ChatGPTConnection error={typeof error === 'string' ? error : undefined} />
+      {/* Settings › Models: the model presets, the keys, and the ChatGPT connection among them. */}
+      <ModelSettings chatgptError={typeof error === 'string' ? error : undefined} />
       <DevicePairing />
     </div>
   );

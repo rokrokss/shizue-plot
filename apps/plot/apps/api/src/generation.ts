@@ -58,7 +58,7 @@ import {
   type TriggerRunInput,
 } from '@shizue/core/triggers';
 import { chats, messages, type Message } from '@shizue/db';
-import { ChatGPTError, getAdapter, getModel, supportsVision, type ChatGPTAccount, type LLMAdapter } from '@shizue/llm';
+import { isIdleTimeout, LLMError } from '@shizue/llm';
 import { eq, sql } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { streamSSE, type SSEStreamingApi } from 'hono/streaming';
@@ -67,6 +67,7 @@ import { withImageNote } from './attachments.js';
 import { chatRequestSent } from './cacheHealth.js';
 import { ApiError, badRequest } from './errors.js';
 import type { AppDeps, AppEnv, OpenGeneration, Tx } from './deps.js';
+import type { ResolvedModel } from './models.js';
 import { invalidateMemoryForEdit, noteRequestOverhead, scheduleMemoryUpdate } from './memory.js';
 import { runPromptScriptJob } from './regexWorker.js';
 import { withPromptScripts } from './sentHistory.js';
@@ -120,7 +121,14 @@ type GenerationTarget =
 
 export interface GenerationPlan {
   chatId: string;
+  /** The main preset's model id: what the reply is stored as written by, and what `{{model}}` reads. */
   model: string;
+  /**
+   * The model this turn runs on — the chat's main preset, resolved before
+   * anything is written so a turn that cannot run is refused untouched
+   * (`resolveModel`, §7.1).
+   */
+  main: ResolvedModel;
   /** The work this chat belongs to, as the assembler reads it. */
   plot: PromptPlot;
   /** Its roster, in the creator's order. May be empty. */
@@ -380,8 +388,8 @@ export async function withGenerationSlot(
  * can acknowledge an image it was not shown rather than ignoring a turn that
  * looks empty. A chat whose turns carry no images is untouched.
  */
-async function withoutUnseeableImages(history: HistoryMessage[], model: string, deps: AppDeps, account?: ChatGPTAccount): Promise<HistoryMessage[]> {
-  if (!history.some((turn) => turn.images?.length) || await supportsVision(model, deps.env, account)) return history;
+function withoutUnseeableImages(history: HistoryMessage[], vision: boolean): HistoryMessage[] {
+  if (!history.some((turn) => turn.images?.length) || vision) return history;
   return history.map((turn) => {
     if (!turn.images?.length) return turn;
     const { images, ...rest } = turn;
@@ -413,10 +421,9 @@ async function buildRequestMessages(
   plan: GenerationPlan,
   deps: AppDeps,
   reader: string,
-  account?: ChatGPTAccount,
   report = false,
 ): Promise<BuiltRequest> {
-  const request = await buildEditableRequest(plan, deps, reader, account, report);
+  const request = await buildEditableRequest(plan, deps, reader, report);
   // How much history fits beside the rest is what memory summarizes against.
   // An inspector's look changes nothing.
   if (!report && request.fixedTokens !== undefined) noteRequestOverhead(plan.chatId, request.fixedTokens);
@@ -427,10 +434,9 @@ async function buildEditableRequest(
   plan: GenerationPlan,
   deps: AppDeps,
   reader: string,
-  account?: ChatGPTAccount,
   report = false,
 ): Promise<BuiltRequest> {
-  const prompt = await assembleRequest(plan, deps, account, report);
+  const prompt = await assembleRequest(plan, deps, report);
   const lua = requestLuaInput(plan);
   const triggers = requestTriggerInput(plan);
   if (!lua && !triggers) return prompt;
@@ -732,7 +738,6 @@ export function tavernBiasOf(plan: Pick<GenerationPlan, 'target' | 'characters' 
 async function assembleRequest(
   plan: GenerationPlan,
   deps: AppDeps,
-  account?: ChatGPTAccount,
   report = false,
 ): Promise<AssembledPrompt> {
   // For continue the trailing assistant text must be the last turn so the model
@@ -786,11 +791,9 @@ async function assembleRequest(
   });
   // The scripts read the turns as stored, before an image note is added to them —
   // the greeting as this request's scripts left it, which is what the assembler sends.
-  const history = await withoutUnseeableImages(
+  const history = withoutUnseeableImages(
     await withPromptScripts(withBranchGreeting(isContinue ? plan.history.slice(0, -1) : plan.history, branch), plan, branch),
-    plan.model,
-    deps,
-    account,
+    plan.main.vision,
   );
   // The mode's own nudge first, then the bias's: one closing instruction rather
   // than two system turns in a row.
@@ -923,10 +926,9 @@ export async function inspectGeneration(
   deps: AppDeps,
   plan: GenerationPlan,
   reader: string,
-  account?: ChatGPTAccount,
 ): Promise<PromptReport> {
   try {
-    const { report } = await buildRequestMessages(plan, deps, reader, account, true);
+    const { report } = await buildRequestMessages(plan, deps, reader, true);
     return report!;
   } catch (error) {
     // What a generation would fail on, the inspector is told as a refusal.
@@ -938,35 +940,10 @@ export async function inspectGeneration(
 }
 
 /**
- * The reasoning effort to send with this turn, if any. Read here rather than
- * planned: it is a request option, not prompt input. The catalog can drop an
- * effort after the reader chose it, and one the model no longer advertises is
- * left unsent rather than risked as an upstream error. Best effort: the reply
- * does not depend on it, so a failed read sends none instead of failing the turn
- * under a misleading `model_unavailable`.
+ * What the stream may spend, which the prompt's budget reserves too: one number
+ * for both — the main preset's cap where it sets one, else the plot's reply length's.
  */
-async function chosenReasoningEffort(
-  deps: AppDeps,
-  plan: GenerationPlan,
-  account?: ChatGPTAccount,
-): Promise<string | undefined> {
-  try {
-    const [row] = await deps.db
-      .select({ reasoningEffort: chats.reasoningEffort })
-      .from(chats)
-      .where(eq(chats.id, plan.chatId));
-    const chosen = row?.reasoningEffort;
-    if (!chosen) return undefined;
-    const offered = (await getModel(plan.model, deps.env, account))?.reasoningEfforts;
-    return offered?.includes(chosen) ? chosen : undefined;
-  } catch (error) {
-    console.error('[api] reasoning effort lookup failed', error);
-    return undefined;
-  }
-}
-
-/** What the stream may spend, which the prompt's budget reserves too: one number for both. */
-const responseTokens = (plan: GenerationPlan): number => replyLengthTokens(plan.plot.style?.replyLength);
+const responseTokens = (plan: GenerationPlan): number => plan.main.maxTokens ?? replyLengthTokens(plan.plot.style?.replyLength);
 
 async function runGeneration(
   c: Context<AppEnv>,
@@ -974,17 +951,11 @@ async function runGeneration(
   plan: GenerationPlan,
   release: () => Promise<void>,
 ): Promise<Response> {
-  // Defensive: the routes already rejected unavailable models before writing
-  // anything, so this should not fire for the deterministic case.
-  let resolved: { adapter: LLMAdapter; providerModel: string };
+  // The model was resolved with the plan, before anything was written.
+  const resolved = plan.main;
   let request: BuiltRequest;
-  let reasoningEffort: string | undefined;
   try {
-    // The reader's own ChatGPT account answers their chat.
-    const account = deps.chatgpt?.accounts.forUser(c.get('userId'));
-    resolved = await (deps.getAdapter ?? getAdapter)(plan.model, deps.env, account);
-    request = await buildRequestMessages(plan, deps, c.get('userId'), account);
-    reasoningEffort = await chosenReasoningEffort(deps, plan, account);
+    request = await buildRequestMessages(plan, deps, c.get('userId'));
   } catch (error) {
     // The card's listeners grew the request past the chat's context: it fails
     // as RisuAI's `toomuchtoken` does, as a provider failure does here —
@@ -1006,7 +977,7 @@ async function runGeneration(
       });
     }
     await release();
-    if (error instanceof ChatGPTError) throw error;
+    if (error instanceof LLMError) throw error;
     // What went wrong is the log's; the reader's page is told only that it did.
     console.error('[generation] building the request failed', error);
     throw badRequest('model_unavailable', 'Model unavailable');
@@ -1045,9 +1016,11 @@ async function runGeneration(
     const heartbeat = setInterval(() => void send({ event: 'ping', data: '' }), HEARTBEAT_MS);
 
     let text = '';
+    /** What the model thought beside its answer, kept on the reply (`messages.reasoning`) and never sent. */
+    let reasoning = '';
     let usage: Usage = { promptTokens: 0, completionTokens: 0 };
-    /** The upstream went quiet (`chatgpt_timeout`): what it sent is kept as a stopped reply is. */
-    let timeout: ChatGPTError | null = null;
+    /** The upstream went quiet (`isIdleTimeout`): what it sent is kept as a stopped reply is. */
+    let timeout: LLMError | null = null;
 
     try {
       try {
@@ -1060,13 +1033,12 @@ async function runGeneration(
           model: resolved.providerModel,
           system: request.system,
           messages: request.messages,
-          // ChatGPT sharing accepts the prompt's length directive, not a hard
-          // token cap. Keep the budget here for prompt planning and test adapters.
+          // The cap the prompt's budget reserved; ChatGPT sharing takes none and
+          // reads the prompt's length directive instead. The preset's values ride
+          // with its adapter. Only another group member's turn stops a reply; the
+          // reader's lines may be written.
           maxTokens: responseTokens(plan),
-          // ChatGPT sharing does not accept sampling parameters. Only another
-          // group member's turn stops a reply; the reader's lines may be written.
           stop: request.stopSequences ?? [],
-          ...(reasoningEffort ? { reasoningEffort } : {}),
           // One cache per chat, whatever the branch: a regenerate or a swipe sends the
           // request its turn sent, which the cache serves whole, and a key of the
           // branch's own would look for it in another cache.
@@ -1076,8 +1048,11 @@ async function runGeneration(
 
         let next = await generator.next();
         while (!next.done) {
-          text += next.value.text;
-          await send({ event: 'delta', data: JSON.stringify({ text: next.value.text }) });
+          if (next.value.type === 'reasoning') reasoning += next.value.reasoning;
+          else {
+            text += next.value.text;
+            await send({ event: 'delta', data: JSON.stringify({ text: next.value.text }) });
+          }
           next = await generator.next();
         }
         usage = next.value.usage;
@@ -1086,15 +1061,17 @@ async function runGeneration(
         // A stop surfaces as an abort error, and a stream the upstream let go quiet
         // as `chatgpt_timeout`; both keep what arrived. Anything else is a real
         // failure and must not persist a message.
-        timeout = error instanceof ChatGPTError && error.code === 'chatgpt_timeout' ? error : null;
+        timeout = isIdleTimeout(error) ? error : null;
         if (!controller.signal.aborted && !timeout) {
-          // A provider's failure has its code and a message made to be shown; any
-          // other is the log's, and the reader is told only that the reply failed.
-          if (!(error instanceof ChatGPTError)) console.error('[generation] stream failed', error);
+          // A provider's failure has its code and a message made to be shown, and
+          // its own words go to the log; any other is the log's alone, and the
+          // reader is told only that the reply failed.
+          if (!(error instanceof LLMError)) console.error('[generation] stream failed', error);
+          else if (error.detail) console.warn(`[generation] ${error.code} (${error.status}): ${error.detail}`);
           await send({
             event: 'error',
             data: JSON.stringify(
-              error instanceof ChatGPTError
+              error instanceof LLMError
                 ? { message: error.message, code: error.code }
                 : { message: 'Generation failed', code: 'generation_failed' },
             ),
@@ -1110,7 +1087,7 @@ async function runGeneration(
         if (text) {
           // Stored pending all the same, if the browser meant to post-process
           // it: the next time it opens the chat it finds the mark and finishes.
-          await persist(deps, plan, text, usage, request, { stopped: true });
+          await persist(deps, plan, text, usage, request, { stopped: true, reasoning });
           await keepGlobalWrites(deps, plan, request);
           if (!plan.postProcess) scheduleBackgroundUpdates(deps, plan.chatId);
         }
@@ -1120,7 +1097,7 @@ async function runGeneration(
         return;
       }
 
-      const stored = await persist(deps, plan, text, usage, request);
+      const stored = await persist(deps, plan, text, usage, request, { reasoning });
       await keepGlobalWrites(deps, plan, request);
       await send({
         event: 'done',
@@ -1450,8 +1427,12 @@ async function persist(
   text: string,
   usage: Usage,
   { loreTriggers, variableWrites, listenerEdits }: Pick<BuiltRequest, 'loreTriggers' | 'variableWrites' | 'listenerEdits'>,
-  /** The reader stopped it: nothing chooses its emotion picture again (`scheduleBackgroundUpdates`). */
-  { stopped = false }: { stopped?: boolean } = {},
+  /**
+   * The reader stopped it: nothing chooses its emotion picture again
+   * (`scheduleBackgroundUpdates`). `reasoning`: what the model thought, which
+   * a new reply keeps folded above its text and never sends.
+   */
+  { stopped = false, reasoning = '' }: { stopped?: boolean; reasoning?: string } = {},
 ): Promise<StoredTurn> {
   const scriptState = plan.postProcess ? ('pending' as const) : null;
   // A SillyTavern reply is what the model wrote after the bias it went on from;
@@ -1519,6 +1500,7 @@ async function persist(
         model: plan.model,
         promptTokens: usage.promptTokens,
         completionTokens: usage.completionTokens,
+        ...(reasoning.trim() ? { reasoning: reasoning.trim() } : {}),
         loreTriggers: loreTriggers.length > 0 ? loreTriggers : null,
         variableDelta: storableDelta(generatedDelta(plan, content, content, variableWrites)),
         scriptState,

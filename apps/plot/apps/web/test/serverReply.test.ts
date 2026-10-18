@@ -76,7 +76,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
   return {
     ...original,
     apiGet: (url: string) => {
-      if (url === '/api/models') return Promise.resolve([]);
+      if (url === '/api/model-presets') return Promise.resolve([]);
       if (url.endsWith('/public')) return Promise.resolve({ characters: [], displayScripts: [], defaultVariables: {} });
       if (url === '/api/chats/cht_1' || url.startsWith('/api/chats/cht_1?')) {
         chatReads += 1;
@@ -107,10 +107,10 @@ const reply = message('msg_3', 'msg_2', 'assistant', '부분 응답 끝.');
 const state = (path: ReturnType<typeof message>[], generating: boolean): ChatState =>
   ({
     chat: {
-      id: 'cht_1', plotId: 'sty_1', personaId: null, title: '비 오는 밤의 서점', model: 'm1', subModel: null, note: '',
+      id: 'cht_1', plotId: 'sty_1', personaId: null, title: '비 오는 밤의 서점', modelBinding: { main: 'm1', sub: null }, note: '',
       preset: 'default', headMessageId: path.at(-1)!.id, memoryRevision: 0, memorySettings: null,
       narrator: null, allowComponentTurns: false, statusWindowEnabled: false,
-      choicesEnabled: false, reasoningEffort: null, absentCharacterIds: [], noteIds: [], generating,
+      choicesEnabled: false, absentCharacterIds: [], noteIds: [], generating,
       createdAt: '2026-08-16T00:00:00.000Z', updatedAt: '2026-08-16T00:00:00.000Z',
     },
     path,

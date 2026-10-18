@@ -1,10 +1,11 @@
 # shizue-plot
 
 shizue (always lowercase) is a character-chat app one person runs on their own
-computer, as RisuAI and PocketRisu are: there are no accounts, and the owner's
-ChatGPT plan, connected through the Shizue extension, pays for replies. It
-imports RisuAI and SillyTavern cards and plays them as those apps do. The UI is
-in Korean, English and Japanese.
+computer, as RisuAI and PocketRisu are: there are no accounts, and replies run
+on the owner's model presets — their ChatGPT plan, connected through the Shizue
+extension, their own API keys, or a model server on this computer. It imports
+RisuAI and SillyTavern cards and plays them as those apps do. The UI is in
+Korean, English and Japanese.
 
 This file covers what the code doesn't show: commands, gotchas and the owner's
 standing decisions. The docs below own behavior. Read the relevant one before

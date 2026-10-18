@@ -1,18 +1,29 @@
-import type { ModelInfo } from '@/lib/types';
+import type { ModelPreset } from '@/lib/types';
 
 /**
- * The models a chat may run on, as a select's options — the one list the
- * settings' model control (`ChatSettings`) and the header's pill (`ModelPill`)
- * both offer.
+ * A model slot's choices as a select's options — the one list the settings'
+ * main and sub controls (`ChatSettings`), the header's pill (`ModelPill`), the
+ * start panel and the default binding all offer: the slot left to the default
+ * (`''`, named by `defaultLabel`), then the owner's model presets.
  */
-export function ModelOptions({ model, models }: { model: string; models: ModelInfo[] }) {
+export function ModelOptions({
+  presets,
+  value,
+  defaultLabel,
+}: {
+  presets: readonly ModelPreset[];
+  /** The slot's pick; null is the default. */
+  value: string | null;
+  defaultLabel: string;
+}) {
   return (
     <>
-      {/* Keep a historical model visible until the reader selects an available ChatGPT model. */}
-      {models.some((entry) => entry.id === model) ? null : <option value={model}>{model}</option>}
-      {models.map((entry) => (
-        <option key={entry.id} value={entry.id}>
-          {entry.label}
+      <option value="">{defaultLabel}</option>
+      {/* A pick the list does not have yet stays visible until the list is in. */}
+      {value && !presets.some((preset) => preset.id === value) ? <option value={value}>{value}</option> : null}
+      {presets.map((preset) => (
+        <option key={preset.id} value={preset.id}>
+          {preset.name}
         </option>
       ))}
     </>

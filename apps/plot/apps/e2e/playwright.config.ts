@@ -59,8 +59,8 @@ export default defineConfig({
         // happen to be on disk.
         EMBEDDER: 'off',
       },
-      // Public route, so a plain 200 means the API is really serving.
-      url: `${API_URL}/api/models`,
+      // The probe answers before anyone is known, so a plain 200 means the API is really serving.
+      url: `${API_URL}/api/health`,
       reuseExistingServer: false,
       timeout: 120_000,
     },

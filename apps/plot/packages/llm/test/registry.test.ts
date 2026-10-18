@@ -1,57 +1,105 @@
-import { describe, expect, it, vi } from 'vitest';
-import { getAdapter, listEnabledModels, supportsVision } from '../src/registry.js';
+import { describe, expect, it } from 'vitest';
+import {
+  adapterFor,
+  availableFormats,
+  connectionOf,
+  credentialFits,
+  formatOf,
+  validateCredential,
+  type ModelCredential,
+} from '../src/formats/index.js';
+import { applyParameters, parseCapabilities, parseModelParams, reformat, withPresetParams } from '../src/params.js';
 import type { ChatGPTAccount } from '../src/chatgptAuth.js';
+import { drain, recordingFetch, REQUEST, thrown } from './helpers.js';
 
-describe('ChatGPT-only registry', () => {
-  it('does not fall back to Echo or legacy keys without a signed-in account', async () => {
-    const env = { NODE_ENV: 'development', OPENROUTER_API_KEY: 'old-key', SHIZUE_TEST_MODELS: '1' };
-    const network = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('No network expected'));
-    try {
-      expect(await listEnabledModels(env)).toEqual([]);
-      await expect(getAdapter('echo/echo', env)).rejects.toMatchObject({ code: 'chatgpt_login_required' });
-      await expect(getAdapter('openai/gpt-5', env)).rejects.toMatchObject({ code: 'chatgpt_login_required' });
-      expect(network).not.toHaveBeenCalled();
-    } finally { network.mockRestore(); }
+const key = (provider: string, baseUrl: string | null = null): ModelCredential => ({ kind: 'api_key', provider, baseUrl, apiKey: 'sk-test' });
+
+describe('the format registry', () => {
+  it('offers echo to the test runner alone', () => {
+    expect(availableFormats({ NODE_ENV: 'test' }).map((format) => format.id)).toEqual(['openai-chat', 'openai-responses', 'anthropic', 'google', 'echo']);
+    expect(availableFormats({ NODE_ENV: 'production' }).map((format) => format.id)).toEqual(['openai-chat', 'openai-responses', 'anthropic', 'google']);
+    expect(formatOf('echo', { NODE_ENV: 'development' })).toBeUndefined();
+    expect(thrown(() => adapterFor({ format: 'echo', endpoint: null, model: 'echo', params: {}, capabilities: {} }, undefined, { NODE_ENV: 'development' })))
+      .toMatchObject({ code: 'format_unavailable', status: 400 });
   });
-  it("serves each reader from their own account's catalog and token", async () => {
-    const env = { NODE_ENV: 'development' };
-    const account = (model: string, token: string): ChatGPTAccount => ({
-      accessToken: async () => token,
-      models: async () => [{ id: model, label: model, vision: model === 'vision' }],
+
+  it("sends a key only to its credential's address, and a keyless preset to its own", () => {
+    const chat = formatOf('openai-chat', {})!;
+    expect(connectionOf(chat, 'https://attacker.example/v1', key('deepseek')).baseUrl).toBe('https://api.deepseek.com');
+    expect(connectionOf(chat, 'https://attacker.example/v1', key('custom', 'http://localhost:8000/v1')).baseUrl).toBe('http://localhost:8000/v1');
+    expect(connectionOf(chat, 'http://localhost:11434/v1', undefined)).toEqual({ baseUrl: 'http://localhost:11434/v1', access: { kind: 'none' } });
+    // A custom credential without its own address has nowhere to go.
+    expect(thrown(() => connectionOf(chat, null, key('custom')))).toMatchObject({ code: 'endpoint_required' });
+    expect(thrown(() => connectionOf(chat, null, undefined))).toMatchObject({ code: 'endpoint_required' });
+  });
+
+  it('holds a credential to the formats its provider speaks', () => {
+    const anthropic = formatOf('anthropic', {})!;
+    const responses = formatOf('openai-responses', {})!;
+    expect(credentialFits(anthropic, { kind: 'api_key', provider: 'anthropic' })).toBe(true);
+    expect(credentialFits(anthropic, { kind: 'api_key', provider: 'openai' })).toBe(false);
+    expect(credentialFits(responses, { kind: 'chatgpt' })).toBe(true);
+    expect(credentialFits(anthropic, { kind: 'chatgpt' })).toBe(false);
+    expect(thrown(() => connectionOf(anthropic, null, key('openai')))).toMatchObject({ code: 'credential_format_mismatch' });
+    expect(thrown(() => connectionOf(formatOf('google', {})!, null, undefined))).toMatchObject({ code: 'credential_required' });
+  });
+
+  it("checks OpenRouter's key at /key, another key by listing models, and the ChatGPT connection by its catalog", async () => {
+    const { fetcher, sent } = recordingFetch(() => Response.json({ data: [] }));
+    await validateCredential(key('openrouter'), {}, fetcher);
+    await validateCredential(key('anthropic'), {}, fetcher);
+    expect(sent.map((request) => request.url)).toEqual(['https://openrouter.ai/api/v1/key', 'https://api.anthropic.com/v1/models?limit=1000']);
+    expect(sent[0]!.headers['authorization']).toBe('Bearer sk-test');
+    const refused = recordingFetch(() => Response.json({ error: { message: 'No auth credentials found' } }, { status: 401 }));
+    await expect(validateCredential(key('openrouter'), {}, refused.fetcher)).rejects.toMatchObject({ code: 'provider_unauthorized' });
+    let asked = 0;
+    const account: ChatGPTAccount = { accessToken: async () => 'T', models: async () => { asked += 1; return []; } };
+    await validateCredential({ kind: 'chatgpt', account }, {});
+    expect(asked).toBe(1);
+  });
+
+  it('runs echo for the tests, with the delay its env sets', async () => {
+    const adapter = adapterFor({ format: 'echo', endpoint: null, model: 'echo', params: {}, capabilities: {} }, undefined, { NODE_ENV: 'test' });
+    expect((await drain(adapter.stream({ ...REQUEST, messages: [{ role: 'user', content: '안녕 리안' }] }))).text).toBe('안녕 리안');
+  });
+});
+
+describe("a preset's values", () => {
+  it("lay over the caller's request: the values, the preset's cap in place of the caller's, and both sets of stop strings", () => {
+    expect(withPresetParams({ ...REQUEST, temperature: 0.2 }, { temperature: 0.9, maxTokens: 4000, stop: ['END'], extraBody: { a: 1 } })).toEqual({
+      ...REQUEST, temperature: 0.9, maxTokens: 4000, stop: ['\nUser:', 'END'],
     });
-    expect(await listEnabledModels(env, account('gpt-a', 'A'))).toEqual([{ id: 'gpt-a', label: 'gpt-a' }]);
-    // The efforts travel with the listing — the selector is drawn from them.
-    expect(await listEnabledModels(env, {
-      accessToken: async () => 'C',
-      models: async () => [{ id: 'gpt-r', label: 'R', vision: true, reasoningEfforts: ['low', 'high'], defaultReasoningEffort: 'low' }],
-    })).toEqual([{ id: 'gpt-r', label: 'R', reasoningEfforts: ['low', 'high'], defaultReasoningEffort: 'low' }]);
-    expect(await supportsVision('vision', env, account('vision', 'B'))).toBe(true);
-    await expect(getAdapter('gpt-a', env, account('gpt-b', 'B'))).rejects.toMatchObject({ code: 'model_unavailable' });
-    expect((await getAdapter('gpt-a', env, account('gpt-a', 'A'))).providerModel).toBe('gpt-a');
+    expect(withPresetParams(REQUEST, {})).toEqual(REQUEST);
   });
-  it("hands a token the provider turned down back to the reader's account for another", async () => {
-    const asked: (string | undefined)[] = [];
-    const account: ChatGPTAccount = {
-      accessToken: async (rejected) => { asked.push(rejected); return rejected ? 'NEW' : 'OLD'; },
-      models: async () => [{ id: 'gpt-a', label: 'gpt-a', vision: false }],
-    };
-    const completed = `data: ${JSON.stringify({ type: 'response.completed', response: { usage: { input_tokens: 1, output_tokens: 0 } } })}\n\n`;
-    const network = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) =>
-      new Headers(init!.headers).get('authorization') === 'Bearer OLD'
-        ? Response.json({ error: { code: 'token_expired' } }, { status: 401 })
-        : new Response(completed));
-    try {
-      const { adapter } = await getAdapter('gpt-a', { NODE_ENV: 'development' }, account);
-      const stream = adapter.stream({ model: 'gpt-a', system: '', messages: [{ role: 'user', content: 'hi' }], maxTokens: 10 });
-      expect((await stream.next()).done).toBe(true);
-      expect(asked).toEqual([undefined, 'OLD']);
-    } finally { network.mockRestore(); }
+
+  it("go where the format takes them, and not at all where it does not (RisuAI's applyParameters)", () => {
+    expect(applyParameters({ model: 'm' }, { temperature: 0.5, topK: 3, thinkingTokens: 100 }, { temperature: 'temperature', thinkingTokens: 'a.b.c' }))
+      .toEqual({ model: 'm', temperature: 0.5, a: { b: { c: 100 } } });
   });
-  it('offers deterministic models only to the test runner', async () => {
-    expect(await listEnabledModels({ NODE_ENV: 'test' })).toEqual([{ id: 'echo/echo', label: 'Echo (test)' }]);
-    expect((await getAdapter('echo/echo', { NODE_ENV: 'test' })).providerModel).toBe('echo');
-    expect(await supportsVision('test/vision', { NODE_ENV: 'test', SHIZUE_TEST_MODELS: '1' })).toBe(true);
-    expect(await supportsVision('unknown', { NODE_ENV: 'test' })).toBe(false);
-    await expect(getAdapter('unknown', { NODE_ENV: 'test' })).rejects.toMatchObject({ code: 'model_unavailable' });
+
+  it("move system turns and join roles for a strict chat template (RisuAI's reformater)", () => {
+    const messages = [
+      { role: 'system' as const, content: 'one' }, { role: 'system' as const, content: 'two' },
+      { role: 'assistant' as const, content: 'hi' }, { role: 'system' as const, content: 'note' }, { role: 'user' as const, content: 'yo' },
+    ];
+    expect(reformat(messages)).toEqual(messages);
+    expect(reformat(messages, { systemPrompt: 'first', alternateRoles: true, startWithUser: true })).toEqual([
+      { role: 'system', content: 'one\n\ntwo' },
+      { role: 'user', content: ' ' },
+      { role: 'assistant', content: 'hi' },
+      { role: 'user', content: 'system: note\nyo' },
+    ]);
+    expect(reformat(messages, { systemPrompt: 'none' })[0]).toEqual({ role: 'user', content: 'system: one' });
+  });
+
+  it('are refused out of range, unknown or unsafe', () => {
+    expect(parseModelParams({ temperature: 0.8, topK: 40, reasoningEffort: 'high', verbosity: 'low', maxTokens: 2000, stop: ['\n'], extraHeaders: { 'X-A': '1' }, extraBody: { seed: 1 }, topP: null }))
+      .toEqual({ temperature: 0.8, topK: 40, reasoningEffort: 'high', verbosity: 'low', maxTokens: 2000, stop: ['\n'], extraHeaders: { 'X-A': '1' }, extraBody: { seed: 1 } });
+    for (const bad of [
+      { temperature: 3 }, { topK: 1.5 }, { frequencyPenalty: -3 }, { reasoningEffort: 'HIGH' }, { verbosity: 'max' }, { maxTokens: 0 },
+      { stop: [''] }, { extraHeaders: { 'Content-Length': '1' } }, { extraHeaders: { 'X-A': 'a\r\nB: c' } }, { nope: 1 }, [],
+    ]) expect(() => parseModelParams(bad), JSON.stringify(bad)).toThrow(TypeError);
+    expect(parseCapabilities({ vision: true, systemPrompt: 'first' })).toEqual({ vision: true, systemPrompt: 'first' });
+    expect(() => parseCapabilities({ vision: 'yes' })).toThrow(TypeError);
   });
 });

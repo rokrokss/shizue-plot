@@ -77,7 +77,7 @@ import {
   type Plot,
 } from '@shizue/db';
 import { AI_OUTPUT, SLASH_COMMAND, USER_INPUT } from '@shizue/core/prompt-scripts';
-import { contentText, getModel, type ChatMessage } from '@shizue/llm';
+import { contentText, type ChatMessage } from '@shizue/llm';
 import {
   cardScripts,
   hasTriggersFor,
@@ -172,6 +172,7 @@ import { isSillyTavernCard, loadOwnedPlot, toPromptCharacters, toPromptPlot } fr
 import { editRequestTurns } from '../requestTriggers.js';
 import { createScriptFetch } from '../scriptFetch.js';
 import { readScriptLlmMessages, readScriptLlmModel, runScriptLlm } from '../scriptLlm.js';
+import { bindingJson, mergeBinding, readBindingPatch, resolveModel, resolvePreset } from '../models.js';
 import { asSent, foldOptionsOf, promptBranch, toHistory } from '../sentHistory.js';
 import { RECENT_TURNS as SUGGEST_RECENT_TURNS, suggestReplies } from '../suggest.js';
 import { readerMembers } from '../transcript.js';
@@ -193,12 +194,11 @@ export const toChatJson = (chat: Chat, noteIds: string[], generating = false) =>
   plotId: chat.plotId,
   personaId: chat.personaId,
   title: chat.title,
-  model: chat.model,
   /**
-   * The auxiliary model the reader picked for scripts' auxiliary calls and the
-   * background work; null runs them on the first model of the owner's catalog.
+   * The model presets the chat runs on (§7.1): `main` its turns, `sub` the side
+   * work. Null follows the owner's default binding — and an open sub, the main.
    */
-  subModel: chat.subModel,
+  modelBinding: bindingJson(chat.modelBinding),
   note: chat.note,
   /** Where the note goes and how often (SillyTavern's depth, frequency and role), the defaults filled in. */
   noteSettings: authorNoteSettingsOf(chat.noteSettings),
@@ -230,8 +230,6 @@ export const toChatJson = (chat: Chat, noteIds: string[], generating = false) =>
    */
   statusWindowEnabled: chat.statusWindowEnabled,
   choicesEnabled: chat.choicesEnabled,
-  /** One of the model's advertised efforts, or null to send none. */
-  reasoningEffort: chat.reasoningEffort,
   /**
    * Members the reader sent off the stage; empty while the whole roster is on.
    * An id whose member has since been deleted may linger here — it matches
@@ -476,61 +474,20 @@ function pathWindow(c: Context<AppEnv>): PathWindow {
   return { ...(before === undefined ? {} : { before }), limit: Math.min(limit, MAX_PATH_LIMIT) };
 }
 
-async function requireEnabledModel(deps: AppDeps, userId: string, model: string): Promise<string> {
-  const entry = await getModel(model, deps.env, deps.chatgpt?.accounts.forUser(userId));
-  if (!entry) {
-    throw badRequest('model_unavailable', `Model not available: ${model}`);
-  }
-  return model;
-}
-
 /**
- * The auxiliary model a start opens the chat with or a PATCH leaves it with;
- * undefined leaves it alone (a start: no pick). A model is held to the reader's
- * catalog exactly as the chat's own is, and null clears the pick, handing the
- * side work back to the default (`auxiliaryModelOf`).
+ * The binding a start opens the chat with or a PATCH leaves it with
+ * (`modelBinding: {main?, sub?}`); undefined leaves it alone. A slot is held to
+ * the owner's presets as it is set (`readBindingPatch`), and null hands it back
+ * to the default.
  */
-async function optionalSubModel(
+async function optionalBinding(
   deps: AppDeps,
   userId: string,
   body: Record<string, unknown>,
-): Promise<string | null | undefined> {
-  const value = body['subModel'];
-  if (value === undefined || value === null) return value;
-  if (typeof value !== 'string') throw badRequest('invalid_request', 'subModel must be a string or null');
-  return requireEnabledModel(deps, userId, value);
-}
-
-/**
- * The reasoning effort a PATCH leaves the chat with; undefined leaves it alone. A
- * requested effort must be one the chat's model advertises — the new model, when
- * the same body switches it — and null clears it. A model switch on its own keeps
- * the stored effort only where the new model offers it too, so the setting never
- * names something the selector cannot show.
- */
-async function patchedReasoningEffort(
-  deps: AppDeps,
-  userId: string,
-  body: Record<string, unknown>,
-  chat: Chat,
-  model: string | undefined,
-): Promise<string | null | undefined> {
-  const offered = async (id: string): Promise<string[]> =>
-    (await getModel(id, deps.env, deps.chatgpt?.accounts.forUser(userId)))?.reasoningEfforts ?? [];
-  const requested = body['reasoningEffort'];
-  if (requested === null) return null;
-  if (requested === undefined) {
-    if (model === undefined || chat.reasoningEffort === null) return undefined;
-    return (await offered(model)).includes(chat.reasoningEffort) ? undefined : null;
-  }
-  if (typeof requested !== 'string') {
-    throw badRequest('invalid_request', 'reasoningEffort must be a string or null');
-  }
-  const target = model ?? chat.model;
-  if (!(await offered(target)).includes(requested)) {
-    throw badRequest('invalid_request', `Reasoning effort not offered by ${target}: ${requested}`);
-  }
-  return requested;
+  current: Chat['modelBinding'],
+): Promise<Chat['modelBinding'] | undefined> {
+  if (body['modelBinding'] === undefined) return undefined;
+  return mergeBinding(current, await readBindingPatch(deps, userId, body['modelBinding']));
 }
 
 /** Validates an optional preset id against the catalog @shizue/core owns. */
@@ -976,7 +933,7 @@ function readerPromptSettings(
       userId: chat.userId,
       plotLanguage: plot.language,
       ...(language.mode === 'instruct' && language.language ? { conversationLanguage: language.language } : {}),
-      subModel: chat.subModel,
+      modelBinding: chat.modelBinding,
       retrieval: retrievalEnabled(chat.retrieval),
     },
   };
@@ -1030,12 +987,11 @@ function loreStateOf(branch: Message[]): LoreTimedState {
  */
 const promptHistory = async (
   deps: AppDeps,
-  userId: string,
-  model: string,
+  vision: boolean,
   source: Message[],
   speaker: string | undefined,
 ): Promise<HistoryMessage[]> =>
-  withTurnImages(deps, userId, model, source, await withFileTexts(deps, source, toHistory(source, speaker)));
+  withTurnImages(deps, vision, source, await withFileTexts(deps, source, toHistory(source, speaker)));
 
 /**
  * Chat variables of a branch. Folded over the *whole* branch rather than the
@@ -1612,7 +1568,7 @@ async function regeneratePlan(
   group?: { speakerId: string; notLast: boolean },
   request?: string,
 ): Promise<GenerationPlan> {
-  await requireEnabledModel(deps, chat.userId, chat.model);
+  const main = await resolveModel(deps, chat, 'main');
   const context = await loadGenerationContext(deps, chat, scripts);
   const voice = group ? groupVoiceOf(context, group.speakerId) : null;
   const scriptMember = scriptMemberOf(scripts.memberId, context.members);
@@ -1657,15 +1613,15 @@ async function regeneratePlan(
 
   return {
     chatId: chat.id,
-    model: chat.model,
+    model: main.preset.model,
+    main,
     plot: context.plot,
     characters: context.characters,
     personaText: context.personaText,
     userName: context.userName,
     history: await promptHistory(
       deps,
-      chat.userId,
-      chat.model,
+      main.vision,
       gone > 0 && !edited ? memory.history.slice(0, Math.max(0, memory.history.length - gone)) : memory.history,
       context.scriptSpeaker,
     ),
@@ -1878,10 +1834,12 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     // The chat points at the work's row, so later edits reach it.
     const plot = await loadOwnedPlot(deps, plotId, userId);
 
-    const model = await requireEnabledModel(deps, c.get('userId'), requireString(body, 'model'));
     // Checked before the persona: a profile pick copies a row, and a refused
-    // start must leave nothing behind.
-    const subModel = await optionalSubModel(deps, userId, body);
+    // start must leave nothing behind. A chat opens on a model it can run on:
+    // its own pick, or the default binding's.
+    const modelBinding = (await optionalBinding(deps, userId, body, null)) ?? null;
+    const model = (await resolvePreset(deps, { userId, modelBinding }, 'main'))?.model;
+    if (!model) throw badRequest('model_unavailable', 'No model preset is set; add one in Settings › Models');
     const persona = await startPersona(deps, userId, plot, body);
 
     // SillyTavern's stored-text scripts rewrite the greetings a chat opens on, as
@@ -1910,8 +1868,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         plotId,
         personaId: persona?.id ?? null,
         title: plot.name,
-        model,
-        subModel: subModel ?? null,
+        modelBinding,
       })
       .returning();
     let chat = created!;
@@ -1955,7 +1912,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     // on the reader's auxiliary model, if its creator's pass never made them.
     const language = resolveTranslation(chat.translation, plot.language, readerLocale(c));
     if (language.mode === 'instruct' && language.language === 'ko') {
-      scheduleLoreAliases(deps, plotId, { userId, subModel: chat.subModel });
+      scheduleLoreAliases(deps, plotId, { userId, modelBinding: chat.modelBinding });
     }
 
     return c.json(await chatState(deps, chat), 201);
@@ -2084,9 +2041,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const chat = await loadWritableChat(deps, id, userId);
       const body = await readJsonBody(c);
 
-      const model =
-        body['model'] === undefined ? undefined : await requireEnabledModel(deps, c.get('userId'), requireString(body, 'model'));
-      const subModel = await optionalSubModel(deps, userId, body);
+      const modelBinding = await optionalBinding(deps, userId, body, chat.modelBinding);
       const personaId =
         'personaId' in body ? ((await resolvePersona(deps, userId, body['personaId']))?.id ?? null) : undefined;
       const note = optionalString(body, 'note');
@@ -2099,7 +2054,6 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const statusWindowEnabled = optionalBoolean(body, 'statusWindowEnabled');
       const choicesEnabled = optionalBoolean(body, 'choicesEnabled');
       const narrator = optionalNarrator(body);
-      const reasoningEffort = await patchedReasoningEffort(deps, userId, body, chat, model);
       const absentCharacterIds = await patchedAbsentIds(deps, body, chat);
       const noteSettings = optionalSettings(body, 'noteSettings', coerceAuthorNoteSettings);
       const translation = optionalSettings(body, 'translation', coerceTranslationSettings);
@@ -2113,8 +2067,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         noteSettings === undefined &&
         translation === undefined &&
         retrieval === undefined &&
-        model === undefined &&
-        subModel === undefined &&
+        modelBinding === undefined &&
         personaId === undefined &&
         note === undefined &&
         preset === undefined &&
@@ -2125,7 +2078,6 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         statusWindowEnabled === undefined &&
         choicesEnabled === undefined &&
         narrator === undefined &&
-        reasoningEffort === undefined &&
         absentCharacterIds === undefined
       ) {
         return c.json(await releasedState(deps, chat));
@@ -2134,8 +2086,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const [updated] = await deps.db
         .update(chats)
         .set({
-          ...(model !== undefined ? { model } : {}),
-          ...(subModel !== undefined ? { subModel } : {}),
+          ...(modelBinding !== undefined ? { modelBinding } : {}),
           ...(personaId !== undefined ? { personaId } : {}),
           ...(note !== undefined ? { note } : {}),
           ...(preset !== undefined ? { preset } : {}),
@@ -2146,7 +2097,6 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           ...(statusWindowEnabled !== undefined ? { statusWindowEnabled } : {}),
           ...(choicesEnabled !== undefined ? { choicesEnabled } : {}),
           ...(narrator !== undefined ? { narrator } : {}),
-          ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
           ...(absentCharacterIds !== undefined ? { absentCharacterIds } : {}),
           ...(noteSettings !== undefined ? { noteSettings } : {}),
           ...(translation !== undefined ? { translation } : {}),
@@ -2875,15 +2825,14 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     }
     if (!(await acquireChatSlot(deps, chat.id))) rejectBusyChat();
     try {
-      // An owner with no catalog resolves to '', and the adapter then says why,
-      // as it does for the chat's own model.
-      const model = which === 'sub' ? await auxiliaryModelOf(deps, chat) : chat.model;
+      // The chat's main model, or its sub — which an open sub leaves to the main.
+      const model = await resolveModel(deps, chat, which);
       // RisuAI runs the request triggers over a script's call as over any request it sends.
       const sent = hasTriggersFor(scripted.scripts.triggers, 'request')
         ? await withScriptRequestTriggers(c, deps, chat, messages, scripted.member.id)
         : messages;
       return c.json({
-        result: await runScriptLlm(deps, { userId, model, messages: sent, signal: c.req.raw.signal }),
+        result: await runScriptLlm({ model, messages: sent, signal: c.req.raw.signal }),
       });
     } finally {
       await releaseChatSlot(deps, chat.id);
@@ -3061,7 +3010,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       const chat = await loadWritableChat(deps, id, userId);
       // Fail before any write: a 400 here must leave the chat untouched, otherwise
       // the client resends a turn that was already persisted.
-      await requireEnabledModel(deps, userId, chat.model);
+      const main = await resolveModel(deps, chat, 'main');
       const { context, edited, voice } = await storeTurn(chat);
       const branch = edited.path;
 
@@ -3070,15 +3019,15 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       // it; the rest of the branch's are not re-sent (see `withTurnImages`).
       const history = await promptHistory(
         deps,
-        c.get('userId'),
-        chat.model,
+        main.vision,
         [...memory.history, ...branch.slice(-1)],
         context.scriptSpeaker,
       );
 
       return {
         chatId: chat.id,
-        model: chat.model,
+        model: main.preset.model,
+        main,
         plot: context.plot,
         characters: context.characters,
         personaText: context.personaText,
@@ -3175,7 +3124,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
 
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
       const chat = await loadWritableChat(deps, id, userId);
-      await requireEnabledModel(deps, userId, chat.model);
+      const main = await resolveModel(deps, chat, 'main');
       const context = await loadGenerationContext(deps, chat, scripts);
       const voice = groupVoiceOf(context, speakerId);
       const scriptMember = scriptMemberOf(scripts.memberId, context.members);
@@ -3209,12 +3158,13 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
 
       return {
         chatId: chat.id,
-        model: chat.model,
+        model: main.preset.model,
+        main,
         plot: context.plot,
         characters: context.characters,
         personaText: context.personaText,
         userName: context.userName,
-        history: await promptHistory(deps, c.get('userId'), chat.model, history, context.scriptSpeaker),
+        history: await promptHistory(deps, main.vision, history, context.scriptSpeaker),
         wholeBranch: path,
         memoryText: memory.memoryText,
         recalledMemoryText: memory.recalledMemoryText,
@@ -3253,7 +3203,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const userId = c.get('userId');
     const chat = await loadOwnedChat(deps, requireUuidParam(c), userId);
     const plan = await regeneratePlan(c, deps, chat);
-    return c.json(await inspectGeneration(deps, plan, userId, deps.chatgpt?.accounts.forUser(userId)));
+    return c.json(await inspectGeneration(deps, plan, userId));
   });
 
   app.post('/:id/continue', async (c) => {
@@ -3264,7 +3214,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
 
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
       const chat = await loadWritableChat(deps, id, userId);
-      await requireEnabledModel(deps, userId, chat.model);
+      const main = await resolveModel(deps, chat, 'main');
       const context = await loadGenerationContext(deps, chat, scripts);
       const before = buildPath(context.all, chat.headMessageId);
       if (before.at(-1)?.role !== 'assistant') {
@@ -3305,12 +3255,13 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
 
       return {
         chatId: chat.id,
-        model: chat.model,
+        model: main.preset.model,
+        main,
         plot: context.plot,
         characters: context.characters,
         personaText: context.personaText,
         userName: context.userName,
-        history: await promptHistory(deps, c.get('userId'), chat.model, history, context.scriptSpeaker),
+        history: await promptHistory(deps, main.vision, history, context.scriptSpeaker),
         // The head being continued is in the chat, as RisuAI's continue keeps it there.
         wholeBranch: path,
         memoryText: memory.memoryText,
@@ -3368,7 +3319,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
 
     return withGenerationSlot(c, deps, id, async (): Promise<GenerationPlan> => {
       const chat = await loadWritableChat(deps, id, userId);
-      await requireEnabledModel(deps, userId, chat.model);
+      const main = await resolveModel(deps, chat, 'main');
       const context = await loadGenerationContext(deps, chat, scripts);
       const before = buildPath(context.all, chat.headMessageId);
       if (before.at(-1)?.role !== 'assistant') {
@@ -3394,12 +3345,13 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
 
       return {
         chatId: chat.id,
-        model: chat.model,
+        model: main.preset.model,
+        main,
         plot: context.plot,
         characters: context.characters,
         personaText: context.personaText,
         userName: context.userName,
-        history: await promptHistory(deps, c.get('userId'), chat.model, history, context.scriptSpeaker),
+        history: await promptHistory(deps, main.vision, history, context.scriptSpeaker),
         wholeBranch: path,
         memoryText: memory.memoryText,
         recalledMemoryText: memory.recalledMemoryText,
@@ -3478,7 +3430,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       return c.json({
         suggestions: await suggestReplies(deps, {
           userId: chat.userId,
-          subModel: chat.subModel,
+          modelBinding: chat.modelBinding,
           recent,
           members: context.members,
           plotName: context.plot.name,

@@ -19,8 +19,8 @@ test('AI draft locks its premise and other creation doors, preserving input afte
     // The model is part of the request too, so it locks with the premise.
     await expect(page.getByTestId('draft-model')).toBeDisabled();
     await expect(page.getByRole('button', { name: '초안 만들기', exact: true })).toHaveAttribute('aria-busy', 'true');
-    // The test API's catalog leads with echo, the default the select starts on.
-    expect(request.request().postDataJSON()).toEqual({ premise: '비 오는 밤의 서점에서 만나는 두 사람', model: 'echo/echo' });
+    // The select starts on the default — the default binding's sub model — which sends none.
+    expect(request.request().postDataJSON()).toEqual({ premise: '비 오는 밤의 서점에서 만나는 두 사람' });
   } finally {
     await request.fulfill({ status: 502, json: { error: 'Draft failed', code: 'draft_failed' } });
   }

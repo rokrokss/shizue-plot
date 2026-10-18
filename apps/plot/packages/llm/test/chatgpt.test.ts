@@ -233,7 +233,7 @@ function streamFetch(source: string, capture?: (body: Record<string, unknown>) =
 async function collect(source: string): Promise<{ text: string; usage: unknown }> {
   const adapter = createChatGPTAdapter(async () => 'TOKEN', streamFetch(source));
   const stream = adapter.stream(request); let text = '';
-  while (true) { const value = await stream.next(); if (value.done) return { text, usage: value.value.usage }; text += value.value.text; }
+  while (true) { const value = await stream.next(); if (value.done) return { text, usage: value.value.usage }; if (value.value.type === 'text') text += value.value.text; }
 }
 describe('ChatGPT Responses adapter', () => {
   it('sends the supported stateless request and preserves system-message ordering', () => {
@@ -343,7 +343,7 @@ describe('ChatGPT Responses adapter', () => {
     const { fetcher, bearers } = tokenCheckingFetch(new Set(['OLD']));
     const stream = createChatGPTAdapter(access, fetcher).stream(request);
     let text = '';
-    for (let next = await stream.next(); !next.done; next = await stream.next()) text += next.value.text;
+    for (let next = await stream.next(); !next.done; next = await stream.next()) if (next.value.type === 'text') text += next.value.text;
     expect(text).toBe('네');
     expect(asked).toEqual([undefined, 'OLD']);
     expect(bearers).toEqual(['OLD', 'NEW']);
@@ -398,7 +398,7 @@ describe('ChatGPT Responses idle timeout', () => {
     const stream = createChatGPTAdapter(async () => 'TOKEN', live.fetcher).stream(request);
     const collected = (async () => {
       let text = '';
-      while (true) { const value = await stream.next(); if (value.done) return text; text += value.value.text; }
+      while (true) { const value = await stream.next(); if (value.done) return text; if (value.value.type === 'text') text += value.value.text; }
     })();
     for (let minute = 0; minute < 7; minute += 1) {
       live.send({ type: 'response.output_text.delta', delta: `${minute}분 ` });

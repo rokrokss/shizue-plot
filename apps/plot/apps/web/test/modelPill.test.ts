@@ -12,7 +12,7 @@ import { act, createElement, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import messages from '../messages/ko.json';
-import type { ChatState, ModelInfo } from '../src/lib/types';
+import type { ChatState, ModelPreset } from '../src/lib/types';
 
 (globalThis as Record<string, unknown>)['IS_REACT_ACT_ENVIRONMENT'] = true;
 
@@ -26,10 +26,10 @@ Object.defineProperty(window, 'localStorage', {
   },
 });
 
-const MODELS: ModelInfo[] = [
-  { id: 'm1', label: '모델 하나' },
-  { id: 'm2', label: '모델 둘' },
-] as ModelInfo[];
+const preset = (id: string, name: string): ModelPreset => ({
+  id, name, format: 'openai-chat', endpoint: 'http://localhost:1234/v1', model: id, credentialId: null, params: {}, capabilities: {},
+});
+const PRESETS: ModelPreset[] = [preset('m1', '모델 하나'), preset('m2', '모델 둘')];
 
 let chatState: ChatState;
 let sent: { method: string; path: string; body: unknown }[] = [];
@@ -70,7 +70,8 @@ vi.mock('@/lib/api', async (importOriginal) => {
   return {
     ...original,
     apiGet: (url: string) => {
-      if (url === '/api/models') return Promise.resolve(MODELS);
+      if (url === '/api/model-presets') return Promise.resolve(PRESETS);
+      if (url === '/api/model-binding') return Promise.resolve({ main: null, sub: null });
       if (url.startsWith('/api/chats/')) return Promise.resolve(chatState);
       if (url.endsWith('/public')) return Promise.resolve({ characters: [], displayScripts: [], defaultVariables: {} });
       return Promise.resolve([]);
@@ -85,13 +86,13 @@ vi.mock('@/lib/api', async (importOriginal) => {
 
 const { default: ChatPage } = await import('../src/app/[locale]/(app)/(member)/chats/[id]/page');
 
-const state = (model: string): ChatState =>
+const state = (main: string): ChatState =>
   ({
     chat: {
-      id: 'cht_1', plotId: 'sty_1', personaId: null, title: '비 오는 밤의 서점', model, subModel: null, note: '',
+      id: 'cht_1', plotId: 'sty_1', personaId: null, title: '비 오는 밤의 서점', modelBinding: { main, sub: null }, note: '',
       preset: 'default', headMessageId: 'msg_1', memoryRevision: 0, memorySettings: null,
       narrator: null, allowComponentTurns: false, statusWindowEnabled: false,
-      choicesEnabled: false, reasoningEffort: null, absentCharacterIds: [], noteIds: [],
+      choicesEnabled: false, absentCharacterIds: [], noteIds: [],
       createdAt: '2026-08-16T00:00:00.000Z', updatedAt: '2026-08-16T00:00:00.000Z',
     },
     path: [
@@ -148,18 +149,19 @@ describe('the header’s model pill', () => {
     expect(face()).toBe('모델 하나');
     // Its own name, so the settings' "모델" stays the one control of that name.
     expect(picker().getAttribute('aria-label')).toBe(messages.chat.modelPill);
-    expect(options()).toEqual(['m1:모델 하나', 'm2:모델 둘']);
+    // The slot left to the default first, as the settings offer it.
+    expect(options()).toEqual([':기본', 'm1:모델 하나', 'm2:모델 둘']);
 
     await pick('m2');
-    expect(sent).toEqual([{ method: 'PATCH', path: '/api/chats/cht_1', body: { model: 'm2' } }]);
+    expect(sent).toEqual([{ method: 'PATCH', path: '/api/chats/cht_1', body: { modelBinding: { main: 'm2' } } }]);
     expect(face()).toBe('모델 둘');
   });
 
-  it('keeps a model the catalog has dropped, by its id, until another is picked', async () => {
+  it('keeps a pick the presets do not have, by its id, until another is picked', async () => {
     chatState = state('retired-model');
     await render();
     expect(face()).toBe('retired-model');
-    expect(options()).toEqual(['retired-model:retired-model', 'm1:모델 하나', 'm2:모델 둘']);
+    expect(options()).toEqual([':기본', 'retired-model:retired-model', 'm1:모델 하나', 'm2:모델 둘']);
   });
 
   it('is held while a reply is written', async () => {

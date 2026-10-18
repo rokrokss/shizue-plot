@@ -1,6 +1,5 @@
 import { IMAGE_ATTACHED_PLACEHOLDER, type HistoryMessage } from '@shizue/core';
 import { chatAttachments, type ChatAttachment, type Message } from '@shizue/db';
-import { supportsVision } from '@shizue/llm';
 import { asc, inArray } from 'drizzle-orm';
 import { detectImageType } from './avatar.js';
 import type { AppDeps } from './deps.js';
@@ -128,14 +127,14 @@ export async function attachmentsByMessage(
  * attempt saw.
  *
  * `source` must be the array `history` was mapped from, one entry per message.
- * `model` decides whether the bytes are read at all: a model without vision is
+ * `vision` — whether the chat's model reads pictures (`ResolvedModel.vision`) —
+ * decides whether the bytes are read at all: a model without vision is
  * told the turn carried pictures, and megabytes are never pulled out of the store
  * only for the assembler to drop them again.
  */
 export async function withTurnImages(
   deps: AppDeps,
-  userId: string,
-  model: string,
+  vision: boolean,
   source: Message[],
   history: HistoryMessage[],
 ): Promise<HistoryMessage[]> {
@@ -149,7 +148,7 @@ export async function withTurnImages(
     history.map((entry, index) =>
       index === at ? { ...entry, content: withImageNote(entry.content, skipped) } : entry,
     );
-  if (!await supportsVision(model, deps.env, deps.chatgpt?.accounts.forUser(userId))) return noted(attachments.length);
+  if (!vision) return noted(attachments.length);
 
   const { images, skipped } = await attachmentImages(deps, attachments);
   if (images.length === 0) return skipped > 0 ? noted(skipped) : history;

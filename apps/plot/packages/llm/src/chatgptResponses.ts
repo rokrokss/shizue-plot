@@ -1,9 +1,8 @@
-import { LLMError, type ChatMessage, type ChatRequest, type ContentPart, type LLMAdapter, type StreamDone } from './types.js';
+import { eventJson, IDLE_TIMEOUT_MS, IdleWatch, readSse, StopFilter } from './stream.js';
+import { LLMError, type ChatMessage, type ChatRequest, type ContentPart, type LLMAdapter, type StreamDelta, type StreamDone } from './types.js';
 
 export const CHATGPT_RESOURCE = 'https://api.openai.com/v1';
-export class ChatGPTError extends LLMError {
-  constructor(readonly code: string, message: string, readonly status = 502) { super(message); }
-}
+export class ChatGPTError extends LLMError {}
 
 const MESSAGES: Record<string, string> = {
   chatgpt_login_required: 'Connect ChatGPT in AI settings to continue.',
@@ -139,101 +138,105 @@ export function cacheHeaders(req: Pick<ChatRequest, 'cacheKey'>): Record<string,
  * longest silent think a reply survives. A stream that keeps sending is never
  * cut, however long it runs.
  */
-export const CHATGPT_IDLE_TIMEOUT_MS = 300_000;
+export const CHATGPT_IDLE_TIMEOUT_MS = IDLE_TIMEOUT_MS;
+
+/** How a Responses stream's failures are told: the ChatGPT connection's codes, or a key's. */
+export interface ResponsesFailures {
+  /** An `error` or `response.failed` event, with the code it named. */
+  failed(code: string | undefined): LLMError;
+  /** A `response.incomplete`: an error (the plan), or null to end the reply there (a key's capped reply). */
+  incomplete(): LLMError | null;
+  invalid(): LLMError;
+  interrupted(): LLMError;
+}
 
 /**
- * Success requires response.completed, including when an error follows text deltas.
- * A token the provider turns down is answered before the stream opens, so the one
- * retry (`withAccessToken`) never repeats anything the caller was given.
+ * A Responses API stream, read to its terminal event: the text deltas as they
+ * pass the stop strings, and the usage `response.completed` reports. Success
+ * requires that event, including when an error follows text deltas.
+ */
+export async function* readResponsesStream(
+  response: Response,
+  req: ChatRequest,
+  watch: IdleWatch,
+  failures: ResponsesFailures,
+): AsyncGenerator<StreamDelta, StreamDone> {
+  if (!response.body) throw failures.interrupted();
+  const stop = new StopFilter(req.stop);
+  for await (const block of readSse(response.body, watch, { invalid: failures.invalid })) {
+    if (!block.data || block.data === '[DONE]') continue;
+    const event = eventJson<{
+      type: string; delta?: string; code?: string;
+      response?: {
+        error?: { code?: string };
+        usage?: { input_tokens?: number; output_tokens?: number; input_tokens_details?: { cached_tokens?: number } };
+      };
+    }>(block.data, failures.invalid);
+    if (event.type === 'response.output_text.delta' && typeof event.delta === 'string') {
+      const out = stop.push(event.delta);
+      if (out) yield { type: 'text', text: out };
+    }
+    if (event.type === 'error' || event.type === 'response.failed') throw failures.failed(event.response?.error?.code ?? event.code);
+    if (event.type === 'response.incomplete') {
+      const error = failures.incomplete();
+      if (error) throw error;
+    }
+    if (event.type === 'response.completed' || event.type === 'response.incomplete') {
+      const rest = stop.flush();
+      if (rest) yield { type: 'text', text: rest };
+      const usage = event.response?.usage;
+      // The prompt cache's share, where the response says it (`input_tokens_details.cached_tokens`).
+      const cached = usage?.input_tokens_details?.cached_tokens;
+      return {
+        usage: {
+          promptTokens: usage?.input_tokens ?? 0,
+          completionTokens: usage?.output_tokens ?? 0,
+          ...(typeof cached === 'number' ? { cachedPromptTokens: cached } : {}),
+        },
+      } satisfies StreamDone;
+    }
+  }
+  throw failures.interrupted();
+}
+
+/** The ChatGPT connection's failures, each a code the reader's page knows. */
+const CHATGPT_FAILURES: ResponsesFailures = {
+  failed: (code) => providerError(code),
+  incomplete: () => providerError('chatgpt_response_incomplete'),
+  invalid: () => providerError('chatgpt_invalid_stream'),
+  interrupted: () => providerError('chatgpt_stream_interrupted'),
+};
+
+/**
+ * The owner's ChatGPT plan through the Responses API: no temperature, top_p or
+ * max_output_tokens (the endpoint refuses them), the system text as
+ * instructions, `store: false`, and the prompt cache's key and header. A token
+ * the provider turns down is answered before the stream opens, so the one retry
+ * (`withAccessToken`) never repeats anything the caller was given.
  */
 export function createChatGPTAdapter(access: (rejected?: string) => Promise<string>, fetcher: typeof fetch = fetch): LLMAdapter {
   return {
     async *stream(req) {
-      const idle = new AbortController();
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      // Armed only while waiting on the upstream: a delta the caller is slow to
-      // take is not the stream going quiet.
-      const arm = (): void => { timer = setTimeout(() => idle.abort(), CHATGPT_IDLE_TIMEOUT_MS); };
-      const signal = req.abortSignal ? AbortSignal.any([req.abortSignal, idle.signal]) : idle.signal;
-      let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
-      // Do not send unsupported stop/max_output_tokens/temperature fields. Keep the
-      // role-play stop boundary locally, but consume through the terminal event.
-      let text = '';
-      let stopped = false;
-      const stops = (req.stop ?? []).filter(Boolean);
-      const tailSize = Math.max(0, ...stops.map((stop) => stop.length - 1));
+      const watch = new IdleWatch(req.abortSignal, CHATGPT_IDLE_TIMEOUT_MS);
       try {
-        arm();
+        watch.arm();
+        // Do not send unsupported stop/max_output_tokens/temperature fields. Keep the
+        // role-play stop boundary locally, but consume through the terminal event.
         const response = await withAccessToken(access, async (token) => requireOK(await fetcher(`${CHATGPT_RESOURCE}/responses`, {
-          method: 'POST', signal,
+          method: 'POST', signal: watch.signal,
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...cacheHeaders(req) },
           body: JSON.stringify(responseBody(req)),
         })));
-        clearTimeout(timer);
+        watch.disarm();
         if (!response.body) throw providerError('chatgpt_empty_stream');
-        reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let pending = '';
-        while (true) {
-          arm();
-          const { done, value } = await reader.read();
-          clearTimeout(timer);
-          pending += decoder.decode(value, { stream: !done });
-          pending = pending.replace(/\r\n/g, '\n');
-          let boundary: number;
-          while ((boundary = pending.indexOf('\n\n')) >= 0) {
-            const block = pending.slice(0, boundary);
-            pending = pending.slice(boundary + 2);
-            const data = block.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n');
-            if (!data || data === '[DONE]') continue;
-            let event: {
-              type: string; delta?: string; code?: string;
-              response?: {
-                error?: { code?: string };
-                usage?: { input_tokens?: number; output_tokens?: number; input_tokens_details?: { cached_tokens?: number } };
-              };
-            };
-            try { event = JSON.parse(data) as typeof event; }
-            catch { throw providerError('chatgpt_invalid_stream'); }
-            if (event.type === 'response.output_text.delta' && !stopped && typeof event.delta === 'string') {
-              text += event.delta;
-              const indices = stops.map((stop) => text.indexOf(stop)).filter((at) => at >= 0);
-              const at = indices.length ? Math.min(...indices) : -1;
-              if (at >= 0) {
-                if (at) yield { type: 'text', text: text.slice(0, at) };
-                text = ''; stopped = true;
-              } else if (text.length > tailSize) {
-                yield { type: 'text', text: text.slice(0, text.length - tailSize) };
-                text = text.slice(text.length - tailSize);
-              }
-            }
-            if (event.type === 'error' || event.type === 'response.failed') throw providerError(event.response?.error?.code ?? event.code);
-            if (event.type === 'response.incomplete') throw providerError('chatgpt_response_incomplete');
-            if (event.type === 'response.completed') {
-              if (text && !stopped) yield { type: 'text', text };
-              const usage = event.response?.usage;
-              // The prompt cache's share, where the response says it (`input_tokens_details.cached_tokens`).
-              const cached = usage?.input_tokens_details?.cached_tokens;
-              return {
-                usage: {
-                  promptTokens: usage?.input_tokens ?? 0,
-                  completionTokens: usage?.output_tokens ?? 0,
-                  ...(typeof cached === 'number' ? { cachedPromptTokens: cached } : {}),
-                },
-              } satisfies StreamDone;
-            }
-          }
-          if (pending.length > 8 * 1024 * 1024) throw providerError('chatgpt_invalid_stream');
-          if (done) throw providerError('chatgpt_stream_interrupted');
-        }
+        return yield* readResponsesStream(response, req, watch, CHATGPT_FAILURES);
       } catch (error) {
         // The caller's own abort goes out as it came, which is how it tells a
         // disconnect from a failure; a stream gone quiet is a failure of its own.
-        if (idle.signal.aborted && !req.abortSignal?.aborted) throw providerError('chatgpt_timeout', 504);
+        if (watch.timedOut) throw providerError('chatgpt_timeout', 504);
         throw error;
       } finally {
-        clearTimeout(timer);
-        if (reader) { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+        watch.disarm();
       }
     },
   };

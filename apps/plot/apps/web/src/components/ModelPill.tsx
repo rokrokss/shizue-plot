@@ -1,7 +1,7 @@
 'use client';
 
 import { useTranslations } from 'next-intl';
-import type { ModelInfo } from '@/lib/types';
+import type { ModelPreset } from '@/lib/types';
 import { Icon } from './Icon';
 import { ModelOptions } from './ModelOptions';
 import { cx } from './ui';
@@ -14,20 +14,26 @@ import { cx } from './ui';
  * stays in the settings. Held while a reply or a round is written.
  */
 export function ModelPill({
-  model,
-  models,
+  value,
+  presets,
+  current,
+  defaultLabel,
   disabled,
   className,
   onChange,
 }: {
-  model: string;
-  models: ModelInfo[];
+  /** The chat's main pick; null follows the default. */
+  value: string | null;
+  presets: readonly ModelPreset[];
+  /** The preset the chat runs on now, which the pill is named for. */
+  current: ModelPreset | undefined;
+  defaultLabel: string;
   disabled: boolean;
   className?: string;
-  onChange: (model: string) => void;
+  onChange: (presetId: string | null) => void;
 }) {
   const t = useTranslations('chat');
-  const label = models.find((entry) => entry.id === model)?.label ?? model;
+  const label = current?.name ?? value ?? defaultLabel;
 
   return (
     <span
@@ -45,14 +51,14 @@ export function ModelPill({
       </span>
       <Icon name="chevron" className="size-3 shrink-0 text-muted" />
       <select
-        value={model}
+        value={value ?? ''}
         disabled={disabled}
         aria-label={t('modelPill')}
         {...(disabled ? { title: t('lockedWhileGenerating') } : {})}
         className="absolute inset-0 size-full cursor-pointer appearance-none opacity-0 disabled:cursor-not-allowed"
-        onChange={(event) => onChange(event.target.value)}
+        onChange={(event) => onChange(event.target.value || null)}
       >
-        <ModelOptions model={model} models={models} />
+        <ModelOptions presets={presets} value={value} defaultLabel={defaultLabel} />
       </select>
     </span>
   );

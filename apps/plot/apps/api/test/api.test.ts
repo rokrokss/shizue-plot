@@ -67,8 +67,8 @@ import { toWorldInfo } from '@shizue/core/world-info';
 import { parseToggleSyntax } from '@shizue/core/toggles';
 import { ChatExportSchema } from '@shizue/contracts';
 import {
-  account,
   characters,
+  credentials,
   chatAttachments,
   chats,
   chatSummaries,
@@ -84,6 +84,7 @@ import {
   memories,
   messages,
   messageTranslations,
+  modelPresets,
   plots,
   plotAssets,
   readerModules,
@@ -238,7 +239,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await client.exec(`TRUNCATE TABLE memories, chat_attachments, messages, chat_note_links, user_notes, plot_reader_variables, chats, personas, plot_assets, characters, plots, jobs, "session", account, verification, "user" RESTART IDENTITY CASCADE`);
+  await client.exec(`TRUNCATE TABLE memories, chat_attachments, messages, chat_note_links, user_notes, plot_reader_variables, chats, personas, plot_assets, characters, plots, jobs, "session", credentials, model_presets, verification, "user" RESTART IDENTITY CASCADE`);
   app = makeApp();
   jobHandlers = createJobHandlers(makeDeps());
 });
@@ -872,7 +873,7 @@ describe('the local owner gate', () => {
       expect(await readJson(refused)).toEqual({ error: expect.any(String), code: 'unauthorized' });
     }
     // Everything else under /api, the static catalogue and the model list among it.
-    for (const path of ['/api/presets', '/api/models', '/api/chatgpt', '/api/explore', '/api/chats']) {
+    for (const path of ['/api/presets', '/api/model-presets', '/api/credentials', '/api/chatgpt', '/api/explore', '/api/chats']) {
       expect((await ask(app, path, FROM_TUNNEL, '127.0.0.1')).status, path).toBe(401);
     }
   });
@@ -1069,10 +1070,36 @@ describe('the ChatGPT connection', () => {
     // The owner's, and no account of its own.
     const owner = await ownerId();
     expect(await db.select().from(user)).toHaveLength(1);
-    const [row] = await db.select().from(account).where(eq(account.userId, owner));
-    expect(row).toMatchObject({ providerId: 'chatgpt', accountId: 'alice', clientId: 'app_alice' });
+    const [row] = await db.select().from(credentials).where(eq(credentials.userId, owner));
+    expect(row).toMatchObject({ kind: 'chatgpt', provider: 'chatgpt', meta: { subject: 'alice', clientId: 'app_alice' } });
     // Sealed at rest.
-    expect(`${row!.accessToken}${row!.refreshToken}${row!.idToken}`).not.toMatch(/ACCESS|REFRESH|alice/);
+    expect(Object.keys(row!.secrets).sort()).toEqual(['accessToken', 'idToken', 'refreshToken']);
+    expect(JSON.stringify(row!.secrets)).not.toMatch(/ACCESS|REFRESH|alice/);
+  });
+
+  it("gives an owner with no model preset one on the account's first model, the default main where none is set", async () => {
+    const openai = fakeOpenAI();
+    const { target, connect } = connectApp(openai);
+    const owned = async (): Promise<any[]> =>
+      (await readJson(await request(undefined, '/api/model-presets', 'GET', undefined, target))).filter((preset: any) => !preset.builtIn);
+    // A default main that is set stays: here the test catalog's echo.
+    await json(undefined, '/api/model-binding', 'PUT', { main: 'echo/echo' }, target);
+    await connect('alice');
+    const [connection] = await db.select().from(credentials);
+    expect(await owned()).toMatchObject([{ name: 'gpt-for-alice', format: 'openai-responses', model: 'gpt-for-alice', credentialId: connection!.id }]);
+    expect(await readJson(await request(undefined, '/api/model-binding', 'GET', undefined, target))).toEqual({ main: 'echo/echo', sub: null });
+
+    // With none set, the new preset is the default's main.
+    await db.delete(modelPresets);
+    await json(undefined, '/api/model-binding', 'PUT', {}, target);
+    await connect('bob');
+    const [bobs] = await owned();
+    expect(bobs).toMatchObject({ model: 'gpt-for-bob', credentialId: connection!.id });
+    expect(await readJson(await request(undefined, '/api/model-binding', 'GET', undefined, target))).toEqual({ main: bobs.id, sub: null });
+
+    // An owner who has a preset gets no other.
+    await connect('carol');
+    expect((await owned()).map((preset) => preset.model)).toEqual(['gpt-for-bob']);
   });
 
   it('refuses a callback from another browser, a replayed attempt and a declined consent', async () => {
@@ -1091,7 +1118,7 @@ describe('the ChatGPT connection', () => {
     const retry = new URL((await readJson(again)).authorizationUrl).searchParams.get('state');
     const declined = await request(cookieOf(again), `/api/chatgpt/callback?error=access_denied&state=${retry}`, 'GET', undefined, target);
     expect(declined.headers.get('location')).toBe('/ja/settings?error=chatgpt_login_declined');
-    expect(await db.select().from(account)).toHaveLength(0);
+    expect(await db.select().from(credentials)).toHaveLength(0);
   });
 
   it('lands a connection that started on another page back there, and never on another site', async () => {
@@ -1129,15 +1156,21 @@ describe('the ChatGPT connection', () => {
   it('disconnects, keeps the registration for the next connection, and takes another account in its place', async () => {
     const openai = fakeOpenAI();
     const { target, connect } = connectApp(openai, { NODE_ENV: 'development' });
+    /** The connection's catalog, as the preset editor's picker lists it. */
+    const catalog = async (): Promise<Response> => {
+      const listed = await readJson(await request(undefined, '/api/credentials', 'GET', undefined, target));
+      const connection = listed.find((credential: any) => credential.kind === 'chatgpt');
+      return request(undefined, `/api/model-presets/catalog?format=openai-responses&credentialId=${connection.id}`, 'GET', undefined, target);
+    };
     const alice = await connect('alice');
-    expect(await readJson(await request(undefined, '/api/models', 'GET', undefined, target))).toEqual([{ id: 'gpt-for-alice', label: 'gpt-for-alice' }]);
+    expect(await readJson(await catalog())).toEqual([{ id: 'gpt-for-alice', label: 'gpt-for-alice', vision: false }]);
 
     expect(await readJson(await json(undefined, '/api/chatgpt/disconnect', 'POST', undefined, target))).toEqual({ revocationPending: false });
     expect(openai.state.revoked).toEqual(['REFRESH-alice-0']);
     expect(await readJson(await request(undefined, '/api/chatgpt', 'GET', undefined, target))).toEqual({ connected: false, email: null, local: true });
-    expect(await readJson(await request(undefined, '/api/models', 'GET', undefined, target))).toEqual([]);
-    const [kept] = await db.select().from(account).where(eq(account.accountId, 'alice'));
-    expect(kept).toMatchObject({ clientId: 'app_alice', accessToken: null, refreshToken: null });
+    expect(await readJson(await catalog())).toMatchObject({ code: 'chatgpt_login_required' });
+    const [kept] = await db.select().from(credentials);
+    expect(kept).toMatchObject({ meta: { subject: 'alice', clientId: 'app_alice' }, secrets: {} });
     // Nothing else ends with it: the app has no session of its own to end.
     expect((await request(undefined, '/api/chats', 'GET', undefined, target)).status).toBe(200);
 
@@ -1145,20 +1178,20 @@ describe('the ChatGPT connection', () => {
     const back = await connect('alice', alice.cookie);
     expect(back.authorization.searchParams.get('client_id')).toBe('app_alice');
     expect(back.authorization.searchParams.has('agent_name_hint')).toBe(false);
-    expect(await readJson(await request(undefined, '/api/models', 'GET', undefined, target))).toEqual([{ id: 'gpt-for-alice', label: 'gpt-for-alice' }]);
+    expect(await readJson(await catalog())).toEqual([{ id: 'gpt-for-alice', label: 'gpt-for-alice', vision: false }]);
 
     // Another account takes the one connection's place.
     await json(undefined, '/api/chatgpt/disconnect', 'POST', undefined, target);
     await connect('bob');
-    expect(await readJson(await request(undefined, '/api/models', 'GET', undefined, target))).toEqual([{ id: 'gpt-for-bob', label: 'gpt-for-bob' }]);
+    expect(await readJson(await catalog())).toEqual([{ id: 'gpt-for-bob', label: 'gpt-for-bob', vision: false }]);
     expect(await readJson(await request(undefined, '/api/chatgpt', 'GET', undefined, target))).toEqual({ connected: true, email: 'bob@chatgpt.test', local: true });
-    expect((await db.select().from(account)).map((row) => row.accountId)).toEqual(['bob']);
+    expect((await db.select().from(credentials)).map((row) => row.meta.subject)).toEqual(['bob']);
     expect(await db.select().from(user)).toHaveLength(1);
 
     // Connected over without a disconnect, the account replaced lets its grant go as a disconnect does.
     await connect('carol');
     expect(openai.state.revoked).toEqual(['REFRESH-alice-0', 'REFRESH-alice-0', 'REFRESH-bob-0']);
-    expect((await db.select().from(account)).map((row) => row.accountId)).toEqual(['carol']);
+    expect((await db.select().from(credentials)).map((row) => row.meta.subject)).toEqual(['carol']);
   });
 
   it('rotates an expiring token once however many requests need it', async () => {
@@ -1166,7 +1199,7 @@ describe('the ChatGPT connection', () => {
     const { accounts, connect } = connectApp(openai);
     await connect('alice');
     const me = await ownerId();
-    await db.update(account).set({ accessTokenExpiresAt: new Date(0) }).where(eq(account.userId, me));
+    await db.update(credentials).set({ expiresAt: new Date(0) }).where(eq(credentials.userId, me));
     const tokens = await Promise.all([1, 2, 3].map(() => accounts.forUser(me).accessToken()));
     expect(tokens).toEqual(['ACCESS-alice-1', 'ACCESS-alice-1', 'ACCESS-alice-1']);
     expect(openai.state.refreshes).toBe(1);
@@ -1176,15 +1209,15 @@ describe('the ChatGPT connection', () => {
     const { connect } = connectApp(fakeOpenAI());
     await connect('alice');
     const me = await ownerId();
-    await db.update(account).set({ accessTokenExpiresAt: new Date(0) }).where(eq(account.userId, me));
+    await db.update(credentials).set({ expiresAt: new Date(0) }).where(eq(credentials.userId, me));
     // A process that has not loaded discovery yet, while auth.openai.com answers 502.
     const restarted = fakeOpenAI();
     restarted.state.discoveryDown = true;
     const { accounts } = connectApp(restarted);
     await expect(accounts.forUser(me).accessToken()).rejects.toMatchObject({ code: 'chatgpt_unavailable', status: 503 });
     expect(restarted.state.refreshes).toBe(0);
-    const [kept] = await db.select().from(account).where(eq(account.userId, me));
-    expect(kept).toMatchObject({ accessToken: expect.any(String), refreshToken: expect.any(String) });
+    const [kept] = await db.select().from(credentials).where(eq(credentials.userId, me));
+    expect(kept!.secrets).toMatchObject({ accessToken: expect.any(String), refreshToken: expect.any(String) });
     // Once discovery answers, the stored refresh token still works.
     restarted.state.discoveryDown = false;
     expect(await accounts.forUser(me).accessToken()).toBe('ACCESS-alice-1');
@@ -1194,6 +1227,8 @@ describe('the ChatGPT connection', () => {
   async function connectedAlice() {
     const openai = fakeOpenAI();
     const { accounts, connect } = connectApp(openai);
+    // The owner has a preset already, so connecting leaves the catalog unread (`ensureFirstPreset`).
+    await db.insert(modelPresets).values({ userId: await ownerId(), name: 'Local', format: 'openai-chat', endpoint: 'http://localhost:1234/v1', model: 'local' });
     await connect('alice');
     const me = { id: await ownerId() };
     return { openai, accounts, me, alice: accounts.forUser(me.id) };
@@ -1229,8 +1264,8 @@ describe('the ChatGPT connection', () => {
     openai.state.expired.add('ACCESS-alice-0');
     openai.state.grantRevoked = true;
     await expect(alice.models()).rejects.toMatchObject({ code: 'invalid_grant' });
-    const [row] = await db.select().from(account).where(eq(account.userId, me.id));
-    expect(row).toMatchObject({ clientId: 'app_alice', accessToken: null, refreshToken: null });
+    const [row] = await db.select().from(credentials).where(eq(credentials.userId, me.id));
+    expect(row).toMatchObject({ meta: { clientId: 'app_alice' }, secrets: {} });
     expect(await accounts.status(me.id)).toEqual({ connected: false, email: null });
   });
 });
@@ -1492,9 +1527,9 @@ describe('pairing a phone', () => {
 });
 
 describe('models', () => {
-  it('lists the enabled models', async () => {
-    const models = await readJson(await request(undefined, '/api/models'));
-    expect(models).toEqual([{ id: 'echo/echo', label: expect.any(String) }]);
+  it("lists the model presets, the test runner's echo among them", async () => {
+    const presets = await readJson(await request(undefined, '/api/model-presets'));
+    expect(presets).toEqual([expect.objectContaining({ id: 'echo/echo', format: 'echo', builtIn: true })]);
   });
 });
 
@@ -3353,7 +3388,7 @@ describe('chats', () => {
     const cookie = await signUp('settings@example.com');
     const { chatId } = await setupChat(cookie);
     const persona = await readJson(await json(cookie, '/api/personas', 'POST', { name: '민준' }));
-    // A second enabled model needs its provider key present in the app env.
+    // A second preset of the test catalog needs SHIZUE_TEST_MODELS in the app env.
     const withKey = makeApp({ env: { SHIZUE_TEST_MODELS: '1' } });
 
     const patched = await readJson(
@@ -3361,78 +3396,78 @@ describe('chats', () => {
         cookie,
         `/api/chats/${chatId}`,
         'PATCH',
-        { model: 'test/text', personaId: persona.id },
+        { modelBinding: { main: 'test/text' }, personaId: persona.id },
         withKey,
       ),
     );
-    expect(patched.chat.model).toBe('test/text');
+    expect(patched.chat.modelBinding).toEqual({ main: 'test/text', sub: null });
     expect(patched.chat.personaId).toBe(persona.id);
     // Same shape as GET.
     expect(patched.path).toHaveLength(1);
     expect(patched.siblings[patched.path[0].id]).toMatchObject({ index: 0, total: 2 });
 
     const reread = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    expect(reread.chat.model).toBe('test/text');
+    expect(reread.chat.modelBinding.main).toBe('test/text');
     expect(reread.chat.personaId).toBe(persona.id);
 
     const cleared = await readJson(
       await json(cookie, `/api/chats/${chatId}`, 'PATCH', { personaId: null }, withKey),
     );
     expect(cleared.chat.personaId).toBeNull();
-    expect(cleared.chat.model).toBe('test/text');
+    expect(cleared.chat.modelBinding.main).toBe('test/text');
   });
 
-  it("picks an auxiliary model from the reader's catalog, and null hands the side work back to the default", async () => {
+  it("picks an auxiliary model from the owner's presets, and null hands the side work back to the default", async () => {
     const cookie = await signUp('sub-model@example.com');
     const { chatId, state } = await setupChat(cookie);
-    expect(state.chat.subModel).toBeNull();
+    expect(state.chat.modelBinding).toEqual({ main: null, sub: null });
     const withKey = makeApp({ env: { SHIZUE_TEST_MODELS: '1' } });
     const patch = (body: unknown, target: Hono<AppEnv> = withKey) =>
       json(cookie, `/api/chats/${chatId}`, 'PATCH', body, target);
 
-    const picked = await readJson(await patch({ subModel: 'test/text' }));
-    expect(picked.chat).toMatchObject({ model: 'echo/echo', subModel: 'test/text' });
+    const picked = await readJson(await patch({ modelBinding: { sub: 'test/text' } }));
+    expect(picked.chat.modelBinding).toEqual({ main: null, sub: 'test/text' });
     // Same shape as GET, and it survives a re-read.
     expect(picked.path).toHaveLength(1);
-    expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.subModel).toBe('test/text');
+    expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.modelBinding.sub).toBe('test/text');
 
-    // Held to the catalog exactly as the chat's own model is.
+    // Held to the presets exactly as the chat's own model is.
     for (const [body, target] of [
-      [{ subModel: 'nope/none' }, withKey],
+      [{ modelBinding: { sub: 'nope/none' } }, withKey],
       // The default app's catalog has echo alone.
-      [{ subModel: 'test/reasoning' }, app],
-      [{ subModel: '' }, withKey],
+      [{ modelBinding: { sub: 'test/reasoning' } }, app],
+      [{ modelBinding: { sub: '' } }, withKey],
     ] as const) {
       const res = await patch(body, target);
       expect(res.status).toBe(400);
       expect((await readJson(res)).code).toBe('model_unavailable');
     }
-    for (const bad of [7, true, { id: 'test/text' }]) {
-      const res = await patch({ subModel: bad });
+    for (const bad of [{ sub: 7 }, { sub: true }, { sub: { id: 'test/text' } }, { aux: 'test/text' }, 'test/text', null]) {
+      const res = await patch({ modelBinding: bad });
       expect(res.status).toBe(400);
       expect((await readJson(res)).code).toBe('invalid_request');
     }
-    expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.subModel).toBe('test/text');
+    expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.modelBinding.sub).toBe('test/text');
 
     // Switching the main model leaves the pick alone, and the pick leaves the main model alone.
-    expect((await readJson(await patch({ model: 'test/reasoning' }))).chat).toMatchObject({
-      model: 'test/reasoning',
-      subModel: 'test/text',
+    expect((await readJson(await patch({ modelBinding: { main: 'test/reasoning' } }))).chat.modelBinding).toEqual({
+      main: 'test/reasoning',
+      sub: 'test/text',
     });
-    expect((await readJson(await patch({ subModel: 'echo/echo' }))).chat).toMatchObject({
-      model: 'test/reasoning',
-      subModel: 'echo/echo',
+    expect((await readJson(await patch({ modelBinding: { sub: 'echo/echo' } }))).chat.modelBinding).toEqual({
+      main: 'test/reasoning',
+      sub: 'echo/echo',
     });
 
     // A generation running holds the slot, and the setting waits for it like any other.
     depsOfApp.get(withKey)!.generating.add(chatId);
-    const busy = await patch({ subModel: null });
+    const busy = await patch({ modelBinding: { sub: null } });
     expect(busy.status).toBe(409);
     expect((await readJson(busy)).code).toBe('generation_in_progress');
     depsOfApp.get(withKey)!.generating.delete(chatId);
 
-    expect((await readJson(await patch({ subModel: null }))).chat.subModel).toBeNull();
-    expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.subModel).toBeNull();
+    expect((await readJson(await patch({ modelBinding: { sub: null } }))).chat.modelBinding.sub).toBeNull();
+    expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.modelBinding).toEqual({ main: 'test/reasoning', sub: null });
   });
 
   it('opens a chat with an auxiliary model held to the same rules as the PATCH', async () => {
@@ -3441,113 +3476,40 @@ describe('chats', () => {
     const [profile] = plot.profiles;
     const withKey = makeApp({ env: { SHIZUE_TEST_MODELS: '1' } });
     const start =(body: Record<string, unknown>, target: Hono<AppEnv> = withKey) =>
-      json(cookie, '/api/chats', 'POST', { plotId: plot.id, model: 'echo/echo', ...body }, target);
+      json(cookie, '/api/chats', 'POST', { plotId: plot.id, ...body }, target);
 
-    const picked = await start({ subModel: 'test/text' });
+    const picked = await start({ modelBinding: { sub: 'test/text' } });
     expect(picked.status, await picked.clone().text()).toBe(201);
     const { chat } = await readJson(picked);
-    expect(chat).toMatchObject({ model: 'echo/echo', subModel: 'test/text' });
-    expect((await readJson(await request(cookie, `/api/chats/${chat.id}`))).chat.subModel).toBe('test/text');
+    expect(chat.modelBinding).toEqual({ main: null, sub: 'test/text' });
+    expect((await readJson(await request(cookie, `/api/chats/${chat.id}`))).chat.modelBinding.sub).toBe('test/text');
 
     // No pick and an explicit null both open on the default.
-    for (const body of [{}, { subModel: null }]) {
+    for (const body of [{}, { modelBinding: { sub: null } }]) {
       const res = await start(body);
       expect(res.status).toBe(201);
-      expect((await readJson(res)).chat.subModel).toBeNull();
+      expect((await readJson(res)).chat.modelBinding).toEqual({ main: null, sub: null });
     }
 
     // Refused with a profile picked, too: a refused start must not copy one.
     const before = (await readJson(await request(cookie, '/api/chats'))).length;
     for (const [body, target] of [
-      [{ subModel: 'nope/none' }, withKey],
+      [{ modelBinding: { sub: 'nope/none' } }, withKey],
       // The default app's catalog has echo alone.
-      [{ subModel: 'test/text' }, app],
-      [{ subModel: '' }, withKey],
+      [{ modelBinding: { sub: 'test/text' } }, app],
+      [{ modelBinding: { sub: '' } }, withKey],
     ] as const) {
       const res = await start({ ...body, profileId: profile.id }, target);
       expect(res.status).toBe(400);
       expect((await readJson(res)).code).toBe('model_unavailable');
     }
-    for (const bad of [7, true, { id: 'test/text' }]) {
-      const res = await start({ subModel: bad, profileId: profile.id });
+    for (const bad of [{ sub: 7 }, { sub: true }, { sub: { id: 'test/text' } }]) {
+      const res = await start({ modelBinding: bad, profileId: profile.id });
       expect(res.status).toBe(400);
       expect((await readJson(res)).code).toBe('invalid_request');
     }
     expect((await readJson(await request(cookie, '/api/chats'))).length).toBe(before);
     expect(await readJson(await request(cookie, '/api/personas'))).toEqual([]);
-  });
-
-  it('takes a reasoning effort only from the list the chat model advertises', async () => {
-    const cookie = await signUp('effort@example.com');
-    const { chatId } = await setupChat(cookie);
-    const withKey = makeApp({ env: { SHIZUE_TEST_MODELS: '1' } });
-
-    const models = await readJson(await request(cookie, '/api/models', 'GET', undefined, withKey));
-    expect(models.find((entry: any) => entry.id === 'test/reasoning')).toEqual({
-      id: 'test/reasoning',
-      label: expect.any(String),
-      reasoningEfforts: ['low', 'medium', 'high'],
-      defaultReasoningEffort: 'medium',
-    });
-    expect(models.find((entry: any) => entry.id === 'echo/echo')).toEqual({ id: 'echo/echo', label: expect.any(String) });
-
-    const patch = (body: unknown) => json(cookie, `/api/chats/${chatId}`, 'PATCH', body, withKey);
-    // Echo advertises none, so there is nothing to pick from.
-    const refused = await patch({ reasoningEffort: 'high' });
-    expect(refused.status).toBe(400);
-    expect((await readJson(refused)).code).toBe('invalid_request');
-
-    // Checked against the model the same body switches to.
-    const chosen = await readJson(await patch({ model: 'test/reasoning', reasoningEffort: 'high' }));
-    expect(chosen.chat).toMatchObject({ model: 'test/reasoning', reasoningEffort: 'high' });
-    for (const bad of ['turbo', 7, '']) {
-      const res = await patch({ reasoningEffort: bad });
-      expect(res.status).toBe(400);
-      expect((await readJson(res)).code).toBe('invalid_request');
-    }
-    expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.reasoningEffort).toBe('high');
-
-    expect((await readJson(await patch({ reasoningEffort: null }))).chat.reasoningEffort).toBeNull();
-    expect((await readJson(await patch({ reasoningEffort: 'low' }))).chat.reasoningEffort).toBe('low');
-    // A model that still offers it keeps it; one that does not clears it.
-    expect((await readJson(await patch({ model: 'test/reasoning' }))).chat.reasoningEffort).toBe('low');
-    expect((await readJson(await patch({ model: 'test/text' }))).chat).toMatchObject({
-      model: 'test/text',
-      reasoningEffort: null,
-    });
-  });
-
-  it('sends the reasoning effort only while the model still advertises it', async () => {
-    const cookie = await signUp('effort-send@example.com');
-    const { chatId } = await setupChat(cookie);
-    const sent: (string | undefined)[] = [];
-    const echo = createEchoAdapter();
-    const effortApp = makeApp({
-      env: { SHIZUE_TEST_MODELS: '1' },
-      getAdapter: () => ({
-        providerModel: 'echo',
-        adapter: {
-          stream: (req) => {
-            sent.push(req.reasoningEffort);
-            return echo.stream(req);
-          },
-        },
-      }),
-    });
-    const send = async (): Promise<void> => {
-      const events = await readSse(
-        await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, effortApp),
-      );
-      expect(events.at(-1)?.event).toBe('done');
-    };
-
-    await send();
-    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { model: 'test/reasoning', reasoningEffort: 'high' }, effortApp);
-    await send();
-    // An effort the catalog stopped advertising stays stored but is not sent.
-    await db.update(chats).set({ reasoningEffort: 'turbo' }).where(eq(chats.id, chatId));
-    await send();
-    expect(sent).toEqual([undefined, 'high', undefined]);
   });
 
   it("asks the provider's prompt cache by the chat, whatever the branch", async () => {
@@ -3618,13 +3580,13 @@ describe('chats', () => {
     const cookie = await signUp('settings-bad@example.com');
     const { chatId } = await setupChat(cookie);
 
-    const unknown = await json(cookie, `/api/chats/${chatId}`, 'PATCH', { model: 'nope/nope' });
+    const unknown = await json(cookie, `/api/chats/${chatId}`, 'PATCH', { modelBinding: { main: 'nope/nope' } });
     expect(unknown.status).toBe(400);
     expect((await readJson(unknown)).code).toBe('model_unavailable');
 
     // Known model, but no provider key in this app's env.
     const gated = await json(cookie, `/api/chats/${chatId}`, 'PATCH', {
-      model: 'test/text',
+      modelBinding: { main: 'test/text' },
     });
     expect(gated.status).toBe(400);
     expect((await readJson(gated)).code).toBe('model_unavailable');
@@ -3635,7 +3597,7 @@ describe('chats', () => {
 
     // The chat is untouched by all of the above.
     const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
-    expect(state.chat.model).toBe('echo/echo');
+    expect(state.chat.modelBinding).toEqual({ main: null, sub: null });
     expect(state.chat.personaId).toBeNull();
   });
 
@@ -4299,7 +4261,7 @@ describe('chats', () => {
         cookie,
         '/api/chats',
         'POST',
-        { plotId: plot.id, model: 'test/text' },
+        { plotId: plot.id, modelBinding: { main: 'test/text' } },
         keyed,
       ),
     );
@@ -4352,7 +4314,7 @@ describe('chats', () => {
 
     // A rejected patch takes the slot too, and must not leak it.
     generating.acquired.length = 0;
-    expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { model: 'nope/nope' }, shared)).status).toBe(400);
+    expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { modelBinding: { main: 'nope/nope' } }, shared)).status).toBe(400);
     expect(generating.acquired).toEqual([chatId]);
     expect(generating.size).toBe(0);
 
@@ -6463,7 +6425,7 @@ describe('chat attachments', () => {
     const created = await readJson(
       await json(cookie, '/api/chats', 'POST', {
         plotId: plot.id,
-        model: 'test/vision',
+        modelBinding: { main: 'test/vision' },
       }, seeing),
     );
     const chatId = created.chat.id;
@@ -6565,8 +6527,7 @@ describe('chat attachments', () => {
 
     const history = await withTurnImages(
       makeDeps({ storage: oversized, env: { SHIZUE_TEST_MODELS: '1' } }),
-      'reader',
-      'test/vision',
+      true,
       [turn!],
       [{ role: 'user', content: '두 장' }],
     );
@@ -8700,7 +8661,7 @@ describe('memory', () => {
     const offering = makeDeps({ env: { SHIZUE_TEST_MODELS: '1' }, getAdapter: summarizing });
     const dropped = makeDeps({ getAdapter: summarizing });
     const chatId = await importedBacklog(cookie, createApp(offering), 40, 'b');
-    await db.update(chats).set({ subModel: 'test/text' }).where(eq(chats.id, chatId));
+    await db.update(chats).set({ modelBinding: { sub: 'test/text' } }).where(eq(chats.id, chatId));
     // Completing only asked whether the owner has a model to summarize with at all.
     asked.length = 0;
 
@@ -8712,8 +8673,8 @@ describe('memory', () => {
     expect(asked.length).toBeGreaterThan(0);
     expect(new Set(asked)).toEqual(new Set(['test/memory']));
     // The pick is left as the reader made it: the model may come back.
-    const [row] = await db.select({ subModel: chats.subModel }).from(chats).where(eq(chats.id, chatId));
-    expect(row!.subModel).toBe('test/text');
+    const [row] = await db.select({ modelBinding: chats.modelBinding }).from(chats).where(eq(chats.id, chatId));
+    expect(row!.modelBinding).toEqual({ sub: 'test/text' });
   });
 
   it('ends a backfill quietly once the chat is gone', async () => {
@@ -8776,7 +8737,7 @@ describe('chat import', () => {
     expect(first.chat).toMatchObject({
       plotId: plot.id,
       title: '도서관',
-      model: 'echo/echo',
+      modelBinding: { main: null, sub: null },
       importing: true,
       importedFrom: { fileName: 'chat.jsonl', sha256: FILE, importedAt: expect.any(String) },
     });
@@ -9598,9 +9559,9 @@ describe('plot draft', () => {
     expect(ok.status, await ok.clone().text()).toBe(200);
     expect(calls()).toBe(2);
 
-    // A keyless deployment serves only the echo model, and it answers with the
-    // premise rather than with JSON — so the default app is the failure itself.
-    const failed = await json(cookie, '/api/plots/draft', 'POST', { premise: '밤의 도서관' });
+    // Echo, as the sub model a draft runs on, answers with the premise rather
+    // than with JSON — the failure itself.
+    const failed = await json(cookie, '/api/plots/draft', 'POST', { premise: '밤의 도서관' }, makeApp({ env: { MEMORY_MODEL: 'echo/echo' } }));
     expect(failed.status).toBe(502);
     expect((await readJson(failed)).code).toBe('draft_failed');
     expect(await readJson(await request(cookie, '/api/plots'))).toEqual([]);
@@ -9620,7 +9581,7 @@ describe('plot draft', () => {
     expect(calls()).toBe(0);
   });
 
-  it("runs on the model the creator picked, held to their catalog, or else on the first", async () => {
+  it("runs on the model preset the creator picked, held to their presets, or else on the default's sub model", async () => {
     const cookie = await signUp('draft-model@example.com');
     const scripted = scriptedGetAdapter(DRAFT);
     /** The model each call was handed to, in order. */
@@ -9637,10 +9598,10 @@ describe('plot draft', () => {
       json(cookie, '/api/plots/draft', 'POST', { premise: '밤의 도서관', ...body }, target);
 
     expect((await draft({ model: 'test/text' })).status).toBe(200);
-    // No pick and an explicit null are the default: the catalog's first model.
+    // No pick and an explicit null are the default: the default binding's sub model.
     expect((await draft({})).status).toBe(200);
     expect((await draft({ model: null })).status).toBe(200);
-    expect(used).toEqual(['test/text', 'echo/echo', 'echo/echo']);
+    expect(used).toEqual(['test/text', 'test/memory', 'test/memory']);
 
     for (const [body, target] of [
       [{ model: 'nope/none' }, drafting],
@@ -9746,11 +9707,11 @@ describe('reply suggestions', () => {
     };
 
     await suggest(offering);
-    expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { subModel: 'test/text' }, offering)).status).toBe(200);
+    expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { modelBinding: { sub: 'test/text' } }, offering)).status).toBe(200);
     await suggest(offering);
     // The account no longer offers the pick: the default answers instead.
     await suggest(recording({}));
-    expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { subModel: null }, offering)).status).toBe(200);
+    expect((await json(cookie, `/api/chats/${chatId}`, 'PATCH', { modelBinding: { sub: null } }, offering)).status).toBe(200);
     await suggest(offering);
     expect(asked).toEqual(['test/memory', 'test/text', 'test/memory', 'test/memory']);
   });
@@ -12063,12 +12024,12 @@ describe('request triggers', () => {
     };
     const userTurn = () => prompts.at(-1)!.messages.find((message) => contentText(message.content).includes('질문') || contentText(message.content).includes('뭐야'));
 
-    const edited = await requestChat('request-image@example.com', atTurn('이건 뭐야?', setText('바뀐 질문')), { model: 'test/vision' }, seeing);
+    const edited = await requestChat('request-image@example.com', atTurn('이건 뭐야?', setText('바뀐 질문')), { modelBinding: { main: 'test/vision' } }, seeing);
     await sendWithImage(edited.cookie, edited.chatId);
     expect(userTurn()).toEqual({ role: 'user', content: [{ type: 'text', text: '바뀐 질문' }, image] });
 
     // Another turn's role changed: the picture's own turn is still the reader's, and it carries it.
-    const reshaped = await requestChat('request-image-role@example.com', atTurn('문 앞이다.', setRole('system')), { model: 'test/vision' }, seeing);
+    const reshaped = await requestChat('request-image-role@example.com', atTurn('문 앞이다.', setRole('system')), { modelBinding: { main: 'test/vision' } }, seeing);
     await sendWithImage(reshaped.cookie, reshaped.chatId);
     expect(prompts.at(-1)!.messages.slice(0, 2)).toEqual([
       { role: 'system', content: '[Start a new chat]' },
@@ -12077,7 +12038,7 @@ describe('request triggers', () => {
     expect(userTurn()).toEqual({ role: 'user', content: [{ type: 'text', text: '이건 뭐야?' }, image] });
 
     // Its own turn became a system turn: sent there, beside its text, as RisuAI's Responses request sends one.
-    const turned = await requestChat('request-image-turned@example.com', atTurn('이건 뭐야?', setRole('system')), { model: 'test/vision' }, seeing);
+    const turned = await requestChat('request-image-turned@example.com', atTurn('이건 뭐야?', setRole('system')), { modelBinding: { main: 'test/vision' } }, seeing);
     await sendWithImage(turned.cookie, turned.chatId);
     expect(userTurn()).toEqual({ role: 'system', content: [{ type: 'text', text: '이건 뭐야?' }, image] });
   });
@@ -12725,7 +12686,7 @@ describe('editRequest listeners', () => {
         extensions: { risuai: { triggerscript: [lua(code)] } },
       },
     });
-    const chatId = (await json(cookie, '/api/chats', 'POST', { plotId: plot.id, model: 'test/vision' }, seeing).then(readJson)).chat.id;
+    const chatId = (await json(cookie, '/api/chats', 'POST', { plotId: plot.id, modelBinding: { main: 'test/vision' } }, seeing).then(readJson)).chat.id;
     const sendWithImage = async (content: string): Promise<void> => {
       const events = await answerWithImages(cookie, chatId, content, [gif], seeing);
       expect(events.at(-1)!.event).toBe('done');
@@ -13611,7 +13572,7 @@ describe('script model calls', () => {
     expect(asked).toEqual(['echo/echo', 'echo/echo', 'test/memory']);
 
     asked.length = 0;
-    expect((await json(reader, `/api/chats/${chatId}`, 'PATCH', { subModel: 'test/text' }, offering)).status).toBe(200);
+    expect((await json(reader, `/api/chats/${chatId}`, 'PATCH', { modelBinding: { sub: 'test/text' } }, offering)).status).toBe(200);
     await send({ model: 'sub' });
     await send({ model: 'main' });
     // The account no longer offers the pick: the default answers instead.

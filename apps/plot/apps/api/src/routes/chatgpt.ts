@@ -1,7 +1,10 @@
+import { credentials } from '@shizue/db';
+import { and, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { SIGN_IN_LOCALES, SignInFailure, type SignInLocale } from '../chatgptAccounts.js';
 import type { AppDeps, AppEnv } from '../deps.js';
 import { ApiError, badRequest } from '../errors.js';
+import { ensureFirstPreset } from '../models.js';
 import { cookie, readCookie, requireLocal } from '../session.js';
 import { optionalString, readJsonBody } from '../util.js';
 
@@ -60,6 +63,10 @@ export function chatGPTRoutes(deps: AppDeps): Hono<AppEnv> {
     try {
       const done = await accounts.finishSignIn(new URL(c.req.url).searchParams, readCookie(c.req.raw.headers, ATTEMPT_COOKIE), c.get('userId'));
       c.header('Set-Cookie', cookie(CLIENT_COOKIE, done.clientId, { path: COOKIE_PATH, maxAge: 365 * 24 * 60 * 60, secure }), { append: true });
+      // An owner with no model preset yet gets one on the plan (`ensureFirstPreset`).
+      const [connection] = await deps.db.select().from(credentials)
+        .where(and(eq(credentials.userId, c.get('userId')), eq(credentials.kind, 'chatgpt'))).limit(1);
+      if (connection) await ensureFirstPreset(deps, connection);
       return c.redirect(`/${done.target.locale}${done.target.next}`, 302);
     } catch (error) {
       if (!(error instanceof SignInFailure)) throw error;

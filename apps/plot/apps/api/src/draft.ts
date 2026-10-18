@@ -6,16 +6,17 @@
  * is answered to the plot editor, which creates the plot through the ordinary POST,
  * so the editor stays the only place a work is written.
  *
- * The call goes to the model the creator picked, else to the default chat model
- * — never to the memory channel: this is the creator's own writing being
- * drafted, and the cheap summarizer is not the model to hand that to unasked.
+ * The call goes to the model preset the creator picked, else to the default
+ * binding's sub model — the side work's, as the owner's plan of 2026-10-18 puts
+ * drafts — which an open sub leaves to the main (§7.1).
  */
 import { MAX_INTRO_LENGTH } from '@shizue/core';
-import { getAdapter, getModel, listEnabledModels, type ChatGPTAccount, type ChatRequest } from '@shizue/llm';
+import type { ChatRequest } from '@shizue/llm';
 import type { AppDeps } from './deps.js';
 import { ApiError } from './errors.js';
 import { normalizeTags } from './hub.js';
 import { collect } from './memory.js';
+import { bindablePreset, modelOf, resolveModel, resolvePreset, type ResolvedModel } from './models.js';
 
 /** The premise a creator hands over; a paragraph, not a manuscript. */
 export const MAX_PREMISE_LENGTH = 2000;
@@ -78,24 +79,14 @@ export interface PlotDraft {
 }
 
 /**
- * Drafts use the model the creator picked, held to their catalog exactly as a
- * chat's model is; without a pick, the first model available to their ChatGPT
- * account, matching the initial selection on the start-chat panel.
+ * Drafts use the preset the creator picked, held to their presets exactly as a
+ * chat's binding is; without a pick, the default binding's sub model.
  */
-const draftModel = async (
-  deps: AppDeps,
-  account: ChatGPTAccount | undefined,
-  requested: string | undefined,
-): Promise<string> => {
-  if (requested !== undefined) {
-    if (!(await getModel(requested, deps.env, account))) {
-      throw new ApiError(400, 'model_unavailable', `Model not available: ${requested}`);
-    }
-    return requested;
-  }
-  const model = (await listEnabledModels(deps.env, account))[0];
-  if (!model) throw new ApiError(503, 'draft_unavailable', 'No chat model is configured');
-  return model.id;
+const draftModel = async (deps: AppDeps, userId: string, requested: string | undefined): Promise<ResolvedModel> => {
+  if (requested !== undefined) return modelOf(deps, userId, await bindablePreset(deps, userId, requested));
+  const owner = { userId, modelBinding: null };
+  if (!(await resolvePreset(deps, owner, 'sub'))) throw new ApiError(503, 'draft_unavailable', 'No model preset is set');
+  return resolveModel(deps, owner, 'sub');
 };
 
 /**
@@ -110,9 +101,7 @@ export async function draftPlot(
   premise: string,
   model?: string,
 ): Promise<PlotDraft> {
-  const account = deps.chatgpt?.accounts.forUser(userId);
-  const modelId = await draftModel(deps, account, model);
-  const resolved = await (deps.getAdapter ?? getAdapter)(modelId, deps.env, account);
+  const resolved = await draftModel(deps, userId, model);
   const request: ChatRequest = {
     model: resolved.providerModel,
     system: DRAFT_RULES,

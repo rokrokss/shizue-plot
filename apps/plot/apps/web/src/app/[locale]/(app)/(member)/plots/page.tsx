@@ -5,17 +5,20 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ImportProgressLine, RealmImportForm } from '@/components/CardImport';
 import { CreatorTabs } from '@/components/CreatorTabs';
 import { DraftGuide } from '@/components/DraftGuide';
+import { ModelOptions } from '@/components/ModelOptions';
 import { PlotShelf } from '@/components/PlotShelf';
 import { Button, buttonClass, ErrorText, Field, Select, Spinner, TextArea, TextInput } from '@/components/ui';
 import { Link, useRouter } from '@/i18n/navigation';
 import { apiGet, apiSend } from '@/lib/api';
 import { readDraftModel, writeDraftModel } from '@/lib/draftPrefs';
+import { effectivePreset, OPEN_BINDING } from '@/lib/modelBinding';
 import { importFile, type ImportProgress } from '@/lib/fileImport';
 import { keepImportWarnings } from '@/lib/importWarnings';
 import { checkCardSize, downloadRealmCard } from '@/lib/realm';
 import {
   MAX_PREMISE_LENGTH,
-  type ModelInfo,
+  type ModelBinding,
+  type ModelPreset,
   type Plot,
   type PlotDetail,
   type PlotDraft,
@@ -33,6 +36,7 @@ export default function PlotsPage() {
   const t = useTranslations('plots');
   const cardImport = useTranslations('cardImport');
   const common = useTranslations('common');
+  const chat = useTranslations('chat');
   const toMessage = useErrorMessage();
   const router = useRouter();
   const fileInput = useRef<HTMLInputElement>(null);
@@ -44,8 +48,9 @@ export default function PlotsPage() {
   /** The AI draft panel, and the one line it is written from. */
   const [drafting, setDrafting] = useState(false);
   const [premise, setPremise] = useState('');
-  /** The models a draft can run on, and the one it will: the last pick, else the first. */
-  const [models, setModels] = useState<ModelInfo[]>([]);
+  /** The presets a draft can run on, and the one it will: the last pick, else the default's sub model (''). */
+  const [presets, setPresets] = useState<ModelPreset[]>([]);
+  const [modelDefaults, setModelDefaults] = useState<ModelBinding>(OPEN_BINDING);
   const [draftModel, setDraftModel] = useState('');
   /** The RisuRealm panel: a card page's address instead of a file. */
   const [realmOpen, setRealmOpen] = useState(false);
@@ -67,14 +72,16 @@ export default function PlotsPage() {
     void load();
   }, [load]);
 
-  // A catalog that does not load leaves the draft without a select, and the
-  // server drafts on its default model — so its failure is not this page's error.
+  // Presets that do not load leave the draft without a select, and the server
+  // drafts on the default sub model — so their failure is not this page's error.
   useEffect(() => {
-    apiGet<ModelInfo[]>('/api/models').then((list) => {
-      setModels(list);
+    apiGet<ModelPreset[]>('/api/model-presets').then((list) => {
+      setPresets(list);
       setDraftModel(readDraftModel(list));
     }, () => undefined);
+    apiGet<ModelBinding>('/api/model-binding').then(setModelDefaults, () => undefined);
   }, []);
+  const draftDefault = effectivePreset(presets, OPEN_BINDING, modelDefaults, 'sub');
 
   async function create(): Promise<void> {
     if (!name.trim() || busy) return;
@@ -280,7 +287,7 @@ export default function PlotsPage() {
               />
             </Field>
             <div className="flex flex-wrap items-end justify-end gap-2">
-              {models.length > 0 ? (
+              {presets.length > 0 ? (
                 <div className="min-w-0 flex-1 sm:max-w-xs">
                   <Field label={t('draftModel')}>
                     <Select
@@ -291,11 +298,11 @@ export default function PlotsPage() {
                         writeDraftModel(event.target.value);
                       }}
                     >
-                      {models.map((entry) => (
-                        <option key={entry.id} value={entry.id}>
-                          {entry.label}
-                        </option>
-                      ))}
+                      <ModelOptions
+                        presets={presets}
+                        value={draftModel || null}
+                        defaultLabel={draftDefault ? t('draftModelDefault', { model: draftDefault.name }) : chat('modelDefault')}
+                      />
                     </Select>
                   </Field>
                 </div>

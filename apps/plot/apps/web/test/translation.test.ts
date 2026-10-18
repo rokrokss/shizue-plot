@@ -228,11 +228,10 @@ describe('the language mode settings', () => {
   function renderSettings(language: Record<string, unknown>, patches: unknown[] = []): HTMLSelectElement[] {
     render(
       createElement(ChatSettings, {
-        model: 'm1',
-        subModel: null,
-        reasoningEffort: null,
+        binding: { main: 'm1', sub: null },
+        presets: [{ id: 'm1', name: '모델 하나', format: 'openai-chat', endpoint: null, model: 'one', credentialId: null, params: {}, capabilities: {} }],
+        defaults: { main: null, sub: null },
         personaId: null,
-        models: [{ id: 'm1', label: '모델 하나' }],
         personas: [],
         disabled: false,
         language: { settings: {}, plotLanguage: 'en', locale: 'ko', recommended: false, ...language } as never,

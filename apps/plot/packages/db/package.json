@@ -24,6 +24,7 @@
     "@electric-sql/pglite": "0.5.8",
     "@electric-sql/pglite-pgvector": "0.0.9",
     "@shizue/core": "workspace:*",
+    "@shizue/llm": "workspace:*",
     "drizzle-orm": "^0.45.2"
   },
   "devDependencies": {

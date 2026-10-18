@@ -1,6 +1,6 @@
 /**
- * What this browser remembers about the AI draft: the model the creator last
- * drafted with, and whether they keep the "how it works" guide open. Per browser,
+ * What this browser remembers about the AI draft: the model preset the creator
+ * last drafted with, and whether they keep the "how it works" guide open. Per browser,
  * like the embedding model and the folded 상태창 — a way of working, not a
  * setting of any plot, so neither goes to the server.
  */
@@ -9,18 +9,16 @@ const MODEL_KEY = 'shizue.draftModel';
 const GUIDE_KEY = 'shizue.draftGuideOpen';
 
 /**
- * The creator's last pick where the catalog still offers it, else the first
- * model — the one the server drafts with when it is sent none. Empty while the
- * catalog is.
+ * The creator's last pick where the presets still have it, else '' — the
+ * default binding's sub model, which the server drafts with when it is sent none.
  */
 export function readDraftModel(offered: readonly { id: string }[]): string {
-  const fallback = offered[0]?.id ?? '';
-  if (typeof window === 'undefined') return fallback;
+  if (typeof window === 'undefined') return '';
   try {
     const stored = window.localStorage.getItem(MODEL_KEY);
-    return offered.some((model) => model.id === stored) ? stored! : fallback;
+    return offered.some((preset) => preset.id === stored) ? stored! : '';
   } catch {
-    return fallback;
+    return '';
   }
 }
 

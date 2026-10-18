@@ -19,7 +19,8 @@ vi.mock('@/lib/api', async (original) => ({
   ...(await original<typeof import('../src/lib/api')>()),
   apiGet: (path: string) => Promise.resolve(
     path === '/api/plots/plot-1' ? plot
-      : path === '/api/models' ? [{ id: 'echo/echo', label: 'Echo' }]
+      : path === '/api/model-presets' ? [{ id: 'echo/echo', name: 'Echo' }]
+      : path === '/api/model-binding' ? { main: null, sub: null }
       : path === '/api/notes' || path === '/api/personas' ? records : [],
   ),
   apiSend: (...args: unknown[]) => send(...args),

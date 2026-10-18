@@ -351,13 +351,98 @@ export interface Persona {
   createdAt: string;
 }
 
+/** One model a provider offers, as the preset editor's picker lists it (`GET /api/model-presets/catalog`). */
 export interface ModelInfo {
   id: string;
   label: string;
-  /** Reasoning efforts the model accepts; absent where it advertises none. */
+  /** Whether it reads pictures, where the provider says. */
+  vision?: boolean;
+  /** Reasoning efforts the model accepts (a ChatGPT model's catalog); absent where it advertises none. */
   reasoningEfforts?: string[];
-  /** The effort the model runs at when the chat picks none. */
+  /** The effort the model runs at when the preset picks none. */
   defaultReasoningEffort?: string;
+}
+
+/** The sampling values a preset may set (`@shizue/llm` `MODEL_PARAMETERS`). */
+export type ModelParameter =
+  | 'temperature'
+  | 'topP'
+  | 'topK'
+  | 'minP'
+  | 'topA'
+  | 'repetitionPenalty'
+  | 'frequencyPenalty'
+  | 'presencePenalty'
+  | 'reasoningEffort'
+  | 'thinkingTokens'
+  | 'verbosity';
+
+/** What a preset sends with every request on it; a value left out is not sent. */
+export interface ModelParams extends Partial<Record<Exclude<ModelParameter, 'reasoningEffort' | 'verbosity'>, number>> {
+  reasoningEffort?: string;
+  verbosity?: string;
+  maxTokens?: number;
+  stop?: string[];
+  extraHeaders?: Record<string, string>;
+  extraBody?: Record<string, unknown>;
+}
+
+/** What a preset's model can take: pictures, and RisuAI's flags for a strict chat template. */
+export interface ModelCapabilities {
+  vision?: boolean;
+  systemPrompt?: 'full' | 'first' | 'none';
+  alternateRoles?: boolean;
+  startWithUser?: boolean;
+}
+
+/** A model preset (`/api/model-presets`): a format, a model, its credential or a keyless address, its values. */
+export interface ModelPreset {
+  id: string;
+  name: string;
+  format: string;
+  endpoint: string | null;
+  model: string;
+  credentialId: string | null;
+  params: ModelParams;
+  capabilities: ModelCapabilities;
+  /** The test runner's catalog entry, not one of the owner's. */
+  builtIn?: true;
+}
+
+/** Which presets a chat runs on, or the owner's default (`/api/model-binding`); null follows the default. */
+export interface ModelBinding {
+  main: string | null;
+  sub: string | null;
+}
+
+/** An API key or the ChatGPT connection (`/api/credentials`) — never its secret, only a masked hint. */
+export interface Credential {
+  id: string;
+  kind: 'api_key' | 'chatgpt' | string;
+  provider: string;
+  label: string;
+  baseUrl: string | null;
+  hint: string;
+  /** The ChatGPT connection holds tokens; a key always counts as set. */
+  connected: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** What `GET /api/model-presets/formats` says each format and provider takes. */
+export interface ModelFormats {
+  formats: {
+    id: string;
+    parameters: ModelParameter[];
+    /** The values it sends on the ChatGPT connection, where it takes one. */
+    chatgptParameters: ModelParameter[] | null;
+    key: 'required' | 'optional';
+    defaultBaseUrl: string | null;
+  }[];
+  providers: { id: string; label: string; baseUrl: string | null; formats: string[]; key: 'required' | 'optional' }[];
+  localEndpoints: { id: string; label: string; endpoint: string }[];
+  reasoningEfforts: string[];
+  verbosities: string[];
 }
 
 /**
@@ -525,13 +610,12 @@ export interface Chat {
   plotId: string;
   personaId: string | null;
   title: string;
-  model: string;
   /**
-   * The auxiliary model for scripts' auxiliary calls and the background work
-   * (summaries, suggestions); null leaves it to the first model in
-   * the reader's catalog.
+   * The model presets the chat runs on: `main` its turns, `sub` the side work —
+   * null follows the owner's default, and an open sub the main. Optional so a
+   * state built by hand needs none; absent is both open.
    */
-  subModel: string | null;
+  modelBinding?: ModelBinding;
   /** Author's note, injected into the history at `noteSettings.depth`. */
   note: string;
   /**
@@ -573,8 +657,6 @@ export interface Chat {
    */
   statusWindowEnabled: boolean;
   choicesEnabled: boolean;
-  /** One of the model's advertised efforts; null sends none (the model's default). */
-  reasoningEffort: string | null;
   /**
    * Members the reader sent off the stage; empty while the whole roster is on.
    * May name a member that has since been deleted, which matches nobody.

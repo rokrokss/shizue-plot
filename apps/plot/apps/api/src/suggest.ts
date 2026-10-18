@@ -12,7 +12,7 @@
  * Nothing is stored — a suggestion the reader ignores must leave no trace.
  */
 import type { Character, Message } from '@shizue/db';
-import type { ChatRequest } from '@shizue/llm';
+import type { ChatRequest, ModelBinding } from '@shizue/llm';
 import type { AppDeps } from './deps.js';
 import { ApiError } from './errors.js';
 import { collect, memoryChannel } from './memory.js';
@@ -45,10 +45,10 @@ Output format: output only one JSON object that follows the schema below. Do not
 }`;
 
 export interface SuggestInput {
-  /** The reader asking, whose ChatGPT account writes the suggestions. */
+  /** The owner, whose default binding an open slot follows. */
   userId: string;
-  /** The chat's auxiliary model, which writes them; null for the default. */
-  subModel: string | null;
+  /** The chat's binding, whose sub model writes them (`resolveModel`). */
+  modelBinding: ModelBinding | null;
   /** The branch tail, oldest first; the caller has already windowed it. */
   recent: Message[];
   /** The roster, by whose ids a group reply names its speaker. */

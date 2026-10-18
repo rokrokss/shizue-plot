@@ -13,7 +13,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import messages from '../messages/ko.json';
 import { ApiError } from '../src/lib/api';
-import type { ModelInfo, PlotDraft } from '../src/lib/types';
+import type { ModelPreset, PlotDraft } from '../src/lib/types';
 
 (globalThis as Record<string, unknown>)['IS_REACT_ACT_ENVIRONMENT'] = true;
 
@@ -37,8 +37,8 @@ let sent: { path: string; body: unknown }[] = [];
 /** What the draft call answers with; a rejection is how a failure is tested. */
 let drafted: () => Promise<PlotDraft>;
 let created: () => Promise<{ id: string }>;
-/** The creator's models; empty unless a test is about picking one. */
-let catalog: ModelInfo[] = [];
+/** The creator's model presets; empty unless a test is about picking one. */
+let catalog: Pick<ModelPreset, 'id' | 'name'>[] = [];
 
 vi.mock('@/i18n/navigation', async () => {
   const { createElement: h } = await import('react');
@@ -54,7 +54,8 @@ vi.mock('@/lib/api', async (importOriginal) => {
   const original = await importOriginal<typeof import('../src/lib/api')>();
   return {
     ...original,
-    apiGet: (path: string) => Promise.resolve(path === '/api/models' ? catalog : []),
+    apiGet: (path: string) =>
+      Promise.resolve(path === '/api/model-presets' ? catalog : path === '/api/model-binding' ? { main: null, sub: null } : []),
     apiSend: (_method: string, path: string, body: unknown) => {
       sent.push({ path, body });
       if (path === '/api/plots/draft') return drafted();
@@ -201,8 +202,8 @@ describe('the draft’s model', () => {
 
   beforeEach(() => {
     catalog = [
-      { id: 'm1', label: '모델 하나' },
-      { id: 'm2', label: '가벼운 모델' },
+      { id: 'm1', name: '모델 하나' },
+      { id: 'm2', name: '가벼운 모델' },
     ];
   });
 
@@ -212,12 +213,12 @@ describe('the draft’s model', () => {
     return sent[0]!.body;
   }
 
-  it('starts on the first model and sends it', async () => {
+  it('starts on the default, which it leaves to the server', async () => {
     await render();
     await click(opener());
-    expect([...modelSelect()!.options].map((option) => option.textContent)).toEqual(['모델 하나', '가벼운 모델']);
-    expect(modelSelect()!.value).toBe('m1');
-    expect(await draftWith()).toEqual({ premise: '한 줄.', model: 'm1' });
+    expect([...modelSelect()!.options].map((option) => option.textContent)).toEqual(['기본', '모델 하나', '가벼운 모델']);
+    expect(modelSelect()!.value).toBe('');
+    expect(await draftWith()).toEqual({ premise: '한 줄.' });
   });
 
   it('remembers the last pick in this browser', async () => {
@@ -238,15 +239,15 @@ describe('the draft’s model', () => {
     expect(await draftWith()).toEqual({ premise: '한 줄.', model: 'm2' });
   });
 
-  it('falls back to the first model when the remembered one is no longer offered', async () => {
+  it('falls back to the default when the remembered preset is gone', async () => {
     store.set('shizue.draftModel', 'gone/model');
     await render();
     await click(opener());
-    expect(modelSelect()!.value).toBe('m1');
-    expect(await draftWith()).toEqual({ premise: '한 줄.', model: 'm1' });
+    expect(modelSelect()!.value).toBe('');
+    expect(await draftWith()).toEqual({ premise: '한 줄.' });
   });
 
-  it('leaves the choice to the server while there is no catalog', async () => {
+  it('leaves the choice to the server while there are no presets', async () => {
     catalog = [];
     await render();
     await click(opener());

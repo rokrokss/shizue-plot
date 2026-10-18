@@ -50,7 +50,8 @@ test('connecting ChatGPT through Shizue, a callback error, and disconnecting', a
   await page.goto('/ko/settings');
   await expect(page.getByRole('link', STORE_LINK)).toBeVisible();
   await expect(page.getByRole('button', CONNECT)).toBeDisabled();
-  await expect(page.locator('input')).toHaveCount(0);
+  // Connecting asks for nothing: the card has no field (the API keys card beside it does).
+  await expect(page.locator('section').filter({ has: page.getByRole('button', CONNECT) }).locator('input')).toHaveCount(0);
   await page.evaluate(installShizue);
   await page.getByRole('button', { name: '다시 확인' }).click();
   await expect(page.getByRole('button', CONNECT)).toBeFocused();

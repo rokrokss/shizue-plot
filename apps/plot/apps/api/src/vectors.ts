@@ -49,6 +49,7 @@ import { embedErrorForLog, type Embedder, type Embedding } from './embedder.js';
 import { aliasPlotLore, loreAliasesEnabled, loreAliasesFor } from './loreAliases.js';
 import { noteLexicalSearch } from './lexicalHealth.js';
 import { LANGUAGE_TURNS, type AuxiliaryOwner } from './memory.js';
+import type { ModelBinding } from '@shizue/llm';
 import { buildPath, roundsAlong, visibleToAi } from './tree.js';
 
 /** How long a request waits to embed its query before it goes on without the search. */
@@ -75,8 +76,8 @@ export interface VectorPlan {
    * in the plot's. What the aliases go by. Absent in the other modes.
    */
   conversationLanguage?: ContentLanguage;
-  /** The chat's own auxiliary model pick (`chats.sub_model`), for an alias pass its search starts. */
-  subModel?: string | null;
+  /** The chat's binding (`chats.model_binding`), whose sub model an alias pass its search starts runs on. */
+  modelBinding?: ModelBinding | null;
   /** The chat's retrieval is on (`chats.retrieval`). */
   retrieval: boolean;
 }
@@ -165,7 +166,7 @@ export function scheduleLoreAliases(deps: AppDeps, plotId: string, owner: Auxili
 
 /** What a write that can change a plot's lore starts: its aliases, on its creator's auxiliary model. */
 export function scheduleLoreUpdate(deps: AppDeps, plotId: string, ownerId: string): void {
-  scheduleLoreAliases(deps, plotId, { userId: ownerId, subModel: null });
+  scheduleLoreAliases(deps, plotId, { userId: ownerId, modelBinding: null });
 }
 
 /* --------------------------------------------------------------- messages */
@@ -297,7 +298,7 @@ export async function searchByMeaning(
 
   const aliases = await loreAliasesFor(deps, vectors, entries);
   if (aliases?.pending && vectors.userId) {
-    scheduleLoreAliases(deps, vectors.plotId, { userId: vectors.userId, subModel: vectors.subModel ?? null });
+    scheduleLoreAliases(deps, vectors.plotId, { userId: vectors.userId, modelBinding: vectors.modelBinding ?? null });
   }
   const none: VectorSearch = aliases ? { loreAliases: aliases.lookup } : NOTHING;
 

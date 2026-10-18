@@ -34,7 +34,11 @@ const personas: Persona[] = [
 vi.mock('@/lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/lib/api')>()),
   apiGet: (url: string) =>
-    Promise.resolve(url === '/api/personas' ? personas : [{ id: 'm1', label: '모델 하나' }]),
+    Promise.resolve(
+      url === '/api/personas' ? personas
+        : url === '/api/model-binding' ? { main: null, sub: null }
+        : [{ id: 'm1', name: '모델 하나' }],
+    ),
   apiSend: (_method: string, _path: string, body: Record<string, unknown>) => {
     started.push(body);
     return Promise.resolve({ chat: { id: 'cht_1' } });
@@ -110,7 +114,7 @@ describe('the start panel’s profile picker', () => {
     expect(selects()[2]!.disabled).toBe(true);
 
     await click(start());
-    expect(started).toEqual([{ plotId: 'sty_1', model: 'm1', profileId: 'prf_1' }]);
+    expect(started).toEqual([{ plotId: 'sty_1', modelBinding: { main: 'm1' }, profileId: 'prf_1' }]);
   });
 
   it('gives up the profile the moment a persona is chosen', async () => {
@@ -126,7 +130,7 @@ describe('the start panel’s profile picker', () => {
     expect(chips()[1]!.getAttribute('aria-pressed')).toBe('false');
 
     await click(start());
-    expect(started).toEqual([{ plotId: 'sty_1', model: 'm1', personaId: 'per_1' }]);
+    expect(started).toEqual([{ plotId: 'sty_1', modelBinding: { main: 'm1' }, personaId: 'per_1' }]);
   });
 
   it('picks nothing again when the same profile is pressed twice', async () => {
@@ -136,6 +140,6 @@ describe('the start panel’s profile picker', () => {
     expect(chips()[0]!.getAttribute('aria-pressed')).toBe('false');
 
     await click(start());
-    expect(started).toEqual([{ plotId: 'sty_1', model: 'm1' }]);
+    expect(started).toEqual([{ plotId: 'sty_1', modelBinding: { main: 'm1' } }]);
   });
 });

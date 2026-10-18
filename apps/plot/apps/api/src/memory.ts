@@ -73,9 +73,10 @@ import {
   type JobPayloadMap,
   type Message,
 } from '@shizue/db';
-import { getAdapter, listEnabledModels, type ChatRequest, type LLMAdapter } from '@shizue/llm';
+import type { ChatRequest, LLMAdapter } from '@shizue/llm';
 import { and, asc, eq, inArray, notExists, sql } from 'drizzle-orm';
 import type { AppDeps, Tx } from './deps.js';
+import { resolveModel, resolvePreset, type BindingOwner, type ModelDeps } from './models.js';
 import { embedErrorForLog, type Embedding } from './embedder.js';
 import { noteCachedTokens } from './cacheHealth.js';
 import { embedPendingFacts, extractFacts, keepEndedFacts, selectFacts } from './facts.js';
@@ -867,7 +868,7 @@ interface SummarizeInput {
  */
 export async function summarize(
   deps: AppDeps,
-  chat: Pick<Chat, 'userId' | 'subModel' | 'plotId'>,
+  chat: Pick<Chat, 'userId' | 'modelBinding' | 'plotId'>,
   input: SummarizeInput,
 ): Promise<string | null> {
   const resolved = await memoryChannel(deps, chat);
@@ -889,69 +890,49 @@ export async function summarize(
 /** Memory models already reported as unusable — a config state, not a per-turn failure. */
 const warnedModels = new Set<string>();
 
-/** What picks a chat's auxiliary model: whose catalog it comes from, and the reader's choice. */
-export type AuxiliaryOwner = Pick<Chat, 'userId' | 'subModel'>;
+/** What picks a chat's auxiliary model: the owner, whose default binding an open slot follows, and the chat's own binding. */
+export type AuxiliaryOwner = BindingOwner;
 
 /**
  * The model a chat's side work runs on — RisuAI's auxiliary (sub) model: the
- * one the reader picked for the chat (`chats.sub_model`) while the owner's
- * ChatGPT catalog still lists it, and otherwise the first model that catalog
- * lists. '' when there is none, which is what an owner without ChatGPT connected has.
- *
- * A pick the catalog has since dropped is not an error: the chat falls back to
- * the default, as it would had the reader never picked, and the server says so
- * once. The setting is left as it is — the model may come back, and the
- * selector keeps showing it until the reader picks another.
- *
- * Tests have no first model worth the name — the catalog leads with echo, the
- * chat's own — so the default there is `MEMORY_MODEL`, or `test/memory`. A pick
- * is still checked against the catalog, which is how a vanished one is tested.
+ * chat's sub preset, else the default binding's, else the main one's
+ * (`resolvePreset`). Its model id is what `{{axmodel}}` reads; '' when nothing
+ * is bound at all.
  */
-export async function auxiliaryModelOf(deps: Pick<AppDeps, 'env' | 'chatgpt'>, owner: AuxiliaryOwner): Promise<string> {
-  const catalog = await listEnabledModels(deps.env, deps.chatgpt?.accounts.forUser(owner.userId));
-  if (owner.subModel) {
-    if (catalog.some((model) => model.id === owner.subModel)) return owner.subModel;
-    const key = `sub:${owner.subModel}`;
-    if (!warnedModels.has(key)) {
-      warnedModels.add(key);
-      console.warn(`[memory] auxiliary model ${owner.subModel} is no longer offered, falling back to the default`);
-    }
-  }
-  return (deps.env['NODE_ENV'] ?? process.env['NODE_ENV']) === 'test'
-    ? deps.env['MEMORY_MODEL'] || 'test/memory'
-    : catalog[0]?.id ?? '';
+export async function auxiliaryModelOf(deps: Pick<AppDeps, 'db' | 'env'>, owner: AuxiliaryOwner): Promise<string> {
+  return (await resolvePreset(deps, owner, 'sub'))?.model ?? '';
 }
 
 /**
- * Summaries and suggestions run on the chat's auxiliary model
- * (`auxiliaryModelOf`). An owner without ChatGPT connected has no background work.
+ * Summaries, facts, suggestions, translations, emotion and lore aliases run on
+ * the chat's sub model (`resolveModel(…, 'sub')`). Nothing bound — or a preset
+ * that cannot run — is no background work, said once.
  */
-export async function memoryChannel(
-  deps: Pick<AppDeps, 'env' | 'chatgpt' | 'getAdapter'>,
-  owner: AuxiliaryOwner,
-): Promise<{ adapter: LLMAdapter; providerModel: string } | null> {
-  let modelId = "chatgpt";
+export async function memoryChannel(deps: ModelDeps, owner: AuxiliaryOwner): Promise<{ adapter: LLMAdapter; providerModel: string } | null> {
   try {
-    modelId = await auxiliaryModelOf(deps, owner);
-    if (!modelId) return null;
-    return await (deps.getAdapter ?? getAdapter)(modelId, deps.env, deps.chatgpt?.accounts.forUser(owner.userId));
+    const resolved = await resolveModel(deps, owner, 'sub');
+    return { adapter: resolved.adapter, providerModel: resolved.providerModel };
   } catch (error) {
     // Warn once, not on every turn for the rest of the process' life.
-    if (!warnedModels.has(modelId)) {
-      warnedModels.add(modelId);
+    const key = JSON.stringify(owner.modelBinding ?? null);
+    if (!warnedModels.has(key)) {
+      warnedModels.add(key);
       console.error('[memory] channel model unavailable, background updates are off', error);
     }
     return null;
   }
 }
 
-/** Drains a non-streaming side-channel call into one string, its prompt cache's share noted (`cacheHealth.ts`). */
+/**
+ * Drains a non-streaming side-channel call into one string, its prompt cache's
+ * share noted (`cacheHealth.ts`). What the model thought is not part of it.
+ */
 export async function collect(adapter: LLMAdapter, request: ChatRequest): Promise<string> {
   const generator = adapter.stream(request);
   let text = '';
   let next = await generator.next();
   while (!next.done) {
-    text += next.value.text;
+    if (next.value.type === 'text') text += next.value.text;
     next = await generator.next();
   }
   // A test's stub may end without saying anything of its usage.

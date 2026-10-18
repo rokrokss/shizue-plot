@@ -18,6 +18,7 @@ import type {
   VariableDelta,
   Variables,
 } from '@shizue/core';
+import type { ModelBinding } from '@shizue/llm';
 import { sql } from 'drizzle-orm';
 import {
   bigint,
@@ -296,12 +297,13 @@ export const chats = pgTable(
       .references(() => plots.id, { onDelete: 'cascade' }),
     personaId: uuid('persona_id').references(() => personas.id, { onDelete: 'set null' }),
     title: text('title').notNull().default(''),
-    model: text('model').notNull(),
-    // The auxiliary model (RisuAI's sub model) the reader picked for this chat's
-    // side work: card scripts' auxiliary calls and the background jobs — memory
-    // summaries, reply suggestions. Null leaves it to the memory
-    // channel's default, the first model in the owner's ChatGPT catalog.
-    subModel: text('sub_model'),
+    // The model presets this chat runs on (PocketRisu's binding): `main` its own
+    // turns, `sub` the side work — card scripts' auxiliary calls, the memory's
+    // summaries and facts, emotion, translation, suggestions. A slot left out or
+    // null follows the owner's default (`user.model_binding`), and an open sub
+    // runs on the main. Null is both open. Ids of the owner's `model_presets`,
+    // which the API checks on the way in; a preset's delete clears them.
+    modelBinding: jsonb('model_binding').$type<ModelBinding>(),
     // Author's note: per-chat instruction injected into the history, by default
     // four messages from its end (`AUTHOR_NOTE_DEPTH`).
     note: text('note').notNull().default(''),
@@ -349,9 +351,6 @@ export const chats = pgTable(
     // Roster members the reader sent off the stage: their cards leave the prompt
     // until they are brought back. Null (or empty) means the whole roster is on.
     absentCharacterIds: jsonb('absent_character_ids').$type<string[]>(),
-    // Reasoning effort the reader asked for. Null sends none and leaves the model
-    // at its default; a value is only sent where the model advertises it.
-    reasoningEffort: text('reasoning_effort'),
     // Set when the conversation came from another app's chat file (SillyTavern's
     // JSONL), null when it was started here. The hash is what a second run of the
     // same import recognizes it by.

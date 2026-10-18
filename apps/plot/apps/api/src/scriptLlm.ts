@@ -1,15 +1,14 @@
 /**
  * A model call a card's script asks for — RisuAI's Lua `LLM`, `axLLM` and
  * `simpleLLM`, and its triggers' `runLLM` and `v2RunLLM` — answered on the
- * reader's own ChatGPT account, through the chat's own model or its auxiliary
- * one.
+ * chat's own model preset or its auxiliary one (`resolveModel`, §7.1).
  *
  * Which of the two is RisuAI's choice, carried over: `LLM`, `simpleLLM` and
  * `runLLM` ask for the main model (`'main'`), `axLLM` in every one of its modes
  * asks for the auxiliary model (`'sub'`), and `v2RunLLM` asks for whichever its
  * effect names. RisuAI can give each auxiliary mode a model of its own; here
- * they share the chat's one auxiliary model, resolved as the background work
- * resolves it (`auxiliaryModelOf`).
+ * they share the chat's one sub preset, resolved as the background work
+ * resolves it — an open sub runs on the main.
  *
  * The script runs in the reader's browser, in the Lua sandbox; this is the one
  * thing of the server it can reach, and only through the page, which forwards
@@ -28,10 +27,10 @@
  * API key. Nothing is stored. The answer is the model's text; RisuAI's
  * `{success, result}` wrapping is the sandbox's.
  */
-import { ChatGPTError, getAdapter, type ChatMessage, type ChatRequest } from '@shizue/llm';
-import type { AppDeps } from './deps.js';
+import { LLMError, type ChatMessage, type ChatRequest } from '@shizue/llm';
 import { ApiError, badRequest } from './errors.js';
 import { collect } from './memory.js';
+import type { ResolvedModel } from './models.js';
 
 /** Which of the chat's models a call asks for: its own, or its auxiliary one. */
 export type ScriptLlmModel = 'main' | 'sub';
@@ -80,18 +79,16 @@ export function readScriptLlmModel(value: unknown): ScriptLlmModel {
 }
 
 /**
- * Sends the prompt to `model` on the reader's account and answers with the
+ * Sends the prompt to the resolved `model` and answers with the
  * text. System turns at the head become the instructions and the rest keep
  * their places, as the adapter turns a system turn into a developer one. A
  * model that does not answer is a 502 `script_llm_failed`; an account problem
  * is the adapter's own error, as on a turn.
  */
 export async function runScriptLlm(
-  deps: AppDeps,
-  input: { userId: string; model: string; messages: ChatMessage[]; signal?: AbortSignal },
+  input: { model: ResolvedModel; messages: ChatMessage[]; signal?: AbortSignal },
 ): Promise<string> {
-  const account = deps.chatgpt?.accounts.forUser(input.userId);
-  const resolved = await (deps.getAdapter ?? getAdapter)(input.model, deps.env, account);
+  const resolved = input.model;
   // A prompt of system turns alone keeps them as turns: there must be something to answer.
   const lead = input.messages.findIndex((message) => message.role !== 'system');
   const head = lead > 0 ? input.messages.slice(0, lead) : [];
@@ -107,7 +104,7 @@ export async function runScriptLlm(
   try {
     return await collect(resolved.adapter, request);
   } catch (error) {
-    if (error instanceof ApiError || error instanceof ChatGPTError) throw error;
+    if (error instanceof ApiError || error instanceof LLMError) throw error;
     // The card's script is told the call failed; what failed is the log's.
     console.error('[script-llm] call failed', error);
     throw new ApiError(502, 'script_llm_failed', 'The model did not answer');

@@ -1,7 +1,7 @@
 import type { PhoneAccess } from './tunnel.js';
 import type { Db } from '@shizue/db';
-import type { getAdapter } from '@shizue/llm';
-import type { ChatGPTAccounts } from './chatgptAccounts.js';
+import type { LLMAdapter } from '@shizue/llm';
+import type { ChatGPTAccounts, TokenCipher } from './chatgptAccounts.js';
 import type { Embedder } from './embedder.js';
 import type { RemoteFetch } from './localizeAssets.js';
 import type { LuaStateStore, RequestLuaRunner } from './requestLua.js';
@@ -11,6 +11,12 @@ import type { ObjectStorage } from './storage.js';
 
 /** The db handle inside a transaction — same query surface as `Db`. */
 export type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
+
+/** An adapter and the model id its requests name. */
+export interface ResolvedAdapter {
+  adapter: LLMAdapter;
+  providerModel: string;
+}
 
 /** The fire-and-forget jobs a finished turn — or a plot's write — can start. */
 export type BackgroundTaskKind = 'memory' | 'emotion' | 'vectors' | 'aliases';
@@ -106,8 +112,17 @@ export interface AppDeps {
    * the process's own store by default. Tests hand their own to look inside.
    */
   luaStates?: LuaStateStore;
-  /** Adapter factory; defaults to the model registry. Overridden in tests. */
-  getAdapter?: (...args: Parameters<typeof getAdapter>) => ReturnType<typeof getAdapter> | Awaited<ReturnType<typeof getAdapter>>;
+  /**
+   * Tests' stand-in for the format registry (`adapterFor`): handed the model id
+   * of the preset a slot resolved to, it answers with the adapter every call on
+   * it streams from (`resolveModel`, `models.ts`).
+   */
+  getAdapter?: (modelId: string, env: NodeJS.ProcessEnv) => ResolvedAdapter | Promise<ResolvedAdapter>;
+  /**
+   * Seals and opens the credentials' secrets with the install's secret
+   * (`tokenCipher`); without it, no credential can be stored or used.
+   */
+  vault?: TokenCipher;
   /**
    * Sink for fire-and-forget work started after a response is finished. The tasks
    * already swallow their errors; tests use this to await them, and the kind tells

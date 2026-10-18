@@ -129,7 +129,7 @@ const holdsOnSql = (branchIds: readonly string[]) =>
 /* --------------------------------------------------------------- extraction */
 
 export interface ExtractionInput {
-  chat: Pick<Chat, 'id' | 'userId' | 'plotId' | 'subModel'>;
+  chat: Pick<Chat, 'id' | 'userId' | 'plotId' | 'modelBinding'>;
   plotLanguage: ContentLanguage;
   /** The summary just written, whose messages the facts come from, and whose stage they are known on. */
   summary: Pick<ChatSummary, 'id' | 'text' | 'turnFrom' | 'turnTo' | 'sceneMemberIds'>;

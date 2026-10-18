@@ -114,7 +114,7 @@ test('opens on the card’s neutral and moves to the picture a reply leaves', as
   // The echo model is the chat's auxiliary model too, so it is what picks the picture.
   const started = await page.request.post(`${base}/api/chats`, {
     headers: { origin: base },
-    data: { plotId, model: 'echo/echo', subModel: 'echo/echo' },
+    data: { plotId, modelBinding: { main: 'echo/echo', sub: 'echo/echo' } },
   });
   expect(started.status()).toBe(201);
   chatId = (await started.json()).chat.id;

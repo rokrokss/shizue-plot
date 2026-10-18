@@ -2,8 +2,10 @@
 
 Character chat with plot creation, character cards, persistent conversations,
 branching replies, memory and personas, as an app one person runs on their own
-computer. There are no accounts; AI runs on your ChatGPT plan, connected through
-Sign in with ChatGPT. The app supports Korean, English and Japanese.
+computer. There are no accounts; AI runs on model presets you make, as in
+PocketRisu: your ChatGPT plan connected through Sign in with ChatGPT, your own
+provider API keys, or a model server on this computer. The app supports Korean,
+English and Japanese.
 
 ## Layout
 
@@ -14,7 +16,7 @@ Sign in with ChatGPT. The app supports Korean, English and Japanese.
 | `apps/plot/apps/e2e` | Playwright browser tests |
 | `apps/plot/packages/core` | Character cards, prompts and chat presentation |
 | `apps/plot/packages/db` | Drizzle schema and PostgreSQL migrations |
-| `apps/plot/packages/llm` | Model adapters and registry |
+| `apps/plot/packages/llm` | Model request formats, provider adapters and the ChatGPT connection |
 | `packages/contracts` | Validated chat-export format |
 
 See [the architecture](apps/plot/docs/ARCHITECTURE.md) for chat behavior and
@@ -73,7 +75,7 @@ A reader's browser uploads a card or module file in 8 MB parts to the API,
 which streams each to disk, and a job in the API reads it back and imports it
 (ARCHITECTURE §10 파일 임포트). The API reads one import at a time.
 
-## The owner, and connecting ChatGPT
+## The owner, and the models
 
 shizue runs for one person on their own computer, so there is nothing to sign in
 to: a browser on this computer is the app's owner, and so is a phone paired from
@@ -81,10 +83,39 @@ the settings page (below). Anything else that reaches the API — a phone throug
 tunnel that was never paired, another site's page whose name resolves to this
 machine — is answered 401 (ARCHITECTURE §4.1).
 
-Chats run on your own ChatGPT plan, which you connect in **Settings → AI
-connection**. Connecting is not a login: it only gives the app your plan. No
-provider API key or usage billing is involved; on a limit or connection error the
-app reports it and does not switch providers.
+Chats run on model presets, as in PocketRisu. A preset names a request format,
+a model, a key or a keyless address, and the values sent with it (temperature,
+reasoning effort and the rest); make them in **Settings → Models**. Each chat
+binds a main model for its replies and a sub model for the side work: scripts'
+model calls, summaries, facts, reply suggestions, translation, emotions and lore
+aliases. A chat that picks none follows the default models on the same page, and
+with no sub model the main one does the side work. On a limit or connection
+error the app reports it and does not switch to another preset (ARCHITECTURE
+§7.1).
+
+| Request format | For |
+|---|---|
+| OpenAI-compatible (Chat Completions) | OpenAI, OpenRouter, DeepSeek, DeepInfra and Mistral keys, any compatible server, and keyless local servers such as LM Studio, Ollama, llama.cpp or vLLM |
+| OpenAI Responses | OpenAI keys, and your ChatGPT plan |
+| Anthropic Messages | Anthropic keys |
+| Google Gemini | Google AI Studio keys |
+
+### API keys
+
+Add keys in **Settings → API keys**, on the computer shizue runs on; a paired
+phone only lists them. The API seals each key in the app's folder (the install's
+`secret` derives the key), never returns it — the page shows a masked hint — and
+sends it only to the address it was entered for: the provider's own, or the one
+you typed for a custom server. **Check** asks the provider whether the key
+works. Saving a key while you have no model preset makes one on the
+provider's first listed model and makes it the default. A preset picks the
+key, and **Load the model list** fetches the provider's models for it. A server that needs no key gets its address in the
+preset instead, and no key is ever sent there.
+
+### Your ChatGPT plan
+
+Connecting ChatGPT is not a login: it only gives the app your plan, and no API
+key or usage billing is involved.
 
 OpenAI's open-source flow only returns to `http://127.0.0.1:<port>/auth/callback`.
 **Shizue**, the Chrome Web Store extension (0.3.6 or later), rewrites that
@@ -94,14 +125,19 @@ dev server). It is needed only while connecting; afterwards the API calls OpenAI
 directly.
 
 1. Install [Shizue from the Chrome Web Store](https://chromewebstore.google.com/detail/mpcbgfkoholfgapcgcmfjobnfcbnfanm).
-2. In **Settings → AI connection**, choose **Continue with ChatGPT** and approve in
-   the same tab. The app returns to the settings page.
-3. Pick one of your account's models when you start a chat.
+2. In **Settings → ChatGPT connection**, choose **Continue with ChatGPT** and
+   approve in the same tab. The app returns to the settings page.
+3. With no model preset yet, the connection makes one on your account's first
+   model and makes it the default. Add others in **Settings → Models** with the
+   OpenAI Responses format and **ChatGPT plan** as their key. An install that had
+   chats before model presets existed already has one preset for each model its
+   chats used.
 
 The API exchanges the code and keeps the tokens sealed in the app's folder (the
 install's `secret` derives the key). **Disconnect ChatGPT** revokes the refresh
 token when reachable, deletes the tokens and keeps the app registration for the
-next connection; connecting another account replaces the one before. Only this
+next connection; connecting another account replaces the one before, and the
+presets on the plan run on the new account. Only this
 computer connects or disconnects ChatGPT.
 
 ChatGPT plan sharing supports the Responses route, not image generation or
@@ -125,8 +161,8 @@ yourself can be listed in `REMOTE_ORIGINS` (`apps/plot/.env`) instead. Plain LAN
 addresses (`http://192.168.x.x`) are not supported: without HTTPS the browser
 withholds `crypto.subtle`, `crypto.randomUUID` and the clipboard, which chats use.
 
-Phone browsers run no extension, so a phone never connects ChatGPT itself: it
-uses the connection the computer made. Open **Settings → Connect a phone** on the
+Phone browsers run no extension, so a phone never connects ChatGPT or adds keys
+itself: it uses the connection and keys the computer made. Open **Settings → Connect a phone** on the
 computer and scan the QR code; the code works once, for five minutes, and the
 phone gets a device session of its own for 30 days. **Disconnect this phone** in
 the phone's settings ends that session alone. The computer's settings list the

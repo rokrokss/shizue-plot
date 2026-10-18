@@ -1,7 +1,21 @@
-export interface StreamDelta {
+/** A piece of the model's answer. */
+export interface TextDelta {
   type: 'text';
   text: string;
 }
+
+/**
+ * A piece of the model's thinking, which some providers send beside the answer
+ * (`reasoning_content`, Anthropic's `thinking_delta`, Gemini's thought parts).
+ * Never part of the reply's text: the field has its own name so a consumer that
+ * reads `.text` without looking at the type does not compile.
+ */
+export interface ReasoningDelta {
+  type: 'reasoning';
+  reasoning: string;
+}
+
+export type StreamDelta = TextDelta | ReasoningDelta;
 
 export interface StreamDone {
   usage: {
@@ -38,20 +52,41 @@ export const contentText = (content: MessageContent): string =>
         .map((part) => part.text)
         .join('\n');
 
-export interface ChatRequest {
+/**
+ * The sampling values a request carries — RisuAI's parameters (`LLMParameter`)
+ * by our names. Each format sends only the ones it takes (`ParameterPlaces`);
+ * one left out is the provider's default. A model preset's values are laid over
+ * a request by its adapter (`withPresetParams`).
+ */
+export interface SamplingValues {
+  temperature?: number;
+  topP?: number;
+  topK?: number;
+  minP?: number;
+  topA?: number;
+  repetitionPenalty?: number;
+  frequencyPenalty?: number;
+  presencePenalty?: number;
+  /** A reasoning-effort word (`REASONING_EFFORTS`, or one a ChatGPT model advertises); absent leaves the model's default. */
+  reasoningEffort?: string;
+  /** A thinking budget in tokens (Anthropic's `budget_tokens`, Gemini 2.5's `thinkingBudget`). */
+  thinkingTokens?: number;
+  /** OpenAI's `verbosity`: low, medium or high. */
+  verbosity?: string;
+}
+
+export interface ChatRequest extends SamplingValues {
   /** Provider-native model name. */
   model: string;
   system: string;
   messages: ChatMessage[];
+  /** The reply's token cap, which the prompt's budget reserves too. */
   maxTokens: number;
-  temperature?: number;
-  /** One of the model's advertised reasoning efforts; absent leaves the model's default. */
-  reasoningEffort?: string;
   /**
    * The provider's prompt cache this request is served from and written to
    * (`prompt_cache_key` and the `session_id` header, `cacheHeaders`): without one
    * nothing is served from the cache. A chat's replies use the chat's id; absent
-   * sends none.
+   * sends none. Only the Responses formats read it.
    */
   cacheKey?: string;
   stop?: string[];
@@ -62,4 +97,19 @@ export interface LLMAdapter {
   stream(req: ChatRequest): AsyncGenerator<StreamDelta, StreamDone>;
 }
 
-export class LLMError extends Error {}
+/**
+ * A model call that failed, with a code the reader's page translates and the
+ * HTTP status the API answers with. `detail` is the provider's own message,
+ * with anything that looks like a key taken out (`providerHttpError`): for the
+ * server's log, never the page.
+ */
+export class LLMError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly status = 502,
+    readonly detail?: string,
+  ) {
+    super(message);
+  }
+}

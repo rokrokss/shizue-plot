@@ -36,7 +36,8 @@ vi.mock('@/lib/api', async (importOriginal) => ({
   apiGet: (url: string) => {
     asked.push(url);
     if (url === '/api/plots/sty_1/public') return Promise.resolve(plotResponse);
-    if (url === '/api/models') return Promise.resolve([{ id: 'm1', label: '모델 하나' }]);
+    if (url === '/api/model-presets') return Promise.resolve([{ id: 'm1', name: '모델 하나' }]);
+    if (url === '/api/model-binding') return Promise.resolve({ main: null, sub: null });
     if (url === '/api/personas') return Promise.resolve([]);
     return Promise.reject(new Error(`unexpected read: ${url}`));
   },
@@ -137,7 +138,7 @@ describe('the plot page', () => {
     await render();
 
     expect(find('select')).not.toBeNull();
-    expect(asked).toContain('/api/models');
+    expect(asked).toContain('/api/model-presets');
     expect(asked).toContain('/api/personas');
     expect(find('a[href="/plots/sty_1"]')?.textContent).toBe('편집');
   });

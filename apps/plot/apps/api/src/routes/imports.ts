@@ -16,7 +16,6 @@ import {
   type ImportedMessageExtra,
 } from '@shizue/core';
 import { characters, chatAttachments, chats, messages, plots, type NewMessage } from '@shizue/db';
-import { listEnabledModels } from '@shizue/llm';
 import { and, asc, count, eq, inArray, isNotNull, isNull, max, min, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { randomUUID } from 'node:crypto';
@@ -32,6 +31,7 @@ import { ApiError, badRequest, notFound } from '../errors.js';
 import { acquireChatSlot, rejectBusyChat, releaseChatSlot } from '../generation.js';
 import { enqueueJob } from '../jobs.js';
 import { memoryChannel, summaryDue } from '../memory.js';
+import { resolvePreset } from '../models.js';
 import { attachedNoteIds } from '../notes.js';
 import { loadMembers } from '../hub.js';
 import { loadOwnedPlot } from '../plots.js';
@@ -366,13 +366,13 @@ async function lockImportingChat(tx: Tx, id: string, userId: string, { finished 
 }
 
 /**
- * The model an imported chat starts on: the first the reader's account offers,
- * the same one the start-chat panel selects first. The file names none we have.
+ * An imported chat starts on the default binding, as a chat started here with
+ * no pick does — the file names no model we have — so there must be one.
  */
-async function defaultModel(deps: AppDeps, userId: string): Promise<string> {
-  const [model] = await listEnabledModels(deps.env, deps.chatgpt?.accounts.forUser(userId));
-  if (!model) throw badRequest('model_unavailable', 'No chat model is available');
-  return model.id;
+async function requireDefaultModel(deps: AppDeps, userId: string): Promise<void> {
+  if (!(await resolvePreset(deps, { userId, modelBinding: null }, 'main'))) {
+    throw badRequest('model_unavailable', 'No model preset is set; add one in Settings › Models');
+  }
 }
 
 /** `POST /api/imports/lookup` — which of a backup's files are already here. */
@@ -491,7 +491,7 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
     if (!isUuid(plotId)) throw notFound('Plot not found');
     const plot = await loadOwnedPlot(deps, plotId, userId);
     const persona = await resolvePersona(deps, userId, body['personaId']);
-    const model = await defaultModel(deps, userId);
+    await requireDefaultModel(deps, userId);
 
     const result = await deps.db.transaction(async (tx) => {
       // Two runs of the same file at once would each find nothing to replace and
@@ -522,7 +522,6 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
           plotId,
           personaId: persona?.id ?? null,
           title: title || plot.name,
-          model,
           importing: true,
           importedFrom: { fileName, sha256, importedAt: new Date().toISOString() },
         })
@@ -761,7 +760,7 @@ export function chatImportRoutes(deps: AppDeps): Hono<AppEnv> {
     // The chat has no auxiliary model of its own yet — the settings route takes
     // no writes while the import runs — and a pick would not change the answer
     // anyway: what is asked is whether the owner has any model to fold with.
-    const channel = backfill ? await memoryChannel(deps, { userId, subModel: null }) : null;
+    const channel = backfill ? await memoryChannel(deps, { userId, modelBinding: null }) : null;
 
     const { chat, memoryBackfill } = await deps.db.transaction(async (tx) => {
       const locked = await lockImportingChat(tx, id, userId);

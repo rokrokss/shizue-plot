@@ -89,7 +89,7 @@ try {
       console.log(`${label}, ${batches} call${batches === 1 ? '' : 's'}`);
       continue;
     }
-    const result = await aliasPlotLore(deps, plot.id, { userId: plot.ownerId, subModel: null });
+    const result = await aliasPlotLore(deps, plot.id, { userId: plot.ownerId, modelBinding: null });
     console.log(
       `${label} — wrote ${result.written} (${result.aliases} aliases) in ${result.calls} calls` +
         (result.skipped ? `, stopped: ${result.skipped}` : ''),

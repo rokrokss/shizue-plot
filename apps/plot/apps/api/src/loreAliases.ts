@@ -42,6 +42,7 @@ import type { LLMAdapter } from '@shizue/llm';
 import { and, asc, eq, notInArray } from 'drizzle-orm';
 import { createHash } from 'node:crypto';
 import type { AppDeps } from './deps.js';
+import type { ModelDeps } from './models.js';
 import { collect, memoryChannel, type AuxiliaryOwner } from './memory.js';
 
 /** What one call may answer: thirty entries' aliases with room to spare. */
@@ -123,7 +124,7 @@ export interface AliasPassResult {
  * `RETRY_AFTER_MS`. Only a database error throws — the scheduler logs it.
  */
 export async function aliasPlotLore(
-  deps: Pick<AppDeps, 'db' | 'env' | 'chatgpt' | 'getAdapter'>,
+  deps: ModelDeps,
   plotId: string,
   owner: AuxiliaryOwner,
 ): Promise<AliasPassResult> {

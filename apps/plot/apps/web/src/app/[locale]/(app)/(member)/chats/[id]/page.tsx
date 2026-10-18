@@ -24,6 +24,7 @@ import { ChatSettings } from '@/components/ChatSettings';
 import { EmotionScreen } from '@/components/EmotionScreen';
 import { MessageRow } from '@/components/MessageRow';
 import { ModelPill } from '@/components/ModelPill';
+import { effectivePreset, OPEN_BINDING } from '@/lib/modelBinding';
 import { ScriptDialog, type ScriptPrompt } from '@/components/ScriptDialog';
 import { TurnEditor } from '@/components/TurnEditor';
 import { ThemeSwitcher } from '@/components/ThemeSwitcher';
@@ -117,7 +118,8 @@ import type {
   DisplayScript,
   MessageRole,
   MessageSource,
-  ModelInfo,
+  ModelBinding,
+  ModelPreset,
   NarratorConfig,
   Persona,
   ReaderPreset,
@@ -368,7 +370,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    * null until read. Read again whenever the reader changes which are on.
    */
   const [chatModules, setChatModules] = useState<ChatModulesView | null>(null);
-  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [presets, setPresets] = useState<ModelPreset[]>([]);
+  /** The owner's default binding, which the chat's open slots follow. */
+  const [modelDefaults, setModelDefaults] = useState<ModelBinding>(OPEN_BINDING);
   const [personas, setPersonas] = useState<Persona[]>([]);
   const [readerPresets, setReaderPresets] = useState<ReaderPreset[]>([]);
   const [notes, setNotes] = useState<UserNote[]>([]);
@@ -641,7 +645,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
 
   useEffect(() => {
     apiGet<ChatState>(`/api/chats/${id}`).then(applyState, () => setMissing(true));
-    apiGet<ModelInfo[]>('/api/models').then(setModels, () => undefined);
+    apiGet<ModelPreset[]>('/api/model-presets').then(setPresets, () => undefined);
+    apiGet<ModelBinding>('/api/model-binding').then(setModelDefaults, () => undefined);
     apiGet<Persona[]>('/api/personas').then(setPersonas, () => undefined);
     apiGet<ReaderPreset[]>('/api/reader-presets').then(setReaderPresets, () => undefined);
     apiGet<UserNote[]>('/api/notes').then(setNotes, () => undefined);
@@ -2648,11 +2653,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
 
   /** Every chat setting goes through PATCH, which answers with the whole state. */
   async function updateSettings(patch: {
-    model?: string;
-    /** null hands the side work back to the first model in the catalog. */
-    subModel?: string | null;
-    /** null sends no effort, leaving the model's own default. */
-    reasoningEffort?: string | null;
+    /** The model slots a pick sets; null hands one back to the default binding. */
+    modelBinding?: Partial<ModelBinding>;
     personaId?: string | null;
     note?: string;
     /** The reader's own preset in place of the built-in default; null runs the default. */
@@ -3031,11 +3033,13 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           ) : (
             // Zeta's "zeta ⌄": the main model.
             <ModelPill
-              model={state.chat.model}
-              models={models}
+              value={state.chat.modelBinding?.main ?? null}
+              presets={presets}
+              current={effectivePreset(presets, state.chat.modelBinding, modelDefaults, 'main')}
+              defaultLabel={t('modelDefault')}
               disabled={settingsLocked}
               className="max-w-24!"
-              onChange={(model) => void updateSettings({ model })}
+              onChange={(main) => void updateSettings({ modelBinding: { main } })}
             />
           )}
           <button
@@ -3688,11 +3692,10 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           {/* The music's mute, which the header has no room for. */}
           <BgmMute row className="mb-5" />
           <ChatSettings
-            model={state.chat.model}
-            subModel={state.chat.subModel}
-            reasoningEffort={state.chat.reasoningEffort}
+            binding={state.chat.modelBinding ?? OPEN_BINDING}
+            presets={presets}
+            defaults={modelDefaults}
             personaId={state.chat.personaId}
-            models={models}
             personas={personas}
             readerPresetId={state.chat.readerPresetId}
             readerPresets={readerPresets}

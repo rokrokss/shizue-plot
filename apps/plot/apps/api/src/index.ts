@@ -1,7 +1,7 @@
 import { serve } from '@hono/node-server';
 import { createApp } from './app.js';
 import { DataDirBusy, openAppDb } from './appDb.js';
-import { createChatGPTAccounts } from './chatgptAccounts.js';
+import { createChatGPTAccounts, tokenCipher } from './chatgptAccounts.js';
 import type { AppDeps } from './deps.js';
 import { createLocalEmbedder } from './embedder.js';
 import { isLoopback, loadRootEnv, readConfig, readOrCreateSecret } from './env.js';
@@ -53,6 +53,8 @@ const ownOrigins = (): string[] => [
 const deps: AppDeps = {
   db,
   chatgpt: { accounts },
+  // The API keys' seal, the same as the ChatGPT tokens' (§7.1).
+  vault: tokenCipher(secret),
   webOrigin: config.authUrl,
   remoteOrigins: config.remoteOrigins,
   ...(phoneAccess ? { phoneAccess } : {}),

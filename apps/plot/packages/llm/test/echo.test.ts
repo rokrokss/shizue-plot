@@ -8,7 +8,7 @@ async function collect(
   const deltas: string[] = [];
   let next = await generator.next();
   while (!next.done) {
-    deltas.push(next.value.text);
+    if (next.value.type === 'text') deltas.push(next.value.text);
     next = await generator.next();
   }
   return { deltas, done: next.value };
@@ -91,7 +91,7 @@ describe('echo adapter with a stream delay', () => {
       for await (const delta of createEchoAdapter({ delayMs: 20 }).stream(
         request({ ...spaced, abortSignal: controller.signal }),
       )) {
-        deltas.push(delta.text);
+        if (delta.type === 'text') deltas.push(delta.text);
         if (deltas.length === 2) controller.abort();
       }
     })();

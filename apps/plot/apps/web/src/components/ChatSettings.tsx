@@ -11,7 +11,8 @@ import {
 } from '@shizue/core/translation';
 import { useTranslations } from 'next-intl';
 import { useId, type ReactNode } from 'react';
-import type { ModelInfo, Persona, ReaderPreset } from '@/lib/types';
+import { effectivePreset } from '@/lib/modelBinding';
+import type { ModelBinding, ModelPreset, Persona, ReaderPreset } from '@/lib/types';
 import { PersonaFace } from './Avatar';
 import { ModelOptions } from './ModelOptions';
 import { ReaderPresetField } from './ReaderPresets';
@@ -29,14 +30,11 @@ export interface LanguageSettingsView {
   recommended: boolean;
 }
 
-/** Effort words the catalogues translate; any other word a model advertises is shown as it is. */
-const KNOWN_EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh']);
-
 /**
- * The choices a chat is run with: model, reasoning effort where the model offers
- * one, auxiliary model, the reader's own preset in place of the built-in
- * default, and persona — labelled rows at full width, in the chat's settings
- * sheet.
+ * The choices a chat is run with: its main model preset, its auxiliary (sub)
+ * one, the reader's own prompt preset in place of the built-in default, and
+ * persona — labelled rows at full width, in the chat's settings sheet. A model
+ * slot left open follows the default binding, which its "기본 (…)" option names.
  *
  * The caption is a `<label htmlFor>`: pointed at the control by id rather than
  * wrapping it, because wrapping would put every option's text into the
@@ -45,11 +43,10 @@ const KNOWN_EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh']);
  * competing name, so the controls do without one.
  */
 export function ChatSettings({
-  model,
-  subModel,
-  reasoningEffort,
+  binding,
+  presets,
+  defaults,
   personaId,
-  models,
   personas,
   readerPresetId = null,
   readerPresets,
@@ -59,12 +56,13 @@ export function ChatSettings({
   retrieval,
   onChange,
 }: {
-  model: string;
-  /** The auxiliary model the reader picked; null runs the side work on the first model. */
-  subModel: string | null;
-  reasoningEffort: string | null;
+  /** The chat's own picks; a null slot follows the default. */
+  binding: ModelBinding;
+  /** The owner's model presets. */
+  presets: readonly ModelPreset[];
+  /** The owner's default binding, which an open slot follows. */
+  defaults: ModelBinding;
   personaId: string | null;
-  models: ModelInfo[];
   personas: Persona[];
   /** This chat's reader preset ("내 프리셋"); null runs the built-in default. */
   readerPresetId?: string | null;
@@ -77,9 +75,8 @@ export function ChatSettings({
   /** Whether the chat brings back its earlier messages by meaning; without it, no control. */
   retrieval?: boolean;
   onChange: (patch: {
-    model?: string;
-    subModel?: string | null;
-    reasoningEffort?: string | null;
+    /** The slots the pick sets; null hands one back to the default. */
+    modelBinding?: Partial<ModelBinding>;
     readerPresetId?: string | null;
     personaId?: string | null;
     translation?: ChatTranslationSettings;
@@ -90,15 +87,10 @@ export function ChatSettings({
   const locales = useTranslations('locales');
   const locked = disabled ? t('lockedWhileGenerating') : undefined;
   const id = useId();
-  // Only a model that advertises efforts gets the control; the server clears a
-  // chosen effort when the model is switched to one that does not offer it.
-  const current = models.find((entry) => entry.id === model);
-  const efforts = current?.reasoningEfforts ?? [];
-  const effortLabel = (effort: string): string =>
-    KNOWN_EFFORTS.has(effort) ? t(`reasoningEfforts.${effort}`) : effort;
-  // What the server falls back to when the reader picked none: the first model
-  // the catalog lists. Named once the list is in, so the reader sees what it is.
-  const firstModel = models[0];
+  // What an open slot runs on, named once the lists are in: the default's main,
+  // and for the sub the default's sub — or the main where that is open too.
+  const defaultMain = effectivePreset(presets, { ...binding, main: null }, defaults, 'main');
+  const defaultSub = effectivePreset(presets, { ...binding, sub: null }, defaults, 'sub');
 
   /** The select's id, which its caption names it by. */
   const nameOf = (key: string) => ({ id: `${id}-${key}` });
@@ -123,67 +115,35 @@ export function ChatSettings({
         'model',
         t('model'),
         <Select
-          value={model}
+          value={binding.main ?? ''}
           disabled={disabled}
           {...(locked ? { title: locked } : {})}
           {...nameOf('model')}
-          onChange={(event) => onChange({ model: event.target.value })}
+          onChange={(event) => onChange({ modelBinding: { main: event.target.value || null } })}
         >
-          <ModelOptions model={model} models={models} />
+          <ModelOptions
+            presets={presets}
+            value={binding.main}
+            defaultLabel={defaultMain ? t('modelDefaultIs', { model: defaultMain.name }) : t('modelDefault')}
+          />
         </Select>,
       )}
-      {efforts.length > 0
-        ? field(
-            'effort',
-            t('reasoningEffort'),
-            <Select
-              value={reasoningEffort ?? ''}
-              disabled={disabled}
-              {...(locked ? { title: locked } : {})}
-              {...nameOf('effort')}
-              onChange={(event) => onChange({ reasoningEffort: event.target.value || null })}
-            >
-              <option value="">
-                {current?.defaultReasoningEffort
-                  ? t('reasoningEffortDefaultIs', { effort: effortLabel(current.defaultReasoningEffort) })
-                  : t('reasoningEffortDefault')}
-              </option>
-              {/* An effort the catalog has since dropped stays visible, as a historical model does. */}
-              {reasoningEffort && !efforts.includes(reasoningEffort) ? (
-                <option value={reasoningEffort}>{effortLabel(reasoningEffort)}</option>
-              ) : null}
-              {efforts.map((effort) => (
-                <option key={effort} value={effort}>
-                  {effortLabel(effort)}
-                </option>
-              ))}
-            </Select>,
-          )
-        : null}
       {/* Next to the model it spares: the side work runs here instead. */}
       {field(
         'subModel',
         t('subModel'),
         <Select
-          value={subModel ?? ''}
+          value={binding.sub ?? ''}
           disabled={disabled}
           title={locked ?? t('subModelHint')}
           {...nameOf('subModel')}
-          onChange={(event) => onChange({ subModel: event.target.value || null })}
+          onChange={(event) => onChange({ modelBinding: { sub: event.target.value || null } })}
         >
-          <option value="">
-            {firstModel ? t('subModelDefaultIs', { model: firstModel.label }) : t('subModelDefault')}
-          </option>
-          {/* A pick the catalog has since dropped stays visible, as a historical model does;
-              the server runs the side work on the default meanwhile. */}
-          {subModel && !models.some((entry) => entry.id === subModel) ? (
-            <option value={subModel}>{subModel}</option>
-          ) : null}
-          {models.map((entry) => (
-            <option key={entry.id} value={entry.id}>
-              {entry.label}
-            </option>
-          ))}
+          <ModelOptions
+            presets={presets}
+            value={binding.sub}
+            defaultLabel={defaultSub ? t('subModelDefaultIs', { model: defaultSub.name }) : t('subModelDefault')}
+          />
         </Select>,
         t('subModelHint'),
       )}
