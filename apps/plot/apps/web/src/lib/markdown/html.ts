@@ -428,9 +428,10 @@ export const markdownToHtml = (md: string): string => withSheetsKept(md, (text) 
 
 /**
  * A markup chunk as it may reach the DOM: rendered, then sanitized like any
- * display script's output. Empty where there is no DOM to sanitize with.
+ * display script's output — without its frames while it is still being written
+ * (`live`). Empty where there is no DOM to sanitize with.
  */
-export const renderMarkup = (md: string): string => sanitizeCustomHtml(markdownToHtml(md));
+export const renderMarkup = (md: string, live = false): string => sanitizeCustomHtml(markdownToHtml(md), { live });
 
 /** A mark (`lib/taint`) as markdown percent-encoded it into a link's or a picture's address. */
 const ENCODED_MARK_RE = /%0([1-3])/g;

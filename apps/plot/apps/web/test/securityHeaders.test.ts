@@ -16,8 +16,14 @@ describe('page security headers', () => {
     expect(directive(policy, 'connect-src')).toEqual(["'self'", REALM_ORIGIN]);
     expect(directive(policy, 'object-src')).toEqual(["'none'"]);
     expect(directive(policy, 'base-uri')).toEqual(["'self'"]);
-    expect(directive(policy, 'form-action')).toEqual(["'self'"]);
     expect(directive(policy, 'frame-ancestors')).toEqual(["'none'"]);
+  });
+
+  it('frame our own documents and YouTube’s player only, and let no form submit', () => {
+    const policy = contentSecurityPolicy({}, 'n0nce');
+    expect(directive(policy, 'frame-src')).toEqual(["'self'", 'https://www.youtube.com', 'https://www.youtube-nocookie.com']);
+    // A card's text field would otherwise reload the chat with what was typed in it.
+    expect(directive(policy, 'form-action')).toEqual(["'none'"]);
   });
 
   it('run only our files, the scripts carrying the nonce and the theme script, and eval nothing outside next dev', () => {

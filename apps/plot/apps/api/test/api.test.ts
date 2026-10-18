@@ -15781,6 +15781,39 @@ describe('what a card loads from other hosts, brought in at import', () => {
       { type: 'application/json' },
     );
 
+  it('leaves a YouTube player where it is: a frame the reader’s browser shows, not a file to bring in', async () => {
+    const { asked, remoteFetch } = remote();
+    const target = makeApp({ remoteFetch });
+    const cookie = await signUp('localize-player@example.com');
+    const player = '<iframe src="https://www.youtube.com/embed/dQw4w9WgXcQ"></iframe>';
+    const card = {
+      ...v2Card,
+      data: {
+        ...v2Card.data,
+        first_mes: `${player}<img src="https://cdn.test/hello.png"> [bgm:abc123]`,
+        alternate_greetings: [],
+        extensions: {
+          risuai: {
+            backgroundHTML: '<iframe src="//www.youtube-nocookie.com/embed/videoseries?list=PL1"></iframe>',
+            customScripts: [
+              { comment: '', type: 'editdisplay', in: '\\[bgm:(\\w+)\\]', out: '<iframe src="https://www.youtube.com/embed/$1"></iframe>', flag: 'g', ableFlag: true },
+            ],
+          },
+        },
+      },
+    };
+    const form = new FormData();
+    form.append('file', new File([JSON.stringify(card)], 'player.json', { type: 'application/json' }));
+    const res = await fileImport(cookie, '/api/plots/import', form, target);
+    expect(res.status, await res.clone().text()).toBe(201);
+    const plot = await readJson(res);
+    // The picture beside it is brought in; the players are neither fetched nor counted as misses.
+    expect(asked).toEqual(['https://cdn.test/hello.png']);
+    expect(plot.importWarnings).toEqual([]);
+    const shown = await readPublicPlot(cookie, plot.id);
+    expect(shown.backgroundHtml).toContain('<iframe src="//www.youtube-nocookie.com/embed/videoseries?list=PL1"></iframe>');
+  });
+
   it('brings in an address a card builds from its variables, by what the card sets them to', async () => {
     const asked: string[] = [];
     const remoteFetch: RemoteFetch = async (url) => {

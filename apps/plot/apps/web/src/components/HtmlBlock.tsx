@@ -33,7 +33,8 @@ export const useHydrated = (): boolean =>
  * shown as written until it is done, it is drawn as it arrives: its open
  * markdown markers are closed (`balancePartial`) and an element the model has
  * opened and not yet closed is closed by the sanitizer's parse, so the box is on
- * screen while its contents arrive.
+ * screen while its contents arrive. A YouTube frame in it waits for the block
+ * to close: drawn again on every token, it would load the player each time.
  */
 export const HtmlBlock = memo(function HtmlBlock({
   content,
@@ -44,7 +45,7 @@ export const HtmlBlock = memo(function HtmlBlock({
 }) {
   const hydrated = useHydrated();
   const html = useMemo(
-    () => (hydrated ? renderMarkup(live ? balancePartial(content) : content) : ''),
+    () => (hydrated ? renderMarkup(live ? balancePartial(content) : content, live) : ''),
     [hydrated, content, live],
   );
   return (

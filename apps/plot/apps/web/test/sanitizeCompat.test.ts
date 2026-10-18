@@ -59,6 +59,12 @@ describe('the corpus keeps covering', () => {
     ['native progress and meter', '<progress value="72" max="100">'],
     ['details and summary', '<details'],
     ['external links, opened away from us', 'rel="noopener noreferrer nofollow"'],
+    ['inline SVG icons', '<svg class="x-shizue-ring" viewBox="0 0 36 36"'],
+    ['an SVG painted with its own gradient', 'stroke: url(#x-shizue-hud-grad)'],
+    ['data attributes a sheet selects on', '.x-shizue-hud[data-mood="tense"]'],
+    ['aria attributes', 'aria-label="루미의 상태"'],
+    ['a dropdown', '<select name="x-shizue-move">'],
+    ['a slider', '<input type="range"'],
   ];
 
   for (const [what, needle] of features) {

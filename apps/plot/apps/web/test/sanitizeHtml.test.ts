@@ -96,22 +96,37 @@ describe('urls', () => {
 });
 
 describe('framed, embedded and form elements', () => {
-  it('removes iframe, object and embed', () => {
+  it('removes a frame of any host but YouTube’s player, and object and embed', () => {
     expectClean('<iframe src="https://evil.test"></iframe>', '<iframe', 'evil.test');
     expectClean('<object data="x.swf"></object>', '<object');
     expectClean('<embed src="x.swf">', '<embed');
   });
 
-  it('removes forms and every input control', () => {
-    expectClean(
-      '<form action="https://evil.test"><input name="p"><textarea></textarea>' +
-        '<select><option>1</option></select></form>',
+  it('unwraps a form and keeps its controls, so nothing of it can submit anywhere', () => {
+    const output = expectClean(
+      '<form action="https://evil.test" method="post" target="_top" enctype="text/plain"><input name="p">' +
+        '<textarea name="t"></textarea><select name="s"><option>1</option></select>' +
+        '<button type="submit" formaction="https://evil.test" formmethod="post" formtarget="_top">보내기</button>' +
+        '<input type="submit" formaction="https://evil.test"></form>',
       '<form',
-      '<input',
-      '<textarea',
-      '<select',
       'evil.test',
+      'action',
+      'method',
+      'formtarget',
+      'enctype',
     );
+    for (const kept of ['<input name="x-shizue-p">', '<textarea name="x-shizue-t">', '<select name="x-shizue-s">', '<option>1</option>']) {
+      expect(output).toContain(kept);
+    }
+    expect(output).toContain('<button type="button">보내기</button>');
+    // With no form to belong to, Enter in the field and the submit input have nothing to send.
+    const holder = document.createElement('div');
+    holder.innerHTML = output;
+    for (const control of Array.from(holder.querySelectorAll('input, textarea, select, button'))) {
+      expect((control as HTMLInputElement).form).toBeNull();
+    }
+    // Nor can a control join one of the page's forms by its id.
+    expectClean('<input form="composer-form"><button form="composer-form">x</button>', 'form=');
   });
 
   it('removes base, link and meta, which retarget the whole page', () => {
@@ -121,21 +136,157 @@ describe('framed, embedded and form elements', () => {
   });
 });
 
-describe('svg and mathml', () => {
-  it('removes svg along with its event handlers', () => {
-    expectClean(
-      '<svg><animate onbegin="alert(1)" attributeName="x"></animate></svg>',
-      '<svg',
-      '<animate',
-      'onbegin',
-      'alert',
+describe('YouTube’s player, the one frame RisuAI draws', () => {
+  const PLAYER =
+    ' sandbox="allow-scripts allow-same-origin" allow="autoplay; encrypted-media; fullscreen; picture-in-picture"' +
+    ' referrerpolicy="strict-origin-when-cross-origin" loading="lazy"';
+
+  it('keeps a player under our sandbox and permissions, never the card’s', () => {
+    expect(
+      sanitizeCustomHtml(
+        '<iframe width="320" height="180" src="https://www.youtube.com/embed/dQw4w9WgXcQ?start=5&amp;autoplay=1" title="BGM" ' +
+          'frameborder="0" allow="camera; microphone; geolocation" sandbox="allow-scripts allow-same-origin allow-top-navigation allow-popups" ' +
+          'referrerpolicy="unsafe-url" allowfullscreen class="video"></iframe>',
+      ),
+    ).toBe(
+      '<iframe width="320" height="180" src="https://www.youtube.com/embed/dQw4w9WgXcQ?start=5&amp;autoplay=1" title="BGM" ' +
+        'frameborder="0" allow="autoplay; encrypted-media; fullscreen; picture-in-picture" sandbox="allow-scripts allow-same-origin" ' +
+        'referrerpolicy="strict-origin-when-cross-origin" class="x-shizue-video" loading="lazy"></iframe>',
     );
+  });
+
+  it('keeps the cookieless player and a playlist’s', () => {
+    expect(sanitizeCustomHtml('<iframe src="https://www.youtube-nocookie.com/embed/videoseries?list=PL1"></iframe>')).toBe(
+      `<iframe src="https://www.youtube-nocookie.com/embed/videoseries?list=PL1"${PLAYER}></iframe>`,
+    );
+  });
+
+  it('removes a frame of any other address, decided on the parsed URL', () => {
+    for (const src of [
+      'https://evil.test/embed/x',
+      'http://www.youtube.com/embed/x',
+      '//www.youtube.com/embed/x',
+      'https://youtube.com/embed/x',
+      'https://www.youtube.com.evil.test/embed/x',
+      'https://www.youtube.com@evil.test/embed/x',
+      'https://user:pass@www.youtube.com/embed/x',
+      'https://www.youtube.com:8443/embed/x',
+      'https://evil.test/?https://www.youtube.com/embed/x',
+      'https://www.youtube.com/embed/../redirect?q=https://evil.test',
+      'https://www.youtube.com/embed/%2e%2e/redirect?q=https://evil.test',
+      'https://www.youtube.com/embed/x/../../redirect',
+      'https://www.youtube.com/embed/',
+      'https://www.youtube.com/watch?v=x',
+      'https://www.youtube.com/embed\\x',
+      ' javascript:alert(1)',
+      'data:text/html,<script>alert(1)</script>',
+      '/api/plots/x/assets/page.html',
+    ]) {
+      expectClean(`<iframe src="${src}"></iframe>`, '<iframe');
+    }
+    expectClean('<iframe></iframe>', '<iframe');
+    expectClean('<iframe srcdoc="<b>x</b>"></iframe>', '<iframe', 'srcdoc');
+  });
+
+  it('holds no frame while its block is still being written, which draws it again on every token', () => {
+    const html = '<div><iframe src="https://www.youtube.com/embed/x"></iframe>노래</div>';
+    expect(sanitizeCustomHtml(html, { live: true })).toBe('<div>노래</div>');
+    expect(sanitizeCustomHtml(html)).toContain('<iframe');
+  });
+});
+
+describe('svg and mathml', () => {
+  it('keeps an inline SVG icon, its viewBox, paths and namespaced class', () => {
+    const output = sanitizeCustomHtml(
+      '<span class="stat"><svg class="icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">' +
+        '<path d="M12 2 2 22h20Z" fill="currentColor" stroke="#fff" stroke-width="2" stroke-linejoin="round"/>' +
+        '<circle cx="12" cy="12" r="3" transform="rotate(-90 12 12)"/></svg>HP</span>',
+    );
+    expect(output).toContain('<svg class="x-shizue-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">');
+    expect(output).toContain('<path d="M12 2 2 22h20Z" fill="currentColor" stroke="#fff" stroke-width="2" stroke-linejoin="round">');
+    expect(output).toContain('<circle cx="12" cy="12" r="3" transform="rotate(-90 12 12)">');
+  });
+
+  it('keeps an SVG pointing at its own gradient, filter and clip path by the folded id', () => {
+    const output = sanitizeCustomHtml(
+      '<svg viewBox="0 0 10 10"><defs><linearGradient id="hp"><stop offset="0" stop-color="#f00"/></linearGradient>' +
+        '<linearGradient id="hp2" href="#hp"/><radialGradient id="glow" xlink:href="#hp"/>' +
+        '<filter id="blur"><feGaussianBlur stdDeviation="1"/></filter><clipPath id="c"><rect width="5" height="5"/></clipPath></defs>' +
+        '<rect fill="url(#hp)" stroke="url(\'#glow\')" filter="url(#blur)" clip-path="url(#c)" width="10" height="2"/>' +
+        '<text><textPath href="#arc">길</textPath></text></svg>',
+    );
+    for (const kept of [
+      'id="x-shizue-hp"',
+      'href="#x-shizue-hp"',
+      'fill="url(#x-shizue-hp)"',
+      'stroke="url(#x-shizue-glow)"',
+      'filter="url(#x-shizue-blur)"',
+      'clip-path="url(#x-shizue-c)"',
+      '<textPath href="#x-shizue-arc">',
+    ]) {
+      expect(output).toContain(kept);
+    }
+    expect(output).not.toContain('xlink:href');
+  });
+
+  it('refuses an SVG reference to a file anywhere, its own origin included, but a picture of ours', () => {
+    const output = expectClean(
+      '<svg><rect fill="url(https://evil.test/p.svg#g)" width="1"/><rect filter="url(//evil.test/f.svg#f)" width="2"/>' +
+        '<rect mask="image-set(\'https://evil.test/m.png\' 1x)" width="3"/><rect stroke="u\\72l(https://evil.test/x)" width="4"/>' +
+        '<rect clip-path="url(/api/plots/x/assets/c.svg#c)" width="5"/>' +
+        '<linearGradient href="https://evil.test/g.svg#g"/><textPath xlink:href="/api/plots/x/assets/p.svg#p"/>' +
+        '<image href="https://evil.test/t.png"/><image xlink:href="//evil.test/t.png"/><image href="data:image/png;base64,AAAA"/>' +
+        '<feImage href="https://evil.test/x.png"/><image href="/api/plots/x/assets/a" width="8"/></svg>',
+      'evil.test',
+      'data:',
+      'clip-path',
+      'c.svg',
+      'p.svg',
+      'feimage',
+    );
+    // The shapes stay, without what they pointed at; our own picture loads as an <img> would.
+    for (const width of ['1', '2', '3', '4', '5']) expect(output).toContain(`<rect width="${width}">`);
+    expect(output).toContain('<image href="/api/plots/x/assets/a" width="8">');
+    expect(output.match(/<image/g)).toHaveLength(1);
+  });
+
+  it('removes svg event handlers, and animate, set and use with their href tricks', () => {
+    expectClean('<svg onload="alert(1)"><circle r="4" onclick="alert(2)"/></svg>', 'onload', 'onclick', 'alert');
+    expectClean('<svg><animate onbegin="alert(1)" attributeName="x"></animate></svg>', '<animate', 'onbegin', 'alert');
+    expectClean(
+      '<svg><a><animate attributeName="href" values="javascript:alert(1)"/><text>x</text></a></svg>',
+      '<animate',
+      'javascript',
+    );
+    expectClean('<svg><a><set attributeName="href" to="javascript:alert(1)"/><text>x</text></a></svg>', '<set', 'javascript');
+    expectClean(
+      '<svg><use href="https://evil.test/sprite.svg#i"/><use xlink:href="data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=#x"/>' +
+        '<use href="#icon"/></svg>',
+      '<use',
+      'evil.test',
+      'data:',
+    );
+    // The animations DOMPurify keeps can still not be aimed at an address.
+    expectClean(
+      '<svg><a><animateTransform attributeName="href" values="javascript:alert(1)"/>' +
+        '<animateMotion attributeName="xlink:href" to="https://evil.test"><mpath href="https://evil.test/p.svg#p"/></animateMotion></a></svg>',
+      'attributename',
+      'javascript',
+      'evil.test',
+    );
+  });
+
+  it('keeps an SVG link a link only to an http(s) address, opened away from us', () => {
+    expectClean('<svg><a href="javascript:alert(1)"><text>x</text></a><a xlink:href="javascript:alert(2)"><text>y</text></a></svg>', 'javascript', 'href');
+    const output = sanitizeCustomHtml('<svg><a xlink:href="https://example.test/"><text>z</text></a></svg>');
+    expect(output).toContain('href="https://example.test/"');
+    expect(output).toContain('rel="noopener noreferrer nofollow"');
+    expect(output).not.toContain('xlink:href');
   });
 
   it('removes an svg foreignObject wrapper', () => {
     expectClean(
       '<svg><foreignObject><div onclick="alert(1)">x</div></foreignObject></svg>',
-      '<svg',
       'foreignobject',
       'onclick',
     );
@@ -145,21 +296,111 @@ describe('svg and mathml', () => {
     expectClean('<svg><g><script>alert(1)</script></g></svg>', '<script', 'alert(1)');
   });
 
-  it('removes mathml, including the annotation-xml mXSS carrier', () => {
-    expectClean(
-      '<math><mtext><table><mglyph><style><img src=x onerror=alert(1)>',
-      '<math',
-      '<mglyph',
-      'onerror',
-      'alert',
-    );
+  it('lifts an SVG’s own stylesheet into the message scope, and lets no markup out of it', () => {
+    const output = sanitizeCustomHtml('<svg><style>.ring{stroke:#0f0;stroke-width:4}</style><circle class="ring" r="4"/></svg>');
+    expect(output).toMatch(/^<style>\.shizue-msg \.x-shizue-ring \{\s*stroke: #0f0;\s*stroke-width: 4;\s*\}<\/style>/);
+    expectClean('<svg><style><img src=x onerror=alert(1)></style></svg>', 'onerror', 'alert');
+    expectClean('<svg><style><![CDATA[</style><img src=x onerror=alert(1)>]]></style></svg>', 'onerror', 'alert');
+  });
+
+  it('keeps mathml, and kills the annotation-xml and mglyph mXSS carriers', () => {
+    expect(sanitizeCustomHtml('<math><mfrac><mi>a</mi><mn>2</mn></mfrac></math>')).toBe('<math><mfrac><mi>a</mi><mn>2</mn></mfrac></math>');
+    expectClean('<math><mtext><table><mglyph><style><img src=x onerror=alert(1)>', 'onerror', 'alert');
     expectClean(
       '<math><annotation-xml encoding="text/html"><script>alert(1)</script></annotation-xml></math>',
-      '<math',
       'annotation-xml',
       '<script',
     );
+    // A MathML `href` would be a link no rule of ours saw.
+    expectClean('<math><mi href="javascript:alert(1)">x</mi><mi href="https://evil.test">y</mi></math>', 'href', 'evil.test');
   });
+});
+
+/**
+ * Whether markup can do nothing but be looked at: no script, no handler, no
+ * address that runs or leaves (`href` only on a link to http(s), every `src` ours
+ * but the YouTube player's), no form, no popover, no frame but the player, which
+ * our sandbox holds.
+ */
+function expectInert(html: string): void {
+  const output = sanitizeCustomHtml(html);
+  const holder = document.createElement('template');
+  holder.innerHTML = output;
+  const forbidden = 'script, object, embed, form, base, link, meta, template, foreignObject, use, animate, set, annotation-xml, iframe:not([sandbox="allow-scripts allow-same-origin"])';
+  expect(holder.content.querySelector(forbidden), output).toBeNull();
+  for (const element of Array.from(holder.content.querySelectorAll('*'))) {
+    for (const { name, value } of Array.from(element.attributes)) {
+      const lower = name.toLowerCase();
+      expect(lower.startsWith('on'), `${lower} in ${output}`).toBe(false);
+      expect(['srcdoc', 'action', 'formaction', 'popover', 'popovertarget', 'command', 'commandfor', 'srcset', 'autofocus'].includes(lower), `${lower} in ${output}`).toBe(false);
+      expect(/^\s*(?:javascript|vbscript|data):/i.test(value), `${lower}="${value}"`).toBe(false);
+      if (lower === 'src' || lower === 'poster' || lower === 'background') {
+        const player = element.tagName.toLowerCase() === 'iframe' && value.startsWith('https://www.youtube');
+        expect(player || new URL(value, location.origin).origin === location.origin, `${lower}="${value}"`).toBe(true);
+      }
+      if (lower === 'href' && !['a', 'area'].includes(element.tagName.toLowerCase())) {
+        expect(value.startsWith('#') || new URL(value, location.origin).origin === location.origin, `href="${value}"`).toBe(true);
+      }
+    }
+  }
+}
+
+describe('known XSS vectors, against what the RisuAI allowances let in', () => {
+  const vectors = [
+    // Form controls and their handlers.
+    '<input onfocus="alert(1)" autofocus>',
+    '<input type="text" onfocus=alert(1) autofocus value="x">',
+    '<select onchange="alert(1)" autofocus><option>x</option></select>',
+    '<textarea onfocus=alert(1) autofocus>x</textarea>',
+    '<input type="image" src="x" onerror="alert(1)">',
+    '<input type="image" src="https://evil.test/x.png">',
+    '<button formaction="javascript:alert(1)">x</button>',
+    '<form><button formaction=javascript:alert(1)>X</button></form>',
+    '<form id="f"></form><button form="f" formaction="javascript:alert(1)">X</button>',
+    '<isindex action="javascript:alert(1)" type="image">',
+    '<details open ontoggle=alert(1)>x</details>',
+    '<dialog open onclose=alert(1)>x</dialog>',
+    '<div popover id="p" onbeforetoggle=alert(1)>x</div><button popovertarget="p">x</button>',
+    '<button command="show-modal" commandfor="d">x</button><dialog id="d">y</dialog>',
+    // Frames.
+    '<iframe src="javascript:alert(1)"></iframe>',
+    '<iframe src="data:text/html,<script>alert(1)</script>"></iframe>',
+    '<iframe srcdoc="<script>alert(1)</script>"></iframe>',
+    '<iframe src="https://www.youtube.com/embed/x" srcdoc="<script>alert(1)</script>" onload="alert(1)"></iframe>',
+    '<iframe src="https://www.youtube.com/embed/x" sandbox="allow-scripts allow-same-origin allow-top-navigation allow-popups"></iframe>',
+    // SVG.
+    '<svg><script>alert(1)</script></svg>',
+    '<svg onload=alert(1)>',
+    '<svg><animate onbegin=alert(1) attributeName=x dur=1s>',
+    '<svg><animateTransform onbegin=alert(1) attributeName=transform>',
+    '<svg><set attributeName="onmouseover" to="alert(1)"/></svg>',
+    '<svg><animate attributeName="onclick" values="alert(1)"/></svg>',
+    '<svg><a xlink:href="javascript:alert(1)"><text x="20" y="20">X</text></a></svg>',
+    '<svg><a><animate attributeName=href values=javascript:alert(1) /><text x=20 y=20>X</text></a></svg>',
+    '<svg><discard onbegin=alert(1)>',
+    '<svg><image href="javascript:alert(1)"/></svg>',
+    '<svg><foreignObject><iframe srcdoc="<script>alert(1)</script>"></iframe></foreignObject></svg>',
+    '<svg></p><style><a id="</style><img src=1 onerror=alert(1)>">',
+    '<svg><p><style><img src=x onerror=alert(1)></style></p></svg>',
+    // MathML namespace confusion.
+    '<math><mtext><table><mglyph><style><img src=x onerror=alert(1)>',
+    '<math><mi><mglyph><svg><mtext><textarea><path id="</textarea><img onerror=alert(1) src=1>">',
+    '<form><math><mtext></form><form><mglyph><style></math><img src onerror=alert(1)>',
+    '<math><maction actiontype="statusline#http://evil.test" xlink:href="javascript:alert(1)">x</maction></math>',
+    '<math href="javascript:alert(1)">x</math>',
+    // Pictures and media that load from elsewhere.
+    '<video poster="javascript:alert(1)" src="/api/plots/x/assets/v"></video>',
+    '<table background="javascript:alert(1)"><tr><td>x</td></tr></table>',
+    '<img src="/a.png" srcset="https://evil.test/a.png 2x">',
+    '<picture><source srcset="https://evil.test/a.png"><img src="/a.png"></picture>',
+    '<video src="/api/v"><track src="https://evil.test/sub.vtt"></video>',
+    '<template><img src=x onerror=alert(1)></template>',
+    '<a href="javascript:alert(1)" data-x="1" aria-label="y">x</a>',
+    '<area href="javascript:alert(1)">',
+  ];
+  for (const vector of vectors) {
+    it(vector, () => expectInert(vector));
+  }
 });
 
 describe('css', () => {
@@ -356,18 +597,64 @@ describe('css property and function allowlists', () => {
     expectClean('<style>.a{-webkit-position:sticky}</style>', 'sticky');
   });
 
-  it('refuses a url() where it would name an SVG element or draw the pointer, whatever its origin', () => {
+  it('takes a url() that names an SVG element only as one of the card’s own, never a file, and none in a cursor', () => {
     for (const declaration of [
-      'filter:url(#blur)',
+      'filter:url(/api/plots/x/assets/f.svg#f)',
       'backdrop-filter:url(/api/plots/x/assets/f.svg#f)',
-      'clip-path:url(#clip)',
+      'clip-path:url(/api/plots/x/assets/c.svg#c)',
       'mask:url(/api/plots/x/assets/m.svg#m)',
       '-webkit-mask-image:url(/api/plots/x/assets/m.png)',
+      'fill:url(https://evil.test/p.svg#p)',
+      'stroke:url(/api/plots/x/assets/p.svg#p)',
+      'marker-end:url(//evil.test/m.svg#m)',
       'cursor:url(/api/plots/x/assets/c.png), auto',
+      'cursor:url(#c), auto',
     ]) {
       expectClean(`<style>.a{${declaration}}</style>`, declaration.split(':')[0]!);
       expectClean(`<div style="${declaration}">x</div>`, declaration.split(':')[0]!);
     }
+    // A fragment names an element of the card's own, by the id the DOM pass folds it to.
+    const output = sanitizeCustomHtml(
+      '<style>.a{filter:url(#blur);clip-path:url("#clip");fill:url( #hp );marker-end:url(#arrow)}</style>' +
+        '<div style="mask:url(#m)">x</div>',
+    );
+    for (const kept of [
+      'filter: url(#x-shizue-blur)',
+      'clip-path: url(#x-shizue-clip)',
+      'fill: url(#x-shizue-hp)',
+      'marker-end: url(#x-shizue-arrow)',
+      'style="mask: url(#x-shizue-m)"',
+    ]) {
+      expect(output).toContain(kept);
+    }
+  });
+
+  it('keeps an SVG gauge’s painting and geometry', () => {
+    const declarations = [
+      'fill: none',
+      'stroke: #22c55e',
+      'stroke-width: 4',
+      'stroke-dasharray: 100',
+      'stroke-dashoffset: 28',
+      'stroke-linecap: round',
+      'stop-color: #7c3aed',
+      'r: 16',
+      'cx: 18',
+      'paint-order: stroke',
+      'transition: stroke-dashoffset 300ms ease',
+    ];
+    const output = sanitizeCustomHtml(`<style>.ring{${declarations.join(';')}}</style>`);
+    for (const kept of declarations) expect(output).toContain(kept);
+  });
+
+  it('selects on a card’s data attributes as written, a dot in a value included', () => {
+    const output = sanitizeCustomHtml(
+      '<style>[data-hp="0.5"] .bar{width:50%}.panel[data-state="low"] .bar{background-color:#f00}' +
+        '.x[aria-expanded="true"]{color:red}</style>',
+    );
+    expect(output).toContain('.shizue-msg [data-hp="0.5"] .x-shizue-bar');
+    expect(output).toContain('.shizue-msg .x-shizue-panel[data-state="low"] .x-shizue-bar');
+    expect(output).toContain('.shizue-msg .x-shizue-x[aria-expanded="true"]');
   });
 
   it('holds a custom property to what any declaration carries, so var() has nothing foreign to expand to', () => {
@@ -451,8 +738,87 @@ describe('attributes and structure', () => {
     expect(output).toContain('type="button"');
   });
 
-  it('drops every other data attribute', () => {
-    expectClean('<div data-evil="1" data-shizue-other="2">x</div>', 'data-evil', 'data-shizue-other');
+  it('keeps a card’s data and aria attributes and its roles, as RisuAI does', () => {
+    expect(sanitizeCustomHtml('<div data-state="low" data-hp="30" data-v1.2="x" aria-label="체력" aria-hidden="true" role="meter">x</div>')).toBe(
+      '<div data-state="low" data-hp="30" data-v1.2="x" aria-label="체력" aria-hidden="true" role="meter">x</div>',
+    );
+  });
+
+  it('drops the app’s own data attributes, which a card would use to pass for the page', () => {
+    expectClean(
+      '<div data-shizue-other="2" data-shizue-spoken="" data-testid="message-assistant" data-chat-image="" ' +
+        'data-image-group="" data-message-list="" data-hide-icons="" data-dialogue="">x</div>',
+      'data-shizue-other',
+      'data-shizue-spoken',
+      'data-testid',
+      'data-chat-image',
+      'data-image-group',
+      'data-message-list',
+      'data-hide-icons',
+      'data-dialogue',
+    );
+  });
+
+  it('cannot make a button run another member’s scripts', () => {
+    // The chat page runs a button's trigger as the member its closest
+    // `[data-shizue-member][data-shizue-spoken]` names.
+    const other = '0a1b2c3d-0000-4000-8000-00000000000b';
+    const output = expectClean(
+      `<div data-shizue-member="${other}" data-shizue-spoken=""><button risu-trigger="공격">공격</button></div>`,
+      'data-shizue-member',
+      'data-shizue-spoken',
+    );
+    expect(output).toContain('data-shizue-trigger="공격"');
+  });
+
+  it('folds every attribute that names an element by id, lists included', () => {
+    const output = sanitizeCustomHtml(
+      '<span id="t">체력</span><meter aria-labelledby="t s" aria-describedby="d" value="3"></meter>' +
+        '<input list="opts"><datalist id="opts"><option value="a"></option></datalist>' +
+        '<output for="a b"></output><td headers="h1">x</td>' +
+        '<img src="/api/plots/x/assets/map" usemap="#m"><map name="m"><area href="https://example.test/" shape="rect" coords="0,0,1,1"><area href="/local"></map>',
+    );
+    for (const kept of [
+      'aria-labelledby="x-shizue-t x-shizue-s"',
+      'aria-describedby="x-shizue-d"',
+      'list="x-shizue-opts"',
+      'id="x-shizue-opts"',
+      'for="x-shizue-a x-shizue-b"',
+      'usemap="#x-shizue-m"',
+      'name="x-shizue-m"',
+      '<area href="https://example.test/" shape="rect" coords="0,0,1,1" target="_blank" rel="noopener noreferrer nofollow">',
+      '<area>',
+    ]) {
+      expect(output).toContain(kept);
+    }
+  });
+
+  it('keeps nothing that lifts a box into the top layer, takes focus or edits the page', () => {
+    expectClean(
+      '<div popover id="p">x</div><button popovertarget="p" popovertargetaction="show">열기</button>' +
+        '<button command="show-modal" commandfor="d">열기</button><dialog id="d">y</dialog>' +
+        '<input autofocus><div contenteditable="true">z</div><img src="/a.png" nonce="abc">',
+      'popover',
+      'command',
+      'autofocus',
+      'contenteditable',
+      'nonce',
+    );
+  });
+
+  it('holds a poster, an old background picture and a subtitle file to our origin', () => {
+    const output = expectClean(
+      '<video poster="https://evil.test/p.png" src="/api/plots/x/assets/v"><track src="https://evil.test/sub.vtt"></video>' +
+        '<table background="https://evil.test/b.png"><tr><td background="//evil.test/c.png">x</td></tr></table>',
+      'evil.test',
+      '<track',
+      'poster',
+      'background',
+    );
+    expect(output).toContain('<video src="/api/plots/x/assets/v">');
+    expect(sanitizeCustomHtml('<video poster="/api/plots/x/assets/p" src="/api/plots/x/assets/v"><track src="/api/plots/x/assets/s"></video>')).toBe(
+      '<video poster="/api/plots/x/assets/p" src="/api/plots/x/assets/v"><track src="/api/plots/x/assets/s"></video>',
+    );
   });
 
   it('keeps the ordinary markup a status window is made of', () => {
@@ -680,12 +1046,28 @@ describe('CSS-only toggles', () => {
     expect(message.innerHTML).toContain('for="x-shizue-settings-open"');
   });
 
-  it('keeps no input but a checkbox or a radio', () => {
-    for (const type of ['text', 'password', 'hidden', 'submit', 'image', 'file', 'range', '']) {
-      expectClean(`<input type="${type}" name="q" src="/a.png" value="x">`, '<input');
+  it('keeps every kind of input, as RisuAI does, and none that loads a picture from elsewhere', () => {
+    for (const type of ['text', 'password', 'hidden', 'submit', 'reset', 'file', 'range', 'number', 'date', 'color', 'search']) {
+      expect(sanitizeCustomHtml(`<input type="${type}" name="q" value="x">`)).toBe(`<input type="${type}" name="x-shizue-q" value="x">`);
     }
-    expectClean('<input name="q">', '<input');
+    expect(sanitizeCustomHtml('<input name="q" placeholder="이름">')).toBe('<input name="x-shizue-q" placeholder="이름">');
     expect(sanitizeCustomHtml('<input type="CheckBox">')).toContain('type="checkbox"');
+    expect(sanitizeCustomHtml('<input type="image" src="/api/plots/x/assets/a" alt="확인">')).toBe(
+      '<input type="image" src="/api/plots/x/assets/a" alt="확인">',
+    );
+    expectClean('<input type="image" src="https://evil.test/a.png">', '<input', 'evil.test');
+  });
+
+  it('keeps a select, its groups and options, and a text area', () => {
+    expect(
+      sanitizeCustomHtml(
+        '<select name="act"><option value="a" selected>공격</option><optgroup label="마법"><option>화염</option></optgroup></select>' +
+          '<textarea rows="2" placeholder="메모" maxlength="200"></textarea><fieldset><legend>선택</legend></fieldset>',
+      ),
+    ).toBe(
+      '<select name="x-shizue-act"><option value="a" selected="">공격</option><optgroup label="마법"><option>화염</option></optgroup></select>' +
+        '<textarea rows="2" placeholder="메모" maxlength="200"></textarea><fieldset><legend>선택</legend></fieldset>',
+    );
   });
 
   it('drops a name or an id with nothing left once it is folded', () => {

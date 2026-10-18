@@ -17,13 +17,18 @@ const THEME_SCRIPT_HASH = `'sha256-${createHash('sha256').update(THEME_SCRIPT).d
 /** Where the studio downloads a RisuRealm card from, in the browser (`lib/realm.ts`). */
 const REALM_ORIGIN = 'https://realm.risuai.net';
 
+/** The one frame a card may draw, YouTube's player, and its cookieless twin (`lib/sanitizeHtml.ts` `rewriteFrame`). */
+const PLAYER_ORIGINS = ['https://www.youtube.com', 'https://www.youtube-nocookie.com'];
+
 /**
  * The page's policy. A card's HTML and CSS are drawn into the page itself, and
  * the sanitizer holds every address in them to our own origin (`lib/sanitizeHtml.ts`);
  * this is the browser holding them there too, should a rule of the sanitizer's
  * let one through: pictures, music, fonts and connections load from us, with
- * Realm the only other — a file's parts upload to the API, on our origin — and no `<object>`, `<base>` or form
- * that leaves.
+ * Realm the only other — a file's parts upload to the API, on our origin — frames
+ * from us and YouTube's player only, no `<object>` or `<base>`, and no form
+ * submits at all: every form of the app's handles its own submit, and a card's
+ * text field must not reload the chat with what was typed in it.
  *
  * Scripts run only from us: our files, the inline scripts Next writes into the
  * page, which carry this request's `nonce` (Next reads it off the request's
@@ -49,10 +54,10 @@ export function contentSecurityPolicy(env: Env, nonce: string): string {
     `connect-src ${connect.join(' ')}`,
     // The sandboxes' workers are blobs; the page's own come from `/_next`.
     "worker-src 'self' blob:",
-    "frame-src 'self'",
+    `frame-src 'self' ${PLAYER_ORIGINS.join(' ')}`,
     "object-src 'none'",
     "base-uri 'self'",
-    "form-action 'self'",
+    "form-action 'none'",
     "frame-ancestors 'none'",
   ].join('; ');
 }

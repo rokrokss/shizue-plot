@@ -15,12 +15,17 @@
  *      prefixed instead, and every reference to them rewritten to match. A rule
  *      or a declaration the parser refuses is dropped on its own, as the browser
  *      drops it, rather than the whole sheet (`repairPiece`).
- *   2. DOMPurify against a tag/attribute whitelist — no script, no event handler,
- *      no framed or form element, no input but a checkbox or a radio, no
- *      `javascript:` / `data:` URL.
- *   3. A DOM pass for what a string filter cannot see: classes, ids, label targets
- *      and radio groups namespaced, inline styles put through the same declaration
- *      filter, link and image targets re-checked, followed by a second DOMPurify
+ *   2. DOMPurify against what RisuAI's DOMPurify lets through — its default HTML,
+ *      SVG and MathML, `data-*` and `aria-*`, every form control, a YouTube frame
+ *      — less what cannot be made safe on a page that holds the owner's data
+ *      (`HTML_TAGS`, `ALLOWED_ATTR`): no script, no event handler, no `<form>`, no
+ *      popover or invoker that lifts a box into the top layer, no `javascript:`
+ *      / `data:` URL.
+ *   3. A DOM pass for what a string filter cannot see: classes, ids and every
+ *      attribute that names one namespaced, inline styles put through the same
+ *      declaration filter, every address re-checked — links, pictures, music, an
+ *      SVG's references to its own gradients and filters, a frame's host — and
+ *      the app's own data attributes taken off, followed by a second DOMPurify
  *      pass so nothing that pass introduced escapes review.
  *
  * The DOM pass is also where a link's *destination* is judged rather than its
@@ -42,9 +47,10 @@
  * In a work of several members a member's own stylesheet is scoped further, to
  * the rows of that member's messages (`member`): every selector under
  * `[data-shizue-member="<id>"] .shizue-msg`. The attribute is the chat page's,
- * on the row around the markup; nothing a template writes can carry it — data
- * attributes do not survive the whitelist — so no card can dress another
- * member's messages, or claim its scope. Its animations and font families are
+ * on the row around the markup; nothing a template writes can carry it — every
+ * `data-shizue-*` but the button bridge's is taken off (`APP_DATA_ATTRIBUTES`) —
+ * so no card can dress another member's messages, claim its scope, or run its
+ * buttons as that member's. Its animations and font families are
  * that member's too: prefixed with its id, so another member's sheet can neither
  * use them nor redefine them.
  */
@@ -72,45 +78,181 @@ export const MEMBER_ATTRIBUTE = 'data-shizue-member';
 /** A member id, which is all a member scope may name: it goes into a selector. */
 const MEMBER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-const ALLOWED_TAGS = [
-  'div', 'span', 'p', 'br', 'hr', 'b', 'strong', 'i', 'em', 'u', 's', 'small', 'sub', 'sup',
-  'code', 'pre', 'blockquote', 'ul', 'ol', 'li', 'dl', 'dt', 'dd',
-  'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-  'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'caption', 'colgroup', 'col',
-  'img', 'a', 'button', 'progress', 'meter', 'details', 'summary',
-  'figure', 'figcaption', 'mark', 'time', 'abbr', 'wbr',
-  // What a message's own markdown makes (`~~취소~~` is a <del>), and the inert
-  // presentational and sectioning tags RisuAI cards are written with. None of
-  // them can load, run or navigate anything; dropped, they took their layout
-  // with them and left a greeting reading as one run-on line.
-  'del', 'ins', 'strike', 'big', 'center', 'font', 'q', 'cite', 'kbd', 'ruby', 'rt', 'rp',
-  'section', 'article', 'header', 'footer', 'aside', 'nav',
-  // A card's music and video, which load from our own origin only (`rewriteElement`).
-  'audio', 'video', 'source',
-  // RisuAI's CSS-only toggles: a checkbox or a radio, a `<label>` that flips it,
-  // and a `:checked ~ …` rule that shows a panel or switches a tab. Only those two
-  // kinds of input survive (`rewriteElement`), and with no form to belong to
-  // neither can submit anything.
-  'input', 'label',
+/*
+ * What RisuAI lets through, and what of it we do not.
+ *
+ * RisuAI sanitizes a message with DOMPurify's defaults plus a frame and a few
+ * attributes of its own (`trimPurifyConfig`, `src/ts/parser/parser.svelte.ts`).
+ * The lists below are those defaults as DOMPurify 3.4.16 ships them
+ * (`dist/purify.es.mjs`: `html$1`, `svg$1`, `svgFilters`, `mathMl$1`, and the
+ * `html`, `svg`, `mathMl` and `xml` attribute lists), written out rather than
+ * taken from the library, because `keepsElement` has to answer without a DOM
+ * (`lib/markdown/html.ts` cuts a message on the server too), and because what is
+ * left out has to be read somewhere. Each omission says why; everything that
+ * stays is held to its address rules in `rewriteElement`.
+ */
+
+/**
+ * DOMPurify's HTML elements, and RisuAI's `iframe` (`rewriteFrame`: YouTube's
+ * player only). Left out:
+ *
+ * - `style` — lifted out and rebuilt before DOMPurify runs (`STYLE_BLOCK`);
+ * - `html`, `head`, `body` — never kept in a fragment, and counted as open they
+ *   would take the rest of a reply off the prose path (`keepsElement`);
+ * - `form` — a form submits on Enter in a lone text field even with no submit
+ *   button, and to the page's own address when it names none, so it is
+ *   unwrapped and its controls kept with no form to belong to (the page's
+ *   policy refuses every submission too: `form-action 'none'`);
+ * - `template` — inert without a script, and its content is a fragment of its
+ *   own that the DOM pass does not walk;
+ * - `content`, `decorator`, `element`, `shadow`, `slot` — names from shadow-DOM
+ *   drafts that no browser gives any behaviour in a page's own markup, so
+ *   unwrapping them changes nothing on screen, while keeping them would move a
+ *   reply that uses one as a wrapper off the prose path.
+ */
+const HTML_TAGS = [
+  'a', 'abbr', 'acronym', 'address', 'area', 'article', 'aside', 'audio',
+  'b', 'bdi', 'bdo', 'big', 'blink', 'blockquote', 'br', 'button',
+  'canvas', 'caption', 'center', 'cite', 'code', 'col', 'colgroup',
+  'data', 'datalist', 'dd', 'del', 'details', 'dfn', 'dialog', 'dir', 'div', 'dl', 'dt',
+  'em', 'fieldset', 'figcaption', 'figure', 'font', 'footer',
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'hgroup', 'hr',
+  'i', 'iframe', 'img', 'input', 'ins', 'kbd', 'label', 'legend', 'li',
+  'main', 'map', 'mark', 'marquee', 'menu', 'menuitem', 'meter', 'nav', 'nobr',
+  'ol', 'optgroup', 'option', 'output', 'p', 'picture', 'pre', 'progress', 'q',
+  'rp', 'rt', 'ruby', 's', 'samp', 'search', 'section', 'select', 'small', 'source', 'spacer',
+  'span', 'strike', 'strong', 'sub', 'summary', 'sup',
+  'table', 'tbody', 'td', 'textarea', 'tfoot', 'th', 'thead', 'time', 'tr', 'track', 'tt',
+  'u', 'ul', 'var', 'video', 'wbr',
 ];
 
+/**
+ * DOMPurify's SVG elements and filter primitives — a status window's icons,
+ * gauges and rings. DOMPurify already leaves out `script`, `foreignObject` (a
+ * door back into HTML), `use`, `animate` and `set` (the `href` tricks), and so
+ * does RisuAI; `style` is lifted out as in HTML. Four names in DOMPurify's list
+ * (`enterkeyhint`, `exportparts`, `inputmode`, `part`) are attributes filed
+ * there by mistake, not elements.
+ */
+const SVG_TAGS = [
+  'svg', 'altGlyph', 'altGlyphDef', 'altGlyphItem', 'animateColor', 'animateMotion', 'animateTransform',
+  'circle', 'clipPath', 'defs', 'desc', 'ellipse', 'filter', 'g', 'glyph', 'glyphRef', 'hkern',
+  'image', 'line', 'linearGradient', 'marker', 'mask', 'metadata', 'mpath', 'path', 'pattern',
+  'polygon', 'polyline', 'radialGradient', 'rect', 'stop', 'switch', 'symbol', 'text', 'textPath',
+  'title', 'tref', 'tspan', 'view', 'vkern',
+  'feBlend', 'feColorMatrix', 'feComponentTransfer', 'feComposite', 'feConvolveMatrix',
+  'feDiffuseLighting', 'feDisplacementMap', 'feDistantLight', 'feDropShadow', 'feFlood',
+  'feFuncA', 'feFuncB', 'feFuncG', 'feFuncR', 'feGaussianBlur', 'feImage', 'feMerge',
+  'feMergeNode', 'feMorphology', 'feOffset', 'fePointLight', 'feSpecularLighting',
+  'feSpotLight', 'feTile', 'feTurbulence',
+];
+
+/**
+ * DOMPurify's MathML. RisuAI adds `semantics` and `annotation` for the TeX
+ * source KaTeX writes beside its formulas; nothing here renders KaTeX, so they
+ * stay out, and so does `annotation-xml`, the one MathML element that takes
+ * HTML inside it.
+ */
+const MATHML_TAGS = [
+  'math', 'menclose', 'merror', 'mfenced', 'mfrac', 'mglyph', 'mi', 'mlabeledtr', 'mmultiscripts',
+  'mn', 'mo', 'mover', 'mpadded', 'mphantom', 'mprescripts', 'mroot', 'mrow', 'ms', 'mspace',
+  'msqrt', 'mstyle', 'msub', 'msubsup', 'msup', 'mtable', 'mtd', 'mtext', 'mtr', 'munder', 'munderover',
+];
+
+const ALLOWED_TAGS = [...HTML_TAGS, ...SVG_TAGS, ...MATHML_TAGS];
+
+/**
+ * DOMPurify's HTML attributes. Left out:
+ *
+ * - `action`, `enctype`, `method`, `novalidate` — no form survives to use them;
+ * - `popover`, `popovertarget`, `popovertargetaction`, `command`, `commandfor`
+ *   — a popover, or a dialog an invoker opens as a modal, is drawn in the top
+ *   layer, above every box the page holds a card's markup in (`.chat-stage`,
+ *   ARCHITECTURE §8.1 떠 있는 것): over the header and the composer, and a modal
+ *   one makes the rest of the page inert, its way out included;
+ * - `srcset` — a list of addresses, none of which an asset macro writes; the
+ *   `src` beside it is the one held to our origin;
+ * - `nonce` — names a script the page might trust, and nothing here is one.
+ */
+const HTML_ATTRIBUTES = [
+  'accept', 'align', 'alt', 'autocapitalize', 'autocomplete', 'autopictureinpicture', 'autoplay',
+  'background', 'bgcolor', 'border', 'capture', 'cellpadding', 'cellspacing', 'checked', 'cite',
+  'class', 'clear', 'color', 'cols', 'colspan', 'controls', 'controlslist', 'coords', 'crossorigin',
+  'datetime', 'decoding', 'default', 'dir', 'disabled', 'disablepictureinpicture',
+  'disableremoteplayback', 'download', 'draggable', 'enterkeyhint', 'exportparts', 'face', 'for',
+  'headers', 'height', 'hidden', 'high', 'href', 'hreflang', 'id', 'inert', 'inputmode', 'integrity',
+  'ismap', 'kind', 'label', 'lang', 'list', 'loading', 'loop', 'low', 'max', 'maxlength', 'media',
+  'min', 'minlength', 'multiple', 'muted', 'name', 'noshade', 'nowrap', 'open', 'optimum', 'part',
+  'pattern', 'placeholder', 'playsinline', 'poster', 'preload', 'pubdate', 'radiogroup', 'readonly',
+  'rel', 'required', 'rev', 'reversed', 'role', 'rows', 'rowspan', 'spellcheck', 'scope', 'selected',
+  'shape', 'size', 'sizes', 'slot', 'span', 'srclang', 'start', 'src', 'step', 'style', 'summary',
+  'tabindex', 'title', 'translate', 'type', 'usemap', 'valign', 'value', 'width', 'wrap', 'xmlns',
+];
+
+/** DOMPurify's SVG attributes, whole. Every one that reads as CSS is held to the CSS rules (`svgAttributeValue`). */
+const SVG_ATTRIBUTES = [
+  'accent-height', 'accumulate', 'additive', 'alignment-baseline', 'amplitude', 'ascent',
+  'attributename', 'attributetype', 'azimuth', 'basefrequency', 'baseline-shift', 'begin', 'bias',
+  'by', 'class', 'clip', 'clippathunits', 'clip-path', 'clip-rule', 'color', 'color-interpolation',
+  'color-interpolation-filters', 'color-profile', 'color-rendering', 'cx', 'cy', 'd', 'dx', 'dy',
+  'diffuseconstant', 'direction', 'display', 'divisor', 'dominant-baseline', 'dur', 'edgemode',
+  'elevation', 'end', 'exponent', 'fill', 'fill-opacity', 'fill-rule', 'filter', 'filterunits',
+  'flood-color', 'flood-opacity', 'font-family', 'font-size', 'font-size-adjust', 'font-stretch',
+  'font-style', 'font-variant', 'font-weight', 'fx', 'fy', 'g1', 'g2', 'glyph-name', 'glyphref',
+  'gradientunits', 'gradienttransform', 'height', 'href', 'id', 'image-rendering', 'in', 'in2',
+  'intercept', 'k', 'k1', 'k2', 'k3', 'k4', 'kerning', 'keypoints', 'keysplines', 'keytimes', 'lang',
+  'lengthadjust', 'letter-spacing', 'kernelmatrix', 'kernelunitlength', 'lighting-color', 'local',
+  'marker-end', 'marker-mid', 'marker-start', 'markerheight', 'markerunits', 'markerwidth',
+  'maskcontentunits', 'maskunits', 'max', 'mask', 'mask-type', 'media', 'method', 'mode', 'min',
+  'name', 'numoctaves', 'offset', 'operator', 'opacity', 'order', 'orient', 'orientation', 'origin',
+  'overflow', 'paint-order', 'path', 'pathlength', 'patterncontentunits', 'patterntransform',
+  'patternunits', 'pointer-events', 'points', 'preservealpha', 'preserveaspectratio',
+  'primitiveunits', 'r', 'rx', 'ry', 'radius', 'refx', 'refy', 'repeatcount', 'repeatdur', 'restart',
+  'result', 'rotate', 'scale', 'seed', 'shape-rendering', 'slope', 'specularconstant',
+  'specularexponent', 'spreadmethod', 'startoffset', 'stddeviation', 'stitchtiles', 'stop-color',
+  'stop-opacity', 'stroke-dasharray', 'stroke-dashoffset', 'stroke-linecap', 'stroke-linejoin',
+  'stroke-miterlimit', 'stroke-opacity', 'stroke', 'stroke-width', 'style', 'surfacescale',
+  'systemlanguage', 'tabindex', 'tablevalues', 'targetx', 'targety', 'transform', 'transform-origin',
+  'text-anchor', 'text-decoration', 'text-orientation', 'text-rendering', 'textlength', 'type', 'u1',
+  'u2', 'unicode', 'values', 'vector-effect', 'viewbox', 'visibility', 'version', 'vert-adv-y',
+  'vert-origin-x', 'vert-origin-y', 'width', 'word-spacing', 'wrap', 'writing-mode',
+  'xchannelselector', 'ychannelselector', 'x', 'x1', 'x2', 'xmlns', 'y', 'y1', 'y2', 'z', 'zoomandpan',
+];
+
+/** DOMPurify's MathML attributes. Its `href` makes no link here (`rewriteElement`). */
+const MATHML_ATTRIBUTES = [
+  'accent', 'accentunder', 'align', 'bevelled', 'close', 'columnalign', 'columnlines',
+  'columnspacing', 'columnspan', 'denomalign', 'depth', 'dir', 'display', 'displaystyle', 'encoding',
+  'fence', 'frame', 'height', 'href', 'id', 'largeop', 'length', 'linethickness', 'lquote', 'lspace',
+  'mathbackground', 'mathcolor', 'mathsize', 'mathvariant', 'maxsize', 'minsize', 'movablelimits',
+  'notation', 'numalign', 'open', 'rowalign', 'rowlines', 'rowspacing', 'rowspan', 'rspace', 'rquote',
+  'scriptlevel', 'scriptminsize', 'scriptsizemultiplier', 'selection', 'separator', 'separators',
+  'stretchy', 'subscriptshift', 'supscriptshift', 'symmetric', 'voffset', 'width', 'xmlns',
+];
+
+/**
+ * DOMPurify's namespaced attributes, less `xml:id`, an id the folding would
+ * not see. `xlink:href` is read as `href` (`rewriteElement`).
+ */
+const XML_ATTRIBUTES = ['xlink:href', 'xlink:title', 'xml:space', 'xmlns:xlink'];
+
+/**
+ * RisuAI's frame attributes (`allow`, `allowfullscreen`, `frameborder`,
+ * `scrolling`) and the two more `rewriteFrame` writes. A card's own `allow`,
+ * `allowfullscreen` and `sandbox` never stand — `rewriteFrame` puts ours in
+ * their place.
+ */
+const FRAME_ATTRIBUTES = ['allow', 'allowfullscreen', 'frameborder', 'scrolling', 'sandbox', 'referrerpolicy'];
+
 const ALLOWED_ATTR = [
-  'class', 'style', 'title', 'alt', 'src', 'href', 'target', 'rel',
-  'colspan', 'rowspan', 'span', 'width', 'height',
-  'value', 'max', 'min', 'low', 'high', 'optimum', 'open', 'type', 'datetime',
-  // `<ol start>` from markdown; `<font color face size>` and `align` from cards.
-  'start', 'color', 'face', 'size', 'align',
-  // The toggles' wiring. `id`, `for` and `name` are folded into our namespace
-  // (`NAMED_ATTRIBUTES`), so they can only ever name the creator's own elements.
-  'id', 'for', 'name', 'checked',
-  'data-shizue-fill',
-  // RisuAI's script buttons, under their own names for the first pass and under
-  // ours after it (`SCRIPT_ATTRIBUTES`).
-  'risu-trigger', 'risu-id', 'risu-btn',
-  'data-shizue-trigger', 'data-shizue-trigger-id', 'data-shizue-btn',
-  // A card's music: RisuAI's player (`{{audio::…}}`, or one the card writes out)
-  // and the background music the chat page plays (`{{bgm::…}}`, `useBackgroundMusic`).
-  'controls', 'autoplay', 'loop', 'muted', 'preload', 'playsinline', 'data-shizue-bgm',
+  ...new Set([
+    ...HTML_ATTRIBUTES, ...SVG_ATTRIBUTES, ...MATHML_ATTRIBUTES, ...XML_ATTRIBUTES, ...FRAME_ATTRIBUTES,
+    // Links leave in a tab of their own (`rewriteElement`).
+    'target',
+    // RisuAI's script buttons, under their own names for the first pass; ours
+    // after it are data attributes (`SCRIPT_ATTRIBUTES`).
+    'risu-trigger', 'risu-id', 'risu-btn',
+  ]),
 ];
 
 /**
@@ -128,19 +270,57 @@ const SCRIPT_ATTRIBUTES: readonly (readonly [string, string])[] = [
 ];
 
 /**
- * The attributes that name an element or a radio group, folded as classes are
- * (`foldClass`): a card's `id="composer"` is `x-shizue-composer`, which no element
- * of the page carries, so a `<label for>` can only flip one of the creator's own
- * inputs, `#id` in a stylesheet can only match one, and a radio `name` can only
- * group with the creator's radios. A card that wants one toggle per message writes
- * `{{chat_index}}` into its ids, as it must in RisuAI, where ids are page-wide too.
+ * The attributes that name an element, a radio group or an image map, folded as
+ * classes are (`foldClass`): a card's `id="composer"` is `x-shizue-composer`,
+ * which no element of the page carries, so `#id` in a stylesheet can only match
+ * one of the creator's own, and a radio `name` can only group with the creator's
+ * radios. A card that wants one toggle per message writes `{{chat_index}}` into
+ * its ids, as it must in RisuAI, where ids are page-wide too.
  */
-const NAMED_ATTRIBUTES = ['id', 'for', 'name'] as const;
+const NAMED_ATTRIBUTES = ['id', 'name'] as const;
 
-/** The only inputs a message may hold: the two a CSS-only toggle is built from. */
-const TOGGLE_TYPES: ReadonlySet<string> = new Set(['checkbox', 'radio']);
+/**
+ * The attributes that point at elements by id, each a list of them: a `<label
+ * for>` can only flip one of the creator's own inputs, an `<input list>` offer
+ * the creator's own options, and an `aria-labelledby` read the creator's own
+ * words, because every id they name is folded the way the ids are.
+ */
+const ID_REFERENCE_ATTRIBUTES = [
+  'for', 'list', 'headers',
+  'aria-activedescendant', 'aria-controls', 'aria-describedby', 'aria-details',
+  'aria-errormessage', 'aria-flowto', 'aria-labelledby', 'aria-owns',
+] as const;
 
-const KEPT_TAGS: ReadonlySet<string> = new Set(ALLOWED_TAGS);
+/**
+ * The button bridge: the data attributes the chat page reads off a click
+ * (`data-shizue-fill`, the script attributes under our names) and the music
+ * marker `useBackgroundMusic` plays (`data-shizue-bgm`). The only `data-shizue-*`
+ * that stand.
+ */
+const BRIDGE_ATTRIBUTES: ReadonlySet<string> = new Set([
+  'data-shizue-fill', 'data-shizue-bgm', ...SCRIPT_ATTRIBUTES.map(([, ours]) => ours),
+]);
+
+/**
+ * The data attributes that are the app's own, which a card's `data-*` may not
+ * be: our namespace (`data-shizue-member` and `data-shizue-spoken` say whose
+ * scripts a button in a row runs), and the names the app finds its own elements
+ * by or styles them by. App code that looks an element up by a data attribute
+ * from inside a message names it `data-shizue-*`, or adds it here.
+ */
+const APP_DATA_PREFIX = 'data-shizue-';
+const APP_DATA_ATTRIBUTES: ReadonlySet<string> = new Set([
+  'data-testid', 'data-chat-image', 'data-image-group', 'data-message-list', 'data-hide-icons', 'data-dialogue',
+]);
+
+/**
+ * Whether an element holds the rest of a block open when left unclosed
+ * (`lib/markdown/html.ts`): one it keeps in HTML. An SVG or MathML element is
+ * only ever inside its `<svg>` or `<math>`, which holds the block open itself;
+ * outside one, the parser drops it, so a model's `<Text>` or `<Line>` is no
+ * element at all.
+ */
+const KEPT_TAGS: ReadonlySet<string> = new Set([...HTML_TAGS, 'svg', 'math']);
 
 /** Whether an element survives the whitelist — anything else is unwrapped, its text kept. */
 export const keepsElement = (tag: string): boolean => KEPT_TAGS.has(tag.toLowerCase());
@@ -148,12 +328,14 @@ export const keepsElement = (tag: string): boolean => KEPT_TAGS.has(tag.toLowerC
 const PURIFY_CONFIG = {
   ALLOWED_TAGS,
   ALLOWED_ATTR,
-  // Only the data attributes the button bridge reads get through.
-  ALLOW_DATA_ATTR: false,
+  // RisuAI's: a card's `data-*` and `aria-*`, which its stylesheet selects on.
+  // The app's own come off in the DOM pass (`APP_DATA_ATTRIBUTES`).
+  ALLOW_DATA_ATTR: true,
+  ALLOW_ARIA_ATTR: true,
   ALLOW_UNKNOWN_PROTOCOLS: false,
-  // Their values are free text (a message to put in the composer, a trigger's
-  // name), not URLs, so they must not be measured against the URI whitelist.
-  ADD_URI_SAFE_ATTR: ['data-shizue-fill', ...SCRIPT_ATTRIBUTES.flat()],
+  // Their values are free text (a trigger's name, a frame's permissions), not
+  // URLs, so they must not be measured against the URI whitelist.
+  ADD_URI_SAFE_ATTR: [...SCRIPT_ATTRIBUTES.flat(), 'allow', 'sandbox', 'referrerpolicy'],
   RETURN_DOM: false as const,
   RETURN_DOM_FRAGMENT: false as const,
 };
@@ -266,16 +448,17 @@ const ALLOWED_PROPERTIES = new Set([
   // Ivy, The Vampire Maid draws its portrait through `multiply` and `screen`
   // layers of solid colour, which without them hide it. These were refused for
   // the 2016 pixel theft, which timed a blend over a cross-origin frame from a
-  // script; a message has neither — no frame survives the whitelist, every
-  // picture is our own origin, and no script of the card's runs on the page —
-  // and everything they mix stays inside the box that clips the message.
+  // script; a message has no such script — the one frame is YouTube's player,
+  // which shows nothing of the reader's, every picture is our own origin, and
+  // no script of the card's runs on the page — and everything they mix stays
+  // inside the box that clips the message.
   'mix-blend-mode', 'isolation',
   // A blur, a tint, frosted glass behind a panel: the box's own pixels, or the
-  // message's under it, filtered where they are drawn. Functions only — a
-  // `url()` here would name an SVG filter, and is refused (`NO_URL_PROPERTIES`).
+  // message's under it, filtered where they are drawn. A `url()` here names an
+  // SVG filter, and only one of the card's own (`REFERENCE_PROPERTIES`).
   'filter', 'backdrop-filter',
-  // A portrait cut to a circle or a polygon. Shapes only: a `url()` would name
-  // an SVG clip path (`NO_URL_PROPERTIES`). Clipping only ever hides.
+  // A portrait cut to a circle or a polygon, or to a clip path of the card's
+  // own SVG (`REFERENCE_PROPERTIES`). Clipping only ever hides.
   'clip-path',
   // Flip cards and tilted panels: where the 3-D transforms already allowed are
   // seen from, and whether a turned face shows.
@@ -284,7 +467,7 @@ const ALLOWED_PROPERTIES = new Set([
   // pointer over a button, a decoration that lets clicks through. Inside the
   // message only, and a background's boxes lie under the conversation, which
   // takes the clicks. A cursor is a keyword — a picture of one (`url()`) could
-  // stand in for the real pointer, and is refused (`NO_URL_PROPERTIES`).
+  // stand in for the real pointer, and is refused (`isSafeDeclaration`).
   'cursor', 'pointer-events', 'user-select', 'touch-action',
   // A checkbox toggle drawn as the card's own, columns of text, vertical
   // Japanese, a box that is its own layout and paint island, scaled, or that
@@ -294,27 +477,39 @@ const ALLOWED_PROPERTIES = new Set([
   'line-clamp', 'box-orient',
   // Its own scrolling boxes' bars and their behaviour.
   'scroll-behavior', 'scrollbar-width', 'scrollbar-color', 'scrollbar-gutter',
+  // An SVG's painting — a shape's fill, a gradient's stops, a filter's flood,
+  // where its text sits — and its geometry, the ring a gauge draws with `r` and
+  // a dash offset. Pixels only; a `url()` in the painting ones may name nothing
+  // but the card's own gradient, pattern or marker (`REFERENCE_PROPERTIES`).
+  'fill', 'fill-opacity', 'fill-rule', 'stop-color', 'stop-opacity', 'flood-color', 'flood-opacity',
+  'lighting-color', 'paint-order', 'vector-effect', 'shape-rendering', 'dominant-baseline',
+  'alignment-baseline', 'baseline-shift', 'color-interpolation', 'color-interpolation-filters',
+  'cx', 'cy', 'r', 'rx', 'ry', 'x', 'y', 'd',
 ]);
 
 /**
  * Prefix families of the same. `border` covers `border-radius`, `border-color`, …;
  * `mask` the gradient fades a card softens a picture's edge with (`url()`s
- * refused, `NO_URL_PROPERTIES`); `outline` a focus ring of the card's own;
- * `column-` the rules between its columns; `overscroll-` its scrolling boxes'.
+ * only to its own SVG, `REFERENCE_PROPERTIES`); `outline` a focus ring of the
+ * card's own; `column-` the rules between its columns; `overscroll-` its
+ * scrolling boxes'; `stroke` an SVG line's width, dashes and ends; `marker` the
+ * arrowheads on one.
  */
 const ALLOWED_PROPERTY_PREFIXES = [
   'background-', 'border', 'margin', 'padding', 'min-', 'max-',
   'font', 'text-', 'list-style', 'flex', 'grid', 'align-', 'justify-', 'place-',
   'overflow', 'transition-', 'animation-', 'inset-',
-  'mask', 'outline', 'column-', 'overscroll-',
+  'mask', 'outline', 'column-', 'overscroll-', 'stroke', 'marker',
 ];
 
 /**
- * The properties a `url()` may not appear in at all, whatever origin it names:
- * there it is not a picture but a reference to an SVG element (a filter, a clip
- * path, a mask) or a picture drawn as the reader's own pointer.
+ * The properties where a `url()` is not a picture but a reference to an SVG
+ * element — a filter, a clip path, a mask, a gradient or pattern to paint
+ * with, a marker. There it may only be a fragment, `url(#glow)`, which names an
+ * element by id, and since every id is folded (`foldReferences`), only one of
+ * the card's own: never a file, whatever its origin, and never the page's.
  */
-const NO_URL_PROPERTIES = /^(?:filter|backdrop-filter|clip-path|mask.*|cursor)$/;
+const REFERENCE_PROPERTIES = /^(?:filter|backdrop-filter|clip-path|mask.*|fill|stroke|marker.*)$/;
 
 /**
  * The name a declaration is judged by: its own, or — for a `-webkit-` one — the
@@ -411,10 +606,28 @@ interface Scope {
 function scopeSelector(selector: string, scope: Scope): string | null {
   const trimmed = selector.trim();
   if (!trimmed || SELECTOR_FORBIDDEN.test(trimmed) || SELECTOR_LEADING_COMBINATOR.test(trimmed)) return null;
-  const renamed = trimmed
-    .replace(SELECTOR_CLASS, (_match, name: string) => `.${foldClass(name)}`)
-    .replace(SELECTOR_ID, (_match, name: string) => `#${foldClass(name)}`);
-  return `${scope.selector} ${renamed}`;
+  const rename = (text: string): string =>
+    text
+      .replace(SELECTOR_CLASS, (_match, name: string) => `.${foldClass(name)}`)
+      .replace(SELECTOR_ID, (_match, name: string) => `#${foldClass(name)}`);
+  return `${scope.selector} ${outsideAttributeSelectors(trimmed, rename)}`;
+}
+
+/**
+ * A selector with `rename` applied to everything but its attribute selectors.
+ * What `[data-hp="0.5"]` holds is the card's value, not a class: folded, its dot
+ * would have eaten the closing quote and taken the rule with it.
+ */
+function outsideAttributeSelectors(selector: string, rename: (text: string) => string): string {
+  let out = '';
+  let at = 0;
+  for (let open = selector.indexOf('[', at); open >= 0; open = selector.indexOf('[', at)) {
+    const close = selector.indexOf(']', open);
+    if (close < 0) break;
+    out += rename(selector.slice(at, open)) + selector.slice(open, close + 1);
+    at = close + 1;
+  }
+  return out + rename(selector.slice(at));
 }
 
 /**
@@ -423,11 +636,12 @@ function scopeSelector(selector: string, scope: Scope): string | null {
  *
  * The survivors of the allowlists still need a value check. `position` is
  * allowed but `sticky` is not (`ALLOWED_POSITIONS`). `url()` is allowed but
- * only pointing at us, which is what an asset macro produces — and nowhere at
- * all in a property where it names something other than a picture
- * (`NO_URL_PROPERTIES`). And a value that leaves a bracket or a string open is
- * dropped as the browser would read it: open, it would swallow the declarations
- * and rules after it (`isBalanced`).
+ * only pointing at us, which is what an asset macro produces — only at one of
+ * the card's own SVG elements where it names one rather than a picture
+ * (`REFERENCE_PROPERTIES`), and nowhere at all in a `cursor`, where a picture
+ * would stand in for the reader's own pointer. And a value that leaves a
+ * bracket or a string open is dropped as the browser would read it: open, it
+ * would swallow the declarations and rules after it (`isBalanced`).
  */
 function isSafeDeclaration(property: string, value: string): boolean {
   const name = canonicalProperty(normalizeCss(property).trim().toLowerCase());
@@ -437,7 +651,8 @@ function isSafeDeclaration(property: string, value: string): boolean {
   if (!isBalanced(value)) return false;
   if (!callsOnly(text, ALLOWED_FUNCTIONS)) return false;
   if (name === 'position' && !ALLOWED_POSITIONS.has(text.toLowerCase())) return false;
-  if (NO_URL_PROPERTIES.test(name) && /url\(/i.test(text)) return false;
+  if (name === 'cursor' && /url\(/i.test(text)) return false;
+  if (REFERENCE_PROPERTIES.test(name)) return urlsAreFragments(text);
   return urlsAreOurs(text);
 }
 
@@ -452,8 +667,8 @@ function callsOnly(text: string, allowed: ReadonlySet<string>): boolean {
   return true;
 }
 
-/** Whether every `url()` in a normalized value is one the browser reads as one address, on our origin. */
-function urlsAreOurs(text: string): boolean {
+/** Whether every `url()` in a normalized value is one the browser reads as one address that `accept` takes. */
+function urlsAre(text: string, accept: (address: string) => boolean): boolean {
   const opened = text.match(/url\(/gi)?.length ?? 0;
   if (opened === 0) return true;
   const urls = [...text.matchAll(URL_FUNCTION)];
@@ -462,9 +677,30 @@ function urlsAreOurs(text: string): boolean {
   if (urls.length !== opened) return false;
   return urls.every((match) => {
     const body = unquoteUrl(match[1]!);
-    return body !== null && isSameOriginUrl(body);
+    return body !== null && accept(body);
   });
 }
+
+/** Whether every `url()` in a normalized value is on our origin. */
+const urlsAreOurs = (text: string): boolean => urlsAre(text, isSameOriginUrl);
+
+/** A fragment: an element of this page by its id, which the browser reads as such only when it starts the address. */
+const FRAGMENT = /^#[^\s#\\]*$/;
+
+/** Whether every `url()` in a normalized value names an element by id — never a file. */
+const urlsAreFragments = (text: string): boolean => urlsAre(text, (address) => FRAGMENT.test(address));
+
+/** A `url(#id)` as a value spells it, quoted or not. Linear: no part of it can take what the next part matches. */
+const FRAGMENT_URL = /url\(\s*(['"]?)#([^\s'"()\\]*)\1\s*\)/gi;
+
+/**
+ * A value with every `url(#id)` in it pointed at the id as the DOM pass folds
+ * ids (`foldClass`), so a card's `fill: url(#glow)` still finds its own
+ * `<linearGradient id="glow">`, and can find nothing of the page's. One spelled
+ * with escapes is left as it is, and names nothing.
+ */
+const foldReferences = (value: string): string =>
+  value.replace(FRAGMENT_URL, (_match, _quote, id: string) => `url(#${foldClass(id)})`);
 
 /**
  * The address inside a `url()`, or null when the quoting is not something the
@@ -609,8 +845,9 @@ function renameFamilies(text: string, original: string, names: string): string {
 
 /**
  * A declaration as it may stand — its value rewritten where it names an
- * animation or a font family (`renameAnimations`, `renameFamilies`) — or null
- * where it may not stand at all (`isSafeDeclaration`).
+ * animation, a font family or an element by id (`renameAnimations`,
+ * `renameFamilies`, `foldReferences`) — or null where it may not stand at all
+ * (`isSafeDeclaration`).
  */
 function rewriteDeclaration(property: string, value: string, scope: Scope): string | null {
   if (!isSafeDeclaration(property, value)) return null;
@@ -620,7 +857,7 @@ function rewriteDeclaration(property: string, value: string, scope: Scope): stri
     return renameAnimations(normalizeCss(value).trim(), name === 'animation', scope.names);
   }
   if (name === 'font-family') return renameFamilies(normalizeCss(value).trim(), value, scope.names);
-  return value;
+  return foldReferences(value);
 }
 
 function rewriteDeclarations(declarations: readonly CssDeclarationAST[] | undefined, scope: Scope): CssDeclarationAST[] {
@@ -994,15 +1231,132 @@ function rewriteInlineStyle(css: string): string {
 /** How much of a refused destination is shown. Long enough to read, short enough not to reflow. */
 const DESTINATION_LIMIT = 120;
 
-function rewriteElement(element: Element): void {
-  const tag = element.tagName.toLowerCase();
+const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
 
-  // Read the taint before it is stripped: this is the whole question for an `<a>`,
+/** YouTube's player, the one frame RisuAI draws (`https://www.youtube.com/embed/…`), and its cookieless twin. */
+const FRAME_HOSTS: ReadonlySet<string> = new Set(['www.youtube.com', 'www.youtube-nocookie.com']);
+/** A video's or a playlist's player (`/embed/videoseries?list=…`), and no other page of the host. */
+const FRAME_PATH = /^\/embed\/[A-Za-z0-9_-]{1,64}$/;
+/**
+ * What the player may do: run its own script under its own origin — which is
+ * YouTube's, never ours, the host being checked — and play: autoplay, protected
+ * video, full screen, picture in picture. No popup, no form, no navigating the
+ * page, no camera, microphone or anything else a card might ask for.
+ */
+const FRAME_SANDBOX = 'allow-scripts allow-same-origin';
+const FRAME_ALLOW = 'autoplay; encrypted-media; fullscreen; picture-in-picture';
+
+/**
+ * The address of the YouTube player a frame names, as the browser will load it,
+ * or null for any other: decided on the parsed URL — `https:`, the host itself
+ * with no port or credentials, the player's path after `..` and its encodings are
+ * resolved — never on how the address starts.
+ */
+function frameUrl(raw: string): string | null {
+  const value = raw.trim();
+  if (!value || URL_FORBIDDEN_CHARS.test(value) || URL_FORBIDDEN_ENCODED.test(value)) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || !FRAME_HOSTS.has(url.hostname) || url.port || url.username || url.password) {
+      return null;
+    }
+    return FRAME_PATH.test(url.pathname) ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A YouTube player, or nothing: any other frame is removed, and so is one in a
+ * block still being written (`live`), whose markup is drawn again on every token
+ * and would load the player again with it. What it may do is ours to say, never
+ * the card's (`FRAME_SANDBOX`, `FRAME_ALLOW`); the page's policy names the same
+ * two hosts (`frame-src`). It sends our origin as its referrer, as every request
+ * of the page does: the player refuses to play without one.
+ */
+function rewriteFrame(element: Element, live: boolean): void {
+  const src = frameUrl(element.getAttribute('src') ?? '');
+  if (src === null || live) {
+    element.remove();
+    return;
+  }
+  element.removeAttribute('allowfullscreen');
+  element.setAttribute('src', src);
+  element.setAttribute('sandbox', FRAME_SANDBOX);
+  element.setAttribute('allow', FRAME_ALLOW);
+  element.setAttribute('referrerpolicy', 'strict-origin-when-cross-origin');
+  element.setAttribute('loading', 'lazy');
+}
+
+/** Ids, separated by whitespace, each folded as an `id` is. Empty when none is left. */
+const foldIds = (value: string): string =>
+  value
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(foldClass)
+    .filter((id) => id !== CLASS_PREFIX)
+    .join(' ');
+
+/** The SVG attributes that are not read as CSS: names, addresses and the style, which have rules of their own. */
+const SVG_PLAIN_ATTRIBUTES: ReadonlySet<string> = new Set(['id', 'class', 'name', 'style', 'href']);
+
+/**
+ * An SVG attribute's value as it may stand, or null. Its presentation
+ * attributes — `fill`, `filter`, `clip-path`, `mask`, `transform` — are read as
+ * CSS, escapes and all, so they are held to the stylesheet's rules: only the
+ * functions a style may call, and a `url()` only to one of the card's own
+ * elements, pointed at its folded id (`foldReferences`). A value with no
+ * parenthesis calls nothing and stands as written.
+ */
+function svgAttributeValue(value: string): string | null {
+  if (!value.includes('(')) return value;
+  const text = normalizeCss(value);
+  if (!callsOnly(text, ALLOWED_FUNCTIONS) || !urlsAreFragments(text)) return null;
+  return foldReferences(text);
+}
+
+/**
+ * Where an SVG element other than a link points (`href`): one of the card's own
+ * elements by its folded id — a gradient another inherits from, a text's path, a
+ * motion's — or, for a picture (`<image>`, `<feImage>`), a file of our own
+ * origin as an `<img>` may load. Anything else names a file elsewhere and goes:
+ * the attribute, or the picture with it. Answers whether the element went.
+ */
+function rewriteSvgReference(element: Element, tag: string, href: string): boolean {
+  const value = href.trim();
+  if (value.startsWith('#')) {
+    const id = foldClass(value.slice(1));
+    if (id === CLASS_PREFIX) element.removeAttribute('href');
+    else element.setAttribute('href', `#${id}`);
+    return false;
+  }
+  if ((tag === 'image' || tag === 'feimage') && !isSameOriginUrl(value)) {
+    element.remove();
+    return true;
+  }
+  if (tag !== 'image' && tag !== 'feimage') element.removeAttribute('href');
+  return false;
+}
+
+function rewriteElement(element: Element, live: boolean): void {
+  const tag = element.tagName.toLowerCase();
+  const svg = element.namespaceURI === SVG_NAMESPACE;
+  const link = tag === 'a' || tag === 'area';
+
+  // SVG's old spelling of an address, read as the one SVG 2 and every browser
+  // now read — so the rules below, the link's included, see the one address.
+  const legacy = element.getAttribute('xlink:href');
+  if (legacy !== null) {
+    element.removeAttribute('xlink:href');
+    if (!element.hasAttribute('href')) element.setAttribute('href', legacy);
+  }
+
+  // Read the taint before it is stripped: this is the whole question for a link,
   // and it can only be asked of the finished value. Everywhere else the markers are
   // bookkeeping that has to come off before anything measures the string — a
   // control character inside a url would fail `isSameOriginUrl` on its own, and
   // inside a `style` it would fail the CSS parse.
-  const taintedHref = tag === 'a' && isTainted(element.getAttribute('href') ?? '');
+  const taintedHref = link && isTainted(element.getAttribute('href') ?? '');
   for (const attribute of Array.from(element.attributes)) {
     if (isTainted(attribute.value)) {
       element.setAttribute(attribute.name, stripTaint(attribute.value));
@@ -1014,6 +1368,20 @@ function rewriteElement(element: Element): void {
     if (value === null) continue;
     element.removeAttribute(risu);
     element.setAttribute(ours, value);
+  }
+
+  // A card's `data-*` stands for its stylesheet; the app's own do not
+  // (`APP_DATA_ATTRIBUTES`), nor does any attribute an SVG reads as CSS and the
+  // CSS rules refuse.
+  for (const attribute of Array.from(element.attributes)) {
+    const name = attribute.name.toLowerCase();
+    if (name.startsWith(APP_DATA_PREFIX) ? !BRIDGE_ATTRIBUTES.has(name) : APP_DATA_ATTRIBUTES.has(name)) {
+      element.removeAttribute(attribute.name);
+    } else if (svg && !SVG_PLAIN_ATTRIBUTES.has(name) && !name.startsWith('data-') && !name.startsWith('aria-')) {
+      const value = svgAttributeValue(attribute.value);
+      if (value === null) element.removeAttribute(attribute.name);
+      else if (value !== attribute.value) element.setAttribute(attribute.name, value);
+    }
   }
 
   const classes = element.getAttribute('class');
@@ -1032,6 +1400,20 @@ function rewriteElement(element: Element): void {
     if (folded === CLASS_PREFIX) element.removeAttribute(attribute);
     else element.setAttribute(attribute, folded);
   }
+  for (const attribute of ID_REFERENCE_ATTRIBUTES) {
+    const value = element.getAttribute(attribute);
+    if (value === null) continue;
+    const folded = foldIds(value);
+    if (folded) element.setAttribute(attribute, folded);
+    else element.removeAttribute(attribute);
+  }
+  // An image map is named as a fragment (`usemap="#menu"`) and its `<map name>` folded.
+  const usemap = element.getAttribute('usemap');
+  if (usemap !== null) {
+    const name = foldClass(usemap.trim().replace(/^#/, ''));
+    if (name === CLASS_PREFIX) element.removeAttribute('usemap');
+    else element.setAttribute('usemap', `#${name}`);
+  }
 
   const style = element.getAttribute('style');
   if (style !== null) {
@@ -1040,7 +1422,7 @@ function rewriteElement(element: Element): void {
     else element.removeAttribute('style');
   }
 
-  if (tag === 'a') {
+  if (link) {
     const href = element.getAttribute('href') ?? '';
     const external = isExternalUrl(href);
     if (taintedHref) {
@@ -1069,32 +1451,51 @@ function rewriteElement(element: Element): void {
     return;
   }
 
+  // Only a link goes anywhere: an SVG element's `href` names one of its own
+  // (`rewriteSvgReference`), and a MathML one's would make a link the rules
+  // above never saw.
+  const href = element.getAttribute('href');
+  if (href !== null) {
+    if (!svg) element.removeAttribute('href');
+    else if (rewriteSvgReference(element, tag, href)) return;
+  }
+
+  if (tag === 'iframe') {
+    rewriteFrame(element, live);
+    return;
+  }
+
   if (tag === 'img') {
     if (!isSameOriginUrl(element.getAttribute('src') ?? '')) element.remove();
     return;
   }
 
-  // Music and video load as a picture does, from our own origin or not at all.
-  // A player may name its file on itself or on the `<source>` inside it, so an
-  // absent `src` is no reason to drop it; the background music's marker is held
-  // to the same test.
-  if (tag === 'audio' || tag === 'video' || tag === 'source') {
-    const src = element.getAttribute('src');
-    if (src !== null && !isSameOriginUrl(src)) element.remove();
+  // Everything else that loads a file loads as a picture does, from our own
+  // origin or not at all: music and video, their `<source>` and `<track>`, an
+  // image button. A player may name its file on itself or on the `<source>`
+  // inside it, so an absent `src` is no reason to drop it. A video's poster and
+  // a table's old `background` picture are held to the same test, and so is the
+  // background music's marker.
+  const src = element.getAttribute('src');
+  if (src !== null && !isSameOriginUrl(src)) {
+    element.remove();
+    return;
   }
-  const bgm = element.getAttribute('data-shizue-bgm');
-  if (bgm !== null && !isSameOriginUrl(bgm)) element.removeAttribute('data-shizue-bgm');
+  for (const attribute of ['poster', 'background', 'data-shizue-bgm']) {
+    const value = element.getAttribute(attribute);
+    if (value !== null && !isSameOriginUrl(value)) element.removeAttribute(attribute);
+  }
 
-  // A checkbox or a radio, or nothing: a text field would take the reader's
-  // typing, and an image input loads its `src` like an `<img>` unchecked.
+  // Any kind of input, as RisuAI keeps them: a text field, a slider, a picker.
+  // None has a form to submit (`HTML_TAGS`), and nothing of the app reads what
+  // is typed into one.
   if (tag === 'input') {
-    const type = (element.getAttribute('type') ?? '').trim().toLowerCase();
-    if (TOGGLE_TYPES.has(type)) element.setAttribute('type', type);
-    else element.remove();
+    const type = element.getAttribute('type');
+    if (type !== null) element.setAttribute('type', type.trim().toLowerCase());
     return;
   }
 
-  // A button never submits: forms cannot survive the whitelist, and the chat page
+  // A button never submits: no form survives the whitelist, and the chat page
   // is the only thing that reads `data-shizue-fill` and the script attributes.
   if (tag === 'button') element.setAttribute('type', 'button');
 }
@@ -1107,9 +1508,10 @@ const STYLE_BLOCK = /<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi;
  * Returns '' when the markup cannot be processed — including on the server, where
  * there is no DOM and therefore no way to sanitize anything. With `member` its
  * stylesheets reach only that member's message rows (`MEMBER_ATTRIBUTE`); a
- * `member` that is not a member id sanitizes to nothing.
+ * `member` that is not a member id sanitizes to nothing. `live` is markup still
+ * being written, drawn again on every token: it holds no frame (`rewriteFrame`).
  */
-export function sanitizeCustomHtml(html: string, options: { member?: string } = {}): string {
+export function sanitizeCustomHtml(html: string, options: { member?: string; live?: boolean } = {}): string {
   if (!html) return '';
   if (options.member !== undefined && !MEMBER_ID.test(options.member)) return '';
   const member = options.member?.toLowerCase();
@@ -1147,7 +1549,7 @@ export function sanitizeCustomHtml(html: string, options: { member?: string } = 
       if (node.nodeValue && isTainted(node.nodeValue)) node.nodeValue = stripTaint(node.nodeValue);
     }
     for (const element of Array.from(holder.content.querySelectorAll('*'))) {
-      rewriteElement(element);
+      rewriteElement(element, options.live === true);
     }
 
     const body = DOMPurify.sanitize(holder.innerHTML, PURIFY_CONFIG);

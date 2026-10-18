@@ -76,7 +76,7 @@ import {
   type RoundRequest,
 } from '@/lib/groupRound';
 import { reconcileSend } from '@/lib/reconcile';
-import { sanitizeCustomHtml } from '@/lib/sanitizeHtml';
+import { MESSAGE_SCOPE_CLASS, sanitizeCustomHtml } from '@/lib/sanitizeHtml';
 import { streamGeneration } from '@/lib/sse';
 import { loadWholeBranch } from '@/lib/scripts/branch';
 import { readEmbeddingModel } from '@/lib/scripts/embeddingModels';
@@ -896,8 +896,10 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     if (!cardOverlays.open) return;
     const onKey = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape' || event.defaultPrevented) return;
-      // A dialog or a sheet of ours that is open takes its own Esc.
-      if ((event.target as Element | null)?.closest?.('[role="dialog"], dialog')) return;
+      // A dialog or a sheet of ours that is open takes its own Esc — not a card's,
+      // which its markup may call one, and which this Esc is the way out of.
+      const dialog = (event.target as Element | null)?.closest?.('[role="dialog"], dialog');
+      if (dialog && !dialog.closest(`.${MESSAGE_SCOPE_CLASS}`)) return;
       event.preventDefault();
       closeCardOverlays();
     };

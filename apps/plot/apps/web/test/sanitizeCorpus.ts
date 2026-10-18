@@ -146,6 +146,26 @@ export const CORPUS: CorpusCase[] = [
 <hr>
 <pre class="raw"><code>hp=72 mp=18</code></pre>`,
   },
+  {
+    name: 'svg-hud',
+    about: 'A RisuAI HUD: an SVG ring painted with its own gradient, a data-* mood its sheet selects on, a dropdown and a slider.',
+    html: `<style>
+.hud { display: flex; gap: 8px; align-items: center; }
+.hud[data-mood="tense"] .label { color: #f87171; }
+.hud .ring .fill { fill: none; stroke: url(#hud-grad); stroke-width: 4; stroke-linecap: round; stroke-dasharray: 100; stroke-dashoffset: 28; }
+.hud select { background: #1b1b21; color: #ecebef; border: 1px solid #3a3a44; border-radius: 6px; }
+</style>
+<div class="hud" data-mood="tense" role="group" aria-label="루미의 상태">
+  <svg class="ring" viewBox="0 0 36 36" width="36" height="36" aria-hidden="true">
+    <defs><linearGradient id="hud-grad" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#7c3aed"/><stop offset="100%" stop-color="#d8b4fe"/></linearGradient></defs>
+    <circle cx="18" cy="18" r="16" fill="none" stroke="#2a2a32" stroke-width="4"/>
+    <circle class="fill" cx="18" cy="18" r="16" transform="rotate(-90 18 18)"/>
+  </svg>
+  <span class="label">HP 72</span>
+  <select name="move"><option value="rest" selected>쉰다</option><option value="go">나간다</option></select>
+  <input type="range" min="0" max="100" value="72" aria-label="음량">
+</div>`,
+  },
 ];
 
 /**
@@ -330,4 +350,39 @@ export const PINNED: Record<string, string> = {
 <ul class="x-shizue-items"><li>우산 <mark>1</mark></li><li>등불 <s>2</s> <small>(젖음)</small></li></ul>
 <hr>
 <pre class="x-shizue-raw"><code>hp=72 mp=18</code></pre>`,
+  'svg-hud': `<style>.shizue-msg .x-shizue-hud {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.shizue-msg .x-shizue-hud[data-mood="tense"] .x-shizue-label {
+  color: #f87171;
+}
+
+.shizue-msg .x-shizue-hud .x-shizue-ring .x-shizue-fill {
+  fill: none;
+  stroke: url(#x-shizue-hud-grad);
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-dasharray: 100;
+  stroke-dashoffset: 28;
+}
+
+.shizue-msg .x-shizue-hud select {
+  background: #1b1b21;
+  color: #ecebef;
+  border: 1px solid #3a3a44;
+  border-radius: 6px;
+}</style>
+<div class="x-shizue-hud" data-mood="tense" role="group" aria-label="루미의 상태">
+  <svg class="x-shizue-ring" viewBox="0 0 36 36" width="36" height="36" aria-hidden="true">
+    <defs><linearGradient id="x-shizue-hud-grad" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#7c3aed"></stop><stop offset="100%" stop-color="#d8b4fe"></stop></linearGradient></defs>
+    <circle cx="18" cy="18" r="16" fill="none" stroke="#2a2a32" stroke-width="4"></circle>
+    <circle class="x-shizue-fill" cx="18" cy="18" r="16" transform="rotate(-90 18 18)"></circle>
+  </svg>
+  <span class="x-shizue-label">HP 72</span>
+  <select name="x-shizue-move"><option value="rest" selected="">쉰다</option><option value="go">나간다</option></select>
+  <input type="range" min="0" max="100" value="72" aria-label="음량">
+</div>`,
 };

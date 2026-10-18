@@ -223,6 +223,13 @@ const FILE_TYPE = /^(?:image\/|audio\/|font\/|application\/(?:font-|x-font-|vnd\
 const mediaType = (contentType: string): string => contentType.split(';')[0]!.trim().toLowerCase();
 
 /**
+ * YouTube's player, the one frame a card may draw from another host (the web
+ * sanitizer's `rewriteFrame`): a page the reader's browser shows, not a file to
+ * bring in, so it is neither fetched nor counted as a miss.
+ */
+const PLAYER_ADDRESS = /^(?:https?:)?\/\/www\.youtube(?:-nocookie)?\.com\/embed\//i;
+
+/**
  * The comment an inlined stylesheet opens with: where it came from, for the
  * creator reading their sheet, and how a later run sees it is already there.
  */
@@ -477,6 +484,7 @@ async function gather(
     drawn.push(field.text);
     if (field.stylesheet && field.text.search(ASSET_ADDRESS_MACRO) >= 0) addressed = true;
     for (const ref of findExternal(field.text)) {
+      if (ref.kind === 'src' && PLAYER_ADDRESS.test(ref.address.trim())) continue;
       if (ref.kind === 'import') {
         const url = ref.url;
         if (url) imports.set(url, imports.get(url) ?? field.unit);
