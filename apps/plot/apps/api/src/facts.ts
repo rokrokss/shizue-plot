@@ -301,8 +301,9 @@ export async function extractFacts(deps: AppDeps, embedder: Embedder, input: Ext
         .from(chatSummaries)
         .where(eq(chatSummaries.id, input.summary.id));
       if (!summary) return;
-      // A millisecond apart, so the extraction's order is the order they are listed and sent in.
-      const at = Date.now();
+      // A millisecond apart, so the extraction's order is the order they are listed
+      // and sent in — by the database's clock, the column's default, as an app
+      // clock behind it would list them ahead of facts written before them.
       const rows =
         written.length === 0
           ? []
@@ -310,7 +311,7 @@ export async function extractFacts(deps: AppDeps, embedder: Embedder, input: Ext
               .insert(memories)
               .values(
                 written.map((fact, index) => ({
-                  createdAt: new Date(at + index),
+                  createdAt: sql`now() + ${`${index} milliseconds`}::interval`,
                   userId: input.chat.userId,
                   plotId: input.chat.plotId,
                   chatId: input.chat.id,

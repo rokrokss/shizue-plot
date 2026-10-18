@@ -8965,6 +8965,10 @@ describe('memory', () => {
       await db.update(chatSummaries).set({ turnFrom: 2, turnTo: 3 }).where(eq(chatSummaries.id, back.id));
 
       const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+      // The app's clock a minute behind the database's, as on another machine
+      // (or as Docker's drifts): the facts must still come in the order written.
+      const appClock = Date.now;
+      const behind = vi.spyOn(Date, 'now').mockImplementation(() => appClock() - 60_000);
       try {
         await extractFacts(harness.deps, embedder, {
           ...(await extractionSource(chatId, ids.slice(3, 6))),
@@ -8978,6 +8982,7 @@ describe('memory', () => {
           `[facts] chat ${chatId}: 1 added, 1 updated, 1 invalidated of 3 shown, 1 rejected, 0 ended later`,
         );
       } finally {
+        behind.mockRestore();
         log.mockRestore();
       }
       // Shown the branch's facts from before it, numbered, ahead of the transcript.
