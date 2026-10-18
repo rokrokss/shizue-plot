@@ -115,8 +115,14 @@ export interface CbsBlock {
 /** A template strict parsing refuses. Lenient parsing never throws. */
 export class CbsSyntaxError extends Error {}
 
-/** Blocks inside blocks. One more is malformed. */
-export const MAX_CBS_BLOCK_DEPTH = 8;
+/**
+ * Blocks inside blocks. One more is malformed. RisuAI's parser has no such cap
+ * (only its call stack of 20, for functions); presets nest toggle and model
+ * conditions far deeper than a card would — the owner's "소악마" preset 39
+ * levels, whose conditions all went to the model unread at the old 8. This
+ * one only keeps a hostile template from exhausting the stack.
+ */
+export const MAX_CBS_BLOCK_DEPTH = 256;
 /** Macros inside macro arguments — real cards reach six or seven. */
 const MAX_MACRO_DEPTH = 16;
 

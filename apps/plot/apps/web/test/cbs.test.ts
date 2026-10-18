@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { pickHashRand } from '@shizue/core/cbs';
+import { MAX_CBS_BLOCK_DEPTH, pickHashRand } from '@shizue/core/cbs';
 import { renderProse, renderProseButtons, renderTemplate, RenderBudgetExhausted, type CbsContext } from '../src/lib/cbs';
 import { TAINT, stripTaint } from '../src/lib/taint';
 
@@ -452,11 +452,11 @@ describe('malformed templates', () => {
   });
 
   it('caps nesting so a pathological template cannot blow up the render', () => {
-    const open = '{{#if 1}}'.repeat(8);
-    const close = '{{/if}}'.repeat(8);
+    const open = '{{#if 1}}'.repeat(MAX_CBS_BLOCK_DEPTH);
+    const close = '{{/if}}'.repeat(MAX_CBS_BLOCK_DEPTH);
     expect(render(`${open}깊음${close}`)).toBe('깊음');
 
-    const tooDeep = `${'{{#if 1}}'.repeat(9)}깊음${'{{/if}}'.repeat(9)}`;
+    const tooDeep = `${'{{#if 1}}'.repeat(MAX_CBS_BLOCK_DEPTH + 1)}깊음${'{{/if}}'.repeat(MAX_CBS_BLOCK_DEPTH + 1)}`;
     expect(render(tooDeep)).toBe(
       tooDeep.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
     );

@@ -6,6 +6,7 @@ import {
   evaluateCbs,
   evaluateExpression,
   findAssetMacros,
+  MAX_CBS_BLOCK_DEPTH,
   parseCbs,
   pickHashRand,
   replaceAssetMacros,
@@ -76,11 +77,26 @@ describe('parseCbs', () => {
 
   it('caps nesting', () => {
     const blocks = (n: number): string => `${'{{#if 1}}'.repeat(n)}x${'{{/if}}'.repeat(n)}`;
-    expect(run(blocks(8))).toBe('x');
-    expect(() => parseCbs(blocks(9), { strict: true })).toThrow(CbsSyntaxError);
+    expect(run(blocks(MAX_CBS_BLOCK_DEPTH))).toBe('x');
+    expect(() => parseCbs(blocks(MAX_CBS_BLOCK_DEPTH + 1), { strict: true })).toThrow(CbsSyntaxError);
     const macros = `${'{{equal::'.repeat(40)}${'::}}'.repeat(40)}`;
     expect(() => parseCbs(macros, { strict: true })).toThrow(CbsSyntaxError);
     expect(() => parseCbs(macros)).not.toThrow();
+  });
+
+  it('reads conditions nested as deep as a RisuAI preset nests its toggles', () => {
+    // The owner's "소악마" preset nests toggle and model conditions 39 deep, and
+    // RisuAI reads every level: an unset toggle's section is left out, a set one's kept.
+    const level = (n: number): string =>
+      n === 0 ? 'core' : `{{#if {{? {{getglobalvar::toggle_on}}=1 }}}}on${n}{{/if}}{{#if {{? {{getglobalvar::toggle_off}}=1 }}}}off${n}{{/if}}{{#if 1}}${level(n - 1)}{{/if}}`;
+    const out = evaluateCbs(level(40), parseCbs(level(40)), {
+      variable: () => undefined,
+      globalVariable: (name) => (name === 'toggle_on' ? '1' : undefined),
+    });
+    expect(out).toContain('core');
+    expect(out).toContain('on40');
+    expect(out).not.toContain('off');
+    expect(out).not.toContain('{{');
   });
 });
 
